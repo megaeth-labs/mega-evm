@@ -15,8 +15,9 @@ use std::{
 mod common;
 
 /// Offline RPC capture, including the transaction's on-chain receipt.
-const CACHE: &str =
-    concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/replay_offline.cache.json");
+/// Name of the committed offline capture, resolved through the shared fixture
+/// helper so its location lives in exactly one place.
+const CACHE: &str = "replay_offline.cache.json";
 
 /// The transaction captured in `CACHE` (a 75,514-gas Rex5 mainnet call).
 const TX: &str = "0x41d34e7e13dfe0f85da9d407e2b2c381955d8c7eed428b17dc82327b2616b000";
@@ -98,7 +99,7 @@ fn replay_with_env(cache: &Path, args: &[&str], envs: &[(&str, &str)]) -> Run {
 
 /// The committed capture, unmodified.
 fn cache() -> PathBuf {
-    PathBuf::from(CACHE)
+    common::fixture(CACHE)
 }
 
 /// A temp path unique to this process and this test.
@@ -110,7 +111,7 @@ fn temp_path(name: &str) -> PathBuf {
 /// `doctor`, and return its path.
 fn doctored_cache(name: &str, doctor: impl Fn(&mut serde_json::Value)) -> PathBuf {
     let mut envelope: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(CACHE).expect("read offline cache"))
+        serde_json::from_str(&std::fs::read_to_string(cache()).expect("read offline cache"))
             .expect("parse offline cache");
     let mut doctored = false;
     for entry in envelope["cache"].as_array_mut().expect("cache entries").iter_mut() {
@@ -136,7 +137,7 @@ fn doctored_cache(name: &str, doctor: impl Fn(&mut serde_json::Value)) -> PathBu
 /// modelling an endpoint that has pruned it.
 fn cache_without_receipt(name: &str) -> PathBuf {
     let mut envelope: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(CACHE).expect("read offline cache"))
+        serde_json::from_str(&std::fs::read_to_string(cache()).expect("read offline cache"))
             .expect("parse offline cache");
     let entries = envelope["cache"].as_array_mut().expect("cache entries");
     let before = entries.len();
@@ -710,7 +711,7 @@ fn test_batch_dump_does_not_write_or_clobber_when_block_aborts_before_finish() {
         "0x91bbb37d27a588e217e5be6aeab0fb377ffea0ad3a2714d1f54ceb69852124f2";
 
     let mut envelope: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(CACHE).expect("read offline cache"))
+        serde_json::from_str(&std::fs::read_to_string(cache()).expect("read offline cache"))
             .expect("parse offline cache");
     // Clone the dump target's TX response shape and rewrite hash + gas so the
     // later index is fetchable but rejected at execution (intrinsic gas).
@@ -803,28 +804,14 @@ fn test_batch_dump_does_not_write_or_clobber_when_block_aborts_before_finish() {
 /// identity and a block-global `logIndex` that starts above zero when earlier
 /// receipts in the block already emitted logs.
 ///
-/// The committed offline capture has no logs, so this test uses the dev
-/// envelope (block 22945844, last tx) when `MEGA_EVME_TEST_ENVELOPE` is set —
-/// the same fixture the ignored batch suite uses. Without the envelope the
-/// non-empty path is covered by
-/// `outcome::tests::test_op_receipt_to_tx_receipt_stamps_inner_log_metadata`.
+/// The single-transaction capture this file otherwise uses is log-less, so this
+/// one reads the whole-block capture, whose late transactions emit logs and sit
+/// behind other log-emitting receipts. `MEGA_EVME_TEST_ENVELOPE` overrides it.
 #[test]
 fn test_replay_receipt_inner_log_metadata_matches_outer_receipt() {
     let envelope = match std::env::var("MEGA_EVME_TEST_ENVELOPE") {
         Ok(path) if !path.is_empty() => PathBuf::from(path),
-        _ => {
-            // Unit test covers non-empty logs + non-zero first_log_index; keep
-            // this integration test green in CI without the large envelope.
-            let run = replay(&cache(), &["--json", TX]);
-            assert!(run.success, "replay must exit 0.\nstderr: {}", run.stderr);
-            let summary = run.json();
-            let logs = summary["receipt"]["logs"].as_array().expect("logs array");
-            assert!(
-                logs.is_empty(),
-                "committed capture is log-less; set MEGA_EVME_TEST_ENVELOPE for multi-log coverage"
-            );
-            return;
-        }
+        _ => common::fixture("replay_batch_blocks.cache.json"),
     };
 
     // Last transaction of block 22945844: multi-log, with many preceding logs.

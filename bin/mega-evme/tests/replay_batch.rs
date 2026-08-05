@@ -20,19 +20,13 @@
 //!   mega-evme replay --rpc <URL> --rpc.capture-file replay_batch_blocks.cache.json \
 //!     --block "$block" --verify-receipt --json
 //! done
-//! tar -czf replay_batch_blocks.tar.gz replay_batch_blocks.cache.json
+//! tar -czf replay_batch_blocks.cache.json.tar.gz replay_batch_blocks.cache.json
 //! ```
 //!
 //! The endpoint must serve state at those blocks; a pruning node fails every
 //! target with "state at block #N is pruned".
 
-use std::{
-    path::{Path, PathBuf},
-    process::Command,
-    sync::OnceLock,
-};
-
-use tempfile::TempDir;
+use std::process::Command;
 
 mod common;
 
@@ -61,38 +55,15 @@ const OTHER_BLOCK_TX_INDEX: u64 = 23;
 
 /// Path of the offline envelope.
 ///
-/// The committed archive is extracted once per test binary into a temporary
-/// directory that lives for the whole run; `MEGA_EVME_TEST_ENVELOPE` overrides
-/// it with an already-extracted capture. Extraction shells out to `tar` rather
-/// than linking a decompressor, since every platform that runs these tests has
-/// one and the archive is only read here.
+/// `MEGA_EVME_TEST_ENVELOPE` overrides the committed capture with another one.
 fn envelope() -> String {
     if let Ok(path) = std::env::var("MEGA_EVME_TEST_ENVELOPE") {
         return path;
     }
-
-    static EXTRACTED: OnceLock<(TempDir, PathBuf)> = OnceLock::new();
-    let (_dir, capture) = EXTRACTED.get_or_init(|| {
-        let archive =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/replay_batch_blocks.tar.gz");
-        let dir = tempfile::tempdir().expect("failed to create a temp dir for the envelope");
-        let status = Command::new("tar")
-            .arg("-xzf")
-            .arg(&archive)
-            .arg("-C")
-            .arg(dir.path())
-            .status()
-            .expect("failed to run tar");
-        assert!(status.success(), "failed to extract {}", archive.display());
-
-        let capture = dir.path().join(ENVELOPE_NAME);
-        assert!(capture.is_file(), "{} does not contain {ENVELOPE_NAME}", archive.display());
-        (dir, capture)
-    });
-    capture.display().to_string()
+    common::fixture(ENVELOPE_NAME).display().to_string()
 }
 
-/// Name of the capture inside the committed archive.
+/// Name of the committed capture, stored compressed alongside the other fixtures.
 const ENVELOPE_NAME: &str = "replay_batch_blocks.cache.json";
 
 fn mega_evme() -> Command {

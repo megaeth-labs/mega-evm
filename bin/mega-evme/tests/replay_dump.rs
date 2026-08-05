@@ -14,9 +14,17 @@ use std::{
     time::Duration,
 };
 
-/// Offline RPC capture (includes the on-chain receipt needed by the fidelity gate).
-const CACHE: &str =
-    concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/replay_offline.cache.json");
+mod common;
+
+/// Offline RPC capture (includes the on-chain receipt needed by the fidelity
+/// gate). Name of the committed offline capture, resolved through the shared fixture
+/// helper so its location lives in exactly one place.
+const CACHE: &str = "replay_offline.cache.json";
+
+/// Path of the committed offline capture.
+fn cache() -> std::path::PathBuf {
+    common::fixture(CACHE)
+}
 
 /// The transaction captured in `CACHE` (a 75,514-gas Rex5 mainnet call).
 const TX: &str = "0x41d34e7e13dfe0f85da9d407e2b2c381955d8c7eed428b17dc82327b2616b000";
@@ -33,11 +41,12 @@ fn test_replay_dump_rejects_transaction_overrides() {
     let out = std::env::temp_dir().join(format!("mega_evme_dump_ovr_{}.json", std::process::id()));
     let _ = std::fs::remove_file(&out);
 
+    let cache = cache();
     let output = mega_evme()
         .args([
             "replay",
             "--rpc.replay-file",
-            CACHE,
+            cache.to_str().unwrap(),
             "--dump-fixture",
             out.to_str().unwrap(),
             "--override.gas-limit",
@@ -64,8 +73,16 @@ fn test_replay_dump_fixture_writes_validatable_file() {
     let out = std::env::temp_dir().join(format!("mega_evme_dump_{}.json", std::process::id()));
     let _ = std::fs::remove_file(&out);
 
+    let cache = cache();
     let output = mega_evme()
-        .args(["replay", "--rpc.replay-file", CACHE, "--dump-fixture", out.to_str().unwrap(), TX])
+        .args([
+            "replay",
+            "--rpc.replay-file",
+            cache.to_str().unwrap(),
+            "--dump-fixture",
+            out.to_str().unwrap(),
+            TX,
+        ])
         .output()
         .expect("failed to run mega-evme");
 
@@ -93,11 +110,12 @@ fn test_replay_dump_is_byte_reproducible() {
         let out = std::env::temp_dir()
             .join(format!("mega_evme_repro_{}_{suffix}.json", std::process::id()));
         let _ = std::fs::remove_file(&out);
+        let cache = cache();
         let output = mega_evme()
             .args([
                 "replay",
                 "--rpc.replay-file",
-                CACHE,
+                cache.to_str().unwrap(),
                 "--dump-fixture",
                 out.to_str().unwrap(),
                 TX,
@@ -133,8 +151,16 @@ fn test_replay_dump_overwrites_atomically_without_tmp_residue() {
     // Seed a pre-existing "committed" fixture that the dump overwrites in place.
     std::fs::write(&out, br#"{"pre-existing":"corpus fixture"}"#).expect("seed existing fixture");
 
+    let cache = cache();
     let output = mega_evme()
-        .args(["replay", "--rpc.replay-file", CACHE, "--dump-fixture", out.to_str().unwrap(), TX])
+        .args([
+            "replay",
+            "--rpc.replay-file",
+            cache.to_str().unwrap(),
+            "--dump-fixture",
+            out.to_str().unwrap(),
+            TX,
+        ])
         .output()
         .expect("failed to run mega-evme");
 
@@ -180,7 +206,7 @@ fn test_replay_dump_rejects_receipt_from_different_block() {
     // Doctor the capture: flip the receipt's blockHash. Cache entries are keyed
     // by the request, not the response, so the doctored entry still resolves.
     let mut envelope: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(CACHE).expect("read offline cache"))
+        serde_json::from_str(&std::fs::read_to_string(cache()).expect("read offline cache"))
             .expect("parse offline cache");
     let mut doctored = false;
     for entry in envelope["cache"].as_array_mut().expect("cache entries").iter_mut() {
@@ -235,11 +261,12 @@ fn test_replay_dump_rejects_spec_override() {
     let out = std::env::temp_dir().join(format!("mega_evme_dump_spec_{}.json", std::process::id()));
     let _ = std::fs::remove_file(&out);
 
+    let cache = cache();
     let output = mega_evme()
         .args([
             "replay",
             "--rpc.replay-file",
-            CACHE,
+            cache.to_str().unwrap(),
             "--dump-fixture",
             out.to_str().unwrap(),
             "--override.spec",

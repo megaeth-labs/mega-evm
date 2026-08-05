@@ -8,9 +8,67 @@
 
 #![allow(dead_code)] // Each test binary uses a different subset of helpers.
 
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+    process::Command,
+    sync::{Mutex, OnceLock},
+};
+
 use clap::Parser;
 use mega_evme::common::RpcArgs;
+use tempfile::TempDir;
 use wiremock::{matchers, Mock, MockServer, ResponseTemplate};
+
+/// Resolve a fixture in `tests/fixtures/` by name, extracting it if it is
+/// stored compressed.
+///
+/// A fixture is either the file itself, or a `<name>.tar.gz` holding exactly
+/// that one file. Compression is worth it only where the raw file would bloat a
+/// pull-request diff — git already compresses blobs, so it buys little on its
+/// own, and a compressed blob cannot delta against its previous revision.
+///
+/// Archives are extracted once per test binary into a temporary directory that
+/// lives for the whole run. Extraction shells out to `tar` rather than linking a
+/// decompressor: every platform that runs these tests has one, and this is the
+/// only place that reads an archive.
+pub(crate) fn fixture(name: &str) -> PathBuf {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let plain = dir.join(name);
+    if plain.is_file() {
+        return plain;
+    }
+
+    let archive = dir.join(format!("{name}.tar.gz"));
+    assert!(
+        archive.is_file(),
+        "no fixture named {name}: neither {} nor {} exists",
+        plain.display(),
+        archive.display(),
+    );
+
+    static ROOT: OnceLock<TempDir> = OnceLock::new();
+    static EXTRACTED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    let root = ROOT.get_or_init(|| {
+        tempfile::tempdir().expect("failed to create a temp dir for extracted fixtures")
+    });
+    let mut extracted =
+        EXTRACTED.get_or_init(|| Mutex::new(HashSet::new())).lock().expect("fixture lock");
+
+    let path = root.path().join(name);
+    if extracted.insert(name.to_string()) {
+        let status = Command::new("tar")
+            .arg("-xzf")
+            .arg(&archive)
+            .arg("-C")
+            .arg(root.path())
+            .status()
+            .expect("failed to run tar");
+        assert!(status.success(), "failed to extract {}", archive.display());
+        assert!(path.is_file(), "{} does not contain {name}", archive.display());
+    }
+    path
+}
 
 /// A mock JSON-RPC server tuned for mega-evme integration tests.
 ///

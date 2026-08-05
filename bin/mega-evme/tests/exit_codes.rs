@@ -11,8 +11,14 @@ use std::process::{Command, Output};
 mod common;
 
 /// Offline RPC capture used as the replay file.
-const CACHE: &str =
-    concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/replay_offline.cache.json");
+/// Name of the committed offline capture, resolved through the shared fixture
+/// helper so its location lives in exactly one place.
+const CACHE: &str = "replay_offline.cache.json";
+
+/// Path of the committed offline capture.
+fn cache() -> std::path::PathBuf {
+    common::fixture(CACHE)
+}
 
 /// The transaction the committed capture can replay.
 const TX_OK: &str = "0x41d34e7e13dfe0f85da9d407e2b2c381955d8c7eed428b17dc82327b2616b000";
@@ -77,7 +83,9 @@ fn run(args: &[&str]) -> Run {
 
 /// Run `replay` against the committed offline capture.
 fn replay(args: &[&str]) -> Run {
-    let mut argv = vec!["replay", "--rpc.replay-file", CACHE];
+    let cache = cache();
+    let mut argv =
+        vec!["replay", "--rpc.replay-file", cache.to_str().expect("fixture path is utf-8")];
     argv.extend_from_slice(args);
     run(&argv)
 }
@@ -86,7 +94,7 @@ fn replay(args: &[&str]) -> Run {
 /// return its path.
 fn cache_without_entry(name: &str, key: &str) -> std::path::PathBuf {
     let mut envelope: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(CACHE).expect("read offline cache"))
+        serde_json::from_str(&std::fs::read_to_string(cache()).expect("read offline cache"))
             .expect("parse offline cache");
     let entries = envelope["cache"].as_array_mut().expect("cache entries");
     let before = entries.len();
