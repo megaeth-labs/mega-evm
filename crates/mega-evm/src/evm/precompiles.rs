@@ -47,8 +47,8 @@ impl MegaPrecompiles {
             MegaSpecId::REX3 |
             MegaSpecId::REX4 |
             MegaSpecId::REX5 |
-            MegaSpecId::REX6 |
-            MegaSpecId::REX7 => rex(),
+            MegaSpecId::REX6 => rex(),
+            MegaSpecId::REX7 => rex7(),
         };
 
         Self { inner: EthPrecompiles { precompiles: inner, spec: spec.into_eth_spec() }, spec }
@@ -71,16 +71,101 @@ pub fn rex() -> &'static Precompiles {
     INSTANCE.get_or_init(|| Box::new(mini_rex().clone()))
 }
 
+/// Precompiles for the `REX7` spec.
+pub fn rex7() -> &'static Precompiles {
+    static INSTANCE: OnceBox<Precompiles> = OnceBox::new();
+    INSTANCE.get_or_init(|| {
+        let mut precompiles = rex().clone();
+        // Rex7 adopts the final EIP-7883 ModExp schedule: upstream's implementation
+        // charges the computed formula cost for zero-base/zero-modulus inputs, where
+        // the frozen specs keep the historical 500-gas short-circuit (see
+        // [`modexp::OSAKA_LEGACY`]).
+        precompiles.extend([revm::precompile::modexp::OSAKA]);
+        Box::new(precompiles)
+    })
+}
+
 /// Precompiles for the `MINI_REX` spec.
 pub fn mini_rex() -> &'static Precompiles {
     static INSTANCE: OnceBox<Precompiles> = OnceBox::new();
     INSTANCE.get_or_init(|| {
         let mut precompiles = op_revm::precompiles::isthmus().clone();
-        // Use the OSAKA modexp precompile for MINI_REX
-        precompiles
-            .extend([revm::precompile::modexp::OSAKA, kzg_point_evaluation::KZG_POINT_EVALUATION]);
+        // Use the OSAKA modexp precompile (with the frozen legacy schedule) for MINI_REX
+        precompiles.extend([modexp::OSAKA_LEGACY, kzg_point_evaluation::KZG_POINT_EVALUATION]);
         Box::new(precompiles)
     })
+}
+
+/// Customized `ModExp` precompile module.
+///
+/// `MINI_REX` adopted the Osaka / EIP-7883 pricing schedule through the revm implementation
+/// current at the time, and that implementation short-circuited zero-base/zero-modulus inputs
+/// to the 500-gas minimum *before* computing the EIP-7883 formula cost. Later revm versions
+/// compute — and charge — the full formula cost for those inputs, as the EIP text specifies
+/// (EIP-7883 has no zero-length special case, and its multiplication complexity has a floor
+/// of 16, so a zero-base/zero-modulus call with a 64-byte exponent length prices in the
+/// thousands rather than 500).
+///
+/// The frozen specs are pinned to the historical short-circuit for replay identity; `REX7`
+/// adopts the corrected schedule by installing upstream's implementation unwrapped (see
+/// [`rex7`]).
+pub mod modexp {
+    use revm::{
+        precompile::{
+            self, u64_to_address, utilities::right_pad_with_offset, Precompile, PrecompileHalt,
+            PrecompileId, PrecompileOutput, PrecompileResult,
+        },
+        primitives::{eip7823, Address, Bytes, U256},
+    };
+
+    /// Address of the `ModExp` precompile.
+    pub const ADDRESS: Address = u64_to_address(5);
+
+    /// Minimum gas of the Osaka `ModExp` schedule, and the flat charge of the legacy
+    /// zero-base/zero-modulus short-circuit.
+    pub const MIN_GAS: u64 = 500;
+
+    /// Runs `ModExp` with the frozen-spec legacy Osaka schedule.
+    ///
+    /// Reproduces the historical implementation's check order for the intercepted region:
+    /// minimum-gas check, header parse, EIP-7823 size limits, then the
+    /// zero-base/zero-modulus short-circuit returning [`MIN_GAS`]. Every other input defers
+    /// to the upstream implementation, whose leading checks are identical, so the wrapper
+    /// diverges from upstream only in the short-circuit's position and charge.
+    fn run_osaka_legacy(input: &[u8], gas_limit: u64, reservoir: u64) -> PrecompileResult {
+        if MIN_GAS > gas_limit {
+            return Ok(PrecompileOutput::halt(PrecompileHalt::OutOfGas, reservoir));
+        }
+
+        let base_len = U256::from_be_bytes(right_pad_with_offset::<32>(input, 0).into_owned());
+        let exp_len = U256::from_be_bytes(right_pad_with_offset::<32>(input, 32).into_owned());
+        let mod_len = U256::from_be_bytes(right_pad_with_offset::<32>(input, 64).into_owned());
+
+        let (Ok(base_len), Ok(mod_len)) = (usize::try_from(base_len), usize::try_from(mod_len))
+        else {
+            return Ok(PrecompileOutput::halt(PrecompileHalt::ModexpEip7823LimitSize, reservoir));
+        };
+        let exp_len = usize::try_from(exp_len).unwrap_or(usize::MAX);
+        if base_len > eip7823::INPUT_SIZE_LIMIT ||
+            mod_len > eip7823::INPUT_SIZE_LIMIT ||
+            exp_len > eip7823::INPUT_SIZE_LIMIT
+        {
+            return Ok(PrecompileOutput::halt(PrecompileHalt::ModexpEip7823LimitSize, reservoir));
+        }
+
+        if base_len == 0 && mod_len == 0 {
+            return Ok(PrecompileOutput::new(MIN_GAS, Bytes::new(), reservoir));
+        }
+
+        Ok(match precompile::modexp::osaka_run(input, gas_limit) {
+            Ok(output) => PrecompileOutput::new(output.gas_used, output.bytes, reservoir),
+            Err(halt) => PrecompileOutput::halt(halt, reservoir),
+        })
+    }
+
+    /// `ModExp` with the frozen-spec legacy Osaka schedule.
+    pub const OSAKA_LEGACY: Precompile =
+        Precompile::new(PrecompileId::ModExp, ADDRESS, run_osaka_legacy);
 }
 
 /// Customized KZG point evaluation precompile module.
@@ -900,5 +985,57 @@ mod tests {
             GAS_COST,
             "CALLCODE-to-KZG must charge fixed GAS_COST via bytecode_address"
         );
+    }
+
+    /// Direct unit coverage for `PrecompileProvider::contains` on the Mega
+    /// `PrecompilesMap` wrapper.
+    ///
+    /// The method is a thin forwarder; both always-true and always-false mutants
+    /// of its body previously survived because no test consulted the return value.
+    /// Pin known precompile addresses as true and a non-precompile as false under
+    /// every MegaETH-relevant precompile table (`MINI_REX` / `REX` share the same
+    /// Isthmus-era set for the classic 0x01-0x0a range plus KZG).
+    #[test]
+    fn test_precompiles_map_contains_known_and_unknown_addresses() {
+        // Classic Ethereum precompiles present in every MegaETH table.
+        const ECRECOVER: Address =
+            alloy_primitives::address!("0000000000000000000000000000000000000001");
+        const SHA256: Address =
+            alloy_primitives::address!("0000000000000000000000000000000000000002");
+        const IDENTITY: Address =
+            alloy_primitives::address!("0000000000000000000000000000000000000004");
+        // KZG point evaluation (EIP-4844) — overridden by MegaPrecompiles.
+        let kzg = revm::precompile::kzg_point_evaluation::ADDRESS;
+        // Address outside the precompile range.
+        const NON_PRECOMPILE: Address =
+            alloy_primitives::address!("00000000000000000000000000000000000000ff");
+
+        type Ctx<'a> = MegaContext<&'a mut MemoryDatabase, crate::EmptyExternalEnv>;
+
+        for spec in [MegaSpecId::MINI_REX, MegaSpecId::REX, MegaSpecId::REX5, MegaSpecId::REX6] {
+            let precompiles_map =
+                PrecompilesMap::from_static(MegaPrecompiles::new_with_spec(spec).precompiles());
+
+            assert!(
+                PrecompileProvider::<Ctx<'_>>::contains(&precompiles_map, &ECRECOVER),
+                "{spec:?}: ecrecover (0x01) must be reported as a precompile",
+            );
+            assert!(
+                PrecompileProvider::<Ctx<'_>>::contains(&precompiles_map, &SHA256),
+                "{spec:?}: sha256 (0x02) must be reported as a precompile",
+            );
+            assert!(
+                PrecompileProvider::<Ctx<'_>>::contains(&precompiles_map, &IDENTITY),
+                "{spec:?}: identity (0x04) must be reported as a precompile",
+            );
+            assert!(
+                PrecompileProvider::<Ctx<'_>>::contains(&precompiles_map, &kzg),
+                "{spec:?}: KZG point evaluation must be reported as a precompile",
+            );
+            assert!(
+                !PrecompileProvider::<Ctx<'_>>::contains(&precompiles_map, &NON_PRECOMPILE),
+                "{spec:?}: 0xff must not be reported as a precompile",
+            );
+        }
     }
 }

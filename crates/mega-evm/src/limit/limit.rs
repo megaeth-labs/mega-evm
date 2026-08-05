@@ -1150,4 +1150,90 @@ mod tests {
         // REX4 < REX5: the precondition assert must fire.
         let _ = AdditionalLimit::intrinsic_check_for_tx(MegaSpecId::REX4, &tx, test_limits());
     }
+
+    /// Builds a successful `FrameResult::Call` carrying `gas_limit` gas.
+    fn stopped_call_result(gas_limit: u64) -> FrameResult {
+        FrameResult::Call(CallOutcome::new(
+            InterpreterResult::new(InstructionResult::Stop, Bytes::new(), Gas::new(gas_limit)),
+            0..0,
+        ))
+    }
+
+    /// A frame that returns while a TX-level limit is latched must have its result rewritten to
+    /// the exceeding instruction result, otherwise a transaction that blew its budget would be
+    /// reported as a plain success.
+    ///
+    /// The `duplicate_return_frame_result` guard must suppress the rewrite only for the *second*
+    /// top-level invocation, which is distinguished by an already-empty tracker frame stack.
+    /// Here the frame is still on the stack, so the rewrite is required even with
+    /// `LAST_FRAME == true`.
+    #[test]
+    fn test_before_frame_return_result_marks_latched_tx_level_exceed() {
+        let mut limits = test_limits();
+        limits.tx_data_size_limit = 100;
+        // MINI_REX is pre-Rex4, so the exceed is TX-level (not frame-local) and must halt.
+        let mut limit = AdditionalLimit::new(MegaSpecId::MINI_REX, limits);
+        limit.push_empty_frame();
+        assert!(!limit.on_log(4, 1_000), "an oversized log must latch a data-size exceed");
+
+        let mut result = stopped_call_result(1_000);
+        limit.before_frame_return_result::<true>(&mut result);
+        assert_eq!(
+            result.instruction_result(),
+            AdditionalLimit::EXCEEDING_LIMIT_INSTRUCTION_RESULT,
+            "a returning frame with a latched TX-level exceed must be marked as exceeding",
+        );
+    }
+
+    /// The duplicate top-level invocation (frame stack already emptied by the first one) must
+    /// leave the result untouched — it is the same result object the first call already handled.
+    #[test]
+    fn test_before_frame_return_result_skips_duplicate_top_level_call() {
+        let mut limits = test_limits();
+        limits.tx_data_size_limit = 100;
+        let mut limit = AdditionalLimit::new(MegaSpecId::MINI_REX, limits);
+        limit.push_empty_frame();
+        assert!(!limit.on_log(4, 1_000));
+
+        let mut result = stopped_call_result(1_000);
+        // First call pops the frame and marks the result.
+        limit.before_frame_return_result::<true>(&mut result);
+        // Reset the result to observe whether the duplicate call would mark it again.
+        let mut duplicate = stopped_call_result(1_000);
+        limit.before_frame_return_result::<true>(&mut duplicate);
+        assert_eq!(
+            duplicate.instruction_result(),
+            InstructionResult::Stop,
+            "the duplicate top-level invocation must not re-handle the result",
+        );
+    }
+
+    /// `mark_frame_result_as_exceeding_limit` rewrites both frame-result variants in place.
+    #[test]
+    fn test_mark_frame_result_as_exceeding_limit_rewrites_both_variants() {
+        let output = Bytes::from_static(b"over");
+
+        let mut call = stopped_call_result(50);
+        mark_frame_result_as_exceeding_limit(
+            &mut call,
+            InstructionResult::OutOfGas,
+            output.clone(),
+        );
+        let FrameResult::Call(call_outcome) = &call else { panic!("call frame result") };
+        assert_eq!(call_outcome.result.result, InstructionResult::OutOfGas);
+        assert_eq!(call_outcome.result.output, output);
+
+        let mut create = FrameResult::Create(CreateOutcome::new(
+            InterpreterResult::new(InstructionResult::Stop, Bytes::new(), Gas::new(50)),
+            None,
+        ));
+        mark_frame_result_as_exceeding_limit(
+            &mut create,
+            InstructionResult::OutOfGas,
+            output.clone(),
+        );
+        let FrameResult::Create(create_outcome) = &create else { panic!("create frame result") };
+        assert_eq!(create_outcome.result.result, InstructionResult::OutOfGas);
+        assert_eq!(create_outcome.result.output, output);
+    }
 }

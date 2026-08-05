@@ -131,6 +131,9 @@ mega-system-contracts = { path = "./crates/system-contracts", version = "1.7.0",
 # reth v2.3.0 (revm 40.0.3, alloy-evm 0.36.0). crates.io has no `op-revm` / `alloy-op-evm` release
 # built against revm 40, so every OP crate below must share this exact source to keep a single
 # source identity for `OpTxEnvelope`, receipt and hardfork types.
+# NOTE: git dependencies block `cargo publish` — crates.io rejects crates whose dependencies come
+# from other repositories — so the release publish workflow cannot ship `mega-evm` (and the crates
+# depending on it) until the OP fork publishes revm-40-compatible registry releases.
 op-revm = { git = "https://github.com/ethereum-optimism/optimism", rev = "f67d87cd5c9992b62d215c043917b94e3f019629", default-features = false }
 revm = { version = "=40.0.3", default-features = false }
 revm-inspectors = { version = "=0.40.1", default-features = false }

@@ -1,78 +1,216 @@
-//! Value-pinning tests for the arithmetic `pub const` definitions in
+//! Literal value-pinning tests for every consensus `pub const` in
 //! `src/constants.rs`.
 //!
-//! Several constants are defined via compile-time arithmetic (e.g.
-//! `12 * 1024 * 1024 + 512 * 1024`). Mutation testing replaces individual
-//! operators (`*`→`+`, `+`→`-`, `/`→`*`, …) inside these expressions, which
-//! changes the resulting numeric value but leaves the program compiling. None
-//! of the targeted expressions are no-ops, so every operator swap is a true
-//! behavioral change.
+//! Expected values are hard-coded decimal (or size) literals only.
+//! They must never be derived from the same constants under test, so a
+//! `gas_const` mutator that rewrites a RHS by ±1 (or swaps arithmetic
+//! operators in a compound expression) is killed regardless of whether
+//! behavioral tests happen to re-import the same constant into their
+//! expected side.
 //!
-//! Each test below asserts the constant equals its exact unmutated value. Any
-//! arithmetic mutation on the relevant line yields a different value and is
-//! therefore killed.
+//! Covers every module-level and nested `pub const` declared in
+//! `constants.rs` (not re-exports of upstream revm gas symbols).
 
-use mega_evm::constants::{mini_rex, rex};
+use mega_evm::constants::{mini_rex, rex, rex2, rex3, rex4, rex5, PRE_REX5_SYSTEM_CALL_GAS_LIMIT};
 
-/// Pins `mini_rex::ADDITIONAL_INITCODE_SIZE` (`24 * 1024`).
-///
-/// Kills `constants.rs:25:52 replace * with /` and `:25:52 replace * with +`.
+// =============================================================================
+// Top-level
+// =============================================================================
+
+#[test]
+fn test_pre_rex5_system_call_gas_limit_literal() {
+    assert_eq!(PRE_REX5_SYSTEM_CALL_GAS_LIMIT, 30_000_000);
+}
+
+// =============================================================================
+// mini_rex
+// =============================================================================
+
+#[test]
+fn test_mini_rex_max_contract_size_literal() {
+    assert_eq!(mini_rex::MAX_CONTRACT_SIZE, 524_288);
+}
+
 #[test]
 fn test_mini_rex_additional_initcode_size() {
-    assert_eq!(mini_rex::ADDITIONAL_INITCODE_SIZE, 24 * 1024);
     assert_eq!(mini_rex::ADDITIONAL_INITCODE_SIZE, 24_576);
 }
 
-/// Pins `mini_rex::MAX_INITCODE_SIZE`
-/// (`MAX_CONTRACT_SIZE + ADDITIONAL_INITCODE_SIZE`).
-///
-/// Kills `constants.rs:27:60 replace + with -`.
 #[test]
 fn test_mini_rex_max_initcode_size() {
-    // 512 * 1024 + 24 * 1024 = 524_288 + 24_576
     assert_eq!(mini_rex::MAX_INITCODE_SIZE, 548_864);
-    assert_eq!(
-        mini_rex::MAX_INITCODE_SIZE,
-        mini_rex::MAX_CONTRACT_SIZE + mini_rex::ADDITIONAL_INITCODE_SIZE
-    );
 }
 
-/// Pins `mini_rex::BLOCK_DATA_LIMIT` (`12 * 1024 * 1024 + 512 * 1024`, 12.5 MB).
-///
-/// Kills `constants.rs:59:62 replace * with +`, `:59:56 replace + with -`,
-/// `:59:62 replace * with /`, and `:59:56 replace + with *`.
+#[test]
+fn test_mini_rex_tx_compute_gas_limit_literal() {
+    assert_eq!(mini_rex::TX_COMPUTE_GAS_LIMIT, 1_000_000_000);
+}
+
+#[test]
+fn test_mini_rex_sstore_set_storage_gas_literal() {
+    assert_eq!(mini_rex::SSTORE_SET_STORAGE_GAS, 2_000_000);
+}
+
+#[test]
+fn test_mini_rex_new_account_storage_gas_literal() {
+    assert_eq!(mini_rex::NEW_ACCOUNT_STORAGE_GAS, 2_000_000);
+}
+
+#[test]
+fn test_mini_rex_codedeposit_storage_gas_literal() {
+    assert_eq!(mini_rex::CODEDEPOSIT_STORAGE_GAS, 10_000);
+}
+
+#[test]
+fn test_mini_rex_log_data_storage_gas_literal() {
+    assert_eq!(mini_rex::LOG_DATA_STORAGE_GAS, 80);
+}
+
+#[test]
+fn test_mini_rex_log_topic_storage_gas_literal() {
+    assert_eq!(mini_rex::LOG_TOPIC_STORAGE_GAS, 3_750);
+}
+
+#[test]
+fn test_mini_rex_calldata_standard_token_storage_gas_literal() {
+    assert_eq!(mini_rex::CALLDATA_STANDARD_TOKEN_STORAGE_GAS, 40);
+}
+
+#[test]
+fn test_mini_rex_calldata_standard_token_storage_floor_gas_literal() {
+    assert_eq!(mini_rex::CALLDATA_STANDARD_TOKEN_STORAGE_FLOOR_GAS, 100);
+}
+
 #[test]
 fn test_mini_rex_block_data_limit() {
-    assert_eq!(mini_rex::BLOCK_DATA_LIMIT, 12 * 1024 * 1024 + 512 * 1024);
     assert_eq!(mini_rex::BLOCK_DATA_LIMIT, 13_107_200);
 }
 
-/// Pins `mini_rex::TX_DATA_LIMIT` (`BLOCK_DATA_LIMIT * 25 / 100`, 25% of block).
-///
-/// Kills `constants.rs:62:58 replace / with *` and `:62:53 replace * with +`.
 #[test]
 fn test_mini_rex_tx_data_limit() {
-    assert_eq!(mini_rex::TX_DATA_LIMIT, mini_rex::BLOCK_DATA_LIMIT * 25 / 100);
     assert_eq!(mini_rex::TX_DATA_LIMIT, 3_276_800);
 }
 
-/// Pins `mini_rex::TX_KV_UPDATE_LIMIT`
-/// (`BLOCK_KV_UPDATE_LIMIT * 25 / 100`, 25% of block).
-///
-/// Kills `constants.rs:68:68 replace / with *` and `:68:63 replace * with +`.
+#[test]
+fn test_mini_rex_block_kv_update_limit_literal() {
+    assert_eq!(mini_rex::BLOCK_KV_UPDATE_LIMIT, 500_000);
+}
+
 #[test]
 fn test_mini_rex_tx_kv_update_limit() {
-    assert_eq!(mini_rex::TX_KV_UPDATE_LIMIT, mini_rex::BLOCK_KV_UPDATE_LIMIT * 25 / 100);
     assert_eq!(mini_rex::TX_KV_UPDATE_LIMIT, 125_000);
 }
 
-/// Pins `rex::TX_DATA_LIMIT` (`12 * 1024 * 1024 + 512 * 1024`, same as the
-/// block data limit).
+/// Kills `gas_const:mini_rex::BLOCK_ENV_ACCESS_COMPUTE_GAS` ±1.
 ///
-/// Kills the full operator-swap cluster on line 188: `+:53 with *`/`with -`,
-/// `*:46 with +`/`with /`, `*:59 with +`/`with /`, and `*:39 with /`/`with +`.
+/// Behavioral suites often assert against the same constant (or against the
+/// equal Rex3 oracle cap), so only a literal pin catches the +1 polarity.
+#[test]
+fn test_mini_rex_block_env_access_compute_gas_literal() {
+    assert_eq!(mini_rex::BLOCK_ENV_ACCESS_COMPUTE_GAS, 20_000_000);
+}
+
+/// Kills `gas_const:mini_rex::ORACLE_ACCESS_COMPUTE_GAS` ±1.
+///
+/// Existing oracle/detention tests assert
+/// `compute_gas_limit == ORACLE_ACCESS_COMPUTE_GAS`, which is tautological
+/// under constant mutation.
+#[test]
+fn test_mini_rex_oracle_access_compute_gas_literal() {
+    assert_eq!(mini_rex::ORACLE_ACCESS_COMPUTE_GAS, 1_000_000);
+}
+
+// =============================================================================
+// rex2
+// =============================================================================
+
+#[test]
+fn test_rex2_keyless_deploy_overhead_gas_literal() {
+    assert_eq!(rex2::KEYLESS_DEPLOY_OVERHEAD_GAS, 100_000);
+}
+
+// =============================================================================
+// rex3
+// =============================================================================
+
+#[test]
+fn test_rex3_oracle_access_compute_gas_literal() {
+    assert_eq!(rex3::ORACLE_ACCESS_COMPUTE_GAS, 20_000_000);
+}
+
+// =============================================================================
+// rex4
+// =============================================================================
+
+#[test]
+fn test_rex4_frame_limit_numerator_literal() {
+    assert_eq!(rex4::FRAME_LIMIT_NUMERATOR, 98);
+}
+
+#[test]
+fn test_rex4_frame_limit_denominator_literal() {
+    assert_eq!(rex4::FRAME_LIMIT_DENOMINATOR, 100);
+}
+
+#[test]
+fn test_rex4_storage_call_stipend_literal() {
+    assert_eq!(rex4::STORAGE_CALL_STIPEND, 23_000);
+}
+
+// =============================================================================
+// rex5
+// =============================================================================
+
+#[test]
+fn test_rex5_system_call_gas_limit_floor_literal() {
+    assert_eq!(rex5::SYSTEM_CALL_GAS_LIMIT_FLOOR, 30_000_000);
+}
+
+// =============================================================================
+// rex
+// =============================================================================
+
+#[test]
+fn test_rex_tx_intrinsic_storage_gas_literal() {
+    assert_eq!(rex::TX_INTRINSIC_STORAGE_GAS, 39_000);
+}
+
+#[test]
+fn test_rex_sstore_set_storage_gas_base_literal() {
+    assert_eq!(rex::SSTORE_SET_STORAGE_GAS_BASE, 20_000);
+}
+
+#[test]
+fn test_rex_new_account_storage_gas_base_literal() {
+    assert_eq!(rex::NEW_ACCOUNT_STORAGE_GAS_BASE, 25_000);
+}
+
+#[test]
+fn test_rex_contract_creation_storage_gas_base_literal() {
+    assert_eq!(rex::CONTRACT_CREATION_STORAGE_GAS_BASE, 32_000);
+}
+
+#[test]
+fn test_rex_tx_compute_gas_limit_literal() {
+    assert_eq!(rex::TX_COMPUTE_GAS_LIMIT, 200_000_000);
+}
+
 #[test]
 fn test_rex_tx_data_limit() {
-    assert_eq!(rex::TX_DATA_LIMIT, 12 * 1024 * 1024 + 512 * 1024);
     assert_eq!(rex::TX_DATA_LIMIT, 13_107_200);
+}
+
+#[test]
+fn test_rex_tx_kv_update_limit_literal() {
+    assert_eq!(rex::TX_KV_UPDATE_LIMIT, 500_000);
+}
+
+#[test]
+fn test_rex_tx_state_growth_limit_literal() {
+    assert_eq!(rex::TX_STATE_GROWTH_LIMIT, 1_000);
+}
+
+#[test]
+fn test_rex_block_state_growth_limit_literal() {
+    assert_eq!(rex::BLOCK_STATE_GROWTH_LIMIT, 1_000);
 }

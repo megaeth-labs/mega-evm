@@ -213,3 +213,126 @@ impl StorageCallStipendTracker {
         is_internal_call && is_value_transfer && is_call_or_callcode
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use alloy_primitives::{Address, Bytes, U256};
+    use revm::interpreter::{
+        interpreter::SharedMemory, CallInput, CallInputs, CallValue, InstructionResult,
+        InterpreterResult,
+    };
+
+    use super::*;
+
+    /// A `FrameInit` that qualifies for a stipend grant: an internal (depth > 0),
+    /// value-transferring `CALL`.
+    fn granted_call_frame_init() -> FrameInit {
+        FrameInit {
+            depth: 1,
+            memory: SharedMemory::new(),
+            frame_input: FrameInput::Call(Box::new(CallInputs {
+                input: CallInput::Bytes(Bytes::new()),
+                return_memory_offset: 0..0,
+                gas_limit: 100_000,
+                bytecode_address: Address::ZERO,
+                target_address: Address::ZERO,
+                caller: Address::ZERO,
+                value: CallValue::Transfer(U256::from(1)),
+                scheme: CallScheme::Call,
+                is_static: false,
+                reservoir: 0,
+                known_bytecode: Default::default(),
+                charged_new_account_state_gas: false,
+            })),
+        }
+    }
+
+    /// Pushes a granted REX5 frame and returns the tracker holding it.
+    fn tracker_with_granted_frame() -> StorageCallStipendTracker {
+        let mut tracker = StorageCallStipendTracker::new(MegaSpecId::REX5);
+        let mut compute_gas = compute_gas::ComputeGasTracker::new(MegaSpecId::REX5, u64::MAX);
+        let mut frame_init = granted_call_frame_init();
+        tracker.before_frame_init(&mut frame_init, &mut compute_gas);
+        tracker
+    }
+
+    /// `try_consume` must *drain* the frame's allowance: each draw reduces what later
+    /// storage-gas sites can still take. If the balance moved the other way, a single frame
+    /// could keep drawing free storage gas for the whole call.
+    #[test]
+    fn test_try_consume_drains_the_frame_allowance() {
+        let grant = constants::rex4::STORAGE_CALL_STIPEND;
+        let mut tracker = tracker_with_granted_frame();
+        assert_eq!(
+            tracker.current_frame_stipend(),
+            grant,
+            "granted frame starts at the full grant"
+        );
+
+        assert_eq!(tracker.try_consume(100), 100, "a draw within the balance is fully served");
+        assert_eq!(
+            tracker.current_frame_stipend(),
+            grant - 100,
+            "the drawn amount must be subtracted from the remaining allowance"
+        );
+
+        // The follow-up draw can never hand out more than what is left.
+        assert_eq!(tracker.try_consume(u64::MAX), grant - 100, "a draw is capped by the balance");
+        assert_eq!(tracker.current_frame_stipend(), 0, "the allowance is now exhausted");
+        assert_eq!(tracker.try_consume(1), 0, "an exhausted allowance serves nothing");
+    }
+
+    /// `reset` must clear the per-frame stack. A tracker is reused across transactions, so a
+    /// retained entry would hand the next transaction's first frame a stale allowance.
+    #[test]
+    fn test_reset_clears_the_frame_stack() {
+        let grant = constants::rex4::STORAGE_CALL_STIPEND;
+        let mut tracker = tracker_with_granted_frame();
+        assert_eq!(tracker.current_frame_stipend(), grant);
+
+        tracker.reset();
+        assert_eq!(tracker.current_frame_stipend(), 0, "reset must drop every frame entry");
+        assert_eq!(tracker.try_consume(1), 0, "no frame is active after reset");
+    }
+
+    /// REX4 burns the unused part of a granted frame's stipend on return by clamping
+    /// `gas.remaining()` back to the pre-inflation limit, so the caller never recovers
+    /// system-granted gas.
+    #[test]
+    fn test_rex4_burns_unused_stipend_on_return() {
+        let grant = constants::rex4::STORAGE_CALL_STIPEND;
+        let mut tracker = StorageCallStipendTracker::new(MegaSpecId::REX4);
+        let mut compute_gas = compute_gas::ComputeGasTracker::new(MegaSpecId::REX4, u64::MAX);
+        let mut frame_init = granted_call_frame_init();
+        let FrameInput::Call(call_inputs) = &frame_init.frame_input else {
+            panic!("call frame init");
+        };
+        let pre_inflation_limit = call_inputs.gas_limit;
+        tracker.before_frame_init(&mut frame_init, &mut compute_gas);
+
+        let FrameInput::Call(call_inputs) = &frame_init.frame_input else {
+            panic!("call frame init");
+        };
+        assert_eq!(
+            call_inputs.gas_limit,
+            pre_inflation_limit + grant,
+            "REX4 inflates the child's gas limit by the stipend"
+        );
+
+        // The child spends nothing, so the whole stipend is unused and must be burned.
+        let mut result = FrameResult::Call(revm::interpreter::CallOutcome::new(
+            InterpreterResult::new(
+                InstructionResult::Stop,
+                Bytes::new(),
+                Gas::new(call_inputs.gas_limit),
+            ),
+            0..0,
+        ));
+        tracker.before_frame_return_result::<false>(&mut result);
+        assert_eq!(
+            result.gas().remaining(),
+            pre_inflation_limit,
+            "unused stipend must not survive the frame return"
+        );
+    }
+}

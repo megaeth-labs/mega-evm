@@ -1012,7 +1012,7 @@ mod tests {
     /// `code_by_hash()`. The workspace's `MemoryDatabase` cannot model this —
     /// it eagerly populates `AccountInfo.code` inside `basic()`, so any cache
     /// miss against it would always see the code already hydrated.
-    #[derive(Default)]
+    #[derive(Default, Debug)]
     struct LazyCodeDatabase {
         accounts: HashMap<Address, AccountInfo>,
         codes: HashMap<B256, Bytecode>,
@@ -1896,5 +1896,69 @@ mod tests {
             ctx.volatile_data_tracker.borrow().has_accessed_oracle(),
             "legacy sload must also mark oracle access",
         );
+    }
+
+    /// Direct unit coverage for `Host::load_account_delegated`'s REX6 delegate mark.
+    ///
+    /// Production CALL-family opcodes no longer reach this trait method (revm resolves
+    /// the delegate via `load_account_info_skip_cold_load` under a
+    /// `begin_call_target_resolution` bracket). The override therefore only serves
+    /// direct trait callers. Both polarities of the REX6 gate at this site survived
+    /// the M2 campaign because no test observed the mark set through this entry.
+    ///
+    /// Setup: EIP-7702 delegator whose code points at the block beneficiary.
+    /// - REX6: loading the delegator must also mark beneficiary access.
+    /// - REX5: loading the delegator must **not** mark beneficiary access (only the raw address is
+    ///   marked, and the raw address is not the beneficiary).
+    #[test]
+    fn test_load_account_delegated_marks_eip7702_delegate_only_from_rex6() {
+        const DELEGATOR: Address = address!("00000000000000000000000000000000000000d1");
+        const BENEFICIARY: Address = address!("00000000000000000000000000000000000000b1");
+        const UNRELATED: Address = address!("00000000000000000000000000000000000000aa");
+
+        // REX6: delegate hop must mark beneficiary.
+        {
+            let db = LazyCodeDatabase::default().with_eip7702_delegation(DELEGATOR, BENEFICIARY);
+            let block = revm::context::BlockEnv { beneficiary: BENEFICIARY, ..Default::default() };
+            let mut ctx = MegaContext::new(db, MegaSpecId::REX6).with_block(block);
+
+            let _loaded = Host::load_account_delegated(&mut ctx, DELEGATOR)
+                .expect("load_account_delegated must succeed");
+
+            assert!(
+                ctx.volatile_data_tracker.borrow().has_accessed_beneficiary_balance(),
+                "REX6 load_account_delegated(delegator→beneficiary) must mark beneficiary access",
+            );
+        }
+
+        // REX5: freeze — only the raw address is marked; delegator ≠ beneficiary so no mark.
+        {
+            let db = LazyCodeDatabase::default().with_eip7702_delegation(DELEGATOR, BENEFICIARY);
+            let block = revm::context::BlockEnv { beneficiary: BENEFICIARY, ..Default::default() };
+            let mut ctx = MegaContext::new(db, MegaSpecId::REX5).with_block(block);
+
+            let _ = Host::load_account_delegated(&mut ctx, DELEGATOR)
+                .expect("load_account_delegated must succeed");
+
+            assert!(
+                !ctx.volatile_data_tracker.borrow().has_accessed_beneficiary_balance(),
+                "REX5 load_account_delegated must not resolve the EIP-7702 delegate for marking",
+            );
+        }
+
+        // Control: loading an unrelated non-delegating account never marks.
+        {
+            let db = LazyCodeDatabase::default();
+            let block = revm::context::BlockEnv { beneficiary: BENEFICIARY, ..Default::default() };
+            let mut ctx = MegaContext::new(db, MegaSpecId::REX6).with_block(block);
+
+            let _ = Host::load_account_delegated(&mut ctx, UNRELATED)
+                .expect("load_account_delegated must succeed");
+
+            assert!(
+                !ctx.volatile_data_tracker.borrow().has_accessed_beneficiary_balance(),
+                "loading an unrelated address must not mark beneficiary access",
+            );
+        }
     }
 }

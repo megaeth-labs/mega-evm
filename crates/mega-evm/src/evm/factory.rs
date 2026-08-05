@@ -306,6 +306,23 @@ mod tests {
         assert!(evm_env.cfg_env.disable_eip7623);
     }
 
+    /// The production path — `create_evm` routing the embedder's `EvmEnv` through `with_cfg` —
+    /// pins the chain-id gate off however the config arrives: revm 40 defaults the flag to
+    /// `true`, and every frozen `MegaETH` spec ran without the gate.
+    #[test]
+    fn test_create_evm_pins_chain_id_check_off() {
+        let mut cfg = CfgEnv::new_with_spec(MegaSpecId::REX6);
+        cfg.chain_id = CHAIN_ID;
+        assert!(cfg.tx_chain_id_check, "revm 40 must default the gate on for this test to bite");
+
+        let evm = MegaEvmFactory::new().create_evm(MemoryDatabase::default(), evm_env(cfg));
+
+        assert!(
+            !evm.ctx.cfg.tx_chain_id_check,
+            "a factory-built EVM must run with the revm-27 chain-id semantics"
+        );
+    }
+
     /// Carrying the config is not enough — it must also drive execution. A custom per-token
     /// calldata cost moves the same transaction's gas by exactly its per-token delta.
     #[test]

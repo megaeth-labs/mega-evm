@@ -73,13 +73,15 @@ fn rex5_hardforks() -> MegaHardforkConfig {
     )
 }
 
-/// Per-test cfg toggles that affect the REX5 system-tx guards. Defaults match the
-/// production-equivalent `CfgEnv` shape (chain-id check on, nonce check on, EIP-3607
-/// on), so most tests can call `Rex5Cfg::default()`; tests that pin the cfg-toggle
-/// escape hatch override one field via struct-update syntax.
+/// Per-test cfg toggles that affect the REX5 system-tx guards. Most tests enable the
+/// chain-id gate to exercise the guard logic; tests that pin the cfg-toggle escape
+/// hatch override one field via struct-update syntax.
 #[derive(Copy, Clone)]
 struct Rex5Cfg {
-    /// Mirrors `CfgEnv::tx_chain_id_check` — production default `true`.
+    /// Mirrors `CfgEnv::tx_chain_id_check`. The factory pins this flag off (frozen
+    /// `MegaETH` semantics run without the gate), so `create_rex5_block_executor`
+    /// re-applies the requested value on the live context after construction — the
+    /// deliberate opt-in the guard tests need.
     tx_chain_id_check: bool,
     /// Mirrors `CfgEnv::disable_nonce_check` — production default `false`.
     disable_nonce_check: bool,
@@ -97,7 +99,6 @@ fn rex5_evm_env(cfg: Rex5Cfg) -> EvmEnv<MegaSpecId> {
     let mut cfg_env = CfgEnv::default();
     cfg_env.spec = MegaSpecId::REX5;
     cfg_env.chain_id = MEGA_CHAIN_ID;
-    cfg_env.tx_chain_id_check = cfg.tx_chain_id_check;
     cfg_env.disable_nonce_check = cfg.disable_nonce_check;
     cfg_env.disable_eip3607 = cfg.disable_eip3607;
 
@@ -127,6 +128,9 @@ fn create_rex5_block_executor<'a>(
     let block_ctx =
         MegaBlockExecutionCtx::new(B256::ZERO, Some(B256::ZERO), Bytes::new(), block_limits);
     let mut executor = executor_factory.create_executor(state, block_ctx, rex5_evm_env(cfg));
+    // The factory pins `tx_chain_id_check` off; these tests opt into the gate on purpose,
+    // so re-apply the requested value on the live context the guards read.
+    executor.evm.ctx.cfg.tx_chain_id_check = cfg.tx_chain_id_check;
     executor.evm.ctx.chain_mut().operator_fee_scalar = Some(U256::ZERO);
     executor.evm.ctx.chain_mut().operator_fee_constant = Some(U256::ZERO);
     executor
