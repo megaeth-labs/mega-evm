@@ -1,13 +1,13 @@
-//! ModExp pricing across the spec arc: the frozen legacy schedule vs Rex7's EIP-7883 adoption.
+//! `ModExp` pricing across the spec arc: the frozen legacy schedule vs Rex7's EIP-7883 adoption.
 //!
-//! `MINI_REX` adopted the Osaka / EIP-7883 ModExp schedule through the revm implementation
+//! `MINI_REX` adopted the Osaka / EIP-7883 `ModExp` schedule through the revm implementation
 //! current at the time, which short-circuited zero-base/zero-modulus inputs to the 500-gas
 //! minimum before computing the formula cost. EIP-7883 as written has no such special case:
 //! its multiplication complexity floors at 16, so a zero-base/zero-modulus call with a
 //! 64-byte exponent length prices in the thousands. Later revm versions charge the formula
 //! cost, as the EIP specifies.
 //!
-//! The frozen specs (MINI_REX through REX6) stay pinned to the historical short-circuit for
+//! The frozen specs (`MINI_REX` through REX6) stay pinned to the historical short-circuit for
 //! replay identity; REX7 adopts the corrected schedule. EQUIVALENCE uses the inherited
 //! Berlin schedule, whose formula collapses to the flat minimum for these inputs under
 //! either ordering, so it is structurally unaffected.
@@ -31,7 +31,7 @@ const MODEXP: Address = mega_evm::modexp::ADDRESS;
 /// The flat charge of the frozen zero-base/zero-modulus short-circuit.
 const LEGACY_MIN_GAS: u64 = mega_evm::modexp::MIN_GAS;
 
-/// All frozen specs that install the Osaka ModExp schedule.
+/// All frozen specs that install the Osaka `ModExp` schedule.
 const FROZEN_OSAKA_SPECS: [MegaSpecId; 8] = [
     MegaSpecId::MINI_REX,
     MegaSpecId::REX,
@@ -43,7 +43,7 @@ const FROZEN_OSAKA_SPECS: [MegaSpecId; 8] = [
     MegaSpecId::REX6,
 ];
 
-/// Wrapper contract: writes a 96-byte ModExp header (`base_len=0`, `exp_len`, `mod_len=0`,
+/// Wrapper contract: writes a 96-byte `ModExp` header (`base_len=0`, `exp_len`, `mod_len=0`,
 /// no body) into memory, CALLs the precompile with `forwarded_gas`, stores the CALL result
 /// at storage slot 0, and STOPs — so the outer transaction always succeeds and the
 /// precompile outcome is observable in both gas and state.
@@ -147,7 +147,7 @@ fn test_rex7_zero_base_mod_charges_eip7883_formula_cost() {
 }
 
 /// The frozen-vs-REX7 window flip: a call forwarding more than 500 but less than the
-/// formula cost succeeds on frozen specs and halts with PrecompileOOG on REX7.
+/// formula cost succeeds on frozen specs and halts with `PrecompileOOG` on REX7.
 #[test]
 fn test_rex7_underfunded_zero_base_mod_call_halts() {
     let rex6 = transact(MegaSpecId::REX6, zero_base_mod_wrapper(64, 1_000));
