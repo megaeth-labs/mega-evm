@@ -1337,6 +1337,78 @@ mod tests {
         );
     }
 
+    /// The deprecated constructor fills the `MINI_REX` contract-size limits when the caller left
+    /// them unset. Pins the enabled side of the gate: dropping it would silently fall back to
+    /// revm's 24 KiB EIP-170 cap for every `MINI_REX`-and-later context built this way.
+    #[allow(deprecated)]
+    #[test]
+    fn test_new_with_context_fills_mini_rex_contract_size_limits() {
+        let inner: MegaInnerContext<EmptyDB> = revm::Context::op()
+            .with_tx(crate::MegaTransaction::default())
+            .with_db(EmptyDB::default());
+        assert_eq!(inner.cfg.limit_contract_code_size, None, "caller leaves the limits unset");
+        assert_eq!(inner.cfg.limit_contract_initcode_size, None);
+
+        let context = MegaContext::new_with_context(
+            inner,
+            MegaSpecId::MINI_REX,
+            ExternalEnvs::<EmptyExternalEnv>::default(),
+        );
+
+        assert_eq!(
+            context.inner.cfg.limit_contract_code_size,
+            Some(constants::mini_rex::MAX_CONTRACT_SIZE)
+        );
+        assert_eq!(
+            context.inner.cfg.limit_contract_initcode_size,
+            Some(constants::mini_rex::MAX_INITCODE_SIZE)
+        );
+    }
+
+    /// The `EQUIVALENCE` side of the same gate: the enlarged `MINI_REX` sizes must not leak into
+    /// the baseline spec, which keeps revm's EIP-170 / EIP-3860 defaults.
+    #[allow(deprecated)]
+    #[test]
+    fn test_new_with_context_keeps_equivalence_contract_size_defaults() {
+        let inner: MegaInnerContext<EmptyDB> = revm::Context::op()
+            .with_tx(crate::MegaTransaction::default())
+            .with_db(EmptyDB::default());
+
+        let context = MegaContext::new_with_context(
+            inner,
+            MegaSpecId::EQUIVALENCE,
+            ExternalEnvs::<EmptyExternalEnv>::default(),
+        );
+
+        assert_eq!(
+            context.inner.cfg.limit_contract_code_size, None,
+            "EQUIVALENCE must keep revm's EIP-170 default"
+        );
+        assert_eq!(
+            context.inner.cfg.limit_contract_initcode_size, None,
+            "EQUIVALENCE must keep revm's EIP-3860 default"
+        );
+    }
+
+    /// `with_cfg` fills the `MINI_REX` sizes only from `MINI_REX` on; an `EQUIVALENCE` config
+    /// comes out with revm's defaults untouched. Complements
+    /// `test_with_cfg_unpinned_still_applies_mega_pins`, which pins the enabled side.
+    #[test]
+    fn test_with_cfg_keeps_equivalence_contract_size_defaults() {
+        let context = MegaContext::new(EmptyDB::default(), MegaSpecId::EQUIVALENCE)
+            .with_cfg(CfgEnv::new_with_spec(MegaSpecId::EQUIVALENCE));
+
+        assert_eq!(context.mega_spec(), MegaSpecId::EQUIVALENCE);
+        assert_eq!(
+            context.inner.cfg.limit_contract_code_size, None,
+            "EQUIVALENCE must keep revm's EIP-170 default"
+        );
+        assert_eq!(
+            context.inner.cfg.limit_contract_initcode_size, None,
+            "EQUIVALENCE must keep revm's EIP-3860 default"
+        );
+    }
+
     /// The test/bench-only `new_with_ext_envs` wrapper builds a `MegaContext`
     /// over a caller-supplied external environment (`TestExternalEnvs`), at the
     /// requested spec and wired to the given SALT/oracle handles.

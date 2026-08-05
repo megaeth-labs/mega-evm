@@ -265,3 +265,87 @@ const _: fn() = || {
     let _ = InvalidTransaction::CallGasCostMoreThanGasLimit { initial_gas: 0, gas_limit: 0 };
     let _ = InvalidTransaction::GasFloorMoreThanGasLimit { gas_floor: 0, gas_limit: 0 };
 };
+
+// ==================================================================================
+// Ordering and boundary of the REX5 final check
+// ==================================================================================
+
+/// REX5 moved the `initial_gas > gas_limit` check to the *end* of Mega-step-D. The rejection
+/// therefore reports the final `initial_gas` — including the callee-side new-account storage gas
+/// — even when the pre-storage-gas value already exceeded the limit. Restoring the pre-REX5
+/// mid-sequence check would short-circuit here and report the smaller, pre-storage number.
+#[test]
+fn test_rex5_rejection_reports_initial_gas_after_new_account_storage_gas() {
+    let mut db = MemoryDatabase::default();
+    let initial_balance = U256::from(10_000_000u64);
+    db.set_account_balance(CALLER, initial_balance);
+
+    // Empty calldata: mid-sequence initial_gas = 21_000 + 39_000 = 60_000, already above the
+    // 50_000 limit. The callee is empty, sits in a heavy SALT bucket, and the transfer is
+    // non-zero, so Mega adds `NEW_ACCOUNT_STORAGE_GAS_BASE * (multiplier - 1)` afterwards.
+    let multiplier = 10u64;
+    let external_envs = external_envs_with_hot_account(NEW_ACCOUNT, multiplier);
+    let new_account_storage_gas =
+        mega_evm::constants::rex::NEW_ACCOUNT_STORAGE_GAS_BASE * (multiplier - 1);
+    assert!(
+        new_account_storage_gas > 0,
+        "fixture must add storage gas after the mid-sequence point"
+    );
+
+    let gas_limit = 50_000;
+    let expected_initial_gas = 60_000 + new_account_storage_gas;
+    let tx = TxEnv {
+        caller: CALLER,
+        kind: TxKind::Call(NEW_ACCOUNT),
+        data: Bytes::new(),
+        value: U256::from(1),
+        gas_limit,
+        ..Default::default()
+    };
+
+    let err = run_tx(MegaSpecId::REX5, &mut db, external_envs, tx)
+        .expect_err("REX5 must reject initial_gas > gas_limit as a validation error");
+    assert_call_gas_cost_more_than_gas_limit(&err);
+    let dbg = format!("{err:?}");
+    assert!(
+        dbg.contains(&format!("initial_gas: {expected_initial_gas}")),
+        "the rejection must report the final initial_gas ({expected_initial_gas}), got {dbg}",
+    );
+    assert_sender_untouched(&mut db, initial_balance, 0);
+}
+
+/// The REX5 floor check is strictly-greater-than: `floor_gas == gas_limit` is affordable and must
+/// still execute, consuming exactly the floor. One unit less is the rejection pinned by
+/// `test_rex5_floor_gas_above_gas_limit_is_validation_rejection`.
+#[test]
+fn test_rex5_floor_gas_equal_to_gas_limit_is_accepted() {
+    // Same shape as the floor-rejection test: 700 zero calldata bytes give
+    //   initial_gas = 60_000 + 44*700 =  90_800
+    //   floor_gas   = 21_000 + 110*700 = 98_000
+    // so `initial_gas <= gas_limit == floor_gas` holds exactly at 98_000.
+    let calldata_len = 700usize;
+    let initial_gas = 60_000 + 44 * calldata_len as u64;
+    let floor_gas = 21_000 + 110 * calldata_len as u64;
+    assert!(initial_gas <= floor_gas, "fixture must band initial_gas <= gas_limit");
+
+    let mut db = MemoryDatabase::default();
+    db.set_account_balance(CALLER, U256::from(1_000_000_000u64));
+
+    let tx = TxEnv {
+        caller: CALLER,
+        kind: TxKind::Call(NEW_ACCOUNT),
+        data: Bytes::from(vec![0u8; calldata_len]),
+        value: U256::ZERO,
+        gas_limit: floor_gas,
+        ..Default::default()
+    };
+
+    let res = run_tx(MegaSpecId::REX5, &mut db, TestExternalEnvs::<Infallible>::new(), tx)
+        .expect("floor_gas == gas_limit must not be a validation rejection");
+    assert!(res.result.is_success(), "got {:?}", res.result);
+    assert_eq!(
+        res.result.tx_gas_used(),
+        floor_gas,
+        "EIP-7623 raises the charge to exactly the floor",
+    );
+}

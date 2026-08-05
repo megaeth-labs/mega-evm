@@ -983,3 +983,80 @@ fn test_rex6_unrecoverable_authority_skipped() {
         "an applied authority charges exactly one more KV update than an unrecoverable one",
     );
 }
+
+// ============================================================================
+// Application-gate boundaries of the shared authorization scan
+// ============================================================================
+
+/// Installs a real EIP-7702 delegation designator on `authority`, the way an earlier
+/// transaction's `apply_eip7702_auth_list` would have left the account.
+fn set_eip7702_delegation(db: &mut MemoryDatabase, authority: Address, target: Address) {
+    use revm::{bytecode::Bytecode, database::AccountState};
+    let code = Bytecode::new_eip7702(target);
+    let account = db.load_account(authority).expect("cache insert is infallible");
+    account.info.code_hash = code.hash_slow();
+    account.info.code = Some(code);
+    account.account_state = AccountState::None;
+}
+
+/// The code gate skips an authority that already carries *non-7702* code, but must let an
+/// already-delegated authority through: re-delegation is the normal EIP-7702 rotation, and the
+/// scan has to account for it exactly like a first delegation.
+#[test]
+fn test_rex6_applied_authority_with_existing_delegation_is_accounted() {
+    // Baseline: same-shaped type-4 transaction whose single authorization is unrecoverable, so
+    // it is skipped before any account read and contributes no per-authority accounting.
+    let mut baseline_db = funded_db();
+    let baseline_tx = tx_with_auths(vec![auth_unrecoverable(1, 0)]);
+    let (baseline_res, baseline_usage) =
+        transact(MegaSpecId::REX6, &mut baseline_db, &no_heavy_buckets(), baseline_tx);
+    assert!(baseline_res.result.is_success(), "got {:?}", baseline_res.result);
+
+    // Same transaction, plus one applicable authorization whose authority is already delegated.
+    let mut db = funded_db();
+    set_eip7702_delegation(&mut db, AUTHORITY_A, CALLEE);
+    let tx = tx_with_auths(vec![auth(AUTHORITY_A, 1, 0)]);
+    let (res, usage) = transact(MegaSpecId::REX6, &mut db, &no_heavy_buckets(), tx);
+    assert!(res.result.is_success(), "got {:?}", res.result);
+
+    assert_eq!(
+        usage.data_size - baseline_usage.data_size,
+        ACCOUNT_INFO_WRITE_SIZE,
+        "re-delegating an already-delegated authority is an applied authorization and must be \
+         charged one account-info write",
+    );
+    assert_eq!(
+        usage.kv_updates - baseline_usage.kv_updates,
+        1,
+        "an applied authorization is one KV update",
+    );
+}
+
+/// `creates_authority` is a conjunction: the authority account must be empty **and** absent from
+/// state. An account that exists but happens to be empty is not net-new, so applying an
+/// authorization to it must record no state growth.
+#[test]
+fn test_rex6_empty_but_existing_authority_is_not_state_growth() {
+    // Present in state with a zero balance: `basic()` returns `Some(default)`, so the journal
+    // loads it as existing while `is_empty()` is still true.
+    let mut db = funded_db().account_balance(AUTHORITY_A, U256::ZERO);
+    let tx = tx_with_auths(vec![auth(AUTHORITY_A, 1, 0)]);
+    let (res, usage) = transact(MegaSpecId::REX6, &mut db, &no_heavy_buckets(), tx);
+
+    assert!(res.result.is_success(), "got {:?}", res.result);
+    assert_eq!(
+        usage.state_growth, 0,
+        "an authority that already exists in state must not count as state growth",
+    );
+
+    // Contrast: the same authorization against an authority absent from state does grow it.
+    let mut absent_db = funded_db();
+    let absent_tx = tx_with_auths(vec![auth(AUTHORITY_A, 1, 0)]);
+    let (absent_res, absent_usage) =
+        transact(MegaSpecId::REX6, &mut absent_db, &no_heavy_buckets(), absent_tx);
+    assert!(absent_res.result.is_success(), "got {:?}", absent_res.result);
+    assert_eq!(
+        absent_usage.state_growth, 1,
+        "a net-new authority must count as exactly one unit of state growth",
+    );
+}
