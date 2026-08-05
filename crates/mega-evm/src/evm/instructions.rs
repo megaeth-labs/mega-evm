@@ -1029,6 +1029,13 @@ mod mini_rex {
     /// `volatile_data_ext` handler — the block-environment reads plus the beneficiary-conditional
     /// account-touching opcodes. See [`super::volatile_data_ext::charge_static_gas`] for why those
     /// entries have to move out of the interpreter's pre-charge and into the handler.
+    ///
+    /// Opcodes this table dispatches to `control::invalid` (disabled) or `control::unknown` (never
+    /// wired) keep their entries even though no handler consumes them. The pre-charge cannot change
+    /// what such a frame pays — the handler takes the whole budget either way — only which halt it
+    /// reports, and revm treats that as an implementation detail: its own table prices `CLZ`,
+    /// `SLOTNUM` and the `DUPN` family at every fork, including the forks whose handlers reject
+    /// them outright.
     pub(super) const fn gas_table(mut table: GasTable) -> GasTable {
         use revm::bytecode::opcode::*;
 
@@ -2892,7 +2899,7 @@ impl StackInspectTr for Stack {
 mod tests {
     use super::*;
 
-    const ALL_SPECS: [MegaSpecId; 9] = [
+    const ALL_SPECS: [MegaSpecId; 10] = [
         MegaSpecId::EQUIVALENCE,
         MegaSpecId::MINI_REX,
         MegaSpecId::REX,
@@ -2902,6 +2909,7 @@ mod tests {
         MegaSpecId::REX4,
         MegaSpecId::REX5,
         MegaSpecId::REX6,
+        MegaSpecId::REX7,
     ];
 
     /// [`STATIC_GAS_TABLE`] is a single table shared by every handler, so the static gas it adds
@@ -2998,6 +3006,11 @@ mod tests {
     /// [`gas_table_for_spec`] — so a mismatch is silent but consensus-visible: an opcode zeroed
     /// without a guard to charge it becomes free, and a guard whose entry was left in place charges
     /// its opcode twice.
+    ///
+    /// The disabled and never-wired opcodes are deliberately not in the zeroed set. Their entries
+    /// are charged by a frame the handler was going to strip of its whole budget anyway, so the
+    /// pre-charge moves no gas — it only decides which halt an underfunded frame reports, and that
+    /// is not a surface this table is used to pin.
     #[test]
     fn test_only_volatile_guarded_opcodes_have_zero_static_gas() {
         for spec in ALL_SPECS {
