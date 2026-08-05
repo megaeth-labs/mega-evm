@@ -1,5 +1,35 @@
 # Domain mutator — open questions / future work
 
+## Known equivalent mutants
+
+Survivors that were analysed and found to have no observable effect. Each entry
+carries the proof; do not spend test budget on them again.
+
+- `spec_gate:crates/mega-evm/src/limit/state_growth.rs:169:REX4:true` —
+  `current_call_remaining`. Only affects pre-REX4 specs, and the sole consumer of that
+  value (`sandbox/execution.rs`'s `with_tx_state_growth_limit` for the REX5+ `KeylessDeploy`
+  sandbox) is unreachable before REX5, so no pre-REX4 execution ever observes the added
+  `min(frame_remaining, tx_remaining)`. Pre-REX4 frames are also pushed with `u64::MAX`
+  (state_growth.rs:121, the only push path), so the `min` is a no-op for every state this
+  tracker can reach through its own API except a refund-skewed corner with an unlimited TX
+  budget — which still has no consumer.
+- `spec_gate:crates/mega-evm/src/limit/state_growth.rs:206:REX4:true` — `check_limit`. The
+  REX4 branch is a strict prefix of the shared TX-level check: it only adds
+  `exceeds_current_frame_limit` before falling through to the same `tx_usage()` vs
+  `tx_limit()` comparison the pre-REX4 path performs. Pre-REX4 frames carry a `u64::MAX`
+  limit, so `used - refund > limit` can never hold and the added branch can never fire.
+  Extensionally identical for every reachable state.
+- `spec_gate:crates/mega-evm/src/limit/data_size.rs:74:REX5:true` — `DataSizeTracker`'s
+  `rex5_enabled`. Its only read is as a disjunct inside the `debug_assert!` in `check_limit`
+  (data_size.rs:193); forcing it `true` only relaxes that assertion. The field is private and
+  has no accessor, so nothing else can observe it.
+- `storage_call_stipend.rs` `if burn > 0` → `>=` (cargo-mutants operator). `burn == 0` makes
+  the guarded call `gas.record_regular_cost(0)`, which subtracts nothing and cannot fail.
+- `storage_call_stipend.rs` `if stipend > 0` → `>=` (cargo-mutants operator). With
+  `stipend == 0` the taken branch computes `gas.remaining().min(gas.limit() - 0)`, and
+  `remaining <= limit` always holds, so it returns `gas.remaining()` — exactly the `else`
+  branch.
+
 ## Out of scope for v0
 
 - `spec.is_enabled(SomeType::ACTIVATION_SPEC)` style gates (associated constants,
