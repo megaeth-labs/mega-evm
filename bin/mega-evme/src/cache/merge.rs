@@ -118,6 +118,36 @@ pub(crate) fn merge_kv_entries(base: Vec<CacheKv>, overlay: Vec<CacheKv>) -> Vec
     map.into_iter().map(|(key, value)| CacheKv { key, value }).collect()
 }
 
+/// Merge `ours` over `on_disk` for a provider cache, keeping at most `cap`
+/// entries.
+///
+/// `--rpc.cache-max-entries` bounds what a run persists, so the union of a
+/// sibling's file and ours must be bounded too: runs that share a cache
+/// directory but touch disjoint RPC keys would otherwise grow the file without
+/// limit, and every later start would parse all of it before the in-memory LRU
+/// could evict anything.
+///
+/// This process's entries are kept first — they are already LRU-bounded by the
+/// same cap, and they are the ones this run just proved it needs. On-disk
+/// entries then fill whatever room is left.
+pub(crate) fn merge_provider_entries_capped(
+    on_disk: Vec<CacheKv>,
+    ours: Vec<CacheKv>,
+    cap: usize,
+) -> Vec<CacheKv> {
+    let mut map: BTreeMap<B256, String> = BTreeMap::new();
+    for e in ours.into_iter().take(cap) {
+        map.insert(e.key, e.value);
+    }
+    for e in on_disk {
+        if map.len() >= cap {
+            break;
+        }
+        map.entry(e.key).or_insert(e.value);
+    }
+    map.into_iter().map(|(key, value)| CacheKv { key, value }).collect()
+}
+
 /// Detect whether `value` is a provider-cache array or a capture envelope.
 pub(crate) fn detect_shape(value: &serde_json::Value, path: &Path) -> Result<CacheShape> {
     if value.is_array() {
@@ -603,6 +633,37 @@ mod tests {
                 .expect("intentional A→B refresh must succeed");
         assert_eq!(merged.external_env, Some(ours_ext.canonicalized()));
         assert_eq!(merged.cache, vec![kv(1, "disk"), kv(2, "ours")]);
+    }
+
+    /// The merged provider cache never exceeds the configured cap, and this
+    /// process's entries survive the truncation.
+    ///
+    /// Runs sharing a cache directory touch disjoint RPC keys, so an uncapped
+    /// union grows the file without limit no matter how small each run's LRU is.
+    #[test]
+    fn test_merge_provider_entries_capped_bounds_the_union() {
+        let on_disk: Vec<CacheKv> = (0..10).map(|i| kv(i, "disk")).collect();
+        let ours: Vec<CacheKv> = (100..104).map(|i| kv(i, "ours")).collect();
+
+        let merged = merge_provider_entries_capped(on_disk, ours.clone(), 6);
+        assert_eq!(merged.len(), 6, "the union is capped, not the sum of both sides");
+        for entry in &ours {
+            assert!(
+                merged.iter().any(|m| m.key == entry.key && m.value == entry.value),
+                "this run's entries survive truncation: {:?}",
+                entry.key
+            );
+        }
+    }
+
+    /// A cap larger than the union keeps everything, and ours win on collision.
+    #[test]
+    fn test_merge_provider_entries_capped_keeps_all_below_the_cap() {
+        let on_disk = vec![kv(1, "disk"), kv(2, "disk")];
+        let ours = vec![kv(2, "ours"), kv(3, "ours")];
+
+        let merged = merge_provider_entries_capped(on_disk, ours, 16);
+        assert_eq!(merged, vec![kv(1, "disk"), kv(2, "ours"), kv(3, "ours")]);
     }
 
     /// No opinion: loaded A, ours A (carried forward), disk now B → B wins and

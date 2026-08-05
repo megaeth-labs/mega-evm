@@ -31,9 +31,9 @@ use tracing::{info, warn};
 use super::transport::TransportCache;
 use crate::{
     cache::{
-        lock_sidecar_path, merge_envelope_for_persist, merge_kv_entries, read_provider_cache,
-        reread_envelope_for_merge, write_bytes_atomic, write_envelope_atomic, CacheKv, EnvelopeDoc,
-        EnvelopeReread, ExternalEnvDoc, ENVELOPE_VERSION,
+        lock_sidecar_path, merge_envelope_for_persist, merge_provider_entries_capped,
+        read_provider_cache, reread_envelope_for_merge, write_bytes_atomic, write_envelope_atomic,
+        CacheKv, EnvelopeDoc, EnvelopeReread, ExternalEnvDoc, ENVELOPE_VERSION,
     },
     common::{EvmeError, Result},
 };
@@ -320,7 +320,10 @@ fn save_cache_atomic(cache: &SharedCache, target: &Path) -> std::io::Result<()> 
         }
     };
 
-    let merged = merge_kv_entries(disk_entries, our_entries);
+    // The union must respect the configured cap: a sibling's file plus ours can
+    // otherwise exceed what either run was allowed to keep.
+    let merged =
+        merge_provider_entries_capped(disk_entries, our_entries, cache.max_items() as usize);
     let serialized = serde_json::to_vec(&merged).map_err(|e| {
         std::io::Error::other(format!(
             "failed to serialize merged cache for {}: {e}",
@@ -558,6 +561,43 @@ mod tests {
     }
 
     /// Interleaving: A holds only key A in memory; B persists key B; A then
+    /// Persisting into a shared cache directory keeps the file within the
+    /// configured cap.
+    ///
+    /// Runs that share a directory touch disjoint RPC keys, so merging a
+    /// sibling's file in wholesale would grow it past what either run was
+    /// allowed to keep, and every later start would parse all of it.
+    #[test]
+    fn test_provider_cache_persist_respects_the_configured_cap() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("rpc-cache-1.json");
+
+        // A sibling with a bigger budget fills the file first.
+        let sibling = CacheLayer::new(64).cache();
+        for i in 0..20u8 {
+            sibling.put(B256::repeat_byte(i), format!(r#"{{"result":"{i}"}}"#)).expect("put");
+        }
+        RpcCacheStore::new(sibling, path.clone()).persist().expect("persist sibling");
+
+        // Ours is capped at 4 and holds keys the sibling never saw.
+        let ours = CacheLayer::new(4).cache();
+        let mine: Vec<B256> = (100..104u8).map(B256::repeat_byte).collect();
+        for key in &mine {
+            ours.put(*key, r#"{"result":"mine"}"#.to_string()).expect("put");
+        }
+        RpcCacheStore::new(ours, path.clone()).persist().expect("persist ours");
+
+        let entries = crate::cache::read_provider_cache(&path).expect("read merged cache");
+        assert!(
+            entries.len() <= 4,
+            "the merged file must respect this run's cap, got {} entries",
+            entries.len()
+        );
+        for key in &mine {
+            assert!(entries.iter().any(|e| e.key == *key), "this run's entries survive: {key}");
+        }
+    }
+
     /// persists — on-disk file must contain the union (B's entries survive).
     #[test]
     fn test_provider_cache_persist_merges_interleaved_disk_entries() {

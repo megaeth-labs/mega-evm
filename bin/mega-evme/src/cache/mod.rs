@@ -12,10 +12,11 @@ use clap::{Parser, Subcommand};
 use crate::common::{EvmeError, Result};
 
 pub(crate) use merge::{
-    lock_sidecar_path, merge_envelope_for_persist, merge_kv_entries, merge_provider_lists,
-    parse_rpc_cache_filename_chain_id, read_provider_cache, reread_envelope_for_merge,
-    write_bytes_atomic, write_envelope_atomic, write_provider_cache_atomic, CacheKv, EnvelopeDoc,
-    EnvelopeReread, ExternalEnvDoc, ENVELOPE_VERSION,
+    lock_sidecar_path, merge_envelope_for_persist, merge_provider_entries_capped,
+    merge_provider_lists, parse_rpc_cache_filename_chain_id, read_provider_cache,
+    reread_envelope_for_merge, write_bytes_atomic, write_envelope_atomic,
+    write_provider_cache_atomic, CacheKv, EnvelopeDoc, EnvelopeReread, ExternalEnvDoc,
+    ENVELOPE_VERSION,
 };
 
 use merge::{load_cache_file, merge_envelopes_cli, CacheShape, LoadedCache};
