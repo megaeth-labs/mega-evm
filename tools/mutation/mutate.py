@@ -84,6 +84,9 @@ CALL_DELETE_SUBDIRS: Tuple[str, ...] = ("limit", "evm", "sandbox", "system")
 #   tools/mutation/logs/**      per-mutant cargo logs
 #   tools/mutation/state*.json  campaign state (gitignored)
 #   tools/mutation/.mutate-journal.json(+tmp.*)  crash journal
+#   any path ending in `.tmp.<pid>`  orphaned atomic-write temps (product or
+#                                    harness); cleaned on success, may linger
+#                                    after a kill mid-write
 ALLOWED_ARTIFACT_DIR_PREFIXES = (
     "tools/mutation/reports/",
     "tools/mutation/logs/",
@@ -93,6 +96,9 @@ ALLOWED_ARTIFACT_DIR_PREFIXES = (
 _ALLOWED_ARTIFACT_BASENAME = re.compile(
     r"^(?:state[^/]*\.json|\.mutate-journal\.json(?:\.tmp\.[^/]+)?)$"
 )
+# Atomic product/journal writes use `path.with_suffix(path.suffix + f".tmp.{pid}")`,
+# e.g. `foo.rs.tmp.12345` or `.mutate-journal.json.tmp.12345`.
+_ATOMIC_WRITE_TMP_SUFFIX = re.compile(r"\.tmp\.\d+$")
 
 # Oracle packages (fixed; recorded in state for --resume binding).
 ORACLE_L1_PACKAGE = "mega-evm"
@@ -269,8 +275,12 @@ def is_allowed_artifact_path(path: str) -> bool:
       - under tools/mutation/reports/ or tools/mutation/logs/
       - tools/mutation/state*.json (basename only, no nested dirs)
       - tools/mutation/.mutate-journal.json(+tmp.*)
+      - any `*.tmp.<pid>` orphaned atomic-write temp (product or harness)
     """
     if not path:
+        return True
+    # Orphaned temp from atomic_write_text / journal / state (any directory).
+    if _ATOMIC_WRITE_TMP_SUFFIX.search(path):
         return True
     for pref in ALLOWED_ARTIFACT_DIR_PREFIXES:
         if _path_matches_prefix(path, pref):
@@ -390,37 +400,42 @@ def in_string_literal(line: str, col: int) -> bool:
     return in_str
 
 
+def _skip_ws_left(text: str, i: int) -> int:
+    """Index of the first non-whitespace character at or left of `i`, or -1."""
+    while i >= 0 and text[i] in " \t\r\n":
+        i -= 1
+    return i
+
+
 def find_receiver_start(text: str, dot_pos: int) -> int:
-    """Walk left from the '.' of `.is_enabled(...)` to the start of the receiver expr."""
-    i = dot_pos - 1
-    depth = 0
-    while i >= 0:
-        c = text[i]
-        if c == ")":
-            depth += 1
-            i -= 1
-            continue
-        if c == "(":
-            if depth == 0:
-                break
-            depth -= 1
-            i -= 1
-            continue
-        if depth > 0:
-            i -= 1
-            continue
-        if c.isalnum() or c in "_$":
-            i -= 1
-            continue
-        if c == ".":
-            i -= 1
-            continue
-        if c == ":" and i > 0 and text[i - 1] == ":":
-            i -= 2
-            continue
-        # stop at whitespace, operators, punctuation
-        break
-    return i + 1
+    """Walk left from the '.' of `.is_enabled(...)` to the start of the receiver expr.
+
+    Multi-line method chains such as::
+
+        mega_spec
+            .is_enabled(MegaSpecId::REX4)
+
+    or::
+
+        if context
+            .host
+            .spec_id()
+            .is_enabled(MegaSpecId::REX5)
+
+    are resolved by reusing call_delete's segment walker (`_find_call_expr_start`),
+    which allows whitespace/newlines only between a segment and a preceding `.`
+    and therefore stops at statement keywords (`if`, `let`, …) rather than
+    swallowing them.
+
+    Returns `dot_pos` when no segment can be parsed to the left (an *empty*
+    receiver); callers must treat that as a walk failure, not as a zero-width
+    receiver — see `find_spec_gate_sites`.
+    """
+    # `_find_call_expr_start` expects the start of the method name after `.`.
+    j = dot_pos + 1
+    while j < len(text) and text[j] in " \t":
+        j += 1
+    return _find_call_expr_start(text, j)
 
 
 def line_number_at(text: str, offset: int) -> int:
@@ -685,6 +700,17 @@ def find_spec_gate_sites(root: Path) -> Tuple[List[SpecGateSite], List[str]]:
 
             recv_start = find_receiver_start(text, call_start)
             expr_original = text[recv_start:call_end]
+            # Empty receiver: the walk stopped on the '.' itself because no
+            # segment could be parsed to its left (e.g. a `foo()?.` or `arr[i].`
+            # receiver). Mutating that span would splice `true`/`false` straight
+            # after the unparsed prefix, and the resulting compile error would be
+            # scored as a kill. Drop the site instead of emitting a fake mutant.
+            if recv_start >= call_start:
+                exclusions.append(
+                    f"empty-receiver: {rel}:{line_idx + 1}: "
+                    f"{line_text.rstrip()[:120]}"
+                )
+                continue
             if ".is_enabled" not in expr_original:
                 exclusions.append(
                     f"receiver-walk-failed: {rel}:{line_idx + 1}: "
@@ -879,7 +905,10 @@ def _find_call_expr_start(text: str, callee_start: int) -> int:
 
     resolve to `ctx` (then rejected as non-statements by the line-prefix check).
     Does **not** cross statement boundaries (`;`, `{`, …).
-    Spec-gate's `find_receiver_start` is intentionally left unchanged.
+
+    Shared with spec-gate: `find_receiver_start` delegates here so both operators
+    resolve line-wrapped receivers identically. Returns `callee_start` (bare
+    call) or the '.' position when no segment parses to its left.
     """
     # Optional whitespace then '.' before the callee name → method call.
     j = callee_start - 1
@@ -892,9 +921,7 @@ def _find_call_expr_start(text: str, callee_start: int) -> int:
     dot = j
     while True:
         # Consume one segment to the left of `dot`: ident, path, or call `ident(...)`.
-        k = dot - 1
-        while k >= 0 and text[k] in " \t\r\n":
-            k -= 1
+        k = _skip_ws_left(text, dot - 1)
         if k < 0:
             return dot
 
@@ -944,23 +971,23 @@ def _find_call_expr_start(text: str, callee_start: int) -> int:
                 while k >= 0 and text[k] in " \t":
                     k -= 1
             # Identifier / path before the call.
-            if k >= 0 and (text[k].isalnum() or text[k] == "_"):
-                while k >= 0 and (text[k].isalnum() or text[k] in "_"):
+            if k >= 0 and (text[k].isalnum() or text[k] in "_$"):
+                while k >= 0 and (text[k].isalnum() or text[k] in "_$"):
                     k -= 1
                 if k >= 1 and text[k - 1 : k + 1] == "::":
                     # rare: Type::method — keep walking path segments simply
                     while k >= 1 and text[k - 1 : k + 1] == "::":
                         k -= 2
-                        while k >= 0 and (text[k].isalnum() or text[k] in "_"):
+                        while k >= 0 and (text[k].isalnum() or text[k] in "_$"):
                             k -= 1
             seg_start = k + 1
-        elif text[k].isalnum() or text[k] == "_":
-            while k >= 0 and (text[k].isalnum() or text[k] in "_"):
+        elif text[k].isalnum() or text[k] in "_$":
+            while k >= 0 and (text[k].isalnum() or text[k] in "_$"):
                 k -= 1
             # Path prefix `Foo::`
             while k >= 1 and text[k - 1 : k + 1] == "::":
                 k -= 2
-                while k >= 0 and (text[k].isalnum() or text[k] in "_"):
+                while k >= 0 and (text[k].isalnum() or text[k] in "_$"):
                     k -= 1
             seg_start = k + 1
         else:
@@ -968,9 +995,7 @@ def _find_call_expr_start(text: str, callee_start: int) -> int:
             return dot
 
         # Can the chain continue further left via another '.'?
-        k = seg_start - 1
-        while k >= 0 and text[k] in " \t\r\n":
-            k -= 1
+        k = _skip_ws_left(text, seg_start - 1)
         if k >= 0 and text[k] == ".":
             # Do not chain into a `//` comment (e.g. `// ... budget.` above a call).
             ls = _line_start_at(text, k)
@@ -1405,6 +1430,37 @@ def _enclosing_mod(lines: List[str], idx: int) -> str:
 # ---------------------------------------------------------------------------
 
 
+def atomic_write_text(path: Path, text: str) -> None:
+    """Write `text` to `path` via same-dir temp + flush + os.replace.
+
+    A kill/power-loss mid-write cannot leave a half-written product file whose
+    hash matches neither journal original nor mutated (which would block
+    compare-and-restore). Orphaned temps match `_ATOMIC_WRITE_TMP_SUFFIX` and
+    are whitelisted by cleanliness asserts; they are unlinked on failure.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + f".tmp.{os.getpid()}")
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        # `os.replace` gives the target the temp's mode. Copy the original's mode
+        # first so applying/restoring a mutant cannot silently change a product
+        # file's permissions — which the porcelain cleanliness check would then
+        # report as a dirty tree.
+        if path.is_file():
+            os.chmod(tmp, path.stat().st_mode & 0o7777)
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            if tmp.is_file():
+                tmp.unlink()
+        except OSError:
+            pass
+        raise
+
+
 def apply_mutant(root: Path, mutant: Mutant) -> str:
     """Apply mutant text edit. Returns the mutated file content (for journaling)."""
     path = root / mutant.file
@@ -1426,7 +1482,7 @@ def apply_mutant(root: Path, mutant: Mutant) -> str:
     )
     if new_text == text:
         raise RuntimeError(f"replacement produced no change for {mutant.mid}")
-    path.write_text(new_text, encoding="utf-8")
+    atomic_write_text(path, new_text)
     return new_text
 
 
@@ -1462,10 +1518,7 @@ def write_journal(
         "written_at": datetime.now(timezone.utc).isoformat(),
     }
     path = journal_path(root)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + f".tmp.{os.getpid()}")
-    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    os.replace(tmp, path)
+    atomic_write_text(path, json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
 
 def clear_journal(root: Path) -> None:
@@ -1529,7 +1582,7 @@ def compare_and_restore_journal(root: Path) -> Optional[str]:
                 f"journal original_text hash mismatch for mid={mid}; "
                 "refusing restore. Scene preserved."
             )
-        target.write_text(original_text, encoding="utf-8")
+        atomic_write_text(target, original_text)
         clear_journal(root)
         return (
             f"journal: recovered mid={mid} file={file_rel} "
@@ -1580,7 +1633,7 @@ def apply_mutant_journaled(root: Path, mutant: Mutant) -> None:
         original_text=original_text,
         mutated_text=mutated_text,
     )
-    path.write_text(mutated_text, encoding="utf-8")
+    atomic_write_text(path, mutated_text)
 
 
 def restore_mutant_journaled(root: Path, mutant: Mutant) -> None:
@@ -1806,11 +1859,8 @@ def load_state(path: Path) -> dict:
 
 def save_state(path: Path, state: dict) -> None:
     """Atomic write: temp file in the same directory + os.replace."""
-    path.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps(state, indent=2, sort_keys=True) + "\n"
-    tmp = path.with_suffix(path.suffix + f".tmp.{os.getpid()}")
-    tmp.write_text(payload, encoding="utf-8")
-    os.replace(tmp, path)
+    atomic_write_text(path, payload)
 
 
 def validate_resume_state(

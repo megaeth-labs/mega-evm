@@ -28,9 +28,13 @@ workspace and has **zero CI impact**.
 
 - Matches `.is_enabled((?:crate::)?MegaSpecId::IDENT)`.
 - Walks left from the `.` to capture the full receiver (`spec`, `ctx.spec`,
-  `$context.host.spec_id()`, `MegaSpecId::REX5`, …).
+  `$context.host.spec_id()`, `MegaSpecId::REX5`, …), including **line-wrapped**
+  method chains (shared segment walker with `call_delete`).
 - Skips lines that are comments (`//`, `///`, `//!`).
 - Skips matches inside double-quoted string literals (simple heuristic).
+- Skips a site whose receiver walk yields **nothing** (reported as
+  `empty-receiver`): replacing that span would splice the body straight after an
+  unparsed prefix, and the compile error would be miscounted as a kill.
 - Manual exclusions are listed in the report.
 
 ### Gas-const details
@@ -160,12 +164,17 @@ python3 tools/mutation/mutate.py --limit 40 --resume \
   the regular per-mutant restore share the same hash logic (no `git checkout`).
   Concurrent-edit hash mismatch refuses to touch the file, keeps the journal,
   and aborts the campaign.
+- **Atomic product writes**: mutated source (and journal restore) is written via
+  same-directory temp + `fsync` + `os.replace`, so a kill mid-write cannot leave
+  a half-written file that matches neither journal hash. Orphaned `*.tmp.<pid>`
+  temps are whitelisted by the cleanliness assert.
 - **Full-tree clean**: after baseline and after every mutant restore the harness
   runs `git status --porcelain` on the whole repo. Only harness **runtime
   artifacts** are whitelisted (`tools/mutation/reports/`, `logs/`,
-  `state*.json`, `.mutate-journal.json`). Harness sources (`mutate.py`,
-  `README.md`, `TODO.md`, …) dirty or renamed-into-artifact-dir abort and
-  preserve the scene. Rename/copy porcelain lines check **both** path sides.
+  `state*.json`, `.mutate-journal.json`, orphaned `*.tmp.<pid>`). Harness
+  sources (`mutate.py`, `README.md`, `TODO.md`, …) dirty or
+  renamed-into-artifact-dir abort and preserve the scene. Rename/copy porcelain
+  lines check **both** path sides.
 
 ## Spec-gate exclusions (non-product)
 

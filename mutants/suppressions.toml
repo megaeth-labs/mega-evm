@@ -316,3 +316,19 @@ file = "crates/mega-evm/src/limit/state_growth.rs"
 mutant = "crates/mega-evm/src/limit/state_growth.rs:169:1: spec-gate if self.spec.is_enabled(MegaSpecId::REX4) { -> if self.spec.is_enabled(MegaSpecId::REX5) {"
 justification = "Equivalent: current_call_remaining is only read by the REX5+ KeylessDeploy sandbox (sandbox/execution.rs:1037). The REX4->REX5 shift differs only at exactly REX4, where the function is never called — no observable change."
 reviewer = "improve-mutation-score (William Aaron Cheung)"
+
+# --- host.rs:oracle_sload debug_assert MINI_REX→EQUIVALENCE (equivalent) ---------
+#
+# The mutated conjunct lives in the `debug_assert!` at the top of `oracle_sload`
+# (`host.rs:425`), which restates the sole caller's guard
+# (`sload_skip_cold_load`, host.rs:181-182). `is_enabled(EQUIVALENCE)` is
+# vacuously true, so the mutant only weakens an assertion that never fires on
+# guarded code, and `debug_assert!` is compiled out of release builds. The
+# guard's own spec-gate mutants are killed. Do not add a `#[should_panic]` test.
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "crates/mega-evm/src/evm/host.rs"
+mutant = "spec-gate self.spec.is_enabled(MegaSpecId::MINI_REX) && address == ORACLE_CONTRACT_ADDRESS, -> self.spec.is_enabled(MegaSpecId::EQUIVALENCE) && address == ORACLE_CONTRACT_ADDRESS,"
+justification = "Equivalent: the mutated conjunct lives in the debug_assert! at the top of oracle_sload, which restates the sole caller's guard (sload_skip_cold_load, host.rs:181-182). is_enabled(EQUIVALENCE) is vacuously true, so the mutant only weakens an assertion that never fires on guarded code, and debug_assert! is compiled out of release builds. The guard's own spec-gate mutants are killed."
+reviewer = "RealiCZ (cz)"
