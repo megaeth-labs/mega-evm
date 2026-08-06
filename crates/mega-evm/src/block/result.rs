@@ -301,4 +301,40 @@ mod tests {
             assert!(!error.is_nonce_too_low());
         }
     }
+
+    /// A `MegaETH` resource-limit rejection has no upstream `InvalidTransaction` counterpart, so
+    /// both error types answer `as_invalid_tx_err` with `None` for every variant. reth-side
+    /// classification consumes this answer as "drop this transaction", not "abort payload
+    /// building" — the mega-reth integration owns pinning that reading; this pins the answer.
+    #[test]
+    fn test_limit_errors_have_no_invalid_transaction_counterpart() {
+        let tx_errors = [
+            MegaTxLimitExceededError::TransactionGasLimit { tx_gas_limit: 31, limit: 30 },
+            MegaTxLimitExceededError::TransactionEncodeSizeLimit { tx_size: 101, limit: 100 },
+            MegaTxLimitExceededError::DataAvailabilitySizeLimit { da_size: 11, limit: 10 },
+        ];
+        for error in tx_errors {
+            assert!(error.as_invalid_tx_err().is_none(), "no counterpart for {error}");
+        }
+
+        let block_errors = [
+            MegaBlockLimitExceededError::TransactionDataLimit { block_used: 1, limit: 10 },
+            MegaBlockLimitExceededError::KVUpdateLimit { block_used: 2, limit: 11 },
+            MegaBlockLimitExceededError::ComputeGasLimit { block_used: 3, limit: 12 },
+            MegaBlockLimitExceededError::TransactionEncodeSizeLimit {
+                block_used: 4,
+                tx_used: 1,
+                limit: 13,
+            },
+            MegaBlockLimitExceededError::DataAvailabilitySizeLimit {
+                block_used: 5,
+                tx_used: 1,
+                limit: 14,
+            },
+            MegaBlockLimitExceededError::StateGrowthLimit { block_used: 6, limit: 15 },
+        ];
+        for error in block_errors {
+            assert!(error.as_invalid_tx_err().is_none(), "no counterpart for {error}");
+        }
+    }
 }

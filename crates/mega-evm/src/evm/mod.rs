@@ -470,6 +470,37 @@ mod tests {
         tx
     }
 
+    /// Trait-plumbing smoke test for the `EvmTr` / `InspectorEvmTr` accessors.
+    ///
+    /// These are pure field projections required by revm 40's traits — every tuple element has a
+    /// distinct type, so a miswired projection would not compile. There is no logic to get wrong;
+    /// this pins only that each projection is wired and callable, so the surface stays exercised.
+    #[test]
+    fn test_evm_trait_accessors_project_the_context() {
+        use revm::{handler::EvmTr, inspector::InspectorEvmTr};
+
+        let mut db = MemoryDatabase::default();
+        let mut evm = MegaEvm::new(configure_context(&mut db)).with_inspector(NoOpInspector);
+        let chain_id = evm.ctx_ref().cfg.chain_id;
+
+        let (ctx, _instructions, _precompiles, _frames) = evm.all();
+        assert_eq!(ctx.cfg.chain_id, chain_id);
+        let (ctx, _instructions, _precompiles, _frames) = evm.all_mut();
+        assert_eq!(ctx.cfg.chain_id, chain_id);
+        let (ctx, _instructions) = evm.ctx_instructions();
+        assert_eq!(ctx.cfg.chain_id, chain_id);
+        let (ctx, _precompiles) = evm.ctx_precompiles();
+        assert_eq!(ctx.cfg.chain_id, chain_id);
+
+        let (ctx, _instructions, _precompiles, _frames, _inspector) = evm.all_inspector();
+        assert_eq!(ctx.cfg.chain_id, chain_id);
+        let (ctx, _instructions, _precompiles, _frames, _inspector) = evm.all_mut_inspector();
+        assert_eq!(ctx.cfg.chain_id, chain_id);
+
+        // The handler's `Default` belongs to the same required-surface family.
+        let _handler: crate::MegaHandler<(), (), ()> = Default::default();
+    }
+
     #[test]
     fn test_mega_evm_builder_chain_produces_working_evm() {
         let mut db = MemoryDatabase::default()
