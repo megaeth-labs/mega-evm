@@ -713,6 +713,27 @@ macro_rules! run_inner_instruction_or_abort {
             Err(result) => Err(result),
         };
     };
+    // Same as above, but a plain out-of-gas halt runs `$tripwire` before the early return skips
+    // the wrapper's tail. Debug builds only; see
+    // `volatile_data_ext::debug_check_frozen_detention_window` for what the tripwire watches.
+    ($inner_fn:path, $context:expr, $out:ident, on_plain_oog: $tripwire:expr) => {
+        let ctx = InstructionContext::<'_, H, WIRE> {
+            interpreter: &mut *$context.interpreter,
+            host: &mut *$context.host,
+        };
+        #[allow(unused_variables)]
+        let $out: InstructionExecResult = match $inner_fn(ctx) {
+            Ok(()) => Ok(()),
+            Err(result) if result.is_halt() => {
+                #[cfg(debug_assertions)]
+                if matches!(result, InstructionResult::OutOfGas) {
+                    $tripwire;
+                }
+                return Err(result);
+            }
+            Err(result) => Err(result),
+        };
+    };
 }
 
 /// Records an opcode's compute gas in a single measurement window and enforces the compute-gas
@@ -1303,6 +1324,46 @@ pub mod volatile_data_ext {
         };
     }
 
+    /// Debug-build tripwire for the frozen detention window (CALL family and EXTCODECOPY).
+    ///
+    /// revm 27 loaded these opcodes' target account before charging the opcode's own costs, so a
+    /// frame that ran out of gas on those charges had already marked beneficiary access and the
+    /// rest of the transaction ran detained. revm 40 charges first, so the same frame halts with
+    /// the beneficiary unmarked and the rest of the transaction runs undetained. Release builds
+    /// accept the revm 40 order; the full-history replay that gates a release is what proves no
+    /// historical transaction sits in that window — and this check, compiled only under debug
+    /// assertions, is the tripwire such a replay must run with: it fires exactly when a window
+    /// transaction is found, so the wrapper backfill archived for that case gets implemented
+    /// instead of the divergence going unnoticed.
+    ///
+    /// The check over-approximates on purpose — it does not reconstruct how far revm 27 would
+    /// have gotten — with one exception: a `MemoryOOG` halt is never routed here, because memory
+    /// expansion was charged before the load under revm 27 as well, so that halt shape cannot
+    /// diverge. An already-marked transaction is skipped for the same reason: the mark is
+    /// idempotent, so losing a duplicate cannot change replay.
+    #[cfg(debug_assertions)]
+    fn debug_check_frozen_detention_window<H: HostExt + ?Sized>(
+        host: &mut H,
+        opcode: u8,
+        raw_target: Option<Address>,
+    ) {
+        let Some(target) = raw_target else { return };
+        if host.volatile_data_tracker().borrow().has_accessed_beneficiary_balance() {
+            return;
+        }
+        let beneficiary = host.beneficiary_address();
+        let hits_beneficiary = target == beneficiary ||
+            (host.spec_id().is_enabled(MegaSpecId::REX6) &&
+                host.best_effort_resolve_eip7702_delegate_address(target) == beneficiary);
+        debug_assert!(
+            !hits_beneficiary,
+            "frozen detention window hit: opcode 0x{opcode:02x} ran out of gas before loading \
+             the beneficiary, which revm 27 marked (detaining the rest of the transaction). \
+             Replaying this transaction diverges from its historical execution; implement the \
+             wrapper backfill archived in REVM_40_REVIEW_GUIDE.md (wontfix #20)."
+        );
+    }
+
     /// Rejects the guarded opcode with the `disableVolatileDataAccess` revert data and returns from
     /// the enclosing handler, leaving the frame's gas exactly as it was before the opcode.
     ///
@@ -1396,7 +1457,24 @@ pub mod volatile_data_ext {
                 }
             }
 
-            run_inner_instruction_or_abort!($original_fn, context, inner_outcome);
+            // The raw stack target, captured before the body pops it, for the frozen-window
+            // tripwire. EXTCODECOPY is the family member with a real window (its revm body
+            // charges the copy cost before the load); for the others the hook doubles as a
+            // running check that their loads do mark before any out-of-gas halt.
+            #[cfg(debug_assertions)]
+            let tripwire_target: Option<Address> =
+                context.interpreter.stack.inspect::<0>().map(|w| w.into_address());
+
+            run_inner_instruction_or_abort!(
+                $original_fn,
+                context,
+                inner_outcome,
+                on_plain_oog: debug_check_frozen_detention_window(
+                    context.host,
+                    opcode::$opcode,
+                    tripwire_target
+                )
+            );
             apply_compute_gas_limit!(context);
             inner_outcome
         }
@@ -1672,10 +1750,19 @@ pub mod volatile_data_ext {
                     }
                 }
             }
+            // The raw stack target, captured before the body pops it, for the frozen-window
+            // tripwire. The CALL family is where the window lives: this wrapper's static charge
+            // and the body's value-transfer charge both precede the load that marks.
+            #[cfg(debug_assertions)]
+            let tripwire_target: Option<Address> =
+                context.interpreter.stack.inspect::<1>().map(|w| w.into_address());
+
             // Charged here rather than after the body — see the macro's doc comment. The charge
             // does not return early: the detention tail below has to run on this path too.
             const STATIC_GAS: u64 = static_gas(opcode::$opcode);
             if !context.interpreter.gas.record_regular_cost(STATIC_GAS) {
+                #[cfg(debug_assertions)]
+                debug_check_frozen_detention_window(context.host, opcode::$opcode, tripwire_target);
                 apply_compute_gas_limit!(context);
                 return Err(InstructionResult::OutOfGas);
             }
@@ -1690,6 +1777,13 @@ pub mod volatile_data_ext {
                 // The inner handler already recorded its outcome in the interpreter action; the
                 // detention below must run regardless, so the result is carried to the tail.
                 inner_outcome = $inner_fn(ctx);
+            }
+
+            // A plain out-of-gas halt from the body can be its value-transfer charge, which
+            // sits before the load: the frozen-window tripwire has to look at it.
+            #[cfg(debug_assertions)]
+            if matches!(inner_outcome, Err(InstructionResult::OutOfGas)) {
+                debug_check_frozen_detention_window(context.host, opcode::$opcode, tripwire_target);
             }
 
             // Propagate the detained compute gas limit if the CALL triggered beneficiary

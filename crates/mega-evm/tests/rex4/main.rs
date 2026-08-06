@@ -8,6 +8,7 @@ mod deployment;
 mod eip7702_delegation_cycle;
 mod frame_limits;
 mod frame_state_growth;
+mod frozen_window_tripwire;
 mod gas_detention;
 mod inspector_frame_run_parity;
 mod intrinsic_limit_bypass;
