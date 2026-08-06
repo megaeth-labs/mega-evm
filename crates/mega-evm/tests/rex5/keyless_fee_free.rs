@@ -270,6 +270,31 @@ fn test_rex4_unfunded_signer_still_rejected_by_balance_precheck() {
     );
 }
 
+/// A pre-Rex5 sandbox rejection has no reserved sandbox gas to refund.
+/// The fixed dispatch overhead therefore remains charged even when validation rejects the signer.
+#[test]
+fn test_rex4_sandbox_rejection_does_not_refund_unreserved_gas() {
+    let (keyless_tx_bytes, _) =
+        build_keyless_tx_with_init_code(Bytes::from_static(STOP_RUNTIME_INIT_CODE));
+    let mut db = MemoryDatabase::default();
+    db.set_account_balance(RELAYER, U256::from(1_000_000_000u64));
+
+    let result = run_keyless_outer(
+        MegaSpecId::REX4,
+        &mut db,
+        TestExternalEnvs::<std::convert::Infallible>::new(),
+        keyless_tx_bytes,
+        LARGE_GAS_LIMIT_OVERRIDE,
+    );
+
+    assert!(matches!(result, ExecutionResult::Revert { .. }), "unfunded signer must reject");
+    assert!(
+        result.tx_gas_used() >= mega_evm::constants::rex2::KEYLESS_DEPLOY_OVERHEAD_GAS,
+        "sandbox rejection must retain the fixed dispatch charge; got {}",
+        result.tx_gas_used(),
+    );
+}
+
 // ============================================================================
 // 3. value > 0 still requires the signer to fund the transfer (REX5)
 // ============================================================================
