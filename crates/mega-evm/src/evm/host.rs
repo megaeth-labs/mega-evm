@@ -10,15 +10,12 @@ use crate::{
     VolatileDataAccessTracker, ORACLE_CONTRACT_ADDRESS,
 };
 use alloy_evm::Database;
-use alloy_primitives::{Address, Bytes, Log, B256, U256};
+use alloy_primitives::{Address, Log, B256, U256};
 use delegate::delegate;
 use revm::{
     context::{ContextTr, JournalTr},
     context_interface::{
-        cfg::GasParams,
-        context::ContextError,
-        host::LoadError,
-        journaled_state::{AccountInfoLoad, AccountLoad},
+        cfg::GasParams, context::ContextError, host::LoadError, journaled_state::AccountInfoLoad,
     },
     interpreter::{Host, SStoreResult, SelfDestructResult, StateLoad},
     primitives::{hash_map::Entry, StorageKey, StorageValue, KECCAK_EMPTY},
@@ -89,12 +86,6 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> Host for MegaContext<DB, ExtEnvs> 
             fn log(&mut self, log: Log);
             fn caller(&self) -> Address;
             fn max_initcode_size(&self) -> usize;
-            fn sstore(
-                &mut self,
-                address: Address,
-                key: U256,
-                value: U256,
-            ) -> Option<StateLoad<SStoreResult>>;
             fn tstore(&mut self, address: Address, key: U256, value: U256);
             fn tload(&mut self, address: Address, key: U256) -> U256;
         }
@@ -236,50 +227,17 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> Host for MegaContext<DB, ExtEnvs> 
         Ok(load)
     }
 
-    // NOTE: `Host::sload` is deliberately NOT overridden. Its default implementation is
-    // `self.sload_skip_cold_load(address, key, false).ok()`, so the oracle customizations reach
-    // every caller of the legacy entry (still a public trait method for third parties) through the
-    // single implementation above. Re-adding an override here would fork the oracle logic into two
-    // bodies that can drift apart; keep it deleted.
-
-    fn balance(&mut self, address: Address) -> Option<StateLoad<U256>> {
-        self.check_and_mark_beneficiary_balance_access(&address);
-        self.inner.balance(address)
-    }
-
-    /// Loads `address` and its EIP-7702 delegate, marking beneficiary access for both from Rex6.
-    ///
-    /// The CALL-family opcodes no longer reach this method: revm resolves the delegate inside the
-    /// instruction and issues one [`Host::load_account_info_skip_cold_load`] call per address
-    /// instead. This override therefore only serves direct callers of the trait method, and the
-    /// `self.inner` delegation below deliberately keeps the inner context's own account loads out
-    /// of this impl's marking hook so the address set marked here is exactly `address` plus, from
-    /// Rex6, its delegate.
-    fn load_account_delegated(&mut self, address: Address) -> Option<StateLoad<AccountLoad>> {
-        self.check_and_mark_beneficiary_balance_access(&address);
-        // Rex6+: also mark the EIP-7702 delegate of `address` if any, so a CALL whose
-        // target delegates to the beneficiary triggers detention even though the raw stack
-        // operand doesn't match. The Rex4 path only marked the raw input. A resolve DB error
-        // falls back to the raw address (no delegate mark) — the `load_account_delegated` below
-        // remains responsible for surfacing the failure.
-        if self.spec.is_enabled(MegaSpecId::REX6) {
-            let resolved = self.best_effort_resolve_eip7702_delegate_address(address);
-            if resolved != address {
-                self.check_and_mark_beneficiary_balance_access(&resolved);
-            }
-        }
-        self.inner.load_account_delegated(address)
-    }
-
-    fn load_account_code(&mut self, address: Address) -> Option<StateLoad<Bytes>> {
-        self.check_and_mark_beneficiary_balance_access(&address);
-        self.inner.load_account_code(address)
-    }
-
-    fn load_account_code_hash(&mut self, address: Address) -> Option<StateLoad<B256>> {
-        self.check_and_mark_beneficiary_balance_access(&address);
-        self.inner.load_account_code_hash(address)
-    }
+    // NOTE: the six `Host` methods that carry a forwarding default implementation — `sload`,
+    // `sstore`, `balance`, `load_account_delegated`, `load_account_code` and
+    // `load_account_code_hash` — are deliberately NOT overridden. Each forwards to one of the three
+    // primitives implemented above, so every caller reaches the `MegaETH` customizations through
+    // the same single body the interpreter uses: the oracle storage rules, the resident-entry
+    // coldness rule, and the beneficiary marking site. An override here forks that logic into a
+    // second body that can drift apart from the first, and silently loses whatever the first grows
+    // next.
+    //
+    // `balance` is not a dead legacy entry: `SELFBALANCE` reads through it. The rest serve direct
+    // callers of the trait, which is public.
 }
 
 /// Which account load of a CALL-family opcode's target resolution comes next.
@@ -997,7 +955,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> JournalInspectTr for MegaContext<D
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_primitives::{address, keccak256};
+    use alloy_primitives::{address, keccak256, Bytes};
     use core::cell::Cell;
     use revm::{
         primitives::HashMap,
@@ -1722,6 +1680,69 @@ mod tests {
         );
     }
 
+    /// Discriminating probe for the resident-entry coldness rule at every legacy [`Host`] accessor
+    /// that reads an account.
+    ///
+    /// `warm_precompiles` puts the address in the journal's pre-warmed set, which is the only state
+    /// in which the two paths disagree: revm reports such an address warm on the resident path,
+    /// `MegaETH` prices it cold from the entry alone. Each accessor runs against a control issuing
+    /// the same call on the inner revm context, so an accessor that stopped reaching
+    /// [`Host::load_account_info_skip_cold_load`] — by being overridden again, say — flips its own
+    /// assertion while the control still holds.
+    #[test]
+    fn test_probe_legacy_accessor_coldness_discriminates() {
+        use revm::context_interface::JournalTr;
+        let precompile = Address::with_last_byte(1);
+        let mut warm = revm::primitives::AddressSet::default();
+        warm.insert(precompile);
+
+        macro_rules! probe {
+            ($accessor:ident) => {{
+                let mut ctx = oracle_sload_context(
+                    MegaSpecId::REX6,
+                    OracleTestEnvs::new(),
+                    crate::test_utils::MemoryDatabase::default(),
+                );
+                ctx.inner.journaled_state.warm_precompiles(&warm);
+                ctx.inspect_account(precompile, false).expect("entry must become resident");
+
+                let mut control = oracle_sload_context(
+                    MegaSpecId::REX6,
+                    OracleTestEnvs::new(),
+                    crate::test_utils::MemoryDatabase::default(),
+                );
+                control.inner.journaled_state.warm_precompiles(&warm);
+                control.inspect_account(precompile, false).expect("entry must become resident");
+
+                let ours = Host::$accessor(&mut ctx, precompile).expect("the load must succeed");
+                let theirs = Host::$accessor(&mut control.inner, precompile)
+                    .expect("the control load must succeed");
+
+                assert!(
+                    !theirs.is_cold,
+                    concat!(
+                        "control: revm prices a pre-warmed resident address warm at `",
+                        stringify!($accessor),
+                        "`"
+                    ),
+                );
+                assert!(
+                    ours.is_cold,
+                    concat!(
+                        "`",
+                        stringify!($accessor),
+                        "` must price a resident entry cold from the entry alone"
+                    ),
+                );
+            }};
+        }
+
+        probe!(balance);
+        probe!(load_account_code);
+        probe!(load_account_code_hash);
+        probe!(load_account_delegated);
+    }
+
     /// The oracle access mark (and with it the detention compute-gas cap) starts at REX3 exactly:
     /// REX2 reads the oracle without marking, REX3 marks and caps.
     #[test]
@@ -1898,59 +1919,56 @@ mod tests {
         );
     }
 
-    /// Direct unit coverage for `Host::load_account_delegated`'s REX6 delegate mark.
+    /// `Host::load_account_delegated` carries a forwarding default that issues two account loads —
+    /// the address it is handed, then that address's EIP-7702 delegate — and both must land in the
+    /// priced entry, where the beneficiary mark is taken.
     ///
-    /// Production CALL-family opcodes no longer reach this trait method (revm resolves
-    /// the delegate via `load_account_info_skip_cold_load` under a
-    /// `begin_call_target_resolution` bracket). The override therefore only serves
-    /// direct trait callers. Both polarities of the REX6 gate at this site survived
-    /// the M2 campaign because no test observed the mark set through this entry.
-    ///
-    /// Setup: EIP-7702 delegator whose code points at the block beneficiary.
-    /// - REX6: loading the delegator must also mark beneficiary access.
-    /// - REX5: loading the delegator must **not** mark beneficiary access (only the raw address is
-    ///   marked, and the raw address is not the beneficiary).
+    /// The spec is deliberately pre-`REX6`. No CALL-family bracket is open at this entry, so the
+    /// phase stays [`CallTargetLoadPhase::Idle`] and the delegate hop marks on every spec; the
+    /// `REX6`-gated delegate rule describes what a CALL opcode does and is pinned from the opcode
+    /// in `tests/rex6/beneficiary_detention.rs`. Asserting the hop from `REX5` is what makes this
+    /// test discriminating — an implementation that restated the opcode's gate here would leave the
+    /// flag clear.
     #[test]
-    fn test_load_account_delegated_marks_eip7702_delegate_only_from_rex6() {
+    fn test_load_account_delegated_marks_both_of_its_loads() {
         const DELEGATOR: Address = address!("00000000000000000000000000000000000000d1");
         const BENEFICIARY: Address = address!("00000000000000000000000000000000000000b1");
         const UNRELATED: Address = address!("00000000000000000000000000000000000000aa");
+        const SPEC: MegaSpecId = MegaSpecId::REX5;
 
-        // REX6: delegate hop must mark beneficiary.
+        // The EIP-7702 delegate hop is marked, on a spec whose CALL family would not mark it.
         {
             let db = LazyCodeDatabase::default().with_eip7702_delegation(DELEGATOR, BENEFICIARY);
             let block = revm::context::BlockEnv { beneficiary: BENEFICIARY, ..Default::default() };
-            let mut ctx = MegaContext::new(db, MegaSpecId::REX6).with_block(block);
-
-            let _loaded = Host::load_account_delegated(&mut ctx, DELEGATOR)
-                .expect("load_account_delegated must succeed");
-
-            assert!(
-                ctx.volatile_data_tracker.borrow().has_accessed_beneficiary_balance(),
-                "REX6 load_account_delegated(delegator→beneficiary) must mark beneficiary access",
-            );
-        }
-
-        // REX5: freeze — only the raw address is marked; delegator ≠ beneficiary so no mark.
-        {
-            let db = LazyCodeDatabase::default().with_eip7702_delegation(DELEGATOR, BENEFICIARY);
-            let block = revm::context::BlockEnv { beneficiary: BENEFICIARY, ..Default::default() };
-            let mut ctx = MegaContext::new(db, MegaSpecId::REX5).with_block(block);
+            let mut ctx = MegaContext::new(db, SPEC).with_block(block);
 
             let _ = Host::load_account_delegated(&mut ctx, DELEGATOR)
                 .expect("load_account_delegated must succeed");
 
             assert!(
-                !ctx.volatile_data_tracker.borrow().has_accessed_beneficiary_balance(),
-                "REX5 load_account_delegated must not resolve the EIP-7702 delegate for marking",
+                ctx.volatile_data_tracker.borrow().has_accessed_beneficiary_balance(),
+                "the delegate hop must reach the beneficiary-marking site",
             );
         }
 
-        // Control: loading an unrelated non-delegating account never marks.
+        // So is the address it is handed.
         {
-            let db = LazyCodeDatabase::default();
             let block = revm::context::BlockEnv { beneficiary: BENEFICIARY, ..Default::default() };
-            let mut ctx = MegaContext::new(db, MegaSpecId::REX6).with_block(block);
+            let mut ctx = MegaContext::new(LazyCodeDatabase::default(), SPEC).with_block(block);
+
+            let _ = Host::load_account_delegated(&mut ctx, BENEFICIARY)
+                .expect("load_account_delegated must succeed");
+
+            assert!(
+                ctx.volatile_data_tracker.borrow().has_accessed_beneficiary_balance(),
+                "the address handed in must reach the beneficiary-marking site",
+            );
+        }
+
+        // Control: an unrelated, non-delegating account never marks.
+        {
+            let block = revm::context::BlockEnv { beneficiary: BENEFICIARY, ..Default::default() };
+            let mut ctx = MegaContext::new(LazyCodeDatabase::default(), SPEC).with_block(block);
 
             let _ = Host::load_account_delegated(&mut ctx, UNRELATED)
                 .expect("load_account_delegated must succeed");

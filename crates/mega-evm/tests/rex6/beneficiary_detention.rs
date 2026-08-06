@@ -15,6 +15,12 @@
 //!   volatile-access-enabled path the host marks the delegate as the CALL loads it, again only from
 //!   REX6. The cross-spec sweeps below freeze that split for all four CALL-family opcodes.
 //!
+//!   These sweeps are the only place that rule is pinned. `Host::load_account_delegated` used to
+//!   restate it — it was the CALL family's host entry under revm 27 — but revm 40 routes the CALL
+//!   family through `load_account_info_skip_cold_load` under a `begin_call_target_resolution`
+//!   bracket, and the phase gate there owns the Rex6 split now. Pin it here, from the opcode,
+//!   rather than at a trait method no opcode reaches.
+//!
 //! - **Existing-target SELFDESTRUCT** — REX5 `storage_gas_ext::selfdestruct` only charged
 //!   DataSize/KV/StateGrowth for SELFDESTRUCT to a *new* beneficiary. When the target already
 //!   exists, the balance update went through `host.selfdestruct` without flowing through any
