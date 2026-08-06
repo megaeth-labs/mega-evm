@@ -23,6 +23,14 @@ carries the proof; do not spend test budget on them again.
   `rex5_enabled`. Its only read is as a disjunct inside the `debug_assert!` in `check_limit`
   (data_size.rs:193); forcing it `true` only relaxes that assertion. The field is private and
   has no accessor, so nothing else can observe it.
+- `spec_gate:crates/mega-evm/src/sandbox/execution.rs:603:REX5:false` and
+  `adjacent_spec:crates/mega-evm/src/sandbox/execution.rs:603:REX5:succ=REX6` — the only production
+  caller constructs the sandbox transaction at lines 342-365.
+  Rex5 and later always take `build_fee_free_sandbox_deposit_tx`, which fixes `gas_price` to zero.
+  The mutated fallback therefore computes `gas_limit * 0 + value`, exactly the same `value` used
+  by the original Rex5 branch.
+  Before Rex5 both original and mutant already take the fallback, and the helper has no other
+  production caller capable of supplying a nonzero-gas-price Rex5 transaction.
 - `storage_call_stipend.rs` `if burn > 0` → `>=` (cargo-mutants operator). `burn == 0` makes
   the guarded call `gas.record_regular_cost(0)`, which subtracts nothing and cannot fail.
 - `storage_call_stipend.rs` `if stipend > 0` → `>=` (cargo-mutants operator). With
