@@ -60,6 +60,15 @@ pub struct MegaBlockExecutor<H, E, R: OpReceiptBuilder> {
     /// The block limiter for tracking the limit usage.
     pub block_limiter: BlockLimiter,
     /// The receipts for the transactions in the block.
+    ///
+    /// Mid-build contents are only meaningful together with the rejection latch: a commit-time
+    /// block-limit rejection commits nothing — no receipt here, no limiter update, no state
+    /// change — and on the infallible [`alloy_evm::block::BlockExecutor::commit_transaction`]
+    /// path the only records of it are the latched error and the zero gas it returned. A caller
+    /// harvesting this field (or the equivalent trait accessor) directly must consult
+    /// [`MegaBlockExecutor::pending_commit_error`] first, or let
+    /// [`alloy_evm::block::BlockExecutor::finish`] fail the block; otherwise a rejected
+    /// transaction silently vanishes from the block it believes it built.
     pub receipts: Vec<R::Receipt>,
 }
 
@@ -947,7 +956,8 @@ where
     /// contributed nothing to the block. [`alloy_evm::block::BlockExecutor::finish`] then fails
     /// the block with the recorded error, so a rejection can never be silently dropped;
     /// [`MegaBlockExecutor::pending_commit_error`] exposes it earlier for callers that want to
-    /// react before `finish`.
+    /// react before `finish`. Zero is unambiguous: a committed transaction always uses at least
+    /// intrinsic gas, so a zero return from this method always means the rejection latch is set.
     ///
     /// Prefer [`MegaBlockExecutor::commit_tx_result`] when the caller can act on a rejection: it
     /// is the same commit, returns the error instead of latching it, and leaves the executor
