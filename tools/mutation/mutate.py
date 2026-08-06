@@ -19,8 +19,10 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -108,6 +110,18 @@ ORACLE_COMMAND = [
     f"cargo test -p {ORACLE_L2_PACKAGE} --quiet",
 ]
 
+# Per-oracle-layer wall-clock ceiling for one `cargo test` call.
+# Default (no explicit --test-timeout) is derived per layer from that layer's
+# clean-tree baseline: max(FLOOR, ceil(FACTOR x baseline_seconds)).
+TEST_TIMEOUT_FLOOR_S = 300
+TEST_TIMEOUT_FACTOR = 5
+# Used when no baseline wall time exists (--skip-baseline and no explicit
+# --test-timeout), and for the baseline run itself (it cannot derive from
+# a measurement it is about to take).
+TEST_TIMEOUT_NO_BASELINE_S = 1800
+# SIGTERM → grace → SIGKILL window when killing a timed-out process group.
+TEST_TIMEOUT_KILL_GRACE_S = 10.0
+
 # Match receiver.is_enabled(MegaSpecId::X) / receiver.is_enabled(crate::MegaSpecId::X)
 IS_ENABLED_CALL = re.compile(
     r"\.is_enabled\s*\(\s*((?:crate::)?MegaSpecId::([A-Za-z0-9_]+))\s*\)"
@@ -178,6 +192,17 @@ class MutantResult:
     error: Optional[str] = None
     is_sentinel: bool = False
     note: str = ""
+    # How a kill was obtained (None when not killed):
+    #   "assertion" — the oracle ran to completion and reported failure
+    #                 (failing test or compile error)
+    #   "timeout"   — the oracle layer exceeded its wall-clock ceiling and its
+    #                 process group was killed; a mutant that hangs the suite
+    #                 counts as detected, but is reported separately so an
+    #                 over-tight threshold is visible to an auditor.
+    kill_kind: Optional[str] = None
+    timed_out: bool = False
+    # Wall-clock ceiling (seconds) that fired, for timeout results only.
+    timeout_s: Optional[float] = None
 
 
 # ---------------------------------------------------------------------------
@@ -1695,83 +1720,281 @@ def parse_first_failing_test(output: str) -> Optional[str]:
     return None
 
 
+# ---------------------------------------------------------------------------
+# Oracle execution (per-layer `cargo test` with a wall-clock ceiling)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class TestTimeoutPolicy:
+    """Per-layer wall-clock ceilings for one oracle `cargo test` call."""
+
+    l1_s: float
+    l2_s: float
+    # Human-readable provenance, echoed to stdout / state / report.
+    source: str
+
+    def for_layer(self, layer: str) -> float:
+        return self.l1_s if layer == "L1" else self.l2_s
+
+    def describe(self) -> str:
+        return f"L1={self.l1_s:g}s L2={self.l2_s:g}s ({self.source})"
+
+    def as_dict(self) -> dict:
+        return {"L1_s": self.l1_s, "L2_s": self.l2_s, "source": self.source}
+
+
+def derived_timeout_s(baseline_s: float) -> float:
+    """max(floor, ceil(factor x baseline)) — the documented derivation rule."""
+    return float(
+        max(TEST_TIMEOUT_FLOOR_S, math.ceil(TEST_TIMEOUT_FACTOR * baseline_s))
+    )
+
+
+def _baseline_layer_duration(baseline: Optional[dict], layer: str) -> Optional[float]:
+    """Clean-tree wall time for one layer from a passed baseline record."""
+    if not isinstance(baseline, dict) or baseline.get("status") != "passed":
+        return None
+    entry = baseline.get(layer)
+    if not isinstance(entry, dict):
+        return None
+    value = entry.get("duration_s")
+    if not isinstance(value, (int, float)) or value <= 0:
+        return None
+    return float(value)
+
+
+def resolve_test_timeout(
+    explicit_s: Optional[float], baseline: Optional[dict]
+) -> TestTimeoutPolicy:
+    """Resolve the per-layer test timeout. Explicit always wins.
+
+    1. `--test-timeout N` → both layers use N.
+    2. else, a passed baseline → per layer
+       `max(TEST_TIMEOUT_FLOOR_S, ceil(TEST_TIMEOUT_FACTOR x layer baseline))`.
+    3. else (no baseline wall time, e.g. --skip-baseline) → both layers use the
+       absolute default `TEST_TIMEOUT_NO_BASELINE_S`.
+    """
+    if explicit_s is not None:
+        return TestTimeoutPolicy(
+            l1_s=explicit_s,
+            l2_s=explicit_s,
+            source=f"explicit --test-timeout={explicit_s:g}s",
+        )
+    d1 = _baseline_layer_duration(baseline, "L1")
+    d2 = _baseline_layer_duration(baseline, "L2")
+    if d1 is None or d2 is None:
+        return TestTimeoutPolicy(
+            l1_s=float(TEST_TIMEOUT_NO_BASELINE_S),
+            l2_s=float(TEST_TIMEOUT_NO_BASELINE_S),
+            source=(
+                f"no baseline wall time; absolute default "
+                f"{TEST_TIMEOUT_NO_BASELINE_S}s"
+            ),
+        )
+    return TestTimeoutPolicy(
+        l1_s=derived_timeout_s(d1),
+        l2_s=derived_timeout_s(d2),
+        source=(
+            f"derived from baseline (L1={d1:.1f}s, L2={d2:.1f}s): "
+            f"max({TEST_TIMEOUT_FLOOR_S}s, ceil({TEST_TIMEOUT_FACTOR} x baseline))"
+        ),
+    )
+
+
+def kill_process_group(proc: "subprocess.Popen", grace_s: float) -> str:
+    """Kill a timed-out child **and every process in its group**.
+
+    `cargo` spawns rustc and test binaries; signalling only the direct child
+    leaves them running and holding the `target/` lock. The child is started
+    with `start_new_session=True`, so its pid is the group leader and the whole
+    tree can be signalled at once: SIGTERM, short grace, then SIGKILL.
+
+    Returns a short description of what it took (for the layer log).
+    """
+    try:
+        pgid = os.getpgid(proc.pid)
+    except OSError:
+        pgid = None
+
+    def signal_group(sig: int) -> None:
+        try:
+            if pgid is not None:
+                os.killpg(pgid, sig)
+            else:
+                proc.send_signal(sig)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+
+    signal_group(signal.SIGTERM)
+    try:
+        proc.wait(timeout=grace_s)
+        return "process group killed with SIGTERM"
+    except subprocess.TimeoutExpired:
+        pass
+    signal_group(signal.SIGKILL)
+    try:
+        proc.wait(timeout=grace_s)
+        return "process group killed with SIGKILL (SIGTERM grace expired)"
+    except subprocess.TimeoutExpired:
+        return "process group SIGKILLed but child did not reap within grace"
+
+
+@dataclass
+class OracleLayerOutcome:
+    """Result of one oracle `cargo test` call."""
+
+    passed: bool
+    # First failing test / compile error / timeout label; None when passed.
+    detail: Optional[str]
+    duration_s: float
+    timed_out: bool = False
+    # Ceiling that fired; only meaningful when timed_out.
+    timeout_s: Optional[float] = None
+
+
 def run_oracle_layer(
-    root: Path, layer: str, package: str, log_path: Path
-) -> Tuple[bool, Optional[str], float]:
-    """Run one cargo test layer. Returns (passed, first_failing_or_error, duration_s)."""
+    root: Path,
+    layer: str,
+    package: str,
+    log_path: Path,
+    *,
+    timeout_s: float,
+) -> OracleLayerOutcome:
+    """Run one cargo test layer under a wall-clock ceiling.
+
+    The child runs in its own session (`start_new_session=True`) so a timeout
+    can kill cargo together with every rustc / test binary it spawned. A
+    timeout is a **failure** of the layer (`passed=False`) flagged with
+    `timed_out=True`; callers classify it as a kill of kind `timeout`.
+    """
     cmd = ["cargo", "test", "-p", package, "--quiet"]
     t0 = time.monotonic()
-    proc = subprocess.run(
+    proc = subprocess.Popen(
         cmd,
         cwd=root,
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
-        check=False,
         env={**os.environ, "CARGO_TERM_COLOR": "never"},
+        start_new_session=True,
     )
+    timed_out = False
+    kill_note = ""
+    try:
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout_s)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            kill_note = kill_process_group(proc, TEST_TIMEOUT_KILL_GRACE_S)
+            try:
+                stdout, stderr = proc.communicate(timeout=TEST_TIMEOUT_KILL_GRACE_S)
+            except subprocess.TimeoutExpired:
+                # Something outside the killed group still holds the write end.
+                # Drop our read ends so a long campaign cannot leak descriptors.
+                stdout, stderr = "", ""
+                for stream in (proc.stdout, proc.stderr):
+                    if stream is not None:
+                        try:
+                            stream.close()
+                        except OSError:
+                            pass
+    except BaseException:
+        # Ctrl-C / abort: the child is in its own group and would not receive
+        # the terminal signal, so tear the group down before propagating.
+        kill_process_group(proc, TEST_TIMEOUT_KILL_GRACE_S)
+        raise
     duration = time.monotonic() - t0
-    out = (proc.stdout or "") + "\n" + (proc.stderr or "")
+    returncode = proc.returncode if proc.returncode is not None else -signal.SIGKILL
+    out = (stdout or "") + "\n" + (stderr or "")
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    log_path.write_text(
-        f"$ {' '.join(cmd)}\nexit={proc.returncode}\nduration_s={duration:.3f}\n\n{out}",
-        encoding="utf-8",
+    header = (
+        f"$ {' '.join(cmd)}\n"
+        f"exit={returncode}\n"
+        f"duration_s={duration:.3f}\n"
+        f"timeout_s={timeout_s:g}\n"
+        f"timed_out={'true' if timed_out else 'false'}"
     )
-    if proc.returncode == 0:
-        return True, None, duration
-    return False, parse_first_failing_test(out) or f"<exit {proc.returncode}>", duration
+    if timed_out:
+        header += f" ({kill_note})"
+    log_path.write_text(f"{header}\n\n{out}", encoding="utf-8")
+    if timed_out:
+        return OracleLayerOutcome(
+            passed=False,
+            detail=f"<timeout after {timeout_s:g}s>",
+            duration_s=duration,
+            timed_out=True,
+            timeout_s=timeout_s,
+        )
+    if returncode == 0:
+        return OracleLayerOutcome(passed=True, detail=None, duration_s=duration)
+    return OracleLayerOutcome(
+        passed=False,
+        detail=parse_first_failing_test(out) or f"<exit {returncode}>",
+        duration_s=duration,
+    )
 
 
 def run_mutant(
-    root: Path, mutant: Mutant, *, is_sentinel: bool = False
+    root: Path,
+    mutant: Mutant,
+    *,
+    is_sentinel: bool = False,
+    timeouts: TestTimeoutPolicy,
 ) -> MutantResult:
     """Apply → L1 → (if live) L2 → compare-and-restore (journal hash logic).
 
-    Restore always runs in `finally`. Concurrent-edit refusal raises
-    `SystemExit` (propagates out of the campaign). Other apply/oracle errors
-    become a MutantResult with status=error so the campaign can continue.
+    Restore always runs in `finally`, including on the timeout path: a mutant
+    that hangs an oracle layer is killed (kind `timeout`) and its file is
+    restored through the same journal compare-and-restore as any other
+    outcome. Concurrent-edit refusal raises `SystemExit` (propagates out of the
+    campaign). Other apply/oracle errors become a MutantResult with
+    status=error so the campaign can continue.
     """
     t0 = time.monotonic()
     base_log = LOG_DIR / mutant.mid.replace("/", "_").replace(":", "__")
+
+    def killed(layer: str, outcome: OracleLayerOutcome) -> MutantResult:
+        return MutantResult(
+            mid=mutant.mid,
+            operator=mutant.operator,
+            file=mutant.file,
+            line=mutant.line,
+            site=mutant.site,
+            body=mutant.body,
+            status="killed",
+            kill_layer=layer,
+            first_failing_test=outcome.detail,
+            duration_s=time.monotonic() - t0,
+            is_sentinel=is_sentinel,
+            note=mutant.note,
+            kill_kind="timeout" if outcome.timed_out else "assertion",
+            timed_out=outcome.timed_out,
+            timeout_s=outcome.timeout_s,
+        )
+
     try:
         apply_mutant_journaled(root, mutant)
         # L1
-        ok1, fail1, _d1 = run_oracle_layer(
-            root, "L1", ORACLE_L1_PACKAGE, Path(str(base_log) + ".L1.log")
+        out1 = run_oracle_layer(
+            root,
+            "L1",
+            ORACLE_L1_PACKAGE,
+            Path(str(base_log) + ".L1.log"),
+            timeout_s=timeouts.for_layer("L1"),
         )
-        if not ok1:
-            return MutantResult(
-                mid=mutant.mid,
-                operator=mutant.operator,
-                file=mutant.file,
-                line=mutant.line,
-                site=mutant.site,
-                body=mutant.body,
-                status="killed",
-                kill_layer="L1",
-                first_failing_test=fail1,
-                duration_s=time.monotonic() - t0,
-                is_sentinel=is_sentinel,
-                note=mutant.note,
-            )
+        if not out1.passed:
+            return killed("L1", out1)
         # L2
-        ok2, fail2, _d2 = run_oracle_layer(
-            root, "L2", ORACLE_L2_PACKAGE, Path(str(base_log) + ".L2.log")
+        out2 = run_oracle_layer(
+            root,
+            "L2",
+            ORACLE_L2_PACKAGE,
+            Path(str(base_log) + ".L2.log"),
+            timeout_s=timeouts.for_layer("L2"),
         )
-        if not ok2:
-            return MutantResult(
-                mid=mutant.mid,
-                operator=mutant.operator,
-                file=mutant.file,
-                line=mutant.line,
-                site=mutant.site,
-                body=mutant.body,
-                status="killed",
-                kill_layer="L2",
-                first_failing_test=fail2,
-                duration_s=time.monotonic() - t0,
-                is_sentinel=is_sentinel,
-                note=mutant.note,
-            )
+        if not out2.passed:
+            return killed("L2", out2)
         return MutantResult(
             mid=mutant.mid,
             operator=mutant.operator,
@@ -1812,36 +2035,55 @@ def run_mutant(
             raise
 
 
-def run_baseline(root: Path) -> dict:
-    """Run unmutated L1+L2. Abort (SystemExit) if either fails."""
+def run_baseline(root: Path, *, timeout_s: float) -> dict:
+    """Run unmutated L1+L2. Abort (SystemExit) if either fails or times out.
+
+    The baseline cannot use the derived per-layer ceiling (it *is* the
+    measurement that ceiling comes from), so it runs under the explicit
+    `--test-timeout` when given and otherwise the absolute default.
+    """
     log_base = LOG_DIR / "_baseline"
-    print("[baseline] running clean-tree L1 (mega-evm) ...", flush=True)
-    ok1, fail1, d1 = run_oracle_layer(
-        root, "L1", ORACLE_L1_PACKAGE, Path(str(log_base) + ".L1.log")
+    print(
+        f"[baseline] running clean-tree L1 (mega-evm), timeout={timeout_s:g}s ...",
+        flush=True,
     )
-    if not ok1:
+    out1 = run_oracle_layer(
+        root, "L1", ORACLE_L1_PACKAGE, Path(str(log_base) + ".L1.log"),
+        timeout_s=timeout_s,
+    )
+    if not out1.passed:
+        kind = "TIMED OUT" if out1.timed_out else "FAILED"
         raise SystemExit(
-            f"BASELINE FAILED at L1 (clean tree must pass before campaign).\n"
-            f"  first_fail={fail1}\n"
+            f"BASELINE {kind} at L1 (clean tree must pass before campaign).\n"
+            f"  first_fail={out1.detail}\n"
             f"  log={log_base}.L1.log\n"
-            f"Fix the tree, then re-run (do not --resume a failed baseline)."
+            f"Fix the tree (or raise --test-timeout), then re-run "
+            f"(do not --resume a failed baseline)."
         )
-    print(f"[baseline] L1 ok ({d1:.1f}s); running L2 (mega-state-test) ...", flush=True)
-    ok2, fail2, d2 = run_oracle_layer(
-        root, "L2", ORACLE_L2_PACKAGE, Path(str(log_base) + ".L2.log")
+    print(
+        f"[baseline] L1 ok ({out1.duration_s:.1f}s); "
+        f"running L2 (mega-state-test) ...",
+        flush=True,
     )
-    if not ok2:
+    out2 = run_oracle_layer(
+        root, "L2", ORACLE_L2_PACKAGE, Path(str(log_base) + ".L2.log"),
+        timeout_s=timeout_s,
+    )
+    if not out2.passed:
+        kind = "TIMED OUT" if out2.timed_out else "FAILED"
         raise SystemExit(
-            f"BASELINE FAILED at L2 (clean tree must pass before campaign).\n"
-            f"  first_fail={fail2}\n"
+            f"BASELINE {kind} at L2 (clean tree must pass before campaign).\n"
+            f"  first_fail={out2.detail}\n"
             f"  log={log_base}.L2.log\n"
-            f"Fix the tree, then re-run (do not --resume a failed baseline)."
+            f"Fix the tree (or raise --test-timeout), then re-run "
+            f"(do not --resume a failed baseline)."
         )
-    print(f"[baseline] L2 ok ({d2:.1f}s)", flush=True)
+    print(f"[baseline] L2 ok ({out2.duration_s:.1f}s)", flush=True)
     return {
         "status": "passed",
-        "L1": {"ok": True, "duration_s": d1, "first_fail": None},
-        "L2": {"ok": True, "duration_s": d2, "first_fail": None},
+        "L1": {"ok": True, "duration_s": out1.duration_s, "first_fail": None},
+        "L2": {"ok": True, "duration_s": out2.duration_s, "first_fail": None},
+        "timeout_s": timeout_s,
         "completed_at": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -1923,12 +2165,13 @@ def format_list_table(mutants: Sequence[Mutant]) -> str:
 
 def format_results_table(results: Sequence[MutantResult]) -> str:
     lines = [
-        "| # | mid | op | site | body | status | layer | first fail | time (s) | sentinel |",
-        "|---|-----|----|-----|------|--------|-------|------------|----------|----------|",
+        "| # | mid | op | site | body | status | kind | layer | first fail | time (s) | sentinel |",
+        "|---|-----|----|-----|------|--------|------|-------|------------|----------|----------|",
     ]
     for i, r in enumerate(results, 1):
         lines.append(
             f"| {i} | `{r.mid}` | {r.operator} | `{r.site}` | {r.body} | **{r.status}** | "
+            f"{r.kill_kind or '—'} | "
             f"{r.kill_layer or '—'} | `{r.first_failing_test or '—'}` | {r.duration_s:.1f} | "
             f"{'yes' if r.is_sentinel else ''} |"
         )
@@ -1946,12 +2189,15 @@ def write_report(
     extra_sections: Sequence[Tuple[str, str]] = (),
     git_status_sample: str = "",
     projection: str = "",
+    timeout_policy: str = "",
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     killed = sum(1 for r in results if r.status == "killed")
     survived = sum(1 for r in results if r.status == "survived")
     errors = sum(1 for r in results if r.status == "error")
+    timeouts = [r for r in results if r.timed_out]
+    assertion_kills = killed - len(timeouts)
     total_time = sum(r.duration_s for r in results)
 
     sg = [m for m in mutants_all if m.operator == "spec_gate"]
@@ -1981,9 +2227,31 @@ def write_report(
         f"(pred/succ; ends omit one body)",
         f"- Call-delete sites: **{cd_sites}** statement deletions",
         f"- Subset run: **{len(results)}** mutants "
-        f"(killed={killed}, survived={survived}, error={errors})",
+        f"(killed={killed} [assertion={assertion_kills}, "
+        f"timeout={len(timeouts)}], survived={survived}, error={errors})",
         f"- Wall time (sum of mutant durations): **{total_time:.1f}s** "
         f"({total_time / 60:.1f} min)",
+        "",
+        "## Test timeout",
+        "",
+        f"Policy: {timeout_policy or '_not recorded_'}",
+        "",
+        f"Timeout kills: **{len(timeouts)}** (assertion kills: {assertion_kills}).",
+        "A timeout counts as a kill — the mutant hangs the suite, so it is",
+        "detected — but is listed separately: a rising timeout count means the",
+        "threshold may be too tight rather than the tests being strong.",
+        "",
+    ]
+    if timeouts:
+        for r in timeouts:
+            parts.append(
+                f"- `{r.mid}`: layer={r.kill_layer or '—'}, "
+                f"ceiling={r.timeout_s if r.timeout_s is not None else '—'}s, "
+                f"observed={r.duration_s:.1f}s"
+            )
+    else:
+        parts.append("_No mutant hit the timeout in this run._")
+    parts += [
         "",
         "## Sentinel verification",
         "",
@@ -2002,7 +2270,8 @@ def write_report(
             ok = r.status == "killed"
             parts.append(
                 f"- `{r.mid}`: **{'KILLED (ok)' if ok else 'SURVIVED / ERROR (harness bug?)'}** "
-                f"— layer={r.kill_layer or '—'}, fail=`{r.first_failing_test or r.error or '—'}`, "
+                f"— kind={r.kill_kind or '—'}, layer={r.kill_layer or '—'}, "
+                f"fail=`{r.first_failing_test or r.error or '—'}`, "
                 f"t={r.duration_s:.1f}s"
             )
     parts += [
@@ -2231,6 +2500,19 @@ def select_subset(
     return selected[:limit]
 
 
+def positive_seconds(raw: str) -> float:
+    """argparse type for `--test-timeout`: a strictly positive number of seconds."""
+    try:
+        value = float(raw)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(f"not a number of seconds: {raw!r}") from e
+    if not math.isfinite(value) or value <= 0:
+        raise argparse.ArgumentTypeError(
+            f"timeout must be a finite value > 0 seconds, got {raw!r}"
+        )
+    return value
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     ap = argparse.ArgumentParser(
         description=(
@@ -2280,6 +2562,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "--skip-baseline",
         action="store_true",
         help="Skip clean-tree L1+L2 baseline (debug only; not for real campaigns)",
+    )
+    ap.add_argument(
+        "--test-timeout",
+        type=positive_seconds,
+        default=None,
+        metavar="SECONDS",
+        help=(
+            "Wall-clock ceiling for each oracle `cargo test` call. "
+            "Default per layer: "
+            f"max({TEST_TIMEOUT_FLOOR_S}s, ceil({TEST_TIMEOUT_FACTOR} x that "
+            "layer's baseline wall time)); with --skip-baseline (no baseline "
+            f"wall time) the absolute default {TEST_TIMEOUT_NO_BASELINE_S}s is "
+            "used. A layer that exceeds its ceiling has its whole process "
+            "group killed and the mutant is recorded as killed/timeout."
+        ),
     )
     args = ap.parse_args(argv)
 
@@ -2429,11 +2726,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         }
 
     # Unmutated baseline: required once per campaign (recorded in state).
+    # The baseline itself cannot use the derived ceiling (it is the measurement
+    # the ceiling derives from): explicit --test-timeout, else absolute default.
+    baseline_timeout = (
+        args.test_timeout
+        if args.test_timeout is not None
+        else float(TEST_TIMEOUT_NO_BASELINE_S)
+    )
     if not args.skip_baseline:
         if state.get("baseline", {}).get("status") == "passed":
             print("[baseline] already recorded in state; skipping re-run", flush=True)
         else:
-            state["baseline"] = run_baseline(root)
+            state["baseline"] = run_baseline(root, timeout_s=baseline_timeout)
             # Full-tree clean after baseline (oracle must not leave product dirt).
             if not args.skip_clean_check:
                 assert_tree_clean(
@@ -2447,6 +2751,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "baseline",
             {"status": "skipped", "note": "--skip-baseline"},
         )
+
+    # Per-layer oracle ceilings: explicit flag > baseline-derived > absolute
+    # default. Recorded in state so a report/auditor can see what was in force.
+    timeouts = resolve_test_timeout(args.test_timeout, state.get("baseline"))
+    state["test_timeout"] = timeouts.as_dict()
+    print(f"[timeout] {timeouts.describe()}", flush=True)
 
     completed: Dict[str, dict] = state.get("completed", {})
     results: List[MutantResult] = []
@@ -2481,7 +2791,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(f"[run] {m.mid} ...", flush=True)
         # run_mutant always compare-and-restores in finally; concurrent-edit
         # refusal raises SystemExit and aborts the campaign with scene preserved.
-        res = run_mutant(root, m, is_sentinel=m.mid in sentinel_ids)
+        res = run_mutant(
+            root, m, is_sentinel=m.mid in sentinel_ids, timeouts=timeouts
+        )
 
         # Full-tree clean after each restore (catches collateral writes during
         # oracle). Unexpected dirt → abort; do not scrub the tree.
@@ -2502,7 +2814,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
         flag = "SENTINEL " if res.is_sentinel else ""
         print(
-            f"[done] {flag}{res.status} layer={res.kill_layer} "
+            f"[done] {flag}{res.status} kind={res.kill_kind} "
+            f"layer={res.kill_layer} "
             f"fail={res.first_failing_test} t={res.duration_s:.1f}s",
             flush=True,
         )
@@ -2524,7 +2837,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             f"**{avg * full_n / 3600:.1f} hours** ({avg * full_n / 60:.0f} min).\n"
             f"Use `--resume` to continue a partial campaign (binding must match).\n"
             f"\nBreakdown of this run: "
-            f"killed={sum(1 for r in results if r.status=='killed')}, "
+            f"killed={sum(1 for r in results if r.status=='killed')} "
+            f"(assertion={sum(1 for r in results if r.status=='killed' and not r.timed_out)}, "
+            f"timeout={sum(1 for r in results if r.timed_out)}), "
             f"survived={sum(1 for r in results if r.status=='survived')}, "
             f"error={sum(1 for r in results if r.status=='error')}."
         )
@@ -2546,6 +2861,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         sentinels=[m.mid for m in sentinels],
         git_status_sample=status_sample,
         projection=proj,
+        timeout_policy=timeouts.describe(),
         extra_sections=[
             (
                 "Campaign binding",
@@ -2572,6 +2888,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         "position (assign/return/condition/`?`) is skipped.",
                         "- State resume binds HEAD + inventory_hash + oracle_command; "
                         "mismatch → refuse with --fresh hint.",
+                        "- Each oracle layer runs under a wall-clock ceiling "
+                        "(`--test-timeout`, else derived from the baseline). On "
+                        "expiry the child's whole process group is killed "
+                        "(SIGTERM → grace → SIGKILL), the mutant is restored "
+                        "through the normal journal compare-and-restore, and it "
+                        "is recorded as killed with kill_kind=timeout — counted "
+                        "as a kill but reported apart from assertion kills.",
                         "- Crash journal + regular restore share compare-and-restore "
                         "(hash vs original/mutated); concurrent-edit refuses and keeps "
                         "journal. Full-tree `git status --porcelain` after baseline and "
