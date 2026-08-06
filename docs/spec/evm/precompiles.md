@@ -34,17 +34,18 @@ The compute gas recorded for that failure is a separate amount; see [Compute Gas
 
 For ModExp, the node MUST use the Osaka / [EIP-7883](https://eips.ethereum.org/EIPS/eip-7883) pricing schedule instead of the earlier inherited pricing schedule.
 
-One input shape deviates from the EIP-7883 formula: a call whose header declares `base_length = 0` and `modulus_length = 0` MUST be charged the flat 500-gas minimum, regardless of the declared exponent length.
-This preserves the behavior of the implementation the schedule was adopted through, which returned the minimum before computing the formula cost; EIP-7883 as written has no such special case, and its multiplication complexity never falls below 16, so the formula prices these inputs above the minimum whenever the exponent length is large.
+One input shape deviates from the EIP-7883 formula: a call whose header declares `base_length = 0` and `modulus_length = 0` MUST be charged the flat `MODEXP_MIN_GAS_COST` minimum, regardless of the declared exponent length.
+This preserves the behavior of the implementation the schedule was adopted through, which returned the minimum before computing the formula cost; EIP-7883 as written has no such special case, and under its formula a large declared exponent length always prices these inputs above the minimum.
 The [EIP-7823](https://eips.ethereum.org/EIPS/eip-7823) input-size limits MUST still be enforced before this short-circuit: an oversized declared length fails the call even when base and modulus lengths are zero.
 
 All other precompiles MUST behave according to the inherited EVM baseline unless explicitly overridden elsewhere in this specification.
 
 ## Constants
 
-| Constant                        | Value   | Description                                            |
-| ------------------------------- | ------- | ------------------------------------------------------ |
-| `KZG_POINT_EVALUATION_GAS_COST` | 100,000 | Fixed gas cost for the KZG Point Evaluation precompile |
+| Constant                        | Value   | Description                                                                                           |
+| ------------------------------- | ------- | ----------------------------------------------------------------------------------------------------- |
+| `KZG_POINT_EVALUATION_GAS_COST` | 100,000 | Fixed gas cost for the KZG Point Evaluation precompile                                                |
+| `MODEXP_MIN_GAS_COST`           | 500     | Minimum charge for the ModExp precompile; the flat charge for the zero-base-and-modulus short-circuit |
 
 ## Security Considerations
 
