@@ -45,10 +45,10 @@ fn create_tx() -> TxEnv {
     }
 }
 
-fn run(inspected: bool) -> (ResultAndState<MegaHaltReason>, LimitUsage) {
+fn run(spec: MegaSpecId, inspected: bool) -> (ResultAndState<MegaHaltReason>, LimitUsage) {
     let db = MemoryDatabase::default().account_balance(CALLER, U256::from(1_000_000u64));
-    let mut context = MegaContext::new(db, MegaSpecId::REX4)
-        .with_tx_runtime_limits(EvmTxRuntimeLimits::no_limits());
+    let mut context =
+        MegaContext::new(db, spec).with_tx_runtime_limits(EvmTxRuntimeLimits::no_limits());
     context.modify_chain(|chain| {
         chain.operator_fee_scalar = Some(U256::ZERO);
         chain.operator_fee_constant = Some(U256::ZERO);
@@ -75,27 +75,33 @@ fn run(inspected: bool) -> (ResultAndState<MegaHaltReason>, LimitUsage) {
 /// pre-`process_next_action` gas snapshot.
 #[test]
 fn test_rex4_create_compute_gas_matches_with_and_without_inspector() {
-    let (plain_result, plain_usage) = run(false);
-    let (inspected_result, inspected_usage) = run(true);
+    for spec in [MegaSpecId::MINI_REX, MegaSpecId::REX4] {
+        let (plain_result, plain_usage) = run(spec, false);
+        let (inspected_result, inspected_usage) = run(spec, true);
 
-    assert!(plain_result.result.is_success(), "got {:?}", plain_result.result);
-    assert!(inspected_result.result.is_success(), "got {:?}", inspected_result.result);
+        assert!(plain_result.result.is_success(), "{spec:?}: got {:?}", plain_result.result);
+        assert!(
+            inspected_result.result.is_success(),
+            "{spec:?}: got {:?}",
+            inspected_result.result
+        );
 
-    let code_deposit_gas = DEPLOYED_LEN * CODEDEPOSIT;
-    assert!(
-        plain_usage.compute_gas >= code_deposit_gas,
-        "the plain loop must meter the code-deposit gas ({code_deposit_gas}); \
-         compute_gas was {}",
-        plain_usage.compute_gas,
-    );
-    assert_eq!(
-        inspected_usage.compute_gas, plain_usage.compute_gas,
-        "the inspected loop must meter a CREATE identically to the plain loop; \
-         dropping the pre-action gas snapshot loses exactly {code_deposit_gas} gas",
-    );
-    assert_eq!(
-        inspected_result.result.tx_gas_used(),
-        plain_result.result.tx_gas_used(),
-        "inspected and plain runs must consume the same gas",
-    );
+        let code_deposit_gas = DEPLOYED_LEN * CODEDEPOSIT;
+        assert!(
+            plain_usage.compute_gas >= code_deposit_gas,
+            "{spec:?}: the plain loop must meter the code-deposit gas ({code_deposit_gas}); \
+             compute_gas was {}",
+            plain_usage.compute_gas,
+        );
+        assert_eq!(
+            inspected_usage.compute_gas, plain_usage.compute_gas,
+            "{spec:?}: the inspected loop must meter a CREATE identically to the plain loop; \
+             dropping the pre-action gas snapshot loses exactly {code_deposit_gas} gas",
+        );
+        assert_eq!(
+            inspected_result.result.tx_gas_used(),
+            plain_result.result.tx_gas_used(),
+            "{spec:?}: inspected and plain runs must consume the same gas",
+        );
+    }
 }
