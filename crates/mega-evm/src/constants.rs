@@ -148,11 +148,17 @@ pub mod rex5 {
     /// `SequencerRegistry.applyPendingChanges()`, EIP-2935 history-storage, and
     /// EIP-4788 beacon-roots pre-block calls.
     ///
-    /// Same historical 30M value as [`super::PRE_REX5_SYSTEM_CALL_GAS_LIMIT`].
-    /// Do NOT raise this to follow upstream revm's `SYSTEM_CALL_GAS_LIMIT`
-    /// (now `31_566_720`) — the floor must remain at the historical 30M so REX5
-    /// chains whose block gas limit is smaller still receive that budget, and
-    /// so the `GAS` opcode inside `applyPendingChanges()` stays stable.
+    /// Same historical 30M value as [`super::PRE_REX5_SYSTEM_CALL_GAS_LIMIT`],
+    /// and a floor so chains whose block gas limit is smaller still receive
+    /// that budget.
+    ///
+    /// Do NOT raise this to follow upstream
+    /// [`revm::handler::system_call::SYSTEM_CALL_GAS_LIMIT`]: revm 40 redefined
+    /// it as `30_000_000 + eip8037::SSTORE_SET_BYTES *
+    /// eip8037::CPSB_GLAMSTERDAM * SYSTEM_MAX_SSTORES_PER_CALL` (`31_566_720`),
+    /// and all three factors are bal-devnet-7 parameters that drift as upstream
+    /// evolves. A frozen spec's budget cannot hang off a drifting upstream
+    /// constant.
     pub const SYSTEM_CALL_GAS_LIMIT_FLOOR: u64 = super::PRE_REX5_SYSTEM_CALL_GAS_LIMIT;
 }
 
