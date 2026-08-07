@@ -19,7 +19,12 @@ pub struct BlockMegaTransactionOutcome<T> {
     pub tx_size: u64,
     /// The transaction data availability size in bytes.
     pub da_size: u64,
-    /// The depositor account info.
+    /// The depositor's account as it stood before execution, recorded for the deposit receipt's
+    /// nonce.
+    ///
+    /// Doubles as the deposit signal at commit time: `Some` iff the transaction is a deposit.
+    /// The `run_transaction*` producers uphold that (a deposit with an absent depositor account
+    /// still records `Some(AccountInfo::default())`); a hand-built value must uphold it too.
     pub depositor: Option<AccountInfo>,
     /// The transaction execution outcome.
     #[deref]
@@ -51,7 +56,12 @@ pub struct MegaBlockTxResult<T> {
     pub tx_size: u64,
     /// The transaction data availability size in bytes.
     pub da_size: u64,
-    /// The depositor account info.
+    /// The depositor's account as it stood before execution, recorded for the deposit receipt's
+    /// nonce.
+    ///
+    /// Doubles as the deposit signal at commit time: `Some` iff the transaction is a deposit.
+    /// The `run_transaction*` producers uphold that (a deposit with an absent depositor account
+    /// still records `Some(AccountInfo::default())`); a hand-built value must uphold it too.
     pub depositor: Option<AccountInfo>,
     /// The data size usage in bytes.
     pub data_size: u64,

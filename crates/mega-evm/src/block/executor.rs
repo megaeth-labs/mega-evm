@@ -555,9 +555,12 @@ where
     /// Commits a [`crate::MegaBlockTxResult`] produced by
     /// [`MegaBlockExecutor::run_tx_env_with_sizes`].
     ///
-    /// Mirrors [`MegaBlockExecutor::commit_transaction_outcome`], but reads the transaction hash,
-    /// gas limit and deposit flag from the already-recorded result instead of from a transaction
-    /// object, which `BlockExecutor::commit_transaction` no longer receives.
+    /// This is the single commit body: every other commit entry —
+    /// [`MegaBlockExecutor::commit_transaction_outcome`], its alias, and the infallible
+    /// `BlockExecutor::commit_transaction` — funnels into it. Receipts feed the receipts root, so
+    /// their construction must not exist twice. All identity fields (hash, gas limit, deposit
+    /// signal) are read from the already-recorded result; the deposit signal is the `depositor`
+    /// record (`Some` iff the transaction is a deposit).
     ///
     /// # Contract
     ///
@@ -618,8 +621,9 @@ where
             compute_gas_used,
             state_growth_used,
         };
-        // The typed `post_execution_update` reads the deposit flag off the transaction, which is
-        // no longer available at commit time; the deposit-nonce record carries the same signal.
+        // Accumulate post-execution resource usage into block-level counters. This does not
+        // validate limits; over-limit enforcement happens in `pre_execution_check` before the
+        // next transaction. The deposit-nonce record doubles as the deposit signal here.
         self.block_limiter.post_execution_update_raw(
             outcome.result.tx_gas_used(),
             tx_size,
@@ -669,25 +673,26 @@ where
         outcome: BlockMegaTransactionOutcome<Tx>,
     ) -> Result<u64, BlockExecutionError>
     where
-        Tx: IntoTxEnv<MegaTransaction> + RecoveredTx<R::Transaction> + Copy,
+        Tx: RecoveredTx<R::Transaction>,
     {
         self.commit_transaction_outcome(outcome)
     }
 
     /// Commit the execution outcome of a transaction.
     ///
-    /// This method commits the execution outcome of a transaction to the block executor's inner
-    /// state.
+    /// This is [`MegaBlockExecutor::commit_tx_result`] for callers still holding the transaction
+    /// object: it derives the identity fields the commit needs (`tx_type`, `tx_hash`,
+    /// `gas_limit`) and forwards. There is deliberately no separate commit body — receipts feed
+    /// the receipts root, so every path must build them through the same code.
     ///
-    /// Like [`MegaBlockExecutor::commit_tx_result`], block-level admission is re-validated here
-    /// against the current limiter state: a transaction whose block capacity was consumed by
-    /// another transaction committed in between is rejected with `Err`, before any receipt,
-    /// limiter counter or state change is applied. The executor stays usable and the caller
-    /// decides what to do with the rejected transaction.
+    /// The `depositor` record doubles as the deposit signal downstream (`Some` iff the
+    /// transaction is a deposit); the `run_transaction*` methods that produce outcomes uphold
+    /// that, and a hand-built outcome must too.
     ///
-    /// # Parameters
-    ///
-    /// - `outcome`: The execution outcome of the transaction.
+    /// Block-level admission is re-validated at commit time: a transaction whose block capacity
+    /// was consumed by another transaction committed in between is rejected with `Err`, before
+    /// any receipt, limiter counter or state change is applied. The executor stays usable and
+    /// the caller decides what to do with the rejected transaction.
     ///
     /// # Returns
     ///
@@ -697,64 +702,31 @@ where
         outcome: BlockMegaTransactionOutcome<Tx>,
     ) -> Result<u64, BlockExecutionError>
     where
-        Tx: IntoTxEnv<MegaTransaction> + RecoveredTx<R::Transaction> + Copy,
+        Tx: RecoveredTx<R::Transaction>,
     {
-        // Re-validate limits at commit time to handle parallel execution race conditions.
-        // Between run_transaction() and commit_transaction_outcome(), other transactions
-        // may have been committed, potentially exceeding block limits.
-        self.block_limiter.pre_execution_check(
-            outcome.tx.tx().tx_hash(),
-            outcome.tx.tx().gas_limit(),
-            outcome.tx_size,
-            outcome.da_size,
-            outcome.tx.tx().ty() == DEPOSIT_TRANSACTION_TYPE,
-        )?;
+        let BlockMegaTransactionOutcome { tx, tx_size, da_size, depositor, inner } = outcome;
+        let MegaTransactionOutcome {
+            result,
+            state,
+            data_size,
+            kv_updates,
+            compute_gas_used,
+            state_growth_used,
+        } = inner;
 
-        // Accumulate post-execution resource usage into block-level counters.
-        // This does not validate limits; over-limit enforcement happens in
-        // `pre_execution_check` before the next transaction.
-        self.block_limiter.post_execution_update(&outcome)?;
-
-        let BlockMegaTransactionOutcome { tx, depositor, inner, .. } = outcome;
-        let MegaTransactionOutcome { result, state, .. } = inner;
-        let gas_used = result.tx_gas_used();
-
-        let block_gas_used = self.block_limiter.block_gas_used;
-        self.receipts.push(
-            match self.receipt_builder.build_receipt(ReceiptBuilderCtx {
-                tx_type: tx.tx().tx_type(),
-                result,
-                cumulative_gas_used: block_gas_used,
-                evm: &self.evm,
-                state: &state,
-            }) {
-                Ok(receipt) => receipt,
-                Err(ctx) => {
-                    let receipt = alloy_consensus::Receipt {
-                        // Success flag was added in `EIP-658: Embedding transaction status code
-                        // in receipts`.
-                        status: Eip658Value::Eip658(ctx.result.is_success()),
-                        cumulative_gas_used: block_gas_used,
-                        logs: ctx.result.into_logs(),
-                    };
-
-                    self.receipt_builder.build_deposit_receipt(OpDepositReceipt {
-                        inner: receipt,
-                        // The deposit receipt version was introduced in Canyon to indicate an
-                        // update to how receipt hashes should be computed
-                        // when set. The state transition process ensures
-                        // this is only set for post-Canyon deposit
-                        // transactions. In MegaETH, Canyon is always active.
-                        deposit_receipt_version: depositor.is_some().then_some(1),
-                        deposit_nonce: depositor.map(|account| account.nonce),
-                    })
-                }
-            },
-        );
-
-        self.evm.db_mut().commit(state);
-
-        Ok(gas_used)
+        self.commit_tx_result(crate::MegaBlockTxResult {
+            tx_type: tx.tx().tx_type(),
+            tx_hash: tx.tx().tx_hash(),
+            gas_limit: tx.tx().gas_limit(),
+            tx_size,
+            da_size,
+            depositor,
+            data_size,
+            kv_updates,
+            compute_gas_used,
+            state_growth_used,
+            result_and_state: ExecResultAndState { result, state },
+        })
     }
 
     /// Get the bucket IDs used during transaction execution.
