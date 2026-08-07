@@ -258,6 +258,28 @@ fn test_rex4_preserves_legacy_oog_after_full_gas_charge() {
     );
 }
 
+#[test]
+fn test_rex4_rejects_when_pre_storage_initial_gas_already_exceeds_limit() {
+    let mut db = MemoryDatabase::default();
+    let initial_balance = U256::from(10_000_000u64);
+    db.set_account_balance(CALLER, initial_balance);
+
+    let gas_limit = 50_000;
+    let tx = TxEnv {
+        caller: CALLER,
+        kind: TxKind::Call(NEW_ACCOUNT),
+        data: Bytes::new(),
+        value: U256::ZERO,
+        gas_limit,
+        ..Default::default()
+    };
+
+    let err = run_tx(MegaSpecId::REX4, &mut db, TestExternalEnvs::<Infallible>::new(), tx)
+        .expect_err("REX4 must retain its mid-sequence initial-gas validation rejection");
+    assert_call_gas_cost_more_than_gas_limit(&err);
+    assert_sender_untouched(&mut db, initial_balance, 0);
+}
+
 // `_` to prove `InvalidTransaction` from `revm::context::result` is reachable via the
 // public re-export and to catch a future revm bump that drops the variant.
 const _: fn() = || {

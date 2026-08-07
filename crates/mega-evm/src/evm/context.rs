@@ -1092,22 +1092,23 @@ mod tests {
     /// adopted and the `MINI_REX` size limits still fill in when unset.
     #[test]
     fn test_with_cfg_unpinned_still_applies_mega_pins() {
-        let cfg = CfgEnv::new_with_spec(MegaSpecId::REX5);
+        for spec in [MegaSpecId::MINI_REX, MegaSpecId::REX5] {
+            let cfg = CfgEnv::new_with_spec(spec);
+            let context = MegaContext::new(EmptyDB::default(), MegaSpecId::EQUIVALENCE)
+                .with_cfg_unpinned(cfg);
 
-        let context =
-            MegaContext::new(EmptyDB::default(), MegaSpecId::EQUIVALENCE).with_cfg_unpinned(cfg);
-
-        assert_eq!(context.mega_spec(), MegaSpecId::REX5);
-        assert_eq!(
-            context.inner.cfg.limit_contract_code_size,
-            Some(constants::mini_rex::MAX_CONTRACT_SIZE)
-        );
-        assert_eq!(
-            context.inner.cfg.limit_contract_initcode_size,
-            Some(constants::mini_rex::MAX_INITCODE_SIZE)
-        );
-        // The escape hatch still means what it says alongside those pins.
-        assert!(context.inner.cfg.tx_chain_id_check);
+            assert_eq!(context.mega_spec(), spec);
+            assert_eq!(
+                context.inner.cfg.limit_contract_code_size,
+                Some(constants::mini_rex::MAX_CONTRACT_SIZE)
+            );
+            assert_eq!(
+                context.inner.cfg.limit_contract_initcode_size,
+                Some(constants::mini_rex::MAX_INITCODE_SIZE)
+            );
+            // The escape hatch still means what it says alongside those pins.
+            assert!(context.inner.cfg.tx_chain_id_check);
+        }
     }
 
     /// EIP-8037 is settled where it is read, not where a configuration enters: the entry points

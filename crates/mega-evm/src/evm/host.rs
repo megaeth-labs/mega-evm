@@ -2097,6 +2097,21 @@ mod tests {
             );
         }
 
+        let mut rex4_journal = Journal::new(db.clone());
+        let rex4_resolved = rex4_journal
+            .inspect_account_delegated(MegaSpecId::REX4, A)
+            .expect("one-hop inspect must succeed on REX4");
+        let rex4_code = rex4_resolved
+            .info
+            .code
+            .as_ref()
+            .expect("the one-hop account must retain its delegation designator");
+        assert_eq!(
+            rex4_code.eip7702_address(),
+            Some(C),
+            "REX4 must stop after A→B instead of recursively resolving B→C",
+        );
+
         let mut journal = Journal::new(db);
         let resolved = journal
             .inspect_account_delegated(MegaSpecId::REX3, A)
