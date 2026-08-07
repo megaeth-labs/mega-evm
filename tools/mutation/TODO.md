@@ -62,28 +62,38 @@ Every dimension therefore stays at 0 with the aggregate latched `WithinLimit`
 (pinned by `tests/equivalence/pre_mini_rex_gates.rs::test_equivalence_leaves_additional_limit_dormant`).
 Enabling any of these hooks on that side moves nothing observable:
 
-- `spec_gate:crates/mega-evm/src/evm/execution.rs:426:MINI_REX:true` — `before_frame_run`. All four
+- `spec_gate:crates/mega-evm/src/evm/execution.rs:426:MINI_REX:true` and
+  `adjacent_spec:crates/mega-evm/src/evm/execution.rs:426:MINI_REX:pred=EQUIVALENCE` —
+  `before_frame_run`. All four
   sub-tracker `before_frame_run` implementations are the trait's default empty body
   (`limit/frame_limit.rs`, no overrides), so the call reduces to `check_limit()`, which is constant
   `WithinLimit` and returns `None`.
-- `spec_gate:crates/mega-evm/src/evm/execution.rs:508:MINI_REX:true` — `after_frame_run`. The
+- `spec_gate:crates/mega-evm/src/evm/execution.rs:508:MINI_REX:true` and
+  `adjacent_spec:crates/mega-evm/src/evm/execution.rs:508:MINI_REX:pred=EQUIVALENCE` —
+  `after_frame_run`. The
   `gas_remaining_before_process_action` argument is `None` on this side (its producer at line 1365
   is itself `MINI_REX`-gated), so the body reduces to `try_rescue_gas`, which is a no-op unless a
   limit is latched as exceeded.
-- `spec_gate:crates/mega-evm/src/evm/execution.rs:988:MINI_REX:true` — `last_frame_result`. The
+- `spec_gate:crates/mega-evm/src/evm/execution.rs:988:MINI_REX:true` and
+  `adjacent_spec:crates/mega-evm/src/evm/execution.rs:988:MINI_REX:pred=EQUIVALENCE` —
+  `last_frame_result`. The
   sub-tracker pops run against empty frame stacks (`FrameLimitTracker::pop_frame` returns `None`),
   the `LAST_FRAME = true` const argument satisfies the non-empty-stack assertions, `check_limit()`
   is `WithinLimit` so the result is not rewritten, and the trailing
   `gas.erase_cost(rescued_gas)` erases 0.
-- `spec_gate:crates/mega-evm/src/evm/execution.rs:1506:MINI_REX:true` — `inspect_frame_init`'s
+- `spec_gate:crates/mega-evm/src/evm/execution.rs:1506:MINI_REX:true` and
+  `adjacent_spec:crates/mega-evm/src/evm/execution.rs:1506:MINI_REX:pred=EQUIVALENCE` —
+  `inspect_frame_init`'s
   `push_empty_frame`. It only pushes frame entries carrying zero usage and a `u64::MAX` derived
   limit; `get_usage()` reports `net_usage()`, which counts recorded usage only, and no
   frame-local check is reachable pre-`REX4`.
 
 ### Consumer-discarded values
 
-- `spec_gate:crates/mega-evm/src/evm/execution.rs:1365:MINI_REX:true` and
-  `spec_gate:crates/mega-evm/src/evm/execution.rs:1600:MINI_REX:true` — the
+- `spec_gate:crates/mega-evm/src/evm/execution.rs:1365:MINI_REX:true`,
+  `adjacent_spec:crates/mega-evm/src/evm/execution.rs:1365:MINI_REX:pred=EQUIVALENCE`,
+  `spec_gate:crates/mega-evm/src/evm/execution.rs:1600:MINI_REX:true`, and
+  `adjacent_spec:crates/mega-evm/src/evm/execution.rs:1600:MINI_REX:pred=EQUIVALENCE` — the
   `gas_remaining_before` snapshots in `frame_run` / `inspect_frame_run`. Each value has exactly one
   consumer, `MegaEvm::after_frame_run`, whose first statement returns early on
   `!ctx.spec.is_enabled(MegaSpecId::MINI_REX)` against the same `ctx`. Forcing the predicate `true`
@@ -118,7 +128,9 @@ Enabling any of these hooks on that side moves nothing observable:
   Consequently every dimension remains zero and `check_limit()` is always `WithinLimit`; a
   block-environment opcode may mark the volatile tracker, but the sole consumer of the newly
   captured snapshot is unreachable and the mapped execution result is unchanged.
-- `spec_gate:crates/mega-evm/src/evm/execution.rs:1412:REX4:true` — `frame_return_result`'s
+- `spec_gate:crates/mega-evm/src/evm/execution.rs:1412:REX4:true` and
+  `adjacent_spec:crates/mega-evm/src/evm/execution.rs:1412:REX4:pred=REX3` —
+  `frame_return_result`'s
   `enable_access_if_returning`. It is a no-op unless `VolatileDataAccessTracker::disable_depth` is
   `Some`. The only production writer is `disable_access`, called from `AccessControlInterceptor`,
   whose `ACTIVATION_SPEC` is `REX4`; the `MegaAccessControl` contract is also only deployed from
@@ -126,7 +138,9 @@ Enabling any of these hooks on that side moves nothing observable:
   transaction start, so on the pre-`REX4` side `disable_depth` is `None` for the whole frame
   lifetime and the hook cannot observe anything. (The field is reachable from a test through the
   `pub` tracker API, so this is a reachability argument, not a pure extensional one.)
-- `spec_gate:crates/mega-evm/src/evm/context.rs:700:MINI_REX:true` — `on_new_block`'s
+- `spec_gate:crates/mega-evm/src/evm/context.rs:681:MINI_REX:true` and
+  `adjacent_spec:crates/mega-evm/src/evm/context.rs:681:MINI_REX:pred=EQUIVALENCE` —
+  `on_new_block`'s
   `DynamicGasCost::on_new_block`, which is `reset(parent_block)`: clear the bucket-multiplier cache
   and store the parent block number. Both fields are read only by the SALT gas helpers
   (`new_account_gas`, `create_contract_gas`, `sstore_set_gas`, `get_bucket_ids`), and every caller
