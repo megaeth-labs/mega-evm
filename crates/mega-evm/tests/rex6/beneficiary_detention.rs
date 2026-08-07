@@ -484,6 +484,33 @@ fn test_call_family_to_delegator_to_beneficiary_marks_beneficiary_only_from_rex6
     }
 }
 
+/// `EQUIVALENCE` keeps revm's unwrapped CALL handlers, so — unlike `MINI_REX..REX5` — its
+/// delegate hop DOES mark the beneficiary. This pins that quirk together with why it is
+/// unobservable: the mark never becomes detention (no wrapper on the `EQUIVALENCE` table applies
+/// the tracker's cap into `AdditionalLimit`, so the detained limit stays `u64::MAX`), the
+/// reported volatile info is `MINI_REX`-gated in `execution_result`, and
+/// `get_block_env_accesses` masks the beneficiary bit (pinned at the tracker's own unit tests).
+/// If a table change ever routes `EQUIVALENCE` through the bracket, the `marked` assertion goes
+/// red and the frozen-spec question must be re-examined rather than silently absorbed.
+#[test]
+fn test_equivalence_delegate_hop_marks_but_is_unobservable() {
+    for opcode in [CALL, CALLCODE, DELEGATECALL, STATICCALL] {
+        let (marked, detained) = run_beneficiary_marking_case(
+            MegaSpecId::EQUIVALENCE,
+            call_family_code(opcode, DELEGATOR_TO_BENEFICIARY),
+        );
+        assert!(
+            marked,
+            "EQUIVALENCE's unwrapped {opcode:#x} marks the delegate hop (raw revm table, no bracket)",
+        );
+        assert_eq!(
+            detained,
+            u64::MAX,
+            "the mark must never engage detention on EQUIVALENCE for {opcode:#x}",
+        );
+    }
+}
+
 /// A CALL whose raw stack operand IS the beneficiary marks it on every spec — the delegate-hop rule
 /// must not suppress the operand it brackets.
 ///
