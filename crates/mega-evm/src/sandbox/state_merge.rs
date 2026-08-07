@@ -400,9 +400,18 @@ mod tests {
         );
 
         JournalTr::checkpoint_revert(journal, checkpoint);
+        let deployed = journal
+            .inner
+            .state
+            .get(&deploy_addr)
+            .expect("legacy merge should remain present after checkpoint revert");
         assert!(
-            journal.inner.state.contains_key(&deploy_addr),
-            "pre-Rex5 keeps the legacy direct-merge semantics instead of journal rollback"
+            deployed.is_created(),
+            "pre-Rex5 checkpoint revert must preserve the direct-merged created status"
+        );
+        assert_ne!(
+            deployed.info.code_hash, KECCAK_EMPTY,
+            "pre-Rex5 checkpoint revert must preserve the directly merged deployed code"
         );
     }
 
