@@ -5,7 +5,9 @@
 Survivors that were analysed and found to have no observable effect. Each entry
 carries the proof; do not spend test budget on them again.
 
-- `spec_gate:crates/mega-evm/src/limit/state_growth.rs:169:REX4:true` —
+- `spec_gate:crates/mega-evm/src/limit/state_growth.rs:169:REX4:true`,
+  `adjacent_spec:crates/mega-evm/src/limit/state_growth.rs:169:REX4:pred=REX3`, and
+  `adjacent_spec:crates/mega-evm/src/limit/state_growth.rs:169:REX4:succ=REX5` —
   `current_call_remaining`. Only affects pre-REX4 specs, and the sole consumer of that
   value (`sandbox/execution.rs`'s `with_tx_state_growth_limit` for the REX5+ `KeylessDeploy`
   sandbox) is unreachable before REX5, so no pre-REX4 execution ever observes the added
@@ -13,13 +15,15 @@ carries the proof; do not spend test budget on them again.
   (state_growth.rs:121, the only push path), so the `min` is a no-op for every state this
   tracker can reach through its own API except a refund-skewed corner with an unlimited TX
   budget — which still has no consumer.
-- `spec_gate:crates/mega-evm/src/limit/state_growth.rs:206:REX4:true` — `check_limit`. The
+- `spec_gate:crates/mega-evm/src/limit/state_growth.rs:206:REX4:true` and
+  `adjacent_spec:crates/mega-evm/src/limit/state_growth.rs:206:REX4:pred=REX3` — `check_limit`. The
   REX4 branch is a strict prefix of the shared TX-level check: it only adds
   `exceeds_current_frame_limit` before falling through to the same `tx_usage()` vs
   `tx_limit()` comparison the pre-REX4 path performs. Pre-REX4 frames carry a `u64::MAX`
   limit, so `used - refund > limit` can never hold and the added branch can never fire.
   Extensionally identical for every reachable state.
-- `spec_gate:crates/mega-evm/src/limit/data_size.rs:74:REX5:true` — `DataSizeTracker`'s
+- `spec_gate:crates/mega-evm/src/limit/data_size.rs:74:REX5:true` and
+  `adjacent_spec:crates/mega-evm/src/limit/data_size.rs:74:REX5:pred=REX4` — `DataSizeTracker`'s
   `rex5_enabled`. Its only read is as a disjunct inside the `debug_assert!` in `check_limit`
   (data_size.rs:193); forcing it `true` only relaxes that assertion. The field is private and
   has no accessor, so nothing else can observe it.
