@@ -89,6 +89,18 @@ Enabling any of these hooks on that side moves nothing observable:
 
 ### Unreachable-state gates
 
+- `spec_gate:crates/mega-evm/src/evm/instructions.rs:2638:REX5:false`,
+  `adjacent_spec:crates/mega-evm/src/evm/instructions.rs:2638:REX5:pred=REX4`, and
+  `adjacent_spec:crates/mega-evm/src/evm/instructions.rs:2638:REX5:succ=REX6` — this gate is inside
+  the `@frame` expansion that defines `compute_gas_ext::call_code`.
+  The function is installed for `CALLCODE` only by `mini_rex::instruction_table`; the `REX` table
+  immediately overwrites that entry with `forward_gas_ext::call_code`, and every later table
+  inherits or replaces the overwritten entry rather than restoring `compute_gas_ext::call_code`.
+  Therefore the gated code is reachable only with spec `MINI_REX`, for which `REX4`, `REX5`, and
+  `REX6` are all disabled.
+  Forcing the `REX5` predicate false or moving its threshold to either adjacent spec leaves the
+  only reachable invocation false, so `stipend_from_revm` remains zero and all consumers receive
+  identical values.
 - `spec_gate:crates/mega-evm/src/evm/execution.rs:1022:MINI_REX:true` and
   `adjacent_spec:crates/mega-evm/src/evm/execution.rs:1022:MINI_REX:pred=EQUIVALENCE` — the
   `volatile_info` snapshot can affect the result only inside the
