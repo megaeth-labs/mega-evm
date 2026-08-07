@@ -1741,10 +1741,7 @@ mod mutation_tests {
         context: &MegaContext<DB, ExtEnvs>,
         mut result: FrameResult,
     ) {
-        context
-            .additional_limit
-            .borrow_mut()
-            .before_frame_return_result::<false>(&mut result);
+        context.additional_limit.borrow_mut().before_frame_return_result::<false>(&mut result);
     }
 
     #[test]
@@ -1760,11 +1757,8 @@ mod mutation_tests {
     #[test]
     fn test_frame_init_depth_short_circuit_pushes_limit_frame() {
         let mut evm = MegaEvm::new(MegaContext::new(MemoryDatabase::default(), MegaSpecId::REX5));
-        let ItemOrResult::Result(result) = EvmTr::frame_init(
-            &mut evm,
-            call_frame_init(CALL_STACK_LIMIT as usize + 1),
-        )
-        .unwrap()
+        let ItemOrResult::Result(result) =
+            EvmTr::frame_init(&mut evm, call_frame_init(CALL_STACK_LIMIT as usize + 1)).unwrap()
         else {
             panic!("depth guard must return a synthetic result");
         };
@@ -1789,8 +1783,7 @@ mod mutation_tests {
 
     #[test]
     fn test_inspect_frame_init_limit_short_circuit_pushes_limit_frame() {
-        let mut evm =
-            MegaEvm::new(context_with_latched_limit()).with_inspector(StopInspector);
+        let mut evm = MegaEvm::new(context_with_latched_limit()).with_inspector(StopInspector);
         let ItemOrResult::Result(result) =
             InspectorEvmTr::inspect_frame_init(&mut evm, call_frame_init(1)).unwrap()
         else {
@@ -1801,17 +1794,13 @@ mod mutation_tests {
 
     #[test]
     fn test_inspect_frame_init_depth_short_circuit_pushes_limit_frame() {
-        let mut evm = MegaEvm::new(MegaContext::new(
-            MemoryDatabase::default(),
-            MegaSpecId::REX5,
-        ))
-        .with_inspector(StopInspector);
+        let mut evm = MegaEvm::new(MegaContext::new(MemoryDatabase::default(), MegaSpecId::REX5))
+            .with_inspector(StopInspector);
         let ItemOrResult::Result(result) = InspectorEvmTr::inspect_frame_init(
             &mut evm,
             call_frame_init(CALL_STACK_LIMIT as usize + 1),
         )
-        .unwrap()
-        else {
+        .unwrap() else {
             panic!("depth guard must override the inspector result");
         };
         consume_synthetic_limit_frame(evm.ctx_ref(), result);
