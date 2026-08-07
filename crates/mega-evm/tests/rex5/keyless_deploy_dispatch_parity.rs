@@ -4,14 +4,15 @@
 //! REX4 and REX5. A spec-gated divergence in the interceptor's admission path
 //! would fail one of these tests.
 
+use mega_evm::MegaTransaction;
 use std::convert::Infallible;
 
 use alloy_primitives::{address, Address, Bytes, TxKind, U256};
 use alloy_sol_types::SolCall;
 use mega_evm::{
-    alloy_op_evm::OpTx, op_revm::OpTransaction, revm::context::result::ExecutionResult,
-    test_utils::MemoryDatabase, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, TestExternalEnvs,
-    KEYLESS_DEPLOY_ADDRESS, KEYLESS_DEPLOY_CODE,
+    op_revm::OpTransaction, revm::context::result::ExecutionResult, test_utils::MemoryDatabase,
+    MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, TestExternalEnvs, KEYLESS_DEPLOY_ADDRESS,
+    KEYLESS_DEPLOY_CODE,
 };
 use revm::context::{result::ResultAndState, tx::TxEnvBuilder};
 
@@ -40,7 +41,7 @@ fn run_dispatch(spec: MegaSpecId, calldata: Bytes) -> ResultAndState<MegaHaltRea
         .gas_price(0)
         .data(calldata)
         .build_fill();
-    let mut tx = OpTx(OpTransaction::new(tx_env));
+    let mut tx = MegaTransaction(OpTransaction::new(tx_env));
     tx.enveloped_tx = Some(Bytes::new());
 
     let mut evm = MegaEvm::new(context);

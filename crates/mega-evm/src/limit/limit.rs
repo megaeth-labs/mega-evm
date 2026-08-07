@@ -1087,7 +1087,7 @@ mod tests {
 
         // Latch the data-size dimension at its mutation site: intrinsic transaction data
         // (110-byte base + 200 bytes of calldata) exceeds the 100-byte limit.
-        let tx = alloy_op_evm::OpTx(op_revm::OpTransaction::new(
+        let tx = crate::MegaTransaction(op_revm::OpTransaction::new(
             TxEnvBuilder::new()
                 .caller(Address::ZERO)
                 .call(Address::ZERO)
@@ -1144,7 +1144,7 @@ mod tests {
     #[should_panic(expected = "REX5")]
     #[cfg(debug_assertions)]
     fn test_intrinsic_check_for_tx_requires_rex5_spec() {
-        let tx = alloy_op_evm::OpTx(op_revm::OpTransaction::new(
+        let tx = crate::MegaTransaction(op_revm::OpTransaction::new(
             TxEnvBuilder::new().caller(Address::ZERO).call(Address::ZERO).build_fill(),
         ));
         // REX4 < REX5: the precondition assert must fire.

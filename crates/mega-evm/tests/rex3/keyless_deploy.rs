@@ -6,13 +6,12 @@
 use alloy_primitives::{address, Address, Bytes, TxKind, U256};
 use alloy_sol_types::SolCall;
 use mega_evm::{
-    alloy_op_evm::OpTx as MegaTransaction,
     constants,
     revm::context::result::ExecutionResult,
     sandbox::tests::{CREATE2_FACTORY_DEPLOYER, CREATE2_FACTORY_TX},
     test_utils::MemoryDatabase,
     EvmTxRuntimeLimits, IKeylessDeploy, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
-    TestExternalEnvs, KEYLESS_DEPLOY_ADDRESS,
+    MegaTransaction, TestExternalEnvs, KEYLESS_DEPLOY_ADDRESS,
 };
 use revm::{context::TxEnv, handler::EvmTr, inspector::NoOpInspector};
 

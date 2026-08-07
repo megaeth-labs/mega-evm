@@ -12,13 +12,13 @@
 //!   in either case `make_create_frame` reaches the post-pre-bump nonce bump, so the signer nonce
 //!   is bumped. The parent journal merges the bump via `merge_evm_state_optional_status`.
 
+use mega_evm::MegaTransaction;
 use std::vec::Vec;
 
 use alloy_primitives::{address, hex, Address, Bytes, Signature, TxKind, B256, U256};
 use alloy_sol_types::SolCall;
 use mega_evm::{
     alloy_consensus::{Signed, TxLegacy},
-    alloy_op_evm::OpTx,
     op_revm::OpTransaction,
     revm::context::result::ExecutionResult,
     sandbox::{
@@ -75,7 +75,7 @@ fn run_keyless_outer(
         gas_price: 0,
         ..Default::default()
     };
-    let mut tx = OpTx(OpTransaction::new(tx));
+    let mut tx = MegaTransaction(OpTransaction::new(tx));
     tx.enveloped_tx = Some(Bytes::new());
 
     let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);

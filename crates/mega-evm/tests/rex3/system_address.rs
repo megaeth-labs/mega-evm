@@ -2,9 +2,8 @@
 
 use alloy_primitives::{address, Bytes, TxKind, U256};
 use mega_evm::{
-    alloy_op_evm::OpTx as MegaTransaction,
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    MegaContext, MegaEvm, MegaSpecId, TestExternalEnvs, MEGA_SYSTEM_ADDRESS,
+    MegaContext, MegaEvm, MegaSpecId, MegaTransaction, TestExternalEnvs, MEGA_SYSTEM_ADDRESS,
     ORACLE_CONTRACT_ADDRESS,
 };
 use revm::{

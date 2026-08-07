@@ -11,13 +11,13 @@
 //!   `KEYLESS_DEPLOY_OVERHEAD_GAS`) based on parent journal-visible state, and is retained even
 //!   when the sandbox subsequently validate-rejects.
 
+use mega_evm::MegaTransaction;
 use std::vec::Vec;
 
 use alloy_primitives::{address, hex, Address, Bytes, Signature, TxKind, B256, U256};
 use alloy_sol_types::SolCall;
 use mega_evm::{
     alloy_consensus::{Signed, TxLegacy},
-    alloy_op_evm::OpTx,
     op_revm::OpTransaction,
     revm::context::result::ExecutionResult,
     sandbox::{calculate_keyless_deploy_address, decode_error_result, KeylessDeployError},
@@ -84,7 +84,7 @@ fn run_keyless_outer_with_gas_limit(
         gas_price: 0,
         ..Default::default()
     };
-    let mut tx = OpTx(OpTransaction::new(tx));
+    let mut tx = MegaTransaction(OpTransaction::new(tx));
     tx.enveloped_tx = Some(Bytes::new());
 
     let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);
@@ -127,7 +127,7 @@ where
         gas_price: 0,
         ..Default::default()
     };
-    let mut tx = OpTx(OpTransaction::new(tx));
+    let mut tx = MegaTransaction(OpTransaction::new(tx));
     tx.enveloped_tx = Some(Bytes::new());
 
     let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);

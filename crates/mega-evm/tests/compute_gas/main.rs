@@ -34,10 +34,9 @@ use std::{convert::Infallible, fmt::Write as _, path::Path};
 use alloy_eips::eip2930::AccessList;
 use alloy_primitives::{address, Address, Bytes, U256};
 use mega_evm::{
-    alloy_op_evm::OpTx as MegaTransaction,
     test_utils::{BytecodeBuilder, MemoryDatabase},
     EvmTxRuntimeLimits, LimitUsage, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
-    TestExternalEnvs,
+    MegaTransaction, TestExternalEnvs,
 };
 use revm::{
     bytecode::opcode::{

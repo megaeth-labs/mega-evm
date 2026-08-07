@@ -19,12 +19,13 @@
 //! left out of this regression suite — behavior equivalence is the
 //! consensus-critical invariant.
 
+use mega_evm::MegaTransaction;
 use std::convert::Infallible;
 
 use alloy_primitives::{address, Address, Bytes, U256};
 use alloy_sol_types::SolCall;
 use mega_evm::{
-    alloy_op_evm::{OpTx, OpTxError},
+    alloy_op_evm::OpTxError,
     op_revm::OpTransaction,
     test_utils::{BytecodeBuilder, MemoryDatabase},
     IMegaAccessControl, IOracle, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
@@ -56,7 +57,7 @@ fn transact(
         chain.operator_fee_constant = Some(U256::from(0));
     });
     let mut evm = MegaEvm::new(context);
-    let mut tx = OpTx(OpTransaction::new(tx));
+    let mut tx = MegaTransaction(OpTransaction::new(tx));
     tx.enveloped_tx = Some(Bytes::new());
     alloy_evm::Evm::transact_raw(&mut evm, tx)
 }
@@ -267,7 +268,7 @@ fn test_oracle_hint_malformed_args_does_not_record_under_both_specs() {
             .gas_limit(100_000_000)
             .build_fill();
         let mut evm = MegaEvm::new(context);
-        let mut tx = OpTx(OpTransaction::new(tx));
+        let mut tx = MegaTransaction(OpTransaction::new(tx));
         tx.enveloped_tx = Some(Bytes::new());
         let _ = alloy_evm::Evm::transact_raw(&mut evm, tx).expect("transact ok");
 

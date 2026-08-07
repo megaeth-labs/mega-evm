@@ -8,9 +8,8 @@
 use alloy_primitives::{address, bytes, Bytes, TxKind, B256, U256};
 use alloy_sol_types::{sol, SolCall};
 use mega_evm::{
-    alloy_op_evm::OpTx as MegaTransaction,
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    MegaContext, MegaEvm, MegaSpecId, TestExternalEnvs, ORACLE_CONTRACT_ADDRESS,
+    MegaContext, MegaEvm, MegaSpecId, MegaTransaction, TestExternalEnvs, ORACLE_CONTRACT_ADDRESS,
     ORACLE_CONTRACT_CODE_REX2,
 };
 use revm::{

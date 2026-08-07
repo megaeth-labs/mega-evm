@@ -15,12 +15,13 @@
 //!   child's actual gas used. Per-frame limits act as "early termination guardrails", not budget
 //!   protection.
 
+use mega_evm::MegaTransaction;
 use std::convert::Infallible;
 
 use alloy_primitives::{address, Address, Bytes, U256};
 use alloy_sol_types::SolError;
 use mega_evm::{
-    alloy_op_evm::{OpTx, OpTxError},
+    alloy_op_evm::OpTxError,
     op_revm::OpTransaction,
     test_utils::{BytecodeBuilder, MemoryDatabase},
     EvmTxRuntimeLimits, MegaContext, MegaEvm, MegaHaltReason, MegaLimitExceeded, MegaSpecId,
@@ -68,7 +69,7 @@ fn transact_data_kv(
         chain.operator_fee_constant = Some(U256::from(0));
     });
     let mut evm = MegaEvm::new(context);
-    let mut tx = OpTx(OpTransaction::new(tx));
+    let mut tx = MegaTransaction(OpTransaction::new(tx));
     tx.enveloped_tx = Some(Bytes::new());
     let r = alloy_evm::Evm::transact_raw(&mut evm, tx)?;
 
@@ -92,7 +93,7 @@ fn transact_compute(
         chain.operator_fee_constant = Some(U256::from(0));
     });
     let mut evm = MegaEvm::new(context);
-    let mut tx = OpTx(OpTransaction::new(tx));
+    let mut tx = MegaTransaction(OpTransaction::new(tx));
     tx.enveloped_tx = Some(Bytes::new());
     let r = alloy_evm::Evm::transact_raw(&mut evm, tx)?;
 

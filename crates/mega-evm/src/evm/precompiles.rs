@@ -842,7 +842,7 @@ mod tests {
             .build_fill();
 
         let mut evm = MegaEvm::new(context);
-        let mut tx = alloy_op_evm::OpTx(op_revm::OpTransaction::new(tx));
+        let mut tx = crate::MegaTransaction(op_revm::OpTransaction::new(tx));
         tx.enveloped_tx = Some(BytesT::new());
         let result = alloy_evm::Evm::transact_raw(&mut evm, tx).expect("transact ok");
 

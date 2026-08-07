@@ -21,10 +21,9 @@
 use alloy_eips::eip2930::{AccessList, AccessListItem};
 use alloy_primitives::{address, Address, Bytes, B256, U256};
 use mega_evm::{
-    alloy_op_evm::OpTx,
     op_revm::OpTransaction,
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    MegaContext, MegaEvm, MegaSpecId,
+    MegaContext, MegaEvm, MegaSpecId, MegaTransaction,
 };
 use revm::{
     bytecode::opcode::*,
@@ -129,15 +128,15 @@ impl Listing {
 // HELPERS
 // ============================================================================
 
-fn wrap(tx: TxEnv) -> OpTx {
-    let mut tx = OpTx(OpTransaction::new(tx));
+fn wrap(tx: TxEnv) -> MegaTransaction {
+    let mut tx = MegaTransaction(OpTransaction::new(tx));
     tx.enveloped_tx = Some(Bytes::new());
     tx
 }
 
 /// The transaction that makes [`RESIDENT`] resident: a bare value transfer to it, so the journal
 /// carries its entry into the next transaction of the same block.
-fn materializing_tx() -> OpTx {
+fn materializing_tx() -> MegaTransaction {
     wrap(
         TxEnvBuilder::default()
             .caller(CALLER)

@@ -18,7 +18,7 @@ use std::convert::Infallible;
 
 use alloy_primitives::{address, Address, Bytes, U256};
 use mega_evm::{
-    alloy_op_evm::{OpTx, OpTxError},
+    alloy_op_evm::OpTxError,
     op_revm::OpTransaction,
     test_utils::{BytecodeBuilder, MemoryDatabase},
     BucketHasher, BucketId, EmptyExternalEnv, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
@@ -51,7 +51,7 @@ fn simple_return_contract() -> Bytes {
 /// Builds an OP deposit transaction (`tx_type` == `DEPOSIT_TRANSACTION_TYPE`) with the
 /// specified caller, mint amount, and callee.
 fn make_op_deposit_tx(caller: Address, mint: u128, callee: Address) -> MegaTransaction {
-    let mut tx = OpTx(OpTransaction {
+    let mut tx = MegaTransaction(OpTransaction {
         base: TxEnv {
             caller,
             kind: TxKind::Call(callee),
@@ -75,7 +75,7 @@ fn make_op_deposit_tx(caller: Address, mint: u128, callee: Address) -> MegaTrans
 fn make_op_deposit_create_tx(caller: Address, mint: u128) -> MegaTransaction {
     // Minimal init code: STOP (deploys to a zero-byte runtime).
     let init_code = Bytes::from_static(&[0x00]);
-    let mut tx = OpTx(OpTransaction {
+    let mut tx = MegaTransaction(OpTransaction {
         base: TxEnv {
             caller,
             kind: TxKind::Create,
@@ -94,7 +94,7 @@ fn make_op_deposit_create_tx(caller: Address, mint: u128) -> MegaTransaction {
 
 /// Builds a mega system deposit-marked legacy tx.
 fn make_mega_system_tx() -> MegaTransaction {
-    let mut tx = OpTx(OpTransaction {
+    let mut tx = MegaTransaction(OpTransaction {
         base: TxEnv {
             caller: MEGA_SYSTEM_ADDRESS,
             kind: TxKind::Call(WHITELISTED_CALLEE),
@@ -202,7 +202,7 @@ fn test_rex5_non_empty_caller_no_extra_charge() {
     let db_normal = MemoryDatabase::default()
         .account_balance(FUNDED_CALLER, U256::from(1_000_000u64))
         .account_code(TARGET_CONTRACT, simple_return_contract());
-    let tx_normal = OpTx(OpTransaction {
+    let tx_normal = MegaTransaction(OpTransaction {
         base: TxEnv {
             caller: FUNDED_CALLER,
             kind: TxKind::Call(TARGET_CONTRACT),

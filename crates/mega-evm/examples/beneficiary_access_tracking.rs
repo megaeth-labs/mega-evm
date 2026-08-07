@@ -11,7 +11,7 @@ use alloy_primitives::{address, Bytes, U256};
 // Imported as the struct itself (not the `MegaTransaction` type alias) so the
 // tuple-struct constructor is usable — constructors cannot be called through a
 // type alias.
-use mega_evm::{alloy_op_evm::OpTx as MegaTransaction, MegaContext, MegaEvm, MegaSpecId};
+use mega_evm::{MegaContext, MegaEvm, MegaSpecId, MegaTransaction};
 use revm::{
     bytecode::opcode::{BALANCE, CALLER, POP, PUSH20, STOP},
     context::{BlockEnv, ContextSetters, ContextTr, TxEnv},

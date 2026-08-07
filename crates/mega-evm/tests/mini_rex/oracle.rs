@@ -3,11 +3,10 @@
 
 use alloy_primitives::{address, Bytes, TxKind, U256};
 use mega_evm::{
-    alloy_op_evm::OpTx as MegaTransaction,
     constants::mini_rex::{ORACLE_ACCESS_COMPUTE_GAS, TX_COMPUTE_GAS_LIMIT},
     test_utils::{BytecodeBuilder, MemoryDatabase},
     BlockLimits, MegaContext, MegaEvm, MegaHaltReason, MegaHardforkConfig, MegaSpecId,
-    TestExternalEnvs, ORACLE_CONTRACT_ADDRESS,
+    MegaTransaction, TestExternalEnvs, ORACLE_CONTRACT_ADDRESS,
 };
 use revm::{
     bytecode::opcode::{

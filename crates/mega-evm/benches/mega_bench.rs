@@ -25,10 +25,9 @@ use criterion::{black_box, criterion_group, criterion_main, Criterion};
 // tuple-struct constructor is usable — constructors cannot be called through a
 // type alias.
 use mega_evm::{
-    alloy_op_evm::OpTx as MegaTransaction,
     revm::inspector::NoOpInspector,
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    EmptyExternalEnv, MegaContext, MegaEvm, MegaSpecId,
+    EmptyExternalEnv, MegaContext, MegaEvm, MegaSpecId, MegaTransaction,
 };
 use revm::{
     bytecode::opcode::{

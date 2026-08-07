@@ -12,10 +12,9 @@
 
 use alloy_primitives::{address, Address, Bytes, U256};
 use mega_evm::{
-    alloy_op_evm::OpTx,
     op_revm::OpTransaction,
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    EmptyExternalEnv, MegaContext, MegaEvm, MegaSpecId, MEGA_SYSTEM_ADDRESS,
+    EmptyExternalEnv, MegaContext, MegaEvm, MegaSpecId, MegaTransaction, MEGA_SYSTEM_ADDRESS,
     ORACLE_CONTRACT_ADDRESS,
 };
 use revm::{
@@ -57,7 +56,7 @@ fn build_evm<DB: revm::Database + core::fmt::Debug>(
 }
 
 fn system_address_tx(callee: Address, gas_price: u128) -> mega_evm::MegaTransaction {
-    let mut tx = OpTx(OpTransaction::new(TxEnv {
+    let mut tx = MegaTransaction(OpTransaction::new(TxEnv {
         caller: MEGA_SYSTEM_ADDRESS,
         kind: TxKind::Call(callee),
         gas_limit: GAS_LIMIT,
@@ -154,7 +153,7 @@ fn test_equivalence_leaves_additional_limit_dormant() {
         .account_code(INNER, inner_code);
     let mut evm = build_evm(db);
 
-    let mut tx = OpTx(OpTransaction::new(TxEnv {
+    let mut tx = MegaTransaction(OpTransaction::new(TxEnv {
         caller: EOA_CALLER,
         kind: TxKind::Call(CALLEE),
         gas_limit: 10_000_000,

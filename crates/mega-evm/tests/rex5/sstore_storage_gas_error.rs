@@ -5,11 +5,12 @@
 //! fails to price the slot (`sstore_set_storage_gas` returns `None`), the instruction must
 //! halt with `FatalExternalError`, which surfaces as `EVMError::Custom`.
 
+use mega_evm::MegaTransaction;
 use std::convert::Infallible;
 
 use alloy_primitives::{address, Address, Bytes, TxKind, U256};
 use mega_evm::{
-    alloy_op_evm::{OpTx, OpTxError},
+    alloy_op_evm::OpTxError,
     op_revm::OpTransaction,
     test_utils::{BytecodeBuilder, MemoryDatabase},
     BucketId, EVMError, EmptyExternalEnv, EvmTxRuntimeLimits, ExternalEnvs, MegaContext, MegaEvm,
@@ -77,7 +78,7 @@ fn transact_with_failing_salt(
         gas_limit: 1_000_000,
         ..Default::default()
     };
-    let mut tx = OpTx(OpTransaction::new(tx));
+    let mut tx = MegaTransaction(OpTransaction::new(tx));
     tx.enveloped_tx = Some(Bytes::new());
     alloy_evm::Evm::transact_raw(&mut evm, tx)
 }

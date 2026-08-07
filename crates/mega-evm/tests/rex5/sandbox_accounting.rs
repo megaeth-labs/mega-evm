@@ -10,7 +10,6 @@ use alloy_primitives::{address, hex, Address, Bytes, Signature, TxKind, B256, U2
 use alloy_sol_types::SolCall;
 use mega_evm::{
     alloy_consensus::{Signed, TxLegacy},
-    alloy_op_evm::OpTx,
     constants,
     op_revm::OpTransaction,
     revm::context::result::{ExecutionResult, ResultAndState},
@@ -138,7 +137,7 @@ fn keyless_deploy_call_tx(
         gas_price: 0,
         ..Default::default()
     };
-    let mut tx = OpTx(OpTransaction::new(tx));
+    let mut tx = MegaTransaction(OpTransaction::new(tx));
     tx.enveloped_tx = Some(Bytes::new());
     tx
 }
@@ -155,7 +154,7 @@ fn sandbox_create_tx_for_intrinsic(init_code: Bytes, signer: Address) -> MegaTra
         nonce: 0,
         ..Default::default()
     };
-    OpTx(OpTransaction::new(tx))
+    MegaTransaction(OpTransaction::new(tx))
 }
 
 /// Computes the intrinsic compute gas that Rex5 records during transaction validation.

@@ -2,7 +2,6 @@ use std::{path::PathBuf, str::FromStr};
 
 use clap::Parser;
 use mega_evm::{
-    alloy_op_evm::OpTx as MegaTransaction,
     op_revm::OpTransaction,
     revm::{
         context::{
@@ -13,7 +12,7 @@ use mega_evm::{
         state::{AccountInfo, Bytecode},
         ExecuteCommitEvm,
     },
-    MegaContext, MegaEvm, MegaSpecId,
+    MegaContext, MegaEvm, MegaSpecId, MegaTransaction,
 };
 use state_test::types::Env;
 

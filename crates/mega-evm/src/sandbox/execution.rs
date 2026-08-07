@@ -356,7 +356,7 @@ pub fn execute_keyless_deploy_call<DB: AlloyDatabase, ExtEnvs: ExternalEnvTypes>
             nonce: 0,
             ..Default::default()
         };
-        let mut mega_tx = alloy_op_evm::OpTx(op_revm::OpTransaction::new(tx));
+        let mut mega_tx = crate::MegaTransaction(op_revm::OpTransaction::new(tx));
         mega_tx.enveloped_tx = Some(tx_bytes.clone());
         mega_tx
     };
@@ -532,7 +532,7 @@ fn build_fee_free_sandbox_deposit_tx(
         nonce: 0,
         ..Default::default()
     };
-    let mut mega_tx = alloy_op_evm::OpTx(op_revm::OpTransaction::new(tx));
+    let mut mega_tx = crate::MegaTransaction(op_revm::OpTransaction::new(tx));
     mega_tx.enveloped_tx = Some(raw_tx_bytes.clone());
     mega_tx.deposit.source_hash = SANDBOX_TX_SOURCE_HASH;
     mega_tx.deposit.mint = None;

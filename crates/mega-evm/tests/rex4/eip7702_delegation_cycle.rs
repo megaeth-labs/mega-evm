@@ -27,11 +27,12 @@
 //! EIP-7702 specifies that clients must resolve at most one level of delegation.
 //! Recursive resolution is itself a spec violation, independent of the crash.
 
+use mega_evm::MegaTransaction;
 use std::convert::Infallible;
 
 use alloy_primitives::{address, Address, Bytes, U256};
 use mega_evm::{
-    alloy_op_evm::{OpTx, OpTxError},
+    alloy_op_evm::OpTxError,
     op_revm::OpTransaction,
     test_utils::{BytecodeBuilder, MemoryDatabase},
     EvmTxRuntimeLimits, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
@@ -67,7 +68,7 @@ fn transact(
         chain.operator_fee_constant = Some(U256::from(0));
     });
     let mut evm = MegaEvm::new(context);
-    let mut tx = OpTx(OpTransaction::new(tx));
+    let mut tx = MegaTransaction(OpTransaction::new(tx));
     tx.enveloped_tx = Some(Bytes::new());
     alloy_evm::Evm::transact_raw(&mut evm, tx)
 }

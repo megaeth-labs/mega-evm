@@ -14,10 +14,10 @@
 
 use alloy_primitives::{address, Address, Bytes, U256};
 use mega_evm::{
-    alloy_op_evm::{OpTx, OpTxError},
+    alloy_op_evm::OpTxError,
     op_revm::OpTransaction,
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
+    MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
 };
 use revm::{
     bytecode::opcode::*,
@@ -87,7 +87,7 @@ fn transact(
         chain.operator_fee_constant = Some(U256::from(0));
     });
     let mut evm = MegaEvm::new(context);
-    let mut tx = OpTx(OpTransaction::new(tx));
+    let mut tx = MegaTransaction(OpTransaction::new(tx));
     tx.enveloped_tx = Some(Bytes::new());
     alloy_evm::Evm::transact_raw(&mut evm, tx)
 }

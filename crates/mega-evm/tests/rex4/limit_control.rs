@@ -3,12 +3,13 @@
 //! When a contract calls `LIMIT_CONTROL_ADDRESS.remainingComputeGas()`,
 //! the interceptor returns the remaining compute gas for the current call.
 
+use mega_evm::MegaTransaction;
 use std::convert::Infallible;
 
 use alloy_primitives::{address, Address, Bytes, U256};
 use alloy_sol_types::{SolCall, SolError};
 use mega_evm::{
-    alloy_op_evm::{OpTx, OpTxError},
+    alloy_op_evm::OpTxError,
     constants::mini_rex::BLOCK_ENV_ACCESS_COMPUTE_GAS,
     op_revm::OpTransaction,
     test_utils::{BytecodeBuilder, MemoryDatabase},
@@ -55,7 +56,7 @@ fn transact(
         chain.operator_fee_constant = Some(U256::from(0));
     });
     let mut evm = MegaEvm::new(context);
-    let mut tx = OpTx(OpTransaction::new(tx));
+    let mut tx = MegaTransaction(OpTransaction::new(tx));
     tx.enveloped_tx = Some(Bytes::new());
     alloy_evm::Evm::transact_raw(&mut evm, tx)
 }
@@ -106,7 +107,7 @@ fn transact_with_compute_limit(
         chain.operator_fee_constant = Some(U256::from(0));
     });
     let mut evm = MegaEvm::new(context);
-    let mut tx = OpTx(OpTransaction::new(tx));
+    let mut tx = MegaTransaction(OpTransaction::new(tx));
     tx.enveloped_tx = Some(Bytes::new());
     let result = alloy_evm::Evm::transact_raw(&mut evm, tx)?;
     let additional_limit = evm.ctx_ref().additional_limit.borrow();
@@ -592,7 +593,7 @@ fn test_remaining_compute_gas_clamped_by_detention_limit() {
         chain.operator_fee_constant = Some(U256::from(0));
     });
     let mut evm = MegaEvm::new(context);
-    let mut tx = OpTx(OpTransaction::new(default_tx(CONTRACT)));
+    let mut tx = MegaTransaction(OpTransaction::new(default_tx(CONTRACT)));
     tx.enveloped_tx = Some(Bytes::new());
     let result = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
 
@@ -644,7 +645,7 @@ fn test_inspector_sees_remaining_compute_gas_system_call() {
     });
     let mut inspector = CallTrackingInspector::default();
     let mut evm = MegaEvm::new(context).with_inspector(&mut inspector);
-    let mut tx = OpTx(OpTransaction::new(default_tx(CONTRACT)));
+    let mut tx = MegaTransaction(OpTransaction::new(default_tx(CONTRACT)));
     tx.enveloped_tx = Some(Bytes::new());
     let result = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
 

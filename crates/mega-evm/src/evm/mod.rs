@@ -463,7 +463,7 @@ mod tests {
     }
 
     fn mega_tx() -> MegaTransaction {
-        let mut tx = alloy_op_evm::OpTx(op_revm::OpTransaction::new(tx_env()));
+        let mut tx = crate::MegaTransaction(op_revm::OpTransaction::new(tx_env()));
         tx.enveloped_tx = Some(Bytes::new());
         tx
     }
@@ -700,7 +700,7 @@ mod tests {
         let mut db = MemoryDatabase::default().account_code(CALLEE, Bytes::new());
         let mut evm = MegaEvm::new(configure_context(&mut db));
 
-        let mut tx = alloy_op_evm::OpTx(op_revm::OpTransaction::new(TxEnv {
+        let mut tx = crate::MegaTransaction(op_revm::OpTransaction::new(TxEnv {
             caller: CALLER,
             gas_limit: 100_000,
             kind: alloy_primitives::TxKind::Call(CALLEE),

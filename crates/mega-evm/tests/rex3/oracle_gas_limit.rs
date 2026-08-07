@@ -3,9 +3,9 @@
 
 use alloy_primitives::{address, Bytes, TxKind, U256};
 use mega_evm::{
-    alloy_op_evm::OpTx as MegaTransaction,
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, TestExternalEnvs, ORACLE_CONTRACT_ADDRESS,
+    MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction, TestExternalEnvs,
+    ORACLE_CONTRACT_ADDRESS,
 };
 use revm::{
     bytecode::opcode::{CALL, GAS, POP, PUSH0, SLOAD, SSTORE, STOP, TIMESTAMP},

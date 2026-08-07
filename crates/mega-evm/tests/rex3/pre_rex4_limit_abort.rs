@@ -10,12 +10,13 @@
 //! module pins the frozen REX3 shape both guards must not retroactively change: the transaction
 //! still fails, but it burns the entire gas limit.
 
+use mega_evm::MegaTransaction;
 use std::convert::Infallible;
 
 use alloy_primitives::{address, Address, Bytes, U256};
 use alloy_sol_types::SolCall;
 use mega_evm::{
-    alloy_op_evm::{OpTx, OpTxError},
+    alloy_op_evm::OpTxError,
     op_revm::OpTransaction,
     test_utils::{BytecodeBuilder, MemoryDatabase},
     EvmTxRuntimeLimits, IKeylessDeploy, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
@@ -53,7 +54,7 @@ fn exhausted_context(
 }
 
 fn call_tx(to: Address, data: Bytes) -> mega_evm::MegaTransaction {
-    let mut tx = OpTx(OpTransaction::new(TxEnv {
+    let mut tx = MegaTransaction(OpTransaction::new(TxEnv {
         caller: CALLER,
         kind: TxKind::Call(to),
         data,

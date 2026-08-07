@@ -21,12 +21,12 @@
 //!   same underfunded frame with volatile access *enabled* must still run out of gas exactly as an
 //!   unguarded opcode does, which the `..._runs_out_of_gas` tests pin.
 
+use mega_evm::MegaTransaction;
 use std::convert::Infallible;
 
 use alloy_primitives::{address, Address, Bytes, U256};
 use alloy_sol_types::{SolCall, SolError};
 use mega_evm::{
-    alloy_op_evm::OpTx,
     op_revm::OpTransaction,
     test_utils::{BytecodeBuilder, MemoryDatabase},
     IMegaAccessControl, MegaContext, MegaEvm, MegaSpecId, TestExternalEnvs, VolatileDataAccessType,
@@ -176,7 +176,7 @@ fn transact_inspected(
         chain.operator_fee_constant = Some(U256::from(0));
     });
     let mut evm = MegaEvm::new(context).with_inspector(inspector);
-    let mut tx = OpTx(OpTransaction::new(tx));
+    let mut tx = MegaTransaction(OpTransaction::new(tx));
     tx.enveloped_tx = Some(Bytes::new());
     alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap().result.is_success()
 }

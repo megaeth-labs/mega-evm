@@ -4,11 +4,10 @@ use std::convert::Infallible;
 
 use alloy_primitives::{address, keccak256, Bytes, TxKind, U256};
 use mega_evm::{
-    alloy_op_evm::OpTx as MegaTransaction,
     constants::{self, mini_rex::SSTORE_SET_STORAGE_GAS},
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    EVMError, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, SaltEnv, TestExternalEnvs,
-    MIN_BUCKET_SIZE,
+    EVMError, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction, SaltEnv,
+    TestExternalEnvs, MIN_BUCKET_SIZE,
 };
 use revm::{
     bytecode::opcode::{CALL, CREATE, CREATE2, GAS, LOG0, PUSH0},

@@ -273,7 +273,7 @@ mod tests {
             .data(Bytes::from(vec![0u8; calldata_tokens as usize]))
             .gas_limit(1_000_000)
             .build_fill();
-        let mut tx = alloy_op_evm::OpTx(op_revm::OpTransaction::new(tx));
+        let mut tx = crate::MegaTransaction(op_revm::OpTransaction::new(tx));
         tx.enveloped_tx = Some(Bytes::new());
 
         let result = evm.transact_raw(tx).expect("probe transaction must execute");
@@ -399,7 +399,7 @@ mod tests {
             .chain_id(Some(CHAIN_ID))
             .gas_limit(1_000_000)
             .build_fill();
-        let mut tx = alloy_op_evm::OpTx(op_revm::OpTransaction::new(tx));
+        let mut tx = crate::MegaTransaction(op_revm::OpTransaction::new(tx));
         tx.enveloped_tx = Some(Bytes::new());
 
         let result = evm.transact_raw(tx).expect("probe transaction must execute");

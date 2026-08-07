@@ -19,10 +19,9 @@
 
 use alloy_primitives::{address, Address, Bytes, U256};
 use mega_evm::{
-    alloy_op_evm::OpTx,
     op_revm::OpTransaction,
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    MegaContext, MegaEvm, MegaSpecId,
+    MegaContext, MegaEvm, MegaSpecId, MegaTransaction,
 };
 use revm::{
     bytecode::opcode::*,
@@ -93,7 +92,7 @@ fn gas_used(spec: MegaSpecId, code: Bytes) -> u64 {
         chain.operator_fee_constant = Some(U256::ZERO);
     });
     let mut evm = MegaEvm::new(context);
-    let mut tx = OpTx(OpTransaction::new(tx()));
+    let mut tx = MegaTransaction(OpTransaction::new(tx()));
     tx.enveloped_tx = Some(Bytes::new());
 
     let outcome = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();

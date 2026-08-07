@@ -24,12 +24,12 @@
 //! well-funded frame.
 
 use crate::common;
+use mega_evm::MegaTransaction;
 use std::{cell::RefCell, convert::Infallible, rc::Rc};
 
 use alloy_primitives::{address, Address, Bytes, U256};
 use alloy_sol_types::SolCall;
 use mega_evm::{
-    alloy_op_evm::OpTx,
     op_revm::OpTransaction,
     test_utils::{BytecodeBuilder, MemoryDatabase},
     EvmTxRuntimeLimits, IMegaAccessControl, MegaContext, MegaEvm, MegaSpecId, TestExternalEnvs,
@@ -194,7 +194,7 @@ fn transact(
         chain.operator_fee_constant = Some(U256::from(0));
     });
     let mut evm = MegaEvm::new(context).with_inspector(probe);
-    let mut tx = OpTx(OpTransaction::new(tx));
+    let mut tx = MegaTransaction(OpTransaction::new(tx));
     tx.enveloped_tx = Some(Bytes::new());
     alloy_evm::Evm::transact_raw(&mut evm, tx).expect("tx should not surface an EVMError");
 

@@ -11,14 +11,12 @@
 //! CREATE results — so a predicate that disagrees with revm shows up directly as a compute-gas
 //! total that is short (or inflated) by `code_len * CODEDEPOSIT`.
 
+use mega_evm::MegaTransaction;
 use std::convert::Infallible;
 
 use alloy_primitives::{address, Address, Bytes, U256};
 use mega_evm::{
-    alloy_op_evm::{OpTx, OpTxError},
-    constants,
-    op_revm::OpTransaction,
-    test_utils::MemoryDatabase,
+    alloy_op_evm::OpTxError, constants, op_revm::OpTransaction, test_utils::MemoryDatabase,
     EVMError, EmptyExternalEnv, EvmTxRuntimeLimits, LimitUsage, MegaContext, MegaEvm,
     MegaHaltReason, MegaSpecId,
 };
@@ -52,7 +50,7 @@ fn deploy(len: u64) -> (ResultAndState<MegaHaltReason>, LimitUsage) {
         chain.operator_fee_constant = Some(U256::ZERO);
     });
 
-    let mut tx = OpTx(OpTransaction::new(TxEnv {
+    let mut tx = MegaTransaction(OpTransaction::new(TxEnv {
         caller: CALLER,
         kind: TxKind::Create,
         data: init_code(len),

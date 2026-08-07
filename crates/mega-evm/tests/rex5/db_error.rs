@@ -14,12 +14,12 @@
 //!   the selector-only `KeylessDeployError::InternalError` and surface as `Revert` (validation-
 //!   style — no sandbox state to merge).
 
+use mega_evm::MegaTransaction;
 use std::convert::Infallible;
 
 use alloy_primitives::{address, Address, Bytes, TxKind, U256};
 use alloy_sol_types::SolCall;
 use mega_evm::{
-    alloy_op_evm::OpTx,
     op_revm::OpTransaction,
     revm::context::result::ExecutionResult,
     sandbox::{
@@ -75,7 +75,7 @@ fn test_keyless_deploy_address_db_error_maps_to_internal_error_revert() {
         gas_price: 0,
         ..Default::default()
     };
-    let mut tx = OpTx(OpTransaction::new(tx));
+    let mut tx = MegaTransaction(OpTransaction::new(tx));
     tx.enveloped_tx = Some(Bytes::new());
 
     let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);
@@ -144,7 +144,7 @@ fn test_keyless_deploy_address_db_error_maps_to_internal_error_revert_rex6() {
         gas_price: 0,
         ..Default::default()
     };
-    let mut tx = OpTx(OpTransaction::new(tx));
+    let mut tx = MegaTransaction(OpTransaction::new(tx));
     tx.enveloped_tx = Some(Bytes::new());
 
     let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);
@@ -211,7 +211,7 @@ fn test_keyless_signer_nonce_db_error_maps_to_internal_error_revert() {
         gas_price: 0,
         ..Default::default()
     };
-    let mut tx = OpTx(OpTransaction::new(tx));
+    let mut tx = MegaTransaction(OpTransaction::new(tx));
     tx.enveloped_tx = Some(Bytes::new());
 
     let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);
@@ -274,7 +274,7 @@ fn test_system_tx_validate_inspect_account_db_error_surfaces_as_custom() {
         nonce: 0,
         ..Default::default()
     };
-    let mut tx = OpTx(OpTransaction::new(tx));
+    let mut tx = MegaTransaction(OpTransaction::new(tx));
     tx.enveloped_tx = Some(Bytes::new());
 
     let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);

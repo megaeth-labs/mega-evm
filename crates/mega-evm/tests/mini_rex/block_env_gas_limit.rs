@@ -12,10 +12,9 @@
 use alloy_evm::Evm;
 use alloy_primitives::{address, Address, Bytes, TxKind, U256};
 use mega_evm::{
-    alloy_op_evm::OpTx as MegaTransaction,
     constants::mini_rex::{BLOCK_ENV_ACCESS_COMPUTE_GAS, TX_COMPUTE_GAS_LIMIT},
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, TestExternalEnvs,
+    MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction, TestExternalEnvs,
 };
 use revm::{
     bytecode::opcode::*,

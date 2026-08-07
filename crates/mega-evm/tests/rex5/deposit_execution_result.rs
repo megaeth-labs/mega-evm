@@ -6,11 +6,12 @@
 //! reported as `FailedDeposit` with the whole gas limit consumed. Widening the bypass to every
 //! deposit transaction would change that consensus-visible shape.
 
+use mega_evm::MegaTransaction;
 use std::convert::Infallible;
 
 use alloy_primitives::{address, Address, Bytes, U256};
 use mega_evm::{
-    alloy_op_evm::{OpTx, OpTxError},
+    alloy_op_evm::OpTxError,
     op_revm::OpTransaction,
     test_utils::{BytecodeBuilder, MemoryDatabase},
     EVMError, EmptyExternalEnv, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
@@ -30,7 +31,7 @@ const GAS_LIMIT: u64 = 5_000_000;
 /// A non-sandbox OP deposit transaction: a non-zero `source_hash` flips `tx_type` to
 /// `DEPOSIT_TRANSACTION_TYPE`.
 fn deposit_tx() -> mega_evm::MegaTransaction {
-    let mut tx = OpTx(OpTransaction {
+    let mut tx = MegaTransaction(OpTransaction {
         base: TxEnv {
             caller: DEPOSIT_CALLER,
             kind: TxKind::Call(HALTING_CONTRACT),

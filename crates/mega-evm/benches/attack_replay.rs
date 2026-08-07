@@ -55,8 +55,7 @@ use criterion::{black_box, criterion_group, criterion_main, BatchSize, Criterion
 // tuple-struct constructor is usable — constructors cannot be called through a
 // type alias.
 use mega_evm::{
-    alloy_op_evm::OpTx as MegaTransaction, test_utils::MemoryDatabase, EmptyExternalEnv,
-    MegaContext, MegaEvm, MegaSpecId,
+    test_utils::MemoryDatabase, EmptyExternalEnv, MegaContext, MegaEvm, MegaSpecId, MegaTransaction,
 };
 use revm::{
     context::{

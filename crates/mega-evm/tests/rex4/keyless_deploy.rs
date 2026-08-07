@@ -4,13 +4,13 @@
 //! ensuring correct dynamic gas pricing for storage operations in keyless deploy constructors.
 //! Pre-Rex4 specs retain the `EmptyExternalEnv` behavior for backward compatibility.
 
+use mega_evm::MegaTransaction;
 use std::vec::Vec;
 
 use alloy_primitives::{address, hex, Address, Bytes, Signature, TxKind, B256, U256};
 use alloy_sol_types::{sol, SolCall};
 use mega_evm::{
     alloy_consensus::{Signed, TxLegacy},
-    alloy_op_evm::OpTx,
     op_revm::OpTransaction,
     revm::context::result::ExecutionResult,
     sandbox::{
@@ -75,7 +75,7 @@ fn execute_keyless_deploy_with_envs(
         gas_price: 0,
         ..Default::default()
     };
-    let mut tx = OpTx(OpTransaction::new(tx));
+    let mut tx = MegaTransaction(OpTransaction::new(tx));
     tx.enveloped_tx = Some(Bytes::new());
 
     let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);

@@ -18,10 +18,9 @@
 
 use alloy_primitives::{address, Address, Bytes, U256};
 use mega_evm::{
-    alloy_op_evm::OpTx,
     op_revm::OpTransaction,
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
+    MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
 };
 use revm::{
     bytecode::opcode::{CALL, SSTORE},
@@ -87,7 +86,7 @@ fn transact(spec: MegaSpecId, code: Bytes) -> ResultAndState<MegaHaltReason> {
     // wrapper's result slot, which a 1M budget does not cover.
     let tx: TxEnv =
         TxEnvBuilder::default().caller(CALLER).call(CONTRACT).gas_limit(30_000_000).build_fill();
-    let mut tx = OpTx(OpTransaction::new(tx));
+    let mut tx = MegaTransaction(OpTransaction::new(tx));
     tx.enveloped_tx = Some(Bytes::new());
     alloy_evm::Evm::transact_raw(&mut evm, tx).expect("tx should not error")
 }

@@ -8,12 +8,13 @@
 //! sites (CALL, CREATE, SSTORE, LOG, SELFDESTRUCT) instead of inflating `gas.limit()`;
 //! pre-REX5 retains the legacy inflation byte-for-byte.
 
+use mega_evm::MegaTransaction;
 use std::convert::Infallible;
 
 use alloy_primitives::{address, Address, Bytes, U256};
 use alloy_sol_types::SolCall;
 use mega_evm::{
-    alloy_op_evm::{OpTx, OpTxError},
+    alloy_op_evm::OpTxError,
     op_revm::OpTransaction,
     test_utils::{BytecodeBuilder, MemoryDatabase},
     EvmTxRuntimeLimits, IMegaAccessControl, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
@@ -63,7 +64,7 @@ fn transact(
         chain.operator_fee_constant = Some(U256::from(0));
     });
     let mut evm = MegaEvm::new(context);
-    let mut tx = OpTx(OpTransaction::new(tx));
+    let mut tx = MegaTransaction(OpTransaction::new(tx));
     tx.enveloped_tx = Some(Bytes::new());
     alloy_evm::Evm::transact_raw(&mut evm, tx)
 }
@@ -81,7 +82,7 @@ fn transact_with_compute(
         chain.operator_fee_constant = Some(U256::from(0));
     });
     let mut evm = MegaEvm::new(context);
-    let mut tx = OpTx(OpTransaction::new(tx));
+    let mut tx = MegaTransaction(OpTransaction::new(tx));
     tx.enveloped_tx = Some(Bytes::new());
     let result = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
     let compute = evm.ctx_ref().additional_limit.borrow().get_usage().compute_gas;
@@ -102,7 +103,7 @@ fn transact_with_limits(
         chain.operator_fee_constant = Some(U256::from(0));
     });
     let mut evm = MegaEvm::new(context);
-    let mut tx = OpTx(OpTransaction::new(tx));
+    let mut tx = MegaTransaction(OpTransaction::new(tx));
     tx.enveloped_tx = Some(Bytes::new());
     alloy_evm::Evm::transact_raw(&mut evm, tx)
 }
@@ -522,7 +523,7 @@ fn test_sstore_storage_gas_residual_subtracts_drained_stipend_rex5() {
             chain.operator_fee_constant = Some(U256::from(0));
         });
         let mut evm = MegaEvm::new(context);
-        let mut tx = OpTx(OpTransaction::new(default_tx()));
+        let mut tx = MegaTransaction(OpTransaction::new(default_tx()));
         tx.enveloped_tx = Some(Bytes::new());
         let result = alloy_evm::Evm::transact_raw(&mut evm, tx).expect("tx must not error");
         assert!(result.result.is_success(), "execution must succeed: {:?}", result.result);

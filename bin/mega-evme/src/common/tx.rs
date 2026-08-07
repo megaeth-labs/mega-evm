@@ -12,11 +12,10 @@ use mega_evm::{
         eip7702::{Authorization, RecoveredAuthority, RecoveredAuthorization, SignedAuthorization},
         Decodable2718, Encodable2718, Typed2718 as _,
     },
-    alloy_op_evm::OpTx as MegaTransaction,
     op_alloy_consensus::{OpTxEnvelope, TxDeposit},
     op_revm::{transaction::deposit::DepositTransactionParts, OpTransaction},
     revm::{context::tx::TxEnv, primitives::TxKind},
-    Either, MegaTxEnvelope, MegaTxType,
+    Either, MegaTransaction, MegaTxEnvelope, MegaTxType,
 };
 use tracing::{debug, trace};
 
