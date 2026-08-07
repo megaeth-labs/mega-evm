@@ -1,7 +1,7 @@
 pub use alloy_evm::InvalidTxError;
 use alloy_primitives::Address;
 pub use op_revm::{OpHaltReason, OpTransactionError};
-use revm::{context::result::ExecutionResult, state::EvmState};
+use revm::{context::result::ResultAndState, state::EvmState};
 pub use revm::{
     context::result::{EVMError, InvalidTransaction},
     context_interface::{
@@ -14,14 +14,16 @@ use crate::VolatileDataAccess;
 
 /// The execution outcome of a transaction in `MegaETH`.
 ///
-/// This struct contains additional information about the transaction execution on top of the
-/// standard EVM's execution result and state.
-#[derive(Debug, Clone)]
+/// The standard EVM's execution result and post-state, plus the four `MegaETH` resource
+/// dimensions. The deref target is the upstream pair, so `outcome.result` and `outcome.state`
+/// read straight through; the pair is one field rather than two so every carrier of this type
+/// hands it around whole instead of re-plumbing its parts.
+#[derive(Debug, Clone, derive_more::Deref, derive_more::DerefMut)]
 pub struct MegaTransactionOutcome {
-    /// The transaction execution result.
-    pub result: ExecutionResult<MegaHaltReason>,
-    /// The post-execution evm state.
-    pub state: EvmState,
+    /// The transaction execution result and post-execution EVM state.
+    #[deref]
+    #[deref_mut]
+    pub result_and_state: ResultAndState<MegaHaltReason>,
     /// The data size usage in bytes.
     pub data_size: u64,
     /// The number of KV updates.

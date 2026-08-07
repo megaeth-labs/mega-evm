@@ -60,7 +60,7 @@ use alloy_evm::{
     Database,
 };
 use revm::{
-    context::{result::ResultAndState, BlockEnv, CfgEnv, ContextTr},
+    context::{BlockEnv, CfgEnv, ContextTr},
     handler::{EthFrame, EvmTr},
     inspector::NoOpInspector,
     interpreter::interpreter::EthInterpreter,
@@ -354,7 +354,7 @@ where
         &mut self,
         tx: MegaTransaction,
     ) -> Result<MegaTransactionOutcome, EVMError<DB::Error, MegaTransactionError>> {
-        let ResultAndState { result, state } = if self.inspect {
+        let result_and_state = if self.inspect {
             InspectEvm::inspect_tx(self, tx)?
         } else {
             ExecuteEvm::transact(self, tx)?
@@ -363,8 +363,7 @@ where
         let LimitUsage { data_size, kv_updates, compute_gas, state_growth } =
             additional_limit.get_usage();
         Ok(MegaTransactionOutcome {
-            result,
-            state,
+            result_and_state,
             data_size,
             kv_updates,
             compute_gas_used: compute_gas,
@@ -390,13 +389,12 @@ where
         &mut self,
         tx: MegaTransaction,
     ) -> Result<MegaTransactionOutcome, EVMError<DB::Error, MegaTransactionError>> {
-        let ResultAndState { result, state } = InspectEvm::inspect_tx(self, tx)?;
+        let result_and_state = InspectEvm::inspect_tx(self, tx)?;
         let additional_limit = self.ctx().additional_limit.borrow();
         let LimitUsage { data_size, kv_updates, compute_gas, state_growth } =
             additional_limit.get_usage();
         Ok(MegaTransactionOutcome {
-            result,
-            state,
+            result_and_state,
             data_size,
             kv_updates,
             compute_gas_used: compute_gas,

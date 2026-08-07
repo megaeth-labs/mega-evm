@@ -17,7 +17,7 @@ use alloy_op_evm::block::receipt_builder::OpReceiptBuilder;
 use alloy_primitives::B256;
 use op_alloy_consensus::OpDepositReceipt;
 use op_revm::transaction::deposit::DEPOSIT_TRANSACTION_TYPE;
-use revm::{context::result::ExecResultAndState, database::State, handler::EvmTr, Inspector};
+use revm::{context::result::ResultAndState, database::State, handler::EvmTr, Inspector};
 
 use crate::{
     block::eips, flat_system_contract_specs, is_apply_pending_changes_due, resolve_system_address,
@@ -189,7 +189,7 @@ where
             self.ctx.parent_hash,
             &mut self.evm,
         )?;
-        if let Some(ExecResultAndState { result, state }) = result_and_state {
+        if let Some(ResultAndState { result, state }) = result_and_state {
             if is_rex_5 && !result.is_success() {
                 return Err(BlockValidationError::BlockHashContractCall {
                     message: std::format!(
@@ -210,7 +210,7 @@ where
             self.ctx.parent_beacon_block_root,
             &mut self.evm,
         )?;
-        if let Some(ExecResultAndState { result, state }) = result_and_state {
+        if let Some(ResultAndState { result, state }) = result_and_state {
             if is_rex_5 && !result.is_success() {
                 let parent_beacon_block_root =
                     self.ctx.parent_beacon_block_root.unwrap_or_default();
@@ -293,8 +293,7 @@ where
                 state: witness_state,
             });
             if due {
-                let ExecResultAndState { state, .. } =
-                    transact_apply_pending_changes(&mut self.evm)?;
+                let ResultAndState { state, .. } = transact_apply_pending_changes(&mut self.evm)?;
                 outcomes.push(MegaSystemCallOutcome {
                     source: StateChangeSource::Transaction(0),
                     state,
@@ -593,11 +592,14 @@ where
             tx_size,
             da_size,
             depositor,
-            data_size,
-            kv_updates,
-            compute_gas_used,
-            state_growth_used,
-            result_and_state,
+            inner:
+                MegaTransactionOutcome {
+                    result_and_state: ResultAndState { result, state },
+                    data_size,
+                    kv_updates,
+                    compute_gas_used,
+                    state_growth_used,
+                },
         } = result;
 
         // Re-validate limits at commit time to handle parallel execution race conditions.
@@ -611,31 +613,20 @@ where
             depositor.is_some(),
         )?;
 
-        let ExecResultAndState { result, state } = result_and_state;
-
-        let outcome = MegaTransactionOutcome {
-            result,
-            state,
-            data_size,
-            kv_updates,
-            compute_gas_used,
-            state_growth_used,
-        };
         // Accumulate post-execution resource usage into block-level counters. This does not
         // validate limits; over-limit enforcement happens in `pre_execution_check` before the
         // next transaction. The deposit-nonce record doubles as the deposit signal here.
         self.block_limiter.post_execution_update_raw(
-            outcome.result.tx_gas_used(),
+            result.tx_gas_used(),
             tx_size,
             da_size,
-            outcome.data_size,
-            outcome.kv_updates,
-            outcome.compute_gas_used,
-            outcome.state_growth_used,
+            data_size,
+            kv_updates,
+            compute_gas_used,
+            state_growth_used,
             depositor.is_some(),
         );
 
-        let MegaTransactionOutcome { result, state, .. } = outcome;
         let gas_used = result.tx_gas_used();
         let block_gas_used = self.block_limiter.block_gas_used;
         self.receipts.push(
@@ -705,14 +696,6 @@ where
         Tx: RecoveredTx<R::Transaction>,
     {
         let BlockMegaTransactionOutcome { tx, tx_size, da_size, depositor, inner } = outcome;
-        let MegaTransactionOutcome {
-            result,
-            state,
-            data_size,
-            kv_updates,
-            compute_gas_used,
-            state_growth_used,
-        } = inner;
 
         self.commit_tx_result(crate::MegaBlockTxResult {
             tx_type: tx.tx().tx_type(),
@@ -721,11 +704,7 @@ where
             tx_size,
             da_size,
             depositor,
-            data_size,
-            kv_updates,
-            compute_gas_used,
-            state_growth_used,
-            result_and_state: ExecResultAndState { result, state },
+            inner,
         })
     }
 
@@ -892,14 +871,6 @@ where
         let tx_hash = recovered.tx().tx_hash();
         let gas_limit = recovered.tx().gas_limit();
         let (depositor, inner) = self.run_tx_env_with_sizes(tx_env, recovered, tx_size, da_size)?;
-        let MegaTransactionOutcome {
-            result,
-            state,
-            data_size,
-            kv_updates,
-            compute_gas_used,
-            state_growth_used,
-        } = inner;
         Ok(crate::MegaBlockTxResult {
             tx_type,
             tx_hash,
@@ -907,11 +878,7 @@ where
             tx_size,
             da_size,
             depositor,
-            data_size,
-            kv_updates,
-            compute_gas_used,
-            state_growth_used,
-            result_and_state: ExecResultAndState { result, state },
+            inner,
         })
     }
 
