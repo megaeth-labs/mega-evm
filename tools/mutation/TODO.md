@@ -89,6 +89,19 @@ Enabling any of these hooks on that side moves nothing observable:
 
 ### Unreachable-state gates
 
+- `spec_gate:crates/mega-evm/src/evm/execution.rs:1022:MINI_REX:true` and
+  `adjacent_spec:crates/mega-evm/src/evm/execution.rs:1022:MINI_REX:pred=EQUIVALENCE` — the
+  `volatile_info` snapshot can affect the result only inside the
+  `additional_limit.is_exceeding_limit_halt(&reason)` branch at line 1055.
+  That predicate requires both a basic out-of-gas halt and `AdditionalLimit::check_limit()` to
+  report an exceeded dimension.
+  Under `EQUIVALENCE`, `EvmTxRuntimeLimits::from_spec` returns `no_limits()` (`u64::MAX` for every
+  dimension), `MegaContext::on_new_tx` skips intrinsic accounting, validation skips initial
+  compute-gas accounting, and the stock revm instruction table has no additional-limit opcode
+  recorders.
+  Consequently every dimension remains zero and `check_limit()` is always `WithinLimit`; a
+  block-environment opcode may mark the volatile tracker, but the sole consumer of the newly
+  captured snapshot is unreachable and the mapped execution result is unchanged.
 - `spec_gate:crates/mega-evm/src/evm/execution.rs:1412:REX4:true` — `frame_return_result`'s
   `enable_access_if_returning`. It is a no-op unless `VolatileDataAccessTracker::disable_depth` is
   `Some`. The only production writer is `disable_access`, called from `AccessControlInterceptor`,
