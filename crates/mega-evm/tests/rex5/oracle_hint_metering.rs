@@ -175,6 +175,19 @@ fn test_rex4_zero_gas_send_hint_still_forwards() {
     assert_eq!(hints.len(), 1, "REX4 must keep the pre-REX5 unmetered, zero-gas-accepting path",);
 }
 
+#[test]
+fn test_rex4_intrinsic_overflow_blocks_hint_before_interceptor_dispatch() {
+    let calldata =
+        sendHintCall { topic: TOPIC, data: Bytes::from_static(b"blocked") }.abi_encode().into();
+    let (result, hints, _) = run_direct_oracle_tx(MegaSpecId::REX4, calldata, 0);
+
+    assert!(!result.is_success(), "the intrinsic data-size overflow must halt the transaction");
+    assert!(
+        hints.is_empty(),
+        "REX4 must surface the pending intrinsic overflow before the hint interceptor runs",
+    );
+}
+
 /// REX4 replay parity: a normal sendHint with a large payload under REX4 must NOT
 /// be charged against `data_size_used`. This pins the pre-REX5 unmetered invariant —
 /// if hint metering accidentally activated on stable specs, the data-size lane
