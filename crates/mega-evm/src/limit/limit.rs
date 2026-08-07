@@ -1110,6 +1110,21 @@ mod tests {
         assert_eq!(latched_kind(&limit), Some(LimitKind::DataSize));
     }
 
+    #[test]
+    fn test_rex5_authority_creation_latches_state_growth_exceed() {
+        let mut limits = test_limits();
+        limits.tx_state_growth_limit = 1;
+        let mut limit = AdditionalLimit::new(MegaSpecId::REX5, limits);
+
+        limit.on_rex5_eip7702_authority_creations(2);
+
+        assert_eq!(
+            latched_kind(&limit),
+            Some(LimitKind::StateGrowth),
+            "authority creation accounting must latch its TX-level state-growth exceed",
+        );
+    }
+
     /// SELFDESTRUCT's beneficiary usage is recorded *before* the inner instruction runs and
     /// must NOT latch at the recording site: the inner instruction can still fail (out of
     /// gas, DB error), in which case the frame pops the discardable usage and a latch taken

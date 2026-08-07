@@ -1679,3 +1679,141 @@ fn gen_oog_frame_result(tx_kind: TxKind, gas_limit: u64) -> FrameResult {
         )),
     }
 }
+
+#[cfg(test)]
+mod mutation_tests {
+    use super::*;
+    use crate::{
+        test_utils::MemoryDatabase, AdditionalLimit, EmptyExternalEnv, EvmTxRuntimeLimits,
+        LimitCheck, LimitKind,
+    };
+    use alloy_primitives::Address;
+    use revm::{
+        context::ContextTr,
+        inspector::InspectorEvmTr,
+        interpreter::{
+            interpreter::SharedMemory, interpreter_action::FrameInit, CallInput, CallInputs,
+            CallScheme, CallValue, InterpreterTypes,
+        },
+        primitives::CALL_STACK_LIMIT,
+        Inspector,
+    };
+    use std::{cell::RefCell, rc::Rc};
+
+    const TEST_GAS_LIMIT: u64 = 100_000;
+
+    fn call_frame_init(depth: usize) -> FrameInit {
+        FrameInit {
+            depth,
+            memory: SharedMemory::new(),
+            frame_input: FrameInput::Call(Box::new(CallInputs {
+                input: CallInput::Bytes(Bytes::new()),
+                return_memory_offset: 0..0,
+                gas_limit: TEST_GAS_LIMIT,
+                bytecode_address: Address::ZERO,
+                target_address: Address::ZERO,
+                caller: Address::ZERO,
+                value: CallValue::Transfer(U256::ZERO),
+                scheme: CallScheme::Call,
+                is_static: false,
+                reservoir: 0,
+                known_bytecode: Default::default(),
+                charged_new_account_state_gas: false,
+            })),
+        }
+    }
+
+    fn context_with_latched_limit() -> MegaContext<MemoryDatabase, EmptyExternalEnv> {
+        let mut context = MegaContext::new(MemoryDatabase::default(), MegaSpecId::REX5);
+        let mut additional =
+            AdditionalLimit::new(MegaSpecId::REX5, EvmTxRuntimeLimits::from_spec(MegaSpecId::REX5));
+        additional.set_has_exceeded_limit_for_test(LimitCheck::ExceedsLimit {
+            kind: LimitKind::KVUpdate,
+            limit: 0,
+            used: 1,
+            frame_local: false,
+        });
+        context.additional_limit = Rc::new(RefCell::new(additional));
+        context
+    }
+
+    fn consume_synthetic_limit_frame<DB: Database, ExtEnvs: ExternalEnvTypes>(
+        context: &MegaContext<DB, ExtEnvs>,
+        mut result: FrameResult,
+    ) {
+        context
+            .additional_limit
+            .borrow_mut()
+            .before_frame_return_result::<false>(&mut result);
+    }
+
+    #[test]
+    fn test_frame_init_limit_short_circuit_pushes_limit_frame() {
+        let mut evm = MegaEvm::new(context_with_latched_limit());
+        let ItemOrResult::Result(result) = EvmTr::frame_init(&mut evm, call_frame_init(1)).unwrap()
+        else {
+            panic!("latched limit must return a synthetic result");
+        };
+        consume_synthetic_limit_frame(evm.ctx_ref(), result);
+    }
+
+    #[test]
+    fn test_frame_init_depth_short_circuit_pushes_limit_frame() {
+        let mut evm = MegaEvm::new(MegaContext::new(MemoryDatabase::default(), MegaSpecId::REX5));
+        let ItemOrResult::Result(result) = EvmTr::frame_init(
+            &mut evm,
+            call_frame_init(CALL_STACK_LIMIT as usize + 1),
+        )
+        .unwrap()
+        else {
+            panic!("depth guard must return a synthetic result");
+        };
+        consume_synthetic_limit_frame(evm.ctx_ref(), result);
+    }
+
+    #[derive(Default)]
+    struct StopInspector;
+
+    impl<CTX: ContextTr, INTR: InterpreterTypes> Inspector<CTX, INTR> for StopInspector {
+        fn call(&mut self, _context: &mut CTX, inputs: &mut CallInputs) -> Option<CallOutcome> {
+            Some(CallOutcome::new(
+                InterpreterResult::new(
+                    InstructionResult::Stop,
+                    Bytes::new(),
+                    Gas::new(inputs.gas_limit),
+                ),
+                inputs.return_memory_offset.clone(),
+            ))
+        }
+    }
+
+    #[test]
+    fn test_inspect_frame_init_limit_short_circuit_pushes_limit_frame() {
+        let mut evm =
+            MegaEvm::new(context_with_latched_limit()).with_inspector(StopInspector);
+        let ItemOrResult::Result(result) =
+            InspectorEvmTr::inspect_frame_init(&mut evm, call_frame_init(1)).unwrap()
+        else {
+            panic!("latched limit must override the inspector result");
+        };
+        consume_synthetic_limit_frame(evm.ctx_ref(), result);
+    }
+
+    #[test]
+    fn test_inspect_frame_init_depth_short_circuit_pushes_limit_frame() {
+        let mut evm = MegaEvm::new(MegaContext::new(
+            MemoryDatabase::default(),
+            MegaSpecId::REX5,
+        ))
+        .with_inspector(StopInspector);
+        let ItemOrResult::Result(result) = InspectorEvmTr::inspect_frame_init(
+            &mut evm,
+            call_frame_init(CALL_STACK_LIMIT as usize + 1),
+        )
+        .unwrap()
+        else {
+            panic!("depth guard must override the inspector result");
+        };
+        consume_synthetic_limit_frame(evm.ctx_ref(), result);
+    }
+}
