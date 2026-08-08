@@ -385,16 +385,18 @@ mod tests {
     use alloc as std;
     use std::{rc::Rc, vec::Vec};
 
-    use super::{kzg_point_evaluation::GAS_COST, mini_rex, rex, MegaPrecompiles};
+    use super::{kzg_point_evaluation::GAS_COST, mini_rex, modexp, rex, MegaPrecompiles};
     use crate::{
         test_utils::MemoryDatabase, AdditionalLimit, EvmTxRuntimeLimits, MegaContext, MegaSpecId,
     };
     use alloy_evm::precompiles::PrecompilesMap;
-    use alloy_primitives::{Address, Bytes};
+    use alloy_primitives::{Address, Bytes, U256};
     use core::cell::RefCell;
     use revm::{
         handler::PrecompileProvider,
         interpreter::{CallInputs, CallScheme, CallValue, InputsImpl, InstructionResult},
+        precompile::{PrecompileHalt, PrecompileOutput, PrecompileStatus},
+        primitives::eip7823,
     };
     use sha2::{Digest, Sha256};
 
@@ -1064,6 +1066,184 @@ mod tests {
             assert!(
                 !PrecompileProvider::<Ctx<'_>>::contains(&precompiles_map, &NON_PRECOMPILE),
                 "{spec:?}: 0xff must not be reported as a precompile",
+            );
+        }
+    }
+
+    // ── frozen legacy Osaka ModExp: check order and boundaries ──────────────────────
+    //
+    // The wrapper's contract is an exact check order — minimum-gas, header parse, EIP-7823
+    // input-size limits, then the zero-base/zero-modulus flat charge — and every step's
+    // boundary is consensus-visible. The probes below drive the wired precompile directly, so
+    // each boundary is pinned by its own sub-millisecond case rather than only through a
+    // transaction.
+
+    /// The EIP-7823 input-size limit, shared by the wrapper and the upstream implementation.
+    const MODEXP_SIZE_LIMIT: u64 = eip7823::INPUT_SIZE_LIMIT as u64;
+
+    /// A gas limit above every charge the probes below can incur.
+    const MODEXP_AMPLE_GAS: u64 = 1_000_000;
+
+    /// Builds `ModExp` calldata carrying only the 96-byte header (the three big-endian
+    /// lengths). The base, exponent and modulus bodies are absent, so the implementation
+    /// right-pads them with zero bytes.
+    fn modexp_header(base_len: u64, exp_len: u64, mod_len: u64) -> Vec<u8> {
+        let mut input = Vec::with_capacity(96);
+        for len in [base_len, exp_len, mod_len] {
+            input.extend_from_slice(&U256::from(len).to_be_bytes::<32>());
+        }
+        input
+    }
+
+    /// Runs the frozen legacy Osaka `ModExp` on a header-only input.
+    fn run_modexp(base_len: u64, exp_len: u64, mod_len: u64, gas_limit: u64) -> PrecompileOutput {
+        modexp::OSAKA_LEGACY
+            .execute(&modexp_header(base_len, exp_len, mod_len), gas_limit, 0)
+            .expect("the legacy ModExp wrapper reports failures as halts, never as an error")
+    }
+
+    /// The upstream EIP-7883 formula charge for the given lengths with a zero exponent head.
+    fn modexp_formula_gas(base_len: u64, exp_len: u64, mod_len: u64) -> u64 {
+        revm::precompile::modexp::osaka_gas_calc(base_len, exp_len, mod_len, &U256::ZERO)
+    }
+
+    /// A gas limit below the Osaka minimum halts before anything else is inspected.
+    #[test]
+    fn test_modexp_gas_limit_below_min_gas_halts() {
+        let output = run_modexp(0, 64, 0, modexp::MIN_GAS - 1);
+        assert_eq!(
+            output.status,
+            PrecompileStatus::Halt(PrecompileHalt::OutOfGas),
+            "a gas limit one below MIN_GAS must halt out of gas",
+        );
+    }
+
+    /// The minimum-gas check is exclusive at its boundary: a gas limit of exactly `MIN_GAS`
+    /// funds the call, and the zero-base/zero-modulus short-circuit charges all of it.
+    #[test]
+    fn test_modexp_gas_limit_exactly_min_gas_is_funded() {
+        let output = run_modexp(0, 64, 0, modexp::MIN_GAS);
+        assert_eq!(
+            output.status,
+            PrecompileStatus::Success,
+            "a gas limit of exactly MIN_GAS must fund the call",
+        );
+        assert_eq!(output.gas_used, modexp::MIN_GAS);
+        assert!(output.bytes.is_empty(), "a zero-length modulus returns no output");
+    }
+
+    /// Zero base and zero modulus lengths are charged the flat minimum, not the EIP-7883
+    /// formula cost — the historical behavior every spec is pinned to.
+    #[test]
+    fn test_modexp_zero_base_and_mod_charge_flat_min_gas() {
+        let output = run_modexp(0, 64, 0, MODEXP_AMPLE_GAS);
+        assert_eq!(output.status, PrecompileStatus::Success);
+        assert_eq!(output.gas_used, modexp::MIN_GAS, "the short-circuit charge must be flat");
+        assert!(output.bytes.is_empty());
+        assert!(
+            modexp_formula_gas(0, 64, 0) > modexp::MIN_GAS,
+            "the formula charge must exceed the flat one, or this probe proves nothing",
+        );
+    }
+
+    /// The flat charge needs *both* lengths to be zero. A zero base with a non-zero modulus
+    /// takes the formula path, which returns a modulus-sized output instead of no output.
+    #[test]
+    fn test_modexp_short_circuit_needs_both_base_and_mod_zero() {
+        let output = run_modexp(0, 1, 32, MODEXP_AMPLE_GAS);
+        assert_eq!(output.status, PrecompileStatus::Success);
+        assert_eq!(
+            output.bytes.len(),
+            32,
+            "a non-zero modulus length must produce a modulus-sized output, not the flat \
+             short-circuit's empty one",
+        );
+    }
+
+    /// The EIP-7823 base-length limit is inclusive: a length of exactly the limit is accepted
+    /// and priced by the formula.
+    #[test]
+    fn test_modexp_base_len_at_size_limit_is_accepted() {
+        let output = run_modexp(MODEXP_SIZE_LIMIT, 0, 0, MODEXP_AMPLE_GAS);
+        assert_eq!(
+            output.status,
+            PrecompileStatus::Success,
+            "a base length of exactly the EIP-7823 limit must be accepted",
+        );
+        let formula_gas = modexp_formula_gas(MODEXP_SIZE_LIMIT, 0, 0);
+        assert_eq!(output.gas_used, formula_gas);
+        assert!(
+            formula_gas > modexp::MIN_GAS,
+            "a limit-sized base must price above the flat charge",
+        );
+    }
+
+    /// The EIP-7823 modulus-length limit is inclusive, and the accepted call is priced by the
+    /// formula rather than the flat charge.
+    #[test]
+    fn test_modexp_mod_len_at_size_limit_is_accepted() {
+        let output = run_modexp(0, 0, MODEXP_SIZE_LIMIT, MODEXP_AMPLE_GAS);
+        assert_eq!(
+            output.status,
+            PrecompileStatus::Success,
+            "a modulus length of exactly the EIP-7823 limit must be accepted",
+        );
+        let formula_gas = modexp_formula_gas(0, 0, MODEXP_SIZE_LIMIT);
+        assert_eq!(output.gas_used, formula_gas);
+        assert!(formula_gas > modexp::MIN_GAS);
+        assert_eq!(
+            output.bytes.len(),
+            MODEXP_SIZE_LIMIT as usize,
+            "the output is padded to the modulus length",
+        );
+    }
+
+    /// The EIP-7823 exponent-length limit is inclusive: at exactly the limit the call is
+    /// accepted and reaches the zero-base/zero-modulus short-circuit.
+    #[test]
+    fn test_modexp_exp_len_at_size_limit_is_accepted() {
+        let output = run_modexp(0, MODEXP_SIZE_LIMIT, 0, MODEXP_AMPLE_GAS);
+        assert_eq!(
+            output.status,
+            PrecompileStatus::Success,
+            "an exponent length of exactly the EIP-7823 limit must be accepted",
+        );
+        assert_eq!(output.gas_used, modexp::MIN_GAS);
+    }
+
+    /// Ordinary short lengths sit below every EIP-7823 limit and are accepted.
+    #[test]
+    fn test_modexp_small_lengths_are_accepted() {
+        let output = run_modexp(1, 1, 1, MODEXP_AMPLE_GAS);
+        assert_eq!(
+            output.status,
+            PrecompileStatus::Success,
+            "single-byte base, exponent and modulus must be accepted",
+        );
+        assert_eq!(output.bytes.len(), 1);
+    }
+
+    /// The size limits are checked *before* the flat-charge short-circuit: an oversized
+    /// exponent length halts even though base and modulus lengths are zero.
+    #[test]
+    fn test_modexp_oversized_exp_len_halts_before_short_circuit() {
+        let output = run_modexp(0, MODEXP_SIZE_LIMIT + 1, 0, MODEXP_AMPLE_GAS);
+        assert_eq!(
+            output.status,
+            PrecompileStatus::Halt(PrecompileHalt::ModexpEip7823LimitSize),
+            "an exponent length above the limit must halt, not take the short-circuit",
+        );
+    }
+
+    /// Base and modulus lengths above the limit are rejected the same way.
+    #[test]
+    fn test_modexp_oversized_base_or_mod_len_halts() {
+        for (base_len, mod_len) in [(MODEXP_SIZE_LIMIT + 1, 0), (0, MODEXP_SIZE_LIMIT + 1)] {
+            let output = run_modexp(base_len, 0, mod_len, MODEXP_AMPLE_GAS);
+            assert_eq!(
+                output.status,
+                PrecompileStatus::Halt(PrecompileHalt::ModexpEip7823LimitSize),
+                "base_len={base_len}, mod_len={mod_len} exceeds the EIP-7823 limit",
             );
         }
     }

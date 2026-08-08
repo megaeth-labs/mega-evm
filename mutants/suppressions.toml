@@ -317,6 +317,33 @@ mutant = "crates/mega-evm/src/limit/state_growth.rs:169:1: spec-gate if self.spe
 justification = "Equivalent: current_call_remaining is only read by the REX5+ KeylessDeploy sandbox (sandbox/execution.rs:1037). The REX4->REX5 shift differs only at exactly REX4, where the function is never called — no observable change."
 reviewer = "improve-mutation-score (William Aaron Cheung)"
 
+# --- precompiles.rs:135 legacy Osaka ModExp size check, first `||` (equivalent) ---
+#
+# `if base_len > L || mod_len > L || exp_len > L { return halt(ModexpEip7823LimitSize) }`, with
+# L = `eip7823::INPUT_SIZE_LIMIT`. Turning the FIRST `||` (line 135) into `&&` weakens the guard
+# to `(base_len > L && mod_len > L) || exp_len > L`, so it stops halting only when exactly one of
+# `base_len` / `mod_len` exceeds L while `exp_len` does not. Every such input yields the identical
+# value:
+#   * the zero-base/zero-modulus short-circuit below cannot intervene — it requires
+#     `base_len == 0 && mod_len == 0`, and the length that exceeds L is non-zero;
+#   * so control reaches `precompile::modexp::osaka_run`, whose own EIP-7823 check is
+#     `base_len > L || mod_len > L || exp_len > L` over lengths parsed from the same input (its
+#     minimum-gas check already passed at line 122), returning `Err(ModexpEip7823LimitSize)`;
+#   * the wrapper maps that to `PrecompileOutput::halt(ModexpEip7823LimitSize, reservoir)` — the
+#     same status, zero `gas_used`, empty output and same reservoir the unmutated line returns.
+# The full mega-evm suite is green with the mutant applied. The SECOND `||` (line 136) is NOT
+# equivalent: weakening it lets an over-limit `exp_len` fall through to the short-circuit and be
+# charged the flat minimum, which `test_modexp_oversized_exp_len_halts_before_short_circuit`
+# rejects. The two mutants share identical mutation text, so this entry uses the full
+# `file:line:col:` form to suppress only the line-135 one.
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "crates/mega-evm/src/evm/precompiles.rs"
+mutant = "crates/mega-evm/src/evm/precompiles.rs:135:49: replace || with && in modexp::run_osaka_legacy"
+justification = "Equivalent: weakening the first || only skips the early halt when exactly one of base_len/mod_len exceeds the EIP-7823 limit while exp_len does not. The zero-base/zero-modulus short-circuit cannot fire there (the offending length is non-zero), so control reaches upstream osaka_run, whose identical EIP-7823 check returns Err(ModexpEip7823LimitSize); the wrapper maps it to the same PrecompileOutput::halt(ModexpEip7823LimitSize, reservoir) the unmutated line returns. Full suite green with the mutant applied."
+reviewer = "RealiCZ (cz)"
+
 # --- host.rs:oracle_sload debug_assert MINI_REX→EQUIVALENCE (equivalent) ---------
 #
 # The mutated conjunct lives in the `debug_assert!` at the top of `oracle_sload`
