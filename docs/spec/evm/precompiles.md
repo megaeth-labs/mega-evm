@@ -16,6 +16,7 @@ The overrides on this page exist to reduce that denial-of-service risk by bringi
 
 ## Specification
 
+The overrides on this page begin at MiniRex; under Equivalence a node runs the inherited precompile table unmodified.
 A node MUST inherit the standard precompile set from the Optimism Isthmus / Ethereum Prague baseline except for the following MegaETH-specific overrides.
 A node MUST preserve these MegaETH-specific overrides whenever it refreshes or reselects its internal precompile table.
 If multiple MegaETH specs share the same inherited upstream baseline, an implementation MUST NOT reconstruct the MegaETH precompile table from the upstream baseline identifier alone.
