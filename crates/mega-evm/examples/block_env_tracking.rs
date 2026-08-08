@@ -8,9 +8,6 @@
 //! 3. Contract 3: Does NOT use block environment (CALLER opcode)
 
 use alloy_primitives::{address, Bytes, U256};
-// Imported as the struct itself (not the `MegaTransaction` type alias) so the
-// tuple-struct constructor is usable — constructors cannot be called through a
-// type alias.
 use mega_evm::{MegaContext, MegaEvm, MegaSpecId, MegaTransaction, VolatileDataAccess};
 use revm::{
     bytecode::opcode::{BASEFEE, CALLER, NUMBER, POP, STOP, TIMESTAMP},

@@ -51,9 +51,6 @@ use std::{
 
 use alloy_primitives::{hex, Address, Bytes, B256, U256};
 use criterion::{black_box, criterion_group, criterion_main, BatchSize, Criterion};
-// Imported as the struct itself (not the `MegaTransaction` type alias) so the
-// tuple-struct constructor is usable — constructors cannot be called through a
-// type alias.
 use mega_evm::{
     test_utils::MemoryDatabase, EmptyExternalEnv, MegaContext, MegaEvm, MegaSpecId, MegaTransaction,
 };
