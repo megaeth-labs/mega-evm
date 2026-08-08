@@ -31,17 +31,16 @@
 //! Each scenario is paired with a REX5 baseline that freeze-guards the pre-REX6 behavior.
 //! Pre-REX6 dispatch tables are unchanged.
 
-use mega_evm::MegaTransaction;
 use std::convert::Infallible;
 
 use alloy_primitives::{address, Address, Bytes, B256, U256};
 use alloy_sol_types::{SolCall, SolError};
 use mega_evm::{
     alloy_op_evm::OpTxError,
-    op_revm::OpTransaction,
     test_utils::{BytecodeBuilder, ErrorInjectingDatabase, MemoryDatabase},
     EvmTxRuntimeLimits, IMegaAccessControl, LimitUsage, MegaContext, MegaEvm, MegaHaltReason,
-    MegaSpecId, VolatileDataAccessType, ACCESS_CONTROL_ADDRESS,
+    MegaSpecId, MegaTransaction, MegaTransactionNew as _, VolatileDataAccessType,
+    ACCESS_CONTROL_ADDRESS,
 };
 use revm::{
     bytecode::opcode::*,
@@ -119,7 +118,7 @@ fn transact_with_beneficiary(
         chain.operator_fee_constant = Some(U256::from(0));
     });
     let mut evm = MegaEvm::new(context);
-    let mut tx = MegaTransaction(OpTransaction::new(tx));
+    let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
     let result = alloy_evm::Evm::transact_raw(&mut evm, tx)?;
     let usage = evm.ctx_ref().additional_limit.borrow().get_usage();
@@ -785,7 +784,7 @@ fn test_rex6_selfdestruct_db_error_on_target_surfaces() {
     });
     let mut evm = MegaEvm::new(context);
     let tx = TxEnvBuilder::default().caller(CALLER).call(MIDDLE).gas_limit(1_000_000).build_fill();
-    let mut tx = MegaTransaction(OpTransaction::new(tx));
+    let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
 
     let surfaced = match alloy_evm::Evm::transact_raw(&mut evm, tx) {
@@ -921,7 +920,7 @@ fn test_rex6_call_db_error_on_target_surfaces() {
     let mut evm = MegaEvm::new(context);
     let tx =
         TxEnvBuilder::default().caller(CALLER).call(MIDDLE).gas_limit(100_000_000).build_fill();
-    let mut tx = MegaTransaction(OpTransaction::new(tx));
+    let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
 
     let surfaced = match alloy_evm::Evm::transact_raw(&mut evm, tx) {
@@ -987,7 +986,7 @@ fn test_call_partial_stack_db_error_on_target_surfaces_rex5_eq_rex6() {
         let mut evm = MegaEvm::new(context);
         let tx =
             TxEnvBuilder::default().caller(CALLER).call(MIDDLE).gas_limit(100_000_000).build_fill();
-        let mut tx = MegaTransaction(OpTransaction::new(tx));
+        let mut tx = MegaTransaction::new(tx);
         tx.enveloped_tx = Some(Bytes::new());
         match alloy_evm::Evm::transact_raw(&mut evm, tx) {
             Err(_) => true,
@@ -1038,7 +1037,7 @@ fn test_rex6_call_partial_stack_code_load_failure_keeps_stack_underflow() {
     let mut evm = MegaEvm::new(context);
     let tx =
         TxEnvBuilder::default().caller(CALLER).call(MIDDLE).gas_limit(100_000_000).build_fill();
-    let mut tx = MegaTransaction(OpTransaction::new(tx));
+    let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
 
     match alloy_evm::Evm::transact_raw(&mut evm, tx) {

@@ -13,10 +13,10 @@
 use alloy_primitives::{address, Address, Bytes, B256, U256};
 use alloy_sol_types::{sol, SolCall};
 use mega_evm::{
-    op_revm::OpTransaction,
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    IMegaAccessControl, MegaContext, MegaEvm, MegaSpecId, MegaTransaction, RecordedHint,
-    TestExternalEnvs, ACCESS_CONTROL_ADDRESS, ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE_REX5,
+    IMegaAccessControl, MegaContext, MegaEvm, MegaSpecId, MegaTransaction, MegaTransactionNew as _,
+    RecordedHint, TestExternalEnvs, ACCESS_CONTROL_ADDRESS, ORACLE_CONTRACT_ADDRESS,
+    ORACLE_CONTRACT_CODE_REX5,
 };
 use revm::{
     bytecode::opcode::*,
@@ -117,7 +117,7 @@ fn run_with_oracle(
     let tx =
         TxEnvBuilder::default().caller(CALLER).call(PARENT).gas_limit(100_000_000).build_fill();
     let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);
-    let mut tx = MegaTransaction(OpTransaction::new(tx));
+    let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
     let envelope = alloy_evm::Evm::transact_raw(&mut evm, tx).expect("transact ok");
     (envelope.result, external_envs.recorded_hints())
@@ -148,7 +148,7 @@ fn run_with_oracle_and_data_size_limit(
     let tx =
         TxEnvBuilder::default().caller(CALLER).call(PARENT).gas_limit(100_000_000).build_fill();
     let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);
-    let mut tx = MegaTransaction(OpTransaction::new(tx));
+    let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
     let envelope = alloy_evm::Evm::transact_raw(&mut evm, tx).expect("transact ok");
     (envelope.result, external_envs.recorded_hints())

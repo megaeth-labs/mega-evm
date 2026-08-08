@@ -2,8 +2,8 @@
 
 use alloy_primitives::{address, Address, Bytes, U256};
 use mega_evm::{
-    op_revm::OpTransaction, test_utils::MemoryDatabase, EvmTxRuntimeLimits, MegaContext, MegaEvm,
-    MegaHaltReason, MegaSpecId, MegaTransaction,
+    test_utils::MemoryDatabase, EvmTxRuntimeLimits, MegaContext, MegaEvm, MegaHaltReason,
+    MegaSpecId, MegaTransaction, MegaTransactionNew as _,
 };
 use revm::{
     context::{result::ExecutionResult, tx::TxEnvBuilder},
@@ -48,7 +48,7 @@ pub(crate) fn transact(
     });
     let tx =
         TxEnvBuilder::default().caller(CALLER).call(CONTRACT).gas_limit(100_000_000).build_fill();
-    let mut tx = MegaTransaction(OpTransaction::new(tx));
+    let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
     let mut evm = MegaEvm::new(context);
     let result =

@@ -21,9 +21,8 @@
 use alloy_eips::eip2930::{AccessList, AccessListItem};
 use alloy_primitives::{address, Address, Bytes, B256, U256};
 use mega_evm::{
-    op_revm::OpTransaction,
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    MegaContext, MegaEvm, MegaSpecId, MegaTransaction,
+    MegaContext, MegaEvm, MegaSpecId, MegaTransaction, MegaTransactionNew as _,
 };
 use revm::{
     bytecode::opcode::*,
@@ -129,7 +128,7 @@ impl Listing {
 // ============================================================================
 
 fn wrap(tx: TxEnv) -> MegaTransaction {
-    let mut tx = MegaTransaction(OpTransaction::new(tx));
+    let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
     tx
 }

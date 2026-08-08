@@ -12,10 +12,9 @@
 
 use alloy_primitives::{address, Address, Bytes, U256};
 use mega_evm::{
-    op_revm::OpTransaction,
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    EmptyExternalEnv, MegaContext, MegaEvm, MegaSpecId, MegaTransaction, MEGA_SYSTEM_ADDRESS,
-    ORACLE_CONTRACT_ADDRESS,
+    EmptyExternalEnv, MegaContext, MegaEvm, MegaSpecId, MegaTransaction, MegaTransactionNew as _,
+    MEGA_SYSTEM_ADDRESS, ORACLE_CONTRACT_ADDRESS,
 };
 use revm::{
     bytecode::opcode::*,
@@ -55,14 +54,14 @@ fn build_evm<DB: revm::Database + core::fmt::Debug>(
     MegaEvm::new(context)
 }
 
-fn system_address_tx(callee: Address, gas_price: u128) -> mega_evm::MegaTransaction {
-    let mut tx = MegaTransaction(OpTransaction::new(TxEnv {
+fn system_address_tx(callee: Address, gas_price: u128) -> MegaTransaction {
+    let mut tx = MegaTransaction::new(TxEnv {
         caller: MEGA_SYSTEM_ADDRESS,
         kind: TxKind::Call(callee),
         gas_limit: GAS_LIMIT,
         gas_price,
         ..Default::default()
-    }));
+    });
     tx.enveloped_tx = Some(Bytes::new());
     tx
 }
@@ -153,14 +152,14 @@ fn test_equivalence_leaves_additional_limit_dormant() {
         .account_code(INNER, inner_code);
     let mut evm = build_evm(db);
 
-    let mut tx = MegaTransaction(OpTransaction::new(TxEnv {
+    let mut tx = MegaTransaction::new(TxEnv {
         caller: EOA_CALLER,
         kind: TxKind::Call(CALLEE),
         gas_limit: 10_000_000,
         gas_price: 0,
         data: Bytes::from(vec![0xAAu8; 64]),
         ..Default::default()
-    }));
+    });
     tx.enveloped_tx = Some(Bytes::new());
 
     let result = alloy_evm::Evm::transact_raw(&mut evm, tx).expect("tx must execute");

@@ -20,7 +20,8 @@ use mega_evm::{
         primitives::{hardfork::SpecId, Bytes, B256},
         ExecuteCommitEvm,
     },
-    AHashBucketHasher, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransactionError,
+    AHashBucketHasher, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
+    MegaTransactionError, MegaTransactionNew as _,
 };
 use serde_json::json;
 use std::{
@@ -616,7 +617,7 @@ fn execute_single_test<'a>(ctx: TestExecutionContext<'a>) -> Result<(), TestErro
         .with_cfg(ctx.cfg.clone())
         .with_block(ctx.block.clone())
         .with_external_envs(external_envs_for(ctx.unit)?.into());
-    let mut tx = mega_evm::new_mega_transaction(ctx.tx.clone());
+    let mut tx = MegaTransaction::new(ctx.tx.clone());
     tx.enveloped_tx = Some(Bytes::default());
 
     // Execute
@@ -710,7 +711,7 @@ fn run_unit_once(
         .with_cfg(cfg.clone())
         .with_block(block)
         .with_external_envs(external_envs_for(unit)?.into());
-    let mut megatx = mega_evm::new_mega_transaction(tx);
+    let mut megatx = MegaTransaction::new(tx);
     megatx.enveloped_tx = Some(Bytes::default());
 
     let mut evm = MegaEvm::new(evm_context);
@@ -1016,7 +1017,7 @@ fn debug_failed_test<'a>(ctx: DebugContext<'a>) {
         .with_cfg(ctx.cfg.clone())
         .with_block(ctx.block.clone())
         .with_external_envs(external_envs.into());
-    let mut tx = mega_evm::new_mega_transaction(ctx.tx.clone());
+    let mut tx = MegaTransaction::new(ctx.tx.clone());
     tx.enveloped_tx = Some(Bytes::default());
     let mut evm = MegaEvm::new(evm_context)
         .with_inspector(TracerEip3155::buffered(stderr()).without_summary());

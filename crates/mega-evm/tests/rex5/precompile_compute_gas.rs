@@ -24,10 +24,9 @@ use alloy_primitives::{address, Address, Bytes, B256, U256};
 use core::cell::RefCell;
 use mega_evm::{
     kzg_point_evaluation,
-    op_revm::OpTransaction,
     test_utils::{BytecodeBuilder, MemoryDatabase},
     AdditionalLimit, EvmTxRuntimeLimits, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
-    MegaTransaction,
+    MegaTransaction, MegaTransactionNew as _,
 };
 use revm::{
     bytecode::opcode::*,
@@ -91,7 +90,7 @@ fn transact_with_compute_limit(
         context.additional_limit = Rc::new(RefCell::new(AdditionalLimit::new(spec, tx_limits)));
     }
     let mut evm = MegaEvm::new(context);
-    let mut tx = MegaTransaction(OpTransaction::new(tx));
+    let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
     let r = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
     let compute_gas = evm.ctx_ref().additional_limit.borrow().get_usage().compute_gas;

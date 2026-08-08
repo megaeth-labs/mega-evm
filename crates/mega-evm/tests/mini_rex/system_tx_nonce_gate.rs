@@ -10,10 +10,9 @@
 
 use alloy_primitives::{Bytes, U256};
 use mega_evm::{
-    op_revm::OpTransaction,
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    EmptyExternalEnv, MegaContext, MegaEvm, MegaSpecId, MegaTransaction, MEGA_SYSTEM_ADDRESS,
-    ORACLE_CONTRACT_ADDRESS,
+    EmptyExternalEnv, MegaContext, MegaEvm, MegaSpecId, MegaTransaction, MegaTransactionNew as _,
+    MEGA_SYSTEM_ADDRESS, ORACLE_CONTRACT_ADDRESS,
 };
 use revm::{
     context::{BlockEnv, TxEnv},
@@ -42,15 +41,15 @@ fn build_evm(
 }
 
 /// A legacy system transaction with a stale nonce, targeting the whitelisted oracle contract.
-fn stale_nonce_system_tx() -> mega_evm::MegaTransaction {
-    let mut tx = MegaTransaction(OpTransaction::new(TxEnv {
+fn stale_nonce_system_tx() -> MegaTransaction {
+    let mut tx = MegaTransaction::new(TxEnv {
         caller: MEGA_SYSTEM_ADDRESS,
         kind: TxKind::Call(ORACLE_CONTRACT_ADDRESS),
         gas_limit: 1_000_000,
         gas_price: 0,
         nonce: 0,
         ..Default::default()
-    }));
+    });
     tx.enveloped_tx = Some(Bytes::new());
     tx
 }

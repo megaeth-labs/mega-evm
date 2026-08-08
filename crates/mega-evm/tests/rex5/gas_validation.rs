@@ -12,13 +12,13 @@
 //! the legacy stable-spec test so the gating is exercised in two pre-REX5 specs
 //! that follow different code paths into Mega-step-D.
 
-use mega_evm::MegaTransaction;
 use std::convert::Infallible;
 
 use alloy_primitives::{address, Bytes, TxKind, U256};
 use mega_evm::{
-    alloy_op_evm::OpTxError, op_revm::OpTransaction, test_utils::MemoryDatabase, EVMError,
-    MegaContext, MegaEvm, MegaSpecId, SaltEnv, TestExternalEnvs, MIN_BUCKET_SIZE,
+    alloy_op_evm::OpTxError, test_utils::MemoryDatabase, EVMError, MegaContext, MegaEvm,
+    MegaSpecId, MegaTransaction, MegaTransactionNew as _, SaltEnv, TestExternalEnvs,
+    MIN_BUCKET_SIZE,
 };
 use revm::{
     context::{result::ResultAndState, TxEnv},
@@ -51,7 +51,7 @@ fn run_tx(
     tx: TxEnv,
 ) -> Result<ResultAndState<mega_evm::MegaHaltReason>, EVMError<Infallible, OpTxError>> {
     let mut evm = build_evm(db, spec, external_envs);
-    let mut tx = MegaTransaction(OpTransaction::new(tx));
+    let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
     alloy_evm::Evm::transact_raw(&mut evm, tx)
 }

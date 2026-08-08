@@ -2,7 +2,6 @@
 
 use alloy_primitives::{address, Address, Bytes, U256};
 use mega_evm::{
-    op_revm::OpTransaction,
     revm::{
         bytecode::opcode::{DUPN, PUSH0, SELFDESTRUCT},
         context::{
@@ -12,7 +11,7 @@ use mega_evm::{
         },
     },
     test_utils::{transact, MemoryDatabase},
-    MegaTransaction, *,
+    MegaTransaction, MegaTransactionNew as _, *,
 };
 
 /// Specs that disable `SELFDESTRUCT`, dispatching it to `control::invalid`.
@@ -50,7 +49,7 @@ fn transact_with_gas_limit(
     let mut evm = MegaEvm::new(context);
     let tx: TxEnv =
         TxEnvBuilder::default().caller(CALLER).call(CONTRACT).gas_limit(gas_limit).build_fill();
-    let mut tx = MegaTransaction(OpTransaction::new(tx));
+    let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
     alloy_evm::Evm::transact_raw(&mut evm, tx).expect("tx should not error")
 }

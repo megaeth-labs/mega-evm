@@ -8,10 +8,10 @@
 use alloy_primitives::{address, Address, Bytes, U256};
 use alloy_sol_types::{SolCall, SolError};
 use mega_evm::{
-    op_revm::OpTransaction,
     test_utils::{BytecodeBuilder, MemoryDatabase},
     EvmTxRuntimeLimits, IMegaAccessControl, LimitUsage, MegaContext, MegaEvm, MegaHaltReason,
-    MegaSpecId, MegaTransaction, VolatileDataAccessType, ACCESS_CONTROL_ADDRESS,
+    MegaSpecId, MegaTransaction, MegaTransactionNew as _, VolatileDataAccessType,
+    ACCESS_CONTROL_ADDRESS,
 };
 use revm::{
     bytecode::opcode::*,
@@ -56,7 +56,7 @@ fn transact(
         chain.operator_fee_constant = Some(U256::from(0));
     });
     let mut evm = MegaEvm::new(context);
-    let mut tx = MegaTransaction(OpTransaction::new(tx));
+    let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
     let r = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
     let usage = evm.ctx_ref().additional_limit.borrow().get_usage();
@@ -460,7 +460,7 @@ fn test_rex5_selfdestruct_beneficiary_creation_fails_on_state_growth_limit() {
             .call(CONTRACT)
             .gas_limit(10_000_000)
             .build_fill();
-        let mut tx = MegaTransaction(OpTransaction::new(tx));
+        let mut tx = MegaTransaction::new(tx);
         tx.enveloped_tx = Some(Bytes::new());
         let r = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
         let usage = evm.ctx_ref().additional_limit.borrow().get_usage();
@@ -577,7 +577,7 @@ fn run_selfdestruct_guard_scenario(child_gas: u64) -> (SelfdestructGuardGasInspe
     let mut evm = MegaEvm::new(context).with_inspector(&mut inspector);
     let tx =
         TxEnvBuilder::default().caller(CALLER).call(PARENT).gas_limit(100_000_000).build_fill();
-    let mut tx = MegaTransaction(OpTransaction::new(tx));
+    let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
     let result = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
     assert!(result.result.is_success(), "parent should succeed: {result:?}");

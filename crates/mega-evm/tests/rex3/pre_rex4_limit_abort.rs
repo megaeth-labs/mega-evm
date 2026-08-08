@@ -17,10 +17,9 @@ use alloy_primitives::{address, Address, Bytes, U256};
 use alloy_sol_types::SolCall;
 use mega_evm::{
     alloy_op_evm::OpTxError,
-    op_revm::OpTransaction,
     test_utils::{BytecodeBuilder, MemoryDatabase},
     EvmTxRuntimeLimits, IKeylessDeploy, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
-    KEYLESS_DEPLOY_ADDRESS,
+    MegaTransactionNew as _, KEYLESS_DEPLOY_ADDRESS,
 };
 use revm::{
     context::{
@@ -53,15 +52,15 @@ fn exhausted_context(
     context
 }
 
-fn call_tx(to: Address, data: Bytes) -> mega_evm::MegaTransaction {
-    let mut tx = MegaTransaction(OpTransaction::new(TxEnv {
+fn call_tx(to: Address, data: Bytes) -> MegaTransaction {
+    let mut tx = MegaTransaction::new(TxEnv {
         caller: CALLER,
         kind: TxKind::Call(to),
         data,
         gas_limit: GAS_LIMIT,
         gas_price: 0,
         ..Default::default()
-    }));
+    });
     tx.enveloped_tx = Some(Bytes::new());
     tx
 }

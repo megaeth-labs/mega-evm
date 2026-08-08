@@ -9,13 +9,12 @@
 //! REX4 is the spec that exercises the snapshot on the CREATE path: REX5+ pre-charges the
 //! code-deposit compute gas before the action runs and deliberately passes `None` here instead.
 
-use mega_evm::MegaTransaction;
 use std::convert::Infallible;
 
 use alloy_primitives::{address, Address, Bytes, U256};
 use mega_evm::{
-    alloy_op_evm::OpTxError, op_revm::OpTransaction, test_utils::MemoryDatabase,
-    EvmTxRuntimeLimits, LimitUsage, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
+    alloy_op_evm::OpTxError, test_utils::MemoryDatabase, EvmTxRuntimeLimits, LimitUsage,
+    MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction, MegaTransactionNew as _,
 };
 use revm::{
     context::{result::ResultAndState, TxEnv},
@@ -55,7 +54,7 @@ fn run(inspected: bool) -> (ResultAndState<MegaHaltReason>, LimitUsage) {
         chain.operator_fee_constant = Some(U256::ZERO);
     });
 
-    let mut tx = MegaTransaction(OpTransaction::new(create_tx()));
+    let mut tx = MegaTransaction::new(create_tx());
     tx.enveloped_tx = Some(Bytes::new());
 
     // Both arms must produce the same `MegaEvm` type, so build the inspected one by toggling

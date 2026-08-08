@@ -11,14 +11,13 @@ use alloy_sol_types::SolCall;
 use mega_evm::{
     alloy_consensus::{Signed, TxLegacy},
     constants,
-    op_revm::OpTransaction,
     revm::context::result::{ExecutionResult, ResultAndState},
     sandbox::{calculate_keyless_deploy_address, decode_error_result, KeylessDeployError},
     test_utils::{BytecodeBuilder, MemoryDatabase},
     EvmTxRuntimeLimits, IKeylessDeploy, IOracle, LimitKind, LimitUsage, MegaContext, MegaEvm,
-    MegaHaltReason, MegaSpecId, MegaTransaction, TestExternalEnvs, VolatileDataAccess,
-    ACCOUNT_INFO_WRITE_SIZE, AUTHORIZATION_SIZE, BASE_TX_SIZE, KEYLESS_DEPLOY_ADDRESS,
-    ORACLE_CONTRACT_ADDRESS,
+    MegaHaltReason, MegaSpecId, MegaTransaction, MegaTransactionNew as _, TestExternalEnvs,
+    VolatileDataAccess, ACCOUNT_INFO_WRITE_SIZE, AUTHORIZATION_SIZE, BASE_TX_SIZE,
+    KEYLESS_DEPLOY_ADDRESS, ORACLE_CONTRACT_ADDRESS,
 };
 use revm::{
     bytecode::opcode::*,
@@ -137,7 +136,7 @@ fn keyless_deploy_call_tx(
         gas_price: 0,
         ..Default::default()
     };
-    let mut tx = MegaTransaction(OpTransaction::new(tx));
+    let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
     tx
 }
@@ -154,7 +153,7 @@ fn sandbox_create_tx_for_intrinsic(init_code: Bytes, signer: Address) -> MegaTra
         nonce: 0,
         ..Default::default()
     };
-    MegaTransaction(OpTransaction::new(tx))
+    MegaTransaction::new(tx)
 }
 
 /// Computes the intrinsic compute gas that Rex5 records during transaction validation.

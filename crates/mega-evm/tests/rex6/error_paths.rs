@@ -14,17 +14,15 @@
 //!   `length` operand must halt with `StackUnderflow` from the wrapper's own `stack.inspect::<1>()`
 //!   / `inspect::<2>()`, before any memory expansion.
 
-use mega_evm::MegaTransaction;
 use std::convert::Infallible;
 
 use alloy_primitives::{Address, Bytes, TxKind, U256};
 use mega_evm::{
     alloy_op_evm::OpTxError,
-    op_revm::OpTransaction,
     revm::context::result::ResultAndState,
     test_utils::{BytecodeBuilder, MemoryDatabase},
     BucketId, EVMError, EmptyExternalEnv, EvmTxRuntimeLimits, ExternalEnvs, MegaContext, MegaEvm,
-    MegaHaltReason, MegaSpecId, SaltEnv,
+    MegaHaltReason, MegaSpecId, MegaTransaction, MegaTransactionNew as _, SaltEnv,
 };
 use revm::{
     bytecode::opcode::{CREATE, CREATE2, SSTORE, STOP},
@@ -88,7 +86,7 @@ fn transact_with_failing_salt(
         gas_limit: 100_000_000,
         ..Default::default()
     };
-    let mut tx = MegaTransaction(OpTransaction::new(tx));
+    let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
     alloy_evm::Evm::transact_raw(&mut evm, tx)
 }

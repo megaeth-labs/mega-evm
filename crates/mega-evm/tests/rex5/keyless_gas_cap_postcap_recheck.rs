@@ -8,19 +8,18 @@
 //! capped value. Pre-REX5 does not apply the cap, so this recheck never
 //! fires under pre-REX5 specs.
 
-use mega_evm::MegaTransaction;
 use std::{convert::Infallible, vec::Vec};
 
 use alloy_primitives::{address, hex, Address, Bytes, Signature, TxKind, B256, U256};
 use alloy_sol_types::SolCall;
 use mega_evm::{
     alloy_consensus::{Signed, TxLegacy},
-    op_revm::OpTransaction,
     revm::context::result::ExecutionResult,
     sandbox::{calculate_keyless_deploy_address, decode_error_result, KeylessDeployError},
     test_utils::MemoryDatabase,
     BucketHasher, IKeylessDeploy, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
-    SimpleBucketHasher, TestExternalEnvs, KEYLESS_DEPLOY_ADDRESS, MIN_BUCKET_SIZE,
+    MegaTransaction, MegaTransactionNew as _, SimpleBucketHasher, TestExternalEnvs,
+    KEYLESS_DEPLOY_ADDRESS, MIN_BUCKET_SIZE,
 };
 use revm::{context::TxEnv, inspector::NoOpInspector, Database as _};
 
@@ -117,7 +116,7 @@ fn run_keyless_outer_with_envs(
         gas_price: 0,
         ..Default::default()
     };
-    let mut tx = MegaTransaction(OpTransaction::new(tx));
+    let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
     let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);
     alloy_evm::Evm::transact_commit(&mut evm, tx)

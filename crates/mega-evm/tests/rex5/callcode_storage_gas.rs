@@ -15,17 +15,16 @@
 //! `CALL` behavior is unchanged across all specs: the stack `to` is the value
 //! recipient and is the correct address for emptiness / new-account metering.
 
-use mega_evm::MegaTransaction;
 use std::convert::Infallible;
 
 use alloy_primitives::{address, Address, Bytes, TxKind, U256};
 use mega_evm::{
     alloy_op_evm::OpTxError,
     constants::rex::NEW_ACCOUNT_STORAGE_GAS_BASE,
-    op_revm::OpTransaction,
     test_utils::{BytecodeBuilder, ErrorInjectingDatabase, InjectedDbError, MemoryDatabase},
     BucketId, EVMError, EmptyExternalEnv, EvmTxRuntimeLimits, ExternalEnvs, MegaContext, MegaEvm,
-    MegaHaltReason, MegaSpecId, SaltEnv, TestExternalEnvs, MIN_BUCKET_SIZE,
+    MegaHaltReason, MegaSpecId, MegaTransaction, MegaTransactionNew as _, SaltEnv,
+    TestExternalEnvs, MIN_BUCKET_SIZE,
 };
 use revm::{
     bytecode::opcode::{CALL, CALLCODE, STOP},
@@ -114,7 +113,7 @@ fn transact(
         gas_limit,
         ..Default::default()
     };
-    let mut tx = MegaTransaction(OpTransaction::new(tx));
+    let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
     alloy_evm::Evm::transact_raw(&mut evm, tx)
 }
@@ -395,7 +394,7 @@ fn transact_with_error_db(
         gas_limit,
         ..Default::default()
     };
-    let mut tx = MegaTransaction(OpTransaction::new(tx));
+    let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
     alloy_evm::Evm::transact_raw(&mut evm, tx)
 }
@@ -427,7 +426,7 @@ fn transact_with_failing_salt(
         gas_limit,
         ..Default::default()
     };
-    let mut tx = MegaTransaction(OpTransaction::new(tx));
+    let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
     alloy_evm::Evm::transact_raw(&mut evm, tx)
 }

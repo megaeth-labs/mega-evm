@@ -2,7 +2,6 @@ use std::{path::PathBuf, str::FromStr};
 
 use clap::Parser;
 use mega_evm::{
-    op_revm::OpTransaction,
     revm::{
         context::{
             block::BlockEnv, cfg::CfgEnv, either::Either, result::ExecutionResult, tx::TxEnv,
@@ -12,7 +11,7 @@ use mega_evm::{
         state::{AccountInfo, Bytecode},
         ExecuteCommitEvm,
     },
-    MegaContext, MegaEvm, MegaSpecId, MegaTransaction,
+    MegaContext, MegaEvm, MegaSpecId, MegaTransaction, MegaTransactionNew as _,
 };
 use state_test::types::Env;
 
@@ -206,7 +205,7 @@ impl Cmd {
                 .with_cfg(cfg.clone())
                 .with_block(block.clone());
 
-            let mut tx = MegaTransaction(OpTransaction::new(tx_env.clone()));
+            let mut tx = MegaTransaction::new(tx_env.clone());
             tx.enveloped_tx = Some(Bytes::default());
 
             // Execute transaction

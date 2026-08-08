@@ -9,16 +9,15 @@
 //! Pre-REX6 keeps the old split (ungated `before_tx_start` DataSize/KV + pre-execution
 //! state-growth scan, no authority SALT gas), frozen for replay parity — the REX5 arms pin it.
 
-use mega_evm::MegaTransaction;
 use std::convert::Infallible;
 
 use alloy_eips::eip7702::{Authorization, RecoveredAuthority, RecoveredAuthorization};
 use alloy_primitives::{address, Address, Bytes, U256};
 use mega_evm::{
-    alloy_op_evm::OpTxError, constants, op_revm::OpTransaction, test_utils::MemoryDatabase,
-    BucketHasher, EVMError, EvmTxRuntimeLimits, LimitUsage, MegaContext, MegaEvm, MegaHaltReason,
-    MegaSpecId, MegaTransactionError, SimpleBucketHasher, TestExternalEnvs,
-    ACCOUNT_INFO_WRITE_SIZE, MIN_BUCKET_SIZE,
+    alloy_op_evm::OpTxError, constants, test_utils::MemoryDatabase, BucketHasher, EVMError,
+    EvmTxRuntimeLimits, LimitUsage, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
+    MegaTransaction, MegaTransactionError, MegaTransactionNew as _, SimpleBucketHasher,
+    TestExternalEnvs, ACCOUNT_INFO_WRITE_SIZE, MIN_BUCKET_SIZE,
 };
 use revm::{
     context::{
@@ -79,7 +78,7 @@ fn transact_with_limits(
         chain.operator_fee_constant = Some(U256::from(0));
     });
     let mut evm = MegaEvm::new(context);
-    let mut tx = MegaTransaction(OpTransaction::new(tx));
+    let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
     let r = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
     let usage = evm.ctx_ref().additional_limit.borrow().get_usage();
@@ -121,7 +120,7 @@ fn try_transact(
         chain.operator_fee_constant = Some(U256::from(0));
     });
     let mut evm = MegaEvm::new(context);
-    let mut tx = MegaTransaction(OpTransaction::new(tx));
+    let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
     alloy_evm::Evm::transact_raw(&mut evm, tx)
 }
@@ -179,7 +178,7 @@ fn transact_detention(
         chain.operator_fee_constant = Some(U256::from(0));
     });
     let mut evm = MegaEvm::new(context);
-    let mut tx = MegaTransaction(OpTransaction::new(tx));
+    let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
     let r = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
     let detained = evm.ctx_ref().additional_limit.borrow().detained_compute_gas_limit();
