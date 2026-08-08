@@ -489,7 +489,9 @@ fn test_call_family_to_delegator_to_beneficiary_marks_beneficiary_only_from_rex6
 /// unobservable: the mark never becomes detention (no wrapper on the `EQUIVALENCE` table applies
 /// the tracker's cap into `AdditionalLimit`, so the detained limit stays `u64::MAX`), the
 /// reported volatile info is `MINI_REX`-gated in `execution_result`, and
-/// `get_block_env_accesses` masks the beneficiary bit (pinned at the tracker's own unit tests).
+/// `get_block_env_accesses` masks the beneficiary bit (the mask is
+/// `VolatileDataAccess::block_env_only`, pinned by `test_block_env_helpers_ignore_non_block_flags`
+/// in `access/volatile.rs`).
 /// If a table change ever routes `EQUIVALENCE` through the bracket, the `marked` assertion goes
 /// red and the frozen-spec question must be re-examined rather than silently absorbed.
 #[test]
