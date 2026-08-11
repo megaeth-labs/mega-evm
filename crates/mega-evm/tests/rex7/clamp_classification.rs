@@ -10,7 +10,9 @@
 //! The payload has to match too. A frame-local binding reverts with
 //! `MegaLimitExceeded(uint8 kind, uint64 limit)`, which the caller can decode and branch on, so its
 //! `limit` must be the sub-frame budget that actually bound the clamp rather than the
-//! transaction-level limit.
+//! transaction-level limit. A transaction-level binding halts with `ComputeGasLimitExceeded`, whose
+//! `actual` must be the compute usage the transaction ends with — including the frame-exit
+//! settlement that runs after the exceed is latched.
 
 use crate::common::{
     transact, transact_default, transact_with_gas_limit, Outcome, CALLEE, CALLER, CONTRACT, ONE_ETH,
@@ -125,9 +127,9 @@ fn test_exact_value_clamp_is_still_a_compute_exceed() {
     match r7.halt_reason("REX7") {
         MegaHaltReason::ComputeGasLimitExceeded { limit, actual } => {
             assert_eq!(*limit, edge.compute_limit, "the reported limit is the TX compute limit");
-            assert!(
-                *actual <= edge.compute_limit,
-                "the crossing opcode never ran, so usage cannot be past the limit; got {actual}",
+            assert_eq!(
+                *actual, r7.compute_gas,
+                "the reported usage must be the transaction's final compute usage",
             );
         }
         other => panic!(
@@ -268,5 +270,48 @@ fn test_frame_local_clamp_exceed_reports_the_sub_frame_budget() {
         d7.limit < 1_000_000,
         "the sub-frame budget is a fraction of the TX limit, not the TX limit itself; got {}",
         d7.limit
+    );
+}
+
+/// A transaction-level clamp exceed must report the usage the transaction actually ends with.
+///
+/// The exceed is latched at the frame's final result, but the frame-exit settlement that closes
+/// the partial plain segment runs after that. A halt reason frozen at latch time reports a usage
+/// the transaction never had.
+#[test]
+fn test_tx_level_clamp_halt_reports_the_final_usage() {
+    let mut code = plain_filler(200);
+    code.push(STOP);
+    let code = Bytes::from(code);
+
+    // The unconstrained run tells us both ends of the plain segment; putting the limit in the
+    // middle of it guarantees the halt lands with a partial segment still unsettled.
+    let free = transact_default(MegaSpecId::REX7, base_db(code.clone()));
+    assert!(free.is_success(), "the unconstrained run must succeed: {:?}", free.result);
+    let intrinsic = transact_default(MegaSpecId::REX7, base_db(Bytes::from(vec![STOP])));
+    let midpoint = (intrinsic.compute_gas + free.compute_gas) / 2;
+
+    let r7 = transact(MegaSpecId::REX7, base_db(code), compute_limit(midpoint)(MegaSpecId::REX7));
+
+    let (limit, actual) = match r7.halt_reason("REX7") {
+        MegaHaltReason::ComputeGasLimitExceeded { limit, actual } => (*limit, *actual),
+        other => panic!("expected a compute-gas halt, got {other:?}"),
+    };
+    assert_eq!(limit, midpoint, "the reported limit is the configured TX compute limit");
+    assert_eq!(
+        r7.compute_gas, midpoint,
+        "clamp enforcement stops the crossing opcode, so usage lands exactly on the limit",
+    );
+    assert_eq!(
+        actual, r7.compute_gas,
+        "the reported usage must be the tracker's final reading, not a pre-settlement snapshot; \
+         reported={actual} tracker={}",
+        r7.compute_gas
+    );
+    assert_eq!(
+        r7.gas_used,
+        r7.compute_gas + (intrinsic.gas_used - intrinsic.compute_gas),
+        "the receipt must charge exactly the compute the transaction was allowed plus the \
+         intrinsic storage gas",
     );
 }

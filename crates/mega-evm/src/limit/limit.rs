@@ -984,6 +984,7 @@ impl AdditionalLimit {
                 } else {
                     let gas_used = self.checkpoint_baseline.saturating_sub(remaining);
                     let _ = self.record_compute_gas_unguarded(gas_used);
+                    self.refresh_latched_compute_usage();
                 }
                 self.checkpoint_baseline = remaining;
             }
@@ -1076,6 +1077,32 @@ impl AdditionalLimit {
                     Default::default(),
                 );
             }
+        }
+    }
+
+    /// Re-reads a latched TX-level compute exceed's usage from the tracker (REX7+).
+    ///
+    /// A clamp-induced exceed is latched at the frame's final result, before the frame-exit
+    /// settlement closes the plain segment the crossing opcode stopped inside. The latch is sticky,
+    /// so the halt reason built later from [`check_limit`](Self::check_limit) would otherwise
+    /// report the usage as it stood one settlement short of final — which is not the number the
+    /// transaction's compute total ends on. The detention path never had this problem: it rebuilds
+    /// its halt reason from live tracker usage.
+    ///
+    /// Only TX-level exceeds are refreshed. A frame-local exceed's `used` is the frame's own
+    /// figure, which the frame-local revert payload does not carry, so rewriting it with a
+    /// transaction-level total would only blur what it means.
+    #[inline]
+    fn refresh_latched_compute_usage(&mut self) {
+        let usage = self.compute_gas.tx_usage();
+        if let LimitCheck::ExceedsLimit {
+            kind: super::LimitKind::ComputeGas,
+            frame_local: false,
+            used,
+            ..
+        } = &mut self.has_exceeded_limit
+        {
+            *used = usage;
         }
     }
 
