@@ -142,7 +142,12 @@ impl ExitCode {
         match err {
             // The endpoint never answered: unreachable, transport-level
             // failure, or an offline replay file without the response.
-            EvmeError::RpcTransportError(_) | EvmeError::RpcError(_) => Self::RpcFailure,
+            // `BlockBodyTransactionNull` is the same class: the block body
+            // already listed the hash, so a null lookup is an inconsistent
+            // endpoint rather than a definitive unknown transaction.
+            EvmeError::RpcTransportError(_) |
+            EvmeError::RpcError(_) |
+            EvmeError::BlockBodyTransactionNull(_) => Self::RpcFailure,
             // A block error the EVM raised because a state read failed is that
             // read's failure, not an execution result: classify it by its
             // cause, so an endpoint that died mid-execution still reports the
@@ -291,6 +296,7 @@ mod tests {
             EvmeError::RpcTransportError(
                 alloy_provider::transport::TransportErrorKind::custom_str("connection refused"),
             ),
+            EvmeError::BlockBodyTransactionNull(B256::ZERO),
         ] {
             assert_eq!(
                 ExitCode::from_evme_error(&err),

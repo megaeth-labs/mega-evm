@@ -766,11 +766,16 @@ where
             // preceding transactions).
             block_executor.clear_accessed_block_hashes();
 
+            // Every hash here came from the block body this endpoint already
+            // served. `Ok(None)` therefore means the endpoint is inconsistent
+            // (reorg or load-balanced divergent views), not that the hash is
+            // unknown — that definitive answer only applies to a user-supplied
+            // target lookup on the single-transaction path.
             let tx = provider
                 .get_transaction_by_hash(*tx_hash)
                 .await
                 .map_err(|e| ReplayError::RpcError(format!("RPC transport error: {e}")))?
-                .ok_or(ReplayError::TransactionNotFound(*tx_hash))?;
+                .ok_or(ReplayError::BlockBodyTransactionNull(*tx_hash))?;
 
             let is_target = target_set.contains(tx_hash);
             let start = Instant::now();
@@ -1216,7 +1221,9 @@ where
 fn classify(err: &ReplayError) -> BatchErrorKind {
     match err {
         ReplayError::TransactionNotFound(_) => BatchErrorKind::NotFound,
-        ReplayError::RpcError(_) | ReplayError::RpcTransportError(_) => BatchErrorKind::Rpc,
+        ReplayError::RpcError(_) |
+        ReplayError::RpcTransportError(_) |
+        ReplayError::BlockBodyTransactionNull(_) => BatchErrorKind::Rpc,
         // A block error the EVM raised because a state read failed is that
         // read's failure: the same classification the run-level exit code uses.
         ReplayError::BlockExecutionError(_)
@@ -1248,7 +1255,9 @@ fn swept_kind(_err: &ReplayError) -> BatchErrorKind {
 /// The transaction an aborting error is about, when it names one.
 fn aborting_tx_hash(err: &ReplayError) -> Option<B256> {
     match err {
-        ReplayError::TransactionNotFound(hash) => Some(*hash),
+        ReplayError::TransactionNotFound(hash) | ReplayError::BlockBodyTransactionNull(hash) => {
+            Some(*hash)
+        }
         ReplayError::BlockExecutionError(err) => block_error_tx_hash(err),
         _ => None,
     }
@@ -1487,6 +1496,11 @@ mod tests {
         assert_eq!(swept_kind(&ReplayError::TransactionNotFound(B256::ZERO)), BatchErrorKind::Rpc);
         // Transport/RPC failure.
         assert_eq!(swept_kind(&ReplayError::RpcError("endpoint down".into())), BatchErrorKind::Rpc);
+        // Block-body null is rpc-class for the aborting target and for sweeps.
+        assert_eq!(
+            swept_kind(&ReplayError::BlockBodyTransactionNull(B256::ZERO)),
+            BatchErrorKind::Rpc
+        );
         // Execution-class aborts (other, setup, internal) must not blame swept targets.
         assert_eq!(
             swept_kind(&ReplayError::Other("executor setup failed".into())),
@@ -1501,6 +1515,19 @@ mod tests {
             classify(&ReplayError::Other("executor setup failed".into())),
             BatchErrorKind::Execution
         );
+    }
+
+    /// A block-body hash resolving to null is an RPC inconsistency that still
+    /// names the vanished transaction for the abort sweep.
+    #[test]
+    fn test_block_body_transaction_null_classifies_as_rpc_and_names_the_hash() {
+        let hash = B256::repeat_byte(0xab);
+        let err = ReplayError::BlockBodyTransactionNull(hash);
+        assert_eq!(classify(&err), BatchErrorKind::Rpc);
+        assert_eq!(aborting_tx_hash(&err), Some(hash));
+        // Contrasts with the user-supplied unknown-hash definitive answer.
+        assert_eq!(classify(&ReplayError::TransactionNotFound(hash)), BatchErrorKind::NotFound);
+        assert_eq!(aborting_tx_hash(&ReplayError::TransactionNotFound(hash)), Some(hash));
     }
 
     /// A run whose only finding is divergence fails as the mismatch it is.

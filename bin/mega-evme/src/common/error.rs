@@ -16,6 +16,14 @@ pub enum EvmeError {
     #[error("Transaction not found: {0}")]
     TransactionNotFound(TxHash),
 
+    /// The block body listed this hash, but `eth_getTransactionByHash` returned null.
+    ///
+    /// That answer contradicts data the endpoint already served (the block body),
+    /// so the endpoint is inconsistent — typically a reorg or load-balanced
+    /// divergent views — rather than a definitive "unknown transaction".
+    #[error("Block body lists transaction {0} but the endpoint resolves it to null")]
+    BlockBodyTransactionNull(TxHash),
+
     /// Block not found
     #[error("Block not found: {0}")]
     BlockNotFound(BlockNumber),

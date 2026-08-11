@@ -340,10 +340,12 @@ fn test_replay_block_verify_receipt_reports_a_verdict_per_target() {
     assert_eq!(code, Some(0), "a fully matching run exits 0");
 }
 
-/// An abort caused by one transaction of the block is not an answer about the
-/// targets behind it: only the transaction the endpoint denied is reported as
-/// `not_found`, and every target swept up behind it is reported as unanswered
-/// (`rpc`) with a message naming the transaction that aborted the block.
+/// An abort caused by a block-body transaction resolving to null is not a
+/// definitive "unknown hash": the hash came from the block the endpoint already
+/// served, so the null is an RPC inconsistency. The aborting target is reported
+/// as `rpc` (not `not_found`), and every target swept up behind it is also
+/// unanswered (`rpc`) with a message naming the transaction that aborted the
+/// block.
 #[test]
 fn test_replay_block_sweeps_targets_behind_an_abort_as_unanswered() {
     let (missing, missing_index) = BLOCK_TXS[1];
@@ -364,8 +366,16 @@ fn test_replay_block_sweeps_targets_behind_an_abort_as_unanswered() {
         if index == missing_index {
             assert_eq!(
                 line["error"]["kind"].as_str(),
-                Some("not_found"),
-                "only the denied transaction is unknown: {line}"
+                Some("rpc"),
+                "a block-body hash resolving to null is an RPC inconsistency: {line}"
+            );
+            assert!(
+                line["error"]["message"].as_str().is_some_and(|m| {
+                    m.contains(missing) &&
+                        m.contains("Block body") &&
+                        m.contains("resolves it to null")
+                }),
+                "the aborting error must name the hash and the inconsistency: {line}"
             );
             continue;
         }
@@ -380,10 +390,11 @@ fn test_replay_block_sweeps_targets_behind_an_abort_as_unanswered() {
         );
     }
 
-    // The denied transaction is an execution-class failure, which outranks the
-    // unanswered ones.
-    assert_eq!(code, Some(1), "a definitive negative answer exits 1");
-    assert_eq!(run_error(&stdout)["error"]["kind"].as_str(), Some("execution-error"));
+    // Every failure is RPC-class (inconsistency + unanswered sweeps), so the
+    // run exits 3 rather than the definitive-answer class of a user-supplied
+    // unknown hash.
+    assert_eq!(code, Some(3), "a block-body null lookup exits 3");
+    assert_eq!(run_error(&stdout)["error"]["kind"].as_str(), Some("rpc-failure"));
 }
 
 /// An executor/setup abort on a mid-block transaction is still an execution
