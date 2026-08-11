@@ -11,9 +11,9 @@
 //! anyway, so summing it by segment reproduces the per-opcode sum exactly.
 //!
 //! The two places where the models are *not* identical are pinned at the bottom of this file:
-//! a limit crossing inside a plain-opcode segment surfaces at the next checkpoint rather than at
-//! the crossing opcode, and a frame that halts out of gas settles its burned remainder as compute
-//! gas.
+//! a limit crossing inside a plain-opcode segment halts *before* the crossing opcode rather than
+//! after it, and a frame that halts out of gas settles its burned remainder as compute gas. The
+//! enforcement mechanism behind the first — the V0 gas clamp — has its own suite in `v0_clamp`.
 
 use crate::common::{
     transact, transact_default, transact_with_bucket_capacity, Outcome, CALLEE, CALLER, CONTRACT,
@@ -425,9 +425,9 @@ fn test_conditional_volatile_checkpoints() {
     });
 }
 
-/// `GAS` is not a checkpoint: it runs raw and reads the interpreter's own counter. The settlement
-/// must not perturb that counter, so a contract that stores its `GAS` reading must store the same
-/// value under both specs.
+/// `GAS` reads the interpreter's own counter, so neither the settlement nor the gas clamp may
+/// perturb what it observes: a contract that stores its `GAS` reading must store the same value
+/// under both specs.
 #[test]
 fn test_gas_opcode_reads_the_same_remaining_gas() {
     let code = plain_filler(BytecodeBuilder::default(), 10)
@@ -468,12 +468,14 @@ fn plain_run_then_sstore_code(pairs: usize, include_sstore: bool) -> Bytes {
     builder.append(STOP).build()
 }
 
-/// The one enforcement difference this ticket's model has: a compute-gas crossing inside a
-/// plain-opcode segment is not caught at the crossing opcode — nothing is metered there — but at
-/// the next checkpoint. Both specs halt; REX7 records the whole segment up to that checkpoint,
-/// which is exactly what an unconstrained run records at the same point.
+/// The one enforcement difference this model has: a compute-gas crossing inside a plain-opcode
+/// segment is not caught *at* the crossing opcode — nothing is metered there — but *before* it, by
+/// the V0 gas clamp, which leaves the interpreter only as much visible gas as the compute headroom
+/// allows. Both specs halt, and both halt in the middle of the plain run without ever reaching the
+/// SSTORE checkpoint downstream; REX6 executes the crossing opcode and records it, so its usage
+/// ends up over the limit, while REX7 stops one opcode earlier and its usage stays at the limit.
 #[test]
-fn test_compute_limit_crossing_surfaces_at_the_next_checkpoint() {
+fn test_compute_limit_crossing_halts_before_the_crossing_opcode() {
     let code = plain_run_then_sstore_code(200, true);
     let usage_before_sstore =
         transact_default(MegaSpecId::REX7, base_db(plain_run_then_sstore_code(200, false)))
@@ -487,26 +489,32 @@ fn test_compute_limit_crossing_surfaces_at_the_next_checkpoint() {
         |spec| EvmTxRuntimeLimits::from_spec(spec).with_tx_compute_gas_limit(compute_limit);
 
     let r6 = transact(MegaSpecId::REX6, base_db(code.clone()), limits(MegaSpecId::REX6));
-    let r7 = transact(MegaSpecId::REX7, base_db(code.clone()), limits(MegaSpecId::REX7));
-    let r7_unconstrained = transact_default(MegaSpecId::REX7, base_db(code));
+    let r7 = transact(MegaSpecId::REX7, base_db(code), limits(MegaSpecId::REX7));
 
     assert!(!r6.is_success(), "REX6 must halt on the tight compute limit; got {:?}", r6.result);
     assert!(!r7.is_success(), "REX7 must halt on the tight compute limit; got {:?}", r7.result);
     assert!(
-        r6.compute_gas <= compute_limit + 12,
-        "REX6 halts at the crossing opcode; compute={} limit={compute_limit}",
+        r6.compute_gas > compute_limit,
+        "REX6 records the crossing opcode it just executed; compute={} limit={compute_limit}",
         r6.compute_gas
     );
     assert_eq!(
-        r7.compute_gas, r7_unconstrained.compute_gas,
-        "REX7 settles the whole segment through the SSTORE checkpoint",
+        r7.compute_gas, compute_limit,
+        "REX7 stops at the clamp boundary, with the crossing opcode's cost excluded",
     );
     assert!(
-        r7.compute_gas > r6.compute_gas,
-        "checkpoint enforcement overshoots per-opcode enforcement; REX6={} REX7={}",
+        r7.compute_gas < r6.compute_gas,
+        "clamp enforcement must be at least as tight as per-opcode enforcement; REX6={} REX7={}",
         r6.compute_gas,
         r7.compute_gas
     );
+    let slot = U256::from(7u64);
+    for (label, r) in [("REX6", &r6), ("REX7", &r7)] {
+        assert!(
+            r.storage_value(CONTRACT, slot).is_zero(),
+            "{label}: the halt lands inside the plain run, so the SSTORE downstream never executes",
+        );
+    }
 }
 
 /// The second difference: a frame that halts out of EVM gas has its remaining budget zeroed by the

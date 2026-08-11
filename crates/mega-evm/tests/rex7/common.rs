@@ -45,6 +45,14 @@ impl Outcome {
         self.result.is_success()
     }
 
+    /// The halt reason, or a panic with `label` when the transaction did not halt.
+    pub(crate) fn halt_reason(&self, label: &str) -> &MegaHaltReason {
+        match &self.result {
+            ExecutionResult::Halt { reason, .. } => reason,
+            other => panic!("{label}: expected a halt, got {other:?}"),
+        }
+    }
+
     /// Reads a storage slot out of the produced state, defaulting to zero when the transaction
     /// never touched it.
     pub(crate) fn storage_value(&self, address: Address, slot: U256) -> U256 {
@@ -56,12 +64,27 @@ impl Outcome {
     }
 }
 
+/// The transaction gas limit [`transact`] runs with — high enough that EVM gas is never the
+/// binding constraint.
+pub(crate) const DEFAULT_TX_GAS_LIMIT: u64 = 100_000_000;
+
 /// Runs a single transaction that calls [`CONTRACT`] under `spec` with the given DB and runtime
 /// limits, returning the execution result plus the post-tx tracker readings and `gas_used`.
 pub(crate) fn transact(
     spec: MegaSpecId,
+    db: MemoryDatabase,
+    limits: EvmTxRuntimeLimits,
+) -> Outcome {
+    transact_with_gas_limit(spec, db, limits, DEFAULT_TX_GAS_LIMIT)
+}
+
+/// [`transact`] with an explicit transaction gas limit, for cases that need EVM gas itself to run
+/// out.
+pub(crate) fn transact_with_gas_limit(
+    spec: MegaSpecId,
     mut db: MemoryDatabase,
     limits: EvmTxRuntimeLimits,
+    gas_limit: u64,
 ) -> Outcome {
     let mut context = MegaContext::new(&mut db, spec).with_tx_runtime_limits(limits);
     context.modify_chain(|chain| {
@@ -69,7 +92,7 @@ pub(crate) fn transact(
         chain.operator_fee_constant = Some(U256::from(0));
     });
     let tx =
-        TxEnvBuilder::default().caller(CALLER).call(CONTRACT).gas_limit(100_000_000).build_fill();
+        TxEnvBuilder::default().caller(CALLER).call(CONTRACT).gas_limit(gas_limit).build_fill();
     let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
     let mut evm = MegaEvm::new(context);
