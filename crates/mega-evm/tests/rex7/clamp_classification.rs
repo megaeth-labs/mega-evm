@@ -248,6 +248,7 @@ fn decode_limit_exceeded(label: &str, outcome: &Outcome) -> MegaLimitExceeded {
 /// return value for the same execution.
 #[test]
 fn test_frame_local_clamp_exceed_reports_the_sub_frame_budget() {
+    // Enough iterations to outrun the sub-frame's 98/100 share of a one-million compute budget.
     let callee = countdown_loop_code(&[], 40_000);
     let code = call_and_return_revert_data(50_000_000);
     let build_db = || base_db(code.clone()).account_code(CALLEE, callee.clone());
