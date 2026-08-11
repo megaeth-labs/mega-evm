@@ -251,10 +251,21 @@ pub fn report_command_result(result: Result<(), Error>, json: bool) -> ExitCode 
 /// Also used by failures that never become a command result — an argument
 /// parsing error is reported by `clap` itself, but a machine-readable run must
 /// still end its stdout with the object the taxonomy promises.
+///
+/// Writes are fallible: a closed stdout is ignored rather than panicking.
+/// The panic hook relies on this so a broken-pipe panic during normal output
+/// still reaches `exit(1)` instead of aborting inside the hook. With an open
+/// stdout the bytes match a successful `println!` of the same envelope.
 pub fn print_json_error(code: ExitCode, message: &str) {
+    use std::io::Write;
+
     let envelope =
         ErrorEnvelope { error: ErrorBody { code: code.code(), kind: code.kind(), message } };
-    println!("{}", serde_json::to_string(&envelope).expect("failed to serialize the error"));
+    // Serialization of this envelope cannot fail for ordinary messages; still
+    // avoid `.expect` so a hook-path write never panics on its way to exit(1).
+    if let Ok(json) = serde_json::to_string(&envelope) {
+        let _ = writeln!(std::io::stdout(), "{json}");
+    }
 }
 
 #[cfg(test)]

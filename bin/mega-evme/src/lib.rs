@@ -32,21 +32,32 @@ pub use common::*;
 /// When the raw process argv contains `--json`, the hook also prints the
 /// standard structured error object on stdout before exiting so a machine-
 /// readable run never ends with empty stdout on panic.
+///
+/// Every write the hook performs is fallible: a closed stdout or stderr must
+/// not re-panic inside the hook, or the runtime aborts (SIGABRT) before the
+/// documented `exit(1)`. Consumers that close the pipe early
+/// (`… --json | head`) therefore still see exit class 1 rather than an
+/// undefined signal death.
 pub fn set_thread_panic_hook() {
     use std::{
         backtrace::Backtrace,
+        io::{self, Write},
         panic::{set_hook, take_hook},
         process::exit,
     };
     let orig_hook = take_hook();
     set_hook(Box::new(move |panic_info| {
         // Raw stderr rather than `tracing`: the subscriber may not be
-        // installed yet when a panic fires during CLI startup.
-        eprintln!("Custom backtrace: {}", Backtrace::capture());
+        // installed yet when a panic fires during CLI startup. Discard write
+        // errors so a closed stderr cannot abort the process from here.
+        let _ = writeln!(io::stderr(), "Custom backtrace: {}", Backtrace::capture());
         orig_hook(panic_info);
         if raw_argv_wants_json() {
             // Keep the panic text on stderr (via `orig_hook`); the structured
             // object is the machine-readable final stdout line.
+            // `print_json_error` itself is non-panicking on a closed stdout —
+            // the broken pipe that often triggered this panic must not cause a
+            // second panic before `exit(1)`.
             let message = format!("panic: {panic_info}");
             print_json_error(ExitCode::ExecutionError, &message);
         }

@@ -373,3 +373,59 @@ fn test_help_in_json_mode_prints_no_error_object() {
         help.stdout
     );
 }
+
+/// Closing stdout mid-batch must not abort the process.
+///
+/// Rust ignores SIGPIPE, so the next NDJSON `println!` panics with a broken
+/// pipe. The panic hook still has to reach `exit(1)` even when it cannot write
+/// the structured error object to the same closed stdout — otherwise the
+/// runtime aborts (SIGABRT, shell status 134) and scripts that branch on the
+/// documented 0/1/2/3 exit classes see an undefined status.
+#[test]
+fn test_closed_stdout_during_json_batch_exits_one() {
+    use std::{
+        io::{BufRead, BufReader},
+        process::{Command, Stdio},
+    };
+
+    // Multi-target offline batch: many NDJSON lines, so dropping the pipe after
+    // the first line still leaves further writes that hit the broken pipe.
+    let envelope = common::fixture("replay_batch_blocks.cache.json");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_mega-evme"))
+        .args([
+            "replay",
+            "--rpc.replay-file",
+            envelope.to_str().expect("fixture path is utf-8"),
+            "--block",
+            "22945844",
+            "--json",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn mega-evme");
+
+    let stdout = child.stdout.take().expect("child stdout was piped");
+    let mut first_line = String::new();
+    BufReader::new(stdout)
+        .read_line(&mut first_line)
+        .expect("failed to read the first NDJSON line");
+    assert!(
+        !first_line.trim().is_empty(),
+        "batch --json must print at least one NDJSON line before further writes"
+    );
+    // Dropping the BufReader closes the read end. The child's next stdout write
+    // then fails with EPIPE and panics into the process-wide hook.
+    // (Binding ends here; no further use of the pipe.)
+
+    let status = child.wait().expect("failed to wait for mega-evme");
+    assert_eq!(
+        status.code(),
+        Some(1),
+        "closed stdout must exit 1 (execution-error), not signal death.\nstatus: {status:?}"
+    );
+    assert!(
+        status.code().is_some(),
+        "process must not be signal-killed (e.g. SIGABRT from a double panic in the hook)"
+    );
+}
