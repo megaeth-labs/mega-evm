@@ -25,7 +25,7 @@
 //! measured.
 
 use crate::common::{
-    transact_default, transact_with_gas_limit, Outcome, CALLER, CONTRACT, ONE_ETH,
+    transact, transact_default, transact_with_gas_limit, Outcome, CALLER, CONTRACT, ONE_ETH,
 };
 use alloy_primitives::{Bytes, U256};
 use mega_evm::{
@@ -67,11 +67,16 @@ fn approach(volatile: bool) -> BytecodeBuilder {
     plain_filler(builder, 20).push_number(0u64).push_number(CROSSING_OFFSET)
 }
 
-/// Runs `code` with nothing constraining it, for calibration.
-fn unconstrained(code: Bytes) -> Outcome {
-    let outcome = transact_default(MegaSpecId::REX7, base_db(code));
+/// Runs `db` with nothing constraining it, for calibration.
+fn unconstrained_db(db: MemoryDatabase) -> Outcome {
+    let outcome = transact_default(MegaSpecId::REX7, db);
     assert!(outcome.is_success(), "the calibration run must succeed: {:?}", outcome.result);
     outcome
+}
+
+/// Runs `code` against the default database with nothing constraining it, for calibration.
+fn unconstrained(code: Bytes) -> Outcome {
+    unconstrained_db(base_db(code))
 }
 
 /// The compute gas `code` records when neither EVM gas nor any resource limit constrains it.
@@ -243,22 +248,26 @@ fn test_detained_double_exceed_classification_is_stable_across_the_knife_edge() 
 
 /// The corner one frame down, where the clamp is bound frame-locally rather than TX-level.
 ///
-/// A frame-local exceed is absorbed into a revert, so the caller survives and sees a failed CALL —
-/// and it must keep doing so across the edge, where the crossing opcode flips from unaffordable to
-/// affordable in the child's true gas. The caller's own budget is untouched throughout, so the
-/// transaction itself must succeed on every sweep point.
+/// A nested frame's compute budget is always strictly tighter than the TX-level remaining (98/100
+/// of its parent's), so the clamp inside a sub-frame is always bound frame-locally — and a
+/// frame-local exceed is absorbed into a revert rather than halting the transaction. With the
+/// compute limit set so the child's headroom runs out inside the crossing opcode, that absorption
+/// has to hold on every sweep point, including where the child's *true* forwarded gas flips from
+/// too little to enough.
+///
+/// The control arm — the same sweep with nothing constraining compute — is what shows the window
+/// straddles a real edge: there the sub-frame's outcome does flip.
 #[test]
 fn test_frame_local_double_exceed_classification_is_stable_across_the_knife_edge() {
     let callee_code = approach(false).append(MSTORE).append(STOP).build();
     let callee_before = approach(false).append(STOP).build();
-    // The callee is a whole transaction's worth of work when run on its own, so calibrating it that
-    // way gives the EVM gas it needs before the MSTORE; inside a frame the intrinsic part is not
-    // charged again, so the edge is calibrated by sweeping a wide enough window instead.
+    // Calibrating the callee as a standalone transaction gives its work up to the MSTORE once the
+    // intrinsic part — which a sub-frame does not pay again — is taken back out.
     let callee_intrinsic =
         unconstrained_compute_gas(BytecodeBuilder::default().append(STOP).build());
-    let before_in_frame = unconstrained_compute_gas(callee_before) - callee_intrinsic;
-    let cost = unconstrained_compute_gas(callee_code.clone()) -
-        unconstrained_compute_gas(approach(false).append(STOP).build());
+    let callee_before_compute = unconstrained_compute_gas(callee_before);
+    let before_in_frame = callee_before_compute - callee_intrinsic;
+    let cost = unconstrained_compute_gas(callee_code.clone()) - callee_before_compute;
     let forwarded_at_edge = before_in_frame + cost;
 
     let caller = |forwarded: u64| {
@@ -278,18 +287,44 @@ fn test_frame_local_double_exceed_classification_is_stable_across_the_knife_edge
             .append(RETURN)
             .build()
     };
+    let build_db = |code: &Bytes| {
+        base_db(code.clone()).account_code(crate::common::CALLEE, callee_code.clone())
+    };
+    let call_succeeded =
+        |r: &Outcome| r.result.output().map(|o| U256::from_be_slice(o)) == Some(U256::from(1u64));
 
-    let mut succeeded = Vec::new();
+    // A compute limit half a crossing-opcode short of what the whole transaction needs when the
+    // sub-frame completes: the child's own budget is what runs out, and it runs out inside the
+    // MSTORE.
+    let generous = caller(forwarded_at_edge + SWEEP as u64);
+    let whole_tx = unconstrained_db(build_db(&generous));
+    assert!(call_succeeded(&whole_tx), "the calibration run's sub-frame must complete");
+    let limit = whole_tx.compute_gas - cost / 2;
+    let limits = |spec| EvmTxRuntimeLimits::from_spec(spec).with_tx_compute_gas_limit(limit);
+
+    let mut control_outcomes = Vec::new();
     for delta in -SWEEP..=SWEEP {
         let forwarded = (forwarded_at_edge as i64 + delta) as u64;
         let label = format!("edge{delta:+}");
         let code = caller(forwarded);
-        let build_db =
-            || base_db(code.clone()).account_code(crate::common::CALLEE, callee_code.clone());
-        let r6 = transact_default(MegaSpecId::REX6, build_db());
-        let r7 = transact_default(MegaSpecId::REX7, build_db());
 
-        for (spec, r) in [("REX6", &r6), ("REX7", &r7)] {
+        // Treatment: the child's compute headroom is what the crossing opcode cannot pay for.
+        let r7 = transact(MegaSpecId::REX7, build_db(&code), limits(MegaSpecId::REX7));
+        assert!(
+            r7.is_success(),
+            "{label}: a frame-local exceed must be absorbed into a revert, not halt the \
+             transaction: {:?}",
+            r7.result
+        );
+        assert!(
+            !call_succeeded(&r7),
+            "{label}: the sub-frame must report failure on every sweep point",
+        );
+
+        // Control: nothing constrains compute, so only the forwarded gas decides.
+        let c6 = transact_default(MegaSpecId::REX6, build_db(&code));
+        let c7 = transact_default(MegaSpecId::REX7, build_db(&code));
+        for (spec, r) in [("REX6", &c6), ("REX7", &c7)] {
             assert!(
                 r.is_success(),
                 "{label}/{spec}: a sub-frame running out of gas must not stop the transaction: \
@@ -297,19 +332,18 @@ fn test_frame_local_double_exceed_classification_is_stable_across_the_knife_edge
                 r.result
             );
         }
-        let call_ok = |r: &Outcome| {
-            r.result.output().map(|o| U256::from_be_slice(o)) == Some(U256::from(1u64))
-        };
         assert_eq!(
-            call_ok(&r6),
-            call_ok(&r7),
+            call_succeeded(&c6),
+            call_succeeded(&c7),
             "{label}: both models must agree on whether the sub-frame survived",
         );
-        succeeded.push(call_ok(&r7));
+        control_outcomes.push(call_succeeded(&c7));
     }
-    // The window straddles the point where the forwarded gas starts covering the crossing opcode.
+    // The window straddles the point where the forwarded gas starts covering the crossing opcode,
+    // so the stability asserted above is a statement about a real edge.
     assert!(
-        succeeded.contains(&true) && succeeded.contains(&false),
-        "the sweep must straddle the sub-frame's knife edge; outcomes = {succeeded:?}",
+        control_outcomes.contains(&true) && control_outcomes.contains(&false),
+        "the sweep must straddle the sub-frame's knife edge; control outcomes = \
+         {control_outcomes:?}",
     );
 }
