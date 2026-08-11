@@ -19,12 +19,15 @@
 //!   the REX5 storage-call stipend, and oracle hints.
 //! - `double_exceed_corner` — the adjudicated corner swept one gas at a time, so the classification
 //!   is shown to be stable rather than merely correct at one point.
+//! - `exceptional_halt` — every exceptional-halt classification, in both frame positions: the
+//!   frame's whole burned budget settles as compute gas without changing the receipt.
 
 mod checkpoint_families;
 mod checkpoint_settlement;
 mod clamp_classification;
 mod common;
 mod double_exceed_corner;
+mod exceptional_halt;
 mod gas_leakage;
 mod interceptor_resume;
 mod latch_surfacing;

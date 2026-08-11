@@ -849,32 +849,52 @@ fn test_compute_gas_snapshot_matches() {
     }
 }
 
-/// Rex7 is the unstable spec and carries no behavior of its own yet: it delegates its instruction
-/// table, runtime limits, and precompile set to Rex6 unchanged.
+/// Rex7's checkpoint settlement is a precision-preserving change: every program that stays inside
+/// its resource limits records the same compute gas, spends the same EVM gas, and ends the same
+/// way as it does under Rex6.
 ///
 /// The snapshot alone does not pin this. Its rows differ by the spec-name column, so a Rex7 row
 /// that drifted from its Rex6 counterpart would still render as a well-formed snapshot and could be
 /// blessed by a regeneration. Comparing the readings directly makes the first accidental Rex7
-/// divergence a failure. When Rex7 gains its first deliberate behavior change, this test is
-/// expected to fail and should be narrowed to the corpus entries that behavior does not reach.
+/// divergence a failure.
+///
+/// The one sanctioned divergence is the exceptional-halt carve-out: a frame that halts
+/// exceptionally returns none of its remaining budget, and Rex7 settles that burned remainder as
+/// compute gas where per-opcode recording attributes nothing to it. That moves compute gas upward
+/// only — the receipt and the outcome still have to match exactly. `tests/rex7/exceptional_halt.rs`
+/// pins the settled amount itself.
 #[test]
 fn test_rex7_matches_rex6_on_every_program() {
     for program in corpus() {
         let rex6 = transact(MegaSpecId::REX6, (program.build_db)());
         let rex7 = transact(MegaSpecId::REX7, (program.build_db)());
         assert_eq!(
-            (rex7.compute_gas, rex7.gas_used, &rex7.outcome),
-            (rex6.compute_gas, rex6.gas_used, &rex6.outcome),
-            "{}: Rex7 must be behaviorally identical to Rex6 \
-             (Rex6: compute_gas={} gas_used={} outcome={}; \
-             Rex7: compute_gas={} gas_used={} outcome={})",
+            (rex7.gas_used, &rex7.outcome),
+            (rex6.gas_used, &rex6.outcome),
+            "{}: Rex7 must spend the same gas and end the same way as Rex6 \
+             (Rex6: gas_used={} outcome={}; Rex7: gas_used={} outcome={})",
             program.name,
-            rex6.compute_gas,
             rex6.gas_used,
             rex6.outcome,
-            rex7.compute_gas,
             rex7.gas_used,
             rex7.outcome,
+        );
+        if rex7.outcome.starts_with("halt ") {
+            assert!(
+                rex7.compute_gas >= rex6.compute_gas,
+                "{}: the exceptional-halt carve-out only ever moves compute gas up \
+                 (Rex6={} Rex7={})",
+                program.name,
+                rex6.compute_gas,
+                rex7.compute_gas,
+            );
+            continue;
+        }
+        assert_eq!(
+            rex7.compute_gas, rex6.compute_gas,
+            "{}: checkpoint settlement must telescope to the per-opcode sum \
+             (Rex6={} Rex7={})",
+            program.name, rex6.compute_gas, rex7.compute_gas,
         );
     }
 }

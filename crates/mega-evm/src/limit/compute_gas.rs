@@ -52,6 +52,15 @@ pub(crate) struct ComputeGasTracker {
     /// The effective compute gas limit, which may be dynamically lowered by gas detention
     /// (volatile data access). Always <= `frame_tracker.tx_limit()`.
     detained_limit: u64,
+    /// Compute gas settled from the burned remainders of exceptionally halted frames (REX7+).
+    ///
+    /// Recorded into the TX-level lane of `frame_tracker`, so it shows up in the transaction's
+    /// reported compute total and in block-level accounting, and subtracted back out of every
+    /// limit comparison. A burned remainder is gas the EVM destroyed, not work the network
+    /// performed; letting it trip a limit would turn an ordinary EVM halt into a resource-limit
+    /// failure with the remaining gas rescued for the sender, changing a receipt that must stay
+    /// identical to per-opcode accounting. Always 0 before REX7.
+    burned: u64,
     frame_tracker: FrameLimitTracker<()>,
 }
 
@@ -59,6 +68,7 @@ impl ComputeGasTracker {
     pub(crate) fn new(spec: MegaSpecId, tx_limit: u64) -> Self {
         Self {
             detained_limit: tx_limit,
+            burned: 0,
             frame_tracker: FrameLimitTracker::new(spec, tx_limit),
             rex1_enabled: spec.is_enabled(MegaSpecId::REX1),
             rex4_enabled: spec.is_enabled(MegaSpecId::REX4),
@@ -88,7 +98,7 @@ impl ComputeGasTracker {
     pub(crate) fn set_detained_limit(&mut self, cap: u64) {
         let new_limit = if self.rex4_enabled {
             // REX4+: cap is relative to current usage (limits post-access computation)
-            self.tx_usage().saturating_add(cap)
+            self.enforced_tx_usage().saturating_add(cap)
         } else {
             // Pre-REX4: cap is absolute
             cap
@@ -111,7 +121,7 @@ impl ComputeGasTracker {
     /// At that point `frame_stack.last()` is the caller's frame, so
     /// `current_frame_remaining()` gives the caller's remaining compute gas.
     pub(crate) fn current_call_remaining(&self) -> u64 {
-        let tx_remaining = self.tx_limit().saturating_sub(self.tx_usage());
+        let tx_remaining = self.tx_limit().saturating_sub(self.enforced_tx_usage());
         if self.rex4_enabled {
             self.frame_tracker.current_frame_remaining().min(tx_remaining)
         } else {
@@ -141,7 +151,7 @@ impl ComputeGasTracker {
     #[inline]
     pub(crate) fn clamp_binding(&self) -> ClampBinding {
         let tx_limit = self.tx_limit();
-        let tx_remaining = tx_limit.saturating_sub(self.tx_usage());
+        let tx_remaining = tx_limit.saturating_sub(self.enforced_tx_usage());
         if self.rex4_enabled {
             let frame_remaining = self.frame_tracker.current_frame_remaining();
             if frame_remaining < tx_remaining {
@@ -154,7 +164,7 @@ impl ComputeGasTracker {
     /// Returns `true` when gas detention is the binding TX-level constraint, i.e., the detained
     /// limit is tighter than the base TX limit AND actual usage exceeds it.
     pub(crate) fn is_detained_exceed(&self) -> bool {
-        let used = self.tx_usage();
+        let used = self.enforced_tx_usage();
         used > self.detained_limit && self.detained_limit < self.frame_tracker.tx_limit()
     }
 
@@ -187,6 +197,21 @@ impl ComputeGasTracker {
         }
     }
 
+    /// Records a burned remainder from an exceptionally halted frame (REX7+).
+    ///
+    /// Counts toward the transaction's reported compute total and block-level accounting, and is
+    /// excluded from every limit comparison — see [`burned`](Self::burned).
+    pub(crate) fn record_burned_gas(&mut self, amount: u64) {
+        self.burned = self.burned.saturating_add(amount);
+        self.frame_tracker.add_tx_persistent(amount);
+    }
+
+    /// Total recorded usage minus the burned remainders that must not enforce.
+    #[inline]
+    fn enforced_tx_usage(&self) -> u64 {
+        self.frame_tracker.net_usage().saturating_sub(self.burned)
+    }
+
     /// Merges external persistent usage into the TX-level entry.
     ///
     /// Used by `KeylessDeploy` (REX5+) to propagate sandbox compute gas consumption
@@ -213,6 +238,7 @@ impl TxRuntimeLimit for ComputeGasTracker {
     #[inline]
     fn reset(&mut self) {
         self.frame_tracker.reset();
+        self.burned = 0;
         // Rex1+: reset detained limit to original TX limit between transactions.
         // Pre-Rex1: the detained limit persists across transactions.
         if self.rex1_enabled {
@@ -244,14 +270,16 @@ impl TxRuntimeLimit for ComputeGasTracker {
             // So TX-level detained check must still run even when frame check is within limit.
         }
         // TX-level detained check (all specs): total usage vs effective limit (min of tx/detained).
+        // The comparison runs on enforced usage — burned remainders are excluded — while the
+        // reported `used` is the full settled total, so a halt reason states the usage the
+        // transaction actually ends with. The two coincide on every spec before REX7.
         let limit = self.tx_limit();
-        let used = self.tx_usage();
-        if used > limit {
+        if self.enforced_tx_usage() > limit {
             LimitCheck::ExceedsLimit {
                 kind: LimitKind::ComputeGas,
                 frame_local: false,
                 limit,
-                used,
+                used: self.tx_usage(),
             }
         } else {
             LimitCheck::WithinLimit
