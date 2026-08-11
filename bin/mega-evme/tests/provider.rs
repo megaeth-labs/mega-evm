@@ -929,6 +929,70 @@ async fn test_capture_does_not_cache_jsonrpc_error_response() {
     assert!(cached.get("error").is_none(), "cached entry must not be an error response");
 }
 
+/// A success with `"result": null` must be served to the caller but must not
+/// be baked into the capture fixture. Offline replay of that fixture then
+/// fails with a cache-miss error naming the request, not a silent not-found
+/// from a frozen null.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_capture_does_not_cache_null_result_and_offline_misses() {
+    let server = MockRpcServer::start().await;
+    // eth_chainId must succeed so build_capture_provider can complete.
+    server.respond_eth_chain_id(4326, 1).await;
+    // Any other call resolves to a null result at HTTP 200.
+    server.respond_jsonrpc_null_result(2).await;
+
+    let dir = tempdir().expect("tempdir");
+    let cache_file = dir.path().join("null.cache.json");
+
+    let capture_args = RpcArgs::parse_from([
+        "mega-evme",
+        "--rpc",
+        &server.uri(),
+        "--rpc.capture-file",
+        cache_file.to_str().unwrap(),
+    ]);
+    let output = capture_args.build_capture_provider().await.expect("capture build");
+
+    // Null is a transport-level success; the provider fails deserializing it
+    // into a block number. Capture must still observe the response and skip it.
+    let _ = output.provider.get_block_number().await;
+    output.cache_store.persist().expect("persist should still succeed");
+
+    // The envelope must hold only eth_chainId — no entry for the null call.
+    let raw = std::fs::read_to_string(&cache_file).expect("read envelope");
+    let envelope: serde_json::Value = serde_json::from_str(&raw).expect("parse envelope");
+    let entries = envelope["cache"].as_array().expect("cache is a JSON array");
+    assert_eq!(
+        entries.len(),
+        1,
+        "only eth_chainId should be cached; null results must be skipped. entries = {entries:#?}",
+    );
+    let cached: serde_json::Value =
+        serde_json::from_str(entries[0]["value"].as_str().expect("value is a JSON string"))
+            .expect("cached response is valid JSON");
+    assert!(
+        cached.get("result").is_some_and(|r| !r.is_null()),
+        "sole cached entry must be a non-null success, got {cached}",
+    );
+
+    // Offline replay: the null was never captured, so the same request is a
+    // cache miss that names the method — not a silent null / not_found.
+    let replay_args =
+        RpcArgs::parse_from(["mega-evme", "--rpc.replay-file", cache_file.to_str().unwrap()]);
+    let replay = replay_args.build_replay_provider().await.expect("replay build");
+    let err = replay
+        .provider
+        .get_block_number()
+        .await
+        .expect_err("missing null entry must surface as cache miss");
+    let msg = format!("{err}");
+    assert!(msg.contains("cache miss"), "offline error must say 'cache miss', got: {msg}",);
+    assert!(
+        msg.contains("eth_blockNumber"),
+        "offline error must name the missing method, got: {msg}",
+    );
+}
+
 /// Cross-chain contamination guard: an existing envelope claiming chain X
 /// combined with an endpoint returning chain Y must hard-error, not silently
 /// mix responses from two chains.

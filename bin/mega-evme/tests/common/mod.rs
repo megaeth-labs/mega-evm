@@ -142,6 +142,23 @@ impl MockRpcServer {
             .await;
     }
 
+    /// Mount an unbounded mock that always returns a successful JSON-RPC body
+    /// with `"result": null` (HTTP 200). Models a transient not-found answer
+    /// (e.g. `eth_getTransactionByHash` for a briefly-invisible transaction)
+    /// that capture must not bake into the fixture.
+    pub(crate) async fn respond_jsonrpc_null_result(&self, priority: u8) {
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 0,
+            "result": null,
+        });
+        Mock::given(matchers::method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .with_priority(priority)
+            .mount(&self.server)
+            .await;
+    }
+
     /// Mount an unbounded mock that answers every JSON-RPC request for
     /// `method` with the given hex `result`, regardless of params.
     pub(crate) async fn respond_method_result(&self, method: &str, hex_result: &str, priority: u8) {
