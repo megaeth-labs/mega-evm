@@ -423,12 +423,13 @@ where
             .basic_ref(*address)
             .map_err(|e| ReplayError::Other(format!("pre-state read for {address}: {e}")))?
         else {
-            // The database reports no account. RPC-backed databases (AlloyDB)
-            // always materialize an account (possibly all-empty), so on a forked
-            // replay this branch never fires and accounts created by the target
-            // transaction enter `pre` as explicit empty accounts — equivalent
-            // under EIP-161 state clearing. A database that can signal
-            // nonexistence omits the account here.
+            // The database reports no account. On a forked replay the RPC
+            // backend normalizes an all-zero (balance, nonce, code) answer to
+            // `None` (see `normalize_rpc_account` in `common/state.rs`), so
+            // this branch fires for every pre-transaction nonexistent account
+            // — including accounts the target transaction itself creates.
+            // Omitting them is correct state-test semantics: absence in `pre`
+            // means the account did not exist.
             continue;
         };
 
@@ -610,6 +611,86 @@ mod tests {
 
     fn unavailable() -> crate::common::EvmeError {
         crate::common::EvmeError::InvalidInput("database unavailable".to_string())
+    }
+
+    /// A database whose `basic_ref` answers are supplied per address.
+    ///
+    /// Used to pin the `build_pre_state` shape for both existence outcomes:
+    /// a touched address that returns `None` is omitted from `pre`, and a
+    /// touched address that returns `Some` is recorded with its fields.
+    struct MapDb {
+        accounts: std::collections::HashMap<Address, Option<RevmAccountInfo>>,
+    }
+
+    impl DatabaseRef for MapDb {
+        type Error = crate::common::EvmeError;
+
+        fn basic_ref(
+            &self,
+            address: Address,
+        ) -> std::result::Result<Option<RevmAccountInfo>, Self::Error> {
+            Ok(self.accounts.get(&address).cloned().unwrap_or(None))
+        }
+
+        fn code_by_hash_ref(&self, _: B256) -> std::result::Result<Bytecode, Self::Error> {
+            Err(unavailable())
+        }
+
+        fn storage_ref(
+            &self,
+            _: Address,
+            _: StorageKey,
+        ) -> std::result::Result<StorageValue, Self::Error> {
+            Err(unavailable())
+        }
+
+        fn block_hash_ref(&self, _: u64) -> std::result::Result<B256, Self::Error> {
+            Err(unavailable())
+        }
+    }
+
+    /// Touched addresses with no pre-transaction account are omitted from `pre`;
+    /// touched addresses that exist are recorded with their fields.
+    ///
+    /// Absence-means-nonexistence is the state-test fixture shape: a forked
+    /// backend returns `None` for all-zero RPC answers, so accounts created by
+    /// the target transaction must not appear as explicit empty entries.
+    #[test]
+    fn test_build_pre_state_omits_nonexistent_and_records_existing() {
+        let missing = Address::repeat_byte(0xaa);
+        let present = Address::repeat_byte(0xbb);
+        let balance = U256::from(42u64);
+        let nonce = 7u64;
+
+        let mut accounts = std::collections::HashMap::new();
+        accounts.insert(missing, None);
+        accounts.insert(
+            present,
+            Some(RevmAccountInfo {
+                balance,
+                nonce,
+                code_hash: KECCAK256_EMPTY,
+                code: Some(Bytecode::default()),
+                ..Default::default()
+            }),
+        );
+        let db = MapDb { accounts };
+
+        let mut evm_state = EvmState::default();
+        evm_state.insert(missing, Default::default());
+        evm_state.insert(present, Default::default());
+
+        let pre = build_pre_state(&db, &evm_state).expect("pre-state construction succeeds");
+
+        assert!(
+            !pre.contains_key(&missing),
+            "touched + basic_ref=None must be absent from pre (nonexistence)"
+        );
+        let recorded = pre.get(&present).expect("touched + basic_ref=Some must appear in pre");
+        assert_eq!(recorded.balance, balance);
+        assert_eq!(recorded.nonce, nonce);
+        assert!(recorded.code.is_empty());
+        assert!(recorded.storage.is_empty());
     }
 
     fn deposit_transaction() -> Transaction {
