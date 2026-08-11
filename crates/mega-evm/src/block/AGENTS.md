@@ -17,10 +17,38 @@ Block execution orchestration for MegaETH, including hardfork-to-spec resolution
 - Pre-execution and post-execution limits are intentionally separated.
 - Pre-checks reject/skip before execution.
 - Post-checks can drop outcomes before commit.
-- System contract deployments are idempotent state patches and are hardfork-gated.
+- System contract deployments are idempotent state patches, position-gated on the resolved spec.
 - Executor constructor asserts hardfork/spec coherence for non-test builds.
 - Block limiter state is cumulative and must be updated only on committed outcomes.
 - `pre_execution_changes` collects `Option<EvmState>` outcomes from each helper into a vector; `commit_system_call_outcomes` walks them and calls `system_caller.on_state(source, &state)` **before** `db.commit(state)` for every entry. The `on_state` hook feeds the stateless witness generator with the complete read/write set. Helpers must therefore return all accounts and slots they touched (including reads). See `crates/mega-evm/src/system/AGENTS.md` → `PRE-BLOCK STATE CHANGE CONTRACT` for the helper-side contract.
+
+## INVARIANT MAP
+The structural invariants of the spec ladder and fork schedule, indexed by where each is enforced and when it fires.
+Guards live next to the tables they guard; this map is the index, not the home.
+
+Compile time (const assertions and exhaustive matches; a violation fails `cargo build`):
+- `MegaSpecId::ALL` lists every spec in ladder order without gaps: `is_ladder_prefix` assertion in `evm/spec.rs`.
+- The `behavior()` projection is flat — no alias chains or cycles, no upward targets: `is_flat_projection` assertion in `evm/spec.rs`.
+- The fork→spec map is strictly ascending and therefore 1:1: `climbs_the_spec_ladder` assertion in `hardfork.rs`.
+- Every new spec must be placed everywhere it matters: exhaustive matches in `ladder_index` (`evm/spec.rs`), the instruction table (`evm/instructions.rs`), precompiles (`evm/precompiles.rs`), and runtime limits (`evm/limit.rs`) fail compilation until the variant is wired; its fork is forced the same way by the matches on the fork enum in `MegaHardfork::spec_id` (`hardfork.rs`) and block limits (`limit.rs`).
+
+Chain-config load time:
+- A published schedule climbs the ladder in activation order with required params attached: `MegaHardforks::validate_schedule` (`hardfork.rs`); `hardfork_schedule` (`chain.rs`) debug-asserts it, and node startup should call it.
+- Per-fork params invariants hold: `HardforkParams::validate` runs inside `with_params` and panics at load time, not at the fork's first block.
+
+Block execution time:
+- The cfg spec equals the schedule's resolution: executor constructor assert (compiled out under `test`/`test-utils`; pre-block setup reads the same cfg spec as `resolve_system_address`, so a tool overriding the cfg spec gets a coherent what-if rather than a hybrid block).
+- A scheduled fork whose params are missing fails closed at its first block: registry checks in `executor.rs` and `system/sequencer_registry.rs`.
+
+Test time (`cargo test`):
+- Alias dispatch grouping agrees with `behavior()`: reconciliation tests in `evm/instructions.rs`, `evm/precompiles.rs`, `evm/limit.rs`, and `limit.rs`.
+- The resolved spec equals the maximum over activated forks on every schedule shape: `test_resolved_spec_is_the_maximum_over_activated_forks` (`hardfork.rs`).
+- Position projections coincide with raw activation events: parity tests on every canonical schedule (`hardfork.rs`) and on a fully staged synthetic ladder (`tests/mutation/block.rs`).
+- The const checkers themselves reject malformed inputs (the real tables can never exercise the negative path): `test_is_ladder_prefix_rejects_malformed_lists`, `test_is_flat_projection_rejects_malformed_tables`, `test_climbs_the_spec_ladder_rejects_malformed_lists`.
+- Golden tables pin what derivation cannot: spec names and discriminant positions (`ALL_SPECS` in `evm/spec.rs`), the exact fork→spec pairs (`hardfork.rs`), and the pairing of load-time and pre-block params rules (`tests/block_executor/partial_ladder.rs`).
+
+CI:
+- Spec-gate mutation testing probes boundary shifts and dispatch misroutes: `mutants/operators/spec-gate/` (behavior-introducing specs only; alias rungs are not on the behavior axis).
 
 ## ANTI-PATTERNS
 - Do not apply post-execution limit counters before a tx outcome is commit-eligible.
