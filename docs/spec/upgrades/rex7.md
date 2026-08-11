@@ -70,10 +70,21 @@ For every transaction that stays within every runtime resource limit, a node MUS
 The interpreter's gas counter already meters every opcode; settling by segment reproduces the per-opcode sum exactly when no limit is crossed.
 
 **Exceptional-halt frame carve-out.**
-When a frame ends in an exceptional halt — including ordinary out-of-gas and memory out-of-gas — the interpreter zeros the frame's remaining gas before the frame-exit settlement runs.
-A node MUST therefore settle the entire burned remainder of that frame's budget as compute gas at frame exit.
+A frame that ends in an exceptional halt — ordinary out-of-gas, memory out-of-gas, stack underflow or overflow, invalid jump, unknown opcode, and every other error result — returns none of its remaining budget.
+The top-level frame's whole envelope is spent by the transaction's final gas accounting, and an inner frame's remainder is never handed back to its caller.
+A node MUST settle that entire burned remainder as compute gas at frame exit: the open plain-opcode segment measured against a zero remainder, plus any gas the clamp was hiding from the interpreter.
+The rule is driven by the halt classification, not by the interpreter's own counter — an inherited EVM zeroes that counter for ordinary out-of-gas only.
+
 Under per-opcode recording through Rex6, neither the failing opcode nor the burn is attributed to compute gas.
-Consequently, a transaction that contains an inner call frame which runs out of gas MAY report a **strictly higher** compute-gas total under Rex7 than under Rex6, while EVM gas accounting and the receipt remain identical.
+Consequently, a transaction that halts exceptionally, or that contains an inner call frame which does, MAY report a **strictly higher** compute-gas total under Rex7 than under Rex6, while EVM gas accounting and the receipt remain identical.
+
+A node MUST NOT evaluate any resource limit against the burned remainder.
+The burn is bounded by the sender's gas envelope rather than by the compute limit, so it can carry the recorded total past that limit; halting on it would rescue gas the EVM has already burned and change a receipt this carve-out requires to stay identical.
+The usage a limit is evaluated against therefore excludes the burn, while the transaction's reported compute-gas total and the block-level compute accounting include it.
+Nothing is lost by that exclusion: the part of an exceptionally halted frame's tail that was actually executed is bounded either by the gas clamp or by a frame gas remainder that was already below the compute headroom, so it could not have exceeded a limit in the first place.
+
+A clamp-induced out-of-gas is not an exceptional halt for this rule.
+The crossing opcode was stopped before it executed and the remaining gas is rescued for the sender rather than burned, so the reclassification rules below apply instead.
 
 ### Gas-Clamp Enforcement
 
@@ -90,8 +101,9 @@ Under Rex7, a node MUST enforce compute-gas and detention limits inside plain-op
 At each checkpoint, after settlement and after the checkpoint body has recorded its own compute gas (and after any detention cap the checkpoint installs), and again at frame entry and resume, a node MUST:
 
 1. Compute the remaining compute headroom as the minimum of the current frame's remaining per-frame compute budget and the transaction-level remaining budget under the effective limit (including detention).
-2. Hide any interpreter remaining gas above that headroom from the interpreter, remembering both the hidden amount and which constraint bound the clamp (frame-local budget vs transaction-level / detained limit).
-3. Leave the true remaining gas available again before the next checkpoint body runs, before `GAS` is observed, before call-gas forwarding is computed, and before storage-gas charges are taken, so those sites always see the unclamped counter.
+2. When the interpreter's true remaining gas is at or above that headroom, put the clamp in force for the segment that follows: hide the excess from the interpreter and remember which constraint bound the clamp — the frame-local budget or the transaction-level / detained limit — together with that constraint's own limit value. Equality is a binding clamp that hides nothing, not the absence of a clamp.
+3. When the true remaining gas is below the headroom, no clamp is in force: the frame's own gas runs out ahead of the compute headroom, and an out-of-gas inside the segment is the inherited EVM's own rather than a resource-limit exceed.
+4. Leave the true remaining gas available again before the next checkpoint body runs, before `GAS` is observed, before call-gas forwarding is computed, and before storage-gas charges are taken, so those sites always see the unclamped counter.
 
 Inside a plain-opcode segment only plain opcodes run, so the inherited EVM's ordinary per-opcode gas check is the enforcement tool:
 
@@ -102,8 +114,12 @@ Inside a plain-opcode segment only plain opcodes run, so the inherited EVM's ord
   - **Transaction-level compute binding** → the transaction halts with `OutOfGas`, and remaining gas is rescued and refunded to the sender.
   - **Detained-limit binding** → the transaction halts with `VolatileDataAccessOutOfGas`, with the same gas rescue.
 
+The reported `limit` MUST be the constraint that bound the clamp, not whichever limit is largest or most convenient: the frame's own compute budget for a frame-local binding, the effective transaction-level limit otherwise.
+The revert payload is visible to the calling contract, so a frame-local exceed that reported the transaction-level limit would be a different observable return value for the same execution, not merely a different diagnostic.
+
 Because the crossing opcode never executes, a node MUST NOT include its cost in recorded compute-gas usage.
 Recorded usage at a clamp-induced halt therefore ends at the limit (or strictly below it if settlement had not yet closed a partial segment), not strictly above it.
+The `actual` a transaction-level clamp halt reports MUST be that final usage — the frame-exit settlement closes the partial segment after the exceed is identified, and a node MUST NOT report the usage as it stood before that settlement.
 
 **Top-frame headroom tie-break.**
 At the top-level frame the remaining per-frame compute budget equals the transaction-level remaining budget whenever both are still governed by the same base limit.
@@ -128,7 +144,8 @@ Contracts and tools that assume per-opcode compute-gas attribution for every ins
 Contracts that stay within every resource limit see no behavioral change relative to Rex6.
 Contracts that trip the compute-gas or detention limit inside a plain-opcode segment halt one opcode earlier than under Rex6, with the crossing opcode excluded from recorded compute usage and with remaining gas still refundable on a transaction-level halt.
 
-A parent that calls into a child which runs out of ordinary EVM gas may observe a higher transaction-level compute-gas total under Rex7 than under Rex6; the receipt `gas_used` and the execution success or failure of the outer transaction are unchanged by that carve-out alone.
+A transaction that halts exceptionally, or that calls into a child frame which does, may report a higher transaction-level compute-gas total under Rex7 than under Rex6 — for any exceptional halt, not just out-of-gas.
+The receipt `gas_used`, the halt or revert reported, and the execution success or failure of the outer transaction are unchanged by that carve-out: the burned remainder is reported, never enforced.
 
 ## Safety and Compatibility
 

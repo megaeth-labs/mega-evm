@@ -479,13 +479,20 @@ For every transaction that stays within every runtime resource limit, a node MUS
 
 After settlement and body recording at a checkpoint (and at frame entry and resume), a node MUST clamp the interpreter-visible remaining gas to the remaining compute headroom — the minimum of the current frame's remaining per-frame compute budget and the transaction-level remaining budget under the effective limit (including detention) — and MUST restore the hidden amount before the next checkpoint body, before `GAS` is observed, before call-gas forwarding, and before storage-gas charges.
 
+The clamp is in force for the segment that follows whenever the true remaining gas is at or above the headroom, and a node MUST remember which constraint bound it along with that constraint's own limit value.
+An exact equality is a binding clamp that hides nothing, not the absence of a clamp.
+When the true remaining gas is below the headroom, no clamp is in force and an out-of-gas inside the segment is the inherited EVM's own.
+
 Inside a plain-opcode segment:
 
 - An opcode that would cost more than the clamped visible remainder MUST NOT execute.
 - The frame's final result MUST restore the hidden gas.
 - The node MUST reclassify that out-of-gas as the resource-limit exceed the clamp stood for: frame-local budget → frame revert with `MegaLimitExceeded`; transaction-level compute → transaction halt with `OutOfGas` and rescued remaining gas; detained limit → transaction halt with `VolatileDataAccessOutOfGas` and rescued remaining gas.
 
+The `limit` reported by either shape MUST be the constraint that bound the clamp — the frame's own compute budget for a frame-local binding, the effective transaction-level limit otherwise — matching what the per-opcode check path on this page reports.
+
 Because the crossing opcode never executes, a node MUST NOT include its cost in recorded compute-gas usage.
+The `actual` a transaction-level clamp halt reports MUST be the transaction's final compute usage, after the frame-exit settlement has closed the partial segment the crossing opcode stopped inside.
 
 When the current frame's remaining per-frame compute budget equals the transaction-level remaining budget, a node MUST bind the clamp to the transaction-level constraint (including detention when detention is the effective transaction-level bound).
 A clamp-induced exceed under that binding MUST halt the transaction with gas rescue; a node MUST NOT classify the equality as frame-local.
@@ -495,9 +502,16 @@ When the crossing opcode would exhaust both the true remaining EVM gas and the c
 
 #### Exceptional-halt frame carve-out
 
-When a frame ends in an exceptional halt — including ordinary out-of-gas and memory out-of-gas — the interpreter zeros the frame's remaining gas before frame-exit settlement.
-A node MUST settle that entire burned remainder as compute gas at frame exit.
-Under per-opcode recording through Rex6 neither the failing opcode nor the burn is attributed to compute gas, so a transaction that contains an inner out-of-gas call frame MAY report a strictly higher compute-gas total under Rex7 while EVM gas and the receipt remain identical.
+A frame that ends in an exceptional halt — ordinary out-of-gas, memory out-of-gas, stack underflow or overflow, invalid jump, unknown opcode, and every other error result — returns none of its remaining budget.
+A node MUST settle that entire burned remainder as compute gas at frame exit: the open plain-opcode segment measured against a zero remainder, plus any gas the clamp was hiding.
+The rule is driven by the halt classification rather than by the interpreter's own counter, which an inherited EVM zeroes for ordinary out-of-gas only.
+Under per-opcode recording through Rex6 neither the failing opcode nor the burn is attributed to compute gas, so a transaction that halts exceptionally, or that contains an inner call frame which does, MAY report a strictly higher compute-gas total under Rex7 while EVM gas and the receipt remain identical.
+
+A node MUST NOT evaluate any resource limit against the burned remainder: it is bounded by the sender's gas envelope rather than by the compute limit, and halting on it would rescue gas the EVM already burned and change the receipt this carve-out requires to stay identical.
+The usage a limit is evaluated against therefore excludes the burn, while the reported compute-gas total and the block-level compute accounting include it.
+Nothing is lost by the exclusion: the executed part of an exceptionally halted frame's tail is bounded either by the clamp or by a frame gas remainder that was already below the headroom.
+
+A clamp-induced out-of-gas is not an exceptional halt for this rule — the crossing opcode never executed and the remaining gas is rescued rather than burned.
 
 </details>
 
