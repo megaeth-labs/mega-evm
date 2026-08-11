@@ -147,14 +147,13 @@ pub fn flat_system_contract_specs(
     hardforks: impl MegaHardforks,
     block_timestamp: u64,
 ) -> Vec<SystemContractSpec> {
-    flat_system_contract_specs_for(hardforks.max_activated_spec_id(block_timestamp))
+    flat_system_contract_specs_for(hardforks.spec_id(block_timestamp))
 }
 
-/// [`flat_system_contract_specs`] against an already-resolved scheduled spec.
+/// [`flat_system_contract_specs`] against an already-resolved spec.
 ///
-/// The block executor resolves the floor once per block
-/// ([`max_activated_spec_id`](crate::MegaHardforks::max_activated_spec_id)) and calls this
-/// directly; the public wrapper above resolves it for callers that hold a hardfork config.
+/// The block executor resolves the spec once per block and calls this directly; the public
+/// wrapper above resolves it for callers that hold a hardfork config.
 pub(crate) fn flat_system_contract_specs_for(spec: MegaSpecId) -> Vec<SystemContractSpec> {
     // Compose the per-contract spec builders (each its own single source of gate
     // + bytecode-version selection). `None` entries (inactive contracts) drop out.

@@ -222,7 +222,7 @@ fn staged_config() -> MegaHardforkConfig {
 ///
 /// Every predicate is probed on **both** sides of its own activation, which is what pins the
 /// spec each one projects. A behavior-introducing predicate's body is
-/// `max_activated_spec_id(t).reaches(MegaSpecId::X)`, so shifting `X` one rung either way is a
+/// `spec_id(t).reaches(MegaSpecId::X)`, so shifting `X` one rung either way is a
 /// live mutation: shifting down makes the predicate fire at the rung below (caught by the
 /// `false` assertion one second early), shifting up makes it stop firing at its own rung (caught
 /// by the `true` assertion). A one-sided probe kills neither direction.
@@ -230,48 +230,48 @@ fn staged_config() -> MegaHardforkConfig {
 fn test_hardfork_activation_predicates_are_true_at_activation() {
     let cfg = staged_config();
 
-    // MiniRex (hardfork.rs:178) — spec-introducing (MINI_REX). Shifting down lands on
+    // MiniRex (hardfork.rs:192) — spec-introducing (MINI_REX). Shifting down lands on
     // EQUIVALENCE, which is enabled at every timestamp, so only the `false` side catches it.
     assert!(!cfg.is_mini_rex_active_at_timestamp(99));
     assert!(cfg.is_mini_rex_active_at_timestamp(100));
 
-    // MiniRex1 (hardfork.rs:189) — alias fork, raw event query.
+    // MiniRex1 (hardfork.rs:203) — alias fork, raw event query.
     assert!(!cfg.is_mini_rex_1_active_at_timestamp(199));
     assert!(cfg.is_mini_rex_1_active_at_timestamp(200));
 
-    // MiniRex2 (hardfork.rs:199) — alias fork, raw event query.
+    // MiniRex2 (hardfork.rs:213) — alias fork, raw event query.
     assert!(!cfg.is_mini_rex_2_active_at_timestamp(299));
     assert!(cfg.is_mini_rex_2_active_at_timestamp(300));
 
-    // Rex (hardfork.rs:206).
+    // Rex (hardfork.rs:220).
     assert!(!cfg.is_rex_active_at_timestamp(399));
     assert!(cfg.is_rex_active_at_timestamp(400));
 
-    // Rex1 (hardfork.rs:213).
+    // Rex1 (hardfork.rs:227).
     assert!(!cfg.is_rex_1_active_at_timestamp(499));
     assert!(cfg.is_rex_1_active_at_timestamp(500));
 
-    // Rex2 (hardfork.rs:220).
+    // Rex2 (hardfork.rs:234).
     assert!(!cfg.is_rex_2_active_at_timestamp(599));
     assert!(cfg.is_rex_2_active_at_timestamp(600));
 
-    // Rex3 (hardfork.rs:227).
+    // Rex3 (hardfork.rs:241).
     assert!(!cfg.is_rex_3_active_at_timestamp(699));
     assert!(cfg.is_rex_3_active_at_timestamp(700));
 
-    // Rex4 (hardfork.rs:234).
+    // Rex4 (hardfork.rs:248).
     assert!(!cfg.is_rex_4_active_at_timestamp(799));
     assert!(cfg.is_rex_4_active_at_timestamp(800));
 
-    // Rex5 (hardfork.rs:241).
+    // Rex5 (hardfork.rs:255).
     assert!(!cfg.is_rex_5_active_at_timestamp(899));
     assert!(cfg.is_rex_5_active_at_timestamp(900));
 
-    // Rex6 (hardfork.rs:248).
+    // Rex6 (hardfork.rs:262).
     assert!(!cfg.is_rex_6_active_at_timestamp(999));
     assert!(cfg.is_rex_6_active_at_timestamp(1000));
 
-    // Rex7 (hardfork.rs:255).
+    // Rex7 (hardfork.rs:269).
     assert!(!cfg.is_rex_7_active_at_timestamp(1099));
     assert!(cfg.is_rex_7_active_at_timestamp(1100));
 }

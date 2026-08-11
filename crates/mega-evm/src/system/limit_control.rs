@@ -29,7 +29,7 @@ pub fn transact_deploy_limit_control_contract<DB: Database>(
     block_timestamp: u64,
     db: &mut State<DB>,
 ) -> Result<Option<EvmState>, DB::Error> {
-    limit_control_spec(hardforks.max_activated_spec_id(block_timestamp))
+    limit_control_spec(hardforks.spec_id(block_timestamp))
         .map(|s| crate::transact_deploy(db, &s))
         .transpose()
 }

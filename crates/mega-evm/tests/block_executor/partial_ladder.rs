@@ -1,10 +1,9 @@
 //! End-to-end tests for pre-block setup on partial and rollback hardfork ladders.
 //!
 //! Pre-block setup (system-contract predeploys, the EIP-2935/EIP-4788 fail-closed checks, the
-//! `SequencerRegistry` bootstrap) is gated on the **scheduled spec**
-//! (`MegaHardforks::max_activated_spec_id`, position-compared via `reaches`), not on
-//! per-fork registration and not on the behavior projection. These tests pin both directions of
-//! that choice:
+//! `SequencerRegistry` bootstrap) is gated on the resolved spec position-compared via
+//! `reaches`, not on per-fork registration and not on the behavior projection. These tests pin
+//! both directions of that choice:
 //!
 //! - A *partial* ladder — a config scheduling a later fork without its predecessors — must still
 //!   run every lower fork's setup, rather than silently skipping it.
@@ -177,7 +176,7 @@ fn test_partial_ladder_runs_lower_fork_setup() {
     }
 
     // The Oracle takes its Rex5 bytecode, and the registry its Rex6 bytecode with the seeded
-    // rotation delay — i.e. the floor drives version selection too, not just the on/off gate.
+    // rotation delay — i.e. the position drives version selection too, not just the on/off gate.
     assert_eq!(
         state.basic(ORACLE_CONTRACT_ADDRESS).unwrap().unwrap().code_hash,
         ORACLE_CONTRACT_CODE_HASH_REX5

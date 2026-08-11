@@ -448,11 +448,11 @@ fn bench_rex5_pre_block(c: &mut Criterion) {
 
 /// Benchmark hardfork-config resolution on the real mainnet schedule.
 ///
-/// The floor-projected predicates (`is_rex_5_active_at_timestamp`) and
-/// `max_activated_spec_id` are what downstream node components call once per block; `spec_id`
-/// is the executor's per-block resolution; `validate_schedule` is a once-per-config-load cost.
-/// The floor's descending early-exit scan keeps the per-query cost at one or two activation
-/// lookups for chains near the top of the ladder, which this benchmark pins.
+/// The position-projected predicates (`is_rex_5_active_at_timestamp`) are what downstream node
+/// components call once per block; `spec_id` is the executor's per-block resolution;
+/// `validate_schedule` is a once-per-config-load cost. Resolution's descending early-exit scan
+/// keeps the per-query cost at one or two activation lookups for chains near the top of the
+/// ladder, which this benchmark pins.
 fn bench_hardfork_resolution(c: &mut Criterion) {
     use mega_evm::MegaHardforks;
 
@@ -463,9 +463,6 @@ fn bench_hardfork_resolution(c: &mut Criterion) {
 
     group.bench_function("is_rex_5_active_at_timestamp", |b| {
         b.iter(|| black_box(schedule.is_rex_5_active_at_timestamp(black_box(ts))))
-    });
-    group.bench_function("max_activated_spec_id", |b| {
-        b.iter(|| black_box(schedule.max_activated_spec_id(black_box(ts))))
     });
     group.bench_function("spec_id", |b| b.iter(|| black_box(schedule.spec_id(black_box(ts)))));
     group.bench_function("validate_schedule", |b| {

@@ -46,7 +46,7 @@ pub fn transact_deploy_oracle_contract<DB: Database>(
     block_timestamp: u64,
     db: &mut State<DB>,
 ) -> Result<Option<EvmState>, DB::Error> {
-    oracle_spec(hardforks.max_activated_spec_id(block_timestamp))
+    oracle_spec(hardforks.spec_id(block_timestamp))
         .map(|s| crate::transact_deploy(db, &s))
         .transpose()
 }
@@ -108,7 +108,7 @@ pub fn transact_deploy_high_precision_timestamp_oracle<DB: Database>(
     block_timestamp: u64,
     db: &mut State<DB>,
 ) -> Result<Option<EvmState>, DB::Error> {
-    high_precision_timestamp_oracle_spec(hardforks.max_activated_spec_id(block_timestamp))
+    high_precision_timestamp_oracle_spec(hardforks.spec_id(block_timestamp))
         .map(|s| crate::transact_deploy(db, &s))
         .transpose()
 }

@@ -142,7 +142,7 @@ where
         );
 
         Self {
-            setup_spec: hardforks.max_activated_spec_id(block_timestamp),
+            setup_spec: hardforks.spec_id(block_timestamp),
             hardforks: hardforks.clone(),
             receipt_builder,
             receipts: Vec::new(),

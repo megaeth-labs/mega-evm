@@ -192,17 +192,17 @@ pub fn transact_deploy_sequencer_registry<DB: Database>(
     db: &mut State<DB>,
     config: &SequencerRegistryConfig,
 ) -> Result<Option<EvmState>, BlockExecutionError> {
-    let spec = hardforks.max_activated_spec_id(block_timestamp);
+    let spec = hardforks.spec_id(block_timestamp);
     let rex6_config = hardforks.fork_params::<SequencerRegistryRex6Config>();
     transact_deploy_sequencer_registry_for(spec, rex6_config, current_block_number, db, config)
 }
 
-/// [`transact_deploy_sequencer_registry`] against an already-resolved scheduled spec.
+/// [`transact_deploy_sequencer_registry`] against an already-resolved spec.
 ///
-/// The block executor resolves the floor once per block and calls this directly; the public
+/// The block executor resolves the spec once per block and calls this directly; the public
 /// wrapper above resolves it for callers that hold a hardfork config. Like the flat-registry
 /// spec builders, this deliberately does not take a hardfork config — everything a deploy
-/// depends on arrives resolved (the floor and the typed params), so a per-fork activation gate
+/// depends on arrives resolved (the spec and the typed params), so a per-fork activation gate
 /// cannot be reintroduced here.
 pub(crate) fn transact_deploy_sequencer_registry_for<DB: Database>(
     spec: crate::MegaSpecId,
