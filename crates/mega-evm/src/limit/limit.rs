@@ -107,6 +107,22 @@ pub struct AdditionalLimit {
 
     /// A tracker for the `STORAGE_CALL_STIPEND` granted to value-transferring calls (REX4+).
     pub(crate) storage_call_stipend: storage_call_stipend::StorageCallStipendTracker,
+
+    /// REX7+: whether compute gas settles at checkpoints rather than per opcode.
+    ///
+    /// When set, plain opcodes run unwrapped and record nothing; the interpreter's own gas
+    /// counter is read at each checkpoint and the whole segment since the previous one is
+    /// recorded in a single call.
+    checkpoint_accounting: bool,
+
+    /// Interpreter gas remaining at the start of the current unsettled segment — the previous
+    /// checkpoint, or the frame entry / resume that opened the window. Only meaningful while a
+    /// frame is running and only when [`checkpoint_accounting`](Self::checkpoint_accounting) is
+    /// active. Re-synced at every [`before_frame_run`](Self::before_frame_run) (which covers both
+    /// frame entry and every resume after a child frame's outcome is merged back) and at every
+    /// checkpoint settlement, and lowered by storage-gas charge sites that debit interpreter gas
+    /// inside an open window.
+    checkpoint_baseline: u64,
 }
 
 /// The usage of the additional limits.
@@ -134,6 +150,8 @@ impl AdditionalLimit {
             kv_update: kv_update::KVUpdateTracker::new(spec, limits.tx_kv_updates_limit),
             compute_gas: compute_gas::ComputeGasTracker::new(spec, limits.tx_compute_gas_limit),
             storage_call_stipend: storage_call_stipend::StorageCallStipendTracker::new(spec),
+            checkpoint_accounting: spec.is_enabled(MegaSpecId::REX7),
+            checkpoint_baseline: 0,
         }
     }
 }
@@ -175,6 +193,53 @@ impl AdditionalLimit {
         self.data_size.reset();
         self.kv_update.reset();
         self.storage_call_stipend.reset();
+        self.checkpoint_baseline = 0;
+    }
+
+    /// Whether compute gas settles at checkpoints (REX7+) rather than per opcode.
+    #[inline]
+    pub(crate) fn checkpoint_accounting(&self) -> bool {
+        self.checkpoint_accounting
+    }
+
+    /// Interpreter gas remaining at the start of the current unsettled segment.
+    ///
+    /// Settlement sites that need to subtract their own storage gas or forwarded child gas read
+    /// this instead of a per-opcode `gas_before` capture, so the measured delta covers every
+    /// unwrapped plain opcode executed since the previous checkpoint.
+    #[inline]
+    pub(crate) fn checkpoint_baseline(&self) -> u64 {
+        self.checkpoint_baseline
+    }
+
+    /// Re-opens the settlement window at `remaining`, without recording anything.
+    ///
+    /// Used by settlement sites that compute their own segment amount; every such site must
+    /// call this once it has recorded, so a later settlement cannot bill the segment twice.
+    #[inline]
+    pub(crate) fn sync_checkpoint_baseline(&mut self, remaining: u64) {
+        self.checkpoint_baseline = remaining;
+    }
+
+    /// Lowers the open window's baseline by `amount`, excluding a storage-gas debit from the
+    /// segment that the next settlement will measure.
+    ///
+    /// Charge sites that debit storage gas to interpreter gas while a window is open, and whose
+    /// settlement site does not receive the charged amount directly, use this instead: the
+    /// settlement then takes `baseline − remaining` with no storage term of its own.
+    #[inline]
+    pub(crate) fn deduct_checkpoint_baseline(&mut self, amount: u64) {
+        self.checkpoint_baseline = self.checkpoint_baseline.saturating_sub(amount);
+    }
+
+    /// Settles the open segment against `gas_remaining`, re-opens the window there, and returns
+    /// `false` when a limit — including a non-compute exceed latched since the previous
+    /// checkpoint — surfaces.
+    #[inline]
+    pub(crate) fn settle_checkpoint(&mut self, gas_remaining: u64) -> bool {
+        let gas_used = self.checkpoint_baseline.saturating_sub(gas_remaining);
+        self.checkpoint_baseline = gas_remaining;
+        self.record_compute_gas(gas_used)
     }
 
     /// Test-only setter for [`has_exceeded_limit`](Self::has_exceeded_limit). Bypasses every
@@ -418,8 +483,33 @@ impl AdditionalLimit {
     /// This runs on every metered opcode, so it is the hottest hook in the whole tracker.
     /// `#[inline]` lets the record + within-limit check fold directly into the per-opcode
     /// wrapper, removing a call across the `RefMut<AdditionalLimit>` boundary.
+    ///
+    /// Surfacing an exceed here is what turns a latched non-compute overflow into a halt, so
+    /// the call sites are also the positions a halt can land on: every metered opcode under
+    /// per-opcode accounting, and every checkpoint under checkpoint accounting.
     #[inline]
     pub(crate) fn record_compute_gas(&mut self, compute_gas_used: u64) -> bool {
+        self.record_compute_gas_impl::<true>(compute_gas_used)
+    }
+
+    /// Records the compute gas used without the latch-protocol guard.
+    ///
+    /// The guard in [`record_compute_gas_impl`](Self::record_compute_gas_impl) asserts that no
+    /// non-compute dimension is over limit without having latched, which holds at every position
+    /// an opcode can record from. It does not hold at a frame's final settlement: a pre-inner
+    /// recorder whose opcode then failed (SELFDESTRUCT's beneficiary accounting) deliberately
+    /// leaves its usage unlatched, and the frame is about to pop and discard it. Recording it
+    /// through the guarded entry point would trip the assert on that path.
+    #[inline]
+    pub(crate) fn record_compute_gas_unguarded(&mut self, compute_gas_used: u64) -> bool {
+        self.record_compute_gas_impl::<false>(compute_gas_used)
+    }
+
+    #[inline]
+    fn record_compute_gas_impl<const GUARD_LATCH_PROTOCOL: bool>(
+        &mut self,
+        compute_gas_used: u64,
+    ) -> bool {
         // Record unconditionally, even when another dimension has already latched an exceed:
         // the compute work was performed, and the recorded total feeds the transaction outcome
         // and block-level compute accounting. Skipping the record would under-report compute
@@ -437,13 +527,15 @@ impl AdditionalLimit {
         // only if every non-compute mutation site already latched its own exceed. If a
         // non-compute dimension is over limit but not yet latched, some mutation site is missing
         // its `check_limit()` — catch it here in tests, not in production. The sub-tracker
-        // `check_limit()` calls are non-mutating, so this compiles out of release builds. (The
-        // one pre-inner recorder, SELFDESTRUCT, routes through `record_compute_gas_all_dims`, not
-        // this method, so it never trips this.)
+        // `check_limit()` calls are non-mutating, so this compiles out of release builds. The one
+        // pre-inner recorder, SELFDESTRUCT, routes through `record_compute_gas_all_dims`, not this
+        // method, so it never trips this; the frame-final settlement, which can observe that same
+        // recorder's usage after its opcode failed, opts out via `GUARD_LATCH_PROTOCOL`.
         debug_assert!(
-            !self.data_size.check_limit().exceeded_limit() &&
-                !self.kv_update.check_limit().exceeded_limit() &&
-                !self.state_growth.check_limit().exceeded_limit(),
+            !GUARD_LATCH_PROTOCOL ||
+                (!self.data_size.check_limit().exceeded_limit() &&
+                    !self.kv_update.check_limit().exceeded_limit() &&
+                    !self.state_growth.check_limit().exceeded_limit()),
             "non-compute limit exceeded without latching: a mutation site is missing check_limit()",
         );
         // Recording compute gas can only change the compute-gas dimension, so check just that one
@@ -670,6 +762,15 @@ impl AdditionalLimit {
         &mut self,
         frame: &EthFrame<EthInterpreter>,
     ) -> Option<InterpreterResult> {
+        // Checkpoint accounting: open the settlement window at the frame's current gas. This hook
+        // runs both at frame entry and at every resume after a child frame's outcome — including
+        // the gas it returned — has been merged back into this frame's interpreter, so the window
+        // always starts at an instruction boundary with the interpreter's counter in its real,
+        // post-merge state.
+        if self.checkpoint_accounting {
+            self.checkpoint_baseline = frame.interpreter.gas.remaining();
+        }
+
         self.state_growth.before_frame_run(frame);
         self.data_size.before_frame_run(frame);
         self.kv_update.before_frame_run(frame);
@@ -719,6 +820,24 @@ impl AdditionalLimit {
         frame: &'a EthFrame<EthInterpreter>,
         action: &'a mut InterpreterAction,
     ) {
+        // Checkpoint accounting: the frame has produced its final action, so settle the tail
+        // segment — everything since the last checkpoint — against the interpreter's gas counter.
+        // `frame.interpreter.gas` still holds the loop-exit value here (the code-deposit storage
+        // charge applied by the execution-layer hook mutates only the action's gas copy), so the
+        // delta telescopes over exactly the unwrapped plain opcodes that ran since. A checkpoint
+        // that already settled and halted leaves `baseline == remaining` (delta 0), and a CALL
+        // abort path's forwarded-gas `erase_cost` can only raise `remaining` above the baseline,
+        // which the saturation turns into 0. Any exceed recorded here is latched, and the frame
+        // result marking below / in `before_frame_return_result` surfaces it.
+        if self.checkpoint_accounting {
+            if let InterpreterAction::Return(_) = action {
+                let remaining = frame.interpreter.gas.remaining();
+                let gas_used = self.checkpoint_baseline.saturating_sub(remaining);
+                self.checkpoint_baseline = remaining;
+                let _ = self.record_compute_gas_unguarded(gas_used);
+            }
+        }
+
         self.state_growth.after_frame_run(frame, action);
         self.data_size.after_frame_run(frame, action);
         self.kv_update.after_frame_run(frame, action);
