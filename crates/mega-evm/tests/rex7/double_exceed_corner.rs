@@ -20,7 +20,7 @@
 //! The calibration runs a probe truncated just before the crossing opcode and reads two numbers off
 //! it: the compute gas recorded there (which fixes where to put the compute limit) and the
 //! receipt's `gas_used` (the EVM gas spent there, which fixes the transaction gas limit at which
-//! the crossing opcode is exactly affordable). The two are not the same number — MegaETH's
+//! the crossing opcode is exactly affordable). The two are not the same number — `MegaETH`'s
 //! intrinsic transaction gas is larger than the intrinsic compute it records — so both have to be
 //! measured.
 

@@ -324,7 +324,7 @@ fn test_system_originated_transaction_is_unclamped_under_both_models() {
     );
 }
 
-/// The REX5 storage-call stipend is a per-frame allowance drawn only at MegaETH's storage-gas
+/// The REX5 storage-call stipend is a per-frame allowance drawn only at `MegaETH`'s storage-gas
 /// surcharge sites — which are exactly the checkpoints. A value-transferring internal CALL into a
 /// callee that logs and writes storage draws on it at three of them.
 ///
