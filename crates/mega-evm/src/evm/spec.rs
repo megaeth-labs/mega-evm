@@ -361,29 +361,32 @@ impl Display for MegaSpecId {
 mod tests {
     use super::*;
 
-    const ALL_SPECS: [(MegaSpecId, &str); 12] = [
-        (MegaSpecId::EQUIVALENCE, name::EQUIVALENCE),
-        (MegaSpecId::MINI_REX, name::MINI_REX),
-        (MegaSpecId::MINI_REX_1, name::MINI_REX_1),
-        (MegaSpecId::MINI_REX_2, name::MINI_REX_2),
-        (MegaSpecId::REX, name::REX),
-        (MegaSpecId::REX1, name::REX1),
-        (MegaSpecId::REX2, name::REX2),
-        (MegaSpecId::REX3, name::REX3),
-        (MegaSpecId::REX4, name::REX4),
-        (MegaSpecId::REX5, name::REX5),
-        (MegaSpecId::REX6, name::REX6),
-        (MegaSpecId::REX7, name::REX7),
+    /// The one golden spec table: every spec with its string identifier and its pinned ladder
+    /// position. The spec column must be exactly [`MegaSpecId::ALL`] (asserted in the
+    /// round-trip test); the name and position columns stay hand-written — deriving either
+    /// from the code under test would make its check vacuous.
+    const ALL_SPECS: [(MegaSpecId, &str, u8); 12] = [
+        (MegaSpecId::EQUIVALENCE, name::EQUIVALENCE, 0),
+        (MegaSpecId::MINI_REX, name::MINI_REX, 1),
+        (MegaSpecId::MINI_REX_1, name::MINI_REX_1, 2),
+        (MegaSpecId::MINI_REX_2, name::MINI_REX_2, 3),
+        (MegaSpecId::REX, name::REX, 4),
+        (MegaSpecId::REX1, name::REX1, 5),
+        (MegaSpecId::REX2, name::REX2, 6),
+        (MegaSpecId::REX3, name::REX3, 7),
+        (MegaSpecId::REX4, name::REX4, 8),
+        (MegaSpecId::REX5, name::REX5, 9),
+        (MegaSpecId::REX6, name::REX6, 10),
+        (MegaSpecId::REX7, name::REX7, 11),
     ];
 
     #[test]
     fn test_spec_names_roundtrip_and_display() {
-        // The golden pairs stay hand-written — deriving the expected names from the code under
-        // test would make the round-trip vacuous — but the spec column must be exactly
-        // `MegaSpecId::ALL`, so a newly introduced spec cannot be forgotten here.
-        assert!(ALL_SPECS.iter().map(|(spec, _)| *spec).eq(MegaSpecId::ALL.iter().copied()));
+        // The spec column must be exactly `MegaSpecId::ALL`, so a newly introduced spec cannot
+        // be forgotten here.
+        assert!(ALL_SPECS.iter().map(|(spec, _, _)| *spec).eq(MegaSpecId::ALL.iter().copied()));
 
-        for (spec, expected_name) in ALL_SPECS {
+        for (spec, expected_name, _) in ALL_SPECS {
             assert_eq!(<&'static str>::from(spec), expected_name);
             assert_eq!(MegaSpecId::from_str(expected_name).unwrap(), spec);
             assert_eq!(spec.to_string(), expected_name);
@@ -402,31 +405,14 @@ mod tests {
         assert_eq!(*MegaSpecId::ALL.last().unwrap(), MegaSpecId::default());
     }
 
-    /// The compile-time checker is itself exercised with malformed lists: the real `ALL`
-    /// always satisfies the property, so only rejection cases can detect a weakened guard
-    /// inside the checker.
     #[test]
     fn test_ladder_positions_are_pinned() {
         // A downstream variant-index codec (bincode-style) of `MegaSpecId` — or of a
         // container holding it — silently misreads old data if discriminants renumber.
-        // Pinning every position turns any future renumbering into a loud diff here,
-        // where the review attention is.
-        let pinned: [(MegaSpecId, u8); 12] = [
-            (MegaSpecId::EQUIVALENCE, 0),
-            (MegaSpecId::MINI_REX, 1),
-            (MegaSpecId::MINI_REX_1, 2),
-            (MegaSpecId::MINI_REX_2, 3),
-            (MegaSpecId::REX, 4),
-            (MegaSpecId::REX1, 5),
-            (MegaSpecId::REX2, 6),
-            (MegaSpecId::REX3, 7),
-            (MegaSpecId::REX4, 8),
-            (MegaSpecId::REX5, 9),
-            (MegaSpecId::REX6, 10),
-            (MegaSpecId::REX7, 11),
-        ];
-        assert_eq!(pinned.len(), MegaSpecId::ALL.len());
-        for (spec, position) in pinned {
+        // Pinning every position turns any future renumbering into a loud diff on the
+        // golden table, where the review attention is.
+        assert_eq!(ALL_SPECS.len(), MegaSpecId::ALL.len());
+        for (spec, _, position) in ALL_SPECS {
             assert_eq!(spec as u8, position, "{spec:?} moved on the ladder");
         }
     }
