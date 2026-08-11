@@ -11,4 +11,5 @@ mod gas_leakage;
 mod interceptor_resume;
 mod latch_surfacing;
 mod modexp_gas;
+mod parity_shapes;
 mod v0_clamp;

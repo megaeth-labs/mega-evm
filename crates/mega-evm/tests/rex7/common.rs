@@ -123,15 +123,6 @@ pub(crate) fn transact_default(spec: MegaSpecId, db: MemoryDatabase) -> Outcome 
     transact(spec, db, EvmTxRuntimeLimits::from_spec(spec))
 }
 
-/// The transaction shape [`transact`] runs: a plain call from [`CALLER`] to [`CONTRACT`].
-pub(crate) fn default_tx() -> TxEnv {
-    TxEnvBuilder::default()
-        .caller(CALLER)
-        .call(CONTRACT)
-        .gas_limit(DEFAULT_TX_GAS_LIMIT)
-        .build_fill()
-}
-
 /// The external environment [`transact_tx`] runs with when a test does not need SALT buckets or
 /// oracle storage of its own. Equivalent to the empty environment the other helpers use: every
 /// bucket reports the minimum capacity and the oracle has no data.
