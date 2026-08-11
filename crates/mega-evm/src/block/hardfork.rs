@@ -49,7 +49,7 @@ impl MegaHardfork {
 
     /// Gets the `MegaSpecId` associated with this hardfork.
     #[allow(clippy::match_same_arms)]
-    pub fn spec_id(&self) -> MegaSpecId {
+    pub const fn spec_id(&self) -> MegaSpecId {
         // Note: MiniRex1 and MiniRex2 map to alias specs: rungs of their own whose
         // behavior projects to previously released specs.
         match self {
@@ -67,6 +67,34 @@ impl MegaHardfork {
         }
     }
 }
+
+/// Whether each fork in `forks` maps to a strictly higher spec rung than the fork before it.
+///
+/// This is the invariant the fork→spec map rests on: the reverse scan in
+/// [`MegaHardforks::hardfork`] and the skipped-rung rule in
+/// [`MegaHardforks::validate_schedule`] assume declaration order climbs the ladder, and
+/// strictness pins injectivity — no two forks share a rung, so the map stays 1:1 and the
+/// resolved spec is monotone on any ordered schedule.
+///
+/// Shared by the compile-time assertion below and by the test that feeds it malformed lists,
+/// so the checker itself is exercised — the real `VARIANTS` always satisfies the property it
+/// checks.
+const fn climbs_the_spec_ladder(forks: &[MegaHardfork]) -> bool {
+    let mut i = 1;
+    while i < forks.len() {
+        if forks[i - 1].spec_id() as u8 >= forks[i].spec_id() as u8 {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+const _: () = assert!(
+    climbs_the_spec_ladder(MegaHardfork::VARIANTS),
+    "every hardfork must map to a strictly higher spec rung than the fork declared before it — \
+     express a rollback as a new alias rung, not by reusing an earlier spec"
+);
 
 /// Validation error returned by [`HardforkParams::validate`].
 #[derive(Debug, Clone, PartialEq, Eq, derive_more::Display, derive_more::Error)]
@@ -611,18 +639,25 @@ mod tests {
     use crate::SequencerRegistryConfig;
 
     #[test]
-    fn test_variants_declaration_order_climbs_the_ladder() {
-        // The reverse scan in `hardfork()` and the skipped-rung rule in `validate_schedule`
-        // assume declaration order maps to strictly ascending spec rungs; this fails at a
-        // misplaced variant instead of two derived tests away.
-        for pair in MegaHardfork::VARIANTS.windows(2) {
-            assert!(
-                (pair[0].spec_id() as u8) < (pair[1].spec_id() as u8),
-                "{:?} -> {:?} must climb the spec ladder",
-                pair[0],
-                pair[1],
-            );
-        }
+    fn test_climbs_the_spec_ladder_rejects_malformed_lists() {
+        // The real `VARIANTS` is checked at compile time by the const assertion; only
+        // rejection cases can detect a weakened guard inside the checker.
+        assert!(climbs_the_spec_ladder(MegaHardfork::VARIANTS));
+        assert!(climbs_the_spec_ladder(&[]), "the empty list climbs trivially");
+        assert!(climbs_the_spec_ladder(&[MegaHardfork::Rex]), "a single fork climbs trivially");
+        assert!(
+            climbs_the_spec_ladder(&[MegaHardfork::MiniRex, MegaHardfork::Rex5]),
+            "gaps are fine — strictly ascending is the property, contiguity is not"
+        );
+
+        assert!(
+            !climbs_the_spec_ladder(&[MegaHardfork::Rex, MegaHardfork::MiniRex]),
+            "a fork mapping below its predecessor must be rejected"
+        );
+        assert!(
+            !climbs_the_spec_ladder(&[MegaHardfork::Rex, MegaHardfork::Rex]),
+            "two forks sharing a rung must be rejected — the map must stay 1:1"
+        );
     }
 
     #[test]
