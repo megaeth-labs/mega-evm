@@ -1,6 +1,6 @@
 //! Shared helpers for the REX7 test suite.
 
-use alloy_primitives::{address, Address, Bytes, U256};
+use alloy_primitives::{address, Address, Bytes, B256, U256};
 use mega_evm::{
     test_utils::MemoryDatabase, EvmTxRuntimeLimits, MegaContext, MegaEvm, MegaHaltReason,
     MegaSpecId, MegaTransaction, MegaTransactionNew as _, TestExternalEnvs,
@@ -10,6 +10,7 @@ use revm::{
     handler::EvmTr,
     state::EvmState,
 };
+use std::collections::BTreeMap;
 
 /// Transaction sender.
 pub(crate) const CALLER: Address = address!("0000000000000000000000000000000000300000");
@@ -172,8 +173,57 @@ pub(crate) fn transact_tx(
     }
 }
 
+/// The part of an account a transaction's state actually asserts.
+///
+/// Raw [`EvmState`] cannot be compared directly: `Account::transaction_id` and each storage slot's
+/// `is_cold` are journal bookkeeping with no consensus meaning, and two runs that produce identical
+/// state can still differ there. This keeps the account info, the deployed code, the status flags
+/// that decide how the account is applied, and every slot's original/present pair.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct AccountView {
+    balance: U256,
+    nonce: u64,
+    code_hash: B256,
+    code: Bytes,
+    touched: bool,
+    created: bool,
+    selfdestructed: bool,
+    loaded_as_not_existing: bool,
+    storage: BTreeMap<U256, (U256, U256)>,
+}
+
+/// Normalises an [`EvmState`] into a stable, order-independent view.
+pub(crate) fn state_view(state: &EvmState) -> BTreeMap<Address, AccountView> {
+    state
+        .iter()
+        .map(|(address, account)| {
+            let view = AccountView {
+                balance: account.info.balance,
+                nonce: account.info.nonce,
+                code_hash: account.info.code_hash,
+                code: account
+                    .info
+                    .code
+                    .as_ref()
+                    .map(|code| code.original_bytes())
+                    .unwrap_or_default(),
+                touched: account.is_touched(),
+                created: account.is_created(),
+                selfdestructed: account.is_selfdestructed(),
+                loaded_as_not_existing: account.is_loaded_as_not_existing(),
+                storage: account
+                    .storage
+                    .iter()
+                    .map(|(slot, value)| (*slot, (value.original_value, value.present_value)))
+                    .collect(),
+            };
+            (*address, view)
+        })
+        .collect()
+}
+
 /// Asserts that two outcomes are indistinguishable: same execution result, same four-dimension
-/// usage, same receipt `gas_used`, and the same detained compute-gas limit.
+/// usage, same receipt `gas_used`, the same detained compute-gas limit, and the same state.
 ///
 /// This is the precision invariant in assertion form — what a transaction that stays inside every
 /// per-tx limit must produce under both accounting models.
@@ -205,6 +255,22 @@ pub(crate) fn assert_outcomes_identical(label: &str, r6: &Outcome, r7: &Outcome)
         "{label}: the detained compute-gas limit must be identical; REX6={} REX7={}",
         r6.detained_compute_gas_limit, r7.detained_compute_gas_limit
     );
+    let (s6, s7) = (state_view(&r6.state), state_view(&r7.state));
+    if s6 != s7 {
+        // Report the first address the two disagree on; dumping both whole states buries it.
+        let mut addresses: Vec<&Address> = s6.keys().chain(s7.keys()).collect();
+        addresses.sort_unstable();
+        addresses.dedup();
+        let culprit = addresses
+            .into_iter()
+            .find(|address| s6.get(*address) != s7.get(*address))
+            .expect("the maps differ, so some address must");
+        panic!(
+            "{label}: the produced state must be identical; {culprit} is\n  REX6: {:?}\n  REX7: {:?}",
+            s6.get(culprit),
+            s7.get(culprit),
+        );
+    }
 }
 
 /// [`transact`] with every SALT bucket reporting `bucket_capacity`.
