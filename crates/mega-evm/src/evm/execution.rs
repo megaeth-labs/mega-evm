@@ -456,10 +456,10 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
         let is_rex5 = ctx.spec.is_enabled(MegaSpecId::REX5);
 
         if let InterpreterAction::Return(interpreter_result) = action {
-            // REX7 V0 clamp: hand any clamp-hidden gas back to the result — and latch a
-            // clamp-induced out-of-gas as the compute exceed it stands for — before the
-            // code-deposit charge below observes the result's gas.
-            ctx.additional_limit.borrow_mut().restore_clamp_into_result(interpreter_result);
+            // REX7: hand any clamp-hidden gas back to the result and latch a clamp-induced
+            // out-of-gas as the compute exceed it stands for, before the code-deposit charge below
+            // observes the result's gas.
+            ctx.additional_limit.borrow_mut().settle_frame_final_result(interpreter_result);
 
             // Charge storage gas cost for the number of bytes
             if frame.data.is_create() && interpreter_result.is_ok() {

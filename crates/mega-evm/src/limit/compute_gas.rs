@@ -6,6 +6,20 @@ use super::{
 };
 use crate::{JournalInspectTr, MegaSpecId};
 
+/// The constraint that bounds the V0 gas clamp for one plain-opcode segment.
+///
+/// Captured when the clamp is applied, so a clamp-induced out-of-gas can be classified against the
+/// constraint that was in force at the time rather than against whatever the tracker looks like
+/// once the frame has already failed.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ClampBinding {
+    /// The compute headroom the interpreter is allowed to keep seeing.
+    pub(crate) headroom: u64,
+    /// `true` when the current frame's compute budget is what binds, `false` when the TX-level
+    /// (possibly detained) limit is.
+    pub(crate) frame_local: bool,
+}
+
 /// A frame-limit-based compute gas tracker using `FrameLimitTracker`.
 ///
 /// Unlike the other trackers (`DataSizeTracker`, `KVUpdateTracker`, `StateGrowthTracker`), compute
@@ -115,24 +129,26 @@ impl ComputeGasTracker {
         self.frame_tracker.tx_limit()
     }
 
-    /// Returns the compute gas headroom the V0 gas clamp may leave visible to the interpreter,
-    /// and whether the binding constraint is the frame-local budget (`true`) or the TX-level
-    /// (possibly detained) limit (`false`).
+    /// Returns the constraint the V0 gas clamp must bind to at this point in the transaction.
     ///
     /// The headroom is the tighter of the current frame's remaining compute budget (Rex4+) and
     /// the TX-level remaining under the effective (possibly detained) limit — the same pair
     /// [`check_limit`](TxRuntimeLimit::check_limit) enforces. Gas hidden beyond this headroom is
     /// therefore reachable only by a transaction that would exceed one of those two limits.
+    /// Equal remainders bind to the TX-level constraint, so a top-level frame — where the two are
+    /// equal whenever the same base limit still governs both — halts with gas rescue rather than
+    /// absorbing the exceed into a revert.
     #[inline]
-    pub(crate) fn clamp_headroom(&self) -> (u64, bool) {
-        let tx_remaining = self.tx_limit().saturating_sub(self.tx_usage());
+    pub(crate) fn clamp_binding(&self) -> ClampBinding {
+        let tx_limit = self.tx_limit();
+        let tx_remaining = tx_limit.saturating_sub(self.tx_usage());
         if self.rex4_enabled {
             let frame_remaining = self.frame_tracker.current_frame_remaining();
             if frame_remaining < tx_remaining {
-                return (frame_remaining, true);
+                return ClampBinding { headroom: frame_remaining, frame_local: true };
             }
         }
-        (tx_remaining, false)
+        ClampBinding { headroom: tx_remaining, frame_local: false }
     }
 
     /// Returns `true` when gas detention is the binding TX-level constraint, i.e., the detained
