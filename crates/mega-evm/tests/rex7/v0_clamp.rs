@@ -23,13 +23,14 @@
 use crate::common::{
     transact, transact_default, transact_with_gas_limit, Outcome, CALLEE, CONTRACT, ONE_ETH,
 };
-use alloy_primitives::{Bytes, U256};
+use alloy_primitives::{Address, Bytes, U256};
 use mega_evm::{
     test_utils::{BytecodeBuilder, MemoryDatabase},
     EvmTxRuntimeLimits, MegaHaltReason, MegaSpecId,
 };
 use revm::bytecode::opcode::{
-    CALL, DUP1, GAS, JUMPDEST, JUMPI, MSTORE, POP, RETURN, SSTORE, STOP, SUB, SWAP1, TIMESTAMP,
+    CALL, DUP1, EXTCODECOPY, GAS, JUMPDEST, JUMPI, MSTORE, POP, RETURN, SSTORE, STOP, SUB, SWAP1,
+    TIMESTAMP,
 };
 
 /// Slot the outer contract stores the CALL success flag into.
@@ -440,5 +441,72 @@ fn assert_outcomes_identical(r6: &Outcome, r7: &Outcome) {
         (r6.data_size, r6.kv_updates, r6.state_growth),
         (r7.data_size, r7.kv_updates, r7.state_growth),
         "the non-compute dimensions must be identical",
+    );
+}
+
+/// A volatile checkpoint whose own body crosses the compute limit must behave identically under
+/// both accounting models.
+///
+/// The prologue restores the clamp before the body runs, so an `EXTCODECOPY` large enough to cross
+/// the limit is metered on the true counter and recorded per opcode exactly as REX6 records it —
+/// the clamp plays no part. What the checkpoint form has to reproduce is the tail: the detention
+/// cap is applied on a frame-local exceed (a revert the per-opcode layering carries past the cap)
+/// and skipped on a TX-level exceed (an out-of-gas halt that layering short-circuits on). Pinning
+/// the halt, the recorded usage and the resulting detained limit together covers both the metering
+/// and that ordering.
+#[test]
+fn test_volatile_body_crossing_the_limit_matches_per_opcode() {
+    // ~1.5 MB of EXTCODECOPY against the block beneficiary: the copy plus the memory expansion cost
+    // millions of gas, and the account load marks beneficiary access.
+    let callee = BytecodeBuilder::default()
+        .push_number(1_500_000u64) // length
+        .push_number(0u64) // offset
+        .push_number(0u64) // destOffset
+        .push_address(Address::ZERO) // the default block beneficiary
+        .append(EXTCODECOPY)
+        .append(STOP)
+        .build();
+    let code = BytecodeBuilder::default()
+        .push_number(0u64) // retSize
+        .push_number(0u64) // retOffset
+        .push_number(0u64) // argsSize
+        .push_number(0u64) // argsOffset
+        .push_number(0u64) // value
+        .push_address(CALLEE)
+        .push_number(50_000_000u64) // gas
+        .append(CALL)
+        .append(POP)
+        .append(STOP)
+        .build();
+    let build_db = || base_db(code.clone()).account_code(CALLEE, callee.clone());
+    let full = transact_default(MegaSpecId::REX7, build_db()).compute_gas;
+    assert!(full > 4_000_000, "the copy must dominate the transaction; compute={full}");
+
+    // Just under what the transaction needs, so the crossing lands inside the EXTCODECOPY body
+    // rather than in a plain segment.
+    let tx_limit = full - full / 100;
+    let limits = move |spec| {
+        let mut limits = EvmTxRuntimeLimits::from_spec(spec).with_tx_compute_gas_limit(tx_limit);
+        limits.block_env_access_compute_gas_limit = 1_000;
+        limits
+    };
+
+    let r6 = transact(MegaSpecId::REX6, build_db(), limits(MegaSpecId::REX6));
+    let r7 = transact(MegaSpecId::REX7, build_db(), limits(MegaSpecId::REX7));
+
+    assert!(!r6.is_success(), "REX6 must stop on the tight compute limit: {:?}", r6.result);
+    assert_eq!(
+        format!("{:?}", r6.result),
+        format!("{:?}", r7.result),
+        "the halt must be identical",
+    );
+    assert_eq!(
+        r6.compute_gas, r7.compute_gas,
+        "the body is metered on the true counter under both models; REX6={} REX7={}",
+        r6.compute_gas, r7.compute_gas
+    );
+    assert_eq!(
+        r6.detained_compute_gas_limit, r7.detained_compute_gas_limit,
+        "the detention tail must fire — or not fire — at the same point under both models",
     );
 }

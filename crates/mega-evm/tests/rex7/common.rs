@@ -36,6 +36,9 @@ pub(crate) struct Outcome {
     pub(crate) state_growth: u64,
     /// Receipt `gas_used` (combined compute + storage EVM gas).
     pub(crate) gas_used: u64,
+    /// Post-tx detained compute gas limit — equal to the configured TX limit unless volatile
+    /// access lowered it.
+    pub(crate) detained_compute_gas_limit: u64,
     /// The state the transaction produced.
     pub(crate) state: EvmState,
 }
@@ -98,7 +101,10 @@ pub(crate) fn transact_with_gas_limit(
     let mut evm = MegaEvm::new(context);
     let result =
         alloy_evm::Evm::transact_raw(&mut evm, tx).expect("tx should not surface EVMError");
-    let usage = evm.ctx_ref().additional_limit.borrow().get_usage();
+    let (usage, detained_compute_gas_limit) = {
+        let additional_limit = evm.ctx_ref().additional_limit.borrow();
+        (additional_limit.get_usage(), additional_limit.detained_compute_gas_limit())
+    };
     let gas_used = result.result.tx_gas_used();
     Outcome {
         result: result.result,
@@ -107,6 +113,7 @@ pub(crate) fn transact_with_gas_limit(
         kv_updates: usage.kv_updates,
         state_growth: usage.state_growth,
         gas_used,
+        detained_compute_gas_limit,
         state: result.state,
     }
 }
@@ -143,7 +150,10 @@ pub(crate) fn transact_with_bucket_capacity(
     let mut evm = MegaEvm::new(context);
     let result =
         alloy_evm::Evm::transact_raw(&mut evm, tx).expect("tx should not surface EVMError");
-    let usage = evm.ctx_ref().additional_limit.borrow().get_usage();
+    let (usage, detained_compute_gas_limit) = {
+        let additional_limit = evm.ctx_ref().additional_limit.borrow();
+        (additional_limit.get_usage(), additional_limit.detained_compute_gas_limit())
+    };
     let gas_used = result.result.tx_gas_used();
     Outcome {
         result: result.result,
@@ -152,6 +162,7 @@ pub(crate) fn transact_with_bucket_capacity(
         kv_updates: usage.kv_updates,
         state_growth: usage.state_growth,
         gas_used,
+        detained_compute_gas_limit,
         state: result.state,
     }
 }

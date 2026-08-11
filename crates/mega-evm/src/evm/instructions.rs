@@ -902,6 +902,30 @@ macro_rules! record_checkpoint_body_compute_gas {
             compute_gas!($context.interpreter, additional_limit, gas_used);
         }
     };
+    // Variant for the volatile checkpoints, whose tail installs the detention cap. A frame-local
+    // exceed reports as a revert, which the per-opcode layering carries past the cap application
+    // rather than returning on, so the cap is applied here before returning. A TX-level exceed
+    // reports as an out-of-gas halt, which that layering does short-circuit — no cap on that path.
+    ($context:expr, $gas_before:expr, detention_tail) => {
+        let gas_after = $context.interpreter.gas.remaining();
+        let gas_used = $gas_before.saturating_sub(gas_after);
+        let exceeding_result = {
+            let mut additional_limit = $context.host.additional_limit().borrow_mut();
+            additional_limit.sync_checkpoint_baseline(gas_after);
+            if additional_limit.record_compute_gas(gas_used) {
+                None
+            } else {
+                Some(additional_limit.exceeding_instruction_result())
+            }
+        };
+        if let Some(result) = exceeding_result {
+            set_halt_action!($context.interpreter, result);
+            if !result.is_halt() {
+                apply_compute_gas_limit!($context);
+            }
+            return Err(result);
+        }
+    };
 }
 
 /// Records an opcode's compute gas in a single measurement window and enforces the compute-gas
@@ -2053,7 +2077,7 @@ pub mod volatile_data_ext {
             charge_static_gas!(context, $opcode);
 
             run_inner_instruction_or_abort!($original_fn, context, inner_outcome);
-            record_checkpoint_body_compute_gas!(context, gas_before);
+            record_checkpoint_body_compute_gas!(context, gas_before, detention_tail);
             apply_compute_gas_limit!(context);
             checkpoint_epilogue!(context);
             inner_outcome
@@ -2088,7 +2112,7 @@ pub mod volatile_data_ext {
 
             run_inner_instruction_or_abort!($original_fn, context, inner_outcome);
             charge_static_gas!(context, $opcode);
-            record_checkpoint_body_compute_gas!(context, gas_before);
+            record_checkpoint_body_compute_gas!(context, gas_before, detention_tail);
             apply_compute_gas_limit!(context);
             checkpoint_epilogue!(context);
             inner_outcome
@@ -2187,7 +2211,7 @@ pub mod volatile_data_ext {
 
         run_inner_instruction_or_abort!(instructions::host::sload, context, inner_outcome);
         charge_static_gas!(context, SLOAD);
-        record_checkpoint_body_compute_gas!(context, gas_before);
+        record_checkpoint_body_compute_gas!(context, gas_before, detention_tail);
         apply_compute_gas_limit!(context);
         checkpoint_epilogue!(context);
         inner_outcome
@@ -2213,7 +2237,7 @@ pub mod volatile_data_ext {
         charge_static_gas!(context, SELFBALANCE);
 
         run_inner_instruction_or_abort!(instructions::host::selfbalance, context, inner_outcome);
-        record_checkpoint_body_compute_gas!(context, gas_before);
+        record_checkpoint_body_compute_gas!(context, gas_before, detention_tail);
         apply_compute_gas_limit!(context);
         checkpoint_epilogue!(context);
         inner_outcome
