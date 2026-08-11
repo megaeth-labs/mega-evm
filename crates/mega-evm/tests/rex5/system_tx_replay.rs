@@ -29,12 +29,10 @@ use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
 use alloy_primitives::{address, Address, Bytes, Signature, TxKind, B256, U256};
 use alloy_sol_types::SolCall;
 use mega_evm::{
-    alloy_op_evm::{OpTx, OpTxError},
-    op_revm::OpTransaction,
-    test_utils::MemoryDatabase,
-    BlockLimits, EVMError, IOracle, MegaBlockExecutionCtx, MegaBlockExecutor,
-    MegaBlockExecutorFactory, MegaContext, MegaEvm, MegaEvmFactory, MegaHardfork,
-    MegaHardforkConfig, MegaSpecId, MegaTxEnvelope, SequencerRegistryConfig, TestExternalEnvs,
+    alloy_op_evm::OpTxError, test_utils::MemoryDatabase, BlockLimits, EVMError, IOracle,
+    MegaBlockExecutionCtx, MegaBlockExecutor, MegaBlockExecutorFactory, MegaContext, MegaEvm,
+    MegaEvmFactory, MegaHardfork, MegaHardforkConfig, MegaSpecId, MegaTransaction,
+    MegaTransactionNew as _, MegaTxEnvelope, SequencerRegistryConfig, TestExternalEnvs,
     MEGA_SYSTEM_ADDRESS, ORACLE_CONTRACT_ADDRESS,
 };
 use revm::{
@@ -574,7 +572,7 @@ fn test_normal_user_legacy_tx_is_unaffected() {
                                         * defaults */
         ..Default::default()
     };
-    let mut tx = OpTx(OpTransaction::new(tx));
+    let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
 
     let result: Result<_, EVMError<Infallible, OpTxError>> =
@@ -621,7 +619,7 @@ fn test_actual_op_deposit_tx_is_unaffected() {
         gas_price: 0,
         ..Default::default()
     };
-    let mut tx = OpTx(OpTransaction::new(tx_inner));
+    let mut tx = MegaTransaction::new(tx_inner);
     tx.deposit.source_hash = MEGA_SYSTEM_TRANSACTION_SOURCE_HASH;
     tx.enveloped_tx = Some(Bytes::new());
 

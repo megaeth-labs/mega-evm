@@ -3,7 +3,6 @@
 use ::revm::{context::BlockEnv, ExecuteEvm};
 use alloy_primitives::{address, Bytes, U256};
 use mega_evm::{
-    alloy_op_evm::OpTx as MegaTransaction,
     revm::{
         bytecode::opcode::{
             BASEFEE, BLOCKHASH, CALLER, CHAINID, COINBASE, DIFFICULTY, GASLIMIT, GASPRICE, NUMBER,
@@ -12,7 +11,7 @@ use mega_evm::{
         context::{ContextSetters, ContextTr},
     },
     test_utils::MemoryDatabase,
-    *,
+    MegaTransaction, *,
 };
 
 /// Test that verifies the EVM correctly tracks block environment access for various opcodes.

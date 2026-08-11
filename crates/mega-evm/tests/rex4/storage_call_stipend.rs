@@ -15,11 +15,11 @@ use std::convert::Infallible;
 use alloy_primitives::{address, Address, Bytes, U256};
 use alloy_sol_types::SolCall;
 use mega_evm::{
-    alloy_op_evm::{OpTx, OpTxError},
-    op_revm::OpTransaction,
+    alloy_op_evm::OpTxError,
     test_utils::{BytecodeBuilder, MemoryDatabase},
     EvmTxRuntimeLimits, IKeylessDeploy, IMegaAccessControl, MegaContext, MegaEvm, MegaHaltReason,
-    MegaSpecId, ACCESS_CONTROL_ADDRESS, KEYLESS_DEPLOY_ADDRESS,
+    MegaSpecId, MegaTransaction, MegaTransactionNew as _, ACCESS_CONTROL_ADDRESS,
+    KEYLESS_DEPLOY_ADDRESS,
 };
 use revm::{
     bytecode::opcode::*,
@@ -77,7 +77,7 @@ fn transact_with_limits(
         chain.operator_fee_constant = Some(U256::from(0));
     });
     let mut evm = MegaEvm::new(context);
-    let mut tx = OpTx(OpTransaction::new(tx));
+    let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
     alloy_evm::Evm::transact_raw(&mut evm, tx)
 }

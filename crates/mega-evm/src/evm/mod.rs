@@ -60,7 +60,7 @@ use alloy_evm::{
     Database,
 };
 use revm::{
-    context::{result::ResultAndState, BlockEnv, CfgEnv, ContextTr},
+    context::{BlockEnv, CfgEnv, ContextTr},
     handler::{EthFrame, EvmTr},
     inspector::NoOpInspector,
     interpreter::interpreter::EthInterpreter,
@@ -154,7 +154,13 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, NoOpInspector, ExtEnvs
     /// # Returns
     ///
     /// A new `Evm` instance configured with the provided context and inspector.
-    pub fn new(context: MegaContext<DB, ExtEnvs>) -> Self {
+    pub fn new(mut context: MegaContext<DB, ExtEnvs>) -> Self {
+        // Settle EIP-8037 here as well as before each transaction, so the snapshot taken below and
+        // everything read back through it describe the configuration transactions will actually
+        // run with. See `context::force_amsterdam_eip8037_off` for why the flag is not a caller's
+        // to set.
+        self::context::force_amsterdam_eip8037_off(&mut context.inner.cfg);
+
         let spec = context.mega_spec();
         let mega_cfg = context.cfg().clone().into_megaeth_cfg(spec);
         Self {
@@ -348,7 +354,7 @@ where
         &mut self,
         tx: MegaTransaction,
     ) -> Result<MegaTransactionOutcome, EVMError<DB::Error, MegaTransactionError>> {
-        let ResultAndState { result, state } = if self.inspect {
+        let result_and_state = if self.inspect {
             InspectEvm::inspect_tx(self, tx)?
         } else {
             ExecuteEvm::transact(self, tx)?
@@ -357,8 +363,7 @@ where
         let LimitUsage { data_size, kv_updates, compute_gas, state_growth } =
             additional_limit.get_usage();
         Ok(MegaTransactionOutcome {
-            result,
-            state,
+            result_and_state,
             data_size,
             kv_updates,
             compute_gas_used: compute_gas,
@@ -384,13 +389,12 @@ where
         &mut self,
         tx: MegaTransaction,
     ) -> Result<MegaTransactionOutcome, EVMError<DB::Error, MegaTransactionError>> {
-        let ResultAndState { result, state } = InspectEvm::inspect_tx(self, tx)?;
+        let result_and_state = InspectEvm::inspect_tx(self, tx)?;
         let additional_limit = self.ctx().additional_limit.borrow();
         let LimitUsage { data_size, kv_updates, compute_gas, state_growth } =
             additional_limit.get_usage();
         Ok(MegaTransactionOutcome {
-            result,
-            state,
+            result_and_state,
             data_size,
             kv_updates,
             compute_gas_used: compute_gas,
@@ -459,9 +463,40 @@ mod tests {
     }
 
     fn mega_tx() -> MegaTransaction {
-        let mut tx = alloy_op_evm::OpTx(op_revm::OpTransaction::new(tx_env()));
+        let mut tx = crate::MegaTransaction(op_revm::OpTransaction::new(tx_env()));
         tx.enveloped_tx = Some(Bytes::new());
         tx
+    }
+
+    /// Trait-plumbing smoke test for the `EvmTr` / `InspectorEvmTr` accessors.
+    ///
+    /// These are pure field projections required by revm 40's traits — every tuple element has a
+    /// distinct type, so a miswired projection would not compile. There is no logic to get wrong;
+    /// this pins only that each projection is wired and callable, so the surface stays exercised.
+    #[test]
+    fn test_evm_trait_accessors_project_the_context() {
+        use revm::{handler::EvmTr, inspector::InspectorEvmTr};
+
+        let mut db = MemoryDatabase::default();
+        let mut evm = MegaEvm::new(configure_context(&mut db)).with_inspector(NoOpInspector);
+        let chain_id = evm.ctx_ref().cfg.chain_id;
+
+        let (ctx, _instructions, _precompiles, _frames) = evm.all();
+        assert_eq!(ctx.cfg.chain_id, chain_id);
+        let (ctx, _instructions, _precompiles, _frames) = evm.all_mut();
+        assert_eq!(ctx.cfg.chain_id, chain_id);
+        let (ctx, _instructions) = evm.ctx_instructions();
+        assert_eq!(ctx.cfg.chain_id, chain_id);
+        let (ctx, _precompiles) = evm.ctx_precompiles();
+        assert_eq!(ctx.cfg.chain_id, chain_id);
+
+        let (ctx, _instructions, _precompiles, _frames, _inspector) = evm.all_inspector();
+        assert_eq!(ctx.cfg.chain_id, chain_id);
+        let (ctx, _instructions, _precompiles, _frames, _inspector) = evm.all_mut_inspector();
+        assert_eq!(ctx.cfg.chain_id, chain_id);
+
+        // The handler's `Default` belongs to the same required-surface family.
+        let _handler: crate::MegaHandler<(), (), ()> = Default::default();
     }
 
     #[test]
@@ -665,7 +700,7 @@ mod tests {
         let mut db = MemoryDatabase::default().account_code(CALLEE, Bytes::new());
         let mut evm = MegaEvm::new(configure_context(&mut db));
 
-        let mut tx = alloy_op_evm::OpTx(op_revm::OpTransaction::new(TxEnv {
+        let mut tx = crate::MegaTransaction(op_revm::OpTransaction::new(TxEnv {
             caller: CALLER,
             gas_limit: 100_000,
             kind: alloy_primitives::TxKind::Call(CALLEE),

@@ -4,8 +4,8 @@ use std::convert::Infallible;
 
 use alloy_primitives::{address, Bytes, TxKind, U256};
 use mega_evm::{
-    alloy_op_evm::OpTx as MegaTransaction, constants, test_utils::MemoryDatabase, EVMError,
-    MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, TestExternalEnvs,
+    constants, test_utils::MemoryDatabase, EVMError, MegaContext, MegaEvm, MegaHaltReason,
+    MegaSpecId, MegaTransaction, TestExternalEnvs,
 };
 use revm::{
     context::{result::ResultAndState, TxEnv},

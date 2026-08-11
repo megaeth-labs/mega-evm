@@ -8,13 +8,7 @@
 
 use alloy_primitives::{address, bytes, Address, Bytes, U256};
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-// Imported as the struct itself (not the `MegaTransaction` type alias) so the
-// tuple-struct constructor is usable — constructors cannot be called through a
-// type alias.
-use mega_evm::{
-    alloy_op_evm::OpTx as MegaTransaction, test_utils::MemoryDatabase, MegaContext, MegaEvm,
-    MegaSpecId,
-};
+use mega_evm::{test_utils::MemoryDatabase, MegaContext, MegaEvm, MegaSpecId, MegaTransaction};
 use revm::{context::tx::TxEnvBuilder, primitives::KECCAK_EMPTY, ExecuteCommitEvm, ExecuteEvm};
 
 const DEPLOYER: Address = address!("0000000000000000000000000000000000100000");

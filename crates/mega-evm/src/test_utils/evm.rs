@@ -37,7 +37,7 @@ where
         gas_limit: 1000000000000000000,
         ..Default::default()
     };
-    let mut tx = alloy_op_evm::OpTx(op_revm::OpTransaction::new(tx));
+    let mut tx = crate::MegaTransaction(op_revm::OpTransaction::new(tx));
     tx.enveloped_tx = Some(Bytes::new());
     alloy_evm::Evm::transact_raw(&mut evm, tx)
 }

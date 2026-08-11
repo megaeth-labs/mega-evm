@@ -15,6 +15,12 @@
 //!   volatile-access-enabled path the host marks the delegate as the CALL loads it, again only from
 //!   REX6. The cross-spec sweeps below freeze that split for all four CALL-family opcodes.
 //!
+//!   These sweeps are the only place that rule is pinned. `Host::load_account_delegated` used to
+//!   restate it — it was the CALL family's host entry under revm 27 — but revm 40 routes the CALL
+//!   family through `load_account_info_skip_cold_load` under a `begin_call_target_resolution`
+//!   bracket, and the phase gate there owns the Rex6 split now. Pin it here, from the opcode,
+//!   rather than at a trait method no opcode reaches.
+//!
 //! - **Existing-target SELFDESTRUCT** — REX5 `storage_gas_ext::selfdestruct` only charged
 //!   DataSize/KV/StateGrowth for SELFDESTRUCT to a *new* beneficiary. When the target already
 //!   exists, the balance update went through `host.selfdestruct` without flowing through any
@@ -30,11 +36,11 @@ use std::convert::Infallible;
 use alloy_primitives::{address, Address, Bytes, B256, U256};
 use alloy_sol_types::{SolCall, SolError};
 use mega_evm::{
-    alloy_op_evm::{OpTx, OpTxError},
-    op_revm::OpTransaction,
+    alloy_op_evm::OpTxError,
     test_utils::{BytecodeBuilder, ErrorInjectingDatabase, MemoryDatabase},
     EvmTxRuntimeLimits, IMegaAccessControl, LimitUsage, MegaContext, MegaEvm, MegaHaltReason,
-    MegaSpecId, VolatileDataAccessType, ACCESS_CONTROL_ADDRESS,
+    MegaSpecId, MegaTransaction, MegaTransactionNew as _, VolatileDataAccessType,
+    ACCESS_CONTROL_ADDRESS,
 };
 use revm::{
     bytecode::opcode::*,
@@ -112,7 +118,7 @@ fn transact_with_beneficiary(
         chain.operator_fee_constant = Some(U256::from(0));
     });
     let mut evm = MegaEvm::new(context);
-    let mut tx = OpTx(OpTransaction::new(tx));
+    let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
     let result = alloy_evm::Evm::transact_raw(&mut evm, tx)?;
     let usage = evm.ctx_ref().additional_limit.borrow().get_usage();
@@ -478,6 +484,35 @@ fn test_call_family_to_delegator_to_beneficiary_marks_beneficiary_only_from_rex6
     }
 }
 
+/// `EQUIVALENCE` keeps revm's unwrapped CALL handlers, so — unlike `MINI_REX..REX5` — its
+/// delegate hop DOES mark the beneficiary. This pins that quirk together with why it is
+/// unobservable: the mark never becomes detention (no wrapper on the `EQUIVALENCE` table applies
+/// the tracker's cap into `AdditionalLimit`, so the detained limit stays `u64::MAX`), the
+/// reported volatile info is `MINI_REX`-gated in `execution_result`, and
+/// `get_block_env_accesses` masks the beneficiary bit (the mask is
+/// `VolatileDataAccess::block_env_only`, pinned by `test_block_env_helpers_ignore_non_block_flags`
+/// in `access/volatile.rs`).
+/// If a table change ever routes `EQUIVALENCE` through the bracket, the `marked` assertion goes
+/// red and the frozen-spec question must be re-examined rather than silently absorbed.
+#[test]
+fn test_equivalence_delegate_hop_marks_but_is_unobservable() {
+    for opcode in [CALL, CALLCODE, DELEGATECALL, STATICCALL] {
+        let (marked, detained) = run_beneficiary_marking_case(
+            MegaSpecId::EQUIVALENCE,
+            call_family_code(opcode, DELEGATOR_TO_BENEFICIARY),
+        );
+        assert!(
+            marked,
+            "EQUIVALENCE's unwrapped {opcode:#x} marks the delegate hop (raw revm table, no bracket)",
+        );
+        assert_eq!(
+            detained,
+            u64::MAX,
+            "the mark must never engage detention on EQUIVALENCE for {opcode:#x}",
+        );
+    }
+}
+
 /// A CALL whose raw stack operand IS the beneficiary marks it on every spec — the delegate-hop rule
 /// must not suppress the operand it brackets.
 ///
@@ -751,7 +786,7 @@ fn test_rex6_selfdestruct_db_error_on_target_surfaces() {
     });
     let mut evm = MegaEvm::new(context);
     let tx = TxEnvBuilder::default().caller(CALLER).call(MIDDLE).gas_limit(1_000_000).build_fill();
-    let mut tx = OpTx(OpTransaction::new(tx));
+    let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
 
     let surfaced = match alloy_evm::Evm::transact_raw(&mut evm, tx) {
@@ -887,7 +922,7 @@ fn test_rex6_call_db_error_on_target_surfaces() {
     let mut evm = MegaEvm::new(context);
     let tx =
         TxEnvBuilder::default().caller(CALLER).call(MIDDLE).gas_limit(100_000_000).build_fill();
-    let mut tx = OpTx(OpTransaction::new(tx));
+    let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
 
     let surfaced = match alloy_evm::Evm::transact_raw(&mut evm, tx) {
@@ -953,7 +988,7 @@ fn test_call_partial_stack_db_error_on_target_surfaces_rex5_eq_rex6() {
         let mut evm = MegaEvm::new(context);
         let tx =
             TxEnvBuilder::default().caller(CALLER).call(MIDDLE).gas_limit(100_000_000).build_fill();
-        let mut tx = OpTx(OpTransaction::new(tx));
+        let mut tx = MegaTransaction::new(tx);
         tx.enveloped_tx = Some(Bytes::new());
         match alloy_evm::Evm::transact_raw(&mut evm, tx) {
             Err(_) => true,
@@ -1004,7 +1039,7 @@ fn test_rex6_call_partial_stack_code_load_failure_keeps_stack_underflow() {
     let mut evm = MegaEvm::new(context);
     let tx =
         TxEnvBuilder::default().caller(CALLER).call(MIDDLE).gas_limit(100_000_000).build_fill();
-    let mut tx = OpTx(OpTransaction::new(tx));
+    let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
 
     match alloy_evm::Evm::transact_raw(&mut evm, tx) {

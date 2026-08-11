@@ -602,7 +602,7 @@ mod tests {
             .call(contract)
             .gas_limit(100_000_000)
             .build_fill();
-        let mut tx = alloy_op_evm::OpTx(op_revm::OpTransaction::new(tx));
+        let mut tx = crate::MegaTransaction(op_revm::OpTransaction::new(tx));
         tx.enveloped_tx = Some(Bytes::new());
 
         let result = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();

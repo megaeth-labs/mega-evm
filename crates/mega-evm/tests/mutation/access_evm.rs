@@ -32,12 +32,10 @@ use std::convert::Infallible;
 
 use alloy_primitives::{address, Address, Bytes, TxKind, U256};
 use mega_evm::{
-    alloy_op_evm::OpTx,
     constants,
-    op_revm::OpTransaction,
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, SaltEnv, TestExternalEnvs,
-    VolatileDataAccess, VolatileDataAccessTracker, MIN_BUCKET_SIZE,
+    MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction, MegaTransactionNew as _,
+    SaltEnv, TestExternalEnvs, VolatileDataAccess, VolatileDataAccessTracker, MIN_BUCKET_SIZE,
 };
 use revm::context::{BlockEnv, TxEnv};
 
@@ -227,7 +225,7 @@ fn test_get_accessed_bucket_ids_reports_touched_non_zero_bucket() {
         gas_price: 0,
         ..Default::default()
     };
-    let mut tx = OpTx(OpTransaction::new(tx));
+    let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
 
     let result = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
@@ -287,7 +285,7 @@ fn beneficiary_balance_after_transfer(disable: bool) -> U256 {
         value: U256::from(1_u64),
         ..Default::default()
     };
-    let mut tx = OpTx(OpTransaction::new(tx));
+    let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
 
     let result = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
@@ -360,7 +358,7 @@ fn intrinsic_boundary_result(
         value: U256::ZERO,
         ..Default::default()
     };
-    let mut tx = OpTx(OpTransaction::new(tx));
+    let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
 
     alloy_evm::Evm::transact_raw(&mut evm, tx)

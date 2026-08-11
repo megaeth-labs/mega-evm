@@ -18,7 +18,7 @@ use std::convert::Infallible;
 
 use alloy_primitives::{address, Address, Bytes, U256};
 use mega_evm::{
-    alloy_op_evm::{OpTx, OpTxError},
+    alloy_op_evm::OpTxError,
     op_revm::OpTransaction,
     test_utils::{BytecodeBuilder, MemoryDatabase},
     BucketHasher, BucketId, EmptyExternalEnv, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
@@ -51,7 +51,7 @@ fn simple_return_contract() -> Bytes {
 /// Builds an OP deposit transaction (`tx_type` == `DEPOSIT_TRANSACTION_TYPE`) with the
 /// specified caller, mint amount, and callee.
 fn make_op_deposit_tx(caller: Address, mint: u128, callee: Address) -> MegaTransaction {
-    let mut tx = OpTx(OpTransaction {
+    let mut tx = MegaTransaction(OpTransaction {
         base: TxEnv {
             caller,
             kind: TxKind::Call(callee),
@@ -75,7 +75,7 @@ fn make_op_deposit_tx(caller: Address, mint: u128, callee: Address) -> MegaTrans
 fn make_op_deposit_create_tx(caller: Address, mint: u128) -> MegaTransaction {
     // Minimal init code: STOP (deploys to a zero-byte runtime).
     let init_code = Bytes::from_static(&[0x00]);
-    let mut tx = OpTx(OpTransaction {
+    let mut tx = MegaTransaction(OpTransaction {
         base: TxEnv {
             caller,
             kind: TxKind::Create,
@@ -94,7 +94,7 @@ fn make_op_deposit_create_tx(caller: Address, mint: u128) -> MegaTransaction {
 
 /// Builds a mega system deposit-marked legacy tx.
 fn make_mega_system_tx() -> MegaTransaction {
-    let mut tx = OpTx(OpTransaction {
+    let mut tx = MegaTransaction(OpTransaction {
         base: TxEnv {
             caller: MEGA_SYSTEM_ADDRESS,
             kind: TxKind::Call(WHITELISTED_CALLEE),
@@ -202,7 +202,7 @@ fn test_rex5_non_empty_caller_no_extra_charge() {
     let db_normal = MemoryDatabase::default()
         .account_balance(FUNDED_CALLER, U256::from(1_000_000u64))
         .account_code(TARGET_CONTRACT, simple_return_contract());
-    let tx_normal = OpTx(OpTransaction {
+    let tx_normal = MegaTransaction(OpTransaction {
         base: TxEnv {
             caller: FUNDED_CALLER,
             kind: TxKind::Call(TARGET_CONTRACT),
@@ -600,5 +600,59 @@ fn test_rex5_deposit_caller_storage_gas_is_added_not_multiplied() {
         EXACT_SUCCESS_GAS_LIMIT - FUNDED_SUCCESS_GAS_LIMIT,
         DEPOSIT_CALLER_STORAGE_GAS,
         "empty−funded gas delta must equal the REX new-account storage charge (25_000)",
+    );
+}
+
+/// The self-call exemption must require *both* halves of its predicate.
+///
+/// `validate()` skips the caller-side `new_account_storage_gas` charge only when the callee branch
+/// already charged the same account: the transaction is a `Call` back to the caller **and** it
+/// carries value. A deposit to a *different* callee is not that case, so the caller charge stands
+/// whatever the value is — the two runs below differ only in `value` and must cost the same.
+#[test]
+fn test_rex5_deposit_caller_charge_survives_value_transfer_to_other_callee() {
+    use std::convert::Infallible;
+
+    // Same SALT setup as `test_rex5_deposit_caller_storage_gas_is_added_not_multiplied`: bucket 7
+    // at 2x `MIN_BUCKET_SIZE` gives multiplier 2, so the caller-materialisation charge is a
+    // visible 25_000 instead of the default bucket's 0.
+    const HEAVY_BUCKET: BucketId = 7;
+    const HEAVY_CAPACITY: u64 = 512;
+    const DEPOSIT_CALLER_STORAGE_GAS: u64 = 25_000;
+
+    fn gas_used_for(value: U256) -> u64 {
+        let external_envs = TestExternalEnvs::<Infallible, SingleBucketHasher>::new()
+            .with_bucket_capacity(HEAVY_BUCKET, HEAVY_CAPACITY);
+        // TARGET_CONTRACT is funded, so the callee branch never charges new-account gas and the
+        // only account materialisation in either run is the empty deposit caller.
+        let mut db = MemoryDatabase::default()
+            .account_balance(TARGET_CONTRACT, U256::from(1u64))
+            .account_code(TARGET_CONTRACT, simple_return_contract());
+        let mut context =
+            MegaContext::new(&mut db, MegaSpecId::REX5).with_external_envs((&external_envs).into());
+        context.modify_chain(|chain| {
+            chain.operator_fee_scalar = Some(U256::from(0));
+            chain.operator_fee_constant = Some(U256::from(0));
+        });
+        let mut tx = make_op_deposit_tx(EMPTY_CALLER, 1_000_000u128, TARGET_CONTRACT);
+        tx.base.value = value;
+        let mut evm = MegaEvm::new(context);
+        let res = alloy_evm::Evm::transact_raw(&mut evm, tx).expect("deposit tx must execute");
+        assert!(res.result.is_success(), "got {:?}", res.result);
+        res.result.tx_gas_used()
+    }
+
+    let with_value = gas_used_for(U256::from(1));
+    let without_value = gas_used_for(U256::ZERO);
+
+    assert_eq!(
+        with_value, without_value,
+        "a non-self-call deposit must pay the caller-materialisation storage gas regardless of \
+         value; got {with_value} with value vs {without_value} without",
+    );
+    assert!(
+        with_value > DEPOSIT_CALLER_STORAGE_GAS,
+        "sanity: the run must actually include the {DEPOSIT_CALLER_STORAGE_GAS} caller charge, \
+         got {with_value}",
     );
 }

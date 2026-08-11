@@ -185,7 +185,7 @@ mod tests {
         });
         let mut evm = MegaEvm::new(context);
         let tx = TxEnvBuilder::default().call(contract).gas_limit(1_000_000_000).build_fill();
-        let mut tx = alloy_op_evm::OpTx(op_revm::OpTransaction::new(tx));
+        let mut tx = crate::MegaTransaction(op_revm::OpTransaction::new(tx));
         tx.enveloped_tx = Some(Bytes::new());
         alloy_evm::Evm::transact_raw(&mut evm, tx)
     }

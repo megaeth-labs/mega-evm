@@ -11,10 +11,9 @@ use alloy_eips::{
 };
 use alloy_primitives::{address, bytes, Address, Bytes, B256, U256};
 use mega_evm::{
-    alloy_op_evm::OpTx as MegaTransaction,
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    EvmTxRuntimeLimits, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, ACCOUNT_INFO_WRITE_SIZE,
-    BASE_TX_SIZE, STORAGE_SLOT_WRITE_SIZE,
+    EvmTxRuntimeLimits, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
+    ACCOUNT_INFO_WRITE_SIZE, BASE_TX_SIZE, STORAGE_SLOT_WRITE_SIZE,
 };
 use revm::{
     bytecode::opcode::{

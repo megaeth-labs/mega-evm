@@ -6,10 +6,9 @@
 
 use alloy_primitives::{address, Address, Bytes, U256};
 use mega_evm::{
-    alloy_op_evm::OpTx as MegaTransaction,
     constants::mini_rex::BLOCK_ENV_ACCESS_COMPUTE_GAS,
     test_utils::{BytecodeBuilder, GasInspector, MsgCallMeta},
-    EmptyExternalEnv, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
+    EmptyExternalEnv, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
 };
 use revm::{
     bytecode::opcode::{BALANCE, EXTCODECOPY, EXTCODEHASH, EXTCODESIZE, POP, PUSH0, STOP},

@@ -11,11 +11,11 @@ use std::convert::Infallible;
 use alloy_primitives::{address, Address, Bytes, U256};
 use alloy_sol_types::SolCall;
 use mega_evm::{
-    alloy_op_evm::{OpTx, OpTxError},
-    op_revm::OpTransaction,
+    alloy_op_evm::OpTxError,
     test_utils::{BytecodeBuilder, MemoryDatabase},
     EvmTxRuntimeLimits, IMegaLimitControl, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
-    ACCOUNT_INFO_WRITE_SIZE, BASE_TX_SIZE, LIMIT_CONTROL_ADDRESS, STORAGE_SLOT_WRITE_SIZE,
+    MegaTransaction, MegaTransactionNew as _, ACCOUNT_INFO_WRITE_SIZE, BASE_TX_SIZE,
+    LIMIT_CONTROL_ADDRESS, STORAGE_SLOT_WRITE_SIZE,
 };
 use revm::{
     bytecode::opcode::*,
@@ -53,7 +53,7 @@ fn transact_data_kv(
         chain.operator_fee_constant = Some(U256::from(0));
     });
     let mut evm = MegaEvm::new(context);
-    let mut tx = OpTx(OpTransaction::new(tx));
+    let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
     let r = alloy_evm::Evm::transact_raw(&mut evm, tx)?;
 
@@ -429,7 +429,7 @@ fn test_intrinsic_data_size_overflow_with_inspector_early_return() {
 
     let mut inspector = SkipAllCallsInspector;
     let mut evm = MegaEvm::new(context).with_inspector(&mut inspector);
-    let mut tx = OpTx(OpTransaction::new(default_tx_builder(CALLEE).build_fill()));
+    let mut tx = MegaTransaction::new(default_tx_builder(CALLEE).build_fill());
     tx.enveloped_tx = Some(Bytes::new());
     let result = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
 

@@ -273,7 +273,7 @@ mod tests {
             .data(Bytes::from(vec![0u8; calldata_tokens as usize]))
             .gas_limit(1_000_000)
             .build_fill();
-        let mut tx = alloy_op_evm::OpTx(op_revm::OpTransaction::new(tx));
+        let mut tx = crate::MegaTransaction(op_revm::OpTransaction::new(tx));
         tx.enveloped_tx = Some(Bytes::new());
 
         let result = evm.transact_raw(tx).expect("probe transaction must execute");
@@ -375,10 +375,8 @@ mod tests {
     }
 
     /// Executes one transaction into [`SSTORE_FRESH_SLOT_CODE`] planted at [`TARGET`] and returns
-    /// its gas used. `force_state_gas` turns EIP-8037 on directly on the config the EVM ends up
-    /// running with, bypassing the conversion pins — the control that shows this probe reacts to
-    /// state-gas accounting at all.
-    fn run_sstore_tx(cfg: CfgEnv<MegaSpecId>, force_state_gas: bool) -> u64 {
+    /// its gas used.
+    fn run_sstore_tx(cfg: CfgEnv<MegaSpecId>) -> u64 {
         let mut db = MemoryDatabase::default();
         let code = Bytes::from_static(&SSTORE_FRESH_SLOT_CODE);
         db.insert_account_info(
@@ -395,17 +393,13 @@ mod tests {
             chain.operator_fee_scalar = Some(U256::ZERO);
             chain.operator_fee_constant = Some(U256::ZERO);
         });
-        if force_state_gas {
-            evm.ctx.inner.cfg.enable_amsterdam_eip8037 = true;
-        }
-
         let tx = TxEnvBuilder::new()
             .caller(SENDER)
             .call(TARGET)
             .chain_id(Some(CHAIN_ID))
             .gas_limit(1_000_000)
             .build_fill();
-        let mut tx = alloy_op_evm::OpTx(op_revm::OpTransaction::new(tx));
+        let mut tx = crate::MegaTransaction(op_revm::OpTransaction::new(tx));
         tx.enveloped_tx = Some(Bytes::new());
 
         let result = evm.transact_raw(tx).expect("probe transaction must execute");
@@ -413,10 +407,16 @@ mod tests {
         result.result.tx_gas_used()
     }
 
-    /// EIP-8037 is the one `CfgEnv` field an embedder does not own. `MegaETH`'s frozen-spec gas
-    /// accounting assumes no state-gas split exists, so the flag is pinned off on the way in and
-    /// reads back off on the way out, and setting it changes nothing about what a transaction
-    /// costs.
+    /// EIP-8037 is the one `CfgEnv` field an embedder does not own. `MegaETH`'s gas accounting
+    /// assumes no state-gas split exists, so the flag is forced off before the EVM is built and
+    /// again before every transaction, reads back off, and setting it changes nothing about what a
+    /// transaction costs.
+    ///
+    /// The probe is a fresh-slot `SSTORE` under a schedule that prices state gas —
+    /// `state_gas_priced_cfg` asserts the Amsterdam charge it installs is non-zero, so a live
+    /// split would land on this transaction. There is deliberately no "forced past the pin"
+    /// control any more: the force now happens inside the transaction, after any window a test
+    /// could write the flag in, which is the property being asserted.
     #[test]
     fn test_embedder_cannot_enable_amsterdam_eip8037() {
         let mut cfg = state_gas_priced_cfg();
@@ -443,17 +443,17 @@ mod tests {
         // whether or not the embedder asked for EIP-8037, even on a schedule that prices state
         // gas.
         assert_eq!(
-            run_sstore_tx(cfg, false),
-            run_sstore_tx(state_gas_priced_cfg(), false),
+            run_sstore_tx(cfg),
+            run_sstore_tx(state_gas_priced_cfg()),
             "an embedder's EIP-8037 request must not reprice a fresh-slot SSTORE"
         );
 
-        // Control: forced past the pin, the same transaction does price differently — so the
-        // equality above is a real observation, not a probe blind to state gas.
-        assert_ne!(
-            run_sstore_tx(state_gas_priced_cfg(), true),
-            run_sstore_tx(state_gas_priced_cfg(), false),
-            "the probe must be able to observe EIP-8037 state gas when it is live"
+        // And the state-gas price in the schedule is inert on its own: installing it changes
+        // nothing either, so no part of execution reads the state-gas table.
+        assert_eq!(
+            run_sstore_tx(state_gas_priced_cfg()),
+            run_sstore_tx(embedder_cfg(MAINNET_TX_TOKEN_COST, true)),
+            "a schedule that prices state gas must not reprice a transaction while the split is off"
         );
     }
 }

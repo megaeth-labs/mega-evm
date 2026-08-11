@@ -503,7 +503,6 @@ fn build_env(chain_id: u64, block: &Block<Transaction>) -> Env {
         current_withdrawals_root: None,
         parent_blob_gas_used: None,
         parent_excess_blob_gas: None,
-        parent_target_blobs_per_block: None,
         current_blob_gas_used: None,
     }
 }

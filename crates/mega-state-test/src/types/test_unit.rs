@@ -137,17 +137,11 @@ impl TestUnit {
         } else if let (Some(parent_blob_gas_used), Some(parent_excess_blob_gas)) =
             (self.env.parent_blob_gas_used, self.env.parent_excess_blob_gas)
         {
-            // A fixture may pin the parent's target blob gas per block; only fall
-            // back to the Cancun target when it does not.
-            let parent_target_blob_gas_per_block = self
-                .env
-                .parent_target_blobs_per_block
-                .map_or(eip4844::TARGET_BLOB_GAS_PER_BLOCK_CANCUN, |target| target.to());
             block.set_blob_excess_gas_and_price(
                 calc_excess_blob_gas(
                     parent_excess_blob_gas.to(),
                     parent_blob_gas_used.to(),
-                    parent_target_blob_gas_per_block,
+                    eip4844::TARGET_BLOB_GAS_PER_BLOCK_CANCUN,
                 ),
                 eip4844::BLOB_BASE_FEE_UPDATE_FRACTION_CANCUN,
             );
@@ -218,30 +212,6 @@ mod tests {
     }
 
     #[test]
-    fn test_block_env_derives_excess_blob_gas_from_fixture_target() {
-        // Parent used exactly its own (non-Cancun) target, so the excess does not
-        // grow. Deriving against the Cancun target instead would leave
-        // 786432 - 393216 = 393216 behind.
-        let unit = blob_fixture(
-            r#""parentExcessBlobGas": "0x00",
-               "parentBlobGasUsed": "0xc0000",
-               "parentTargetBlobsPerBlock": "0xc0000","#,
-        );
-        assert_eq!(excess_blob_gas(&unit), 0);
-    }
-
-    #[test]
-    fn test_block_env_derives_excess_blob_gas_above_fixture_target() {
-        // 131072 + 786432 - 262144 = 655360.
-        let unit = blob_fixture(
-            r#""parentExcessBlobGas": "0x20000",
-               "parentBlobGasUsed": "0xc0000",
-               "parentTargetBlobsPerBlock": "0x40000","#,
-        );
-        assert_eq!(excess_blob_gas(&unit), 655_360);
-    }
-
-    #[test]
     fn test_block_env_falls_back_to_cancun_target_without_fixture_target() {
         // 0 + 786432 - 393216 = 393216.
         let unit = blob_fixture(
@@ -254,12 +224,11 @@ mod tests {
     #[test]
     fn test_block_env_current_excess_blob_gas_wins_over_parent_fields() {
         // An explicit `currentExcessBlobGas` is the block's value as-is; the
-        // parent fields, fixture target included, are not consulted.
+        // parent fields are not consulted.
         let unit = blob_fixture(
             r#""currentExcessBlobGas": "0x20000",
                "parentExcessBlobGas": "0x00",
-               "parentBlobGasUsed": "0xc0000",
-               "parentTargetBlobsPerBlock": "0xc0000","#,
+               "parentBlobGasUsed": "0xc0000","#,
         );
         assert_eq!(excess_blob_gas(&unit), 131_072);
     }

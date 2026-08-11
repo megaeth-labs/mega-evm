@@ -10,16 +10,15 @@ use alloy_primitives::{address, hex, Address, Bytes, Signature, TxKind, B256, U2
 use alloy_sol_types::{sol, SolCall};
 use mega_evm::{
     alloy_consensus::{Signed, TxLegacy},
-    alloy_op_evm::OpTx,
-    op_revm::OpTransaction,
     revm::context::result::ExecutionResult,
     sandbox::{
         calculate_keyless_deploy_address,
         tests::{CREATE2_FACTORY_CONTRACT, CREATE2_FACTORY_DEPLOYER, CREATE2_FACTORY_TX},
     },
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    IKeylessDeploy, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, SaltEnv, TestExternalEnvs,
-    KEYLESS_DEPLOY_ADDRESS, MIN_BUCKET_SIZE, ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE_REX2,
+    IKeylessDeploy, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
+    MegaTransactionNew as _, SaltEnv, TestExternalEnvs, KEYLESS_DEPLOY_ADDRESS, MIN_BUCKET_SIZE,
+    ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE_REX2,
 };
 use revm::{
     bytecode::opcode::{CALL, GAS, MSTORE, POP, PUSH0, RETURN},
@@ -75,7 +74,7 @@ fn execute_keyless_deploy_with_envs(
         gas_price: 0,
         ..Default::default()
     };
-    let mut tx = OpTx(OpTransaction::new(tx));
+    let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
 
     let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);

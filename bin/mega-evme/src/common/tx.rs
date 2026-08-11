@@ -12,11 +12,10 @@ use mega_evm::{
         eip7702::{Authorization, RecoveredAuthority, RecoveredAuthorization, SignedAuthorization},
         Decodable2718, Encodable2718, Typed2718 as _,
     },
-    alloy_op_evm::OpTx as MegaTransaction,
     op_alloy_consensus::{OpTxEnvelope, TxDeposit},
-    op_revm::{transaction::deposit::DepositTransactionParts, OpTransaction},
+    op_revm::transaction::deposit::DepositTransactionParts,
     revm::{context::tx::TxEnv, primitives::TxKind},
-    Either, MegaTxEnvelope, MegaTxType,
+    Either, MegaTransaction, MegaTransactionNew as _, MegaTxEnvelope, MegaTxType,
 };
 use tracing::{debug, trace};
 
@@ -349,7 +348,7 @@ impl TxArgs {
     pub fn create_tx(&self, chain_id: u64) -> Result<MegaTransaction> {
         let tx_env = self.create_tx_env(chain_id)?;
         let envelope = create_fake_envelope(&tx_env)?;
-        let mut tx = MegaTransaction(OpTransaction::new(tx_env));
+        let mut tx = MegaTransaction::new(tx_env);
         tx.enveloped_tx = Some(Bytes::from(envelope.encoded_2718()));
 
         // Set deposit fields if this is a deposit transaction (type 126)
@@ -494,7 +493,7 @@ impl DecodedRawTx {
     ///
     /// Uses the stored raw bytes for `enveloped_tx` (used in L1 fee calculation).
     pub fn into_tx(self) -> MegaTransaction {
-        let mut tx = MegaTransaction(OpTransaction::new(self.tx_env));
+        let mut tx = MegaTransaction::new(self.tx_env);
         tx.enveloped_tx = Some(self.raw_bytes);
         if let Some((source_hash, mint, is_system_transaction)) = self.deposit {
             tx.deposit = DepositTransactionParts { source_hash, mint, is_system_transaction };

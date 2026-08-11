@@ -1087,7 +1087,7 @@ mod tests {
 
         // Latch the data-size dimension at its mutation site: intrinsic transaction data
         // (110-byte base + 200 bytes of calldata) exceeds the 100-byte limit.
-        let tx = alloy_op_evm::OpTx(op_revm::OpTransaction::new(
+        let tx = crate::MegaTransaction(op_revm::OpTransaction::new(
             TxEnvBuilder::new()
                 .caller(Address::ZERO)
                 .call(Address::ZERO)
@@ -1108,6 +1108,21 @@ mod tests {
 
         // The latched kind is preserved (not overwritten by the compute-gas check).
         assert_eq!(latched_kind(&limit), Some(LimitKind::DataSize));
+    }
+
+    #[test]
+    fn test_rex5_authority_creation_latches_state_growth_exceed() {
+        let mut limits = test_limits();
+        limits.tx_state_growth_limit = 1;
+        let mut limit = AdditionalLimit::new(MegaSpecId::REX5, limits);
+
+        limit.on_rex5_eip7702_authority_creations(2);
+
+        assert_eq!(
+            latched_kind(&limit),
+            Some(LimitKind::StateGrowth),
+            "authority creation accounting must latch its TX-level state-growth exceed",
+        );
     }
 
     /// SELFDESTRUCT's beneficiary usage is recorded *before* the inner instruction runs and
@@ -1144,7 +1159,7 @@ mod tests {
     #[should_panic(expected = "REX5")]
     #[cfg(debug_assertions)]
     fn test_intrinsic_check_for_tx_requires_rex5_spec() {
-        let tx = alloy_op_evm::OpTx(op_revm::OpTransaction::new(
+        let tx = crate::MegaTransaction(op_revm::OpTransaction::new(
             TxEnvBuilder::new().caller(Address::ZERO).call(Address::ZERO).build_fill(),
         ));
         // REX4 < REX5: the precondition assert must fire.

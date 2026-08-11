@@ -34,11 +34,11 @@ use std::convert::Infallible;
 use alloy_primitives::{address, Address, Bytes, U256};
 use alloy_sol_types::SolCall;
 use mega_evm::{
-    alloy_op_evm::{OpTx, OpTxError},
-    op_revm::OpTransaction,
+    alloy_op_evm::OpTxError,
     test_utils::{BytecodeBuilder, MemoryDatabase},
     EvmTxRuntimeLimits, IMegaAccessControl, IMegaLimitControl, MegaContext, MegaEvm,
-    MegaHaltReason, MegaSpecId, ACCESS_CONTROL_ADDRESS, LIMIT_CONTROL_ADDRESS,
+    MegaHaltReason, MegaSpecId, MegaTransaction, MegaTransactionNew as _, ACCESS_CONTROL_ADDRESS,
+    LIMIT_CONTROL_ADDRESS,
 };
 use revm::{
     bytecode::opcode::*,
@@ -87,7 +87,7 @@ fn transact_with_spec(
         chain.operator_fee_constant = Some(U256::from(0));
     });
     let mut evm = MegaEvm::new(context);
-    let mut tx = OpTx(OpTransaction::new(tx));
+    let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
     let r = alloy_evm::Evm::transact_raw(&mut evm, tx)?;
 
@@ -129,7 +129,7 @@ fn transact_detailed(
         chain.operator_fee_constant = Some(U256::from(0));
     });
     let mut evm = MegaEvm::new(context);
-    let mut tx = OpTx(OpTransaction::new(tx));
+    let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
     let r = alloy_evm::Evm::transact_raw(&mut evm, tx)?;
 
@@ -733,7 +733,7 @@ fn test_detention_plus_intrinsic_data_size_overflow() {
         chain.operator_fee_constant = Some(U256::from(0));
     });
     let mut evm = MegaEvm::new(context);
-    let mut tx = OpTx(OpTransaction::new(tx));
+    let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
     let result = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
 
@@ -819,7 +819,7 @@ fn test_detention_does_not_interfere_with_data_size_limit() {
         chain.operator_fee_constant = Some(U256::from(0));
     });
     let mut evm = MegaEvm::new(context);
-    let mut tx = OpTx(OpTransaction::new(tx));
+    let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
     let result = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
 
@@ -1019,5 +1019,68 @@ fn test_selfbalance_at_non_beneficiary_with_access_disabled_executes() {
     assert!(
         !marked,
         "non-beneficiary SELFBALANCE must not set the beneficiary-balance tracker bit",
+    );
+}
+
+// ============================================================================
+// TEST 5c: Caller is beneficiary, no volatile opcode — eager sync must stand alone
+// ============================================================================
+
+/// Test 5 lets the callee CALL `MegaLimitControl`, and the CALL-family wrapper re-syncs the
+/// tracker's cap into `AdditionalLimit` on its own. This variant removes every opcode that could
+/// re-sync — the callee is a bare `STOP` — so the detained limit can only come from the eager
+/// `on_new_tx` sync. Without it the transaction would run against the full TX compute-gas cap.
+#[test]
+fn test_caller_is_beneficiary_eager_detention_without_volatile_opcode() {
+    let callee_code = BytecodeBuilder::default().stop().build();
+
+    let mut db = MemoryDatabase::default()
+        .account_balance(BENEFICIARY, U256::from(1_000_000))
+        .account_code(CALLEE, callee_code);
+
+    let tx = TxEnvBuilder::default()
+        .caller(BENEFICIARY)
+        .call(CALLEE)
+        .gas_limit(1_000_000_000)
+        .build_fill();
+
+    let (result, detained_limit) =
+        transact(&mut db, BENEFICIARY, 200_000_000, DETENTION_CAP, tx).unwrap();
+
+    assert!(result.result.is_success());
+    assert!(
+        detained_limit < 200_000_000,
+        "caller=beneficiary must be detained from TX start even when no opcode re-syncs the \
+         cap; detained limit stayed at {detained_limit}",
+    );
+}
+
+// ============================================================================
+// TEST 6c: Recipient is beneficiary, no volatile opcode — eager sync must stand alone
+// ============================================================================
+
+/// Recipient-side mirror of test 5c: the beneficiary's own code is a bare `STOP`.
+#[test]
+fn test_recipient_is_beneficiary_eager_detention_without_volatile_opcode() {
+    let beneficiary_code = BytecodeBuilder::default().stop().build();
+
+    let mut db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(1_000_000))
+        .account_code(BENEFICIARY, beneficiary_code);
+
+    let tx = TxEnvBuilder::default()
+        .caller(CALLER)
+        .call(BENEFICIARY)
+        .gas_limit(1_000_000_000)
+        .build_fill();
+
+    let (result, detained_limit) =
+        transact(&mut db, BENEFICIARY, 200_000_000, DETENTION_CAP, tx).unwrap();
+
+    assert!(result.result.is_success());
+    assert!(
+        detained_limit < 200_000_000,
+        "recipient=beneficiary must be detained from TX start even when no opcode re-syncs the \
+         cap; detained limit stayed at {detained_limit}",
     );
 }

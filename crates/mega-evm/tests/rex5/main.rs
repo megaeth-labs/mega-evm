@@ -3,12 +3,14 @@
 mod apply_pending_changes_gas_budget;
 mod call_too_deep_guard;
 mod callcode_storage_gas;
+mod code_deposit_precharge_bounds;
 mod create2_empty_initcode;
 mod create2_resize_gas_metering;
 mod create_atomicity;
 mod db_error;
 mod deposit_caller_accounting;
 mod deposit_create_storage_gas;
+mod deposit_execution_result;
 mod eip7702_metering;
 mod eip7702_state_growth;
 mod frame_target_updated_dedup;

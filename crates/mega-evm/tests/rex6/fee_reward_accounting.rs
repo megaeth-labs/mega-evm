@@ -23,7 +23,7 @@ use std::convert::Infallible;
 
 use alloy_primitives::{address, Address, Bytes, U256};
 use mega_evm::{
-    alloy_op_evm::{OpTx, OpTxError},
+    alloy_op_evm::OpTxError,
     op_revm::OpTransaction,
     test_utils::{BytecodeBuilder, ErrorInjectingDatabase, MemoryDatabase},
     EmptyExternalEnv, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
@@ -107,7 +107,7 @@ fn build_evm(spec: MegaSpecId, db: MemoryDatabase, basefee: u64) -> TestEvm {
 /// `BASE_FEE_RECIPIENT` is credited `basefee × gas_used > 0` — which
 /// materialises it when the account is absent from the DB.
 fn make_call_tx() -> MegaTransaction {
-    let mut tx = OpTx(OpTransaction {
+    let mut tx = MegaTransaction(OpTransaction {
         base: TxEnv {
             caller: CALLER,
             kind: TxKind::Call(TARGET_CONTRACT),
@@ -141,7 +141,7 @@ fn transact_with_spec(
 /// A transaction with a 1-wei priority fee so the block beneficiary receives a non-zero
 /// credit: `effective_gas_price = BASEFEE + 1` → `coinbase_gas_price = 1` → `1 × gas_used`.
 fn make_tip_tx() -> MegaTransaction {
-    let mut tx = OpTx(OpTransaction {
+    let mut tx = MegaTransaction(OpTransaction {
         base: TxEnv {
             caller: CALLER,
             kind: TxKind::Call(TARGET_CONTRACT),
@@ -159,7 +159,7 @@ fn make_tip_tx() -> MegaTransaction {
 /// An OP deposit-style transaction. A non-zero `source_hash` flips `tx_type` to deposit, and
 /// op-revm's `reward_beneficiary` early-returns for deposits — so no fee recipient is credited.
 fn make_deposit_tx() -> MegaTransaction {
-    let mut tx = OpTx(OpTransaction {
+    let mut tx = MegaTransaction(OpTransaction {
         base: TxEnv {
             caller: CALLER,
             kind: TxKind::Call(TARGET_CONTRACT),

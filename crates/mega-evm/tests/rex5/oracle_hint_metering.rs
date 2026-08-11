@@ -20,11 +20,10 @@
 use alloy_primitives::{address, Address, Bytes, B256, U256};
 use alloy_sol_types::{sol, SolCall};
 use mega_evm::{
-    alloy_op_evm::OpTx,
-    op_revm::OpTransaction,
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    EvmTxRuntimeLimits, MegaContext, MegaEvm, MegaSpecId, TestExternalEnvs,
-    ACCOUNT_INFO_WRITE_SIZE, BASE_TX_SIZE, ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE_REX2,
+    EvmTxRuntimeLimits, MegaContext, MegaEvm, MegaSpecId, MegaTransaction, MegaTransactionNew as _,
+    TestExternalEnvs, ACCOUNT_INFO_WRITE_SIZE, BASE_TX_SIZE, ORACLE_CONTRACT_ADDRESS,
+    ORACLE_CONTRACT_CODE_REX2,
 };
 use revm::{
     bytecode::opcode::*,
@@ -110,7 +109,7 @@ fn run_with_oracle(
         .gas_limit(100_000_000)
         .build_fill();
     let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);
-    let mut tx = OpTx(OpTransaction::new(tx));
+    let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
     let envelope = alloy_evm::Evm::transact_raw(&mut evm, tx).expect("transact ok");
     use revm::handler::EvmTr;
@@ -145,7 +144,7 @@ fn run_direct_oracle_tx(
         .gas_limit(100_000_000)
         .build_fill();
     let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);
-    let mut tx = OpTx(OpTransaction::new(tx));
+    let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
     let envelope = alloy_evm::Evm::transact_raw(&mut evm, tx).expect("transact ok");
     use revm::handler::EvmTr;
@@ -174,6 +173,19 @@ fn test_rex4_zero_gas_send_hint_still_forwards() {
     let (result, hints, _) = run_with_oracle(MegaSpecId::REX4, code, u64::MAX);
     assert!(result.is_success());
     assert_eq!(hints.len(), 1, "REX4 must keep the pre-REX5 unmetered, zero-gas-accepting path",);
+}
+
+#[test]
+fn test_rex4_intrinsic_overflow_blocks_hint_before_interceptor_dispatch() {
+    let calldata =
+        sendHintCall { topic: TOPIC, data: Bytes::from_static(b"blocked") }.abi_encode().into();
+    let (result, hints, _) = run_direct_oracle_tx(MegaSpecId::REX4, calldata, 0);
+
+    assert!(!result.is_success(), "the intrinsic data-size overflow must halt the transaction");
+    assert!(
+        hints.is_empty(),
+        "REX4 must surface the pending intrinsic overflow before the hint interceptor runs",
+    );
 }
 
 /// REX4 replay parity: a normal sendHint with a large payload under REX4 must NOT
@@ -569,7 +581,7 @@ fn test_rex5_hint_charge_persists_across_initiating_frame_revert() {
         .gas_limit(100_000_000)
         .build_fill();
     let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);
-    let mut tx = OpTx(OpTransaction::new(tx));
+    let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
     let envelope = alloy_evm::Evm::transact_raw(&mut evm, tx).expect("transact ok");
     use revm::handler::EvmTr;

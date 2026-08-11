@@ -10,9 +10,9 @@ use std::convert::Infallible;
 
 use alloy_primitives::{address, Address, Bytes, TxKind, B256, U256};
 use mega_evm::{
-    alloy_op_evm::OpTx, constants, op_revm::OpTransaction, test_utils::MemoryDatabase,
-    BucketHasher, EvmTxRuntimeLimits, MegaContext, MegaEvm, MegaSpecId, MegaTransaction,
-    SimpleBucketHasher, TestExternalEnvs, MIN_BUCKET_SIZE,
+    constants, test_utils::MemoryDatabase, BucketHasher, EvmTxRuntimeLimits, MegaContext, MegaEvm,
+    MegaSpecId, MegaTransaction, MegaTransactionNew as _, SimpleBucketHasher, TestExternalEnvs,
+    MIN_BUCKET_SIZE,
 };
 use revm::{context::TxEnv, database::Database as _};
 
@@ -62,7 +62,7 @@ fn deposit_create_tx(tx_nonce: u64, gas_limit: u64) -> MegaTransaction {
         value: U256::ZERO,
         ..Default::default()
     };
-    let mut tx = OpTx(OpTransaction::new(tx_env));
+    let mut tx = MegaTransaction::new(tx_env);
     tx.deposit.source_hash = B256::from([0x42; 32]);
     tx.enveloped_tx = Some(Bytes::new());
     tx
@@ -81,7 +81,7 @@ fn normal_create_tx(state_nonce: u64, gas_limit: u64) -> MegaTransaction {
         value: U256::ZERO,
         ..Default::default()
     };
-    let mut tx = OpTx(OpTransaction::new(tx_env));
+    let mut tx = MegaTransaction::new(tx_env);
     tx.enveloped_tx = Some(Bytes::new());
     tx
 }

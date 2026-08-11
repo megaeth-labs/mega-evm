@@ -28,9 +28,13 @@ workspace and has **zero CI impact**.
 
 - Matches `.is_enabled((?:crate::)?MegaSpecId::IDENT)`.
 - Walks left from the `.` to capture the full receiver (`spec`, `ctx.spec`,
-  `$context.host.spec_id()`, `MegaSpecId::REX5`, …).
+  `$context.host.spec_id()`, `MegaSpecId::REX5`, …), including **line-wrapped**
+  method chains (shared segment walker with `call_delete`).
 - Skips lines that are comments (`//`, `///`, `//!`).
 - Skips matches inside double-quoted string literals (simple heuristic).
+- Skips a site whose receiver walk yields **nothing** (reported as
+  `empty-receiver`): replacing that span would splice the body straight after an
+  unparsed prefix, and the compile error would be miscounted as a kill.
 - Manual exclusions are listed in the report.
 
 ### Gas-const details
@@ -98,6 +102,8 @@ For each mutant:
 2. Journal original content + hashes, then apply text replacement.
 3. **L1**: `cargo test -p mega-evm --quiet`
    - fail → **killed** at L1; record first failing test / compile error.
+   - exceeds the wall-clock ceiling → **killed** at L1 with
+     `kill_kind="timeout"` (see [Test timeout](#test-timeout)).
 4. If L1 passes → **L2**: `cargo test -p mega-state-test --quiet`
    - fail → **killed** at L2; else **survived**.
 5. **Compare-and-restore** from the journal (no `git checkout`):
@@ -131,6 +137,9 @@ python3 tools/mutation/mutate.py --limit 40 \
 python3 tools/mutation/mutate.py --limit 40 --resume \
   --state tools/mutation/state.json \
   --report tools/mutation/reports/subset-report.md
+
+# Override the per-layer test timeout (seconds)
+python3 tools/mutation/mutate.py --limit 40 --test-timeout 900
 ```
 
 | Flag | Meaning |
@@ -146,6 +155,54 @@ python3 tools/mutation/mutate.py --limit 40 --resume \
 | `--no-sentinel-priority` | Do not force must-kill sentinels first |
 | `--skip-clean-check` | Debug only — skip initial clean-tree assert |
 | `--skip-baseline` | Debug only — skip clean-tree L1+L2 baseline |
+| `--test-timeout SECONDS` | Wall-clock ceiling for each oracle `cargo test` call (default: derived from the baseline — see below) |
+
+## Test timeout
+
+A mutant can make the tested path — or a test loop — run forever (a flipped
+spec gate that turns a `while` condition always-true, for instance). Without a
+ceiling that hangs the whole campaign: no result, no state progress, no journal
+recovery, and a manual kill can land while the product file is still mutated.
+
+Every oracle `cargo test` call therefore runs under a wall-clock ceiling.
+
+**Derivation (explicit always wins):**
+
+1. `--test-timeout N` → both layers use `N` seconds.
+2. Otherwise, from the clean-tree baseline, **per layer**:
+   `max(300, ceil(5 × that layer's baseline wall time))`.
+   With an L1 baseline of 363.3s and an L2 baseline of 11.8s that is
+   `L1 = ceil(1816.4) = 1817s` and `L2 = max(300, 59) = 300s` — the floor keeps
+   a fast layer from getting a hair-trigger ceiling.
+3. No baseline wall time available (`--skip-baseline`, and no explicit flag) →
+   both layers use the absolute default **1800s**.
+
+The baseline run itself cannot use rule 2 (it is the measurement rule 2 derives
+from), so it uses `--test-timeout` when given and the 1800s absolute default
+otherwise. A baseline that times out aborts the campaign like any other
+baseline failure.
+
+The resolved policy is printed at campaign start, stored in the state file
+under `test_timeout`, and shown in the report.
+
+**On expiry:**
+
+- The child is spawned with `start_new_session=True`, so `cargo` is a process
+  group leader. The harness signals the **whole group** — `SIGTERM`, 10s grace,
+  then `SIGKILL` — because killing only the direct child leaves `rustc` and
+  test binaries orphaned on the `target/` lock.
+- The mutant is restored through the **normal journal compare-and-restore**,
+  exactly like any other outcome, and the post-restore cleanliness assert runs.
+- The result is recorded as `status="killed"` with `kill_kind="timeout"`,
+  `timed_out=true`, `timeout_s=<ceiling>`, and
+  `first_failing_test="<timeout after Ns>"`. The queue advances and `--resume`
+  treats it as completed work.
+
+**Classification:** a timeout *is* a kill (a mutant that hangs the suite is
+detected), but the report counts it separately from assertion kills
+(`killed=N [assertion=X, timeout=Y]`, plus a per-mutant `kind` column and a
+list of timed-out mutants with their ceiling). A rising timeout count means the
+threshold may be too tight, not that the tests got stronger.
 
 ## Campaign safety (M4)
 
@@ -160,12 +217,21 @@ python3 tools/mutation/mutate.py --limit 40 --resume \
   the regular per-mutant restore share the same hash logic (no `git checkout`).
   Concurrent-edit hash mismatch refuses to touch the file, keeps the journal,
   and aborts the campaign.
+- **Atomic product writes**: mutated source (and journal restore) is written via
+  same-directory temp + `fsync` + `os.replace`, so a kill mid-write cannot leave
+  a half-written file that matches neither journal hash. Orphaned `*.tmp.<pid>`
+  temps are whitelisted by the cleanliness assert.
+- **Per-layer test timeout**: every oracle `cargo test` call runs under a
+  wall-clock ceiling; expiry kills the whole process group, restores through the
+  journal, and records a `kill_kind="timeout"` kill. See
+  [Test timeout](#test-timeout).
 - **Full-tree clean**: after baseline and after every mutant restore the harness
   runs `git status --porcelain` on the whole repo. Only harness **runtime
   artifacts** are whitelisted (`tools/mutation/reports/`, `logs/`,
-  `state*.json`, `.mutate-journal.json`). Harness sources (`mutate.py`,
-  `README.md`, `TODO.md`, …) dirty or renamed-into-artifact-dir abort and
-  preserve the scene. Rename/copy porcelain lines check **both** path sides.
+  `state*.json`, `.mutate-journal.json`, orphaned `*.tmp.<pid>`). Harness
+  sources (`mutate.py`, `README.md`, `TODO.md`, …) dirty or
+  renamed-into-artifact-dir abort and preserve the scene. Rename/copy porcelain
+  lines check **both** path sides.
 
 ## Spec-gate exclusions (non-product)
 

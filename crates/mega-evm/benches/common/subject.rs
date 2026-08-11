@@ -12,13 +12,9 @@
 use alloy_primitives::{Bytes, U256};
 use core::convert::Infallible;
 use criterion::black_box;
-// Imported as the struct itself (not the `MegaTransaction` type alias) so the
-// tuple-struct constructor is usable — constructors cannot be called through a
-// type alias.
 use mega_evm::{
-    alloy_op_evm::OpTx as MegaTransaction, revm::inspector::NoOpInspector,
-    test_utils::MemoryDatabase, EmptyExternalEnv, MegaContext, MegaEvm, MegaSpecId,
-    TestExternalEnvs,
+    revm::inspector::NoOpInspector, test_utils::MemoryDatabase, EmptyExternalEnv, MegaContext,
+    MegaEvm, MegaSpecId, MegaTransaction, TestExternalEnvs,
 };
 use op_revm::{
     DefaultOp as _, OpBuilder as _, OpContext as OpContextPinned, OpSpecId as OpSpecIdPinned,
