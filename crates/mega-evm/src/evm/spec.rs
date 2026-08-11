@@ -144,6 +144,10 @@ impl MegaSpecId {
 
     /// The behavior this spec executes: alias specs project to the spec whose behavior they
     /// reuse; every other spec is its own behavior.
+    ///
+    /// The projection must stay flat — every target is a concrete spec at or below the
+    /// projecting rung, never another alias — which the `is_flat_projection` const assertion
+    /// below pins at compile time.
     pub const fn behavior(self) -> Self {
         match self {
             Self::MINI_REX_1 => Self::EQUIVALENCE,
@@ -218,6 +222,76 @@ const _: () = assert!(
     is_ladder_prefix(MegaSpecId::ALL),
     "MegaSpecId::ALL must list every spec in ladder order, without gaps"
 );
+
+/// The target `spec` projects to under a behavior `table` of `(spec, target)` pairs; a spec
+/// absent from the table is its own target, mirroring [`MegaSpecId::behavior`]'s identity arm.
+const fn project(table: &[(MegaSpecId, MegaSpecId)], spec: MegaSpecId) -> MegaSpecId {
+    let mut i = 0;
+    while i < table.len() {
+        if table[i].0 as u8 == spec as u8 {
+            return table[i].1;
+        }
+        i += 1;
+    }
+    spec
+}
+
+/// Whether a behavior table is flat: every target is a fixed point of the table and sits at
+/// or below the spec projecting onto it.
+///
+/// The fixed-point check rejects chains and cycles in one property — a chain `A→B→C` fails
+/// because `B`'s own target is `C`, a cycle `A→B→A` because `B` projects back to `A` — either
+/// way [`MegaSpecId::behavior`]'s single-step lookup would silently resolve half-way. The
+/// downward check rejects an alias projecting upward, which would execute semantics whose
+/// one-way setup (gated by [`MegaSpecId::reaches`], a position below the target's rung) never
+/// ran.
+///
+/// The table is passed as data so the checker can be fed malformed shapes: the compile-time
+/// assertion below checks the real projection, and the test exercises the rejection cases the
+/// real table can never produce — a weakened guard here would otherwise pass silently.
+const fn is_flat_projection(table: &[(MegaSpecId, MegaSpecId)]) -> bool {
+    let mut i = 0;
+    while i < table.len() {
+        let (spec, target) = table[i];
+        if project(table, target) as u8 != target as u8 {
+            return false;
+        }
+        if target as u8 > spec as u8 {
+            return false;
+        }
+        // A key that appears twice would make `project` ambiguous (first match wins);
+        // reject the table outright rather than trusting the lookup order.
+        let mut j = 0;
+        while j < i {
+            if table[j].0 as u8 == spec as u8 {
+                return false;
+            }
+            j += 1;
+        }
+        i += 1;
+    }
+    true
+}
+
+/// [`MegaSpecId::behavior`] as data: every spec in [`MegaSpecId::ALL`] paired with its
+/// projection target.
+const fn behavior_table() -> [(MegaSpecId, MegaSpecId); MegaSpecId::ALL.len()] {
+    let mut table = [(MegaSpecId::EQUIVALENCE, MegaSpecId::EQUIVALENCE); MegaSpecId::ALL.len()];
+    let mut i = 0;
+    while i < table.len() {
+        table[i] = (MegaSpecId::ALL[i], MegaSpecId::ALL[i].behavior());
+        i += 1;
+    }
+    table
+}
+
+const _: () = {
+    let table = behavior_table();
+    assert!(
+        is_flat_projection(&table),
+        "behavior() targets must be concrete specs at or below the projecting rung"
+    );
+};
 
 impl From<MegaSpecId> for &'static str {
     /// Converts the [`SpecId`] into its corresponding string identifier.
@@ -374,6 +448,42 @@ mod tests {
         assert!(
             !is_ladder_prefix(&[MegaSpecId::EQUIVALENCE, MegaSpecId::REX]),
             "a skipped rung must be rejected"
+        );
+    }
+
+    #[test]
+    fn test_is_flat_projection_rejects_malformed_tables() {
+        assert!(is_flat_projection(&behavior_table()));
+        assert!(is_flat_projection(&[]), "the empty table is flat");
+        assert!(
+            is_flat_projection(&[(MegaSpecId::MINI_REX_1, MegaSpecId::EQUIVALENCE)]),
+            "a target absent from the table projects to itself"
+        );
+
+        assert!(
+            !is_flat_projection(&[
+                (MegaSpecId::MINI_REX_1, MegaSpecId::EQUIVALENCE),
+                (MegaSpecId::MINI_REX_2, MegaSpecId::MINI_REX_1),
+            ]),
+            "a chain — an alias targeting another alias — must be rejected"
+        );
+        assert!(
+            !is_flat_projection(&[
+                (MegaSpecId::EQUIVALENCE, MegaSpecId::MINI_REX),
+                (MegaSpecId::MINI_REX, MegaSpecId::EQUIVALENCE),
+            ]),
+            "a projection cycle must be rejected"
+        );
+        assert!(
+            !is_flat_projection(&[(MegaSpecId::MINI_REX, MegaSpecId::REX)]),
+            "an alias projecting to a higher rung must be rejected"
+        );
+        assert!(
+            !is_flat_projection(&[
+                (MegaSpecId::MINI_REX_1, MegaSpecId::EQUIVALENCE),
+                (MegaSpecId::MINI_REX_1, MegaSpecId::MINI_REX),
+            ]),
+            "a duplicate key must be rejected — it would make the projection ambiguous"
         );
     }
 
