@@ -7,6 +7,7 @@
 
 mod checkpoint_settlement;
 mod common;
+mod gas_leakage;
 mod interceptor_resume;
 mod latch_surfacing;
 mod modexp_gas;
