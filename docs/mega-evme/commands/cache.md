@@ -47,6 +47,10 @@ An existing output that cannot be parsed at all (corrupt JSON) is replaced by th
 An existing output that parses but cannot be folded — the other cache shape, an unrecognized JSON shape, a different `chain_id`, a different envelope `version` — is a hard error that names the output path and leaves the file untouched.
 Both shapes classify it the same way: a mistyped `--output` should not destroy a file the merge cannot read as its own.
 
+Warnings about a merge that may be silently wrong or lossy — an output being replaced, or chain identity that cannot be validated — are printed on stderr regardless of verbosity.
+They do not depend on `-v` flags or `RUST_LOG`, which only add the structured log event alongside them.
+Stdout carries the summary line only, so it stays parseable.
+
 ### Provider-cache merge
 
 - Union entries by `key`.

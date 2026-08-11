@@ -6,7 +6,7 @@
 mod lock;
 mod merge;
 
-use std::path::PathBuf;
+use std::{fmt, path::PathBuf};
 
 use clap::{Parser, Subcommand};
 
@@ -62,10 +62,29 @@ impl Cmd {
     }
 }
 
+/// Emit a diagnostic that protects the user from a silently wrong merge, on
+/// stderr unconditionally and through the structured log sinks.
+///
+/// The CLI leaves the tracing filter at `off` unless `-v` flags or `RUST_LOG`
+/// raise it, so a `warn!`-only diagnostic reaches nobody on a default command
+/// line: a safeguard reporting that it could not run, or a write about to
+/// discard data already on disk, would be announced into a disabled subscriber.
+/// stderr therefore carries the human line regardless of verbosity, and the
+/// tracing event still carries it to a `--log.file` sink. At raised verbosity
+/// without `--log.file` both channels land on stderr and the line appears
+/// twice, which is preferable to dropping either one.
+///
+/// Reserved for warnings a user must act on; ordinary progress reporting stays
+/// on `tracing` alone.
+fn warn_user(message: fmt::Arguments<'_>) {
+    eprintln!("warning: {message}");
+    warn!("{message}");
+}
+
 /// Validate that provider-cache paths agreeing with `rpc-cache-{id}.json` all
 /// name the same chain id.
 ///
-/// Paths that do not match the pattern emit a `warn!` (chain identity cannot be
+/// Paths that do not match the pattern warn the user (chain identity cannot be
 /// validated for them) and are otherwise ignored. Two or more matching paths
 /// with different ids are a hard error naming the conflicting files.
 pub(crate) fn check_provider_cache_chain_identity<'a>(
@@ -75,11 +94,11 @@ pub(crate) fn check_provider_cache_chain_identity<'a>(
     for path in paths {
         match parse_rpc_cache_filename_chain_id(path) {
             None => {
-                warn!(
-                    path = %path.display(),
-                    "Provider-cache path does not match rpc-cache-{{id}}.json; \
+                warn_user(format_args!(
+                    "Provider-cache path '{}' does not match rpc-cache-{{id}}.json; \
                      chain identity cannot be validated for this file",
-                );
+                    path.display(),
+                ));
             }
             Some(id) => match &seen {
                 None => seen = Some((id, path.to_path_buf())),
@@ -177,12 +196,13 @@ impl MergeArgs {
                     ProviderReread::Ok(entries) => entries,
                     ProviderReread::Hard(err) => return Err(err),
                     ProviderReread::Degradable(msg) => {
-                        warn!(
-                            path = %self.output.display(),
-                            error = %msg,
-                            "Failed to read the existing merge output; \
-                             it will be replaced by the merged inputs",
-                        );
+                        // Replacing the output drops whatever it held: the user
+                        // must hear about it whatever the verbosity is.
+                        warn_user(format_args!(
+                            "{msg}. Replacing the existing merge output '{}' with the \
+                             merged inputs; any entries it held are discarded",
+                            self.output.display(),
+                        ));
                         Vec::new()
                     }
                 };
@@ -214,12 +234,12 @@ impl MergeArgs {
                         }
                         EnvelopeReread::Hard(err) => return Err(err),
                         EnvelopeReread::Degradable(msg) => {
-                            warn!(
-                                path = %self.output.display(),
-                                error = %msg,
-                                "Failed to read the existing merge output; \
-                                 it will be replaced by the merged inputs",
-                            );
+                            // Same data loss as the provider shape above.
+                            warn_user(format_args!(
+                                "{msg}. Replacing the existing merge output '{}' with the \
+                                 merged inputs; any entries it held are discarded",
+                                self.output.display(),
+                            ));
                             merged
                         }
                     }
