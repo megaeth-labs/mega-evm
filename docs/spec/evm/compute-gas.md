@@ -487,6 +487,10 @@ Inside a plain-opcode segment:
 
 Because the crossing opcode never executes, a node MUST NOT include its cost in recorded compute-gas usage.
 
+When the current frame's remaining per-frame compute budget equals the transaction-level remaining budget, a node MUST bind the clamp to the transaction-level constraint (including detention when detention is the effective transaction-level bound).
+A clamp-induced exceed under that binding MUST halt the transaction with gas rescue; a node MUST NOT classify the equality as frame-local.
+Through Rex6, the same equality is classified by the per-opcode check as a frame-local exceed; at the top-level frame that surfaces as a revert rather than a halt.
+
 When the crossing opcode would exhaust both the true remaining EVM gas and the compute headroom, a node MUST attribute the halt to the compute-gas or detention limit (with rescue) rather than to ordinary EVM out-of-gas.
 
 #### Exceptional-halt frame carve-out

@@ -105,6 +105,12 @@ Inside a plain-opcode segment only plain opcodes run, so the inherited EVM's ord
 Because the crossing opcode never executes, a node MUST NOT include its cost in recorded compute-gas usage.
 Recorded usage at a clamp-induced halt therefore ends at the limit (or strictly below it if settlement had not yet closed a partial segment), not strictly above it.
 
+**Top-frame headroom tie-break.**
+At the top-level frame the remaining per-frame compute budget equals the transaction-level remaining budget whenever both are still governed by the same base limit.
+When those two remaining amounts are equal, a node MUST bind the clamp to the transaction-level constraint (or to the detained limit when detention is the effective transaction-level bound).
+A clamp-induced exceed under that binding MUST halt the transaction with gas rescue; a node MUST NOT classify the equality as frame-local.
+Through Rex6, the same equality is classified by the per-opcode check as a frame-local exceed, which the top-level frame absorbs into a revert rather than a halt.
+
 **Double-exceed preference.**
 When the crossing opcode would have exhausted both the true remaining EVM gas and the compute headroom at the same point, a node MUST attribute the halt to the compute-gas (or detention) limit rather than to ordinary EVM out-of-gas, so remaining gas stays refundable under the rescue rules.
 The two cases are indistinguishable once the frame has already reported out-of-gas, and the compute classification is the one that preserves the sender refund.

@@ -109,9 +109,15 @@ pub enum MegaHaltReason {
     },
     /// Compute gas limit exceeded
     ComputeGasLimitExceeded {
-        /// The configured compute gas limit
+        /// The configured compute gas limit that was exceeded.
+        ///
+        /// Relation to `actual` depends on the enforcement model:
+        /// - Per-opcode enforcement (through Rex6): the crossing opcode has already recorded its
+        ///   cost, so `actual > limit`.
+        /// - Gas-clamp enforcement (Rex7+): the crossing opcode is stopped before it executes and
+        ///   its cost is not recorded, so `actual ≤ limit`.
         limit: u64,
-        /// The actual compute gas usage
+        /// The actual compute gas usage at the halt.
         actual: u64,
     },
     /// State growth limit exceeded
@@ -136,9 +142,15 @@ pub enum MegaHaltReason {
         access_type: VolatileDataAccess,
         /// The effective detained compute gas limit that was exceeded.
         /// In REX4+ this is `usage_at_access + cap` (relative); pre-REX4 it equals the raw cap
-        /// (absolute). Always satisfies `actual > limit`.
+        /// (absolute).
+        ///
+        /// Relation to `actual` depends on the enforcement model:
+        /// - Per-opcode enforcement (through Rex6): the crossing opcode has already recorded its
+        ///   cost, so `actual > limit`.
+        /// - Gas-clamp enforcement (Rex7+): the crossing opcode is stopped before it executes and
+        ///   its cost is not recorded, so `actual ≤ limit`.
         limit: u64,
-        /// The actual compute gas usage
+        /// The actual compute gas usage at the halt.
         actual: u64,
     },
 }
