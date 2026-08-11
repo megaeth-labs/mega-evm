@@ -8,5 +8,6 @@
 mod checkpoint_settlement;
 mod common;
 mod interceptor_resume;
+mod latch_surfacing;
 mod modexp_gas;
 mod v0_clamp;
