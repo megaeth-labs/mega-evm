@@ -111,11 +111,14 @@ pub struct RpcArgs {
     ///
     /// Defaults to the platform cache directory (`$XDG_CACHE_HOME/mega-evme/rpc` on
     /// Linux, `~/Library/Caches/mega-evme/rpc` on macOS). Pass `--rpc.no-cache-file`
-    /// to disable on-disk persistence entirely.
+    /// to disable on-disk persistence entirely. Batch replay (`--tx-file` / `--block`)
+    /// uses the on-disk cache only when this flag names a directory explicitly.
     #[arg(long = "rpc.cache-dir", value_parser = parse_non_empty_path)]
     pub cache_dir: Option<PathBuf>,
 
     /// Disable on-disk cache persistence. The in-memory LRU cache still applies.
+    /// This is already the default for batch replay (`--tx-file` / `--block`)
+    /// unless `--rpc.cache-dir` is passed.
     #[arg(long = "rpc.no-cache-file")]
     pub no_cache_file: bool,
 

@@ -142,6 +142,22 @@ impl MockRpcServer {
             .await;
     }
 
+    /// Mount an unbounded mock that answers every JSON-RPC request for
+    /// `method` with the given hex `result`, regardless of params.
+    pub(crate) async fn respond_method_result(&self, method: &str, hex_result: &str, priority: u8) {
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 0,
+            "result": hex_result,
+        });
+        Mock::given(matchers::method("POST"))
+            .and(matchers::body_partial_json(serde_json::json!({ "method": method })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .with_priority(priority)
+            .mount(&self.server)
+            .await;
+    }
+
     /// Mount a mock that returns `eth_chainId` with the given chain id.
     pub(crate) async fn respond_eth_chain_id(&self, chain_id: u64, priority: u8) {
         let body = serde_json::json!({

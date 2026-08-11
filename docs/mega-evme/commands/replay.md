@@ -49,7 +49,10 @@ Batch mode does all of it once.
 
 A batch run builds a single provider and a single RPC cache, groups the requested transactions by their containing block, and processes the blocks in ascending order.
 Each block is executed exactly once: state is forked at the parent block, pre-execution changes are applied, and every transaction of the block runs in order, with each requested transaction's result recorded before it is committed.
-The RPC cache is persisted once, on exit, even if some transactions failed — the captured responses are the artifact you need to debug the failure offline.
+A capture file (`--rpc.capture-file`) is persisted once, on exit, even if some transactions failed — the captured responses are the artifact you need to debug the failure offline.
+The per-chain on-disk RPC cache is opt-in for batch runs: it is loaded and persisted only when `--rpc.cache-dir` names a directory explicitly.
+A batch scan walks linear history whose request keys essentially never repeat across runs, so a shared cache file buys almost no hits, while its clean-exit re-read-merge-rewrite grows with the file and serializes concurrent processes on the persist lock.
+The in-memory cache still serves every repeated request within the run.
 
 A plain batch replay issues the same RPC calls as single-transaction replay, so an offline envelope captured by single-transaction runs serves a batch run without a cache miss.
 `--verify-receipt` and `--dump-fixture-dir` are the exception: both fetch the receipt of every target in the block, including transactions a single-transaction capture never asked about, so an older envelope will miss them and the run exits `3`.

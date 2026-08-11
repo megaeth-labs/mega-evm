@@ -26,7 +26,7 @@ use crate::{
     common::{
         op_receipt_to_tx_receipt, parse_bucket_capacity, print_execution_summary,
         print_execution_trace, print_receipt, BuildProviderOutput, EvmeExternalEnvs, EvmeOutcome,
-        ExecutionSummary, ExternalEnvSnapshot, OpTxReceipt, RpcCacheStore, TracerType,
+        ExecutionSummary, ExternalEnvSnapshot, OpTxReceipt, RpcArgs, RpcCacheStore, TracerType,
         TxOverrideArgs,
     },
     replay::get_hardfork_config,
@@ -458,7 +458,11 @@ impl Cmd {
             self.rpc_args.build_replay_provider().await?
         } else if let Some(rpc) = &self.rpc_args.rpc_url {
             info!(rpc = %rpc, "Provider mode: online RPC");
-            self.rpc_args.build_provider().await?
+            if self.is_batch() {
+                self.batch_rpc_args().build_provider().await?
+            } else {
+                self.rpc_args.build_provider().await?
+            }
         } else {
             return Err(ReplayError::Other(
                 "'mega-evme replay' requires '--rpc <URL>', '--rpc.capture-file <PATH>', \
@@ -469,6 +473,27 @@ impl Cmd {
 
         let BuildProviderOutput { provider, cache_store, chain_id, external_env } = output;
         Ok(ProviderContext { provider, cache_store, external_env, chain_id })
+    }
+
+    /// The RPC args a batch run actually uses: on-disk cache persistence is opt-in for batch.
+    ///
+    /// A batch scan walks linear history — its request keys are block-scoped and essentially
+    /// never repeat across runs, so a shared cache file buys almost no hits, while its
+    /// clean-exit persist re-reads, merges, and rewrites the whole file under a cross-process
+    /// lock. That exit tail grows linearly with the file and serializes across concurrent
+    /// batch processes sharing the default cache directory, so batch mode keeps the disk
+    /// cache off unless `--rpc.cache-dir` names one explicitly. The in-memory LRU (and its
+    /// intra-run reuse across a block's transactions) is unaffected.
+    fn batch_rpc_args(&self) -> RpcArgs {
+        let mut args = self.rpc_args.clone();
+        if args.cache_dir.is_none() && !args.no_cache_file {
+            info!(
+                "Batch replay leaves the on-disk RPC cache disabled; \
+                 pass --rpc.cache-dir to enable it"
+            );
+            args.no_cache_file = true;
+        }
+        args
     }
 
     /// Fetch the transaction, its block, and preceding transaction hashes from the provider.
@@ -1030,6 +1055,37 @@ mod tests {
         argv.extend_from_slice(extra);
         let cmd = parse(&argv).expect("flags should parse");
         cmd.validate().expect_err("batch mode must reject the flag").to_string()
+    }
+
+    /// Parse an online `replay` invocation (no offline RPC flags).
+    fn parse_online(extra: &[&str]) -> Cmd {
+        let mut argv = vec!["replay", "--rpc", "http://localhost:1"];
+        argv.extend_from_slice(extra);
+        Cmd::try_parse_from(argv).expect("online flags should parse")
+    }
+
+    #[test]
+    fn test_batch_rpc_args_disables_disk_cache_by_default() {
+        let cmd = parse_online(&["--block", "1"]);
+        assert!(!cmd.rpc_args.no_cache_file, "the flag itself must default off");
+        assert!(
+            cmd.batch_rpc_args().no_cache_file,
+            "a batch run without --rpc.cache-dir must not touch the disk cache",
+        );
+    }
+
+    #[test]
+    fn test_batch_rpc_args_explicit_cache_dir_opts_back_in() {
+        let cmd = parse_online(&["--block", "1", "--rpc.cache-dir", "/tmp/evme-cache"]);
+        let args = cmd.batch_rpc_args();
+        assert!(!args.no_cache_file, "an explicit --rpc.cache-dir must keep persistence on");
+        assert_eq!(args.cache_dir.as_deref(), Some(std::path::Path::new("/tmp/evme-cache")));
+    }
+
+    #[test]
+    fn test_batch_rpc_args_keeps_explicit_no_cache_file() {
+        let cmd = parse_online(&["--block", "1", "--rpc.no-cache-file"]);
+        assert!(cmd.batch_rpc_args().no_cache_file, "--rpc.no-cache-file must stay honored");
     }
 
     #[test]

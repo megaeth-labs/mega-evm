@@ -454,6 +454,25 @@ where
     Forked(Box<CacheDB<WrapDatabaseAsync<AlloyDB<N, P>>>>),
 }
 
+/// Normalizes an account fetched over RPC, mapping the all-zero answer to "does not exist".
+///
+/// JSON-RPC cannot express account non-existence: `eth_getBalance`, `eth_getTransactionCount`,
+/// and `eth_getCode` all answer `0`/`0`/empty for an account that was never created, so the RPC
+/// backend materializes it as an *existing* empty account. That flips every consumer of
+/// existence, most visibly the EIP-7702 per-authorization refund: a brand-new authority is
+/// judged "already in the trie" and the replay refunds 12,500 gas per authorization that the
+/// chain did not.
+///
+/// Mapping all-zero back to `None` is safe because an existing-but-empty account cannot occur
+/// on `MegaETH`: EIP-161 (Spurious Dragon) removes empty accounts on touch and forbids creating
+/// them, every chain this tool replays activated it from genesis, and the genesis allocs carry
+/// balance or code. The one shape this cannot distinguish — an account with zero
+/// balance/nonce/code that still holds storage — also cannot exist post-EIP-161, since storage
+/// is only reachable through code and contracts have a non-empty code hash or nonce.
+fn normalize_rpc_account(account: Option<AccountInfo>) -> Option<AccountInfo> {
+    account.filter(|info| !info.is_empty())
+}
+
 /// State database that can be backed by either [`EmptyDB`] or [`AlloyDB`] (forked from RPC)
 #[derive(Debug)]
 pub struct EvmeState<N, P>
@@ -645,9 +664,9 @@ where
                 Ok(account)
             }
             EvmeBackend::Forked(db) => {
-                let account = db.basic(address).map_err(|e| {
+                let account = normalize_rpc_account(db.basic(address).map_err(|e| {
                     EvmeError::RpcError(format!("Failed to fetch account {}: {:?}", address, e))
-                })?;
+                })?);
                 trace!(address = %address, account = ?account, "Loaded account basic from forked state");
                 Ok(account)
             }
@@ -766,9 +785,9 @@ where
                 Ok(account)
             }
             EvmeBackend::Forked(db) => {
-                let account = db.basic_ref(address).map_err(|e| {
+                let account = normalize_rpc_account(db.basic_ref(address).map_err(|e| {
                     EvmeError::RpcError(format!("Failed to fetch account {}: {:?}", address, e))
-                })?;
+                })?);
                 trace!(address = %address, account = ?account, "Loaded account basic from forked state");
                 Ok(account)
             }
