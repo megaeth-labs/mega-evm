@@ -649,6 +649,162 @@ fn test_replay_tx_file_rejects_mined_target_without_inclusion_hash() {
     let _ = std::fs::remove_file(&list);
 }
 
+/// A `--tx-file` target whose `eth_getTransactionByHash` answer carries an
+/// inclusion hash but no block number is unanswered: the endpoint served
+/// contradictory metadata, so the target is not treated as pending.
+#[test]
+fn test_replay_tx_file_rejects_inclusion_hash_without_block_number() {
+    let mut envelope: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(envelope()).expect("read envelope"))
+            .expect("parse envelope");
+    let (target, _) = BLOCK_TXS[1];
+
+    // Keep the inclusion hash so the response still claims a mined block, but
+    // drop the block number. Cache entries are keyed by the request, so the
+    // doctored answer still resolves.
+    let marker = format!("\"hash\":\"{target}\"");
+    let mut doctored = 0;
+    for entry in envelope["cache"].as_array_mut().expect("cache entries").iter_mut() {
+        let value = entry["value"].as_str().expect("entry value is a string");
+        if !value.contains(&marker) {
+            continue;
+        }
+        let mut response: serde_json::Value =
+            serde_json::from_str(value).expect("parse transaction response");
+        let result = response.get_mut("result").expect("transaction result");
+        assert!(result.is_object(), "expected a transaction object");
+        assert!(
+            result.get("blockHash").is_some_and(|h| !h.is_null()),
+            "fixture transaction must report an inclusion hash"
+        );
+        assert!(
+            result.get("blockNumber").is_some_and(|n| !n.is_null()),
+            "fixture transaction must report a block number before doctoring"
+        );
+        result["blockNumber"] = serde_json::Value::Null;
+        entry["value"] = serde_json::Value::String(response.to_string());
+        doctored += 1;
+    }
+    assert_eq!(doctored, 1, "exactly one response describes the target transaction");
+
+    let envelope_path = std::env::temp_dir()
+        .join(format!("mega_evme_batch_null_number_with_hash_{}.json", std::process::id()));
+    std::fs::write(&envelope_path, envelope.to_string()).expect("write doctored envelope");
+    // Pair the contradictory target with one from another block so a clean job
+    // still runs when resolution fails for only one hash.
+    let list = std::env::temp_dir()
+        .join(format!("mega_evme_tx_list_null_number_with_hash_{}.txt", std::process::id()));
+    std::fs::write(&list, format!("{target}\n{OTHER_BLOCK_TX}\n")).expect("write tx list");
+
+    let (stdout, code) =
+        replay_envelope_with_code(&envelope_path, &["--tx-file", list.to_str().unwrap(), "--json"]);
+    let lines = ndjson(&stdout);
+    assert_eq!(lines.len(), 2, "every target is reported once: {stdout}");
+
+    let failed = lines
+        .iter()
+        .find(|line| line["tx_hash"].as_str() == Some(target))
+        .expect("doctored target must be reported");
+    assert_eq!(
+        failed["error"]["kind"].as_str(),
+        Some("rpc"),
+        "contradictory metadata is unanswered as rpc, not pending: {failed}"
+    );
+    let message = failed["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("contradictory") &&
+            (message.contains("without a block number") || message.contains("block number")),
+        "message names the contradiction: {message}"
+    );
+    assert!(
+        !message.contains("pending"),
+        "contradictory metadata must not be classified as pending: {message}"
+    );
+
+    let ok = lines
+        .iter()
+        .find(|line| line["tx_hash"].as_str() == Some(OTHER_BLOCK_TX))
+        .expect("other-block target must be reported");
+    assert!(ok.get("error").is_none(), "targets in other blocks still replay: {ok}");
+    assert_eq!(ok["block_number"].as_u64(), Some(OTHER_BLOCK));
+    assert_eq!(ok["success"].as_bool(), Some(true));
+
+    assert_eq!(code, Some(3), "an unanswered target exits 3");
+    assert_eq!(run_error(&stdout)["error"]["kind"].as_str(), Some("rpc-failure"));
+
+    let _ = std::fs::remove_file(&envelope_path);
+    let _ = std::fs::remove_file(&list);
+}
+
+/// A genuinely pending `--tx-file` target (`blockNumber` and `blockHash` both
+/// null) keeps the pending classification and is not queued for replay.
+#[test]
+fn test_replay_tx_file_classifies_null_number_and_hash_as_pending() {
+    let mut envelope: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(envelope()).expect("read envelope"))
+            .expect("parse envelope");
+    let (target, _) = BLOCK_TXS[1];
+
+    let marker = format!("\"hash\":\"{target}\"");
+    let mut doctored = 0;
+    for entry in envelope["cache"].as_array_mut().expect("cache entries").iter_mut() {
+        let value = entry["value"].as_str().expect("entry value is a string");
+        if !value.contains(&marker) {
+            continue;
+        }
+        let mut response: serde_json::Value =
+            serde_json::from_str(value).expect("parse transaction response");
+        let result = response.get_mut("result").expect("transaction result");
+        assert!(result.is_object(), "expected a transaction object");
+        result["blockNumber"] = serde_json::Value::Null;
+        result["blockHash"] = serde_json::Value::Null;
+        entry["value"] = serde_json::Value::String(response.to_string());
+        doctored += 1;
+    }
+    assert_eq!(doctored, 1, "exactly one response describes the target transaction");
+
+    let envelope_path = std::env::temp_dir()
+        .join(format!("mega_evme_batch_pending_nulls_{}.json", std::process::id()));
+    std::fs::write(&envelope_path, envelope.to_string()).expect("write doctored envelope");
+    let list = std::env::temp_dir()
+        .join(format!("mega_evme_tx_list_pending_nulls_{}.txt", std::process::id()));
+    std::fs::write(&list, format!("{target}\n{OTHER_BLOCK_TX}\n")).expect("write tx list");
+
+    let (stdout, code) =
+        replay_envelope_with_code(&envelope_path, &["--tx-file", list.to_str().unwrap(), "--json"]);
+    let lines = ndjson(&stdout);
+    assert_eq!(lines.len(), 2, "every target is reported once: {stdout}");
+
+    let failed = lines
+        .iter()
+        .find(|line| line["tx_hash"].as_str() == Some(target))
+        .expect("doctored target must be reported");
+    assert_eq!(
+        failed["error"]["kind"].as_str(),
+        Some("pending"),
+        "null number and null hash is pending: {failed}"
+    );
+    let message = failed["error"]["message"].as_str().unwrap_or_default();
+    assert_eq!(
+        message, "Transaction is pending (no block number)",
+        "pending message is unchanged: {message}"
+    );
+
+    let ok = lines
+        .iter()
+        .find(|line| line["tx_hash"].as_str() == Some(OTHER_BLOCK_TX))
+        .expect("other-block target must be reported");
+    assert!(ok.get("error").is_none(), "targets in other blocks still replay: {ok}");
+    assert_eq!(ok["block_number"].as_u64(), Some(OTHER_BLOCK));
+    assert_eq!(ok["success"].as_bool(), Some(true));
+
+    // Pending counts as an execution-class failure (exit 1), not rpc (exit 3).
+    assert_eq!(code, Some(1), "a pending target exits 1");
+
+    let _ = std::fs::remove_file(&envelope_path);
+    let _ = std::fs::remove_file(&list);
+}
+
 /// infrastructure failure for every target of that block (reorg / divergent views).
 #[test]
 fn test_replay_block_rejects_mismatched_parent_hash() {

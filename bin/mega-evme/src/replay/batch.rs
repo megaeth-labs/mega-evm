@@ -512,23 +512,11 @@ where
                 kind: BatchErrorKind::NotFound,
                 message: "Transaction not found".to_string(),
             }),
-            Ok(Some(tx)) => match tx.block_number {
-                Some(number) => {
-                    // A mined transaction without an inclusion hash is an
-                    // unanchored view: the number alone cannot prove which block
-                    // body to replay against, so the target is unanswered rather
-                    // than queued with inclusion_hash left unset.
-                    let Some(theirs) = tx.block_hash else {
-                        failures.push(FailedTx {
-                            tx_hash: *hash,
-                            kind: BatchErrorKind::Rpc,
-                            message: format!(
-                                "endpoint reported a mined transaction in block {number} \
-                                 without an inclusion hash: unanchored view"
-                            ),
-                        });
-                        continue;
-                    };
+            // Every (block_number, block_hash) shape the endpoint can return is
+            // handled explicitly so a contradictory row cannot fall through a
+            // wildcard into the pending arm.
+            Ok(Some(tx)) => match (tx.block_number, tx.block_hash) {
+                (Some(number), Some(theirs)) => {
                     let (targets, inclusion) = grouped.entry(number).or_default();
                     // Two targets resolving to the same number but different
                     // block hashes means the endpoint served two views. Neither
@@ -552,7 +540,29 @@ where
                     }
                     targets.push(*hash);
                 }
-                None => failures.push(FailedTx {
+                // A mined transaction without an inclusion hash is an unanchored
+                // view: the number alone cannot prove which block body to replay
+                // against, so the target is unanswered rather than queued with
+                // inclusion_hash left unset.
+                (Some(number), None) => failures.push(FailedTx {
+                    tx_hash: *hash,
+                    kind: BatchErrorKind::Rpc,
+                    message: format!(
+                        "endpoint reported a mined transaction in block {number} \
+                         without an inclusion hash: unanchored view"
+                    ),
+                }),
+                // A hash proves inclusion; a null number denies it. That pair is
+                // self-contradictory metadata, not a pending transaction.
+                (None, Some(hash_value)) => failures.push(FailedTx {
+                    tx_hash: *hash,
+                    kind: BatchErrorKind::Rpc,
+                    message: format!(
+                        "endpoint reported inclusion hash {hash_value} without a block \
+                         number: contradictory metadata"
+                    ),
+                }),
+                (None, None) => failures.push(FailedTx {
                     tx_hash: *hash,
                     kind: BatchErrorKind::Pending,
                     message: "Transaction is pending (no block number)".to_string(),
