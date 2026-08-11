@@ -334,9 +334,9 @@ impl AdditionalLimit {
             self.compute_gas.detained_limit() < self.compute_gas.base_tx_limit();
     }
 
-    /// Finalises the compute accounting a frame's own result decides: restores any outstanding V0
-    /// clamp, latches a clamp-induced out-of-gas as a compute exceed, and settles an exceptional
-    /// halt's burned remainder.
+    /// Finalises what the frame's own result decides about the clamp: restores any outstanding V0
+    /// clamp into the result's gas, latches a clamp-induced out-of-gas as the compute exceed it
+    /// stands for, and records how much was hidden for the frame-exit settlement that follows.
     ///
     /// Must run before anything reads or charges the result's gas — in particular before the
     /// execution-layer code-deposit storage charge, which would otherwise observe the clamped copy
@@ -1137,6 +1137,10 @@ impl AdditionalLimit {
     ///
     /// Used by `KeylessDeploy` (REX5+) to propagate sandbox resource consumption
     /// back to the parent transaction.
+    ///
+    /// [`LimitUsage`] carries one compute-gas total, so a REX7 sandbox that halted exceptionally
+    /// merges its burned remainder as ordinary enforcing usage rather than into the parent's
+    /// non-enforcing lane. The amount is bounded by the sandbox's gas reservation.
     pub(crate) fn merge_usage(&mut self, usage: LimitUsage) {
         self.compute_gas.merge_persistent_usage(usage.compute_gas);
         self.data_size.merge_persistent_usage(usage.data_size);
