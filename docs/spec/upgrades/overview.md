@@ -153,7 +153,7 @@ Not yet scheduled
 {% endtabs %}
 
 Unstable; under active development.
-No behavioral change over Rex6 yet.
+Checkpoint-settled [compute gas](../glossary.md#compute-gas) accounting with gas-clamp enforcement: plain opcodes record nothing between checkpoints; within-limit transactions stay bit-identical to Rex6; a compute-gas or detention exceed inside a plain segment stops the crossing opcode before it executes.
 
 ## How to Read These Pages
 

@@ -114,7 +114,8 @@ Consequently:
 MegaETH separates EVM gas into two independent dimensions tracked during execution:
 
 - **Compute gas**: Measures pure computational cost.
-  Every opcode's gas consumption is recorded via wrapped instructions in `evm/instructions.rs` — `compute_gas_ext::*` for plain opcodes and `storage_gas_ext::*` for storage-affecting opcodes (SSTORE, LOG, CALL-family, CREATE/CREATE2, SELFDESTRUCT) — both invoking the shared `record_storage_compute_gas!` primitive after the opcode body completes.
+  Through REX6 every opcode's gas consumption is recorded via wrapped instructions in `evm/instructions.rs` — `compute_gas_ext::*` for plain opcodes and `storage_gas_ext::*` for storage-affecting opcodes (SSTORE, LOG, CALL-family, CREATE/CREATE2, SELFDESTRUCT) — both invoking the shared `record_storage_compute_gas!` primitive after the opcode body completes.
+  REX7 settles compute gas at checkpoints (storage-gas opcodes, CALL/CREATE family, volatile opcodes, `GAS`, frame entry/resume/exit) rather than after every plain opcode, and enforces limits inside plain segments with a V0 gas clamp.
   Subject to a per-spec compute gas limit and further restricted by gas detention (see below).
 - **Storage gas**: Charges for persistent state modifications (SSTORE, account creation, contract deployment).
   These costs scale dynamically with SALT bucket capacity (see External Environment Dependencies below).
@@ -222,7 +223,7 @@ Correctness of the other three dimensions (data size, KV updates, state growth) 
 
 1. **Every non-compute mutation site must latch.**
    Any code that records data-size/KV/state-growth usage during execution (`on_sstore`, `on_log`, `record_oracle_hint_bytes`, the frame-lifecycle hooks) must run `check_limit()` itself, latching any exceed into `has_exceeded_limit`.
-   The latch is surfaced by the leading short-circuit of the next `record_compute_gas` call, so the halt lands on the same opcode as the pre-protocol fan-out did.
+   The latch is surfaced by the leading short-circuit of the next `record_compute_gas` call (through REX6, that is the next metered opcode; under REX7 checkpoint accounting it is the next checkpoint), so the halt lands on the same site as the pre-protocol fan-out did.
 2. **Pre-inner recorders must NOT latch.**
    A site that records usage _before_ its inner instruction executes (currently SELFDESTRUCT's two beneficiary recorders: empty-beneficiary creation and the REX6+ existing-beneficiary credit) must record without latching: the inner instruction can still fail, the frame then discards the usage, and an early latch would stick and rewrite the frame's real result.
    Such opcodes use a trailing all-dimension check (`record_compute_gas_all_dims`) that runs only after the inner instruction succeeds.

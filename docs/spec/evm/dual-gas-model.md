@@ -99,6 +99,16 @@ When more than one dimension is over its limit on that opcode, the reported dime
 A node MUST record an opcode's compute gas in exactly one step, after the opcode body has fully executed — with no `CREATE2` exception.
 The no-record rule when the body does not run to completion is specified in [Single-Record Rule](compute-gas.md#single-record-rule).
 
+<details>
+<summary>Rex7 (unstable): checkpoint settlement of compute gas</summary>
+
+Under Rex7, the metering order above continues to govern every **checkpoint** opcode — the storage-affecting set listed in this section, the volatile / detention-guarded set, and `GAS` — and those checkpoints still charge storage gas before the body and record compute gas after it.
+Plain opcodes between checkpoints MUST NOT record compute gas when they finish; their compute gas settles as an interpreter-gas segment delta at the next checkpoint or at frame entry, resume, or exit.
+Limit enforcement inside a plain-opcode segment uses gas clamping rather than a post-opcode record step: a crossing opcode is stopped before it executes, and its cost is excluded from recorded usage.
+See [Compute Gas Accounting](compute-gas.md) and the [Rex7 Network Upgrade](../upgrades/rex7.md) for the full checkpoint set, clamp rules, and the exceptional-halt frame carve-out.
+
+</details>
+
 ### Storage Gas
 
 [Storage gas](../glossary.md#storage-gas) is an additional charge for operations that impose persistent storage burden on nodes.
@@ -305,3 +315,4 @@ For the historical evolution of storage gas formulas and constants across specs:
 - [Rex4](../upgrades/rex4.md) — storage gas stipend for value transfers
 - [Rex5](../upgrades/rex5.md) — reworked the storage gas stipend into a separated-allowance model, derived the top-level contract-creation storage-gas address from the sender's current state nonce, and made contract-creation code-deposit compute gas atomic with the deployment commit
 - [Rex6](../upgrades/rex6.md) — unified per-opcode gas metering order (compute gas recorded once, after the opcode body, with no `CREATE2` exception); system-originated transactions charge dynamic storage gas at minimum bucket capacity; forwarded gas and the KeylessDeploy envelope are returned on a compute-gas exceed rather than spent
+- [Rex7](../upgrades/rex7.md) _(unstable)_ — settles compute gas at checkpoints rather than after every plain opcode; clamps interpreter-visible gas between checkpoints so compute and detention limits stop a crossing opcode before it executes

@@ -113,6 +113,15 @@ When a volatile-data trigger occurs, the node MUST perform the following steps i
 
 After detention has been applied, any subsequent execution step that would cause `compute_gas_used` to exceed the effective detained limit MUST halt the transaction with `VolatileDataAccessOutOfGas`.
 
+<details>
+<summary>Rex7 (unstable): clamp-based detention enforcement inside plain segments</summary>
+
+Under Rex7, after a detention cap has been installed the remaining compute headroom includes that detained limit, and the gas clamp applied at checkpoints and frame boundaries restricts interpreter-visible gas to that headroom.
+A plain-opcode segment that would cross the detained limit is therefore stopped at the clamp boundary before the crossing opcode executes, reclassified as `VolatileDataAccessOutOfGas`, with remaining gas rescued for the sender — the same halt reason and refund shape as through Rex6, but without executing the crossing opcode or recording its cost.
+See [Compute Gas Accounting](compute-gas.md) and the [Rex7 Network Upgrade](../upgrades/rex7.md).
+
+</details>
+
 The detained compute-gas limit MUST NOT halt a [system-originated transaction](../system-contracts/system-tx.md#system-originated-transaction-metering-exemption).
 Volatile-data accesses by such a transaction are still tracked, but the detention cap is not enforced against it; its standard EVM `gas_limit` remains the only halting bound.
 
@@ -204,3 +213,4 @@ Gas detention semantics evolved across specs:
 - [Rex3](../upgrades/rex3.md) — raised oracle cap to 20M and changed oracle detection from CALL-based to SLOAD-based
 - [Rex4](../upgrades/rex4.md) — changes absolute detention to relative detention and adds additional beneficiary-triggered behavior
 - [Rex6](../upgrades/rex6.md) — adds a beneficiary-detention trigger for an applied EIP-7702 authorization whose authority equals the block beneficiary; resolves a CALL-family target's EIP-7702 delegation one hop before the beneficiary comparison, so a call through a delegator whose delegate is the beneficiary triggers detention (through Rex5 only the raw target is compared); and stops enforcing the detention cap against system-originated transactions, whose volatile accesses are still tracked
+- [Rex7](../upgrades/rex7.md) _(unstable)_ — enforces the detained limit inside plain-opcode segments by gas clamping, stopping a crossing opcode before it executes while preserving `VolatileDataAccessOutOfGas` and gas rescue

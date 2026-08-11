@@ -444,6 +444,59 @@ The transaction's standard EVM `gas_limit` remains the only bound that can halt 
 A node MUST record compute gas before evaluating any exceed, including an exceed already latched on another resource dimension.
 The compute work was performed, and the recorded total feeds the transaction outcome and the block-level compute accounting even for a transaction halted on a different dimension.
 
+<details>
+<summary>Rex7 (unstable): checkpoint settlement and gas-clamp enforcement</summary>
+
+Rex7 replaces per-opcode recording for plain opcodes with checkpoint settlement, and enforces compute-gas and detention limits inside plain segments by clamping interpreter-visible gas.
+The full previous/new pairing is on the [Rex7 Network Upgrade](../upgrades/rex7.md) page; the normative rules for implementers follow.
+
+#### Checkpoint set
+
+A node MUST settle compute gas at each of the following **checkpoints**, and MUST NOT open a per-opcode measurement window for any other opcode:
+
+- storage-gas opcodes: `SSTORE`, `LOG0`–`LOG4`, `SELFDESTRUCT`;
+- call-family opcodes: `CALL`, `CALLCODE`, `DELEGATECALL`, `STATICCALL`;
+- create opcodes: `CREATE`, `CREATE2`;
+- volatile / detention-guarded opcodes: the unconditional block-environment set, the beneficiary-conditional set, and oracle-conditional `SLOAD` (same membership as the Volatile class and the call-family / `SELFDESTRUCT` beneficiary guards above);
+- the `GAS` opcode;
+- frame entry, frame resume after a child returns, and frame exit.
+
+Plain opcodes between checkpoints MUST run without recording compute gas when they finish.
+
+#### Segment settlement
+
+At each checkpoint a node MUST:
+
+1. Settle the open plain-opcode segment as the interpreter-gas delta since the previous checkpoint or frame open/resume, applying the same storage-gas and forwarded-child exclusions as the checkpoint opcode's measurement window under this page's stable rules.
+2. Record that segment amount as compute gas and evaluate the compute-gas limit (and any latched non-compute resource-limit exceed) at that checkpoint — the latch-surface point is the next checkpoint rather than the next per-opcode recording site.
+3. Record the checkpoint opcode's own body under the measurement-window rules for its metering class, then re-open the settlement window.
+
+Non-opcode recording sites on this page (intrinsic gas, precompiles, code deposit, KeylessDeploy) are unchanged.
+
+For every transaction that stays within every runtime resource limit, a node MUST produce the same recorded compute-gas total, the same four-dimension usage, the same receipt `gas_used`, the same execution result, and the same state as under Rex6.
+
+#### Gas-clamp enforcement
+
+After settlement and body recording at a checkpoint (and at frame entry and resume), a node MUST clamp the interpreter-visible remaining gas to the remaining compute headroom — the minimum of the current frame's remaining per-frame compute budget and the transaction-level remaining budget under the effective limit (including detention) — and MUST restore the hidden amount before the next checkpoint body, before `GAS` is observed, before call-gas forwarding, and before storage-gas charges.
+
+Inside a plain-opcode segment:
+
+- An opcode that would cost more than the clamped visible remainder MUST NOT execute.
+- The frame's final result MUST restore the hidden gas.
+- The node MUST reclassify that out-of-gas as the resource-limit exceed the clamp stood for: frame-local budget → frame revert with `MegaLimitExceeded`; transaction-level compute → transaction halt with `OutOfGas` and rescued remaining gas; detained limit → transaction halt with `VolatileDataAccessOutOfGas` and rescued remaining gas.
+
+Because the crossing opcode never executes, a node MUST NOT include its cost in recorded compute-gas usage.
+
+When the crossing opcode would exhaust both the true remaining EVM gas and the compute headroom, a node MUST attribute the halt to the compute-gas or detention limit (with rescue) rather than to ordinary EVM out-of-gas.
+
+#### Exceptional-halt frame carve-out
+
+When a frame ends in an exceptional halt — including ordinary out-of-gas and memory out-of-gas — the interpreter zeros the frame's remaining gas before frame-exit settlement.
+A node MUST settle that entire burned remainder as compute gas at frame exit.
+Under per-opcode recording through Rex6 neither the failing opcode nor the burn is attributed to compute gas, so a transaction that contains an inner out-of-gas call frame MAY report a strictly higher compute-gas total under Rex7 while EVM gas and the receipt remain identical.
+
+</details>
+
 #### Keyless Deploy Exceed
 
 When recording the [KeylessDeploy](../system-contracts/keyless-deploy.md) dispatch overhead exceeds a compute gas limit, the outcome follows the frame-local / transaction-level split above, but the two branches are not observably the same:
@@ -572,3 +625,4 @@ System-granted gas leaks to the sender, who recovers gas that was never theirs t
 - [Rex4](../upgrades/rex4.md) — introduced the per-call-frame compute gas budget; made gas detention caps relative to usage at the access point; added beneficiary volatile-access guards to the `CALL` family, `SELFDESTRUCT`, and `SELFBALANCE`.
 - [Rex5](../upgrades/rex5.md) — excluded the `CALL_STIPEND` from the forwarded-gas deduction; moved `CREATE2` memory-expansion recording ahead of the storage-gas charge; made contract-creation code-deposit compute gas atomic with the deployment commit; refined precompile compute-gas recording and bounded it by the remaining compute budget; added the `SELFDESTRUCT` empty-beneficiary storage-gas charge; removed `CALLCODE` from the cold first-touch charge and added `SELFDESTRUCT`'s beneficiary to it; stopped following EIP-7702 delegation in the pre-execution inspection, restoring inherited warmth for delegates.
 - [Rex6](../upgrades/rex6.md) — unified the measurement window across all storage-affecting opcodes and folded `CREATE2` memory expansion into it, ending the two-window exception; returned forwarded gas to the failing frame on a compute-gas exceed; rescued the unused envelope on a keyless-deploy dispatch exceed; made beneficiary detection delegation-aware, returning `CALLCODE` call targets to the cold first-touch charge; exempted system-originated transactions from the compute gas limit and gas detention.
+- [Rex7](../upgrades/rex7.md) _(unstable)_ — settles compute gas at checkpoints rather than after every plain opcode; enforces compute and detention limits inside plain segments by clamping interpreter-visible gas so a crossing opcode does not execute; records an exceptional-halt frame's burned remainder as compute gas at frame exit.
