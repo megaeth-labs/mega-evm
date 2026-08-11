@@ -5,6 +5,7 @@
 //! - `v0_clamp` — V0 gas-clamp enforcement: a crossing opcode is stopped before it executes, and
 //!   the resulting out-of-gas is restored and reclassified by the constraint that bound the clamp.
 
+mod checkpoint_families;
 mod checkpoint_settlement;
 mod common;
 mod double_exceed_corner;
