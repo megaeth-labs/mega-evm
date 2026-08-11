@@ -448,6 +448,17 @@ Useful when you want to test how the transaction would behave under a different 
 mega-evme replay --override.spec Rex2 <TX_HASH>
 ```
 
+The override replaces the entire execution world, not just the EVM semantics.
+The block is executed as if it had run on a chain whose schedule activates the forced spec at genesis: the pre-block system contract deploys, the EIP-2935 and EIP-4788 pre-block calls, the block-level resource limits, and the EVM semantics all come from the forced spec.
+This keeps a forced replay coherent — mixing the historical setup with forced semantics would execute a world that never existed on any chain.
+
+A consequence worth stating explicitly: replaying an old block under a newer spec installs predeploys that did not exist at that block (for example, forcing `Rex5` on a pre-`Rex5` block deploys the `SequencerRegistry`), and forcing an older spec withholds predeploys the block did have, or installs an earlier version of them.
+That is intentional — it is what "how would this transaction behave under spec X" means.
+The replayed state therefore diverges from the chain's historical state by construction, so `--verify-receipt` will normally report a mismatch and `--dump-fixture` is rejected outright.
+
+The forced spec does not synthesize chain configuration.
+Per-fork parameters (currently the `SequencerRegistry` seeds a chain publishes for `Rex5` and `Rex6`) are taken from the chain's own configuration, so a fork the chain has not configured cannot be forced: the run fails before executing, naming the missing parameters, rather than proceeding with an invented value.
+
 ## Transaction Overrides
 
 Override flags let you modify the transaction before re-executing it.

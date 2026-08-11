@@ -8,6 +8,12 @@ These options control which MegaETH spec and chain ID the EVM uses during execut
 They are available in the `run` and `tx` commands.
 The `replay` command auto-detects the spec from the chain ID and block timestamp (see [replay](../commands/replay.md#spec-auto-detection)).
 
+In all three commands a chosen spec defines the whole execution world, not only the opcode and gas rules: the system contracts predeployed before execution, the block-level resource limits, and the EVM semantics all come from that one spec.
+For `run` and `tx` there is nothing else it could mean — there is no historical block to contradict it.
+For `replay`, [`--override.spec`](../commands/replay.md#--overridespec-spec) makes the same choice explicitly: the block is replayed as if it had run on a chain at the forced spec, so replaying an old block under a newer spec installs predeploys that never existed at that block, and forcing an older spec withholds or downgrades the ones that did.
+That is intentional, and it is what makes the answer a coherent what-if rather than a mixture of two worlds.
+Chain-specific configuration is not synthesized along with it: a fork whose parameters the chain has not published (the `SequencerRegistry` seeds, today) cannot be forced, and the run fails up front naming what is missing.
+
 ## Options
 
 | Flag              | Default | Aliases     | Description         |
