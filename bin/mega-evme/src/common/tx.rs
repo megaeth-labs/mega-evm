@@ -687,6 +687,10 @@ mod tests {
         assert_eq!(base.tx_type, MegaTxType::Eip2930 as u8);
         assert_eq!(base.nonce, 4);
         assert_eq!(base.gas_limit, 50_000);
+        assert_eq!(base.gas_price, 30_000_000_000, "gas_price must survive typed decode");
+        assert_eq!(base.kind, TxKind::Call(TYPED_TO), "to must survive typed decode");
+        assert_eq!(base.value, U256::from(1), "value must survive typed decode");
+        assert_eq!(base.data, Bytes::from_static(b"\xca\xfe"), "input must survive typed decode");
         assert_eq!(base.chain_id, Some(TYPED_CHAIN_ID));
         assert_eq!(base.access_list, access_list, "access list addresses and keys must survive");
         assert_eq!(
@@ -725,6 +729,8 @@ mod tests {
         assert_eq!(base.nonce, 7);
         assert_eq!(base.gas_limit, 80_000);
         assert_eq!(base.chain_id, Some(TYPED_CHAIN_ID));
+        assert_eq!(base.kind, TxKind::Call(TYPED_TO), "to must survive typed decode");
+        assert_eq!(base.value, U256::from(2), "value must survive typed decode");
         assert_eq!(base.gas_price, max_fee_per_gas, "gas_price must map from max_fee_per_gas");
         assert_eq!(
             base.gas_priority_fee,
@@ -742,12 +748,14 @@ mod tests {
     fn test_from_raw_eip7702_recovers_signer_and_preserves_authorization_list() {
         let signed_auth = sample_signed_authorization();
         let expected_inner = signed_auth.inner().clone();
+        let max_fee_per_gas = 50_000_000_000u128;
+        let max_priority_fee_per_gas = 1_000_000_000u128;
         let tx = TxEip7702 {
             chain_id: TYPED_CHAIN_ID,
             nonce: 11,
             gas_limit: 120_000,
-            max_fee_per_gas: 50_000_000_000,
-            max_priority_fee_per_gas: 1_000_000_000,
+            max_fee_per_gas,
+            max_priority_fee_per_gas,
             to: TYPED_TO,
             value: U256::ZERO,
             access_list: AccessList::default(),
@@ -768,17 +776,32 @@ mod tests {
         assert_eq!(base.nonce, 11);
         assert_eq!(base.gas_limit, 120_000);
         assert_eq!(base.chain_id, Some(TYPED_CHAIN_ID));
+        assert_eq!(base.gas_price, max_fee_per_gas, "gas_price must map from max_fee_per_gas");
+        assert_eq!(
+            base.gas_priority_fee,
+            Some(max_priority_fee_per_gas),
+            "gas_priority_fee must map from max_priority_fee_per_gas",
+        );
+        assert_eq!(base.kind, TxKind::Call(TYPED_TO), "to must survive typed decode");
         assert_eq!(base.authorization_list.len(), 1, "authorization list length must survive");
         match &base.authorization_list[0] {
             Either::Right(recovered) => {
                 assert_eq!(*recovered.chain_id(), expected_inner.chain_id);
                 assert_eq!(*recovered.address(), expected_inner.address);
                 assert_eq!(recovered.nonce(), expected_inner.nonce);
+                // Authority recovery is independent of field survival: a
+                // recovery regression that yields RecoveredAuthority::Invalid
+                // must not pass this test.
+                assert_eq!(
+                    recovered.authority(),
+                    Some(DEFAULT_SENDER),
+                    "authorization authority must recover to the test signer",
+                );
             }
             Either::Left(signed) => {
-                assert_eq!(signed.inner().chain_id, expected_inner.chain_id);
-                assert_eq!(signed.inner().address, expected_inner.address);
-                assert_eq!(signed.inner().nonce, expected_inner.nonce);
+                panic!(
+                    "from_raw must recover the authorization authority, got unrecovered signed auth: {signed:?}"
+                );
             }
         }
         assert_eq!(

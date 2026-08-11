@@ -650,15 +650,19 @@ mod tests {
     }
 
     /// Touched addresses with no pre-transaction account are omitted from `pre`;
-    /// touched addresses that exist are recorded with their fields.
+    /// touched addresses that exist are recorded with their fields — including
+    /// an explicitly present-but-empty account (`Some(AccountInfo::default())`).
     ///
     /// Absence-means-nonexistence is the state-test fixture shape: a forked
     /// backend returns `None` for all-zero RPC answers, so accounts created by
     /// the target transaction must not appear as explicit empty entries.
+    /// Presence of an empty account is a different DB answer and must still be
+    /// recorded; `build_pre_state` does not filter empties with `is_empty()`.
     #[test]
     fn test_build_pre_state_omits_nonexistent_and_records_existing() {
         let missing = Address::repeat_byte(0xaa);
         let present = Address::repeat_byte(0xbb);
+        let empty_present = Address::repeat_byte(0xcc);
         let balance = U256::from(42u64);
         let nonce = 7u64;
 
@@ -674,11 +678,15 @@ mod tests {
                 ..Default::default()
             }),
         );
+        // Present-but-empty: the DB returns Some with zero fields. This must
+        // stay in `pre` so a future `is_empty()` filter cannot creep in.
+        accounts.insert(empty_present, Some(RevmAccountInfo::default()));
         let db = MapDb { accounts };
 
         let mut evm_state = EvmState::default();
         evm_state.insert(missing, Default::default());
         evm_state.insert(present, Default::default());
+        evm_state.insert(empty_present, Default::default());
 
         let pre = build_pre_state(&db, &evm_state).expect("pre-state construction succeeds");
 
@@ -691,6 +699,14 @@ mod tests {
         assert_eq!(recorded.nonce, nonce);
         assert!(recorded.code.is_empty());
         assert!(recorded.storage.is_empty());
+
+        let empty_recorded = pre
+            .get(&empty_present)
+            .expect("touched + basic_ref=Some(default) must appear in pre (empty is not absent)");
+        assert_eq!(empty_recorded.balance, U256::ZERO);
+        assert_eq!(empty_recorded.nonce, 0);
+        assert!(empty_recorded.code.is_empty());
+        assert!(empty_recorded.storage.is_empty());
     }
 
     fn deposit_transaction() -> Transaction {

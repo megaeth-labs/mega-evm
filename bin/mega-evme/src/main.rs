@@ -16,6 +16,19 @@ use mega_evme::{cmd::MainCmd, print_json_error, report_command_result, set_threa
 async fn main() -> ExitCode {
     set_thread_panic_hook();
 
+    // Test-only injection: force a panic after the process-wide hook is
+    // installed so integration tests can pin the structured JSON envelope on
+    // an open stdout. Same gate as the fixture pre-state inject
+    // (`test-utils`, enabled for the test-profile binary via the self
+    // dev-dependency). Production builds never carry this branch.
+    // `manual_assert` is allowed: this must be a plain `panic!` payload so the
+    // hook message stays `panic: …`, not an assertion-failure rewrite.
+    #[cfg(feature = "test-utils")]
+    #[allow(clippy::manual_assert)]
+    if std::env::var_os("MEGA_EVME_INJECT_PANIC").is_some() {
+        panic!("injected panic for panic-hook JSON envelope test");
+    }
+
     let cmd = match MainCmd::try_parse() {
         Ok(cmd) => cmd,
         Err(err) => {

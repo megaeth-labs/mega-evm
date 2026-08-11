@@ -384,8 +384,9 @@ fn test_help_in_json_mode_prints_no_error_object() {
 #[test]
 fn test_closed_stdout_during_json_batch_exits_one() {
     use std::{
-        io::{BufRead, BufReader},
+        io::{BufRead, BufReader, Read},
         process::{Command, Stdio},
+        thread,
     };
 
     // Multi-target offline batch: many NDJSON lines, so dropping the pipe after
@@ -400,10 +401,24 @@ fn test_closed_stdout_during_json_batch_exits_one() {
             "22945844",
             "--json",
         ])
+        // Bound panic-hook stderr volume regardless of the ambient env: a full
+        // backtrace can fill the pipe buffer and deadlock child-vs-`wait()` if
+        // stderr is never drained. We still drain (below) so a caller that
+        // exports `RUST_BACKTRACE=full` cannot hang this test either.
+        .env("RUST_BACKTRACE", "0")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .expect("failed to spawn mega-evme");
+
+    // Drain stderr on a reader thread before any wait, so a noisy panic hook
+    // cannot fill the pipe and stall the child forever.
+    let stderr = child.stderr.take().expect("child stderr was piped");
+    let stderr_drain = thread::spawn(move || {
+        let mut sink = Vec::new();
+        let _ = BufReader::new(stderr).read_to_end(&mut sink);
+        sink
+    });
 
     let stdout = child.stdout.take().expect("child stdout was piped");
     let mut first_line = String::new();
@@ -419,6 +434,7 @@ fn test_closed_stdout_during_json_batch_exits_one() {
     // (Binding ends here; no further use of the pipe.)
 
     let status = child.wait().expect("failed to wait for mega-evme");
+    let _stderr_bytes = stderr_drain.join().expect("stderr drain thread panicked");
     assert_eq!(
         status.code(),
         Some(1),
@@ -427,5 +443,46 @@ fn test_closed_stdout_during_json_batch_exits_one() {
     assert!(
         status.code().is_some(),
         "process must not be signal-killed (e.g. SIGABRT from a double panic in the hook)"
+    );
+}
+
+/// A panic under `--json` with an open stdout ends the stream with the standard
+/// error envelope (`code: 1`, `kind: "execution-error"`).
+///
+/// The closed-stdout case only proves `exit(1)` when the hook cannot write.
+/// This test pins the machine-readable object the hook prints when stdout is
+/// still open. Triggered via the test-only `MEGA_EVME_INJECT_PANIC` hook (same
+/// `test-utils` gate as the fixture pre-state inject), not via invalid input.
+#[test]
+fn test_panic_under_json_prints_execution_error_envelope() {
+    let output = Command::new(env!("CARGO_BIN_EXE_mega-evme"))
+        .args(["--json"])
+        .env("MEGA_EVME_INJECT_PANIC", "1")
+        .env("RUST_BACKTRACE", "0")
+        .output()
+        .expect("failed to run mega-evme");
+
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "injected panic must exit 1.\nstderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("stdout is utf-8");
+    let values = common::json_values(&stdout);
+    let last = values
+        .last()
+        .unwrap_or_else(|| panic!("panic under --json must not leave stdout empty:\n{stdout}"));
+    assert!(
+        common::is_run_error(last),
+        "the final stdout line must be the run-level error object, got: {last}"
+    );
+    assert_eq!(last["error"]["code"].as_u64(), Some(1));
+    assert_eq!(last["error"]["kind"].as_str(), Some("execution-error"));
+    let message = last["error"]["message"].as_str().expect("error.message must be a string");
+    assert!(
+        message.starts_with("panic: "),
+        "panic-hook message must keep the `panic: …` prefix: {message}"
     );
 }
