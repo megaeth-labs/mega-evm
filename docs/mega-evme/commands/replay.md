@@ -159,8 +159,10 @@ Where `corpus.txt` looks like:
 Count the transactions that did not succeed:
 
 ```bash
-jq -c 'select(.error != null or .success == false)' results.ndjson | wc -l
+jq -c 'select(.tx_hash and (.error != null or .success == false))' results.ndjson | wc -l
 ```
+
+A failed run ends its stdout with a run-level `{"error": …}` object (see [Exit codes](../overview.md#exit-codes)), which carries no `tx_hash`, so selecting on `.tx_hash` keeps the count to per-transaction lines.
 
 ## Receipt Verification
 
@@ -262,9 +264,11 @@ Verify a whole corpus in one process and collect the divergences:
 mega-evme replay --rpc https://mainnet.megaeth.com/rpc \
   --tx-file ./corpus.txt --verify-receipt --json > results.ndjson
 
-jq -c 'select(.verification.match == false)' results.ndjson    # mismatched
-jq -c 'select(.error != null)' results.ndjson                  # unverified
+jq -c 'select(.tx_hash and .verification.match == false)' results.ndjson    # mismatched
+jq -c 'select(.tx_hash and .error != null)' results.ndjson                  # unverified
 ```
+
+Both selectors require `.tx_hash` so that the run-level `{"error": …}` object a failed run appends to stdout is not counted as an unverified transaction.
 
 Capture once online, then re-verify the same corpus offline:
 
