@@ -86,10 +86,56 @@ fn bench_weth9_transfer(c: &mut Criterion) {
     group.finish();
 }
 
+/// Builds a tight countdown loop of cheap opcodes:
+///
+/// ```text
+/// PUSH3 iterations
+/// loop: JUMPDEST; PUSH1 1; SWAP1; SUB; DUP1; PUSH1 loop; JUMPI
+/// STOP
+/// ```
+///
+/// Each iteration executes 7 opcodes for 26 gas (JUMPDEST 1 + PUSH1 3 + SWAP1 3 +
+/// SUB 3 + DUP1 3 + PUSH1 3 + JUMPI 10), all from the cheap-opcode family that
+/// dominates real interpreter workloads.
+fn hotloop_code(iterations: u32) -> Bytes {
+    let mut code = Vec::with_capacity(14);
+    // PUSH3 <iterations>
+    code.push(0x62);
+    code.extend_from_slice(&iterations.to_be_bytes()[1..4]);
+    // loop target is the JUMPDEST right after the initial PUSH3 (offset 4).
+    let loop_target = code.len() as u8;
+    code.push(0x5b); // JUMPDEST
+    code.push(0x60); // PUSH1
+    code.push(0x01);
+    code.push(0x90); // SWAP1
+    code.push(0x03); // SUB
+    code.push(0x80); // DUP1
+    code.push(0x60); // PUSH1
+    code.push(loop_target);
+    code.push(0x57); // JUMPI
+    code.push(0x00); // STOP
+    Bytes::from(code)
+}
+
+/// Benchmark a cheap-opcode-dense interpreter hot loop (~700k executed opcodes,
+/// ~2.6M gas), the workload shape where per-opcode gas-accounting overhead is
+/// the dominant tax.
+fn bench_interpreter_hotloop(c: &mut Criterion) {
+    let mut group = c.benchmark_group("interpreter_hotloop");
+    // Gas price is zero, so the caller needs no balance. Callee holds the loop body.
+    let workload = Workload::single(
+        vec![Account::new(CALLEE).code(hotloop_code(100_000))],
+        TxSpec::call(CALLER, CALLEE),
+    );
+    register_all(&mut group, &workload);
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_empty_transaction,
     bench_simple_ether_transfer,
-    bench_weth9_transfer
+    bench_weth9_transfer,
+    bench_interpreter_hotloop
 );
 criterion_main!(benches);
