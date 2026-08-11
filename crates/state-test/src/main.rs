@@ -112,22 +112,20 @@ impl Cmd {
         self.bench_spec
             .as_deref()
             .map(|s| {
+                // Derived from `MegaSpecId::ALL` so the roster tracks the ladder (aliases and
+                // new specs included) instead of drifting as a hand-written list.
                 let invalid_spec = || TestError {
                     name: "spec".to_string(),
                     path: s.to_string(),
                     kind: TestErrorKind::FixtureError(format!(
                         "invalid --bench-spec {s:?}; expected one of: {}",
-                        [
-                            mega_evm::name::EQUIVALENCE,
-                            mega_evm::name::MINI_REX,
-                            mega_evm::name::REX,
-                            mega_evm::name::REX1,
-                            mega_evm::name::REX2,
-                            mega_evm::name::REX3,
-                            mega_evm::name::REX4,
-                            mega_evm::name::REX5,
-                        ]
-                        .join(", ")
+                        MegaSpecId::ALL
+                            .iter()
+                            .copied()
+                            .filter(|spec| SpecName::from_mega_spec(*spec) != SpecName::Unknown)
+                            .map(<&'static str>::from)
+                            .collect::<Vec<_>>()
+                            .join(", ")
                     )),
                 };
                 let spec = MegaSpecId::from_str(s)
@@ -246,22 +244,16 @@ mod tests {
 
     #[test]
     fn resolve_spec_accepts_every_known_spec() {
-        for (s, expected) in [
-            (mega_evm::name::EQUIVALENCE, SpecName::Equivalence),
-            (mega_evm::name::MINI_REX, SpecName::MiniRex),
-            (mega_evm::name::MINI_REX_1, SpecName::MiniRex1),
-            (mega_evm::name::MINI_REX_2, SpecName::MiniRex2),
-            (mega_evm::name::REX, SpecName::Rex),
-            (mega_evm::name::REX1, SpecName::Rex1),
-            (mega_evm::name::REX2, SpecName::Rex2),
-            (mega_evm::name::REX3, SpecName::Rex3),
-            (mega_evm::name::REX4, SpecName::Rex4),
-            (mega_evm::name::REX5, SpecName::Rex5),
-        ] {
-            let spec = cmd_with_bench_spec(s).resolve_spec().expect("valid spec").expect("present");
-            assert_eq!(spec, expected, "--bench-spec {s}");
+        // Driven off `MegaSpecId::ALL`, so a newly introduced spec or alias joins here
+        // automatically — and a spec left without a fixture-facing `SpecName` fails loudly
+        // instead of being quietly absent from the roster.
+        for spec in MegaSpecId::ALL.iter().copied() {
+            let s: &str = spec.into();
+            let resolved =
+                cmd_with_bench_spec(s).resolve_spec().expect("valid spec").expect("present");
+            assert_eq!(resolved, SpecName::from_mega_spec(spec), "--bench-spec {s}");
             // No accepted spec may slip through as Unknown and fail later.
-            assert_ne!(spec, SpecName::Unknown, "--bench-spec {s}");
+            assert_ne!(resolved, SpecName::Unknown, "--bench-spec {s}");
         }
     }
 
