@@ -514,13 +514,28 @@ where
             }),
             Ok(Some(tx)) => match tx.block_number {
                 Some(number) => {
+                    // A mined transaction without an inclusion hash is an
+                    // unanchored view: the number alone cannot prove which block
+                    // body to replay against, so the target is unanswered rather
+                    // than queued with inclusion_hash left unset.
+                    let Some(theirs) = tx.block_hash else {
+                        failures.push(FailedTx {
+                            tx_hash: *hash,
+                            kind: BatchErrorKind::Rpc,
+                            message: format!(
+                                "endpoint reported a mined transaction in block {number} \
+                                 without an inclusion hash: unanchored view"
+                            ),
+                        });
+                        continue;
+                    };
                     let (targets, inclusion) = grouped.entry(number).or_default();
                     // Two targets resolving to the same number but different
                     // block hashes means the endpoint served two views. Neither
                     // can be trusted, so the disagreeing target is reported as
                     // unanswered rather than silently replayed against one view.
-                    match (*inclusion, tx.block_hash) {
-                        (Some(seen), Some(theirs)) if seen != theirs => {
+                    match *inclusion {
+                        Some(seen) if seen != theirs => {
                             failures.push(FailedTx {
                                 tx_hash: *hash,
                                 kind: BatchErrorKind::Rpc,
@@ -532,8 +547,8 @@ where
                             });
                             continue;
                         }
-                        (None, Some(theirs)) => *inclusion = Some(theirs),
-                        _ => {}
+                        None => *inclusion = Some(theirs),
+                        Some(_) => {}
                     }
                     targets.push(*hash);
                 }

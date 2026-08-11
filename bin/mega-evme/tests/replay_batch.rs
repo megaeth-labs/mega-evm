@@ -561,6 +561,84 @@ fn test_replay_tx_file_rejects_a_block_that_does_not_match_the_resolved_inclusio
     let _ = std::fs::remove_file(&list);
 }
 
+/// A mined `--tx-file` target whose `eth_getTransactionByHash` answer carries a
+/// block number but no inclusion hash is unanswered: the endpoint served an
+/// unanchored view, so the target is not queued and other blocks still replay.
+#[test]
+fn test_replay_tx_file_rejects_mined_target_without_inclusion_hash() {
+    let mut envelope: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(envelope()).expect("read envelope"))
+            .expect("parse envelope");
+    let (target, _) = BLOCK_TXS[1];
+
+    // Keep the block number so the response still looks mined, but drop the
+    // inclusion hash. Cache entries are keyed by the request, so the doctored
+    // answer still resolves.
+    let marker = format!("\"hash\":\"{target}\"");
+    let mut doctored = 0;
+    for entry in envelope["cache"].as_array_mut().expect("cache entries").iter_mut() {
+        let value = entry["value"].as_str().expect("entry value is a string");
+        if !value.contains(&marker) {
+            continue;
+        }
+        let mut response: serde_json::Value =
+            serde_json::from_str(value).expect("parse transaction response");
+        let result = response.get_mut("result").expect("transaction result");
+        assert!(result.is_object(), "expected a transaction object");
+        assert!(
+            result.get("blockNumber").is_some_and(|n| !n.is_null()),
+            "fixture transaction must report a block number"
+        );
+        result["blockHash"] = serde_json::Value::Null;
+        entry["value"] = serde_json::Value::String(response.to_string());
+        doctored += 1;
+    }
+    assert_eq!(doctored, 1, "exactly one response describes the target transaction");
+
+    let envelope_path = std::env::temp_dir()
+        .join(format!("mega_evme_batch_null_inclusion_{}.json", std::process::id()));
+    std::fs::write(&envelope_path, envelope.to_string()).expect("write doctored envelope");
+    // Pair the unanchored target with one from another block so a clean job
+    // still runs when resolution fails for only one hash.
+    let list = std::env::temp_dir()
+        .join(format!("mega_evme_tx_list_null_inclusion_{}.txt", std::process::id()));
+    std::fs::write(&list, format!("{target}\n{OTHER_BLOCK_TX}\n")).expect("write tx list");
+
+    let (stdout, code) =
+        replay_envelope_with_code(&envelope_path, &["--tx-file", list.to_str().unwrap(), "--json"]);
+    let lines = ndjson(&stdout);
+    assert_eq!(lines.len(), 2, "every target is reported once: {stdout}");
+
+    let failed = lines
+        .iter()
+        .find(|line| line["tx_hash"].as_str() == Some(target))
+        .expect("doctored target must be reported");
+    assert_eq!(
+        failed["error"]["kind"].as_str(),
+        Some("rpc"),
+        "a mined target without an inclusion hash is unanswered: {failed}"
+    );
+    let message = failed["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("inclusion hash") && message.contains("unanchored"),
+        "message names the unanchored view: {message}"
+    );
+
+    let ok = lines
+        .iter()
+        .find(|line| line["tx_hash"].as_str() == Some(OTHER_BLOCK_TX))
+        .expect("other-block target must be reported");
+    assert!(ok.get("error").is_none(), "targets in other blocks still replay: {ok}");
+    assert_eq!(ok["block_number"].as_u64(), Some(OTHER_BLOCK));
+    assert_eq!(ok["success"].as_bool(), Some(true));
+
+    assert_eq!(code, Some(3), "an unanswered target exits 3");
+    assert_eq!(run_error(&stdout)["error"]["kind"].as_str(), Some("rpc-failure"));
+
+    let _ = std::fs::remove_file(&envelope_path);
+    let _ = std::fs::remove_file(&list);
+}
+
 /// infrastructure failure for every target of that block (reorg / divergent views).
 #[test]
 fn test_replay_block_rejects_mismatched_parent_hash() {
