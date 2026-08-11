@@ -570,14 +570,53 @@ fn create_fake_envelope(tx_env: &TxEnv) -> Result<MegaTxEnvelope> {
 mod tests {
     use super::*;
     use alloy_primitives::b256;
+    use mega_evm::alloy_consensus::{crypto::secp256k1, SignableTransaction};
 
     /// The EIP-155 appendix example: a chain-1 legacy transaction with a known
     /// signer, exercising signature recovery on a real signed payload.
     const EIP155_RAW: &str = "0xf86c098504a817c800825208943535353535353535353535353535353535353535880de0b6b3a76400008025a028ef61340bd939bc2195fe537567866003e1a15d3c71ff63e1590620aa636276a067cbe9d8997f761aecb703304b3800ccf555c9f3dc64214b297fb1966a3b6d83";
     const EIP155_SIGNER: Address = address!("9d8A62f656a8d1615C1294fd71e9CFb3E4855A4F");
 
+    /// Hardhat account #0 private key; recovered address is [`DEFAULT_SENDER`].
+    const TEST_SECRET: B256 =
+        b256!("ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80");
+
+    /// Fixed chain and receiver used by the typed-envelope signing vectors.
+    const TYPED_CHAIN_ID: u64 = 1;
+    const TYPED_TO: Address = address!("3535353535353535353535353535353535353535");
+    const ACCESS_ADDR: Address = address!("1111111111111111111111111111111111111111");
+    const ACCESS_KEY: B256 =
+        b256!("2222222222222222222222222222222222222222222222222222222222222222");
+    const AUTH_DELEGATION: Address = address!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+
     fn eip155_raw_bytes() -> Bytes {
         load_hex(Some(EIP155_RAW.to_string()), None).expect("valid hex").expect("non-empty")
+    }
+
+    /// Signs a signable transaction body with [`TEST_SECRET`] and returns the
+    /// EIP-2718 envelope bytes for the given `MegaTxEnvelope` constructor.
+    fn sign_and_encode_envelope(
+        envelope: impl FnOnce(Signature) -> MegaTxEnvelope,
+        signature_hash: B256,
+    ) -> Bytes {
+        let sig = secp256k1::sign_message(TEST_SECRET, signature_hash).expect("sign must succeed");
+        Bytes::from(envelope(sig).encoded_2718())
+    }
+
+    fn sample_access_list() -> AccessList {
+        AccessList(vec![AccessListItem { address: ACCESS_ADDR, storage_keys: vec![ACCESS_KEY] }])
+    }
+
+    /// Builds a genuinely signed EIP-7702 authorization for the fixed fields.
+    fn sample_signed_authorization() -> SignedAuthorization {
+        let auth = Authorization {
+            chain_id: U256::from(TYPED_CHAIN_ID),
+            address: AUTH_DELEGATION,
+            nonce: 3,
+        };
+        let sig = secp256k1::sign_message(TEST_SECRET, auth.signature_hash())
+            .expect("auth sign must succeed");
+        auth.into_signed(sig)
     }
 
     /// A `TxArgs` with no flag set, the base for override tests.
@@ -615,6 +654,133 @@ mod tests {
         assert_eq!(base.kind, TxKind::Call(address!("3535353535353535353535353535353535353535")));
         assert_eq!(base.value, U256::from(10u64).pow(U256::from(18u64)));
         assert_eq!(base.chain_id, Some(1));
+        assert_eq!(
+            decoded.tx.enveloped_tx.as_ref(),
+            Some(&raw),
+            "the original raw bytes must back the L1 fee calculation",
+        );
+    }
+
+    #[test]
+    fn test_from_raw_eip2930_recovers_signer_and_preserves_access_list() {
+        let access_list = sample_access_list();
+        let tx = TxEip2930 {
+            chain_id: TYPED_CHAIN_ID,
+            nonce: 4,
+            gas_price: 30_000_000_000,
+            gas_limit: 50_000,
+            to: TxKind::Call(TYPED_TO),
+            value: U256::from(1),
+            access_list: access_list.clone(),
+            input: Bytes::from_static(b"\xca\xfe"),
+        };
+        let signature_hash = tx.signature_hash();
+        let raw = sign_and_encode_envelope(
+            |sig| MegaTxEnvelope::Eip2930(tx.into_signed(sig)),
+            signature_hash,
+        );
+
+        let decoded = DecodedRawTx::from_raw(raw.clone()).expect("decode");
+        let base = &decoded.tx.base;
+
+        assert_eq!(base.caller, DEFAULT_SENDER, "signer recovery must match the test key");
+        assert_eq!(base.tx_type, MegaTxType::Eip2930 as u8);
+        assert_eq!(base.nonce, 4);
+        assert_eq!(base.gas_limit, 50_000);
+        assert_eq!(base.chain_id, Some(TYPED_CHAIN_ID));
+        assert_eq!(base.access_list, access_list, "access list addresses and keys must survive");
+        assert_eq!(
+            decoded.tx.enveloped_tx.as_ref(),
+            Some(&raw),
+            "the original raw bytes must back the L1 fee calculation",
+        );
+    }
+
+    #[test]
+    fn test_from_raw_eip1559_recovers_signer_and_maps_fee_fields() {
+        let max_fee_per_gas = 40_000_000_000u128;
+        let max_priority_fee_per_gas = 2_000_000_000u128;
+        let tx = TxEip1559 {
+            chain_id: TYPED_CHAIN_ID,
+            nonce: 7,
+            gas_limit: 80_000,
+            max_fee_per_gas,
+            max_priority_fee_per_gas,
+            to: TxKind::Call(TYPED_TO),
+            value: U256::from(2),
+            access_list: AccessList::default(),
+            input: Bytes::new(),
+        };
+        let signature_hash = tx.signature_hash();
+        let raw = sign_and_encode_envelope(
+            |sig| MegaTxEnvelope::Eip1559(tx.into_signed(sig)),
+            signature_hash,
+        );
+
+        let decoded = DecodedRawTx::from_raw(raw.clone()).expect("decode");
+        let base = &decoded.tx.base;
+
+        assert_eq!(base.caller, DEFAULT_SENDER, "signer recovery must match the test key");
+        assert_eq!(base.tx_type, MegaTxType::Eip1559 as u8);
+        assert_eq!(base.nonce, 7);
+        assert_eq!(base.gas_limit, 80_000);
+        assert_eq!(base.chain_id, Some(TYPED_CHAIN_ID));
+        assert_eq!(base.gas_price, max_fee_per_gas, "gas_price must map from max_fee_per_gas");
+        assert_eq!(
+            base.gas_priority_fee,
+            Some(max_priority_fee_per_gas),
+            "gas_priority_fee must map from max_priority_fee_per_gas",
+        );
+        assert_eq!(
+            decoded.tx.enveloped_tx.as_ref(),
+            Some(&raw),
+            "the original raw bytes must back the L1 fee calculation",
+        );
+    }
+
+    #[test]
+    fn test_from_raw_eip7702_recovers_signer_and_preserves_authorization_list() {
+        let signed_auth = sample_signed_authorization();
+        let expected_inner = signed_auth.inner().clone();
+        let tx = TxEip7702 {
+            chain_id: TYPED_CHAIN_ID,
+            nonce: 11,
+            gas_limit: 120_000,
+            max_fee_per_gas: 50_000_000_000,
+            max_priority_fee_per_gas: 1_000_000_000,
+            to: TYPED_TO,
+            value: U256::ZERO,
+            access_list: AccessList::default(),
+            authorization_list: vec![signed_auth],
+            input: Bytes::new(),
+        };
+        let signature_hash = tx.signature_hash();
+        let raw = sign_and_encode_envelope(
+            |sig| MegaTxEnvelope::Eip7702(tx.into_signed(sig)),
+            signature_hash,
+        );
+
+        let decoded = DecodedRawTx::from_raw(raw.clone()).expect("decode");
+        let base = &decoded.tx.base;
+
+        assert_eq!(base.caller, DEFAULT_SENDER, "signer recovery must match the test key");
+        assert_eq!(base.tx_type, MegaTxType::Eip7702 as u8);
+        assert_eq!(base.nonce, 11);
+        assert_eq!(base.gas_limit, 120_000);
+        assert_eq!(base.chain_id, Some(TYPED_CHAIN_ID));
+        assert_eq!(base.authorization_list.len(), 1, "authorization list length must survive");
+        match &base.authorization_list[0] {
+            Either::Right(recovered) => {
+                assert_eq!(*recovered.chain_id(), expected_inner.chain_id);
+                assert_eq!(*recovered.address(), expected_inner.address);
+                assert_eq!(recovered.nonce(), expected_inner.nonce);
+            }
+            Either::Left(signed) => {
+                assert_eq!(signed.inner().chain_id, expected_inner.chain_id);
+                assert_eq!(signed.inner().address, expected_inner.address);
+                assert_eq!(signed.inner().nonce, expected_inner.nonce);
+            }
+        }
         assert_eq!(
             decoded.tx.enveloped_tx.as_ref(),
             Some(&raw),
