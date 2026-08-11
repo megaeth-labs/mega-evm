@@ -85,10 +85,7 @@ fn replay(home: &FakeHome, args: &[&str]) {
         .expect("failed to run mega-evme");
     // Every scenario here replays a transaction the mock cannot answer, so the
     // run itself fails; the assertions are about the cache file side effects.
-    assert!(
-        output.status.code().is_some(),
-        "mega-evme must exit, not die on a signal: {output:?}"
-    );
+    assert!(output.status.code().is_some(), "mega-evme must exit, not die on a signal: {output:?}");
 }
 
 /// A mock whose chain id resolves (4326) and whose every other request fails
