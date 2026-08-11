@@ -58,16 +58,6 @@ pub struct MegaBlockExecutor<H, E, R: OpReceiptBuilder> {
     receipt_builder: R,
     ctx: MegaBlockExecutionCtx,
     system_caller: SystemCaller<H>,
-    /// The scheduled spec for this block's timestamp, resolved once at construction.
-    ///
-    /// Every pre-block setup gate derives from this single value through `reaches` (position),
-    /// which keeps setup additive by construction and immune to alias windows — an alias rung
-    /// rolls back behavior, not the setup below it.
-    ///
-    /// Cached because the block env is fixed for an executor's lifetime — the constructor
-    /// already reads `block().timestamp` for its hardfork-coherence asserts.
-    setup_spec: MegaSpecId,
-
     /// The inner evm instance.
     pub evm: E,
     /// The block limiter for tracking the limit usage.
@@ -142,7 +132,6 @@ where
         );
 
         Self {
-            setup_spec: hardforks.spec_id(block_timestamp),
             hardforks: hardforks.clone(),
             receipt_builder,
             receipts: Vec::new(),
@@ -187,13 +176,15 @@ where
         // clear flag to true.
         self.evm.db_mut().set_state_clear_flag(true);
 
-        // Every pre-block gate below derives from the one scheduled spec resolved at
-        // construction, compared by POSITION (`reaches`): setup stays additive by construction
-        // — a config that schedules only a later fork still gets every earlier fork's
-        // predeploys and fail-closed checks, and an alias window (`MINI_REX_1`, live on
-        // mainnet) rolls back behavior without dropping the Oracle predeploys or their
-        // read-only witness entries.
-        let setup_spec = self.setup_spec;
+        // Every pre-block gate below derives from the executing spec in the EVM's cfg — the
+        // same source `resolve_system_address` reads — compared by POSITION (`reaches`): setup
+        // stays additive by construction — a config that schedules only a later fork still gets
+        // every earlier fork's predeploys and fail-closed checks, and an alias window
+        // (`MINI_REX_1`, live on mainnet) rolls back behavior without dropping the Oracle
+        // predeploys or their read-only witness entries. On node paths the constructor asserts
+        // this spec equals the schedule's resolution; tools that override the cfg spec get a
+        // coherent what-if (setup and execution move together) instead of a hybrid block.
+        let setup_spec = self.evm.ctx().mega_spec();
         let is_rex_5 = setup_spec.reaches(MegaSpecId::REX5);
 
         // EIP-2935
