@@ -236,6 +236,17 @@ impl<I> FrameLimitTracker<I> {
         }
     }
 
+    /// Returns the budget of the current frame, in the same form
+    /// [`exceeds_current_frame_limit`](Self::exceeds_current_frame_limit) reports it on an exceed.
+    ///
+    /// If the frame stack is empty (before the first frame is pushed), returns the TX-level limit.
+    pub(crate) fn current_frame_limit(&self) -> u64 {
+        match self.frame_stack.last() {
+            Some(entry) => entry.limit,
+            None => self.tx_entry.limit,
+        }
+    }
+
     /// Returns a mutable reference to the current (top) frame entry.
     pub(crate) fn frame_mut(&mut self) -> Option<&mut FrameLimitEntry<I>> {
         self.frame_stack.last_mut()

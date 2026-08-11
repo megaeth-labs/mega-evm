@@ -6,14 +6,28 @@
 //! exactly *on* it changes how much gets hidden — zero in the second case — but not whether the
 //! clamp is in force. Both are the compute limit doing the stopping, and both must be reported as
 //! such; only a frame whose own EVM gas runs out first is an ordinary out-of-gas.
+//!
+//! The payload has to match too. A frame-local binding reverts with
+//! `MegaLimitExceeded(uint8 kind, uint64 limit)`, which the caller can decode and branch on, so its
+//! `limit` must be the sub-frame budget that actually bound the clamp rather than the
+//! transaction-level limit.
 
-use crate::common::{transact_default, transact_with_gas_limit, CALLER, CONTRACT, ONE_ETH};
+use crate::common::{
+    transact, transact_default, transact_with_gas_limit, Outcome, CALLEE, CALLER, CONTRACT, ONE_ETH,
+};
 use alloy_primitives::{Bytes, U256};
+use alloy_sol_types::SolError;
 use mega_evm::{
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    EvmTxRuntimeLimits, MegaHaltReason, MegaSpecId,
+    EvmTxRuntimeLimits, LimitKind, MegaHaltReason, MegaLimitExceeded, MegaSpecId,
 };
-use revm::bytecode::opcode::{MSTORE, POP, STOP};
+use revm::{
+    bytecode::opcode::{
+        CALL, DUP1, JUMPDEST, JUMPI, MSTORE, POP, RETURN, RETURNDATACOPY, RETURNDATASIZE, STOP,
+        SUB, SWAP1,
+    },
+    context::result::ExecutionResult,
+};
 
 fn base_db(code: Bytes) -> MemoryDatabase {
     MemoryDatabase::default()
@@ -167,5 +181,92 @@ fn test_knife_edge_neighbours_classify_by_which_budget_binds() {
     assert!(
         gas_bound.compute_gas > edge.compute_before,
         "the EVM out-of-gas burns the frame's remainder, which settles as compute",
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// The payload a clamp-induced exceed reports.
+// ---------------------------------------------------------------------------------------------
+
+/// A countdown loop of cheap plain opcodes, prefixed verbatim.
+fn countdown_loop_code(prefix: &[u8], iterations: u16) -> Bytes {
+    let mut code = prefix.to_vec();
+    code.push(0x61); // PUSH2
+    code.extend_from_slice(&iterations.to_be_bytes());
+    let loop_target = u8::try_from(code.len()).expect("loop target must fit in a PUSH1");
+    code.push(JUMPDEST);
+    code.extend_from_slice(&[0x60, 0x01]); // PUSH1 1
+    code.push(SWAP1);
+    code.push(SUB);
+    code.push(DUP1);
+    code.extend_from_slice(&[0x60, loop_target]); // PUSH1 loop
+    code.push(JUMPI);
+    code.push(STOP);
+    Bytes::from(code)
+}
+
+/// A caller that CALLs [`CALLEE`] and returns the sub-frame's return data verbatim, so the
+/// `MegaLimitExceeded` payload the sub-frame reverted with is observable from the receipt.
+fn call_and_return_revert_data(gas: u64) -> Bytes {
+    BytecodeBuilder::default()
+        .push_number(0u64) // retSize
+        .push_number(0u64) // retOffset
+        .push_number(0u64) // argsSize
+        .push_number(0u64) // argsOffset
+        .push_number(0u64) // value
+        .push_address(CALLEE)
+        .push_number(gas)
+        .append(CALL)
+        .append(POP)
+        .append(RETURNDATASIZE)
+        .push_number(0u64) // dataOffset
+        .push_number(0u64) // destOffset
+        .append(RETURNDATACOPY)
+        .append(RETURNDATASIZE)
+        .push_number(0u64) // offset
+        .append(RETURN)
+        .build()
+}
+
+/// Decodes the `MegaLimitExceeded` payload a successful transaction returned.
+fn decode_limit_exceeded(label: &str, outcome: &Outcome) -> MegaLimitExceeded {
+    let output = match &outcome.result {
+        ExecutionResult::Success { output, .. } => output.data().clone(),
+        other => panic!("{label}: expected success carrying the sub-frame payload, got {other:?}"),
+    };
+    MegaLimitExceeded::abi_decode(&output)
+        .unwrap_or_else(|e| panic!("{label}: return data is not MegaLimitExceeded: {e}"))
+}
+
+/// A frame-local clamp exceed must report the sub-frame budget that bound it, byte for byte the
+/// same payload per-opcode enforcement produces.
+///
+/// The revert data is visible to the calling contract, which can decode `limit` and branch on it,
+/// so a transaction-level value here is not a diagnostic difference — it is a different observable
+/// return value for the same execution.
+#[test]
+fn test_frame_local_clamp_exceed_reports_the_sub_frame_budget() {
+    let callee = countdown_loop_code(&[], 40_000);
+    let code = call_and_return_revert_data(50_000_000);
+    let build_db = || base_db(code.clone()).account_code(CALLEE, callee.clone());
+    let limits = compute_limit(1_000_000);
+
+    let r6 = transact(MegaSpecId::REX6, build_db(), limits(MegaSpecId::REX6));
+    let r7 = transact(MegaSpecId::REX7, build_db(), limits(MegaSpecId::REX7));
+
+    let d6 = decode_limit_exceeded("REX6", &r6);
+    let d7 = decode_limit_exceeded("REX7", &r7);
+
+    assert_eq!(d6.kind, LimitKind::ComputeGas.as_u8(), "REX6 must blame compute gas");
+    assert_eq!(d7.kind, d6.kind, "REX7 must blame the same dimension");
+    assert_eq!(
+        d7.limit, d6.limit,
+        "the ABI-visible limit must be the sub-frame budget on both specs; REX6={} REX7={}",
+        d6.limit, d7.limit
+    );
+    assert!(
+        d7.limit < 1_000_000,
+        "the sub-frame budget is a fraction of the TX limit, not the TX limit itself; got {}",
+        d7.limit
     );
 }

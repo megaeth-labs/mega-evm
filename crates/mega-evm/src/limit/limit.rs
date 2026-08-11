@@ -311,10 +311,11 @@ impl AdditionalLimit {
     ///
     /// The crossing opcode never executed — revm's own gas check stopped it at the clamp boundary —
     /// so its cost is not in the recorded usage and an ordinary [`check_limit`](Self::check_limit)
-    /// pass sees usage at or below the limit. The latch is therefore stamped directly, with
-    /// `frame_local` taken from the constraint that bound the clamp, so the existing frame-result
-    /// machinery (frame-local absorb to revert; TX-level mark plus gas rescue) produces the halt
-    /// shape it produces for every other compute exceed.
+    /// pass sees usage at or below the limit. The latch is therefore stamped directly, from the
+    /// constraint that bound the clamp: `frame_local` decides the shape the existing frame-result
+    /// machinery produces (frame-local absorb to revert; TX-level mark plus gas rescue), and the
+    /// constraint's own `limit` is what that shape reports — the sub-frame budget for a frame-local
+    /// binding, the effective TX limit otherwise, matching what the non-clamp check path writes.
     #[inline]
     fn latch_clamp_exceed(&mut self, binding: &compute_gas::ClampBinding) {
         if !self.has_exceeded_limit.within_limit() {
@@ -323,7 +324,7 @@ impl AdditionalLimit {
         self.has_exceeded_limit = LimitCheck::ExceedsLimit {
             kind: super::LimitKind::ComputeGas,
             frame_local: binding.frame_local,
-            limit: self.compute_gas.tx_limit(),
+            limit: binding.limit,
             used: self.compute_gas.tx_usage(),
         };
         // Preserve the volatile-detention attribution: when the binding TX-level constraint at

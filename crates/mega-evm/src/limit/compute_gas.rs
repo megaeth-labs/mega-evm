@@ -18,6 +18,11 @@ pub(crate) struct ClampBinding {
     /// `true` when the current frame's compute budget is what binds, `false` when the TX-level
     /// (possibly detained) limit is.
     pub(crate) frame_local: bool,
+    /// The binding constraint's own limit. A clamp-induced exceed reports this — as
+    /// `MegaLimitExceeded.limit` in the frame-local revert payload, or as
+    /// `ComputeGasLimitExceeded.limit` in the transaction halt — so it has to be the budget that
+    /// actually stopped execution, exactly as the non-clamp check path reports it.
+    pub(crate) limit: u64,
 }
 
 /// A frame-limit-based compute gas tracker using `FrameLimitTracker`.
@@ -155,10 +160,14 @@ impl ComputeGasTracker {
         if self.rex4_enabled {
             let frame_remaining = self.frame_tracker.current_frame_remaining();
             if frame_remaining < tx_remaining {
-                return ClampBinding { headroom: frame_remaining, frame_local: true };
+                return ClampBinding {
+                    headroom: frame_remaining,
+                    frame_local: true,
+                    limit: self.frame_tracker.current_frame_limit(),
+                };
             }
         }
-        ClampBinding { headroom: tx_remaining, frame_local: false }
+        ClampBinding { headroom: tx_remaining, frame_local: false, limit: tx_limit }
     }
 
     /// Returns `true` when gas detention is the binding TX-level constraint, i.e., the detained
