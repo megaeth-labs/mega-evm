@@ -512,7 +512,6 @@ fn test_replay_batch_rejects_single_transaction_flags() {
     }
 }
 
-/// A parent block whose hash does not match the child block's `parentHash` is an
 /// A `--tx-file` target whose reported inclusion block is not the block fetched
 /// by that number is unanswered, not replayed.
 ///
