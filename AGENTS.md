@@ -116,6 +116,7 @@ MegaETH separates EVM gas into two independent dimensions tracked during executi
 - **Compute gas**: Measures pure computational cost.
   Through REX6 every opcode's gas consumption is recorded via wrapped instructions in `evm/instructions.rs` — `compute_gas_ext::*` for plain opcodes and `storage_gas_ext::*` for storage-affecting opcodes (SSTORE, LOG, CALL-family, CREATE/CREATE2, SELFDESTRUCT) — both invoking the shared `record_storage_compute_gas!` primitive after the opcode body completes.
   REX7 settles compute gas at checkpoints (storage-gas opcodes, CALL/CREATE family, volatile opcodes, `GAS`, frame entry/resume/exit) rather than after every plain opcode, and enforces limits inside plain segments with a V0 gas clamp.
+  A REX7 frame that ends in an exceptional halt additionally settles its whole burned remainder into a lane of `ComputeGasTracker` that the reported total and block accounting include but no limit comparison sees — the burn is destroyed gas, not work performed, and enforcing it would turn an EVM halt into a resource-limit failure with the gas rescued.
   Subject to a per-spec compute gas limit and further restricted by gas detention (see below).
 - **Storage gas**: Charges for persistent state modifications (SSTORE, account creation, contract deployment).
   These costs scale dynamically with SALT bucket capacity (see External Environment Dependencies below).
