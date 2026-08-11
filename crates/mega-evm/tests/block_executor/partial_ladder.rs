@@ -24,7 +24,7 @@ use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
 use alloy_primitives::{address, bytes, Address, Bytes, B256, U256};
 use mega_evm::{
     test_utils::MemoryDatabase, BlockLimits, MegaBlockExecutionCtx, MegaBlockExecutorFactory,
-    MegaEvmFactory, MegaHardfork, MegaHardforkConfig, MegaHardforks, MegaSpecId,
+    MegaEvmFactory, MegaHardfork, MegaHardforkConfig, MegaHardforks, MegaSpecId, ScheduleError,
     SequencerRegistryConfig, SequencerRegistryRex6Config, TestExternalEnvs, ACCESS_CONTROL_ADDRESS,
     HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS, KEYLESS_DEPLOY_ADDRESS, LIMIT_CONTROL_ADDRESS,
     ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE_HASH, ORACLE_CONTRACT_CODE_HASH_REX5,
@@ -275,6 +275,73 @@ fn test_rex6_without_any_rex5_entry_fails_closed() {
         format!("{err:?}").contains("SequencerRegistryConfig not configured"),
         "expected the missing-config error, got: {err:?}"
     );
+}
+
+/// The load-time params roster (`validate_schedule` → `MissingParams`) and the block-time
+/// fail-closed checks are written independently but must cover the same requirements: one
+/// config missing a required params type has to fail BOTH surfaces. A params rule registered
+/// on only one side — a schedule accepted at load that dies at the fork's first block, or a
+/// load-time rule with no execution-time counterpart — fails this pairing.
+#[test]
+fn test_missing_params_fail_at_load_time_and_pre_block_alike() {
+    let ladder_through = |top: MegaHardfork| {
+        MegaHardfork::VARIANTS
+            .iter()
+            .copied()
+            .filter(|fork| {
+                !fork.spec_id().is_alias() && fork.spec_id() as u8 <= top.spec_id() as u8
+            })
+            .fold(MegaHardforkConfig::default(), |config, fork| {
+                config.with(fork, ForkCondition::Timestamp(0))
+            })
+    };
+    let run_pre_block = |chain_spec: MegaHardforkConfig, spec: MegaSpecId| {
+        let mut db = MemoryDatabase::default();
+        install_eip_contracts(&mut db);
+        let mut state = State::builder().with_database(&mut db).build();
+        let evm_factory =
+            MegaEvmFactory::new().with_external_env_factory(TestExternalEnvs::<Infallible>::new());
+        let block_executor_factory = MegaBlockExecutorFactory::new(
+            chain_spec,
+            evm_factory,
+            OpAlloyReceiptBuilder::default(),
+        );
+        let mut executor = block_executor_factory.create_executor(
+            &mut state,
+            block_ctx(),
+            create_evm_env(spec, 0),
+        );
+        executor
+            .pre_execution_changes()
+            .err()
+            .map(|err| format!("{err:?}"))
+            .expect("a schedule missing required params must fail pre-block execution")
+    };
+
+    // Rex5 scheduled without `SequencerRegistryConfig`.
+    let rex5_without_params = ladder_through(MegaHardfork::Rex5);
+    assert_eq!(
+        rex5_without_params.validate_schedule(),
+        Err(ScheduleError::MissingParams {
+            fork: MegaHardfork::Rex5,
+            params: "SequencerRegistryConfig"
+        })
+    );
+    let err = run_pre_block(rex5_without_params, MegaSpecId::REX5);
+    assert!(err.contains("SequencerRegistryConfig not configured"), "got: {err}");
+
+    // Rex6 scheduled with the Rex5 params attached but without `SequencerRegistryRex6Config`.
+    let rex6_without_params =
+        ladder_through(MegaHardfork::Rex6).with_params(sequencer_registry_config());
+    assert_eq!(
+        rex6_without_params.validate_schedule(),
+        Err(ScheduleError::MissingParams {
+            fork: MegaHardfork::Rex6,
+            params: "SequencerRegistryRex6Config"
+        })
+    );
+    let err = run_pre_block(rex6_without_params, MegaSpecId::REX6);
+    assert!(err.contains("SequencerRegistryRex6Config not configured"), "got: {err}");
 }
 
 /// Mainnet's `MiniRex1` window rolls the executing spec back to `EQUIVALENCE` while `MiniRex`'s
