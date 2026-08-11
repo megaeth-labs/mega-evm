@@ -9,15 +9,14 @@ use std::convert::Infallible;
 
 use alloy_consensus::{Signed, TxLegacy};
 use alloy_evm::{block::BlockExecutor, EvmEnv, EvmFactory};
-use alloy_hardforks::ForkCondition;
 use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
 use alloy_primitives::{address, Address, Bytes, Signature, TxKind, B256, U256};
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use mega_evm::{
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    BlockLimits, MegaBlockExecutionCtx, MegaBlockExecutor, MegaEvmFactory, MegaHardfork,
-    MegaHardforkConfig, MegaSpecId, MegaTxEnvelope, SequencerRegistryConfig, TestExternalEnvs,
-    ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE, HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS,
+    BlockLimits, MegaBlockExecutionCtx, MegaBlockExecutor, MegaEvmFactory, MegaHardforkConfig,
+    MegaSpecId, MegaTxEnvelope, SequencerRegistryConfig, TestExternalEnvs, ACCESS_CONTROL_ADDRESS,
+    ACCESS_CONTROL_CODE, HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS,
     HIGH_PRECISION_TIMESTAMP_ORACLE_CODE, KEYLESS_DEPLOY_ADDRESS, KEYLESS_DEPLOY_CODE,
     LIMIT_CONTROL_ADDRESS, LIMIT_CONTROL_CODE, MEGA_SYSTEM_ADDRESS, ORACLE_CONTRACT_ADDRESS,
     ORACLE_CONTRACT_CODE_REX5, SEQUENCER_REGISTRY_ADDRESS, SEQUENCER_REGISTRY_CODE,
@@ -74,20 +73,20 @@ fn create_deploy_tx(
     alloy_consensus::transaction::Recovered::new_unchecked(tx, CALLER)
 }
 
-/// Hardfork config activating all hardforks from genesis.
-fn all_hardforks_config() -> MegaHardforkConfig {
-    MegaHardforkConfig::default()
-        .with(MegaHardfork::MiniRex, ForkCondition::Timestamp(0))
-        .with(MegaHardfork::Rex, ForkCondition::Timestamp(0))
-        .with(MegaHardfork::Rex1, ForkCondition::Timestamp(0))
-        .with(MegaHardfork::Rex2, ForkCondition::Timestamp(0))
-        .with(MegaHardfork::Rex3, ForkCondition::Timestamp(0))
-        .with(MegaHardfork::Rex4, ForkCondition::Timestamp(0))
-        .with(MegaHardfork::Rex5, ForkCondition::Timestamp(0))
-        .with_params(SequencerRegistryConfig {
+/// Hardfork schedule coherent with `spec`: everything through the spec's rung is active from
+/// genesis, with the params Rex5+ pre-block setup needs. Each benchmark row therefore measures
+/// one complete per-spec world — pre-block setup included — matching the executor's rule that
+/// setup follows the executing spec. (A REX6+ row would additionally need
+/// `SequencerRegistryRex6Config` attached here.)
+fn hardforks_for(spec: MegaSpecId) -> MegaHardforkConfig {
+    let mut config = MegaHardforkConfig::default().with_all_activated_through(spec);
+    if spec.reaches(MegaSpecId::REX5) {
+        config = config.with_params(SequencerRegistryConfig {
             rex5_initial_sequencer: MEGA_SYSTEM_ADDRESS,
             rex5_initial_admin: MEGA_SYSTEM_ADDRESS,
-        })
+        });
+    }
+    config
 }
 
 /// Create block EVM environment.
@@ -190,7 +189,7 @@ fn bench_block_empty_txs(c: &mut Criterion) {
                     let mut executor = MegaBlockExecutor::new(
                         evm,
                         block_ctx,
-                        all_hardforks_config(),
+                        hardforks_for(spec),
                         OpAlloyReceiptBuilder::default(),
                     );
                     executor
@@ -243,7 +242,7 @@ fn bench_block_mixed_txs(c: &mut Criterion) {
                     let mut executor = MegaBlockExecutor::new(
                         evm,
                         block_ctx,
-                        all_hardforks_config(),
+                        hardforks_for(spec),
                         OpAlloyReceiptBuilder::default(),
                     );
                     executor
@@ -294,7 +293,7 @@ fn bench_block_deploy(c: &mut Criterion) {
                 let mut executor = MegaBlockExecutor::new(
                     evm,
                     block_ctx,
-                    all_hardforks_config(),
+                    hardforks_for(spec),
                     OpAlloyReceiptBuilder::default(),
                 );
                 executor
@@ -316,10 +315,11 @@ fn bench_block_deploy(c: &mut Criterion) {
 
 /// Benchmark spec comparison for block execution.
 ///
-/// NOTE: All specs run with `all_hardforks_config()`, so even `EQUIVALENCE` and `MINI_REX`
-/// deploy Rex4 system contracts during `pre_execution_changes`. This is intentional —
-/// the benchmark isolates EVM execution behavior differences across specs, not system
-/// contract deployment overhead.
+/// NOTE: Each spec runs against its own coherent world (`hardforks_for(spec)`), pre-block
+/// setup included: `EQUIVALENCE` deploys nothing while `REX5` bootstraps its predeploys and
+/// registry inside every iteration. Rows therefore compare whole-block costs per spec, not
+/// isolated EVM execution deltas — for the latter, the cross-spec compute-gas snapshot
+/// (`tests/compute_gas/`) is the tool.
 fn bench_block_spec_comparison(c: &mut Criterion) {
     let mut group = c.benchmark_group("block_executor_spec_comparison");
     group.sample_size(10);
@@ -353,7 +353,7 @@ fn bench_block_spec_comparison(c: &mut Criterion) {
                 let mut executor = MegaBlockExecutor::new(
                     evm,
                     block_ctx,
-                    all_hardforks_config(),
+                    hardforks_for(spec),
                     OpAlloyReceiptBuilder::default(),
                 );
                 executor
@@ -407,7 +407,7 @@ fn bench_rex5_pre_block(c: &mut Criterion) {
             let mut executor = MegaBlockExecutor::new(
                 evm,
                 block_ctx,
-                all_hardforks_config(),
+                hardforks_for(spec),
                 OpAlloyReceiptBuilder::default(),
             );
             executor.apply_pre_execution_changes().expect("pre-execution changes should succeed");
@@ -435,7 +435,7 @@ fn bench_rex5_pre_block(c: &mut Criterion) {
             let mut executor = MegaBlockExecutor::new(
                 evm,
                 block_ctx,
-                all_hardforks_config(),
+                hardforks_for(spec),
                 OpAlloyReceiptBuilder::default(),
             );
             executor.apply_pre_execution_changes().expect("pre-execution changes should succeed");
