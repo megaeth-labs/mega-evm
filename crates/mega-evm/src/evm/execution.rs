@@ -419,7 +419,7 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
     #[inline]
     fn before_frame_run(
         ctx: &MegaContext<DB, ExtEnvs>,
-        frame: &EthFrame<EthInterpreter>,
+        frame: &mut EthFrame<EthInterpreter>,
     ) -> Result<Option<InterpreterAction>, ContextDbError<MegaContext<DB, ExtEnvs>>> {
         // Check if the additional limit is already exceeded, if so, we should immediately stop
         // and synthesize an interpreter action.
@@ -456,6 +456,11 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
         let is_rex5 = ctx.spec.is_enabled(MegaSpecId::REX5);
 
         if let InterpreterAction::Return(interpreter_result) = action {
+            // REX7 V0 clamp: hand any clamp-hidden gas back to the result — and latch a
+            // clamp-induced out-of-gas as the compute exceed it stands for — before the
+            // code-deposit charge below observes the result's gas.
+            ctx.additional_limit.borrow_mut().restore_clamp_into_result(interpreter_result);
+
             // Charge storage gas cost for the number of bytes
             if frame.data.is_create() && interpreter_result.is_ok() {
                 let code_deposit_storage_gas = constants::mini_rex::CODEDEPOSIT_STORAGE_GAS *

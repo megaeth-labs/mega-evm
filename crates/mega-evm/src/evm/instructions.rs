@@ -650,8 +650,12 @@ mod rex7 {
         table[SELFBALANCE as usize] = Instruction::new(volatile_data_ext::selfbalance_checkpoint);
         table[SLOAD as usize] = Instruction::new(volatile_data_ext::sload_checkpoint);
 
+        // V0 gas-clamp enforcement: `GAS` has to be a checkpoint so the clamp is restored before
+        // the counter is observed.
+        table[GAS as usize] = Instruction::new(compute_gas_ext::gas_checkpoint);
+
         // Storage-gas and frame-spawning checkpoints: the Rex6 handler chains unchanged. Under
-        // Rex7 they settle from the checkpoint baseline internally.
+        // Rex7 they open with a checkpoint prologue and close with an epilogue.
         table[SSTORE as usize] = Instruction::new(additional_limit_ext::sstore);
         table[LOG0 as usize] = Instruction::new(additional_limit_ext::log::<0, _, _>);
         table[LOG1 as usize] = Instruction::new(additional_limit_ext::log::<1, _, _>);
@@ -818,6 +822,88 @@ macro_rules! run_inner_instruction_or_abort {
     };
 }
 
+/// REX7 checkpoint prologue. Runs at the top of every checkpoint handler, before any gas capture or
+/// gas-consuming work:
+///
+/// 1. Settles the open plain-opcode segment — `baseline − remaining`, both readings on the clamped
+///    counter, telescoping over exactly the unwrapped opcodes since the last checkpoint.
+/// 2. Restores the clamp-hidden gas, so the checkpoint's body runs on the **true** counter: the
+///    CALL-family forwarding math, the `GAS` opcode's pushed value and the storage-gas charges all
+///    observe real gas, which is what keeps the clamp unobservable to a transaction that never
+///    exceeds a limit.
+/// 3. Re-opens the settlement window at the restored counter.
+///
+/// Halts — returning from the enclosing handler — when the settlement surfaces a limit exceed,
+/// including one latched earlier by a non-compute mutation site. The restore has already happened
+/// on that path, so the frame result carries true gas. No-op before REX7.
+macro_rules! checkpoint_prologue {
+    ($context:expr) => {
+        if $context.host.spec_id().is_enabled(MegaSpecId::REX7) {
+            let exceeding_result = {
+                let mut additional_limit = $context.host.additional_limit().borrow_mut();
+                let remaining = $context.interpreter.gas.remaining();
+                let segment = additional_limit.checkpoint_baseline().saturating_sub(remaining);
+                let hidden = additional_limit.checkpoint_restore_hidden();
+                $context.interpreter.gas.erase_cost(hidden);
+                additional_limit.sync_checkpoint_baseline($context.interpreter.gas.remaining());
+                if additional_limit.record_compute_gas(segment) {
+                    None
+                } else {
+                    Some(additional_limit.exceeding_instruction_result())
+                }
+            };
+            if let Some(result) = exceeding_result {
+                set_halt_action!($context.interpreter, result);
+                return Err(result);
+            }
+        }
+    };
+}
+
+/// REX7 checkpoint epilogue: re-applies the V0 gas clamp from the freshly settled usage — including
+/// any detention cap the checkpoint just installed — and re-opens the settlement window on the
+/// clamped counter.
+///
+/// Only applies when the frame keeps executing. A checkpoint that published an action has either
+/// suspended into a child frame (the resume clamps in `AdditionalLimit::before_frame_run`) or ended
+/// the frame (the frame's final result restores instead), and clamping either would strand hidden
+/// gas across the boundary. No-op before REX7.
+macro_rules! checkpoint_epilogue {
+    ($context:expr) => {
+        if $context.host.spec_id().is_enabled(MegaSpecId::REX7) &&
+            $context.interpreter.bytecode.action().is_none()
+        {
+            let mut additional_limit = $context.host.additional_limit().borrow_mut();
+            let hide =
+                additional_limit.checkpoint_clamp_amount($context.interpreter.gas.remaining());
+            if hide > 0 {
+                let clamped = $context.interpreter.gas.record_regular_cost(hide);
+                debug_assert!(clamped, "clamp amount exceeds remaining gas");
+            }
+            additional_limit.sync_checkpoint_baseline($context.interpreter.gas.remaining());
+        }
+    };
+}
+
+/// Records a checkpoint opcode's own body gas (`$gas_before − remaining`) and re-opens the
+/// settlement window, enforcing the compute-gas limit exactly as the per-opcode wrappers do.
+///
+/// Used by the REX7 checkpoint handlers whose bodies can never spawn a child frame (the volatile
+/// opcodes, `SLOAD`, `SELFBALANCE`, `GAS`). The CALL / CREATE and storage-gas bodies use
+/// [`record_storage_compute_gas!`] instead, which additionally excludes storage charges and
+/// forwarded child gas.
+macro_rules! record_checkpoint_body_compute_gas {
+    ($context:expr, $gas_before:expr) => {
+        let gas_after = $context.interpreter.gas.remaining();
+        let gas_used = $gas_before.saturating_sub(gas_after);
+        {
+            let mut additional_limit = $context.host.additional_limit().borrow_mut();
+            additional_limit.sync_checkpoint_baseline(gas_after);
+            compute_gas!($context.interpreter, additional_limit, gas_used);
+        }
+    };
+}
+
 /// Records an opcode's compute gas in a single measurement window and enforces the compute-gas
 /// limit. The REX6 storage-affecting handlers invoke it directly with the storage gas they
 /// charged; plain opcodes use the leaner inline recording in
@@ -840,9 +926,8 @@ macro_rules! run_inner_instruction_or_abort {
 /// CREATE2 differs only by folding its memory-expansion gas into this single window instead of
 /// recording it separately.
 ///
-/// Under REX7 checkpoint accounting the window instead opens at the previous checkpoint, so the
-/// same recording also settles the unwrapped plain opcodes that ran since; see the macro body for
-/// why the exclusions stay exact and why the static gas is no longer added back.
+/// Under REX7 checkpoint accounting the window is the same one — [`checkpoint_prologue!`] runs
+/// ahead of the `$gas_before` capture — but the static gas is not added back: see the macro body.
 ///
 /// On exceeding the compute-gas limit, halts the interpreter and returns from the enclosing
 /// instruction handler. The early return mirrors [`compute_gas!`] so a trailing statement after
@@ -855,16 +940,18 @@ macro_rules! record_storage_compute_gas {
         let is_rex6 = spec.is_enabled(MegaSpecId::REX6);
         let is_checkpoint_accounting = spec.is_enabled(MegaSpecId::REX7);
         let gas_after = $context.interpreter.gas.remaining();
-        // Under checkpoint accounting the window opens at the last checkpoint — frame entry /
-        // resume, or the previous checkpoint opcode — instead of at this handler's own
-        // `$gas_before` capture, so the plain opcodes that ran since settle here in the same
-        // recording. Only plain opcodes can run inside that extra span, so no storage gas and no
-        // forwarded child gas hides in it and the exclusions below stay exact. The window then
-        // also contains the interpreter's static-gas pre-charge for this opcode, which the
-        // per-opcode form has to add back because its capture sits after it.
+        // The per-opcode `$gas_before` window applies on every spec: under checkpoint accounting
+        // the plain segment ahead of this opcode was already settled by
+        // [`checkpoint_prologue!`], which also restored the gas clamp, so `$gas_before`
+        // (captured after the prologue) lives on the true counter and measures the same
+        // span it measures everywhere else.
+        //
+        // What the two differ on is the opcode's static gas. Whoever charges it — the interpreter
+        // before dispatch, or an outer volatile wrapper — does so ahead of the prologue, so under
+        // checkpoint accounting it is already inside the settled segment and adding it back here
+        // would bill it twice.
         let mut gas_used = if is_checkpoint_accounting {
-            let baseline = $context.host.additional_limit().borrow().checkpoint_baseline();
-            baseline.saturating_sub(gas_after).saturating_sub($storage_charged)
+            $gas_before.saturating_sub(gas_after).saturating_sub($storage_charged)
         } else {
             (const { static_gas($opcode) } + $gas_before.saturating_sub(gas_after))
                 .saturating_sub($storage_charged)
@@ -1216,8 +1303,19 @@ pub mod forward_gas_ext {
     /// - `$wrapped_fn`: Path to the wrapped instruction implementation
     /// - `$has_transfer_logic`: Expression to determine if value is being transferred (e.g.,
     ///   `has_transfer` or `false`)
+    ///
+    /// The `@checkpoint_tail` variant additionally re-applies the REX7 gas clamp on the way out. It
+    /// is used by `CREATE` / `CREATE2`, whose table entries dispatch straight here; the CALL family
+    /// is wrapped once more by `volatile_data_ext::wrap_call_volatile_check`, which owns the
+    /// epilogue so that it lands after the detention cap that wrapper installs.
     macro_rules! wrap_gas_cap {
         ($fn_name:ident, $opcode_name:expr, $wrapped_fn:path, $has_transfer_logic:expr) => {
+            wrap_gas_cap!(@inner $fn_name, $opcode_name, $wrapped_fn, $has_transfer_logic, false);
+        };
+        (@checkpoint_tail $fn_name:ident, $opcode_name:expr, $wrapped_fn:path, $has_transfer_logic:expr) => {
+            wrap_gas_cap!(@inner $fn_name, $opcode_name, $wrapped_fn, $has_transfer_logic, true);
+        };
+        (@inner $fn_name:ident, $opcode_name:expr, $wrapped_fn:path, $has_transfer_logic:expr, $checkpoint_tail:literal) => {
             #[doc = concat!("`", $opcode_name, "` opcode with 98/100 gas forwarding rule.")]
             #[inline]
             pub fn $fn_name<
@@ -1301,6 +1399,9 @@ pub mod forward_gas_ext {
                     }
                     _ => {}
                 }
+                if $checkpoint_tail {
+                    checkpoint_epilogue!(context);
+                }
                 inner_outcome
             }
         };
@@ -1333,8 +1434,12 @@ pub mod forward_gas_ext {
     wrap_gas_cap!(call_code, "CALLCODE", storage_gas_ext::call_code, check_call_has_transfer);
     wrap_gas_cap!(delegate_call, "DELEGATECALL", storage_gas_ext::delegate_call, no_transfer);
     wrap_gas_cap!(static_call, "STATICCALL", storage_gas_ext::static_call, no_transfer);
-    wrap_gas_cap!(create, "CREATE", storage_gas_ext::create::<WIRE, false, H>, no_transfer);
-    wrap_gas_cap!(create2, "CREATE2", storage_gas_ext::create::<WIRE, true, H>, no_transfer);
+    wrap_gas_cap!(
+        @checkpoint_tail create, "CREATE", storage_gas_ext::create::<WIRE, false, H>, no_transfer
+    );
+    wrap_gas_cap!(
+        @checkpoint_tail create2, "CREATE2", storage_gas_ext::create::<WIRE, true, H>, no_transfer
+    );
 }
 
 /** Volatile data access opcode handlers with compute gas limit enforcement.
@@ -1897,6 +2002,11 @@ pub mod volatile_data_ext {
             // not interpreter state, so it is safe in any interpreter state (including
             // `NewFrame` after a successful CALL).
             apply_compute_gas_limit!(context);
+            // REX7: re-clamp for a CALL that never published a child frame (an insufficient balance
+            // or depth rejection pushes 0 and lets the frame keep running). The epilogue is what
+            // keeps the following plain segment bounded, and it sits after the cap above so a CALL
+            // that just marked beneficiary access clamps against the detained headroom.
+            checkpoint_epilogue!(context);
             inner_outcome
         }
     };
@@ -1911,55 +2021,26 @@ pub mod volatile_data_ext {
 
     /* Checkpoint variants of the volatile handlers (REX7+).
 
-    Under checkpoint accounting the volatile opcodes stay wrapped — they are checkpoints — but
-    they run revm's raw instruction and settle the whole open segment, measured on the
-    interpreter's own gas counter, in one recording, instead of delegating to a per-opcode
-    `compute_gas_ext` wrapper. Wherever the opcode's static gas is charged it lands inside that
-    segment, so the settlement adds nothing back; each handler keeps charging it at the position
-    its per-opcode counterpart does, because that position decides what an underfunded frame has
-    already done when it halts.
+    Under checkpoint accounting the volatile opcodes stay wrapped — they are checkpoints. The
+    prologue settles the open plain segment and restores the gas clamp, revm's raw instruction runs
+    on the true counter, the body's own gas is recorded per opcode, the detention cap is applied
+    from the fully settled usage exactly as the per-opcode order applies it, and the epilogue
+    re-clamps against the possibly-lowered headroom.
 
-    The settlement runs before `apply_compute_gas_limit!`, so a REX4+ relative detention cap is
-    still derived from fully settled usage at the access point.
+    Each handler keeps charging the opcode's static gas at the position its per-opcode counterpart
+    charges it, because that position decides what an underfunded frame has already done when it
+    halts.
 
     The frozen detention-window tripwire the per-opcode conditional wrapper carries is not
     repeated here: it watches for historical transactions whose replay would diverge across a revm
     bump, and no such transaction can exist for a spec with no activation history. */
 
-    /// Settles the open checkpoint segment at the interpreter's current gas, re-opens the window,
-    /// and halts — returning from the enclosing handler — when a limit surfaces.
-    ///
-    /// A frame-local exceed reports as a revert, which the enclosing handler's tail would have
-    /// treated as a normal (non-halting) outcome and still followed with the detention cap, so the
-    /// cap is applied here before returning. A TX-level exceed reports as an out-of-gas halt, which
-    /// that tail short-circuits, so the cap is not applied on that path.
-    macro_rules! settle_checkpoint_compute_gas {
-        ($context:expr) => {
-            let exceeding_result = {
-                let gas_after = $context.interpreter.gas.remaining();
-                let mut additional_limit = $context.host.additional_limit().borrow_mut();
-                if additional_limit.settle_checkpoint(gas_after) {
-                    None
-                } else {
-                    Some(additional_limit.exceeding_instruction_result())
-                }
-            };
-            if let Some(result) = exceeding_result {
-                set_halt_action!($context.interpreter, result);
-                if !result.is_halt() {
-                    apply_compute_gas_limit!($context);
-                }
-                return Err(result);
-            }
-        };
-    }
-
-    /// Checkpoint form of [`wrap_op_detain_gas_unconditional`]: disabled guard, static gas ahead
-    /// of the raw instruction (the position these opcodes' revm bodies charge from), segment
-    /// settlement, detention cap.
+    /// Checkpoint form of [`wrap_op_detain_gas_unconditional`]: disabled guard, prologue, static
+    /// gas ahead of the raw instruction (the position these opcodes' revm bodies charge from),
+    /// body recording, detention cap, epilogue.
     macro_rules! wrap_checkpoint_detain_gas_unconditional {
     ($fn_name:ident, $opcode:ident, $original_fn:path, $access_type:expr) => {
-        #[doc = concat!("`", stringify!($opcode), "` opcode as a checkpoint: raw instruction, segment settlement, gas detention.")]
+        #[doc = concat!("`", stringify!($opcode), "` opcode as a checkpoint: segment settlement, raw instruction, gas detention, re-clamp.")]
         #[inline]
         pub fn $fn_name<WIRE: InterpreterTypes, H: HostExt + ?Sized>(
             context: InstructionContext<'_, H, WIRE>,
@@ -1967,23 +2048,26 @@ pub mod volatile_data_ext {
             if context.host.volatile_access_disabled() {
                 revert_volatile_access_disabled!(context, $opcode, $access_type);
             }
+            checkpoint_prologue!(context);
+            let gas_before = context.interpreter.gas.remaining();
             charge_static_gas!(context, $opcode);
 
             run_inner_instruction_or_abort!($original_fn, context, inner_outcome);
-            settle_checkpoint_compute_gas!(context);
+            record_checkpoint_body_compute_gas!(context, gas_before);
             apply_compute_gas_limit!(context);
+            checkpoint_epilogue!(context);
             inner_outcome
         }
     };
     }
 
-    /// Checkpoint form of [`wrap_op_detain_gas_conditional`]: beneficiary peek, raw instruction,
-    /// static gas after it (the position these opcodes' revm bodies charge from, so an underfunded
-    /// frame has already popped its operands and marked its access), segment settlement, detention
-    /// cap.
+    /// Checkpoint form of [`wrap_op_detain_gas_conditional`]: beneficiary peek, prologue, raw
+    /// instruction, static gas after it (the position these opcodes' revm bodies charge from, so an
+    /// underfunded frame has already popped its operands and marked its access), body recording,
+    /// detention cap, epilogue.
     macro_rules! wrap_checkpoint_detain_gas_conditional {
     ($fn_name:ident, $opcode:ident, $original_fn:path) => {
-        #[doc = concat!("`", stringify!($opcode), "` opcode as a checkpoint: raw instruction, segment settlement, gas detention.")]
+        #[doc = concat!("`", stringify!($opcode), "` opcode as a checkpoint: segment settlement, raw instruction, gas detention, re-clamp.")]
         #[inline]
         pub fn $fn_name<WIRE: InterpreterTypes<Stack: StackInspectTr>, H: HostExt + ?Sized>(
             context: InstructionContext<'_, H, WIRE>,
@@ -1999,11 +2083,14 @@ pub mod volatile_data_ext {
                     );
                 }
             }
+            checkpoint_prologue!(context);
+            let gas_before = context.interpreter.gas.remaining();
 
             run_inner_instruction_or_abort!($original_fn, context, inner_outcome);
             charge_static_gas!(context, $opcode);
-            settle_checkpoint_compute_gas!(context);
+            record_checkpoint_body_compute_gas!(context, gas_before);
             apply_compute_gas_limit!(context);
+            checkpoint_epilogue!(context);
             inner_outcome
         }
     };
@@ -2086,7 +2173,7 @@ pub mod volatile_data_ext {
     );
 
     /// `SLOAD` as a checkpoint. Same oracle-volatile handling as [`sload`], but the raw revm
-    /// instruction runs unwrapped and the open segment settles here.
+    /// instruction runs unwrapped and the open segment settles in the prologue.
     #[inline]
     pub fn sload_checkpoint<WIRE: InterpreterTypes, H: HostExt + ?Sized>(
         context: InstructionContext<'_, H, WIRE>,
@@ -2095,16 +2182,19 @@ pub mod volatile_data_ext {
         if target == ORACLE_CONTRACT_ADDRESS && context.host.volatile_access_disabled() {
             revert_volatile_access_disabled!(context, SLOAD, VolatileDataAccessType::Oracle);
         }
+        checkpoint_prologue!(context);
+        let gas_before = context.interpreter.gas.remaining();
 
         run_inner_instruction_or_abort!(instructions::host::sload, context, inner_outcome);
         charge_static_gas!(context, SLOAD);
-        settle_checkpoint_compute_gas!(context);
+        record_checkpoint_body_compute_gas!(context, gas_before);
         apply_compute_gas_limit!(context);
+        checkpoint_epilogue!(context);
         inner_outcome
     }
 
     /// `SELFBALANCE` as a checkpoint. Same beneficiary-volatile handling as [`selfbalance`], but
-    /// the raw revm instruction runs unwrapped and the open segment settles here.
+    /// the raw revm instruction runs unwrapped and the open segment settles in the prologue.
     #[inline]
     pub fn selfbalance_checkpoint<WIRE: InterpreterTypes, H: HostExt + ?Sized>(
         context: InstructionContext<'_, H, WIRE>,
@@ -2118,11 +2208,14 @@ pub mod volatile_data_ext {
                 VolatileDataAccessType::Beneficiary
             );
         }
+        checkpoint_prologue!(context);
+        let gas_before = context.interpreter.gas.remaining();
         charge_static_gas!(context, SELFBALANCE);
 
         run_inner_instruction_or_abort!(instructions::host::selfbalance, context, inner_outcome);
-        settle_checkpoint_compute_gas!(context);
+        record_checkpoint_body_compute_gas!(context, gas_before);
         apply_compute_gas_limit!(context);
+        checkpoint_epilogue!(context);
         inner_outcome
     }
 }
@@ -2183,6 +2276,9 @@ pub mod additional_limit_ext {
             set_halt_action!(context.interpreter, result);
             return Err(result);
         }
+        drop(additional_limit);
+        // REX7: re-clamp once every dimension this opcode touches has been recorded.
+        checkpoint_epilogue!(context);
         inner_outcome
     }
 
@@ -2220,6 +2316,9 @@ pub mod additional_limit_ext {
             set_halt_action!(context.interpreter, result);
             return Err(result);
         }
+        drop(additional_limit);
+        // REX7: re-clamp once every dimension this opcode touches has been recorded.
+        checkpoint_epilogue!(context);
         inner_outcome
     }
 }
@@ -2310,6 +2409,9 @@ pub mod storage_gas_ext {
             >(
                 context: InstructionContext<'_, H, WIRE>,
             ) -> InstructionExecResult {
+                // REX7: settle the open segment and restore the clamp before any gas observation,
+                // so the storage charge and the body's 63/64 forwarding math see the true counter.
+                checkpoint_prologue!(context);
                 // Captured at the very top so the single compute window covers all of the
                 // opcode's compute work.
                 let gas_before = context.interpreter.gas.remaining();
@@ -2664,6 +2766,10 @@ pub mod storage_gas_ext {
             return Err(InstructionResult::StateChangeDuringStaticCall);
         }
 
+        // REX7: settle the open segment and restore the clamp before any gas observation, so the
+        // memory expansion, the storage charge and the body's forwarding math see the true counter.
+        checkpoint_prologue!(context);
+
         // Captured before any gas movement so the single compute window covers the wrapper-side
         // CREATE2 memory expansion as well as the inner opcode.
         let gas_before = context.interpreter.gas.remaining();
@@ -2745,6 +2851,8 @@ pub mod storage_gas_ext {
     >(
         context: InstructionContext<'_, H, WIRE>,
     ) -> InstructionExecResult {
+        // REX7: settle the open segment and restore the clamp before any gas observation.
+        checkpoint_prologue!(context);
         // Captured at the very top so the single compute window covers the inner opcode.
         let gas_before = context.interpreter.gas.remaining();
         let Some(len) = context.interpreter.stack.inspect::<1>() else {
@@ -2805,6 +2913,8 @@ pub mod storage_gas_ext {
     >(
         context: InstructionContext<'_, H, WIRE>,
     ) -> InstructionExecResult {
+        // REX7: settle the open segment and restore the clamp before any gas observation.
+        checkpoint_prologue!(context);
         // Captured at the very top so the single compute window covers the inner opcode.
         let gas_before = context.interpreter.gas.remaining();
         // The address to the underlying execution contract state
@@ -2881,6 +2991,11 @@ pub mod storage_gas_ext {
     >(
         context: InstructionContext<'_, H, WIRE>,
     ) -> InstructionExecResult {
+        // REX7: settle the open segment and restore the clamp before any gas observation — the
+        // beneficiary-creation storage charge below and the inner opcode both run on the true
+        // counter, which is what keeps the storage charge outside every compute window.
+        checkpoint_prologue!(context);
+
         // Inside a static frame, revm's inner SELFDESTRUCT halts on the
         // static-context check without changing state. Skip the mega host work below
         // (two account inspections, SALT account-creation pricing, the storage-gas
@@ -2929,19 +3044,7 @@ pub mod storage_gas_ext {
             };
             let drained =
                 context.host.additional_limit().borrow_mut().try_consume_storage_stipend(cost);
-            let storage_charged = cost - drained;
-            gas!(context.interpreter, storage_charged);
-
-            // Under checkpoint accounting this storage debit sits inside the window that the
-            // trailing compute recording in `compute_gas_ext::selfdestruct_self_charged` closes,
-            // and that recording has no storage term of its own — exclude the debit by lowering
-            // the open baseline here.
-            {
-                let mut additional_limit = context.host.additional_limit().borrow_mut();
-                if additional_limit.checkpoint_accounting() {
-                    additional_limit.deduct_checkpoint_baseline(storage_charged);
-                }
-            }
+            gas!(context.interpreter, cost - drained);
 
             // Record resource usage for new beneficiary account
             context.host.additional_limit().borrow_mut().on_selfdestruct_new_account();
@@ -3294,17 +3397,14 @@ pub mod compute_gas_ext {
             if SELF_CHARGES_STATIC_GAS { 0 } else { const { static_gas(opcode::SELFDESTRUCT) } };
         let gas_after = context.interpreter.gas.remaining();
         let mut additional_limit = context.host.additional_limit().borrow_mut();
-        // Under checkpoint accounting the window opens at the previous checkpoint, so this
-        // recording also settles the unwrapped plain opcodes that ran since. Wherever the opcode's
-        // static gas was charged it lands inside that window, so nothing is added back; the
-        // beneficiary-creation storage charge already lowered the baseline by its own amount.
-        let gas_used = if additional_limit.checkpoint_accounting() {
-            let used = additional_limit.checkpoint_baseline().saturating_sub(gas_after);
+        // The per-opcode `gas_before` window applies on every spec. Under checkpoint accounting the
+        // plain segment ahead of this opcode was already settled by the `checkpoint_prologue!` in
+        // `storage_gas_ext::selfdestruct`, which also restored the clamp; the window is re-opened
+        // here so the frame's final settlement cannot bill this body a second time.
+        let gas_used = pre_charged + gas_before.saturating_sub(gas_after);
+        if additional_limit.checkpoint_accounting() {
             additional_limit.sync_checkpoint_baseline(gas_after);
-            used
-        } else {
-            pre_charged + gas_before.saturating_sub(gas_after)
-        };
+        }
         if !additional_limit.record_compute_gas_all_dims(gas_used) {
             // A successful inner SELFDESTRUCT has already set its return action, which the halt
             // replaces; the `Err` is what stops the interpreter loop.
@@ -3312,6 +3412,24 @@ pub mod compute_gas_ext {
             set_halt_action!(context.interpreter, result);
             return Err(result);
         }
+        inner_outcome
+    }
+
+    /// `GAS` as a REX7 checkpoint.
+    ///
+    /// `GAS` has to be a checkpoint under V0 clamp enforcement even though it charges nothing but
+    /// its static gas: the prologue hands the clamp-hidden gas back before the raw instruction
+    /// reads the counter, so the value pushed on the stack is the true remaining and the clamp
+    /// stays invisible to any transaction that never exceeds a limit.
+    #[inline]
+    pub fn gas_checkpoint<WIRE: InterpreterTypes, H: HostExt + ?Sized>(
+        context: InstructionContext<'_, H, WIRE>,
+    ) -> InstructionExecResult {
+        checkpoint_prologue!(context);
+        let gas_before = context.interpreter.gas.remaining();
+        run_inner_instruction_or_abort!(instructions::system::gas, context, inner_outcome);
+        record_checkpoint_body_compute_gas!(context, gas_before);
+        checkpoint_epilogue!(context);
         inner_outcome
     }
 }

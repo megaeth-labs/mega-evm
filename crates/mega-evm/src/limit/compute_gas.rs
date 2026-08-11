@@ -110,6 +110,31 @@ impl ComputeGasTracker {
         self.detained_limit
     }
 
+    /// Returns the base (undetained) TX compute gas limit.
+    pub(crate) fn base_tx_limit(&self) -> u64 {
+        self.frame_tracker.tx_limit()
+    }
+
+    /// Returns the compute gas headroom the V0 gas clamp may leave visible to the interpreter,
+    /// and whether the binding constraint is the frame-local budget (`true`) or the TX-level
+    /// (possibly detained) limit (`false`).
+    ///
+    /// The headroom is the tighter of the current frame's remaining compute budget (Rex4+) and
+    /// the TX-level remaining under the effective (possibly detained) limit — the same pair
+    /// [`check_limit`](TxRuntimeLimit::check_limit) enforces. Gas hidden beyond this headroom is
+    /// therefore reachable only by a transaction that would exceed one of those two limits.
+    #[inline]
+    pub(crate) fn clamp_headroom(&self) -> (u64, bool) {
+        let tx_remaining = self.tx_limit().saturating_sub(self.tx_usage());
+        if self.rex4_enabled {
+            let frame_remaining = self.frame_tracker.current_frame_remaining();
+            if frame_remaining < tx_remaining {
+                return (frame_remaining, true);
+            }
+        }
+        (tx_remaining, false)
+    }
+
     /// Returns `true` when gas detention is the binding TX-level constraint, i.e., the detained
     /// limit is tighter than the base TX limit AND actual usage exceeds it.
     pub(crate) fn is_detained_exceed(&self) -> bool {
