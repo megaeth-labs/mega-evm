@@ -10,7 +10,7 @@ CLI toolbox for direct MegaEVM execution (`run`, `tx`, `replay`, `cache`) with o
 - `src/run/`: bytecode execution command.
 - `src/tx/`: full transaction execution command with raw-tx override support.
 - `src/replay/`: RPC-backed historical transaction replay through block executor, plus the batch driver.
-- `src/cache/`: cache-file merge utilities (provider-cache and capture-envelope JSON shapes) backing the `cache merge` subcommand and the lock-protected merge-on-persist.
+- `src/cache/`: cache-file merge utilities (provider-cache and capture-envelope JSON shapes) backing the `cache merge` subcommand and the lock-protected merge-on-persist, plus the sidecar advisory lock every cache-file writer takes.
 
 ## KEY PATTERNS
 - Shared argument groups are flattened from `run` argument structs into sibling commands.
@@ -33,4 +33,5 @@ CLI toolbox for direct MegaEVM execution (`run`, `tx`, `replay`, `cache`) with o
 - Change replay hardfork/spec selection: `src/replay/{cmd.rs,hardforks.rs}`.
 - Change receipt/summary formatting: `src/common/outcome.rs` and printer helpers.
 - Change cache merge behavior (CLI or merge-on-persist): `src/cache/{mod.rs,merge.rs}`.
+- Change how cache files are locked against concurrent writers: `src/cache/lock.rs` — the one place a cache-file write may acquire its lock, and every caller must fail closed when it cannot.
 - Change process exit classification: `src/common/exit.rs` — the single exit site for command results.

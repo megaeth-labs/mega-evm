@@ -17,10 +17,14 @@
 //! therefore share one `--rpc.cache-dir` without losing each other's entries.
 //! The lock sidecar is left in place after the process exits (the flock is released
 //! when the lock file handle is closed).
+//!
+//! Persist fails closed on the lock: if the lock cannot be acquired, nothing is
+//! written. Writing unlocked would reintroduce exactly the lost-update race the
+//! lock exists to prevent, and it would do so silently — a sibling process's
+//! entries would vanish under our rename.
 
 use std::{
     fmt, fs,
-    fs::OpenOptions,
     path::{Path, PathBuf},
 };
 
@@ -31,9 +35,10 @@ use tracing::{info, warn};
 use super::transport::TransportCache;
 use crate::{
     cache::{
-        lock_sidecar_path, merge_envelope_for_persist, merge_provider_entries_capped,
-        read_provider_cache, reread_envelope_for_merge, write_bytes_atomic, write_envelope_atomic,
-        CacheKv, EnvelopeDoc, EnvelopeReread, ExternalEnvDoc, ENVELOPE_VERSION,
+        acquire_exclusive_lock, lock_sidecar_path, merge_envelope_for_persist,
+        merge_provider_entries_capped, read_provider_cache, reread_envelope_for_merge,
+        write_bytes_atomic, write_envelope_atomic, CacheKv, EnvelopeDoc, EnvelopeReread,
+        ExternalEnvDoc, ENVELOPE_VERSION,
     },
     common::{EvmeError, Result},
 };
@@ -234,50 +239,26 @@ impl fmt::Debug for RpcCacheStore {
     }
 }
 
-/// RAII exclusive lock on the sidecar file for `target`.
-///
-/// The lock is released when this guard is dropped (file handle closed).
-/// The sidecar file itself is left on disk.
-struct ExclusiveFileLock {
-    _file: fs::File,
-}
-
-/// Acquire an exclusive advisory lock on `<target>.lock`, blocking until held.
-///
-/// The sidecar is created if missing and left in place after unlock.
-fn acquire_exclusive_lock(target: &Path) -> std::io::Result<ExclusiveFileLock> {
-    let lock_path = lock_sidecar_path(target);
-    if let Some(parent) = lock_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    // truncate(false): the sidecar is only a flock target; keep any existing bytes.
-    let file =
-        OpenOptions::new().create(true).read(true).write(true).truncate(false).open(&lock_path)?;
-    // Blocking exclusive advisory lock.
-    file.lock()?;
-    Ok(ExclusiveFileLock { _file: file })
-}
-
 /// Atomically persist `cache` to `target` via lock + re-read-merge + temp rename.
 ///
 /// All error paths include `target` in the returned [`std::io::Error`] so the
 /// warn-log in [`RpcCacheStore::persist`] identifies which file failed.
 ///
-/// Lock acquisition failure degrades to an unlocked write with a `warn!`.
+/// Lock acquisition failure aborts the persist: the provider cache is a
+/// best-effort artifact, so skipping it costs a re-fetch, while an unlocked
+/// write can silently delete a sibling process's entries.
 /// A missing or corrupt on-disk file during re-read degrades to persisting
 /// our entries only (with a `warn!` for corrupt).
 fn save_cache_atomic(cache: &SharedCache, target: &Path) -> std::io::Result<()> {
-    let _guard = match acquire_exclusive_lock(target) {
-        Ok(g) => Some(g),
-        Err(err) => {
-            warn!(
-                path = %target.display(),
-                error = %err,
-                "Failed to acquire RPC cache lock; persisting without lock",
-            );
-            None
-        }
-    };
+    let _guard = acquire_exclusive_lock(target).map_err(|e| {
+        std::io::Error::other(format!(
+            "failed to acquire the cache lock {} for {}: {e}; \
+             cache entries were not saved (an unlocked write could drop a \
+             concurrent process's entries)",
+            lock_sidecar_path(target).display(),
+            target.display(),
+        ))
+    })?;
 
     let dir = target.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(dir).map_err(|e| {
@@ -402,24 +383,22 @@ impl CacheFileEnvelope {
     /// corrupt JSON degrades to ours-only with a warning.
     ///
     /// Lock contention blocks until the lock is free. Failure to create/acquire
-    /// the lock degrades to an unlocked write with a `warn!`. Write failures
-    /// remain hard errors.
+    /// the lock is a hard error — the envelope is the primary output of capture
+    /// mode, so an unlocked write that silently drops a concurrent writer's
+    /// entries is worse than a failed run. Write failures remain hard errors.
     pub(super) fn save(
         &self,
         path: &Path,
         loaded_external_env: Option<&ExternalEnvSnapshot>,
     ) -> Result<()> {
-        let _guard = match acquire_exclusive_lock(path) {
-            Ok(g) => Some(g),
-            Err(err) => {
-                warn!(
-                    path = %path.display(),
-                    error = %err,
-                    "Failed to acquire envelope lock; persisting without lock",
-                );
-                None
-            }
-        };
+        let _guard = acquire_exclusive_lock(path).map_err(|e| {
+            EvmeError::FixtureError(format!(
+                "Failed to acquire the cache lock {} for envelope '{}': {e}. \
+                 Refusing to write it unlocked: a concurrent writer's entries would be lost.",
+                lock_sidecar_path(path).display(),
+                path.display(),
+            ))
+        })?;
 
         let ours = self.to_merge_doc()?;
         let loaded_doc = loaded_external_env
@@ -946,6 +925,95 @@ mod tests {
             EnvelopeReread::Ok(doc) => assert_eq!(doc.chain_id, 5),
             other => panic!("valid envelope must be Ok, got {other:?}"),
         }
+    }
+
+    /// Provider persist fails closed when the lock cannot be acquired: nothing
+    /// is written, and the file a sibling process left behind is intact.
+    ///
+    /// The store swallows the failure (the provider cache is best-effort), so
+    /// the observable contract is the untouched file, not the return value.
+    #[test]
+    fn test_provider_cache_persist_skips_when_the_lock_is_unavailable() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("rpc-cache-1.json");
+
+        // A sibling's file is already on disk.
+        let sibling = CacheLayer::new(16).cache();
+        sibling.put(B256::repeat_byte(0xbb), "from-sibling".into()).expect("put");
+        RpcCacheStore::new(sibling, path.clone()).persist().expect("persist sibling");
+        let before = fs::read_to_string(&path).expect("read sibling file");
+
+        // A directory in the sidecar's place makes the lock un-acquirable.
+        fs::remove_file(lock_sidecar_path(&path)).expect("remove sidecar");
+        fs::create_dir(lock_sidecar_path(&path)).expect("occupy sidecar path");
+
+        let ours = CacheLayer::new(16).cache();
+        ours.put(B256::repeat_byte(0xaa), "ours".into()).expect("put");
+        RpcCacheStore::new(ours, path.clone())
+            .persist()
+            .expect("provider persist stays best-effort");
+
+        assert_eq!(fs::read_to_string(&path).unwrap(), before, "no unlocked write happened");
+    }
+
+    /// The skipped persist reports why, naming the lock and stating that the
+    /// entries were not saved.
+    #[test]
+    fn test_save_cache_atomic_reports_the_lock_failure() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("rpc-cache-1.json");
+        fs::create_dir(lock_sidecar_path(&path)).expect("occupy sidecar path");
+
+        let cache = CacheLayer::new(16).cache();
+        cache.put(B256::repeat_byte(0xaa), "ours".into()).expect("put");
+        let err = save_cache_atomic(&cache, &path).expect_err("lock failure must not write");
+        let msg = err.to_string();
+        assert!(msg.contains("rpc-cache-1.json.lock"), "msg={msg}");
+        assert!(msg.contains("were not saved"), "msg={msg}");
+        assert!(!path.exists(), "nothing was written");
+    }
+
+    /// Envelope persist hard-errors when the lock cannot be acquired: the
+    /// capture is the primary output, so a silently unlocked write is worse
+    /// than a failed run.
+    #[test]
+    fn test_envelope_persist_errors_when_the_lock_is_unavailable() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("capture.json");
+
+        CacheFileEnvelope::new(&TransportCache::new(), 7, None).save(&path, None).expect("seed");
+        let before = fs::read_to_string(&path).expect("read seeded envelope");
+
+        fs::remove_file(lock_sidecar_path(&path)).expect("remove sidecar");
+        fs::create_dir(lock_sidecar_path(&path)).expect("occupy sidecar path");
+
+        let cache = TransportCache::new();
+        cache
+            .merge(&serde_json::json!([{
+                "key": keccak256("a"),
+                "value": r#"{"result":"a"}"#,
+            }]))
+            .expect("seed ours");
+        let err = CacheFileEnvelope::new(&cache, 7, None)
+            .save(&path, None)
+            .expect_err("lock failure must abort the capture persist");
+        let msg = err.to_string();
+        assert!(msg.contains("capture.json.lock"), "msg={msg}");
+        assert!(msg.contains("unlocked"), "msg={msg}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), before, "no unlocked write happened");
+    }
+
+    /// The store surfaces the envelope lock failure to its caller.
+    #[test]
+    fn test_store_envelope_persist_errors_when_the_lock_is_unavailable() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("capture.json");
+        fs::create_dir(lock_sidecar_path(&path)).expect("occupy sidecar path");
+
+        let store = RpcCacheStore::new_envelope(TransportCache::new(), path.clone(), 7, None);
+        let err = store.persist().expect_err("capture persist must fail closed");
+        assert!(err.to_string().contains("lock"), "msg={err}");
+        assert!(!path.exists(), "nothing was written");
     }
 
     /// Corrupt on-disk provider cache during re-read does not abort; ours are written.
