@@ -107,6 +107,58 @@ fn cache_without_entry(name: &str, key: &str) -> std::path::PathBuf {
     path
 }
 
+/// Write a copy of the committed capture whose parent-block response reports a
+/// hash that does not link to the replayed block, and return its path together
+/// with the hash the untouched capture reported.
+///
+/// The capture answers `eth_getBlockByNumber` for exactly two heights: the
+/// replayed block and its parent. Rewriting the lower-numbered body's own `hash`
+/// models an endpoint serving divergent views of the chain, since the two blocks
+/// are fetched in separate calls. Only that field changes — state reads are
+/// keyed by block number, so every other response still resolves.
+fn cache_with_unlinked_parent(name: &str, wrong_hash: &str) -> (std::path::PathBuf, String) {
+    let mut envelope: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(cache()).expect("read offline cache"))
+            .expect("parse offline cache");
+    let entries = envelope["cache"].as_array_mut().expect("cache entries");
+
+    let mut blocks: Vec<(usize, u64)> = vec![];
+    for (index, entry) in entries.iter().enumerate() {
+        let value = entry["value"].as_str().expect("entry value is a string");
+        let Ok(response) = serde_json::from_str::<serde_json::Value>(value) else {
+            continue;
+        };
+        let Some(result) = response.get("result") else {
+            continue;
+        };
+        // A block body is the only response carrying a parent hash.
+        if !result.is_object() || result.get("parentHash").is_none() {
+            continue;
+        }
+        let number = result["number"].as_str().expect("block number is a string");
+        let number =
+            u64::from_str_radix(number.trim_start_matches("0x"), 16).expect("block number is hex");
+        blocks.push((index, number));
+    }
+    assert_eq!(blocks.len(), 2, "the capture must hold the replayed block and its parent");
+    blocks.sort_unstable_by_key(|&(_, number)| number);
+    let (parent_index, _) = blocks[0];
+
+    let entry = &mut entries[parent_index];
+    let mut response: serde_json::Value =
+        serde_json::from_str(entry["value"].as_str().expect("entry value is a string"))
+            .expect("parse parent block response");
+    let result = &mut response["result"];
+    let original = result["hash"].as_str().expect("parent block hash").to_string();
+    result["hash"] = serde_json::Value::String(wrong_hash.to_string());
+    entry["value"] = serde_json::Value::String(response.to_string());
+
+    let path =
+        std::env::temp_dir().join(format!("mega_evme_exit_{name}_{}.json", std::process::id()));
+    std::fs::write(&path, envelope.to_string()).expect("write doctored cache");
+    (path, original)
+}
+
 /// Write a `--tx-file` holding `contents`, and return its path.
 fn tx_file(name: &str, contents: &str) -> std::path::PathBuf {
     let path =
@@ -190,6 +242,56 @@ fn test_state_read_failure_during_execution_is_an_rpc_failure() {
         "the target is reported as unanswered:\n{}",
         batch.stdout
     );
+}
+
+/// A parent block that does not link to the replayed block is an unanswered
+/// question, not a wrong answer: the single-transaction run exits 3, with or
+/// without `--verify-receipt`.
+///
+/// The block and its parent are fetched by number in two separate calls, so a
+/// reorg (or a load-balanced endpoint serving divergent views) can answer them
+/// from different chains. Replaying anyway would fork from a pre-state that does
+/// not precede the block, and the divergence would surface later as a receipt
+/// mismatch (exit 2) or as a silently wrong replay.
+#[test]
+fn test_unlinked_parent_block_is_an_rpc_failure() {
+    const WRONG_PARENT: &str = "0x1111111111111111111111111111111111111111111111111111111111111111";
+
+    let (path, expected_parent) = cache_with_unlinked_parent("unlinked_parent", WRONG_PARENT);
+    let cache = path.to_str().unwrap();
+
+    for extra in [&[][..], &["--verify-receipt"][..]] {
+        let mut argv = vec!["replay", "--rpc.replay-file", cache, "--json"];
+        argv.extend_from_slice(extra);
+        argv.push(TX_OK);
+        let outcome = run(&argv);
+
+        assert_eq!(
+            outcome.code(),
+            3,
+            "a broken parent linkage exits 3 for {extra:?}.\nstderr: {}",
+            outcome.stderr
+        );
+        let error = outcome.error_object();
+        assert_eq!(error["error"]["code"].as_u64(), Some(3));
+        assert_eq!(error["error"]["kind"].as_str(), Some("rpc-failure"));
+        let message = error["error"]["message"].as_str().unwrap_or_default();
+        assert!(
+            message.contains(WRONG_PARENT) && message.contains(&expected_parent),
+            "the message must name both hashes (parent {expected_parent}, served \
+             {WRONG_PARENT}): {error}"
+        );
+        assert!(message.contains("divergent views"), "the message must name the cause: {error}");
+        assert!(
+            !outcome.stdout.contains("MISMATCH") &&
+                !outcome.stderr.contains("verification mismatch"),
+            "an unanswered question must not be reported as a mismatch:\n{}\n{}",
+            outcome.stdout,
+            outcome.stderr,
+        );
+    }
+
+    let _ = std::fs::remove_file(&path);
 }
 
 /// A batch run's error object follows the per-target lines, so a parser reading

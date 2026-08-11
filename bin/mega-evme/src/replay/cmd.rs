@@ -541,6 +541,30 @@ impl Cmd {
             .map_err(|e| ReplayError::RpcError(format!("RPC transport error: {e}")))?
             .ok_or(ReplayError::BlockNotFound(block_number))?;
 
+        // Parent/block linkage guard: the two blocks above were fetched by
+        // number in separate calls, so across a reorg or a load-balanced
+        // endpoint serving divergent views `eth_getBlockByNumber(N-1)` can
+        // return a block that is not the parent of the block being replayed.
+        // Forking from that state would silently execute against the wrong
+        // pre-state, and the divergence would surface later as a receipt
+        // mismatch rather than as the infrastructure failure it is.
+        //
+        // A pending transaction has no such pair: its state base *is* the
+        // latest block, so both fetches address the same block and there is no
+        // linkage to check.
+        if !is_pending {
+            let parent_hash = parent_block.hash();
+            let expected_parent = block.header.parent_hash();
+            if parent_hash != expected_parent {
+                return Err(ReplayError::RpcError(format!(
+                    "parent block hash {parent_hash} != block parent_hash {expected_parent}: the \
+                     parent block describes a different chain than the block being replayed (reorg \
+                     in progress, or a load-balanced endpoint serving divergent views); retry once \
+                     the chain settles"
+                )));
+            }
+        }
+
         let mut preceding_tx_hashes = vec![];
         if !is_pending {
             for hash in block.transactions.hashes() {
