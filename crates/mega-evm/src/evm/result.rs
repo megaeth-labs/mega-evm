@@ -115,7 +115,10 @@ pub enum MegaHaltReason {
         /// - Per-opcode enforcement (through Rex6): the crossing opcode has already recorded its
         ///   cost, so `actual > limit`.
         /// - Gas-clamp enforcement (Rex7+): the crossing opcode is stopped before it executes and
-        ///   its cost is not recorded, so `actual ≤ limit`.
+        ///   its cost is not recorded, so the *enforced* usage stays at or below `limit`. `actual`
+        ///   is the transaction's full reported total, which also carries the remainders of any
+        ///   frame that halted exceptionally earlier in the transaction — those are reported but
+        ///   never enforced, and they can push `actual` above `limit`.
         limit: u64,
         /// The actual compute gas usage at the halt.
         actual: u64,
@@ -148,7 +151,10 @@ pub enum MegaHaltReason {
         /// - Per-opcode enforcement (through Rex6): the crossing opcode has already recorded its
         ///   cost, so `actual > limit`.
         /// - Gas-clamp enforcement (Rex7+): the crossing opcode is stopped before it executes and
-        ///   its cost is not recorded, so `actual ≤ limit`.
+        ///   its cost is not recorded, so the *enforced* usage stays at or below `limit`. `actual`
+        ///   is the transaction's full reported total, which also carries the remainders of any
+        ///   frame that halted exceptionally earlier in the transaction — those are reported but
+        ///   never enforced, and they can push `actual` above `limit`.
         limit: u64,
         /// The actual compute gas usage at the halt.
         actual: u64,
