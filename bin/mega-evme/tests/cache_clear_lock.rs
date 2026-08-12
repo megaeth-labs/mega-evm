@@ -142,3 +142,53 @@ async fn test_clear_cache_serializes_with_a_held_sidecar_lock() {
         String::from_utf8_lossy(&out.stderr),
     );
 }
+
+/// A concurrent writer that lands under the lock while clear is queued must
+/// still be wiped: clear's critical section is unlink + exists-check + load,
+/// so the file written just before clear acquires cannot be reloaded into the
+/// clearing session.
+///
+/// Inverse of `test_clear_cache_serializes_with_a_held_sidecar_lock`: that test
+/// seeds before the hold and proves clear does not act while blocked; this one
+/// writes only while clear is blocked (as a clean-exit persist would, under
+/// the same lock) and proves the injected entries do not survive the clear.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_clear_cache_wipes_file_written_while_queued_on_lock() {
+    let server = MockRpcServer::start().await;
+    let chain_id: u64 = 56;
+    server.respond_eth_chain_id(chain_id, 1).await;
+    server.respond_jsonrpc_null_result(10).await;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cache_file = dir.path().join(format!("rpc-cache-{chain_id}.json"));
+    // No seed before the hold: the only pollution is what the concurrent
+    // writer leaves under the lock while clear waits.
+    assert!(!cache_file.exists(), "precondition: cache file must be absent");
+
+    let lock = hold_cache_lock(&cache_file);
+    let mut child = spawn_clear_cache(&server.uri(), dir.path());
+    assert_blocked_while_held(&mut child);
+
+    // Concurrent persist finishes under the lock clear is waiting for: its
+    // rename lands, then it releases — clear acquires next and must treat this
+    // file as the one to wipe, not as content to load after an early unlock.
+    let injected = r#"[{"key":"0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","value":"injected-while-clear-queued"}]"#;
+    fs::write(&cache_file, injected).expect("write while clear is queued");
+    assert_eq!(
+        fs::read_to_string(&cache_file).expect("read injected"),
+        injected,
+        "injected file must still be present while clear is blocked",
+    );
+
+    drop(lock);
+    let out = finish(child);
+    let after = fs::read_to_string(&cache_file).unwrap_or_default();
+    assert!(
+        !after.contains("injected-while-clear-queued"),
+        "clear must delete the concurrent write and start empty; injected \
+         entries must not reappear via load-then-persist.\n\
+         after={after}\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+}

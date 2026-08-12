@@ -192,14 +192,22 @@ impl RpcArgs {
         let cache = cache_layer.cache();
         let cache_store = match cache_path {
             Some(path) => {
-                if self.clear_cache {
-                    // Same sidecar lock as persist / `cache merge`: without it a
-                    // writer mid re-read-merge-rename can land after the unlink
-                    // (undoing the clear), or the clear can delete a file the
-                    // locked writer just re-read. Fail closed if the lock cannot
-                    // be acquired — the user asked for a deletion that is not
-                    // safe to do unlocked.
-                    let _clear_lock = acquire_exclusive_lock(&path).map_err(|e| {
+                // Same sidecar lock as persist / `cache merge`. Held for the
+                // whole clear critical section: acquire → unlink → exists-check
+                // → load (or the decision that nothing is on disk to load).
+                // Releasing after unlink but before load leaves a window where a
+                // concurrent locked writer can recreate the file with the
+                // entries the user asked to remove, and this invocation then
+                // loads them. Fail closed if the lock cannot be acquired — the
+                // user asked for a deletion that is not safe to do unlocked.
+                //
+                // Lock ordering with same-process persist: this guard lives only
+                // for provider build and is dropped before `BuildProviderOutput`
+                // returns; clean-exit `RpcCacheStore::persist` acquires later.
+                // The two critical sections never overlap in one process, so
+                // clear cannot deadlock against its own later persist.
+                let clear_lock = if self.clear_cache {
+                    Some(acquire_exclusive_lock(&path).map_err(|e| {
                         EvmeError::RpcError(format!(
                             "Failed to acquire the cache lock {} for clear-cache of {}: {e}. \
                              Refusing to clear without it: a concurrent writer could race \
@@ -207,7 +215,11 @@ impl RpcArgs {
                             lock_sidecar_path(&path).display(),
                             path.display(),
                         ))
-                    })?;
+                    })?)
+                } else {
+                    None
+                };
+                if self.clear_cache {
                     if let Err(e) = fs::remove_file(&path) {
                         if e.kind() != std::io::ErrorKind::NotFound {
                             return Err(EvmeError::RpcError(format!(
@@ -218,7 +230,6 @@ impl RpcArgs {
                     } else {
                         info!(path = %path.display(), "Cleared existing RPC cache");
                     }
-                    // Lock released on drop before load / provider build continue.
                 }
                 if let Some(parent) = path.parent() {
                     if let Err(e) = fs::create_dir_all(parent) {
@@ -242,6 +253,10 @@ impl RpcArgs {
                         );
                     }
                 }
+                // Release after unlink + exists + load; later provider construction
+                // and exit-time persist run without this guard (they never overlap
+                // it in the same process — see lock-ordering note above).
+                drop(clear_lock);
                 RpcCacheStore::new(cache, path)
             }
             None => RpcCacheStore::noop(),
