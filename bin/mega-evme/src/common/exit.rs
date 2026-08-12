@@ -27,7 +27,7 @@
 //! assigned a class.
 
 use mega_evm::{
-    alloy_evm::block::BlockExecutionError,
+    alloy_evm::block::{BlockExecutionError, BlockValidationError},
     alloy_op_evm::OpTxError,
     revm::{context::result::EVMError, database_interface::bal::EvmDatabaseError},
 };
@@ -36,7 +36,7 @@ use tracing::error;
 
 use crate::{
     cmd::Error,
-    common::{BatchFailureCounts, EvmeError},
+    common::{BatchFailureCounts, EvmeError, RPC_ERROR_PREFIX, RPC_TRANSPORT_ERROR_PREFIX},
 };
 
 /// The concrete EVM error a `mega-evme` block executor produces.
@@ -58,14 +58,23 @@ type BlockEvmError = EVMError<EvmDatabaseError<EvmeError>, OpTxError>;
 /// step is typed: the rendered message is never inspected.
 ///
 /// Not every block error carries its cause this way. A read that fails inside
-/// the pre-block system calls (EIP-4788 beacon root, EIP-2935 block hashes) or
-/// inside the sandboxed execution used by the keyless-deploy system contract
-/// has its cause rendered into a message string by the layer that raised it, so
-/// the type is gone before the error arrives here and the failure stays
-/// execution-class.
+/// the pre-block system calls (EIP-4788 beacon root, EIP-2935 block hashes)
+/// is stringified into a [`BlockValidationError`] message field by mega-evm
+/// before the error reaches here. For that path, see
+/// [`stringified_rpc_failure`]. The keyless-deploy sandbox erases the cause
+/// entirely (selector-only `InternalError`); that path cannot be recovered
+/// bin-side.
 fn database_cause(err: &BlockExecutionError) -> Option<&EvmeError> {
-    let internal = err.as_internal()?;
-    let boxed = internal.as_evm().map(|(_, error)| error).or_else(|| internal.as_other())?;
+    let boxed = match err {
+        BlockExecutionError::Internal(internal) => {
+            internal.as_evm().map(|(_, error)| error).or_else(|| internal.as_other())?
+        }
+        // Validation::EVM / Other box a non-tx failure the same way Internal does.
+        BlockExecutionError::Validation(
+            BlockValidationError::EVM { error, .. } | BlockValidationError::Other(error),
+        ) => error.as_ref(),
+        BlockExecutionError::Validation(_) => return None,
+    };
 
     if let Some(evm_error) = boxed.downcast_ref::<BlockEvmError>() {
         return match evm_error {
@@ -86,6 +95,41 @@ const fn external_cause(err: &EvmDatabaseError<EvmeError>) -> Option<&EvmeError>
         // A block access list error is the executor's own bookkeeping.
         EvmDatabaseError::Bal(_) => None,
     }
+}
+
+/// Whether a rendered message still carries an [`EvmeError`] RPC-class prefix.
+///
+/// Used only after typed recovery fails. The prefixes are the stable
+/// [`Display`] texts of [`EvmeError::RpcError`] / [`EvmeError::RpcTransportError`],
+/// which this crate owns; mega-evm and alloy-evm wrappers that call
+/// `to_string()` leave them embedded in the outer message.
+fn message_carries_rpc_class(message: &str) -> bool {
+    message.contains(RPC_ERROR_PREFIX) || message.contains(RPC_TRANSPORT_ERROR_PREFIX)
+}
+
+/// Recover an RPC-class failure that mega-evm stringified into a validation
+/// message, losing the typed [`EvmeError`] chain.
+///
+/// Pre-block EIP-2935 / EIP-4788 helpers map a system-call database error to
+/// [`BlockValidationError::BlockHashContractCall`] /
+/// [`BlockValidationError::BeaconRootContractCall`] with `message: e.to_string()`.
+/// The type is gone, but the message still contains this crate's RPC
+/// [`Display`] prefixes. Other validation variants either keep a typed box
+/// (handled by [`database_cause`]) or are genuine consensus/execution failures.
+fn stringified_rpc_failure(err: &BlockExecutionError) -> bool {
+    let BlockExecutionError::Validation(validation) = err else {
+        return false;
+    };
+    let message = match validation {
+        BlockValidationError::BlockHashContractCall { message } |
+        BlockValidationError::BeaconRootContractCall { message, .. } |
+        BlockValidationError::WithdrawalRequestsContractCall { message } |
+        BlockValidationError::ConsolidationRequestsContractCall { message } => message.as_str(),
+        // Typed boxes are recovered by `database_cause`; consensus-only variants
+        // never embed an RPC `Display` prefix.
+        _ => return false,
+    };
+    message_carries_rpc_class(message)
 }
 
 /// Process exit status of a `mega-evme` run.
@@ -152,10 +196,18 @@ impl ExitCode {
             EvmeError::BlockBodyTransactionFetch { .. } => Self::RpcFailure,
             // A block error the EVM raised because a state read failed is that
             // read's failure, not an execution result: classify it by its
-            // cause, so an endpoint that died mid-execution still reports the
-            // question as unanswered.
-            EvmeError::BlockExecutionError(err) => database_cause(err)
-                .map_or(Self::ExecutionError, Self::from_evme_error),
+            // cause when the type survives, or by the stable RPC Display
+            // prefixes when mega-evm stringified the failure into a validation
+            // message (pre-block EIP-2935 / EIP-4788 system calls).
+            EvmeError::BlockExecutionError(err) => {
+                if let Some(cause) = database_cause(err) {
+                    Self::from_evme_error(cause)
+                } else if stringified_rpc_failure(err) {
+                    Self::RpcFailure
+                } else {
+                    Self::ExecutionError
+                }
+            }
             // Answered, definitively negative.
             EvmeError::TransactionNotFound(_) |
             EvmeError::BlockNotFound(_) |
@@ -281,6 +333,7 @@ pub fn print_json_error(code: ExitCode, message: &str) {
 mod tests {
     use super::*;
     use alloy_primitives::B256;
+    use mega_evm::alloy_evm::block::BlockValidationError;
 
     /// Every failure class the taxonomy defines keeps its documented code.
     #[test]
@@ -289,6 +342,36 @@ mod tests {
         assert_eq!(ExitCode::ExecutionError.code(), 1);
         assert_eq!(ExitCode::VerificationMismatch.code(), 2);
         assert_eq!(ExitCode::RpcFailure.code(), 3);
+    }
+
+    /// The classifier recovers stringified RPC failures by the same prefixes
+    /// [`EvmeError`]'s `Display` emits — a drift between the two would silently
+    /// reclassify pre-block cache misses as execution errors.
+    #[test]
+    fn test_rpc_display_prefixes_round_trip_with_classifier() {
+        let rpc = EvmeError::RpcError("cache miss in offline replay file".to_string());
+        let rpc_text = rpc.to_string();
+        assert!(
+            rpc_text.starts_with(RPC_ERROR_PREFIX),
+            "RpcError Display must start with RPC_ERROR_PREFIX, got: {rpc_text}"
+        );
+        assert!(message_carries_rpc_class(&rpc_text));
+
+        let transport = EvmeError::RpcTransportError(
+            alloy_provider::transport::TransportErrorKind::custom_str("connection refused"),
+        );
+        let transport_text = transport.to_string();
+        assert!(
+            transport_text.starts_with(RPC_TRANSPORT_ERROR_PREFIX),
+            "RpcTransportError Display must start with RPC_TRANSPORT_ERROR_PREFIX, got: \
+             {transport_text}"
+        );
+        assert!(message_carries_rpc_class(&transport_text));
+
+        // Nested the way mega-evm stringifies a system-call DB failure.
+        let nested = format!("Database error: {rpc_text}");
+        assert!(message_carries_rpc_class(&nested));
+        assert!(!message_carries_rpc_class("failed to apply blockhash contract call: halt"));
     }
 
     /// The `kind` namespace is kebab-case and one name per class.
@@ -379,6 +462,87 @@ mod tests {
             ExitCode::ExecutionError,
             "unexpected class: {err}"
         );
+    }
+
+    /// Pre-block EIP-2935 stringifies the system-call error into
+    /// `BlockHashContractCall { message }`. The typed cause is gone, but the
+    /// message still embeds this crate's RPC Display prefix — classify as
+    /// unanswered, not as an execution rejection.
+    #[test]
+    fn test_stringified_blockhash_contract_call_rpc_failure_maps_to_three() {
+        let message = format!(
+            "Database error: {}",
+            EvmeError::RpcError("Failed to fetch storage for history slot: cache miss".into())
+        );
+        let err = EvmeError::BlockExecutionError(BlockExecutionError::Validation(
+            BlockValidationError::BlockHashContractCall { message },
+        ));
+
+        assert_eq!(
+            ExitCode::from_evme_error(&err),
+            ExitCode::RpcFailure,
+            "unexpected class: {err}"
+        );
+    }
+
+    /// Pre-block EIP-4788 uses the same stringification path with a different
+    /// validation variant; the classifier must treat it the same way.
+    #[test]
+    fn test_stringified_beacon_root_contract_call_rpc_failure_maps_to_three() {
+        let message = format!(
+            "Database error: {}",
+            EvmeError::RpcError("Failed to fetch storage for beacon root: cache miss".into())
+        );
+        let err = EvmeError::BlockExecutionError(BlockExecutionError::Validation(
+            BlockValidationError::BeaconRootContractCall {
+                parent_beacon_block_root: Box::new(B256::ZERO),
+                message,
+            },
+        ));
+
+        assert_eq!(
+            ExitCode::from_evme_error(&err),
+            ExitCode::RpcFailure,
+            "unexpected class: {err}"
+        );
+    }
+
+    /// A pre-block system-call failure that is not an unanswered RPC question
+    /// (for example a genuine EVM halt during the call) stays execution-class.
+    #[test]
+    fn test_stringified_blockhash_contract_call_without_rpc_prefix_maps_to_one() {
+        let err = EvmeError::BlockExecutionError(BlockExecutionError::Validation(
+            BlockValidationError::BlockHashContractCall { message: "OutOfGas".to_string() },
+        ));
+
+        assert_eq!(
+            ExitCode::from_evme_error(&err),
+            ExitCode::ExecutionError,
+            "unexpected class: {err}"
+        );
+    }
+
+    /// Keyless-deploy sandbox DB failures are erased to a selector-only
+    /// `InternalError` inside mega-evm before any message reaches bin-side
+    /// classification. A synthetic stringified sandbox path that still carried
+    /// the RPC Display prefix (as `SandboxDbError` does before that final
+    /// erasure) is classified as RPC when it appears in a message-bearing
+    /// wrapper — pinning the prefix rule used for pre-block recovery.
+    #[test]
+    fn test_stringified_sandbox_style_rpc_prefix_maps_to_three() {
+        // SandboxDbError(e.to_string()) where e is EvmeError::RpcError(...).
+        let sandbox_db_message =
+            EvmeError::RpcError("Failed to fetch account during sandbox read".into()).to_string();
+        assert!(
+            sandbox_db_message.starts_with(RPC_ERROR_PREFIX),
+            "sandbox stringification preserves the RPC prefix: {sandbox_db_message}"
+        );
+        // If that message were embedded in a validation wrapper the same way
+        // pre-block helpers do, classification would recover it.
+        let err = EvmeError::BlockExecutionError(BlockExecutionError::Validation(
+            BlockValidationError::BlockHashContractCall { message: sandbox_db_message },
+        ));
+        assert_eq!(ExitCode::from_evme_error(&err), ExitCode::RpcFailure);
     }
 
     /// A completed run whose replay diverged from the chain exits 2.

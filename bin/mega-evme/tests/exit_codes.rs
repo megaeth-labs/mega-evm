@@ -37,6 +37,23 @@ const UNANSWERABLE_TX: &str = "0x00000000000000000000000000000000000000000000000
 const IN_EXECUTION_STATE_READ: &str =
     "0x0d9aee1b171e0c4a2be0107def891d838cc94d71e4046cb95b00a1c2a61cffed";
 
+/// Request fingerprint of the EIP-2935 history-storage slot the pre-block
+/// system call writes when replaying `TX_OK`'s block.
+///
+/// Dropping this entry makes `apply_pre_execution_changes` fail inside the
+/// blockhash contract call. mega-evm stringifies that database failure into
+/// `BlockHashContractCall { message }`, so classification must recover the RPC
+/// class from the stable `RPC error:` Display prefix rather than from a typed
+/// cause chain.
+const PRE_BLOCK_HISTORY_STORAGE_READ: &str =
+    "0x3abed4482ce079cf23c80a8e43bd75f8ac32b8b108e925b39f0a5c93de4aff48";
+
+/// Request fingerprint of an EIP-4788 beacon-roots storage slot the pre-block
+/// system call touches for the same block — a second stringified validation
+/// path (`BeaconRootContractCall`) with the same recovery rule.
+const PRE_BLOCK_BEACON_ROOT_STORAGE_READ: &str =
+    "0x49e3c5174c528b49897a0556c762d4fb88e1ad5e6aa8f8795ddbc37aa6c278f0";
+
 /// Outcome of one `mega-evme` invocation.
 struct Run {
     code: Option<i32>,
@@ -329,6 +346,76 @@ fn test_state_read_failure_during_execution_is_an_rpc_failure() {
         batch.stdout.contains("Error (rpc):"),
         "the target is reported as unanswered:\n{}",
         batch.stdout
+    );
+}
+
+/// A cache miss during the pre-block EIP-2935 blockhash system call is an
+/// unanswered RPC question even though mega-evm stringifies it into
+/// `BlockHashContractCall { message }` before the exit classifier sees it.
+///
+/// Without prefix recovery this lands as exit 1 / `execution-error`; with it,
+/// single-run and batch both report the RPC class (exit 3).
+#[test]
+fn test_pre_block_blockhash_system_call_cache_miss_is_an_rpc_failure() {
+    let path = cache_without_entry("pre_block_2935", PRE_BLOCK_HISTORY_STORAGE_READ);
+    let cache = path.to_str().unwrap();
+
+    let single = run(&["replay", "--rpc.replay-file", cache, "--json", TX_OK]);
+    assert_eq!(
+        single.code(),
+        3,
+        "a pre-block history-storage miss exits 3 (was exit 1 before stringified-RPC recovery).\n\
+         stderr: {}",
+        single.stderr
+    );
+    let error = single.error_object();
+    assert_eq!(error["error"]["code"].as_u64(), Some(3));
+    assert_eq!(error["error"]["kind"].as_str(), Some("rpc-failure"));
+    let message = error["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("blockhash contract call") &&
+            message.contains("RPC error:") &&
+            message.contains("cache miss"),
+        "the message must name the stringified pre-block path and the miss: {error}"
+    );
+
+    let list = tx_file("pre_block_2935", &format!("{TX_OK}\n"));
+    let batch = run(&["replay", "--rpc.replay-file", cache, "--tx-file", list.to_str().unwrap()]);
+    let _ = std::fs::remove_file(&list);
+    let _ = std::fs::remove_file(&path);
+
+    assert_eq!(batch.code(), 3, "the batch run exits 3 too.\nstderr: {}", batch.stderr);
+    assert!(
+        batch.stdout.contains("Error (rpc):"),
+        "the target is reported as unanswered:\n{}",
+        batch.stdout
+    );
+}
+
+/// Same recovery for the EIP-4788 beacon-root pre-block system call, which uses
+/// `BeaconRootContractCall { message }` rather than the blockhash variant.
+#[test]
+fn test_pre_block_beacon_root_system_call_cache_miss_is_an_rpc_failure() {
+    let path = cache_without_entry("pre_block_4788", PRE_BLOCK_BEACON_ROOT_STORAGE_READ);
+    let cache = path.to_str().unwrap();
+
+    let single = run(&["replay", "--rpc.replay-file", cache, "--json", TX_OK]);
+    let _ = std::fs::remove_file(&path);
+
+    assert_eq!(
+        single.code(),
+        3,
+        "a pre-block beacon-root miss exits 3.\nstderr: {}",
+        single.stderr
+    );
+    let error = single.error_object();
+    assert_eq!(error["error"]["kind"].as_str(), Some("rpc-failure"));
+    let message = error["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("beacon root contract call") &&
+            message.contains("RPC error:") &&
+            message.contains("cache miss"),
+        "the message must name the stringified beacon-root path and the miss: {error}"
     );
 }
 
