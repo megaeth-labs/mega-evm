@@ -415,8 +415,14 @@ async fn test_build_provider_clear_cache_fails_closed_when_lock_unacquirable() {
     ]);
 
     let err = args.build_provider().await.expect_err("clear-cache must fail closed on lock");
+    assert_eq!(
+        ExitCode::from_evme_error(&err),
+        ExitCode::ExecutionError,
+        "a local lock failure is not the endpoint's fault: retrying or switching \
+         the RPC cannot fix it, so it must not classify as an rpc failure",
+    );
     match err {
-        EvmeError::RpcError(msg) => {
+        EvmeError::InvalidInput(msg) => {
             assert!(msg.contains("lock"), "error must name the lock failure, got: {msg}");
             assert!(
                 msg.contains("rpc-cache-77.json.lock") || msg.contains(".lock"),
@@ -427,7 +433,7 @@ async fn test_build_provider_clear_cache_fails_closed_when_lock_unacquirable() {
                 "error must state the clear was refused, got: {msg}",
             );
         }
-        other => panic!("expected EvmeError::RpcError, got {other:?}"),
+        other => panic!("expected EvmeError::InvalidInput, got {other:?}"),
     }
     assert_eq!(
         std::fs::read_to_string(&cache_file).expect("file still readable"),
@@ -488,14 +494,20 @@ async fn test_build_provider_clear_cache_hard_errors_on_unlink_failure() {
     std::fs::set_permissions(dir.path(), orig_perms).expect("chmod restore");
 
     let err = result.expect_err("clear-cache must hard-error on unlink failure");
+    assert_eq!(
+        ExitCode::from_evme_error(&err),
+        ExitCode::ExecutionError,
+        "a local unlink failure is not the endpoint's fault: retrying or switching \
+         the RPC cannot fix it, so it must not classify as an rpc failure",
+    );
     match err {
-        EvmeError::RpcError(msg) => {
+        EvmeError::InvalidInput(msg) => {
             assert!(
                 msg.contains("Failed to clear RPC cache"),
                 "error must name the failed operation, got: {msg}",
             );
         }
-        other => panic!("expected EvmeError::RpcError, got {other:?}"),
+        other => panic!("expected EvmeError::InvalidInput, got {other:?}"),
     }
     assert!(cache_file.exists(), "the cache file should still be on disk — unlink failed");
 }

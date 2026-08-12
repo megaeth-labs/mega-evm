@@ -223,6 +223,7 @@ A batch scan walks linear history whose request keys essentially never repeat ac
 Two flags ask for it: `--rpc.cache-dir`, which names the file to use, and `--rpc.clear-cache`, which asks for that file to be deleted.
 Clearing only means something while the disk cache is engaged, so a batch run that forced the cache off would parse the recovery flag, do nothing, and leave the polluted file in place for the next run.
 With `--rpc.clear-cache`, a batch run deletes the cache file under the sidecar lock, starts from an empty cache, and persists on exit — the same sequence as single-transaction mode.
+A clear that fails locally — the sidecar lock cannot be acquired, or the file cannot be unlinked — is an execution-class failure (exit `1`), not an RPC failure: retrying or switching the endpoint cannot fix the local filesystem.
 An explicit `--rpc.no-cache-file` still wins over both flags.
 
 ### Concurrent cache-dir sharing

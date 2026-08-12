@@ -211,9 +211,15 @@ impl RpcArgs {
                 // returns; clean-exit `RpcCacheStore::persist` acquires later.
                 // The two critical sections never overlap in one process, so
                 // clear cannot deadlock against its own later persist.
+                // Local filesystem failures below are the operator's
+                // environment refusing the requested operation — retrying or
+                // switching the endpoint cannot fix them, so they classify as
+                // execution-class input failures (exit 1), not as the endpoint
+                // failing to answer (exit 3). Same class as `cache merge`'s
+                // lock failure.
                 let clear_lock = if self.clear_cache {
                     Some(acquire_exclusive_lock(&path).map_err(|e| {
-                        EvmeError::RpcError(format!(
+                        EvmeError::InvalidInput(format!(
                             "Failed to acquire the cache lock {} for clear-cache of {}: {e}. \
                              Refusing to clear without it: a concurrent writer could race \
                              the unlink and silently recreate or rely on the file.",
@@ -227,7 +233,7 @@ impl RpcArgs {
                 if self.clear_cache {
                     if let Err(e) = fs::remove_file(&path) {
                         if e.kind() != std::io::ErrorKind::NotFound {
-                            return Err(EvmeError::RpcError(format!(
+                            return Err(EvmeError::InvalidInput(format!(
                                 "Failed to clear RPC cache at {}: {e}",
                                 path.display(),
                             )));
