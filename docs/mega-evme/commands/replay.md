@@ -380,6 +380,7 @@ The fixture still self-validates and reproduces gas exactly; only such balance-d
 A target transaction that reads a block hash via `BLOCKHASH` is also rejected: fixtures carry no historical block hashes, so the isolated re-execution could not reproduce the values the replay observed.
 Block hash reads by preceding transactions in the same block do not matter — only the target transaction's reads are checked.
 Because the fidelity gate reads the receipt, an offline dump (`--rpc.replay-file`) requires the receipt to be present in the capture — so capture and dump together in the online run, then re-dump offline reproducibly.
+A receipt the endpoint does not serve — no receipt at all, or one describing a different inclusion than the replayed block — is classified exactly as under [`--verify-receipt`](#--verify-receipt): an RPC failure (exit `3`), because the question went unanswered rather than answered no.
 When combined with `--rpc.capture-file`, the capture file is written even if execution or the fidelity gate fails, so the captured RPC responses remain available for debugging the failure offline.
 
 ```bash

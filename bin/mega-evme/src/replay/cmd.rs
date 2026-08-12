@@ -793,8 +793,9 @@ impl Cmd {
         // self-validation alone cannot catch.
         let fixture_inputs = if self.dump_fixture.is_some() {
             // A pending transaction has no receipt yet, so the fidelity gate cannot
-            // run; fail clearly instead of surfacing the receipt lookup's confusing
-            // `TransactionNotFound`.
+            // run; fail clearly here, where the missing receipt is a definitive
+            // property of the target, instead of surfacing the receipt lookup's
+            // infrastructure-class failure, which would invite a pointless retry.
             if ctx.target_tx.block_number.is_none() {
                 return Err(ReplayError::Other(
                     "--dump-fixture does not support pending transactions: the fidelity \
@@ -811,18 +812,22 @@ impl Cmd {
             let mut oracle_storage = external_envs.oracle_storage();
             oracle_storage.sort_unstable();
             let mega_env = state_test::types::MegaEnv { bucket_capacities, oracle_storage };
-            let receipt = provider
-                .get_transaction_receipt(ctx.tx_hash)
-                .await
-                .map_err(|e| ReplayError::RpcError(format!("RPC transport error: {e}")))?
-                .ok_or(ReplayError::TransactionNotFound(ctx.tx_hash))?;
+            // Fetched through the same helper `--verify-receipt` uses, so both
+            // modes classify an unserved receipt identically. A null answer for a
+            // target this run has already resolved as mined is the endpoint
+            // failing to answer — a pruned receipt, or a backend serving a
+            // divergent view — not a definitive statement that the transaction
+            // does not exist, so it is a retryable infrastructure failure rather
+            // than an execution verdict.
+            let receipt = verify::fetch_receipt(provider, ctx.tx_hash).await?;
             // Anchor the receipt to the replayed block: across a reorg or a
             // load-balanced endpoint serving divergent views, the receipt can
             // describe a different inclusion than the block fetched earlier
-            // (including a receipt with `blockHash: null`). Same check as
-            // `--verify-receipt` so dump and verify agree on unanchored receipts.
+            // (including a receipt with `blockHash: null`). Same check and same
+            // failure class as `--verify-receipt`, so dump and verify agree on
+            // unanchored receipts.
             verify::check_inclusion(receipt.block_hash(), ctx.block.hash())
-                .map_err(ReplayError::Other)?;
+                .map_err(ReplayError::RpcError)?;
             // RLP-hash the receipt's logs with the same helper the state-test
             // runner uses for `logsRoot`, so the dump can check the replay's logs
             // against the chain (the rich RPC logs' `inner` is the consensus log).
