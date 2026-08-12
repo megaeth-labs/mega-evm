@@ -594,6 +594,22 @@ impl Cmd {
         // one view under a block environment from another. The pending path
         // therefore fetches once and uses the same block for both roles, so the
         // two roles cannot disagree at all.
+        // Both heights below come from the endpoint's own answers — the target's
+        // inclusion metadata for a mined transaction, the reported latest height
+        // for a pending one — so a null block is the endpoint contradicting
+        // itself (a reorg in progress, or a load-balanced endpoint serving
+        // divergent views), not a definitive "unknown block". `BlockNotFound`
+        // (exit 1) stays reserved for user-supplied heights, where the null is
+        // the answer; here the same context is an infrastructure failure
+        // (exit 3), matching the batch path's classification.
+        let missing_resolved_block = |number: u64| {
+            ReplayError::RpcError(format!(
+                "endpoint did not serve block {number}, which it itself resolved (the target's \
+                 inclusion metadata, or its reported latest height): the endpoint served \
+                 divergent views (reorg in progress, or a load-balanced endpoint); retry once \
+                 the chain settles"
+            ))
+        };
         let parent_block = if is_pending {
             None
         } else {
@@ -602,14 +618,14 @@ impl Cmd {
                     .get_block_by_number(state_base_block.into())
                     .await
                     .map_err(|e| ReplayError::RpcError(format!("RPC transport error: {e}")))?
-                    .ok_or(ReplayError::BlockNotFound(state_base_block))?,
+                    .ok_or_else(|| missing_resolved_block(state_base_block))?,
             )
         };
         let block = provider
             .get_block_by_number(block_number.into())
             .await
             .map_err(|e| ReplayError::RpcError(format!("RPC transport error: {e}")))?
-            .ok_or(ReplayError::BlockNotFound(block_number))?;
+            .ok_or_else(|| missing_resolved_block(block_number))?;
         let parent_block = parent_block.unwrap_or_else(|| block.clone());
 
         // Parent/block linkage guard: the two blocks above were fetched by

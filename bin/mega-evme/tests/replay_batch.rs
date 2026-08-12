@@ -294,6 +294,41 @@ fn envelope_with_reassigned_sender(name: &str, tx_hash: &str) -> std::path::Path
     path
 }
 
+/// Write a copy of the envelope whose `eth_getBlockByNumber` answer for block
+/// `number` is null, and return its path.
+///
+/// The height was resolved by the endpoint's own answers (the target's
+/// inclusion metadata names the block, whose parent must then exist), so the
+/// null models an endpoint contradicting itself across a reorg or divergent
+/// load-balanced views — not a user asking about an unknown height.
+fn envelope_without_block(name: &str, number: u64) -> std::path::PathBuf {
+    let mut envelope: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(envelope()).expect("read envelope"))
+            .expect("parse envelope");
+    let number_hex = format!("0x{number:x}");
+    let mut doctored = 0;
+    for entry in envelope["cache"].as_array_mut().expect("cache entries").iter_mut() {
+        let value = entry["value"].as_str().expect("entry value is a string");
+        if !value.contains("\"transactions\"") {
+            continue;
+        }
+        let mut response: serde_json::Value =
+            serde_json::from_str(value).expect("parse block response");
+        if response["result"]["number"].as_str() != Some(number_hex.as_str()) {
+            continue;
+        }
+        response["result"] = serde_json::Value::Null;
+        entry["value"] = serde_json::Value::String(response.to_string());
+        doctored += 1;
+    }
+    assert_eq!(doctored, 1, "the envelope must hold exactly one header for block {number}");
+
+    let path =
+        std::env::temp_dir().join(format!("mega_evme_batch_{name}_{}.json", std::process::id()));
+    std::fs::write(&path, envelope.to_string()).expect("write doctored envelope");
+    path
+}
+
 /// Write a copy of the envelope whose header for block `number` advertises
 /// `gas_limit`, and return its path.
 ///
@@ -870,6 +905,48 @@ fn test_replay_single_transaction_tampered_preceding_fails_authentication() {
             message.contains(tampered) &&
             message.contains("served a different transaction"),
         "the failure must name the tampered body-listed fetch: {message}"
+    );
+}
+
+/// A parent block the endpoint itself resolved — the target claims inclusion
+/// in its child — answering null is an endpoint self-contradiction: a
+/// retryable infrastructure failure (exit 3, matching the batch path), not a
+/// definitive exit-1 "block not found".
+#[test]
+fn test_replay_single_transaction_null_resolved_parent_is_an_rpc_failure() {
+    let (target, _) = BLOCK_TXS[1];
+    let path = envelope_without_block("single_null_parent", BLOCK - 1);
+
+    let (stdout, code) = replay_envelope_with_code(&path, &["--json", target]);
+    let _ = std::fs::remove_file(&path);
+
+    assert_eq!(code, Some(3), "a null resolved parent exits 3: {stdout}");
+    let error = single_run_error(&stdout);
+    assert_eq!(error["error"]["kind"].as_str(), Some("rpc-failure"));
+    let message = error["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("divergent views") && message.contains(&(BLOCK - 1).to_string()),
+        "the failure must name the divergent view and the block: {message}"
+    );
+}
+
+/// The replayed block itself answering null after the target's metadata named
+/// it is the same self-contradiction as a null parent: exit 3, not exit 1.
+#[test]
+fn test_replay_single_transaction_null_resolved_block_is_an_rpc_failure() {
+    let (target, _) = BLOCK_TXS[1];
+    let path = envelope_without_block("single_null_block", BLOCK);
+
+    let (stdout, code) = replay_envelope_with_code(&path, &["--json", target]);
+    let _ = std::fs::remove_file(&path);
+
+    assert_eq!(code, Some(3), "a null resolved block exits 3: {stdout}");
+    let error = single_run_error(&stdout);
+    assert_eq!(error["error"]["kind"].as_str(), Some("rpc-failure"));
+    let message = error["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("divergent views") && message.contains(&BLOCK.to_string()),
+        "the failure must name the divergent view and the block: {message}"
     );
 }
 
