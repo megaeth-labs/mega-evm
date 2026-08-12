@@ -1,10 +1,16 @@
-//! Integration tests for the pending-transaction single-transaction replay path.
+//! Integration tests for the pending-transaction single-transaction replay path
+//! and for the target-metadata classification that decides who enters it.
 //!
 //! A pending target has no parent/block pair: its state base *is* the latest
 //! block, which is also the block it is replayed in. The two roles must
 //! therefore be filled by one and the same block, and these tests pin that from
 //! outside the process — an endpoint that changes its answer between two calls
 //! at the same height must not be able to produce a mixed-view replay.
+//!
+//! Only a target reporting neither a block number nor an inclusion hash is
+//! pending. The other `(block_number, block_hash)` shapes are classified from the
+//! metadata alone, before any block is fetched, and these tests pin that too by
+//! counting the requests the endpoint receives.
 //!
 //! They run against a mock JSON-RPC endpoint rather than a recorded capture. An
 //! offline capture cannot represent this case at all: identical requests are
@@ -87,9 +93,10 @@ fn block_json(hash: &str, parent_hash: &str) -> Value {
     })
 }
 
-/// The replayed transaction, reported as pending: no block number and no
-/// inclusion hash.
-fn pending_tx_json() -> Value {
+/// The replayed transaction, carrying the `(blockNumber, blockHash)` pair the
+/// endpoint reports for it. Everything else is the same transaction, so a test
+/// varies only the metadata the classification reads.
+fn tx_json(block_number: Value, block_hash: Value) -> Value {
     json!({
         "type": "0x2",
         "chainId": format!("0x{CHAIN_ID:x}"),
@@ -108,19 +115,32 @@ fn pending_tx_json() -> Value {
         "v": "0x0",
         "hash": TX_HASH,
         "from": SENDER,
-        "blockHash": Value::Null,
-        "blockNumber": Value::Null,
+        "blockHash": block_hash,
+        "blockNumber": block_number,
         "transactionIndex": Value::Null,
     })
+}
+
+/// The replayed transaction, reported as pending: no block number and no
+/// inclusion hash.
+fn pending_tx_json() -> Value {
+    tx_json(Value::Null, Value::Null)
 }
 
 /// A mock endpoint holding one pending transaction, whose `latest` height is
 /// answered with [`LATEST_HASH`] once and with [`REPLACEMENT_HASH`] from the
 /// second call on.
+async fn mock_chain() -> MockRpcServer {
+    mock_chain_serving(pending_tx_json()).await
+}
+
+/// A mock endpoint that resolves the target to `tx`, and otherwise behaves like
+/// [`mock_chain`]: the `latest` height is answered with [`LATEST_HASH`] once and
+/// with [`REPLACEMENT_HASH`] from the second call on.
 ///
 /// Account reads are answered blanket: every account holds 1 ETH, has nonce 0,
 /// no code, and zero storage.
-async fn mock_chain() -> MockRpcServer {
+async fn mock_chain_serving(tx: Value) -> MockRpcServer {
     let server = MockRpcServer::start().await;
     server.respond_eth_chain_id(CHAIN_ID, 1).await;
     server.respond_method_result("eth_blockNumber", &format!("0x{LATEST:x}"), 2).await;
@@ -140,7 +160,7 @@ async fn mock_chain() -> MockRpcServer {
             3,
         )
         .await;
-    server.respond_method_json("eth_getTransactionByHash", pending_tx_json(), 3).await;
+    server.respond_method_json("eth_getTransactionByHash", tx, 3).await;
     server.respond_method_result("eth_getBalance", "0xde0b6b3a7640000", 4).await;
     server.respond_method_result("eth_getTransactionCount", "0x0", 4).await;
     server.respond_method_result("eth_getCode", "0x", 4).await;
@@ -176,6 +196,19 @@ impl Run {
             self.stderr,
         );
         values.pop().expect("checked above")
+    }
+
+    /// The structured error object a failing `--json` run ends with.
+    fn error_object(&self) -> Value {
+        let values = common::json_values(&self.stdout);
+        let last = values.last().unwrap_or_else(|| {
+            panic!("a failing --json run must not leave stdout empty:\nstderr:\n{}", self.stderr)
+        });
+        assert!(
+            common::is_run_error(last),
+            "the last stdout value must be the error object, got: {last}"
+        );
+        last.clone()
     }
 }
 
@@ -240,5 +273,90 @@ async fn test_pending_replay_executes_against_the_latest_block() {
         summary["receipt"]["transactionHash"].as_str(),
         Some(TX_HASH),
         "the receipt must describe the replayed transaction: {summary}",
+    );
+}
+
+/// An inclusion hash paired with a null block number is contradictory metadata,
+/// not a pending transaction: the hash proves inclusion while the null number
+/// denies it. The run answers that from the metadata alone — exit 3 without a
+/// single block fetch — rather than reading the null number as "pending",
+/// skipping every inclusion and body guard, and replaying the target against
+/// latest with exit 0.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_inclusion_hash_without_a_block_number_is_rejected_before_any_fetch() {
+    const INCLUSION: &str = "0x5555555555555555555555555555555555555555555555555555555555555555";
+
+    let server = mock_chain_serving(tx_json(Value::Null, json!(INCLUSION))).await;
+
+    let run = replay(&server);
+
+    assert_eq!(
+        run.code,
+        Some(3),
+        "contradictory metadata exits 3.\nstdout:\n{}\nstderr:\n{}",
+        run.stdout,
+        run.stderr,
+    );
+    assert_eq!(
+        server.received_method_count("eth_getBlockByNumber").await,
+        0,
+        "the verdict must precede every block fetch:\n{}",
+        run.stdout,
+    );
+    assert_eq!(
+        server.received_method_count("eth_blockNumber").await,
+        0,
+        "the verdict must precede the latest-height lookup too:\n{}",
+        run.stdout,
+    );
+    let error = run.error_object();
+    assert_eq!(error["error"]["code"].as_u64(), Some(3));
+    assert_eq!(error["error"]["kind"].as_str(), Some("rpc-failure"));
+    let message = error["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains(INCLUSION) && message.contains("contradictory metadata"),
+        "the message must name the hash and the contradiction: {error}"
+    );
+    assert!(
+        !run.stdout.contains("\"success\""),
+        "the run must not produce an execution summary:\n{}",
+        run.stdout,
+    );
+}
+
+/// A block number paired with a null inclusion hash is an unanchored view: the
+/// number alone cannot prove which block body the target belongs to. The run
+/// answers that from the metadata alone — exit 3 without a single block fetch —
+/// so neither a missing block nor a broken parent linkage can mask it.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_mined_target_without_an_inclusion_hash_is_rejected_before_any_fetch() {
+    let server = mock_chain_serving(tx_json(json!(format!("0x{LATEST:x}")), Value::Null)).await;
+
+    let run = replay(&server);
+
+    assert_eq!(
+        run.code,
+        Some(3),
+        "an unanchored view exits 3.\nstdout:\n{}\nstderr:\n{}",
+        run.stdout,
+        run.stderr,
+    );
+    assert_eq!(
+        server.received_method_count("eth_getBlockByNumber").await,
+        0,
+        "the verdict must precede every block fetch:\n{}",
+        run.stdout,
+    );
+    let error = run.error_object();
+    assert_eq!(error["error"]["code"].as_u64(), Some(3));
+    assert_eq!(error["error"]["kind"].as_str(), Some("rpc-failure"));
+    let message = error["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("inclusion hash") && message.contains("unanchored"),
+        "the message must name the unanchored view: {error}"
+    );
+    assert!(
+        message.contains(&LATEST.to_string()),
+        "the message must name the block number the lookup reported: {error}"
     );
 }
