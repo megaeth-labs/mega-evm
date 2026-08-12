@@ -503,15 +503,28 @@ When the crossing opcode would exhaust both the true remaining EVM gas and the c
 #### Exceptional-halt frame carve-out
 
 A frame that ends in an exceptional halt — ordinary out-of-gas, memory out-of-gas, stack underflow or overflow, invalid jump, unknown opcode, and every other error result — returns none of its remaining budget.
-A node MUST settle that entire burned remainder as compute gas at frame exit: the open plain-opcode segment measured against a zero remainder, plus any gas the clamp was hiding.
-The rule is driven by the halt classification rather than by the interpreter's own counter, which an inherited EVM zeroes for ordinary out-of-gas only.
-Under per-opcode recording through Rex6 neither the failing opcode nor the burn is attributed to compute gas, so a transaction that halts exceptionally, or that contains an inner call frame which does, MAY report a strictly higher compute-gas total under Rex7 while EVM gas and the receipt remain identical.
+A node MUST settle that whole budget as compute gas, split into two parts that are accounted differently:
 
-A node MUST NOT evaluate any resource limit against the burned remainder: it is bounded by the sender's gas envelope rather than by the compute limit, and halting on it would rescue gas the EVM already burned and change the receipt this carve-out requires to stay identical.
-The usage a limit is evaluated against therefore excludes the burn, while the reported compute-gas total and the block-level compute accounting include it.
-Nothing is lost by the exclusion: the executed part of an exceptionally halted frame's tail is bounded either by the clamp or by a frame gas remainder that was already below the headroom.
+- **Executed** — the open plain-opcode segment, measured as the interpreter-gas delta since the previous checkpoint, less any storage gas a checkpoint body charged before aborting. This is work the network performed, and a node MUST record it through the ordinary path: it counts toward the transaction's reported total **and** toward the usage every resource limit is evaluated against, exactly as the same opcodes would if the frame had returned normally.
+- **Destroyed** — whatever the frame still held when its result became final, including any gas the clamp was hiding. A node MUST record it in the reported compute-gas total and in block-level compute accounting, and MUST NOT evaluate any resource limit against it.
 
-A clamp-induced out-of-gas is not an exceptional halt for this rule — the crossing opcode never executed and the remaining gas is rescued rather than burned.
+The destroyed part is bounded by the sender's gas envelope rather than by the compute limit, and halting on it would rescue gas the EVM already destroyed and change the receipt this carve-out requires to stay identical.
+The executed part carries no such problem: it is work, and leaving it out of enforcement would let a frame that keeps executing after absorbing a failed child spend the same compute headroom a second time.
+
+The split MUST be driven by the halt classification rather than by the interpreter's own counter, which an inherited EVM zeroes for ordinary out-of-gas only.
+That zeroing has one consequence a node MUST accept: for an ordinary out-of-gas taken with no clamp in force, the counter is already zero when the frame exits, so the whole segment measures as executed and is enforced in full.
+A node MUST NOT try to recover the split in that case.
+It is the one shape where Rex7 enforcement is stricter than per-opcode enforcement through Rex6, which attributes the failing opcode to neither part.
+
+A node MUST take the split from the frame's **final** result, after the create-return processing that can still turn a successful constructor into a canonical code-deposit out-of-gas, an EIP-3541 reject or a runtime code-size reject.
+Each of those destroys the frame's remainder just as a halt from the interpreter loop does.
+
+Under per-opcode recording through Rex6 neither the failing opcode nor the destroyed remainder is attributed to compute gas, so a transaction that halts exceptionally, or that contains an inner call frame which does, MAY report a strictly higher compute-gas total under Rex7 while EVM gas and the receipt remain identical.
+
+A clamp-induced out-of-gas is not an exceptional halt for this rule — the crossing opcode never executed and the remaining gas is rescued rather than destroyed.
+A frame whose exit latches a resource-limit exceed destroys nothing either: it reverts to its parent (frame-local) or halts the transaction with its gas rescued (transaction-level).
+
+When a nested execution merges its usage into an outer one — the [KeylessDeploy](../system-contracts/keyless-deploy.md) sandbox is the only such boundary — a node MUST carry the split across it, reporting the inner total in full while enforcing only the executed part.
 
 </details>
 
