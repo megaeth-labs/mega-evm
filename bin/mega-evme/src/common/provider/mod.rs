@@ -39,6 +39,7 @@ use self::{
     transport::{CachingTransport, ReplayTransport, TransportCache},
 };
 use super::{EvmeError, Result};
+use crate::cache::{acquire_exclusive_lock, lock_sidecar_path};
 
 /// OP-stack provider type used throughout mega-evme.
 pub type OpProvider = DynProvider<op_alloy_network::Optimism>;
@@ -192,6 +193,21 @@ impl RpcArgs {
         let cache_store = match cache_path {
             Some(path) => {
                 if self.clear_cache {
+                    // Same sidecar lock as persist / `cache merge`: without it a
+                    // writer mid re-read-merge-rename can land after the unlink
+                    // (undoing the clear), or the clear can delete a file the
+                    // locked writer just re-read. Fail closed if the lock cannot
+                    // be acquired — the user asked for a deletion that is not
+                    // safe to do unlocked.
+                    let _clear_lock = acquire_exclusive_lock(&path).map_err(|e| {
+                        EvmeError::RpcError(format!(
+                            "Failed to acquire the cache lock {} for clear-cache of {}: {e}. \
+                             Refusing to clear without it: a concurrent writer could race \
+                             the unlink and silently recreate or rely on the file.",
+                            lock_sidecar_path(&path).display(),
+                            path.display(),
+                        ))
+                    })?;
                     if let Err(e) = fs::remove_file(&path) {
                         if e.kind() != std::io::ErrorKind::NotFound {
                             return Err(EvmeError::RpcError(format!(
@@ -202,6 +218,7 @@ impl RpcArgs {
                     } else {
                         info!(path = %path.display(), "Cleared existing RPC cache");
                     }
+                    // Lock released on drop before load / provider build continue.
                 }
                 if let Some(parent) = path.parent() {
                     if let Err(e) = fs::create_dir_all(parent) {

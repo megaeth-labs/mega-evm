@@ -15,15 +15,16 @@ use crate::common::{EvmeError, Result};
 pub(crate) use lock::{acquire_exclusive_lock, lock_sidecar_path};
 pub(crate) use merge::{
     merge_envelope_for_persist, merge_provider_entries_capped, merge_provider_lists,
-    parse_rpc_cache_filename_chain_id, read_provider_cache, reread_envelope_for_merge,
+    parse_rpc_cache_filename_chain_id, reread_envelope_for_merge, reread_provider_cache_for_merge,
     write_bytes_atomic, write_envelope_atomic, write_provider_cache_atomic, CacheKv, EnvelopeDoc,
-    EnvelopeReread, ExternalEnvDoc, ENVELOPE_VERSION,
+    EnvelopeReread, ExternalEnvDoc, ProviderReread, ENVELOPE_VERSION,
 };
 
-use merge::{
-    fold_output_envelope, load_cache_file, merge_envelopes_cli, reread_provider_cache_for_merge,
-    CacheShape, LoadedCache, ProviderReread,
-};
+// Used by unit tests that assert the provider-array on-disk shape after a merge.
+#[cfg(test)]
+pub(crate) use merge::read_provider_cache;
+
+use merge::{fold_output_envelope, load_cache_file, merge_envelopes_cli, CacheShape, LoadedCache};
 use tracing::warn;
 
 /// `mega-evme cache` — offline cache-file utilities.
@@ -62,8 +63,9 @@ impl Cmd {
     }
 }
 
-/// Emit a diagnostic that protects the user from a silently wrong merge, on
-/// stderr unconditionally and through the structured log sinks.
+/// Emit a diagnostic that protects the user from a silently wrong merge or
+/// persist decision, on stderr unconditionally and through the structured log
+/// sinks.
 ///
 /// The CLI leaves the tracing filter at `off` unless `-v` flags or `RUST_LOG`
 /// raise it, so a `warn!`-only diagnostic reaches nobody on a default command
@@ -76,7 +78,7 @@ impl Cmd {
 ///
 /// Reserved for warnings a user must act on; ordinary progress reporting stays
 /// on `tracing` alone.
-fn warn_user(message: fmt::Arguments<'_>) {
+pub(crate) fn warn_user(message: fmt::Arguments<'_>) {
     eprintln!("warning: {message}");
     warn!("{message}");
 }

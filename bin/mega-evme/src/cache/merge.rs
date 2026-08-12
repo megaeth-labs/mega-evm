@@ -173,6 +173,11 @@ pub(crate) fn detect_shape(value: &serde_json::Value, path: &Path) -> Result<Cac
 /// Read and parse a provider-cache file (JSON array). Missing file → empty vec.
 ///
 /// Corrupt / unreadable content returns `Err` so callers can degrade or hard-fail.
+///
+/// Production writers use [`reread_provider_cache_for_merge`] (typed hard vs
+/// degradable). This helper remains for tests and call sites that only need the
+/// provider-array parse and treat any other shape as an error.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn read_provider_cache(path: &Path) -> Result<Vec<CacheKv>> {
     if !path.exists() {
         return Ok(Vec::new());
