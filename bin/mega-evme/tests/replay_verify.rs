@@ -374,10 +374,11 @@ fn test_batch_verify_receipt_reports_a_mismatch_and_exits_nonzero() {
     );
 }
 
-/// In batch mode an unavailable receipt turns the target into an `rpc` error
-/// entry — reported as unverified, never as a mismatch.
+/// In batch mode an unavailable receipt keeps the replayed result line and
+/// reports the failure on `verification.error` — never as a mismatch, and never
+/// by discarding the execution summary.
 #[test]
-fn test_batch_verify_receipt_missing_receipt_is_an_rpc_error_entry() {
+fn test_batch_verify_receipt_missing_receipt_keeps_result_and_is_rpc() {
     let path = cache_without_receipt("batch_pruned");
     let list = tx_file("batch_pruned");
 
@@ -388,8 +389,24 @@ fn test_batch_verify_receipt_missing_receipt_is_an_rpc_error_entry() {
     assert_eq!(run.code(), 3, "an unverified target exits 3.\nstderr: {}", run.stderr);
     let lines = run.ndjson();
     assert_eq!(lines.len(), 1, "one line per requested transaction");
-    assert_eq!(lines[0]["error"]["kind"].as_str(), Some("rpc"));
-    assert!(lines[0].get("verification").is_none(), "an unverified target carries no verdict");
+    assert!(
+        lines[0].get("error").is_none(),
+        "a replayed target keeps its result line, not a bare error entry: {}",
+        lines[0]
+    );
+    assert!(lines[0]["receipt"].is_object(), "local receipt is kept: {}", lines[0]);
+    assert_eq!(lines[0]["success"].as_bool(), Some(true));
+    assert_eq!(lines[0]["gas_used"].as_u64(), Some(GAS_USED));
+    assert!(
+        lines[0]["verification"]["error"].is_string(),
+        "verification carries the unanswered receipt: {}",
+        lines[0]
+    );
+    assert!(
+        lines[0]["verification"].get("match").is_none(),
+        "unavailable is not a match/mismatch verdict: {}",
+        lines[0]
+    );
     assert_eq!(run.error_object()["error"]["kind"].as_str(), Some("rpc-failure"));
     assert!(
         !run.stderr.contains("verification mismatch"),
@@ -398,9 +415,10 @@ fn test_batch_verify_receipt_missing_receipt_is_an_rpc_error_entry() {
     );
 }
 
-/// The reorg guard applies in batch mode too, as an `rpc` error entry.
+/// The reorg guard applies in batch mode too: the result is kept and the
+/// divergent-inclusion failure is reported on `verification.error`.
 #[test]
-fn test_batch_verify_receipt_reorg_is_an_rpc_error_entry() {
+fn test_batch_verify_receipt_reorg_keeps_result_and_is_rpc() {
     let path = doctored_cache("batch_reorg", |receipt| {
         receipt["blockHash"] =
             "0x1111111111111111111111111111111111111111111111111111111111111111".into();
@@ -413,9 +431,9 @@ fn test_batch_verify_receipt_reorg_is_an_rpc_error_entry() {
 
     assert_eq!(run.code(), 3, "an unverified target exits 3.\nstderr: {}", run.stderr);
     let lines = run.ndjson();
-    assert_eq!(lines[0]["error"]["kind"].as_str(), Some("rpc"));
+    assert!(lines[0].get("error").is_none(), "result line is kept: {}", lines[0]);
     assert!(
-        lines[0]["error"]["message"]
+        lines[0]["verification"]["error"]
             .as_str()
             .is_some_and(|message| message.contains("different inclusion")),
         "expected the reorg/divergent-endpoint hint: {}",
@@ -449,9 +467,10 @@ fn test_verify_receipt_null_block_hash_is_an_infrastructure_error() {
     );
 }
 
-/// Batch mode reports a null `blockHash` as an `rpc` error entry.
+/// Batch mode reports a null `blockHash` on the kept result line as
+/// `verification.error` (rpc), not as a bare error entry.
 #[test]
-fn test_batch_verify_receipt_null_block_hash_is_an_rpc_error_entry() {
+fn test_batch_verify_receipt_null_block_hash_keeps_result_and_is_rpc() {
     let path = doctored_cache("batch_null_block_hash", |receipt| {
         receipt["blockHash"] = serde_json::Value::Null;
     });
@@ -463,15 +482,164 @@ fn test_batch_verify_receipt_null_block_hash_is_an_rpc_error_entry() {
 
     assert_eq!(run.code(), 3, "an unverified target exits 3.\nstderr: {}", run.stderr);
     let lines = run.ndjson();
-    assert_eq!(lines[0]["error"]["kind"].as_str(), Some("rpc"));
+    assert!(lines[0].get("error").is_none(), "result line is kept: {}", lines[0]);
     assert!(
-        lines[0]["error"]["message"]
+        lines[0]["verification"]["error"]
             .as_str()
             .is_some_and(|message| message.contains("no block hash")),
         "expected a missing-inclusion-hash hint: {}",
         lines[0]
     );
-    assert!(lines[0].get("verification").is_none(), "an unverified target carries no verdict");
+    assert!(
+        lines[0]["verification"].get("match").is_none(),
+        "unavailable is not a match/mismatch verdict: {}",
+        lines[0]
+    );
+}
+
+/// Dump-dir with a nulled receipt response fails the fidelity gate as rpc on
+/// the kept result line (not a silent `fidelity-gate-unavailable` skip).
+#[test]
+fn test_batch_dump_fixture_dir_null_receipt_is_rpc_fixture_error() {
+    let path = doctored_cache("batch_dump_null_receipt", |receipt| {
+        // Doctor the whole result to null by replacing the entry value below.
+        let _ = receipt;
+    });
+    // Null the receipt response entirely (result: null), modelling a pruned
+    // or unanswered eth_getTransactionReceipt.
+    let mut envelope: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).expect("read doctored cache"))
+            .expect("parse");
+    for entry in envelope["cache"].as_array_mut().expect("cache entries").iter_mut() {
+        let value = entry["value"].as_str().expect("entry value is a string");
+        if !value.contains("cumulativeGasUsed") {
+            continue;
+        }
+        let mut response: serde_json::Value =
+            serde_json::from_str(value).expect("parse receipt response");
+        response["result"] = serde_json::Value::Null;
+        entry["value"] = serde_json::Value::String(response.to_string());
+    }
+    std::fs::write(&path, envelope.to_string()).expect("rewrite null-receipt cache");
+
+    let list = tx_file("batch_dump_null_receipt");
+    let dir = std::env::temp_dir()
+        .join(format!("mega_evme_batch_dump_null_receipt_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let run = replay(
+        &path,
+        &[
+            "--tx-file",
+            list.to_str().unwrap(),
+            "--dump-fixture-dir",
+            dir.to_str().unwrap(),
+            "--json",
+        ],
+    );
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(&list);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert_eq!(run.code(), 3, "unanswered receipt for dump exits 3.\nstderr: {}", run.stderr);
+    let lines = run.ndjson();
+    assert_eq!(lines.len(), 1);
+    assert!(lines[0].get("error").is_none(), "result line is kept: {}", lines[0]);
+    assert!(lines[0]["receipt"].is_object(), "local receipt is kept: {}", lines[0]);
+    assert_eq!(lines[0]["success"].as_bool(), Some(true));
+    assert!(
+        lines[0]["fixture"]["error"].is_string(),
+        "fixture reports the unanswered receipt: {}",
+        lines[0]
+    );
+    assert!(
+        lines[0]["fixture"].get("skipped").is_none(),
+        "receipt fetch failure is not a fidelity-gate skip: {}",
+        lines[0]
+    );
+    assert_eq!(run.error_object()["error"]["kind"].as_str(), Some("rpc-failure"));
+}
+
+/// Dump-dir against an envelope that never captured the receipt is the same
+/// unanswered class: rpc fixture error, result kept, exit 3.
+#[test]
+fn test_batch_dump_fixture_dir_missing_receipt_is_rpc_fixture_error() {
+    let path = cache_without_receipt("batch_dump_no_receipt");
+    let list = tx_file("batch_dump_no_receipt");
+    let dir = std::env::temp_dir()
+        .join(format!("mega_evme_batch_dump_no_receipt_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let run = replay(
+        &path,
+        &[
+            "--tx-file",
+            list.to_str().unwrap(),
+            "--dump-fixture-dir",
+            dir.to_str().unwrap(),
+            "--json",
+        ],
+    );
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(&list);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert_eq!(run.code(), 3, "missing receipt for dump exits 3.\nstderr: {}", run.stderr);
+    let lines = run.ndjson();
+    assert_eq!(lines.len(), 1);
+    assert!(lines[0].get("error").is_none(), "result line is kept: {}", lines[0]);
+    assert!(lines[0]["receipt"].is_object(), "local receipt is kept: {}", lines[0]);
+    assert!(
+        lines[0]["fixture"]["error"].as_str().is_some_and(|m| m.contains("receipt") ||
+            m.contains("not found") ||
+            m.contains("cache")),
+        "fixture.error names the unanswered receipt: {}",
+        lines[0]
+    );
+    assert!(
+        lines[0]["fixture"].get("skipped").is_none(),
+        "missing receipt is not a silent skip: {}",
+        lines[0]
+    );
+    assert_eq!(run.error_object()["error"]["kind"].as_str(), Some("rpc-failure"));
+}
+
+/// A genuine fidelity-gate skip (local gas disagrees with on-chain receipt)
+/// still exits 0: the receipt question was answered, the dump was correctly
+/// refused, and skips never fail the run.
+#[test]
+fn test_batch_dump_fixture_dir_fidelity_mismatch_stays_skip() {
+    let path = doctored_cache("batch_dump_fidelity_skip", |receipt| {
+        receipt["gasUsed"] = "0x1".into();
+    });
+    let list = tx_file("batch_dump_fidelity_skip");
+    let dir = std::env::temp_dir()
+        .join(format!("mega_evme_batch_dump_fidelity_skip_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let run = replay(
+        &path,
+        &[
+            "--tx-file",
+            list.to_str().unwrap(),
+            "--dump-fixture-dir",
+            dir.to_str().unwrap(),
+            "--json",
+        ],
+    );
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(&list);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert_eq!(run.code(), 0, "a fidelity skip exits 0.\nstderr: {}", run.stderr);
+    let lines = run.ndjson();
+    assert_eq!(lines.len(), 1);
+    assert!(
+        lines[0]["fixture"]["skipped"].as_str().is_some_and(|m| m.contains("fidelity gate failed")),
+        "expected fidelity-gate skip: {}",
+        lines[0]
+    );
+    assert!(lines[0]["fixture"].get("error").is_none());
 }
 
 /// Batch `--dump-fixture-dir` writes a self-validating fixture for a target

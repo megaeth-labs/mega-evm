@@ -1043,6 +1043,129 @@ fn test_replay_tx_file_anchored_but_absent_target_is_rpc() {
     let _ = std::fs::remove_file(&list);
 }
 
+/// When every target of a job is absent from the fetched block body, each gets
+/// its definitive `rpc` answer pre-loop and the block is never executed.
+///
+/// After doctoring the body, the envelope is stripped of every response that is
+/// not a target transaction lookup or the doctored block body (parent header,
+/// state, receipts, body-tx objects). A clean early return needs only those two
+/// shapes; forking state or walking the body would miss and fail differently.
+#[test]
+fn test_replay_tx_file_all_targets_absent_from_body_skips_block_execution() {
+    let targets: Vec<&str> = BLOCK_TXS.iter().map(|(h, _)| *h).collect();
+
+    let mut envelope: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(envelope()).expect("read envelope"))
+            .expect("parse envelope");
+
+    let mut body_doctored = 0;
+    let mut block_hash = None;
+    for entry in envelope["cache"].as_array_mut().expect("cache entries").iter_mut() {
+        let value = entry["value"].as_str().expect("entry value is a string");
+        let Ok(mut response) = serde_json::from_str::<serde_json::Value>(value) else {
+            continue;
+        };
+        let Some(result) = response.get_mut("result") else {
+            continue;
+        };
+        if !result.is_object() {
+            continue;
+        }
+        let number = result.get("number").and_then(|n| {
+            n.as_str().and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
+        });
+        if number != Some(BLOCK) {
+            continue;
+        }
+        let Some(txs) = result.get_mut("transactions").and_then(|t| t.as_array_mut()) else {
+            continue;
+        };
+        let before = txs.len();
+        txs.retain(|tx| {
+            let hash = tx.as_str().unwrap_or("");
+            !targets.contains(&hash)
+        });
+        if txs.len() != before {
+            block_hash = result.get("hash").and_then(|h| h.as_str()).map(str::to_string);
+            entry["value"] = serde_json::Value::String(response.to_string());
+            body_doctored += 1;
+        }
+    }
+    assert_eq!(body_doctored, 1, "exactly one block body for {BLOCK} must list the targets");
+    let block_hash = block_hash.expect("block hash");
+
+    // Cache keys are request hashes, so filter by response shape: keep only the
+    // target transaction lookups and the doctored block-at-height body.
+    let entries = envelope["cache"].as_array_mut().expect("cache entries");
+    entries.retain(|entry| {
+        let value = entry["value"].as_str().unwrap_or("");
+        let Ok(response) = serde_json::from_str::<serde_json::Value>(value) else {
+            return false;
+        };
+        let Some(result) = response.get("result") else {
+            return false;
+        };
+        if !result.is_object() {
+            return false;
+        }
+        // Transaction lookup for one of our targets.
+        if let Some(hash) = result.get("hash").and_then(|h| h.as_str()) {
+            if targets.contains(&hash) && result.get("blockNumber").is_some() {
+                return true;
+            }
+        }
+        // Doctored block body at the job height.
+        let number = result.get("number").and_then(|n| {
+            n.as_str().and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
+        });
+        number == Some(BLOCK) && result.get("transactions").is_some()
+    });
+
+    let envelope_path = std::env::temp_dir()
+        .join(format!("mega_evme_batch_all_absent_{}.json", std::process::id()));
+    std::fs::write(&envelope_path, envelope.to_string()).expect("write doctored envelope");
+    let list = std::env::temp_dir()
+        .join(format!("mega_evme_tx_list_all_absent_{}.txt", std::process::id()));
+    std::fs::write(&list, format!("{}\n", targets.join("\n"))).expect("write tx list");
+
+    let (stdout, code) =
+        replay_envelope_with_code(&envelope_path, &["--tx-file", list.to_str().unwrap(), "--json"]);
+    let lines = ndjson(&stdout);
+    assert_eq!(lines.len(), targets.len(), "every target is reported once: {stdout}");
+
+    for target in &targets {
+        let failed = lines
+            .iter()
+            .find(|line| line["tx_hash"].as_str() == Some(target))
+            .unwrap_or_else(|| panic!("target {target} must be reported"));
+        assert_eq!(failed["error"]["kind"].as_str(), Some("rpc"), "all-absent is rpc: {failed}");
+        let message = failed["error"]["message"].as_str().unwrap_or_default();
+        assert!(
+            message.contains("does not list") && message.contains(&block_hash),
+            "message names absence and block: {message}"
+        );
+        assert!(
+            failed.get("success").is_none() && failed.get("receipt").is_none(),
+            "no execution result for an unexecuted target: {failed}"
+        );
+    }
+
+    assert_eq!(code, Some(3), "all-absent exits 3");
+    assert_eq!(run_error(&stdout)["error"]["kind"].as_str(), Some("rpc-failure"));
+    // If the driver had forked state or walked body transactions, the stripped
+    // envelope would have produced a cache-miss error naming parent/state — not
+    // a clean per-target membership rpc answer for every hash.
+    assert!(
+        !stdout.contains("cache miss") &&
+            !stdout.contains("not found in the offline") &&
+            !stdout.contains("not present in the offline"),
+        "early return must not touch parent/state/body-tx paths:\n{stdout}"
+    );
+
+    let _ = std::fs::remove_file(&envelope_path);
+    let _ = std::fs::remove_file(&list);
+}
+
 /// A hash whose resolution answers `null` keeps the definitive `not_found`
 /// class: the endpoint denied the hash, rather than claiming inclusion and then
 /// contradicting itself.
@@ -1419,18 +1542,18 @@ fn test_replay_receipt_inner_log_metadata_nonzero_preceding_offset() {
     }
 }
 
-/// Sweeping a block with `--dump-fixture-dir` against an envelope that carries
-/// no receipts skips every target on the fidelity gate and still exits 0.
-///
-/// Fixture skips are expected (not infrastructure failures); the development
-/// `--block N --dump-fixture-dir` writes a fixture for every transaction it can
-/// express and skips the ones it cannot, without failing the run.
+/// Sweeping a block with `--dump-fixture-dir` writes a fixture for every
+/// transaction it can express and skips genuine unsupported shapes (deposit)
+/// without failing the run.
 ///
 /// Every OP-stack block opens with a deposit, which the fixture format cannot
 /// represent. Reporting that as an error rather than a skip would make a
 /// whole-block sweep exit non-zero on every block, so this pins the
 /// classification end to end: 22 files written, the deposit skipped with its
 /// reason, nothing reported as an error, and exit 0.
+///
+/// (An unanswered on-chain receipt is a separate rpc-class fixture error and is
+/// covered by the doctored dump-dir tests in `replay_verify`.)
 #[test]
 fn test_replay_block_dump_fixture_dir_writes_all_but_the_deposit() {
     let dir = std::env::temp_dir()

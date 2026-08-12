@@ -140,13 +140,15 @@ With [`--dump-fixture-dir`](#--dump-fixture-dir-dir), each result line additiona
 ### Exit Status
 
 A batch run exits `0` when every requested transaction produced an execution result and nothing the run was asked to do failed, and non-zero otherwise — see [Exit codes](../overview.md#exit-codes) for how the failure classes are ranked.
-Fixture skips (fidelity gate, BLOCKHASH readers, unsupported shapes) are not failures and do not fail the run; a fixture construction or write failure is an execution-class failure of its target.
+Fixture skips (fidelity mismatch, BLOCKHASH readers, unsupported shapes) are not failures and do not fail the run; a fixture construction or write failure is an execution-class failure of its target; an unanswered on-chain receipt for the fidelity gate is an rpc-class failure of its target.
 When a mid-block abort discards a drafted fixture, that fixture error inherits the abort's class (so a transport abort still exits `3`).
 The NDJSON stream is written to stdout in both cases; diagnostics go to stderr.
 
 Swept targets behind an abort always report as `rpc` ("unanswered").
 When the aborting transaction is not itself a target, the run still tallies the abort's own class so the process exit reflects the root cause — a non-target executor abort exits `1`, a transport abort exits `3`.
-`--block 0` is rejected as invalid input; a block that genuinely holds no transactions produces no stdout lines, exits `0`, and says so on stderr.
+`--block 0` is rejected as invalid input (exit `1`): the user asked for a genesis block that cannot be replayed.
+An endpoint that resolves a transaction hash into block 0 is contradictory endpoint data instead — each such target is reported as `rpc` and the run exits `3`, in the same family as unanchored views and contradictory metadata.
+A block that genuinely holds no transactions produces no stdout lines, exits `0`, and says so on stderr.
 
 ### Examples
 
@@ -208,7 +210,9 @@ Anything that prevents the comparison from running is an infrastructure failure 
 - The receipt describes a different inclusion than the replayed block (its `blockHash` differs from the replayed block, or is null — a reorg in progress, or a load-balanced endpoint serving divergent views): reported as an `rpc` failure, because comparing against it would compare the replay to the wrong on-chain execution, and a receipt with no inclusion hash cannot be anchored at all.
 - The target is a pending transaction, which has no receipt yet: rejected up front in single-transaction mode, and reported as a `pending` error entry in batch mode.
 
-In batch mode each of these becomes an error entry for that transaction, exactly like any other infrastructure failure.
+In batch mode, when a target already produced an execution result and only the receipt fetch failed, the target keeps its full result line (execution summary, local receipt, timing) and reports the failure on that line as `"verification": {"error": "…"}`.
+The target still counts as `replayed`; the unanswered receipt is tallied as `rpc` and the run exits `3`.
+A target that never reached execution (pending, not-found, block setup failure) remains a bare error entry, exactly like any other infrastructure failure before replay.
 
 Transaction overrides and `--override.spec` are still accepted with `--verify-receipt`, but they make the replay a what-if that the chain never executed, so the comparison will normally report a mismatch.
 
@@ -221,6 +225,12 @@ A match carries nothing else:
 
 ```json
 { "match": true }
+```
+
+An unanswered receipt (fetch failed, pruned, reorg / divergent inclusion) carries only the error — no `match` field, so it is never confused with a divergence:
+
+```json
+{ "error": "No on-chain receipt was fetched for this transaction" }
 ```
 
 A mismatch carries a `diff` holding only the dimensions that disagreed, each as `{"onchain": …, "replay": …}`:
@@ -252,9 +262,11 @@ Without `--json`, each transaction gets one verdict line after its usual output:
 ```
 verification: MATCH
 verification: MISMATCH (gas_used: onchain 75514 vs replay 75500)
+verification: FAILED (No on-chain receipt was fetched for this transaction)
 ```
 
 The mismatch line names every dimension that disagreed, comma-separated.
+The failed line is used when the comparison never ran.
 
 ### Exit Status
 
@@ -405,7 +417,7 @@ The fixture draft is built against the pre-commit state (same moment as the sing
 
 | Gate                                                                             | Outcome                                                       |
 | -------------------------------------------------------------------------------- | ------------------------------------------------------------- |
-| On-chain receipt unavailable (not in capture, pruned, reorg/divergent inclusion) | `fixture.skipped` with `fidelity-gate-unavailable: …`         |
+| On-chain receipt unavailable (not in capture, pruned, reorg/divergent inclusion) | `fixture.error` with the reason; rpc-class failure            |
 | Fidelity mismatch (gas / status / logs root)                                     | `fixture.skipped` with `fidelity gate failed: …`              |
 | Target reads `BLOCKHASH`                                                         | `fixture.skipped` (fixtures carry no historical block hashes) |
 | Unsupported shape (deposit, EIP-7702, unknown spec mapping)                      | `fixture.skipped`                                             |
@@ -420,13 +432,14 @@ Human mode prints one fixture line per target.
 An end-of-run `INFO` summary reports written / skipped / failed counts.
 
 A failed dump is reported on the target's own result line rather than replacing it: the transaction did replay, so its receipt — and, with [`--verify-receipt`](#receipt-verification), its verdict — is still what the run was asked for, and a divergence found on such a target is still counted as a mismatch.
-Fixture skips do not fail the run; a failed dump does, as an execution-class failure of that target.
+Fixture skips do not fail the run; a failed dump does — as an execution-class failure for construction/write failures, or as an rpc-class failure when the on-chain receipt question went unanswered.
 
 Registration into `bench/replay/manifest.json` is not performed — corpus curation stays manual.
 `--dump-fixture-dir` cannot be combined with `--dump-fixture`, and is rejected in single-transaction mode.
 
 ```bash
-# Sweep a whole block offline into per-tx fixtures (skips targets without receipts):
+# Sweep a whole block offline into per-tx fixtures (targets whose capture lacks
+# a receipt fail as rpc on the result line and exit 3):
 mega-evme replay --rpc.replay-file ./fixtures/blocks.json \
   --block 22945844 --dump-fixture-dir ./fixtures/out --json
 

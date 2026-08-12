@@ -53,23 +53,76 @@ impl ReceiptFacts {
 }
 
 /// The verdict for one verified transaction.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+///
+/// Three shapes on the wire:
+/// - compared and equal: `{"match": true}`
+/// - compared and diverged: `{"match": false, "diff": …}`
+/// - receipt question unanswered: `{"error": "…"}` — the target still replayed; only the comparison
+///   could not run (transport, pruned, reorg).
+///
+/// Serialize is hand-written so an unavailable outcome never emits a false
+/// `match` that a consumer would read as a divergence.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct VerificationOutcome {
     /// Whether the local replay reproduced the on-chain receipt.
-    #[serde(rename = "match")]
+    ///
+    /// Meaningless when [`Self::error`] is set (kept for a simple bool check
+    /// on the compared path); the wire shape omits `match` in that case.
     pub matched: bool,
-    /// The mismatched dimensions; absent when the replay matched.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// The mismatched dimensions; absent when the replay matched or when the
+    /// comparison never ran.
     pub diff: Option<VerificationDiff>,
+    /// Why the on-chain receipt could not be compared, when the target still
+    /// produced a local result. Mutually exclusive with a real match/diff.
+    pub error: Option<String>,
 }
 
 impl VerificationOutcome {
+    /// A completed comparison against an on-chain receipt.
+    pub(super) fn compared(matched: bool, diff: Option<VerificationDiff>) -> Self {
+        Self { matched, diff, error: None }
+    }
+
+    /// The target replayed, but the on-chain receipt question went unanswered.
+    pub(super) fn unavailable(message: impl Into<String>) -> Self {
+        Self { matched: false, diff: None, error: Some(message.into()) }
+    }
+
+    /// Whether this outcome is an unanswered receipt fetch, not a comparison.
+    pub(super) const fn is_unavailable(&self) -> bool {
+        self.error.is_some()
+    }
+
     /// The one-line human verdict printed for a verified transaction.
     pub(super) fn verdict_line(&self) -> String {
-        match &self.diff {
-            None => "verification: MATCH".to_string(),
-            Some(diff) => format!("verification: MISMATCH ({})", diff.describe()),
+        if let Some(error) = &self.error {
+            format!("verification: FAILED ({error})")
+        } else if let Some(diff) = &self.diff {
+            format!("verification: MISMATCH ({})", diff.describe())
+        } else {
+            "verification: MATCH".to_string()
         }
+    }
+}
+
+impl Serialize for VerificationOutcome {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeMap;
+        if let Some(error) = &self.error {
+            let mut map = serializer.serialize_map(Some(1))?;
+            map.serialize_entry("error", error)?;
+            return map.end();
+        }
+        let fields = 1 + usize::from(self.diff.is_some());
+        let mut map = serializer.serialize_map(Some(fields))?;
+        map.serialize_entry("match", &self.matched)?;
+        if let Some(diff) = &self.diff {
+            map.serialize_entry("diff", diff)?;
+        }
+        map.end()
     }
 }
 
@@ -235,9 +288,9 @@ pub(super) fn compare(onchain: &ReceiptFacts, replay: &ReceiptFacts) -> Verifica
     }
 
     if diff.is_empty() {
-        VerificationOutcome { matched: true, diff: None }
+        VerificationOutcome::compared(true, None)
     } else {
-        VerificationOutcome { matched: false, diff: Some(diff) }
+        VerificationOutcome::compared(false, Some(diff))
     }
 }
 
@@ -392,6 +445,19 @@ mod tests {
         assert!(outcome.diff.is_none(), "a match carries no diff");
         assert_eq!(json(&outcome), serde_json::json!({ "match": true }));
         assert_eq!(outcome.verdict_line(), "verification: MATCH");
+    }
+
+    /// An unanswered receipt serializes as `{"error": …}` with no `match` field,
+    /// so consumers never read it as a false mismatch.
+    #[test]
+    fn test_unavailable_outcome_serializes_as_error_only() {
+        let outcome = VerificationOutcome::unavailable("receipt pruned below retention");
+        assert!(outcome.is_unavailable());
+        assert_eq!(
+            json(&outcome),
+            serde_json::json!({ "error": "receipt pruned below retention" })
+        );
+        assert_eq!(outcome.verdict_line(), "verification: FAILED (receipt pruned below retention)");
     }
 
     #[test]

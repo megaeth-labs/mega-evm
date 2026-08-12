@@ -81,10 +81,11 @@ pub(super) struct ReportArgs {
 /// Per-target fixture dump outcome reported on the NDJSON / human result line.
 ///
 /// Exactly one field is set: the fixture was written, expectedly skipped
-/// (fidelity gate, BLOCKHASH, unsupported shape), or could not be written. A
-/// write failure is reported here rather than replacing the target's result,
-/// so a target that did replay keeps its result — including its receipt
-/// verification verdict — and still fails the run.
+/// (fidelity mismatch, BLOCKHASH, unsupported shape), or could not be written.
+/// A write failure — and an unanswered receipt question for the fidelity gate —
+/// is reported here rather than replacing the target's result, so a target that
+/// did replay keeps its result — including its receipt verification verdict —
+/// and still fails the run.
 #[derive(Debug, Clone, Serialize)]
 struct FixtureReport {
     /// Absolute or as-written path of a successfully written fixture.
@@ -97,8 +98,10 @@ struct FixtureReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
     /// Batch tally class for [`Self::error`]. Construction and write failures
-    /// are execution-class; a draft discarded because the block aborted inherits
-    /// the abort's class so a transient RPC abort does not become exit 1.
+    /// are execution-class; an unanswered on-chain receipt (transport, pruned,
+    /// divergent inclusion, missing from the offline envelope) is rpc-class; a
+    /// draft discarded because the block aborted inherits the abort's class so
+    /// a transient RPC abort does not become exit 1.
     /// Not serialized: the wire shape stays `path` / `skipped` / `error`.
     #[serde(skip)]
     error_kind: BatchErrorKind,
@@ -130,6 +133,21 @@ impl FixtureReport {
             skipped: None,
             error: Some(message.into()),
             error_kind: BatchErrorKind::Execution,
+        }
+    }
+
+    /// Fidelity gate could not run because the on-chain receipt question went
+    /// unanswered (transport, null, reorg, or offline envelope missing it).
+    ///
+    /// Distinct from a genuine skip (BLOCKHASH, unsupported shape, fidelity
+    /// mismatch): the dump was requested and the receipt call failed, so the
+    /// run exits non-zero as rpc-class.
+    fn rpc_error(message: impl Into<String>) -> Self {
+        Self {
+            path: None,
+            skipped: None,
+            error: Some(message.into()),
+            error_kind: BatchErrorKind::Rpc,
         }
     }
 
@@ -280,7 +298,9 @@ impl BatchTally {
     ///
     /// A verdict and a fixture failure are independent findings about the same
     /// target: a replay that diverged from its receipt is counted as a mismatch
-    /// whether or not its fixture could be written.
+    /// whether or not its fixture could be written. An unanswered receipt
+    /// question (verification unavailable, or dump-dir fidelity gate starved of
+    /// a receipt) is rpc-class and does not count as verified.
     fn record_executed(
         &mut self,
         verification: Option<&VerificationOutcome>,
@@ -289,15 +309,21 @@ impl BatchTally {
         self.reported += 1;
         self.replayed += 1;
         if let Some(verification) = verification {
-            self.verified += 1;
-            if !verification.matched {
-                self.counts.mismatched += 1;
+            if verification.is_unavailable() {
+                // Compared path never ran: the receipt question went unanswered.
+                self.counts.rpc += 1;
+            } else {
+                self.verified += 1;
+                if !verification.matched {
+                    self.counts.mismatched += 1;
+                }
             }
         }
         // A fixture the run was asked to write and could not is a failure of
         // that target, even though its replay produced a result. Construction
-        // and write failures are execution-class; an abort-inherited discard
-        // uses the abort's class (see [`FixtureReport::abort_error`]).
+        // and write failures are execution-class; an unanswered receipt for the
+        // fidelity gate is rpc-class; an abort-inherited discard uses the
+        // abort's class (see [`FixtureReport::abort_error`]).
         if let Some(fixture) = fixture.filter(|f| f.is_error()) {
             match fixture.error_kind {
                 BatchErrorKind::Rpc => self.counts.rpc += 1,
@@ -681,10 +707,14 @@ where
     let target_hashes = || targets.iter().map(|t| t.hash);
 
     if number == 0 {
+        // Distinct from `--block 0` (invalid request, exit 1): an endpoint that
+        // resolves a hash into block 0 is contradictory endpoint data — the
+        // same unanswered class as unanchored / contradictory metadata.
         return BlockReplayOutcome::entries_only(fail_all(
             target_hashes(),
             BatchErrorKind::Rpc,
-            "Block 0 has no parent block to fork from",
+            "endpoint resolved the target into block 0, which has no parent block \
+             to fork from: contradictory endpoint data",
         ));
     }
 
@@ -701,43 +731,6 @@ where
             }
         },
     };
-    let parent_block = match fetch_block(provider, number - 1).await {
-        Ok(block) => block,
-        Err(e) => {
-            return BlockReplayOutcome::entries_only(fail_all(
-                target_hashes(),
-                BatchErrorKind::Rpc,
-                &e.to_string(),
-            ));
-        }
-    };
-
-    // Both guards below check the *headers* the endpoint served. The state
-    // reads behind the fork are still addressed by block number, so an endpoint
-    // that serves headers and state from different backends can still hand back
-    // state for a different block at this height. Anchoring state reads to the
-    // validated hash would need the fork to take a block hash rather than a
-    // number, and would change every cached RPC key (alloy hashes the block id
-    // into the cache key), invalidating every committed offline capture.
-    //
-    // Parent/block linkage guard: across a reorg or a load-balanced endpoint
-    // serving divergent views, `eth_getBlockByNumber(N-1)` can return a block
-    // that is not the parent of the block being replayed. Forking from that
-    // state would silently execute against the wrong pre-state.
-    let parent_hash = parent_block.hash();
-    let expected_parent = block.header.parent_hash();
-    if parent_hash != expected_parent {
-        let message = format!(
-            "parent block hash {parent_hash} != block parent_hash {expected_parent}: the parent \
-             block describes a different chain than the block being replayed (reorg in progress, \
-             or a load-balanced endpoint serving divergent views); retry once the chain settles"
-        );
-        return BlockReplayOutcome::entries_only(fail_all(
-            target_hashes(),
-            BatchErrorKind::Rpc,
-            &message,
-        ));
-    }
 
     // Per-target inclusion and membership guards. `--tx-file` resolved each
     // target through `eth_getTransactionByHash`, which reported the block it
@@ -746,6 +739,11 @@ where
     // hashes get independent outcomes. A target whose reported hash matches
     // the body but is missing from it is an endpoint self-contradiction (`rpc`),
     // not a definitive "unknown hash".
+    //
+    // When none of the job's targets appear in the body, every target already
+    // has its definitive answer here — skip parent fetch, state forking, and
+    // the execute loop entirely. Otherwise `last_target_index` would be `None`
+    // and the foreign block would be walked for nothing.
     let fetched = block.hash();
     let body_txs: HashSet<B256> = block.transactions.hashes().collect();
     let mut entries = Vec::with_capacity(targets.len());
@@ -779,6 +777,22 @@ where
                 ));
                 continue;
             }
+        } else if !body_txs.contains(&target.hash) {
+            // `--block` targets come from the body, so this arm is defensive.
+            // A residual not-in-body without an inclusion claim is still an
+            // unanswered view of this height, not a definitive not-found.
+            entries.push(failure(
+                target.hash,
+                BatchErrorKind::Rpc,
+                format!(
+                    "block {number} ({fetched}) does not list target transaction {}, which \
+                     was queued against it: the endpoint served divergent views of this \
+                     block (reorg in progress, or a load-balanced endpoint); retry once \
+                     the chain settles",
+                    target.hash,
+                ),
+            ));
+            continue;
         }
         active.push(target.hash);
     }
@@ -788,6 +802,45 @@ where
         return BlockReplayOutcome::entries_only(entries);
     }
     let targets = active;
+
+    // Both guards below check the *headers* the endpoint served. The state
+    // reads behind the fork are still addressed by block number, so an endpoint
+    // that serves headers and state from different backends can still hand back
+    // state for a different block at this height. Anchoring state reads to the
+    // validated hash would need the fork to take a block hash rather than a
+    // number, and would change every cached RPC key (alloy hashes the block id
+    // into the cache key), invalidating every committed offline capture.
+    //
+    // Parent/block linkage guard: across a reorg or a load-balanced endpoint
+    // serving divergent views, `eth_getBlockByNumber(N-1)` can return a block
+    // that is not the parent of the block being replayed. Forking from that
+    // state would silently execute against the wrong pre-state.
+    let parent_block = match fetch_block(provider, number - 1).await {
+        Ok(block) => block,
+        Err(e) => {
+            return BlockReplayOutcome::entries_only(fail_remaining(
+                &targets,
+                entries,
+                BatchErrorKind::Rpc,
+                &e.to_string(),
+            ));
+        }
+    };
+    let parent_hash = parent_block.hash();
+    let expected_parent = block.header.parent_hash();
+    if parent_hash != expected_parent {
+        let message = format!(
+            "parent block hash {parent_hash} != block parent_hash {expected_parent}: the parent \
+             block describes a different chain than the block being replayed (reorg in progress, \
+             or a load-balanced endpoint serving divergent views); retry once the chain settles"
+        );
+        return BlockReplayOutcome::entries_only(fail_remaining(
+            &targets,
+            entries,
+            BatchErrorKind::Rpc,
+            &message,
+        ));
+    }
 
     // Fetch the on-chain receipts before the block runs. Needed for
     // `--verify-receipt` (mismatch vs unverified) and for `--dump-fixture-dir`
@@ -1070,22 +1123,21 @@ where
                     target.tx_index,
                     first_log_index,
                 );
+                // Keep the execution result even when the receipt question went
+                // unanswered: the target did replay, so its summary, local
+                // receipt, and timing stay on the result line. The verification
+                // field carries the failure; the tally counts it as rpc.
                 let verification = if verify_receipt {
                     match onchain_receipts.get(&target.tx_hash) {
                         Some(Ok(onchain)) => {
                             Some(verify::compare(onchain, &ReceiptFacts::from_receipt(&receipt)))
                         }
-                        // Without an on-chain receipt there is nothing to compare
-                        // against: report the target as unverified.
-                        unverified => {
-                            let message = match unverified {
-                                Some(Err(message)) => message.clone(),
-                                _ => "No on-chain receipt was fetched for this transaction"
-                                    .to_string(),
-                            };
-                            entries.push(failure(target.tx_hash, BatchErrorKind::Rpc, message));
-                            continue;
+                        Some(Err(message)) => {
+                            Some(VerificationOutcome::unavailable(message.clone()))
                         }
+                        None => Some(VerificationOutcome::unavailable(
+                            "No on-chain receipt was fetched for this transaction",
+                        )),
                     }
                 } else {
                     None
@@ -1239,8 +1291,11 @@ struct DumpFixtureArgs<'a> {
 
 /// Prepare a fixture for one successfully executed target against pre-commit state.
 ///
-/// Expected skips (missing receipt, fidelity mismatch, BLOCKHASH, unsupported
-/// transaction shapes) become a final [`FixtureReport`] and never fail the run.
+/// Genuine skips (fidelity mismatch, BLOCKHASH, unsupported transaction shapes)
+/// become a final [`FixtureReport::skipped`] and never fail the run.
+/// An unanswered on-chain receipt (transport, pruned/null, divergent inclusion,
+/// or offline envelope lacking it) becomes a rpc-class fixture error so the run
+/// exits 3 while the target keeps its execution result line.
 /// Database and other construction failures become a fixture error (execution-class).
 /// A successfully built draft is carried as [`DeferredFixture::Ready`] and only
 /// written by [`materialize_deferred_fixture`] after `finish()` succeeds.
@@ -1266,19 +1321,18 @@ where
         overwrite,
     } = args;
 
-    // Fidelity gate needs the on-chain receipt; without it the dump is skipped,
-    // not failed — the envelope may simply lack receipts (expected in sweeps
-    // over captures that never fetched them).
+    // Fidelity gate needs the on-chain receipt. When the receipt question went
+    // unanswered the dump fails as rpc (not a fidelity-gate skip): the run was
+    // asked to write a fixture and could not obtain the receipt it needs. Genuine
+    // gate skips (BLOCKHASH, unsupported shape, fidelity mismatch) stay skips.
     let facts = match onchain {
         Some(Ok(facts)) => facts,
         Some(Err(message)) => {
-            return DeferredFixture::Report(FixtureReport::skipped(format!(
-                "fidelity-gate-unavailable: {message}"
-            )));
+            return DeferredFixture::Report(FixtureReport::rpc_error(message.clone()));
         }
         None => {
-            return DeferredFixture::Report(FixtureReport::skipped(
-                "fidelity-gate-unavailable: no on-chain receipt was fetched for this transaction",
+            return DeferredFixture::Report(FixtureReport::rpc_error(
+                "no on-chain receipt was fetched for this transaction",
             ));
         }
     };
@@ -1618,7 +1672,7 @@ mod tests {
 
     /// A verification verdict as a run would have reported it.
     fn verdict(matched: bool) -> VerificationOutcome {
-        VerificationOutcome { matched, diff: None }
+        VerificationOutcome::compared(matched, None)
     }
 
     /// Build a tally from the outcomes a run would have reported: `failures`
@@ -1817,6 +1871,44 @@ mod tests {
         assert_eq!(ExitCode::from_batch_failures(&counts), ExitCode::RpcFailure);
     }
 
+    /// An unanswered receipt for `--verify-receipt` keeps the target as
+    /// replayed, counts as rpc (not mismatched), and is not "verified".
+    #[test]
+    fn test_batch_tally_verification_unavailable_is_rpc_and_still_replayed() {
+        let mut tally = BatchTally::default();
+        tally.record_executed(Some(&VerificationOutcome::unavailable("receipt pruned")), None);
+
+        assert_eq!(tally.replayed, 1, "the target still replayed");
+        assert_eq!(tally.verified, 0, "no comparison ran");
+        assert_eq!(tally.counts.mismatched, 0, "unverified is not a mismatch");
+        assert_eq!(tally.counts.rpc, 1);
+        let err = tally.into_error().expect("run failed");
+        let ReplayError::BatchFailed(counts) = err else {
+            panic!("expected batch failure: {err:?}");
+        };
+        assert_eq!(ExitCode::from_batch_failures(&counts), ExitCode::RpcFailure);
+    }
+
+    /// An unanswered receipt for `--dump-fixture-dir` is a rpc-class fixture
+    /// error, not a skip that exits 0.
+    #[test]
+    fn test_batch_tally_fixture_receipt_unavailable_is_rpc_class() {
+        let mut tally = BatchTally::default();
+        tally.record_executed(
+            None,
+            Some(&FixtureReport::rpc_error("no on-chain receipt was fetched for this transaction")),
+        );
+
+        assert_eq!(tally.replayed, 1);
+        assert_eq!(tally.counts.rpc, 1);
+        assert_eq!(tally.counts.execution, 0);
+        let err = tally.into_error().expect("run failed");
+        let ReplayError::BatchFailed(counts) = err else {
+            panic!("expected batch failure: {err:?}");
+        };
+        assert_eq!(ExitCode::from_batch_failures(&counts), ExitCode::RpcFailure);
+    }
+
     /// A run whose only finding is divergence fails as the mismatch it is.
     #[test]
     fn test_batch_tally_mismatch_only_reports_the_verification_error() {
@@ -1925,9 +2017,9 @@ mod tests {
     #[test]
     fn test_materialize_deferred_fixture_passes_reports_through() {
         let skipped = materialize_deferred_fixture(DeferredFixture::Report(
-            FixtureReport::skipped("fidelity-gate-unavailable: no receipt"),
+            FixtureReport::skipped("fidelity gate failed: gas_used"),
         ));
-        assert_eq!(skipped.skipped.as_deref(), Some("fidelity-gate-unavailable: no receipt"));
+        assert_eq!(skipped.skipped.as_deref(), Some("fidelity gate failed: gas_used"));
         assert!(skipped.path.is_none());
         assert!(skipped.error.is_none());
 
@@ -1936,5 +2028,12 @@ mod tests {
         )));
         assert!(err.error.as_ref().is_some_and(|m| m.contains("construction failed")));
         assert!(err.path.is_none());
+
+        let rpc = materialize_deferred_fixture(DeferredFixture::Report(FixtureReport::rpc_error(
+            "no on-chain receipt was fetched for this transaction",
+        )));
+        assert!(rpc.is_error());
+        assert_eq!(rpc.error_kind, BatchErrorKind::Rpc);
+        assert!(rpc.skipped.is_none());
     }
 }
