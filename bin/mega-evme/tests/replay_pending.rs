@@ -49,15 +49,52 @@ const PARENT_HASH: &str = "0xd482d481e9d11dd116ef6c41bf95ca608f159206c8f07900b1b
 const REPLACEMENT_PARENT_HASH: &str =
     "0x4444444444444444444444444444444444444444444444444444444444444444";
 
-/// Hash of the pending transaction being replayed.
-const TX_HASH: &str = "0x41d34e7e13dfe0f85da9d407e2b2c381955d8c7eed428b17dc82327b2616b000";
-
-/// Sender of the pending transaction, funded by the mock's blanket balance.
-const SENDER: &str = "0x14112799a39f2905b901067d3cd4a1f63c1cebda";
+/// Signature of the pending transaction: a fixed, well-formed secp256k1 pair.
+///
+/// The replay authenticates every served transaction — its hash is recomputed
+/// from the encoding and its sender re-derived from the signature — so the mock
+/// cannot serve invented `hash`/`from` constants; [`tx_identity`] computes the
+/// authentic pair. The sender is whatever address this signature recovers to,
+/// funded like every other account by the mock's blanket balance.
+const SIG_R: &str = "0xa19f0f1f52e2951452711b4f4aa5d177442c9a56abeb609b803fe2412ed24946";
+const SIG_S: &str = "0x7af21777b2e7d91c745d0077ba2726ee1bb75ccf00039a6218d64fdced768491";
 
 /// Recipient of the pending transaction: an account with no code, so the call
 /// succeeds without depending on any contract the mock does not serve.
 const RECIPIENT: &str = "0x681e908b8ab57c49c74d770f369754ccc3e1ae09";
+
+/// The authentic identity of the pending transaction: `(hash, from)`.
+///
+/// Builds the same consensus object the replay will deserialize from
+/// [`tx_json`], hashes its encoding, and recovers its signer — the two values
+/// the replay authenticates the served answer against.
+fn tx_identity() -> (String, String) {
+    use mega_evm::{
+        alloy_consensus::{transaction::SignerRecoverable, SignableTransaction, TxEip1559},
+        op_alloy_consensus::OpTxEnvelope,
+    };
+
+    let tx = TxEip1559 {
+        chain_id: CHAIN_ID,
+        nonce: 0,
+        gas_limit: 0x249f0,
+        max_fee_per_gas: 0x200b20,
+        max_priority_fee_per_gas: 0x186a0,
+        to: alloy_primitives::TxKind::Call(RECIPIENT.parse().expect("`to` is an address")),
+        value: alloy_primitives::U256::ZERO,
+        access_list: Default::default(),
+        input: alloy_primitives::Bytes::new(),
+    };
+    let signature = alloy_primitives::Signature::new(
+        SIG_R.parse().expect("r is a hex word"),
+        SIG_S.parse().expect("s is a hex word"),
+        false,
+    );
+    let signed = tx.into_signed(signature);
+    let hash = format!("{:#x}", signed.hash());
+    let from = OpTxEnvelope::Eip1559(signed).recover_signer().expect("signature recovers");
+    (hash, format!("{from:#x}"))
+}
 
 /// A block header the RPC backend and the replay accept, carrying only the
 /// fields either of them reads.
@@ -97,6 +134,7 @@ fn block_json(hash: &str, parent_hash: &str) -> Value {
 /// endpoint reports for it. Everything else is the same transaction, so a test
 /// varies only the metadata the classification reads.
 fn tx_json(block_number: Value, block_hash: Value) -> Value {
+    let (hash, from) = tx_identity();
     json!({
         "type": "0x2",
         "chainId": format!("0x{CHAIN_ID:x}"),
@@ -109,12 +147,12 @@ fn tx_json(block_number: Value, block_hash: Value) -> Value {
         "value": "0x0",
         "accessList": [],
         "input": "0x",
-        "r": "0xa19f0f1f52e2951452711b4f4aa5d177442c9a56abeb609b803fe2412ed24946",
-        "s": "0x7af21777b2e7d91c745d0077ba2726ee1bb75ccf00039a6218d64fdced768491",
+        "r": SIG_R,
+        "s": SIG_S,
         "yParity": "0x0",
         "v": "0x0",
-        "hash": TX_HASH,
-        "from": SENDER,
+        "hash": hash,
+        "from": from,
         "blockHash": block_hash,
         "blockNumber": block_number,
         "transactionIndex": Value::Null,
@@ -214,8 +252,9 @@ impl Run {
 
 /// Replay the mock's pending transaction.
 fn replay(server: &MockRpcServer) -> Run {
+    let (tx_hash, _) = tx_identity();
     let output = Command::new(env!("CARGO_BIN_EXE_mega-evme"))
-        .args(["replay", TX_HASH, "--rpc", &server.uri()])
+        .args(["replay", &tx_hash, "--rpc", &server.uri()])
         .args(["--rpc.no-cache-file", "--rpc.max-retries", "0", "--rpc.backoff-ms", "1", "--json"])
         .output()
         .expect("failed to run mega-evme");
@@ -271,7 +310,7 @@ async fn test_pending_replay_executes_against_the_latest_block() {
     assert_eq!(summary["success"], json!(true), "the pending transaction must execute: {summary}");
     assert_eq!(
         summary["receipt"]["transactionHash"].as_str(),
-        Some(TX_HASH),
+        Some(tx_identity().0.as_str()),
         "the receipt must describe the replayed transaction: {summary}",
     );
 }

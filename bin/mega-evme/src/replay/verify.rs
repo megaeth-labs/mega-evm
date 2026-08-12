@@ -15,10 +15,11 @@
 use core::fmt;
 
 use alloy_consensus::TxReceipt;
-use alloy_primitives::{Address, Bytes, Log, B256};
+use alloy_primitives::{keccak256, Address, Bytes, Log, B256};
 use alloy_provider::Provider;
 use alloy_rpc_types_eth::{Log as RpcLog, TransactionReceipt};
-use op_alloy_rpc_types::OpTransactionReceipt;
+use mega_evm::{alloy_consensus::transaction::SignerRecoverable, alloy_eips::Encodable2718};
+use op_alloy_rpc_types::{OpTransactionReceipt, Transaction};
 use serde::Serialize;
 
 use super::{ReplayError, Result};
@@ -392,6 +393,55 @@ pub(super) fn check_transaction_identity(
          requested: the endpoint served the receipt of a different transaction (an inconsistent \
          backend, or a tampered capture); the transaction is unverified"
     ))
+}
+
+/// Check that a fetched transaction is the one it was requested for.
+///
+/// `eth_getTransactionByHash` is asked by transaction hash, but nothing in the
+/// answer forces the endpoint to honour it: an inconsistent backend, or a
+/// tampered offline capture, can serve another transaction under the requested
+/// hash — and the replay would execute it, advancing the block state on the
+/// wrong transaction or reporting another transaction's outcome under the
+/// target's name. The served envelope is authenticated against the request
+/// rather than trusted: the transaction hash is recomputed from the served
+/// consensus encoding (the response's own `hash` field is as unauthenticated as
+/// the rest of it), and the sender is re-derived from the signature, since the
+/// served `from` field is not covered by the hash of a signed transaction (a
+/// deposit's `from` is part of its encoding, so the hash already covers it).
+/// Returns the explanatory message so each call site can wrap it in the error
+/// shape it reports.
+pub(super) fn authenticate_transaction(
+    tx: &Transaction,
+    requested_tx_hash: B256,
+) -> std::result::Result<(), String> {
+    let envelope = tx.inner.inner.inner();
+    // Hash the consensus encoding directly: `trie_hash()`/`tx_hash()` return
+    // the envelope's *cached* hash, which an RPC deserialization seeds from the
+    // response's own `hash` field — the very value being authenticated.
+    let computed = keccak256(envelope.encoded_2718());
+    if computed != requested_tx_hash {
+        return Err(format!(
+            "the served transaction hashes to {computed}, but transaction {requested_tx_hash} \
+             was requested: the endpoint served a different transaction (an inconsistent \
+             backend, or a tampered capture)"
+        ));
+    }
+    let recovered = envelope.recover_signer().map_err(|e| {
+        format!(
+            "transaction {requested_tx_hash}: the served transaction's signature does not \
+             recover a signer ({e}): the endpoint served a corrupted transaction (an \
+             inconsistent backend, or a tampered capture)"
+        )
+    })?;
+    let served = tx.inner.inner.signer();
+    if recovered != served {
+        return Err(format!(
+            "transaction {requested_tx_hash}: the served `from` address {served} does not match \
+             the signer {recovered} recovered from the signature: the endpoint served an \
+             inconsistent transaction (a corrupted backend, or a tampered capture)"
+        ));
+    }
+    Ok(())
 }
 
 /// Check that a fetched receipt describes the block the replay executed.

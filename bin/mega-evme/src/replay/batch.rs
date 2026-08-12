@@ -1079,6 +1079,14 @@ where
                     message: e.to_string(),
                 })?
                 .ok_or(ReplayError::BlockBodyTransactionNull(*tx_hash))?;
+            // A served object that fails authentication is the same class as a
+            // null answer on a body-listed hash: the endpoint failed to deliver
+            // a transaction it claimed to include. Executing it instead would
+            // advance the block state on the wrong transaction, or report
+            // another transaction's outcome under a target hash.
+            verify::authenticate_transaction(&tx, *tx_hash).map_err(|message| {
+                ReplayError::BlockBodyTransactionFetch { tx_hash: *tx_hash, message }
+            })?;
 
             let is_target = target_set.contains(tx_hash);
             let start = Instant::now();

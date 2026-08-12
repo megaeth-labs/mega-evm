@@ -534,6 +534,10 @@ impl Cmd {
             .await
             .map_err(|e| ReplayError::RpcError(format!("Failed to fetch transaction: {e}")))?
             .ok_or_else(|| ReplayError::TransactionNotFound(tx_hash))?;
+        // Authenticate before trusting anything in the answer: the inclusion
+        // metadata read next, and the execution below, must describe the
+        // requested transaction rather than whatever the endpoint served.
+        verify::authenticate_transaction(&target_tx, tx_hash).map_err(ReplayError::RpcError)?;
         debug!(block_number = ?target_tx.block_number, "Transaction found");
 
         // Classify the target from its `(block_number, block_hash)` pair before
@@ -915,6 +919,12 @@ impl Cmd {
                 .await
                 .map_err(|e| ReplayError::RpcError(format!("RPC transport error: {e}")))?
                 .ok_or(ReplayError::BlockBodyTransactionNull(*tx_hash))?;
+            // A served object that fails authentication is the same class as a
+            // null answer on a body-listed hash: the endpoint failed to deliver
+            // a transaction it claimed to include.
+            verify::authenticate_transaction(&tx, *tx_hash).map_err(|message| {
+                ReplayError::BlockBodyTransactionFetch { tx_hash: *tx_hash, message }
+            })?;
             let outcome = block_executor
                 .run_transaction(tx.as_recovered())
                 .map_err(ReplayError::BlockExecutionError)?;

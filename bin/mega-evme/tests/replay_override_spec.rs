@@ -33,8 +33,16 @@ const BLOCK_NUMBER: u64 = 18_172_461;
 /// two worlds — historical and forced — visibly different.
 const MINI_REX_TIMESTAMP: u64 = 1_764_000_000;
 
-/// Hash of the replayed transaction, and the only transaction in the block.
-const TX_HASH: &str = "0x41d34e7e13dfe0f85da9d407e2b2c381955d8c7eed428b17dc82327b2616b000";
+/// Signature of the replayed transaction: a fixed, well-formed secp256k1 pair.
+///
+/// The replay authenticates every served transaction — its hash is recomputed
+/// from the encoding and its sender re-derived from the signature — so the mock
+/// cannot serve invented `hash`/`from` constants. The authentic identity is
+/// computed by [`tx_identity`] from the transaction being built; the sender is
+/// whatever address this signature recovers to for it, funded like every other
+/// account by the mock's blanket balance.
+const SIG_R: &str = "0xa19f0f1f52e2951452711b4f4aa5d177442c9a56abeb609b803fe2412ed24946";
+const SIG_S: &str = "0x7af21777b2e7d91c745d0077ba2726ee1bb75ccf00039a6218d64fdced768491";
 
 /// Hash of the replayed block.
 const BLOCK_HASH: &str = "0x2801837c261826beb8047e46139dfc4eb93ab5b3196ce23f312d3c7658262a62";
@@ -44,9 +52,6 @@ const PARENT_HASH: &str = "0xd482d481e9d11dd116ef6c41bf95ca608f159206c8f07900b1b
 
 /// Hash of the grandparent, so the parent block is a well-formed header.
 const GRANDPARENT_HASH: &str = "0x152b00e0c659a9ea0827f7d3b7666951c100bb6a6761a90e20ed7f79099a82e1";
-
-/// Sender of the replayed transaction. Funded by the mock's blanket balance.
-const SENDER: &str = "0x14112799a39f2905b901067d3cd4a1f63c1cebda";
 
 /// `SequencerRegistry`, deployed pre-block from Rex5 on.
 const SEQUENCER_REGISTRY: &str = "0x6342000000000000000000000000000000000006";
@@ -152,8 +157,42 @@ fn block_json(number: u64, hash: &str, parent_hash: &str, timestamp: u64, txs: V
     })
 }
 
+/// The authentic identity of the replayed transaction: `(hash, from)`.
+///
+/// Builds the same consensus object the replay will deserialize from
+/// [`tx_json`], hashes its encoding, and recovers its signer — the two values
+/// the replay authenticates the served answer against.
+fn tx_identity(chain_id: u64, to: &str, input: &str) -> (String, String) {
+    use mega_evm::{
+        alloy_consensus::{transaction::SignerRecoverable, SignableTransaction, TxEip1559},
+        op_alloy_consensus::OpTxEnvelope,
+    };
+
+    let tx = TxEip1559 {
+        chain_id,
+        nonce: 0,
+        gas_limit: 0x249f0,
+        max_fee_per_gas: 0x200b20,
+        max_priority_fee_per_gas: 0x186a0,
+        to: alloy_primitives::TxKind::Call(to.parse().expect("`to` is an address")),
+        value: alloy_primitives::U256::ZERO,
+        access_list: Default::default(),
+        input: input.parse::<alloy_primitives::Bytes>().expect("calldata is hex"),
+    };
+    let signature = alloy_primitives::Signature::new(
+        SIG_R.parse().expect("r is a hex word"),
+        SIG_S.parse().expect("s is a hex word"),
+        false,
+    );
+    let signed = tx.into_signed(signature);
+    let hash = format!("{:#x}", signed.hash());
+    let from = OpTxEnvelope::Eip1559(signed).recover_signer().expect("signature recovers");
+    (hash, format!("{from:#x}"))
+}
+
 /// The replayed transaction: an EIP-1559 call to `to` with `input` as calldata.
 fn tx_json(chain_id: u64, to: &str, input: &str) -> Value {
+    let (hash, from) = tx_identity(chain_id, to, input);
     json!({
         "type": "0x2",
         "chainId": format!("0x{chain_id:x}"),
@@ -166,16 +205,23 @@ fn tx_json(chain_id: u64, to: &str, input: &str) -> Value {
         "value": "0x0",
         "accessList": [],
         "input": input,
-        "r": "0xa19f0f1f52e2951452711b4f4aa5d177442c9a56abeb609b803fe2412ed24946",
-        "s": "0x7af21777b2e7d91c745d0077ba2726ee1bb75ccf00039a6218d64fdced768491",
+        "r": SIG_R,
+        "s": SIG_S,
         "yParity": "0x0",
         "v": "0x0",
-        "hash": TX_HASH,
-        "from": SENDER,
+        "hash": hash,
+        "from": from,
         "blockHash": BLOCK_HASH,
         "blockNumber": format!("0x{BLOCK_NUMBER:x}"),
         "transactionIndex": "0x0",
     })
+}
+
+/// A mock chain and the hash of the one transaction it serves, which is what
+/// the replay is pointed at.
+struct MockChain {
+    server: MockRpcServer,
+    tx_hash: String,
 }
 
 /// A mock endpoint serving a one-transaction mainnet block at `timestamp`,
@@ -185,19 +231,20 @@ fn tx_json(chain_id: u64, to: &str, input: &str) -> Value {
 /// no code, and zero storage. That leaves the pre-block deploys as the only
 /// source of code on the forked state, which is what makes "did this spec's
 /// predeploys land" observable from the transaction's own return data.
-async fn mock_chain(to: &str, input: &str, timestamp: u64) -> MockRpcServer {
+async fn mock_chain(to: &str, input: &str, timestamp: u64) -> MockChain {
     mock_chain_with_id(CHAIN_ID, to, input, timestamp).await
 }
 
 /// [`mock_chain`], on the chain id of the caller's choosing.
-async fn mock_chain_with_id(chain_id: u64, to: &str, input: &str, timestamp: u64) -> MockRpcServer {
+async fn mock_chain_with_id(chain_id: u64, to: &str, input: &str, timestamp: u64) -> MockChain {
+    let (tx_hash, _) = tx_identity(chain_id, to, input);
     let server = MockRpcServer::start().await;
     server.respond_eth_chain_id(chain_id, 1).await;
     server
         .respond_method_params_json(
             "eth_getBlockByNumber",
             json!([format!("0x{BLOCK_NUMBER:x}"), false]),
-            block_json(BLOCK_NUMBER, BLOCK_HASH, PARENT_HASH, timestamp, vec![TX_HASH]),
+            block_json(BLOCK_NUMBER, BLOCK_HASH, PARENT_HASH, timestamp, vec![&tx_hash]),
             2,
         )
         .await;
@@ -220,13 +267,13 @@ async fn mock_chain_with_id(chain_id: u64, to: &str, input: &str, timestamp: u64
             4,
         )
         .await;
-    server
+    MockChain { server, tx_hash }
 }
 
 /// Replay the mock's transaction, optionally with extra flags.
-fn replay(server: &MockRpcServer, args: &[&str]) -> Run {
+fn replay(chain: &MockChain, args: &[&str]) -> Run {
     let output = Command::new(env!("CARGO_BIN_EXE_mega-evme"))
-        .args(["replay", TX_HASH, "--rpc", &server.uri()])
+        .args(["replay", &chain.tx_hash, "--rpc", &chain.server.uri()])
         .args(["--rpc.no-cache-file", "--rpc.max-retries", "0", "--rpc.backoff-ms", "1", "--json"])
         .args(args)
         .output()

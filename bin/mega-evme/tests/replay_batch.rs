@@ -163,10 +163,73 @@ fn envelope_dropping_transaction(name: &str, tx_hash: &str) -> std::path::PathBu
     path
 }
 
+/// Write a copy of the envelope whose `eth_getBalance` answer for `tx_hash`'s
+/// sender at its parent block is zero, and return its path.
+///
+/// The served transaction stays byte-identical — it still authenticates against
+/// the requested hash — but the block executor rejects it (the sender cannot
+/// fund its gas) and aborts the block: an execution-class abort raised through
+/// served *state*, which carries no proof and cannot be authenticated the way a
+/// consensus object can.
+fn envelope_with_drained_sender(name: &str, tx_hash: &str) -> std::path::PathBuf {
+    let mut envelope: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(envelope()).expect("read envelope"))
+            .expect("parse envelope");
+    // The transaction's own response names its sender and inclusion block.
+    let marker = format!("\"hash\":\"{tx_hash}\"");
+    let mut sender_block: Option<(String, u64)> = None;
+    for entry in envelope["cache"].as_array().expect("cache entries") {
+        let value = entry["value"].as_str().expect("entry value is a string");
+        if !value.contains(&marker) {
+            continue;
+        }
+        let response: serde_json::Value =
+            serde_json::from_str(value).expect("parse transaction response");
+        let result = &response["result"];
+        let from = result["from"].as_str().expect("transaction `from`").to_string();
+        let number = u64::from_str_radix(
+            result["blockNumber"].as_str().expect("blockNumber").trim_start_matches("0x"),
+            16,
+        )
+        .expect("hex block number");
+        assert!(
+            sender_block.replace((from, number)).is_none(),
+            "the envelope must hold exactly one response for {tx_hash}"
+        );
+    }
+    let (from, number) = sender_block.expect("the envelope must hold the transaction");
+    // The state fork reads the sender at the parent block. The entry is keyed
+    // by the same `method\x00params` digest the capturing transport writes, so
+    // the key is recomputed rather than searched for by value.
+    let params = format!("[\"{from}\",\"0x{:x}\"]", number - 1);
+    let key = format!("{}", alloy_primitives::keccak256(format!("eth_getBalance\x00{params}")));
+    let mut doctored = 0;
+    for entry in envelope["cache"].as_array_mut().expect("cache entries").iter_mut() {
+        if entry["key"].as_str() != Some(key.as_str()) {
+            continue;
+        }
+        let mut response: serde_json::Value =
+            serde_json::from_str(entry["value"].as_str().expect("entry value is a string"))
+                .expect("parse balance response");
+        response["result"] = serde_json::Value::String("0x0".into());
+        entry["value"] = serde_json::Value::String(response.to_string());
+        doctored += 1;
+    }
+    assert_eq!(doctored, 1, "the envelope must hold the sender's parent-block balance");
+
+    let path =
+        std::env::temp_dir().join(format!("mega_evme_batch_{name}_{}.json", std::process::id()));
+    std::fs::write(&path, envelope.to_string()).expect("write doctored envelope");
+    path
+}
+
 /// Write a copy of the envelope whose `eth_getTransactionByHash` response for
-/// `tx_hash` still returns the transaction object, but with `gas` set to `0x0`
-/// so execution/setup fails (intrinsic gas / validation) rather than a missing
-/// lookup. Models an executor abort mid-block.
+/// `tx_hash` still returns the transaction object, but with `gas` set to `0x0`.
+///
+/// The tampered body no longer hashes to the requested hash, so the replay must
+/// refuse to execute it: authentication fails before the transaction reaches
+/// the block executor. Models a tampered capture (or a corrupted backend)
+/// serving a body that does not match the hash it was asked for.
 fn envelope_with_zero_gas_transaction(name: &str, tx_hash: &str) -> std::path::PathBuf {
     let mut envelope: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(envelope()).expect("read envelope"))
@@ -183,6 +246,43 @@ fn envelope_with_zero_gas_transaction(name: &str, tx_hash: &str) -> std::path::P
         let result = response.get_mut("result").expect("transaction result");
         assert!(result.is_object(), "expected a transaction object for {tx_hash}");
         result["gas"] = serde_json::Value::String("0x0".into());
+        entry["value"] = serde_json::Value::String(response.to_string());
+        doctored += 1;
+    }
+    assert_eq!(doctored, 1, "the envelope must hold exactly one response for {tx_hash}");
+
+    let path =
+        std::env::temp_dir().join(format!("mega_evme_batch_{name}_{}.json", std::process::id()));
+    std::fs::write(&path, envelope.to_string()).expect("write doctored envelope");
+    path
+}
+
+/// Write a copy of the envelope whose `eth_getTransactionByHash` response for
+/// `tx_hash` keeps the signed body byte-identical but reports a different
+/// `from` address, and return its path.
+///
+/// A signed transaction's `from` is not part of its encoding — it is derived
+/// from the signature — so the tampered answer still hashes to the requested
+/// hash. Executing it would run the transaction under the wrong sender;
+/// authentication must instead re-derive the signer and reject the served
+/// `from`.
+fn envelope_with_reassigned_sender(name: &str, tx_hash: &str) -> std::path::PathBuf {
+    let mut envelope: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(envelope()).expect("read envelope"))
+            .expect("parse envelope");
+    let marker = format!("\"hash\":\"{tx_hash}\"");
+    let mut doctored = 0;
+    for entry in envelope["cache"].as_array_mut().expect("cache entries").iter_mut() {
+        let value = entry["value"].as_str().expect("entry value is a string");
+        if !value.contains(&marker) {
+            continue;
+        }
+        let mut response: serde_json::Value =
+            serde_json::from_str(value).expect("parse transaction response");
+        let result = response.get_mut("result").expect("transaction result");
+        assert!(result.is_object(), "expected a transaction object for {tx_hash}");
+        result["from"] =
+            serde_json::Value::String("0x000000000000000000000000000000000000dead".into());
         entry["value"] = serde_json::Value::String(response.to_string());
         doctored += 1;
     }
@@ -543,14 +643,14 @@ fn test_replay_single_transaction_preceding_transport_error_is_an_rpc_failure() 
 /// failure for that transaction only: every target behind it is unanswered
 /// (`rpc`), not blamed as execution.
 ///
-/// Doctors the envelope so a mid-block type-0x2 call has gas `0x0` — the lookup
-/// succeeds, but the block executor rejects it as an invalid transaction
-/// (intrinsic/call gas) and aborts the block — an execution-class error, not
-/// `TransactionNotFound`.
+/// Doctors the sender's parent-block balance to zero — the lookup succeeds and
+/// the transaction authenticates, but the block executor rejects it as an
+/// invalid transaction (the sender cannot fund its gas) and aborts the block —
+/// an execution-class error, not `TransactionNotFound`.
 #[test]
 fn test_replay_block_sweeps_targets_behind_execution_abort_as_rpc() {
     let (aborting, aborting_index) = EXEC_ABORT_TX;
-    let path = envelope_with_zero_gas_transaction("exec_abort_block", aborting);
+    let path = envelope_with_drained_sender("exec_abort_block", aborting);
 
     let (stdout, code) =
         replay_envelope_with_code(&path, &["--block", &BLOCK.to_string(), "--json"]);
@@ -598,15 +698,15 @@ fn test_replay_block_sweeps_targets_behind_execution_abort_as_rpc() {
 /// Per-target totals stay truthful ("2 of 2"): the abort is not a synthetic
 /// third target failure.
 ///
-/// `EXEC_ABORT_TX` is doctored and kept out of the `--tx-file` target list; only
-/// later targets of the same block are requested.
+/// `EXEC_ABORT_TX`'s sender is drained and the transaction kept out of the
+/// `--tx-file` target list; only later targets of the same block are requested.
 #[test]
 fn test_replay_tx_file_non_target_execution_abort_exits_execution() {
     let (aborting, aborting_index) = EXEC_ABORT_TX;
     let (target_a, target_a_index) = BLOCK_TXS[1];
     let (target_b, _) = BLOCK_TXS[2];
     assert!(target_a_index > aborting_index, "targets must sit behind the non-target aborter");
-    let path = envelope_with_zero_gas_transaction("non_target_exec_abort", aborting);
+    let path = envelope_with_drained_sender("non_target_exec_abort", aborting);
     let list = format!("{target_a}\n{target_b}\n");
     let list_path = std::env::temp_dir()
         .join(format!("mega_evme_tx_list_non_target_exec_{}.txt", std::process::id()));
@@ -646,6 +746,94 @@ fn test_replay_tx_file_non_target_execution_abort_exits_execution() {
             message.contains("2 of 2 target transaction(s) failed"),
         "stderr/stdout aggregate must not count the non-target abort as a target: \
          stderr={stderr}\nmessage={message}"
+    );
+}
+
+/// A served transaction whose body does not hash to the requested hash must
+/// not execute: the batch refuses it as a failed body-listed fetch (`rpc`) and
+/// sweeps the targets behind it, instead of advancing the block state on the
+/// wrong transaction.
+///
+/// Doctors a mid-block transaction's `gas` — any body change breaks the hash.
+#[test]
+fn test_replay_block_tampered_transaction_body_fails_authentication_as_rpc() {
+    let (tampered, tampered_index) = EXEC_ABORT_TX;
+    let path = envelope_with_zero_gas_transaction("tampered_body_block", tampered);
+
+    let (stdout, code) =
+        replay_envelope_with_code(&path, &["--block", &BLOCK.to_string(), "--json"]);
+    let _ = std::fs::remove_file(&path);
+    let lines = ndjson(&stdout);
+
+    assert_eq!(lines.len(), BLOCK_TX_COUNT, "every target is still reported exactly once");
+    for (index, line) in lines.iter().enumerate() {
+        let index = index as u64;
+        if index < tampered_index {
+            assert!(
+                line.get("error").is_none(),
+                "targets before the tampered fetch replay: {line}"
+            );
+            continue;
+        }
+        assert_eq!(
+            line["error"]["kind"].as_str(),
+            Some("rpc"),
+            "a tampered or swept target went unanswered — never an execution verdict: {line}"
+        );
+    }
+    let message = lines[tampered_index as usize]["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("the endpoint served a different transaction"),
+        "the tampered target must name the authentication failure: {message}"
+    );
+
+    assert_eq!(code, Some(3), "an unauthenticated body-listed fetch exits 3");
+    assert_eq!(run_error(&stdout)["error"]["kind"].as_str(), Some("rpc-failure"));
+}
+
+/// A served transaction whose signed body authenticates but whose `from` field
+/// does not match the signature's signer must be refused: executing it would
+/// run the transaction under the wrong sender.
+#[test]
+fn test_replay_single_transaction_reassigned_sender_fails_authentication() {
+    let (target, _) = BLOCK_TXS[1];
+    let path = envelope_with_reassigned_sender("single_reassigned_from", target);
+
+    let (stdout, code) = replay_envelope_with_code(&path, &["--json", target]);
+    let _ = std::fs::remove_file(&path);
+
+    assert_eq!(code, Some(3), "an unauthenticated target fetch exits 3: {stdout}");
+    let error = single_run_error(&stdout);
+    assert_eq!(error["error"]["kind"].as_str(), Some("rpc-failure"));
+    let message = error["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("does not match the signer") && message.contains(target),
+        "the failure must name the sender mismatch and the transaction: {message}"
+    );
+}
+
+/// A tampered preceding transaction is refused before execution on the single
+/// path too: the target's pre-state depends on it, so the run fails as a failed
+/// body-listed fetch (`rpc`) naming the tampered hash.
+#[test]
+fn test_replay_single_transaction_tampered_preceding_fails_authentication() {
+    let (tampered, tampered_index) = EXEC_ABORT_TX;
+    let (target, target_index) = BLOCK_TXS[1];
+    assert!(target_index > tampered_index, "the tampered transaction must precede the target");
+    let path = envelope_with_zero_gas_transaction("single_tampered_preceding", tampered);
+
+    let (stdout, code) = replay_envelope_with_code(&path, &["--json", target]);
+    let _ = std::fs::remove_file(&path);
+
+    assert_eq!(code, Some(3), "an unauthenticated preceding fetch exits 3: {stdout}");
+    let error = single_run_error(&stdout);
+    assert_eq!(error["error"]["kind"].as_str(), Some("rpc-failure"));
+    let message = error["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("Block body lists transaction") &&
+            message.contains(tampered) &&
+            message.contains("served a different transaction"),
+        "the failure must name the tampered body-listed fetch: {message}"
     );
 }
 

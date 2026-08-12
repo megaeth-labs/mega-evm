@@ -45,10 +45,11 @@ pub enum EvmeError {
 
     /// The block body listed this hash, but fetching the transaction failed.
     ///
-    /// A transport error or offline cache miss on a body-listed hash is the same
-    /// class as a null answer: the endpoint failed to deliver a transaction it
-    /// claimed to include, rather than answering "unknown hash" about a user
-    /// query. The hash is carried so abort output can name the failing fetch.
+    /// A transport error, an offline cache miss, or a served transaction that
+    /// fails authentication against the requested hash is the same class as a
+    /// null answer: the endpoint failed to deliver a transaction it claimed to
+    /// include, rather than answering "unknown hash" about a user query. The
+    /// hash is carried so abort output can name the failing fetch.
     #[error("Block body lists transaction {tx_hash} but fetching it failed: {message}")]
     BlockBodyTransactionFetch {
         /// Hash the block body listed and the lookup failed for.
