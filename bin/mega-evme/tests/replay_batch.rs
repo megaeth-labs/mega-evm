@@ -48,6 +48,12 @@ const BLOCK_TXS: [(&str, u64); 3] = [
 const EXEC_ABORT_TX: (&str, u64) =
     ("0xa637d68cda9423d67826e008b1c90295193f30f19cd74a6f4acf54022d56cae2", 2);
 
+/// Non-target body transaction between `BLOCK_TXS[1]` (index 3) and
+/// `BLOCK_TXS[2]` (index 22). Used to abort after an early dumpable target
+/// without putting the aborter on the reported target list.
+const MID_BLOCK_NON_TARGET: (&str, u64) =
+    ("0x63e032fdff2676824fd6a71df09d88f62146d07effc7e4ed7e246034df2e9b22", 4);
+
 /// Last transaction of the envelope's second block.
 const OTHER_BLOCK: u64 = 22_945_853;
 const OTHER_BLOCK_TX: &str = "0x18302160f2395069a44e1654d173fa9eed95ead8f922f12bfe07b6bdcc0a14f2";
@@ -570,6 +576,163 @@ fn test_replay_block_sweeps_targets_behind_execution_abort_as_rpc() {
     // the unanswered ones.
     assert_eq!(code, Some(1), "a definitive execution failure exits 1");
     assert_eq!(run_error(&stdout)["error"]["kind"].as_str(), Some("execution-error"));
+}
+
+/// A non-target deterministic executor abort still exits 1: swept targets stay
+/// `rpc` ("unanswered"), but the run tallies the abort's own class so a
+/// retryable exit is not reported for a permanent failure.
+///
+/// `EXEC_ABORT_TX` is doctored and kept out of the `--tx-file` target list; only
+/// later targets of the same block are requested.
+#[test]
+fn test_replay_tx_file_non_target_execution_abort_exits_execution() {
+    let (aborting, aborting_index) = EXEC_ABORT_TX;
+    let (target_a, target_a_index) = BLOCK_TXS[1];
+    let (target_b, _) = BLOCK_TXS[2];
+    assert!(target_a_index > aborting_index, "targets must sit behind the non-target aborter");
+    let path = envelope_with_zero_gas_transaction("non_target_exec_abort", aborting);
+    let list = format!("{target_a}\n{target_b}\n");
+    let list_path = std::env::temp_dir()
+        .join(format!("mega_evme_tx_list_non_target_exec_{}.txt", std::process::id()));
+    std::fs::write(&list_path, list).expect("write tx list");
+
+    let (stdout, code) =
+        replay_envelope_with_code(&path, &["--tx-file", list_path.to_str().unwrap(), "--json"]);
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(&list_path);
+    let lines = ndjson(&stdout);
+
+    assert_eq!(lines.len(), 2, "only requested targets are reported: {stdout}");
+    for line in &lines {
+        assert_eq!(
+            line["error"]["kind"].as_str(),
+            Some("rpc"),
+            "swept target stays unanswered: {line}"
+        );
+        assert!(
+            line["error"]["message"].as_str().is_some_and(|m| {
+                m.contains(aborting) || m.contains("aborted") || m.contains("Block replay")
+            }),
+            "the message must name the non-target abort: {line}"
+        );
+    }
+
+    assert_eq!(code, Some(1), "a non-target execution abort exits 1, not 3");
+    assert_eq!(run_error(&stdout)["error"]["kind"].as_str(), Some("execution-error"));
+}
+
+/// A non-target transport abort (cache miss) exits 3 and names the failing
+/// fetch so swept entries are distinguishable from the cause.
+#[test]
+fn test_replay_tx_file_non_target_transport_abort_names_hash_and_exits_rpc() {
+    let (aborting, aborting_index) = EXEC_ABORT_TX;
+    let (target_a, target_a_index) = BLOCK_TXS[1];
+    let (target_b, _) = BLOCK_TXS[2];
+    assert!(target_a_index > aborting_index, "targets must sit behind the non-target aborter");
+    let path = envelope_dropping_transaction("non_target_transport_abort", aborting);
+    let list = format!("{target_a}\n{target_b}\n");
+    let list_path = std::env::temp_dir()
+        .join(format!("mega_evme_tx_list_non_target_rpc_{}.txt", std::process::id()));
+    std::fs::write(&list_path, list).expect("write tx list");
+
+    let (stdout, code) =
+        replay_envelope_with_code(&path, &["--tx-file", list_path.to_str().unwrap(), "--json"]);
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(&list_path);
+    let lines = ndjson(&stdout);
+
+    assert_eq!(lines.len(), 2, "only requested targets are reported: {stdout}");
+    for line in &lines {
+        assert_eq!(
+            line["error"]["kind"].as_str(),
+            Some("rpc"),
+            "swept target stays unanswered: {line}"
+        );
+        assert!(
+            line["error"]["message"].as_str().is_some_and(|m| m.contains(aborting)),
+            "the abort message must name the failing fetch: {line}"
+        );
+    }
+
+    assert_eq!(code, Some(3), "a transport abort exits 3");
+    assert_eq!(run_error(&stdout)["error"]["kind"].as_str(), Some("rpc-failure"));
+}
+
+/// With `--dump-fixture-dir`, a target that executed and drafted a fixture
+/// before a later transport abort keeps its result line; only the fixture field
+/// fails, and that failure inherits the abort's `rpc` class so the run exits 3
+/// rather than converting the discard into an execution-class error.
+#[test]
+fn test_replay_tx_file_dump_fixture_inherits_transport_abort_class() {
+    let (aborting, aborting_index) = MID_BLOCK_NON_TARGET;
+    // Early non-deposit target builds a Ready draft; a later target forces the
+    // job past the non-target aborter between them.
+    let (early, early_index) = BLOCK_TXS[1];
+    let (late, late_index) = BLOCK_TXS[2];
+    assert!(early_index < aborting_index && aborting_index < late_index);
+
+    let path = envelope_dropping_transaction("fixture_inherits_rpc_abort", aborting);
+    let list = format!("{early}\n{late}\n");
+    let list_path = std::env::temp_dir()
+        .join(format!("mega_evme_tx_list_fixture_abort_{}.txt", std::process::id()));
+    std::fs::write(&list_path, list).expect("write tx list");
+    let dir =
+        std::env::temp_dir().join(format!("mega_evme_fixture_abort_dir_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create dump dir");
+
+    let (stdout, code) = replay_envelope_with_code(
+        &path,
+        &[
+            "--tx-file",
+            list_path.to_str().unwrap(),
+            "--dump-fixture-dir",
+            dir.to_str().unwrap(),
+            "--json",
+        ],
+    );
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(&list_path);
+    let _ = std::fs::remove_dir_all(&dir);
+    let lines = ndjson(&stdout);
+
+    assert_eq!(lines.len(), 2, "both targets are reported: {stdout}");
+
+    let early_line = lines.iter().find(|l| l["tx_hash"] == early).expect("early target line");
+    assert!(
+        early_line.get("error").is_none(),
+        "the early target keeps its execution result line: {early_line}"
+    );
+    assert!(
+        early_line["success"].is_boolean(),
+        "result fields are present on the early target: {early_line}"
+    );
+    let fixture = &early_line["fixture"];
+    assert!(
+        fixture["error"].is_string(),
+        "the drafted fixture must report the abort (not a skip): {early_line}"
+    );
+    assert!(
+        fixture["error"].as_str().is_some_and(|m| m.contains("aborted") || m.contains("discarded")),
+        "fixture error names the abort: {early_line}"
+    );
+    assert!(fixture.get("path").is_none(), "no fixture file is written after abort");
+    assert!(fixture.get("skipped").is_none(), "abort discard is an error, not a skip");
+
+    let late_line = lines.iter().find(|l| l["tx_hash"] == late).expect("late target line");
+    assert_eq!(
+        late_line["error"]["kind"].as_str(),
+        Some("rpc"),
+        "the late target is swept as unanswered: {late_line}"
+    );
+    assert!(
+        late_line["error"]["message"].as_str().is_some_and(|m| m.contains(aborting)),
+        "swept message names the failing fetch: {late_line}"
+    );
+
+    // Abort is transport-class; fixture discard inherits it — not exit 1.
+    assert_eq!(code, Some(3), "transport abort with fixture discard exits 3");
+    assert_eq!(run_error(&stdout)["error"]["kind"].as_str(), Some("rpc-failure"));
 }
 
 /// Targets swept up by an abort are reported in block transaction-index order,

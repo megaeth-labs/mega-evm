@@ -142,12 +142,14 @@ impl ExitCode {
         match err {
             // The endpoint never answered: unreachable, transport-level
             // failure, or an offline replay file without the response.
-            // `BlockBodyTransactionNull` is the same class: the block body
-            // already listed the hash, so a null lookup is an inconsistent
-            // endpoint rather than a definitive unknown transaction.
+            // `BlockBodyTransactionNull` / `BlockBodyTransactionFetch` are the
+            // same class: the block body already listed the hash, so a null or
+            // failed lookup is an inconsistent endpoint rather than a
+            // definitive unknown transaction.
             EvmeError::RpcTransportError(_) |
             EvmeError::RpcError(_) |
-            EvmeError::BlockBodyTransactionNull(_) => Self::RpcFailure,
+            EvmeError::BlockBodyTransactionNull(_) |
+            EvmeError::BlockBodyTransactionFetch { .. } => Self::RpcFailure,
             // A block error the EVM raised because a state read failed is that
             // read's failure, not an execution result: classify it by its
             // cause, so an endpoint that died mid-execution still reports the
@@ -308,6 +310,10 @@ mod tests {
                 alloy_provider::transport::TransportErrorKind::custom_str("connection refused"),
             ),
             EvmeError::BlockBodyTransactionNull(B256::ZERO),
+            EvmeError::BlockBodyTransactionFetch {
+                tx_hash: B256::ZERO,
+                message: "cache miss in offline replay file".to_string(),
+            },
         ] {
             assert_eq!(
                 ExitCode::from_evme_error(&err),

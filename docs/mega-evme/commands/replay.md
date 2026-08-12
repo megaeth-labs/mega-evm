@@ -140,10 +140,12 @@ With [`--dump-fixture-dir`](#--dump-fixture-dir-dir), each result line additiona
 ### Exit Status
 
 A batch run exits `0` when every requested transaction produced an execution result and nothing the run was asked to do failed, and non-zero otherwise — see [Exit codes](../overview.md#exit-codes) for how the failure classes are ranked.
-Fixture skips (fidelity gate, BLOCKHASH readers, unsupported shapes) are not failures and do not fail the run; a fixture the run was asked to write and could not is an execution-class failure of its target.
+Fixture skips (fidelity gate, BLOCKHASH readers, unsupported shapes) are not failures and do not fail the run; a fixture construction or write failure is an execution-class failure of its target.
+When a mid-block abort discards a drafted fixture, that fixture error inherits the abort's class (so a transport abort still exits `3`).
 The NDJSON stream is written to stdout in both cases; diagnostics go to stderr.
 
-The exit code can understate a failure in one case: when the transaction that aborts a block is not itself a target, no target can claim the abort's own class, so every target is reported as `rpc` and the run exits `3` — "the question went unanswered" — even if the underlying cause was a deterministic execution failure that retrying will not fix.
+Swept targets behind an abort always report as `rpc` ("unanswered").
+When the aborting transaction is not itself a target, the run still tallies the abort's own class so the process exit reflects the root cause — a non-target executor abort exits `1`, a transport abort exits `3`.
 `--block 0` is rejected as invalid input; a block that genuinely holds no transactions produces no stdout lines, exits `0`, and says so on stderr.
 
 ### Examples

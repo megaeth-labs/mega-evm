@@ -93,22 +93,52 @@ struct FixtureReport {
     /// Why the fixture was not written for this target.
     #[serde(skip_serializing_if = "Option::is_none")]
     skipped: Option<String>,
-    /// Why writing the fixture failed. Counts as an execution-class failure.
+    /// Why writing the fixture failed.
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+    /// Batch tally class for [`Self::error`]. Construction and write failures
+    /// are execution-class; a draft discarded because the block aborted inherits
+    /// the abort's class so a transient RPC abort does not become exit 1.
+    /// Not serialized: the wire shape stays `path` / `skipped` / `error`.
+    #[serde(skip)]
+    error_kind: BatchErrorKind,
 }
 
 impl FixtureReport {
     fn written(path: &Path) -> Self {
-        Self { path: Some(path.display().to_string()), skipped: None, error: None }
+        Self {
+            path: Some(path.display().to_string()),
+            skipped: None,
+            error: None,
+            error_kind: BatchErrorKind::Execution,
+        }
     }
 
     fn skipped(reason: impl Into<String>) -> Self {
-        Self { path: None, skipped: Some(reason.into()), error: None }
+        Self {
+            path: None,
+            skipped: Some(reason.into()),
+            error: None,
+            error_kind: BatchErrorKind::Execution,
+        }
     }
 
+    /// Construction or write failure of this target's fixture (execution-class).
     fn error(message: impl Into<String>) -> Self {
-        Self { path: None, skipped: None, error: Some(message.into()) }
+        Self {
+            path: None,
+            skipped: None,
+            error: Some(message.into()),
+            error_kind: BatchErrorKind::Execution,
+        }
+    }
+
+    /// Fixture discarded because the block aborted after the draft was built.
+    ///
+    /// The target keeps its execution result; only the fixture field fails, and
+    /// the failure class matches the abort so the run exit reflects the cause.
+    fn abort_error(message: impl Into<String>, kind: BatchErrorKind) -> Self {
+        Self { path: None, skipped: None, error: Some(message.into()), error_kind: kind }
     }
 
     /// Whether the fixture the run was asked to write could not be written.
@@ -265,9 +295,33 @@ impl BatchTally {
             }
         }
         // A fixture the run was asked to write and could not is a failure of
-        // that target, even though its replay produced a result.
-        if fixture.is_some_and(FixtureReport::is_error) {
-            self.counts.execution += 1;
+        // that target, even though its replay produced a result. Construction
+        // and write failures are execution-class; an abort-inherited discard
+        // uses the abort's class (see [`FixtureReport::abort_error`]).
+        if let Some(fixture) = fixture.filter(|f| f.is_error()) {
+            match fixture.error_kind {
+                BatchErrorKind::Rpc => self.counts.rpc += 1,
+                BatchErrorKind::NotFound | BatchErrorKind::Pending | BatchErrorKind::Execution => {
+                    self.counts.execution += 1
+                }
+            }
+        }
+    }
+
+    /// Count a mid-block abort whose root-cause class is not already carried by
+    /// a per-target failure entry.
+    ///
+    /// Swept targets always stay `rpc` ("unanswered"). When the aborting
+    /// transaction is not itself a reported target, that class would otherwise
+    /// be lost and a deterministic executor abort would exit 3. The abort is
+    /// tallied once without emitting an extra NDJSON line or incrementing
+    /// `reported`.
+    fn record_uncounted_abort(&mut self, kind: BatchErrorKind) {
+        match kind {
+            BatchErrorKind::Rpc => self.counts.rpc += 1,
+            BatchErrorKind::NotFound | BatchErrorKind::Pending | BatchErrorKind::Execution => {
+                self.counts.execution += 1
+            }
         }
     }
 
@@ -461,8 +515,8 @@ where
     };
 
     for job in jobs {
-        let entries = replay_block(provider, chain_id, job, external_envs.clone(), &report).await;
-        for entry in entries {
+        let outcome = replay_block(provider, chain_id, job, external_envs.clone(), &report).await;
+        for entry in outcome.entries {
             if let BatchEntry::Executed(tx) = &entry {
                 match &tx.fixture {
                     Some(fixture) if fixture.path.is_some() => fixtures_written += 1,
@@ -473,6 +527,10 @@ where
             }
             tally.record(&entry);
             emit(&entry, report.json);
+        }
+        // Root-cause class of a non-target abort is not on any per-target line.
+        if let Some(kind) = outcome.uncounted_abort {
+            tally.record_uncounted_abort(kind);
         }
     }
 
@@ -577,6 +635,23 @@ where
     (jobs, failures)
 }
 
+/// Outcome of replaying one block's targets.
+struct BlockReplayOutcome {
+    /// One entry per target of the job (executed or failed).
+    entries: Vec<BatchEntry>,
+    /// Root-cause class of a mid-block abort that no reported entry carries.
+    ///
+    /// Present when the aborting transaction is not a target: swept targets stay
+    /// `rpc`, and this class is tallied so the run exit reflects the abort.
+    uncounted_abort: Option<BatchErrorKind>,
+}
+
+impl BlockReplayOutcome {
+    fn entries_only(entries: Vec<BatchEntry>) -> Self {
+        Self { entries, uncounted_abort: None }
+    }
+}
+
 /// Replay one block, reporting an entry for every target it was asked about.
 ///
 /// The block is executed exactly once: every transaction runs in order, and each
@@ -595,7 +670,7 @@ async fn replay_block<P>(
     job: BlockJob,
     external_envs: EvmeExternalEnvs,
     report: &ReportArgs,
-) -> Vec<BatchEntry>
+) -> BlockReplayOutcome
 where
     P: Provider<op_alloy_network::Optimism> + Clone + std::fmt::Debug,
 {
@@ -606,11 +681,11 @@ where
     let target_hashes = || targets.iter().map(|t| t.hash);
 
     if number == 0 {
-        return fail_all(
+        return BlockReplayOutcome::entries_only(fail_all(
             target_hashes(),
             BatchErrorKind::Rpc,
             "Block 0 has no parent block to fork from",
-        );
+        ));
     }
 
     let block = match block {
@@ -618,14 +693,22 @@ where
         None => match fetch_block(provider, number).await {
             Ok(block) => block,
             Err(e) => {
-                return fail_all(target_hashes(), BatchErrorKind::Rpc, &e.to_string());
+                return BlockReplayOutcome::entries_only(fail_all(
+                    target_hashes(),
+                    BatchErrorKind::Rpc,
+                    &e.to_string(),
+                ));
             }
         },
     };
     let parent_block = match fetch_block(provider, number - 1).await {
         Ok(block) => block,
         Err(e) => {
-            return fail_all(target_hashes(), BatchErrorKind::Rpc, &e.to_string());
+            return BlockReplayOutcome::entries_only(fail_all(
+                target_hashes(),
+                BatchErrorKind::Rpc,
+                &e.to_string(),
+            ));
         }
     };
 
@@ -649,7 +732,11 @@ where
              block describes a different chain than the block being replayed (reorg in progress, \
              or a load-balanced endpoint serving divergent views); retry once the chain settles"
         );
-        return fail_all(target_hashes(), BatchErrorKind::Rpc, &message);
+        return BlockReplayOutcome::entries_only(fail_all(
+            target_hashes(),
+            BatchErrorKind::Rpc,
+            &message,
+        ));
     }
 
     // Per-target inclusion and membership guards. `--tx-file` resolved each
@@ -698,7 +785,7 @@ where
     // Every target either failed an inclusion/membership check or was a
     // `--block` target already taken from the body. Nothing left to execute.
     if active.is_empty() {
-        return entries;
+        return BlockReplayOutcome::entries_only(entries);
     }
     let targets = active;
 
@@ -733,13 +820,23 @@ where
     let cfg_env = match chain_args.create_cfg_env() {
         Ok(cfg) => cfg,
         Err(e) => {
-            return fail_remaining(&targets, entries, BatchErrorKind::Execution, &e.to_string());
+            return BlockReplayOutcome::entries_only(fail_remaining(
+                &targets,
+                entries,
+                BatchErrorKind::Execution,
+                &e.to_string(),
+            ));
         }
     };
     let block_env = match retrieve_block_env(&block) {
         Ok(env) => env,
         Err(e) => {
-            return fail_remaining(&targets, entries, BatchErrorKind::Execution, &e.to_string());
+            return BlockReplayOutcome::entries_only(fail_remaining(
+                &targets,
+                entries,
+                BatchErrorKind::Execution,
+                &e.to_string(),
+            ));
         }
     };
     let executed_spec = cfg_env.spec;
@@ -747,7 +844,12 @@ where
 
     let Some(hardfork) = hardforks.hardfork(timestamp) else {
         let message = format!("No `MegaHardfork` active at block timestamp: {timestamp}");
-        return fail_remaining(&targets, entries, BatchErrorKind::Execution, &message);
+        return BlockReplayOutcome::entries_only(fail_remaining(
+            &targets,
+            entries,
+            BatchErrorKind::Execution,
+            &message,
+        ));
     };
     let block_limits =
         BlockLimits::from_hardfork_and_block_gas_limit(hardfork, block.header.gas_limit());
@@ -769,7 +871,12 @@ where
     {
         Ok(database) => database,
         Err(e) => {
-            return fail_remaining(&targets, entries, BatchErrorKind::Rpc, &e.to_string());
+            return BlockReplayOutcome::entries_only(fail_remaining(
+                &targets,
+                entries,
+                BatchErrorKind::Rpc,
+                &e.to_string(),
+            ));
         }
     };
 
@@ -781,7 +888,12 @@ where
 
     if let Err(e) = block_executor.apply_pre_execution_changes() {
         let error = ReplayError::BlockExecutionError(e);
-        return fail_remaining(&targets, entries, classify(&error), &error.to_string());
+        return BlockReplayOutcome::entries_only(fail_remaining(
+            &targets,
+            entries,
+            classify(&error),
+            &error.to_string(),
+        ));
     }
 
     let target_set: HashSet<B256> = targets.iter().copied().collect();
@@ -817,7 +929,10 @@ where
             let tx = provider
                 .get_transaction_by_hash(*tx_hash)
                 .await
-                .map_err(|e| ReplayError::RpcError(format!("RPC transport error: {e}")))?
+                .map_err(|e| ReplayError::BlockBodyTransactionFetch {
+                    tx_hash: *tx_hash,
+                    message: e.to_string(),
+                })?
                 .ok_or(ReplayError::BlockBodyTransactionNull(*tx_hash))?;
 
             let is_target = target_set.contains(tx_hash);
@@ -978,21 +1093,21 @@ where
                 // Materialize only when the block loop completed cleanly: a
                 // mid-block abort after this target built a Ready draft must
                 // not publish (or clobber) a fixture for a block that failed.
-                let fixture = target.fixture.map(|deferred| {
-                    if loop_result.is_ok() {
-                        materialize_deferred_fixture(deferred)
-                    } else {
-                        // Drop the ready draft without writing; the target still
-                        // reports its receipt below when finish succeeded.
-                        match deferred {
-                            DeferredFixture::Report(report) => report,
-                            DeferredFixture::Ready { path, .. } => FixtureReport::error(format!(
+                // Keep the execution result; only the fixture field fails, and
+                // it inherits the abort's class so a transient RPC abort exits 3.
+                let fixture = target.fixture.map(|deferred| match &loop_result {
+                    Ok(()) => materialize_deferred_fixture(deferred),
+                    Err(abort) => match deferred {
+                        DeferredFixture::Report(report) => report,
+                        DeferredFixture::Ready { path, .. } => FixtureReport::abort_error(
+                            format!(
                                 "fixture not written: block aborted before a clean finish \
-                                 (draft for {} was discarded)",
+                                 (draft for {} was discarded): {abort}",
                                 path.display()
-                            )),
-                        }
-                    }
+                            ),
+                            classify(abort),
+                        ),
+                    },
                 });
                 entries.push(BatchEntry::Executed(Box::new(ExecutedTx {
                     tx_hash: target.tx_hash,
@@ -1032,6 +1147,7 @@ where
         .chain(targets.iter().filter(|hash| !block_txs.contains(*hash)))
         .filter(|hash| !reported.contains(*hash));
 
+    let mut uncounted_abort = None;
     match &loop_result {
         Ok(()) => {
             // Active targets are already filtered for inclusion agreement; a
@@ -1054,10 +1170,13 @@ where
         Err(e) => {
             warn!(block = number, error = %e, "Aborted block replay; skipping its remaining targets");
             let aborting = aborting_tx_hash(e);
+            let root_kind = classify(e);
+            let mut root_on_target = false;
             for tx_hash in unreported {
                 if aborting == Some(*tx_hash) {
                     // The abort is this target's own answer.
-                    entries.push(failure(*tx_hash, classify(e), e.to_string()));
+                    root_on_target = true;
+                    entries.push(failure(*tx_hash, root_kind, e.to_string()));
                 } else {
                     // The abort belongs to another transaction of the block, so
                     // nothing was established about this target: it went
@@ -1069,10 +1188,37 @@ where
                     ));
                 }
             }
+            // When the aborter is not a reported target, no failure entry carries
+            // the abort's own class. Tallied separately so the run exit reflects
+            // the root cause (e.g. exit 1 for a deterministic non-target abort).
+            // Fixture abort-errors on executed targets may also carry the class;
+            // double-counting the same class still yields the correct exit.
+            if !root_on_target {
+                // If finish failed for pending targets that already include the
+                // aborter as a Failed entry, the class is already counted.
+                let already_counted = aborting.is_some_and(|hash| {
+                    entries.iter().any(|entry| match entry {
+                        BatchEntry::Failed(tx) => tx.tx_hash == hash && tx.kind == root_kind,
+                        BatchEntry::Executed(_) => false,
+                    })
+                });
+                // Abort-inherited fixture failures on executed targets already
+                // contribute the abort class to the tally.
+                let fixture_carries_class = entries.iter().any(|entry| match entry {
+                    BatchEntry::Executed(tx) => tx
+                        .fixture
+                        .as_ref()
+                        .is_some_and(|f| f.is_error() && f.error_kind == root_kind),
+                    BatchEntry::Failed(_) => false,
+                });
+                if !already_counted && !fixture_carries_class {
+                    uncounted_abort = Some(root_kind);
+                }
+            }
         }
     }
 
-    entries
+    BlockReplayOutcome { entries, uncounted_abort }
 }
 
 /// Inputs for [`prepare_target_fixture`], grouped so the dump path stays a single
@@ -1279,7 +1425,8 @@ fn classify(err: &ReplayError) -> BatchErrorKind {
         ReplayError::TransactionNotFound(_) => BatchErrorKind::NotFound,
         ReplayError::RpcError(_) |
         ReplayError::RpcTransportError(_) |
-        ReplayError::BlockBodyTransactionNull(_) => BatchErrorKind::Rpc,
+        ReplayError::BlockBodyTransactionNull(_) |
+        ReplayError::BlockBodyTransactionFetch { .. } => BatchErrorKind::Rpc,
         // A block error the EVM raised because a state read failed is that
         // read's failure: the same classification the run-level exit code uses.
         ReplayError::BlockExecutionError(_)
@@ -1296,14 +1443,13 @@ fn classify(err: &ReplayError) -> BatchErrorKind {
 /// The abort says nothing about this target: whatever class caused the block to
 /// stop (unknown hash, RPC failure, executor/setup error on another
 /// transaction), a non-aborting swept target is unanswered (`rpc`). Only the
-/// transaction that caused the abort keeps its own classified kind.
+/// transaction that caused the abort keeps its own classified kind (when it is
+/// a reported target); otherwise the run tallies the abort class separately so
+/// the exit code still reflects the root cause.
 ///
 /// The error is taken and ignored on purpose: the signature keeps the decision
 /// visible at the call site, so a future change that wants to classify by cause
-/// has to argue against this rule rather than silently add a parameter. Note the
-/// consequence — a deterministic execution failure in a *non-target* transaction
-/// sweeps every target as `rpc` (exit `3`, "retrying may help") even though
-/// retrying will not help.
+/// has to argue against this rule rather than silently add a parameter.
 fn swept_kind(_err: &ReplayError) -> BatchErrorKind {
     BatchErrorKind::Rpc
 }
@@ -1314,6 +1460,7 @@ fn aborting_tx_hash(err: &ReplayError) -> Option<B256> {
         ReplayError::TransactionNotFound(hash) | ReplayError::BlockBodyTransactionNull(hash) => {
             Some(*hash)
         }
+        ReplayError::BlockBodyTransactionFetch { tx_hash, .. } => Some(*tx_hash),
         ReplayError::BlockExecutionError(err) => block_error_tx_hash(err),
         _ => None,
     }
@@ -1567,6 +1714,9 @@ mod tests {
 
     /// Every non-aborting swept target is unanswered (`rpc`), even when the
     /// abort itself is an execution-class failure of another transaction.
+    ///
+    /// The abort's own class is tallied separately when the aborter is not a
+    /// target (`record_uncounted_abort`); swept entries stay `rpc`.
     #[test]
     fn test_swept_kind_always_rpc_regardless_of_abort_class() {
         // Unknown hash: already unanswered for the cause, and for swept peers.
@@ -1605,6 +1755,66 @@ mod tests {
         // Contrasts with the user-supplied unknown-hash definitive answer.
         assert_eq!(classify(&ReplayError::TransactionNotFound(hash)), BatchErrorKind::NotFound);
         assert_eq!(aborting_tx_hash(&ReplayError::TransactionNotFound(hash)), Some(hash));
+    }
+
+    /// A block-body fetch failure (transport / cache miss) is rpc-class and
+    /// names the hash, matching the null-answer pattern.
+    #[test]
+    fn test_block_body_transaction_fetch_classifies_as_rpc_and_names_the_hash() {
+        let hash = B256::repeat_byte(0xcd);
+        let err = ReplayError::BlockBodyTransactionFetch {
+            tx_hash: hash,
+            message: "cache miss in offline replay file".into(),
+        };
+        assert_eq!(classify(&err), BatchErrorKind::Rpc);
+        assert_eq!(aborting_tx_hash(&err), Some(hash));
+        let message = err.to_string();
+        assert!(message.contains(&hash.to_string()) || message.contains(&format!("{hash:#x}")));
+        assert!(message.contains("fetching it failed"), "unexpected message: {message}");
+        assert!(message.contains("cache miss"), "unexpected message: {message}");
+    }
+
+    /// An uncounted non-target abort contributes its class to the exit without
+    /// a synthetic reported entry.
+    #[test]
+    fn test_batch_tally_uncounted_abort_drives_exit_class() {
+        let mut tally = BatchTally::default();
+        // Two targets swept as unanswered behind a non-target execution abort.
+        tally.record(&failure(B256::repeat_byte(0x01), BatchErrorKind::Rpc, "swept".into()));
+        tally.record(&failure(B256::repeat_byte(0x02), BatchErrorKind::Rpc, "swept".into()));
+        tally.record_uncounted_abort(BatchErrorKind::Execution);
+
+        assert_eq!(tally.reported, 2, "uncounted abort is not a reported target");
+        assert_eq!(tally.counts.rpc, 2);
+        assert_eq!(tally.counts.execution, 1);
+        let err = tally.into_error().expect("run failed");
+        let ReplayError::BatchFailed(counts) = err else {
+            panic!("expected batch failure: {err:?}");
+        };
+        assert_eq!(ExitCode::from_batch_failures(&counts), ExitCode::ExecutionError);
+    }
+
+    /// A fixture discarded after a transport abort counts as rpc, not execution,
+    /// so the run exit matches the abort class.
+    #[test]
+    fn test_batch_tally_abort_inherited_fixture_error_is_rpc_class() {
+        let mut tally = BatchTally::default();
+        tally.record_executed(
+            None,
+            Some(&FixtureReport::abort_error(
+                "fixture not written: block aborted: transport",
+                BatchErrorKind::Rpc,
+            )),
+        );
+
+        assert_eq!(tally.replayed, 1);
+        assert_eq!(tally.counts.rpc, 1);
+        assert_eq!(tally.counts.execution, 0);
+        let err = tally.into_error().expect("run failed");
+        let ReplayError::BatchFailed(counts) = err else {
+            panic!("expected batch failure: {err:?}");
+        };
+        assert_eq!(ExitCode::from_batch_failures(&counts), ExitCode::RpcFailure);
     }
 
     /// A run whose only finding is divergence fails as the mismatch it is.
