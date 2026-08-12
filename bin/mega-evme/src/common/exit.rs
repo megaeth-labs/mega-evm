@@ -97,14 +97,68 @@ const fn external_cause(err: &EvmDatabaseError<EvmeError>) -> Option<&EvmeError>
     }
 }
 
-/// Whether a rendered message still carries an [`EvmeError`] RPC-class prefix.
+/// Outer `Display` wrapper of alloy-evm [`BlockValidationError::BlockHashContractCall`].
 ///
-/// Used only after typed recovery fails. The prefixes are the stable
-/// [`Display`] texts of [`EvmeError::RpcError`] / [`EvmeError::RpcTransportError`],
-/// which this crate owns; mega-evm and alloy-evm wrappers that call
-/// `to_string()` leave them embedded in the outer message.
+/// Producer: alloy-evm's `#[error("failed to apply blockhash contract call: {message}")]`
+/// on that variant; mega-evm's EIP-2935 pre-block path
+/// (`transact_blockhashes_contract_call`) fills `message` with `e.to_string()`.
+/// The classifier usually sees only the inner `message` field, but this constant
+/// is also stripped so a full rendered validation string classifies the same way.
+const BLOCKHASH_CONTRACT_CALL_WRAPPER: &str = "failed to apply blockhash contract call: ";
+
+/// Outer `Display` stem of alloy-evm [`BlockValidationError::BeaconRootContractCall`].
+///
+/// Producer: alloy-evm's beacon-root validation error / mega-evm's EIP-4788
+/// pre-block path (`transact_beacon_root_contract_call`). The full `Display`
+/// inserts `at {parent_beacon_block_root}:` between this stem and the message;
+/// the variant's `message` field itself does not carry this wrapper.
+const BEACON_ROOT_CONTRACT_CALL_WRAPPER: &str = "failed to apply beacon root contract call: ";
+
+/// revm [`EvmDatabaseError::Database`] `Display` layer around the external DB error.
+///
+/// Producer: revm-database-interface `EvmDatabaseError` formats
+/// `Database error: {error}`; mega-evm pre-block helpers stringify the system-call
+/// failure with `e.to_string()`, so this layer sits immediately outside the
+/// crate-owned RPC `Display` prefix in the validation `message` field.
+const DATABASE_ERROR_WRAPPER: &str = "Database error: ";
+
+/// Strip every recognized outer wrapper produced on the pre-block stringification
+/// path, leaving the cause boundary for prefix matching.
+///
+/// Only the wrappers documented above are removed, and only from the front of
+/// the string (repeatedly). Anything else — including an RPC-looking substring
+/// that appears mid-message — is left alone so incidental embeds stay
+/// execution-class.
+fn strip_recognized_wrappers(message: &str) -> &str {
+    let mut rest = message;
+    loop {
+        if let Some(stripped) = rest.strip_prefix(BLOCKHASH_CONTRACT_CALL_WRAPPER) {
+            rest = stripped;
+            continue;
+        }
+        if let Some(stripped) = rest.strip_prefix(BEACON_ROOT_CONTRACT_CALL_WRAPPER) {
+            rest = stripped;
+            continue;
+        }
+        if let Some(stripped) = rest.strip_prefix(DATABASE_ERROR_WRAPPER) {
+            rest = stripped;
+            continue;
+        }
+        break;
+    }
+    rest
+}
+
+/// Whether a rendered message is an RPC-class failure at the cause boundary.
+///
+/// Used only after typed recovery fails. Recognized mega-evm / revm / alloy-evm
+/// outer wrappers are stripped first; the remainder must then
+/// [`str::starts_with`] a stable [`EvmeError`] RPC [`Display`] prefix this crate
+/// owns. A mere `contains` would misclassify an execution failure whose message
+/// incidentally embeds `"RPC error: "` (revert data, user input, etc.).
 fn message_carries_rpc_class(message: &str) -> bool {
-    message.contains(RPC_ERROR_PREFIX) || message.contains(RPC_TRANSPORT_ERROR_PREFIX)
+    let cause = strip_recognized_wrappers(message);
+    cause.starts_with(RPC_ERROR_PREFIX) || cause.starts_with(RPC_TRANSPORT_ERROR_PREFIX)
 }
 
 /// Recover an RPC-class failure that mega-evm stringified into a validation
@@ -113,9 +167,10 @@ fn message_carries_rpc_class(message: &str) -> bool {
 /// Pre-block EIP-2935 / EIP-4788 helpers map a system-call database error to
 /// [`BlockValidationError::BlockHashContractCall`] /
 /// [`BlockValidationError::BeaconRootContractCall`] with `message: e.to_string()`.
-/// The type is gone, but the message still contains this crate's RPC
-/// [`Display`] prefixes. Other validation variants either keep a typed box
-/// (handled by [`database_cause`]) or are genuine consensus/execution failures.
+/// The type is gone, but after stripping the recognized outer wrappers the
+/// remainder still starts with this crate's RPC [`Display`] prefixes. Other
+/// validation variants either keep a typed box (handled by [`database_cause`])
+/// or are genuine consensus/execution failures.
 fn stringified_rpc_failure(err: &BlockExecutionError) -> bool {
     let BlockExecutionError::Validation(validation) = err else {
         return false;
@@ -126,7 +181,7 @@ fn stringified_rpc_failure(err: &BlockExecutionError) -> bool {
         BlockValidationError::WithdrawalRequestsContractCall { message } |
         BlockValidationError::ConsolidationRequestsContractCall { message } => message.as_str(),
         // Typed boxes are recovered by `database_cause`; consensus-only variants
-        // never embed an RPC `Display` prefix.
+        // never start with an RPC `Display` prefix after wrapper strip.
         _ => return false,
     };
     message_carries_rpc_class(message)
@@ -346,7 +401,8 @@ mod tests {
 
     /// The classifier recovers stringified RPC failures by the same prefixes
     /// [`EvmeError`]'s `Display` emits — a drift between the two would silently
-    /// reclassify pre-block cache misses as execution errors.
+    /// reclassify pre-block cache misses as execution errors. Outer wrappers
+    /// from the pre-block path are stripped before the `starts_with` check.
     #[test]
     fn test_rpc_display_prefixes_round_trip_with_classifier() {
         let rpc = EvmeError::RpcError("cache miss in offline replay file".to_string());
@@ -368,10 +424,64 @@ mod tests {
         );
         assert!(message_carries_rpc_class(&transport_text));
 
-        // Nested the way mega-evm stringifies a system-call DB failure.
-        let nested = format!("Database error: {rpc_text}");
+        // Nested the way mega-evm stringifies a system-call DB failure into the
+        // validation message field (`Database error: RPC error: …`).
+        let nested = format!("{DATABASE_ERROR_WRAPPER}{rpc_text}");
         assert!(message_carries_rpc_class(&nested));
-        assert!(!message_carries_rpc_class("failed to apply blockhash contract call: halt"));
+        assert_eq!(strip_recognized_wrappers(&nested), rpc_text.as_str());
+
+        // Full alloy-evm Display of BlockHashContractCall around that message.
+        let with_blockhash = format!("{BLOCKHASH_CONTRACT_CALL_WRAPPER}{nested}");
+        assert!(message_carries_rpc_class(&with_blockhash));
+        assert_eq!(strip_recognized_wrappers(&with_blockhash), rpc_text.as_str());
+
+        // Beacon-root stem (message field path has no stem; full Display may).
+        let with_beacon = format!("{BEACON_ROOT_CONTRACT_CALL_WRAPPER}{nested}");
+        assert!(message_carries_rpc_class(&with_beacon));
+
+        // Execution-class pre-block halt: recognized wrapper, no RPC cause.
+        assert!(!message_carries_rpc_class(&format!("{BLOCKHASH_CONTRACT_CALL_WRAPPER}halt")));
+    }
+
+    /// An execution-class message that merely *contains* an RPC prefix substring
+    /// (e.g. revert data or user-echoed text) must not classify as exit 3.
+    /// Only a cause that *starts with* the prefix after wrapper strip is RPC.
+    #[test]
+    fn test_embedded_rpc_prefix_in_execution_message_maps_to_one() {
+        // Bare embed: contains the prefix, does not start with it.
+        let embedded = "system contract reverted: payload embeds RPC error: spoofed";
+        assert!(
+            embedded.contains(RPC_ERROR_PREFIX) && !embedded.starts_with(RPC_ERROR_PREFIX),
+            "fixture must contain but not start with the RPC prefix"
+        );
+        assert!(!message_carries_rpc_class(embedded));
+
+        let err = EvmeError::BlockExecutionError(BlockExecutionError::Validation(
+            BlockValidationError::BlockHashContractCall { message: embedded.to_string() },
+        ));
+        assert_eq!(
+            ExitCode::from_evme_error(&err),
+            ExitCode::ExecutionError,
+            "embedded RPC substring must stay execution-class: {err}"
+        );
+
+        // Same embed behind the Database-error wrapper: after strip the cause
+        // still does not start with the RPC prefix.
+        let wrapped_embed =
+            format!("{DATABASE_ERROR_WRAPPER}OutOfGas while echoing {RPC_ERROR_PREFIX}spoofed");
+        assert!(
+            wrapped_embed.contains(RPC_ERROR_PREFIX) &&
+                !strip_recognized_wrappers(&wrapped_embed).starts_with(RPC_ERROR_PREFIX),
+            "post-strip cause must not start with the RPC prefix"
+        );
+        let err = EvmeError::BlockExecutionError(BlockExecutionError::Validation(
+            BlockValidationError::BlockHashContractCall { message: wrapped_embed },
+        ));
+        assert_eq!(
+            ExitCode::from_evme_error(&err),
+            ExitCode::ExecutionError,
+            "wrapped embed must stay execution-class: {err}"
+        );
     }
 
     /// The `kind` namespace is kebab-case and one name per class.
@@ -465,13 +575,14 @@ mod tests {
     }
 
     /// Pre-block EIP-2935 stringifies the system-call error into
-    /// `BlockHashContractCall { message }`. The typed cause is gone, but the
-    /// message still embeds this crate's RPC Display prefix — classify as
-    /// unanswered, not as an execution rejection.
+    /// `BlockHashContractCall { message }`. The typed cause is gone, but after
+    /// stripping the Database-error wrapper the remainder starts with this
+    /// crate's RPC Display prefix — classify as unanswered, not as an
+    /// execution rejection.
     #[test]
     fn test_stringified_blockhash_contract_call_rpc_failure_maps_to_three() {
         let message = format!(
-            "Database error: {}",
+            "{DATABASE_ERROR_WRAPPER}{}",
             EvmeError::RpcError("Failed to fetch storage for history slot: cache miss".into())
         );
         let err = EvmeError::BlockExecutionError(BlockExecutionError::Validation(
@@ -490,7 +601,7 @@ mod tests {
     #[test]
     fn test_stringified_beacon_root_contract_call_rpc_failure_maps_to_three() {
         let message = format!(
-            "Database error: {}",
+            "{DATABASE_ERROR_WRAPPER}{}",
             EvmeError::RpcError("Failed to fetch storage for beacon root: cache miss".into())
         );
         let err = EvmeError::BlockExecutionError(BlockExecutionError::Validation(

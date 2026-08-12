@@ -10,17 +10,18 @@ use mega_evm::{
 /// Pre-block system calls (EIP-2935 / EIP-4788) and similar mega-evm wrappers
 /// render a database failure into a message string with `to_string()`, so the
 /// typed variant is gone by the time exit classification runs. The classifier
-/// recovers the RPC class by looking for this exact prefix inside that message.
-/// The `#[error(...)]` text on the variant must keep the same prefix; the
-/// round-trip unit test in `exit` enforces that.
+/// recovers the RPC class by stripping recognized outer wrappers and requiring
+/// the remainder to start with this exact prefix. The `#[error(...)]` text on
+/// the variant must keep the same prefix; the round-trip unit test in `exit`
+/// enforces that.
 pub const RPC_TRANSPORT_ERROR_PREFIX: &str = "RPC transport error: ";
 
 /// Stable `Display` prefix of [`EvmeError::RpcError`].
 ///
 /// Same recovery contract as [`RPC_TRANSPORT_ERROR_PREFIX`]: fork-state reads
 /// map transport/cache failures into this variant, and stringified block errors
-/// still carry this prefix so exit classification can treat them as unanswered
-/// questions rather than execution failures.
+/// still start with this prefix (after wrapper strip) so exit classification
+/// can treat them as unanswered questions rather than execution failures.
 pub const RPC_ERROR_PREFIX: &str = "RPC error: ";
 
 /// Error types for the replay command
