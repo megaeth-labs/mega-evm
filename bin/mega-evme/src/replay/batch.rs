@@ -300,18 +300,26 @@ impl BatchTally {
     }
 }
 
+/// One target of a [`BlockJob`], carrying the inclusion hash it resolved with.
+///
+/// Per-target inclusion (rather than a job-level first-seen anchor) keeps
+/// outcomes order-independent: two same-height targets that report different
+/// hashes each validate against the fetched block on their own.
+struct JobTarget {
+    hash: B256,
+    /// Inclusion block hash from `eth_getTransactionByHash` (`--tx-file`).
+    /// `None` for `--block` targets, which come from the body itself.
+    inclusion_hash: Option<B256>,
+}
+
 /// One block's worth of work.
 struct BlockJob {
     /// Number of the block holding the targets.
     number: u64,
     /// Block body, present when planning already fetched it (`--block`).
     block: Option<Block<Transaction>>,
-    /// Hashes of the transactions whose results are reported.
-    targets: Vec<B256>,
-    /// Block hash the targets reported as their inclusion, when a resolution
-    /// step observed one (`--tx-file`). `None` for `--block`, whose targets come
-    /// from the block body itself and so cannot disagree with it.
-    inclusion_hash: Option<B256>,
+    /// Targets whose results are reported for this block.
+    targets: Vec<JobTarget>,
 }
 
 /// Fixture work for one target, held until `finish()` succeeds.
@@ -426,8 +434,12 @@ where
                 vec![BlockJob {
                     number: *number,
                     block: Some(block),
-                    targets,
-                    inclusion_hash: None,
+                    // Whole-block mode takes its targets from the body, so there
+                    // is no separate inclusion claim to reconcile later.
+                    targets: targets
+                        .into_iter()
+                        .map(|hash| JobTarget { hash, inclusion_hash: None })
+                        .collect(),
                 }]
             }
         }
@@ -493,11 +505,16 @@ where
 ///
 /// Returns the per-block jobs in ascending block order, plus the failures for
 /// hashes that could not be resolved (in the order they were requested).
+///
+/// Grouping is by block number only. Each target keeps the inclusion hash its
+/// own lookup reported; agreement with the fetched block is checked later in
+/// [`replay_block`], so two same-height targets that disagree with each other
+/// still get independent outcomes instead of a first-seen race.
 async fn resolve_targets<P>(provider: &P, hashes: &[B256]) -> (Vec<BlockJob>, Vec<FailedTx>)
 where
     P: Provider<op_alloy_network::Optimism>,
 {
-    let mut grouped: BTreeMap<u64, (Vec<B256>, Option<B256>)> = BTreeMap::new();
+    let mut grouped: BTreeMap<u64, Vec<JobTarget>> = BTreeMap::new();
     let mut failures = Vec::new();
 
     for hash in hashes {
@@ -517,33 +534,15 @@ where
             // wildcard into the pending arm.
             Ok(Some(tx)) => match (tx.block_number, tx.block_hash) {
                 (Some(number), Some(theirs)) => {
-                    let (targets, inclusion) = grouped.entry(number).or_default();
-                    // Two targets resolving to the same number but different
-                    // block hashes means the endpoint served two views. Neither
-                    // can be trusted, so the disagreeing target is reported as
-                    // unanswered rather than silently replayed against one view.
-                    match *inclusion {
-                        Some(seen) if seen != theirs => {
-                            failures.push(FailedTx {
-                                tx_hash: *hash,
-                                kind: BatchErrorKind::Rpc,
-                                message: format!(
-                                    "inclusion block hash {theirs} for block {number} differs \
-                                     from {seen} reported by an earlier target of the same \
-                                     block: the endpoint served divergent views"
-                                ),
-                            });
-                            continue;
-                        }
-                        None => *inclusion = Some(theirs),
-                        Some(_) => {}
-                    }
-                    targets.push(*hash);
+                    grouped
+                        .entry(number)
+                        .or_default()
+                        .push(JobTarget { hash: *hash, inclusion_hash: Some(theirs) });
                 }
                 // A mined transaction without an inclusion hash is an unanchored
                 // view: the number alone cannot prove which block body to replay
-                // against, so the target is unanswered rather than queued with
-                // inclusion_hash left unset.
+                // against, so the target is unanswered rather than queued without
+                // an inclusion claim.
                 (Some(number), None) => failures.push(FailedTx {
                     tx_hash: *hash,
                     kind: BatchErrorKind::Rpc,
@@ -573,12 +572,7 @@ where
 
     let jobs = grouped
         .into_iter()
-        .map(|(number, (targets, inclusion_hash))| BlockJob {
-            number,
-            block: None,
-            targets,
-            inclusion_hash,
-        })
+        .map(|(number, targets)| BlockJob { number, block: None, targets })
         .collect();
     (jobs, failures)
 }
@@ -605,13 +599,18 @@ async fn replay_block<P>(
 where
     P: Provider<op_alloy_network::Optimism> + Clone + std::fmt::Debug,
 {
-    let BlockJob { number, block, targets, inclusion_hash } = job;
+    let BlockJob { number, block, targets } = job;
     let verify_receipt = report.verify_receipt;
     let dump_dir = report.dump_fixture_dir.as_deref();
     let overwrite = report.overwrite;
+    let target_hashes = || targets.iter().map(|t| t.hash);
 
     if number == 0 {
-        return fail_all(&targets, BatchErrorKind::Rpc, "Block 0 has no parent block to fork from");
+        return fail_all(
+            target_hashes(),
+            BatchErrorKind::Rpc,
+            "Block 0 has no parent block to fork from",
+        );
     }
 
     let block = match block {
@@ -619,14 +618,14 @@ where
         None => match fetch_block(provider, number).await {
             Ok(block) => block,
             Err(e) => {
-                return fail_all(&targets, BatchErrorKind::Rpc, &e.to_string());
+                return fail_all(target_hashes(), BatchErrorKind::Rpc, &e.to_string());
             }
         },
     };
     let parent_block = match fetch_block(provider, number - 1).await {
         Ok(block) => block,
         Err(e) => {
-            return fail_all(&targets, BatchErrorKind::Rpc, &e.to_string());
+            return fail_all(target_hashes(), BatchErrorKind::Rpc, &e.to_string());
         }
     };
 
@@ -650,24 +649,58 @@ where
              block describes a different chain than the block being replayed (reorg in progress, \
              or a load-balanced endpoint serving divergent views); retry once the chain settles"
         );
-        return fail_all(&targets, BatchErrorKind::Rpc, &message);
+        return fail_all(target_hashes(), BatchErrorKind::Rpc, &message);
     }
 
-    // Inclusion guard: `--tx-file` resolved each target through
-    // `eth_getTransactionByHash`, which reported the block it belongs to. If the
-    // block fetched by that number is a different one, the endpoint served two
-    // views and the targets do not belong to what is about to be replayed.
-    if let Some(expected) = inclusion_hash {
-        let fetched = block.hash();
-        if fetched != expected {
-            let message = format!(
-                "block {number} has hash {fetched}, but its targets were resolved as included in \
-                 {expected}: the endpoint served divergent views of this block (reorg in \
-                 progress, or a load-balanced endpoint); retry once the chain settles"
-            );
-            return fail_all(&targets, BatchErrorKind::Rpc, &message);
+    // Per-target inclusion and membership guards. `--tx-file` resolved each
+    // target through `eth_getTransactionByHash`, which reported the block it
+    // belongs to. Agreement is checked against the fetched body, not against
+    // a first-seen peer, so two same-height targets that report different
+    // hashes get independent outcomes. A target whose reported hash matches
+    // the body but is missing from it is an endpoint self-contradiction (`rpc`),
+    // not a definitive "unknown hash".
+    let fetched = block.hash();
+    let body_txs: HashSet<B256> = block.transactions.hashes().collect();
+    let mut entries = Vec::with_capacity(targets.len());
+    let mut active: Vec<B256> = Vec::new();
+    for target in &targets {
+        if let Some(reported) = target.inclusion_hash {
+            if reported != fetched {
+                entries.push(failure(
+                    target.hash,
+                    BatchErrorKind::Rpc,
+                    format!(
+                        "block {number} has hash {fetched}, but the target transaction was \
+                         resolved as included in {reported}: the endpoint served divergent \
+                         views of this block (reorg in progress, or a load-balanced \
+                         endpoint); retry once the chain settles"
+                    ),
+                ));
+                continue;
+            }
+            if !body_txs.contains(&target.hash) {
+                entries.push(failure(
+                    target.hash,
+                    BatchErrorKind::Rpc,
+                    format!(
+                        "block {number} ({fetched}) does not list target transaction {}, which \
+                         the endpoint resolved as included in it: the endpoint served \
+                         divergent views of this block (reorg in progress, or a \
+                         load-balanced endpoint); retry once the chain settles",
+                        target.hash,
+                    ),
+                ));
+                continue;
+            }
         }
+        active.push(target.hash);
     }
+    // Every target either failed an inclusion/membership check or was a
+    // `--block` target already taken from the body. Nothing left to execute.
+    if active.is_empty() {
+        return entries;
+    }
+    let targets = active;
 
     // Fetch the on-chain receipts before the block runs. Needed for
     // `--verify-receipt` (mismatch vs unverified) and for `--dump-fixture-dir`
@@ -700,13 +733,13 @@ where
     let cfg_env = match chain_args.create_cfg_env() {
         Ok(cfg) => cfg,
         Err(e) => {
-            return fail_all(&targets, BatchErrorKind::Execution, &e.to_string());
+            return fail_remaining(&targets, entries, BatchErrorKind::Execution, &e.to_string());
         }
     };
     let block_env = match retrieve_block_env(&block) {
         Ok(env) => env,
         Err(e) => {
-            return fail_all(&targets, BatchErrorKind::Execution, &e.to_string());
+            return fail_remaining(&targets, entries, BatchErrorKind::Execution, &e.to_string());
         }
     };
     let executed_spec = cfg_env.spec;
@@ -714,7 +747,7 @@ where
 
     let Some(hardfork) = hardforks.hardfork(timestamp) else {
         let message = format!("No `MegaHardfork` active at block timestamp: {timestamp}");
-        return fail_all(&targets, BatchErrorKind::Execution, &message);
+        return fail_remaining(&targets, entries, BatchErrorKind::Execution, &message);
     };
     let block_limits =
         BlockLimits::from_hardfork_and_block_gas_limit(hardfork, block.header.gas_limit());
@@ -736,7 +769,7 @@ where
     {
         Ok(database) => database,
         Err(e) => {
-            return fail_all(&targets, BatchErrorKind::Rpc, &e.to_string());
+            return fail_remaining(&targets, entries, BatchErrorKind::Rpc, &e.to_string());
         }
     };
 
@@ -748,7 +781,7 @@ where
 
     if let Err(e) = block_executor.apply_pre_execution_changes() {
         let error = ReplayError::BlockExecutionError(e);
-        return fail_all(&targets, classify(&error), &error.to_string());
+        return fail_remaining(&targets, entries, classify(&error), &error.to_string());
     }
 
     let target_set: HashSet<B256> = targets.iter().copied().collect();
@@ -870,8 +903,8 @@ where
     .await;
 
     // Finish the block even when it aborted midway: targets that already ran
-    // still have a receipt worth reporting.
-    let mut entries = Vec::with_capacity(targets.len());
+    // still have a receipt worth reporting. `entries` already holds any
+    // inclusion/membership failures recorded before the block started.
     match block_executor.finish() {
         Ok((evm, block_result)) => {
             let (db, _) = evm.finish();
@@ -986,10 +1019,11 @@ where
         }
     }
 
-    // Any target that produced no entry either sat behind the abort or is not
-    // part of this block at all. They are appended in block transaction-index
-    // order, keeping the run's ascending (block, index) order; a target the
-    // block does not contain has no index and keeps its input position.
+    // Any active target that produced no entry sat behind an abort (or is a
+    // residual not-in-body case for `--block`, which has no inclusion claim).
+    // They are appended in block transaction-index order, keeping the run's
+    // ascending (block, index) order; a target the block does not contain has
+    // no index and keeps its input position among the active set.
     let reported: HashSet<B256> = entries.iter().map(BatchEntry::tx_hash).collect();
     let block_txs: HashSet<B256> = tx_hashes.iter().copied().collect();
     let unreported = tx_hashes
@@ -1000,9 +1034,21 @@ where
 
     match &loop_result {
         Ok(()) => {
-            let message = format!("Transaction is not part of block {number}");
+            // Active targets are already filtered for inclusion agreement; a
+            // remaining absence from the body is still an endpoint
+            // inconsistency (the target was queued against this block), not a
+            // definitive not-found.
             for tx_hash in unreported {
-                entries.push(failure(*tx_hash, BatchErrorKind::NotFound, message.clone()));
+                entries.push(failure(
+                    *tx_hash,
+                    BatchErrorKind::Rpc,
+                    format!(
+                        "block {number} ({fetched}) does not list target transaction {tx_hash}, \
+                         which the endpoint resolved as included in it: the endpoint served \
+                         divergent views of this block (reorg in progress, or a load-balanced \
+                         endpoint); retry once the chain settles"
+                    ),
+                ));
             }
         }
         Err(e) => {
@@ -1291,8 +1337,29 @@ fn failure(tx_hash: B256, kind: BatchErrorKind, message: String) -> BatchEntry {
 }
 
 /// Report the same failure for every target of a block that never started.
-fn fail_all(targets: &[B256], kind: BatchErrorKind, message: &str) -> Vec<BatchEntry> {
-    targets.iter().map(|hash| failure(*hash, kind, message.to_string())).collect()
+fn fail_all(
+    targets: impl IntoIterator<Item = B256>,
+    kind: BatchErrorKind,
+    message: &str,
+) -> Vec<BatchEntry> {
+    targets.into_iter().map(|hash| failure(hash, kind, message.to_string())).collect()
+}
+
+/// Append the same failure for every remaining target, keeping any entries
+/// already recorded (for example inclusion mismatches decided earlier).
+fn fail_remaining(
+    targets: &[B256],
+    mut entries: Vec<BatchEntry>,
+    kind: BatchErrorKind,
+    message: &str,
+) -> Vec<BatchEntry> {
+    let reported: HashSet<B256> = entries.iter().map(BatchEntry::tx_hash).collect();
+    for hash in targets {
+        if !reported.contains(hash) {
+            entries.push(failure(*hash, kind, message.to_string()));
+        }
+    }
+    entries
 }
 
 /// Write one entry to stdout: a compact NDJSON line, or the human-readable

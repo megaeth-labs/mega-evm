@@ -694,6 +694,240 @@ fn test_replay_tx_file_rejects_a_block_that_does_not_match_the_resolved_inclusio
     let _ = std::fs::remove_file(&list);
 }
 
+/// Two same-height targets that report different inclusion hashes get
+/// independent outcomes: the one that matches the fetched block replays, the
+/// one that does not fails as `rpc`. Outcomes must not depend on file order.
+///
+/// The resolution step used to keep a first-seen job-level anchor and reject
+/// later peers that disagreed, so a stale target listed first could poison the
+/// canonical peer. Both orders are exercised against the same doctored capture.
+#[test]
+fn test_replay_tx_file_inclusion_mismatch_is_order_independent() {
+    let (stale_target, _) = BLOCK_TXS[1];
+    let (canonical_target, canonical_index) = BLOCK_TXS[2];
+    let wrong_hash = "0x2222222222222222222222222222222222222222222222222222222222222222";
+
+    // Doctor only the stale target's inclusion hash; the canonical target and
+    // the block body keep their original agreement.
+    let mut envelope: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(envelope()).expect("read envelope"))
+            .expect("parse envelope");
+    let marker = format!("\"hash\":\"{stale_target}\"");
+    let mut doctored = 0;
+    for entry in envelope["cache"].as_array_mut().expect("cache entries").iter_mut() {
+        let value = entry["value"].as_str().expect("entry value is a string");
+        if !value.contains(&marker) {
+            continue;
+        }
+        let mut response: serde_json::Value =
+            serde_json::from_str(value).expect("parse transaction response");
+        let result = response.get_mut("result").expect("transaction result");
+        assert!(result.is_object(), "expected a transaction object");
+        result["blockHash"] = serde_json::Value::String(wrong_hash.into());
+        entry["value"] = serde_json::Value::String(response.to_string());
+        doctored += 1;
+    }
+    assert_eq!(doctored, 1, "exactly one response describes the stale target");
+
+    let envelope_path = std::env::temp_dir()
+        .join(format!("mega_evme_batch_inclusion_order_{}.json", std::process::id()));
+    std::fs::write(&envelope_path, envelope.to_string()).expect("write doctored envelope");
+
+    for (label, first, second) in [
+        ("stale_first", stale_target, canonical_target),
+        ("canonical_first", canonical_target, stale_target),
+    ] {
+        let list = std::env::temp_dir()
+            .join(format!("mega_evme_tx_list_inclusion_order_{label}_{}.txt", std::process::id()));
+        std::fs::write(&list, format!("{first}\n{second}\n")).expect("write tx list");
+
+        let (stdout, code) = replay_envelope_with_code(
+            &envelope_path,
+            &["--tx-file", list.to_str().unwrap(), "--json"],
+        );
+        let lines = ndjson(&stdout);
+        assert_eq!(lines.len(), 2, "{label}: every target is reported once: {stdout}");
+
+        let stale = lines
+            .iter()
+            .find(|line| line["tx_hash"].as_str() == Some(stale_target))
+            .unwrap_or_else(|| panic!("{label}: stale target must be reported"));
+        assert_eq!(
+            stale["error"]["kind"].as_str(),
+            Some("rpc"),
+            "{label}: mismatched inclusion is unanswered: {stale}"
+        );
+        let message = stale["error"]["message"].as_str().unwrap_or_default();
+        assert!(
+            message.contains("divergent views") &&
+                message.contains(wrong_hash) &&
+                message.contains("resolved as included"),
+            "{label}: message names both views: {message}"
+        );
+
+        let ok = lines
+            .iter()
+            .find(|line| line["tx_hash"].as_str() == Some(canonical_target))
+            .unwrap_or_else(|| panic!("{label}: canonical target must be reported"));
+        assert!(ok.get("error").is_none(), "{label}: matching inclusion still replays: {ok}");
+        assert_eq!(ok["block_number"].as_u64(), Some(BLOCK));
+        assert_eq!(ok["tx_index"].as_u64(), Some(canonical_index));
+        assert_eq!(ok["success"].as_bool(), Some(true));
+
+        assert_eq!(code, Some(3), "{label}: an unanswered target exits 3");
+        assert_eq!(run_error(&stdout)["error"]["kind"].as_str(), Some("rpc-failure"));
+
+        let _ = std::fs::remove_file(&list);
+    }
+
+    let _ = std::fs::remove_file(&envelope_path);
+}
+
+/// A target whose reported inclusion hash matches the fetched block, but which
+/// the block body does not list, is an endpoint self-contradiction (`rpc`), not
+/// a definitive `not_found`.
+///
+/// The lookup said "in block B"; B's body lacks it. That is the same class as
+/// the single-transaction membership guard, not an answer that the hash is
+/// unknown.
+#[test]
+fn test_replay_tx_file_anchored_but_absent_target_is_rpc() {
+    let (target, _) = BLOCK_TXS[1];
+
+    let mut envelope: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(envelope()).expect("read envelope"))
+            .expect("parse envelope");
+
+    // Keep the transaction lookup intact (correct number + hash) but drop the
+    // hash from the block body it claims to belong to.
+    let mut body_doctored = 0;
+    let mut block_hash = None;
+    for entry in envelope["cache"].as_array_mut().expect("cache entries").iter_mut() {
+        let value = entry["value"].as_str().expect("entry value is a string");
+        let Ok(mut response) = serde_json::from_str::<serde_json::Value>(value) else {
+            continue;
+        };
+        let Some(result) = response.get_mut("result") else {
+            continue;
+        };
+        if !result.is_object() {
+            continue;
+        }
+        let number = result.get("number").and_then(|n| {
+            n.as_str().and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
+        });
+        if number != Some(BLOCK) {
+            continue;
+        }
+        let Some(txs) = result.get_mut("transactions").and_then(|t| t.as_array_mut()) else {
+            continue;
+        };
+        let before = txs.len();
+        txs.retain(|tx| tx.as_str() != Some(target));
+        if txs.len() != before {
+            block_hash = result.get("hash").and_then(|h| h.as_str()).map(str::to_string);
+            entry["value"] = serde_json::Value::String(response.to_string());
+            body_doctored += 1;
+        }
+    }
+    assert_eq!(body_doctored, 1, "exactly one block body for {BLOCK} must list the target");
+    let block_hash = block_hash.expect("block hash");
+
+    // Pair with another-block target so a clean job still runs alongside the
+    // inconsistency: only the absent target fails.
+    let envelope_path = std::env::temp_dir()
+        .join(format!("mega_evme_batch_anchored_absent_{}.json", std::process::id()));
+    std::fs::write(&envelope_path, envelope.to_string()).expect("write doctored envelope");
+    let list = std::env::temp_dir()
+        .join(format!("mega_evme_tx_list_anchored_absent_{}.txt", std::process::id()));
+    std::fs::write(&list, format!("{target}\n{OTHER_BLOCK_TX}\n")).expect("write tx list");
+
+    let (stdout, code) =
+        replay_envelope_with_code(&envelope_path, &["--tx-file", list.to_str().unwrap(), "--json"]);
+    let lines = ndjson(&stdout);
+    assert_eq!(lines.len(), 2, "every target is reported once: {stdout}");
+
+    let failed = lines
+        .iter()
+        .find(|line| line["tx_hash"].as_str() == Some(target))
+        .expect("absent target must be reported");
+    assert_eq!(
+        failed["error"]["kind"].as_str(),
+        Some("rpc"),
+        "anchored-but-absent is an RPC inconsistency, not not_found: {failed}"
+    );
+    let message = failed["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains(target) &&
+            message.contains(&block_hash) &&
+            message.contains("does not list") &&
+            message.contains("divergent views"),
+        "message names the target, the block, and the cause: {message}"
+    );
+
+    let ok = lines
+        .iter()
+        .find(|line| line["tx_hash"].as_str() == Some(OTHER_BLOCK_TX))
+        .expect("other-block target must be reported");
+    assert!(ok.get("error").is_none(), "targets in other blocks still replay: {ok}");
+    assert_eq!(ok["block_number"].as_u64(), Some(OTHER_BLOCK));
+    assert_eq!(ok["success"].as_bool(), Some(true));
+
+    assert_eq!(code, Some(3), "an unanswered target exits 3");
+    assert_eq!(run_error(&stdout)["error"]["kind"].as_str(), Some("rpc-failure"));
+
+    let _ = std::fs::remove_file(&envelope_path);
+    let _ = std::fs::remove_file(&list);
+}
+
+/// A hash whose resolution answers `null` keeps the definitive `not_found`
+/// class: the endpoint denied the hash, rather than claiming inclusion and then
+/// contradicting itself.
+#[test]
+fn test_replay_tx_file_null_resolution_stays_not_found() {
+    let (target, _) = BLOCK_TXS[1];
+    let path = envelope_without_transaction("tx_file_null_resolution", target);
+
+    // Pair with a clean other-block target so the run still produces a success
+    // line next to the definitive not-found.
+    let list = std::env::temp_dir()
+        .join(format!("mega_evme_tx_list_null_resolution_{}.txt", std::process::id()));
+    std::fs::write(&list, format!("{target}\n{OTHER_BLOCK_TX}\n")).expect("write tx list");
+
+    let (stdout, code) =
+        replay_envelope_with_code(&path, &["--tx-file", list.to_str().unwrap(), "--json"]);
+    let _ = std::fs::remove_file(&path);
+    let lines = ndjson(&stdout);
+    assert_eq!(lines.len(), 2, "every target is reported once: {stdout}");
+
+    let failed = lines
+        .iter()
+        .find(|line| line["tx_hash"].as_str() == Some(target))
+        .expect("null-resolution target must be reported");
+    assert_eq!(
+        failed["error"]["kind"].as_str(),
+        Some("not_found"),
+        "a null lookup is a definitive not_found: {failed}"
+    );
+    assert_eq!(
+        failed["error"]["message"].as_str(),
+        Some("Transaction not found"),
+        "not_found message is unchanged: {failed}"
+    );
+
+    let ok = lines
+        .iter()
+        .find(|line| line["tx_hash"].as_str() == Some(OTHER_BLOCK_TX))
+        .expect("other-block target must be reported");
+    assert!(ok.get("error").is_none(), "targets in other blocks still replay: {ok}");
+    assert_eq!(ok["success"].as_bool(), Some(true));
+
+    // Definitive not_found is an execution-class failure (exit 1), not rpc.
+    assert_eq!(code, Some(1), "a definitive not_found exits 1");
+
+    let _ = std::fs::remove_file(&list);
+}
+
 /// A mined `--tx-file` target whose `eth_getTransactionByHash` answer carries a
 /// block number but no inclusion hash is unanswered: the endpoint served an
 /// unanchored view, so the target is not queued and other blocks still replay.
