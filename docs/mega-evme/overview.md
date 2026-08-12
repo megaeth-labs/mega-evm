@@ -80,6 +80,8 @@ Every command reports its outcome through the same set of exit codes, so a pipel
 
 Codes `1` and `3` separate the two ways a question can go wrong: `1` means the tool answered, and the answer is negative; `3` means the question went unanswered, so retrying against a healthy endpoint may still produce a result.
 A state read that fails while the EVM is executing — an offline replay file without the response, or an endpoint that dies mid-transaction — belongs to `3` as well, even though it surfaces as a block execution error.
+A hash the endpoint itself listed in a block body but then resolves to null belongs to `3` too: the null contradicts an answer the endpoint already gave, so it describes an inconsistent endpoint (a reorg, or a load-balanced backend serving divergent views) rather than an unknown transaction.
+Only a hash the caller supplied directly stays in `1` when it resolves to null, since nothing the endpoint served claimed it existed.
 Two paths cannot be classified that way: a read that fails inside the pre-block system calls (EIP-4788 beacon root, EIP-2935 block hashes) or inside the sandboxed execution of the keyless-deploy system contract has its cause rendered into a message by the layer that raises it, so `mega-evme` cannot tell it from an execution failure and reports `1`.
 
 A batch run (`--tx-file` / `--block`) reports every target on its own line and then exits once for the run as a whole, ranking the failure classes it saw: any execution or internal failure exits `1`, otherwise any RPC failure exits `3`, otherwise any verification mismatch exits `2`.

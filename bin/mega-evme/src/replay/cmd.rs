@@ -518,6 +518,10 @@ impl Cmd {
         P: Provider<op_alloy_network::Optimism>,
     {
         info!(tx_hash = %tx_hash, "Fetching transaction");
+        // The user supplied this hash and nothing the endpoint served so far
+        // claims it exists, so `Ok(None)` is a definitive "unknown transaction"
+        // rather than an inconsistency — unlike the block-body-derived lookups
+        // further down, which the endpoint has already vouched for.
         let target_tx = provider
             .get_transaction_by_hash(tx_hash)
             .await
@@ -807,11 +811,18 @@ impl Cmd {
         info!(preceding_count = ctx.preceding_tx_hashes.len(), "Executing preceding transactions",);
         for tx_hash in &ctx.preceding_tx_hashes {
             debug!(tx_hash = %tx_hash, "Executing preceding transaction");
+            // These hashes were read out of the block body this endpoint already
+            // served, so `Ok(None)` contradicts an answer it gave itself: the
+            // endpoint is inconsistent (reorg, or a load-balanced backend serving
+            // divergent views), not definitively denying the hash. Only the
+            // user-supplied target lookup keeps `TransactionNotFound`, because
+            // there the null is a definitive answer about a hash the caller asked
+            // about.
             let tx = provider
                 .get_transaction_by_hash(*tx_hash)
                 .await
                 .map_err(|e| ReplayError::RpcError(format!("RPC transport error: {e}")))?
-                .ok_or(ReplayError::TransactionNotFound(*tx_hash))?;
+                .ok_or(ReplayError::BlockBodyTransactionNull(*tx_hash))?;
             let outcome = block_executor
                 .run_transaction(tx.as_recovered())
                 .map_err(ReplayError::BlockExecutionError)?;

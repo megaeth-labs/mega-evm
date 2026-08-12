@@ -129,6 +129,34 @@ fn envelope_without_transaction(name: &str, tx_hash: &str) -> std::path::PathBuf
     path
 }
 
+/// Write a copy of the envelope with the `eth_getTransactionByHash` entry for
+/// `tx_hash` removed entirely, and return its path.
+///
+/// Distinct from [`envelope_without_transaction`]: there the endpoint answers
+/// "no such transaction", here it does not answer at all — an offline cache
+/// miss, which is how a transport failure reaches the same call site.
+fn envelope_dropping_transaction(name: &str, tx_hash: &str) -> std::path::PathBuf {
+    let mut envelope: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(envelope()).expect("read envelope"))
+            .expect("parse envelope");
+    let marker = format!("\"hash\":\"{tx_hash}\"");
+    let entries = envelope["cache"].as_array_mut().expect("cache entries");
+    let before = entries.len();
+    entries.retain(|entry| {
+        !entry["value"].as_str().expect("entry value is a string").contains(&marker)
+    });
+    assert_eq!(
+        before - entries.len(),
+        1,
+        "the envelope must hold exactly one response for {tx_hash}"
+    );
+
+    let path =
+        std::env::temp_dir().join(format!("mega_evme_batch_{name}_{}.json", std::process::id()));
+    std::fs::write(&path, envelope.to_string()).expect("write doctored envelope");
+    path
+}
+
 /// Write a copy of the envelope whose `eth_getTransactionByHash` response for
 /// `tx_hash` still returns the transaction object, but with `gas` set to `0x0`
 /// so execution/setup fails (intrinsic gas / validation) rather than a missing
@@ -196,6 +224,20 @@ fn run_error(stdout: &str) -> serde_json::Value {
         .unwrap_or_else(|e| panic!("last stdout line is not compact JSON ({e}): {last}"));
     assert!(common::is_run_error(&value), "the last line must be the error object: {value}");
     value
+}
+
+/// The structured error object a failing single-transaction `--json` run ends
+/// with.
+///
+/// Single-transaction output is pretty-printed rather than NDJSON, so the
+/// object is recovered by streaming every JSON value on stdout instead of
+/// reading the last line.
+fn single_run_error(stdout: &str) -> serde_json::Value {
+    let values = common::json_values(stdout);
+    let last =
+        values.last().unwrap_or_else(|| panic!("a failing --json run must not leave stdout empty"));
+    assert!(common::is_run_error(last), "the last stdout value must be the error object: {last}");
+    last.clone()
 }
 
 /// `--block N --json` emits exactly one NDJSON line per transaction of the
@@ -395,6 +437,87 @@ fn test_replay_block_sweeps_targets_behind_an_abort_as_unanswered() {
     // unknown hash.
     assert_eq!(code, Some(3), "a block-body null lookup exits 3");
     assert_eq!(run_error(&stdout)["error"]["kind"].as_str(), Some("rpc-failure"));
+}
+
+/// A preceding transaction of a single-transaction replay resolving to null is
+/// an endpoint inconsistency (exit 3), not a definitive unknown transaction.
+///
+/// The single-transaction path derives its preceding hashes from the block body
+/// the endpoint already served, so the batch driver's reasoning applies
+/// unchanged: a null lookup contradicts an answer the endpoint gave itself.
+/// Doctors the index-0 transaction's response and replays a mid-block target,
+/// which executes that transaction before its own.
+#[test]
+fn test_replay_single_transaction_preceding_null_is_an_rpc_failure() {
+    let missing = BLOCK_TXS[0].0;
+    let (target, target_index) = BLOCK_TXS[1];
+    assert!(target_index > 0, "the target must have preceding transactions to execute");
+    let path = envelope_without_transaction("single_preceding_null", missing);
+
+    let (stdout, code) = replay_envelope_with_code(&path, &["--json", target]);
+    let _ = std::fs::remove_file(&path);
+
+    assert_eq!(code, Some(3), "a preceding block-body null exits 3: {stdout}");
+    let error = single_run_error(&stdout);
+    assert_eq!(error["error"]["code"].as_u64(), Some(3));
+    assert_eq!(error["error"]["kind"].as_str(), Some("rpc-failure"));
+    assert!(
+        error["error"]["message"].as_str().is_some_and(|m| {
+            m.contains(missing) && m.contains("Block body") && m.contains("resolves it to null")
+        }),
+        "the failure must name the hash and the inconsistency: {error}"
+    );
+}
+
+/// The user-supplied target of a single-transaction replay resolving to null
+/// keeps the definitive-answer class (exit 1).
+///
+/// Nothing the endpoint served claims that hash exists, so the null is an
+/// answer about the caller's own question rather than a contradiction — the one
+/// lookup on this path that stays `TransactionNotFound`.
+#[test]
+fn test_replay_single_transaction_target_null_is_not_found() {
+    let target = BLOCK_TXS[1].0;
+    let path = envelope_without_transaction("single_target_null", target);
+
+    let (stdout, code) = replay_envelope_with_code(&path, &["--json", target]);
+    let _ = std::fs::remove_file(&path);
+
+    assert_eq!(code, Some(1), "an unknown user-supplied hash exits 1: {stdout}");
+    let error = single_run_error(&stdout);
+    assert_eq!(error["error"]["code"].as_u64(), Some(1));
+    assert_eq!(error["error"]["kind"].as_str(), Some("execution-error"));
+    assert!(
+        error["error"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("Transaction not found") && m.contains(target)),
+        "the failure must stay a definitive not-found naming the hash: {error}"
+    );
+}
+
+/// A preceding transaction the endpoint never answers is an unanswered
+/// question, not a null answer: same exit class (3), different message.
+///
+/// Pins that reclassifying the null answer did not swallow the transport
+/// failure reaching the same call site.
+#[test]
+fn test_replay_single_transaction_preceding_transport_error_is_an_rpc_failure() {
+    let missing = BLOCK_TXS[0].0;
+    let target = BLOCK_TXS[1].0;
+    let path = envelope_dropping_transaction("single_preceding_miss", missing);
+
+    let (stdout, code) = replay_envelope_with_code(&path, &["--json", target]);
+    let _ = std::fs::remove_file(&path);
+
+    assert_eq!(code, Some(3), "an unanswered preceding lookup exits 3: {stdout}");
+    let error = single_run_error(&stdout);
+    assert_eq!(error["error"]["kind"].as_str(), Some("rpc-failure"));
+    let message = error["error"]["message"].as_str().unwrap_or_default();
+    assert!(message.contains("cache miss"), "the failure must name the missed request: {error}");
+    assert!(
+        !message.contains("resolves it to null"),
+        "an unanswered lookup is not a null answer: {error}"
+    );
 }
 
 /// An executor/setup abort on a mid-block transaction is still an execution
