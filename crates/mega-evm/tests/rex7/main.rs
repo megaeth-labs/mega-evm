@@ -21,7 +21,11 @@
 //!   is shown to be stable rather than merely correct at one point.
 //! - `exceptional_halt` — every exceptional-halt classification, in both frame positions: the
 //!   frame's whole burned budget settles as compute gas without changing the receipt.
+//! - `burn_split` — which half of that budget enforces: the work the frame performed does, the
+//!   remainder it destroyed does not, and both boundaries (a checkpoint's storage charge, revm's
+//!   post-action create rejects) land on the right side.
 
+mod burn_split;
 mod checkpoint_families;
 mod checkpoint_settlement;
 mod clamp_classification;

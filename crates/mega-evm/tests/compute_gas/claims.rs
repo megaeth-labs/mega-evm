@@ -819,24 +819,31 @@ fn test_first_call_to_the_beneficiary_is_charged_cold_from_minirex() {
 /// Pins "Code Deposit": the deposit's compute gas is recorded exactly once when the deposit
 /// occurs, and nothing is recorded when it does not.
 ///
-/// The two initcodes have identical length and opcode sequence and differ only in the byte they
-/// store, so every other cost in the transaction cancels and the difference between the two
-/// recorded totals is the code-deposit charge alone. `0xEF` makes EIP-3541 reject the runtime
-/// code, so the deposit never happens.
+/// The two initcodes have identical length and opcode sequence and differ only in the length they
+/// return, so every other cost in the transaction cancels — the `MSTORE8` has already expanded
+/// memory past both `RETURN` windows — and the difference between the two recorded totals is the
+/// code-deposit charge alone.
+///
+/// The zero-length return is what makes "the deposit does not happen" observable on every spec:
+/// the CREATE still succeeds, so the frame returns its unspent budget to the caller. A CREATE that
+/// fails the deposit instead (EIP-3541, the code-size limit, an unaffordable code-deposit charge)
+/// is an exceptional halt that returns nothing, and Rex7 settles that destroyed budget as compute
+/// gas — a much larger number than the charge under test. Those shapes are pinned by the Rex7
+/// exceptional-halt suite rather than here.
 ///
 /// Two different mechanisms produce this number — `MiniRex` through Rex4 measure it over the
 /// frame-action window, Rex5+ pre-charge the canonical amount before the checkpoint commits — so
 /// the assertion runs on every tracked spec to keep them agreeing.
 #[test]
 fn test_code_deposit_recorded_only_when_deposit_occurs() {
-    /// `PUSH1 <first>, PUSH0, MSTORE8, PUSH1 32, PUSH0, RETURN` — returns 32 bytes of runtime
-    /// code whose first byte is `first`.
-    fn initcode(first: u8) -> [u8; 8] {
-        [0x60, first, 0x5f, 0x53, 0x60, 0x20, 0x5f, 0xf3]
+    /// `PUSH1 0, PUSH0, MSTORE8, PUSH1 <len>, PUSH0, RETURN` — returns `len` bytes of runtime
+    /// code.
+    fn initcode(len: u8) -> [u8; 8] {
+        [0x60, 0x00, 0x5f, 0x53, 0x60, len, 0x5f, 0xf3]
     }
 
-    fn creator(first: u8) -> MemoryDatabase {
-        let code = initcode(first);
+    fn creator(len: u8) -> MemoryDatabase {
+        let code = initcode(len);
         base_db(
             BytecodeBuilder::default()
                 .mstore(0, code)
@@ -856,10 +863,10 @@ fn test_code_deposit_recorded_only_when_deposit_occurs() {
         if !spec.is_enabled(MegaSpecId::MINI_REX) {
             continue; // Equivalence records no compute gas at all.
         }
-        let deposited = transact(spec, creator(0x00));
-        let skipped = transact(spec, creator(0xef));
-        // Both transactions succeed: the EIP-3541 rejection fails the CREATE (it pushes zero),
-        // not the transaction. A non-success outcome means the fixture itself drifted.
+        let deposited = transact(spec, creator(32));
+        let skipped = transact(spec, creator(0));
+        // Both transactions succeed: an empty deploy leaves the CREATE successful (it pushes the
+        // created address). A non-success outcome means the fixture itself drifted.
         assert_eq!(deposited.outcome, "success", "{spec_name}: depositing run should succeed");
         assert_eq!(skipped.outcome, "success", "{spec_name}: skipped-deposit run should succeed");
         let (deposited, skipped) = (deposited.compute_gas, skipped.compute_gas);
@@ -872,7 +879,7 @@ fn test_code_deposit_recorded_only_when_deposit_occurs() {
         });
         assert_eq!(
             delta, EXPECTED_DEPOSIT_GAS,
-            "{spec_name}: the only compute gas separating a deposit from an EIP-3541 rejection \
+            "{spec_name}: the only compute gas separating a 32-byte deposit from an empty one \
              must be the code-deposit charge (deposited={deposited} skipped={skipped})"
         );
     }
