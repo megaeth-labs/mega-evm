@@ -10,6 +10,7 @@ mod frame_limits;
 mod frame_state_growth;
 mod frozen_window_tripwire;
 mod gas_detention;
+mod halt_logs_stripped;
 mod inspector_frame_run_parity;
 mod intrinsic_limit_bypass;
 mod keyless_deploy;
