@@ -168,8 +168,12 @@ use revm::{
 /// - **REX7** (extends REX6): switches to **checkpoint compute-gas settlement**. The plain opcodes
 ///   are revm's own instructions with no recording wrapper at all; compute gas settles as an
 ///   interpreter-gas delta at each checkpoint — the storage-gas opcodes, the CALL / CREATE family,
-///   the volatile opcodes, and frame entry / resume / exit. Per-transaction totals are unchanged; a
-///   limit exceed surfaces at the next checkpoint rather than at the opcode that crossed it.
+///   the volatile opcodes, and frame entry / resume / exit. Per-transaction totals are unchanged
+///   for a transaction that stays inside every limit and never halts exceptionally; a frame that
+///   does halt exceptionally additionally reports the budget it destroyed, which is enforced
+///   against nothing. Enforcement inside a plain segment is the V0 gas clamp, which stops the
+///   crossing opcode before it executes; an exceed detected by a settlement instead surfaces at the
+///   checkpoint that settled it rather than at the opcode that crossed the limit.
 ///   - Volatile opcodes: `volatile_data_ext::*_checkpoint` (raw instruction + segment settlement +
 ///     detention cap) in place of the `compute_gas_ext` delegation
 ///   - Storage-gas, CALL-family, CREATE and SELFDESTRUCT: the REX6 handler chains, settling from
@@ -926,6 +930,29 @@ macro_rules! record_checkpoint_body_compute_gas {
             return Err(result);
         }
     };
+}
+
+/// Charges `$amount` of `MegaETH` storage gas to the interpreter's counter and keeps it out of the
+/// REX7 settlement segment that is currently open, returning the amount charged.
+///
+/// Storage gas is never compute gas. A checkpoint body normally subtracts its own charge when
+/// [`record_storage_compute_gas!`] closes the body's measurement window — but a body that halts
+/// before reaching that macro (a static-context `LOG`, an inner instruction that runs out of gas)
+/// leaves the frame-exit settlement measuring a segment the charge is still inside, which would
+/// report storage gas as compute gas. Excluding it from the segment as it is charged makes the
+/// exclusion hold on both paths; on the normal path the body's own window re-syncs the segment
+/// afterwards, so this is invisible there.
+///
+/// Returns `Err(OutOfGas)` from the enclosing handler when the frame cannot afford the charge,
+/// exactly as a bare `gas!` would — with nothing debited and so nothing to exclude. No-op before
+/// REX7, where nothing measures against a segment.
+macro_rules! charge_storage_gas {
+    ($context:expr, $amount:expr) => {{
+        let amount: u64 = $amount;
+        gas!($context.interpreter, amount);
+        $context.host.additional_limit().borrow_mut().exclude_storage_gas_from_segment(amount);
+        amount
+    }};
 }
 
 /// Records an opcode's compute gas in a single measurement window and enforces the compute-gas
@@ -2478,9 +2505,7 @@ pub mod storage_gas_ext {
                         .additional_limit()
                         .borrow_mut()
                         .try_consume_storage_stipend(new_account_storage_gas);
-                    let charged = new_account_storage_gas - drained;
-                    gas!(context.interpreter, charged);
-                    charged
+                    charge_storage_gas!(context, new_account_storage_gas - drained)
                 } else {
                     0
                 };
@@ -2826,8 +2851,7 @@ pub mod storage_gas_ext {
             .additional_limit()
             .borrow_mut()
             .try_consume_storage_stipend(create_contract_storage_gas);
-        let storage_charged = create_contract_storage_gas - drained;
-        gas!(context.interpreter, storage_charged);
+        let storage_charged = charge_storage_gas!(context, create_contract_storage_gas - drained);
 
         // Run the raw inner create opcode (no `compute_gas_ext` wrapper — REX6 records compute gas
         // once below).
@@ -2905,6 +2929,15 @@ pub mod storage_gas_ext {
         // storage cost.
         let storage_charged =
             log_storage_cost.expect("gas_or_fail! above halts and returns on None");
+        // The `gas_or_fail!` above is the storage-gas charge, so it gets the same segment
+        // exclusion `charge_storage_gas!` applies at every other charge site: the raw opcode below
+        // can halt (a static frame rejects `LOG` outright) before the recording that would
+        // otherwise subtract it.
+        context
+            .host
+            .additional_limit()
+            .borrow_mut()
+            .exclude_storage_gas_from_segment(storage_charged);
 
         // Run the raw opcode and record compute gas once after the body completes (canonical
         // metering order). Byte-equivalent to the pre-REX6 per-`N` `compute_gas_ext::logK`
@@ -2973,9 +3006,7 @@ pub mod storage_gas_ext {
                     .additional_limit()
                     .borrow_mut()
                     .try_consume_storage_stipend(sstore_set_storage_gas);
-                let charged = sstore_set_storage_gas - drained;
-                gas!(context.interpreter, charged);
-                charged
+                charge_storage_gas!(context, sstore_set_storage_gas - drained)
             } else {
                 0
             };
@@ -3068,7 +3099,7 @@ pub mod storage_gas_ext {
             };
             let drained =
                 context.host.additional_limit().borrow_mut().try_consume_storage_stipend(cost);
-            gas!(context.interpreter, cost - drained);
+            charge_storage_gas!(context, cost - drained);
 
             // Record resource usage for new beneficiary account
             context.host.additional_limit().borrow_mut().on_selfdestruct_new_account();
