@@ -1097,6 +1097,19 @@ where
 /// post-commit result rewrite (limit exceed after CREATE checkpoint commit) can otherwise leak
 /// constructor logs into a failed receipt. Clearing here is the single product-code fix; it is
 /// a no-op when the journal already discarded the logs (mid-frame halt / natural revert).
+///
+/// # This is unconditional only because EIP-7708 is off
+///
+/// "A failed transaction contributes no logs" stops being true once EIP-7708 is active: the
+/// burn logs it emits are produced while the transaction result is being assembled, outside any
+/// frame checkpoint, so no revert can take them back and a failed transaction legitimately
+/// carries them. Every `MegaSpecId` maps to Prague, where every EIP-7708 emission site returns
+/// early, so today there is nothing legitimate for this to drop — the only logs that can reach a
+/// non-`Success` result are the ones a post-commit rewrite stranded in the journal.
+///
+/// If a `MegaSpecId` is ever mapped to Amsterdam or later, this clearing must become
+/// conditional, or it will silently swallow logs that belong on the receipt.
+/// `test_all_specs_map_to_isthmus_and_prague` is what stands between that change and this code.
 fn strip_logs_if_not_success<HaltReasonTy>(
     result: ExecutionResult<HaltReasonTy>,
 ) -> ExecutionResult<HaltReasonTy> {

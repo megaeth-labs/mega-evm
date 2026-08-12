@@ -205,6 +205,17 @@ mod tests {
         assert_eq!(MegaSpecId::from_str("unknown"), Err(UnknownHardfork));
     }
 
+    /// Behavior elsewhere is written against this mapping, so advancing it is not a one-line
+    /// change. What breaks, and where to look:
+    ///
+    /// - Amsterdam turns on EIP-7708, which emits logs outside every frame checkpoint. The
+    ///   transaction result seam drops logs from non-`Success` results unconditionally on the
+    ///   strength of that never happening, and would start swallowing legitimate ones.
+    /// - Osaka caps a transaction's gas limit at 2^24, below `MegaETH`'s own system-call and
+    ///   compute-gas figures, so every system call and many user transactions would be rejected
+    ///   during validation unless the cap is pinned first.
+    ///
+    /// Neither is a reason not to advance the mapping — they are the work that comes with it.
     #[test]
     fn test_all_specs_map_to_isthmus_and_prague() {
         for (spec, _) in ALL_SPECS {
