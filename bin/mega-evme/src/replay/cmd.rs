@@ -529,14 +529,44 @@ impl Cmd {
             .ok_or_else(|| ReplayError::TransactionNotFound(tx_hash))?;
         debug!(block_number = ?target_tx.block_number, "Transaction found");
 
-        let (state_base_block, block_number, is_pending) = if let Some(n) = target_tx.block_number {
-            (n - 1, n, false)
+        // Classify the target from its `(block_number, block_hash)` pair before
+        // anything else is fetched. Every shape the endpoint can return is
+        // handled explicitly, so a contradictory row cannot fall through into the
+        // pending arm, and a shape that can never be replayed is answered from the
+        // metadata alone — no block fetch precedes the verdict, and no fetch
+        // failure can mask it. A mined target keeps its inclusion hash here, which
+        // is what the block fetched below is anchored against.
+        let mined: Option<(u64, B256)> = match (target_tx.block_number, target_tx.block_hash) {
+            (Some(number), Some(inclusion)) => Some((number, inclusion)),
+            // A mined transaction without an inclusion hash is an unanchored
+            // view: the block number alone cannot prove which block body the
+            // target belongs to, so there is nothing to anchor the replay to.
+            (Some(number), None) => {
+                return Err(ReplayError::RpcError(format!(
+                    "endpoint reported a mined transaction in block {number} without an \
+                     inclusion hash: unanchored view"
+                )))
+            }
+            // A hash proves inclusion; a null number denies it. That pair is
+            // self-contradictory metadata, not a pending transaction.
+            (None, Some(inclusion)) => {
+                return Err(ReplayError::RpcError(format!(
+                    "endpoint reported inclusion hash {inclusion} without a block \
+                     number: contradictory metadata"
+                )))
+            }
+            (None, None) => None,
+        };
+        let is_pending = mined.is_none();
+
+        let (state_base_block, block_number) = if let Some((n, _)) = mined {
+            (n - 1, n)
         } else {
             let latest = provider
                 .get_block_number()
                 .await
                 .map_err(|e| ReplayError::RpcError(format!("RPC transport error: {e}")))?;
-            (latest, latest, true)
+            (latest, latest)
         };
         debug!(
             state_base_block = state_base_block,
@@ -582,7 +612,7 @@ impl Cmd {
         // A pending transaction has no such pair: its state base *is* the
         // latest block, so one fetch fills both roles and there is no linkage,
         // no inclusion, and no membership to check.
-        if !is_pending {
+        if let Some((_, reported)) = mined {
             let parent_hash = parent_block.hash();
             let expected_parent = block.header.parent_hash();
             if parent_hash != expected_parent {
@@ -600,27 +630,17 @@ impl Cmd {
             // it, in a separate call, so a reorg or a load-balanced endpoint can
             // answer both numbered fetches from a replacement block the target is
             // not part of. Replaying that block anyway executes the target
-            // against a body it never ran in.
+            // against a body it never ran in. The reported hash is the one the
+            // metadata classification kept, so a mined target always has one to
+            // anchor against.
             let fetched = block.hash();
-            match target_tx.block_hash {
-                Some(reported) if reported != fetched => {
-                    return Err(ReplayError::RpcError(format!(
-                        "block {block_number} has hash {fetched}, but the target transaction was \
-                         resolved as included in {reported}: the endpoint served divergent views \
-                         of this block (reorg in progress, or a load-balanced endpoint); retry \
-                         once the chain settles"
-                    )))
-                }
-                Some(_) => {}
-                // A mined transaction without an inclusion hash is an unanchored
-                // view: the block number alone cannot prove which block body the
-                // target belongs to, so there is nothing to anchor the replay to.
-                None => {
-                    return Err(ReplayError::RpcError(format!(
-                        "endpoint reported a mined transaction in block {block_number} without an \
-                         inclusion hash: unanchored view"
-                    )))
-                }
+            if reported != fetched {
+                return Err(ReplayError::RpcError(format!(
+                    "block {block_number} has hash {fetched}, but the target transaction was \
+                     resolved as included in {reported}: the endpoint served divergent views of \
+                     this block (reorg in progress, or a load-balanced endpoint); retry once the \
+                     chain settles"
+                )));
             }
         }
 
