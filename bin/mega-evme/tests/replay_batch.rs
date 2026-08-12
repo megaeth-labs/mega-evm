@@ -294,6 +294,42 @@ fn envelope_with_reassigned_sender(name: &str, tx_hash: &str) -> std::path::Path
     path
 }
 
+/// Write a copy of the envelope whose header for block `number` advertises
+/// `gas_limit`, and return its path.
+///
+/// Shrinking the advertised limit makes the block-gas admission check reject
+/// the first transaction whose own gas limit exceeds what remains — a
+/// deterministic execution-class rejection whose error names no transaction
+/// hash, raised while that transaction is in flight.
+fn envelope_with_block_gas_limit(name: &str, number: u64, gas_limit: u64) -> std::path::PathBuf {
+    let mut envelope: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(envelope()).expect("read envelope"))
+            .expect("parse envelope");
+    let number_hex = format!("0x{number:x}");
+    let mut doctored = 0;
+    for entry in envelope["cache"].as_array_mut().expect("cache entries").iter_mut() {
+        let value = entry["value"].as_str().expect("entry value is a string");
+        if !value.contains("\"transactions\"") {
+            continue;
+        }
+        let mut response: serde_json::Value =
+            serde_json::from_str(value).expect("parse block response");
+        let result = &mut response["result"];
+        if result["number"].as_str() != Some(number_hex.as_str()) {
+            continue;
+        }
+        result["gasLimit"] = serde_json::Value::String(format!("0x{gas_limit:x}"));
+        entry["value"] = serde_json::Value::String(response.to_string());
+        doctored += 1;
+    }
+    assert_eq!(doctored, 1, "the envelope must hold exactly one header for block {number}");
+
+    let path =
+        std::env::temp_dir().join(format!("mega_evme_batch_{name}_{}.json", std::process::id()));
+    std::fs::write(&path, envelope.to_string()).expect("write doctored envelope");
+    path
+}
+
 /// Run `replay` against `envelope_path` and return its stdout plus its exit code.
 fn replay_envelope_with_code(
     envelope_path: &std::path::Path,
@@ -835,6 +871,48 @@ fn test_replay_single_transaction_tampered_preceding_fails_authentication() {
             message.contains("served a different transaction"),
         "the failure must name the tampered body-listed fetch: {message}"
     );
+}
+
+/// A deterministic rejection that does not name its transaction still lands on
+/// the transaction it was raised about: the in-flight target keeps the
+/// execution-class abort as its own answer, and only the targets behind it are
+/// swept as unanswered.
+///
+/// Shrinks the block's advertised gas limit so admission rejects the index-1
+/// transaction (`TransactionGasLimitMoreThanAvailableBlockGas` names no hash);
+/// the index-0 deposit still fits the shrunken limit.
+#[test]
+fn test_replay_block_hashless_abort_lands_on_the_in_flight_target() {
+    let path = envelope_with_block_gas_limit("hashless_abort", BLOCK, 200_000_000);
+
+    let (stdout, code) =
+        replay_envelope_with_code(&path, &["--block", &BLOCK.to_string(), "--json"]);
+    let _ = std::fs::remove_file(&path);
+    let lines = ndjson(&stdout);
+
+    assert_eq!(lines.len(), BLOCK_TX_COUNT, "every target is still reported exactly once");
+    assert!(lines[0].get("error").is_none(), "the deposit fits the shrunken limit: {}", lines[0]);
+    let aborter = &lines[1];
+    assert_eq!(
+        aborter["error"]["kind"].as_str(),
+        Some("execution"),
+        "the in-flight target keeps the hashless rejection as its own answer: {aborter}"
+    );
+    let message = aborter["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("gas") && !message.contains("aborted before this transaction"),
+        "the aborter's line carries the rejection itself, not a swept notice: {message}"
+    );
+    for line in &lines[2..] {
+        assert_eq!(
+            line["error"]["kind"].as_str(),
+            Some("rpc"),
+            "targets behind the abort went unanswered: {line}"
+        );
+    }
+
+    assert_eq!(code, Some(1), "a deterministic rejection exits 1");
+    assert_eq!(run_error(&stdout)["error"]["kind"].as_str(), Some("execution-error"));
 }
 
 /// A non-target transport abort (cache miss) exits 3 and names the failing

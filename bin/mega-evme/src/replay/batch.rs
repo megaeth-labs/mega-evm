@@ -1059,8 +1059,16 @@ where
     // Run the block's transactions in order. Any failure aborts the block: the
     // executor state no longer matches the chain, so the remaining targets
     // cannot be replayed faithfully.
+    //
+    // `in_flight` names the transaction whose iteration raised the abort. It is
+    // the attribution ground truth: some rejections raised *about* a
+    // transaction do not embed its hash in the error (the block-gas admission
+    // check, for one), and attributing from error introspection alone would
+    // sweep the aborter itself as an unanswered peer.
+    let mut in_flight: Option<B256> = None;
     let loop_result: Result<()> = async {
         for (tx_index, tx_hash) in tx_hashes.iter().enumerate() {
+            in_flight = Some(*tx_hash);
             // Isolate BLOCKHASH reads per transaction so a fixture dump sees only
             // the target's own accesses (mirrors the single-tx clear after
             // preceding transactions).
@@ -1321,7 +1329,10 @@ where
         }
         Err(e) => {
             warn!(block = number, error = %e, "Aborted block replay; skipping its remaining targets");
-            let aborting = aborting_tx_hash(e);
+            // The iteration that raised the abort is authoritative; error
+            // introspection only covers errors raised outside the loop (a
+            // failed `finish`, for one), which can still name a transaction.
+            let aborting = in_flight.or_else(|| aborting_tx_hash(e));
             let root_kind = classify(e);
             let mut root_on_target = false;
             for tx_hash in unreported {
