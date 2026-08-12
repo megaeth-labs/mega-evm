@@ -648,7 +648,13 @@ fn run_sandbox_ctx<DB: AlloyDatabase, ExtEnvs: ExternalEnvTypes>(
     let is_rex6_enabled = sandbox_ctx.mega_spec().is_enabled(MegaSpecId::REX6);
     let mut sandbox_evm = MegaEvm::new(sandbox_ctx);
     let result = sandbox_evm.transact_raw(sandbox_tx);
-    let limit_usage = sandbox_evm.ctx.additional_limit.borrow().get_usage();
+    let limit_usage = {
+        let additional_limit = sandbox_evm.ctx.additional_limit.borrow();
+        SandboxUsage {
+            usage: additional_limit.get_usage(),
+            burned_compute_gas: additional_limit.burned_compute_gas(),
+        }
+    };
     let volatile_accesses =
         sandbox_evm.ctx.volatile_data_tracker.borrow().get_volatile_data_accessed();
     process_sandbox_transact_result(
@@ -686,7 +692,7 @@ pub enum SandboxOutcome {
         /// Wire-shape dispatch for what the outer caller should report.
         completion: SandboxCompletion,
         /// Resource usage from the sandbox's additional limit trackers.
-        limit_usage: LimitUsage,
+        limit_usage: SandboxUsage,
         /// Volatile-access footprint to merge into the parent after sandbox return.
         volatile_accesses: VolatileDataAccess,
     },
@@ -694,6 +700,22 @@ pub enum SandboxOutcome {
     /// or `InternalError`). No state, resource usage, or volatile-access footprint
     /// applies — the outer caller must refund the full pre-debited reservation.
     Rejected(KeylessDeployError),
+}
+
+/// Resource usage a completed sandbox hands to the parent, with Rex7's compute-gas split intact.
+///
+/// [`LimitUsage`] carries one number per dimension, which is all the parent needs for three of
+/// them. Compute gas needs two: the parent must report the sandbox's whole total but must enforce
+/// only the part the sandbox performed, exactly as the sandbox itself did. Collapsing the two at
+/// this boundary would let an ordinary EVM halt inside a sandboxed constructor fail the outer
+/// transaction on a resource limit.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SandboxUsage {
+    /// Full reported usage. `compute_gas` includes `burned_compute_gas`.
+    pub usage: LimitUsage,
+    /// The part of `usage.compute_gas` the sandbox destroyed rather than performed — the
+    /// remainders of exceptionally halted sandbox frames (Rex7+, always 0 before).
+    pub burned_compute_gas: u64,
 }
 
 /// Wire-shape dispatch for a completed sandbox execution.
@@ -788,7 +810,7 @@ impl SandboxCompletion {
 /// surface (`Deployed { addr }` returned for create+SELFDESTRUCT) for replay parity.
 fn process_sandbox_transact_result<E: core::fmt::Display + IsTxError>(
     result: Result<ResultAndState<MegaHaltReason>, E>,
-    limit_usage: LimitUsage,
+    limit_usage: SandboxUsage,
     volatile_accesses: VolatileDataAccess,
     is_rex5_enabled: bool,
     is_rex6_enabled: bool,
@@ -930,7 +952,7 @@ fn process_sandbox_transact_result<E: core::fmt::Display + IsTxError>(
 fn apply_sandbox_post_accounting<DB: AlloyDatabase, ExtEnvs: ExternalEnvTypes>(
     ctx: &MegaContext<DB, ExtEnvs>,
     gas: &mut Gas,
-    limit_usage: LimitUsage,
+    limit_usage: SandboxUsage,
     volatile_accesses: VolatileDataAccess,
     reservation: u64,
     sandbox_gas_used: u64,
@@ -1003,15 +1025,18 @@ fn charge_caller_materialization_pre_sandbox<DB: AlloyDatabase, ExtEnvs: Externa
     Ok(None)
 }
 
-/// Merges the sandbox's multidim usage into the parent's trackers.
+/// Merges the sandbox's multidim usage into the parent's trackers, keeping the REX7 split
+/// between compute gas the sandbox performed and compute gas it destroyed.
 ///
 /// This merge is intentionally not undone on later halt paths, because
 /// block-level multidim counters survive halts.
 fn merge_sandbox_limit_usage<DB: AlloyDatabase, ExtEnvs: ExternalEnvTypes>(
     ctx: &MegaContext<DB, ExtEnvs>,
-    limit_usage: LimitUsage,
+    limit_usage: SandboxUsage,
 ) {
-    ctx.additional_limit.borrow_mut().merge_usage(limit_usage);
+    ctx.additional_limit
+        .borrow_mut()
+        .merge_usage(limit_usage.usage, limit_usage.burned_compute_gas);
 }
 
 /// Returns the unused portion of the sandbox's pre-debited gas reservation to the
@@ -1254,7 +1279,7 @@ mod tests {
         });
         let out = process_sandbox_transact_result(
             result,
-            LimitUsage::default(),
+            SandboxUsage::default(),
             VolatileDataAccess::empty(),
             true,
             false,
@@ -1280,7 +1305,7 @@ mod tests {
         });
         let out = process_sandbox_transact_result(
             result,
-            LimitUsage::default(),
+            SandboxUsage::default(),
             VolatileDataAccess::empty(),
             true,
             false,
@@ -1301,7 +1326,7 @@ mod tests {
             Err(FakeTxErr { is_tx: false, msg: "db blew up" });
         let out = process_sandbox_transact_result(
             result,
-            LimitUsage::default(),
+            SandboxUsage::default(),
             VolatileDataAccess::empty(),
             true,
             false,
@@ -1320,7 +1345,7 @@ mod tests {
             Err(FakeTxErr { is_tx: true, msg: "intrinsic gas too low" });
         let out = process_sandbox_transact_result(
             result,
-            LimitUsage::default(),
+            SandboxUsage::default(),
             VolatileDataAccess::empty(),
             true,
             false,
