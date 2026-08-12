@@ -506,7 +506,7 @@ A frame that ends in an exceptional halt — ordinary out-of-gas, memory out-of-
 A node MUST settle that whole budget as compute gas, split into two parts that are accounted differently:
 
 - **Executed** — the open plain-opcode segment, measured as the interpreter-gas delta since the previous checkpoint, less any storage gas a checkpoint body charged before aborting. This is work the network performed, and a node MUST record it through the ordinary path: it counts toward the transaction's reported total **and** toward the usage every resource limit is evaluated against, exactly as the same opcodes would if the frame had returned normally.
-- **Destroyed** — whatever the frame still held when its result became final, including any gas the clamp was hiding. A node MUST record it in the reported compute-gas total and in block-level compute accounting, and MUST NOT evaluate any resource limit against it.
+- **Destroyed** — whatever the frame still held when its result became final, including any gas the clamp was hiding. A node MUST record it in the reported compute-gas total and in block-level compute accounting, and MUST NOT evaluate any resource limit against it, at transaction level or at block level (see [Resource Limits](resource-limits.md)).
 
 The destroyed part is bounded by the sender's gas envelope rather than by the compute limit, and halting on it would rescue gas the EVM already destroyed and change the receipt this carve-out requires to stay identical.
 The executed part carries no such problem: it is work, and leaving it out of enforcement would let a frame that keeps executing after absorbing a failed child spend the same compute headroom a second time.

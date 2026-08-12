@@ -131,6 +131,12 @@ Subsequent candidate transactions MUST be skipped before execution once the bloc
 
 Although block compute gas usage MAY be tracked, the protocol does not impose a separate block-level compute gas cap.
 
+From [Rex7](../upgrades/rex7.md) onward, a node that tracks cumulative block compute gas MUST track it as two readings, because the [exceptional-halt frame carve-out](compute-gas.md#exceptional-halt-frame-carve-out) makes them differ.
+The **reported** reading accumulates each transaction's full compute-gas total, destroyed remainders included; it is the block's compute-gas statistic.
+The **enforced** reading accumulates only the part each transaction performed, and is the only one a node MAY compare against a configured block compute-gas ceiling, and the only one such a ceiling's rejection MUST report as the block's usage.
+Comparing the reported reading instead would let a transaction that destroyed a large gas envelope while performing almost no work close the block's compute capacity for every transaction behind it.
+Before Rex7 nothing is destroyed, so the two readings coincide.
+
 ### Two-Phase Block Building Workflow
 
 When constructing a block, a node or sequencer MUST process candidate transactions in the following order:
@@ -246,4 +252,4 @@ Including failed transactions ensures the sender always pays for consumed resour
 - [Rex4](../upgrades/rex4.md) — added per-call-frame runtime budgets; intrinsic resource costs (always deducted before execution) are now reflected in the top-level frame budget before it is forwarded to child frames.
 - [Rex5](../upgrades/rex5.md) — bounded a precompile invocation's compute-gas consumption by the remaining compute-gas budget, failing the precompile with `PrecompileOOG` rather than letting it overshoot the budget.
 - [Rex6](../upgrades/rex6.md) — moved EIP-7702 authority state-growth resolution from pre-execution (after the caller nonce bump) to validation, and added dynamic SALT account-creation gas for each net-new applied authority to the pre-frame intrinsic gas deduction; removed the keyless-deploy exception to gas preservation, so remaining gas is now rescued on every transaction-level exceed; and stopped enforcing the four runtime transaction-level limits against system-originated transactions, whose usage is still recorded.
-- [Rex7](../upgrades/rex7.md) _(unstable)_ — does not change the limit ceilings or the success/failed/skipped/rejected outcomes; a compute-gas or detention exceed inside a plain-opcode segment is stopped before the crossing opcode executes (see [Compute Gas Accounting](compute-gas.md)).
+- [Rex7](../upgrades/rex7.md) _(unstable)_ — does not change the limit ceilings or the success/failed/skipped/rejected outcomes; a compute-gas or detention exceed inside a plain-opcode segment is stopped before the crossing opcode executes, and cumulative block compute gas splits into a reported and an enforced reading (see [Compute Gas Accounting](compute-gas.md)).

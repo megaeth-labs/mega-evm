@@ -118,6 +118,7 @@ MegaETH separates EVM gas into two independent dimensions tracked during executi
   REX7 settles compute gas at checkpoints (storage-gas opcodes, CALL/CREATE family, volatile opcodes, `GAS`, frame entry/resume/exit) rather than after every plain opcode, and enforces limits inside plain segments with a V0 gas clamp.
   A REX7 frame that ends in an exceptional halt splits its remaining budget: the work it performed before failing settles through the ordinary enforcing path, while the remainder it destroyed goes into a lane of `ComputeGasTracker` that the reported total and block accounting include but no limit comparison sees — destroyed gas is not work performed, and enforcing it would turn an EVM halt into a resource-limit failure with the gas rescued.
   The destroyed half is read from the frame's final result after action processing, so revm's post-action create rejects are covered; storage gas a checkpoint body charged before aborting belongs to neither half.
+  The split crosses the transaction boundary: `MegaTransactionOutcome` carries the destroyed part alongside the reported total, and `BlockLimiter` keeps `block_compute_gas_used` (reported) separate from `block_compute_gas_enforced` (the counter block admission compares).
   Subject to a per-spec compute gas limit and further restricted by gas detention (see below).
 - **Storage gas**: Charges for persistent state modifications (SSTORE, account creation, contract deployment).
   These costs scale dynamically with SALT bucket capacity (see External Environment Dependencies below).

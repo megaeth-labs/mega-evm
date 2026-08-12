@@ -80,7 +80,7 @@ A node MUST record it through the ordinary path, so it counts toward the transac
 A parent frame keeps executing after it absorbs a failed child; excluding the child's work from enforcement would let the code that follows spend the same compute headroom a second time.
 
 The **destroyed** part is whatever the frame still held when its result became final, including any gas the clamp was hiding from the interpreter.
-A node MUST record it in the transaction's reported compute-gas total and in block-level compute accounting, and MUST NOT evaluate any resource limit against it.
+A node MUST record it in the transaction's reported compute-gas total and in block-level compute accounting, and MUST NOT evaluate any resource limit against it — at transaction level or at block level, where a destroyed remainder that counted toward admission would close the block's compute capacity for the transactions behind it (see [Resource Limits](../evm/resource-limits.md)).
 It is bounded by the sender's gas envelope rather than by the compute limit, so it can carry the reported total past that limit; halting on it would rescue gas the EVM has already destroyed and change a receipt this carve-out requires to stay identical.
 
 The split MUST be driven by the halt classification, not by the interpreter's own counter — an inherited EVM zeroes that counter for ordinary out-of-gas only.
