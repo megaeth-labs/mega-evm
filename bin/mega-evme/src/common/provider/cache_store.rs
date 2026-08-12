@@ -36,9 +36,9 @@ use super::transport::TransportCache;
 use crate::{
     cache::{
         acquire_exclusive_lock, lock_sidecar_path, merge_envelope_for_persist,
-        merge_provider_entries_capped, read_provider_cache, reread_envelope_for_merge,
-        write_bytes_atomic, write_envelope_atomic, CacheKv, EnvelopeDoc, EnvelopeReread,
-        ExternalEnvDoc, ENVELOPE_VERSION,
+        merge_provider_entries_capped, reread_envelope_for_merge, reread_provider_cache_for_merge,
+        warn_user, write_bytes_atomic, write_envelope_atomic, CacheKv, EnvelopeDoc, EnvelopeReread,
+        ExternalEnvDoc, ProviderReread, ENVELOPE_VERSION,
     },
     common::{EvmeError, Result},
 };
@@ -196,7 +196,9 @@ impl RpcCacheStore {
         match inner {
             RpcCacheStoreInner::ProviderCache { cache, path } => {
                 match save_cache_atomic(&cache, &path) {
-                    Ok(()) => info!(path = %path.display(), "Persisted RPC cache"),
+                    Ok(true) => info!(path = %path.display(), "Persisted RPC cache"),
+                    // Intentional skip (e.g. foreign on-disk shape) already warned inside.
+                    Ok(false) => {}
                     Err(err) => warn!(
                         path = %path.display(),
                         error = %err,
@@ -241,15 +243,22 @@ impl fmt::Debug for RpcCacheStore {
 
 /// Atomically persist `cache` to `target` via lock + re-read-merge + temp rename.
 ///
-/// All error paths include `target` in the returned [`std::io::Error`] so the
-/// warn-log in [`RpcCacheStore::persist`] identifies which file failed.
+/// Returns `Ok(true)` when the file was written, `Ok(false)` when the write was
+/// intentionally skipped (a recognizable foreign on-disk shape), and `Err` on
+/// lock/IO failure. All error paths include `target` in the returned
+/// [`std::io::Error`] so the warn-log in [`RpcCacheStore::persist`] identifies
+/// which file failed.
 ///
 /// Lock acquisition failure aborts the persist: the provider cache is a
 /// best-effort artifact, so skipping it costs a re-fetch, while an unlocked
 /// write can silently delete a sibling process's entries.
-/// A missing or corrupt on-disk file during re-read degrades to persisting
-/// our entries only (with a `warn!` for corrupt).
-fn save_cache_atomic(cache: &SharedCache, target: &Path) -> std::io::Result<()> {
+///
+/// On-disk re-read is typed (same classification as `cache merge`):
+/// - missing / provider array → merge and write;
+/// - corrupt / unreadable → degrade to ours-only (with a `warn!`);
+/// - recognizable foreign shape (capture envelope, …) → skip the write with a visible warning so a
+///   mispointed cache-dir cannot destroy the foreign file.
+fn save_cache_atomic(cache: &SharedCache, target: &Path) -> std::io::Result<bool> {
     let _guard = acquire_exclusive_lock(target).map_err(|e| {
         std::io::Error::other(format!(
             "failed to acquire the cache lock {} for {}: {e}; \
@@ -289,15 +298,29 @@ fn save_cache_atomic(cache: &SharedCache, target: &Path) -> std::io::Result<()> 
     // Drop the NamedTempFile so it is unlinked; we only needed the dump bytes.
     drop(our_tmp);
 
-    let disk_entries = match read_provider_cache(target) {
-        Ok(entries) => entries,
-        Err(err) => {
+    let disk_entries = match reread_provider_cache_for_merge(target) {
+        ProviderReread::Ok(entries) => entries,
+        ProviderReread::Degradable(msg) => {
             warn!(
                 path = %target.display(),
-                error = %err,
+                error = %msg,
                 "Failed to re-read on-disk RPC cache during merge; persisting our entries only",
             );
             Vec::new()
+        }
+        ProviderReread::Hard(err) => {
+            // Best-effort provider persist must not destroy a foreign file that
+            // a shared-dir misconfiguration pointed it at (e.g. a capture
+            // envelope). Skip the write so the foreign content survives.
+            // stderr via `warn_user`: default CLI tracing is off, so a
+            // `warn!`-only line would never reach the operator who needs to
+            // fix the shared-dir misconfiguration.
+            warn_user(format_args!(
+                "Skipping RPC cache persist to '{}': {err}. On-disk file is not a \
+                 provider cache; leaving it intact",
+                target.display(),
+            ));
+            return Ok(false);
         }
     };
 
@@ -312,7 +335,7 @@ fn save_cache_atomic(cache: &SharedCache, target: &Path) -> std::io::Result<()> 
         ))
     })?;
     write_bytes_atomic(target, &serialized)?;
-    Ok(())
+    Ok(true)
 }
 
 /// On-disk envelope format shared by `--rpc.capture-file` (write) and
@@ -973,6 +996,53 @@ mod tests {
         assert!(!path.exists(), "nothing was written");
     }
 
+    /// Persisting a provider cache onto a capture envelope must leave the
+    /// envelope intact: a shared-dir misconfiguration must not destroy a
+    /// foreign file the provider shape cannot fold.
+    #[test]
+    fn test_provider_cache_persist_skips_foreign_envelope_target() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("rpc-cache-1.json");
+
+        let envelope = serde_json::json!({
+            "version": 1,
+            "chain_id": 7,
+            "cache": [],
+            "external_env": null,
+        });
+        let before = serde_json::to_string_pretty(&envelope).unwrap();
+        fs::write(&path, &before).expect("seed envelope");
+
+        let cache = CacheLayer::new(16).cache();
+        cache.put(B256::repeat_byte(0xaa), "ours".into()).expect("put");
+        let wrote = save_cache_atomic(&cache, &path).expect("skip is Ok(false), not Err");
+        assert!(!wrote, "foreign shape must not be overwritten");
+        assert_eq!(fs::read_to_string(&path).unwrap(), before, "envelope left intact");
+
+        // Store path is best-effort: same skip, same intact file, no hard error.
+        let store_cache = CacheLayer::new(16).cache();
+        store_cache.put(B256::repeat_byte(0xbb), "store".into()).expect("put");
+        RpcCacheStore::new(store_cache, path.clone())
+            .persist()
+            .expect("provider persist stays best-effort on foreign skip");
+        assert_eq!(fs::read_to_string(&path).unwrap(), before, "store path also leaves envelope");
+    }
+
+    /// An unrecognized structured JSON shape is also foreign: skip, do not replace.
+    #[test]
+    fn test_provider_cache_persist_skips_unrecognized_foreign_shape() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("rpc-cache-1.json");
+        let before = r#"{"not":"a-provider-cache","nor":"an-envelope"}"#;
+        fs::write(&path, before).expect("seed foreign");
+
+        let cache = CacheLayer::new(16).cache();
+        cache.put(B256::repeat_byte(0xaa), "ours".into()).expect("put");
+        let wrote = save_cache_atomic(&cache, &path).expect("skip is Ok");
+        assert!(!wrote);
+        assert_eq!(fs::read_to_string(&path).unwrap(), before);
+    }
+
     /// Envelope persist hard-errors when the lock cannot be acquired: the
     /// capture is the primary output, so a silently unlocked write is worse
     /// than a failed run.
@@ -1026,7 +1096,8 @@ mod tests {
         let key = B256::repeat_byte(0xcc);
         let cache = CacheLayer::new(16).cache();
         cache.put(key, "ok".into()).expect("put");
-        RpcCacheStore::new(cache, path.clone()).persist().expect("persist");
+        let wrote = save_cache_atomic(&cache, &path).expect("corrupt degrades to write");
+        assert!(wrote, "corrupt target is replaced with ours");
 
         let loaded = CacheLayer::new(16).cache();
         loaded.load_cache(path).expect("load");

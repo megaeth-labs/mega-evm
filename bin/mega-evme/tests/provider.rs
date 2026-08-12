@@ -388,6 +388,54 @@ async fn test_build_provider_clear_cache_deletes_file_before_load() {
     );
 }
 
+/// `--rpc.clear-cache` fails closed when the sidecar lock cannot be acquired:
+/// the user asked for a deletion that is not safe to do unlocked, so the file
+/// must remain and the build must hard-error rather than unlink without the lock.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_build_provider_clear_cache_fails_closed_when_lock_unacquirable() {
+    let server = MockRpcServer::start().await;
+    server.respond_eth_chain_id(77, 1).await;
+
+    let dir = tempdir().expect("tempdir");
+    let cache_file = dir.path().join("rpc-cache-77.json");
+    let seed = r#"[{"key":"0x0000000000000000000000000000000000000000000000000000000000000001","value":"seed"}]"#;
+    std::fs::write(&cache_file, seed).expect("seed cache");
+    // A directory in the sidecar's place makes the lock un-acquirable.
+    std::fs::create_dir(format!("{}.lock", cache_file.display())).expect("occupy sidecar");
+
+    let args = RpcArgs::parse_from([
+        "mega-evme",
+        "--rpc",
+        &server.uri(),
+        "--rpc.cache-max-entries",
+        "256",
+        "--rpc.cache-dir",
+        dir.path().to_str().unwrap(),
+        "--rpc.clear-cache",
+    ]);
+
+    let err = args.build_provider().await.expect_err("clear-cache must fail closed on lock");
+    match err {
+        EvmeError::RpcError(msg) => {
+            assert!(msg.contains("lock"), "error must name the lock failure, got: {msg}");
+            assert!(
+                msg.contains("rpc-cache-77.json.lock") || msg.contains(".lock"),
+                "error must name the sidecar, got: {msg}",
+            );
+            assert!(
+                msg.contains("Refusing to clear") || msg.contains("clear"),
+                "error must state the clear was refused, got: {msg}",
+            );
+        }
+        other => panic!("expected EvmeError::RpcError, got {other:?}"),
+    }
+    assert_eq!(
+        std::fs::read_to_string(&cache_file).expect("file still readable"),
+        seed,
+        "no unlocked unlink happened",
+    );
+}
+
 /// `--rpc.clear-cache` must hard-error when the file exists but cannot be
 /// unlinked, rather than warn-and-continue. Silent fallback would reload
 /// exactly the content the user asked to wipe, defeating the recovery path.
@@ -409,6 +457,10 @@ async fn test_build_provider_clear_cache_hard_errors_on_unlink_failure() {
     // Seed a "polluted" cache file the user would want to wipe.
     let cache_file = dir.path().join(format!("rpc-cache-{chain_id}.json"));
     std::fs::write(&cache_file, r#"{"polluted":"content"}"#).expect("write seed");
+    // Pre-create the lock sidecar while the directory is still writable.
+    // Clear acquires that sidecar before unlinking; without it, a read-only
+    // parent would fail lock creation first and never exercise the unlink path.
+    std::fs::write(format!("{}.lock", cache_file.display()), b"").expect("seed sidecar");
 
     // Revoke write permission on the parent dir so `remove_file` fails.
     // Read/execute stays on so the file is still visible to `path.exists()`
