@@ -425,10 +425,10 @@ fn test_pre_execution_check_block_da_size_boundary() {
 fn test_post_execution_update_raw_da_gated_by_deposit_flag() {
     let mut limiter = BlockLimiter::new(BlockLimits::no_limits());
 
-    limiter.post_execution_update_raw(0, 0, 1_234, 0, 0, 0, 0, false);
+    limiter.post_execution_update_raw(0, 0, 1_234, 0, 0, 0, 0, 0, false);
     assert_eq!(limiter.block_da_size_used, 1_234, "a non-deposit call must accumulate da_size");
 
-    limiter.post_execution_update_raw(0, 0, 5_000, 0, 0, 0, 0, true);
+    limiter.post_execution_update_raw(0, 0, 5_000, 0, 0, 0, 0, 0, true);
     assert_eq!(
         limiter.block_da_size_used, 1_234,
         "a deposit call must leave the da counter untouched"
@@ -457,6 +457,7 @@ fn test_is_block_limit_reached_all_below_is_false() {
     limiter.block_data_used = 9;
     limiter.block_kv_updates_used = 9;
     limiter.block_compute_gas_used = 9;
+    limiter.block_compute_gas_enforced = 9;
     limiter.block_state_growth_used = 9;
 
     assert!(
@@ -487,6 +488,7 @@ macro_rules! only_dimension_at_limit {
         limiter.block_data_used = 0;
         limiter.block_kv_updates_used = 0;
         limiter.block_compute_gas_used = 0;
+        limiter.block_compute_gas_enforced = 0;
         limiter.block_state_growth_used = 0;
         // ...except the one under test, which sits exactly at its (5) limit.
         limiter.$used_field = 5;
@@ -524,10 +526,21 @@ fn test_is_block_limit_reached_kv_updates_dimension() {
     assert!(limiter.is_block_limit_reached(), "kv updates at limit ⇒ block full");
 }
 
+/// Compute gas is the one dimension whose clause reads a counter other than the `*_used` one:
+/// admission is evaluated against the enforced counter, so the reported total sitting at the
+/// limit must leave the block open.
 #[test]
 fn test_is_block_limit_reached_compute_gas_dimension() {
-    let limiter = only_dimension_at_limit!(block_compute_gas_limit, block_compute_gas_used);
-    assert!(limiter.is_block_limit_reached(), "compute gas at limit ⇒ block full");
+    let limiter = only_dimension_at_limit!(block_compute_gas_limit, block_compute_gas_enforced);
+    assert!(limiter.is_block_limit_reached(), "enforced compute gas at limit ⇒ block full");
+
+    let mut reported_only =
+        only_dimension_at_limit!(block_compute_gas_limit, block_compute_gas_used);
+    reported_only.block_compute_gas_enforced = 0;
+    assert!(
+        !reported_only.is_block_limit_reached(),
+        "a reported total at the limit with nothing enforced must leave the block open"
+    );
 }
 
 #[test]

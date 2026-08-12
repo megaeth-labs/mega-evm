@@ -29,7 +29,20 @@ pub struct MegaTransactionOutcome {
     /// The number of KV updates.
     pub kv_updates: u64,
     /// The compute gas used.
+    ///
+    /// This is the transaction's full reported total, which under Rex7+ also carries whatever an
+    /// exceptionally halted frame destroyed rather than performed. It is the number to report and
+    /// to accumulate into block-level compute accounting; it is not the number to compare against
+    /// a limit — see [`compute_gas_destroyed`](Self::compute_gas_destroyed).
     pub compute_gas_used: u64,
+    /// The part of [`compute_gas_used`](Self::compute_gas_used) that exceptionally halted frames
+    /// destroyed rather than performed (Rex7+, always 0 before).
+    ///
+    /// Destroyed gas is not work the network did, so no resource limit is evaluated against it.
+    /// The transaction's own limits already excluded it while executing; a consumer that
+    /// accumulates this outcome into a further limit — today the block compute-gas counter — must
+    /// subtract it too, and compare `compute_gas_used - compute_gas_destroyed` instead.
+    pub compute_gas_destroyed: u64,
     /// The state growth used.
     pub state_growth_used: u64,
 }

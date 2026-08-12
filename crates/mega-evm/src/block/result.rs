@@ -280,6 +280,7 @@ mod tests {
             data_size: 1,
             kv_updates: 2,
             compute_gas_used: 3,
+            compute_gas_destroyed: 1,
             state_growth_used: 4,
         };
 
@@ -301,6 +302,7 @@ mod tests {
         // One hop for the resource dimensions (`Copy` scalars may leave through a deref).
         let kv: u64 = outcome.kv_updates;
         assert_eq!((kv, outcome.compute_gas_used, outcome.state_growth_used), (2, 3, 4));
+        assert_eq!(outcome.compute_gas_destroyed, 1);
     }
 
     #[test]

@@ -598,6 +598,7 @@ where
                     data_size,
                     kv_updates,
                     compute_gas_used,
+                    compute_gas_destroyed,
                     state_growth_used,
                 },
         } = result;
@@ -616,6 +617,11 @@ where
         // Accumulate post-execution resource usage into block-level counters. This does not
         // validate limits; over-limit enforcement happens in `pre_execution_check` before the
         // next transaction. The deposit-nonce record doubles as the deposit signal here.
+        //
+        // Compute gas crosses this boundary as the pair execution produced it — the full reported
+        // total and the destroyed part of it — so the limiter can report one and enforce the
+        // other. Collapsing them here would hand the block a single number that is right for
+        // reporting and wrong for admission.
         self.block_limiter.post_execution_update_raw(
             result.tx_gas_used(),
             tx_size,
@@ -623,6 +629,7 @@ where
             data_size,
             kv_updates,
             compute_gas_used,
+            compute_gas_destroyed,
             state_growth_used,
             depositor.is_some(),
         );
