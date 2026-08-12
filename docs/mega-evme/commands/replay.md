@@ -30,6 +30,14 @@ The transaction hash to replay (32-byte hex).
 `mega-evme` re-executes the transaction locally using state and block context sourced from either an RPC endpoint or a local fixture file.
 This gives you a fully reproducible execution without needing a local archive node.
 
+Resolving a mined transaction takes three separate calls — the transaction lookup, the block it reports, and that block's parent — which a reorg in progress or a load-balanced endpoint can answer from different views of the chain.
+Replaying a mixed view yields a plausible but wrong result, so the answers are checked against each other and a disagreement is reported as an RPC failure (exit `3`) instead of being replayed:
+the parent block must be the replayed block's parent, the fetched block must be the one the transaction was resolved as included in, and that block's body must list the transaction — its position there is what defines the preceding transactions replayed ahead of it.
+A mined transaction the endpoint reports without an inclusion hash is rejected the same way: the block number alone cannot anchor the replay to a block body.
+
+A pending transaction has no such pair, since its state base is the latest block, which is also the block it is replayed in.
+That block is fetched once and fills both roles, so the two cannot disagree.
+
 ### `--rpc <URL>`
 
 Aliases: `--rpc-url`

@@ -545,16 +545,31 @@ impl Cmd {
             "Block numbers determined",
         );
 
-        let parent_block = provider
-            .get_block_by_number(state_base_block.into())
-            .await
-            .map_err(|e| ReplayError::RpcError(format!("RPC transport error: {e}")))?
-            .ok_or(ReplayError::BlockNotFound(state_base_block))?;
+        // A mined target forks from its parent block, which is a different block
+        // than the one it is replayed in. A pending target forks from the latest
+        // block, which *is* the block it is replayed in: fetching that one height
+        // twice lets a reorg or a load-balanced endpoint answer the two roles
+        // from different blocks, and the replay would then run a pre-state from
+        // one view under a block environment from another. The pending path
+        // therefore fetches once and uses the same block for both roles, so the
+        // two roles cannot disagree at all.
+        let parent_block = if is_pending {
+            None
+        } else {
+            Some(
+                provider
+                    .get_block_by_number(state_base_block.into())
+                    .await
+                    .map_err(|e| ReplayError::RpcError(format!("RPC transport error: {e}")))?
+                    .ok_or(ReplayError::BlockNotFound(state_base_block))?,
+            )
+        };
         let block = provider
             .get_block_by_number(block_number.into())
             .await
             .map_err(|e| ReplayError::RpcError(format!("RPC transport error: {e}")))?
             .ok_or(ReplayError::BlockNotFound(block_number))?;
+        let parent_block = parent_block.unwrap_or_else(|| block.clone());
 
         // Parent/block linkage guard: the two blocks above were fetched by
         // number in separate calls, so across a reorg or a load-balanced
@@ -565,8 +580,8 @@ impl Cmd {
         // mismatch rather than as the infrastructure failure it is.
         //
         // A pending transaction has no such pair: its state base *is* the
-        // latest block, so both fetches address the same block and there is no
-        // linkage to check.
+        // latest block, so one fetch fills both roles and there is no linkage,
+        // no inclusion, and no membership to check.
         if !is_pending {
             let parent_hash = parent_block.hash();
             let expected_parent = block.header.parent_hash();
@@ -578,15 +593,60 @@ impl Cmd {
                      the chain settles"
                 )));
             }
+
+            // Inclusion guard: the linkage above only proves the two fetched
+            // blocks belong to one chain, not that the target belongs to them.
+            // The lookup that resolved the target reported which block includes
+            // it, in a separate call, so a reorg or a load-balanced endpoint can
+            // answer both numbered fetches from a replacement block the target is
+            // not part of. Replaying that block anyway executes the target
+            // against a body it never ran in.
+            let fetched = block.hash();
+            match target_tx.block_hash {
+                Some(reported) if reported != fetched => {
+                    return Err(ReplayError::RpcError(format!(
+                        "block {block_number} has hash {fetched}, but the target transaction was \
+                         resolved as included in {reported}: the endpoint served divergent views \
+                         of this block (reorg in progress, or a load-balanced endpoint); retry \
+                         once the chain settles"
+                    )))
+                }
+                Some(_) => {}
+                // A mined transaction without an inclusion hash is an unanchored
+                // view: the block number alone cannot prove which block body the
+                // target belongs to, so there is nothing to anchor the replay to.
+                None => {
+                    return Err(ReplayError::RpcError(format!(
+                        "endpoint reported a mined transaction in block {block_number} without an \
+                         inclusion hash: unanchored view"
+                    )))
+                }
+            }
         }
 
+        // The preceding transactions are the block-body entries ahead of the
+        // target, so the target's own position in that body defines the set and
+        // the body must contain it. A body that does not list the target would
+        // silently make every transaction of the block count as preceding and
+        // execute the target after the whole block.
         let mut preceding_tx_hashes = vec![];
         if !is_pending {
+            let mut found = false;
             for hash in block.transactions.hashes() {
                 if hash == tx_hash {
+                    found = true;
                     break;
                 }
                 preceding_tx_hashes.push(hash);
+            }
+            if !found {
+                return Err(ReplayError::RpcError(format!(
+                    "block {block_number} ({}) does not list target transaction {tx_hash}, which \
+                     the endpoint resolved as included in it: the endpoint served divergent views \
+                     of this block (reorg in progress, or a load-balanced endpoint); retry once \
+                     the chain settles",
+                    block.hash(),
+                )));
             }
         }
 

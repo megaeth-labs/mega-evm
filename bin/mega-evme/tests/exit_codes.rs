@@ -23,6 +23,9 @@ fn cache() -> std::path::PathBuf {
 /// The transaction the committed capture can replay.
 const TX_OK: &str = "0x41d34e7e13dfe0f85da9d407e2b2c381955d8c7eed428b17dc82327b2616b000";
 
+/// Number of the block `TX_OK` was mined in, as the capture reports it.
+const BLOCK_NUMBER: u64 = 18_172_461;
+
 /// A hash the capture holds no response for: the question goes unanswered.
 const UNANSWERABLE_TX: &str = "0x0000000000000000000000000000000000000000000000000000000000000001";
 
@@ -159,6 +162,91 @@ fn cache_with_unlinked_parent(name: &str, wrong_hash: &str) -> (std::path::PathB
     (path, original)
 }
 
+/// Write a copy of the committed capture whose `eth_getTransactionByHash`
+/// response for `TX_OK` carries `block_hash` as its inclusion hash, and return
+/// its path together with the hash the untouched capture reported.
+///
+/// Entries are keyed by the request, so the doctored answer still resolves. The
+/// transaction lookup and the block fetch are separate calls, so rewriting only
+/// the lookup models an endpoint that describes the target's inclusion
+/// differently than the block it serves for that number. Passing
+/// [`serde_json::Value::Null`] models a lookup that reports a mined transaction
+/// without anchoring it to any block at all.
+fn cache_with_inclusion_hash(
+    name: &str,
+    block_hash: serde_json::Value,
+) -> (std::path::PathBuf, String) {
+    let mut envelope: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(cache()).expect("read offline cache"))
+            .expect("parse offline cache");
+    // Only the transaction's own response carries it as the `hash` field; the
+    // block body lists bare hashes and a receipt names it `transactionHash`.
+    let marker = format!("\"hash\":\"{TX_OK}\"");
+    let mut original = None;
+    for entry in envelope["cache"].as_array_mut().expect("cache entries").iter_mut() {
+        let value = entry["value"].as_str().expect("entry value is a string");
+        if !value.contains(&marker) {
+            continue;
+        }
+        let mut response: serde_json::Value =
+            serde_json::from_str(value).expect("parse transaction response");
+        let result = response.get_mut("result").expect("transaction result");
+        assert!(result.is_object(), "expected a transaction object for {TX_OK}");
+        assert!(
+            result.get("blockNumber").is_some_and(|n| !n.is_null()),
+            "the captured transaction must report a block number"
+        );
+        original = Some(result["blockHash"].as_str().expect("inclusion hash").to_string());
+        result["blockHash"] = block_hash.clone();
+        entry["value"] = serde_json::Value::String(response.to_string());
+    }
+    let original = original.expect("the capture must hold exactly one response for the target");
+
+    let path =
+        std::env::temp_dir().join(format!("mega_evme_exit_{name}_{}.json", std::process::id()));
+    std::fs::write(&path, envelope.to_string()).expect("write doctored cache");
+    (path, original)
+}
+
+/// Write a copy of the committed capture whose replayed block no longer lists
+/// `TX_OK` in its body, and return its path together with that block's hash.
+///
+/// The block keeps its own hash, so the lookup's inclusion hash still matches
+/// what the endpoint serves for that number: only the membership the preceding
+/// transaction set is derived from is gone.
+fn cache_without_target_in_block_body(name: &str) -> (std::path::PathBuf, String) {
+    let mut envelope: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(cache()).expect("read offline cache"))
+            .expect("parse offline cache");
+    let mut block_hash = None;
+    for entry in envelope["cache"].as_array_mut().expect("cache entries").iter_mut() {
+        let value = entry["value"].as_str().expect("entry value is a string");
+        let Ok(mut response) = serde_json::from_str::<serde_json::Value>(value) else {
+            continue;
+        };
+        // A block body is the only response carrying a transaction list.
+        let Some(txs) = response
+            .get_mut("result")
+            .and_then(|result| result.get_mut("transactions"))
+            .and_then(|txs| txs.as_array_mut())
+        else {
+            continue;
+        };
+        if !txs.iter().any(|hash| hash.as_str() == Some(TX_OK)) {
+            continue;
+        }
+        txs.retain(|hash| hash.as_str() != Some(TX_OK));
+        block_hash = Some(response["result"]["hash"].as_str().expect("block hash").to_string());
+        entry["value"] = serde_json::Value::String(response.to_string());
+    }
+    let block_hash = block_hash.expect("exactly one captured block body lists the target");
+
+    let path =
+        std::env::temp_dir().join(format!("mega_evme_exit_{name}_{}.json", std::process::id()));
+    std::fs::write(&path, envelope.to_string()).expect("write doctored cache");
+    (path, block_hash)
+}
+
 /// Write a `--tx-file` holding `contents`, and return its path.
 fn tx_file(name: &str, contents: &str) -> std::path::PathBuf {
     let path =
@@ -292,6 +380,83 @@ fn test_unlinked_parent_block_is_an_rpc_failure() {
     }
 
     let _ = std::fs::remove_file(&path);
+}
+
+/// A block whose hash is not the one the target was resolved as included in is
+/// an unanswered question: the single-transaction run exits 3 rather than
+/// replaying the target against a block it never ran in.
+///
+/// The parent linkage can hold while both numbered fetches answer from a
+/// replacement block, so the linkage guard alone does not anchor the target.
+#[test]
+fn test_block_that_does_not_match_the_reported_inclusion_is_an_rpc_failure() {
+    const WRONG_INCLUSION: &str =
+        "0x2222222222222222222222222222222222222222222222222222222222222222";
+
+    let (path, served) =
+        cache_with_inclusion_hash("wrong_inclusion", serde_json::json!(WRONG_INCLUSION));
+    let run = run(&["replay", "--rpc.replay-file", path.to_str().unwrap(), "--json", TX_OK]);
+    let _ = std::fs::remove_file(&path);
+
+    assert_eq!(run.code(), 3, "a divergent inclusion exits 3.\nstderr: {}", run.stderr);
+    let error = run.error_object();
+    assert_eq!(error["error"]["code"].as_u64(), Some(3));
+    assert_eq!(error["error"]["kind"].as_str(), Some("rpc-failure"));
+    let message = error["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains(WRONG_INCLUSION) && message.contains(&served),
+        "the message must name both hashes (served {served}, reported {WRONG_INCLUSION}): {error}"
+    );
+    assert!(message.contains("divergent views"), "the message must name the cause: {error}");
+}
+
+/// A block body that does not list the target is an unanswered question too: the
+/// run exits 3 instead of treating every transaction of the block as preceding
+/// and executing the target after the whole block.
+#[test]
+fn test_target_absent_from_the_block_body_is_an_rpc_failure() {
+    let (path, block_hash) = cache_without_target_in_block_body("absent_target");
+    let run = run(&["replay", "--rpc.replay-file", path.to_str().unwrap(), "--json", TX_OK]);
+    let _ = std::fs::remove_file(&path);
+
+    assert_eq!(run.code(), 3, "a target absent from the body exits 3.\nstderr: {}", run.stderr);
+    let error = run.error_object();
+    assert_eq!(error["error"]["code"].as_u64(), Some(3));
+    assert_eq!(error["error"]["kind"].as_str(), Some("rpc-failure"));
+    let message = error["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains(TX_OK) && message.contains(&block_hash),
+        "the message must name the target and the block it is missing from: {error}"
+    );
+    assert!(
+        !run.stdout.contains("\"success\""),
+        "the run must not produce an execution summary:\n{}",
+        run.stdout
+    );
+}
+
+/// A mined lookup carrying no inclusion hash is an unanchored view: the block
+/// number alone cannot prove which body the target belongs to, so the run exits
+/// 3 — the same class the batch driver rejects it with.
+#[test]
+fn test_mined_target_without_an_inclusion_hash_is_an_rpc_failure() {
+    let (path, _) = cache_with_inclusion_hash("unanchored", serde_json::Value::Null);
+    let run = run(&["replay", "--rpc.replay-file", path.to_str().unwrap(), "--json", TX_OK]);
+    let _ = std::fs::remove_file(&path);
+
+    assert_eq!(run.code(), 3, "an unanchored view exits 3.\nstderr: {}", run.stderr);
+    let error = run.error_object();
+    assert_eq!(error["error"]["code"].as_u64(), Some(3));
+    assert_eq!(error["error"]["kind"].as_str(), Some("rpc-failure"));
+    let message = error["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("inclusion hash") && message.contains("unanchored"),
+        "the message must name the unanchored view: {error}"
+    );
+    assert!(
+        message.contains(&BLOCK_NUMBER.to_string()),
+        "the message must name the block number the lookup reported: {error}"
+    );
 }
 
 /// A batch run's error object follows the per-target lines, so a parser reading

@@ -219,6 +219,53 @@ impl MockRpcServer {
             .await;
     }
 
+    /// Mount a mock that answers the first `n` calls of `method` with matching
+    /// `params` and then stops matching, so a lower-priority mock for the same
+    /// request serves every later call.
+    ///
+    /// Models an endpoint whose answer to one repeated request changes
+    /// mid-run — a reorg landing between two calls, or a load balancer moving
+    /// the run to another backend.
+    pub(crate) async fn respond_method_params_json_n_times(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+        result: serde_json::Value,
+        n: u64,
+        priority: u8,
+    ) {
+        let body = serde_json::json!({ "jsonrpc": "2.0", "id": 0, "result": result });
+        Mock::given(matchers::method("POST"))
+            .and(matchers::body_partial_json(
+                serde_json::json!({ "method": method, "params": params }),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .up_to_n_times(n)
+            .with_priority(priority)
+            .mount(&self.server)
+            .await;
+    }
+
+    /// How many single JSON-RPC requests for `method` the server has received.
+    ///
+    /// Batched requests (a JSON array body) are not counted: every call these
+    /// tests make is a single request.
+    pub(crate) async fn received_method_count(&self, method: &str) -> usize {
+        let requests = self.server.received_requests().await.expect("received_requests");
+        requests
+            .iter()
+            .filter(|request| {
+                serde_json::from_slice::<serde_json::Value>(&request.body)
+                    .ok()
+                    .and_then(|body| {
+                        body.get("method").and_then(serde_json::Value::as_str).map(str::to_string)
+                    })
+                    .as_deref() ==
+                    Some(method)
+            })
+            .count()
+    }
+
     /// Mount a mock that returns `eth_chainId` with the given chain id.
     pub(crate) async fn respond_eth_chain_id(&self, chain_id: u64, priority: u8) {
         let body = serde_json::json!({
