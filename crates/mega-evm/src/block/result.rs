@@ -170,7 +170,11 @@ pub enum MegaBlockLimitExceededError {
     /// Block compute gas limit reached.
     #[error("Block compute gas limit reached: block_used={block_used} >= limit={limit}")]
     ComputeGasLimit {
-        /// Compute gas used by block so far
+        /// Compute gas used by block so far, as the limit measures it.
+        ///
+        /// This is the enforced reading — the counter that was actually compared — so it excludes
+        /// the remainders Rex7+ exceptionally halted frames destroyed. The block's full reported
+        /// compute statistic, which includes them, can be higher.
         block_used: u64,
         /// Block compute gas limit
         limit: u64,
