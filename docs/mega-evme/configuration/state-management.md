@@ -217,8 +217,13 @@ The default cache directory is the platform cache directory:
 - **Linux**: `$XDG_CACHE_HOME/mega-evme/rpc`
 - **macOS**: `~/Library/Caches/mega-evme/rpc`
 
-Batch replay (`--tx-file` / `--block`) is the exception: it engages the on-disk cache only when `--rpc.cache-dir` names a directory explicitly, and otherwise behaves as if `--rpc.no-cache-file` were set.
+Batch replay (`--tx-file` / `--block`) is the exception: it engages the on-disk cache only when the invocation asks for it explicitly, and otherwise behaves as if `--rpc.no-cache-file` were set.
 A batch scan walks linear history whose request keys essentially never repeat across runs, so the file buys almost no hits, while its clean-exit persist re-reads, merges, and rewrites the whole file under the cross-process lock — a cost that grows with the file and serializes concurrent batch processes.
+
+Two flags ask for it: `--rpc.cache-dir`, which names the file to use, and `--rpc.clear-cache`, which asks for that file to be deleted.
+Clearing only means something while the disk cache is engaged, so a batch run that forced the cache off would parse the recovery flag, do nothing, and leave the polluted file in place for the next run.
+With `--rpc.clear-cache`, a batch run deletes the cache file under the sidecar lock, starts from an empty cache, and persists on exit — the same sequence as single-transaction mode.
+An explicit `--rpc.no-cache-file` still wins over both flags.
 
 ### Concurrent cache-dir sharing
 
@@ -263,9 +268,9 @@ Provider-cache merge also rejects inputs (and `--output`) whose `rpc-cache-{chai
 | Flag                          | Type  | Default            | Description                                                                                                                                                                                                                            |
 | ----------------------------- | ----- | ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `--rpc.cache-max-entries <N>` | `u32` | `0`                | Maximum number of items in the in-memory RPC LRU cache (and therefore what is persisted to the cache file). `0` = effectively unlimited (caps at 1,048,576 entries; the cache index is preallocated proportional to the cap). Default. |
-| `--rpc.cache-dir <PATH>`      | path  | Platform cache dir | Directory for per-chain cache files. Each chain's cache is stored as `{cache_dir}/rpc-cache-{chain_id}.json`. Batch replay uses the on-disk cache only when this flag is passed explicitly.                                            |
-| `--rpc.no-cache-file`         | flag  | `false`            | Disable on-disk cache persistence. The in-memory LRU cache still applies. Already the default for batch replay unless `--rpc.cache-dir` is passed.                                                                                     |
-| `--rpc.clear-cache`           | flag  | `false`            | Delete the current chain's cache file before loading it. Recovery path for a polluted or corrupt cache.                                                                                                                                |
+| `--rpc.cache-dir <PATH>`      | path  | Platform cache dir | Directory for per-chain cache files. Each chain's cache is stored as `{cache_dir}/rpc-cache-{chain_id}.json`. Batch replay uses the on-disk cache only when this flag or `--rpc.clear-cache` is passed explicitly.                     |
+| `--rpc.no-cache-file`         | flag  | `false`            | Disable on-disk cache persistence. The in-memory LRU cache still applies. Wins over `--rpc.clear-cache`. Already the default for batch replay unless `--rpc.cache-dir` or `--rpc.clear-cache` is passed.                               |
+| `--rpc.clear-cache`           | flag  | `false`            | Delete the current chain's cache file before loading it. Recovery path for a polluted or corrupt cache. Engages the on-disk cache, including in batch replay. No effect alongside `--rpc.no-cache-file`.                               |
 
 The in-memory cache layer is always installed on a forked or online run and cannot be turned off; `--rpc.no-cache-file` disables only on-disk persistence.
 At the default cap the cache index is preallocated to tens of MiB regardless of how many entries a run actually stores, which is the trade for never re-fetching during a long verification sweep.

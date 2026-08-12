@@ -62,9 +62,13 @@ Batch mode does all of it once.
 A batch run builds a single provider and a single RPC cache, groups the requested transactions by their containing block, and processes the blocks in ascending order.
 Each block is executed exactly once: state is forked at the parent block, pre-execution changes are applied, and every transaction of the block runs in order, with each requested transaction's result recorded before it is committed.
 A capture file (`--rpc.capture-file`) is persisted once, on exit, even if some transactions failed — the captured responses are the artifact you need to debug the failure offline.
-The per-chain on-disk RPC cache is opt-in for batch runs: it is loaded and persisted only when `--rpc.cache-dir` names a directory explicitly.
+The per-chain on-disk RPC cache is opt-in for batch runs: it is loaded and persisted only when `--rpc.cache-dir` names a directory explicitly, or when `--rpc.clear-cache` asks for the cache file to be deleted.
 A batch scan walks linear history whose request keys essentially never repeat across runs, so a shared cache file buys almost no hits, while its clean-exit re-read-merge-rewrite grows with the file and serializes concurrent processes on the persist lock.
 The in-memory cache still serves every repeated request within the run.
+
+`--rpc.clear-cache` counts as an explicit opt-in because deleting the cache file only means something while the disk cache is engaged: a batch run that forced the cache off would parse the flag, do nothing, and leave the polluted file in place for the next run.
+With it, the cache file (at the default path, or under `--rpc.cache-dir`) is deleted under the sidecar lock, the run starts from an empty cache, and the cache is persisted on exit.
+An explicit `--rpc.no-cache-file` still wins over both flags and keeps the disk cache off, exactly as in single-transaction mode.
 
 A plain batch replay issues the same RPC calls as single-transaction replay, so an offline envelope captured by single-transaction runs serves a batch run without a cache miss.
 `--verify-receipt` and `--dump-fixture-dir` are the exception: both fetch the receipt of every target in the block, including transactions a single-transaction capture never asked about, so an older envelope will miss them and the run exits `3`.
@@ -208,6 +212,7 @@ Anything that prevents the comparison from running is an infrastructure failure 
 
 - The endpoint fails the receipt call, or has pruned the receipt below its retention height (common on non-archive endpoints): reported as an `rpc` failure.
 - The receipt describes a different inclusion than the replayed block (its `blockHash` differs from the replayed block, or is null — a reorg in progress, or a load-balanced endpoint serving divergent views): reported as an `rpc` failure, because comparing against it would compare the replay to the wrong on-chain execution, and a receipt with no inclusion hash cannot be anchored at all.
+- The receipt describes a different transaction than the one requested (its `transactionHash` is not the hash the receipt was asked for — an inconsistent endpoint, or a tampered capture): reported as an `rpc` failure, because the verdict would describe the wrong transaction, and two transactions sharing their consensus facts would even yield a spurious match.
 - The target is a pending transaction, which has no receipt yet: rejected up front in single-transaction mode, and reported as a `pending` error entry in batch mode.
 
 In batch mode, when a target already produced an execution result and only the receipt fetch failed, the target keeps its full result line (execution summary, local receipt, timing) and reports the failure on that line as `"verification": {"error": "…"}`.
@@ -391,6 +396,7 @@ The fixture still self-validates and reproduces gas exactly; only such balance-d
 A target transaction that reads a block hash via `BLOCKHASH` is also rejected: fixtures carry no historical block hashes, so the isolated re-execution could not reproduce the values the replay observed.
 Block hash reads by preceding transactions in the same block do not matter — only the target transaction's reads are checked.
 Because the fidelity gate reads the receipt, an offline dump (`--rpc.replay-file`) requires the receipt to be present in the capture — so capture and dump together in the online run, then re-dump offline reproducibly.
+A receipt the endpoint does not serve — no receipt at all, one describing a different inclusion than the replayed block, or one describing a different transaction than the one requested — is classified exactly as under [`--verify-receipt`](#--verify-receipt): an RPC failure (exit `3`), because the question went unanswered rather than answered no.
 When combined with `--rpc.capture-file`, the capture file is written even if execution or the fidelity gate fails, so the captured RPC responses remain available for debugging the failure offline.
 
 ```bash
@@ -416,15 +422,15 @@ Existing files are refused unless `--overwrite` is also set — a refused overwr
 Per-target gating mirrors the single-transaction rules, but records a skip instead of failing the run.
 The fixture draft is built against the pre-commit state (same moment as the single-transaction dump) and only written after the block finishes successfully — a commit-time rejection or finish failure never creates or replaces a fixture file.
 
-| Gate                                                                             | Outcome                                                       |
-| -------------------------------------------------------------------------------- | ------------------------------------------------------------- |
-| On-chain receipt unavailable (not in capture, pruned, reorg/divergent inclusion) | `fixture.error` with the reason; rpc-class failure            |
-| Fidelity mismatch (gas / status / logs root)                                     | `fixture.skipped` with `fidelity gate failed: …`              |
-| Target reads `BLOCKHASH`                                                         | `fixture.skipped` (fixtures carry no historical block hashes) |
-| Unsupported shape (deposit, EIP-7702, unknown spec mapping)                      | `fixture.skipped`                                             |
-| Fixture construction failure (database / pre-state reads)                        | `fixture.error` with the reason; execution-class failure      |
-| Finalize / write / self-validation failure, refused overwrite                    | `fixture.error` with the reason; execution-class failure      |
-| Pending / unresolvable target                                                    | already an error entry; no fixture report                     |
+| Gate                                                                                                              | Outcome                                                       |
+| ----------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------- |
+| On-chain receipt unavailable (not in capture, pruned, reorg/divergent inclusion, receipt for another transaction) | `fixture.error` with the reason; rpc-class failure            |
+| Fidelity mismatch (gas / status / logs root)                                                                      | `fixture.skipped` with `fidelity gate failed: …`              |
+| Target reads `BLOCKHASH`                                                                                          | `fixture.skipped` (fixtures carry no historical block hashes) |
+| Unsupported shape (deposit, EIP-7702, unknown spec mapping)                                                       | `fixture.skipped`                                             |
+| Fixture construction failure (database / pre-state reads)                                                         | `fixture.error` with the reason; execution-class failure      |
+| Finalize / write / self-validation failure, refused overwrite                                                     | `fixture.error` with the reason; execution-class failure      |
+| Pending / unresolvable target                                                                                     | already an error entry; no fixture report                     |
 
 `BLOCKHASH` access is isolated per transaction: the access record is cleared before each transaction of the block, so preceding readers do not poison a later target's dump.
 

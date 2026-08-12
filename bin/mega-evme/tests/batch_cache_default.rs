@@ -1,13 +1,18 @@
 //! Integration tests for the batch-mode on-disk cache default.
 //!
 //! Batch replay (`--tx-file` / `--block`) engages the on-disk RPC cache only
-//! when `--rpc.cache-dir` names a directory explicitly. The clean-exit persist
+//! when the invocation asks for it explicitly. The clean-exit persist
 //! re-reads, merges, and atomically rewrites the whole per-chain cache file
 //! under a cross-process lock, so its cost grows with the file and serializes
 //! across concurrent processes — while a linear history scan gets almost no
 //! cache hits in return. With the default in place a batch exit performs zero
 //! disk-cache work, making its cost independent of any cache a machine has
 //! accumulated. Single-transaction replay keeps the previous default.
+//!
+//! `--rpc.clear-cache` opts a batch run back in the same way `--rpc.cache-dir`
+//! does: deleting the cache file is a request that only means something while
+//! the disk cache is engaged, so forcing it off would make the documented
+//! recovery flag a no-op and leave the polluted file for the next run.
 //!
 //! The tests point the child's platform cache directory into a temp dir via
 //! `HOME` / `XDG_CACHE_HOME`, so the real user cache is never touched.
@@ -141,6 +146,96 @@ async fn test_batch_default_leaves_disk_cache_untouched() {
         vec![seeded],
         "no other cache file may appear anywhere under the fake home",
     );
+}
+
+/// An explicit `--rpc.clear-cache` opts a batch run back into the disk cache at
+/// the default path: the seeded file is deleted before the run and a fresh cache
+/// file is persisted on exit. Forcing the cache off instead would make the flag
+/// parse and do nothing, leaving the polluted file for the next non-batch run.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_batch_clear_cache_clears_and_repersists_default_path() {
+    let home = FakeHome::new();
+    let seeded = home.default_cache_file();
+    std::fs::create_dir_all(seeded.parent().expect("cache file has a parent")).expect("mkdir");
+    std::fs::write(&seeded, b"not even json").expect("seed cache file");
+
+    let server = failing_mock().await;
+    let targets = tx_file(&home);
+
+    replay(
+        &home,
+        &[
+            "--tx-file",
+            targets.to_str().expect("utf-8"),
+            "--rpc",
+            &server.uri(),
+            "--rpc.clear-cache",
+            "--rpc.max-retries",
+            "0",
+            "--rpc.backoff-ms",
+            "1",
+            "--json",
+        ],
+    );
+
+    let bytes = std::fs::read(&seeded).expect("a fresh cache file must exist after the run");
+    assert_ne!(
+        bytes, b"not even json",
+        "the seeded cache file must have been cleared, not carried forward",
+    );
+    // The clear only happened because the disk cache was engaged, so the exit
+    // persist must have written a well-formed provider cache in its place.
+    serde_json::from_slice::<serde_json::Value>(&bytes)
+        .expect("the persisted cache file must be valid JSON");
+    assert_eq!(
+        home.cache_files(),
+        vec![seeded],
+        "the run must not create a cache file anywhere else under the fake home",
+    );
+}
+
+/// `--rpc.no-cache-file` wins over `--rpc.clear-cache`: with no cache file in
+/// play there is nothing to delete, load, or persist, so a seeded file survives
+/// byte-identical. Batch mode passes the pair through unchanged, so both target
+/// forms behave the same way.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_no_cache_file_wins_over_clear_cache_in_both_modes() {
+    for batch in [false, true] {
+        let home = FakeHome::new();
+        let seeded = home.default_cache_file();
+        std::fs::create_dir_all(seeded.parent().expect("cache file has a parent")).expect("mkdir");
+        std::fs::write(&seeded, b"not even json").expect("seed cache file");
+
+        let server = failing_mock().await;
+        let uri = server.uri();
+        let targets = tx_file(&home);
+
+        let mut args =
+            if batch { vec!["--tx-file", targets.to_str().expect("utf-8")] } else { vec![TX] };
+        args.extend_from_slice(&[
+            "--rpc",
+            &uri,
+            "--rpc.no-cache-file",
+            "--rpc.clear-cache",
+            "--rpc.max-retries",
+            "0",
+            "--rpc.backoff-ms",
+            "1",
+            "--json",
+        ]);
+        replay(&home, &args);
+
+        let bytes = std::fs::read(&seeded).expect("the seeded file must still exist");
+        assert_eq!(
+            bytes, b"not even json",
+            "--rpc.no-cache-file must keep the disk cache out of play (batch = {batch})",
+        );
+        assert_eq!(
+            home.cache_files(),
+            vec![seeded],
+            "no cache file may be written anywhere (batch = {batch})",
+        );
+    }
 }
 
 /// An explicit `--rpc.cache-dir` opts a batch run back into persistence: the
