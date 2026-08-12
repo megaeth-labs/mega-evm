@@ -346,6 +346,40 @@ fn test_replay_dump_rejects_receipt_from_different_block() {
     assert!(!out.exists(), "must not write a fixture when the receipt anchor mismatches");
 }
 
+/// The fidelity gate must reject a receipt that describes a different
+/// transaction than the one requested: anchoring a fixture to another
+/// transaction's gas, status and logs would bake a wrong expectation into the
+/// artifact. The endpoint answered a question that was never asked, so this is an
+/// infrastructure failure (exit 3) and no fixture is written.
+#[test]
+fn test_replay_dump_rejects_receipt_for_another_transaction() {
+    const OTHER_TX: &str = "0x00000000000000000000000000000000000000000000000000000000feed0001";
+
+    let doctored_cache = cache_with_doctored_receipt("wrong_tx_cache", |receipt| {
+        receipt["transactionHash"] = OTHER_TX.into();
+    });
+    let out = temp_path("wrong_tx");
+    let _ = std::fs::remove_file(&out);
+
+    let output = dump(&doctored_cache, &out);
+    let _ = std::fs::remove_file(&doctored_cache);
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "a receipt for another transaction is an infrastructure failure.\nstderr: {stderr}",
+    );
+    let error = error_object(&String::from_utf8_lossy(&output.stdout));
+    assert_eq!(error["kind"].as_str(), Some("rpc-failure"), "got: {error}");
+    let message = error["message"].as_str().expect("the error object carries a message");
+    assert!(
+        message.contains(OTHER_TX) && message.contains(TX),
+        "the message must name both the served and the requested transaction: {message}"
+    );
+    assert!(!out.exists(), "must not write a fixture when the receipt is for another transaction");
+}
+
 /// A receipt the endpoint answers with `null` leaves the fidelity gate's
 /// question unanswered: the run resolved this very transaction as mined moments
 /// earlier, so the null is a pruned receipt or a divergent backend, not a
@@ -452,6 +486,11 @@ fn test_dump_and_verify_classify_receipt_anomalies_identically() {
     assert_dump_and_verify_agree("agree_reorg", |receipt| {
         receipt["blockHash"] =
             "0x1111111111111111111111111111111111111111111111111111111111111111".into();
+    });
+    // A receipt describing a different transaction than the one requested.
+    assert_dump_and_verify_agree("agree_wrong_tx", |receipt| {
+        receipt["transactionHash"] =
+            "0x00000000000000000000000000000000000000000000000000000000feed0001".into();
     });
 }
 

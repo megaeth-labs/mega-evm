@@ -25,6 +25,10 @@ const TX: &str = "0x41d34e7e13dfe0f85da9d407e2b2c381955d8c7eed428b17dc82327b2616
 /// Gas the transaction used on-chain, which a faithful replay reproduces.
 const GAS_USED: u64 = 75_514;
 
+/// A transaction hash that is not the replayed target, used to model an endpoint
+/// answering a receipt request with another transaction's receipt.
+const OTHER_TX: &str = "0x00000000000000000000000000000000000000000000000000000000feed0001";
+
 /// Outcome of one `mega-evme replay` invocation.
 struct Run {
     success: bool,
@@ -305,6 +309,37 @@ fn test_verify_receipt_reorg_is_an_infrastructure_error() {
     );
 }
 
+/// A receipt describing a different transaction than the one requested is an
+/// infrastructure failure: comparing against it would report a verdict about the
+/// wrong transaction, so the target is unverified and the message names both the
+/// requested and the served hash.
+#[test]
+fn test_verify_receipt_for_another_transaction_is_an_infrastructure_error() {
+    let path = doctored_cache("wrong_tx", |receipt| {
+        receipt["transactionHash"] = OTHER_TX.into();
+    });
+
+    let run = replay(&path, &["--verify-receipt", "--json", TX]);
+    let _ = std::fs::remove_file(&path);
+
+    assert_eq!(run.code(), 3, "a receipt for another transaction exits 3.\nstderr: {}", run.stderr);
+    assert_eq!(run.error_object()["error"]["kind"].as_str(), Some("rpc-failure"));
+    let message = run.error_object()["error"]["message"]
+        .as_str()
+        .expect("the error object carries a message")
+        .to_string();
+    assert!(
+        message.contains(OTHER_TX) && message.contains(TX),
+        "the message must name both the served and the requested transaction: {message}"
+    );
+    assert!(
+        !run.stderr.contains("verification mismatch") && !run.stdout.contains("MISMATCH"),
+        "a receipt for another transaction must not be reported as a mismatch:\n{}\n{}",
+        run.stdout,
+        run.stderr,
+    );
+}
+
 /// A receipt the endpoint cannot serve (e.g. pruned below its retention height)
 /// is an infrastructure failure, not a mismatch.
 #[test]
@@ -420,6 +455,38 @@ fn test_batch_verify_receipt_reorg_is_an_rpc_error_entry() {
             .is_some_and(|message| message.contains("different inclusion")),
         "expected the reorg/divergent-endpoint hint: {}",
         lines[0]
+    );
+}
+
+/// The identity guard applies in batch mode too, as an `rpc` error entry naming
+/// both hashes, and the target carries no verdict.
+#[test]
+fn test_batch_verify_receipt_for_another_transaction_is_an_rpc_error_entry() {
+    let path = doctored_cache("batch_wrong_tx", |receipt| {
+        receipt["transactionHash"] = OTHER_TX.into();
+    });
+    let list = tx_file("batch_wrong_tx");
+
+    let run = replay(&path, &["--tx-file", list.to_str().unwrap(), "--verify-receipt", "--json"]);
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(&list);
+
+    assert_eq!(run.code(), 3, "an unverified target exits 3.\nstderr: {}", run.stderr);
+    let lines = run.ndjson();
+    assert_eq!(lines.len(), 1, "one line per requested transaction");
+    assert_eq!(lines[0]["error"]["kind"].as_str(), Some("rpc"));
+    assert!(
+        lines[0]["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains(OTHER_TX) && message.contains(TX)),
+        "expected both the served and the requested transaction: {}",
+        lines[0]
+    );
+    assert!(lines[0].get("verification").is_none(), "an unverified target carries no verdict");
+    assert!(
+        !run.stderr.contains("verification mismatch"),
+        "an unverifiable target must not fail as a mismatch:\n{}",
+        run.stderr
     );
 }
 

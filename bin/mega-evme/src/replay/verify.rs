@@ -7,7 +7,8 @@
 //! and testable without a provider.
 //!
 //! Anything that prevents the comparison from running at all (a receipt the
-//! endpoint cannot serve, or a receipt describing a different inclusion than the
+//! endpoint cannot serve, a receipt describing a different transaction than the
+//! one requested, or a receipt describing a different inclusion than the
 //! replayed block) is an infrastructure failure, never a mismatch: a target that
 //! could not be verified must not be reported as a divergence.
 
@@ -293,12 +294,15 @@ fn compare_log(index: usize, onchain: &Log, replay: &Log) -> Option<LogFieldMism
 ///
 /// A receipt the endpoint cannot serve — a transport failure, or a receipt
 /// pruned below the endpoint's retention height — is an [`ReplayError::RpcError`]
-/// so the target is reported as unverified rather than as a mismatch.
+/// so the target is reported as unverified rather than as a mismatch. So is a
+/// receipt that describes a different transaction than the one requested: the
+/// identity check runs here, at the one seam every mode fetches through, so no
+/// caller can compare against or anchor to a receipt it never asked for.
 pub(super) async fn fetch_receipt<P>(provider: &P, tx_hash: B256) -> Result<OpTransactionReceipt>
 where
     P: Provider<op_alloy_network::Optimism>,
 {
-    provider
+    let receipt = provider
         .get_transaction_receipt(tx_hash)
         .await
         .map_err(|e| ReplayError::RpcError(format!("Failed to fetch receipt: {e}")))?
@@ -307,7 +311,34 @@ where
                 "No on-chain receipt for transaction {tx_hash}: the transaction is unknown to \
                  the endpoint, or the endpoint has pruned its receipt"
             ))
-        })
+        })?;
+    check_transaction_identity(receipt.inner.transaction_hash, tx_hash)
+        .map_err(ReplayError::RpcError)?;
+    Ok(receipt)
+}
+
+/// Check that a fetched receipt describes the transaction it was requested for.
+///
+/// `eth_getTransactionReceipt` is asked by transaction hash, but nothing in the
+/// answer forces the endpoint to honour it: an inconsistent backend, or a
+/// tampered offline capture, can serve another transaction's receipt. Comparing
+/// against it would report a verdict about the wrong transaction — a mismatch
+/// blamed on the replay, or a spurious match when the two transactions happen to
+/// share their consensus facts — and the dump path would anchor a fixture to it.
+/// Returns the explanatory message so each mode can wrap it in the error shape it
+/// reports.
+pub(super) fn check_transaction_identity(
+    receipt_tx_hash: B256,
+    requested_tx_hash: B256,
+) -> std::result::Result<(), String> {
+    if receipt_tx_hash == requested_tx_hash {
+        return Ok(());
+    }
+    Err(format!(
+        "receipt is for transaction {receipt_tx_hash}, but transaction {requested_tx_hash} was \
+         requested: the endpoint served the receipt of a different transaction (an inconsistent \
+         backend, or a tampered capture); the transaction is unverified"
+    ))
 }
 
 /// Check that a fetched receipt describes the block the replay executed.
@@ -613,6 +644,33 @@ mod tests {
         assert!(
             message.contains("different inclusion") && message.contains("unverified"),
             "message must explain the reorg and that the target is unverified: {message}"
+        );
+    }
+
+    #[test]
+    fn test_check_transaction_identity_accepts_the_requested_transaction() {
+        let hash = b256!("0x3333333333333333333333333333333333333333333333333333333333333333");
+
+        assert!(check_transaction_identity(hash, hash).is_ok());
+    }
+
+    /// A receipt for another transaction is rejected, and the message names both
+    /// hashes so the served/requested confusion is diagnosable from the error
+    /// alone.
+    #[test]
+    fn test_check_transaction_identity_rejects_another_transactions_receipt() {
+        let served = b256!("0x3333333333333333333333333333333333333333333333333333333333333333");
+        let requested = b256!("0x4444444444444444444444444444444444444444444444444444444444444444");
+
+        let message = check_transaction_identity(served, requested)
+            .expect_err("a receipt for another transaction must be rejected");
+
+        assert!(
+            message.contains(&format!("{served}")) &&
+                message.contains(&format!("{requested}")) &&
+                message.contains("different transaction") &&
+                message.contains("unverified"),
+            "message must name both hashes and explain the target is unverified: {message}"
         );
     }
 

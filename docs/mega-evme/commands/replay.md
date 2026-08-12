@@ -208,6 +208,7 @@ Anything that prevents the comparison from running is an infrastructure failure 
 
 - The endpoint fails the receipt call, or has pruned the receipt below its retention height (common on non-archive endpoints): reported as an `rpc` failure.
 - The receipt describes a different inclusion than the replayed block (its `blockHash` differs from the replayed block, or is null — a reorg in progress, or a load-balanced endpoint serving divergent views): reported as an `rpc` failure, because comparing against it would compare the replay to the wrong on-chain execution, and a receipt with no inclusion hash cannot be anchored at all.
+- The receipt describes a different transaction than the one requested (its `transactionHash` is not the hash the receipt was asked for — an inconsistent endpoint, or a tampered capture): reported as an `rpc` failure, because the verdict would describe the wrong transaction, and two transactions sharing their consensus facts would even yield a spurious match.
 - The target is a pending transaction, which has no receipt yet: rejected up front in single-transaction mode, and reported as a `pending` error entry in batch mode.
 
 In batch mode each of these becomes an error entry for that transaction, exactly like any other infrastructure failure.
@@ -380,7 +381,7 @@ The fixture still self-validates and reproduces gas exactly; only such balance-d
 A target transaction that reads a block hash via `BLOCKHASH` is also rejected: fixtures carry no historical block hashes, so the isolated re-execution could not reproduce the values the replay observed.
 Block hash reads by preceding transactions in the same block do not matter — only the target transaction's reads are checked.
 Because the fidelity gate reads the receipt, an offline dump (`--rpc.replay-file`) requires the receipt to be present in the capture — so capture and dump together in the online run, then re-dump offline reproducibly.
-A receipt the endpoint does not serve — no receipt at all, or one describing a different inclusion than the replayed block — is classified exactly as under [`--verify-receipt`](#--verify-receipt): an RPC failure (exit `3`), because the question went unanswered rather than answered no.
+A receipt the endpoint does not serve — no receipt at all, one describing a different inclusion than the replayed block, or one describing a different transaction than the one requested — is classified exactly as under [`--verify-receipt`](#--verify-receipt): an RPC failure (exit `3`), because the question went unanswered rather than answered no.
 When combined with `--rpc.capture-file`, the capture file is written even if execution or the fidelity gate fails, so the captured RPC responses remain available for debugging the failure offline.
 
 ```bash
@@ -406,15 +407,15 @@ Existing files are refused unless `--overwrite` is also set — a refused overwr
 Per-target gating mirrors the single-transaction rules, but records a skip instead of failing the run.
 The fixture draft is built against the pre-commit state (same moment as the single-transaction dump) and only written after the block finishes successfully — a commit-time rejection or finish failure never creates or replaces a fixture file.
 
-| Gate                                                                             | Outcome                                                       |
-| -------------------------------------------------------------------------------- | ------------------------------------------------------------- |
-| On-chain receipt unavailable (not in capture, pruned, reorg/divergent inclusion) | `fixture.skipped` with `fidelity-gate-unavailable: …`         |
-| Fidelity mismatch (gas / status / logs root)                                     | `fixture.skipped` with `fidelity gate failed: …`              |
-| Target reads `BLOCKHASH`                                                         | `fixture.skipped` (fixtures carry no historical block hashes) |
-| Unsupported shape (deposit, EIP-7702, unknown spec mapping)                      | `fixture.skipped`                                             |
-| Fixture construction failure (database / pre-state reads)                        | `fixture.error` with the reason; execution-class failure      |
-| Finalize / write / self-validation failure, refused overwrite                    | `fixture.error` with the reason; execution-class failure      |
-| Pending / unresolvable target                                                    | already an error entry; no fixture report                     |
+| Gate                                                                                                              | Outcome                                                       |
+| ----------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------- |
+| On-chain receipt unavailable (not in capture, pruned, reorg/divergent inclusion, receipt for another transaction) | `fixture.skipped` with `fidelity-gate-unavailable: …`         |
+| Fidelity mismatch (gas / status / logs root)                                                                      | `fixture.skipped` with `fidelity gate failed: …`              |
+| Target reads `BLOCKHASH`                                                                                          | `fixture.skipped` (fixtures carry no historical block hashes) |
+| Unsupported shape (deposit, EIP-7702, unknown spec mapping)                                                       | `fixture.skipped`                                             |
+| Fixture construction failure (database / pre-state reads)                                                         | `fixture.error` with the reason; execution-class failure      |
+| Finalize / write / self-validation failure, refused overwrite                                                     | `fixture.error` with the reason; execution-class failure      |
+| Pending / unresolvable target                                                                                     | already an error entry; no fixture report                     |
 
 `BLOCKHASH` access is isolated per transaction: the access record is cleared before each transaction of the block, so preceding readers do not poison a later target's dump.
 
