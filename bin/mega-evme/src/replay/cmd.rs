@@ -493,11 +493,18 @@ impl Cmd {
     /// clean-exit persist re-reads, merges, and rewrites the whole file under a cross-process
     /// lock. That exit tail grows linearly with the file and serializes across concurrent
     /// batch processes sharing the default cache directory, so batch mode keeps the disk
-    /// cache off unless `--rpc.cache-dir` names one explicitly. The in-memory LRU (and its
+    /// cache off unless the invocation says otherwise. The in-memory LRU (and its
     /// intra-run reuse across a block's transactions) is unaffected.
+    ///
+    /// Two flags say otherwise. `--rpc.cache-dir` names the file to use, and `--rpc.clear-cache`
+    /// asks for that file to be deleted — a request that only means something while the disk
+    /// cache is engaged, so forcing the cache off would silently swallow it and leave the
+    /// polluted file in place for the next run. Either flag therefore opts the batch run back
+    /// into the disk cache. An explicit `--rpc.no-cache-file` still wins over both, keeping the
+    /// same meaning it has outside batch mode.
     fn batch_rpc_args(&self) -> RpcArgs {
         let mut args = self.rpc_args.clone();
-        if args.cache_dir.is_none() && !args.no_cache_file {
+        if args.cache_dir.is_none() && !args.clear_cache && !args.no_cache_file {
             info!(
                 "Batch replay leaves the on-disk RPC cache disabled; \
                  pass --rpc.cache-dir to enable it"
@@ -1211,9 +1218,49 @@ mod tests {
     }
 
     #[test]
+    fn test_batch_rpc_args_explicit_clear_cache_opts_back_in() {
+        let cmd = parse_online(&["--block", "1", "--rpc.clear-cache"]);
+        let args = cmd.batch_rpc_args();
+        assert!(
+            !args.no_cache_file,
+            "--rpc.clear-cache asks for the disk cache file to be deleted, which only \
+             happens while the disk cache is engaged",
+        );
+        assert!(args.clear_cache, "the clear request itself must survive");
+        assert_eq!(args.cache_dir, None, "the default cache path is the one being cleared");
+    }
+
+    #[test]
     fn test_batch_rpc_args_keeps_explicit_no_cache_file() {
         let cmd = parse_online(&["--block", "1", "--rpc.no-cache-file"]);
         assert!(cmd.batch_rpc_args().no_cache_file, "--rpc.no-cache-file must stay honored");
+    }
+
+    /// `--rpc.no-cache-file` and `--rpc.clear-cache` are not mutually exclusive at the
+    /// parser level. Batch mode must not reinterpret the pair: it passes both through so
+    /// the combination behaves exactly as it does in single-transaction mode.
+    #[test]
+    fn test_batch_rpc_args_passes_no_cache_file_with_clear_cache_through() {
+        let cmd = parse_online(&["--block", "1", "--rpc.no-cache-file", "--rpc.clear-cache"]);
+        let args = cmd.batch_rpc_args();
+        assert!(args.no_cache_file, "--rpc.no-cache-file must stay honored alongside clear");
+        assert!(args.clear_cache, "the clear flag must be passed through unmodified");
+    }
+
+    /// `--rpc.cache-dir` and `--rpc.clear-cache` together name the file to clear.
+    #[test]
+    fn test_batch_rpc_args_cache_dir_with_clear_cache_opts_back_in() {
+        let cmd = parse_online(&[
+            "--block",
+            "1",
+            "--rpc.cache-dir",
+            "/tmp/evme-cache",
+            "--rpc.clear-cache",
+        ]);
+        let args = cmd.batch_rpc_args();
+        assert!(!args.no_cache_file, "both flags opt the batch run into the disk cache");
+        assert!(args.clear_cache);
+        assert_eq!(args.cache_dir.as_deref(), Some(std::path::Path::new("/tmp/evme-cache")));
     }
 
     #[test]

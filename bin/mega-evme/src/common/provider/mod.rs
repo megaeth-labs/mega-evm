@@ -113,19 +113,24 @@ pub struct RpcArgs {
     /// Defaults to the platform cache directory (`$XDG_CACHE_HOME/mega-evme/rpc` on
     /// Linux, `~/Library/Caches/mega-evme/rpc` on macOS). Pass `--rpc.no-cache-file`
     /// to disable on-disk persistence entirely. Batch replay (`--tx-file` / `--block`)
-    /// uses the on-disk cache only when this flag names a directory explicitly.
+    /// uses the on-disk cache only when this flag or `--rpc.clear-cache` is passed
+    /// explicitly.
     #[arg(long = "rpc.cache-dir", value_parser = parse_non_empty_path)]
     pub cache_dir: Option<PathBuf>,
 
     /// Disable on-disk cache persistence. The in-memory LRU cache still applies.
-    /// This is already the default for batch replay (`--tx-file` / `--block`)
-    /// unless `--rpc.cache-dir` is passed.
+    /// Takes precedence over `--rpc.clear-cache`: with no cache file in play there is
+    /// nothing to delete, load, or persist. This is already the default for batch replay
+    /// (`--tx-file` / `--block`) unless `--rpc.cache-dir` or `--rpc.clear-cache` is passed.
     #[arg(long = "rpc.no-cache-file")]
     pub no_cache_file: bool,
 
     /// Delete the current chain's cache file before loading it. Recovery path for a
     /// polluted or corrupt cache file. If the unlink itself fails (e.g. insufficient
     /// permissions), `mega-evme` aborts rather than silently reloading the stale file.
+    /// Passing this flag engages the on-disk cache, including in batch replay
+    /// (`--tx-file` / `--block`), where it is otherwise off by default. Has no effect
+    /// alongside `--rpc.no-cache-file`.
     #[arg(long = "rpc.clear-cache")]
     pub clear_cache: bool,
 

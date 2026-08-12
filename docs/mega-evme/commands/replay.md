@@ -62,9 +62,13 @@ Batch mode does all of it once.
 A batch run builds a single provider and a single RPC cache, groups the requested transactions by their containing block, and processes the blocks in ascending order.
 Each block is executed exactly once: state is forked at the parent block, pre-execution changes are applied, and every transaction of the block runs in order, with each requested transaction's result recorded before it is committed.
 A capture file (`--rpc.capture-file`) is persisted once, on exit, even if some transactions failed — the captured responses are the artifact you need to debug the failure offline.
-The per-chain on-disk RPC cache is opt-in for batch runs: it is loaded and persisted only when `--rpc.cache-dir` names a directory explicitly.
+The per-chain on-disk RPC cache is opt-in for batch runs: it is loaded and persisted only when `--rpc.cache-dir` names a directory explicitly, or when `--rpc.clear-cache` asks for the cache file to be deleted.
 A batch scan walks linear history whose request keys essentially never repeat across runs, so a shared cache file buys almost no hits, while its clean-exit re-read-merge-rewrite grows with the file and serializes concurrent processes on the persist lock.
 The in-memory cache still serves every repeated request within the run.
+
+`--rpc.clear-cache` counts as an explicit opt-in because deleting the cache file only means something while the disk cache is engaged: a batch run that forced the cache off would parse the flag, do nothing, and leave the polluted file in place for the next run.
+With it, the cache file (at the default path, or under `--rpc.cache-dir`) is deleted under the sidecar lock, the run starts from an empty cache, and the cache is persisted on exit.
+An explicit `--rpc.no-cache-file` still wins over both flags and keeps the disk cache off, exactly as in single-transaction mode.
 
 A plain batch replay issues the same RPC calls as single-transaction replay, so an offline envelope captured by single-transaction runs serves a batch run without a cache miss.
 `--verify-receipt` and `--dump-fixture-dir` are the exception: both fetch the receipt of every target in the block, including transactions a single-transaction capture never asked about, so an older envelope will miss them and the run exits `3`.
