@@ -1066,8 +1066,13 @@ impl AdditionalLimit {
         // frame-local budget. The detection may not have happened during execution, so
         // we call check_limit() here to ensure it's caught.
         // If frame-local, absorb it — clear the exceed flag and change to Revert so
-        // remaining gas returns to the caller. State changes are reverted by revm's
-        // Revert handling. This works at any depth including the top-level frame.
+        // remaining gas returns to the caller. This works at any depth including the
+        // top-level frame.
+        //
+        // The rewrite changes the reported result, not the journal. revm decides
+        // commit-or-revert from the frame's original instruction result, before the
+        // `FrameResult` ever reaches this hook, so a frame that ran to a successful exit is
+        // already committed and stays committed under the rewritten Revert.
         let limit_check = self.check_limit();
         if limit_check.exceeded_limit() && !duplicate_return_frame_result {
             if limit_check.is_frame_local() {

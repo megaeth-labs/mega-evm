@@ -15,6 +15,7 @@ mod eip7702_metering;
 mod eip7702_state_growth;
 mod frame_target_updated_dedup;
 mod gas_validation;
+mod halt_logs_stripped;
 mod interceptor_selector_probe;
 mod keyless_deploy_dispatch_parity;
 mod keyless_empty_code_logs;

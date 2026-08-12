@@ -1055,7 +1055,7 @@ where
         } else {
             self.op.execution_result(evm, result, result_gas)?
         };
-        Ok(result.map_haltreason(|reason| {
+        let result = result.map_haltreason(|reason| {
             let mut additional_limit = evm.ctx().additional_limit.borrow_mut();
             if additional_limit.is_exceeding_limit_halt(&reason) {
                 if let Some(access_type) = volatile_info {
@@ -1075,7 +1075,12 @@ where
                 // not due to additional limit exceeded
                 MegaHaltReason::Base(reason)
             }
-        }))
+        });
+        // revm 40 attaches journal logs to Success / Revert / Halt alike. Pre-revm-40, Halt had no
+        // logs field, so a failed receipt was structurally empty. Restore that invariant at the
+        // single result seam shared by transact, inspect, and system-call entry points. Status,
+        // gasUsed, and post-state are untouched — only the receipt log list is cleared.
+        Ok(strip_logs_if_not_success(result))
     }
 
     fn catch_error(
@@ -1084,7 +1089,43 @@ where
         error: Self::Error,
     ) -> Result<ExecutionResult<Self::HaltReason>, Self::Error> {
         let result = self.op.catch_error(evm, error)?;
-        Ok(result.map_haltreason(MegaHaltReason::Base))
+        // Belt-and-braces: op-revm already reverts the journal to the default checkpoint before
+        // building FailedDeposit, so logs are already empty. Clearing is idempotent.
+        Ok(strip_logs_if_not_success(result.map_haltreason(MegaHaltReason::Base)))
+    }
+}
+
+/// Drop logs from any non-`Success` [`ExecutionResult`].
+///
+/// Ethereum consensus receipts carry logs only for successful transactions. revm 40 stores a
+/// `logs` field on `Revert` and `Halt` as well and fills it from `journal.take_logs()`, so a
+/// post-commit result rewrite (limit exceed after CREATE checkpoint commit) can otherwise leak
+/// constructor logs into a failed receipt. Clearing here is the single product-code fix; it is
+/// a no-op when the journal already discarded the logs (mid-frame halt / natural revert).
+///
+/// # This is unconditional only because EIP-7708 is off
+///
+/// "A failed transaction contributes no logs" stops being true once EIP-7708 is active: the
+/// burn logs it emits are produced while the transaction result is being assembled, outside any
+/// frame checkpoint, so no revert can take them back and a failed transaction legitimately
+/// carries them. Every `MegaSpecId` maps to Prague, where every EIP-7708 emission site returns
+/// early, so today there is nothing legitimate for this to drop — the only logs that can reach a
+/// non-`Success` result are the ones a post-commit rewrite stranded in the journal.
+///
+/// If a `MegaSpecId` is ever mapped to Amsterdam or later, this clearing must become
+/// conditional, or it will silently swallow logs that belong on the receipt.
+/// `test_all_specs_map_to_isthmus_and_prague` is what stands between that change and this code.
+fn strip_logs_if_not_success<HaltReasonTy>(
+    result: ExecutionResult<HaltReasonTy>,
+) -> ExecutionResult<HaltReasonTy> {
+    match result {
+        ExecutionResult::Success { .. } => result,
+        ExecutionResult::Revert { gas, output, .. } => {
+            ExecutionResult::Revert { gas, logs: Vec::new(), output }
+        }
+        ExecutionResult::Halt { reason, gas, .. } => {
+            ExecutionResult::Halt { reason, gas, logs: Vec::new() }
+        }
     }
 }
 
