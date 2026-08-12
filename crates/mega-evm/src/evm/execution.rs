@@ -1050,7 +1050,7 @@ where
         } else {
             self.op.execution_result(evm, result, result_gas)?
         };
-        Ok(result.map_haltreason(|reason| {
+        let result = result.map_haltreason(|reason| {
             let mut additional_limit = evm.ctx().additional_limit.borrow_mut();
             if additional_limit.is_exceeding_limit_halt(&reason) {
                 if let Some(access_type) = volatile_info {
@@ -1070,7 +1070,12 @@ where
                 // not due to additional limit exceeded
                 MegaHaltReason::Base(reason)
             }
-        }))
+        });
+        // revm 40 attaches journal logs to Success / Revert / Halt alike. Pre-revm-40, Halt had no
+        // logs field, so a failed receipt was structurally empty. Restore that invariant at the
+        // single result seam shared by transact, inspect, and system-call entry points. Status,
+        // gasUsed, and post-state are untouched — only the receipt log list is cleared.
+        Ok(strip_logs_if_not_success(result))
     }
 
     fn catch_error(
@@ -1079,7 +1084,30 @@ where
         error: Self::Error,
     ) -> Result<ExecutionResult<Self::HaltReason>, Self::Error> {
         let result = self.op.catch_error(evm, error)?;
-        Ok(result.map_haltreason(MegaHaltReason::Base))
+        // Belt-and-braces: op-revm already reverts the journal to the default checkpoint before
+        // building FailedDeposit, so logs are already empty. Clearing is idempotent.
+        Ok(strip_logs_if_not_success(result.map_haltreason(MegaHaltReason::Base)))
+    }
+}
+
+/// Drop logs from any non-`Success` [`ExecutionResult`].
+///
+/// Ethereum consensus receipts carry logs only for successful transactions. revm 40 stores a
+/// `logs` field on `Revert` and `Halt` as well and fills it from `journal.take_logs()`, so a
+/// post-commit result rewrite (limit exceed after CREATE checkpoint commit) can otherwise leak
+/// constructor logs into a failed receipt. Clearing here is the single product-code fix; it is
+/// a no-op when the journal already discarded the logs (mid-frame halt / natural revert).
+fn strip_logs_if_not_success<HaltReasonTy>(
+    result: ExecutionResult<HaltReasonTy>,
+) -> ExecutionResult<HaltReasonTy> {
+    match result {
+        ExecutionResult::Success { .. } => result,
+        ExecutionResult::Revert { gas, output, .. } => {
+            ExecutionResult::Revert { gas, logs: Vec::new(), output }
+        }
+        ExecutionResult::Halt { reason, gas, .. } => {
+            ExecutionResult::Halt { reason, gas, logs: Vec::new() }
+        }
     }
 }
 

@@ -465,8 +465,8 @@ pub fn execute_keyless_deploy_call<DB: AlloyDatabase, ExtEnvs: ExternalEnvTypes>
 
             // Dispatch ABI return shape. `Deployed` and `EmptyCode` both forward
             // constructor logs into the parent receipt (run-to-completion EVM side
-            // effect); `ExecutionFailed` (Revert / Halt) does not, because revm's
-            // own frame accounting already rolled the failed frame's logs back.
+            // effect); `ExecutionFailed` (Revert / Halt) does not, because a failed
+            // sandbox result reaches here with an empty log list.
             match completion {
                 SandboxCompletion::Deployed { gas_used, deploy_address: deployed, logs } => {
                     if deployed != deploy_address {
@@ -673,8 +673,8 @@ fn run_sandbox_ctx<DB: AlloyDatabase, ExtEnvs: ExternalEnvTypes>(
 ///
 /// Logs naturally live on the completion variants where the EVM ran to a
 /// non-reverted exit (`Deployed` and `EmptyCode`). `ExecutionFailed` covers
-/// Revert / Halt — revm's own frame accounting already rolled those logs back,
-/// so there is nothing to forward.
+/// Revert / Halt, whose results arrive with an empty log list — see the note on
+/// that variant for why.
 #[derive(Debug)]
 pub enum SandboxOutcome {
     /// Sandbox EVM ran to a frame exit (success, empty-code success, revert, or
@@ -705,8 +705,8 @@ pub enum SandboxOutcome {
 /// `EmptyCode` into `ExecutionFailed { error: EmptyCodeDeployed }` so logs are
 /// dropped, preserving the frozen replay behavior.
 ///
-/// `ExecutionFailed` covers Revert / Halt. revm rolled the frame's logs back
-/// inside the sandbox; there is nothing to forward to the parent.
+/// `ExecutionFailed` covers Revert / Halt. Those results carry no logs by the time
+/// the sandbox hands them over, so there is nothing to forward to the parent.
 #[derive(Debug)]
 pub enum SandboxCompletion {
     /// Inner CREATE succeeded with non-empty runtime bytecode.
@@ -736,8 +736,13 @@ pub enum SandboxCompletion {
     ///
     /// Covers two cases that share an ABI wire shape but have different
     /// underlying reasons for not forwarding logs:
-    /// - `ExecutionResult::Revert` and `ExecutionResult::Halt` — revm already rolled the failed
-    ///   frame's logs back inside the sandbox; nothing exists to forward.
+    /// - `ExecutionResult::Revert` and `ExecutionResult::Halt` — a failed sandbox result carries
+    ///   no logs. A frame that fails during execution has them truncated by its checkpoint revert;
+    ///   a frame whose successful result is rewritten to a failure afterwards keeps them in the
+    ///   journal, and they are dropped where the transaction result is finalized. Either way the
+    ///   list is empty here. Note that the second case is the reason this cannot be phrased as
+    ///   "revm rolled them back" — on that path revm committed the frame and never sees the
+    ///   failure.
     /// - Pre-REX5 `EmptyCodeDeployed` — the constructor ran successfully and emitted logs, but
     ///   pre-REX5 deliberately drops them at this layer for replay parity. REX5+ uses
     ///   [`SandboxCompletion::EmptyCode`] to forward them instead.
