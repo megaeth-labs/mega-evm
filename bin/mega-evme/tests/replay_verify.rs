@@ -476,10 +476,11 @@ fn test_batch_verify_receipt_reorg_keeps_result_and_is_rpc() {
     );
 }
 
-/// The identity guard applies in batch mode too, as an `rpc` error entry naming
-/// both hashes, and the target carries no verdict.
+/// The identity guard applies in batch mode too: the target replayed, so it
+/// keeps its result line, and the failure to answer its receipt question is
+/// reported on `verification.error` naming both hashes — tallied rpc once.
 #[test]
-fn test_batch_verify_receipt_for_another_transaction_is_an_rpc_error_entry() {
+fn test_batch_verify_receipt_for_another_transaction_keeps_result_and_is_rpc() {
     let path = doctored_cache("batch_wrong_tx", |receipt| {
         receipt["transactionHash"] = OTHER_TX.into();
     });
@@ -492,15 +493,37 @@ fn test_batch_verify_receipt_for_another_transaction_is_an_rpc_error_entry() {
     assert_eq!(run.code(), 3, "an unverified target exits 3.\nstderr: {}", run.stderr);
     let lines = run.ndjson();
     assert_eq!(lines.len(), 1, "one line per requested transaction");
-    assert_eq!(lines[0]["error"]["kind"].as_str(), Some("rpc"));
     assert!(
-        lines[0]["error"]["message"]
+        lines[0].get("error").is_none(),
+        "a replayed target keeps its result line, not a bare error entry: {}",
+        lines[0]
+    );
+    assert!(lines[0]["receipt"].is_object(), "local receipt is kept: {}", lines[0]);
+    assert_eq!(lines[0]["success"].as_bool(), Some(true));
+    assert_eq!(lines[0]["gas_used"].as_u64(), Some(GAS_USED));
+    assert!(
+        lines[0]["verification"]["error"]
             .as_str()
             .is_some_and(|message| message.contains(OTHER_TX) && message.contains(TX)),
         "expected both the served and the requested transaction: {}",
         lines[0]
     );
-    assert!(lines[0].get("verification").is_none(), "an unverified target carries no verdict");
+    assert!(
+        lines[0]["verification"].get("match").is_none(),
+        "a receipt served for another transaction is not a match/mismatch verdict: {}",
+        lines[0]
+    );
+    let err = run.error_object();
+    assert_eq!(err["error"]["kind"].as_str(), Some("rpc-failure"));
+    let message = err["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("1 of 1 target transaction(s) failed"),
+        "the one unverified target is the one failure: {message}"
+    );
+    assert!(
+        message.contains("(0 execution, 1 rpc)"),
+        "an unanswered receipt question is tallied rpc, not execution: {message}"
+    );
     assert!(
         !run.stderr.contains("verification mismatch"),
         "an unverifiable target must not fail as a mismatch:\n{}",
