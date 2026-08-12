@@ -2,6 +2,7 @@
 
 mod accessed_block_hashes;
 mod block_limits;
+mod compute_gas_lanes;
 mod deposit_da_exemption;
 mod inspector;
 mod sequencer_registry;
