@@ -232,10 +232,14 @@ On clean-exit persist, each process:
 
 The lock sidecar is left in place after the process exits; only the flock is released when the handle closes.
 Lock contention blocks for a short critical section rather than failing the finished run.
-If the lock cannot be acquired at all (for example the directory is not writable), persist logs a warning and falls back to an unlocked write.
+If the lock cannot be acquired at all (for example the directory is not writable), persist fails closed and writes nothing.
+For the provider cache that means the file is left untouched and a warning names it — the cache is a best-effort artifact, so the cost is a re-fetch on the next run.
+An unlocked write is not offered as a fallback: it is exactly the lost-update race the lock exists to prevent, and it would delete a sibling process's entries silently.
 A missing or corrupt on-disk file during the re-read degrades to writing this process's entries only (also warned).
 
-Capture envelopes (`--rpc.capture-file`) use the same lock + re-read-merge path, with additional hard-error checks before writing:
+Capture envelopes (`--rpc.capture-file`) use the same lock + re-read-merge path, with additional hard-error checks before writing.
+A capture that cannot take the lock fails the run rather than writing unlocked: the envelope is the primary output of capture mode, so losing a concurrent writer's entries is worse than reporting the failure.
+The checks are:
 
 - The on-disk envelope `version` and `chain_id` must match this process's capture.
 - `external_env` uses optimistic concurrency against the snapshot observed when this process opened the capture file:
@@ -252,6 +256,7 @@ A corrupt or unreadable on-disk envelope during re-read degrades to writing this
 
 To consolidate historical per-worker cache directories offline, use [`cache merge`](../commands/cache.md).
 Provider-cache merge also rejects inputs (and `--output`) whose `rpc-cache-{chain_id}.json` filenames disagree on chain id.
+`cache merge` follows the same lock protocol for its `--output`: it takes the output's sidecar lock, folds whatever the file holds at that moment into the union, writes, and releases — so merging into a file a live run is still persisting to loses neither side's entries.
 
 ### Cache Flags
 

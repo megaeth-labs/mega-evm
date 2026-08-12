@@ -14,8 +14,8 @@ use mega_evm::{
         primitives::eip4844,
         DatabaseRef,
     },
-    BlockLimits, EvmTxRuntimeLimits, MegaBlockExecutionCtx, MegaBlockExecutorFactory,
-    MegaEvmFactory, MegaHardforks, MegaSpecId,
+    BlockLimits, MegaBlockExecutionCtx, MegaBlockExecutorFactory, MegaEvmFactory, MegaHardforks,
+    MegaSpecId,
 };
 use tracing::{debug, error, info, trace, warn};
 
@@ -29,7 +29,7 @@ use crate::{
         ExecutionSummary, ExternalEnvSnapshot, OpTxReceipt, RpcArgs, RpcCacheStore, TracerType,
         TxOverrideArgs,
     },
-    replay::get_hardfork_config,
+    replay::{get_hardfork_config, ReplayHardforks},
     run, ChainArgs, EvmeState,
 };
 
@@ -266,6 +266,17 @@ impl Cmd {
             ));
         }
         Ok(())
+    }
+
+    /// The spec forced by `--override.spec`, parsed.
+    fn resolve_spec_override(&self) -> Result<Option<MegaSpecId>> {
+        self.spec_override
+            .as_deref()
+            .map(|spec| {
+                MegaSpecId::from_str(spec)
+                    .map_err(|e| ReplayError::Other(format!("Invalid spec: {e:?}")))
+            })
+            .transpose()
     }
 
     /// Whether this invocation selects a batch of transactions.
@@ -541,6 +552,30 @@ impl Cmd {
             .map_err(|e| ReplayError::RpcError(format!("RPC transport error: {e}")))?
             .ok_or(ReplayError::BlockNotFound(block_number))?;
 
+        // Parent/block linkage guard: the two blocks above were fetched by
+        // number in separate calls, so across a reorg or a load-balanced
+        // endpoint serving divergent views `eth_getBlockByNumber(N-1)` can
+        // return a block that is not the parent of the block being replayed.
+        // Forking from that state would silently execute against the wrong
+        // pre-state, and the divergence would surface later as a receipt
+        // mismatch rather than as the infrastructure failure it is.
+        //
+        // A pending transaction has no such pair: its state base *is* the
+        // latest block, so both fetches address the same block and there is no
+        // linkage to check.
+        if !is_pending {
+            let parent_hash = parent_block.hash();
+            let expected_parent = block.header.parent_hash();
+            if parent_hash != expected_parent {
+                return Err(ReplayError::RpcError(format!(
+                    "parent block hash {parent_hash} != block parent_hash {expected_parent}: the \
+                     parent block describes a different chain than the block being replayed (reorg \
+                     in progress, or a load-balanced endpoint serving divergent views); retry once \
+                     the chain settles"
+                )));
+            }
+        }
+
         let mut preceding_tx_hashes = vec![];
         if !is_pending {
             for hash in block.transactions.hashes() {
@@ -627,7 +662,16 @@ impl Cmd {
     where
         P: Provider<op_alloy_network::Optimism> + Clone + std::fmt::Debug,
     {
-        let hardforks = get_hardfork_config(ctx.chain_id);
+        // `--override.spec` replaces the whole execution world, not just the EVM semantics: the
+        // synthesized schedule drives the pre-block predeploys and the block-level limits too, so
+        // the replay is a coherent what-if rather than a mix of the historical setup with forced
+        // semantics.
+        let chain_hardforks = get_hardfork_config(ctx.chain_id);
+        let spec_override = self.resolve_spec_override()?;
+        if let Some(spec_override) = spec_override {
+            info!(spec_override = %spec_override, "Overriding EVM spec");
+        }
+        let hardforks = ReplayHardforks::resolve(&chain_hardforks, spec_override);
         let spec = hardforks.spec_id(ctx.block.header.timestamp());
         let chain_args = ChainArgs { chain_id: ctx.chain_id, spec: spec.to_string() };
         debug!(chain_id = ctx.chain_id, spec = %spec, "Chain configuration");
@@ -643,7 +687,7 @@ impl Cmd {
 
         let block_env = retrieve_block_env(&ctx.block)?;
         trace!(?block_env, "Block environment built");
-        let mut evm_env = EvmEnv::new(chain_args.create_cfg_env()?, block_env);
+        let evm_env = EvmEnv::new(chain_args.create_cfg_env()?, block_env);
 
         // For `--dump-fixture`, snapshot the two inputs a fixture
         // needs before the external env is moved into the factory: the effective
@@ -721,26 +765,19 @@ impl Cmd {
         };
 
         let evm_factory = MegaEvmFactory::new().with_external_env_factory(external_envs);
-        let block_executor_factory = MegaBlockExecutorFactory::new(
-            &hardforks,
-            evm_factory,
-            OpAlloyReceiptBuilder::default(),
-        );
-        let mut block_limits = BlockLimits::from_hardfork_and_block_gas_limit(
+        let block_executor_factory =
+            MegaBlockExecutorFactory::new(hardforks, evm_factory, OpAlloyReceiptBuilder::default());
+        // Both the per-transaction and the block-level dimensions come from the fork resolved out
+        // of the schedule above, so a spec override moves all of them at once. The no-override
+        // path keeps the "no fork active" failure: a block older than the chain's first hardfork
+        // has no limits to execute under. A synthesized schedule always has one active.
+        let block_limits = BlockLimits::from_hardfork_and_block_gas_limit(
             hardforks.hardfork(ctx.block.header.timestamp()).ok_or(ReplayError::Other(format!(
                 "No `MegaHardfork` active at block timestamp: {}",
                 ctx.block.header.timestamp()
             )))?,
             ctx.block.header.gas_limit(),
         );
-
-        if let Some(spec_override) = &self.spec_override {
-            info!(spec_override = %spec_override, "Overriding EVM spec");
-            let spec = MegaSpecId::from_str(spec_override)
-                .map_err(|e| ReplayError::Other(format!("Invalid spec: {e:?}")))?;
-            evm_env.cfg_env.set_spec_and_mainnet_gas_params(spec);
-            block_limits = block_limits.with_tx_runtime_limits(EvmTxRuntimeLimits::from_spec(spec));
-        }
 
         // The spec the target transaction will execute under (after any override),
         // captured before `evm_env` is moved into the executor.

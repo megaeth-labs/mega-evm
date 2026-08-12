@@ -79,13 +79,6 @@ pub(crate) fn canonicalize_bucket_capacities(caps: &[(u32, u64)]) -> Vec<(u32, u
     map.into_iter().collect()
 }
 
-/// Path of the advisory lock sidecar for `target` (`<target>.lock`).
-pub(crate) fn lock_sidecar_path(target: &Path) -> PathBuf {
-    let mut os = target.as_os_str().to_owned();
-    os.push(".lock");
-    PathBuf::from(os)
-}
-
 /// Parse `rpc-cache-{chain_id}.json` from a path's file name.
 ///
 /// Returns `None` when the name does not match the per-chain provider-cache
@@ -201,6 +194,63 @@ pub(crate) fn read_provider_cache(path: &Path) -> Result<Vec<CacheKv>> {
             "Expected provider-cache array in '{}', found capture envelope",
             path.display()
         ))),
+    }
+}
+
+/// Classification of the file already at a provider-shape merge's output.
+///
+/// The counterpart of [`EnvelopeReread`] for the other shape, and typed for the
+/// same reason: content that cannot be parsed at all is safe to replace, while
+/// a file that parses into something this merge cannot fold is a file the merge
+/// must not silently destroy.
+#[derive(Debug)]
+pub(crate) enum ProviderReread {
+    /// The output holds provider-cache entries (or does not exist yet).
+    Ok(Vec<CacheKv>),
+    /// Corrupt, unreadable, or undecodable content — safe to warn and replace.
+    Degradable(String),
+    /// Readable, but not a provider cache: refusing beats overwriting.
+    Hard(EvmeError),
+}
+
+/// Re-read the existing merge output for a provider-shape merge.
+pub(crate) fn reread_provider_cache_for_merge(path: &Path) -> ProviderReread {
+    if !path.exists() {
+        return ProviderReread::Ok(Vec::new());
+    }
+    let content = match fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(e) => {
+            return ProviderReread::Degradable(format!(
+                "Failed to read cache file {}: {e}",
+                path.display()
+            ));
+        }
+    };
+    let value: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(e) => {
+            return ProviderReread::Degradable(format!(
+                "Failed to parse cache file {}: {e}",
+                path.display()
+            ));
+        }
+    };
+    match detect_shape(&value, path) {
+        Ok(CacheShape::Provider) => match serde_json::from_value(value) {
+            Ok(entries) => ProviderReread::Ok(entries),
+            Err(e) => ProviderReread::Degradable(format!(
+                "Failed to decode provider-cache entries in {}: {e}",
+                path.display()
+            )),
+        },
+        Ok(CacheShape::Envelope) => ProviderReread::Hard(EvmeError::InvalidInput(format!(
+            "Expected provider-cache array in '{}', found capture envelope",
+            path.display()
+        ))),
+        // An unrecognized shape is still structured JSON somebody wrote: it is
+        // not this merge's output to overwrite.
+        Err(e) => ProviderReread::Hard(e),
     }
 }
 
@@ -446,6 +496,67 @@ pub(crate) fn merge_envelopes_cli(docs: &[(PathBuf, EnvelopeDoc)]) -> Result<Env
     }
 
     Ok(EnvelopeDoc { version, chain_id, cache, external_env })
+}
+
+/// Fold the envelope already on disk at the merge output into `merged_inputs`.
+///
+/// Called by `cache merge` under the output's exclusive lock, so `on_disk` is
+/// whatever a concurrent writer left behind while this merge waited. It joins
+/// the union as one more input under the same rules the CLI merge applies to
+/// its inputs: identity must agree, entries union by key, and non-null
+/// `external_env` snapshots must be identical after canonicalization.
+///
+/// The merge's own inputs win on key collision — the operator named those
+/// files, and this matches the ours-win rule the persist path uses for the
+/// same read-modify-write cycle. Errors name the output path, since that is
+/// the file the caller did not list on the command line.
+pub(crate) fn fold_output_envelope(
+    output: &Path,
+    on_disk: EnvelopeDoc,
+    merged_inputs: EnvelopeDoc,
+) -> Result<EnvelopeDoc> {
+    if on_disk.version != merged_inputs.version {
+        return Err(EvmeError::InvalidInput(format!(
+            "Envelope version mismatch with existing output '{}': output has version {}, \
+             inputs have version {}",
+            output.display(),
+            on_disk.version,
+            merged_inputs.version,
+        )));
+    }
+    if on_disk.chain_id != merged_inputs.chain_id {
+        return Err(EvmeError::InvalidInput(format!(
+            "Envelope chain_id mismatch with existing output '{}': output has chain_id {}, \
+             inputs have chain_id {}",
+            output.display(),
+            on_disk.chain_id,
+            merged_inputs.chain_id,
+        )));
+    }
+
+    let external_env = match (&on_disk.external_env, &merged_inputs.external_env) {
+        (Some(disk), Some(ours)) => {
+            let (disk_c, ours_c) = (disk.canonicalized(), ours.canonicalized());
+            if disk_c != ours_c {
+                return Err(EvmeError::InvalidInput(format!(
+                    "Conflicting external_env snapshots with existing output '{}': \
+                     output {disk_c:?}, inputs {ours_c:?}",
+                    output.display(),
+                )));
+            }
+            Some(ours_c)
+        }
+        (Some(disk), None) => Some(disk.canonicalized()),
+        (None, Some(ours)) => Some(ours.canonicalized()),
+        (None, None) => None,
+    };
+
+    Ok(EnvelopeDoc {
+        version: merged_inputs.version,
+        chain_id: merged_inputs.chain_id,
+        cache: merge_kv_entries(on_disk.cache, merged_inputs.cache),
+        external_env,
+    })
 }
 
 /// Atomically write `entries` as a provider-cache JSON array to `path`.
@@ -885,10 +996,97 @@ mod tests {
         );
     }
 
+    /// Folding the existing output unions its entries in, with the named inputs
+    /// winning on key collision.
     #[test]
-    fn test_lock_sidecar_path_suffix() {
-        let p = Path::new("/tmp/rpc-cache-1.json");
-        assert_eq!(lock_sidecar_path(p), PathBuf::from("/tmp/rpc-cache-1.json.lock"));
+    fn test_fold_output_envelope_unions_with_inputs_winning() {
+        let on_disk = EnvelopeDoc {
+            version: 1,
+            chain_id: 7,
+            cache: vec![kv(1, "output"), kv(9, "concurrent")],
+            external_env: None,
+        };
+        let inputs = EnvelopeDoc {
+            version: 1,
+            chain_id: 7,
+            cache: vec![kv(1, "inputs"), kv(2, "inputs")],
+            external_env: Some(ExternalEnvDoc { bucket_capacities: vec![(2, 20), (1, 10)] }),
+        };
+        let folded =
+            fold_output_envelope(Path::new("out.json"), on_disk, inputs).expect("fold output");
+        assert_eq!(folded.cache, vec![kv(1, "inputs"), kv(2, "inputs"), kv(9, "concurrent")]);
+        // The written snapshot is canonical.
+        assert_eq!(
+            folded.external_env,
+            Some(ExternalEnvDoc { bucket_capacities: vec![(1, 10), (2, 20)] })
+        );
+    }
+
+    /// A snapshot on the existing output that disagrees with the inputs is a
+    /// conflict, exactly as it is between two inputs.
+    #[test]
+    fn test_fold_output_envelope_rejects_conflicting_external_env() {
+        let on_disk = EnvelopeDoc {
+            version: 1,
+            chain_id: 7,
+            cache: vec![],
+            external_env: Some(ExternalEnvDoc { bucket_capacities: vec![(1, 42)] }),
+        };
+        let inputs = EnvelopeDoc {
+            version: 1,
+            chain_id: 7,
+            cache: vec![],
+            external_env: Some(ExternalEnvDoc { bucket_capacities: vec![(1, 99)] }),
+        };
+        let err =
+            fold_output_envelope(Path::new("out.json"), on_disk, inputs).expect_err("conflict");
+        let msg = err.to_string();
+        assert!(msg.contains("external_env"), "msg={msg}");
+        assert!(msg.contains("out.json"), "msg={msg}");
+        assert!(msg.contains("42") && msg.contains("99"), "msg={msg}");
+    }
+
+    /// Same effective capacities in different order are not a conflict.
+    #[test]
+    fn test_fold_output_envelope_order_insensitive_external_env() {
+        let on_disk = EnvelopeDoc {
+            version: 1,
+            chain_id: 7,
+            cache: vec![],
+            external_env: Some(ExternalEnvDoc { bucket_capacities: vec![(2, 20), (1, 10)] }),
+        };
+        let inputs = EnvelopeDoc {
+            version: 1,
+            chain_id: 7,
+            cache: vec![],
+            external_env: Some(ExternalEnvDoc { bucket_capacities: vec![(1, 10), (2, 20)] }),
+        };
+        let folded = fold_output_envelope(Path::new("out.json"), on_disk, inputs)
+            .expect("order-only difference must not conflict");
+        assert_eq!(
+            folded.external_env,
+            Some(ExternalEnvDoc { bucket_capacities: vec![(1, 10), (2, 20)] })
+        );
+    }
+
+    /// Identity failures against the existing output name that file.
+    #[test]
+    fn test_fold_output_envelope_rejects_identity_mismatch() {
+        let inputs = EnvelopeDoc { version: 1, chain_id: 7, cache: vec![], external_env: None };
+
+        let other_chain =
+            EnvelopeDoc { version: 1, chain_id: 8, cache: vec![], external_env: None };
+        let err = fold_output_envelope(Path::new("out.json"), other_chain, inputs.clone())
+            .expect_err("chain_id mismatch");
+        let msg = err.to_string();
+        assert!(msg.contains("chain_id") && msg.contains("out.json"), "msg={msg}");
+
+        let other_version =
+            EnvelopeDoc { version: 2, chain_id: 7, cache: vec![], external_env: None };
+        let err = fold_output_envelope(Path::new("out.json"), other_version, inputs)
+            .expect_err("version mismatch");
+        let msg = err.to_string();
+        assert!(msg.contains("version") && msg.contains("out.json"), "msg={msg}");
     }
 
     /// Filename-derived chain id for the standard provider-cache naming scheme.

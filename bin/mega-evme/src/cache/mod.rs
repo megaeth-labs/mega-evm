@@ -3,23 +3,27 @@
 //! Currently ships `cache merge` for consolidating per-worker provider-cache
 //! files or capture envelopes after historical sharded campaigns.
 
+mod lock;
 mod merge;
 
-use std::path::PathBuf;
+use std::{fmt, path::PathBuf};
 
 use clap::{Parser, Subcommand};
 
 use crate::common::{EvmeError, Result};
 
+pub(crate) use lock::{acquire_exclusive_lock, lock_sidecar_path};
 pub(crate) use merge::{
-    lock_sidecar_path, merge_envelope_for_persist, merge_provider_entries_capped,
-    merge_provider_lists, parse_rpc_cache_filename_chain_id, read_provider_cache,
-    reread_envelope_for_merge, write_bytes_atomic, write_envelope_atomic,
-    write_provider_cache_atomic, CacheKv, EnvelopeDoc, EnvelopeReread, ExternalEnvDoc,
-    ENVELOPE_VERSION,
+    merge_envelope_for_persist, merge_provider_entries_capped, merge_provider_lists,
+    parse_rpc_cache_filename_chain_id, read_provider_cache, reread_envelope_for_merge,
+    write_bytes_atomic, write_envelope_atomic, write_provider_cache_atomic, CacheKv, EnvelopeDoc,
+    EnvelopeReread, ExternalEnvDoc, ENVELOPE_VERSION,
 };
 
-use merge::{load_cache_file, merge_envelopes_cli, CacheShape, LoadedCache};
+use merge::{
+    fold_output_envelope, load_cache_file, merge_envelopes_cli, reread_provider_cache_for_merge,
+    CacheShape, LoadedCache, ProviderReread,
+};
 use tracing::warn;
 
 /// `mega-evme cache` — offline cache-file utilities.
@@ -58,10 +62,29 @@ impl Cmd {
     }
 }
 
+/// Emit a diagnostic that protects the user from a silently wrong merge, on
+/// stderr unconditionally and through the structured log sinks.
+///
+/// The CLI leaves the tracing filter at `off` unless `-v` flags or `RUST_LOG`
+/// raise it, so a `warn!`-only diagnostic reaches nobody on a default command
+/// line: a safeguard reporting that it could not run, or a write about to
+/// discard data already on disk, would be announced into a disabled subscriber.
+/// stderr therefore carries the human line regardless of verbosity, and the
+/// tracing event still carries it to a `--log.file` sink. At raised verbosity
+/// without `--log.file` both channels land on stderr and the line appears
+/// twice, which is preferable to dropping either one.
+///
+/// Reserved for warnings a user must act on; ordinary progress reporting stays
+/// on `tracing` alone.
+fn warn_user(message: fmt::Arguments<'_>) {
+    eprintln!("warning: {message}");
+    warn!("{message}");
+}
+
 /// Validate that provider-cache paths agreeing with `rpc-cache-{id}.json` all
 /// name the same chain id.
 ///
-/// Paths that do not match the pattern emit a `warn!` (chain identity cannot be
+/// Paths that do not match the pattern warn the user (chain identity cannot be
 /// validated for them) and are otherwise ignored. Two or more matching paths
 /// with different ids are a hard error naming the conflicting files.
 pub(crate) fn check_provider_cache_chain_identity<'a>(
@@ -71,11 +94,11 @@ pub(crate) fn check_provider_cache_chain_identity<'a>(
     for path in paths {
         match parse_rpc_cache_filename_chain_id(path) {
             None => {
-                warn!(
-                    path = %path.display(),
-                    "Provider-cache path does not match rpc-cache-{{id}}.json; \
+                warn_user(format_args!(
+                    "Provider-cache path '{}' does not match rpc-cache-{{id}}.json; \
                      chain identity cannot be validated for this file",
-                );
+                    path.display(),
+                ));
             }
             Some(id) => match &seen {
                 None => seen = Some((id, path.to_path_buf())),
@@ -126,24 +149,67 @@ impl MergeArgs {
         let total_in: usize = loaded.iter().map(|(_, _, d)| d.entry_count()).sum();
         let input_count = loaded.len();
 
+        if first_shape == CacheShape::Provider {
+            // Provider-cache files carry chain identity only in the
+            // `rpc-cache-{id}.json` filename. Reject merges that would
+            // union different chains; warn when a path cannot be checked.
+            // Checked before the output is locked so a doomed merge leaves no
+            // sidecar behind.
+            check_provider_cache_chain_identity(
+                loaded
+                    .iter()
+                    .map(|(p, _, _)| p.as_path())
+                    .chain(std::iter::once(self.output.as_path())),
+            )?;
+        }
+
+        // The output is a shared file: a live run may be persisting to the same
+        // path under the same sidecar lock. Take that lock and hold it across
+        // read-merge-rename, so neither side's entries are lost to whichever
+        // rename lands last.
+        let _output_lock = acquire_exclusive_lock(&self.output).map_err(|e| {
+            EvmeError::InvalidInput(format!(
+                "Failed to acquire the cache lock {} for output '{}': {e}. \
+                 Refusing to merge without it: an unlocked write would silently drop \
+                 entries written by a concurrent process.",
+                lock_sidecar_path(&self.output).display(),
+                self.output.display(),
+            ))
+        })?;
+
+        // Entries the output file already held when the lock was granted.
+        let mut folded_in = 0usize;
+
         let unique_out = match first_shape {
             CacheShape::Provider => {
-                // Provider-cache files carry chain identity only in the
-                // `rpc-cache-{id}.json` filename. Reject merges that would
-                // union different chains; warn when a path cannot be checked.
-                check_provider_cache_chain_identity(
-                    loaded
-                        .iter()
-                        .map(|(p, _, _)| p.as_path())
-                        .chain(std::iter::once(self.output.as_path())),
-                )?;
-
                 let mut acc = Vec::new();
                 for (_, _, data) in loaded {
                     let LoadedCache::Provider(entries) = data else { unreachable!() };
                     // Later inputs win on collision.
                     acc = merge_provider_lists(acc, entries);
                 }
+
+                // Whatever is at the output now joins the union as one more
+                // input: a concurrent writer may have landed entries there
+                // while this merge waited for the lock.
+                let on_disk = match reread_provider_cache_for_merge(&self.output) {
+                    ProviderReread::Ok(entries) => entries,
+                    ProviderReread::Hard(err) => return Err(err),
+                    ProviderReread::Degradable(msg) => {
+                        // Replacing the output drops whatever it held: the user
+                        // must hear about it whatever the verbosity is.
+                        warn_user(format_args!(
+                            "{msg}. Replacing the existing merge output '{}' with the \
+                             merged inputs; any entries it held are discarded",
+                            self.output.display(),
+                        ));
+                        Vec::new()
+                    }
+                };
+                folded_in = on_disk.len();
+                // The named inputs win over the output's prior entries.
+                let acc = merge_provider_lists(on_disk, acc);
+
                 let unique = acc.len();
                 write_provider_cache_atomic(&self.output, &acc)?;
                 unique
@@ -157,14 +223,46 @@ impl MergeArgs {
                     })
                     .collect();
                 let merged = merge_envelopes_cli(&docs)?;
+
+                let merged = if self.output.exists() {
+                    // Typed classification: identity/schema failures must not be
+                    // papered over by overwriting the file we cannot read.
+                    match reread_envelope_for_merge(&self.output) {
+                        EnvelopeReread::Ok(on_disk) => {
+                            folded_in = on_disk.cache.len();
+                            fold_output_envelope(&self.output, on_disk, merged)?
+                        }
+                        EnvelopeReread::Hard(err) => return Err(err),
+                        EnvelopeReread::Degradable(msg) => {
+                            // Same data loss as the provider shape above.
+                            warn_user(format_args!(
+                                "{msg}. Replacing the existing merge output '{}' with the \
+                                 merged inputs; any entries it held are discarded",
+                                self.output.display(),
+                            ));
+                            merged
+                        }
+                    }
+                } else {
+                    merged
+                };
+
                 let unique = merged.cache.len();
                 write_envelope_atomic(&self.output, &merged)?;
                 unique
             }
         };
 
+        // Name the folded-in entries so the arithmetic still adds up when the
+        // output already held some.
+        let folded = if folded_in > 0 {
+            format!(" + {folded_in} already in the output")
+        } else {
+            String::new()
+        };
         println!(
-            "Merged {input_count} inputs ({total_in} entries in) → {unique_out} unique entries out"
+            "Merged {input_count} inputs ({total_in} entries in{folded}) \
+             → {unique_out} unique entries out"
         );
         Ok(())
     }
@@ -347,6 +445,218 @@ mod tests {
         let err = MergeArgs { inputs: vec![a], output: out }.run().unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("chain 1") && msg.contains("chain 4326"), "msg={msg}");
+    }
+
+    /// A provider-shaped output already on disk joins the union as one more
+    /// input: entries a concurrent writer left there survive the merge, and the
+    /// named inputs win where the keys collide.
+    #[test]
+    fn test_cache_merge_folds_the_existing_provider_output() {
+        let dir = tempdir().unwrap();
+        let a = dir.path().join("a.json");
+        let b = dir.path().join("b.json");
+        let out = dir.path().join("out.json");
+
+        write(&a, &serde_json::to_string(&vec![kv(1, "from-a")]).unwrap());
+        write(&b, &serde_json::to_string(&vec![kv(2, "from-b")]).unwrap());
+        // The output already holds a sibling's entry plus a stale copy of key 2.
+        write(
+            &out,
+            &serde_json::to_string(&vec![kv(2, "from-output"), kv(9, "concurrent")]).unwrap(),
+        );
+
+        MergeArgs { inputs: vec![a, b], output: out.clone() }.run().expect("merge");
+
+        let merged: Vec<CacheKv> =
+            serde_json::from_str(&fs::read_to_string(&out).unwrap()).unwrap();
+        assert_eq!(merged, vec![kv(1, "from-a"), kv(2, "from-b"), kv(9, "concurrent")]);
+    }
+
+    /// The envelope shape folds its existing output the same way.
+    #[test]
+    fn test_cache_merge_folds_the_existing_envelope_output() {
+        let dir = tempdir().unwrap();
+        let a = dir.path().join("a.json");
+        let out = dir.path().join("out.json");
+
+        let env_a = EnvelopeDoc {
+            version: 1,
+            chain_id: 4326,
+            cache: vec![kv(1, "from-a"), kv(2, "from-a")],
+            external_env: None,
+        };
+        let existing = EnvelopeDoc {
+            version: 1,
+            chain_id: 4326,
+            cache: vec![kv(2, "from-output"), kv(9, "concurrent")],
+            external_env: Some(ExternalEnvDoc { bucket_capacities: vec![(1, 100)] }),
+        };
+        write(&a, &serde_json::to_string_pretty(&env_a).unwrap());
+        write(&out, &serde_json::to_string_pretty(&existing).unwrap());
+
+        MergeArgs { inputs: vec![a], output: out.clone() }.run().expect("merge");
+
+        let merged: EnvelopeDoc = serde_json::from_str(&fs::read_to_string(&out).unwrap()).unwrap();
+        assert_eq!(merged.cache, vec![kv(1, "from-a"), kv(2, "from-a"), kv(9, "concurrent")]);
+        // The output's snapshot is preserved when the inputs carry none.
+        assert_eq!(merged.external_env, Some(ExternalEnvDoc { bucket_capacities: vec![(1, 100)] }));
+    }
+
+    /// An unreadable provider output degrades to the merged inputs (warned),
+    /// matching the persist path's handling of a corrupt on-disk file.
+    #[test]
+    fn test_cache_merge_replaces_corrupt_provider_output() {
+        let dir = tempdir().unwrap();
+        let a = dir.path().join("a.json");
+        let out = dir.path().join("out.json");
+
+        write(&a, &serde_json::to_string(&vec![kv(1, "from-a")]).unwrap());
+        write(&out, "not-json{{{");
+
+        MergeArgs { inputs: vec![a], output: out.clone() }.run().expect("merge");
+
+        let merged: Vec<CacheKv> =
+            serde_json::from_str(&fs::read_to_string(&out).unwrap()).unwrap();
+        assert_eq!(merged, vec![kv(1, "from-a")]);
+    }
+
+    /// An existing envelope output on another chain is an identity failure, not
+    /// something to overwrite.
+    #[test]
+    fn test_cache_merge_rejects_existing_envelope_output_on_another_chain() {
+        let dir = tempdir().unwrap();
+        let a = dir.path().join("a.json");
+        let out = dir.path().join("out.json");
+
+        write(
+            &a,
+            &serde_json::to_string_pretty(&EnvelopeDoc {
+                version: 1,
+                chain_id: 1,
+                cache: vec![kv(1, "a")],
+                external_env: None,
+            })
+            .unwrap(),
+        );
+        let existing = serde_json::to_string_pretty(&EnvelopeDoc {
+            version: 1,
+            chain_id: 2,
+            cache: vec![kv(9, "concurrent")],
+            external_env: None,
+        })
+        .unwrap();
+        write(&out, &existing);
+
+        let err = MergeArgs { inputs: vec![a], output: out.clone() }.run().unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("chain_id"), "msg={msg}");
+        assert!(msg.contains("out.json"), "the output must be named: msg={msg}");
+        assert_eq!(fs::read_to_string(&out).unwrap(), existing, "output left untouched");
+    }
+
+    /// A capture envelope sitting at a provider merge's output is a hard error
+    /// for the same reason as the mirrored case below: a mistyped `--output`
+    /// must not destroy a file the merge cannot fold.
+    #[test]
+    fn test_cache_merge_rejects_wrong_shaped_existing_provider_output() {
+        let dir = tempdir().unwrap();
+        let a = dir.path().join("a.json");
+        let out = dir.path().join("out.json");
+
+        write(&a, &serde_json::to_string(&vec![kv(1, "from-a")]).unwrap());
+        let existing = serde_json::to_string_pretty(&EnvelopeDoc {
+            version: 1,
+            chain_id: 1,
+            cache: vec![kv(9, "concurrent")],
+            external_env: None,
+        })
+        .unwrap();
+        write(&out, &existing);
+
+        let err = MergeArgs { inputs: vec![a], output: out.clone() }.run().unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("envelope"), "msg={msg}");
+        assert_eq!(fs::read_to_string(&out).unwrap(), existing, "output left untouched");
+    }
+
+    /// A provider-shaped file sitting at an envelope merge's output is a hard
+    /// error: it cannot be folded, and overwriting it would destroy it.
+    #[test]
+    fn test_cache_merge_rejects_wrong_shaped_existing_output() {
+        let dir = tempdir().unwrap();
+        let a = dir.path().join("a.json");
+        let out = dir.path().join("out.json");
+
+        write(
+            &a,
+            &serde_json::to_string_pretty(&EnvelopeDoc {
+                version: 1,
+                chain_id: 1,
+                cache: vec![kv(1, "a")],
+                external_env: None,
+            })
+            .unwrap(),
+        );
+        let existing = serde_json::to_string(&vec![kv(9, "concurrent")]).unwrap();
+        write(&out, &existing);
+
+        let err = MergeArgs { inputs: vec![a], output: out.clone() }.run().unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("envelope"), "msg={msg}");
+        assert_eq!(fs::read_to_string(&out).unwrap(), existing, "output left untouched");
+    }
+
+    /// Provider merge fails closed when the output lock cannot be acquired: the
+    /// existing output is left exactly as it was.
+    #[test]
+    fn test_cache_merge_provider_fails_closed_when_the_output_lock_is_unavailable() {
+        let dir = tempdir().unwrap();
+        let a = dir.path().join("a.json");
+        let out = dir.path().join("out.json");
+
+        write(&a, &serde_json::to_string(&vec![kv(1, "from-a")]).unwrap());
+        let existing = serde_json::to_string(&vec![kv(9, "concurrent")]).unwrap();
+        write(&out, &existing);
+        // A directory in the sidecar's place makes the lock un-acquirable.
+        fs::create_dir(lock_sidecar_path(&out)).expect("occupy sidecar path");
+
+        let err = MergeArgs { inputs: vec![a], output: out.clone() }.run().unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("lock"), "msg={msg}");
+        assert!(msg.contains("out.json.lock"), "the lock path must be named: msg={msg}");
+        assert_eq!(fs::read_to_string(&out).unwrap(), existing, "no unlocked write happened");
+    }
+
+    /// Envelope merge fails closed on the same condition.
+    #[test]
+    fn test_cache_merge_envelope_fails_closed_when_the_output_lock_is_unavailable() {
+        let dir = tempdir().unwrap();
+        let a = dir.path().join("a.json");
+        let out = dir.path().join("out.json");
+
+        write(
+            &a,
+            &serde_json::to_string_pretty(&EnvelopeDoc {
+                version: 1,
+                chain_id: 1,
+                cache: vec![kv(1, "a")],
+                external_env: None,
+            })
+            .unwrap(),
+        );
+        let existing = serde_json::to_string_pretty(&EnvelopeDoc {
+            version: 1,
+            chain_id: 1,
+            cache: vec![kv(9, "concurrent")],
+            external_env: None,
+        })
+        .unwrap();
+        write(&out, &existing);
+        fs::create_dir(lock_sidecar_path(&out)).expect("occupy sidecar path");
+
+        let err = MergeArgs { inputs: vec![a], output: out.clone() }.run().unwrap_err();
+        assert!(err.to_string().contains("lock"), "msg={err}");
+        assert_eq!(fs::read_to_string(&out).unwrap(), existing, "no unlocked write happened");
     }
 
     /// Unit-testable predicate: non-matching filename cannot supply chain identity.

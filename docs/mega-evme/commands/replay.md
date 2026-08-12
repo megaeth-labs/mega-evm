@@ -159,8 +159,10 @@ Where `corpus.txt` looks like:
 Count the transactions that did not succeed:
 
 ```bash
-jq -c 'select(.error != null or .success == false)' results.ndjson | wc -l
+jq -c 'select(.tx_hash and (.error != null or .success == false))' results.ndjson | wc -l
 ```
+
+A failed run ends its stdout with a run-level `{"error": …}` object (see [Exit codes](../overview.md#exit-codes)), which carries no `tx_hash`, so selecting on `.tx_hash` keeps the count to per-transaction lines.
 
 ## Receipt Verification
 
@@ -262,9 +264,11 @@ Verify a whole corpus in one process and collect the divergences:
 mega-evme replay --rpc https://mainnet.megaeth.com/rpc \
   --tx-file ./corpus.txt --verify-receipt --json > results.ndjson
 
-jq -c 'select(.verification.match == false)' results.ndjson    # mismatched
-jq -c 'select(.error != null)' results.ndjson                  # unverified
+jq -c 'select(.tx_hash and .verification.match == false)' results.ndjson    # mismatched
+jq -c 'select(.tx_hash and .error != null)' results.ndjson                  # unverified
 ```
+
+Both selectors require `.tx_hash` so that the run-level `{"error": …}` object a failed run appends to stdout is not counted as an unverified transaction.
 
 Capture once online, then re-verify the same corpus offline:
 
@@ -447,6 +451,17 @@ Useful when you want to test how the transaction would behave under a different 
 ```
 mega-evme replay --override.spec Rex2 <TX_HASH>
 ```
+
+The override replaces the entire execution world, not just the EVM semantics.
+The block is executed as if it had run on a chain whose schedule activates the forced spec at genesis: the pre-block system contract deploys, the EIP-2935 and EIP-4788 pre-block calls, the block-level resource limits, and the EVM semantics all come from the forced spec.
+This keeps a forced replay coherent — mixing the historical setup with forced semantics would execute a world that never existed on any chain.
+
+A consequence worth stating explicitly: replaying an old block under a newer spec installs predeploys that did not exist at that block (for example, forcing `Rex5` on a pre-`Rex5` block deploys the `SequencerRegistry`), and forcing an older spec withholds predeploys the block did have, or installs an earlier version of them.
+That is intentional — it is what "how would this transaction behave under spec X" means.
+The replayed state therefore diverges from the chain's historical state by construction, so `--verify-receipt` will normally report a mismatch and `--dump-fixture` is rejected outright.
+
+The forced spec does not synthesize chain configuration.
+Per-fork parameters (currently the `SequencerRegistry` seeds a chain publishes for `Rex5` and `Rex6`) are taken from the chain's own configuration, so a fork the chain has not configured cannot be forced: the run fails before executing, naming the missing parameters, rather than proceeding with an invented value.
 
 ## Transaction Overrides
 

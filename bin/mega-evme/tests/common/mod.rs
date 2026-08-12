@@ -175,6 +175,50 @@ impl MockRpcServer {
             .await;
     }
 
+    /// Mount an unbounded mock that answers every JSON-RPC request for `method`
+    /// with the given JSON `result`, regardless of params.
+    ///
+    /// The result is any JSON value, so this serves structured answers (blocks,
+    /// transactions) that [`Self::respond_method_result`]'s hex string cannot.
+    pub(crate) async fn respond_method_json(
+        &self,
+        method: &str,
+        result: serde_json::Value,
+        priority: u8,
+    ) {
+        let body = serde_json::json!({ "jsonrpc": "2.0", "id": 0, "result": result });
+        Mock::given(matchers::method("POST"))
+            .and(matchers::body_partial_json(serde_json::json!({ "method": method })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .with_priority(priority)
+            .mount(&self.server)
+            .await;
+    }
+
+    /// Mount an unbounded mock that answers `method` calls whose params match
+    /// `params` with the given JSON `result`.
+    ///
+    /// Needed where one method is called with different arguments in the same
+    /// run and the answers must differ — `eth_getBlockByNumber` for a block and
+    /// its parent, for instance.
+    pub(crate) async fn respond_method_params_json(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+        result: serde_json::Value,
+        priority: u8,
+    ) {
+        let body = serde_json::json!({ "jsonrpc": "2.0", "id": 0, "result": result });
+        Mock::given(matchers::method("POST"))
+            .and(matchers::body_partial_json(
+                serde_json::json!({ "method": method, "params": params }),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .with_priority(priority)
+            .mount(&self.server)
+            .await;
+    }
+
     /// Mount a mock that returns `eth_chainId` with the given chain id.
     pub(crate) async fn respond_eth_chain_id(&self, chain_id: u64, priority: u8) {
         let body = serde_json::json!({
