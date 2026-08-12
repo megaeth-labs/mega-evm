@@ -116,12 +116,33 @@ pub enum EvmeError {
     Other(String),
 }
 
+/// Exit-code floor contributed by a non-target mid-block abort.
+///
+/// Per-target failure counters stay strictly about reported targets. When the
+/// aborting transaction is not itself a target, this floor still ranks the run
+/// exit by the abort's root cause without inflating the "N of M target(s)
+/// failed" totals.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum BatchExitFloor {
+    /// No non-target abort contributed a floor.
+    #[default]
+    None,
+    /// A non-target abort was execution-class (setup, executor rejection, …).
+    Execution,
+    /// A non-target abort was rpc-class (transport, cache miss, …).
+    Rpc,
+}
+
 /// How many targets of a batch replay failed, by failure class.
 ///
 /// A batch run reports every target on its own output line and then fails once
 /// with this summary, so the exit-code mapping can apply the batch precedence
 /// (execution before RPC before mismatch) without re-reading the per-target
 /// lines or parsing an error message.
+///
+/// [`Self::execution`], [`Self::rpc`], [`Self::mismatched`], and [`Self::total`]
+/// count only reported targets. [`Self::exit_floor`] is consulted solely for
+/// exit ranking when a non-target abort's class is not carried by any target.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct BatchFailureCounts {
     /// Targets that failed for an execution, setup, or definitive-answer reason
@@ -134,10 +155,15 @@ pub struct BatchFailureCounts {
     pub mismatched: usize,
     /// Targets the run reported on.
     pub total: usize,
+    /// Non-target abort class that floors the run exit without being a target
+    /// failure count. Display ignores this for "N of M"; exit mapping uses it.
+    pub exit_floor: BatchExitFloor,
 }
 
 impl core::fmt::Display for BatchFailureCounts {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        // Totals stay per-target: a non-target abort floor must not print
+        // "3 of 2 target transaction(s) failed".
         write!(
             f,
             "{} of {} target transaction(s) failed ({} execution, {} rpc)",

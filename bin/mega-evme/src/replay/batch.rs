@@ -18,7 +18,7 @@
 //! about. Offline, those come back as `rpc` entries and the run exits `3`.
 
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     path::{Path, PathBuf},
     str::FromStr,
     time::{Duration, Instant},
@@ -50,8 +50,8 @@ use tracing::{debug, info, warn};
 
 use crate::{
     common::{
-        op_receipt_to_tx_receipt, print_execution_summary, print_receipt, BatchFailureCounts,
-        EvmeExternalEnvs, ExecutionSummary, ExitCode, OpTxReceipt,
+        op_receipt_to_tx_receipt, print_execution_summary, print_receipt, BatchExitFloor,
+        BatchFailureCounts, EvmeExternalEnvs, ExecutionSummary, ExitCode, OpTxReceipt,
     },
     replay::get_hardfork_config,
     ChainArgs, EvmeState,
@@ -260,6 +260,11 @@ struct FailedTx {
 /// A batch reports each target as it goes and fails once at the end, so the
 /// outcome classes are counted here rather than recovered from the emitted
 /// lines.
+///
+/// Per-target counters ([`Self::counts`], [`Self::reported`]) stay strictly
+/// about emitted target entries. A non-target abort's class is carried only as
+/// [`Self::exit_floor`] so the human "N of M" totals stay truthful while the
+/// run exit still reflects the root cause.
 #[derive(Debug, Default)]
 struct BatchTally {
     /// Targets the run reported on, one per emitted entry.
@@ -268,8 +273,10 @@ struct BatchTally {
     replayed: usize,
     /// Targets compared against an on-chain receipt.
     verified: usize,
-    /// Failed and mismatched targets, by class.
+    /// Failed and mismatched targets, by class (reported targets only).
     counts: BatchFailureCounts,
+    /// Run-level exit floor from a non-target abort not carried by any target.
+    exit_floor: BatchExitFloor,
 }
 
 impl BatchTally {
@@ -301,6 +308,10 @@ impl BatchTally {
     /// whether or not its fixture could be written. An unanswered receipt
     /// question (verification unavailable, or dump-dir fidelity gate starved of
     /// a receipt) is rpc-class and does not count as verified.
+    ///
+    /// When both `--verify-receipt` and `--dump-fixture-dir` fail on the same
+    /// unanswered receipt, both result fields stay on the line but the shared
+    /// rpc failure is counted once.
     fn record_executed(
         &mut self,
         verification: Option<&VerificationOutcome>,
@@ -308,10 +319,12 @@ impl BatchTally {
     ) {
         self.reported += 1;
         self.replayed += 1;
+        let mut receipt_rpc_counted = false;
         if let Some(verification) = verification {
             if verification.is_unavailable() {
                 // Compared path never ran: the receipt question went unanswered.
                 self.counts.rpc += 1;
+                receipt_rpc_counted = true;
             } else {
                 self.verified += 1;
                 if !verification.matched {
@@ -326,7 +339,14 @@ impl BatchTally {
         // abort's class (see [`FixtureReport::abort_error`]).
         if let Some(fixture) = fixture.filter(|f| f.is_error()) {
             match fixture.error_kind {
-                BatchErrorKind::Rpc => self.counts.rpc += 1,
+                BatchErrorKind::Rpc => {
+                    // Same missing receipt as verification.error: one target,
+                    // one rpc count. Independent fixture rpc failures (none
+                    // today share the gate without verification) still count.
+                    if !receipt_rpc_counted {
+                        self.counts.rpc += 1;
+                    }
+                }
                 BatchErrorKind::NotFound | BatchErrorKind::Pending | BatchErrorKind::Execution => {
                     self.counts.execution += 1
                 }
@@ -334,21 +354,29 @@ impl BatchTally {
         }
     }
 
-    /// Count a mid-block abort whose root-cause class is not already carried by
+    /// Record a mid-block abort whose root-cause class is not already carried by
     /// a per-target failure entry.
     ///
     /// Swept targets always stay `rpc` ("unanswered"). When the aborting
     /// transaction is not itself a reported target, that class would otherwise
     /// be lost and a deterministic executor abort would exit 3. The abort is
-    /// tallied once without emitting an extra NDJSON line or incrementing
-    /// `reported`.
+    /// recorded as an exit floor only: it does not emit an NDJSON line, does
+    /// not increment `reported`, and does not inflate the per-target counters.
     fn record_uncounted_abort(&mut self, kind: BatchErrorKind) {
-        match kind {
-            BatchErrorKind::Rpc => self.counts.rpc += 1,
+        let floor = match kind {
+            BatchErrorKind::Rpc => BatchExitFloor::Rpc,
             BatchErrorKind::NotFound | BatchErrorKind::Pending | BatchErrorKind::Execution => {
-                self.counts.execution += 1
+                BatchExitFloor::Execution
             }
-        }
+        };
+        // Multiple blocks can each contribute a floor; keep the more severe.
+        self.exit_floor = match (self.exit_floor, floor) {
+            (BatchExitFloor::Execution, _) | (_, BatchExitFloor::Execution) => {
+                BatchExitFloor::Execution
+            }
+            (BatchExitFloor::Rpc, _) | (_, BatchExitFloor::Rpc) => BatchExitFloor::Rpc,
+            (BatchExitFloor::None, BatchExitFloor::None) => BatchExitFloor::None,
+        };
     }
 
     /// Targets that failed, by any class other than a receipt mismatch.
@@ -363,10 +391,14 @@ impl BatchTally {
     /// run whose only finding is divergence fails as the mismatch it is.
     /// Fixture skips never count as failures; a fixture that could not be
     /// written does, as an execution-class failure of its target.
+    ///
+    /// A non-target abort floor alone also fails the run (with empty target
+    /// failure counters) so the exit still reflects the root cause.
     fn into_error(self) -> Option<ReplayError> {
-        if self.failed() > 0 {
+        if self.failed() > 0 || self.exit_floor != BatchExitFloor::None {
             return Some(ReplayError::BatchFailed(BatchFailureCounts {
                 total: self.reported,
+                exit_floor: self.exit_floor,
                 ..self.counts
             }));
         }
@@ -673,9 +705,55 @@ struct BlockReplayOutcome {
 }
 
 impl BlockReplayOutcome {
-    fn entries_only(entries: Vec<BatchEntry>) -> Self {
-        Self { entries, uncounted_abort: None }
+    /// Order entries into documented stream order before returning.
+    ///
+    /// Pre-execution inclusion/membership failures are collected before the
+    /// execute loop, while canonical results are appended after `finish()`.
+    /// Without a final reorder, a later same-block target's inclusion failure
+    /// would precede an earlier target's execution result.
+    fn ordered(
+        entries: Vec<BatchEntry>,
+        job_targets: &[JobTarget],
+        block_tx_order: Option<&[B256]>,
+        uncounted_abort: Option<BatchErrorKind>,
+    ) -> Self {
+        Self { entries: order_block_entries(entries, job_targets, block_tx_order), uncounted_abort }
     }
+}
+
+/// Order a block's entries: targets present in the body by ascending transaction
+/// index, then targets the block cannot place (inclusion/membership failures)
+/// last, in job input order.
+fn order_block_entries(
+    entries: Vec<BatchEntry>,
+    job_targets: &[JobTarget],
+    block_tx_order: Option<&[B256]>,
+) -> Vec<BatchEntry> {
+    if entries.len() <= 1 {
+        return entries;
+    }
+    let mut by_hash: HashMap<B256, BatchEntry> = HashMap::with_capacity(entries.len());
+    for entry in entries {
+        by_hash.insert(entry.tx_hash(), entry);
+    }
+    let mut ordered = Vec::with_capacity(by_hash.len());
+    if let Some(block_txs) = block_tx_order {
+        for hash in block_txs {
+            if let Some(entry) = by_hash.remove(hash) {
+                ordered.push(entry);
+            }
+        }
+    }
+    // Residual targets (absent from the body, or no body order available) keep
+    // the job's input order — the documented absent-last placement.
+    for target in job_targets {
+        if let Some(entry) = by_hash.remove(&target.hash) {
+            ordered.push(entry);
+        }
+    }
+    // Defensive: anything not listed on the job (should not happen).
+    ordered.extend(by_hash.into_values());
+    ordered
 }
 
 /// Replay one block, reporting an entry for every target it was asked about.
@@ -700,22 +778,27 @@ async fn replay_block<P>(
 where
     P: Provider<op_alloy_network::Optimism> + Clone + std::fmt::Debug,
 {
-    let BlockJob { number, block, targets } = job;
+    let BlockJob { number, block, targets: job_targets } = job;
     let verify_receipt = report.verify_receipt;
     let dump_dir = report.dump_fixture_dir.as_deref();
     let overwrite = report.overwrite;
-    let target_hashes = || targets.iter().map(|t| t.hash);
+    let target_hashes = || job_targets.iter().map(|t| t.hash);
 
     if number == 0 {
         // Distinct from `--block 0` (invalid request, exit 1): an endpoint that
         // resolves a hash into block 0 is contradictory endpoint data — the
         // same unanswered class as unanchored / contradictory metadata.
-        return BlockReplayOutcome::entries_only(fail_all(
-            target_hashes(),
-            BatchErrorKind::Rpc,
-            "endpoint resolved the target into block 0, which has no parent block \
-             to fork from: contradictory endpoint data",
-        ));
+        return BlockReplayOutcome::ordered(
+            fail_all(
+                target_hashes(),
+                BatchErrorKind::Rpc,
+                "endpoint resolved the target into block 0, which has no parent block \
+                 to fork from: contradictory endpoint data",
+            ),
+            &job_targets,
+            None,
+            None,
+        );
     }
 
     let block = match block {
@@ -723,14 +806,17 @@ where
         None => match fetch_block(provider, number).await {
             Ok(block) => block,
             Err(e) => {
-                return BlockReplayOutcome::entries_only(fail_all(
-                    target_hashes(),
-                    BatchErrorKind::Rpc,
-                    &e.to_string(),
-                ));
+                return BlockReplayOutcome::ordered(
+                    fail_all(target_hashes(), BatchErrorKind::Rpc, &e.to_string()),
+                    &job_targets,
+                    None,
+                    None,
+                );
             }
         },
     };
+    // Body order for the documented ascending `(block, tx_index)` stream.
+    let block_tx_order: Vec<B256> = block.transactions.hashes().collect();
 
     // Per-target inclusion and membership guards. `--tx-file` resolved each
     // target through `eth_getTransactionByHash`, which reported the block it
@@ -744,11 +830,15 @@ where
     // has its definitive answer here — skip parent fetch, state forking, and
     // the execute loop entirely. Otherwise `last_target_index` would be `None`
     // and the foreign block would be walked for nothing.
+    //
+    // Pre-execution failures are buffered into `entries` and reordered with
+    // executed results at return time so a later-index inclusion failure cannot
+    // precede an earlier target's result line.
     let fetched = block.hash();
-    let body_txs: HashSet<B256> = block.transactions.hashes().collect();
-    let mut entries = Vec::with_capacity(targets.len());
+    let body_txs: HashSet<B256> = block_tx_order.iter().copied().collect();
+    let mut entries = Vec::with_capacity(job_targets.len());
     let mut active: Vec<B256> = Vec::new();
-    for target in &targets {
+    for target in &job_targets {
         if let Some(reported) = target.inclusion_hash {
             if reported != fetched {
                 entries.push(failure(
@@ -799,7 +889,7 @@ where
     // Every target either failed an inclusion/membership check or was a
     // `--block` target already taken from the body. Nothing left to execute.
     if active.is_empty() {
-        return BlockReplayOutcome::entries_only(entries);
+        return BlockReplayOutcome::ordered(entries, &job_targets, Some(&block_tx_order), None);
     }
     let targets = active;
 
@@ -818,12 +908,12 @@ where
     let parent_block = match fetch_block(provider, number - 1).await {
         Ok(block) => block,
         Err(e) => {
-            return BlockReplayOutcome::entries_only(fail_remaining(
-                &targets,
-                entries,
-                BatchErrorKind::Rpc,
-                &e.to_string(),
-            ));
+            return BlockReplayOutcome::ordered(
+                fail_remaining(&targets, entries, BatchErrorKind::Rpc, &e.to_string()),
+                &job_targets,
+                Some(&block_tx_order),
+                None,
+            );
         }
     };
     let parent_hash = parent_block.hash();
@@ -834,12 +924,12 @@ where
              block describes a different chain than the block being replayed (reorg in progress, \
              or a load-balanced endpoint serving divergent views); retry once the chain settles"
         );
-        return BlockReplayOutcome::entries_only(fail_remaining(
-            &targets,
-            entries,
-            BatchErrorKind::Rpc,
-            &message,
-        ));
+        return BlockReplayOutcome::ordered(
+            fail_remaining(&targets, entries, BatchErrorKind::Rpc, &message),
+            &job_targets,
+            Some(&block_tx_order),
+            None,
+        );
     }
 
     // Fetch the on-chain receipts before the block runs. Needed for
@@ -873,23 +963,23 @@ where
     let cfg_env = match chain_args.create_cfg_env() {
         Ok(cfg) => cfg,
         Err(e) => {
-            return BlockReplayOutcome::entries_only(fail_remaining(
-                &targets,
-                entries,
-                BatchErrorKind::Execution,
-                &e.to_string(),
-            ));
+            return BlockReplayOutcome::ordered(
+                fail_remaining(&targets, entries, BatchErrorKind::Execution, &e.to_string()),
+                &job_targets,
+                Some(&block_tx_order),
+                None,
+            );
         }
     };
     let block_env = match retrieve_block_env(&block) {
         Ok(env) => env,
         Err(e) => {
-            return BlockReplayOutcome::entries_only(fail_remaining(
-                &targets,
-                entries,
-                BatchErrorKind::Execution,
-                &e.to_string(),
-            ));
+            return BlockReplayOutcome::ordered(
+                fail_remaining(&targets, entries, BatchErrorKind::Execution, &e.to_string()),
+                &job_targets,
+                Some(&block_tx_order),
+                None,
+            );
         }
     };
     let executed_spec = cfg_env.spec;
@@ -897,12 +987,12 @@ where
 
     let Some(hardfork) = hardforks.hardfork(timestamp) else {
         let message = format!("No `MegaHardfork` active at block timestamp: {timestamp}");
-        return BlockReplayOutcome::entries_only(fail_remaining(
-            &targets,
-            entries,
-            BatchErrorKind::Execution,
-            &message,
-        ));
+        return BlockReplayOutcome::ordered(
+            fail_remaining(&targets, entries, BatchErrorKind::Execution, &message),
+            &job_targets,
+            Some(&block_tx_order),
+            None,
+        );
     };
     let block_limits =
         BlockLimits::from_hardfork_and_block_gas_limit(hardfork, block.header.gas_limit());
@@ -924,12 +1014,12 @@ where
     {
         Ok(database) => database,
         Err(e) => {
-            return BlockReplayOutcome::entries_only(fail_remaining(
-                &targets,
-                entries,
-                BatchErrorKind::Rpc,
-                &e.to_string(),
-            ));
+            return BlockReplayOutcome::ordered(
+                fail_remaining(&targets, entries, BatchErrorKind::Rpc, &e.to_string()),
+                &job_targets,
+                Some(&block_tx_order),
+                None,
+            );
         }
     };
 
@@ -941,16 +1031,18 @@ where
 
     if let Err(e) = block_executor.apply_pre_execution_changes() {
         let error = ReplayError::BlockExecutionError(e);
-        return BlockReplayOutcome::entries_only(fail_remaining(
-            &targets,
-            entries,
-            classify(&error),
-            &error.to_string(),
-        ));
+        return BlockReplayOutcome::ordered(
+            fail_remaining(&targets, entries, classify(&error), &error.to_string()),
+            &job_targets,
+            Some(&block_tx_order),
+            None,
+        );
     }
 
     let target_set: HashSet<B256> = targets.iter().copied().collect();
-    let tx_hashes: Vec<B256> = block.transactions.hashes().collect();
+    // Prefer the already-collected body order so stream ordering and the loop
+    // walk the same sequence.
+    let tx_hashes = block_tx_order.clone();
     // Highest block index among this job's targets: once that transaction has
     // committed we can stop — later non-targets are not needed for receipts or
     // fixtures, and requiring them would force incomplete offline captures to
@@ -1270,7 +1362,7 @@ where
         }
     }
 
-    BlockReplayOutcome { entries, uncounted_abort }
+    BlockReplayOutcome::ordered(entries, &job_targets, Some(&block_tx_order), uncounted_abort)
 }
 
 /// Inputs for [`prepare_target_fixture`], grouped so the dump path stays a single
@@ -1727,7 +1819,16 @@ mod tests {
         let ReplayError::BatchFailed(counts) = err else {
             panic!("infrastructure failures must aggregate: {err:?}");
         };
-        assert_eq!(counts, BatchFailureCounts { execution: 2, rpc: 1, mismatched: 1, total: 5 });
+        assert_eq!(
+            counts,
+            BatchFailureCounts {
+                execution: 2,
+                rpc: 1,
+                mismatched: 1,
+                total: 5,
+                ..Default::default()
+            }
+        );
         assert!(
             counts.to_string().contains("3 of 5 target transaction(s) failed"),
             "unexpected message: {counts}"
@@ -1751,7 +1852,16 @@ mod tests {
         let ReplayError::BatchFailed(counts) = err else {
             panic!("a failed fixture must fail the run: {err:?}");
         };
-        assert_eq!(counts, BatchFailureCounts { execution: 1, rpc: 0, mismatched: 1, total: 1 });
+        assert_eq!(
+            counts,
+            BatchFailureCounts {
+                execution: 1,
+                rpc: 0,
+                mismatched: 1,
+                total: 1,
+                ..Default::default()
+            }
+        );
         assert_eq!(ExitCode::from_batch_failures(&counts), ExitCode::ExecutionError);
     }
 
@@ -1828,8 +1938,8 @@ mod tests {
         assert!(message.contains("cache miss"), "unexpected message: {message}");
     }
 
-    /// An uncounted non-target abort contributes its class to the exit without
-    /// a synthetic reported entry.
+    /// An uncounted non-target abort floors the exit class without a synthetic
+    /// reported entry and without inflating per-target failure totals.
     #[test]
     fn test_batch_tally_uncounted_abort_drives_exit_class() {
         let mut tally = BatchTally::default();
@@ -1839,13 +1949,83 @@ mod tests {
         tally.record_uncounted_abort(BatchErrorKind::Execution);
 
         assert_eq!(tally.reported, 2, "uncounted abort is not a reported target");
-        assert_eq!(tally.counts.rpc, 2);
-        assert_eq!(tally.counts.execution, 1);
+        assert_eq!(tally.counts.rpc, 2, "target counters stay per-target");
+        assert_eq!(tally.counts.execution, 0, "abort must not inflate execution count");
+        assert_eq!(tally.exit_floor, BatchExitFloor::Execution);
         let err = tally.into_error().expect("run failed");
         let ReplayError::BatchFailed(counts) = err else {
             panic!("expected batch failure: {err:?}");
         };
+        assert_eq!(
+            counts.to_string(),
+            "2 of 2 target transaction(s) failed (0 execution, 2 rpc)",
+            "aggregate message must stay truthful about targets"
+        );
         assert_eq!(ExitCode::from_batch_failures(&counts), ExitCode::ExecutionError);
+    }
+
+    /// One unanswered receipt with both `--verify-receipt` and
+    /// `--dump-fixture-dir` counts as a single rpc failure, while both result
+    /// fields remain present on the executed entry.
+    #[test]
+    fn test_batch_tally_shared_receipt_failure_counted_once() {
+        let mut tally = BatchTally::default();
+        tally.record_executed(
+            Some(&VerificationOutcome::unavailable("receipt pruned")),
+            Some(&FixtureReport::rpc_error("no on-chain receipt was fetched for this transaction")),
+        );
+
+        assert_eq!(tally.reported, 1);
+        assert_eq!(tally.replayed, 1);
+        assert_eq!(tally.verified, 0);
+        assert_eq!(tally.counts.rpc, 1, "shared receipt failure is one rpc count");
+        assert_eq!(tally.counts.execution, 0);
+        let err = tally.into_error().expect("run failed");
+        let ReplayError::BatchFailed(counts) = err else {
+            panic!("expected batch failure: {err:?}");
+        };
+        assert_eq!(counts.to_string(), "1 of 1 target transaction(s) failed (0 execution, 1 rpc)");
+        assert_eq!(ExitCode::from_batch_failures(&counts), ExitCode::RpcFailure);
+    }
+
+    /// Independent findings on the same target still both count: a receipt
+    /// mismatch plus a fixture write failure is not a shared root cause.
+    #[test]
+    fn test_batch_tally_mismatch_and_fixture_error_are_independent() {
+        let mut tally = BatchTally::default();
+        tally.record_executed(Some(&verdict(false)), Some(&FixtureReport::error("disk full")));
+
+        assert_eq!(tally.counts.mismatched, 1);
+        assert_eq!(tally.counts.execution, 1);
+        assert_eq!(tally.counts.rpc, 0);
+    }
+
+    /// Documented stream order: body-index first, then absent targets last in
+    /// job input order — independent of the order entries were collected.
+    #[test]
+    fn test_order_block_entries_body_index_before_absent_last() {
+        let early = B256::repeat_byte(0x11);
+        let mid = B256::repeat_byte(0x22);
+        let late_absent = B256::repeat_byte(0x33);
+        let job_targets = vec![
+            JobTarget { hash: late_absent, inclusion_hash: Some(B256::ZERO) },
+            JobTarget { hash: early, inclusion_hash: Some(B256::ZERO) },
+            JobTarget { hash: mid, inclusion_hash: Some(B256::ZERO) },
+        ];
+        // Collected in the buggy pre-execution-first order: absent then results.
+        let entries = vec![
+            failure(late_absent, BatchErrorKind::Rpc, "inclusion".into()),
+            failure(mid, BatchErrorKind::Rpc, "swept".into()),
+            failure(early, BatchErrorKind::Rpc, "swept".into()),
+        ];
+        let body = [early, mid, B256::repeat_byte(0x99)];
+        let ordered = order_block_entries(entries, &job_targets, Some(&body));
+        let hashes: Vec<B256> = ordered.iter().map(BatchEntry::tx_hash).collect();
+        assert_eq!(
+            hashes,
+            vec![early, mid, late_absent],
+            "body order first, absent last: {hashes:?}"
+        );
     }
 
     /// A fixture discarded after a transport abort counts as rpc, not execution,

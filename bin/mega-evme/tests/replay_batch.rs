@@ -199,11 +199,24 @@ fn replay_envelope_with_code(
     envelope_path: &std::path::Path,
     args: &[&str],
 ) -> (String, Option<i32>) {
+    let (stdout, _stderr, code) = replay_envelope_full(envelope_path, args);
+    (stdout, code)
+}
+
+/// Run `replay` against `envelope_path` and return stdout, stderr, and exit code.
+fn replay_envelope_full(
+    envelope_path: &std::path::Path,
+    args: &[&str],
+) -> (String, String, Option<i32>) {
     let mut cmd = mega_evme();
     cmd.args(["replay", "--rpc.replay-file", envelope_path.to_str().expect("path is utf-8")]);
     cmd.args(args);
     let output = cmd.output().expect("failed to run mega-evme");
-    (String::from_utf8(output.stdout).expect("stdout is utf-8"), output.status.code())
+    (
+        String::from_utf8(output.stdout).expect("stdout is utf-8"),
+        String::from_utf8(output.stderr).expect("stderr is utf-8"),
+        output.status.code(),
+    )
 }
 
 /// Parse NDJSON stdout into one JSON value per line, dropping the structured
@@ -579,8 +592,11 @@ fn test_replay_block_sweeps_targets_behind_execution_abort_as_rpc() {
 }
 
 /// A non-target deterministic executor abort still exits 1: swept targets stay
-/// `rpc` ("unanswered"), but the run tallies the abort's own class so a
-/// retryable exit is not reported for a permanent failure.
+/// `rpc` ("unanswered"), but the run floors the exit on the abort's own class so
+/// a retryable exit is not reported for a permanent failure.
+///
+/// Per-target totals stay truthful ("2 of 2"): the abort is not a synthetic
+/// third target failure.
 ///
 /// `EXEC_ABORT_TX` is doctored and kept out of the `--tx-file` target list; only
 /// later targets of the same block are requested.
@@ -596,8 +612,8 @@ fn test_replay_tx_file_non_target_execution_abort_exits_execution() {
         .join(format!("mega_evme_tx_list_non_target_exec_{}.txt", std::process::id()));
     std::fs::write(&list_path, list).expect("write tx list");
 
-    let (stdout, code) =
-        replay_envelope_with_code(&path, &["--tx-file", list_path.to_str().unwrap(), "--json"]);
+    let (stdout, stderr, code) =
+        replay_envelope_full(&path, &["--tx-file", list_path.to_str().unwrap(), "--json"]);
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(&list_path);
     let lines = ndjson(&stdout);
@@ -618,7 +634,19 @@ fn test_replay_tx_file_non_target_execution_abort_exits_execution() {
     }
 
     assert_eq!(code, Some(1), "a non-target execution abort exits 1, not 3");
-    assert_eq!(run_error(&stdout)["error"]["kind"].as_str(), Some("execution-error"));
+    let err = run_error(&stdout);
+    assert_eq!(err["error"]["kind"].as_str(), Some("execution-error"));
+    let message = err["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("2 of 2 target transaction(s) failed"),
+        "aggregate must stay truthful about targets (not 3 of 2): {message}"
+    );
+    assert!(
+        stderr.contains("2 of 2 target transaction(s) failed") ||
+            message.contains("2 of 2 target transaction(s) failed"),
+        "stderr/stdout aggregate must not count the non-target abort as a target: \
+         stderr={stderr}\nmessage={message}"
+    );
 }
 
 /// A non-target transport abort (cache miss) exits 3 and names the failing
@@ -855,6 +883,80 @@ fn test_replay_tx_file_rejects_a_block_that_does_not_match_the_resolved_inclusio
 
     let _ = std::fs::remove_file(&envelope_path);
     let _ = std::fs::remove_file(&list);
+}
+
+/// Same-block mix of a successful early target and a later inclusion failure:
+/// NDJSON line order follows ascending `(block, tx_index)`, so the earlier
+/// result precedes the later inclusion failure even when the failure was
+/// decided before the execute loop.
+///
+/// Looks up by hash alone cannot catch this; the test asserts line positions.
+#[test]
+fn test_replay_tx_file_same_block_mixed_inclusion_preserves_line_order() {
+    let (early_target, early_index) = BLOCK_TXS[1];
+    let (late_target, late_index) = BLOCK_TXS[2];
+    assert!(early_index < late_index);
+    let wrong_hash = "0x2222222222222222222222222222222222222222222222222222222222222222";
+
+    // Doctor only the later target's inclusion hash so it fails the membership
+    // guard while the earlier target still replays.
+    let mut envelope: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(envelope()).expect("read envelope"))
+            .expect("parse envelope");
+    let marker = format!("\"hash\":\"{late_target}\"");
+    let mut doctored = 0;
+    for entry in envelope["cache"].as_array_mut().expect("cache entries").iter_mut() {
+        let value = entry["value"].as_str().expect("entry value is a string");
+        if !value.contains(&marker) {
+            continue;
+        }
+        let mut response: serde_json::Value =
+            serde_json::from_str(value).expect("parse transaction response");
+        let result = response.get_mut("result").expect("transaction result");
+        assert!(result.is_object(), "expected a transaction object");
+        result["blockHash"] = serde_json::Value::String(wrong_hash.into());
+        entry["value"] = serde_json::Value::String(response.to_string());
+        doctored += 1;
+    }
+    assert_eq!(doctored, 1, "exactly one response describes the late target");
+
+    let envelope_path = std::env::temp_dir()
+        .join(format!("mega_evme_batch_mixed_order_{}.json", std::process::id()));
+    std::fs::write(&envelope_path, envelope.to_string()).expect("write doctored envelope");
+
+    // List the later (failing) target first so a pre-execution-first emit would
+    // put its failure line before the earlier result.
+    let list = std::env::temp_dir()
+        .join(format!("mega_evme_tx_list_mixed_order_{}.txt", std::process::id()));
+    std::fs::write(&list, format!("{late_target}\n{early_target}\n")).expect("write tx list");
+
+    let (stdout, code) =
+        replay_envelope_with_code(&envelope_path, &["--tx-file", list.to_str().unwrap(), "--json"]);
+    let _ = std::fs::remove_file(&envelope_path);
+    let _ = std::fs::remove_file(&list);
+    let lines = ndjson(&stdout);
+    assert_eq!(lines.len(), 2, "every target is reported once: {stdout}");
+
+    // End-to-end line order: earlier body index first, absent/divergent last.
+    assert_eq!(
+        lines[0]["tx_hash"].as_str(),
+        Some(early_target),
+        "line 0 must be the earlier target's result, got: {}",
+        lines[0]
+    );
+    assert!(lines[0].get("error").is_none(), "earlier target still replays: {}", lines[0]);
+    assert_eq!(lines[0]["tx_index"].as_u64(), Some(early_index));
+    assert_eq!(lines[0]["success"].as_bool(), Some(true));
+
+    assert_eq!(
+        lines[1]["tx_hash"].as_str(),
+        Some(late_target),
+        "line 1 must be the later target's inclusion failure, got: {}",
+        lines[1]
+    );
+    assert_eq!(lines[1]["error"]["kind"].as_str(), Some("rpc"), "inclusion failure: {}", lines[1]);
+
+    assert_eq!(code, Some(3), "an unanswered target exits 3");
 }
 
 /// Two same-height targets that report different inclusion hashes get

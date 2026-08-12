@@ -182,14 +182,21 @@ impl ExitCode {
     /// verified, so reporting such a run as a mismatch would overstate what it
     /// found.
     ///
+    /// [`BatchFailureCounts::exit_floor`] ranks with the same precedence when a
+    /// non-target abort's class is not carried by any reported target: an
+    /// execution floor outranks target-only rpc failures, and an rpc floor still
+    /// yields rpc when every target was clean of infrastructure failures.
+    ///
     /// Counts that record no failure at all reach this mapping only through a
     /// batch aggregation bug, since the run reports a failure precisely when it
     /// counted one. That is an internal error, not a success: a failure can
     /// never produce exit `0`.
     pub const fn from_batch_failures(counts: &BatchFailureCounts) -> Self {
-        if counts.execution > 0 {
+        use crate::common::BatchExitFloor;
+
+        if counts.execution > 0 || matches!(counts.exit_floor, BatchExitFloor::Execution) {
             Self::ExecutionError
-        } else if counts.rpc > 0 {
+        } else if counts.rpc > 0 || matches!(counts.exit_floor, BatchExitFloor::Rpc) {
             Self::RpcFailure
         } else if counts.mismatched > 0 {
             Self::VerificationMismatch
@@ -397,14 +404,68 @@ mod tests {
     /// Batch precedence: execution beats rpc beats mismatch.
     #[test]
     fn test_batch_failure_precedence() {
-        let mixed = BatchFailureCounts { execution: 1, rpc: 2, mismatched: 3, total: 6 };
+        let mixed = BatchFailureCounts {
+            execution: 1,
+            rpc: 2,
+            mismatched: 3,
+            total: 6,
+            ..Default::default()
+        };
         assert_eq!(ExitCode::from_batch_failures(&mixed), ExitCode::ExecutionError);
 
-        let rpc_only = BatchFailureCounts { execution: 0, rpc: 2, mismatched: 3, total: 6 };
+        let rpc_only = BatchFailureCounts {
+            execution: 0,
+            rpc: 2,
+            mismatched: 3,
+            total: 6,
+            ..Default::default()
+        };
         assert_eq!(ExitCode::from_batch_failures(&rpc_only), ExitCode::RpcFailure);
 
-        let mismatch_only = BatchFailureCounts { execution: 0, rpc: 0, mismatched: 3, total: 6 };
+        let mismatch_only = BatchFailureCounts {
+            execution: 0,
+            rpc: 0,
+            mismatched: 3,
+            total: 6,
+            ..Default::default()
+        };
         assert_eq!(ExitCode::from_batch_failures(&mismatch_only), ExitCode::VerificationMismatch);
+    }
+
+    /// A non-target execution abort floors exit 1 even when every reported
+    /// target failure is rpc (swept unanswered).
+    #[test]
+    fn test_batch_exit_floor_execution_outranks_target_rpc() {
+        use crate::common::BatchExitFloor;
+
+        let counts = BatchFailureCounts {
+            execution: 0,
+            rpc: 2,
+            mismatched: 0,
+            total: 2,
+            exit_floor: BatchExitFloor::Execution,
+        };
+        assert_eq!(ExitCode::from_batch_failures(&counts), ExitCode::ExecutionError);
+        assert_eq!(
+            counts.to_string(),
+            "2 of 2 target transaction(s) failed (0 execution, 2 rpc)",
+            "floor must not inflate the target totals"
+        );
+    }
+
+    /// A non-target rpc abort floors exit 3 when targets alone would not.
+    #[test]
+    fn test_batch_exit_floor_rpc_when_targets_clean_of_infra() {
+        use crate::common::BatchExitFloor;
+
+        let counts = BatchFailureCounts {
+            execution: 0,
+            rpc: 0,
+            mismatched: 1,
+            total: 1,
+            exit_floor: BatchExitFloor::Rpc,
+        };
+        assert_eq!(ExitCode::from_batch_failures(&counts), ExitCode::RpcFailure);
     }
 
     /// A batch failure that counted nothing is an internal error, never a
@@ -434,6 +495,7 @@ mod tests {
             rpc: 1,
             mismatched: 1,
             total: 3,
+            ..Default::default()
         });
         assert_eq!(ExitCode::from_evme_error(&with_execution), ExitCode::ExecutionError);
     }

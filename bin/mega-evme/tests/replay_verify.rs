@@ -604,6 +604,60 @@ fn test_batch_dump_fixture_dir_missing_receipt_is_rpc_fixture_error() {
     assert_eq!(run.error_object()["error"]["kind"].as_str(), Some("rpc-failure"));
 }
 
+/// Combined `--verify-receipt --dump-fixture-dir` with a missing receipt: both
+/// result fields report the failure, the shared receipt failure is counted once
+/// ("1 of 1"), and the run exits 3.
+#[test]
+fn test_batch_verify_and_dump_missing_receipt_counted_once() {
+    let path = cache_without_receipt("batch_verify_dump_no_receipt");
+    let list = tx_file("batch_verify_dump_no_receipt");
+    let dir = std::env::temp_dir()
+        .join(format!("mega_evme_batch_verify_dump_no_receipt_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let run = replay(
+        &path,
+        &[
+            "--tx-file",
+            list.to_str().unwrap(),
+            "--verify-receipt",
+            "--dump-fixture-dir",
+            dir.to_str().unwrap(),
+            "--json",
+        ],
+    );
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(&list);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert_eq!(run.code(), 3, "shared missing receipt exits 3.\nstderr: {}", run.stderr);
+    let lines = run.ndjson();
+    assert_eq!(lines.len(), 1, "one target: {}", run.stdout);
+    assert!(lines[0].get("error").is_none(), "result line is kept: {}", lines[0]);
+    assert!(lines[0]["receipt"].is_object(), "local receipt is kept: {}", lines[0]);
+    assert!(
+        lines[0]["verification"]["error"].is_string(),
+        "verification.error carries the unanswered receipt: {}",
+        lines[0]
+    );
+    assert!(
+        lines[0]["fixture"]["error"].is_string(),
+        "fixture.error also carries the unanswered receipt: {}",
+        lines[0]
+    );
+    let err = run.error_object();
+    let message = err["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("1 of 1 target transaction(s) failed"),
+        "shared receipt failure must not double-count: {message}"
+    );
+    assert!(
+        message.contains("1 rpc") || message.contains("(0 execution, 1 rpc)"),
+        "exactly one rpc failure in the aggregate: {message}"
+    );
+    assert_eq!(err["error"]["kind"].as_str(), Some("rpc-failure"));
+}
+
 /// A genuine fidelity-gate skip (local gas disagrees with on-chain receipt)
 /// still exits 0: the receipt question was answered, the dump was correctly
 /// refused, and skips never fail the run.

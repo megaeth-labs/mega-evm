@@ -128,8 +128,8 @@ Execution outcomes are not errors: a reverted or halted transaction is a normal 
 A failure while running the block aborts it, because the executor state no longer matches the chain.
 The transaction the failure is about — the hash the endpoint denied, or the one the executor rejected — is reported with that failure's own kind.
 Every target behind it is reported as `rpc` with a message naming the aborting cause: nothing was established about those transactions, so they went unanswered rather than being unknown.
-Targets that never ran are still emitted in the block's transaction-index order, keeping the whole stream in ascending `(block, tx_index)` order; a hash the block does not contain is reported last within its block, in input order, as `not_found`.
-Hashes that could not be resolved to a block at all (unknown, pending, or an endpoint failure during resolution) are emitted before every block result, since the run cannot place them in the stream's order.
+Targets that never ran are still emitted in the block's transaction-index order, keeping the whole stream in ascending `(block, tx_index)` order; a hash the endpoint claimed for this block but that the body does not list is reported last within its block, in input order, as `rpc` (an unanswered, divergent view — not a definitive unknown hash).
+Hashes that could not be resolved to a block at all (unknown as `not_found`, pending, or an endpoint failure during resolution) are emitted before every block result, since the run cannot place them in the stream's order.
 
 Without `--json`, each transaction is printed with a header naming its hash, block, and index, followed by the same summary and receipt the single-transaction mode prints.
 A final one-line summary (transactions replayed, transactions failed, elapsed time) is logged at `INFO` level, so pass `-vvv` to see it.
@@ -291,9 +291,10 @@ mega-evme replay --rpc https://mainnet.megaeth.com/rpc \
   --tx-file ./corpus.txt --verify-receipt --json > results.ndjson
 
 jq -c 'select(.tx_hash and .verification.match == false)' results.ndjson    # mismatched
-jq -c 'select(.tx_hash and .error != null)' results.ndjson                  # unverified
+jq -c 'select(.tx_hash and (.error != null or .verification.error != null))' results.ndjson  # unverified
 ```
 
+Receipt-fetch failures on a target that still replayed live under `.verification.error` on the result line (the line keeps `receipt` / `success`); infrastructure failures that prevented execution live under `.error`.
 Both selectors require `.tx_hash` so that the run-level `{"error": …}` object a failed run appends to stdout is not counted as an unverified transaction.
 
 Capture once online, then re-verify the same corpus offline:
