@@ -57,14 +57,21 @@ pub(crate) struct ComputeGasTracker {
     /// The effective compute gas limit, which may be dynamically lowered by gas detention
     /// (volatile data access). Always <= `frame_tracker.tx_limit()`.
     detained_limit: u64,
-    /// Compute gas settled from the burned remainders of exceptionally halted frames (REX7+).
+    /// Compute gas settled from the **destroyed** remainders of exceptionally halted frames
+    /// (REX7+).
     ///
     /// Recorded into the TX-level lane of `frame_tracker`, so it shows up in the transaction's
     /// reported compute total and in block-level accounting, and subtracted back out of every
-    /// limit comparison. A burned remainder is gas the EVM destroyed, not work the network
-    /// performed; letting it trip a limit would turn an ordinary EVM halt into a resource-limit
-    /// failure with the remaining gas rescued for the sender, changing a receipt that must stay
-    /// identical to per-opcode accounting. Always 0 before REX7.
+    /// limit comparison. A destroyed remainder is gas the EVM threw away without executing
+    /// anything for it; letting it trip a limit would turn an ordinary EVM halt into a
+    /// resource-limit failure with the remaining gas rescued for the sender, changing a receipt
+    /// that must stay identical to per-opcode accounting.
+    ///
+    /// Only the remainder lands here. The work an exceptionally halted frame actually performed
+    /// before it failed is recorded through [`record_gas_used`](Self::record_gas_used) like any
+    /// other work, so it shrinks the parent frame's and the transaction's budgets — otherwise the
+    /// code that runs after the failed frame returns could spend the same headroom twice. Always 0
+    /// before REX7.
     burned: u64,
     frame_tracker: FrameLimitTracker<()>,
 }
@@ -206,7 +213,7 @@ impl ComputeGasTracker {
         }
     }
 
-    /// Records a burned remainder from an exceptionally halted frame (REX7+).
+    /// Records the destroyed remainder of an exceptionally halted frame (REX7+).
     ///
     /// Counts toward the transaction's reported compute total and block-level accounting, and is
     /// excluded from every limit comparison — see [`burned`](Self::burned).
@@ -215,7 +222,23 @@ impl ComputeGasTracker {
         self.frame_tracker.add_tx_persistent(amount);
     }
 
-    /// Total recorded usage minus the burned remainders that must not enforce.
+    /// Reclassifies `amount` of already-merged usage as a destroyed remainder (REX7+).
+    ///
+    /// The sandbox path merges one compute total through
+    /// [`merge_persistent_usage`](Self::merge_persistent_usage) and then declares how much of it
+    /// the sandbox destroyed, rather than adding the amount a second time.
+    pub(crate) fn merge_burned_usage(&mut self, amount: u64) {
+        self.burned = self.burned.saturating_add(amount);
+    }
+
+    /// The destroyed remainders inside [`tx_usage`](TxRuntimeLimit::tx_usage) — see
+    /// [`burned`](Self::burned).
+    #[inline]
+    pub(crate) fn burned_usage(&self) -> u64 {
+        self.burned
+    }
+
+    /// Total recorded usage minus the destroyed remainders that must not enforce.
     #[inline]
     fn enforced_tx_usage(&self) -> u64 {
         self.frame_tracker.net_usage().saturating_sub(self.burned)

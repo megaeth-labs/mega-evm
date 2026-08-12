@@ -133,15 +133,6 @@ pub struct AdditionalLimit {
     /// [`settle_frame_final_result`](Self::settle_frame_final_result).
     clamp: Option<ClampState>,
 
-    /// The clamp-hidden gas [`settle_frame_final_result`](Self::settle_frame_final_result) just
-    /// handed back to the frame's result, carried to the frame-exit settlement in
-    /// [`after_frame_run_instructions`](Self::after_frame_run_instructions).
-    ///
-    /// The two hooks are split by the execution layer's code-deposit charge, which has to observe
-    /// unclamped gas; the settlement that follows still needs to know how much of the frame's true
-    /// remainder the interpreter could not see. Written and consumed on the same frame exit.
-    restored_clamp_hidden: u64,
-
     /// Whether a clamp-induced out-of-gas was latched while gas detention was the binding TX-level
     /// constraint.
     ///
@@ -196,7 +187,6 @@ impl AdditionalLimit {
             checkpoint_accounting: spec.is_enabled(MegaSpecId::REX7),
             checkpoint_baseline: 0,
             clamp: None,
-            restored_clamp_hidden: 0,
             clamp_latched_detained: false,
         }
     }
@@ -241,7 +231,6 @@ impl AdditionalLimit {
         self.storage_call_stipend.reset();
         self.checkpoint_baseline = 0;
         self.clamp = None;
-        self.restored_clamp_hidden = 0;
         self.clamp_latched_detained = false;
     }
 
@@ -268,6 +257,24 @@ impl AdditionalLimit {
     #[inline]
     pub(crate) fn sync_checkpoint_baseline(&mut self, remaining: u64) {
         self.checkpoint_baseline = remaining;
+    }
+
+    /// Moves the open segment's baseline down by `amount` of `MegaETH` storage gas just charged to
+    /// the interpreter, so the charge sits outside the segment rather than inside it.
+    ///
+    /// A checkpoint body normally subtracts its own storage charge when it closes its measurement
+    /// window. A body that aborts — a static-context `LOG`, a `SELFDESTRUCT` whose inner
+    /// instruction runs out of gas — never reaches that subtraction, and the frame-exit settlement
+    /// that follows would then bill the charge as compute. Excluding it from the baseline as it is
+    /// charged makes the exclusion hold on both paths; on the normal path the body's own window
+    /// re-syncs the baseline afterwards, so this is invisible there.
+    ///
+    /// No-op before REX7, where nothing measures against a baseline.
+    #[inline]
+    pub(crate) fn exclude_storage_gas_from_segment(&mut self, amount: u64) {
+        if self.checkpoint_accounting {
+            self.checkpoint_baseline = self.checkpoint_baseline.saturating_sub(amount);
+        }
     }
 
     /// Takes the outstanding clamp so the caller can hand its hidden gas back to the interpreter,
@@ -335,12 +342,14 @@ impl AdditionalLimit {
     }
 
     /// Finalises what the frame's own result decides about the clamp: restores any outstanding V0
-    /// clamp into the result's gas, latches a clamp-induced out-of-gas as the compute exceed it
-    /// stands for, and records how much was hidden for the frame-exit settlement that follows.
+    /// clamp into the result's gas and latches a clamp-induced out-of-gas as the compute exceed it
+    /// stands for.
     ///
     /// Must run before anything reads or charges the result's gas — in particular before the
     /// execution-layer code-deposit storage charge, which would otherwise observe the clamped copy
-    /// and mis-fire an out-of-gas on a CREATE frame that is nowhere near its limits.
+    /// and mis-fire an out-of-gas on a CREATE frame that is nowhere near its limits. It is also
+    /// what puts the result's gas into the true domain, which is where the destroyed remainder of
+    /// an exceptionally halted frame is later read from.
     ///
     /// A clamp can only be outstanding when the frame ended inside a plain-opcode segment, because
     /// every checkpoint prologue takes it before its body. An out-of-gas exit from such a segment
@@ -353,12 +362,8 @@ impl AdditionalLimit {
         if !self.checkpoint_accounting {
             return;
         }
-        self.restored_clamp_hidden = 0;
         if let Some(clamp) = self.clamp.take() {
             result.gas.erase_cost(clamp.hidden);
-            // Handed to the frame-exit settlement, which runs after the execution layer's
-            // code-deposit charge and can no longer see the clamp itself.
-            self.restored_clamp_hidden = clamp.hidden;
             // `MemoryOOG` is the same gas shortage reported from the memory-expansion path; every
             // other result either is unrelated to gas or cannot arise from a plain opcode.
             if matches!(result.result, InstructionResult::OutOfGas | InstructionResult::MemoryOOG) {
@@ -398,6 +403,18 @@ impl AdditionalLimit {
     #[inline]
     pub(crate) fn mark_exempt(&mut self) {
         self.has_exceeded_limit = LimitCheck::Exempt;
+    }
+
+    /// The part of [`get_usage`](Self::get_usage)'s `compute_gas` that exceptionally halted frames
+    /// destroyed rather than performed (REX7+, always 0 before).
+    ///
+    /// Reported and accounted like the rest of the total, never enforced. A caller that merges
+    /// this transaction's usage into another tracker — today the `KeylessDeploy` sandbox boundary —
+    /// has to carry it alongside the total, or the receiving tracker re-enforces gas the EVM
+    /// already destroyed.
+    #[inline]
+    pub(crate) fn burned_compute_gas(&self) -> u64 {
+        self.compute_gas.burned_usage()
     }
 
     /// Gets the usage of the additional limits.
@@ -928,8 +945,9 @@ impl AdditionalLimit {
     /// Hook called after frame action processing in `frame_run`.
     ///
     /// Records compute gas cost induced in frame action processing (e.g., code deposit cost),
-    /// marks the frame result as exceeding limit if needed, and rescues gas if a TX-level limit
-    /// was exceeded (before any inspector callback that might modify gas).
+    /// marks the frame result as exceeding limit if needed, settles an exceptionally halted
+    /// frame's destroyed remainder (REX7+), and rescues gas if a TX-level limit was exceeded
+    /// (before any inspector callback that might modify gas).
     pub(crate) fn after_frame_run(
         &mut self,
         result: &mut FrameResult,
@@ -945,6 +963,7 @@ impl AdditionalLimit {
                 );
             }
         }
+        self.settle_exceptional_halt_burn(result);
         // Rescue gas if a TX-level additional limit has been exceeded.
         // This must happen before any inspector callback (`frame_end`) that might modify
         // the gas via `spend_all()`, so the correct `gas.remaining()` value is captured.
@@ -971,21 +990,19 @@ impl AdditionalLimit {
         // `settle_frame_final_result`, before the execution-layer hook charged code-deposit storage
         // gas against the action's gas.
         //
-        // A frame that ended in an exceptional halt takes the burn branch instead: it returns none
-        // of its remaining budget, so the whole remainder — not just what the counter shows —
-        // settles, and it settles outside limit enforcement. See `settle_exceptional_halt_burn`.
+        // This delta is the work the frame *performed*, so it settles the same way — through the
+        // enforcing path — however the frame ended. A frame that halts exceptionally still ran the
+        // opcodes ahead of its failure, and a parent frame keeps executing after absorbing that
+        // failure; leaving the executed tail out of enforcement would let the code after the failed
+        // frame spend the same headroom a second time. What such a frame additionally destroys —
+        // the budget it never gets to spend — is settled after action processing, outside
+        // enforcement, by `settle_exceptional_halt_burn`.
         if self.checkpoint_accounting {
-            if let InterpreterAction::Return(interpreter_result) = action {
-                let exceptional_halt = !interpreter_result.result.is_ok_or_revert();
-                let hidden = core::mem::take(&mut self.restored_clamp_hidden);
+            if let InterpreterAction::Return(_) = action {
                 let remaining = frame.interpreter.gas.remaining();
-                if exceptional_halt && !self.limit_exceeded() {
-                    self.settle_exceptional_halt_burn(hidden);
-                } else {
-                    let gas_used = self.checkpoint_baseline.saturating_sub(remaining);
-                    let _ = self.record_compute_gas_unguarded(gas_used);
-                    self.refresh_latched_compute_usage();
-                }
+                let gas_used = self.checkpoint_baseline.saturating_sub(remaining);
+                let _ = self.record_compute_gas_unguarded(gas_used);
+                self.refresh_latched_compute_usage();
                 self.checkpoint_baseline = remaining;
             }
         }
@@ -1106,31 +1123,43 @@ impl AdditionalLimit {
         }
     }
 
-    /// Settles the entire remainder an exceptionally halted frame burns, as compute gas.
+    /// Settles the remainder an exceptionally halted frame destroys, as non-enforcing compute gas
+    /// (REX7+).
     ///
     /// An exceptional halt returns no gas: the top-level frame's whole envelope is spent by the
     /// transaction's final gas accounting, and an inner frame's remainder is simply never handed
-    /// back to its caller. The interpreter zeroes its own counter only for a plain `OutOfGas`,
-    /// so the frame-exit delta cannot see the burn on any other classification. This settles it
-    /// directly instead: everything the frame still held at the last checkpoint — the open segment
-    /// (`baseline`, measured against a zero remainder) plus `hidden`, the part of the true
-    /// remainder the clamp was keeping out of the interpreter's sight.
+    /// back to its caller. The interpreter zeroes its own counter only for a plain `OutOfGas`, so
+    /// the frame-exit delta cannot see that destroyed budget on any other classification. The
+    /// result's own gas can: by the time this runs,
+    /// [`settle_frame_final_result`](Self::settle_frame_final_result) has handed back whatever the
+    /// V0 clamp was hiding and the code-deposit storage charge has been taken, so
+    /// `result.gas().remaining()` is exactly what the frame still held and will not get to keep.
     ///
-    /// The whole amount goes to the tracker's non-enforcing lane, not just the part beyond the
-    /// compute headroom. Nothing is lost by that: a segment that runs under a clamp can never
-    /// consume past the headroom (the clamp is the enforcement), and a segment with no clamp is
-    /// bounded by a frame gas remainder that was already below the headroom — so the executed part
-    /// of an exceptionally halted frame's tail could not have exceeded a limit either way. What
-    /// enforcing the *burn* would do is turn an ordinary EVM halt into a resource-limit failure
-    /// with the remaining gas rescued for the sender, which is exactly the receipt change the
+    /// Runs **after** action processing, which is the first point the classification is final:
+    /// revm's create-return can still turn a successful constructor into a canonical code-deposit
+    /// out-of-gas, an EIP-3541 reject or a runtime code-size reject, and each of those destroys the
+    /// frame's remainder just like a halt from the interpreter loop.
+    ///
+    /// Only the destroyed part goes to the tracker's non-enforcing lane — the work performed ahead
+    /// of the failure already settled through the enforcing path in
+    /// [`after_frame_run_instructions`](Self::after_frame_run_instructions). Enforcing the
+    /// destroyed part would turn an ordinary EVM halt into a resource-limit failure with the
+    /// remaining gas rescued for the sender, which is exactly the receipt change the
     /// exceptional-halt carve-out forbids.
     ///
-    /// Not reached when a resource limit is already latched: that path burns nothing, because the
-    /// frame either reverts to its parent (frame-local) or halts the transaction with its gas
+    /// Not reached when a resource limit is already latched: that path destroys nothing, because
+    /// the frame either reverts to its parent (frame-local) or halts the transaction with its gas
     /// rescued (TX-level) — including a clamp-induced out-of-gas, which
-    /// [`settle_frame_final_result`](Self::settle_frame_final_result) latches just before this.
-    fn settle_exceptional_halt_burn(&mut self, hidden: u64) {
-        self.compute_gas.record_burned_gas(self.checkpoint_baseline.saturating_add(hidden));
+    /// [`settle_frame_final_result`](Self::settle_frame_final_result) latches earlier in this
+    /// frame exit.
+    fn settle_exceptional_halt_burn(&mut self, result: &FrameResult) {
+        if !self.checkpoint_accounting ||
+            self.limit_exceeded() ||
+            result.instruction_result().is_ok_or_revert()
+        {
+            return;
+        }
+        self.compute_gas.record_burned_gas(result.gas().remaining());
     }
 
     /// Merges resource usage from a sandbox execution into this tracker.
@@ -1138,11 +1167,14 @@ impl AdditionalLimit {
     /// Used by `KeylessDeploy` (REX5+) to propagate sandbox resource consumption
     /// back to the parent transaction.
     ///
-    /// [`LimitUsage`] carries one compute-gas total, so a REX7 sandbox that halted exceptionally
-    /// merges its burned remainder as ordinary enforcing usage rather than into the parent's
-    /// non-enforcing lane. The amount is bounded by the sandbox's gas reservation.
-    pub(crate) fn merge_usage(&mut self, usage: LimitUsage) {
+    /// `burned_compute_gas` is the part of `usage.compute_gas` the sandbox destroyed rather than
+    /// performed (REX7+, always 0 before). It is already inside the merged total, so it is only
+    /// reclassified here — the parent reports it and never enforces it, exactly as the sandbox
+    /// did. Merging it as ordinary usage instead would let a sandbox frame's ordinary EVM halt
+    /// fail the outer transaction on a resource limit.
+    pub(crate) fn merge_usage(&mut self, usage: LimitUsage, burned_compute_gas: u64) {
         self.compute_gas.merge_persistent_usage(usage.compute_gas);
+        self.compute_gas.merge_burned_usage(burned_compute_gas);
         self.data_size.merge_persistent_usage(usage.data_size);
         self.kv_update.merge_persistent_usage(usage.kv_updates);
         self.state_growth.merge_persistent_usage(usage.state_growth);
