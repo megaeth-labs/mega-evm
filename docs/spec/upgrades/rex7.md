@@ -1,5 +1,5 @@
 ---
-description: Rex7 network upgrade — checkpoint-settled compute gas accounting with gas-clamp enforcement; plain opcodes record no compute gas between checkpoints, within-limit transactions stay bit-identical to Rex6, and limit-exceeding opcodes are stopped before they execute.
+description: Rex7 network upgrade — checkpoint-settled compute gas accounting with gas-clamp enforcement; plain opcodes record no compute gas between checkpoints, within-limit transactions that never end a frame in an exceptional halt stay bit-identical to Rex6, and limit-exceeding opcodes are stopped before they execute.
 ---
 
 # Rex7 Network Upgrade
@@ -21,7 +21,7 @@ Rex7 replaces that per-opcode recording for ordinary opcodes with **checkpoint s
 
 Rex7 also introduces **gas-clamp enforcement**: between checkpoints the node restricts the interpreter-visible remaining gas to the remaining compute headroom, so the inherited EVM's own per-opcode gas check stops a limit-crossing opcode before that opcode executes.
 
-For a transaction that never crosses a compute-gas, detention, or other resource limit, Rex7 is bit-identical to Rex6: the same gas, the same receipt, the same state, and the same `GAS` opcode readings.
+For a transaction that never crosses a compute-gas, detention, or other resource limit and in which no frame ends in an exceptional halt, Rex7 is bit-identical to Rex6: the same gas, the same receipt, the same state, and the same `GAS` opcode readings.
 For a transaction that does cross a compute-gas or detention limit inside a plain-opcode segment, the halt lands before the crossing opcode rather than after it, the crossing opcode's cost is excluded from recorded compute usage, and remaining gas remains refundable under the same rescue rules as other transaction-level compute-limit halts.
 
 One deliberate accounting carve-out remains: a frame that ends in an exceptional halt (including ordinary out-of-gas) settles its entire EVM-gas budget as compute gas, so a transaction that contains an inner out-of-gas call can report higher compute usage under Rex7 than under Rex6 even though EVM gas and the receipt are unchanged.
@@ -67,8 +67,8 @@ At each checkpoint a node MUST:
 Non-opcode recording sites (transaction intrinsic gas, precompiles, contract-creation code deposit, KeylessDeploy overhead and sandbox merge) are unchanged.
 
 **Precision invariant.**
-For every transaction that stays within every runtime resource limit, a node MUST produce the same recorded compute-gas total, the same four-dimension resource usage, the same receipt `gas_used`, the same execution result, and the same state under Rex7 as under Rex6.
-The interpreter's gas counter already meters every opcode; settling by segment reproduces the per-opcode sum exactly when no limit is crossed.
+For every transaction that stays within every runtime resource limit and in which no frame ends in an exceptional halt, a node MUST produce the same recorded compute-gas total, the same four-dimension resource usage, the same receipt `gas_used`, the same execution result, and the same state under Rex7 as under Rex6.
+The interpreter's gas counter already meters every opcode; settling by segment reproduces the per-opcode sum exactly when no limit is crossed and no frame ends in an exceptional halt.
 
 **Exceptional-halt frame carve-out.**
 A frame that ends in an exceptional halt — ordinary out-of-gas, memory out-of-gas, stack underflow or overflow, invalid jump, unknown opcode, and every other error result — returns none of its remaining budget.
@@ -154,7 +154,7 @@ Its semantics may still change before it is frozen.
 
 Contracts and tools that assume per-opcode compute-gas attribution for every instruction MUST treat that assumption as false under Rex7: only checkpoints settle compute gas during execution, and a plain-opcode segment has no intermediate recording.
 
-Contracts that stay within every resource limit see no behavioral change relative to Rex6.
+Contracts that stay within every resource limit and never end a frame in an exceptional halt see no behavioral change relative to Rex6.
 Contracts that trip the compute-gas or detention limit inside a plain-opcode segment halt one opcode earlier than under Rex6, with the crossing opcode excluded from recorded compute usage and with remaining gas still refundable on a transaction-level halt.
 
 A transaction that halts exceptionally, or that calls into a child frame which does, may report a higher transaction-level compute-gas total under Rex7 than under Rex6 — for any exceptional halt, not just out-of-gas.

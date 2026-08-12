@@ -473,7 +473,7 @@ At each checkpoint a node MUST:
 
 Non-opcode recording sites on this page (intrinsic gas, precompiles, code deposit, KeylessDeploy) are unchanged.
 
-For every transaction that stays within every runtime resource limit, a node MUST produce the same recorded compute-gas total, the same four-dimension usage, the same receipt `gas_used`, the same execution result, and the same state as under Rex6.
+For every transaction that stays within every runtime resource limit and in which no frame ends in an exceptional halt, a node MUST produce the same recorded compute-gas total, the same four-dimension usage, the same receipt `gas_used`, the same execution result, and the same state as under Rex6.
 
 #### Gas-clamp enforcement
 
