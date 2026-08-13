@@ -1285,13 +1285,13 @@ mod tests {
         }
     }
 
-    /// Compute limit tight enough that a leftover REX7 V0 clamp is visible in receipt gas.
+    /// Compute limit tight enough that a leftover REX7 gas clamp is visible in receipt gas.
     const CFG_MIGRATION_COMPUTE_LIMIT: u64 = 50_000;
     /// Transaction gas limit used by the `PUSH0 STOP` migration probe.
     const CFG_MIGRATION_TX_GAS_LIMIT: u64 = 1_000_000;
     const CFG_MIGRATION_CALLER: Address = address!("0000000000000000000000000000000000300000");
     const CFG_MIGRATION_CONTRACT: Address = address!("0000000000000000000000000000000000300001");
-    /// `PUSH0 STOP` — a compute-only body, so a leftover V0 clamp shows up as receipt gas.
+    /// `PUSH0 STOP` — a compute-only body, so a leftover gas clamp shows up as receipt gas.
     const CFG_MIGRATION_CODE: [u8; 2] = [0x5f, 0x00];
 
     #[derive(Debug, PartialEq, Eq)]

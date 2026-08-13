@@ -171,8 +171,8 @@ use revm::{
 ///   the volatile opcodes, and frame entry / resume / exit. Per-transaction totals are unchanged
 ///   for a transaction that stays inside every limit and never halts exceptionally; a frame that
 ///   does halt exceptionally additionally reports the budget it destroyed, which is enforced
-///   against nothing. Enforcement inside a plain segment is the V0 gas clamp, which stops the
-///   crossing opcode before it executes; an exceed detected by a settlement instead surfaces at the
+///   against nothing. Enforcement inside a plain segment is the gas clamp, which stops the crossing
+///   opcode before it executes; an exceed detected by a settlement instead surfaces at the
 ///   checkpoint that settled it rather than at the opcode that crossed the limit.
 ///   - Volatile opcodes: `volatile_data_ext::*_checkpoint` (raw instruction + segment settlement +
 ///     detention cap) in place of the `compute_gas_ext` delegation
@@ -657,7 +657,7 @@ mod rex7 {
         table[SELFBALANCE as usize] = Instruction::new(volatile_data_ext::selfbalance_checkpoint);
         table[SLOAD as usize] = Instruction::new(volatile_data_ext::sload_checkpoint);
 
-        // V0 gas-clamp enforcement: `GAS` has to be a checkpoint so the clamp is restored before
+        // Gas-clamp enforcement: `GAS` has to be a checkpoint so the clamp is restored before
         // the counter is observed.
         table[GAS as usize] = Instruction::new(compute_gas_ext::gas_checkpoint);
 
@@ -870,7 +870,7 @@ macro_rules! checkpoint_prologue {
     };
 }
 
-/// REX7 checkpoint epilogue: re-applies the V0 gas clamp from the freshly settled usage — including
+/// REX7 checkpoint epilogue: re-applies the gas clamp from the freshly settled usage — including
 /// any detention cap the checkpoint just installed — and re-opens the settlement window on the
 /// clamped counter.
 ///
@@ -3556,7 +3556,7 @@ pub mod compute_gas_ext {
 
     /// `GAS` as a REX7 checkpoint.
     ///
-    /// `GAS` has to be a checkpoint under V0 clamp enforcement even though it charges nothing but
+    /// `GAS` has to be a checkpoint under gas-clamp enforcement even though it charges nothing but
     /// its static gas: the prologue hands the clamp-hidden gas back before the raw instruction
     /// reads the counter, so the value pushed on the stack is the true remaining and the clamp
     /// stays invisible to any transaction that never exceeds a limit.

@@ -1,7 +1,7 @@
 //! REX7: the three gas-leakage paths, exercised with a clamp outstanding.
 //!
 //! Any mechanism that hides, grants or adjusts gas per frame has to be unwound on every way out of
-//! a frame, or system-held gas leaks back to the parent or the sender. The V0 clamp is such a
+//! a frame, or system-held gas leaks back to the parent or the sender. The gas clamp is such a
 //! mechanism — it hides part of the interpreter's gas — and the three paths that have to handle it
 //! are the ones the leakage checklist names:
 //!

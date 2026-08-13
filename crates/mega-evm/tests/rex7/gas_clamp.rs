@@ -1,4 +1,4 @@
-//! REX7 V0 gas-clamp enforcement.
+//! REX7 gas-clamp enforcement.
 //!
 //! Plain opcodes under checkpoint accounting record nothing, so nothing checks a limit while a
 //! plain segment runs. Enforcement instead comes from the interpreter itself: at every checkpoint

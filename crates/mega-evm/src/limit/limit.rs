@@ -123,7 +123,7 @@ pub struct AdditionalLimit {
     /// checkpoint prologue and body recording.
     checkpoint_baseline: u64,
 
-    /// V0 gas-clamp enforcement (REX7+): the clamp in force for the plain-opcode segment the
+    /// Gas-clamp enforcement (REX7+): the clamp in force for the plain-opcode segment the
     /// current frame is inside, so that revm's own per-opcode gas checks enforce the compute
     /// headroom at no per-opcode cost.
     ///
@@ -144,7 +144,7 @@ pub struct AdditionalLimit {
     clamp_latched_detained: bool,
 }
 
-/// A V0 gas clamp in force for one plain-opcode segment (REX7+).
+/// A gas clamp in force for one plain-opcode segment (REX7+).
 ///
 /// The clamp is a lifecycle, not an amount. It is recorded exactly while it **binds** — while the
 /// interpreter's true remaining gas was at or above the compute headroom when the segment opened —
@@ -288,7 +288,7 @@ impl AdditionalLimit {
         self.clamp.take().map_or(0, |clamp| clamp.hidden)
     }
 
-    /// Applies the V0 gas clamp for the segment that starts at `remaining`, and returns the amount
+    /// Applies the gas clamp for the segment that starts at `remaining`, and returns the amount
     /// the caller must debit from the interpreter's counter.
     ///
     /// The clamp is recorded — and the segment therefore enforces the compute limit — whenever the
@@ -341,7 +341,7 @@ impl AdditionalLimit {
             self.compute_gas.detained_limit() < self.compute_gas.base_tx_limit();
     }
 
-    /// Finalises what the frame's own result decides about the clamp: restores any outstanding V0
+    /// Finalises what the frame's own result decides about the clamp: restores any outstanding
     /// clamp into the result's gas and latches a clamp-induced out-of-gas as the compute exceed it
     /// stands for.
     ///
@@ -355,9 +355,10 @@ impl AdditionalLimit {
     /// every checkpoint prologue takes it before its body. An out-of-gas exit from such a segment
     /// is a clamp artifact: the true counter held `hidden` more gas than the interpreter could see,
     /// and the crossing opcode was stopped at the clamp boundary *before executing* — exactly the
-    /// V0 enforcement point. When the crossing opcode would have exceeded the true remaining as
-    /// well, the compute classification still wins: the two are indistinguishable here, and
-    /// attributing the halt to the resource limit keeps the sender's remaining gas refundable.
+    /// gas-clamp enforcement point. When the crossing opcode would have exceeded the true
+    /// remaining as well, the compute classification still wins: the two are indistinguishable
+    /// here, and attributing the halt to the resource limit keeps the sender's remaining gas
+    /// refundable.
     pub(crate) fn settle_frame_final_result(&mut self, result: &mut InterpreterResult) {
         if !self.checkpoint_accounting {
             return;
@@ -526,7 +527,7 @@ impl AdditionalLimit {
         access_type: VolatileDataAccess,
     ) -> Option<MegaHaltReason> {
         // `is_detained_exceed` covers per-opcode enforcement, where usage crossed the detained
-        // limit. `clamp_latched_detained` covers V0 clamp enforcement, where the crossing opcode
+        // limit. `clamp_latched_detained` covers gas-clamp enforcement, where the crossing opcode
         // was stopped before executing and usage therefore stays at or below the limit.
         (self.compute_gas.is_detained_exceed() || self.clamp_latched_detained).then(|| {
             MegaHaltReason::VolatileDataAccessOutOfGas {
@@ -923,7 +924,7 @@ impl AdditionalLimit {
             ));
         }
 
-        // Checkpoint accounting: apply the V0 gas clamp and open the settlement window at the
+        // Checkpoint accounting: apply the gas clamp and open the settlement window at the
         // frame's clamped gas. This hook runs both at frame entry and at every resume after a child
         // frame's outcome — including the gas it returned — has been merged back into this frame's
         // interpreter, so the window always starts at an instruction boundary with the
@@ -1137,7 +1138,7 @@ impl AdditionalLimit {
     /// the frame-exit delta cannot see that destroyed budget on any other classification. The
     /// result's own gas can: by the time this runs,
     /// [`settle_frame_final_result`](Self::settle_frame_final_result) has handed back whatever the
-    /// V0 clamp was hiding and the code-deposit storage charge has been taken, so
+    /// clamp was hiding and the code-deposit storage charge has been taken, so
     /// `result.gas().remaining()` is exactly what the frame still held and will not get to keep.
     ///
     /// Runs **after** action processing, which is the first point the classification is final:

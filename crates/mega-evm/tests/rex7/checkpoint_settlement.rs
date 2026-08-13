@@ -13,7 +13,7 @@
 //! The two places where the models are *not* identical are pinned at the bottom of this file:
 //! a limit crossing inside a plain-opcode segment halts *before* the crossing opcode rather than
 //! after it, and a frame that halts out of gas settles its burned remainder as compute gas. The
-//! enforcement mechanism behind the first — the V0 gas clamp — has its own suite in `v0_clamp`.
+//! enforcement mechanism behind the first — the gas clamp — has its own suite in `gas_clamp`.
 
 use crate::common::{
     transact, transact_default, transact_with_bucket_capacity, Outcome, CALLEE, CALLER, CONTRACT,
@@ -470,7 +470,7 @@ fn plain_run_then_sstore_code(pairs: usize, include_sstore: bool) -> Bytes {
 
 /// The one enforcement difference this model has: a compute-gas crossing inside a plain-opcode
 /// segment is not caught *at* the crossing opcode — nothing is metered there — but *before* it, by
-/// the V0 gas clamp, which leaves the interpreter only as much visible gas as the compute headroom
+/// the gas clamp, which leaves the interpreter only as much visible gas as the compute headroom
 /// allows. Both specs halt, and both halt in the middle of the plain run without ever reaching the
 /// SSTORE checkpoint downstream; REX6 executes the crossing opcode and records it, so its usage
 /// ends up over the limit, while REX7 stops one opcode earlier and its usage stays at the limit.

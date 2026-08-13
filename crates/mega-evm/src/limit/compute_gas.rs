@@ -6,7 +6,7 @@ use super::{
 };
 use crate::{JournalInspectTr, MegaSpecId};
 
-/// The constraint that bounds the V0 gas clamp for one plain-opcode segment.
+/// The constraint that bounds the gas clamp for one plain-opcode segment.
 ///
 /// Captured when the clamp is applied, so a clamp-induced out-of-gas can be classified against the
 /// constraint that was in force at the time rather than against whatever the tracker looks like
@@ -151,7 +151,7 @@ impl ComputeGasTracker {
         self.frame_tracker.tx_limit()
     }
 
-    /// Returns the constraint the V0 gas clamp must bind to at this point in the transaction.
+    /// Returns the constraint the gas clamp must bind to at this point in the transaction.
     ///
     /// The headroom is the tighter of the current frame's remaining compute budget (Rex4+) and
     /// the TX-level remaining under the effective (possibly detained) limit — the same pair
