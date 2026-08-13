@@ -1,6 +1,7 @@
 use alloy_primitives::Bytes;
 use alloy_sol_types::SolError;
 
+mod checkpoint;
 mod compute_gas;
 mod data_size;
 mod frame_limit;

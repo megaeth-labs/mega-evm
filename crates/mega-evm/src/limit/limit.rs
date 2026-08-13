@@ -13,7 +13,7 @@ use revm::{
 };
 
 use super::{
-    compute_gas, data_size, frame_limit::TxRuntimeLimit, kv_update, state_growth,
+    checkpoint, compute_gas, data_size, frame_limit::TxRuntimeLimit, kv_update, state_growth,
     storage_call_stipend,
 };
 use crate::{
@@ -108,55 +108,8 @@ pub struct AdditionalLimit {
     /// A tracker for the `STORAGE_CALL_STIPEND` granted to value-transferring calls (REX4+).
     pub(crate) storage_call_stipend: storage_call_stipend::StorageCallStipendTracker,
 
-    /// REX7+: whether compute gas settles at checkpoints rather than per opcode.
-    ///
-    /// When set, plain opcodes run unwrapped and record nothing; the interpreter's own gas
-    /// counter is read at each checkpoint and the whole segment since the previous one is
-    /// recorded in a single call.
-    checkpoint_accounting: bool,
-
-    /// Interpreter gas remaining at the start of the current unsettled segment — the previous
-    /// checkpoint, or the frame entry / resume that opened the window. Only meaningful while a
-    /// frame is running and only when [`checkpoint_accounting`](Self::checkpoint_accounting) is
-    /// active. Re-synced at every [`before_frame_run`](Self::before_frame_run) (which covers both
-    /// frame entry and every resume after a child frame's outcome is merged back) and at every
-    /// checkpoint prologue and body recording.
-    checkpoint_baseline: u64,
-
-    /// Gas-clamp enforcement (REX7+): the clamp in force for the plain-opcode segment the
-    /// current frame is inside, so that revm's own per-opcode gas checks enforce the compute
-    /// headroom at no per-opcode cost.
-    ///
-    /// Present only while the current frame is inside a plain segment: every checkpoint takes it
-    /// before running its body — so CALL forwarding, `GAS` and storage charges observe the true
-    /// counter — and re-applies it on the way out, and the frame's final result takes it via
-    /// [`settle_frame_final_result`](Self::settle_frame_final_result).
-    clamp: Option<ClampState>,
-
-    /// Whether a clamp-induced out-of-gas was latched while gas detention was the binding TX-level
-    /// constraint.
-    ///
-    /// [`ComputeGasTracker::is_detained_exceed`] requires `used > detained_limit`, which a
-    /// clamp-stopped transaction never reaches — the crossing opcode is stopped before it
-    /// executes, so usage stays at or below the limit. The halt-reason attribution consults
-    /// this flag instead, keeping the reported reason `VolatileDataAccessOutOfGas` exactly as
-    /// per-opcode enforcement reports it.
-    clamp_latched_detained: bool,
-}
-
-/// A gas clamp in force for one plain-opcode segment (REX7+).
-///
-/// The clamp is a lifecycle, not an amount. It is recorded exactly while it **binds** — while the
-/// interpreter's true remaining gas was at or above the compute headroom when the segment opened —
-/// and a `hidden` of zero is a binding clamp whose two budgets happened to coincide, not the
-/// absence of one. When the frame's own gas would run out ahead of the compute headroom no clamp
-/// is recorded at all, and an out-of-gas inside that segment stays the EVM's own.
-#[derive(Clone, Copy, Debug)]
-struct ClampState {
-    /// Interpreter gas hidden from the interpreter for this segment.
-    hidden: u64,
-    /// The constraint the clamp was bound to, captured at the moment it was applied.
-    binding: compute_gas::ClampBinding,
+    /// A tracker for REX7+ checkpoint settlement and gas-clamp state.
+    pub(crate) checkpoint: checkpoint::CheckpointTracker,
 }
 
 /// The usage of the additional limits.
@@ -184,10 +137,7 @@ impl AdditionalLimit {
             kv_update: kv_update::KVUpdateTracker::new(spec, limits.tx_kv_updates_limit),
             compute_gas: compute_gas::ComputeGasTracker::new(spec, limits.tx_compute_gas_limit),
             storage_call_stipend: storage_call_stipend::StorageCallStipendTracker::new(spec),
-            checkpoint_accounting: spec.is_enabled(MegaSpecId::REX7),
-            checkpoint_baseline: 0,
-            clamp: None,
-            clamp_latched_detained: false,
+            checkpoint: checkpoint::CheckpointTracker::new(spec),
         }
     }
 }
@@ -229,15 +179,13 @@ impl AdditionalLimit {
         self.data_size.reset();
         self.kv_update.reset();
         self.storage_call_stipend.reset();
-        self.checkpoint_baseline = 0;
-        self.clamp = None;
-        self.clamp_latched_detained = false;
+        self.checkpoint.reset();
     }
 
     /// Whether compute gas settles at checkpoints (REX7+) rather than per opcode.
     #[inline]
-    pub(crate) fn checkpoint_accounting(&self) -> bool {
-        self.checkpoint_accounting
+    pub(crate) fn rex7_enabled(&self) -> bool {
+        self.checkpoint.rex7_enabled()
     }
 
     /// Interpreter gas remaining at the start of the current unsettled segment.
@@ -247,7 +195,7 @@ impl AdditionalLimit {
     /// unwrapped plain opcode executed since the previous checkpoint.
     #[inline]
     pub(crate) fn checkpoint_baseline(&self) -> u64 {
-        self.checkpoint_baseline
+        self.checkpoint.baseline()
     }
 
     /// Re-opens the settlement window at `remaining`, without recording anything.
@@ -256,7 +204,7 @@ impl AdditionalLimit {
     /// call this once it has recorded, so a later settlement cannot bill the segment twice.
     #[inline]
     pub(crate) fn sync_checkpoint_baseline(&mut self, remaining: u64) {
-        self.checkpoint_baseline = remaining;
+        self.checkpoint.sync_baseline(remaining);
     }
 
     /// Moves the open segment's baseline down by `amount` of `MegaETH` storage gas just charged to
@@ -272,9 +220,7 @@ impl AdditionalLimit {
     /// No-op before REX7, where nothing measures against a baseline.
     #[inline]
     pub(crate) fn exclude_storage_gas_from_segment(&mut self, amount: u64) {
-        if self.checkpoint_accounting {
-            self.checkpoint_baseline = self.checkpoint_baseline.saturating_sub(amount);
-        }
+        self.checkpoint.exclude_storage_gas_from_segment(amount);
     }
 
     /// Takes the outstanding clamp so the caller can hand its hidden gas back to the interpreter,
@@ -285,7 +231,7 @@ impl AdditionalLimit {
     /// segment.
     #[inline]
     pub(crate) fn checkpoint_restore_hidden(&mut self) -> u64 {
-        self.clamp.take().map_or(0, |clamp| clamp.hidden)
+        self.checkpoint.restore_hidden()
     }
 
     /// Applies the gas clamp for the segment that starts at `remaining`, and returns the amount
@@ -302,7 +248,7 @@ impl AdditionalLimit {
     /// instead).
     #[inline]
     pub(crate) fn checkpoint_clamp_amount(&mut self, remaining: u64) -> u64 {
-        debug_assert!(self.clamp.is_none(), "clamp applied while a clamp is outstanding");
+        debug_assert!(!self.checkpoint.has_clamp(), "clamp applied while a clamp is outstanding");
         if !self.has_exceeded_limit.within_limit() {
             return 0;
         }
@@ -310,7 +256,7 @@ impl AdditionalLimit {
         let Some(hidden) = remaining.checked_sub(binding.headroom) else {
             return 0;
         };
-        self.clamp = Some(ClampState { hidden, binding });
+        self.checkpoint.set_clamp(hidden, binding);
         hidden
     }
 
@@ -337,8 +283,10 @@ impl AdditionalLimit {
         // Preserve the volatile-detention attribution: when the binding TX-level constraint at
         // clamp time was the detained limit, the halt must classify as `VolatileDataAccessOutOfGas`
         // exactly as per-opcode enforcement classifies it.
-        self.clamp_latched_detained = !binding.frame_local &&
-            self.compute_gas.detained_limit() < self.compute_gas.base_tx_limit();
+        self.checkpoint.set_latched_detained(
+            !binding.frame_local &&
+                self.compute_gas.detained_limit() < self.compute_gas.base_tx_limit(),
+        );
     }
 
     /// Finalises what the frame's own result decides about the clamp: restores any outstanding
@@ -360,10 +308,10 @@ impl AdditionalLimit {
     /// here, and attributing the halt to the resource limit keeps the sender's remaining gas
     /// refundable.
     pub(crate) fn settle_frame_final_result(&mut self, result: &mut InterpreterResult) {
-        if !self.checkpoint_accounting {
+        if !self.checkpoint.rex7_enabled() {
             return;
         }
-        if let Some(clamp) = self.clamp.take() {
+        if let Some(clamp) = self.checkpoint.take_clamp() {
             result.gas.erase_cost(clamp.hidden);
             // `MemoryOOG` is the same gas shortage reported from the memory-expansion path; every
             // other result either is unrelated to gas or cannot arise from a plain opcode.
@@ -527,9 +475,9 @@ impl AdditionalLimit {
         access_type: VolatileDataAccess,
     ) -> Option<MegaHaltReason> {
         // `is_detained_exceed` covers per-opcode enforcement, where usage crossed the detained
-        // limit. `clamp_latched_detained` covers gas-clamp enforcement, where the crossing opcode
+        // limit. `latched_detained` covers gas-clamp enforcement, where the crossing opcode
         // was stopped before executing and usage therefore stays at or below the limit.
-        (self.compute_gas.is_detained_exceed() || self.clamp_latched_detained).then(|| {
+        (self.compute_gas.is_detained_exceed() || self.checkpoint.latched_detained()).then(|| {
             MegaHaltReason::VolatileDataAccessOutOfGas {
                 access_type,
                 limit: self.compute_gas.detained_limit(),
@@ -931,14 +879,14 @@ impl AdditionalLimit {
         // interpreter's counter in its real, post-merge state. No clamp can be outstanding
         // here: every suspension point (the CALL / CREATE checkpoint prologue) and every
         // frame end restores it first.
-        if self.checkpoint_accounting {
-            debug_assert!(self.clamp.is_none(), "frame resumed with a clamp outstanding");
+        if self.checkpoint.rex7_enabled() {
+            debug_assert!(!self.checkpoint.has_clamp(), "frame resumed with a clamp outstanding");
             let hide = self.checkpoint_clamp_amount(frame.interpreter.gas.remaining());
             if hide > 0 {
                 let clamped = frame.interpreter.gas.record_regular_cost(hide);
                 debug_assert!(clamped, "clamp amount exceeds remaining gas");
             }
-            self.checkpoint_baseline = frame.interpreter.gas.remaining();
+            self.checkpoint.sync_baseline(frame.interpreter.gas.remaining());
         }
         None
     }
@@ -998,13 +946,12 @@ impl AdditionalLimit {
         // frame spend the same headroom a second time. What such a frame additionally destroys —
         // the budget it never gets to spend — is settled after action processing, outside
         // enforcement, by `settle_exceptional_halt_burn`.
-        if self.checkpoint_accounting {
+        if self.checkpoint.rex7_enabled() {
             if let InterpreterAction::Return(_) = action {
                 let remaining = frame.interpreter.gas.remaining();
-                let gas_used = self.checkpoint_baseline.saturating_sub(remaining);
+                let gas_used = self.checkpoint.take_segment(remaining);
                 let _ = self.record_compute_gas_unguarded(gas_used);
                 self.refresh_latched_compute_usage();
-                self.checkpoint_baseline = remaining;
             }
         }
 
@@ -1159,7 +1106,7 @@ impl AdditionalLimit {
     /// [`settle_frame_final_result`](Self::settle_frame_final_result) latches earlier in this
     /// frame exit.
     fn settle_exceptional_halt_burn(&mut self, result: &FrameResult) {
-        if !self.checkpoint_accounting ||
+        if !self.checkpoint.rex7_enabled() ||
             self.limit_exceeded() ||
             result.instruction_result().is_ok_or_revert()
         {

@@ -3457,7 +3457,7 @@ pub mod compute_gas_ext {
         // `storage_gas_ext::selfdestruct`, which also restored the clamp; the window is re-opened
         // here so the frame's final settlement cannot bill this body a second time.
         let gas_used = pre_charged + gas_before.saturating_sub(gas_after);
-        if additional_limit.checkpoint_accounting() {
+        if additional_limit.rex7_enabled() {
             additional_limit.sync_checkpoint_baseline(gas_after);
         }
         if !additional_limit.record_compute_gas_all_dims(gas_used) {

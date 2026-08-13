@@ -1352,11 +1352,11 @@ mod tests {
 
         assert_eq!(rex7_to_rex6.mega_spec(), MegaSpecId::REX6);
         assert_eq!(
-            rex7_to_rex6.additional_limit.borrow().checkpoint_accounting(),
-            rex6_direct.additional_limit.borrow().checkpoint_accounting(),
+            rex7_to_rex6.additional_limit.borrow().rex7_enabled(),
+            rex6_direct.additional_limit.borrow().rex7_enabled(),
         );
         assert!(
-            !rex7_to_rex6.additional_limit.borrow().checkpoint_accounting(),
+            !rex7_to_rex6.additional_limit.borrow().rex7_enabled(),
             "REX6 must not latch checkpoint accounting"
         );
         assert_eq!(rex7_to_rex6.additional_limit.borrow().limits, limits);
@@ -1369,11 +1369,11 @@ mod tests {
 
         assert_eq!(rex6_to_rex7.mega_spec(), MegaSpecId::REX7);
         assert_eq!(
-            rex6_to_rex7.additional_limit.borrow().checkpoint_accounting(),
-            rex7_direct.additional_limit.borrow().checkpoint_accounting(),
+            rex6_to_rex7.additional_limit.borrow().rex7_enabled(),
+            rex7_direct.additional_limit.borrow().rex7_enabled(),
         );
         assert!(
-            rex6_to_rex7.additional_limit.borrow().checkpoint_accounting(),
+            rex6_to_rex7.additional_limit.borrow().rex7_enabled(),
             "REX7 must latch checkpoint accounting"
         );
         assert_eq!(rex6_to_rex7.additional_limit.borrow().limits, limits);
@@ -1382,7 +1382,7 @@ mod tests {
             .with_tx_runtime_limits(limits)
             .with_cfg_unpinned(CfgEnv::new_with_spec(MegaSpecId::REX6));
         assert!(
-            !via_unpinned.additional_limit.borrow().checkpoint_accounting(),
+            !via_unpinned.additional_limit.borrow().rex7_enabled(),
             "with_cfg_unpinned must rebuild latched limit state on a spec change"
         );
         assert_eq!(via_unpinned.additional_limit.borrow().limits, limits);
@@ -1400,7 +1400,7 @@ mod tests {
 
         assert!(Rc::ptr_eq(&before, &context.additional_limit));
         assert_eq!(context.additional_limit.borrow().limits, limits);
-        assert!(!context.additional_limit.borrow().checkpoint_accounting());
+        assert!(!context.additional_limit.borrow().rex7_enabled());
     }
 
     #[test]
