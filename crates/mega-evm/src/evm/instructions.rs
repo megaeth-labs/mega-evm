@@ -989,7 +989,7 @@ macro_rules! record_storage_compute_gas {
     ($context:expr, $gas_before:expr, $storage_charged:expr, $opcode:expr) => {{
         let spec = $context.host.spec_id();
         let is_rex6 = spec.is_enabled(MegaSpecId::REX6);
-        let is_checkpoint_accounting = spec.is_enabled(MegaSpecId::REX7);
+        let is_rex7 = spec.is_enabled(MegaSpecId::REX7);
         let gas_after = $context.interpreter.gas.remaining();
         // The per-opcode `$gas_before` window applies on every spec: under checkpoint accounting
         // the plain segment ahead of this opcode was already settled by
@@ -1001,7 +1001,7 @@ macro_rules! record_storage_compute_gas {
         // before dispatch, or an outer volatile wrapper — does so ahead of the prologue, so under
         // checkpoint accounting it is already inside the settled segment and adding it back here
         // would bill it twice.
-        let mut gas_used = if is_checkpoint_accounting {
+        let mut gas_used = if is_rex7 {
             $gas_before.saturating_sub(gas_after).saturating_sub($storage_charged)
         } else {
             (const { static_gas($opcode) } + $gas_before.saturating_sub(gas_after))
@@ -1040,7 +1040,7 @@ macro_rules! record_storage_compute_gas {
             let mut additional_limit = $context.host.additional_limit().borrow_mut();
             // Re-open the settlement window at this opcode's exit before recording, so neither a
             // halt here nor the frame-final settlement can bill this segment twice.
-            if is_checkpoint_accounting {
+            if is_rex7 {
                 additional_limit.sync_checkpoint_baseline(gas_after);
             }
             if additional_limit.record_compute_gas(gas_used) {
