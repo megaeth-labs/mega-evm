@@ -367,6 +367,10 @@ impl<DB: Database, ExtEnvTypes: ExternalEnvTypes> MegaContext<DB, ExtEnvTypes> {
     /// specification, it automatically applies appropriate contract size limits
     /// if they are not already set in the configuration.
     ///
+    /// A spec change rebuilds the additional-limit trackers from the new spec and the
+    /// already-configured runtime limits so spec-latched state stays aligned. An unchanged
+    /// spec leaves the existing tracker in place.
+    ///
     /// # `tx_chain_id_check` is pinned off
     ///
     /// revm 40 flipped the `CfgEnv::tx_chain_id_check` default from `false` to `true` — a gate
@@ -417,8 +421,16 @@ impl<DB: Database, ExtEnvTypes: ExternalEnvTypes> MegaContext<DB, ExtEnvTypes> {
     /// [`with_cfg_unpinned`](Self::with_cfg_unpinned): both adopt the caller's configuration the
     /// same way, and differ only in whether `tx_chain_id_check` is pinned to the revm-27 `false`
     /// or taken as the caller provided it.
+    ///
+    /// A spec change rebuilds [`AdditionalLimit`] from the new spec and the already-configured
+    /// runtime limits, so spec-latched tracker state stays aligned with [`Self::spec`]. Limits
+    /// already set by [`with_tx_runtime_limits`](Self::with_tx_runtime_limits) are kept; they are
+    /// not replaced by the new spec's defaults. An unchanged spec leaves the existing tracker in
+    /// place.
     fn apply_cfg(mut self, cfg: CfgEnv<MegaSpecId>, intent: CfgIntent) -> Self {
-        self.spec = cfg.spec;
+        let new_spec = cfg.spec;
+        let spec_changed = new_spec != self.spec;
+        self.spec = new_spec;
         self.inner = self.inner.with_cfg(cfg.into_op_cfg());
         if intent == CfgIntent::Pinned {
             self.inner.cfg.tx_chain_id_check = false;
@@ -432,6 +444,10 @@ impl<DB: Database, ExtEnvTypes: ExternalEnvTypes> MegaContext<DB, ExtEnvTypes> {
                 self.inner.cfg.limit_contract_initcode_size =
                     Some(constants::mini_rex::MAX_INITCODE_SIZE);
             }
+        }
+        if spec_changed {
+            let limits = self.additional_limit.borrow().limits;
+            self.additional_limit = Rc::new(RefCell::new(AdditionalLimit::new(self.spec, limits)));
         }
         self
     }
@@ -923,15 +939,15 @@ impl IntoMegaethCfgEnv for CfgEnv<OpSpecId> {
 mod tests {
     use super::*;
 
-    use alloy_primitives::address;
+    use alloy_primitives::{address, Address, Bytes, U256};
     use revm::{
-        context::CfgEnv,
+        context::{tx::TxEnvBuilder, CfgEnv},
         context_interface::cfg::{GasId, GasParams},
         database::EmptyDB,
         primitives::hardfork::SpecId,
     };
 
-    use crate::TestExternalEnvs;
+    use crate::{test_utils::MemoryDatabase, MegaTransactionNew as _, TestExternalEnvs};
 
     /// A gas schedule an embedder could install: the spec table with one entry moved off its
     /// mainnet value. Distinct from every `GasParams::new_spec(..)` table, so a conversion that
@@ -1267,6 +1283,200 @@ mod tests {
             assert_eq!(current_context.mega_spec(), spec);
             assert_eq!(current_context.inner.cfg.spec, OpSpecId::from(spec));
         }
+    }
+
+    /// Compute limit tight enough that a leftover REX7 V0 clamp is visible in receipt gas.
+    const CFG_MIGRATION_COMPUTE_LIMIT: u64 = 50_000;
+    /// Transaction gas limit used by the `PUSH0 STOP` migration probe.
+    const CFG_MIGRATION_TX_GAS_LIMIT: u64 = 1_000_000;
+    const CFG_MIGRATION_CALLER: Address = address!("0000000000000000000000000000000000300000");
+    const CFG_MIGRATION_CONTRACT: Address = address!("0000000000000000000000000000000000300001");
+    /// `PUSH0 STOP` — a compute-only body, so a leftover V0 clamp shows up as receipt gas.
+    const CFG_MIGRATION_CODE: [u8; 2] = [0x5f, 0x00];
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct CfgMigrationOutcome {
+        success: bool,
+        gas_used: u64,
+        compute_gas: u64,
+    }
+
+    fn cfg_migration_limits() -> EvmTxRuntimeLimits {
+        EvmTxRuntimeLimits::from_spec(MegaSpecId::REX7)
+            .with_tx_compute_gas_limit(CFG_MIGRATION_COMPUTE_LIMIT)
+    }
+
+    fn cfg_migration_db() -> MemoryDatabase {
+        MemoryDatabase::default()
+            .account_balance(CFG_MIGRATION_CALLER, U256::from(10).pow(U256::from(18)))
+            .account_code(CFG_MIGRATION_CONTRACT, Bytes::from_static(&CFG_MIGRATION_CODE))
+    }
+
+    fn run_cfg_migration_tx<DB: Database>(
+        mut context: MegaContext<DB, EmptyExternalEnv>,
+    ) -> CfgMigrationOutcome {
+        context.modify_chain(|chain| {
+            chain.operator_fee_scalar = Some(U256::ZERO);
+            chain.operator_fee_constant = Some(U256::ZERO);
+        });
+
+        let tx = TxEnvBuilder::default()
+            .caller(CFG_MIGRATION_CALLER)
+            .call(CFG_MIGRATION_CONTRACT)
+            .gas_limit(CFG_MIGRATION_TX_GAS_LIMIT)
+            .build_fill();
+        let mut tx = crate::MegaTransaction::new(tx);
+        tx.enveloped_tx = Some(Bytes::new());
+
+        let mut evm = crate::MegaEvm::new(context);
+        let result =
+            alloy_evm::Evm::transact_raw(&mut evm, tx).expect("cfg-migration probe must execute");
+        let compute_gas = evm.ctx.additional_limit.borrow().get_usage().compute_gas;
+        CfgMigrationOutcome {
+            success: result.result.is_success(),
+            gas_used: result.result.tx_gas_used(),
+            compute_gas,
+        }
+    }
+
+    /// Spec-latched tracker bits must follow `with_cfg`, using the already-configured limits.
+    #[test]
+    fn test_with_cfg_rebuilds_latched_limit_state_when_spec_changes() {
+        let limits = cfg_migration_limits();
+
+        let rex7_to_rex6 = MegaContext::new(EmptyDB::default(), MegaSpecId::REX7)
+            .with_tx_runtime_limits(limits)
+            .with_cfg(CfgEnv::new_with_spec(MegaSpecId::REX6));
+        let rex6_direct =
+            MegaContext::new(EmptyDB::default(), MegaSpecId::REX6).with_tx_runtime_limits(limits);
+
+        assert_eq!(rex7_to_rex6.mega_spec(), MegaSpecId::REX6);
+        assert_eq!(
+            rex7_to_rex6.additional_limit.borrow().checkpoint_accounting(),
+            rex6_direct.additional_limit.borrow().checkpoint_accounting(),
+        );
+        assert!(
+            !rex7_to_rex6.additional_limit.borrow().checkpoint_accounting(),
+            "REX6 must not latch checkpoint accounting"
+        );
+        assert_eq!(rex7_to_rex6.additional_limit.borrow().limits, limits);
+
+        let rex6_to_rex7 = MegaContext::new(EmptyDB::default(), MegaSpecId::REX6)
+            .with_tx_runtime_limits(limits)
+            .with_cfg(CfgEnv::new_with_spec(MegaSpecId::REX7));
+        let rex7_direct =
+            MegaContext::new(EmptyDB::default(), MegaSpecId::REX7).with_tx_runtime_limits(limits);
+
+        assert_eq!(rex6_to_rex7.mega_spec(), MegaSpecId::REX7);
+        assert_eq!(
+            rex6_to_rex7.additional_limit.borrow().checkpoint_accounting(),
+            rex7_direct.additional_limit.borrow().checkpoint_accounting(),
+        );
+        assert!(
+            rex6_to_rex7.additional_limit.borrow().checkpoint_accounting(),
+            "REX7 must latch checkpoint accounting"
+        );
+        assert_eq!(rex6_to_rex7.additional_limit.borrow().limits, limits);
+
+        let via_unpinned = MegaContext::new(EmptyDB::default(), MegaSpecId::REX7)
+            .with_tx_runtime_limits(limits)
+            .with_cfg_unpinned(CfgEnv::new_with_spec(MegaSpecId::REX6));
+        assert!(
+            !via_unpinned.additional_limit.borrow().checkpoint_accounting(),
+            "with_cfg_unpinned must rebuild latched limit state on a spec change"
+        );
+        assert_eq!(via_unpinned.additional_limit.borrow().limits, limits);
+    }
+
+    /// Same-spec `with_cfg` must not replace the additional-limit `Rc`.
+    #[test]
+    fn test_with_cfg_same_spec_keeps_additional_limit_identity() {
+        let limits = cfg_migration_limits();
+        let context =
+            MegaContext::new(EmptyDB::default(), MegaSpecId::REX6).with_tx_runtime_limits(limits);
+        let before = Rc::clone(&context.additional_limit);
+
+        let context = context.with_cfg(CfgEnv::new_with_spec(MegaSpecId::REX6));
+
+        assert!(Rc::ptr_eq(&before, &context.additional_limit));
+        assert_eq!(context.additional_limit.borrow().limits, limits);
+        assert!(!context.additional_limit.borrow().checkpoint_accounting());
+    }
+
+    #[test]
+    fn test_with_cfg_rex7_to_rex6_matches_direct_rex6_when_limits_applied_first() {
+        let limits = cfg_migration_limits();
+
+        let mut migrated_db = cfg_migration_db();
+        let migrated = run_cfg_migration_tx(
+            MegaContext::new(&mut migrated_db, MegaSpecId::REX7)
+                .with_tx_runtime_limits(limits)
+                .with_cfg(CfgEnv::new_with_spec(MegaSpecId::REX6)),
+        );
+
+        let mut direct_db = cfg_migration_db();
+        let direct = run_cfg_migration_tx(
+            MegaContext::new(&mut direct_db, MegaSpecId::REX6).with_tx_runtime_limits(limits),
+        );
+
+        assert_eq!(migrated, direct);
+    }
+
+    #[test]
+    fn test_with_cfg_rex6_to_rex7_matches_direct_rex7_when_limits_applied_first() {
+        let limits = cfg_migration_limits();
+
+        let mut migrated_db = cfg_migration_db();
+        let migrated = run_cfg_migration_tx(
+            MegaContext::new(&mut migrated_db, MegaSpecId::REX6)
+                .with_tx_runtime_limits(limits)
+                .with_cfg(CfgEnv::new_with_spec(MegaSpecId::REX7)),
+        );
+
+        let mut direct_db = cfg_migration_db();
+        let direct = run_cfg_migration_tx(
+            MegaContext::new(&mut direct_db, MegaSpecId::REX7).with_tx_runtime_limits(limits),
+        );
+
+        assert_eq!(migrated, direct);
+    }
+
+    #[test]
+    fn test_with_cfg_rex7_to_rex6_matches_direct_rex6_when_limits_applied_after() {
+        let limits = cfg_migration_limits();
+
+        let mut migrated_db = cfg_migration_db();
+        let migrated = run_cfg_migration_tx(
+            MegaContext::new(&mut migrated_db, MegaSpecId::REX7)
+                .with_cfg(CfgEnv::new_with_spec(MegaSpecId::REX6))
+                .with_tx_runtime_limits(limits),
+        );
+
+        let mut direct_db = cfg_migration_db();
+        let direct = run_cfg_migration_tx(
+            MegaContext::new(&mut direct_db, MegaSpecId::REX6).with_tx_runtime_limits(limits),
+        );
+
+        assert_eq!(migrated, direct);
+    }
+
+    #[test]
+    fn test_with_cfg_rex6_to_rex7_matches_direct_rex7_when_limits_applied_after() {
+        let limits = cfg_migration_limits();
+
+        let mut migrated_db = cfg_migration_db();
+        let migrated = run_cfg_migration_tx(
+            MegaContext::new(&mut migrated_db, MegaSpecId::REX6)
+                .with_cfg(CfgEnv::new_with_spec(MegaSpecId::REX7))
+                .with_tx_runtime_limits(limits),
+        );
+
+        let mut direct_db = cfg_migration_db();
+        let direct = run_cfg_migration_tx(
+            MegaContext::new(&mut direct_db, MegaSpecId::REX7).with_tx_runtime_limits(limits),
+        );
+
+        assert_eq!(migrated, direct);
     }
 
     /// Sharing SALT env handles between parent and sandbox must not merge their bucket caches.
