@@ -1098,18 +1098,24 @@ where
 /// constructor logs into a failed receipt. Clearing here is the single product-code fix; it is
 /// a no-op when the journal already discarded the logs (mid-frame halt / natural revert).
 ///
-/// # This is unconditional only because EIP-7708 is off
+/// # Why dropping them unconditionally is safe here, and when to re-check
 ///
-/// "A failed transaction contributes no logs" stops being true once EIP-7708 is active: the
-/// burn logs it emits are produced while the transaction result is being assembled, outside any
-/// frame checkpoint, so no revert can take them back and a failed transaction legitimately
-/// carries them. Every `MegaSpecId` maps to Prague, where every EIP-7708 emission site returns
-/// early, so today there is nothing legitimate for this to drop — the only logs that can reach a
-/// non-`Success` result are the ones a post-commit rewrite stranded in the journal.
+/// Upstream added those fields on purpose: logs emitted before a failure used to be discarded,
+/// and revm keeps them now so downstream consumers can see them (revm PR #3424, a marked
+/// breaking change). So this is deliberately throwing away something upstream chose to hand over,
+/// and that is only defensible while nothing legitimate is in there.
 ///
-/// If a `MegaSpecId` is ever mapped to Amsterdam or later, this clearing must become
-/// conditional, or it will silently swallow logs that belong on the receipt.
-/// `test_all_specs_map_to_isthmus_and_prague` is what stands between that change and this code.
+/// Measured under the specs this crate runs — every `MegaSpecId` maps to Prague — nothing is: an
+/// ordinary top-level `REVERT` and an ordinary halt both arrive with an empty list, because the
+/// frame's checkpoint revert truncated the journal long before the result was assembled. The only
+/// upstream path that deliberately survives a revert is a failing precompile's logs, which the
+/// call outcome carries separately and which no `MegaETH` precompile produces. What remains is
+/// exactly the case this exists for: a frame that was committed and then rewritten into a failure.
+///
+/// Two changes invalidate that measurement and require redoing it rather than assuming it holds:
+/// mapping a spec past Prague, which introduces log sources that do not exist today (EIP-7708
+/// emits during result assembly), and adding a `MegaETH` precompile that emits logs.
+/// `test_all_specs_map_to_isthmus_and_prague` is what stands between the first one and this code.
 fn strip_logs_if_not_success<HaltReasonTy>(
     result: ExecutionResult<HaltReasonTy>,
 ) -> ExecutionResult<HaltReasonTy> {
