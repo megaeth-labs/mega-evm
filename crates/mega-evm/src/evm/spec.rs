@@ -208,9 +208,10 @@ mod tests {
     /// Behavior elsewhere is written against this mapping, so advancing it is not a one-line
     /// change. What breaks, and where to look:
     ///
-    /// - Amsterdam turns on EIP-7708, which emits logs outside every frame checkpoint. The
-    ///   transaction result seam drops logs from non-`Success` results unconditionally on the
-    ///   strength of that never happening, and would start swallowing legitimate ones.
+    /// - The transaction result seam drops logs from non-`Success` results unconditionally, which
+    ///   is safe only because nothing legitimate can be in there under Prague. Amsterdam adds log
+    ///   sources that do not exist today — EIP-7708 emits during result assembly — so that has to
+    ///   be re-measured rather than assumed.
     /// - Osaka caps a transaction's gas limit at 2^24, below `MegaETH`'s own system-call and
     ///   compute-gas figures, so every system call and many user transactions would be rejected
     ///   during validation unless the cap is pinned first.
