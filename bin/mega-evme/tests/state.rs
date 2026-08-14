@@ -234,14 +234,14 @@ async fn test_create_initial_state_fork_real_rpc_smoke() {
 /// Real-RPC twin of `test_storage_cache_hit_round_trip_via_mock`. Phase 1
 /// queries a `MegaETH` Oracle storage slot against a public mainnet endpoint
 /// and persists; phase 2 rebuilds against the same RPC URL (needed for the
-/// `eth_chainId` resolution) and relies on the alloy cache to serve the
+/// `eth_chainId` resolution) and relies on the persisted cache to serve the
 /// same slot without an additional `eth_getStorageAt` round-trip.
 /// Useful as a manual smoke test for the full live stack.
 ///
-/// Probes through `storage_ref` rather than `basic_ref` because alloy's
-/// `CacheLayer` (at the pinned version) only intercepts `eth_getStorageAt` /
-/// `eth_getCode` / `eth_getProof`; `basic_ref` fans out to `eth_getBalance`
-/// and `eth_getTransactionCount` too, neither of which is cached.
+/// Probes through `storage_ref` because a single-method probe pins the cache
+/// hit to one request; `basic_ref` fans out to `eth_getBalance` and
+/// `eth_getTransactionCount`, so a miss on either would be reported as a
+/// storage-cache failure.
 ///
 /// Defaults to `https://mainnet.megaeth.com/rpc`. Override via the
 /// `MEGA_EVME_TEST_RPC_URL` environment variable.

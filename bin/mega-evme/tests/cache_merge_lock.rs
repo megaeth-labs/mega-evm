@@ -7,10 +7,10 @@
 //!
 //! Mutual exclusion cannot be demonstrated inside one process: a single-process
 //! test that "takes the lock" and then calls the merge in-process either
-//! deadlocks or proves nothing about a second process. These tests hold the
-//! sidecar lock in the test process, spawn the real binary, show it makes no
-//! progress while the lock is held, write a concurrent writer's entries under
-//! that same lock, and only then release — so the merge's output can contain
+//! deadlocks or proves nothing about a second process. This test holds the
+//! sidecar lock in the test process, spawns the real binary, shows it makes no
+//! progress while the lock is held, writes a concurrent writer's entries under
+//! that same lock, and only then releases — so the merge's output can contain
 //! those entries only by re-reading the file after it acquired the lock.
 
 use std::{
@@ -120,17 +120,29 @@ fn value_of(entries: &[Value], byte: u8) -> Option<String> {
         .map(str::to_owned)
 }
 
-/// Provider shape: the merge waits for the lock, then folds in what a
-/// concurrent writer left in the output while it waited.
+/// An envelope holding `entries`.
+fn envelope(entries: Vec<Value>) -> Value {
+    json!({
+        "version": 1,
+        "chain_id": 4326,
+        "cache": entries,
+        "external_env": null,
+    })
+}
+
+/// The merge waits for the lock, then folds in what a concurrent writer left in
+/// the output while it waited.
 #[test]
-fn test_cache_merge_serializes_with_a_concurrent_provider_writer() {
+fn test_cache_merge_serializes_with_a_concurrent_envelope_writer() {
     let dir = tempfile::tempdir().expect("tempdir");
     let a = dir.path().join("a.json");
     let b = dir.path().join("b.json");
     let out = dir.path().join("out.json");
 
-    fs::write(&a, serde_json::to_string(&vec![kv(1, "from-a")]).unwrap()).expect("write a");
-    fs::write(&b, serde_json::to_string(&vec![kv(2, "from-b")]).unwrap()).expect("write b");
+    fs::write(&a, serde_json::to_string_pretty(&envelope(vec![kv(1, "from-a")])).unwrap())
+        .expect("write a");
+    fs::write(&b, serde_json::to_string_pretty(&envelope(vec![kv(2, "from-b")])).unwrap())
+        .expect("write b");
 
     let lock = hold_output_lock(&out);
     let mut child = spawn_merge(&[&a, &b], &out);
@@ -138,51 +150,6 @@ fn test_cache_merge_serializes_with_a_concurrent_provider_writer() {
 
     // A concurrent writer lands its entries the way a clean-exit persist does:
     // while it holds the same lock the merge is waiting for.
-    fs::write(&out, serde_json::to_string(&vec![kv(9, "from-concurrent-writer")]).unwrap())
-        .expect("concurrent write");
-    drop(lock);
-
-    let stdout = finish(child);
-
-    let merged: Vec<Value> =
-        serde_json::from_str(&fs::read_to_string(&out).expect("read merged output"))
-            .expect("merged output is a provider-cache array");
-    assert_eq!(
-        value_of(&merged, 9).as_deref(),
-        Some("from-concurrent-writer"),
-        "the entry written while the merge was blocked must survive: {merged:?}",
-    );
-    assert_eq!(value_of(&merged, 1).as_deref(), Some("from-a"), "input entry lost: {merged:?}");
-    assert_eq!(value_of(&merged, 2).as_deref(), Some("from-b"), "input entry lost: {merged:?}");
-    assert_eq!(merged.len(), 3, "the union is exactly both sides: {merged:?}");
-    assert!(
-        stdout.contains("already in the output"),
-        "the summary must report the folded-in entries: {stdout}",
-    );
-}
-
-/// Envelope shape: same protocol, same guarantee.
-#[test]
-fn test_cache_merge_serializes_with_a_concurrent_envelope_writer() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let a = dir.path().join("a.json");
-    let out = dir.path().join("out.json");
-
-    let envelope = |entries: Vec<Value>| {
-        json!({
-            "version": 1,
-            "chain_id": 4326,
-            "cache": entries,
-            "external_env": null,
-        })
-    };
-    fs::write(&a, serde_json::to_string_pretty(&envelope(vec![kv(1, "from-a")])).unwrap())
-        .expect("write a");
-
-    let lock = hold_output_lock(&out);
-    let mut child = spawn_merge(&[&a], &out);
-    assert_blocked_while_held(&mut child);
-
     fs::write(
         &out,
         serde_json::to_string_pretty(&envelope(vec![kv(9, "from-concurrent-writer")])).unwrap(),
@@ -190,7 +157,7 @@ fn test_cache_merge_serializes_with_a_concurrent_envelope_writer() {
     .expect("concurrent write");
     drop(lock);
 
-    finish(child);
+    let stdout = finish(child);
 
     let merged: Value =
         serde_json::from_str(&fs::read_to_string(&out).expect("read merged output"))
@@ -202,6 +169,11 @@ fn test_cache_merge_serializes_with_a_concurrent_envelope_writer() {
         "the entry written while the merge was blocked must survive: {entries:?}",
     );
     assert_eq!(value_of(&entries, 1).as_deref(), Some("from-a"), "input entry lost: {entries:?}");
-    assert_eq!(entries.len(), 2, "the union is exactly both sides: {entries:?}");
+    assert_eq!(value_of(&entries, 2).as_deref(), Some("from-b"), "input entry lost: {entries:?}");
+    assert_eq!(entries.len(), 3, "the union is exactly both sides: {entries:?}");
     assert_eq!(merged["chain_id"], json!(4326));
+    assert!(
+        stdout.contains("already in the output"),
+        "the summary must report the folded-in entries: {stdout}",
+    );
 }

@@ -184,9 +184,11 @@ async fn test_batch_clear_cache_clears_and_repersists_default_path() {
         "the seeded cache file must have been cleared, not carried forward",
     );
     // The clear only happened because the disk cache was engaged, so the exit
-    // persist must have written a well-formed provider cache in its place.
-    serde_json::from_slice::<serde_json::Value>(&bytes)
-        .expect("the persisted cache file must be valid JSON");
+    // persist must have written a well-formed cache envelope in its place.
+    let doc: serde_json::Value =
+        serde_json::from_slice(&bytes).expect("the persisted cache file must be valid JSON");
+    assert_eq!(doc["version"], serde_json::json!(1), "doc={doc}");
+    assert_eq!(doc["kind"], serde_json::json!("cache"), "doc={doc}");
     assert_eq!(
         home.cache_files(),
         vec![seeded],

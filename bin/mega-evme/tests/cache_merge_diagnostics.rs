@@ -1,9 +1,9 @@
 //! Binary-level tests for the diagnostics `cache merge` owes the user.
 //!
-//! `cache merge` has safeguards that can only warn: chain identity that cannot
-//! be derived from a filename, and an unreadable output file that the merge is
-//! about to replace. Both report a result that is silently wrong or lossy, and
-//! both are worthless if the user never sees them.
+//! Two of them cannot be inferred from the exit code: an unreadable output file
+//! the merge is about to replace, and an input in the format a retired build
+//! wrote, which no merge can convert. The first reports a lossy result, the
+//! second a refused one, and both are worthless if the user never sees them.
 //!
 //! The CLI initializes tracing with the filter at `off` unless `-v` flags or
 //! `RUST_LOG` raise it, so these cannot be asserted through a tracing capture
@@ -21,12 +21,12 @@ use std::{
 use alloy_primitives::B256;
 use serde_json::{json, Value};
 
-/// One `{key, value}` provider-cache entry, keyed by a repeated byte.
+/// One `{key, value}` cache entry, keyed by a repeated byte.
 fn kv(byte: u8, value: &str) -> Value {
     json!({ "key": B256::repeat_byte(byte), "value": value })
 }
 
-/// A capture envelope holding `entries`.
+/// A cache envelope holding `entries`.
 fn envelope(entries: Vec<Value>) -> Value {
     json!({ "version": 1, "chain_id": 4326, "cache": entries, "external_env": null })
 }
@@ -67,49 +67,18 @@ fn value_of(entries: &[Value], byte: u8) -> Option<String> {
         .map(str::to_owned)
 }
 
-/// Read the merged provider-cache array at `path`.
-fn read_provider(path: &Path) -> Vec<Value> {
-    serde_json::from_str(&fs::read_to_string(path).expect("read merged output"))
-        .expect("merged output is a provider-cache array")
+/// Read the merged envelope's cache entries at `path`.
+fn read_entries(path: &Path) -> Vec<Value> {
+    let merged: Value =
+        serde_json::from_str(&fs::read_to_string(path).expect("read merged output"))
+            .expect("merged output is an envelope");
+    merged["cache"].as_array().expect("cache array").clone()
 }
 
-/// Filenames that carry no chain id leave the cross-chain safeguard unable to
-/// run. The merge proceeds — renamed shards are legitimate — but the user is
-/// told, on stderr, without asking for verbosity.
+/// A merge with nothing to report says nothing: every warning below is a
+/// deviation from this baseline, not background noise.
 #[test]
-fn test_cache_merge_warns_on_stderr_when_chain_identity_cannot_be_validated() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let a = dir.path().join("worker-a.json");
-    let b = dir.path().join("worker-b.json");
-    let out = dir.path().join("merged.json");
-
-    fs::write(&a, serde_json::to_string(&vec![kv(1, "from-a")]).unwrap()).expect("write a");
-    fs::write(&b, serde_json::to_string(&vec![kv(2, "from-b")]).unwrap()).expect("write b");
-
-    let output = run_merge(&[&a, &b], &out);
-    let (stdout, stderr) = succeeds(&output);
-
-    assert!(
-        stderr.contains("chain identity cannot be validated"),
-        "the safeguard must announce that it could not run: stderr={stderr}",
-    );
-    assert!(
-        stderr.contains("worker-a.json") && stderr.contains("worker-b.json"),
-        "each unvalidatable file must be named: stderr={stderr}",
-    );
-
-    // Behavior is otherwise unchanged: the merge still produced the union.
-    let merged = read_provider(&out);
-    assert_eq!(value_of(&merged, 1).as_deref(), Some("from-a"), "{merged:?}");
-    assert_eq!(value_of(&merged, 2).as_deref(), Some("from-b"), "{merged:?}");
-    assert_eq!(merged.len(), 2, "{merged:?}");
-    assert!(stdout.contains("Merged"), "the summary still goes to stdout: {stdout}");
-}
-
-/// The warning is specific to unvalidatable names: filenames that agree on a
-/// chain id let the safeguard run, and a quiet merge stays quiet.
-#[test]
-fn test_cache_merge_is_silent_when_filenames_agree_on_the_chain_id() {
+fn test_cache_merge_is_silent_on_a_clean_run() {
     let dir = tempfile::tempdir().expect("tempdir");
     let worker0 = dir.path().join("worker0");
     let worker1 = dir.path().join("worker1");
@@ -121,63 +90,43 @@ fn test_cache_merge_is_silent_when_filenames_agree_on_the_chain_id() {
     let b = worker1.join("rpc-cache-4326.json");
     let out = merged_dir.join("rpc-cache-4326.json");
 
-    fs::write(&a, serde_json::to_string(&vec![kv(1, "from-a")]).unwrap()).expect("write a");
-    fs::write(&b, serde_json::to_string(&vec![kv(2, "from-b")]).unwrap()).expect("write b");
+    fs::write(&a, serde_json::to_string_pretty(&envelope(vec![kv(1, "from-a")])).unwrap())
+        .expect("write a");
+    fs::write(&b, serde_json::to_string_pretty(&envelope(vec![kv(2, "from-b")])).unwrap())
+        .expect("write b");
 
     let output = run_merge(&[&a, &b], &out);
-    let (_, stderr) = succeeds(&output);
+    let (stdout, stderr) = succeeds(&output);
 
-    assert!(
-        !stderr.contains("chain identity"),
-        "a validated same-chain merge must not warn: stderr={stderr}",
-    );
     assert!(stderr.is_empty(), "a clean merge writes nothing to stderr: stderr={stderr}");
-
-    let merged = read_provider(&out);
-    assert_eq!(merged.len(), 2, "{merged:?}");
+    assert!(stdout.contains("Merged"), "the summary still goes to stdout: {stdout}");
+    assert_eq!(read_entries(&out).len(), 2);
 }
 
-/// An unreadable provider output is replaced by the merged inputs, dropping
-/// whatever it held. That data loss reaches stderr at default verbosity too.
+/// An input in the retired array format cannot be merged into anything a build
+/// can serve. The refusal exits non-zero and names the file, the likely cause,
+/// and the way forward — on stderr, at default verbosity.
 #[test]
-fn test_cache_merge_warns_on_stderr_when_replacing_an_unreadable_provider_output() {
+fn test_cache_merge_rejects_a_retired_array_input_with_guidance() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let inputs = dir.path().join("inputs");
-    let merged_dir = dir.path().join("merged");
-    for d in [&inputs, &merged_dir] {
-        fs::create_dir(d).expect("create dir");
-    }
-    // Convention-following names on both sides, so the only warning that can
-    // fire here is the one under test.
-    let a = inputs.join("rpc-cache-4326.json");
-    let out = merged_dir.join("rpc-cache-4326.json");
+    let a = dir.path().join("rpc-cache-4326.json");
+    let out = dir.path().join("merged.json");
 
     fs::write(&a, serde_json::to_string(&vec![kv(1, "from-a")]).unwrap()).expect("write a");
-    fs::write(&out, "not-json{{{").expect("write a corrupt output");
 
     let output = run_merge(&[&a], &out);
-    let (_, stderr) = succeeds(&output);
-
-    assert!(
-        stderr.contains("Replacing the existing merge output"),
-        "the replacement must be announced: stderr={stderr}",
-    );
-    assert!(
-        stderr.contains("discarded"),
-        "the user must be told entries are lost: stderr={stderr}",
-    );
-    assert!(
-        !stderr.contains("chain identity"),
-        "no chain-identity warning is due here: stderr={stderr}",
-    );
-
-    let merged = read_provider(&out);
-    assert_eq!(value_of(&merged, 1).as_deref(), Some("from-a"), "{merged:?}");
-    assert_eq!(merged.len(), 1, "{merged:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert_eq!(output.status.code(), Some(1), "an unmergeable input is a usage failure");
+    assert!(stderr.contains("rpc-cache-4326.json"), "the file must be named: stderr={stderr}");
+    assert!(stderr.contains("not a cache envelope"), "stderr={stderr}");
+    assert!(stderr.contains("bare JSON array"), "the likely cause: stderr={stderr}");
+    assert!(stderr.contains("Delete it"), "the way forward: stderr={stderr}");
+    assert!(stderr.contains("--rpc.capture-file"), "the other way forward: stderr={stderr}");
+    assert!(!out.exists(), "a refused merge writes no output");
 }
 
-/// The envelope shape replaces an unreadable output the same way, and warns the
-/// same way.
+/// An unreadable output is replaced by the merged inputs, dropping whatever it
+/// held. That data loss reaches stderr at default verbosity too.
 #[test]
 fn test_cache_merge_warns_on_stderr_when_replacing_an_unreadable_envelope_output() {
     let dir = tempfile::tempdir().expect("tempdir");
