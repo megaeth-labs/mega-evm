@@ -59,6 +59,7 @@ use crate::{
 
 use super::{
     cmd::retrieve_block_env,
+    coherence::{self, Incoherence, MembershipClaim, TargetPlacement},
     fixture,
     verify::{self, ReceiptFacts, VerificationOutcome},
     ReplayError, Result,
@@ -646,42 +647,24 @@ where
                 message: "Transaction not found".to_string(),
             }),
             // Every (block_number, block_hash) shape the endpoint can return is
-            // handled explicitly so a contradictory row cannot fall through a
-            // wildcard into the pending arm.
-            Ok(Some(tx)) => match (tx.block_number, tx.block_hash) {
-                (Some(number), Some(theirs)) => {
+            // classified by the shared judgment, so a contradictory row cannot
+            // fall through into the pending arm. An unanchored or contradictory
+            // row leaves the target unanswered (`rpc`); a genuinely pending one
+            // is a definitive answer about it, which batch mode reports as its
+            // own class.
+            Ok(Some(tx)) => match coherence::classify_placement(tx.block_number, tx.block_hash) {
+                Ok(TargetPlacement::Mined { number, inclusion_hash }) => {
                     grouped
                         .entry(number)
                         .or_default()
-                        .push(JobTarget { hash: *hash, inclusion_hash: Some(theirs) });
+                        .push(JobTarget { hash: *hash, inclusion_hash: Some(inclusion_hash) });
                 }
-                // A mined transaction without an inclusion hash is an unanchored
-                // view: the number alone cannot prove which block body to replay
-                // against, so the target is unanswered rather than queued without
-                // an inclusion claim.
-                (Some(number), None) => failures.push(FailedTx {
-                    tx_hash: *hash,
-                    kind: BatchErrorKind::Rpc,
-                    message: format!(
-                        "endpoint reported a mined transaction in block {number} \
-                         without an inclusion hash: unanchored view"
-                    ),
-                }),
-                // A hash proves inclusion; a null number denies it. That pair is
-                // self-contradictory metadata, not a pending transaction.
-                (None, Some(hash_value)) => failures.push(FailedTx {
-                    tx_hash: *hash,
-                    kind: BatchErrorKind::Rpc,
-                    message: format!(
-                        "endpoint reported inclusion hash {hash_value} without a block \
-                         number: contradictory metadata"
-                    ),
-                }),
-                (None, None) => failures.push(FailedTx {
+                Ok(TargetPlacement::Pending) => failures.push(FailedTx {
                     tx_hash: *hash,
                     kind: BatchErrorKind::Pending,
                     message: "Transaction is pending (no block number)".to_string(),
                 }),
+                Err(incoherence) => failures.push(incoherent_endpoint(*hash, &incoherence)),
             },
         }
     }
@@ -784,17 +767,12 @@ where
     let overwrite = report.overwrite;
     let target_hashes = || job_targets.iter().map(|t| t.hash);
 
-    if number == 0 {
-        // Distinct from `--block 0` (invalid request, exit 1): an endpoint that
-        // resolves a hash into block 0 is contradictory endpoint data — the
-        // same unanswered class as unanchored / contradictory metadata.
+    // Distinct from `--block 0` (invalid request, exit 1): an endpoint that
+    // resolves a hash into block 0 is contradictory endpoint data — the
+    // same unanswered class as unanchored / contradictory metadata.
+    if let Err(incoherence) = coherence::require_forkable_block(number) {
         return BlockReplayOutcome::ordered(
-            fail_all(
-                target_hashes(),
-                BatchErrorKind::Rpc,
-                "endpoint resolved the target into block 0, which has no parent block \
-                 to fork from: contradictory endpoint data",
-            ),
+            fail_all(target_hashes(), BatchErrorKind::Rpc, &incoherence.to_string()),
             &job_targets,
             None,
             None,
@@ -839,49 +817,32 @@ where
     let mut entries = Vec::with_capacity(job_targets.len());
     let mut active: Vec<B256> = Vec::new();
     for target in &job_targets {
-        if let Some(reported) = target.inclusion_hash {
-            if reported != fetched {
-                entries.push(failure(
-                    target.hash,
-                    BatchErrorKind::Rpc,
-                    format!(
-                        "block {number} has hash {fetched}, but the target transaction was \
-                         resolved as included in {reported}: the endpoint served divergent \
-                         views of this block (reorg in progress, or a load-balanced \
-                         endpoint); retry once the chain settles"
-                    ),
-                ));
-                continue;
+        // A target carrying an inclusion claim must anchor to the fetched block
+        // before its membership is worth asking about. A target queued without
+        // one (`--block` takes its targets from the body) only has to still be
+        // listed — that arm is defensive, and a residual absence is an
+        // unanswered view of this height, not a definitive not-found.
+        let claim = match target.inclusion_hash {
+            Some(reported) => {
+                if let Err(incoherence) =
+                    coherence::require_inclusion_anchor(number, fetched, reported)
+                {
+                    entries
+                        .push(BatchEntry::Failed(incoherent_endpoint(target.hash, &incoherence)));
+                    continue;
+                }
+                MembershipClaim::ResolvedInclusion
             }
-            if !body_txs.contains(&target.hash) {
-                entries.push(failure(
-                    target.hash,
-                    BatchErrorKind::Rpc,
-                    format!(
-                        "block {number} ({fetched}) does not list target transaction {}, which \
-                         the endpoint resolved as included in it: the endpoint served \
-                         divergent views of this block (reorg in progress, or a \
-                         load-balanced endpoint); retry once the chain settles",
-                        target.hash,
-                    ),
-                ));
-                continue;
-            }
-        } else if !body_txs.contains(&target.hash) {
-            // `--block` targets come from the body, so this arm is defensive.
-            // A residual not-in-body without an inclusion claim is still an
-            // unanswered view of this height, not a definitive not-found.
-            entries.push(failure(
-                target.hash,
-                BatchErrorKind::Rpc,
-                format!(
-                    "block {number} ({fetched}) does not list target transaction {}, which \
-                     was queued against it: the endpoint served divergent views of this \
-                     block (reorg in progress, or a load-balanced endpoint); retry once \
-                     the chain settles",
-                    target.hash,
-                ),
-            ));
+            None => MembershipClaim::QueuedAgainstBlock,
+        };
+        if let Err(incoherence) = coherence::require_body_membership(
+            number,
+            fetched,
+            target.hash,
+            body_txs.contains(&target.hash),
+            claim,
+        ) {
+            entries.push(BatchEntry::Failed(incoherent_endpoint(target.hash, &incoherence)));
             continue;
         }
         active.push(target.hash);
@@ -916,16 +877,11 @@ where
             );
         }
     };
-    let parent_hash = parent_block.hash();
-    let expected_parent = block.header.parent_hash();
-    if parent_hash != expected_parent {
-        let message = format!(
-            "parent block hash {parent_hash} != block parent_hash {expected_parent}: the parent \
-             block describes a different chain than the block being replayed (reorg in progress, \
-             or a load-balanced endpoint serving divergent views); retry once the chain settles"
-        );
+    if let Err(incoherence) =
+        coherence::require_parent_linkage(parent_block.hash(), block.header.parent_hash())
+    {
         return BlockReplayOutcome::ordered(
-            fail_remaining(&targets, entries, BatchErrorKind::Rpc, &message),
+            fail_remaining(&targets, entries, BatchErrorKind::Rpc, &incoherence.to_string()),
             &job_targets,
             Some(&block_tx_order),
             None,
@@ -1315,16 +1271,13 @@ where
             // inconsistency (the target was queued against this block), not a
             // definitive not-found.
             for tx_hash in unreported {
-                entries.push(failure(
-                    *tx_hash,
-                    BatchErrorKind::Rpc,
-                    format!(
-                        "block {number} ({fetched}) does not list target transaction {tx_hash}, \
-                         which the endpoint resolved as included in it: the endpoint served \
-                         divergent views of this block (reorg in progress, or a load-balanced \
-                         endpoint); retry once the chain settles"
-                    ),
-                ));
+                let incoherence = Incoherence::AbsentFromBody {
+                    number,
+                    block_hash: fetched,
+                    tx_hash: *tx_hash,
+                    claim: MembershipClaim::ResolvedInclusion,
+                };
+                entries.push(BatchEntry::Failed(incoherent_endpoint(*tx_hash, &incoherence)));
             }
         }
         Err(e) => {
@@ -1641,6 +1594,16 @@ fn block_error_tx_hash(err: &BlockExecutionError) -> Option<B256> {
         };
     }
     err.as_internal()?.as_evm().map(|(hash, _)| *hash)
+}
+
+/// Adapt a shared coherence verdict to this target's failure record.
+///
+/// An incoherent answer is the endpoint contradicting itself (a reorg in
+/// progress, or a load-balanced endpoint serving divergent views), so nothing
+/// definitive was established about the target: it stays unanswered (`rpc`),
+/// with the verdict's own wording as its message.
+fn incoherent_endpoint(tx_hash: B256, incoherence: &Incoherence) -> FailedTx {
+    FailedTx { tx_hash, kind: BatchErrorKind::Rpc, message: incoherence.to_string() }
 }
 
 /// Build a failure entry.
