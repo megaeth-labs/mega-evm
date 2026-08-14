@@ -1380,6 +1380,7 @@ mod tests {
     use revm::context::tx::TxEnvBuilder;
 
     use super::{super::LimitKind, *};
+    use crate::VolatileDataAccess;
 
     fn test_limits() -> EvmTxRuntimeLimits {
         EvmTxRuntimeLimits {
@@ -1546,6 +1547,121 @@ mod tests {
             duplicate.instruction_result(),
             InstructionResult::Stop,
             "the duplicate top-level invocation must not re-handle the result",
+        );
+    }
+
+    fn oog_result() -> InterpreterResult {
+        InterpreterResult::new(InstructionResult::OutOfGas, Bytes::new(), Gas::new(100_000))
+    }
+
+    fn rex7_limit() -> AdditionalLimit {
+        AdditionalLimit::new(MegaSpecId::REX7, EvmTxRuntimeLimits::from_spec(MegaSpecId::REX7))
+    }
+
+    /// A frame-local clamp exceed while detention is active must not be attributed to
+    /// detention: the child reverts with `MegaLimitExceeded`, and `latched_detained` stays
+    /// clear so a later halt cannot be rewritten as `VolatileDataAccessOutOfGas`.
+    ///
+    /// Kills `&&` → `||` in `latch_clamp_exceed`: the `||` would fire on the detained-limit
+    /// arm alone and stamp the frame-local exceed as detained.
+    #[test]
+    fn test_latch_clamp_exceed_frame_local_with_detention_is_not_detained() {
+        let mut limit = rex7_limit();
+        limit.set_compute_gas_limit(1);
+        assert!(
+            limit.compute_gas.detained_limit() < limit.compute_gas.base_tx_limit(),
+            "the fixture must actually tighten detention"
+        );
+        limit.checkpoint.set_clamp(
+            50,
+            compute_gas::ClampBinding { headroom: 100, frame_local: true, limit: 1_000 },
+        );
+
+        limit.settle_frame_final_result(&mut oog_result());
+
+        assert!(
+            limit.has_exceeded_limit.is_frame_local(),
+            "the exceed must stay frame-local; got {:?}",
+            limit.has_exceeded_limit
+        );
+        assert!(
+            !limit.checkpoint.latched_detained(),
+            "a frame-local clamp must not inherit detention attribution"
+        );
+        assert!(
+            limit.detained_compute_gas_halt_reason(VolatileDataAccess::TIMESTAMP).is_none(),
+            "frame-local + detention must not classify as VolatileDataAccessOutOfGas"
+        );
+    }
+
+    /// A TX-level clamp exceed when detention did not tighten (`detained_limit == base`)
+    /// must stay a compute-gas halt, not `VolatileDataAccessOutOfGas`.
+    ///
+    /// Kills `<` → `<=` in `latch_clamp_exceed`: at equality the `<=` mutant stamps
+    /// `latched_detained` and the halt-reason remap would blame detention.
+    #[test]
+    fn test_latch_clamp_exceed_tx_level_without_tightened_detention_is_not_detained() {
+        let mut limit = rex7_limit();
+        assert_eq!(
+            limit.compute_gas.detained_limit(),
+            limit.compute_gas.base_tx_limit(),
+            "the fixture is the detained == base knife edge"
+        );
+        let tx_limit = limit.compute_gas.base_tx_limit();
+        limit.checkpoint.set_clamp(
+            50,
+            compute_gas::ClampBinding { headroom: 100, frame_local: false, limit: tx_limit },
+        );
+
+        limit.settle_frame_final_result(&mut oog_result());
+
+        assert!(
+            !limit.checkpoint.latched_detained(),
+            "detained_limit == base_tx_limit must not count as a detained clamp"
+        );
+        assert!(
+            limit.detained_compute_gas_halt_reason(VolatileDataAccess::TIMESTAMP).is_none(),
+            "a TX-level clamp with no tightened detention must not classify as \
+             VolatileDataAccessOutOfGas"
+        );
+    }
+
+    /// The same `AdditionalLimit` is reused across transactions (`on_new_tx` calls `reset`).
+    /// Leftover checkpoint state from a detained clamp halt must not pollute the next
+    /// transaction's halt classification.
+    #[test]
+    fn test_reset_clears_checkpoint_so_the_next_tx_is_not_classified_as_detained() {
+        let mut limit = rex7_limit();
+        limit.set_compute_gas_limit(1);
+        limit.checkpoint.sync_baseline(99_999);
+        limit.checkpoint.set_clamp(
+            50,
+            compute_gas::ClampBinding { headroom: 100, frame_local: false, limit: 1 },
+        );
+        limit.settle_frame_final_result(&mut oog_result());
+        assert!(
+            limit.checkpoint.latched_detained(),
+            "TX1's detained clamp must stamp the attribution flag"
+        );
+        assert!(
+            limit.detained_compute_gas_halt_reason(VolatileDataAccess::TIMESTAMP).is_some(),
+            "TX1 must classify as a detained halt"
+        );
+
+        limit.reset();
+
+        assert_eq!(limit.checkpoint.baseline(), 0, "reset must drop TX1's baseline");
+        assert!(
+            limit.checkpoint.take_clamp().is_none(),
+            "reset must drop any clamp TX1 left behind"
+        );
+        assert!(
+            !limit.checkpoint.latched_detained(),
+            "reset must drop TX1's detention-attribution flag"
+        );
+        assert!(
+            limit.detained_compute_gas_halt_reason(VolatileDataAccess::TIMESTAMP).is_none(),
+            "TX2 must not inherit TX1's VolatileDataAccessOutOfGas attribution"
         );
     }
 

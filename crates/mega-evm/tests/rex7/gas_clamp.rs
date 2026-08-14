@@ -92,6 +92,16 @@ fn detention_cap(cap: u64) -> impl Fn(MegaSpecId) -> EvmTxRuntimeLimits {
     }
 }
 
+/// Per-spec runtime limits with both the TX compute gas limit and the block-environment
+/// detention cap replaced.
+fn compute_and_detention(compute: u64, cap: u64) -> impl Fn(MegaSpecId) -> EvmTxRuntimeLimits {
+    move |spec| {
+        EvmTxRuntimeLimits::from_spec(spec)
+            .with_tx_compute_gas_limit(compute)
+            .with_block_env_access_compute_gas_limit(cap)
+    }
+}
+
 /// The compute gas a transaction running `code` uses when nothing constrains it.
 fn unconstrained_compute_gas(code: Bytes) -> u64 {
     transact_default(MegaSpecId::REX7, base_db(code)).compute_gas
@@ -260,6 +270,44 @@ fn test_frame_local_clamp_exceed_reverts_to_the_parent() {
         r6.compute_gas,
         r7.compute_gas
     );
+}
+
+/// A TX-level clamp exceed after a volatile access that did not tighten the detained
+/// limit (`detained_limit == base_tx_limit`) must stay a compute-gas halt.
+///
+/// `TIMESTAMP` marks volatile access so the halt-reason remap consults
+/// `latched_detained`, but the detention cap is far above the TX compute budget, so
+/// `set_detained_limit` leaves the effective limit at the base. The `<` comparison in
+/// `latch_clamp_exceed` is then false; `<=` would stamp the flag and rewrite the halt
+/// as `VolatileDataAccessOutOfGas`.
+#[test]
+fn test_tx_level_clamp_exceed_without_tightened_detention_is_compute() {
+    let code = countdown_loop_code(&[TIMESTAMP, POP], 10_000);
+    let free = transact_default(MegaSpecId::REX7, base_db(code.clone()));
+    assert!(free.is_success(), "the unconstrained run must succeed: {:?}", free.result);
+    let with_timestamp = unconstrained_compute_gas(
+        BytecodeBuilder::default().append(TIMESTAMP).append(POP).append(STOP).build(),
+    );
+    let midpoint = (with_timestamp + free.compute_gas) / 2;
+    // Far above the TX compute budget, so usage_at_access + cap cannot undercut it.
+    let limits = compute_and_detention(midpoint, 50_000_000);
+
+    let r7 = transact(MegaSpecId::REX7, base_db(code), limits(MegaSpecId::REX7));
+
+    assert_eq!(
+        r7.detained_compute_gas_limit, midpoint,
+        "detention must not tighten: detained={} base={midpoint}",
+        r7.detained_compute_gas_limit
+    );
+    match r7.halt_reason("REX7") {
+        MegaHaltReason::ComputeGasLimitExceeded { limit, .. } => {
+            assert_eq!(*limit, midpoint, "the reported limit is the TX compute limit");
+        }
+        other => panic!(
+            "a TX-level clamp with detained_limit == base must be ComputeGasLimitExceeded, \
+             not {other:?}"
+        ),
+    }
 }
 
 /// A detention crossing keeps its `VolatileDataAccessOutOfGas` attribution.

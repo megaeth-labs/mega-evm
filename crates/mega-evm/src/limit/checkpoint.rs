@@ -160,3 +160,36 @@ impl CheckpointTracker {
         gas_used
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dirty_tracker() -> CheckpointTracker {
+        let mut tracker = CheckpointTracker::new(MegaSpecId::REX7);
+        tracker.sync_baseline(99_999);
+        tracker.set_clamp(7, ClampBinding { headroom: 1, frame_local: false, limit: 1 });
+        tracker.set_latched_detained(true);
+        tracker
+    }
+
+    /// `AdditionalLimit::reset` (called from `MegaContext::on_new_tx`) must wipe leftover
+    /// checkpoint state so a reused context cannot leak the previous transaction's baseline,
+    /// outstanding clamp, or detention-attribution flag into the next one.
+    #[test]
+    fn test_reset_clears_baseline_clamp_and_latched_detained() {
+        let mut tracker = dirty_tracker();
+
+        tracker.reset();
+
+        assert_eq!(tracker.baseline(), 0, "reset must drop the previous transaction's baseline");
+        assert!(
+            tracker.take_clamp().is_none(),
+            "reset must drop an outstanding clamp left by the previous transaction"
+        );
+        assert!(
+            !tracker.latched_detained(),
+            "reset must drop a leftover detention-attribution flag"
+        );
+    }
+}

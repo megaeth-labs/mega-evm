@@ -359,3 +359,36 @@ file = "crates/mega-evm/src/evm/host.rs"
 mutant = "spec-gate self.spec.is_enabled(MegaSpecId::MINI_REX) && address == ORACLE_CONTRACT_ADDRESS, -> self.spec.is_enabled(MegaSpecId::EQUIVALENCE) && address == ORACLE_CONTRACT_ADDRESS,"
 justification = "Equivalent: the mutated conjunct lives in the debug_assert! at the top of oracle_sload, which restates the sole caller's guard (sload_skip_cold_load, host.rs:181-182). is_enabled(EQUIVALENCE) is vacuously true, so the mutant only weakens an assertion that never fires on guarded code, and debug_assert! is compiled out of release builds. The guard's own spec-gate mutants are killed."
 reviewer = "RealiCZ (cz)"
+
+# --- checkpoint.rs:128 has_clamp -> false (equivalent: debug_assert only) ---------
+#
+# `CheckpointTracker::has_clamp` has exactly two call sites, both `debug_assert!(!has_clamp())`
+# (limit.rs `checkpoint_clamp_amount` and `before_frame_run`). Those asserts fire only if a
+# clamp is already outstanding when a new one is applied or a frame is resumed — an invariant
+# violation that no green test reaches. Replacing the predicate with `false` makes
+# `debug_assert!(!false)` always pass, so every currently-passing test stays green. Release
+# builds compile the asserts out, leaving `has_clamp` with zero call sites. The sibling
+# `has_clamp -> true` mutant *does* trip those asserts on every REX7 clamp path and is killed.
+# Do not add a `#[should_panic]` test of the debug_assert.
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "crates/mega-evm/src/limit/checkpoint.rs"
+mutant = "replace CheckpointTracker::has_clamp -> bool with false"
+justification = "Equivalent: has_clamp is consumed only by two debug_assert!(!has_clamp()) sites (checkpoint_clamp_amount, before_frame_run). Those fire only on an outstanding-clamp invariant violation that no green test reaches, so forcing the predicate to false cannot change any passing test. Release builds compile the asserts out (zero call sites). The has_clamp -> true sibling is not equivalent and is killed by the same asserts."
+reviewer = "RealiCZ (cz)"
+
+# --- instructions.rs:671 += → *= in rex7::instruction_table (dead: non-terminating) -
+#
+# The loop copies INHERITED_FROM_REX6 into the Rex7 table: `while i < len { ...; i += 1 }`.
+# `i *= 1` is a no-op increment, so the loop never advances. The function is `const fn`, so
+# the mutant hangs const evaluation / the test build rather than producing a distinguishable
+# wrong table — structurally unkillable. The neighbouring `+=` → `-=` and the loop-bound
+# `<` / `==` / `>` mutants do terminate and are killed by opcode-set tests.
+[[suppress]]
+kind = "line"
+category = "dead"
+file = "crates/mega-evm/src/evm/instructions.rs"
+mutant = "replace += with *= in rex7::instruction_table"
+justification = "Dead/non-terminating: i *= 1 does not advance the INHERITED_FROM_REX6 copy loop, so instruction_table (a const fn) never finishes evaluating. The mutant times out at build rather than yielding a wrong table that a test could reject. Structurally unkillable; the += → -= and loop-bound mutants on the same loop are caught."
+reviewer = "RealiCZ (cz)"

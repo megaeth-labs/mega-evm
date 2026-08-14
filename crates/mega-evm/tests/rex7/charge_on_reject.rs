@@ -13,6 +13,9 @@
 //! A second set of tests pins the unaffordable-static-fee branch: the guarded frame is given
 //! just enough gas to reach the opcode and not enough to pay the entry, so the result is
 //! `OutOfGas` rather than a `VolatileDataAccessDisabled` revert.
+//!
+//! A third set pins the conjunction XOR corners: `disableVolatileDataAccess` is on, but the
+//! target is not the oracle / beneficiary, so `SLOAD` / `SELFBALANCE` must still execute.
 
 use std::convert::Infallible;
 
@@ -617,4 +620,76 @@ fn test_rejected_selfdestruct_charges_static_gas_only_on_rex7() {
         r6,
         r7,
     );
+}
+
+/// Runs `child_code` after the parent disables volatile access, and returns the child's
+/// frame outcome. The child is a non-oracle, non-beneficiary address, so a conjunction
+/// guard (`target == oracle/beneficiary && disabled`) must let the opcode execute.
+fn run_child_executes(
+    spec: MegaSpecId,
+    opcode: u8,
+    child: Address,
+    child_code: Bytes,
+) -> GuardedFrameOutcome {
+    let parent_code = append_call(call_disable(BytecodeBuilder::default()), child, 50_000_000)
+        .append(POP)
+        .stop()
+        .build();
+    let mut db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(1_000_000))
+        .account_code(PARENT, parent_code)
+        .account_code(child, child_code);
+    let mut inspector = GuardedFrameGasInspector::new(child, opcode);
+    let (success, _compute_gas, _gas_used) = transact_rejected(
+        spec,
+        &mut db,
+        TxEnvBuilder::default().caller(CALLER).call(PARENT).gas_limit(100_000_000).build_fill(),
+        &mut inspector,
+    );
+    assert!(success, "{spec}: the parent must succeed when only the child is under test");
+    inspector.outcome.unwrap_or_else(|| panic!("{spec}: child frame never ended"))
+}
+
+fn assert_not_disable_revert(label: &str, spec: MegaSpecId, outcome: &GuardedFrameOutcome) {
+    assert_ne!(
+        outcome.result,
+        InstructionResult::Revert,
+        "{label}/{spec}: disabled but off-target must execute, not revert; output={:?}",
+        outcome.output
+    );
+    let selector = IMegaAccessControl::VolatileDataAccessDisabled::SELECTOR;
+    assert!(
+        outcome.output.len() < 4 || outcome.output[..4] != selector,
+        "{label}/{spec}: must not revert with VolatileDataAccessDisabled; output={:?}",
+        outcome.output
+    );
+}
+
+/// XOR corner: `disableVolatileDataAccess` is on, but the `SLOAD` target is not the
+/// oracle. The conjunction must stay false, so the load executes.
+///
+/// Kills `&&` → `||` in `sload_checkpoint`: the `||` would reject on the disabled arm
+/// alone.
+#[test]
+fn test_sload_at_non_oracle_with_access_disabled_executes() {
+    let code =
+        BytecodeBuilder::default().push_number(0_u64).append(SLOAD).append(POP).stop().build();
+    let r6 = run_child_executes(MegaSpecId::REX6, SLOAD, CHILD, code.clone());
+    let r7 = run_child_executes(MegaSpecId::REX7, SLOAD, CHILD, code);
+    assert_not_disable_revert("non-oracle SLOAD", MegaSpecId::REX6, &r6);
+    assert_not_disable_revert("non-oracle SLOAD", MegaSpecId::REX7, &r7);
+}
+
+/// XOR corner: `disableVolatileDataAccess` is on, but the frame is not the beneficiary.
+/// The conjunction must stay false, so `SELFBALANCE` executes.
+///
+/// Kills `&&` → `||` in `selfbalance_checkpoint`: the `||` would reject on the disabled
+/// arm alone.
+#[test]
+fn test_selfbalance_at_non_beneficiary_with_access_disabled_executes() {
+    let code = BytecodeBuilder::default().append(SELFBALANCE).append(POP).stop().build();
+    let r6 = run_child_executes(MegaSpecId::REX6, SELFBALANCE, CHILD, code.clone());
+    let r7 = run_child_executes(MegaSpecId::REX7, SELFBALANCE, CHILD, code);
+    assert_not_disable_revert("non-beneficiary SELFBALANCE", MegaSpecId::REX6, &r6);
+    assert_not_disable_revert("non-beneficiary SELFBALANCE", MegaSpecId::REX7, &r7);
 }

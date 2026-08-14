@@ -239,8 +239,10 @@ Correctness of the other three dimensions (data size, KV updates, state growth) 
 The protocol governs mutation sites that run during execution; the REX6+ post-execution fee-reward accounting is deliberately outside it.
 That accounting merges usage into the transaction's reported totals and the block-level cumulative counters after the execution result is final, without latching, and never retroactively fails the transaction.
 
-Rule 1 is backed by a `debug_assert!` in `record_compute_gas`: if a non-compute dimension is over its limit but not yet latched, the assert trips at the exact opcode whose mutation site forgot to call `check_limit()`.
+Rule 1 is backed by a `debug_assert!` inside `record_compute_gas_impl`, reached through the guarded entry `record_compute_gas` (`GUARD_LATCH_PROTOCOL = true`): if a non-compute dimension is over its limit but not yet latched, the assert trips at the exact opcode whose mutation site forgot to call `check_limit()`.
 The sub-tracker checks are non-mutating, so the guard compiles out of release builds.
+The same impl is also reached through `record_compute_gas_unguarded` (`GUARD_LATCH_PROTOCOL = false`), which skips the assert.
+REX7 frame-exit tail settlement (`after_frame_run_instructions`) uses the unguarded entry: that settlement can observe SELFDESTRUCT pre-inner recorder usage that rule 2 deliberately left unlatched, because the frame is about to pop and discard it, and the guarded entry would trip the assert on that path.
 
 When adding an opcode or mutation site that touches a non-compute dimension, decide whether it records after or before its inner instruction, follow the matching case above, and add a test asserting the exceed halts at that opcode.
 
