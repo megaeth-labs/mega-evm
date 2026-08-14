@@ -131,11 +131,16 @@ Subsequent candidate transactions MUST be skipped before execution once the bloc
 
 Although block compute gas usage MAY be tracked, the protocol does not impose a separate block-level compute gas cap.
 
+<details>
+<summary>Rex7 (unstable): two readings of cumulative block compute gas</summary>
+
 From [Rex7](../upgrades/rex7.md) onward, a node that tracks cumulative block compute gas MUST track it as two readings, because the [exceptional-halt frame carve-out](compute-gas.md#exceptional-halt-frame-carve-out) makes them differ.
 The **reported** reading accumulates each transaction's full compute-gas total, destroyed remainders included; it is the block's compute-gas statistic.
 The **enforced** reading accumulates only the part each transaction performed, and is the only one a node MAY compare against a configured block compute-gas ceiling, and the only one such a ceiling's rejection MUST report as the block's usage.
 Comparing the reported reading instead would let a transaction that destroyed a large gas envelope while performing almost no work close the block's compute capacity for every transaction behind it.
 Before Rex7 nothing is destroyed, so the two readings coincide.
+
+</details>
 
 ### Two-Phase Block Building Workflow
 
