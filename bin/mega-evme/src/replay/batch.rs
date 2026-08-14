@@ -1538,6 +1538,17 @@ where
 
 /// Map an error raised while replaying a block onto the kind reported for the
 /// target the error is about.
+///
+/// This is a per-target reporting classification, not an exit-code decision:
+/// the kinds are tallied across the run and [`ExitCode`] resolves the process
+/// exit from those tallies, staying the single authority on what each class
+/// exits with. Nothing here re-derives that judgment. The one arm where the
+/// class is not visible in the variant — a block error whose real cause is a
+/// failed state read, buried in the executor's error or stringified into a
+/// validation message — asks [`ExitCode::from_evme_error`] rather than
+/// re-implementing its unwrapping, so the two can never drift apart. Classify a
+/// new error variant the same way: by delegating, never by copying the
+/// authority's rules.
 fn classify(err: &ReplayError) -> BatchErrorKind {
     match err {
         ReplayError::TransactionNotFound(_) => BatchErrorKind::NotFound,
@@ -1556,7 +1567,8 @@ fn classify(err: &ReplayError) -> BatchErrorKind {
     }
 }
 
-/// The kind reported for a target swept up by an abort caused elsewhere.
+/// The kind reported for a target swept up by an abort caused elsewhere:
+/// always `rpc`, whatever class the abort itself had.
 ///
 /// The abort says nothing about this target: whatever class caused the block to
 /// stop (unknown hash, RPC failure, executor/setup error on another
@@ -1565,10 +1577,12 @@ fn classify(err: &ReplayError) -> BatchErrorKind {
 /// a reported target); otherwise the run tallies the abort class separately so
 /// the exit code still reflects the root cause.
 ///
-/// The error is taken and ignored on purpose: the signature keeps the decision
-/// visible at the call site, so a future change that wants to classify by cause
-/// has to argue against this rule rather than silently add a parameter.
-fn swept_kind(_err: &ReplayError) -> BatchErrorKind {
+/// The abort's cause is therefore a parameter this function deliberately does
+/// not read — hence the underscore. It stays in the signature so the decision is
+/// stated where the cause is in hand: a change that wants to classify swept
+/// targets by cause has to argue against the rule above rather than silently
+/// add a parameter.
+fn swept_kind(_abort_cause: &ReplayError) -> BatchErrorKind {
     BatchErrorKind::Rpc
 }
 

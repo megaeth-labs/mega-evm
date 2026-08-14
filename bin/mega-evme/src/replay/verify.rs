@@ -15,6 +15,7 @@
 use core::fmt;
 
 use alloy_consensus::TxReceipt;
+use alloy_network::ReceiptResponse;
 use alloy_primitives::{keccak256, Address, Bytes, Log, B256};
 use alloy_provider::Provider;
 use alloy_rpc_types_eth::{Log as RpcLog, TransactionReceipt};
@@ -369,6 +370,57 @@ where
     check_transaction_identity(receipt.inner.transaction_hash, tx_hash)
         .map_err(ReplayError::RpcError)?;
     Ok(receipt)
+}
+
+/// A target's on-chain receipt, fetched once and admitted for every consumer of
+/// this replay.
+///
+/// `--dump-fixture` anchors its fidelity gate to the receipt and
+/// `--verify-receipt` compares the replay against it. A run asking for both must
+/// answer them from one and the same receipt: two fetches let a reorg, or a
+/// load-balanced endpoint serving divergent views, hand the two consumers
+/// different receipts, and the fixture would then be anchored to one on-chain
+/// execution while the verdict describes another. Admission — fetching the
+/// receipt, checking it describes the requested transaction, and anchoring it to
+/// the replayed block — therefore happens once, here, and the consumers read the
+/// admitted receipt instead of asking again.
+pub(super) struct ReceiptEvidence {
+    /// The admitted receipt.
+    receipt: OpTransactionReceipt,
+}
+
+impl ReceiptEvidence {
+    /// Fetch the receipt of `tx_hash` and admit it for a replay of the block
+    /// `replayed_block_hash`.
+    ///
+    /// Every way the receipt question can go unanswered — a transport failure, a
+    /// pruned receipt, a receipt describing another transaction, a receipt
+    /// describing another inclusion — is a [`ReplayError::RpcError`], so a target
+    /// that could not be evidenced is reported as unverified rather than as a
+    /// divergence.
+    pub(super) async fn admit<P>(
+        provider: &P,
+        tx_hash: B256,
+        replayed_block_hash: B256,
+    ) -> Result<Self>
+    where
+        P: Provider<op_alloy_network::Optimism>,
+    {
+        let receipt = fetch_receipt(provider, tx_hash).await?;
+        check_inclusion(receipt.block_hash(), replayed_block_hash)
+            .map_err(ReplayError::RpcError)?;
+        Ok(Self { receipt })
+    }
+
+    /// The admitted receipt, for a consumer that only reads it.
+    pub(super) const fn receipt(&self) -> &OpTransactionReceipt {
+        &self.receipt
+    }
+
+    /// The admitted receipt, for the consumer that keeps it past this replay.
+    pub(super) fn into_receipt(self) -> OpTransactionReceipt {
+        self.receipt
+    }
 }
 
 /// Check that a fetched receipt describes the transaction it was requested for.

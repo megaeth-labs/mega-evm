@@ -779,84 +779,76 @@ impl Cmd {
         trace!(?block_env, "Block environment built");
         let evm_env = EvmEnv::new(chain_args.create_cfg_env()?, block_env);
 
+        // A pending transaction has no receipt yet, so the fidelity gate cannot
+        // run; fail clearly here, ahead of the receipt lookup, where the missing
+        // receipt is a definitive property of the target, instead of surfacing
+        // the lookup's infrastructure-class failure, which would invite a
+        // pointless retry.
+        if self.dump_fixture.is_some() && ctx.target_tx.block_number.is_none() {
+            return Err(ReplayError::Other(
+                "--dump-fixture does not support pending transactions: the fidelity \
+                 gate needs the on-chain receipt, which does not exist yet"
+                    .to_string(),
+            ));
+        }
+
+        // The on-chain receipt both `--dump-fixture` and `--verify-receipt` need,
+        // fetched once for whichever of them is on. Admission happens here —
+        // before the executor borrows the database — so `--rpc.capture-file`
+        // records it and a later offline run works without network access, and so
+        // a run with both flags anchors its fixture to exactly the receipt its
+        // verdict describes. A null answer for a target this run has already
+        // resolved as mined is the endpoint failing to answer — a pruned receipt,
+        // or a backend serving a divergent view — not a definitive statement that
+        // the transaction does not exist, so it is a retryable infrastructure
+        // failure rather than an execution verdict.
+        let receipt_evidence = if self.dump_fixture.is_some() || self.verify_receipt {
+            Some(verify::ReceiptEvidence::admit(provider, ctx.tx_hash, ctx.block.hash()).await?)
+        } else {
+            None
+        };
+
         // For `--dump-fixture`, snapshot the two inputs a fixture
         // needs before the external env is moved into the factory: the effective
         // MegaETH external environment, and the on-chain receipt gas used as the
         // fidelity anchor. They live or die together (kept in one `Option`), so the
         // fixture builder never has to assume one without the other.
         //
-        // The receipt is fetched here (before the executor borrows the database) so
-        // it is captured by `--rpc.capture-file`. A fixture/benchmark is only
-        // meaningful if the local replay reproduces the receipt's gas and success
-        // status — a mismatch means a wrong spec or hardfork config, which
-        // self-validation alone cannot catch.
-        let fixture_inputs = if self.dump_fixture.is_some() {
-            // A pending transaction has no receipt yet, so the fidelity gate cannot
-            // run; fail clearly here, where the missing receipt is a definitive
-            // property of the target, instead of surfacing the receipt lookup's
-            // infrastructure-class failure, which would invite a pointless retry.
-            if ctx.target_tx.block_number.is_none() {
-                return Err(ReplayError::Other(
-                    "--dump-fixture does not support pending transactions: the fidelity \
-                     gate needs the on-chain receipt, which does not exist yet"
-                        .to_string(),
-                ));
+        // A fixture/benchmark is only meaningful if the local replay reproduces
+        // the receipt's gas and success status — a mismatch means a wrong spec or
+        // hardfork config, which self-validation alone cannot catch.
+        let fixture_inputs = match (self.dump_fixture.is_some(), receipt_evidence.as_ref()) {
+            (true, Some(evidence)) => {
+                // Sort the accessed buckets/oracle slots so the dumped fixture is
+                // byte-reproducible: these come from hash-map iteration, whose order
+                // is otherwise non-deterministic across runs (noisy diffs, and an
+                // online dump would not byte-match an offline re-dump).
+                let mut bucket_capacities = external_envs.bucket_capacities();
+                bucket_capacities.sort_unstable();
+                let mut oracle_storage = external_envs.oracle_storage();
+                oracle_storage.sort_unstable();
+                let mega_env = state_test::types::MegaEnv { bucket_capacities, oracle_storage };
+                let receipt = evidence.receipt();
+                // RLP-hash the receipt's logs with the same helper the state-test
+                // runner uses for `logsRoot`, so the dump can check the replay's logs
+                // against the chain (the rich RPC logs' `inner` is the consensus log).
+                let receipt_logs: Vec<_> =
+                    receipt.inner.logs().iter().map(|log| log.inner.clone()).collect();
+                let anchor = super::fixture::OnchainAnchor {
+                    gas_used: receipt.gas_used(),
+                    success: receipt.inner.status(),
+                    logs_root: state_test::utils::log_rlp_hash(&receipt_logs),
+                };
+                Some((mega_env, anchor))
             }
-            // Sort the accessed buckets/oracle slots so the dumped fixture is
-            // byte-reproducible: these come from hash-map iteration, whose order
-            // is otherwise non-deterministic across runs (noisy diffs, and an
-            // online dump would not byte-match an offline re-dump).
-            let mut bucket_capacities = external_envs.bucket_capacities();
-            bucket_capacities.sort_unstable();
-            let mut oracle_storage = external_envs.oracle_storage();
-            oracle_storage.sort_unstable();
-            let mega_env = state_test::types::MegaEnv { bucket_capacities, oracle_storage };
-            // Fetched through the same helper `--verify-receipt` uses, so both
-            // modes classify an unserved receipt identically. A null answer for a
-            // target this run has already resolved as mined is the endpoint
-            // failing to answer — a pruned receipt, or a backend serving a
-            // divergent view — not a definitive statement that the transaction
-            // does not exist, so it is a retryable infrastructure failure rather
-            // than an execution verdict.
-            let receipt = verify::fetch_receipt(provider, ctx.tx_hash).await?;
-            // Anchor the receipt to the replayed block: across a reorg or a
-            // load-balanced endpoint serving divergent views, the receipt can
-            // describe a different inclusion than the block fetched earlier
-            // (including a receipt with `blockHash: null`). Same check and same
-            // failure class as `--verify-receipt`, so dump and verify agree on
-            // unanchored receipts.
-            verify::check_inclusion(receipt.block_hash(), ctx.block.hash())
-                .map_err(ReplayError::RpcError)?;
-            // RLP-hash the receipt's logs with the same helper the state-test
-            // runner uses for `logsRoot`, so the dump can check the replay's logs
-            // against the chain (the rich RPC logs' `inner` is the consensus log).
-            let receipt_logs: Vec<_> =
-                receipt.inner.logs().iter().map(|log| log.inner.clone()).collect();
-            let anchor = super::fixture::OnchainAnchor {
-                gas_used: receipt.gas_used(),
-                success: receipt.inner.status(),
-                logs_root: state_test::utils::log_rlp_hash(&receipt_logs),
-            };
-            Some((mega_env, anchor))
-        } else {
-            None
+            _ => None,
         };
 
-        // For `--verify-receipt`, fetch the on-chain receipt here — before the
-        // executor borrows the database, and with the same call shape the
-        // fixture path uses — so `--rpc.capture-file` records it and a later
-        // offline run verifies without network access. It is compared against
-        // the replay's own receipt once the block is finished.
-        let onchain_receipt = if self.verify_receipt {
-            let receipt = verify::fetch_receipt(provider, ctx.tx_hash).await?;
-            // A receipt describing a different inclusion than the replayed block
-            // would compare the replay against the wrong on-chain execution:
-            // that is an infrastructure failure, not a verification mismatch.
-            verify::check_inclusion(receipt.block_hash(), ctx.block.hash())
-                .map_err(ReplayError::RpcError)?;
-            Some(receipt)
-        } else {
-            None
+        // For `--verify-receipt`, keep the admitted receipt past this block: it is
+        // compared against the replay's own receipt once the block is finished.
+        let onchain_receipt = match (self.verify_receipt, receipt_evidence) {
+            (true, Some(evidence)) => Some(evidence.into_receipt()),
+            _ => None,
         };
 
         let evm_factory = MegaEvmFactory::new().with_external_env_factory(external_envs);
