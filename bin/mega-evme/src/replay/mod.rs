@@ -8,6 +8,7 @@ mod cmd;
 mod coherence;
 mod fixture;
 mod hardforks;
+mod kernel;
 mod verify;
 
 pub use cmd::Cmd;
