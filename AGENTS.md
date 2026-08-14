@@ -150,6 +150,8 @@ MegaETH's parallel EVM needs to minimize conflicts between concurrent transactio
 - Different volatile data categories (block env/beneficiary, oracle) have different cap levels defined in `constants.rs`.
 - The **most restrictive cap wins** when multiple volatile sources are accessed.
 - Caps are applied via host hooks (`evm/host.rs`) that mark access in a `VolatileDataAccessTracker` (`access/tracker.rs`), then enforced after each volatile opcode via `wrap_op_detain_gas!` in `evm/instructions.rs`.
+- REX7 charges the opcode's static fee even when `disableVolatileDataAccess` rejects (charge-on-reject); frozen specs still reject for free.
+- REX7 specifies that a detention mark is produced when the target account is loaded, so a frame that cannot afford the pre-load CALL / EXTCODECOPY fees produces no mark (the frozen-window tripwire is `!REX7`-gated).
 
 This forces transactions that touch volatile data to terminate quickly, reducing parallel execution conflicts without banning the access outright.
 Detained gas is effectively refunded — users only pay for actual computation performed.

@@ -153,7 +153,8 @@ Not yet scheduled
 {% endtabs %}
 
 Unstable; under active development.
-Checkpoint-settled [compute gas](../glossary.md#compute-gas) accounting with gas-clamp enforcement: plain opcodes record nothing between checkpoints; within-limit transactions that never end a frame in an exceptional halt stay bit-identical to Rex6; a compute-gas or detention exceed inside a plain segment stops the crossing opcode before it executes.
+Checkpoint-settled [compute gas](../glossary.md#compute-gas) accounting with gas-clamp enforcement: plain opcodes record nothing between checkpoints; within-limit transactions that never end a frame in an exceptional halt and never trip a `disableVolatileDataAccess` guard stay bit-identical to Rex6; a compute-gas or detention exceed inside a plain segment stops the crossing opcode before it executes.
+A disabled-volatile rejection charges the opcode's static fee; a detention mark is produced when the target account is loaded.
 
 ## How to Read These Pages
 

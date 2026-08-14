@@ -1,5 +1,5 @@
 ---
-description: Rex7 network upgrade — checkpoint-settled compute gas accounting with gas-clamp enforcement; plain opcodes record no compute gas between checkpoints, within-limit transactions that never end a frame in an exceptional halt stay bit-identical to Rex6, and limit-exceeding opcodes are stopped before they execute.
+description: Rex7 network upgrade — checkpoint-settled compute gas accounting with gas-clamp enforcement; plain opcodes record no compute gas between checkpoints, within-limit transactions that never end a frame in an exceptional halt and never trip a disableVolatileDataAccess guard stay bit-identical to Rex6, a disabled-volatile rejection charges the opcode's static fee, and a detention mark is produced when the target account is loaded.
 ---
 
 # Rex7 Network Upgrade
@@ -21,8 +21,13 @@ Rex7 replaces that per-opcode recording for ordinary opcodes with **checkpoint s
 
 Rex7 also introduces **gas-clamp enforcement**: between checkpoints the node restricts the interpreter-visible remaining gas to the remaining compute headroom, so the inherited EVM's own per-opcode gas check stops a limit-crossing opcode before that opcode executes.
 
-For a transaction that never crosses a compute-gas, detention, or other resource limit and in which no frame ends in an exceptional halt, Rex7 is bit-identical to Rex6: the same gas, the same receipt, the same state, and the same `GAS` opcode readings.
+For a transaction that never crosses a compute-gas, detention, or other resource limit, in which no frame ends in an exceptional halt, and in which no `disableVolatileDataAccess` guard rejects an opcode, Rex7 is bit-identical to Rex6: the same gas, the same receipt, the same state, and the same `GAS` opcode readings.
 For a transaction that does cross a compute-gas or detention limit inside a plain-opcode segment, the halt lands before the crossing opcode rather than after it, the crossing opcode's cost is excluded from recorded compute usage, and remaining gas remains refundable under the same rescue rules as other transaction-level compute-limit halts.
+
+Rex7 also makes two guard- and detention-related choices that Rex6 does not:
+
+- A `disableVolatileDataAccess` rejection still charges the rejected opcode's static fee.
+- A detention mark is produced when the target account is loaded, so a frame that cannot afford the fees charged before that load produces no mark.
 
 One deliberate accounting carve-out remains: a frame that ends in an exceptional halt (including ordinary out-of-gas) settles its entire EVM-gas budget as compute gas, so a transaction that contains an inner out-of-gas call can report higher compute usage under Rex7 than under Rex6 even though EVM gas and the receipt are unchanged.
 That budget is split — the work the frame performed enforces like any other work, while the remainder it destroyed is reported but never enforced.
@@ -67,8 +72,8 @@ At each checkpoint a node MUST:
 Non-opcode recording sites (transaction intrinsic gas, precompiles, contract-creation code deposit, KeylessDeploy overhead and sandbox merge) are unchanged.
 
 **Precision invariant.**
-For every transaction that stays within every runtime resource limit and in which no frame ends in an exceptional halt, a node MUST produce the same recorded compute-gas total, the same four-dimension resource usage, the same receipt `gas_used`, the same execution result, and the same state under Rex7 as under Rex6.
-The interpreter's gas counter already meters every opcode; settling by segment reproduces the per-opcode sum exactly when no limit is crossed and no frame ends in an exceptional halt.
+For every transaction that stays within every runtime resource limit, in which no frame ends in an exceptional halt, and in which no `disableVolatileDataAccess` guard rejects an opcode, a node MUST produce the same recorded compute-gas total, the same four-dimension resource usage, the same receipt `gas_used`, the same execution result, and the same state under Rex7 as under Rex6.
+The interpreter's gas counter already meters every opcode; settling by segment reproduces the per-opcode sum exactly when no limit is crossed, no frame ends in an exceptional halt, and no rejected guard charges a static fee.
 
 **Exceptional-halt frame carve-out.**
 A frame that ends in an exceptional halt — ordinary out-of-gas, memory out-of-gas, stack underflow or overflow, invalid jump, unknown opcode, and every other error result — returns none of its remaining budget.
@@ -147,6 +152,37 @@ The two cases are indistinguishable once the frame has already reported out-of-g
 **Within-limit observability.**
 For a transaction that never crosses a compute or detention limit, the clamp MUST be unobservable: `GAS` returns the true remaining gas, call forwarding and storage-gas charges see the true counter, and gas, receipt, and state match Rex6.
 
+### Charge-on-Reject for Disabled Volatile Access
+
+#### Previous behavior
+
+Through [Rex6](rex6.md), a node that has `disableVolatileDataAccess` active rejects a volatile-guarded opcode with a revert and the `VolatileDataAccessDisabled` payload, and charges the rejected opcode nothing.
+The static gas table zeroes those opcodes so a frame holding less than the static fee still reaches the guard, and the handler charges the entry only after the check declines.
+The reverting frame returns every unit of gas it held when it reached the opcode.
+
+#### New behavior
+
+Under Rex7, a node MUST still reject the same opcodes with the same revert payload, and MUST still leave the tracker unmarked.
+A node MUST charge the rejected opcode's static fee before producing that revert.
+The fee is ordinary EVM gas: it is debited from the frame, it is not refunded by the synthetic revert, and it MUST be recorded as compute gas when the open segment is settled — at the next checkpoint if the guard then passes, or at frame exit if it rejects.
+A frame that cannot afford the static fee MUST halt out of gas instead of reaching the disable revert.
+
+The guarded set is unchanged from Rex6: the unconditional block-environment opcodes, the beneficiary-conditional account reads, `SELFBALANCE`, oracle-conditional `SLOAD`, the CALL family, and `SELFDESTRUCT`.
+
+### Detention Mark at Account Load
+
+#### Previous behavior
+
+Through Rex6, a node documents that `BALANCE`, `EXTCODESIZE`, `EXTCODEHASH`, `SLOAD`, and `SELFDESTRUCT` register a volatile access even when the frame then runs out of gas on that opcode's own cost.
+The CALL family and `EXTCODECOPY` are excluded from that guarantee because their implementation charges the base access cost — and, for a value-transferring call, the transfer cost — or the copy cost before the target account is read.
+That exclusion is a frozen replay window, not a Rex6 rule: historical executions under the previous interpreter loaded first and marked first.
+
+#### New behavior
+
+Under Rex7, a node MUST produce a beneficiary or oracle detention mark when the target account (or oracle slot) is loaded, and MUST NOT produce that mark from a frame that cannot afford the fees charged before the load.
+A CALL-family opcode whose static fee or value-transfer fee exhausts the frame, and an `EXTCODECOPY` whose copy cost exhausts the frame, therefore halt without marking, and the rest of the transaction runs undetained unless some other access has already marked.
+This is specified behavior, not a replay exception.
+
 ## Developer Impact
 
 Rex7 is not scheduled on any network.
@@ -154,8 +190,10 @@ Its semantics may still change before it is frozen.
 
 Contracts and tools that assume per-opcode compute-gas attribution for every instruction MUST treat that assumption as false under Rex7: only checkpoints settle compute gas during execution, and a plain-opcode segment has no intermediate recording.
 
-Contracts that stay within every resource limit and never end a frame in an exceptional halt see no behavioral change relative to Rex6.
+Contracts that stay within every resource limit, never end a frame in an exceptional halt, and never trip a `disableVolatileDataAccess` guard see no behavioral change relative to Rex6.
 Contracts that trip the compute-gas or detention limit inside a plain-opcode segment halt one opcode earlier than under Rex6, with the crossing opcode excluded from recorded compute usage and with remaining gas still refundable on a transaction-level halt.
+A contract that disables volatile access and then hits a guarded opcode pays that opcode's static fee under Rex7 and gets the same revert payload; through Rex6 that reject cost nothing.
+A CALL or `EXTCODECOPY` that cannot afford the fees charged before the target account is loaded does not detain the rest of the transaction.
 
 A transaction that halts exceptionally, or that calls into a child frame which does, may report a higher transaction-level compute-gas total under Rex7 than under Rex6 — for any exceptional halt, not just out-of-gas.
 The receipt `gas_used`, the halt or revert reported, and the execution success or failure of the outer transaction are unchanged by the destroyed half of that carve-out: it is reported, never enforced.
@@ -171,8 +209,8 @@ Any node, tool, or test fixture pinned to Rex7 must expect its results to move.
 A deployment that needs stable semantics must select a frozen spec explicitly rather than relying on the latest one.
 
 The gas clamp is strictly tighter than Rex6's post-opcode enforcement on the overshoot axis: the crossing opcode does not run, and enforced usage does not pass the limit by that opcode's cost.
-The exceptional-halt frame carve-out is the only path on which Rex7 can report more compute gas than Rex6 for the same inputs; it over-reports rather than under-reports.
-Its enforcing half is never looser than Rex6's, and is stricter in exactly one shape: an ordinary out-of-gas taken with no clamp in force, whose zeroed counter leaves the whole segment measuring as executed.
+Rex7 can report more compute gas than Rex6 for the same inputs on two paths: the exceptional-halt frame carve-out, which over-reports rather than under-reports, and a `disableVolatileDataAccess` rejection, which now includes the rejected opcode's static fee.
+The carve-out's enforcing half is never looser than Rex6's, and is stricter in exactly one shape: an ordinary out-of-gas taken with no clamp in force, whose zeroed counter leaves the whole segment measuring as executed.
 
 ## References
 

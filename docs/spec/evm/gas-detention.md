@@ -165,6 +165,28 @@ The CALL-family opcodes are excluded from this registration guarantee: their bas
 `EXTCODECOPY` is excluded for the same reason: its copy cost is charged before the target account is read, so only a frame that affords the copy cost registers the access.
 An access blocked by [`disableVolatileDataAccess()`](../system-contracts/mega-access-control.md) is the exception: the blocked opcode never runs, so it reads nothing and triggers nothing.
 
+<details>
+<summary>Rex7 (unstable): detention mark at account load</summary>
+
+Under Rex7 the CALL-family / `EXTCODECOPY` charge-before-load order is specified, not a frozen replay window.
+A node MUST produce the beneficiary (or oracle) mark when the target account or slot is loaded, and MUST NOT produce that mark from a frame that cannot afford the fees charged before the load.
+A CALL that exhausts the frame on its static fee or value-transfer fee, and an `EXTCODECOPY` that exhausts the frame on its copy fee, therefore halt without detaining the rest of the transaction.
+See the [Rex7 Network Upgrade](../upgrades/rex7.md).
+
+</details>
+
+<details>
+<summary>Rex7 (unstable): charge-on-reject for disabled volatile access</summary>
+
+Under Rex7 a node MUST still revert a `disableVolatileDataAccess` rejection with `VolatileDataAccessDisabled` and MUST still leave the tracker unmarked.
+A node MUST charge the rejected opcode's static fee before that revert.
+The fee is ordinary EVM gas, is not refunded by the synthetic revert, and is recorded as compute gas when the open segment is settled.
+A frame that cannot afford the static fee MUST halt out of gas instead of reaching the disable revert.
+Through Rex6 the same reject charges nothing.
+See the [Rex7 Network Upgrade](../upgrades/rex7.md).
+
+</details>
+
 ## Constants
 
 | Constant                       | Value      | Description                                                          |
@@ -213,4 +235,4 @@ Gas detention semantics evolved across specs:
 - [Rex3](../upgrades/rex3.md) — raised oracle cap to 20M and changed oracle detection from CALL-based to SLOAD-based
 - [Rex4](../upgrades/rex4.md) — changes absolute detention to relative detention and adds additional beneficiary-triggered behavior
 - [Rex6](../upgrades/rex6.md) — adds a beneficiary-detention trigger for an applied EIP-7702 authorization whose authority equals the block beneficiary; resolves a CALL-family target's EIP-7702 delegation one hop before the beneficiary comparison, so a call through a delegator whose delegate is the beneficiary triggers detention (through Rex5 only the raw target is compared); and stops enforcing the detention cap against system-originated transactions, whose volatile accesses are still tracked
-- [Rex7](../upgrades/rex7.md) _(unstable)_ — enforces the detained limit inside plain-opcode segments by gas clamping, stopping a crossing opcode before it executes while preserving `VolatileDataAccessOutOfGas` and gas rescue
+- [Rex7](../upgrades/rex7.md) _(unstable)_ — enforces the detained limit inside plain-opcode segments by gas clamping, stopping a crossing opcode before it executes while preserving `VolatileDataAccessOutOfGas` and gas rescue; specifies that a detention mark is produced when the target account is loaded, so a frame that cannot afford the pre-load fees produces no mark; and charges the static fee of an opcode rejected by `disableVolatileDataAccess`
