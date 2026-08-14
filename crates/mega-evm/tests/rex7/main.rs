@@ -35,11 +35,15 @@
 //! - `detention_window` — an underfunded CALL / EXTCODECOPY that OOGs before the target load does
 //!   not mark beneficiary access; that order is specified, so the frozen-window tripwire stays
 //!   silent.
+//! - `checkpoint_static_fee_edges` — a table-prepaid checkpoint (`GAS`, `LOG1`) whose static fee
+//!   exceeds the clamp headroom is a plain-segment crossing; `CREATE`'s 32,000 is charged inside
+//!   the body, so the same headroom runs the body and then reverts.
 
 mod burn_split;
 mod charge_on_reject;
 mod checkpoint_families;
 mod checkpoint_settlement;
+mod checkpoint_static_fee_edges;
 mod clamp_classification;
 mod common;
 mod detention_window;
