@@ -5,6 +5,7 @@
 
 mod batch;
 mod cmd;
+mod coherence;
 mod fixture;
 mod hardforks;
 mod verify;

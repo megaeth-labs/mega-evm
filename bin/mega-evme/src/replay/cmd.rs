@@ -35,6 +35,7 @@ use crate::{
 
 use super::{
     batch,
+    coherence::{self, Incoherence, MembershipClaim, TargetPlacement},
     verify::{self, VerificationOutcome},
     ReplayError, Result,
 };
@@ -547,27 +548,13 @@ impl Cmd {
         // metadata alone — no block fetch precedes the verdict, and no fetch
         // failure can mask it. A mined target keeps its inclusion hash here, which
         // is what the block fetched below is anchored against.
-        let mined: Option<(u64, B256)> = match (target_tx.block_number, target_tx.block_hash) {
-            (Some(number), Some(inclusion)) => Some((number, inclusion)),
-            // A mined transaction without an inclusion hash is an unanchored
-            // view: the block number alone cannot prove which block body the
-            // target belongs to, so there is nothing to anchor the replay to.
-            (Some(number), None) => {
-                return Err(ReplayError::RpcError(format!(
-                    "endpoint reported a mined transaction in block {number} without an \
-                     inclusion hash: unanchored view"
-                )))
-            }
-            // A hash proves inclusion; a null number denies it. That pair is
-            // self-contradictory metadata, not a pending transaction.
-            (None, Some(inclusion)) => {
-                return Err(ReplayError::RpcError(format!(
-                    "endpoint reported inclusion hash {inclusion} without a block \
-                     number: contradictory metadata"
-                )))
-            }
-            (None, None) => None,
-        };
+        let mined: Option<(u64, B256)> =
+            match coherence::classify_placement(target_tx.block_number, target_tx.block_hash)
+                .map_err(incoherent_endpoint)?
+            {
+                TargetPlacement::Mined { number, inclusion_hash } => Some((number, inclusion_hash)),
+                TargetPlacement::Pending => None,
+            };
         let is_pending = mined.is_none();
 
         let (state_base_block, block_number) = if let Some((n, _)) = mined {
@@ -575,13 +562,7 @@ impl Cmd {
             // target into the genesis block contradicts itself — same guard and
             // wording as the batch path, and it also keeps `n - 1` from
             // underflowing below.
-            if n == 0 {
-                return Err(ReplayError::RpcError(
-                    "endpoint resolved the target into block 0, which has no parent block \
-                     to fork from: contradictory endpoint data"
-                        .to_string(),
-                ));
-            }
+            coherence::require_forkable_block(n).map_err(incoherent_endpoint)?;
             (n - 1, n)
         } else {
             let latest = provider
@@ -651,16 +632,8 @@ impl Cmd {
         // latest block, so one fetch fills both roles and there is no linkage,
         // no inclusion, and no membership to check.
         if let Some((_, reported)) = mined {
-            let parent_hash = parent_block.hash();
-            let expected_parent = block.header.parent_hash();
-            if parent_hash != expected_parent {
-                return Err(ReplayError::RpcError(format!(
-                    "parent block hash {parent_hash} != block parent_hash {expected_parent}: the \
-                     parent block describes a different chain than the block being replayed (reorg \
-                     in progress, or a load-balanced endpoint serving divergent views); retry once \
-                     the chain settles"
-                )));
-            }
+            coherence::require_parent_linkage(parent_block.hash(), block.header.parent_hash())
+                .map_err(incoherent_endpoint)?;
 
             // Inclusion guard: the linkage above only proves the two fetched
             // blocks belong to one chain, not that the target belongs to them.
@@ -671,15 +644,8 @@ impl Cmd {
             // against a body it never ran in. The reported hash is the one the
             // metadata classification kept, so a mined target always has one to
             // anchor against.
-            let fetched = block.hash();
-            if reported != fetched {
-                return Err(ReplayError::RpcError(format!(
-                    "block {block_number} has hash {fetched}, but the target transaction was \
-                     resolved as included in {reported}: the endpoint served divergent views of \
-                     this block (reorg in progress, or a load-balanced endpoint); retry once the \
-                     chain settles"
-                )));
-            }
+            coherence::require_inclusion_anchor(block_number, block.hash(), reported)
+                .map_err(incoherent_endpoint)?;
         }
 
         // The preceding transactions are the block-body entries ahead of the
@@ -697,15 +663,17 @@ impl Cmd {
                 }
                 preceding_tx_hashes.push(hash);
             }
-            if !found {
-                return Err(ReplayError::RpcError(format!(
-                    "block {block_number} ({}) does not list target transaction {tx_hash}, which \
-                     the endpoint resolved as included in it: the endpoint served divergent views \
-                     of this block (reorg in progress, or a load-balanced endpoint); retry once \
-                     the chain settles",
-                    block.hash(),
-                )));
-            }
+            coherence::require_body_membership(
+                block_number,
+                block.hash(),
+                tx_hash,
+                found,
+                // The target reached this block through its own inclusion claim,
+                // which the anchor guard above already matched to the fetched
+                // block.
+                MembershipClaim::ResolvedInclusion,
+            )
+            .map_err(incoherent_endpoint)?;
         }
 
         debug!(chain_id, preceding_count = preceding_tx_hashes.len(), "Replay context ready");
@@ -1148,6 +1116,16 @@ impl Cmd {
         }
         Ok(())
     }
+}
+
+/// Adapt a shared coherence verdict to the single-transaction failure type.
+///
+/// An incoherent answer is the endpoint contradicting itself (a reorg in
+/// progress, or a load-balanced endpoint serving divergent views), not a
+/// definitive answer about the target, so the run fails as an infrastructure
+/// failure (exit 3) and the verdict's own wording is the message.
+fn incoherent_endpoint(incoherence: Incoherence) -> ReplayError {
+    ReplayError::RpcError(incoherence.to_string())
 }
 
 /// Whether any trace option was set on the command line.
