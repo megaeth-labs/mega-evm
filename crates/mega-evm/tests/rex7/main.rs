@@ -26,12 +26,20 @@
 //! - `burn_split` — which half of that budget enforces: the work the frame performed does, the
 //!   remainder it destroyed does not, and both boundaries (a checkpoint's storage charge, revm's
 //!   post-action create rejects) land on the right side.
+//! - `charge_on_reject` — a `disableVolatileDataAccess` rejection still pays the opcode's static
+//!   fee, which segment settlement records as compute; REX6 keeps the historical zero-charge
+//!   revert.
+//! - `detention_window` — an underfunded CALL / EXTCODECOPY that OOGs before the target load does
+//!   not mark beneficiary access; that order is specified, so the frozen-window tripwire stays
+//!   silent.
 
 mod burn_split;
+mod charge_on_reject;
 mod checkpoint_families;
 mod checkpoint_settlement;
 mod clamp_classification;
 mod common;
+mod detention_window;
 mod double_exceed_corner;
 mod exceptional_halt;
 mod gas_clamp;

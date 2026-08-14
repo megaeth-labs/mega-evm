@@ -1536,11 +1536,16 @@ opcode and revert immediately if the access would be volatile.
 This ensures that disabled volatile accesses do not pollute the tracker's `volatile_data_accessed`
 bitmap or lower the `compute_gas_limit`.
 
-The check runs before *anything* is charged for the opcode, including its static gas: every spec's
-static gas table zeroes the entries of the opcodes handled here, and the entry is charged via
-[`charge_static_gas`] only after the check has declined to fire.
+Through REX6 the check runs before *anything* is charged for the opcode, including its static gas:
+every spec's static gas table zeroes the entries of the opcodes handled here, and the entry is
+charged via [`charge_static_gas`] only after the check has declined to fire.
 That is what lets the rejection be a revert that keeps the frame's whole remaining gas even when
 that gas would not have covered the opcode's static cost.
+
+REX7 charges the static entry first and then runs the same check: a rejection is still a revert
+with the same payload, but the static fee stays charged and is settled into compute gas as part of
+the open segment. A frame that cannot afford the static fee runs out of gas instead of reaching
+the revert. Frozen specs are unchanged.
 
 # Where the Static Gas Lands Once the Guard Declines
 
@@ -1614,6 +1619,10 @@ pub mod volatile_data_ext {
     /// transaction is found, so the wrapper backfill archived for that case gets implemented
     /// instead of the divergence going unnoticed.
     ///
+    /// REX7 specifies that same charge-before-load order, so a window miss is not a replay
+    /// divergence there and this check must not fire. The gate is `!is_enabled(REX7)` rather
+    /// than a table split because the CALL-family wrapper is shared with the frozen specs.
+    ///
     /// The check over-approximates on purpose — it does not reconstruct how far revm 27 would
     /// have gotten — with one exception: a `MemoryOOG` halt is never routed here, because memory
     /// expansion was charged before the load under revm 27 as well, so that halt shape cannot
@@ -1625,6 +1634,9 @@ pub mod volatile_data_ext {
         opcode: u8,
         raw_target: Option<Address>,
     ) {
+        if host.spec_id().is_enabled(MegaSpecId::REX7) {
+            return;
+        }
         let Some(target) = raw_target else { return };
         if host.volatile_data_tracker().borrow().has_accessed_beneficiary_balance() {
             return;
@@ -1643,15 +1655,15 @@ pub mod volatile_data_ext {
     }
 
     /// Rejects the guarded opcode with the `disableVolatileDataAccess` revert data and returns from
-    /// the enclosing handler, leaving the frame's gas exactly as it was before the opcode.
+    /// the enclosing handler, snapshotting the frame's gas as it stands.
     ///
-    /// Every guard using this macro rejects its opcode *before* the opcode executes, so the opcode
-    /// must cost the frame nothing: the gas snapshot taken into the revert action is what the
-    /// parent frame gets back. Nothing has been debited at this point — the guarded opcodes are
-    /// excluded from the interpreter's static-gas pre-charge and are charged by
-    /// [`charge_static_gas`] only once the guard has declined to fire — so the snapshot is taken
-    /// as-is. Debiting and refunding around the guard instead would be observably wrong for a
-    /// frame holding less gas than the pre-charge: it would never reach the guard at all.
+    /// Through REX6 nothing has been debited at this point — the guarded opcodes are excluded from
+    /// the interpreter's static-gas pre-charge and are charged by [`charge_static_gas`] only once
+    /// the guard has declined to fire — so the snapshot is the gas the frame held on entry and the
+    /// parent gets all of it back. REX7 charges the static entry first, so the snapshot already
+    /// reflects that debit and the revert does not refund it. Debiting and refunding around the
+    /// guard instead would be observably wrong for a frozen-spec frame holding less gas than the
+    /// pre-charge: it would never reach the guard at all.
     macro_rules! revert_volatile_access_disabled {
         ($context:expr, $opcode:ident, $access_type:expr) => {{
             $context.interpreter.bytecode.set_action(InterpreterAction::new_return(
@@ -1854,20 +1866,20 @@ pub mod volatile_data_ext {
             // The guards apply only once the opcode actually acts on a target.
             if let Some(addr_word) = context.interpreter.stack.inspect::<0>() {
                 let target: Address = addr_word.into_address();
+                let spec = context.host.spec_id();
                 // REX6: the executing contract (source) reading and zeroing its own balance is
                 // itself a beneficiary observation. Frozen off pre-REX6, where only the stack
                 // target below was guarded.
-                if context.host.spec_id().is_enabled(MegaSpecId::REX6) &&
-                    context.interpreter.input.target_address() == beneficiary
-                {
-                    revert_volatile_access_disabled!(
-                        context,
-                        SELFDESTRUCT,
-                        VolatileDataAccessType::Beneficiary
-                    );
-                }
+                let hits_source = spec.is_enabled(MegaSpecId::REX6) &&
+                    context.interpreter.input.target_address() == beneficiary;
                 // All specs: the stack target (the value-transfer destination).
-                if target == beneficiary {
+                let hits_target = target == beneficiary;
+                if hits_source || hits_target {
+                    // REX7 charge-on-reject: the static entry is paid even though the body never
+                    // runs. Frozen specs keep the historical zero-charge reject.
+                    if spec.is_enabled(MegaSpecId::REX7) {
+                        charge_static_gas!(context, SELFDESTRUCT);
+                    }
                     revert_volatile_access_disabled!(
                         context,
                         SELFDESTRUCT,
@@ -1975,11 +1987,18 @@ pub mod volatile_data_ext {
     /// for a frame that can afford them.
     ///
     /// A frame that *cannot* afford the charge is the case where that order shows: the body never
-    /// runs, so it never loads the target and never marks beneficiary access. That divergence is
-    /// unreachable from a wrapper. What is reachable is the tail: the detention cap below is
-    /// applied on every path out of this handler, including the out-of-gas one, so an access marked
-    /// by an already-returned inner frame is still propagated into the transaction's compute
-    /// budget.
+    /// runs, so it never loads the target and never marks beneficiary access. Through REX6 that
+    /// window is a frozen replay hazard (wontfix #20, tripwire below). REX7 specifies it: the mark
+    /// is produced when the target account is loaded, so a frame that cannot pay the pre-load fees
+    /// produces none.
+    ///
+    /// REX7 also charges the static entry on a disable rejection (charge-on-reject); frozen specs
+    /// still reject for free. The charge sits in the open segment and the frame-exit settlement
+    /// records it as compute.
+    ///
+    /// What is reachable on every spec is the tail: the detention cap below is applied on every
+    /// path out of this handler, including the out-of-gas one, so an access marked by an
+    /// already-returned inner frame is still propagated into the transaction's compute budget.
     macro_rules! wrap_call_volatile_check {
     ($fn_name:ident, $opcode:ident, $inner_fn:path) => {
         #[doc = concat!("`", stringify!($opcode), "` opcode with volatile data access disabled check for beneficiary.")]
@@ -1991,19 +2010,21 @@ pub mod volatile_data_ext {
             context: InstructionContext<'_, H, WIRE>,
         ) -> InstructionExecResult {
             let inner_outcome: InstructionExecResult;
+            let spec = context.host.spec_id();
+            let is_rex7 = spec.is_enabled(MegaSpecId::REX7);
             // Rex4+: If targeting the beneficiary while volatile access is disabled, revert before
             // executing the opcode to avoid polluting the tracker. Only this disabled path can
             // revert and only it needs the EIP-7702 delegate resolved, so the resolve (a DB read)
             // is gated behind the disabled check to keep it off the common (enabled) hot path —
             // enabled-access detention is marked by the host as the CALL loads the resolved
             // delegate.
+            let mut reject_disabled = false;
             if context.host.volatile_access_disabled() {
                 // Peek the target address from the stack (position 1 for CALL-like opcodes:
                 // stack layout is [gas_limit, to, ...]).
                 if let Some(addr_word) = context.interpreter.stack.inspect::<1>() {
                     let target: Address = addr_word.into_address();
                     let beneficiary = context.host.beneficiary_address();
-                    let spec = context.host.spec_id();
                     // The raw target already being the beneficiary observes beneficiary state
                     // regardless of where it itself delegates, so check it first — `||` short-circuits
                     // so no EIP-7702 delegate is resolved (and no DB read happens) in that case.
@@ -2020,11 +2041,7 @@ pub mod volatile_data_ext {
                             context.host.best_effort_resolve_eip7702_delegate_address(target) ==
                                 beneficiary)
                     {
-                        revert_volatile_access_disabled!(
-                            context,
-                            $opcode,
-                            VolatileDataAccessType::Beneficiary
-                        );
+                        reject_disabled = true;
                     }
                 }
             }
@@ -2035,14 +2052,31 @@ pub mod volatile_data_ext {
             let tripwire_target: Option<Address> =
                 context.interpreter.stack.inspect::<1>().map(|w| w.into_address());
 
-            // Charged here rather than after the body — see the macro's doc comment. The charge
-            // does not return early: the detention tail below has to run on this path too.
-            const STATIC_GAS: u64 = static_gas(opcode::$opcode);
-            if !context.interpreter.gas.record_regular_cost(STATIC_GAS) {
-                #[cfg(debug_assertions)]
-                debug_check_frozen_detention_window(context.host, opcode::$opcode, tripwire_target);
-                apply_compute_gas_limit!(context);
-                return Err(InstructionResult::OutOfGas);
+            // REX7 charges the static entry even when the guard will reject, so the fee lands in
+            // the open segment and the revert does not refund it. Frozen specs keep charging only
+            // after the guard declines, which is the zero-charge reject the historical tests pin.
+            // Charged here rather than after the body on the success path — see the macro's doc
+            // comment. The charge does not return early: the detention tail below has to run on
+            // this path too.
+            if is_rex7 || !reject_disabled {
+                const STATIC_GAS: u64 = static_gas(opcode::$opcode);
+                if !context.interpreter.gas.record_regular_cost(STATIC_GAS) {
+                    #[cfg(debug_assertions)]
+                    debug_check_frozen_detention_window(
+                        context.host,
+                        opcode::$opcode,
+                        tripwire_target,
+                    );
+                    apply_compute_gas_limit!(context);
+                    return Err(InstructionResult::OutOfGas);
+                }
+            }
+            if reject_disabled {
+                revert_volatile_access_disabled!(
+                    context,
+                    $opcode,
+                    VolatileDataAccessType::Beneficiary
+                );
             }
 
             // Delegate to the existing forward_gas_ext handler via reborrow so that
@@ -2095,17 +2129,23 @@ pub mod volatile_data_ext {
     from the fully settled usage exactly as the per-opcode order applies it, and the epilogue
     re-clamps against the possibly-lowered headroom.
 
-    Each handler keeps charging the opcode's static gas at the position its per-opcode counterpart
-    charges it, because that position decides what an underfunded frame has already done when it
-    halts.
+    Each handler still charges the opcode's static gas at the position its per-opcode counterpart
+    charges it on the success path, because that position decides what an underfunded frame has
+    already done when it halts. The one REX7 change is charge-on-reject: the static entry is
+    debited before the disable guard, so a rejection still pays and the fee lands in the open
+    segment for the prologue (success) or the frame-exit settlement (reject) to record as compute.
 
     The frozen detention-window tripwire the per-opcode conditional wrapper carries is not
     repeated here: it watches for historical transactions whose replay would diverge across a revm
-    bump, and no such transaction can exist for a spec with no activation history. */
+    bump, and no such transaction can exist for a spec with no activation history. The shared
+    CALL-family wrapper still has the tripwire; that copy is spec-gated so REX7 cannot trip it. */
 
-    /// Checkpoint form of [`wrap_op_detain_gas_unconditional`]: disabled guard, prologue, static
-    /// gas ahead of the raw instruction (the position these opcodes' revm bodies charge from),
-    /// body recording, detention cap, epilogue.
+    /// Checkpoint form of [`wrap_op_detain_gas_unconditional`]: static gas, disabled guard,
+    /// prologue, raw instruction, body recording, detention cap, epilogue.
+    ///
+    /// The static entry is charged before the guard so a rejection still pays (REX7
+    /// charge-on-reject). The debit sits in the open segment: a passing guard lets the prologue
+    /// settle it, a rejecting guard leaves it for the frame-exit settlement.
     macro_rules! wrap_checkpoint_detain_gas_unconditional {
     ($fn_name:ident, $opcode:ident, $original_fn:path, $access_type:expr) => {
         #[doc = concat!("`", stringify!($opcode), "` opcode as a checkpoint: segment settlement, raw instruction, gas detention, re-clamp.")]
@@ -2113,12 +2153,12 @@ pub mod volatile_data_ext {
         pub fn $fn_name<WIRE: InterpreterTypes, H: HostExt + ?Sized>(
             context: InstructionContext<'_, H, WIRE>,
         ) -> InstructionExecResult {
+            charge_static_gas!(context, $opcode);
             if context.host.volatile_access_disabled() {
                 revert_volatile_access_disabled!(context, $opcode, $access_type);
             }
             checkpoint_prologue!(context);
             let gas_before = context.interpreter.gas.remaining();
-            charge_static_gas!(context, $opcode);
 
             run_inner_instruction_or_abort!($original_fn, context, inner_outcome);
             record_checkpoint_body_compute_gas!(context, gas_before, detention_tail);
@@ -2133,6 +2173,10 @@ pub mod volatile_data_ext {
     /// instruction, static gas after it (the position these opcodes' revm bodies charge from, so an
     /// underfunded frame has already popped its operands and marked its access), body recording,
     /// detention cap, epilogue.
+    ///
+    /// A disable rejection charges the static entry first (REX7 charge-on-reject) and then reverts
+    /// without running the body, so the success-path charge-after-load order — and the mark that
+    /// load produces — is unchanged.
     macro_rules! wrap_checkpoint_detain_gas_conditional {
     ($fn_name:ident, $opcode:ident, $original_fn:path) => {
         #[doc = concat!("`", stringify!($opcode), "` opcode as a checkpoint: segment settlement, raw instruction, gas detention, re-clamp.")]
@@ -2144,6 +2188,7 @@ pub mod volatile_data_ext {
                 let target: Address = addr_word.into_address();
                 let beneficiary = context.host.beneficiary_address();
                 if target == beneficiary && context.host.volatile_access_disabled() {
+                    charge_static_gas!(context, $opcode);
                     revert_volatile_access_disabled!(
                         context,
                         $opcode,
@@ -2241,13 +2286,16 @@ pub mod volatile_data_ext {
     );
 
     /// `SLOAD` as a checkpoint. Same oracle-volatile handling as [`sload`], but the raw revm
-    /// instruction runs unwrapped and the open segment settles in the prologue.
+    /// instruction runs unwrapped and the open segment settles in the prologue. A disable
+    /// rejection charges the static entry first (REX7 charge-on-reject) without running the
+    /// load, so the success-path charge-after-load order is unchanged.
     #[inline]
     pub fn sload_checkpoint<WIRE: InterpreterTypes, H: HostExt + ?Sized>(
         context: InstructionContext<'_, H, WIRE>,
     ) -> InstructionExecResult {
         let target = context.interpreter.input.target_address();
         if target == ORACLE_CONTRACT_ADDRESS && context.host.volatile_access_disabled() {
+            charge_static_gas!(context, SLOAD);
             revert_volatile_access_disabled!(context, SLOAD, VolatileDataAccessType::Oracle);
         }
         checkpoint_prologue!(context);
@@ -2262,13 +2310,15 @@ pub mod volatile_data_ext {
     }
 
     /// `SELFBALANCE` as a checkpoint. Same beneficiary-volatile handling as [`selfbalance`], but
-    /// the raw revm instruction runs unwrapped and the open segment settles in the prologue.
+    /// the raw revm instruction runs unwrapped and the open segment settles in the prologue. The
+    /// static entry is charged before the guard (REX7 charge-on-reject).
     #[inline]
     pub fn selfbalance_checkpoint<WIRE: InterpreterTypes, H: HostExt + ?Sized>(
         context: InstructionContext<'_, H, WIRE>,
     ) -> InstructionExecResult {
         let target = context.interpreter.input.target_address();
         let beneficiary = context.host.beneficiary_address();
+        charge_static_gas!(context, SELFBALANCE);
         if target == beneficiary && context.host.volatile_access_disabled() {
             revert_volatile_access_disabled!(
                 context,
@@ -2278,7 +2328,6 @@ pub mod volatile_data_ext {
         }
         checkpoint_prologue!(context);
         let gas_before = context.interpreter.gas.remaining();
-        charge_static_gas!(context, SELFBALANCE);
 
         run_inner_instruction_or_abort!(instructions::host::selfbalance, context, inner_outcome);
         record_checkpoint_body_compute_gas!(context, gas_before, detention_tail);
