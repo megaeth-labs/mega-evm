@@ -10,7 +10,7 @@ CLI toolbox for direct MegaEVM execution (`run`, `tx`, `replay`, `cache`) with o
 - `src/run/`: bytecode execution command.
 - `src/tx/`: full transaction execution command with raw-tx override support.
 - `src/replay/`: RPC-backed historical transaction replay through block executor, plus the batch driver.
-- `src/cache/`: cache-file merge utilities (provider-cache and capture-envelope JSON shapes) backing the `cache merge` subcommand and the lock-protected merge-on-persist, plus the sidecar advisory lock every cache-file writer takes.
+- `src/cache/`: cache-file merge utilities (the single envelope JSON shape every cache file uses) backing the `cache merge` subcommand and the lock-protected merge-on-persist, plus the sidecar advisory lock every cache-file writer takes.
 
 ## KEY PATTERNS
 - Shared argument groups are flattened from `run` argument structs into sibling commands.

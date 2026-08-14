@@ -317,7 +317,9 @@ mega-evme replay --rpc.replay-file ./corpus.cache.json \
 `mega-evme replay` supports a transport-level JSON-RPC fixture mechanism that records every request/response pair to a single file and serves them back on later runs without touching the network.
 It is useful for pinning a reproducible replay (e.g. for regression tests, debugging sessions, or offline review) and for running `replay` in environments that cannot reach the RPC endpoint.
 
-Unlike the generic [RPC Cache](../configuration/state-management.md#rpc-cache-and-retry), which is keyed on a small allow-list of cacheable methods and stored per chain under the platform cache directory, the cache file covers every single (non-batch) JSON-RPC call issued during the replay and lives at a user-chosen path.
+The generic [RPC Cache](../configuration/state-management.md#rpc-cache-and-retry) records the same request/response pairs in the same envelope format, and the capture file differs from it in three ways: it lives at a path you choose rather than per chain under the platform cache directory, it holds the whole recorded conversation rather than a bounded number of entries, and it keeps the answers that are only true for the moment they were taken — the chain tip, block-tag reads, still-pending transaction metadata — which the per-chain cache drops so a later run cannot inherit that moment.
+Keeping them is what lets an offline rerun reproduce a pending transaction.
+Neither cache records batched JSON-RPC requests; they are forwarded as-is.
 
 The mechanism has two modes, selected by two mutually exclusive flags.
 

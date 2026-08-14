@@ -101,9 +101,11 @@ pub struct RpcArgs {
     pub replay_file: Option<PathBuf>,
 
     /// Maximum number of items in the in-memory RPC LRU cache (and therefore what
-    /// gets persisted to the cache file). `0` = effectively unlimited (caps at
-    /// 1,048,576 entries; the cache index is preallocated proportional to the
-    /// cap). Default is `0`.
+    /// gets persisted to the cache file). `0` = effectively unlimited, which caps
+    /// at 1,048,576 entries so a long-running process cannot grow without bound.
+    /// The ceiling is not an allocation: memory grows with the entries actually
+    /// cached, so a high value costs nothing until that many responses arrive.
+    /// Default is `0`.
     #[arg(id = "cache_max_entries", long = "rpc.cache-max-entries", default_value_t = 0)]
     pub cache_max_entries: u32,
 

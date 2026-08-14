@@ -21,7 +21,7 @@ cargo build --release -p mega-evme
 | [`run`](commands/run.md)       | Execute arbitrary EVM bytecode directly                                        |
 | [`tx`](commands/tx.md)         | Run a transaction with full transaction context and optional RPC state forking |
 | [`replay`](commands/replay.md) | Replay an existing on-chain transaction from RPC                               |
-| [`cache`](commands/cache.md)   | Offline RPC cache utilities (merge provider caches or capture envelopes)       |
+| [`cache`](commands/cache.md)   | Offline RPC cache utilities (merge cache envelopes)                            |
 
 ## Quick Start
 

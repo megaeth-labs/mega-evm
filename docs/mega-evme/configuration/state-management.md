@@ -207,10 +207,38 @@ When using fork mode, `mega-evme` caches RPC responses to avoid redundant networ
 
 These options take effect only when an RPC endpoint is actually contacted: on `run` and `tx` that requires `--fork` (without `--fork` they are accepted but silently ignored); on `replay` they apply to its `--rpc` fetches (an offline `--rpc.replay-file` run contacts no endpoint and does not use them).
 
+The cache sits at the transport, below the provider, so it sees every single JSON-RPC request the run issues — block bodies included — rather than a fixed list of methods.
+Batched JSON-RPC requests are the exception: they are forwarded as-is, neither read from nor written to the cache.
+The chain-id probe that names the cache file is issued on a provider without the cache, so a cache file can never confirm its own chain identity.
+
+Two kinds of response are never cached by either writer:
+
+- A JSON-RPC `error` body — a transient rate limit surfaced as an `error` rather than an HTTP status would otherwise be replayed as a permanent failure.
+- A `"result": null` — a briefly invisible transaction would otherwise freeze as "not found".
+
+Three more hold only for the moment they were taken, and the per-chain online cache drops them so a later run does not inherit that moment:
+
+- `eth_blockNumber`, whose result _is_ the chain tip.
+- Any request whose params name a moving block (`latest`, `pending`, `earliest`, `safe`, `finalized`) at any depth, including inside an `eth_getLogs` filter.
+- `eth_getTransactionByHash` metadata for a transaction with a null `blockNumber` or `blockHash`, which is what every consumer reads as "still pending".
+
+The caller always gets the response; only the cache declines it, so the next identical request goes back to the endpoint.
+Capture fixtures (`--rpc.capture-file`) keep these three deliberately: an offline rerun of a pending transaction has to be answered from the fixture, and dropping them would make it unusable for exactly that case.
+See [RPC Cache File](../commands/replay.md#rpc-cache-file) for capture and offline replay.
+
 ### Per-Chain Cache Files
 
 Each chain gets its own cache file named `rpc-cache-{chain_id}.json` inside the cache directory.
 The per-chain filename makes cross-chain contamination impossible by construction: a cache populated from mainnet physically cannot be loaded during a testnet run.
+The file body records the chain id too, and it is checked against the chain the endpoint reports before a single entry is adopted.
+A body that disagrees with the endpoint is a hard error (exit `1`) naming both chains: the filename already separates chains, so disagreement inside means the file was swapped or the directory is shared across chains, and continuing would bury that behind a persist that swallows its own failures.
+
+The body is a cache envelope — the `{version, chain_id, cache, external_env}` shape `--rpc.capture-file` also writes — plus a `kind: "cache"` marker identifying it as this cache's own file.
+What is found at the path therefore falls into one of three cases:
+
+- **This cache's file**, at the current version and for this chain: entries are loaded, and clean-exit persist merges into it.
+- **Someone else's file** — a capture fixture, an envelope whose identity fields this build cannot read, a JSON shape neither writer produces, or a file that cannot be read at all: never loaded and never overwritten. The run warns, starts with an empty cache, and skips its persist, so a mispointed `--rpc.cache-dir` cannot destroy the file it was pointed at.
+- **Unusable at this path** — not valid JSON, an envelope `version` this build does not write, undecodable entries, or the bare JSON array an older `mega-evme` wrote: removed and rebuilt from scratch, with one warning. A cache file is a regenerable artifact, so upgrading heals itself instead of failing the first run; an old array cannot be converted, because it stores only hashed request keys that this build hashes differently.
 
 The default cache directory is the platform cache directory:
 
@@ -236,16 +264,19 @@ On clean-exit persist, each process:
 3. Merges its in-memory entries over the on-disk ones (same key → this process's value wins).
 4. Writes the result via a temp file and atomic rename, then releases the lock.
 
+Both writers — the per-chain online cache and `--rpc.capture-file` — follow that sequence; the file they write is the same envelope, and what differs is how each one treats a failure.
+
 The lock sidecar is left in place after the process exits; only the flock is released when the handle closes.
 Lock contention blocks for a short critical section rather than failing the finished run.
 If the lock cannot be acquired at all (for example the directory is not writable), persist fails closed and writes nothing.
-For the provider cache that means the file is left untouched and a warning names it — the cache is a best-effort artifact, so the cost is a re-fetch on the next run.
 An unlocked write is not offered as a fallback: it is exactly the lost-update race the lock exists to prevent, and it would delete a sibling process's entries silently.
-A missing or corrupt on-disk file during the re-read degrades to writing this process's entries only (also warned).
 
-Capture envelopes (`--rpc.capture-file`) use the same lock + re-read-merge path, with additional hard-error checks before writing.
+For the online cache, persist is best-effort: a lock or write failure leaves the file untouched and warns, and the cost is a re-fetch on the next run.
+The re-read under the lock classifies the target exactly as load does, so a file that turned out to be someone else's is left intact and the persist is skipped, while an unusable one is replaced by this process's entries.
+The union of on-disk and in-memory entries is also held to `--rpc.cache-max-entries`, so two processes sharing one file cannot together keep more than either was allowed to.
+
 A capture that cannot take the lock fails the run rather than writing unlocked: the envelope is the primary output of capture mode, so losing a concurrent writer's entries is worse than reporting the failure.
-The checks are:
+Capture adds hard-error checks before writing:
 
 - The on-disk envelope `version` and `chain_id` must match this process's capture.
 - `external_env` uses optimistic concurrency against the snapshot observed when this process opened the capture file:
@@ -260,22 +291,22 @@ The checks are:
 
 A corrupt or unreadable on-disk envelope during re-read degrades to writing this process's entries only (warned), while identity/schema failures remain hard errors.
 
-To consolidate historical per-worker cache directories offline, use [`cache merge`](../commands/cache.md).
-Provider-cache merge also rejects inputs (and `--output`) whose `rpc-cache-{chain_id}.json` filenames disagree on chain id.
+To consolidate cache envelopes offline, use [`cache merge`](../commands/cache.md), which checks chain identity from each envelope body rather than from file names.
+Its output carries no `kind` marker, so it is a fixture and not a drop-in per-chain cache file: a run pointed at it warns, leaves it untouched, and starts with an empty cache.
 `cache merge` follows the same lock protocol for its `--output`: it takes the output's sidecar lock, folds whatever the file holds at that moment into the union, writes, and releases — so merging into a file a live run is still persisting to loses neither side's entries.
 
 ### Cache Flags
 
-| Flag                          | Type  | Default            | Description                                                                                                                                                                                                                            |
-| ----------------------------- | ----- | ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--rpc.cache-max-entries <N>` | `u32` | `0`                | Maximum number of items in the in-memory RPC LRU cache (and therefore what is persisted to the cache file). `0` = effectively unlimited (caps at 1,048,576 entries; the cache index is preallocated proportional to the cap). Default. |
-| `--rpc.cache-dir <PATH>`      | path  | Platform cache dir | Directory for per-chain cache files. Each chain's cache is stored as `{cache_dir}/rpc-cache-{chain_id}.json`. Batch replay uses the on-disk cache only when this flag or `--rpc.clear-cache` is passed explicitly.                     |
-| `--rpc.no-cache-file`         | flag  | `false`            | Disable on-disk cache persistence. The in-memory LRU cache still applies. Wins over `--rpc.clear-cache`. Already the default for batch replay unless `--rpc.cache-dir` or `--rpc.clear-cache` is passed.                               |
-| `--rpc.clear-cache`           | flag  | `false`            | Delete the current chain's cache file before loading it. Recovery path for a polluted or corrupt cache. Engages the on-disk cache, including in batch replay. No effect alongside `--rpc.no-cache-file`.                               |
+| Flag                          | Type  | Default            | Description                                                                                                                                                                                                        |
+| ----------------------------- | ----- | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `--rpc.cache-max-entries <N>` | `u32` | `0`                | Maximum number of items in the in-memory RPC LRU cache (and therefore what is persisted to the cache file). `0` = effectively unlimited, capped at 1,048,576 entries. Default.                                     |
+| `--rpc.cache-dir <PATH>`      | path  | Platform cache dir | Directory for per-chain cache files. Each chain's cache is stored as `{cache_dir}/rpc-cache-{chain_id}.json`. Batch replay uses the on-disk cache only when this flag or `--rpc.clear-cache` is passed explicitly. |
+| `--rpc.no-cache-file`         | flag  | `false`            | Disable on-disk cache persistence. The in-memory LRU cache still applies. Wins over `--rpc.clear-cache`. Already the default for batch replay unless `--rpc.cache-dir` or `--rpc.clear-cache` is passed.           |
+| `--rpc.clear-cache`           | flag  | `false`            | Delete the current chain's cache file before loading it. Recovery path for a polluted or corrupt cache. Engages the on-disk cache, including in batch replay. No effect alongside `--rpc.no-cache-file`.           |
 
-The in-memory cache layer is always installed on a forked or online run and cannot be turned off; `--rpc.no-cache-file` disables only on-disk persistence.
-At the default cap the cache index is preallocated to tens of MiB regardless of how many entries a run actually stores, which is the trade for never re-fetching during a long verification sweep.
-Set `--rpc.cache-max-entries` to a smaller value to reduce that footprint.
+The in-memory cache is always installed on a forked or online run and cannot be turned off; `--rpc.no-cache-file` disables only on-disk persistence.
+The cap is an eviction threshold, not an allocation: memory grows with the entries the run actually caches, so raising it costs nothing until that many responses arrive, and the default `0` (1,048,576 entries) is a guard rail against a long-running process growing without bound rather than a reserved budget.
+Set `--rpc.cache-max-entries` to a smaller value when a run's own working set is the footprint you want to bound — entries beyond the cap are evicted least-recently-used first, and re-fetched if asked for again.
 
 #### Removed Flags
 
@@ -312,11 +343,14 @@ Disable on-disk caching but keep the in-memory LRU:
 mega-evme tx --fork --rpc https://mainnet.megaeth.com/rpc --rpc.no-cache-file ...
 ```
 
-Clear a corrupt cache before replaying:
+Clear a cache you no longer trust before replaying:
 
 ```bash
 mega-evme replay --rpc https://mainnet.megaeth.com/rpc --rpc.clear-cache 0xabc123...
 ```
+
+A cache file left by an older `mega-evme` needs no migration step of its own: the first run of this build reports the file, removes it, and rebuilds the cache from scratch.
+`--rpc.clear-cache` is for a file this build can still read but whose contents you want gone.
 
 ## Round-Trip Example
 
