@@ -115,6 +115,10 @@ A system contract invocation a node answers without opening an EVM frame — the
 An answer that returns or reverts gives the gas back to the caller, and a halt whose remaining gas is rescued for the sender is a refund.
 A node MUST NOT record either as destroyed; that gas was not lost, and counting it would report it twice.
 
+Those sites are the complete set of ways a Rex7 transaction can lose an envelope without executing it.
+One further shape burns a whole envelope having executed nothing — a transaction whose intrinsic gas requirement outgrows the gas limit its sender supplied — but [Rex5](rex5.md) already rejects that transaction during validation, after every MegaETH storage-gas contribution has been folded into the intrinsic total and before the sender is debited.
+It therefore produces no receipt on Rex7 and there is no envelope to split; a node MUST NOT record a rejected transaction's gas limit as a destroyed remainder.
+
 Under per-opcode recording through Rex6, neither the failing opcode nor the destroyed remainder is attributed to compute gas.
 Consequently, a transaction that halts exceptionally, or that contains an inner call frame which does, MAY report a **strictly higher** compute-gas total under Rex7 than under Rex6, while EVM gas accounting and the receipt remain identical.
 

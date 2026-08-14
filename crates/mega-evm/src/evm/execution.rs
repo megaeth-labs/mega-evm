@@ -167,9 +167,31 @@ where
         // Check if the initial gas exceeds the tx gas limit, if so, we halt with out of gas
         let ctx = evm.ctx();
         let tx = ctx.tx();
-        if tx.gas_limit() < init_and_floor_gas.initial_regular_gas {
+        let gas_limit = tx.gas_limit();
+        let tx_kind = tx.kind();
+        if gas_limit < init_and_floor_gas.initial_regular_gas {
+            // REX7+: this halt burns the whole transaction envelope without running a single
+            // opcode, and it produces its result before any frame exists — so the frame-exit
+            // settlement that splits an ordinary exceptional halt can never see it. Take the same
+            // split here: the intrinsic compute gas `validate` already recorded is the only work
+            // performed and stays on the enforcing lane, and the rest of the envelope is
+            // destroyed, which makes the reported total cover what the receipt burns.
+            //
+            // REX5+ rejects this transaction in `validate` instead — the final initial-gas check
+            // there compares the same pair after every MegaETH storage-gas contribution has been
+            // folded in, and returns `CallGasCostMoreThanGasLimit` before `pre_execution` debits
+            // the sender. So no transaction on a spec that has the destroyed lane reaches this
+            // branch today; the recording is what keeps the lane correct if a later spec grows an
+            // intrinsic component that is only resolved after validation.
+            if ctx.spec.is_enabled(MegaSpecId::REX7) {
+                let mut additional_limit = ctx.additional_limit.borrow_mut();
+                // Nothing can have been destroyed before the first frame, so the recorded total
+                // is entirely enforcing usage.
+                let performed = additional_limit.get_usage().compute_gas;
+                additional_limit.record_burned_gas(gas_limit.saturating_sub(performed));
+            }
             // If not sufficient gas, we halt with out of gas
-            let oog_frame_result = gen_oog_frame_result(tx.kind(), tx.gas_limit());
+            let oog_frame_result = gen_oog_frame_result(tx_kind, gas_limit);
             return Ok(Some(oog_frame_result));
         }
         Ok(None)
@@ -1711,6 +1733,11 @@ fn gen_call_too_deep_result(call_inputs: &revm::interpreter::CallInputs) -> Fram
 /// which can happen after `MegaHandler::validate` has added any MegaETH-specific
 /// intrinsic gas (calldata storage gas, REX intrinsic storage gas, callee-side
 /// new-account storage gas, or the REX5+ deposit-caller storage gas).
+///
+/// Reachable on `MINI_REX`..REX4 only: those specs run their initial-gas check midway through
+/// the `MegaETH` additions, so a contribution added after it can still push the total past the
+/// gas limit and land here. REX5 moved that check to the end of the additions, which turns the
+/// same transaction into a `CallGasCostMoreThanGasLimit` validation error instead.
 fn gen_oog_frame_result(tx_kind: TxKind, gas_limit: u64) -> FrameResult {
     match tx_kind {
         TxKind::Call(_address) => FrameResult::Call(CallOutcome::new(
@@ -1856,5 +1883,78 @@ mod mutation_tests {
             panic!("depth guard must override the inspector result");
         };
         consume_synthetic_limit_frame(evm.ctx_ref(), result);
+    }
+
+    /// Drives [`MegaHandler::before_execution`] straight at its short-circuit: a transaction whose
+    /// gas limit is one below the initial gas it is handed, with `recorded_intrinsic` already on
+    /// the compute-gas tracker the way `validate` leaves it.
+    ///
+    /// Returns `(halt gas spent, reported compute total, destroyed part)`.
+    ///
+    /// Driving the hook directly is the only way to reach the branch from REX5 on: those specs
+    /// run their initial-gas check after every `MegaETH` storage-gas contribution, so a transaction
+    /// with this shape is rejected in `validate` instead (pinned by
+    /// `tests/rex7/pre_execution_intrinsic_reject.rs`).
+    fn run_before_execution_short_circuit(
+        spec: MegaSpecId,
+        recorded_intrinsic: u64,
+    ) -> (u64, u64, u64) {
+        let mut context = MegaContext::new(MemoryDatabase::default(), spec);
+        context.inner.tx.base.gas_limit = TEST_GAS_LIMIT;
+        context.additional_limit.borrow_mut().record_compute_gas(recorded_intrinsic);
+
+        let mut evm = MegaEvm::new(context);
+        let handler = MegaHandler::<
+            _,
+            revm::context::result::EVMError<core::convert::Infallible, MegaTransactionError>,
+            (),
+        >::new();
+        let result = handler
+            .before_execution(&mut evm, &InitialAndFloorGas::new(TEST_GAS_LIMIT + 1, 0))
+            .expect("the short circuit cannot fail")
+            .expect("initial gas above the gas limit must short-circuit");
+
+        let additional_limit = evm.ctx_ref().additional_limit.borrow();
+        (
+            result.gas().total_gas_spent(),
+            additional_limit.get_usage().compute_gas,
+            additional_limit.burned_compute_gas(),
+        )
+    }
+
+    /// REX7: the pre-execution intrinsic overrun burns the whole envelope having performed only
+    /// the intrinsic compute gas `validate` recorded, so that intrinsic stays enforcing and the
+    /// rest of the envelope is destroyed. The reported total covers the envelope the halt burns.
+    #[test]
+    fn test_before_execution_short_circuit_destroys_the_unperformed_envelope() {
+        const INTRINSIC: u64 = 21_000;
+        let (spent, reported, destroyed) =
+            run_before_execution_short_circuit(MegaSpecId::REX7, INTRINSIC);
+
+        assert_eq!(spent, TEST_GAS_LIMIT, "the halt burns the whole transaction envelope");
+        assert_eq!(reported, TEST_GAS_LIMIT, "the reported total covers the burnt envelope");
+        assert_eq!(
+            destroyed,
+            TEST_GAS_LIMIT - INTRINSIC,
+            "everything the transaction did not perform is destroyed",
+        );
+        assert_eq!(
+            reported - destroyed,
+            INTRINSIC,
+            "only the intrinsic compute gas already recorded enforces",
+        );
+    }
+
+    /// REX6 has no destroyed lane: the same short circuit records nothing beyond the intrinsic
+    /// `validate` already put on the tracker, and burns the same envelope.
+    #[test]
+    fn test_before_execution_short_circuit_records_nothing_before_rex7() {
+        const INTRINSIC: u64 = 21_000;
+        let (spent, reported, destroyed) =
+            run_before_execution_short_circuit(MegaSpecId::REX6, INTRINSIC);
+
+        assert_eq!(spent, TEST_GAS_LIMIT, "the burnt envelope is spec-independent");
+        assert_eq!(reported, INTRINSIC, "REX6 reports only what validate recorded");
+        assert_eq!(destroyed, 0, "REX6 has no destroyed lane");
     }
 }

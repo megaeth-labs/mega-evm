@@ -536,6 +536,10 @@ A [system contract](../system-contracts/overview.md) invocation a node answers w
 It applies only when the answer is a halt that keeps the call's gas: the part the invocation performed before failing is executed, and the rest of the call's gas limit is destroyed.
 An answer that returns or reverts hands the gas back to the caller, and a halt whose remaining gas is rescued for the sender is a refund; a node MUST NOT record either as destroyed, because that gas was not lost.
 
+The one remaining way to burn a whole envelope without executing anything — a transaction whose intrinsic gas requirement outgrows the gas limit its sender supplied — is not part of this carve-out.
+Since [Rex5](../upgrades/rex5.md) a node rejects that transaction during validation, after every MegaETH storage-gas contribution has been folded into the intrinsic total and before the sender is debited, so it is never included and there is no burnt envelope to split.
+A node MUST NOT record a rejected transaction's gas limit as a destroyed remainder.
+
 The destroyed part is bounded by the sender's gas envelope rather than by the compute limit, and halting on it would rescue gas the EVM already destroyed and change the receipt this carve-out requires to stay identical.
 The executed part carries no such problem: it is work, and leaving it out of enforcement would let a frame that keeps executing after absorbing a failed child spend the same compute headroom a second time.
 

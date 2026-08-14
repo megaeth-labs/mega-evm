@@ -43,6 +43,9 @@
 //! - `precompile_halt` — a precompile that halts exceptionally is split at the recording site the
 //!   same way an interpreter frame is: executed work enforces, the unused forwarded envelope does
 //!   not.
+//! - `pre_execution_intrinsic_reject` — the one envelope-keeping synthetic halt REX7 cannot reach:
+//!   an intrinsic overrun is a validation error from REX5 on, so the destroyed lane never has to
+//!   account for it.
 
 mod burn_split;
 mod charge_on_reject;
@@ -63,4 +66,5 @@ mod latch_surfacing;
 mod modexp_gas;
 mod opcode_set_parity;
 mod parity_shapes;
+mod pre_execution_intrinsic_reject;
 mod precompile_halt;
