@@ -7,10 +7,13 @@
 //! - [`RpcArgs::build_capture_provider`] — RPC with transport-level capture to
 //!   `--rpc.capture-file`.
 //!
-//! The `--rpc.cache-dir` path uses alloy's provider-level `CacheLayer` (caches ~8 methods).
-//! The `--rpc.capture-file` / `--rpc.replay-file` paths use a transport-level
-//! [`CachingTransport`] / [`ReplayTransport`] that captures single JSON-RPC request/response
-//! pairs.
+//! All three build a transport-level [`CachingTransport`] / [`ReplayTransport`]
+//! over single JSON-RPC request/response pairs, so every method is covered and
+//! every path reads and writes the same on-disk envelope. What differs is the
+//! policy each one runs, which is carried by [`CachingTransport`]'s role: the
+//! online path refuses to reuse an answer that is only true for "now" (the chain
+//! tip, a block-tag read, a still-pending transaction), while capture keeps
+//! exactly those so an offline rerun can be answered from the fixture.
 
 mod cache_store;
 mod transport;
@@ -22,7 +25,6 @@ use std::{
 };
 
 use alloy_provider::{
-    layers::CacheLayer,
     transport::{
         layers::{RateLimitRetryPolicy, RetryBackoffLayer},
         RpcError, TransportError, TransportErrorKind,
@@ -35,8 +37,8 @@ use tracing::{debug, info, warn};
 
 pub use self::cache_store::{ExternalEnvSnapshot, RpcCacheStore};
 use self::{
-    cache_store::CacheFileEnvelope,
-    transport::{CachingTransport, ReplayTransport, TransportCache},
+    cache_store::{load_online_cache, CacheFileEnvelope},
+    transport::{CacheRole, CachingTransport, ReplayTransport, TransportCache},
 };
 use super::{EvmeError, Result};
 use crate::cache::{acquire_exclusive_lock, lock_sidecar_path};
@@ -48,7 +50,7 @@ pub type OpProvider = DynProvider<op_alloy_network::Optimism>;
 #[derive(Debug)]
 pub struct BuildProviderOutput {
     /// Configured OP-stack provider. Already wrapped with the retry layer and the
-    /// in-memory cache layer.
+    /// in-memory transport cache.
     pub provider: OpProvider,
     /// Clean-exit cache persistence handle. Call [`RpcCacheStore::persist`] on the
     /// success path; no-op when on-disk persistence is disabled (`--rpc.no-cache-file`).
@@ -189,12 +191,11 @@ impl RpcArgs {
             Some(resolve_cache_path(self.cache_dir.as_deref(), chain_id)?)
         };
 
-        // 3. Build the cache layer and (optionally) the disk store.
-        // Cache layer is always installed; 0 max entries maps to
+        // 3. Build the in-memory cache and (optionally) the disk store.
+        // The cache is always installed; 0 max entries maps to
         // EFFECTIVELY_UNLIMITED_CACHE_ENTRIES.
         let max_items = cache_max_entries_capacity(self.cache_max_entries);
-        let cache_layer = CacheLayer::new(max_items);
-        let cache = cache_layer.cache();
+        let cache = TransportCache::with_max_entries(self.cache_max_entries);
         let cache_store = match cache_path {
             Some(path) => {
                 // Same sidecar lock as persist / `cache merge`. Held for the
@@ -251,33 +252,29 @@ impl RpcArgs {
                         );
                     }
                 }
-                if path.exists() {
-                    // Oversized-load warning is intentionally omitted: alloy's
-                    // `SharedCache` has no public entry-count API (`len` / loaded-count),
-                    // so a file-with-N-entries-over-cap warning cannot be emitted
-                    // without re-implementing load or file-size heuristics (rejected).
-                    if let Err(err) = cache.load_cache(path.clone()) {
-                        warn!(
-                            path = %path.display(),
-                            error = %err,
-                            "Failed to load RPC cache; starting empty",
-                        );
-                    }
-                }
+                // The load can hard-fail (a cache claiming another chain), so its
+                // verdict is held until the guard is gone: releasing the lock is
+                // part of the critical section ending, not of the run succeeding.
+                let load = load_online_cache(&cache, &path, chain_id);
                 // Release after unlink + exists + load; later provider construction
                 // and exit-time persist run without this guard (they never overlap
                 // it in the same process — see lock-ordering note above).
                 drop(clear_lock);
-                RpcCacheStore::new(cache, path)
+                load?;
+                RpcCacheStore::new_online_cache(cache.clone(), path, chain_id)
             }
             None => RpcCacheStore::noop(),
         };
 
         // 4. Build the cached provider.
-        let client = self.build_retry_client(url);
+        let caching = CachingTransport::with_role(
+            self.build_http_transport(url.clone()),
+            cache,
+            CacheRole::Online,
+        );
+        let client = self.build_client(caching, &url);
         let provider = ProviderBuilder::new()
             .disable_recommended_fillers()
-            .layer(cache_layer)
             .network::<op_alloy_network::Optimism>()
             .connect_client(client);
 
@@ -563,16 +560,16 @@ fn parse_non_empty_path(s: &str) -> std::result::Result<PathBuf, String> {
 
 /// Cap used when `--rpc.cache-max-entries 0` ("effectively unlimited") is requested.
 ///
-/// Alloy's `SharedCache` preallocates its LRU hash table to full capacity
-/// (`lru::LruCache::with_hasher` → `HashMap::with_capacity_and_hasher`), so a true
-/// `u32::MAX` mapping would preallocate ~2^33 hash buckets and balloon RSS by multi-GB
-/// on every default-config online run. 2^20 entries preallocates ~2^21 pointer-sized
-/// buckets (tens of MB) while covering ~2,600 blocks' worth of RPC entries per process
-/// (a full mainnet block is ~200 entries; the largest real merged corpus to date was
-/// 15,294).
+/// A guard rail rather than an allocation budget: the entry store grows with the
+/// entries it actually holds, so the number costs nothing until that many
+/// responses are really cached. It exists so a long-running process cannot grow
+/// without bound, and 2^20 entries covers ~2,600 blocks' worth of RPC entries per
+/// process (a full mainnet block is ~200 entries; the largest real merged corpus
+/// to date was 15,294). The value is the published meaning of `0`, so it is not
+/// a free number to change.
 const EFFECTIVELY_UNLIMITED_CACHE_ENTRIES: u32 = 1_048_576;
 
-/// Map `--rpc.cache-max-entries` to the capacity passed to [`CacheLayer::new`].
+/// Map `--rpc.cache-max-entries` to the in-memory cache's entry ceiling.
 ///
 /// `0` means effectively unlimited and is approximated by
 /// [`EFFECTIVELY_UNLIMITED_CACHE_ENTRIES`] (see that constant's rationale).
@@ -683,22 +680,5 @@ mod tests {
         assert_eq!(cache_max_entries_capacity(256), 256);
         assert_eq!(cache_max_entries_capacity(10_000), 10_000);
         assert_eq!(cache_max_entries_capacity(u32::MAX), u32::MAX);
-    }
-
-    /// Construction-reality check: actually allocate the cache at the mapped "unlimited"
-    /// capacity, insert, and read back. Preallocating `u32::MAX` would hang/OOM here
-    /// (hashbrown ctrl-byte memset over ~2^33 buckets); this test must complete quickly.
-    #[test]
-    fn test_cache_layer_constructs_at_effectively_unlimited_capacity() {
-        let layer = CacheLayer::new(cache_max_entries_capacity(0));
-        assert_eq!(layer.max_items(), EFFECTIVELY_UNLIMITED_CACHE_ENTRIES);
-
-        let cache = layer.cache();
-        assert_eq!(cache.max_items(), EFFECTIVELY_UNLIMITED_CACHE_ENTRIES);
-
-        let key = alloy_primitives::B256::repeat_byte(0xab);
-        let value = r#"{"result":"0x1"}"#.to_string();
-        cache.put(key, value.clone()).expect("put into SharedCache");
-        assert_eq!(cache.get(&key).as_deref(), Some(value.as_str()));
     }
 }

@@ -155,23 +155,31 @@ impl TransportCache {
     /// long-running process cannot grow without bound, not an allocation
     /// budget: the store allocates for the entries it actually holds, so even
     /// `u32::MAX` costs nothing at construction.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn with_max_entries(max_entries: u32) -> Self {
         let capacity = NonZeroUsize::new(super::cache_max_entries_capacity(max_entries) as usize)
             .expect("the capacity mapping never yields zero");
         Self { entries: Arc::new(RwLock::new(CacheEntries::bounded(capacity))) }
     }
 
+    /// The configured entry ceiling, `None` when this cache is unbounded.
+    ///
+    /// The on-disk union is capped by the same number, so a run that shares a
+    /// cache directory cannot leave behind a file larger than it was allowed to
+    /// keep in memory.
+    pub(super) fn max_entries(&self) -> Option<usize> {
+        self.entries.read().expect("cache lock poisoned").capacity.map(NonZeroUsize::get)
+    }
+
     /// Read an entry, promoting it to most-recently-used.
     ///
     /// Takes the write lock: a read that does not promote would make the
     /// eviction order depend on writes alone.
-    fn get(&self, key: &B256) -> Option<String> {
+    pub(super) fn get(&self, key: &B256) -> Option<String> {
         self.entries.write().expect("cache lock poisoned").get(key)
     }
 
     /// Store a response. `persistable` decides whether it may reach the envelope.
-    fn put(&self, key: B256, value: String, persistable: bool) {
+    pub(super) fn put(&self, key: B256, value: String, persistable: bool) {
         self.entries.write().expect("cache lock poisoned").put(key, value, persistable);
     }
 
@@ -277,14 +285,8 @@ fn is_null_success_result(resp: &alloy_json_rpc::Response) -> bool {
 /// differ only on responses whose value holds just for "now".
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum CacheRole {
-    /// The online path, which reuses its cache across runs against the same
-    /// endpoint.
-    ///
-    /// Not constructed in production yet: the online provider still caches at
-    /// alloy's provider layer, which refuses block-tag requests outright and
-    /// never sees most methods. These rows are what the same protection looks
-    /// like once online caching moves down to the transport.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// The `--rpc.cache-dir` path, which reuses its cache across runs against
+    /// the same endpoint.
     Online,
     /// The `--rpc.capture-file` path, which writes a fixture meant to answer
     /// every request a later offline run repeats.
@@ -324,13 +326,10 @@ pub(super) enum SkipReason {
     /// The endpoint answered with `"result": null`.
     NullResult,
     /// The method reports the chain tip, so its answer ages out with the next block.
-    #[cfg_attr(not(test), allow(dead_code))]
     ChainTipMethod,
     /// The params name a moving block (`latest`, `pending`, …) rather than a fixed one.
-    #[cfg_attr(not(test), allow(dead_code))]
     BlockTagParams,
     /// Transaction metadata for a transaction that is not in a block yet.
-    #[cfg_attr(not(test), allow(dead_code))]
     PendingTransaction,
 }
 
@@ -691,7 +690,7 @@ mod tests {
 
     /// The configured entry ceiling, `None` when unbounded.
     fn configured_capacity(cache: &TransportCache) -> Option<usize> {
-        cache.entries.read().expect("cache lock poisoned").capacity.map(NonZeroUsize::get)
+        cache.max_entries()
     }
 
     /// A transaction-metadata response for a transaction that is not mined yet.
