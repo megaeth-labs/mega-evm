@@ -24,18 +24,15 @@ use std::{
     time::{Duration, Instant},
 };
 
-use alloy_consensus::BlockHeader;
+use alloy_consensus::{transaction::Recovered, BlockHeader};
 use alloy_network::ReceiptResponse;
 use alloy_primitives::{Address, B256};
 use alloy_provider::Provider;
 use alloy_rpc_types_eth::Block;
 use mega_evm::{
-    alloy_evm::{
-        block::{BlockExecutionError, BlockValidationError},
-        EvmEnv,
-    },
-    revm::{context::result::ExecutionResult, DatabaseRef},
-    BlockLimits, MegaBlockExecutionCtx, MegaHaltReason, MegaHardforks, MegaSpecId,
+    alloy_evm::EvmEnv,
+    revm::{context::result::ExecutionResult, inspector::NoOpInspector, DatabaseRef},
+    BlockLimits, MegaBlockExecutionCtx, MegaHaltReason, MegaHardforks, MegaSpecId, MegaTxEnvelope,
 };
 use op_alloy_rpc_types::Transaction;
 use serde::Serialize;
@@ -457,13 +454,15 @@ struct FixtureDumpEnv<'a> {
     mega_env: MegaEnv,
 }
 
-/// The batch driver's pre-commit work, run by the execution kernel for every
-/// target of a block.
+/// The batch driver's participation in the kernel's block run.
 ///
 /// A fixture draft has to be built while the database still reflects the state
 /// the target started from, which is only true between its execution and its
 /// commit. The draft is carried through the block's `finish()` and published by
 /// the driver afterwards, so a block that never finishes leaves no file behind.
+///
+/// The other lifecycle points are the ones a plain replay does not need: a batch
+/// target executes exactly as it was mined, and nothing inspects it.
 struct FixtureDraftHook<'a> {
     /// Where and against what to dump, or `None` when no dump was requested.
     dump: Option<FixtureDumpEnv<'a>>,
@@ -477,21 +476,47 @@ struct FixtureDraftHook<'a> {
     onchain_receipts: &'a BTreeMap<B256, std::result::Result<ReceiptFacts, String>>,
 }
 
-impl kernel::TargetHook for FixtureDraftHook<'_> {
+impl kernel::TargetLifecycle for FixtureDraftHook<'_> {
+    /// Nothing observes a batch replay step by step: the run reports receipts,
+    /// not traces.
+    type Inspector = NoOpInspector;
+    const INSPECT: bool = false;
+    /// A batch target is replayed as the chain mined it — overrides belong to
+    /// the single-transaction path, which refuses them together with a dump.
+    type Tx<'tx> = Recovered<&'tx MegaTxEnvelope>;
     type Draft = Option<DeferredFixture>;
 
-    fn on_target_executed<DB>(&mut self, target: kernel::TargetExecution<'_, DB>) -> Self::Draft
+    /// Replay the target exactly as the block body served it.
+    fn before_target<'tx>(
+        &mut self,
+        tx: &'tx Transaction,
+        _inspector: &mut NoOpInspector,
+    ) -> Result<Self::Tx<'tx>> {
+        Ok(tx.as_recovered())
+    }
+
+    /// Prepare this target's fixture against the pre-commit state.
+    ///
+    /// Every way a dump can fail for one target is folded into its own report
+    /// and the run keeps going: a batch reports per target, so one target's
+    /// unwritable fixture must not stop the block. The kernel's failure channel
+    /// is therefore unused here.
+    fn on_target_executed<DB>(
+        &mut self,
+        target: kernel::TargetExecution<'_, DB>,
+        _inspector: &NoOpInspector,
+    ) -> Result<Self::Draft>
     where
         DB: DatabaseRef,
         DB::Error: core::fmt::Display,
     {
-        let dump = self.dump.as_ref()?;
-        Some(prepare_target_fixture(
+        let Some(dump) = self.dump.as_ref() else { return Ok(None) };
+        Ok(Some(prepare_target_fixture(
             target.db,
             DumpFixtureArgs {
                 accessed_block_hash_count: target.accessed_block_hash_count,
-                exec_result: target.exec_result,
-                evm_state: target.evm_state,
+                exec_result: &target.result_and_state.result,
+                evm_state: &target.result_and_state.state,
                 chain_id: self.chain_id,
                 executed_spec: self.executed_spec,
                 block: self.block,
@@ -501,7 +526,7 @@ impl kernel::TargetHook for FixtureDraftHook<'_> {
                 dir: dump.dir,
                 overwrite: dump.overwrite,
             },
-        ))
+        )))
     }
 }
 
@@ -550,7 +575,7 @@ pub(super) async fn run<P>(
     report: ReportArgs,
 ) -> Result<()>
 where
-    P: Provider<op_alloy_network::Optimism> + Clone + std::fmt::Debug,
+    P: Provider<op_alloy_network::Optimism> + Clone + std::fmt::Debug + 'static,
 {
     let start = Instant::now();
     let mut tally = BatchTally::default();
@@ -795,7 +820,7 @@ async fn replay_block<P>(
     report: &ReportArgs,
 ) -> BlockReplayOutcome
 where
-    P: Provider<op_alloy_network::Optimism> + Clone + std::fmt::Debug,
+    P: Provider<op_alloy_network::Optimism> + Clone + std::fmt::Debug + 'static,
 {
     let BlockJob { number, block, targets: job_targets } = job;
     let verify_receipt = report.verify_receipt;
@@ -1014,6 +1039,7 @@ where
             external_envs,
             block_ctx,
             evm_env,
+            inspector: NoOpInspector,
             fork_block: parent_block.header.number(),
             identity: kernel::BlockIdentity { number, timestamp, hash: block.hash() },
             tx_hashes: &tx_hashes,
@@ -1027,7 +1053,7 @@ where
     // was asked about, classified by what stopped it: a failed fork is an
     // unanswered endpoint question, while rejected pre-execution changes are
     // the executor's own verdict on the block.
-    let kernel::BlockRun { loop_result, in_flight, finish } = match run {
+    let kernel::BlockRun { loop_outcome, finish } = match run {
         Ok(run) => run,
         Err(setup) => {
             let (kind, message) = match setup {
@@ -1088,22 +1114,19 @@ where
                 // Materialize only when the block loop completed cleanly: a
                 // mid-block abort after this target built a Ready draft must
                 // not publish (or clobber) a fixture for a block that failed.
-                // Keep the execution result; only the fixture field fails, and
-                // it inherits the abort's class so a transient RPC abort exits 3.
-                let fixture = target.draft.map(|deferred| match &loop_result {
-                    Ok(()) => materialize_deferred_fixture(deferred),
-                    Err(abort) => match deferred {
-                        DeferredFixture::Report(report) => report,
-                        DeferredFixture::Ready { path, .. } => FixtureReport::abort_error(
-                            format!(
-                                "fixture not written: block aborted before a clean finish \
-                                 (draft for {} was discarded): {abort}",
-                                path.display()
-                            ),
-                            classify(abort),
-                        ),
-                    },
-                });
+                // That is the kernel's rule, not this driver's discipline — a
+                // draft is only redeemable against the run's clean-run proof,
+                // and an aborted run has none to hand out. Keep the execution
+                // result; only the fixture field fails, and it inherits the
+                // abort's class so a transient RPC abort exits 3.
+                let fixture = match &loop_outcome {
+                    kernel::LoopOutcome::Completed(clean) => {
+                        target.draft.redeem(clean).map(materialize_deferred_fixture)
+                    }
+                    kernel::LoopOutcome::Aborted { error, .. } => {
+                        target.draft.peek().as_ref().map(|draft| discarded_fixture(draft, error))
+                    }
+                };
                 entries.push(BatchEntry::Executed(Box::new(ExecutedTx {
                     tx_hash: target.tx_hash,
                     block_number: number,
@@ -1142,8 +1165,8 @@ where
         .filter(|hash| !reported.contains(*hash));
 
     let mut uncounted_abort = None;
-    match &loop_result {
-        Ok(()) => {
+    match &loop_outcome {
+        kernel::LoopOutcome::Completed(_) => {
             // Active targets are already filtered for inclusion agreement; a
             // remaining absence from the body is still an endpoint
             // inconsistency (the target was queued against this block), not a
@@ -1158,16 +1181,12 @@ where
                 entries.push(BatchEntry::Failed(incoherent_endpoint(*tx_hash, &incoherence)));
             }
         }
-        Err(e) => {
+        kernel::LoopOutcome::Aborted { error: e, tx_hash: aborting } => {
             warn!(block = number, error = %e, "Aborted block replay; skipping its remaining targets");
-            // The iteration that raised the abort is authoritative; error
-            // introspection only covers errors raised outside the loop (a
-            // failed `finish`, for one), which can still name a transaction.
-            let aborting = in_flight.or_else(|| aborting_tx_hash(e));
             let root_kind = classify(e);
             let mut root_on_target = false;
             for tx_hash in unreported {
-                if aborting == Some(*tx_hash) {
+                if aborting == tx_hash {
                     // The abort is this target's own answer.
                     root_on_target = true;
                     entries.push(failure(*tx_hash, root_kind, e.to_string()));
@@ -1190,11 +1209,9 @@ where
             if !root_on_target {
                 // If finish failed for pending targets that already include the
                 // aborter as a Failed entry, the class is already counted.
-                let already_counted = aborting.is_some_and(|hash| {
-                    entries.iter().any(|entry| match entry {
-                        BatchEntry::Failed(tx) => tx.tx_hash == hash && tx.kind == root_kind,
-                        BatchEntry::Executed(_) => false,
-                    })
+                let already_counted = entries.iter().any(|entry| match entry {
+                    BatchEntry::Failed(tx) => tx.tx_hash == *aborting && tx.kind == root_kind,
+                    BatchEntry::Executed(_) => false,
                 });
                 // Abort-inherited fixture failures on executed targets already
                 // contribute the abort class to the tally.
@@ -1351,6 +1368,26 @@ fn materialize_deferred_fixture(deferred: DeferredFixture) -> FixtureReport {
     }
 }
 
+/// Report a deferred fixture the block aborted on before it could be written.
+///
+/// The kernel hands an aborted run's drafts back for reading only, which is
+/// exactly what this needs: a pre-decided report is what it always was, and a
+/// draft that was ready to write becomes a failure naming the file that was not
+/// created, classified as the abort that prevented it.
+fn discarded_fixture(deferred: &DeferredFixture, abort: &ReplayError) -> FixtureReport {
+    match deferred {
+        DeferredFixture::Report(report) => report.clone(),
+        DeferredFixture::Ready { path, .. } => FixtureReport::abort_error(
+            format!(
+                "fixture not written: block aborted before a clean finish \
+                 (draft for {} was discarded): {abort}",
+                path.display()
+            ),
+            classify(abort),
+        ),
+    }
+}
+
 /// Classify a [`fixture::build_draft`] error as a skip (unsupported shape) or a
 /// fixture construction error (database / other failures).
 ///
@@ -1462,30 +1499,6 @@ fn classify(err: &ReplayError) -> BatchErrorKind {
 /// add a parameter.
 fn swept_kind(_abort_cause: &ReplayError) -> BatchErrorKind {
     BatchErrorKind::Rpc
-}
-
-/// The transaction an aborting error is about, when it names one.
-fn aborting_tx_hash(err: &ReplayError) -> Option<B256> {
-    match err {
-        ReplayError::TransactionNotFound(hash) | ReplayError::BlockBodyTransactionNull(hash) => {
-            Some(*hash)
-        }
-        ReplayError::BlockBodyTransactionFetch { tx_hash, .. } => Some(*tx_hash),
-        ReplayError::BlockExecutionError(err) => block_error_tx_hash(err),
-        _ => None,
-    }
-}
-
-/// The transaction a block execution error names, when it carries one.
-fn block_error_tx_hash(err: &BlockExecutionError) -> Option<B256> {
-    if let Some(validation) = err.as_validation() {
-        return match validation {
-            BlockValidationError::InvalidTx { hash, .. } |
-            BlockValidationError::EVM { hash, .. } => Some(*hash),
-            _ => None,
-        };
-    }
-    err.as_internal()?.as_evm().map(|(hash, _)| *hash)
 }
 
 /// Adapt a shared coherence verdict to this target's failure record.
@@ -1782,17 +1795,20 @@ mod tests {
         );
     }
 
-    /// A block-body hash resolving to null is an RPC inconsistency that still
-    /// names the vanished transaction for the abort sweep.
+    /// A block-body hash resolving to null is an RPC inconsistency, and its
+    /// message names the vanished transaction the abort is attributed to.
     #[test]
     fn test_block_body_transaction_null_classifies_as_rpc_and_names_the_hash() {
         let hash = B256::repeat_byte(0xab);
         let err = ReplayError::BlockBodyTransactionNull(hash);
         assert_eq!(classify(&err), BatchErrorKind::Rpc);
-        assert_eq!(aborting_tx_hash(&err), Some(hash));
+        let message = err.to_string();
+        assert!(
+            message.contains(&hash.to_string()) || message.contains(&format!("{hash:#x}")),
+            "unexpected message: {message}"
+        );
         // Contrasts with the user-supplied unknown-hash definitive answer.
         assert_eq!(classify(&ReplayError::TransactionNotFound(hash)), BatchErrorKind::NotFound);
-        assert_eq!(aborting_tx_hash(&ReplayError::TransactionNotFound(hash)), Some(hash));
     }
 
     /// A block-body fetch failure (transport / cache miss) is rpc-class and
@@ -1805,7 +1821,6 @@ mod tests {
             message: "cache miss in offline replay file".into(),
         };
         assert_eq!(classify(&err), BatchErrorKind::Rpc);
-        assert_eq!(aborting_tx_hash(&err), Some(hash));
         let message = err.to_string();
         assert!(message.contains(&hash.to_string()) || message.contains(&format!("{hash:#x}")));
         assert!(message.contains("fetching it failed"), "unexpected message: {message}");
