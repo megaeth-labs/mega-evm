@@ -23,6 +23,25 @@
 //! snapshot is only as trustworthy as the rules that produced it, and those
 //! rules should be readable without following helpers into another module.
 //!
+//! # Digested sections
+//!
+//! A traced replay prints hundreds of kilobytes and a state dump tens, which no
+//! reviewer reads and which would bury the rest of the corpus in the diff of any
+//! change that legitimately moves them. A row may therefore opt in
+//! ([`Row::digested`]) to recording its oversized sections as a content digest —
+//! the byte count, the line count and a keccak-256 of the normalized body —
+//! instead of the body itself. The gate is as strict either way: any change to
+//! the payload changes the digest. What is lost is the *diff*, so a row that
+//! fails on a digest has to be re-run by hand to see what moved; the
+//! [`Row::digested`] rows are picked so that this is the payload nobody would
+//! read line by line anyway.
+//!
+//! Each digesting trace row has a sibling that writes its payload to a file
+//! instead of printing it, so the summary the run prints stays pinned verbatim
+//! by the sibling while the payload is digested by both. The `call` tracer's
+//! payload is small enough that neither of its two rows digests anything, which
+//! keeps one trace pinned byte for byte.
+//!
 //! # Regenerating
 //!
 //! ```bash
@@ -47,10 +66,11 @@
 //! - **Windows paths are not normalized.** Path substitution matches the native separator, and a
 //!   JSON-serialized Windows path carries doubled backslashes, so a golden blessed on Windows would
 //!   not match one blessed on Unix. This repository has no Windows CI; the gate is a Unix gate.
-//! - **Tracing, state dumps and `--override.spec` are not in the matrix.** Trace output is large
-//!   enough to swamp the goldens, and the override rows need an online mock rather than an offline
-//!   capture. Those flags keep their structured coverage in `replay_override_spec.rs` and the
-//!   `run`/`tx` tests.
+//! - **Only a downgrade is pinned for `--override.spec`.** Forcing a *newer* spec makes the replay
+//!   read state the historical block never touched, which an offline capture answers with a miss
+//!   rather than with the state the forced world needs. The upgrade direction, and what the
+//!   override does to the pre-block predeploys and the block limits, keep their structured coverage
+//!   in `replay_override_spec.rs`, which drives a mock endpoint.
 //! - **Fixture failure branches beyond the two pinned here** — a destination that already exists,
 //!   and the fidelity gate refusing a halted replay — stay with the structured tests
 //!   (`replay_dump.rs`). An unanswered receipt for the gate, a mid-flight write failure, and a
@@ -101,6 +121,18 @@ const BLOCK_MID_TX: &str = "0x323ddc8e67dfc134284d78c65f3c1dc7ff45ba1db02eeaf62e
 /// Last transaction of [`BLOCK`] (index 22).
 const BLOCK_LAST_TX: &str = "0xb6a0b7a302c741f64b8e46861a3dcb2d5c1047f6f2cb89a35b5c2183c96296b7";
 
+/// Transaction of [`BLOCK`] at index 1, so it is walked *before*
+/// [`BLOCK_MID_TX`] and never reported on. Breaking this one is how a row
+/// manufactures a failure among a target's preceding transactions.
+const BLOCK_PRECEDING_TX: &str =
+    "0xac421778129bf356848cb654e74a41cc3a94bb0d15e284d22c9d2789675f3775";
+
+/// Transaction of [`BLOCK`] at index 10, so it sits between [`BLOCK_MID_TX`]
+/// and [`BLOCK_LAST_TX`] and is a target of neither. Breaking this one aborts
+/// the body after the first target committed and before the second ran.
+const BLOCK_INTERVENING_TX: &str =
+    "0x714b90de188cf13b94caa6f7e7c7218f453c550532918a38261ef89191675fbd";
+
 /// Transaction of the capture's second block, so a `--tx-file` run has to group
 /// targets across blocks.
 const OTHER_BLOCK_TX: &str = "0x18302160f2395069a44e1654d173fa9eed95ead8f922f12bfe07b6bdcc0a14f2";
@@ -144,6 +176,12 @@ const DUMP_FIXTURE_PATH: &str = "<DUMP_FIXTURE>";
 
 /// Stands for the `--dump-fixture-dir` destination.
 const DUMP_DIR_PATH: &str = "<DUMP_DIR>";
+
+/// Stands for the `--trace.output` destination.
+const TRACE_OUTPUT_PATH: &str = "<TRACE_OUTPUT>";
+
+/// Stands for the `--dump.output` destination.
+const DUMP_OUTPUT_PATH: &str = "<DUMP_OUTPUT>";
 
 /// Stands for the `--tx-file` target list.
 const TX_FILE_PATH: &str = "<TX_FILE>";
@@ -265,8 +303,9 @@ struct Expect {
     /// Values a `--json` run must print that report a per-target failure
     /// instead of a result (`{"tx_hash":…,"error":{…}}`).
     error_lines: Option<usize>,
-    /// Whether the row's `--dump-fixture` destination must exist afterwards.
-    dump_written: Option<bool>,
+    /// Whether the row's single-file destination — a dumped fixture, a written
+    /// trace, a written state dump — must exist afterwards.
+    file_written: Option<bool>,
     /// Files the row's `--dump-fixture-dir` destination must hold afterwards.
     dir_files: Option<usize>,
 }
@@ -291,6 +330,8 @@ struct Row {
     /// Absolute paths this row puts on the command line, with the placeholder
     /// each is rewritten to before comparison.
     paths: Vec<(PathBuf, &'static str)>,
+    /// Whether this row's oversized sections are recorded by digest.
+    digest: bool,
     /// Golden-independent invariants of this row.
     expect: Expect,
 }
@@ -319,6 +360,7 @@ impl Row {
             inputs: Vec::new(),
             artifacts: Vec::new(),
             paths: Vec::new(),
+            digest: false,
             expect: Expect::default(),
         }
     }
@@ -326,6 +368,16 @@ impl Row {
     /// Replay from a doctored copy of the capture rather than the committed one.
     fn doctored(mut self, doctoring: Doctoring) -> Self {
         self.doctoring = Some(doctoring);
+        self
+    }
+
+    /// Record this row's oversized sections by content digest.
+    ///
+    /// Only sections longer than [`DIGEST_OVER`] are affected, so a row that
+    /// opts in still pins everything small — its exit code, its stderr, and the
+    /// summary of a run whose payload went to a file — verbatim.
+    fn digested(mut self) -> Self {
+        self.digest = true;
         self
     }
 
@@ -347,9 +399,9 @@ impl Row {
         self
     }
 
-    /// Declare whether the `--dump-fixture` destination must exist afterwards.
-    fn dump_written(mut self, written: bool) -> Self {
-        self.expect.dump_written = Some(written);
+    /// Declare whether this row's single-file destination must exist afterwards.
+    fn file_written(mut self, written: bool) -> Self {
+        self.expect.file_written = Some(written);
         self
     }
 
@@ -395,6 +447,30 @@ impl Row {
         self.args.push(display(&path));
         self.paths.push((path.clone(), DUMP_FIXTURE_PATH));
         self.artifacts.push(Artifact::File(DUMP_FIXTURE_PATH, path));
+        self
+    }
+
+    /// Add `--trace.output`, pointed at a path in the scratch directory.
+    ///
+    /// The written trace joins the snapshot as an artifact, so the payload is
+    /// pinned in the destination the flag sent it to rather than only in the
+    /// line stdout prints about it.
+    fn with_trace_output(mut self, scratch: &Path) -> Self {
+        let path = scratch.join("trace.json");
+        self.args.push("--trace.output".into());
+        self.args.push(display(&path));
+        self.paths.push((path.clone(), TRACE_OUTPUT_PATH));
+        self.artifacts.push(Artifact::File(TRACE_OUTPUT_PATH, path));
+        self
+    }
+
+    /// Add `--dump.output`, pointed at a path in the scratch directory.
+    fn with_dump_output(mut self, scratch: &Path) -> Self {
+        let path = scratch.join("state.json");
+        self.args.push("--dump.output".into());
+        self.args.push(display(&path));
+        self.paths.push((path.clone(), DUMP_OUTPUT_PATH));
+        self.artifacts.push(Artifact::File(DUMP_OUTPUT_PATH, path));
         self
     }
 
@@ -478,7 +554,7 @@ fn row_single_verify_mismatch(_scratch: &Path) -> Row {
 fn row_single_verify_dump(scratch: &Path) -> Row {
     Row::new(CAPTURE_SINGLE, &["--verify-receipt", SINGLE_TX])
         .with_dump_fixture(scratch)
-        .dump_written(true)
+        .file_written(true)
 }
 
 /// Replay a deposit: a different transaction type, receipt shape and fee path.
@@ -518,7 +594,7 @@ fn row_single_halt_verify(_scratch: &Path) -> Row {
 /// reproduce the halt, so the dump is refused and no file is written. The
 /// snapshot records both the refusal and the absent artifact.
 fn row_single_halt_dump_refused(scratch: &Path) -> Row {
-    Row::new(CAPTURE_HALT, &[HALT_TX]).with_dump_fixture(scratch).exits(1).dump_written(false)
+    Row::new(CAPTURE_HALT, &[HALT_TX]).with_dump_fixture(scratch).exits(1).file_written(false)
 }
 
 /// Replay one transaction of the batch capture through the single-transaction
@@ -535,7 +611,171 @@ fn row_single_block_tx_verify(_scratch: &Path) -> Row {
 
 /// Dump a fixture for that same transaction through the single-file writer.
 fn row_single_block_tx_dump(scratch: &Path) -> Row {
-    Row::new(CAPTURE_BLOCKS, &[BLOCK_MID_TX]).with_dump_fixture(scratch).dump_written(true)
+    Row::new(CAPTURE_BLOCKS, &[BLOCK_MID_TX]).with_dump_fixture(scratch).file_written(true)
+}
+
+/// Trace the target with the opcode tracer, printed inline.
+///
+/// The tracer a `replay` run gets when `--trace` names none. Its payload is the
+/// largest thing this tool prints, so it is digested; the summary it is printed
+/// alongside is pinned verbatim by `single_offline_mined`, which replays the
+/// same transaction without a tracer, and by the `_file` row below.
+fn row_single_trace_opcode(_scratch: &Path) -> Row {
+    Row::new(CAPTURE_SINGLE, &["--trace", SINGLE_TX]).digested()
+}
+
+/// Trace the target with the opcode tracer, written to a file.
+///
+/// The other destination the flag family offers. stdout then carries the
+/// summary and the line naming the destination, both verbatim, and the payload
+/// is pinned as an artifact — so a trace that silently stopped being written, or
+/// started being written somewhere else, fails here.
+fn row_single_trace_opcode_file(scratch: &Path) -> Row {
+    Row::new(CAPTURE_SINGLE, &["--trace", SINGLE_TX])
+        .with_trace_output(scratch)
+        .digested()
+        .file_written(true)
+}
+
+/// Trace the target with the call tracer, printed inline.
+///
+/// Small enough to pin verbatim, which makes this the one row that holds a whole
+/// trace in a golden rather than a digest of one.
+fn row_single_trace_call(_scratch: &Path) -> Row {
+    Row::new(CAPTURE_SINGLE, &["--trace", "--tracer", "call", SINGLE_TX])
+}
+
+/// Trace the target with the call tracer, written to a file.
+fn row_single_trace_call_file(scratch: &Path) -> Row {
+    Row::new(CAPTURE_SINGLE, &["--trace", "--tracer", "call", SINGLE_TX])
+        .with_trace_output(scratch)
+        .file_written(true)
+}
+
+/// Trace the target with the prestate tracer, printed inline.
+///
+/// The prestate tracer reads the database rather than the execution steps, so it
+/// is the tracer most sensitive to *when* in the block the target is observed —
+/// exactly the moment the shared kernel hands over.
+fn row_single_trace_prestate(_scratch: &Path) -> Row {
+    Row::new(CAPTURE_SINGLE, &["--trace", "--tracer", "prestate", SINGLE_TX]).digested()
+}
+
+/// Trace the target with the prestate tracer, written to a file.
+fn row_single_trace_prestate_file(scratch: &Path) -> Row {
+    Row::new(CAPTURE_SINGLE, &["--trace", "--tracer", "prestate", SINGLE_TX])
+        .with_trace_output(scratch)
+        .digested()
+        .file_written(true)
+}
+
+/// Trace the target with the prestate tracer in diff mode, printed inline.
+///
+/// Diff mode reports the pre- and post-state of everything the target touched,
+/// so it depends on the target's own state diff as well as on the state it ran
+/// against — a second reading of the same pre-commit moment.
+fn row_single_trace_prestate_diff(_scratch: &Path) -> Row {
+    Row::new(
+        CAPTURE_SINGLE,
+        &["--trace", "--tracer", "prestate", "--trace.prestate.diff-mode", SINGLE_TX],
+    )
+    .digested()
+}
+
+/// Trace the target with the prestate tracer in diff mode, written to a file.
+fn row_single_trace_prestate_diff_file(scratch: &Path) -> Row {
+    Row::new(
+        CAPTURE_SINGLE,
+        &["--trace", "--tracer", "prestate", "--trace.prestate.diff-mode", SINGLE_TX],
+    )
+    .with_trace_output(scratch)
+    .digested()
+    .file_written(true)
+}
+
+/// Dump the target's post-execution state, printed inline.
+///
+/// The state dump is the target's own state diff rendered, so it pins what the
+/// driver took out of the pre-commit moment rather than what a tracer observed
+/// during it.
+fn row_single_state_dump(_scratch: &Path) -> Row {
+    Row::new(CAPTURE_SINGLE, &["--dump", SINGLE_TX]).digested()
+}
+
+/// Dump the target's post-execution state to a file.
+fn row_single_state_dump_file(scratch: &Path) -> Row {
+    Row::new(CAPTURE_SINGLE, &["--dump", SINGLE_TX])
+        .with_dump_output(scratch)
+        .digested()
+        .file_written(true)
+}
+
+/// Replay the target under a forced older spec.
+///
+/// `Equivalence` prices the same transaction at less than half the gas its own
+/// fork charges, so the snapshot fails loudly if the forced schedule ever stops
+/// reaching the EVM. The downgrade direction is the one an offline capture can
+/// answer; see this file's declared limits.
+fn row_single_override_spec(_scratch: &Path) -> Row {
+    Row::new(CAPTURE_SINGLE, &["--override.spec", "Equivalence", SINGLE_TX])
+}
+
+/// Replay the target with all three transaction overrides at once.
+///
+/// The value and the input each move the outcome on their own — the call reverts
+/// where the mined one succeeded — so this row cannot pass with either of them
+/// dropped on the floor. The gas limit is raised rather than lowered here, and
+/// is pinned separately by the row below.
+fn row_single_override_tx(_scratch: &Path) -> Row {
+    Row::new(
+        CAPTURE_SINGLE,
+        &[
+            "--override.gas-limit",
+            "200000",
+            "--override.value",
+            "1",
+            "--override.input",
+            "0x",
+            SINGLE_TX,
+        ],
+    )
+}
+
+/// Replay the target under a gas limit it cannot pay for.
+///
+/// A raised gas limit leaves the outcome exactly where it was, so the row above
+/// cannot say whether its `--override.gas-limit` reached the EVM at all. A limit
+/// below the call's own cost can only be answered by a rejection, which is what
+/// this row pins.
+fn row_single_override_gas_limit(_scratch: &Path) -> Row {
+    Row::new(CAPTURE_SINGLE, &["--override.gas-limit", "50000", SINGLE_TX]).exits(1)
+}
+
+/// Replay a target whose block body holds a transaction the endpoint no longer
+/// serves, ahead of the target.
+///
+/// A single-transaction replay executes the body up to its target, so a failure
+/// among those preceding transactions is a failure of the run: there is no
+/// second target to keep a result for. The endpoint answering a body-listed hash
+/// with null is an inconsistency rather than a verdict, so the run exits `3`.
+fn row_single_preceding_null(_scratch: &Path) -> Row {
+    Row::new(CAPTURE_BLOCKS, &[BLOCK_MID_TX]).doctored(doctor_preceding_null).exits(3)
+}
+
+/// Replay two targets of one block with an unserved transaction between them.
+///
+/// The abort contract, which no other row reaches: the first target had already
+/// committed when the walk stopped, so it keeps the result and the receipt it
+/// earned, while the second — which never ran — is reported as the abort. Both
+/// halves matter, and only together do they say that a broken block body costs
+/// exactly the targets behind the break.
+fn row_batch_mid_block_abort(scratch: &Path) -> Row {
+    Row::new(CAPTURE_BLOCKS, &[])
+        .doctored(doctor_intervening_null)
+        .with_tx_file(scratch, &[BLOCK_MID_TX, BLOCK_LAST_TX])
+        .exits(3)
+        .result_lines(1)
+        .error_lines(1)
 }
 
 /// Replay a whole block: every transaction of `BLOCK` in order.
@@ -697,6 +937,27 @@ fn doctor_batch_mixed(source: &Path, scratch: &Path) -> PathBuf {
     })
 }
 
+/// Answer the lookup for [`BLOCK_PRECEDING_TX`] with null.
+///
+/// The block body still lists it, so the walk asks for it and is told it does
+/// not exist — the endpoint contradicting the body it served — one transaction
+/// before the target it was walking towards.
+fn doctor_preceding_null(source: &Path, scratch: &Path) -> PathBuf {
+    write_doctored_capture(source, scratch, "preceding_null", |envelope| {
+        envelope.null_transaction(BLOCK_PRECEDING_TX)
+    })
+}
+
+/// Answer the lookup for [`BLOCK_INTERVENING_TX`] with null.
+///
+/// Same break as above, moved to a position between two targets so the walk
+/// stops with one target already committed and one still to come.
+fn doctor_intervening_null(source: &Path, scratch: &Path) -> PathBuf {
+    write_doctored_capture(source, scratch, "intervening_null", |envelope| {
+        envelope.null_transaction(BLOCK_INTERVENING_TX)
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Running and normalizing
 // ---------------------------------------------------------------------------
@@ -763,17 +1024,18 @@ fn render(
     ));
 
     for (label, body) in &row.inputs {
-        section(&mut snap, &format!("input {label}"), body);
+        section(&mut snap, &format!("input {label}"), body, row.digest);
     }
     section(
         &mut snap,
         "exit code",
         &output.status.code().map_or_else(|| "killed by a signal".to_string(), |c| c.to_string()),
+        row.digest,
     );
-    section(&mut snap, "stdout", &normalize(&String::from_utf8_lossy(&output.stdout)));
-    section(&mut snap, "stderr", &normalize(&String::from_utf8_lossy(&output.stderr)));
+    section(&mut snap, "stdout", &normalize(&String::from_utf8_lossy(&output.stdout)), row.digest);
+    section(&mut snap, "stderr", &normalize(&String::from_utf8_lossy(&output.stderr)), row.digest);
     for artifact in &row.artifacts {
-        append_artifact(&mut snap, artifact, &normalize);
+        append_artifact(&mut snap, artifact, &normalize, row.digest);
     }
     snap
 }
@@ -842,9 +1104,43 @@ fn normalize_durations(text: &str) -> String {
     out
 }
 
+/// Longest body a digesting row still records verbatim.
+///
+/// Chosen so that everything a reader would actually read stays readable — the
+/// printed summary of a replay runs to about a kilobyte and a half — while the
+/// bodies this exists for, a trace of hundreds of kilobytes and a state dump of
+/// tens, are well clear of it. A row that does not opt into digesting is not
+/// affected by this at any size.
+const DIGEST_OVER: usize = 4 * 1024;
+
+/// Render a body as the facts about it that a golden can hold.
+///
+/// The digest is keccak-256 rather than SHA-256 only because this crate already
+/// depends on it; any digest a change cannot survive would do. The byte and line
+/// counts are not part of the guarantee — the digest already covers every byte —
+/// but they are what makes a failing golden diff say something ("it grew by 12
+/// lines") instead of nothing.
+fn digest_body(body: &str) -> String {
+    format!(
+        "bytes: {}\nlines: {}\nkeccak256: {}\n",
+        body.len(),
+        body.lines().count(),
+        alloy_primitives::keccak256(body.as_bytes()),
+    )
+}
+
 /// Append one snapshot section, marking an empty body rather than leaving a
 /// hole a later section could be mistaken for.
-fn section(snap: &mut String, title: &str, body: &str) {
+///
+/// `digest` is the row's opt-in: an oversized body is then recorded by digest,
+/// and the title says so, so a reader never has to guess whether a section holds
+/// the payload or a stand-in for it.
+fn section(snap: &mut String, title: &str, body: &str, digest: bool) {
+    if digest && body.len() > DIGEST_OVER {
+        snap.push_str(&format!("\n== {title} (digest) ==\n"));
+        snap.push_str(&digest_body(body));
+        return;
+    }
     snap.push_str(&format!("\n== {title} ==\n"));
     if body.is_empty() {
         snap.push_str("(empty)\n");
@@ -860,7 +1156,12 @@ fn section(snap: &mut String, title: &str, body: &str) {
 ///
 /// A missing file is recorded, not skipped: "the dump was refused" and "the
 /// dump changed" must not produce the same snapshot.
-fn append_artifact(snap: &mut String, artifact: &Artifact, normalize: &dyn Fn(&str) -> String) {
+fn append_artifact(
+    snap: &mut String,
+    artifact: &Artifact,
+    normalize: &dyn Fn(&str) -> String,
+    digest: bool,
+) {
     match artifact {
         Artifact::File(label, path) => {
             let body = if path.exists() {
@@ -868,11 +1169,11 @@ fn append_artifact(snap: &mut String, artifact: &Artifact, normalize: &dyn Fn(&s
             } else {
                 "(not written)\n".to_string()
             };
-            section(snap, &format!("artifact {label}"), &body);
+            section(snap, &format!("artifact {label}"), &body, digest);
         }
         Artifact::Dir(label, path) => {
             let Ok(entries) = fs::read_dir(path) else {
-                section(snap, &format!("artifact {label}/"), "(directory missing)\n");
+                section(snap, &format!("artifact {label}/"), "(directory missing)\n", digest);
                 return;
             };
             // Directory order is filesystem-dependent; name order is not.
@@ -882,13 +1183,13 @@ fn append_artifact(snap: &mut String, artifact: &Artifact, normalize: &dyn Fn(&s
                 .collect();
             names.sort();
             if names.is_empty() {
-                section(snap, &format!("artifact {label}/"), "(no files)\n");
+                section(snap, &format!("artifact {label}/"), "(no files)\n", digest);
                 return;
             }
             for name in names {
                 let content =
                     fs::read_to_string(path.join(&name)).expect("failed to read artifact");
-                section(snap, &format!("artifact {label}/{name}"), &normalize(&content));
+                section(snap, &format!("artifact {label}/{name}"), &normalize(&content), digest);
             }
         }
     }
@@ -975,7 +1276,7 @@ fn check_artifacts(case: &str, row: &Row) {
     for artifact in &row.artifacts {
         match artifact {
             Artifact::File(label, path) => {
-                if let Some(written) = row.expect.dump_written {
+                if let Some(written) = row.expect.file_written {
                     assert_eq!(
                         path.exists(),
                         written,
@@ -1215,6 +1516,20 @@ matrix! {
     single_block_tx_mined: row_single_block_tx_mined,
     single_block_tx_verify: row_single_block_tx_verify,
     single_block_tx_dump: row_single_block_tx_dump,
+    single_trace_opcode: row_single_trace_opcode,
+    single_trace_opcode_file: row_single_trace_opcode_file,
+    single_trace_call: row_single_trace_call,
+    single_trace_call_file: row_single_trace_call_file,
+    single_trace_prestate: row_single_trace_prestate,
+    single_trace_prestate_file: row_single_trace_prestate_file,
+    single_trace_prestate_diff: row_single_trace_prestate_diff,
+    single_trace_prestate_diff_file: row_single_trace_prestate_diff_file,
+    single_state_dump: row_single_state_dump,
+    single_state_dump_file: row_single_state_dump_file,
+    single_override_spec: row_single_override_spec,
+    single_override_tx: row_single_override_tx,
+    single_override_gas_limit: row_single_override_gas_limit,
+    single_preceding_null: row_single_preceding_null,
     batch_block: row_batch_block,
     batch_block_verify: row_batch_block_verify,
     batch_tx_file: row_batch_tx_file,
@@ -1224,6 +1539,7 @@ matrix! {
     batch_tx_file_dump_dir: row_batch_tx_file_dump_dir,
     batch_dump_dir_refused: row_batch_dump_dir_refused,
     batch_dump_dir_overwrite: row_batch_dump_dir_overwrite,
+    batch_mid_block_abort: row_batch_mid_block_abort,
 }
 
 // ---------------------------------------------------------------------------
@@ -1405,6 +1721,70 @@ fn test_negative_control_tampered_block_gas_limit_changes_the_dumped_fixture() {
 fn split_at_artifact(snap: &str) -> (&str, &str) {
     let marker = format!("\n== artifact {DUMP_FIXTURE_PATH} ==\n");
     snap.split_once(marker.as_str()).expect("the snapshot must carry a dumped fixture")
+}
+
+/// A digested section must still be a function of the body it stands for.
+///
+/// The digest rows trade the diff for a hash, and the trade is only honest while
+/// the hash tracks every byte. This drives the same row twice — once as the
+/// matrix runs it, once with `--trace.opcode.disable-stack`, which rewrites the
+/// trace and nothing else — and requires that the reported output does not move
+/// while the digest does. Without it, a digest computed over the wrong bytes, or
+/// a threshold that quietly stopped triggering, would leave the trace rows
+/// passing on a payload nothing checks.
+///
+/// The run is driven directly rather than through a golden, so the control holds
+/// while the goldens are being rewritten.
+#[test]
+fn test_negative_control_digest_tracks_the_body_it_stands_for() {
+    const CASE: &str = "single_trace_opcode_file_json";
+
+    /// Run the traced row, optionally with an extra flag, and return its
+    /// normalized stdout and the trace it wrote.
+    fn traced_run(extra: &[&str]) -> (String, String) {
+        let scratch = tempfile::tempdir().expect("failed to create a scratch directory");
+        let mut row = row_single_trace_opcode_file(scratch.path());
+        row.args.extend(extra.iter().map(|arg| (*arg).to_string()));
+        let capture = fixture(row.capture);
+        let args = row.argv(true);
+        let output = run_cli(&capture, &args, scratch.path());
+        assert_eq!(output.status.code(), Some(0), "the traced run must succeed");
+
+        let subs = substitutions(&row, &capture, scratch.path());
+        let stdout = normalize_paths(&String::from_utf8_lossy(&output.stdout), &subs);
+        let Some(Artifact::File(_, path)) = row.artifacts.first() else {
+            panic!("the traced row must declare its written trace as a file artifact");
+        };
+        let trace = fs::read_to_string(path).expect("the run must have written the trace");
+        (stdout, trace)
+    }
+
+    let clean = clean_snapshot(CASE, true, row_single_trace_opcode_file);
+    assert!(
+        clean.contains(&format!("\n== artifact {TRACE_OUTPUT_PATH} (digest) ==\n")),
+        "the traced row's artifact was recorded verbatim, so this control proves nothing \
+         about the digest; lower DIGEST_OVER or pick a larger payload",
+    );
+
+    let (clean_stdout, clean_trace) = traced_run(&[]);
+    let (variant_stdout, variant_trace) = traced_run(&["--trace.opcode.disable-stack"]);
+    assert!(
+        clean_stdout == variant_stdout,
+        "dropping the stack from the trace was expected to be invisible to the renderers, \
+         but the reported output moved; pick another variation for this control",
+    );
+    assert!(
+        clean_trace != variant_trace,
+        "dropping the stack left the written trace unchanged, so this control does not \
+         vary the body the digest stands for",
+    );
+    assert!(
+        digest_body(&clean_trace) != digest_body(&variant_trace),
+        "two different traces produced the same digest: a digested section cannot fail on \
+         a payload change",
+    );
+
+    check_clean_against_golden(CASE, true, row_single_trace_opcode_file, &clean);
 }
 
 /// The stderr section must carry a failure's continuation lines.
