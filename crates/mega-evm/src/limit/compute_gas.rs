@@ -239,8 +239,15 @@ impl ComputeGasTracker {
     }
 
     /// Total recorded usage minus the destroyed remainders that must not enforce.
+    ///
+    /// This is the transaction's claim about how much compute work it actually performed. It is
+    /// built only from [`record_gas_used`](Self::record_gas_used) and
+    /// [`merge_persistent_usage`](Self::merge_persistent_usage) — a
+    /// [`record_burned_gas`](Self::record_burned_gas) raises `net_usage` and `burned` by the same
+    /// amount and so cancels here — which is what lets the destroyed remainder be re-derived from
+    /// it independently of how it was booked.
     #[inline]
-    fn enforced_tx_usage(&self) -> u64 {
+    pub(crate) fn enforced_tx_usage(&self) -> u64 {
         self.frame_tracker.net_usage().saturating_sub(self.burned)
     }
 

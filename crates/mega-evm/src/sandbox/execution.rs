@@ -970,7 +970,7 @@ fn apply_sandbox_post_accounting<DB: AlloyDatabase, ExtEnvs: ExternalEnvTypes>(
     sandbox_gas_used: u64,
     return_memory_offset: &core::ops::Range<usize>,
 ) -> Option<FrameResult> {
-    merge_sandbox_limit_usage(ctx, limit_usage);
+    merge_sandbox_limit_usage(ctx, limit_usage, sandbox_gas_used);
     ctx.volatile_data_tracker.borrow_mut().merge_accesses_from_bitmap(volatile_accesses);
     refund_unused_sandbox_gas(gas, reservation, sandbox_gas_used);
     reject_if_tx_limit_overflow(ctx, gas, return_memory_offset)
@@ -1026,6 +1026,9 @@ fn charge_caller_materialization_pre_sandbox<DB: AlloyDatabase, ExtEnvs: Externa
         // performed, and everything the call still held is destroyed.
         return Ok(Some(destroying_oog_frame_result(ctx, gas, return_memory_offset)));
     }
+    // The charge that just landed is `MegaETH` storage gas, not compute work, so the parent's
+    // REX7 accounting has to see it as such.
+    ctx.additional_limit.borrow_mut().record_non_compute_gas(i128::from(caller_storage_gas));
     // `record_deposit_caller_creation` can latch `has_exceeded_limit` to a non-frame-local
     // `StateGrowthLimitExceeded`. Convert it to the canonical exceeding-limit OOG halt
     // (with rescued gas) here — interceptor short-circuit bypasses `after_frame_run`'s
@@ -1042,15 +1045,22 @@ fn charge_caller_materialization_pre_sandbox<DB: AlloyDatabase, ExtEnvs: Externa
 /// Merges the sandbox's multidim usage into the parent's trackers, keeping the REX7 split
 /// between compute gas the sandbox performed and compute gas it destroyed.
 ///
+/// `sandbox_gas_used` is what the sandbox costs the parent's gas counter, which the parent's
+/// REX7 accounting needs alongside the usage: it is the only place the sandbox's own storage gas
+/// and receipt-level refunds reach the parent's books.
+///
 /// This merge is intentionally not undone on later halt paths, because
 /// block-level multidim counters survive halts.
 fn merge_sandbox_limit_usage<DB: AlloyDatabase, ExtEnvs: ExternalEnvTypes>(
     ctx: &MegaContext<DB, ExtEnvs>,
     limit_usage: SandboxUsage,
+    sandbox_gas_used: u64,
 ) {
-    ctx.additional_limit
-        .borrow_mut()
-        .merge_usage(limit_usage.usage, limit_usage.burned_compute_gas);
+    ctx.additional_limit.borrow_mut().merge_usage(
+        limit_usage.usage,
+        limit_usage.burned_compute_gas,
+        sandbox_gas_used,
+    );
 }
 
 /// Returns the unused portion of the sandbox's pre-debited gas reservation to the

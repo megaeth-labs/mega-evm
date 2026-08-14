@@ -218,9 +218,98 @@ impl AdditionalLimit {
     /// re-syncs the baseline afterwards, so this is invisible there.
     ///
     /// No-op before REX7, where nothing measures against a baseline.
+    ///
+    /// The same charge is also the canonical funnel for the transaction's in-frame `MegaETH`
+    /// storage gas, so it feeds the non-compute lane the destroyed-remainder derivation reads.
     #[inline]
     pub(crate) fn exclude_storage_gas_from_segment(&mut self, amount: u64) {
         self.checkpoint.exclude_storage_gas_from_segment(amount);
+        self.checkpoint.record_non_compute_gas(i128::from(amount));
+    }
+
+    /// Records EVM gas the transaction spends that is neither compute work nor a destroyed
+    /// remainder (REX7+).
+    ///
+    /// The in-frame storage-gas charges arrive through
+    /// [`exclude_storage_gas_from_segment`](Self::exclude_storage_gas_from_segment); this is the
+    /// entry point for the contributions that are charged outside an open settlement segment —
+    /// the `MegaETH` share of intrinsic gas, the code-deposit storage charge, the `KeylessDeploy`
+    /// interceptor's caller-materialisation charge, and the sandbox boundary's residue.
+    #[inline]
+    pub(crate) fn record_non_compute_gas(&mut self, amount: i128) {
+        self.checkpoint.record_non_compute_gas(amount);
+    }
+
+    /// Re-derives the transaction's destroyed compute gas from what it spent, rather than from the
+    /// sites that booked it (REX7+).
+    ///
+    /// Every unit of EVM gas a transaction burns is *almost* exactly one of three things: compute
+    /// work the trackers enforce, `MegaETH` storage gas, or budget an exceptional halt threw away
+    /// without executing anything for it. Two of those three are counted as they happen —
+    /// [`ComputeGasTracker::enforced_tx_usage`](compute_gas::ComputeGasTracker::enforced_tx_usage)
+    /// and the non-compute lane — so the third is whatever is left of `tx_gas_spent`:
+    ///
+    /// ```text
+    /// destroyed = tx_gas_spent + double_counted_call_stipend
+    ///             − non_compute_gas − enforced_compute_gas
+    /// ```
+    ///
+    /// The stipend term is what makes "almost" necessary: recorded compute gas is deliberately not
+    /// a partition of the gas the transaction spent, because a value-transferring call's
+    /// `CALL_STIPEND` is recorded by the caller and the callee both — see
+    /// [`CheckpointTracker::double_counted_call_stipend`](
+    /// checkpoint::CheckpointTracker::double_counted_call_stipend). Adding it back is measurement,
+    /// not correction: the amount is booked from the single site that already computes it, and
+    /// without it the two sides disagree by one stipend per such call.
+    ///
+    /// `tx_gas_spent` must be read once the transaction's envelope is final and before any
+    /// post-execution adjustment that moves gas without anyone having burnt it — see the caller in
+    /// `MegaHandler::last_frame_result`. Gas that is rescued for the sender or hidden by the gas
+    /// clamp is erased from the envelope before that point, so neither can reach this subtraction.
+    ///
+    /// Signed on purpose: a mismatch against the booked total is a defect to report, and clamping
+    /// it at zero would hide the half of the mismatch space where the booking over-counts.
+    #[inline]
+    pub(crate) fn derived_burned_compute_gas(&self, tx_gas_spent: u64) -> i128 {
+        i128::from(tx_gas_spent) + i128::from(self.double_counted_call_stipend()) -
+            self.non_compute_gas() -
+            i128::from(self.enforced_compute_gas())
+    }
+
+    /// The `CALL_STIPEND` total this transaction recorded twice, in the caller and again in the
+    /// callee — the term that keeps recorded compute gas from being a partition of what the
+    /// transaction spent. Always 0 before REX7.
+    #[inline]
+    pub(crate) fn double_counted_call_stipend(&self) -> u64 {
+        self.checkpoint.double_counted_call_stipend()
+    }
+
+    /// Books one `CALL_STIPEND` that the caller's compute window kept and the callee will record
+    /// again (REX7+).
+    ///
+    /// Called from the CALL-family settlement once the child frame is certain to run: on the
+    /// compute-limit abort path the pending child is discarded and its forwarded gas returned, so
+    /// no stipend is ever handed over and nothing is recorded twice.
+    #[inline]
+    pub(crate) fn record_double_counted_call_stipend(&mut self, amount: u64) {
+        self.checkpoint.record_double_counted_call_stipend(amount);
+    }
+
+    /// The EVM gas the transaction has spent that is neither compute work nor destroyed (REX7+,
+    /// always 0 before) — the second term of
+    /// [`derived_burned_compute_gas`](Self::derived_burned_compute_gas).
+    #[inline]
+    pub(crate) fn non_compute_gas(&self) -> i128 {
+        self.checkpoint.non_compute_gas()
+    }
+
+    /// The compute gas the transaction claims to have performed: the reported total less the
+    /// destroyed remainders — the third term of
+    /// [`derived_burned_compute_gas`](Self::derived_burned_compute_gas), and the number every
+    /// compute-gas limit comparison runs against.
+    #[inline]
+    pub(crate) fn enforced_compute_gas(&self) -> u64 {
+        self.compute_gas.enforced_tx_usage()
     }
 
     /// Takes the outstanding clamp so the caller can hand its hidden gas back to the interpreter,
@@ -1138,7 +1227,22 @@ impl AdditionalLimit {
     /// reclassified here — the parent reports it and never enforces it, exactly as the sandbox
     /// did. Merging it as ordinary usage instead would let a sandbox frame's ordinary EVM halt
     /// fail the outer transaction on a resource limit.
-    pub(crate) fn merge_usage(&mut self, usage: LimitUsage, burned_compute_gas: u64) {
+    ///
+    /// `sandbox_gas_used` is the EVM gas the sandbox cost the parent's own counter: the parent
+    /// pre-debits a reservation and gets the unused part back, so this is what the parent's
+    /// envelope is short by. Whatever of it the sandbox did not spend on compute work is
+    /// non-compute gas from the parent's point of view — the sandbox's own storage gas, less any
+    /// refund the sandbox's receipt handed back — and joins the lane the destroyed-remainder
+    /// derivation reads. The difference is taken against the merged total rather than the enforced
+    /// part so the sandbox's destroyed remainder stays destroyed on the parent's books instead of
+    /// being reclassified as storage gas.
+    pub(crate) fn merge_usage(
+        &mut self,
+        usage: LimitUsage,
+        burned_compute_gas: u64,
+        sandbox_gas_used: u64,
+    ) {
+        self.record_non_compute_gas(i128::from(sandbox_gas_used) - i128::from(usage.compute_gas));
         self.compute_gas.merge_persistent_usage(usage.compute_gas);
         self.compute_gas.merge_burned_usage(burned_compute_gas);
         self.data_size.merge_persistent_usage(usage.data_size);

@@ -1030,6 +1030,9 @@ macro_rules! record_storage_compute_gas {
         // for replay parity. `forwarded_child_gas` records that deducted amount so the abort path
         // below can return it to the parent.
         let mut forwarded_child_gas: u64 = 0;
+        // The stipend the caller keeps in its own window above and the callee will record again,
+        // booked only once the child is certain to run — see the abort path below.
+        let mut kept_call_stipend: u64 = 0;
         match $context.interpreter.bytecode.action() {
             Some(InterpreterAction::NewFrame(FrameInput::Call(call_inputs))) => {
                 let stipend_from_revm = if spec.is_enabled(MegaSpecId::REX5) &&
@@ -1040,6 +1043,7 @@ macro_rules! record_storage_compute_gas {
                 } else {
                     0
                 };
+                kept_call_stipend = stipend_from_revm;
                 let parent_contributed = call_inputs.gas_limit.saturating_sub(stipend_from_revm);
                 forwarded_child_gas = parent_contributed;
                 gas_used = gas_used.saturating_sub(parent_contributed);
@@ -1061,6 +1065,10 @@ macro_rules! record_storage_compute_gas {
                 additional_limit.sync_checkpoint_baseline(gas_after);
             }
             if additional_limit.record_compute_gas(gas_used) {
+                // The child will run, so the stipend this window kept is about to be recorded a
+                // second time by the callee. Book it where the destroyed-remainder derivation can
+                // reconcile the two sides.
+                additional_limit.record_double_counted_call_stipend(kept_call_stipend);
                 None
             } else {
                 Some(additional_limit.exceeding_instruction_result())

@@ -46,6 +46,36 @@ pub(crate) struct CheckpointTracker {
     /// this flag instead, keeping the reported reason `VolatileDataAccessOutOfGas` exactly as
     /// per-opcode enforcement reports it.
     latched_detained: bool,
+
+    /// EVM gas the transaction spends that is neither compute work nor a destroyed remainder.
+    ///
+    /// Every gas unit the transaction burns is exactly one of three things: work the trackers
+    /// record as compute gas, `MegaETH` storage gas, or budget an exceptional halt threw away.
+    /// This field is the running total of the second kind, which makes the third derivable at the
+    /// transaction's settlement point instead of having to be booked at each site that destroys
+    /// one — see [`AdditionalLimit::derived_burned_compute_gas`](
+    /// super::AdditionalLimit::derived_burned_compute_gas).
+    ///
+    /// Signed because one contributor is a difference rather than a charge: the `KeylessDeploy`
+    /// sandbox boundary hands the parent one number for what the sandbox cost and another for what
+    /// it performed, and an inner EIP-3529 refund can make the second exceed the first.
+    non_compute_gas: i128,
+
+    /// Compute gas the transaction records twice: revm's `CALL_STIPEND`, once in the caller and
+    /// again in the callee.
+    ///
+    /// A value-transferring `CALL` / `CALLCODE` charges the caller the full `CALLVALUE` fee and
+    /// then hands the callee a `CALL_STIPEND` funded out of that fee. From REX5 the caller's
+    /// compute window deliberately keeps the stipend — it subtracts only the gas it contributed
+    /// itself, `gas_limit - CALL_STIPEND` — while the callee separately records whatever of the
+    /// stipend it spends, and returns the rest to the caller. The caller's envelope is therefore
+    /// short by exactly one `CALL_STIPEND` per such call against what the two frames recorded
+    /// between them, whether or not the callee spent any of it.
+    ///
+    /// That makes the recorded compute total *not* a partition of the gas the transaction spent,
+    /// so the destroyed-remainder derivation has to add this back before the two sides can agree.
+    /// The behaviour is REX5 semantics and is frozen; this field only measures it.
+    double_counted_call_stipend: u64,
 }
 
 /// A gas clamp in force for one plain-opcode segment (REX7+).
@@ -70,6 +100,8 @@ impl CheckpointTracker {
             baseline: 0,
             clamp: None,
             latched_detained: false,
+            non_compute_gas: 0,
+            double_counted_call_stipend: 0,
         }
     }
 
@@ -77,6 +109,8 @@ impl CheckpointTracker {
         self.baseline = 0;
         self.clamp = None;
         self.latched_detained = false;
+        self.non_compute_gas = 0;
+        self.double_counted_call_stipend = 0;
     }
 
     /// Whether compute gas settles at checkpoints (REX7+) rather than per opcode.
@@ -152,6 +186,39 @@ impl CheckpointTracker {
         self.latched_detained = latched;
     }
 
+    /// Adds `amount` to the transaction's non-compute EVM gas — see
+    /// [`non_compute_gas`](Self::non_compute_gas). No-op before REX7, where nothing derives the
+    /// destroyed remainder.
+    #[inline]
+    pub(crate) fn record_non_compute_gas(&mut self, amount: i128) {
+        if self.rex7_enabled {
+            self.non_compute_gas += amount;
+        }
+    }
+
+    /// The transaction's non-compute EVM gas so far — see
+    /// [`non_compute_gas`](Self::non_compute_gas).
+    #[inline]
+    pub(crate) fn non_compute_gas(&self) -> i128 {
+        self.non_compute_gas
+    }
+
+    /// Books one `CALL_STIPEND` the caller and callee both record — see
+    /// [`double_counted_call_stipend`](Self::double_counted_call_stipend). No-op before REX7.
+    #[inline]
+    pub(crate) fn record_double_counted_call_stipend(&mut self, amount: u64) {
+        if self.rex7_enabled {
+            self.double_counted_call_stipend += amount;
+        }
+    }
+
+    /// The transaction's twice-recorded `CALL_STIPEND` total — see
+    /// [`double_counted_call_stipend`](Self::double_counted_call_stipend).
+    #[inline]
+    pub(crate) fn double_counted_call_stipend(&self) -> u64 {
+        self.double_counted_call_stipend
+    }
+
     /// Returns the unsettled segment usage and re-opens the window at `remaining`.
     #[inline]
     pub(crate) fn take_segment(&mut self, remaining: u64) -> u64 {
@@ -170,6 +237,8 @@ mod tests {
         tracker.sync_baseline(99_999);
         tracker.set_clamp(7, ClampBinding { headroom: 1, frame_local: false, limit: 1 });
         tracker.set_latched_detained(true);
+        tracker.record_non_compute_gas(4_242);
+        tracker.record_double_counted_call_stipend(2_300);
         tracker
     }
 
@@ -191,5 +260,58 @@ mod tests {
             !tracker.latched_detained(),
             "reset must drop a leftover detention-attribution flag"
         );
+        assert_eq!(
+            tracker.non_compute_gas(),
+            0,
+            "reset must drop the previous transaction's non-compute gas"
+        );
+        assert_eq!(
+            tracker.double_counted_call_stipend(),
+            0,
+            "reset must drop the previous transaction's twice-recorded call stipend"
+        );
+    }
+
+    /// The non-compute lane is REX7-only state: a frozen spec must keep it at zero so the
+    /// derivation it feeds can never be read as meaningful there.
+    #[test]
+    fn test_non_compute_gas_is_inert_before_rex7() {
+        let mut tracker = CheckpointTracker::new(MegaSpecId::REX6);
+        tracker.record_non_compute_gas(1_000);
+        assert_eq!(tracker.non_compute_gas(), 0, "pre-REX7 must not accumulate non-compute gas");
+    }
+
+    /// The sandbox boundary can hand the lane a negative contribution, so the accumulator must be
+    /// signed rather than saturating at zero.
+    #[test]
+    fn test_non_compute_gas_accumulates_signed() {
+        let mut tracker = CheckpointTracker::new(MegaSpecId::REX7);
+        tracker.record_non_compute_gas(100);
+        tracker.record_non_compute_gas(-250);
+        assert_eq!(tracker.non_compute_gas(), -150);
+    }
+
+    /// Like the non-compute lane, the twice-recorded stipend is REX7-only state.
+    #[test]
+    fn test_double_counted_call_stipend_is_inert_before_rex7() {
+        let mut tracker = CheckpointTracker::new(MegaSpecId::REX6);
+        tracker.record_double_counted_call_stipend(2_300);
+        assert_eq!(
+            tracker.double_counted_call_stipend(),
+            0,
+            "pre-REX7 must not accumulate the twice-recorded call stipend"
+        );
+    }
+
+    /// One transaction can make several value-transferring calls, and each contributes its own
+    /// stipend to the reconciliation — so the term accumulates rather than latching a single one.
+    #[test]
+    fn test_double_counted_call_stipend_accumulates_per_call() {
+        let mut tracker = CheckpointTracker::new(MegaSpecId::REX7);
+        tracker.record_double_counted_call_stipend(2_300);
+        tracker.record_double_counted_call_stipend(2_300);
+        // A call that forwards no stipend must leave the running total alone.
+        tracker.record_double_counted_call_stipend(0);
+        assert_eq!(tracker.double_counted_call_stipend(), 4_600);
     }
 }

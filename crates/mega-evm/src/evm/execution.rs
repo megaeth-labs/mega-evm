@@ -487,7 +487,15 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
             if frame.data.is_create() && interpreter_result.is_ok() {
                 let code_deposit_storage_gas = constants::mini_rex::CODEDEPOSIT_STORAGE_GAS *
                     interpreter_result.output.len() as u64;
-                if !interpreter_result.gas.record_regular_cost(code_deposit_storage_gas) {
+                if interpreter_result.gas.record_regular_cost(code_deposit_storage_gas) {
+                    // Storage gas, not compute work — and it is charged after the frame's tail
+                    // segment has been measured, so nothing else can classify it.
+                    ctx.additional_limit
+                        .borrow_mut()
+                        .record_non_compute_gas(i128::from(code_deposit_storage_gas));
+                } else {
+                    // Nothing was debited, so there is nothing to classify; the frame now halts
+                    // out of gas and the remainder it keeps is settled as destroyed below.
                     interpreter_result.result = InstructionResult::OutOfGas;
                 }
             }
@@ -744,6 +752,11 @@ where
             ctx.additional_limit()
                 .borrow_mut()
                 .record_compute_gas(initial_and_floor_gas.initial_regular_gas);
+            // Everything this block adds to `initial_regular_gas` from here on is MegaETH storage
+            // gas: it is charged to the transaction's envelope but is not compute work, and only
+            // the base intrinsic just recorded is. Snapshot the base so the difference can be
+            // booked as non-compute gas once every addition is in.
+            let base_intrinsic_gas = initial_and_floor_gas.initial_regular_gas;
 
             // MegaETH MiniRex modification: calldata storage gas costs (10x the standard EVM rates)
             // - Standard tokens: 40 gas per token (vs 4)
@@ -934,6 +947,15 @@ where
                     .into());
                 }
             }
+
+            // Book the MegaETH share of intrinsic gas — calldata storage gas, the flat REX
+            // intrinsic storage gas, and the callee-side / deposit-caller account-creation gas —
+            // as non-compute gas. Deliberately last: every contribution above is inside it, and
+            // the paths that return early from here are validation rejects, which never reach a
+            // settlement that would read the lane.
+            ctx.additional_limit().borrow_mut().record_non_compute_gas(i128::from(
+                initial_and_floor_gas.initial_regular_gas.saturating_sub(base_intrinsic_gas),
+            ));
         }
 
         Ok(initial_and_floor_gas)
@@ -1031,6 +1053,32 @@ where
             let additional_limit = ctx.additional_limit.borrow();
             let gas = frame_result.gas_mut();
             gas.erase_cost(additional_limit.rescued_gas);
+
+            // REX7: the transaction's envelope is now final — op-revm has normalised the gas
+            // object to `tx.gas_limit()`, the rescue has been handed back, and every frame's
+            // burn settlement and every precompile recording already ran. Nothing after this
+            // point burns gas; `post_execution`'s EIP-3529 refund and EIP-7623 floor only move
+            // the number the receipt reports. So this is where the destroyed remainder can be
+            // re-derived from what the transaction spent and checked against what the per-site
+            // recordings booked. A mismatch means either a site that destroys an envelope
+            // without booking it, or a spend the non-compute lane does not know about.
+            //
+            // `total_gas_spent` rather than the deprecated `spent`: the two are the same
+            // subtraction today, and EIP-8037's state-gas split — which is what deprecated the
+            // latter — is pinned off for every `MegaEVM` transaction, so the reservoir is
+            // structurally zero here.
+            debug_assert!(
+                !additional_limit.rex7_enabled() ||
+                    additional_limit.derived_burned_compute_gas(gas.total_gas_spent()) ==
+                        i128::from(additional_limit.burned_compute_gas()),
+                "destroyed compute gas disagrees with the conservation law: \
+                 derived {} vs booked {} (spent {}, non-compute {}, enforced compute {})",
+                additional_limit.derived_burned_compute_gas(gas.total_gas_spent()),
+                additional_limit.burned_compute_gas(),
+                gas.total_gas_spent(),
+                additional_limit.non_compute_gas(),
+                additional_limit.enforced_compute_gas(),
+            );
         }
 
         Ok(())
