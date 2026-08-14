@@ -610,6 +610,15 @@ mod rex7 {
     /// where a limit-exceeding transaction halts: the exceed surfaces at the next checkpoint
     /// rather than at the opcode that crossed the limit.
     ///
+    /// Of those, only the volatile / detention handlers (plus `GAS`, a checkpoint so that the
+    /// clamp is restored before the counter is observed) are declared here. The storage-gas and
+    /// frame-spawning slots are copied out of the Rex6 table one opcode at a time, which is what
+    /// makes "the same handler chains as Rex6" a property of the construction rather than of two
+    /// declarations kept in sync. The same copy covers the four opcodes revm wires ahead of the
+    /// fork that activates them (`DUPN`, `SWAPN`, `EXCHANGE`, `SLOTNUM`): Rex6 leaves
+    /// `control::unknown` in those slots, so inheriting them keeps the two opcode sets identical
+    /// instead of letting revm's base table decide what Rex7 exposes.
+    ///
     /// The Rex6 behavior differences (canonical metering order, `create_rex6` dispatch,
     /// SELFDESTRUCT existing-target accounting, CALL-family EIP-7702 delegate resolution on the
     /// disabled path) live as internal `spec.is_enabled(MegaSpecId::REX6)` dispatch inside the
@@ -627,15 +636,40 @@ mod rex7 {
     {
         use revm::bytecode::opcode::*;
         let mut table = instructions::instruction_table::<WIRE, H>();
+        let rex6 = rex6::instruction_table::<WIRE, H>();
 
-        // revm's table wires these four ahead of the fork that activates them; every `MegaSpecId`
-        // maps to a pre-activation Ethereum spec, and no `MegaETH` table has ever dispatched them.
-        // Restore the unknown-opcode handler so the checkpoint table's opcode set is the same one
-        // Rex6 exposes.
-        table[DUPN as usize] = Instruction::new(control::unknown);
-        table[SWAPN as usize] = Instruction::new(control::unknown);
-        table[EXCHANGE as usize] = Instruction::new(control::unknown);
-        table[SLOTNUM as usize] = Instruction::new(control::unknown);
+        /// The opcodes Rex7 takes from the Rex6 table verbatim.
+        const INHERITED_FROM_REX6: &[u8] = &[
+            // Storage-gas and frame-spawning checkpoints: the Rex6 handler chains, which under
+            // Rex7 open with a checkpoint prologue and close with an epilogue.
+            SSTORE,
+            LOG0,
+            LOG1,
+            LOG2,
+            LOG3,
+            LOG4,
+            CREATE,
+            CREATE2,
+            CALL,
+            CALLCODE,
+            DELEGATECALL,
+            STATICCALL,
+            SELFDESTRUCT,
+            // Opcodes revm's table wires ahead of the fork that activates them: every
+            // `MegaSpecId` maps to a pre-activation Ethereum spec and no `MegaETH` table has ever
+            // dispatched them, so Rex6 holds `control::unknown` here.
+            DUPN,
+            SWAPN,
+            EXCHANGE,
+            SLOTNUM,
+        ];
+
+        let mut i = 0;
+        while i < INHERITED_FROM_REX6.len() {
+            let opcode = INHERITED_FROM_REX6[i] as usize;
+            table[opcode] = rex6[opcode];
+            i += 1;
+        }
 
         // Volatile / detention checkpoints: raw instruction, segment settlement, detention cap.
         table[BALANCE as usize] = Instruction::new(volatile_data_ext::balance_checkpoint);
@@ -657,23 +691,6 @@ mod rex7 {
         // Gas-clamp enforcement: `GAS` has to be a checkpoint so the clamp is restored before
         // the counter is observed.
         table[GAS as usize] = Instruction::new(compute_gas_ext::gas_checkpoint);
-
-        // Storage-gas and frame-spawning checkpoints: the Rex6 handler chains unchanged. Under
-        // Rex7 they open with a checkpoint prologue and close with an epilogue.
-        table[SSTORE as usize] = Instruction::new(additional_limit_ext::sstore);
-        table[LOG0 as usize] = Instruction::new(additional_limit_ext::log::<0, _, _>);
-        table[LOG1 as usize] = Instruction::new(additional_limit_ext::log::<1, _, _>);
-        table[LOG2 as usize] = Instruction::new(additional_limit_ext::log::<2, _, _>);
-        table[LOG3 as usize] = Instruction::new(additional_limit_ext::log::<3, _, _>);
-        table[LOG4 as usize] = Instruction::new(additional_limit_ext::log::<4, _, _>);
-        table[CREATE as usize] = Instruction::new(forward_gas_ext::create);
-        table[CREATE2 as usize] = Instruction::new(forward_gas_ext::create2);
-        table[CALL as usize] = Instruction::new(volatile_data_ext::call);
-        table[CALLCODE as usize] = Instruction::new(volatile_data_ext::call_code);
-        table[DELEGATECALL as usize] = Instruction::new(volatile_data_ext::delegate_call);
-        table[STATICCALL as usize] = Instruction::new(volatile_data_ext::static_call);
-        table[SELFDESTRUCT as usize] =
-            Instruction::new(volatile_data_ext::selfdestruct_with_beneficiary_guard);
 
         table
     }
