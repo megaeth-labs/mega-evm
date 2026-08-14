@@ -9,6 +9,10 @@
 //! Each test runs the same rejected shape on both specs. REX6 remaining and compute stay at the
 //! historical zero-charge amounts; REX7 remaining drops by exactly the opcode's static entry and
 //! compute / receipt `gas_used` rise by that same amount.
+//!
+//! A second set of tests pins the unaffordable-static-fee branch: the guarded frame is given
+//! just enough gas to reach the opcode and not enough to pay the entry, so the result is
+//! `OutOfGas` rather than a `VolatileDataAccessDisabled` revert.
 
 use std::convert::Infallible;
 
@@ -406,6 +410,197 @@ fn test_rejected_selfbalance_charges_static_gas_only_on_rex7() {
         VolatileDataAccessType::Beneficiary,
         r6,
         r7,
+    );
+}
+
+/// A child that reaches `opcode` holding less than its static fee must OOG rather than
+/// produce the disable revert. `forward_gas` is the CALL stipend the parent hands the child
+/// — enough to reach the opcode, not enough to pay the entry.
+fn run_child_underfunded(
+    opcode: u8,
+    child: Address,
+    child_code: Bytes,
+    forward_gas: u64,
+) -> (u64, GuardedFrameOutcome) {
+    let parent_code = append_call(call_disable(BytecodeBuilder::default()), child, forward_gas)
+        .append(POP)
+        .stop()
+        .build();
+    let mut db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(1_000_000))
+        .account_code(PARENT, parent_code)
+        .account_code(child, child_code);
+    let mut inspector = GuardedFrameGasInspector::new(child, opcode);
+    let (success, _compute_gas, _gas_used) = transact_rejected(
+        MegaSpecId::REX7,
+        &mut db,
+        TxEnvBuilder::default().caller(CALLER).call(PARENT).gas_limit(100_000_000).build_fill(),
+        &mut inspector,
+    );
+    assert!(success, "only the underfunded child should fail");
+    let remaining_before = inspector
+        .remaining_before
+        .unwrap_or_else(|| panic!("underfunded opcode {opcode} was never reached"));
+    let outcome = inspector.outcome.unwrap_or_else(|| panic!("underfunded frame never ended"));
+    (remaining_before, outcome)
+}
+
+fn assert_oog_not_disable_revert(
+    label: &str,
+    static_gas: u64,
+    remaining_before: u64,
+    outcome: &GuardedFrameOutcome,
+) {
+    assert!(
+        remaining_before < static_gas,
+        "{label}: remaining_before={remaining_before} must be below static {static_gas}"
+    );
+    assert_eq!(
+        outcome.result,
+        InstructionResult::OutOfGas,
+        "{label}: unaffordable static fee must OOG, got {:?}",
+        outcome.result
+    );
+    assert!(
+        outcome.output.is_empty(),
+        "{label}: OOG must not carry a disable-revert payload, got {:?}",
+        outcome.output
+    );
+}
+
+/// Unconditional family: child holds 1 gas, `TIMESTAMP` costs 2.
+#[test]
+fn test_rejected_timestamp_oog_when_static_gas_unaffordable() {
+    let code = BytecodeBuilder::default().append(TIMESTAMP).append(POP).stop().build();
+    let (remaining_before, outcome) = run_child_underfunded(TIMESTAMP, CHILD, code, 1);
+    assert_oog_not_disable_revert("TIMESTAMP", TIMESTAMP_STATIC_GAS, remaining_before, &outcome);
+}
+
+/// Same family, larger static entry: `PUSH1 0` (3) then `BLOCKHASH` (20), forwarded 4.
+#[test]
+fn test_rejected_blockhash_oog_when_static_gas_unaffordable() {
+    let code =
+        BytecodeBuilder::default().push_number(0_u64).append(BLOCKHASH).append(POP).stop().build();
+    let (remaining_before, outcome) = run_child_underfunded(BLOCKHASH, CHILD, code, 4);
+    assert_oog_not_disable_revert("BLOCKHASH", BLOCKHASH_STATIC_GAS, remaining_before, &outcome);
+}
+
+/// Conditional account-read family: `PUSH20 beneficiary` (3) then `BALANCE` (100), forwarded 4.
+#[test]
+fn test_rejected_balance_oog_when_static_gas_unaffordable() {
+    let code = BytecodeBuilder::default()
+        .push_address(BENEFICIARY)
+        .append(BALANCE)
+        .append(POP)
+        .stop()
+        .build();
+    let (remaining_before, outcome) = run_child_underfunded(BALANCE, CHILD, code, 4);
+    assert_oog_not_disable_revert("BALANCE", WARM_ACCESS_STATIC_GAS, remaining_before, &outcome);
+}
+
+/// CALL family: setup is five `PUSH1 0` + `PUSH20` + `PUSH3` (21), then `CALL` (100).
+#[test]
+fn test_rejected_call_oog_when_static_gas_unaffordable() {
+    let code =
+        append_call(BytecodeBuilder::default(), BENEFICIARY, 100_000).append(POP).stop().build();
+    let (remaining_before, outcome) =
+        run_child_underfunded(CALL, CHILD, code, 21 + WARM_ACCESS_STATIC_GAS - 1);
+    assert_oog_not_disable_revert("CALL", WARM_ACCESS_STATIC_GAS, remaining_before, &outcome);
+}
+
+/// Oracle `SLOAD`: `PUSH1 0` (3) then `SLOAD` (100), forwarded 4.
+#[test]
+fn test_rejected_oracle_sload_oog_when_static_gas_unaffordable() {
+    let code =
+        BytecodeBuilder::default().push_number(0_u64).append(SLOAD).append(POP).stop().build();
+    let (remaining_before, outcome) =
+        run_child_underfunded(SLOAD, ORACLE_CONTRACT_ADDRESS, code, 4);
+    assert_oog_not_disable_revert(
+        "oracle SLOAD",
+        WARM_ACCESS_STATIC_GAS,
+        remaining_before,
+        &outcome,
+    );
+}
+
+/// `SELFDESTRUCT`: `PUSH20` (3) then static `5000`, forwarded 4.
+#[test]
+fn test_rejected_selfdestruct_oog_when_static_gas_unaffordable() {
+    let code = BytecodeBuilder::default().push_address(BENEFICIARY).append(SELFDESTRUCT).build();
+    let (remaining_before, outcome) = run_child_underfunded(SELFDESTRUCT, CHILD, code, 4);
+    assert_oog_not_disable_revert(
+        "SELFDESTRUCT",
+        SELFDESTRUCT_STATIC_GAS,
+        remaining_before,
+        &outcome,
+    );
+}
+
+/// `SELFBALANCE` is only rejected in the beneficiary's own frame. `GAS` after `disable`
+/// stores the true remaining; the transaction gas limit is then cut so the frame holds
+/// `static − 1` at `SELFBALANCE`.
+#[test]
+fn test_rejected_selfbalance_oog_when_static_gas_unaffordable() {
+    use revm::bytecode::opcode::{GAS, SSTORE};
+    const HIGH_LIMIT: u64 = 100_000_000;
+    const GAS_SLOT: u64 = 0x67;
+
+    let calibrate_code = call_disable(BytecodeBuilder::default())
+        .append(GAS)
+        .push_u256(U256::from(GAS_SLOT))
+        .append(SSTORE)
+        .stop()
+        .build();
+    let mut db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(1_000_000))
+        .account_code(BENEFICIARY, calibrate_code);
+    let external_envs = TestExternalEnvs::<Infallible>::new();
+    let mut context = MegaContext::new(&mut db, MegaSpecId::REX7)
+        .with_block(BlockEnv { beneficiary: BENEFICIARY, ..Default::default() })
+        .with_external_envs((&external_envs).into());
+    context.modify_chain(|chain| {
+        chain.operator_fee_scalar = Some(U256::from(0));
+        chain.operator_fee_constant = Some(U256::from(0));
+    });
+    let tx =
+        TxEnvBuilder::default().caller(CALLER).call(BENEFICIARY).gas_limit(HIGH_LIMIT).build_fill();
+    let mut tx = MegaTransaction::new(tx);
+    tx.enveloped_tx = Some(Bytes::new());
+    let mut evm = MegaEvm::new(context);
+    let result = alloy_evm::Evm::transact_raw(&mut evm, tx).expect("calibration must execute");
+    assert!(result.result.is_success(), "calibration run must succeed: {:?}", result.result);
+    let true_after_gas: u64 = result
+        .state
+        .get(&BENEFICIARY)
+        .and_then(|account| account.storage.get(&U256::from(GAS_SLOT)))
+        .map(|slot| slot.present_value())
+        .expect("calibration SSTORE must land")
+        .try_into()
+        .expect("remaining fits in u64");
+    // `GAS` charges 2 and then pushes the post-charge remaining. `SELFBALANCE` sits where
+    // `GAS` sat, so the true remaining there is that reading plus 2.
+    let true_at_selfbalance = true_after_gas + 2;
+    let gas_limit = HIGH_LIMIT - true_at_selfbalance + (SELFBALANCE_STATIC_GAS - 1);
+
+    let code =
+        call_disable(BytecodeBuilder::default()).append(SELFBALANCE).append(POP).stop().build();
+    let mut db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(1_000_000))
+        .account_code(BENEFICIARY, code);
+    let mut inspector = GuardedFrameGasInspector::new(BENEFICIARY, SELFBALANCE);
+    let _ = transact_rejected(
+        MegaSpecId::REX7,
+        &mut db,
+        TxEnvBuilder::default().caller(CALLER).call(BENEFICIARY).gas_limit(gas_limit).build_fill(),
+        &mut inspector,
+    );
+    let remaining_before = inspector.remaining_before.expect("SELFBALANCE must be reached");
+    let outcome = inspector.outcome.expect("beneficiary frame must end");
+    assert_oog_not_disable_revert(
+        "SELFBALANCE",
+        SELFBALANCE_STATIC_GAS,
+        remaining_before,
+        &outcome,
     );
 }
 

@@ -29,6 +29,9 @@
 //! - `charge_on_reject` — a `disableVolatileDataAccess` rejection still pays the opcode's static
 //!   fee, which segment settlement records as compute; REX6 keeps the historical zero-charge
 //!   revert.
+//! - `guard_pass_static_gas` — a passing guard charges the checkpoint static fee after the prologue
+//!   restores true gas, so a compute headroom of `static_gas − 1` records the body rather than
+//!   stopping at the clamp.
 //! - `detention_window` — an underfunded CALL / EXTCODECOPY that OOGs before the target load does
 //!   not mark beneficiary access; that order is specified, so the frozen-window tripwire stays
 //!   silent.
@@ -44,6 +47,7 @@ mod double_exceed_corner;
 mod exceptional_halt;
 mod gas_clamp;
 mod gas_leakage;
+mod guard_pass_static_gas;
 mod interceptor_resume;
 mod latch_surfacing;
 mod modexp_gas;
