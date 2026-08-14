@@ -32,7 +32,8 @@ CLI toolbox for direct MegaEVM execution (`run`, `tx`, `replay`, `cache`) with o
 - Change state-forking or prestate merge semantics: `src/common/state.rs`.
 - Change replay hardfork/spec selection: `src/replay/{cmd.rs,hardforks.rs}`.
 - Change how a replay target's endpoint answers are judged coherent (metadata shape, genesis placement, parent linkage, inclusion anchor, block-body membership): `src/replay/coherence.rs` — the single source of those verdicts and their wording, shared by both replay drivers, which adapt them into their own failure shapes.
-- Change how a mined block is executed (state fork, body walk, per-target isolation, early stop, receipt harvest): `src/replay/kernel.rs` — the shared execution kernel. Fetching, coherence guards, entry assembly and error adaptation stay with the driver.
+- Change how a mined block is executed (state fork, body walk, per-target isolation, early stop, receipt harvest): `src/replay/kernel.rs` — the shared execution kernel both replay drivers run their mined targets through. Fetching, coherence guards, entry assembly and error adaptation stay with the driver.
+- Change how a pending target is replayed: `src/replay/cmd.rs`, `execute_pending` — deliberately off the kernel, because its one block fills both the fork and the environment role and its metadata is exactly what the online cache refuses to keep.
 - Change receipt/summary formatting: `src/common/outcome.rs` and printer helpers.
 - Change cache merge behavior (CLI or merge-on-persist): `src/cache/{mod.rs,merge.rs}`.
 - Change how cache files are locked against concurrent writers: `src/cache/lock.rs` — the one place a cache-file write may acquire its lock, and every caller must fail closed when it cannot.

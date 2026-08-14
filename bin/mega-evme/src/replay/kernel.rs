@@ -6,11 +6,17 @@
 //!
 //! Everything that decides *which* block, *whether* the endpoint's answers are
 //! coherent, and *how* a result is reported stays with the driver
-//! ([`super::batch`], and the single-transaction path once it moves here): block
-//! and parent fetches, the coherence guards, the on-chain receipt prefetch, the
-//! per-target entry assembly and ordering, the error-to-report adaptation, and
-//! the decision to publish a fixture. The kernel takes the pieces those
-//! decisions produced, executes, and hands back what it observed.
+//! ([`super::batch`] and [`super::cmd`]): block and parent fetches, the
+//! coherence guards, the on-chain receipt prefetch, the per-target entry
+//! assembly and ordering, the error-to-report adaptation, and the decision to
+//! publish a fixture. The kernel takes the pieces those decisions produced,
+//! executes, and hands back what it observed.
+//!
+//! Replaying a *pending* transaction is the one shape that stays off this path
+//! ([`super::cmd::Cmd::execute_pending`]). It has no block body to walk, and the
+//! block it does have fills both the fork and the environment role from a single
+//! fetch — walking it here would re-ask the endpoint for the target, whose
+//! pending metadata is exactly what the online cache refuses to keep.
 //!
 //! # Lifecycle
 //!
@@ -311,6 +317,10 @@ pub(super) struct HarvestedTarget<D> {
     pub(super) exec_result: ExecutionResult<MegaHaltReason>,
     /// Wall-clock time the execution took.
     pub(super) exec_time: Duration,
+    /// Nonce the target's signer held before it executed — the one the created
+    /// contract address above was derived from, reported so a driver does not
+    /// have to read it back from a database the target has since committed to.
+    pub(super) pre_execution_nonce: u64,
     /// Address a successful contract creation deployed to.
     pub(super) contract_address: Option<Address>,
     /// Receipt built from the block's own receipt for this target.
@@ -431,8 +441,17 @@ where
     for (tx_index, tx_hash) in tx_hashes.iter().enumerate() {
         let step: Result<()> = async {
             // Isolate BLOCKHASH reads per transaction so a fixture dump sees only
-            // the target's own accesses (mirrors the single-tx clear after
-            // preceding transactions).
+            // the target's own accesses.
+            //
+            // Invariant: the record is cleared immediately before every
+            // transaction, and the only thing ever read from it is a target's
+            // own count, at [`TargetLifecycle::on_target_executed`]. Clearing
+            // per transaction is therefore indistinguishable from clearing once
+            // just before the target — the reads of the transactions in between
+            // are discarded either way, and no reader exists between two clears.
+            // That equivalence is what let the single-transaction path, which
+            // cleared once after its preceding transactions, move onto this
+            // rhythm without changing what a dump refuses.
             block_executor.clear_accessed_block_hashes();
 
             // Every hash here came from the block body this endpoint already
@@ -561,6 +580,19 @@ where
                     .then(|| target.from.create(target.pre_execution_nonce));
                 // Block-global log index: cumulative log count of all committed
                 // receipts that precede this target in the block.
+                //
+                // The window starts at `offset`, so a receipt produced before
+                // the block's first transaction does not count. That is the
+                // deliberate reading: the index this stamps is the one the chain
+                // assigns, and the chain numbers logs across the receipts of the
+                // block *body*, one per transaction. A receipt with no
+                // transaction behind it is not part of that list, so counting
+                // its logs would shift every index of the block off the chain's
+                // numbering. Today no such receipt exists (`offset` is always
+                // zero), which is why the window is the same set as "every
+                // receipt but this target's own" — the two readings only part
+                // company if the executor ever grows a pre-transaction receipt,
+                // and this one stays right when it does.
                 let first_log_index: u64 = receipts[offset..offset + target.commit_index]
                     .iter()
                     .map(|r| r.logs().len() as u64)
@@ -584,6 +616,7 @@ where
                     tx_index: target.tx_index,
                     exec_result: target.exec_result,
                     exec_time: target.exec_time,
+                    pre_execution_nonce: target.pre_execution_nonce,
                     contract_address,
                     receipt,
                     draft: PendingDraft(target.draft),
