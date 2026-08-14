@@ -10,6 +10,8 @@ use std::process::{Command, Output};
 
 mod common;
 
+use common::doctor::DoctoredEnvelope;
+
 /// Offline RPC capture used as the replay file.
 /// Name of the committed offline capture, resolved through the shared fixture
 /// helper so its location lives in exactly one place.
@@ -110,160 +112,6 @@ fn replay(args: &[&str]) -> Run {
     run(&argv)
 }
 
-/// Write a copy of the committed capture without the entry `key` answers, and
-/// return its path.
-fn cache_without_entry(name: &str, key: &str) -> std::path::PathBuf {
-    let mut envelope: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(cache()).expect("read offline cache"))
-            .expect("parse offline cache");
-    let entries = envelope["cache"].as_array_mut().expect("cache entries");
-    let before = entries.len();
-    entries.retain(|entry| entry["key"].as_str() != Some(key));
-    assert_eq!(entries.len() + 1, before, "the capture must hold exactly one entry for {key}");
-
-    let path =
-        std::env::temp_dir().join(format!("mega_evme_exit_{name}_{}.json", std::process::id()));
-    std::fs::write(&path, envelope.to_string()).expect("write pruned cache");
-    path
-}
-
-/// Write a copy of the committed capture whose parent-block response reports a
-/// hash that does not link to the replayed block, and return its path together
-/// with the hash the untouched capture reported.
-///
-/// The capture answers `eth_getBlockByNumber` for exactly two heights: the
-/// replayed block and its parent. Rewriting the lower-numbered body's own `hash`
-/// models an endpoint serving divergent views of the chain, since the two blocks
-/// are fetched in separate calls. Only that field changes — state reads are
-/// keyed by block number, so every other response still resolves.
-fn cache_with_unlinked_parent(name: &str, wrong_hash: &str) -> (std::path::PathBuf, String) {
-    let mut envelope: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(cache()).expect("read offline cache"))
-            .expect("parse offline cache");
-    let entries = envelope["cache"].as_array_mut().expect("cache entries");
-
-    let mut blocks: Vec<(usize, u64)> = vec![];
-    for (index, entry) in entries.iter().enumerate() {
-        let value = entry["value"].as_str().expect("entry value is a string");
-        let Ok(response) = serde_json::from_str::<serde_json::Value>(value) else {
-            continue;
-        };
-        let Some(result) = response.get("result") else {
-            continue;
-        };
-        // A block body is the only response carrying a parent hash.
-        if !result.is_object() || result.get("parentHash").is_none() {
-            continue;
-        }
-        let number = result["number"].as_str().expect("block number is a string");
-        let number =
-            u64::from_str_radix(number.trim_start_matches("0x"), 16).expect("block number is hex");
-        blocks.push((index, number));
-    }
-    assert_eq!(blocks.len(), 2, "the capture must hold the replayed block and its parent");
-    blocks.sort_unstable_by_key(|&(_, number)| number);
-    let (parent_index, _) = blocks[0];
-
-    let entry = &mut entries[parent_index];
-    let mut response: serde_json::Value =
-        serde_json::from_str(entry["value"].as_str().expect("entry value is a string"))
-            .expect("parse parent block response");
-    let result = &mut response["result"];
-    let original = result["hash"].as_str().expect("parent block hash").to_string();
-    result["hash"] = serde_json::Value::String(wrong_hash.to_string());
-    entry["value"] = serde_json::Value::String(response.to_string());
-
-    let path =
-        std::env::temp_dir().join(format!("mega_evme_exit_{name}_{}.json", std::process::id()));
-    std::fs::write(&path, envelope.to_string()).expect("write doctored cache");
-    (path, original)
-}
-
-/// Write a copy of the committed capture whose `eth_getTransactionByHash`
-/// response for `TX_OK` carries `block_hash` as its inclusion hash, and return
-/// its path together with the hash the untouched capture reported.
-///
-/// Entries are keyed by the request, so the doctored answer still resolves. The
-/// transaction lookup and the block fetch are separate calls, so rewriting only
-/// the lookup models an endpoint that describes the target's inclusion
-/// differently than the block it serves for that number. Passing
-/// [`serde_json::Value::Null`] models a lookup that reports a mined transaction
-/// without anchoring it to any block at all.
-fn cache_with_inclusion_hash(
-    name: &str,
-    block_hash: serde_json::Value,
-) -> (std::path::PathBuf, String) {
-    let mut envelope: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(cache()).expect("read offline cache"))
-            .expect("parse offline cache");
-    // Only the transaction's own response carries it as the `hash` field; the
-    // block body lists bare hashes and a receipt names it `transactionHash`.
-    let marker = format!("\"hash\":\"{TX_OK}\"");
-    let mut original = None;
-    for entry in envelope["cache"].as_array_mut().expect("cache entries").iter_mut() {
-        let value = entry["value"].as_str().expect("entry value is a string");
-        if !value.contains(&marker) {
-            continue;
-        }
-        let mut response: serde_json::Value =
-            serde_json::from_str(value).expect("parse transaction response");
-        let result = response.get_mut("result").expect("transaction result");
-        assert!(result.is_object(), "expected a transaction object for {TX_OK}");
-        assert!(
-            result.get("blockNumber").is_some_and(|n| !n.is_null()),
-            "the captured transaction must report a block number"
-        );
-        original = Some(result["blockHash"].as_str().expect("inclusion hash").to_string());
-        result["blockHash"] = block_hash.clone();
-        entry["value"] = serde_json::Value::String(response.to_string());
-    }
-    let original = original.expect("the capture must hold exactly one response for the target");
-
-    let path =
-        std::env::temp_dir().join(format!("mega_evme_exit_{name}_{}.json", std::process::id()));
-    std::fs::write(&path, envelope.to_string()).expect("write doctored cache");
-    (path, original)
-}
-
-/// Write a copy of the committed capture whose replayed block no longer lists
-/// `TX_OK` in its body, and return its path together with that block's hash.
-///
-/// The block keeps its own hash, so the lookup's inclusion hash still matches
-/// what the endpoint serves for that number: only the membership the preceding
-/// transaction set is derived from is gone.
-fn cache_without_target_in_block_body(name: &str) -> (std::path::PathBuf, String) {
-    let mut envelope: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(cache()).expect("read offline cache"))
-            .expect("parse offline cache");
-    let mut block_hash = None;
-    for entry in envelope["cache"].as_array_mut().expect("cache entries").iter_mut() {
-        let value = entry["value"].as_str().expect("entry value is a string");
-        let Ok(mut response) = serde_json::from_str::<serde_json::Value>(value) else {
-            continue;
-        };
-        // A block body is the only response carrying a transaction list.
-        let Some(txs) = response
-            .get_mut("result")
-            .and_then(|result| result.get_mut("transactions"))
-            .and_then(|txs| txs.as_array_mut())
-        else {
-            continue;
-        };
-        if !txs.iter().any(|hash| hash.as_str() == Some(TX_OK)) {
-            continue;
-        }
-        txs.retain(|hash| hash.as_str() != Some(TX_OK));
-        block_hash = Some(response["result"]["hash"].as_str().expect("block hash").to_string());
-        entry["value"] = serde_json::Value::String(response.to_string());
-    }
-    let block_hash = block_hash.expect("exactly one captured block body lists the target");
-
-    let path =
-        std::env::temp_dir().join(format!("mega_evme_exit_{name}_{}.json", std::process::id()));
-    std::fs::write(&path, envelope.to_string()).expect("write doctored cache");
-    (path, block_hash)
-}
-
 /// Write a `--tx-file` holding `contents`, and return its path.
 fn tx_file(name: &str, contents: &str) -> std::path::PathBuf {
     let path =
@@ -322,7 +170,7 @@ fn test_offline_cache_miss_exits_rpc_failure_with_a_json_error_object() {
 /// a batch reports the target as an `rpc` failure rather than an execution one.
 #[test]
 fn test_state_read_failure_during_execution_is_an_rpc_failure() {
-    let path = cache_without_entry("state_read", IN_EXECUTION_STATE_READ);
+    let path = DoctoredEnvelope::without_entry(cache(), "state_read", IN_EXECUTION_STATE_READ);
     let cache = path.to_str().unwrap();
 
     let single = run(&["replay", "--rpc.replay-file", cache, "--json", TX_OK]);
@@ -357,7 +205,8 @@ fn test_state_read_failure_during_execution_is_an_rpc_failure() {
 /// single-run and batch both report the RPC class (exit 3).
 #[test]
 fn test_pre_block_blockhash_system_call_cache_miss_is_an_rpc_failure() {
-    let path = cache_without_entry("pre_block_2935", PRE_BLOCK_HISTORY_STORAGE_READ);
+    let path =
+        DoctoredEnvelope::without_entry(cache(), "pre_block_2935", PRE_BLOCK_HISTORY_STORAGE_READ);
     let cache = path.to_str().unwrap();
 
     let single = run(&["replay", "--rpc.replay-file", cache, "--json", TX_OK]);
@@ -396,7 +245,11 @@ fn test_pre_block_blockhash_system_call_cache_miss_is_an_rpc_failure() {
 /// `BeaconRootContractCall { message }` rather than the blockhash variant.
 #[test]
 fn test_pre_block_beacon_root_system_call_cache_miss_is_an_rpc_failure() {
-    let path = cache_without_entry("pre_block_4788", PRE_BLOCK_BEACON_ROOT_STORAGE_READ);
+    let path = DoctoredEnvelope::without_entry(
+        cache(),
+        "pre_block_4788",
+        PRE_BLOCK_BEACON_ROOT_STORAGE_READ,
+    );
     let cache = path.to_str().unwrap();
 
     let single = run(&["replay", "--rpc.replay-file", cache, "--json", TX_OK]);
@@ -432,7 +285,8 @@ fn test_pre_block_beacon_root_system_call_cache_miss_is_an_rpc_failure() {
 fn test_unlinked_parent_block_is_an_rpc_failure() {
     const WRONG_PARENT: &str = "0x1111111111111111111111111111111111111111111111111111111111111111";
 
-    let (path, expected_parent) = cache_with_unlinked_parent("unlinked_parent", WRONG_PARENT);
+    let (path, expected_parent) =
+        DoctoredEnvelope::with_unlinked_parent(cache(), "unlinked_parent", WRONG_PARENT);
     let cache = path.to_str().unwrap();
 
     for extra in [&[][..], &["--verify-receipt"][..]] {
@@ -480,8 +334,12 @@ fn test_block_that_does_not_match_the_reported_inclusion_is_an_rpc_failure() {
     const WRONG_INCLUSION: &str =
         "0x2222222222222222222222222222222222222222222222222222222222222222";
 
-    let (path, served) =
-        cache_with_inclusion_hash("wrong_inclusion", serde_json::json!(WRONG_INCLUSION));
+    let (path, served) = DoctoredEnvelope::with_inclusion_hash(
+        cache(),
+        "wrong_inclusion",
+        TX_OK,
+        serde_json::json!(WRONG_INCLUSION),
+    );
     let run = run(&["replay", "--rpc.replay-file", path.to_str().unwrap(), "--json", TX_OK]);
     let _ = std::fs::remove_file(&path);
 
@@ -502,7 +360,8 @@ fn test_block_that_does_not_match_the_reported_inclusion_is_an_rpc_failure() {
 /// and executing the target after the whole block.
 #[test]
 fn test_target_absent_from_the_block_body_is_an_rpc_failure() {
-    let (path, block_hash) = cache_without_target_in_block_body("absent_target");
+    let (path, block_hash) =
+        DoctoredEnvelope::without_target_in_block_body(cache(), "absent_target", TX_OK);
     let run = run(&["replay", "--rpc.replay-file", path.to_str().unwrap(), "--json", TX_OK]);
     let _ = std::fs::remove_file(&path);
 
@@ -527,7 +386,12 @@ fn test_target_absent_from_the_block_body_is_an_rpc_failure() {
 /// 3 — the same class the batch driver rejects it with.
 #[test]
 fn test_mined_target_without_an_inclusion_hash_is_an_rpc_failure() {
-    let (path, _) = cache_with_inclusion_hash("unanchored", serde_json::Value::Null);
+    let (path, _) = DoctoredEnvelope::with_inclusion_hash(
+        cache(),
+        "unanchored",
+        TX_OK,
+        serde_json::Value::Null,
+    );
     let run = run(&["replay", "--rpc.replay-file", path.to_str().unwrap(), "--json", TX_OK]);
     let _ = std::fs::remove_file(&path);
 

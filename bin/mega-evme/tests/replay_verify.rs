@@ -14,6 +14,8 @@ use std::{
 
 mod common;
 
+use common::doctor::DoctoredEnvelope;
+
 /// Offline RPC capture, including the transaction's on-chain receipt.
 /// Name of the committed offline capture, resolved through the shared fixture
 /// helper so its location lives in exactly one place.
@@ -106,55 +108,6 @@ fn cache() -> PathBuf {
     common::fixture(CACHE)
 }
 
-/// A temp path unique to this process and this test.
-fn temp_path(name: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("mega_evme_verify_{name}_{}.json", std::process::id()))
-}
-
-/// Write a copy of the committed capture whose receipt response is rewritten by
-/// `doctor`, and return its path.
-fn doctored_cache(name: &str, doctor: impl Fn(&mut serde_json::Value)) -> PathBuf {
-    let mut envelope: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(cache()).expect("read offline cache"))
-            .expect("parse offline cache");
-    let mut doctored = false;
-    for entry in envelope["cache"].as_array_mut().expect("cache entries").iter_mut() {
-        let value = entry["value"].as_str().expect("entry value is a string");
-        // The receipt is the only cached response carrying cumulativeGasUsed.
-        if !value.contains("cumulativeGasUsed") {
-            continue;
-        }
-        let mut response: serde_json::Value =
-            serde_json::from_str(value).expect("parse receipt response");
-        doctor(&mut response["result"]);
-        entry["value"] = serde_json::Value::String(response.to_string());
-        doctored = true;
-    }
-    assert!(doctored, "offline cache should contain the receipt entry");
-
-    let path = temp_path(name);
-    std::fs::write(&path, envelope.to_string()).expect("write doctored cache");
-    path
-}
-
-/// Write a copy of the committed capture with the receipt dropped entirely,
-/// modelling an endpoint that has pruned it.
-fn cache_without_receipt(name: &str) -> PathBuf {
-    let mut envelope: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(cache()).expect("read offline cache"))
-            .expect("parse offline cache");
-    let entries = envelope["cache"].as_array_mut().expect("cache entries");
-    let before = entries.len();
-    entries.retain(|entry| {
-        !entry["value"].as_str().expect("entry value is a string").contains("cumulativeGasUsed")
-    });
-    assert!(entries.len() < before, "offline cache should contain the receipt entry");
-
-    let path = temp_path(name);
-    std::fs::write(&path, envelope.to_string()).expect("write pruned cache");
-    path
-}
-
 /// Write a `--tx-file` holding the single captured transaction.
 fn tx_file(name: &str) -> PathBuf {
     let path =
@@ -209,7 +162,8 @@ fn test_single_transaction_json_is_unchanged_without_the_flag() {
 /// dedicated mismatch exit code.
 #[test]
 fn test_verify_receipt_reports_a_gas_mismatch() {
-    let path = doctored_cache("gas", |receipt| receipt["gasUsed"] = "0x1".into());
+    let path =
+        DoctoredEnvelope::with_receipt(cache(), "gas", |receipt| receipt["gasUsed"] = "0x1".into());
 
     let run = replay(&path, &["--verify-receipt", "--json", TX]);
     let _ = std::fs::remove_file(&path);
@@ -235,7 +189,9 @@ fn test_verify_receipt_reports_a_gas_mismatch() {
 /// dimensions that agreed.
 #[test]
 fn test_verify_receipt_reports_a_status_mismatch() {
-    let path = doctored_cache("status", |receipt| receipt["status"] = "0x0".into());
+    let path = DoctoredEnvelope::with_receipt(cache(), "status", |receipt| {
+        receipt["status"] = "0x0".into()
+    });
 
     let run = replay(&path, &["--verify-receipt", "--json", TX]);
     let _ = std::fs::remove_file(&path);
@@ -253,7 +209,7 @@ fn test_verify_receipt_reports_a_status_mismatch() {
 /// A log divergence is reported under `logs`.
 #[test]
 fn test_verify_receipt_reports_a_log_mismatch() {
-    let path = doctored_cache("logs", |receipt| {
+    let path = DoctoredEnvelope::with_receipt(cache(), "logs", |receipt| {
         receipt["logs"] = serde_json::json!([{
             "address": "0x00000000000000000000000000000000000000aa",
             "topics": ["0x000000000000000000000000000000000000000000000000000000000000000a"],
@@ -284,7 +240,7 @@ fn test_verify_receipt_reports_a_log_mismatch() {
 /// infrastructure failure: the transaction is unverified, never mismatched.
 #[test]
 fn test_verify_receipt_reorg_is_an_infrastructure_error() {
-    let path = doctored_cache("reorg", |receipt| {
+    let path = DoctoredEnvelope::with_receipt(cache(), "reorg", |receipt| {
         receipt["blockHash"] =
             "0x1111111111111111111111111111111111111111111111111111111111111111".into();
     });
@@ -315,7 +271,7 @@ fn test_verify_receipt_reorg_is_an_infrastructure_error() {
 /// requested and the served hash.
 #[test]
 fn test_verify_receipt_for_another_transaction_is_an_infrastructure_error() {
-    let path = doctored_cache("wrong_tx", |receipt| {
+    let path = DoctoredEnvelope::with_receipt(cache(), "wrong_tx", |receipt| {
         receipt["transactionHash"] = OTHER_TX.into();
     });
 
@@ -344,7 +300,7 @@ fn test_verify_receipt_for_another_transaction_is_an_infrastructure_error() {
 /// is an infrastructure failure, not a mismatch.
 #[test]
 fn test_verify_receipt_missing_receipt_is_an_infrastructure_error() {
-    let path = cache_without_receipt("pruned");
+    let path = DoctoredEnvelope::without_receipt(cache(), "pruned");
 
     let run = replay(&path, &["--verify-receipt", "--json", TX]);
     let _ = std::fs::remove_file(&path);
@@ -383,7 +339,9 @@ fn test_batch_verify_receipt_reports_a_match() {
 /// through the dedicated verification error.
 #[test]
 fn test_batch_verify_receipt_reports_a_mismatch_and_exits_nonzero() {
-    let path = doctored_cache("batch_gas", |receipt| receipt["gasUsed"] = "0x1".into());
+    let path = DoctoredEnvelope::with_receipt(cache(), "batch_gas", |receipt| {
+        receipt["gasUsed"] = "0x1".into()
+    });
     let list = tx_file("batch_gas");
 
     let run = replay(&path, &["--tx-file", list.to_str().unwrap(), "--verify-receipt", "--json"]);
@@ -414,7 +372,7 @@ fn test_batch_verify_receipt_reports_a_mismatch_and_exits_nonzero() {
 /// by discarding the execution summary.
 #[test]
 fn test_batch_verify_receipt_missing_receipt_keeps_result_and_is_rpc() {
-    let path = cache_without_receipt("batch_pruned");
+    let path = DoctoredEnvelope::without_receipt(cache(), "batch_pruned");
     let list = tx_file("batch_pruned");
 
     let run = replay(&path, &["--tx-file", list.to_str().unwrap(), "--verify-receipt", "--json"]);
@@ -454,7 +412,7 @@ fn test_batch_verify_receipt_missing_receipt_keeps_result_and_is_rpc() {
 /// divergent-inclusion failure is reported on `verification.error`.
 #[test]
 fn test_batch_verify_receipt_reorg_keeps_result_and_is_rpc() {
-    let path = doctored_cache("batch_reorg", |receipt| {
+    let path = DoctoredEnvelope::with_receipt(cache(), "batch_reorg", |receipt| {
         receipt["blockHash"] =
             "0x1111111111111111111111111111111111111111111111111111111111111111".into();
     });
@@ -481,7 +439,7 @@ fn test_batch_verify_receipt_reorg_keeps_result_and_is_rpc() {
 /// reported on `verification.error` naming both hashes — tallied rpc once.
 #[test]
 fn test_batch_verify_receipt_for_another_transaction_keeps_result_and_is_rpc() {
-    let path = doctored_cache("batch_wrong_tx", |receipt| {
+    let path = DoctoredEnvelope::with_receipt(cache(), "batch_wrong_tx", |receipt| {
         receipt["transactionHash"] = OTHER_TX.into();
     });
     let list = tx_file("batch_wrong_tx");
@@ -535,7 +493,7 @@ fn test_batch_verify_receipt_for_another_transaction_keeps_result_and_is_rpc() {
 /// infrastructure failure, never a match/mismatch verdict.
 #[test]
 fn test_verify_receipt_null_block_hash_is_an_infrastructure_error() {
-    let path = doctored_cache("null_block_hash", |receipt| {
+    let path = DoctoredEnvelope::with_receipt(cache(), "null_block_hash", |receipt| {
         receipt["blockHash"] = serde_json::Value::Null;
     });
 
@@ -561,7 +519,7 @@ fn test_verify_receipt_null_block_hash_is_an_infrastructure_error() {
 /// `verification.error` (rpc), not as a bare error entry.
 #[test]
 fn test_batch_verify_receipt_null_block_hash_keeps_result_and_is_rpc() {
-    let path = doctored_cache("batch_null_block_hash", |receipt| {
+    let path = DoctoredEnvelope::with_receipt(cache(), "batch_null_block_hash", |receipt| {
         receipt["blockHash"] = serde_json::Value::Null;
     });
     let list = tx_file("batch_null_block_hash");
@@ -591,26 +549,9 @@ fn test_batch_verify_receipt_null_block_hash_keeps_result_and_is_rpc() {
 /// the kept result line (not a silent `fidelity-gate-unavailable` skip).
 #[test]
 fn test_batch_dump_fixture_dir_null_receipt_is_rpc_fixture_error() {
-    let path = doctored_cache("batch_dump_null_receipt", |receipt| {
-        // Doctor the whole result to null by replacing the entry value below.
-        let _ = receipt;
-    });
     // Null the receipt response entirely (result: null), modelling a pruned
     // or unanswered eth_getTransactionReceipt.
-    let mut envelope: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&path).expect("read doctored cache"))
-            .expect("parse");
-    for entry in envelope["cache"].as_array_mut().expect("cache entries").iter_mut() {
-        let value = entry["value"].as_str().expect("entry value is a string");
-        if !value.contains("cumulativeGasUsed") {
-            continue;
-        }
-        let mut response: serde_json::Value =
-            serde_json::from_str(value).expect("parse receipt response");
-        response["result"] = serde_json::Value::Null;
-        entry["value"] = serde_json::Value::String(response.to_string());
-    }
-    std::fs::write(&path, envelope.to_string()).expect("rewrite null-receipt cache");
+    let path = DoctoredEnvelope::with_null_receipt(cache(), "batch_dump_null_receipt");
 
     let list = tx_file("batch_dump_null_receipt");
     let dir = std::env::temp_dir()
@@ -654,7 +595,7 @@ fn test_batch_dump_fixture_dir_null_receipt_is_rpc_fixture_error() {
 /// unanswered class: rpc fixture error, result kept, exit 3.
 #[test]
 fn test_batch_dump_fixture_dir_missing_receipt_is_rpc_fixture_error() {
-    let path = cache_without_receipt("batch_dump_no_receipt");
+    let path = DoctoredEnvelope::without_receipt(cache(), "batch_dump_no_receipt");
     let list = tx_file("batch_dump_no_receipt");
     let dir = std::env::temp_dir()
         .join(format!("mega_evme_batch_dump_no_receipt_{}", std::process::id()));
@@ -699,7 +640,7 @@ fn test_batch_dump_fixture_dir_missing_receipt_is_rpc_fixture_error() {
 /// ("1 of 1"), and the run exits 3.
 #[test]
 fn test_batch_verify_and_dump_missing_receipt_counted_once() {
-    let path = cache_without_receipt("batch_verify_dump_no_receipt");
+    let path = DoctoredEnvelope::without_receipt(cache(), "batch_verify_dump_no_receipt");
     let list = tx_file("batch_verify_dump_no_receipt");
     let dir = std::env::temp_dir()
         .join(format!("mega_evme_batch_verify_dump_no_receipt_{}", std::process::id()));
@@ -753,7 +694,7 @@ fn test_batch_verify_and_dump_missing_receipt_counted_once() {
 /// refused, and skips never fail the run.
 #[test]
 fn test_batch_dump_fixture_dir_fidelity_mismatch_stays_skip() {
-    let path = doctored_cache("batch_dump_fidelity_skip", |receipt| {
+    let path = DoctoredEnvelope::with_receipt(cache(), "batch_dump_fidelity_skip", |receipt| {
         receipt["gasUsed"] = "0x1".into();
     });
     let list = tx_file("batch_dump_fidelity_skip");
@@ -1022,37 +963,15 @@ fn test_batch_dump_does_not_write_or_clobber_when_block_aborts_before_finish() {
     const LATER_CACHE_KEY: &str =
         "0x91bbb37d27a588e217e5be6aeab0fb377ffea0ad3a2714d1f54ceb69852124f2";
 
-    let mut envelope: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(cache()).expect("read offline cache"))
-            .expect("parse offline cache");
     // Clone the dump target's TX response shape and rewrite hash + gas so the
     // later index is fetchable but rejected at execution (intrinsic gas).
-    let mut template: Option<serde_json::Value> = None;
-    let target_marker = format!("\"hash\":\"{TX}\"");
-    for entry in envelope["cache"].as_array().expect("cache entries") {
-        let value = entry["value"].as_str().expect("entry value is a string");
-        if !value.contains(&target_marker) {
-            continue;
-        }
-        let response: serde_json::Value =
-            serde_json::from_str(value).expect("parse transaction response");
-        if response["result"].get("hash").and_then(|h| h.as_str()) == Some(TX) {
-            template = Some(response);
-            break;
-        }
-    }
-    let mut response = template.expect("offline cache must hold the dump target TX object");
-    let result = response["result"].as_object_mut().expect("tx result object");
-    result.insert("hash".into(), serde_json::Value::String(LATER.to_string()));
-    result.insert("transactionIndex".into(), serde_json::Value::String("0x2".into()));
-    result.insert("gas".into(), serde_json::Value::String("0x0".into()));
-    envelope["cache"].as_array_mut().expect("cache").push(serde_json::json!({
-        "key": LATER_CACHE_KEY,
-        "value": response.to_string(),
-    }));
-
-    let cache_path = temp_path("dump_abort_after");
-    std::fs::write(&cache_path, envelope.to_string()).expect("write doctored cache");
+    let cache_path = DoctoredEnvelope::load(cache())
+        .push_cloned_transaction(TX, LATER_CACHE_KEY, |result| {
+            result["hash"] = serde_json::Value::String(LATER.to_string());
+            result["transactionIndex"] = serde_json::Value::String("0x2".into());
+            result["gas"] = serde_json::Value::String("0x0".into());
+        })
+        .write_to_temp("dump_abort_after");
 
     let list_path = std::env::temp_dir()
         .join(format!("mega_evme_verify_dump_abort_after_{}.txt", std::process::id()));

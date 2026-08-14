@@ -3,10 +3,12 @@
 //! `tests/common/` as a directory (not a top-level test binary), so this file
 //! is not picked up as a standalone test target.
 //!
-//! Add helpers only when a third caller shows up; the current set is sized to
-//! the patterns shared between `tests/provider.rs` and `tests/state.rs`.
+//! Capture-envelope doctoring lives in [`doctor`]. Other helpers here are the
+//! patterns shared across the provider, state, and replay test binaries.
 
 #![allow(dead_code)] // Each test binary uses a different subset of helpers.
+
+pub(crate) mod doctor;
 
 use std::{
     collections::HashSet,
