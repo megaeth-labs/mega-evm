@@ -14,6 +14,8 @@
 //!   stop.
 //! - `gas_leakage` — the three paths a per-frame gas mechanism can leak through (interception,
 //!   TX-level rescue, frame return), each with a clamp outstanding.
+//! - `opcode_set_parity` — all 256 opcodes probed under both specs, so the REX7 table cannot gain
+//!   an opcode REX6 does not have when revm's base table grows one.
 //! - `parity_shapes` — parity on the transaction shapes that enter through a different door:
 //!   EIP-7702 authorizations, the `KeylessDeploy` sandbox, system-originated (exempt) transactions,
 //!   the REX5 storage-call stipend, and oracle hints.
@@ -37,4 +39,5 @@ mod gas_leakage;
 mod interceptor_resume;
 mod latch_surfacing;
 mod modexp_gas;
+mod opcode_set_parity;
 mod parity_shapes;
