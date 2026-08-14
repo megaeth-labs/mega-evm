@@ -25,8 +25,8 @@ use mega_evm::{
 };
 use revm::{
     bytecode::opcode::{
-        CALL, DUP1, JUMPDEST, JUMPI, MSTORE, POP, RETURN, RETURNDATACOPY, RETURNDATASIZE, STOP,
-        SUB, SWAP1,
+        CALL, DUP1, EXP, JUMPDEST, JUMPI, MSTORE, POP, RETURN, RETURNDATACOPY, RETURNDATASIZE,
+        STOP, SUB, SWAP1,
     },
     context::result::ExecutionResult,
 };
@@ -183,6 +183,95 @@ fn test_knife_edge_neighbours_classify_by_which_budget_binds() {
     assert!(
         gas_bound.compute_gas > edge.compute_before,
         "the EVM out-of-gas burns the frame's remainder, which settles as compute",
+    );
+}
+
+/// The two shapes the spend-all knife edge needs: everything up to the `EXP`'s operands, and
+/// the same thing with the `EXP` itself. A full-width exponent is charged through the plain
+/// `gas!` macro, so a shortage is `InstructionResult::OutOfGas` — the variant
+/// `Interpreter::halt` spends all remaining gas for.
+fn spend_all_knife_edge_shapes() -> (Bytes, Bytes) {
+    let operands = |mut code: Vec<u8>| {
+        let mut builder = BytecodeBuilder::default();
+        builder = builder.push_u256(U256::MAX).push_number(2u64);
+        code.extend_from_slice(&builder.build_vec());
+        code
+    };
+    let mut before = operands(plain_filler(20));
+    before.push(STOP);
+    let mut full = operands(plain_filler(20));
+    full.push(EXP);
+    full.push(STOP);
+    (Bytes::from(before), Bytes::from(full))
+}
+
+fn calibrate_spend_all_knife_edge() -> KnifeEdge {
+    let (before_code, full_code) = spend_all_knife_edge_shapes();
+    let before = transact_default(MegaSpecId::REX7, base_db(before_code));
+    let full = transact_default(MegaSpecId::REX7, base_db(full_code.clone()));
+    assert!(before.is_success(), "calibration run must succeed: {:?}", before.result);
+    assert!(full.is_success(), "calibration run must succeed: {:?}", full.result);
+    // The receipt carries compute gas plus MegaETH storage gas; only the compute half is what
+    // the compute limit bounds. Both calibration shapes must carry the same storage gas, or the
+    // two budgets cannot be lined up from these readings.
+    assert_eq!(
+        before.gas_used - before.compute_gas,
+        full.gas_used - full.compute_gas,
+        "the two calibration shapes must carry the same storage gas",
+    );
+
+    let crossing_cost = full.compute_gas - before.compute_gas;
+    assert!(crossing_cost > 1, "the EXP must have a real cost, got {crossing_cost}");
+    KnifeEdge {
+        code: full_code,
+        // One gas short of the EXP on the EVM's own counter...
+        gas_limit: before.gas_used + crossing_cost - 1,
+        // ...and one gas short of it on the compute headroom, so the two coincide exactly.
+        compute_limit: before.compute_gas + crossing_cost - 1,
+        compute_before: before.compute_gas,
+    }
+}
+
+/// An equal-value clamp on a spend-all out-of-gas charges the sender the same as REX6 at the
+/// same point. The halt reason moves to a compute exceed; the receipt `gas_used` does not.
+///
+/// The existing equal-value case above is a `MemoryOOG` (`MSTORE`), which does not spend all
+/// and is already pinned for classification. This is the `OutOfGas` neighbour, where revm
+/// zeroes the counter before the clamp restore, so rescue has nothing to hand back.
+#[test]
+fn test_equal_value_clamp_on_a_spend_all_out_of_gas_matches_rex6_gas_used() {
+    let edge = calibrate_spend_all_knife_edge();
+
+    let r7 = transact_with_gas_limit(
+        MegaSpecId::REX7,
+        base_db(edge.code.clone()),
+        compute_limit(edge.compute_limit)(MegaSpecId::REX7),
+        edge.gas_limit,
+    );
+    let r6 = transact_with_gas_limit(
+        MegaSpecId::REX6,
+        base_db(edge.code.clone()),
+        compute_limit(edge.compute_limit)(MegaSpecId::REX6),
+        edge.gas_limit,
+    );
+
+    assert_eq!(
+        r7.gas_used, edge.gas_limit,
+        "an equal-value clamp on a spend-all out-of-gas returns nothing to the sender",
+    );
+    assert_eq!(
+        r7.gas_used, r6.gas_used,
+        "REX6 and REX7 charge the sender identically at the equal-value spend-all edge",
+    );
+    assert!(
+        matches!(r7.halt_reason("REX7"), MegaHaltReason::ComputeGasLimitExceeded { .. }),
+        "the equal-value clamp still classifies as a compute exceed; got {:?}",
+        r7.result,
+    );
+    assert!(
+        !matches!(r6.halt_reason("REX6"), MegaHaltReason::ComputeGasLimitExceeded { .. }),
+        "REX6 reports the EVM's own out-of-gas, not a compute exceed; got {:?}",
+        r6.result,
     );
 }
 
