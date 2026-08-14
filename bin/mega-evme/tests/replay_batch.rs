@@ -30,6 +30,8 @@ use std::process::Command;
 
 mod common;
 
+use common::doctor::DoctoredEnvelope;
+
 /// Block fully covered by the envelope, and its transaction count.
 const BLOCK: u64 = 22_945_844;
 const BLOCK_TX_COUNT: usize = 23;
@@ -100,269 +102,6 @@ fn replay_with_code(args: &[&str]) -> (String, Option<i32>) {
     cmd.args(args);
     let output = cmd.output().expect("failed to run mega-evme");
     (String::from_utf8(output.stdout).expect("stdout is utf-8"), output.status.code())
-}
-
-/// Write a copy of the envelope whose `eth_getTransactionByHash` response for
-/// `tx_hash` answers "unknown transaction", and return its path.
-///
-/// Entries are keyed by the request, not the response, so the doctored answer
-/// still resolves. This models the endpoint losing one transaction of a block it
-/// still serves — the block body lists the hash, the lookup denies it.
-fn envelope_without_transaction(name: &str, tx_hash: &str) -> std::path::PathBuf {
-    let mut envelope: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(envelope()).expect("read envelope"))
-            .expect("parse envelope");
-    // Only the transaction's own response carries it as the `hash` field; the
-    // block body lists bare hashes and a receipt names it `transactionHash`.
-    let marker = format!("\"hash\":\"{tx_hash}\"");
-    let mut doctored = 0;
-    for entry in envelope["cache"].as_array_mut().expect("cache entries").iter_mut() {
-        let value = entry["value"].as_str().expect("entry value is a string");
-        if !value.contains(&marker) {
-            continue;
-        }
-        let mut response: serde_json::Value =
-            serde_json::from_str(value).expect("parse transaction response");
-        response["result"] = serde_json::Value::Null;
-        entry["value"] = serde_json::Value::String(response.to_string());
-        doctored += 1;
-    }
-    assert_eq!(doctored, 1, "the envelope must hold exactly one response for {tx_hash}");
-
-    let path =
-        std::env::temp_dir().join(format!("mega_evme_batch_{name}_{}.json", std::process::id()));
-    std::fs::write(&path, envelope.to_string()).expect("write doctored envelope");
-    path
-}
-
-/// Write a copy of the envelope with the `eth_getTransactionByHash` entry for
-/// `tx_hash` removed entirely, and return its path.
-///
-/// Distinct from [`envelope_without_transaction`]: there the endpoint answers
-/// "no such transaction", here it does not answer at all — an offline cache
-/// miss, which is how a transport failure reaches the same call site.
-fn envelope_dropping_transaction(name: &str, tx_hash: &str) -> std::path::PathBuf {
-    let mut envelope: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(envelope()).expect("read envelope"))
-            .expect("parse envelope");
-    let marker = format!("\"hash\":\"{tx_hash}\"");
-    let entries = envelope["cache"].as_array_mut().expect("cache entries");
-    let before = entries.len();
-    entries.retain(|entry| {
-        !entry["value"].as_str().expect("entry value is a string").contains(&marker)
-    });
-    assert_eq!(
-        before - entries.len(),
-        1,
-        "the envelope must hold exactly one response for {tx_hash}"
-    );
-
-    let path =
-        std::env::temp_dir().join(format!("mega_evme_batch_{name}_{}.json", std::process::id()));
-    std::fs::write(&path, envelope.to_string()).expect("write doctored envelope");
-    path
-}
-
-/// Write a copy of the envelope whose `eth_getBalance` answer for `tx_hash`'s
-/// sender at its parent block is zero, and return its path.
-///
-/// The served transaction stays byte-identical — it still authenticates against
-/// the requested hash — but the block executor rejects it (the sender cannot
-/// fund its gas) and aborts the block: an execution-class abort raised through
-/// served *state*, which carries no proof and cannot be authenticated the way a
-/// consensus object can.
-fn envelope_with_drained_sender(name: &str, tx_hash: &str) -> std::path::PathBuf {
-    let mut envelope: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(envelope()).expect("read envelope"))
-            .expect("parse envelope");
-    // The transaction's own response names its sender and inclusion block.
-    let marker = format!("\"hash\":\"{tx_hash}\"");
-    let mut sender_block: Option<(String, u64)> = None;
-    for entry in envelope["cache"].as_array().expect("cache entries") {
-        let value = entry["value"].as_str().expect("entry value is a string");
-        if !value.contains(&marker) {
-            continue;
-        }
-        let response: serde_json::Value =
-            serde_json::from_str(value).expect("parse transaction response");
-        let result = &response["result"];
-        let from = result["from"].as_str().expect("transaction `from`").to_string();
-        let number = u64::from_str_radix(
-            result["blockNumber"].as_str().expect("blockNumber").trim_start_matches("0x"),
-            16,
-        )
-        .expect("hex block number");
-        assert!(
-            sender_block.replace((from, number)).is_none(),
-            "the envelope must hold exactly one response for {tx_hash}"
-        );
-    }
-    let (from, number) = sender_block.expect("the envelope must hold the transaction");
-    // The state fork reads the sender at the parent block. The entry is keyed
-    // by the same `method\x00params` digest the capturing transport writes, so
-    // the key is recomputed rather than searched for by value.
-    let params = format!("[\"{from}\",\"0x{:x}\"]", number - 1);
-    let key = format!("{}", alloy_primitives::keccak256(format!("eth_getBalance\x00{params}")));
-    let mut doctored = 0;
-    for entry in envelope["cache"].as_array_mut().expect("cache entries").iter_mut() {
-        if entry["key"].as_str() != Some(key.as_str()) {
-            continue;
-        }
-        let mut response: serde_json::Value =
-            serde_json::from_str(entry["value"].as_str().expect("entry value is a string"))
-                .expect("parse balance response");
-        response["result"] = serde_json::Value::String("0x0".into());
-        entry["value"] = serde_json::Value::String(response.to_string());
-        doctored += 1;
-    }
-    assert_eq!(doctored, 1, "the envelope must hold the sender's parent-block balance");
-
-    let path =
-        std::env::temp_dir().join(format!("mega_evme_batch_{name}_{}.json", std::process::id()));
-    std::fs::write(&path, envelope.to_string()).expect("write doctored envelope");
-    path
-}
-
-/// Write a copy of the envelope whose `eth_getTransactionByHash` response for
-/// `tx_hash` still returns the transaction object, but with `gas` set to `0x0`.
-///
-/// The tampered body no longer hashes to the requested hash, so the replay must
-/// refuse to execute it: authentication fails before the transaction reaches
-/// the block executor. Models a tampered capture (or a corrupted backend)
-/// serving a body that does not match the hash it was asked for.
-fn envelope_with_zero_gas_transaction(name: &str, tx_hash: &str) -> std::path::PathBuf {
-    let mut envelope: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(envelope()).expect("read envelope"))
-            .expect("parse envelope");
-    let marker = format!("\"hash\":\"{tx_hash}\"");
-    let mut doctored = 0;
-    for entry in envelope["cache"].as_array_mut().expect("cache entries").iter_mut() {
-        let value = entry["value"].as_str().expect("entry value is a string");
-        if !value.contains(&marker) {
-            continue;
-        }
-        let mut response: serde_json::Value =
-            serde_json::from_str(value).expect("parse transaction response");
-        let result = response.get_mut("result").expect("transaction result");
-        assert!(result.is_object(), "expected a transaction object for {tx_hash}");
-        result["gas"] = serde_json::Value::String("0x0".into());
-        entry["value"] = serde_json::Value::String(response.to_string());
-        doctored += 1;
-    }
-    assert_eq!(doctored, 1, "the envelope must hold exactly one response for {tx_hash}");
-
-    let path =
-        std::env::temp_dir().join(format!("mega_evme_batch_{name}_{}.json", std::process::id()));
-    std::fs::write(&path, envelope.to_string()).expect("write doctored envelope");
-    path
-}
-
-/// Write a copy of the envelope whose `eth_getTransactionByHash` response for
-/// `tx_hash` keeps the signed body byte-identical but reports a different
-/// `from` address, and return its path.
-///
-/// A signed transaction's `from` is not part of its encoding — it is derived
-/// from the signature — so the tampered answer still hashes to the requested
-/// hash. Executing it would run the transaction under the wrong sender;
-/// authentication must instead re-derive the signer and reject the served
-/// `from`.
-fn envelope_with_reassigned_sender(name: &str, tx_hash: &str) -> std::path::PathBuf {
-    let mut envelope: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(envelope()).expect("read envelope"))
-            .expect("parse envelope");
-    let marker = format!("\"hash\":\"{tx_hash}\"");
-    let mut doctored = 0;
-    for entry in envelope["cache"].as_array_mut().expect("cache entries").iter_mut() {
-        let value = entry["value"].as_str().expect("entry value is a string");
-        if !value.contains(&marker) {
-            continue;
-        }
-        let mut response: serde_json::Value =
-            serde_json::from_str(value).expect("parse transaction response");
-        let result = response.get_mut("result").expect("transaction result");
-        assert!(result.is_object(), "expected a transaction object for {tx_hash}");
-        result["from"] =
-            serde_json::Value::String("0x000000000000000000000000000000000000dead".into());
-        entry["value"] = serde_json::Value::String(response.to_string());
-        doctored += 1;
-    }
-    assert_eq!(doctored, 1, "the envelope must hold exactly one response for {tx_hash}");
-
-    let path =
-        std::env::temp_dir().join(format!("mega_evme_batch_{name}_{}.json", std::process::id()));
-    std::fs::write(&path, envelope.to_string()).expect("write doctored envelope");
-    path
-}
-
-/// Write a copy of the envelope whose `eth_getBlockByNumber` answer for block
-/// `number` is null, and return its path.
-///
-/// The height was resolved by the endpoint's own answers (the target's
-/// inclusion metadata names the block, whose parent must then exist), so the
-/// null models an endpoint contradicting itself across a reorg or divergent
-/// load-balanced views — not a user asking about an unknown height.
-fn envelope_without_block(name: &str, number: u64) -> std::path::PathBuf {
-    let mut envelope: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(envelope()).expect("read envelope"))
-            .expect("parse envelope");
-    let number_hex = format!("0x{number:x}");
-    let mut doctored = 0;
-    for entry in envelope["cache"].as_array_mut().expect("cache entries").iter_mut() {
-        let value = entry["value"].as_str().expect("entry value is a string");
-        if !value.contains("\"transactions\"") {
-            continue;
-        }
-        let mut response: serde_json::Value =
-            serde_json::from_str(value).expect("parse block response");
-        if response["result"]["number"].as_str() != Some(number_hex.as_str()) {
-            continue;
-        }
-        response["result"] = serde_json::Value::Null;
-        entry["value"] = serde_json::Value::String(response.to_string());
-        doctored += 1;
-    }
-    assert_eq!(doctored, 1, "the envelope must hold exactly one header for block {number}");
-
-    let path =
-        std::env::temp_dir().join(format!("mega_evme_batch_{name}_{}.json", std::process::id()));
-    std::fs::write(&path, envelope.to_string()).expect("write doctored envelope");
-    path
-}
-
-/// Write a copy of the envelope whose header for block `number` advertises
-/// `gas_limit`, and return its path.
-///
-/// Shrinking the advertised limit makes the block-gas admission check reject
-/// the first transaction whose own gas limit exceeds what remains — a
-/// deterministic execution-class rejection whose error names no transaction
-/// hash, raised while that transaction is in flight.
-fn envelope_with_block_gas_limit(name: &str, number: u64, gas_limit: u64) -> std::path::PathBuf {
-    let mut envelope: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(envelope()).expect("read envelope"))
-            .expect("parse envelope");
-    let number_hex = format!("0x{number:x}");
-    let mut doctored = 0;
-    for entry in envelope["cache"].as_array_mut().expect("cache entries").iter_mut() {
-        let value = entry["value"].as_str().expect("entry value is a string");
-        if !value.contains("\"transactions\"") {
-            continue;
-        }
-        let mut response: serde_json::Value =
-            serde_json::from_str(value).expect("parse block response");
-        let result = &mut response["result"];
-        if result["number"].as_str() != Some(number_hex.as_str()) {
-            continue;
-        }
-        result["gasLimit"] = serde_json::Value::String(format!("0x{gas_limit:x}"));
-        entry["value"] = serde_json::Value::String(response.to_string());
-        doctored += 1;
-    }
-    assert_eq!(doctored, 1, "the envelope must hold exactly one header for block {number}");
-
-    let path =
-        std::env::temp_dir().join(format!("mega_evme_batch_{name}_{}.json", std::process::id()));
-    std::fs::write(&path, envelope.to_string()).expect("write doctored envelope");
-    path
 }
 
 /// Run `replay` against `envelope_path` and return its stdout plus its exit code.
@@ -581,7 +320,7 @@ fn test_replay_block_verify_receipt_reports_a_verdict_per_target() {
 #[test]
 fn test_replay_block_sweeps_targets_behind_an_abort_as_unanswered() {
     let (missing, missing_index) = BLOCK_TXS[1];
-    let path = envelope_without_transaction("abort_block", missing);
+    let path = DoctoredEnvelope::without_transaction(envelope(), "abort_block", missing);
 
     let (stdout, code) =
         replay_envelope_with_code(&path, &["--block", &BLOCK.to_string(), "--json"]);
@@ -642,7 +381,7 @@ fn test_replay_single_transaction_preceding_null_is_an_rpc_failure() {
     let missing = BLOCK_TXS[0].0;
     let (target, target_index) = BLOCK_TXS[1];
     assert!(target_index > 0, "the target must have preceding transactions to execute");
-    let path = envelope_without_transaction("single_preceding_null", missing);
+    let path = DoctoredEnvelope::without_transaction(envelope(), "single_preceding_null", missing);
 
     let (stdout, code) = replay_envelope_with_code(&path, &["--json", target]);
     let _ = std::fs::remove_file(&path);
@@ -668,7 +407,7 @@ fn test_replay_single_transaction_preceding_null_is_an_rpc_failure() {
 #[test]
 fn test_replay_single_transaction_target_null_is_not_found() {
     let target = BLOCK_TXS[1].0;
-    let path = envelope_without_transaction("single_target_null", target);
+    let path = DoctoredEnvelope::without_transaction(envelope(), "single_target_null", target);
 
     let (stdout, code) = replay_envelope_with_code(&path, &["--json", target]);
     let _ = std::fs::remove_file(&path);
@@ -694,7 +433,7 @@ fn test_replay_single_transaction_target_null_is_not_found() {
 fn test_replay_single_transaction_preceding_transport_error_is_an_rpc_failure() {
     let missing = BLOCK_TXS[0].0;
     let target = BLOCK_TXS[1].0;
-    let path = envelope_dropping_transaction("single_preceding_miss", missing);
+    let path = DoctoredEnvelope::dropping_transaction(envelope(), "single_preceding_miss", missing);
 
     let (stdout, code) = replay_envelope_with_code(&path, &["--json", target]);
     let _ = std::fs::remove_file(&path);
@@ -721,7 +460,7 @@ fn test_replay_single_transaction_preceding_transport_error_is_an_rpc_failure() 
 #[test]
 fn test_replay_block_sweeps_targets_behind_execution_abort_as_rpc() {
     let (aborting, aborting_index) = EXEC_ABORT_TX;
-    let path = envelope_with_drained_sender("exec_abort_block", aborting);
+    let path = DoctoredEnvelope::with_drained_sender(envelope(), "exec_abort_block", aborting);
 
     let (stdout, code) =
         replay_envelope_with_code(&path, &["--block", &BLOCK.to_string(), "--json"]);
@@ -777,7 +516,7 @@ fn test_replay_tx_file_non_target_execution_abort_exits_execution() {
     let (target_a, target_a_index) = BLOCK_TXS[1];
     let (target_b, _) = BLOCK_TXS[2];
     assert!(target_a_index > aborting_index, "targets must sit behind the non-target aborter");
-    let path = envelope_with_drained_sender("non_target_exec_abort", aborting);
+    let path = DoctoredEnvelope::with_drained_sender(envelope(), "non_target_exec_abort", aborting);
     let list = format!("{target_a}\n{target_b}\n");
     let list_path = std::env::temp_dir()
         .join(format!("mega_evme_tx_list_non_target_exec_{}.txt", std::process::id()));
@@ -829,7 +568,8 @@ fn test_replay_tx_file_non_target_execution_abort_exits_execution() {
 #[test]
 fn test_replay_block_tampered_transaction_body_fails_authentication_as_rpc() {
     let (tampered, tampered_index) = EXEC_ABORT_TX;
-    let path = envelope_with_zero_gas_transaction("tampered_body_block", tampered);
+    let path =
+        DoctoredEnvelope::with_zero_gas_transaction(envelope(), "tampered_body_block", tampered);
 
     let (stdout, code) =
         replay_envelope_with_code(&path, &["--block", &BLOCK.to_string(), "--json"]);
@@ -868,7 +608,8 @@ fn test_replay_block_tampered_transaction_body_fails_authentication_as_rpc() {
 #[test]
 fn test_replay_single_transaction_reassigned_sender_fails_authentication() {
     let (target, _) = BLOCK_TXS[1];
-    let path = envelope_with_reassigned_sender("single_reassigned_from", target);
+    let path =
+        DoctoredEnvelope::with_reassigned_sender(envelope(), "single_reassigned_from", target);
 
     let (stdout, code) = replay_envelope_with_code(&path, &["--json", target]);
     let _ = std::fs::remove_file(&path);
@@ -891,7 +632,11 @@ fn test_replay_single_transaction_tampered_preceding_fails_authentication() {
     let (tampered, tampered_index) = EXEC_ABORT_TX;
     let (target, target_index) = BLOCK_TXS[1];
     assert!(target_index > tampered_index, "the tampered transaction must precede the target");
-    let path = envelope_with_zero_gas_transaction("single_tampered_preceding", tampered);
+    let path = DoctoredEnvelope::with_zero_gas_transaction(
+        envelope(),
+        "single_tampered_preceding",
+        tampered,
+    );
 
     let (stdout, code) = replay_envelope_with_code(&path, &["--json", target]);
     let _ = std::fs::remove_file(&path);
@@ -915,7 +660,7 @@ fn test_replay_single_transaction_tampered_preceding_fails_authentication() {
 #[test]
 fn test_replay_single_transaction_null_resolved_parent_is_an_rpc_failure() {
     let (target, _) = BLOCK_TXS[1];
-    let path = envelope_without_block("single_null_parent", BLOCK - 1);
+    let path = DoctoredEnvelope::without_block(envelope(), "single_null_parent", BLOCK - 1);
 
     let (stdout, code) = replay_envelope_with_code(&path, &["--json", target]);
     let _ = std::fs::remove_file(&path);
@@ -935,7 +680,7 @@ fn test_replay_single_transaction_null_resolved_parent_is_an_rpc_failure() {
 #[test]
 fn test_replay_single_transaction_null_resolved_block_is_an_rpc_failure() {
     let (target, _) = BLOCK_TXS[1];
-    let path = envelope_without_block("single_null_block", BLOCK);
+    let path = DoctoredEnvelope::without_block(envelope(), "single_null_block", BLOCK);
 
     let (stdout, code) = replay_envelope_with_code(&path, &["--json", target]);
     let _ = std::fs::remove_file(&path);
@@ -960,7 +705,8 @@ fn test_replay_single_transaction_null_resolved_block_is_an_rpc_failure() {
 /// the index-0 deposit still fits the shrunken limit.
 #[test]
 fn test_replay_block_hashless_abort_lands_on_the_in_flight_target() {
-    let path = envelope_with_block_gas_limit("hashless_abort", BLOCK, 200_000_000);
+    let path =
+        DoctoredEnvelope::with_block_gas_limit(envelope(), "hashless_abort", BLOCK, 200_000_000);
 
     let (stdout, code) =
         replay_envelope_with_code(&path, &["--block", &BLOCK.to_string(), "--json"]);
@@ -1000,7 +746,8 @@ fn test_replay_tx_file_non_target_transport_abort_names_hash_and_exits_rpc() {
     let (target_a, target_a_index) = BLOCK_TXS[1];
     let (target_b, _) = BLOCK_TXS[2];
     assert!(target_a_index > aborting_index, "targets must sit behind the non-target aborter");
-    let path = envelope_dropping_transaction("non_target_transport_abort", aborting);
+    let path =
+        DoctoredEnvelope::dropping_transaction(envelope(), "non_target_transport_abort", aborting);
     let list = format!("{target_a}\n{target_b}\n");
     let list_path = std::env::temp_dir()
         .join(format!("mega_evme_tx_list_non_target_rpc_{}.txt", std::process::id()));
@@ -1042,7 +789,8 @@ fn test_replay_tx_file_dump_fixture_inherits_transport_abort_class() {
     let (late, late_index) = BLOCK_TXS[2];
     assert!(early_index < aborting_index && aborting_index < late_index);
 
-    let path = envelope_dropping_transaction("fixture_inherits_rpc_abort", aborting);
+    let path =
+        DoctoredEnvelope::dropping_transaction(envelope(), "fixture_inherits_rpc_abort", aborting);
     let list = format!("{early}\n{late}\n");
     let list_path = std::env::temp_dir()
         .join(format!("mega_evme_tx_list_fixture_abort_{}.txt", std::process::id()));
@@ -1111,7 +859,7 @@ fn test_replay_tx_file_dump_fixture_inherits_transport_abort_class() {
 #[test]
 fn test_replay_tx_file_sweeps_targets_in_block_order() {
     let missing = BLOCK_TXS[0].0;
-    let path = envelope_without_transaction("abort_order", missing);
+    let path = DoctoredEnvelope::without_transaction(envelope(), "abort_order", missing);
     // Deliberately reversed: the last transaction of the block first.
     let list = format!("{}\n{}\n", BLOCK_TXS[2].0, BLOCK_TXS[1].0);
     let list_path =
@@ -1178,34 +926,14 @@ fn test_replay_batch_rejects_single_transaction_flags() {
 /// the block runs, instead of replaying targets against a block they are not in.
 #[test]
 fn test_replay_tx_file_rejects_a_block_that_does_not_match_the_resolved_inclusion() {
-    let mut envelope: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(envelope()).expect("read envelope"))
-            .expect("parse envelope");
     let wrong_hash = "0x2222222222222222222222222222222222222222222222222222222222222222";
     let (target, _) = BLOCK_TXS[1];
 
     // Rewrite only the transaction's own response: it now claims to belong to a
     // block whose hash differs from the one `eth_getBlockByNumber` returns.
-    let marker = format!("\"hash\":\"{target}\"");
-    let mut doctored = 0;
-    for entry in envelope["cache"].as_array_mut().expect("cache entries").iter_mut() {
-        let value = entry["value"].as_str().expect("entry value is a string");
-        if !value.contains(&marker) {
-            continue;
-        }
-        let mut response: serde_json::Value =
-            serde_json::from_str(value).expect("parse transaction response");
-        let result = response.get_mut("result").expect("transaction result");
-        assert!(result.is_object(), "expected a transaction object");
-        result["blockHash"] = serde_json::Value::String(wrong_hash.into());
-        entry["value"] = serde_json::Value::String(response.to_string());
-        doctored += 1;
-    }
-    assert_eq!(doctored, 1, "exactly one response describes the target transaction");
-
-    let envelope_path =
-        std::env::temp_dir().join(format!("mega_evme_batch_inclusion_{}.json", std::process::id()));
-    std::fs::write(&envelope_path, envelope.to_string()).expect("write doctored envelope");
+    let envelope_path = DoctoredEnvelope::load(envelope())
+        .set_transaction_block_hash(target, wrong_hash)
+        .write_to_temp("inclusion");
     let list = std::env::temp_dir()
         .join(format!("mega_evme_tx_list_inclusion_{}.txt", std::process::id()));
     std::fs::write(&list, format!("{target}\n")).expect("write tx list");
@@ -1243,29 +971,9 @@ fn test_replay_tx_file_same_block_mixed_inclusion_preserves_line_order() {
 
     // Doctor only the later target's inclusion hash so it fails the membership
     // guard while the earlier target still replays.
-    let mut envelope: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(envelope()).expect("read envelope"))
-            .expect("parse envelope");
-    let marker = format!("\"hash\":\"{late_target}\"");
-    let mut doctored = 0;
-    for entry in envelope["cache"].as_array_mut().expect("cache entries").iter_mut() {
-        let value = entry["value"].as_str().expect("entry value is a string");
-        if !value.contains(&marker) {
-            continue;
-        }
-        let mut response: serde_json::Value =
-            serde_json::from_str(value).expect("parse transaction response");
-        let result = response.get_mut("result").expect("transaction result");
-        assert!(result.is_object(), "expected a transaction object");
-        result["blockHash"] = serde_json::Value::String(wrong_hash.into());
-        entry["value"] = serde_json::Value::String(response.to_string());
-        doctored += 1;
-    }
-    assert_eq!(doctored, 1, "exactly one response describes the late target");
-
-    let envelope_path = std::env::temp_dir()
-        .join(format!("mega_evme_batch_mixed_order_{}.json", std::process::id()));
-    std::fs::write(&envelope_path, envelope.to_string()).expect("write doctored envelope");
+    let envelope_path = DoctoredEnvelope::load(envelope())
+        .set_transaction_block_hash(late_target, wrong_hash)
+        .write_to_temp("mixed_order");
 
     // List the later (failing) target first so a pre-execution-first emit would
     // put its failure line before the earlier result.
@@ -1317,29 +1025,9 @@ fn test_replay_tx_file_inclusion_mismatch_is_order_independent() {
 
     // Doctor only the stale target's inclusion hash; the canonical target and
     // the block body keep their original agreement.
-    let mut envelope: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(envelope()).expect("read envelope"))
-            .expect("parse envelope");
-    let marker = format!("\"hash\":\"{stale_target}\"");
-    let mut doctored = 0;
-    for entry in envelope["cache"].as_array_mut().expect("cache entries").iter_mut() {
-        let value = entry["value"].as_str().expect("entry value is a string");
-        if !value.contains(&marker) {
-            continue;
-        }
-        let mut response: serde_json::Value =
-            serde_json::from_str(value).expect("parse transaction response");
-        let result = response.get_mut("result").expect("transaction result");
-        assert!(result.is_object(), "expected a transaction object");
-        result["blockHash"] = serde_json::Value::String(wrong_hash.into());
-        entry["value"] = serde_json::Value::String(response.to_string());
-        doctored += 1;
-    }
-    assert_eq!(doctored, 1, "exactly one response describes the stale target");
-
-    let envelope_path = std::env::temp_dir()
-        .join(format!("mega_evme_batch_inclusion_order_{}.json", std::process::id()));
-    std::fs::write(&envelope_path, envelope.to_string()).expect("write doctored envelope");
+    let envelope_path = DoctoredEnvelope::load(envelope())
+        .set_transaction_block_hash(stale_target, wrong_hash)
+        .write_to_temp("inclusion_order");
 
     for (label, first, second) in [
         ("stale_first", stale_target, canonical_target),
@@ -1402,50 +1090,12 @@ fn test_replay_tx_file_inclusion_mismatch_is_order_independent() {
 fn test_replay_tx_file_anchored_but_absent_target_is_rpc() {
     let (target, _) = BLOCK_TXS[1];
 
-    let mut envelope: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(envelope()).expect("read envelope"))
-            .expect("parse envelope");
-
     // Keep the transaction lookup intact (correct number + hash) but drop the
     // hash from the block body it claims to belong to.
-    let mut body_doctored = 0;
-    let mut block_hash = None;
-    for entry in envelope["cache"].as_array_mut().expect("cache entries").iter_mut() {
-        let value = entry["value"].as_str().expect("entry value is a string");
-        let Ok(mut response) = serde_json::from_str::<serde_json::Value>(value) else {
-            continue;
-        };
-        let Some(result) = response.get_mut("result") else {
-            continue;
-        };
-        if !result.is_object() {
-            continue;
-        }
-        let number = result.get("number").and_then(|n| {
-            n.as_str().and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
-        });
-        if number != Some(BLOCK) {
-            continue;
-        }
-        let Some(txs) = result.get_mut("transactions").and_then(|t| t.as_array_mut()) else {
-            continue;
-        };
-        let before = txs.len();
-        txs.retain(|tx| tx.as_str() != Some(target));
-        if txs.len() != before {
-            block_hash = result.get("hash").and_then(|h| h.as_str()).map(str::to_string);
-            entry["value"] = serde_json::Value::String(response.to_string());
-            body_doctored += 1;
-        }
-    }
-    assert_eq!(body_doctored, 1, "exactly one block body for {BLOCK} must list the target");
-    let block_hash = block_hash.expect("block hash");
-
-    // Pair with another-block target so a clean job still runs alongside the
-    // inconsistency: only the absent target fails.
-    let envelope_path = std::env::temp_dir()
-        .join(format!("mega_evme_batch_anchored_absent_{}.json", std::process::id()));
-    std::fs::write(&envelope_path, envelope.to_string()).expect("write doctored envelope");
+    let env = DoctoredEnvelope::load(envelope());
+    let block_hash = env.listing_block_hash(target);
+    let envelope_path =
+        env.remove_from_block_body(BLOCK, &[target]).write_to_temp("anchored_absent");
     let list = std::env::temp_dir()
         .join(format!("mega_evme_tx_list_anchored_absent_{}.txt", std::process::id()));
     std::fs::write(&list, format!("{target}\n{OTHER_BLOCK_TX}\n")).expect("write tx list");
@@ -1499,76 +1149,15 @@ fn test_replay_tx_file_anchored_but_absent_target_is_rpc() {
 fn test_replay_tx_file_all_targets_absent_from_body_skips_block_execution() {
     let targets: Vec<&str> = BLOCK_TXS.iter().map(|(h, _)| *h).collect();
 
-    let mut envelope: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(envelope()).expect("read envelope"))
-            .expect("parse envelope");
-
-    let mut body_doctored = 0;
-    let mut block_hash = None;
-    for entry in envelope["cache"].as_array_mut().expect("cache entries").iter_mut() {
-        let value = entry["value"].as_str().expect("entry value is a string");
-        let Ok(mut response) = serde_json::from_str::<serde_json::Value>(value) else {
-            continue;
-        };
-        let Some(result) = response.get_mut("result") else {
-            continue;
-        };
-        if !result.is_object() {
-            continue;
-        }
-        let number = result.get("number").and_then(|n| {
-            n.as_str().and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
-        });
-        if number != Some(BLOCK) {
-            continue;
-        }
-        let Some(txs) = result.get_mut("transactions").and_then(|t| t.as_array_mut()) else {
-            continue;
-        };
-        let before = txs.len();
-        txs.retain(|tx| {
-            let hash = tx.as_str().unwrap_or("");
-            !targets.contains(&hash)
-        });
-        if txs.len() != before {
-            block_hash = result.get("hash").and_then(|h| h.as_str()).map(str::to_string);
-            entry["value"] = serde_json::Value::String(response.to_string());
-            body_doctored += 1;
-        }
-    }
-    assert_eq!(body_doctored, 1, "exactly one block body for {BLOCK} must list the targets");
-    let block_hash = block_hash.expect("block hash");
-
-    // Cache keys are request hashes, so filter by response shape: keep only the
-    // target transaction lookups and the doctored block-at-height body.
-    let entries = envelope["cache"].as_array_mut().expect("cache entries");
-    entries.retain(|entry| {
-        let value = entry["value"].as_str().unwrap_or("");
-        let Ok(response) = serde_json::from_str::<serde_json::Value>(value) else {
-            return false;
-        };
-        let Some(result) = response.get("result") else {
-            return false;
-        };
-        if !result.is_object() {
-            return false;
-        }
-        // Transaction lookup for one of our targets.
-        if let Some(hash) = result.get("hash").and_then(|h| h.as_str()) {
-            if targets.contains(&hash) && result.get("blockNumber").is_some() {
-                return true;
-            }
-        }
-        // Doctored block body at the job height.
-        let number = result.get("number").and_then(|n| {
-            n.as_str().and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
-        });
-        number == Some(BLOCK) && result.get("transactions").is_some()
-    });
-
-    let envelope_path = std::env::temp_dir()
-        .join(format!("mega_evme_batch_all_absent_{}.json", std::process::id()));
-    std::fs::write(&envelope_path, envelope.to_string()).expect("write doctored envelope");
+    let env = DoctoredEnvelope::load(envelope());
+    let block_hash = env.block_hash_at(BLOCK);
+    // After doctoring the body, keep only the target transaction lookups and
+    // the doctored block-at-height body. Cache keys are request hashes, so
+    // filter by response shape.
+    let envelope_path = env
+        .remove_from_block_body(BLOCK, &targets)
+        .keep_only_transactions_and_block(&targets, BLOCK)
+        .write_to_temp("all_absent");
     let list = std::env::temp_dir()
         .join(format!("mega_evme_tx_list_all_absent_{}.txt", std::process::id()));
     std::fs::write(&list, format!("{}\n", targets.join("\n"))).expect("write tx list");
@@ -1617,7 +1206,7 @@ fn test_replay_tx_file_all_targets_absent_from_body_skips_block_execution() {
 #[test]
 fn test_replay_tx_file_null_resolution_stays_not_found() {
     let (target, _) = BLOCK_TXS[1];
-    let path = envelope_without_transaction("tx_file_null_resolution", target);
+    let path = DoctoredEnvelope::without_transaction(envelope(), "tx_file_null_resolution", target);
 
     // Pair with a clean other-block target so the run still produces a success
     // line next to the definitive not-found.
@@ -1664,38 +1253,14 @@ fn test_replay_tx_file_null_resolution_stays_not_found() {
 /// unanchored view, so the target is not queued and other blocks still replay.
 #[test]
 fn test_replay_tx_file_rejects_mined_target_without_inclusion_hash() {
-    let mut envelope: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(envelope()).expect("read envelope"))
-            .expect("parse envelope");
     let (target, _) = BLOCK_TXS[1];
 
     // Keep the block number so the response still looks mined, but drop the
     // inclusion hash. Cache entries are keyed by the request, so the doctored
     // answer still resolves.
-    let marker = format!("\"hash\":\"{target}\"");
-    let mut doctored = 0;
-    for entry in envelope["cache"].as_array_mut().expect("cache entries").iter_mut() {
-        let value = entry["value"].as_str().expect("entry value is a string");
-        if !value.contains(&marker) {
-            continue;
-        }
-        let mut response: serde_json::Value =
-            serde_json::from_str(value).expect("parse transaction response");
-        let result = response.get_mut("result").expect("transaction result");
-        assert!(result.is_object(), "expected a transaction object");
-        assert!(
-            result.get("blockNumber").is_some_and(|n| !n.is_null()),
-            "fixture transaction must report a block number"
-        );
-        result["blockHash"] = serde_json::Value::Null;
-        entry["value"] = serde_json::Value::String(response.to_string());
-        doctored += 1;
-    }
-    assert_eq!(doctored, 1, "exactly one response describes the target transaction");
-
-    let envelope_path = std::env::temp_dir()
-        .join(format!("mega_evme_batch_null_inclusion_{}.json", std::process::id()));
-    std::fs::write(&envelope_path, envelope.to_string()).expect("write doctored envelope");
+    let envelope_path = DoctoredEnvelope::load(envelope())
+        .set_transaction_block_hash(target, serde_json::Value::Null)
+        .write_to_temp("null_inclusion");
     // Pair the unanchored target with one from another block so a clean job
     // still runs when resolution fails for only one hash.
     let list = std::env::temp_dir()
@@ -1742,42 +1307,14 @@ fn test_replay_tx_file_rejects_mined_target_without_inclusion_hash() {
 /// contradictory metadata, so the target is not treated as pending.
 #[test]
 fn test_replay_tx_file_rejects_inclusion_hash_without_block_number() {
-    let mut envelope: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(envelope()).expect("read envelope"))
-            .expect("parse envelope");
     let (target, _) = BLOCK_TXS[1];
 
     // Keep the inclusion hash so the response still claims a mined block, but
     // drop the block number. Cache entries are keyed by the request, so the
     // doctored answer still resolves.
-    let marker = format!("\"hash\":\"{target}\"");
-    let mut doctored = 0;
-    for entry in envelope["cache"].as_array_mut().expect("cache entries").iter_mut() {
-        let value = entry["value"].as_str().expect("entry value is a string");
-        if !value.contains(&marker) {
-            continue;
-        }
-        let mut response: serde_json::Value =
-            serde_json::from_str(value).expect("parse transaction response");
-        let result = response.get_mut("result").expect("transaction result");
-        assert!(result.is_object(), "expected a transaction object");
-        assert!(
-            result.get("blockHash").is_some_and(|h| !h.is_null()),
-            "fixture transaction must report an inclusion hash"
-        );
-        assert!(
-            result.get("blockNumber").is_some_and(|n| !n.is_null()),
-            "fixture transaction must report a block number before doctoring"
-        );
-        result["blockNumber"] = serde_json::Value::Null;
-        entry["value"] = serde_json::Value::String(response.to_string());
-        doctored += 1;
-    }
-    assert_eq!(doctored, 1, "exactly one response describes the target transaction");
-
-    let envelope_path = std::env::temp_dir()
-        .join(format!("mega_evme_batch_null_number_with_hash_{}.json", std::process::id()));
-    std::fs::write(&envelope_path, envelope.to_string()).expect("write doctored envelope");
+    let envelope_path = DoctoredEnvelope::load(envelope())
+        .set_transaction_block_number(target, serde_json::Value::Null)
+        .write_to_temp("null_number_with_hash");
     // Pair the contradictory target with one from another block so a clean job
     // still runs when resolution fails for only one hash.
     let list = std::env::temp_dir()
@@ -1828,32 +1365,11 @@ fn test_replay_tx_file_rejects_inclusion_hash_without_block_number() {
 /// null) keeps the pending classification and is not queued for replay.
 #[test]
 fn test_replay_tx_file_classifies_null_number_and_hash_as_pending() {
-    let mut envelope: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(envelope()).expect("read envelope"))
-            .expect("parse envelope");
     let (target, _) = BLOCK_TXS[1];
 
-    let marker = format!("\"hash\":\"{target}\"");
-    let mut doctored = 0;
-    for entry in envelope["cache"].as_array_mut().expect("cache entries").iter_mut() {
-        let value = entry["value"].as_str().expect("entry value is a string");
-        if !value.contains(&marker) {
-            continue;
-        }
-        let mut response: serde_json::Value =
-            serde_json::from_str(value).expect("parse transaction response");
-        let result = response.get_mut("result").expect("transaction result");
-        assert!(result.is_object(), "expected a transaction object");
-        result["blockNumber"] = serde_json::Value::Null;
-        result["blockHash"] = serde_json::Value::Null;
-        entry["value"] = serde_json::Value::String(response.to_string());
-        doctored += 1;
-    }
-    assert_eq!(doctored, 1, "exactly one response describes the target transaction");
-
-    let envelope_path = std::env::temp_dir()
-        .join(format!("mega_evme_batch_pending_nulls_{}.json", std::process::id()));
-    std::fs::write(&envelope_path, envelope.to_string()).expect("write doctored envelope");
+    let envelope_path = DoctoredEnvelope::load(envelope())
+        .mark_transaction_pending(target)
+        .write_to_temp("pending_nulls");
     let list = std::env::temp_dir()
         .join(format!("mega_evme_tx_list_pending_nulls_{}.txt", std::process::id()));
     std::fs::write(&list, format!("{target}\n{OTHER_BLOCK_TX}\n")).expect("write tx list");
@@ -1896,43 +1412,11 @@ fn test_replay_tx_file_classifies_null_number_and_hash_as_pending() {
 /// infrastructure failure for every target of that block (reorg / divergent views).
 #[test]
 fn test_replay_block_rejects_mismatched_parent_hash() {
-    let mut envelope: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(envelope()).expect("read envelope"))
-            .expect("parse envelope");
     let wrong_parent = "0x1111111111111111111111111111111111111111111111111111111111111111";
-    let mut expected_parent = None;
-    let mut doctored = 0;
-    for entry in envelope["cache"].as_array_mut().expect("cache entries").iter_mut() {
-        let value = entry["value"].as_str().expect("entry value is a string");
-        let Ok(mut response) = serde_json::from_str::<serde_json::Value>(value) else {
-            continue;
-        };
-        let Some(result) = response.get_mut("result") else {
-            continue;
-        };
-        if !result.is_object() {
-            continue;
-        }
-        // Doctor the parent block (number == BLOCK - 1), not the target block.
-        let number = result.get("number").and_then(|n| {
-            n.as_str().and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
-        });
-        if number != Some(BLOCK - 1) {
-            continue;
-        }
-        let original = result.get("hash").and_then(|h| h.as_str()).map(str::to_string);
-        assert!(original.is_some(), "parent block must report a hash");
-        expected_parent = original;
-        result["hash"] = serde_json::Value::String(wrong_parent.into());
-        entry["value"] = serde_json::Value::String(response.to_string());
-        doctored += 1;
-    }
-    assert_eq!(doctored, 1, "the envelope must hold exactly one parent-block body for {BLOCK}");
-    let expected_parent = expected_parent.expect("parent hash");
-
-    let path = std::env::temp_dir()
-        .join(format!("mega_evme_batch_parent_mismatch_{}.json", std::process::id()));
-    std::fs::write(&path, envelope.to_string()).expect("write doctored envelope");
+    // Doctor the parent block (number == BLOCK - 1), not the target block.
+    let env = DoctoredEnvelope::load(envelope());
+    let expected_parent = env.block_hash_at(BLOCK - 1);
+    let path = env.set_block_hash(BLOCK - 1, wrong_parent).write_to_temp("parent_mismatch");
 
     let (stdout, code) =
         replay_envelope_with_code(&path, &["--block", &BLOCK.to_string(), "--json"]);

@@ -17,6 +17,8 @@ use std::{
 
 mod common;
 
+use common::doctor::DoctoredEnvelope;
+
 /// Offline RPC capture (includes the on-chain receipt needed by the fidelity
 /// gate). Name of the committed offline capture, resolved through the shared fixture
 /// helper so its location lives in exactly one place.
@@ -79,75 +81,6 @@ fn error_object(stdout: &str) -> serde_json::Value {
         .unwrap_or_else(|| panic!("a failing --json run must not leave stdout empty:\n{stdout}"));
     assert!(common::is_run_error(last), "the last stdout value must be the error object: {last}");
     last["error"].clone()
-}
-
-/// Write a copy of the committed capture in which the `result` of every cached
-/// response `selects` accepts is rewritten by `doctor`, and return its path.
-///
-/// Cache entries are keyed by the request, not the response, so a doctored entry
-/// still resolves and the run meets the doctored answer where it would meet the
-/// real one.
-fn rewrite_cache(
-    name: &str,
-    selects: impl Fn(&serde_json::Value) -> bool,
-    doctor: impl Fn(&mut serde_json::Value),
-) -> PathBuf {
-    let mut envelope: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(cache()).expect("read offline cache"))
-            .expect("parse offline cache");
-    let mut doctored = false;
-    for entry in envelope["cache"].as_array_mut().expect("cache entries").iter_mut() {
-        let value = entry["value"].as_str().expect("entry value is a string");
-        let mut response: serde_json::Value =
-            serde_json::from_str(value).expect("parse cached response");
-        if !selects(&response["result"]) {
-            continue;
-        }
-        doctor(&mut response["result"]);
-        entry["value"] = serde_json::Value::String(response.to_string());
-        doctored = true;
-    }
-    assert!(doctored, "offline capture should contain the entry being doctored");
-
-    let path = temp_path(name);
-    std::fs::write(&path, envelope.to_string()).expect("write doctored cache");
-    path
-}
-
-/// A copy of the committed capture whose on-chain receipt response is rewritten
-/// by `doctor`. The receipt is the only cached response carrying
-/// `cumulativeGasUsed`.
-fn cache_with_doctored_receipt(name: &str, doctor: impl Fn(&mut serde_json::Value)) -> PathBuf {
-    rewrite_cache(name, |result| result.get("cumulativeGasUsed").is_some(), doctor)
-}
-
-/// A copy of the committed capture with the on-chain receipt dropped entirely.
-/// Offline, the absent entry surfaces as a cache miss — the transport failing to
-/// answer the receipt request at all.
-fn cache_without_receipt(name: &str) -> PathBuf {
-    let mut envelope: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(cache()).expect("read offline cache"))
-            .expect("parse offline cache");
-    let entries = envelope["cache"].as_array_mut().expect("cache entries");
-    let before = entries.len();
-    entries.retain(|entry| {
-        !entry["value"].as_str().expect("entry value is a string").contains("cumulativeGasUsed")
-    });
-    assert!(entries.len() < before, "offline capture should contain the receipt entry");
-
-    let path = temp_path(name);
-    std::fs::write(&path, envelope.to_string()).expect("write pruned cache");
-    path
-}
-
-/// A copy of the committed capture whose target-transaction lookup answers null,
-/// modelling an endpoint that does not know the hash the caller asked about.
-fn cache_with_null_target_transaction(name: &str) -> PathBuf {
-    rewrite_cache(
-        name,
-        |result| result.get("hash").and_then(serde_json::Value::as_str) == Some(TX),
-        |result| *result = serde_json::Value::Null,
-    )
 }
 
 /// `--dump-fixture` is incompatible with transaction overrides (the isolated
@@ -321,7 +254,7 @@ fn test_replay_dump_overwrites_atomically_without_tmp_residue() {
 /// `--verify-receipt` gives the identical condition — and no fixture is written.
 #[test]
 fn test_replay_dump_rejects_receipt_from_different_block() {
-    let doctored_cache = cache_with_doctored_receipt("reorg_cache", |receipt| {
+    let doctored_cache = DoctoredEnvelope::with_receipt(cache(), "reorg_cache", |receipt| {
         receipt["blockHash"] =
             "0x1111111111111111111111111111111111111111111111111111111111111111".into();
     });
@@ -355,7 +288,7 @@ fn test_replay_dump_rejects_receipt_from_different_block() {
 fn test_replay_dump_rejects_receipt_for_another_transaction() {
     const OTHER_TX: &str = "0x00000000000000000000000000000000000000000000000000000000feed0001";
 
-    let doctored_cache = cache_with_doctored_receipt("wrong_tx_cache", |receipt| {
+    let doctored_cache = DoctoredEnvelope::with_receipt(cache(), "wrong_tx_cache", |receipt| {
         receipt["transactionHash"] = OTHER_TX.into();
     });
     let out = temp_path("wrong_tx");
@@ -387,7 +320,7 @@ fn test_replay_dump_rejects_receipt_for_another_transaction() {
 /// failure, name the receipt, and write no fixture.
 #[test]
 fn test_replay_dump_null_receipt_is_an_rpc_failure() {
-    let doctored_cache = cache_with_doctored_receipt("null_receipt_cache", |receipt| {
+    let doctored_cache = DoctoredEnvelope::with_receipt(cache(), "null_receipt_cache", |receipt| {
         *receipt = serde_json::Value::Null;
     });
     let out = temp_path("null_receipt");
@@ -421,7 +354,7 @@ fn test_replay_dump_null_receipt_is_an_rpc_failure() {
 /// infrastructure failure with no fixture written.
 #[test]
 fn test_replay_dump_unanswered_receipt_request_is_an_rpc_failure() {
-    let pruned_cache = cache_without_receipt("pruned_receipt_cache");
+    let pruned_cache = DoctoredEnvelope::without_receipt(cache(), "pruned_receipt_cache");
     let out = temp_path("pruned_receipt");
     let _ = std::fs::remove_file(&out);
 
@@ -450,7 +383,7 @@ fn test_replay_dump_unanswered_receipt_request_is_an_rpc_failure() {
 /// not every null the run can meet.
 #[test]
 fn test_replay_dump_null_target_transaction_stays_an_execution_error() {
-    let doctored_cache = cache_with_null_target_transaction("null_target_cache");
+    let doctored_cache = DoctoredEnvelope::without_transaction(cache(), "null_target_cache", TX);
     let out = temp_path("null_target");
     let _ = std::fs::remove_file(&out);
 
@@ -498,7 +431,7 @@ fn test_dump_and_verify_classify_receipt_anomalies_identically() {
 /// `doctor`, and assert the two runs fail with the same exit code and the same
 /// error object.
 fn assert_dump_and_verify_agree(name: &str, doctor: impl Fn(&mut serde_json::Value)) {
-    let doctored_cache = cache_with_doctored_receipt(&format!("{name}_cache"), doctor);
+    let doctored_cache = DoctoredEnvelope::with_receipt(cache(), &format!("{name}_cache"), doctor);
     let out = temp_path(name);
     let _ = std::fs::remove_file(&out);
 
