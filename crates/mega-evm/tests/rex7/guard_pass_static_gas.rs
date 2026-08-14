@@ -1,14 +1,15 @@
 //! Guard-pass static-gas position under REX7 checkpoint accounting.
 //!
 //! Charge-on-reject debits a disabled opcode's static entry on the reject arm only. A passing
-//! guard must charge after [`checkpoint_prologue!`] restores the true counter — the same
-//! position the baseline REX7 handler used — so a compute headroom of `static_gas − 1` lets
-//! the body run and reports a frame-local `MegaLimitExceeded` rather than a clamp halt that
-//! never reads the host.
+//! guard must charge at the same position the baseline REX7 handler used. For the
+//! checkpoint-wrapped families that is after [`checkpoint_prologue!`] restores the true
+//! counter, so a compute headroom of `static_gas − 1` lets the body run and reports a
+//! frame-local `MegaLimitExceeded` rather than a clamp halt that never reads the host.
 //!
 //! `headroom = static_gas − 1` and `headroom = static_gas` are the two edges: the first
-//! overshoots after the body, the second can afford the charge. Each is exercised in the
-//! top-level frame and in a nested child. `remainingComputeGas` is the value
+//! overshoots after the body, the second can afford the charge. `TIMESTAMP` is exercised in
+//! the top-level frame and in a nested child; `SELFBALANCE` covers the dedicated checkpoint
+//! handler at the top-level edges. `remainingComputeGas` is the value
 //! `MegaLimitControl.remainingComputeGas` would return after the transaction: the TX-level
 //! remaining, which is what the interceptor reads once the frames have been popped.
 
@@ -22,13 +23,16 @@ use mega_evm::{
     LIMIT_CONTROL_ADDRESS,
 };
 use revm::{
-    bytecode::opcode::{CALL, MLOAD, POP, SSTORE, STATICCALL, STOP, TIMESTAMP},
+    bytecode::opcode::{CALL, MLOAD, POP, SELFBALANCE, SSTORE, STATICCALL, STOP, TIMESTAMP},
     context::{result::ExecutionResult, tx::TxEnvBuilder},
     handler::EvmTr,
 };
 
 /// `TIMESTAMP` static gas — the unconditional-family representative.
 const TIMESTAMP_STATIC_GAS: u64 = 2;
+
+/// `SELFBALANCE` static gas (`LOW`) — the dedicated-checkpoint representative.
+const SELFBALANCE_STATIC_GAS: u64 = 5;
 
 /// Slot the nested caller stores its `remainingComputeGas` reading into.
 const REMAINING_SLOT: u64 = 0xc0;
@@ -52,6 +56,16 @@ fn timestamp_pop_stop() -> Bytes {
 /// The same checkpoint with nothing after it, so `headroom = static_gas` can finish.
 fn timestamp_stop() -> Bytes {
     BytecodeBuilder::default().append(TIMESTAMP).stop().build()
+}
+
+/// Dedicated-checkpoint sibling of [`timestamp_pop_stop`]: `SELFBALANCE; POP; STOP`.
+fn selfbalance_pop_stop() -> Bytes {
+    BytecodeBuilder::default().append(SELFBALANCE).append(POP).stop().build()
+}
+
+/// Dedicated-checkpoint sibling of [`timestamp_stop`]: `SELFBALANCE; STOP`.
+fn selfbalance_stop() -> Bytes {
+    BytecodeBuilder::default().append(SELFBALANCE).stop().build()
 }
 
 fn stop_only() -> Bytes {
@@ -362,4 +376,70 @@ fn test_nested_timestamp_remaining_compute_gas_is_detained() {
         "TIMESTAMP detention must shrink remainingComputeGas; empty={empty_reading} ts={ts_reading}"
     );
     assert_eq!(with_ts.outcome.compute_gas, empty.outcome.compute_gas + TIMESTAMP_STATIC_GAS,);
+}
+
+/// Dedicated-checkpoint sibling of the Codex edge: `SELFBALANCE; POP; STOP` with compute
+/// limit `intrinsic + 4`.
+///
+/// Headroom at `SELFBALANCE` is `static_gas − 1`. Charging after the prologue records the
+/// body and reverts `MegaLimitExceeded` with compute `intrinsic + 5`. Charging before the
+/// prologue (the e4dfbca shape) lets the clamp stop the opcode: a TX-level
+/// `Halt(ComputeGasLimitExceeded)` with compute `intrinsic + 4`.
+#[test]
+fn test_top_frame_selfbalance_one_below_static_gas_reverts_after_the_body() {
+    let intrinsic = intrinsic_stop();
+    assert_eq!(intrinsic.compute_gas, 21_000, "intrinsic compute is 21_000");
+    let limit = intrinsic.compute_gas + SELFBALANCE_STATIC_GAS - 1;
+    assert_eq!(limit, 21_004);
+
+    let run = run(selfbalance_pop_stop(), compute_limit(limit));
+
+    let decoded = decode_top_revert("SELFBALANCE headroom=static-1", &run.outcome);
+    assert_eq!(decoded.kind, LimitKind::ComputeGas.as_u8());
+    // Top-frame remaining after intrinsic equals the headroom (`static_gas − 1`). The
+    // per-opcode record path classifies that as frame-local, so the payload names the
+    // frame budget (4), not the TX compute limit (21004).
+    assert_eq!(
+        decoded.limit,
+        SELFBALANCE_STATIC_GAS - 1,
+        "the payload names the top-frame budget that the body overshot"
+    );
+    assert_eq!(
+        run.outcome.compute_gas,
+        intrinsic.compute_gas + SELFBALANCE_STATIC_GAS,
+        "the body charge is recorded; compute must be 21005, not the clamp's 21004"
+    );
+    assert_eq!(run.outcome.compute_gas, 21_005);
+    assert_eq!(
+        run.outcome.gas_used,
+        run.outcome.compute_gas + storage_overhead(&intrinsic),
+        "receipt gas is compute plus the intrinsic storage component"
+    );
+    assert_eq!(run.outcome.gas_used, 60_005);
+    assert_eq!(
+        run.remaining_compute_gas, 0,
+        "usage is past the limit, so remainingComputeGas is zero"
+    );
+}
+
+/// Neighbouring edge: headroom equals the static fee, so `SELFBALANCE` itself can finish.
+///
+/// Nothing follows the checkpoint (`SELFBALANCE; STOP`) so the transaction continues rather
+/// than walking into a zero-headroom clamp on `POP`.
+#[test]
+fn test_top_frame_selfbalance_at_static_gas_continues() {
+    let intrinsic = intrinsic_stop();
+    let limit = intrinsic.compute_gas + SELFBALANCE_STATIC_GAS;
+    assert_eq!(limit, 21_005);
+
+    let run = run(selfbalance_stop(), compute_limit(limit));
+
+    assert!(
+        run.outcome.is_success(),
+        "headroom=static_gas must let SELFBALANCE finish; got {:?}",
+        run.outcome.result
+    );
+    assert_eq!(run.outcome.compute_gas, intrinsic.compute_gas + SELFBALANCE_STATIC_GAS);
+    assert_eq!(run.outcome.gas_used, run.outcome.compute_gas + storage_overhead(&intrinsic),);
+    assert_eq!(run.remaining_compute_gas, 0);
 }

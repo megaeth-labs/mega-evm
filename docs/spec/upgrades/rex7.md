@@ -165,7 +165,8 @@ The reverting frame returns every unit of gas it held when it reached the opcode
 Under Rex7, a node MUST still reject the same opcodes with the same revert payload, and MUST still leave the tracker unmarked.
 A node MUST charge the rejected opcode's static fee before producing that revert.
 The fee is ordinary EVM gas: it is debited from the frame, it is not refunded by the synthetic revert, and it MUST be recorded as compute gas when the open segment is settled at frame exit.
-A guard that does not reject MUST charge the opcode's static fee in the checkpoint body, after the clamp is restored, at the same position the body charged it before this rule.
+A guard that does not reject MUST charge the opcode's static fee at the same position the body charged it before this rule.
+For the CALL family that position remains before the target account is read.
 A frame that cannot afford the static fee MUST halt out of gas instead of reaching the disable revert.
 
 The guarded set is unchanged from Rex6: the unconditional block-environment opcodes, the beneficiary-conditional account reads, `SELFBALANCE`, oracle-conditional `SLOAD`, the CALL family, and `SELFDESTRUCT`.
