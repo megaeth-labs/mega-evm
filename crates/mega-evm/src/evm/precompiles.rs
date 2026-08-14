@@ -423,6 +423,24 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> PrecompileProvider<MegaContext<DB,
                         additional_limit.record_burned_gas(gas_limit);
                     } else {
                         let executed = kzg_point_evaluation::GAS_COST;
+                        // This recording must not latch a limit exceed. If it did, the halt
+                        // result would leave `frame_init` with a rescue that hands its whole
+                        // remaining gas back to the sender, while the same envelope has just been
+                        // booked as destroyed — the same gas reported twice, once refunded and
+                        // once burnt.
+                        //
+                        // It cannot, and the REX5 forwarded-gas cap is what makes that true: the
+                        // effective limit this arm tests against `GAS_COST` is
+                        // `min(gas_limit, remaining)` for the very `remaining` the limit check
+                        // consults, so reaching this arm at all means the fixed fee already fits
+                        // inside both the frame and the transaction budget. Nothing between the
+                        // cap and here moves that budget — the KZG precompile records no compute
+                        // gas of its own.
+                        debug_assert!(
+                            additional_limit.current_call_remaining_compute_gas() >= executed,
+                            "the forwarded-gas cap must keep the KZG fixed fee inside the \
+                             remaining compute budget",
+                        );
                         additional_limit.record_compute_gas(executed);
                         if is_rex7 {
                             additional_limit.record_burned_gas(gas_limit.saturating_sub(executed));
@@ -1205,6 +1223,80 @@ mod tests {
         );
     }
 
+    /// The fixed-cost arm's `record_compute_gas(GAS_COST)` must never latch a limit exceed.
+    /// A latch there would make `frame_init` return a halt whose remaining gas is rescued for the
+    /// sender while the same envelope has already been booked as destroyed, reporting the gas
+    /// twice.
+    ///
+    /// The forwarded-gas cap is what rules it out, and the two halves of that coupling are pinned
+    /// here at the one gas unit where they meet. With the remaining budget exactly at the fixed
+    /// fee, the arm fires and lands exactly on the limit — never over it. One unit lower, the cap
+    /// pushes the effective limit below the fixed fee, so the wrapper's own gas gate fires and the
+    /// arm is not taken at all: there is no shape in which the recording is reached with less
+    /// budget than it records.
+    #[test]
+    fn test_kzg_fixed_cost_arm_cannot_latch_at_the_cap_boundary() {
+        for spec in [MegaSpecId::REX5, MegaSpecId::REX6, MegaSpecId::REX7] {
+            let inputs = generate_invalid_proof_kzg_test_input();
+            let address = revm::precompile::kzg_point_evaluation::ADDRESS;
+            let forwarded_gas = 500_000u64;
+
+            // Remaining budget exactly at the fixed fee: the tightest cap that still admits the
+            // arm.
+            let mut db = MemoryDatabase::default();
+            let mut context = MegaContext::new(&mut db, spec);
+            set_tx_compute_gas_limit(&mut context, spec, GAS_COST);
+            let mut precompiles_map =
+                PrecompilesMap::from_static(MegaPrecompiles::new_with_spec(spec).precompiles());
+            let output = precompiles_map
+                .run(&mut context, &call_inputs(&inputs, address, true, forwarded_gas))
+                .expect("run ok")
+                .expect("Some output");
+            assert!(
+                matches!(output.result, InstructionResult::PrecompileError),
+                "{spec:?}: verification must fail past the gas gate; got {:?}",
+                output.result,
+            );
+            let additional = context.additional_limit.borrow();
+            assert_eq!(
+                additional.get_usage().compute_gas - additional.burned_compute_gas(),
+                GAS_COST,
+                "{spec:?}: the fixed-cost arm fired and only the fixed fee enforces",
+            );
+            assert!(
+                !additional.limit_exceeded(),
+                "{spec:?}: the fixed fee exactly exhausts the budget, which is not an exceed",
+            );
+            drop(additional);
+
+            // One unit lower: the cap forces the wrapper's gas gate, so the fixed-cost arm is
+            // never reached.
+            let mut db = MemoryDatabase::default();
+            let mut context = MegaContext::new(&mut db, spec);
+            set_tx_compute_gas_limit(&mut context, spec, GAS_COST - 1);
+            let mut precompiles_map =
+                PrecompilesMap::from_static(MegaPrecompiles::new_with_spec(spec).precompiles());
+            let output = precompiles_map
+                .run(&mut context, &call_inputs(&inputs, address, true, forwarded_gas))
+                .expect("run ok")
+                .expect("Some output");
+            assert!(
+                matches!(output.result, InstructionResult::PrecompileOOG),
+                "{spec:?}: one unit below the fixed fee must stop at the gas gate; got {:?}",
+                output.result,
+            );
+            assert!(
+                output.gas.limit() < GAS_COST,
+                "{spec:?}: the capped effective limit is what excludes the fixed-cost arm",
+            );
+            let additional = context.additional_limit.borrow();
+            assert!(
+                !additional.limit_exceeded(),
+                "{spec:?}: the arm the cap excluded cannot latch either",
+            );
+        }
+    }
+
     /// REX6 KZG verification failure stays on the historical single-lane recording: the
     /// fixed fee is enforcing and nothing is destroyed.
     #[test]
@@ -1418,6 +1510,11 @@ mod tests {
     /// flips the map into its dynamic representation — the `PrecompilesMap::get` branch the
     /// builtin table never reaches, and the only way to produce a reverting precompile at all
     /// (no builtin returns `PrecompileStatus::Revert`).
+    ///
+    /// It echoes the forwarded call value into its output and the forwarded reservoir into its
+    /// gas, so both become observable in the compared `InterpreterResult`. No builtin precompile
+    /// reads the call value, so without this the value cases in the matrix would only prove the
+    /// two paths agree on an input neither of them can act on.
     fn parity_precompiles(with_dynamic: bool) -> PrecompilesMap {
         let mut map = PrecompilesMap::from_static(
             MegaPrecompiles::new_with_spec(MegaSpecId::REX7).precompiles(),
@@ -1425,9 +1522,11 @@ mod tests {
         if with_dynamic {
             map.apply_precompile(&PARITY_DYN_ADDRESS, |_| {
                 Some(DynPrecompile::new(PrecompileId::Custom("parity-revert".into()), |input| {
+                    let mut echoed = Vec::from(b"reverted".as_slice());
+                    echoed.extend_from_slice(&input.value.to_be_bytes::<32>());
                     Ok(PrecompileOutput::revert(
                         input.gas / 4,
-                        Bytes::from_static(b"reverted"),
+                        Bytes::from(echoed),
                         input.reservoir,
                     ))
                 }))
@@ -1436,9 +1535,29 @@ mod tests {
         map
     }
 
+    /// Sets the EIP-8037 state-gas reservoir on an already-built [`CallInputs`].
+    ///
+    /// `reservoir` and `value` are two of the nine `PrecompileInput` fields the mirror forwards,
+    /// and no builtin precompile reads either — so an upstream step keyed on one of them would
+    /// pass a matrix that leaves both at zero. The cases built with these helpers vary them
+    /// instead, on both an `is_ok_or_revert` arm and a failing arm.
+    fn with_reservoir(mut inputs: CallInputs, reservoir: u64) -> CallInputs {
+        inputs.reservoir = reservoir;
+        inputs
+    }
+
+    /// Sets the call value on an already-built [`CallInputs`], as a non-static CALL.
+    fn with_value(mut inputs: CallInputs, value: U256) -> CallInputs {
+        inputs.value = CallValue::Transfer(value);
+        inputs.is_static = false;
+        inputs
+    }
+
     /// One case per distinguishable path through the upstream body: dispatch miss, revert,
     /// success, each KZG failure variant, the wrapper's own gas gate, a generic
     /// malformed-input halt, an out-of-gas halt, and the DELEGATECALL bytecode-vs-target split.
+    /// Each of the two forwarded inputs no builtin consults — the state-gas reservoir and the
+    /// call value — additionally appears on a succeeding and on a failing case.
     fn parity_cases() -> Vec<(&'static str, CallInputs)> {
         let kzg = revm::precompile::kzg_point_evaluation::ADDRESS;
         let ecrecover = Address::with_last_byte(1);
@@ -1508,6 +1627,63 @@ mod tests {
                     true,
                     200_000,
                     CallScheme::DelegateCall,
+                ),
+            ),
+            (
+                "success with reservoir",
+                with_reservoir(
+                    call_inputs(&plain(identity, vec![0xCD; 96]), identity, true, 1_000_000),
+                    250_000,
+                ),
+            ),
+            (
+                // The dynamic precompile echoes `input.reservoir` straight into its output, so
+                // this is the one case where a mirrored reservoir is directly observable in the
+                // returned `InterpreterResult` rather than only forwarded.
+                "dynamic revert with reservoir",
+                with_reservoir(
+                    call_inputs(
+                        &plain(PARITY_DYN_ADDRESS, vec![7; 8]),
+                        PARITY_DYN_ADDRESS,
+                        true,
+                        1_000_000,
+                    ),
+                    250_000,
+                ),
+            ),
+            (
+                "kzg invalid proof with reservoir",
+                with_reservoir(
+                    call_inputs(&generate_invalid_proof_kzg_test_input(), kzg, true, 1_000_000),
+                    250_000,
+                ),
+            ),
+            (
+                "success with value",
+                with_value(
+                    call_inputs(&plain(identity, vec![0xEF; 96]), identity, false, 1_000_000),
+                    U256::from(7u64),
+                ),
+            ),
+            (
+                // The dynamic precompile echoes `input.value` into its output bytes, so this is
+                // the case that observes a mirrored call value rather than only forwarding it.
+                "dynamic revert with value",
+                with_value(
+                    call_inputs(
+                        &plain(PARITY_DYN_ADDRESS, vec![7; 8]),
+                        PARITY_DYN_ADDRESS,
+                        false,
+                        1_000_000,
+                    ),
+                    U256::from(7u64),
+                ),
+            ),
+            (
+                "blake2f malformed input with value",
+                with_value(
+                    call_inputs(&plain(blake2f, vec![0xAA; 32]), blake2f, false, 1_000_000),
+                    U256::from(7u64),
                 ),
             ),
         ]
