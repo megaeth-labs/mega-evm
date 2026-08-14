@@ -1210,3 +1210,37 @@ async fn test_build_provider_requires_rpc() {
     let msg = format!("{err}");
     assert!(msg.contains("No RPC URL"), "got: {msg}");
 }
+
+// ─── User-facing warning visibility ──────────────────────────────────────────
+
+/// The low `--rpc.cu-per-sec` warning must reach stderr at default verbosity:
+/// the tracing filter is `off` without `-v` flags, so a `warn!`-only event
+/// would be discarded exactly where the user needs to learn why the run is
+/// about to self-throttle.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_low_cu_per_sec_warning_reaches_stderr_at_default_verbosity() {
+    let server = MockRpcServer::start().await;
+    server.respond_eth_chain_id(4326, 1).await;
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_mega-evme"))
+        .args([
+            "replay",
+            "0x41d34e7e13dfe0f85da9d407e2b2c381955d8c7eed428b17dc82327b2616b000",
+            "--rpc",
+            &server.uri(),
+            "--rpc.no-cache-file",
+            "--rpc.cu-per-sec",
+            "50",
+            "--rpc.max-retries",
+            "1",
+            "--rpc.backoff-ms",
+            "1",
+        ])
+        .output()
+        .expect("failed to run mega-evme");
+    let stderr = String::from_utf8(output.stderr).expect("stderr is utf-8");
+    assert!(
+        stderr.contains("warning:") && stderr.contains("--rpc.cu-per-sec is set to 50"),
+        "the low-CU warning must be visible without -v flags, got stderr:\n{stderr}"
+    );
+}

@@ -510,7 +510,10 @@ impl RpcArgs {
     /// would fire twice.
     fn maybe_warn_low_cu_per_sec(&self) {
         if let Some(msg) = cu_per_sec_warning(self.max_retries, self.compute_units_per_sec) {
-            warn!("{msg}");
+            // Must reach the user on a default command line, where the tracing
+            // filter is `off` and a `warn!`-only event is discarded — the whole
+            // point is to explain why the run is about to self-throttle.
+            crate::cache::warn_user(format_args!("{msg}"));
         }
     }
 
