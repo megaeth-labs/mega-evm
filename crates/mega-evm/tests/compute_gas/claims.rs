@@ -27,8 +27,9 @@ use revm::{
 
 use crate::{
     base_db, push_call_operands, push_valueless_call_operands, transact, transact_output,
-    transact_with_access_list, transact_with_envs, transact_with_limits, Outcome, CALLEE, CALLER,
-    CONTRACT, EMPTY_TARGET, EXISTING_TARGET, ONE_ETH, PRECOMPILE_IDENTITY, PRECOMPILE_KZG,
+    transact_with_access_list, transact_with_envs, transact_with_limits,
+    transact_with_limits_outcome, Outcome, CALLEE, CALLER, CONTRACT, EMPTY_TARGET, EXISTING_TARGET,
+    ONE_ETH, PRECOMPILE_IDENTITY, PRECOMPILE_KZG,
 };
 
 /// `remainingComputeGas()` — the `MegaLimitControl` selector the interceptor recognizes.
@@ -256,12 +257,18 @@ fn test_refunds_do_not_reduce_compute_gas() {
 /// A direct transaction with empty calldata to the KZG precompile under a 30,000 tx compute
 /// limit: the intrinsic records 21,000, leaving 9,000 of transaction-level remainder. The
 /// forwarded cap is that remainder, which is below the precompile's 100,000 minimum cost, so the
-/// invocation fails and records exactly the 9,000 cap — total recorded compute gas is exactly
-/// the 30,000 limit. A cap that ignored the recorded intrinsic (forwarding 30,000) or one derived
-/// from an undefined frame budget would shift the total away from the limit.
+/// invocation fails without running verification.
+///
+/// Through Rex6 that failure records the 9,000 cap as enforcing usage, so the reported total is
+/// exactly the 30,000 limit. Rex7 still caps the work (verification does not run) but books the
+/// parent-frame loss — the caller-supplied envelope, not the capped remainder — as destroyed,
+/// so the reported total is the intrinsic plus that envelope and the enforced half stays at the
+/// intrinsic alone. A cap that ignored the recorded intrinsic (forwarding 30,000) or one derived
+/// from an undefined frame budget would still shift the enforced total away from these numbers.
 #[test]
 fn test_direct_precompile_transaction_cap_is_the_tx_level_remainder() {
     const TX_COMPUTE_LIMIT: u64 = 30_000;
+    const INTRINSIC_COMPUTE: u64 = 21_000;
 
     for (spec, spec_name) in crate::ALL_SPECS {
         if !spec.is_enabled(MegaSpecId::REX5) {
@@ -269,6 +276,28 @@ fn test_direct_precompile_transaction_cap_is_the_tx_level_remainder() {
         }
         let limits =
             EvmTxRuntimeLimits::from_spec(spec).with_tx_compute_gas_limit(TX_COMPUTE_LIMIT);
+        if spec.is_enabled(MegaSpecId::REX7) {
+            let outcome =
+                transact_with_limits_outcome(spec, base_db(Bytes::new()), PRECOMPILE_KZG, limits);
+            assert!(
+                matches!(outcome.result, ExecutionResult::Halt { .. }),
+                "{spec_name}: the underfunded direct precompile transaction should halt, got \
+                 {:?}",
+                outcome.result
+            );
+            assert_eq!(
+                outcome.compute_gas_used - outcome.compute_gas_destroyed,
+                INTRINSIC_COMPUTE,
+                "{spec_name}: a wrapper OOG performed no work, so only the intrinsic enforces",
+            );
+            assert!(
+                outcome.compute_gas_destroyed > TX_COMPUTE_LIMIT - INTRINSIC_COMPUTE,
+                "{spec_name}: destroyed is the caller-supplied envelope, not the capped \
+                 remainder ({})",
+                outcome.compute_gas_destroyed,
+            );
+            continue;
+        }
         let (result, usage) =
             transact_with_limits(spec, base_db(Bytes::new()), PRECOMPILE_KZG, limits);
         assert!(

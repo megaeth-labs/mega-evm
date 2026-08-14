@@ -366,6 +366,19 @@ impl AdditionalLimit {
         self.compute_gas.burned_usage()
     }
 
+    /// Records a destroyed remainder into the non-enforcing compute-gas lane (REX7+).
+    ///
+    /// Raises the reported total and leaves every limit comparison unchanged — the same
+    /// [`ComputeGasTracker::record_burned_gas`](compute_gas::ComputeGasTracker::record_burned_gas)
+    /// the interpreter-frame halt path uses. Precompile halt accounting calls this at the
+    /// recording site rather than through frame-exit settlement: a halt `Gas` is reset to
+    /// `Gas::new(limit)`, so the frame formula `remaining()` would double-count or miss the
+    /// forwarded-cap gap.
+    #[inline]
+    pub(crate) fn record_burned_gas(&mut self, amount: u64) {
+        self.compute_gas.record_burned_gas(amount);
+    }
+
     /// Gets the usage of the additional limits.
     #[inline]
     pub fn get_usage(&self) -> LimitUsage {

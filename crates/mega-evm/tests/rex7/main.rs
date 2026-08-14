@@ -38,6 +38,9 @@
 //! - `checkpoint_static_fee_edges` — a table-prepaid checkpoint (`GAS`, `LOG1`) whose static fee
 //!   exceeds the clamp headroom is a plain-segment crossing; `CREATE`'s 32,000 is charged inside
 //!   the body, so the same headroom runs the body and then reverts.
+//! - `precompile_halt` — a precompile that halts exceptionally is split at the recording site the
+//!   same way an interpreter frame is: executed work enforces, the unused forwarded envelope does
+//!   not.
 
 mod burn_split;
 mod charge_on_reject;
@@ -57,3 +60,4 @@ mod latch_surfacing;
 mod modexp_gas;
 mod opcode_set_parity;
 mod parity_shapes;
+mod precompile_halt;

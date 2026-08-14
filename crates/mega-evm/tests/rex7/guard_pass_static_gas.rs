@@ -97,27 +97,26 @@ fn run_db(mut db: MemoryDatabase, limits: EvmTxRuntimeLimits) -> GuardPassRun {
     let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
     let mut evm = MegaEvm::new(context);
-    let result =
-        alloy_evm::Evm::transact_raw(&mut evm, tx).expect("tx should not surface EVMError");
-    let (usage, detained_compute_gas_limit, remaining_compute_gas) = {
+    let executed = evm.execute_transaction(tx).expect("tx should not surface EVMError");
+    let (detained_compute_gas_limit, remaining_compute_gas) = {
         let additional_limit = evm.ctx_ref().additional_limit.borrow();
         (
-            additional_limit.get_usage(),
             additional_limit.detained_compute_gas_limit(),
             additional_limit.current_call_remaining_compute_gas(),
         )
     };
     let accessed = evm.ctx_ref().volatile_data_tracker.borrow().get_volatile_data_accessed();
-    let gas_used = result.result.tx_gas_used();
+    let gas_used = executed.result_and_state.result.tx_gas_used();
     let outcome = Outcome {
-        result: result.result,
-        compute_gas: usage.compute_gas,
-        data_size: usage.data_size,
-        kv_updates: usage.kv_updates,
-        state_growth: usage.state_growth,
+        result: executed.result_and_state.result,
+        compute_gas: executed.compute_gas_used,
+        data_size: executed.data_size,
+        kv_updates: executed.kv_updates,
+        state_growth: executed.state_growth_used,
         gas_used,
+        destroyed: executed.compute_gas_destroyed,
         detained_compute_gas_limit,
-        state: result.state,
+        state: executed.result_and_state.state,
     };
     GuardPassRun { outcome, accessed, remaining_compute_gas }
 }

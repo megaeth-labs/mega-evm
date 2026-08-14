@@ -425,22 +425,20 @@ fn transact_create_reject(
     let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
     let mut evm = MegaEvm::new(context);
-    let result =
-        alloy_evm::Evm::transact_raw(&mut evm, tx).expect("tx should not surface EVMError");
-    let (usage, detained_compute_gas_limit) = {
-        let additional_limit = EvmTr::ctx_ref(&evm).additional_limit.borrow();
-        (additional_limit.get_usage(), additional_limit.detained_compute_gas_limit())
-    };
-    let gas_used = result.result.tx_gas_used();
+    let outcome = evm.execute_transaction(tx).expect("tx should not surface EVMError");
+    let detained_compute_gas_limit =
+        EvmTr::ctx_ref(&evm).additional_limit.borrow().detained_compute_gas_limit();
+    let gas_used = outcome.result_and_state.result.tx_gas_used();
     Outcome {
-        result: result.result,
-        compute_gas: usage.compute_gas,
-        data_size: usage.data_size,
-        kv_updates: usage.kv_updates,
-        state_growth: usage.state_growth,
+        result: outcome.result_and_state.result,
+        compute_gas: outcome.compute_gas_used,
+        data_size: outcome.data_size,
+        kv_updates: outcome.kv_updates,
+        state_growth: outcome.state_growth_used,
         gas_used,
+        destroyed: outcome.compute_gas_destroyed,
         detained_compute_gas_limit,
-        state: result.state,
+        state: outcome.result_and_state.state,
     }
 }
 

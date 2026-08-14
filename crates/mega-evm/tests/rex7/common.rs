@@ -37,6 +37,9 @@ pub(crate) struct Outcome {
     pub(crate) state_growth: u64,
     /// Receipt `gas_used` (combined compute + storage EVM gas).
     pub(crate) gas_used: u64,
+    /// The part of [`compute_gas`](Self::compute_gas) an exceptionally halted frame destroyed
+    /// rather than performed (REX7+, else 0).
+    pub(crate) destroyed: u64,
     /// Post-tx detained compute gas limit — equal to the configured TX limit unless volatile
     /// access lowered it.
     pub(crate) detained_compute_gas_limit: u64,
@@ -55,6 +58,11 @@ impl Outcome {
             ExecutionResult::Halt { reason, .. } => reason,
             other => panic!("{label}: expected a halt, got {other:?}"),
         }
+    }
+
+    /// The part of the reported compute total that a resource limit is evaluated against.
+    pub(crate) fn enforced(&self) -> u64 {
+        self.compute_gas - self.destroyed
     }
 
     /// Reads a storage slot out of the produced state, defaulting to zero when the transaction
@@ -100,22 +108,20 @@ pub(crate) fn transact_with_gas_limit(
     let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
     let mut evm = MegaEvm::new(context);
-    let result =
-        alloy_evm::Evm::transact_raw(&mut evm, tx).expect("tx should not surface EVMError");
-    let (usage, detained_compute_gas_limit) = {
-        let additional_limit = evm.ctx_ref().additional_limit.borrow();
-        (additional_limit.get_usage(), additional_limit.detained_compute_gas_limit())
-    };
-    let gas_used = result.result.tx_gas_used();
+    let outcome = evm.execute_transaction(tx).expect("tx should not surface EVMError");
+    let detained_compute_gas_limit =
+        evm.ctx_ref().additional_limit.borrow().detained_compute_gas_limit();
+    let gas_used = outcome.result_and_state.result.tx_gas_used();
     Outcome {
-        result: result.result,
-        compute_gas: usage.compute_gas,
-        data_size: usage.data_size,
-        kv_updates: usage.kv_updates,
-        state_growth: usage.state_growth,
+        result: outcome.result_and_state.result,
+        compute_gas: outcome.compute_gas_used,
+        data_size: outcome.data_size,
+        kv_updates: outcome.kv_updates,
+        state_growth: outcome.state_growth_used,
         gas_used,
+        destroyed: outcome.compute_gas_destroyed,
         detained_compute_gas_limit,
-        state: result.state,
+        state: outcome.result_and_state.state,
     }
 }
 
@@ -154,22 +160,20 @@ pub(crate) fn transact_tx(
     let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
     let mut evm = MegaEvm::new(context);
-    let result =
-        alloy_evm::Evm::transact_raw(&mut evm, tx).expect("tx should not surface EVMError");
-    let (usage, detained_compute_gas_limit) = {
-        let additional_limit = evm.ctx_ref().additional_limit.borrow();
-        (additional_limit.get_usage(), additional_limit.detained_compute_gas_limit())
-    };
-    let gas_used = result.result.tx_gas_used();
+    let outcome = evm.execute_transaction(tx).expect("tx should not surface EVMError");
+    let detained_compute_gas_limit =
+        evm.ctx_ref().additional_limit.borrow().detained_compute_gas_limit();
+    let gas_used = outcome.result_and_state.result.tx_gas_used();
     Outcome {
-        result: result.result,
-        compute_gas: usage.compute_gas,
-        data_size: usage.data_size,
-        kv_updates: usage.kv_updates,
-        state_growth: usage.state_growth,
+        result: outcome.result_and_state.result,
+        compute_gas: outcome.compute_gas_used,
+        data_size: outcome.data_size,
+        kv_updates: outcome.kv_updates,
+        state_growth: outcome.state_growth_used,
         gas_used,
+        destroyed: outcome.compute_gas_destroyed,
         detained_compute_gas_limit,
-        state: result.state,
+        state: outcome.result_and_state.state,
     }
 }
 
@@ -298,21 +302,19 @@ pub(crate) fn transact_with_bucket_capacity(
     let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
     let mut evm = MegaEvm::new(context);
-    let result =
-        alloy_evm::Evm::transact_raw(&mut evm, tx).expect("tx should not surface EVMError");
-    let (usage, detained_compute_gas_limit) = {
-        let additional_limit = evm.ctx_ref().additional_limit.borrow();
-        (additional_limit.get_usage(), additional_limit.detained_compute_gas_limit())
-    };
-    let gas_used = result.result.tx_gas_used();
+    let outcome = evm.execute_transaction(tx).expect("tx should not surface EVMError");
+    let detained_compute_gas_limit =
+        evm.ctx_ref().additional_limit.borrow().detained_compute_gas_limit();
+    let gas_used = outcome.result_and_state.result.tx_gas_used();
     Outcome {
-        result: result.result,
-        compute_gas: usage.compute_gas,
-        data_size: usage.data_size,
-        kv_updates: usage.kv_updates,
-        state_growth: usage.state_growth,
+        result: outcome.result_and_state.result,
+        compute_gas: outcome.compute_gas_used,
+        data_size: outcome.data_size,
+        kv_updates: outcome.kv_updates,
+        state_growth: outcome.state_growth_used,
         gas_used,
+        destroyed: outcome.compute_gas_destroyed,
         detained_compute_gas_limit,
-        state: result.state,
+        state: outcome.result_and_state.state,
     }
 }

@@ -340,7 +340,7 @@ precompile_kzg_invalid_input    Rex3                 23633       262633  success
 precompile_kzg_invalid_input    Rex4                 23633       262633  success
 precompile_kzg_invalid_input    Rex5                123633       262633  success
 precompile_kzg_invalid_input    Rex6                123633       262633  success
-precompile_kzg_invalid_input    Rex7                123633       262633  success
+precompile_kzg_invalid_input    Rex7                223633       262633  success
 
 precompile_underfunded          Equivalence              0        21140  success
 precompile_underfunded          MiniRex              23639        23640  success

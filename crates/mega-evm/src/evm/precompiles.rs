@@ -325,20 +325,32 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> PrecompileProvider<MegaContext<DB,
             // * Success / revert: revm called `record_regular_cost`, so `total_gas_spent()` already
             //   reflects the actually-consumed amount. Use it.
             // * Fixed-cost precompile that reached past its wrapper gas pre-check (today: KZG with
-            //   `limit() >= GAS_COST`): record the declared fixed cost. revm's `PrecompileError`
-            //   halt still consumes the parent's forwarded `gas_limit` from the EVM-gas meter, so
-            //   compute-gas here is intentionally a separate number from the EVM-gas burn. Address
+            //   `limit() >= GAS_COST`): the declared fixed cost is the work performed. Address
             //   match uses `bytecode_address` (see above) so DELEGATECALL/CALLCODE to KZG still hit
-            //   this arm.
+            //   this arm. Through REX6 that amount is the whole recorded charge; REX7 keeps it on
+            //   the enforcing lane and books the rest of the parent-frame loss — the
+            //   caller-supplied `gas_limit`, not the REX5-capped effective limit — as destroyed.
+            //   The REX5 cap still prevents the precompile from *doing* more work than the
+            //   remaining compute budget; the cap gap is parent-frame loss, not work, so it belongs
+            //   with the destroyed remainder.
             // * All other error paths (non-KZG, or KZG with `limit() < GAS_COST` meaning the
             //   wrapper's pre-check itself OOG'd before verification could run): after the
-            //   spend_all undo above, `total_gas_spent() == 0` again. The parent still permanently
-            //   loses the forwarded amount, so record `limit()` to match the EVM-gas burn (do not
-            //   use `total_gas_spent()` here — the structural `limit()` is the intentional charge,
-            //   independent of whether upstream spend_all'd).
+            //   spend_all undo above, `total_gas_spent() == 0` again. Through REX6 the parent still
+            //   permanently loses the forwarded amount, so those specs record `limit()` as
+            //   enforcing usage to match the EVM-gas burn. REX7 treats the same path as
+            //   performed-zero / destroyed-all: no work ran, so nothing enforces, and the
+            //   parent-frame loss (`gas_limit`, again the uncapped forwarded envelope) is reported
+            //   only.
+            //
+            // The split is computed here rather than by the interpreter-frame halt settlement.
+            // A halt `Gas` is `Gas::new(limit)` after the undo above (`remaining() == limit()`
+            // == the effective, capped budget), so copying that formula would double-count the
+            // generic arm's REX6 charge or drop the cap gap.
             if is_rex5_enabled {
-                let compute_gas = if output.result.is_ok_or_revert() {
-                    output.gas.total_gas_spent()
+                let is_rex7 = context.spec.is_enabled(MegaSpecId::REX7);
+                let mut additional_limit = context.additional_limit.borrow_mut();
+                if output.result.is_ok_or_revert() {
+                    additional_limit.record_compute_gas(output.gas.total_gas_spent());
                 } else if address == kzg_point_evaluation::ADDRESS &&
                     output.gas.limit() >= kzg_point_evaluation::GAS_COST
                 {
@@ -349,11 +361,16 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> PrecompileProvider<MegaContext<DB,
                     // error variant fired. Using the structural predicate
                     // (`limit() >= GAS_COST`) instead of an error-variant match keeps this arm
                     // robust against upstream KZG adding new non-OOG variants.
-                    kzg_point_evaluation::GAS_COST
+                    let executed = kzg_point_evaluation::GAS_COST;
+                    additional_limit.record_compute_gas(executed);
+                    if is_rex7 {
+                        additional_limit.record_burned_gas(gas_limit.saturating_sub(executed));
+                    }
+                } else if is_rex7 {
+                    additional_limit.record_burned_gas(gas_limit);
                 } else {
-                    output.gas.limit()
-                };
-                context.additional_limit.borrow_mut().record_compute_gas(compute_gas);
+                    additional_limit.record_compute_gas(output.gas.limit());
+                }
             } else if context.spec.is_enabled(MegaSpecId::MINI_REX) {
                 context
                     .additional_limit
@@ -973,6 +990,154 @@ mod tests {
             GAS_COST,
             "CALLCODE-to-KZG must charge fixed GAS_COST via bytecode_address"
         );
+    }
+
+    /// REX7 KZG verification failure: the fixed fee is the work performed (enforcing) and
+    /// the rest of the caller-supplied envelope is destroyed. The reported total therefore
+    /// equals the parent-frame loss, not just the fixed fee.
+    #[test]
+    fn test_kzg_precompile_rex7_verification_failure_splits_the_parent_loss() {
+        let mut db = MemoryDatabase::default();
+        let mut context = MegaContext::new(&mut db, MegaSpecId::REX7);
+        let mut precompiles_map = PrecompilesMap::from_static(
+            MegaPrecompiles::new_with_spec(MegaSpecId::REX7).precompiles(),
+        );
+        let inputs = generate_invalid_proof_kzg_test_input();
+        let address = revm::precompile::kzg_point_evaluation::ADDRESS;
+        let forwarded_gas = 1_000_000u64;
+
+        let result =
+            precompiles_map.run(&mut context, &call_inputs(&inputs, address, true, forwarded_gas));
+        let output = result.expect("run ok").expect("Some output");
+        assert!(
+            matches!(output.result, InstructionResult::PrecompileError),
+            "expected PrecompileError on invalid-proof; got {:?}",
+            output.result
+        );
+
+        let additional = context.additional_limit.borrow();
+        assert_eq!(
+            additional.get_usage().compute_gas,
+            forwarded_gas,
+            "reported compute is the whole parent-frame loss",
+        );
+        assert_eq!(
+            additional.burned_compute_gas(),
+            forwarded_gas - GAS_COST,
+            "the unused envelope is destroyed, not enforced",
+        );
+    }
+
+    /// REX7 generic error (blake2f malformed input): no work ran, so nothing enforces and the
+    /// whole caller-supplied envelope is destroyed.
+    #[test]
+    fn test_blake2f_precompile_rex7_malformed_input_destroys_the_envelope() {
+        let mut db = MemoryDatabase::default();
+        let mut context = MegaContext::new(&mut db, MegaSpecId::REX7);
+        let mut precompiles_map = PrecompilesMap::from_static(
+            MegaPrecompiles::new_with_spec(MegaSpecId::REX7).precompiles(),
+        );
+        let address = Address::with_last_byte(9);
+        let inputs = InputsImpl {
+            target_address: address,
+            bytecode_address: Some(address),
+            caller_address: address,
+            input: revm::interpreter::CallInput::Bytes(Bytes::from(vec![0xAAu8; 32])),
+            call_value: Default::default(),
+        };
+        let forwarded_gas = 1_000_000u64;
+
+        let result =
+            precompiles_map.run(&mut context, &call_inputs(&inputs, address, true, forwarded_gas));
+        let output = result.expect("run ok").expect("Some output");
+        assert!(
+            matches!(output.result, InstructionResult::PrecompileError),
+            "expected PrecompileError on wrong-length blake2f; got {:?}",
+            output.result
+        );
+
+        let additional = context.additional_limit.borrow();
+        assert_eq!(
+            additional.get_usage().compute_gas,
+            forwarded_gas,
+            "reported compute is the whole parent-frame loss",
+        );
+        assert_eq!(
+            additional.burned_compute_gas(),
+            forwarded_gas,
+            "generic error performed no work, so the whole envelope is destroyed",
+        );
+    }
+
+    /// REX7 + REX5 cap: `effective < gas_limit`, verification still runs. Destroyed is
+    /// `gas_limit − GAS_COST`, which includes the cap gap. Recording `effective − GAS_COST`
+    /// instead would drop that third piece of the parent-frame loss.
+    #[test]
+    fn test_kzg_precompile_rex7_cap_gap_is_destroyed_not_dropped() {
+        let mut db = MemoryDatabase::default();
+        let mut context = MegaContext::new(&mut db, MegaSpecId::REX7);
+        set_tx_compute_gas_limit(&mut context, MegaSpecId::REX7, GAS_COST + 1_000);
+        let mut precompiles_map = PrecompilesMap::from_static(
+            MegaPrecompiles::new_with_spec(MegaSpecId::REX7).precompiles(),
+        );
+        let inputs = generate_invalid_proof_kzg_test_input();
+        let address = revm::precompile::kzg_point_evaluation::ADDRESS;
+        let forwarded_gas = 500_000u64;
+
+        let result =
+            precompiles_map.run(&mut context, &call_inputs(&inputs, address, true, forwarded_gas));
+        let output = result.expect("run ok").expect("Some output");
+        assert!(
+            matches!(output.result, InstructionResult::PrecompileError),
+            "expected PrecompileError on invalid-proof under the cap; got {:?}",
+            output.result
+        );
+        // Halt Gas stays on the capped effective limit.
+        assert_eq!(output.gas.limit(), GAS_COST + 1_000);
+
+        let additional = context.additional_limit.borrow();
+        assert_eq!(
+            additional.get_usage().compute_gas - additional.burned_compute_gas(),
+            GAS_COST,
+            "only the fixed fee enforces",
+        );
+        assert_eq!(
+            additional.burned_compute_gas(),
+            forwarded_gas - GAS_COST,
+            "destroyed includes the cap gap (forwarded − effective) plus the unused effective \
+             remainder",
+        );
+    }
+
+    /// REX6 KZG verification failure stays on the historical single-lane recording: the
+    /// fixed fee is enforcing and nothing is destroyed.
+    #[test]
+    fn test_kzg_precompile_rex6_verification_failure_stays_single_lane() {
+        let mut db = MemoryDatabase::default();
+        let mut context = MegaContext::new(&mut db, MegaSpecId::REX6);
+        let mut precompiles_map = PrecompilesMap::from_static(
+            MegaPrecompiles::new_with_spec(MegaSpecId::REX6).precompiles(),
+        );
+        let inputs = generate_invalid_proof_kzg_test_input();
+        let address = revm::precompile::kzg_point_evaluation::ADDRESS;
+        let forwarded_gas = 1_000_000u64;
+
+        let result =
+            precompiles_map.run(&mut context, &call_inputs(&inputs, address, true, forwarded_gas));
+        let output = result.expect("run ok").expect("Some output");
+        assert!(
+            matches!(output.result, InstructionResult::PrecompileError),
+            "expected PrecompileError on invalid-proof; got {:?}",
+            output.result
+        );
+
+        let additional = context.additional_limit.borrow();
+        assert_eq!(
+            additional.get_usage().compute_gas,
+            GAS_COST,
+            "REX6 still records only the fixed fee",
+        );
+        assert_eq!(additional.burned_compute_gas(), 0, "REX6 has no destroyed lane");
     }
 
     /// Direct unit coverage for `PrecompileProvider::contains` on the Mega
