@@ -14,10 +14,7 @@ use mega_evm::{
     alloy_evm::{block::BlockExecutor, Evm, EvmEnv},
     alloy_op_evm::block::OpAlloyReceiptBuilder,
     revm::{
-        context::{
-            result::{ExecutionResult, ResultAndState},
-            BlockEnv, ContextTr,
-        },
+        context::{result::ExecutionResult, BlockEnv, ContextTr},
         database::{states::bundle_state::BundleRetention, StateBuilder},
         primitives::eip4844,
         state::EvmState,
@@ -1292,21 +1289,21 @@ impl Cmd {
         let outcome =
             block_executor.run_transaction(wrapped_tx).map_err(ReplayError::BlockExecutionError)?;
         trace!(tx_hash = %ctx.target_tx.inner.inner.tx_hash(), ?outcome, "Target transaction executed");
-        let exec_result = outcome.inner.result.clone();
-        let evm_state = outcome.inner.state.clone();
+        log_execution_result(&outcome.inner.result);
 
-        log_execution_result(&exec_result);
-
-        let result_and_state =
-            ResultAndState { result: exec_result.clone(), state: evm_state.clone() };
-
+        // Read off the same moment the kernel hands its participants: the
+        // target's outcome is known and the database still holds the state it
+        // ran against. The outcome carries the pair the tracer needs, so it is
+        // borrowed rather than rebuilt from copies of its halves.
         let trace_data = self.trace_args.is_tracing_enabled().then(|| {
             self.trace_args.generate_trace(
                 block_executor.inspector(),
-                &result_and_state,
+                &outcome.inner.result_and_state,
                 block_executor.evm().db_ref(),
             )
         });
+        let exec_result = outcome.inner.result.clone();
+        let evm_state = outcome.inner.state.clone();
 
         let gas_used = block_executor
             .commit_transaction_outcome(outcome)
@@ -1320,17 +1317,13 @@ impl Cmd {
         let receipt_envelope = block_result.receipts.last().unwrap().clone();
         trace!(?receipt_envelope, "Receipt envelope obtained");
 
-        // Block-global log index: the target is the only transaction this block
-        // committed, so the fold below runs over an empty tail and the index is
-        // zero — the same answer the kernel's window gives for a first
-        // transaction.
-        let first_log_index: u64 = block_result
-            .receipts
-            .iter()
-            .rev()
-            .skip(1)
-            .map(|envelope| envelope.logs().len() as u64)
-            .sum();
+        // Block-global log index: the chain numbers logs across the receipts of
+        // the block *body*, and the body of the block built here is the target
+        // alone, so nothing precedes it. Stated rather than folded over the
+        // other receipts: such a fold would count a receipt produced before the
+        // first transaction, which is not part of that numbering — the reading
+        // the kernel's harvest window takes for the same question.
+        let first_log_index: u64 = 0;
 
         let from = ctx.target_tx.inner.inner.signer();
         let to = ctx.target_tx.inner.inner.to();
@@ -1347,7 +1340,10 @@ impl Cmd {
             gas_used,
             Some(ctx.target_tx.inner.inner.tx_hash()),
             Some(ctx.block.hash()),
-            ctx.preceding_tx_hashes.len() as u64,
+            // Index in the replayed block: the target is the only transaction
+            // in it. A pending target has no position in a mined body, which is
+            // why `fetch_replay_context` collects no preceding hashes for it.
+            0,
             first_log_index,
         );
 
