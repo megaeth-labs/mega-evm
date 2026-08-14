@@ -155,5 +155,6 @@ REX7 is the current **unstable** spec under active development; its semantics ma
 - **Checkpoint-settled compute gas** — Plain opcodes record no compute gas between checkpoints; settlement runs at storage-gas opcodes, the CALL / CREATE family, volatile opcodes, `GAS`, and frame entry / resume / exit.
 - **Gas-clamp enforcement** — Between checkpoints the interpreter-visible remaining gas is clamped to the remaining compute headroom, so a compute-gas or detention exceed stops the crossing opcode before it executes (zero overshoot; crossing cost excluded from recorded usage).
 - **Exceptional-halt frame carve-out** — A frame that ends in an exceptional halt (including out-of-gas) settles its burned remainder as compute gas, so nested out-of-gas calls may report higher compute usage than REX6 while EVM gas and the receipt stay the same.
+  A failing precompile is split the same way: executed work enforces, the unused forwarded envelope is reported only.
 
 _See [Rex7 Network Upgrade](upgrades/rex7.md) for the full previous/new pairing._

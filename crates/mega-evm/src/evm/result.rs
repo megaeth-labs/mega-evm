@@ -34,6 +34,11 @@ pub struct MegaTransactionOutcome {
     /// exceptionally halted frame destroyed rather than performed. It is the number to report and
     /// to accumulate into block-level compute accounting; it is not the number to compare against
     /// a limit — see [`compute_gas_destroyed`](Self::compute_gas_destroyed).
+    ///
+    /// These two fields are the uninspected execution's split.
+    /// An inspector that rewrites a frame result or edits the interpreter gas counter will make
+    /// them diverge from that path: the burn split is settled before `frame_end`, and the
+    /// plain-segment delta is read from the interpreter counter.
     pub compute_gas_used: u64,
     /// The part of [`compute_gas_used`](Self::compute_gas_used) that exceptionally halted frames
     /// destroyed rather than performed (Rex7+, always 0 before).
@@ -42,6 +47,9 @@ pub struct MegaTransactionOutcome {
     /// The transaction's own limits already excluded it while executing; a consumer that
     /// accumulates this outcome into a further limit — today the block compute-gas counter — must
     /// subtract it too, and compare `compute_gas_used - compute_gas_destroyed` instead.
+    ///
+    /// Same inspector caveat as [`compute_gas_used`](Self::compute_gas_used): the field is the
+    /// uninspected split, and a rewriting inspector will move it.
     pub compute_gas_destroyed: u64,
     /// The state growth used.
     pub state_growth_used: u64,

@@ -471,7 +471,8 @@ At each checkpoint a node MUST:
 2. Record that segment amount as compute gas and evaluate the compute-gas limit (and any latched non-compute resource-limit exceed) at that checkpoint — the latch-surface point is the next checkpoint rather than the next per-opcode recording site.
 3. Record the checkpoint opcode's own body under the measurement-window rules for its metering class, then re-open the settlement window.
 
-Non-opcode recording sites on this page (intrinsic gas, precompiles, code deposit, KeylessDeploy) are unchanged.
+Non-opcode recording sites on this page (intrinsic gas, successful or reverting precompiles, code deposit, KeylessDeploy) are unchanged.
+A precompile that fails is split under the exceptional-halt carve-out below.
 
 For every transaction that stays within every runtime resource limit, in which no frame ends in an exceptional halt, and in which no `disableVolatileDataAccess` guard rejects an opcode, a node MUST produce the same recorded compute-gas total, the same four-dimension usage, the same receipt `gas_used`, the same execution result, and the same state as under Rex6.
 
@@ -514,6 +515,19 @@ A node MUST settle that whole budget as compute gas, split into two parts that a
   This is work the network performed, and a node MUST record it through the ordinary path: it counts toward the transaction's reported total **and** toward the usage every resource limit is evaluated against, exactly as the same opcodes would if the frame had returned normally.
 - **Destroyed** — whatever the frame still held when its result became final, including any gas the clamp was hiding.
   A node MUST record it in the reported compute-gas total and in block-level compute accounting, and MUST NOT evaluate any resource limit against it, at transaction level or at block level (see [Resource Limits](resource-limits.md)).
+
+A precompile invocation that fails is the same split, taken at the precompile recording site.
+A precompile never becomes a child EVM frame, so the frame-exit settlement cannot see it.
+
+- **Executed** — the work the precompile performed: the KZG point-evaluation fixed cost when that precompile reached verification and returned a non-out-of-gas error, and zero when the invocation was rejected before any work.
+  A node MUST record that part through the ordinary enforcing path.
+- **Destroyed** — the rest of the parent-frame loss: the caller-supplied call gas limit minus the executed part.
+  That loss is the uncapped forwarded envelope, not the Rex5-capped effective gas limit; when the cap binds, the gap belongs to the destroyed part.
+  A node MUST record it in the reported total and MUST NOT evaluate any resource limit against it.
+
+Through Rex6 the generic error arm recorded the effective gas limit as enforcing usage.
+Under Rex7 that arm enforces nothing, which is a deliberate enforcement difference.
+The Rex5 forwarded-gas cap is unchanged: a precompile still MUST NOT perform more work than the remaining compute budget.
 
 The destroyed part is bounded by the sender's gas envelope rather than by the compute limit, and halting on it would rescue gas the EVM already destroyed and change the receipt this carve-out requires to stay identical.
 The executed part carries no such problem: it is work, and leaving it out of enforcement would let a frame that keeps executing after absorbing a failed child spend the same compute headroom a second time.
@@ -663,4 +677,4 @@ System-granted gas leaks to the sender, who recovers gas that was never theirs t
 - [Rex4](../upgrades/rex4.md) — introduced the per-call-frame compute gas budget; made gas detention caps relative to usage at the access point; added beneficiary volatile-access guards to the `CALL` family, `SELFDESTRUCT`, and `SELFBALANCE`.
 - [Rex5](../upgrades/rex5.md) — excluded the `CALL_STIPEND` from the forwarded-gas deduction; moved `CREATE2` memory-expansion recording ahead of the storage-gas charge; made contract-creation code-deposit compute gas atomic with the deployment commit; refined precompile compute-gas recording and bounded it by the remaining compute budget; added the `SELFDESTRUCT` empty-beneficiary storage-gas charge; removed `CALLCODE` from the cold first-touch charge and added `SELFDESTRUCT`'s beneficiary to it; stopped following EIP-7702 delegation in the pre-execution inspection, restoring inherited warmth for delegates.
 - [Rex6](../upgrades/rex6.md) — unified the measurement window across all storage-affecting opcodes and folded `CREATE2` memory expansion into it, ending the two-window exception; returned forwarded gas to the failing frame on a compute-gas exceed; rescued the unused envelope on a keyless-deploy dispatch exceed; made beneficiary detection delegation-aware, returning `CALLCODE` call targets to the cold first-touch charge; exempted system-originated transactions from the compute gas limit and gas detention.
-- [Rex7](../upgrades/rex7.md) _(unstable)_ — settles compute gas at checkpoints rather than after every plain opcode; enforces compute and detention limits inside plain segments by clamping interpreter-visible gas so a crossing opcode does not execute; records an exceptional-halt frame's burned remainder as compute gas at frame exit.
+- [Rex7](../upgrades/rex7.md) _(unstable)_ — settles compute gas at checkpoints rather than after every plain opcode; enforces compute and detention limits inside plain segments by clamping interpreter-visible gas so a crossing opcode does not execute; records an exceptional-halt frame's burned remainder as compute gas at frame exit; splits a failing precompile the same way at the recording site.

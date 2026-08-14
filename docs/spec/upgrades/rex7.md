@@ -29,8 +29,11 @@ Rex7 also makes two guard- and detention-related choices that Rex6 does not:
 - A `disableVolatileDataAccess` rejection still charges the rejected opcode's static fee.
 - A detention mark is produced when the target account is loaded, so a frame that cannot afford the fees charged before that load produces no mark.
 
-One deliberate accounting carve-out remains: a frame that ends in an exceptional halt (including ordinary out-of-gas) settles its entire EVM-gas budget as compute gas, so a transaction that contains an inner out-of-gas call can report higher compute usage under Rex7 than under Rex6 even though EVM gas and the receipt are unchanged.
+Two deliberate accounting carve-outs remain.
+A frame that ends in an exceptional halt (including ordinary out-of-gas) settles its entire EVM-gas budget as compute gas, so a transaction that contains an inner out-of-gas call can report higher compute usage under Rex7 than under Rex6 even though EVM gas and the receipt are unchanged.
 That budget is split — the work the frame performed enforces like any other work, while the remainder it destroyed is reported but never enforced.
+A precompile that fails is split the same way at its recording site: executed work (the KZG fixed fee when verification ran; zero when the input was rejected before any work) enforces, and the unused caller-supplied envelope is destroyed.
+The generic error arm therefore stops enforcing the whole forwarded amount, which is an intentional enforcement difference from Rex6; the Rex5 forwarded-gas cap still prevents the precompile from performing more work than the remaining compute budget.
 
 ## What Changed
 
@@ -69,7 +72,8 @@ At each checkpoint a node MUST:
 2. Record that segment amount as compute gas and evaluate the compute-gas limit (and any latched non-compute resource-limit exceed) at that checkpoint.
 3. Record the checkpoint opcode's own body compute gas under the same measurement-window rules that apply through Rex6 for that opcode class, then re-open the settlement window for the next segment.
 
-Non-opcode recording sites (transaction intrinsic gas, precompiles, contract-creation code deposit, KeylessDeploy overhead and sandbox merge) are unchanged.
+Non-opcode recording sites (transaction intrinsic gas, successful or reverting precompiles, contract-creation code deposit, KeylessDeploy overhead and sandbox merge) are unchanged.
+A precompile that **fails** is the exception below.
 
 **Precision invariant.**
 For every transaction that stays within every runtime resource limit, in which no frame ends in an exceptional halt, and in which no `disableVolatileDataAccess` guard rejects an opcode, a node MUST produce the same recorded compute-gas total, the same four-dimension resource usage, the same receipt `gas_used`, the same execution result, and the same state under Rex7 as under Rex6.
@@ -94,6 +98,15 @@ This is the one shape where Rex7 enforcement is stricter than Rex6's, which attr
 
 A node MUST take the split from the frame's **final** result, after the create-return processing that can still turn a successful constructor into a canonical code-deposit out-of-gas, an EIP-3541 reject or a runtime code-size reject — each of which destroys the frame's remainder just as a halt from the interpreter loop does.
 When a nested execution merges its usage into an outer one, which today is only the `KeylessDeploy` sandbox boundary, a node MUST carry the split across that boundary: the outer transaction reports the inner total in full and enforces only its executed part.
+
+A precompile invocation that fails is the same split, taken at the precompile recording site rather than at interpreter-frame exit — a precompile never becomes a child EVM frame, so the frame-exit settlement cannot see it.
+The **executed** part is the work the precompile performed: the KZG point-evaluation fixed cost when that precompile reached verification and returned a non-out-of-gas error, and zero when the invocation was rejected before any work (malformed input, or a wrapper out-of-gas that never reached verification).
+A node MUST record that part through the ordinary enforcing path.
+The **destroyed** part is the rest of the parent-frame loss: the caller-supplied call gas limit, not the Rex5-capped effective gas limit.
+When the cap binds, the gap between those two amounts is parent-frame loss rather than work, and a node MUST include it in the destroyed part.
+Through Rex6 the generic error arm recorded the effective gas limit as enforcing usage; under Rex7 that arm enforces nothing.
+That is a deliberate enforcement difference.
+The Rex5 forwarded-gas cap is unchanged: a precompile still MUST NOT perform more work than the remaining compute budget.
 
 Under per-opcode recording through Rex6, neither the failing opcode nor the destroyed remainder is attributed to compute gas.
 Consequently, a transaction that halts exceptionally, or that contains an inner call frame which does, MAY report a **strictly higher** compute-gas total under Rex7 than under Rex6, while EVM gas accounting and the receipt remain identical.
@@ -206,6 +219,8 @@ A CALL or `EXTCODECOPY` that cannot afford the fees charged before the target ac
 A transaction that halts exceptionally, or that calls into a child frame which does, may report a higher transaction-level compute-gas total under Rex7 than under Rex6 — for any exceptional halt, not just out-of-gas.
 The receipt `gas_used`, the halt or revert reported, and the execution success or failure of the outer transaction are unchanged by the destroyed half of that carve-out: it is reported, never enforced.
 The executed half does enforce, so a contract that calls into a failing child and keeps working can trip a resource limit at the same point it would under Rex6 — and, for a child that ran out of gas with no clamp in force, marginally earlier.
+A contract that calls a precompile which then fails is on the same split: work the precompile performed still binds the remaining compute budget; the unused forwarded envelope does not.
+Under Rex6 that unused envelope was enforcing, so the same tail work can survive under Rex7 and starve under Rex6.
 
 ## Safety and Compatibility
 
@@ -217,8 +232,9 @@ Any node, tool, or test fixture pinned to Rex7 must expect its results to move.
 A deployment that needs stable semantics must select a frozen spec explicitly rather than relying on the latest one.
 
 The gas clamp is strictly tighter than Rex6's post-opcode enforcement on the overshoot axis: the crossing opcode does not run, and enforced usage does not pass the limit by that opcode's cost.
-Rex7 can report more compute gas than Rex6 for the same inputs on two paths: the exceptional-halt frame carve-out, which over-reports rather than under-reports, and a `disableVolatileDataAccess` rejection, which now includes the rejected opcode's static fee.
-The carve-out's enforcing half is never looser than Rex6's, and is stricter in exactly one shape: an ordinary out-of-gas taken with no clamp in force, whose zeroed counter leaves the whole segment measuring as executed.
+Rex7 can report more compute gas than Rex6 for the same inputs on three paths: the exceptional-halt frame carve-out, which over-reports rather than under-reports; a failing precompile whose unused forwarded envelope is now reported as destroyed; and a `disableVolatileDataAccess` rejection, which now includes the rejected opcode's static fee.
+The carve-out's enforcing half is never looser than Rex6's on interpreter frames, and is stricter in exactly one shape: an ordinary out-of-gas taken with no clamp in force, whose zeroed counter leaves the whole segment measuring as executed.
+On a precompile that fails before performing work, Rex7 enforcement is deliberately looser than Rex6's: the unused envelope does not bind the compute limit.
 
 ## References
 
