@@ -1,0 +1,13 @@
+# mega-evme replay equivalence baseline
+# case:    single_preceding_null_json
+# capture: replay_batch_blocks.cache.json
+# argv:    replay --rpc.replay-file <CAPTURE> 0x323ddc8e67dfc134284d78c65f3c1dc7ff45ba1db02eeaf62e211ae3253478ef --json
+
+== exit code ==
+3
+
+== stdout ==
+{"error":{"code":3,"kind":"rpc-failure","message":"Block body lists transaction 0xac421778129bf356848cb654e74a41cc3a94bb0d15e284d22c9d2789675f3775 but the endpoint resolves it to null"}}
+
+== stderr ==
+error: Block body lists transaction 0xac421778129bf356848cb654e74a41cc3a94bb0d15e284d22c9d2789675f3775 but the endpoint resolves it to null
