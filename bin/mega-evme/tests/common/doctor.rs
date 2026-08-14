@@ -4,8 +4,11 @@
 //! (`{"chain_id", "cache": [{"key", "value"}, ...], ...}`). Entries are keyed by
 //! the request (`keccak256("{method}\\x00{params_json}")`), so a doctored
 //! response still resolves. Request method/params are not stored on disk: an
-//! entry is located by a value-content marker or by recomputing its key, and
-//! every operation asserts it hit exactly one entry.
+//! entry is located by parsing the cached JSON-RPC value and matching a
+//! `result` field path, or by recomputing its request key. Every operation
+//! asserts it hit exactly one entry
+//! ([`DoctoredEnvelope::keep_only_transactions_and_block`] is the documented
+//! exception).
 //!
 //! Non-target entries, other envelope fields, and cache order are left
 //! untouched. The typical call is
@@ -25,6 +28,36 @@ use serde_json::Value;
 pub(crate) fn cache_key(method: &str, params_json: &str) -> String {
     alloy_primitives::keccak256(format!("{method}\x00{params_json}")).to_string()
 }
+
+/// Names of every public mutating operation that returns [`DoctoredEnvelope`].
+///
+/// One-shot `PathBuf` wrappers are excluded: they only load, delegate to one of
+/// these methods, and write. Contract tests assert their table covers this list
+/// so a newly added mutator cannot land without an invariance case.
+pub(crate) const PUBLIC_MUTATING_OPS: &[&str] = &[
+    "null_transaction",
+    "drop_transaction",
+    "drain_sender_balance",
+    "zero_transaction_gas",
+    "reassign_transaction_sender",
+    "set_transaction_field",
+    "set_transaction_fields",
+    "set_transaction_block_hash",
+    "set_transaction_block_number",
+    "mark_transaction_pending",
+    "push_cloned_transaction",
+    "rewrite_receipt",
+    "null_receipt",
+    "drop_receipt",
+    "null_block",
+    "set_block_gas_limit",
+    "set_block_hash",
+    "set_lowest_block_hash",
+    "remove_from_block_body",
+    "remove_from_listing_block",
+    "keep_only_transactions_and_block",
+    "drop_entry",
+];
 
 /// In-memory copy of a capture envelope, mutated one operation at a time.
 pub(crate) struct DoctoredEnvelope {
@@ -198,8 +231,10 @@ impl DoctoredEnvelope {
     /// Removes the unique `eth_getTransactionByHash` entry for `tx_hash`.
     #[must_use]
     pub(crate) fn drop_transaction(mut self, tx_hash: &str) -> Self {
-        let marker = tx_hash_marker(tx_hash);
-        self.drop_one(|entry| value_contains(entry, &marker), &format!("response for {tx_hash}"));
+        self.drop_one(
+            |entry| is_transaction_for(entry, tx_hash),
+            &format!("response for {tx_hash}"),
+        );
         self
     }
 
@@ -454,6 +489,9 @@ impl DoctoredEnvelope {
     /// Keeps only transaction lookups for `tx_hashes` and the block body at
     /// `number`. Used to prove a path never touches parent, state, or body-tx
     /// objects.
+    ///
+    /// This is the exception to the module's exactly-one-hit contract: it
+    /// filters the cache in one pass instead of locating a single entry.
     #[must_use]
     pub(crate) fn keep_only_transactions_and_block(
         mut self,
@@ -551,8 +589,10 @@ impl DoctoredEnvelope {
     }
 
     fn transaction_index(&self, tx_hash: &str) -> usize {
-        let marker = tx_hash_marker(tx_hash);
-        self.find_one(|entry| value_contains(entry, &marker), &format!("response for {tx_hash}"))
+        self.find_one(
+            |entry| is_transaction_for(entry, tx_hash),
+            &format!("response for {tx_hash}"),
+        )
     }
 
     fn rewrite_transaction(&mut self, tx_hash: &str, doctor: impl FnOnce(&mut Value)) {
@@ -585,14 +625,10 @@ impl DoctoredEnvelope {
     fn lowest_parent_block_index(&self) -> usize {
         let mut blocks: Vec<(usize, u64)> = Vec::new();
         for (index, entry) in self.entries().iter().enumerate() {
-            let value = entry["value"].as_str().expect("entry value is a string");
-            let Ok(response) = serde_json::from_str::<Value>(value) else {
+            let Some(result) = result_object(entry) else {
                 continue;
             };
-            let Some(result) = response.get("result") else {
-                continue;
-            };
-            if !result.is_object() || result.get("parentHash").is_none() {
+            if result.get("parentHash").is_none() {
                 continue;
             }
             let number = result["number"].as_str().expect("block number is a string");
@@ -605,101 +641,76 @@ impl DoctoredEnvelope {
     }
 }
 
-fn tx_hash_marker(tx_hash: &str) -> String {
-    format!("\"hash\":\"{tx_hash}\"")
-}
-
-fn value_contains(entry: &Value, marker: &str) -> bool {
-    entry["value"].as_str().expect("entry value is a string").contains(marker)
-}
-
 fn parsed_response(entry: &Value) -> Value {
     serde_json::from_str(entry["value"].as_str().expect("entry value is a string"))
         .expect("parse cached response")
 }
 
+/// Parsed JSON-RPC `result` object, if the cache value is a response whose
+/// result is an object. Unparseable values and non-object results (`null`,
+/// scalars) yield `None` rather than a substring hit.
+fn result_object(entry: &Value) -> Option<Value> {
+    let raw = entry.get("value")?.as_str()?;
+    let response: Value = serde_json::from_str(raw).ok()?;
+    let result = response.get("result")?;
+    result.is_object().then(|| result.clone())
+}
+
+fn result_number(result: &Value) -> Option<u64> {
+    result.get("number").and_then(Value::as_str).and_then(parse_hex_u64)
+}
+
+/// Transaction lookups carry `result.hash` plus `blockNumber`; block bodies
+/// carry `number` instead. Matching the parsed fields ignores a nested `hash`
+/// or an escaped mention of the same bytes in another string.
+fn is_transaction_for(entry: &Value, tx_hash: &str) -> bool {
+    result_object(entry).is_some_and(|result| {
+        result.get("hash").and_then(Value::as_str) == Some(tx_hash) &&
+            result.get("blockNumber").is_some()
+    })
+}
+
 fn is_receipt_entry(entry: &Value) -> bool {
-    value_contains(entry, "cumulativeGasUsed")
+    result_object(entry).is_some_and(|result| result.get("cumulativeGasUsed").is_some())
 }
 
 fn is_block_with_transactions(entry: &Value, number: u64) -> bool {
-    let value = entry["value"].as_str().expect("entry value is a string");
-    if !value.contains("\"transactions\"") {
-        return false;
-    }
-    let response: Value = serde_json::from_str(value).expect("parse block response");
-    response["result"]["number"].as_str() == Some(hex_u64(number).as_str())
+    result_object(entry).is_some_and(|result| {
+        result.get("transactions").is_some() && result_number(&result) == Some(number)
+    })
 }
 
 fn is_numbered_object(entry: &Value, number: u64) -> bool {
-    let value = entry["value"].as_str().expect("entry value is a string");
-    let Ok(response) = serde_json::from_str::<Value>(value) else {
-        return false;
-    };
-    let Some(result) = response.get("result") else {
-        return false;
-    };
-    if !result.is_object() {
-        return false;
-    }
-    result.get("number").and_then(Value::as_str).and_then(parse_hex_u64) == Some(number)
+    result_object(entry).is_some_and(|result| result_number(&result) == Some(number))
 }
 
 fn lists_tx(entry: &Value, tx_hash: &str) -> bool {
-    let value = entry["value"].as_str().expect("entry value is a string");
-    let Ok(response) = serde_json::from_str::<Value>(value) else {
-        return false;
-    };
-    response
-        .get("result")
-        .and_then(|result| result.get("transactions"))
-        .and_then(Value::as_array)
-        .is_some_and(|txs| txs.iter().any(|hash| hash.as_str() == Some(tx_hash)))
+    result_object(entry).is_some_and(|result| {
+        result
+            .get("transactions")
+            .and_then(Value::as_array)
+            .is_some_and(|txs| txs.iter().any(|hash| hash.as_str() == Some(tx_hash)))
+    })
 }
 
 fn block_lists_any(entry: &Value, number: u64, tx_hashes: &[&str]) -> bool {
-    let value = entry["value"].as_str().expect("entry value is a string");
-    let Ok(response) = serde_json::from_str::<Value>(value) else {
-        return false;
-    };
-    let Some(result) = response.get("result") else {
-        return false;
-    };
-    if !result.is_object() {
-        return false;
-    }
-    let parsed_number = result.get("number").and_then(Value::as_str).and_then(parse_hex_u64);
-    if parsed_number != Some(number) {
-        return false;
-    }
-    result
-        .get("transactions")
-        .and_then(Value::as_array)
-        .is_some_and(|txs| txs.iter().any(|tx| tx.as_str().is_some_and(|h| tx_hashes.contains(&h))))
+    result_object(entry).is_some_and(|result| {
+        result_number(&result) == Some(number) &&
+            result.get("transactions").and_then(Value::as_array).is_some_and(|txs| {
+                txs.iter().any(|tx| tx.as_str().is_some_and(|h| tx_hashes.contains(&h)))
+            })
+    })
 }
 
 fn keep_tx_or_block(entry: &Value, tx_hashes: &[&str], number: u64) -> bool {
-    let value = entry["value"].as_str().unwrap_or("");
-    let Ok(response) = serde_json::from_str::<Value>(value) else {
-        return false;
-    };
-    let Some(result) = response.get("result") else {
-        return false;
-    };
-    if !result.is_object() {
-        return false;
-    }
-    if let Some(hash) = result.get("hash").and_then(Value::as_str) {
-        if tx_hashes.contains(&hash) && result.get("blockNumber").is_some() {
-            return true;
-        }
-    }
-    let parsed_number = result.get("number").and_then(Value::as_str).and_then(parse_hex_u64);
-    parsed_number == Some(number) && result.get("transactions").is_some()
-}
-
-fn hex_u64(number: u64) -> String {
-    format!("0x{number:x}")
+    result_object(entry).is_some_and(|result| {
+        let is_tx =
+            result.get("hash").and_then(Value::as_str).is_some_and(|h| tx_hashes.contains(&h)) &&
+                result.get("blockNumber").is_some();
+        let is_block =
+            result_number(&result) == Some(number) && result.get("transactions").is_some();
+        is_tx || is_block
+    })
 }
 
 fn parse_hex_u64(s: &str) -> Option<u64> {
