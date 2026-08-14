@@ -174,7 +174,9 @@ pub fn execute_keyless_deploy_call<DB: AlloyDatabase, ExtEnvs: ExternalEnvTypes>
     let cost = constants::rex2::KEYLESS_DEPLOY_OVERHEAD_GAS;
     let has_sufficient_gas = gas.record_regular_cost(cost);
     if !has_sufficient_gas {
-        return make_halt!();
+        // The call cannot even pay the dispatch overhead, so nothing has been recorded as
+        // compute gas and nothing is rescued — the whole envelope is destroyed.
+        return destroying_oog_frame_result(ctx, &gas, &return_memory_offset);
     }
     if ctx.spec.is_enabled(MegaSpecId::REX3) {
         let mut additional_limit = ctx.additional_limit.borrow_mut();
@@ -197,6 +199,11 @@ pub fn execute_keyless_deploy_call<DB: AlloyDatabase, ExtEnvs: ExternalEnvTypes>
                 // `last_frame_result` then erases `rescued_gas` from the final spend, so
                 // the receipt's `gas_used` excludes the rescued amount. Pre-REX6 specs
                 // leave the un-rescued full-spend in place for replay parity.
+                //
+                // Nothing is destroyed on this branch under REX7: the rescue hands the whole
+                // post-overhead remainder back to the sender, so the only gas actually lost is
+                // the overhead already recorded as compute above. Booking the rescued remainder
+                // as destroyed as well would report gas that was refunded.
                 if ctx.spec.is_enabled(MegaSpecId::REX6) {
                     additional_limit.try_rescue_gas(&gas);
                 }
@@ -1015,7 +1022,9 @@ fn charge_caller_materialization_pre_sandbox<DB: AlloyDatabase, ExtEnvs: Externa
             KeylessDeployError::InternalError
         })?;
     if !gas.record_regular_cost(caller_storage_gas) {
-        return Ok(Some(oog_frame_result(gas.limit(), return_memory_offset)));
+        // Plain OOG with no rescue: the dispatch overhead recorded in step 1 is the only work
+        // performed, and everything the call still held is destroyed.
+        return Ok(Some(destroying_oog_frame_result(ctx, gas, return_memory_offset)));
     }
     // `record_deposit_caller_creation` can latch `has_exceeded_limit` to a non-frame-local
     // `StateGrowthLimitExceeded`. Convert it to the canonical exceeding-limit OOG halt
@@ -1064,6 +1073,9 @@ fn refund_unused_sandbox_gas(gas: &mut Gas, reservation: u64, sandbox_gas_used: 
 /// (rescue remaining gas, return as exceeding-limit OOG), `None` when the
 /// merged usage fits.
 ///
+/// This is the rescued shape, not the destroying one: the remaining gas goes back to the
+/// sender, so under REX7 nothing on this path is booked as destroyed.
+///
 /// State must not be merged after this returns `Some(_)`; the footprint
 /// side effects already applied by `apply_sandbox_post_accounting` remain.
 fn reject_if_tx_limit_overflow<DB: AlloyDatabase, ExtEnvs: ExternalEnvTypes>(
@@ -1084,6 +1096,30 @@ fn reject_if_tx_limit_overflow<DB: AlloyDatabase, ExtEnvs: ExternalEnvTypes>(
         Default::default(),
     );
     Some(result)
+}
+
+/// Builds the [`oog_frame_result`] shape for a synthetic halt that keeps the whole envelope,
+/// recording the part it destroys (REX7+).
+///
+/// The `KeylessDeploy` interceptor produces its results inside `frame_init`, before a child EVM
+/// frame exists, so the frame-exit settlement that splits an ordinary exceptional halt never
+/// sees them. The split is taken here instead, by the same formula that settlement uses: the
+/// gas the frame still held when it gave up is destroyed, and whatever it had already recorded
+/// as compute gas stays on the enforcing lane. `gas` must therefore be read *before* the halt
+/// result is built — the result itself reports zero remaining, because the envelope is gone.
+///
+/// Only for halts that keep the envelope. A halt whose remaining gas is rescued for the sender
+/// destroys nothing: the rescue is a refund, and booking the same gas here as well would report
+/// gas that was handed back.
+fn destroying_oog_frame_result<DB: AlloyDatabase, ExtEnvs: ExternalEnvTypes>(
+    ctx: &MegaContext<DB, ExtEnvs>,
+    gas: &Gas,
+    return_memory_offset: &core::ops::Range<usize>,
+) -> FrameResult {
+    if ctx.spec.is_enabled(MegaSpecId::REX7) {
+        ctx.additional_limit.borrow_mut().record_burned_gas(gas.remaining());
+    }
+    oog_frame_result(gas.limit(), return_memory_offset)
 }
 
 /// Single source of truth for the `OutOfGas` halt `FrameResult` shape (empty return

@@ -532,6 +532,10 @@ Through Rex6 the generic error arm recorded the effective gas limit as enforcing
 Under Rex7 that arm enforces nothing, which is a deliberate enforcement difference.
 The Rex5 forwarded-gas cap is unchanged: a precompile still MUST NOT perform more work than the remaining compute budget.
 
+A [system contract](../system-contracts/overview.md) invocation a node answers without opening an EVM frame takes the same split, at the site that produces the answer.
+It applies only when the answer is a halt that keeps the call's gas: the part the invocation performed before failing is executed, and the rest of the call's gas limit is destroyed.
+An answer that returns or reverts hands the gas back to the caller, and a halt whose remaining gas is rescued for the sender is a refund; a node MUST NOT record either as destroyed, because that gas was not lost.
+
 The destroyed part is bounded by the sender's gas envelope rather than by the compute limit, and halting on it would rescue gas the EVM already destroyed and change the receipt this carve-out requires to stay identical.
 The executed part carries no such problem: it is work, and leaving it out of enforcement would let a frame that keeps executing after absorbing a failed child spend the same compute headroom a second time.
 

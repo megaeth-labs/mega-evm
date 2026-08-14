@@ -111,6 +111,10 @@ Through Rex6 the generic error arm recorded the effective gas limit as enforcing
 That is a deliberate enforcement difference.
 The Rex5 forwarded-gas cap is unchanged: a precompile still MUST NOT perform more work than the remaining compute budget.
 
+A system contract invocation a node answers without opening an EVM frame — the `KeylessDeploy` dispatch is the only one today — takes the same split at the site that produces the answer, and only when that answer is a halt which keeps the call's gas: whatever the invocation performed before failing is executed, and the rest of the call's gas limit is destroyed.
+An answer that returns or reverts gives the gas back to the caller, and a halt whose remaining gas is rescued for the sender is a refund.
+A node MUST NOT record either as destroyed; that gas was not lost, and counting it would report it twice.
+
 Under per-opcode recording through Rex6, neither the failing opcode nor the destroyed remainder is attributed to compute gas.
 Consequently, a transaction that halts exceptionally, or that contains an inner call frame which does, MAY report a **strictly higher** compute-gas total under Rex7 than under Rex6, while EVM gas accounting and the receipt remain identical.
 

@@ -10,6 +10,8 @@
 //!   is covered exhaustively rather than through representatives.
 //! - `interceptor_resume` — the two ways a CALL returns without a child frame ever running: a
 //!   system contract interceptor's synthetic result, and a precompile.
+//! - `keyless_synthetic_halt` — the `KeylessDeploy` interceptor's synthetic halts: the two that
+//!   keep the envelope book the unperformed part as destroyed, the rescued one books nothing.
 //! - `latch_surfacing` — where a latched data-size / KV-update / state-growth exceed becomes a
 //!   stop.
 //! - `gas_leakage` — the three paths a per-frame gas mechanism can leak through (interception,
@@ -56,6 +58,7 @@ mod gas_clamp;
 mod gas_leakage;
 mod guard_pass_static_gas;
 mod interceptor_resume;
+mod keyless_synthetic_halt;
 mod latch_surfacing;
 mod modexp_gas;
 mod opcode_set_parity;
