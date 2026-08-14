@@ -102,8 +102,9 @@ When a nested execution merges its usage into an outer one, which today is only 
 A precompile invocation that fails is the same split, taken at the precompile recording site rather than at interpreter-frame exit — a precompile never becomes a child EVM frame, so the frame-exit settlement cannot see it.
 The **executed** part is the work the precompile performed: the KZG point-evaluation fixed cost when that precompile reached verification and returned a non-out-of-gas error, and zero when the invocation was rejected before any work (malformed input, or a wrapper out-of-gas that never reached verification).
 A node MUST record that part through the ordinary enforcing path.
-The **destroyed** part is the rest of the parent-frame loss: the caller-supplied call gas limit, not the Rex5-capped effective gas limit.
-When the cap binds, the gap between those two amounts is parent-frame loss rather than work, and a node MUST include it in the destroyed part.
+The **destroyed** part is the rest of the call's gas limit — the caller-supplied envelope, not the Rex5-capped effective gas limit.
+On a value-transferring call that envelope includes the protocol-granted call stipend, so it can exceed what the parent itself funded.
+When the cap binds, the gap between the envelope and the effective limit is destroyed budget rather than work, and a node MUST include it in the destroyed part.
 Through Rex6 the generic error arm recorded the effective gas limit as enforcing usage; under Rex7 that arm enforces nothing.
 That is a deliberate enforcement difference.
 The Rex5 forwarded-gas cap is unchanged: a precompile still MUST NOT perform more work than the remaining compute budget.

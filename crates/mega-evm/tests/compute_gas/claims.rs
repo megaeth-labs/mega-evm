@@ -261,7 +261,7 @@ fn test_refunds_do_not_reduce_compute_gas() {
 ///
 /// Through Rex6 that failure records the 9,000 cap as enforcing usage, so the reported total is
 /// exactly the 30,000 limit. Rex7 still caps the work (verification does not run) but books the
-/// parent-frame loss — the caller-supplied envelope, not the capped remainder — as destroyed,
+/// forwarded envelope — the caller-supplied envelope, not the capped remainder — as destroyed,
 /// so the reported total is the intrinsic plus that envelope and the enforced half stays at the
 /// intrinsic alone. A cap that ignored the recorded intrinsic (forwarding 30,000) or one derived
 /// from an undefined frame budget would still shift the enforced total away from these numbers.
@@ -290,11 +290,10 @@ fn test_direct_precompile_transaction_cap_is_the_tx_level_remainder() {
                 INTRINSIC_COMPUTE,
                 "{spec_name}: a wrapper OOG performed no work, so only the intrinsic enforces",
             );
-            assert!(
-                outcome.compute_gas_destroyed > TX_COMPUTE_LIMIT - INTRINSIC_COMPUTE,
-                "{spec_name}: destroyed is the caller-supplied envelope, not the capped \
-                 remainder ({})",
-                outcome.compute_gas_destroyed,
+            assert_eq!(
+                outcome.compute_gas_destroyed, 99_940_000,
+                "{spec_name}: destroyed is the caller-supplied envelope (the 98/100 forward of \
+                 the frame's remaining gas at the CALL), not the capped remainder",
             );
             continue;
         }

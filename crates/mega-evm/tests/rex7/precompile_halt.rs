@@ -5,7 +5,7 @@
 //!
 //! - **Executed** — the work the precompile actually performed (the KZG fixed fee when verification
 //!   ran; zero when the input was rejected before any work). This is enforcing.
-//! - **Destroyed** — the rest of the parent-frame loss, which is the caller-supplied forwarded
+//! - **Destroyed** — the rest of the forwarded envelope, which is the caller-supplied forwarded
 //!   envelope, not the REX5-capped effective limit. This is reported and never enforced.
 //!
 //! Through REX6 the same recording site stays single-lane: success / revert still charge spent,
@@ -141,14 +141,17 @@ fn test_precompile_halt_splits_executed_work_from_the_destroyed_envelope() {
         (FORWARDED - kzg_point_evaluation::GAS_COST) as i64,
         "the rest of the forwarded envelope is destroyed, not enforced",
     );
-    assert_eq!(kzg_dc, FORWARDED as i64, "the reported total covers the whole parent-frame loss",);
+    assert_eq!(kzg_dc, FORWARDED as i64, "the reported total covers the whole forwarded envelope",);
 
     assert_eq!(blake_de, 0, "a generic precompile error performed no work, so nothing enforces");
     assert_eq!(
         blake_dd, FORWARDED as i64,
         "the whole forwarded envelope is destroyed on the generic error arm",
     );
-    assert_eq!(blake_dc, FORWARDED as i64, "the reported total still covers the parent-frame loss");
+    assert_eq!(
+        blake_dc, FORWARDED as i64,
+        "the reported total still covers the forwarded envelope"
+    );
 }
 
 /// Through REX6 the same three shapes stay on the historical single-lane recording: KZG
@@ -235,8 +238,8 @@ fn test_generic_precompile_halt_does_not_starve_the_tail() {
 }
 
 /// When the REX5 forwarded-gas cap binds (`effective < gas_limit`), the parent still burns
-/// the caller-supplied envelope. The gap is parent-frame loss, not work, so it lands in
-/// the destroyed remainder rather than disappearing from both lanes.
+/// the caller-supplied envelope. The gap is part of the forwarded envelope, not work, so it lands
+/// in the destroyed remainder rather than disappearing from both lanes.
 #[test]
 fn test_destroyed_remainder_includes_the_forwarded_cap_gap() {
     let unconstrained = run(

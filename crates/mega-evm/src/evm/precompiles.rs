@@ -328,19 +328,18 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> PrecompileProvider<MegaContext<DB,
             //   `limit() >= GAS_COST`): the declared fixed cost is the work performed. Address
             //   match uses `bytecode_address` (see above) so DELEGATECALL/CALLCODE to KZG still hit
             //   this arm. Through REX6 that amount is the whole recorded charge; REX7 keeps it on
-            //   the enforcing lane and books the rest of the parent-frame loss — the
+            //   the enforcing lane and books the rest of the forwarded envelope — the
             //   caller-supplied `gas_limit`, not the REX5-capped effective limit — as destroyed.
             //   The REX5 cap still prevents the precompile from *doing* more work than the
-            //   remaining compute budget; the cap gap is parent-frame loss, not work, so it belongs
-            //   with the destroyed remainder.
+            //   remaining compute budget; the cap gap is part of the forwarded envelope, not work,
+            //   so it belongs with the destroyed remainder.
             // * All other error paths (non-KZG, or KZG with `limit() < GAS_COST` meaning the
             //   wrapper's pre-check itself OOG'd before verification could run): after the
             //   spend_all undo above, `total_gas_spent() == 0` again. Through REX6 the parent still
             //   permanently loses the forwarded amount, so those specs record `limit()` as
             //   enforcing usage to match the EVM-gas burn. REX7 treats the same path as
-            //   performed-zero / destroyed-all: no work ran, so nothing enforces, and the
-            //   parent-frame loss (`gas_limit`, again the uncapped forwarded envelope) is reported
-            //   only.
+            //   performed-zero / destroyed-all: no work ran, so nothing enforces, and the forwarded
+            //   envelope (`gas_limit`, again uncapped) is reported only.
             //
             // The split is computed here rather than by the interpreter-frame halt settlement.
             // A halt `Gas` is `Gas::new(limit)` after the undo above (`remaining() == limit()`
@@ -994,7 +993,7 @@ mod tests {
 
     /// REX7 KZG verification failure: the fixed fee is the work performed (enforcing) and
     /// the rest of the caller-supplied envelope is destroyed. The reported total therefore
-    /// equals the parent-frame loss, not just the fixed fee.
+    /// equals the forwarded envelope, not just the fixed fee.
     #[test]
     fn test_kzg_precompile_rex7_verification_failure_splits_the_parent_loss() {
         let mut db = MemoryDatabase::default();
@@ -1019,7 +1018,7 @@ mod tests {
         assert_eq!(
             additional.get_usage().compute_gas,
             forwarded_gas,
-            "reported compute is the whole parent-frame loss",
+            "reported compute is the whole forwarded envelope",
         );
         assert_eq!(
             additional.burned_compute_gas(),
@@ -1060,7 +1059,7 @@ mod tests {
         assert_eq!(
             additional.get_usage().compute_gas,
             forwarded_gas,
-            "reported compute is the whole parent-frame loss",
+            "reported compute is the whole forwarded envelope",
         );
         assert_eq!(
             additional.burned_compute_gas(),
@@ -1071,7 +1070,7 @@ mod tests {
 
     /// REX7 + REX5 cap: `effective < gas_limit`, verification still runs. Destroyed is
     /// `gas_limit − GAS_COST`, which includes the cap gap. Recording `effective − GAS_COST`
-    /// instead would drop that third piece of the parent-frame loss.
+    /// instead would drop that third piece of the forwarded envelope.
     #[test]
     fn test_kzg_precompile_rex7_cap_gap_is_destroyed_not_dropped() {
         let mut db = MemoryDatabase::default();

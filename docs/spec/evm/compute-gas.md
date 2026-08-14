@@ -521,7 +521,8 @@ A precompile never becomes a child EVM frame, so the frame-exit settlement canno
 
 - **Executed** — the work the precompile performed: the KZG point-evaluation fixed cost when that precompile reached verification and returned a non-out-of-gas error, and zero when the invocation was rejected before any work.
   A node MUST record that part through the ordinary enforcing path.
-- **Destroyed** — the rest of the parent-frame loss: the caller-supplied call gas limit minus the executed part.
+- **Destroyed** — the rest of the call's gas limit: the caller-supplied envelope minus the executed part.
+  On a value-transferring call the envelope includes the protocol-granted call stipend, so it can exceed what the parent itself funded.
   That loss is the uncapped forwarded envelope, not the Rex5-capped effective gas limit; when the cap binds, the gap belongs to the destroyed part.
   A node MUST record it in the reported total and MUST NOT evaluate any resource limit against it.
 
