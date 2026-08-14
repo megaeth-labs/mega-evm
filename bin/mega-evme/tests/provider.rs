@@ -3,13 +3,14 @@
 //!
 //! Covers: CLI parsing of all `--rpc.*` flags, `build_provider` shape across
 //! cache configurations, on-disk cache round-trip via the test-utils
-//! `cache()` accessor, chain-id resolution (RPC fetch vs. failure),
-//! `--rpc.clear-cache` behaviour, and the retry policy on both branches of
-//! its coverage (HTTP 429/503 via wiremock; transport failures via a closed
-//! local port). Tests for the private helpers `temp_path_for` and
+//! `put_cache_entry` / `cache_entry` accessors, what `build_provider` does with
+//! each shape of file it can find at the cache path, chain-id resolution (RPC
+//! fetch vs. failure), `--rpc.clear-cache` behaviour, and the retry policy on
+//! both branches of its coverage (HTTP 429/503 via wiremock; transport failures
+//! via a closed local port). Tests for the private helpers `temp_path_for` and
 //! `resolve_cache_path` stay inline in `src/common/provider.rs`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use alloy_primitives::B256;
 use alloy_provider::Provider;
@@ -287,9 +288,16 @@ async fn test_build_provider_chain_id_rpc_failure_is_hard_error() {
 
 // ─── Cache file round-trip ───────────────────────────────────────────────────
 
+/// Read the JSON at `path`, failing with the raw bytes when it is not JSON.
+fn read_json(path: &Path) -> serde_json::Value {
+    let raw = std::fs::read_to_string(path).expect("read cache file");
+    serde_json::from_str(&raw).unwrap_or_else(|e| panic!("cache file is not JSON ({e}):\n{raw}"))
+}
+
 /// Seed an entry through the cache, persist, build a fresh session against
 /// the same directory + chain id, and confirm the entry comes back via the
-/// load path.
+/// load path. The written file is the cache envelope, stamped with the `kind`
+/// that tells it apart from a capture fixture.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_atomic_save_round_trip() {
     let server = MockRpcServer::start().await;
@@ -303,11 +311,20 @@ async fn test_atomic_save_round_trip() {
 
     let BuildProviderOutput { cache_store, .. } =
         args.build_provider().await.expect("build_provider #1");
-    cache_store.cache().expect("real store").put(key, value.clone()).expect("seed put");
+    assert!(cache_store.put_cache_entry(key, value.clone()), "seed put");
     cache_store.persist().expect("persist");
 
     let cache_file = dir.path().join("rpc-cache-4326.json");
     assert!(cache_file.exists(), "save must produce the target file");
+
+    let written = read_json(&cache_file);
+    assert_eq!(written["version"], serde_json::json!(1));
+    assert_eq!(written["kind"], serde_json::json!("cache"), "written = {written}");
+    assert_eq!(written["chain_id"], serde_json::json!(4326));
+    assert!(
+        written["external_env"].is_null(),
+        "the online cache never writes a snapshot: {written}",
+    );
 
     // Atomic save uses a temp file in the same parent dir; nothing should remain.
     let stale_temps: Vec<_> = std::fs::read_dir(dir.path())
@@ -319,7 +336,7 @@ async fn test_atomic_save_round_trip() {
 
     let BuildProviderOutput { cache_store: reloaded, .. } =
         args.build_provider().await.expect("build_provider #2");
-    let got = reloaded.cache().expect("real store").get(&key).expect("entry must reload");
+    let got = reloaded.cache_entry(&key).expect("entry must reload");
     assert_eq!(got, value);
 }
 
@@ -331,19 +348,164 @@ async fn test_build_provider_tolerates_missing_or_corrupt_cache_file() {
     server.respond_eth_chain_id(42, 1).await;
 
     let dir = tempdir().expect("tempdir");
+    let cache_file = dir.path().join("rpc-cache-42.json");
     let args = test_rpc_args_cached(&server.uri(), dir.path(), None);
 
     // Missing file — load skipped.
     let BuildProviderOutput { cache_store, .. } =
         args.build_provider().await.expect("missing file");
     assert!(!cache_store.is_noop());
-    assert!(cache_store.cache().expect("real store").get(&B256::ZERO).is_none());
+    assert!(cache_store.cache_entry(&B256::ZERO).is_none());
 
-    // Corrupt file — load fails, cache starts empty.
-    std::fs::write(dir.path().join("rpc-cache-42.json"), b"not json").expect("write corrupt");
+    // Corrupt file — unusable, so it is replaced and the cache starts empty.
+    std::fs::write(&cache_file, b"not json").expect("write corrupt");
     let BuildProviderOutput { cache_store, .. } =
         args.build_provider().await.expect("corrupt file");
-    assert!(cache_store.cache().expect("real store").get(&B256::ZERO).is_none());
+    assert!(cache_store.cache_entry(&B256::ZERO).is_none());
+    assert!(!cache_file.exists(), "an unusable cache file is removed, not carried forward");
+}
+
+/// A cache file written by a retired build (the bare `[{key, value}]` array) is
+/// replaced rather than reported: its entries cannot be converted — they are
+/// hashed request keys this build hashes differently — and the cache is a
+/// regenerable artifact, so failing every first run after an upgrade would be a
+/// worse answer than starting fresh.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_build_provider_replaces_a_retired_cache_file_format() {
+    let server = MockRpcServer::start().await;
+    server.respond_eth_chain_id(4326, 1).await;
+
+    let dir = tempdir().expect("tempdir");
+    let cache_file = dir.path().join("rpc-cache-4326.json");
+    let legacy = serde_json::json!([{ "key": B256::repeat_byte(0x11), "value": "legacy" }]);
+    std::fs::write(&cache_file, serde_json::to_string(&legacy).unwrap()).expect("seed legacy");
+
+    let args = test_rpc_args_cached(&server.uri(), dir.path(), None);
+    let BuildProviderOutput { cache_store, .. } =
+        args.build_provider().await.expect("a retired format must not fail the run");
+    assert!(
+        cache_store.cache_entry(&B256::repeat_byte(0x11)).is_none(),
+        "no entry of the retired file may be adopted",
+    );
+    assert!(!cache_file.exists(), "the retired file is removed at load");
+
+    // The run persists into the freed path, in the format this build reads.
+    assert!(cache_store.put_cache_entry(B256::repeat_byte(0x22), "fresh".to_string()));
+    cache_store.persist().expect("persist");
+    assert_eq!(read_json(&cache_file)["kind"], serde_json::json!("cache"));
+}
+
+/// A capture fixture that happens to sit at the per-chain cache path is not
+/// ours: it is never adopted (its entries answer the run it was recorded for,
+/// including reads that are only true for that moment) and never rewritten (the
+/// online cap would silently truncate it).
+#[tokio::test(flavor = "multi_thread")]
+async fn test_build_provider_leaves_a_capture_fixture_at_the_cache_path_intact() {
+    let server = MockRpcServer::start().await;
+    server.respond_eth_chain_id(4326, 1).await;
+
+    let dir = tempdir().expect("tempdir");
+    let cache_file = dir.path().join("rpc-cache-4326.json");
+    let fixture = serde_json::json!({
+        "version": 1,
+        "chain_id": 4326,
+        "cache": [{ "key": B256::repeat_byte(0x33), "value": "captured" }],
+        "external_env": { "bucket_capacities": [[1, 64]] },
+    });
+    let before = serde_json::to_string_pretty(&fixture).unwrap();
+    std::fs::write(&cache_file, &before).expect("seed fixture");
+
+    let args = test_rpc_args_cached(&server.uri(), dir.path(), None);
+    let BuildProviderOutput { cache_store, .. } =
+        args.build_provider().await.expect("a foreign envelope must not fail the run");
+    assert!(
+        cache_store.cache_entry(&B256::repeat_byte(0x33)).is_none(),
+        "a fixture's entries must not be adopted by the online cache",
+    );
+
+    assert!(cache_store.put_cache_entry(B256::repeat_byte(0x44), "ours".to_string()));
+    cache_store.persist().expect("the online persist stays best-effort");
+    assert_eq!(
+        std::fs::read_to_string(&cache_file).expect("fixture still readable"),
+        before,
+        "the fixture must survive byte-identical",
+    );
+}
+
+/// A cache file whose body claims another chain is a hard error, not a silent
+/// restart: the per-chain file name already separates chains, so disagreement
+/// inside means the file was swapped or the directory is shared across chains.
+/// The persist that would follow swallows its own failures, so continuing would
+/// make every later run re-fetch everything and never say why.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_build_provider_hard_errors_when_the_cache_claims_another_chain() {
+    let server = MockRpcServer::start().await;
+    server.respond_eth_chain_id(4326, 1).await;
+
+    let dir = tempdir().expect("tempdir");
+    let cache_file = dir.path().join("rpc-cache-4326.json");
+    let foreign_chain = serde_json::json!({
+        "version": 1,
+        "kind": "cache",
+        "chain_id": 6342,
+        "cache": [],
+        "external_env": null,
+    });
+    let before = serde_json::to_string_pretty(&foreign_chain).unwrap();
+    std::fs::write(&cache_file, &before).expect("seed cross-chain cache");
+
+    let args = test_rpc_args_cached(&server.uri(), dir.path(), None);
+    let err = args.build_provider().await.expect_err("a cross-chain cache must fail the run");
+    assert_eq!(
+        ExitCode::from_evme_error(&err),
+        ExitCode::ExecutionError,
+        "a mispointed cache directory is bad input, not the endpoint failing to answer",
+    );
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("6342") && msg.contains("4326"),
+        "the error must name both chains, got: {msg}",
+    );
+    assert_eq!(
+        std::fs::read_to_string(&cache_file).expect("file still readable"),
+        before,
+        "a hard error must not also delete the file",
+    );
+}
+
+/// The chain-id probe runs on a bare provider, so a cache entry claiming another
+/// chain cannot authenticate the cache that holds it. The cache below is a
+/// well-formed one for chain 4326 whose `eth_chainId` entry answers 999; the
+/// build must still resolve 4326 from the endpoint.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_build_provider_chain_id_probe_ignores_a_tampered_cache_entry() {
+    let server = MockRpcServer::start().await;
+    server.respond_eth_chain_id(4326, 1).await;
+
+    let dir = tempdir().expect("tempdir");
+    let cache_file = dir.path().join("rpc-cache-4326.json");
+    let key = alloy_primitives::keccak256("eth_chainId\x00null");
+    let seeded = serde_json::json!({
+        "version": 1,
+        "kind": "cache",
+        "chain_id": 4326,
+        "cache": [{
+            "key": format!("{key:?}"),
+            "value": r#"{"jsonrpc":"2.0","id":0,"result":"0x3e7"}"#,
+        }],
+        "external_env": null,
+    });
+    std::fs::write(&cache_file, serde_json::to_string_pretty(&seeded).unwrap()).expect("seed");
+
+    let args = test_rpc_args_cached(&server.uri(), dir.path(), None);
+    let BuildProviderOutput { chain_id, cache_store, .. } =
+        args.build_provider().await.expect("build_provider");
+    assert_eq!(chain_id, 4326, "the probe must come from the endpoint, not from the cache");
+    assert_eq!(
+        cache_store.cache_path(),
+        Some(cache_file.as_path()),
+        "the file is still named after the probed chain",
+    );
 }
 
 /// `--rpc.clear-cache` must remove the file before load so the new session
@@ -361,7 +523,7 @@ async fn test_build_provider_clear_cache_deletes_file_before_load() {
     let key = B256::repeat_byte(0xCC);
     let BuildProviderOutput { cache_store: store, .. } =
         seed_args.build_provider().await.expect("seed build_provider");
-    store.cache().expect("real store").put(key, r#"{"v":1}"#.to_string()).expect("seed put");
+    assert!(store.put_cache_entry(key, r#"{"v":1}"#.to_string()), "seed put");
     store.persist().expect("persist");
     assert!(cache_file.exists(), "seed must produce the cache file");
 
@@ -378,10 +540,7 @@ async fn test_build_provider_clear_cache_deletes_file_before_load() {
     ]);
     let BuildProviderOutput { cache_store: store, .. } =
         clear_args.build_provider().await.expect("cleared build_provider");
-    assert!(
-        store.cache().expect("real store").get(&key).is_none(),
-        "clear-cache must wipe previously-seeded entries",
-    );
+    assert!(store.cache_entry(&key).is_none(), "clear-cache must wipe previously-seeded entries",);
     assert!(
         !cache_file.exists(),
         "clear-cache must delete the file (it is only recreated on persist)",

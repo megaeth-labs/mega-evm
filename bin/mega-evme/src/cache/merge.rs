@@ -111,7 +111,7 @@ pub(crate) fn merge_kv_entries(base: Vec<CacheKv>, overlay: Vec<CacheKv>) -> Vec
     map.into_iter().map(|(key, value)| CacheKv { key, value }).collect()
 }
 
-/// Merge `ours` over `on_disk` for a provider cache, keeping at most `cap`
+/// Merge `ours` over `on_disk` for a capped cache file, keeping at most `cap`
 /// entries.
 ///
 /// `--rpc.cache-max-entries` bounds what a run persists, so the union of a
