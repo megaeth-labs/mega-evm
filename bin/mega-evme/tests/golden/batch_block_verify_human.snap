@@ -1,7 +1,7 @@
 # mega-evme replay equivalence baseline
-# case:    batch_block_human
+# case:    batch_block_verify_human
 # capture: replay_batch_blocks.cache.json
-# argv:    replay --rpc.replay-file <CAPTURE> --block 22945844
+# argv:    replay --rpc.replay-file <CAPTURE> --block 22945844 --verify-receipt
 
 == exit code ==
 0
@@ -35,6 +35,8 @@ Execution Time:   <DURATION>
   "contractAddress": null
 }
 
+verification: MATCH
+
 === Transaction 0xac421778129bf356848cb654e74a41cc3a94bb0d15e284d22c9d2789675f3775 (block 22945844, index 1) ===
 
 === Transaction Summary ===
@@ -59,6 +61,8 @@ Execution Time:   <DURATION>
   "to": "0x6342000000000000000000000000000000000001",
   "contractAddress": null
 }
+
+verification: MATCH
 
 === Transaction 0xa637d68cda9423d67826e008b1c90295193f30f19cd74a6f4acf54022d56cae2 (block 22945844, index 2) ===
 
@@ -241,6 +245,8 @@ Events:           11 log(s) emitted
   "contractAddress": null
 }
 
+verification: MATCH
+
 === Transaction 0x323ddc8e67dfc134284d78c65f3c1dc7ff45ba1db02eeaf62e211ae3253478ef (block 22945844, index 3) ===
 
 === Transaction Summary ===
@@ -265,6 +271,8 @@ Execution Time:   <DURATION>
   "to": "0x6342000000000000000000000000000000000001",
   "contractAddress": null
 }
+
+verification: MATCH
 
 === Transaction 0x63e032fdff2676824fd6a71df09d88f62146d07effc7e4ed7e246034df2e9b22 (block 22945844, index 4) ===
 
@@ -447,6 +455,8 @@ Events:           11 log(s) emitted
   "contractAddress": null
 }
 
+verification: MATCH
+
 === Transaction 0x88db4259446e76b50e7e11754460f621ed5984ae5a72ccc744c2a086d365b4dc (block 22945844, index 5) ===
 
 === Transaction Summary ===
@@ -471,6 +481,8 @@ Execution Time:   <DURATION>
   "to": "0x6342000000000000000000000000000000000001",
   "contractAddress": null
 }
+
+verification: MATCH
 
 === Transaction 0xf58f7a48ec548f49637c76ed23713bdeb1f6adda7686ae1912ccaefa05fa81c5 (block 22945844, index 6) ===
 
@@ -653,6 +665,8 @@ Events:           11 log(s) emitted
   "contractAddress": null
 }
 
+verification: MATCH
+
 === Transaction 0x856087ac6e638c6765ef1405141f428e5c25eeb8013c0bfe745d3ab9c98f9d7a (block 22945844, index 7) ===
 
 === Transaction Summary ===
@@ -677,6 +691,8 @@ Execution Time:   <DURATION>
   "to": "0x6342000000000000000000000000000000000001",
   "contractAddress": null
 }
+
+verification: MATCH
 
 === Transaction 0x35abeb93ea4af7094e20204022a171a0ad07b0a5700035a8e74b44a56dae8960 (block 22945844, index 8) ===
 
@@ -859,6 +875,8 @@ Events:           11 log(s) emitted
   "contractAddress": null
 }
 
+verification: MATCH
+
 === Transaction 0x5caf1b34f27d177f06bebcc9c142f7fcde41adee67d93c1cffbdfeffc4b122dc (block 22945844, index 9) ===
 
 === Transaction Summary ===
@@ -883,6 +901,8 @@ Execution Time:   <DURATION>
   "to": "0x6342000000000000000000000000000000000001",
   "contractAddress": null
 }
+
+verification: MATCH
 
 === Transaction 0x714b90de188cf13b94caa6f7e7c7218f453c550532918a38261ef89191675fbd (block 22945844, index 10) ===
 
@@ -1065,6 +1085,8 @@ Events:           11 log(s) emitted
   "contractAddress": null
 }
 
+verification: MATCH
+
 === Transaction 0x0ef6d15f622c4624eb5a744c79dfb887f4e77d0eb3451d070c66b6c51859caa1 (block 22945844, index 11) ===
 
 === Transaction Summary ===
@@ -1089,6 +1111,8 @@ Execution Time:   <DURATION>
   "to": "0x6342000000000000000000000000000000000001",
   "contractAddress": null
 }
+
+verification: MATCH
 
 === Transaction 0xe7b1f17fb2207a82def3e20c1a073118161458f189ddf7383cf9dbd2841ff1c8 (block 22945844, index 12) ===
 
@@ -1271,6 +1295,8 @@ Events:           11 log(s) emitted
   "contractAddress": null
 }
 
+verification: MATCH
+
 === Transaction 0x8625ae94e99d60086c9072d78ada5239f3213d890e1f7d8b01d87394c92c6bc0 (block 22945844, index 13) ===
 
 === Transaction Summary ===
@@ -1296,6 +1322,8 @@ Execution Time:   <DURATION>
   "contractAddress": null
 }
 
+verification: MATCH
+
 === Transaction 0x61f7d380c9ff4c7e5b49d5e5c24a4670d44f35d487189bb10a56b2a8b428267f (block 22945844, index 14) ===
 
 === Transaction Summary ===
@@ -1320,6 +1348,8 @@ Execution Time:   <DURATION>
   "to": "0x6342000000000000000000000000000000000001",
   "contractAddress": null
 }
+
+verification: MATCH
 
 === Transaction 0x8105fd71e6ce54c3511edbcf746a48c7dedcfa59e21673c10bf2ae77ded272e7 (block 22945844, index 15) ===
 
@@ -1502,6 +1532,8 @@ Events:           11 log(s) emitted
   "contractAddress": null
 }
 
+verification: MATCH
+
 === Transaction 0x804e1ef01a7858c826ad14b7e925092c344bad2acff6c7d7354d2e6593216484 (block 22945844, index 16) ===
 
 === Transaction Summary ===
@@ -1526,6 +1558,8 @@ Execution Time:   <DURATION>
   "to": "0x6342000000000000000000000000000000000001",
   "contractAddress": null
 }
+
+verification: MATCH
 
 === Transaction 0x9b2b678b0c3e6a0d63705ba512592417c6cd0d24594bedd7254271799942ba12 (block 22945844, index 17) ===
 
@@ -1708,6 +1742,8 @@ Events:           11 log(s) emitted
   "contractAddress": null
 }
 
+verification: MATCH
+
 === Transaction 0x0ec9f21940773d4c8b871d4a63054253754b4b5d5277a0058792bb1926a23079 (block 22945844, index 18) ===
 
 === Transaction Summary ===
@@ -1805,6 +1841,8 @@ Events:           5 log(s) emitted
   "contractAddress": null
 }
 
+verification: MATCH
+
 === Transaction 0xb0a735e39be1d1a71da115345385c496d4c763a91d7c74cdff103767b9a469e5 (block 22945844, index 19) ===
 
 === Transaction Summary ===
@@ -1829,6 +1867,8 @@ Execution Time:   <DURATION>
   "to": "0x6342000000000000000000000000000000000001",
   "contractAddress": null
 }
+
+verification: MATCH
 
 === Transaction 0x7a8ce7fd18a9e631850b60f66cb69b680fb8d9498022da956bfb28a5ed54e318 (block 22945844, index 20) ===
 
@@ -2011,6 +2051,8 @@ Events:           11 log(s) emitted
   "contractAddress": null
 }
 
+verification: MATCH
+
 === Transaction 0xa2d56f2632d9fdbba044be4fc3204975f64f92e636cbfc69ffcb2ecf14937866 (block 22945844, index 21) ===
 
 === Transaction Summary ===
@@ -2035,6 +2077,8 @@ Execution Time:   <DURATION>
   "to": "0x6342000000000000000000000000000000000001",
   "contractAddress": null
 }
+
+verification: MATCH
 
 === Transaction 0xb6a0b7a302c741f64b8e46861a3dcb2d5c1047f6f2cb89a35b5c2183c96296b7 (block 22945844, index 22) ===
 
@@ -2216,6 +2260,8 @@ Events:           11 log(s) emitted
   "to": "0x897a33a0af45b3ba097bd6045187d622252e6acd",
   "contractAddress": null
 }
+
+verification: MATCH
 
 == stderr ==
 (empty)

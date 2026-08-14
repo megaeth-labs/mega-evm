@@ -10,36 +10,68 @@
 //! `tests/golden/`. A refactor is behavior-preserving exactly when every
 //! snapshot still matches.
 //!
-//! A snapshot pins the exit code, stdout, the failure lines of stderr, and the
-//! content of any file the run was asked to write — a fixture dump is part of
-//! the observable behavior, and a change there is invisible on stdout.
+//! A snapshot pins the exit code, stdout, the whole of stderr, and the content
+//! of any file the run was asked to write — a fixture dump is part of the
+//! observable behavior, and a change there is invisible on stdout. stderr is
+//! pinned in full rather than filtered down to its `error:` lines: a failure
+//! message may carry continuation lines (an RPC error's re-capture `hint:`),
+//! and dropping them would let a rewrite of the hint through the gate.
 //!
-//! Regenerate every snapshot after an intentional change, then read the diff:
+//! Rows that need a failure the committed captures do not hold manufacture it
+//! by doctoring a copy of a capture through the shared typed doctor
+//! ([`common::doctor`]). The normalization rules stay local to this file: a
+//! snapshot is only as trustworthy as the rules that produced it, and those
+//! rules should be readable without following helpers into another module.
+//!
+//! # Regenerating
 //!
 //! ```bash
 //! MEGA_EVME_BLESS=1 cargo test -p mega-evme --test replay_equivalence
 //! ```
 //!
-//! The `negative_control` tests keep the gate honest. A snapshot suite that
-//! normalizes too much passes forever and proves nothing, so two of them doctor
-//! a copy of a capture and require the snapshot to change — one through stdout,
-//! one only through the dumped fixture — and a third pins that the timing
-//! normalizer is still rewriting something.
+//! Blessing is not an approval. The discipline is:
 //!
-//! Everything the harness needs is local to this file, including the fixture
-//! extraction: a snapshot is only as trustworthy as the rules that produced it,
-//! and those rules should be readable without following helpers into another
-//! module.
+//! 1. Run the command above, which rewrites every golden.
+//! 2. Run the suite again *without* `MEGA_EVME_BLESS` and require it green.
+//! 3. Read `git diff` line by line and accept each change deliberately.
+//!
+//! Steps 2 and 3 are the reviewer's job, not the harness's, so the harness
+//! makes them as hard as possible to need: the invariant checks and the
+//! negative controls run under `MEGA_EVME_BLESS` exactly as they do without it,
+//! and every blessed golden is immediately re-derived from a second independent
+//! run and compared, so run-to-run nondeterminism fails at the bless rather
+//! than becoming a flaky golden.
+//!
+//! # Declared limits
+//!
+//! - **Windows paths are not normalized.** Path substitution matches the native separator, and a
+//!   JSON-serialized Windows path carries doubled backslashes, so a golden blessed on Windows would
+//!   not match one blessed on Unix. This repository has no Windows CI; the gate is a Unix gate.
+//! - **Tracing, state dumps and `--override.spec` are not in the matrix.** Trace output is large
+//!   enough to swamp the goldens, and the override rows need an online mock rather than an offline
+//!   capture. Those flags keep their structured coverage in `replay_override_spec.rs` and the
+//!   `run`/`tx` tests.
+//! - **Fixture failure branches beyond the two pinned here** — a destination that already exists,
+//!   and the fidelity gate refusing a halted replay — stay with the structured tests
+//!   (`replay_dump.rs`). An unanswered receipt for the gate, a mid-flight write failure, and a
+//!   draft discarded by a block abort are asserted there, not byte-pinned here.
+
+mod common;
 
 use std::{
     collections::HashSet,
     fs,
     path::{Path, PathBuf},
-    process::Command,
-    sync::{Mutex, OnceLock},
+    process::{Command, Output},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Mutex, OnceLock,
+    },
 };
 
 use tempfile::TempDir;
+
+use common::{doctor::DoctoredEnvelope, is_run_error, json_values};
 
 // ---------------------------------------------------------------------------
 // Captures and their transactions
@@ -52,6 +84,10 @@ const CAPTURE_BLOCKS: &str = "replay_batch_blocks.cache.json";
 /// Block of [`CAPTURE_BLOCKS`] replayed whole: 23 transactions, index 0 being a
 /// deposit.
 const BLOCK: u64 = 22_945_844;
+
+/// Number of transactions [`BLOCK`] holds, and therefore the number of result
+/// lines a whole-block batch run reports.
+const BLOCK_TX_COUNT: usize = 23;
 
 /// Index-0 deposit of [`BLOCK`]. Deposits are the one transaction class
 /// `--dump-fixture` refuses, so this target covers the skip branch.
@@ -203,6 +239,38 @@ fn blessing() -> bool {
 // Matrix rows
 // ---------------------------------------------------------------------------
 
+/// A rewrite applied to a copy of a row's capture before the run, manufacturing
+/// a failure the committed captures do not hold.
+///
+/// Takes the committed capture and the scratch directory; returns the path of
+/// the doctored copy the run replays from.
+type Doctoring = fn(&Path, &Path) -> PathBuf;
+
+/// What a run must satisfy whatever its golden says.
+///
+/// These are the checks that stay meaningful while the goldens are being
+/// rewritten, so they are what stands between `MEGA_EVME_BLESS=1` and a
+/// laundered regression. They are deliberately structural — an exit class, a
+/// line count, a file count — rather than a second copy of the golden.
+#[derive(Default)]
+struct Expect {
+    /// Exit code the row must produce. A row that declares nothing must succeed.
+    exit: i32,
+    /// Values a `--json` run must print that report an execution result.
+    ///
+    /// Pins the keep-result contract without going through the golden: a target
+    /// that replayed keeps its result line even when its receipt verification
+    /// or its fixture dump failed, rather than being replaced by an error line.
+    result_lines: Option<usize>,
+    /// Values a `--json` run must print that report a per-target failure
+    /// instead of a result (`{"tx_hash":…,"error":{…}}`).
+    error_lines: Option<usize>,
+    /// Whether the row's `--dump-fixture` destination must exist afterwards.
+    dump_written: Option<bool>,
+    /// Files the row's `--dump-fixture-dir` destination must hold afterwards.
+    dir_files: Option<usize>,
+}
+
 /// One row of the argv matrix, resolved against a scratch directory.
 ///
 /// A row is output-mode agnostic: `--json` is appended by the runner so the two
@@ -210,6 +278,8 @@ fn blessing() -> bool {
 struct Row {
     /// Capture to replay from, by fixture name.
     capture: &'static str,
+    /// Rewrite applied to a copy of that capture before the run.
+    doctoring: Option<Doctoring>,
     /// Arguments after `replay --rpc.replay-file <capture>`.
     args: Vec<String>,
     /// Files the row writes for the run to read. Echoed into the snapshot, so a
@@ -221,6 +291,8 @@ struct Row {
     /// Absolute paths this row puts on the command line, with the placeholder
     /// each is rewritten to before comparison.
     paths: Vec<(PathBuf, &'static str)>,
+    /// Golden-independent invariants of this row.
+    expect: Expect,
 }
 
 /// A file, or a directory of files, whose content joins the snapshot.
@@ -231,16 +303,60 @@ enum Artifact {
     Dir(&'static str, PathBuf),
 }
 
+/// Content the harness seeds a dump destination with, to be refused or replaced.
+///
+/// Deliberately not a valid fixture: if the run ever mistook it for one, the
+/// snapshot would say so.
+const SEEDED_FIXTURE: &str = "{\"note\":\"a fixture was already written at this path\"}\n";
+
 impl Row {
     /// A row that only replays, writing nothing.
     fn new(capture: &'static str, args: &[&str]) -> Self {
         Self {
             capture,
+            doctoring: None,
             args: args.iter().map(|arg| (*arg).to_string()).collect(),
             inputs: Vec::new(),
             artifacts: Vec::new(),
             paths: Vec::new(),
+            expect: Expect::default(),
         }
+    }
+
+    /// Replay from a doctored copy of the capture rather than the committed one.
+    fn doctored(mut self, doctoring: Doctoring) -> Self {
+        self.doctoring = Some(doctoring);
+        self
+    }
+
+    /// Declare the exit code this row must produce.
+    fn exits(mut self, code: i32) -> Self {
+        self.expect.exit = code;
+        self
+    }
+
+    /// Declare how many result values a `--json` run of this row must print.
+    fn result_lines(mut self, count: usize) -> Self {
+        self.expect.result_lines = Some(count);
+        self
+    }
+
+    /// Declare how many per-target error values a `--json` run must print.
+    fn error_lines(mut self, count: usize) -> Self {
+        self.expect.error_lines = Some(count);
+        self
+    }
+
+    /// Declare whether the `--dump-fixture` destination must exist afterwards.
+    fn dump_written(mut self, written: bool) -> Self {
+        self.expect.dump_written = Some(written);
+        self
+    }
+
+    /// Declare how many files the `--dump-fixture-dir` must hold afterwards.
+    fn dir_files(mut self, count: usize) -> Self {
+        self.expect.dir_files = Some(count);
+        self
     }
 
     /// Add `--tx-file`, writing `hashes` into the scratch directory.
@@ -285,7 +401,7 @@ impl Row {
     /// Add `--dump-fixture-dir`, pointed at a directory in the scratch
     /// directory. The directory is created first, the way a caller would.
     fn with_dump_fixture_dir(mut self, scratch: &Path) -> Self {
-        let path = scratch.join("fixtures");
+        let path = dump_dir(scratch);
         fs::create_dir_all(&path).expect("failed to create the fixture directory");
         self.args.push("--dump-fixture-dir".into());
         self.args.push(display(&path));
@@ -293,6 +409,45 @@ impl Row {
         self.artifacts.push(Artifact::Dir(DUMP_DIR_PATH, path));
         self
     }
+
+    /// Seed the `--dump-fixture-dir` destination with a file where `tx_hash`'s
+    /// dump would land, so the run has something to refuse or to replace.
+    fn with_seeded_fixture(self, scratch: &Path, tx_hash: &str) -> Self {
+        let dir = dump_dir(scratch);
+        fs::create_dir_all(&dir).expect("failed to create the fixture directory");
+        fs::write(dir.join(format!("{tx_hash}.json")), SEEDED_FIXTURE)
+            .expect("failed to seed the fixture destination");
+        self
+    }
+
+    /// Command-line arguments of this row in one output mode.
+    fn argv(&self, json: bool) -> Vec<String> {
+        let mut args = self.args.clone();
+        if json {
+            args.push("--json".into());
+        }
+        args
+    }
+
+    /// The capture this row replays from, doctored into `scratch` if it asked
+    /// for a manufactured failure.
+    fn capture_path(&self, scratch: &Path) -> PathBuf {
+        let source = fixture(self.capture);
+        match self.doctoring {
+            Some(doctoring) => doctoring(&source, scratch),
+            None => source,
+        }
+    }
+
+    /// Whether this row drives the batch path.
+    fn is_batch(&self) -> bool {
+        self.args.iter().any(|arg| arg == "--tx-file" || arg == "--block")
+    }
+}
+
+/// The `--dump-fixture-dir` destination of a scratch directory.
+fn dump_dir(scratch: &Path) -> PathBuf {
+    scratch.join("fixtures")
 }
 
 /// Replay one mined transaction: the baseline of the single-transaction path.
@@ -303,6 +458,27 @@ fn row_single_offline_mined(_scratch: &Path) -> Row {
 /// Verify one mined transaction against the on-chain receipt the capture holds.
 fn row_single_offline_verify(_scratch: &Path) -> Row {
     Row::new(CAPTURE_SINGLE, &["--verify-receipt", SINGLE_TX])
+}
+
+/// Verify a replay against a receipt it cannot reproduce.
+///
+/// The one row that reaches exit `2`. `verification-mismatch` is the code a
+/// verification pipeline branches on, and nothing else in the matrix produces
+/// it: the capture's receipt is rewritten to advertise a gas usage the replay
+/// will not match, which is a divergence rather than an unanswered question.
+fn row_single_verify_mismatch(_scratch: &Path) -> Row {
+    Row::new(CAPTURE_SINGLE, &["--verify-receipt", SINGLE_TX])
+        .doctored(doctor_receipt_gas_used)
+        .exits(2)
+}
+
+/// Verify and dump in the same run: the two single-transaction post-processing
+/// steps interact through the same replay result, and each is normally pinned
+/// alone.
+fn row_single_verify_dump(scratch: &Path) -> Row {
+    Row::new(CAPTURE_SINGLE, &["--verify-receipt", SINGLE_TX])
+        .with_dump_fixture(scratch)
+        .dump_written(true)
 }
 
 /// Replay a deposit: a different transaction type, receipt shape and fee path.
@@ -316,7 +492,7 @@ fn row_single_smoke_deposit(_scratch: &Path) -> Row {
 /// answer as an infrastructure failure rather than a mismatch, and that
 /// classification is exactly the kind of thing a driver refactor can move.
 fn row_single_smoke_verify_unavailable(_scratch: &Path) -> Row {
-    Row::new(CAPTURE_SMOKE, &["--verify-receipt", SMOKE_TX])
+    Row::new(CAPTURE_SMOKE, &["--verify-receipt", SMOKE_TX]).exits(3)
 }
 
 /// Replay against a capture with a non-empty external env, so the snapshot
@@ -342,7 +518,7 @@ fn row_single_halt_verify(_scratch: &Path) -> Row {
 /// reproduce the halt, so the dump is refused and no file is written. The
 /// snapshot records both the refusal and the absent artifact.
 fn row_single_halt_dump_refused(scratch: &Path) -> Row {
-    Row::new(CAPTURE_HALT, &[HALT_TX]).with_dump_fixture(scratch)
+    Row::new(CAPTURE_HALT, &[HALT_TX]).with_dump_fixture(scratch).exits(1).dump_written(false)
 }
 
 /// Replay one transaction of the batch capture through the single-transaction
@@ -359,24 +535,70 @@ fn row_single_block_tx_verify(_scratch: &Path) -> Row {
 
 /// Dump a fixture for that same transaction through the single-file writer.
 fn row_single_block_tx_dump(scratch: &Path) -> Row {
-    Row::new(CAPTURE_BLOCKS, &[BLOCK_MID_TX]).with_dump_fixture(scratch)
+    Row::new(CAPTURE_BLOCKS, &[BLOCK_MID_TX]).with_dump_fixture(scratch).dump_written(true)
 }
 
 /// Replay a whole block: every transaction of `BLOCK` in order.
 fn row_batch_block(_scratch: &Path) -> Row {
     Row::new(CAPTURE_BLOCKS, &["--block", &BLOCK.to_string()])
+        .result_lines(BLOCK_TX_COUNT)
+        .error_lines(0)
+}
+
+/// Verify a whole block against the on-chain receipts: the batch driver's two
+/// entry points differ in how they resolve targets, so `--block` needs its own
+/// verification row rather than inheriting `--tx-file`'s.
+fn row_batch_block_verify(_scratch: &Path) -> Row {
+    Row::new(CAPTURE_BLOCKS, &["--block", &BLOCK.to_string(), "--verify-receipt"])
+        .result_lines(BLOCK_TX_COUNT)
+        .error_lines(0)
 }
 
 /// Replay a target subset spanning both blocks of the capture.
 fn row_batch_tx_file(scratch: &Path) -> Row {
     Row::new(CAPTURE_BLOCKS, &[])
         .with_tx_file(scratch, &[OTHER_BLOCK_TX, BLOCK_LAST_TX, BLOCK_DEPOSIT_TX, BLOCK_MID_TX])
+        .result_lines(4)
+        .error_lines(0)
 }
 
 /// Verify that subset against the on-chain receipts: one verdict per target.
 fn row_batch_tx_file_verify(scratch: &Path) -> Row {
     Row::new(CAPTURE_BLOCKS, &["--verify-receipt"])
         .with_tx_file(scratch, &[OTHER_BLOCK_TX, BLOCK_LAST_TX, BLOCK_DEPOSIT_TX, BLOCK_MID_TX])
+        .result_lines(4)
+        .error_lines(0)
+}
+
+/// Replay a target list in which two targets never resolve and two do.
+///
+/// The ordering contract of a batch `--json` run is not derivable from the
+/// clean rows: unresolved targets are emitted first in the order they were
+/// requested, then each block's results in transaction-index order, and the
+/// run-level error object last. This row pins all three at once, together with
+/// the exit precedence — a `not_found` target is execution-class and outranks
+/// the `rpc` one, so the run exits `1` rather than `3`.
+fn row_batch_mixed_failures(scratch: &Path) -> Row {
+    Row::new(CAPTURE_BLOCKS, &[])
+        .doctored(doctor_batch_mixed)
+        .with_tx_file(scratch, &[OTHER_BLOCK_TX, BLOCK_LAST_TX, BLOCK_DEPOSIT_TX, BLOCK_MID_TX])
+        .exits(1)
+        .result_lines(2)
+        .error_lines(2)
+}
+
+/// Verify a batch target whose receipt the endpoint no longer answers.
+///
+/// The keep-result contract: the target replayed, so its result line stays and
+/// carries the failure under `verification.error` instead of being replaced by
+/// an error line. An unanswered receipt is rpc-class, so the run exits `3`.
+fn row_batch_verify_unavailable(scratch: &Path) -> Row {
+    Row::new(CAPTURE_SINGLE, &["--verify-receipt"])
+        .doctored(doctor_null_receipt)
+        .with_tx_file(scratch, &[SINGLE_TX])
+        .exits(3)
+        .result_lines(1)
+        .error_lines(0)
 }
 
 /// Dump per-target fixtures for a two-target subset: the deposit is skipped,
@@ -385,6 +607,94 @@ fn row_batch_tx_file_dump_dir(scratch: &Path) -> Row {
     Row::new(CAPTURE_BLOCKS, &[])
         .with_tx_file(scratch, &[BLOCK_DEPOSIT_TX, BLOCK_MID_TX])
         .with_dump_fixture_dir(scratch)
+        .result_lines(2)
+        .error_lines(0)
+        .dir_files(1)
+}
+
+/// Dump into a directory that already holds one of the destination files.
+///
+/// The other half of keep-result: the target replayed and keeps its line, the
+/// refusal lands in `fixture.error`, and the seeded file is left byte-for-byte
+/// alone — which the artifact section is what proves.
+fn row_batch_dump_dir_refused(scratch: &Path) -> Row {
+    Row::new(CAPTURE_BLOCKS, &[])
+        .with_tx_file(scratch, &[BLOCK_DEPOSIT_TX, BLOCK_MID_TX])
+        .with_dump_fixture_dir(scratch)
+        .with_seeded_fixture(scratch, BLOCK_MID_TX)
+        .exits(1)
+        .result_lines(2)
+        .error_lines(0)
+        .dir_files(1)
+}
+
+/// The same run with `--overwrite`: the seeded file is replaced and the run
+/// succeeds. Paired with `batch_dump_dir_refused`, the two rows pin both sides
+/// of the flag.
+fn row_batch_dump_dir_overwrite(scratch: &Path) -> Row {
+    Row::new(CAPTURE_BLOCKS, &["--overwrite"])
+        .with_tx_file(scratch, &[BLOCK_DEPOSIT_TX, BLOCK_MID_TX])
+        .with_dump_fixture_dir(scratch)
+        .with_seeded_fixture(scratch, BLOCK_MID_TX)
+        .result_lines(2)
+        .error_lines(0)
+        .dir_files(1)
+}
+
+// ---------------------------------------------------------------------------
+// Doctored captures
+// ---------------------------------------------------------------------------
+
+/// Apply `rewrite` to a copy of `source` and place the result in `scratch`.
+///
+/// The doctored capture lives beside the row's other scratch inputs so it is
+/// removed with them, and so its path normalizes to `<CAPTURE>` like any other.
+/// The shared doctor stages through the process temp directory; the name is
+/// made unique because the two output modes of one row doctor concurrently.
+fn write_doctored_capture(
+    source: &Path,
+    scratch: &Path,
+    name: &str,
+    rewrite: impl FnOnce(DoctoredEnvelope) -> DoctoredEnvelope,
+) -> PathBuf {
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    let unique = format!("equivalence_{name}_{}", NEXT.fetch_add(1, Ordering::Relaxed));
+    let staged = rewrite(DoctoredEnvelope::load(source)).write_to_temp(&unique);
+    let path = scratch.join("capture.json");
+    fs::copy(&staged, &path).expect("failed to place the doctored capture");
+    fs::remove_file(&staged).expect("failed to remove the staged capture");
+    path
+}
+
+/// Rewrite the served receipt's `gasUsed`, so the replay's gas cannot match it.
+///
+/// Chosen because gas is one of the dimensions the comparison reports, and a
+/// value of one is far enough from any real usage that no future capture
+/// refresh can make it accidentally correct.
+fn doctor_receipt_gas_used(source: &Path, scratch: &Path) -> PathBuf {
+    write_doctored_capture(source, scratch, "receipt_gas", |envelope| {
+        envelope.rewrite_receipt(|receipt| {
+            receipt["gasUsed"] = serde_json::Value::String("0x1".into());
+        })
+    })
+}
+
+/// Null the served receipt: the endpoint answers, and answers "no receipt".
+fn doctor_null_receipt(source: &Path, scratch: &Path) -> PathBuf {
+    write_doctored_capture(source, scratch, "null_receipt", DoctoredEnvelope::null_receipt)
+}
+
+/// Make two of the four `--tx-file` targets unresolvable, in two different ways.
+///
+/// [`OTHER_BLOCK_TX`]'s lookup is answered with null — a definitive "unknown
+/// transaction", which is execution-class — while [`BLOCK_LAST_TX`]'s entry is
+/// removed entirely, so the offline lookup misses and the question goes
+/// unanswered (rpc-class). The remaining two targets still replay, so the run
+/// mixes both failure classes with real results.
+fn doctor_batch_mixed(source: &Path, scratch: &Path) -> PathBuf {
+    write_doctored_capture(source, scratch, "batch_mixed", |envelope| {
+        envelope.null_transaction(OTHER_BLOCK_TX).drop_transaction(BLOCK_LAST_TX)
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -396,24 +706,50 @@ fn display(path: &Path) -> String {
     path.to_str().expect("paths in this test are utf-8").to_string()
 }
 
-/// Run one row against `capture` and render its normalized snapshot.
-fn snapshot(name: &str, row: &Row, json: bool, capture: &Path, scratch: &Path) -> String {
-    let mut args = row.args.clone();
-    if json {
-        args.push("--json".into());
-    }
+/// Run the CLI against `capture`, in an environment scrubbed of everything that
+/// could move its output.
+///
+/// A developer's `RUST_LOG` would add tracing output to stderr, `RUST_BACKTRACE`
+/// would paste addresses into a panic, and the fault-injection hooks would make
+/// one snapshot depend on how another test left the environment. The home and
+/// cache directories are pointed inside the scratch directory because the CLI
+/// derives its default RPC cache location from them: an offline replay should
+/// not be able to read, write, or name a developer's real cache.
+fn run_cli(capture: &Path, args: &[String], scratch: &Path) -> Output {
+    let home = scratch.join("home");
+    fs::create_dir_all(&home).expect("failed to create the scratch home directory");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_mega-evme"))
+    Command::new(env!("CARGO_BIN_EXE_mega-evme"))
         .arg("replay")
         .arg("--rpc.replay-file")
         .arg(capture)
-        .args(&args)
-        // A developer's RUST_LOG would add tracing output to stderr and make
-        // the snapshot depend on the shell that launched the test.
+        .args(args)
         .env_remove("RUST_LOG")
+        .env_remove("RUST_BACKTRACE")
+        .env_remove("MEGA_EVME_INJECT_PANIC")
+        .env_remove("MEGA_EVME_INJECT_FIXTURE_PRE_STATE_ERROR")
+        .env("HOME", &home)
+        .env("XDG_CACHE_HOME", home.join("cache"))
         .output()
-        .expect("failed to run mega-evme");
+        .expect("failed to run mega-evme")
+}
 
+/// Run one row against `capture` and render its normalized snapshot.
+fn snapshot(name: &str, row: &Row, json: bool, capture: &Path, scratch: &Path) -> String {
+    let args = row.argv(json);
+    let output = run_cli(capture, &args, scratch);
+    render(name, row, &args, capture, scratch, &output)
+}
+
+/// Render the normalized snapshot of a finished run.
+fn render(
+    name: &str,
+    row: &Row,
+    args: &[String],
+    capture: &Path,
+    scratch: &Path,
+    output: &Output,
+) -> String {
     let subs = substitutions(row, capture, scratch);
     let normalize = |text: &str| normalize_durations(&normalize_paths(text, &subs));
 
@@ -435,11 +771,7 @@ fn snapshot(name: &str, row: &Row, json: bool, capture: &Path, scratch: &Path) -
         &output.status.code().map_or_else(|| "killed by a signal".to_string(), |c| c.to_string()),
     );
     section(&mut snap, "stdout", &normalize(&String::from_utf8_lossy(&output.stdout)));
-    section(
-        &mut snap,
-        "stderr (error:/warning: lines)",
-        &failure_lines(&normalize(&String::from_utf8_lossy(&output.stderr))),
-    );
+    section(&mut snap, "stderr", &normalize(&String::from_utf8_lossy(&output.stderr)));
     for artifact in &row.artifacts {
         append_artifact(&mut snap, artifact, &normalize);
     }
@@ -510,24 +842,6 @@ fn normalize_durations(text: &str) -> String {
     out
 }
 
-/// Keep only the lines a run failed on.
-///
-/// stderr also carries tracing output whenever the caller raises the verbosity,
-/// which is noise for an equivalence baseline. `error:` and `warning:` are the
-/// two prefixes the CLI writes user-facing failures under, so the filter keeps
-/// those and drops everything else — including the `hint:` continuation lines,
-/// whose text the structured error object on stdout already carries.
-fn failure_lines(stderr: &str) -> String {
-    stderr
-        .lines()
-        .filter(|line| {
-            let line = line.trim_start();
-            line.starts_with("error:") || line.starts_with("warning:")
-        })
-        .map(|line| format!("{line}\n"))
-        .collect()
-}
-
 /// Append one snapshot section, marking an empty body rather than leaving a
 /// hole a later section could be mistaken for.
 fn section(snap: &mut String, title: &str, body: &str) {
@@ -581,6 +895,111 @@ fn append_artifact(snap: &mut String, artifact: &Artifact, normalize: &dyn Fn(&s
 }
 
 // ---------------------------------------------------------------------------
+// Golden-independent invariants
+// ---------------------------------------------------------------------------
+
+/// Check what must hold of a run whatever its golden says.
+///
+/// Runs on every case in both modes, blessing included: while the goldens are
+/// being rewritten these are the only assertions left, so they are what keeps
+/// `MEGA_EVME_BLESS=1` from accepting a regression wholesale.
+fn check_invariants(case: &str, row: &Row, json: bool, output: &Output) {
+    let exit = output
+        .status
+        .code()
+        .unwrap_or_else(|| panic!("{case}: the run was killed by a signal, not by an exit code"));
+    assert!(
+        (0..=3).contains(&exit),
+        "{case}: exit {exit} is outside the documented taxonomy (0, 1, 2, 3)",
+    );
+    assert_eq!(exit, row.expect.exit, "{case}: the row declares exit {}", row.expect.exit);
+
+    if json {
+        check_json_stream(case, row, exit, &String::from_utf8_lossy(&output.stdout));
+    }
+    check_artifacts(case, row);
+}
+
+/// Check the machine-readable contract of a `--json` run's stdout.
+///
+/// Every value must parse, a batch run must keep one value per line, and the
+/// run-level error object must be last and appear exactly on the failing runs —
+/// the ordering contract a consumer reads the stream by, pinned independently
+/// of what any golden happens to hold.
+fn check_json_stream(case: &str, row: &Row, exit: i32, stdout: &str) {
+    let values = json_values(stdout);
+    if row.is_batch() {
+        let lines = stdout.lines().filter(|line| !line.trim().is_empty()).count();
+        assert_eq!(
+            values.len(),
+            lines,
+            "{case}: a batch --json run must print exactly one JSON value per line",
+        );
+    }
+
+    let run_errors = values.iter().filter(|value| is_run_error(value)).count();
+    if exit == 0 {
+        assert_eq!(run_errors, 0, "{case}: a successful run must not print a run error object");
+    } else {
+        assert_eq!(
+            run_errors, 1,
+            "{case}: a failing --json run prints exactly one run error object",
+        );
+        assert!(
+            values.last().is_some_and(is_run_error),
+            "{case}: the run error object must be the last value on stdout",
+        );
+    }
+
+    // A per-target failure carries its transaction hash alongside `error`; a
+    // result line carries no top-level `error` at all.
+    let error_lines =
+        values.iter().filter(|value| !is_run_error(value) && value.get("error").is_some()).count();
+    if let Some(expected) = row.expect.error_lines {
+        assert_eq!(
+            error_lines, expected,
+            "{case}: the row declares {expected} target error line(s)"
+        );
+    }
+    if let Some(expected) = row.expect.result_lines {
+        assert_eq!(
+            values.len() - run_errors - error_lines,
+            expected,
+            "{case}: the row declares {expected} target result line(s)",
+        );
+    }
+}
+
+/// Check that the run wrote the files the row says it must.
+fn check_artifacts(case: &str, row: &Row) {
+    for artifact in &row.artifacts {
+        match artifact {
+            Artifact::File(label, path) => {
+                if let Some(written) = row.expect.dump_written {
+                    assert_eq!(
+                        path.exists(),
+                        written,
+                        "{case}: the row declares that {label} is{} written",
+                        if written { "" } else { " not" },
+                    );
+                }
+            }
+            Artifact::Dir(label, path) => {
+                if let Some(expected) = row.expect.dir_files {
+                    let found = fs::read_dir(path)
+                        .unwrap_or_else(|e| panic!("{case}: cannot read {label} ({e})"))
+                        .count();
+                    assert_eq!(
+                        found, expected,
+                        "{case}: the row declares {expected} file(s) in {label}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Golden comparison
 // ---------------------------------------------------------------------------
 
@@ -590,14 +1009,14 @@ const CONTEXT: usize = 3;
 /// Longest line rendered in a mismatch report before it is excerpted.
 const EXCERPT: usize = 160;
 
-/// Compare `snap` against the golden of `case`, or rewrite it when blessing.
-fn check_golden(case: &str, snap: &str) {
-    let path = golden_dir().join(format!("{case}.snap"));
-    if blessing() {
-        write_golden(&path, snap);
-        return;
-    }
+/// Path of the golden of `case`.
+fn golden_path(case: &str) -> PathBuf {
+    golden_dir().join(format!("{case}.snap"))
+}
 
+/// Compare `snap` against the golden of `case`.
+fn check_golden(case: &str, snap: &str) {
+    let path = golden_path(case);
     let golden = fs::read_to_string(&path).unwrap_or_else(|e| {
         panic!(
             "{case}: cannot read {} ({e})\n\
@@ -623,11 +1042,22 @@ fn write_golden(path: &Path, snap: &str) {
     fs::rename(&staging, path).expect("failed to install the golden");
 }
 
-/// Report the first place a snapshot diverges from its golden.
+/// Report the first place a snapshot diverges from its golden, and say how to
+/// accept the new behavior.
+fn mismatch_report(case: &str, path: &Path, golden: &str, actual: &str) -> String {
+    let mut out = diff_report(case, path, golden, actual);
+    out.push_str(
+        "accept the new behavior with \
+         `MEGA_EVME_BLESS=1 cargo test -p mega-evme --test replay_equivalence`\n",
+    );
+    out
+}
+
+/// Report the first place two snapshots diverge.
 ///
 /// A whole-block snapshot runs to thousands of lines, so the report shows the
 /// first difference with a little context instead of both documents.
-fn mismatch_report(case: &str, path: &Path, golden: &str, actual: &str) -> String {
+fn diff_report(case: &str, path: &Path, golden: &str, actual: &str) -> String {
     let expected: Vec<&str> = golden.lines().collect();
     let found: Vec<&str> = actual.lines().collect();
     if expected == found {
@@ -666,10 +1096,6 @@ fn mismatch_report(case: &str, path: &Path, golden: &str, actual: &str) -> Strin
             }
         }
     }
-    out.push_str(
-        "accept the new behavior with \
-         `MEGA_EVME_BLESS=1 cargo test -p mega-evme --test replay_equivalence`\n",
-    );
     out
 }
 
@@ -710,14 +1136,45 @@ fn floor_boundary(line: &str, index: usize) -> usize {
 // The matrix
 // ---------------------------------------------------------------------------
 
-/// Run one row in one output mode and check it against its golden.
-fn check_row(case: &str, mode: &str, json: bool, build: fn(&Path) -> Row) {
+/// Run one row in one output mode from a fresh scratch directory, check the
+/// invariants, and render the snapshot.
+fn run_row(case: &str, json: bool, build: fn(&Path) -> Row) -> String {
     let scratch = tempfile::tempdir().expect("failed to create a scratch directory");
     let row = build(scratch.path());
-    let capture = fixture(row.capture);
+    let capture = row.capture_path(scratch.path());
+    let args = row.argv(json);
+    let output = run_cli(&capture, &args, scratch.path());
+    check_invariants(case, &row, json, &output);
+    render(case, &row, &args, &capture, scratch.path(), &output)
+}
+
+/// Run one row in one output mode and check it against its golden.
+///
+/// Blessing rewrites the golden and then re-derives it: the row runs a second
+/// time from a fresh scratch directory, with fresh temporary paths, and the
+/// just-installed golden must hold for it. A run-dependent or path-dependent
+/// snapshot therefore fails at the bless, where the author can still see what
+/// they were about to commit, rather than as a flaky golden later.
+fn check_row(case: &str, mode: &str, json: bool, build: fn(&Path) -> Row) {
     let case = format!("{case}_{mode}");
-    let snap = snapshot(&case, &row, json, &capture, scratch.path());
-    check_golden(&case, &snap);
+    let snap = run_row(&case, json, build);
+
+    if !blessing() {
+        check_golden(&case, &snap);
+        return;
+    }
+
+    let path = golden_path(&case);
+    write_golden(&path, &snap);
+    let installed = fs::read_to_string(&path).expect("failed to read back the blessed golden");
+    let again = run_row(&case, json, build);
+    assert!(
+        installed == again,
+        "{case}: two runs of this row produced different snapshots, so the golden just \
+         written pins something run- or path-dependent rather than behavior; fix the \
+         normalization before committing it\n{}",
+        diff_report(&case, &path, &installed, &again),
+    );
 }
 
 /// Declare the two snapshot tests — human and `--json` — of one matrix row.
@@ -747,6 +1204,8 @@ macro_rules! matrix {
 matrix! {
     single_offline_mined: row_single_offline_mined,
     single_offline_verify: row_single_offline_verify,
+    single_verify_mismatch: row_single_verify_mismatch,
+    single_verify_dump: row_single_verify_dump,
     single_smoke_deposit: row_single_smoke_deposit,
     single_smoke_verify_unavailable: row_single_smoke_verify_unavailable,
     single_bucket_cap_mined: row_single_bucket_cap_mined,
@@ -757,9 +1216,14 @@ matrix! {
     single_block_tx_verify: row_single_block_tx_verify,
     single_block_tx_dump: row_single_block_tx_dump,
     batch_block: row_batch_block,
+    batch_block_verify: row_batch_block_verify,
     batch_tx_file: row_batch_tx_file,
     batch_tx_file_verify: row_batch_tx_file_verify,
+    batch_mixed_failures: row_batch_mixed_failures,
+    batch_verify_unavailable: row_batch_verify_unavailable,
     batch_tx_file_dump_dir: row_batch_tx_file_dump_dir,
+    batch_dump_dir_refused: row_batch_dump_dir_refused,
+    batch_dump_dir_overwrite: row_batch_dump_dir_overwrite,
 }
 
 // ---------------------------------------------------------------------------
@@ -768,41 +1232,60 @@ matrix! {
 
 /// Read the committed golden of `case`, if it is there.
 fn golden_of(case: &str) -> Option<String> {
-    fs::read_to_string(golden_dir().join(format!("{case}.snap"))).ok()
+    fs::read_to_string(golden_path(case)).ok()
 }
 
-/// Snapshot a row twice under the name of an existing case: once against a
-/// verbatim copy of its capture, once against a copy `doctor` has modified.
+/// Snapshot a row under the name of an existing case, against a verbatim copy
+/// of that case's capture at a fresh temporary path.
 ///
-/// Both copies live at fresh temporary paths, so the clean snapshot reproducing
-/// that case's golden also proves the snapshot does not depend on where its
-/// inputs sat — the property that lets a golden blessed on one machine hold on
-/// another.
-fn doctored_pair(
+/// The copy is what makes the result meaningful: a snapshot that reproduces the
+/// committed golden from a capture that never sat where the golden's capture sat
+/// cannot be depending on its inputs' location, which is the property that lets
+/// a golden blessed on one machine hold on another.
+fn clean_snapshot(case: &str, json: bool, build: fn(&Path) -> Row) -> String {
+    let scratch = tempfile::tempdir().expect("failed to create a scratch directory");
+    let row = build(scratch.path());
+    assert!(row.doctoring.is_none(), "{case}: a control's baseline row must not be doctored");
+    let copy = scratch.path().join("capture.json");
+    fs::copy(fixture(row.capture), &copy).expect("failed to copy the capture");
+    snapshot(case, &row, json, &copy, scratch.path())
+}
+
+/// Snapshot a row under the name of an existing case, against a copy of its
+/// capture that `doctor` has modified.
+fn doctored_snapshot(
     case: &str,
     json: bool,
     build: fn(&Path) -> Row,
     doctor: fn(&mut serde_json::Value),
-) -> (String, String) {
-    let clean_scratch = tempfile::tempdir().expect("failed to create a scratch directory");
-    let clean_row = build(clean_scratch.path());
-    let source = fixture(clean_row.capture);
-
-    let clean_copy = clean_scratch.path().join("capture.json");
-    fs::copy(&source, &clean_copy).expect("failed to copy the capture");
-    let clean = snapshot(case, &clean_row, json, &clean_copy, clean_scratch.path());
-
-    let doctored_scratch = tempfile::tempdir().expect("failed to create a scratch directory");
-    let doctored_row = build(doctored_scratch.path());
+) -> String {
+    let scratch = tempfile::tempdir().expect("failed to create a scratch directory");
+    let row = build(scratch.path());
+    let source = fixture(row.capture);
     let mut capture: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&source).expect("failed to read the capture"))
             .expect("the capture is JSON");
     doctor(&mut capture);
-    let doctored_copy = doctored_scratch.path().join("capture.json");
-    fs::write(&doctored_copy, capture.to_string()).expect("failed to write the doctored capture");
-    let doctored = snapshot(case, &doctored_row, json, &doctored_copy, doctored_scratch.path());
+    let copy = scratch.path().join("capture.json");
+    fs::write(&copy, capture.to_string()).expect("failed to write the doctored capture");
+    snapshot(case, &row, json, &copy, scratch.path())
+}
 
-    (clean, doctored)
+/// Cross-check a control's clean snapshot against the case's golden.
+///
+/// Blessing rewrites that golden from another test thread, so reading it here
+/// would race a concurrent update. The property is checked without the file
+/// instead: a second independent clean run, from another temporary path, must
+/// produce the same bytes. That is what "the golden is reproducible elsewhere"
+/// means, minus the file the bless is in the middle of replacing.
+fn check_clean_against_golden(case: &str, json: bool, build: fn(&Path) -> Row, clean: &str) {
+    if blessing() {
+        let second = clean_snapshot(case, json, build);
+        assert!(clean == second, "{}", diff_report(case, &golden_path(case), clean, &second),);
+        return;
+    }
+    let golden = golden_of(case).expect("the baseline case must have a committed golden");
+    assert!(clean == golden, "{}", mismatch_report(case, &golden_path(case), &golden, clean));
 }
 
 /// Rewrite the `gas` of [`BLOCK_MID_TX`]'s served body to zero.
@@ -872,8 +1355,8 @@ fn doctor_block_gas_limit(capture: &mut serde_json::Value) {
 fn test_negative_control_tampered_transaction_changes_the_snapshot() {
     const CASE: &str = "single_block_tx_mined_json";
 
-    let (clean, doctored) =
-        doctored_pair(CASE, true, row_single_block_tx_mined, doctor_transaction_gas);
+    let clean = clean_snapshot(CASE, true, row_single_block_tx_mined);
+    let doctored = doctored_snapshot(CASE, true, row_single_block_tx_mined, doctor_transaction_gas);
 
     assert!(
         clean != doctored,
@@ -881,17 +1364,11 @@ fn test_negative_control_tampered_transaction_changes_the_snapshot() {
          detect a behavior change",
     );
 
-    // A blessing run rewrites the goldens while this test reads them.
-    if blessing() {
-        return;
+    check_clean_against_golden(CASE, true, row_single_block_tx_mined, &clean);
+    if !blessing() {
+        let golden = golden_of(CASE).expect("the baseline case must have a committed golden");
+        assert!(doctored != golden, "the doctored capture reproduced the golden of {CASE}");
     }
-    let golden = golden_of(CASE).expect("the baseline case must have a committed golden");
-    assert!(
-        clean == golden,
-        "{}",
-        mismatch_report(CASE, &golden_dir().join(format!("{CASE}.snap")), &golden, &clean),
-    );
-    assert!(doctored != golden, "the doctored capture reproduced the golden of {CASE}");
 }
 
 /// A change no renderer prints must still change the snapshot, through the
@@ -905,8 +1382,8 @@ fn test_negative_control_tampered_transaction_changes_the_snapshot() {
 fn test_negative_control_tampered_block_gas_limit_changes_the_dumped_fixture() {
     const CASE: &str = "single_block_tx_dump_json";
 
-    let (clean, doctored) =
-        doctored_pair(CASE, true, row_single_block_tx_dump, doctor_block_gas_limit);
+    let clean = clean_snapshot(CASE, true, row_single_block_tx_dump);
+    let doctored = doctored_snapshot(CASE, true, row_single_block_tx_dump, doctor_block_gas_limit);
 
     let (clean_head, clean_artifact) = split_at_artifact(&clean);
     let (doctored_head, doctored_artifact) = split_at_artifact(&doctored);
@@ -921,21 +1398,51 @@ fn test_negative_control_tampered_block_gas_limit_changes_the_dumped_fixture() {
          load-bearing",
     );
 
-    if blessing() {
-        return;
-    }
-    let golden = golden_of(CASE).expect("the baseline case must have a committed golden");
-    assert!(
-        clean == golden,
-        "{}",
-        mismatch_report(CASE, &golden_dir().join(format!("{CASE}.snap")), &golden, &clean),
-    );
+    check_clean_against_golden(CASE, true, row_single_block_tx_dump, &clean);
 }
 
 /// Split a snapshot into what the run reported and what it wrote.
 fn split_at_artifact(snap: &str) -> (&str, &str) {
     let marker = format!("\n== artifact {DUMP_FIXTURE_PATH} ==\n");
     snap.split_once(marker.as_str()).expect("the snapshot must carry a dumped fixture")
+}
+
+/// The stderr section must carry a failure's continuation lines.
+///
+/// The CLI writes a failure as `error: <message>`, and a message may run to
+/// several lines — an offline cache miss appends a `hint:` line telling the
+/// caller how to re-capture. A snapshot that kept only the `error:` line would
+/// let that hint be rewritten, reordered or dropped without failing the gate,
+/// so this pins that the section is the whole stream rather than a filter over
+/// it. Checked against the raw output, so it does not depend on a golden being
+/// current.
+#[test]
+fn test_negative_control_stderr_section_keeps_continuation_lines() {
+    const CASE: &str = "single_smoke_verify_unavailable_human";
+
+    let scratch = tempfile::tempdir().expect("failed to create a scratch directory");
+    let row = row_single_smoke_verify_unavailable(scratch.path());
+    let capture = fixture(row.capture);
+    let args = row.argv(false);
+    let output = run_cli(&capture, &args, scratch.path());
+    let raw = String::from_utf8_lossy(&output.stderr).to_string();
+
+    assert!(
+        raw.lines().any(|line| line.starts_with("error:")),
+        "the failure must be reported under the error: prefix:\n{raw}",
+    );
+    let hint = raw
+        .lines()
+        .find(|line| line.starts_with("hint:"))
+        .expect("the offline cache-miss failure must print a hint continuation line");
+
+    let snap = render(CASE, &row, &args, &capture, scratch.path(), &output);
+    let (_, stderr) =
+        snap.split_once("\n== stderr ==\n").expect("the snapshot must carry a stderr section");
+    assert!(
+        stderr.contains(&normalize_paths(hint, &substitutions(&row, &capture, scratch.path()))),
+        "the snapshot dropped the hint continuation line:\n{stderr}",
+    );
 }
 
 /// The timing normalizer must still be rewriting something.
@@ -949,14 +1456,7 @@ fn test_negative_control_duration_normalizer_rewrites_human_timings() {
     let scratch = tempfile::tempdir().expect("failed to create a scratch directory");
     let row = row_single_offline_mined(scratch.path());
     let capture = fixture(row.capture);
-    let output = Command::new(env!("CARGO_BIN_EXE_mega-evme"))
-        .arg("replay")
-        .arg("--rpc.replay-file")
-        .arg(&capture)
-        .args(&row.args)
-        .env_remove("RUST_LOG")
-        .output()
-        .expect("failed to run mega-evme");
+    let output = run_cli(&capture, &row.argv(false), scratch.path());
     let raw = String::from_utf8(output.stdout).expect("stdout is utf-8");
 
     let measured: Vec<&str> = raw.lines().filter(|line| line.contains(DURATION_LABEL)).collect();

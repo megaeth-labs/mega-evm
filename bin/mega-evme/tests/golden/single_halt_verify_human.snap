@@ -34,5 +34,5 @@ Halt Reason:      ComputeGasLimitExceeded { limit: 1000000, actual: 4003045 }
 
 verification: MATCH
 
-== stderr (error:/warning: lines) ==
+== stderr ==
 (empty)

@@ -439,5 +439,5 @@ Events:           11 log(s) emitted
 
 verification: MATCH
 
-== stderr (error:/warning: lines) ==
+== stderr ==
 (empty)

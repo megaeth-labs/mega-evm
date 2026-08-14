@@ -1,10 +1,10 @@
 # mega-evme replay equivalence baseline
-# case:    single_offline_mined_human
+# case:    single_verify_mismatch_human
 # capture: replay_offline.cache.json
-# argv:    replay --rpc.replay-file <CAPTURE> 0x41d34e7e13dfe0f85da9d407e2b2c381955d8c7eed428b17dc82327b2616b000
+# argv:    replay --rpc.replay-file <CAPTURE> --verify-receipt 0x41d34e7e13dfe0f85da9d407e2b2c381955d8c7eed428b17dc82327b2616b000
 
 == exit code ==
-0
+2
 
 == stdout ==
 
@@ -31,5 +31,7 @@ Execution Time:   <DURATION>
   "contractAddress": null
 }
 
+verification: MISMATCH (gas_used: onchain 1 vs replay 75514)
+
 == stderr ==
-(empty)
+error: Receipt verification mismatch: 1 of 1 verified transaction(s) did not reproduce the on-chain receipt

@@ -1,0 +1,20 @@
+# mega-evme replay equivalence baseline
+# case:    batch_verify_unavailable_json
+# capture: replay_offline.cache.json
+# argv:    replay --rpc.replay-file <CAPTURE> --verify-receipt --tx-file <TX_FILE> --json
+
+== input <TX_FILE> ==
+# equivalence corpus
+0x41d34e7e13dfe0f85da9d407e2b2c381955d8c7eed428b17dc82327b2616b000
+
+0x41d34e7e13dfe0f85da9d407e2b2c381955d8c7eed428b17dc82327b2616b000
+
+== exit code ==
+3
+
+== stdout ==
+{"tx_hash":"0x41d34e7e13dfe0f85da9d407e2b2c381955d8c7eed428b17dc82327b2616b000","block_number":18172461,"tx_index":1,"success":true,"gas_used":75514,"logs_count":0,"receipt":{"type":"0x2","status":"0x1","cumulativeGasUsed":"0x2b3d2","logs":[],"logsBloom":"0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000","transactionHash":"0x41d34e7e13dfe0f85da9d407e2b2c381955d8c7eed428b17dc82327b2616b000","transactionIndex":"0x1","blockHash":"0x2801837c261826beb8047e46139dfc4eb93ab5b3196ce23f312d3c7658262a62","blockNumber":"0x1154a2d","gasUsed":"0x126fa","effectiveGasPrice":"0x10c8e0","from":"0x14112799a39f2905b901067d3cd4a1f63c1cebda","to":"0x681e908b8ab57c49c74d770f369754ccc3e1ae09","contractAddress":null},"verification":{"error":"No on-chain receipt for transaction 0x41d34e7e13dfe0f85da9d407e2b2c381955d8c7eed428b17dc82327b2616b000: the transaction is unknown to the endpoint, or the endpoint has pruned its receipt"}}
+{"error":{"code":3,"kind":"rpc-failure","message":"1 of 1 target transaction(s) failed (0 execution, 1 rpc)"}}
+
+== stderr ==
+error: 1 of 1 target transaction(s) failed (0 execution, 1 rpc)

@@ -32,7 +32,7 @@ Halt Reason:      ComputeGasLimitExceeded { limit: 1000000, actual: 4003045 }
   "contractAddress": null
 }
 
-== stderr (error:/warning: lines) ==
+== stderr ==
 error: Other error: fixture not reproducible: status "success" != replay status "halt"
 
 == artifact <DUMP_FIXTURE> ==

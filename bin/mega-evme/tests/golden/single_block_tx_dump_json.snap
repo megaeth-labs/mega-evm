@@ -29,7 +29,7 @@
   }
 }
 
-== stderr (error:/warning: lines) ==
+== stderr ==
 (empty)
 
 == artifact <DUMP_FIXTURE> ==

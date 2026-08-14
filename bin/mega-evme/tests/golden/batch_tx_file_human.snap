@@ -431,5 +431,5 @@ Events:           11 log(s) emitted
   "contractAddress": null
 }
 
-== stderr (error:/warning: lines) ==
+== stderr ==
 (empty)

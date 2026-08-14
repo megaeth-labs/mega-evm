@@ -33,5 +33,5 @@ Execution Time:   <DURATION>
   "contractAddress": null
 }
 
-== stderr (error:/warning: lines) ==
+== stderr ==
 (empty)
