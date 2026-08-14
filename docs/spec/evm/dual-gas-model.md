@@ -102,7 +102,9 @@ The no-record rule when the body does not run to completion is specified in [Sin
 <details>
 <summary>Rex7 (unstable): checkpoint settlement of compute gas</summary>
 
-Under Rex7, the metering order above continues to govern every **checkpoint** opcode — the storage-affecting set listed in this section, the volatile / detention-guarded set, and `GAS` — and those checkpoints still charge storage gas before the body and record compute gas after it.
+Under Rex7, the metering order above continues to govern every **checkpoint** opcode that has a storage-gas component — the storage-affecting set listed in this section.
+Those checkpoints still charge storage gas before the body and record compute gas after it.
+Volatile / detention-guarded checkpoints and `GAS` record compute gas after the body and charge no storage gas.
 Plain opcodes between checkpoints MUST NOT record compute gas when they finish; their compute gas settles as an interpreter-gas segment delta at the next checkpoint or at frame entry, resume, or exit.
 Limit enforcement inside a plain-opcode segment uses gas clamping rather than a post-opcode record step: a crossing opcode is stopped before it executes, and its cost is excluded from recorded usage.
 See [Compute Gas Accounting](compute-gas.md) and the [Rex7 Network Upgrade](../upgrades/rex7.md) for the full checkpoint set, clamp rules, and the exceptional-halt frame carve-out.

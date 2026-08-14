@@ -134,6 +134,12 @@ The reported `limit` MUST be the constraint that bound the clamp, not whichever 
 The revert payload is visible to the calling contract, so a frame-local exceed that reported the transaction-level limit would be a different observable return value for the same execution, not merely a different diagnostic.
 
 Because the crossing opcode never executes, a node MUST NOT include its cost in recorded compute-gas usage.
+
+A checkpoint that still carries a non-zero static fee — `GAS` and `LOG0` through `LOG4` — MAY itself be the crossing opcode of the preceding plain-opcode segment.
+When the clamped visible remainder is less than that fee, the inherited per-opcode check stops the opcode before the body runs, and a node MUST treat that stop as a plain-segment crossing.
+The CALL family is the same stop: its static fee is charged before the body, so a clamped remainder below that fee stops the opcode before the target account is read.
+`CREATE` and `CREATE2` charge their inherited creation fee inside the body, after the true remaining gas has been restored, so a compute headroom below that fee MUST NOT stop them before the body.
+
 The usage the clamp **enforces** therefore ends at or below the limit, not strictly above it.
 The `actual` a transaction-level clamp halt reports MUST be the transaction's final reported compute usage — the frame-exit settlement closes the partial segment after the exceed is identified, and a node MUST NOT report the usage as it stood before that settlement.
 Reported usage is not the same quantity as enforced usage: it also carries the destroyed remainders of any frame that halted exceptionally earlier in the transaction, which are reported and never enforced.

@@ -494,6 +494,11 @@ The `limit` reported by either shape MUST be the constraint that bound the clamp
 Because the crossing opcode never executes, a node MUST NOT include its cost in recorded compute-gas usage.
 The `actual` a transaction-level clamp halt reports MUST be the transaction's final compute usage, after the frame-exit settlement has closed the partial segment the crossing opcode stopped inside.
 
+A checkpoint that still carries a non-zero static fee — `GAS` and `LOG0` through `LOG4` — MAY itself be the crossing opcode of the preceding plain-opcode segment.
+When the clamped visible remainder is less than that fee, the inherited per-opcode check stops the opcode before the body runs, and a node MUST treat that stop as a plain-segment crossing.
+The CALL family is the same stop: its static fee is charged before the body, so a clamped remainder below that fee stops the opcode before the target account is read.
+`CREATE` and `CREATE2` charge their inherited creation fee inside the body, after the true remaining gas has been restored, so a compute headroom below that fee MUST NOT stop them before the body.
+
 When the current frame's remaining per-frame compute budget equals the transaction-level remaining budget, a node MUST bind the clamp to the transaction-level constraint (including detention when detention is the effective transaction-level bound).
 A clamp-induced exceed under that binding MUST halt the transaction with gas rescue; a node MUST NOT classify the equality as frame-local.
 Through Rex6, the same equality is classified by the per-opcode check as a frame-local exceed; at the top-level frame that surfaces as a revert rather than a halt.
@@ -505,8 +510,10 @@ When the crossing opcode would exhaust both the true remaining EVM gas and the c
 A frame that ends in an exceptional halt — ordinary out-of-gas, memory out-of-gas, stack underflow or overflow, invalid jump, unknown opcode, and every other error result — returns none of its remaining budget.
 A node MUST settle that whole budget as compute gas, split into two parts that are accounted differently:
 
-- **Executed** — the open plain-opcode segment, measured as the interpreter-gas delta since the previous checkpoint, less any storage gas a checkpoint body charged before aborting. This is work the network performed, and a node MUST record it through the ordinary path: it counts toward the transaction's reported total **and** toward the usage every resource limit is evaluated against, exactly as the same opcodes would if the frame had returned normally.
-- **Destroyed** — whatever the frame still held when its result became final, including any gas the clamp was hiding. A node MUST record it in the reported compute-gas total and in block-level compute accounting, and MUST NOT evaluate any resource limit against it, at transaction level or at block level (see [Resource Limits](resource-limits.md)).
+- **Executed** — the open plain-opcode segment, measured as the interpreter-gas delta since the previous checkpoint, less any storage gas a checkpoint body charged before aborting.
+  This is work the network performed, and a node MUST record it through the ordinary path: it counts toward the transaction's reported total **and** toward the usage every resource limit is evaluated against, exactly as the same opcodes would if the frame had returned normally.
+- **Destroyed** — whatever the frame still held when its result became final, including any gas the clamp was hiding.
+  A node MUST record it in the reported compute-gas total and in block-level compute accounting, and MUST NOT evaluate any resource limit against it, at transaction level or at block level (see [Resource Limits](resource-limits.md)).
 
 The destroyed part is bounded by the sender's gas envelope rather than by the compute limit, and halting on it would rescue gas the EVM already destroyed and change the receipt this carve-out requires to stay identical.
 The executed part carries no such problem: it is work, and leaving it out of enforcement would let a frame that keeps executing after absorbing a failed child spend the same compute headroom a second time.
