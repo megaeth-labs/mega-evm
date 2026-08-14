@@ -299,8 +299,7 @@ impl RpcArgs {
     ///
     /// Loads the envelope's transport-level cache and builds the provider over
     /// [`ReplayTransport`], which serves cached responses directly and returns
-    /// a descriptive error on cache miss. No `CacheLayer` is used — all caching
-    /// is at the transport level so every RPC method is covered.
+    /// a descriptive error on cache miss.
     pub async fn build_replay_provider(&self) -> Result<BuildProviderOutput> {
         let path = self.replay_file.as_ref().expect("replay mode requires --rpc.replay-file");
 
@@ -343,8 +342,7 @@ impl RpcArgs {
     ///
     /// If the capture file already exists, its entries are loaded into the transport-
     /// level cache. Missing entries are fetched via the HTTP transport (with retry),
-    /// cached in-memory, and persisted as an envelope on clean exit. No `CacheLayer`
-    /// is used — all caching is at the transport level so every RPC method is covered.
+    /// cached in-memory, and persisted as an envelope on clean exit.
     pub async fn build_capture_provider(&self) -> Result<BuildProviderOutput> {
         let path = self.capture_file.as_ref().expect("capture mode requires --rpc.capture-file");
         let rpc_url_str = self.rpc_url.as_ref().expect("capture mode requires --rpc");

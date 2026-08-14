@@ -35,17 +35,16 @@ use std::{
 
 #[cfg(any(test, feature = "test-utils"))]
 use alloy_primitives::B256;
-use alloy_provider::layers::SharedCache;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
 use super::transport::TransportCache;
 use crate::{
     cache::{
-        acquire_exclusive_lock, detect_shape, lock_sidecar_path, merge_envelope_for_persist,
-        merge_provider_entries_capped, reread_envelope_for_merge, reread_provider_cache_for_merge,
-        warn_user, write_bytes_atomic, write_envelope_atomic, CacheKv, CacheShape, EnvelopeDoc,
-        EnvelopeReread, ExternalEnvDoc, ProviderReread, ENVELOPE_VERSION,
+        acquire_exclusive_lock, detect_shape, lock_sidecar_path, merge_cache_entries_capped,
+        merge_envelope_for_persist, reread_envelope_for_merge, warn_user, write_bytes_atomic,
+        write_envelope_atomic, CacheKv, CacheShape, EnvelopeDoc, EnvelopeReread, ExternalEnvDoc,
+        ENVELOPE_VERSION,
     },
     common::{EvmeError, Result},
 };
@@ -75,13 +74,6 @@ pub struct RpcCacheStore {
 /// `OnlineCache` is the per-chain file backing `--rpc.cache-dir`;
 /// `FixtureCapture` is the fixture backing `--rpc.capture-file`.
 enum RpcCacheStoreInner {
-    /// Provider-level LRU cache persisted to a per-chain file.
-    ///
-    /// No builder produces this any more — `--rpc.cache-dir` writes an envelope
-    /// through [`RpcCacheStoreInner::OnlineCache`]. Kept until the alloy
-    /// provider-cache support surface is removed as a whole.
-    #[cfg_attr(not(test), allow(dead_code))]
-    ProviderCache { cache: SharedCache, path: PathBuf },
     /// Transport-level cache persisted to the per-chain `--rpc.cache-dir` file.
     OnlineCache { cache: TransportCache, path: PathBuf, chain_id: u64 },
     /// Transport-level fixture envelope captured for offline replay (`--rpc.capture-file`).
@@ -103,15 +95,6 @@ enum RpcCacheStoreInner {
 }
 
 impl RpcCacheStore {
-    /// Construct a store backed by a provider-level LRU cache file.
-    ///
-    /// Retained alongside the alloy provider-cache support surface it belongs
-    /// to; the online builder in `mod.rs` calls [`Self::new_online_cache`].
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(super) fn new(cache: SharedCache, cache_path: PathBuf) -> Self {
-        Self { inner: Some(RpcCacheStoreInner::ProviderCache { cache, path: cache_path }) }
-    }
-
     /// Construct a store backed by the per-chain online cache file.
     ///
     /// `pub(super)` because only the builders in `mod.rs` construct these;
@@ -171,7 +154,7 @@ impl RpcCacheStore {
         Self { inner: None }
     }
 
-    // The three accessors below are gated on `cfg(any(test, feature =
+    // The accessors below are gated on `cfg(any(test, feature =
     // "test-utils"))` because they leak internal state that the owner type
     // is otherwise designed to hide. Production code must not branch on any
     // of them — call `persist()` instead, which is a no-op when there is
@@ -182,15 +165,6 @@ impl RpcCacheStore {
     #[cfg(any(test, feature = "test-utils"))]
     pub fn is_noop(&self) -> bool {
         self.inner.is_none()
-    }
-
-    /// Returns the underlying [`SharedCache`] (provider-cache path only), or `None`.
-    #[cfg(any(test, feature = "test-utils"))]
-    pub fn cache(&self) -> Option<&SharedCache> {
-        match &self.inner {
-            Some(RpcCacheStoreInner::ProviderCache { cache, .. }) => Some(cache),
-            _ => None,
-        }
     }
 
     /// Seed a response into the in-memory transport cache, as a served RPC call
@@ -229,7 +203,6 @@ impl RpcCacheStore {
     pub fn cache_path(&self) -> Option<&Path> {
         match &self.inner {
             Some(
-                RpcCacheStoreInner::ProviderCache { path, .. } |
                 RpcCacheStoreInner::OnlineCache { path, .. } |
                 RpcCacheStoreInner::FixtureCapture { path, .. },
             ) => Some(path.as_path()),
@@ -248,25 +221,12 @@ impl RpcCacheStore {
     /// our in-memory entries over the on-disk ones (ours win on key collision)
     /// before the atomic write.
     ///
-    /// - **`ProviderCache` / `OnlineCache`**: best-effort — failures are warn-logged and swallowed.
+    /// - **`OnlineCache`**: best-effort — failures are warn-logged and swallowed.
     /// - **`FixtureCapture`**: hard error — the fixture is the primary output of capture mode.
     /// - **No-op**: returns `Ok(())`.
     pub fn persist(self) -> Result<()> {
         let Some(inner) = self.inner else { return Ok(()) };
         match inner {
-            RpcCacheStoreInner::ProviderCache { cache, path } => {
-                match save_cache_atomic(&cache, &path) {
-                    Ok(true) => info!(path = %path.display(), "Persisted RPC cache"),
-                    // Intentional skip (e.g. foreign on-disk shape) already warned inside.
-                    Ok(false) => {}
-                    Err(err) => warn!(
-                        path = %path.display(),
-                        error = %err,
-                        "Failed to save RPC cache (continuing)",
-                    ),
-                }
-                Ok(())
-            }
             RpcCacheStoreInner::OnlineCache { cache, path, chain_id } => {
                 match save_online_cache_atomic(&cache, &path, chain_id) {
                     Ok(true) => info!(path = %path.display(), "Persisted RPC cache"),
@@ -302,115 +262,18 @@ impl RpcCacheStore {
     }
 }
 
-// Manual `Debug` because `SharedCache` does not implement `Debug`.
+// Manual `Debug`: a store's identity is the file it writes, and the cached
+// responses behind it are neither small nor informative in a debug dump.
 impl fmt::Debug for RpcCacheStore {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.inner {
             Some(
-                RpcCacheStoreInner::ProviderCache { path, .. } |
                 RpcCacheStoreInner::OnlineCache { path, .. } |
                 RpcCacheStoreInner::FixtureCapture { path, .. },
             ) => f.debug_struct("RpcCacheStore").field("path", path).finish_non_exhaustive(),
             None => f.debug_struct("RpcCacheStore").field("inner", &Option::<()>::None).finish(),
         }
     }
-}
-
-/// Atomically persist `cache` to `target` via lock + re-read-merge + temp rename.
-///
-/// Returns `Ok(true)` when the file was written, `Ok(false)` when the write was
-/// intentionally skipped (a recognizable foreign on-disk shape), and `Err` on
-/// lock/IO failure. All error paths include `target` in the returned
-/// [`std::io::Error`] so the warn-log in [`RpcCacheStore::persist`] identifies
-/// which file failed.
-///
-/// Lock acquisition failure aborts the persist: the provider cache is a
-/// best-effort artifact, so skipping it costs a re-fetch, while an unlocked
-/// write can silently delete a sibling process's entries.
-///
-/// On-disk re-read is typed (same classification as `cache merge`):
-/// - missing / provider array → merge and write;
-/// - corrupt / unreadable → degrade to ours-only (with a `warn!`);
-/// - recognizable foreign shape (capture envelope, …) → skip the write with a visible warning so a
-///   mispointed cache-dir cannot destroy the foreign file.
-fn save_cache_atomic(cache: &SharedCache, target: &Path) -> std::io::Result<bool> {
-    let _guard = acquire_exclusive_lock(target).map_err(|e| {
-        std::io::Error::other(format!(
-            "failed to acquire the cache lock {} for {}: {e}; \
-             cache entries were not saved (an unlocked write could drop a \
-             concurrent process's entries)",
-            lock_sidecar_path(target).display(),
-            target.display(),
-        ))
-    })?;
-
-    let dir = target.parent().unwrap_or_else(|| Path::new("."));
-    fs::create_dir_all(dir).map_err(|e| {
-        std::io::Error::other(format!("failed to create directory {}: {e}", dir.display()))
-    })?;
-
-    // SharedCache has no iteration API — dump our entries to a temp file and re-read.
-    let our_tmp = tempfile::NamedTempFile::new_in(dir).map_err(|e| {
-        std::io::Error::other(format!("failed to create temp file in {}: {e}", dir.display()))
-    })?;
-    let our_tmp_path = our_tmp.path().to_path_buf();
-    cache.save_cache(our_tmp_path.clone()).map_err(|e| {
-        std::io::Error::other(format!("failed to save cache for {}: {e}", target.display()))
-    })?;
-
-    let our_entries: Vec<CacheKv> = match fs::read_to_string(&our_tmp_path)
-        .map_err(|e| e.to_string())
-        .and_then(|s| serde_json::from_str(&s).map_err(|e| e.to_string()))
-    {
-        Ok(entries) => entries,
-        Err(err) => {
-            return Err(std::io::Error::other(format!(
-                "failed to re-read our cache dump for {}: {err}",
-                target.display()
-            )));
-        }
-    };
-    // Drop the NamedTempFile so it is unlinked; we only needed the dump bytes.
-    drop(our_tmp);
-
-    let disk_entries = match reread_provider_cache_for_merge(target) {
-        ProviderReread::Ok(entries) => entries,
-        ProviderReread::Degradable(msg) => {
-            warn!(
-                path = %target.display(),
-                error = %msg,
-                "Failed to re-read on-disk RPC cache during merge; persisting our entries only",
-            );
-            Vec::new()
-        }
-        ProviderReread::Hard(err) => {
-            // Best-effort provider persist must not destroy a foreign file that
-            // a shared-dir misconfiguration pointed it at (e.g. a capture
-            // envelope). Skip the write so the foreign content survives.
-            // stderr via `warn_user`: default CLI tracing is off, so a
-            // `warn!`-only line would never reach the operator who needs to
-            // fix the shared-dir misconfiguration.
-            warn_user(format_args!(
-                "Skipping RPC cache persist to '{}': {err}. On-disk file is not a \
-                 provider cache; leaving it intact",
-                target.display(),
-            ));
-            return Ok(false);
-        }
-    };
-
-    // The union must respect the configured cap: a sibling's file plus ours can
-    // otherwise exceed what either run was allowed to keep.
-    let merged =
-        merge_provider_entries_capped(disk_entries, our_entries, cache.max_items() as usize);
-    let serialized = serde_json::to_vec(&merged).map_err(|e| {
-        std::io::Error::other(format!(
-            "failed to serialize merged cache for {}: {e}",
-            target.display()
-        ))
-    })?;
-    write_bytes_atomic(target, &serialized)?;
-    Ok(true)
 }
 
 /// Value of the envelope's `kind` field that marks the online `--rpc.cache-dir`
@@ -659,7 +522,7 @@ fn save_online_cache_atomic(
     // The union must respect the configured cap: a sibling's file plus ours can
     // otherwise exceed what either run was allowed to keep.
     let cap = cache.max_entries().unwrap_or(usize::MAX);
-    let merged = merge_provider_entries_capped(disk_entries, our_entries, cap);
+    let merged = merge_cache_entries_capped(disk_entries, our_entries, cap);
     let doc = OnlineCacheDoc {
         version: ENVELOPE_VERSION,
         kind: ONLINE_CACHE_KIND,
@@ -825,7 +688,6 @@ pub struct ExternalEnvSnapshot {
 #[cfg(test)]
 mod tests {
     use alloy_primitives::keccak256;
-    use alloy_provider::layers::CacheLayer;
 
     use super::*;
 
@@ -1042,6 +904,26 @@ mod tests {
         assert_eq!(fs::read_to_string(&path).unwrap(), before);
     }
 
+    /// Lock sidecar `<target>.lock` is created on persist and left in place: the
+    /// flock is released when the handle closes, so the file itself outliving the
+    /// run is the designed state, not litter to clean up.
+    #[test]
+    fn test_online_cache_persist_creates_lock_sidecar_left_in_place() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("rpc-cache-9.json");
+        let lock = lock_sidecar_path(&path);
+        assert!(!lock.exists());
+
+        let cache = online_cache(16, &[(B256::repeat_byte(1), "v")]);
+        RpcCacheStore::new_online_cache(cache, path.clone(), 9).persist().expect("persist");
+
+        assert!(path.exists(), "cache file written");
+        assert!(lock.exists(), "lock sidecar left in place");
+        // Sidecar is an empty (or near-empty) lock file, not the cache payload.
+        let lock_meta = fs::metadata(&lock).expect("lock meta");
+        assert!(lock_meta.len() == 0 || lock_meta.is_file());
+    }
+
     /// Corrupt content at the target does not abort the persist: it is our own
     /// regenerable file, so ours replace it.
     #[test]
@@ -1179,110 +1061,6 @@ mod tests {
         let err = CacheFileEnvelope::load(&p3).expect_err("missing version");
         let msg = format!("{err}");
         assert!(msg.contains("parse"), "error should mention parse: {msg}");
-    }
-
-    /// Interleaving: A holds only key A in memory; B persists key B; A then
-    /// Persisting into a shared cache directory keeps the file within the
-    /// configured cap.
-    ///
-    /// Runs that share a directory touch disjoint RPC keys, so merging a
-    /// sibling's file in wholesale would grow it past what either run was
-    /// allowed to keep, and every later start would parse all of it.
-    #[test]
-    fn test_provider_cache_persist_respects_the_configured_cap() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("rpc-cache-1.json");
-
-        // A sibling with a bigger budget fills the file first.
-        let sibling = CacheLayer::new(64).cache();
-        for i in 0..20u8 {
-            sibling.put(B256::repeat_byte(i), format!(r#"{{"result":"{i}"}}"#)).expect("put");
-        }
-        RpcCacheStore::new(sibling, path.clone()).persist().expect("persist sibling");
-
-        // Ours is capped at 4 and holds keys the sibling never saw.
-        let ours = CacheLayer::new(4).cache();
-        let mine: Vec<B256> = (100..104u8).map(B256::repeat_byte).collect();
-        for key in &mine {
-            ours.put(*key, r#"{"result":"mine"}"#.to_string()).expect("put");
-        }
-        RpcCacheStore::new(ours, path.clone()).persist().expect("persist ours");
-
-        let entries = crate::cache::read_provider_cache(&path).expect("read merged cache");
-        assert!(
-            entries.len() <= 4,
-            "the merged file must respect this run's cap, got {} entries",
-            entries.len()
-        );
-        for key in &mine {
-            assert!(entries.iter().any(|e| e.key == *key), "this run's entries survive: {key}");
-        }
-    }
-
-    /// persists — on-disk file must contain the union (B's entries survive).
-    #[test]
-    fn test_provider_cache_persist_merges_interleaved_disk_entries() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("rpc-cache-1.json");
-
-        let key_a = B256::repeat_byte(0xaa);
-        let key_b = B256::repeat_byte(0xbb);
-        let val_a = r#"{"result":"a"}"#.to_string();
-        let val_b = r#"{"result":"b"}"#.to_string();
-
-        // Process B persists first.
-        let cache_b = CacheLayer::new(64).cache();
-        cache_b.put(key_b, val_b.clone()).expect("put b");
-        RpcCacheStore::new(cache_b, path.clone()).persist().expect("persist b");
-
-        // Process A never loaded B's write; only has key_a in memory.
-        let cache_a = CacheLayer::new(64).cache();
-        cache_a.put(key_a, val_a.clone()).expect("put a");
-        RpcCacheStore::new(cache_a, path.clone()).persist().expect("persist a");
-
-        let loaded = CacheLayer::new(64).cache();
-        loaded.load_cache(path).expect("load");
-        assert_eq!(loaded.get(&key_a).as_deref(), Some(val_a.as_str()));
-        assert_eq!(loaded.get(&key_b).as_deref(), Some(val_b.as_str()));
-    }
-
-    /// On collision, the process that persists last wins for that key.
-    #[test]
-    fn test_provider_cache_persist_ours_wins_on_collision() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("rpc-cache-1.json");
-        let key = B256::repeat_byte(0x01);
-
-        let cache_b = CacheLayer::new(64).cache();
-        cache_b.put(key, "from-b".into()).expect("put");
-        RpcCacheStore::new(cache_b, path.clone()).persist().expect("persist b");
-
-        let cache_a = CacheLayer::new(64).cache();
-        cache_a.put(key, "from-a".into()).expect("put");
-        RpcCacheStore::new(cache_a, path.clone()).persist().expect("persist a");
-
-        let loaded = CacheLayer::new(64).cache();
-        loaded.load_cache(path).expect("load");
-        assert_eq!(loaded.get(&key).as_deref(), Some("from-a"));
-    }
-
-    /// Lock sidecar `<target>.lock` is created on persist and left in place.
-    #[test]
-    fn test_provider_cache_persist_creates_lock_sidecar_left_in_place() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("rpc-cache-9.json");
-        let lock = lock_sidecar_path(&path);
-        assert!(!lock.exists());
-
-        let cache = CacheLayer::new(16).cache();
-        cache.put(B256::repeat_byte(1), "v".into()).expect("put");
-        RpcCacheStore::new(cache, path.clone()).persist().expect("persist");
-
-        assert!(path.exists(), "cache file written");
-        assert!(lock.exists(), "lock sidecar left in place");
-        // Sidecar is an empty (or near-empty) lock file, not the cache payload.
-        let lock_meta = fs::metadata(&lock).expect("lock meta");
-        assert!(lock_meta.len() == 0 || lock_meta.is_file());
     }
 
     /// Envelope persist merges on-disk entries the same way, with `chain_id` check.
@@ -1569,99 +1347,6 @@ mod tests {
         }
     }
 
-    /// Provider persist fails closed when the lock cannot be acquired: nothing
-    /// is written, and the file a sibling process left behind is intact.
-    ///
-    /// The store swallows the failure (the provider cache is best-effort), so
-    /// the observable contract is the untouched file, not the return value.
-    #[test]
-    fn test_provider_cache_persist_skips_when_the_lock_is_unavailable() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("rpc-cache-1.json");
-
-        // A sibling's file is already on disk.
-        let sibling = CacheLayer::new(16).cache();
-        sibling.put(B256::repeat_byte(0xbb), "from-sibling".into()).expect("put");
-        RpcCacheStore::new(sibling, path.clone()).persist().expect("persist sibling");
-        let before = fs::read_to_string(&path).expect("read sibling file");
-
-        // A directory in the sidecar's place makes the lock un-acquirable.
-        fs::remove_file(lock_sidecar_path(&path)).expect("remove sidecar");
-        fs::create_dir(lock_sidecar_path(&path)).expect("occupy sidecar path");
-
-        let ours = CacheLayer::new(16).cache();
-        ours.put(B256::repeat_byte(0xaa), "ours".into()).expect("put");
-        RpcCacheStore::new(ours, path.clone())
-            .persist()
-            .expect("provider persist stays best-effort");
-
-        assert_eq!(fs::read_to_string(&path).unwrap(), before, "no unlocked write happened");
-    }
-
-    /// The skipped persist reports why, naming the lock and stating that the
-    /// entries were not saved.
-    #[test]
-    fn test_save_cache_atomic_reports_the_lock_failure() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("rpc-cache-1.json");
-        fs::create_dir(lock_sidecar_path(&path)).expect("occupy sidecar path");
-
-        let cache = CacheLayer::new(16).cache();
-        cache.put(B256::repeat_byte(0xaa), "ours".into()).expect("put");
-        let err = save_cache_atomic(&cache, &path).expect_err("lock failure must not write");
-        let msg = err.to_string();
-        assert!(msg.contains("rpc-cache-1.json.lock"), "msg={msg}");
-        assert!(msg.contains("were not saved"), "msg={msg}");
-        assert!(!path.exists(), "nothing was written");
-    }
-
-    /// Persisting a provider cache onto a capture envelope must leave the
-    /// envelope intact: a shared-dir misconfiguration must not destroy a
-    /// foreign file the provider shape cannot fold.
-    #[test]
-    fn test_provider_cache_persist_skips_foreign_envelope_target() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("rpc-cache-1.json");
-
-        let envelope = serde_json::json!({
-            "version": 1,
-            "chain_id": 7,
-            "cache": [],
-            "external_env": null,
-        });
-        let before = serde_json::to_string_pretty(&envelope).unwrap();
-        fs::write(&path, &before).expect("seed envelope");
-
-        let cache = CacheLayer::new(16).cache();
-        cache.put(B256::repeat_byte(0xaa), "ours".into()).expect("put");
-        let wrote = save_cache_atomic(&cache, &path).expect("skip is Ok(false), not Err");
-        assert!(!wrote, "foreign shape must not be overwritten");
-        assert_eq!(fs::read_to_string(&path).unwrap(), before, "envelope left intact");
-
-        // Store path is best-effort: same skip, same intact file, no hard error.
-        let store_cache = CacheLayer::new(16).cache();
-        store_cache.put(B256::repeat_byte(0xbb), "store".into()).expect("put");
-        RpcCacheStore::new(store_cache, path.clone())
-            .persist()
-            .expect("provider persist stays best-effort on foreign skip");
-        assert_eq!(fs::read_to_string(&path).unwrap(), before, "store path also leaves envelope");
-    }
-
-    /// An unrecognized structured JSON shape is also foreign: skip, do not replace.
-    #[test]
-    fn test_provider_cache_persist_skips_unrecognized_foreign_shape() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("rpc-cache-1.json");
-        let before = r#"{"not":"a-provider-cache","nor":"an-envelope"}"#;
-        fs::write(&path, before).expect("seed foreign");
-
-        let cache = CacheLayer::new(16).cache();
-        cache.put(B256::repeat_byte(0xaa), "ours".into()).expect("put");
-        let wrote = save_cache_atomic(&cache, &path).expect("skip is Ok");
-        assert!(!wrote);
-        assert_eq!(fs::read_to_string(&path).unwrap(), before);
-    }
-
     /// Envelope persist hard-errors when the lock cannot be acquired: the
     /// capture is the primary output, so a silently unlocked write is worse
     /// than a failed run.
@@ -1703,23 +1388,5 @@ mod tests {
         let err = store.persist().expect_err("capture persist must fail closed");
         assert!(err.to_string().contains("lock"), "msg={err}");
         assert!(!path.exists(), "nothing was written");
-    }
-
-    /// Corrupt on-disk provider cache during re-read does not abort; ours are written.
-    #[test]
-    fn test_provider_cache_persist_degrades_on_corrupt_disk() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("rpc-cache-1.json");
-        fs::write(&path, "not-json{{{").expect("corrupt");
-
-        let key = B256::repeat_byte(0xcc);
-        let cache = CacheLayer::new(16).cache();
-        cache.put(key, "ok".into()).expect("put");
-        let wrote = save_cache_atomic(&cache, &path).expect("corrupt degrades to write");
-        assert!(wrote, "corrupt target is replaced with ours");
-
-        let loaded = CacheLayer::new(16).cache();
-        loaded.load_cache(path).expect("load");
-        assert_eq!(loaded.get(&key).as_deref(), Some("ok"));
     }
 }

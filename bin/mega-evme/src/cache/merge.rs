@@ -1,7 +1,12 @@
-//! Pure merge helpers for provider-cache and capture-envelope JSON shapes.
+//! Pure merge helpers for the on-disk cache envelope.
 //!
 //! Used by the `cache merge` subcommand and by lock-protected merge-on-persist
 //! in [`crate::common::provider`]'s cache store.
+//!
+//! Every file mega-evme reads or writes is the envelope. The bare `[{key,
+//! value}]` array a retired build wrote is still *recognized* — see
+//! [`CacheShape::Provider`] — but only so a diagnostic can name it; nothing here
+//! reads, merges, or writes that shape.
 
 use std::{
     collections::BTreeMap,
@@ -18,7 +23,7 @@ use crate::common::{EvmeError, Result};
 /// Current on-disk envelope schema version (must match capture/replay).
 pub(crate) const ENVELOPE_VERSION: u32 = 1;
 
-/// One `{key, value}` entry shared by provider-cache files and envelope `cache` arrays.
+/// One `{key, value}` entry of an envelope's `cache` array.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct CacheKv {
     /// Request fingerprint (typically `keccak256` of method + params).
@@ -30,9 +35,16 @@ pub(crate) struct CacheKv {
 /// Detected on-disk shape of a cache file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CacheShape {
-    /// JSON array of `{key, value}` (provider `--rpc.cache-dir` files).
+    /// The bare JSON array of `{key, value}` a retired build wrote for
+    /// `--rpc.cache-dir`.
+    ///
+    /// Recognized, never read: the array stores hashed request keys, this build
+    /// hashes requests differently, and the method and params behind each entry
+    /// are not recoverable from the file. The variant exists so a diagnostic can
+    /// tell the operator what the file is instead of calling it corrupt.
     Provider,
-    /// `{version, chain_id, cache, external_env?}` capture envelope.
+    /// `{version, chain_id, cache, external_env?}` envelope — the only shape
+    /// this build reads or writes.
     Envelope,
 }
 
@@ -79,24 +91,6 @@ pub(crate) fn canonicalize_bucket_capacities(caps: &[(u32, u64)]) -> Vec<(u32, u
     map.into_iter().collect()
 }
 
-/// Parse `rpc-cache-{chain_id}.json` from a path's file name.
-///
-/// Returns `None` when the name does not match the per-chain provider-cache
-/// convention (so callers can warn that chain identity cannot be validated).
-pub(crate) fn parse_rpc_cache_filename_chain_id(path: &Path) -> Option<u64> {
-    let name = path.file_name()?.to_str()?;
-    let rest = name.strip_prefix("rpc-cache-")?.strip_suffix(".json")?;
-    if rest.is_empty() || !rest.chars().all(|c| c.is_ascii_digit()) {
-        return None;
-    }
-    // Reject leading zeros (except the single digit `0`) so `rpc-cache-01.json`
-    // is not treated as chain 1 under a different spelling.
-    if rest.len() > 1 && rest.starts_with('0') {
-        return None;
-    }
-    rest.parse().ok()
-}
-
 /// Union `base` with `overlay` by key; overlay wins on collision.
 ///
 /// Output is sorted by key for deterministic files.
@@ -123,7 +117,7 @@ pub(crate) fn merge_kv_entries(base: Vec<CacheKv>, overlay: Vec<CacheKv>) -> Vec
 /// This process's entries are kept first — they are already LRU-bounded by the
 /// same cap, and they are the ones this run just proved it needs. On-disk
 /// entries then fill whatever room is left.
-pub(crate) fn merge_provider_entries_capped(
+pub(crate) fn merge_cache_entries_capped(
     on_disk: Vec<CacheKv>,
     ours: Vec<CacheKv>,
     cap: usize,
@@ -141,15 +135,20 @@ pub(crate) fn merge_provider_entries_capped(
     map.into_iter().map(|(key, value)| CacheKv { key, value }).collect()
 }
 
-/// Detect whether `value` is a provider-cache array or a capture envelope.
+/// Classify `value` as the envelope this build uses or the retired array format.
+///
+/// `Err` means neither: structured JSON somebody else wrote, which no caller may
+/// adopt or overwrite.
 pub(crate) fn detect_shape(value: &serde_json::Value, path: &Path) -> Result<CacheShape> {
     if value.is_array() {
-        // Validate array elements look like {key, value} when non-empty.
+        // An array of anything else is not the retired format either — it is
+        // some other tool's file, and falls through to the unrecognized arm.
         if let Some(arr) = value.as_array() {
             for (i, el) in arr.iter().enumerate() {
                 if !el.is_object() || el.get("key").is_none() || el.get("value").is_none() {
                     return Err(EvmeError::InvalidInput(format!(
-                        "Provider-cache entry {i} in '{}' is not a {{key, value}} object",
+                        "Unrecognized cache file shape in '{}': entry {i} of the JSON \
+                         array is not a {{key, value}} object",
                         path.display()
                     )));
                 }
@@ -164,99 +163,10 @@ pub(crate) fn detect_shape(value: &serde_json::Value, path: &Path) -> Result<Cac
         }
     }
     Err(EvmeError::InvalidInput(format!(
-        "Unrecognized cache file shape in '{}': expected a JSON array of {{key, value}} \
-         or a capture envelope {{version, chain_id, cache, ...}}",
+        "Unrecognized cache file shape in '{}': expected a cache envelope \
+         {{version, chain_id, cache, ...}}",
         path.display()
     )))
-}
-
-/// Read and parse a provider-cache file (JSON array). Missing file → empty vec.
-///
-/// Corrupt / unreadable content returns `Err` so callers can degrade or hard-fail.
-///
-/// Production writers use [`reread_provider_cache_for_merge`] (typed hard vs
-/// degradable). This helper remains for tests and call sites that only need the
-/// provider-array parse and treat any other shape as an error.
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) fn read_provider_cache(path: &Path) -> Result<Vec<CacheKv>> {
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
-    let content = fs::read_to_string(path).map_err(|e| {
-        EvmeError::InvalidInput(format!("Failed to read cache file {}: {e}", path.display()))
-    })?;
-    let value: serde_json::Value = serde_json::from_str(&content).map_err(|e| {
-        EvmeError::InvalidInput(format!("Failed to parse cache file {}: {e}", path.display()))
-    })?;
-    match detect_shape(&value, path)? {
-        CacheShape::Provider => serde_json::from_value(value).map_err(|e| {
-            EvmeError::InvalidInput(format!(
-                "Failed to decode provider-cache entries in {}: {e}",
-                path.display()
-            ))
-        }),
-        CacheShape::Envelope => Err(EvmeError::InvalidInput(format!(
-            "Expected provider-cache array in '{}', found capture envelope",
-            path.display()
-        ))),
-    }
-}
-
-/// Classification of the file already at a provider-shape merge's output.
-///
-/// The counterpart of [`EnvelopeReread`] for the other shape, and typed for the
-/// same reason: content that cannot be parsed at all is safe to replace, while
-/// a file that parses into something this merge cannot fold is a file the merge
-/// must not silently destroy.
-#[derive(Debug)]
-pub(crate) enum ProviderReread {
-    /// The output holds provider-cache entries (or does not exist yet).
-    Ok(Vec<CacheKv>),
-    /// Corrupt, unreadable, or undecodable content — safe to warn and replace.
-    Degradable(String),
-    /// Readable, but not a provider cache: refusing beats overwriting.
-    Hard(EvmeError),
-}
-
-/// Re-read the existing merge output for a provider-shape merge.
-pub(crate) fn reread_provider_cache_for_merge(path: &Path) -> ProviderReread {
-    if !path.exists() {
-        return ProviderReread::Ok(Vec::new());
-    }
-    let content = match fs::read_to_string(path) {
-        Ok(c) => c,
-        Err(e) => {
-            return ProviderReread::Degradable(format!(
-                "Failed to read cache file {}: {e}",
-                path.display()
-            ));
-        }
-    };
-    let value: serde_json::Value = match serde_json::from_str(&content) {
-        Ok(v) => v,
-        Err(e) => {
-            return ProviderReread::Degradable(format!(
-                "Failed to parse cache file {}: {e}",
-                path.display()
-            ));
-        }
-    };
-    match detect_shape(&value, path) {
-        Ok(CacheShape::Provider) => match serde_json::from_value(value) {
-            Ok(entries) => ProviderReread::Ok(entries),
-            Err(e) => ProviderReread::Degradable(format!(
-                "Failed to decode provider-cache entries in {}: {e}",
-                path.display()
-            )),
-        },
-        Ok(CacheShape::Envelope) => ProviderReread::Hard(EvmeError::InvalidInput(format!(
-            "Expected provider-cache array in '{}', found capture envelope",
-            path.display()
-        ))),
-        // An unrecognized shape is still structured JSON somebody wrote: it is
-        // not this merge's output to overwrite.
-        Err(e) => ProviderReread::Hard(e),
-    }
 }
 
 /// Classification of an envelope re-read during concurrent persist merge.
@@ -325,16 +235,31 @@ pub(crate) fn reread_envelope_for_merge(path: &Path) -> EnvelopeReread {
             }
             EnvelopeReread::Ok(doc)
         }
-        CacheShape::Provider => EnvelopeReread::Hard(EvmeError::FixtureError(format!(
-            "Expected capture envelope in '{}', found provider-cache array",
-            path.display()
-        ))),
+        CacheShape::Provider => {
+            EnvelopeReread::Hard(EvmeError::FixtureError(retired_array_format_message(path)))
+        }
     }
 }
 
-/// Merge two provider-cache entry lists (overlay wins).
-pub(crate) fn merge_provider_lists(base: Vec<CacheKv>, overlay: Vec<CacheKv>) -> Vec<CacheKv> {
-    merge_kv_entries(base, overlay)
+/// The one diagnostic a reader owes an operator whose file is not an envelope.
+///
+/// Deliberately a single message for every non-envelope input rather than one
+/// per shape. The overwhelmingly likely case is the `[{key, value}]` array a
+/// retired build wrote, and that file cannot be converted: it stores only hashed
+/// request keys, this build hashes requests differently, and the method and
+/// params behind each entry are unrecoverable from the file. Naming a repair
+/// that cannot exist would be worse than naming the two ways forward, and those
+/// two ways are the same whatever the file turns out to be.
+fn retired_array_format_message(path: &Path) -> String {
+    format!(
+        "'{}' is not a cache envelope ({{version, chain_id, cache, ...}}). It may be \
+         an RPC cache from an older mega-evme (a bare JSON array), a format this \
+         build no longer reads: such a file stores only hashed request keys, and \
+         this build hashes requests differently, so the method and params behind \
+         each entry cannot be recovered. Delete it, or re-record the responses \
+         with --rpc.capture-file.",
+        path.display(),
+    )
 }
 
 /// Merge `ours` over `on_disk` for envelope persist (ours wins on key collision).
@@ -564,18 +489,6 @@ pub(crate) fn fold_output_envelope(
     })
 }
 
-/// Atomically write `entries` as a provider-cache JSON array to `path`.
-pub(crate) fn write_provider_cache_atomic(path: &Path, entries: &[CacheKv]) -> Result<()> {
-    let dir = path.parent().unwrap_or_else(|| Path::new("."));
-    fs::create_dir_all(dir).map_err(|e| {
-        EvmeError::InvalidInput(format!("Failed to create directory {}: {e}", dir.display()))
-    })?;
-    let serialized = serde_json::to_vec(entries)
-        .map_err(|e| EvmeError::InvalidInput(format!("Failed to serialize provider cache: {e}")))?;
-    write_bytes_atomic(path, &serialized)
-        .map_err(|e| EvmeError::InvalidInput(format!("Failed to write {}: {e}", path.display())))
-}
-
 /// Atomically write an envelope document (pretty-printed, matching capture).
 pub(crate) fn write_envelope_atomic(path: &Path, doc: &EnvelopeDoc) -> Result<()> {
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
@@ -615,56 +528,32 @@ pub(crate) fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<(
     Ok(())
 }
 
-/// Load any supported cache file and return its shape + entry count.
-pub(crate) fn load_cache_file(path: &Path) -> Result<(CacheShape, LoadedCache)> {
+/// Load a `cache merge` input, which must be an envelope.
+///
+/// Anything else — the retired array format included — is rejected with the one
+/// diagnostic that names what the file probably is and what to do about it. A
+/// merge of the old arrays is not withheld here, it is impossible: the shapes
+/// key their entries differently, so a union of the two would be a file no
+/// build can serve ([`retired_array_format_message`]).
+pub(crate) fn load_cache_file(path: &Path) -> Result<EnvelopeDoc> {
     let content = fs::read_to_string(path)
         .map_err(|e| EvmeError::InvalidInput(format!("Failed to read {}: {e}", path.display())))?;
     let value: serde_json::Value = serde_json::from_str(&content)
         .map_err(|e| EvmeError::InvalidInput(format!("Failed to parse {}: {e}", path.display())))?;
-    let shape = detect_shape(&value, path)?;
-    match shape {
-        CacheShape::Provider => {
-            let entries: Vec<CacheKv> = serde_json::from_value(value).map_err(|e| {
-                EvmeError::InvalidInput(format!(
-                    "Failed to decode provider cache {}: {e}",
-                    path.display()
-                ))
-            })?;
-            Ok((shape, LoadedCache::Provider(entries)))
-        }
-        CacheShape::Envelope => {
-            let doc: EnvelopeDoc = serde_json::from_value(value).map_err(|e| {
-                EvmeError::InvalidInput(format!(
-                    "Failed to decode envelope {}: {e}",
-                    path.display()
-                ))
-            })?;
-            if doc.version != ENVELOPE_VERSION {
-                return Err(EvmeError::InvalidInput(format!(
-                    "Unsupported cache file version {} in '{}'; expected {ENVELOPE_VERSION}",
-                    doc.version,
-                    path.display(),
-                )));
-            }
-            Ok((shape, LoadedCache::Envelope(doc)))
-        }
+    if !matches!(detect_shape(&value, path), Ok(CacheShape::Envelope)) {
+        return Err(EvmeError::InvalidInput(retired_array_format_message(path)));
     }
-}
-
-/// Parsed cache file payload.
-#[derive(Debug)]
-pub(crate) enum LoadedCache {
-    Provider(Vec<CacheKv>),
-    Envelope(EnvelopeDoc),
-}
-
-impl LoadedCache {
-    pub(crate) fn entry_count(&self) -> usize {
-        match self {
-            Self::Provider(e) => e.len(),
-            Self::Envelope(d) => d.cache.len(),
-        }
+    let doc: EnvelopeDoc = serde_json::from_value(value).map_err(|e| {
+        EvmeError::InvalidInput(format!("Failed to decode envelope {}: {e}", path.display()))
+    })?;
+    if doc.version != ENVELOPE_VERSION {
+        return Err(EvmeError::InvalidInput(format!(
+            "Unsupported cache file version {} in '{}'; expected {ENVELOPE_VERSION}",
+            doc.version,
+            path.display(),
+        )));
     }
+    Ok(doc)
 }
 
 #[cfg(test)]
@@ -686,8 +575,11 @@ mod tests {
         assert_eq!(merged[2], kv(3, "c"));
     }
 
+    /// The retired array stays recognizable, which is what lets a diagnostic
+    /// name it instead of calling it corrupt. An array of anything else is not
+    /// that format and does not get the retired-format story told about it.
     #[test]
-    fn test_detect_shape_provider_and_envelope() {
+    fn test_detect_shape_recognizes_the_retired_array_and_the_envelope() {
         let arr = serde_json::json!([{"key": B256::ZERO, "value": "x"}]);
         assert_eq!(detect_shape(&arr, Path::new("p.json")).unwrap(), CacheShape::Provider);
         let env = serde_json::json!({
@@ -696,6 +588,38 @@ mod tests {
             "cache": []
         });
         assert_eq!(detect_shape(&env, Path::new("e.json")).unwrap(), CacheShape::Envelope);
+
+        let other = serde_json::json!([{"not": "a cache entry"}]);
+        assert!(detect_shape(&other, Path::new("o.json")).is_err());
+    }
+
+    /// `cache merge` reads envelopes and nothing else, and says so in a way the
+    /// operator can act on.
+    #[test]
+    fn test_load_cache_file_rejects_the_retired_array_with_guidance() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("rpc-cache-4326.json");
+        fs::write(&path, serde_json::to_string(&vec![kv(1, "legacy")]).unwrap()).expect("write");
+
+        let err = load_cache_file(&path).expect_err("the retired array is not an input");
+        let msg = err.to_string();
+        assert!(msg.contains("not a cache envelope"), "msg={msg}");
+        assert!(msg.contains("bare JSON array"), "the likely cause must be named: msg={msg}");
+        assert!(msg.contains("Delete it"), "the way forward must be named: msg={msg}");
+        assert!(msg.contains("--rpc.capture-file"), "msg={msg}");
+    }
+
+    /// An envelope input still loads, so the rejection above is about the shape
+    /// and not about `load_cache_file` refusing everything.
+    #[test]
+    fn test_load_cache_file_accepts_an_envelope() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("fixture.json");
+        let doc =
+            EnvelopeDoc { version: 1, chain_id: 4326, cache: vec![kv(1, "a")], external_env: None };
+        fs::write(&path, serde_json::to_string_pretty(&doc).unwrap()).expect("write");
+
+        assert_eq!(load_cache_file(&path).expect("envelope loads"), doc);
     }
 
     #[test]
@@ -751,17 +675,17 @@ mod tests {
         assert_eq!(merged.cache, vec![kv(1, "disk"), kv(2, "ours")]);
     }
 
-    /// The merged provider cache never exceeds the configured cap, and this
+    /// The merged cache file never exceeds the configured cap, and this
     /// process's entries survive the truncation.
     ///
     /// Runs sharing a cache directory touch disjoint RPC keys, so an uncapped
     /// union grows the file without limit no matter how small each run's LRU is.
     #[test]
-    fn test_merge_provider_entries_capped_bounds_the_union() {
+    fn test_merge_cache_entries_capped_bounds_the_union() {
         let on_disk: Vec<CacheKv> = (0..10).map(|i| kv(i, "disk")).collect();
         let ours: Vec<CacheKv> = (100..104).map(|i| kv(i, "ours")).collect();
 
-        let merged = merge_provider_entries_capped(on_disk, ours.clone(), 6);
+        let merged = merge_cache_entries_capped(on_disk, ours.clone(), 6);
         assert_eq!(merged.len(), 6, "the union is capped, not the sum of both sides");
         for entry in &ours {
             assert!(
@@ -774,11 +698,11 @@ mod tests {
 
     /// A cap larger than the union keeps everything, and ours win on collision.
     #[test]
-    fn test_merge_provider_entries_capped_keeps_all_below_the_cap() {
+    fn test_merge_cache_entries_capped_keeps_all_below_the_cap() {
         let on_disk = vec![kv(1, "disk"), kv(2, "disk")];
         let ours = vec![kv(2, "ours"), kv(3, "ours")];
 
-        let merged = merge_provider_entries_capped(on_disk, ours, 16);
+        let merged = merge_cache_entries_capped(on_disk, ours, 16);
         assert_eq!(merged, vec![kv(1, "disk"), kv(2, "ours"), kv(3, "ours")]);
     }
 
@@ -1092,24 +1016,5 @@ mod tests {
             .expect_err("version mismatch");
         let msg = err.to_string();
         assert!(msg.contains("version") && msg.contains("out.json"), "msg={msg}");
-    }
-
-    /// Filename-derived chain id for the standard provider-cache naming scheme.
-    #[test]
-    fn test_parse_rpc_cache_filename_chain_id() {
-        assert_eq!(parse_rpc_cache_filename_chain_id(Path::new("rpc-cache-1.json")), Some(1));
-        assert_eq!(
-            parse_rpc_cache_filename_chain_id(Path::new("/tmp/rpc-cache-4326.json")),
-            Some(4326)
-        );
-        assert_eq!(
-            parse_rpc_cache_filename_chain_id(Path::new("worker/rpc-cache-11155420.json")),
-            Some(11_155_420)
-        );
-        // Non-matching names cannot be validated from the filename alone.
-        assert_eq!(parse_rpc_cache_filename_chain_id(Path::new("out.json")), None);
-        assert_eq!(parse_rpc_cache_filename_chain_id(Path::new("rpc-cache.json")), None);
-        assert_eq!(parse_rpc_cache_filename_chain_id(Path::new("rpc-cache-abc.json")), None);
-        assert_eq!(parse_rpc_cache_filename_chain_id(Path::new("cache-4326.json")), None);
     }
 }
