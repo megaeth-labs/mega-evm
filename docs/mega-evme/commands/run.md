@@ -305,7 +305,7 @@ RPC Options:
           (replay command only) Serve JSON-RPC from a captured fixture; not usable as a run/tx offline-fork path
 
       --rpc.cache-max-entries <cache_max_entries>
-          Max items in the in-memory RPC LRU cache (and therefore the cache file); 0 = effectively unlimited (caps at 1,048,576 entries; the cache index is preallocated proportional to the cap) [default: 0]
+          Max items in the in-memory RPC LRU cache (and therefore the cache file); 0 = effectively unlimited, capped at 1,048,576 entries. The ceiling is an eviction threshold, not an allocation [default: 0]
 
       --rpc.cache-dir <CACHE_DIR>
           Directory for per-chain RPC cache files (default: platform cache dir)

@@ -1,5 +1,5 @@
 ---
-description: Merge provider-cache files or capture envelopes offline.
+description: Merge RPC cache envelopes offline.
 ---
 
 # cache
@@ -18,15 +18,23 @@ mega-evme cache merge <INPUT>... --output <FILE>
 
 Union one or more input files into a single output file.
 
-Inputs are auto-detected by JSON shape:
+Every input must be a cache envelope, the single on-disk format `mega-evme` reads and writes:
 
-| Shape            | On-disk form                                | Produced by                             |
-| ---------------- | ------------------------------------------- | --------------------------------------- |
-| Provider cache   | JSON array of `{key, value}`                | `--rpc.cache-dir` per-chain files       |
-| Capture envelope | `{version, chain_id, cache, external_env?}` | `--rpc.capture-file` / offline fixtures |
+| Field          | Meaning                                                                                       |
+| -------------- | --------------------------------------------------------------------------------------------- |
+| `version`      | Envelope schema version; every input must carry the version this build writes.                |
+| `chain_id`     | Chain the entries were recorded against; every input must name the same one.                  |
+| `cache`        | The transport-level `{key, value}` entries.                                                   |
+| `external_env` | Optional external-environment snapshot (SALT bucket capacities); present in capture fixtures. |
 
-All inputs in one invocation must share the same shape.
-Mixing a provider-cache file with a capture envelope is a hard error that names the offending path.
+Both writers produce that shape: `--rpc.capture-file` fixtures and the per-chain `--rpc.cache-dir` files.
+An online cache file additionally carries a `kind: "cache"` marker, which the merge reads past.
+
+An input that is not an envelope is refused with an error naming the file.
+The overwhelmingly likely case is the bare JSON array an older `mega-evme` wrote at `--rpc.cache-dir`, and such a file cannot be converted: it stores only hashed request keys, this build hashes requests differently, and the method and params behind each entry cannot be recovered from the file.
+Delete it, or re-record the responses with `--rpc.capture-file`.
+
+Every input is read and shape-checked before the output is locked, so a refused merge writes nothing and leaves no lock sidecar behind.
 
 ### Output locking
 
@@ -44,30 +52,26 @@ If the lock cannot be acquired at all (for example the sidecar path is not writa
 An unlocked write would silently drop a concurrent process's entries, which is the failure the merge exists to prevent.
 
 An existing output that cannot be parsed at all (corrupt JSON) is replaced by the merged inputs, with a warning.
-An existing output that parses but cannot be folded — the other cache shape, an unrecognized JSON shape, a different `chain_id`, a different envelope `version` — is a hard error that names the output path and leaves the file untouched.
-Both shapes classify it the same way: a mistyped `--output` should not destroy a file the merge cannot read as its own.
+An existing output that parses but cannot be folded — an unrecognized JSON shape, the retired array format, a different `chain_id`, a different envelope `version` — is a hard error that names the output path and leaves the file untouched.
+A mistyped `--output` should not destroy a file the merge cannot read as its own.
 
-Warnings about a merge that may be silently wrong or lossy — an output being replaced, or chain identity that cannot be validated — are printed on stderr regardless of verbosity.
+Warnings about a merge that may be silently lossy — an unreadable output being replaced, and the entries it held discarded — are printed on stderr regardless of verbosity.
 They do not depend on `-v` flags or `RUST_LOG`, which only add the structured log event alongside them.
 Stdout carries the summary line only, so it stays parseable.
 
-### Provider-cache merge
-
-- Union entries by `key`.
-- Later inputs win on collision; the inputs win over entries already in `--output`.
-- Output is a provider-cache-shaped JSON array, written atomically (temp file + rename) under the output lock.
-- Chain identity is taken only from the standard filename `rpc-cache-{chain_id}.json` (provider-cache bodies have no chain field).
-  Every input path and `--output` that matches that pattern must name the same chain id; a mismatch is a hard error that names the conflicting files.
-  Paths that do not match the pattern emit a warning that chain identity cannot be validated for them, and the merge proceeds for those paths without a filename-based check.
-
-### Envelope merge
+### Merge rules
 
 - Every input must use the current envelope `version` and the same `chain_id` (else hard error naming the mismatch).
   An envelope already at `--output` must agree with them too.
+  Chain identity comes from the envelope body, so it holds whatever the files are named.
 - Union the `cache` arrays by key; later inputs win on collision, and the inputs win over entries already in `--output`.
 - `external_env`: if two inputs carry non-identical snapshots, hard error; otherwise propagate the non-null snapshot.
   A snapshot already at `--output` is held to the same rule.
 - Output is a pretty-printed envelope, written atomically under the output lock.
+
+The merged output carries no `kind` marker, so it is not an online cache file.
+Pointing `--rpc.cache-dir` at a directory holding one makes that run warn, leave the file untouched, and start with an empty cache.
+Merging consolidates fixtures; it is not a way to seed the per-chain online cache.
 
 ### Summary
 
@@ -84,16 +88,6 @@ Merged 3 inputs (120 entries in + 12 already in the output) → 101 unique entri
 ```
 
 ### Examples
-
-Merge sharded worker provider caches after a multi-process campaign:
-
-```bash
-mega-evme cache merge \
-  worker0/rpc-cache-4326.json \
-  worker1/rpc-cache-4326.json \
-  worker2/rpc-cache-4326.json \
-  --output ./rpc-cache-4326.json
-```
 
 Merge two capture envelopes for the same chain:
 
