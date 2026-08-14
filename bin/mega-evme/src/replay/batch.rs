@@ -24,24 +24,18 @@ use std::{
     time::{Duration, Instant},
 };
 
-use alloy_consensus::{BlockHeader, Transaction as _};
+use alloy_consensus::BlockHeader;
 use alloy_network::ReceiptResponse;
 use alloy_primitives::{Address, B256};
 use alloy_provider::Provider;
 use alloy_rpc_types_eth::Block;
 use mega_evm::{
     alloy_evm::{
-        block::{BlockExecutionError, BlockExecutor, BlockValidationError},
-        Evm, EvmEnv,
+        block::{BlockExecutionError, BlockValidationError},
+        EvmEnv,
     },
-    alloy_op_evm::block::OpAlloyReceiptBuilder,
-    revm::{
-        context::{result::ExecutionResult, ContextTr},
-        database::{states::bundle_state::BundleRetention, StateBuilder},
-        DatabaseRef,
-    },
-    BlockLimits, MegaBlockExecutionCtx, MegaBlockExecutorFactory, MegaEvmFactory, MegaHaltReason,
-    MegaHardforks, MegaSpecId,
+    revm::{context::result::ExecutionResult, DatabaseRef},
+    BlockLimits, MegaBlockExecutionCtx, MegaHaltReason, MegaHardforks, MegaSpecId,
 };
 use op_alloy_rpc_types::Transaction;
 use serde::Serialize;
@@ -50,17 +44,17 @@ use tracing::{debug, info, warn};
 
 use crate::{
     common::{
-        op_receipt_to_tx_receipt, print_execution_summary, print_receipt, BatchExitFloor,
-        BatchFailureCounts, EvmeExternalEnvs, ExecutionSummary, ExitCode, OpTxReceipt,
+        print_execution_summary, print_receipt, BatchExitFloor, BatchFailureCounts,
+        EvmeExternalEnvs, ExecutionSummary, ExitCode, OpTxReceipt,
     },
     replay::get_hardfork_config,
-    ChainArgs, EvmeState,
+    ChainArgs,
 };
 
 use super::{
     cmd::retrieve_block_env,
     coherence::{self, Incoherence, MembershipClaim, TargetPlacement},
-    fixture,
+    fixture, kernel,
     verify::{self, ReceiptFacts, VerificationOutcome},
     ReplayError, Result,
 };
@@ -452,21 +446,63 @@ enum DeferredFixture {
     Ready { draft: Box<fixture::FixtureDraft>, path: PathBuf, overwrite: bool },
 }
 
-/// A target that executed, awaiting the receipt harvested by `finish()`.
-struct PendingTarget {
-    tx_hash: B256,
-    tx_index: u64,
-    /// Position of this transaction among the block's committed transactions.
-    commit_index: usize,
-    exec_result: ExecutionResult<MegaHaltReason>,
-    exec_time: Duration,
-    gas_used: u64,
-    pre_execution_nonce: u64,
-    from: Address,
-    to: Option<Address>,
-    effective_gas_price: u128,
-    /// Fixture dump work, present iff `--dump-fixture-dir` was given.
-    fixture: Option<DeferredFixture>,
+/// Fixture dump destination and the environment every fixture of a block is
+/// built against, present iff `--dump-fixture-dir` was given.
+struct FixtureDumpEnv<'a> {
+    /// Directory the fixture files are written into.
+    dir: &'a Path,
+    /// Replace an existing file at the target path.
+    overwrite: bool,
+    /// `MegaETH` external environment recorded into every fixture of this block.
+    mega_env: MegaEnv,
+}
+
+/// The batch driver's pre-commit work, run by the execution kernel for every
+/// target of a block.
+///
+/// A fixture draft has to be built while the database still reflects the state
+/// the target started from, which is only true between its execution and its
+/// commit. The draft is carried through the block's `finish()` and published by
+/// the driver afterwards, so a block that never finishes leaves no file behind.
+struct FixtureDraftHook<'a> {
+    /// Where and against what to dump, or `None` when no dump was requested.
+    dump: Option<FixtureDumpEnv<'a>>,
+    /// Chain the fixture declares.
+    chain_id: u64,
+    /// Spec the target actually executed under.
+    executed_spec: MegaSpecId,
+    /// Block the targets belong to.
+    block: &'a Block<Transaction>,
+    /// On-chain receipts prefetched for this block's targets, keyed by hash.
+    onchain_receipts: &'a BTreeMap<B256, std::result::Result<ReceiptFacts, String>>,
+}
+
+impl kernel::TargetHook for FixtureDraftHook<'_> {
+    type Draft = Option<DeferredFixture>;
+
+    fn on_target_executed<DB>(&mut self, target: kernel::TargetExecution<'_, DB>) -> Self::Draft
+    where
+        DB: DatabaseRef,
+        DB::Error: core::fmt::Display,
+    {
+        let dump = self.dump.as_ref()?;
+        Some(prepare_target_fixture(
+            target.db,
+            DumpFixtureArgs {
+                accessed_block_hash_count: target.accessed_block_hash_count,
+                exec_result: target.exec_result,
+                evm_state: target.evm_state,
+                chain_id: self.chain_id,
+                executed_spec: self.executed_spec,
+                block: self.block,
+                target_tx: target.tx,
+                mega_env: dump.mega_env.clone(),
+                onchain: self.onchain_receipts.get(&target.tx_hash),
+                dir: dump.dir,
+                overwrite: dump.overwrite,
+            },
+        ))
+    }
 }
 
 /// NDJSON line for a target that produced an execution result.
@@ -902,12 +938,12 @@ where
 
     // Sorted once so every fixture of this block is byte-reproducible for the
     // same megaEnv (hash-map iteration order is otherwise non-deterministic).
-    let mega_env = dump_dir.map(|_| {
+    let fixture_dump = dump_dir.map(|dir| {
         let mut bucket_capacities = external_envs.bucket_capacities();
         bucket_capacities.sort_unstable();
         let mut oracle_storage = external_envs.oracle_storage();
         oracle_storage.sort_unstable();
-        MegaEnv { bucket_capacities, oracle_storage }
+        FixtureDumpEnv { dir, overwrite, mega_env: MegaEnv { bucket_capacities, oracle_storage } }
     });
 
     let hardforks = get_hardfork_config(chain_id);
@@ -959,19 +995,47 @@ where
         block_limits,
     );
 
-    info!(block = number, fork_block = parent_block.header.number(), "Forking state for block");
-    let mut database = match EvmeState::new_forked(
-        provider.clone(),
-        Some(parent_block.header.number()),
-        Default::default(),
-        Default::default(),
+    let target_set: HashSet<B256> = targets.iter().copied().collect();
+    // Prefer the already-collected body order so stream ordering and the kernel
+    // walk the same sequence.
+    let tx_hashes = block_tx_order.clone();
+
+    let mut hook = FixtureDraftHook {
+        dump: fixture_dump,
+        chain_id,
+        executed_spec,
+        block: &block,
+        onchain_receipts: &onchain_receipts,
+    };
+    let run = kernel::execute_until_targets(
+        provider,
+        kernel::MinedBlockRun {
+            hardforks: &hardforks,
+            external_envs,
+            block_ctx,
+            evm_env,
+            fork_block: parent_block.header.number(),
+            identity: kernel::BlockIdentity { number, timestamp, hash: block.hash() },
+            tx_hashes: &tx_hashes,
+            targets: &target_set,
+        },
+        &mut hook,
     )
-    .await
-    {
-        Ok(database) => database,
-        Err(e) => {
+    .await;
+
+    // A block that never started reports the same failure for every target it
+    // was asked about, classified by what stopped it: a failed fork is an
+    // unanswered endpoint question, while rejected pre-execution changes are
+    // the executor's own verdict on the block.
+    let kernel::BlockRun { loop_result, in_flight, finish } = match run {
+        Ok(run) => run,
+        Err(setup) => {
+            let (kind, message) = match setup {
+                kernel::SetupError::Fork(e) => (BatchErrorKind::Rpc, e.to_string()),
+                kernel::SetupError::PreExecution(e) => (classify(&e), e.to_string()),
+            };
             return BlockReplayOutcome::ordered(
-                fail_remaining(&targets, entries, BatchErrorKind::Rpc, &e.to_string()),
+                fail_remaining(&targets, entries, kind, &message),
                 &job_targets,
                 Some(&block_tx_order),
                 None,
@@ -979,223 +1043,32 @@ where
         }
     };
 
-    let evm_factory = MegaEvmFactory::new().with_external_env_factory(external_envs);
-    let block_executor_factory =
-        MegaBlockExecutorFactory::new(&hardforks, evm_factory, OpAlloyReceiptBuilder::default());
-    let mut state = StateBuilder::new().with_database(&mut database).with_bundle_update().build();
-    let mut block_executor = block_executor_factory.create_executor(&mut state, block_ctx, evm_env);
-
-    if let Err(e) = block_executor.apply_pre_execution_changes() {
-        let error = ReplayError::BlockExecutionError(e);
-        return BlockReplayOutcome::ordered(
-            fail_remaining(&targets, entries, classify(&error), &error.to_string()),
-            &job_targets,
-            Some(&block_tx_order),
-            None,
-        );
-    }
-
-    let target_set: HashSet<B256> = targets.iter().copied().collect();
-    // Prefer the already-collected body order so stream ordering and the loop
-    // walk the same sequence.
-    let tx_hashes = block_tx_order.clone();
-    // Highest block index among this job's targets: once that transaction has
-    // committed we can stop — later non-targets are not needed for receipts or
-    // fixtures, and requiring them would force incomplete offline captures to
-    // abort after a successful dump target.
-    let last_target_index = tx_hashes
-        .iter()
-        .enumerate()
-        .filter(|(_, hash)| target_set.contains(*hash))
-        .map(|(i, _)| i)
-        .max();
-    let mut pending: Vec<PendingTarget> = Vec::new();
-    let mut committed = 0usize;
-
-    // Run the block's transactions in order. Any failure aborts the block: the
-    // executor state no longer matches the chain, so the remaining targets
-    // cannot be replayed faithfully.
-    //
-    // `in_flight` names the transaction whose iteration raised the abort. It is
-    // the attribution ground truth: some rejections raised *about* a
-    // transaction do not embed its hash in the error (the block-gas admission
-    // check, for one), and attributing from error introspection alone would
-    // sweep the aborter itself as an unanswered peer.
-    let mut in_flight: Option<B256> = None;
-    let loop_result: Result<()> = async {
-        for (tx_index, tx_hash) in tx_hashes.iter().enumerate() {
-            in_flight = Some(*tx_hash);
-            // Isolate BLOCKHASH reads per transaction so a fixture dump sees only
-            // the target's own accesses (mirrors the single-tx clear after
-            // preceding transactions).
-            block_executor.clear_accessed_block_hashes();
-
-            // Every hash here came from the block body this endpoint already
-            // served. `Ok(None)` therefore means the endpoint is inconsistent
-            // (reorg or load-balanced divergent views), not that the hash is
-            // unknown — that definitive answer only applies to a user-supplied
-            // target lookup on the single-transaction path.
-            let tx = provider
-                .get_transaction_by_hash(*tx_hash)
-                .await
-                .map_err(|e| ReplayError::BlockBodyTransactionFetch {
-                    tx_hash: *tx_hash,
-                    message: e.to_string(),
-                })?
-                .ok_or(ReplayError::BlockBodyTransactionNull(*tx_hash))?;
-            // A served object that fails authentication is the same class as a
-            // null answer on a body-listed hash: the endpoint failed to deliver
-            // a transaction it claimed to include. Executing it instead would
-            // advance the block state on the wrong transaction, or report
-            // another transaction's outcome under a target hash.
-            verify::authenticate_transaction(&tx, *tx_hash).map_err(|message| {
-                ReplayError::BlockBodyTransactionFetch { tx_hash: *tx_hash, message }
-            })?;
-
-            let is_target = target_set.contains(tx_hash);
-            let start = Instant::now();
-            let pre_execution_nonce = if is_target {
-                block_executor
-                    .evm()
-                    .db_ref()
-                    .basic_ref(tx.inner.inner.signer())?
-                    .map(|acc| acc.nonce)
-                    .unwrap_or(0)
-            } else {
-                0
-            };
-
-            let outcome = block_executor
-                .run_transaction(tx.as_recovered())
-                .map_err(ReplayError::BlockExecutionError)?;
-
-            // Fixture draft must be built before commit: the pre-state closure
-            // is the database after preceding txs, with the target's result
-            // state still uncommitted — same moment as the single-tx dump.
-            // The draft is only written after `finish()` succeeds (see harvest).
-            let fixture = if is_target {
-                if let (Some(dir), Some(mega_env)) = (dump_dir, mega_env.as_ref()) {
-                    let accessed_block_hashes = block_executor.get_accessed_block_hashes();
-                    Some(prepare_target_fixture(
-                        block_executor.evm().db_ref(),
-                        DumpFixtureArgs {
-                            accessed_block_hash_count: accessed_block_hashes.len(),
-                            exec_result: &outcome.inner.result,
-                            evm_state: &outcome.inner.state,
-                            chain_id,
-                            executed_spec,
-                            block: &block,
-                            target_tx: &tx,
-                            mega_env: mega_env.clone(),
-                            onchain: onchain_receipts.get(tx_hash),
-                            dir,
-                            overwrite,
-                        },
-                    ))
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-
-            // Record the target's result before committing, mirroring the
-            // single-transaction path.
-            let exec_result = is_target.then(|| outcome.inner.result.clone());
-            let gas_used = block_executor
-                .commit_transaction_outcome(outcome)
-                .map_err(ReplayError::BlockExecutionError)?;
-            let commit_index = committed;
-            committed += 1;
-
-            if let Some(exec_result) = exec_result {
-                pending.push(PendingTarget {
-                    tx_hash: *tx_hash,
-                    tx_index: tx_index as u64,
-                    commit_index,
-                    exec_result,
-                    exec_time: start.elapsed(),
-                    gas_used,
-                    pre_execution_nonce,
-                    from: tx.inner.inner.signer(),
-                    to: tx.inner.inner.to(),
-                    effective_gas_price: tx.inner.effective_gas_price.unwrap_or(0),
-                    fixture,
-                });
-            }
-
-            // Stop once every requested target that can run has committed: trailing
-            // non-targets are irrelevant to this job's receipts and fixtures.
-            if Some(tx_index) == last_target_index {
-                break;
-            }
-        }
-        Ok(())
-    }
-    .await;
-
-    // Finish the block even when it aborted midway: targets that already ran
-    // still have a receipt worth reporting. `entries` already holds any
-    // inclusion/membership failures recorded before the block started.
-    match block_executor.finish() {
-        Ok((evm, block_result)) => {
-            let (db, _) = evm.finish();
-            db.merge_transitions(BundleRetention::Reverts);
-            let receipts = block_result.receipts;
-            // Receipts are pushed one per committed transaction; index from the
-            // end so any receipt produced before the first transaction (now or
-            // later) cannot shift the mapping.
-            let offset = receipts.len().saturating_sub(committed);
-            let block_hash = block.hash();
-            // A fixture that could not be written stays on the target's own
-            // result line below: the target did replay, so its receipt and its
-            // verification verdict are still what the run was asked for. The
-            // failed dump fails the run through the tally, not by replacing the
-            // result with an error entry.
-            //
-            // Finalize+write runs only here, after finish succeeded: a
-            // commit-time rejection never reaches pending, and a finish failure
-            // drops ready drafts unwritten (see the Err arm).
-            for target in pending {
-                let Some(envelope) = receipts.get(offset + target.commit_index) else {
-                    entries.push(failure(
-                        target.tx_hash,
-                        BatchErrorKind::Execution,
-                        format!("No receipt produced for transaction index {}", target.tx_index),
-                    ));
-                    continue;
+    // `entries` already holds any inclusion/membership failure recorded before
+    // the block started; the harvested targets are appended to it here.
+    match finish {
+        kernel::FinishOutcome::Harvested(harvest) => {
+            for harvested in harvest {
+                let target = match harvested {
+                    kernel::TargetHarvest::Receipt(target) => target,
+                    kernel::TargetHarvest::MissingReceipt { tx_hash, tx_index } => {
+                        entries.push(failure(
+                            tx_hash,
+                            BatchErrorKind::Execution,
+                            format!("No receipt produced for transaction index {tx_index}"),
+                        ));
+                        continue;
+                    }
                 };
-                let contract_address = (target.to.is_none() && envelope.is_success())
-                    .then(|| target.from.create(target.pre_execution_nonce));
-                // Block-global log index: cumulative log count of all committed
-                // receipts that precede this target in the block.
-                let first_log_index: u64 = receipts[offset..offset + target.commit_index]
-                    .iter()
-                    .map(|r| r.logs().len() as u64)
-                    .sum();
-                let receipt = op_receipt_to_tx_receipt(
-                    envelope,
-                    number,
-                    timestamp,
-                    target.from,
-                    target.to,
-                    contract_address,
-                    target.effective_gas_price,
-                    target.gas_used,
-                    Some(target.tx_hash),
-                    Some(block_hash),
-                    target.tx_index,
-                    first_log_index,
-                );
                 // Keep the execution result even when the receipt question went
                 // unanswered: the target did replay, so its summary, local
                 // receipt, and timing stay on the result line. The verification
                 // field carries the failure; the tally counts it as rpc.
                 let verification = if verify_receipt {
                     match onchain_receipts.get(&target.tx_hash) {
-                        Some(Ok(onchain)) => {
-                            Some(verify::compare(onchain, &ReceiptFacts::from_receipt(&receipt)))
-                        }
+                        Some(Ok(onchain)) => Some(verify::compare(
+                            onchain,
+                            &ReceiptFacts::from_receipt(&target.receipt),
+                        )),
                         Some(Err(message)) => {
                             Some(VerificationOutcome::unavailable(message.clone()))
                         }
@@ -1206,12 +1079,18 @@ where
                 } else {
                     None
                 };
+                // A fixture that could not be written stays on the target's own
+                // result line: the target did replay, so its receipt and its
+                // verification verdict are still what the run was asked for. The
+                // failed dump fails the run through the tally, not by replacing
+                // the result with an error entry.
+                //
                 // Materialize only when the block loop completed cleanly: a
                 // mid-block abort after this target built a Ready draft must
                 // not publish (or clobber) a fixture for a block that failed.
                 // Keep the execution result; only the fixture field fails, and
                 // it inherits the abort's class so a transient RPC abort exits 3.
-                let fixture = target.fixture.map(|deferred| match &loop_result {
+                let fixture = target.draft.map(|deferred| match &loop_result {
                     Ok(()) => materialize_deferred_fixture(deferred),
                     Err(abort) => match deferred {
                         DeferredFixture::Report(report) => report,
@@ -1230,9 +1109,9 @@ where
                     block_number: number,
                     tx_index: target.tx_index,
                     exec_result: target.exec_result,
-                    contract_address,
+                    contract_address: target.contract_address,
                     exec_time: target.exec_time,
-                    receipt,
+                    receipt: target.receipt,
                     verification,
                     fixture,
                 })));
@@ -1240,12 +1119,11 @@ where
         }
         // The block itself failed to finish, so no target of it has a receipt
         // and no deferred fixture is written or replaced.
-        Err(e) => {
-            let error = ReplayError::BlockExecutionError(e);
+        kernel::FinishOutcome::Failed { error, executed } => {
             let kind = classify(&error);
             let message = error.to_string();
-            for target in pending {
-                entries.push(failure(target.tx_hash, kind, message.clone()));
+            for tx_hash in executed {
+                entries.push(failure(tx_hash, kind, message.clone()));
             }
         }
     }
