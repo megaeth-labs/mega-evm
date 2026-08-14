@@ -1,7 +1,7 @@
 # mega-evme replay equivalence baseline
-# case:    batch_tx_file_dump_dir_human
+# case:    batch_dump_dir_overwrite_human
 # capture: replay_batch_blocks.cache.json
-# argv:    replay --rpc.replay-file <CAPTURE> --tx-file <TX_FILE> --dump-fixture-dir <DUMP_DIR>
+# argv:    replay --rpc.replay-file <CAPTURE> --overwrite --tx-file <TX_FILE> --dump-fixture-dir <DUMP_DIR>
 
 == input <TX_FILE> ==
 # equivalence corpus

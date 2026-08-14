@@ -33,5 +33,5 @@ Execution Time:   <DURATION>
 
 verification: MATCH
 
-== stderr (error:/warning: lines) ==
+== stderr ==
 (empty)

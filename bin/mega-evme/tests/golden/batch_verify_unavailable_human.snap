@@ -1,12 +1,20 @@
 # mega-evme replay equivalence baseline
-# case:    single_offline_mined_human
+# case:    batch_verify_unavailable_human
 # capture: replay_offline.cache.json
-# argv:    replay --rpc.replay-file <CAPTURE> 0x41d34e7e13dfe0f85da9d407e2b2c381955d8c7eed428b17dc82327b2616b000
+# argv:    replay --rpc.replay-file <CAPTURE> --verify-receipt --tx-file <TX_FILE>
+
+== input <TX_FILE> ==
+# equivalence corpus
+0x41d34e7e13dfe0f85da9d407e2b2c381955d8c7eed428b17dc82327b2616b000
+
+0x41d34e7e13dfe0f85da9d407e2b2c381955d8c7eed428b17dc82327b2616b000
 
 == exit code ==
-0
+3
 
 == stdout ==
+
+=== Transaction 0x41d34e7e13dfe0f85da9d407e2b2c381955d8c7eed428b17dc82327b2616b000 (block 18172461, index 1) ===
 
 === Transaction Summary ===
 Status:           Success
@@ -31,5 +39,7 @@ Execution Time:   <DURATION>
   "contractAddress": null
 }
 
+verification: FAILED (No on-chain receipt for transaction 0x41d34e7e13dfe0f85da9d407e2b2c381955d8c7eed428b17dc82327b2616b000: the transaction is unknown to the endpoint, or the endpoint has pruned its receipt)
+
 == stderr ==
-(empty)
+error: 1 of 1 target transaction(s) failed (0 execution, 1 rpc)
