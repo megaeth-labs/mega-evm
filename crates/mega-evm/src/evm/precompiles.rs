@@ -5,12 +5,16 @@
 
 #[cfg(not(feature = "std"))]
 use alloc as std;
-use std::{boxed::Box, string::String, sync::Arc};
+use std::{
+    boxed::Box,
+    string::{String, ToString},
+    sync::Arc,
+};
 
-use crate::{ExternalEnvTypes, MegaContext, MegaSpecId};
+use crate::{ExternalEnvTypes, MegaContext, MegaInnerContext, MegaSpecId};
 use alloy_evm::{
-    precompiles::{DynPrecompile, PrecompilesMap},
-    Database,
+    precompiles::{DynPrecompile, Precompile, PrecompileInput, PrecompilesMap},
+    Database, EvmInternals,
 };
 use delegate::delegate;
 use once_cell::race::OnceBox;
@@ -18,9 +22,9 @@ use op_revm::OpSpecId;
 use revm::{
     context::Cfg,
     context_interface::ContextTr,
-    handler::{EthPrecompiles, PrecompileProvider},
+    handler::{precompile_output_to_interpreter_result, EthPrecompiles, PrecompileProvider},
     interpreter::{CallInputs, Gas, InterpreterResult},
-    precompile::Precompiles,
+    precompile::{PrecompileHalt, Precompiles},
     primitives::{Address, AddressSet, HashMap},
 };
 
@@ -224,6 +228,53 @@ impl Default for MegaPrecompiles {
     }
 }
 
+/// Runs the precompile addressed by `inputs`, reporting the halt reason next to the
+/// `InterpreterResult`.
+///
+/// This is a mirror of `<PrecompilesMap as PrecompileProvider<Context<..>>>::run`
+/// (`alloy_evm::precompiles`, alloy-evm 0.37.1) rather than a call into it. Delegating would
+/// hand back only the converted `InterpreterResult`, and the conversion folds every non-out-of-gas
+/// halt into one opaque `PrecompileError` code — so the caller could no longer tell a doorway
+/// reject apart from a failure raised mid-computation, which is exactly the distinction the
+/// compute-gas split needs. Mirroring keeps the raw `PrecompileStatus` in reach while the
+/// `InterpreterResult` still comes out of the same public conversion, so the two paths agree
+/// bit-for-bit (pinned by `test_precompile_mirror_matches_upstream_delegation`).
+///
+/// Upgrading alloy-evm obliges a re-read of that upstream function: a new `PrecompileInput`
+/// field, a different dispatch address, a result cache, or any other added step must be mirrored
+/// here, or this silently stops being the same call.
+fn run_precompile_capturing_halt<DB: Database>(
+    precompiles: &PrecompilesMap,
+    context: &mut MegaInnerContext<DB>,
+    inputs: &CallInputs,
+) -> Result<Option<(InterpreterResult, Option<PrecompileHalt>)>, String> {
+    let Some(precompile) = precompiles.get(&inputs.bytecode_address) else {
+        return Ok(None);
+    };
+
+    let (block, tx, cfg, journaled_state, _, local) = context.all_mut();
+
+    let output = {
+        let _span =
+            tracing::trace_span!("precompile", name = precompile.precompile_id().name()).entered();
+        precompile.call(PrecompileInput {
+            data: inputs.input.as_bytes_local(local).as_ref(),
+            gas: inputs.gas_limit,
+            reservoir: inputs.reservoir,
+            caller: inputs.caller,
+            value: inputs.call_value(),
+            is_static: inputs.is_static,
+            internals: EvmInternals::new(journaled_state, block, cfg, tx),
+            target_address: inputs.target_address,
+            bytecode_address: inputs.bytecode_address,
+        })
+    }
+    .map_err(|e| e.to_string())?;
+
+    let halt = output.status.halt_reason().cloned();
+    Ok(Some((precompile_output_to_interpreter_result(output, inputs.gas_limit), halt)))
+}
+
 impl<DB: Database, ExtEnvs: ExternalEnvTypes> PrecompileProvider<MegaContext<DB, ExtEnvs>>
     for PrecompilesMap
 {
@@ -271,15 +322,12 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> PrecompileProvider<MegaContext<DB,
             &capped_inputs
         };
 
-        // `PrecompilesMap` implements the provider for revm's plain `Context`; delegate to the
-        // context `MegaContext` wraps.
-        let maybe_output = PrecompileProvider::<crate::MegaInnerContext<DB>>::run(
-            self,
-            &mut context.inner,
-            inputs,
-        )?;
+        // Run the precompile against the context `MegaContext` wraps. `halt` is the precompile's
+        // own halt reason, which the `InterpreterResult` no longer carries — the accounting arms
+        // below read it instead of trying to rebuild it from the collapsed instruction result.
+        let maybe_output = run_precompile_capturing_halt(self, &mut context.inner, inputs)?;
 
-        Ok(maybe_output.map(|mut output| {
+        Ok(maybe_output.map(|(mut output, halt)| {
             // Upstream revm-handler (`precompile_output_to_interpreter_result`) calls
             // `gas.spend_all()` for every non-success/non-revert precompile status, so
             // error-path Gas now reports `total_gas_spent() == limit`. Frozen REX5
@@ -325,17 +373,19 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> PrecompileProvider<MegaContext<DB,
             // * Success / revert: revm called `record_regular_cost`, so `total_gas_spent()` already
             //   reflects the actually-consumed amount. Use it.
             // * Fixed-cost precompile that reached past its wrapper gas pre-check (today: KZG with
-            //   `limit() >= GAS_COST`): the declared fixed cost is the work performed. Address
-            //   match uses `bytecode_address` (see above) so DELEGATECALL/CALLCODE to KZG still hit
-            //   this arm. Through REX6 that amount is the whole recorded charge; REX7 keeps it on
-            //   the enforcing lane and books the rest of the forwarded envelope — the
+            //   `limit() >= GAS_COST`): the call got through the gas gate and into the upstream
+            //   body, so how far it got decides what was performed. Address match uses
+            //   `bytecode_address` (see above) so DELEGATECALL/CALLCODE to KZG still hit this arm.
+            //   Through REX6 the fixed cost is charged for every halt this arm sees and is the
+            //   whole recorded charge; REX7 splits it by halt reason (below), keeping the performed
+            //   part on the enforcing lane and booking the rest of the forwarded envelope — the
             //   caller-supplied `gas_limit`, not the REX5-capped effective limit — as destroyed.
             //   The REX5 cap still prevents the precompile from *doing* more work than the
             //   remaining compute budget; the cap gap is part of the forwarded envelope, not work,
             //   so it belongs with the destroyed remainder.
             // * All other error paths (non-KZG, or KZG with `limit() < GAS_COST` meaning the
-            //   wrapper's pre-check itself OOG'd before verification could run): after the
-            //   spend_all undo above, `total_gas_spent() == 0` again. Through REX6 the parent still
+            //   wrapper's pre-check itself OOG'd before the body could run): after the spend_all
+            //   undo above, `total_gas_spent() == 0` again. Through REX6 the parent still
             //   permanently loses the forwarded amount, so those specs record `limit()` as
             //   enforcing usage to match the EVM-gas burn. REX7 treats the same path as
             //   performed-zero / destroyed-all: no work ran, so nothing enforces, and the forwarded
@@ -353,17 +403,30 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> PrecompileProvider<MegaContext<DB,
                 } else if address == kzg_point_evaluation::ADDRESS &&
                     output.gas.limit() >= kzg_point_evaluation::GAS_COST
                 {
-                    // KZG with the wrapper's `gas_limit < GAS_COST` pre-check passed: upstream
-                    // verification ran and returned a non-OOG error
-                    // (`BlobInvalidInputLength` / `BlobMismatchedVersion` /
-                    // `BlobVerifyKzgProofFailed`). Charge the fixed cost regardless of which
-                    // error variant fired. Using the structural predicate
-                    // (`limit() >= GAS_COST`) instead of an error-variant match keeps this arm
-                    // robust against upstream KZG adding new non-OOG variants.
-                    let executed = kzg_point_evaluation::GAS_COST;
-                    additional_limit.record_compute_gas(executed);
-                    if is_rex7 {
-                        additional_limit.record_burned_gas(gas_limit.saturating_sub(executed));
+                    // Inside the KZG body the halt reason marks how much of the fixed-price work
+                    // the call bought before failing. `BlobInvalidInputLength` is the doorway:
+                    // the input length is checked first, so a rejected length means the
+                    // commitment was never read and nothing was computed. Every other halt is
+                    // raised at or after the versioned-hash comparison, i.e. once verification is
+                    // under way, and MegaETH prices verification as the whole fixed fee however
+                    // far it got.
+                    //
+                    // The non-doorway side is a wildcard on purpose: an upstream KZG release that
+                    // adds a halt reason lands there, which can only over-charge, never
+                    // under-charge. So does the unreachable `halt == None` shape (a success or
+                    // revert whose `gas_used` outran the gas limit and was converted to an
+                    // out-of-gas), which no MegaETH-wired precompile can produce.
+                    //
+                    // REX6 and earlier take neither branch's split: they charge the fixed cost for
+                    // every halt this arm sees, doorway rejects included.
+                    if is_rex7 && matches!(halt, Some(PrecompileHalt::BlobInvalidInputLength)) {
+                        additional_limit.record_burned_gas(gas_limit);
+                    } else {
+                        let executed = kzg_point_evaluation::GAS_COST;
+                        additional_limit.record_compute_gas(executed);
+                        if is_rex7 {
+                            additional_limit.record_burned_gas(gas_limit.saturating_sub(executed));
+                        }
                     }
                 } else if is_rex7 {
                     additional_limit.record_burned_gas(gas_limit);
@@ -401,17 +464,20 @@ mod tests {
     use alloc as std;
     use std::{rc::Rc, vec::Vec};
 
-    use super::{kzg_point_evaluation::GAS_COST, mini_rex, modexp, rex, MegaPrecompiles};
+    use super::{
+        kzg_point_evaluation::GAS_COST, mini_rex, modexp, rex, run_precompile_capturing_halt,
+        MegaPrecompiles,
+    };
     use crate::{
         test_utils::MemoryDatabase, AdditionalLimit, EvmTxRuntimeLimits, MegaContext, MegaSpecId,
     };
-    use alloy_evm::precompiles::PrecompilesMap;
+    use alloy_evm::precompiles::{DynPrecompile, PrecompilesMap};
     use alloy_primitives::{Address, Bytes, U256};
     use core::cell::RefCell;
     use revm::{
         handler::PrecompileProvider,
         interpreter::{CallInputs, CallScheme, CallValue, InputsImpl, InstructionResult},
-        precompile::{PrecompileHalt, PrecompileOutput, PrecompileStatus},
+        precompile::{PrecompileHalt, PrecompileId, PrecompileOutput, PrecompileStatus},
         primitives::eip7823,
     };
     use sha2::{Digest, Sha256};
@@ -495,6 +561,37 @@ mod tests {
         let mut buf = bytes.to_vec();
         let last = buf.len() - 1;
         buf[last] ^= 0x01;
+        inputs.input = revm::interpreter::CallInput::Bytes(Bytes::from(buf));
+        inputs
+    }
+
+    /// Mirror of `generate_kzg_test_input()` truncated to 191 bytes — one short of the
+    /// required 192. Upstream rejects it at the doorway with
+    /// `PrecompileHalt::BlobInvalidInputLength`, before the commitment is looked at.
+    fn generate_wrong_length_kzg_test_input() -> InputsImpl {
+        let mut inputs = generate_kzg_test_input();
+        let bytes = match inputs.input {
+            revm::interpreter::CallInput::Bytes(b) => b,
+            _ => panic!("expected Bytes"),
+        };
+        let mut buf = bytes.to_vec();
+        buf.pop();
+        assert_eq!(buf.len(), 191, "the doorway probe must be one byte short of 192");
+        inputs.input = revm::interpreter::CallInput::Bytes(Bytes::from(buf));
+        inputs
+    }
+
+    /// Mirror of `generate_kzg_test_input()` with the versioned hash's trailing byte flipped —
+    /// still 192 bytes, so upstream clears the length doorway and fails the following
+    /// commitment/versioned-hash comparison with `PrecompileHalt::BlobMismatchedVersion`.
+    fn generate_mismatched_version_kzg_test_input() -> InputsImpl {
+        let mut inputs = generate_kzg_test_input();
+        let bytes = match inputs.input {
+            revm::interpreter::CallInput::Bytes(b) => b,
+            _ => panic!("expected Bytes"),
+        };
+        let mut buf = bytes.to_vec();
+        buf[31] ^= 0x01;
         inputs.input = revm::interpreter::CallInput::Bytes(Bytes::from(buf));
         inputs
     }
@@ -1137,6 +1234,349 @@ mod tests {
             "REX6 still records only the fixed fee",
         );
         assert_eq!(additional.burned_compute_gas(), 0, "REX6 has no destroyed lane");
+    }
+
+    // ── KZG failure split: doorway reject vs. verification under way ────────────────
+    //
+    // A KZG call that clears the wrapper's gas gate can still fail in two very different
+    // places, and REX7 prices them differently. The probes below pin each variant on its own
+    // side of the split, pin the frozen REX6 amounts for the same inputs, and pin the upstream
+    // check order the split is derived from.
+
+    /// Drives a KZG call that fails through the wired precompile table on `spec`.
+    ///
+    /// Returns the collapsed instruction result together with the tracker's reported and
+    /// destroyed compute gas, so each probe can state the split as
+    /// `reported - destroyed == enforced`.
+    fn record_kzg_failure(
+        spec: MegaSpecId,
+        inputs: &InputsImpl,
+        forwarded_gas: u64,
+    ) -> (InstructionResult, u64, u64) {
+        let mut db = MemoryDatabase::default();
+        let mut context = MegaContext::new(&mut db, spec);
+        let mut precompiles_map =
+            PrecompilesMap::from_static(MegaPrecompiles::new_with_spec(spec).precompiles());
+        let address = revm::precompile::kzg_point_evaluation::ADDRESS;
+
+        let result =
+            precompiles_map.run(&mut context, &call_inputs(inputs, address, true, forwarded_gas));
+        let output = result.expect("run ok").expect("Some output");
+        assert!(!output.result.is_ok_or_revert(), "the probe must fail; got {:?}", output.result,);
+
+        let additional = context.additional_limit.borrow();
+        (output.result, additional.get_usage().compute_gas, additional.burned_compute_gas())
+    }
+
+    /// The premise the REX7 split rests on: upstream checks the input length before it reads
+    /// the commitment, so a wrong length is a doorway reject and a mismatched versioned hash
+    /// is not. If upstream ever reorders those checks, the split's "nothing was computed"
+    /// claim stops holding and this turns red before the accounting probes do.
+    #[test]
+    fn test_kzg_halt_reasons_distinguish_the_doorway_from_verification() {
+        let map = PrecompilesMap::from_static(
+            MegaPrecompiles::new_with_spec(MegaSpecId::REX7).precompiles(),
+        );
+        let address = revm::precompile::kzg_point_evaluation::ADDRESS;
+
+        for (label, inputs, expected) in [
+            (
+                "wrong length",
+                generate_wrong_length_kzg_test_input(),
+                PrecompileHalt::BlobInvalidInputLength,
+            ),
+            (
+                "mismatched versioned hash",
+                generate_mismatched_version_kzg_test_input(),
+                PrecompileHalt::BlobMismatchedVersion,
+            ),
+            (
+                "invalid proof",
+                generate_invalid_proof_kzg_test_input(),
+                PrecompileHalt::BlobVerifyKzgProofFailed,
+            ),
+        ] {
+            let mut db = MemoryDatabase::default();
+            let mut context = MegaContext::new(&mut db, MegaSpecId::REX7);
+            let (_, halt) = run_precompile_capturing_halt(
+                &map,
+                &mut context.inner,
+                &call_inputs(&inputs, address, true, 1_000_000),
+            )
+            .expect("run ok")
+            .expect("Some output");
+            assert_eq!(halt, Some(expected), "{label}: unexpected KZG halt reason");
+        }
+    }
+
+    /// REX7 splits KZG failures by where they were raised: a doorway reject performed no work,
+    /// everything past the doorway is priced at the whole fixed fee.
+    #[test]
+    fn test_kzg_precompile_rex7_splits_failures_by_halt_reason() {
+        let forwarded = 1_000_000u64;
+
+        let (result, reported, destroyed) = record_kzg_failure(
+            MegaSpecId::REX7,
+            &generate_wrong_length_kzg_test_input(),
+            forwarded,
+        );
+        assert!(
+            matches!(result, InstructionResult::PrecompileError),
+            "a wrong-length reject is not an out-of-gas; got {result:?}",
+        );
+        assert_eq!(reported, forwarded, "reported compute is the whole forwarded envelope");
+        assert_eq!(destroyed, forwarded, "a doorway reject performed no work");
+        assert_eq!(reported - destroyed, 0, "so nothing enforces");
+
+        for (label, inputs) in [
+            ("mismatched versioned hash", generate_mismatched_version_kzg_test_input()),
+            ("invalid proof", generate_invalid_proof_kzg_test_input()),
+        ] {
+            let (_, reported, destroyed) = record_kzg_failure(MegaSpecId::REX7, &inputs, forwarded);
+            assert_eq!(reported, forwarded, "{label}: reported compute is the whole envelope");
+            assert_eq!(
+                reported - destroyed,
+                GAS_COST,
+                "{label}: verification was under way, so the fixed fee is the work performed",
+            );
+        }
+    }
+
+    /// REX6 pin for the same three inputs: the frozen spec charges the fixed fee for every KZG
+    /// failure it sees, doorway rejects included, and has no destroyed lane. Any drift in the
+    /// REX7 arm that leaked back into the shared code path shows up here.
+    #[test]
+    fn test_kzg_precompile_rex6_charges_the_fixed_cost_for_every_failure() {
+        let forwarded = 1_000_000u64;
+        for (label, inputs) in [
+            ("wrong length", generate_wrong_length_kzg_test_input()),
+            ("mismatched versioned hash", generate_mismatched_version_kzg_test_input()),
+            ("invalid proof", generate_invalid_proof_kzg_test_input()),
+        ] {
+            let (_, reported, destroyed) = record_kzg_failure(MegaSpecId::REX6, &inputs, forwarded);
+            assert_eq!(reported, GAS_COST, "{label}: REX6 records only the fixed fee");
+            assert_eq!(destroyed, 0, "{label}: REX6 has no destroyed lane");
+        }
+    }
+
+    /// The knife edge of the fixed-cost arm's `limit() >= GAS_COST` predicate, taken on a
+    /// doorway-rejected input.
+    ///
+    /// At exactly `GAS_COST` the wrapper's `gas_limit < GAS_COST` pre-check passes by one, the
+    /// call reaches the length doorway, and the split books the envelope as destroyed. One gas
+    /// lower the wrapper halts out of gas before the doorway, which is the generic error arm.
+    /// Both arms destroy the same envelope under REX7, so the edge is invisible there — but
+    /// REX6 charges the fixed fee on one side and the (equal) forwarded limit on the other, and
+    /// pinning both keeps the predicate's boundary from drifting unnoticed.
+    #[test]
+    fn test_kzg_precompile_wrong_length_at_the_fixed_cost_boundary() {
+        let inputs = generate_wrong_length_kzg_test_input();
+
+        let (result, reported, destroyed) = record_kzg_failure(MegaSpecId::REX7, &inputs, GAS_COST);
+        assert!(
+            matches!(result, InstructionResult::PrecompileError),
+            "at exactly GAS_COST the wrapper's gas gate passes; got {result:?}",
+        );
+        assert_eq!(reported, GAS_COST);
+        assert_eq!(destroyed, GAS_COST, "the doorway reject destroys the whole envelope");
+
+        let (result, reported, destroyed) =
+            record_kzg_failure(MegaSpecId::REX7, &inputs, GAS_COST - 1);
+        assert!(
+            matches!(result, InstructionResult::PrecompileOOG),
+            "one gas below GAS_COST the wrapper's gate halts first; got {result:?}",
+        );
+        assert_eq!(reported, GAS_COST - 1);
+        assert_eq!(destroyed, GAS_COST - 1, "the generic arm destroys the envelope too");
+
+        // Frozen side of the same edge.
+        let (_, reported, destroyed) = record_kzg_failure(MegaSpecId::REX6, &inputs, GAS_COST);
+        assert_eq!(reported, GAS_COST, "REX6 charges the fixed fee at the boundary");
+        assert_eq!(destroyed, 0);
+        let (_, reported, destroyed) = record_kzg_failure(MegaSpecId::REX6, &inputs, GAS_COST - 1);
+        assert_eq!(reported, GAS_COST - 1, "REX6 charges the forwarded limit below it");
+        assert_eq!(destroyed, 0);
+    }
+
+    // ── seam parity: the mirror must still be the upstream call ──────────────────────
+    //
+    // `run_precompile_capturing_halt` reimplements alloy-evm's `PrecompilesMap::run` so the
+    // precompile's halt reason survives the conversion. That is only safe while the
+    // reimplementation produces exactly what delegating would have produced, and nothing in
+    // the type system holds it there — an alloy-evm bump can change the upstream body
+    // underneath it. The probe below drives both paths over the same inputs and compares the
+    // whole `InterpreterResult`, so an upstream change the mirror has not picked up turns red
+    // here rather than silently shifting consensus.
+
+    /// Address the parity matrix installs a dynamic precompile at. Outside the builtin table,
+    /// so with the dynamic precompile absent the same case doubles as a dispatch-miss probe.
+    const PARITY_DYN_ADDRESS: Address = Address::with_last_byte(0x7e);
+
+    /// Builds the table both paths run against.
+    ///
+    /// `with_dynamic` installs a reverting precompile at [`PARITY_DYN_ADDRESS`], which also
+    /// flips the map into its dynamic representation — the `PrecompilesMap::get` branch the
+    /// builtin table never reaches, and the only way to produce a reverting precompile at all
+    /// (no builtin returns `PrecompileStatus::Revert`).
+    fn parity_precompiles(with_dynamic: bool) -> PrecompilesMap {
+        let mut map = PrecompilesMap::from_static(
+            MegaPrecompiles::new_with_spec(MegaSpecId::REX7).precompiles(),
+        );
+        if with_dynamic {
+            map.apply_precompile(&PARITY_DYN_ADDRESS, |_| {
+                Some(DynPrecompile::new(PrecompileId::Custom("parity-revert".into()), |input| {
+                    Ok(PrecompileOutput::revert(
+                        input.gas / 4,
+                        Bytes::from_static(b"reverted"),
+                        input.reservoir,
+                    ))
+                }))
+            });
+        }
+        map
+    }
+
+    /// One case per distinguishable path through the upstream body: dispatch miss, revert,
+    /// success, each KZG failure variant, the wrapper's own gas gate, a generic
+    /// malformed-input halt, an out-of-gas halt, and the DELEGATECALL bytecode-vs-target split.
+    fn parity_cases() -> Vec<(&'static str, CallInputs)> {
+        let kzg = revm::precompile::kzg_point_evaluation::ADDRESS;
+        let ecrecover = Address::with_last_byte(1);
+        let identity = Address::with_last_byte(4);
+        let blake2f = Address::with_last_byte(9);
+        let not_a_precompile = Address::with_last_byte(0xff);
+
+        let plain = |address: Address, data: Vec<u8>| InputsImpl {
+            target_address: address,
+            bytecode_address: Some(address),
+            caller_address: address,
+            input: revm::interpreter::CallInput::Bytes(Bytes::from(data)),
+            call_value: Default::default(),
+        };
+
+        vec![
+            (
+                "dispatch miss",
+                call_inputs(
+                    &plain(not_a_precompile, vec![1, 2, 3]),
+                    not_a_precompile,
+                    true,
+                    1_000_000,
+                ),
+            ),
+            (
+                "dynamic revert",
+                call_inputs(
+                    &plain(PARITY_DYN_ADDRESS, vec![7; 8]),
+                    PARITY_DYN_ADDRESS,
+                    true,
+                    1_000_000,
+                ),
+            ),
+            ("success", call_inputs(&plain(identity, vec![0xAB; 64]), identity, true, 1_000_000)),
+            ("kzg success", call_inputs(&generate_kzg_test_input(), kzg, true, 1_000_000)),
+            (
+                "kzg wrong length",
+                call_inputs(&generate_wrong_length_kzg_test_input(), kzg, true, 1_000_000),
+            ),
+            (
+                "kzg mismatched versioned hash",
+                call_inputs(&generate_mismatched_version_kzg_test_input(), kzg, true, 1_000_000),
+            ),
+            (
+                "kzg invalid proof",
+                call_inputs(&generate_invalid_proof_kzg_test_input(), kzg, true, 1_000_000),
+            ),
+            (
+                "kzg below the fixed cost",
+                call_inputs(&generate_kzg_test_input(), kzg, true, GAS_COST - 1),
+            ),
+            (
+                "blake2f malformed input",
+                call_inputs(&plain(blake2f, vec![0xAA; 32]), blake2f, true, 1_000_000),
+            ),
+            (
+                "ecrecover out of gas",
+                call_inputs(&plain(ecrecover, vec![0u8; 128]), ecrecover, true, 100),
+            ),
+            (
+                "delegatecall to kzg",
+                call_inputs_with_scheme(
+                    &generate_invalid_proof_kzg_test_input(),
+                    Address::repeat_byte(0xAB),
+                    kzg,
+                    true,
+                    200_000,
+                    CallScheme::DelegateCall,
+                ),
+            ),
+        ]
+    }
+
+    #[test]
+    fn test_precompile_mirror_matches_upstream_delegation() {
+        for with_dynamic in [false, true] {
+            for (label, inputs) in parity_cases() {
+                // Mirror path.
+                let mut mirror_db = MemoryDatabase::default();
+                let mut mirror_ctx = MegaContext::new(&mut mirror_db, MegaSpecId::REX7);
+                let mirror_map = parity_precompiles(with_dynamic);
+                let mirrored =
+                    run_precompile_capturing_halt(&mirror_map, &mut mirror_ctx.inner, &inputs)
+                        .expect("the mirror must not fail fatally");
+
+                // Delegated path: alloy-evm's own provider impl, reached exactly as the
+                // pre-mirror code reached it.
+                let mut delegate_db = MemoryDatabase::default();
+                let mut delegate_ctx = MegaContext::new(&mut delegate_db, MegaSpecId::REX7);
+                let mut delegate_map = parity_precompiles(with_dynamic);
+                let delegated = PrecompileProvider::<crate::MegaInnerContext<_>>::run(
+                    &mut delegate_map,
+                    &mut delegate_ctx.inner,
+                    &inputs,
+                )
+                .expect("delegation must not fail fatally");
+
+                match (mirrored, delegated) {
+                    (None, None) => {}
+                    (Some((mirror_result, halt)), Some(delegate_result)) => {
+                        assert_eq!(
+                            mirror_result.result, delegate_result.result,
+                            "{label} (dynamic table: {with_dynamic}): instruction result",
+                        );
+                        assert_eq!(
+                            mirror_result.output, delegate_result.output,
+                            "{label} (dynamic table: {with_dynamic}): output bytes",
+                        );
+                        assert_eq!(
+                            mirror_result.gas, delegate_result.gas,
+                            "{label} (dynamic table: {with_dynamic}): gas",
+                        );
+                        // Whole-struct equality also covers `Gas`'s private tracker and memory
+                        // fields, which the accessors above do not reach.
+                        assert_eq!(
+                            mirror_result, delegate_result,
+                            "{label} (dynamic table: {with_dynamic})",
+                        );
+                        // The captured signal must agree with the code the conversion collapsed
+                        // it into; a halt reason next to a success would mean the mirror read
+                        // the wrong output.
+                        assert_eq!(
+                            halt.is_some(),
+                            !mirror_result.result.is_ok_or_revert(),
+                            "{label} (dynamic table: {with_dynamic}): captured halt reason must \
+                             match the collapsed result",
+                        );
+                    }
+                    (mirror, delegate) => panic!(
+                        "{label} (dynamic table: {with_dynamic}): dispatch disagreed — mirror \
+                         returned {:?}, delegation returned {:?}",
+                        mirror.is_some(),
+                        delegate.is_some(),
+                    ),
+                }
+            }
+        }
     }
 
     /// Direct unit coverage for `PrecompileProvider::contains` on the Mega

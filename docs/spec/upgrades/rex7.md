@@ -32,7 +32,7 @@ Rex7 also makes two guard- and detention-related choices that Rex6 does not:
 Two deliberate accounting carve-outs remain.
 A frame that ends in an exceptional halt (including ordinary out-of-gas) settles its entire EVM-gas budget as compute gas, so a transaction that contains an inner out-of-gas call can report higher compute usage under Rex7 than under Rex6 even though EVM gas and the receipt are unchanged.
 That budget is split — the work the frame performed enforces like any other work, while the remainder it destroyed is reported but never enforced.
-A precompile that fails is split the same way at its recording site: executed work (the KZG fixed fee when verification ran; zero when the input was rejected before any work) enforces, and the unused caller-supplied envelope is destroyed.
+A precompile that fails is split the same way at its recording site: executed work (the KZG fixed fee when the call reached verification; zero when the input was rejected before any work, KZG's own 192-byte length check included) enforces, and the unused caller-supplied envelope is destroyed.
 The generic error arm therefore stops enforcing the whole forwarded amount, which is an intentional enforcement difference from Rex6; the Rex5 forwarded-gas cap still prevents the precompile from performing more work than the remaining compute budget.
 
 ## What Changed
@@ -101,7 +101,9 @@ When a nested execution merges its usage into an outer one, which today is only 
 
 A precompile invocation that fails is the same split, taken at the precompile recording site rather than at interpreter-frame exit — a precompile never becomes a child EVM frame, so the frame-exit settlement cannot see it.
 The **executed** part is the work the precompile performed: the KZG point-evaluation fixed cost when that precompile reached verification and returned a non-out-of-gas error, and zero when the invocation was rejected before any work (malformed input, or a wrapper out-of-gas that never reached verification).
-A node MUST record that part through the ordinary enforcing path.
+For KZG the boundary is its own input-length check, which runs before the commitment is read: an input whose length is not 192 bytes is a rejection before any work, while every other non-out-of-gas failure is raised once verification is under way and is priced at the whole fixed cost, however far it got.
+A node MUST price an unrecognised non-out-of-gas KZG failure as verification under way, so that an unfamiliar failure can only over-charge.
+A node MUST record the executed part through the ordinary enforcing path.
 The **destroyed** part is the rest of the call's gas limit — the caller-supplied envelope, not the Rex5-capped effective gas limit.
 On a value-transferring call that envelope includes the protocol-granted call stipend, so it can exceed what the parent itself funded.
 When the cap binds, the gap between the envelope and the effective limit is destroyed budget rather than work, and a node MUST include it in the destroyed part.

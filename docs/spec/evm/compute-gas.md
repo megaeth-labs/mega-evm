@@ -520,7 +520,9 @@ A precompile invocation that fails is the same split, taken at the precompile re
 A precompile never becomes a child EVM frame, so the frame-exit settlement cannot see it.
 
 - **Executed** — the work the precompile performed: the KZG point-evaluation fixed cost when that precompile reached verification and returned a non-out-of-gas error, and zero when the invocation was rejected before any work.
-  A node MUST record that part through the ordinary enforcing path.
+  For KZG the dividing line is its own input-length check, which runs before the commitment is read: an input whose length is not 192 bytes is turned away before any work, while every other non-out-of-gas failure is raised once verification is under way and is priced at the whole fixed cost regardless of how far it got.
+  A node MUST price an unrecognised non-out-of-gas KZG failure as verification under way, so an unfamiliar failure can only over-charge.
+  A node MUST record the executed part through the ordinary enforcing path.
 - **Destroyed** — the rest of the call's gas limit: the caller-supplied envelope minus the executed part.
   On a value-transferring call the envelope includes the protocol-granted call stipend, so it can exceed what the parent itself funded.
   That loss is the uncapped forwarded envelope, not the Rex5-capped effective gas limit; when the cap binds, the gap belongs to the destroyed part.
