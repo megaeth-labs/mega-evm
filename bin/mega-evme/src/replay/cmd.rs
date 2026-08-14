@@ -571,6 +571,17 @@ impl Cmd {
         let is_pending = mined.is_none();
 
         let (state_base_block, block_number) = if let Some((n, _)) = mined {
+            // Block 0 has no parent to fork from, so an endpoint resolving the
+            // target into the genesis block contradicts itself — same guard and
+            // wording as the batch path, and it also keeps `n - 1` from
+            // underflowing below.
+            if n == 0 {
+                return Err(ReplayError::RpcError(
+                    "endpoint resolved the target into block 0, which has no parent block \
+                     to fork from: contradictory endpoint data"
+                        .to_string(),
+                ));
+            }
             (n - 1, n)
         } else {
             let latest = provider

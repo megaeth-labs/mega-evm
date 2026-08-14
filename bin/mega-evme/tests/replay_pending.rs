@@ -363,6 +363,34 @@ async fn test_inclusion_hash_without_a_block_number_is_rejected_before_any_fetch
     );
 }
 
+/// A target resolved into block 0 is contradictory endpoint data: the genesis
+/// block has no parent to fork from. Same guard and exit class as the batch
+/// path — and the `n - 1` state-base computation must never run (in a debug
+/// build it would underflow).
+#[tokio::test(flavor = "multi_thread")]
+async fn test_target_resolved_into_block_zero_is_contradictory_endpoint_data() {
+    const GENESIS_HASH: &str = "0x6666666666666666666666666666666666666666666666666666666666666666";
+
+    let server = mock_chain_serving(tx_json(json!("0x0"), json!(GENESIS_HASH))).await;
+
+    let run = replay(&server);
+
+    assert_eq!(
+        run.code,
+        Some(3),
+        "a block-0 inclusion claim exits 3.\nstdout:\n{}\nstderr:\n{}",
+        run.stdout,
+        run.stderr,
+    );
+    let error = run.error_object();
+    assert_eq!(error["error"]["kind"].as_str(), Some("rpc-failure"));
+    let message = error["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("block 0") && message.contains("no parent block"),
+        "the message must name the block-0 contradiction: {error}"
+    );
+}
+
 /// A block number paired with a null inclusion hash is an unanchored view: the
 /// number alone cannot prove which block body the target belongs to. The run
 /// answers that from the metadata alone — exit 3 without a single block fetch —
