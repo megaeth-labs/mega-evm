@@ -250,17 +250,17 @@ impl AdditionalLimit {
     /// and the non-compute lane — so the third is whatever is left of `tx_gas_spent`:
     ///
     /// ```text
-    /// destroyed = tx_gas_spent + double_counted_call_stipend
+    /// destroyed = tx_gas_spent + minted_call_stipend
     ///             − non_compute_gas − enforced_compute_gas
     /// ```
     ///
     /// The stipend term is what makes "almost" necessary: recorded compute gas is deliberately not
     /// a partition of the gas the transaction spent, because a value-transferring call's
-    /// `CALL_STIPEND` is recorded by the caller and the callee both — see
-    /// [`CheckpointTracker::double_counted_call_stipend`](
-    /// checkpoint::CheckpointTracker::double_counted_call_stipend). Adding it back is measurement,
-    /// not correction: the amount is booked from the single site that already computes it, and
-    /// without it the two sides disagree by one stipend per such call.
+    /// `CALL_STIPEND` is minted into the child frame rather than debited from the caller — see
+    /// [`CheckpointTracker::minted_call_stipend`](
+    /// checkpoint::CheckpointTracker::minted_call_stipend). Adding it back is measurement, not
+    /// correction: the amount is booked from the single site that already computes it, and without
+    /// it the two sides disagree by one stipend per such call.
     ///
     /// `tx_gas_spent` must be read once the transaction's envelope is final and before any
     /// post-execution adjustment that moves gas without anyone having burnt it — see the caller in
@@ -271,28 +271,27 @@ impl AdditionalLimit {
     /// it at zero would hide the half of the mismatch space where the booking over-counts.
     #[inline]
     pub(crate) fn derived_burned_compute_gas(&self, tx_gas_spent: u64) -> i128 {
-        i128::from(tx_gas_spent) + i128::from(self.double_counted_call_stipend()) -
+        i128::from(tx_gas_spent) + i128::from(self.minted_call_stipend()) -
             self.non_compute_gas() -
             i128::from(self.enforced_compute_gas())
     }
 
-    /// The `CALL_STIPEND` total this transaction recorded twice, in the caller and again in the
-    /// callee — the term that keeps recorded compute gas from being a partition of what the
+    /// The `CALL_STIPEND` total this transaction's value-transferring calls minted into their
+    /// child frames — the term that keeps recorded compute gas from being a partition of what the
     /// transaction spent. Always 0 before REX7.
     #[inline]
-    pub(crate) fn double_counted_call_stipend(&self) -> u64 {
-        self.checkpoint.double_counted_call_stipend()
+    pub(crate) fn minted_call_stipend(&self) -> u64 {
+        self.checkpoint.minted_call_stipend()
     }
 
-    /// Books one `CALL_STIPEND` that the caller's compute window kept and the callee will record
-    /// again (REX7+).
+    /// Books one `CALL_STIPEND` minted into a child frame that the caller never funded (REX7+).
     ///
     /// Called from the CALL-family settlement once the child frame is certain to run: on the
     /// compute-limit abort path the pending child is discarded and its forwarded gas returned, so
-    /// no stipend is ever handed over and nothing is recorded twice.
+    /// the mint never reaches a frame and there is nothing to book.
     #[inline]
-    pub(crate) fn record_double_counted_call_stipend(&mut self, amount: u64) {
-        self.checkpoint.record_double_counted_call_stipend(amount);
+    pub(crate) fn record_minted_call_stipend(&mut self, amount: u64) {
+        self.checkpoint.record_minted_call_stipend(amount);
     }
 
     /// The EVM gas the transaction has spent that is neither compute work nor destroyed (REX7+,
