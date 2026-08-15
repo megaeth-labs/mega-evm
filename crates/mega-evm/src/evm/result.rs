@@ -40,8 +40,14 @@ pub struct MegaTransactionOutcome {
     /// them diverge from that path: the burn split is settled before `frame_end`, and the
     /// plain-segment delta is read from the interpreter counter.
     pub compute_gas_used: u64,
-    /// The part of [`compute_gas_used`](Self::compute_gas_used) that exceptionally halted frames
-    /// destroyed rather than performed (Rex7+, always 0 before).
+    /// The part of [`compute_gas_used`](Self::compute_gas_used) the transaction destroyed rather
+    /// than performed (Rex7+, always 0 before).
+    ///
+    /// Derived from what the transaction spent, not summed from the sites that destroyed it: gas
+    /// the transaction burnt is either work the trackers recorded, MegaETH storage gas, or a
+    /// budget something threw away without executing anything for it, and this field is the last
+    /// of the three read off as the remainder. A transaction that produces no receipt has no
+    /// envelope to split and reports zero.
     ///
     /// Destroyed gas is not work the network did, so no resource limit is evaluated against it.
     /// The transaction's own limits already excluded it while executing; a consumer that

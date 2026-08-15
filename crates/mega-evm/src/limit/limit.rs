@@ -269,6 +269,8 @@ impl AdditionalLimit {
     ///
     /// Signed on purpose: a mismatch against the booked total is a defect to report, and clamping
     /// it at zero would hide the half of the mismatch space where the booking over-counts.
+    /// [`settle_destroyed_compute_gas`](Self::settle_destroyed_compute_gas) is what turns the
+    /// signed result into the number the transaction reports.
     #[inline]
     pub(crate) fn derived_burned_compute_gas(&self, tx_gas_spent: u64) -> i128 {
         i128::from(tx_gas_spent) + i128::from(self.minted_call_stipend()) -
@@ -282,6 +284,68 @@ impl AdditionalLimit {
     #[inline]
     pub(crate) fn minted_call_stipend(&self) -> u64 {
         self.checkpoint.minted_call_stipend()
+    }
+
+    /// Settles the transaction's destroyed compute gas from the conservation law and stores it as
+    /// the number the transaction reports (REX7+; a no-op before, where nothing is destroyed).
+    ///
+    /// `tx_gas_spent` must be the envelope the transaction actually burnt, read at the one moment
+    /// it is final: after op-revm has normalised the gas object and the resource-limit rescue has
+    /// been handed back, and before `post_execution` applies the EIP-3529 refund and the EIP-7623
+    /// floor. Those two move the number the receipt reports without anybody having burnt the
+    /// difference, so reading after them would fold a refund into the destroyed total. Gas that is
+    /// rescued for the sender and gas the clamp was hiding are both erased from the envelope
+    /// before this point, so neither can reach the subtraction either.
+    ///
+    /// The per-site destroyed bookings do not feed this number. They stay as the independent
+    /// second opinion the `debug_assert` below cross-checks the derivation against, so a site that
+    /// destroys an envelope without booking it — or a spend the non-compute lane does not know
+    /// about — still fails loudly in debug builds and in the test corpus.
+    ///
+    /// A negative derivation is defended against rather than expected: it would mean the recorded
+    /// compute and non-compute lanes together claim more gas than the transaction spent, which no
+    /// spec produces today. Debug builds trip on it; release builds clamp to zero so a reporting
+    /// defect cannot wrap into an enormous destroyed total.
+    #[inline]
+    pub(crate) fn settle_destroyed_compute_gas(&mut self, tx_gas_spent: u64) {
+        if !self.rex7_enabled() {
+            return;
+        }
+        let derived = self.derived_burned_compute_gas(tx_gas_spent);
+        debug_assert!(
+            derived >= 0,
+            "derived destroyed compute gas is negative: {derived} \
+             (spent {tx_gas_spent}, minted stipend {}, non-compute {}, enforced compute {})",
+            self.minted_call_stipend(),
+            self.non_compute_gas(),
+            self.enforced_compute_gas(),
+        );
+        debug_assert!(
+            derived == i128::from(self.burned_compute_gas()),
+            "destroyed compute gas disagrees with the conservation law: \
+             derived {derived} vs booked {} \
+             (spent {tx_gas_spent}, minted stipend {}, non-compute {}, enforced compute {})",
+            self.burned_compute_gas(),
+            self.minted_call_stipend(),
+            self.non_compute_gas(),
+            self.enforced_compute_gas(),
+        );
+        let settled = u64::try_from(derived.max(0)).unwrap_or(u64::MAX);
+        self.checkpoint.set_settled_destroyed(settled);
+    }
+
+    /// The transaction's destroyed compute gas, as settled by
+    /// [`settle_destroyed_compute_gas`](Self::settle_destroyed_compute_gas) — the part of
+    /// [`get_usage`](Self::get_usage)'s `compute_gas` that is reported and accounted but never
+    /// enforced.
+    ///
+    /// This is the reporting answer, and the only one a caller outside this module should use.
+    /// [`burned_compute_gas`](Self::burned_compute_gas) is the per-site booking that backs the
+    /// transaction's own enforcement and cross-checks this derivation; the two agree, and reading
+    /// the wrong one would silently pick the wrong side of that check.
+    #[inline]
+    pub(crate) fn destroyed_compute_gas(&self) -> u64 {
+        self.checkpoint.settled_destroyed()
     }
 
     /// Books one `CALL_STIPEND` minted into a child frame that the caller never funded (REX7+).
@@ -442,13 +506,18 @@ impl AdditionalLimit {
         self.has_exceeded_limit = LimitCheck::Exempt;
     }
 
-    /// The part of [`get_usage`](Self::get_usage)'s `compute_gas` that exceptionally halted frames
-    /// destroyed rather than performed (REX7+, always 0 before).
+    /// The destroyed remainders the per-site bookings recorded, summed as they happened (REX7+,
+    /// always 0 before) — **not** the number the transaction reports.
     ///
-    /// Reported and accounted like the rest of the total, never enforced. A caller that merges
-    /// this transaction's usage into another tracker — today the `KeylessDeploy` sandbox boundary —
-    /// has to carry it alongside the total, or the receiving tracker re-enforces gas the EVM
-    /// already destroyed.
+    /// This is the sum that separates the recorded compute total into the work every limit is
+    /// evaluated against and the remainder none of them sees, so it is what the transaction's own
+    /// enforcement runs on, and what a tracker merging this transaction's usage — today the
+    /// `KeylessDeploy` sandbox boundary — must carry alongside the total, or the receiving tracker
+    /// re-enforces gas the EVM already destroyed.
+    ///
+    /// It is also the second opinion the settlement point's `debug_assert` holds the derivation
+    /// to. For the reported destroyed total use
+    /// [`destroyed_compute_gas`](Self::destroyed_compute_gas).
     #[inline]
     pub(crate) fn burned_compute_gas(&self) -> u64 {
         self.compute_gas.burned_usage()

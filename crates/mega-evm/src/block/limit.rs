@@ -926,10 +926,11 @@ impl BlockLimiter {
     /// accounting.
     ///
     /// Compute gas arrives as two numbers, not one: `compute_gas_used` is the transaction's full
-    /// reported total and `compute_gas_destroyed` is the part of it that Rex7+ exceptionally
-    /// halted frames destroyed rather than performed (0 before Rex7). The reported total lands in
-    /// the public statistic and the difference in the counter the block compute-gas limit is
-    /// evaluated against.
+    /// reported total and `compute_gas_destroyed` is the part of it that Rex7+ destroyed rather
+    /// than performed (0 before Rex7). The reported total lands in the public statistic and the
+    /// difference in the counter the block compute-gas limit is evaluated against. Both come from
+    /// the transaction's own report, so the block inherits whatever the transaction settled — it
+    /// does not re-derive the split, and there is no second definition of it here.
     #[allow(clippy::too_many_arguments)]
     pub fn post_execution_update_raw(
         &mut self,

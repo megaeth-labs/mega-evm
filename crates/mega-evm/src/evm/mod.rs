@@ -367,7 +367,7 @@ where
             data_size,
             kv_updates,
             compute_gas_used: compute_gas,
-            compute_gas_destroyed: additional_limit.burned_compute_gas(),
+            compute_gas_destroyed: additional_limit.destroyed_compute_gas(),
             state_growth_used: state_growth,
         })
     }
@@ -399,7 +399,7 @@ where
             data_size,
             kv_updates,
             compute_gas_used: compute_gas,
-            compute_gas_destroyed: additional_limit.burned_compute_gas(),
+            compute_gas_destroyed: additional_limit.destroyed_compute_gas(),
             state_growth_used: state_growth,
         })
     }

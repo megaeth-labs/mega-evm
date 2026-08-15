@@ -1050,35 +1050,25 @@ where
         if is_mini_rex {
             let ctx = evm.ctx_mut();
 
-            let additional_limit = ctx.additional_limit.borrow();
+            let mut additional_limit = ctx.additional_limit.borrow_mut();
             let gas = frame_result.gas_mut();
             gas.erase_cost(additional_limit.rescued_gas);
 
-            // REX7: the transaction's envelope is now final — op-revm has normalised the gas
-            // object to `tx.gas_limit()`, the rescue has been handed back, and every frame's
-            // burn settlement and every precompile recording already ran. Nothing after this
-            // point burns gas; `post_execution`'s EIP-3529 refund and EIP-7623 floor only move
-            // the number the receipt reports. So this is where the destroyed remainder can be
-            // re-derived from what the transaction spent and checked against what the per-site
-            // recordings booked. A mismatch means either a site that destroys an envelope
-            // without booking it, or a spend the non-compute lane does not know about.
+            // REX7 settlement point. The transaction's envelope is final exactly here: op-revm
+            // has normalised the gas object to `tx.gas_limit()`, the rescue has been handed back,
+            // and every frame's burn settlement and every precompile recording already ran.
+            // Nothing after this point burns gas — `post_execution`'s EIP-3529 refund and EIP-7623
+            // floor only move the number the receipt reports — so this is the one place the
+            // envelope can be read to derive what the transaction destroyed. Reading it any later
+            // would fold a refund into the destroyed total; reading it any earlier would miss the
+            // rescue. The derived value is what the transaction reports, so this read point is
+            // load-bearing for the reported number, not just for the cross-check it also runs.
             //
             // `total_gas_spent` rather than the deprecated `spent`: the two are the same
             // subtraction today, and EIP-8037's state-gas split — which is what deprecated the
             // latter — is pinned off for every `MegaEVM` transaction, so the reservoir is
             // structurally zero here.
-            debug_assert!(
-                !additional_limit.rex7_enabled() ||
-                    additional_limit.derived_burned_compute_gas(gas.total_gas_spent()) ==
-                        i128::from(additional_limit.burned_compute_gas()),
-                "destroyed compute gas disagrees with the conservation law: \
-                 derived {} vs booked {} (spent {}, non-compute {}, enforced compute {})",
-                additional_limit.derived_burned_compute_gas(gas.total_gas_spent()),
-                additional_limit.burned_compute_gas(),
-                gas.total_gas_spent(),
-                additional_limit.non_compute_gas(),
-                additional_limit.enforced_compute_gas(),
-            );
+            additional_limit.settle_destroyed_compute_gas(gas.total_gas_spent());
         }
 
         Ok(())

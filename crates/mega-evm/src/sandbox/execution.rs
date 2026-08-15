@@ -659,6 +659,13 @@ fn run_sandbox_ctx<DB: AlloyDatabase, ExtEnvs: ExternalEnvTypes>(
         let additional_limit = sandbox_evm.ctx.additional_limit.borrow();
         SandboxUsage {
             usage: additional_limit.get_usage(),
+            // The per-site booking, deliberately, not the sandbox's own derived report. What
+            // crosses this boundary is the split the parent must *enforce* on: the parent adds
+            // the sandbox's whole total to its own and then declares this much of it
+            // non-enforcing, which is how it inherits the sandbox's executed compute. The
+            // parent's reported destroyed total is settled once, from the conservation law, at
+            // the outer transaction's settlement point — this number is an input to the term
+            // that derivation reads, not a second place destroyed gas gets reported.
             burned_compute_gas: additional_limit.burned_compute_gas(),
         }
     };

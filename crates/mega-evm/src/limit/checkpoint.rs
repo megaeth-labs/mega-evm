@@ -81,6 +81,15 @@ pub(crate) struct CheckpointTracker {
     /// the destroyed-remainder derivation has to account for the minted gas before the two sides
     /// can agree. The behaviour is REX5 semantics and is frozen; this field only measures it.
     minted_call_stipend: u64,
+
+    /// The transaction's destroyed compute gas, as derived from the conservation law once its
+    /// envelope was final — the number the transaction reports.
+    ///
+    /// Zero until the settlement point writes it, so a transaction that never reaches settlement
+    /// (a validation reject, which produces no receipt) reports nothing destroyed. See
+    /// [`AdditionalLimit::settle_destroyed_compute_gas`](
+    /// super::AdditionalLimit::settle_destroyed_compute_gas).
+    settled_destroyed: u64,
 }
 
 /// A gas clamp in force for one plain-opcode segment (REX7+).
@@ -107,6 +116,7 @@ impl CheckpointTracker {
             latched_detained: false,
             non_compute_gas: 0,
             minted_call_stipend: 0,
+            settled_destroyed: 0,
         }
     }
 
@@ -116,6 +126,7 @@ impl CheckpointTracker {
         self.latched_detained = false;
         self.non_compute_gas = 0;
         self.minted_call_stipend = 0;
+        self.settled_destroyed = 0;
     }
 
     /// Whether compute gas settles at checkpoints (REX7+) rather than per opcode.
@@ -222,6 +233,20 @@ impl CheckpointTracker {
     #[inline]
     pub(crate) fn minted_call_stipend(&self) -> u64 {
         self.minted_call_stipend
+    }
+
+    /// Stores the destroyed compute gas the settlement point derived — see
+    /// [`settled_destroyed`](Self::settled_destroyed).
+    #[inline]
+    pub(crate) fn set_settled_destroyed(&mut self, amount: u64) {
+        self.settled_destroyed = amount;
+    }
+
+    /// The destroyed compute gas the settlement point derived — see
+    /// [`settled_destroyed`](Self::settled_destroyed).
+    #[inline]
+    pub(crate) fn settled_destroyed(&self) -> u64 {
+        self.settled_destroyed
     }
 
     /// Returns the unsettled segment usage and re-opens the window at `remaining`.
