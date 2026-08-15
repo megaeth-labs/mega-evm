@@ -183,6 +183,12 @@ where
             // the sender. So no transaction on a spec that has the destroyed lane reaches this
             // branch today; the recording is what keeps the lane correct if a later spec grows an
             // intrinsic component that is only resolved after validation.
+            //
+            // That reachability is what the booking here relies on: this path returns its result
+            // without running the frame loop, so it never reaches the settlement in
+            // `last_frame_result` that derives the reported destroyed total. A spec that made the
+            // branch reachable would produce a receipt reporting nothing destroyed while this
+            // booking says otherwise, and would have to settle the derivation here as well.
             if ctx.spec.is_enabled(MegaSpecId::REX7) {
                 let mut additional_limit = ctx.additional_limit.borrow_mut();
                 // Nothing can have been destroyed before the first frame, so the recorded total

@@ -129,6 +129,22 @@ fn run_block(
     block_compute_gas_limit: u64,
     txs: &[MegaTxEnvelope],
 ) -> Vec<Contribution> {
+    run_block_reporting(spec, block_compute_gas_limit, txs, None)
+}
+
+/// [`run_block`], with a test channel that rewrites each transaction's **reported** destroyed
+/// total between execution and commit.
+///
+/// `reported_destroyed` is the value handed to the block in place of the one the transaction
+/// derived, which is how a test forces the derived report and the per-site enforcement lane apart
+/// — a divergence execution itself cannot produce, since the two are cross-checked against each
+/// other at settlement. The `Contribution` still carries what the transaction really derived.
+fn run_block_reporting(
+    spec: MegaSpecId,
+    block_compute_gas_limit: u64,
+    txs: &[MegaTxEnvelope],
+    reported_destroyed: Option<u64>,
+) -> Vec<Contribution> {
     let mut db = build_db();
     let mut state = State::builder().with_database(&mut db).build();
     let external_envs = TestExternalEnvs::<Infallible>::new();
@@ -156,12 +172,15 @@ fn run_block(
 
     let mut contributions = Vec::new();
     for tx in txs {
-        let Ok(outcome) = executor.run_transaction(Recovered::new_unchecked(tx, CALLER)) else {
+        let Ok(mut outcome) = executor.run_transaction(Recovered::new_unchecked(tx, CALLER)) else {
             break;
         };
         let succeeded = outcome.result.is_success();
         let reported = outcome.compute_gas_used;
         let destroyed = outcome.compute_gas_destroyed;
+        if let Some(rewritten) = reported_destroyed {
+            outcome.compute_gas_destroyed = rewritten;
+        }
         executor.commit_transaction_outcome(outcome).expect("the commit must be admitted too");
 
         let limiter = &executor.block_limiter;
@@ -281,6 +300,64 @@ fn test_rex7_sandbox_destroyed_remainder_does_not_close_the_block_either() {
     );
     assert!(!sandbox.block_full, "a sandbox's destroyed remainder must not fill the block");
     assert!(cheap.succeeded, "the second transaction must execute normally");
+}
+
+/// Block admission must not move when the transaction's *reported* destroyed total does.
+///
+/// The reported number is derived from a conservation law over the transaction's gas envelope; the
+/// number the block admits on is the compute-gas recordings' own enforcement lane. The two agree —
+/// a settlement cross-check fails loudly in debug builds if they ever stop — but only one of them
+/// is a measurement of work performed, and admission runs on that one. Here the two are forced
+/// apart at the seam the block reads, in both directions, which is a divergence execution cannot
+/// produce on its own.
+///
+/// The block must be indifferent. A block that reached its enforced counter by subtracting the
+/// reported total would not be: the fixture reports five times the block's compute ceiling, so
+/// under-reporting the destroyed part would close the block on the spot and refuse the transaction
+/// behind it, and over-reporting it would credit the transaction with no work at all. That is the
+/// difference between a lost term in the law misreporting a statistic and repacking blocks.
+#[test]
+fn test_rex7_block_admission_ignores_the_reported_destroyed_total() {
+    let txs = [
+        envelope(0, HALTING_TX_GAS_LIMIT, HALTING, Bytes::new()),
+        envelope(1, 100_000, CHEAP, Bytes::new()),
+    ];
+    let honest = run_block(MegaSpecId::REX7, BLOCK_COMPUTE_GAS_LIMIT, &txs);
+
+    assert_eq!(honest.len(), 2, "the honest run must admit both transactions");
+    assert!(honest[0].destroyed > 0, "the fixture must destroy a remainder to misreport one");
+    assert!(
+        honest[0].reported > BLOCK_COMPUTE_GAS_LIMIT,
+        "the reported total must clear the block ceiling, or rewriting the destroyed part could \
+         not change admission however it were read; got {}",
+        honest[0].reported,
+    );
+
+    // Under-reporting the destroyed part, then over-reporting it past the reported total itself.
+    for rewritten in [0, u64::MAX] {
+        let poisoned =
+            run_block_reporting(MegaSpecId::REX7, BLOCK_COMPUTE_GAS_LIMIT, &txs, Some(rewritten));
+
+        assert_eq!(
+            poisoned.len(),
+            honest.len(),
+            "reported destroyed {rewritten}: the block admitted a different set of transactions",
+        );
+        for (index, (seen, expected)) in poisoned.iter().zip(&honest).enumerate() {
+            assert_eq!(
+                seen.block_enforced, expected.block_enforced,
+                "reported destroyed {rewritten}, tx {index}: the enforced counter moved",
+            );
+            assert_eq!(
+                seen.block_reported, expected.block_reported,
+                "reported destroyed {rewritten}, tx {index}: the reported counter moved",
+            );
+            assert_eq!(
+                seen.block_full, expected.block_full,
+                "reported destroyed {rewritten}, tx {index}: block admission changed",
+            );
+        }
+    }
 }
 
 /// Executed work still fills the block: the split is a classification, not a way out of the block

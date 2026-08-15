@@ -1031,8 +1031,10 @@ macro_rules! record_storage_compute_gas {
         // `forwarded_child_gas` records that deducted amount so the abort path below can return it
         // to the parent.
         let mut forwarded_child_gas: u64 = 0;
-        // The stipend revm mints into the child's budget without debiting the caller, booked only
-        // once the child is certain to run — see the abort path below.
+        // The stipend revm mints into the child's budget without debiting the caller, booked once
+        // this opcode hands the child invocation on — whether or not a child frame then runs. The
+        // one path that mints nothing is the compute-limit abort below, which discards the pending
+        // child before the EVM ever sees it.
         let mut minted_call_stipend: u64 = 0;
         match $context.interpreter.bytecode.action() {
             Some(InterpreterAction::NewFrame(FrameInput::Call(call_inputs))) => {
@@ -1066,10 +1068,13 @@ macro_rules! record_storage_compute_gas {
                 additional_limit.sync_checkpoint_baseline(gas_after);
             }
             if additional_limit.record_compute_gas(gas_used) {
-                // The child will run, so the stipend revm minted into its budget is now live: the
-                // callee either spends it as work no envelope funded, or hands it back and shrinks
-                // the envelope. Book it where the destroyed-remainder derivation can reconcile the
-                // recorded work against what the transaction spent.
+                // The invocation survives this opcode, so the stipend revm minted into its budget
+                // is now live, whatever becomes of the child: the callee spends it as work no
+                // envelope funded, or hands it back and shrinks the envelope, or never runs at all
+                // — a frame init that fails on balance or depth refunds the whole child budget,
+                // mint included, into the caller's envelope, which shrinks it by the same amount.
+                // Book it where the destroyed-remainder derivation can reconcile the recorded work
+                // against what the transaction spent.
                 additional_limit.record_minted_call_stipend(minted_call_stipend);
                 None
             } else {

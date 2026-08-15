@@ -73,9 +73,11 @@ pub(crate) struct CheckpointTracker {
     ///
     /// The minted gas leaves the transaction one stipend richer per such call, however it is used.
     /// Spent by the callee, it is recorded as work no envelope paid for; returned when the child
-    /// exits, it shrinks the envelope by the same amount. Either way the frames' recorded work
-    /// exceeds what the transaction spent by exactly one `CALL_STIPEND` per call, whatever the
-    /// callee did with it.
+    /// exits, it shrinks the envelope by the same amount. A child that never runs at all — a frame
+    /// init that fails on balance or call depth — refunds the whole budget, mint included, and so
+    /// shrinks the envelope exactly as a child that returned it would. Every outcome leaves the
+    /// frames' recorded work exceeding what the transaction spent by one `CALL_STIPEND` per call,
+    /// which is why the mint, not the child frame, is what this field counts.
     ///
     /// So the recorded compute total is *not* a partition of the gas the transaction spent, and
     /// the destroyed-remainder derivation has to account for the minted gas before the two sides
@@ -86,8 +88,9 @@ pub(crate) struct CheckpointTracker {
     /// envelope was final — the number the transaction reports.
     ///
     /// Zero until the settlement point writes it, so a transaction that never reaches settlement
-    /// (a validation reject, which produces no receipt) reports nothing destroyed. See
-    /// [`AdditionalLimit::settle_destroyed_compute_gas`](
+    /// reports nothing destroyed: a validation reject, which produces no receipt to report into,
+    /// and the pre-execution intrinsic overrun, which is itself a validation reject on every spec
+    /// that has this lane. See [`AdditionalLimit::settle_destroyed_compute_gas`](
     /// super::AdditionalLimit::settle_destroyed_compute_gas).
     settled_destroyed: u64,
 }

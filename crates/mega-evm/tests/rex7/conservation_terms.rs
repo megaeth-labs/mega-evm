@@ -186,6 +186,79 @@ fn test_several_minted_stipends_in_one_transaction() {
     }
 }
 
+/// A caller with no balance at all, so its value-transferring call cannot be funded.
+///
+/// Everything else about the fixture matches [`run_fixture`]: the caller pops the call's success
+/// flag and returns normally, so the transaction succeeds and the only destroyed remainder is the
+/// one the destroying child leaves behind.
+fn run_unfunded_fixture(destroy: bool) -> Outcome {
+    let mut builder = call_code(BytecodeBuilder::default(), EMPTY_TARGET, 1, 100_000);
+    if destroy {
+        builder = call_code(builder, CALLEE, 0, DESTROYING_CHILD_GAS);
+    }
+    let db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(10 * ONE_ETH))
+        .account_code(CONTRACT, builder.append(STOP).build())
+        // No balance for CONTRACT: revm turns the value call away at frame init.
+        .account_code(CALLEE, Bytes::from_static(&[ADD]));
+    transact_default(MegaSpecId::REX7, db)
+}
+
+/// A value-transferring call whose child frame never runs still mints a stipend, and the law needs
+/// it booked.
+///
+/// The stipend is created by the CALL opcode, before the callee is entered: the inherited EVM adds
+/// it to the child's budget without debiting the caller. A call that is then turned away at frame
+/// init — here for want of balance, equally for exceeding the call depth — hands that whole budget
+/// back to the caller, mint included, so the envelope shrinks against recorded work by exactly one
+/// stipend, the same way a child that ran and returned it would.
+///
+/// Booking the mint on "the child frame ran" instead would leave the term short by 2,300 on this
+/// shape, which any contract can produce, and the derived remainder short by the same amount:
+/// [`EXPECTED_DESTROYED`] − [`CALL_STIPEND`] rather than [`EXPECTED_DESTROYED`].
+#[test]
+fn test_stipend_is_minted_by_a_value_call_whose_child_frame_never_runs() {
+    let alone = run_unfunded_fixture(false);
+    let with_destroyed_envelope = run_unfunded_fixture(true);
+
+    assert!(alone.is_success(), "the caller must survive its failed call: {:?}", alone.result);
+    assert!(
+        with_destroyed_envelope.is_success(),
+        "the caller must survive both children: {:?}",
+        with_destroyed_envelope.result,
+    );
+
+    // The child frame really never ran: an unfunded value call materialises nothing at the target.
+    assert!(
+        alone.state.get(&EMPTY_TARGET).is_none_or(|account| account.is_empty()),
+        "the value call must have been turned away before the target was touched",
+    );
+
+    assert_eq!(
+        alone.minted_call_stipend, CALL_STIPEND,
+        "the mint is created by the CALL opcode, not by the child frame",
+    );
+    assert_eq!(
+        alone.destroyed, 0,
+        "a refunded child budget is not a destroyed one: nothing here was thrown away",
+    );
+
+    assert_eq!(
+        with_destroyed_envelope.minted_call_stipend, CALL_STIPEND,
+        "the failed value call still mints, with a destroying sibling alongside it",
+    );
+    assert_eq!(
+        with_destroyed_envelope.destroyed,
+        EXPECTED_DESTROYED,
+        "only the destroying child's remainder is destroyed; dropping the mint would report {}",
+        EXPECTED_DESTROYED - CALL_STIPEND,
+    );
+    assert_eq!(
+        with_destroyed_envelope.destroyed, with_destroyed_envelope.booked_destroyed,
+        "the derived remainder and the per-site bookings must agree",
+    );
+}
+
 /// Builds a deterministic pre-EIP-155 keyless deployment transaction.
 fn keyless_tx_bytes(init_code: Bytes, gas_limit: u64) -> Bytes {
     let tx = TxLegacy {

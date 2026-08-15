@@ -657,7 +657,7 @@ impl BlockLimits {
 ///
 ///     // Post-execution update (the executor commit path drives this internally)
 ///     limiter.post_execution_update_raw(
-///         gas, tx_size, da_size, data, kv, compute, destroyed_compute, growth, is_deposit,
+///         gas, tx_size, da_size, data, kv, compute, enforced_compute, growth, is_deposit,
 ///     );
 /// }
 /// ```
@@ -696,13 +696,17 @@ pub struct BlockLimiter {
     pub block_compute_gas_used: u64,
 
     /// The part of [`block_compute_gas_used`](Self::block_compute_gas_used) the block enforces:
-    /// the same total with each transaction's destroyed remainder subtracted.
+    /// the sum of what each transaction performed and evaluated its own compute limit against.
     ///
     /// Destroyed gas is not work the network performed, and no resource limit is evaluated against
     /// it at any level. A transaction whose reported total dwarfs its executed work would
     /// otherwise close the block's compute capacity for everyone behind it while having computed
     /// almost nothing. Before Rex7 nothing is ever destroyed, so this counter and the reported one
     /// advance in lockstep.
+    ///
+    /// Each transaction contributes the number its own enforcement ran on, not that transaction's
+    /// reported total less its reported destroyed remainder — the two are equal, but only one of
+    /// them is a measurement of work performed.
     pub block_compute_gas_enforced: u64,
 
     /// Cumulative state growth consumed by all transactions in the block.
@@ -926,11 +930,17 @@ impl BlockLimiter {
     /// accounting.
     ///
     /// Compute gas arrives as two numbers, not one: `compute_gas_used` is the transaction's full
-    /// reported total and `compute_gas_destroyed` is the part of it that Rex7+ destroyed rather
-    /// than performed (0 before Rex7). The reported total lands in the public statistic and the
-    /// difference in the counter the block compute-gas limit is evaluated against. Both come from
-    /// the transaction's own report, so the block inherits whatever the transaction settled — it
-    /// does not re-derive the split, and there is no second definition of it here.
+    /// reported total, and `compute_gas_enforced` is the part of it the transaction performed and
+    /// evaluated its own compute limit against (equal to the total before Rex7, which destroys
+    /// nothing). The reported total lands in the public statistic and the enforced part in the
+    /// counter the block compute-gas limit is evaluated against.
+    ///
+    /// The enforced number is taken, not computed here from the transaction's reported destroyed
+    /// total. Block admission is enforcement, and it therefore reads the same per-opcode and
+    /// checkpoint recordings the transaction enforced on, rather than a quantity derived for
+    /// reporting: subtracting the reported destroyed total would put a reporting derivation on the
+    /// admission path, where an error in it would repack blocks instead of misreporting a
+    /// statistic.
     #[allow(clippy::too_many_arguments)]
     pub fn post_execution_update_raw(
         &mut self,
@@ -940,7 +950,7 @@ impl BlockLimiter {
         tx_data: u64,
         kv_updates: u64,
         compute_gas_used: u64,
-        compute_gas_destroyed: u64,
+        compute_gas_enforced: u64,
         state_growth_used: u64,
         is_deposit: bool,
     ) {
@@ -968,9 +978,8 @@ impl BlockLimiter {
         // Block compute gas limit, no need to check here since we allow the last transaction to
         // exceed the limit. Only the executed part advances the enforced counter.
         self.block_compute_gas_used = self.block_compute_gas_used.saturating_add(compute_gas_used);
-        self.block_compute_gas_enforced = self
-            .block_compute_gas_enforced
-            .saturating_add(compute_gas_used.saturating_sub(compute_gas_destroyed));
+        self.block_compute_gas_enforced =
+            self.block_compute_gas_enforced.saturating_add(compute_gas_enforced);
 
         // Block state growth limit, no need to check here since we allow the last transaction to
         // exceed the limit.
@@ -1062,7 +1071,7 @@ mod tests {
             u64::MAX,
             u64::MAX,
             u64::MAX,
-            0,
+            u64::MAX,
             u64::MAX,
             false,
         );
@@ -1097,25 +1106,26 @@ mod tests {
     fn test_post_execution_update_raw_splits_the_compute_gas_lanes() {
         let mut limiter = BlockLimiter::new(BlockLimits::no_limits());
 
-        limiter.post_execution_update_raw(0, 0, 0, 0, 0, 1_000_000, 900_000, 0, false);
+        // A transaction reporting 1,000,000 having performed 100,000 of it.
+        limiter.post_execution_update_raw(0, 0, 0, 0, 0, 1_000_000, 100_000, 0, false);
         assert_eq!(limiter.block_compute_gas_used, 1_000_000, "the report takes the whole total");
         assert_eq!(limiter.block_compute_gas_enforced, 100_000, "enforcement takes only the work");
 
         // A second transaction that destroyed nothing advances both counters by the same amount.
-        limiter.post_execution_update_raw(0, 0, 0, 0, 0, 50_000, 0, 0, false);
+        limiter.post_execution_update_raw(0, 0, 0, 0, 0, 50_000, 50_000, 0, false);
         assert_eq!(limiter.block_compute_gas_used, 1_050_000);
         assert_eq!(limiter.block_compute_gas_enforced, 150_000);
     }
 
-    /// Nothing is ever destroyed before Rex7, so a block of transactions that report a zero
-    /// destroyed part leaves the two counters equal at every step — the pre-Rex7 behaviour, which
-    /// the split must reproduce byte for byte.
+    /// Nothing is ever destroyed before Rex7, so a block of transactions whose enforced part is
+    /// their whole total leaves the two counters equal at every step — the pre-Rex7 behaviour,
+    /// which the split must reproduce byte for byte.
     #[test]
     fn test_compute_gas_lanes_coincide_without_a_destroyed_part() {
         let mut limiter = BlockLimiter::new(BlockLimits::no_limits());
 
         for compute in [21_000, 500, 1_234_567, 0] {
-            limiter.post_execution_update_raw(0, 0, 0, 0, 0, compute, 0, 0, false);
+            limiter.post_execution_update_raw(0, 0, 0, 0, 0, compute, compute, 0, false);
             assert_eq!(
                 limiter.block_compute_gas_used, limiter.block_compute_gas_enforced,
                 "with nothing destroyed the reported and enforced counters must not diverge"
@@ -1133,7 +1143,7 @@ mod tests {
         let mut limiter = BlockLimiter::new(limits);
 
         // One transaction reporting far past the block limit, having performed almost none of it.
-        limiter.post_execution_update_raw(0, 0, 0, 0, 0, 5_000_000, 4_950_000, 0, false);
+        limiter.post_execution_update_raw(0, 0, 0, 0, 0, 5_000_000, 50_000, 0, false);
         assert!(
             limiter.block_compute_gas_used > limits.block_compute_gas_limit,
             "the reported total must carry the destroyed remainder past the limit"
@@ -1148,7 +1158,7 @@ mod tests {
         );
 
         // Executed work fills it, and the error names the enforced counter.
-        limiter.post_execution_update_raw(0, 0, 0, 0, 0, 950_000, 0, 0, false);
+        limiter.post_execution_update_raw(0, 0, 0, 0, 0, 950_000, 950_000, 0, false);
         assert!(limiter.is_block_limit_reached(), "executed work does fill the block");
         let error = limiter
             .pre_execution_check(B256::ZERO, 0, 0, 0, false)

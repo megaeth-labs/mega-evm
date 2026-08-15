@@ -348,11 +348,15 @@ impl AdditionalLimit {
         self.checkpoint.settled_destroyed()
     }
 
-    /// Books one `CALL_STIPEND` minted into a child frame that the caller never funded (REX7+).
+    /// Books one `CALL_STIPEND` minted into a child invocation that the caller never funded
+    /// (REX7+).
     ///
-    /// Called from the CALL-family settlement once the child frame is certain to run: on the
-    /// compute-limit abort path the pending child is discarded and its forwarded gas returned, so
-    /// the mint never reaches a frame and there is nothing to book.
+    /// Called from the CALL-family settlement once the opcode has handed the invocation on, which
+    /// is where the mint is created — not once a child frame runs. A frame init that then fails on
+    /// balance or call depth refunds the whole child budget, mint included, to the caller, so the
+    /// envelope shrinks against recorded work by exactly one stipend just as a child that ran and
+    /// returned it would. The one path that mints nothing is the compute-limit abort, which
+    /// discards the pending child and returns its forwarded gas before the EVM sees it.
     #[inline]
     pub(crate) fn record_minted_call_stipend(&mut self, amount: u64) {
         self.checkpoint.record_minted_call_stipend(amount);

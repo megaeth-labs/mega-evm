@@ -666,6 +666,10 @@ fn run_sandbox_ctx<DB: AlloyDatabase, ExtEnvs: ExternalEnvTypes>(
             // parent's reported destroyed total is settled once, from the conservation law, at
             // the outer transaction's settlement point — this number is an input to the term
             // that derivation reads, not a second place destroyed gas gets reported.
+            //
+            // The sandbox never settles a derivation of its own: the law is stated over a
+            // transaction's final envelope, and the sandbox's gas is a charge inside the outer
+            // transaction's envelope rather than one of its own.
             burned_compute_gas: additional_limit.burned_compute_gas(),
         }
     };
