@@ -44,7 +44,7 @@ pub struct MegaTransactionOutcome {
     /// than performed (Rex7+, always 0 before).
     ///
     /// Derived from what the transaction spent, not summed from the sites that destroyed it: gas
-    /// the transaction burnt is either work the trackers recorded, MegaETH storage gas, or a
+    /// the transaction burnt is either work the trackers recorded, `MegaETH` storage gas, or a
     /// budget something threw away without executing anything for it, and this field is the last
     /// of the three read off as the remainder. A transaction that produces no receipt has no
     /// envelope to split and reports zero.

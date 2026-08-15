@@ -54,6 +54,7 @@ mod checkpoint_settlement;
 mod checkpoint_static_fee_edges;
 mod clamp_classification;
 mod common;
+mod conservation_terms;
 mod detention_window;
 mod double_exceed_corner;
 mod exceptional_halt;

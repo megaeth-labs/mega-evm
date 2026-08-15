@@ -426,8 +426,17 @@ fn transact_create_reject(
     tx.enveloped_tx = Some(Bytes::new());
     let mut evm = MegaEvm::new(context);
     let outcome = evm.execute_transaction(tx).expect("tx should not surface EVMError");
-    let detained_compute_gas_limit =
-        EvmTr::ctx_ref(&evm).additional_limit.borrow().detained_compute_gas_limit();
+    let (detained_compute_gas_limit, non_compute_gas, minted_call_stipend, booked_destroyed) = {
+        let additional_limit = EvmTr::ctx_ref(&evm).additional_limit.borrow();
+        let (non_compute_gas, minted_call_stipend, booked_destroyed) =
+            additional_limit.conservation_terms_for_test();
+        (
+            additional_limit.detained_compute_gas_limit(),
+            non_compute_gas,
+            minted_call_stipend,
+            booked_destroyed,
+        )
+    };
     let gas_used = outcome.result_and_state.result.tx_gas_used();
     Outcome {
         result: outcome.result_and_state.result,
@@ -438,6 +447,9 @@ fn transact_create_reject(
         gas_used,
         destroyed: outcome.compute_gas_destroyed,
         detained_compute_gas_limit,
+        non_compute_gas,
+        minted_call_stipend,
+        booked_destroyed,
         state: outcome.result_and_state.state,
     }
 }

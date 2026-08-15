@@ -375,6 +375,16 @@ impl AdditionalLimit {
         self.compute_gas.enforced_tx_usage()
     }
 
+    /// Test-only reads of the conservation law's terms, so a test can assert which term a fixture
+    /// actually moved instead of inferring it from the destroyed total the terms combine into.
+    ///
+    /// Returns `(non-compute gas, minted call stipend, per-site destroyed bookings)`.
+    #[cfg(any(test, feature = "test-utils"))]
+    #[doc(hidden)]
+    pub fn conservation_terms_for_test(&self) -> (i128, u64, u64) {
+        (self.non_compute_gas(), self.minted_call_stipend(), self.burned_compute_gas())
+    }
+
     /// Takes the outstanding clamp so the caller can hand its hidden gas back to the interpreter,
     /// returning that amount.
     ///
@@ -1864,5 +1874,61 @@ mod tests {
         let FrameResult::Create(create_outcome) = &create else { panic!("create frame result") };
         assert_eq!(create_outcome.result.result, InstructionResult::OutOfGas);
         assert_eq!(create_outcome.result.output, output);
+    }
+
+    /// The settlement point turns the signed derivation into the number the transaction reports,
+    /// clamping the one direction that must never reach a consumer.
+    ///
+    /// A negative derivation means the recorded compute and non-compute lanes together claim more
+    /// gas than the transaction spent, which no spec produces today — the guard is defence, not an
+    /// expected shape. Driving it at the seam is the only way to reach it: every end-to-end fixture
+    /// that could produce it would have to break the conservation law first.
+    ///
+    /// Debug builds trip the assert instead of clamping, so the test asserts the panic there and
+    /// the clamp in release.
+    #[test]
+    #[cfg_attr(
+        debug_assertions,
+        should_panic(expected = "derived destroyed compute gas is negative")
+    )]
+    fn test_negative_derivation_is_clamped_to_zero() {
+        let mut limit = AdditionalLimit::new(MegaSpecId::REX7, test_limits());
+        // Claim more non-compute gas than the envelope the settlement is handed.
+        limit.record_non_compute_gas(1_000);
+
+        limit.settle_destroyed_compute_gas(100);
+
+        assert_eq!(
+            limit.destroyed_compute_gas(),
+            0,
+            "a negative derivation must clamp to zero rather than wrap into an enormous total",
+        );
+    }
+
+    /// The sandbox boundary hands the lane a difference, not a charge, so a sandbox whose own
+    /// EIP-3529 refund outgrew its storage gas drives the non-compute lane negative. The
+    /// derivation has to stay correct across that sign change — a lane that saturated at zero
+    /// would silently under-report the destroyed remainder by the whole overshoot.
+    ///
+    /// The end-to-end shape that produces a negative lane is in the REX7 suite; this pins the
+    /// arithmetic at the seam, where the sign can be set directly.
+    #[test]
+    fn test_derivation_survives_a_negative_non_compute_lane() {
+        let mut limit = AdditionalLimit::new(MegaSpecId::REX7, test_limits());
+        // A sandbox that cost the parent 1,000 gas while recording 3,000 of compute work: the
+        // 2,000 difference is refund the sandbox's own receipt handed back.
+        limit.merge_usage(LimitUsage { compute_gas: 3_000, ..Default::default() }, 0, 1_000);
+        assert_eq!(limit.non_compute_gas(), -2_000, "the lane must carry the difference signed");
+        // On top of that, a frame destroyed 4,000 of its budget.
+        limit.record_burned_gas(4_000);
+
+        // 5,000 spent = 3,000 enforced + (−2,000) non-compute + 4,000 destroyed.
+        limit.settle_destroyed_compute_gas(5_000);
+
+        assert_eq!(
+            limit.destroyed_compute_gas(),
+            4_000,
+            "the negative lane must add to the destroyed remainder, not saturate away",
+        );
     }
 }

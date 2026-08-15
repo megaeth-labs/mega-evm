@@ -43,6 +43,14 @@ pub(crate) struct Outcome {
     /// Post-tx detained compute gas limit — equal to the configured TX limit unless volatile
     /// access lowered it.
     pub(crate) detained_compute_gas_limit: u64,
+    /// Post-tx non-compute EVM gas — the `MegaETH` storage gas and sandbox residue the destroyed
+    /// derivation subtracts. Signed: the sandbox boundary contributes a difference, not a charge.
+    pub(crate) non_compute_gas: i128,
+    /// Post-tx `CALL_STIPEND` total minted into child frames by value-transferring calls.
+    pub(crate) minted_call_stipend: u64,
+    /// Post-tx sum of the per-site destroyed bookings — the second opinion the derived
+    /// [`destroyed`](Self::destroyed) is cross-checked against, never the reported number.
+    pub(crate) booked_destroyed: u64,
     /// The state the transaction produced.
     pub(crate) state: EvmState,
 }
@@ -109,8 +117,17 @@ pub(crate) fn transact_with_gas_limit(
     tx.enveloped_tx = Some(Bytes::new());
     let mut evm = MegaEvm::new(context);
     let outcome = evm.execute_transaction(tx).expect("tx should not surface EVMError");
-    let detained_compute_gas_limit =
-        evm.ctx_ref().additional_limit.borrow().detained_compute_gas_limit();
+    let (detained_compute_gas_limit, non_compute_gas, minted_call_stipend, booked_destroyed) = {
+        let additional_limit = evm.ctx_ref().additional_limit.borrow();
+        let (non_compute_gas, minted_call_stipend, booked_destroyed) =
+            additional_limit.conservation_terms_for_test();
+        (
+            additional_limit.detained_compute_gas_limit(),
+            non_compute_gas,
+            minted_call_stipend,
+            booked_destroyed,
+        )
+    };
     let gas_used = outcome.result_and_state.result.tx_gas_used();
     Outcome {
         result: outcome.result_and_state.result,
@@ -121,6 +138,9 @@ pub(crate) fn transact_with_gas_limit(
         gas_used,
         destroyed: outcome.compute_gas_destroyed,
         detained_compute_gas_limit,
+        non_compute_gas,
+        minted_call_stipend,
+        booked_destroyed,
         state: outcome.result_and_state.state,
     }
 }
@@ -161,8 +181,17 @@ pub(crate) fn transact_tx(
     tx.enveloped_tx = Some(Bytes::new());
     let mut evm = MegaEvm::new(context);
     let outcome = evm.execute_transaction(tx).expect("tx should not surface EVMError");
-    let detained_compute_gas_limit =
-        evm.ctx_ref().additional_limit.borrow().detained_compute_gas_limit();
+    let (detained_compute_gas_limit, non_compute_gas, minted_call_stipend, booked_destroyed) = {
+        let additional_limit = evm.ctx_ref().additional_limit.borrow();
+        let (non_compute_gas, minted_call_stipend, booked_destroyed) =
+            additional_limit.conservation_terms_for_test();
+        (
+            additional_limit.detained_compute_gas_limit(),
+            non_compute_gas,
+            minted_call_stipend,
+            booked_destroyed,
+        )
+    };
     let gas_used = outcome.result_and_state.result.tx_gas_used();
     Outcome {
         result: outcome.result_and_state.result,
@@ -173,6 +202,9 @@ pub(crate) fn transact_tx(
         gas_used,
         destroyed: outcome.compute_gas_destroyed,
         detained_compute_gas_limit,
+        non_compute_gas,
+        minted_call_stipend,
+        booked_destroyed,
         state: outcome.result_and_state.state,
     }
 }
@@ -303,8 +335,17 @@ pub(crate) fn transact_with_bucket_capacity(
     tx.enveloped_tx = Some(Bytes::new());
     let mut evm = MegaEvm::new(context);
     let outcome = evm.execute_transaction(tx).expect("tx should not surface EVMError");
-    let detained_compute_gas_limit =
-        evm.ctx_ref().additional_limit.borrow().detained_compute_gas_limit();
+    let (detained_compute_gas_limit, non_compute_gas, minted_call_stipend, booked_destroyed) = {
+        let additional_limit = evm.ctx_ref().additional_limit.borrow();
+        let (non_compute_gas, minted_call_stipend, booked_destroyed) =
+            additional_limit.conservation_terms_for_test();
+        (
+            additional_limit.detained_compute_gas_limit(),
+            non_compute_gas,
+            minted_call_stipend,
+            booked_destroyed,
+        )
+    };
     let gas_used = outcome.result_and_state.result.tx_gas_used();
     Outcome {
         result: outcome.result_and_state.result,
@@ -315,6 +356,9 @@ pub(crate) fn transact_with_bucket_capacity(
         gas_used,
         destroyed: outcome.compute_gas_destroyed,
         detained_compute_gas_limit,
+        non_compute_gas,
+        minted_call_stipend,
+        booked_destroyed,
         state: outcome.result_and_state.state,
     }
 }
