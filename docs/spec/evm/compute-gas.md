@@ -513,8 +513,30 @@ A node MUST settle that whole budget as compute gas, split into two parts that a
 
 - **Executed** — the open plain-opcode segment, measured as the interpreter-gas delta since the previous checkpoint, less any storage gas a checkpoint body charged before aborting.
   This is work the network performed, and a node MUST record it through the ordinary path: it counts toward the transaction's reported total **and** toward the usage every resource limit is evaluated against, exactly as the same opcodes would if the frame had returned normally.
-- **Destroyed** — whatever the frame still held when its result became final, including any gas the clamp was hiding.
+- **Destroyed** — the budget the frame never spent and never handed back.
   A node MUST record it in the reported compute-gas total and in block-level compute accounting, and MUST NOT evaluate any resource limit against it, at transaction level or at block level (see [Resource Limits](resource-limits.md)).
+
+The destroyed part is bounded by the sender's gas envelope rather than by the compute limit, and halting on it would rescue gas the EVM already destroyed and change the receipt this carve-out requires to stay identical.
+The executed part carries no such problem: it is work, and leaving it out of enforcement would let a frame that keeps executing after absorbing a failed child spend the same compute headroom a second time.
+
+#### Destroyed compute gas
+
+The destroyed part of a transaction is defined by a conservation law over the gas the transaction spent, not by an enumeration of the places that can destroy an envelope.
+
+Every unit of EVM gas a transaction spends is exactly one of three things: compute work its frames performed, MegaETH storage gas, or budget that was lost without anything being executed for it.
+Two of those three are recorded as they happen, so a node MUST derive the third:
+
+`destroyed = spent + minted_stipends − storage_gas − executed_compute`
+
+- `spent` — the EVM gas the transaction's envelope burnt, read once, at the moment the envelope is final: after the transaction's gas accounting has settled and any resource-limit gas rescue has been returned to the sender, and before the EIP-3529 refund and the EIP-7623 floor are applied. Those two move the number the receipt reports without anything having been burnt, so a node MUST NOT read `spent` after them. Gas rescued for the sender, and gas the clamp was hiding, are both out of the envelope by this point and MUST NOT be added back.
+- `minted_stipends` — the sum of `CALL_STIPEND` over the transaction's value-transferring `CALL` and `CALLCODE` invocations whose child frame ran. The inherited EVM grants that stipend to the child's frame budget without debiting the caller's gas counter, so the frames between them record one stipend more work than the envelope funded, per such call, whether the child spends it or returns it. A node MUST add it back; without it the two sides of the law disagree by exactly that amount.
+- `storage_gas` — the MegaETH storage gas the transaction was charged: the storage-gas share of intrinsic gas, the in-frame storage-gas surcharges, the code-deposit charge, and the charges a system contract invocation takes outside an EVM frame. At a nested-execution boundary this term takes the **difference** between what the nested execution cost the outer gas counter and what it recorded as compute, which can be negative when the nested execution's own EIP-3529 refund outgrew its storage gas; a node MUST NOT clamp that contribution at zero.
+- `executed_compute` — the transaction's recorded compute total less its destroyed part: the work every resource limit is evaluated against.
+
+The result is the number a node MUST report as the transaction's destroyed compute gas, and the number block-level compute accounting MUST subtract from the reported total to obtain the block's enforced compute counter.
+A node MUST NOT report a negative result: the law cannot produce one on this spec, and a node that computes one MUST report zero rather than a wrapped value.
+
+The rules that follow fix `executed_compute` at each site that can leave budget unspent, which is what makes the law's remainder well defined; they are not themselves the definition of the destroyed total.
 
 A precompile invocation that fails is the same split, taken at the precompile recording site.
 A precompile never becomes a child EVM frame, so the frame-exit settlement cannot see it.
@@ -536,12 +558,9 @@ A [system contract](../system-contracts/overview.md) invocation a node answers w
 It applies only when the answer is a halt that keeps the call's gas: the part the invocation performed before failing is executed, and the rest of the call's gas limit is destroyed.
 An answer that returns or reverts hands the gas back to the caller, and a halt whose remaining gas is rescued for the sender is a refund; a node MUST NOT record either as destroyed, because that gas was not lost.
 
-The one remaining way to burn a whole envelope without executing anything — a transaction whose intrinsic gas requirement outgrows the gas limit its sender supplied — is not part of this carve-out.
-Since [Rex5](../upgrades/rex5.md) a node rejects that transaction during validation, after every MegaETH storage-gas contribution has been folded into the intrinsic total and before the sender is debited, so it is never included and there is no burnt envelope to split.
+A transaction a node rejects during validation has no envelope to split.
+Since [Rex5](../upgrades/rex5.md) a transaction whose intrinsic gas requirement outgrows the gas limit its sender supplied is rejected during validation — after every MegaETH storage-gas contribution has been folded into the intrinsic total and before the sender is debited — so it produces no receipt.
 A node MUST NOT record a rejected transaction's gas limit as a destroyed remainder.
-
-The destroyed part is bounded by the sender's gas envelope rather than by the compute limit, and halting on it would rescue gas the EVM already destroyed and change the receipt this carve-out requires to stay identical.
-The executed part carries no such problem: it is work, and leaving it out of enforcement would let a frame that keeps executing after absorbing a failed child spend the same compute headroom a second time.
 
 The split MUST be driven by the halt classification rather than by the interpreter's own counter, which an inherited EVM zeroes for ordinary out-of-gas only.
 That zeroing has one consequence a node MUST accept: for an ordinary out-of-gas taken with no clamp in force, the counter is already zero when the frame exits, so the whole segment measures as executed and is enforced in full.
@@ -557,6 +576,7 @@ A clamp-induced out-of-gas is not an exceptional halt for this rule — the cros
 A frame whose exit latches a resource-limit exceed destroys nothing either: it reverts to its parent (frame-local) or halts the transaction with its gas rescued (transaction-level).
 
 When a nested execution merges its usage into an outer one — the [KeylessDeploy](../system-contracts/keyless-deploy.md) sandbox is the only such boundary — a node MUST carry the split across it, reporting the inner total in full while enforcing only the executed part.
+The outer transaction's destroyed total is still derived once, from its own envelope, after the merge.
 
 </details>
 
@@ -618,6 +638,16 @@ Permitting both lets an implementation choose whichever is cheaper at a given si
 
 For a value-transferring `CALL` or `CALLCODE`, the inherited EVM adds `CALL_STIPEND` to the child's gas limit without deducting it from the parent's remaining gas.
 Treating the child's full gas limit as forwarded would therefore subtract gas the parent never contributed, under-counting the parent's compute gas by the stipend.
+
+<details>
+<summary>Rex7 (unstable): why destroyed compute gas is defined by a conservation law</summary>
+
+A definition that enumerates the sites which can destroy an envelope is only as complete as the enumeration, and its completeness is not checkable — a site added later, or one an implementation reaches by a path the list did not anticipate, silently under-reports with nothing to notice it.
+The conservation law has no such failure mode: it is stated over quantities a node already tracks for other reasons, so any envelope lost anywhere shows up in the remainder whether or not the loss was foreseen.
+It also gives the site rules something to be checked against, since the two are computed independently and must agree.
+The cost is one correction term — the inherited EVM's minted `CALL_STIPEND`, which makes recorded work exceed the envelope — and one ordering obligation on where the envelope is read.
+
+</details>
 
 **Why is the first `CALL`-family touch of a preload-warm address charged cold?**
 

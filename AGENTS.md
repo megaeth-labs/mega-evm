@@ -120,6 +120,8 @@ MegaETH separates EVM gas into two independent dimensions tracked during executi
   The destroyed half is read from the frame's final result after action processing, so revm's post-action create rejects are covered; storage gas a checkpoint body charged before aborting belongs to neither half.
   A precompile that fails never becomes a child EVM frame, so the same split is taken at the precompile recording site: executed work (the KZG fixed fee when verification ran; zero when the input was rejected before any work) enforces, and the unused caller-supplied envelope — including any REX5 forwarded-gas cap gap — is destroyed.
   The split crosses the transaction boundary: `MegaTransactionOutcome` carries the destroyed part alongside the reported total, and `BlockLimiter` keeps `block_compute_gas_used` (reported) separate from `block_compute_gas_enforced` (the counter block admission compares).
+  The destroyed part a transaction *reports* is not the sum of those per-site bookings: `MegaHandler::last_frame_result` derives it once, from a conservation law over the envelope — `destroyed = spent + minted_call_stipend − non_compute_gas − enforced_compute_gas` — and the per-site bookings stay as the enforcement split and as the `debug_assert` cross-check that the two agree.
+  `minted_call_stipend` is the correction the law needs because revm mints `CALL_STIPEND` into a value-transferring call's child frame without debiting the caller, so recorded work exceeds the envelope by one stipend per such call.
   Subject to a per-spec compute gas limit and further restricted by gas detention (see below).
 - **Storage gas**: Charges for persistent state modifications (SSTORE, account creation, contract deployment).
   These costs scale dynamically with SALT bucket capacity (see External Environment Dependencies below).
@@ -311,6 +313,9 @@ When the agent is requested to implement a new feature or bug fix, it should con
   New or modified benchmarks must be executed locally (`cargo bench -p mega-evm --bench <name>`) to verify they pass before committing.
   Benchmarks may compile but panic at runtime due to missing setup (e.g., required block fields), so compilation alone is not sufficient.
   For instruction-count deltas across a PR, use the CodSpeed report posted on the PR rather than local wall-clock numbers.
+- **Re-run the destroyed-gas conservation scan after a revm / alloy-evm upgrade.**
+  The REX7 destroyed total is derived from the envelope, so any upstream change that moves gas without a MegaETH site recording it — a new minted subsidy like `CALL_STIPEND`, a changed refund or floor ordering, a new component of `total_gas_spent` — becomes a missing term in the law rather than a compile error.
+  After bumping revm or alloy-evm, run `cargo test -p mega-evm` and `cargo test -p mega-state-test -p state-test` (the `debug_assert` cross-check is live in debug builds) plus the replay fixtures under the latest spec (`cargo run -p state-test -- --bench --bench-spec <LatestSpec> bench/replay/fixtures`), whose own `post` expectations pin an older spec and would otherwise give the derivation no coverage.
 - **Use `test_` prefix for Rust test function names.**
   New `#[test]` functions should be named with a `test_` prefix for consistency with this repository and upstream revm style.
   If editing nearby tests in the same module, align names to the same `test_` style when reasonable.

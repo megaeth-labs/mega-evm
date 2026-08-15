@@ -32,6 +32,7 @@ Rex7 also makes two guard- and detention-related choices that Rex6 does not:
 Two deliberate accounting carve-outs remain.
 A frame that ends in an exceptional halt (including ordinary out-of-gas) settles its entire EVM-gas budget as compute gas, so a transaction that contains an inner out-of-gas call can report higher compute usage under Rex7 than under Rex6 even though EVM gas and the receipt are unchanged.
 That budget is split — the work the frame performed enforces like any other work, while the remainder it destroyed is reported but never enforced.
+The reported destroyed total is derived from a conservation law over what the transaction spent rather than summed from the sites that destroyed it, so an envelope lost anywhere lands in it whether or not a site was written to book it.
 A precompile that fails is split the same way at its recording site: executed work (the KZG fixed fee when the call reached verification; zero when the input was rejected before any work, KZG's own 192-byte length check included) enforces, and the unused caller-supplied envelope is destroyed.
 The generic error arm therefore stops enforcing the whole forwarded amount, which is an intentional enforcement difference from Rex6; the Rex5 forwarded-gas cap still prevents the precompile from performing more work than the remaining compute budget.
 
@@ -88,9 +89,22 @@ The **executed** part is the open plain-opcode segment, measured as the interpre
 A node MUST record it through the ordinary path, so it counts toward the transaction's reported total **and** toward the usage every resource limit is evaluated against — exactly as the same opcodes would if the frame had returned normally.
 A parent frame keeps executing after it absorbs a failed child; excluding the child's work from enforcement would let the code that follows spend the same compute headroom a second time.
 
-The **destroyed** part is whatever the frame still held when its result became final, including any gas the clamp was hiding from the interpreter.
+The **destroyed** part is the budget the frame never spent and never handed back.
 A node MUST record it in the transaction's reported compute-gas total and in block-level compute accounting, and MUST NOT evaluate any resource limit against it — at transaction level or at block level, where a destroyed remainder that counted toward admission would close the block's compute capacity for the transactions behind it (see [Resource Limits](../evm/resource-limits.md)).
 It is bounded by the sender's gas envelope rather than by the compute limit, so it can carry the reported total past that limit; halting on it would rescue gas the EVM has already destroyed and change a receipt this carve-out requires to stay identical.
+
+**The destroyed total is derived, not summed.**
+Rex7 does not define a transaction's destroyed compute gas as the sum of what its halted frames, precompiles and system-contract invocations booked. It defines it as a conservation law over the gas the transaction spent:
+
+`destroyed = spent + minted_stipends − storage_gas − executed_compute`
+
+`spent` is the EVM gas the envelope burnt, read once at the moment the envelope is final — after the transaction's gas accounting has settled and any resource-limit rescue has been returned to the sender, and before the EIP-3529 refund and the EIP-7623 floor are applied, since those move the receipt's number without anything having been burnt.
+`minted_stipends` is the sum of `CALL_STIPEND` over the value-transferring `CALL` and `CALLCODE` invocations whose child frame ran: the inherited EVM grants that stipend to the child's frame budget without debiting the caller, so the frames record one stipend more work than the envelope funded per such call, and a node MUST add it back.
+`storage_gas` is the MegaETH storage gas the transaction was charged, taken as a signed difference at a nested-execution boundary — negative when the nested execution's own EIP-3529 refund outgrew its storage gas — which a node MUST NOT clamp at zero.
+`executed_compute` is the recorded compute total less the destroyed part: the work every resource limit is evaluated against.
+A node MUST NOT report a negative result; the law cannot produce one on this spec, and a node that computes one MUST report zero rather than a wrapped value.
+
+Enforcement is unaffected: the work a limit is evaluated against still comes from the checkpoint and per-opcode recordings, and only the reported destroyed total — and the block's enforced counter, which subtracts it — comes from the law.
 
 The split MUST be driven by the halt classification, not by the interpreter's own counter — an inherited EVM zeroes that counter for ordinary out-of-gas only.
 That zeroing has one consequence a node MUST accept rather than work around: for an ordinary out-of-gas taken with no clamp in force, the counter is already zero at frame exit, so the whole segment measures as executed and is enforced in full.
@@ -115,7 +129,10 @@ A system contract invocation a node answers without opening an EVM frame — the
 An answer that returns or reverts gives the gas back to the caller, and a halt whose remaining gas is rescued for the sender is a refund.
 A node MUST NOT record either as destroyed; that gas was not lost, and counting it would report it twice.
 
-Those sites are the complete set of ways a Rex7 transaction can lose an envelope without executing it.
+Those sites are where a Rex7 transaction is known to lose an envelope without executing it, and they are what fixes `executed_compute` at each one — but they are not what makes the enumeration complete.
+Completeness is a consequence of the law: a lost envelope is gas the transaction spent that neither the compute lanes nor the storage-gas lane accounts for, so it lands in the remainder whether or not a site above anticipated it.
+Reading the two independently and requiring them to agree is what turns the list from an assumption into a checkable claim.
+
 One further shape burns a whole envelope having executed nothing — a transaction whose intrinsic gas requirement outgrows the gas limit its sender supplied — but [Rex5](rex5.md) already rejects that transaction during validation, after every MegaETH storage-gas contribution has been folded into the intrinsic total and before the sender is debited.
 It therefore produces no receipt on Rex7 and there is no envelope to split; a node MUST NOT record a rejected transaction's gas limit as a destroyed remainder.
 
