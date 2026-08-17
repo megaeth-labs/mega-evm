@@ -343,6 +343,11 @@ When the agent is requested to implement a new feature or bug fix, it should con
   Do not expect these schemes to trigger system contract interception.
 - **System contract interceptor tests must cover boundary behaviors.**
   Include tests for normal intercepted path, non-zero value behavior, unknown selector fallback, and CALL vs DELEGATECALL/CALLCODE interception boundaries.
+- **A new precompile that can halt after doing work must record that work explicitly.**
+  Under REX7+ the generic precompile-halt arm books zero executed compute gas and destroys the whole forwarded envelope, because every wired precompile halts only on a pre-work input rejection.
+  A precompile with a do-work-then-halt path (a future verification precompile that halts after running its check) would leave that work unenforced, so a caller could repeat the failure without the transaction- or block-level compute limits ever accounting for it.
+  Express failure-after-work as a `revert` instead of a halt (the revert arm records actual spend), or give the precompile its own recording arm the way KZG does.
+  Only code that compiles into the node can register a precompile, so this is a rule for future authors, not an on-chain attack surface.
 - **Respect `no_std` in `mega-evm` crate.**
   Do not use `std::` directly.
   Follow the existing pattern: `#[cfg(not(feature = "std"))] use alloc as std;` then `use std::{vec::Vec, ...};`.

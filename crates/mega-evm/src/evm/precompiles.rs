@@ -450,6 +450,11 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> PrecompileProvider<MegaContext<DB,
                         }
                     }
                 } else if is_rex7 {
+                    // Every wired precompile that reaches this arm halted on a pre-work input
+                    // rejection, so nothing was performed and the whole forwarded envelope is
+                    // destroyed. A precompile that can halt *after* doing work would need its
+                    // own arm (as KZG has) or must express the failure as a revert, which the
+                    // ok_or_revert branch above records as actual spend.
                     additional_limit.record_burned_gas(gas_limit);
                 } else {
                     additional_limit.record_compute_gas(output.gas.limit());
