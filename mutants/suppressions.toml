@@ -335,12 +335,12 @@ reviewer = "improve-mutation-score (William Aaron Cheung)"
 # equivalent: weakening it lets an over-limit `exp_len` fall through to the short-circuit and be
 # charged the flat minimum, which `test_modexp_oversized_exp_len_halts_before_short_circuit`
 # rejects. The two mutants share identical mutation text, so this entry uses the full
-# `file:line:col:` form to suppress only the line-135 one.
+# `file:line:col:` form to suppress only the line-139 one.
 [[suppress]]
 kind = "line"
 category = "equivalent"
 file = "crates/mega-evm/src/evm/precompiles.rs"
-mutant = "crates/mega-evm/src/evm/precompiles.rs:135:49: replace || with && in modexp::run_osaka_legacy"
+mutant = "crates/mega-evm/src/evm/precompiles.rs:139:49: replace || with && in modexp::run_osaka_legacy"
 justification = "Equivalent: weakening the first || only skips the early halt when exactly one of base_len/mod_len exceeds the EIP-7823 limit while exp_len does not. The zero-base/zero-modulus short-circuit cannot fire there (the offending length is non-zero), so control reaches upstream osaka_run, whose identical EIP-7823 check returns Err(ModexpEip7823LimitSize); the wrapper maps it to the same PrecompileOutput::halt(ModexpEip7823LimitSize, reservoir) the unmutated line returns. Full suite green with the mutant applied."
 reviewer = "RealiCZ (cz)"
 

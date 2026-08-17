@@ -1,0 +1,1021 @@
+From e1a2bde50aa6ccd8ce830b9626eaab087d914a04 Mon Sep 17 00:00:00 2001
+From: RealiCZ <wylbzc4928@gmail.com>
+Date: Fri, 24 Jul 2026 19:13:27 +0800
+Subject: [PATCH] feat(rex6): V0 gas-clamp enforcement for checkpoint
+ accounting
+
+Enforcement inside plain-opcode segments moves from checkpoint-deferred
+settlement to the V0 gas clamp: at every checkpoint and frame entry/resume
+the interpreter's visible gas is clamped to the compute headroom (the
+tighter of the frame-local budget and the TX-level detained limit), so
+revm's own per-opcode gas checks stop a crossing opcode at the clamp
+boundary before it executes -- zero overshoot, zero per-opcode overhead.
+
+Checkpoint handlers gain a prologue (settle the open segment, restore the
+clamp so CALL forwarding, GAS, and storage charges observe the true
+counter) and an epilogue (re-clamp against the possibly-detained
+headroom). GAS joins the checkpoint set so clamping is unobservable for
+non-exceeding transactions. A clamp-induced fake OOG is restored and
+reclassified at frame end as the corresponding limit exceed, preserving
+the volatile-detention halt attribution.
+
+Non-exceeding transactions remain bit-identical to per-opcode accounting;
+a limit-exceeding transaction now halts at the crossing opcode before it
+executes, with that opcode's cost excluded from recorded usage. Specs
+<= REX5 are byte-for-byte unchanged.
+---
+ crates/mega-evm/src/evm/execution.rs          |   6 +-
+ crates/mega-evm/src/evm/instructions.rs       | 255 ++++++++++++------
+ crates/mega-evm/src/limit/compute_gas.rs      |  25 ++
+ crates/mega-evm/src/limit/limit.rs            | 167 ++++++++++--
+ .../tests/rex6/checkpoint_accounting.rs       | 195 +++++++++-----
+ 5 files changed, 464 insertions(+), 184 deletions(-)
+
+diff --git a/crates/mega-evm/src/evm/execution.rs b/crates/mega-evm/src/evm/execution.rs
+index a34c6ea..d415477 100644
+--- a/crates/mega-evm/src/evm/execution.rs
++++ b/crates/mega-evm/src/evm/execution.rs
+@@ -417,7 +417,7 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
+     #[inline]
+     fn before_frame_run(
+         ctx: &MegaContext<DB, ExtEnvs>,
+-        frame: &EthFrame<EthInterpreter>,
++        frame: &mut EthFrame<EthInterpreter>,
+     ) -> Result<Option<InterpreterAction>, ContextDbError<MegaContext<DB, ExtEnvs>>> {
+         // Check if the additional limit is already exceeded, if so, we should immediately stop
+         // and synthesize an interpreter action.
+@@ -454,6 +454,10 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
+         let is_rex5 = ctx.spec.is_enabled(MegaSpecId::REX5);
+ 
+         if let InterpreterAction::Return(interpreter_result) = action {
++            // REX6 V0 clamp: restore any hidden gas into the action's copy (and latch a
++            // clamp-induced fake OOG) before the code-deposit charge below observes it.
++            ctx.additional_limit.borrow_mut().restore_clamp_into_result(interpreter_result);
++
+             // Charge storage gas cost for the number of bytes
+             if frame.data.is_create() && interpreter_result.is_ok() {
+                 let code_deposit_storage_gas = constants::mini_rex::CODEDEPOSIT_STORAGE_GAS *
+diff --git a/crates/mega-evm/src/evm/instructions.rs b/crates/mega-evm/src/evm/instructions.rs
+index f15fee4..be5e121 100644
+--- a/crates/mega-evm/src/evm/instructions.rs
++++ b/crates/mega-evm/src/evm/instructions.rs
+@@ -380,24 +380,33 @@ mod rex6 {
+     use super::*;
+ 
+     /// Returns the instruction table for the `REX6` spec — **checkpoint compute-gas
+-    /// accounting** (prototype).
++    /// accounting with V0 gas-clamp enforcement** (prototype).
+     ///
+     /// Unlike every earlier custom table, plain opcodes are wired to the raw revm mainnet
+     /// instructions with no per-opcode gas recording: the interpreter's own gas counter is
+     /// the accounting source, and compute gas settles as a segment delta at each
+-    /// checkpoint. The checkpoints are exactly the positions that had to stay wrapped
+-    /// anyway:
++    /// checkpoint. The checkpoints are the positions that had to stay wrapped anyway, plus
++    /// `GAS`:
+     /// - storage-gas opcodes (SSTORE, LOG0–LOG4, SELFDESTRUCT) and the CALL/CREATE family — their
+-    ///   existing handler chains settle from the checkpoint baseline inside
+-    ///   [`record_storage_compute_gas!`] (spec-dispatched, so ≤REX5 tables are untouched);
+-    /// - volatile / detention opcodes — `*_checkpoint` variants that run the raw instruction,
+-    ///   settle the segment, then apply the detention cap;
+-    /// - frame entry/exit — `AdditionalLimit::before_frame_run` re-opens the window and
+-    ///   `after_frame_run_instructions` settles the tail segment.
++    ///   existing handler chains gain a [`checkpoint_prologue!`] (spec-dispatched, so ≤REX5 tables
++    ///   are untouched);
++    /// - volatile / detention opcodes — `*_checkpoint` variants;
++    /// - `GAS` — [`compute_gas_ext::gas_checkpoint`], so the clamp is restored before the counter
++    ///   is observed;
++    /// - frame entry/exit — `AdditionalLimit::before_frame_run` clamps and re-opens the window; the
++    ///   frame-end hooks settle the tail and restore the clamp into the frame result.
+     ///
+-    /// Accounting totals telescope to the same per-transaction sums as per-opcode
+-    /// recording; only the halt position for limit-exceeding transactions coarsens to the
+-    /// next checkpoint.
++    /// **Enforcement (V0)**: at every checkpoint and frame entry/resume the interpreter's
++    /// visible gas is clamped to the compute headroom (the tighter of the frame-local
++    /// budget and the TX-level detained limit), so revm's own per-opcode gas checks
++    /// enforce the limits inside plain segments with zero per-opcode overhead and zero
++    /// overshoot: a crossing opcode fake-OOGs at the clamp boundary before executing and
++    /// is reclassified as the corresponding limit exceed at frame end.
++    ///
++    /// Accounting totals for non-exceeding transactions are bit-identical to per-opcode
++    /// recording (plain segments telescope; checkpoint bodies are recorded per-opcode); a
++    /// limit-exceeding transaction halts at the crossing opcode *before* it executes, with
++    /// that opcode's cost excluded from the recorded usage.
+     ///
+     /// The pre-existing REX6 behavior differences (canonical metering order, CREATE
+     /// `create_rex6` dispatch, SELFDESTRUCT existing-target accounting, CALL-family
+@@ -430,6 +439,10 @@ mod rex6 {
+         table[SELFBALANCE as usize] = volatile_data_ext::selfbalance_checkpoint;
+         table[SLOAD as usize] = volatile_data_ext::sload_checkpoint;
+ 
++        // V0 gas-clamp enforcement: GAS must be a checkpoint so the clamp is restored
++        // before the counter is observed.
++        table[GAS as usize] = compute_gas_ext::gas_checkpoint;
++
+         // Storage-gas checkpoints — the same handler chains as REX5; under REX6 they
+         // settle from the checkpoint baseline internally.
+         table[SSTORE as usize] = additional_limit_ext::sstore;
+@@ -480,6 +493,82 @@ macro_rules! run_inner_instruction_or_abort {
+     };
+ }
+ 
++/// REX6 checkpoint prologue. Runs at the top of every checkpoint handler, before any gas
++/// capture or gas-consuming work:
++///
++/// 1. Settles the open plain-opcode segment — `baseline − remaining`, both on the clamped counter,
++///    telescoping exactly over the unwrapped opcodes since the last checkpoint.
++/// 2. Restores the clamp-hidden gas, so the checkpoint's body runs on the **true** counter:
++///    CALL-family forwarding math, the `GAS` opcode's pushed value, and storage-gas charges all
++///    observe real gas, keeping the clamp unobservable for non-exceeding transactions.
++/// 3. Re-opens the settlement window at the restored counter.
++///
++/// Halts (returning from the enclosing handler) when the settlement surfaces a limit
++/// exceed — including one latched earlier by a non-compute mutation site. The restore has
++/// already happened on that path, so the frame result carries true gas. No-op before REX6.
++macro_rules! checkpoint_prologue {
++    ($context:expr $(,$ret:expr)?) => {
++        if $context.host.spec_id().is_enabled(MegaSpecId::REX6) {
++            let exceeding_result = {
++                let mut additional_limit = $context.host.additional_limit().borrow_mut();
++                let remaining = $context.interpreter.gas.remaining();
++                let segment = additional_limit.checkpoint_baseline().saturating_sub(remaining);
++                let hidden = additional_limit.checkpoint_restore_hidden();
++                $context.interpreter.gas.erase_cost(hidden);
++                additional_limit.sync_checkpoint_baseline($context.interpreter.gas.remaining());
++                if additional_limit.record_compute_gas(segment) {
++                    None
++                } else {
++                    Some(additional_limit.exceeding_instruction_result())
++                }
++            };
++            if let Some(result) = exceeding_result {
++                $context.interpreter.halt(result);
++                return $($ret)?;
++            }
++        }
++    };
++}
++
++/// REX6 checkpoint epilogue for checkpoints whose frame keeps executing (SSTORE, LOG,
++/// volatile opcodes, `GAS`): re-applies the V0 gas clamp from the freshly settled usage —
++/// including any detention cap the checkpoint just installed — and re-opens the settlement
++/// window on the clamped counter. CALL/CREATE checkpoints skip this (the frame suspends
++/// and `before_frame_run` re-clamps on resume), as do frame-ending opcodes (the frame-end
++/// settlement restores instead). No-op before REX6.
++macro_rules! checkpoint_epilogue {
++    ($context:expr) => {
++        if $context.host.spec_id().is_enabled(MegaSpecId::REX6) {
++            let mut additional_limit = $context.host.additional_limit().borrow_mut();
++            let hide =
++                additional_limit.checkpoint_clamp_amount($context.interpreter.gas.remaining());
++            if hide > 0 {
++                let clamped = $context.interpreter.gas.record_cost(hide);
++                debug_assert!(clamped, "clamp amount exceeds remaining gas");
++            }
++            additional_limit.sync_checkpoint_baseline($context.interpreter.gas.remaining());
++        }
++    };
++}
++
++/// Records a checkpoint opcode's own body gas (`$gas_before − remaining`) and re-opens the
++/// settlement window, enforcing the compute-gas limit exactly as the per-opcode wrappers
++/// did. Used by the REX6 checkpoint handlers for bodies that can never spawn a child frame
++/// (volatile opcodes, SLOAD, SELFBALANCE, `GAS`); the CALL/CREATE and storage-gas bodies
++/// use [`record_storage_compute_gas!`], which additionally excludes storage charges and
++/// forwarded child gas.
++macro_rules! record_checkpoint_body_compute_gas {
++    ($context:expr, $gas_before:expr) => {
++        let gas_after = $context.interpreter.gas.remaining();
++        let gas_used = $gas_before.saturating_sub(gas_after);
++        {
++            let mut additional_limit = $context.host.additional_limit().borrow_mut();
++            additional_limit.sync_checkpoint_baseline(gas_after);
++            compute_gas!($context.interpreter, additional_limit, gas_used);
++        }
++    };
++}
++
+ /// Records an opcode's compute gas in a single measurement window and enforces the compute-gas
+ /// limit. The REX6 storage-affecting handlers invoke it directly with the storage gas they
+ /// charged; plain opcodes use the leaner inline recording in
+@@ -509,18 +598,12 @@ macro_rules! record_storage_compute_gas {
+     ($context:expr, $gas_before:expr, $storage_charged:expr) => {{
+         let is_rex6 = $context.host.spec_id().is_enabled(MegaSpecId::REX6);
+         let gas_after = $context.interpreter.gas.remaining();
+-        // REX6 checkpoint accounting: the measurement window opens at the last checkpoint
+-        // (frame entry / resume or the previous checkpoint opcode), not at this opcode's own
+-        // start, so the unwrapped plain opcodes executed since then settle here in the same
+-        // recording. Only plain opcodes can run between two checkpoints, so no storage gas
+-        // or forwarded child gas is hiding in the extra window — the exclusions below stay
+-        // exact. Pre-REX6 keeps the per-opcode `$gas_before` window byte-for-byte.
+-        let window_start = if is_rex6 {
+-            $context.host.additional_limit().borrow().checkpoint_baseline()
+-        } else {
+-            $gas_before
+-        };
+-        let mut gas_used = window_start.saturating_sub(gas_after).saturating_sub($storage_charged);
++        // The per-opcode `$gas_before` window applies on every spec. Under REX6 checkpoint
++        // accounting the plain segment preceding this opcode was already settled by
++        // [`checkpoint_prologue!`], which also restored the gas clamp, so `$gas_before`
++        // (captured after the prologue) lives on the true counter and the recorded amount
++        // is byte-identical to the pre-checkpoint per-opcode recording.
++        let mut gas_used = $gas_before.saturating_sub(gas_after).saturating_sub($storage_charged);
+         // Exclude gas forwarded to a child frame. REX5+ excludes the revm-side `CALL_STIPEND`
+         // (added by value-transferring CALL/CALLCODE without deducting from the parent) so the
+         // parent's compute gas is not under-counted; pre-REX5 subtracts the full child gas limit
+@@ -1328,38 +1411,14 @@ pub mod volatile_data_ext {
+ 
+     /* REX6 checkpoint-accounting volatile handlers.
+ 
+-    Under checkpoint accounting the volatile opcodes stay wrapped (they are checkpoints),
+-    but they run the raw revm instruction and settle the open segment — everything since
+-    the last checkpoint, measured on the interpreter's own gas counter — in one recording,
+-    instead of delegating to a per-opcode `compute_gas_ext` wrapper. The settlement runs
+-    before `apply_compute_gas_limit!` so a REX4+ relative detention cap is derived from the
+-    fully settled usage at the access point, exactly as the per-opcode order did. */
+-
+-    /// Settles the open checkpoint segment against the interpreter gas counter, re-opens
+-    /// the window, and halts (returning from the enclosing handler) when a limit —
+-    /// including a latched non-compute exceed — surfaces.
+-    macro_rules! settle_checkpoint_compute_gas {
+-        ($context:expr) => {
+-            let exceeding_result = {
+-                let gas_after = $context.interpreter.gas.remaining();
+-                let mut additional_limit = $context.host.additional_limit().borrow_mut();
+-                let gas_used = additional_limit.checkpoint_baseline().saturating_sub(gas_after);
+-                additional_limit.sync_checkpoint_baseline(gas_after);
+-                if additional_limit.record_compute_gas(gas_used) {
+-                    None
+-                } else {
+-                    Some(additional_limit.exceeding_instruction_result())
+-                }
+-            };
+-            if let Some(result) = exceeding_result {
+-                $context.interpreter.halt(result);
+-                return;
+-            }
+-        };
+-    }
++    Under checkpoint accounting the volatile opcodes stay wrapped (they are checkpoints):
++    the prologue settles the open plain segment and restores the gas clamp, the raw revm
++    instruction runs on the true counter, the body's own gas is recorded per-opcode, the
++    detention cap is applied from the fully settled usage (exactly as the per-opcode order
++    did), and the epilogue re-clamps against the possibly-lowered headroom. */
+ 
+-    /// Checkpoint variant of [`wrap_op_detain_gas_unconditional`]: disabled-check, raw
+-    /// revm instruction, segment settlement, detention cap.
++    /// Checkpoint variant of [`wrap_op_detain_gas_unconditional`]: disabled-check,
++    /// prologue, raw revm instruction, body record, detention cap, epilogue.
+     macro_rules! wrap_checkpoint_detain_gas_unconditional {
+     ($fn_name:ident, $opcode_name:expr, $original_fn:path, $access_type:expr) => {
+         #[doc = concat!("`", $opcode_name, "` opcode as a REX6 checkpoint: raw instruction, segment settlement, gas detention.")]
+@@ -1378,15 +1437,18 @@ pub mod volatile_data_ext {
+                 return;
+             }
+ 
++            checkpoint_prologue!(context);
++            let gas_before = context.interpreter.gas.remaining();
+             run_inner_instruction_or_abort!($original_fn, context);
+-            settle_checkpoint_compute_gas!(context);
++            record_checkpoint_body_compute_gas!(context, gas_before);
+             apply_compute_gas_limit!(context);
++            checkpoint_epilogue!(context);
+         }
+     };
+     }
+ 
+-    /// Checkpoint variant of [`wrap_op_detain_gas_conditional`]: beneficiary peek, raw
+-    /// revm instruction, segment settlement, detention cap.
++    /// Checkpoint variant of [`wrap_op_detain_gas_conditional`]: beneficiary peek,
++    /// prologue, raw revm instruction, body record, detention cap, epilogue.
+     macro_rules! wrap_checkpoint_detain_gas_conditional {
+     ($fn_name:ident, $opcode_name:expr, $original_fn:path) => {
+         #[doc = concat!("`", $opcode_name, "` opcode as a REX6 checkpoint: raw instruction, segment settlement, gas detention.")]
+@@ -1412,9 +1474,12 @@ pub mod volatile_data_ext {
+                 }
+             }
+ 
++            checkpoint_prologue!(context);
++            let gas_before = context.interpreter.gas.remaining();
+             run_inner_instruction_or_abort!($original_fn, context);
+-            settle_checkpoint_compute_gas!(context);
++            record_checkpoint_body_compute_gas!(context, gas_before);
+             apply_compute_gas_limit!(context);
++            checkpoint_epilogue!(context);
+         }
+     };
+     }
+@@ -1511,9 +1576,12 @@ pub mod volatile_data_ext {
+             return;
+         }
+ 
++        checkpoint_prologue!(context);
++        let gas_before = context.interpreter.gas.remaining();
+         run_inner_instruction_or_abort!(instructions::host::sload, context);
+-        settle_checkpoint_compute_gas!(context);
++        record_checkpoint_body_compute_gas!(context, gas_before);
+         apply_compute_gas_limit!(context);
++        checkpoint_epilogue!(context);
+     }
+ 
+     /// `SELFBALANCE` as a REX6 checkpoint. Same beneficiary-volatile handling as
+@@ -1534,9 +1602,12 @@ pub mod volatile_data_ext {
+             return;
+         }
+ 
++        checkpoint_prologue!(context);
++        let gas_before = context.interpreter.gas.remaining();
+         run_inner_instruction_or_abort!(instructions::host::selfbalance, context);
+-        settle_checkpoint_compute_gas!(context);
++        record_checkpoint_body_compute_gas!(context, gas_before);
+         apply_compute_gas_limit!(context);
++        checkpoint_epilogue!(context);
+     }
+ }
+ 
+@@ -1709,6 +1780,9 @@ pub mod storage_gas_ext {
+             >(
+                 context: InstructionContext<'_, H, WIRE>,
+             ) {
++                // REX6: settle the open segment and restore the clamp before any gas
++                // observation, so the forwarding math below sees the true counter.
++                checkpoint_prologue!(context);
+                 // Captured at the very top so the single compute window covers all of the
+                 // opcode's compute work.
+                 let gas_before = context.interpreter.gas.remaining();
+@@ -2041,6 +2115,10 @@ pub mod storage_gas_ext {
+     >(
+         mut context: InstructionContext<'_, H, WIRE>,
+     ) {
++        // Settle the open segment and restore the clamp before any gas observation or the
++        // CREATE2 memory-expansion work below.
++        checkpoint_prologue!(context);
++
+         // Canonical revm's `create` runs `require_non_staticcall!` before any operand read,
+         // memory work, address derivation, or storage-gas charge, so a static-frame
+         // `CREATE`/`CREATE2` halts here first. This unifies the halt reasons the prework below
+@@ -2118,6 +2196,8 @@ pub mod storage_gas_ext {
+     >(
+         context: InstructionContext<'_, H, WIRE>,
+     ) {
++        // REX6: settle the open segment and restore the clamp before any gas observation.
++        checkpoint_prologue!(context);
+         // Captured at the very top so the single compute window covers the inner opcode.
+         let gas_before = context.interpreter.gas.remaining();
+         let Some(len) = context.interpreter.stack.inspect::<1>() else {
+@@ -2155,6 +2235,7 @@ pub mod storage_gas_ext {
+         // generic `instructions::host::log::<N, _>` covers every valid call site.
+         run_inner_instruction_or_abort!(instructions::host::log::<N, _>, context);
+         record_storage_compute_gas!(context, gas_before, storage_charged);
++        checkpoint_epilogue!(context);
+     }
+ 
+     /// `SSTORE` opcode implementation modified from `revm` with compute gas tracking and
+@@ -2178,6 +2259,8 @@ pub mod storage_gas_ext {
+     >(
+         context: InstructionContext<'_, H, WIRE>,
+     ) {
++        // REX6: settle the open segment and restore the clamp before any gas observation.
++        checkpoint_prologue!(context);
+         // Captured at the very top so the single compute window covers the inner opcode.
+         let gas_before = context.interpreter.gas.remaining();
+         // The address to the underlying execution contract state
+@@ -2229,6 +2312,7 @@ pub mod storage_gas_ext {
+         // EVM gas.
+         run_inner_instruction_or_abort!(instructions::host::sstore, context);
+         record_storage_compute_gas!(context, gas_before, storage_charged);
++        checkpoint_epilogue!(context);
+     }
+ 
+     /// `SELFDESTRUCT` opcode implementation with storage gas metering for
+@@ -2257,6 +2341,10 @@ pub mod storage_gas_ext {
+     >(
+         context: InstructionContext<'_, H, WIRE>,
+     ) {
++        // REX6: settle the open segment and restore the clamp before any gas observation
++        // (the storage charge below and the inner opcode both run on the true counter).
++        checkpoint_prologue!(context);
++
+         // Inside a static frame, revm's inner SELFDESTRUCT halts on the
+         // static-context check without changing state. Skip the mega host work below
+         // (two account inspections, SALT account-creation pricing, the storage-gas
+@@ -2305,20 +2393,7 @@ pub mod storage_gas_ext {
+             };
+             let drained =
+                 context.host.additional_limit().borrow_mut().try_consume_storage_stipend(cost);
+-            let storage_charged = cost - drained;
+-            gas!(context.interpreter, storage_charged);
+-
+-            // REX6 checkpoint accounting: this storage debit sits inside the window that
+-            // `compute_gas_ext::selfdestruct` closes later, so exclude it by lowering the
+-            // baseline now — the trailing settlement takes `baseline - remaining` with no
+-            // storage term of its own.
+-            if context.host.spec_id().is_enabled(MegaSpecId::REX6) {
+-                context
+-                    .host
+-                    .additional_limit()
+-                    .borrow_mut()
+-                    .deduct_checkpoint_baseline(storage_charged);
+-            }
++            gas!(context.interpreter, cost - drained);
+ 
+             // Record resource usage for new beneficiary account
+             context.host.additional_limit().borrow_mut().on_selfdestruct_new_account();
+@@ -2587,17 +2662,14 @@ pub mod compute_gas_ext {
+         // Call the original instruction
+         run_inner_instruction_or_abort!(instructions::host::selfdestruct, context);
+ 
+-        // REX6 checkpoint accounting: the window opens at the checkpoint baseline, folding
+-        // in the unwrapped plain opcodes since the last checkpoint. The beneficiary-creation
+-        // storage charge in `storage_gas_ext::selfdestruct` already lowered the baseline by
+-        // the charged amount, so no storage exclusion is needed here. Pre-REX6 keeps the
+-        // per-opcode `gas_before` window.
++        // The per-opcode `gas_before` window applies on every spec. Under REX6 the plain
++        // segment before this opcode was settled by the `checkpoint_prologue!` in
++        // `storage_gas_ext::selfdestruct` (which also restored the clamp), and the window
++        // is re-opened here so the frame-end settlement does not recount the body.
+         let is_rex6 = context.host.spec_id().is_enabled(MegaSpecId::REX6);
+         let gas_after = context.interpreter.gas.remaining();
+         let mut additional_limit = context.host.additional_limit().borrow_mut();
+-        let window_start =
+-            if is_rex6 { additional_limit.checkpoint_baseline() } else { gas_before };
+-        let gas_used = window_start.saturating_sub(gas_after);
++        let gas_used = gas_before.saturating_sub(gas_after);
+         if is_rex6 {
+             additional_limit.sync_checkpoint_baseline(gas_after);
+         }
+@@ -2605,6 +2677,23 @@ pub mod compute_gas_ext {
+             context.interpreter.halt(additional_limit.exceeding_instruction_result());
+         }
+     }
++
++    /// `GAS` opcode as a REX6 checkpoint.
++    ///
++    /// `GAS` must be a checkpoint under V0 gas-clamp enforcement: the prologue restores
++    /// the clamp-hidden gas before the raw instruction reads the counter, so the pushed
++    /// value equals the true remaining and clamping stays unobservable for transactions
++    /// that never exceed a limit.
++    #[inline]
++    pub fn gas_checkpoint<WIRE: InterpreterTypes, H: HostExt + ?Sized>(
++        context: InstructionContext<'_, H, WIRE>,
++    ) {
++        checkpoint_prologue!(context);
++        let gas_before = context.interpreter.gas.remaining();
++        run_inner_instruction_or_abort!(instructions::system::gas, context);
++        record_checkpoint_body_compute_gas!(context, gas_before);
++        checkpoint_epilogue!(context);
++    }
+ }
+ 
+ /// Trait to inspect the stack elements.
+diff --git a/crates/mega-evm/src/limit/compute_gas.rs b/crates/mega-evm/src/limit/compute_gas.rs
+index d37e27c..ce3c2ee 100644
+--- a/crates/mega-evm/src/limit/compute_gas.rs
++++ b/crates/mega-evm/src/limit/compute_gas.rs
+@@ -110,6 +110,31 @@ impl ComputeGasTracker {
+         self.detained_limit
+     }
+ 
++    /// Returns the base (undetained) TX compute-gas limit.
++    pub(crate) fn base_tx_limit(&self) -> u64 {
++        self.frame_tracker.tx_limit()
++    }
++
++    /// Returns the compute-gas headroom the V0 gas clamp may leave visible to the
++    /// interpreter, and whether the binding constraint is the frame-local budget (`true`)
++    /// or the TX-level (detained) limit (`false`).
++    ///
++    /// The headroom is the tighter of the current frame's remaining compute budget
++    /// (Rex4+) and the TX-level remaining under the effective (possibly detained) limit —
++    /// the same pair `check_limit` enforces, so gas hidden beyond this headroom can only
++    /// be reached by a transaction that would exceed a limit.
++    #[inline]
++    pub(crate) fn clamp_headroom(&self) -> (u64, bool) {
++        let tx_remaining = self.tx_limit().saturating_sub(self.tx_usage());
++        if self.rex4_enabled {
++            let frame_remaining = self.frame_tracker.current_frame_remaining();
++            if frame_remaining < tx_remaining {
++                return (frame_remaining, true);
++            }
++        }
++        (tx_remaining, false)
++    }
++
+     /// Returns `true` when gas detention is the binding TX-level constraint, i.e., the detained
+     /// limit is tighter than the base TX limit AND actual usage exceeds it.
+     pub(crate) fn is_detained_exceed(&self) -> bool {
+diff --git a/crates/mega-evm/src/limit/limit.rs b/crates/mega-evm/src/limit/limit.rs
+index 1b01e61..54f3e27 100644
+--- a/crates/mega-evm/src/limit/limit.rs
++++ b/crates/mega-evm/src/limit/limit.rs
+@@ -117,9 +117,29 @@ pub struct AdditionalLimit {
+     /// checkpoint, frame entry, or frame resume). Only meaningful while a frame is running
+     /// and only when `checkpoint_accounting` is active. Re-synced at every
+     /// `before_frame_run` (which covers both frame entry and every resume after a child
+-    /// frame's outcome is merged back), at every checkpoint settlement, and lowered by
+-    /// storage-gas charge sites that debit interpreter gas outside a settlement window.
++    /// frame's outcome is merged back) and at every checkpoint settlement.
+     checkpoint_baseline: u64,
++
++    /// V0 gas-clamp enforcement: the portion of the executing frame's interpreter gas
++    /// hidden (clamped away) so revm's own per-opcode gas checks enforce the compute /
++    /// detention headroom inside plain-opcode segments. Non-zero only while the current
++    /// frame is inside a plain segment: every checkpoint restores it before running its
++    /// body (so CALL forwarding, `GAS`, and storage charges see the true counter) and
++    /// re-clamps on exit; the frame-end settlement restores it into the frame result.
++    clamp_hidden: u64,
++
++    /// Whether the binding headroom at the last clamp was the frame-local compute budget
++    /// (`true`) or the TX-level (possibly detained) limit (`false`). Decides how a
++    /// clamp-induced fake OOG is reclassified: frame-local exceeds revert to the parent,
++    /// TX-level exceeds halt the transaction.
++    clamp_frame_local: bool,
++
++    /// Whether a clamp-induced fake OOG was latched while gas detention was the binding
++    /// TX-level constraint. `is_detained_exceed` requires `used > detained_limit`, which a
++    /// clamp-stopped transaction never reaches (the crossing opcode's cost is excluded),
++    /// so the halt-reason attribution consults this flag to keep reporting
++    /// `VolatileDataAccessOutOfGas` exactly as per-opcode enforcement does.
++    clamp_latched_detained: bool,
+ }
+ 
+ /// The usage of the additional limits.
+@@ -149,6 +169,9 @@ impl AdditionalLimit {
+             storage_call_stipend: storage_call_stipend::StorageCallStipendTracker::new(spec),
+             checkpoint_accounting: spec.is_enabled(MegaSpecId::REX6),
+             checkpoint_baseline: 0,
++            clamp_hidden: 0,
++            clamp_frame_local: false,
++            clamp_latched_detained: false,
+         }
+     }
+ }
+@@ -191,6 +214,9 @@ impl AdditionalLimit {
+         self.kv_update.reset();
+         self.storage_call_stipend.reset();
+         self.checkpoint_baseline = 0;
++        self.clamp_hidden = 0;
++        self.clamp_frame_local = false;
++        self.clamp_latched_detained = false;
+     }
+ 
+     /// Interpreter gas remaining at the start of the current unsettled segment
+@@ -209,14 +235,80 @@ impl AdditionalLimit {
+         self.checkpoint_baseline = remaining;
+     }
+ 
+-    /// Lowers the baseline by `amount` to exclude a storage-gas debit from the open
+-    /// settlement window. Used by charge sites whose storage gas is not passed to the
+-    /// settlement macro directly (currently the SELFDESTRUCT beneficiary-creation charge,
+-    /// which is debited in `storage_gas_ext::selfdestruct` while the window is closed later
+-    /// in `compute_gas_ext::selfdestruct`).
++    /// Takes the outstanding clamp-hidden gas for restoration into the interpreter
++    /// counter. Every checkpoint calls this before running its body; the frame-end
++    /// settlement calls it before the frame result propagates.
++    #[inline]
++    pub(crate) fn checkpoint_restore_hidden(&mut self) -> u64 {
++        core::mem::take(&mut self.clamp_hidden)
++    }
++
++    /// Computes the amount of interpreter gas to hide so the visible remaining equals the
++    /// compute headroom (the tighter of the frame-local budget and the TX-level detained
++    /// limit), records it as outstanding, and returns it for the caller to deduct from the
++    /// interpreter counter. Returns 0 — clamping disabled — for exempt transactions.
++    #[inline]
++    pub(crate) fn checkpoint_clamp_amount(&mut self, remaining: u64) -> u64 {
++        debug_assert_eq!(self.clamp_hidden, 0, "clamp applied while a clamp is outstanding");
++        if self.has_exceeded_limit.is_exempt() {
++            return 0;
++        }
++        let (headroom, frame_local) = self.compute_gas.clamp_headroom();
++        let hide = remaining.saturating_sub(headroom);
++        self.clamp_hidden = hide;
++        self.clamp_frame_local = frame_local;
++        hide
++    }
++
++    /// Latches a clamp-induced fake OOG as a compute-gas limit exceed.
++    ///
++    /// The crossing opcode never executed (revm's own gas check stopped it at the clamp
++    /// boundary), so its cost is not in the recorded usage and the normal `check_limit`
++    /// pass sees usage at-or-below the limit. The latch is stamped directly, with
++    /// `frame_local` taken from the binding constraint at clamp time, so the existing
++    /// frame-result machinery (frame-local absorb to revert; TX-level mark + rescue)
++    /// produces the halt shape.
+     #[inline]
+-    pub(crate) fn deduct_checkpoint_baseline(&mut self, amount: u64) {
+-        self.checkpoint_baseline = self.checkpoint_baseline.saturating_sub(amount);
++    pub(crate) fn latch_clamp_exceed(&mut self) {
++        if self.has_exceeded_limit.within_limit() {
++            self.has_exceeded_limit = LimitCheck::ExceedsLimit {
++                kind: super::LimitKind::ComputeGas,
++                frame_local: self.clamp_frame_local,
++                limit: self.compute_gas.tx_limit(),
++                used: self.compute_gas.tx_usage(),
++            };
++            // Preserve the volatile-detention attribution: when the binding TX-level
++            // constraint at clamp time was the detained limit, the halt must classify as
++            // `VolatileDataAccessOutOfGas` exactly as per-opcode enforcement would.
++            self.clamp_latched_detained = !self.clamp_frame_local &&
++                self.compute_gas.detained_limit() < self.compute_gas.base_tx_limit();
++        }
++    }
++
++    /// Restores any outstanding V0 clamp into the frame's final interpreter result and
++    /// latches a clamp-induced fake OOG.
++    ///
++    /// Must run before anything reads or charges the result's gas — in particular before
++    /// the execution-layer code-deposit storage charge, which would otherwise observe the
++    /// clamped copy and mis-fire an OOG on a non-exceeding CREATE frame.
++    ///
++    /// A clamp can only be outstanding when the frame ended inside a plain segment (every
++    /// checkpoint prologue restores it before its body), and an `OutOfGas` exit from such
++    /// a segment is a fake OOG: revm's own gas check stopped the crossing opcode at the
++    /// clamp boundary *before executing it* — exactly the V0 enforcement point. The latch
++    /// makes the existing frame-result machinery (frame-local absorb to revert; TX-level
++    /// mark + rescue on the restored gas) produce the halt shape.
++    pub(crate) fn restore_clamp_into_result(&mut self, result: &mut InterpreterResult) {
++        if !self.checkpoint_accounting {
++            return;
++        }
++        let hidden = self.checkpoint_restore_hidden();
++        if hidden > 0 {
++            result.gas.erase_cost(hidden);
++            if result.result == InstructionResult::OutOfGas {
++                self.latch_clamp_exceed();
++            }
++        }
+     }
+ 
+     /// Test-only setter for [`has_exceeded_limit`](Self::has_exceeded_limit). Bypasses every
+@@ -360,10 +452,15 @@ impl AdditionalLimit {
+         &self,
+         access_type: VolatileDataAccess,
+     ) -> Option<MegaHaltReason> {
+-        self.compute_gas.is_detained_exceed().then(|| MegaHaltReason::VolatileDataAccessOutOfGas {
+-            access_type,
+-            limit: self.compute_gas.detained_limit(),
+-            actual: self.compute_gas.tx_usage(),
++        // `is_detained_exceed` covers per-opcode enforcement (usage crossed the detained
++        // limit); `clamp_latched_detained` covers V0 clamp enforcement, where the crossing
++        // opcode was stopped before executing and usage stays at-or-below the limit.
++        (self.compute_gas.is_detained_exceed() || self.clamp_latched_detained).then(|| {
++            MegaHaltReason::VolatileDataAccessOutOfGas {
++                access_type,
++                limit: self.compute_gas.detained_limit(),
++                actual: self.compute_gas.tx_usage(),
++            }
+         })
+     }
+ 
+@@ -710,16 +807,8 @@ impl AdditionalLimit {
+     /// indicating that the limit is exceeded.
+     pub(crate) fn before_frame_run(
+         &mut self,
+-        frame: &EthFrame<EthInterpreter>,
++        frame: &mut EthFrame<EthInterpreter>,
+     ) -> Option<InterpreterResult> {
+-        // Checkpoint accounting: open the settlement window at the frame's current gas.
+-        // This hook runs both at frame entry and at every resume after a child frame's
+-        // outcome (including its returned gas) has been merged back into this frame's
+-        // interpreter, so the window start always sits at an instruction boundary.
+-        if self.checkpoint_accounting {
+-            self.checkpoint_baseline = frame.interpreter.gas.remaining();
+-        }
+-
+         self.state_growth.before_frame_run(frame);
+         self.data_size.before_frame_run(frame);
+         self.kv_update.before_frame_run(frame);
+@@ -733,6 +822,22 @@ impl AdditionalLimit {
+                 output,
+             ));
+         }
++
++        // Checkpoint accounting: apply the V0 gas clamp and open the settlement window at
++        // the frame's (clamped) gas. This hook runs both at frame entry and at every
++        // resume after a child frame's outcome (including its returned gas) has been
++        // merged back into this frame's interpreter, so the window start always sits at an
++        // instruction boundary. No clamp is outstanding here: every suspension point
++        // (CALL/CREATE checkpoint prologue) and every frame end restores it first.
++        if self.checkpoint_accounting {
++            debug_assert_eq!(self.clamp_hidden, 0, "frame resumed with a clamp outstanding");
++            let hide = self.checkpoint_clamp_amount(frame.interpreter.gas.remaining());
++            if hide > 0 {
++                let clamped = frame.interpreter.gas.record_cost(hide);
++                debug_assert!(clamped, "clamp amount exceeds remaining gas");
++            }
++            self.checkpoint_baseline = frame.interpreter.gas.remaining();
++        }
+         None
+     }
+ 
+@@ -771,14 +876,18 @@ impl AdditionalLimit {
+     ) {
+         // Checkpoint accounting: the frame has produced its final action, so settle the
+         // tail segment (everything since the last checkpoint) against the interpreter's
+-        // gas counter. `frame.interpreter.gas` still holds the loop-exit value here — the
+-        // code-deposit storage charge in the execution-layer hook mutates only the action's
+-        // gas copy — so the delta telescopes exactly over the unwrapped plain opcodes.
+-        // A checkpoint that already settled and halted leaves `baseline == remaining`
+-        // (delta 0), and the CALL-family abort path's forwarded-gas `erase_cost` can only
+-        // raise `remaining` above the baseline, which the saturation turns into 0.
++        // gas counter. `frame.interpreter.gas` still holds the loop-exit value here (the
++        // clamp restore and the code-deposit storage charge both mutate only the action's
++        // gas copy), and both it and the baseline live in the same (clamped) domain, so
++        // the delta telescopes exactly over the unwrapped plain opcodes. A checkpoint that
++        // already settled and halted leaves `baseline == remaining` (delta 0), and the
++        // CALL-family abort path's forwarded-gas `erase_cost` can only raise `remaining`
++        // above the baseline, which the saturation turns into 0.
++        //
+         // Any limit exceed recorded here is latched and surfaced by the existing
+-        // frame-result marking below / in `before_frame_return_result`.
++        // frame-result marking below / in `before_frame_return_result`. The clamp restore
++        // itself happens earlier, in `restore_clamp_into_result`, before the
++        // execution-layer hook charges code-deposit storage against the action's gas.
+         if self.checkpoint_accounting {
+             if let InterpreterAction::Return(_) = action {
+                 let remaining = frame.interpreter.gas.remaining();
+diff --git a/crates/mega-evm/tests/rex6/checkpoint_accounting.rs b/crates/mega-evm/tests/rex6/checkpoint_accounting.rs
+index 462a07f..022a499 100644
+--- a/crates/mega-evm/tests/rex6/checkpoint_accounting.rs
++++ b/crates/mega-evm/tests/rex6/checkpoint_accounting.rs
+@@ -1,15 +1,20 @@
+-//! REX6 checkpoint compute-gas accounting (prototype).
++//! REX6 checkpoint compute-gas accounting with V0 gas-clamp enforcement (prototype).
+ //!
+-//! Under checkpoint accounting, plain opcodes run the raw revm instructions with no per-opcode
+-//! recording; compute gas settles as an interpreter-gas delta at each checkpoint (storage-gas
+-//! opcodes, CALL/CREATE family, volatile opcodes, frame entry/exit). These tests pin the two
+-//! sides of that trade:
++//! Plain opcodes run the raw revm instructions with no per-opcode recording; compute gas
++//! settles as an interpreter-gas delta at each checkpoint (storage-gas opcodes, CALL/CREATE
++//! family, volatile opcodes, `GAS`, frame entry/exit). Enforcement inside plain segments is
++//! the V0 gas clamp: the interpreter's visible gas is clamped to the compute headroom, so
++//! revm's own per-opcode gas checks stop a crossing opcode at the clamp boundary *before it
++//! executes* — zero overshoot.
+ //!
+-//! - **Precision invariant**: per-transaction accounting totals are bit-identical to per-opcode
+-//!   recording (the interpreter gas counter telescopes over the unwrapped segment).
+-//! - **Coarsened enforcement**: a limit crossing inside a plain-opcode segment surfaces at the
+-//!   *next checkpoint*, not at the crossing opcode, so limit-exceeding transactions overshoot by up
+-//!   to one segment.
++//! These tests pin the three sides of the design:
++//!
++//! - **Precision invariant**: non-exceeding transactions produce accounting totals (and receipts)
++//!   bit-identical to per-opcode recording, including under an active clamp (`GAS` observability).
++//! - **Exact enforcement**: a crossing inside a plain segment halts at the crossing opcode with its
++//!   cost excluded — earlier than per-opcode enforcement, which executes the crossing opcode first.
++//! - **Bounded loops**: a detention cap inside a checkpoint-free arithmetic loop is enforced by the
++//!   clamp, not deferred to frame end.
+ 
+ use crate::common::{transact, transact_default, CALLER, CONTRACT};
+ use alloy_primitives::{Bytes, U256};
+@@ -17,7 +22,7 @@ use mega_evm::{
+     test_utils::{BytecodeBuilder, MemoryDatabase},
+     EvmTxRuntimeLimits, MegaSpecId,
+ };
+-use revm::bytecode::opcode::{POP, SSTORE, STOP, TIMESTAMP};
++use revm::bytecode::opcode::{GAS, MSTORE, POP, RETURN, SSTORE, STOP, TIMESTAMP};
+ 
+ const ONE_ETH: u128 = 1_000_000_000_000_000_000;
+ 
+@@ -27,10 +32,19 @@ fn db_with_code(code: Bytes) -> MemoryDatabase {
+         .account_code(CONTRACT, code)
+ }
+ 
++/// Measures the intrinsic compute gas (tx base cost) with a STOP-only contract.
++fn intrinsic_compute_gas() -> u64 {
++    transact_default(
++        MegaSpecId::REX6,
++        db_with_code(BytecodeBuilder::default().append(STOP).build()),
++    )
++    .compute_gas
++}
++
+ /// A countdown loop of cheap opcodes with no checkpoint inside the loop body:
+ ///
+ /// ```text
+-/// PUSH2 iterations; loop: JUMPDEST; PUSH1 1; SWAP1; SUB; DUP1; PUSH1 loop; JUMPI; STOP
++/// [prefix] PUSH2 iterations; loop: JUMPDEST; PUSH1 1; SWAP1; SUB; DUP1; PUSH1 loop; JUMPI; STOP
+ /// ```
+ ///
+ /// Each iteration executes 7 plain opcodes for 26 gas. `prefix` is prepended verbatim and
+@@ -51,12 +65,8 @@ fn countdown_loop_code_with_prefix(prefix: &[u8], iterations: u16) -> Bytes {
+     Bytes::from(code)
+ }
+ 
+-fn countdown_loop_code(iterations: u16) -> Bytes {
+-    countdown_loop_code_with_prefix(&[], iterations)
+-}
+-
+ /// A straight line of `pairs` PUSH1/POP pairs (5 gas, 2 plain opcodes each), then
+-/// `SSTORE(7, 99)` (the first checkpoint in the code), then STOP.
++/// `SSTORE(7, 99)` and STOP.
+ fn plain_run_then_sstore_code(pairs: usize) -> Bytes {
+     let mut builder = BytecodeBuilder::default();
+     for _ in 0..pairs {
+@@ -78,7 +88,7 @@ fn plain_run_then_sstore_code(pairs: usize) -> Bytes {
+ /// checkpoint.
+ #[test]
+ fn test_checkpoint_plain_loop_totals_match_rex5() {
+-    let code = countdown_loop_code(500);
++    let code = countdown_loop_code_with_prefix(&[], 500);
+     let r5 = transact_default(MegaSpecId::REX5, db_with_code(code.clone()));
+     let r6 = transact_default(MegaSpecId::REX6, db_with_code(code));
+ 
+@@ -91,22 +101,47 @@ fn test_checkpoint_plain_loop_totals_match_rex5() {
+     assert_eq!(r5.gas_used, r6.gas_used, "receipt gas must be unchanged");
+ }
+ 
+-/// A compute-gas crossing inside a plain-opcode segment surfaces at the next checkpoint.
+-///
+-/// The limit is placed mid-way through a straight plain-opcode run that ends in an SSTORE.
+-/// REX5 (per-opcode) halts at the crossing opcode; REX6 (checkpoint) runs the rest of the
+-/// segment and halts at the SSTORE settlement, recording the full segment — the same total a
+-/// generous-limit run records up to that point. Both halt; the checkpoint run overshoots.
++/// `GAS` observability under an active clamp: with a tight detention cap the interpreter's
++/// visible gas is clamped for the whole post-access run, yet the value `GAS` pushes must be
++/// the true remaining — the checkpoint prologue restores the clamp before the raw
++/// instruction reads the counter. The returned word and the receipt must be bit-identical
++/// to per-opcode REX5, where no clamp exists at all.
+ #[test]
+-fn test_checkpoint_halt_lands_at_next_checkpoint() {
+-    let code = plain_run_then_sstore_code(200); // 200 * 5 = 1,000 gas of plain opcodes
++fn test_v0_clamp_is_unobservable_via_gas_opcode() {
++    // TIMESTAMP; POP; GAS; PUSH1 0; MSTORE; PUSH1 32; PUSH1 0; RETURN
++    let code =
++        Bytes::from(vec![TIMESTAMP, POP, GAS, 0x60, 0x00, MSTORE, 0x60, 0x20, 0x60, 0x00, RETURN]);
++    // Detention cap 1,000: far below the interpreter's remaining gas, so the clamp is
++    // active at the GAS opcode; the tx itself stays far below the cap (non-exceeding).
++    let limits = |spec| {
++        let mut l = EvmTxRuntimeLimits::from_spec(spec);
++        l.block_env_access_compute_gas_limit = 1_000;
++        l
++    };
+ 
+-    // Intrinsic compute gas (tx base cost) measured with a STOP-only contract.
+-    let intrinsic = transact_default(
+-        MegaSpecId::REX6,
+-        db_with_code(BytecodeBuilder::default().append(STOP).build()),
+-    )
+-    .compute_gas;
++    let r5 = transact(MegaSpecId::REX5, db_with_code(code.clone()), limits(MegaSpecId::REX5));
++    let r6 = transact(MegaSpecId::REX6, db_with_code(code), limits(MegaSpecId::REX6));
++
++    assert!(r5.is_success(), "REX5 must succeed: {:?}", r5.result);
++    assert!(r6.is_success(), "REX6 must succeed: {:?}", r6.result);
++    assert_eq!(
++        r5.result.output(),
++        r6.result.output(),
++        "GAS must push the true remaining under the clamp"
++    );
++    assert_eq!(r5.compute_gas, r6.compute_gas, "compute totals must be identical");
++    assert_eq!(r5.gas_used, r6.gas_used, "receipt gas must be identical");
++}
++
++/// V0 exact enforcement in a plain segment: the limit is placed mid-way through a straight
++/// plain-opcode run. REX5 (per-opcode) executes the crossing opcode and then halts, so its
++/// recorded usage exceeds the limit; REX6 (clamp) fake-OOGs the crossing opcode at the
++/// clamp boundary *before executing it*, so its recorded usage stays at or below the limit
++/// and the halt lands one opcode earlier — zero overshoot.
++#[test]
++fn test_v0_clamp_halts_at_crossing_opcode_without_executing_it() {
++    let code = plain_run_then_sstore_code(200); // 200 * 5 = 1,000 gas of plain opcodes
++    let intrinsic = intrinsic_compute_gas();
+ 
+     // Trip the limit ~300 gas into the 1,000-gas plain run, well before the SSTORE.
+     let compute_limit = intrinsic + 300;
+@@ -114,72 +149,90 @@ fn test_checkpoint_halt_lands_at_next_checkpoint() {
+         |spec| EvmTxRuntimeLimits::from_spec(spec).with_tx_compute_gas_limit(compute_limit);
+ 
+     let r5 = transact(MegaSpecId::REX5, db_with_code(code.clone()), limits(MegaSpecId::REX5));
+-    let r6 = transact(MegaSpecId::REX6, db_with_code(code.clone()), limits(MegaSpecId::REX6));
+-    let r6_full = transact_default(MegaSpecId::REX6, db_with_code(code));
++    let r6 = transact(MegaSpecId::REX6, db_with_code(code), limits(MegaSpecId::REX6));
+ 
+     assert!(!r5.is_success(), "REX5 must stop on the tight compute limit: {:?}", r5.result);
+     assert!(!r6.is_success(), "REX6 must stop on the tight compute limit: {:?}", r6.result);
+ 
+-    // REX5 stops within one opcode of the crossing.
++    // Per-opcode enforcement records the crossing opcode: usage strictly exceeds the limit.
+     assert!(
+-        r5.compute_gas <= compute_limit + 12,
+-        "REX5 must stop at the crossing opcode; compute={} limit={compute_limit}",
++        r5.compute_gas > compute_limit,
++        "REX5 executes the crossing opcode before halting; compute={} limit={compute_limit}",
+         r5.compute_gas
+     );
+-    // REX6 records the whole segment up to (and including) the SSTORE checkpoint: identical
+-    // to what a run without the tight limit records at that point (SSTORE is the last
+-    // gas-consuming opcode, so the full-run total equals the at-checkpoint total).
+-    assert_eq!(
+-        r6.compute_gas, r6_full.compute_gas,
+-        "REX6 must settle the full segment at the checkpoint"
++    // Clamp enforcement stops the crossing opcode before execution: usage stays at or
++    // below the limit.
++    assert!(
++        r6.compute_gas <= compute_limit,
++        "REX6 must not execute the crossing opcode; compute={} limit={compute_limit}",
++        r6.compute_gas
+     );
+     assert!(
+-        r6.compute_gas > r5.compute_gas,
+-        "checkpoint enforcement overshoots per-opcode enforcement; REX5={} REX6={}",
+-        r5.compute_gas,
++        r6.compute_gas > compute_limit - 12,
++        "REX6 must stop at the clamp boundary, not earlier; compute={} limit={compute_limit}",
+         r6.compute_gas
+     );
+ }
+ 
+-/// Pins the V1 checkpoint-set gap: a loop of plain opcodes contains **no checkpoint**, so a
+-/// detention cap crossing inside it is only enforced at the frame-end settlement — the
+-/// overshoot is bounded by the interpreter gas budget, NOT by the ~73k straight-line
+-/// code-size bound from the design spec ("a straight line cannot loop" only holds when
+-/// JUMP/JUMPI are checkpoints, which V1 deliberately excludes).
+-///
+-/// A ~14-byte contract overshoots the detention cap by >100k gas here. If the V1 set is kept
+-/// for the final spec, the overshoot bound must be stated as the remaining interpreter gas;
+-/// bounding it by code size requires JUMP/JUMPI checkpoints (V2) or another backstop.
++/// V0 bounds detention inside a checkpoint-free plain loop — the shape that broke V1
++/// (which deferred enforcement to frame end, overshooting by the whole loop). The clamp
++/// stops the loop at the cap boundary regardless of the absence of checkpoints.
+ #[test]
+-fn test_checkpoint_v1_loop_segment_is_not_code_size_bounded() {
+-    // TIMESTAMP marks volatile access (detention cap = usage + 1,000), then a 10,000-iteration
+-    // countdown loop (~260k gas) with no checkpoint inside.
++fn test_v0_clamp_bounds_detention_inside_plain_loop() {
++    // TIMESTAMP marks volatile access (detention cap = usage + 1,000), then a
++    // 10,000-iteration countdown loop (~260k gas) with no checkpoint inside.
+     let code = countdown_loop_code_with_prefix(&[TIMESTAMP, POP], 10_000);
++    let intrinsic = intrinsic_compute_gas();
+ 
+-    let mut limits = EvmTxRuntimeLimits::from_spec(MegaSpecId::REX6);
+-    limits.block_env_access_compute_gas_limit = 1_000;
+-
+-    let r5 = transact(MegaSpecId::REX5, db_with_code(code.clone()), {
+-        let mut l = EvmTxRuntimeLimits::from_spec(MegaSpecId::REX5);
++    let limits = |spec| {
++        let mut l = EvmTxRuntimeLimits::from_spec(spec);
+         l.block_env_access_compute_gas_limit = 1_000;
+         l
+-    });
+-    let r6 = transact(MegaSpecId::REX6, db_with_code(code), limits);
++    };
++
++    let r5 = transact(MegaSpecId::REX5, db_with_code(code.clone()), limits(MegaSpecId::REX5));
++    let r6 = transact(MegaSpecId::REX6, db_with_code(code), limits(MegaSpecId::REX6));
+ 
+     assert!(!r5.is_success(), "REX5 must halt on the detention cap: {:?}", r5.result);
+     assert!(!r6.is_success(), "REX6 must halt on the detention cap: {:?}", r6.result);
+ 
+-    // REX5 enforces within one opcode of the cap crossing (cap ≈ intrinsic + 1,000).
++    // The detained limit is usage-at-access + 1,000 ≈ intrinsic + TIMESTAMP + 1,000.
++    let detained_limit_upper = intrinsic + 2 + 1_000;
++    // Per-opcode enforcement executes the crossing opcode: usage strictly exceeds the cap.
+     assert!(
+-        r5.compute_gas < 30_000,
++        r5.compute_gas > detained_limit_upper - 12,
+         "REX5 must stop near the detention cap; compute={}",
+         r5.compute_gas
+     );
+-    // REX6 runs the entire loop before any checkpoint settles: >100k gas past the cap from a
+-    // 16-byte contract — the overshoot is not bounded by code size under V1.
++    // Clamp enforcement stops at the boundary without executing the crossing opcode,
++    // despite the loop containing no checkpoint at all.
+     assert!(
+-        r6.compute_gas > 100_000,
+-        "REX6 V1 loop segment must overshoot far past the code-size bound; compute={}",
++        r6.compute_gas <= detained_limit_upper,
++        "REX6 must not overshoot the detention cap; compute={} cap≈{detained_limit_upper}",
+         r6.compute_gas
+     );
++    assert!(
++        r6.compute_gas > detained_limit_upper - 30,
++        "REX6 must stop at the clamp boundary, not earlier; compute={}",
++        r6.compute_gas
++    );
++
++    // Attribution parity: a clamp-stopped detention exceed must classify as
++    // `VolatileDataAccessOutOfGas` exactly like per-opcode enforcement, even though the
++    // recorded usage never crossed the detained limit (the crossing opcode was stopped
++    // before executing).
++    let halt_reason = |label: &str, r: &crate::common::Outcome| match &r.result {
++        revm::context::result::ExecutionResult::Halt { reason, .. } => format!("{reason:?}"),
++        other => panic!("{label}: expected a halt, got {other:?}"),
++    };
++    let r5_reason = halt_reason("REX5", &r5);
++    let r6_reason = halt_reason("REX6", &r6);
++    assert!(
++        r5_reason.starts_with("VolatileDataAccessOutOfGas"),
++        "REX5 must attribute the halt to volatile detention; got {r5_reason}"
++    );
++    assert!(
++        r6_reason.starts_with("VolatileDataAccessOutOfGas"),
++        "REX6 clamp halt must keep the volatile detention attribution; got {r6_reason}"
++    );
+ }
+-- 
+2.50.1 (Apple Git-155)
+
