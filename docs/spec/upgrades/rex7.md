@@ -30,10 +30,10 @@ Rex7 also makes two guard- and detention-related choices that Rex6 does not:
 - A detention mark is produced when the target account is loaded, so a frame that cannot afford the fees charged before that load produces no mark.
 
 Two deliberate accounting carve-outs remain.
-A frame that ends in an exceptional halt (including ordinary out-of-gas) settles its entire EVM-gas budget as compute gas, so a transaction that contains an inner out-of-gas call can report higher compute usage under Rex7 than under Rex6 even though EVM gas and the receipt are unchanged.
+A frame that ends in an exceptional halt (including ordinary out-of-gas) settles its whole EVM-gas budget as compute gas, apart from storage gas it had already been charged, so a transaction that contains an inner out-of-gas call can report higher compute usage under Rex7 than under Rex6 even though EVM gas and the receipt are unchanged.
 That budget is split — the work the frame performed enforces like any other work, while the remainder it destroyed is reported but never enforced.
 The reported destroyed total is derived from a conservation law over what the transaction spent rather than summed from the sites that destroyed it, so an envelope lost anywhere lands in it whether or not a site was written to book it.
-A precompile that fails is split the same way at its recording site: executed work (the KZG fixed fee when the call reached verification; zero when the input was rejected before any work, KZG's own 192-byte length check included) enforces, and the unused caller-supplied envelope is destroyed.
+A precompile that fails is split the same way at its recording site: executed work (the KZG fixed fee when the call reached verification; zero when the input was rejected before any work, KZG's own input-length check included) enforces, and the unused caller-supplied envelope is destroyed.
 The generic error arm therefore stops enforcing the whole forwarded amount, which is an intentional enforcement difference from Rex6; the Rex5 forwarded-gas cap still prevents the precompile from performing more work than the remaining compute budget.
 
 ## What Changed
@@ -83,9 +83,9 @@ The interpreter's gas counter already meters every opcode; settling by segment r
 **Exceptional-halt frame carve-out.**
 A frame that ends in an exceptional halt — ordinary out-of-gas, memory out-of-gas, stack underflow or overflow, invalid jump, unknown opcode, and every other error result — returns none of its remaining budget.
 The top-level frame's whole envelope is spent by the transaction's final gas accounting, and an inner frame's remainder is never handed back to its caller.
-A node MUST settle that whole budget as compute gas, in two parts that are accounted differently.
+A node MUST settle that budget as compute gas in two parts that are accounted differently, except for any MegaETH storage gas a checkpoint body charged before aborting: that charge stays storage gas and is in neither part.
 
-The **executed** part is the open plain-opcode segment, measured as the interpreter-gas delta since the previous checkpoint, less any storage gas a checkpoint body charged before aborting.
+The **executed** part is the open plain-opcode segment, measured as the interpreter-gas delta since the previous checkpoint, net of that storage charge.
 A node MUST record it through the ordinary path, so it counts toward the transaction's reported total **and** toward the usage every resource limit is evaluated against — exactly as the same opcodes would if the frame had returned normally.
 A parent frame keeps executing after it absorbs a failed child; excluding the child's work from enforcement would let the code that follows spend the same compute headroom a second time.
 
@@ -94,7 +94,8 @@ A node MUST record it in the transaction's reported compute-gas total and in blo
 It is bounded by the sender's gas envelope rather than by the compute limit, so it can carry the reported total past that limit; halting on it would rescue gas the EVM has already destroyed and change a receipt this carve-out requires to stay identical.
 
 **The destroyed total is derived, not summed.**
-Rex7 does not define a transaction's destroyed compute gas as the sum of what its halted frames, precompiles and system-contract invocations booked. It defines it as a conservation law over the gas the transaction spent:
+Rex7 does not define a transaction's destroyed compute gas as the sum of what its halted frames, precompiles and system-contract invocations booked.
+It defines it as a conservation law over the gas the transaction spent:
 
 `destroyed = spent + minted_stipends − storage_gas − executed_compute`
 
@@ -118,7 +119,7 @@ When a nested execution merges its usage into an outer one, which today is only 
 
 A precompile invocation that fails is the same split, taken at the precompile recording site rather than at interpreter-frame exit — a precompile never becomes a child EVM frame, so the frame-exit settlement cannot see it.
 The **executed** part is the work the precompile performed: the KZG point-evaluation fixed cost when that precompile reached verification and returned a non-out-of-gas error, and zero when the invocation was rejected before any work (malformed input, or a wrapper out-of-gas that never reached verification).
-For KZG the boundary is its own input-length check, which runs before the commitment is read: an input whose length is not 192 bytes is a rejection before any work, while every other non-out-of-gas failure is raised once verification is under way and is priced at the whole fixed cost, however far it got.
+For KZG the boundary is its own input-length check, which runs before the commitment is read: an input whose length is not `KZG_POINT_EVALUATION_INPUT_LENGTH` is a rejection before any work, while every other non-out-of-gas failure is raised once verification is under way and is priced at the whole fixed cost, however far it got.
 A node MUST price an unrecognised non-out-of-gas KZG failure as verification under way, so that an unfamiliar failure can only over-charge.
 A node MUST record the executed part through the ordinary enforcing path.
 The **destroyed** part is the rest of the call's gas limit — the caller-supplied envelope, not the Rex5-capped effective gas limit.
@@ -161,7 +162,8 @@ Under Rex7, a node MUST enforce compute-gas and detention limits inside plain-op
 At each checkpoint, after settlement and after the checkpoint body has recorded its own compute gas (and after any detention cap the checkpoint installs), and again at frame entry and resume, a node MUST:
 
 1. Compute the remaining compute headroom as the minimum of the current frame's remaining per-frame compute budget and the transaction-level remaining budget under the effective limit (including detention).
-2. When the interpreter's true remaining gas is at or above that headroom, put the clamp in force for the segment that follows: hide the excess from the interpreter and remember which constraint bound the clamp — the frame-local budget or the transaction-level / detained limit — together with that constraint's own limit value. Equality is a binding clamp that hides nothing, not the absence of a clamp.
+2. When the interpreter's true remaining gas is at or above that headroom, put the clamp in force for the segment that follows: hide the excess from the interpreter and remember which constraint bound the clamp — the frame-local budget or the transaction-level / detained limit — together with that constraint's own limit value.
+   Equality is a binding clamp that hides nothing, not the absence of a clamp.
 3. When the true remaining gas is below the headroom, no clamp is in force: the frame's own gas runs out ahead of the compute headroom, and an out-of-gas inside the segment is the inherited EVM's own rather than a resource-limit exceed.
 4. Leave the true remaining gas available again before the next checkpoint body runs, before `GAS` is observed, before call-gas forwarding is computed, and before storage-gas charges are taken, so those sites always see the unclamped counter.
 

@@ -232,7 +232,8 @@ impl Default for MegaPrecompiles {
 /// `InterpreterResult`.
 ///
 /// This is a mirror of `<PrecompilesMap as PrecompileProvider<Context<..>>>::run`
-/// (`alloy_evm::precompiles`, alloy-evm 0.37.1) rather than a call into it. Delegating would
+/// (`alloy_evm::precompiles`, alloy-evm 0.36.0 — the pinned version) rather than a call into it.
+/// Delegating would
 /// hand back only the converted `InterpreterResult`, and the conversion folds every non-out-of-gas
 /// halt into one opaque `PrecompileError` code — so the caller could no longer tell a doorway
 /// reject apart from a failure raised mid-computation, which is exactly the distinction the
@@ -242,7 +243,9 @@ impl Default for MegaPrecompiles {
 ///
 /// Upgrading alloy-evm obliges a re-read of that upstream function: a new `PrecompileInput`
 /// field, a different dispatch address, a result cache, or any other added step must be mirrored
-/// here, or this silently stops being the same call.
+/// here, or this silently stops being the same call. The next published version, 0.37.1, was read
+/// against this one: its `run` body is byte-identical, and the differences in that module are in
+/// how `PrecompilesMap` stores its dynamic lookup, which this function does not touch.
 fn run_precompile_capturing_halt<DB: Database>(
     precompiles: &PrecompilesMap,
     context: &mut MegaInnerContext<DB>,

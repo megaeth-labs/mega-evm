@@ -509,9 +509,10 @@ When the crossing opcode would exhaust both the true remaining EVM gas and the c
 #### Exceptional-halt frame carve-out
 
 A frame that ends in an exceptional halt — ordinary out-of-gas, memory out-of-gas, stack underflow or overflow, invalid jump, unknown opcode, and every other error result — returns none of its remaining budget.
-A node MUST settle that whole budget as compute gas, split into two parts that are accounted differently:
+A node MUST settle that budget as compute gas, apart from any MegaETH storage gas a checkpoint body charged before aborting: that charge was taken on the storage-gas lane, stays there, and belongs to neither part below.
+A node MUST split what remains into two parts that are accounted differently:
 
-- **Executed** — the open plain-opcode segment, measured as the interpreter-gas delta since the previous checkpoint, less any storage gas a checkpoint body charged before aborting.
+- **Executed** — the open plain-opcode segment, measured as the interpreter-gas delta since the previous checkpoint, net of that storage charge.
   This is work the network performed, and a node MUST record it through the ordinary path: it counts toward the transaction's reported total **and** toward the usage every resource limit is evaluated against, exactly as the same opcodes would if the frame had returned normally.
 - **Destroyed** — the budget the frame never spent and never handed back.
   A node MUST record it in the reported compute-gas total and in block-level compute accounting, and MUST NOT evaluate any resource limit against it, at transaction level or at block level (see [Resource Limits](resource-limits.md)).
@@ -528,10 +529,18 @@ Two of those three are recorded as they happen, so a node MUST derive the third:
 
 `destroyed = spent + minted_stipends − storage_gas − executed_compute`
 
-- `spent` — the EVM gas the transaction's envelope burnt, read once, at the moment the envelope is final: after the transaction's gas accounting has settled and any resource-limit gas rescue has been returned to the sender, and before the EIP-3529 refund and the EIP-7623 floor are applied. Those two move the number the receipt reports without anything having been burnt, so a node MUST NOT read `spent` after them. Gas rescued for the sender, and gas the clamp was hiding, are both out of the envelope by this point and MUST NOT be added back.
-- `minted_stipends` — the sum of `CALL_STIPEND` over the transaction's value-transferring `CALL` and `CALLCODE` invocations, counted once per stipend the EVM mints. The inherited EVM grants that stipend to the child's frame budget without debiting the caller's gas counter, so the frames between them record one stipend more work than the envelope funded, per such call, whatever becomes of the stipend afterwards. The mint is created when the invocation is handed to the EVM, before the child is entered, and a node MUST count it from that point rather than from the child frame running: an invocation turned away at frame entry — for want of balance, or at the call-depth limit — hands the whole child budget back to the caller with the stipend inside it, which shrinks the envelope against recorded work by exactly as much as a child that ran and returned it would. An invocation a node halts before handing it to the EVM, which is what a compute-gas limit reached at the call site does, mints nothing and a node MUST NOT count it. A node MUST add the total back; without it the two sides of the law disagree by exactly that amount.
-- `storage_gas` — the MegaETH storage gas the transaction was charged: the storage-gas share of intrinsic gas, the in-frame storage-gas surcharges, the code-deposit charge, and the charges a system contract invocation takes outside an EVM frame. At a nested-execution boundary this term takes the **difference** between what the nested execution cost the outer gas counter and what it recorded as compute, which can be negative when the nested execution's own EIP-3529 refund outgrew its storage gas; a node MUST NOT clamp that contribution at zero.
-- `executed_compute` — the compute gas the transaction is recorded as having performed, fixed site by site by the rules below, and the quantity every resource limit is evaluated against. It equals the reported total less the destroyed part, but that identity is a consequence of the law rather than a definition of either side.
+- `spent` — the EVM gas the transaction's envelope burnt, read once, at the moment the envelope is final: after the transaction's gas accounting has settled and any resource-limit gas rescue has been returned to the sender, and before the EIP-3529 refund and the EIP-7623 floor are applied.
+  Those two move the number the receipt reports without anything having been burnt, so a node MUST NOT read `spent` after them.
+  Gas rescued for the sender, and gas the clamp was hiding, are both out of the envelope by this point and MUST NOT be added back.
+- `minted_stipends` — the sum of `CALL_STIPEND` over the transaction's value-transferring `CALL` and `CALLCODE` invocations, counted once per stipend the EVM mints.
+  The inherited EVM grants that stipend to the child's frame budget without debiting the caller's gas counter, so the frames between them record one stipend more work than the envelope funded, per such call, whatever becomes of the stipend afterwards.
+  The mint is created when the invocation is handed to the EVM, before the child is entered, and a node MUST count it from that point rather than from the child frame running: an invocation turned away at frame entry — for want of balance, or at the call-depth limit — hands the whole child budget back to the caller with the stipend inside it, which shrinks the envelope against recorded work by exactly as much as a child that ran and returned it would.
+  An invocation a node halts before handing it to the EVM, which is what a compute-gas limit reached at the call site does, mints nothing and a node MUST NOT count it.
+  A node MUST add the total back; without it the two sides of the law disagree by exactly that amount.
+- `storage_gas` — the MegaETH storage gas the transaction was charged: the storage-gas share of intrinsic gas, the in-frame storage-gas surcharges, the code-deposit charge, and the charges a system contract invocation takes outside an EVM frame.
+  At a nested-execution boundary this term takes the **difference** between what the nested execution cost the outer gas counter and what it recorded as compute, which can be negative when the nested execution's own EIP-3529 refund outgrew its storage gas; a node MUST NOT clamp that contribution at zero.
+- `executed_compute` — the compute gas the transaction is recorded as having performed, fixed site by site by the rules below, and the quantity every resource limit is evaluated against.
+  It equals the reported total less the destroyed part, but that identity is a consequence of the law rather than a definition of either side.
 
 The result is the number a node MUST report as the transaction's destroyed compute gas.
 A node MUST NOT report a negative result: the law cannot produce one on this spec, and a node that computes one MUST report zero rather than a wrapped value.
@@ -546,7 +555,7 @@ A precompile invocation that fails is the same split, taken at the precompile re
 A precompile never becomes a child EVM frame, so the frame-exit settlement cannot see it.
 
 - **Executed** — the work the precompile performed: the KZG point-evaluation fixed cost when that precompile reached verification and returned a non-out-of-gas error, and zero when the invocation was rejected before any work.
-  For KZG the dividing line is its own input-length check, which runs before the commitment is read: an input whose length is not 192 bytes is turned away before any work, while every other non-out-of-gas failure is raised once verification is under way and is priced at the whole fixed cost regardless of how far it got.
+  For KZG the dividing line is its own input-length check, which runs before the commitment is read: an input whose length is not `KZG_POINT_EVALUATION_INPUT_LENGTH` is turned away before any work, while every other non-out-of-gas failure is raised once verification is under way and is priced at the whole fixed cost regardless of how far it got.
   A node MUST price an unrecognised non-out-of-gas KZG failure as verification under way, so an unfamiliar failure can only over-charge.
   A node MUST record the executed part through the ordinary enforcing path.
 - **Destroyed** — the rest of the call's gas limit: the caller-supplied envelope minus the executed part.
@@ -606,16 +615,17 @@ See [Resource Accounting](resource-accounting.md#revert-behavior).
 
 ## Constants
 
-| Constant                        | Value         | Spec           | Description                                                                                                      |
-| ------------------------------- | ------------- | -------------- | ---------------------------------------------------------------------------------------------------------------- |
-| `TX_COMPUTE_GAS_LIMIT`          | 200,000,000   | Rex onward     | Maximum compute gas per transaction from Rex onward                                                              |
-| `TX_COMPUTE_GAS_LIMIT`          | 1,000,000,000 | MiniRex        | Maximum compute gas per transaction under MiniRex                                                                |
-| `FRAME_LIMIT_NUMERATOR`         | 98            | Rex4 onward    | Numerator of the per-call-frame budget forwarding fraction                                                       |
-| `FRAME_LIMIT_DENOMINATOR`       | 100           | Rex4 onward    | Denominator of the per-call-frame budget forwarding fraction                                                     |
-| `CALL_STIPEND`                  | 2,300         | All            | Standard EVM value-transfer call stipend, inherited unchanged                                                    |
-| `CODEDEPOSIT`                   | 200           | All            | Standard EVM per-byte code-deposit gas, inherited unchanged                                                      |
-| `KEYLESS_DEPLOY_OVERHEAD_GAS`   | 100,000       | Rex2 onward    | Fixed dispatch overhead for a keyless deploy                                                                     |
-| `KZG_POINT_EVALUATION_GAS_COST` | 100,000       | MiniRex onward | MegaETH's fixed-cost override for the KZG point-evaluation precompile (defined in [Precompiles](precompiles.md)) |
+| Constant                            | Value         | Spec           | Description                                                                                                      |
+| ----------------------------------- | ------------- | -------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `TX_COMPUTE_GAS_LIMIT`              | 200,000,000   | Rex onward     | Maximum compute gas per transaction from Rex onward                                                              |
+| `TX_COMPUTE_GAS_LIMIT`              | 1,000,000,000 | MiniRex        | Maximum compute gas per transaction under MiniRex                                                                |
+| `FRAME_LIMIT_NUMERATOR`             | 98            | Rex4 onward    | Numerator of the per-call-frame budget forwarding fraction                                                       |
+| `FRAME_LIMIT_DENOMINATOR`           | 100           | Rex4 onward    | Denominator of the per-call-frame budget forwarding fraction                                                     |
+| `CALL_STIPEND`                      | 2,300         | All            | Standard EVM value-transfer call stipend, inherited unchanged                                                    |
+| `CODEDEPOSIT`                       | 200           | All            | Standard EVM per-byte code-deposit gas, inherited unchanged                                                      |
+| `KEYLESS_DEPLOY_OVERHEAD_GAS`       | 100,000       | Rex2 onward    | Fixed dispatch overhead for a keyless deploy                                                                     |
+| `KZG_POINT_EVALUATION_GAS_COST`     | 100,000       | MiniRex onward | MegaETH's fixed-cost override for the KZG point-evaluation precompile (defined in [Precompiles](precompiles.md)) |
+| `KZG_POINT_EVALUATION_INPUT_LENGTH` | 192           | All            | Required input length in bytes of the KZG point-evaluation precompile, inherited unchanged                       |
 
 The gas detention caps that lower the effective compute gas limit are defined in [Gas Detention](gas-detention.md).
 
