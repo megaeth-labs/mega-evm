@@ -155,3 +155,39 @@ fn test_cache_merge_warns_on_stderr_when_replacing_an_unreadable_envelope_output
     assert_eq!(value_of(&entries, 1).as_deref(), Some("from-a"), "{entries:?}");
     assert_eq!(entries.len(), 1, "{entries:?}");
 }
+
+/// An input that is a hard link to the output is folded in as the output, not
+/// read a second time as an input.
+///
+/// The two names are one file, so the merged *content* is the same either way —
+/// the pre-lock copy only overwrites a concurrent writer when there is one. The
+/// summary is what tells them apart: an input that reached the output by another
+/// name is not counted as one, because it never went through the pre-lock read.
+#[cfg(unix)]
+#[test]
+fn test_cache_merge_does_not_count_a_hard_linked_input_as_an_input() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out = dir.path().join("out.json");
+    let link = dir.path().join("link.json");
+    let new = dir.path().join("new.json");
+
+    fs::write(&out, serde_json::to_string_pretty(&envelope(vec![kv(1, "from-output")])).unwrap())
+        .expect("write out");
+    fs::write(&new, serde_json::to_string_pretty(&envelope(vec![kv(2, "from-new")])).unwrap())
+        .expect("write new");
+    fs::hard_link(&out, &link).expect("hard link the output");
+
+    let output = run_merge(&[&link, &new], &out);
+    let (stdout, stderr) = succeeds(&output);
+
+    assert!(
+        stdout.contains("Merged 1 inputs (1 entries in + 1 already in the output)"),
+        "the hard link must be folded in as the output, not counted as an input: \
+         stdout={stdout} stderr={stderr}",
+    );
+
+    let entries = read_entries(&out);
+    assert_eq!(value_of(&entries, 1).as_deref(), Some("from-output"), "{entries:?}");
+    assert_eq!(value_of(&entries, 2).as_deref(), Some("from-new"), "{entries:?}");
+    assert_eq!(entries.len(), 2, "{entries:?}");
+}

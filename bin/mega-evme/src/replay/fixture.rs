@@ -263,6 +263,10 @@ where
         extra: BTreeMap::new(),
     };
 
+    // The suite key names the transaction the unit was isolated from.
+    // `tx_hash()` is the cached hash seeded from the served `hash` field, and it
+    // is a verified value here: `verify::authenticate_transaction` admits no
+    // transaction whose served field disagrees with what its body hashes to.
     let name = format!("replay_{:#x}", target_tx.inner.inner.tx_hash());
 
     Ok(FixtureDraft {

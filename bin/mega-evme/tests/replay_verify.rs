@@ -766,6 +766,95 @@ fn test_batch_dump_fixture_dir_writes_validatable_file() {
     result.unwrap_or_else(|e| panic!("dumped fixture failed to validate: {e}"));
 }
 
+/// A transaction hash no capture holds, used as the value a lying `hash` field
+/// carries.
+const LYING_TX_HASH: &str = "0x00000000000000000000000000000000000000000000000000000000feed0002";
+
+/// A served transaction whose body is authentic but whose `hash` field names
+/// another transaction must be refused in batch mode, before it can name
+/// anything the run writes.
+///
+/// The payload still hashes to the requested hash, so the request/recompute
+/// comparison alone lets it through — and the dump path then names the fixture
+/// after the served field, writing the target's execution to
+/// `<lying hash>.json` and (under `--overwrite`) over an unrelated target's
+/// fixture. The positive control is
+/// [`test_batch_dump_fixture_dir_writes_validatable_file`], which pins the
+/// honest answer's fixture at `<TX>.json`.
+#[test]
+fn test_batch_refuses_a_transaction_whose_served_hash_field_lies() {
+    let path = DoctoredEnvelope::load(cache())
+        .set_transaction_field(TX, "hash", serde_json::Value::String(LYING_TX_HASH.to_string()))
+        .write_to_temp("batch_lying_tx_hash_field");
+    let list = tx_file("batch_lying_hash_field");
+    let dir =
+        std::env::temp_dir().join(format!("mega_evme_batch_lying_hash_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let run = replay(
+        &path,
+        &[
+            "--tx-file",
+            list.to_str().unwrap(),
+            "--dump-fixture-dir",
+            dir.to_str().unwrap(),
+            "--json",
+        ],
+    );
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(&list);
+
+    assert_eq!(run.code(), 3, "an unauthenticated target fetch exits 3.\nstderr: {}", run.stderr);
+    let lines = run.ndjson();
+    assert_eq!(lines.len(), 1, "one line per requested transaction");
+    assert_eq!(
+        lines[0]["error"]["kind"].as_str(),
+        Some("rpc"),
+        "a target that could not be authenticated went unanswered: {}",
+        lines[0]
+    );
+    let message = lines[0]["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains(LYING_TX_HASH) && message.contains(TX),
+        "the failure must name the served field and the value it must carry: {message}"
+    );
+    assert!(
+        message.contains("the served `hash` field"),
+        "the failure must name the inconsistent field: {message}"
+    );
+    assert!(
+        !dir.join(format!("{LYING_TX_HASH}.json")).exists() &&
+            !dir.join(format!("{TX}.json")).exists(),
+        "a refused target writes no fixture under either name",
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The same refusal on the single-transaction path: the target lookup is
+/// authenticated there too, so a lying `hash` field never reaches execution.
+#[test]
+fn test_single_transaction_refuses_a_served_hash_field_that_lies() {
+    let path = DoctoredEnvelope::load(cache())
+        .set_transaction_field(TX, "hash", serde_json::Value::String(LYING_TX_HASH.to_string()))
+        .write_to_temp("single_lying_tx_hash_field");
+
+    let run = replay(&path, &["--json", TX]);
+    let _ = std::fs::remove_file(&path);
+
+    assert_eq!(run.code(), 3, "an unauthenticated target fetch exits 3.\nstderr: {}", run.stderr);
+    let error = run.error_object();
+    assert_eq!(error["error"]["kind"].as_str(), Some("rpc-failure"));
+    let message = error["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains(LYING_TX_HASH) && message.contains(TX),
+        "the failure must name the served field and the value it must carry: {message}"
+    );
+    assert!(
+        message.contains("the served `hash` field"),
+        "the failure must name the inconsistent field: {message}"
+    );
+}
+
 /// A target whose fixture could not be written is still verified against its
 /// on-chain receipt: the failed dump is reported on the target's result line
 /// alongside the verdict, and fails the run as an execution-class failure.

@@ -1335,6 +1335,13 @@ where
         Err(e) => return DeferredFixture::Report(fixture_report_from_build_err(e)),
     };
 
+    // The fixture is filed under the transaction's own hash. `tx_hash()` returns
+    // the cached hash an RPC deserialization seeds from the response's `hash`
+    // field, so this name would be the endpoint's to choose — and under
+    // `--overwrite`, an unrelated target's file to replace. It is a verified
+    // value here because no transaction reaches execution without passing
+    // `verify::authenticate_transaction`, which refuses a served `hash` field
+    // that does not match the value the served body hashes to.
     let tx_hash = target_tx.inner.inner.tx_hash();
     let path = dir.join(format!("{tx_hash:#x}.json"));
     // Fast-path courtesy: refuse overwrite before carrying a ready draft so the
