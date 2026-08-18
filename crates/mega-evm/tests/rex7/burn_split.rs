@@ -25,7 +25,7 @@
 //! which side of the enforcing boundary each part lands on.
 
 use crate::common::{
-    transact, transact_default, transact_tx, transact_with_bucket_capacity,
+    finish, transact, transact_default, transact_tx, transact_with_bucket_capacity,
     transact_with_gas_limit, Outcome, CALLEE, CALLER, CONTRACT, DEFAULT_TX_GAS_LIMIT, ONE_ETH,
 };
 use alloy_primitives::{address, hex, Address, Bytes, Signature, TxKind, B256, U256};
@@ -437,21 +437,14 @@ fn transact_create_reject(
             booked_destroyed,
         )
     };
-    let gas_used = outcome.result_and_state.result.tx_gas_used();
-    Outcome {
-        result: outcome.result_and_state.result,
-        compute_gas: outcome.compute_gas_used,
-        data_size: outcome.data_size,
-        kv_updates: outcome.kv_updates,
-        state_growth: outcome.state_growth_used,
-        gas_used,
-        destroyed: outcome.compute_gas_destroyed,
+    finish(
+        MegaSpecId::REX7,
+        outcome,
         detained_compute_gas_limit,
         non_compute_gas,
         minted_call_stipend,
         booked_destroyed,
-        state: outcome.result_and_state.state,
-    }
+    )
 }
 
 /// Runtime length the CREATE cases deploy — small enough that the per-byte code-deposit storage

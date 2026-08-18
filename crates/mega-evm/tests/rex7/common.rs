@@ -3,7 +3,7 @@
 use alloy_primitives::{address, Address, Bytes, B256, U256};
 use mega_evm::{
     test_utils::MemoryDatabase, EvmTxRuntimeLimits, MegaContext, MegaEvm, MegaHaltReason,
-    MegaSpecId, MegaTransaction, MegaTransactionNew as _, TestExternalEnvs,
+    MegaSpecId, MegaTransaction, MegaTransactionNew as _, MegaTransactionOutcome, TestExternalEnvs,
 };
 use revm::{
     context::{result::ExecutionResult, tx::TxEnvBuilder, TxEnv},
@@ -40,6 +40,12 @@ pub(crate) struct Outcome {
     /// The part of [`compute_gas`](Self::compute_gas) an exceptionally halted frame destroyed
     /// rather than performed (REX7+, else 0).
     pub(crate) destroyed: u64,
+    /// Post-tx enforced compute gas — the part of [`compute_gas`](Self::compute_gas) every limit
+    /// comparison and the block's admission counter run against.
+    pub(crate) enforced_lane: u64,
+    /// Receipt envelope before the EIP-3529 refund and the EIP-7623 floor: exactly the number
+    /// settlement derives the destroyed total from.
+    pub(crate) total_gas_spent: u64,
     /// Post-tx detained compute gas limit — equal to the configured TX limit unless volatile
     /// access lowered it.
     pub(crate) detained_compute_gas_limit: u64,
@@ -69,8 +75,12 @@ impl Outcome {
     }
 
     /// The part of the reported compute total that a resource limit is evaluated against.
+    ///
+    /// Read from the tracker's own lane rather than subtracted from the reported total; the two
+    /// agree because [`assert_terminal_identity`] checks that they do on every transaction the
+    /// helpers in this module run.
     pub(crate) fn enforced(&self) -> u64 {
-        self.compute_gas - self.destroyed
+        self.enforced_lane
     }
 
     /// Reads a storage slot out of the produced state, defaulting to zero when the transaction
@@ -128,8 +138,33 @@ pub(crate) fn transact_with_gas_limit(
             booked_destroyed,
         )
     };
+    finish(
+        spec,
+        outcome,
+        detained_compute_gas_limit,
+        non_compute_gas,
+        minted_call_stipend,
+        booked_destroyed,
+    )
+}
+
+/// Assembles an [`Outcome`] from what a transaction reported and checks the terminal identity
+/// before handing it back.
+///
+/// Every helper in this module funnels through here, so every REX7 transaction the suite runs —
+/// not just the ones written to look at gas — is a check that the tracker lanes reconcile with the
+/// receipt the transaction produced.
+pub(crate) fn finish(
+    spec: MegaSpecId,
+    outcome: MegaTransactionOutcome,
+    detained_compute_gas_limit: u64,
+    non_compute_gas: i128,
+    minted_call_stipend: u64,
+    booked_destroyed: u64,
+) -> Outcome {
     let gas_used = outcome.result_and_state.result.tx_gas_used();
-    Outcome {
+    let total_gas_spent = outcome.result_and_state.result.gas().total_gas_spent();
+    let outcome = Outcome {
         result: outcome.result_and_state.result,
         compute_gas: outcome.compute_gas_used,
         data_size: outcome.data_size,
@@ -137,12 +172,96 @@ pub(crate) fn transact_with_gas_limit(
         state_growth: outcome.state_growth_used,
         gas_used,
         destroyed: outcome.compute_gas_destroyed,
+        enforced_lane: outcome.compute_gas_enforced,
+        total_gas_spent,
         detained_compute_gas_limit,
         non_compute_gas,
         minted_call_stipend,
         booked_destroyed,
         state: outcome.result_and_state.state,
+    };
+    assert_terminal_identity(spec, &outcome);
+    outcome
+}
+
+/// The identity every REX7 transaction that produces a receipt must satisfy, connecting what the
+/// trackers hold to the number the receipt reports.
+///
+/// # The identity
+///
+/// For one transaction, write
+///
+/// ```text
+/// C = compute_gas         reported compute total
+/// E = enforced_lane       the part limits and block admission compare against
+/// D = destroyed           the part that is reported and accounted but never enforced
+/// N = non_compute_gas     MegaETH storage gas plus the sandbox boundary residue (signed)
+/// M = minted_call_stipend CALL_STIPEND minted into child frames and never debited from a caller
+/// S = total_gas_spent     the receipt envelope, before the refund and the floor
+/// R = the receipt's raw refund
+/// F = the receipt's EIP-7623 floor gas
+/// ```
+///
+/// then
+///
+/// ```text
+/// (1)  C = E + D
+/// (2)  C + N − M = S
+/// (3)  receipt gas_used = max(S − R, F)
+/// ```
+///
+/// (1) is the split of the reported total. (2) is the conservation law rearranged: settlement
+/// defines `D = S + M − N − E`, so `S = D + E + N − M`, and substituting (1) gives `S = C + N − M`.
+/// (3) is how a receipt's gas number is built from its envelope.
+///
+/// # Why (2) needs no refund or floor correction
+///
+/// The EIP-3529 refund and the EIP-7623 floor both move the number the receipt reports without
+/// anyone having burnt the difference. Both are applied strictly after the envelope is final, and
+/// both are carried on the result as their own fields rather than folded into the envelope, so
+/// anchoring on `S` — the same value settlement reads — keeps them out of the identity entirely.
+/// Substituting (2) into (3) gives the receipt-level form, which is what a reader normally wants:
+///
+/// ```text
+/// receipt gas_used = max(C + N − M − R, F)
+/// ```
+///
+/// # What it catches
+///
+/// (2) fails whenever a transaction's envelope moves without a `MegaETH` site accounting for it —
+/// a settlement that never ran, a result rewritten after settlement, an upstream subsidy nobody
+/// records. (1) fails when the reported split disagrees with the per-site bookings, which is what
+/// the block's admission counter reads. Pre-REX7 specs have neither a destroyed lane nor a
+/// non-compute lane, so the identity is REX7-only by construction.
+fn assert_terminal_identity(spec: MegaSpecId, outcome: &Outcome) {
+    if !spec.is_enabled(MegaSpecId::REX7) {
+        return;
     }
+    assert_eq!(
+        outcome.compute_gas,
+        outcome.enforced_lane + outcome.destroyed,
+        "reported compute gas must split into enforced + destroyed; \
+         compute={} enforced={} destroyed={} result={:?}",
+        outcome.compute_gas,
+        outcome.enforced_lane,
+        outcome.destroyed,
+        outcome.result,
+    );
+    let accounted = i128::from(outcome.compute_gas) + outcome.non_compute_gas -
+        i128::from(outcome.minted_call_stipend);
+    assert_eq!(
+        accounted,
+        i128::from(outcome.total_gas_spent),
+        "the tracker lanes must account for the whole receipt envelope; \
+         compute={} non_compute={} minted_stipend={} accounted={accounted} envelope={} \
+         (receipt gas_used={}) result={:?}",
+        outcome.compute_gas,
+        outcome.non_compute_gas,
+        outcome.minted_call_stipend,
+        outcome.total_gas_spent,
+        outcome.gas_used,
+        outcome.result,
+    );
 }
 
 /// Runs [`transact`] with the spec's default runtime limits.
@@ -165,9 +284,23 @@ pub(crate) fn default_envs() -> TestExternalEnvs {
 /// so a test can read back what execution recorded into it (oracle hints, for instance).
 pub(crate) fn transact_tx(
     spec: MegaSpecId,
-    mut db: MemoryDatabase,
+    db: MemoryDatabase,
     limits: EvmTxRuntimeLimits,
     tx: TxEnv,
+    envs: &TestExternalEnvs,
+) -> Outcome {
+    let mut tx = MegaTransaction::new(tx);
+    tx.enveloped_tx = Some(Bytes::new());
+    transact_mega_tx(spec, db, limits, tx, envs)
+}
+
+/// [`transact_tx`] for the shapes that need the `MegaETH` transaction itself, not just its
+/// `TxEnv` — a deposit's `source_hash` and `mint` live on the outer type.
+pub(crate) fn transact_mega_tx(
+    spec: MegaSpecId,
+    mut db: MemoryDatabase,
+    limits: EvmTxRuntimeLimits,
+    tx: MegaTransaction,
     envs: &TestExternalEnvs,
 ) -> Outcome {
     let mut context = MegaContext::new(&mut db, spec)
@@ -177,8 +310,6 @@ pub(crate) fn transact_tx(
         chain.operator_fee_scalar = Some(U256::from(0));
         chain.operator_fee_constant = Some(U256::from(0));
     });
-    let mut tx = MegaTransaction::new(tx);
-    tx.enveloped_tx = Some(Bytes::new());
     let mut evm = MegaEvm::new(context);
     let outcome = evm.execute_transaction(tx).expect("tx should not surface EVMError");
     let (detained_compute_gas_limit, non_compute_gas, minted_call_stipend, booked_destroyed) = {
@@ -192,21 +323,14 @@ pub(crate) fn transact_tx(
             booked_destroyed,
         )
     };
-    let gas_used = outcome.result_and_state.result.tx_gas_used();
-    Outcome {
-        result: outcome.result_and_state.result,
-        compute_gas: outcome.compute_gas_used,
-        data_size: outcome.data_size,
-        kv_updates: outcome.kv_updates,
-        state_growth: outcome.state_growth_used,
-        gas_used,
-        destroyed: outcome.compute_gas_destroyed,
+    finish(
+        spec,
+        outcome,
         detained_compute_gas_limit,
         non_compute_gas,
         minted_call_stipend,
         booked_destroyed,
-        state: outcome.result_and_state.state,
-    }
+    )
 }
 
 /// The part of an account a transaction's state actually asserts.
@@ -346,19 +470,12 @@ pub(crate) fn transact_with_bucket_capacity(
             booked_destroyed,
         )
     };
-    let gas_used = outcome.result_and_state.result.tx_gas_used();
-    Outcome {
-        result: outcome.result_and_state.result,
-        compute_gas: outcome.compute_gas_used,
-        data_size: outcome.data_size,
-        kv_updates: outcome.kv_updates,
-        state_growth: outcome.state_growth_used,
-        gas_used,
-        destroyed: outcome.compute_gas_destroyed,
+    finish(
+        spec,
+        outcome,
         detained_compute_gas_limit,
         non_compute_gas,
         minted_call_stipend,
         booked_destroyed,
-        state: outcome.result_and_state.state,
-    }
+    )
 }

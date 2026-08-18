@@ -13,7 +13,9 @@
 //! `MegaLimitControl.remainingComputeGas` would return after the transaction: the TX-level
 //! remaining, which is what the interceptor reads once the frames have been popped.
 
-use crate::common::{transact, Outcome, CALLEE, CALLER, CONTRACT, DEFAULT_TX_GAS_LIMIT, ONE_ETH};
+use crate::common::{
+    finish, transact, Outcome, CALLEE, CALLER, CONTRACT, DEFAULT_TX_GAS_LIMIT, ONE_ETH,
+};
 use alloy_primitives::{Bytes, U256};
 use alloy_sol_types::{SolCall as _, SolError};
 use mega_evm::{
@@ -117,21 +119,14 @@ fn run_db(mut db: MemoryDatabase, limits: EvmTxRuntimeLimits) -> GuardPassRun {
         )
     };
     let accessed = evm.ctx_ref().volatile_data_tracker.borrow().get_volatile_data_accessed();
-    let gas_used = executed.result_and_state.result.tx_gas_used();
-    let outcome = Outcome {
-        result: executed.result_and_state.result,
-        compute_gas: executed.compute_gas_used,
-        data_size: executed.data_size,
-        kv_updates: executed.kv_updates,
-        state_growth: executed.state_growth_used,
-        gas_used,
-        destroyed: executed.compute_gas_destroyed,
+    let outcome = finish(
+        MegaSpecId::REX7,
+        executed,
         detained_compute_gas_limit,
         non_compute_gas,
         minted_call_stipend,
         booked_destroyed,
-        state: executed.result_and_state.state,
-    };
+    );
     GuardPassRun { outcome, accessed, remaining_compute_gas }
 }
 

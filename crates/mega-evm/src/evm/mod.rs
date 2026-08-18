@@ -68,7 +68,7 @@ use revm::{
     ExecuteEvm, InspectEvm, Inspector, Journal,
 };
 
-use crate::{BucketId, ExternalEnvTypes, LimitUsage, MegaTransaction};
+use crate::{AdditionalLimit, BucketId, ExternalEnvTypes, LimitUsage, MegaTransaction};
 
 /// The main EVM implementation for the `MegaETH` chain.
 ///
@@ -359,10 +359,12 @@ where
         } else {
             ExecuteEvm::transact(self, tx)?
         };
+        let is_inside_sandbox = self.ctx().is_inside_sandbox();
+        let spec = self.ctx().spec;
         let additional_limit = self.ctx().additional_limit.borrow();
         let LimitUsage { data_size, kv_updates, compute_gas, state_growth } =
             additional_limit.get_usage();
-        Ok(MegaTransactionOutcome {
+        let outcome = MegaTransactionOutcome {
             result_and_state,
             data_size,
             kv_updates,
@@ -370,7 +372,9 @@ where
             compute_gas_destroyed: additional_limit.destroyed_compute_gas(),
             compute_gas_enforced: additional_limit.enforced_compute_gas(),
             state_growth_used: state_growth,
-        })
+        };
+        debug_assert_envelope_accounted(spec, is_inside_sandbox, &additional_limit, &outcome);
+        Ok(outcome)
     }
 
     /// Inspect a transaction and return the outcome. The inspector used is the one set up already
@@ -392,10 +396,12 @@ where
         tx: MegaTransaction,
     ) -> Result<MegaTransactionOutcome, EVMError<DB::Error, MegaTransactionError>> {
         let result_and_state = InspectEvm::inspect_tx(self, tx)?;
+        let is_inside_sandbox = self.ctx().is_inside_sandbox();
+        let spec = self.ctx().spec;
         let additional_limit = self.ctx().additional_limit.borrow();
         let LimitUsage { data_size, kv_updates, compute_gas, state_growth } =
             additional_limit.get_usage();
-        Ok(MegaTransactionOutcome {
+        let outcome = MegaTransactionOutcome {
             result_and_state,
             data_size,
             kv_updates,
@@ -403,7 +409,9 @@ where
             compute_gas_destroyed: additional_limit.destroyed_compute_gas(),
             compute_gas_enforced: additional_limit.enforced_compute_gas(),
             state_growth_used: state_growth,
-        })
+        };
+        debug_assert_envelope_accounted(spec, is_inside_sandbox, &additional_limit, &outcome);
+        Ok(outcome)
     }
 
     /// Get the bucket IDs used during transaction execution.
@@ -413,6 +421,56 @@ where
     /// Returns the bucket IDs used during transaction execution.
     pub fn get_accessed_bucket_ids(&self) -> Vec<BucketId> {
         self.ctx_ref().dynamic_storage_gas_cost.borrow().get_bucket_ids()
+    }
+}
+
+/// Debug-only check that a transaction's tracker lanes account for the whole envelope its receipt
+/// reports (REX7+; before REX7 there is no destroyed lane and no non-compute lane, so there is
+/// nothing to reconcile).
+///
+/// The reported compute total, the `MegaETH` storage gas, and the `CALL_STIPEND` the EVM minted
+/// into child frames are the three terms the destroyed remainder is derived from, so once
+/// settlement has run they must add back up to the envelope the transaction burnt:
+///
+/// ```text
+/// compute_gas_used + non_compute_gas − minted_call_stipend == total_gas_spent
+/// ```
+///
+/// The EIP-3529 refund and the EIP-7623 floor move the number a receipt reports without anyone
+/// having burnt the difference; both are carried on the result as their own fields and applied
+/// after the envelope is final, so the envelope this compares against is unaffected by either.
+///
+/// What this catches that the settlement site's own cross-check cannot: a result whose envelope is
+/// decided *after* settlement, or a path that produces a receipt without settling at all. Both
+/// leave the settlement site's derived-versus-booked comparison perfectly happy and the reported
+/// total wrong. A failed OP deposit is such a path — its receipt is rebuilt to report the whole
+/// gas limit at the outermost error boundary — and is settled explicitly there.
+///
+/// Skipped inside a keyless-deploy sandbox: a sandbox transaction never settles a derivation of
+/// its own, because the law is stated over an outer transaction's final envelope and the sandbox's
+/// gas is a charge inside its parent's.
+#[inline]
+fn debug_assert_envelope_accounted(
+    spec: MegaSpecId,
+    is_inside_sandbox: bool,
+    additional_limit: &AdditionalLimit,
+    outcome: &MegaTransactionOutcome,
+) {
+    if cfg!(debug_assertions) && spec.is_enabled(MegaSpecId::REX7) && !is_inside_sandbox {
+        let envelope = outcome.result_and_state.result.gas().total_gas_spent();
+        let accounted = i128::from(outcome.compute_gas_used) + additional_limit.non_compute_gas() -
+            i128::from(additional_limit.minted_call_stipend());
+        debug_assert!(
+            accounted == i128::from(envelope),
+            "the tracker lanes must account for the whole receipt envelope: \
+             accounted {accounted} vs envelope {envelope} \
+             (compute {}, non-compute {}, minted stipend {}, destroyed {}, enforced {})",
+            outcome.compute_gas_used,
+            additional_limit.non_compute_gas(),
+            additional_limit.minted_call_stipend(),
+            outcome.compute_gas_destroyed,
+            outcome.compute_gas_enforced,
+        );
     }
 }
 
