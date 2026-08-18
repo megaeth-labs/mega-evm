@@ -31,6 +31,9 @@
 //!   (the child's `parentHash`, inclusion `blockHash`es) so the whole capture stays coherent;
 //!   [`DoctoredEnvelope::reseal_block_keeping_references`] deliberately does not, which is how a
 //!   parent that does not link to its child is manufactured.
+//! - [`DoctoredEnvelope::answer_block_with`] rewrites no header at all: it moves one captured
+//!   block's response onto another height's request, so the answer authenticates and the only thing
+//!   wrong with it is the question it answers.
 
 use std::path::{Path, PathBuf};
 
@@ -70,6 +73,7 @@ pub(crate) const PUBLIC_MUTATING_OPS: &[&str] = &[
     "reseal_block",
     "reseal_block_keeping_references",
     "set_block_hash",
+    "answer_block_with",
     "remove_from_block_body",
     "remove_from_listing_block",
     "keep_only_transactions_and_block",
@@ -512,6 +516,30 @@ impl DoctoredEnvelope {
         self
     }
 
+    /// Answers the request that served the block body at `requested` with the
+    /// block body the capture serves at `served`, verbatim.
+    ///
+    /// No header is rewritten, so the moved answer keeps hashing to the hash it
+    /// is served under: the only thing wrong with it is the question it answers.
+    /// That is the one forgery a numbered fetch cannot see from the hash alone,
+    /// and offsetting the parent's answer by the same distance leaves the
+    /// parent/block linkage satisfied too — so nothing downstream notices either.
+    ///
+    /// Both heights must be captured as block bodies, and the entry each is
+    /// served under is located by parsing the cached response, so no request-key
+    /// formula is restated here. Afterwards two entries carry the block at
+    /// `served`, which is exactly the endpoint being modelled — and which is why
+    /// the inspectors keyed by height must be read before this operation runs.
+    #[must_use]
+    pub(crate) fn answer_block_with(mut self, requested: u64, served: u64) -> Self {
+        assert_ne!(requested, served, "answering a fetch with its own block changes nothing");
+        let source = self.block_with_transactions_index(served);
+        let response = self.entries()[source]["value"].clone();
+        let destination = self.block_with_transactions_index(requested);
+        self.entries_mut()[destination]["value"] = response;
+        self
+    }
+
     /// Removes `tx_hashes` from the unique block body at `number`.
     #[must_use]
     pub(crate) fn remove_from_block_body(mut self, number: u64, tx_hashes: &[&str]) -> Self {
@@ -576,6 +604,17 @@ impl DoctoredEnvelope {
         parsed_response(&self.entries()[idx])["result"]["hash"]
             .as_str()
             .expect("block hash")
+            .to_string()
+    }
+
+    /// Returns `parentHash` of the unique result object whose `number` is
+    /// `number`, which is what the replay's linkage guard compares the block
+    /// served at the parent height against.
+    pub(crate) fn block_parent_hash_at(&self, number: u64) -> String {
+        let idx = self.numbered_object_index(number);
+        parsed_response(&self.entries()[idx])["result"]["parentHash"]
+            .as_str()
+            .expect("block parent hash")
             .to_string()
     }
 

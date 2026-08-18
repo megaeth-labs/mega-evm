@@ -1403,12 +1403,14 @@ fn incoherent_endpoint(incoherence: Incoherence) -> ReplayError {
 /// answer; here the same context is an infrastructure failure (exit 3), matching
 /// the batch path's classification.
 ///
-/// The served header is authenticated against the hash it was served under
-/// before the caller reads anything out of it: the inclusion and linkage guards
-/// consume that hash, and the block environment is built from the fields beside
-/// it, so a header rewritten under its original hash would move the world the
-/// target is replayed in while passing every later guard. The check is a local
-/// recomputation, so it issues no additional request.
+/// The served header is authenticated before the caller reads anything out of
+/// it: against the hash it was served under, and against the height that was
+/// asked for. The inclusion and linkage guards consume that hash, and the block
+/// environment is built from the fields beside it, so a header rewritten under
+/// its original hash would move the world the target is replayed in while
+/// passing every later guard; and no guard reads the height back, so a block
+/// served for another height would be replayed as this one. The checks are
+/// local, so they issue no additional request.
 async fn fetch_resolved_block<P>(provider: &P, number: u64) -> Result<Block<Transaction>>
 where
     P: Provider<op_alloy_network::Optimism>,
@@ -1425,7 +1427,7 @@ where
                  the chain settles"
             ))
         })?;
-    coherence::authenticate_block_header(&block.header).map_err(incoherent_endpoint)?;
+    coherence::authenticate_block_header(&block.header, number).map_err(incoherent_endpoint)?;
     Ok(block)
 }
 

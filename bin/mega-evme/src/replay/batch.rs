@@ -1455,10 +1455,10 @@ where
 ///
 /// Every block this driver executes against — the replayed block and the parent
 /// it forks from — is fetched here, so the served header is authenticated here
-/// too: a header that does not hash to the hash it was served under is rejected
-/// before any guard consumes that hash and before the block environment is built
-/// from its fields. The check is a local recomputation, so it issues no
-/// additional request.
+/// too: a header that does not hash to the hash it was served under, or that
+/// claims a height other than the one asked for, is rejected before any guard
+/// consumes that hash and before the block environment is built from its fields.
+/// The checks are local, so they issue no additional request.
 async fn fetch_block<P>(provider: &P, number: u64) -> Result<Block<Transaction>>
 where
     P: Provider<op_alloy_network::Optimism>,
@@ -1468,7 +1468,7 @@ where
         .await
         .map_err(|e| ReplayError::RpcError(format!("RPC transport error: {e}")))?
         .ok_or(ReplayError::BlockNotFound(number))?;
-    coherence::authenticate_block_header(&block.header)
+    coherence::authenticate_block_header(&block.header, number)
         .map_err(|incoherence| ReplayError::RpcError(incoherence.to_string()))?;
     Ok(block)
 }

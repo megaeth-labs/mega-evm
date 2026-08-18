@@ -15,9 +15,10 @@
 //!
 //! Every [`Incoherence`] describes the *endpoint* contradicting itself (a reorg
 //! landing between two calls, a load-balanced endpoint serving divergent views,
-//! or a served block header that does not hash to the hash it is served under),
-//! never a definitive answer about the target. Both drivers therefore report all
-//! of them as infrastructure failures.
+//! or a served block header that does not hash to the hash it is served under,
+//! or that answers a numbered fetch from another height), never a definitive
+//! answer about the target. Both drivers therefore report all of them as
+//! infrastructure failures.
 
 use alloy_primitives::B256;
 use alloy_rpc_types_eth::Header;
@@ -80,6 +81,13 @@ pub(super) enum Incoherence {
         /// Hash the served consensus fields actually produce.
         computed: B256,
     },
+    /// A block fetched by number is a block at another height.
+    HeightMismatch {
+        /// Height the fetch asked for.
+        requested: u64,
+        /// Height the served header claims.
+        served: u64,
+    },
     /// The target was resolved into the genesis block, which has no parent to
     /// fork the pre-state from.
     GenesisPlacement,
@@ -141,6 +149,17 @@ impl fmt::Display for Incoherence {
                  inconsistent backend, or a tampered capture); the block environment it \
                  describes is unverified"
             ),
+            // The height a header claims is a consensus field, so an
+            // authenticated header cannot be at the height it was fetched under
+            // by accident: either the endpoint answered a different question, or
+            // the answer was moved onto another request.
+            Self::HeightMismatch { requested, served } => write!(
+                f,
+                "the endpoint answered the fetch of block {requested} with block {served}: a \
+                 numbered fetch was served a header from another height (an inconsistent backend, \
+                 or a tampered capture); the block environment it describes is not the one the run \
+                 asked for"
+            ),
             Self::GenesisPlacement => write!(
                 f,
                 "endpoint resolved the target into block 0, which has no parent block \
@@ -198,30 +217,48 @@ pub(super) fn classify_placement(
     }
 }
 
-/// Authenticate a served block header against the hash it was served under.
+/// Authenticate a served block header: it must hash to the hash it was served
+/// under, and it must be the height that was asked for.
 ///
 /// Every other judgment in this module compares two answers the endpoint gave.
-/// This one compares an answer against itself: a block header is a consensus
-/// object whose hash is a function of its own fields, so the `hash` an endpoint
-/// reports beside them can be checked without asking anything further. Nothing
-/// else in the replay does check it — the inclusion, linkage and membership
-/// guards all consume that reported hash — so an endpoint (or a tampered offline
-/// capture) can rewrite `timestamp`, `baseFeePerGas`, `gasLimit` or `parentHash`
-/// while keeping the original `hash`, pass every guard, and have the target
-/// replayed under a block environment it never ran in.
+/// This one compares an answer against itself and against the question: a block
+/// header is a consensus object whose hash and height are functions of its own
+/// fields, so both can be checked without asking anything further. Nothing else
+/// in the replay does check them — the inclusion, linkage and membership guards
+/// all consume the reported hash, and every block is fetched by number without
+/// ever reading the height back — so two forgeries would otherwise pass:
+///
+/// - Rewriting `timestamp`, `baseFeePerGas`, `gasLimit` or `parentHash` while keeping the original
+///   `hash` moves the world the target executes in past every later guard.
+/// - Answering `eth_getBlockByNumber(N)` with a self-consistent block `M` replays the body and
+///   environment of `M` while the run reports it as `N`. Offsetting the parent fetch by the same
+///   distance keeps the linkage guard satisfied, so nothing downstream notices.
+///
+/// The two checks are asked in that order: the height a header claims is one of
+/// the fields the hash covers, so it is worth reading only once the header is
+/// proven to be the one the endpoint vouches for.
 ///
 /// The hash is recomputed from the served consensus fields rather than read back
 /// from the response. `Header::hash()` / `Block::hash()` return the `hash` field
 /// an RPC deserialization filled in — the very value being authenticated — the
 /// same trap the transaction-level authentication meets with the envelope's
 /// cached hash.
-pub(super) fn authenticate_block_header(header: &Header) -> Result<(), Incoherence> {
+pub(super) fn authenticate_block_header(
+    header: &Header,
+    requested_number: u64,
+) -> Result<(), Incoherence> {
     let computed = header.inner.hash_slow();
     if computed != header.hash {
         return Err(Incoherence::UnauthenticHeader {
             number: header.inner.number,
             served: header.hash,
             computed,
+        });
+    }
+    if header.inner.number != requested_number {
+        return Err(Incoherence::HeightMismatch {
+            requested: requested_number,
+            served: header.inner.number,
         });
     }
     Ok(())
@@ -303,10 +340,14 @@ mod tests {
     const HASH_A: B256 = B256::repeat_byte(0xaa);
     const HASH_B: B256 = B256::repeat_byte(0xbb);
 
+    /// Height [`sealed_header`] claims, and therefore the height a fetch has to
+    /// have asked for to accept it.
+    const SEALED_NUMBER: u64 = 22_945_844;
+
     /// A served header whose reported hash is the one its own fields produce.
     fn sealed_header() -> Header {
         let inner = alloy_consensus::Header {
-            number: 22_945_844,
+            number: SEALED_NUMBER,
             timestamp: 1_764_000_000,
             gas_limit: 10_000_000_000,
             parent_hash: HASH_A,
@@ -392,6 +433,14 @@ mod tests {
                 ),
             ),
             (
+                Incoherence::HeightMismatch { requested: 22_945_844, served: 22_945_843 },
+                "the endpoint answered the fetch of block 22945844 with block 22945843: a \
+                 numbered fetch was served a header from another height (an inconsistent \
+                 backend, or a tampered capture); the block environment it describes is not the \
+                 one the run asked for"
+                    .to_string(),
+            ),
+            (
                 Incoherence::GenesisPlacement,
                 "endpoint resolved the target into block 0, which has no parent block to fork \
                  from: contradictory endpoint data"
@@ -445,10 +494,11 @@ mod tests {
         }
     }
 
-    /// A header served under the hash of its own fields authenticates.
+    /// A header served under the hash of its own fields, at the height it was
+    /// fetched under, authenticates.
     #[test]
     fn test_authenticate_block_header_accepts_a_sealed_header() {
-        assert_eq!(authenticate_block_header(&sealed_header()), Ok(()));
+        assert_eq!(authenticate_block_header(&sealed_header(), SEALED_NUMBER), Ok(()));
     }
 
     /// Rewriting any execution-relevant header field while keeping the reported
@@ -475,7 +525,11 @@ mod tests {
             let served = header.hash;
             tamper(&mut header.inner);
 
-            let Err(verdict) = authenticate_block_header(&header) else {
+            // Asked for under the height the untampered header claims, so a
+            // rewritten `number` is judged by the hash rather than by the
+            // height: the served fields no longer produce the served hash, and
+            // that is the more specific answer of the two.
+            let Err(verdict) = authenticate_block_header(&header, SEALED_NUMBER) else {
                 panic!("a rewritten {field} must not authenticate");
             };
             let Incoherence::UnauthenticHeader { number, served: reported, computed } = verdict
@@ -507,7 +561,7 @@ mod tests {
         let computed = header.hash;
         header.hash = HASH_B;
 
-        let verdict = authenticate_block_header(&header)
+        let verdict = authenticate_block_header(&header, SEALED_NUMBER)
             .expect_err("a header served under another hash must not authenticate");
 
         assert_eq!(
@@ -518,6 +572,22 @@ mod tests {
                 computed
             }
         );
+    }
+
+    /// A header that authenticates is still rejected when it is not the height
+    /// the fetch asked for, and the verdict names both heights.
+    ///
+    /// This is the forgery the hash check cannot see: the header is a real,
+    /// self-consistent block — it is simply the answer to another question.
+    #[test]
+    fn test_authenticate_block_header_rejects_another_height() {
+        for requested in [SEALED_NUMBER - 1, SEALED_NUMBER + 1, 0, u64::MAX] {
+            assert_eq!(
+                authenticate_block_header(&sealed_header(), requested),
+                Err(Incoherence::HeightMismatch { requested, served: SEALED_NUMBER }),
+                "a sealed header fetched as block {requested} must be rejected",
+            );
+        }
     }
 
     /// Genesis is the only height without a parent to fork from.
