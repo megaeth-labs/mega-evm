@@ -72,6 +72,37 @@ pub(crate) fn fixture(name: &str) -> PathBuf {
     path
 }
 
+/// The authentic hash of a served block header: the hash its own consensus
+/// fields produce.
+///
+/// The replay authenticates every block it fetches by recomputing this and
+/// comparing it against the `hash` the endpoint reported, so a mock endpoint or
+/// a doctored capture cannot serve an invented block hash any more than it can
+/// serve an invented transaction hash. `header_json` is a served block object
+/// (or a bare header object); its non-header members — `hash`, `transactions`,
+/// `uncles`, `withdrawals`, `size`, `totalDifficulty` — are ignored, which is
+/// exactly what the consensus hash covers.
+///
+/// This is the block-level counterpart of the per-file `tx_identity` helpers:
+/// the identity is computed from the object being served, never asserted beside
+/// it.
+pub(crate) fn block_hash_of(header_json: &serde_json::Value) -> String {
+    let header: alloy_consensus::Header = serde_json::from_value(header_json.clone())
+        .expect("a served block must carry a well-formed consensus header");
+    format!("{:#x}", header.hash_slow())
+}
+
+/// Stamp the authentic hash into a served block's `hash` field.
+///
+/// Chain a block on top of a sealed parent by reading the parent's sealed hash
+/// out of it (`sealed["hash"]`) and passing that as the child's `parentHash`:
+/// the replay checks that linkage too, so a mock's chain has to be built from
+/// the bottom up.
+pub(crate) fn sealed_block(mut header_json: serde_json::Value) -> serde_json::Value {
+    header_json["hash"] = serde_json::Value::String(block_hash_of(&header_json));
+    header_json
+}
+
 /// A mock JSON-RPC server tuned for mega-evme integration tests.
 ///
 /// All mounted mocks match `POST` (the JSON-RPC verb) and use priorities so

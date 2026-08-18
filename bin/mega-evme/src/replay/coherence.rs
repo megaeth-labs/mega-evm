@@ -14,11 +14,13 @@
 //! orders and tallies those entries is its own business.
 //!
 //! Every [`Incoherence`] describes the *endpoint* contradicting itself (a reorg
-//! landing between two calls, or a load-balanced endpoint serving divergent
-//! views), never a definitive answer about the target. Both drivers therefore
-//! report all of them as infrastructure failures.
+//! landing between two calls, a load-balanced endpoint serving divergent views,
+//! or a served block header that does not hash to the hash it is served under),
+//! never a definitive answer about the target. Both drivers therefore report all
+//! of them as infrastructure failures.
 
 use alloy_primitives::B256;
+use alloy_rpc_types_eth::Header;
 use core::fmt;
 
 /// Where the endpoint placed a target, as read from its `(block_number,
@@ -68,6 +70,15 @@ pub(super) enum Incoherence {
     ContradictoryMetadata {
         /// Inclusion hash the lookup reported for an allegedly unmined target.
         inclusion_hash: B256,
+    },
+    /// A served block header does not hash to the hash it was served under.
+    UnauthenticHeader {
+        /// Height the served header claims.
+        number: u64,
+        /// Hash the endpoint reported for the header.
+        served: B256,
+        /// Hash the served consensus fields actually produce.
+        computed: B256,
     },
     /// The target was resolved into the genesis block, which has no parent to
     /// fork the pre-state from.
@@ -119,6 +130,16 @@ impl fmt::Display for Incoherence {
                 f,
                 "endpoint reported inclusion hash {inclusion_hash} without a block \
                  number: contradictory metadata"
+            ),
+            // The hash a header is served under is a claim about the header, not
+            // a property of it. Recomputing the hash is the only way to tell the
+            // two apart, so the message reports both values.
+            Self::UnauthenticHeader { number, served, computed } => write!(
+                f,
+                "the header served for block {number} hashes to {computed}, but the endpoint \
+                 reported it as {served}: the served block header does not authenticate (an \
+                 inconsistent backend, or a tampered capture); the block environment it \
+                 describes is unverified"
             ),
             Self::GenesisPlacement => write!(
                 f,
@@ -175,6 +196,35 @@ pub(super) fn classify_placement(
         (None, Some(inclusion_hash)) => Err(Incoherence::ContradictoryMetadata { inclusion_hash }),
         (None, None) => Ok(TargetPlacement::Pending),
     }
+}
+
+/// Authenticate a served block header against the hash it was served under.
+///
+/// Every other judgment in this module compares two answers the endpoint gave.
+/// This one compares an answer against itself: a block header is a consensus
+/// object whose hash is a function of its own fields, so the `hash` an endpoint
+/// reports beside them can be checked without asking anything further. Nothing
+/// else in the replay does check it — the inclusion, linkage and membership
+/// guards all consume that reported hash — so an endpoint (or a tampered offline
+/// capture) can rewrite `timestamp`, `baseFeePerGas`, `gasLimit` or `parentHash`
+/// while keeping the original `hash`, pass every guard, and have the target
+/// replayed under a block environment it never ran in.
+///
+/// The hash is recomputed from the served consensus fields rather than read back
+/// from the response. `Header::hash()` / `Block::hash()` return the `hash` field
+/// an RPC deserialization filled in — the very value being authenticated — the
+/// same trap the transaction-level authentication meets with the envelope's
+/// cached hash.
+pub(super) fn authenticate_block_header(header: &Header) -> Result<(), Incoherence> {
+    let computed = header.inner.hash_slow();
+    if computed != header.hash {
+        return Err(Incoherence::UnauthenticHeader {
+            number: header.inner.number,
+            served: header.hash,
+            computed,
+        });
+    }
+    Ok(())
 }
 
 /// Require that the block a target was resolved into has a parent to fork from.
@@ -253,6 +303,21 @@ mod tests {
     const HASH_A: B256 = B256::repeat_byte(0xaa);
     const HASH_B: B256 = B256::repeat_byte(0xbb);
 
+    /// A served header whose reported hash is the one its own fields produce.
+    fn sealed_header() -> Header {
+        let inner = alloy_consensus::Header {
+            number: 22_945_844,
+            timestamp: 1_764_000_000,
+            gas_limit: 10_000_000_000,
+            parent_hash: HASH_A,
+            base_fee_per_gas: Some(1_000_000),
+            ..Default::default()
+        };
+        // `Header::new` seals the consensus header, so the reported hash is the
+        // hash of these fields — an authentic answer, as a real endpoint serves.
+        Header::new(inner)
+    }
+
     /// The four `(block_number, block_hash)` shapes, at the boundary values that
     /// have historically been read wrong: block 0 (falsy height), a null hash on
     /// a mined row, and a hash on a null-number row.
@@ -314,6 +379,19 @@ mod tests {
                 ),
             ),
             (
+                Incoherence::UnauthenticHeader {
+                    number: 22_945_844,
+                    served: HASH_A,
+                    computed: HASH_B,
+                },
+                format!(
+                    "the header served for block 22945844 hashes to {b}, but the endpoint \
+                     reported it as {a}: the served block header does not authenticate (an \
+                     inconsistent backend, or a tampered capture); the block environment it \
+                     describes is unverified"
+                ),
+            ),
+            (
                 Incoherence::GenesisPlacement,
                 "endpoint resolved the target into block 0, which has no parent block to fork \
                  from: contradictory endpoint data"
@@ -365,6 +443,81 @@ mod tests {
         ] {
             assert_eq!(incoherence.to_string(), expected, "unexpected message for {incoherence:?}");
         }
+    }
+
+    /// A header served under the hash of its own fields authenticates.
+    #[test]
+    fn test_authenticate_block_header_accepts_a_sealed_header() {
+        assert_eq!(authenticate_block_header(&sealed_header()), Ok(()));
+    }
+
+    /// Rewriting any execution-relevant header field while keeping the reported
+    /// hash is rejected, and the verdict carries both hashes.
+    ///
+    /// The fields are exactly the ones a replay reads out of the header, which
+    /// is what makes a forged header worth catching: each of them silently moves
+    /// the world the target is executed in.
+    #[test]
+    fn test_authenticate_block_header_rejects_every_tampered_field() {
+        /// One named rewrite of a served header's consensus fields.
+        type Tampering = (&'static str, fn(&mut alloy_consensus::Header));
+
+        let tamperings: [Tampering; 6] = [
+            ("timestamp", |h| h.timestamp += 1),
+            ("gas_limit", |h| h.gas_limit += 1),
+            ("parent_hash", |h| h.parent_hash = HASH_B),
+            ("base_fee_per_gas", |h| h.base_fee_per_gas = Some(2_000_000)),
+            ("number", |h| h.number += 1),
+            ("beneficiary", |h| h.beneficiary = alloy_primitives::Address::repeat_byte(0xcc)),
+        ];
+        for (field, tamper) in tamperings {
+            let mut header = sealed_header();
+            let served = header.hash;
+            tamper(&mut header.inner);
+
+            let Err(verdict) = authenticate_block_header(&header) else {
+                panic!("a rewritten {field} must not authenticate");
+            };
+            let Incoherence::UnauthenticHeader { number, served: reported, computed } = verdict
+            else {
+                panic!("tampering with {field} must be reported as an unauthentic header");
+            };
+            assert_eq!(reported, served, "the verdict must carry the hash the endpoint reported");
+            assert_eq!(
+                number, header.inner.number,
+                "the verdict must name the height the served header claims"
+            );
+            assert_ne!(computed, served, "a tampered {field} must change the recomputed hash");
+            assert_eq!(
+                computed,
+                header.inner.hash_slow(),
+                "the verdict must carry the hash the served fields produce"
+            );
+        }
+    }
+
+    /// The recomputation reads the served fields, not the reported hash.
+    ///
+    /// An RPC deserialization fills the `hash` field from the response, and the
+    /// accessors return it verbatim; a check written against those would accept
+    /// any header. Rewriting only `hash` must therefore be rejected too.
+    #[test]
+    fn test_authenticate_block_header_rejects_a_rewritten_hash() {
+        let mut header = sealed_header();
+        let computed = header.hash;
+        header.hash = HASH_B;
+
+        let verdict = authenticate_block_header(&header)
+            .expect_err("a header served under another hash must not authenticate");
+
+        assert_eq!(
+            verdict,
+            Incoherence::UnauthenticHeader {
+                number: header.inner.number,
+                served: HASH_B,
+                computed
+            }
+        );
     }
 
     /// Genesis is the only height without a parent to fork from.

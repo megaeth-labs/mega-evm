@@ -19,6 +19,15 @@ const OTHER: &str = "0x222222222222222222222222222222222222222222222222222222222
 const FROM: &str = "0x0000000000000000000000000000000000000abc";
 const BLOCK: u64 = 0x10;
 
+/// Hash the sample's block is served under.
+const BLOCK_HASH: &str = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+/// Hash the sample's parent block is served under, and the block's `parentHash`.
+const PARENT_HASH: &str = "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+
+/// `parentHash` of the sample's parent block, so its header is well formed.
+const GRANDPARENT_HASH: &str = "0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+
 const TX_KEY: &str = "0xaaa";
 const TRAP_KEY: &str = "0xtrap";
 const RECEIPT_KEY: &str = "0xreceipt";
@@ -33,6 +42,41 @@ fn sender_balance_key() -> String {
 
 fn rpc_result(result: Value) -> String {
     json!({"jsonrpc": "2.0", "result": result}).to_string()
+}
+
+/// A served block body carrying a complete consensus header.
+///
+/// The header is complete because the reseal operations hash it: an abbreviated
+/// header would make them panic on a field the real captures always carry. The
+/// served `hash` is a recognizable constant rather than the hash of these
+/// fields, so an entry that a reseal has rewritten is unmistakable.
+fn block_result(number: u64, hash: &str, parent_hash: &str, transactions: Value) -> Value {
+    json!({
+        "hash": hash,
+        "parentHash": parent_hash,
+        "number": format!("0x{number:x}"),
+        "timestamp": "0x6a704607",
+        "gasLimit": "0x64",
+        "gasUsed": "0x0",
+        "baseFeePerGas": "0xf4240",
+        "blobGasUsed": "0x0",
+        "excessBlobGas": "0x0",
+        "difficulty": "0x0",
+        "extraData": "0x00000000fa00000001",
+        "logsBloom": format!("0x{}", "0".repeat(512)),
+        "miner": "0x4200000000000000000000000000000000000011",
+        "mixHash": "0x5cd8791a477b467456670744425e11d5bd91fd54575d6d3bf80d761ab39d957f",
+        "nonce": "0x0000000000000000",
+        "receiptsRoot": "0x16fe124682128dd43a5da7f2cee0a3bf076deaf12682d19c656914bbea4615e3",
+        "sha3Uncles": "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347",
+        "size": "0x43e7",
+        "stateRoot": "0xa342aba318978654abcf7f09f9494ed271e2136040b628edacb6d384e9074416",
+        "transactionsRoot": "0x2f3c5d0b0c4c8d34dd4e1c8bb4b4a4b6d6a2a3d3b8f6a9a2c1d0e9f8a7b6c5d4",
+        "withdrawalsRoot": "0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421",
+        "uncles": [],
+        "withdrawals": [],
+        "transactions": transactions,
+    })
 }
 
 /// Shared envelope for every contract case.
@@ -53,7 +97,7 @@ fn sample() -> Value {
                     "hash": TX,
                     "from": FROM,
                     "blockNumber": "0x10",
-                    "blockHash": "0xbbb",
+                    "blockHash": BLOCK_HASH,
                     "gas": "0x1"
                 }))
             },
@@ -69,6 +113,7 @@ fn sample() -> Value {
                 "key": RECEIPT_KEY,
                 "value": rpc_result(json!({
                     "transactionHash": TX,
+                    "blockHash": BLOCK_HASH,
                     "cumulativeGasUsed": "0x1",
                     "status": "0x1",
                     "logs": []
@@ -76,23 +121,11 @@ fn sample() -> Value {
             },
             {
                 "key": BLOCK_KEY,
-                "value": rpc_result(json!({
-                    "number": "0x10",
-                    "hash": "0xbbb",
-                    "parentHash": "0xccc",
-                    "gasLimit": "0x64",
-                    "transactions": [TX]
-                }))
+                "value": rpc_result(block_result(0x10, BLOCK_HASH, PARENT_HASH, json!([TX])))
             },
             {
                 "key": PARENT_KEY,
-                "value": rpc_result(json!({
-                    "number": "0x0f",
-                    "hash": "0xccc",
-                    "parentHash": "0xddd",
-                    "gasLimit": "0x64",
-                    "transactions": []
-                }))
+                "value": rpc_result(block_result(0x0f, PARENT_HASH, GRANDPARENT_HASH, json!([])))
             },
             {
                 "key": sender_balance_key(),
@@ -306,6 +339,126 @@ fn test_keep_only_transactions_and_block_retains_exact_keep_set() {
     assert_eq!(entry_by_key(&after, BLOCK_KEY), entry_by_key(&before, BLOCK_KEY));
 }
 
+// --- Block header resealing -----------------------------------------------
+
+/// The `result` object of a cache entry, parsed.
+fn result_of(root: &Value, key: &str) -> Value {
+    let raw = entry_by_key(root, key)["value"].as_str().expect("value");
+    serde_json::from_str::<Value>(raw).expect("parse")["result"].clone()
+}
+
+/// Resealing recomputes the served `hash` from the rewritten header, so the
+/// entry is authentic afterwards — which is the whole reason the operation
+/// exists, since the replay recomputes exactly this.
+#[test]
+fn test_reseal_block_serves_the_hash_the_rewritten_header_produces() {
+    let src = write_sample("reseal_authentic");
+    let before = read_json(&src);
+    let out = DoctoredEnvelope::load(&src)
+        .reseal_block(BLOCK, |header| header["gasLimit"] = json!("0x20"))
+        .write_to_temp("reseal_authentic");
+    let after = read_json(&out);
+    let _ = std::fs::remove_file(&src);
+    let _ = std::fs::remove_file(&out);
+
+    let block = result_of(&after, BLOCK_KEY);
+    assert_eq!(block["gasLimit"], json!("0x20"), "the rewrite must land on the header");
+    assert_eq!(
+        block["hash"].as_str().expect("hash"),
+        common::block_hash_of(&block),
+        "the resealed block must be served under the hash its own fields produce",
+    );
+    assert_ne!(
+        block["hash"],
+        result_of(&before, BLOCK_KEY)["hash"],
+        "a rewritten header must not keep the hash it was served under",
+    );
+}
+
+/// Relinking follows the resealed hash everywhere the capture referenced the
+/// previous one, so the doctored capture stays coherent under the inclusion and
+/// linkage guards rather than tripping them by accident.
+#[test]
+fn test_reseal_block_relinks_every_reference_to_the_previous_hash() {
+    let src = write_sample("reseal_relink");
+    let out = DoctoredEnvelope::load(&src)
+        .reseal_block(BLOCK - 1, |header| header["gasLimit"] = json!("0x20"))
+        .write_to_temp("reseal_relink");
+    let after = read_json(&out);
+    let _ = std::fs::remove_file(&src);
+    let _ = std::fs::remove_file(&out);
+
+    let resealed = result_of(&after, PARENT_KEY)["hash"].clone();
+    assert_eq!(
+        result_of(&after, BLOCK_KEY)["parentHash"],
+        resealed,
+        "the child must name the hash its parent is now served under",
+    );
+    assert_eq!(
+        result_of(&after, BLOCK_KEY)["hash"],
+        json!(BLOCK_HASH),
+        "relinking must not touch another block's own hash",
+    );
+}
+
+/// The reference-keeping variant reseals and stops there: the child keeps
+/// naming the hash the parent no longer has, which is the divergence it is
+/// there to manufacture.
+#[test]
+fn test_reseal_block_keeping_references_leaves_the_child_unlinked() {
+    let src = write_sample("reseal_unlinked");
+    let out = DoctoredEnvelope::load(&src)
+        .reseal_block_keeping_references(BLOCK - 1, |header| header["gasLimit"] = json!("0x20"))
+        .write_to_temp("reseal_unlinked");
+    let after = read_json(&out);
+    let _ = std::fs::remove_file(&src);
+    let _ = std::fs::remove_file(&out);
+
+    let parent = result_of(&after, PARENT_KEY);
+    assert_eq!(
+        parent["hash"].as_str().expect("hash"),
+        common::block_hash_of(&parent),
+        "the resealed parent must still authenticate",
+    );
+    assert_eq!(
+        result_of(&after, BLOCK_KEY)["parentHash"],
+        json!(PARENT_HASH),
+        "the child must keep naming the parent's previous hash",
+    );
+}
+
+/// Rewriting a field without resealing leaves the served hash behind, which is
+/// what makes `set_block_*` the vehicle for the header authentication itself.
+#[test]
+fn test_set_block_field_leaves_the_served_hash_behind() {
+    let src = write_sample("unauthentic_field");
+    let out = DoctoredEnvelope::load(&src)
+        .set_block_field(BLOCK, "timestamp", json!("0x1"))
+        .write_to_temp("unauthentic_field");
+    let after = read_json(&out);
+    let _ = std::fs::remove_file(&src);
+    let _ = std::fs::remove_file(&out);
+
+    let block = result_of(&after, BLOCK_KEY);
+    assert_eq!(block["timestamp"], json!("0x1"));
+    assert_eq!(block["hash"], json!(BLOCK_HASH), "the served hash must be left alone");
+    assert_ne!(
+        block["hash"].as_str().expect("hash"),
+        common::block_hash_of(&block),
+        "the rewritten header must no longer hash to what it is served under",
+    );
+}
+
+/// A field the captured header does not report is a programming error in the
+/// test: silently adding it would rewrite a header the endpoint never served
+/// that way.
+#[test]
+#[should_panic(expected = "must already report `nosuchfield`")]
+fn test_set_block_field_panics_on_an_unreported_field() {
+    let _ =
+        load_envelope("unknown_field", &sample()).set_block_field(BLOCK, "nosuchfield", json!(1));
+}
+
 // --- Per-op non-target invariance -----------------------------------------
 
 enum Mutation {
@@ -424,19 +577,32 @@ fn cases() -> Vec<Case> {
             mutation: rewrite(&[BLOCK_KEY]),
         },
         Case {
-            op: "set_block_gas_limit",
-            apply: |env| env.set_block_gas_limit(BLOCK, 0x20),
+            op: "set_block_field",
+            apply: |env| env.set_block_field(BLOCK, "timestamp", Value::String("0x1".into())),
             mutation: rewrite(&[BLOCK_KEY]),
+        },
+        // Resealing the block rewrites its own `hash`, so the transaction lookup
+        // and the receipt that named the previous one are relinked with it.
+        Case {
+            op: "reseal_block",
+            apply: |env| env.reseal_block(BLOCK, |header| header["gasLimit"] = json!("0x20")),
+            mutation: rewrite(&[TX_KEY, RECEIPT_KEY, BLOCK_KEY]),
+        },
+        // Without relinking, only the resealed entry changes — which is the
+        // point: the child block keeps naming the parent's previous hash.
+        Case {
+            op: "reseal_block_keeping_references",
+            apply: |env| {
+                env.reseal_block_keeping_references(BLOCK - 1, |header| {
+                    header["gasLimit"] = json!("0x20");
+                })
+            },
+            mutation: rewrite(&[PARENT_KEY]),
         },
         Case {
             op: "set_block_hash",
             apply: |env| env.set_block_hash(BLOCK, "0xeeee"),
             mutation: rewrite(&[BLOCK_KEY]),
-        },
-        Case {
-            op: "set_lowest_block_hash",
-            apply: |env| env.set_lowest_block_hash("0xeeee"),
-            mutation: rewrite(&[PARENT_KEY]),
         },
         Case {
             op: "remove_from_block_body",

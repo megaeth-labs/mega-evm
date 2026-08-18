@@ -35,19 +35,23 @@ const LATEST: u64 = 18_172_461;
 /// A mainnet timestamp inside the `MiniRex` window.
 const TIMESTAMP: u64 = 1_764_000_000;
 
-/// Hash of the block the endpoint serves first for `LATEST`.
-const LATEST_HASH: &str = "0x2801837c261826beb8047e46139dfc4eb93ab5b3196ce23f312d3c7658262a62";
-
-/// Hash of the replacement block the endpoint serves for `LATEST` from the
-/// second call on — the divergent view a second fetch would pick up.
-const REPLACEMENT_HASH: &str = "0x3333333333333333333333333333333333333333333333333333333333333333";
-
-/// Parent of `LATEST_HASH`, so its header is well formed.
+/// `parentHash` of the block the endpoint serves first for `LATEST`.
 const PARENT_HASH: &str = "0xd482d481e9d11dd116ef6c41bf95ca608f159206c8f07900b1b53936d196ccb3";
 
-/// Parent of the replacement block: a different chain, as a reorg would leave it.
+/// `parentHash` of the replacement block: a different chain, as a reorg would
+/// leave it.
 const REPLACEMENT_PARENT_HASH: &str =
     "0x4444444444444444444444444444444444444444444444444444444444444444";
+
+/// Hash of the block the endpoint serves first for `LATEST`.
+///
+/// The replay authenticates every block header it fetches against the hash the
+/// endpoint reports beside it, so the mock cannot serve an invented block hash
+/// any more than an invented transaction hash: each block is sealed under the
+/// hash its own header produces.
+fn latest_hash() -> String {
+    common::block_hash_of(&block_json(PARENT_HASH))
+}
 
 /// Signature of the pending transaction: a fixed, well-formed secp256k1 pair.
 ///
@@ -96,11 +100,11 @@ fn tx_identity() -> (String, String) {
     (hash, format!("{from:#x}"))
 }
 
-/// A block header the RPC backend and the replay accept, carrying only the
-/// fields either of them reads.
-fn block_json(hash: &str, parent_hash: &str) -> Value {
-    json!({
-        "hash": hash,
+/// A block header the RPC backend and the replay accept, sealed under the hash
+/// its own consensus fields produce. The two views the endpoint serves for
+/// `LATEST` differ only in the chain they descend from.
+fn block_json(parent_hash: &str) -> Value {
+    common::sealed_block(json!({
         "parentHash": parent_hash,
         "number": format!("0x{LATEST:x}"),
         "timestamp": format!("0x{TIMESTAMP:x}"),
@@ -127,7 +131,7 @@ fn block_json(hash: &str, parent_hash: &str) -> Value {
         "uncles": [],
         "withdrawals": [],
         "transactions": [],
-    })
+    }))
 }
 
 /// The replayed transaction, carrying the `(blockNumber, blockHash)` pair the
@@ -166,15 +170,16 @@ fn pending_tx_json() -> Value {
 }
 
 /// A mock endpoint holding one pending transaction, whose `latest` height is
-/// answered with [`LATEST_HASH`] once and with [`REPLACEMENT_HASH`] from the
-/// second call on.
+/// answered with the [`PARENT_HASH`] chain once and with the
+/// [`REPLACEMENT_PARENT_HASH`] chain from the second call on.
 async fn mock_chain() -> MockRpcServer {
     mock_chain_serving(pending_tx_json()).await
 }
 
 /// A mock endpoint that resolves the target to `tx`, and otherwise behaves like
-/// [`mock_chain`]: the `latest` height is answered with [`LATEST_HASH`] once and
-/// with [`REPLACEMENT_HASH`] from the second call on.
+/// [`mock_chain`]: the `latest` height is answered with the [`PARENT_HASH`]
+/// chain once and with the [`REPLACEMENT_PARENT_HASH`] chain from the second
+/// call on.
 ///
 /// Account reads are answered blanket: every account holds 1 ETH, has nonce 0,
 /// no code, and zero storage.
@@ -186,17 +191,13 @@ async fn mock_chain_serving(tx: Value) -> MockRpcServer {
         .respond_method_params_json_n_times(
             "eth_getBlockByNumber",
             json!([format!("0x{LATEST:x}"), false]),
-            block_json(LATEST_HASH, PARENT_HASH),
+            block_json(PARENT_HASH),
             1,
             2,
         )
         .await;
     server
-        .respond_method_json(
-            "eth_getBlockByNumber",
-            block_json(REPLACEMENT_HASH, REPLACEMENT_PARENT_HASH),
-            3,
-        )
+        .respond_method_json("eth_getBlockByNumber", block_json(REPLACEMENT_PARENT_HASH), 3)
         .await;
     server.respond_method_json("eth_getTransactionByHash", tx, 3).await;
     server.respond_method_result("eth_getBalance", "0xde0b6b3a7640000", 4).await;
@@ -290,7 +291,7 @@ async fn test_pending_replay_fetches_the_latest_block_once() {
     let receipt = &run.summary()["receipt"];
     assert_eq!(
         receipt["blockHash"].as_str(),
-        Some(LATEST_HASH),
+        Some(latest_hash().as_str()),
         "the replay must report the block it forked from, not the replacement: {receipt}",
     );
     assert_eq!(receipt["blockNumber"].as_str(), Some(format!("0x{LATEST:x}").as_str()));

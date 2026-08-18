@@ -35,14 +35,26 @@ const BLOCK: u64 = 18_172_461;
 /// A mainnet timestamp inside the `MiniRex` window.
 const TIMESTAMP: u64 = 1_764_000_000;
 
-/// Hash of [`BLOCK`].
-const BLOCK_HASH: &str = "0x2801837c261826beb8047e46139dfc4eb93ab5b3196ce23f312d3c7658262a62";
-
-/// Hash of the parent of [`BLOCK_HASH`], the block a mined replay forks from.
-const PARENT_HASH: &str = "0xd482d481e9d11dd116ef6c41bf95ca608f159206c8f07900b1b53936d196ccb3";
-
-/// Parent of the parent block, so its header is well formed too.
+/// `parentHash` of the parent block, so its header is well formed too.
 const GRANDPARENT_HASH: &str = "0x4444444444444444444444444444444444444444444444444444444444444444";
+
+/// Hash of the parent of [`BLOCK`], the block a mined replay forks from.
+///
+/// The replay authenticates every block header it fetches against the hash the
+/// endpoint reports beside it, so the mock cannot serve an invented block hash
+/// any more than an invented transaction hash: the chain is built from the
+/// bottom up, each block sealed under the hash its own header produces.
+fn parent_hash() -> String {
+    common::block_hash_of(&block_json(BLOCK - 1, GRANDPARENT_HASH, json!([])))
+}
+
+/// Hash of [`BLOCK`], whose header names [`parent_hash`] as its parent.
+///
+/// The transaction list is not part of the consensus header, so the hash does
+/// not depend on which body the mock serves under it.
+fn block_hash() -> String {
+    common::block_hash_of(&block_json(BLOCK, &parent_hash(), json!([])))
+}
 
 /// Signature of the replayed transaction: a fixed, well-formed secp256k1 pair.
 ///
@@ -91,11 +103,10 @@ fn tx_identity() -> (String, String) {
     (hash, format!("{from:#x}"))
 }
 
-/// A block header the RPC backend and the replay accept, carrying only the
-/// fields either of them reads.
-fn block_json(number: u64, hash: &str, parent_hash: &str, transactions: Value) -> Value {
-    json!({
-        "hash": hash,
+/// A block header the RPC backend and the replay accept, sealed under the hash
+/// its own consensus fields produce.
+fn block_json(number: u64, parent_hash: &str, transactions: Value) -> Value {
+    common::sealed_block(json!({
         "parentHash": parent_hash,
         "number": format!("0x{number:x}"),
         "timestamp": format!("0x{TIMESTAMP:x}"),
@@ -122,7 +133,7 @@ fn block_json(number: u64, hash: &str, parent_hash: &str, transactions: Value) -
         "uncles": [],
         "withdrawals": [],
         "transactions": transactions,
-    })
+    }))
 }
 
 /// The replayed transaction, carrying whichever `(blockNumber, blockHash)` pair
@@ -165,7 +176,7 @@ fn receipt_json() -> Value {
         "logsBloom": format!("0x{}", "0".repeat(512)),
         "transactionHash": hash,
         "transactionIndex": "0x0",
-        "blockHash": BLOCK_HASH,
+        "blockHash": block_hash(),
         "blockNumber": format!("0x{BLOCK:x}"),
         "gasUsed": format!("0x{GAS_USED:x}"),
         "effectiveGasPrice": "0x10c8e0",
@@ -196,7 +207,7 @@ async fn mock_chain_serving(tx: Value) -> MockRpcServer {
         .respond_method_params_json(
             "eth_getBlockByNumber",
             json!([format!("0x{BLOCK:x}"), false]),
-            block_json(BLOCK, BLOCK_HASH, PARENT_HASH, json!([tx_hash])),
+            block_json(BLOCK, &parent_hash(), json!([tx_hash])),
             2,
         )
         .await;
@@ -204,7 +215,7 @@ async fn mock_chain_serving(tx: Value) -> MockRpcServer {
         .respond_method_params_json(
             "eth_getBlockByNumber",
             json!([format!("0x{:x}", BLOCK - 1), false]),
-            block_json(BLOCK - 1, PARENT_HASH, GRANDPARENT_HASH, json!([])),
+            block_json(BLOCK - 1, GRANDPARENT_HASH, json!([])),
             2,
         )
         .await;
@@ -225,7 +236,7 @@ async fn mock_chain_serving(tx: Value) -> MockRpcServer {
 
 /// The mock with the target reported as mined in [`BLOCK`].
 async fn mined_chain() -> MockRpcServer {
-    mock_chain_serving(tx_json(json!(format!("0x{BLOCK:x}")), json!(BLOCK_HASH))).await
+    mock_chain_serving(tx_json(json!(format!("0x{BLOCK:x}")), json!(block_hash()))).await
 }
 
 /// The mock with the target reported as pending: no block number, no inclusion hash.

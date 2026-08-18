@@ -15,6 +15,22 @@
 //! `DoctoredEnvelope::load(path).null_transaction(hash).write_to_temp(name)`.
 //! One-shot associated functions wrap the high-frequency single-operation
 //! cases so call sites stay in domain language.
+//!
+//! # Authentic and unauthentic block headers
+//!
+//! The replay authenticates every block header it fetches by recomputing the
+//! hash from the served consensus fields, so a header rewrite is two different
+//! faults depending on what happens to the `hash` beside them:
+//!
+//! - The `set_block_*` operations rewrite fields (or the hash) and leave the other side alone, so
+//!   the served header no longer authenticates. That is the fault itself — the vehicle for testing
+//!   the authentication.
+//! - The `reseal_block*` operations recompute the `hash` from the rewritten fields, so the header
+//!   still authenticates and the rewrite reaches the behavior under test.
+//!   [`DoctoredEnvelope::reseal_block`] additionally relinks every reference to the previous hash
+//!   (the child's `parentHash`, inclusion `blockHash`es) so the whole capture stays coherent;
+//!   [`DoctoredEnvelope::reseal_block_keeping_references`] deliberately does not, which is how a
+//!   parent that does not link to its child is manufactured.
 
 use std::path::{Path, PathBuf};
 
@@ -50,9 +66,10 @@ pub(crate) const PUBLIC_MUTATING_OPS: &[&str] = &[
     "null_receipt",
     "drop_receipt",
     "null_block",
-    "set_block_gas_limit",
+    "set_block_field",
+    "reseal_block",
+    "reseal_block_keeping_references",
     "set_block_hash",
-    "set_lowest_block_hash",
     "remove_from_block_body",
     "remove_from_listing_block",
     "keep_only_transactions_and_block",
@@ -139,16 +156,6 @@ impl DoctoredEnvelope {
         Self::load(src).null_block(number).write_to_temp(name)
     }
 
-    /// Rewrites the advertised `gasLimit` of block `number` and writes the copy.
-    pub(crate) fn with_block_gas_limit(
-        src: impl AsRef<Path>,
-        name: &str,
-        number: u64,
-        gas_limit: u64,
-    ) -> PathBuf {
-        Self::load(src).set_block_gas_limit(number, gas_limit).write_to_temp(name)
-    }
-
     /// Rewrites the unique receipt result with `doctor` and writes the copy.
     pub(crate) fn with_receipt(
         src: impl AsRef<Path>,
@@ -173,19 +180,26 @@ impl DoctoredEnvelope {
         Self::load(src).drop_entry(key).write_to_temp(name)
     }
 
-    /// Rewrites the lower-numbered block body's own `hash` and writes the copy.
+    /// Reseals the lower-numbered block body onto a different chain and writes
+    /// the copy, leaving the replayed block naming the hash its parent used to
+    /// carry.
     ///
-    /// Returns the path together with the hash the untouched capture reported.
-    /// The capture is expected to hold exactly two block bodies (replayed block
-    /// and its parent), matching the single-transaction offline fixture.
+    /// Returns the path, the hash the parent is now served under, and the hash
+    /// the replayed block still names as its parent — the two sides of the
+    /// linkage failure. Both served headers authenticate, so the run has to
+    /// reject them on the linkage rather than on the header itself. The capture
+    /// is expected to hold exactly two block bodies (replayed block and its
+    /// parent), matching the single-transaction offline fixture.
     pub(crate) fn with_unlinked_parent(
         src: impl AsRef<Path>,
         name: &str,
-        wrong_hash: &str,
-    ) -> (PathBuf, String) {
+    ) -> (PathBuf, String, String) {
         let env = Self::load(src);
-        let original = env.lowest_block_hash();
-        (env.set_lowest_block_hash(wrong_hash).write_to_temp(name), original)
+        let number = env.lowest_block_number();
+        let expected = env.lowest_block_hash();
+        let env = env.reseal_block_keeping_references(number, foreign_state_root);
+        let served = env.block_hash_at(number);
+        (env.write_to_temp(name), served, expected)
     }
 
     /// Rewrites `tx_hash`'s inclusion `blockHash` and writes the copy.
@@ -426,13 +440,61 @@ impl DoctoredEnvelope {
         self
     }
 
-    /// Rewrites `gasLimit` on the unique block body at `number`.
+    /// Rewrites one header field on the unique block body at `number`, leaving
+    /// the served `hash` alone.
+    ///
+    /// The header therefore no longer hashes to the hash it is served under: the
+    /// endpoint keeps vouching for a block whose contents it has changed. Use
+    /// [`Self::reseal_block`] where the rewrite is meant to reach the replay
+    /// instead of being rejected by the header authentication.
     #[must_use]
-    pub(crate) fn set_block_gas_limit(mut self, number: u64, gas_limit: u64) -> Self {
+    pub(crate) fn set_block_field(mut self, number: u64, field: &str, value: Value) -> Self {
         let idx = self.block_with_transactions_index(number);
         self.rewrite_result_at(idx, |result| {
-            result["gasLimit"] = Value::String(format!("0x{gas_limit:x}"));
+            assert!(
+                result.get(field).is_some(),
+                "the captured block must already report `{field}` before it is rewritten"
+            );
+            result[field] = value;
         });
+        self
+    }
+
+    /// Rewrites the header of the unique block body at `number` and reseals it:
+    /// the served `hash` is recomputed from the rewritten consensus fields, and
+    /// every reference to the previous hash — the child block's `parentHash`,
+    /// and the `blockHash` of transaction lookups and receipts — is rewritten to
+    /// the new one.
+    ///
+    /// The result is a capture that is coherent everywhere the replay looks, so
+    /// the rewrite is judged by what it does to the replay rather than by the
+    /// header authentication. Read the new hash back with [`Self::block_hash_at`].
+    #[must_use]
+    pub(crate) fn reseal_block(mut self, number: u64, doctor: impl FnOnce(&mut Value)) -> Self {
+        let idx = self.block_with_transactions_index(number);
+        self.rewrite_result_at(idx, doctor);
+        let (previous, resealed) = self.reseal_at(idx);
+        self.relink(&previous, &resealed);
+        self
+    }
+
+    /// Rewrites the header of the unique block body at `number` and reseals it
+    /// *without* relinking: everything that referenced the previous hash keeps
+    /// referencing it.
+    ///
+    /// This is how an endpoint that serves two views of one chain is
+    /// manufactured — reseal a parent and its child no longer links to it —
+    /// while both served headers still authenticate, so the divergence is judged
+    /// by the linkage guard rather than by the header authentication.
+    #[must_use]
+    pub(crate) fn reseal_block_keeping_references(
+        mut self,
+        number: u64,
+        doctor: impl FnOnce(&mut Value),
+    ) -> Self {
+        let idx = self.block_with_transactions_index(number);
+        self.rewrite_result_at(idx, doctor);
+        self.reseal_at(idx);
         self
     }
 
@@ -445,16 +507,6 @@ impl DoctoredEnvelope {
                 result.get("hash").and_then(Value::as_str).is_some(),
                 "block must report a hash"
             );
-            result["hash"] = Value::String(hash.to_string());
-        });
-        self
-    }
-
-    /// Rewrites `hash` on the lower-numbered of the two captured block bodies.
-    #[must_use]
-    pub(crate) fn set_lowest_block_hash(mut self, hash: &str) -> Self {
-        let idx = self.lowest_parent_block_index();
-        self.rewrite_result_at(idx, |result| {
             result["hash"] = Value::String(hash.to_string());
         });
         self
@@ -525,6 +577,25 @@ impl DoctoredEnvelope {
             .as_str()
             .expect("block hash")
             .to_string()
+    }
+
+    /// Returns the hash the header of the block at `number` actually produces,
+    /// which is what the replay recomputes and compares the served `hash`
+    /// against.
+    ///
+    /// Equal to [`Self::block_hash_at`] on an untouched capture and after a
+    /// reseal; the two diverge exactly when a `set_block_*` rewrite has left the
+    /// header unauthentic.
+    pub(crate) fn recomputed_block_hash_at(&self, number: u64) -> String {
+        let idx = self.numbered_object_index(number);
+        super::block_hash_of(&parsed_response(&self.entries()[idx])["result"])
+    }
+
+    /// Returns the height of the lower-numbered of the two captured block bodies.
+    pub(crate) fn lowest_block_number(&self) -> u64 {
+        let idx = self.lowest_parent_block_index();
+        let result = parsed_response(&self.entries()[idx])["result"].clone();
+        result_number(&result).expect("block number is hex")
     }
 
     /// Returns `hash` of the lower-numbered of the two captured block bodies.
@@ -622,6 +693,49 @@ impl DoctoredEnvelope {
         )
     }
 
+    /// Recomputes the `hash` of the block entry at `index` from its own
+    /// consensus fields, and returns `(previous, resealed)`.
+    fn reseal_at(&mut self, index: usize) -> (String, String) {
+        let result = parsed_response(&self.entries()[index])["result"]
+            .as_object()
+            .cloned()
+            .map(Value::Object);
+        let result = result.expect("a block entry carries a result object");
+        let previous =
+            result["hash"].as_str().expect("the captured block must report a hash").to_string();
+        let resealed = super::block_hash_of(&result);
+        self.rewrite_result_at(index, |result| {
+            result["hash"] = Value::String(resealed.clone());
+        });
+        (previous, resealed)
+    }
+
+    /// Repoints every reference to `previous` at `resealed`: the `parentHash` of
+    /// a child block, and the inclusion `blockHash` of transaction lookups and
+    /// receipts.
+    ///
+    /// A block entry's own `hash` is left alone — the resealed entry already
+    /// carries the new value, and no other block may claim it.
+    fn relink(&mut self, previous: &str, resealed: &str) {
+        for entry in self.entries_mut() {
+            let mut response = parsed_response(entry);
+            let Some(result) = response.get_mut("result") else { continue };
+            if !result.is_object() {
+                continue;
+            }
+            let mut touched = false;
+            for field in ["parentHash", "blockHash"] {
+                if result.get(field).and_then(Value::as_str) == Some(previous) {
+                    result[field] = Value::String(resealed.to_string());
+                    touched = true;
+                }
+            }
+            if touched {
+                entry["value"] = Value::String(response.to_string());
+            }
+        }
+    }
+
     fn lowest_parent_block_index(&self) -> usize {
         let mut blocks: Vec<(usize, u64)> = Vec::new();
         for (index, entry) in self.entries().iter().enumerate() {
@@ -639,6 +753,18 @@ impl DoctoredEnvelope {
         blocks.sort_unstable_by_key(|&(_, number)| number);
         blocks[0].0
     }
+}
+
+/// Moves a header onto a chain the capture never served, by way of the one
+/// consensus field the replay never reads.
+///
+/// Any field change reseals the header to a different hash; `stateRoot` is
+/// picked because the replay reads its pre-state by block *number*, so the
+/// rewrite changes nothing but the identity of the block.
+pub(crate) fn foreign_state_root(header: &mut Value) {
+    assert!(header.get("stateRoot").is_some(), "the captured block must report a state root");
+    header["stateRoot"] =
+        Value::String("0x9999999999999999999999999999999999999999999999999999999999999999".into());
 }
 
 fn parsed_response(entry: &Value) -> Value {
