@@ -334,6 +334,69 @@ impl AdditionalLimit {
         self.checkpoint.set_settled_destroyed(settled);
     }
 
+    /// Settles a transaction whose reported envelope is rewritten after every `MegaETH`
+    /// settlement has already run (REX7+; a no-op before, where nothing is destroyed).
+    ///
+    /// One such rewrite exists. An OP deposit is not allowed to fail, so a deposit that does fail
+    /// has its receipt rebuilt to report the whole `gas_limit`, with the journal rolled back to
+    /// nothing but the nonce bump and the mint. That rebuild happens at the outermost error
+    /// boundary, past every site that records or settles, so neither the per-site bookings nor
+    /// [`settle_destroyed_compute_gas`](Self::settle_destroyed_compute_gas) can see it. Two
+    /// shapes arrive here:
+    ///
+    /// - A validation reject, which never reached a settlement at all. Its lanes hold only what
+    ///   `validate` recorded before returning the error, and the whole rest of the rewritten
+    ///   envelope is unaccounted.
+    /// - An execution halt, which settled correctly against the envelope it really burnt and is
+    ///   then raised back to `gas_limit`. The gap is exactly what the resource-limit rescue had
+    ///   handed back to the sender, which the rewrite takes away again.
+    ///
+    /// Both are the same accounting event: the receipt burns an envelope that nothing was
+    /// executed for. So the difference between what the conservation law derives for the rewritten
+    /// envelope and what the per-site bookings already hold is destroyed compute gas. Booking it
+    /// makes the reported total cover the receipt; re-settling against the rewritten envelope
+    /// keeps the derived total and the bookings agreeing, which is what the cross-check in
+    /// `settle_destroyed_compute_gas` verifies.
+    ///
+    /// Enforcement is deliberately untouched. [`record_burned_gas`](Self::record_burned_gas)
+    /// raises the reported total and the destroyed lane by the same amount, so
+    /// [`enforced_compute_gas`](Self::enforced_compute_gas) — what every limit comparison and the
+    /// block's admission counter read — does not move. A deposit rejected before it executed
+    /// anything must not consume block compute capacity for work it never performed.
+    ///
+    /// The difference is non-negative on every shape that reaches here. The rewritten envelope is
+    /// the transaction's `gas_limit`. A rejected deposit's lanes hold at most the intrinsic gas
+    /// requirement it had already cleared against that limit when the reject fired, and nothing is
+    /// booked as destroyed yet. A halted deposit settled against the same limit less whatever the
+    /// resource-limit rescue returned, so raising the envelope back to the limit can only add.
+    ///
+    /// The one shape that would break that is a synthetic pre-frame halt which books a destroyed
+    /// remainder without settling — it would leave the `MegaETH` share of intrinsic gas booked as
+    /// non-compute *and* the whole envelope booked as destroyed, double-counting it. No spec with
+    /// the destroyed lane reaches one: an intrinsic overrun has been a validation reject since
+    /// REX5. A spec that re-opened that path would have to settle it at its own site. Debug builds
+    /// trip on a negative difference; release builds book nothing for it.
+    #[inline]
+    pub(crate) fn settle_rewritten_envelope(&mut self, envelope_gas_spent: u64) {
+        if !self.rex7_enabled() {
+            return;
+        }
+        let unbooked = self.derived_burned_compute_gas(envelope_gas_spent) -
+            i128::from(self.burned_compute_gas());
+        debug_assert!(
+            unbooked >= 0,
+            "rewritten envelope destroys a negative amount: {unbooked} \
+             (envelope {envelope_gas_spent}, minted stipend {}, non-compute {}, \
+              enforced compute {}, booked destroyed {})",
+            self.minted_call_stipend(),
+            self.non_compute_gas(),
+            self.enforced_compute_gas(),
+            self.burned_compute_gas(),
+        );
+        self.record_burned_gas(u64::try_from(unbooked.max(0)).unwrap_or(u64::MAX));
+        self.settle_destroyed_compute_gas(envelope_gas_spent);
+    }
+
     /// The transaction's destroyed compute gas, as settled by
     /// [`settle_destroyed_compute_gas`](Self::settle_destroyed_compute_gas) — the part of
     /// [`get_usage`](Self::get_usage)'s `compute_gas` that is reported and accounted but never

@@ -44,8 +44,11 @@
 //!   same way an interpreter frame is: executed work enforces, the unused forwarded envelope does
 //!   not.
 //! - `pre_execution_intrinsic_reject` — the one envelope-keeping synthetic halt REX7 cannot reach:
-//!   an intrinsic overrun is a validation error from REX5 on, so the destroyed lane never has to
-//!   account for it.
+//!   for an ordinary transaction an intrinsic overrun is a validation error from REX5 on, and a
+//!   validation error produces no receipt for any lane to account for.
+//! - `deposit_receipt_rewrite` — the transactions that break that last step. A failed OP deposit
+//!   does get a receipt, rebuilt to report its whole gas limit after every settlement has run; the
+//!   boundary that rebuilds it books the difference as destroyed without moving what enforces.
 
 mod burn_split;
 mod charge_on_reject;
@@ -55,6 +58,7 @@ mod checkpoint_static_fee_edges;
 mod clamp_classification;
 mod common;
 mod conservation_terms;
+mod deposit_receipt_rewrite;
 mod detention_window;
 mod double_exceed_corner;
 mod exceptional_halt;

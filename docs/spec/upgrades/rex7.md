@@ -100,6 +100,7 @@ It defines it as a conservation law over the gas the transaction spent:
 `destroyed = spent + minted_stipends − storage_gas − executed_compute`
 
 `spent` is the EVM gas the envelope burnt, read once at the moment the envelope is final — after the transaction's gas accounting has settled and any resource-limit rescue has been returned to the sender, and before the EIP-3529 refund and the EIP-7623 floor are applied, since those move the receipt's number without anything having been burnt.
+For a deposit transaction whose result is rebuilt into a failed-deposit receipt, that moment is the rebuild; see below.
 `minted_stipends` is the sum of `CALL_STIPEND` over the value-transferring `CALL` and `CALLCODE` invocations, counted once per stipend the EVM mints: the inherited EVM grants that stipend to the child's frame budget without debiting the caller, so the frames record one stipend more work than the envelope funded per such call, and a node MUST add it back.
 The mint happens when the invocation is handed to the EVM, before the child is entered, and a node MUST count it from there rather than from the child frame running — an invocation turned away at frame entry, for want of balance or at the call-depth limit, returns the whole child budget with the stipend inside it and shrinks the envelope by exactly as much as a child that ran and returned it would.
 An invocation a node halts before handing it to the EVM, which is what a compute-gas limit reached at the call site does, mints nothing and a node MUST NOT count it.
@@ -138,7 +139,13 @@ Completeness is a consequence of the law: a lost envelope is gas the transaction
 Reading the two independently and requiring them to agree is what turns the list from an assumption into a checkable claim.
 
 One further shape burns a whole envelope having executed nothing — a transaction whose intrinsic gas requirement outgrows the gas limit its sender supplied — but [Rex5](rex5.md) already rejects that transaction during validation, after every MegaETH storage-gas contribution has been folded into the intrinsic total and before the sender is debited.
-It therefore produces no receipt on Rex7 and there is no envelope to split; a node MUST NOT record a rejected transaction's gas limit as a destroyed remainder.
+An ordinary transaction therefore produces no receipt on Rex7 and there is no envelope to split; a node MUST NOT record such a transaction's gas limit as a destroyed remainder.
+
+A deposit transaction is the exception, because it is not allowed to fail.
+A deposit a node would otherwise reject during validation, and a deposit that halts during execution, are both rebuilt into a receipt reporting the transaction's whole gas limit, with state rolled back to the sender's nonce bump and the deposit's mint.
+That rebuild runs after every recording and settlement site, so it is the last thing that decides the envelope: a node MUST derive the law against the rebuilt envelope, which makes the difference between it and what those sites already hold destroyed compute gas.
+The two shapes arrive from opposite positions and the law covers both without distinguishing them — a rejected deposit has recorded only the standard-EVM share of its intrinsic gas and settled nothing, while a halted deposit has already settled against the smaller envelope its resource-limit gas rescue left behind.
+`executed_compute` MUST NOT move: nothing was executed for the difference, so a deposit rejected before it ran anything consumes no compute capacity at transaction or block level.
 
 Under per-opcode recording through Rex6, neither the failing opcode nor the destroyed remainder is attributed to compute gas.
 Consequently, a transaction that halts exceptionally, or that contains an inner call frame which does, MAY report a **strictly higher** compute-gas total under Rex7 than under Rex6, while EVM gas accounting and the receipt remain identical.
@@ -265,7 +272,7 @@ Any node, tool, or test fixture pinned to Rex7 must expect its results to move.
 A deployment that needs stable semantics must select a frozen spec explicitly rather than relying on the latest one.
 
 The gas clamp is strictly tighter than Rex6's post-opcode enforcement on the overshoot axis: the crossing opcode does not run, and enforced usage does not pass the limit by that opcode's cost.
-Rex7 can report more compute gas than Rex6 for the same inputs on three paths: the exceptional-halt frame carve-out, which over-reports rather than under-reports; a failing precompile whose unused forwarded envelope is now reported as destroyed; and a `disableVolatileDataAccess` rejection, which now includes the rejected opcode's static fee.
+Rex7 can report more compute gas than Rex6 for the same inputs on four paths: the exceptional-halt frame carve-out, which over-reports rather than under-reports; a failing precompile whose unused forwarded envelope is now reported as destroyed; a `disableVolatileDataAccess` rejection, which now includes the rejected opcode's static fee; and a failed deposit, whose rebuilt receipt is now covered by the reported total instead of leaving part of the envelope unaccounted.
 The carve-out's enforcing half is never looser than Rex6's on interpreter frames, and is stricter in exactly one shape: an ordinary out-of-gas taken with no clamp in force, whose zeroed counter leaves the whole segment measuring as executed.
 On a precompile that fails before performing work, Rex7 enforcement is deliberately looser than Rex6's: the unused envelope does not bind the compute limit.
 

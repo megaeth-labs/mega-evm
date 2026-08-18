@@ -956,9 +956,14 @@ where
 
             // Book the MegaETH share of intrinsic gas — calldata storage gas, the flat REX
             // intrinsic storage gas, and the callee-side / deposit-caller account-creation gas —
-            // as non-compute gas. Deliberately last: every contribution above is inside it, and
-            // the paths that return early from here are validation rejects, which never reach a
-            // settlement that would read the lane.
+            // as non-compute gas. Deliberately last: every contribution above is inside it.
+            //
+            // The paths that return early from here are validation rejects, which leave the lanes
+            // holding nothing but the base intrinsic already recorded as compute. For an ordinary
+            // transaction that is the end of it: there is no receipt, so no settlement ever reads
+            // the lanes. A deposit is the exception — it is not allowed to fail, so its receipt is
+            // rebuilt to report the whole gas limit, and the boundary that rebuilds it settles the
+            // difference against exactly this pair of lanes.
             ctx.additional_limit().borrow_mut().record_non_compute_gas(i128::from(
                 initial_and_floor_gas.initial_regular_gas.saturating_sub(base_intrinsic_gas),
             ));
@@ -1155,6 +1160,24 @@ where
         error: Self::Error,
     ) -> Result<ExecutionResult<Self::HaltReason>, Self::Error> {
         let result = self.op.catch_error(evm, error)?;
+
+        // Reaching an `Ok` here means one thing: op-revm rewrote a failed deposit into a receipt
+        // that reports the transaction's whole gas limit. Its `output` starts as the incoming
+        // error and is replaced only on that branch, so every other error still propagates as
+        // `Err` and produces no receipt at all. The rewrite is the last thing that happens to the
+        // transaction's envelope, after the journal has been rolled back and after any settlement
+        // the transaction reached — so it is the only place the rewritten envelope can be booked.
+        //
+        // Skipped inside a keyless-deploy sandbox. The conservation law is stated over an outer
+        // transaction's final envelope; a sandbox transaction's gas is a charge inside its
+        // parent's envelope, and the parent settles once, later, over its own. A sandbox tx that
+        // is rewritten here is a validation reject, whose whole reservation the interceptor hands
+        // back and whose usage never crosses the boundary.
+        if !evm.ctx().is_inside_sandbox() {
+            let envelope_gas_spent = result.gas().total_gas_spent();
+            evm.ctx().additional_limit().borrow_mut().settle_rewritten_envelope(envelope_gas_spent);
+        }
+
         // Belt-and-braces: op-revm already reverts the journal to the default checkpoint before
         // building FailedDeposit, so logs are already empty. Clearing is idempotent.
         Ok(strip_logs_if_not_success(result.map_haltreason(MegaHaltReason::Base)))

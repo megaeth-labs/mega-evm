@@ -532,6 +532,7 @@ Two of those three are recorded as they happen, so a node MUST derive the third:
 - `spent` — the EVM gas the transaction's envelope burnt, read once, at the moment the envelope is final: after the transaction's gas accounting has settled and any resource-limit gas rescue has been returned to the sender, and before the EIP-3529 refund and the EIP-7623 floor are applied.
   Those two move the number the receipt reports without anything having been burnt, so a node MUST NOT read `spent` after them.
   Gas rescued for the sender, and gas the clamp was hiding, are both out of the envelope by this point and MUST NOT be added back.
+  A failed deposit transaction, whose result is rebuilt after that point, is the one exception; the rule for it is below.
 - `minted_stipends` — the sum of `CALL_STIPEND` over the transaction's value-transferring `CALL` and `CALLCODE` invocations, counted once per stipend the EVM mints.
   The inherited EVM grants that stipend to the child's frame budget without debiting the caller's gas counter, so the frames between them record one stipend more work than the envelope funded, per such call, whatever becomes of the stipend afterwards.
   The mint is created when the invocation is handed to the EVM, before the child is entered, and a node MUST count it from that point rather than from the child frame running: an invocation turned away at frame entry — for want of balance, or at the call-depth limit — hands the whole child budget back to the caller with the stipend inside it, which shrinks the envelope against recorded work by exactly as much as a child that ran and returned it would.
@@ -571,9 +572,16 @@ A [system contract](../system-contracts/overview.md) invocation a node answers w
 It applies only when the answer is a halt that keeps the call's gas: the part the invocation performed before failing is executed, and the rest of the call's gas limit is destroyed.
 An answer that returns or reverts hands the gas back to the caller, and a halt whose remaining gas is rescued for the sender is a refund; a node MUST NOT record either as destroyed, because that gas was not lost.
 
-A transaction a node rejects during validation has no envelope to split.
+An ordinary transaction a node rejects during validation has no envelope to split.
 Since [Rex5](../upgrades/rex5.md) a transaction whose intrinsic gas requirement outgrows the gas limit its sender supplied is rejected during validation — after every MegaETH storage-gas contribution has been folded into the intrinsic total and before the sender is debited — so it produces no receipt.
-A node MUST NOT record a rejected transaction's gas limit as a destroyed remainder.
+A node MUST NOT record such a transaction's gas limit as a destroyed remainder.
+
+A deposit transaction is not allowed to fail, and that is where the exception lies.
+A deposit a node would otherwise reject during validation, and a deposit that halts during execution, are both rebuilt into a receipt reporting the transaction's whole gas limit, with state rolled back to the sender's nonce bump and the deposit's mint.
+The rebuild runs after every recording and settlement site, so it is the last thing that decides the envelope: a node MUST derive the law against the rebuilt envelope rather than against the one the transaction reached on its own.
+The difference between the two is destroyed compute gas, because the receipt burns it and nothing was executed for it.
+The two shapes arrive from opposite positions and the law covers both without distinguishing them — a rejected deposit has recorded only the standard-EVM share of its intrinsic gas and settled nothing, while a halted deposit has already settled against the smaller envelope its resource-limit gas rescue left behind.
+A node MUST NOT let the rebuild change `executed_compute`: nothing was executed for the difference, so a deposit rejected before it ran anything consumes no compute capacity at transaction or block level.
 
 The split MUST be driven by the halt classification rather than by the interpreter's own counter, which an inherited EVM zeroes for ordinary out-of-gas only.
 That zeroing has one consequence a node MUST accept: for an ordinary out-of-gas taken with no clamp in force, the counter is already zero when the frame exits, so the whole segment measures as executed and is enforced in full.

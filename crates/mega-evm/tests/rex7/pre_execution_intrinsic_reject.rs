@@ -11,6 +11,12 @@
 //! to participate: no transaction on a spec that has the lane can reach the halt. These probes pin
 //! both sides of the boundary, so a future change that re-opens the halt for REX7 turns red here
 //! rather than silently reporting a transaction whose burnt envelope no lane accounts for.
+//!
+//! Every probe here is an ordinary transaction, and that is the whole of what they claim. The
+//! second half of the reasoning — a validation reject produces no receipt, so there is nothing for
+//! the lane to account for — holds only for ordinary transactions. A rejected deposit does produce
+//! a receipt, rebuilt to report its whole gas limit, and the destroyed lane does have to account
+//! for it; that shape lives in `deposit_receipt_rewrite`.
 
 use std::convert::Infallible;
 
