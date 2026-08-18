@@ -133,7 +133,11 @@ pub struct Cmd {
     ///
     /// Without this flag, a target whose `<DIR>/<tx_hash>.json` already exists is
     /// reported as an infrastructure error for that target.
-    #[arg(long = "overwrite")]
+    ///
+    /// Only meaningful alongside `--dump-fixture-dir` (a single-file
+    /// `--dump-fixture` always replaces its destination), so it is rejected
+    /// without it rather than silently ignoring a requested artifact policy.
+    #[arg(long = "overwrite", requires = "dump_fixture_dir")]
     pub overwrite: bool,
 
     /// Verify every replayed transaction against its on-chain receipt.

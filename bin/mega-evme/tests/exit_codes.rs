@@ -704,3 +704,34 @@ fn test_panic_under_json_prints_execution_error_envelope() {
         "panic-hook message must keep the `panic: …` prefix: {message}"
     );
 }
+
+/// `--overwrite` only means something while `--dump-fixture-dir` writes
+/// fixtures; anywhere else it would silently ignore a requested artifact
+/// policy, so the pairing is rejected at parse time as a usage error.
+#[test]
+fn test_overwrite_without_dump_fixture_dir_is_a_usage_error() {
+    let hash = "0x323ddc8e67dfc134284d78c65f3c1dc7ff45ba1db02eeaf62e211ae3253478ef";
+
+    let alone = run(&["replay", hash, "--overwrite"]);
+    assert_eq!(
+        alone.code(),
+        1,
+        "--overwrite without --dump-fixture-dir is a usage error.\nstderr: {}",
+        alone.stderr
+    );
+    assert!(
+        alone.stderr.contains("--dump-fixture-dir"),
+        "the error must name the missing flag.\nstderr: {}",
+        alone.stderr
+    );
+
+    // The single-file dump always replaces its destination, so the flag is
+    // meaningless (and rejected) there too.
+    let with_single_dump = run(&["replay", hash, "--dump-fixture", "unused.json", "--overwrite"]);
+    assert_eq!(
+        with_single_dump.code(),
+        1,
+        "--overwrite alongside the single-file dump is still rejected.\nstderr: {}",
+        with_single_dump.stderr
+    );
+}
