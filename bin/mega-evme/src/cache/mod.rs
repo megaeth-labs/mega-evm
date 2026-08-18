@@ -92,18 +92,58 @@ pub(crate) fn warn_user(message: fmt::Arguments<'_>) {
 /// writer landed while this merge waited. The output therefore contributes
 /// through the locked read alone.
 ///
-/// Symlinks and `..` are resolved, so an input reaching the output by another
-/// name is caught too. A path that cannot be resolved — the output usually does
-/// not exist yet — falls back to its canonical directory plus its file name, and
-/// finally to comparing the paths as given.
+/// Sameness is the file system's own identity, not a path comparison, so every
+/// way an input can reach the output is caught: a symlink or a `..` detour
+/// resolves to the same file, and so does a *hard* link — one file under two
+/// real paths, which no amount of canonicalizing collapses. A path with no file
+/// behind it — the output usually does not exist yet — has no such identity and
+/// falls back to its canonical path, then to its canonical directory plus its
+/// file name, and finally to comparing the paths as given.
 fn names_output(input: &Path, output: &Path) -> bool {
     if input == output {
         return true;
     }
-    match (resolve_for_identity(input), resolve_for_identity(output)) {
+    match (file_identity(input), file_identity(output)) {
         (Some(input), Some(output)) => input == output,
         _ => false,
     }
+}
+
+/// What makes two paths the same file for [`names_output`].
+#[derive(PartialEq, Eq)]
+enum FileIdentity {
+    /// The file system's identity for a file that exists, which two names of
+    /// one file share however differently they are spelled. Unix only: no other
+    /// target exposes an equivalent on stable.
+    #[cfg(unix)]
+    Node {
+        /// The device the file lives on: inode numbers are only unique within one.
+        device: u64,
+        /// The file's inode number on that device.
+        inode: u64,
+    },
+    /// The resolved path of a name with no file behind it. Deliberately never
+    /// equal to a `Node`: a name that resolves to no file is not the file
+    /// another name resolves to.
+    Unborn(PathBuf),
+}
+
+/// Identity of the file at `path`, or `None` when neither the file nor its
+/// directory can be resolved.
+///
+/// Unix reads the identity the file system itself keeps. Elsewhere there is no
+/// stable equivalent, so the resolved path stands in and a hard link to the
+/// output goes undetected there — the alias forms that a path can express
+/// (symlinks, `..`) are still caught.
+fn file_identity(path: &Path) -> Option<FileIdentity> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if let Ok(metadata) = std::fs::metadata(path) {
+            return Some(FileIdentity::Node { device: metadata.dev(), inode: metadata.ino() });
+        }
+    }
+    resolve_for_identity(path).map(FileIdentity::Unborn)
 }
 
 /// Canonical path of `path`, falling back to its canonical directory plus file
@@ -492,6 +532,43 @@ mod tests {
 
         let merged: EnvelopeDoc = serde_json::from_str(&fs::read_to_string(&out).unwrap()).unwrap();
         assert_eq!(merged.cache, vec![kv(1, "from-output"), kv(2, "from-new")]);
+    }
+
+    /// A hard link to the output is the output too, and canonicalizing cannot
+    /// see it: a hard link is one file under two *real* paths, so both sides
+    /// resolve to themselves and a path comparison calls them different files.
+    /// Only the file system's own identity catches it.
+    #[cfg(unix)]
+    #[test]
+    fn test_cache_merge_in_place_sees_through_a_hard_linked_input() {
+        let dir = tempdir().unwrap();
+        let out = dir.path().join("out.json");
+        let link = dir.path().join("link.json");
+
+        write(
+            &out,
+            &serde_json::to_string_pretty(&EnvelopeDoc {
+                version: 1,
+                chain_id: 4326,
+                cache: vec![kv(1, "from-output")],
+                external_env: None,
+            })
+            .unwrap(),
+        );
+        fs::hard_link(&out, &link).expect("hard link the output");
+
+        // Sentinel: the two names survive canonicalization as distinct paths,
+        // so this case is not covered by the symlink/`..` resolution.
+        assert_ne!(
+            link.canonicalize().unwrap(),
+            out.canonicalize().unwrap(),
+            "a hard link is a second real path; if these ever collapse, this test proves nothing",
+        );
+
+        assert!(
+            names_output(&link, &out),
+            "a hard link to the output must be recognized as the output",
+        );
     }
 
     /// Naming nothing but the output is the degenerate in-place merge: the file
