@@ -35,6 +35,7 @@ The overwhelmingly likely case is the bare JSON array an older `mega-evme` wrote
 Delete it, or re-record the responses with `--rpc.capture-file`.
 
 Every input is read and shape-checked before the output is locked, so a refused merge writes nothing and leaves no lock sidecar behind.
+An input that names the output itself is the one exception: it is excluded from that pre-lock read and contributes only through the locked re-read of the output, so a concurrent writer's entries cannot be rolled back by a stale pre-lock copy.
 
 ### Output locking
 
@@ -60,6 +61,8 @@ They do not depend on `-v` flags or `RUST_LOG`, which only add the structured lo
 Stdout carries the summary line only, so it stays parseable.
 
 ### Merge rules
+
+An in-place incremental merge — `cache merge out.json new.json --output out.json` — therefore means "fold `new.json` into whatever `out.json` holds at the moment the lock is granted"; the summary's input count covers only the inputs actually read.
 
 - Every input must use the current envelope `version` and the same `chain_id` (else hard error naming the mismatch).
   An envelope already at `--output` must agree with them too.
