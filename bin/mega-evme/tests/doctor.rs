@@ -459,6 +459,63 @@ fn test_set_block_field_panics_on_an_unreported_field() {
         load_envelope("unknown_field", &sample()).set_block_field(BLOCK, "nosuchfield", json!(1));
 }
 
+// --- Moving one block's answer onto another height's request ---------------
+
+/// The moved answer is the source entry's response verbatim — same height, same
+/// served hash, byte for byte — which is what makes it authenticate: nothing
+/// about the header was touched, so whatever the source hashed to, it still
+/// hashes to.
+///
+/// The source entry keeps answering its own request, so the capture ends up
+/// serving that one block at two heights: the endpoint being modelled.
+#[test]
+fn test_answer_block_with_moves_the_response_verbatim() {
+    let src = write_sample("answer_block_with");
+    let before = read_json(&src);
+    let out = DoctoredEnvelope::load(&src)
+        .answer_block_with(BLOCK, BLOCK - 1)
+        .write_to_temp("answer_block_with");
+    let after = read_json(&out);
+    let _ = std::fs::remove_file(&src);
+    let _ = std::fs::remove_file(&out);
+
+    assert_eq!(
+        entry_by_key(&after, BLOCK_KEY)["value"],
+        entry_by_key(&before, PARENT_KEY)["value"],
+        "the requested height must be answered with the other block's response, verbatim",
+    );
+    let moved = result_of(&after, BLOCK_KEY);
+    assert_eq!(moved["number"], json!(format!("0x{:x}", BLOCK - 1)), "the served height moves too");
+    assert_eq!(moved["hash"], json!(PARENT_HASH), "and so does the hash it is served under");
+    assert_eq!(
+        entry_by_key(&after, PARENT_KEY),
+        entry_by_key(&before, PARENT_KEY),
+        "the source entry must keep answering its own request",
+    );
+}
+
+/// A height the capture does not serve as a block body is a programming error
+/// in the test, on either side of the move.
+#[test]
+#[should_panic(expected = "exactly one header for block")]
+fn test_answer_block_with_panics_when_the_served_height_is_absent() {
+    let _ = load_envelope("answer_missing_src", &sample()).answer_block_with(BLOCK, 0x99);
+}
+
+#[test]
+#[should_panic(expected = "exactly one header for block")]
+fn test_answer_block_with_panics_when_the_requested_height_is_absent() {
+    let _ = load_envelope("answer_missing_dst", &sample()).answer_block_with(0x99, BLOCK);
+}
+
+/// Answering a height with its own block is a no-op the caller did not mean to
+/// write, so it is refused rather than silently doing nothing.
+#[test]
+#[should_panic(expected = "changes nothing")]
+fn test_answer_block_with_panics_on_the_same_height() {
+    let _ = load_envelope("answer_same", &sample()).answer_block_with(BLOCK, BLOCK);
+}
+
 // --- Per-op non-target invariance -----------------------------------------
 
 enum Mutation {
@@ -602,6 +659,13 @@ fn cases() -> Vec<Case> {
         Case {
             op: "set_block_hash",
             apply: |env| env.set_block_hash(BLOCK, "0xeeee"),
+            mutation: rewrite(&[BLOCK_KEY]),
+        },
+        // Only the entry that answered the requested height changes; the block
+        // whose response was moved onto it stays where it was.
+        Case {
+            op: "answer_block_with",
+            apply: |env| env.answer_block_with(BLOCK, BLOCK - 1),
             mutation: rewrite(&[BLOCK_KEY]),
         },
         Case {

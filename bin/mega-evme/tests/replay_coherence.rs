@@ -22,7 +22,8 @@
 //! reports per target, and the single-transaction driver reports the same text
 //! behind its `RPC error: ` envelope. Header authentication is asked inside each
 //! driver's block fetch instead, so both report it behind that same envelope
-//! ([`Case::shared_at_fetch`]).
+//! ([`Case::shared_at_fetch`]) — as is the check that the block served for a
+//! numbered fetch is the height that was asked for.
 
 use std::{
     path::{Path, PathBuf},
@@ -262,6 +263,24 @@ fn cases(prefix: &str) -> Vec<Case> {
                 BLOCK - 1,
             ),
         ),
+        // A numbered fetch answered out of another height: the endpoint serves
+        // the block below the one asked for, verbatim, so the answer still
+        // authenticates and only its height gives it away. Caught at the fetch,
+        // like the unauthentic header above, and before the inclusion guard —
+        // which would otherwise be the first to notice, and only because this
+        // target carries an inclusion claim.
+        Case::shared_at_fetch(
+            "misnumbered_block",
+            DoctoredEnvelope::load(&src)
+                .answer_block_with(BLOCK, BLOCK - 1)
+                .write_to_temp(&name("misnumbered_block")),
+            format!(
+                "the endpoint answered the fetch of block {BLOCK} with block {}: a numbered fetch \
+                 was served a header from another height (an inconsistent backend, or a tampered \
+                 capture); the block environment it describes is not the one the run asked for",
+                BLOCK - 1,
+            ),
+        ),
         // Neither a block number nor an inclusion hash. This is the one shape
         // the drivers answer differently by design: it is a valid placement for
         // the single-transaction driver (which replays a pending target on top
@@ -288,13 +307,14 @@ fn cases(prefix: &str) -> Vec<Case> {
 
 /// Markers that identify a shared coherence verdict in a message, used by
 /// [`Expect::NoCoherenceVerdict`] to prove no such verdict was reached.
-const COHERENCE_MARKERS: [&str; 6] = [
+const COHERENCE_MARKERS: [&str; 7] = [
     "unanchored view",
     "contradictory metadata",
     "contradictory endpoint data",
     "divergent views",
     "does not list target transaction",
     "does not authenticate",
+    "a header from another height",
 ];
 
 // ---------------------------------------------------------------------------

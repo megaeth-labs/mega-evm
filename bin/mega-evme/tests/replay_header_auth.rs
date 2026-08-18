@@ -19,8 +19,18 @@
 //!
 //! The mirror image — the fields untouched and the `hash` rewritten — is one of
 //! the cases in `replay_coherence.rs`, alongside the guards that consume it.
+//!
+//! The same fetch also authenticates the header's *height*, and the last test
+//! here covers the forgery the hash cannot: a block moved onto another height's
+//! request is a real, self-consistent block, and offsetting the parent's answer
+//! by the same distance leaves the parent/block linkage satisfied too. The
+//! single-height version of that case, over both drivers, is one row of the
+//! `replay_coherence.rs` table.
 
-use std::{path::PathBuf, process::Command};
+use std::{
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 use serde_json::{json, Value};
 
@@ -33,6 +43,11 @@ const ENVELOPE_NAME: &str = "replay_batch_blocks.cache.json";
 
 /// Block of the capture every case tampers with.
 const BLOCK: u64 = 22_945_844;
+
+/// The upper of the two block pairs the same capture holds, far enough from
+/// [`BLOCK`] to be an unmistakably different part of the chain. Captured
+/// together with its own parent, so the offset pair is genuinely linked.
+const FAR_BLOCK: u64 = 22_945_853;
 
 /// Mid-block call of [`BLOCK`] (index 3), the target every case asks about.
 const TARGET: &str = "0x323ddc8e67dfc134284d78c65f3c1dc7ff45ba1db02eeaf62e211ae3253478ef";
@@ -98,9 +113,9 @@ fn cases(prefix: &str) -> Vec<Case> {
 }
 
 /// Run `replay` offline against `envelope_path` with the given extra arguments.
-fn replay(case: &Case, args: &[&str]) -> (String, String, Option<i32>) {
+fn replay(envelope_path: &Path, args: &[&str]) -> (String, String, Option<i32>) {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_mega-evme"));
-    cmd.args(["replay", "--rpc.replay-file", case.envelope.to_str().expect("path is utf-8")]);
+    cmd.args(["replay", "--rpc.replay-file", envelope_path.to_str().expect("path is utf-8")]);
     cmd.args(args);
     let output = cmd.output().expect("failed to run mega-evme");
     (
@@ -140,7 +155,7 @@ fn assert_rejected(case: &Case, driver: &str, message: &str, stdout: &str, stder
 #[test]
 fn test_single_transaction_driver_rejects_a_forged_header() {
     for case in cases("single") {
-        let (stdout, stderr, exit) = replay(&case, &["--json", TARGET]);
+        let (stdout, stderr, exit) = replay(&case.envelope, &["--json", TARGET]);
         let values = common::json_values(&stdout);
         let error = values
             .last()
@@ -184,7 +199,7 @@ fn test_batch_driver_rejects_a_forged_header() {
         ));
         std::fs::write(&list, format!("{TARGET}\n")).expect("write tx list");
         let (stdout, stderr, exit) =
-            replay(&case, &["--tx-file", list.to_str().expect("path is utf-8"), "--json"]);
+            replay(&case.envelope, &["--tx-file", list.to_str().expect("path is utf-8"), "--json"]);
         let _ = std::fs::remove_file(&list);
 
         let entry = common::json_values(&stdout)
@@ -228,7 +243,8 @@ fn test_batch_driver_rejects_a_forged_header() {
 #[test]
 fn test_whole_block_mode_rejects_a_forged_header_before_listing_targets() {
     for case in cases("whole_block") {
-        let (stdout, stderr, exit) = replay(&case, &["--block", &BLOCK.to_string(), "--json"]);
+        let (stdout, stderr, exit) =
+            replay(&case.envelope, &["--block", &BLOCK.to_string(), "--json"]);
         let values = common::json_values(&stdout);
         assert_eq!(
             values.len(),
@@ -277,7 +293,7 @@ fn test_rejection_needs_no_answer_beyond_the_forged_block() {
         envelope: env.write_to_temp("header_auth_minimal"),
     };
 
-    let (stdout, stderr, exit) = replay(&case, &["--block", &BLOCK.to_string(), "--json"]);
+    let (stdout, stderr, exit) = replay(&case.envelope, &["--block", &BLOCK.to_string(), "--json"]);
     let _ = std::fs::remove_file(&case.envelope);
 
     assert_eq!(exit, Some(3), "an unauthentic header exits 3\nstdout:\n{stdout}");
@@ -289,4 +305,69 @@ fn test_rejection_needs_no_answer_beyond_the_forged_block() {
         "the verdict must be reached without any further answer: {message}",
     );
     assert_rejected(&case, "whole-block replay", message, &stdout, &stderr);
+}
+
+/// A whole-block run is rejected when the endpoint answers the replayed block
+/// and its parent from another, equally consistent pair.
+///
+/// This is the forgery the hash cannot catch: nothing is rewritten, so both
+/// answers hash to the hashes they are served under, and the pair really is a
+/// parent and its child — so the linkage guard has nothing to say either.
+/// Whole-block mode takes its targets from the served body, so the membership
+/// guard is satisfied by construction as well. Without the height check the run
+/// would execute [`FAR_BLOCK`]'s body under [`FAR_BLOCK`]'s environment while
+/// forking the state at `BLOCK - 1` and reporting every receipt under [`BLOCK`].
+#[test]
+fn test_whole_block_mode_rejects_an_offset_pair_of_authentic_blocks() {
+    let src = envelope();
+
+    // Read the properties that make this case worth having before the capture is
+    // doctored: both answers authenticate, and the pair is genuinely linked.
+    let pristine = DoctoredEnvelope::load(&src);
+    for number in [FAR_BLOCK, FAR_BLOCK - 1] {
+        assert_eq!(
+            pristine.block_hash_at(number),
+            pristine.recomputed_block_hash_at(number),
+            "block {number} must authenticate before it is moved onto another request",
+        );
+    }
+    assert_eq!(
+        pristine.block_parent_hash_at(FAR_BLOCK),
+        pristine.block_hash_at(FAR_BLOCK - 1),
+        "the offset pair must be genuinely linked, or the linkage guard would catch it",
+    );
+    drop(pristine);
+
+    let doctored = DoctoredEnvelope::load(&src)
+        .answer_block_with(BLOCK, FAR_BLOCK)
+        .answer_block_with(BLOCK - 1, FAR_BLOCK - 1)
+        .write_to_temp("header_auth_offset_pair");
+
+    let (stdout, stderr, exit) = replay(&doctored, &["--block", &BLOCK.to_string(), "--json"]);
+    let _ = std::fs::remove_file(&doctored);
+
+    let context = format!("stdout:\n{stdout}\nstderr:\n{stderr}");
+    assert_eq!(exit, Some(3), "a block served for another height exits 3.\n{context}");
+    let values = common::json_values(&stdout);
+    assert_eq!(values.len(), 1, "only the run-level error may be printed.\n{context}");
+    let error = values.last().expect("checked above");
+    assert!(common::is_run_error(error), "the only printed value must be the error: {error}");
+    assert_eq!(error["error"]["kind"].as_str(), Some("rpc-failure"), "\n{context}");
+    assert_eq!(
+        error["error"]["message"].as_str(),
+        Some(
+            format!(
+                "RPC error: the endpoint answered the fetch of block {BLOCK} with block \
+                 {FAR_BLOCK}: a numbered fetch was served a header from another height (an \
+                 inconsistent backend, or a tampered capture); the block environment it describes \
+                 is not the one the run asked for"
+            )
+            .as_str()
+        ),
+        "the verdict must name the height asked for and the height served.\n{context}",
+    );
+    assert!(
+        !stdout.contains("\"success\""),
+        "a block served for another height must not produce an execution result.\n{context}",
+    );
 }
