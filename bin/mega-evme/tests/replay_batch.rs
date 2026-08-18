@@ -1524,3 +1524,40 @@ fn test_replay_block_dump_fixture_dir_writes_all_but_the_deposit() {
     assert_eq!(on_disk, written, "each reported path is a file on disk");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A served answer must authenticate before its metadata may classify the
+/// target: an endpoint answering hash `H` with a tampered body that reports no
+/// inclusion is an inconsistent endpoint (`rpc`), never a definitive `pending`
+/// verdict. Resolution is the one lookup that exits planning before the
+/// kernel's authenticated walk, so the check must sit in resolution itself.
+#[test]
+fn test_replay_tx_file_unauthentic_pending_answer_is_rpc_not_pending() {
+    let (target, _) = BLOCK_TXS[1];
+    let path = DoctoredEnvelope::load(envelope())
+        .zero_transaction_gas(target)
+        .mark_transaction_pending(target)
+        .write_to_temp("unauthentic_pending");
+    let list = std::env::temp_dir()
+        .join(format!("mega_evme_tx_list_unauth_pending_{}.txt", std::process::id()));
+    std::fs::write(&list, format!("{target}\n")).expect("write tx list");
+
+    let (stdout, code) =
+        replay_envelope_with_code(&path, &["--tx-file", list.to_str().unwrap(), "--json"]);
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(&list);
+    let lines = ndjson(&stdout);
+
+    assert_eq!(lines.len(), 1, "the single target is reported once: {stdout}");
+    assert_eq!(
+        lines[0]["error"]["kind"].as_str(),
+        Some("rpc"),
+        "an unauthenticated answer went unanswered — never a pending verdict: {}",
+        lines[0]
+    );
+    let message = lines[0]["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("the endpoint served a different transaction"),
+        "the failure must name the authentication mismatch: {message}"
+    );
+    assert_eq!(code, Some(3), "an unauthenticated lookup exits 3");
+}

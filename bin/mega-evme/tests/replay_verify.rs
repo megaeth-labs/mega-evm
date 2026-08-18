@@ -947,10 +947,14 @@ fn test_batch_fixture_construction_failure_is_fixture_error_not_skip() {
 /// When the block aborts after a dump target built a Ready draft, no fixture
 /// file is written and `--overwrite` does not clobber a pre-existing file.
 ///
-/// Seeds a zero-gas object for the index-2 hash so resolve succeeds but the
-/// block loop aborts on that transaction *after* the dump target (index 1)
-/// has executed and built a deferred draft. Materialize runs only on a clean
-/// loop, so the Ready draft is discarded. Happy-path writes are covered by
+/// Seeds a zero-gas object for the index-2 hash and replays with `--block`, so
+/// the walk reaches that transaction *after* the dump target (index 1) has
+/// executed and built a deferred draft, and aborts there (the tampered body
+/// fails the walk's authentication). Materialize runs only on a clean loop, so
+/// the Ready draft is discarded. `--block` rather than `--tx-file` because
+/// target resolution authenticates its own lookups: as a listed target the
+/// doctored hash would be refused at planning and the walk would stop before
+/// index 2. Happy-path writes are covered by
 /// [`test_batch_dump_fixture_dir_writes_validatable_file`].
 #[test]
 fn test_batch_dump_does_not_write_or_clobber_when_block_aborts_before_finish() {
@@ -973,10 +977,6 @@ fn test_batch_dump_does_not_write_or_clobber_when_block_aborts_before_finish() {
         })
         .write_to_temp("dump_abort_after");
 
-    let list_path = std::env::temp_dir()
-        .join(format!("mega_evme_verify_dump_abort_after_{}.txt", std::process::id()));
-    std::fs::write(&list_path, format!("{TX}\n{LATER}\n")).expect("write tx list");
-
     let dir =
         std::env::temp_dir().join(format!("mega_evme_batch_dump_abort_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -985,11 +985,12 @@ fn test_batch_dump_does_not_write_or_clobber_when_block_aborts_before_finish() {
     let sentinel = br#"{"pre-existing":"must-not-be-clobbered"}"#;
     std::fs::write(&fixture_path, sentinel).expect("seed pre-existing fixture");
 
+    // The captured block; `TX` sits at index 1, the doctored hash at index 2.
     let run = replay(
         &cache_path,
         &[
-            "--tx-file",
-            list_path.to_str().unwrap(),
+            "--block",
+            "18172461",
             "--dump-fixture-dir",
             dir.to_str().unwrap(),
             "--overwrite",
@@ -997,7 +998,6 @@ fn test_batch_dump_does_not_write_or_clobber_when_block_aborts_before_finish() {
         ],
     );
     let _ = std::fs::remove_file(&cache_path);
-    let _ = std::fs::remove_file(&list_path);
 
     assert!(!run.success, "an aborted block must exit non-zero.\nstderr: {}", run.stderr);
     let lines = run.ndjson();

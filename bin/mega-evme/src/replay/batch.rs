@@ -707,25 +707,37 @@ where
                 kind: BatchErrorKind::NotFound,
                 message: "Transaction not found".to_string(),
             }),
+            // Authenticate before reading anything out of the answer: a pending
+            // verdict leaves planning immediately and would never reach the
+            // authenticated lookup inside the execution kernel, so an endpoint
+            // serving another (pending) transaction under this hash could
+            // otherwise stamp the target as definitively pending — and capture
+            // mode would persist that answer for offline reuse.
+            //
             // Every (block_number, block_hash) shape the endpoint can return is
-            // classified by the shared judgment, so a contradictory row cannot
-            // fall through into the pending arm. An unanchored or contradictory
-            // row leaves the target unanswered (`rpc`); a genuinely pending one
-            // is a definitive answer about it, which batch mode reports as its
-            // own class.
-            Ok(Some(tx)) => match coherence::classify_placement(tx.block_number, tx.block_hash) {
-                Ok(TargetPlacement::Mined { number, inclusion_hash }) => {
-                    grouped
-                        .entry(number)
-                        .or_default()
-                        .push(JobTarget { hash: *hash, inclusion_hash: Some(inclusion_hash) });
+            // then classified by the shared judgment, so a contradictory row
+            // cannot fall through into the pending arm. An unanchored or
+            // contradictory row leaves the target unanswered (`rpc`); a
+            // genuinely pending one is a definitive answer about it, which
+            // batch mode reports as its own class.
+            Ok(Some(tx)) => match verify::authenticate_transaction(&tx, *hash) {
+                Err(message) => {
+                    failures.push(FailedTx { tx_hash: *hash, kind: BatchErrorKind::Rpc, message })
                 }
-                Ok(TargetPlacement::Pending) => failures.push(FailedTx {
-                    tx_hash: *hash,
-                    kind: BatchErrorKind::Pending,
-                    message: "Transaction is pending (no block number)".to_string(),
-                }),
-                Err(incoherence) => failures.push(incoherent_endpoint(*hash, &incoherence)),
+                Ok(()) => match coherence::classify_placement(tx.block_number, tx.block_hash) {
+                    Ok(TargetPlacement::Mined { number, inclusion_hash }) => {
+                        grouped
+                            .entry(number)
+                            .or_default()
+                            .push(JobTarget { hash: *hash, inclusion_hash: Some(inclusion_hash) });
+                    }
+                    Ok(TargetPlacement::Pending) => failures.push(FailedTx {
+                        tx_hash: *hash,
+                        kind: BatchErrorKind::Pending,
+                        message: "Transaction is pending (no block number)".to_string(),
+                    }),
+                    Err(incoherence) => failures.push(incoherent_endpoint(*hash, &incoherence)),
+                },
             },
         }
     }
