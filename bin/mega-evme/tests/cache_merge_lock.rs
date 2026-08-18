@@ -7,11 +7,17 @@
 //!
 //! Mutual exclusion cannot be demonstrated inside one process: a single-process
 //! test that "takes the lock" and then calls the merge in-process either
-//! deadlocks or proves nothing about a second process. This test holds the
-//! sidecar lock in the test process, spawns the real binary, shows it makes no
-//! progress while the lock is held, writes a concurrent writer's entries under
-//! that same lock, and only then releases — so the merge's output can contain
+//! deadlocks or proves nothing about a second process. These tests hold the
+//! sidecar lock in the test process, spawn the real binary, show it makes no
+//! progress while the lock is held, write a concurrent writer's entries under
+//! that same lock, and only then release — so the merge's output can contain
 //! those entries only by re-reading the file after it acquired the lock.
+//!
+//! The second test drives the in-place idiom (`cache merge out.json new.json -o
+//! out.json`), where the output is also a named input. What the merge must not
+//! do there is read the output twice: the pre-lock copy would be a snapshot from
+//! before the writer's update, and the inputs-win rule would let it overwrite
+//! the writer's value on a shared key — losing an entry no side ever deleted.
 
 use std::{
     fs::{self, File, OpenOptions},
@@ -176,4 +182,79 @@ fn test_cache_merge_serializes_with_a_concurrent_envelope_writer() {
         stdout.contains("already in the output"),
         "the summary must report the folded-in entries: {stdout}",
     );
+}
+
+/// An in-place merge does not roll a concurrent writer back.
+///
+/// The output is named as an input as well, so the merge could read it twice:
+/// once before the lock, as an input, and once after, as the file it is merging
+/// into. The pre-lock copy is a snapshot from before the writer's update, and it
+/// would win the key collision under the inputs-win rule — leaving the merged
+/// file carrying the value the writer had already replaced, with nothing on
+/// stdout to say so.
+///
+/// Key 1 is the one the writer updates while the merge is blocked. Key 5 is
+/// carried by the named input too, so the test also pins that excluding the
+/// output from the input set does not flip the inputs-win rule.
+#[test]
+fn test_in_place_cache_merge_keeps_a_concurrent_writers_update() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let new = dir.path().join("new.json");
+    let out = dir.path().join("out.json");
+
+    fs::write(
+        &out,
+        serde_json::to_string_pretty(&envelope(vec![kv(1, "before-the-writer"), kv(5, "shared")]))
+            .unwrap(),
+    )
+    .expect("write the output's prior contents");
+    fs::write(
+        &new,
+        serde_json::to_string_pretty(&envelope(vec![kv(2, "from-new"), kv(5, "from-new")]))
+            .unwrap(),
+    )
+    .expect("write new");
+
+    let lock = hold_output_lock(&out);
+    let mut child = spawn_merge(&[&out, &new], &out);
+    assert_blocked_while_held(&mut child);
+
+    // The writer updates an entry the merge already read as an input, and adds
+    // one it never saw — both under the lock the merge is waiting for.
+    fs::write(
+        &out,
+        serde_json::to_string_pretty(&envelope(vec![
+            kv(1, "from-concurrent-writer"),
+            kv(5, "shared"),
+            kv(9, "landed-while-waiting"),
+        ]))
+        .unwrap(),
+    )
+    .expect("concurrent write");
+    drop(lock);
+
+    finish(child);
+
+    let merged: Value =
+        serde_json::from_str(&fs::read_to_string(&out).expect("read merged output"))
+            .expect("merged output is an envelope");
+    let entries = merged["cache"].as_array().expect("cache array").clone();
+    assert_eq!(
+        value_of(&entries, 1).as_deref(),
+        Some("from-concurrent-writer"),
+        "the writer's update must survive: a pre-lock copy of the output must not win \
+         the collision: {entries:?}",
+    );
+    assert_eq!(
+        value_of(&entries, 9).as_deref(),
+        Some("landed-while-waiting"),
+        "the entry the writer added while the merge was blocked must survive: {entries:?}",
+    );
+    assert_eq!(
+        value_of(&entries, 5).as_deref(),
+        Some("from-new"),
+        "a named input must still win over the output's own entry: {entries:?}",
+    );
+    assert_eq!(value_of(&entries, 2).as_deref(), Some("from-new"), "input entry lost: {entries:?}");
+    assert_eq!(entries.len(), 4, "the union is exactly both sides: {entries:?}");
 }
