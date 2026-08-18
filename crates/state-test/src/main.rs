@@ -126,6 +126,8 @@ impl Cmd {
                             mega_evm::name::REX3,
                             mega_evm::name::REX4,
                             mega_evm::name::REX5,
+                            mega_evm::name::REX6,
+                            mega_evm::name::REX7,
                         ]
                         .join(", ")
                     )),
