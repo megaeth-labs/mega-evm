@@ -462,6 +462,17 @@ pub(super) fn check_transaction_identity(
 /// deposit's `from` is part of its encoding, so the hash already covers it).
 /// Returns the explanatory message so each call site can wrap it in the error
 /// shape it reports.
+///
+/// The served `hash` field is checked against the recomputed value too, rather
+/// than merely ignored. An RPC deserialization seeds the envelope's cached hash
+/// from that field, so it is what every later `tx_hash()` read returns — the
+/// name a dumped fixture is filed and keyed under, and the identity a result
+/// line carries. A payload that honestly hashes to the requested transaction
+/// paired with a `hash` field naming another one would pass a request-only
+/// comparison and then misfile everything downstream reads that accessor for.
+/// Because the check runs here, at the one seam every fetched transaction is
+/// admitted through, `tx_hash()` on an authenticated transaction is a verified
+/// value and no consumer has to recompute it.
 pub(super) fn authenticate_transaction(
     tx: &Transaction,
     requested_tx_hash: B256,
@@ -476,6 +487,16 @@ pub(super) fn authenticate_transaction(
             "the served transaction hashes to {computed}, but transaction {requested_tx_hash} \
              was requested: the endpoint served a different transaction (an inconsistent \
              backend, or a tampered capture)"
+        ));
+    }
+    // The cached hash every downstream `tx_hash()` reads, which is the served
+    // `hash` field rather than a property of the body beside it.
+    let served_hash = tx.inner.inner.tx_hash();
+    if served_hash != computed {
+        return Err(format!(
+            "transaction {requested_tx_hash}: the served `hash` field {served_hash} does not \
+             match the {computed} its own consensus encoding hashes to: the endpoint served an \
+             inconsistent transaction (a corrupted backend, or a tampered capture)"
         ));
     }
     let recovered = envelope.recover_signer().map_err(|e| {
