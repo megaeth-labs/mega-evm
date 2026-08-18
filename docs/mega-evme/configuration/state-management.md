@@ -223,6 +223,8 @@ Three more hold only for the moment they were taken, and the per-chain online ca
 - `eth_getTransactionByHash` metadata for a transaction with a null `blockNumber` or `blockHash`, which is what every consumer reads as "still pending".
 
 The caller always gets the response; only the cache declines it, so the next identical request goes back to the endpoint.
+Everything else — mined transactions, numbered blocks, receipts, state reads at a numbered height — is persisted as final: MegaETH's single-sequencer blocks do not reorg once served, so a recorded answer stays canonical.
+On an endpoint whose recent history can still change, that assumption does not hold, and a cache recorded before a reorg keeps answering from the orphaned view until it is discarded; `--rpc.clear-cache` does that, and `--rpc.no-cache-file` keeps a run off the disk cache entirely.
 Capture fixtures (`--rpc.capture-file`) keep these three deliberately: an offline rerun of a pending transaction has to be answered from the fixture, and dropping them would make it unusable for exactly that case.
 See [RPC Cache File](../commands/replay.md#rpc-cache-file) for capture and offline replay.
 

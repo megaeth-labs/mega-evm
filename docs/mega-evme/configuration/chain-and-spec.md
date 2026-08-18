@@ -10,8 +10,10 @@ The `replay` command auto-detects the spec from the chain ID and block timestamp
 
 In all three commands a chosen spec defines the whole execution world, not only the opcode and gas rules: the system contracts predeployed before execution, the block-level resource limits, and the EVM semantics all come from that one spec.
 For `run` and `tx` there is nothing else it could mean — there is no historical block to contradict it.
-For `replay`, [`--override.spec`](../commands/replay.md#--overridespec-spec) makes the same choice explicitly: the block is replayed as if it had run on a chain at the forced spec, so replaying an old block under a newer spec installs predeploys that never existed at that block, and forcing an older spec withholds or downgrades the ones that did.
+For `replay`, [`--override.spec`](../commands/replay.md#--overridespec-spec) makes the same choice explicitly: the block is replayed as if it had run on a chain at the forced spec, so replaying an old block under a newer spec installs predeploys that never existed at that block, and forcing an older spec withholds or downgrades what its own pre-block operations would have deployed.
 That is intentional, and it is what makes the answer a coherent what-if rather than a mixture of two worlds.
+The override synthesizes the schedule — the pre-block operations, the resource limits, the EVM behavior — and leaves the forked parent state as history recorded it.
+A contract that a later fork had already deployed by that block therefore remains in state under a downgrade, reachable as plain on-chain bytecode without its spec-gated interception, because deleting it would fabricate a parent state that never existed on any chain.
 Chain-specific configuration is not synthesized along with it: a fork whose parameters the chain has not published (the `SequencerRegistry` seeds, today) cannot be forced, and the run fails up front naming what is missing.
 
 ## Options
