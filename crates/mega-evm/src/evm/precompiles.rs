@@ -24,7 +24,7 @@ use revm::{
     context_interface::ContextTr,
     handler::{precompile_output_to_interpreter_result, EthPrecompiles, PrecompileProvider},
     interpreter::{CallInputs, Gas, InterpreterResult},
-    precompile::{PrecompileHalt, Precompiles},
+    precompile::{PrecompileHalt, PrecompileId, Precompiles},
     primitives::{Address, AddressSet, HashMap},
 };
 
@@ -329,6 +329,11 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> PrecompileProvider<MegaContext<DB,
         // own halt reason, which the `InterpreterResult` no longer carries — the accounting arms
         // below read it instead of trying to rebuild it from the collapsed instruction result.
         let maybe_output = run_precompile_capturing_halt(self, &mut context.inner, inputs)?;
+        // The helper's borrow of the map entry ends with the call. Re-read the dispatched
+        // identity here so the REX7 fixed-fee arm can key on it after that borrow is gone.
+        let is_kzg_identity = self.get(&address).is_some_and(|precompile| {
+            *precompile.precompile_id() == PrecompileId::KzgPointEvaluation
+        });
 
         Ok(maybe_output.map(|(mut output, halt)| {
             // Upstream revm-handler (`precompile_output_to_interpreter_result`) calls
@@ -379,16 +384,20 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> PrecompileProvider<MegaContext<DB,
             //   `limit() >= GAS_COST`): the call got through the gas gate and into the upstream
             //   body, so how far it got decides what was performed. Address match uses
             //   `bytecode_address` (see above) so DELEGATECALL/CALLCODE to KZG still hit this arm.
-            //   Through REX6 the fixed cost is charged for every halt this arm sees and is the
-            //   whole recorded charge; REX7 splits it by halt reason (below), keeping the performed
-            //   part on the enforcing lane and booking the rest of the forwarded envelope — the
-            //   caller-supplied `gas_limit`, not the REX5-capped effective limit — as destroyed.
-            //   The REX5 cap still prevents the precompile from *doing* more work than the
-            //   remaining compute budget; the cap gap is part of the forwarded envelope, not work,
-            //   so it belongs with the destroyed remainder.
-            // * All other error paths (non-KZG, or KZG with `limit() < GAS_COST` meaning the
-            //   wrapper's pre-check itself OOG'd before the body could run): after the spend_all
-            //   undo above, `total_gas_spent() == 0` again. Through REX6 the parent still
+            //   Through REX6 the arm is address-only and the fixed cost is charged for every halt
+            //   it sees. REX7 also requires the dispatched precompile's identity to be
+            //   `KzgPointEvaluation` — a `Custom` (or any other) override at the KZG address is a
+            //   different implementation and falls through to the generic arm — then splits the
+            //   charge by halt reason (below), keeping the performed part on the enforcing lane and
+            //   booking the rest of the forwarded envelope — the caller-supplied `gas_limit`, not
+            //   the REX5-capped effective limit — as destroyed. The REX5 cap still prevents the
+            //   precompile from *doing* more work than the remaining compute budget; the cap gap is
+            //   part of the forwarded envelope, not work, so it belongs with the destroyed
+            //   remainder.
+            // * All other error paths (non-KZG, KZG with `limit() < GAS_COST` meaning the wrapper's
+            //   pre-check itself OOG'd before the body could run, or — REX7 only — a
+            //   non-`KzgPointEvaluation` implementation sitting at the KZG address): after the
+            //   spend_all undo above, `total_gas_spent() == 0` again. Through REX6 the parent still
             //   permanently loses the forwarded amount, so those specs record `limit()` as
             //   enforcing usage to match the EVM-gas burn. REX7 treats the same path as
             //   performed-zero / destroyed-all: no work ran, so nothing enforces, and the forwarded
@@ -400,12 +409,19 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> PrecompileProvider<MegaContext<DB,
             // generic arm's REX6 charge or drop the cap gap.
             if is_rex5_enabled {
                 let is_rex7 = context.spec.is_enabled(MegaSpecId::REX7);
+                let address_clears_kzg_gas_gate = address == kzg_point_evaluation::ADDRESS &&
+                    output.gas.limit() >= kzg_point_evaluation::GAS_COST;
+                // REX7 keys the fixed-fee arm on the dispatched identity, not just the address.
+                // Frozen specs keep the address-only match, including a Custom override of KZG.
+                let take_kzg_fixed_fee_arm = if is_rex7 {
+                    address_clears_kzg_gas_gate && is_kzg_identity
+                } else {
+                    address_clears_kzg_gas_gate
+                };
                 let mut additional_limit = context.additional_limit.borrow_mut();
                 if output.result.is_ok_or_revert() {
                     additional_limit.record_compute_gas(output.gas.total_gas_spent());
-                } else if address == kzg_point_evaluation::ADDRESS &&
-                    output.gas.limit() >= kzg_point_evaluation::GAS_COST
-                {
+                } else if take_kzg_fixed_fee_arm {
                     // Inside the KZG body the halt reason marks how much of the fixed-price work
                     // the call bought before failing. `BlobInvalidInputLength` is the doorway:
                     // the input length is checked first, so a rejected length means the
@@ -455,6 +471,10 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> PrecompileProvider<MegaContext<DB,
                     // destroyed. A precompile that can halt *after* doing work would need its
                     // own arm (as KZG has) or must express the failure as a revert, which the
                     // ok_or_revert branch above records as actual spend.
+                    //
+                    // REX7 also lands a non-`KzgPointEvaluation` override of the KZG address
+                    // here: identity keying sent it off the fixed-fee arm, and a cheap halt is
+                    // priced as performed-zero like every other generic halt.
                     additional_limit.record_burned_gas(gas_limit);
                 } else {
                     additional_limit.record_compute_gas(output.gas.limit());
@@ -1496,6 +1516,126 @@ mod tests {
         let (_, reported, destroyed) = record_kzg_failure(MegaSpecId::REX6, &inputs, GAS_COST - 1);
         assert_eq!(reported, GAS_COST - 1, "REX6 charges the forwarded limit below it");
         assert_eq!(destroyed, 0);
+    }
+
+    // ── dyn-precompile halt accounting: identity keying vs. the generic arm ──────────
+    //
+    // `with_dyn_precompiles` can sit a `PrecompileId::Custom` implementation on any address,
+    // including KZG's. Through REX6 the fixed-fee arm is address-only, so that override still
+    // walks the KZG arm. REX7 keys the arm on identity as well, so the same override falls
+    // through to the generic halt arm (executed 0, whole envelope destroyed). The probes
+    // below pin both sides of the gate, and pin a Custom halt at a non-KZG address so the
+    // generic arm's dyn-halt shape has a direct assertion — the parity matrix only covers
+    // the revert shape.
+
+    /// Address used to pin a Custom dyn-precompile halt off the KZG address.
+    const DYN_HALT_ADDRESS: Address = Address::with_last_byte(0x7f);
+
+    /// Installs a cheap-halting dynamic precompile at `address` and drives one call.
+    ///
+    /// The closure returns `OutOfGas` without doing work, so a miss of the identity key
+    /// (REX7 still taking the KZG arm) charges `GAS_COST` as executed, while the generic
+    /// arm reports the whole envelope as destroyed. `PrecompileOOG` also distinguishes the
+    /// override from the wired KZG doorway (`PrecompileError` on a short input).
+    fn record_dyn_precompile_halt(
+        spec: MegaSpecId,
+        address: Address,
+        id: PrecompileId,
+        forwarded_gas: u64,
+    ) -> (InstructionResult, u64, u64) {
+        let mut db = MemoryDatabase::default();
+        let mut context = MegaContext::new(&mut db, spec);
+        let mut precompiles_map =
+            PrecompilesMap::from_static(MegaPrecompiles::new_with_spec(spec).precompiles());
+        precompiles_map.apply_precompile(&address, move |_| {
+            Some(DynPrecompile::new(id, |input| {
+                Ok(PrecompileOutput::halt(PrecompileHalt::OutOfGas, input.reservoir))
+            }))
+        });
+        let inputs = InputsImpl {
+            target_address: address,
+            bytecode_address: Some(address),
+            caller_address: address,
+            input: revm::interpreter::CallInput::Bytes(Bytes::new()),
+            call_value: Default::default(),
+        };
+
+        let output = precompiles_map
+            .run(&mut context, &call_inputs(&inputs, address, true, forwarded_gas))
+            .expect("run ok")
+            .expect("Some output");
+        assert!(!output.result.is_ok_or_revert(), "the probe must halt; got {:?}", output.result,);
+
+        let additional = context.additional_limit.borrow();
+        (output.result, additional.get_usage().compute_gas, additional.burned_compute_gas())
+    }
+
+    /// REX7: a Custom override of the KZG address is not the wired KZG implementation, so
+    /// the fixed-fee arm must not run. The generic arm books executed 0 and destroys the
+    /// whole forwarded envelope.
+    #[test]
+    fn test_rex7_custom_override_at_kzg_address_takes_the_generic_halt_arm() {
+        let kzg = revm::precompile::kzg_point_evaluation::ADDRESS;
+        let forwarded = 1_000_000u64;
+
+        let (result, reported, destroyed) = record_dyn_precompile_halt(
+            MegaSpecId::REX7,
+            kzg,
+            PrecompileId::Custom("kzg-override-halt".into()),
+            forwarded,
+        );
+
+        assert!(
+            matches!(result, InstructionResult::PrecompileOOG),
+            "the override's cheap halt must surface as PrecompileOOG; got {result:?}",
+        );
+        assert_eq!(reported, forwarded, "reported compute is the whole forwarded envelope");
+        assert_eq!(destroyed, forwarded, "the generic arm destroys the whole envelope");
+        assert_eq!(reported - destroyed, 0, "executed work must be zero, not the KZG fixed fee");
+    }
+
+    /// Frozen pin of the same override: REX6 still keys the fixed-fee arm on address alone,
+    /// so a Custom halt at the KZG address is charged as wired KZG.
+    #[test]
+    fn test_rex6_custom_override_at_kzg_address_still_takes_the_kzg_arm() {
+        let kzg = revm::precompile::kzg_point_evaluation::ADDRESS;
+        let forwarded = 1_000_000u64;
+
+        let (result, reported, destroyed) = record_dyn_precompile_halt(
+            MegaSpecId::REX6,
+            kzg,
+            PrecompileId::Custom("kzg-override-halt".into()),
+            forwarded,
+        );
+
+        assert!(
+            matches!(result, InstructionResult::PrecompileOOG),
+            "the override's cheap halt must surface as PrecompileOOG; got {result:?}",
+        );
+        assert_eq!(reported, GAS_COST, "REX6 charges the KZG fixed fee for an address match");
+        assert_eq!(destroyed, 0, "REX6 has no destroyed lane");
+    }
+
+    /// REX7: a Custom dyn-precompile halt at a non-KZG address is the generic arm —
+    /// executed 0, whole envelope destroyed. The parity matrix only pins the revert shape.
+    #[test]
+    fn test_rex7_custom_dyn_halt_at_plain_address_takes_the_generic_halt_arm() {
+        let forwarded = 1_000_000u64;
+
+        let (result, reported, destroyed) = record_dyn_precompile_halt(
+            MegaSpecId::REX7,
+            DYN_HALT_ADDRESS,
+            PrecompileId::Custom("plain-halt".into()),
+            forwarded,
+        );
+
+        assert!(
+            matches!(result, InstructionResult::PrecompileOOG),
+            "the dyn halt must surface as PrecompileOOG; got {result:?}",
+        );
+        assert_eq!(reported, forwarded, "reported compute is the whole forwarded envelope");
+        assert_eq!(destroyed, forwarded, "the generic arm destroys the whole envelope");
+        assert_eq!(reported - destroyed, 0, "executed work must be zero");
     }
 
     // ── seam parity: the mirror must still be the upstream call ──────────────────────

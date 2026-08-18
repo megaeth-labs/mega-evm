@@ -348,6 +348,7 @@ When the agent is requested to implement a new feature or bug fix, it should con
   A precompile with a do-work-then-halt path (a future verification precompile that halts after running its check) would leave that work unenforced, so a caller could repeat the failure without the transaction- or block-level compute limits ever accounting for it.
   Express failure-after-work as a `revert` instead of a halt (the revert arm records actual spend), or give the precompile its own recording arm the way KZG does.
   Only code that compiles into the node can register a precompile, so this is a rule for future authors, not an on-chain attack surface.
+  Do not override the KZG address — or any precompile that has its own recording arm — without updating that arm to match the replacement; a substitute registered under `PrecompileId::KzgPointEvaluation` is a new precompile and must ship its own arm.
 - **Respect `no_std` in `mega-evm` crate.**
   Do not use `std::` directly.
   Follow the existing pattern: `#[cfg(not(feature = "std"))] use alloc as std;` then `use std::{vec::Vec, ...};`.
