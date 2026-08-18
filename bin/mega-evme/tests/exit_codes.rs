@@ -281,12 +281,16 @@ fn test_pre_block_beacon_root_system_call_cache_miss_is_an_rpc_failure() {
 /// from different chains. Replaying anyway would fork from a pre-state that does
 /// not precede the block, and the divergence would surface later as a receipt
 /// mismatch (exit 2) or as a silently wrong replay.
+///
+/// The parent is moved onto another chain by resealing its header, so both
+/// served headers authenticate and the run has to reach the linkage guard: a
+/// parent whose `hash` had simply been overwritten would be rejected earlier, as
+/// a header that does not hash to what it is served under, and this test would
+/// no longer cover the linkage at all.
 #[test]
 fn test_unlinked_parent_block_is_an_rpc_failure() {
-    const WRONG_PARENT: &str = "0x1111111111111111111111111111111111111111111111111111111111111111";
-
-    let (path, expected_parent) =
-        DoctoredEnvelope::with_unlinked_parent(cache(), "unlinked_parent", WRONG_PARENT);
+    let (path, served_parent, expected_parent) =
+        DoctoredEnvelope::with_unlinked_parent(cache(), "unlinked_parent");
     let cache = path.to_str().unwrap();
 
     for extra in [&[][..], &["--verify-receipt"][..]] {
@@ -306,9 +310,9 @@ fn test_unlinked_parent_block_is_an_rpc_failure() {
         assert_eq!(error["error"]["kind"].as_str(), Some("rpc-failure"));
         let message = error["error"]["message"].as_str().unwrap_or_default();
         assert!(
-            message.contains(WRONG_PARENT) && message.contains(&expected_parent),
+            message.contains(&served_parent) && message.contains(&expected_parent),
             "the message must name both hashes (parent {expected_parent}, served \
-             {WRONG_PARENT}): {error}"
+             {served_parent}): {error}"
         );
         assert!(message.contains("divergent views"), "the message must name the cause: {error}");
         assert!(

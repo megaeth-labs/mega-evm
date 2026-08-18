@@ -702,11 +702,15 @@ fn test_replay_single_transaction_null_resolved_block_is_an_rpc_failure() {
 ///
 /// Shrinks the block's advertised gas limit so admission rejects the index-1
 /// transaction (`TransactionGasLimitMoreThanAvailableBlockGas` names no hash);
-/// the index-0 deposit still fits the shrunken limit.
+/// the index-0 deposit still fits the shrunken limit. The block is resealed
+/// under the hash the shrunken header produces and every reference to its
+/// previous hash is relinked, so the rewrite reaches admission instead of being
+/// rejected as a header that does not authenticate.
 #[test]
 fn test_replay_block_hashless_abort_lands_on_the_in_flight_target() {
-    let path =
-        DoctoredEnvelope::with_block_gas_limit(envelope(), "hashless_abort", BLOCK, 200_000_000);
+    let path = DoctoredEnvelope::load(envelope())
+        .reseal_block(BLOCK, |header| header["gasLimit"] = serde_json::json!("0xbebc200"))
+        .write_to_temp("hashless_abort");
 
     let (stdout, code) =
         replay_envelope_with_code(&path, &["--block", &BLOCK.to_string(), "--json"]);
@@ -1410,13 +1414,20 @@ fn test_replay_tx_file_classifies_null_number_and_hash_as_pending() {
 }
 
 /// infrastructure failure for every target of that block (reorg / divergent views).
+///
+/// The parent is moved onto another chain by resealing its header, so both
+/// served headers still authenticate: a parent whose `hash` had simply been
+/// overwritten would be rejected at the fetch, as a header that does not hash to
+/// what it is served under, and this test would no longer reach the linkage
+/// guard at all.
 #[test]
 fn test_replay_block_rejects_mismatched_parent_hash() {
-    let wrong_parent = "0x1111111111111111111111111111111111111111111111111111111111111111";
     // Doctor the parent block (number == BLOCK - 1), not the target block.
     let env = DoctoredEnvelope::load(envelope());
     let expected_parent = env.block_hash_at(BLOCK - 1);
-    let path = env.set_block_hash(BLOCK - 1, wrong_parent).write_to_temp("parent_mismatch");
+    let env = env.reseal_block_keeping_references(BLOCK - 1, common::doctor::foreign_state_root);
+    let wrong_parent = env.block_hash_at(BLOCK - 1);
+    let path = env.write_to_temp("parent_mismatch");
 
     let (stdout, code) =
         replay_envelope_with_code(&path, &["--block", &BLOCK.to_string(), "--json"]);
@@ -1432,7 +1443,7 @@ fn test_replay_block_rejects_mismatched_parent_hash() {
         );
         let message = line["error"]["message"].as_str().unwrap_or("");
         assert!(
-            message.contains(wrong_parent) && message.contains(&expected_parent),
+            message.contains(&wrong_parent) && message.contains(&expected_parent),
             "the message must name both hashes (got parent {expected_parent}, wrong {wrong_parent}): {line}"
         );
     }

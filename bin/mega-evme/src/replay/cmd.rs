@@ -783,38 +783,16 @@ impl Cmd {
         // one view under a block environment from another. The pending path
         // therefore fetches once and uses the same block for both roles, so the
         // two roles cannot disagree at all.
-        // Both heights below come from the endpoint's own answers — the target's
-        // inclusion metadata for a mined transaction, the reported latest height
-        // for a pending one — so a null block is the endpoint contradicting
-        // itself (a reorg in progress, or a load-balanced endpoint serving
-        // divergent views), not a definitive "unknown block". `BlockNotFound`
-        // (exit 1) stays reserved for user-supplied heights, where the null is
-        // the answer; here the same context is an infrastructure failure
-        // (exit 3), matching the batch path's classification.
-        let missing_resolved_block = |number: u64| {
-            ReplayError::RpcError(format!(
-                "endpoint did not serve block {number}, which it itself resolved (the target's \
-                 inclusion metadata, or its reported latest height): the endpoint served \
-                 divergent views (reorg in progress, or a load-balanced endpoint); retry once \
-                 the chain settles"
-            ))
-        };
+        //
+        // Both heights below come from the endpoint's own answers, and both
+        // fetches go through one helper: how a null block and an unauthentic
+        // header are classified is settled there, once.
         let parent_block = if is_pending {
             None
         } else {
-            Some(
-                provider
-                    .get_block_by_number(state_base_block.into())
-                    .await
-                    .map_err(|e| ReplayError::RpcError(format!("RPC transport error: {e}")))?
-                    .ok_or_else(|| missing_resolved_block(state_base_block))?,
-            )
+            Some(fetch_resolved_block(provider, state_base_block).await?)
         };
-        let block = provider
-            .get_block_by_number(block_number.into())
-            .await
-            .map_err(|e| ReplayError::RpcError(format!("RPC transport error: {e}")))?
-            .ok_or_else(|| missing_resolved_block(block_number))?;
+        let block = fetch_resolved_block(provider, block_number).await?;
         let parent_block = parent_block.unwrap_or_else(|| block.clone());
 
         // Parent/block linkage guard: the two blocks above were fetched by
@@ -1411,6 +1389,44 @@ impl Cmd {
 /// failure (exit 3) and the verdict's own wording is the message.
 fn incoherent_endpoint(incoherence: Incoherence) -> ReplayError {
     ReplayError::RpcError(incoherence.to_string())
+}
+
+/// Fetch a block the endpoint itself resolved, and authenticate the header it
+/// serves.
+///
+/// Both heights this path fetches come from the endpoint's own answers — the
+/// target's inclusion metadata for a mined transaction, the reported latest
+/// height for a pending one — so a null block is the endpoint contradicting
+/// itself (a reorg in progress, or a load-balanced endpoint serving divergent
+/// views), not a definitive "unknown block". [`ReplayError::BlockNotFound`]
+/// (exit 1) stays reserved for user-supplied heights, where the null is the
+/// answer; here the same context is an infrastructure failure (exit 3), matching
+/// the batch path's classification.
+///
+/// The served header is authenticated against the hash it was served under
+/// before the caller reads anything out of it: the inclusion and linkage guards
+/// consume that hash, and the block environment is built from the fields beside
+/// it, so a header rewritten under its original hash would move the world the
+/// target is replayed in while passing every later guard. The check is a local
+/// recomputation, so it issues no additional request.
+async fn fetch_resolved_block<P>(provider: &P, number: u64) -> Result<Block<Transaction>>
+where
+    P: Provider<op_alloy_network::Optimism>,
+{
+    let block = provider
+        .get_block_by_number(number.into())
+        .await
+        .map_err(|e| ReplayError::RpcError(format!("RPC transport error: {e}")))?
+        .ok_or_else(|| {
+            ReplayError::RpcError(format!(
+                "endpoint did not serve block {number}, which it itself resolved (the target's \
+                 inclusion metadata, or its reported latest height): the endpoint served \
+                 divergent views (reorg in progress, or a load-balanced endpoint); retry once \
+                 the chain settles"
+            ))
+        })?;
+    coherence::authenticate_block_header(&block.header).map_err(incoherent_endpoint)?;
+    Ok(block)
 }
 
 /// Whether any trace option was set on the command line.

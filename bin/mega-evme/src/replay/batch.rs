@@ -1452,15 +1452,25 @@ where
 }
 
 /// Fetch a block by number, using the same call shape as the single-transaction path.
+///
+/// Every block this driver executes against — the replayed block and the parent
+/// it forks from — is fetched here, so the served header is authenticated here
+/// too: a header that does not hash to the hash it was served under is rejected
+/// before any guard consumes that hash and before the block environment is built
+/// from its fields. The check is a local recomputation, so it issues no
+/// additional request.
 async fn fetch_block<P>(provider: &P, number: u64) -> Result<Block<Transaction>>
 where
     P: Provider<op_alloy_network::Optimism>,
 {
-    provider
+    let block = provider
         .get_block_by_number(number.into())
         .await
         .map_err(|e| ReplayError::RpcError(format!("RPC transport error: {e}")))?
-        .ok_or(ReplayError::BlockNotFound(number))
+        .ok_or(ReplayError::BlockNotFound(number))?;
+    coherence::authenticate_block_header(&block.header)
+        .map_err(|incoherence| ReplayError::RpcError(incoherence.to_string()))?;
+    Ok(block)
 }
 
 /// Map an error raised while replaying a block onto the kind reported for the

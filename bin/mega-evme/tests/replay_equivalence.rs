@@ -1629,35 +1629,63 @@ fn doctor_transaction_gas(capture: &mut serde_json::Value) {
     assert_eq!(doctored, 1, "the capture must hold exactly one response for {BLOCK_MID_TX}");
 }
 
-/// Raise the gas limit [`BLOCK`]'s header advertises by one.
+/// Raise the pre-state balance the capture reports for [`BLOCK_MID_TX`]'s
+/// sender.
 ///
-/// Chosen because it is invisible to the replay itself — every transaction of
-/// the block still fits, so stdout does not move — and lands only in the
-/// dumped fixture's `currentGasLimit`.
-fn doctor_block_gas_limit(capture: &mut serde_json::Value) {
-    let number = format!("0x{BLOCK:x}");
+/// Chosen because the replay charges this transaction nothing — its effective
+/// gas price is zero and it transfers no value — so a larger balance cannot
+/// change the gas, the status, or the logs any renderer prints, and lands only
+/// in the dumped fixture's pre-state and in the post root computed from it.
+///
+/// The block header, which used to serve this control, is no longer available
+/// for it: the replay authenticates every header it fetches, so a rewritten
+/// header is now rejected outright, and one resealed to match moves the block
+/// hash the receipt reports.
+fn doctor_sender_balance(capture: &mut serde_json::Value) {
+    let (sender, block_number) = served_sender(capture);
+    let params = format!("[\"{sender}\",\"0x{:x}\"]", block_number - 1);
+    let key = common::doctor::cache_key("eth_getBalance", &params);
+
     let mut doctored = 0;
     for entry in capture["cache"].as_array_mut().expect("cache entries") {
-        let value = entry["value"].as_str().expect("entry value is a string");
-        if !value.contains("\"transactions\"") {
+        if entry["key"].as_str() != Some(key.as_str()) {
             continue;
         }
         let mut response: serde_json::Value =
-            serde_json::from_str(value).expect("parse block response");
-        let result = &mut response["result"];
-        if result["number"].as_str() != Some(number.as_str()) {
-            continue;
-        }
-        let limit = u64::from_str_radix(
-            result["gasLimit"].as_str().expect("gasLimit").trim_start_matches("0x"),
-            16,
-        )
-        .expect("hex gas limit");
-        result["gasLimit"] = serde_json::Value::String(format!("0x{:x}", limit + 1));
+            serde_json::from_str(entry["value"].as_str().expect("entry value is a string"))
+                .expect("parse balance response");
+        assert_eq!(
+            response["result"].as_str(),
+            Some("0x0"),
+            "the sender is expected to hold nothing, so raising the balance is a change",
+        );
+        response["result"] = serde_json::Value::String("0xde0b6b3a7640000".into());
         entry["value"] = serde_json::Value::String(response.to_string());
         doctored += 1;
     }
-    assert_eq!(doctored, 1, "the capture must hold exactly one header for block {BLOCK}");
+    assert_eq!(doctored, 1, "the capture must hold exactly one parent-block balance for {sender}");
+}
+
+/// The `(from, blockNumber)` pair the capture reports for [`BLOCK_MID_TX`],
+/// which is what its pre-state balance is keyed by.
+fn served_sender(capture: &serde_json::Value) -> (String, u64) {
+    let marker = format!("\"hash\":\"{BLOCK_MID_TX}\"");
+    let mut found = None;
+    for entry in capture["cache"].as_array().expect("cache entries") {
+        let value = entry["value"].as_str().expect("entry value is a string");
+        if !value.contains(&marker) {
+            continue;
+        }
+        let response: serde_json::Value =
+            serde_json::from_str(value).expect("parse transaction response");
+        let result = &response["result"];
+        let from = result["from"].as_str().expect("transaction `from`").to_string();
+        let number = result["blockNumber"].as_str().expect("blockNumber");
+        let number =
+            u64::from_str_radix(number.trim_start_matches("0x"), 16).expect("hex block number");
+        assert!(found.replace((from, number)).is_none(), "one response for {BLOCK_MID_TX}");
+    }
+    found.unwrap_or_else(|| panic!("the capture must hold a response for {BLOCK_MID_TX}"))
 }
 
 /// A tampered transaction body must change the snapshot.
@@ -1690,27 +1718,27 @@ fn test_negative_control_tampered_transaction_changes_the_snapshot() {
 /// A change no renderer prints must still change the snapshot, through the
 /// artifact.
 ///
-/// The second half: the doctored gas limit leaves the exit code, stdout and
-/// stderr identical, so the only thing that can catch it is the dumped fixture.
-/// Without this, dropping the artifact section from the snapshot would go
-/// unnoticed.
+/// The second half: the doctored pre-state balance leaves the exit code, stdout
+/// and stderr identical, so the only thing that can catch it is the dumped
+/// fixture. Without this, dropping the artifact section from the snapshot would
+/// go unnoticed.
 #[test]
-fn test_negative_control_tampered_block_gas_limit_changes_the_dumped_fixture() {
+fn test_negative_control_tampered_prestate_changes_the_dumped_fixture() {
     const CASE: &str = "single_block_tx_dump_json";
 
     let clean = clean_snapshot(CASE, true, row_single_block_tx_dump);
-    let doctored = doctored_snapshot(CASE, true, row_single_block_tx_dump, doctor_block_gas_limit);
+    let doctored = doctored_snapshot(CASE, true, row_single_block_tx_dump, doctor_sender_balance);
 
     let (clean_head, clean_artifact) = split_at_artifact(&clean);
     let (doctored_head, doctored_artifact) = split_at_artifact(&doctored);
     assert!(
         clean_head == doctored_head,
-        "the doctored gas limit was expected to be invisible to the renderers, but the \
+        "the doctored balance was expected to be invisible to the renderers, but the \
          reported output moved; pick another doctoring for this control",
     );
     assert!(
         clean_artifact != doctored_artifact,
-        "the doctored gas limit never reached the snapshot: the artifact section is not \
+        "the doctored balance never reached the snapshot: the artifact section is not \
          load-bearing",
     );
 

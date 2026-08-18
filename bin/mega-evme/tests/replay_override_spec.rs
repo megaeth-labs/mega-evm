@@ -44,14 +44,27 @@ const MINI_REX_TIMESTAMP: u64 = 1_764_000_000;
 const SIG_R: &str = "0xa19f0f1f52e2951452711b4f4aa5d177442c9a56abeb609b803fe2412ed24946";
 const SIG_S: &str = "0x7af21777b2e7d91c745d0077ba2726ee1bb75ccf00039a6218d64fdced768491";
 
-/// Hash of the replayed block.
-const BLOCK_HASH: &str = "0x2801837c261826beb8047e46139dfc4eb93ab5b3196ce23f312d3c7658262a62";
+/// `parentHash` of the parent block, so it is a well-formed header.
+const GRANDPARENT_HASH: &str = "0x152b00e0c659a9ea0827f7d3b7666951c100bb6a6761a90e20ed7f79099a82e1";
 
 /// Hash of the parent block, which the replay forks its state from.
-const PARENT_HASH: &str = "0xd482d481e9d11dd116ef6c41bf95ca608f159206c8f07900b1b53936d196ccb3";
+///
+/// The replay authenticates every block header it fetches against the hash the
+/// endpoint reports beside it, so the mock cannot serve an invented block hash
+/// any more than an invented transaction hash: the chain is built from the
+/// bottom up, each block sealed under the hash its own header produces. Both
+/// hashes depend on the block timestamp, which every case varies.
+fn parent_hash(timestamp: u64) -> String {
+    common::block_hash_of(&block_json(BLOCK_NUMBER - 1, GRANDPARENT_HASH, timestamp - 1, vec![]))
+}
 
-/// Hash of the grandparent, so the parent block is a well-formed header.
-const GRANDPARENT_HASH: &str = "0x152b00e0c659a9ea0827f7d3b7666951c100bb6a6761a90e20ed7f79099a82e1";
+/// Hash of the replayed block, whose header names [`parent_hash`] as its parent.
+///
+/// The transaction list is not part of the consensus header, so the hash does
+/// not depend on which body the mock serves under it.
+fn block_hash(timestamp: u64) -> String {
+    common::block_hash_of(&block_json(BLOCK_NUMBER, &parent_hash(timestamp), timestamp, vec![]))
+}
 
 /// `SequencerRegistry`, deployed pre-block from Rex5 on.
 const SEQUENCER_REGISTRY: &str = "0x6342000000000000000000000000000000000006";
@@ -123,11 +136,10 @@ impl Run {
     }
 }
 
-/// A block header the RPC backend and the replay accept, carrying only the
-/// fields either of them reads.
-fn block_json(number: u64, hash: &str, parent_hash: &str, timestamp: u64, txs: Vec<&str>) -> Value {
-    json!({
-        "hash": hash,
+/// A block header the RPC backend and the replay accept, sealed under the hash
+/// its own consensus fields produce.
+fn block_json(number: u64, parent_hash: &str, timestamp: u64, txs: Vec<&str>) -> Value {
+    common::sealed_block(json!({
         "parentHash": parent_hash,
         "number": format!("0x{number:x}"),
         "timestamp": format!("0x{timestamp:x}"),
@@ -154,7 +166,7 @@ fn block_json(number: u64, hash: &str, parent_hash: &str, timestamp: u64, txs: V
         "uncles": [],
         "withdrawals": [],
         "transactions": txs,
-    })
+    }))
 }
 
 /// The authentic identity of the replayed transaction: `(hash, from)`.
@@ -190,8 +202,9 @@ fn tx_identity(chain_id: u64, to: &str, input: &str) -> (String, String) {
     (hash, format!("{from:#x}"))
 }
 
-/// The replayed transaction: an EIP-1559 call to `to` with `input` as calldata.
-fn tx_json(chain_id: u64, to: &str, input: &str) -> Value {
+/// The replayed transaction: an EIP-1559 call to `to` with `input` as calldata,
+/// reported as included in the block the mock serves at `timestamp`.
+fn tx_json(chain_id: u64, to: &str, input: &str, timestamp: u64) -> Value {
     let (hash, from) = tx_identity(chain_id, to, input);
     json!({
         "type": "0x2",
@@ -211,7 +224,7 @@ fn tx_json(chain_id: u64, to: &str, input: &str) -> Value {
         "v": "0x0",
         "hash": hash,
         "from": from,
-        "blockHash": BLOCK_HASH,
+        "blockHash": block_hash(timestamp),
         "blockNumber": format!("0x{BLOCK_NUMBER:x}"),
         "transactionIndex": "0x0",
     })
@@ -244,7 +257,7 @@ async fn mock_chain_with_id(chain_id: u64, to: &str, input: &str, timestamp: u64
         .respond_method_params_json(
             "eth_getBlockByNumber",
             json!([format!("0x{BLOCK_NUMBER:x}"), false]),
-            block_json(BLOCK_NUMBER, BLOCK_HASH, PARENT_HASH, timestamp, vec![&tx_hash]),
+            block_json(BLOCK_NUMBER, &parent_hash(timestamp), timestamp, vec![&tx_hash]),
             2,
         )
         .await;
@@ -252,11 +265,13 @@ async fn mock_chain_with_id(chain_id: u64, to: &str, input: &str, timestamp: u64
         .respond_method_params_json(
             "eth_getBlockByNumber",
             json!([format!("0x{:x}", BLOCK_NUMBER - 1), false]),
-            block_json(BLOCK_NUMBER - 1, PARENT_HASH, GRANDPARENT_HASH, timestamp - 1, vec![]),
+            block_json(BLOCK_NUMBER - 1, GRANDPARENT_HASH, timestamp - 1, vec![]),
             2,
         )
         .await;
-    server.respond_method_json("eth_getTransactionByHash", tx_json(chain_id, to, input), 3).await;
+    server
+        .respond_method_json("eth_getTransactionByHash", tx_json(chain_id, to, input, timestamp), 3)
+        .await;
     server.respond_method_result("eth_getBalance", "0xde0b6b3a7640000", 4).await;
     server.respond_method_result("eth_getTransactionCount", "0x0", 4).await;
     server.respond_method_result("eth_getCode", "0x", 4).await;

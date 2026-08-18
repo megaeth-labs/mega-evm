@@ -17,9 +17,12 @@
 //! the undoctored control row proves the table's rejections come from the
 //! doctoring rather than from a broken capture.
 //!
-//! Driver adaptation is visible on purpose: the shared verdict is the message
-//! the batch driver reports per target, and the single-transaction driver
-//! reports the same text behind its `RPC error: ` envelope.
+//! Driver adaptation is visible on purpose: for the judgments asked once the
+//! blocks are in hand, the shared verdict is the message the batch driver
+//! reports per target, and the single-transaction driver reports the same text
+//! behind its `RPC error: ` envelope. Header authentication is asked inside each
+//! driver's block fetch instead, so both report it behind that same envelope
+//! ([`Case::shared_at_fetch`]).
 
 use std::{
     path::{Path, PathBuf},
@@ -107,6 +110,34 @@ impl Case {
             batch: Expect::Rejects { message: verdict, kind: "rpc", exit: 3 },
         }
     }
+
+    /// A case both drivers must reject at the block fetch itself.
+    ///
+    /// The judgments above are asked once the blocks are in hand, so the batch
+    /// driver reports them as the target's own message. Header authentication
+    /// instead runs inside each driver's block fetch — the one place every block
+    /// this run executes against comes from — and a failed fetch is reported
+    /// through the driver's error type, so both drivers put the same verdict
+    /// behind the same `RPC error: ` envelope.
+    fn shared_at_fetch(name: &'static str, envelope: PathBuf, verdict: String) -> Self {
+        let message = format!("RPC error: {verdict}");
+        Self {
+            name,
+            envelope,
+            single: Expect::Rejects { message: message.clone(), kind: "rpc-failure", exit: 3 },
+            batch: Expect::Rejects { message, kind: "rpc", exit: 3 },
+        }
+    }
+}
+
+/// A capture whose parent block was resealed onto another chain, and the hash
+/// the parent is now served under.
+struct UnlinkedParent {
+    /// Hash the resealed parent header produces, which the replayed block does
+    /// not name.
+    served: String,
+    /// The doctored capture.
+    envelope: PathBuf,
 }
 
 /// Build the case table, writing each doctored capture under a `prefix`-scoped
@@ -121,6 +152,16 @@ fn cases(prefix: &str) -> Vec<Case> {
     let inclusion_hash = pristine.transaction_str(TARGET, "blockHash");
     let parent_hash = pristine.block_hash_at(BLOCK - 1);
     drop(pristine);
+
+    // Resealing the parent gives it a hash the replayed block does not name, so
+    // the served hash of the linkage verdict has to be read back rather than
+    // invented.
+    let unlinked_parent = {
+        let env = DoctoredEnvelope::load(&src)
+            .reseal_block_keeping_references(BLOCK - 1, common::doctor::foreign_state_root);
+        let served = env.block_hash_at(BLOCK - 1);
+        UnlinkedParent { served, envelope: env.write_to_temp(&name("parent_linkage")) }
+    };
 
     vec![
         // Control: an untouched capture replays under both drivers, so every
@@ -191,17 +232,34 @@ fn cases(prefix: &str) -> Vec<Case> {
             ),
         ),
         // The block served at the parent height is not the parent of the block
-        // being replayed.
+        // being replayed. The parent is moved onto another chain by resealing
+        // its header, so both served headers still authenticate and the verdict
+        // is the linkage rather than the header itself.
         Case::shared(
             "parent_linkage",
+            unlinked_parent.envelope,
+            format!(
+                "parent block hash {} != block parent_hash {parent_hash}: the parent block \
+                 describes a different chain than the block being replayed (reorg in progress, \
+                 or a load-balanced endpoint serving divergent views); retry once the chain \
+                 settles",
+                unlinked_parent.served,
+            ),
+        ),
+        // The parent header is served under a hash it does not produce: the
+        // endpoint vouches for a block whose contents it has changed. Caught at
+        // the fetch, before the linkage guard reads the hash it reported.
+        Case::shared_at_fetch(
+            "unauthentic_header",
             DoctoredEnvelope::load(&src)
                 .set_block_hash(BLOCK - 1, FOREIGN_HASH)
-                .write_to_temp(&name("parent_linkage")),
+                .write_to_temp(&name("unauthentic_header")),
             format!(
-                "parent block hash {FOREIGN_HASH} != block parent_hash {parent_hash}: the parent \
-                 block describes a different chain than the block being replayed (reorg in \
-                 progress, or a load-balanced endpoint serving divergent views); retry once the \
-                 chain settles"
+                "the header served for block {} hashes to {parent_hash}, but the endpoint \
+                 reported it as {FOREIGN_HASH}: the served block header does not authenticate \
+                 (an inconsistent backend, or a tampered capture); the block environment it \
+                 describes is unverified",
+                BLOCK - 1,
             ),
         ),
         // Neither a block number nor an inclusion hash. This is the one shape
@@ -230,12 +288,13 @@ fn cases(prefix: &str) -> Vec<Case> {
 
 /// Markers that identify a shared coherence verdict in a message, used by
 /// [`Expect::NoCoherenceVerdict`] to prove no such verdict was reached.
-const COHERENCE_MARKERS: [&str; 5] = [
+const COHERENCE_MARKERS: [&str; 6] = [
     "unanchored view",
     "contradictory metadata",
     "contradictory endpoint data",
     "divergent views",
     "does not list target transaction",
+    "does not authenticate",
 ];
 
 // ---------------------------------------------------------------------------
