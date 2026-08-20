@@ -754,6 +754,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     ///
     /// DB-dependent pre-frame usage may still be recorded later during pre-execution.
     pub(crate) fn on_new_tx(&mut self) {
+        assert_cfg_spec_matches_context_spec(self.spec, self.inner.cfg.spec);
         assert_spec_owned_gas_schedule(&self.inner.cfg);
         force_amsterdam_eip8037_off(&mut self.inner.cfg);
 
@@ -975,6 +976,56 @@ fn panic_gas_schedule_mismatch(
          `CfgEnv::new_with_spec(spec)` or `cfg.set_spec_and_mainnet_gas_params(spec)` and leave \
          the schedule alone.",
         id.name(),
+    )
+}
+
+/// Panics unless `cfg_spec` is the op-spec `spec` maps to.
+///
+/// A [`MegaContext`] carries its spec twice: as the [`MegaSpecId`] on the context, and as the
+/// [`OpSpecId`] that spec maps to inside `CfgEnv`. Execution reads both, from different halves.
+/// The `MegaSpecId` selects the instruction table, the precompile set and the
+/// [`AdditionalLimit`](crate::AdditionalLimit) trackers, all baked when the EVM is built from the
+/// context; `CfgEnv::spec` is what revm's own spec gating reads while a transaction runs. The two
+/// must name the same fork, and every supported way of setting a spec writes both from a single
+/// value — the constructors derive the configuration from the `MegaSpecId` they are given, and
+/// [`MegaContext::apply_cfg`] takes the context's `MegaSpecId` from the configuration it adopts.
+///
+/// They come apart only through the mutable deref to the inner context (`ctx.modify_cfg`, or a
+/// `&mut CfgEnv` taken directly), which reaches the configuration without passing through either.
+/// Rewriting `cfg.spec` there leaves the baked halves on the context's `MegaSpecId` while revm
+/// prices the transaction under the written one — one transaction executing under two forks at
+/// once, with `MegaETH`'s wrappers, precompiles and resource limits taken from a fork revm is not
+/// pricing. Writing the schedule along with the spec (`set_spec_and_mainnet_gas_params`) leaves
+/// [`assert_spec_owned_gas_schedule`] satisfied, because the schedule then does match the spec
+/// that was written, so that check alone does not catch this.
+///
+/// Called from [`MegaContext::on_new_tx`], and checked there rather than at each entry point for
+/// the same reason [`force_amsterdam_eip8037_off`] is applied there: the point of use covers a
+/// configuration mutated in place after the context was built, which a per-entry-point check
+/// cannot. It runs ahead of [`assert_spec_owned_gas_schedule`] so that a bare `cfg.spec` write —
+/// which both checks reject — is reported as the desync it is, rather than as a schedule that
+/// could be repaired by installing the written spec's table.
+pub(crate) fn assert_cfg_spec_matches_context_spec(spec: MegaSpecId, cfg_spec: OpSpecId) {
+    if cfg_spec != spec.into_op_spec() {
+        panic_context_spec_mismatch(spec, cfg_spec);
+    }
+}
+
+/// Reports a context whose two spec fields name different forks, and panics.
+///
+/// Split out of [`assert_cfg_spec_matches_context_spec`] and marked cold for the same reason
+/// [`panic_gas_schedule_mismatch`] is: the formatting stays out of the caller's inlined fast path.
+#[cold]
+#[inline(never)]
+fn panic_context_spec_mismatch(spec: MegaSpecId, cfg_spec: OpSpecId) -> ! {
+    panic!(
+        "the configuration's spec is {cfg_spec:?}, but this context executes {spec:?}, whose \
+         op-spec is {:?}. MegaETH's spec is not a `CfgEnv` field a caller can rewrite on a live \
+         context: it also selects the instruction table, the precompiles and the resource-limit \
+         trackers, which are baked when the EVM is built, so a rewritten `CfgEnv::spec` would \
+         run one transaction under two specs at once. Change the spec by adopting a whole \
+         configuration through `MegaContext::with_cfg` (or `with_cfg_unpinned`), which sets both.",
+        spec.into_op_spec(),
     )
 }
 
@@ -1302,6 +1353,87 @@ mod tests {
         context.modify_cfg(|cfg| cfg.gas_params = custom_gas_params());
 
         context.on_new_tx();
+    }
+
+    /// The spec is pinned the same way the schedule is, and for a shape the schedule pin cannot
+    /// see: `cfg.spec` and `cfg.gas_params` rewritten together on a live context are
+    /// self-consistent, so the schedule matches the spec that was written. What no longer matches
+    /// is the context — the instruction table, the precompiles and the resource-limit trackers
+    /// stay on the `MegaSpecId` the EVM was built from, so the transaction would run under two
+    /// specs at once.
+    #[test]
+    #[should_panic(expected = "the configuration's spec is BEDROCK, but this context executes")]
+    fn test_on_new_tx_rejects_a_spec_and_schedule_mutated_together() {
+        let mut context = MegaContext::new(EmptyDB::default(), MegaSpecId::REX7);
+        context.modify_cfg(|cfg| cfg.set_spec_and_mainnet_gas_params(OpSpecId::BEDROCK));
+        // The pair is self-consistent: the schedule pin, on its own, admits this configuration.
+        assert_eq!(
+            context.inner.cfg.gas_params,
+            GasParams::new_spec(SpecId::from(OpSpecId::BEDROCK)),
+        );
+
+        context.on_new_tx();
+    }
+
+    /// A bare `cfg.spec` write desyncs the context the same way, and is rejected by the spec pin
+    /// rather than by the schedule pin it also trips: the schedule is a consequence here, and its
+    /// message would send an embedder to `set_spec_and_mainnet_gas_params`, which repairs the
+    /// schedule and leaves the desync — the shape the test above covers.
+    #[test]
+    #[should_panic(expected = "the configuration's spec is BEDROCK, but this context executes")]
+    fn test_on_new_tx_rejects_a_bare_spec_write() {
+        let mut context = MegaContext::new(EmptyDB::default(), MegaSpecId::REX7);
+        context.modify_cfg(|cfg| cfg.spec = OpSpecId::BEDROCK);
+
+        context.on_new_tx();
+    }
+
+    /// The rejection names both specs and the entry point that sets them together, so an embedder
+    /// that hits it can act on the message.
+    #[test]
+    #[should_panic(
+        expected = "this context executes REX7, whose op-spec is ISTHMUS. MegaETH's spec is not"
+    )]
+    fn test_spec_rejection_names_both_specs_and_the_supported_entry_point() {
+        let mut context = MegaContext::new(EmptyDB::default(), MegaSpecId::REX7);
+        context.modify_cfg(|cfg| cfg.set_spec_and_mainnet_gas_params(OpSpecId::BEDROCK));
+
+        context.on_new_tx();
+    }
+
+    /// The spec pin rejects desync, not any particular spec: every spec, reached by every
+    /// supported path — the constructors, both `with_cfg` entry points, and the deprecated
+    /// `new_with_context` — passes it at the point of use.
+    #[allow(deprecated)]
+    #[test]
+    fn test_every_spec_passes_the_spec_pin_on_every_construction_path() {
+        for spec in ALL_SPECS {
+            MegaContext::new(EmptyDB::default(), spec).on_new_tx();
+
+            MegaContext::<_, EmptyExternalEnv>::new_with_shared_ext_envs(
+                EmptyDB::default(),
+                spec,
+                Rc::new(EmptyExternalEnv),
+                Rc::new(RefCell::new(EmptyExternalEnv)),
+            )
+            .on_new_tx();
+
+            MegaContext::new(EmptyDB::default(), MegaSpecId::EQUIVALENCE)
+                .with_cfg(spec_cfg(spec))
+                .on_new_tx();
+
+            MegaContext::new(EmptyDB::default(), MegaSpecId::EQUIVALENCE)
+                .with_cfg_unpinned(spec_cfg(spec))
+                .on_new_tx();
+
+            // The deprecated constructor's input is a configuration on revm's default op-spec,
+            // which it relabels — so this also covers the relabel leaving the two in sync.
+            let inner: MegaInnerContext<EmptyDB> = revm::Context::op()
+                .with_tx(crate::MegaTransaction::default())
+                .with_db(EmptyDB::default());
+            MegaContext::new_with_context(inner, spec, ExternalEnvs::<EmptyExternalEnv>::default())
+                .on_new_tx();
+        }
     }
 
     /// The pin is unconditional: a configured cfg — here a blob schedule plus an explicitly
