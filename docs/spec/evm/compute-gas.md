@@ -334,21 +334,13 @@ These conditions apply on every spec; only the point at which the recording happ
 
 | Spec         | Recording point                                                                                                                                                                                    |
 | ------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Rex7+        | Conditional on the deposit: evaluated once the frame's own accounting is complete, and recorded only if the amount fits the budgets it is weighed against.                                         |
 | Rex5–Rex6    | Atomically with the deployment commit: recorded when the deployment's pre-commit success conditions hold, at the same point the EVM charges the code-deposit gas and commits the created contract. |
 | MiniRex–Rex4 | During frame-return processing, in the window covering the EVM's code-deposit charge.                                                                                                              |
 
 A node MUST NOT record this amount twice.
 
-The recording interacts with the compute-gas limit, and the three recording points then produce different outcomes:
+The recording interacts with the compute-gas limit, and the two recording points then produce different outcomes:
 
-- From Rex7, the amount is weighed before it is recorded.
-  A node MUST evaluate the frame-local and transaction-level compute budgets against the frame's usage plus this amount, and MUST NOT record the amount when either would be exceeded.
-  That evaluation MUST happen once the frame's own accounting for the exit is complete — its final segment settled and its frame-exit resource usage merged — so the amount is weighed against the frame's whole usage rather than a total still missing part of it.
-  A frame that failed on any dimension before this point never reaches the evaluation: the EVM does not charge a deposit such a frame will not make, so there is nothing to record.
-  When the amount does not fit, the frame fails as specified in [Exceed Behavior](#exceed-behavior) and the deployment commits nothing — the same outcome Rex5 and Rex6 produce — but the transaction's compute total reports only what it spent.
-  A frame-local exceed on this path MUST NOT be latched: with the amount unrecorded the transaction is within every limit, and the frames above it MAY continue.
-  A transaction-level exceed MUST be latched and MUST halt the transaction with the usual gas rescue, and MUST carry the same detention attribution it would have carried had the amount been recorded.
 - Under Rex5 and Rex6, the recording precedes the commit: the frame fails as specified in [Exceed Behavior](#exceed-behavior) and the deployment commits nothing, but the recorded amount stands — recording precedes exceed evaluation, and compute gas is never reverted.
   The amount stands on every path that fails the frame after it, not only on a compute-gas exceed.
 - Under Rex4, the only earlier spec with a per-frame budget, the recording happens after the EVM has already charged the deposit and committed the created contract.
@@ -356,6 +348,21 @@ The recording interacts with the compute-gas limit, and the three recording poin
   A node MUST NOT roll the deployment back on this path.
 
 The code-deposit _storage_ gas is charged before this window opens and therefore falls outside it, consistent with the [storage gas exclusion](#storage-gas-exclusion).
+
+<details>
+<summary>Rex7 (unstable): the code-deposit amount is weighed before it is recorded</summary>
+
+Rex7 replaces the Rex5 recording point with a conditional one: the amount is evaluated once the frame's own accounting for the exit is complete, and recorded only if it fits the budgets it is weighed against.
+The full previous/new pairing is on the [Rex7 Network Upgrade](../upgrades/rex7.md) page; the normative rules for implementers follow.
+
+A node MUST evaluate the frame-local and transaction-level compute budgets against the frame's usage plus this amount, and MUST NOT record the amount when either would be exceeded.
+That evaluation MUST happen once the frame's own accounting for the exit is complete — its final segment settled and its frame-exit resource usage merged — so the amount is weighed against the frame's whole usage rather than a total still missing part of it.
+A frame that failed on any dimension before this point never reaches the evaluation: the EVM does not charge a deposit such a frame will not make, so there is nothing to record.
+When the amount does not fit, the frame fails as specified in [Exceed Behavior](#exceed-behavior) and the deployment commits nothing — the same outcome Rex5 and Rex6 produce — but the transaction's compute total reports only what it spent.
+A frame-local exceed on this path MUST NOT be latched: with the amount unrecorded the transaction is within every limit, and the frames above it MAY continue.
+A transaction-level exceed MUST be latched and MUST halt the transaction with the usual gas rescue, and MUST carry the same detention attribution it would have carried had the amount been recorded.
+
+</details>
 
 #### Keyless Deploy Sandbox
 
@@ -749,4 +756,4 @@ System-granted gas leaks to the sender, who recovers gas that was never theirs t
 - [Rex4](../upgrades/rex4.md) — introduced the per-call-frame compute gas budget; made gas detention caps relative to usage at the access point; added beneficiary volatile-access guards to the `CALL` family, `SELFDESTRUCT`, and `SELFBALANCE`.
 - [Rex5](../upgrades/rex5.md) — excluded the `CALL_STIPEND` from the forwarded-gas deduction; moved `CREATE2` memory-expansion recording ahead of the storage-gas charge; made contract-creation code-deposit compute gas atomic with the deployment commit; refined precompile compute-gas recording and bounded it by the remaining compute budget; added the `SELFDESTRUCT` empty-beneficiary storage-gas charge; removed `CALLCODE` from the cold first-touch charge and added `SELFDESTRUCT`'s beneficiary to it; stopped following EIP-7702 delegation in the pre-execution inspection, restoring inherited warmth for delegates.
 - [Rex6](../upgrades/rex6.md) — unified the measurement window across all storage-affecting opcodes and folded `CREATE2` memory expansion into it, ending the two-window exception; returned forwarded gas to the failing frame on a compute-gas exceed; rescued the unused envelope on a keyless-deploy dispatch exceed; made beneficiary detection delegation-aware, returning `CALLCODE` call targets to the cold first-touch charge; exempted system-originated transactions from the compute gas limit and gas detention.
-- [Rex7](../upgrades/rex7.md) _(unstable)_ — settles compute gas at checkpoints rather than after every plain opcode; enforces compute and detention limits inside plain segments by clamping interpreter-visible gas so a crossing opcode does not execute; records an exceptional-halt frame's burned remainder as compute gas at frame exit; splits a failing precompile the same way at the recording site.
+- [Rex7](../upgrades/rex7.md) _(unstable)_ — settles compute gas at checkpoints rather than after every plain opcode; enforces compute and detention limits inside plain segments by clamping interpreter-visible gas so a crossing opcode does not execute; records an exceptional-halt frame's burned remainder as compute gas at frame exit; splits a failing precompile the same way at the recording site; weighs a contract creation's code-deposit compute gas against the compute budgets before recording it, rather than recording it ahead of the evaluation.
