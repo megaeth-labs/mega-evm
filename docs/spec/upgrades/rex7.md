@@ -28,6 +28,7 @@ Rex7 also makes two guard- and detention-related choices that Rex6 does not:
 
 - A `disableVolatileDataAccess` rejection still charges the rejected opcode's static fee.
 - A detention mark is produced when the target account is loaded, so a frame that cannot afford the fees charged before that load produces no mark.
+- A contract creation's code-deposit compute gas is weighed before it is recorded, so a creation that fails at its frame exit is no longer charged compute gas for a deposit it never made.
 
 Two deliberate accounting carve-outs remain.
 A frame that ends in an exceptional halt (including ordinary out-of-gas) settles its whole EVM-gas budget as compute gas, apart from storage gas it had already been charged, so a transaction that contains an inner out-of-gas call can report higher compute usage under Rex7 than under Rex6 even though EVM gas and the receipt are unchanged.
@@ -244,6 +245,28 @@ Under Rex7, a node MUST produce a beneficiary or oracle detention mark when the 
 A CALL-family opcode whose static fee or value-transfer fee exhausts the frame, and an `EXTCODECOPY` whose copy cost exhausts the frame, therefore halt without marking, and the rest of the transaction runs undetained unless some other access has already marked.
 This is specified behavior, not a replay exception.
 
+### Conditional Code-Deposit Compute Gas Recording
+
+#### Previous behavior
+
+From [Rex5](rex5.md), a node records a contract creation's code-deposit compute gas (`code_length × CODEDEPOSIT`) before the deployment is committed, so that a compute-limit exceed caused by that amount fails the frame while the deployment is still revertible.
+The amount is recorded first and the limit is evaluated afterwards, so it stays in the transaction's compute total whichever way the frame then ends.
+It stays there on every path that fails the frame after the recording, not only on a compute-gas exceed: a data-size or state-growth exceed detected as the frame exits fails the frame just as effectively, and the EVM then charges no deposit at all.
+The recorded amount is therefore compute gas that nothing spent, which both the transaction's reported total and the block's compute accounting carry.
+
+#### New behavior
+
+Under Rex7, a node MUST weigh the amount before recording it.
+
+A node MUST evaluate the frame-local and transaction-level compute budgets against the frame's usage plus the amount, and MUST record the amount only when neither budget would be exceeded.
+That evaluation MUST happen once the frame's own accounting for the exit is complete — its final segment settled and its frame-exit resource usage merged — so the amount is weighed against the frame's whole usage.
+A frame that has already failed at that point never reaches the evaluation, and nothing is recorded for it.
+
+When the amount does not fit, the outcome for the deployment is unchanged from Rex5: the frame fails as specified in [Exceed Behavior](../evm/compute-gas.md#exceed-behavior) and the deployment commits nothing.
+What changes is what the transaction reports.
+A frame-local exceed on this path MUST NOT be latched — with the amount unrecorded the transaction is within every limit, and the frames above it MAY continue.
+A transaction-level exceed MUST be latched and MUST halt the transaction with the usual gas rescue, and MUST carry the same detention attribution it would have carried had the amount been recorded.
+
 ## Developer Impact
 
 Rex7 is not scheduled on any network.
@@ -262,6 +285,9 @@ The executed half does enforce, so a contract that calls into a failing child an
 A contract that calls a precompile which then fails is on the same split: work the precompile performed still binds the remaining compute budget; the unused forwarded envelope does not.
 Under Rex6 that unused envelope was enforcing, so the same tail work can survive under Rex7 and starve under Rex6.
 
+A contract creation that fails at its frame exit reports `code_length × CODEDEPOSIT` less compute gas under Rex7 than under Rex6, and leaves that much more of the transaction's and the block's compute budget for the work that follows.
+Whether the creation succeeds, what it deploys, and the receipt it produces are unchanged.
+
 ## Safety and Compatibility
 
 Rex7 changes nothing about how blocks under earlier specs are executed.
@@ -275,6 +301,9 @@ The gas clamp is strictly tighter than Rex6's post-opcode enforcement on the ove
 Rex7 can report more compute gas than Rex6 for the same inputs on four paths: the exceptional-halt frame carve-out, which over-reports rather than under-reports; a failing precompile whose unused forwarded envelope is now reported as destroyed; a `disableVolatileDataAccess` rejection, which now includes the rejected opcode's static fee; and a failed deposit, whose rebuilt receipt is now covered by the reported total instead of leaving part of the envelope unaccounted.
 The carve-out's enforcing half is never looser than Rex6's on interpreter frames, and is stricter in exactly one shape: an ordinary out-of-gas taken with no clamp in force, whose zeroed counter leaves the whole segment measuring as executed.
 On a precompile that fails before performing work, Rex7 enforcement is deliberately looser than Rex6's: the unused envelope does not bind the compute limit.
+
+Rex7 reports less compute gas than Rex6 on one path: a contract creation that fails at its frame exit, whose code-deposit compute gas Rex6 records and Rex7 does not.
+Enforcement is looser there by the same amount, and deliberately so — the EVM charges that amount only for a deposit that happens, so enforcing it against a creation that failed would bind the compute limit with gas nobody spent.
 
 ## References
 

@@ -258,6 +258,52 @@ impl ComputeGasTracker {
     pub(crate) fn merge_persistent_usage(&mut self, amount: u64) {
         self.frame_tracker.add_tx_persistent(amount);
     }
+
+    /// Pushes a frame with an explicit budget, for tests that need a specific frame-local edge
+    /// without executing a transaction to get there.
+    #[cfg(test)]
+    pub(crate) fn push_frame_with_limit_for_test(&mut self, limit: u64) {
+        self.frame_tracker.push_frame_with_limit(limit, ());
+    }
+
+    /// [`check_limit`](TxRuntimeLimit::check_limit) evaluated as if `extra` gas had already been
+    /// recorded, without recording it.
+    ///
+    /// This is the whole verdict a caller would get by recording and then checking: the Rex4+
+    /// per-frame budget first, then the TX-level (possibly detained) limit, reported exactly as
+    /// enforcement reports them. A caller that must decide whether to make a charge at all asks
+    /// here; `check_limit` is this method at `extra = 0`, so there is no second copy of the
+    /// predicate to drift.
+    #[inline]
+    pub(crate) fn check_limit_with_extra(&self, extra: u64) -> LimitCheck {
+        if self.rex4_enabled {
+            let frame_check =
+                self.frame_tracker.would_exceed_current_frame_limit(LimitKind::ComputeGas, extra);
+            if frame_check.exceeded_limit() {
+                return frame_check;
+            }
+            // Do not early-return on frame WithinLimit:
+            // 1) pre-frame intrinsic compute gas is recorded in `tx_entry`, outside current frame
+            //    budget;
+            // 2) `detained_limit` can be lowered at runtime by volatile-data access.
+            // So TX-level detained check must still run even when frame check is within limit.
+        }
+        // TX-level detained check (all specs): total usage vs effective limit (min of tx/detained).
+        // The comparison runs on enforced usage — burned remainders are excluded — while the
+        // reported `used` is the full settled total, so a halt reason states the usage the
+        // transaction actually ends with. The two coincide on every spec before REX7.
+        let limit = self.tx_limit();
+        if self.enforced_tx_usage().saturating_add(extra) > limit {
+            LimitCheck::ExceedsLimit {
+                kind: LimitKind::ComputeGas,
+                frame_local: false,
+                limit,
+                used: self.tx_usage().saturating_add(extra),
+            }
+        } else {
+            LimitCheck::WithinLimit
+        }
+    }
 }
 
 impl TxRuntimeLimit for ComputeGasTracker {
@@ -297,32 +343,7 @@ impl TxRuntimeLimit for ComputeGasTracker {
     /// when the current frame budget is still within limit.
     #[inline]
     fn check_limit(&self) -> LimitCheck {
-        if self.rex4_enabled {
-            let frame_check = self.frame_tracker.exceeds_current_frame_limit(LimitKind::ComputeGas);
-            if frame_check.exceeded_limit() {
-                return frame_check;
-            }
-            // Do not early-return on frame WithinLimit:
-            // 1) pre-frame intrinsic compute gas is recorded in `tx_entry`, outside current frame
-            //    budget;
-            // 2) `detained_limit` can be lowered at runtime by volatile-data access.
-            // So TX-level detained check must still run even when frame check is within limit.
-        }
-        // TX-level detained check (all specs): total usage vs effective limit (min of tx/detained).
-        // The comparison runs on enforced usage — burned remainders are excluded — while the
-        // reported `used` is the full settled total, so a halt reason states the usage the
-        // transaction actually ends with. The two coincide on every spec before REX7.
-        let limit = self.tx_limit();
-        if self.enforced_tx_usage() > limit {
-            LimitCheck::ExceedsLimit {
-                kind: LimitKind::ComputeGas,
-                frame_local: false,
-                limit,
-                used: self.tx_usage(),
-            }
-        } else {
-            LimitCheck::WithinLimit
-        }
+        self.check_limit_with_extra(0)
     }
 
     #[inline]

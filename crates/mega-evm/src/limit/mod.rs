@@ -66,7 +66,7 @@ impl LimitKind {
 /// see [`crate::is_system_originated`]). The `Exempt` state is **sticky**: once `AdditionalLimit`
 /// stores it in `has_exceeded_limit`, `check_limit` short-circuits and the sub-tracker checks
 /// are skipped, so no later overflow can overwrite it.
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum LimitCheck {
     /// All limits are within their configured thresholds.
     #[default]

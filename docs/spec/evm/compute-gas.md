@@ -334,14 +334,23 @@ These conditions apply on every spec; only the point at which the recording happ
 
 | Spec         | Recording point                                                                                                                                                                                    |
 | ------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Rex5+        | Atomically with the deployment commit: recorded when the deployment's pre-commit success conditions hold, at the same point the EVM charges the code-deposit gas and commits the created contract. |
+| Rex7+        | Conditional on the deposit: evaluated once the frame's own accounting is complete, and recorded only if the amount fits the budgets it is weighed against.                                         |
+| Rex5–Rex6    | Atomically with the deployment commit: recorded when the deployment's pre-commit success conditions hold, at the same point the EVM charges the code-deposit gas and commits the created contract. |
 | MiniRex–Rex4 | During frame-return processing, in the window covering the EVM's code-deposit charge.                                                                                                              |
 
 A node MUST NOT record this amount twice.
 
-The recording itself can latch a compute-gas exceed, and the two recording points then produce different deployment outcomes:
+The recording interacts with the compute-gas limit, and the three recording points then produce different outcomes:
 
-- From Rex5, the recording precedes the commit: the frame fails as specified in [Exceed Behavior](#exceed-behavior) and the deployment commits nothing, but the recorded amount stands — recording precedes exceed evaluation, and compute gas is never reverted.
+- From Rex7, the amount is weighed before it is recorded.
+  A node MUST evaluate the frame-local and transaction-level compute budgets against the frame's usage plus this amount, and MUST NOT record the amount when either would be exceeded.
+  That evaluation MUST happen once the frame's own accounting for the exit is complete — its final segment settled and its frame-exit resource usage merged — so the amount is weighed against the frame's whole usage rather than a total still missing part of it.
+  A frame that failed on any dimension before this point never reaches the evaluation: the EVM does not charge a deposit such a frame will not make, so there is nothing to record.
+  When the amount does not fit, the frame fails as specified in [Exceed Behavior](#exceed-behavior) and the deployment commits nothing — the same outcome Rex5 and Rex6 produce — but the transaction's compute total reports only what it spent.
+  A frame-local exceed on this path MUST NOT be latched: with the amount unrecorded the transaction is within every limit, and the frames above it MAY continue.
+  A transaction-level exceed MUST be latched and MUST halt the transaction with the usual gas rescue, and MUST carry the same detention attribution it would have carried had the amount been recorded.
+- Under Rex5 and Rex6, the recording precedes the commit: the frame fails as specified in [Exceed Behavior](#exceed-behavior) and the deployment commits nothing, but the recorded amount stands — recording precedes exceed evaluation, and compute gas is never reverted.
+  The amount stands on every path that fails the frame after it, not only on a compute-gas exceed.
 - Under Rex4, the only earlier spec with a per-frame budget, the recording happens after the EVM has already charged the deposit and committed the created contract.
   A frame-budget exceed latched by this recording therefore produces a split outcome: the frame's result is the frame-local revert, while the deployed code remains committed.
   A node MUST NOT roll the deployment back on this path.

@@ -1236,6 +1236,71 @@ impl AdditionalLimit {
         }
     }
 
+    /// The verdict [`record_compute_gas`](Self::record_compute_gas) would reach for `charge`,
+    /// without recording it and without latching anything.
+    ///
+    /// Recording and then reacting is the right shape for work that has already happened: the gas
+    /// was spent whatever the verdict says. It is the wrong shape for a charge that is still
+    /// conditional — one the EVM only takes if the frame survives — because a charge skipped after
+    /// being recorded leaves compute gas in the tracker that nothing ever spent. Such a caller asks
+    /// here first and records only on the answer that lets the charge happen.
+    ///
+    /// The verdict is produced by the same predicate enforcement uses, evaluated at `charge` more
+    /// usage, so there is no gap between what this reports and what recording would produce.
+    #[inline]
+    pub(crate) fn would_exceed_compute_gas(&self, charge: u64) -> LimitCheck {
+        // Sticky short-circuit, mirroring `record_compute_gas`: an already-latched `ExceedsLimit`
+        // is what the caller would observe, and `Exempt` suppresses the decision entirely.
+        if !self.has_exceeded_limit.within_limit() {
+            return self.has_exceeded_limit;
+        }
+        self.compute_gas.check_limit_with_extra(charge)
+    }
+
+    /// Records the canonical code-deposit compute gas of a CREATE frame that is about to deposit
+    /// its code, or reports the result rewrite that stops the deposit from happening (REX7+).
+    ///
+    /// `charge` is the gas revm charges the frame for the deposit, and it is charged only if the
+    /// frame's result is still successful when the action is processed. So the decision has to be
+    /// made here, ahead of that: recording it and marking the result afterwards would leave the
+    /// tracker holding compute gas for a deposit that then never happened.
+    ///
+    /// Returns `Some((result, output))` when the charge cannot be afforded, for the caller to write
+    /// onto the frame's result:
+    ///
+    /// - a frame-local exceed reverts the frame and is settled here — nothing is recorded and
+    ///   nothing is latched, because with the charge not made the transaction is within its limits
+    ///   and the frames above are free to continue;
+    /// - a TX-level exceed is latched, which is what the transaction halts and rescues its gas on,
+    ///   exactly as it would have had the charge been recorded.
+    ///
+    /// Returns `None` when the charge fits, having recorded it.
+    pub(crate) fn settle_create_code_deposit_compute_gas(
+        &mut self,
+        charge: u64,
+    ) -> Option<(InstructionResult, Bytes)> {
+        let check = self.would_exceed_compute_gas(charge);
+        if !check.exceeded_limit() {
+            let recorded = self.record_compute_gas(charge);
+            debug_assert!(recorded, "the peek and the record must reach the same verdict");
+            return None;
+        }
+
+        let output = check.revert_data();
+        if check.is_frame_local() {
+            return Some((InstructionResult::Revert, output));
+        }
+
+        self.has_exceeded_limit = check;
+        // Preserve the volatile-detention attribution the recorded path would have produced: with
+        // nothing recorded, usage stays at or below the detained limit, so `is_detained_exceed`
+        // cannot see that detention is what the charge ran into.
+        self.checkpoint.set_latched_detained(
+            self.compute_gas.detained_limit() < self.compute_gas.base_tx_limit(),
+        );
+        Some((Self::EXCEEDING_LIMIT_INSTRUCTION_RESULT, output))
+    }
+
     /// Hook called when returning a frame result to parent frame in `frame_return_result` or
     /// `last_frame_result`. May modify the frame result in place if the limit is exceeded.
     pub(crate) fn before_frame_return_result<const LAST_FRAME: bool>(
@@ -1912,6 +1977,95 @@ mod tests {
             limit.detained_compute_gas_halt_reason(VolatileDataAccess::TIMESTAMP).is_none(),
             "TX2 must not inherit TX1's VolatileDataAccessOutOfGas attribution"
         );
+    }
+
+    /// The peek must reach exactly the verdict recording would have produced. Recording the
+    /// charge and then checking, versus asking first, are compared on the same tracker state
+    /// across the whole knife edge — the one place a second copy of `used > limit` could drift
+    /// from the copy enforcement runs.
+    #[test]
+    fn test_peek_matches_record_then_check_across_the_edge() {
+        const FRAME_BUDGET: u64 = 1_000;
+        for charge in 0..=(FRAME_BUDGET + 2) {
+            let mut peeked = rex7_limit();
+            peeked.compute_gas.push_frame_with_limit_for_test(FRAME_BUDGET);
+            let mut recorded = rex7_limit();
+            recorded.compute_gas.push_frame_with_limit_for_test(FRAME_BUDGET);
+
+            let peek = peeked.would_exceed_compute_gas(charge);
+            let within = recorded.record_compute_gas(charge);
+
+            assert_eq!(
+                peek.exceeded_limit(),
+                !within,
+                "charge {charge}: the peek and the record must agree on the verdict",
+            );
+            assert_eq!(
+                peek, recorded.has_exceeded_limit,
+                "charge {charge}: the peek must report what the record latched",
+            );
+        }
+    }
+
+    /// The frame-local arm of the code-deposit settlement reverts the frame without touching the
+    /// tracker: nothing recorded, nothing latched. Both matter — a recorded charge would be
+    /// compute gas the deposit never spent, and a latched exceed would outlive the frame that is
+    /// already being reverted for it.
+    #[test]
+    fn test_create_code_deposit_frame_local_arm_records_and_latches_nothing() {
+        let mut limit = rex7_limit();
+        limit.compute_gas.push_frame_with_limit_for_test(100);
+        let before = limit.get_usage().compute_gas;
+
+        let rewrite = limit.settle_create_code_deposit_compute_gas(101);
+
+        let (result, output) = rewrite.expect("an unaffordable charge must rewrite the result");
+        assert_eq!(result, InstructionResult::Revert, "a frame-local exceed reverts the frame");
+        assert!(!output.is_empty(), "the revert must carry the MegaLimitExceeded payload");
+        assert_eq!(limit.get_usage().compute_gas, before, "the charge must not be recorded");
+        assert_eq!(latched_kind(&limit), None, "the frame-local arm must not latch");
+    }
+
+    /// The TX-level arm latches instead, which is what the transaction halts and rescues its gas
+    /// on — but still records nothing. With nothing recorded, usage stays under the detained
+    /// limit, so the halt can only keep blaming detention through the latched flag.
+    #[test]
+    fn test_create_code_deposit_tx_level_arm_latches_detention_without_recording() {
+        let mut limit = rex7_limit();
+        // A frame budget far above the charge, so the transaction limit is what binds.
+        limit.compute_gas.push_frame_with_limit_for_test(u64::MAX);
+        limit.set_compute_gas_limit(10);
+        let before = limit.get_usage().compute_gas;
+
+        let rewrite = limit.settle_create_code_deposit_compute_gas(11);
+
+        let (result, _) = rewrite.expect("an unaffordable charge must rewrite the result");
+        assert_eq!(
+            result,
+            AdditionalLimit::EXCEEDING_LIMIT_INSTRUCTION_RESULT,
+            "a TX-level exceed halts the transaction",
+        );
+        assert_eq!(limit.get_usage().compute_gas, before, "the charge must not be recorded");
+        assert_eq!(latched_kind(&limit), Some(LimitKind::ComputeGas), "the TX-level arm latches");
+        assert!(
+            limit.detained_compute_gas_halt_reason(VolatileDataAccess::empty()).is_some(),
+            "the halt must still be attributable to detention",
+        );
+    }
+
+    /// An affordable charge is recorded like any other work and leaves the result alone.
+    #[test]
+    fn test_create_code_deposit_affordable_charge_is_recorded() {
+        let mut limit = rex7_limit();
+        limit.compute_gas.push_frame_with_limit_for_test(100);
+        let before = limit.get_usage().compute_gas;
+
+        assert!(
+            limit.settle_create_code_deposit_compute_gas(100).is_none(),
+            "an affordable charge must not rewrite the result",
+        );
+        assert_eq!(limit.get_usage().compute_gas, before + 100, "an affordable charge is recorded",);
+        assert_eq!(latched_kind(&limit), None, "an affordable charge must not latch");
     }
 
     /// `mark_frame_result_as_exceeding_limit` rewrites both frame-result variants in place.

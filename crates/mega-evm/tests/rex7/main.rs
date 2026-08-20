@@ -8,6 +8,9 @@
 //!   and the ABI payload / halt fields a clamp-induced exceed reports.
 //! - `checkpoint_families` — one parity case per checkpoint opcode the REX7 table wires, so the set
 //!   is covered exhaustively rather than through representatives.
+//! - `create_code_deposit_charge` — a CREATE's canonical code-deposit compute gas is weighed before
+//!   it is recorded, so a creation that fails at its frame exit is charged nothing for a deposit
+//!   the EVM never makes.
 //! - `interceptor_resume` — the two ways a CALL returns without a child frame ever running: a
 //!   system contract interceptor's synthetic result, and a precompile.
 //! - `keyless_synthetic_halt` — the `KeylessDeploy` interceptor's synthetic halts: the two that
@@ -58,6 +61,7 @@ mod checkpoint_static_fee_edges;
 mod clamp_classification;
 mod common;
 mod conservation_terms;
+mod create_code_deposit_charge;
 mod deposit_receipt_rewrite;
 mod detention_window;
 mod double_exceed_corner;

@@ -482,6 +482,7 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
             return Ok(());
         }
         let is_rex5 = ctx.spec.is_enabled(MegaSpecId::REX5);
+        let is_rex7 = ctx.spec.is_enabled(MegaSpecId::REX7);
 
         if let InterpreterAction::Return(interpreter_result) = action {
             // REX7: hand any clamp-hidden gas back to the result and latch a clamp-induced
@@ -506,21 +507,14 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
                 }
             }
 
-            // REX5+: pre-charge canonical code-deposit compute gas before
+            // REX5/REX6: pre-charge canonical code-deposit compute gas before
             // process_next_action commits the CREATE checkpoint. Skip when
             // revm's return_create would not charge it; the existing
             // limit-side hook below owns the result-marking on exceed.
-            if is_rex5 && frame.data.is_create() {
-                let cfg = ctx.cfg();
-                if will_return_create_charge_code_deposit(
-                    interpreter_result,
-                    cfg.max_code_size(),
-                    cfg.spec().into_eth_spec(),
-                    cfg.is_eip3541_disabled(),
-                ) {
-                    let code_len = interpreter_result.output.len() as u64;
-                    let canonical_code_deposit_gas =
-                        code_len.saturating_mul(revm::interpreter::gas::CODEDEPOSIT);
+            if is_rex5 && !is_rex7 && frame.data.is_create() {
+                if let Some(canonical_code_deposit_gas) =
+                    canonical_code_deposit_gas(ctx, interpreter_result)
+                {
                     let _ = ctx
                         .additional_limit
                         .borrow_mut()
@@ -532,14 +526,41 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
         // Update additional limits. MiniRex is guaranteed to be enabled here.
         ctx.additional_limit.borrow_mut().after_frame_run_instructions(frame, action);
 
+        // REX7: settle the same canonical code-deposit charge, after the hook above has closed the
+        // frame's tail segment, merged this frame's non-compute usage and marked the result if any
+        // of that put the frame over a limit. Two things follow from settling here rather than
+        // ahead of the hook. The charge is weighed against the frame's complete usage instead of a
+        // total still missing its tail. And a frame the hook already failed is skipped, because the
+        // marked result fails the deposit predicate — which is the point: revm only charges the
+        // deposit on a result that is still successful when the action is processed, so a charge
+        // recorded for a frame that ends any other way is compute gas nothing ever spent.
+        if is_rex7 {
+            if let InterpreterAction::Return(interpreter_result) = action {
+                if frame.data.is_create() {
+                    if let Some(canonical_code_deposit_gas) =
+                        canonical_code_deposit_gas(ctx, interpreter_result)
+                    {
+                        let rewrite = ctx
+                            .additional_limit
+                            .borrow_mut()
+                            .settle_create_code_deposit_compute_gas(canonical_code_deposit_gas);
+                        if let Some((result, output)) = rewrite {
+                            interpreter_result.result = result;
+                            interpreter_result.output = output;
+                        }
+                    }
+                }
+            }
+        }
+
         Ok(())
     }
 
     /// Apply `MiniRex` additional limits after frame action processing.
     ///
-    /// Under REX5+ for CREATE results, the code-deposit compute gas was
-    /// already pre-charged in [`after_frame_run_instructions`]; pass
-    /// `None` here so the post-action hook does not double-record.
+    /// Under REX5+ for CREATE results, the code-deposit compute gas was already settled in
+    /// [`after_frame_run_instructions`]; pass `None` here so the post-action hook does not
+    /// re-record what that settlement recorded, or record what it deliberately did not.
     #[inline]
     fn after_frame_run(
         ctx: &MegaContext<DB, ExtEnvs>,
@@ -552,8 +573,8 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
         let is_rex5 = ctx.spec.is_enabled(MegaSpecId::REX5);
 
         if let ItemOrResult::Result(frame_result) = frame_output {
-            // REX5+: code-deposit compute gas for CREATE results was already
-            // pre-charged. Skip post-action recording so we don't double-count.
+            // REX5+: code-deposit compute gas for CREATE results was already settled at the
+            // frame's exit. Skip post-action recording so we don't double-count.
             let pass_through = if is_rex5 && matches!(frame_result, FrameResult::Create(_)) {
                 None
             } else {
@@ -564,6 +585,25 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
 
         Ok(())
     }
+}
+
+/// The canonical code-deposit compute gas revm will charge a CREATE frame, or `None` when
+/// `return_create` would not charge it at all.
+#[inline]
+fn canonical_code_deposit_gas<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    ctx: &MegaContext<DB, ExtEnvs>,
+    interpreter_result: &InterpreterResult,
+) -> Option<u64> {
+    let cfg = ctx.cfg();
+    will_return_create_charge_code_deposit(
+        interpreter_result,
+        cfg.max_code_size(),
+        cfg.spec().into_eth_spec(),
+        cfg.is_eip3541_disabled(),
+    )
+    .then(|| {
+        (interpreter_result.output.len() as u64).saturating_mul(revm::interpreter::gas::CODEDEPOSIT)
+    })
 }
 
 /// Mirrors `revm_handler::frame::return_create`'s pre-commit predicate.

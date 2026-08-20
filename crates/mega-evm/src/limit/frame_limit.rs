@@ -223,12 +223,29 @@ impl<I> FrameLimitTracker<I> {
     /// Returns whether the current frame has exceeded its frame-local limit.
     /// If exceeded, `frame_local` is always `true` since this checks per-frame budgets.
     pub(crate) fn exceeds_current_frame_limit(&self, kind: LimitKind) -> LimitCheck {
+        self.would_exceed_current_frame_limit(kind, 0)
+    }
+
+    /// [`exceeds_current_frame_limit`](Self::exceeds_current_frame_limit) evaluated as if `extra`
+    /// had already been added to the current frame's usage, without adding it.
+    ///
+    /// A caller that must decide whether to make a charge at all — rather than make it and react
+    /// to the verdict — asks here. The two share one predicate on purpose: a separate copy of
+    /// `used - refund > limit` would be free to drift from the one enforcement actually uses.
+    pub(crate) fn would_exceed_current_frame_limit(
+        &self,
+        kind: LimitKind,
+        extra: u64,
+    ) -> LimitCheck {
         match self.frame_stack.last() {
-            Some(entry) if entry.used().saturating_sub(entry.refund) > entry.limit => {
+            Some(entry)
+                if entry.used().saturating_add(extra).saturating_sub(entry.refund) >
+                    entry.limit =>
+            {
                 LimitCheck::ExceedsLimit {
                     kind,
                     limit: entry.limit,
-                    used: entry.used(),
+                    used: entry.used().saturating_add(extra),
                     frame_local: true,
                 }
             }
