@@ -327,6 +327,12 @@ When the agent is requested to implement a new feature or bug fix, it should con
   Never change what an existing stable spec does.
 - **System contract changes require a new spec.**
   Do not modify system contract Solidity sources or their Rust integration without also introducing a new spec for backward compatibility.
+- **The gas schedule belongs to the spec, not to `CfgEnv`.**
+  revm 40 made every operation's price a `CfgEnv.gas_params` table an embedder can rewrite, but several `MegaETH` accounting sites carry the schedule's values as constants (the `CALL_STIPEND` a value-transferring call mints, the pre-`REX7` per-byte code-deposit rate, the mainnet table the keyless-deploy preflight estimates intrinsic gas from).
+  A configuration whose `gas_params` is not exactly `GasParams::new_spec(SpecId::from(cfg.spec))` is therefore rejected with a panic rather than executed, at both `with_cfg` entry points, at the deprecated `new_with_context`, and again at the point of use before every transaction — so a configuration mutated in place after the context was built is caught too.
+  The check is unconditional across specs: it governs the configuration domain, which no historical block covers.
+  Build configurations with `CfgEnv::new_with_spec(spec)` or `cfg.set_spec_and_mainnet_gas_params(spec)`; do not add a way to opt out, and do not add a tool-only bypass.
+  New code that needs one of the schedule's values may read it from `cfg().gas_params()` or restate the constant — under the pin the two are equal, and reading the table is the preferred form for unfrozen specs.
 - **Override `HardforkParams::validate()` for every new params type.**
   The default implementation accepts any value silently.
   Override it with field-level invariant checks (e.g., non-zero addresses) so that `with_params()` panics loudly at chain-config load time rather than allowing the error to surface at the first block where the fork activates.

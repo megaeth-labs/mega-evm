@@ -17,14 +17,22 @@
 //!
 //! These tests pin the four rows of that decision, the frozen REX4-REX6 shapes they must not
 //! disturb, and the journal consistency that the early decision exists for in the first place.
+//!
+//! One shape that used to be pinned here is gone: a knife-edge CREATE holding exactly revm's
+//! built-in per-byte charge under a schedule that charged more, which separated a predicate
+//! reading the active schedule from one reading the constant. That fork needed a configuration
+//! carrying a gas schedule other than its spec's, and such a configuration is now rejected at
+//! every entry point into the EVM rather than run, so the two readings can no longer disagree on
+//! any input. What survives here is the pair that is still decidable: installing the built-in
+//! rate explicitly changes nothing, and installing anything else is turned away.
 
 use crate::common::{default_envs, finish, transact_tx, Outcome, CALLER, ONE_ETH};
 use alloy_primitives::{Address, Bytes, TxKind, U256};
 use alloy_sol_types::SolError as _;
 use mega_evm::{
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    EthHaltReason, EvmTxRuntimeLimits, LimitKind, MegaContext, MegaEvm, MegaHaltReason,
-    MegaLimitExceeded, MegaSpecId, MegaTransaction, MegaTransactionNew as _, OpHaltReason,
+    EvmTxRuntimeLimits, LimitKind, MegaContext, MegaEvm, MegaHaltReason, MegaLimitExceeded,
+    MegaSpecId, MegaTransaction, MegaTransactionNew as _,
 };
 use revm::{
     bytecode::opcode::{MSTORE, POP, RETURN, TIMESTAMP},
@@ -425,20 +433,17 @@ fn test_frozen_specs_keep_their_create_journal_shapes() {
     }
 }
 
-/// The per-byte code-deposit rate the override cases install, one gas above revm's built-in
-/// [`CODEDEPOSIT`]. Any value that differs would do; one gas apart keeps the arithmetic below
-/// legible and makes the gap between the two readings exactly [`RUNTIME_LEN`].
+/// A per-byte code-deposit rate one gas above revm's built-in [`CODEDEPOSIT`] — the smallest
+/// deviation from the schedule `REX7` defines, and one no configuration may carry.
 const OVERRIDDEN_CODEDEPOSIT: u64 = CODEDEPOSIT + 1;
-
-/// The code-deposit charge for [`RUNTIME_LEN`] bytes under the overridden schedule.
-const OVERRIDDEN_CODE_DEPOSIT_GAS: u64 = RUNTIME_LEN * OVERRIDDEN_CODEDEPOSIT;
 
 /// Runs [`return_zeros_initcode`] as a REX7 creation transaction with `gas_limit`, under a
 /// configuration whose gas schedule charges `rate` gas per deployed byte.
 ///
-/// An embedder-installed gas schedule is a supported configuration, and revm's create-return reads
-/// the code-deposit rate off it. The shared helpers all run the default schedule, so this builds
-/// the context itself — everything else about the transaction matches [`create`].
+/// The shared helpers all take the context's default configuration, so this builds the context
+/// itself — everything else about the transaction matches [`create`]. A `rate` other than the
+/// one `REX7`'s schedule defines makes the configuration inadmissible, and `with_cfg` panics
+/// before any transaction runs.
 fn create_at_rate(rate: u64, gas_limit: u64) -> Outcome {
     let mut db = MemoryDatabase::default().account_balance(CALLER, U256::from(10 * ONE_ETH));
     let mut cfg = CfgEnv::new_with_spec(MegaSpecId::REX7);
@@ -482,132 +487,37 @@ fn create_at_rate(rate: u64, gas_limit: u64) -> Outcome {
     )
 }
 
-/// The charge REX7 records is the one the active gas schedule defines, not revm's built-in rate.
-///
-/// revm's create-return debits `gas_params().code_deposit_cost(len)`, and an embedder may have
-/// installed a schedule where that is not `len * CODEDEPOSIT`. Reading the constant instead would
-/// record a charge that differs from the one debited on every successful CREATE — a standing break
-/// of the conservation law the reported compute total is derived from, which is what
-/// [`crate::common::finish`] checks on every transaction these helpers run.
+/// Installing a rate explicitly is not itself a deviation: a schedule that names revm's built-in
+/// per-byte rate is the schedule `REX7` defines, is admitted, and measures exactly what the
+/// shared helper measures on the default configuration.
 #[test]
-fn test_create_code_deposit_charge_follows_the_active_gas_schedule() {
-    let default_rate = create_at_rate(CODEDEPOSIT, TX_GAS_LIMIT);
+fn test_installing_the_built_in_code_deposit_rate_changes_nothing() {
+    let explicit = create_at_rate(CODEDEPOSIT, TX_GAS_LIMIT);
+
+    assert!(explicit.is_success(), "the explicit-rate run must deploy: {:?}", explicit.result);
     assert!(
-        default_rate.is_success(),
-        "the default-schedule run must deploy: {:?}",
-        default_rate.result,
+        has_deployed_code(&explicit.state, deployed_address()),
+        "the explicit-rate run must leave code behind",
     );
     assert_eq!(
-        default_rate.compute_gas,
+        explicit.compute_gas,
         calibrate(MegaSpecId::REX7).compute_gas,
-        "installing the built-in rate explicitly must not change what the shared helper measures",
+        "naming the built-in rate must not change what the shared helper measures",
     );
-
-    let overridden = create_at_rate(OVERRIDDEN_CODEDEPOSIT, TX_GAS_LIMIT);
-    assert!(
-        overridden.is_success(),
-        "the overridden-schedule run must deploy too: {:?}",
-        overridden.result,
-    );
-    assert!(
-        has_deployed_code(&overridden.state, deployed_address()),
-        "the overridden-schedule run must leave code behind",
-    );
-
-    // The whole difference between the two runs is the deposit charge, and it moved by exactly the
-    // rate difference — so the recorded amount tracks the schedule rather than the constant.
+    assert_eq!(explicit.destroyed, 0, "a successful CREATE destroys nothing");
     assert_eq!(
-        overridden.compute_gas,
-        default_rate.compute_gas + OVERRIDDEN_CODE_DEPOSIT_GAS - CODE_DEPOSIT_GAS,
-        "the recorded charge must follow the schedule (default={}, overridden={})",
-        default_rate.compute_gas,
-        overridden.compute_gas,
-    );
-    assert_eq!(
-        overridden.gas_used,
-        default_rate.gas_used + OVERRIDDEN_CODE_DEPOSIT_GAS - CODE_DEPOSIT_GAS,
-        "the receipt moved by the same amount, which is what the recorded charge has to match",
-    );
-
-    // Nothing was destroyed, so the whole reported total enforces — and the terminal identity
-    // already checked that it accounts for the receipt envelope.
-    assert_eq!(overridden.destroyed, 0, "a successful CREATE destroys nothing");
-    assert_eq!(
-        overridden.enforced(),
-        overridden.compute_gas,
+        explicit.enforced(),
+        explicit.compute_gas,
         "the whole reported total enforces when nothing is destroyed",
     );
 }
 
-/// The knife edge the constant would fall off: a frame holding exactly the built-in rate's charge
-/// under a schedule that charges more.
-///
-/// `return_create` weighs the deposit against the schedule and takes the frame out of gas. A
-/// predicate reading the constant would answer "affordable", record a charge nobody is ever
-/// debited, and leave the deposit rejected anyway — the phantom accounting this decision exists to
-/// prevent. Reading the schedule answers "unaffordable": nothing is recorded, and the remainder the
-/// rejected frame never spends is settled as destroyed like any other exceptional halt's.
+/// A schedule that charges a different per-byte rate never runs. `MegaETH`'s gas schedule is
+/// defined by the spec, and a configuration carrying any other one is rejected where it enters
+/// rather than executed — which is what keeps the charge revm debits at the create-return equal
+/// to the one the tracker weighed and recorded a step earlier.
 #[test]
-fn test_create_code_deposit_knife_edge_under_an_overridden_schedule() {
-    // A gas limit equal to what the unconstrained run spends leaves the frame exactly the
-    // schedule's charge at the deposit; one deployed byte's worth less leaves it exactly the
-    // built-in rate's charge, which is the point being tested.
-    let unconstrained = create_at_rate(OVERRIDDEN_CODEDEPOSIT, TX_GAS_LIMIT);
-    assert!(unconstrained.is_success(), "{:?}", unconstrained.result);
-    let exactly_affordable_gas_limit = unconstrained.total_gas_spent;
-
-    let exact = create_at_rate(OVERRIDDEN_CODEDEPOSIT, exactly_affordable_gas_limit);
-    assert!(
-        exact.is_success(),
-        "a frame holding exactly the schedule's charge must deposit: {:?}",
-        exact.result,
-    );
-    assert!(
-        has_deployed_code(&exact.state, deployed_address()),
-        "the exactly-affordable CREATE must leave code behind",
-    );
-    assert_eq!(
-        exact.compute_gas, unconstrained.compute_gas,
-        "the gas limit is not part of the work; only the room left over changed",
-    );
-
-    let knife = create_at_rate(
-        OVERRIDDEN_CODEDEPOSIT,
-        exactly_affordable_gas_limit - (OVERRIDDEN_CODE_DEPOSIT_GAS - CODE_DEPOSIT_GAS),
-    );
-    assert!(
-        matches!(
-            knife.result,
-            ExecutionResult::Halt {
-                reason: MegaHaltReason::Base(OpHaltReason::Base(EthHaltReason::OutOfGas(_))),
-                ..
-            }
-        ),
-        "a frame holding only the built-in rate's charge must be taken out of gas by the \
-         create-return: {:?}",
-        knife.result,
-    );
-    assert!(
-        !has_deployed_code(&knife.state, deployed_address()),
-        "the rejected CREATE must leave no code behind",
-    );
-
-    // The deposit was not recorded: what the constant would have called affordable is exactly what
-    // the halted frame destroyed instead.
-    assert_eq!(
-        knife.destroyed, CODE_DEPOSIT_GAS,
-        "the frame's whole remainder — the built-in rate's charge — must settle as destroyed",
-    );
-    assert_eq!(
-        knife.booked_destroyed, knife.destroyed,
-        "the per-site booking must agree with the derived destroyed total",
-    );
-    assert_eq!(
-        knife.enforced() + OVERRIDDEN_CODE_DEPOSIT_GAS,
-        exact.compute_gas,
-        "the enforced lane must hold the frame's work and none of the deposit (enforced={}, \
-         successful total={})",
-        knife.enforced(),
-        exact.compute_gas,
-    );
+#[should_panic(expected = "gas params differ from the spec-defined schedule")]
+fn test_a_code_deposit_rate_off_the_spec_schedule_is_rejected() {
+    let _ = create_at_rate(OVERRIDDEN_CODEDEPOSIT, TX_GAS_LIMIT);
 }

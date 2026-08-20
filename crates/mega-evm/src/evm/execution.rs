@@ -596,9 +596,10 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
 /// The code-deposit compute gas a CREATE returning `output_len` bytes is charged under the
 /// configuration's active gas schedule — the same reading `return_create` takes.
 ///
-/// An embedder may install its own schedule, so the per-byte rate is not necessarily revm's
-/// built-in constant. Reading it here keeps the amount `MegaETH` weighs and records equal to the
-/// amount revm debits, whatever schedule the configuration carries.
+/// The active schedule is required to be the one the spec defines, so this reads the same
+/// per-byte rate as revm's built-in constant. Reading it off the schedule rather than restating
+/// the constant keeps the amount `MegaETH` weighs and records tied to the amount revm debits at
+/// the source, so the two cannot drift apart independently.
 #[inline]
 fn active_code_deposit_gas<DB: Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &MegaContext<DB, ExtEnvs>,
@@ -609,9 +610,8 @@ fn active_code_deposit_gas<DB: Database, ExtEnvs: ExternalEnvTypes>(
 
 /// The frozen REX5/REX6 reading of the same charge: revm's built-in per-byte rate as a constant.
 ///
-/// Those specs record the charge without a conservation law behind it, so a schedule that departs
-/// from the constant only shifts their reported compute total. Their behavior is frozen, which
-/// makes the constant the definition rather than an approximation of one.
+/// Those specs record the charge without a conservation law behind it, and their behavior is
+/// frozen, which makes the constant the definition rather than an approximation of one.
 #[inline]
 fn frozen_code_deposit_gas(output_len: usize) -> u64 {
     (output_len as u64).saturating_mul(revm::interpreter::gas::CODEDEPOSIT)

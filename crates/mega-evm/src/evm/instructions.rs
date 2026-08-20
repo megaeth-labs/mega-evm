@@ -1042,6 +1042,8 @@ macro_rules! record_storage_compute_gas {
                     matches!(call_inputs.scheme, CallScheme::Call | CallScheme::CallCode) &&
                     call_inputs.transfers_value()
                 {
+                    // The constant is what revm minted: the active gas schedule is required to be
+                    // the one the spec defines, so its `call_stipend` entry is this value.
                     gas::CALL_STIPEND
                 } else {
                     0
@@ -1424,7 +1426,10 @@ pub mod forward_gas_ext {
 
                         // We recover the forwarded gas to the child call from the parent call.
                         let child_gas = call_inputs.gas_limit as u128;
-                        // There may be a call stipend if there is value to be transferred.
+                        // There may be a call stipend if there is value to be transferred. The
+                        // constant is what revm added to `gas_limit`: the active gas schedule is
+                        // required to be the one the spec defines, so its `call_stipend` entry is
+                        // this value and the subtraction below cannot go negative.
                         let transfer_gas_stipend =
                             if has_transfer { gas::CALL_STIPEND as u128 } else { 0 };
                         let forwarded_gas = child_gas - transfer_gas_stipend; // Safe from underflow

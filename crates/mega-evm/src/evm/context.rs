@@ -37,8 +37,12 @@ pub type MegaInnerContext<DB> = revm::Context<
 >;
 use revm::{
     context::{BlockEnv, CfgEnv, ContextSetters, ContextTr, LocalContext},
-    context_interface::context::ContextError,
+    context_interface::{
+        cfg::{GasId, GasParams},
+        context::ContextError,
+    },
     database::EmptyDB,
+    primitives::hardfork::SpecId as EthSpecId,
     Journal,
 };
 
@@ -237,6 +241,13 @@ impl<DB: Database, ExtEnvTypes: ExternalEnvTypes> MegaContext<DB, ExtEnvTypes> {
     /// # Returns
     ///
     /// Returns a new `Context` instance wrapping the provided context.
+    ///
+    /// # Panics
+    ///
+    /// If the provided context's `gas_params` is not the schedule its own `cfg.spec` defines —
+    /// the gas schedule belongs to the spec, see [`assert_spec_owned_gas_schedule`]. A
+    /// configuration still on its builder's default spec is fine: the spec relabel below
+    /// re-derives the schedule for `spec`.
     #[deprecated(note = "Use `MegaContext::new` instead")]
     pub fn new_with_context(
         context: MegaInnerContext<DB>,
@@ -244,6 +255,12 @@ impl<DB: Database, ExtEnvTypes: ExternalEnvTypes> MegaContext<DB, ExtEnvTypes> {
         external_envs: ExternalEnvs<ExtEnvTypes>,
     ) -> Self {
         let mut inner = context;
+
+        // Checked against the spec the caller's configuration itself carries, before the relabel
+        // below re-derives the schedule: a configuration still on its builder's default op-spec
+        // (`revm::Context::op()` starts at `BEDROCK`) is a supported input here, but its schedule
+        // must be that spec's, not one the caller rewrote.
+        assert_spec_owned_gas_schedule(&inner.cfg);
 
         // Spec in context must keep the same with parameter `spec`.
         // revm 40 keeps per-spec `GasParams` in `CfgEnv`, so update both together —
@@ -381,6 +398,19 @@ impl<DB: Database, ExtEnvTypes: ExternalEnvTypes> MegaContext<DB, ExtEnvTypes> {
     /// configuration that explicitly set it. An embedder that wants the gate opts in through
     /// [`with_cfg_unpinned`](Self::with_cfg_unpinned), where the field is taken as provided.
     ///
+    /// # The gas schedule is defined by the spec
+    ///
+    /// `cfg.gas_params` must be exactly the schedule `cfg.spec` defines — the table
+    /// `CfgEnv::new_with_spec(spec)` and `cfg.set_spec_and_mainnet_gas_params(spec)` install.
+    /// `MegaETH`'s gas schedule is a property of the spec rather than of the configuration, so
+    /// there is no supported way to override it, and a configuration that deviates is rejected
+    /// here with a panic rather than run. See [`assert_spec_owned_gas_schedule`] for why the
+    /// deviation cannot be tolerated and where else the same check runs.
+    ///
+    /// # Panics
+    ///
+    /// If `cfg.gas_params` is not the schedule `cfg.spec` defines.
+    ///
     /// # Arguments
     ///
     /// * `cfg` - The configuration environment
@@ -401,10 +431,17 @@ impl<DB: Database, ExtEnvTypes: ExternalEnvTypes> MegaContext<DB, ExtEnvTypes> {
     ///
     /// Skipping that pin does not skip `MegaETH`'s own consensus pins:
     ///
+    /// - The gas schedule is defined by the spec: a `gas_params` that deviates from what `cfg.spec`
+    ///   defines panics here exactly as it does in [`with_cfg`](Self::with_cfg) — see
+    ///   [`assert_spec_owned_gas_schedule`].
     /// - EIP-8037 (Amsterdam state gas) is forced off before every transaction runs, wherever the
     ///   configuration came from — see [`force_amsterdam_eip8037_off`].
     /// - Under `MINI_REX` and later, the contract size and initcode size limits fill in when the
     ///   configuration leaves them unset.
+    ///
+    /// # Panics
+    ///
+    /// If `cfg.gas_params` is not the schedule `cfg.spec` defines.
     ///
     /// # Arguments
     ///
@@ -427,7 +464,13 @@ impl<DB: Database, ExtEnvTypes: ExternalEnvTypes> MegaContext<DB, ExtEnvTypes> {
     /// already set by [`with_tx_runtime_limits`](Self::with_tx_runtime_limits) are kept; they are
     /// not replaced by the new spec's defaults. An unchanged spec leaves the existing tracker in
     /// place.
+    ///
+    /// # Panics
+    ///
+    /// If `cfg.gas_params` is not the schedule `cfg.spec` defines — the gas schedule belongs to
+    /// the spec, see [`assert_spec_owned_gas_schedule`].
     fn apply_cfg(mut self, cfg: CfgEnv<MegaSpecId>, intent: CfgIntent) -> Self {
+        assert_spec_owned_gas_schedule(&cfg);
         let new_spec = cfg.spec;
         let spec_changed = new_spec != self.spec;
         self.spec = new_spec;
@@ -711,6 +754,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     ///
     /// DB-dependent pre-frame usage may still be recorded later during pre-execution.
     pub(crate) fn on_new_tx(&mut self) {
+        assert_spec_owned_gas_schedule(&self.inner.cfg);
         force_amsterdam_eip8037_off(&mut self.inner.cfg);
 
         self.reset_volatile_data_access();
@@ -861,6 +905,79 @@ pub(crate) fn force_amsterdam_eip8037_off<SPEC>(cfg: &mut CfgEnv<SPEC>) {
     cfg.enable_amsterdam_eip8037 = false;
 }
 
+/// Panics unless `cfg` carries exactly the gas schedule its own `spec` defines.
+///
+/// `MegaETH`'s gas schedule belongs to the spec, not to the configuration. revm 40 turned the
+/// price of every operation into a `CfgEnv::gas_params` table an embedder can rewrite, and
+/// `MegaETH`'s own accounting does not read that table everywhere revm does: several recording
+/// sites carry the schedule's value as a constant (the `CALL_STIPEND` a value-transferring call
+/// mints, the pre-`REX7` per-byte code-deposit rate, the mainnet table the keyless-deploy
+/// preflight estimates intrinsic gas from). Under a rewritten table those sites would book
+/// something other than what revm charged, which silently breaks the conservation law the
+/// reported compute total is derived from — and, for a table that prices the call stipend below
+/// revm's, takes the 98/100 forwarding cap's subtraction below zero.
+///
+/// Rather than teach every such site to read the table, the schedule is pinned: a configuration
+/// whose `gas_params` deviates from its spec's is rejected outright, at the loudest available
+/// signal, so no transaction ever runs on one. This mirrors [`crate::HardforkParams::validate`],
+/// which panics at chain-config load time instead of letting a bad value surface at the first
+/// block that uses it. The check is unconditional across specs: it governs the configuration
+/// domain, which no historical block covers, so gating it on a spec would only narrow the
+/// guarantee without preserving anything.
+///
+/// Deviation is the only thing rejected — the rest of `CfgEnv` stays the embedder's, including
+/// switches that change what a transaction costs by other means (`disable_eip7623`,
+/// `limit_contract_code_size`, the blob caps).
+///
+/// Called from the three points a configuration can reach the EVM through: both `with_cfg`
+/// entry points (via [`MegaContext::apply_cfg`]), the deprecated
+/// [`MegaContext::new_with_context`], and [`MegaContext::on_new_tx`] — the last one being the
+/// point of use, which also covers a configuration mutated in place after the context was built
+/// (reachable through the mutable deref, e.g. `ctx.modify_cfg`). The comparison is a pointer
+/// compare in the common case: both tables come from the same per-spec `OnceLock` inside revm.
+pub(crate) fn assert_spec_owned_gas_schedule<SPEC: Into<EthSpecId> + Clone + core::fmt::Debug>(
+    cfg: &CfgEnv<SPEC>,
+) {
+    let expected = GasParams::new_spec(cfg.spec.clone().into());
+    if cfg.gas_params != expected {
+        panic_gas_schedule_mismatch(&cfg.spec, &cfg.gas_params, &expected);
+    }
+}
+
+/// Reports the first entry on which a configuration's gas schedule deviates from its spec's, and
+/// panics.
+///
+/// Split out of [`assert_spec_owned_gas_schedule`] and taking the spec as `&dyn Debug` so the
+/// formatting and the table walk stay out of the caller's inlined fast path, and are emitted once
+/// rather than per instantiation.
+#[cold]
+#[inline(never)]
+fn panic_gas_schedule_mismatch(
+    spec: &dyn core::fmt::Debug,
+    actual: &GasParams,
+    expected: &GasParams,
+) -> ! {
+    let mismatch = actual
+        .table()
+        .iter()
+        .zip(expected.table().iter())
+        .enumerate()
+        .find(|(_, (got, want))| got != want);
+    let (id, got, want) = match mismatch {
+        Some((index, (got, want))) => (GasId::new(index as u8), *got, *want),
+        // `!=` on `GasParams` compares exactly these tables, so a mismatch always has an entry.
+        None => unreachable!("gas params differ but no table entry does"),
+    };
+    panic!(
+        "gas params differ from the spec-defined schedule for {spec:?}: `{}` is {got}, the \
+         schedule defines {want}. MegaETH's gas schedule is defined by the spec and cannot be \
+         overridden through `CfgEnv::gas_params`; build the configuration with \
+         `CfgEnv::new_with_spec(spec)` or `cfg.set_spec_and_mainnet_gas_params(spec)` and leave \
+         the schedule alone.",
+        id.name(),
+    )
+}
+
 /// A convenient trait to convert a `CfgEnv<OpSpecId>` into a `CfgEnv<SpecId>`.
 ///
 /// This trait provides a conversion method for `OpStack` configuration environments
@@ -891,16 +1008,17 @@ impl IntoOpCfgEnv for CfgEnv<MegaSpecId> {
     /// This method relabels the specification type and carries every other field of the
     /// caller's configuration — the gas schedule included — into the `OpStack` shape. It is a
     /// relabel and nothing more: the fields `MegaETH` does not let a caller choose are settled
-    /// where they are read, not here (EIP-8037 by [`force_amsterdam_eip8037_off`]).
+    /// where they are read, not here (EIP-8037 by [`force_amsterdam_eip8037_off`], the gas
+    /// schedule by [`assert_spec_owned_gas_schedule`]).
     ///
     /// # Returns
     ///
     /// Returns a new `CfgEnv<OpSpecId>` with all fields moved from `self`.
     fn into_op_cfg(self) -> CfgEnv<OpSpecId> {
         let op_spec = OpSpecId::from(self.spec);
-        // Keep the caller's gas schedule instead of re-deriving it from the spec: an embedder
-        // may have installed its own, and a spec-derived one is unaffected either way because
-        // every `MegaSpecId` and its op-spec map to the same eth hardfork.
+        // Carry the schedule rather than re-deriving it: the relabel must not be the thing that
+        // silently repairs a deviating table, and re-deriving would be a no-op on a conforming
+        // one anyway — every `MegaSpecId` and its op-spec map to the same eth hardfork.
         let gas_params = self.gas_params.clone();
         // `with_spec_and_gas_params` is revm's own whole-struct carrier: it moves every field
         // (including the ones behind revm cargo features) into the new spec type, so fields
@@ -949,15 +1067,41 @@ mod tests {
 
     use crate::{test_utils::MemoryDatabase, MegaTransactionNew as _, TestExternalEnvs};
 
-    /// A gas schedule an embedder could install: the spec table with one entry moved off its
-    /// mainnet value. Distinct from every `GasParams::new_spec(..)` table, so a conversion that
-    /// re-derives the schedule from the spec instead of carrying it shows up as a diff.
+    /// A gas schedule an embedder could try to install: the spec table with one entry moved off
+    /// its mainnet value. Distinct from every `GasParams::new_spec(..)` table, so a conversion
+    /// that re-derives the schedule from the spec instead of carrying it shows up as a diff — and
+    /// so an entry point that admits it instead of rejecting it does too.
     fn custom_gas_params() -> GasParams {
         let mut gas_params = GasParams::new_spec(SpecId::PRAGUE);
         gas_params.override_gas([(GasId::tx_token_cost(), 40)]);
         assert_ne!(gas_params, GasParams::new_spec(SpecId::PRAGUE));
         gas_params
     }
+
+    /// The schedule `spec` defines — the one and only schedule an entry point admits.
+    fn spec_gas_params(spec: MegaSpecId) -> GasParams {
+        GasParams::new_spec(SpecId::from(spec))
+    }
+
+    /// An untouched configuration for `spec`, schedule included.
+    fn spec_cfg(spec: MegaSpecId) -> CfgEnv<MegaSpecId> {
+        CfgEnv::new_with_spec(spec)
+    }
+
+    /// Every `MegaSpecId`, so the schedule pin is asserted across the whole progression rather
+    /// than on whichever spec a test happened to pick.
+    const ALL_SPECS: [MegaSpecId; 10] = [
+        MegaSpecId::EQUIVALENCE,
+        MegaSpecId::MINI_REX,
+        MegaSpecId::REX,
+        MegaSpecId::REX1,
+        MegaSpecId::REX2,
+        MegaSpecId::REX3,
+        MegaSpecId::REX4,
+        MegaSpecId::REX5,
+        MegaSpecId::REX6,
+        MegaSpecId::REX7,
+    ];
 
     /// A [`CfgEnv`] with every field moved off its revm default, so any field the conversion
     /// drops instead of carrying collapses back to a default and fails an equality assert.
@@ -982,6 +1126,16 @@ mod tests {
         cfg.enable_amsterdam_eip8037 = true;
         cfg.amsterdam_eip7708_disabled = true;
         cfg.amsterdam_eip7708_delayed_burn_disabled = true;
+        cfg
+    }
+
+    /// [`fully_customized_cfg`] with the one field a caller does not own put back to the schedule
+    /// its spec defines, so the configuration reaches an entry point instead of being rejected by
+    /// it. Everything else is still off its revm default, which is what the carry-every-field
+    /// asserts need.
+    fn admissible_customized_cfg(spec: MegaSpecId) -> CfgEnv<MegaSpecId> {
+        let mut cfg = fully_customized_cfg(spec);
+        cfg.gas_params = spec_gas_params(spec);
         cfg
     }
 
@@ -1014,18 +1168,140 @@ mod tests {
     /// `with_cfg` is where an embedder's `CfgEnv` lands. It must reach the inner revm config
     /// intact — only the `MegaETH` pins (spec, `MINI_REX` size limits) may differ.
     #[test]
-    fn test_with_cfg_carries_embedder_gas_params_and_switches() {
+    fn test_with_cfg_carries_embedder_switches_and_the_spec_schedule() {
         let mut cfg = CfgEnv::new_with_spec(MegaSpecId::REX6);
         cfg.chain_id = 6342;
-        cfg.gas_params = custom_gas_params();
         cfg.disable_eip7623 = true;
 
-        let context =
-            MegaContext::new(EmptyDB::default(), MegaSpecId::EQUIVALENCE).with_cfg(cfg.clone());
+        let context = MegaContext::new(EmptyDB::default(), MegaSpecId::EQUIVALENCE).with_cfg(cfg);
 
-        assert_eq!(context.inner.cfg.gas_params, cfg.gas_params);
+        assert_eq!(context.inner.cfg.gas_params, spec_gas_params(MegaSpecId::REX6));
         assert!(context.inner.cfg.disable_eip7623);
         assert_eq!(context.inner.cfg.chain_id, 6342);
+    }
+
+    /// The gas schedule is not an embedder's to set. A configuration carrying anything other than
+    /// the schedule its spec defines is rejected at the entry point rather than run, because
+    /// `MegaETH` records several of the schedule's values from constants rather than from the
+    /// table and would otherwise book charges revm never made.
+    #[test]
+    #[should_panic(expected = "gas params differ from the spec-defined schedule")]
+    fn test_with_cfg_rejects_a_schedule_off_the_spec_table() {
+        let mut cfg = CfgEnv::new_with_spec(MegaSpecId::REX6);
+        cfg.gas_params = custom_gas_params();
+
+        let _ = MegaContext::new(EmptyDB::default(), MegaSpecId::EQUIVALENCE).with_cfg(cfg);
+    }
+
+    /// The `call_stipend` entry specifically: `MegaETH` books the stipend revm mints into a
+    /// value-transferring call's child frame from `gas::CALL_STIPEND`, and the 98/100 forwarding
+    /// cap subtracts the same constant back out of the child's budget. A schedule that priced the
+    /// stipend differently would desync both.
+    #[test]
+    #[should_panic(expected = "gas params differ from the spec-defined schedule")]
+    fn test_with_cfg_rejects_an_overridden_call_stipend() {
+        let mut cfg = CfgEnv::new_with_spec(MegaSpecId::REX7);
+        cfg.gas_params.override_gas([(GasId::call_stipend(), 0)]);
+
+        let _ = MegaContext::new(EmptyDB::default(), MegaSpecId::EQUIVALENCE).with_cfg(cfg);
+    }
+
+    /// The `code_deposit_cost` entry specifically: revm debits a successful `CREATE` the
+    /// schedule's per-byte rate, and pre-`REX7` specs record that charge from the constant.
+    #[test]
+    #[should_panic(expected = "gas params differ from the spec-defined schedule")]
+    fn test_with_cfg_rejects_an_overridden_code_deposit_cost() {
+        let mut cfg = CfgEnv::new_with_spec(MegaSpecId::REX7);
+        cfg.gas_params.override_gas([(GasId::code_deposit_cost(), 201)]);
+
+        let _ = MegaContext::new(EmptyDB::default(), MegaSpecId::EQUIVALENCE).with_cfg(cfg);
+    }
+
+    /// The rejection reports the spec whose schedule was expected, which entry deviated and both
+    /// values, so an embedder that hits it can act on the message rather than bisect its
+    /// configuration.
+    #[test]
+    #[should_panic(
+        expected = "schedule for REX7: `code_deposit_cost` is 201, the schedule defines 200"
+    )]
+    fn test_schedule_rejection_names_the_spec_the_entry_and_both_values() {
+        let mut cfg = CfgEnv::new_with_spec(MegaSpecId::REX7);
+        cfg.gas_params.override_gas([(GasId::code_deposit_cost(), 201)]);
+
+        let _ = MegaContext::new(EmptyDB::default(), MegaSpecId::EQUIVALENCE).with_cfg(cfg);
+    }
+
+    /// Every spec's own default schedule is admissible on every entry point, and reaches the EVM
+    /// as written. The pin is a rejection of deviation, not a narrowing of which specs run.
+    #[test]
+    fn test_every_spec_default_schedule_is_admissible() {
+        for spec in ALL_SPECS {
+            let expected = spec_gas_params(spec);
+
+            let pinned = MegaContext::new(EmptyDB::default(), MegaSpecId::EQUIVALENCE)
+                .with_cfg(spec_cfg(spec));
+            assert_eq!(pinned.inner.cfg.gas_params, expected, "with_cfg on {spec:?}");
+
+            let unpinned = MegaContext::new(EmptyDB::default(), MegaSpecId::EQUIVALENCE)
+                .with_cfg_unpinned(spec_cfg(spec));
+            assert_eq!(unpinned.inner.cfg.gas_params, expected, "with_cfg_unpinned on {spec:?}");
+        }
+    }
+
+    /// The constructors that build their own configuration install the spec's schedule, so the
+    /// contexts that never see a caller's `CfgEnv` satisfy the pin by construction. This is the
+    /// path the keyless-deploy sandbox takes: it builds its inner context from
+    /// [`MegaContext::new_with_shared_ext_envs`] rather than inheriting the outer configuration,
+    /// so no override could reach it even if one had been admitted outside.
+    #[test]
+    fn test_constructors_install_the_spec_schedule_on_every_spec() {
+        for spec in ALL_SPECS {
+            let expected = spec_gas_params(spec);
+
+            let plain = MegaContext::new(EmptyDB::default(), spec);
+            assert_eq!(plain.inner.cfg.gas_params, expected, "MegaContext::new on {spec:?}");
+
+            let sandbox_shaped = MegaContext::<_, EmptyExternalEnv>::new_with_shared_ext_envs(
+                EmptyDB::default(),
+                spec,
+                Rc::new(EmptyExternalEnv),
+                Rc::new(RefCell::new(EmptyExternalEnv)),
+            );
+            assert_eq!(
+                sandbox_shaped.inner.cfg.gas_params, expected,
+                "the sandbox's constructor on {spec:?}",
+            );
+        }
+    }
+
+    /// Migrating a live context between specs leaves it on the schedule the new spec defines, in
+    /// both directions — the entry point adopts the whole configuration, so the schedule cannot
+    /// be left behind from the spec the context previously ran.
+    #[test]
+    fn test_spec_migration_keeps_the_schedule_on_the_active_spec() {
+        let mut context = MegaContext::new(EmptyDB::default(), MegaSpecId::EQUIVALENCE);
+
+        for spec in [MegaSpecId::REX5, MegaSpecId::REX7, MegaSpecId::REX5, MegaSpecId::MINI_REX] {
+            context = context.with_cfg(spec_cfg(spec));
+
+            assert_eq!(context.mega_spec(), spec);
+            assert_eq!(context.inner.cfg.gas_params, spec_gas_params(spec), "after {spec:?}");
+            // And the migrated context is one a transaction can run on: `on_new_tx` re-checks the
+            // schedule at the point of use.
+            context.on_new_tx();
+        }
+    }
+
+    /// The entry points are not the only place the schedule is checked: it is re-checked at the
+    /// point of use, so a configuration mutated in place after the context was built — reachable
+    /// through the mutable deref, e.g. `ctx.modify_cfg` — cannot execute either.
+    #[test]
+    #[should_panic(expected = "gas params differ from the spec-defined schedule")]
+    fn test_on_new_tx_rejects_a_schedule_mutated_after_construction() {
+        let mut context = MegaContext::new(EmptyDB::default(), MegaSpecId::REX7);
+        context.modify_cfg(|cfg| cfg.gas_params = custom_gas_params());
+
+        context.on_new_tx();
     }
 
     /// The pin is unconditional: a configured cfg — here a blob schedule plus an explicitly
@@ -1043,19 +1319,6 @@ mod tests {
             !context.inner.cfg.tx_chain_id_check,
             "with_cfg must pin the chain-id gate off even when the cfg enabled it"
         );
-    }
-
-    /// The pin does not depend on the rest of the configuration: a custom gas schedule rides
-    /// through while the gate still comes out pinned off.
-    #[test]
-    fn test_with_cfg_pins_chain_id_check_off_with_custom_gas_params() {
-        let mut cfg = CfgEnv::new_with_spec(MegaSpecId::REX5);
-        cfg.gas_params = custom_gas_params();
-
-        let context = MegaContext::new(EmptyDB::default(), MegaSpecId::EQUIVALENCE).with_cfg(cfg);
-
-        assert!(!context.inner.cfg.tx_chain_id_check);
-        assert_eq!(context.inner.cfg.gas_params, custom_gas_params());
     }
 
     /// An untouched `CfgEnv::new_with_spec` config carries revm 40's flipped default, which the
@@ -1094,7 +1357,7 @@ mod tests {
     /// inner revm config as written.
     #[test]
     fn test_with_cfg_unpinned_carries_every_field() {
-        let mut cfg = fully_customized_cfg(MegaSpecId::REX6);
+        let mut cfg = admissible_customized_cfg(MegaSpecId::REX6);
         cfg.tx_chain_id_check = true;
 
         let context = MegaContext::new(EmptyDB::default(), MegaSpecId::EQUIVALENCE)
@@ -1102,6 +1365,17 @@ mod tests {
 
         assert!(context.inner.cfg.tx_chain_id_check);
         assert_eq!(context.inner.cfg, cfg.into_op_cfg());
+    }
+
+    /// Skipping the chain-id pin does not skip the schedule check: the escape hatch is an opt-in
+    /// to revm 40's chain-id gate, not to owning the gas schedule.
+    #[test]
+    #[should_panic(expected = "gas params differ from the spec-defined schedule")]
+    fn test_with_cfg_unpinned_rejects_a_schedule_off_the_spec_table() {
+        let cfg = fully_customized_cfg(MegaSpecId::REX6);
+
+        let _ =
+            MegaContext::new(EmptyDB::default(), MegaSpecId::EQUIVALENCE).with_cfg_unpinned(cfg);
     }
 
     /// The opt-in skips the chain-id pin, not `MegaETH`'s other normalization: the spec is
@@ -1174,24 +1448,25 @@ mod tests {
         assert!(!alloy_evm::Evm::cfg_env(&evm).enable_amsterdam_eip8037);
     }
 
-    /// The deprecated constructor re-derives the gas schedule only when it applies a different
-    /// op-spec. A caller already sitting on the `MegaETH` op-spec keeps its own schedule.
+    /// The deprecated constructor rejects a rewritten schedule like every other entry point. Its
+    /// input is checked against the spec the caller's own configuration carries — the relabel
+    /// below re-derives the schedule for a configuration on a different spec, and must not be
+    /// what quietly repairs a rewritten one.
     #[allow(deprecated)]
     #[test]
-    fn test_new_with_context_keeps_gas_params_when_spec_already_matches() {
+    #[should_panic(expected = "gas params differ from the spec-defined schedule")]
+    fn test_new_with_context_rejects_a_schedule_off_the_spec_table() {
         let mut inner: MegaInnerContext<EmptyDB> = revm::Context::op()
             .with_tx(crate::MegaTransaction::default())
             .with_db(EmptyDB::default());
         inner.cfg.set_spec_and_mainnet_gas_params(MegaSpecId::EQUIVALENCE.into_op_spec());
         inner.cfg.gas_params = custom_gas_params();
 
-        let context = MegaContext::new_with_context(
+        let _ = MegaContext::new_with_context(
             inner,
             MegaSpecId::EQUIVALENCE,
             ExternalEnvs::<EmptyExternalEnv>::default(),
         );
-
-        assert_eq!(context.inner.cfg.gas_params, custom_gas_params());
     }
 
     /// Same unconditional pin at the deprecated constructor: a configured context that enabled
