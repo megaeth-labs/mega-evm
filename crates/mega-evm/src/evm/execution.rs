@@ -512,9 +512,11 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
             // revm's return_create would not charge it; the existing
             // limit-side hook below owns the result-marking on exceed.
             if is_rex5 && !is_rex7 && frame.data.is_create() {
-                if let Some(canonical_code_deposit_gas) =
-                    canonical_code_deposit_gas(ctx, interpreter_result)
-                {
+                if let Some(canonical_code_deposit_gas) = canonical_code_deposit_gas(
+                    ctx,
+                    interpreter_result,
+                    frozen_code_deposit_gas(interpreter_result.output.len()),
+                ) {
                     let _ = ctx
                         .additional_limit
                         .borrow_mut()
@@ -526,9 +528,11 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
         // Update additional limits. MiniRex is guaranteed to be enabled here.
         ctx.additional_limit.borrow_mut().after_frame_run_instructions(frame, action);
 
-        // REX7: settle the same canonical code-deposit charge, after the hook above has closed the
-        // frame's tail segment, merged this frame's non-compute usage and marked the result if any
-        // of that put the frame over a limit. Two things follow from settling here rather than
+        // REX7: settle the canonical code-deposit charge — read off the active gas schedule, so
+        // the amount weighed and recorded is the amount revm will debit even under a schedule an
+        // embedder installed — after the hook above has closed the frame's tail segment, merged
+        // this frame's non-compute usage and marked the result if any of that put the frame over a
+        // limit. Two things follow from settling here rather than
         // ahead of the hook. The charge is weighed against the frame's complete usage instead of a
         // total still missing its tail. And a frame the hook already failed is skipped, because the
         // marked result fails the deposit predicate — which is the point: revm only charges the
@@ -537,9 +541,11 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
         if is_rex7 {
             if let InterpreterAction::Return(interpreter_result) = action {
                 if frame.data.is_create() {
-                    if let Some(canonical_code_deposit_gas) =
-                        canonical_code_deposit_gas(ctx, interpreter_result)
-                    {
+                    if let Some(canonical_code_deposit_gas) = canonical_code_deposit_gas(
+                        ctx,
+                        interpreter_result,
+                        active_code_deposit_gas(ctx, interpreter_result.output.len()),
+                    ) {
                         let rewrite = ctx
                             .additional_limit
                             .borrow_mut()
@@ -587,12 +593,37 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
     }
 }
 
-/// The canonical code-deposit compute gas revm will charge a CREATE frame, or `None` when
+/// The code-deposit compute gas a CREATE returning `output_len` bytes is charged under the
+/// configuration's active gas schedule — the same reading `return_create` takes.
+///
+/// An embedder may install its own schedule, so the per-byte rate is not necessarily revm's
+/// built-in constant. Reading it here keeps the amount `MegaETH` weighs and records equal to the
+/// amount revm debits, whatever schedule the configuration carries.
+#[inline]
+fn active_code_deposit_gas<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    ctx: &MegaContext<DB, ExtEnvs>,
+    output_len: usize,
+) -> u64 {
+    ctx.cfg().gas_params().code_deposit_cost(output_len)
+}
+
+/// The frozen REX5/REX6 reading of the same charge: revm's built-in per-byte rate as a constant.
+///
+/// Those specs record the charge without a conservation law behind it, so a schedule that departs
+/// from the constant only shifts their reported compute total. Their behavior is frozen, which
+/// makes the constant the definition rather than an approximation of one.
+#[inline]
+fn frozen_code_deposit_gas(output_len: usize) -> u64 {
+    (output_len as u64).saturating_mul(revm::interpreter::gas::CODEDEPOSIT)
+}
+
+/// `code_deposit_gas` if revm will actually charge it to this CREATE frame, `None` when
 /// `return_create` would not charge it at all.
 #[inline]
 fn canonical_code_deposit_gas<DB: Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &MegaContext<DB, ExtEnvs>,
     interpreter_result: &InterpreterResult,
+    code_deposit_gas: u64,
 ) -> Option<u64> {
     let cfg = ctx.cfg();
     will_return_create_charge_code_deposit(
@@ -600,14 +631,13 @@ fn canonical_code_deposit_gas<DB: Database, ExtEnvs: ExternalEnvTypes>(
         cfg.max_code_size(),
         cfg.spec().into_eth_spec(),
         cfg.is_eip3541_disabled(),
+        code_deposit_gas,
     )
-    .then(|| {
-        (interpreter_result.output.len() as u64).saturating_mul(revm::interpreter::gas::CODEDEPOSIT)
-    })
+    .then_some(code_deposit_gas)
 }
 
 /// Mirrors `revm_handler::frame::return_create`'s pre-commit predicate.
-/// Returns `true` iff `return_create` would charge `code_len * CODEDEPOSIT`
+/// Returns `true` iff `return_create` would charge `code_deposit_gas`
 /// from the interpreter gas and commit the checkpoint.
 ///
 /// REVIEW ON UPSTREAM BUMP: keep in lockstep with
@@ -619,6 +649,7 @@ fn will_return_create_charge_code_deposit(
     max_code_size: usize,
     runtime_spec_id: revm::primitives::hardfork::SpecId,
     is_eip3541_disabled: bool,
+    code_deposit_gas: u64,
 ) -> bool {
     use revm::primitives::hardfork::SpecId;
 
@@ -636,8 +667,6 @@ fn will_return_create_charge_code_deposit(
     {
         return false;
     }
-    let code_deposit_gas = (interpreter_result.output.len() as u64)
-        .saturating_mul(revm::interpreter::gas::CODEDEPOSIT);
     interpreter_result.gas.remaining() >= code_deposit_gas
 }
 
