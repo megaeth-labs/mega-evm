@@ -246,7 +246,7 @@ pub fn execute_keyless_deploy_call<DB: AlloyDatabase, ExtEnvs: ExternalEnvTypes>
     // Step 4: validate `gasLimitOverride` covers the keyless tx's own gas limit. The
     // Rex5+ cap is deferred to step 4b below so it observes the materialization charge.
     let tx_gas_limit = keyless_tx.gas_limit();
-    let mut gas_limit_override_u64: u64 = gas_limit_override.try_into().unwrap_or(u64::MAX);
+    let gas_limit_override_u64: u64 = gas_limit_override.try_into().unwrap_or(u64::MAX);
     if gas_limit_override_u64 < tx_gas_limit {
         return make_error!(KeylessDeployError::GasLimitTooLow {
             tx_gas_limit,
@@ -317,24 +317,26 @@ pub fn execute_keyless_deploy_call<DB: AlloyDatabase, ExtEnvs: ExternalEnvTypes>
         }
     }
 
-    // Step 4b: Rex5+ cap of `gas_limit_override` to the outer's remaining gas. Runs after
-    // materialization has been debited so the reservation in step 8b only covers the
-    // sandbox envelope itself.
+    // Step 4b: Rex5+ cap of the granted sandbox gas to the outer's remaining gas.
+    // Runs after materialization has been debited so the reservation in step 8b
+    // only covers the sandbox envelope itself. Pre-REX5 grants the decoded override
+    // unchanged.
     //
     // After the cap, re-enforce the signer's "must execute with at least `tx_gas_limit`"
     // guarantee. The relayer can shrink the outer envelope so that `gas.remaining()`
-    // drops below the keyless `tx_gas_limit`, in which case the cap brings the override
-    // below the signed minimum. Rejecting here with the same `GasLimitTooLow` shape
+    // drops below the keyless `tx_gas_limit`, in which case the cap brings the granted
+    // gas below the signed minimum. Rejecting here with the same `GasLimitTooLow` shape
     // surfaces the failure cleanly instead of letting the sandbox OOG silently. The
     // pre-cap check above (Step 4) is retained so a relayer passing
     // `override < tx_gas_limit` outright still fails before the signer-recovery /
     // materialization work.
+    let mut effective_gas_limit = gas_limit_override_u64;
     if ctx.spec.is_enabled(MegaSpecId::REX5) {
-        gas_limit_override_u64 = gas_limit_override_u64.min(gas.remaining());
-        if gas_limit_override_u64 < tx_gas_limit {
+        effective_gas_limit = effective_gas_limit.min(gas.remaining());
+        if effective_gas_limit < tx_gas_limit {
             return make_error!(KeylessDeployError::GasLimitTooLow {
                 tx_gas_limit,
-                provided_gas_limit: gas_limit_override_u64,
+                provided_gas_limit: effective_gas_limit,
             });
         }
     }
@@ -344,19 +346,14 @@ pub fn execute_keyless_deploy_call<DB: AlloyDatabase, ExtEnvs: ExternalEnvTypes>
     // (gas_price=0, source_hash set) so caller balance is never debited for gas; pre-Rex5
     // keeps the original signed gas price.
     let sandbox_tx = if ctx.spec.is_enabled(MegaSpecId::REX5) {
-        build_fee_free_sandbox_deposit_tx(
-            deploy_signer,
-            &keyless_tx,
-            tx_bytes,
-            gas_limit_override_u64,
-        )
+        build_fee_free_sandbox_deposit_tx(deploy_signer, &keyless_tx, tx_bytes, effective_gas_limit)
     } else {
         let tx = TxEnv {
             caller: deploy_signer,
             kind: TxKind::Create,
             data: keyless_tx.input().clone(),
             value: keyless_tx.value(),
-            gas_limit: gas_limit_override_u64,
+            gas_limit: effective_gas_limit,
             gas_price: keyless_tx.effective_gas_price(None),
             nonce: 0,
             ..Default::default()
@@ -438,10 +435,10 @@ pub fn execute_keyless_deploy_call<DB: AlloyDatabase, ExtEnvs: ExternalEnvTypes>
     // `gas_limit_override.min(gas.remaining())` cap — there is no intervening gas
     // movement between the cap and this debit.
     if ctx.spec.is_enabled(MegaSpecId::REX5) {
-        let ok = gas.record_cost(gas_limit_override_u64);
+        let ok = gas.record_cost(effective_gas_limit);
         debug_assert!(
             ok,
-            "Rex5+ sandbox pre-debit must succeed: gas_limit_override is capped to gas.remaining()",
+            "Rex5+ sandbox pre-debit must succeed: effective_gas_limit is capped to gas.remaining()",
         );
     }
 
@@ -456,6 +453,7 @@ pub fn execute_keyless_deploy_call<DB: AlloyDatabase, ExtEnvs: ExternalEnvTypes>
             signer: deploy_signer,
             deploy_address,
             gas_limit_override: gas_limit_override_u64,
+            effective_gas_limit,
             tx_gas_limit,
         });
     }
@@ -470,7 +468,7 @@ pub fn execute_keyless_deploy_call<DB: AlloyDatabase, ExtEnvs: ExternalEnvTypes>
                     &mut gas,
                     limit_usage,
                     volatile_accesses,
-                    gas_limit_override_u64,
+                    effective_gas_limit,
                     gas_used,
                     &return_memory_offset,
                 ) {
@@ -558,7 +556,7 @@ pub fn execute_keyless_deploy_call<DB: AlloyDatabase, ExtEnvs: ExternalEnvTypes>
             // upfront is intentionally retained, mirroring the upfront
             // `KEYLESS_DEPLOY_OVERHEAD_GAS` charge.
             if ctx.spec.is_enabled(MegaSpecId::REX5) {
-                gas.erase_cost(gas_limit_override_u64);
+                gas.erase_cost(effective_gas_limit);
             }
             notify_sandbox_end(
                 &observer,
@@ -1742,6 +1740,44 @@ mod tests {
 
     impl<E: ExternalEnvTypes> SandboxObserver<E> for SplitNopObserver {}
 
+    fn assert_sandbox_outcomes_eq(left: &SandboxOutcome, right: &SandboxOutcome, case: &str) {
+        match (left, right) {
+            (
+                SandboxOutcome::Completed {
+                    state: left_state,
+                    completion: left_completion,
+                    volatile_accesses: left_accesses,
+                    ..
+                },
+                SandboxOutcome::Completed {
+                    state: right_state,
+                    completion: right_completion,
+                    volatile_accesses: right_accesses,
+                    ..
+                },
+            ) => {
+                assert_eq!(
+                    core::mem::discriminant(left_completion),
+                    core::mem::discriminant(right_completion),
+                    "{case}: completion kind"
+                );
+                assert_eq!(left_completion.gas_used(), right_completion.gas_used(), "{case}: gas");
+                assert_eq!(left_accesses, right_accesses, "{case}: volatile accesses");
+                assert_eq!(left_state.len(), right_state.len(), "{case}: account count");
+                for (addr, account) in left_state {
+                    let other = right_state.get(addr).unwrap_or_else(|| {
+                        panic!("{case}: missing account {addr:?} in observer state")
+                    });
+                    assert_eq!(account, other, "{case}: account {addr:?}");
+                }
+            }
+            (SandboxOutcome::Rejected(left_err), SandboxOutcome::Rejected(right_err)) => {
+                assert_eq!(left_err, right_err, "{case}: rejected error");
+            }
+            _ => panic!("{case}: outcome variants differ: {left:?} vs {right:?}"),
+        }
+    }
+
     fn run_split_create_fixture(
         spec: MegaSpecId,
         observer: Option<Rc<RefCell<dyn SandboxObserver<crate::EmptyExternalEnv>>>>,
@@ -1780,35 +1816,37 @@ mod tests {
         run_sandbox_ctx(context, tx, Some(limits), block, chain, observer)
     }
 
-    fn split_outcome_fingerprint(outcome: &SandboxOutcome) -> (bool, Option<U256>, u64) {
+    fn split_create_slot(outcome: &SandboxOutcome) -> (bool, Option<U256>) {
         match outcome {
-            SandboxOutcome::Completed { state, completion, .. } => {
+            SandboxOutcome::Completed { state, .. } => {
                 let deployed = SPLIT_CREATE_CALLER.create(0);
                 let created = state.get(&deployed).is_some_and(|account| account.is_created());
                 let slot = state.get(&deployed).and_then(|account| {
                     account.storage.get(&SPLIT_CREATE_SLOT).map(|slot| slot.present_value())
                 });
-                (created, slot, completion.gas_used())
+                (created, slot)
             }
-            SandboxOutcome::Rejected(_) => (false, None, 0),
+            SandboxOutcome::Rejected(_) => (false, None),
         }
     }
 
     #[test]
     fn test_observer_parity_pre_rex5_split_create_commits_sstore() {
-        let baseline = run_split_create_fixture(MegaSpecId::REX4, None);
-        let observer: Rc<RefCell<dyn SandboxObserver<crate::EmptyExternalEnv>>> =
-            Rc::new(RefCell::new(SplitNopObserver));
-        let observed = run_split_create_fixture(MegaSpecId::REX4, Some(observer));
+        for spec in [MegaSpecId::REX2, MegaSpecId::REX3, MegaSpecId::REX4] {
+            let baseline = run_split_create_fixture(spec, None);
+            let observer: Rc<RefCell<dyn SandboxObserver<crate::EmptyExternalEnv>>> =
+                Rc::new(RefCell::new(SplitNopObserver));
+            let observed = run_split_create_fixture(spec, Some(observer));
 
-        let (created, slot, gas) = split_outcome_fingerprint(&baseline);
-        assert!(created, "pre-REX5 split CREATE must leave the account created");
-        assert_eq!(slot, Some(U256::from(0x2a)), "SSTORE must survive the failed deploy");
-        assert_eq!(
-            split_outcome_fingerprint(&observed),
-            (created, slot, gas),
-            "observer must not change split-CREATE sandbox outcome"
-        );
+            let (created, slot) = split_create_slot(&baseline);
+            assert!(created, "{spec:?}: pre-REX5 split CREATE must leave the account created");
+            assert_eq!(
+                slot,
+                Some(U256::from(0x2a)),
+                "{spec:?}: SSTORE must survive the failed deploy"
+            );
+            assert_sandbox_outcomes_eq(&observed, &baseline, &format!("split-CREATE {spec:?}"));
+        }
     }
 
     #[test]
@@ -1818,13 +1856,9 @@ mod tests {
             Rc::new(RefCell::new(SplitNopObserver));
         let observed = run_split_create_fixture(MegaSpecId::REX5, Some(observer));
 
-        let (created, slot, gas) = split_outcome_fingerprint(&baseline);
+        let (created, slot) = split_create_slot(&baseline);
         assert!(!created, "REX5 atomic CREATE failure must not leave a created account");
         assert!(slot.is_none() || slot == Some(U256::ZERO));
-        assert_eq!(
-            split_outcome_fingerprint(&observed),
-            (created, slot, gas),
-            "observer must not change atomic CREATE-failure outcome"
-        );
+        assert_sandbox_outcomes_eq(&observed, &baseline, "atomic CREATE-failure REX5");
     }
 }

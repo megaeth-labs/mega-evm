@@ -8,19 +8,30 @@
 //!
 //! # Read-only contract
 //!
-//! Implementations must not mutate interpreter or context state through the
-//! `&mut` hook arguments. Doing so is not structurally prevented for every
-//! argument (the signatures match revm so generic inspectors can adapt) and
-//! may cause consensus divergence; debug builds already trip conservation
-//! asserts on many such mutations.
+//! Two layers close intervention:
+//!
+//! - **Structural.** [`SandboxObserver::call`] / [`SandboxObserver::create`] take shared references
+//!   to [`CallInputs`] / [`CreateInputs`]. [`InspectorSandboxObserver`] clones a temporary copy
+//!   when forwarding to an inner [`Inspector`]; mutations of that copy are discarded, as are `Some`
+//!   override outcomes. Combined with [`ObserverBridge`] always returning `None`, rewriting inputs
+//!   and short-circuiting the frame are both closed.
+//! - **Contractual.** [`SandboxObserver::step`] / [`SandboxObserver::step_end`] take `&mut
+//!   Interpreter` and hooks take `&mut MegaContext` because those types are not cheaply cloneable.
+//!   Implementations must not mutate them. Debug builds already trip conservation asserts on many
+//!   such mutations.
+//!
+//! Attaching a compliant (read-only) observer does not change sandbox execution
+//! results. No such guarantee is made for an observer that mutates interpreter
+//! or context state.
 //!
 //! # Lifecycle
 //!
 //! [`sandbox_start`](SandboxObserver::sandbox_start) and
 //! [`sandbox_end`](SandboxObserver::sandbox_end) fire exactly once per sandbox
-//! that begins execution, and only when an observer is attached. Reverted
-//! inner frames still emit their events; whether sandbox state was applied to
-//! the parent is reported by [`SandboxEndOutcome::state_applied`].
+//! attempt, and only when an observer is attached. A validate-reject path that
+//! never constructs a sandbox EVM still delivers the pair. Reverted inner
+//! frames still emit their events; whether sandbox state was applied to the
+//! parent is reported by [`SandboxEndOutcome::state_applied`].
 //!
 //! # External-environment invariance
 //!
@@ -64,8 +75,12 @@ pub struct SandboxStartInfo {
     pub signer: Address,
     /// Deterministic deploy address derived from the signer.
     pub deploy_address: Address,
-    /// Gas limit override actually supplied to the sandbox (after any cap).
+    /// Caller-supplied gas limit override exactly as decoded from the payload.
     pub gas_limit_override: u64,
+    /// Gas limit actually granted to the sandbox after outer-gas capping
+    /// (REX5+ caps to the outer frame's remaining gas; pre-REX5 equals
+    /// [`Self::gas_limit_override`]).
+    pub effective_gas_limit: u64,
     /// Gas limit carried by the signed keyless transaction itself.
     pub tx_gas_limit: u64,
 }
@@ -127,8 +142,11 @@ impl SandboxEndOutcome {
 /// breaking change. Method-level lifetimes on [`MegaContext`]`<`[`SandboxDb`]`<'_>, _>`
 /// keep the trait object-safe.
 ///
-/// INVARIANT: hooks observe; they must not mutate execution state. [`ObserverBridge`]
-/// structurally drops `call`/`create` override outcomes.
+/// A compliant (read-only) observer does not change sandbox execution results.
+/// [`call`](Self::call) / [`create`](Self::create) cannot rewrite inputs or
+/// override the frame; [`step`](Self::step) and context arguments remain
+/// contractually read-only. [`ObserverBridge`] always drops `call`/`create`
+/// override outcomes.
 pub trait SandboxObserver<ExtEnvs: ExternalEnvTypes> {
     /// Called once after the sandbox interpreter is created, before the first opcode.
     #[inline]
@@ -178,7 +196,7 @@ pub trait SandboxObserver<ExtEnvs: ExternalEnvTypes> {
 
     /// Called when a call frame is about to start. Cannot override the call.
     #[inline]
-    fn call(&mut self, context: &mut MegaContext<SandboxDb<'_>, ExtEnvs>, inputs: &mut CallInputs) {
+    fn call(&mut self, context: &mut MegaContext<SandboxDb<'_>, ExtEnvs>, inputs: &CallInputs) {
         let _ = context;
         let _ = inputs;
     }
@@ -198,11 +216,7 @@ pub trait SandboxObserver<ExtEnvs: ExternalEnvTypes> {
 
     /// Called when a create frame is about to start. Cannot override the create.
     #[inline]
-    fn create(
-        &mut self,
-        context: &mut MegaContext<SandboxDb<'_>, ExtEnvs>,
-        inputs: &mut CreateInputs,
-    ) {
+    fn create(&mut self, context: &mut MegaContext<SandboxDb<'_>, ExtEnvs>, inputs: &CreateInputs) {
         let _ = context;
         let _ = inputs;
     }
@@ -235,6 +249,11 @@ pub trait SandboxObserver<ExtEnvs: ExternalEnvTypes> {
     }
 
     /// Called once with the terminal sandbox outcome. Paired with [`Self::sandbox_start`].
+    ///
+    /// When an internal database error aborts sandbox execution, the opcode-level
+    /// event stream may truncate on an unclosed frame (the upstream inspect path
+    /// propagates the error with `?`). [`sandbox_end`](Self::sandbox_end) is still
+    /// delivered and is the terminus of the event stream.
     #[inline]
     fn sandbox_end(&mut self, outcome: &SandboxEndOutcome) {
         let _ = outcome;
@@ -243,9 +262,9 @@ pub trait SandboxObserver<ExtEnvs: ExternalEnvTypes> {
 
 /// Adapts any HRTB-compatible revm [`Inspector`] into a [`SandboxObserver`].
 ///
-/// `call`/`create` override outcomes from the inner inspector are discarded.
-/// [`SandboxObserver::sandbox_start`] and [`SandboxObserver::sandbox_end`] keep
-/// their default empty implementations.
+/// `call`/`create` clone a temporary input copy for the inner inspector; that
+/// copy and any override outcome are discarded. [`SandboxObserver::sandbox_start`]
+/// and [`SandboxObserver::sandbox_end`] keep their default empty implementations.
 pub struct InspectorSandboxObserver<I>(pub I);
 
 impl<I> core::fmt::Debug for InspectorSandboxObserver<I> {
@@ -297,8 +316,9 @@ where
     }
 
     #[inline]
-    fn call(&mut self, context: &mut MegaContext<SandboxDb<'_>, E>, inputs: &mut CallInputs) {
-        let _ = self.0.call(context, inputs);
+    fn call(&mut self, context: &mut MegaContext<SandboxDb<'_>, E>, inputs: &CallInputs) {
+        let mut inputs = inputs.clone();
+        let _ = self.0.call(context, &mut inputs);
     }
 
     #[inline]
@@ -314,8 +334,9 @@ where
     }
 
     #[inline]
-    fn create(&mut self, context: &mut MegaContext<SandboxDb<'_>, E>, inputs: &mut CreateInputs) {
-        let _ = self.0.create(context, inputs);
+    fn create(&mut self, context: &mut MegaContext<SandboxDb<'_>, E>, inputs: &CreateInputs) {
+        let mut inputs = inputs.clone();
+        let _ = self.0.create(context, &mut inputs);
     }
 
     #[inline]

@@ -241,7 +241,8 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
     ///
     /// Forwards to [`MegaContext::set_keyless_sandbox_observer`]. The observer
     /// must implement [`SandboxObserver`] for both this EVM's [`ExtEnvs`] and
-    /// [`EmptyExternalEnv`]. `None` restores the no-observer sandbox path.
+    /// [`EmptyExternalEnv`]. Use [`Self::clear_keyless_sandbox_observer`] to
+    /// detach.
     pub fn set_keyless_sandbox_observer<O>(&mut self, observer: Option<Rc<RefCell<O>>>)
     where
         O: SandboxObserver<ExtEnvs> + SandboxObserver<EmptyExternalEnv> + 'static,
@@ -254,11 +255,19 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
     ///
     /// Forwards to [`MegaContext::set_keyless_sandbox_observer_for_parent_env`].
     /// Pre-REX4 sandboxes emit only `sandbox_start` / `sandbox_end`.
+    /// Use [`Self::clear_keyless_sandbox_observer`] to detach.
     pub fn set_keyless_sandbox_observer_for_parent_env(
         &mut self,
         observer: Option<Rc<RefCell<dyn SandboxObserver<ExtEnvs>>>>,
     ) {
         self.inner.ctx.set_keyless_sandbox_observer_for_parent_env(observer);
+    }
+
+    /// Detaches any sandbox observer from both env-type slots.
+    ///
+    /// Forwards to [`MegaContext::clear_keyless_sandbox_observer`].
+    pub fn clear_keyless_sandbox_observer(&mut self) {
+        self.inner.ctx.clear_keyless_sandbox_observer();
     }
 
     /// Provides a reference to the block environment.

@@ -7,17 +7,18 @@ use alloy_primitives::{address, hex, Address, Bytes, Signature, TxKind, B256, U2
 use alloy_sol_types::SolCall;
 use mega_evm::{
     alloy_consensus::{Signed, TxLegacy},
+    constants,
     revm::context::result::{ExecutionResult, ResultAndState},
     sandbox::{
         decode_error_result, InspectorSandboxObserver, SandboxCompletionKind, SandboxEndOutcome,
         SandboxObserver, SandboxRejectKind, SandboxStartInfo,
     },
-    test_utils::{BytecodeBuilder, MemoryDatabase},
+    test_utils::{BytecodeBuilder, ErrorInjectingDatabase, MemoryDatabase},
     EmptyExternalEnv, EvmTxRuntimeLimits, IKeylessDeploy, MegaContext, MegaEvm, MegaHaltReason,
     MegaSpecId, MegaTransaction, TestExternalEnvs, KEYLESS_DEPLOY_ADDRESS, MIN_BUCKET_SIZE,
 };
 use revm::{
-    bytecode::opcode::{CALL, POP, PUSH0, RETURN, STATICCALL},
+    bytecode::opcode::{BALANCE, CALL, POP, PUSH0, RETURN, STATICCALL},
     context::TxEnv,
     handler::EvmTr,
     inspector::NoOpInspector,
@@ -34,6 +35,8 @@ const LARGE_SIGNER_BALANCE: u128 = 1_000_000_000_000_000_000_000;
 const SIGNED_TX_GAS_LIMIT: u64 = 1_000_000;
 const REVERTER: Address = address!("0000000000000000000000000000000000aaaaaa");
 const IDENTITY_PRECOMPILE: Address = address!("0000000000000000000000000000000000000004");
+const MERGE_FAIL_SENTINEL: Address = address!("0000000000000000000000000000000000bbbbbb");
+const DEFAULT_OUTER_GAS_LIMIT: u64 = 1_000_000_000_000;
 
 const SPECS: [MegaSpecId; 5] =
     [MegaSpecId::REX2, MegaSpecId::REX3, MegaSpecId::REX4, MegaSpecId::REX5, MegaSpecId::REX6];
@@ -45,6 +48,7 @@ enum ObservedEvent {
         signer: Address,
         deploy_address: Address,
         gas_limit_override: u64,
+        effective_gas_limit: u64,
         tx_gas_limit: u64,
     },
     End(SandboxEndOutcome),
@@ -96,7 +100,7 @@ impl<E: mega_evm::ExternalEnvTypes> SandboxObserver<E> for RecordingObserver {
     fn call(
         &mut self,
         _context: &mut mega_evm::MegaContext<mega_evm::sandbox::SandboxDb<'_>, E>,
-        inputs: &mut CallInputs,
+        inputs: &CallInputs,
     ) {
         self.events.push(ObservedEvent::Call { target: inputs.target_address });
     }
@@ -113,7 +117,7 @@ impl<E: mega_evm::ExternalEnvTypes> SandboxObserver<E> for RecordingObserver {
     fn create(
         &mut self,
         _context: &mut mega_evm::MegaContext<mega_evm::sandbox::SandboxDb<'_>, E>,
-        _inputs: &mut CreateInputs,
+        _inputs: &CreateInputs,
     ) {
         self.events.push(ObservedEvent::Create);
     }
@@ -146,6 +150,7 @@ impl<E: mega_evm::ExternalEnvTypes> SandboxObserver<E> for RecordingObserver {
             signer: info.signer,
             deploy_address: info.deploy_address,
             gas_limit_override: info.gas_limit_override,
+            effective_gas_limit: info.effective_gas_limit,
             tx_gas_limit: info.tx_gas_limit,
         });
     }
@@ -209,6 +214,46 @@ fn constructor_calls_reverter() -> Bytes {
         .build()
 }
 
+fn constructor_touches_sentinel() -> Bytes {
+    BytecodeBuilder::default()
+        .push_address(MERGE_FAIL_SENTINEL)
+        .append(BALANCE)
+        .append(POP)
+        .sstore(U256::from(0), U256::from(1))
+        .push_number(1_u8)
+        .push_number(0_u8)
+        .push_number(0_u8)
+        .append(revm::bytecode::opcode::CODECOPY)
+        .push_number(1_u8)
+        .push_number(0_u8)
+        .append(RETURN)
+        .build()
+}
+
+fn split_create_initcode() -> Bytes {
+    let code_len = 8_000u32.to_be_bytes();
+    Bytes::from(vec![
+        revm::bytecode::opcode::PUSH1,
+        0x2a,
+        revm::bytecode::opcode::PUSH1,
+        0x02,
+        revm::bytecode::opcode::SSTORE,
+        revm::bytecode::opcode::PUSH1,
+        0x16,
+        revm::bytecode::opcode::PUSH1,
+        0x00,
+        revm::bytecode::opcode::KECCAK256,
+        revm::bytecode::opcode::POP,
+        revm::bytecode::opcode::PUSH3,
+        code_len[1],
+        code_len[2],
+        code_len[3],
+        revm::bytecode::opcode::PUSH1,
+        0x00,
+        revm::bytecode::opcode::RETURN,
+    ])
+}
+
 fn constructor_calls_identity_precompile() -> Bytes {
     BytecodeBuilder::default()
         .push_number(0_u8)
@@ -262,6 +307,18 @@ fn keyless_deploy_call_tx(
     keyless_deployment_tx: Bytes,
     gas_limit_override: u64,
 ) -> MegaTransaction {
+    keyless_deploy_call_tx_with_outer_gas(
+        keyless_deployment_tx,
+        gas_limit_override,
+        DEFAULT_OUTER_GAS_LIMIT,
+    )
+}
+
+fn keyless_deploy_call_tx_with_outer_gas(
+    keyless_deployment_tx: Bytes,
+    gas_limit_override: u64,
+    outer_gas_limit: u64,
+) -> MegaTransaction {
     let call_data = IKeylessDeploy::keylessDeployCall {
         keylessDeploymentTransaction: keyless_deployment_tx,
         gasLimitOverride: U256::from(gas_limit_override),
@@ -272,7 +329,7 @@ fn keyless_deploy_call_tx(
         kind: TxKind::Call(KEYLESS_DEPLOY_ADDRESS),
         data: call_data.into(),
         value: U256::ZERO,
-        gas_limit: 1_000_000_000_000,
+        gas_limit: outer_gas_limit,
         gas_price: 0,
         ..Default::default()
     };
@@ -294,6 +351,7 @@ struct RunConfig<'a, O> {
     gas_limit_override: u64,
     observer: Option<Rc<RefCell<O>>>,
     tx_limits: Option<EvmTxRuntimeLimits>,
+    outer_gas_limit: u64,
 }
 
 fn run_keyless<O>(config: RunConfig<'_, O>) -> ResultAndState<MegaHaltReason>
@@ -310,7 +368,11 @@ where
     }
     context.set_keyless_sandbox_observer(config.observer);
     let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);
-    let tx = keyless_deploy_call_tx(config.tx_bytes, config.gas_limit_override);
+    let tx = keyless_deploy_call_tx_with_outer_gas(
+        config.tx_bytes,
+        config.gas_limit_override,
+        config.outer_gas_limit,
+    );
     alloy_evm::Evm::transact_raw(&mut evm, tx).expect("keyless deploy transact")
 }
 
@@ -361,6 +423,7 @@ fn parity_pair(
         gas_limit_override: LARGE_GAS_LIMIT_OVERRIDE,
         observer: Some(observer),
         tx_limits,
+        outer_gas_limit: DEFAULT_OUTER_GAS_LIMIT,
     });
     let baseline = run_keyless(RunConfig {
         spec,
@@ -369,6 +432,7 @@ fn parity_pair(
         gas_limit_override: LARGE_GAS_LIMIT_OVERRIDE,
         observer: None::<Rc<RefCell<RecordingObserver>>>,
         tx_limits,
+        outer_gas_limit: DEFAULT_OUTER_GAS_LIMIT,
     });
     assert_result_and_state_eq(&observed, &baseline, case);
 }
@@ -388,6 +452,7 @@ fn run_with_recorder(
         gas_limit_override: LARGE_GAS_LIMIT_OVERRIDE,
         observer: Some(observer),
         tx_limits,
+        outer_gas_limit: DEFAULT_OUTER_GAS_LIMIT,
     });
     let events = recorder.borrow().events.clone();
     (result, events)
@@ -489,6 +554,43 @@ fn test_observer_parity_pre_rex4_with_nonempty_parent_env() {
             &observed,
             &baseline,
             &format!("pre-REX4 nonempty parent env {spec:?}"),
+        );
+    }
+}
+
+#[test]
+fn test_observer_parity_pre_rex4_with_nonempty_parent_env_on_constructor_revert() {
+    for spec in [MegaSpecId::REX2, MegaSpecId::REX3] {
+        let (tx_bytes, signer) = create_pre_eip155_deploy_tx(revert_constructor());
+        let mut db_obs = funded_db(signer);
+        let mut db_base = db_obs.clone();
+        let observer = Rc::new(RefCell::new(RecordingObserver::default()));
+        let env = crowded_parent_env();
+
+        let observed = run_keyless_with_parent_env(
+            spec,
+            &mut db_obs,
+            tx_bytes.clone(),
+            env.clone(),
+            Some(observer),
+        );
+        let baseline = run_keyless_with_parent_env(
+            spec,
+            &mut db_base,
+            tx_bytes,
+            env,
+            None::<Rc<RefCell<RecordingObserver>>>,
+        );
+
+        assert!(
+            baseline.result.is_success(),
+            "{spec:?} constructor revert is a success-style outer return: {:?}",
+            baseline.result
+        );
+        assert_result_and_state_eq(
+            &observed,
+            &baseline,
+            &format!("pre-REX4 nonempty parent env revert {spec:?}"),
         );
     }
 }
@@ -615,12 +717,14 @@ fn test_sandbox_start_end_pair_on_successful_deploy() {
                 signer: start_signer,
                 deploy_address: start_deploy,
                 gas_limit_override,
+                effective_gas_limit,
                 tx_gas_limit,
             } => {
                 assert_eq!(*start_spec, spec);
                 assert_eq!(*start_signer, signer);
                 assert_eq!(*start_deploy, deploy_address);
                 assert_eq!(*gas_limit_override, LARGE_GAS_LIMIT_OVERRIDE);
+                assert_eq!(*effective_gas_limit, LARGE_GAS_LIMIT_OVERRIDE);
                 assert_eq!(*tx_gas_limit, SIGNED_TX_GAS_LIMIT);
             }
             other => panic!("expected Start, got {other:?}"),
@@ -799,6 +903,7 @@ fn test_inspector_adapter_records_sandbox_create_for_generic_inspector() {
         gas_limit_override: LARGE_GAS_LIMIT_OVERRIDE,
         observer: Some(observer),
         tx_limits: None,
+        outer_gas_limit: DEFAULT_OUTER_GAS_LIMIT,
     });
     assert!(result.result.is_success(), "deploy should succeed: {:?}", result.result);
     assert!(
@@ -819,6 +924,142 @@ fn test_no_observer_skips_lifecycle_hooks() {
         gas_limit_override: LARGE_GAS_LIMIT_OVERRIDE,
         observer: None::<Rc<RefCell<RecordingObserver>>>,
         tx_limits: None,
+        outer_gas_limit: DEFAULT_OUTER_GAS_LIMIT,
     });
     assert!(result.result.is_success(), "default path must still succeed");
+}
+
+#[test]
+fn test_sandbox_start_info_rex5_caps_effective_gas_limit_below_override() {
+    const OVERRIDE: u64 = LARGE_GAS_LIMIT_OVERRIDE;
+    const OUTER_GAS: u64 = 5_000_000;
+
+    for spec in [MegaSpecId::REX5, MegaSpecId::REX6] {
+        let (tx_bytes, signer) = create_pre_eip155_deploy_tx(success_constructor());
+        let mut db = funded_db(signer);
+        let recorder = Rc::new(RefCell::new(RecordingObserver::default()));
+        let result = run_keyless(RunConfig {
+            spec,
+            db: &mut db,
+            tx_bytes,
+            gas_limit_override: OVERRIDE,
+            observer: Some(Rc::clone(&recorder)),
+            tx_limits: None,
+            outer_gas_limit: OUTER_GAS,
+        });
+        assert!(
+            result.result.is_success(),
+            "{spec:?} capped deploy should succeed: {:?}",
+            result.result
+        );
+
+        let events = recorder.borrow().events.clone();
+        assert_single_start_end_pair(&events);
+        match start_and_end(&events).0 {
+            ObservedEvent::Start {
+                gas_limit_override, effective_gas_limit, tx_gas_limit, ..
+            } => {
+                assert_eq!(*gas_limit_override, OVERRIDE, "{spec:?}: decoded override");
+                assert_eq!(*tx_gas_limit, SIGNED_TX_GAS_LIMIT);
+                assert!(
+                    *effective_gas_limit < OVERRIDE,
+                    "{spec:?}: effective_gas_limit ({effective_gas_limit}) must be capped below override ({OVERRIDE})"
+                );
+                assert!(
+                    *effective_gas_limit >= SIGNED_TX_GAS_LIMIT,
+                    "{spec:?}: effective_gas_limit ({effective_gas_limit}) must still cover the signed tx gas limit"
+                );
+                assert!(
+                    *effective_gas_limit + constants::rex2::KEYLESS_DEPLOY_OVERHEAD_GAS
+                        <= OUTER_GAS,
+                    "{spec:?}: effective_gas_limit plus dispatch overhead must fit in the outer envelope"
+                );
+            }
+            other => panic!("{spec:?}: expected Start, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn test_observer_parity_split_create_through_interceptor() {
+    const COMPUTE_BUDGET: u64 = 1_000_000;
+    let limits = EvmTxRuntimeLimits::no_limits().with_tx_compute_gas_limit(COMPUTE_BUDGET);
+
+    for spec in [MegaSpecId::REX2, MegaSpecId::REX3, MegaSpecId::REX4] {
+        let (tx_bytes, signer) = create_pre_eip155_deploy_tx(split_create_initcode());
+        let mut db_obs = funded_db(signer);
+        let mut db_base = db_obs.clone();
+        let observer = Rc::new(RefCell::new(RecordingObserver::default()));
+
+        let observed = run_keyless(RunConfig {
+            spec,
+            db: &mut db_obs,
+            tx_bytes: tx_bytes.clone(),
+            gas_limit_override: LARGE_GAS_LIMIT_OVERRIDE,
+            observer: Some(observer),
+            tx_limits: Some(limits),
+            outer_gas_limit: DEFAULT_OUTER_GAS_LIMIT,
+        });
+        let baseline = run_keyless(RunConfig {
+            spec,
+            db: &mut db_base,
+            tx_bytes,
+            gas_limit_override: LARGE_GAS_LIMIT_OVERRIDE,
+            observer: None::<Rc<RefCell<RecordingObserver>>>,
+            tx_limits: Some(limits),
+            outer_gas_limit: DEFAULT_OUTER_GAS_LIMIT,
+        });
+
+        assert_result_and_state_eq(
+            &observed,
+            &baseline,
+            &format!("split-CREATE interceptor {spec:?}"),
+        );
+    }
+}
+
+#[test]
+fn test_sandbox_end_not_applied_apply_failed_on_merge_db_error() {
+    let spec = MegaSpecId::REX5;
+    let (tx_bytes, signer) = create_pre_eip155_deploy_tx(constructor_touches_sentinel());
+    let mut inner = funded_db(signer);
+    inner.set_account_balance(MERGE_FAIL_SENTINEL, U256::from(1));
+
+    let mut db = ErrorInjectingDatabase::new(inner);
+    db.fail_on_account = Some(MERGE_FAIL_SENTINEL);
+    // Occupancy / sandbox execution load the sentinel once; merge inspects it again.
+    db.fail_on_account_skip = 1;
+
+    let recorder = Rc::new(RefCell::new(RecordingObserver::default()));
+    let mut context = MegaContext::new(&mut db, spec);
+    context.modify_chain(|chain| {
+        chain.operator_fee_scalar = Some(U256::ZERO);
+        chain.operator_fee_constant = Some(U256::ZERO);
+    });
+    context.set_keyless_sandbox_observer(Some(Rc::clone(&recorder)));
+    let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);
+    let tx = keyless_deploy_call_tx(tx_bytes, LARGE_GAS_LIMIT_OVERRIDE);
+    let result = alloy_evm::Evm::transact_raw(&mut evm, tx).expect("outer transact");
+    let events = recorder.borrow().events.clone();
+
+    assert!(
+        matches!(result.result, ExecutionResult::Revert { .. }),
+        "merge DB error must revert the outer call: {:?}",
+        result.result
+    );
+    let error = match &result.result {
+        ExecutionResult::Revert { output, .. } => decode_error_result(output),
+        other => panic!("expected revert, got {other:?}"),
+    };
+    assert!(
+        matches!(error, Some(mega_evm::sandbox::KeylessDeployError::InternalError)),
+        "apply failure surfaces as InternalError, got {error:?}"
+    );
+    assert_single_start_end_pair(&events);
+    match start_and_end(&events).1 {
+        ObservedEvent::End(SandboxEndOutcome::NotApplied {
+            reason: SandboxRejectKind::ApplyFailed,
+        }) => {}
+        other => panic!("expected NotApplied(ApplyFailed), got {other:?}"),
+    }
 }

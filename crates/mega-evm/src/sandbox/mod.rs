@@ -71,10 +71,12 @@
 //! attach a [`SandboxObserver`] via [`crate::MegaContext::set_keyless_sandbox_observer`]
 //! (also forwarded from [`crate::MegaEvm`] and [`crate::MegaBlockExecutor`]). The observer
 //! sees interpreter hooks inside the sandbox plus a paired `sandbox_start` / `sandbox_end`
-//! lifecycle. Observation is read-only and cannot short-circuit `CALL`/`CREATE`.
-//! Reverted inner frames still emit their events; whether sandbox state was applied to
-//! the parent is reported by [`SandboxEndOutcome::state_applied`]. With no observer
-//! attached the sandbox path is unchanged.
+//! lifecycle. Observation cannot short-circuit `CALL`/`CREATE`. A compliant (read-only)
+//! observer does not change execution results; no such guarantee is made for an observer
+//! that mutates interpreter or context state. Reverted inner frames still emit their
+//! events; whether sandbox state was applied to the parent is reported by
+//! [`SandboxEndOutcome::state_applied`]. With no observer attached the sandbox path is
+//! unchanged.
 //!
 //! Observation does not change sandbox external-env semantics: pre-REX4 sandboxes
 //! always run with [`crate::EmptyExternalEnv`] (minimum bucket capacity, no oracle

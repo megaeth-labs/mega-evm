@@ -156,8 +156,8 @@ where
     ///
     /// Forwards to [`crate::MegaEvm::set_keyless_sandbox_observer`]. The observer
     /// must implement [`crate::sandbox::SandboxObserver`] for both this executor's
-    /// `ExtEnvs` and [`crate::EmptyExternalEnv`]. `None` restores the no-observer
-    /// sandbox path.
+    /// `ExtEnvs` and [`crate::EmptyExternalEnv`]. Use
+    /// [`Self::clear_keyless_sandbox_observer`] to detach.
     pub fn set_keyless_sandbox_observer<O>(&mut self, observer: Option<Rc<RefCell<O>>>)
     where
         O: crate::sandbox::SandboxObserver<ExtEnvs>
@@ -172,11 +172,19 @@ where
     ///
     /// Forwards to [`crate::MegaEvm::set_keyless_sandbox_observer_for_parent_env`].
     /// Pre-REX4 sandboxes emit only `sandbox_start` / `sandbox_end`.
+    /// Use [`Self::clear_keyless_sandbox_observer`] to detach.
     pub fn set_keyless_sandbox_observer_for_parent_env(
         &mut self,
         observer: Option<Rc<RefCell<dyn crate::sandbox::SandboxObserver<ExtEnvs>>>>,
     ) {
         self.evm.set_keyless_sandbox_observer_for_parent_env(observer);
+    }
+
+    /// Detaches any sandbox observer from both env-type slots.
+    ///
+    /// Forwards to [`crate::MegaEvm::clear_keyless_sandbox_observer`].
+    pub fn clear_keyless_sandbox_observer(&mut self) {
+        self.evm.clear_keyless_sandbox_observer();
     }
 }
 
