@@ -11,15 +11,15 @@ use alloc as std;
 use core::ops::Range;
 use std::vec::Vec;
 
-use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
+use alloy_primitives::{keccak256, Address, Bytes, B256, U256};
 use revm::{
-    Inspector,
     bytecode::opcode,
     context::ContextTr,
     interpreter::{
-        CallInputs, CallOutcome, CreateInputs, CreateOutcome, Interpreter, InterpreterTypes,
         interpreter_types::{InputsTr, Jumps, LoopControl, MemoryTr},
+        CallInputs, CallOutcome, CreateInputs, CreateOutcome, Interpreter, InterpreterTypes,
     },
+    Inspector,
 };
 
 use crate::{JournalInspectTr, MegaSpecId, StackInspectTr};
@@ -124,8 +124,7 @@ impl KeylessSandboxEvidenceRecorder {
         };
         if reverted {
             self.evidence.operations.truncate(snapshot.operations_len);
-            self.evidence.observed_pre_rex5_split_create =
-                snapshot.observed_pre_rex5_split_create;
+            self.evidence.observed_pre_rex5_split_create = snapshot.observed_pre_rex5_split_create;
         }
     }
 
@@ -137,17 +136,15 @@ impl KeylessSandboxEvidenceRecorder {
         // This journal read is needed only for MegaETH's frozen historical
         // split outcome. Gating before the read avoids making ordinary and
         // REX5+ failed CREATEs depend on journal/code hydration behavior.
-        if !self.spec.is_enabled(MegaSpecId::MINI_REX)
-            || self.spec.is_enabled(MegaSpecId::REX5)
-            || outcome.result.result.is_ok()
+        if !self.spec.is_enabled(MegaSpecId::MINI_REX) ||
+            self.spec.is_enabled(MegaSpecId::REX5) ||
+            outcome.result.result.is_ok()
         {
             return false;
         }
 
         outcome.address.is_some_and(|address| {
-            context
-                .inspect_account(address, false)
-                .is_ok_and(|account| account.is_created())
+            context.inspect_account(address, false).is_ok_and(|account| account.is_created())
         })
     }
 }
@@ -164,9 +161,7 @@ where
 
         if opcode == opcode::SSTORE {
             if let Some(slot) = interp.stack.inspect::<0>() {
-                self.evidence
-                    .operations
-                    .push(KeylessSandboxEvidenceOp::Sstore { address, slot });
+                self.evidence.operations.push(KeylessSandboxEvidenceOp::Sstore { address, slot });
             }
         } else if opcode == opcode::KECCAK256 {
             let Some(offset) = interp.stack.inspect::<0>() else {
@@ -194,21 +189,17 @@ where
             return;
         }
 
-        let preimage = executed_keccak_preimage(
-            pending.offset,
-            pending.size,
-            interp.memory.size(),
-            |range| Bytes::copy_from_slice(interp.memory.slice(range).as_ref()),
-        )
-        .expect("successful KECCAK256 must expose its executed memory range");
+        let preimage =
+            executed_keccak_preimage(pending.offset, pending.size, interp.memory.size(), |range| {
+                Bytes::copy_from_slice(interp.memory.slice(range).as_ref())
+            })
+            .expect("successful KECCAK256 must expose its executed memory range");
         let hash = keccak256(preimage.as_ref());
-        self.evidence
-            .operations
-            .push(KeylessSandboxEvidenceOp::Keccak {
-                address: pending.address,
-                preimage,
-                hash,
-            });
+        self.evidence.operations.push(KeylessSandboxEvidenceOp::Keccak {
+            address: pending.address,
+            preimage,
+            hash,
+        });
     }
 
     fn call(&mut self, _context: &mut CTX, _inputs: &mut CallInputs) -> Option<CallOutcome> {
@@ -216,20 +207,11 @@ where
         None
     }
 
-    fn call_end(
-        &mut self,
-        _context: &mut CTX,
-        _inputs: &CallInputs,
-        outcome: &mut CallOutcome,
-    ) {
+    fn call_end(&mut self, _context: &mut CTX, _inputs: &CallInputs, outcome: &mut CallOutcome) {
         self.finish_frame(!outcome.result.result.is_ok());
     }
 
-    fn create(
-        &mut self,
-        _context: &mut CTX,
-        _inputs: &mut CreateInputs,
-    ) -> Option<CreateOutcome> {
+    fn create(&mut self, _context: &mut CTX, _inputs: &mut CreateInputs) -> Option<CreateOutcome> {
         self.push_frame_snapshot();
         None
     }
@@ -248,11 +230,7 @@ where
 
 fn u256_to_usize(value: U256) -> Option<usize> {
     let limbs = value.as_limbs();
-    if (limbs[0] > usize::MAX as u64)
-        | (limbs[1] != 0)
-        | (limbs[2] != 0)
-        | (limbs[3] != 0)
-    {
+    if (limbs[0] > usize::MAX as u64) | (limbs[1] != 0) | (limbs[2] != 0) | (limbs[3] != 0) {
         return None;
     }
     Some(limbs[0] as usize)

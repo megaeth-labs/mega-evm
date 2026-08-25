@@ -23,9 +23,9 @@ use mega_evm::{
 };
 use revm::{
     bytecode::opcode::{
-        CALL, CALLDATACOPY, CALLDATASIZE, CODECOPY, CREATE, GAS, ISZERO, JUMPDEST, JUMPI, LOG0,
-        KECCAK256, MLOAD, MSTORE, MSTORE8, POP, PUSH0, RETURN, RETURNDATACOPY, RETURNDATASIZE,
-        REVERT, SELFDESTRUCT, SSTORE, STATICCALL, STOP, TIMESTAMP,
+        CALL, CALLDATACOPY, CALLDATASIZE, CODECOPY, CREATE, GAS, ISZERO, JUMPDEST, JUMPI,
+        KECCAK256, LOG0, MLOAD, MSTORE, MSTORE8, POP, PUSH0, RETURN, RETURNDATACOPY,
+        RETURNDATASIZE, REVERT, SELFDESTRUCT, SSTORE, STATICCALL, STOP, TIMESTAMP,
     },
     context::TxEnv,
     Database, DatabaseCommit,
@@ -69,10 +69,7 @@ fn call_keyless_deploy_with_evidence(
     db: &mut MemoryDatabase,
     tx_bytes: Bytes,
     capture: bool,
-) -> (
-    ResultAndState<mega_evm::MegaHaltReason>,
-    Vec<KeylessSandboxEvidence>,
-) {
+) -> (ResultAndState<mega_evm::MegaHaltReason>, Vec<KeylessSandboxEvidence>) {
     let call_data = IKeylessDeploy::keylessDeployCall {
         keylessDeploymentTransaction: tx_bytes,
         gasLimitOverride: U256::from(LARGE_GAS_LIMIT_OVERRIDE),
@@ -325,20 +322,15 @@ fn successful_init_code_calling(address: Address) -> Bytes {
 
 #[test]
 fn test_keyless_sandbox_capture_preserves_successful_sstore_and_keccak_across_specs() {
-    for spec in [
-        MegaSpecId::REX2,
-        MegaSpecId::REX3,
-        MegaSpecId::REX4,
-        MegaSpecId::REX5,
-        MegaSpecId::REX6,
-    ] {
+    for spec in
+        [MegaSpecId::REX2, MegaSpecId::REX3, MegaSpecId::REX4, MegaSpecId::REX5, MegaSpecId::REX6]
+    {
         let mut db = MemoryDatabase::default();
         let (tx_bytes, signer) = create_pre_eip155_deploy_tx(keyless_evidence_success_init_code());
         let deployed = calculate_deploy_address_for_tx(tx_bytes.as_ref());
         db.set_account_balance(signer, U256::from(1_000_000_000_000_000_000_000u128));
 
-        let (result, artifacts) =
-            call_keyless_deploy_with_evidence(spec, &mut db, tx_bytes, true);
+        let (result, artifacts) = call_keyless_deploy_with_evidence(spec, &mut db, tx_bytes, true);
         assert!(
             matches!(result.result, ExecutionResult::Success { .. }),
             "{spec}: outer KeylessDeploy call must succeed"
@@ -349,10 +341,7 @@ fn test_keyless_sandbox_capture_preserves_successful_sstore_and_keccak_across_sp
         assert_eq!(artifact.operations().len(), 2);
         assert_eq!(
             artifact.operations()[0],
-            KeylessSandboxEvidenceOp::Sstore {
-                address: deployed,
-                slot: U256::from(2),
-            }
+            KeylessSandboxEvidenceOp::Sstore { address: deployed, slot: U256::from(2) }
         );
         match &artifact.operations()[1] {
             KeylessSandboxEvidenceOp::Keccak { address, preimage, hash } => {
@@ -384,8 +373,7 @@ fn test_keyless_sandbox_capture_discards_ordinary_reverted_frame_evidence() {
         let (tx_bytes, signer) = create_pre_eip155_deploy_tx(keyless_evidence_revert_init_code());
         db.set_account_balance(signer, U256::from(1_000_000_000_000_000_000_000u128));
 
-        let (result, artifacts) =
-            call_keyless_deploy_with_evidence(spec, &mut db, tx_bytes, true);
+        let (result, artifacts) = call_keyless_deploy_with_evidence(spec, &mut db, tx_bytes, true);
         assert!(
             matches!(result.result, ExecutionResult::Success { .. }),
             "{spec}: KeylessDeploy reports inner execution failure in success-shaped ABI output"
@@ -437,13 +425,9 @@ fn test_keyless_sandbox_capture_retains_real_pre_rex5_split_evidence() {
             LARGE_GAS_LIMIT_OVERRIDE,
         );
         let deployed = calculate_deploy_address_for_tx(tx_bytes.as_ref());
-        db.set_account_balance(
-            signer,
-            U256::from(1_000_000_000_000_000_000_000_000_000_000u128),
-        );
+        db.set_account_balance(signer, U256::from(1_000_000_000_000_000_000_000_000_000_000u128));
 
-        let (result, artifacts) =
-            call_keyless_deploy_with_evidence(spec, &mut db, tx_bytes, true);
+        let (result, artifacts) = call_keyless_deploy_with_evidence(spec, &mut db, tx_bytes, true);
         assert!(matches!(result.result, ExecutionResult::Success { .. }));
         let account = result
             .state
@@ -466,13 +450,9 @@ fn test_keyless_sandbox_capture_discards_real_rex5_atomic_failure_evidence() {
             LARGE_GAS_LIMIT_OVERRIDE,
         );
         let deployed = calculate_deploy_address_for_tx(tx_bytes.as_ref());
-        db.set_account_balance(
-            signer,
-            U256::from(1_000_000_000_000_000_000_000_000_000_000u128),
-        );
+        db.set_account_balance(signer, U256::from(1_000_000_000_000_000_000_000_000_000_000u128));
 
-        let (result, artifacts) =
-            call_keyless_deploy_with_evidence(spec, &mut db, tx_bytes, true);
+        let (result, artifacts) = call_keyless_deploy_with_evidence(spec, &mut db, tx_bytes, true);
         assert!(matches!(result.result, ExecutionResult::Success { .. }));
         if let Some(account) = result.state.get(&deployed) {
             assert!(!account.is_created(), "{spec}: atomic failure retained {account:?}");

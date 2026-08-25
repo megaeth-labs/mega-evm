@@ -639,24 +639,10 @@ pub(crate) fn execute_keyless_deploy_sandbox<DB: AlloyDatabase, ExtEnvs: Externa
         let sandbox_ctx = MegaContext::<_, ExtEnvs>::new_with_shared_ext_envs(
             sandbox_db, mega_spec, salt_env, oracle_env,
         );
-        run_sandbox_ctx(
-            sandbox_ctx,
-            sandbox_tx,
-            sandbox_tx_limits,
-            block,
-            chain,
-            capture_evidence,
-        )
+        run_sandbox_ctx(sandbox_ctx, sandbox_tx, sandbox_tx_limits, block, chain, capture_evidence)
     } else {
         let sandbox_ctx = MegaContext::new(sandbox_db, mega_spec);
-        run_sandbox_ctx(
-            sandbox_ctx,
-            sandbox_tx,
-            sandbox_tx_limits,
-            block,
-            chain,
-            capture_evidence,
-        )
+        run_sandbox_ctx(sandbox_ctx, sandbox_tx, sandbox_tx_limits, block, chain, capture_evidence)
     }
 }
 
@@ -1268,11 +1254,8 @@ fn validate_signer_code<DB: AlloyDatabase, ExtEnvs: ExternalEnvTypes>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{KeylessSandboxEvidenceOp, test_utils::MemoryDatabase};
-    use revm::{
-        bytecode::opcode,
-        context::result::Output,
-    };
+    use crate::{test_utils::MemoryDatabase, KeylessSandboxEvidenceOp};
+    use revm::{bytecode::opcode, context::result::Output};
 
     const EVIDENCE_TEST_CALLER: Address = Address::repeat_byte(0x20);
     const EVIDENCE_TEST_SLOT: U256 = U256::from_limbs([2, 0, 0, 0]);
@@ -1305,10 +1288,7 @@ mod tests {
 
     fn run_split_evidence_fixture(spec: MegaSpecId) -> SandboxOutcome {
         let mut db = MemoryDatabase::default();
-        db.set_account_balance(
-            EVIDENCE_TEST_CALLER,
-            U256::from(10_000_000_000_000_000_000u128),
-        );
+        db.set_account_balance(EVIDENCE_TEST_CALLER, U256::from(10_000_000_000_000_000_000u128));
         let mut context = MegaContext::new(db, spec);
         context.modify_chain(|chain| {
             chain.operator_fee_scalar = Some(U256::ZERO);
@@ -1332,8 +1312,8 @@ mod tests {
             tx.deposit.source_hash = SANDBOX_TX_SOURCE_HASH;
         }
 
-        let limits = EvmTxRuntimeLimits::no_limits()
-            .with_tx_compute_gas_limit(EVIDENCE_TEST_COMPUTE_BUDGET);
+        let limits =
+            EvmTxRuntimeLimits::no_limits().with_tx_compute_gas_limit(EVIDENCE_TEST_COMPUTE_BUDGET);
         run_sandbox_ctx(context, tx, Some(limits), block, chain, true)
     }
 
@@ -1347,18 +1327,12 @@ mod tests {
         let deployed = EVIDENCE_TEST_CALLER.create(0);
 
         assert!(state.get(&deployed).is_some_and(|account| account.is_created()));
-        assert_eq!(
-            state[&deployed].storage[&EVIDENCE_TEST_SLOT].present_value(),
-            U256::from(0x2a),
-        );
+        assert_eq!(state[&deployed].storage[&EVIDENCE_TEST_SLOT].present_value(), U256::from(0x2a),);
         assert!(evidence.observed_pre_rex5_split_create());
         assert_eq!(evidence.operations().len(), 2);
         assert_eq!(
             evidence.operations()[0],
-            KeylessSandboxEvidenceOp::Sstore {
-                address: deployed,
-                slot: EVIDENCE_TEST_SLOT,
-            },
+            KeylessSandboxEvidenceOp::Sstore { address: deployed, slot: EVIDENCE_TEST_SLOT },
         );
         assert!(matches!(
             &evidence.operations()[1],

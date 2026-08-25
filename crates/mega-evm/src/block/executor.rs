@@ -154,15 +154,12 @@ where
     /// Enables or disables execution-evidence capture for accepted
     /// KeylessDeploy sandboxes.
     pub fn set_keyless_sandbox_evidence_capture(&mut self, enabled: bool) {
-        self.evm
-            .set_keyless_sandbox_evidence_capture(enabled);
+        self.evm.set_keyless_sandbox_evidence_capture(enabled);
     }
 
     /// Drains accepted KeylessDeploy sandbox evidence accumulated since the
     /// previous call.
-    pub fn take_keyless_sandbox_evidence(
-        &mut self,
-    ) -> Vec<crate::KeylessSandboxEvidence> {
+    pub fn take_keyless_sandbox_evidence(&mut self) -> Vec<crate::KeylessSandboxEvidence> {
         self.evm.take_keyless_sandbox_evidence()
     }
 }

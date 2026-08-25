@@ -489,10 +489,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
 
     /// Publishes evidence only after the sandbox state has passed every
     /// acceptance check and has been applied to the parent journal.
-    pub(crate) fn publish_keyless_sandbox_evidence(
-        &mut self,
-        evidence: KeylessSandboxEvidence,
-    ) {
+    pub(crate) fn publish_keyless_sandbox_evidence(&mut self, evidence: KeylessSandboxEvidence) {
         if self.capture_keyless_sandbox_evidence {
             self.keyless_sandbox_evidence.push(evidence);
         }
