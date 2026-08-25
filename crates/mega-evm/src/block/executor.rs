@@ -1,6 +1,7 @@
 #[cfg(not(feature = "std"))]
 use alloc as std;
-use std::{boxed::Box, collections::BTreeMap, vec::Vec};
+use core::cell::RefCell;
+use std::{boxed::Box, collections::BTreeMap, rc::Rc, vec::Vec};
 
 use alloy_consensus::{Eip658Value, Header, Transaction, TxReceipt};
 use alloy_eips::{Encodable2718, Typed2718};
@@ -149,6 +150,17 @@ where
     /// Gets a reference to the inspector in the `MegaEVM`.
     pub fn inspector(&self) -> &INSP {
         self.evm.inspector()
+    }
+
+    /// Attaches an observer for nested sandbox execution.
+    ///
+    /// Forwards to [`crate::MegaEvm::set_keyless_sandbox_observer`]. `None`
+    /// restores the no-observer sandbox path.
+    pub fn set_keyless_sandbox_observer(
+        &mut self,
+        observer: Option<Rc<RefCell<dyn crate::sandbox::SandboxObserver<ExtEnvs>>>>,
+    ) {
+        self.evm.set_keyless_sandbox_observer(observer);
     }
 }
 

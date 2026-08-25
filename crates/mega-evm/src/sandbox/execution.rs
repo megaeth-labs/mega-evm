@@ -32,6 +32,7 @@
 
 #[cfg(not(feature = "std"))]
 use alloc as std;
+use core::cell::RefCell;
 use std::{rc::Rc, vec::Vec};
 
 use alloy_consensus::{Signed, Transaction as AlloyTransaction, TxLegacy};
@@ -68,6 +69,10 @@ use super::{
 
 use super::{
     error::{encode_error_result, KeylessDeployError},
+    observer::{
+        ObserverBridge, SandboxCompletionKind, SandboxEndOutcome, SandboxObserver,
+        SandboxRejectKind, SandboxStartInfo,
+    },
     state::SandboxDb,
 };
 
@@ -441,6 +446,20 @@ pub fn execute_keyless_deploy_call<DB: AlloyDatabase, ExtEnvs: ExternalEnvTypes>
     }
 
     // Step 9: Execute sandbox and apply state changes.
+    //
+    // INVARIANT: when an observer is attached, `sandbox_start` and `sandbox_end`
+    // fire exactly once on this path, covering every terminal arm below.
+    let observer = ctx.keyless_sandbox_observer.clone();
+    if let Some(obs) = &observer {
+        obs.borrow_mut().sandbox_start(&SandboxStartInfo {
+            spec: ctx.spec,
+            signer: deploy_signer,
+            deploy_address,
+            gas_limit_override: gas_limit_override_u64,
+            tx_gas_limit,
+        });
+    }
+
     match execute_keyless_deploy_sandbox(ctx, sandbox_tx, sandbox_tx_limits) {
         SandboxOutcome::Completed { state, completion, limit_usage, volatile_accesses } => {
             let gas_used = completion.gas_used();
@@ -455,11 +474,21 @@ pub fn execute_keyless_deploy_call<DB: AlloyDatabase, ExtEnvs: ExternalEnvTypes>
                     gas_used,
                     &return_memory_offset,
                 ) {
+                    notify_sandbox_end(
+                        &observer,
+                        SandboxEndOutcome::NotApplied {
+                            reason: SandboxRejectKind::PostAccountingHalt,
+                        },
+                    );
                     return halt;
                 }
             }
 
             if let Err(e) = apply_sandbox_state(ctx, state, deploy_signer) {
+                notify_sandbox_end(
+                    &observer,
+                    SandboxEndOutcome::NotApplied { reason: SandboxRejectKind::ApplyFailed },
+                );
                 return make_error!(e);
             }
 
@@ -470,17 +499,37 @@ pub fn execute_keyless_deploy_call<DB: AlloyDatabase, ExtEnvs: ExternalEnvTypes>
             match completion {
                 SandboxCompletion::Deployed { gas_used, deploy_address: deployed, logs } => {
                     if deployed != deploy_address {
+                        notify_sandbox_end(
+                            &observer,
+                            SandboxEndOutcome::NotApplied {
+                                reason: SandboxRejectKind::AddressMismatch,
+                            },
+                        );
                         return make_error!(KeylessDeployError::AddressMismatch);
                     }
                     for log in logs {
                         ctx.log(log);
                     }
+                    notify_sandbox_end(
+                        &observer,
+                        SandboxEndOutcome::Applied {
+                            completion: SandboxCompletionKind::Deployed,
+                            gas_used,
+                        },
+                    );
                     make_success!(gas_used, deployed)
                 }
                 SandboxCompletion::EmptyCode { gas_used, logs } => {
                     for log in logs {
                         ctx.log(log);
                     }
+                    notify_sandbox_end(
+                        &observer,
+                        SandboxEndOutcome::Applied {
+                            completion: SandboxCompletionKind::EmptyCode,
+                            gas_used,
+                        },
+                    );
                     make_execution_failure!(
                         gas_used,
                         KeylessDeployError::EmptyCodeDeployed { gas_used }
@@ -491,6 +540,13 @@ pub fn execute_keyless_deploy_call<DB: AlloyDatabase, ExtEnvs: ExternalEnvTypes>
                     // nonce bump from `make_create_frame`, plus any committed sandbox
                     // writes) persists; outer caller sees the failure reason in
                     // `errorData`.
+                    notify_sandbox_end(
+                        &observer,
+                        SandboxEndOutcome::Applied {
+                            completion: SandboxCompletionKind::ExecutionFailed,
+                            gas_used,
+                        },
+                    );
                     make_execution_failure!(gas_used, error)
                 }
             }
@@ -504,6 +560,10 @@ pub fn execute_keyless_deploy_call<DB: AlloyDatabase, ExtEnvs: ExternalEnvTypes>
             if ctx.spec.is_enabled(MegaSpecId::REX5) {
                 gas.erase_cost(gas_limit_override_u64);
             }
+            notify_sandbox_end(
+                &observer,
+                SandboxEndOutcome::NotApplied { reason: SandboxRejectKind::Rejected },
+            );
             make_error!(e)
         }
     }
@@ -562,11 +622,15 @@ pub(crate) fn execute_keyless_deploy_sandbox<DB: AlloyDatabase, ExtEnvs: Externa
     let mega_spec = ctx.mega_spec();
     let block = ctx.block().clone();
     let chain = ctx.chain().clone();
+    let observer = ctx.keyless_sandbox_observer.clone();
 
     // REX4+: Clone Rc references to parent's external envs before `journal_mut()` mutably
     // borrows `ctx`, after which its fields are no longer accessible.
-    let shared_external_envs = mega_spec
-        .is_enabled(MegaSpecId::REX4)
+    // An attached observer needs the sandbox context to use the same `ExtEnvs` as
+    // the parent (the observer trait is parameterized by that type), so the
+    // shared-env constructor is also used on the observed pre-REX4 path.
+    // The zero-observer pre-REX4 path still builds `EmptyExternalEnv`.
+    let shared_external_envs = (mega_spec.is_enabled(MegaSpecId::REX4) || observer.is_some())
         .then(|| (Rc::clone(&ctx.salt_env), Rc::clone(&ctx.oracle_env)));
 
     // Deliberately do not merge `DynamicGasCost.accessed_bucket_ids` back into the
@@ -614,30 +678,31 @@ pub(crate) fn execute_keyless_deploy_sandbox<DB: AlloyDatabase, ExtEnvs: Externa
     }
 
     // Execute sandbox - using type-erased SandboxDb prevents infinite type instantiation.
-    // The two branches differ only in which MegaContext constructor to use: REX4+ shares
-    // the parent's salt and oracle envs, while pre-REX4 creates an EmptyExternalEnv for
-    // backward compatibility. Everything after context construction is identical and is
-    // factored into `run_sandbox_ctx`.
+    // REX4+ (and any observed run) shares the parent's salt and oracle envs so the
+    // sandbox `ExtEnvs` matches the observer. The zero-observer pre-REX4 path still
+    // builds `EmptyExternalEnv` for backward compatibility. Everything after context
+    // construction is factored into `run_sandbox_ctx`.
     if let Some((salt_env, oracle_env)) = shared_external_envs {
         let sandbox_ctx = MegaContext::<_, ExtEnvs>::new_with_shared_ext_envs(
             sandbox_db, mega_spec, salt_env, oracle_env,
         );
-        run_sandbox_ctx(sandbox_ctx, sandbox_tx, sandbox_tx_limits, block, chain)
+        run_sandbox_ctx(sandbox_ctx, sandbox_tx, sandbox_tx_limits, block, chain, observer)
     } else {
         let sandbox_ctx = MegaContext::new(sandbox_db, mega_spec);
-        run_sandbox_ctx(sandbox_ctx, sandbox_tx, sandbox_tx_limits, block, chain)
+        run_sandbox_ctx(sandbox_ctx, sandbox_tx, sandbox_tx_limits, block, chain, None)
     }
 }
 
 /// Applies the shared sandbox-context configuration, runs the sandbox tx, and returns the
 /// processed outcome. Factored out of `execute_keyless_deploy_sandbox` so the REX4+ and
 /// pre-REX4 branches only differ in the `MegaContext` constructor they call.
-fn run_sandbox_ctx<DB: AlloyDatabase, ExtEnvs: ExternalEnvTypes>(
-    sandbox_ctx: MegaContext<DB, ExtEnvs>,
+fn run_sandbox_ctx<'db, ExtEnvs: ExternalEnvTypes>(
+    sandbox_ctx: MegaContext<SandboxDb<'db>, ExtEnvs>,
     sandbox_tx: MegaTransaction,
     sandbox_tx_limits: Option<EvmTxRuntimeLimits>,
     block: BlockEnv,
     chain: L1BlockInfo,
+    observer: Option<Rc<RefCell<dyn SandboxObserver<ExtEnvs>>>>,
 ) -> SandboxOutcome {
     let sandbox_ctx = match sandbox_tx_limits {
         Some(limits) => sandbox_ctx.with_tx_runtime_limits(limits),
@@ -646,18 +711,46 @@ fn run_sandbox_ctx<DB: AlloyDatabase, ExtEnvs: ExternalEnvTypes>(
     let sandbox_ctx = sandbox_ctx.with_block(block).with_chain(chain).with_inside_sandbox(true);
     let is_rex5_enabled = sandbox_ctx.mega_spec().is_enabled(MegaSpecId::REX5);
     let is_rex6_enabled = sandbox_ctx.mega_spec().is_enabled(MegaSpecId::REX6);
-    let mut sandbox_evm = MegaEvm::new(sandbox_ctx);
-    let result = sandbox_evm.transact_raw(sandbox_tx);
-    let limit_usage = sandbox_evm.ctx.additional_limit.borrow().get_usage();
-    let volatile_accesses =
-        sandbox_evm.ctx.volatile_data_tracker.borrow().get_volatile_data_accessed();
-    process_sandbox_transact_result(
-        result,
-        limit_usage,
-        volatile_accesses,
-        is_rex5_enabled,
-        is_rex6_enabled,
-    )
+    if let Some(observer) = observer {
+        let mut sandbox_evm =
+            MegaEvm::new(sandbox_ctx).with_inspector(ObserverBridge::new(observer));
+        let result = sandbox_evm.transact_raw(sandbox_tx);
+        let limit_usage = sandbox_evm.ctx.additional_limit.borrow().get_usage();
+        let volatile_accesses =
+            sandbox_evm.ctx.volatile_data_tracker.borrow().get_volatile_data_accessed();
+        process_sandbox_transact_result(
+            result,
+            limit_usage,
+            volatile_accesses,
+            is_rex5_enabled,
+            is_rex6_enabled,
+        )
+    } else {
+        // Preserve the existing zero-observation path for every caller which
+        // has not attached a sandbox observer.
+        let mut sandbox_evm = MegaEvm::new(sandbox_ctx);
+        let result = sandbox_evm.transact_raw(sandbox_tx);
+        let limit_usage = sandbox_evm.ctx.additional_limit.borrow().get_usage();
+        let volatile_accesses =
+            sandbox_evm.ctx.volatile_data_tracker.borrow().get_volatile_data_accessed();
+        process_sandbox_transact_result(
+            result,
+            limit_usage,
+            volatile_accesses,
+            is_rex5_enabled,
+            is_rex6_enabled,
+        )
+    }
+}
+
+/// Delivers [`SandboxObserver::sandbox_end`] when an observer is attached.
+fn notify_sandbox_end<ExtEnvs: ExternalEnvTypes>(
+    observer: &Option<Rc<RefCell<dyn SandboxObserver<ExtEnvs>>>>,
+    outcome: SandboxEndOutcome,
+) {
+    if let Some(obs) = observer {
+        obs.borrow_mut().sandbox_end(&outcome);
+    }
 }
 
 /// Outcome of sandbox execution.
@@ -1611,6 +1704,125 @@ mod tests {
             ctx.additional_limit.borrow().get_usage().state_growth,
             0,
             "deposit-caller state-growth must not be recorded when the storage gas computation fails",
+        );
+    }
+
+    const SPLIT_CREATE_CALLER: Address = Address::repeat_byte(0x20);
+    const SPLIT_CREATE_SLOT: U256 = U256::from_limbs([2, 0, 0, 0]);
+    const SPLIT_CREATE_CODE_LEN: u32 = 8_000;
+    const SPLIT_CREATE_COMPUTE_BUDGET: u64 = 1_000_000;
+
+    fn split_create_initcode() -> Bytes {
+        let code_len = SPLIT_CREATE_CODE_LEN.to_be_bytes();
+        Bytes::from(vec![
+            revm::bytecode::opcode::PUSH1,
+            0x2a,
+            revm::bytecode::opcode::PUSH1,
+            0x02,
+            revm::bytecode::opcode::SSTORE,
+            revm::bytecode::opcode::PUSH1,
+            0x16,
+            revm::bytecode::opcode::PUSH1,
+            0x00,
+            revm::bytecode::opcode::KECCAK256,
+            revm::bytecode::opcode::POP,
+            revm::bytecode::opcode::PUSH3,
+            code_len[1],
+            code_len[2],
+            code_len[3],
+            revm::bytecode::opcode::PUSH1,
+            0x00,
+            revm::bytecode::opcode::RETURN,
+        ])
+    }
+
+    struct SplitNopObserver;
+
+    impl<E: ExternalEnvTypes> SandboxObserver<E> for SplitNopObserver {}
+
+    fn run_split_create_fixture(
+        spec: MegaSpecId,
+        observer: Option<Rc<RefCell<dyn SandboxObserver<crate::EmptyExternalEnv>>>>,
+    ) -> SandboxOutcome {
+        use crate::test_utils::MemoryDatabase;
+        use revm::state::EvmState;
+        let mut db = MemoryDatabase::default();
+        db.set_account_balance(SPLIT_CREATE_CALLER, U256::from(10_000_000_000_000_000_000u128));
+        let parent_state = EvmState::default();
+        let sandbox_db = SandboxDb::new(&parent_state, &mut db);
+        let mut context = MegaContext::new(sandbox_db, spec);
+        context.modify_chain(|chain| {
+            chain.operator_fee_scalar = Some(U256::ZERO);
+            chain.operator_fee_constant = Some(U256::ZERO);
+        });
+        let block = context.block().clone();
+        let chain = context.chain().clone();
+
+        let tx_env = TxEnv {
+            caller: SPLIT_CREATE_CALLER,
+            kind: TxKind::Create,
+            gas_limit: 100_000_000,
+            gas_price: 0,
+            data: split_create_initcode(),
+            value: U256::ZERO,
+            ..Default::default()
+        };
+        let mut tx = MegaTransaction::new(tx_env);
+        tx.enveloped_tx = Some(Bytes::new());
+        if spec.is_enabled(MegaSpecId::REX5) {
+            tx.deposit.source_hash = SANDBOX_TX_SOURCE_HASH;
+        }
+
+        let limits =
+            EvmTxRuntimeLimits::no_limits().with_tx_compute_gas_limit(SPLIT_CREATE_COMPUTE_BUDGET);
+        run_sandbox_ctx(context, tx, Some(limits), block, chain, observer)
+    }
+
+    fn split_outcome_fingerprint(outcome: &SandboxOutcome) -> (bool, Option<U256>, u64) {
+        match outcome {
+            SandboxOutcome::Completed { state, completion, .. } => {
+                let deployed = SPLIT_CREATE_CALLER.create(0);
+                let created = state.get(&deployed).is_some_and(|account| account.is_created());
+                let slot = state.get(&deployed).and_then(|account| {
+                    account.storage.get(&SPLIT_CREATE_SLOT).map(|slot| slot.present_value())
+                });
+                (created, slot, completion.gas_used())
+            }
+            SandboxOutcome::Rejected(_) => (false, None, 0),
+        }
+    }
+
+    #[test]
+    fn test_observer_parity_pre_rex5_split_create_commits_sstore() {
+        let baseline = run_split_create_fixture(MegaSpecId::REX4, None);
+        let observer: Rc<RefCell<dyn SandboxObserver<crate::EmptyExternalEnv>>> =
+            Rc::new(RefCell::new(SplitNopObserver));
+        let observed = run_split_create_fixture(MegaSpecId::REX4, Some(observer));
+
+        let (created, slot, gas) = split_outcome_fingerprint(&baseline);
+        assert!(created, "pre-REX5 split CREATE must leave the account created");
+        assert_eq!(slot, Some(U256::from(0x2a)), "SSTORE must survive the failed deploy");
+        assert_eq!(
+            split_outcome_fingerprint(&observed),
+            (created, slot, gas),
+            "observer must not change split-CREATE sandbox outcome"
+        );
+    }
+
+    #[test]
+    fn test_observer_parity_rex5_atomic_create_failure() {
+        let baseline = run_split_create_fixture(MegaSpecId::REX5, None);
+        let observer: Rc<RefCell<dyn SandboxObserver<crate::EmptyExternalEnv>>> =
+            Rc::new(RefCell::new(SplitNopObserver));
+        let observed = run_split_create_fixture(MegaSpecId::REX5, Some(observer));
+
+        let (created, slot, gas) = split_outcome_fingerprint(&baseline);
+        assert!(!created, "REX5 atomic CREATE failure must not leave a created account");
+        assert!(slot.is_none() || slot == Some(U256::ZERO));
+        assert_eq!(
+            split_outcome_fingerprint(&observed),
+            (created, slot, gas),
+            "observer must not change atomic CREATE-failure outcome"
         );
     }
 }

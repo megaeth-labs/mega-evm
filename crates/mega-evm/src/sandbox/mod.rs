@@ -59,10 +59,25 @@
 //!
 //! - `execution` - Core sandbox execution logic and the main entry point
 //!   [`execute_keyless_deploy_call`]
+//! - `observer` - Read-only [`SandboxObserver`] channel into nested sandbox execution
 //! - `state` - Type-erased database wrapper ([`SandboxDb`]) for isolated execution
 //! - `state_merge` - Replay-safe merge of sandbox state into the parent journal
 //! - `tx` - Transaction decoding and validation for pre-EIP-155 transactions
 //! - `error` - Error types ([`KeylessDeployError`]) that map to Solidity errors in `IKeylessDeploy`
+//!
+//! # Sandbox observation
+//!
+//! Nested sandbox execution is otherwise invisible to a parent inspector. Callers may
+//! attach a [`SandboxObserver`] via [`crate::MegaContext::set_keyless_sandbox_observer`]
+//! (also forwarded from [`crate::MegaEvm`] and [`crate::MegaBlockExecutor`]). The observer
+//! sees interpreter hooks inside the sandbox plus a paired `sandbox_start` / `sandbox_end`
+//! lifecycle. Observation is read-only and cannot short-circuit `CALL`/`CREATE`.
+//! Reverted inner frames still emit their events; whether sandbox state was applied to
+//! the parent is reported by [`SandboxEndOutcome::state_applied`]. With no observer
+//! attached the sandbox path is unchanged.
+//!
+//! [`SandboxObserver`]: observer::SandboxObserver
+//! [`SandboxEndOutcome::state_applied`]: observer::SandboxEndOutcome::state_applied
 //!
 //! # Type Erasure Strategy
 //!
@@ -95,11 +110,13 @@
 
 mod error;
 mod execution;
+mod observer;
 mod state;
 mod state_merge;
 mod tx;
 
 pub use error::*;
 pub use execution::*;
+pub use observer::*;
 pub use state::*;
 pub use tx::*;

@@ -39,7 +39,8 @@ mod state;
 
 #[cfg(not(feature = "std"))]
 use alloc as std;
-use std::{collections::BTreeMap, vec::Vec};
+use core::cell::RefCell;
+use std::{collections::BTreeMap, rc::Rc, vec::Vec};
 
 use alloy_primitives::{Address, B256};
 pub use context::*;
@@ -68,7 +69,7 @@ use revm::{
     ExecuteEvm, InspectEvm, Inspector, Journal,
 };
 
-use crate::{BucketId, ExternalEnvTypes, LimitUsage, MegaTransaction};
+use crate::{sandbox::SandboxObserver, BucketId, ExternalEnvTypes, LimitUsage, MegaTransaction};
 
 /// The main EVM implementation for the `MegaETH` chain.
 ///
@@ -233,6 +234,17 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
 }
 
 impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
+    /// Attaches an observer for nested sandbox execution.
+    ///
+    /// Forwards to [`MegaContext::set_keyless_sandbox_observer`]. `None`
+    /// restores the no-observer sandbox path.
+    pub fn set_keyless_sandbox_observer(
+        &mut self,
+        observer: Option<Rc<RefCell<dyn SandboxObserver<ExtEnvs>>>>,
+    ) {
+        self.inner.ctx.set_keyless_sandbox_observer(observer);
+    }
+
     /// Provides a reference to the block environment.
     ///
     /// The block environment contains information about the current block being processed,

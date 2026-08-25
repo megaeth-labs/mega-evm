@@ -29,14 +29,15 @@ use revm::{
 };
 
 use crate::{
-    constants, is_system_originated, AdditionalLimit, BucketId, DynamicGasCost, EmptyExternalEnv,
-    EvmTxRuntimeLimits, ExternalEnvTypes, ExternalEnvs, MegaSpecId, TxRuntimeLimit,
-    VolatileDataAccess, VolatileDataAccessTracker, VolatileDataAccessType,
+    constants, is_system_originated, sandbox::SandboxObserver, AdditionalLimit, BucketId,
+    DynamicGasCost, EmptyExternalEnv, EvmTxRuntimeLimits, ExternalEnvTypes, ExternalEnvs,
+    MegaSpecId, TxRuntimeLimit, VolatileDataAccess, VolatileDataAccessTracker,
+    VolatileDataAccessType,
 };
 
 /// `MegaETH` EVM context type. This struct wraps [`OpContext`] and implements the [`ContextTr`]
 /// trait to be used as the context for the [`crate::Evm`].
-#[derive(Debug, derive_more::Deref, derive_more::DerefMut)]
+#[derive(derive_more::Debug, derive_more::Deref, derive_more::DerefMut)]
 pub struct MegaContext<DB: Database, ExtEnvs: ExternalEnvTypes> {
     /// The inner context.
     #[deref]
@@ -74,6 +75,14 @@ pub struct MegaContext<DB: Database, ExtEnvs: ExternalEnvTypes> {
     /// materialization charge in `validate`, which is paid by the outer keyless-deploy call
     /// before the sandbox runs).
     pub(crate) inside_sandbox: Rc<RefCell<bool>>,
+
+    /// Observer for nested sandbox execution.
+    ///
+    /// `None` keeps the historical no-inspector sandbox path. The observer is
+    /// read-only: mutating interpreter or context state through its hooks is
+    /// undefined and may diverge consensus.
+    #[debug(ignore)]
+    pub(crate) keyless_sandbox_observer: Option<Rc<RefCell<dyn SandboxObserver<ExtEnvs>>>>,
 
     /// The system address for the current block.
     /// Pre-REX5: always `MEGA_SYSTEM_ADDRESS` (the legacy hardcoded constant).
@@ -174,6 +183,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
                 tx_limits.oracle_access_compute_gas_limit,
             ))),
             inside_sandbox: Rc::new(RefCell::new(false)),
+            keyless_sandbox_observer: None,
             system_address: crate::MEGA_SYSTEM_ADDRESS,
             inner,
         }
@@ -237,6 +247,7 @@ impl<DB: Database, ExtEnvTypes: ExternalEnvTypes> MegaContext<DB, ExtEnvTypes> {
                 tx_limits.oracle_access_compute_gas_limit,
             ))),
             inside_sandbox: Rc::new(RefCell::new(false)),
+            keyless_sandbox_observer: None,
             system_address: crate::MEGA_SYSTEM_ADDRESS,
             inner,
         }
@@ -265,6 +276,7 @@ impl<DB: Database, ExtEnvTypes: ExternalEnvTypes> MegaContext<DB, ExtEnvTypes> {
             oracle_env: self.oracle_env,
             volatile_data_tracker: self.volatile_data_tracker,
             inside_sandbox: self.inside_sandbox,
+            keyless_sandbox_observer: self.keyless_sandbox_observer,
             system_address: self.system_address,
         }
     }
@@ -369,6 +381,8 @@ impl<DB: Database, ExtEnvTypes: ExternalEnvTypes> MegaContext<DB, ExtEnvTypes> {
             oracle_env: Rc::new(RefCell::new(external_envs.oracle_env)),
             volatile_data_tracker: self.volatile_data_tracker,
             inside_sandbox: self.inside_sandbox,
+            // Observer is parameterized by `ExtEnvs`; a type change cannot keep it.
+            keyless_sandbox_observer: None,
             system_address: self.system_address,
         }
     }
@@ -450,6 +464,19 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     pub fn with_inside_sandbox(self, value: bool) -> Self {
         self.set_inside_sandbox(value);
         self
+    }
+
+    /// Attaches an observer for nested sandbox execution.
+    ///
+    /// `None` restores the no-observer sandbox path. Observation is read-only:
+    /// mutating interpreter or context state through the hooks is undefined
+    /// and may diverge consensus. There is no take/drain API; recorded data
+    /// stays in the caller's observer.
+    pub fn set_keyless_sandbox_observer(
+        &mut self,
+        observer: Option<Rc<RefCell<dyn SandboxObserver<ExtEnvs>>>>,
+    ) {
+        self.keyless_sandbox_observer = observer;
     }
 
     /// Gets the current total data size generated from transaction execution.
