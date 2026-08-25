@@ -30,8 +30,8 @@ use revm::{
 
 use crate::{
     constants, is_system_originated, AdditionalLimit, BucketId, DynamicGasCost, EmptyExternalEnv,
-    EvmTxRuntimeLimits, ExternalEnvTypes, ExternalEnvs, MegaSpecId, TxRuntimeLimit,
-    VolatileDataAccess, VolatileDataAccessTracker, VolatileDataAccessType,
+    EvmTxRuntimeLimits, ExternalEnvTypes, ExternalEnvs, KeylessSandboxEvidence, MegaSpecId,
+    TxRuntimeLimit, VolatileDataAccess, VolatileDataAccessTracker, VolatileDataAccessType,
 };
 
 /// `MegaETH` EVM context type. This struct wraps [`OpContext`] and implements the [`ContextTr`]
@@ -74,6 +74,15 @@ pub struct MegaContext<DB: Database, ExtEnvs: ExternalEnvTypes> {
     /// materialization charge in `validate`, which is paid by the outer keyless-deploy call
     /// before the sandbox runs).
     pub(crate) inside_sandbox: Rc<RefCell<bool>>,
+
+    /// Whether the caller requested execution evidence from KeylessDeploy's
+    /// otherwise-unobserved nested sandbox.
+    pub(crate) capture_keyless_sandbox_evidence: bool,
+
+    /// Commit-scoped artifacts published by accepted KeylessDeploy sandboxes.
+    /// The interceptor is top-level-only, so at most one artifact is expected
+    /// per outer transaction; a vector keeps draining explicit and lossless.
+    pub(crate) keyless_sandbox_evidence: Vec<KeylessSandboxEvidence>,
 
     /// The system address for the current block.
     /// Pre-REX5: always `MEGA_SYSTEM_ADDRESS` (the legacy hardcoded constant).
@@ -174,6 +183,8 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
                 tx_limits.oracle_access_compute_gas_limit,
             ))),
             inside_sandbox: Rc::new(RefCell::new(false)),
+            capture_keyless_sandbox_evidence: false,
+            keyless_sandbox_evidence: Vec::new(),
             system_address: crate::MEGA_SYSTEM_ADDRESS,
             inner,
         }
@@ -237,6 +248,8 @@ impl<DB: Database, ExtEnvTypes: ExternalEnvTypes> MegaContext<DB, ExtEnvTypes> {
                 tx_limits.oracle_access_compute_gas_limit,
             ))),
             inside_sandbox: Rc::new(RefCell::new(false)),
+            capture_keyless_sandbox_evidence: false,
+            keyless_sandbox_evidence: Vec::new(),
             system_address: crate::MEGA_SYSTEM_ADDRESS,
             inner,
         }
@@ -265,6 +278,8 @@ impl<DB: Database, ExtEnvTypes: ExternalEnvTypes> MegaContext<DB, ExtEnvTypes> {
             oracle_env: self.oracle_env,
             volatile_data_tracker: self.volatile_data_tracker,
             inside_sandbox: self.inside_sandbox,
+            capture_keyless_sandbox_evidence: self.capture_keyless_sandbox_evidence,
+            keyless_sandbox_evidence: self.keyless_sandbox_evidence,
             system_address: self.system_address,
         }
     }
@@ -369,6 +384,8 @@ impl<DB: Database, ExtEnvTypes: ExternalEnvTypes> MegaContext<DB, ExtEnvTypes> {
             oracle_env: Rc::new(RefCell::new(external_envs.oracle_env)),
             volatile_data_tracker: self.volatile_data_tracker,
             inside_sandbox: self.inside_sandbox,
+            capture_keyless_sandbox_evidence: self.capture_keyless_sandbox_evidence,
+            keyless_sandbox_evidence: self.keyless_sandbox_evidence,
             system_address: self.system_address,
         }
     }
@@ -450,6 +467,41 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     pub fn with_inside_sandbox(self, value: bool) -> Self {
         self.set_inside_sandbox(value);
         self
+    }
+
+    /// Enables or disables capture of execution evidence from accepted
+    /// KeylessDeploy sandboxes.
+    ///
+    /// Capture is disabled by default. Disabling it also discards any artifact
+    /// the caller has not drained, preventing stale evidence from crossing an
+    /// explicit observation boundary.
+    pub fn set_keyless_sandbox_evidence_capture(&mut self, enabled: bool) {
+        self.capture_keyless_sandbox_evidence = enabled;
+        if !enabled {
+            self.keyless_sandbox_evidence.clear();
+        }
+    }
+
+    /// Whether KeylessDeploy sandbox evidence capture is enabled.
+    pub(crate) fn keyless_sandbox_evidence_capture_enabled(&self) -> bool {
+        self.capture_keyless_sandbox_evidence
+    }
+
+    /// Publishes evidence only after the sandbox state has passed every
+    /// acceptance check and has been applied to the parent journal.
+    pub(crate) fn publish_keyless_sandbox_evidence(
+        &mut self,
+        evidence: KeylessSandboxEvidence,
+    ) {
+        if self.capture_keyless_sandbox_evidence {
+            self.keyless_sandbox_evidence.push(evidence);
+        }
+    }
+
+    /// Drains all accepted KeylessDeploy sandbox artifacts observed since the
+    /// previous call.
+    pub fn take_keyless_sandbox_evidence(&mut self) -> Vec<KeylessSandboxEvidence> {
+        core::mem::take(&mut self.keyless_sandbox_evidence)
     }
 
     /// Gets the current total data size generated from transaction execution.

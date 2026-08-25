@@ -68,7 +68,9 @@ use revm::{
     ExecuteEvm, InspectEvm, Inspector, Journal,
 };
 
-use crate::{BucketId, ExternalEnvTypes, LimitUsage, MegaTransaction};
+use crate::{
+    BucketId, ExternalEnvTypes, KeylessSandboxEvidence, LimitUsage, MegaTransaction,
+};
 
 /// The main EVM implementation for the `MegaETH` chain.
 ///
@@ -233,6 +235,19 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
 }
 
 impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
+    /// Enables or disables capture of accepted KeylessDeploy sandbox evidence.
+    pub fn set_keyless_sandbox_evidence_capture(&mut self, enabled: bool) {
+        self.inner
+            .ctx
+            .set_keyless_sandbox_evidence_capture(enabled);
+    }
+
+    /// Drains accepted KeylessDeploy sandbox evidence accumulated since the
+    /// previous call.
+    pub fn take_keyless_sandbox_evidence(&mut self) -> Vec<KeylessSandboxEvidence> {
+        self.inner.ctx.take_keyless_sandbox_evidence()
+    }
+
     /// Provides a reference to the block environment.
     ///
     /// The block environment contains information about the current block being processed,

@@ -94,12 +94,14 @@
 //! [`SandboxDb`]: state::SandboxDb
 
 mod error;
+mod evidence;
 mod execution;
 mod state;
 mod state_merge;
 mod tx;
 
 pub use error::*;
+pub use evidence::*;
 pub use execution::*;
 pub use state::*;
 pub use tx::*;

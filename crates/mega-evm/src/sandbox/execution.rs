@@ -56,12 +56,13 @@ use tracing::{error, warn};
 
 use crate::{
     constants, inspect_account_code_hash, mark_frame_result_as_exceeding_limit, AdditionalLimit,
-    EvmTxRuntimeLimits, ExternalEnvTypes, JournalInspectTr, LimitCheck, LimitUsage, MegaContext,
-    MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction, TxRuntimeLimit, VolatileDataAccess,
-    SANDBOX_TX_SOURCE_HASH,
+    EvmTxRuntimeLimits, ExternalEnvTypes, JournalInspectTr, KeylessSandboxEvidence, LimitCheck,
+    LimitUsage, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction, TxRuntimeLimit,
+    VolatileDataAccess, SANDBOX_TX_SOURCE_HASH,
 };
 
 use super::{
+    evidence::KeylessSandboxEvidenceRecorder,
     state_merge::apply_sandbox_state,
     tx::{calculate_keyless_deploy_address, decode_keyless_tx, recover_signer},
 };
@@ -442,7 +443,13 @@ pub fn execute_keyless_deploy_call<DB: AlloyDatabase, ExtEnvs: ExternalEnvTypes>
 
     // Step 9: Execute sandbox and apply state changes.
     match execute_keyless_deploy_sandbox(ctx, sandbox_tx, sandbox_tx_limits) {
-        SandboxOutcome::Completed { state, completion, limit_usage, volatile_accesses } => {
+        SandboxOutcome::Completed {
+            state,
+            completion,
+            limit_usage,
+            volatile_accesses,
+            evidence,
+        } => {
             let gas_used = completion.gas_used();
 
             if ctx.spec.is_enabled(MegaSpecId::REX5) {
@@ -467,7 +474,7 @@ pub fn execute_keyless_deploy_call<DB: AlloyDatabase, ExtEnvs: ExternalEnvTypes>
             // constructor logs into the parent receipt (run-to-completion EVM side
             // effect); `ExecutionFailed` (Revert / Halt) does not, because revm's
             // own frame accounting already rolled the failed frame's logs back.
-            match completion {
+            let result = match completion {
                 SandboxCompletion::Deployed { gas_used, deploy_address: deployed, logs } => {
                     if deployed != deploy_address {
                         return make_error!(KeylessDeployError::AddressMismatch);
@@ -493,7 +500,16 @@ pub fn execute_keyless_deploy_call<DB: AlloyDatabase, ExtEnvs: ExternalEnvTypes>
                     // `errorData`.
                     make_execution_failure!(gas_used, error)
                 }
+            };
+
+            // The artifact becomes visible only after every sandbox acceptance
+            // check and state application succeeded. This keeps execution
+            // evidence commit-scoped instead of leaking observations from a
+            // rejected or unmerged sandbox.
+            if let Some(evidence) = evidence {
+                ctx.publish_keyless_sandbox_evidence(evidence);
             }
+            result
         }
         SandboxOutcome::Rejected(e) => {
             // Sandbox bailed before producing a frame — typically a validate-reject
@@ -562,6 +578,7 @@ pub(crate) fn execute_keyless_deploy_sandbox<DB: AlloyDatabase, ExtEnvs: Externa
     let mega_spec = ctx.mega_spec();
     let block = ctx.block().clone();
     let chain = ctx.chain().clone();
+    let capture_evidence = ctx.keyless_sandbox_evidence_capture_enabled();
 
     // REX4+: Clone Rc references to parent's external envs before `journal_mut()` mutably
     // borrows `ctx`, after which its fields are no longer accessible.
@@ -622,10 +639,24 @@ pub(crate) fn execute_keyless_deploy_sandbox<DB: AlloyDatabase, ExtEnvs: Externa
         let sandbox_ctx = MegaContext::<_, ExtEnvs>::new_with_shared_ext_envs(
             sandbox_db, mega_spec, salt_env, oracle_env,
         );
-        run_sandbox_ctx(sandbox_ctx, sandbox_tx, sandbox_tx_limits, block, chain)
+        run_sandbox_ctx(
+            sandbox_ctx,
+            sandbox_tx,
+            sandbox_tx_limits,
+            block,
+            chain,
+            capture_evidence,
+        )
     } else {
         let sandbox_ctx = MegaContext::new(sandbox_db, mega_spec);
-        run_sandbox_ctx(sandbox_ctx, sandbox_tx, sandbox_tx_limits, block, chain)
+        run_sandbox_ctx(
+            sandbox_ctx,
+            sandbox_tx,
+            sandbox_tx_limits,
+            block,
+            chain,
+            capture_evidence,
+        )
     }
 }
 
@@ -638,6 +669,7 @@ fn run_sandbox_ctx<DB: AlloyDatabase, ExtEnvs: ExternalEnvTypes>(
     sandbox_tx_limits: Option<EvmTxRuntimeLimits>,
     block: BlockEnv,
     chain: L1BlockInfo,
+    capture_evidence: bool,
 ) -> SandboxOutcome {
     let sandbox_ctx = match sandbox_tx_limits {
         Some(limits) => sandbox_ctx.with_tx_runtime_limits(limits),
@@ -646,18 +678,41 @@ fn run_sandbox_ctx<DB: AlloyDatabase, ExtEnvs: ExternalEnvTypes>(
     let sandbox_ctx = sandbox_ctx.with_block(block).with_chain(chain).with_inside_sandbox(true);
     let is_rex5_enabled = sandbox_ctx.mega_spec().is_enabled(MegaSpecId::REX5);
     let is_rex6_enabled = sandbox_ctx.mega_spec().is_enabled(MegaSpecId::REX6);
-    let mut sandbox_evm = MegaEvm::new(sandbox_ctx);
-    let result = sandbox_evm.transact_raw(sandbox_tx);
-    let limit_usage = sandbox_evm.ctx.additional_limit.borrow().get_usage();
-    let volatile_accesses =
-        sandbox_evm.ctx.volatile_data_tracker.borrow().get_volatile_data_accessed();
-    process_sandbox_transact_result(
-        result,
-        limit_usage,
-        volatile_accesses,
-        is_rex5_enabled,
-        is_rex6_enabled,
-    )
+    if capture_evidence {
+        let recorder = KeylessSandboxEvidenceRecorder::new(sandbox_ctx.mega_spec());
+        let mut sandbox_evm = MegaEvm::new(sandbox_ctx).with_inspector(recorder);
+        let result = sandbox_evm.transact_raw(sandbox_tx);
+        let limit_usage = sandbox_evm.ctx.additional_limit.borrow().get_usage();
+        let volatile_accesses =
+            sandbox_evm.ctx.volatile_data_tracker.borrow().get_volatile_data_accessed();
+        let evidence = sandbox_evm.inspector_mut().take_evidence();
+        let mut outcome = process_sandbox_transact_result(
+            result,
+            limit_usage,
+            volatile_accesses,
+            is_rex5_enabled,
+            is_rex6_enabled,
+        );
+        if let SandboxOutcome::Completed { evidence: slot, .. } = &mut outcome {
+            *slot = Some(evidence);
+        }
+        outcome
+    } else {
+        // Preserve the existing zero-observation path for every caller which
+        // has not explicitly requested Keyless sandbox evidence.
+        let mut sandbox_evm = MegaEvm::new(sandbox_ctx);
+        let result = sandbox_evm.transact_raw(sandbox_tx);
+        let limit_usage = sandbox_evm.ctx.additional_limit.borrow().get_usage();
+        let volatile_accesses =
+            sandbox_evm.ctx.volatile_data_tracker.borrow().get_volatile_data_accessed();
+        process_sandbox_transact_result(
+            result,
+            limit_usage,
+            volatile_accesses,
+            is_rex5_enabled,
+            is_rex6_enabled,
+        )
+    }
 }
 
 /// Outcome of sandbox execution.
@@ -689,6 +744,10 @@ pub enum SandboxOutcome {
         limit_usage: LimitUsage,
         /// Volatile-access footprint to merge into the parent after sandbox return.
         volatile_accesses: VolatileDataAccess,
+        /// Ordered SSTORE/KECCAK facts from this exact sandbox execution when
+        /// the parent explicitly enabled capture. Published only after state
+        /// application succeeds.
+        evidence: Option<KeylessSandboxEvidence>,
     },
     /// Sandbox bailed before producing a frame (validate-reject `InvalidTransaction`
     /// or `InternalError`). No state, resource usage, or volatile-access footprint
@@ -798,6 +857,7 @@ fn process_sandbox_transact_result<E: core::fmt::Display + IsTxError>(
         completion,
         limit_usage,
         volatile_accesses,
+        evidence: None,
     };
 
     match result {
@@ -1208,7 +1268,117 @@ fn validate_signer_code<DB: AlloyDatabase, ExtEnvs: ExternalEnvTypes>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use revm::context::result::Output;
+    use crate::{KeylessSandboxEvidenceOp, test_utils::MemoryDatabase};
+    use revm::{
+        bytecode::opcode,
+        context::result::Output,
+    };
+
+    const EVIDENCE_TEST_CALLER: Address = Address::repeat_byte(0x20);
+    const EVIDENCE_TEST_SLOT: U256 = U256::from_limbs([2, 0, 0, 0]);
+    const EVIDENCE_TEST_CODE_LEN: u32 = 8_000;
+    const EVIDENCE_TEST_COMPUTE_BUDGET: u64 = 1_000_000;
+
+    fn split_create_initcode() -> Bytes {
+        let code_len = EVIDENCE_TEST_CODE_LEN.to_be_bytes();
+        Bytes::from(vec![
+            opcode::PUSH1,
+            0x2a,
+            opcode::PUSH1,
+            0x02,
+            opcode::SSTORE,
+            opcode::PUSH1,
+            0x16,
+            opcode::PUSH1,
+            0x00,
+            opcode::KECCAK256,
+            opcode::POP,
+            opcode::PUSH3,
+            code_len[1],
+            code_len[2],
+            code_len[3],
+            opcode::PUSH1,
+            0x00,
+            opcode::RETURN,
+        ])
+    }
+
+    fn run_split_evidence_fixture(spec: MegaSpecId) -> SandboxOutcome {
+        let mut db = MemoryDatabase::default();
+        db.set_account_balance(
+            EVIDENCE_TEST_CALLER,
+            U256::from(10_000_000_000_000_000_000u128),
+        );
+        let mut context = MegaContext::new(db, spec);
+        context.modify_chain(|chain| {
+            chain.operator_fee_scalar = Some(U256::ZERO);
+            chain.operator_fee_constant = Some(U256::ZERO);
+        });
+        let block = context.block().clone();
+        let chain = context.chain().clone();
+
+        let tx_env = TxEnv {
+            caller: EVIDENCE_TEST_CALLER,
+            kind: TxKind::Create,
+            gas_limit: 100_000_000,
+            gas_price: 0,
+            data: split_create_initcode(),
+            value: U256::ZERO,
+            ..Default::default()
+        };
+        let mut tx = MegaTransaction::new(tx_env);
+        tx.enveloped_tx = Some(Bytes::new());
+        if spec.is_enabled(MegaSpecId::REX5) {
+            tx.deposit.source_hash = SANDBOX_TX_SOURCE_HASH;
+        }
+
+        let limits = EvmTxRuntimeLimits::no_limits()
+            .with_tx_compute_gas_limit(EVIDENCE_TEST_COMPUTE_BUDGET);
+        run_sandbox_ctx(context, tx, Some(limits), block, chain, true)
+    }
+
+    #[test]
+    fn test_pre_rex5_split_sandbox_retains_committed_evidence() {
+        let SandboxOutcome::Completed { state, evidence: Some(evidence), .. } =
+            run_split_evidence_fixture(MegaSpecId::REX4)
+        else {
+            panic!("REX4 split sandbox must complete with evidence");
+        };
+        let deployed = EVIDENCE_TEST_CALLER.create(0);
+
+        assert!(state.get(&deployed).is_some_and(|account| account.is_created()));
+        assert_eq!(
+            state[&deployed].storage[&EVIDENCE_TEST_SLOT].present_value(),
+            U256::from(0x2a),
+        );
+        assert!(evidence.observed_pre_rex5_split_create());
+        assert_eq!(evidence.operations().len(), 2);
+        assert_eq!(
+            evidence.operations()[0],
+            KeylessSandboxEvidenceOp::Sstore {
+                address: deployed,
+                slot: EVIDENCE_TEST_SLOT,
+            },
+        );
+        assert!(matches!(
+            &evidence.operations()[1],
+            KeylessSandboxEvidenceOp::Keccak { address, preimage, .. }
+                if *address == deployed && preimage.len() == 22
+        ));
+    }
+
+    #[test]
+    fn test_rex5_atomic_create_failure_discards_sandbox_evidence() {
+        let SandboxOutcome::Completed { state, evidence: Some(evidence), .. } =
+            run_split_evidence_fixture(MegaSpecId::REX5)
+        else {
+            panic!("REX5 failed sandbox must complete with an empty evidence artifact");
+        };
+        let deployed = EVIDENCE_TEST_CALLER.create(0);
+
+        assert!(!state.get(&deployed).is_some_and(|account| account.is_created()));
+        assert!(evidence.is_empty());
+    }
 
     /// Test error type that lets us drive `process_sandbox_transact_result`'s
     /// `Err` arms (which map to `SandboxOutcome::Rejected`) directly without

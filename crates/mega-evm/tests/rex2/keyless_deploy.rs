@@ -18,14 +18,16 @@ use mega_evm::{
         KeylessDeployError,
     },
     test_utils::{transact, BytecodeBuilder, MemoryDatabase},
-    IKeylessDeploy, MegaSpecId, KEYLESS_DEPLOY_ADDRESS, KEYLESS_DEPLOY_CODE,
+    IKeylessDeploy, KeylessSandboxEvidence, KeylessSandboxEvidenceOp, MegaContext, MegaEvm,
+    MegaSpecId, MegaTransaction, KEYLESS_DEPLOY_ADDRESS, KEYLESS_DEPLOY_CODE,
 };
 use revm::{
     bytecode::opcode::{
         CALL, CALLDATACOPY, CALLDATASIZE, CODECOPY, CREATE, GAS, ISZERO, JUMPDEST, JUMPI, LOG0,
-        MLOAD, MSTORE, POP, PUSH0, RETURN, RETURNDATACOPY, RETURNDATASIZE, REVERT, SELFDESTRUCT,
-        SSTORE, STATICCALL, STOP,
+        KECCAK256, MLOAD, MSTORE, POP, PUSH0, RETURN, RETURNDATACOPY, RETURNDATASIZE, REVERT,
+        SELFDESTRUCT, SSTORE, STATICCALL, STOP,
     },
+    context::TxEnv,
     Database, DatabaseCommit,
 };
 
@@ -58,6 +60,46 @@ fn call_keyless_deploy(
     .abi_encode();
 
     transact(spec, db, TEST_CALLER, Some(KEYLESS_DEPLOY_ADDRESS), call_data.into(), value).unwrap()
+}
+
+/// Calls the real KeylessDeploy interceptor while opting into the sandbox's
+/// commit-scoped execution artifact.
+fn call_keyless_deploy_with_evidence(
+    spec: MegaSpecId,
+    db: &mut MemoryDatabase,
+    tx_bytes: Bytes,
+    capture: bool,
+) -> (
+    ResultAndState<mega_evm::MegaHaltReason>,
+    Vec<KeylessSandboxEvidence>,
+) {
+    let call_data = IKeylessDeploy::keylessDeployCall {
+        keylessDeploymentTransaction: tx_bytes,
+        gasLimitOverride: U256::from(LARGE_GAS_LIMIT_OVERRIDE),
+    }
+    .abi_encode();
+
+    let mut context = MegaContext::new(db, spec);
+    context.modify_chain(|chain| {
+        chain.operator_fee_scalar = Some(U256::ZERO);
+        chain.operator_fee_constant = Some(U256::ZERO);
+    });
+    let mut evm = MegaEvm::new(context);
+    evm.set_keyless_sandbox_evidence_capture(capture);
+
+    let tx = TxEnv {
+        caller: TEST_CALLER,
+        kind: TxKind::Call(KEYLESS_DEPLOY_ADDRESS),
+        data: call_data.into(),
+        value: U256::ZERO,
+        gas_limit: 1_000_000_000_000_000_000,
+        ..Default::default()
+    };
+    let mut tx = MegaTransaction::new(tx);
+    tx.enveloped_tx = Some(Bytes::new());
+    let result = mega_evm::alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
+    let evidence = evm.take_keyless_sandbox_evidence();
+    (result, evidence)
 }
 
 /// Checks if two `KeylessDeployErrors` match, ignoring the halt reason for `ExecutionHalted`.
@@ -151,9 +193,174 @@ fn calculate_deploy_address_for_tx(tx_bytes: &[u8]) -> Address {
     calculate_keyless_deploy_address(signer)
 }
 
+fn keyless_evidence_success_init_code() -> Bytes {
+    let mut builder = BytecodeBuilder::default()
+        .push_number(0x2a_u8)
+        .push_number(0x02_u8)
+        .append(SSTORE)
+        .push_number(0x16_u8)
+        .push_number(0_u8)
+        .append(KECCAK256)
+        .append(POP);
+    let runtime_offset = builder.len() + 12;
+    builder = builder
+        .push_number(1_u8)
+        .push_number(runtime_offset as u8)
+        .push_number(0_u8)
+        .append(CODECOPY)
+        .push_number(1_u8)
+        .push_number(0_u8)
+        .append(RETURN)
+        .append(STOP);
+    builder.build()
+}
+
+fn keyless_evidence_revert_init_code() -> Bytes {
+    BytecodeBuilder::default()
+        .push_number(0x2a_u8)
+        .push_number(0x02_u8)
+        .append(SSTORE)
+        .push_number(0x16_u8)
+        .push_number(0_u8)
+        .append(KECCAK256)
+        .append(POP)
+        .push_number(0_u8)
+        .push_number(0_u8)
+        .append(REVERT)
+        .build()
+}
+
+fn successful_init_code_calling(address: Address) -> Bytes {
+    let mut builder = BytecodeBuilder::default()
+        .push_number(0_u8)
+        .push_number(0_u8)
+        .push_number(0_u8)
+        .push_number(0_u8)
+        .push_number(0_u8)
+        .push_address(address)
+        .append(GAS)
+        .append(CALL)
+        .append(POP);
+    let runtime_offset = builder.len() + 12;
+    builder = builder
+        .push_number(1_u8)
+        .push_number(runtime_offset as u8)
+        .push_number(0_u8)
+        .append(CODECOPY)
+        .push_number(1_u8)
+        .push_number(0_u8)
+        .append(RETURN)
+        .append(STOP);
+    builder.build()
+}
+
 // =============================================================================
 // Success Tests
 // =============================================================================
+
+#[test]
+fn test_keyless_sandbox_capture_preserves_successful_sstore_and_keccak_across_specs() {
+    for spec in [
+        MegaSpecId::REX2,
+        MegaSpecId::REX3,
+        MegaSpecId::REX4,
+        MegaSpecId::REX5,
+        MegaSpecId::REX6,
+    ] {
+        let mut db = MemoryDatabase::default();
+        let (tx_bytes, signer) = create_pre_eip155_deploy_tx(keyless_evidence_success_init_code());
+        let deployed = calculate_deploy_address_for_tx(tx_bytes.as_ref());
+        db.set_account_balance(signer, U256::from(1_000_000_000_000_000_000_000u128));
+
+        let (result, artifacts) =
+            call_keyless_deploy_with_evidence(spec, &mut db, tx_bytes, true);
+        assert!(
+            matches!(result.result, ExecutionResult::Success { .. }),
+            "{spec}: outer KeylessDeploy call must succeed"
+        );
+        assert_eq!(artifacts.len(), 1, "{spec}: accepted sandbox must publish one artifact");
+        let artifact = &artifacts[0];
+        assert!(!artifact.observed_pre_rex5_split_create());
+        assert_eq!(artifact.operations().len(), 2);
+        assert_eq!(
+            artifact.operations()[0],
+            KeylessSandboxEvidenceOp::Sstore {
+                address: deployed,
+                slot: U256::from(2),
+            }
+        );
+        match &artifact.operations()[1] {
+            KeylessSandboxEvidenceOp::Keccak { address, preimage, hash } => {
+                assert_eq!(*address, deployed);
+                assert_eq!(preimage.as_ref(), &[0u8; 22]);
+                assert_eq!(*hash, keccak256(preimage.as_ref()));
+            }
+            other => panic!("{spec}: expected KECCAK evidence, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn test_keyless_sandbox_capture_is_disabled_by_default() {
+    let mut db = MemoryDatabase::default();
+    let (tx_bytes, signer) = create_pre_eip155_deploy_tx(keyless_evidence_success_init_code());
+    db.set_account_balance(signer, U256::from(1_000_000_000_000_000_000_000u128));
+
+    let (result, artifacts) =
+        call_keyless_deploy_with_evidence(MegaSpecId::REX6, &mut db, tx_bytes, false);
+    assert!(matches!(result.result, ExecutionResult::Success { .. }));
+    assert!(artifacts.is_empty());
+}
+
+#[test]
+fn test_keyless_sandbox_capture_discards_ordinary_reverted_frame_evidence() {
+    for spec in [MegaSpecId::REX4, MegaSpecId::REX5] {
+        let mut db = MemoryDatabase::default();
+        let (tx_bytes, signer) = create_pre_eip155_deploy_tx(keyless_evidence_revert_init_code());
+        db.set_account_balance(signer, U256::from(1_000_000_000_000_000_000_000u128));
+
+        let (result, artifacts) =
+            call_keyless_deploy_with_evidence(spec, &mut db, tx_bytes, true);
+        assert!(
+            matches!(result.result, ExecutionResult::Success { .. }),
+            "{spec}: KeylessDeploy reports inner execution failure in success-shaped ABI output"
+        );
+        assert_eq!(artifacts.len(), 1);
+        assert!(artifacts[0].is_empty(), "{spec}: reverted evidence must not escape");
+    }
+}
+
+#[test]
+fn test_keyless_sandbox_capture_discards_reverted_child_evidence() {
+    let reverting_child = Address::repeat_byte(0x55);
+    let reverting_child_code = BytecodeBuilder::default()
+        .push_number(0x2a_u8)
+        .push_number(0x03_u8)
+        .append(SSTORE)
+        .push_number(0x16_u8)
+        .push_number(0_u8)
+        .append(KECCAK256)
+        .append(POP)
+        .push_number(0_u8)
+        .push_number(0_u8)
+        .append(REVERT)
+        .build();
+
+    let mut db = MemoryDatabase::default();
+    db.set_account_code(reverting_child, reverting_child_code);
+    let (tx_bytes, signer) =
+        create_pre_eip155_deploy_tx(successful_init_code_calling(reverting_child));
+    db.set_account_balance(signer, U256::from(1_000_000_000_000_000_000_000u128));
+
+    let (result, artifacts) =
+        call_keyless_deploy_with_evidence(MegaSpecId::REX6, &mut db, tx_bytes, true);
+    assert!(matches!(result.result, ExecutionResult::Success { .. }));
+    assert_eq!(artifacts.len(), 1);
+    assert!(
+        artifacts[0].is_empty(),
+        "a handled child revert must remove its SSTORE and KECCAK observations"
+    );
+}
 
 #[test]
 fn test_keyless_deploy_eip1820() {

@@ -24,6 +24,7 @@ pub use block::*;
 pub use evm::*;
 pub use external::*;
 pub use limit::*;
+pub use sandbox::{KeylessSandboxEvidence, KeylessSandboxEvidenceOp};
 pub use system::*;
 pub use types::*;
 
