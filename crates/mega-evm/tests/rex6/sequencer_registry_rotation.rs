@@ -23,12 +23,11 @@ use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
 use alloy_primitives::{address, keccak256, Address, Bytes, Signature, TxKind, B256, U256};
 use alloy_sol_types::{SolCall, SolValue};
 use mega_evm::{
-    test_utils::MemoryDatabase, BlockLimits, ISequencerRegistry, MegaBlockExecutionCtx,
-    MegaBlockExecutorFactory, MegaContext, MegaEvm, MegaEvmFactory, MegaHardfork,
-    MegaHardforkConfig, MegaSpecId, MegaTxEnvelope, SequencerRegistryConfig,
-    SequencerRegistryRex6Config, TestExternalEnvs, MEGA_SYSTEM_ADDRESS,
-    SEQUENCER_REGISTRY_ADDRESS, SEQUENCER_REGISTRY_CODE, SEQUENCER_REGISTRY_CODE_HASH,
-    SEQUENCER_REGISTRY_CODE_HASH_REX6, transact_apply_pending_changes,
+    test_utils::MemoryDatabase, transact_apply_pending_changes, BlockLimits, ISequencerRegistry,
+    MegaBlockExecutionCtx, MegaBlockExecutorFactory, MegaContext, MegaEvm, MegaEvmFactory,
+    MegaHardfork, MegaHardforkConfig, MegaSpecId, MegaTxEnvelope, SequencerRegistryConfig,
+    SequencerRegistryRex6Config, TestExternalEnvs, MEGA_SYSTEM_ADDRESS, SEQUENCER_REGISTRY_ADDRESS,
+    SEQUENCER_REGISTRY_CODE, SEQUENCER_REGISTRY_CODE_HASH, SEQUENCER_REGISTRY_CODE_HASH_REX6,
 };
 use mega_system_contracts::sequencer_registry::storage_slots::{
     ADMIN, CURRENT_SEQUENCER, CURRENT_SYSTEM_ADDRESS, MIN_ROTATION_DELAY, PENDING_SEQUENCER,
