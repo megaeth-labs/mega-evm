@@ -152,15 +152,31 @@ where
         self.evm.inspector()
     }
 
-    /// Attaches an observer for nested sandbox execution.
+    /// Attaches an observer for nested sandbox execution on every spec.
     ///
-    /// Forwards to [`crate::MegaEvm::set_keyless_sandbox_observer`]. `None`
-    /// restores the no-observer sandbox path.
-    pub fn set_keyless_sandbox_observer(
+    /// Forwards to [`crate::MegaEvm::set_keyless_sandbox_observer`]. The observer
+    /// must implement [`crate::sandbox::SandboxObserver`] for both this executor's
+    /// `ExtEnvs` and [`crate::EmptyExternalEnv`]. `None` restores the no-observer
+    /// sandbox path.
+    pub fn set_keyless_sandbox_observer<O>(&mut self, observer: Option<Rc<RefCell<O>>>)
+    where
+        O: crate::sandbox::SandboxObserver<ExtEnvs>
+            + crate::sandbox::SandboxObserver<crate::EmptyExternalEnv>
+            + 'static,
+    {
+        self.evm.set_keyless_sandbox_observer(observer);
+    }
+
+    /// Attaches an observer that implements [`crate::sandbox::SandboxObserver`]
+    /// only for this executor's `ExtEnvs`.
+    ///
+    /// Forwards to [`crate::MegaEvm::set_keyless_sandbox_observer_for_parent_env`].
+    /// Pre-REX4 sandboxes emit only `sandbox_start` / `sandbox_end`.
+    pub fn set_keyless_sandbox_observer_for_parent_env(
         &mut self,
         observer: Option<Rc<RefCell<dyn crate::sandbox::SandboxObserver<ExtEnvs>>>>,
     ) {
-        self.evm.set_keyless_sandbox_observer(observer);
+        self.evm.set_keyless_sandbox_observer_for_parent_env(observer);
     }
 }
 

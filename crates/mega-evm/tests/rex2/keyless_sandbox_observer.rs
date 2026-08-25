@@ -14,7 +14,7 @@ use mega_evm::{
     },
     test_utils::{BytecodeBuilder, MemoryDatabase},
     EmptyExternalEnv, EvmTxRuntimeLimits, IKeylessDeploy, MegaContext, MegaEvm, MegaHaltReason,
-    MegaSpecId, MegaTransaction, KEYLESS_DEPLOY_ADDRESS,
+    MegaSpecId, MegaTransaction, TestExternalEnvs, KEYLESS_DEPLOY_ADDRESS, MIN_BUCKET_SIZE,
 };
 use revm::{
     bytecode::opcode::{CALL, POP, PUSH0, RETURN, STATICCALL},
@@ -287,16 +287,19 @@ fn funded_db(signer: Address) -> MemoryDatabase {
     db
 }
 
-struct RunConfig<'a> {
+struct RunConfig<'a, O> {
     spec: MegaSpecId,
     db: &'a mut MemoryDatabase,
     tx_bytes: Bytes,
     gas_limit_override: u64,
-    observer: Option<Rc<RefCell<dyn SandboxObserver<EmptyExternalEnv>>>>,
+    observer: Option<Rc<RefCell<O>>>,
     tx_limits: Option<EvmTxRuntimeLimits>,
 }
 
-fn run_keyless(config: RunConfig<'_>) -> ResultAndState<MegaHaltReason> {
+fn run_keyless<O>(config: RunConfig<'_, O>) -> ResultAndState<MegaHaltReason>
+where
+    O: SandboxObserver<EmptyExternalEnv> + 'static,
+{
     let mut context = MegaContext::new(config.db, config.spec);
     context.modify_chain(|chain| {
         chain.operator_fee_scalar = Some(U256::ZERO);
@@ -349,8 +352,7 @@ fn parity_pair(
     let (tx_bytes, signer) = create_pre_eip155_deploy_tx(init_code);
     let mut db_obs = if fund_signer { funded_db(signer) } else { MemoryDatabase::default() };
     let mut db_base = db_obs.clone();
-    let observer: Rc<RefCell<dyn SandboxObserver<EmptyExternalEnv>>> =
-        Rc::new(RefCell::new(RecordingObserver::default()));
+    let observer = Rc::new(RefCell::new(RecordingObserver::default()));
 
     let observed = run_keyless(RunConfig {
         spec,
@@ -365,7 +367,7 @@ fn parity_pair(
         db: &mut db_base,
         tx_bytes,
         gas_limit_override: LARGE_GAS_LIMIT_OVERRIDE,
-        observer: None,
+        observer: None::<Rc<RefCell<RecordingObserver>>>,
         tx_limits,
     });
     assert_result_and_state_eq(&observed, &baseline, case);
@@ -378,7 +380,7 @@ fn run_with_recorder(
     tx_limits: Option<EvmTxRuntimeLimits>,
 ) -> (ResultAndState<MegaHaltReason>, Vec<ObservedEvent>) {
     let recorder = Rc::new(RefCell::new(RecordingObserver::default()));
-    let observer: Rc<RefCell<dyn SandboxObserver<EmptyExternalEnv>>> = recorder.clone();
+    let observer = Rc::clone(&recorder);
     let result = run_keyless(RunConfig {
         spec,
         db,
@@ -425,6 +427,127 @@ fn assert_call_create_balanced(events: &[ObservedEvent]) {
     }
     assert_eq!(call_depth, 0, "unbalanced call frames: {events:?}");
     assert_eq!(create_depth, 0, "unbalanced create frames: {events:?}");
+}
+
+fn crowded_parent_env() -> TestExternalEnvs {
+    TestExternalEnvs::new()
+        .with_default_bucket_capacity((MIN_BUCKET_SIZE as u64) * 8)
+        .with_oracle_storage(U256::ZERO, U256::from(0x42))
+}
+
+fn run_keyless_with_parent_env<O>(
+    spec: MegaSpecId,
+    db: &mut MemoryDatabase,
+    tx_bytes: Bytes,
+    env: TestExternalEnvs,
+    observer: Option<Rc<RefCell<O>>>,
+) -> ResultAndState<MegaHaltReason>
+where
+    O: SandboxObserver<TestExternalEnvs> + SandboxObserver<EmptyExternalEnv> + 'static,
+{
+    let mut context = MegaContext::new(db, spec).with_external_envs(env.into());
+    context.modify_chain(|chain| {
+        chain.operator_fee_scalar = Some(U256::ZERO);
+        chain.operator_fee_constant = Some(U256::ZERO);
+    });
+    context.set_keyless_sandbox_observer(observer);
+    let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);
+    let tx = keyless_deploy_call_tx(tx_bytes, LARGE_GAS_LIMIT_OVERRIDE);
+    alloy_evm::Evm::transact_raw(&mut evm, tx).expect("keyless deploy transact")
+}
+
+#[test]
+fn test_observer_parity_pre_rex4_with_nonempty_parent_env() {
+    for spec in [MegaSpecId::REX2, MegaSpecId::REX3] {
+        let (tx_bytes, signer) = create_pre_eip155_deploy_tx(success_constructor());
+        let mut db_obs = funded_db(signer);
+        let mut db_base = db_obs.clone();
+        let observer = Rc::new(RefCell::new(RecordingObserver::default()));
+        let env = crowded_parent_env();
+
+        let observed = run_keyless_with_parent_env(
+            spec,
+            &mut db_obs,
+            tx_bytes.clone(),
+            env.clone(),
+            Some(observer),
+        );
+        let baseline = run_keyless_with_parent_env(
+            spec,
+            &mut db_base,
+            tx_bytes,
+            env,
+            None::<Rc<RefCell<RecordingObserver>>>,
+        );
+
+        assert!(
+            baseline.result.is_success(),
+            "{spec:?} baseline must succeed: {:?}",
+            baseline.result
+        );
+        assert_result_and_state_eq(
+            &observed,
+            &baseline,
+            &format!("pre-REX4 nonempty parent env {spec:?}"),
+        );
+    }
+}
+
+#[test]
+fn test_opcode_events_flow_on_pre_rex4_with_nonempty_parent_env() {
+    for spec in [MegaSpecId::REX2, MegaSpecId::REX3] {
+        let (tx_bytes, signer) = create_pre_eip155_deploy_tx(success_constructor());
+        let mut db = funded_db(signer);
+        let recorder = Rc::new(RefCell::new(RecordingObserver::default()));
+        let result = run_keyless_with_parent_env(
+            spec,
+            &mut db,
+            tx_bytes,
+            crowded_parent_env(),
+            Some(Rc::clone(&recorder)),
+        );
+        let events = recorder.borrow().events.clone();
+
+        assert!(result.result.is_success(), "{spec:?} should succeed: {:?}", result.result);
+        assert_single_start_end_pair(&events);
+        assert_call_create_balanced(&events);
+        assert!(
+            events.iter().any(|e| matches!(e, ObservedEvent::Create)),
+            "{spec:?}: pre-REX4 nonempty parent env must emit CREATE: {events:?}"
+        );
+        assert!(
+            events.iter().any(|e| matches!(e, ObservedEvent::Step(_))),
+            "{spec:?}: pre-REX4 nonempty parent env must emit opcode steps: {events:?}"
+        );
+    }
+}
+
+#[test]
+fn test_parent_env_only_observer_skips_pre_rex4_opcode_hooks() {
+    let spec = MegaSpecId::REX2;
+    let (tx_bytes, signer) = create_pre_eip155_deploy_tx(success_constructor());
+    let mut db = funded_db(signer);
+    let recorder = Rc::new(RefCell::new(RecordingObserver::default()));
+    let observer: Rc<RefCell<dyn SandboxObserver<TestExternalEnvs>>> = recorder.clone();
+
+    let mut context =
+        MegaContext::new(&mut db, spec).with_external_envs(crowded_parent_env().into());
+    context.modify_chain(|chain| {
+        chain.operator_fee_scalar = Some(U256::ZERO);
+        chain.operator_fee_constant = Some(U256::ZERO);
+    });
+    context.set_keyless_sandbox_observer_for_parent_env(Some(observer));
+    let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);
+    let tx = keyless_deploy_call_tx(tx_bytes, LARGE_GAS_LIMIT_OVERRIDE);
+    let result = alloy_evm::Evm::transact_raw(&mut evm, tx).expect("keyless deploy transact");
+    let events = recorder.borrow().events.clone();
+
+    assert!(result.result.is_success(), "deploy should succeed: {:?}", result.result);
+    assert_single_start_end_pair(&events);
+    assert!(
+        !events.iter().any(|e| matches!(e, ObservedEvent::Step(_) | ObservedEvent::Create)),
+        "parent-env-only observer must not emit opcode hooks on pre-REX4: {events:?}"
+    );
 }
 
 #[test]
@@ -665,9 +788,7 @@ fn test_event_order_create_wraps_steps() {
 fn test_inspector_adapter_records_sandbox_create_for_generic_inspector() {
     let tracer = GenericCreateCounter::default();
     let creates = Rc::clone(&tracer.creates);
-    let adapter = InspectorSandboxObserver(tracer);
-    let observer: Rc<RefCell<dyn SandboxObserver<EmptyExternalEnv>>> =
-        Rc::new(RefCell::new(adapter));
+    let observer = Rc::new(RefCell::new(InspectorSandboxObserver(tracer)));
 
     let (tx_bytes, signer) = create_pre_eip155_deploy_tx(success_constructor());
     let mut db = funded_db(signer);
@@ -696,7 +817,7 @@ fn test_no_observer_skips_lifecycle_hooks() {
         db: &mut db,
         tx_bytes,
         gas_limit_override: LARGE_GAS_LIMIT_OVERRIDE,
-        observer: None,
+        observer: None::<Rc<RefCell<RecordingObserver>>>,
         tx_limits: None,
     });
     assert!(result.result.is_success(), "default path must still succeed");

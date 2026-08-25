@@ -76,13 +76,28 @@ pub struct MegaContext<DB: Database, ExtEnvs: ExternalEnvTypes> {
     /// before the sandbox runs).
     pub(crate) inside_sandbox: Rc<RefCell<bool>>,
 
-    /// Observer for nested sandbox execution.
+    /// Observer for nested sandbox execution, typed against this context's [`ExtEnvs`].
     ///
-    /// `None` keeps the historical no-inspector sandbox path. The observer is
-    /// read-only: mutating interpreter or context state through its hooks is
-    /// undefined and may diverge consensus.
+    /// `None` keeps the historical no-inspector sandbox path. REX4+ sandboxes
+    /// share the parent env and deliver opcode-level hooks through this slot.
+    /// Changing [`ExtEnvs`] via [`Self::with_external_envs`] resets this field
+    /// and the [`EmptyExternalEnv`] observer slot: the observer cannot be
+    /// carried across an env-type change and must be attached after external
+    /// environments are assembled. The observer is read-only: mutating
+    /// interpreter or context state through its hooks is undefined and may
+    /// diverge consensus.
     #[debug(ignore)]
     pub(crate) keyless_sandbox_observer: Option<Rc<RefCell<dyn SandboxObserver<ExtEnvs>>>>,
+
+    /// Observer handle typed against [`EmptyExternalEnv`].
+    ///
+    /// Pre-REX4 sandboxes always execute with [`EmptyExternalEnv`]. Opcode-level
+    /// hooks on that path use this slot so attaching an observer cannot change
+    /// sandbox env semantics. `None` when no observer is attached, or when the
+    /// caller used [`Self::set_keyless_sandbox_observer_for_parent_env`].
+    #[debug(ignore)]
+    pub(crate) keyless_sandbox_observer_empty:
+        Option<Rc<RefCell<dyn SandboxObserver<EmptyExternalEnv>>>>,
 
     /// The system address for the current block.
     /// Pre-REX5: always `MEGA_SYSTEM_ADDRESS` (the legacy hardcoded constant).
@@ -184,6 +199,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
             ))),
             inside_sandbox: Rc::new(RefCell::new(false)),
             keyless_sandbox_observer: None,
+            keyless_sandbox_observer_empty: None,
             system_address: crate::MEGA_SYSTEM_ADDRESS,
             inner,
         }
@@ -248,6 +264,7 @@ impl<DB: Database, ExtEnvTypes: ExternalEnvTypes> MegaContext<DB, ExtEnvTypes> {
             ))),
             inside_sandbox: Rc::new(RefCell::new(false)),
             keyless_sandbox_observer: None,
+            keyless_sandbox_observer_empty: None,
             system_address: crate::MEGA_SYSTEM_ADDRESS,
             inner,
         }
@@ -277,6 +294,7 @@ impl<DB: Database, ExtEnvTypes: ExternalEnvTypes> MegaContext<DB, ExtEnvTypes> {
             volatile_data_tracker: self.volatile_data_tracker,
             inside_sandbox: self.inside_sandbox,
             keyless_sandbox_observer: self.keyless_sandbox_observer,
+            keyless_sandbox_observer_empty: self.keyless_sandbox_observer_empty,
             system_address: self.system_address,
         }
     }
@@ -353,6 +371,11 @@ impl<DB: Database, ExtEnvTypes: ExternalEnvTypes> MegaContext<DB, ExtEnvTypes> {
     /// external environments, the dynamic gas cost calculator and oracle environment
     /// are reinitialized with the new configurations.
     ///
+    /// Changing `ExtEnvs` resets the sandbox observer (both the parent-env slot
+    /// and the [`EmptyExternalEnv`] slot): the observer is parameterized by env
+    /// type and cannot be carried across this conversion. Attach the observer
+    /// after external environments are assembled.
+    ///
     /// # Arguments
     ///
     /// * `external_envs` - The new external environments configuration
@@ -383,6 +406,7 @@ impl<DB: Database, ExtEnvTypes: ExternalEnvTypes> MegaContext<DB, ExtEnvTypes> {
             inside_sandbox: self.inside_sandbox,
             // Observer is parameterized by `ExtEnvs`; a type change cannot keep it.
             keyless_sandbox_observer: None,
+            keyless_sandbox_observer_empty: None,
             system_address: self.system_address,
         }
     }
@@ -466,17 +490,56 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
         self
     }
 
-    /// Attaches an observer for nested sandbox execution.
+    /// Attaches an observer for nested sandbox execution on every spec.
     ///
-    /// `None` restores the no-observer sandbox path. Observation is read-only:
-    /// mutating interpreter or context state through the hooks is undefined
-    /// and may diverge consensus. There is no take/drain API; recorded data
-    /// stays in the caller's observer.
-    pub fn set_keyless_sandbox_observer(
+    /// The observer must implement [`SandboxObserver`] for both this context's
+    /// [`ExtEnvs`] and [`EmptyExternalEnv`]. The same handle is stored as two
+    /// type-erased slots so opcode-level hooks fire for pre-REX4 sandboxes
+    /// (always [`EmptyExternalEnv`]) and for REX4+ sandboxes (shared parent
+    /// env). [`crate::sandbox::InspectorSandboxObserver`] with a fully generic
+    /// inspector satisfies both bounds.
+    ///
+    /// Attaching an observer does not change sandbox external-env semantics at
+    /// any spec.
+    ///
+    /// `None` restores the no-observer sandbox path and clears both slots.
+    /// Observation is read-only: mutating interpreter or context state through
+    /// the hooks is undefined and may diverge consensus. There is no take/drain
+    /// API; recorded data stays in the caller's observer.
+    pub fn set_keyless_sandbox_observer<O>(&mut self, observer: Option<Rc<RefCell<O>>>)
+    where
+        O: SandboxObserver<ExtEnvs> + SandboxObserver<EmptyExternalEnv> + 'static,
+    {
+        match observer {
+            Some(obs) => {
+                let cloned = Rc::clone(&obs);
+                let parent: Rc<RefCell<dyn SandboxObserver<ExtEnvs>>> = cloned;
+                let empty: Rc<RefCell<dyn SandboxObserver<EmptyExternalEnv>>> = obs;
+                self.keyless_sandbox_observer = Some(parent);
+                self.keyless_sandbox_observer_empty = Some(empty);
+            }
+            None => {
+                self.keyless_sandbox_observer = None;
+                self.keyless_sandbox_observer_empty = None;
+            }
+        }
+    }
+
+    /// Attaches an observer that implements [`SandboxObserver`] only for this
+    /// context's [`ExtEnvs`].
+    ///
+    /// Opcode-level observation is available on REX4+ sandboxes, which share
+    /// the parent env. Pre-REX4 sandboxes keep [`EmptyExternalEnv`] and emit
+    /// only `sandbox_start` / `sandbox_end` through this handle.
+    ///
+    /// Prefer [`Self::set_keyless_sandbox_observer`] when the observer
+    /// implements both env types. `None` clears both slots.
+    pub fn set_keyless_sandbox_observer_for_parent_env(
         &mut self,
         observer: Option<Rc<RefCell<dyn SandboxObserver<ExtEnvs>>>>,
     ) {
         self.keyless_sandbox_observer = observer;
+        self.keyless_sandbox_observer_empty = None;
     }
 
     /// Gets the current total data size generated from transaction execution.
@@ -809,6 +872,10 @@ mod tests {
 
     use crate::TestExternalEnvs;
 
+    struct NopObserver;
+
+    impl<E: ExternalEnvTypes> SandboxObserver<E> for NopObserver {}
+
     #[test]
     fn test_with_cfg_updates_spec() {
         // Create context with initial spec
@@ -905,5 +972,18 @@ mod tests {
             .borrow_mut()
             .new_account_gas(address!("0000000000000000000000000000000000100003"))
             .expect("bucket lookup against the supplied env should succeed");
+    }
+
+    #[test]
+    fn test_with_external_envs_resets_sandbox_observer() {
+        let mut context = MegaContext::new(EmptyDB::default(), MegaSpecId::REX4);
+        context.set_keyless_sandbox_observer(Some(Rc::new(RefCell::new(NopObserver))));
+        assert!(context.keyless_sandbox_observer.is_some());
+        assert!(context.keyless_sandbox_observer_empty.is_some());
+
+        let context =
+            context.with_external_envs(TestExternalEnvs::<std::convert::Infallible>::new().into());
+        assert!(context.keyless_sandbox_observer.is_none());
+        assert!(context.keyless_sandbox_observer_empty.is_none());
     }
 }

@@ -76,6 +76,15 @@
 //! the parent is reported by [`SandboxEndOutcome::state_applied`]. With no observer
 //! attached the sandbox path is unchanged.
 //!
+//! Observation does not change sandbox external-env semantics: pre-REX4 sandboxes
+//! always run with [`crate::EmptyExternalEnv`] (minimum bucket capacity, no oracle
+//! data), and REX4+ sandboxes always share the parent env. Opcode-level hooks on
+//! pre-REX4 are delivered through a second observer slot typed against
+//! [`crate::EmptyExternalEnv`]. Observers that only implement [`SandboxObserver`]
+//! for the parent env type can use
+//! [`crate::MegaContext::set_keyless_sandbox_observer_for_parent_env`]; pre-REX4
+//! then emits only `sandbox_start` / `sandbox_end`.
+//!
 //! [`SandboxObserver`]: observer::SandboxObserver
 //! [`SandboxEndOutcome::state_applied`]: observer::SandboxEndOutcome::state_applied
 //!

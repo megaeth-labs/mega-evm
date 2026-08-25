@@ -21,6 +21,20 @@
 //! that begins execution, and only when an observer is attached. Reverted
 //! inner frames still emit their events; whether sandbox state was applied to
 //! the parent is reported by [`SandboxEndOutcome::state_applied`].
+//!
+//! # External-environment invariance
+//!
+//! Attaching an observer must not change sandbox env semantics at any spec.
+//! Pre-REX4 sandboxes always run with [`crate::EmptyExternalEnv`]; REX4+
+//! sandboxes always share the parent env. Callers that implement
+//! [`SandboxObserver`] for both the parent env type and
+//! [`crate::EmptyExternalEnv`] attach via
+//! [`crate::MegaContext::set_keyless_sandbox_observer`], which stores two
+//! type-erased handles so opcode-level hooks fire on both paths.
+//! [`InspectorSandboxObserver`] with a fully generic inspector satisfies both
+//! bounds. An observer that only implements the parent env type can attach
+//! via [`crate::MegaContext::set_keyless_sandbox_observer_for_parent_env`];
+//! pre-REX4 then emits only `sandbox_start` / `sandbox_end`.
 
 #[cfg(not(feature = "std"))]
 use alloc as std;
@@ -464,5 +478,16 @@ mod tests {
     fn test_inspector_adapter_accepts_generic_inspector() {
         fn assert_observer<E: ExternalEnvTypes, T: SandboxObserver<E>>(_: T) {}
         assert_observer::<EmptyExternalEnv, _>(InspectorSandboxObserver(GenericInspector));
+    }
+
+    #[test]
+    fn test_inspector_adapter_satisfies_empty_and_parent_env_observer_bounds() {
+        use crate::TestExternalEnvs;
+        fn assert_dual<T: SandboxObserver<EmptyExternalEnv> + SandboxObserver<TestExternalEnvs>>(
+            _: T,
+        ) {
+        }
+        assert_dual(InspectorSandboxObserver(GenericInspector));
+        assert_dual(NopObserver);
     }
 }

@@ -622,15 +622,17 @@ pub(crate) fn execute_keyless_deploy_sandbox<DB: AlloyDatabase, ExtEnvs: Externa
     let mega_spec = ctx.mega_spec();
     let block = ctx.block().clone();
     let chain = ctx.chain().clone();
-    let observer = ctx.keyless_sandbox_observer.clone();
+    // Clone observer handles before `journal_mut()` mutably borrows `ctx`.
+    // REX4+ opcode hooks use the parent-env slot; pre-REX4 uses the
+    // EmptyExternalEnv slot. Env construction itself does not depend on
+    // whether an observer is attached.
+    let parent_observer = ctx.keyless_sandbox_observer.clone();
+    let empty_observer = ctx.keyless_sandbox_observer_empty.clone();
 
-    // REX4+: Clone Rc references to parent's external envs before `journal_mut()` mutably
-    // borrows `ctx`, after which its fields are no longer accessible.
-    // An attached observer needs the sandbox context to use the same `ExtEnvs` as
-    // the parent (the observer trait is parameterized by that type), so the
-    // shared-env constructor is also used on the observed pre-REX4 path.
-    // The zero-observer pre-REX4 path still builds `EmptyExternalEnv`.
-    let shared_external_envs = (mega_spec.is_enabled(MegaSpecId::REX4) || observer.is_some())
+    // REX4+: share the parent's salt and oracle envs. Pre-REX4 always builds
+    // EmptyExternalEnv (minimum bucket capacity, no oracle data).
+    let shared_external_envs = mega_spec
+        .is_enabled(MegaSpecId::REX4)
         .then(|| (Rc::clone(&ctx.salt_env), Rc::clone(&ctx.oracle_env)));
 
     // Deliberately do not merge `DynamicGasCost.accessed_bucket_ids` back into the
@@ -678,24 +680,24 @@ pub(crate) fn execute_keyless_deploy_sandbox<DB: AlloyDatabase, ExtEnvs: Externa
     }
 
     // Execute sandbox - using type-erased SandboxDb prevents infinite type instantiation.
-    // REX4+ (and any observed run) shares the parent's salt and oracle envs so the
-    // sandbox `ExtEnvs` matches the observer. The zero-observer pre-REX4 path still
-    // builds `EmptyExternalEnv` for backward compatibility. Everything after context
-    // construction is factored into `run_sandbox_ctx`.
+    // REX4+ shares the parent's salt and oracle envs and attaches the parent-env
+    // observer slot. Pre-REX4 always builds EmptyExternalEnv and attaches the
+    // EmptyExternalEnv observer slot. Everything after context construction is
+    // factored into `run_sandbox_ctx`.
     if let Some((salt_env, oracle_env)) = shared_external_envs {
         let sandbox_ctx = MegaContext::<_, ExtEnvs>::new_with_shared_ext_envs(
             sandbox_db, mega_spec, salt_env, oracle_env,
         );
-        run_sandbox_ctx(sandbox_ctx, sandbox_tx, sandbox_tx_limits, block, chain, observer)
+        run_sandbox_ctx(sandbox_ctx, sandbox_tx, sandbox_tx_limits, block, chain, parent_observer)
     } else {
         let sandbox_ctx = MegaContext::new(sandbox_db, mega_spec);
-        run_sandbox_ctx(sandbox_ctx, sandbox_tx, sandbox_tx_limits, block, chain, None)
+        run_sandbox_ctx(sandbox_ctx, sandbox_tx, sandbox_tx_limits, block, chain, empty_observer)
     }
 }
 
 /// Applies the shared sandbox-context configuration, runs the sandbox tx, and returns the
 /// processed outcome. Factored out of `execute_keyless_deploy_sandbox` so the REX4+ and
-/// pre-REX4 branches only differ in the `MegaContext` constructor they call.
+/// pre-REX4 branches only differ in the `MegaContext` constructor and observer slot.
 fn run_sandbox_ctx<'db, ExtEnvs: ExternalEnvTypes>(
     sandbox_ctx: MegaContext<SandboxDb<'db>, ExtEnvs>,
     sandbox_tx: MegaTransaction,

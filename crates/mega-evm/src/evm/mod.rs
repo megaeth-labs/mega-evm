@@ -69,7 +69,10 @@ use revm::{
     ExecuteEvm, InspectEvm, Inspector, Journal,
 };
 
-use crate::{sandbox::SandboxObserver, BucketId, ExternalEnvTypes, LimitUsage, MegaTransaction};
+use crate::{
+    sandbox::SandboxObserver, BucketId, EmptyExternalEnv, ExternalEnvTypes, LimitUsage,
+    MegaTransaction,
+};
 
 /// The main EVM implementation for the `MegaETH` chain.
 ///
@@ -234,15 +237,28 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
 }
 
 impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
-    /// Attaches an observer for nested sandbox execution.
+    /// Attaches an observer for nested sandbox execution on every spec.
     ///
-    /// Forwards to [`MegaContext::set_keyless_sandbox_observer`]. `None`
-    /// restores the no-observer sandbox path.
-    pub fn set_keyless_sandbox_observer(
+    /// Forwards to [`MegaContext::set_keyless_sandbox_observer`]. The observer
+    /// must implement [`SandboxObserver`] for both this EVM's [`ExtEnvs`] and
+    /// [`EmptyExternalEnv`]. `None` restores the no-observer sandbox path.
+    pub fn set_keyless_sandbox_observer<O>(&mut self, observer: Option<Rc<RefCell<O>>>)
+    where
+        O: SandboxObserver<ExtEnvs> + SandboxObserver<EmptyExternalEnv> + 'static,
+    {
+        self.inner.ctx.set_keyless_sandbox_observer(observer);
+    }
+
+    /// Attaches an observer that implements [`SandboxObserver`] only for this
+    /// EVM's [`ExtEnvs`].
+    ///
+    /// Forwards to [`MegaContext::set_keyless_sandbox_observer_for_parent_env`].
+    /// Pre-REX4 sandboxes emit only `sandbox_start` / `sandbox_end`.
+    pub fn set_keyless_sandbox_observer_for_parent_env(
         &mut self,
         observer: Option<Rc<RefCell<dyn SandboxObserver<ExtEnvs>>>>,
     ) {
-        self.inner.ctx.set_keyless_sandbox_observer(observer);
+        self.inner.ctx.set_keyless_sandbox_observer_for_parent_env(observer);
     }
 
     /// Provides a reference to the block environment.
