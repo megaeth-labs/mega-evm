@@ -153,6 +153,7 @@ mega-evme run --dump --dump.output ./post-state.json ...
 
 The output uses the same JSON format as prestate files, so you can feed it directly back into `--prestate`.
 
+An address the run only observed as nonexistent — read, or touched without ever gaining balance, nonce, or code — is omitted entirely: no account exists on either side of the commit, so there is nothing to describe, and a round-tripped prestate answers `EXTCODEHASH` for it with zero exactly as the chain does.
 An address that `SELFDESTRUCT` erased during the run is reported as the marker `{"selfdestructed": true}` and nothing else.
 Its code and storage still answer for the rest of that transaction, but none of it survives the commit, so printing the account as if it were live would describe a state no later run can observe.
 See [Destroyed Accounts](#destroyed-accounts) for how such an entry is read back.

@@ -334,7 +334,9 @@ impl StateDumpArgs {
         trace!(evm_state = ?evm_state, "Serializing EVM state");
         let account_states: BTreeMap<_, _> = evm_state
             .iter()
-            .map(|(address, account)| (address, DumpedAccount::from_account(account.clone())))
+            .filter_map(|(address, account)| {
+                DumpedAccount::from_account(account.clone()).map(|dumped| (address, dumped))
+            })
             .collect();
         let state_json = serde_json::to_string_pretty(&account_states)
             .map_err(|e| EvmeError::ExecutionError(format!("Failed to serialize state: {}", e)))?;
@@ -384,12 +386,23 @@ pub enum DumpedAccount {
 
 impl DumpedAccount {
     /// Classifies a post-execution account for the state dump.
-    pub fn from_account(account: Account) -> Self {
+    ///
+    /// `None` omits the address entirely: the run only ever observed it as
+    /// nonexistent and it still holds no balance, nonce, or code, so there is no
+    /// account to describe on either side of the commit — printing it as an
+    /// existing empty account would let a round-tripped prestate answer
+    /// `EXTCODEHASH` with the empty-code hash where the chain answers zero.
+    /// The self-destruct check runs first: an account created and destroyed in
+    /// one transaction also started as nonexistent, and it is reported as its
+    /// marker, not omitted.
+    pub fn from_account(account: Account) -> Option<Self> {
         if account.is_selfdestructed() {
-            Self::SelfDestructed { selfdestructed: true }
-        } else {
-            Self::Live(AccountState::from_account(account))
+            return Some(Self::SelfDestructed { selfdestructed: true });
         }
+        if account.is_loaded_as_not_existing() && account.info.is_empty() {
+            return None;
+        }
+        Some(Self::Live(AccountState::from_account(account)))
     }
 }
 
@@ -978,6 +991,68 @@ mod tests {
     }
   }
 }"#
+        );
+    }
+
+    /// An address the run only observed as nonexistent — and that still holds
+    /// no balance, nonce, or code — is omitted: no account exists on either
+    /// side of the commit, so there is nothing to describe.
+    #[test]
+    fn test_serialize_evm_state_omits_a_never_existing_empty_account() {
+        let mut state = EvmState::default();
+        let mut ghost = Account::new_not_existing(TransactionId::ZERO);
+        ghost.mark_touch();
+        state.insert(DESTROYED, ghost);
+        state.insert(LIVE, contract_account(7, 3, &[0x60, 0x00]));
+
+        let json = dump_args().serialize_evm_state(&state).expect("serialize");
+
+        assert!(
+            !json.contains("0x00000000000000000000000000000000000000bb"),
+            "ghost printed: {json}"
+        );
+        assert!(
+            json.contains("0x00000000000000000000000000000000000000aa"),
+            "live dropped: {json}"
+        );
+    }
+
+    /// An account that started as nonexistent but gained substance during the
+    /// transaction (a funded fresh address) exists after the commit and is
+    /// written in full.
+    #[test]
+    fn test_serialize_evm_state_keeps_a_funded_fresh_account() {
+        let mut state = EvmState::default();
+        let mut funded = Account::new_not_existing(TransactionId::ZERO);
+        funded.mark_touch();
+        funded.info.balance = U256::from(5);
+        state.insert(LIVE, funded);
+
+        let json = dump_args().serialize_evm_state(&state).expect("serialize");
+
+        assert!(
+            json.contains("0x00000000000000000000000000000000000000aa") &&
+                json.contains("\"balance\": \"0x5\""),
+            "funded fresh account must be written in full: {json}"
+        );
+    }
+
+    /// The self-destruct marker outranks the omission rule: an account created
+    /// and destroyed in one transaction also started as nonexistent, and it is
+    /// reported as its marker rather than silently dropped.
+    #[test]
+    fn test_serialize_evm_state_selfdestruct_marker_outranks_omission() {
+        let mut state = EvmState::default();
+        let mut account = Account::new_not_existing(TransactionId::ZERO);
+        account.mark_touch();
+        account.mark_selfdestruct();
+        state.insert(DESTROYED, account);
+
+        let json = dump_args().serialize_evm_state(&state).expect("serialize");
+
+        assert!(
+            json.contains("\"selfdestructed\": true"),
+            "the marker must win over omission: {json}"
         );
     }
 

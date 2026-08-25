@@ -19,34 +19,6 @@
     "contract_address": "0x5fbdb2315678afecb367f032d93f642f64180aa3",
     "logs_count": 0,
     "state": {
-      "0x0000000000000000000000000000000000000000": {
-        "balance": "0x0",
-        "nonce": "0x0",
-        "code": "0x",
-        "codeHash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
-        "storage": {}
-      },
-      "0x4200000000000000000000000000000000000019": {
-        "balance": "0x0",
-        "nonce": "0x0",
-        "code": "0x",
-        "codeHash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
-        "storage": {}
-      },
-      "0x420000000000000000000000000000000000001a": {
-        "balance": "0x0",
-        "nonce": "0x0",
-        "code": "0x",
-        "codeHash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
-        "storage": {}
-      },
-      "0x420000000000000000000000000000000000001b": {
-        "balance": "0x0",
-        "nonce": "0x0",
-        "code": "0x",
-        "codeHash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
-        "storage": {}
-      },
       "0x5fbdb2315678afecb367f032d93f642f64180aa3": {
         "balance": "0x0",
         "nonce": "0x2",

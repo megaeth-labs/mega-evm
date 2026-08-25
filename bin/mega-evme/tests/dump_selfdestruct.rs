@@ -161,3 +161,34 @@ fn test_dumped_state_round_trips_through_prestate() {
         "reloaded world must keep the survivor's code and storage and lack the destroyed account",
     );
 }
+
+/// An address the transaction only reads — and that does not exist — is absent
+/// from the dump: printing it as an existing empty account would let a
+/// round-tripped prestate answer `EXTCODEHASH` with the empty-code hash where
+/// the chain answers zero.
+#[test]
+fn test_dump_omits_an_address_only_observed_as_nonexistent() {
+    // `BALANCE` of an address nothing ever funds, then `STOP`.
+    let summary = run_json(&[
+        "0x73deadbeef000000000000000000000000000000003100",
+        "--gas",
+        "1000000",
+        "--sender.balance",
+        "1ether",
+        "--spec",
+        "Rex6",
+        "--dump",
+    ]);
+
+    let state = summary["state"].as_object().expect("dump state is an object");
+    assert!(
+        !state.keys().any(|k| k.to_lowercase().contains("deadbeef")),
+        "a read-only nonexistent address must not appear: {:?}",
+        state.keys().collect::<Vec<_>>()
+    );
+    assert!(
+        state.keys().any(|k| k.to_lowercase().starts_with("0xf39fd6e5")),
+        "the funded sender must remain: {:?}",
+        state.keys().collect::<Vec<_>>()
+    );
+}
