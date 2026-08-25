@@ -24,8 +24,8 @@ use mega_evm::{
 use revm::{
     bytecode::opcode::{
         CALL, CALLDATACOPY, CALLDATASIZE, CODECOPY, CREATE, GAS, ISZERO, JUMPDEST, JUMPI, LOG0,
-        KECCAK256, MLOAD, MSTORE, POP, PUSH0, RETURN, RETURNDATACOPY, RETURNDATASIZE, REVERT,
-        SELFDESTRUCT, SSTORE, STATICCALL, STOP,
+        KECCAK256, MLOAD, MSTORE, MSTORE8, POP, PUSH0, RETURN, RETURNDATACOPY, RETURNDATASIZE,
+        REVERT, SELFDESTRUCT, SSTORE, STATICCALL, STOP, TIMESTAMP,
     },
     context::TxEnv,
     Database, DatabaseCommit,
@@ -182,6 +182,33 @@ fn create_pre_eip155_deploy_tx(init_code: Bytes) -> (Bytes, Address) {
     create_pre_eip155_deploy_tx_with_nonce_and_value(0, init_code, U256::ZERO)
 }
 
+fn create_pre_eip155_deploy_tx_with_gas_limit(
+    init_code: Bytes,
+    gas_limit: u64,
+) -> (Bytes, Address) {
+    let tx = TxLegacy {
+        nonce: 0,
+        gas_price: 100_000_000_000,
+        gas_limit,
+        to: TxKind::Create,
+        value: U256::ZERO,
+        input: init_code,
+        chain_id: None,
+    };
+    let signature_word = U256::from_be_bytes(hex!(
+        "2222222222222222222222222222222222222222222222222222222222222222"
+    ));
+    let signed = Signed::new_unchecked(
+        tx,
+        Signature::new(signature_word, signature_word, false),
+        B256::ZERO,
+    );
+    let signer = signed.recover_signer().expect("should recover signer");
+    let mut buf = Vec::new();
+    signed.rlp_encode(&mut buf);
+    (Bytes::from(buf), signer)
+}
+
 /// Calculate the deployed contract address for a keyless deploy transaction.
 fn calculate_deploy_address_for_tx(tx_bytes: &[u8]) -> Address {
     use mega_evm::{
@@ -228,6 +255,44 @@ fn keyless_evidence_revert_init_code() -> Bytes {
         .push_number(0_u8)
         .append(REVERT)
         .build()
+}
+
+fn keyless_evidence_code_deposit_limit_init_code(code_len: u32) -> Bytes {
+    let length = code_len.to_be_bytes();
+    let final_offset = (code_len - 1).to_be_bytes();
+    Bytes::from(vec![
+        // Pre-expand return memory before the volatile-data compute window.
+        0x60,
+        0x00,
+        0x62,
+        final_offset[1],
+        final_offset[2],
+        final_offset[3],
+        MSTORE8,
+        // SSTORE(2, 42); KECCAK256(memory[0..22]); TIMESTAMP.
+        0x60,
+        0x2a,
+        0x60,
+        0x02,
+        SSTORE,
+        0x60,
+        0x16,
+        0x60,
+        0x00,
+        KECCAK256,
+        POP,
+        TIMESTAMP,
+        POP,
+        // RETURN(memory[0..code_len]); code-deposit accounting crosses the
+        // post-TIMESTAMP compute window.
+        0x62,
+        length[1],
+        length[2],
+        length[3],
+        0x60,
+        0x00,
+        RETURN,
+    ])
 }
 
 fn successful_init_code_calling(address: Address) -> Bytes {
@@ -360,6 +425,64 @@ fn test_keyless_sandbox_capture_discards_reverted_child_evidence() {
         artifacts[0].is_empty(),
         "a handled child revert must remove its SSTORE and KECCAK observations"
     );
+}
+
+#[test]
+fn test_keyless_sandbox_capture_retains_real_pre_rex5_split_evidence() {
+    const CODE_LEN: u32 = 120_000;
+    for spec in [MegaSpecId::REX2, MegaSpecId::REX3, MegaSpecId::REX4] {
+        let mut db = MemoryDatabase::default();
+        let (tx_bytes, signer) = create_pre_eip155_deploy_tx_with_gas_limit(
+            keyless_evidence_code_deposit_limit_init_code(CODE_LEN),
+            LARGE_GAS_LIMIT_OVERRIDE,
+        );
+        let deployed = calculate_deploy_address_for_tx(tx_bytes.as_ref());
+        db.set_account_balance(
+            signer,
+            U256::from(1_000_000_000_000_000_000_000_000_000_000u128),
+        );
+
+        let (result, artifacts) =
+            call_keyless_deploy_with_evidence(spec, &mut db, tx_bytes, true);
+        assert!(matches!(result.result, ExecutionResult::Success { .. }));
+        let account = result
+            .state
+            .get(&deployed)
+            .unwrap_or_else(|| panic!("{spec}: split CREATE account must survive"));
+        assert_eq!(account.storage[&U256::from(2)].present_value(), U256::from(0x2a));
+        assert_eq!(artifacts.len(), 1);
+        assert!(artifacts[0].observed_pre_rex5_split_create());
+        assert_eq!(artifacts[0].operations().len(), 2);
+    }
+}
+
+#[test]
+fn test_keyless_sandbox_capture_discards_real_rex5_atomic_failure_evidence() {
+    const CODE_LEN: u32 = 120_000;
+    for spec in [MegaSpecId::REX5, MegaSpecId::REX6] {
+        let mut db = MemoryDatabase::default();
+        let (tx_bytes, signer) = create_pre_eip155_deploy_tx_with_gas_limit(
+            keyless_evidence_code_deposit_limit_init_code(CODE_LEN),
+            LARGE_GAS_LIMIT_OVERRIDE,
+        );
+        let deployed = calculate_deploy_address_for_tx(tx_bytes.as_ref());
+        db.set_account_balance(
+            signer,
+            U256::from(1_000_000_000_000_000_000_000_000_000_000u128),
+        );
+
+        let (result, artifacts) =
+            call_keyless_deploy_with_evidence(spec, &mut db, tx_bytes, true);
+        assert!(matches!(result.result, ExecutionResult::Success { .. }));
+        if let Some(account) = result.state.get(&deployed) {
+            assert!(!account.is_created(), "{spec}: atomic failure retained {account:?}");
+            if let Some(storage) = account.storage.get(&U256::from(2)) {
+                assert_eq!(storage.present_value(), storage.original_value());
+            }
+        }
+        assert_eq!(artifacts.len(), 1);
+        assert!(artifacts[0].is_empty());
+    }
 }
 
 #[test]
