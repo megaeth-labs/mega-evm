@@ -75,11 +75,11 @@ pub struct MegaContext<DB: Database, ExtEnvs: ExternalEnvTypes> {
     /// before the sandbox runs).
     pub(crate) inside_sandbox: Rc<RefCell<bool>>,
 
-    /// Whether the caller requested execution evidence from KeylessDeploy's
+    /// Whether the caller requested execution evidence from `KeylessDeploy`'s
     /// otherwise-unobserved nested sandbox.
     pub(crate) capture_keyless_sandbox_evidence: bool,
 
-    /// Commit-scoped artifacts published by accepted KeylessDeploy sandboxes.
+    /// Commit-scoped artifacts published by accepted `KeylessDeploy` sandboxes.
     /// The interceptor is top-level-only, so at most one artifact is expected
     /// per outer transaction; a vector keeps draining explicit and lossless.
     pub(crate) keyless_sandbox_evidence: Vec<KeylessSandboxEvidence>,
@@ -470,7 +470,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     }
 
     /// Enables or disables capture of execution evidence from accepted
-    /// KeylessDeploy sandboxes.
+    /// `KeylessDeploy` sandboxes.
     ///
     /// Capture is disabled by default. Disabling it also discards any artifact
     /// the caller has not drained, preventing stale evidence from crossing an
@@ -482,7 +482,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
         }
     }
 
-    /// Whether KeylessDeploy sandbox evidence capture is enabled.
+    /// Whether `KeylessDeploy` sandbox evidence capture is enabled.
     pub(crate) fn keyless_sandbox_evidence_capture_enabled(&self) -> bool {
         self.capture_keyless_sandbox_evidence
     }
@@ -495,7 +495,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
         }
     }
 
-    /// Drains all accepted KeylessDeploy sandbox artifacts observed since the
+    /// Drains all accepted `KeylessDeploy` sandbox artifacts observed since the
     /// previous call.
     pub fn take_keyless_sandbox_evidence(&mut self) -> Vec<KeylessSandboxEvidence> {
         core::mem::take(&mut self.keyless_sandbox_evidence)

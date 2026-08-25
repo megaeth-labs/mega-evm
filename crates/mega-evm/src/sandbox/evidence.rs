@@ -1,9 +1,9 @@
-//! Execution evidence captured from the real KeylessDeploy sandbox run.
+//! Execution evidence captured from the real `KeylessDeploy` sandbox run.
 //!
 //! The canonical sandbox state remains the authority for state transition
 //! semantics. This module only preserves execution facts which cannot be
 //! reconstructed from the final state diff: ordered SSTORE targets and
-//! successful KECCAK256 inputs/outputs. Capture is opt-in so ordinary MegaEVM
+//! successful KECCAK256 inputs/outputs. Capture is opt-in so ordinary `MegaEVM`
 //! users keep the existing no-inspector sandbox path.
 
 #[cfg(not(feature = "std"))]
@@ -24,7 +24,7 @@ use revm::{
 
 use crate::{JournalInspectTr, MegaSpecId, StackInspectTr};
 
-/// One ordered execution fact from a KeylessDeploy sandbox.
+/// One ordered execution fact from a `KeylessDeploy` sandbox.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum KeylessSandboxEvidenceOp {
     /// An SSTORE attempted by a frame whose state survived sandbox execution.
@@ -45,7 +45,7 @@ pub enum KeylessSandboxEvidenceOp {
     },
 }
 
-/// Surviving execution evidence from one accepted KeylessDeploy sandbox.
+/// Surviving execution evidence from one accepted `KeylessDeploy` sandbox.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct KeylessSandboxEvidence {
     operations: Vec<KeylessSandboxEvidenceOp>,
@@ -88,7 +88,7 @@ struct PendingKeccak {
     size: U256,
 }
 
-/// Internal observer attached only to an opted-in KeylessDeploy sandbox.
+/// Internal observer attached only to an opted-in `KeylessDeploy` sandbox.
 #[derive(Clone, Debug)]
 pub(crate) struct KeylessSandboxEvidenceRecorder {
     spec: MegaSpecId,
@@ -230,7 +230,7 @@ where
 
 fn u256_to_usize(value: U256) -> Option<usize> {
     let limbs = value.as_limbs();
-    if (limbs[0] > usize::MAX as u64) | (limbs[1] != 0) | (limbs[2] != 0) | (limbs[3] != 0) {
+    if (limbs[0] > usize::MAX as u64) || (limbs[1] != 0) || (limbs[2] != 0) || (limbs[3] != 0) {
         return None;
     }
     Some(limbs[0] as usize)

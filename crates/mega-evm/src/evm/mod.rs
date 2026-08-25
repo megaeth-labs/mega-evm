@@ -233,12 +233,12 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
 }
 
 impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
-    /// Enables or disables capture of accepted KeylessDeploy sandbox evidence.
+    /// Enables or disables capture of accepted `KeylessDeploy` sandbox evidence.
     pub fn set_keyless_sandbox_evidence_capture(&mut self, enabled: bool) {
         self.inner.ctx.set_keyless_sandbox_evidence_capture(enabled);
     }
 
-    /// Drains accepted KeylessDeploy sandbox evidence accumulated since the
+    /// Drains accepted `KeylessDeploy` sandbox evidence accumulated since the
     /// previous call.
     pub fn take_keyless_sandbox_evidence(&mut self) -> Vec<KeylessSandboxEvidence> {
         self.inner.ctx.take_keyless_sandbox_evidence()
