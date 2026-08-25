@@ -24,10 +24,11 @@ use alloy_primitives::{address, keccak256, Address, Bytes, Signature, TxKind, B2
 use alloy_sol_types::{SolCall, SolValue};
 use mega_evm::{
     test_utils::MemoryDatabase, BlockLimits, ISequencerRegistry, MegaBlockExecutionCtx,
-    MegaBlockExecutorFactory, MegaEvmFactory, MegaHardfork, MegaHardforkConfig, MegaSpecId,
-    MegaTxEnvelope, SequencerRegistryConfig, SequencerRegistryRex6Config, TestExternalEnvs,
-    MEGA_SYSTEM_ADDRESS, SEQUENCER_REGISTRY_ADDRESS, SEQUENCER_REGISTRY_CODE,
-    SEQUENCER_REGISTRY_CODE_HASH, SEQUENCER_REGISTRY_CODE_HASH_REX6,
+    MegaBlockExecutorFactory, MegaContext, MegaEvm, MegaEvmFactory, MegaHardfork,
+    MegaHardforkConfig, MegaSpecId, MegaTxEnvelope, SequencerRegistryConfig,
+    SequencerRegistryRex6Config, TestExternalEnvs, MEGA_SYSTEM_ADDRESS,
+    SEQUENCER_REGISTRY_ADDRESS, SEQUENCER_REGISTRY_CODE, SEQUENCER_REGISTRY_CODE_HASH,
+    SEQUENCER_REGISTRY_CODE_HASH_REX6, transact_apply_pending_changes,
 };
 use mega_system_contracts::sequencer_registry::storage_slots::{
     ADMIN, CURRENT_SEQUENCER, CURRENT_SYSTEM_ADDRESS, MIN_ROTATION_DELAY, PENDING_SEQUENCER,
@@ -37,6 +38,7 @@ use revm::{
     context::BlockEnv,
     database::State,
     state::{AccountInfo, Bytecode},
+    DatabaseCommit,
 };
 
 const CHAIN_ID: u64 = 8453;
@@ -233,6 +235,51 @@ fn seed_v1_registry_with_pending_rotation(
     ] {
         db.insert_account_storage(SEQUENCER_REGISTRY_ADDRESS, slot, value).unwrap();
     }
+}
+
+/// An external caller must be able to apply a v1-scheduled rotation in the Rex6 block before
+/// the separate pre-block path upgrades the registry bytecode to v2.0.0.
+#[test]
+fn test_public_apply_pending_changes_executes_v1_registry_before_rex6_deploy() {
+    let (new_sequencer, _) = new_sequencer_keypair();
+    let activation_block = 1000u64;
+
+    let mut db = MemoryDatabase::default();
+    seed_v1_registry_with_pending_rotation(&mut db, new_sequencer, activation_block);
+
+    let block = BlockEnv {
+        number: U256::from(activation_block),
+        timestamp: U256::from(1_800_000_000u64),
+        gas_limit: 30_000_000,
+        ..Default::default()
+    };
+    let mut context = MegaContext::new(&mut db, MegaSpecId::REX6).with_block(block);
+    context.modify_chain(|chain| {
+        chain.operator_fee_scalar = Some(U256::ZERO);
+        chain.operator_fee_constant = Some(U256::ZERO);
+    });
+
+    let state = {
+        let mut evm = MegaEvm::new(context);
+        transact_apply_pending_changes(&mut evm)
+            .expect("the public helper must apply the due v1 rotation")
+            .state
+    };
+    db.commit(state);
+
+    let mut state = State::builder().with_database(&mut db).build();
+    assert_eq!(
+        registry_code_hash(&mut state),
+        SEQUENCER_REGISTRY_CODE_HASH,
+        "the helper must not perform the separate Rex6 bytecode upgrade"
+    );
+    assert_eq!(
+        read_registry_slot(&mut state, CURRENT_SEQUENCER),
+        U256::from_be_bytes(new_sequencer.into_word().0),
+        "the due v1-scheduled rotation must be committed"
+    );
+    assert_eq!(read_registry_slot(&mut state, PENDING_SEQUENCER), U256::ZERO);
+    assert_eq!(read_registry_slot(&mut state, SEQUENCER_ACTIVATION_BLOCK), U256::ZERO);
 }
 
 /// Fresh chain at Rex6: the pre-block deploy installs v2.0.0 directly with the full seed

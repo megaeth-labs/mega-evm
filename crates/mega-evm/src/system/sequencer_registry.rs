@@ -340,14 +340,15 @@ pub(crate) fn is_apply_pending_changes_due<DB: Database>(
 ///
 /// This single system call applies both the system address change and the sequencer
 /// change if they are due in the current block.
-/// Caller should gate this with [`is_apply_pending_changes_due`] to avoid an EVM
-/// call on every block.
+/// The block executor gates this with its internal due check to avoid an EVM call on every block.
+/// External callers should invoke this only for a known-due pending change and commit the
+/// returned state through their normal pre-block state-change pipeline.
 ///
 /// The system call is issued with `max(block.gas_limit, SYSTEM_CALL_GAS_LIMIT_FLOOR)`
 /// instead of the upstream-fixed 30M. `applyPendingChanges()` writes role-rotation
 /// slots whose actual cost depends on REX dynamic storage gas, so the upstream default
 /// is no longer guaranteed to be enough on activation blocks.
-pub(crate) fn transact_apply_pending_changes<DB, INSP, ExtEnvs>(
+pub fn transact_apply_pending_changes<DB, INSP, ExtEnvs>(
     evm: &mut crate::MegaEvm<DB, INSP, ExtEnvs>,
 ) -> Result<ResultAndState<crate::MegaHaltReason>, BlockExecutionError>
 where
