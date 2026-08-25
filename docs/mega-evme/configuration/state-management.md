@@ -153,6 +153,10 @@ mega-evme run --dump --dump.output ./post-state.json ...
 
 The output uses the same JSON format as prestate files, so you can feed it directly back into `--prestate`.
 
+An address that `SELFDESTRUCT` erased during the run is reported as the marker `{"selfdestructed": true}` and nothing else.
+Its code and storage still answer for the rest of that transaction, but none of it survives the commit, so printing the account as if it were live would describe a state no later run can observe.
+See [Destroyed Accounts](#destroyed-accounts) for how such an entry is read back.
+
 ## State File Format
 
 ### Fields
@@ -160,13 +164,14 @@ The output uses the same JSON format as prestate files, so you can feed it direc
 Each top-level key is a checksummed or lowercase hex address.
 The value is an account object with these fields:
 
-| Field      | Type         | Description                       |
-| ---------- | ------------ | --------------------------------- |
-| `balance`  | hex quantity | Account balance in wei            |
-| `nonce`    | hex quantity | Transaction nonce                 |
-| `code`     | hex bytes    | Deployed bytecode (`0x` for EOAs) |
-| `codeHash` | hex bytes    | Keccak256 hash of `code`          |
-| `storage`  | object       | Map of storage slot to value      |
+| Field            | Type         | Description                                                                   |
+| ---------------- | ------------ | ----------------------------------------------------------------------------- |
+| `balance`        | hex quantity | Account balance in wei                                                        |
+| `nonce`          | hex quantity | Transaction nonce                                                             |
+| `code`           | hex bytes    | Deployed bytecode (`0x` for EOAs)                                             |
+| `codeHash`       | hex bytes    | Keccak256 hash of `code`                                                      |
+| `storage`        | object       | Map of storage slot to value                                                  |
+| `selfdestructed` | boolean      | Written only for an address `SELFDESTRUCT` erased, and then as its only field |
 
 Example:
 
@@ -191,6 +196,22 @@ Example:
   }
 }
 ```
+
+### Destroyed Accounts
+
+An address that `SELFDESTRUCT` erased has no state left to describe — balance, nonce, code, and storage are all dropped when the state is committed — so it carries the marker instead of an account body:
+
+```json
+{
+  "0xa16e02e87b7454126e5e10d957a927a7f5b5d2be": {
+    "selfdestructed": true
+  }
+}
+```
+
+Loading a file that contains such an entry treats the address as absent rather than seeding an account for it, which is exactly the world the destroying transaction committed.
+A dump therefore stays safe to feed straight back into `--prestate`.
+Only the value `true` carries this meaning; an entry that spells the field out as `false` is an ordinary account and is loaded as written.
 
 ### Format Notes
 
