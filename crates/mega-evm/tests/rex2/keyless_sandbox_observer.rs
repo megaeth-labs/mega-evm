@@ -487,11 +487,17 @@ fn assert_split_create_shape(
     // Pre-REX5 `return_create` commits the runtime blob before the code-deposit compute
     // charge marks the frame as exceeding, so the account still carries the 8_000-byte
     // code. The ABI `deployedAddress == 0` above is the "not deployed" signal.
+    // Length and hash are checked independently: a non-empty deposit of the wrong size
+    // (e.g. 7999) must fail rather than pass via the hash arm of a disjunction.
     let code_len = account.info.code.as_ref().map(|c| c.len()).unwrap_or(0);
-    assert!(
-        code_len == SPLIT_CREATE_CODE_LEN as usize ||
-            account.info.code_hash != revm::primitives::KECCAK_EMPTY,
-        "{spec:?}: pre-REX5 split commits returned bytecode; code_len={code_len} hash={:?}",
+    assert_eq!(
+        code_len, SPLIT_CREATE_CODE_LEN as usize,
+        "{spec:?}: pre-REX5 split commits 8000-byte returned bytecode; code_len={code_len}"
+    );
+    assert_ne!(
+        account.info.code_hash,
+        revm::primitives::KECCAK_EMPTY,
+        "{spec:?}: pre-REX5 split commits non-empty code_hash; hash={:?}",
         account.info.code_hash
     );
 }
