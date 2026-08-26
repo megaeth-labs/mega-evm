@@ -75,7 +75,10 @@ pub struct SandboxStartInfo {
     pub signer: Address,
     /// Deterministic deploy address derived from the signer.
     pub deploy_address: Address,
-    /// Caller-supplied gas limit override exactly as decoded from the payload.
+    /// Caller-supplied gas limit override decoded from the payload.
+    ///
+    /// The ABI value is a `U256` and is saturating-converted to `u64`, so a
+    /// payload larger than [`u64::MAX`] is reported as [`u64::MAX`].
     pub gas_limit_override: u64,
     /// Gas limit actually granted to the sandbox after outer-gas capping
     /// (REX5+ caps to the outer frame's remaining gas; pre-REX5 equals

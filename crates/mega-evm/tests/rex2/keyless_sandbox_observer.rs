@@ -10,15 +10,15 @@ use mega_evm::{
     constants,
     revm::context::result::{ExecutionResult, ResultAndState},
     sandbox::{
-        decode_error_result, InspectorSandboxObserver, SandboxCompletionKind, SandboxEndOutcome,
-        SandboxObserver, SandboxRejectKind, SandboxStartInfo,
+        decode_error_result, InspectorSandboxObserver, KeylessDeployError, SandboxCompletionKind,
+        SandboxEndOutcome, SandboxObserver, SandboxRejectKind, SandboxStartInfo,
     },
     test_utils::{BytecodeBuilder, ErrorInjectingDatabase, MemoryDatabase},
     EmptyExternalEnv, EvmTxRuntimeLimits, IKeylessDeploy, MegaContext, MegaEvm, MegaHaltReason,
     MegaSpecId, MegaTransaction, TestExternalEnvs, KEYLESS_DEPLOY_ADDRESS, MIN_BUCKET_SIZE,
 };
 use revm::{
-    bytecode::opcode::{BALANCE, CALL, POP, PUSH0, RETURN, STATICCALL},
+    bytecode::opcode::{BALANCE, CALL, MSTORE, POP, PUSH0, RETURN, STATICCALL},
     context::TxEnv,
     handler::EvmTr,
     inspector::NoOpInspector,
@@ -230,28 +230,31 @@ fn constructor_touches_sentinel() -> Bytes {
         .build()
 }
 
+/// Words of memory expanded by the constructor `MSTORE`.
+///
+/// Pre-REX5 sandboxes ignore the parent's compute limit and run at the spec
+/// default of 200M (`rex::TX_COMPUTE_GAS_LIMIT`). An 8_000-byte code deposit
+/// is only 1.6M compute, so the constructor has to land in the window
+/// `(200M - 1.6M, 200M)` and then `RETURN` `8_000` bytes so the deposit charge
+/// splits the CREATE. Memory-expansion gas is `3*words + words²/512`; `318_191`
+/// words (~10.18 MiB) costs `198_699_714`, which sits in that window without a
+/// multi-million-iteration loop.
+const SPLIT_CREATE_MEM_WORDS: u64 = 318_191;
+const SPLIT_CREATE_MEM_OFFSET: u32 = (SPLIT_CREATE_MEM_WORDS * 32 - 32) as u32;
+const SPLIT_CREATE_CODE_LEN: u32 = 8_000;
+const SPLIT_CREATE_SLOT: u64 = 2;
+const SPLIT_CREATE_SLOT_VALUE: u64 = 0x2a;
+
 fn split_create_initcode() -> Bytes {
-    let code_len = 8_000u32.to_be_bytes();
-    Bytes::from(vec![
-        revm::bytecode::opcode::PUSH1,
-        0x2a,
-        revm::bytecode::opcode::PUSH1,
-        0x02,
-        revm::bytecode::opcode::SSTORE,
-        revm::bytecode::opcode::PUSH1,
-        0x16,
-        revm::bytecode::opcode::PUSH1,
-        0x00,
-        revm::bytecode::opcode::KECCAK256,
-        revm::bytecode::opcode::POP,
-        revm::bytecode::opcode::PUSH3,
-        code_len[1],
-        code_len[2],
-        code_len[3],
-        revm::bytecode::opcode::PUSH1,
-        0x00,
-        revm::bytecode::opcode::RETURN,
-    ])
+    BytecodeBuilder::default()
+        .sstore(U256::from(SPLIT_CREATE_SLOT), U256::from(SPLIT_CREATE_SLOT_VALUE))
+        .push_number(0_u8)
+        .push_number(SPLIT_CREATE_MEM_OFFSET)
+        .append(MSTORE)
+        .push_number(SPLIT_CREATE_CODE_LEN)
+        .push_number(0_u8)
+        .append(RETURN)
+        .build()
 }
 
 fn constructor_calls_identity_precompile() -> Bytes {
@@ -319,9 +322,21 @@ fn keyless_deploy_call_tx_with_outer_gas(
     gas_limit_override: u64,
     outer_gas_limit: u64,
 ) -> MegaTransaction {
+    keyless_deploy_call_tx_with_override_u256(
+        keyless_deployment_tx,
+        U256::from(gas_limit_override),
+        outer_gas_limit,
+    )
+}
+
+fn keyless_deploy_call_tx_with_override_u256(
+    keyless_deployment_tx: Bytes,
+    gas_limit_override: U256,
+    outer_gas_limit: u64,
+) -> MegaTransaction {
     let call_data = IKeylessDeploy::keylessDeployCall {
         keylessDeploymentTransaction: keyless_deployment_tx,
-        gasLimitOverride: U256::from(gas_limit_override),
+        gasLimitOverride: gas_limit_override,
     }
     .abi_encode();
     let tx = TxEnv {
@@ -402,6 +417,83 @@ fn assert_result_and_state_eq(
             .unwrap_or_else(|| panic!("{case}: missing account {addr:?} in no-observer state"));
         assert_eq!(account, other, "{case}: account {addr:?}");
     }
+}
+
+/// Loud split-CREATE shape: constructor finished (SSTORE stuck, account created) but the
+/// sandbox reported `ExecutionFailed` and the ABI does not claim a deploy. An empty spin
+/// that actually deployed would fail here as `Applied(Deployed)` / empty `errorData`.
+fn assert_split_create_shape(
+    spec: MegaSpecId,
+    result: &ResultAndState<MegaHaltReason>,
+    signer: Address,
+    events: Option<&[ObservedEvent]>,
+) {
+    if let Some(events) = events {
+        assert_single_start_end_pair(events);
+        match start_and_end(events).1 {
+            ObservedEvent::End(SandboxEndOutcome::Applied {
+                completion: SandboxCompletionKind::ExecutionFailed,
+                ..
+            }) => {}
+            other => panic!("{spec:?}: expected Applied(ExecutionFailed), got {other:?}"),
+        }
+    }
+
+    assert!(
+        result.result.is_success(),
+        "{spec:?}: split CREATE is a success-style outer return: {:?}",
+        result.result
+    );
+    let output = result.result.output().expect("split CREATE outer output");
+    let ret = IKeylessDeploy::keylessDeployCall::abi_decode_returns(output)
+        .expect("split CREATE ABI return");
+    assert_eq!(
+        ret.deployedAddress,
+        Address::ZERO,
+        "{spec:?}: split CREATE must not report a deployed address"
+    );
+    assert!(
+        !ret.errorData.is_empty(),
+        "{spec:?}: split CREATE must carry errorData (empty spin succeeds with empty errorData)"
+    );
+    let error = decode_error_result(&ret.errorData);
+    assert!(
+        matches!(
+            error,
+            Some(
+                KeylessDeployError::ExecutionHalted { .. } |
+                    KeylessDeployError::ExecutionReverted { .. }
+            )
+        ),
+        "{spec:?}: split CREATE errorData must be halt/revert, got {error:?}"
+    );
+
+    let deploy_address = signer.create(0);
+    let account = result.state.get(&deploy_address).unwrap_or_else(|| {
+        panic!("{spec:?}: split CREATE must leave a state entry at {deploy_address}")
+    });
+    assert!(
+        account.is_created(),
+        "{spec:?}: deploy address must be is_created(); status={:?}",
+        account.status
+    );
+    let slot = account.storage.get(&U256::from(SPLIT_CREATE_SLOT)).map(|slot| slot.present_value());
+    assert_eq!(
+        slot,
+        Some(U256::from(SPLIT_CREATE_SLOT_VALUE)),
+        "{spec:?}: constructor SSTORE must survive the failed code deposit"
+    );
+
+    // Pre-REX5 `return_create` commits the runtime blob before the code-deposit compute
+    // charge marks the frame as exceeding, so the account still carries the 8_000-byte
+    // code. The ABI `deployedAddress == 0` above is the "not deployed" signal.
+    let code_len = account.info.code.as_ref().map(|c| c.len()).unwrap_or(0);
+    assert!(
+        code_len == SPLIT_CREATE_CODE_LEN as usize ||
+            account.info.code_hash != revm::primitives::KECCAK_EMPTY,
+        "{spec:?}: pre-REX5 split commits returned bytecode; code_len={code_len} hash={:?}",
+        account.info.code_hash
+    );
 }
 
 fn parity_pair(
@@ -982,22 +1074,24 @@ fn test_sandbox_start_info_rex5_caps_effective_gas_limit_below_override() {
 
 #[test]
 fn test_observer_parity_split_create_through_interceptor() {
-    const COMPUTE_BUDGET: u64 = 1_000_000;
-    let limits = EvmTxRuntimeLimits::no_limits().with_tx_compute_gas_limit(COMPUTE_BUDGET);
-
+    // Parent 1M compute is not forwarded into pre-REX5 sandboxes; the sandbox
+    // runs at the 200M spec default. Do not set a parent limit — the initcode
+    // itself must overflow that 200M default. EVM gas and compute gas are
+    // independent: the 10B override / 1T outer envelope cover ~199M memory
+    // expansion plus 80M code-deposit storage gas.
     for spec in [MegaSpecId::REX2, MegaSpecId::REX3, MegaSpecId::REX4] {
         let (tx_bytes, signer) = create_pre_eip155_deploy_tx(split_create_initcode());
         let mut db_obs = funded_db(signer);
         let mut db_base = db_obs.clone();
-        let observer = Rc::new(RefCell::new(RecordingObserver::default()));
+        let recorder = Rc::new(RefCell::new(RecordingObserver::default()));
 
         let observed = run_keyless(RunConfig {
             spec,
             db: &mut db_obs,
             tx_bytes: tx_bytes.clone(),
             gas_limit_override: LARGE_GAS_LIMIT_OVERRIDE,
-            observer: Some(observer),
-            tx_limits: Some(limits),
+            observer: Some(Rc::clone(&recorder)),
+            tx_limits: None,
             outer_gas_limit: DEFAULT_OUTER_GAS_LIMIT,
         });
         let baseline = run_keyless(RunConfig {
@@ -1006,15 +1100,50 @@ fn test_observer_parity_split_create_through_interceptor() {
             tx_bytes,
             gas_limit_override: LARGE_GAS_LIMIT_OVERRIDE,
             observer: None::<Rc<RefCell<RecordingObserver>>>,
-            tx_limits: Some(limits),
+            tx_limits: None,
             outer_gas_limit: DEFAULT_OUTER_GAS_LIMIT,
         });
 
+        let events = recorder.borrow().events.clone();
+        assert_split_create_shape(spec, &observed, signer, Some(&events));
+        assert_split_create_shape(spec, &baseline, signer, None);
         assert_result_and_state_eq(
             &observed,
             &baseline,
             &format!("split-CREATE interceptor {spec:?}"),
         );
+    }
+}
+
+#[test]
+fn test_sandbox_start_info_saturates_gas_limit_override_above_u64_max() {
+    let (tx_bytes, signer) = create_pre_eip155_deploy_tx(success_constructor());
+    let mut db = funded_db(signer);
+    let recorder = Rc::new(RefCell::new(RecordingObserver::default()));
+
+    let mut context = MegaContext::new(&mut db, MegaSpecId::REX5);
+    context.modify_chain(|chain| {
+        chain.operator_fee_scalar = Some(U256::ZERO);
+        chain.operator_fee_constant = Some(U256::ZERO);
+    });
+    context.set_keyless_sandbox_observer(Some(Rc::clone(&recorder)));
+    let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);
+    let tx =
+        keyless_deploy_call_tx_with_override_u256(tx_bytes, U256::MAX, DEFAULT_OUTER_GAS_LIMIT);
+    let result = alloy_evm::Evm::transact_raw(&mut evm, tx).expect("keyless deploy transact");
+    assert!(result.result.is_success(), "deploy should succeed: {:?}", result.result);
+
+    let events = recorder.borrow().events.clone();
+    assert_single_start_end_pair(&events);
+    match start_and_end(&events).0 {
+        ObservedEvent::Start { gas_limit_override, .. } => {
+            assert_eq!(
+                *gas_limit_override,
+                u64::MAX,
+                "payload > u64::MAX must saturate gas_limit_override to u64::MAX"
+            );
+        }
+        other => panic!("expected Start, got {other:?}"),
     }
 }
 
