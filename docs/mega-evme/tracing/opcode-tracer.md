@@ -6,6 +6,7 @@ description: Log every instruction with gas, stack, memory, and storage at each 
 
 The opcode tracer records every EVM instruction executed, along with gas costs, stack state, memory, and storage changes.
 This is the default tracer when you pass `--trace` without specifying `--tracer`.
+A KeylessDeploy call includes the sandbox constructor's opcodes in `structLogs`, nested under that call in execution order.
 
 ## Usage
 

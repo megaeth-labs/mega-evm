@@ -13,6 +13,7 @@ use alloy_rpc_types_trace::geth::{
 use clap::{Parser, ValueEnum};
 use mega_evm::{
     revm::{
+        bytecode::opcode::{self, OpCode},
         context::{
             result::{ExecutionResult, ResultAndState},
             ContextTr,
@@ -26,7 +27,10 @@ use mega_evm::{
     sandbox::InspectorSandboxObserver,
     MegaContext, MegaEvm, MegaHaltReason, MegaTransaction, KEYLESS_DEPLOY_ADDRESS,
 };
-use revm_inspectors::tracing::{types::TraceMemberOrder, TracingInspector, TracingInspectorConfig};
+use revm_inspectors::tracing::{
+    types::{CallTraceStep, TraceMemberOrder},
+    TracingInspector, TracingInspectorConfig,
+};
 use tracing::{debug, info, trace};
 
 use super::{EvmeError, EvmeExternalEnvs, EvmeState};
@@ -127,6 +131,11 @@ fn sandbox_has_frames(sandbox: &TracingInspector) -> bool {
 /// that into the outer inspector would replace the CALL root, so the sandbox is traced
 /// on a sibling inspector and grafted here. Depths and arena indices are rewritten so
 /// the Geth call tree hangs the CREATE under the CALL.
+///
+/// `geth_traces` only descends into a child when the parent frame has a matching
+/// call-like opcode in `steps`. Intercepted `KeylessDeploy` records no bytecode, so
+/// a CREATE step is grafted onto the parent; without it, sandbox constructor
+/// steps are omitted from struct-log output rather than nested in execution order.
 fn splice_sandbox_traces(outer: &RcTracingInspector, sandbox: &RcTracingInspector) {
     let sandbox_inspector = sandbox.borrow();
     if !sandbox_has_frames(&sandbox_inspector) {
@@ -173,7 +182,55 @@ fn splice_sandbox_traces(outer: &RcTracingInspector, sandbox: &RcTracingInspecto
     let parent = &mut outer_inspector.traces_mut().nodes_mut()[parent_idx];
     let child_slot = parent.children.len();
     parent.children.push(base);
+
+    // geth_traces pairs call-like parent steps with `children` in order. A
+    // missing CREATE step here would leave the grafted child unreachable.
+    let calllike = parent.trace.steps.iter().filter(|s| is_calllike_opcode(s.op.get())).count();
+    if calllike < parent.children.len() {
+        let step_idx = parent.trace.steps.len();
+        let create_depth = parent.trace.depth as u64 + 1;
+        let contract = parent.trace.address;
+        let gas_remaining = parent.trace.gas_limit;
+        parent.trace.steps.push(intercepted_create_step(create_depth, contract, gas_remaining));
+        parent.ordering.push(TraceMemberOrder::Step(step_idx));
+    }
     parent.ordering.push(TraceMemberOrder::Call(child_slot));
+}
+
+/// CREATE/CALL-family opcodes that `geth_traces` uses to walk into children.
+fn is_calllike_opcode(op: u8) -> bool {
+    matches!(
+        op,
+        opcode::CALL |
+            opcode::DELEGATECALL |
+            opcode::STATICCALL |
+            opcode::CREATE |
+            opcode::CALLCODE |
+            opcode::CREATE2
+    )
+}
+
+/// Placeholder CREATE recorded on an intercepted `KeylessDeploy` CALL so struct-log
+/// output can descend into the spliced sandbox frame.
+fn intercepted_create_step(depth: u64, contract: Address, gas_remaining: u64) -> CallTraceStep {
+    CallTraceStep {
+        depth,
+        pc: 0,
+        op: OpCode::new(opcode::CREATE).expect("CREATE is a defined opcode"),
+        contract,
+        stack: None,
+        push_stack: None,
+        memory: None,
+        returndata: Bytes::new(),
+        gas_remaining,
+        gas_refund_counter: 0,
+        gas_used: 0,
+        gas_cost: 0,
+        storage_change: None,
+        status: None,
+        immediate_bytes: None,
+        decoded: None,
+    }
 }
 
 /// Tracer type for execution analysis
@@ -521,22 +578,25 @@ mod tests {
     fn run_traced_keyless(
         outer: RcTracingInspector,
         sandbox: RcTracingInspector,
-    ) -> (mega_evm::revm::context::result::ExecutionResult<MegaHaltReason>, Address) {
+    ) -> (ResultAndState<MegaHaltReason>, MemoryDatabase, Address) {
         let (tx_bytes, signer) = create_pre_eip155_deploy_tx(success_constructor());
         let mut db = funded_db(signer);
-        let context = keyless_context(&mut db);
-        let mut evm = MegaEvm::new(context).with_inspector(outer);
-        evm.set_keyless_sandbox_observer(Some(sandbox.as_sandbox_observer()));
-        let result = evm.inspect_tx(keyless_deploy_tx(tx_bytes)).expect("keyless deploy");
-        assert!(result.result.is_success(), "deploy should succeed: {:?}", result.result);
-        (result.result, signer)
+        let result = {
+            let context = keyless_context(&mut db);
+            let mut evm = MegaEvm::new(context).with_inspector(outer);
+            evm.set_keyless_sandbox_observer(Some(sandbox.as_sandbox_observer()));
+            let result = evm.inspect_tx(keyless_deploy_tx(tx_bytes)).expect("keyless deploy");
+            assert!(result.result.is_success(), "deploy should succeed: {:?}", result.result);
+            result
+        };
+        (result, db, signer)
     }
 
     #[test]
     fn test_keyless_call_trace_nests_sandbox_create() {
         let outer = RcTracingInspector::new(TracingInspector::new(TracingInspectorConfig::all()));
         let sandbox = RcTracingInspector::new(TracingInspector::new(TracingInspectorConfig::all()));
-        let (exec_result, _signer) = run_traced_keyless(outer.clone(), sandbox.clone());
+        let (result_and_state, _db, _signer) = run_traced_keyless(outer.clone(), sandbox.clone());
         splice_sandbox_traces(&outer, &sandbox);
 
         let outer_ref = outer.borrow();
@@ -555,12 +615,63 @@ mod tests {
 
         let call_frame: CallFrame = outer_ref.geth_builder().geth_call_traces(
             CallConfig { only_top_call: Some(false), with_log: Some(false) },
-            exec_result.gas_used(),
+            result_and_state.result.gas_used(),
         );
         assert_eq!(call_frame.typ, "CALL");
         assert_eq!(call_frame.to, Some(KEYLESS_DEPLOY_ADDRESS));
         assert_eq!(call_frame.calls.len(), 1, "CREATE nested under KeylessDeploy CALL");
         assert_eq!(call_frame.calls[0].typ, "CREATE");
+    }
+
+    #[test]
+    fn test_keyless_opcode_trace_includes_sandbox_steps_in_execution_order() {
+        let outer = RcTracingInspector::new(TracingInspector::new(TracingInspectorConfig::all()));
+        let sandbox = RcTracingInspector::new(TracingInspector::new(TracingInspectorConfig::all()));
+        let (result_and_state, db, _signer) = run_traced_keyless(outer.clone(), sandbox.clone());
+        splice_sandbox_traces(&outer, &sandbox);
+
+        let outer_ref = outer.borrow();
+        let geth_trace = outer_ref.geth_builder().geth_traces(
+            result_and_state.result.gas_used(),
+            Bytes::new(),
+            GethDefaultTracingOptions::default(),
+        );
+        let logs = &geth_trace.struct_logs;
+        let ops: Vec<_> = logs.iter().map(|s| format!("d{}:{}", s.depth, s.op)).collect();
+
+        let create = logs
+            .iter()
+            .position(|s| s.op == "CREATE")
+            .unwrap_or_else(|| panic!("CREATE missing from structLogs: {ops:?}"));
+        let sstore = logs.iter().position(|s| s.op == "SSTORE").unwrap_or_else(|| {
+            panic!("sandbox constructor SSTORE missing from structLogs: {ops:?}")
+        });
+        let first_outer_after_create = logs
+            .iter()
+            .skip(create + 1)
+            .position(|s| s.depth <= logs[create].depth)
+            .map(|rel| create + 1 + rel)
+            .unwrap_or(logs.len());
+
+        assert!(create < sstore, "sandbox SSTORE should follow the outer CREATE: {ops:?}");
+        assert_eq!(
+            sstore,
+            create + 3,
+            "SSTORE should be the constructor's third opcode after CREATE, not delayed: {ops:?}"
+        );
+        assert!(
+            logs[sstore].depth > logs[create].depth,
+            "sandbox SSTORE should nest deeper than CREATE: {ops:?}"
+        );
+        assert!(
+            sstore < first_outer_after_create,
+            "sandbox SSTORE should sit inside the CREATE nest, not after later parent steps: {ops:?}"
+        );
+
+        outer_ref
+            .geth_builder()
+            .geth_prestate_traces(&result_and_state, &PreStateConfig::default(), &*db)
+            .expect("prestate tracer after sandbox splice");
     }
 
     #[test]
