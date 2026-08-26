@@ -26,7 +26,8 @@ use crate::{
     common::{
         op_receipt_to_tx_receipt, parse_bucket_capacity, print_execution_summary,
         print_execution_trace, print_receipt, BuildProviderOutput, EvmeExternalEnvs, EvmeOutcome,
-        ExecutionSummary, ExternalEnvSnapshot, OpTxReceipt, RpcCacheStore, TxOverrideArgs,
+        ExecutionSummary, ExternalEnvSnapshot, OpTxReceipt, RcTracingInspector, RpcCacheStore,
+        TxOverrideArgs,
     },
     replay::get_hardfork_config,
     run, ChainArgs, EvmeState,
@@ -470,14 +471,18 @@ impl Cmd {
         );
 
         let start = Instant::now();
-        let mut inspector = self.trace_args.create_inspector();
+        let outer = RcTracingInspector::new(self.trace_args.create_inspector());
+        let sandbox = self
+            .trace_args
+            .is_tracing_enabled()
+            .then(|| RcTracingInspector::new(self.trace_args.create_inspector()));
         let mut state =
             StateBuilder::new().with_database(&mut database).with_bundle_update().build();
         let mut block_executor = block_executor_factory.create_executor_with_inspector(
             &mut state,
             block_ctx,
             evm_env,
-            &mut inspector,
+            outer.clone(),
         );
 
         block_executor
@@ -521,6 +526,9 @@ impl Cmd {
             .unwrap_or(0);
 
         block_executor.inspector_mut().fuse();
+        if let Some(sandbox) = &sandbox {
+            block_executor.set_keyless_sandbox_observer(Some(sandbox.as_sandbox_observer()));
+        }
         let outcome = block_executor
             .run_transaction(wrapped_tx)
             .map_err(|e| ReplayError::Other(format!("Block execution error: {e}")))?;
@@ -541,9 +549,10 @@ impl Cmd {
             state: evm_state.clone(),
         };
 
-        let trace_data = self.trace_args.is_tracing_enabled().then(|| {
-            self.trace_args.generate_trace(
-                block_executor.inspector(),
+        let trace_data = sandbox.as_ref().map(|sandbox| {
+            self.trace_args.generate_trace_with_sandbox(
+                &outer,
+                sandbox,
                 &result_and_state,
                 block_executor.evm().db_ref(),
             )

@@ -6,6 +6,7 @@ description: Capture the nested CALL/CREATE tree with gas usage, return data, an
 
 The call tracer records the nested tree of CALL, STATICCALL, DELEGATECALL, CALLCODE, and CREATE operations.
 It shows which contracts called which, with gas usage and return data at each level.
+A KeylessDeploy call includes the sandbox CREATE (and any calls it makes) as nested children of that CALL.
 
 ## Usage
 
