@@ -2125,11 +2125,25 @@ pub mod volatile_data_ext {
             // not interpreter state, so it is safe in any interpreter state (including
             // `NewFrame` after a successful CALL).
             apply_compute_gas_limit!(context);
-            // REX7: re-clamp for a CALL that never published a child frame (an insufficient balance
-            // or depth rejection pushes 0 and lets the frame keep running). The epilogue is what
-            // keeps the following plain segment bounded, and it sits after the cap above so a CALL
-            // that just marked beneficiary access clamps against the detained headroom.
-            checkpoint_epilogue!(context);
+            // REX7: re-clamp only when the body left this frame executing, which for this
+            // wrapper means the handler returned normally. Every `Err` stops the interpreter
+            // loop: a halt ends the frame, and the suspension that publishes a child frame is
+            // re-clamped by `AdditionalLimit::before_frame_run` when the frame resumes.
+            //
+            // The guard is load-bearing on the halting path, because this is the one wrapper that
+            // carries a failing body to its tail instead of returning at the inner call. revm's
+            // CALL body charges the value-transfer fee and the memory expansion for the argument
+            // and return ranges before the account load and the forwarding charge that can run
+            // out of gas, so a halting body leaves real charges inside the open segment with no
+            // body window left to record them. The epilogue re-opens that segment at the current
+            // counter, which would drop exactly those charges from the frame-exit settlement
+            // about to close it — leaving them neither enforced as work nor booked as destroyed.
+            // Clamping a frame that is already ending is wrong independently: its final result
+            // hands the hidden gas back and reads the EVM's own out-of-gas as a clamp-induced
+            // compute exceed.
+            if inner_outcome.is_ok() {
+                checkpoint_epilogue!(context);
+            }
             inner_outcome
         }
     };

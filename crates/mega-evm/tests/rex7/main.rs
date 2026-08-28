@@ -32,6 +32,9 @@
 //!   rejections (a CREATE onto an occupied address) swallow it and book it as destroyed, the
 //!   returning ones hand it back and book nothing, and a precompile stays booked by its own site;
 //!   then through the deposit-receipt rewrite and the sandbox merge that run after the booking.
+//! - `call_body_halt_charges` — what a CALL-family body already charged when it halts: the
+//!   value-transfer surcharge and the return-range memory expansion stay in the open segment and
+//!   settle as work, rather than being dropped by the wrapper's tail.
 //! - `burn_split` — which half of that budget enforces: the work the frame performed does, the
 //!   remainder it destroyed does not, and both boundaries (a checkpoint's storage charge, revm's
 //!   post-action create rejects) land on the right side.
@@ -58,6 +61,7 @@
 //!   boundary that rebuilds it books the difference as destroyed without moving what enforces.
 
 mod burn_split;
+mod call_body_halt_charges;
 mod charge_on_reject;
 mod checkpoint_families;
 mod checkpoint_settlement;

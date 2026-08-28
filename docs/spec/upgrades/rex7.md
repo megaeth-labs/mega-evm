@@ -87,6 +87,7 @@ The top-level frame's whole envelope is spent by the transaction's final gas acc
 A node MUST settle that budget as compute gas in two parts that are accounted differently, except for any MegaETH storage gas a checkpoint body charged before aborting: that charge stays storage gas and is in neither part.
 
 The **executed** part is the open plain-opcode segment, measured as the interpreter-gas delta since the previous checkpoint, net of that storage charge.
+A checkpoint opcode that halts inside its own body never reaches the recording that closes its measurement window, so the EVM gas the body had already charged — the value-transfer surcharge and the argument / return-range memory expansion a call-family body takes before it loads the target account — is still inside that segment when the frame exits, and a node MUST settle it as executed work rather than dropping it or treating it as destroyed.
 A node MUST record it through the ordinary path, so it counts toward the transaction's reported total **and** toward the usage every resource limit is evaluated against — exactly as the same opcodes would if the frame had returned normally.
 A parent frame keeps executing after it absorbs a failed child; excluding the child's work from enforcement would let the code that follows spend the same compute headroom a second time.
 

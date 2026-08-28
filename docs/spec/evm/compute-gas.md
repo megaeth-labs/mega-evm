@@ -529,6 +529,7 @@ A node MUST settle that budget as compute gas, apart from any MegaETH storage ga
 A node MUST split what remains into two parts that are accounted differently:
 
 - **Executed** — the open plain-opcode segment, measured as the interpreter-gas delta since the previous checkpoint, net of that storage charge.
+  A checkpoint opcode that halts inside its own body never reaches the recording that closes its measurement window, so the EVM gas the body had already charged — the value-transfer surcharge and the argument / return-range memory expansion a call-family body takes before it loads the target account — is still inside that segment when the frame exits, and belongs to this part.
   This is work the network performed, and a node MUST record it through the ordinary path: it counts toward the transaction's reported total **and** toward the usage every resource limit is evaluated against, exactly as the same opcodes would if the frame had returned normally.
 - **Destroyed** — the budget the frame never spent and never handed back.
   A node MUST record it in the reported compute-gas total and in block-level compute accounting, and MUST NOT evaluate any resource limit against it, at transaction level or at block level (see [Resource Limits](resource-limits.md)).
