@@ -135,6 +135,11 @@ A system contract invocation a node answers without opening an EVM frame — the
 An answer that returns or reverts gives the gas back to the caller, and a halt whose remaining gas is rescued for the sender is a refund.
 A node MUST NOT record either as destroyed; that gas was not lost, and counting it would report it twice.
 
+A call or creation an inherited EVM refuses before it opens a frame takes the same split at the site that produces the refusal, and the classification decides which way it goes.
+A creation onto an address that already holds code or a nonce, and a value transfer that overflows the recipient's balance, are exceptional halts whose budget the caller never sees again; the frame never ran, so nothing was executed and a node MUST record the whole budget as destroyed.
+A refusal classified as a success or a revert — a call or creation past the call-stack limit, a creation whose value exceeds the caller's balance, a creation from an account whose nonce cannot be bumped, a call into an account with no code — hands the budget straight back, and a node MUST NOT record any of it as destroyed.
+A precompile invocation is answered on this same path and is covered by its own rule above; a node MUST NOT book it a second time here.
+
 Those sites are where a Rex7 transaction is known to lose an envelope without executing it, and they are what fixes `executed_compute` at each one — but they are not what makes the enumeration complete.
 Completeness is a consequence of the law: a lost envelope is gas the transaction spent that neither the compute lanes nor the storage-gas lane accounts for, so it lands in the remainder whether or not a site above anticipated it.
 Reading the two independently and requiring them to agree is what turns the list from an assumption into a checkable claim.

@@ -28,6 +28,10 @@
 //!   is shown to be stable rather than merely correct at one point.
 //! - `exceptional_halt` — every exceptional-halt classification, in both frame positions: the
 //!   frame's whole burned budget settles as compute gas without changing the receipt.
+//! - `frame_init_reject_burn` — the budget a refused frame init decides the fate of: the halting
+//!   rejections (a CREATE onto an occupied address) swallow it and book it as destroyed, the
+//!   returning ones hand it back and book nothing, and a precompile stays booked by its own site;
+//!   then through the deposit-receipt rewrite and the sandbox merge that run after the booking.
 //! - `burn_split` — which half of that budget enforces: the work the frame performed does, the
 //!   remainder it destroyed does not, and both boundaries (a checkpoint's storage charge, revm's
 //!   post-action create rejects) land on the right side.
@@ -66,6 +70,7 @@ mod deposit_receipt_rewrite;
 mod detention_window;
 mod double_exceed_corner;
 mod exceptional_halt;
+mod frame_init_reject_burn;
 mod gas_clamp;
 mod gas_leakage;
 mod guard_pass_static_gas;

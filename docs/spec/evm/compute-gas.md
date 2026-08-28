@@ -588,6 +588,12 @@ A [system contract](../system-contracts/overview.md) invocation a node answers w
 It applies only when the answer is a halt that keeps the call's gas: the part the invocation performed before failing is executed, and the rest of the call's gas limit is destroyed.
 An answer that returns or reverts hands the gas back to the caller, and a halt whose remaining gas is rescued for the sender is a refund; a node MUST NOT record either as destroyed, because that gas was not lost.
 
+A call or creation an inherited EVM refuses before it opens a frame takes the same split, at the site that produces the refusal.
+The refusal hands back a result carrying the whole child budget, and the classification decides that budget's fate.
+A creation onto an address that already holds code or a nonce, and a value transfer that overflows the recipient's balance, are exceptional halts whose budget the caller never sees again; the frame never ran, so nothing was executed and a node MUST record the whole budget as destroyed.
+A refusal classified as a success or a revert — a call or creation past the call-stack limit, a creation whose value exceeds the caller's balance, a creation from an account whose nonce cannot be bumped, a call into an account with no code — hands the budget straight back to the caller, and a node MUST NOT record any of it as destroyed.
+A precompile invocation is answered on this same path and is covered by its own rule above; a node MUST NOT book it a second time here.
+
 An ordinary transaction a node rejects during validation has no envelope to split.
 Since [Rex5](../upgrades/rex5.md) a transaction whose intrinsic gas requirement outgrows the gas limit its sender supplied is rejected during validation — after every MegaETH storage-gas contribution has been folded into the intrinsic total and before the sender is debited — so it produces no receipt.
 A node MUST NOT record such a transaction's gas limit as a destroyed remainder.

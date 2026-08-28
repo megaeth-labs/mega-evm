@@ -1096,6 +1096,10 @@ impl AdditionalLimit {
             // Rescue gas if a TX-level limit was exceeded. This covers the
             // before_frame_init early-return path and any other Result from frame_init.
             self.try_rescue_gas(result.gas());
+            // Must run after the rescue: the rescue's `check_limit` is what latches a TX-level or
+            // frame-local exceed, and the settlement below reads that latch to decide whether the
+            // envelope is really destroyed or is about to be handed back.
+            self.settle_frame_init_reject_burn(result);
         }
     }
 
@@ -1423,6 +1427,48 @@ impl AdditionalLimit {
             result.instruction_result().is_ok_or_revert()
         {
             return;
+        }
+        self.compute_gas.record_burned_gas(result.gas().remaining());
+    }
+
+    /// Settles the envelope a frame that never started destroys, as non-enforcing compute gas
+    /// (REX7+).
+    ///
+    /// A frame init can refuse to build a frame and hand back a result instead. Such a result
+    /// carries the whole child budget as `remaining`, and what the caller does with it is decided
+    /// by the classification alone: a success or a revert is erased back into the caller's
+    /// counter, while an exceptional halt is not — the caller simply never sees that gas again.
+    /// The child never runs, so the frame-exit settlement that splits an ordinary exceptional halt
+    /// cannot see it either, and without this the destroyed budget would be missing from the
+    /// transaction's reported total while the conservation law still derives it from the envelope.
+    ///
+    /// Only the halt classification books anything. The success and revert shapes reaching this
+    /// site — an empty-code call, a nonce overflow, a depth or balance rejection — destroy nothing
+    /// precisely because their gas is erased back into the caller.
+    ///
+    /// A precompile result is excluded. Precompiles are dispatched inside the same frame init and
+    /// come back as a result rather than a frame, but they have already booked both halves of
+    /// their own split at the recording site, against the forwarded envelope rather than the
+    /// capped budget this result carries. Booking again here would report the same gas twice.
+    ///
+    /// Nothing is booked once a limit is latched, which is also why this runs after the rescue in
+    /// [`after_frame_init`](Self::after_frame_init) rather than before it. A TX-level exceed
+    /// rescues this same remaining gas for the sender and erases it from the envelope, and a
+    /// frame-local exceed is absorbed in
+    /// [`before_frame_return_result`](Self::before_frame_return_result), which rewrites the result
+    /// to a revert and so returns the gas to the caller. Either way the envelope is not destroyed,
+    /// and booking it would report gas that was handed back.
+    fn settle_frame_init_reject_burn(&mut self, result: &FrameResult) {
+        if !self.checkpoint.rex7_enabled() ||
+            self.limit_exceeded() ||
+            result.instruction_result().is_ok_or_revert()
+        {
+            return;
+        }
+        if let FrameResult::Call(outcome) = result {
+            if outcome.was_precompile_called {
+                return;
+            }
         }
         self.compute_gas.record_burned_gas(result.gas().remaining());
     }
