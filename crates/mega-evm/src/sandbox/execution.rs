@@ -205,7 +205,7 @@ pub fn execute_keyless_deploy_call<DB: AlloyDatabase, ExtEnvs: ExternalEnvTypes>
                 // the overhead already recorded as compute above. Booking the rescued remainder
                 // as destroyed as well would report gas that was refunded.
                 if ctx.spec.is_enabled(MegaSpecId::REX6) {
-                    additional_limit.try_rescue_gas(&gas);
+                    additional_limit.try_rescue_gas(&gas, gas.remaining());
                 }
                 let mut result = make_halt!();
                 mark_frame_result_as_exceeding_limit(
@@ -1109,7 +1109,7 @@ fn reject_if_tx_limit_overflow<DB: AlloyDatabase, ExtEnvs: ExternalEnvTypes>(
     if !limit_check.exceeded_limit() || limit_check.is_frame_local() {
         return None;
     }
-    limit.rescue_gas(gas);
+    limit.rescue_gas(gas, gas.remaining());
     let mut result = oog_frame_result(gas.limit(), return_memory_offset);
     mark_frame_result_as_exceeding_limit(
         &mut result,

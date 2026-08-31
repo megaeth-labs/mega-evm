@@ -63,16 +63,21 @@ pub struct InspectorLedger {
     /// edit back and size the synthetic outcome from it. That gas travels through the result lane
     /// below, not through this one.)
     ///
-    /// Adjustments to a frame's *result* gas — `call_end` calling `spend_all`, an intercepting
-    /// callback handing back an outcome wider than what it was given — are deliberately not booked
-    /// here. Whether such an edit moves the transaction's envelope at all depends on the frame's
-    /// final classification (a caller reclaims a returning frame's remaining gas and ignores a
-    /// halting one's), and that classification is not final until after the last mutating
-    /// callback. Booking the edit before then would be a guess. Until the frame lifecycle grows a
-    /// settlement point past that callback, a result-rewriting inspector can still move REX7
-    /// accounting off the uninspected path, and a large enough move trips the conservation
-    /// `debug_assert`.
+    /// Adjustments to a frame's *result* gas belong to [`result`](Self::result), which is booked
+    /// from the frame's own settlement point rather than from a callback boundary.
     pub env: i128,
+
+    /// Net gas the inspector wrote into a frame *result* — what the frame hands back to its
+    /// caller — across the last callback that can rewrite that result.
+    ///
+    /// Unlike the other two lanes this one cannot be booked at the callback boundary, because
+    /// whether the edit moves anything depends on how the frame ends: a returning or reverting
+    /// frame's remaining gas is reclaimed by its caller, so an edit to it changes what the
+    /// transaction spends, while a halting frame's is not handed back at all and an edit to it
+    /// changes nothing. The frame's settlement point knows the final classification and books
+    /// this lane only in the first case; in the second it reconstructs the EVM's own number and
+    /// settles the destroyed remainder against that instead.
+    pub result: i128,
 
     /// How many rewrites the shim refused because their shape is forbidden.
     ///
@@ -88,7 +93,7 @@ impl InspectorLedger {
     /// derivation adds to the transaction's envelope.
     #[inline]
     pub const fn conjured_gas(&self) -> i128 {
-        self.gas + self.env
+        self.gas + self.env + self.result
     }
 
     /// Whether the inspector left the transaction's gas accounting exactly as the EVM produced it.
@@ -96,7 +101,7 @@ impl InspectorLedger {
     /// True for every observation-only inspector, and for every transaction that ran without one.
     #[inline]
     pub const fn is_zero(&self) -> bool {
-        self.gas == 0 && self.env == 0 && self.rejected_rewrites == 0
+        self.gas == 0 && self.env == 0 && self.result == 0 && self.rejected_rewrites == 0
     }
 }
 
@@ -109,7 +114,7 @@ mod tests {
     /// unmoved in that case.
     #[test]
     fn test_conjured_gas_is_the_net_of_both_lanes() {
-        let ledger = InspectorLedger { gas: 2_300, env: -2_300, rejected_rewrites: 0 };
+        let ledger = InspectorLedger { gas: 2_300, env: -2_300, result: 0, rejected_rewrites: 0 };
         assert_eq!(ledger.conjured_gas(), 0);
         assert!(!ledger.is_zero(), "the lanes moved, even though they cancel");
     }
@@ -117,7 +122,7 @@ mod tests {
     /// A refused rewrite moves no gas but must still show the transaction was not left alone.
     #[test]
     fn test_a_rejected_rewrite_alone_is_not_zero() {
-        let ledger = InspectorLedger { gas: 0, env: 0, rejected_rewrites: 1 };
+        let ledger = InspectorLedger { gas: 0, env: 0, result: 0, rejected_rewrites: 1 };
         assert_eq!(ledger.conjured_gas(), 0);
         assert!(!ledger.is_zero());
     }

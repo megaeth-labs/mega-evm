@@ -177,20 +177,24 @@ impl StorageCallStipendTracker {
         self.stack.last().map(|frame| frame.remaining).unwrap_or(0)
     }
 
-    /// Portion of `gas.remaining()` to add to `rescued_gas` on a TX-level limit exceed.
-    /// REX5 returns `gas.remaining()` directly (allowance never entered `gas.limit()`).
+    /// Portion of `remaining` to add to `rescued_gas` on a TX-level limit exceed.
+    /// REX5 returns `remaining` directly (allowance never entered `gas.limit()`).
     /// REX4 excludes the current frame's stipend so system-granted gas is not refunded
     /// to the sender.
-    pub(crate) fn effective_remaining_for_rescue(&self, gas: &Gas) -> u64 {
+    ///
+    /// `remaining` is passed rather than read off `gas` because the caller settles a frame after
+    /// an inspector callback has had a chance to edit the result, and the sender's refund is owed
+    /// on what the EVM left behind. `gas` is still read for its limit, which no callback moves.
+    pub(crate) fn effective_remaining_for_rescue(&self, gas: &Gas, remaining: u64) -> u64 {
         if self.rex5_enabled {
-            return gas.remaining();
+            return remaining;
         }
         let stipend = self.current_frame_stipend();
         if stipend > 0 {
             let original_limit = gas.limit().saturating_sub(stipend);
-            gas.remaining().min(original_limit)
+            remaining.min(original_limit)
         } else {
-            gas.remaining()
+            remaining
         }
     }
 

@@ -40,11 +40,12 @@ use revm::{
     Inspector, Journal,
 };
 
+use super::frame::{classify_frame_action, commit_frame_journal};
 use crate::{
     constants, dispatch_system_contract_interceptors, is_deposit_like_transaction,
     is_mega_system_transaction_with, limit::ACCOUNT_INFO_WRITE_SIZE, sent_from_system_address,
-    ExternalEnvTypes, HostExt, JournalInspectTr, MeasuredInspector, MegaContext, MegaEvm,
-    MegaHaltReason, MegaInstructions, MegaSpecId, MegaTransactionError,
+    AdditionalLimit, ExternalEnvTypes, FrameExit, HostExt, JournalInspectTr, MeasuredInspector,
+    MegaContext, MegaEvm, MegaHaltReason, MegaInstructions, MegaSpecId, MegaTransactionError,
     MEGA_SYSTEM_TRANSACTION_SOURCE_HASH,
 };
 
@@ -563,34 +564,111 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
         Ok(())
     }
 
-    /// Apply `MiniRex` additional limits after frame action processing.
+    /// Charges the compute gas revm's own frame-action processing spent, on the specs that read
+    /// it from the result rather than weighing it beforehand.
     ///
-    /// Under REX5+ for CREATE results, the code-deposit compute gas was already settled in
-    /// [`after_frame_run_instructions`]; pass `None` here so the post-action hook does not
-    /// re-record what that settlement recorded, or record what it deliberately did not.
+    /// The only charge this ever sees is a contract creation's code deposit, and only through
+    /// REX4: REX5 onwards weigh that charge at the frame's exit — against a predicate, before it
+    /// is taken — and pass `None` here so the same gas is not recorded twice. A call frame's
+    /// classification spends nothing, so its delta is structurally zero.
+    ///
+    /// This runs *before* the last mutating callback, unlike the rest of the frame's settlement.
+    /// The delta it measures is a difference between two readings of the result's gas, and a
+    /// callback that edits that gas would land inside the difference and be recorded as compute
+    /// work the EVM performed. The specs that reach this arm are frozen, so the reading stays
+    /// where their behaviour was fixed.
     #[inline]
-    fn after_frame_run(
+    fn settle_post_action_charge(
         ctx: &MegaContext<DB, ExtEnvs>,
-        frame_output: &mut ItemOrResult<FrameInit, FrameResult>,
-        gas_remaining_before_process_action: Option<u64>,
-    ) -> Result<(), ContextDbError<MegaContext<DB, ExtEnvs>>> {
+        frame_result: &mut FrameResult,
+        gas_remaining_before_classification: Option<u64>,
+    ) {
         if !ctx.spec.is_enabled(MegaSpecId::MINI_REX) {
-            return Ok(());
+            return;
         }
-        let is_rex5 = ctx.spec.is_enabled(MegaSpecId::REX5);
+        let pass_through = if ctx.spec.is_enabled(MegaSpecId::REX5) &&
+            matches!(frame_result, FrameResult::Create(_))
+        {
+            None
+        } else {
+            gas_remaining_before_classification
+        };
+        ctx.additional_limit.borrow_mut().settle_post_action_charge(frame_result, pass_through);
+    }
 
-        if let ItemOrResult::Result(frame_result) = frame_output {
-            // REX5+: code-deposit compute gas for CREATE results was already settled at the
-            // frame's exit. Skip post-action recording so we don't double-count.
-            let pass_through = if is_rex5 && matches!(frame_result, FrameResult::Create(_)) {
-                None
-            } else {
-                gas_remaining_before_process_action
-            };
-            ctx.additional_limit.borrow_mut().after_frame_run(frame_result, pass_through);
+    /// The single point a frame's outcome is settled: after the last callback that can rewrite it,
+    /// and before the journal is told what to do with it.
+    ///
+    /// `inspector_gas_delta` is what that callback did to the result's gas, and is zero on the
+    /// uninspected path, where no callback runs at all.
+    #[inline]
+    fn finalize_frame(
+        ctx: &MegaContext<DB, ExtEnvs>,
+        result: &mut FrameResult,
+        exit: FrameExit,
+        inspector_gas_delta: i128,
+    ) {
+        if !ctx.spec.is_enabled(MegaSpecId::MINI_REX) {
+            return;
+        }
+        ctx.additional_limit.borrow_mut().finalize_frame(result, exit, inspector_gas_delta);
+    }
+
+    /// The whole of a frame's exit, from its final action to the journal decision — the body both
+    /// frame loops run.
+    ///
+    /// The loops differ in exactly one thing, which is what `last_callback` carries: the inspected
+    /// loop passes the inspector's `frame_end` and the plain loop passes nothing. Everything else
+    /// — the gas reading the frozen post-action charge is measured against, the settlement point,
+    /// the journal decision — is this function, so the two loops cannot drift apart in it.
+    fn settle_and_commit_frame(
+        ctx: &mut MegaContext<DB, ExtEnvs>,
+        frame: &mut EthFrame<EthInterpreter>,
+        action: InterpreterAction,
+        last_callback: impl FnOnce(&mut MegaContext<DB, ExtEnvs>, &FrameInput, &mut FrameResult),
+    ) -> FrameInitOrResult<EthFrame<EthInterpreter>> {
+        let gas_remaining_before = match (&action, ctx.spec.is_enabled(MegaSpecId::MINI_REX)) {
+            (InterpreterAction::Return(interpreter_result), true) => {
+                Some(interpreter_result.gas.remaining())
+            }
+            _ => None,
+        };
+
+        let pending = match classify_frame_action(ctx, frame, action) {
+            ItemOrResult::Item(frame_init) => return ItemOrResult::Item(frame_init),
+            ItemOrResult::Result(pending) => pending,
+        };
+        frame.set_finished(true);
+        let (mut result, journal) = pending.split();
+
+        // Where the journal decision goes is the one thing about a frame's exit that is not the
+        // same on every spec. Frozen specs take it here, the moment the classification is done,
+        // because that is where revm takes it and because what they replay includes the state a
+        // frame leaves behind when a later rewrite fails it: a contract creation that commits and
+        // is then rewritten into a halt keeps its deployed code. REX7 withholds the decision until
+        // the settlement below has run, so that the state a frame leaves behind agrees with the
+        // result its caller is handed.
+        let mut deferred_journal = None;
+        if ctx.spec.is_enabled(MegaSpecId::REX7) {
+            deferred_journal = Some(journal);
+        } else {
+            commit_frame_journal(ctx, journal, &result);
         }
 
-        Ok(())
+        Self::settle_post_action_charge(ctx, &mut result, gas_remaining_before);
+
+        let gas_before_callback = result.gas().remaining();
+        last_callback(ctx, &frame.input, &mut result);
+        let inspector_gas_delta =
+            i128::from(result.gas().remaining()) - i128::from(gas_before_callback);
+
+        Self::finalize_frame(ctx, &mut result, FrameExit::Ran, inspector_gas_delta);
+
+        if let Some(journal) = deferred_journal {
+            commit_frame_journal(ctx, journal, &result);
+        }
+
+        ItemOrResult::Result(result)
     }
 }
 
@@ -627,7 +705,7 @@ fn canonical_code_deposit_gas<DB: Database, ExtEnvs: ExternalEnvTypes>(
     code_deposit_gas: u64,
 ) -> Option<u64> {
     let cfg = ctx.cfg();
-    will_return_create_charge_code_deposit(
+    super::frame::will_return_create_charge_code_deposit(
         interpreter_result,
         cfg.max_code_size(),
         cfg.spec().into_eth_spec(),
@@ -635,40 +713,6 @@ fn canonical_code_deposit_gas<DB: Database, ExtEnvs: ExternalEnvTypes>(
         code_deposit_gas,
     )
     .then_some(code_deposit_gas)
-}
-
-/// Mirrors `revm_handler::frame::return_create`'s pre-commit predicate.
-/// Returns `true` iff `return_create` would charge `code_deposit_gas`
-/// from the interpreter gas and commit the checkpoint.
-///
-/// REVIEW ON UPSTREAM BUMP: keep in lockstep with
-/// `revm-handler::frame::return_create`. Any revm bump that touches the
-/// predicate inputs (`is_ok`, EIP-3541 gate, EIP-170 gate, code-deposit
-/// gas availability) requires re-auditing this helper.
-fn will_return_create_charge_code_deposit(
-    interpreter_result: &InterpreterResult,
-    max_code_size: usize,
-    runtime_spec_id: revm::primitives::hardfork::SpecId,
-    is_eip3541_disabled: bool,
-    code_deposit_gas: u64,
-) -> bool {
-    use revm::primitives::hardfork::SpecId;
-
-    if !interpreter_result.result.is_ok() {
-        return false;
-    }
-    if !is_eip3541_disabled &&
-        runtime_spec_id.is_enabled_in(SpecId::LONDON) &&
-        interpreter_result.output.first() == Some(&0xEF)
-    {
-        return false;
-    }
-    if runtime_spec_id.is_enabled_in(SpecId::SPURIOUS_DRAGON) &&
-        interpreter_result.output.len() > max_code_size
-    {
-        return false;
-    }
-    interpreter_result.gas.remaining() >= code_deposit_gas
 }
 
 impl<DB: Database, EVM, ERROR, FRAME, ExtEnvs: ExternalEnvTypes> Handler
@@ -1356,6 +1400,179 @@ where
     }
 }
 
+/// What [`MegaEvm::init_frame_unsettled`] hands back: revm's own frame-init outcome, plus how the
+/// frame's settlement should read a refusal.
+type UnsettledFrameInit<'a, DB, ExtEnvs> = Result<
+    (FrameInitResult<'a, EthFrame<EthInterpreter>>, FrameExit),
+    ContextDbError<MegaContext<DB, ExtEnvs>>,
+>;
+
+impl<DB, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs>
+where
+    DB: Database,
+{
+    /// Everything `frame_init` decides — whether a frame is built at all, and what result stands
+    /// in for it when it is not — with the refusal left unsettled.
+    ///
+    /// Both frame-init paths run this. The inspected one has a callback to insert between the
+    /// refusal and its settlement, so the settlement cannot live in here.
+    fn init_frame_unsettled(
+        &mut self,
+        mut frame_init: FrameInit,
+    ) -> UnsettledFrameInit<'_, DB, ExtEnvs> {
+        let is_mini_rex_enabled = self.ctx().spec.is_enabled(MegaSpecId::MINI_REX);
+        let is_rex_enabled = self.ctx().spec.is_enabled(MegaSpecId::REX);
+        let is_rex3_enabled = self.ctx().spec.is_enabled(MegaSpecId::REX3);
+        let is_rex4_enabled = self.ctx().spec.is_enabled(MegaSpecId::REX4);
+        let is_rex5_enabled = self.ctx().spec.is_enabled(MegaSpecId::REX5);
+        let additional_limit = self.ctx().additional_limit.clone();
+
+        // Check if this is a call to the oracle contract and mark it as accessed.
+        // This handles both direct transaction calls and internal CALL operations.
+        // Rex3+: Oracle access gas detention is triggered by SLOAD (not CALL), so skip this
+        // CALL-based check for Rex3 and later specs.
+        //
+        // The check uses `target_address` which equals the oracle address for CALL and
+        // STATICCALL, but equals the caller's address for CALLCODE and DELEGATECALL (since
+        // those execute in the caller's state context). CALLCODE and DELEGATECALL are therefore
+        // never detected here by design — they do not access oracle state.
+        //
+        // MiniRex: Only CALL triggers oracle access detection. STATICCALL, CALLCODE, and
+        //   DELEGATECALL bypass it.
+        // Rex: STATICCALL is added to oracle access detection (unifying CALL-like behavior).
+        if is_mini_rex_enabled && !is_rex3_enabled {
+            if let FrameInput::Call(call_inputs) = &frame_init.frame_input {
+                let detect_oracle = match call_inputs.scheme {
+                    CallScheme::Call => true,
+                    // Rex fixes the bug in MiniRex where STATICCALL bypasses oracle access
+                    // detection.
+                    CallScheme::StaticCall => is_rex_enabled,
+                    // CALLCODE and DELEGATECALL have target_address = caller (not oracle),
+                    // so check_and_mark_oracle_access would never match anyway.
+                    CallScheme::CallCode | CallScheme::DelegateCall => false,
+                };
+                // Mega system address is exempted from volatile data access enforcement.
+                if detect_oracle && call_inputs.caller != self.ctx().system_address {
+                    let volatile_data_tracker = self.ctx().volatile_data_tracker.clone();
+                    let mut tracker = volatile_data_tracker.borrow_mut();
+                    if tracker.check_and_mark_oracle_access(&call_inputs.target_address) {
+                        if let Some(compute_gas_limit) = tracker.get_compute_gas_limit() {
+                            additional_limit.borrow_mut().set_compute_gas_limit(compute_gas_limit);
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some((frame_result, exit)) = Self::refuse_frame_before_dispatch(
+            &additional_limit,
+            &frame_init,
+            is_rex4_enabled,
+            is_rex5_enabled,
+        ) {
+            additional_limit.borrow_mut().push_empty_frame();
+            return Ok((FrameInitResult::Result(frame_result), exit));
+        }
+
+        // System contract interception dispatch.
+        // Each interceptor checks target address and ABI-decodes function selectors.
+        // Side-effect interceptors (oracle hint) usually return None.
+        // Short-circuiting paths return Some(FrameResult).
+        // These synthetic results skip `AdditionalLimit::before_frame_init`; we only push an
+        // empty tracking frame to keep the additional-limit stacks aligned.
+        //
+        // Only `CALL` and `STATICCALL` enter interceptor dispatch. `CALLCODE` and
+        // `DELEGATECALL` execute in the caller's state context, so intercepting them
+        // would apply system-contract logic in the wrong state context — the scheme
+        // guard enforces this policy explicitly rather than relying on upstream
+        // call-frame semantics to keep `target_address` distinct.
+        if let FrameInput::Call(call_inputs) = &frame_init.frame_input {
+            if matches!(call_inputs.scheme, CallScheme::Call | CallScheme::StaticCall) {
+                if let Some(result) =
+                    dispatch_system_contract_interceptors(self.ctx(), call_inputs, frame_init.depth)
+                {
+                    // Push an empty frame to keep the limit tracker stack balanced:
+                    // `frame_return_result` / `last_frame_result` will pop a frame, but
+                    // `after_frame_init` (which normally pushes) was skipped.
+                    if is_mini_rex_enabled {
+                        additional_limit.borrow_mut().push_empty_frame();
+                    }
+                    return Ok((FrameInitResult::Result(result), FrameExit::RefusedSynthetically));
+                }
+            }
+        }
+
+        if is_mini_rex_enabled {
+            if let Some(frame_result) = additional_limit
+                .borrow_mut()
+                .before_frame_init(&mut frame_init, self.ctx().journal_mut())?
+            {
+                return Ok((FrameInitResult::Result(frame_result), FrameExit::Refused));
+            }
+        }
+
+        // call the inner frame_init function to initialize the frame
+        let init_result = self.inner.frame_init(frame_init)?;
+
+        // Apply the additional limits only when the `MINI_REX` spec is enabled.
+        if is_mini_rex_enabled {
+            additional_limit.borrow_mut().after_frame_init(&init_result);
+        }
+
+        Ok((init_result, FrameExit::Refused))
+    }
+
+    /// The two guards that stand in front of system contract interceptor dispatch, and the
+    /// refusal each of them produces.
+    ///
+    /// The order is load-bearing: a transaction that is already over a resource limit has to
+    /// report that, rather than have it shadowed by a depth rejection that happens to also apply.
+    /// Both frame-init paths run this, so an inspector's synthetic outcome cannot be delivered
+    /// under conditions the plain path refuses.
+    fn refuse_frame_before_dispatch(
+        additional_limit: &core::cell::RefCell<AdditionalLimit>,
+        frame_init: &FrameInit,
+        is_rex4_enabled: bool,
+        is_rex5_enabled: bool,
+    ) -> Option<(FrameResult, FrameExit)> {
+        // REX4+: If a TX-level limit is already exceeded (e.g., intrinsic DataSize/KVUpdate
+        // overflow from before_tx_start), abort before interceptor dispatch. Interceptors
+        // return synthetic results that skip before_frame_init(), which would otherwise
+        // catch the exceeded limit.
+        //
+        // Gated to REX4 only: pre-REX4 specs use TX-global check_limit() which catches
+        // intrinsic overflow during execution. Changing pre-REX4 behavior would break replay.
+        if is_rex4_enabled {
+            let exceeded = additional_limit
+                .borrow_mut()
+                .frame_result_if_exceeding_limit(&frame_init.frame_input);
+            if let Some(frame_result) = exceeded {
+                return Some((frame_result, FrameExit::Refused));
+            }
+        }
+
+        // REX5+: enforce `CALL_STACK_LIMIT` before interceptor dispatch. Interceptors
+        // short-circuit before revm's `make_call_frame` runs its own depth check, so
+        // without this guard a system contract could be invoked at unbounded depth.
+        // Scope mirrors interceptor dispatch (Call/StaticCall only); other schemes still
+        // flow into revm where its own depth check applies.
+        if is_rex5_enabled {
+            if let FrameInput::Call(call_inputs) = &frame_init.frame_input {
+                if matches!(call_inputs.scheme, CallScheme::Call | CallScheme::StaticCall) &&
+                    frame_init.depth > CALL_STACK_LIMIT as usize
+                {
+                    return Some((
+                        gen_call_too_deep_result(call_inputs),
+                        FrameExit::RefusedSynthetically,
+                    ));
+                }
+            }
+        }
+
+        None
+    }
+}
+
 impl<DB, INSP, ExtEnvs: ExternalEnvTypes> revm::handler::EvmTr for MegaEvm<DB, INSP, ExtEnvs>
 where
     DB: Database,
@@ -1418,138 +1635,30 @@ where
 
     fn frame_init(
         &mut self,
-        mut frame_init: <Self::Frame as revm::handler::FrameTr>::FrameInit,
+        frame_init: <Self::Frame as revm::handler::FrameTr>::FrameInit,
     ) -> Result<FrameInitResult<'_, Self::Frame>, ContextDbError<Self::Context>> {
         let is_mini_rex_enabled = self.ctx().spec.is_enabled(MegaSpecId::MINI_REX);
-        let is_rex_enabled = self.ctx().spec.is_enabled(MegaSpecId::REX);
-        let is_rex3_enabled = self.ctx().spec.is_enabled(MegaSpecId::REX3);
-        let is_rex4_enabled = self.ctx().spec.is_enabled(MegaSpecId::REX4);
-        let is_rex5_enabled = self.ctx().spec.is_enabled(MegaSpecId::REX5);
         let additional_limit = self.ctx().additional_limit.clone();
 
-        // Check if this is a call to the oracle contract and mark it as accessed.
-        // This handles both direct transaction calls and internal CALL operations.
-        // Rex3+: Oracle access gas detention is triggered by SLOAD (not CALL), so skip this
-        // CALL-based check for Rex3 and later specs.
-        //
-        // The check uses `target_address` which equals the oracle address for CALL and
-        // STATICCALL, but equals the caller's address for CALLCODE and DELEGATECALL (since
-        // those execute in the caller's state context). CALLCODE and DELEGATECALL are therefore
-        // never detected here by design — they do not access oracle state.
-        //
-        // MiniRex: Only CALL triggers oracle access detection. STATICCALL, CALLCODE, and
-        //   DELEGATECALL bypass it.
-        // Rex: STATICCALL is added to oracle access detection (unifying CALL-like behavior).
-        if is_mini_rex_enabled && !is_rex3_enabled {
-            if let FrameInput::Call(call_inputs) = &frame_init.frame_input {
-                let detect_oracle = match call_inputs.scheme {
-                    CallScheme::Call => true,
-                    // Rex fixes the bug in MiniRex where STATICCALL bypasses oracle access
-                    // detection.
-                    CallScheme::StaticCall => is_rex_enabled,
-                    // CALLCODE and DELEGATECALL have target_address = caller (not oracle),
-                    // so check_and_mark_oracle_access would never match anyway.
-                    CallScheme::CallCode | CallScheme::DelegateCall => false,
-                };
-                // Mega system address is exempted from volatile data access enforcement.
-                if detect_oracle && call_inputs.caller != self.ctx().system_address {
-                    let volatile_data_tracker = self.ctx().volatile_data_tracker.clone();
-                    let mut tracker = volatile_data_tracker.borrow_mut();
-                    if tracker.check_and_mark_oracle_access(&call_inputs.target_address) {
-                        if let Some(compute_gas_limit) = tracker.get_compute_gas_limit() {
-                            additional_limit.borrow_mut().set_compute_gas_limit(compute_gas_limit);
-                        }
-                    }
-                }
-            }
-        }
+        let (mut init_result, exit) = self.init_frame_unsettled(frame_init)?;
 
-        // REX4+: If a TX-level limit is already exceeded (e.g., intrinsic DataSize/KVUpdate
-        // overflow from before_tx_start), abort before interceptor dispatch. Interceptors
-        // return synthetic results that skip before_frame_init(), which would otherwise
-        // catch the exceeded limit.
-        //
-        // Gated to REX4 only: pre-REX4 specs use TX-global check_limit() which catches
-        // intrinsic overflow during execution. Changing pre-REX4 behavior would break replay.
-        if is_rex4_enabled {
-            // Separate borrow scope: the RefMut must be dropped before push_empty_frame
-            // borrows again.
-            let exceeded = additional_limit
-                .borrow_mut()
-                .frame_result_if_exceeding_limit(&frame_init.frame_input);
-            if let Some(frame_result) = exceeded {
-                additional_limit.borrow_mut().push_empty_frame();
-                return Ok(FrameInitResult::Result(frame_result));
-            }
-        }
-
-        // REX5+: enforce `CALL_STACK_LIMIT` before interceptor dispatch. Interceptors
-        // short-circuit before revm's `make_call_frame` runs its own depth check, so
-        // without this guard a system contract could be invoked at unbounded depth.
-        // Scope mirrors interceptor dispatch (Call/StaticCall only); other schemes still
-        // flow into revm where its own depth check applies.
-        if is_rex5_enabled {
-            if let FrameInput::Call(call_inputs) = &frame_init.frame_input {
-                if matches!(call_inputs.scheme, CallScheme::Call | CallScheme::StaticCall) &&
-                    frame_init.depth > CALL_STACK_LIMIT as usize
-                {
-                    let frame_result = gen_call_too_deep_result(call_inputs);
-                    additional_limit.borrow_mut().push_empty_frame();
-                    return Ok(FrameInitResult::Result(frame_result));
-                }
-            }
-        }
-
-        // System contract interception dispatch.
-        // Each interceptor checks target address and ABI-decodes function selectors.
-        // Side-effect interceptors (oracle hint) usually return None.
-        // Short-circuiting paths return Some(FrameResult).
-        // These synthetic results skip `AdditionalLimit::before_frame_init`; we only push an
-        // empty tracking frame to keep the additional-limit stacks aligned.
-        //
-        // Only `CALL` and `STATICCALL` enter interceptor dispatch. `CALLCODE` and
-        // `DELEGATECALL` execute in the caller's state context, so intercepting them
-        // would apply system-contract logic in the wrong state context — the scheme
-        // guard enforces this policy explicitly rather than relying on upstream
-        // call-frame semantics to keep `target_address` distinct.
-        if let FrameInput::Call(call_inputs) = &frame_init.frame_input {
-            if matches!(call_inputs.scheme, CallScheme::Call | CallScheme::StaticCall) {
-                if let Some(result) =
-                    dispatch_system_contract_interceptors(self.ctx(), call_inputs, frame_init.depth)
-                {
-                    // Push an empty frame to keep the limit tracker stack balanced:
-                    // `frame_return_result` / `last_frame_result` will pop a frame, but
-                    // `after_frame_init` (which normally pushes) was skipped.
-                    if is_mini_rex_enabled {
-                        additional_limit.borrow_mut().push_empty_frame();
-                    }
-                    return Ok(FrameInitResult::Result(result));
-                }
-            }
-        }
-
+        // There is no inspector on this path, so the callback slot the settlement leaves open is
+        // empty and the frame's refusal is settled with nothing having rewritten it.
         if is_mini_rex_enabled {
-            if let Some(frame_result) = additional_limit
-                .borrow_mut()
-                .before_frame_init(&mut frame_init, self.ctx().journal_mut())?
-            {
-                return Ok(FrameInitResult::Result(frame_result));
+            if let ItemOrResult::Result(result) = &mut init_result {
+                additional_limit.borrow_mut().finalize_frame(result, exit, 0);
             }
         }
-
-        // call the inner frame_init function to initialize the frame
-        let init_result = self.inner.frame_init(frame_init)?;
-
-        // Apply the additional limits only when the `MINI_REX` spec is enabled.
-        if is_mini_rex_enabled {
-            additional_limit.borrow_mut().after_frame_init(&init_result);
-        }
-
         Ok(init_result)
     }
 
-    /// This method copies the logic from `revm::handler::EvmTr::frame_run` to and add additional
-    /// logic before `process_next_action` to handle the additional limit.
+    /// Runs one frame, settles it and tells the journal what to do with it.
+    ///
+    /// This is `revm::handler::EvmTr::frame_run` with `MegaETH`'s frame hooks and with the journal
+    /// decision withheld until the frame's settlement has run — see
+    /// [`settle_and_commit_frame`](MegaEvm::settle_and_commit_frame), which is the whole of the
+    /// body this shares with the inspected loop. There is no inspector on this path, so the
+    /// callback slot the settlement leaves for one is empty.
     #[inline]
     fn frame_run(
         &mut self,
@@ -1572,28 +1681,7 @@ where
         // After frame_run instructions Hook
         Self::after_frame_run_instructions(context, frame, &mut action)?;
 
-        // Record gas remaining before frame action processing
-        let gas_remaining_before = match (&action, context.spec.is_enabled(MegaSpecId::MINI_REX)) {
-            (InterpreterAction::Return(interpreter_result), true) => {
-                Some(interpreter_result.gas.remaining())
-            }
-            _ => None,
-        };
-
-        // Process the frame action, it may need to create a new frame or return the current frame
-        // result.
-        let mut frame_output = frame
-            .process_next_action::<_, ContextDbError<Self::Context>>(context, action)
-            .inspect(|i| {
-                if i.is_result() {
-                    frame.set_finished(true);
-                }
-            })?;
-
-        // After frame_run Hook
-        Self::after_frame_run(context, &mut frame_output, gas_remaining_before)?;
-
-        Ok(frame_output)
+        Ok(Self::settle_and_commit_frame(context, frame, action, |_, _, _| {}))
     }
 
     fn frame_return_result(
@@ -1722,63 +1810,62 @@ where
         let is_mini_rex_enabled = ctx.spec.is_enabled(MegaSpecId::MINI_REX);
         let is_rex4_enabled = ctx.spec.is_enabled(MegaSpecId::REX4);
         let is_rex5_enabled = ctx.spec.is_enabled(MegaSpecId::REX5);
+        let additional_limit = ctx.additional_limit.clone();
 
         // Check if inspector wants to skip this call/create
-        if let Some(mut output) = frame_start(ctx, inspector, &mut frame_init.frame_input) {
+        if let Some(output) = frame_start(ctx, inspector, &mut frame_init.frame_input) {
             // Inspector intercepted — `frame_init()` is skipped entirely, so neither
-            // `frame_result_if_exceeding_limit` nor `before_frame_init` would run.
-            //
-            // The priority order below mirrors `frame_init`'s exact order so that a
-            // TX-level additional-limit exceed is reported instead of being shadowed by
-            // a CallTooDeep guard:
-            //   1. TX-level limit exceed (REX4+)
-            //   2. CALL_STACK_LIMIT depth guard (REX5+)
-            //   3. Deliver the inspector's synthetic output
-            // Each early-return path calls `frame_end` to keep inspector callbacks paired.
+            // `frame_result_if_exceeding_limit` nor `before_frame_init` would run. The two
+            // guards that stand in front of interceptor dispatch are the same ones the plain
+            // path runs, in the same order, so that a TX-level additional-limit exceed is
+            // reported instead of being shadowed by a depth rejection.
+            let (mut output, exit) = Self::refuse_frame_before_dispatch(
+                &additional_limit,
+                &frame_init,
+                is_rex4_enabled,
+                is_rex5_enabled,
+            )
+            .unwrap_or((output, FrameExit::RefusedSynthetically));
 
-            // (1) REX4+: if a TX-level limit is already exceeded (e.g., intrinsic
-            // overflow), abort to ensure correct gas rescue before inspector callbacks.
-            // Gated to REX4 to avoid changing stable spec behavior.
-            if is_rex4_enabled {
-                let exceeded = ctx
-                    .additional_limit
-                    .borrow_mut()
-                    .frame_result_if_exceeding_limit(&frame_init.frame_input);
-                if let Some(mut frame_result) = exceeded {
-                    ctx.additional_limit.borrow_mut().push_empty_frame();
-                    frame_end(ctx, inspector, &frame_init.frame_input, &mut frame_result);
-                    return Ok(ItemOrResult::Result(frame_result));
-                }
-            }
-            // (2) REX5+: enforce CALL_STACK_LIMIT for Call/StaticCall so an inspector
-            // cannot deliver a synthetic call result at unbounded depth, mirroring the
-            // protection added to `frame_init` before interceptor dispatch.
-            if is_rex5_enabled {
-                if let FrameInput::Call(call_inputs) = &frame_init.frame_input {
-                    if matches!(call_inputs.scheme, CallScheme::Call | CallScheme::StaticCall) &&
-                        frame_init.depth > CALL_STACK_LIMIT as usize
-                    {
-                        let mut frame_result = gen_call_too_deep_result(call_inputs);
-                        ctx.additional_limit.borrow_mut().push_empty_frame();
-                        frame_end(ctx, inspector, &frame_init.frame_input, &mut frame_result);
-                        return Ok(ItemOrResult::Result(frame_result));
-                    }
-                }
-            }
-            // (3) MINI_REX+: push empty frame to keep the limit tracker stack balanced
+            // MINI_REX+: push empty frame to keep the limit tracker stack balanced
             // (`before_frame_return_result` will pop).
             if is_mini_rex_enabled {
-                ctx.additional_limit.borrow_mut().push_empty_frame();
+                additional_limit.borrow_mut().push_empty_frame();
             }
+
+            let gas_before_callback = output.gas().remaining();
             frame_end(ctx, inspector, &frame_init.frame_input, &mut output);
+            let inspector_gas_delta =
+                i128::from(output.gas().remaining()) - i128::from(gas_before_callback);
+
+            if is_mini_rex_enabled {
+                additional_limit.borrow_mut().finalize_frame(
+                    &mut output,
+                    exit,
+                    inspector_gas_delta,
+                );
+            }
             return Ok(ItemOrResult::Result(output));
         }
 
-        // Normal path - delegate to frame_init (which pushes a real frame)
+        // Normal path - delegate to the shared frame-init body (which pushes a real frame).
         let frame_input = frame_init.frame_input.clone();
-        if let ItemOrResult::Result(mut output) = self.frame_init(frame_init)? {
+        let (init_result, exit) = self.init_frame_unsettled(frame_init)?;
+        if let ItemOrResult::Result(mut output) = init_result {
             let (ctx, inspector) = self.ctx_inspector();
+
+            let gas_before_callback = output.gas().remaining();
             frame_end(ctx, inspector, &frame_input, &mut output);
+            let inspector_gas_delta =
+                i128::from(output.gas().remaining()) - i128::from(gas_before_callback);
+
+            if is_mini_rex_enabled {
+                additional_limit.borrow_mut().finalize_frame(
+                    &mut output,
+                    exit,
+                    inspector_gas_delta,
+                );
+            }
             return Ok(ItemOrResult::Result(output));
         }
 
@@ -1788,9 +1875,17 @@ where
         Ok(ItemOrResult::Item(frame))
     }
 
-    /// This method copies the logic from `MegaEvm::frame_run` with inspector support.
-    /// It adds the same additional limit checks while using `inspect_instructions` instead of
-    /// `run_plain`.
+    /// The inspected twin of [`frame_run`](revm::handler::EvmTr::frame_run).
+    ///
+    /// It differs from the plain loop in exactly two places: the instruction loop is the inspected
+    /// one, and the callback slot the shared settlement leaves open is filled with the inspector's
+    /// `frame_end`. Everything between the frame's final action and the journal decision is the
+    /// same function for both loops.
+    ///
+    /// `frame_end` runs *before* the journal decision, which is where it differs from revm's own
+    /// inspected loop. It is the last callback that can rewrite a frame's classification, and both
+    /// `MegaETH`'s settlement and the state the frame leaves behind follow the classification it
+    /// hands back.
     #[inline]
     fn inspect_frame_run(
         &mut self,
@@ -1803,7 +1898,7 @@ where
             inspect_instructions(
                 ctx,
                 &mut frame.interpreter,
-                inspector,
+                &mut *inspector,
                 instructions.instruction_table(),
                 instructions.gas_table(),
             )
@@ -1812,34 +1907,9 @@ where
         // Apply additional limits and storage gas cost
         Self::after_frame_run_instructions(ctx, frame, &mut action)?;
 
-        // Record gas remaining before frame action processing
-        let gas_remaining_before = match (&action, ctx.spec.is_enabled(MegaSpecId::MINI_REX)) {
-            (InterpreterAction::Return(interpreter_result), true) => {
-                Some(interpreter_result.gas.remaining())
-            }
-            _ => None,
-        };
-
-        // Process the frame action, it may need to create a new frame or return the current frame
-        // result.
-        let mut frame_output = frame
-            .process_next_action::<_, ContextDbError<Self::Context>>(ctx, action)
-            .inspect(|i| {
-                if i.is_result() {
-                    frame.set_finished(true);
-                }
-            })?;
-
-        // After frame_run Hook
-        Self::after_frame_run(ctx, &mut frame_output, gas_remaining_before)?;
-
-        // Call frame_end for inspector callback
-        if let ItemOrResult::Result(frame_result) = &mut frame_output {
-            let (ctx, inspector, frame) = self.ctx_inspector_frame();
-            frame_end(ctx, inspector, &frame.input, frame_result);
-        }
-
-        Ok(frame_output)
+        Ok(Self::settle_and_commit_frame(ctx, frame, action, |ctx, frame_input, frame_result| {
+            frame_end(ctx, inspector, frame_input, frame_result);
+        }))
     }
 }
 

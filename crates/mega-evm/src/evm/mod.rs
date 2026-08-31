@@ -28,6 +28,7 @@
 mod context;
 mod execution;
 mod factory;
+mod frame;
 mod host;
 mod inspector;
 mod instructions;

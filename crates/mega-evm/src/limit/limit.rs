@@ -23,6 +23,29 @@ use crate::{
 
 use super::LimitCheck;
 
+/// How a frame reached the outcome [`AdditionalLimit::finalize_frame`] is settling.
+///
+/// The three shapes differ in what the frame's remaining gas means and in which of them the
+/// settlement is allowed to reach at all, so the caller names the shape rather than the settlement
+/// guessing it from the result.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameExit {
+    /// The frame ran and produced its own result.
+    Ran,
+    /// The frame was refused before it could run, by a path that went through the limit tracker's
+    /// frame-init accounting: a resource limit already over its budget, or one of revm's own
+    /// frame-init rejections.
+    Refused,
+    /// The frame was refused by a synthetic result that never reached that accounting — a system
+    /// contract interceptor's, or an inspector's.
+    ///
+    /// Frozen specs leave such a refusal's envelope entirely alone, which is the gap REX4's
+    /// pre-dispatch limit check was added to narrow and which REX7 closes: without a settlement
+    /// here, an envelope that is neither handed back nor booked as destroyed leaves the
+    /// conservation law short by exactly that amount.
+    RefusedSynthetically,
+}
+
 /// Additional limits for the `MegaETH` EVM beyond standard EVM limits.
 ///
 /// This struct coordinates four independent resource limits: compute gas, data size,
@@ -1057,8 +1080,9 @@ impl AdditionalLimit {
     /// refunded to the sender. The storage-stipend tracker decides how `gas.remaining()`
     /// maps to the refundable balance — see
     /// `StorageCallStipendTracker::effective_remaining_for_rescue`.
-    pub(crate) fn rescue_gas(&mut self, gas: &Gas) {
-        self.rescued_gas += self.storage_call_stipend.effective_remaining_for_rescue(gas);
+    pub(crate) fn rescue_gas(&mut self, gas: &Gas, remaining: u64) {
+        self.rescued_gas +=
+            self.storage_call_stipend.effective_remaining_for_rescue(gas, remaining);
     }
 
     /// Drains up to `amount` from the current frame's storage stipend allowance and
@@ -1069,16 +1093,19 @@ impl AdditionalLimit {
         self.storage_call_stipend.try_consume(amount)
     }
 
-    /// Rescue remaining gas from a frame result if a TX-level additional limit has been
-    /// exceeded.
+    /// Rescues a frame's remaining gas for the sender if a TX-level additional limit has been
+    /// exceeded, and refunds it in `last_frame_result`.
     ///
-    /// This must be called before any inspector callback (`frame_end`) that might modify the
-    /// gas via `spend_all()`, so the correct `gas.remaining()` value is captured.
-    /// The rescued gas is later refunded to the transaction sender in `last_frame_result`.
-    pub(crate) fn try_rescue_gas(&mut self, gas: &Gas) {
+    /// `remaining` is the gas the EVM left in the result, which is not always the number the
+    /// result now carries: an inspector callback runs between the two, and a callback that spends
+    /// the result down — the shape `GasInspector` takes on an error — must not be able to take
+    /// the sender's refund with it. Every frame the transaction unwinds through rescues the part
+    /// of the envelope it was still holding, and those parts are disjoint, so the sum is the whole
+    /// of what the halted transaction never spent.
+    pub(crate) fn try_rescue_gas(&mut self, gas: &Gas, remaining: u64) {
         let limit_check = self.check_limit();
         if limit_check.exceeded_limit() && !limit_check.is_frame_local() {
-            self.rescue_gas(gas);
+            self.rescue_gas(gas, remaining);
         }
     }
 
@@ -1189,7 +1216,7 @@ impl AdditionalLimit {
     ///
     /// Returns `Some(FrameResult)` if a TX-level limit is already exceeded.
     pub(crate) fn frame_result_if_exceeding_limit(
-        &mut self,
+        &self,
         frame_input: &FrameInput,
     ) -> Option<FrameResult> {
         if !self.limit_exceeded() {
@@ -1202,7 +1229,7 @@ impl AdditionalLimit {
     ///
     /// Shared by `before_frame_init` (limit exceeded after pushing sub-tracker frames)
     /// and `frame_result_if_exceeding_limit` (intrinsic overflow before frame push).
-    fn create_exceeded_limit_result(&mut self, frame_input: &FrameInput) -> Option<FrameResult> {
+    fn create_exceeded_limit_result(&self, frame_input: &FrameInput) -> Option<FrameResult> {
         let (gas_limit, return_memory_offset) = match frame_input {
             FrameInput::Call(inputs) => {
                 (inputs.gas_limit, Some(inputs.return_memory_offset.clone()))
@@ -1211,14 +1238,14 @@ impl AdditionalLimit {
             FrameInput::Empty => unreachable!(),
         };
         let output = self.has_exceeded_limit.revert_data();
-        let result = create_exceeding_limit_frame_result(
+        // The gas this result carries is rescued in `finalize_frame`, along with every other
+        // refused frame's, once the last callback that can rewrite it has run.
+        Some(create_exceeding_limit_frame_result(
             self.exceeding_instruction_result(),
             Gas::new(gas_limit),
             return_memory_offset,
             output,
-        );
-        self.try_rescue_gas(result.gas());
-        Some(result)
+        ))
     }
 
     /// Hook called when a new execution frame is successfully initialized in `frame_init` and needs
@@ -1232,15 +1259,10 @@ impl AdditionalLimit {
             self.data_size.after_frame_init_on_frame(frame);
             self.kv_update.after_frame_init_on_frame(frame);
             self.compute_gas.after_frame_init_on_frame(frame);
-        } else if let ItemOrResult::Result(result) = init_result {
-            // Rescue gas if a TX-level limit was exceeded. This covers the
-            // before_frame_init early-return path and any other Result from frame_init.
-            self.try_rescue_gas(result.gas());
-            // Must run after the rescue: the rescue's `check_limit` is what latches a TX-level or
-            // frame-local exceed, and the settlement below reads that latch to decide whether the
-            // envelope is really destroyed or is about to be handed back.
-            self.settle_frame_init_reject_burn(result);
         }
+        // A `Result` needs no work here. A frame init that refuses to build a frame settles in
+        // `finalize_frame`, like every other frame outcome, so that whatever an inspector's
+        // callback does to the refusal is already in it.
     }
 
     /// Hook called before a frame run. If the limit is exceeded, return an interpreter result
@@ -1282,32 +1304,107 @@ impl AdditionalLimit {
         None
     }
 
-    /// Hook called after frame action processing in `frame_run`.
+    /// Records the compute gas a frame's own classification spent — the code deposit of a
+    /// contract creation, on the specs that read the charge back off the result instead of
+    /// weighing it beforehand.
     ///
-    /// Records compute gas cost induced in frame action processing (e.g., code deposit cost),
-    /// marks the frame result as exceeding limit if needed, settles an exceptionally halted
-    /// frame's destroyed remainder (REX7+), and rescues gas if a TX-level limit was exceeded
-    /// (before any inspector callback that might modify gas).
-    pub(crate) fn after_frame_run(
+    /// Frozen: REX5 onwards weigh the same charge at the frame's exit and pass `None` here, so
+    /// the live callers are the specs through REX4. Their reading is a difference between the
+    /// result's gas before and after classification, which is why this stays ahead of the last
+    /// mutating callback rather than joining [`finalize_frame`](Self::finalize_frame): a callback
+    /// editing that gas would otherwise land inside the difference and be recorded as work.
+    pub(crate) fn settle_post_action_charge(
         &mut self,
         result: &mut FrameResult,
-        gas_remaining_before_process_action: Option<u64>,
+        gas_remaining_before_classification: Option<u64>,
     ) {
-        if let Some(gas_remaining_before) = gas_remaining_before_process_action {
-            let compute_gas_cost = gas_remaining_before.saturating_sub(result.gas().remaining());
-            if !self.record_compute_gas(compute_gas_cost) {
-                mark_frame_result_as_exceeding_limit(
-                    result,
-                    self.exceeding_instruction_result(),
-                    Default::default(),
-                );
+        let Some(gas_remaining_before) = gas_remaining_before_classification else {
+            return;
+        };
+        let compute_gas_cost = gas_remaining_before.saturating_sub(result.gas().remaining());
+        if !self.record_compute_gas(compute_gas_cost) {
+            mark_frame_result_as_exceeding_limit(
+                result,
+                self.exceeding_instruction_result(),
+                Default::default(),
+            );
+        }
+    }
+
+    /// Settles a frame's outcome, once and for all.
+    ///
+    /// # Where this sits
+    ///
+    /// After the last callback that can rewrite the frame's classification, and before the journal
+    /// is told what to do with the frame. Everything here reads the classification the caller will
+    /// actually see, and everything the journal does follows from what this leaves behind. That
+    /// ordering is the whole point: a settlement taken earlier books a result that may still
+    /// change, and a journal decision taken earlier leaves state behind that the reported result
+    /// denies.
+    ///
+    /// # What it does not cover
+    ///
+    /// The gas clamp's restore and its out-of-gas latch stay ahead of this point, in
+    /// [`settle_frame_final_result`](Self::settle_frame_final_result). The latch's input is the
+    /// interpreter's own exit classification, which the create-return classification overwrites —
+    /// a creation that cannot afford its code deposit ends `OutOfGas` for a reason that has
+    /// nothing to do with the clamp — and the code-deposit settlement that runs between the two
+    /// reads the latch. Both halves therefore stay where their inputs are still intact.
+    ///
+    /// The frame's tracker entries are popped later still, when the frame is handed back to its
+    /// caller. Popping here would double-pop the paths that reach the caller without running a
+    /// frame at all.
+    pub(crate) fn finalize_frame(
+        &mut self,
+        result: &mut FrameResult,
+        exit: FrameExit,
+        inspector_gas_delta: i128,
+    ) {
+        let evm_remaining = self.settle_inspector_result_gas(result, inspector_gas_delta);
+
+        match exit {
+            FrameExit::Ran => {
+                // The burn before the rescue: the rescue's `check_limit` is what latches a
+                // TX-level exceed, and a latched exceed is exactly the case whose remainder is
+                // handed back rather than destroyed.
+                self.settle_exceptional_halt_burn(result, evm_remaining);
+                self.try_rescue_gas(result.gas(), evm_remaining);
+            }
+            FrameExit::Refused | FrameExit::RefusedSynthetically => {
+                // The rescue before the burn, for the mirror-image reason: here the latch the
+                // rescue produces is what tells the burn the envelope is being handed back.
+                if exit == FrameExit::Refused || self.rex7_enabled() {
+                    self.try_rescue_gas(result.gas(), evm_remaining);
+                }
+                self.settle_frame_init_reject_burn(result, evm_remaining);
             }
         }
-        self.settle_exceptional_halt_burn(result);
-        // Rescue gas if a TX-level additional limit has been exceeded.
-        // This must happen before any inspector callback (`frame_end`) that might modify
-        // the gas via `spend_all()`, so the correct `gas.remaining()` value is captured.
-        self.try_rescue_gas(result.gas());
+    }
+
+    /// Books what the last mutating callback did to a frame result's gas, and reports the gas the
+    /// EVM itself left in that result.
+    ///
+    /// Whether such an edit moves anything depends on the frame's final classification, which is
+    /// why this can only run here:
+    ///
+    /// - a returning or reverting frame hands its remaining gas back to its caller, so an edit to
+    ///   that number really does change what the transaction spends. It goes to the ledger, and the
+    ///   conservation law reads it back out of the envelope;
+    /// - a halting frame hands nothing back, so the edit changes nothing the transaction spends.
+    ///   The destroyed remainder and the rescue below are then taken on the EVM's own number,
+    ///   reconstructed by undoing the edit — an inspector does not perform work, and gas it removed
+    ///   from a doomed result was never the inspector's to destroy.
+    fn settle_inspector_result_gas(&mut self, result: &FrameResult, delta: i128) -> u64 {
+        let remaining = result.gas().remaining();
+        if delta == 0 {
+            return remaining;
+        }
+        if result.instruction_result().is_ok_or_revert() {
+            self.inspector.result += delta;
+            remaining
+        } else {
+            (i128::from(remaining) - delta).clamp(0, i128::from(u64::MAX)) as u64
+        }
     }
 
     /// Hook called when a frame finishes running in `frame_run`. If the limit is exceeded, mark
@@ -1477,21 +1574,18 @@ impl AdditionalLimit {
         // commit-or-revert from the frame's original instruction result, before the
         // `FrameResult` ever reaches this hook, so a frame that ran to a successful exit is
         // already committed and stays committed under the rewritten Revert.
+        //
+        // Under REX7 an exceed the frame latched while it ran was already absorbed at the frame's
+        // settlement point, ahead of the journal decision, so what reaches here is a first
+        // detection by this hook's own `check_limit` — the frame's usage weighed against its
+        // caller's budget, after the merge. That question is only answerable here, so the absorb
+        // for it stays here on every spec.
         let limit_check = self.check_limit();
         if limit_check.exceeded_limit() && !duplicate_return_frame_result {
             if limit_check.is_frame_local() {
                 let output = limit_check.revert_data();
                 self.has_exceeded_limit = LimitCheck::WithinLimit;
-                match result {
-                    FrameResult::Call(o) => {
-                        o.result.result = InstructionResult::Revert;
-                        o.result.output = output;
-                    }
-                    FrameResult::Create(o) => {
-                        o.result.result = InstructionResult::Revert;
-                        o.result.output = output;
-                    }
-                }
+                mark_frame_result_as_exceeding_limit(result, InstructionResult::Revert, output);
             } else {
                 // Gas should already have been rescued at the point where the limit was
                 // exceeded (frame_result_if_exceeding_limit, before_frame_init,
@@ -1561,14 +1655,14 @@ impl AdditionalLimit {
     /// rescued (TX-level) — including a clamp-induced out-of-gas, which
     /// [`settle_frame_final_result`](Self::settle_frame_final_result) latches earlier in this
     /// frame exit.
-    fn settle_exceptional_halt_burn(&mut self, result: &FrameResult) {
+    fn settle_exceptional_halt_burn(&mut self, result: &FrameResult, evm_remaining: u64) {
         if !self.checkpoint.rex7_enabled() ||
             self.limit_exceeded() ||
             result.instruction_result().is_ok_or_revert()
         {
             return;
         }
-        self.compute_gas.record_burned_gas(result.gas().remaining());
+        self.compute_gas.record_burned_gas(evm_remaining);
     }
 
     /// Settles the envelope a frame that never started destroys, as non-enforcing compute gas
@@ -1598,7 +1692,7 @@ impl AdditionalLimit {
     /// [`before_frame_return_result`](Self::before_frame_return_result), which rewrites the result
     /// to a revert and so returns the gas to the caller. Either way the envelope is not destroyed,
     /// and booking it would report gas that was handed back.
-    fn settle_frame_init_reject_burn(&mut self, result: &FrameResult) {
+    fn settle_frame_init_reject_burn(&mut self, result: &FrameResult, evm_remaining: u64) {
         if !self.checkpoint.rex7_enabled() ||
             self.limit_exceeded() ||
             result.instruction_result().is_ok_or_revert()
@@ -1610,7 +1704,7 @@ impl AdditionalLimit {
                 return;
             }
         }
-        self.compute_gas.record_burned_gas(result.gas().remaining());
+        self.compute_gas.record_burned_gas(evm_remaining);
     }
 
     /// Merges resource usage from a sandbox execution into this tracker.
