@@ -5,9 +5,10 @@
 
 use clap::Parser;
 use state_test::{
+    diff::{collect_fixture_files, run_diff, DiffClass, DiffRunConfig, DiffSpecs, DiffTally},
     runner::{
-        bench_test_suite, fill_test_suite, find_all_json_tests, run, TestError, TestErrorKind,
-        UnitBench,
+        bench_test_suite, fill_test_suite, fill_test_suite_keep_going, find_all_json_tests,
+        is_skipped_fixture, run, TestError, TestErrorKind, UnitBench, UnitStatus,
     },
     types::SpecName,
 };
@@ -71,11 +72,33 @@ pub struct Cmd {
     /// Overwrite an existing non-empty `post` when filling with `--fill`.
     #[arg(long, requires = "fill")]
     force: bool,
+    /// Execute each fixture under this spec as well and report how the two differ.
+    ///
+    /// The spec under test is `--bench-spec`, which is therefore required: a differential run
+    /// compares two named specs, and taking the target from each fixture's own `post` would make
+    /// the comparison mean something different from one unit to the next. Nothing is written —
+    /// the comparison is between the two executions, not against a recorded expectation, which is
+    /// what lets an unstable spec with no expectations be checked at all.
+    #[arg(long, value_name = "SPEC", requires = "bench_spec", conflicts_with_all = ["bench", "fill"])]
+    diff_spec: Option<String>,
+    /// Write the differential run's tally and every flagged unit to this file, as JSON.
+    #[arg(long, value_name = "FILE", requires = "diff_spec")]
+    diff_report: Option<PathBuf>,
+    /// Skip the inspected second pass that collects per-frame evidence for a difference the
+    /// cheap evidence did not explain.
+    ///
+    /// Only useful for measuring the cost of that pass: without it, a difference caused by an
+    /// inner frame the transaction's own result hides is reported as unexplained.
+    #[arg(long, requires = "diff_spec")]
+    diff_no_frame_evidence: bool,
 }
 
 impl Cmd {
     /// Runs `statetest` command.
     pub fn run(&self) -> Result<(), TestError> {
+        if self.diff_spec.is_some() {
+            return self.run_diff();
+        }
         if self.fill {
             return self.run_fill();
         }
@@ -109,47 +132,19 @@ impl Cmd {
 
     /// Parse `--bench-spec` into a [`SpecName`], if given.
     fn resolve_spec(&self) -> Result<Option<SpecName>, TestError> {
-        self.bench_spec
-            .as_deref()
-            .map(|s| {
-                let invalid_spec = || TestError {
-                    name: "spec".to_string(),
-                    path: s.to_string(),
-                    kind: TestErrorKind::FixtureError(format!(
-                        "invalid --bench-spec {s:?}; expected one of: {}",
-                        [
-                            mega_evm::name::EQUIVALENCE,
-                            mega_evm::name::MINI_REX,
-                            mega_evm::name::REX,
-                            mega_evm::name::REX1,
-                            mega_evm::name::REX2,
-                            mega_evm::name::REX3,
-                            mega_evm::name::REX4,
-                            mega_evm::name::REX5,
-                            mega_evm::name::REX6,
-                            mega_evm::name::REX7,
-                        ]
-                        .join(", ")
-                    )),
-                };
-                let spec = MegaSpecId::from_str(s)
-                    .map(SpecName::from_mega_spec)
-                    .map_err(|_| invalid_spec())?;
-                // A spec id that parses but has no fixture-facing name (a
-                // future `MegaSpecId` this crate does not map yet) would
-                // otherwise fail much later, deep inside execution — reject it
-                // here with the same actionable message.
-                if spec == SpecName::Unknown {
-                    return Err(invalid_spec());
-                }
-                Ok(spec)
-            })
-            .transpose()
+        self.bench_spec.as_deref().map(|s| parse_spec("--bench-spec", s)).transpose()
+    }
+
+    /// Parse `--diff-spec` into a [`SpecName`], if given.
+    fn resolve_diff_spec(&self) -> Result<Option<SpecName>, TestError> {
+        self.diff_spec.as_deref().map(|s| parse_spec("--diff-spec", s)).transpose()
     }
 
     /// Fill every fixture's `post` expectation in place (see `--fill`).
     fn run_fill(&self) -> Result<(), TestError> {
         let spec_override = self.resolve_spec()?;
+        let (mut filled, mut errors, mut panics) = (0usize, 0usize, 0usize);
+        let (mut file_errors, mut skipped_files) = (0usize, 0usize);
         for path in &self.paths {
             if !path.exists() {
                 return Err(TestError {
@@ -159,11 +154,114 @@ impl Cmd {
                 });
             }
             for file in find_all_json_tests(path) {
-                let n = fill_test_suite(&file, spec_override, self.force)?;
-                println!("Filled post for {n} unit(s) in {}", file.display());
+                if self.keep_going {
+                    // A file the runner declines as a whole (an unreadable fixture, a filename on
+                    // the validation skip list) must not end the sweep either: record it and move
+                    // on, the same way a declined unit is recorded.
+                    if is_skipped_fixture(&file) {
+                        println!("SKIP_FILE\t{}", file.display());
+                        skipped_files += 1;
+                        continue;
+                    }
+                    let report = match fill_test_suite_keep_going(&file, spec_override, self.force)
+                    {
+                        Ok(report) => report,
+                        Err(e) => {
+                            println!(
+                                "FILE_ERR\t{}\t{}",
+                                file.display(),
+                                e.to_string().replace('\n', " ")
+                            );
+                            file_errors += 1;
+                            continue;
+                        }
+                    };
+                    for unit in &report.units {
+                        match &unit.status {
+                            UnitStatus::Ok => {}
+                            UnitStatus::Error(m) => {
+                                println!("ERR\t{}::{}\t{m}", file.display(), unit.name);
+                                errors += 1;
+                            }
+                            UnitStatus::Panic(m) => {
+                                println!(
+                                    "PANIC\t{}::{}\t{}",
+                                    file.display(),
+                                    unit.name,
+                                    m.replace('\n', " ")
+                                );
+                                panics += 1;
+                            }
+                        }
+                    }
+                    filled += report.filled();
+                } else {
+                    let n = fill_test_suite(&file, spec_override, self.force)?;
+                    println!("Filled post for {n} unit(s) in {}", file.display());
+                    filled += n;
+                }
             }
         }
-        Ok(())
+        if !self.keep_going {
+            return Ok(());
+        }
+        let total = filled + errors + panics;
+        println!(
+            "Fill tally: OK={filled} ERR={errors} PANIC={panics} FILE_ERR={file_errors} \
+             SKIP_FILE={skipped_files} TOTAL={total}"
+        );
+        if errors + panics + file_errors == 0 {
+            return Ok(());
+        }
+        // `--keep-going` changes when the run stops, not whether it failed: the CLI's exit-code
+        // contract still reports a unit that did not fill.
+        Err(TestError {
+            name: "fill summary".to_string(),
+            path: String::new(),
+            kind: TestErrorKind::TestsFailed { failed: errors + panics + file_errors, total },
+        })
+    }
+
+    /// Execute every fixture under both specs and report how they differ (see `--diff-spec`).
+    fn run_diff(&self) -> Result<(), TestError> {
+        let base = self.resolve_diff_spec()?.expect("run_diff is only reached with --diff-spec");
+        // Clap's `requires = "bench_spec"` makes the target explicit before this point.
+        let target = self.resolve_spec()?.expect("--diff-spec requires --bench-spec");
+        let files = collect_fixture_files(&self.paths)?;
+
+        let specs = DiffSpecs { target, base };
+        let tally = run_diff(
+            files,
+            DiffRunConfig {
+                specs,
+                single_thread: self.single_thread,
+                collect_evidence: !self.diff_no_frame_evidence,
+                progress: !self.json,
+            },
+        );
+
+        print_diff_tally(&tally, target, base);
+        if let Some(report) = &self.diff_report {
+            let json = serde_json::to_string_pretty(&diff_report_json(&tally, target, base))
+                .expect("serialize diff report");
+            std::fs::write(report, json).map_err(|e| TestError {
+                name: "diff report".to_string(),
+                path: report.display().to_string(),
+                kind: TestErrorKind::FixtureError(format!("write: {e}")),
+            })?;
+        }
+
+        if !tally.is_failure() {
+            return Ok(());
+        }
+        Err(TestError {
+            name: "diff summary".to_string(),
+            path: String::new(),
+            kind: TestErrorKind::TestsFailed {
+                failed: tally.count(DiffClass::Unexplained) + tally.count(DiffClass::Panic),
+                total: tally.total(),
+            },
+        })
     }
 
     /// Benchmark every fixture under the given paths and print the results as JSON.
@@ -220,6 +318,113 @@ impl Cmd {
         println!("{}", serde_json::to_string_pretty(&output).expect("serialize bench output"));
         Ok(())
     }
+}
+
+/// Parse a spec-name flag value into a [`SpecName`].
+///
+/// Rejects both an unparseable string and a `MegaSpecId` this crate has no fixture-facing name
+/// for; either would otherwise fail much later, deep inside execution.
+fn parse_spec(flag: &str, value: &str) -> Result<SpecName, TestError> {
+    let invalid_spec = || TestError {
+        name: "spec".to_string(),
+        path: value.to_string(),
+        kind: TestErrorKind::FixtureError(format!(
+            "invalid {flag} {value:?}; expected one of: {}",
+            [
+                mega_evm::name::EQUIVALENCE,
+                mega_evm::name::MINI_REX,
+                mega_evm::name::REX,
+                mega_evm::name::REX1,
+                mega_evm::name::REX2,
+                mega_evm::name::REX3,
+                mega_evm::name::REX4,
+                mega_evm::name::REX5,
+                mega_evm::name::REX6,
+                mega_evm::name::REX7,
+            ]
+            .join(", ")
+        )),
+    };
+    let spec =
+        MegaSpecId::from_str(value).map(SpecName::from_mega_spec).map_err(|_| invalid_spec())?;
+    if spec == SpecName::Unknown {
+        return Err(invalid_spec());
+    }
+    Ok(spec)
+}
+
+/// Every class a differential run can produce, in report order.
+const DIFF_CLASSES: [DiffClass; 5] = [
+    DiffClass::Pass,
+    DiffClass::Explained,
+    DiffClass::Unexplained,
+    DiffClass::Skipped,
+    DiffClass::Panic,
+];
+
+/// Prints the differential run's tally, mechanism distribution, and every flagged unit.
+fn print_diff_tally(tally: &DiffTally, target: SpecName, base: SpecName) {
+    println!("\nDifferential run: {target:?} vs {base:?} over {} unit(s)", tally.total());
+    for class in DIFF_CLASSES {
+        println!("  {:<12} {}", class.label(), tally.count(class));
+    }
+    if tally.skipped_files > 0 {
+        println!("  ({} file(s) skipped by filename, no unit of them judged)", tally.skipped_files);
+    }
+    if !tally.mechanisms.is_empty() {
+        println!("Mechanisms over explained differences:");
+        for (label, count) in &tally.mechanisms {
+            println!("  {label:<28} {count}");
+        }
+    }
+    if !tally.explained_fields.is_empty() {
+        println!("Shapes of explained differences (disagreeing quantities):");
+        for (shape, count) in &tally.explained_fields {
+            println!("  {shape:<48} {count}");
+        }
+    }
+    for diff in &tally.flagged {
+        println!(
+            "{}\t{}::{}\t{}\t{}",
+            diff.class.label(),
+            diff.path,
+            diff.name,
+            diff.fields.iter().map(|f| f.label()).collect::<Vec<_>>().join(","),
+            diff.detail.as_deref().unwrap_or("-").replace('\n', " ")
+        );
+    }
+    for error in &tally.file_errors {
+        println!("FILE_ERROR\t{}", error.replace('\n', " "));
+    }
+}
+
+/// The machine-readable form of [`print_diff_tally`], for `--diff-report`.
+fn diff_report_json(tally: &DiffTally, target: SpecName, base: SpecName) -> serde_json::Value {
+    json!({
+        "targetSpec": format!("{target:?}"),
+        "baseSpec": format!("{base:?}"),
+        "total": tally.total(),
+        "classes": DIFF_CLASSES
+            .iter()
+            .map(|c| (c.label().to_string(), json!(tally.count(*c))))
+            .collect::<serde_json::Map<_, _>>(),
+        "mechanisms": tally.mechanisms,
+        "explainedFields": tally.explained_fields,
+        "fileErrors": tally.file_errors,
+        "skippedFiles": tally.skipped_files,
+        "flagged": tally
+            .flagged
+            .iter()
+            .map(|d| json!({
+                "class": d.class.label(),
+                "path": d.path,
+                "name": d.name,
+                "fields": d.fields.iter().map(|f| f.label()).collect::<Vec<_>>(),
+                "mechanisms": d.mechanisms.iter().map(|m| m.label()).collect::<Vec<_>>(),
+                "detail": d.detail,
+            }))
+            .collect::<Vec<_>>(),
+    })
 }
 
 fn main() {

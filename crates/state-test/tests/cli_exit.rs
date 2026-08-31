@@ -99,3 +99,82 @@ fn passing_run_exits_with_code_0() {
     let out = run_cli(&[path.to_str().expect("utf8 path")]);
     assert_eq!(out.status.code(), Some(0), "passing run must exit 0");
 }
+
+#[test]
+fn diff_run_with_no_unexplained_difference_exits_with_code_0() {
+    let mut suite: serde_json::Value = serde_json::from_str(FAILING_SUITE).expect("parse");
+    // The differential run computes both sides itself; the recorded `post` is irrelevant, and an
+    // empty one keeps the fixture honest about that.
+    suite["exit_code_test"]["post"] = serde_json::json!({});
+    let path = write_fixture("diff_pass.json", &serde_json::to_string(&suite).expect("serialize"));
+    let report = write_fixture("diff_pass_report.json", "");
+
+    let out = run_cli(&[
+        path.to_str().expect("utf8 path"),
+        "--bench-spec",
+        "Rex7",
+        "--diff-spec",
+        "Rex6",
+        "--diff-report",
+        report.to_str().expect("utf8 path"),
+    ]);
+    assert_eq!(out.status.code(), Some(0), "a run with no unexplained difference must exit 0");
+
+    let written: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&report).expect("read report"))
+            .expect("report is json");
+    assert_eq!(written["targetSpec"], "Rex7");
+    assert_eq!(written["baseSpec"], "Rex6");
+    assert_eq!(written["classes"]["PASS"], 1);
+    assert_eq!(written["classes"]["UNEXPLAINED"], 0);
+}
+
+#[test]
+fn diff_run_over_two_unrelated_specs_reports_unexplained_and_exits_1() {
+    // The Rex7 precision invariant relates Rex7 to Rex6 and says nothing about any other pair, so
+    // a Rex7-against-Equivalence difference carries no licensing evidence — the MegaETH intrinsic
+    // surcharge alone moves the receipt. This is the negative control for the gate: a classifier
+    // that explained everything would exit 0 here.
+    let mut suite: serde_json::Value = serde_json::from_str(FAILING_SUITE).expect("parse");
+    suite["exit_code_test"]["post"] = serde_json::json!({});
+    let path = write_fixture("diff_fail.json", &serde_json::to_string(&suite).expect("serialize"));
+
+    let out = run_cli(&[
+        path.to_str().expect("utf8 path"),
+        "--bench-spec",
+        "Rex7",
+        "--diff-spec",
+        "Equivalence",
+    ]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("UNEXPLAINED"), "tally should report the class: {stdout}");
+    assert_eq!(out.status.code(), Some(1), "an unexplained difference must fail the gate");
+}
+
+#[test]
+fn diff_spec_requires_an_explicit_target_spec() {
+    let path = write_fixture("diff_needs_target.json", FAILING_SUITE);
+    let out = run_cli(&[path.to_str().expect("utf8 path"), "--diff-spec", "Rex6"]);
+    assert_eq!(out.status.code(), Some(2), "clap rejects the incomplete flag combination");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("bench-spec"),
+        "the error should name the missing flag"
+    );
+}
+
+#[test]
+fn diff_spec_rejects_an_unknown_spec_name() {
+    let path = write_fixture("diff_bad_spec.json", FAILING_SUITE);
+    let out = run_cli(&[
+        path.to_str().expect("utf8 path"),
+        "--bench-spec",
+        "Rex7",
+        "--diff-spec",
+        "FutureFork9000",
+    ]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("--diff-spec"),
+        "the error should name the offending flag"
+    );
+}
