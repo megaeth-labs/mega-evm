@@ -273,6 +273,26 @@ What changes is what the transaction reports.
 A frame-local exceed on this path MUST NOT be latched — with the amount unrecorded the transaction is within every limit, and the frames above it MAY continue.
 A transaction-level exceed MUST be latched and MUST halt the transaction with the usual gas rescue, and MUST carry the same detention attribution it would have carried had the amount been recorded.
 
+### Frame Result and Frame State Agree
+
+#### Previous behavior
+
+A frame's journal checkpoint is committed or reverted from the frame's instruction result at the moment the frame's action is processed, which is before the node applies the resource-limit rewrites that decide what the frame finally reports.
+A frame that ran to a successful exit and is then rewritten into a frame-local revert therefore reports failure over state that stays committed: a contract creation on that path leaves its deployed code and its constructor's storage writes behind, and the caller is told the frame failed.
+[Rex4](rex4.md) documents that split for the code-deposit path, where a node MUST NOT roll the deployment back.
+
+#### New behavior
+
+Under Rex7, a node MUST decide a frame's journal outcome from the frame's **final** result — the result after every settlement and every rewrite the node applies at that frame's exit.
+A frame that reports a revert MUST have its state reverted; a contract creation that reports anything other than success MUST deposit no code.
+
+This closes the split for every exceed the frame itself latched while it ran.
+It does not reach an exceed first detected on the way out to the caller: that check weighs the frame's usage against the caller's budget, after the frame's usage has been merged into it, so it is answerable only once the frame is already back with its caller.
+Such an exceed is absorbed there, on every spec, and the frozen split remains for it.
+
+A node MUST NOT deposit code that its create-return predicates rejected, whatever a later rewrite says the result is.
+The bytes a deployment writes MUST be the bytes those predicates approved.
+
 ## Developer Impact
 
 Rex7 is not scheduled on any network.
@@ -294,6 +314,9 @@ Under Rex6 that unused envelope was enforcing, so the same tail work can survive
 A contract creation that fails at its frame exit reports `code_length × CODEDEPOSIT` less compute gas under Rex7 than under Rex6, and leaves that much more of the transaction's and the block's compute budget for the work that follows.
 Whether the creation succeeds, what it deploys, and the receipt it produces are unchanged.
 
+A frame that reports a frame-local revert leaves no state behind under Rex7, where under Rex6 a frame that had already exited successfully kept its writes.
+A caller that read state written by such a frame after absorbing its revert sees nothing under Rex7.
+
 ## Safety and Compatibility
 
 Rex7 changes nothing about how blocks under earlier specs are executed.
@@ -307,6 +330,9 @@ The gas clamp is strictly tighter than Rex6's post-opcode enforcement on the ove
 Rex7 can report more compute gas than Rex6 for the same inputs on four paths: the exceptional-halt frame carve-out, which over-reports rather than under-reports; a failing precompile whose unused forwarded envelope is now reported as destroyed; a `disableVolatileDataAccess` rejection, which now includes the rejected opcode's static fee; and a failed deposit, whose rebuilt receipt is now covered by the reported total instead of leaving part of the envelope unaccounted.
 The carve-out's enforcing half is never looser than Rex6's on interpreter frames, and is stricter in exactly one shape: an ordinary out-of-gas taken with no clamp in force, whose zeroed counter leaves the whole segment measuring as executed.
 On a precompile that fails before performing work, Rex7 enforcement is deliberately looser than Rex6's: the unused envelope does not bind the compute limit.
+
+Rex7 rolls back state Rex6 keeps on one path: a frame that exited successfully and was then rewritten into a frame-local revert.
+The rewrite itself is unchanged; what changes is that the journal follows it.
 
 Rex7 reports less compute gas than Rex6 on one path: a contract creation that fails at its frame exit, whose code-deposit compute gas Rex6 records and Rex7 does not.
 Enforcement is looser there by the same amount, and deliberately so — the EVM charges that amount only for a deposit that happens, so enforcing it against a creation that failed would bind the compute limit with gas nobody spent.

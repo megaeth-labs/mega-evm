@@ -17,6 +17,9 @@ Resource metering subsystem for transaction and frame limits across compute gas,
 - Limit-check order is deterministic and shared by all opcode paths.
 - Distinguish TX-level exceed (halt/OutOfGas) from frame-local exceed (revert).
 - All trackers push/pop per-frame in lockstep with EVM frame lifecycle hooks.
+- `AdditionalLimit::finalize_frame` is the single point a frame's outcome is settled — the destroyed-remainder booking, the frame-init refusal booking, the gas rescue, and the REX7 frame-local absorb — and it runs after the last callback that can rewrite the frame's classification and before the journal decision.
+  Put a new frame-exit settlement there, not in a lifecycle hook on either side of it.
+  The pops stay in `before_frame_return_result`: the paths that reach a caller without ever running a frame would double-pop.
 - Synthetic frame results still require empty-frame pushes for stack alignment.
 - Gas rescue must exclude any system-granted stipend gas.
 - Revert paths must roll back discardable usage for data/KV/state growth trackers.
@@ -26,6 +29,7 @@ Resource metering subsystem for transaction and frame limits across compute gas,
 - Do not encode frame-local exceeds as halts.
 - They must be reverts with bounded payload.
 - Do not read tracker totals after an exceeded-limit revert path unless using tracker-owned finalized APIs.
+- Do not run a fresh `check_limit()` inside `finalize_frame`: a per-frame exceed is defined by the frame's usage weighed against its *caller's* budget after the merge, which is only answerable once the frame is back with its caller.
 - Avoid duplicating limit checks inside opcode handlers when the tracker already enforces the same dimension.
 
 ## WHERE TO LOOK

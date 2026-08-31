@@ -450,6 +450,19 @@ The rule admits no exception: the keyless-deploy dispatch path rescues on the sa
 Rescue is specific to a transaction-level exceed.
 A frame-local exceed needs none: the frame reverts and its unspent gas returns to the parent through ordinary frame accounting.
 
+Through Rex6, the frame's state does not follow that revert.
+A node commits or reverts a frame's journal checkpoint from the frame's instruction result when the frame's action is processed, which is before the frame-local rewrite reaches the result; a frame that ran to a successful exit therefore reports the revert over state that stays committed.
+
+<details>
+<summary>Rex7 (unstable): the frame's state follows its final result</summary>
+
+Under Rex7, a node MUST decide a frame's journal outcome from the frame's final result — the result after every settlement and every rewrite the node applies at that frame's exit — so a frame that reports a revert has reverted.
+
+The rule reaches every exceed the frame itself latched while it ran.
+It does not reach one first detected on the way out to the caller, which weighs the frame's usage against the caller's budget after the merge and is therefore only answerable once the frame is back with its caller; that one is absorbed there, as on every spec.
+
+</details>
+
 When a `CALL`-family or `CREATE` / `CREATE2` opcode fails on a compute-gas exceed — the frame-local revert and the transaction-level halt alike — its pending child frame is discarded before the child runs.
 A node MUST return the gas already forwarded to that discarded child to the frame before it terminates, so that gas is not charged as consumed: on a frame-local revert it returns to the parent frame, and on a transaction-level halt it is excluded from the transaction's `gas_used`.
 

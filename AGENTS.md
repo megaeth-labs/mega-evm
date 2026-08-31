@@ -119,9 +119,9 @@ MegaETH separates EVM gas into two independent dimensions tracked during executi
   Through REX6 every opcode's gas consumption is recorded via wrapped instructions in `evm/instructions.rs` — `compute_gas_ext::*` for plain opcodes and `storage_gas_ext::*` for storage-affecting opcodes (SSTORE, LOG, CALL-family, CREATE/CREATE2, SELFDESTRUCT) — both invoking the shared `record_storage_compute_gas!` primitive after the opcode body completes.
   REX7 settles compute gas at checkpoints (storage-gas opcodes, CALL/CREATE family, volatile opcodes, `GAS`, frame entry/resume/exit) rather than after every plain opcode, and enforces limits inside plain segments with a gas clamp.
   A REX7 frame that ends in an exceptional halt splits its remaining budget: the work it performed before failing settles through the ordinary enforcing path, while the remainder it destroyed goes into a lane of `ComputeGasTracker` that the reported total and block accounting include but no limit comparison sees — destroyed gas is not work performed, and enforcing it would turn an EVM halt into a resource-limit failure with the gas rescued.
-  The destroyed half is read from the frame's final result after action processing, so revm's post-action create rejects are covered; storage gas a checkpoint body charged before aborting belongs to neither half.
+  The destroyed half is read from the frame's final result at `AdditionalLimit::finalize_frame`, so revm's create-return rejects and any rewrite an inspector's last callback made are both covered; storage gas a checkpoint body charged before aborting belongs to neither half.
   A precompile that fails never becomes a child EVM frame, so the same split is taken at the precompile recording site: executed work (the KZG fixed fee when verification ran; zero when the input was rejected before any work) enforces, and the unused caller-supplied envelope — including any REX5 forwarded-gas cap gap — is destroyed.
-  A frame init that refuses to build a frame at all is settled in `after_frame_init`, driven by the same classification: a halting refusal (a CREATE onto an occupied address) has its whole child budget destroyed, a returning or reverting one books nothing because the caller gets the budget back, and a precompile result is excluded there because its own recording site already booked both halves.
+  A frame init that refuses to build a frame at all is settled at the same point, driven by the same classification: a halting refusal (a CREATE onto an occupied address) has its whole child budget destroyed, a returning or reverting one books nothing because the caller gets the budget back, and a precompile result is excluded there because its own recording site already booked both halves.
   The split crosses the transaction boundary: `MegaTransactionOutcome` carries the destroyed part and the enforced part alongside the reported total, and `BlockLimiter` keeps `block_compute_gas_used` (reported) separate from `block_compute_gas_enforced` (the counter block admission compares).
   The destroyed part a transaction _reports_ is not the sum of those per-site bookings: `MegaHandler::last_frame_result` derives it once, from a conservation law over the envelope — `destroyed = spent + minted_call_stipend + inspector_conjured_gas − non_compute_gas − enforced_compute_gas` — and the per-site bookings stay as the enforcement split and as the `debug_assert` cross-check that the two agree.
   The derived number is reported and nothing else: the block's enforced counter accumulates `MegaTransactionOutcome::compute_gas_enforced`, read from `AdditionalLimit::enforced_compute_gas` (the per-site lane), rather than subtracting the reported destroyed total, so a missing term in the law misreports a statistic instead of repacking blocks.
@@ -129,6 +129,7 @@ MegaETH separates EVM gas into two independent dimensions tracked during executi
   `inspector_conjured_gas` is the same kind of correction for a producer outside the EVM: `MegaEvm` wraps every inspector it is handed in `MeasuredInspector`, which snapshots the interpreter's gas counter and a frame input's `gas_limit` across each callback and books the difference into `AdditionalLimit::inspector_ledger` — the EVM does not execute inside a callback, so anything that moves across one is the inspector's.
   Gas an inspector writes in was never debited from the transaction's envelope, so without the term the derivation reads such a transaction as having spent less than it did and can go negative; the term is zero for every uninspected transaction and every observation-only inspector.
   The same booking site shifts the checkpoint baseline and re-derives the gas clamp, so an inspector's edit never enters the compute measurement and never buys compute headroom.
+  An edit to a frame *result*'s gas is booked instead from `finalize_frame`, because whether it moves the envelope at all depends on how the frame ends: a returning or reverting frame's remainder goes back to its caller and the edit is booked, a halting one's does not and the destroyed remainder is taken on the EVM's own number.
   Subject to a per-spec compute gas limit and further restricted by gas detention (see below).
 - **Storage gas**: Charges for persistent state modifications (SSTORE, account creation, contract deployment).
   These costs scale dynamically with SALT bucket capacity (see External Environment Dependencies below).
@@ -136,6 +137,15 @@ MegaETH separates EVM gas into two independent dimensions tracked during executi
 
 Both dimensions are enforced independently.
 A transaction can be halted by exceeding either limit.
+
+#### Frame Lifecycle and the Single Settlement Point
+
+revm assembles a frame's result, decides its journal checkpoint and — for a contract creation — runs the deposit predicates and writes the code all inside `EthFrame::process_next_action`, and runs the inspector's last mutating callback after that function returns.
+`evm/frame.rs` splits it: `classify_frame_action` decides what the frame's result is and records the journal decision it reached as a `FrameJournalVerdict`; `commit_frame_journal` carries that decision out.
+Between the two run the frozen post-action charge, the inspector's `frame_end`, and `AdditionalLimit::finalize_frame` — the single point a frame's outcome is settled (final classification, executed/destroyed split, frame-init refusal booking, gas rescue, and the REX7 frame-local absorb).
+Under REX7 the journal decision is taken after that settlement, so a frame's state agrees with the result its caller is handed; frozen specs take it where revm does, right after the classification, because what they replay includes the state a frame leaves behind when a later rewrite fails it.
+Both frame loops (`frame_run` / `inspect_frame_run`) and both frame-init paths (`frame_init` / `inspect_frame_init`) run the same bodies; the inspected copies add exactly one thing, the callback that can rewrite a frame's classification.
+`classify_frame_action` and `commit_frame_journal` together are a re-ordering of upstream code with no type-level tie to it, so a revm bump has to re-audit them; the debug assertion in `classify_create_return` catches only the one drift class it names.
 
 #### Multidimensional Resource Limits
 
@@ -223,6 +233,7 @@ The following paths are common sources of leakage:
    Any per-frame gas adjustment applied in `before_frame_init` is skipped on this path.
    The `push_empty_frame()` call maintains stack alignment but does not apply adjustments.
    Synthetic results must not assume any per-frame gas mechanism was applied.
+   Such a result does reach `finalize_frame`, as `FrameExit::RefusedSynthetically`: under REX7 its envelope is settled like any other refusal's, while frozen specs leave it alone.
 2. **Gas rescue on TX-level limit exceed** (`limit/limit.rs`): When a transaction-level resource limit is exceeded, `rescue_gas` captures remaining gas for sender refund.
    If a frame's gas was inflated by a per-frame mechanism, the rescued amount must exclude the inflated portion — otherwise the sender recovers system-granted gas that should have been burned.
 3. **Frame return** (`limit/limit.rs`): `before_frame_return_result` is the final hook before gas is returned to the parent.
@@ -322,7 +333,8 @@ When the agent is requested to implement a new feature or bug fix, it should con
   For instruction-count deltas across a PR, use the CodSpeed report posted on the PR rather than local wall-clock numbers.
 - **Re-run the destroyed-gas conservation scan after a revm / alloy-evm upgrade.**
   The REX7 destroyed total is derived from the envelope, so any upstream change that moves gas without a MegaETH site recording it — a new minted subsidy like `CALL_STIPEND`, a changed refund or floor ordering, a new component of `total_gas_spent` — becomes a missing term in the law rather than a compile error.
-  After bumping revm or alloy-evm, run `cargo test -p mega-evm` and `cargo test -p mega-state-test -p state-test` (the `debug_assert` cross-check is live in debug builds) plus the replay fixtures under the latest spec (`cargo run -p state-test -- --bench --bench-spec <LatestSpec> bench/replay/fixtures`), whose own `post` expectations pin an older spec and would otherwise give the derivation no coverage.
+  The frame-lifecycle mirror in `evm/frame.rs` is the same kind of exposure in the other direction: it is a re-ordering of `EthFrame::process_next_action` and `return_create`, so an upstream change to either becomes a silent divergence rather than a compile error.
+  After bumping revm or alloy-evm, diff those two upstream functions against `evm/frame.rs`, then run `cargo test -p mega-evm` and `cargo test -p mega-state-test -p state-test` (the `debug_assert` cross-check is live in debug builds) plus the replay fixtures under the latest spec (`cargo run -p state-test -- --bench --bench-spec <LatestSpec> bench/replay/fixtures`), whose own `post` expectations pin an older spec and would otherwise give the derivation no coverage.
 - **Use `test_` prefix for Rust test function names.**
   New `#[test]` functions should be named with a `test_` prefix for consistency with this repository and upstream revm style.
   If editing nearby tests in the same module, align names to the same `test_` style when reasonable.
