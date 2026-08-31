@@ -1850,9 +1850,12 @@ where
 
         // Normal path - delegate to the shared frame-init body (which pushes a real frame).
         let frame_input = frame_init.frame_input.clone();
+        let logs_before_init = ctx.journal().logs().len();
         let (init_result, exit) = self.init_frame_unsettled(frame_init)?;
         if let ItemOrResult::Result(mut output) = init_result {
             let (ctx, inspector) = self.ctx_inspector();
+
+            forward_precompile_logs(ctx, inspector, logs_before_init, &output);
 
             let gas_before_callback = output.gas().remaining();
             frame_end(ctx, inspector, &frame_input, &mut output);
@@ -1910,6 +1913,43 @@ where
         Ok(Self::settle_and_commit_frame(ctx, frame, action, |ctx, frame_input, frame_result| {
             frame_end(ctx, inspector, frame_input, frame_result);
         }))
+    }
+}
+
+/// Hands an inspector the logs a precompile emitted, which no other callback would show it.
+///
+/// A precompile is dispatched inside the frame init and comes back as a result rather than a
+/// frame, so nothing it emits passes through the instruction loop's `log` callback. Its logs reach
+/// an inspector through here or not at all — which is how revm's own inspected frame init treats
+/// them, and matching that is the point: an inspector's view of a transaction should not depend on
+/// whether `MegaETH` or revm assembled the frame init around it.
+///
+/// A rejected precompile's logs are the ones the journal has already rolled back, so the outcome
+/// carries them separately; a successful one's are still on the journal, past the mark taken
+/// before the frame init ran.
+///
+/// No precompile `MegaETH` registers emits a log, so this forwards nothing today. It is here for
+/// the same reason the log strip in `execution_result` is: one that does would otherwise change
+/// what an inspector sees, silently and in the direction of showing less.
+#[inline]
+fn forward_precompile_logs<DB: Database, ExtEnvs: ExternalEnvTypes, INSP>(
+    ctx: &mut MegaContext<DB, ExtEnvs>,
+    inspector: &mut INSP,
+    logs_before_init: usize,
+    output: &FrameResult,
+) where
+    INSP: Inspector<MegaContext<DB, ExtEnvs>>,
+{
+    let FrameResult::Call(CallOutcome { was_precompile_called, precompile_call_logs, .. }) = output
+    else {
+        return;
+    };
+    if !*was_precompile_called {
+        return;
+    }
+    let journalled = ctx.journal_mut().logs()[logs_before_init..].to_vec();
+    for log in journalled.into_iter().chain(precompile_call_logs.iter().cloned()) {
+        inspector.log(ctx, log);
     }
 }
 
@@ -1978,7 +2018,7 @@ mod mutation_tests {
         test_utils::MemoryDatabase, AdditionalLimit, EmptyExternalEnv, EvmTxRuntimeLimits,
         LimitCheck, LimitKind,
     };
-    use alloy_primitives::Address;
+    use alloy_primitives::{Address, Log};
     use revm::{
         context::ContextTr,
         inspector::InspectorEvmTr,
@@ -2095,6 +2135,88 @@ mod mutation_tests {
             panic!("depth guard must override the inspector result");
         };
         consume_synthetic_limit_frame(evm.ctx_ref(), result);
+    }
+
+    /// Counts every log the inspector is handed, and nothing else.
+    #[derive(Default)]
+    struct LogCountingInspector {
+        logs: Vec<Log>,
+    }
+
+    impl<CTX: ContextTr, INTR: InterpreterTypes> Inspector<CTX, INTR> for LogCountingInspector {
+        fn log(&mut self, _context: &mut CTX, log: Log) {
+            self.logs.push(log);
+        }
+    }
+
+    fn precompile_outcome(journalled: bool) -> FrameResult {
+        let log = Log::new_unchecked(Address::ZERO, Vec::new(), Bytes::from_static(b"emitted"));
+        FrameResult::Call(CallOutcome {
+            result: InterpreterResult::new(
+                InstructionResult::Return,
+                Bytes::new(),
+                Gas::new(TEST_GAS_LIMIT),
+            ),
+            memory_offset: 0..0,
+            was_precompile_called: true,
+            precompile_call_logs: if journalled { Vec::new() } else { vec![log] },
+            charged_new_account_state_gas: false,
+        })
+    }
+
+    /// A precompile's logs never reach the instruction loop, so unless the frame init forwards
+    /// them an inspector simply does not see them. Both of the places they can be — still on the
+    /// journal for a precompile that succeeded, carried on the outcome for one whose frame was
+    /// rolled back — have to be forwarded, and in that order.
+    #[test]
+    fn test_precompile_logs_reach_the_inspector_from_both_places_they_live() {
+        for journalled in [false, true] {
+            let mut context = MegaContext::new(MemoryDatabase::default(), MegaSpecId::REX7);
+            let logs_before = context.journal_mut().logs().len();
+            if journalled {
+                context.journal_mut().log(Log::new_unchecked(
+                    Address::ZERO,
+                    Vec::new(),
+                    Bytes::from_static(b"emitted"),
+                ));
+            }
+            let mut inspector = LogCountingInspector::default();
+
+            forward_precompile_logs(
+                &mut context,
+                &mut inspector,
+                logs_before,
+                &precompile_outcome(journalled),
+            );
+
+            assert_eq!(
+                inspector.logs.len(),
+                1,
+                "the precompile's log must reach the inspector (journalled: {journalled})",
+            );
+            assert_eq!(inspector.logs[0].data.data, Bytes::from_static(b"emitted"));
+        }
+    }
+
+    /// Nothing else in a frame init is a precompile, and forwarding a call frame's journal tail
+    /// would replay logs the instruction loop already showed.
+    #[test]
+    fn test_a_non_precompile_frame_init_result_forwards_nothing() {
+        let mut context = MegaContext::new(MemoryDatabase::default(), MegaSpecId::REX7);
+        context.journal_mut().log(Log::new_unchecked(
+            Address::ZERO,
+            Vec::new(),
+            Bytes::from_static(b"emitted"),
+        ));
+        let mut inspector = LogCountingInspector::default();
+
+        let mut outcome = precompile_outcome(true);
+        let FrameResult::Call(call) = &mut outcome else { unreachable!() };
+        call.was_precompile_called = false;
+
+        forward_precompile_logs(&mut context, &mut inspector, 0, &outcome);
+
+        assert!(inspector.logs.is_empty(), "a plain frame-init result forwards nothing");
     }
 
     /// Drives [`MegaHandler::before_execution`] straight at its short-circuit: a transaction whose
