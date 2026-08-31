@@ -35,10 +35,12 @@ pub struct MegaTransactionOutcome {
     /// to accumulate into block-level compute accounting; it is not the number to compare against
     /// a limit — see [`compute_gas_destroyed`](Self::compute_gas_destroyed).
     ///
-    /// These two fields are the uninspected execution's split.
-    /// An inspector that rewrites a frame result or edits the interpreter gas counter will make
-    /// them diverge from that path: the burn split is settled before `frame_end`, and the
-    /// plain-segment delta is read from the interpreter counter.
+    /// These two fields are the uninspected execution's split, and an observation-only inspector
+    /// leaves them exactly there. An inspector's edits to interpreter gas counters and to frame
+    /// gas limits are measured at the callback boundary and kept out of the split — see
+    /// [`InspectorLedger`](crate::InspectorLedger) — but one that rewrites a frame *result*, in
+    /// `call_end` or `create_end`, still moves them: the burn split is settled before those
+    /// callbacks run.
     pub compute_gas_used: u64,
     /// The part of [`compute_gas_used`](Self::compute_gas_used) the transaction destroyed rather
     /// than performed (Rex7+, always 0 before).
@@ -62,7 +64,7 @@ pub struct MegaTransactionOutcome {
     /// itself rather than out of this subtraction.
     ///
     /// Same inspector caveat as [`compute_gas_used`](Self::compute_gas_used): the field is the
-    /// uninspected split, and a rewriting inspector will move it.
+    /// uninspected split, and an inspector that rewrites a frame result will move it.
     pub compute_gas_destroyed: u64,
     /// The part of [`compute_gas_used`](Self::compute_gas_used) every compute-gas limit is
     /// evaluated against: the work the transaction performed, with Rex7+ destroyed remainders left

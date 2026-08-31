@@ -104,8 +104,9 @@ fn frame_input_gas_limit(frame_input: &FrameInput) -> Option<u64> {
 /// frame.
 ///
 /// `intercepted` is true when the callback returned a synthetic outcome: the frame is skipped
-/// entirely and the inputs it edited are dropped unread, so no edit of theirs can move the
-/// transaction's envelope.
+/// entirely and the EVM never reads the inputs it edited, so the edit by itself moves nothing. Gas
+/// the inspector then puts into that synthetic outcome travels through the result lane, which this
+/// lane deliberately does not cover — see [`InspectorLedger::env`](crate::InspectorLedger::env).
 #[inline]
 fn book_env_adjustment<DB: Database, ExtEnvs: ExternalEnvTypes>(
     context: &MegaContext<DB, ExtEnvs>,

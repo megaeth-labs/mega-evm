@@ -21,9 +21,15 @@ MegaEVM execution core that wraps revm/op-revm with MegaETH instruction tables, 
 - Oracle `sload` handling forces cold semantics for deterministic replay.
 - `MegaEvm` methods read aggregate resource usage from `additional_limit` after execution.
 - Keep inspector and non-inspector paths behaviorally aligned.
-  That alignment assumes the inspector does not rewrite a frame result and does not edit the interpreter gas counter.
-  A rewriting inspector — one that changes `CallOutcome` / `CreateOutcome` in `call_end` / `create_end`, or that spends or refunds interpreter gas in `step` / `step_end` — will make REX7 compute accounting diverge: the exceptional-halt burn split is settled before `frame_end`, and the plain-segment delta is measured from the interpreter counter, so either edit moves the reported `compute_gas_used` / `compute_gas_destroyed` off the uninspected path.
-  Observational inspectors (`NoOpInspector`, tracers that only read) stay aligned.
+  Observational inspectors (`NoOpInspector`, tracers that only read) are bit-identical to no inspector at all, and must stay so.
+- Every inspector is wrapped in `MeasuredInspector` (`inspector.rs`) before it reaches the inner EVM; the public accessors hand the unwrapped one back, so the type a caller names is unchanged.
+  The shim snapshots the interpreter's gas counter and a frame input's `gas_limit` across each callback and books the difference — the EVM does not execute inside a callback, so anything that moves across one is the inspector's.
+  A gas-counter edit is kept out of REX7 compute accounting (the checkpoint baseline is shifted by it) and out of the compute headroom (the gas clamp is re-derived immediately).
+  A raised frame `gas_limit` is booked as conjured gas so the destroyed-remainder derivation still balances.
+  Add the shim's counterpart when adding an `Inspector` callback: an unwrapped callback is an unmeasured hole, not a compile error.
+- What the shim does **not** yet cover, because the answer depends on a frame's final classification and that is not settled until after the last mutating callback: a `call_end` / `create_end` that rewrites a frame result's gas or its classification, and the gas an intercepting callback puts into a synthetic outcome.
+  Those still move REX7 accounting off the uninspected path, and a large enough move trips the conservation `debug_assert`.
+  One shape is refused outright rather than left to diverge: a `create_end` (or the `frame_end` after it) turning a failed creation into a successful one — see `reject_forbidden_create_rewrite`.
 
 ## WHERE TO LOOK
 - New spec opcode delta: `instructions.rs` (`mini_rex`, `rex`, `rex2`, `rex3`, `rex4`, `rex5`, `rex6`, `rex7` tables; `rex6` still aliases `rex5` and expresses its deltas as `is_enabled` dispatch inside the shared handlers; `rex7` is a standalone checkpoint table built from revm's base table, with the 17 storage / CALL / CREATE / SELFDESTRUCT / not-yet-activated slots inherited from `rex6`, and with 15 volatile `*_checkpoint` handlers plus `gas_checkpoint` registered as rex7-only).

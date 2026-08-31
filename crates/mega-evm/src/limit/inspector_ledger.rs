@@ -58,14 +58,20 @@ pub struct InspectorLedger {
     /// the caller paid for and no frame ever receives.
     ///
     /// Only adjustments that actually reach a frame are booked. When the callback returns a
-    /// synthetic outcome it has intercepted the frame entirely and the inputs it edited are
-    /// discarded, so nothing about them can move the envelope.
+    /// synthetic outcome it has intercepted the frame entirely, and the EVM never reads the inputs
+    /// it edited — so the edit by itself moves nothing. (The inspector can of course read its own
+    /// edit back and size the synthetic outcome from it. That gas travels through the result lane
+    /// below, not through this one.)
     ///
-    /// Adjustments to a frame's *result* gas — `call_end` calling `spend_all`, say — are
-    /// deliberately not booked here. Whether such an edit moves the transaction's envelope at all
-    /// depends on the frame's final classification (a caller reclaims a returning frame's
-    /// remaining gas and ignores a halting one's), and that classification is not final until
-    /// after the last mutating callback. Booking the edit before then would be a guess.
+    /// Adjustments to a frame's *result* gas — `call_end` calling `spend_all`, an intercepting
+    /// callback handing back an outcome wider than what it was given — are deliberately not booked
+    /// here. Whether such an edit moves the transaction's envelope at all depends on the frame's
+    /// final classification (a caller reclaims a returning frame's remaining gas and ignores a
+    /// halting one's), and that classification is not final until after the last mutating
+    /// callback. Booking the edit before then would be a guess. Until the frame lifecycle grows a
+    /// settlement point past that callback, a result-rewriting inspector can still move REX7
+    /// accounting off the uninspected path, and a large enough move trips the conservation
+    /// `debug_assert`.
     pub env: i128,
 
     /// How many rewrites the shim refused because their shape is forbidden.
