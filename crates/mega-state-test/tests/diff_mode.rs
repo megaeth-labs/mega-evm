@@ -12,10 +12,16 @@ use state_test::{
         collect_fixture_files, compare, diff_test_suite, diff_unit, execute_unit_outcome, judge,
         run_diff, DiffClass, DiffRunConfig, DiffSpecs, Mechanism, SpecOutcome,
     },
-    runner::{fill_test_suite, fill_test_suite_keep_going, FixtureScan, UnitStatus},
+    runner::{
+        execute_test_suite, fill_test_suite, fill_test_suite_keep_going, FixtureScan, UnitStatus,
+    },
     types::{SpecName, TestUnit, TxPartIndices},
 };
-use std::path::PathBuf;
+use std::{
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 const SENDER: &str = "0x1000000000000000000000000000000000000001";
 const CALLEE: &str = "0x2000000000000000000000000000000000000002";
@@ -362,7 +368,7 @@ fn test_fill_records_one_expectation_per_vector() {
     let path = write_suite("fill_two_vectors.json", &[("family", two_vector_json())]);
     let report =
         fill_test_suite_keep_going(&path, Some(SpecName::Rex7), true).expect("fill the file");
-    assert_eq!(report.filled(), 1);
+    assert_eq!(report.filled(), 2, "the tally counts vectors, and this unit declares two");
 
     let written: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&path).expect("read")).expect("json");
@@ -374,6 +380,122 @@ fn test_fill_records_one_expectation_per_vector() {
         post[0]["megaGasUsed"], post[1]["megaGasUsed"],
         "each entry records its own vector's execution"
     );
+}
+
+/// `CALLDATACOPY(0, 0, CALLDATASIZE); RETURN(0, CALLDATASIZE)` — returns whatever it was called
+/// with, so two vectors that send different calldata produce different output.
+const ECHO_CALLDATA: &str = "0x366000600037366000f3";
+
+/// `MSTORE(0, 42); RETURN(0, 32)` — returns the same word whatever it was called with.
+const RETURN_CONSTANT: &str = "0x602a60005260206000f3";
+
+/// Re-runs validation over a fixture and returns how many expectations it checked.
+fn validate(path: &Path) -> usize {
+    let elapsed = Arc::new(Mutex::new(Duration::ZERO));
+    execute_test_suite(path, &elapsed, false, false).expect("the filled fixture self-validates")
+}
+
+/// [`two_vector_json`] with a chosen callee, so the two vectors' outputs can be made to agree or
+/// to differ.
+fn two_vector_json_with_callee(code: &str) -> serde_json::Value {
+    let mut json = two_vector_json();
+    json["pre"][CALLEE]["code"] = serde_json::json!(code);
+    json
+}
+
+// `out` is one field for the whole unit, and a multi-vector unit only has an output to record
+// when its vectors agree on one. Clearing it unconditionally drops an expectation the fixture was
+// entitled to — quietly, since the result still parses and still validates.
+#[test]
+fn test_fill_keeps_a_multi_vector_out_when_the_vectors_agree() {
+    let path = write_suite(
+        "fill_out_agree.json",
+        &[("family", two_vector_json_with_callee(RETURN_CONSTANT))],
+    );
+    let report =
+        fill_test_suite_keep_going(&path, Some(SpecName::Rex7), true).expect("fill the file");
+    assert_eq!(report.filled(), 2);
+
+    let written: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).expect("read")).expect("json");
+    assert_eq!(
+        written["family"]["out"],
+        serde_json::json!("0x000000000000000000000000000000000000000000000000000000000000002a"),
+        "both vectors return that word, so the unit has one output: {written}"
+    );
+    // And the recorded output is checked, rather than merely stored.
+    assert_eq!(validate(&path), 2);
+}
+
+// The other half: vectors that return different outputs have no `out` this schema can express.
+// Recording one vector's output would assert it for every vector, and per-vector output is a
+// schema change, so the unit is refused with a reason instead of filled with a claim.
+#[test]
+fn test_fill_refuses_a_multi_vector_unit_whose_outputs_disagree() {
+    let unit = two_vector_json_with_callee(ECHO_CALLDATA);
+    let path = write_suite("fill_out_disagree.json", &[("family", unit)]);
+    let before = std::fs::read_to_string(&path).expect("read");
+
+    let report =
+        fill_test_suite_keep_going(&path, Some(SpecName::Rex7), true).expect("fill the file");
+    assert_eq!(report.filled(), 0, "{:?}", report.vectors);
+    assert_eq!(report.failed(), 2, "the refusal covers every vector of the unit");
+    for vector in &report.vectors {
+        let message = vector.status.message().expect("a refused vector carries its reason");
+        assert!(
+            message.contains("different output"),
+            "the reason should name what could not be recorded: {message}"
+        );
+    }
+    assert_eq!(std::fs::read_to_string(&path).expect("read"), before, "file must be untouched");
+}
+
+// Fill and diff sweep the same corpus and print a total each. Counting units in one and vectors in
+// the other makes those totals disagree over any multi-vector fixture — and a tally that cannot be
+// compared against the other mode's, or against a baseline taken under the other mode, is a number
+// nobody can act on.
+#[test]
+fn test_fill_and_diff_count_the_same_vectors() {
+    let units = [
+        ("family", two_vector_json()),
+        ("single", unit_json("0x", None)),
+        ("another_family", two_vector_json()),
+    ];
+    let path = write_suite("count_parity.json", &units);
+
+    let diffs = diff_test_suite(&path, rex7_over_rex6(), true).expect("diff suite");
+    let report =
+        fill_test_suite_keep_going(&path, Some(SpecName::Rex7), true).expect("fill the file");
+
+    assert_eq!(report.vectors.len(), 5, "two units of two vectors and one of one");
+    assert_eq!(report.vectors.len(), diffs.len(), "the two modes count the same things");
+
+    let mut filled: Vec<&str> = report.vectors.iter().map(|v| v.name.as_str()).collect();
+    let mut judged: Vec<&str> = diffs.iter().map(|d| d.name.as_str()).collect();
+    filled.sort_unstable();
+    judged.sort_unstable();
+    assert_eq!(filled, judged, "and name them the same way");
+}
+
+// Every pair but one is refused at construction, and the constructor is the only way to build the
+// value: the fields it validates are private, which this file — compiled as a consumer of the
+// crate — can only observe through the accessors. The compile-time half of that is pinned by the
+// `compile_fail` example on `DiffSpecs`.
+#[test]
+fn test_diff_specs_is_only_reachable_through_its_constructor() {
+    let (target, base) = DiffSpecs::SUPPORTED;
+    let specs = DiffSpecs::new(target, base).expect("the supported pair");
+    assert_eq!((specs.target(), specs.base()), (SpecName::Rex7, SpecName::Rex6));
+
+    for (t, b) in [
+        (SpecName::Rex7, SpecName::Equivalence),
+        (SpecName::Rex6, SpecName::Rex5),
+        (SpecName::Rex6, SpecName::Rex7),
+        (SpecName::Rex7, SpecName::Rex7),
+    ] {
+        let err = DiffSpecs::new(t, b).expect_err("only one pair has an invariant");
+        assert!(err.contains("Rex7") && err.contains("Rex6"), "name the supported pair: {err}");
+    }
 }
 
 // Keep-going fill: one unit's failure must cost that unit, not the units after it in the same
@@ -397,7 +519,7 @@ fn test_keep_going_fill_isolates_one_unit_failure() {
     let report = fill_test_suite_keep_going(&path, Some(SpecName::Rex7), true).expect("fill");
     assert_eq!(report.filled(), 2);
     assert_eq!(report.failed(), 1);
-    let failed = report.units.iter().find(|u| !u.status.is_ok()).expect("one unit failed");
+    let failed = report.vectors.iter().find(|v| !v.status.is_ok()).expect("one vector failed");
     assert_eq!(failed.name, "b_broken");
     assert!(matches!(failed.status, UnitStatus::Error(_)), "{:?}", failed.status);
 

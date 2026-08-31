@@ -63,13 +63,95 @@ case "$MODE" in
 esac
 
 # `sha256sum` on Linux, `shasum -a 256` on macOS.
+if command -v sha256sum >/dev/null 2>&1; then
+  SHA256=(sha256sum)
+else
+  SHA256=(shasum -a 256)
+fi
 sha256_of() {
-  if command -v sha256sum >/dev/null 2>&1; then
-    sha256sum "$1" | cut -d' ' -f1
-  else
-    shasum -a 256 "$1" | cut -d' ' -f1
+  "${SHA256[@]}" "$1" | cut -d' ' -f1
+}
+
+# How long to wait for another run that is already unpacking this corpus, before giving up on the
+# shared tree and unpacking a private one. A full extraction is well under a minute; the override
+# is for the tests, and for a machine whose lock is known to be stale.
+LOCK_WAIT_SECS="${EEST_UNPACK_LOCK_WAIT_SECS:-900}"
+
+# Name of the manifest inside an unpacked tree. Excluded from its own listing.
+MANIFEST_NAME=".manifest"
+
+# Every file of an unpacked tree with its hash, in a byte-stable order.
+corpus_manifest() {
+  (cd "$1" && find . -type f ! -name "$MANIFEST_NAME" -print0 |
+    LC_ALL=C sort -z |
+    xargs -0 "${SHA256[@]}")
+}
+
+# The manifest covers regular files, which is everything the fixture archive holds. An entry of
+# any other kind is outside what it can speak for — a symlink is not hashed, so swapping its
+# target would leave the manifest matching — so such a tree is rejected rather than described.
+has_irregular_entry() {
+  [ -n "$(find "$1" ! -type d ! -type f -print -quit)" ]
+}
+
+# Whether a tree is exactly what this archive unpacks to: the manifest names this archive, and
+# every file in the tree still hashes to what the manifest recorded — with no file added, removed
+# or rewritten since. This is what the sweep's coverage rests on, so it is re-derived from the
+# bytes on every run rather than trusted from a marker a previous run left behind.
+corpus_is_intact() {
+  local root="$1" manifest="$1/$MANIFEST_NAME" actual status
+  [ -f "$manifest" ] || return 1
+  [ "$(head -n 1 "$manifest")" = "archive-sha256 $EEST_SHA256" ] || return 1
+  has_irregular_entry "$root" && return 1
+  actual="$(mktemp)"
+  if ! corpus_manifest "$root" >"$actual" 2>/dev/null; then
+    rm -f "$actual"
+    return 1
+  fi
+  status=0
+  tail -n +2 "$manifest" | cmp -s - "$actual" || status=1
+  rm -f "$actual"
+  return "$status"
+}
+
+# Unpack the archive into $1, manifest and all, via a scratch directory and one rename: the
+# destination either does not exist or holds a tree this function extracted whole.
+unpack_corpus() {
+  local dest="$1" stage="$CACHE_DIR/.unpack.$$"
+  rm -rf "$stage"
+  mkdir -p "$stage"
+  # Only `state_tests` is unpacked: the runner reads the state-test format, and the archive's
+  # blockchain-test subtrees are several times larger.
+  tar -xzf "$ARCHIVE" -C "$stage" --strip-components=1 fixtures/state_tests
+  if has_irregular_entry "$stage/state_tests"; then
+    echo "the archive unpacks to something other than a tree of regular files, which the corpus" >&2
+    echo "manifest cannot describe; teach corpus_manifest about it before sweeping." >&2
+    exit 1
+  fi
+  {
+    echo "archive-sha256 $EEST_SHA256"
+    corpus_manifest "$stage/state_tests"
+  } >"$stage/state_tests/$MANIFEST_NAME"
+  mkdir -p "$(dirname "$dest")"
+  rm -rf "$dest"
+  mv "$stage/state_tests" "$dest"
+  rm -rf "$stage"
+}
+
+# The unpack lock and any private tree this run extracted, released however the run ends.
+UNPACK_LOCK=""
+LOCK_HELD=0
+PRIVATE_ROOT=""
+cleanup() {
+  if [ "$LOCK_HELD" -eq 1 ]; then
+    rm -rf "$UNPACK_LOCK"
+    LOCK_HELD=0
+  fi
+  if [ -n "$PRIVATE_ROOT" ]; then
+    rm -rf "$PRIVATE_ROOT"
   fi
 }
+trap cleanup EXIT
 
 mkdir -p "$REPORT_DIR"
 
@@ -99,27 +181,45 @@ if [ -z "$CORPUS_DIR" ]; then
   echo "==> corpus hash verified: $EEST_SHA256"
 
   CORPUS_DIR="$CACHE_DIR/$EEST_RELEASE/state_tests"
-  # A tree is reusable only if the run that produced it finished. Unpacking straight into the
-  # final path leaves a half-extracted tree behind on any interruption — a cancelled job, a full
-  # disk, a cache saved mid-write — and the next run finds a directory that exists, sweeps a
-  # fraction of the corpus, and reports a clean tally over it. The stamp is written last and names
-  # the archive hash, so it is a claim only a completed extraction of *this* archive can make.
-  STAMP="$CORPUS_DIR/.unpacked"
-  if [ ! -f "$STAMP" ] || [ "$(cat "$STAMP" 2>/dev/null)" != "$EEST_SHA256" ]; then
-    echo "==> unpacking state_tests"
-    rm -rf "$CORPUS_DIR"
-    # Extract into a scratch directory and move it into place in one step: the final path either
-    # does not exist or holds a complete tree, never a partial one.
-    STAGE="$CACHE_DIR/.unpack.$$"
-    rm -rf "$STAGE"
-    mkdir -p "$STAGE"
-    # Only `state_tests` is unpacked: the runner reads the state-test format, and the archive's
-    # blockchain-test subtrees are several times larger.
-    tar -xzf "$ARCHIVE" -C "$STAGE" --strip-components=1 fixtures/state_tests
-    printf '%s' "$EEST_SHA256" >"$STAGE/state_tests/.unpacked"
-    mkdir -p "$CACHE_DIR/$EEST_RELEASE"
-    mv "$STAGE/state_tests" "$CORPUS_DIR"
-    rm -rf "$STAGE"
+  # What the sweep reports is a statement about the corpus it read, so the tree it reads has to be
+  # the whole corpus and nothing else. A cached tree can be short of that in ways nothing about it
+  # announces: an extraction interrupted by a cancelled job or a full disk, a cache archived
+  # mid-write and restored intact, a stray edit under the cache directory. Each leaves a directory
+  # that exists, sweeps clean, and covers a fraction of what the tally claims.
+  #
+  # So a cached tree is re-verified against its own manifest — every file, hashed — before it is
+  # used, and discarded and re-extracted when it does not match.
+  if corpus_is_intact "$CORPUS_DIR"; then
+    echo "==> corpus tree verified against its manifest"
+  else
+    # Two runs sharing a cache directory would otherwise extract into the same destination at the
+    # same time, and the loser's rename lands inside the winner's tree. An atomic `mkdir` picks
+    # one producer; the other waits for it and, if the wait runs out, extracts a private tree
+    # rather than reaching into a directory a live process may still own.
+    UNPACK_LOCK="$CACHE_DIR/$EEST_RELEASE.unpack.lock"
+    mkdir -p "$CACHE_DIR"
+    if mkdir "$UNPACK_LOCK" 2>/dev/null; then
+      LOCK_HELD=1
+      echo "$$" >"$UNPACK_LOCK/pid" 2>/dev/null || true
+      echo "==> unpacking state_tests"
+      unpack_corpus "$CORPUS_DIR"
+      rm -rf "$UNPACK_LOCK"
+      LOCK_HELD=0
+    else
+      echo "==> another run is unpacking this corpus; waiting up to ${LOCK_WAIT_SECS}s"
+      WAITED=0
+      while [ -d "$UNPACK_LOCK" ] && [ "$WAITED" -lt "$LOCK_WAIT_SECS" ]; do
+        sleep 5
+        WAITED=$((WAITED + 5))
+      done
+      if ! corpus_is_intact "$CORPUS_DIR"; then
+        PRIVATE_ROOT="$CACHE_DIR/.private.$$"
+        echo "==> shared corpus is not usable; unpacking a private tree at $PRIVATE_ROOT"
+        echo "    (a lock left behind by a dead run is cleared by removing $UNPACK_LOCK)" >&2
+        unpack_corpus "$PRIVATE_ROOT/state_tests"
+        CORPUS_DIR="$PRIVATE_ROOT/state_tests"
+      fi
+    fi
   fi
 fi
 

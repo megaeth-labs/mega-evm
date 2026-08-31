@@ -473,6 +473,12 @@ pub(crate) fn resolve_chain_id(env: &Env) -> Result<u64, TestErrorKind> {
 
 /// Execute a single test suite file containing multiple tests
 ///
+/// Returns the number of *expectations judged*: one per `post` entry the file's units declare and
+/// this run actually checked. A unit is not itself a judgement — a `post` of `{}`, a `post` whose
+/// vectors are all empty, and a `post` naming only the skipped Constantinople spec each leave the
+/// unit walked and nothing about it verified. Counting units instead would report such a file as
+/// covered, which is the shape an empty corpus and a truncated one both have.
+///
 /// # Arguments
 /// * `path` - Path to the JSON test file
 /// * `elapsed` - Shared counter for total execution time
@@ -500,9 +506,8 @@ pub fn execute_test_suite(
         kind: e.into(),
     })?;
 
-    let mut units = 0usize;
+    let mut judged = 0usize;
     for (name, unit) in suite.0 {
-        units += 1;
         // Prepare initial state
         let cache_state = unit.state();
 
@@ -556,7 +561,12 @@ pub fn execute_test_suite(
                     Err(
                         TxBuildError::InvalidTransactionType |
                         TxBuildError::UnexpectedException { .. },
-                    ) if test.expect_exception.is_some() => continue,
+                    ) if test.expect_exception.is_some() => {
+                        // The fixture asked for this failure and got it: the expectation was
+                        // checked, even though nothing executed.
+                        judged += 1;
+                        continue;
+                    }
                     // Propagate the real underlying cause instead of masking
                     // every failure as an unknown private key.
                     Err(e) => {
@@ -601,10 +611,11 @@ pub fn execute_test_suite(
 
                     return Err(TestError { path, name, kind: e });
                 }
+                judged += 1;
             }
         }
     }
-    Ok(units)
+    Ok(judged)
 }
 
 /// Build the `MegaETH` external environment for a test unit, reproducing the
@@ -976,31 +987,38 @@ impl UnitStatus {
     }
 }
 
-/// What happened to one unit of a fixture file under a keep-going fill.
+/// What happened to one transaction vector of a fixture unit under a keep-going fill.
 #[derive(Debug, Clone)]
 pub struct UnitFillResult {
-    /// The unit's key in the fixture's test-suite map.
+    /// The unit's key in the fixture's test-suite map, suffixed with this vector's indexes when
+    /// the unit declares more than one (see [`vector_label`]).
     pub name: String,
-    /// Whether the unit filled, failed, or panicked.
+    /// The transaction vector this entry reports on.
+    pub indexes: TxPartIndices,
+    /// Whether the vector filled, failed, or panicked.
     pub status: UnitStatus,
 }
 
-/// Per-unit outcome of filling one fixture file with `keep_going` set.
+/// Per-vector outcome of filling one fixture file with `keep_going` set.
 #[derive(Debug, Clone, Default)]
 pub struct FillReport {
-    /// One entry per unit in the file, in the file's own order.
-    pub units: Vec<UnitFillResult>,
+    /// One entry per transaction vector of every unit in the file, in the file's own order.
+    ///
+    /// A vector rather than a unit, because a unit is a family of transactions and every other
+    /// mode judges each of them separately; counting units here would make a fill sweep and a
+    /// differential sweep report different totals over the same corpus.
+    pub vectors: Vec<UnitFillResult>,
 }
 
 impl FillReport {
-    /// Number of units whose `post` was recomputed and written.
+    /// Number of transaction vectors whose expectation was recomputed and written.
     pub fn filled(&self) -> usize {
-        self.units.iter().filter(|u| u.status.is_ok()).count()
+        self.vectors.iter().filter(|v| v.status.is_ok()).count()
     }
 
-    /// Number of units that failed or panicked and kept their original `post`.
+    /// Number of vectors that failed or panicked and kept their original expectation.
     pub fn failed(&self) -> usize {
-        self.units.len() - self.filled()
+        self.vectors.len() - self.filled()
     }
 }
 
@@ -1009,16 +1027,17 @@ impl FillReport {
 /// fixture that has no `post` yet (a hand-built or `prestateTracer`-snapshot
 /// case). It re-uses the same `execute_unit_collect` + [`Test::for_dump`] the
 /// dump path uses, so the result is a self-validating fixture that
-/// [`execute_test_suite`] checks like any other. Returns the number of units
-/// filled.
+/// [`execute_test_suite`] checks like any other. Returns the number of
+/// transaction vectors filled.
 ///
 /// `spec_override` selects the spec to execute/record under; when `None`, the
 /// unit's single existing `post` spec is used (so a fixture with an empty `post`
 /// must pass a spec).
 ///
-/// Filling replaces the unit's entire `post` map (single spec, single index
-/// `{0,0,0}`) with circularly-derived expectations, so a unit that already has a
-/// non-empty `post` is refused unless `force` is set.
+/// Filling replaces the unit's entire `post` map (a single spec, one entry per
+/// transaction vector the unit declares) with circularly-derived expectations,
+/// so a unit that already has a non-empty `post` is refused unless `force` is
+/// set.
 ///
 /// The first unit that fails aborts the whole file. Use
 /// [`fill_test_suite_keep_going`] to fill the rest of a file whose units fail
@@ -1036,11 +1055,12 @@ pub fn fill_test_suite(
 /// aborting the file at the first one.
 ///
 /// A unit that fails or panics keeps its original `post` and is reported in the
-/// returned [`FillReport`]; the units that succeeded are still written. This is
-/// what lets a corpus sweep run a multi-unit fixture without splitting it into
-/// one file per unit first: an EEST fixture holds one unit per (test, fork)
-/// pair, and under a spec override the ones that the runner declines are
-/// exactly the ones a split sweep would have counted separately.
+/// returned [`FillReport`], one entry per transaction vector; the units that
+/// succeeded are still written. This is what lets a corpus sweep run a
+/// multi-unit fixture without splitting it into one file per unit first: an EEST
+/// fixture holds one unit per (test, fork) pair, and under a spec override the
+/// ones that the runner declines are exactly the ones a split sweep would have
+/// counted separately.
 ///
 /// Errors that belong to the *file* rather than to a unit — an unreadable or
 /// unparseable fixture, a filename on the validation skip list, a failed write —
@@ -1088,18 +1108,18 @@ fn fill_suite(
     let mut out = std::collections::BTreeMap::new();
     let mut any_filled = false;
     for (name, mut unit) in suite.0 {
-        match fill_unit(&mut unit, spec_override, force) {
-            Ok(()) => {
-                any_filled = true;
-                report.units.push(UnitFillResult { name: name.clone(), status: UnitStatus::Ok });
+        let results = fill_unit(&mut unit, spec_override, force);
+        // A unit's `post` is rewritten as a whole, so it either filled for every vector it
+        // declares or for none of them.
+        let multi = results.len() > 1;
+        any_filled |= results.iter().all(|(_, status)| status.is_ok());
+        for (indexes, status) in results {
+            if !keep_going && !status.is_ok() {
+                let detail = status.message().unwrap_or("failed");
+                return Err(fixture_err(format!("unit {name}: {detail}")));
             }
-            Err(status) => {
-                if !keep_going {
-                    let detail = status.message().unwrap_or("failed");
-                    return Err(fixture_err(format!("unit {name}: {detail}")));
-                }
-                report.units.push(UnitFillResult { name: name.clone(), status });
-            }
+            let label = if multi { vector_label(&name, indexes) } else { name.clone() };
+            report.vectors.push(UnitFillResult { name: label, indexes, status });
         }
         out.insert(name, unit);
     }
@@ -1120,7 +1140,13 @@ fn fill_suite(
     Ok(report)
 }
 
-/// Recompute one unit's `post` in place, or report why it could not be filled.
+/// Recompute one unit's `post` in place, or report why each of its vectors could not be filled.
+///
+/// Returns one entry per transaction vector the unit declares, in ascending vector order, so a
+/// caller's tally counts what every other mode counts. A unit's `post` map is rewritten in one
+/// step — writing only the vectors that succeeded would delete the expectations of the ones that
+/// did not — so a failure anywhere in the unit leaves all of its vectors unfilled, and each of
+/// them says so.
 ///
 /// Execution runs under [`panic_capture::catch`] so that a `debug_assert!` a
 /// single fixture trips is that fixture's result rather than the run's.
@@ -1128,11 +1154,15 @@ fn fill_unit(
     unit: &mut TestUnit,
     spec_override: Option<SpecName>,
     force: bool,
-) -> Result<(), UnitStatus> {
-    let err = |msg: String| UnitStatus::Error(msg);
+) -> Vec<(TxPartIndices, UnitStatus)> {
+    let vectors = unit.vectors();
+    // A reason the whole unit cannot be filled is a reason none of its vectors can.
+    let reject_all = |msg: &str| -> Vec<(TxPartIndices, UnitStatus)> {
+        vectors.iter().map(|&i| (i, UnitStatus::Error(msg.to_string()))).collect()
+    };
 
     if !force && unit.post.values().any(|tests| !tests.is_empty()) {
-        return Err(err("already has a post expectation; pass --force to overwrite".to_string()));
+        return reject_all("already has a post expectation; pass --force to overwrite");
     }
     let spec = match spec_override {
         Some(s) => s,
@@ -1140,45 +1170,66 @@ fn fill_unit(
             let mut specs = unit.post.keys();
             match (specs.next(), specs.next()) {
                 (Some(s), None) => *s,
-                _ => {
-                    return Err(
-                        err("has no single post spec; pass --bench-spec to fill".to_string()),
-                    )
-                }
+                _ => return reject_all("has no single post spec; pass --bench-spec to fill"),
             }
         }
     };
     // Reject an unmapped spec at selection time, so the error names the unit
     // instead of surfacing from deep inside execution.
     if spec == SpecName::Unknown {
-        return Err(err("selects an unknown spec; pass a valid --bench-spec".to_string()));
+        return reject_all("selects an unknown spec; pass a valid --bench-spec");
     }
     // Validation skips Constantinople (mirroring upstream revme), so a post
     // recorded under it would never be checked.
     if spec == SpecName::Constantinople {
-        return Err(err(
-            "validation skips Constantinople; a post filled under it would never be checked"
-                .to_string(),
-        ));
+        return reject_all(
+            "validation skips Constantinople; a post filled under it would never be checked",
+        );
     }
 
     // One expectation per vector the unit declares, each carrying its own `indexes`. Recording a
     // single `{0,0,0}` entry would delete the other vectors' expectations along with the tests
     // that used them, and `--force` — which exists to overwrite a stale expectation — would be
     // the one flag that makes the loss silent.
-    let vectors = unit.vectors();
-    let mut tests = Vec::with_capacity(vectors.len());
-    let mut outputs = Vec::with_capacity(vectors.len());
-    for indexes in vectors {
-        let executed = panic_capture::catch(|| execute_unit_collect(unit, indexes, &spec))
-            .map_err(UnitStatus::Panic)?
-            .map_err(|e| {
-                err(format!(
-                    "execute [d={},g={},v={}]: {e}",
-                    indexes.data, indexes.gas, indexes.value
-                ))
-            })?;
-        outputs.push(executed.output.clone());
+    //
+    // Every vector is executed even once one has failed: the verdict is per vector, and stopping
+    // at the first failure would leave the rest of them with none.
+    let mut runs = Vec::with_capacity(vectors.len());
+    for &indexes in &vectors {
+        let result = panic_capture::catch(|| execute_unit_collect(unit, indexes, &spec))
+            .map_err(UnitStatus::Panic)
+            .and_then(|r| {
+                r.map_err(|e| {
+                    UnitStatus::Error(format!(
+                        "execute [d={},g={},v={}]: {e}",
+                        indexes.data, indexes.gas, indexes.value
+                    ))
+                })
+            });
+        runs.push((indexes, result));
+    }
+    if runs.iter().any(|(_, r)| r.is_err()) {
+        return runs
+            .into_iter()
+            .map(|(indexes, result)| match result {
+                Err(status) => (indexes, status),
+                Ok(_) => (
+                    indexes,
+                    UnitStatus::Error(
+                        "not filled: another vector of this unit failed, and a unit's post is \
+                         written as a whole"
+                            .to_string(),
+                    ),
+                ),
+            })
+            .collect();
+    }
+
+    let mut tests = Vec::with_capacity(runs.len());
+    let mut outputs = Vec::with_capacity(runs.len());
+    for (indexes, result) in runs {
+        let executed = result.expect("every vector succeeded");
+        outputs.push(executed.output);
         tests.push(Test::for_dump(
             indexes,
             executed.state_root,
@@ -1188,16 +1239,22 @@ fn fill_unit(
         ));
     }
 
-    // `out` is one field for the whole unit, so it can only describe a unit that has one vector.
-    // For a multi-vector unit the per-vector outputs disagree in general; recording any one of
-    // them would assert it for all, so the field is cleared and the `post` entries carry the
-    // per-vector expectations instead.
-    unit.out = match outputs.as_slice() {
-        [single] => single.clone(),
-        _ => None,
-    };
+    // `out` is one field for the whole unit, so it can only describe an output every vector
+    // produced. Vectors that agree — the single-vector case, and a multi-vector unit whose
+    // variations do not change what the transaction returns — keep it. Vectors that disagree have
+    // no `out` this schema can express: recording one vector's output would assert it for all,
+    // and clearing the field would drop an expectation the fixture is entitled to. Per-vector
+    // output is a schema change, so the unit is refused instead.
+    let (first, rest) = outputs.split_first().expect("a unit declares at least one vector");
+    if !rest.iter().all(|output| output == first) {
+        return reject_all(
+            "vectors return different output, and `out` is one field for the whole unit; this \
+             fixture schema has no per-vector output to record",
+        );
+    }
+    unit.out = first.clone();
     unit.post = std::collections::BTreeMap::from([(spec, tests)]);
-    Ok(())
+    vectors.iter().map(|&i| (i, UnitStatus::Ok)).collect()
 }
 
 pub(crate) fn prune_base_fee_vault_changes(db: &mut State<EmptyDB>) {
@@ -1273,9 +1330,9 @@ impl TestRunnerConfig {
 #[derive(Clone)]
 struct TestRunnerState {
     n_errors: Arc<AtomicUsize>,
-    /// Fixture units the workers reached. A run that reached none validated nothing, however
-    /// many files it walked.
-    n_units: Arc<AtomicUsize>,
+    /// Expectations the workers actually checked, one per `post` entry judged. A run that checked
+    /// none validated nothing, however many files it walked and however many units they held.
+    n_judged: Arc<AtomicUsize>,
     console_bar: Arc<ProgressBar>,
     queue: Arc<Mutex<(usize, Vec<PathBuf>)>>,
     elapsed: Arc<Mutex<Duration>>,
@@ -1286,7 +1343,7 @@ impl TestRunnerState {
         let n_files = test_files.len();
         Self {
             n_errors: Arc::new(AtomicUsize::new(0)),
-            n_units: Arc::new(AtomicUsize::new(0)),
+            n_judged: Arc::new(AtomicUsize::new(0)),
             console_bar: Arc::new(ProgressBar::with_draw_target(
                 Some(n_files as u64),
                 ProgressDrawTarget::stdout(),
@@ -1321,8 +1378,8 @@ fn run_test_worker(state: TestRunnerState, config: TestRunnerConfig) -> Result<(
         state.console_bar.inc(1);
 
         match result {
-            Ok(units) => {
-                state.n_units.fetch_add(units, Ordering::SeqCst);
+            Ok(judged) => {
+                state.n_judged.fetch_add(judged, Ordering::SeqCst);
             }
             Err(err) => {
                 state.n_errors.fetch_add(1, Ordering::SeqCst);
@@ -1398,18 +1455,19 @@ pub fn run(
 
     let n_errors = state.n_errors.load(Ordering::SeqCst);
     let n_thread_errors = thread_errors.len();
-    let n_units = state.n_units.load(Ordering::SeqCst);
+    let n_judged = state.n_judged.load(Ordering::SeqCst);
 
-    // A run that reached no unit at all validated nothing, and "0 errors out of 0" is a truthful
-    // report of that. An empty corpus, or one whose every file is on the skip list, must not
+    // A run that checked no expectation validated nothing, and "0 errors out of 0" is a truthful
+    // report of that. An empty corpus, one whose every file is on the skip list, and one whose
+    // units declare no `post` to check all reach this point the same way, and none of them may
     // print "All tests passed!".
-    if n_errors == 0 && n_thread_errors == 0 && n_units == 0 {
+    if n_errors == 0 && n_thread_errors == 0 && n_judged == 0 {
         return Err(TestError {
             name: "summary".to_string(),
             path: String::new(),
             kind: TestErrorKind::FixtureError(format!(
-                "no fixture unit was validated across {n_files} file(s); the corpus is empty or \
-                 entirely skipped"
+                "no fixture expectation was validated across {n_files} file(s); the corpus is \
+                 empty, entirely skipped, or its units declare no post expectation"
             )),
         });
     }

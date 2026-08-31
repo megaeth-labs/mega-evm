@@ -206,18 +206,18 @@ impl Cmd {
                             continue;
                         }
                     };
-                    for unit in &report.units {
-                        match &unit.status {
+                    for vector in &report.vectors {
+                        match &vector.status {
                             UnitStatus::Ok => {}
                             UnitStatus::Error(m) => {
-                                println!("ERR\t{}::{}\t{m}", file.display(), unit.name);
+                                println!("ERR\t{}::{}\t{m}", file.display(), vector.name);
                                 errors += 1;
                             }
                             UnitStatus::Panic(m) => {
                                 println!(
                                     "PANIC\t{}::{}\t{}",
                                     file.display(),
-                                    unit.name,
+                                    vector.name,
                                     m.replace('\n', " ")
                                 );
                                 panics += 1;
@@ -227,30 +227,35 @@ impl Cmd {
                     filled += report.filled();
                 } else {
                     let n = fill_test_suite(&file, spec_override, self.force)?;
-                    println!("Filled post for {n} unit(s) in {}", file.display());
+                    println!("Filled post for {n} transaction vector(s) in {}", file.display());
                     filled += n;
                 }
             }
         }
-        if !self.keep_going {
-            return Ok(());
-        }
+        // A sweep that filled and declined nothing reached no transaction vector at all: an empty
+        // corpus, or one whose every file was unreadable or skipped. Its zeroes are truthful and
+        // meaningless, so they must not read as a pass — in either mode. Without `--keep-going`
+        // the run stops at the first failure, which says nothing about the case where there was
+        // no work to fail at.
         let total = filled + errors + panics;
-        println!(
-            "Fill tally: OK={filled} ERR={errors} PANIC={panics} FILE_ERR={file_errors} \
-             SKIP_FILE={skipped_files} TOTAL={total}"
-        );
-        // A sweep that filled and declined nothing reached no unit at all: an empty corpus, or one
-        // whose every file was unreadable. Its zeroes are truthful and meaningless, so they must
-        // not read as a pass.
+        if self.keep_going {
+            println!(
+                "Fill tally: OK={filled} ERR={errors} PANIC={panics} FILE_ERR={file_errors} \
+                 SKIP_FILE={skipped_files} TOTAL={total}"
+            );
+        }
         if total == 0 {
             return Err(TestError {
                 name: "fill summary".to_string(),
                 path: String::new(),
                 kind: TestErrorKind::FixtureError(
-                    "no unit was judged; the corpus is empty or unreachable".to_string(),
+                    "no transaction vector was filled; the corpus is empty or unreachable"
+                        .to_string(),
                 ),
             });
+        }
+        if !self.keep_going {
+            return Ok(());
         }
         if errors + panics + file_errors == 0 {
             return Ok(());

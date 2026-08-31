@@ -512,12 +512,33 @@ pub struct UnitDiff {
 /// invariant, which relates Rex7 to Rex6 and says nothing about any other pair. Pointed at
 /// Rex5-against-Rex4 it would apply Rex7's licence to a pair that never had one — deciding, from
 /// mechanisms that are not evidence for anything there, that a difference is fine.
+///
+/// [`DiffSpecs::new`] is that restriction, so the fields it validates are private: a public field
+/// is a second way to build the value, and the classifier cannot tell a pair that came through the
+/// check from one that was assembled around it.
+///
+/// ```
+/// use state_test::{diff::DiffSpecs, types::SpecName};
+///
+/// let (target, base) = DiffSpecs::SUPPORTED;
+/// let specs = DiffSpecs::new(target, base).expect("the supported pair");
+/// assert_eq!((specs.target(), specs.base()), (SpecName::Rex7, SpecName::Rex6));
+/// assert!(DiffSpecs::new(SpecName::Rex6, SpecName::Rex5).is_err());
+/// ```
+///
+/// The same pair the constructor refuses, assembled directly, does not compile:
+///
+/// ```compile_fail
+/// use state_test::{diff::DiffSpecs, types::SpecName};
+///
+/// let specs = DiffSpecs { target: SpecName::Rex6, base: SpecName::Rex5 };
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DiffSpecs {
     /// The spec under test, normally the unstable one.
-    pub target: SpecName,
+    target: SpecName,
     /// The frozen spec the target inherits from.
-    pub base: SpecName,
+    base: SpecName,
 }
 
 impl DiffSpecs {
@@ -540,6 +561,16 @@ impl DiffSpecs {
         }
         Ok(Self { target, base })
     }
+
+    /// The spec under test.
+    pub const fn target(&self) -> SpecName {
+        self.target
+    }
+
+    /// The frozen spec the target is judged against.
+    pub const fn base(&self) -> SpecName {
+        self.base
+    }
 }
 
 /// Runs one unit's transaction vector under both specs and classifies the result.
@@ -552,8 +583,9 @@ pub fn diff_unit(
     specs: DiffSpecs,
     collect_evidence: bool,
 ) -> UnitDiffOutcome {
-    let target = execute_unit_outcome(unit, indexes, &specs.target, false);
-    let base = execute_unit_outcome(unit, indexes, &specs.base, false);
+    let (target_spec, base_spec) = (specs.target(), specs.base());
+    let target = execute_unit_outcome(unit, indexes, &target_spec, false);
+    let base = execute_unit_outcome(unit, indexes, &base_spec, false);
 
     let (target, base) = match (target, base) {
         (Ok(t), Ok(b)) => (t, b),
@@ -578,8 +610,8 @@ pub fn diff_unit(
                 vec![],
                 format!(
                     "{} executed but {} rejected the transaction: {e}",
-                    label(specs.target),
-                    label(specs.base)
+                    label(target_spec),
+                    label(base_spec)
                 ),
             )
         }
@@ -589,8 +621,8 @@ pub fn diff_unit(
                 vec![],
                 format!(
                     "{} rejected the transaction but {} executed it: {e}",
-                    label(specs.target),
-                    label(specs.base)
+                    label(target_spec),
+                    label(base_spec)
                 ),
             )
         }
@@ -610,8 +642,8 @@ pub fn diff_unit(
     // which sees the frames the transaction's own result hides. It costs an inspected execution
     // only for the units that reach here, instead of on every unit in the corpus.
     let (Ok(target), Ok(base)) = (
-        execute_unit_outcome(unit, indexes, &specs.target, true),
-        execute_unit_outcome(unit, indexes, &specs.base, true),
+        execute_unit_outcome(unit, indexes, &target_spec, true),
+        execute_unit_outcome(unit, indexes, &base_spec, true),
     ) else {
         return verdict;
     };
@@ -1548,13 +1580,15 @@ mod tests {
 
     // The classifier reads one sentence — Rex7's precision invariant — and that sentence relates
     // exactly one pair of specs. Any other pair would be judged by a licence it was never given.
+    //
+    // That the constructor is the *only* way in is a property of the crate's boundary, which this
+    // module is inside of; it is pinned by the `compile_fail` example on [`DiffSpecs`] and by
+    // `tests/diff_mode.rs`, which are compiled as consumers.
     #[test]
     fn test_only_the_rex7_rex6_pair_can_be_constructed() {
         let (target, base) = DiffSpecs::SUPPORTED;
-        assert_eq!(
-            DiffSpecs::new(target, base).expect("the supported pair"),
-            DiffSpecs { target, base }
-        );
+        let specs = DiffSpecs::new(target, base).expect("the supported pair");
+        assert_eq!((specs.target(), specs.base()), (target, base));
         for (t, b) in [
             (SpecName::Rex7, SpecName::Equivalence),
             (SpecName::Rex6, SpecName::Rex5),

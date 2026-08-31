@@ -46,6 +46,28 @@ it and warns in the job summary when the coverage numbers move — a corpus that
 change that pushed thousands of fixtures out of execution, is worth seeing even though it is not a
 defect. Update it deliberately when a move is expected.
 
+## The cached corpus
+
+The archive is verified against the hash in `corpus.env` on every run, and the tree unpacked from
+it is verified against a manifest the unpack wrote: every file that was extracted, with that file's
+hash. Before a cached tree is swept, that manifest is re-derived from the bytes on disk and
+compared; a file missing, added or edited discards the tree and unpacks it again.
+
+The tree is what the sweep actually reads, and a cached one can be short of the corpus in ways
+nothing about it announces — an extraction cut off by a cancelled job or a full disk, a CI cache
+archived mid-write and restored intact, a stray edit under the cache directory. Each of those
+leaves a directory that exists and sweeps clean over a fraction of what the tally claims, which is
+the one failure mode a coverage number cannot show.
+
+Unpacking is serialized by an atomic `mkdir` lock, so two runs sharing a cache directory do not
+extract into the same destination at once. A run that finds the lock held waits for it, and if the
+wait runs out — the lock's owner died, or is very slow — unpacks a private tree of its own rather
+than reaching into a directory another process may still be writing. A lock left behind by a dead
+run is cleared by removing `<cache-dir>/<release>.unpack.lock`.
+
+`tests/cache_integrity.sh` drives all of this against a synthetic archive and a stub binary; it
+runs per-PR in CI and needs neither the corpus nor a build.
+
 ## Options
 
 ```

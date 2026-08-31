@@ -64,11 +64,13 @@ jobs:
       # belongs to the release the sweep is pinned to.
       #
       # The key is not what makes the entry trustworthy. The cache holds both the archive and the
-      # tree unpacked from it, and only the archive is hash-verified on every run; a tree saved
-      # from a cancelled job would be restored intact and swept as though it were whole. What
-      # rules that out is on the other side: `run.sh` unpacks into a scratch directory, moves it
-      # into place in one step, and writes a stamp naming this archive's hash only after the
-      # extraction finished. A tree without that stamp is discarded and unpacked again.
+      # tree unpacked from it; the archive is hash-verified on every run, and the tree — which is
+      # what the sweep actually reads — is restored from wherever a previous run left it, whole or
+      # not. What rules out sweeping a fraction of the corpus is on the other side: `run.sh`
+      # unpacks via a scratch directory and one rename, and records a manifest of every file it
+      # extracted with that file's hash. Before each run the tree is re-derived from its bytes and
+      # compared against that manifest; anything missing, added or edited discards the tree and
+      # unpacks it again.
       - name: Cache corpus
         uses: actions/cache@v4
         with:
