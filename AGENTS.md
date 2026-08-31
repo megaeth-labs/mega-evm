@@ -51,6 +51,8 @@ Git submodules are required — clone with `--recursive` or run `git submodule u
 | `mega-evme`             | `bin/mega-evme`           | CLI tool for EVM execution (`run`, `tx`, `replay`)                                          |
 | `mega-t8n`              | `bin/mega-t8n`            | Standalone state transition (t8n) tool                                                      |
 
+The EEST corpus sweep that exercises the unstable spec against the whole Ethereum state-test suite lives in `tools/eest-sweep/` and runs nightly (`.github/workflows/eest-nightly.yml`).
+
 ## Architecture
 
 ### Spec System (`MegaSpecId`)

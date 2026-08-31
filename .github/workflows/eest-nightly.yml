@@ -1,0 +1,113 @@
+name: EEST Nightly Sweep
+
+# Runs the whole Ethereum execution-spec-tests state-test corpus through the mega-evm runner,
+# nightly, under the unstable spec.
+#
+# Two questions, one pass. Does anything break — a fixture that trips a debug assertion or an
+# internal invariant? And does the unstable spec still differ from the frozen spec it inherits
+# from only where its own precision invariant permits? The second is what an unstable spec cannot
+# get from fixtures alone: nobody has computed expected results for it, so the frozen spec is the
+# only oracle available, and the invariant is what says when the two are allowed to disagree.
+#
+# Both are hard gates. Everything else — fixtures the runner declines before execution,
+# differences the classifier accounts for — is reported and compared against a committed
+# baseline, and drift there is a warning in the summary rather than a red run.
+#
+# Needs no secrets: it builds the repo and runs it against a public, hash-pinned corpus.
+
+on:
+  schedule:
+    # Nightly at 04:00 UTC, after the mutation sweep's 03:00 slot.
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+    inputs:
+      target_spec:
+        description: "Spec under test"
+        type: string
+        default: "Rex7"
+      base_spec:
+        description: "Frozen spec to compare against"
+        type: string
+        default: "Rex6"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  sweep:
+    name: EEST differential sweep
+    runs-on: ubuntu-24.04
+    # The sweep itself is minutes; the headroom is for a cold dependency build.
+    timeout-minutes: 90
+    env:
+      TARGET_SPEC: ${{ inputs.target_spec || 'Rex7' }}
+      BASE_SPEC: ${{ inputs.base_spec || 'Rex6' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+
+      - name: Read pinned corpus
+        id: corpus
+        run: |
+          # shellcheck disable=SC1091
+          . tools/eest-sweep/corpus.env
+          echo "release=$EEST_RELEASE" >> "$GITHUB_OUTPUT"
+          echo "sha256=$EEST_SHA256" >> "$GITHUB_OUTPUT"
+
+      # Keyed on the corpus hash, not on the release name: the hash is what the sweep verifies,
+      # so a cache entry can never hold something the sweep would have rejected.
+      - name: Cache corpus
+        uses: actions/cache@v4
+        with:
+          path: .eest-cache
+          key: eest-corpus-${{ steps.corpus.outputs.sha256 }}
+
+      # `hivetests` is optimized *and* keeps debug assertions live, which is the point: the Rex7
+      # gas-conservation cross-checks are `debug_assert!`s, and a release build would run the
+      # corpus without ever evaluating them.
+      - name: Build state-test
+        run: cargo build --profile hivetests -p state-test
+
+      - name: Run sweep
+        id: sweep
+        run: |
+          tools/eest-sweep/run.sh \
+            --no-build \
+            --target-spec "$TARGET_SPEC" \
+            --base-spec "$BASE_SPEC" \
+            --cache-dir .eest-cache \
+            --report-dir .eest-report
+
+      - name: Write job summary
+        if: always()
+        run: |
+          if [ -f .eest-report/diff-report.json ]; then
+            python3 tools/eest-sweep/summarize.py \
+              .eest-report/diff-report.json \
+              --baseline tools/eest-sweep/baseline.json \
+              >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "The sweep produced no report; see the job log." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eest-sweep-report
+          path: |
+            .eest-report/diff-report.json
+            .eest-report/sweep.log
+          if-no-files-found: warn
+          retention-days: 30

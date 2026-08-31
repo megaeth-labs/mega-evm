@@ -8,3 +8,8 @@
 
 # Python bytecode cache (scripts/)
 __pycache__/
+
+# EEST sweep working directories (tools/eest-sweep/run.sh): the hash-pinned corpus
+# archive and the reports a run produces. Both are regenerable.
+/.eest-cache
+/.eest-report

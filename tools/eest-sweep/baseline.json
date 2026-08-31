@@ -1,0 +1,23 @@
+{
+  "targetSpec": "Rex7",
+  "baseSpec": "Rex6",
+  "total": 44023,
+  "classes": {
+    "PASS": 19611,
+    "EXPLAINED": 17363,
+    "UNEXPLAINED": 0,
+    "SKIPPED": 7049,
+    "PANIC": 0
+  },
+  "mechanisms": {
+    "destroyed_compute_gas": 10698,
+    "detention_in_force": 610,
+    "exceptional_halt": 11379
+  },
+  "explainedFields": {
+    "compute_gas_used": 17363
+  },
+  "fileErrors": [],
+  "skippedFiles": 5,
+  "flagged": []
+}
