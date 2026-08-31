@@ -17,6 +17,10 @@
 //!   keep the envelope book the unperformed part as destroyed, the rescued one books nothing.
 //! - `latch_surfacing` — where a latched data-size / KV-update / state-growth exceed becomes a
 //!   stop.
+//! - `measured_inspector` — the shim every inspector is wrapped in: gas an inspector writes into an
+//!   interpreter counter or a frame's gas limit is measured at the callback boundary, booked, and
+//!   kept out of enforcement, with the clamp re-derived on the spot; reviving a failed creation is
+//!   refused; an observation-only inspector is bit-identical to no inspector at all.
 //! - `gas_leakage` — the three paths a per-frame gas mechanism can leak through (interception,
 //!   TX-level rescue, frame return), each with a clamp outstanding.
 //! - `opcode_set_parity` — all 256 opcodes probed under both specs, so the REX7 table cannot gain
@@ -81,6 +85,7 @@ mod guard_pass_static_gas;
 mod interceptor_resume;
 mod keyless_synthetic_halt;
 mod latch_surfacing;
+mod measured_inspector;
 mod modexp_gas;
 mod opcode_set_parity;
 mod parity_shapes;
