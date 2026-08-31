@@ -43,8 +43,9 @@ use revm::{
 use crate::{
     constants, dispatch_system_contract_interceptors, is_deposit_like_transaction,
     is_mega_system_transaction_with, limit::ACCOUNT_INFO_WRITE_SIZE, sent_from_system_address,
-    ExternalEnvTypes, HostExt, JournalInspectTr, MegaContext, MegaEvm, MegaHaltReason,
-    MegaInstructions, MegaSpecId, MegaTransactionError, MEGA_SYSTEM_TRANSACTION_SOURCE_HASH,
+    ExternalEnvTypes, HostExt, JournalInspectTr, MeasuredInspector, MegaContext, MegaEvm,
+    MegaHaltReason, MegaInstructions, MegaSpecId, MegaTransactionError,
+    MEGA_SYSTEM_TRANSACTION_SOURCE_HASH,
 };
 
 /// Revm handler for `MegaETH`. It internally wraps the [`op_revm::handler::OpHandler`] and inherits
@@ -1634,7 +1635,12 @@ where
     DB: Database,
     INSP: Inspector<MegaContext<DB, ExtEnvs>>,
 {
-    type Inspector = INSP;
+    /// The inspector revm's inspected loops drive is the measurement shim, not the caller's own
+    /// inspector — every callback revm makes has to cross the shim's boundary for the shim to be
+    /// able to measure it. The caller's type is still what
+    /// [`alloy_evm::Evm::Inspector`](alloy_evm::Evm) and
+    /// [`InspectEvm::Inspector`](revm::InspectEvm) name.
+    type Inspector = MeasuredInspector<INSP>;
 
     #[inline]
     fn all_inspector(

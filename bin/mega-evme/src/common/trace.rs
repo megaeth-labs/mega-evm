@@ -235,7 +235,7 @@ impl TraceArgs {
             trace!(result_and_state = ?result_and_state, "Evm execution result and state");
 
             // Generate trace string based on tracer type
-            let trace_str = self.generate_trace(evm.inspector, &result_and_state, evm.db_ref());
+            let trace_str = self.generate_trace(&evm.inspector, &result_and_state, evm.db_ref());
             trace!(trace_str = ?trace_str, "Generated trace");
 
             Ok((result_and_state.result, result_and_state.state, Some(trace_str)))

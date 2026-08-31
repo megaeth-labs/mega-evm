@@ -29,6 +29,7 @@ mod context;
 mod execution;
 mod factory;
 mod host;
+mod inspector;
 mod instructions;
 mod interfaces;
 mod limit;
@@ -46,6 +47,7 @@ pub use context::*;
 pub use execution::*;
 pub use factory::*;
 pub use host::*;
+pub use inspector::*;
 pub use instructions::*;
 #[allow(unused_imports, unreachable_pub)]
 pub use interfaces::*;
@@ -89,9 +91,14 @@ use crate::{AdditionalLimit, BucketId, ExternalEnvTypes, LimitUsage, MegaTransac
 #[allow(missing_debug_implementations)]
 #[allow(clippy::type_complexity)]
 pub struct MegaEvm<DB: Database, INSP, ExtEnvTypes: ExternalEnvTypes> {
+    /// The inner EVM, holding the user's inspector wrapped in the measurement shim.
+    ///
+    /// The wrapper is `MegaETH`'s, not the caller's: every entry point that accepts an inspector
+    /// wraps it here, and every accessor hands the unwrapped one back, so `INSP` stays the type
+    /// the caller named. See [`MeasuredInspector`].
     inner: revm::context::Evm<
         MegaContext<DB, ExtEnvTypes>,
-        INSP,
+        MeasuredInspector<INSP>,
         MegaInstructions<DB, ExtEnvTypes>,
         PrecompilesMap,
         EthFrame<EthInterpreter>,
@@ -124,7 +131,7 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> core::ops::Deref
 {
     type Target = revm::context::Evm<
         MegaContext<DB, ExtEnvs>,
-        INSP,
+        MeasuredInspector<INSP>,
         MegaInstructions<DB, ExtEnvs>,
         PrecompilesMap,
         EthFrame<EthInterpreter>,
@@ -167,7 +174,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, NoOpInspector, ExtEnvs
             mega_cfg,
             inner: revm::context::Evm::new_with_inspector(
                 context,
-                NoOpInspector,
+                MeasuredInspector::new(NoOpInspector),
                 MegaInstructions::new(spec),
                 PrecompilesMap::from_static(MegaPrecompiles::new_with_spec(spec).precompiles()),
             ),
@@ -190,7 +197,7 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
         let mega_cfg = self.mega_cfg;
         let inner = revm::context::Evm::new_with_inspector(
             self.inner.ctx,
-            inspector,
+            MeasuredInspector::new(inspector),
             self.inner.instruction,
             self.inner.precompiles,
         );
@@ -206,7 +213,7 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
         let mega_cfg = self.mega_cfg;
         let inner = revm::context::Evm::new_with_inspector(
             self.inner.ctx,
-            NoOpInspector,
+            MeasuredInspector::new(NoOpInspector),
             self.inner.instruction,
             self.inner.precompiles,
         );
@@ -328,7 +335,15 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
         PrecompilesMap,
         EthFrame<EthInterpreter>,
     > {
-        self.inner
+        // The measurement shim is an implementation detail of executing through `MegaEvm`; an
+        // EVM taken apart is no longer executing, so it is handed back unwrapped.
+        revm::context::Evm {
+            ctx: self.inner.ctx,
+            inspector: self.inner.inspector.into_inner(),
+            instruction: self.inner.instruction,
+            precompiles: self.inner.precompiles,
+            frame_stack: self.inner.frame_stack,
+        }
     }
 }
 
