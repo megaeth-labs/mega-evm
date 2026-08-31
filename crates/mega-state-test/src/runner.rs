@@ -1,6 +1,7 @@
 #![allow(missing_docs)]
 
 use crate::{
+    panic_capture,
     types::{
         tx_env_at, Env, SpecName, Test, TestError as TxBuildError, TestSuite, TestUnit,
         TxPartIndices,
@@ -110,11 +111,19 @@ pub fn find_all_json_tests(path: &Path) -> Vec<PathBuf> {
     }
 }
 
+/// Whether validation skips this fixture file entirely, by filename.
+///
+/// The skip list is a policy, not a failure: a driver that walks a corpus needs to tell a file it
+/// is not meant to run from one it could not run, because only the second is a hole in coverage.
+pub fn is_skipped_fixture(path: &Path) -> bool {
+    skip_test(path)
+}
+
 /// Check if a test should be skipped based on its filename
 /// Some tests are known to be problematic or take too long
 ///
 /// These tests are skipped by `revm`, so we also skip them.
-fn skip_test(path: &Path) -> bool {
+pub(crate) fn skip_test(path: &Path) -> bool {
     // A path with no file name or a non-UTF-8 name cannot match any entry on
     // the skip list, so it is simply not skipped (and must not panic).
     let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
@@ -401,7 +410,7 @@ fn check_evm_execution(
 /// revm 40 stores per-spec gas params in [`CfgEnv`]. Assigning `cfg.spec` alone
 /// leaves the previous params in place and drifts gas accounting. Shared by
 /// [`execute_test_suite`] and single-unit execution.
-fn set_cfg_spec_and_mainnet_gas_params(cfg: &mut CfgEnv<MegaSpecId>, spec: MegaSpecId) {
+pub(crate) fn set_cfg_spec_and_mainnet_gas_params(cfg: &mut CfgEnv<MegaSpecId>, spec: MegaSpecId) {
     cfg.set_spec_and_mainnet_gas_params(spec);
 }
 
@@ -409,7 +418,7 @@ fn set_cfg_spec_and_mainnet_gas_params(cfg: &mut CfgEnv<MegaSpecId>, spec: MegaS
 ///
 /// Single source of truth shared by [`execute_test_suite`] and single-unit
 /// execution so the validation and dump paths stay byte-identical.
-fn configure_max_blobs(cfg: &mut CfgEnv<MegaSpecId>) {
+pub(crate) fn configure_max_blobs(cfg: &mut CfgEnv<MegaSpecId>) {
     // OSAKA (which implies PRAGUE) caps blobs back at 6, while the PRAGUE-only
     // window allows 9 — so the OSAKA arm must be checked first and is distinct
     // from the pre-PRAGUE default of 6 despite the same value.
@@ -427,7 +436,7 @@ fn configure_max_blobs(cfg: &mut CfgEnv<MegaSpecId>) {
 /// An absent field defaults to `MegaETH`'s 6342 (intentional EEST behavior),
 /// but a present value that does not fit in a `u64` is a fixture error rather
 /// than a silent fallback to the default chain.
-fn resolve_chain_id(env: &Env) -> Result<u64, TestErrorKind> {
+pub(crate) fn resolve_chain_id(env: &Env) -> Result<u64, TestErrorKind> {
     match env.current_chain_id {
         None => Ok(6342),
         Some(id) => id.try_into().map_err(|_| {
@@ -577,7 +586,7 @@ pub fn execute_test_suite(
 /// Uses [`AHashBucketHasher`] so that bucket IDs match those recorded during
 /// `mega-evme replay` — a different hasher would map keys to different buckets
 /// and reproduce different gas.
-fn external_envs_for(
+pub(crate) fn external_envs_for(
     unit: &TestUnit,
 ) -> Result<mega_evm::TestExternalEnvs<Infallible, AHashBucketHasher>, TestErrorKind> {
     let mega_env = unit.mega_env.clone().unwrap_or_default();
@@ -592,7 +601,10 @@ fn external_envs_for(
 /// A key that does not fit in a `u64` could never be requested by the EVM
 /// (block numbers are `u64` on the `BLOCKHASH` path), so it is a fixture error
 /// rather than a silently dropped entry.
-fn inject_block_hashes(state: &mut State<EmptyDB>, unit: &TestUnit) -> Result<(), TestErrorKind> {
+pub(crate) fn inject_block_hashes(
+    state: &mut State<EmptyDB>,
+    unit: &TestUnit,
+) -> Result<(), TestErrorKind> {
     let Some(hashes) = &unit.env.block_hashes else {
         return Ok(());
     };
@@ -886,6 +898,64 @@ pub fn bench_test_suite(
     Ok(results)
 }
 
+/// What a keep-going driver observed for one fixture unit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UnitStatus {
+    /// The unit ran to completion.
+    Ok,
+    /// The unit failed with a structured error, before or during execution.
+    Error(String),
+    /// Executing the unit panicked; the payload is the captured panic report.
+    ///
+    /// Distinct from [`UnitStatus::Error`] on purpose: an error is a fixture the runner declined
+    /// to execute, a panic is an internal invariant (a `debug_assert!`, an overflow check) that
+    /// the fixture broke. Only the second is a defect in the code under test.
+    Panic(String),
+}
+
+impl UnitStatus {
+    /// Whether the unit ran to completion.
+    pub const fn is_ok(&self) -> bool {
+        matches!(self, Self::Ok)
+    }
+
+    /// The failure report, or `None` when the unit ran to completion.
+    pub fn message(&self) -> Option<&str> {
+        match self {
+            Self::Ok => None,
+            Self::Error(m) | Self::Panic(m) => Some(m),
+        }
+    }
+}
+
+/// What happened to one unit of a fixture file under a keep-going fill.
+#[derive(Debug, Clone)]
+pub struct UnitFillResult {
+    /// The unit's key in the fixture's test-suite map.
+    pub name: String,
+    /// Whether the unit filled, failed, or panicked.
+    pub status: UnitStatus,
+}
+
+/// Per-unit outcome of filling one fixture file with `keep_going` set.
+#[derive(Debug, Clone, Default)]
+pub struct FillReport {
+    /// One entry per unit in the file, in the file's own order.
+    pub units: Vec<UnitFillResult>,
+}
+
+impl FillReport {
+    /// Number of units whose `post` was recomputed and written.
+    pub fn filled(&self) -> usize {
+        self.units.iter().filter(|u| u.status.is_ok()).count()
+    }
+
+    /// Number of units that failed or panicked and kept their original `post`.
+    pub fn failed(&self) -> usize {
+        self.units.len() - self.filled()
+    }
+}
+
 /// Compute and write the `post` expectation for every unit in a fixture file,
 /// in place — the offline analog of `--dump-fixture`'s post-fill step, for a
 /// fixture that has no `post` yet (a hand-built or `prestateTracer`-snapshot
@@ -901,11 +971,47 @@ pub fn bench_test_suite(
 /// Filling replaces the unit's entire `post` map (single spec, single index
 /// `{0,0,0}`) with circularly-derived expectations, so a unit that already has a
 /// non-empty `post` is refused unless `force` is set.
+///
+/// The first unit that fails aborts the whole file. Use
+/// [`fill_test_suite_keep_going`] to fill the rest of a file whose units fail
+/// independently.
 pub fn fill_test_suite(
     path: &Path,
     spec_override: Option<SpecName>,
     force: bool,
 ) -> Result<usize, TestError> {
+    let report = fill_suite(path, spec_override, force, false)?;
+    Ok(report.filled())
+}
+
+/// Fill every unit of a fixture file, recording each unit's failure instead of
+/// aborting the file at the first one.
+///
+/// A unit that fails or panics keeps its original `post` and is reported in the
+/// returned [`FillReport`]; the units that succeeded are still written. This is
+/// what lets a corpus sweep run a multi-unit fixture without splitting it into
+/// one file per unit first: an EEST fixture holds one unit per (test, fork)
+/// pair, and under a spec override the ones that the runner declines are
+/// exactly the ones a split sweep would have counted separately.
+///
+/// Errors that belong to the *file* rather than to a unit — an unreadable or
+/// unparseable fixture, a filename on the validation skip list, a failed write —
+/// are still returned as errors: there is no per-unit result to record them on.
+pub fn fill_test_suite_keep_going(
+    path: &Path,
+    spec_override: Option<SpecName>,
+    force: bool,
+) -> Result<FillReport, TestError> {
+    fill_suite(path, spec_override, force, true)
+}
+
+/// Shared body of [`fill_test_suite`] and [`fill_test_suite_keep_going`].
+fn fill_suite(
+    path: &Path,
+    spec_override: Option<SpecName>,
+    force: bool,
+    keep_going: bool,
+) -> Result<FillReport, TestError> {
     let path_str = path.to_string_lossy().into_owned();
     let fixture_err = |msg: String| TestError {
         name: "fill".to_string(),
@@ -930,67 +1036,96 @@ pub fn fill_test_suite(
         kind: e.into(),
     })?;
 
-    let mut filled = std::collections::BTreeMap::new();
+    let mut report = FillReport::default();
+    let mut out = std::collections::BTreeMap::new();
+    let mut any_filled = false;
     for (name, mut unit) in suite.0 {
-        if !force && unit.post.values().any(|tests| !tests.is_empty()) {
-            return Err(fixture_err(format!(
-                "unit {name} already has a post expectation; pass --force to overwrite"
-            )));
-        }
-        let spec = match spec_override {
-            Some(s) => s,
-            None => {
-                let mut specs = unit.post.keys();
-                match (specs.next(), specs.next()) {
-                    (Some(s), None) => *s,
-                    _ => {
-                        return Err(fixture_err(format!(
-                            "unit {name} has no single post spec; pass --bench-spec to fill"
-                        )))
-                    }
-                }
+        match fill_unit(&mut unit, spec_override, force) {
+            Ok(()) => {
+                any_filled = true;
+                report.units.push(UnitFillResult { name: name.clone(), status: UnitStatus::Ok });
             }
-        };
-        // Reject an unmapped spec at selection time, so the error names the
-        // unit instead of surfacing from deep inside execution.
-        if spec == SpecName::Unknown {
-            return Err(fixture_err(format!(
-                "unit {name} selects an unknown spec; pass a valid --bench-spec"
-            )));
+            Err(status) => {
+                if !keep_going {
+                    let detail = status.message().unwrap_or("failed");
+                    return Err(fixture_err(format!("unit {name}: {detail}")));
+                }
+                report.units.push(UnitFillResult { name: name.clone(), status });
+            }
         }
-        // Validation skips Constantinople (mirroring upstream revme), so a post
-        // recorded under it would never be checked.
-        if spec == SpecName::Constantinople {
-            return Err(fixture_err(format!(
-                "unit {name}: validation skips Constantinople; a post filled under it \
-                 would never be checked"
-            )));
-        }
-        let executed = execute_unit_collect(&unit, &spec)
-            .map_err(|e| fixture_err(format!("execute {name}: {e}")))?;
-        unit.out = executed.output.clone();
-        let test = Test::for_dump(
-            executed.state_root,
-            executed.logs_root,
-            executed.gas_used,
-            executed.status,
-        );
-        unit.post = std::collections::BTreeMap::from([(spec, vec![test])]);
-        filled.insert(name, unit);
+        out.insert(name, unit);
     }
 
-    let count = filled.len();
-    let json = serde_json::to_string_pretty(&TestSuite(filled))
+    // Nothing changed: leave the file's bytes (and mtime) alone rather than
+    // rewriting it with a re-serialization of what it already held.
+    if !any_filled {
+        return Ok(report);
+    }
+
+    let json = serde_json::to_string_pretty(&TestSuite(out))
         .map_err(|e| fixture_err(format!("serialize: {e}")))?;
     // Write to a sibling temp file and rename so an interrupted write cannot
     // truncate the original fixture.
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, json).map_err(|e| fixture_err(format!("write: {e}")))?;
     std::fs::rename(&tmp, path).map_err(|e| fixture_err(format!("rename: {e}")))?;
-    Ok(count)
+    Ok(report)
 }
 
-fn prune_base_fee_vault_changes(db: &mut State<EmptyDB>) {
+/// Recompute one unit's `post` in place, or report why it could not be filled.
+///
+/// Execution runs under [`panic_capture::catch`] so that a `debug_assert!` a
+/// single fixture trips is that fixture's result rather than the run's.
+fn fill_unit(
+    unit: &mut TestUnit,
+    spec_override: Option<SpecName>,
+    force: bool,
+) -> Result<(), UnitStatus> {
+    let err = |msg: String| UnitStatus::Error(msg);
+
+    if !force && unit.post.values().any(|tests| !tests.is_empty()) {
+        return Err(err("already has a post expectation; pass --force to overwrite".to_string()));
+    }
+    let spec = match spec_override {
+        Some(s) => s,
+        None => {
+            let mut specs = unit.post.keys();
+            match (specs.next(), specs.next()) {
+                (Some(s), None) => *s,
+                _ => {
+                    return Err(
+                        err("has no single post spec; pass --bench-spec to fill".to_string()),
+                    )
+                }
+            }
+        }
+    };
+    // Reject an unmapped spec at selection time, so the error names the unit
+    // instead of surfacing from deep inside execution.
+    if spec == SpecName::Unknown {
+        return Err(err("selects an unknown spec; pass a valid --bench-spec".to_string()));
+    }
+    // Validation skips Constantinople (mirroring upstream revme), so a post
+    // recorded under it would never be checked.
+    if spec == SpecName::Constantinople {
+        return Err(err(
+            "validation skips Constantinople; a post filled under it would never be checked"
+                .to_string(),
+        ));
+    }
+
+    let executed = panic_capture::catch(|| execute_unit_collect(unit, &spec))
+        .map_err(UnitStatus::Panic)?
+        .map_err(|e| err(format!("execute: {e}")))?;
+
+    unit.out = executed.output.clone();
+    let test =
+        Test::for_dump(executed.state_root, executed.logs_root, executed.gas_used, executed.status);
+    unit.post = std::collections::BTreeMap::from([(spec, vec![test])]);
+    Ok(())
+}
+
+pub(crate) fn prune_base_fee_vault_changes(db: &mut State<EmptyDB>) {
     let base_fee_vault = address!("0x4200000000000000000000000000000000000019");
     db.cache.accounts.remove(&base_fee_vault);
 }
