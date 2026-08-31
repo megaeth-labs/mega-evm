@@ -5,9 +5,9 @@
 //! An inspector is not a passive observer. Every callback that receives a live interpreter can
 //! write to its gas counter, and every callback that receives a frame's inputs can change the gas
 //! limit the frame is about to be built with. `MegaETH` meters compute gas by watching those exact
-//! counters, and derives what a transaction destroyed from the envelope it spent, so an unmeasured
-//! edit shows up as the EVM having done less work than it did, or as a transaction having spent
-//! less gas than it did.
+//! counters, and derives what a transaction destroyed from the envelope it spent, so an
+//! unmeasured edit shows up as the EVM having done less work than it did, or as a transaction
+//! having spent less gas than it did.
 //!
 //! # Why the callback boundary is enough
 //!
@@ -20,7 +20,12 @@
 //! dispatch loop: wrapping the object is sufficient to sit on every boundary, and mirroring
 //! `inspect_instructions` would take on a core dispatch loop for no additional reach.
 //!
-//! Nothing here changes what an inspector is allowed to do to the EVM, and nothing here runs on
+//! # What the shim does with what it measures
+//!
+//! - Interpreter-counter edits go to [`AdditionalLimit::record_inspector_gas_adjustment`].
+//! - Frame-envelope edits go to [`AdditionalLimit::record_inspector_env_adjustment`].
+//!
+//! Nothing here changes what the inspector is allowed to do to the EVM, and nothing here runs on
 //! the uninspected path — revm's plain interpreter loop never calls an inspector at all.
 
 use alloy_evm::Database;
@@ -36,12 +41,12 @@ use revm::{
 
 use crate::{ExternalEnvTypes, MegaContext};
 
-/// Wraps a user inspector so that what it does to gas accounting can be measured and booked.
+/// Wraps a user inspector so that what it does to gas accounting is measured and booked.
 ///
 /// `MegaETH` applies this itself — [`MegaEvm::with_inspector`](crate::MegaEvm::with_inspector) and
 /// [`InspectEvm::set_inspector`](revm::InspectEvm::set_inspector) take the user's inspector by
-/// value and store it wrapped, and the accessors hand back the unwrapped inspector — so the
-/// wrapper is not something a caller opts into or can opt out of.
+/// value and store it wrapped, and the accessors hand back the unwrapped inspector — so the wrapper
+/// is not something a caller opts into or can opt out of.
 ///
 /// Derefs to the wrapped inspector, so `evm.inspector().whatever()` reaches the user's own type.
 #[derive(Clone, Copy, Debug, Default, derive_more::Deref, derive_more::DerefMut)]
@@ -73,6 +78,44 @@ impl<I> MeasuredInspector<I> {
     }
 }
 
+/// The gas limit a frame input carries, for the two variants that have one.
+#[inline]
+fn frame_input_gas_limit(frame_input: &FrameInput) -> Option<u64> {
+    match frame_input {
+        FrameInput::Call(inputs) => Some(inputs.gas_limit),
+        FrameInput::Create(inputs) => Some(inputs.gas_limit()),
+        FrameInput::Empty => None,
+    }
+}
+
+/// Books what a callback did to a frame's envelope, if the edited inputs will actually reach a
+/// frame.
+///
+/// `intercepted` is true when the callback returned a synthetic outcome: the frame is skipped
+/// entirely and the inputs it edited are dropped unread, so no edit of theirs can move the
+/// transaction's envelope.
+#[inline]
+fn book_env_adjustment<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    context: &MegaContext<DB, ExtEnvs>,
+    before: Option<u64>,
+    after: Option<u64>,
+    intercepted: bool,
+) {
+    if intercepted {
+        return;
+    }
+    let (Some(before), Some(after)) = (before, after) else {
+        return;
+    };
+    if before == after {
+        return;
+    }
+    context
+        .additional_limit
+        .borrow_mut()
+        .record_inspector_env_adjustment(i128::from(after) - i128::from(before));
+}
+
 impl<DB, ExtEnvs, INTR, I> Inspector<MegaContext<DB, ExtEnvs>, INTR> for MeasuredInspector<I>
 where
     DB: Database,
@@ -80,25 +123,44 @@ where
     INTR: InterpreterTypes,
     I: Inspector<MegaContext<DB, ExtEnvs>, INTR>,
 {
+    /// This runs after the frame is built but before its settlement window is opened, which is
+    /// why it books its adjustment without touching that window.
     #[inline]
     fn initialize_interp(
         &mut self,
         interp: &mut Interpreter<INTR>,
         context: &mut MegaContext<DB, ExtEnvs>,
     ) {
+        let before = interp.gas.remaining();
         self.inner.initialize_interp(interp, context);
+        context
+            .additional_limit
+            .borrow_mut()
+            .record_inspector_gas_adjustment::<false>(&mut interp.gas, before);
     }
 
     #[inline]
     fn step(&mut self, interp: &mut Interpreter<INTR>, context: &mut MegaContext<DB, ExtEnvs>) {
+        let before = interp.gas.remaining();
         self.inner.step(interp, context);
+        context
+            .additional_limit
+            .borrow_mut()
+            .record_inspector_gas_adjustment::<true>(&mut interp.gas, before);
     }
 
     #[inline]
     fn step_end(&mut self, interp: &mut Interpreter<INTR>, context: &mut MegaContext<DB, ExtEnvs>) {
+        let before = interp.gas.remaining();
         self.inner.step_end(interp, context);
+        context
+            .additional_limit
+            .borrow_mut()
+            .record_inspector_gas_adjustment::<true>(&mut interp.gas, before);
     }
 
+    /// No interpreter and no frame inputs are reachable here, so there is nothing to measure —
+    /// this callback can only touch the context, which the shim does not police.
     #[inline]
     fn log(&mut self, context: &mut MegaContext<DB, ExtEnvs>, log: Log) {
         self.inner.log(context, log);
@@ -113,7 +175,12 @@ where
         context: &mut MegaContext<DB, ExtEnvs>,
         log: Log,
     ) {
+        let before = interpreter.gas.remaining();
         self.inner.log_full(interpreter, context, log);
+        context
+            .additional_limit
+            .borrow_mut()
+            .record_inspector_gas_adjustment::<true>(&mut interpreter.gas, before);
     }
 
     #[inline]
@@ -122,9 +189,14 @@ where
         context: &mut MegaContext<DB, ExtEnvs>,
         frame_input: &mut FrameInput,
     ) -> Option<FrameResult> {
-        self.inner.frame_start(context, frame_input)
+        let before = frame_input_gas_limit(frame_input);
+        let outcome = self.inner.frame_start(context, frame_input);
+        book_env_adjustment(context, before, frame_input_gas_limit(frame_input), outcome.is_some());
+        outcome
     }
 
+    /// The frame's result gas is deliberately not booked — see
+    /// [`InspectorLedger::env`](crate::InspectorLedger::env) — so this is a plain forward.
     #[inline]
     fn frame_end(
         &mut self,
@@ -141,9 +213,14 @@ where
         context: &mut MegaContext<DB, ExtEnvs>,
         inputs: &mut CallInputs,
     ) -> Option<CallOutcome> {
-        self.inner.call(context, inputs)
+        let before = inputs.gas_limit;
+        let outcome = self.inner.call(context, inputs);
+        book_env_adjustment(context, Some(before), Some(inputs.gas_limit), outcome.is_some());
+        outcome
     }
 
+    /// `CallInputs` is immutable here and the frame's result gas is deliberately not booked — see
+    /// [`InspectorLedger::env`](crate::InspectorLedger::env) — so this is a plain forward.
     #[inline]
     fn call_end(
         &mut self,
@@ -160,9 +237,14 @@ where
         context: &mut MegaContext<DB, ExtEnvs>,
         inputs: &mut CreateInputs,
     ) -> Option<CreateOutcome> {
-        self.inner.create(context, inputs)
+        let before = inputs.gas_limit();
+        let outcome = self.inner.create(context, inputs);
+        book_env_adjustment(context, Some(before), Some(inputs.gas_limit()), outcome.is_some());
+        outcome
     }
 
+    /// `CreateInputs` is immutable here and the frame's result gas is deliberately not booked —
+    /// see [`InspectorLedger::env`](crate::InspectorLedger::env) — so this is a plain forward.
     #[inline]
     fn create_end(
         &mut self,

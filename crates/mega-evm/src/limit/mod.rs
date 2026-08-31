@@ -5,6 +5,7 @@ mod checkpoint;
 mod compute_gas;
 mod data_size;
 mod frame_limit;
+mod inspector_ledger;
 mod kv_update;
 #[allow(clippy::module_inception)]
 mod limit;
@@ -13,6 +14,7 @@ mod storage_call_stipend;
 
 pub use data_size::*;
 pub(crate) use frame_limit::{FrameLimitTracker, TxRuntimeLimit};
+pub use inspector_ledger::*;
 pub use limit::*;
 
 use crate::MegaHaltReason;

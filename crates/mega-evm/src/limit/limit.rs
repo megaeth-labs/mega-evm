@@ -13,8 +13,8 @@ use revm::{
 };
 
 use super::{
-    checkpoint, compute_gas, data_size, frame_limit::TxRuntimeLimit, kv_update, state_growth,
-    storage_call_stipend,
+    checkpoint, compute_gas, data_size, frame_limit::TxRuntimeLimit, inspector_ledger, kv_update,
+    state_growth, storage_call_stipend,
 };
 use crate::{
     EvmTxRuntimeLimits, JournalInspectTr, MegaHaltReason, MegaSpecId, MegaTransaction,
@@ -110,6 +110,13 @@ pub struct AdditionalLimit {
 
     /// A tracker for REX7+ checkpoint settlement and gas-clamp state.
     pub(crate) checkpoint: checkpoint::CheckpointTracker,
+
+    /// What the inspector — if any — did to this transaction's gas accounting.
+    ///
+    /// Written only by the measurement shim every inspector is wrapped in, and read only by the
+    /// conservation law and by reporting. It stays at its default for every transaction that runs
+    /// without an inspector and for every observation-only inspector.
+    inspector: inspector_ledger::InspectorLedger,
 }
 
 /// The usage of the additional limits.
@@ -138,6 +145,7 @@ impl AdditionalLimit {
             compute_gas: compute_gas::ComputeGasTracker::new(spec, limits.tx_compute_gas_limit),
             storage_call_stipend: storage_call_stipend::StorageCallStipendTracker::new(spec),
             checkpoint: checkpoint::CheckpointTracker::new(spec),
+            inspector: inspector_ledger::InspectorLedger::default(),
         }
     }
 }
@@ -180,6 +188,7 @@ impl AdditionalLimit {
         self.kv_update.reset();
         self.storage_call_stipend.reset();
         self.checkpoint.reset();
+        self.inspector = inspector_ledger::InspectorLedger::default();
     }
 
     /// Whether compute gas settles at checkpoints (REX7+) rather than per opcode.
@@ -250,7 +259,7 @@ impl AdditionalLimit {
     /// and the non-compute lane — so the third is whatever is left of `tx_gas_spent`:
     ///
     /// ```text
-    /// destroyed = tx_gas_spent + minted_call_stipend
+    /// destroyed = tx_gas_spent + minted_call_stipend + inspector_conjured_gas
     ///             − non_compute_gas − enforced_compute_gas
     /// ```
     ///
@@ -267,13 +276,24 @@ impl AdditionalLimit {
     /// `MegaHandler::last_frame_result`. Gas that is rescued for the sender or hidden by the gas
     /// clamp is erased from the envelope before that point, so neither can reach this subtraction.
     ///
+    /// The inspector term is the same kind of correction for a different producer. An inspector
+    /// runs outside the EVM's own accounting and can write gas into an interpreter's counter or
+    /// into a frame's envelope that nobody debited — or take gas away that nobody gets back — and
+    /// the transaction then spends correspondingly less or more than its frames recorded. The
+    /// measurement shim books exactly that difference, so adding it back is again measurement
+    /// rather than correction. It is zero for every transaction that ran without an inspector and
+    /// for every observation-only inspector, which is why the law reads the same as it always did
+    /// on those paths.
+    ///
     /// Signed on purpose: a mismatch against the booked total is a defect to report, and clamping
     /// it at zero would hide the half of the mismatch space where the booking over-counts.
     /// [`settle_destroyed_compute_gas`](Self::settle_destroyed_compute_gas) is what turns the
     /// signed result into the number the transaction reports.
     #[inline]
     pub(crate) fn derived_burned_compute_gas(&self, tx_gas_spent: u64) -> i128 {
-        i128::from(tx_gas_spent) + i128::from(self.minted_call_stipend()) -
+        i128::from(tx_gas_spent) +
+            i128::from(self.minted_call_stipend()) +
+            self.inspector_conjured_gas() -
             self.non_compute_gas() -
             i128::from(self.enforced_compute_gas())
     }
@@ -315,8 +335,10 @@ impl AdditionalLimit {
         debug_assert!(
             derived >= 0,
             "derived destroyed compute gas is negative: {derived} \
-             (spent {tx_gas_spent}, minted stipend {}, non-compute {}, enforced compute {})",
+             (spent {tx_gas_spent}, minted stipend {}, inspector conjured {}, non-compute {}, \
+              enforced compute {})",
             self.minted_call_stipend(),
+            self.inspector_conjured_gas(),
             self.non_compute_gas(),
             self.enforced_compute_gas(),
         );
@@ -324,9 +346,11 @@ impl AdditionalLimit {
             derived == i128::from(self.burned_compute_gas()),
             "destroyed compute gas disagrees with the conservation law: \
              derived {derived} vs booked {} \
-             (spent {tx_gas_spent}, minted stipend {}, non-compute {}, enforced compute {})",
+             (spent {tx_gas_spent}, minted stipend {}, inspector conjured {}, non-compute {}, \
+              enforced compute {})",
             self.burned_compute_gas(),
             self.minted_call_stipend(),
+            self.inspector_conjured_gas(),
             self.non_compute_gas(),
             self.enforced_compute_gas(),
         );
@@ -386,9 +410,10 @@ impl AdditionalLimit {
         debug_assert!(
             unbooked >= 0,
             "rewritten envelope destroys a negative amount: {unbooked} \
-             (envelope {envelope_gas_spent}, minted stipend {}, non-compute {}, \
-              enforced compute {}, booked destroyed {})",
+             (envelope {envelope_gas_spent}, minted stipend {}, inspector conjured {}, \
+              non-compute {}, enforced compute {}, booked destroyed {})",
             self.minted_call_stipend(),
+            self.inspector_conjured_gas(),
             self.non_compute_gas(),
             self.enforced_compute_gas(),
             self.burned_compute_gas(),
@@ -423,6 +448,67 @@ impl AdditionalLimit {
     #[inline]
     pub(crate) fn record_minted_call_stipend(&mut self, amount: u64) {
         self.checkpoint.record_minted_call_stipend(amount);
+    }
+
+    /// What the inspector did to this transaction's gas accounting, as measured at the callback
+    /// boundaries — see [`InspectorLedger`](inspector_ledger::InspectorLedger).
+    ///
+    /// Default (all-zero) for every transaction that ran without an inspector and for every
+    /// observation-only inspector. Cumulative over the whole transaction: a caller that wants the
+    /// aggregate over one frame, or over any other window, reads this at both ends of the window
+    /// and takes the difference.
+    #[inline]
+    pub fn inspector_ledger(&self) -> inspector_ledger::InspectorLedger {
+        self.inspector
+    }
+
+    /// The net gas the inspector conjured — the term
+    /// [`derived_burned_compute_gas`](Self::derived_burned_compute_gas) adds to the envelope so
+    /// that gas nobody funded does not read as the transaction having spent less than it did.
+    #[inline]
+    pub(crate) fn inspector_conjured_gas(&self) -> i128 {
+        self.inspector.conjured_gas()
+    }
+
+    /// Books an adjustment an inspector made to a live interpreter's gas counter.
+    ///
+    /// This is the single entry point for interpreter-counter adjustments. `remaining_before` is
+    /// the counter the shim snapshotted before delegating to the user's callback, and
+    /// `gas.remaining()` is what the callback left behind; the difference is the adjustment,
+    /// because the EVM does not execute inside a callback.
+    ///
+    /// A running frame's counter is the frame's own budget, so raising it hands the frame gas the
+    /// caller never forwarded and lowering it takes gas away that the caller will never get back.
+    /// Either way the transaction's envelope stops matching what its frames recorded, which is
+    /// what the ledger's entry lets the conservation law account for.
+    pub(crate) fn record_inspector_gas_adjustment<const IN_OPEN_SEGMENT: bool>(
+        &mut self,
+        gas: &mut Gas,
+        remaining_before: u64,
+    ) {
+        let _ = IN_OPEN_SEGMENT;
+        let remaining_after = gas.remaining();
+        if remaining_after == remaining_before {
+            return;
+        }
+        self.inspector.gas += i128::from(remaining_after) - i128::from(remaining_before);
+    }
+
+    /// Books an adjustment an inspector made to a frame's envelope — the `gas_limit` the frame is
+    /// about to be built with.
+    ///
+    /// The caller's `CALL` / `CREATE` opcode debited the forwarded amount before any inspector
+    /// callback ran, so raising the limit hands the child gas the transaction never paid for, and
+    /// lowering it makes gas the caller paid for reach nobody. Either way the transaction's
+    /// envelope no longer matches the work its frames recorded, and the conservation law needs the
+    /// difference.
+    ///
+    /// Call this only when the adjusted inputs actually reach a frame. A callback that returns a
+    /// synthetic outcome has intercepted the frame, and the inputs it edited are dropped without
+    /// being read.
+    #[inline]
+    pub(crate) fn record_inspector_env_adjustment(&mut self, delta: i128) {
+        self.inspector.env += delta;
     }
 
     /// The EVM gas the transaction has spent that is neither compute work nor destroyed (REX7+,

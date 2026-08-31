@@ -448,8 +448,14 @@ where
 /// settlement has run they must add back up to the envelope the transaction burnt:
 ///
 /// ```text
-/// compute_gas_used + non_compute_gas − minted_call_stipend == total_gas_spent
+/// compute_gas_used + non_compute_gas − minted_call_stipend − inspector_conjured_gas
+///     == total_gas_spent
 /// ```
+///
+/// The inspector term is zero unless a rewriting inspector was attached: it is what the
+/// measurement shim booked for gas the inspector wrote into an interpreter counter or a frame
+/// envelope, which the transaction's own envelope never funded. Subtracting it is what keeps the
+/// law stated over the EVM's gas rather than over the EVM's gas plus an inspector's edits.
 ///
 /// The EIP-3529 refund and the EIP-7623 floor move the number a receipt reports without anyone
 /// having burnt the difference; both are carried on the result as their own fields and applied
@@ -474,15 +480,18 @@ fn debug_assert_envelope_accounted(
     if cfg!(debug_assertions) && spec.is_enabled(MegaSpecId::REX7) && !is_inside_sandbox {
         let envelope = outcome.result_and_state.result.gas().total_gas_spent();
         let accounted = i128::from(outcome.compute_gas_used) + additional_limit.non_compute_gas() -
-            i128::from(additional_limit.minted_call_stipend());
+            i128::from(additional_limit.minted_call_stipend()) -
+            additional_limit.inspector_conjured_gas();
         debug_assert!(
             accounted == i128::from(envelope),
             "the tracker lanes must account for the whole receipt envelope: \
              accounted {accounted} vs envelope {envelope} \
-             (compute {}, non-compute {}, minted stipend {}, destroyed {}, enforced {})",
+             (compute {}, non-compute {}, minted stipend {}, inspector conjured {}, \
+              destroyed {}, enforced {})",
             outcome.compute_gas_used,
             additional_limit.non_compute_gas(),
             additional_limit.minted_call_stipend(),
+            additional_limit.inspector_conjured_gas(),
             outcome.compute_gas_destroyed,
             outcome.compute_gas_enforced,
         );
