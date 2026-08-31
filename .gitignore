@@ -13,3 +13,5 @@ __pycache__/
 # archive and the reports a run produces. Both are regenerable.
 /.eest-cache
 /.eest-report
+# `--report-dir` names the directory, so a run that uses a different one leaves its own.
+/.eest-report-*

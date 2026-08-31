@@ -95,20 +95,46 @@ impl From<TxBuildError> for TestErrorKind {
     }
 }
 
+/// What walking a path for JSON fixtures found — and what it could not read.
+///
+/// The two halves are reported together on purpose. A directory the walk cannot descend into
+/// yields no fixtures, which is indistinguishable from a directory that holds none, so a walk
+/// that only returns file names turns a permission error or a broken symlink into a smaller
+/// corpus and a green run.
+#[derive(Debug, Clone, Default)]
+pub struct FixtureScan {
+    /// Every `.json` file the walk reached.
+    pub files: Vec<PathBuf>,
+    /// Entries the walk could not read, as rendered errors.
+    pub errors: Vec<String>,
+}
+
 /// Find all JSON test files in the given path
 /// If path is a file, returns it in a vector
 /// If path is a directory, recursively finds all .json files
-pub fn find_all_json_tests(path: &Path) -> Vec<PathBuf> {
+///
+/// Entries the walk cannot read are collected in [`FixtureScan::errors`] rather than dropped;
+/// every caller has to decide what an unreadable part of the corpus means for its own verdict.
+pub fn find_all_json_tests(path: &Path) -> FixtureScan {
     if path.is_file() {
-        vec![path.to_path_buf()]
-    } else {
-        WalkDir::new(path)
-            .into_iter()
-            .filter_map(Result::ok)
-            .filter(|e| e.path().extension() == Some("json".as_ref()))
-            .map(DirEntry::into_path)
-            .collect()
+        return FixtureScan { files: vec![path.to_path_buf()], errors: vec![] };
     }
+    let mut scan = FixtureScan::default();
+    for entry in WalkDir::new(path) {
+        match entry {
+            Ok(e) if e.path().extension() == Some("json".as_ref()) => {
+                scan.files.push(DirEntry::into_path(e));
+            }
+            Ok(_) => {}
+            // Name the entry the walk tripped on, not the root it started from: at corpus scale
+            // "something under state_tests/ was unreadable" is not an actionable report.
+            Err(e) => {
+                let at = e.path().unwrap_or(path).display().to_string();
+                scan.errors.push(format!("walk {at}: {e}"));
+            }
+        }
+    }
+    scan
 }
 
 /// Whether validation skips this fixture file entirely, by filename.
@@ -457,9 +483,9 @@ pub fn execute_test_suite(
     elapsed: &Arc<Mutex<Duration>>,
     trace: bool,
     print_json_outcome: bool,
-) -> Result<(), TestError> {
+) -> Result<usize, TestError> {
     if skip_test(path) {
-        return Ok(());
+        return Ok(0);
     }
 
     let path = path.to_string_lossy().into_owned();
@@ -474,7 +500,9 @@ pub fn execute_test_suite(
         kind: e.into(),
     })?;
 
+    let mut units = 0usize;
     for (name, unit) in suite.0 {
+        units += 1;
         // Prepare initial state
         let cache_state = unit.state();
 
@@ -576,7 +604,7 @@ pub fn execute_test_suite(
             }
         }
     }
-    Ok(())
+    Ok(units)
 }
 
 /// Build the `MegaETH` external environment for a test unit, reproducing the
@@ -687,8 +715,8 @@ pub struct ExecutedUnit {
     pub output: Option<Bytes>,
 }
 
-/// Execute a single [`TestUnit`] at transaction index 0 for the given spec, in
-/// isolation, timing only the EVM `transact` call.
+/// Execute a single [`TestUnit`] at the given transaction vector for the given
+/// spec, in isolation, timing only the EVM `transact` call.
 ///
 /// This runs the same `MegaEVM` pipeline as [`execute_test_suite`] — including the
 /// reproduced external environment and the Optimism `BaseFeeVault` pruning. When
@@ -696,6 +724,7 @@ pub struct ExecutedUnit {
 /// timed region); otherwise they are skipped for leaner repeated benchmarking.
 fn run_unit_once(
     unit: &TestUnit,
+    indexes: TxPartIndices,
     spec: &SpecName,
     compute_roots: bool,
 ) -> Result<(Duration, ExecutionResult<MegaHaltReason>, Option<TestValidationResult>), TestErrorKind>
@@ -711,7 +740,7 @@ fn run_unit_once(
     configure_max_blobs(&mut cfg);
 
     let block = unit.block_env(&cfg);
-    let tx = tx_env_at(unit, TxPartIndices { data: 0, gas: 0, value: 0 })?;
+    let tx = tx_env_at(unit, indexes)?;
 
     let cache = unit.state();
     let mut state =
@@ -739,16 +768,17 @@ fn run_unit_once(
     Ok((elapsed, result, validation))
 }
 
-/// Execute a single [`TestUnit`] at transaction index 0 for the given spec and
-/// collect its canonical post-execution roots, gas, status, and output.
+/// Execute a single [`TestUnit`] at the given transaction vector for the given
+/// spec and collect its canonical post-execution roots, gas, status, and output.
 ///
 /// Returns the computed values instead of comparing them against an expectation;
 /// it is the dump-time counterpart to validation.
 pub fn execute_unit_collect(
     unit: &TestUnit,
+    indexes: TxPartIndices,
     spec: &SpecName,
 ) -> Result<ExecutedUnit, TestErrorKind> {
-    let (_elapsed, result, validation) = run_unit_once(unit, spec, true)?;
+    let (_elapsed, result, validation) = run_unit_once(unit, indexes, spec, true)?;
     let validation = validation.expect("roots requested");
     Ok(ExecutedUnit {
         state_root: validation.state_root,
@@ -760,16 +790,17 @@ pub fn execute_unit_collect(
     })
 }
 
-/// Execute a single [`TestUnit`] at transaction index 0 once, returning the time
-/// spent in the EVM `transact` call together with the gas used and status.
+/// Execute a single [`TestUnit`] at the given transaction vector once, returning
+/// the time spent in the EVM `transact` call together with the gas used and status.
 ///
 /// The primitive behind [`bench_test_suite`] / `state-test --bench`: it measures
 /// EVM throughput in isolation (excluding root computation).
 pub fn time_unit_execution(
     unit: &TestUnit,
+    indexes: TxPartIndices,
     spec: &SpecName,
 ) -> Result<(Duration, u64, String), TestErrorKind> {
-    let (elapsed, result, _validation) = run_unit_once(unit, spec, false)?;
+    let (elapsed, result, _validation) = run_unit_once(unit, indexes, spec, false)?;
     Ok((elapsed, result.tx_gas_used(), execution_status(&result).to_string()))
 }
 
@@ -867,35 +898,52 @@ pub fn bench_test_suite(
             )));
         }
 
-        for _ in 0..warmup {
-            time_unit_execution(&unit, &spec)
-                .map_err(|e| fixture_err(format!("warmup {name}: {e}")))?;
+        // A unit is a family of transactions, one per vector its `post` names; benchmarking only
+        // index `{0,0,0}` would report a multi-vector fixture as though the other vectors were
+        // not there. Single-vector fixtures — every replay dump, and the whole EEST state-test
+        // corpus — keep their bare unit name and their one result.
+        let vectors = unit.vectors();
+        let multi = vectors.len() > 1;
+        for indexes in vectors {
+            let name = if multi { vector_label(&name, indexes) } else { name.clone() };
+            for _ in 0..warmup {
+                time_unit_execution(&unit, indexes, &spec)
+                    .map_err(|e| fixture_err(format!("warmup {name}: {e}")))?;
+            }
+            let mut durations = Vec::with_capacity(runs as usize);
+            let mut gas_used = 0u64;
+            let mut status = String::new();
+            for _ in 0..runs {
+                let (elapsed, gas, st) = time_unit_execution(&unit, indexes, &spec)
+                    .map_err(|e| fixture_err(format!("run {name}: {e}")))?;
+                durations.push(elapsed);
+                gas_used = gas;
+                status = st;
+            }
+            durations.sort_unstable();
+            let median = durations[durations.len() / 2];
+            let min = durations[0];
+            let mean = durations.iter().sum::<Duration>() / durations.len() as u32;
+            results.push(UnitBench {
+                name,
+                gas_used,
+                success: status == "success",
+                runs,
+                min,
+                median,
+                mean,
+            });
         }
-        let mut durations = Vec::with_capacity(runs as usize);
-        let mut gas_used = 0u64;
-        let mut status = String::new();
-        for _ in 0..runs {
-            let (elapsed, gas, st) = time_unit_execution(&unit, &spec)
-                .map_err(|e| fixture_err(format!("run {name}: {e}")))?;
-            durations.push(elapsed);
-            gas_used = gas;
-            status = st;
-        }
-        durations.sort_unstable();
-        let median = durations[durations.len() / 2];
-        let min = durations[0];
-        let mean = durations.iter().sum::<Duration>() / durations.len() as u32;
-        results.push(UnitBench {
-            name,
-            gas_used,
-            success: status == "success",
-            runs,
-            min,
-            median,
-            mean,
-        });
     }
     Ok(results)
+}
+
+/// Names one vector of a multi-vector unit, for a per-vector report line.
+///
+/// Only used when a unit actually has more than one vector, so a single-vector fixture's
+/// reported name stays exactly its key in the suite.
+pub fn vector_label(name: &str, indexes: TxPartIndices) -> String {
+    format!("{name}[d={},g={},v={}]", indexes.data, indexes.gas, indexes.value)
 }
 
 /// What a keep-going driver observed for one fixture unit.
@@ -1114,14 +1162,41 @@ fn fill_unit(
         ));
     }
 
-    let executed = panic_capture::catch(|| execute_unit_collect(unit, &spec))
-        .map_err(UnitStatus::Panic)?
-        .map_err(|e| err(format!("execute: {e}")))?;
+    // One expectation per vector the unit declares, each carrying its own `indexes`. Recording a
+    // single `{0,0,0}` entry would delete the other vectors' expectations along with the tests
+    // that used them, and `--force` — which exists to overwrite a stale expectation — would be
+    // the one flag that makes the loss silent.
+    let vectors = unit.vectors();
+    let mut tests = Vec::with_capacity(vectors.len());
+    let mut outputs = Vec::with_capacity(vectors.len());
+    for indexes in vectors {
+        let executed = panic_capture::catch(|| execute_unit_collect(unit, indexes, &spec))
+            .map_err(UnitStatus::Panic)?
+            .map_err(|e| {
+                err(format!(
+                    "execute [d={},g={},v={}]: {e}",
+                    indexes.data, indexes.gas, indexes.value
+                ))
+            })?;
+        outputs.push(executed.output.clone());
+        tests.push(Test::for_dump(
+            indexes,
+            executed.state_root,
+            executed.logs_root,
+            executed.gas_used,
+            executed.status,
+        ));
+    }
 
-    unit.out = executed.output.clone();
-    let test =
-        Test::for_dump(executed.state_root, executed.logs_root, executed.gas_used, executed.status);
-    unit.post = std::collections::BTreeMap::from([(spec, vec![test])]);
+    // `out` is one field for the whole unit, so it can only describe a unit that has one vector.
+    // For a multi-vector unit the per-vector outputs disagree in general; recording any one of
+    // them would assert it for all, so the field is cleared and the `post` entries carry the
+    // per-vector expectations instead.
+    unit.out = match outputs.as_slice() {
+        [single] => single.clone(),
+        _ => None,
+    };
+    unit.post = std::collections::BTreeMap::from([(spec, tests)]);
     Ok(())
 }
 
@@ -1198,6 +1273,9 @@ impl TestRunnerConfig {
 #[derive(Clone)]
 struct TestRunnerState {
     n_errors: Arc<AtomicUsize>,
+    /// Fixture units the workers reached. A run that reached none validated nothing, however
+    /// many files it walked.
+    n_units: Arc<AtomicUsize>,
     console_bar: Arc<ProgressBar>,
     queue: Arc<Mutex<(usize, Vec<PathBuf>)>>,
     elapsed: Arc<Mutex<Duration>>,
@@ -1208,6 +1286,7 @@ impl TestRunnerState {
         let n_files = test_files.len();
         Self {
             n_errors: Arc::new(AtomicUsize::new(0)),
+            n_units: Arc::new(AtomicUsize::new(0)),
             console_bar: Arc::new(ProgressBar::with_draw_target(
                 Some(n_files as u64),
                 ProgressDrawTarget::stdout(),
@@ -1241,10 +1320,15 @@ fn run_test_worker(state: TestRunnerState, config: TestRunnerConfig) -> Result<(
 
         state.console_bar.inc(1);
 
-        if let Err(err) = result {
-            state.n_errors.fetch_add(1, Ordering::SeqCst);
-            if !config.keep_going {
-                return Err(err);
+        match result {
+            Ok(units) => {
+                state.n_units.fetch_add(units, Ordering::SeqCst);
+            }
+            Err(err) => {
+                state.n_errors.fetch_add(1, Ordering::SeqCst);
+                if !config.keep_going {
+                    return Err(err);
+                }
             }
         }
     }
@@ -1314,6 +1398,21 @@ pub fn run(
 
     let n_errors = state.n_errors.load(Ordering::SeqCst);
     let n_thread_errors = thread_errors.len();
+    let n_units = state.n_units.load(Ordering::SeqCst);
+
+    // A run that reached no unit at all validated nothing, and "0 errors out of 0" is a truthful
+    // report of that. An empty corpus, or one whose every file is on the skip list, must not
+    // print "All tests passed!".
+    if n_errors == 0 && n_thread_errors == 0 && n_units == 0 {
+        return Err(TestError {
+            name: "summary".to_string(),
+            path: String::new(),
+            kind: TestErrorKind::FixtureError(format!(
+                "no fixture unit was validated across {n_files} file(s); the corpus is empty or \
+                 entirely skipped"
+            )),
+        });
+    }
 
     if n_errors == 0 && n_thread_errors == 0 {
         println!("All tests passed!");

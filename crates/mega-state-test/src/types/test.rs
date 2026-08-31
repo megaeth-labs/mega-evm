@@ -62,13 +62,19 @@ impl Test {
     /// Construct a `post` expectation for a dumped replay fixture.
     ///
     /// Records the canonical state/logs roots plus the explicit `MegaETH` gas and
-    /// status expectations, at transaction index 0. `expect_exception`,
-    /// `post_state`, `state`, and `txbytes` are left empty/`None` — they are not
-    /// part of a replay-derived fixture.
-    pub fn for_dump(hash: B256, logs: B256, mega_gas_used: u64, mega_status: String) -> Self {
+    /// status expectations, for the transaction vector the caller executed.
+    /// `expect_exception`, `post_state`, `state`, and `txbytes` are left
+    /// empty/`None` — they are not part of a replay-derived fixture.
+    pub fn for_dump(
+        indexes: TxPartIndices,
+        hash: B256,
+        logs: B256,
+        mega_gas_used: u64,
+        mega_status: String,
+    ) -> Self {
         Self {
             expect_exception: None,
-            indexes: TxPartIndices { data: 0, gas: 0, value: 0 },
+            indexes,
             hash,
             post_state: HashMap::default(),
             logs,

@@ -12,7 +12,7 @@
   "mechanisms": {
     "destroyed_compute_gas": 10698,
     "detention_in_force": 610,
-    "exceptional_halt": 11379
+    "exceptional_halt": 17363
   },
   "explainedFields": {
     "compute_gas_used": 17363

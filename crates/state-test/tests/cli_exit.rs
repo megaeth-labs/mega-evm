@@ -130,25 +130,90 @@ fn diff_run_with_no_unexplained_difference_exits_with_code_0() {
 }
 
 #[test]
-fn diff_run_over_two_unrelated_specs_reports_unexplained_and_exits_1() {
-    // The Rex7 precision invariant relates Rex7 to Rex6 and says nothing about any other pair, so
-    // a Rex7-against-Equivalence difference carries no licensing evidence — the MegaETH intrinsic
-    // surcharge alone moves the receipt. This is the negative control for the gate: a classifier
-    // that explained everything would exit 0 here.
+fn diff_run_over_an_unauthorized_spec_pair_is_refused() {
+    // Every rule in the classifier is a reading of one sentence, the Rex7 precision invariant,
+    // which relates Rex7 to Rex6 and states nothing about any other pair. Pointed at another pair
+    // it would grant a licence that pair never had — deciding, from mechanisms that are evidence
+    // for nothing there, that a difference is fine. It refuses instead of judging.
     let mut suite: serde_json::Value = serde_json::from_str(FAILING_SUITE).expect("parse");
     suite["exit_code_test"]["post"] = serde_json::json!({});
-    let path = write_fixture("diff_fail.json", &serde_json::to_string(&suite).expect("serialize"));
+    let path = write_fixture("diff_pair.json", &serde_json::to_string(&suite).expect("serialize"));
+    let path = path.to_str().expect("utf8 path");
 
-    let out = run_cli(&[
-        path.to_str().expect("utf8 path"),
-        "--bench-spec",
-        "Rex7",
-        "--diff-spec",
-        "Equivalence",
-    ]);
+    for (target, base) in [("Rex7", "Equivalence"), ("Rex6", "Rex5"), ("Rex6", "Rex7")] {
+        let out = run_cli(&[path, "--bench-spec", target, "--diff-spec", base]);
+        assert_eq!(out.status.code(), Some(1), "{target} vs {base} must be refused");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("Rex7") && stderr.contains("Rex6"),
+            "the error should name the one supported pair: {stderr}"
+        );
+    }
+}
+
+#[test]
+fn validate_run_that_judged_nothing_exits_1() {
+    // Same hole as in the differential mode, one mode over: a corpus whose every file is on the
+    // validation skip list walks files, reaches no unit, and reports zero errors.
+    let dir = std::env::temp_dir().join("state_test_cli_exit_all_skipped");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    std::fs::write(dir.join("ValueOverflow.json"), FAILING_SUITE).expect("write");
+
+    let out = run_cli(&[dir.to_str().expect("utf8 path")]);
+    assert_eq!(out.status.code(), Some(1), "a run that validated no unit must fail");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("no fixture unit was validated"),
+        "stderr should say what was missing: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn diff_run_that_judged_nothing_exits_1() {
+    // A sweep whose corpus never arrived reaches the gate with an empty tally: zero panics, zero
+    // unexplained differences, every count truthful and meaningless. It must not read as a pass.
+    let dir = std::env::temp_dir().join("state_test_cli_exit_empty_corpus");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("mkdir");
+
+    let out =
+        run_cli(&[dir.to_str().expect("utf8 path"), "--bench-spec", "Rex7", "--diff-spec", "Rex6"]);
+    assert_eq!(out.status.code(), Some(1), "a corpus with no fixture in it must fail");
+
+    // A directory holding only fixtures on the validation skip list reaches the runner but judges
+    // no unit, which is the same hole one step further in.
+    std::fs::write(dir.join("ValueOverflow.json"), FAILING_SUITE).expect("write");
+    let out =
+        run_cli(&[dir.to_str().expect("utf8 path"), "--bench-spec", "Rex7", "--diff-spec", "Rex6"]);
+    assert_eq!(out.status.code(), Some(1), "a sweep that judged no unit must fail");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn diff_run_with_an_unparseable_fixture_exits_1() {
+    // A file the sweep cannot parse is a fixture it did not judge. Skipping it quietly is how a
+    // corpus shrinks without anyone noticing.
+    let dir = std::env::temp_dir().join("state_test_cli_exit_bad_fixture");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    let mut suite: serde_json::Value = serde_json::from_str(FAILING_SUITE).expect("parse");
+    suite["exit_code_test"]["post"] = serde_json::json!({});
+    std::fs::write(dir.join("good.json"), serde_json::to_string(&suite).expect("serialize"))
+        .expect("write");
+    std::fs::write(dir.join("broken.json"), "{ not json").expect("write");
+
+    let out =
+        run_cli(&[dir.to_str().expect("utf8 path"), "--bench-spec", "Rex7", "--diff-spec", "Rex6"]);
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("UNEXPLAINED"), "tally should report the class: {stdout}");
-    assert_eq!(out.status.code(), Some(1), "an unexplained difference must fail the gate");
+    assert!(
+        stdout.lines().any(|l| l.split_whitespace().eq(["PASS", "1"])),
+        "the readable fixture still runs: {stdout}"
+    );
+    assert!(stdout.contains("FILE_ERROR"), "the unreadable one is reported: {stdout}");
+    assert_eq!(out.status.code(), Some(1), "a corpus the sweep only partly read is not a pass");
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

@@ -15,8 +15,11 @@ use state_test::{
         bench_test_suite, execute_test_suite, execute_unit_collect, fill_test_suite, run,
         TestError, TestErrorKind,
     },
-    types::{SpecName, TestUnit},
+    types::{SpecName, TestUnit, TxPartIndices},
 };
+
+/// The only transaction vector these fixtures declare.
+const VECTOR_0: TxPartIndices = TxPartIndices { data: 0, gas: 0, value: 0 };
 
 /// Minimal valid unit JSON: a funded sender sends a legacy transaction to a
 /// recipient whose code is `code` (use `"0x"` for a plain transfer).
@@ -83,14 +86,14 @@ fn write_suite(file_name: &str, unit: &serde_json::Value) -> PathBuf {
     path
 }
 
-fn run_suite(path: &Path) -> Result<(), TestError> {
+fn run_suite(path: &Path) -> Result<usize, TestError> {
     let elapsed = Arc::new(Mutex::new(Duration::ZERO));
     // `print_json_outcome: true` keeps the failure path single-shot (no debug
     // re-run with tracing), so error assertions stay quiet and fast.
     execute_test_suite(path, &elapsed, false, true)
 }
 
-fn expect_fixture_error(result: Result<(), TestError>, needle: &str) {
+fn expect_fixture_error(result: Result<usize, TestError>, needle: &str) {
     let err = result.expect_err("suite must fail");
     match &err.kind {
         TestErrorKind::FixtureError(msg) => {
@@ -269,8 +272,10 @@ fn block_hashes_are_injected_into_execution() {
         "0xf": "0x2222222222222222222222222222222222222222222222222222222222222222"
     });
 
-    let run1 = execute_unit_collect(&blockhash_unit(Some(h1)), &SpecName::Rex5).expect("run h1");
-    let run2 = execute_unit_collect(&blockhash_unit(Some(h2)), &SpecName::Rex5).expect("run h2");
+    let run1 =
+        execute_unit_collect(&blockhash_unit(Some(h1)), VECTOR_0, &SpecName::Rex5).expect("run h1");
+    let run2 =
+        execute_unit_collect(&blockhash_unit(Some(h2)), VECTOR_0, &SpecName::Rex5).expect("run h2");
     assert_eq!(run1.status, "success");
     assert_eq!(run2.status, "success");
     assert_ne!(
@@ -279,7 +284,7 @@ fn block_hashes_are_injected_into_execution() {
     );
 
     // Absent blockHashes: execution still works on the synthetic default.
-    let synthetic = execute_unit_collect(&blockhash_unit(None), &SpecName::Rex5)
+    let synthetic = execute_unit_collect(&blockhash_unit(None), VECTOR_0, &SpecName::Rex5)
         .expect("run without blockHashes");
     assert_eq!(synthetic.status, "success");
 }
@@ -291,7 +296,7 @@ fn block_hashes_key_overflow_is_fixture_error() {
         "0x10000000000000000":
             "0x1111111111111111111111111111111111111111111111111111111111111111"
     });
-    let err = execute_unit_collect(&blockhash_unit(Some(overflow)), &SpecName::Rex5)
+    let err = execute_unit_collect(&blockhash_unit(Some(overflow)), VECTOR_0, &SpecName::Rex5)
         .expect_err("overflowing blockHashes key must fail");
     assert!(err.to_string().contains("blockHashes"), "unexpected error: {err}");
 }

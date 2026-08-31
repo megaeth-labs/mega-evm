@@ -12,8 +12,11 @@ use std::{
 
 use state_test::{
     runner::{execute_test_suite, execute_unit_collect, fill_test_suite},
-    types::{SpecName, Test, TestSuite, TestUnit},
+    types::{SpecName, Test, TestSuite, TestUnit, TxPartIndices},
 };
+
+/// The only transaction vector these fixtures declare.
+const VECTOR_0: TxPartIndices = TxPartIndices { data: 0, gas: 0, value: 0 };
 
 /// A minimal `MegaETH` unit: a funded sender transfers value to a pre-existing
 /// recipient, under a `megaEnv` carrying a non-default SALT bucket capacity.
@@ -69,12 +72,13 @@ fn dump_fixture_json() -> (String, state_test::runner::ExecutedUnit) {
     let mut unit: TestUnit = serde_json::from_str(sample_unit_json()).expect("parse unit");
     let spec = SpecName::Rex5;
 
-    let executed = execute_unit_collect(&unit, &spec).expect("execute unit");
+    let executed = execute_unit_collect(&unit, VECTOR_0, &spec).expect("execute unit");
 
     unit.out = executed.output.clone();
     unit.post = std::collections::BTreeMap::from([(
         spec,
         vec![Test::for_dump(
+            VECTOR_0,
             executed.state_root,
             executed.logs_root,
             executed.gas_used,
@@ -150,7 +154,7 @@ fn test_undersized_bucket_capacity_fails_instead_of_panicking() {
     assert_ne!(bad, sample_unit_json(), "capacity replacement applied");
     let unit: TestUnit = serde_json::from_str(&bad).expect("parse unit");
 
-    let err = execute_unit_collect(&unit, &SpecName::Rex5)
+    let err = execute_unit_collect(&unit, VECTOR_0, &SpecName::Rex5)
         .expect_err("undersized capacity must fail execution");
     assert!(format!("{err}").contains("MIN_BUCKET_SIZE"), "unexpected error: {err}");
 }

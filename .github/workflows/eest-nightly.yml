@@ -19,16 +19,11 @@ on:
   schedule:
     # Nightly at 04:00 UTC, after the mutation sweep's 03:00 slot.
     - cron: "0 4 * * *"
+  # No spec inputs. The comparison is decided by Rex7's precision invariant, which relates Rex7 to
+  # Rex6 and states nothing about any other pair, so there is nothing here to choose: the runner
+  # refuses every other pair. When a later spec becomes the unstable one, its own invariant has to
+  # be written into the classifier, and the pair below changes with it.
   workflow_dispatch:
-    inputs:
-      target_spec:
-        description: "Spec under test"
-        type: string
-        default: "Rex7"
-      base_spec:
-        description: "Frozen spec to compare against"
-        type: string
-        default: "Rex6"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -44,8 +39,8 @@ jobs:
     # The sweep itself is minutes; the headroom is for a cold dependency build.
     timeout-minutes: 90
     env:
-      TARGET_SPEC: ${{ inputs.target_spec || 'Rex7' }}
-      BASE_SPEC: ${{ inputs.base_spec || 'Rex6' }}
+      TARGET_SPEC: "Rex7"
+      BASE_SPEC: "Rex6"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -65,8 +60,15 @@ jobs:
           echo "release=$EEST_RELEASE" >> "$GITHUB_OUTPUT"
           echo "sha256=$EEST_SHA256" >> "$GITHUB_OUTPUT"
 
-      # Keyed on the corpus hash, not on the release name: the hash is what the sweep verifies,
-      # so a cache entry can never hold something the sweep would have rejected.
+      # Keyed on the corpus hash, not on the release name, so an entry restored here always
+      # belongs to the release the sweep is pinned to.
+      #
+      # The key is not what makes the entry trustworthy. The cache holds both the archive and the
+      # tree unpacked from it, and only the archive is hash-verified on every run; a tree saved
+      # from a cancelled job would be restored intact and swept as though it were whole. What
+      # rules that out is on the other side: `run.sh` unpacks into a scratch directory, moves it
+      # into place in one step, and writes a stamp naming this archive's hash only after the
+      # extraction finished. A tree without that stamp is discarded and unpacked again.
       - name: Cache corpus
         uses: actions/cache@v4
         with:

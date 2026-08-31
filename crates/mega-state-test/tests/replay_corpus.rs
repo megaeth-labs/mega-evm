@@ -29,17 +29,18 @@ use state_test::runner::{execute_test_suite, find_all_json_tests};
 #[test]
 fn test_replay_corpus_self_validates() {
     let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../bench/replay/fixtures");
-    let fixtures = find_all_json_tests(std::path::Path::new(dir));
+    let scan = find_all_json_tests(std::path::Path::new(dir));
 
-    assert!(!fixtures.is_empty(), "replay corpus is empty at {dir}");
+    assert!(scan.errors.is_empty(), "replay corpus is not fully readable: {:?}", scan.errors);
+    assert!(!scan.files.is_empty(), "replay corpus is empty at {dir}");
 
     let elapsed = Arc::new(Mutex::new(Duration::ZERO));
     let mut passed = 0usize;
-    for path in &fixtures {
+    for path in &scan.files {
         execute_test_suite(path, &elapsed, false, false).unwrap_or_else(|e| {
             panic!("replay fixture {} failed to validate: {e}", path.display())
         });
         passed += 1;
     }
-    assert_eq!(passed, fixtures.len(), "all corpus fixtures must validate");
+    assert_eq!(passed, scan.files.len(), "all corpus fixtures must validate");
 }

@@ -99,12 +99,27 @@ if [ -z "$CORPUS_DIR" ]; then
   echo "==> corpus hash verified: $EEST_SHA256"
 
   CORPUS_DIR="$CACHE_DIR/$EEST_RELEASE/state_tests"
-  if [ ! -d "$CORPUS_DIR" ]; then
+  # A tree is reusable only if the run that produced it finished. Unpacking straight into the
+  # final path leaves a half-extracted tree behind on any interruption — a cancelled job, a full
+  # disk, a cache saved mid-write — and the next run finds a directory that exists, sweeps a
+  # fraction of the corpus, and reports a clean tally over it. The stamp is written last and names
+  # the archive hash, so it is a claim only a completed extraction of *this* archive can make.
+  STAMP="$CORPUS_DIR/.unpacked"
+  if [ ! -f "$STAMP" ] || [ "$(cat "$STAMP" 2>/dev/null)" != "$EEST_SHA256" ]; then
     echo "==> unpacking state_tests"
-    mkdir -p "$CACHE_DIR/$EEST_RELEASE"
+    rm -rf "$CORPUS_DIR"
+    # Extract into a scratch directory and move it into place in one step: the final path either
+    # does not exist or holds a complete tree, never a partial one.
+    STAGE="$CACHE_DIR/.unpack.$$"
+    rm -rf "$STAGE"
+    mkdir -p "$STAGE"
     # Only `state_tests` is unpacked: the runner reads the state-test format, and the archive's
     # blockchain-test subtrees are several times larger.
-    tar -xzf "$ARCHIVE" -C "$CACHE_DIR/$EEST_RELEASE" --strip-components=1 fixtures/state_tests
+    tar -xzf "$ARCHIVE" -C "$STAGE" --strip-components=1 fixtures/state_tests
+    printf '%s' "$EEST_SHA256" >"$STAGE/state_tests/.unpacked"
+    mkdir -p "$CACHE_DIR/$EEST_RELEASE"
+    mv "$STAGE/state_tests" "$CORPUS_DIR"
+    rm -rf "$STAGE"
   fi
 fi
 
@@ -114,6 +129,10 @@ if [ ! -d "$CORPUS_DIR" ]; then
 fi
 FIXTURE_COUNT="$(find "$CORPUS_DIR" -name '*.json' | wc -l | tr -d ' ')"
 echo "==> corpus: $CORPUS_DIR ($FIXTURE_COUNT fixture files)"
+if [ "$FIXTURE_COUNT" -eq 0 ]; then
+  echo "corpus holds no fixtures: $CORPUS_DIR" >&2
+  exit 1
+fi
 
 # --- binary -----------------------------------------------------------------------------------
 
@@ -176,6 +195,13 @@ fi
 field() { echo "$TALLY" | tr ' ' '\n' | grep "^$1=" | cut -d= -f2; }
 PANICS="$(field PANIC)"
 FILE_ERRS="$(field FILE_ERR)"
+TOTAL="$(field TOTAL)"
+# A run that reached no unit at all reports zero panics and zero file errors, truthfully, and
+# says nothing. It is the one tally that must never pass.
+if [ "${TOTAL:-0}" -eq 0 ]; then
+  echo "gate failed: the sweep judged no unit (TOTAL=0)" >&2
+  exit 1
+fi
 if [ "${PANICS:-0}" -gt 0 ] || [ "${FILE_ERRS:-0}" -gt 0 ]; then
   echo "gate failed: PANIC=$PANICS FILE_ERR=$FILE_ERRS" >&2
   exit 1

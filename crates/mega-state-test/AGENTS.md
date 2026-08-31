@@ -20,12 +20,19 @@ The `state-test` CLI (`crates/state-test`) is a thin front-end over this crate.
 - Failure debugging path can re-run with tracer context for inspection.
 - Parallel execution uses shared queue and atomic counters with optional single-thread mode.
 - Differential classification is evidence-based, never a list of fixtures allowed to differ: every `Mechanism` is a fact read off an execution, and the hypothesis it falsifies is what licenses a difference.
+- Only an execution-provenance observation licenses anything. The fixture is the input under test, so a `Mechanism` read out of revert-payload bytes is reported and never falsifies a hypothesis; a derived quantity (the Rex7 destroyed remainder) needs an independent witness rather than certifying itself.
+- A differential run is defined for exactly one spec pair, the one whose precision invariant the classifier encodes (`DiffSpecs::new`). There is no general two-spec comparator.
+- A unit is a family of transactions, one per vector its `post` names (`TestUnit::vectors`). Diff, fill and bench each enumerate them; nothing takes index `{0,0,0}` and calls it the unit.
+- Every mode fails when it judged no unit at all: an empty tally is truthful and meaningless, and a corpus that never arrived must not read as a pass.
 - Corpus drivers keep going per unit (`fill_test_suite_keep_going`, `diff_test_suite`) and record a unit's failure or panic rather than ending the file.
 - BaseFeeVault state changes are pruned as MegaETH-specific normalization.
 - The SALT bucket hasher comes from `mega_evm::AHashBucketHasher` (via the `test-utils` feature); never introduce a standalone salt/hasher dependency.
 
 ## ANTI-PATTERNS
 - Do not explain a differential disagreement with a fixture allowlist; add a `Mechanism` that reads the evidence instead, and state which hypothesis it falsifies.
+- Do not let a `Mechanism` inferred from bytes the fixture could have written falsify a hypothesis; `Mechanism::provenance` records where an observation came from and the licensing rule follows it.
+- Do not classify a halt by matching its `Debug` rendering; match the `MegaHaltReason` variants with no catch-all arm, so a new variant has to be decided rather than defaulted.
+- Do not drop an entry the fixture-discovery walk could not read; an unreadable directory is a hole in coverage, not an empty one.
 - Do not spread exception matching logic across multiple files.
 - Keep it centralized to avoid drift.
 - Do not bypass `compute_test_roots` when changing validation outputs.
@@ -36,7 +43,9 @@ The `state-test` CLI (`crates/state-test`) is a thin front-end over this crate.
 - Add/adjust skip policy: `runner.rs::skip_test`.
 - Change validation semantics for roots/output/exception: `runner.rs::{validate_exception,validate_output,check_evm_execution}`.
 - Change worker behavior or fail-fast policy: `runner.rs::{run_test_worker,run,TestRunnerConfig}`.
-- Change what a differential run compares or what licenses a difference: `diff.rs::{DiffField,Mechanism,judge}`.
+- Change what a differential run compares or what licenses a difference: `diff.rs::{DiffField,Mechanism,Provenance,halt_kind,judge}`.
+- Change which spec pair a differential run accepts: `diff.rs::DiffSpecs::new`.
+- Change how a unit's transaction vectors are enumerated: `types/test_unit.rs::TestUnit::vectors`.
 - Change the corpus sweep or its CI gates: `tools/eest-sweep/` and `.github/workflows/eest-nightly.yml`.
 - Update JSON schema mapping for test fixtures: `src/types/*` and deserializer modules.
 - Change CLI flags or path handling: `crates/state-test/src/main.rs`.

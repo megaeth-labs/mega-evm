@@ -3,19 +3,26 @@
 //! The classifier's decision table is unit-tested in `src/diff.rs`; these tests drive real
 //! executions, so they cover the parts the table cannot: that the two specs are actually executed
 //! and committed the way validation does, that the staged frame evidence reaches a halt no
-//! transaction result exposes, and that a keep-going fill isolates one unit's failure from the
-//! rest of its file.
+//! transaction result exposes, that evidence a fixture authored itself buys it nothing, and that
+//! a keep-going fill isolates one unit's failure from the rest of its file.
 
+use mega_evm::{alloy_sol_types::SolError, revm::primitives::B256, MegaLimitExceeded};
 use state_test::{
-    diff::{diff_test_suite, diff_unit, execute_unit_outcome, DiffClass, DiffSpecs, Mechanism},
-    runner::{fill_test_suite, fill_test_suite_keep_going, UnitStatus},
-    types::{SpecName, TestUnit},
+    diff::{
+        collect_fixture_files, compare, diff_test_suite, diff_unit, execute_unit_outcome, judge,
+        run_diff, DiffClass, DiffRunConfig, DiffSpecs, Mechanism, SpecOutcome,
+    },
+    runner::{fill_test_suite, fill_test_suite_keep_going, FixtureScan, UnitStatus},
+    types::{SpecName, TestUnit, TxPartIndices},
 };
 use std::path::PathBuf;
 
 const SENDER: &str = "0x1000000000000000000000000000000000000001";
 const CALLEE: &str = "0x2000000000000000000000000000000000000002";
 const INNER: &str = "0x3000000000000000000000000000000000000003";
+
+/// The single transaction vector these hand-built fixtures declare.
+const VECTOR_0: TxPartIndices = TxPartIndices { data: 0, gas: 0, value: 0 };
 
 /// `CALL(0 gas, 0x40..04, no value, no args, no return); POP` — runs out of gas partway.
 ///
@@ -25,12 +32,36 @@ const INNER: &str = "0x3000000000000000000000000000000000000003";
 const INNER_RUNS_OUT: &str =
     "0x600060006000600060007340000000000000000000000000000000000000046000f150";
 
-/// `CALL(<gas> gas, INNER, no value, no args, no return); POP; STOP`.
+/// `CALL(<gas> gas, INNER, no value, no args, no return); POP` — no trailing `STOP`.
 ///
-/// `CALL` pushes 0 on failure and this frame carries on to a normal `STOP`, so nothing about the
-/// child's halt reaches the transaction's own result.
-fn call_into_inner(gas: u16) -> String {
-    format!("0x6000600060006000600073{}61{gas:04x}f1500000", &INNER[2..])
+/// `CALL` pushes 0 on failure and the caller carries on, so nothing about the child's halt
+/// reaches the transaction's own result.
+fn call_inner_frag(gas: u16) -> String {
+    format!("6000600060006000600073{}61{gas:04x}f150", &INNER[2..])
+}
+
+/// `CALL(<gas> gas, 0x08, no value, 1 byte of args, no return); POP` — no trailing `STOP`.
+///
+/// `0x08` is the bn128 pairing precompile, which rejects any input whose length is not a multiple
+/// of 192. It never becomes an EVM frame, so the whole forwarded envelope is lost without being
+/// executed: Rex7 books it as a destroyed remainder, and the caller absorbs the failure.
+fn call_precompile_frag(gas: u16) -> String {
+    format!("60006000600160006000600861{gas:04x}f150")
+}
+
+/// Wraps code fragments into a contract that runs them and stops.
+fn contract(frags: &[String]) -> String {
+    format!("0x{}00", frags.concat())
+}
+
+/// `MSTORE(0, <selector padded left>); REVERT(28, 4)` — a plain revert carrying four chosen bytes.
+///
+/// Nothing about this contract is a `MegaETH` mechanism. It writes the same four bytes `MegaETH`
+/// writes when a frame-local resource limit is exceeded, which is all a classifier that reads
+/// revert payloads as evidence would need to see.
+fn revert_with_selector(selector: [u8; 4]) -> String {
+    let word = u32::from_be_bytes(selector);
+    format!("0x63{word:08x}6000526004601cfd")
 }
 
 /// A unit whose transaction calls `CALLEE`, with an optional third account at `INNER`.
@@ -76,7 +107,16 @@ fn parse_unit(json: &serde_json::Value) -> TestUnit {
 }
 
 fn rex7_over_rex6() -> DiffSpecs {
-    DiffSpecs { target: SpecName::Rex7, base: SpecName::Rex6 }
+    let (target, base) = DiffSpecs::SUPPORTED;
+    DiffSpecs::new(target, base).expect("the supported pair")
+}
+
+fn rex7(unit: &TestUnit, collect_evidence: bool) -> SpecOutcome {
+    execute_unit_outcome(unit, VECTOR_0, &SpecName::Rex7, collect_evidence).expect("rex7 executes")
+}
+
+fn rex6(unit: &TestUnit, collect_evidence: bool) -> SpecOutcome {
+    execute_unit_outcome(unit, VECTOR_0, &SpecName::Rex6, collect_evidence).expect("rex6 executes")
 }
 
 /// Writes a suite of named units to a unique temp file and returns its path.
@@ -99,10 +139,9 @@ fn write_suite(file_name: &str, units: &[(&str, serde_json::Value)]) -> PathBuf 
 /// particular gas number does.
 fn inner_halt_json() -> serde_json::Value {
     for gas in 1..=64u16 {
-        let json = unit_json(&call_into_inner(gas), Some(INNER_RUNS_OUT));
+        let json = unit_json(&contract(&[call_inner_frag(gas)]), Some(INNER_RUNS_OUT));
         let unit = parse_unit(&json);
-        let target = execute_unit_outcome(&unit, &SpecName::Rex7, false).expect("rex7 executes");
-        let base = execute_unit_outcome(&unit, &SpecName::Rex6, false).expect("rex6 executes");
+        let (target, base) = (rex7(&unit, false), rex6(&unit, false));
         let hidden = target.status == "success" && target.compute_gas_destroyed == 0;
         if hidden && target.compute_gas_used != base.compute_gas_used {
             return json;
@@ -115,12 +154,38 @@ fn inner_halt_unit() -> TestUnit {
     parse_unit(&inner_halt_json())
 }
 
+/// A unit whose two specs disagree on the reported compute total, that books a Rex7 destroyed
+/// remainder, and whose own transaction result is a plain success.
+///
+/// Two independent inner calls: a failing precompile, which loses its whole envelope without
+/// executing it and so books the remainder, and a gas-starved inner frame, which is what actually
+/// moves the reported total. Neither is visible from the transaction's own result, so before the
+/// frame pass the remainder is the only thing on the table — exactly the situation in which a
+/// derived number must not be allowed to certify itself.
+///
+/// Searched over the inner allowance for the same reason as [`inner_halt_json`]: the property is
+/// that the shape exists, not that a particular gas number produces it.
+fn destroyed_without_visible_halt_unit() -> TestUnit {
+    for gas in 1..=64u16 {
+        let code = contract(&[call_precompile_frag(2_000), call_inner_frag(gas)]);
+        let unit = parse_unit(&unit_json(&code, Some(INNER_RUNS_OUT)));
+        let (target, base) = (rex7(&unit, false), rex6(&unit, false));
+        if target.status == "success" &&
+            target.compute_gas_destroyed > 0 &&
+            target.compute_gas_used != base.compute_gas_used
+        {
+            return unit;
+        }
+    }
+    panic!("no forwarded-gas amount produced a destroyed remainder under a successful transaction")
+}
+
 // A transaction that stays inside every limit, ends no frame in an exceptional halt and trips no
 // guard is bit-identical under Rex7 and Rex6 — the precision invariant's own statement, executed.
 #[test]
 fn test_within_limit_transaction_is_identical_under_both_specs() {
     let unit = parse_unit(&unit_json("0x", None));
-    let outcome = diff_unit(&unit, rex7_over_rex6(), true);
+    let outcome = diff_unit(&unit, VECTOR_0, rex7_over_rex6(), true);
     assert_eq!(outcome.class, DiffClass::Pass, "{outcome:?}");
     assert!(outcome.fields.is_empty());
 }
@@ -133,19 +198,91 @@ fn test_within_limit_transaction_is_identical_under_both_specs() {
 fn test_inner_frame_halt_is_explained_only_with_frame_evidence() {
     let unit = inner_halt_unit();
 
-    let without = diff_unit(&unit, rex7_over_rex6(), false);
+    let without = diff_unit(&unit, VECTOR_0, rex7_over_rex6(), false);
     assert_eq!(
         without.class,
         DiffClass::Unexplained,
         "the transaction's own result hides the inner halt: {without:?}"
     );
 
-    let with = diff_unit(&unit, rex7_over_rex6(), true);
+    let with = diff_unit(&unit, VECTOR_0, rex7_over_rex6(), true);
     assert_eq!(with.class, DiffClass::Explained, "{with:?}");
     assert!(
         with.mechanisms.contains(&Mechanism::ExceptionalHalt),
         "frame evidence should name the halt: {:?}",
         with.mechanisms
+    );
+}
+
+// A destroyed remainder is derived from a conservation law over the transaction's envelope, not
+// observed. A missing term in that law produces a non-zero remainder with no halt behind it, so
+// letting the remainder license the compute-total difference it causes would make that defect its
+// own alibi. Here a real transaction books one and ends in a plain success: the remainder alone
+// leaves the difference unexplained, and only the halted frame the inspector finds licenses it.
+#[test]
+fn test_destroyed_remainder_is_licensed_by_the_frame_not_by_itself() {
+    let unit = destroyed_without_visible_halt_unit();
+
+    let without = diff_unit(&unit, VECTOR_0, rex7_over_rex6(), false);
+    assert_eq!(
+        without.class,
+        DiffClass::Unexplained,
+        "a destroyed remainder must not certify the halt it claims: {without:?}"
+    );
+    assert!(
+        without.mechanisms.contains(&Mechanism::DestroyedComputeGas),
+        "the remainder is still reported: {:?}",
+        without.mechanisms
+    );
+
+    let with = diff_unit(&unit, VECTOR_0, rex7_over_rex6(), true);
+    assert_eq!(with.class, DiffClass::Explained, "{with:?}");
+    assert!(
+        with.mechanisms.contains(&Mechanism::ExceptionalHalt),
+        "the independent witness is the frame the EVM finished: {:?}",
+        with.mechanisms
+    );
+}
+
+// Anti-vacuity control, and the reason evidence has to be bound to the execution. A contract that
+// writes MegaETH's `MegaLimitExceeded` selector into its revert buffer is observed doing so — the
+// claim is real and reported — but it claims the hypothesis that licenses *every* compared
+// quantity, and it is four bytes any fixture can write. An unrelated difference laid over that
+// execution stays UNEXPLAINED, so the sweep cannot be talked out of a finding by its own input.
+#[test]
+fn test_a_forged_limit_selector_buys_no_exemption() {
+    let selector: [u8; 4] = MegaLimitExceeded::SELECTOR;
+    let unit = parse_unit(&unit_json(&revert_with_selector(selector), None));
+
+    // The forgery is a plain `REVERT`, and the inspector does see the four bytes.
+    let observed = rex7(&unit, true);
+    let frames = observed.frames.expect("the inspected pass collects frame evidence");
+    assert!(
+        frames.limit_revert_payloads > 0,
+        "the forged selector should be observed and reported: {frames:?}"
+    );
+    assert_eq!(frames.halted, 0, "a plain revert is not a halt");
+
+    // On its own the fixture is identical under both specs — the forgery changes nothing.
+    let outcome = diff_unit(&unit, VECTOR_0, rex7_over_rex6(), true);
+    assert_eq!(outcome.class, DiffClass::Pass, "{outcome:?}");
+
+    // Lay an unrelated difference over the same real execution — one on a quantity only a changed
+    // execution path can move. The forged claim is the only thing on the table, and it licenses
+    // nothing, so the difference is still a finding.
+    let mut target = observed.clone();
+    target.state_root = B256::repeat_byte(9);
+    target.gas_used += 1;
+    let verdict = judge(&compare(&target, &observed), &target, &observed);
+    assert_eq!(
+        verdict.class,
+        DiffClass::Unexplained,
+        "bytes the fixture chose must not license a difference: {verdict:?}"
+    );
+    assert!(
+        verdict.mechanisms.contains(&Mechanism::LimitRevertPayload),
+        "the claim is still reported for a human triaging the finding: {:?}",
+        verdict.mechanisms
     );
 }
 
@@ -172,8 +309,71 @@ fn test_transaction_rejected_by_both_specs_is_skipped() {
     let mut json = unit_json("0x", None);
     json["transaction"]["gasLimit"] = serde_json::json!(["0x1"]);
     let unit = parse_unit(&json);
-    let outcome = diff_unit(&unit, rex7_over_rex6(), true);
+    let outcome = diff_unit(&unit, VECTOR_0, rex7_over_rex6(), true);
     assert_eq!(outcome.class, DiffClass::Skipped, "{outcome:?}");
+}
+
+/// A unit with two transaction vectors: `data[1]` is a non-empty calldata, and the two `post`
+/// entries name index 0 and index 1.
+fn two_vector_json() -> serde_json::Value {
+    let mut json = unit_json("0x", None);
+    json["transaction"]["data"] = serde_json::json!(["0x", "0xdeadbeef"]);
+    let entry = |data: usize| {
+        serde_json::json!({
+            "indexes": { "data": data, "gas": 0, "value": 0 },
+            "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+            "logs": "0x0000000000000000000000000000000000000000000000000000000000000000"
+        })
+    };
+    json["post"] = serde_json::json!({ "Rex6": [entry(0), entry(1)] });
+    json
+}
+
+// A unit is a family of transactions, one per vector its `post` names. Judging only index
+// `{0,0,0}` would report a green unit while never running the rest of it, and every count the
+// sweep prints would be short by the vectors it skipped.
+#[test]
+fn test_every_declared_vector_is_judged() {
+    let unit = parse_unit(&two_vector_json());
+    assert_eq!(unit.vectors().len(), 2, "the fixture declares two vectors");
+
+    let path = write_suite("two_vectors.json", &[("family", two_vector_json())]);
+    let diffs = diff_test_suite(&path, rex7_over_rex6(), true).expect("diff suite");
+    assert_eq!(diffs.len(), 2, "one verdict per vector: {diffs:?}");
+    let mut names: Vec<&str> = diffs.iter().map(|d| d.name.as_str()).collect();
+    names.sort_unstable();
+    assert_eq!(names, ["family[d=0,g=0,v=0]", "family[d=1,g=0,v=0]"]);
+
+    // The two vectors send different calldata, so they are genuinely different transactions and
+    // not the same one counted twice.
+    let gas: Vec<u64> = unit
+        .vectors()
+        .into_iter()
+        .map(|v| execute_unit_outcome(&unit, v, &SpecName::Rex7, false).expect("executes").gas_used)
+        .collect();
+    assert_ne!(gas[0], gas[1], "calldata cost should differ between the vectors");
+}
+
+// `--fill --force` exists to overwrite a stale expectation. Collapsing the `post` map to a single
+// `{0,0,0}` entry would make it delete the other vectors' expectations too, and silently: the
+// file still parses, still validates, and covers less than it did.
+#[test]
+fn test_fill_records_one_expectation_per_vector() {
+    let path = write_suite("fill_two_vectors.json", &[("family", two_vector_json())]);
+    let report =
+        fill_test_suite_keep_going(&path, Some(SpecName::Rex7), true).expect("fill the file");
+    assert_eq!(report.filled(), 1);
+
+    let written: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).expect("read")).expect("json");
+    let post = &written["family"]["post"]["Rex7"];
+    assert_eq!(post.as_array().map(Vec::len), Some(2), "both vectors kept: {post}");
+    assert_eq!(post[0]["indexes"], serde_json::json!({ "data": 0, "gas": 0, "value": 0 }));
+    assert_eq!(post[1]["indexes"], serde_json::json!({ "data": 1, "gas": 0, "value": 0 }));
+    assert_ne!(
+        post[0]["megaGasUsed"], post[1]["megaGasUsed"],
+        "each entry records its own vector's execution"
+    );
 }
 
 // Keep-going fill: one unit's failure must cost that unit, not the units after it in the same
@@ -208,4 +408,79 @@ fn test_keep_going_fill_isolates_one_unit_failure() {
     assert!(written["a_ok"]["post"]["Rex7"].is_array());
     assert!(written["c_ok"]["post"]["Rex7"].is_array());
     assert_eq!(written["b_broken"]["post"], serde_json::json!({}));
+}
+
+// A part of the corpus the discovery walk could not read is a hole in coverage, and it reaches
+// the gate as a smaller file list — every count still truthful, every count short. `run_diff`
+// carries those errors into the tally so the run fails instead of grading the part it reached.
+#[test]
+fn test_an_unreadable_part_of_the_corpus_fails_the_run() {
+    let path = write_suite("scan_errors.json", &[("quiet", unit_json("0x", None))]);
+    let clean = FixtureScan { files: vec![path.clone()], errors: vec![] };
+    let config = DiffRunConfig {
+        specs: rex7_over_rex6(),
+        single_thread: true,
+        collect_evidence: true,
+        progress: false,
+    };
+
+    let tally = run_diff(clean, config);
+    assert_eq!(tally.count(DiffClass::Pass), 1);
+    assert!(!tally.is_failure(), "a corpus the sweep read in full and passed");
+
+    let partial =
+        FixtureScan { files: vec![path], errors: vec!["walk /corpus/sub: denied".to_string()] };
+    let tally = run_diff(partial, config);
+    assert_eq!(tally.count(DiffClass::Pass), 1, "the readable part still runs");
+    assert_eq!(tally.file_errors.len(), 1, "and the unreadable part is reported");
+    assert!(tally.is_failure(), "a partly-read corpus is not a pass");
+}
+
+// A directory whose contents cannot be listed yields no fixtures, which is indistinguishable from
+// a directory that holds none. The walk has to report it.
+#[test]
+#[cfg(unix)]
+fn test_discovery_reports_a_directory_it_cannot_read() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = std::env::temp_dir().join("mega_state_test_unreadable_scan");
+    let _ = std::fs::remove_dir_all(&root);
+    let locked = root.join("locked");
+    std::fs::create_dir_all(&locked).expect("mkdir");
+    std::fs::write(locked.join("hidden.json"), "{}").expect("write");
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+
+    let unreadable = std::fs::read_dir(&locked).is_err();
+    let scan = state_test::runner::find_all_json_tests(&root);
+
+    // Restore before asserting, so a failure does not leave an unreadable directory behind.
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).expect("chmod back");
+    let _ = std::fs::remove_dir_all(&root);
+
+    // Running as root defeats the permission bits; then there is nothing to detect and the walk
+    // legitimately finds the file.
+    if unreadable {
+        assert!(scan.files.is_empty(), "the fixture is behind the locked directory");
+        assert!(!scan.errors.is_empty(), "the unreadable directory must be reported");
+    } else {
+        assert_eq!(scan.files.len(), 1, "readable after all (running as root?)");
+    }
+}
+
+// The path-level guards the differential run relies on before it judges anything.
+#[test]
+fn test_collect_fixture_files_rejects_a_corpus_with_nothing_in_it() {
+    let missing = std::env::temp_dir().join("mega_state_test_no_such_corpus_4928");
+    let _ = std::fs::remove_dir_all(&missing);
+    assert!(
+        collect_fixture_files(std::slice::from_ref(&missing)).is_err(),
+        "a path that does not exist"
+    );
+
+    std::fs::create_dir_all(&missing).expect("mkdir");
+    assert!(
+        collect_fixture_files(std::slice::from_ref(&missing)).is_err(),
+        "a directory with no fixtures"
+    );
+    let _ = std::fs::remove_dir_all(&missing);
 }

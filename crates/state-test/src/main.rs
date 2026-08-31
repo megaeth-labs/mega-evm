@@ -115,9 +115,22 @@ impl Cmd {
             }
 
             println!("\nRunning tests in {}...", path.display());
-            let test_files = find_all_json_tests(path);
+            let scan = find_all_json_tests(path);
+            // A directory the walk could not descend into contributes no fixtures, which looks
+            // exactly like a directory that holds none. Fail rather than run the part that was
+            // readable and report it as the whole.
+            if let Some(err) = scan.errors.first() {
+                return Err(TestError {
+                    name: "Path validation".to_string(),
+                    path: path.display().to_string(),
+                    kind: TestErrorKind::FixtureError(format!(
+                        "{} path(s) could not be read; first: {err}",
+                        scan.errors.len()
+                    )),
+                });
+            }
 
-            if test_files.is_empty() {
+            if scan.files.is_empty() {
                 return Err(TestError {
                     name: "Path validation".to_string(),
                     path: path.display().to_string(),
@@ -125,7 +138,7 @@ impl Cmd {
                 });
             }
 
-            run(test_files, self.single_thread, self.json, self.json_outcome, self.keep_going)?
+            run(scan.files, self.single_thread, self.json, self.json_outcome, self.keep_going)?
         }
         Ok(())
     }
@@ -153,7 +166,24 @@ impl Cmd {
                     kind: TestErrorKind::InvalidPath,
                 });
             }
-            for file in find_all_json_tests(path) {
+            let scan = find_all_json_tests(path);
+            // Same hole as in the other modes, reported the way this mode reports a file it could
+            // not read: as a FILE_ERR that the tally's gate counts.
+            for err in &scan.errors {
+                println!("FILE_ERR\t{}\t{}", path.display(), err.replace('\n', " "));
+                file_errors += 1;
+            }
+            if !self.keep_going && !scan.errors.is_empty() {
+                return Err(TestError {
+                    name: "Path validation".to_string(),
+                    path: path.display().to_string(),
+                    kind: TestErrorKind::FixtureError(format!(
+                        "{} path(s) could not be read",
+                        scan.errors.len()
+                    )),
+                });
+            }
+            for file in scan.files {
                 if self.keep_going {
                     // A file the runner declines as a whole (an unreadable fixture, a filename on
                     // the validation skip list) must not end the sweep either: record it and move
@@ -210,6 +240,18 @@ impl Cmd {
             "Fill tally: OK={filled} ERR={errors} PANIC={panics} FILE_ERR={file_errors} \
              SKIP_FILE={skipped_files} TOTAL={total}"
         );
+        // A sweep that filled and declined nothing reached no unit at all: an empty corpus, or one
+        // whose every file was unreadable. Its zeroes are truthful and meaningless, so they must
+        // not read as a pass.
+        if total == 0 {
+            return Err(TestError {
+                name: "fill summary".to_string(),
+                path: String::new(),
+                kind: TestErrorKind::FixtureError(
+                    "no unit was judged; the corpus is empty or unreachable".to_string(),
+                ),
+            });
+        }
         if errors + panics + file_errors == 0 {
             return Ok(());
         }
@@ -227,11 +269,18 @@ impl Cmd {
         let base = self.resolve_diff_spec()?.expect("run_diff is only reached with --diff-spec");
         // Clap's `requires = "bench_spec"` makes the target explicit before this point.
         let target = self.resolve_spec()?.expect("--diff-spec requires --bench-spec");
-        let files = collect_fixture_files(&self.paths)?;
+        // The comparison is decided by Rex7's precision invariant, which relates Rex7 to Rex6 and
+        // states nothing about any other pair; running it over one would apply that licence where
+        // none was granted.
+        let specs = DiffSpecs::new(target, base).map_err(|detail| TestError {
+            name: "spec pair".to_string(),
+            path: String::new(),
+            kind: TestErrorKind::FixtureError(detail),
+        })?;
+        let scan = collect_fixture_files(&self.paths)?;
 
-        let specs = DiffSpecs { target, base };
         let tally = run_diff(
-            files,
+            scan,
             DiffRunConfig {
                 specs,
                 single_thread: self.single_thread,
@@ -281,7 +330,18 @@ impl Cmd {
                     kind: TestErrorKind::InvalidPath,
                 });
             }
-            for file in find_all_json_tests(path) {
+            let scan = find_all_json_tests(path);
+            if let Some(err) = scan.errors.first() {
+                return Err(TestError {
+                    name: "Path validation".to_string(),
+                    path: path.display().to_string(),
+                    kind: TestErrorKind::FixtureError(format!(
+                        "{} path(s) could not be read; first: {err}",
+                        scan.errors.len()
+                    )),
+                });
+            }
+            for file in scan.files {
                 all.extend(bench_test_suite(
                     &file,
                     self.bench_runs,
@@ -289,6 +349,21 @@ impl Cmd {
                     spec_override,
                 )?);
             }
+        }
+
+        if all.is_empty() {
+            return Err(TestError {
+                name: "bench".to_string(),
+                path: self
+                    .paths
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                kind: TestErrorKind::FixtureError(
+                    "no unit was benchmarked; the corpus is empty or unreachable".to_string(),
+                ),
+            });
         }
 
         let bench_json = |u: &UnitBench| {

@@ -2,7 +2,7 @@ use mega_evm::{revm::primitives::eip4844, MegaSpecId};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-use super::{AccountInfo, Env, MegaEnv, SpecName, Test, TransactionParts};
+use super::{AccountInfo, Env, MegaEnv, SpecName, Test, TransactionParts, TxPartIndices};
 use mega_evm::revm::{
     context::{block::BlockEnv, cfg::CfgEnv},
     database::CacheState,
@@ -74,6 +74,28 @@ pub struct TestUnit {
 }
 
 impl TestUnit {
+    /// Every transaction vector this unit defines, ascending and deduplicated.
+    ///
+    /// A state-test unit is not one transaction but a family of them: `transaction` holds arrays
+    /// of `data`, `gasLimit` and `value`, and each `post` entry names the combination it pins
+    /// through its `indexes`. Validation runs every one of those entries, so any other consumer
+    /// that judges or rewrites a unit has to enumerate the same set — taking index `{0,0,0}` and
+    /// calling it "the unit" silently drops whatever the other vectors would have shown.
+    ///
+    /// A unit with no `post` at all (a hand-built or snapshot-derived fixture) declares no
+    /// vector; index `{0,0,0}` is the only one such a fixture can mean, and it is what a fill
+    /// records.
+    pub fn vectors(&self) -> Vec<TxPartIndices> {
+        let mut vectors: Vec<TxPartIndices> =
+            self.post.values().flatten().map(|test| test.indexes).collect();
+        vectors.sort_unstable();
+        vectors.dedup();
+        if vectors.is_empty() {
+            vectors.push(TxPartIndices { data: 0, gas: 0, value: 0 });
+        }
+        vectors
+    }
+
     /// Prepare the state from the test unit.
     ///
     /// This function uses [`TestUnit::pre`] to prepare the pre-state from the test unit.
