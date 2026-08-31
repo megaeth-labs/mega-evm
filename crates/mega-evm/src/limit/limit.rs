@@ -470,28 +470,75 @@ impl AdditionalLimit {
         self.inspector.conjured_gas()
     }
 
-    /// Books an adjustment an inspector made to a live interpreter's gas counter.
+    /// Books an adjustment an inspector made to a live interpreter's gas counter, and restores
+    /// correct accounting and enforcement around it.
     ///
     /// This is the single entry point for interpreter-counter adjustments. `remaining_before` is
     /// the counter the shim snapshotted before delegating to the user's callback, and
     /// `gas.remaining()` is what the callback left behind; the difference is the adjustment,
     /// because the EVM does not execute inside a callback.
     ///
-    /// A running frame's counter is the frame's own budget, so raising it hands the frame gas the
-    /// caller never forwarded and lowering it takes gas away that the caller will never get back.
-    /// Either way the transaction's envelope stops matching what its frames recorded, which is
-    /// what the ledger's entry lets the conservation law account for.
+    /// Three things happen, in this order:
+    ///
+    /// 1. **The ledger** takes the adjustment, so the conservation law can account for gas nobody
+    ///    funded (or gas that vanished) when it derives the destroyed remainder.
+    /// 2. **The open segment is settled against the pre-callback counter** (REX7+,
+    ///    `IN_OPEN_SEGMENT`). This is what keeps the adjustment out of enforcement: compute gas is
+    ///    measured as a drop in the interpreter's counter, so an injection made mid-segment would
+    ///    otherwise show up as *less* work than the frame performed — the frame would have been
+    ///    handed free compute headroom. Closing the segment at `remaining_before` and re-opening it
+    ///    at the adjusted counter measures exactly the work, and nothing else.
+    /// 3. **The gas clamp is re-derived** from the freshly settled usage, exactly as a checkpoint's
+    ///    epilogue does. Without this, an injection would be spendable past the compute headroom:
+    ///    the clamp hides gas beyond the headroom from the interpreter, and gas written in after
+    ///    the clamp was applied is not hidden by it.
+    ///
+    /// `IN_OPEN_SEGMENT` is false at `initialize_interp`, the one callback that runs after a frame
+    /// is built but before its settlement window is opened. There is no segment to settle and no
+    /// clamp to re-derive there; the frame's own entry hook opens the window on the adjusted
+    /// counter a moment later, which absorbs the adjustment for free.
+    ///
+    /// The settlement records through the unguarded entry point for the same reason the frame-exit
+    /// tail settlement does: a callback can run immediately after an opcode whose pre-inner
+    /// recorder deliberately left a non-compute dimension unlatched, and the latch-protocol guard
+    /// would trip on it.
+    ///
+    /// A settlement that latches an exceed does not stop the interpreter here — a callback has no
+    /// way to fail an instruction. The latch is sticky, so the next checkpoint or the frame's own
+    /// exit surfaces it as it would have anyway; the adjustment only moves *when* the halt lands,
+    /// never whether it does.
     pub(crate) fn record_inspector_gas_adjustment<const IN_OPEN_SEGMENT: bool>(
         &mut self,
         gas: &mut Gas,
         remaining_before: u64,
     ) {
-        let _ = IN_OPEN_SEGMENT;
         let remaining_after = gas.remaining();
         if remaining_after == remaining_before {
             return;
         }
         self.inspector.gas += i128::from(remaining_after) - i128::from(remaining_before);
+
+        if !IN_OPEN_SEGMENT || !self.rex7_enabled() {
+            return;
+        }
+
+        // Close the open segment against the counter as the EVM left it, so the adjustment sits
+        // outside the measured span. Both the baseline and `remaining_before` live in the clamped
+        // domain, so the difference telescopes over exactly the opcodes that ran since the last
+        // checkpoint.
+        let segment = self.checkpoint_baseline().saturating_sub(remaining_before);
+        let hidden = self.checkpoint_restore_hidden();
+        gas.erase_cost(hidden);
+        self.sync_checkpoint_baseline(gas.remaining());
+        let _ = self.record_compute_gas_unguarded(segment);
+
+        // Re-derive the clamp for the segment that starts now, from the usage just settled.
+        let hide = self.checkpoint_clamp_amount(gas.remaining());
+        if hide > 0 {
+            let clamped = gas.record_regular_cost(hide);
+            debug_assert!(clamped, "clamp amount exceeds remaining gas");
+            self.sync_checkpoint_baseline(gas.remaining());
+        }
     }
 
     /// Books an adjustment an inspector made to a frame's envelope — the `gas_limit` the frame is

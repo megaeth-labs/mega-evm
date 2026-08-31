@@ -22,7 +22,9 @@
 //!
 //! # What the shim does with what it measures
 //!
-//! - Interpreter-counter edits go to [`AdditionalLimit::record_inspector_gas_adjustment`].
+//! - Interpreter-counter edits go to [`AdditionalLimit::record_inspector_gas_adjustment`], which
+//!   books them, keeps them out of the compute-gas measurement, and re-derives the gas clamp so
+//!   injected gas is not spendable past the compute headroom.
 //! - Frame-envelope edits go to [`AdditionalLimit::record_inspector_env_adjustment`].
 //!
 //! Nothing here changes what the inspector is allowed to do to the EVM, and nothing here runs on
@@ -123,8 +125,9 @@ where
     INTR: InterpreterTypes,
     I: Inspector<MegaContext<DB, ExtEnvs>, INTR>,
 {
-    /// This runs after the frame is built but before its settlement window is opened, which is
-    /// why it books its adjustment without touching that window.
+    /// Measured, but without settling a segment: this runs after the frame is built and before
+    /// its settlement window is opened, so there is nothing open to close. The frame's own entry
+    /// hook opens the window on whatever counter this callback leaves behind.
     #[inline]
     fn initialize_interp(
         &mut self,
