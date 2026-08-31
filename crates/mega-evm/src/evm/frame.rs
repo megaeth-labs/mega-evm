@@ -29,9 +29,6 @@
 //! catches one specific class of drift (the deposit predicate `MegaETH` weighs against) and
 //! nothing else.
 
-#[cfg(not(feature = "std"))]
-use alloc as std;
-
 use alloy_primitives::{Address, Bytes};
 use revm::{
     context::{Cfg, ContextTr, JournalTr},
