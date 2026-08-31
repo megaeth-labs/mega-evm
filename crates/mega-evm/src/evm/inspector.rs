@@ -299,8 +299,10 @@ where
         outcome
     }
 
-    /// Forwards, then refuses a failed-to-successful rewrite — see
-    /// [`reject_forbidden_create_rewrite`].
+    /// Forwards, then refuses a rewrite that turned a failed contract creation into a successful
+    /// one: by this point the journal is already reverted and no code was deposited, so the
+    /// original classification is restored and the transaction is failed with an error rather than
+    /// allowed to report a deployment that did not happen.
     #[inline]
     fn create_end(
         &mut self,
