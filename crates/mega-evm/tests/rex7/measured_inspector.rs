@@ -613,6 +613,71 @@ fn test_reviving_a_failed_creation_is_refused() {
     }
 }
 
+/// An intercepted frame that halts destroys the envelope it was handed, and that has to be booked.
+///
+/// A callback that returns a synthetic outcome skips the frame init entirely: no frame is built,
+/// and the settlement that books what a refused frame init destroys never used to run on this
+/// path. A halting outcome hands nothing back to the caller, so the transaction spends that
+/// envelope with no compute total to show for it — which is exactly what the conservation law is
+/// stated over, and what it goes red on.
+#[test]
+fn test_an_intercepted_frame_that_halts_books_the_envelope_it_destroys() {
+    /// Intercepts the call to [`CALLEE`] with an exceptional halt, keeping the forwarded gas.
+    #[derive(Default)]
+    struct HaltingInterceptor {
+        intercepted: u64,
+        forwarded: u64,
+    }
+
+    impl<CTX, INTR: InterpreterTypes> Inspector<CTX, INTR> for HaltingInterceptor {
+        fn call(&mut self, _context: &mut CTX, inputs: &mut CallInputs) -> Option<CallOutcome> {
+            if inputs.target_address != CALLEE {
+                return None;
+            }
+            self.intercepted += 1;
+            self.forwarded = inputs.gas_limit;
+            Some(CallOutcome::new(
+                InterpreterResult::new(
+                    InstructionResult::OutOfGas,
+                    Bytes::new(),
+                    Gas::new(inputs.gas_limit),
+                ),
+                inputs.return_memory_offset.clone(),
+            ))
+        }
+    }
+
+    let code = BytecodeBuilder::default()
+        .push_number(0u64)
+        .push_number(0u64)
+        .push_number(0u64)
+        .push_number(0u64)
+        .push_number(0u64)
+        .push_address(CALLEE)
+        .push_number(50_000u64)
+        .append(CALL)
+        .append(POP)
+        .append(STOP)
+        .build();
+    let db = base_db(code).account_code(CALLEE, plain_run_code(20));
+
+    let mut inspector = HaltingInterceptor::default();
+    let inspected = transact_inspected(db, default_limits(), &mut inspector);
+
+    assert_eq!(inspector.intercepted, 1, "the fixture must intercept exactly one call");
+    assert!(inspected.result.is_success(), "the caller absorbs the halt: {:?}", inspected.result);
+    assert_eq!(
+        inspected.destroyed, inspector.forwarded,
+        "the whole intercepted envelope is destroyed — nothing hands it back",
+    );
+    assert_eq!(
+        inspected.compute_gas,
+        inspected.enforced + inspected.destroyed,
+        "and it is reported without being enforced",
+    );
+    assert_identity("intercepted halt", &inspected);
+}
+
 /// A `create_end` that turns a *successful* contract creation into a failure is honoured — and the
 /// state has to follow it.
 ///
