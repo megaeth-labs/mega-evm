@@ -558,6 +558,13 @@ impl AdditionalLimit {
         self.inspector.env += delta;
     }
 
+    /// Counts one rewrite the shim refused because its shape is forbidden — see
+    /// [`InspectorLedger::rejected_rewrites`](inspector_ledger::InspectorLedger::rejected_rewrites).
+    #[inline]
+    pub(crate) fn record_inspector_rejected_rewrite(&mut self) {
+        self.inspector.rejected_rewrites = self.inspector.rejected_rewrites.saturating_add(1);
+    }
+
     /// The EVM gas the transaction has spent that is neither compute work nor destroyed (REX7+,
     /// always 0 before) — the second term of
     /// [`derived_burned_compute_gas`](Self::derived_burned_compute_gas).

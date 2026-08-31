@@ -67,6 +67,14 @@ pub struct InspectorLedger {
     /// remaining gas and ignores a halting one's), and that classification is not final until
     /// after the last mutating callback. Booking the edit before then would be a guess.
     pub env: i128,
+
+    /// How many rewrites the shim refused because their shape is forbidden.
+    ///
+    /// Today exactly one shape is: a `create_end` (or the `frame_end` after it) turning a
+    /// non-successful contract creation into a successful one. Such a rewrite runs after the
+    /// journal has already reverted the frame and after the deposit predicates have already
+    /// rejected the code, so honouring it would report a deployment that never happened.
+    pub rejected_rewrites: u32,
 }
 
 impl InspectorLedger {
@@ -82,7 +90,7 @@ impl InspectorLedger {
     /// True for every observation-only inspector, and for every transaction that ran without one.
     #[inline]
     pub const fn is_zero(&self) -> bool {
-        self.gas == 0 && self.env == 0
+        self.gas == 0 && self.env == 0 && self.rejected_rewrites == 0
     }
 }
 
@@ -95,9 +103,17 @@ mod tests {
     /// unmoved in that case.
     #[test]
     fn test_conjured_gas_is_the_net_of_both_lanes() {
-        let ledger = InspectorLedger { gas: 2_300, env: -2_300 };
+        let ledger = InspectorLedger { gas: 2_300, env: -2_300, rejected_rewrites: 0 };
         assert_eq!(ledger.conjured_gas(), 0);
         assert!(!ledger.is_zero(), "the lanes moved, even though they cancel");
+    }
+
+    /// A refused rewrite moves no gas but must still show the transaction was not left alone.
+    #[test]
+    fn test_a_rejected_rewrite_alone_is_not_zero() {
+        let ledger = InspectorLedger { gas: 0, env: 0, rejected_rewrites: 1 };
+        assert_eq!(ledger.conjured_gas(), 0);
+        assert!(!ledger.is_zero());
     }
 
     #[test]
