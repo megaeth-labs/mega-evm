@@ -1360,6 +1360,10 @@ impl AdditionalLimit {
         exit: FrameExit,
         inspector_gas_delta: i128,
     ) {
+        // First, because everything below reads the classification: a frame-local exceed rewrites
+        // it to a revert.
+        self.absorb_frame_local_exceed(result);
+
         let evm_remaining = self.settle_inspector_result_gas(result, inspector_gas_delta);
 
         match exit {
@@ -1404,6 +1408,44 @@ impl AdditionalLimit {
             remaining
         } else {
             (i128::from(remaining) - delta).clamp(0, i128::from(u64::MAX)) as u64
+        }
+    }
+
+    /// Absorbs a frame-local resource exceed the frame itself latched, into the frame's own
+    /// result (REX7+).
+    ///
+    /// A frame that overran a per-frame budget reverts: the exceed is the frame's, its caller is
+    /// free to carry on, and the gas the frame still held goes back to that caller. Running the
+    /// rewrite here rather than on the way out to the caller is what makes the frame's state
+    /// follow it — the journal decision is still ahead, and it reads this same result — so a
+    /// frame that reports a revert has reverted, rather than reporting one over state that stayed
+    /// committed. That split is what a contract creation needs closed most: a constructor that
+    /// ran to a successful exit and is then rewritten leaves deployed code and emitted logs
+    /// behind an otherwise-failed frame.
+    ///
+    /// Only an exceed that is *already latched* is absorbed here — one the frame recorded against
+    /// its own budget while it ran, or one its exit settlement stamped. This deliberately does not
+    /// run a fresh [`check_limit`](Self::check_limit): a fresh pass at this point would weigh the
+    /// frame's usage against its own budget, whereas the pass that runs on the way out to the
+    /// caller weighs it after the frame's usage has been merged into the caller's. Those are
+    /// different questions with different answers, and the second one is the one the per-frame
+    /// budgets are defined by. So a late first detection stays where it is, and this settles the
+    /// one that produces the split.
+    ///
+    /// Frozen specs absorb everything later, on the way out to the caller, and leave a
+    /// successfully-exited frame's state committed under the revert they report.
+    fn absorb_frame_local_exceed(&mut self, result: &mut FrameResult) {
+        if !self.checkpoint.rex7_enabled() {
+            return;
+        }
+        let limit_check = self.has_exceeded_limit;
+        if limit_check.exceeded_limit() && limit_check.is_frame_local() {
+            self.has_exceeded_limit = LimitCheck::WithinLimit;
+            mark_frame_result_as_exceeding_limit(
+                result,
+                InstructionResult::Revert,
+                limit_check.revert_data(),
+            );
         }
     }
 
@@ -2141,6 +2183,77 @@ mod tests {
             duplicate.instruction_result(),
             InstructionResult::Stop,
             "the duplicate top-level invocation must not re-handle the result",
+        );
+    }
+
+    /// A frame-local exceed the frame latched while it ran is absorbed at the frame's settlement
+    /// point under REX7, which is ahead of the journal decision — so the state the frame leaves
+    /// behind is rolled back with the revert it reports, instead of staying committed under it.
+    ///
+    /// Frozen specs must not absorb here: they take the journal decision first, and absorbing
+    /// ahead of it would revert state their replay keeps.
+    #[test]
+    fn test_rex7_absorbs_a_latched_frame_local_exceed_before_the_journal_decision() {
+        for spec in [MegaSpecId::REX6, MegaSpecId::REX7] {
+            let mut limit = AdditionalLimit::new(spec, EvmTxRuntimeLimits::from_spec(spec));
+            limit.set_has_exceeded_limit_for_test(LimitCheck::ExceedsLimit {
+                kind: LimitKind::ComputeGas,
+                limit: 10,
+                used: 11,
+                frame_local: true,
+            });
+
+            let mut result = stopped_call_result(50_000);
+            limit.finalize_frame(&mut result, FrameExit::Ran, 0);
+
+            if spec.is_enabled(MegaSpecId::REX7) {
+                assert_eq!(
+                    result.instruction_result(),
+                    InstructionResult::Revert,
+                    "REX7 must absorb here, so the journal decision that follows reverts too",
+                );
+                assert!(
+                    !limit.limit_exceeded(),
+                    "an absorbed frame-local exceed must not stop the frames above it",
+                );
+            } else {
+                assert_eq!(
+                    result.instruction_result(),
+                    InstructionResult::Stop,
+                    "a frozen spec absorbs on the way out to the caller, after the journal",
+                );
+                assert!(limit.limit_exceeded(), "and so it still has the exceed to absorb");
+            }
+        }
+    }
+
+    /// The settlement must not go looking for an exceed of its own. A fresh check here would
+    /// weigh a frame's usage against its own budget, while the check that decides a per-frame
+    /// exceed weighs it against the caller's, after the frame's usage has been merged in — so a
+    /// fresh check here fails frames the per-frame budgets do not.
+    #[test]
+    fn test_the_settlement_does_not_detect_a_frame_local_exceed_of_its_own() {
+        let mut limit = AdditionalLimit::new(
+            MegaSpecId::REX7,
+            EvmTxRuntimeLimits::from_spec(MegaSpecId::REX7).with_tx_compute_gas_limit(10),
+        );
+        limit.push_empty_frame();
+        // An order of magnitude past the frame's budget, and unlatched: only a fresh check
+        // inside the settlement could find it.
+        let _ = limit.record_compute_gas_unguarded(100);
+        assert!(
+            limit.check_limit().is_frame_local(),
+            "the fixture must be a frame-local exceed a fresh check would find",
+        );
+        limit.set_has_exceeded_limit_for_test(LimitCheck::WithinLimit);
+
+        let mut result = stopped_call_result(50_000);
+        limit.finalize_frame(&mut result, FrameExit::Ran, 0);
+
+        assert_eq!(
+            result.instruction_result(),
+            InstructionResult::Stop,
+            "the settlement absorbs what the frame latched, and nothing else",
         );
     }
 
