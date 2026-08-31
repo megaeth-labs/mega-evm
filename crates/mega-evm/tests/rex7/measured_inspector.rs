@@ -276,6 +276,27 @@ impl<CTX, INTR: InterpreterTypes> Inspector<CTX, INTR> for CallGasLimitRaiser {
     }
 }
 
+/// Rewrites every successful contract creation into a revert — the shape the frame loop has to
+/// carry through to the journal.
+#[derive(Default)]
+struct CreateKiller {
+    killed: u64,
+}
+
+impl<CTX, INTR: InterpreterTypes> Inspector<CTX, INTR> for CreateKiller {
+    fn create_end(
+        &mut self,
+        _context: &mut CTX,
+        _inputs: &CreateInputs,
+        outcome: &mut CreateOutcome,
+    ) {
+        if outcome.result.result.is_ok() {
+            outcome.result.result = InstructionResult::Revert;
+            self.killed += 1;
+        }
+    }
+}
+
 /// Rewrites every failed contract creation into a successful one — the shape the shim refuses.
 #[derive(Default)]
 struct CreateReviver;
@@ -590,6 +611,76 @@ fn test_reviving_a_failed_creation_is_refused() {
             "the error must name the shape it caught; got {error:?}",
         );
     }
+}
+
+/// A `create_end` that turns a *successful* contract creation into a failure is honoured — and the
+/// state has to follow it.
+///
+/// This is the rewrite direction there is something behind: the constructor ran, the deposit
+/// predicates passed, and the inspector is telling the caller the frame failed. If the journal
+/// decision were taken before the callback, the caller would be handed a failure over a deployed
+/// contract, with the constructor's storage writes committed underneath it.
+#[test]
+fn test_killing_a_successful_creation_rolls_its_state_back() {
+    // Init code that stores to slot 1 and returns a two-byte runtime code.
+    let init_code: Vec<u8> = BytecodeBuilder::default()
+        .sstore(U256::from(1), U256::from(7))
+        .push_number(0x6000u64)
+        .push_number(0u64)
+        .append(MSTORE)
+        .push_number(2u64) // size
+        .push_number(30u64) // offset: the last two bytes of the word just stored
+        .append(RETURN)
+        .build()
+        .to_vec();
+
+    let mut builder = BytecodeBuilder::default();
+    for (offset, byte) in init_code.iter().enumerate() {
+        builder = builder
+            .push_number(u64::from(*byte))
+            .push_number(offset as u64)
+            .append(revm::bytecode::opcode::MSTORE8);
+    }
+    let code = builder
+        .push_number(init_code.len() as u64) // size
+        .push_number(0u64) // offset
+        .push_number(0u64) // value
+        .append(CREATE)
+        .append(POP)
+        .append(STOP)
+        .build();
+
+    let deployed = CONTRACT.create(0);
+
+    // The uninspected run deploys, so the rewrite has something to undo.
+    let mut observer = Observer::default();
+    let plain = transact_inspected(base_db(code.clone()), default_limits(), &mut observer);
+    assert!(plain.result.is_success(), "fixture check: {:?}", plain.result);
+    let deployed_account = plain.state.get(&deployed).expect("the fixture must deploy a contract");
+    assert!(
+        !deployed_account.info.is_empty_code_hash(),
+        "the fixture must deploy code for the rewrite to have something to undo",
+    );
+
+    let mut killer = CreateKiller::default();
+    let killed = transact_inspected(base_db(code), default_limits(), &mut killer);
+
+    assert_eq!(killer.killed, 1, "the fixture must rewrite exactly one creation");
+    assert!(
+        killed.state.get(&deployed).is_none_or(|account| account.info.is_empty_code_hash()),
+        "a creation the inspector failed must leave no code at {deployed}",
+    );
+    assert_eq!(
+        killed
+            .state
+            .get(&deployed)
+            .and_then(|account| account.storage.get(&U256::from(1)))
+            .map(|slot| slot.present_value())
+            .unwrap_or_default(),
+        U256::ZERO,
+        "and none of the constructor's storage writes",
+    );
+    assert_identity("killed creation", &killed);
 }
 
 /// (iv) An observation-only inspector leaves an empty ledger and a bit-identical transaction.

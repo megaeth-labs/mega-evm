@@ -2,6 +2,9 @@
 //!
 //! - `checkpoint_settlement` — checkpoint compute-gas settlement: per-transaction totals stay
 //!   bit-identical to per-opcode recording, and the two places where the models diverge.
+//! - `frame_loop_parity` — one case per branch of the frame lifecycle that can end a frame, each
+//!   run through both frame loops and compared on everything a transaction produces, state
+//!   included: the loops share one body, and an observation-only inspector adds nothing to it.
 //! - `gas_clamp` — gas-clamp enforcement: a crossing opcode is stopped before it executes, and the
 //!   resulting out-of-gas is restored and reclassified by the constraint that bound the clamp.
 //! - `clamp_classification` — which constraint a clamp binds to, including the exact-value case,
@@ -79,6 +82,7 @@ mod detention_window;
 mod double_exceed_corner;
 mod exceptional_halt;
 mod frame_init_reject_burn;
+mod frame_loop_parity;
 mod gas_clamp;
 mod gas_leakage;
 mod guard_pass_static_gas;

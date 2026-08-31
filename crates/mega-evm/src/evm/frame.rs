@@ -307,3 +307,178 @@ pub(crate) fn will_return_create_charge_code_deposit(
     }
     interpreter_result.gas.remaining() >= code_deposit_gas
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{test_utils::MemoryDatabase, EmptyExternalEnv, MegaContext, MegaSpecId};
+    use alloy_primitives::{address, Address as Addr, U256};
+    use revm::{
+        context::JournalTr,
+        interpreter::{Gas, InstructionResult, InterpreterResult},
+    };
+    use std::{vec, vec::Vec};
+
+    const DEPLOYED: Addr = address!("00000000000000000000000000000000000c0de0");
+    /// Ample: the deposit charge for the runtime codes below is a few hundred gas.
+    const FRAME_GAS: u64 = 1_000_000;
+
+    fn context() -> MegaContext<MemoryDatabase, EmptyExternalEnv> {
+        MegaContext::new(MemoryDatabase::default(), MegaSpecId::REX7)
+    }
+
+    fn returned(output: Vec<u8>, gas: u64) -> InterpreterResult {
+        InterpreterResult::new(InstructionResult::Return, Bytes::from(output), Gas::new(gas))
+    }
+
+    /// Runs the classification and reports what it decided: the rewritten instruction result, and
+    /// whether the verdict allows a deposit.
+    fn classify(result: &mut InterpreterResult) -> FrameJournalVerdict {
+        classify_create_return(&context(), result, DEPLOYED)
+    }
+
+    fn accepts(verdict: &FrameJournalVerdict) -> bool {
+        matches!(verdict, FrameJournalVerdict::CreateAccepted { .. })
+    }
+
+    /// A creation that clears every deposit predicate is accepted, is charged for its code, and
+    /// carries the exact bytes the predicates approved.
+    #[test]
+    fn test_a_clean_creation_is_accepted_and_charged_for_its_code() {
+        let mut result = returned(vec![0x00; 32], FRAME_GAS);
+        let verdict = classify(&mut result);
+
+        let FrameJournalVerdict::CreateAccepted { address, code } = verdict else {
+            panic!("a clean creation must be accepted, got {verdict:?}")
+        };
+        assert_eq!(address, DEPLOYED);
+        assert_eq!(code, Bytes::from(vec![0x00; 32]), "the approved bytes travel with the verdict");
+        assert_eq!(result.result, InstructionResult::Return);
+        assert_eq!(
+            FRAME_GAS - result.gas.remaining(),
+            32 * revm::interpreter::gas::CODEDEPOSIT,
+            "the deposit is charged during classification, not at the journal decision",
+        );
+    }
+
+    /// Each rejecting predicate rejects, names itself on the result, and — this is the part that
+    /// matters for the deposit — leaves no code on the verdict for anything to write.
+    #[test]
+    fn test_every_rejecting_predicate_rejects_without_code() {
+        // (name, runtime code, gas the frame has left, the classification it must produce)
+        let cases: Vec<(&str, Vec<u8>, u64, InstructionResult)> = vec![
+            (
+                "0xEF prefix",
+                vec![0xEF, 0x00],
+                FRAME_GAS,
+                InstructionResult::CreateContractStartingWithEF,
+            ),
+            (
+                "cannot pay the deposit",
+                vec![0x00; 32],
+                32 * revm::interpreter::gas::CODEDEPOSIT - 1,
+                InstructionResult::OutOfGas,
+            ),
+        ];
+
+        for (name, code, gas, expected) in cases {
+            let mut result = returned(code, gas);
+            let verdict = classify(&mut result);
+
+            assert!(!accepts(&verdict), "{name}: must not be accepted, got {verdict:?}");
+            assert_eq!(result.result, expected, "{name}: classification");
+        }
+    }
+
+    /// A creation whose frame never succeeded is rejected untouched: the classification does not
+    /// charge it, does not rename its failure, and hands the journal a verdict with no code.
+    #[test]
+    fn test_a_failed_frame_is_rejected_without_being_charged() {
+        let mut result = InterpreterResult::new(
+            InstructionResult::Revert,
+            Bytes::from_static(b"reason"),
+            Gas::new(FRAME_GAS),
+        );
+        let verdict = classify(&mut result);
+
+        assert!(!accepts(&verdict));
+        assert_eq!(result.result, InstructionResult::Revert, "the failure keeps its own name");
+        assert_eq!(result.gas.remaining(), FRAME_GAS, "and pays nothing for a deposit");
+    }
+
+    /// The journal decision follows the *final* result. A creation the predicates accepted, whose
+    /// result is then rewritten into a failure, must not leave its code behind.
+    #[test]
+    fn test_a_creation_rewritten_into_a_failure_deposits_nothing() {
+        let mut ctx = context();
+        let checkpoint = ctx.journal_mut().checkpoint();
+        let mut result = returned(vec![0x60; 32], FRAME_GAS);
+        let verdict = classify_create_return(&ctx, &mut result, DEPLOYED);
+        assert!(accepts(&verdict), "the fixture must be a creation the predicates accepted");
+
+        // What a `create_end` rewrite does, after the classification and before the journal.
+        result.result = InstructionResult::Revert;
+        let frame_result = FrameResult::Create(CreateOutcome::new(result, Some(DEPLOYED)));
+        commit_frame_journal(&mut ctx, PendingJournal { verdict, checkpoint }, &frame_result);
+
+        let account = ctx.journal_mut().load_account(DEPLOYED).unwrap();
+        assert!(account.info.is_empty_code_hash(), "no code may be deposited for a failed frame");
+    }
+
+    /// And the other direction: a creation the predicates *rejected*, whose result is then
+    /// rewritten into a success, has no code and no commit branch to reach. The rewrite cannot
+    /// deposit code that never passed the predicates, whatever the result says.
+    #[test]
+    fn test_a_rejected_creation_rewritten_into_a_success_still_deposits_nothing() {
+        let mut ctx = context();
+        let checkpoint = ctx.journal_mut().checkpoint();
+        // Runtime code the frame cannot pay to deposit.
+        let mut result = returned(vec![0x60; 32], 32 * revm::interpreter::gas::CODEDEPOSIT - 1);
+        let verdict = classify_create_return(&ctx, &mut result, DEPLOYED);
+        assert!(!accepts(&verdict), "the fixture must be a creation the predicates rejected");
+
+        result.result = InstructionResult::Return;
+        let frame_result = FrameResult::Create(CreateOutcome::new(result, Some(DEPLOYED)));
+        commit_frame_journal(&mut ctx, PendingJournal { verdict, checkpoint }, &frame_result);
+
+        let account = ctx.journal_mut().load_account(DEPLOYED).unwrap();
+        assert!(
+            account.info.is_empty_code_hash(),
+            "a rejected creation carries no code, so a rewrite has nothing to deposit",
+        );
+    }
+
+    /// A call frame's journal decision reads the final result and nothing else.
+    #[test]
+    fn test_a_call_frame_commits_or_reverts_on_its_final_result() {
+        for (label, instruction_result, expect_committed) in [
+            ("success", InstructionResult::Stop, true),
+            ("revert", InstructionResult::Revert, false),
+            ("halt", InstructionResult::OutOfGas, false),
+        ] {
+            let mut ctx = context();
+            ctx.journal_mut().load_account(DEPLOYED).expect("the account must load");
+            let checkpoint = ctx.journal_mut().checkpoint();
+            ctx.journal_mut()
+                .sstore(DEPLOYED, U256::from(1), U256::from(7))
+                .expect("sstore must reach the in-memory database");
+
+            let frame_result = FrameResult::Call(CallOutcome::new(
+                InterpreterResult::new(instruction_result, Bytes::new(), Gas::new(FRAME_GAS)),
+                0..0,
+            ));
+            commit_frame_journal(
+                &mut ctx,
+                PendingJournal { verdict: FrameJournalVerdict::Call, checkpoint },
+                &frame_result,
+            );
+
+            let stored = ctx.journal_mut().sload(DEPLOYED, U256::from(1)).unwrap().data;
+            assert_eq!(
+                stored == U256::from(7),
+                expect_committed,
+                "{label}: the frame's write must follow its final result",
+            );
+        }
+    }
+}
