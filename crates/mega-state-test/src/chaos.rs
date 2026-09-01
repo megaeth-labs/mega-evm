@@ -187,11 +187,23 @@ pub enum ChaosShape {
     RaiseActionGas,
     /// Gas taken out of one.
     LowerActionGas,
+    /// A refund added to a `Gas`'s refund counter — what the sender is billed, which the envelope
+    /// the conservation law is stated over does not reach.
+    RaiseRefund,
+    /// A refund taken out of one. Skipped when the `Gas` has none, rather than driving the counter
+    /// negative — a state revm documents as invalid at the end of a transaction.
+    LowerRefund,
+    /// An EIP-8037 state-gas pool written into a `Gas` or a call's inputs. `MegaETH` runs with the
+    /// EIP off and fills no pool, so anything found in one is gas the transaction never funded.
+    WriteReservoir,
+    /// An EIP-8037 spend counter written into a `Gas`. Structurally zero for the same reason, and
+    /// reachable through two different receipt figures depending on how the frame ends.
+    WriteStateGas,
 }
 
 impl ChaosShape {
     /// Every shape, in the order the labels are listed by `--chaos-shapes`.
-    pub const ALL: [Self; 17] = [
+    pub const ALL: [Self; 21] = [
         Self::InjectGas,
         Self::DrainGas,
         Self::EditFrameState,
@@ -209,6 +221,10 @@ impl ChaosShape {
         Self::ReviveCall,
         Self::RaiseActionGas,
         Self::LowerActionGas,
+        Self::RaiseRefund,
+        Self::LowerRefund,
+        Self::WriteReservoir,
+        Self::WriteStateGas,
     ];
 
     /// The shape a label names.
@@ -245,6 +261,10 @@ impl ChaosShape {
             Self::ReviveCall => "revive_call",
             Self::RaiseActionGas => "raise_action_gas",
             Self::LowerActionGas => "lower_action_gas",
+            Self::RaiseRefund => "raise_refund",
+            Self::LowerRefund => "lower_refund",
+            Self::WriteReservoir => "write_reservoir",
+            Self::WriteStateGas => "write_state_gas",
         }
     }
 }
@@ -254,13 +274,17 @@ impl ChaosShape {
 /// The last two only land at the one callback that runs with an action already pending —
 /// `step_end`, which revm's inspected loop runs after the instruction that set it. A draw for them
 /// anywhere else leaves the interpreter alone and spends no budget.
-const INTERPRETER_SHAPES: [ChaosShape; 6] = [
+const INTERPRETER_SHAPES: [ChaosShape; 10] = [
     ChaosShape::InjectGas,
     ChaosShape::DrainGas,
     ChaosShape::EditFrameState,
     ChaosShape::JournalWrite,
     ChaosShape::RaiseActionGas,
     ChaosShape::LowerActionGas,
+    ChaosShape::RaiseRefund,
+    ChaosShape::LowerRefund,
+    ChaosShape::WriteReservoir,
+    ChaosShape::WriteStateGas,
 ];
 
 /// Shapes reachable from a callback that holds a frame's inputs, before the frame is built.
@@ -269,7 +293,7 @@ const INTERPRETER_SHAPES: [ChaosShape; 6] = [
 /// the envelope. That is the whole of what separates them, and it is the separation that matters:
 /// the echo is the shape every real tool uses, and it is also the one shape whose accounting
 /// closes without anything measuring the figure.
-const INPUT_SHAPES: [ChaosShape; 8] = [
+const INPUT_SHAPES: [ChaosShape; 9] = [
     ChaosShape::RaiseEnvelope,
     ChaosShape::LowerEnvelope,
     ChaosShape::MakeStatic,
@@ -278,15 +302,20 @@ const INPUT_SHAPES: [ChaosShape; 8] = [
     ChaosShape::InterceptUnderGas,
     ChaosShape::InterceptNoGas,
     ChaosShape::JournalWrite,
+    ChaosShape::WriteReservoir,
 ];
 
 /// Shapes reachable from a callback that holds a finished frame's result.
-const RESULT_SHAPES: [ChaosShape; 5] = [
+const RESULT_SHAPES: [ChaosShape; 9] = [
     ChaosShape::RaiseResultGas,
     ChaosShape::LowerResultGas,
     ChaosShape::FailFrame,
     ChaosShape::ReviveCall,
     ChaosShape::JournalWrite,
+    ChaosShape::RaiseRefund,
+    ChaosShape::LowerRefund,
+    ChaosShape::WriteReservoir,
+    ChaosShape::WriteStateGas,
 ];
 
 /// Which mutations a chaos run is allowed to make.
@@ -534,6 +563,14 @@ impl ChaosInspector {
                     return;
                 }
             }
+            ChaosShape::RaiseRefund |
+            ChaosShape::LowerRefund |
+            ChaosShape::WriteReservoir |
+            ChaosShape::WriteStateGas => {
+                if !edit_receipt_figure(&mut interp.gas, shape, entropy) {
+                    return;
+                }
+            }
             _ => return,
         }
         self.applied(shape);
@@ -556,6 +593,9 @@ impl ChaosInspector {
                 inputs.gas_limit = inputs.gas_limit.saturating_sub(Self::amount(entropy));
             }
             ChaosShape::MakeStatic => inputs.is_static = true,
+            ChaosShape::WriteReservoir => {
+                inputs.reservoir = inputs.reservoir.saturating_add(Self::amount(entropy));
+            }
             ChaosShape::Intercept |
             ChaosShape::InterceptOverGas |
             ChaosShape::InterceptUnderGas |
@@ -606,8 +646,10 @@ impl ChaosInspector {
                 ));
             }
             ChaosShape::JournalWrite => write_journal(context, entropy),
-            // `MakeStatic` has no counterpart here — a creation carries no static flag — and the
-            // rest are not input-facing at all. Both leave the inputs alone and spend no budget.
+            // `MakeStatic` has no counterpart here — a creation carries no static flag — and
+            // `WriteReservoir` has none either, because `CreateInputs` keeps its pool private and
+            // offers no setter. The rest are not input-facing at all. All of them leave the inputs
+            // alone and spend no budget.
             _ => return None,
         }
         self.applied(shape);
@@ -649,10 +691,46 @@ impl ChaosInspector {
                 }
                 result.result = InstructionResult::Stop;
             }
+            ChaosShape::RaiseRefund |
+            ChaosShape::LowerRefund |
+            ChaosShape::WriteReservoir |
+            ChaosShape::WriteStateGas => {
+                if !edit_receipt_figure(&mut result.gas, shape, entropy) {
+                    return;
+                }
+            }
             _ => return,
         }
         self.applied(shape);
     }
+}
+
+/// Writes one of the receipt figures that is not the envelope, returning whether anything moved.
+///
+/// The three are grouped because they are one surface — every `Gas` an inspector is handed carries
+/// all of them — and separated from the gas lanes because the conservation law reaches only one of
+/// the three. A refund reaches what the sender is billed; the EIP-8037 pool reaches the envelope
+/// the receipt reports as spent; the EIP-8037 spend counter reaches the receipt's state-gas figure,
+/// or its caller's pool when the frame fails.
+///
+/// Lowering a refund the `Gas` does not have is skipped rather than driving the counter negative:
+/// revm documents a negative refund at the end of a transaction as invalid, so producing one would
+/// be testing a state the EVM cannot reach on its own.
+fn edit_receipt_figure(gas: &mut Gas, shape: ChaosShape, entropy: u64) -> bool {
+    let amount = entropy % GAS_DELTA_MAX + 1;
+    match shape {
+        ChaosShape::RaiseRefund => gas.record_refund(amount as i64),
+        ChaosShape::LowerRefund => {
+            if gas.refunded() < amount as i64 {
+                return false;
+            }
+            gas.record_refund(-(amount as i64));
+        }
+        ChaosShape::WriteReservoir => gas.set_reservoir(amount),
+        ChaosShape::WriteStateGas => gas.set_state_gas_spent(amount as i64),
+        _ => return false,
+    }
+    true
 }
 
 /// The gas a synthetic outcome hands back, given the envelope the callback was handed.
