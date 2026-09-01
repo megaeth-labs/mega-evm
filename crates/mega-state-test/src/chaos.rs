@@ -53,9 +53,9 @@ use mega_evm::revm::{
     handler::FrameResult,
     inspector::Inspector,
     interpreter::{
-        interpreter_types::{Jumps, MemoryTr, StackTr},
+        interpreter_types::{Jumps, LoopControl, MemoryTr, StackTr},
         CallInputs, CallOutcome, CreateInputs, CreateOutcome, FrameInput, Gas, InstructionResult,
-        Interpreter, InterpreterResult, InterpreterTypes,
+        Interpreter, InterpreterAction, InterpreterResult, InterpreterTypes,
     },
     primitives::{Address, Bytes, Log, U256},
 };
@@ -173,11 +173,17 @@ pub enum ChaosShape {
     /// A failed *call* frame rewritten into a success. The creation form of this shape is refused
     /// by the shim and is deliberately not in the pool — see the module docs.
     ReviveCall,
+    /// Gas written into the action the interpreter is already holding — the object a terminating
+    /// or suspending instruction left behind, which carries its own copy of what the frame is
+    /// handing on.
+    RaiseActionGas,
+    /// Gas taken out of one.
+    LowerActionGas,
 }
 
 impl ChaosShape {
     /// Every shape, in the order the labels are listed by `--chaos-shapes`.
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 14] = [
         Self::InjectGas,
         Self::DrainGas,
         Self::EditFrameState,
@@ -190,6 +196,8 @@ impl ChaosShape {
         Self::LowerResultGas,
         Self::FailFrame,
         Self::ReviveCall,
+        Self::RaiseActionGas,
+        Self::LowerActionGas,
     ];
 
     /// The shape a label names.
@@ -221,16 +229,24 @@ impl ChaosShape {
             Self::LowerResultGas => "lower_result_gas",
             Self::FailFrame => "fail_frame",
             Self::ReviveCall => "revive_call",
+            Self::RaiseActionGas => "raise_action_gas",
+            Self::LowerActionGas => "lower_action_gas",
         }
     }
 }
 
 /// Shapes reachable from a callback that holds a live interpreter.
-const INTERPRETER_SHAPES: [ChaosShape; 4] = [
+///
+/// The last two only land at the one callback that runs with an action already pending —
+/// `step_end`, which revm's inspected loop runs after the instruction that set it. A draw for them
+/// anywhere else leaves the interpreter alone and spends no budget.
+const INTERPRETER_SHAPES: [ChaosShape; 6] = [
     ChaosShape::InjectGas,
     ChaosShape::DrainGas,
     ChaosShape::EditFrameState,
     ChaosShape::JournalWrite,
+    ChaosShape::RaiseActionGas,
+    ChaosShape::LowerActionGas,
 ];
 
 /// Shapes reachable from a callback that holds a frame's inputs, before the frame is built.
@@ -490,6 +506,12 @@ impl ChaosInspector {
                 }
             }
             ChaosShape::JournalWrite => write_journal(context, entropy),
+            ChaosShape::RaiseActionGas | ChaosShape::LowerActionGas => {
+                let raise = shape == ChaosShape::RaiseActionGas;
+                if !edit_pending_action_gas(interp, raise, Self::amount(entropy)) {
+                    return;
+                }
+            }
             _ => return,
         }
         self.applied(shape);
@@ -635,6 +657,50 @@ fn edit_frame_state<INTR: InterpreterTypes>(interp: &mut Interpreter<INTR>, entr
         return true;
     }
     false
+}
+
+/// Moves gas in or out of the action the interpreter is holding, returning whether anything moved.
+///
+/// The pending action is the one gas-carrying object a live-interpreter callback can reach that is
+/// not the interpreter's own counter, and the two are different numbers at exactly one moment: a
+/// terminating instruction has copied the counter into a `Return` action, or a `CALL` / `CREATE`
+/// has put the child's envelope into a `NewFrame` one. With no action pending there is nothing to
+/// edit and no budget is spent.
+fn edit_pending_action_gas<INTR: InterpreterTypes>(
+    interp: &mut Interpreter<INTR>,
+    raise: bool,
+    amount: u64,
+) -> bool {
+    match interp.bytecode.action() {
+        Some(InterpreterAction::Return(result)) => {
+            if raise {
+                result.gas.erase_cost(amount);
+                true
+            } else {
+                // The action cannot afford the removal; leave it alone rather than manufacture an
+                // out-of-gas the EVM did not reach.
+                result.gas.record_regular_cost(amount)
+            }
+        }
+        Some(InterpreterAction::NewFrame(FrameInput::Call(inputs))) => {
+            inputs.gas_limit = move_envelope(inputs.gas_limit, raise, amount);
+            true
+        }
+        Some(InterpreterAction::NewFrame(FrameInput::Create(inputs))) => {
+            inputs.set_gas_limit(move_envelope(inputs.gas_limit(), raise, amount));
+            true
+        }
+        _ => false,
+    }
+}
+
+/// A child envelope moved by `amount`, saturating at both ends.
+const fn move_envelope(limit: u64, raise: bool, amount: u64) -> u64 {
+    if raise {
+        limit.saturating_add(amount)
+    } else {
+        limit.saturating_sub(amount)
+    }
 }
 
 /// Writes one transient-storage slot on the frame's own account, behind the EVM's back.
