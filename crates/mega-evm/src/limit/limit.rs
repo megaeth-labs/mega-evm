@@ -13,7 +13,7 @@ use revm::{
 };
 
 use super::{
-    checkpoint, compute_gas, conservation, data_size, frame_limit::TxRuntimeLimit,
+    checkpoint, compute_gas, conservation, data_size, destroyed, frame_limit::TxRuntimeLimit,
     inspector_ledger, kv_update, state_growth, storage_call_stipend,
 };
 use crate::{
@@ -1390,20 +1390,24 @@ impl AdditionalLimit {
     /// - a returning or reverting frame hands its remaining gas back to its caller, so an edit to
     ///   that number really does change what the transaction spends. It goes to the ledger, and the
     ///   conservation law reads it back out of the envelope;
-    /// - a halting frame hands nothing back, so the edit changes nothing the transaction spends.
-    ///   The destroyed remainder and the rescue below are then taken on the EVM's own number,
-    ///   reconstructed by undoing the edit — an inspector does not perform work, and gas it removed
-    ///   from a doomed result was never the inspector's to destroy.
+    /// - a swallowed (halting) frame hands nothing back, so the edit changes nothing the
+    ///   transaction spends. The destroyed remainder and the rescue below are then taken on the
+    ///   EVM's own number, reconstructed by undoing the edit — an inspector does not perform work,
+    ///   and gas it removed from a doomed result was never the inspector's to destroy.
+    ///
+    /// The split is [`destroyed_disposition`](super::destroyed_disposition), not revm's
+    /// `is_ok_or_revert` catch-all: a new [`InstructionResult`] variant is a compile error until
+    /// it is classified.
     fn settle_inspector_result_gas(&mut self, result: &FrameResult, delta: i128) -> u64 {
         let remaining = result.gas().remaining();
         if delta == 0 {
             return remaining;
         }
-        if result.instruction_result().is_ok_or_revert() {
+        if destroyed::remaining_is_destroyed(result.instruction_result()) {
+            (i128::from(remaining) - delta).clamp(0, i128::from(u64::MAX)) as u64
+        } else {
             self.inspector.result += delta;
             remaining
-        } else {
-            (i128::from(remaining) - delta).clamp(0, i128::from(u64::MAX)) as u64
         }
     }
 
@@ -1737,7 +1741,7 @@ impl AdditionalLimit {
     fn settle_exceptional_halt_burn(&mut self, result: &FrameResult, evm_remaining: u64) {
         if !self.checkpoint.rex7_enabled() ||
             self.limit_exceeded() ||
-            result.instruction_result().is_ok_or_revert()
+            !destroyed::remaining_is_destroyed(result.instruction_result())
         {
             return;
         }
@@ -1755,9 +1759,11 @@ impl AdditionalLimit {
     /// cannot see it either, and without this the destroyed budget would be missing from the
     /// transaction's reported total while the conservation law still derives it from the envelope.
     ///
-    /// Only the halt classification books anything. The success and revert shapes reaching this
+    /// Only a swallowed classification books anything. The success and revert shapes reaching this
     /// site — an empty-code call, a nonce overflow, a depth or balance rejection — destroy nothing
-    /// precisely because their gas is erased back into the caller.
+    /// precisely because their gas is erased back into the caller. The split is
+    /// [`destroyed_disposition`](super::destroyed_disposition): a new [`InstructionResult`]
+    /// variant is a compile error until it is classified.
     ///
     /// A precompile result is excluded. Precompiles are dispatched inside the same frame init and
     /// come back as a result rather than a frame, but they have already booked both halves of
@@ -1774,7 +1780,7 @@ impl AdditionalLimit {
     fn settle_frame_init_reject_burn(&mut self, result: &FrameResult, evm_remaining: u64) {
         if !self.checkpoint.rex7_enabled() ||
             self.limit_exceeded() ||
-            result.instruction_result().is_ok_or_revert()
+            !destroyed::remaining_is_destroyed(result.instruction_result())
         {
             return;
         }

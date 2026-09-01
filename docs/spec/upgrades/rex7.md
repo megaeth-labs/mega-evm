@@ -142,7 +142,19 @@ A refusal classified as a success or a revert — a call or creation past the ca
 A precompile invocation is answered on this same path and is covered by its own rule above; a node MUST NOT book it a second time here.
 
 Those sites are where a Rex7 transaction is known to lose an envelope without executing it, and they are what fixes `executed_compute` at each one — but they are not what makes the enumeration complete.
-Completeness is a consequence of the law: a lost envelope is gas the transaction spent that neither the compute lanes nor the storage-gas lane accounts for, so it lands in the remainder whether or not a site above anticipated it.
+
+| Producer                                                                                                        | Recording site                                                                                    |
+| --------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| A frame that ends in an exceptional halt, including a creation rejected at code deposit                         | The frame's final-result settlement                                                               |
+| A call or creation the inherited EVM refuses before it opens a frame                                            | The same settlement, classified by whether the refusal swallows the child budget or hands it back |
+| A precompile invocation that fails                                                                              | The precompile recording site; not also at the frame-init refusal site                            |
+| A system-contract invocation answered without an EVM frame, when the answer is a halt that keeps the call's gas | The site that produces the answer                                                                 |
+| A failed-deposit receipt rebuild                                                                                | The rebuild of the envelope                                                                       |
+
+The classification that decides whether a result swallows its remaining budget or hands it back MUST be exhaustive over the inherited instruction-result space.
+Every result MUST be assigned swallowed, returned, or unreachable.
+A newly introduced result MUST NOT be assigned by a default arm.
+Completeness of the _reported_ total is a consequence of the law: a lost envelope is gas the transaction spent that neither the compute lanes nor the storage-gas lane accounts for, so it lands in the remainder whether or not a site above anticipated it.
 Reading the two independently and requiring them to agree is what turns the list from an assumption into a checkable claim.
 
 One further shape burns a whole envelope having executed nothing — a transaction whose intrinsic gas requirement outgrows the gas limit its sender supplied — but [Rex5](rex5.md) already rejects that transaction during validation, after every MegaETH storage-gas contribution has been folded into the intrinsic total and before the sender is debited.

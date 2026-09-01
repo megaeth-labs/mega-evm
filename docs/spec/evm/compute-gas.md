@@ -582,6 +582,21 @@ The two readings agree by construction of the law; keeping enforcement on the re
 
 The rules that follow fix `executed_compute` at each site that can leave budget unspent, which is what makes the law's remainder well defined; they are not themselves the definition of the destroyed total.
 
+A node MUST record each producer at the site the table names, and MUST NOT record it at any other site.
+
+| Producer                                                                                                        | Recording site                                                                                    |
+| --------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| A frame that ends in an exceptional halt, including a creation rejected at code deposit                         | The frame's final-result settlement                                                               |
+| A call or creation the inherited EVM refuses before it opens a frame                                            | The same settlement, classified by whether the refusal swallows the child budget or hands it back |
+| A precompile invocation that fails                                                                              | The precompile recording site; a node MUST NOT also record it at the frame-init refusal site      |
+| A system-contract invocation answered without an EVM frame, when the answer is a halt that keeps the call's gas | The site that produces the answer                                                                 |
+| A failed-deposit receipt rebuild                                                                                | The rebuild of the envelope, as the gap between that envelope and every earlier recording         |
+| An ordinary transaction rejected during validation because intrinsic gas outgrew the sender's gas limit         | Nowhere: the transaction produces no receipt                                                      |
+
+The classification that decides whether a refusal swallows its budget or hands it back MUST be exhaustive over the inherited instruction-result space.
+Every result the inherited EVM can produce MUST be assigned swallowed, returned, or unreachable.
+A newly introduced result MUST NOT be assigned by a default arm.
+
 A precompile invocation that fails is the same split, taken at the precompile recording site.
 A precompile never becomes a child EVM frame, so the frame-exit settlement cannot see it.
 
