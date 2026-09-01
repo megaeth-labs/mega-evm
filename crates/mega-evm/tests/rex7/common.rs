@@ -2,13 +2,15 @@
 
 use alloy_primitives::{address, Address, Bytes, B256, U256};
 use mega_evm::{
-    test_utils::MemoryDatabase, EvmTxRuntimeLimits, MegaContext, MegaEvm, MegaHaltReason,
-    MegaSpecId, MegaTransaction, MegaTransactionNew as _, MegaTransactionOutcome, TestExternalEnvs,
+    test_utils::MemoryDatabase, ConservationTerms, EmptyExternalEnv, EvmTxRuntimeLimits,
+    InspectorLedger, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
+    MegaTransactionNew as _, MegaTransactionOutcome, TestExternalEnvs,
 };
 use revm::{
     context::{result::ExecutionResult, tx::TxEnvBuilder, TxEnv},
     handler::EvmTr,
     state::EvmState,
+    Inspector,
 };
 use std::collections::BTreeMap;
 
@@ -57,6 +59,11 @@ pub(crate) struct Outcome {
     /// Post-tx sum of the per-site destroyed bookings — the second opinion the derived
     /// [`destroyed`](Self::destroyed) is cross-checked against, never the reported number.
     pub(crate) booked_destroyed: u64,
+    /// Post-tx net gas an inspector conjured — zero for every transaction that ran without one,
+    /// and for every observation-only inspector.
+    pub(crate) inspector_conjured_gas: i128,
+    /// What the measurement shim booked for this transaction, as the outcome reports it.
+    pub(crate) inspector_ledger: InspectorLedger,
     /// The state the transaction produced.
     pub(crate) state: EvmState,
 }
@@ -127,26 +134,11 @@ pub(crate) fn transact_with_gas_limit(
     tx.enveloped_tx = Some(Bytes::new());
     let mut evm = MegaEvm::new(context);
     let outcome = evm.execute_transaction(tx).expect("tx should not surface EVMError");
-    let (detained_compute_gas_limit, non_compute_gas, minted_call_stipend, booked_destroyed) = {
+    let (detained_compute_gas_limit, terms) = {
         let additional_limit = evm.ctx_ref().additional_limit.borrow();
-        let terms = additional_limit.conservation_terms();
-        let (non_compute_gas, minted_call_stipend, booked_destroyed) =
-            (terms.non_compute_gas, terms.minted_call_stipend, terms.booked_destroyed_compute_gas);
-        (
-            additional_limit.detained_compute_gas_limit(),
-            non_compute_gas,
-            minted_call_stipend,
-            booked_destroyed,
-        )
+        (additional_limit.detained_compute_gas_limit(), additional_limit.conservation_terms())
     };
-    finish(
-        spec,
-        outcome,
-        detained_compute_gas_limit,
-        non_compute_gas,
-        minted_call_stipend,
-        booked_destroyed,
-    )
+    finish(spec, outcome, detained_compute_gas_limit, terms)
 }
 
 /// Assembles an [`Outcome`] from what a transaction reported and checks the terminal identity
@@ -159,9 +151,7 @@ pub(crate) fn finish(
     spec: MegaSpecId,
     outcome: MegaTransactionOutcome,
     detained_compute_gas_limit: u64,
-    non_compute_gas: i128,
-    minted_call_stipend: u64,
-    booked_destroyed: u64,
+    terms: ConservationTerms,
 ) -> Outcome {
     let gas_used = outcome.result_and_state.result.tx_gas_used();
     let total_gas_spent = outcome.result_and_state.result.gas().total_gas_spent();
@@ -176,9 +166,11 @@ pub(crate) fn finish(
         enforced_lane: outcome.compute_gas_enforced,
         total_gas_spent,
         detained_compute_gas_limit,
-        non_compute_gas,
-        minted_call_stipend,
-        booked_destroyed,
+        non_compute_gas: terms.non_compute_gas,
+        minted_call_stipend: terms.minted_call_stipend,
+        booked_destroyed: terms.booked_destroyed_compute_gas,
+        inspector_conjured_gas: terms.inspector_conjured_gas,
+        inspector_ledger: outcome.inspector_ledger,
         state: outcome.result_and_state.state,
     };
     assert_terminal_identity(spec, &outcome);
@@ -198,6 +190,7 @@ pub(crate) fn finish(
 /// D = destroyed           the part that is reported and accounted but never enforced
 /// N = non_compute_gas     MegaETH storage gas plus the sandbox boundary residue (signed)
 /// M = minted_call_stipend CALL_STIPEND minted into child frames and never debited from a caller
+/// I = inspector_conjured_gas gas an inspector wrote into the execution that nothing debited
 /// S = total_gas_spent     the receipt envelope, before the refund and the floor
 /// R = the receipt's raw refund
 /// F = the receipt's EIP-7623 floor gas
@@ -207,13 +200,17 @@ pub(crate) fn finish(
 ///
 /// ```text
 /// (1)  C = E + D
-/// (2)  C + N − M = S
+/// (2)  C + N − M − I = S
 /// (3)  receipt gas_used = max(S − R, F)
 /// ```
 ///
 /// (1) is the split of the reported total. (2) is the conservation law rearranged: settlement
-/// defines `D = S + M − N − E`, so `S = D + E + N − M`, and substituting (1) gives `S = C + N − M`.
-/// (3) is how a receipt's gas number is built from its envelope.
+/// defines `D = S + M + I − N − E`, so `S = D + E + N − M − I`, and substituting (1) gives
+/// `S = C + N − M − I`. (3) is how a receipt's gas number is built from its envelope.
+///
+/// `I` is zero for every transaction that runs without an inspector and for every
+/// observation-only one, so (2) is the plain two-term identity on all but the handful of runs
+/// that attach a rewriting inspector — which is exactly where it earns its keep.
 ///
 /// # Why (2) needs no refund or floor correction
 ///
@@ -249,20 +246,57 @@ fn assert_terminal_identity(spec: MegaSpecId, outcome: &Outcome) {
         outcome.result,
     );
     let accounted = i128::from(outcome.compute_gas) + outcome.non_compute_gas -
-        i128::from(outcome.minted_call_stipend);
+        i128::from(outcome.minted_call_stipend) -
+        outcome.inspector_conjured_gas;
     assert_eq!(
         accounted,
         i128::from(outcome.total_gas_spent),
         "the tracker lanes must account for the whole receipt envelope; \
-         compute={} non_compute={} minted_stipend={} accounted={accounted} envelope={} \
-         (receipt gas_used={}) result={:?}",
+         compute={} non_compute={} minted_stipend={} conjured={} accounted={accounted} \
+         envelope={} (receipt gas_used={}) result={:?}",
         outcome.compute_gas,
         outcome.non_compute_gas,
         outcome.minted_call_stipend,
+        outcome.inspector_conjured_gas,
         outcome.total_gas_spent,
         outcome.gas_used,
         outcome.result,
     );
+}
+
+/// [`transact`] with an inspector attached, borrowed so the caller can read it back afterwards.
+///
+/// Runs the same fixture through the inspected frame loops. The identity every other helper here
+/// checks holds on this path too, with the inspector's own term in it — which is the point: a
+/// rewriting inspector must leave the transaction's numbers accountable, not merely plausible.
+pub(crate) fn transact_inspected<I>(
+    spec: MegaSpecId,
+    mut db: MemoryDatabase,
+    limits: EvmTxRuntimeLimits,
+    inspector: &mut I,
+) -> Outcome
+where
+    I: for<'a> Inspector<MegaContext<&'a mut MemoryDatabase, EmptyExternalEnv>>,
+{
+    let mut context = MegaContext::new(&mut db, spec).with_tx_runtime_limits(limits);
+    context.modify_chain(|chain| {
+        chain.operator_fee_scalar = Some(U256::from(0));
+        chain.operator_fee_constant = Some(U256::from(0));
+    });
+    let tx = TxEnvBuilder::default()
+        .caller(CALLER)
+        .call(CONTRACT)
+        .gas_limit(DEFAULT_TX_GAS_LIMIT)
+        .build_fill();
+    let mut tx = MegaTransaction::new(tx);
+    tx.enveloped_tx = Some(Bytes::new());
+    let mut evm = MegaEvm::new(context).with_inspector(inspector);
+    let outcome = evm.execute_transaction(tx).expect("tx should not surface EVMError");
+    let (detained_compute_gas_limit, terms) = {
+        let additional_limit = evm.ctx_ref().additional_limit.borrow();
+        (additional_limit.detained_compute_gas_limit(), additional_limit.conservation_terms())
+    };
+    finish(spec, outcome, detained_compute_gas_limit, terms)
 }
 
 /// Runs [`transact`] with the spec's default runtime limits.
@@ -313,26 +347,11 @@ pub(crate) fn transact_mega_tx(
     });
     let mut evm = MegaEvm::new(context);
     let outcome = evm.execute_transaction(tx).expect("tx should not surface EVMError");
-    let (detained_compute_gas_limit, non_compute_gas, minted_call_stipend, booked_destroyed) = {
+    let (detained_compute_gas_limit, terms) = {
         let additional_limit = evm.ctx_ref().additional_limit.borrow();
-        let terms = additional_limit.conservation_terms();
-        let (non_compute_gas, minted_call_stipend, booked_destroyed) =
-            (terms.non_compute_gas, terms.minted_call_stipend, terms.booked_destroyed_compute_gas);
-        (
-            additional_limit.detained_compute_gas_limit(),
-            non_compute_gas,
-            minted_call_stipend,
-            booked_destroyed,
-        )
+        (additional_limit.detained_compute_gas_limit(), additional_limit.conservation_terms())
     };
-    finish(
-        spec,
-        outcome,
-        detained_compute_gas_limit,
-        non_compute_gas,
-        minted_call_stipend,
-        booked_destroyed,
-    )
+    finish(spec, outcome, detained_compute_gas_limit, terms)
 }
 
 /// The part of an account a transaction's state actually asserts.
@@ -461,24 +480,9 @@ pub(crate) fn transact_with_bucket_capacity(
     tx.enveloped_tx = Some(Bytes::new());
     let mut evm = MegaEvm::new(context);
     let outcome = evm.execute_transaction(tx).expect("tx should not surface EVMError");
-    let (detained_compute_gas_limit, non_compute_gas, minted_call_stipend, booked_destroyed) = {
+    let (detained_compute_gas_limit, terms) = {
         let additional_limit = evm.ctx_ref().additional_limit.borrow();
-        let terms = additional_limit.conservation_terms();
-        let (non_compute_gas, minted_call_stipend, booked_destroyed) =
-            (terms.non_compute_gas, terms.minted_call_stipend, terms.booked_destroyed_compute_gas);
-        (
-            additional_limit.detained_compute_gas_limit(),
-            non_compute_gas,
-            minted_call_stipend,
-            booked_destroyed,
-        )
+        (additional_limit.detained_compute_gas_limit(), additional_limit.conservation_terms())
     };
-    finish(
-        spec,
-        outcome,
-        detained_compute_gas_limit,
-        non_compute_gas,
-        minted_call_stipend,
-        booked_destroyed,
-    )
+    finish(spec, outcome, detained_compute_gas_limit, terms)
 }

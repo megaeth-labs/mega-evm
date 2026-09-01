@@ -14,6 +14,10 @@
 //! - `create_code_deposit_charge` — a CREATE's canonical code-deposit compute gas is weighed before
 //!   it is recorded, so a creation that fails at its frame exit is charged nothing for a deposit
 //!   the EVM never makes.
+//! - `inspector_settlement_window` — the two windows where a rewrite lands after the accounting
+//!   that should have read it: a terminating opcode's `step_end`, whose counter edit reaches
+//!   nobody, and a precompile's classification, whose split has to follow the callback rather than
+//!   the recording site.
 //! - `interceptor_resume` — the two ways a CALL returns without a child frame ever running: a
 //!   system contract interceptor's synthetic result, and a precompile.
 //! - `keyless_synthetic_halt` — the `KeylessDeploy` interceptor's synthetic halts: the two that
@@ -87,6 +91,7 @@ mod gas_clamp;
 mod gas_leakage;
 mod guard_pass_static_gas;
 mod inspector_cheat_matrix;
+mod inspector_settlement_window;
 mod interceptor_resume;
 mod keyless_synthetic_halt;
 mod latch_surfacing;

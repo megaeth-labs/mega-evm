@@ -100,34 +100,16 @@ fn run_db(mut db: MemoryDatabase, limits: EvmTxRuntimeLimits) -> GuardPassRun {
     tx.enveloped_tx = Some(Bytes::new());
     let mut evm = MegaEvm::new(context);
     let executed = evm.execute_transaction(tx).expect("tx should not surface EVMError");
-    let (
-        detained_compute_gas_limit,
-        remaining_compute_gas,
-        non_compute_gas,
-        minted_call_stipend,
-        booked_destroyed,
-    ) = {
+    let (detained_compute_gas_limit, remaining_compute_gas, terms) = {
         let additional_limit = evm.ctx_ref().additional_limit.borrow();
-        let terms = additional_limit.conservation_terms();
-        let (non_compute_gas, minted_call_stipend, booked_destroyed) =
-            (terms.non_compute_gas, terms.minted_call_stipend, terms.booked_destroyed_compute_gas);
         (
             additional_limit.detained_compute_gas_limit(),
             additional_limit.current_call_remaining_compute_gas(),
-            non_compute_gas,
-            minted_call_stipend,
-            booked_destroyed,
+            additional_limit.conservation_terms(),
         )
     };
     let accessed = evm.ctx_ref().volatile_data_tracker.borrow().get_volatile_data_accessed();
-    let outcome = finish(
-        MegaSpecId::REX7,
-        executed,
-        detained_compute_gas_limit,
-        non_compute_gas,
-        minted_call_stipend,
-        booked_destroyed,
-    );
+    let outcome = finish(MegaSpecId::REX7, executed, detained_compute_gas_limit, terms);
     GuardPassRun { outcome, accessed, remaining_compute_gas }
 }
 

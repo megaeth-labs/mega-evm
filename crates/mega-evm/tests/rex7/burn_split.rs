@@ -426,26 +426,11 @@ fn transact_create_reject(
     tx.enveloped_tx = Some(Bytes::new());
     let mut evm = MegaEvm::new(context);
     let outcome = evm.execute_transaction(tx).expect("tx should not surface EVMError");
-    let (detained_compute_gas_limit, non_compute_gas, minted_call_stipend, booked_destroyed) = {
+    let (detained_compute_gas_limit, terms) = {
         let additional_limit = EvmTr::ctx_ref(&evm).additional_limit.borrow();
-        let terms = additional_limit.conservation_terms();
-        let (non_compute_gas, minted_call_stipend, booked_destroyed) =
-            (terms.non_compute_gas, terms.minted_call_stipend, terms.booked_destroyed_compute_gas);
-        (
-            additional_limit.detained_compute_gas_limit(),
-            non_compute_gas,
-            minted_call_stipend,
-            booked_destroyed,
-        )
+        (additional_limit.detained_compute_gas_limit(), additional_limit.conservation_terms())
     };
-    finish(
-        MegaSpecId::REX7,
-        outcome,
-        detained_compute_gas_limit,
-        non_compute_gas,
-        minted_call_stipend,
-        booked_destroyed,
-    )
+    finish(MegaSpecId::REX7, outcome, detained_compute_gas_limit, terms)
 }
 
 /// Runtime length the CREATE cases deploy — small enough that the per-byte code-deposit storage
