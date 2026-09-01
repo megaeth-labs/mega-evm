@@ -94,8 +94,9 @@ pub struct MegaTransactionOutcome {
     ///
     /// Every gas lane is signed and reads from the transaction's point of view: **positive is gas
     /// conjured** — gas that exists in the execution but that nothing debited from the
-    /// transaction's envelope — and **negative is gas destroyed**, which the envelope funded and
-    /// no frame ever received. The lanes are net, so an injection and a matching removal cancel.
+    /// transaction's envelope — and **negative is gas destroyed** — gas the envelope funded that
+    /// the execution never got the benefit of. The lanes are net, so an injection and a matching
+    /// removal cancel.
     ///
     /// # When it is zero
     ///
@@ -107,11 +108,13 @@ pub struct MegaTransactionOutcome {
     ///
     /// # What it is for
     ///
-    /// Reporting, and that refusal. No resource limit is ever evaluated against it: enforcement
-    /// never sees an inspector's adjustment, because the shim shifts the compute measurement's
-    /// baseline by the same amount it books here. It is also the `I` term of the conservation law
-    /// — see [`ConservationTerms`](crate::ConservationTerms) — which is why an outcome carrying
-    /// gas numbers is not fully described without it.
+    /// Reporting, and that refusal. No resource limit is ever evaluated against it, and no
+    /// adjustment recorded here is ever counted as work: the interpreter-counter lane shifts the
+    /// compute measurement's baseline as it books, so the edit settles outside the measured span
+    /// and the gas clamp is re-derived on the spot, while the other two lanes move a gas budget
+    /// rather than a recording and so never enter the measurement at all. It is also the `I` term
+    /// of the conservation law — see [`ConservationTerms`](crate::ConservationTerms) — which is
+    /// why an outcome carrying gas numbers is not fully described without it.
     pub inspector_ledger: crate::InspectorLedger,
 }
 

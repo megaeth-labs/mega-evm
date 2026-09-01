@@ -28,7 +28,7 @@ use mega_evm::{
     MegaHardforkConfig, MegaSpecId, MegaTxEnvelope, TestExternalEnvs,
 };
 use revm::{
-    bytecode::opcode::{POP, STOP},
+    bytecode::opcode::{CALL, POP, STOP},
     context::BlockEnv,
     database::State,
     interpreter::{Interpreter, InterpreterTypes},
@@ -39,6 +39,8 @@ use revm::{
 const CALLER: Address = address!("2000000000000000000000000000000000000002");
 /// A callee with enough plain opcodes for an inspector to land an edit mid-run.
 const CONTRACT: Address = address!("1000000000000000000000000000000000000001");
+/// A second callee, so a tracer has a nested frame to record.
+const CALLEE: Address = address!("1000000000000000000000000000000000000002");
 
 /// Gas the injecting inspector writes into the interpreter's counter.
 const INJECTED: u64 = 7_000;
@@ -90,8 +92,22 @@ fn build_db() -> MemoryDatabase {
     for _ in 0..16 {
         code = code.push_number(1u64).append(POP);
     }
+    let code = code
+        .sstore(U256::from(1), U256::from(9))
+        .push_number(0u64) // retSize
+        .push_number(0u64) // retOffset
+        .push_number(0u64) // argsSize
+        .push_number(0u64) // argsOffset
+        .push_number(0u64) // value
+        .push_address(CALLEE)
+        .push_number(50_000u64) // gas
+        .append(CALL)
+        .append(POP)
+        .append(STOP)
+        .build();
     let mut db = MemoryDatabase::default();
-    db.set_account_code(CONTRACT, code.append(STOP).build());
+    db.set_account_code(CONTRACT, code);
+    db.set_account_code(CALLEE, BytecodeBuilder::default().stop().build());
     db.set_account_balance(CALLER, U256::from(1_000_000_000_000_000_000u64));
     db
 }
@@ -296,9 +312,9 @@ fn test_the_infallible_commit_hook_latches_the_refusal() {
 /// The guard governs the configuration a block is built with, which no historical block covers, so
 /// it is not gated on a spec — the same rewrite is refused on a frozen one.
 ///
-/// The measurement it reads is spec-independent for the same reason: the shim books what an
-/// inspector writes into a gas counter whether or not the spec has a lane that the write could
-/// make unsound.
+/// The measurement it reads is spec-independent too, for its own reason: the shim books what an
+/// inspector writes into a gas counter whether or not the spec has a lane the write could make
+/// unsound.
 #[test]
 fn test_the_guard_is_not_spec_gated() {
     for spec in [MegaSpecId::MINI_REX, MegaSpecId::REX4, MegaSpecId::REX6, MegaSpecId::REX7] {
@@ -370,4 +386,77 @@ fn test_an_observing_inspector_still_builds_a_block() {
     let (plain_gas, _) = build(false);
     assert!(steps > 0, "the fixture must actually have observed something");
     assert_eq!(observed_gas, plain_gas, "observation must not move a single unit of gas");
+}
+
+/// A pre- or post-block system call never runs the inspector, so it is not an entry the guard has
+/// to cover.
+///
+/// Two independent reasons, and this pins the one that is not visible from the block executor's
+/// own signatures. Structurally, a system call produces a `ResultAndState` rather than a
+/// `MegaTransactionOutcome`, and the ledger is reset at the start of every transaction, so nothing
+/// a system call booked could reach a transaction's outcome anyway. Underneath that, the system
+/// call path takes revm's plain frame loop rather than the inspecting one — which is what this
+/// runs to find out, rather than reading it off upstream's source.
+#[test]
+fn test_a_system_call_does_not_run_the_inspector() {
+    use revm::SystemCallEvm as _;
+
+    let mut db = build_db();
+    let mut state = State::builder().with_database(&mut db).build();
+    let mut executor = executor_factory(MegaSpecId::REX7).create_executor_with_inspector(
+        &mut state,
+        block_ctx(),
+        evm_env(MegaSpecId::REX7),
+        GasInjector::default(),
+    );
+
+    let result = executor
+        .evm_mut()
+        .system_call(CONTRACT, Bytes::new())
+        .expect("the system call must not surface an EVMError");
+
+    assert!(result.result.is_success(), "fixture check: the callee must have run, got {result:?}",);
+    assert!(!executor.evm().inspector.applied, "a system call must not reach the inspector at all",);
+}
+
+/// The real tracer that `mega-evme replay` attaches to this exact path is admitted, and the block
+/// it observes is the one built without it.
+///
+/// The `Observer` above is a fixture; this is the production shape. `TracingInspector` receives
+/// every callback the shim measures — including the ones handed a live interpreter and the ones
+/// handed a frame's inputs — so if observation could move a lane by accident, it would move one
+/// here. Run rather than reasoned about: the guard's blast radius is only acceptable if the
+/// inspectors that exist today pass it.
+#[test]
+fn test_the_production_tracer_is_admitted() {
+    use revm_inspectors::tracing::{TracingInspector, TracingInspectorConfig};
+
+    let mut db = build_db();
+    let mut state = State::builder().with_database(&mut db).build();
+    let mut executor = executor_factory(MegaSpecId::REX7).create_executor_with_inspector(
+        &mut state,
+        block_ctx(),
+        evm_env(MegaSpecId::REX7),
+        TracingInspector::new(TracingInspectorConfig::all()),
+    );
+
+    let tx = envelope(0);
+    let outcome = executor
+        .run_transaction(Recovered::new_unchecked(&tx, CALLER))
+        .expect("the tracer every replay uses must not be refused");
+
+    assert!(outcome.result.is_success(), "fixture check: {:?}", outcome.result);
+    assert!(
+        outcome.inner.inspector_ledger.is_zero(),
+        "a tracer must leave every lane untouched; got {:?}",
+        outcome.inner.inspector_ledger,
+    );
+    executor.commit_transaction_outcome(outcome).expect("nor at commit");
+
+    assert!(
+        executor.evm().inspector.traces().nodes().len() >= 2,
+        "fixture check: the tracer must have recorded the nested frame it was given",
+    );
+    let (_, result) = executor.finish().expect("the block must finish");
+    assert_eq!(result.receipts.len(), 1);
 }

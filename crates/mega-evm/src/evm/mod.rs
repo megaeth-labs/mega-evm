@@ -479,10 +479,10 @@ where
 /// C + S + D − K − I == total_gas_spent
 /// ```
 ///
-/// The settlement site solves the same law for `D`, so reading it back in this direction is only
-/// a tautology when both sides read the same terms *and* the same envelope. Neither holds here,
-/// which is what gives this check its reach: it re-reads the terms after settlement finished and
-/// compares against the envelope the receipt ended up carrying.
+/// The settlement site solved the same law for `D`, so on a transaction that settled against this
+/// same envelope the check is that identity restated — and that is the point. Its reach is the
+/// paths where the two are *not* the same, named below: the terms are re-read after settlement
+/// finished, and the envelope is the one the receipt ended up carrying.
 ///
 /// The inspector term `I` is zero unless a rewriting inspector was attached: it is what the
 /// measurement shim booked for gas the inspector wrote into an interpreter counter, a frame
