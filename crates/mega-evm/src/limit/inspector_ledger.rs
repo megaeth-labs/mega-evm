@@ -21,6 +21,14 @@
 /// from the transaction's envelope — and a negative value is gas it destroyed. Both directions are
 /// recorded, because the conservation law needs the net, not the gross.
 ///
+/// # What it does not measure
+///
+/// Gas movement, and only that. An inspector can change an execution in ways that move no gas at
+/// all — rewriting a frame result's classification, editing the interpreter's stack or memory,
+/// writing the journal directly — and every one of those leaves this all-zero. So an empty ledger
+/// says the transaction's *gas numbers* are the EVM's own; it does not say the transaction is the
+/// one the EVM would have produced alone.
+///
 /// # What consumes it
 ///
 /// - [`conjured_gas`](Self::conjured_gas) is the term the destroyed-remainder derivation adds to
@@ -99,6 +107,8 @@ impl InspectorLedger {
     /// Whether the inspector left the transaction's gas accounting exactly as the EVM produced it.
     ///
     /// True for every observation-only inspector, and for every transaction that ran without one.
+    /// Not the converse of "an inspector changed something": see the type's own documentation for
+    /// the rewrites that move no gas and so leave this true.
     #[inline]
     pub const fn is_zero(&self) -> bool {
         self.gas == 0 && self.env == 0 && self.result == 0 && self.rejected_rewrites == 0

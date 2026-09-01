@@ -106,6 +106,11 @@ pub struct MegaTransactionOutcome {
     /// inspector took part in, and the block-execution path refuses to admit one into a block for
     /// exactly that reason.
     ///
+    /// The converse does not hold, and reading it that way is the mistake this field invites. What
+    /// is measured is gas movement: an inspector that only rewrites a frame result's
+    /// classification, edits the interpreter's stack or memory, or writes the journal directly
+    /// moves no gas and leaves this empty, while changing the state the transaction produces.
+    ///
     /// # What it is for
     ///
     /// Reporting, and that refusal. No resource limit is ever evaluated against it, and no
