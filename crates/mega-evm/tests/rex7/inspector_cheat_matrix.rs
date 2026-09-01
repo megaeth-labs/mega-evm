@@ -46,9 +46,9 @@ use revm::{
     context::{result::ExecutionResult, tx::TxEnvBuilder, ContextTr, JournalTr},
     handler::{EvmTr, FrameResult},
     interpreter::{
-        interpreter_types::{Jumps, MemoryTr, StackTr},
+        interpreter_types::{Jumps, LoopControl, MemoryTr, StackTr},
         CallInputs, CallOutcome, CreateInputs, CreateOutcome, FrameInput, Gas, InstructionResult,
-        Interpreter, InterpreterResult, InterpreterTypes,
+        Interpreter, InterpreterAction, InterpreterResult, InterpreterTypes,
     },
     state::EvmState,
     Inspector,
@@ -68,6 +68,8 @@ const DRAIN: u64 = 1_000;
 const ENVELOPE: u64 = 5_000;
 /// Gas a result cheat adds to, or removes from, a frame result's remaining gas.
 const RESULT: u64 = 2_000;
+/// Gas an action cheat adds to, or removes from, the gas a pending `InterpreterAction` carries.
+const ACTION: u64 = 1_500;
 
 /// Slot the top frame writes, last of all, so a cheat that fails the top frame is visible.
 const TOP_SLOT: u64 = 0x10;
@@ -152,6 +154,15 @@ enum Shape {
     FailResult,
     /// Rewrite a failed frame result into a success.
     ReviveResult,
+    /// Raise the gas a pending `Return` action carries — the gas the frame it ends will hand back.
+    RaiseActionResultGas,
+    /// Lower it.
+    LowerActionResultGas,
+    /// Raise the `gas_limit` a pending `NewFrame` action carries — the envelope of the child the
+    /// frame is suspending into.
+    RaiseActionEnvelope,
+    /// Lower it.
+    LowerActionEnvelope,
     /// Edit the interpreter's stack or memory — the frame's working state, which the EVM reads
     /// back as operands and as data.
     EditStackOrMemory,
@@ -160,7 +171,7 @@ enum Shape {
 }
 
 impl Shape {
-    const ALL: [Self; 12] = [
+    const ALL: [Self; 16] = [
         Self::InjectGas,
         Self::DrainGas,
         Self::RaiseEnvelope,
@@ -171,9 +182,25 @@ impl Shape {
         Self::LowerResultGas,
         Self::FailResult,
         Self::ReviveResult,
+        Self::RaiseActionResultGas,
+        Self::LowerActionResultGas,
+        Self::RaiseActionEnvelope,
+        Self::LowerActionEnvelope,
         Self::EditStackOrMemory,
         Self::JournalWrite,
     ];
+
+    /// Whether this shape reaches through the interpreter's *pending action* rather than through
+    /// the interpreter itself.
+    const fn is_pending_action(self) -> bool {
+        matches!(
+            self,
+            Self::RaiseActionResultGas |
+                Self::LowerActionResultGas |
+                Self::RaiseActionEnvelope |
+                Self::LowerActionEnvelope
+        )
+    }
 }
 
 /// Why a row × column pair cannot be covered, for every pair the matrix leaves out.
@@ -206,6 +233,18 @@ fn inapplicable(at: At, shape: Shape) -> Option<&'static str> {
     let interpreter_facing = matches!(at, InitializeInterp | Step | StepEnd | LogFull);
     let input_facing = matches!(at, FrameStart | Call | Create);
     let result_facing = matches!(at, FrameEnd | CallEnd | CreateEnd);
+
+    if shape.is_pending_action() {
+        return match at {
+            StepEnd => None,
+            InitializeInterp | Step | LogFull => Some(
+                "no action is pending at this callback: revm's inspected loop breaks out as soon \
+                 as one is set, so `step` and `log_full` only ever run with none, and \
+                 `initialize_interp` runs before the loop on a fresh interpreter",
+            ),
+            _ => Some("no live interpreter is reachable from this callback"),
+        };
+    }
 
     match shape {
         InjectGas | DrainGas | EditStackOrMemory if !interpreter_facing => {
@@ -298,6 +337,37 @@ impl Cheat {
             interp.memory.set(0, &[0xAB; 32]);
         } else {
             assert!(interp.stack.push(U256::from(0xDEADu64)));
+        }
+        self.fired += 1;
+    }
+
+    /// Applies a shape that reaches through the interpreter's *pending action* — the object the
+    /// terminating or suspending instruction just left behind, which carries its own copy of the
+    /// gas the frame is handing on.
+    ///
+    /// Leaves the action alone and does not count as fired when the pending action is not the
+    /// variant this shape targets, so the cheat lands on the first `step_end` that offers the
+    /// right one rather than on whichever comes first.
+    fn hit_pending_action<INTR: InterpreterTypes>(&mut self, interp: &mut Interpreter<INTR>) {
+        match (self.shape, interp.bytecode.action()) {
+            (Shape::RaiseActionResultGas, Some(InterpreterAction::Return(result))) => {
+                result.gas.erase_cost(ACTION);
+            }
+            (Shape::LowerActionResultGas, Some(InterpreterAction::Return(result))) => {
+                assert!(
+                    result.gas.record_regular_cost(ACTION),
+                    "the fixture must leave the action enough gas for a {ACTION} gas removal",
+                );
+            }
+            (
+                Shape::RaiseActionEnvelope,
+                Some(InterpreterAction::NewFrame(FrameInput::Call(inputs))),
+            ) => inputs.gas_limit += ACTION,
+            (
+                Shape::LowerActionEnvelope,
+                Some(InterpreterAction::NewFrame(FrameInput::Call(inputs))),
+            ) => inputs.gas_limit -= ACTION,
+            _ => return,
         }
         self.fired += 1;
     }
@@ -450,7 +520,16 @@ impl<CTX: ContextTr, INTR: InterpreterTypes> Inspector<CTX, INTR> for Cheat {
     }
 
     fn step_end(&mut self, interp: &mut Interpreter<INTR>, context: &mut CTX) {
-        if !self.arm(At::StepEnd) || self.steps != self.step_at {
+        if !self.arm(At::StepEnd) {
+            return;
+        }
+        // The action shapes fire on the first `step_end` that offers the action variant they
+        // target, not on a fixed ordinal — only a handful of opcodes leave an action behind.
+        if self.shape.is_pending_action() {
+            self.hit_pending_action(interp);
+            return;
+        }
+        if self.steps != self.step_at {
             return;
         }
         match self.shape {
@@ -916,6 +995,39 @@ fn matrix() -> Vec<Cell> {
         );
     }
 
+    // The pending action, which only `step_end` ever sees: revm's inspected loop breaks out the
+    // moment one is set, so it is the one callback that runs with an instruction's action already
+    // in place. Which lane the edit lands on is decided by the action's own variant — a `Return`
+    // action is what the frame hands back, a `NewFrame` action is what the child is built with.
+    push(
+        StepEnd,
+        RaiseActionResultGas,
+        Fixture::ReturningCallee,
+        ledger_result(i128::from(ACTION)),
+        state_all_committed,
+    );
+    push(
+        StepEnd,
+        LowerActionResultGas,
+        Fixture::ReturningCallee,
+        ledger_result(-i128::from(ACTION)),
+        state_all_committed,
+    );
+    push(
+        StepEnd,
+        RaiseActionEnvelope,
+        Fixture::ReturningCallee,
+        ledger_env(i128::from(ACTION)),
+        state_all_committed,
+    );
+    push(
+        StepEnd,
+        LowerActionEnvelope,
+        Fixture::ReturningCallee,
+        ledger_env(-i128::from(ACTION)),
+        state_all_committed,
+    );
+
     // The three callbacks that are handed a frame's inputs before the frame is built. `create`
     // reaches the fixture's `CREATE`; the other two reach its inner `CALL`.
     for at in [FrameStart, Call, Create] {
@@ -1092,6 +1204,7 @@ fn test_the_matrix_is_inert_with_the_inspected_loops_switched_off() {
         (At::CreateEnd, Shape::FailResult, Fixture::ReturningCallee),
         (At::FrameEnd, Shape::ReviveResult, Fixture::RevertingCallee),
         (At::Step, Shape::JournalWrite, Fixture::ReturningCallee),
+        (At::StepEnd, Shape::RaiseActionResultGas, Fixture::ReturningCallee),
     ];
 
     let mut plain: BTreeMap<Fixture, Reading> = BTreeMap::new();

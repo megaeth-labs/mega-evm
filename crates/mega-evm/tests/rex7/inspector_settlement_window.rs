@@ -418,17 +418,6 @@ impl ActionEditor {
     fn on_halt() -> Self {
         Self { window: Window::Terminating, delta: ACTION_DELTA as i64, halting: true, fired: 0 }
     }
-
-    fn move_gas(&self, gas: &mut revm::interpreter::Gas) {
-        if self.delta >= 0 {
-            gas.erase_cost(self.delta.unsigned_abs());
-        } else {
-            assert!(
-                gas.record_regular_cost(self.delta.unsigned_abs()),
-                "the fixture must leave the action enough gas for the removal to land",
-            );
-        }
-    }
 }
 
 impl<CTX, INTR: InterpreterTypes> Inspector<CTX, INTR> for ActionEditor {
@@ -441,9 +430,14 @@ impl<CTX, INTR: InterpreterTypes> Inspector<CTX, INTR> for ActionEditor {
                 if result.result.is_ok_or_revert() == self.halting {
                     return;
                 }
-                let mut gas = result.gas;
-                self.move_gas(&mut gas);
-                result.gas = gas;
+                if self.delta >= 0 {
+                    result.gas.erase_cost(self.delta.unsigned_abs());
+                } else {
+                    assert!(
+                        result.gas.record_regular_cost(self.delta.unsigned_abs()),
+                        "the fixture must leave the action enough gas for the removal to land",
+                    );
+                }
             }
             Some(InterpreterAction::NewFrame(FrameInput::Call(inputs))) => {
                 inputs.gas_limit = inputs.gas_limit.saturating_add(self.delta.unsigned_abs());
