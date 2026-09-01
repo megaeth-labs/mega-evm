@@ -105,6 +105,14 @@ pub struct InspectorLedger {
     /// The same lane carries an edit made one step earlier, to the gas inside a pending `Return`
     /// action. That action *is* the frame's result a moment later, so the two are one number
     /// measured on either side of the classification, and they settle together.
+    ///
+    /// And it carries the gas of a result the inspector produced outright, by answering a frame
+    /// with a synthetic outcome. That one is not a difference across a callback — no frame is
+    /// built, so there is no EVM-produced number on the other side — but against the envelope the
+    /// answering callback was handed, which the transaction did fund. The two are the same
+    /// question either way, and they settle at the same point for the same reason: a returning or
+    /// reverting outcome hands its gas back to the caller, a halting one hands nothing back and
+    /// the whole envelope is destroyed whatever figure the outcome claimed.
     pub result: i128,
 
     /// How many rewrites the shim refused because their shape is forbidden.

@@ -31,6 +31,9 @@
 //!   interpreter counter or a frame's gas limit is measured at the callback boundary, booked, and
 //!   kept out of enforcement, with the clamp re-derived on the spot; reviving a failed creation is
 //!   refused; an observation-only inspector is bit-identical to no inspector at all.
+//! - `gas_surface` — the closed enumeration one level below the cheat matrix: every field of every
+//!   gas-carrying object an inspector callback is handed, each with a verdict, pinned against what
+//!   upstream's own `Debug` renders.
 //! - `gas_leakage` — the three paths a per-frame gas mechanism can leak through (interception,
 //!   TX-level rescue, frame return), each with a clamp outstanding.
 //! - `opcode_set_parity` — all 256 opcodes probed under both specs, so the REX7 table cannot gain
@@ -93,6 +96,7 @@ mod frame_init_reject_burn;
 mod frame_loop_parity;
 mod gas_clamp;
 mod gas_leakage;
+mod gas_surface;
 mod guard_pass_static_gas;
 mod inspector_cheat_matrix;
 mod inspector_settlement_window;
