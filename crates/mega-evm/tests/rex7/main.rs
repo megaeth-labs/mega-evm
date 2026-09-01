@@ -89,6 +89,7 @@ mod guard_pass_static_gas;
 mod interceptor_resume;
 mod keyless_synthetic_halt;
 mod latch_surfacing;
+mod late_frame_local;
 mod measured_inspector;
 mod modexp_gas;
 mod opcode_set_parity;
