@@ -108,8 +108,9 @@ fn run_db(mut db: MemoryDatabase, limits: EvmTxRuntimeLimits) -> GuardPassRun {
         booked_destroyed,
     ) = {
         let additional_limit = evm.ctx_ref().additional_limit.borrow();
+        let terms = additional_limit.conservation_terms();
         let (non_compute_gas, minted_call_stipend, booked_destroyed) =
-            additional_limit.conservation_terms_for_test();
+            (terms.non_compute_gas, terms.minted_call_stipend, terms.booked_destroyed_compute_gas);
         (
             additional_limit.detained_compute_gas_limit(),
             additional_limit.current_call_remaining_compute_gas(),

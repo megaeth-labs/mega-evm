@@ -469,19 +469,27 @@ where
 /// reports (REX7+; before REX7 there is no destroyed lane and no non-compute lane, so there is
 /// nothing to reconcile).
 ///
-/// The reported compute total, the `MegaETH` storage gas, and the `CALL_STIPEND` the EVM minted
-/// into child frames are the three terms the destroyed remainder is derived from, so once
-/// settlement has run they must add back up to the envelope the transaction burnt:
+/// This is the conservation law solved for the envelope —
+/// [`ConservationTerms::envelope_for`](crate::ConservationTerms::envelope_for) — evaluated against
+/// the destroyed remainder the *outcome* reports rather than the one the settlement derived:
 ///
 /// ```text
-/// compute_gas_used + non_compute_gas − minted_call_stipend − inspector_conjured_gas
-///     == total_gas_spent
+/// C + S + D − K − I == total_gas_spent
 /// ```
 ///
-/// The inspector term is zero unless a rewriting inspector was attached: it is what the
-/// measurement shim booked for gas the inspector wrote into an interpreter counter or a frame
-/// envelope, which the transaction's own envelope never funded. Subtracting it is what keeps the
-/// law stated over the EVM's gas rather than over the EVM's gas plus an inspector's edits.
+/// The settlement site solves the same law for `D`, so reading it back in this direction is only
+/// a tautology when both sides read the same terms *and* the same envelope. Neither holds here,
+/// which is what gives this check its reach: it re-reads the terms after settlement finished and
+/// compares against the envelope the receipt ended up carrying.
+///
+/// The inspector term `I` is zero unless a rewriting inspector was attached: it is what the
+/// measurement shim booked for gas the inspector wrote into an interpreter counter, a frame
+/// envelope, or a returning frame's result, none of which the transaction's own envelope funded.
+/// Subtracting it is what keeps the law stated over the EVM's gas rather than over the EVM's gas
+/// plus an inspector's edits.
+///
+/// The reported compute total is checked to be the sum of the two lanes it is supposed to split
+/// into, so a consumer reading either lane and a consumer reading the total cannot disagree.
 ///
 /// The EIP-3529 refund and the EIP-7623 floor move the number a receipt reports without anyone
 /// having burnt the difference; both are carried on the result as their own fields and applied
@@ -505,21 +513,24 @@ fn debug_assert_envelope_accounted(
 ) {
     if cfg!(debug_assertions) && spec.is_enabled(MegaSpecId::REX7) && !is_inside_sandbox {
         let envelope = outcome.result_and_state.result.gas().total_gas_spent();
-        let accounted = i128::from(outcome.compute_gas_used) + additional_limit.non_compute_gas() -
-            i128::from(additional_limit.minted_call_stipend()) -
-            additional_limit.inspector_conjured_gas();
+        let terms = additional_limit.conservation_terms();
+        debug_assert!(
+            outcome.compute_gas_used ==
+                outcome.compute_gas_enforced + outcome.compute_gas_destroyed,
+            "the reported compute total must be the sum of the lanes it splits into: \
+             reported {} vs enforced {} + destroyed {}",
+            outcome.compute_gas_used,
+            outcome.compute_gas_enforced,
+            outcome.compute_gas_destroyed,
+        );
+        let accounted = terms.envelope_for(outcome.compute_gas_destroyed);
         debug_assert!(
             accounted == i128::from(envelope),
             "the tracker lanes must account for the whole receipt envelope: \
              accounted {accounted} vs envelope {envelope} \
-             (compute {}, non-compute {}, minted stipend {}, inspector conjured {}, \
-              destroyed {}, enforced {})",
+             (reported compute {}, reported destroyed {}, {terms})",
             outcome.compute_gas_used,
-            additional_limit.non_compute_gas(),
-            additional_limit.minted_call_stipend(),
-            additional_limit.inspector_conjured_gas(),
             outcome.compute_gas_destroyed,
-            outcome.compute_gas_enforced,
         );
     }
 }

@@ -53,8 +53,8 @@ pub(crate) struct CheckpointTracker {
     /// record as compute gas, `MegaETH` storage gas, or budget an exceptional halt threw away.
     /// This field is the running total of the second kind, which makes the third derivable at the
     /// transaction's settlement point instead of having to be booked at each site that destroys
-    /// one — see [`AdditionalLimit::derived_burned_compute_gas`](
-    /// super::AdditionalLimit::derived_burned_compute_gas).
+    /// one — see [`AdditionalLimit::conservation_terms`](
+    /// super::AdditionalLimit::conservation_terms).
     ///
     /// Signed because one contributor is a difference rather than a charge: the `KeylessDeploy`
     /// sandbox boundary hands the parent one number for what the sandbox cost and another for what

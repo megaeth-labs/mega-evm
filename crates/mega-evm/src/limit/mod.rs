@@ -3,6 +3,7 @@ use alloy_sol_types::SolError;
 
 mod checkpoint;
 mod compute_gas;
+mod conservation;
 mod data_size;
 mod frame_limit;
 mod inspector_ledger;
@@ -12,6 +13,7 @@ mod limit;
 mod state_growth;
 mod storage_call_stipend;
 
+pub use conservation::*;
 pub use data_size::*;
 pub(crate) use frame_limit::{FrameLimitTracker, LimitReading, TxRuntimeLimit};
 pub use inspector_ledger::*;

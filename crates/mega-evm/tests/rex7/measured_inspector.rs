@@ -20,8 +20,9 @@ use crate::common::{CALLEE, CALLER, CONTRACT, ONE_ETH};
 use alloy_primitives::{Bytes, U256};
 use mega_evm::{
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    AdditionalLimit, EmptyExternalEnv, EvmTxRuntimeLimits, InspectorLedger, MegaContext, MegaEvm,
-    MegaHaltReason, MegaSpecId, MegaTransaction, MegaTransactionNew as _, MegaTransactionOutcome,
+    AdditionalLimit, ConservationTerms, EmptyExternalEnv, EvmTxRuntimeLimits, InspectorLedger,
+    MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction, MegaTransactionNew as _,
+    MegaTransactionOutcome,
 };
 use revm::{
     bytecode::opcode::{
@@ -51,8 +52,7 @@ struct Reading {
     state_growth: u64,
     gas_used: u64,
     total_gas_spent: u64,
-    non_compute_gas: i128,
-    minted_call_stipend: u64,
+    terms: ConservationTerms,
     ledger: InspectorLedger,
     state: EvmState,
 }
@@ -83,19 +83,20 @@ fn assert_identity(label: &str, r: &Reading) {
         r.enforced + r.destroyed,
         "{label}: reported compute must split into enforced + destroyed",
     );
-    let accounted = i128::from(r.compute_gas) + r.non_compute_gas -
-        i128::from(r.minted_call_stipend) -
-        r.ledger.conjured_gas();
     assert_eq!(
-        accounted,
-        i128::from(r.total_gas_spent),
-        "{label}: the tracker lanes plus the inspector ledger must account for the whole envelope; \
-         compute={} non_compute={} minted={} conjured={} envelope={}",
-        r.compute_gas,
-        r.non_compute_gas,
-        r.minted_call_stipend,
+        r.terms.inspector_conjured_gas,
         r.ledger.conjured_gas(),
+        "{label}: the law's `I` term is the ledger's net, and nothing else",
+    );
+    assert_eq!(
+        r.terms.envelope_for(r.destroyed),
+        i128::from(r.total_gas_spent),
+        "{label}: the law must close against the envelope the receipt reports; \
+         reported compute={} destroyed={} envelope={} ({})",
+        r.compute_gas,
+        r.destroyed,
         r.total_gas_spent,
+        r.terms,
     );
 }
 
@@ -159,7 +160,6 @@ where
 }
 
 fn read(limit: &AdditionalLimit, outcome: MegaTransactionOutcome) -> Reading {
-    let (non_compute_gas, minted_call_stipend, _booked) = limit.conservation_terms_for_test();
     let gas_used = outcome.result_and_state.result.tx_gas_used();
     let total_gas_spent = outcome.result_and_state.result.gas().total_gas_spent();
     Reading {
@@ -172,8 +172,7 @@ fn read(limit: &AdditionalLimit, outcome: MegaTransactionOutcome) -> Reading {
         state_growth: outcome.state_growth_used,
         gas_used,
         total_gas_spent,
-        non_compute_gas,
-        minted_call_stipend,
+        terms: limit.conservation_terms(),
         ledger: limit.inspector_ledger(),
         state: outcome.result_and_state.state,
     }
@@ -793,8 +792,7 @@ fn test_an_observing_inspector_changes_nothing() {
     assert_eq!(inspected.state_growth, plain.state_growth);
     assert_eq!(inspected.gas_used, plain.gas_used);
     assert_eq!(inspected.total_gas_spent, plain.total_gas_spent);
-    assert_eq!(inspected.non_compute_gas, plain.non_compute_gas);
-    assert_eq!(inspected.minted_call_stipend, plain.minted_call_stipend);
+    assert_eq!(inspected.terms, plain.terms);
     assert_eq!(inspected.state, plain.state, "the produced state must be identical");
     assert_identity("observed", &inspected);
     assert_identity("plain", &plain);

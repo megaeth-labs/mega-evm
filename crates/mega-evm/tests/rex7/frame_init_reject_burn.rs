@@ -133,7 +133,8 @@ fn run_frame_init(spec: MegaSpecId, mut db: MemoryDatabase, frame_init: FrameIni
     let ItemOrResult::Result(frame_result) = result else {
         panic!("{spec:?}: this shape must reject the frame, not build one");
     };
-    let booked_destroyed = evm.ctx_ref().additional_limit.borrow().conservation_terms_for_test().2;
+    let booked_destroyed =
+        evm.ctx_ref().additional_limit.borrow().conservation_terms().booked_destroyed_compute_gas;
     Row {
         instruction_result: frame_result.instruction_result(),
         remaining: frame_result.gas().remaining(),

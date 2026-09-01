@@ -13,8 +13,8 @@ use revm::{
 };
 
 use super::{
-    checkpoint, compute_gas, data_size, frame_limit::TxRuntimeLimit, inspector_ledger, kv_update,
-    state_growth, storage_call_stipend,
+    checkpoint, compute_gas, conservation, data_size, frame_limit::TxRuntimeLimit,
+    inspector_ledger, kv_update, state_growth, storage_call_stipend,
 };
 use crate::{
     EvmTxRuntimeLimits, JournalInspectTr, MegaHaltReason, MegaSpecId, MegaTransaction,
@@ -272,53 +272,29 @@ impl AdditionalLimit {
         self.checkpoint.record_non_compute_gas(amount);
     }
 
-    /// Re-derives the transaction's destroyed compute gas from what it spent, rather than from the
-    /// sites that booked it (REX7+).
+    /// The terms of the transaction's gas conservation law, as they stand right now — see
+    /// [`ConservationTerms`](conservation::ConservationTerms), which states the law and both of
+    /// its rearrangements.
     ///
-    /// Every unit of EVM gas a transaction burns is *almost* exactly one of three things: compute
-    /// work the trackers enforce, `MegaETH` storage gas, or budget an exceptional halt threw away
-    /// without executing anything for it. Two of those three are counted as they happen —
-    /// [`ComputeGasTracker::enforced_tx_usage`](compute_gas::ComputeGasTracker::enforced_tx_usage)
-    /// and the non-compute lane — so the third is whatever is left of `tx_gas_spent`:
+    /// Every site that derives, re-settles or checks a transaction's gas accounting reads the law
+    /// from here, so the law exists once and the terms cannot drift apart between the places that
+    /// use them.
     ///
-    /// ```text
-    /// destroyed = tx_gas_spent + minted_call_stipend + inspector_conjured_gas
-    ///             − non_compute_gas − enforced_compute_gas
-    /// ```
-    ///
-    /// The stipend term is what makes "almost" necessary: recorded compute gas is deliberately not
-    /// a partition of the gas the transaction spent, because a value-transferring call's
-    /// `CALL_STIPEND` is minted into the child frame rather than debited from the caller — see
-    /// [`CheckpointTracker::minted_call_stipend`](
-    /// checkpoint::CheckpointTracker::minted_call_stipend). Adding it back is measurement, not
-    /// correction: the amount is booked from the single site that already computes it, and without
-    /// it the two sides disagree by one stipend per such call.
-    ///
-    /// `tx_gas_spent` must be read once the transaction's envelope is final and before any
-    /// post-execution adjustment that moves gas without anyone having burnt it — see the caller in
-    /// `MegaHandler::last_frame_result`. Gas that is rescued for the sender or hidden by the gas
-    /// clamp is erased from the envelope before that point, so neither can reach this subtraction.
-    ///
-    /// The inspector term is the same kind of correction for a different producer. An inspector
-    /// runs outside the EVM's own accounting and can write gas into an interpreter's counter or
-    /// into a frame's envelope that nobody debited — or take gas away that nobody gets back — and
-    /// the transaction then spends correspondingly less or more than its frames recorded. The
-    /// measurement shim books exactly that difference, so adding it back is again measurement
-    /// rather than correction. It is zero for every transaction that ran without an inspector and
-    /// for every observation-only inspector, which is why the law reads the same as it always did
-    /// on those paths.
-    ///
-    /// Signed on purpose: a mismatch against the booked total is a defect to report, and clamping
-    /// it at zero would hide the half of the mismatch space where the booking over-counts.
-    /// [`settle_destroyed_compute_gas`](Self::settle_destroyed_compute_gas) is what turns the
-    /// signed result into the number the transaction reports.
+    /// Meaningful once the transaction's envelope is final. Read earlier, the terms are simply
+    /// the partial totals recorded so far — and the envelope a caller solves the law against must
+    /// be read at the one moment it is final too, after the resource-limit rescue has been handed
+    /// back and before `post_execution` applies the EIP-3529 refund and the EIP-7623 floor. Gas
+    /// that is rescued for the sender and gas the clamp was hiding are both erased from the
+    /// envelope before that point, so neither can reach the subtraction.
     #[inline]
-    pub(crate) fn derived_burned_compute_gas(&self, tx_gas_spent: u64) -> i128 {
-        i128::from(tx_gas_spent) +
-            i128::from(self.minted_call_stipend()) +
-            self.inspector_conjured_gas() -
-            self.non_compute_gas() -
-            i128::from(self.enforced_compute_gas())
+    pub fn conservation_terms(&self) -> conservation::ConservationTerms {
+        conservation::ConservationTerms {
+            enforced_compute_gas: self.enforced_compute_gas(),
+            non_compute_gas: self.non_compute_gas(),
+            minted_call_stipend: self.minted_call_stipend(),
+            inspector_conjured_gas: self.inspector_conjured_gas(),
+            booked_destroyed_compute_gas: self.burned_compute_gas(),
+        }
     }
 
     /// The `CALL_STIPEND` total this transaction's value-transferring calls minted into their
@@ -354,28 +330,16 @@ impl AdditionalLimit {
         if !self.rex7_enabled() {
             return;
         }
-        let derived = self.derived_burned_compute_gas(tx_gas_spent);
+        let terms = self.conservation_terms();
+        let derived = terms.destroyed_for(tx_gas_spent);
         debug_assert!(
             derived >= 0,
-            "derived destroyed compute gas is negative: {derived} \
-             (spent {tx_gas_spent}, minted stipend {}, inspector conjured {}, non-compute {}, \
-              enforced compute {})",
-            self.minted_call_stipend(),
-            self.inspector_conjured_gas(),
-            self.non_compute_gas(),
-            self.enforced_compute_gas(),
+            "derived destroyed compute gas is negative: {derived} (spent {tx_gas_spent}, {terms})",
         );
         debug_assert!(
-            derived == i128::from(self.burned_compute_gas()),
-            "destroyed compute gas disagrees with the conservation law: \
-             derived {derived} vs booked {} \
-             (spent {tx_gas_spent}, minted stipend {}, inspector conjured {}, non-compute {}, \
-              enforced compute {})",
-            self.burned_compute_gas(),
-            self.minted_call_stipend(),
-            self.inspector_conjured_gas(),
-            self.non_compute_gas(),
-            self.enforced_compute_gas(),
+            terms.unbooked_for(tx_gas_spent) == 0,
+            "destroyed compute gas disagrees with the conservation law: derived {derived} \
+             (spent {tx_gas_spent}, {terms})",
         );
         let settled = u64::try_from(derived.max(0)).unwrap_or(u64::MAX);
         self.checkpoint.set_settled_destroyed(settled);
@@ -428,18 +392,12 @@ impl AdditionalLimit {
         if !self.rex7_enabled() {
             return;
         }
-        let unbooked = self.derived_burned_compute_gas(envelope_gas_spent) -
-            i128::from(self.burned_compute_gas());
+        let terms = self.conservation_terms();
+        let unbooked = terms.unbooked_for(envelope_gas_spent);
         debug_assert!(
             unbooked >= 0,
             "rewritten envelope destroys a negative amount: {unbooked} \
-             (envelope {envelope_gas_spent}, minted stipend {}, inspector conjured {}, \
-              non-compute {}, enforced compute {}, booked destroyed {})",
-            self.minted_call_stipend(),
-            self.inspector_conjured_gas(),
-            self.non_compute_gas(),
-            self.enforced_compute_gas(),
-            self.burned_compute_gas(),
+             (envelope {envelope_gas_spent}, {terms})",
         );
         self.record_burned_gas(u64::try_from(unbooked.max(0)).unwrap_or(u64::MAX));
         self.settle_destroyed_compute_gas(envelope_gas_spent);
@@ -486,8 +444,8 @@ impl AdditionalLimit {
     }
 
     /// The net gas the inspector conjured — the term
-    /// [`derived_burned_compute_gas`](Self::derived_burned_compute_gas) adds to the envelope so
-    /// that gas nobody funded does not read as the transaction having spent less than it did.
+    /// [`ConservationTerms`](conservation::ConservationTerms) adds to the envelope so that gas
+    /// nobody funded does not read as the transaction having spent less than it did.
     #[inline]
     pub(crate) fn inspector_conjured_gas(&self) -> i128 {
         self.inspector.conjured_gas()
@@ -590,7 +548,7 @@ impl AdditionalLimit {
 
     /// The EVM gas the transaction has spent that is neither compute work nor destroyed (REX7+,
     /// always 0 before) — the second term of
-    /// [`derived_burned_compute_gas`](Self::derived_burned_compute_gas).
+    /// [`ConservationTerms`](conservation::ConservationTerms).
     #[inline]
     pub(crate) fn non_compute_gas(&self) -> i128 {
         self.checkpoint.non_compute_gas()
@@ -598,21 +556,11 @@ impl AdditionalLimit {
 
     /// The compute gas the transaction claims to have performed: the reported total less the
     /// destroyed remainders — the third term of
-    /// [`derived_burned_compute_gas`](Self::derived_burned_compute_gas), and the number every
-    /// compute-gas limit comparison runs against.
+    /// [`ConservationTerms`](conservation::ConservationTerms), and the number every compute-gas
+    /// limit comparison runs against.
     #[inline]
     pub(crate) fn enforced_compute_gas(&self) -> u64 {
         self.compute_gas.enforced_tx_usage()
-    }
-
-    /// Test-only reads of the conservation law's terms, so a test can assert which term a fixture
-    /// actually moved instead of inferring it from the destroyed total the terms combine into.
-    ///
-    /// Returns `(non-compute gas, minted call stipend, per-site destroyed bookings)`.
-    #[cfg(any(test, feature = "test-utils"))]
-    #[doc(hidden)]
-    pub fn conservation_terms_for_test(&self) -> (i128, u64, u64) {
-        (self.non_compute_gas(), self.minted_call_stipend(), self.burned_compute_gas())
     }
 
     /// Takes the outstanding clamp so the caller can hand its hidden gas back to the interpreter,
