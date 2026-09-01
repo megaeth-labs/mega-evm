@@ -86,6 +86,7 @@ mod frame_loop_parity;
 mod gas_clamp;
 mod gas_leakage;
 mod guard_pass_static_gas;
+mod inspector_cheat_matrix;
 mod interceptor_resume;
 mod keyless_synthetic_halt;
 mod latch_surfacing;
