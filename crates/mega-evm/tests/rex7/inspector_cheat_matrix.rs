@@ -70,6 +70,9 @@ const ENVELOPE: u64 = 5_000;
 const RESULT: u64 = 2_000;
 /// Gas an action cheat adds to, or removes from, the gas a pending `InterpreterAction` carries.
 const ACTION: u64 = 1_500;
+/// Gas an interception cheat's synthetic outcome hands back over, or under, the envelope it was
+/// given.
+const INTERCEPTION: u64 = 4_000;
 
 /// Slot the top frame writes, last of all, so a cheat that fails the top frame is visible.
 const TOP_SLOT: u64 = 0x10;
@@ -146,6 +149,10 @@ enum Shape {
     EditInput,
     /// Return a synthetic outcome, so no frame is built at all.
     Intercept,
+    /// Return one whose gas hands back more than the envelope it was given.
+    RaiseInterceptionGas,
+    /// Return one whose gas hands back less.
+    LowerInterceptionGas,
     /// Raise the gas a finished frame hands back to its caller.
     RaiseResultGas,
     /// Lower it.
@@ -171,13 +178,15 @@ enum Shape {
 }
 
 impl Shape {
-    const ALL: [Self; 16] = [
+    const ALL: [Self; 18] = [
         Self::InjectGas,
         Self::DrainGas,
         Self::RaiseEnvelope,
         Self::LowerEnvelope,
         Self::EditInput,
         Self::Intercept,
+        Self::RaiseInterceptionGas,
+        Self::LowerInterceptionGas,
         Self::RaiseResultGas,
         Self::LowerResultGas,
         Self::FailResult,
@@ -189,6 +198,12 @@ impl Shape {
         Self::EditStackOrMemory,
         Self::JournalWrite,
     ];
+
+    /// Whether this shape answers the frame with a synthetic outcome instead of letting the EVM
+    /// build it.
+    const fn is_interception(self) -> bool {
+        matches!(self, Self::Intercept | Self::RaiseInterceptionGas | Self::LowerInterceptionGas)
+    }
 
     /// Whether this shape reaches through the interpreter's *pending action* rather than through
     /// the interpreter itself.
@@ -246,11 +261,18 @@ fn inapplicable(at: At, shape: Shape) -> Option<&'static str> {
         };
     }
 
+    if shape.is_interception() && !input_facing {
+        return Some(
+            "only a callback that runs before the frame is built can answer it instead: the \
+             `*_end` callbacks are handed a result the EVM already produced",
+        );
+    }
+
     match shape {
         InjectGas | DrainGas | EditStackOrMemory if !interpreter_facing => {
             Some("no live interpreter is reachable from this callback")
         }
-        RaiseEnvelope | LowerEnvelope | EditInput | Intercept if !input_facing => Some(
+        RaiseEnvelope | LowerEnvelope | EditInput if !input_facing => Some(
             "this callback receives no frame input it can build a frame from: the `*_end` \
              callbacks take theirs by shared reference, after the frame has already run",
         ),
@@ -398,18 +420,32 @@ impl Cheat {
                 self.fired += 1;
                 None
             }
-            Shape::Intercept => {
+            Shape::Intercept | Shape::RaiseInterceptionGas | Shape::LowerInterceptionGas => {
                 self.fired += 1;
                 Some(CallOutcome::new(
                     InterpreterResult::new(
                         InstructionResult::Stop,
                         Bytes::new(),
-                        Gas::new(inputs.gas_limit),
+                        Gas::new(self.interception_gas(inputs.gas_limit)),
                     ),
                     inputs.return_memory_offset.clone(),
                 ))
             }
             _ => unreachable!("{:?} is not an input-facing shape", self.shape),
+        }
+    }
+
+    /// The gas an interception's synthetic outcome hands back, given the envelope it was handed.
+    ///
+    /// The echo — hand back exactly what was forwarded — is the convention every tool that
+    /// intercepts follows, and the reason the two neighbouring columns exist: with it, the
+    /// accounting closes whether or not anything measures the figure.
+    fn interception_gas(&self, envelope: u64) -> u64 {
+        match self.shape {
+            Shape::Intercept => envelope,
+            Shape::RaiseInterceptionGas => envelope + INTERCEPTION,
+            Shape::LowerInterceptionGas => envelope - INTERCEPTION,
+            _ => unreachable!("{:?} is not an interception", self.shape),
         }
     }
 
@@ -432,13 +468,13 @@ impl Cheat {
                 self.fired += 1;
                 None
             }
-            Shape::Intercept => {
+            Shape::Intercept | Shape::RaiseInterceptionGas | Shape::LowerInterceptionGas => {
                 self.fired += 1;
                 Some(CreateOutcome::new(
                     InterpreterResult::new(
                         InstructionResult::Stop,
                         Bytes::new(),
-                        Gas::new(inputs.gas_limit()),
+                        Gas::new(self.interception_gas(inputs.gas_limit())),
                     ),
                     None,
                 ))
@@ -1060,6 +1096,31 @@ fn matrix() -> Vec<Cell> {
             ledger_intervention(),
             if deployment_side { state_no_deployment } else { state_callee_write_rolled_back },
         );
+        // The same interception, sized against the envelope rather than echoing it. No frame is
+        // built, so the whole of what the outcome hands back is the inspector's number, and the
+        // difference from what the caller forwarded is what the ledger has to carry.
+        push(
+            at,
+            RaiseInterceptionGas,
+            Fixture::ReturningCallee,
+            InspectorLedger {
+                result: i128::from(INTERCEPTION),
+                interventions: 1,
+                ..InspectorLedger::default()
+            },
+            if deployment_side { state_no_deployment } else { state_callee_write_rolled_back },
+        );
+        push(
+            at,
+            LowerInterceptionGas,
+            Fixture::ReturningCallee,
+            InspectorLedger {
+                result: -i128::from(INTERCEPTION),
+                interventions: 1,
+                ..InspectorLedger::default()
+            },
+            if deployment_side { state_no_deployment } else { state_callee_write_rolled_back },
+        );
         push(
             at,
             JournalWrite,
@@ -1199,6 +1260,7 @@ fn test_the_matrix_is_inert_with_the_inspected_loops_switched_off() {
         (At::StepEnd, Shape::DrainGas, Fixture::ReturningCallee),
         (At::Call, Shape::RaiseEnvelope, Fixture::ReturningCallee),
         (At::FrameStart, Shape::Intercept, Fixture::ReturningCallee),
+        (At::Call, Shape::LowerInterceptionGas, Fixture::ReturningCallee),
         (At::Create, Shape::EditInput, Fixture::ReturningCallee),
         (At::CallEnd, Shape::LowerResultGas, Fixture::ReturningCallee),
         (At::CreateEnd, Shape::FailResult, Fixture::ReturningCallee),
