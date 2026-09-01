@@ -87,9 +87,12 @@ fn tx() -> MegaTransaction {
     tx
 }
 
-fn context(db: &mut MemoryDatabase) -> MegaContext<&mut MemoryDatabase, EmptyExternalEnv> {
-    let mut context = MegaContext::new(db, MegaSpecId::REX7)
-        .with_tx_runtime_limits(EvmTxRuntimeLimits::from_spec(MegaSpecId::REX7));
+fn context_for(
+    db: &mut MemoryDatabase,
+    spec: MegaSpecId,
+) -> MegaContext<&mut MemoryDatabase, EmptyExternalEnv> {
+    let mut context =
+        MegaContext::new(db, spec).with_tx_runtime_limits(EvmTxRuntimeLimits::from_spec(spec));
     context.modify_chain(|chain| {
         chain.operator_fee_scalar = Some(U256::ZERO);
         chain.operator_fee_constant = Some(U256::ZERO);
@@ -115,14 +118,21 @@ fn read(limit: &AdditionalLimit, outcome: MegaTransactionOutcome) -> Reading {
     }
 }
 
-fn transact<I>(mut db: MemoryDatabase, inspector: &mut I) -> Reading
+fn transact_on<I>(spec: MegaSpecId, mut db: MemoryDatabase, inspector: &mut I) -> Reading
 where
     I: for<'a> Inspector<MegaContext<&'a mut MemoryDatabase, EmptyExternalEnv>>,
 {
-    let mut evm = MegaEvm::new(context(&mut db)).with_inspector(inspector);
+    let mut evm = MegaEvm::new(context_for(&mut db, spec)).with_inspector(inspector);
     let outcome = evm.execute_transaction(tx()).expect("tx should not surface EVMError");
     let reading = read(&evm.ctx_ref().additional_limit.borrow(), outcome);
     reading
+}
+
+fn transact<I>(db: MemoryDatabase, inspector: &mut I) -> Reading
+where
+    I: for<'a> Inspector<MegaContext<&'a mut MemoryDatabase, EmptyExternalEnv>>,
+{
+    transact_on(MegaSpecId::REX7, db, inspector)
 }
 
 /// A straight run of plain opcodes that always succeeds.
@@ -505,4 +515,54 @@ fn test_the_envelope_is_the_one_the_callback_received_not_the_one_it_left() {
          lane — the env lane stays empty because no frame was ever built from those inputs",
     );
     assert_identity("raised then intercepted", &reading);
+}
+
+/// The lane reports on a frozen spec too, and reporting it settles nothing there.
+///
+/// The measurement is not REX7-gated, and neither are the two lanes it joins: `InspectorLedger` is
+/// what the canonical block path's guard reads, so a frame an inspector answered has to be visible
+/// on it whatever spec is executing. What is REX7's alone is the settlement the lane feeds — the
+/// envelope a refused frame init decides the fate of. REX6 derives nothing from the envelope and
+/// books no destroyed remainder, so what it reports is what it always reported.
+///
+/// The transaction's own gas does follow the figure the inspector wrote, on both specs. That is
+/// the EVM handing the caller back what the result carries, which is upstream's arithmetic rather
+/// than `MegaETH`'s, and it is the movement the lane exists to account for rather than to prevent.
+#[test]
+fn test_a_frozen_spec_reports_the_lane_without_settling_anything() {
+    let mut echoing = CallInterceptor::new(Sizing::Echo, InstructionResult::Stop);
+    let echo = transact_on(MegaSpecId::REX6, call_fixture(), &mut echoing);
+    let mut halving = CallInterceptor::new(Sizing::Half, InstructionResult::Stop);
+    let half = transact_on(MegaSpecId::REX6, call_fixture(), &mut halving);
+
+    assert_eq!(echoing.intercepted, 1, "fixture check");
+    assert_eq!(halving.intercepted, 1, "fixture check");
+    assert_eq!(
+        echo.ledger,
+        InspectorLedger { interventions: 1, ..InspectorLedger::default() },
+        "REX6: an echoed envelope moves no gas here either",
+    );
+    assert_eq!(
+        half.ledger,
+        InspectorLedger {
+            result: Sizing::Half.expected_delta(FORWARDED),
+            interventions: 1,
+            ..InspectorLedger::default()
+        },
+        "REX6: the lane reports, because the block guard has to see this frame on every spec",
+    );
+    assert_eq!(
+        (echo.destroyed, half.destroyed),
+        (0, 0),
+        "REX6 has no destroyed remainder to book, on either sizing",
+    );
+    assert_eq!(
+        echo.compute_gas, half.compute_gas,
+        "and its compute total does not follow the figure the inspector wrote",
+    );
+    assert_eq!(
+        half.total_gas_spent - echo.total_gas_spent,
+        FORWARDED / 2,
+        "the caller really did lose the half the outcome withheld — that is the EVM's arithmetic",
+    );
 }

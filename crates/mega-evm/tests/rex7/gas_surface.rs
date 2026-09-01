@@ -195,7 +195,8 @@ fn field_names(rendered: &str) -> BTreeSet<String> {
             '{' => depth += 1,
             '}' => depth = depth.saturating_sub(1),
             _ if depth == 1 => {
-                let starts_a_field = index > 0 && matches!(bytes[index - 1], '{' | ',') ||
+                // A field name follows the opening brace or a comma, with at most one space.
+                let starts_a_field = (index > 0 && matches!(bytes[index - 1], '{' | ',')) ||
                     (index > 1 &&
                         bytes[index - 1] == ' ' &&
                         matches!(bytes[index - 2], '{' | ','));
