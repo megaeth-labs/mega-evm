@@ -48,25 +48,27 @@ Read the table by the *argument the rewrite reaches through*, not by the tool th
 | Read-only observation | Supported, free | nothing | an empty ledger, and numbers identical to an uninspected run |
 | Gas written into a live interpreter's counter (`initialize_interp`, `step`, `step_end`, `log_full`) | Supported | `InspectorLedger::gas`, at the callback boundary | nothing: the checkpoint baseline shifts by the same amount, and the gas clamp is re-derived on the spot so injected gas buys no compute headroom |
 | A frame input's `gas_limit`, raised or lowered (`frame_start`, `call`, `create`) | Supported | `InspectorLedger::env`, at the callback boundary | nothing: a frame's compute budget comes from the tracker, not from its gas limit |
-| A synthetic outcome that skips the frame entirely (`frame_start`, `call`, `create`) | Supported | nothing on the `env` lane — the edited inputs never reach a frame — and the outcome's own gas on the `result` lane | the frame's envelope is settled at `finalize_frame` as `FrameExit::RefusedSynthetically` |
+| A frame input's semantic fields — target, caller, value, scheme, calldata, static flag (`frame_start`, `call`, `create`) | Supported | `InspectorLedger::interventions`, at the callback boundary | nothing: it changes what the frame does, not what it costs |
+| A synthetic outcome that skips the frame entirely (`frame_start`, `call`, `create`) | Supported | `InspectorLedger::interventions`; nothing on the `env` lane — the edited inputs never reach a frame — and the outcome's own gas on the `result` lane | the frame's envelope is settled at `finalize_frame` as `FrameExit::RefusedSynthetically` |
 | A finished frame result's remaining gas (`call_end`, `create_end`, `frame_end`) | Supported | `InspectorLedger::result`, at the frame's settlement point rather than at the callback boundary | nothing |
-| A successful frame result rewritten into a revert or a halt | Supported | nothing — no gas moves | the journal decision follows the final result, so the frame's state is rolled back with it |
-| A failed **call** frame rewritten into a success | Supported | nothing | the journal commits, so the frame's state follows the result its caller was handed |
-| A failed **contract creation** rewritten into a success | **Refused** | `InspectorLedger::rejected_rewrites` | `reject_forbidden_create_rewrite` restores the original classification and fails the transaction with `EVMError::Custom`; debug builds assert |
-| The interpreter's stack or memory | Supported, unmeasured | nothing | the EVM executes on the edited state and meters it as its own work, because it is |
-| A direct journal write (`tstore`, `log`, …) | Supported, unmetered | nothing | `MegaETH`'s data-size / KV / state-growth lanes do not see it; it moves no gas, so the conservation law is unaffected |
+| A finished frame result's returned output (`call_end`, `create_end`, `frame_end`) | Supported | `InspectorLedger::interventions`, at the callback boundary | nothing |
+| A successful frame result rewritten into a revert or a halt | Supported | `InspectorLedger::interventions` — no gas moves | the journal decision follows the final result, so the frame's state is rolled back with it; a precompile's executed/destroyed split follows it too |
+| A failed **call** frame rewritten into a success | Supported | `InspectorLedger::interventions` | the journal commits, so the frame's state follows the result its caller was handed |
+| A failed **contract creation** rewritten into a success | **Refused** | `InspectorLedger::rejected_rewrites`, alongside `interventions` | `reject_forbidden_create_rewrite` restores the original classification and fails the transaction with `EVMError::Custom`; debug builds assert |
+| The interpreter's stack or memory | Supported, unmeasured | nothing — no argument the shim holds describes it | the EVM executes on the edited state and meters it as its own work, because it is |
+| A direct journal write (`tstore`, `log`, …) | Supported, unmetered | nothing — no argument the shim holds describes it | `MegaETH`'s data-size / KV / state-growth lanes do not see it; it moves no gas, so the conservation law is unaffected |
+| The pending `InterpreterAction`, reached through `LoopControl` | Supported, unmeasured | nothing | an edit to the action's gas does move the envelope; measuring it at the callback boundary would be unsound, because whether it moves anything depends on the frame's final classification |
 | `CfgEnv` or the active gas schedule | **Refused** | — | the gas-schedule pin panics; the schedule belongs to the spec, and a rewritten one has no accounting lane that could rescue it |
 
 Two independent stops back the creation refusal: the shim restores the classification, and `frame.rs`'s `FrameJournalVerdict::CreateRejected` carries no code and no commit branch, so even with the refusal removed such a rewrite deposits nothing.
 
 Booking is a *reported* quantity throughout. No resource limit is ever compared against the ledger, and `MegaTransactionOutcome::compute_gas_enforced` comes off the enforcement lane rather than out of the reported total — so an inspector cannot buy a transaction headroom on any dimension.
 
-### Known gap in the counter lane
+### The window a counter edit reaches nothing through
 
-One window books an adjustment that reaches nothing: a gas-counter edit made at the `step_end` of a frame's *terminating* opcode.
-revm's inspected loop runs `step_end` after the instruction that set the frame's action, and the action carries its own snapshot of the gas, so an edit there moves the interpreter's counter — which `MegaETH`'s tail settlement reads — and never the result the caller is handed.
-The shim books it as conjured gas anyway, and the conservation law then over-counts by exactly that amount; `tools/eest-sweep`'s chaos mode reproduces it, and `--chaos-skip-terminal-counter-edits` is the switch that excludes it.
-The same window exists at the top-of-loop `step` when the bytecode has already ended, which is reachable only when an action was set before the loop began.
+A gas-counter edit made while the interpreter is already holding a `Return` action is written into an object nobody reads again: revm's inspected loop runs `step_end` after the instruction that set the action, and the action carries its own snapshot of the gas, which is what becomes the frame's result.
+The shim books nothing for such an edit and still shifts the settlement baseline for it — `MegaETH`'s tail settlement reads the counter after the action is set, so without the shift the edit would read as work the frame performed.
+The predicate is the pending action's variant, not "the loop is ending": a `NewFrame` action ends the loop too, and that frame resumes on exactly this counter.
 
 ### Rules for changing this
 
@@ -78,6 +80,8 @@ The same window exists at the top-of-loop `step` when the bytecode has already e
   The gas an intercepting callback puts into a synthetic outcome travels through that same lane.
 - **Keep every rewrite out of a block.**
   Supporting a rewrite is not the same as admitting one: the canonical block-execution path refuses a transaction whose ledger is non-zero, in release builds as well as debug, because an inspector is one node's configuration and its edits reach the receipt.
+  That is why a rewrite which moves no gas still has to be booked — on `InspectorLedger::interventions` — or the guard admits it.
+  An EVM an embedder drives itself is deliberately not covered: it produces no block, so there is nothing for two nodes to disagree about.
   See `tests/block_executor/inspector_guard.rs`.
 
 ## WHERE TO LOOK

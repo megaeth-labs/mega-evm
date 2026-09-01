@@ -114,23 +114,6 @@ pub struct Cmd {
     /// unspent on rejected draws, so a narrowed run can reach further into a transaction.
     #[arg(long, value_name = "SHAPES", value_delimiter = ',', requires = "chaos_seed")]
     chaos_shapes: Vec<String>,
-    /// Make no gas-counter edit at the `step_end` of a frame's terminating opcode.
-    ///
-    /// That is the one callback where the interpreter's counter has already been copied into the
-    /// frame's action — revm runs `step_end` after the instruction that set the action, and the
-    /// action carries its own snapshot — so an edit there reaches the counter `MegaETH`'s tail
-    /// settlement reads and nothing the caller ever sees. The other half of the same triage knob
-    /// as `--chaos-shapes`.
-    #[arg(long, requires = "chaos_seed")]
-    chaos_skip_terminal_counter_edits: bool,
-    /// Rewrite no precompile result's classification.
-    ///
-    /// A precompile is answered inside the frame init and never becomes a child frame, so the
-    /// executed / destroyed split of its forwarded envelope is booked at its own recording site,
-    /// before any callback sees the synthetic result. The third triage knob, alongside
-    /// `--chaos-shapes` and `--chaos-skip-terminal-counter-edits`.
-    #[arg(long, requires = "chaos_seed")]
-    chaos_skip_precompile_reclassification: bool,
 }
 
 impl Cmd {
@@ -361,31 +344,22 @@ impl Cmd {
         })
     }
 
-    /// Build the chaos run's shape filter from `--chaos-shapes` and
-    /// `--chaos-skip-terminal-counter-edits`.
+    /// Build the chaos run's shape filter from `--chaos-shapes`.
     fn resolve_chaos_filter(&self) -> Result<ShapeFilter, TestError> {
-        let mut filter = if self.chaos_shapes.is_empty() {
-            ShapeFilter::default()
-        } else {
-            let shapes = self
-                .chaos_shapes
-                .iter()
-                .map(|label| ChaosShape::parse(label))
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|detail| TestError {
-                    name: "--chaos-shapes".to_string(),
-                    path: String::new(),
-                    kind: TestErrorKind::FixtureError(detail),
-                })?;
-            ShapeFilter::only(&shapes)
-        };
-        if self.chaos_skip_terminal_counter_edits {
-            filter = filter.without_terminal_counter_edits();
+        if self.chaos_shapes.is_empty() {
+            return Ok(ShapeFilter::default());
         }
-        if self.chaos_skip_precompile_reclassification {
-            filter = filter.without_precompile_reclassification();
-        }
-        Ok(filter)
+        let shapes = self
+            .chaos_shapes
+            .iter()
+            .map(|label| ChaosShape::parse(label))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|detail| TestError {
+                name: "--chaos-shapes".to_string(),
+                path: String::new(),
+                kind: TestErrorKind::FixtureError(detail),
+            })?;
+        Ok(ShapeFilter::only(&shapes))
     }
 
     /// Sweep the corpus under a deterministic rewriting inspector (see `--chaos-seed`).
@@ -676,18 +650,12 @@ fn chaos_report_json(
 
 /// What a chaos run's shape filter allows, as one line.
 fn chaos_filter_label(filter: ShapeFilter) -> String {
-    let mut parts: Vec<String> = ChaosShape::ALL
+    ChaosShape::ALL
         .into_iter()
         .filter(|shape| filter.allows(*shape))
         .map(|shape| shape.label().to_string())
-        .collect();
-    if !filter.allows_terminal_counter_edits() {
-        parts.push("no-terminal-counter-edits".to_string());
-    }
-    if !filter.allows_precompile_reclassification() {
-        parts.push("no-precompile-reclassification".to_string());
-    }
-    parts.join(",")
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 /// The machine-readable form of [`print_diff_tally`], for `--diff-report`.

@@ -53,7 +53,7 @@ use mega_evm::revm::{
     handler::FrameResult,
     inspector::Inspector,
     interpreter::{
-        interpreter_types::{Jumps, LoopControl, MemoryTr, StackTr},
+        interpreter_types::{Jumps, MemoryTr, StackTr},
         CallInputs, CallOutcome, CreateInputs, CreateOutcome, FrameInput, Gas, InstructionResult,
         Interpreter, InterpreterResult, InterpreterTypes,
     },
@@ -206,16 +206,6 @@ impl ChaosShape {
         })
     }
 
-    /// Whether this shape writes to a live interpreter's gas counter.
-    const fn is_counter_edit(self) -> bool {
-        matches!(self, Self::InjectGas | Self::DrainGas)
-    }
-
-    /// Whether this shape rewrites a frame result's classification.
-    const fn is_reclassification(self) -> bool {
-        matches!(self, Self::FailFrame | Self::ReviveCall)
-    }
-
     /// Stable label, for reports.
     pub const fn label(self) -> &'static str {
         match self {
@@ -263,7 +253,7 @@ const RESULT_SHAPES: [ChaosShape; 5] = [
 
 /// Which mutations a chaos run is allowed to make.
 ///
-/// Both knobs exist for triage rather than for the sweep's normal operation: a flagged vector is
+/// The knob exists for triage rather than for the sweep's normal operation: a flagged vector is
 /// re-run with the filter narrowed until the smallest set of shapes that still reproduces it is
 /// found, which is the difference between "chaos broke something" and a defect report. See
 /// [`ChaosInspector::new`] for what narrowing does and does not preserve.
@@ -271,26 +261,11 @@ const RESULT_SHAPES: [ChaosShape; 5] = [
 pub struct ShapeFilter {
     /// Bitmask over [`ChaosShape::ALL`], by index.
     allowed: u16,
-    /// Whether a gas-counter edit may land at the `step_end` of a frame's *terminating* opcode.
-    ///
-    /// That callback is the one place where the interpreter's counter has already been copied into
-    /// the frame's action — revm's loop runs `step_end` after the instruction that set the action,
-    /// and the action carries its own snapshot of the gas — so an edit there changes the counter
-    /// `MegaETH`'s tail settlement reads, and nothing the caller ever sees. Turning it off narrows
-    /// the sweep to edits that actually move a frame's budget.
-    terminal_counter_edits: bool,
-    /// Whether a classification rewrite may land on a *precompile's* result.
-    ///
-    /// A precompile is answered inside the frame init and never becomes a child frame, so the
-    /// executed / destroyed split of its forwarded envelope is booked at its own recording site —
-    /// before any callback sees the synthetic result it produced. Turning it off narrows the sweep
-    /// to results whose split is decided after the last rewrite.
-    precompile_reclassification: bool,
 }
 
 impl Default for ShapeFilter {
     fn default() -> Self {
-        Self { allowed: u16::MAX, terminal_counter_edits: true, precompile_reclassification: true }
+        Self { allowed: u16::MAX }
     }
 }
 
@@ -301,29 +276,7 @@ impl ShapeFilter {
         for shape in shapes {
             allowed |= 1 << Self::index(*shape);
         }
-        Self { allowed, ..Self::default() }
-    }
-
-    /// This filter, with gas-counter edits at a terminating `step_end` turned off.
-    pub const fn without_terminal_counter_edits(mut self) -> Self {
-        self.terminal_counter_edits = false;
-        self
-    }
-
-    /// This filter, with classification rewrites of a precompile's result turned off.
-    pub const fn without_precompile_reclassification(mut self) -> Self {
-        self.precompile_reclassification = false;
-        self
-    }
-
-    /// Whether gas-counter edits at a terminating `step_end` are allowed.
-    pub const fn allows_terminal_counter_edits(&self) -> bool {
-        self.terminal_counter_edits
-    }
-
-    /// Whether classification rewrites of a precompile's result are allowed.
-    pub const fn allows_precompile_reclassification(&self) -> bool {
-        self.precompile_reclassification
+        Self { allowed }
     }
 
     /// Whether `shape` may be drawn.
@@ -333,9 +286,7 @@ impl ShapeFilter {
 
     /// Whether this filter allows every shape.
     pub fn is_complete(&self) -> bool {
-        self.terminal_counter_edits &&
-            self.precompile_reclassification &&
-            ChaosShape::ALL.into_iter().all(|s| self.allows(s))
+        ChaosShape::ALL.into_iter().all(|s| self.allows(s))
     }
 
     const fn index(shape: ChaosShape) -> u16 {
@@ -613,13 +564,6 @@ impl ChaosInspector {
         outcome
     }
 
-    /// Whether the filter withholds this shape from a precompile's result.
-    fn refuses_reclassification(&self, shape: ChaosShape, is_precompile: bool) -> bool {
-        is_precompile &&
-            shape.is_reclassification() &&
-            !self.filter.allows_precompile_reclassification()
-    }
-
     /// Applies a result-facing shape to a finished frame's result.
     ///
     /// `is_creation` withholds the one shape the shim refuses: a failed contract creation rewritten
@@ -716,14 +660,9 @@ impl<CTX: ContextTr, INTR: InterpreterTypes> Inspector<CTX, INTR> for ChaosInspe
     }
 
     fn step_end(&mut self, interp: &mut Interpreter<INTR>, context: &mut CTX) {
-        let Some((shape, entropy)) = self.pick(&INTERPRETER_SHAPES) else { return };
-        if shape.is_counter_edit() &&
-            !self.filter.allows_terminal_counter_edits() &&
-            interp.bytecode.is_end()
-        {
-            return;
+        if let Some((shape, entropy)) = self.pick(&INTERPRETER_SHAPES) {
+            self.hit_interpreter(interp, context, shape, entropy);
         }
-        self.hit_interpreter(interp, context, shape, entropy);
     }
 
     fn log_full(&mut self, interp: &mut Interpreter<INTR>, context: &mut CTX, _log: Log) {
@@ -760,11 +699,9 @@ impl<CTX: ContextTr, INTR: InterpreterTypes> Inspector<CTX, INTR> for ChaosInspe
     }
 
     fn call_end(&mut self, _context: &mut CTX, _inputs: &CallInputs, outcome: &mut CallOutcome) {
-        let Some((shape, entropy)) = self.pick(&RESULT_SHAPES) else { return };
-        if self.refuses_reclassification(shape, outcome.was_precompile_called) {
-            return;
+        if let Some((shape, entropy)) = self.pick(&RESULT_SHAPES) {
+            self.hit_result(&mut outcome.result, false, shape, entropy);
         }
-        self.hit_result(&mut outcome.result, false, shape, entropy);
     }
 
     fn create_end(
@@ -785,10 +722,6 @@ impl<CTX: ContextTr, INTR: InterpreterTypes> Inspector<CTX, INTR> for ChaosInspe
         frame_result: &mut FrameResult,
     ) {
         let Some((shape, entropy)) = self.pick(&RESULT_SHAPES) else { return };
-        let precompile = matches!(frame_result, FrameResult::Call(o) if o.was_precompile_called);
-        if self.refuses_reclassification(shape, precompile) {
-            return;
-        }
         let is_creation = matches!(frame_result, FrameResult::Create(_));
         self.hit_result(frame_result.interpreter_result_mut(), is_creation, shape, entropy);
     }

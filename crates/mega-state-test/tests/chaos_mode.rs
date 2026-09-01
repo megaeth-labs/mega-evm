@@ -23,17 +23,6 @@ const INNER: &str = "0x3000000000000000000000000000000000000003";
 /// The single transaction vector these hand-built fixtures declare.
 const VECTOR_0: TxPartIndices = TxPartIndices { data: 0, gas: 0, value: 0 };
 
-/// The filter every test here runs with: everything except the two windows the corpus sweep
-/// currently reports as open findings.
-///
-/// Those two windows are a statement about `MegaETH`'s accounting, not about this mode, and the
-/// sweep is where they are measured. A tool test that tripped them would be testing the product,
-/// and would go red for a reason that has nothing to do with what it is asserting. When they are
-/// closed, this becomes `ShapeFilter::default()`.
-fn tool_filter() -> ShapeFilter {
-    ShapeFilter::default().without_terminal_counter_edits().without_precompile_reclassification()
-}
-
 /// `SSTORE(1, 1); CALL(0x2710 gas, INNER, no value, no args, no return); POP; LOG0(0, 0); STOP`.
 ///
 /// One of everything a callback can be handed: a storage write, a child frame, a log, and enough
@@ -101,8 +90,8 @@ fn mutations(seed: u64, filter: ShapeFilter) -> Vec<(String, u32)> {
 /// reproduction if re-running it reproduces.
 #[test]
 fn test_a_seed_reproduces_its_own_run() {
-    let first = mutations(0xC0FFEE, tool_filter());
-    let second = mutations(0xC0FFEE, tool_filter());
+    let first = mutations(0xC0FFEE, ShapeFilter::default());
+    let second = mutations(0xC0FFEE, ShapeFilter::default());
     assert!(!first.is_empty(), "the fixture must reach enough callbacks to mutate something");
     assert_eq!(first, second, "the same seed must produce the same mutations");
 }
@@ -114,7 +103,7 @@ fn test_a_seed_reproduces_its_own_run() {
 #[test]
 fn test_different_seeds_produce_different_runs() {
     let seeds = [1u64, 2, 3, 4, 5, 6, 7, 8];
-    let runs: Vec<_> = seeds.iter().map(|s| mutations(*s, tool_filter())).collect();
+    let runs: Vec<_> = seeds.iter().map(|s| mutations(*s, ShapeFilter::default())).collect();
     assert!(
         runs.iter().any(|run| *run != runs[0]),
         "eight seeds that all mutate identically means the seed reaches nothing: {runs:?}",
@@ -145,9 +134,9 @@ fn test_a_vector_seed_separates_every_part_of_the_identity() {
 /// remain are applied at the same callbacks, so a flagged mutation is still there to be found.
 #[test]
 fn test_narrowing_the_filter_keeps_the_surviving_mutations() {
-    let full = mutations(0xC0FFEE, tool_filter());
+    let full = mutations(0xC0FFEE, ShapeFilter::default());
     let only = [ChaosShape::InjectGas, ChaosShape::DrainGas];
-    let narrowed = mutations(0xC0FFEE, ShapeFilter::only(&only).without_terminal_counter_edits());
+    let narrowed = mutations(0xC0FFEE, ShapeFilter::only(&only));
     let kept: Vec<_> = only.iter().map(|s| s.label()).collect();
 
     assert!(!narrowed.is_empty(), "the narrowed run must still mutate something");
@@ -199,7 +188,7 @@ fn test_the_control_inspector_changes_nothing() {
 /// A vector the rewriting run leaves executable comes back `Pass`, with mutations to show for it.
 #[test]
 fn test_a_mutated_vector_passes_with_mutations_recorded() {
-    let verdict = chaos_unit(&unit(), VECTOR_0, &SpecName::Rex7, 0xC0FFEE, tool_filter());
+    let verdict = chaos_unit(&unit(), VECTOR_0, &SpecName::Rex7, 0xC0FFEE, ShapeFilter::default());
     assert_eq!(verdict.class, ChaosClass::Pass, "{:?}", verdict.detail);
     assert!(verdict.applied.total() > 0, "the fixture must be mutated: {:?}", verdict.applied);
     assert!(verdict.applied.callbacks > 0, "and the callbacks must be counted");
@@ -243,7 +232,7 @@ fn test_a_sweep_that_mutated_passes() {
         ChaosRunConfig {
             spec: SpecName::Rex7,
             seed: 1,
-            filter: tool_filter(),
+            filter: ShapeFilter::default(),
             single_thread: true,
             progress: false,
         },
