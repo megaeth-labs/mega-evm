@@ -159,7 +159,18 @@ where
     evm.execute_transaction(tx()).map(|_| ()).map_err(|e| format!("{e:?}"))
 }
 
+/// Reads one transaction's outcome, and pins the outcome's own ledger field against the tracker's
+/// on every shape this module runs.
+///
+/// The outcome is what a consumer sees; the tracker is where the shim booked. Checking them here
+/// means every test below asserts the outcome API carries the measurement, not just the two that
+/// look at it on purpose.
 fn read(limit: &AdditionalLimit, outcome: MegaTransactionOutcome) -> Reading {
+    assert_eq!(
+        outcome.inspector_ledger,
+        limit.inspector_ledger(),
+        "the outcome must report the ledger the shim booked, unchanged",
+    );
     let gas_used = outcome.result_and_state.result.tx_gas_used();
     let total_gas_spent = outcome.result_and_state.result.gas().total_gas_spent();
     Reading {
@@ -173,7 +184,7 @@ fn read(limit: &AdditionalLimit, outcome: MegaTransactionOutcome) -> Reading {
         gas_used,
         total_gas_spent,
         terms: limit.conservation_terms(),
-        ledger: limit.inspector_ledger(),
+        ledger: outcome.inspector_ledger,
         state: outcome.result_and_state.state,
     }
 }
@@ -796,4 +807,45 @@ fn test_an_observing_inspector_changes_nothing() {
     assert_eq!(inspected.state, plain.state, "the produced state must be identical");
     assert_identity("observed", &inspected);
     assert_identity("plain", &plain);
+}
+
+/// A transaction that ran with no inspector at all reports an empty ledger, and the law's `I` term
+/// is zero — the shape every consumer of this API sees in practice.
+///
+/// The stronger property is what the field is *for*: an all-zero ledger is a consumer's guarantee
+/// that the gas numbers next to it are the EVM's own, so it has to be exactly zero rather than
+/// merely small. A fixture that makes an inner call and writes storage is used, so the assertion
+/// covers a transaction with something for a lane to have picked up.
+#[test]
+fn test_an_uninspected_transaction_reports_an_empty_ledger() {
+    let callee = plain_run_code(20);
+    let code = BytecodeBuilder::default()
+        .sstore(U256::from(1), U256::from(9))
+        .push_number(0u64)
+        .push_number(0u64)
+        .push_number(0u64)
+        .push_number(0u64)
+        .push_number(0u64)
+        .push_address(CALLEE)
+        .push_number(50_000u64)
+        .append(CALL)
+        .append(POP)
+        .append(STOP)
+        .build();
+    let db = base_db(code).account_code(CALLEE, callee);
+
+    let plain = transact_plain(db, default_limits());
+
+    assert!(plain.result.is_success(), "fixture check: {:?}", plain.result);
+    assert!(
+        plain.terms.non_compute_gas > 0,
+        "fixture check: the transaction must have moved a lane other than compute",
+    );
+    assert_eq!(
+        plain.ledger,
+        InspectorLedger::default(),
+        "no inspector ran, so every lane must be untouched",
+    );
+    assert_eq!(plain.terms.inspector_conjured_gas, 0, "and the law's inspector term must be zero");
+    assert_identity("uninspected", &plain);
 }

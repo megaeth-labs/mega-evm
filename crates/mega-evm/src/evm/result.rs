@@ -37,10 +37,10 @@ pub struct MegaTransactionOutcome {
     ///
     /// These two fields are the uninspected execution's split, and an observation-only inspector
     /// leaves them exactly there. An inspector's edits to interpreter gas counters and to frame
-    /// gas limits are measured at the callback boundary and kept out of the split — see
-    /// [`InspectorLedger`](crate::InspectorLedger) — but one that rewrites a frame *result*, in
-    /// `call_end` or `create_end`, still moves them: the burn split is settled before those
-    /// callbacks run.
+    /// gas limits are measured at the callback boundary and kept out of the split, and an edit to
+    /// a returning frame's result is booked at that frame's settlement — all three are reported on
+    /// [`inspector_ledger`](Self::inspector_ledger), which is how a consumer tells an execution
+    /// the EVM produced alone from one an inspector took part in.
     pub compute_gas_used: u64,
     /// The part of [`compute_gas_used`](Self::compute_gas_used) the transaction destroyed rather
     /// than performed (Rex7+, always 0 before).
@@ -64,7 +64,7 @@ pub struct MegaTransactionOutcome {
     /// itself rather than out of this subtraction.
     ///
     /// Same inspector caveat as [`compute_gas_used`](Self::compute_gas_used): the field is the
-    /// uninspected split, and an inspector that rewrites a frame result will move it.
+    /// uninspected split unless [`inspector_ledger`](Self::inspector_ledger) says otherwise.
     pub compute_gas_destroyed: u64,
     /// The part of [`compute_gas_used`](Self::compute_gas_used) every compute-gas limit is
     /// evaluated against: the work the transaction performed, with Rex7+ destroyed remainders left
@@ -80,6 +80,39 @@ pub struct MegaTransactionOutcome {
     pub compute_gas_enforced: u64,
     /// The state growth used.
     pub state_growth_used: u64,
+    /// What an inspector did to this transaction's gas accounting, measured rather than inferred.
+    ///
+    /// `MegaETH` wraps every inspector it is handed in a measurement shim. The EVM does not
+    /// execute inside an inspector callback, so anything that moves across one is the inspector's
+    /// doing by construction, and this is what the shim booked: gas written into a live
+    /// interpreter's counter ([`gas`](crate::InspectorLedger::gas)), into the envelope a frame is
+    /// about to be built with ([`env`](crate::InspectorLedger::env)), into a returning frame's
+    /// result ([`result`](crate::InspectorLedger::result)), and how many rewrites the shim refused
+    /// outright ([`rejected_rewrites`](crate::InspectorLedger::rejected_rewrites)).
+    ///
+    /// # Sign convention
+    ///
+    /// Every gas lane is signed and reads from the transaction's point of view: **positive is gas
+    /// conjured** — gas that exists in the execution but that nothing debited from the
+    /// transaction's envelope — and **negative is gas destroyed**, which the envelope funded and
+    /// no frame ever received. The lanes are net, so an injection and a matching removal cancel.
+    ///
+    /// # When it is zero
+    ///
+    /// [`InspectorLedger::is_zero`](crate::InspectorLedger::is_zero) holds for every transaction
+    /// that ran without an inspector and for every observation-only inspector — which is every
+    /// tracer. A non-zero ledger means this outcome's gas numbers describe an execution an
+    /// inspector took part in, and the block-execution path refuses to admit one into a block for
+    /// exactly that reason.
+    ///
+    /// # What it is for
+    ///
+    /// Reporting, and that refusal. No resource limit is ever evaluated against it: enforcement
+    /// never sees an inspector's adjustment, because the shim shifts the compute measurement's
+    /// baseline by the same amount it books here. It is also the `I` term of the conservation law
+    /// — see [`ConservationTerms`](crate::ConservationTerms) — which is why an outcome carrying
+    /// gas numbers is not fully described without it.
+    pub inspector_ledger: crate::InspectorLedger,
 }
 
 /// Identifies which stage of block execution produced a state change.

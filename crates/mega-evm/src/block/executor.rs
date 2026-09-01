@@ -605,6 +605,7 @@ where
                     compute_gas_destroyed: _,
                     compute_gas_enforced,
                     state_growth_used,
+                    inspector_ledger: _,
                 },
         } = result;
 

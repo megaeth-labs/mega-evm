@@ -413,6 +413,7 @@ where
             compute_gas_destroyed: additional_limit.destroyed_compute_gas(),
             compute_gas_enforced: additional_limit.enforced_compute_gas(),
             state_growth_used: state_growth,
+            inspector_ledger: additional_limit.inspector_ledger(),
         };
         debug_assert_envelope_accounted(spec, is_inside_sandbox, &additional_limit, &outcome);
         Ok(outcome)
@@ -450,6 +451,7 @@ where
             compute_gas_destroyed: additional_limit.destroyed_compute_gas(),
             compute_gas_enforced: additional_limit.enforced_compute_gas(),
             state_growth_used: state_growth,
+            inspector_ledger: additional_limit.inspector_ledger(),
         };
         debug_assert_envelope_accounted(spec, is_inside_sandbox, &additional_limit, &outcome);
         Ok(outcome)

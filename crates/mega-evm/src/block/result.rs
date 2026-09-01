@@ -287,6 +287,7 @@ mod tests {
             compute_gas_destroyed: 1,
             compute_gas_enforced: 2,
             state_growth_used: 4,
+            inspector_ledger: crate::InspectorLedger::default(),
         };
 
         // One hop: MegaTransactionOutcome -> ResultAndState.
