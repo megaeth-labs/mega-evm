@@ -81,6 +81,10 @@
 //! - `deposit_receipt_rewrite` — the transactions that break that last step. A failed OP deposit
 //!   does get a receipt, rebuilt to report its whole gas limit after every settlement has run; the
 //!   boundary that rebuilds it books the difference as destroyed without moving what enforces.
+//! - `result_space_tripwire` — every `InstructionResult` variant has an explicit destroyed-
+//!   remainder class (swallow / return / unreachable), with no catch-all, so a revm bump that adds
+//!   a variant fails to compile until a human assigns it; the early-fail arms of frame init are
+//!   listed beside it for the upgrade diff that those arms have no type-level tie to.
 
 mod burn_split;
 mod call_body_halt_charges;
@@ -116,3 +120,4 @@ mod parity_shapes;
 mod pre_execution_intrinsic_reject;
 mod precompile_halt;
 mod refund_and_state_gas;
+mod result_space_tripwire;

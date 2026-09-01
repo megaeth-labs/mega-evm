@@ -5,6 +5,7 @@ Resource metering subsystem for transaction and frame limits across compute gas,
 
 ## STRUCTURE
 - `limit.rs`: `AdditionalLimit` coordinator and frame/tx lifecycle hooks.
+- `destroyed.rs`: closed `InstructionResult` classification for the destroyed-remainder protocol (swallow / return / unreachable, no catch-all) and the producer × accounting-site table a revm bump diffs against.
 - `compute_gas.rs`: compute gas tracking, detention limits, frame budgets.
 - `data_size.rs`: tx/frame data accounting with revert-aware discard paths.
 - `kv_update.rs`: tx/frame KV accounting with revert-aware discard paths.
@@ -20,6 +21,12 @@ Resource metering subsystem for transaction and frame limits across compute gas,
 - `AdditionalLimit::finalize_frame` is the single point a frame's outcome is settled — the destroyed-remainder booking, the frame-init refusal booking, the gas rescue, and the REX7 frame-local absorb — and it runs after the last callback that can rewrite the frame's classification and before the journal decision.
   Put a new frame-exit settlement there, not in a lifecycle hook on either side of it.
   The pops stay in `before_frame_return_result`: the paths that reach a caller without ever running a frame would double-pop.
+- A frame result's remaining gas is swallowed or returned by `destroyed_disposition`, not by `is_ok_or_revert()`.
+  Every `InstructionResult` variant has an arm; a new variant is a compile error until it is classified.
+  All four readers are inside `finalize_frame`: the three destroyed bookings plus the inspector-edit split, which asks the same question about the same remainder.
+  A site that only mirrors an upstream branch keyed on `is_ok_or_revert()` — the precompile dispatch undoing revm's `spend_all()` and rebuilding the `Gas` object revm's refund logic reads — keeps upstream's predicate, because it has to move with upstream rather than with our classification.
+  A new destroyed-remainder *producer* belongs on the table in `destroyed.rs`, with its own accounting site.
+  The early-fail arms of `make_call_frame` / `make_create_frame` / `classify_create_return` are a second closed set with no type-level tie — diff them by hand on a revm bump against `tests/rex7/result_space_tripwire.rs`.
 - A frame-local exceed a frame could not latch — the one defined against its *caller's* budget after the merge — is settled in `before_frame_return_result` instead, and under REX7 before the pops rather than after them.
   `peek_check_limit_after_pop` answers the post-merge question over `FrameLimitTracker::view_after_pop`, so the reading is the merged one and only the timing moves; the pop that follows reads a revert and discards the frame's usage.
   Every dimension answers it with its own `check_limit` body over a `FrameLimitView`, and the two readings are cross-checked against each other on every frame return in debug builds.
@@ -43,3 +50,4 @@ Resource metering subsystem for transaction and frame limits across compute gas,
 - Change compute detention behavior: `compute_gas.rs` and detention callers in `evm` module.
 - Change frame budget forwarding logic: `frame_limit.rs` and each tracker’s frame hooks.
 - Change storage call stipend semantics: `storage_call_stipend.rs` and `limit.rs` integration points.
+- Classify a new `InstructionResult` variant or add a destroyed-remainder producer: `destroyed.rs` plus `tests/rex7/result_space_tripwire.rs`.

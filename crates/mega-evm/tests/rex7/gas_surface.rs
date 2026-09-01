@@ -31,6 +31,15 @@
 //! exists today by overriding all of it, which catches a rename or a removal at compile time and
 //! an addition only through the upgrade obligation stated in `src/evm/AGENTS.md`. That obligation
 //! is the reason the classification table lives there rather than here.
+//!
+//! # The other closed table
+//!
+//! `src/limit/destroyed.rs` closes the perpendicular axis and the two do not overlap: this file
+//! enumerates the *carriers* — which field of which object carries gas, and which lane books it —
+//! while that one enumerates the *endings*, the `InstructionResult` classification that decides
+//! whether a carrier's remainder is handed back to the caller or swallowed. A number reaches the
+//! receipt through a carrier named here and an ending named there, and `finalize_frame` composes
+//! the two answers.
 
 use revm::{
     handler::FrameResult,

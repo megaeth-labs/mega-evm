@@ -5,6 +5,7 @@ mod checkpoint;
 mod compute_gas;
 mod conservation;
 mod data_size;
+mod destroyed;
 mod frame_limit;
 mod inspector_ledger;
 mod kv_update;
@@ -15,6 +16,7 @@ mod storage_call_stipend;
 
 pub use conservation::*;
 pub use data_size::*;
+pub use destroyed::*;
 pub(crate) use frame_limit::{FrameLimitTracker, LimitReading, TxRuntimeLimit};
 pub use inspector_ledger::*;
 pub use limit::*;

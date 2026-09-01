@@ -13,7 +13,7 @@ use revm::{
 };
 
 use super::{
-    checkpoint, compute_gas, conservation, data_size, frame_limit::TxRuntimeLimit,
+    checkpoint, compute_gas, conservation, data_size, destroyed, frame_limit::TxRuntimeLimit,
     inspector_ledger, kv_update, state_growth, storage_call_stipend,
 };
 use crate::{
@@ -1601,10 +1601,14 @@ impl AdditionalLimit {
     /// - a returning or reverting frame hands its remaining gas back to its caller, so an edit to
     ///   that number really does change what the transaction spends. It goes to the ledger, and the
     ///   conservation law reads it back out of the envelope;
-    /// - a halting frame hands nothing back, so the edit changes nothing the transaction spends.
-    ///   The rescue is then taken on `evm_remaining`, the EVM's own number — an inspector does not
-    ///   perform work, and gas it removed from a doomed result was never the inspector's to
-    ///   destroy.
+    /// - a swallowed (halting) frame hands nothing back, so the edit changes nothing the
+    ///   transaction spends. The rescue is then taken on `evm_remaining`, the EVM's own number — an
+    ///   inspector does not perform work, and gas it removed from a doomed result was never the
+    ///   inspector's to destroy.
+    ///
+    /// Which of the two a result is comes from
+    /// [`destroyed_disposition`](super::destroyed_disposition), not from revm's `is_ok_or_revert`
+    /// catch-all: a new [`InstructionResult`] variant is a compile error until it is classified.
     ///
     /// Returns the number the resource-limit rescue may hand back to the sender, which is the
     /// result as it now stands on the first case and the EVM's own on the second. The destroyed
@@ -1619,11 +1623,11 @@ impl AdditionalLimit {
         if delta == 0 {
             return evm_remaining;
         }
-        if result.instruction_result().is_ok_or_revert() {
+        if destroyed::remaining_is_destroyed(result.instruction_result()) {
+            evm_remaining
+        } else {
             self.inspector.result += delta;
             result.gas().remaining()
-        } else {
-            evm_remaining
         }
     }
 
@@ -1957,7 +1961,7 @@ impl AdditionalLimit {
     fn settle_exceptional_halt_burn(&mut self, result: &FrameResult, evm_remaining: u64) {
         if !self.checkpoint.rex7_enabled() ||
             self.limit_exceeded() ||
-            result.instruction_result().is_ok_or_revert()
+            !destroyed::remaining_is_destroyed(result.instruction_result())
         {
             return;
         }
@@ -1975,9 +1979,11 @@ impl AdditionalLimit {
     /// cannot see it either, and without this the destroyed budget would be missing from the
     /// transaction's reported total while the conservation law still derives it from the envelope.
     ///
-    /// Only the halt classification books anything. The success and revert shapes reaching this
+    /// Only a swallowed classification books anything. The success and revert shapes reaching this
     /// site — an empty-code call, a nonce overflow, a depth or balance rejection — destroy nothing
-    /// precisely because their gas is erased back into the caller.
+    /// precisely because their gas is erased back into the caller. The split is
+    /// [`destroyed_disposition`](super::destroyed_disposition): a new [`InstructionResult`]
+    /// variant is a compile error until it is classified.
     ///
     /// A precompile result takes [`settle_precompile_envelope`](Self::settle_precompile_envelope)
     /// instead. It reaches this point the same way and is settled against the same classification,
@@ -2011,7 +2017,7 @@ impl AdditionalLimit {
             self.settle_precompile_envelope(staged, result, evm_remaining);
             return;
         }
-        if result.instruction_result().is_ok_or_revert() {
+        if !destroyed::remaining_is_destroyed(result.instruction_result()) {
             return;
         }
         self.compute_gas.record_burned_gas(evm_remaining);
@@ -2022,8 +2028,10 @@ impl AdditionalLimit {
     ///
     /// The recording site staged the two numbers only it knows — the forwarded envelope and the
     /// work performed — and the classification decides the rest, exactly as it does for an
-    /// ordinary frame: a success or a revert hands the remainder back to the caller, an
-    /// exceptional halt does not. So the envelope this call consumed is
+    /// ordinary frame: a returned classification hands the remainder back to the caller, a
+    /// swallowed one does not. Which of the two a result is comes from
+    /// [`destroyed_disposition`](super::destroyed_disposition), the same closed table the two
+    /// frame burns route through. So the envelope this call consumed is
     ///
     /// ```text
     /// consumed = forwarded − (returned to the caller)
@@ -2047,8 +2055,11 @@ impl AdditionalLimit {
         result: &FrameResult,
         evm_remaining: u64,
     ) {
-        let returned =
-            if result.instruction_result().is_ok_or_revert() { evm_remaining } else { 0 };
+        let returned = if destroyed::remaining_is_destroyed(result.instruction_result()) {
+            0
+        } else {
+            evm_remaining
+        };
         let consumed = staged.forwarded.saturating_sub(returned);
         self.compute_gas.record_burned_gas(consumed.saturating_sub(staged.executed));
         self.inspector.result += i128::from(staged.executed.saturating_sub(consumed));
