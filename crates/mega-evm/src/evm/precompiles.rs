@@ -403,10 +403,12 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> PrecompileProvider<MegaContext<DB,
             //   performed-zero / destroyed-all: no work ran, so nothing enforces, and the forwarded
             //   envelope (`gas_limit`, again uncapped) is reported only.
             //
-            // The split is computed here rather than by the interpreter-frame halt settlement.
-            // A halt `Gas` is `Gas::new(limit)` after the undo above (`remaining() == limit()`
-            // == the effective, capped budget), so copying that formula would double-count the
-            // generic arm's REX6 charge or drop the cap gap.
+            // Only the executed half is decided here. The destroyed half depends on how the call
+            // is *classified*, which an inspector's `call_end` can still rewrite after this point,
+            // so REX7 stages the two numbers this site knows — the uncapped forwarded envelope and
+            // the work performed — and the frame's settlement point takes the difference against
+            // the final classification, exactly as it does for an ordinary frame. Frozen specs
+            // stage nothing and are unaffected: they have no destroyed lane at all.
             if is_rex5_enabled {
                 let is_rex7 = context.spec.is_enabled(MegaSpecId::REX7);
                 let address_clears_kzg_gas_gate = address == kzg_point_evaluation::ADDRESS &&
@@ -420,7 +422,9 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> PrecompileProvider<MegaContext<DB,
                 };
                 let mut additional_limit = context.additional_limit.borrow_mut();
                 if output.result.is_ok_or_revert() {
-                    additional_limit.record_compute_gas(output.gas.total_gas_spent());
+                    let executed = output.gas.total_gas_spent();
+                    additional_limit.record_compute_gas(executed);
+                    additional_limit.stage_precompile_envelope(gas_limit, executed);
                 } else if take_kzg_fixed_fee_arm {
                     // Inside the KZG body the halt reason marks how much of the fixed-price work
                     // the call bought before failing. `BlobInvalidInputLength` is the doorway:
@@ -439,7 +443,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> PrecompileProvider<MegaContext<DB,
                     // REX6 and earlier take neither branch's split: they charge the fixed cost for
                     // every halt this arm sees, doorway rejects included.
                     if is_rex7 && matches!(halt, Some(PrecompileHalt::BlobInvalidInputLength)) {
-                        additional_limit.record_burned_gas(gas_limit);
+                        additional_limit.stage_precompile_envelope(gas_limit, 0);
                     } else {
                         let executed = kzg_point_evaluation::GAS_COST;
                         // This recording must not latch a limit exceed. If it did, the halt
@@ -461,9 +465,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> PrecompileProvider<MegaContext<DB,
                              remaining compute budget",
                         );
                         additional_limit.record_compute_gas(executed);
-                        if is_rex7 {
-                            additional_limit.record_burned_gas(gas_limit.saturating_sub(executed));
-                        }
+                        additional_limit.stage_precompile_envelope(gas_limit, executed);
                     }
                 } else if is_rex7 {
                     // Every wired precompile that reaches this arm halted on a pre-work input
@@ -475,7 +477,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> PrecompileProvider<MegaContext<DB,
                     // REX7 also lands a non-`KzgPointEvaluation` override of the KZG address
                     // here: identity keying sent it off the fixed-fee arm, and a cheap halt is
                     // priced as performed-zero like every other generic halt.
-                    additional_limit.record_burned_gas(gas_limit);
+                    additional_limit.stage_precompile_envelope(gas_limit, 0);
                 } else {
                     additional_limit.record_compute_gas(output.gas.limit());
                 }
@@ -515,18 +517,36 @@ mod tests {
         MegaPrecompiles,
     };
     use crate::{
-        test_utils::MemoryDatabase, AdditionalLimit, EvmTxRuntimeLimits, MegaContext, MegaSpecId,
+        test_utils::MemoryDatabase, AdditionalLimit, EvmTxRuntimeLimits, FrameExit, MegaContext,
+        MegaSpecId,
     };
     use alloy_evm::precompiles::{DynPrecompile, PrecompilesMap};
     use alloy_primitives::{Address, Bytes, U256};
     use core::cell::RefCell;
     use revm::{
-        handler::PrecompileProvider,
-        interpreter::{CallInputs, CallScheme, CallValue, InputsImpl, InstructionResult},
+        handler::{FrameResult, PrecompileProvider},
+        interpreter::{
+            CallInputs, CallOutcome, CallScheme, CallValue, InputsImpl, InstructionResult,
+            InterpreterResult,
+        },
         precompile::{PrecompileHalt, PrecompileId, PrecompileOutput, PrecompileStatus},
         primitives::eip7823,
     };
     use sha2::{Digest, Sha256};
+
+    /// Runs the frame-init settlement that follows every precompile dispatch, so a `run`-level
+    /// probe sees the split at the point that decides it.
+    ///
+    /// `PrecompilesMap::run` records the work performed and stages the forwarded envelope; the
+    /// destroyed half is taken here, against the classification the caller will see. These probes
+    /// have no inspector, so the classification is the one `run` produced and the numbers are the
+    /// recording site's own — which is what makes them a pin on the split rather than on where it
+    /// happens to be computed.
+    fn settle_frame_init(limit: &RefCell<AdditionalLimit>, output: InterpreterResult) {
+        let mut outcome = CallOutcome::new(output, 0..0);
+        outcome.was_precompile_called = true;
+        limit.borrow_mut().finalize_frame(&mut FrameResult::Call(outcome), FrameExit::Refused, 0);
+    }
 
     /// Wraps precompile call data into the [`CallInputs`] shape `PrecompilesMap::run` takes,
     /// carrying the bytecode address, static flag and gas limit that used to be separate
@@ -1157,6 +1177,7 @@ mod tests {
             output.result
         );
 
+        settle_frame_init(&context.additional_limit, output);
         let additional = context.additional_limit.borrow();
         assert_eq!(
             additional.get_usage().compute_gas,
@@ -1198,6 +1219,7 @@ mod tests {
             output.result
         );
 
+        settle_frame_init(&context.additional_limit, output);
         let additional = context.additional_limit.borrow();
         assert_eq!(
             additional.get_usage().compute_gas,
@@ -1237,6 +1259,7 @@ mod tests {
         // Halt Gas stays on the capped effective limit.
         assert_eq!(output.gas.limit(), GAS_COST + 1_000);
 
+        settle_frame_init(&context.additional_limit, output);
         let additional = context.additional_limit.borrow();
         assert_eq!(
             additional.get_usage().compute_gas - additional.burned_compute_gas(),
@@ -1285,6 +1308,7 @@ mod tests {
                 "{spec:?}: verification must fail past the gas gate; got {:?}",
                 output.result,
             );
+            settle_frame_init(&context.additional_limit, output);
             let additional = context.additional_limit.borrow();
             assert_eq!(
                 additional.get_usage().compute_gas - additional.burned_compute_gas(),
@@ -1317,6 +1341,7 @@ mod tests {
                 output.gas.limit() < GAS_COST,
                 "{spec:?}: the capped effective limit is what excludes the fixed-cost arm",
             );
+            settle_frame_init(&context.additional_limit, output);
             let additional = context.additional_limit.borrow();
             assert!(
                 !additional.limit_exceeded(),
@@ -1347,6 +1372,7 @@ mod tests {
             output.result
         );
 
+        settle_frame_init(&context.additional_limit, output);
         let additional = context.additional_limit.borrow();
         assert_eq!(
             additional.get_usage().compute_gas,
@@ -1383,9 +1409,11 @@ mod tests {
             precompiles_map.run(&mut context, &call_inputs(inputs, address, true, forwarded_gas));
         let output = result.expect("run ok").expect("Some output");
         assert!(!output.result.is_ok_or_revert(), "the probe must fail; got {:?}", output.result,);
+        let result = output.result;
+        settle_frame_init(&context.additional_limit, output);
 
         let additional = context.additional_limit.borrow();
-        (output.result, additional.get_usage().compute_gas, additional.burned_compute_gas())
+        (result, additional.get_usage().compute_gas, additional.burned_compute_gas())
     }
 
     /// The premise the REX7 split rests on: upstream checks the input length before it reads
@@ -1565,9 +1593,11 @@ mod tests {
             .expect("run ok")
             .expect("Some output");
         assert!(!output.result.is_ok_or_revert(), "the probe must halt; got {:?}", output.result,);
+        let result = output.result;
+        settle_frame_init(&context.additional_limit, output);
 
         let additional = context.additional_limit.borrow();
-        (output.result, additional.get_usage().compute_gas, additional.burned_compute_gas())
+        (result, additional.get_usage().compute_gas, additional.burned_compute_gas())
     }
 
     /// REX7: a Custom override of the KZG address is not the wired KZG implementation, so

@@ -1,7 +1,9 @@
 //! A precompile that halts exceptionally is split the same way as an interpreter frame.
 //!
 //! A precompile runs inside `frame_init` and comes back as a result, so it never reaches the
-//! interpreter-frame halt settlement. REX7 therefore splits it at the precompile recording site:
+//! interpreter-frame halt settlement. REX7 splits it at the same settlement point every other
+//! frame outcome goes through, from the classification the caller is handed — the recording site
+//! stages what only it knows, and the split is taken from that:
 //!
 //! - **Executed** — the work the precompile actually performed (the KZG fixed fee when the call
 //!   reached verification; zero when the input was rejected before any work). This is enforcing.
@@ -13,9 +15,9 @@
 //! any failure past that point means verification was under way and is priced at the whole fixed
 //! fee.
 //!
-//! Through REX6 the same recording site stays single-lane: success / revert still charge spent,
-//! every KZG failure past the wrapper's gas gate charges the fixed fee — doorway rejects
-//! included — and every other error still charges the (capped) limit as enforcing usage.
+//! Through REX6 the recording site stays single-lane and stages nothing: success / revert still
+//! charge spent, every KZG failure past the wrapper's gas gate charges the fixed fee — doorway
+//! rejects included — and every other error still charges the (capped) limit as enforcing usage.
 
 use crate::common::{transact, transact_default, Outcome, CALLEE, CALLER, CONTRACT, ONE_ETH};
 use alloy_primitives::{address, Address, Bytes};

@@ -41,8 +41,9 @@
 //!   frame's whole burned budget settles as compute gas without changing the receipt.
 //! - `frame_init_reject_burn` — the budget a refused frame init decides the fate of: the halting
 //!   rejections (a CREATE onto an occupied address) swallow it and book it as destroyed, the
-//!   returning ones hand it back and book nothing, and a precompile stays booked by its own site;
-//!   then through the deposit-receipt rewrite and the sandbox merge that run after the booking.
+//!   returning ones hand it back and book nothing, and a precompile is settled from what its own
+//!   recording site staged; then through the deposit-receipt rewrite and the sandbox merge that run
+//!   after the booking.
 //! - `call_body_halt_charges` — what a CALL-family body already charged when it halts: the
 //!   value-transfer surcharge and the return-range memory expansion stay in the open segment and
 //!   settle as work, rather than being dropped by the wrapper's tail.
@@ -61,9 +62,9 @@
 //! - `checkpoint_static_fee_edges` — a table-prepaid checkpoint (`GAS`, `LOG1`) whose static fee
 //!   exceeds the clamp headroom is a plain-segment crossing; `CREATE`'s 32,000 is charged inside
 //!   the body, so the same headroom runs the body and then reverts.
-//! - `precompile_halt` — a precompile that halts exceptionally is split at the recording site the
-//!   same way an interpreter frame is: executed work enforces, the unused forwarded envelope does
-//!   not.
+//! - `precompile_halt` — a precompile that halts exceptionally is split the same way an interpreter
+//!   frame is, and at the same settlement point: executed work enforces, the unused forwarded
+//!   envelope does not.
 //! - `pre_execution_intrinsic_reject` — the one envelope-keeping synthetic halt REX7 cannot reach:
 //!   for an ordinary transaction an intrinsic overrun is a validation error from REX5 on, and a
 //!   validation error produces no receipt for any lane to account for.

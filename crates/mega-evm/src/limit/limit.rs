@@ -46,6 +46,24 @@ pub enum FrameExit {
     RefusedSynthetically,
 }
 
+/// What a precompile's recording site knows about its call, held until the frame's settlement
+/// point can decide the split (REX7+).
+///
+/// A precompile is answered inside the frame init and never becomes a child frame, so its
+/// recording site is the only place that knows both of these numbers: the envelope is the
+/// caller-supplied forwarded amount rather than the REX5-capped effective limit, and the work is
+/// `MegaETH`'s own price for what the call performed, which a halting precompile's gas object does
+/// not carry. What that site cannot know is how the call ends — an inspector's `call_end` runs
+/// afterwards and can rewrite the classification, and the classification is what decides whether
+/// the caller reclaims the remainder.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PrecompileEnvelope {
+    /// The gas the caller forwarded, uncapped.
+    forwarded: u64,
+    /// The work the precompile performed, already recorded on the enforcing lane.
+    executed: u64,
+}
+
 /// Additional limits for the `MegaETH` EVM beyond standard EVM limits.
 ///
 /// This struct coordinates four independent resource limits: compute gas, data size,
@@ -140,6 +158,14 @@ pub struct AdditionalLimit {
     /// conservation law and by reporting. It stays at its default for every transaction that runs
     /// without an inspector and for every observation-only inspector.
     inspector: inspector_ledger::InspectorLedger,
+
+    /// The precompile call whose split is waiting for its frame's settlement point (REX7+).
+    ///
+    /// At most one can ever be outstanding: a precompile is answered inside a frame init and the
+    /// same frame init settles the result a few statements later, with no room for another frame
+    /// to start in between. [`finalize_frame`](Self::finalize_frame) takes it unconditionally, so
+    /// it cannot outlive the frame that staged it.
+    staged_precompile: Option<PrecompileEnvelope>,
 }
 
 /// The usage of the additional limits.
@@ -169,6 +195,7 @@ impl AdditionalLimit {
             storage_call_stipend: storage_call_stipend::StorageCallStipendTracker::new(spec),
             checkpoint: checkpoint::CheckpointTracker::new(spec),
             inspector: inspector_ledger::InspectorLedger::default(),
+            staged_precompile: None,
         }
     }
 }
@@ -212,6 +239,7 @@ impl AdditionalLimit {
         self.storage_call_stipend.reset();
         self.checkpoint.reset();
         self.inspector = inspector_ledger::InspectorLedger::default();
+        self.staged_precompile = None;
     }
 
     /// Whether compute gas settles at checkpoints (REX7+) rather than per opcode.
@@ -726,13 +754,29 @@ impl AdditionalLimit {
     ///
     /// Raises the reported total and leaves every limit comparison unchanged — the same
     /// [`ComputeGasTracker::record_burned_gas`](compute_gas::ComputeGasTracker::record_burned_gas)
-    /// the interpreter-frame halt path uses. Precompile halt accounting calls this at the
-    /// recording site rather than through frame-exit settlement: a halt `Gas` is reset to
-    /// `Gas::new(limit)`, so the frame formula `remaining()` would double-count or miss the
-    /// forwarded-cap gap.
+    /// the interpreter-frame halt path uses.
     #[inline]
     pub(crate) fn record_burned_gas(&mut self, amount: u64) {
         self.compute_gas.record_burned_gas(amount);
+    }
+
+    /// Hands the precompile recording site's two numbers to the frame's settlement point (REX7+;
+    /// a no-op before, where nothing is destroyed).
+    ///
+    /// `executed` must already have been recorded on the enforcing lane — it is the work the call
+    /// performed, which does not depend on how the call is classified afterwards. Only the
+    /// destroyed half does, and that is what the settlement point derives from these two numbers
+    /// and the final classification. See [`PrecompileEnvelope`].
+    #[inline]
+    pub(crate) fn stage_precompile_envelope(&mut self, forwarded: u64, executed: u64) {
+        if !self.rex7_enabled() {
+            return;
+        }
+        debug_assert!(
+            self.staged_precompile.is_none(),
+            "a precompile's envelope outlived the frame init that staged it",
+        );
+        self.staged_precompile = Some(PrecompileEnvelope { forwarded, executed });
     }
 
     /// Gets the usage of the additional limits.
@@ -1371,23 +1415,34 @@ impl AdditionalLimit {
         // it to a revert.
         self.absorb_frame_local_exceed(result);
 
-        let evm_remaining = self.settle_inspector_result_gas(result, inspector_gas_delta);
+        // Taken unconditionally, so a staged envelope can never outlive the frame that staged it.
+        let staged_precompile = self.staged_precompile.take();
+        // The gas the EVM itself left in this result. Every settlement below is defined against
+        // it: the last callback's edit to the number is the inspector's, and the two are only the
+        // same object on a frame no callback touched.
+        let evm_remaining = evm_own_remaining(result.gas().remaining(), inspector_gas_delta);
+        let rescuable =
+            self.settle_inspector_result_gas(result, inspector_gas_delta, evm_remaining);
 
         match exit {
             FrameExit::Ran => {
+                debug_assert!(
+                    staged_precompile.is_none(),
+                    "a precompile never becomes a frame, so it cannot reach a Ran settlement",
+                );
                 // The burn before the rescue: the rescue's `check_limit` is what latches a
                 // TX-level exceed, and a latched exceed is exactly the case whose remainder is
                 // handed back rather than destroyed.
                 self.settle_exceptional_halt_burn(result, evm_remaining);
-                self.try_rescue_gas(result.gas(), evm_remaining);
+                self.try_rescue_gas(result.gas(), rescuable);
             }
             FrameExit::Refused | FrameExit::RefusedSynthetically => {
                 // The rescue before the burn, for the mirror-image reason: here the latch the
                 // rescue produces is what tells the burn the envelope is being handed back.
                 if exit == FrameExit::Refused || self.rex7_enabled() {
-                    self.try_rescue_gas(result.gas(), evm_remaining);
+                    self.try_rescue_gas(result.gas(), rescuable);
                 }
-                self.settle_frame_init_reject_burn(result, evm_remaining);
+                self.settle_frame_init_reject_burn(result, evm_remaining, staged_precompile);
             }
         }
     }
@@ -1402,19 +1457,28 @@ impl AdditionalLimit {
     ///   that number really does change what the transaction spends. It goes to the ledger, and the
     ///   conservation law reads it back out of the envelope;
     /// - a halting frame hands nothing back, so the edit changes nothing the transaction spends.
-    ///   The destroyed remainder and the rescue below are then taken on the EVM's own number,
-    ///   reconstructed by undoing the edit — an inspector does not perform work, and gas it removed
-    ///   from a doomed result was never the inspector's to destroy.
-    fn settle_inspector_result_gas(&mut self, result: &FrameResult, delta: i128) -> u64 {
-        let remaining = result.gas().remaining();
+    ///   The rescue is then taken on `evm_remaining`, the EVM's own number — an inspector does not
+    ///   perform work, and gas it removed from a doomed result was never the inspector's to
+    ///   destroy.
+    ///
+    /// Returns the number the resource-limit rescue may hand back to the sender, which is the
+    /// result as it now stands on the first case and the EVM's own on the second. The destroyed
+    /// settlements always take `evm_remaining`, because a booked edit is already accounted for on
+    /// the ledger and booking it a second time as a destroyed remainder would double it.
+    fn settle_inspector_result_gas(
+        &mut self,
+        result: &FrameResult,
+        delta: i128,
+        evm_remaining: u64,
+    ) -> u64 {
         if delta == 0 {
-            return remaining;
+            return evm_remaining;
         }
         if result.instruction_result().is_ok_or_revert() {
             self.inspector.result += delta;
-            remaining
+            result.gas().remaining()
         } else {
-            (i128::from(remaining) - delta).clamp(0, i128::from(u64::MAX)) as u64
+            evm_remaining
         }
     }
 
@@ -1770,10 +1834,12 @@ impl AdditionalLimit {
     /// site — an empty-code call, a nonce overflow, a depth or balance rejection — destroy nothing
     /// precisely because their gas is erased back into the caller.
     ///
-    /// A precompile result is excluded. Precompiles are dispatched inside the same frame init and
-    /// come back as a result rather than a frame, but they have already booked both halves of
-    /// their own split at the recording site, against the forwarded envelope rather than the
-    /// capped budget this result carries. Booking again here would report the same gas twice.
+    /// A precompile result takes [`settle_precompile_envelope`](Self::settle_precompile_envelope)
+    /// instead. It reaches this point the same way and is settled against the same classification,
+    /// but neither of the two numbers the formula above uses is the right one for it: the envelope
+    /// it destroys is the caller's forwarded amount rather than the REX5-capped budget its result
+    /// carries, and a precompile that failed after doing work has that work priced by `MegaETH`
+    /// rather than spent down in its gas object.
     ///
     /// Nothing is booked once a limit is latched, which is also why this runs after the rescue in
     /// [`after_frame_init`](Self::after_frame_init) rather than before it. A TX-level exceed
@@ -1782,19 +1848,66 @@ impl AdditionalLimit {
     /// [`before_frame_return_result`](Self::before_frame_return_result), which rewrites the result
     /// to a revert and so returns the gas to the caller. Either way the envelope is not destroyed,
     /// and booking it would report gas that was handed back.
-    fn settle_frame_init_reject_burn(&mut self, result: &FrameResult, evm_remaining: u64) {
-        if !self.checkpoint.rex7_enabled() ||
-            self.limit_exceeded() ||
-            result.instruction_result().is_ok_or_revert()
-        {
+    fn settle_frame_init_reject_burn(
+        &mut self,
+        result: &FrameResult,
+        evm_remaining: u64,
+        staged_precompile: Option<PrecompileEnvelope>,
+    ) {
+        debug_assert_eq!(
+            staged_precompile.is_some(),
+            self.checkpoint.rex7_enabled() &&
+                matches!(result, FrameResult::Call(outcome) if outcome.was_precompile_called),
+            "every REX7 precompile call stages an envelope, and nothing else does",
+        );
+        if !self.checkpoint.rex7_enabled() || self.limit_exceeded() {
             return;
         }
-        if let FrameResult::Call(outcome) = result {
-            if outcome.was_precompile_called {
-                return;
-            }
+        if let Some(staged) = staged_precompile {
+            self.settle_precompile_envelope(staged, result, evm_remaining);
+            return;
+        }
+        if result.instruction_result().is_ok_or_revert() {
+            return;
         }
         self.compute_gas.record_burned_gas(evm_remaining);
+    }
+
+    /// Settles what a precompile call destroyed, against the classification its caller will
+    /// actually see (REX7+).
+    ///
+    /// The recording site staged the two numbers only it knows — the forwarded envelope and the
+    /// work performed — and the classification decides the rest, exactly as it does for an
+    /// ordinary frame: a success or a revert hands the remainder back to the caller, an
+    /// exceptional halt does not. So the envelope this call consumed is
+    ///
+    /// ```text
+    /// consumed = forwarded − (returned to the caller)
+    /// ```
+    ///
+    /// and everything in it that was not the work performed is destroyed.
+    ///
+    /// # Why the difference can go the other way
+    ///
+    /// A halting precompile's `Gas` is reset rather than spent down, so it reports the whole
+    /// budget as remaining even when `MegaETH` priced the call as having done work — the KZG fixed
+    /// fee for a failure raised inside verification is the one case that exists today. Told that
+    /// such a call succeeded, the caller reclaims all of it, fee included. The work stays on the
+    /// enforcing lane, because it really was performed; the fee nobody paid for is gas the rewrite
+    /// conjured, and goes to the ledger so the conservation law still closes. That direction is
+    /// unreachable without an inspector: no classification the EVM itself produces both prices
+    /// work and hands the budget back.
+    fn settle_precompile_envelope(
+        &mut self,
+        staged: PrecompileEnvelope,
+        result: &FrameResult,
+        evm_remaining: u64,
+    ) {
+        let returned =
+            if result.instruction_result().is_ok_or_revert() { evm_remaining } else { 0 };
+        let consumed = staged.forwarded.saturating_sub(returned);
+        self.compute_gas.record_burned_gas(consumed.saturating_sub(staged.executed));
+        self.inspector.result += i128::from(staged.executed.saturating_sub(consumed));
     }
 
     /// Merges resource usage from a sandbox execution into this tracker.
@@ -1930,6 +2043,17 @@ impl AdditionalLimit {
 /// # Returns
 ///
 /// A `FrameResult` indicating that the limit is exceeded with the given instruction result.
+/// Undoes the last mutating callback's edit to a frame result's gas, reporting the number the EVM
+/// itself left there.
+///
+/// The EVM does not execute inside an inspector callback, so the difference across one is the
+/// inspector's by construction, and every settlement that asks what the *transaction* spent has to
+/// ask it of the EVM's number rather than of the rewritten one.
+#[inline]
+fn evm_own_remaining(remaining: u64, inspector_gas_delta: i128) -> u64 {
+    (i128::from(remaining) - inspector_gas_delta).clamp(0, i128::from(u64::MAX)) as u64
+}
+
 fn create_exceeding_limit_frame_result(
     instruction_result: InstructionResult,
     gas: Gas,

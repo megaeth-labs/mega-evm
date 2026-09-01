@@ -259,7 +259,8 @@ fn test_create_collision_books_the_whole_swallowed_budget() {
     }
 }
 
-/// A precompile comes back through the same arm, but it books its own split at the recording site.
+/// A precompile comes back through the same arm on its own terms: the envelope it destroys is the
+/// caller's uncapped forwarded amount rather than the budget its result carries.
 /// Booking again here would double it, so the total must stay one forwarded envelope.
 #[test]
 fn test_precompile_result_is_not_booked_a_second_time() {
