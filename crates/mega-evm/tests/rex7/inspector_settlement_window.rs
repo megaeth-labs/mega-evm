@@ -9,9 +9,9 @@
 //!   instruction that produced the frame's action, and that action carries its own copy of the gas
 //!   counter. An edit to `interp.gas` at that moment changes the counter `MegaETH`'s tail
 //!   settlement measures work against and nothing the caller will ever see, so it must move the
-//!   settlement baseline and must not move the ledger. The two neighbouring windows — a step_end in
-//!   mid-frame, and the one after a `CALL` has set a `NewFrame` action — are the boundary of that
-//!   rule: the frame resumes on the edited counter in both, so both are booked.
+//!   settlement baseline and must not move the ledger. The two neighbouring windows — a `step_end`
+//!   in mid-frame, and the one after a `CALL` has set a `NewFrame` action — are the boundary of
+//!   that rule: the frame resumes on the edited counter in both, so both are booked.
 //!
 //! - **A precompile's classification.** A precompile is answered inside the frame init and never
 //!   becomes a child frame, so its recording site is the only place that knows the forwarded
@@ -50,6 +50,11 @@ const INJECT: u64 = 1_000;
 /// Gas every probed CALL forwards. Well inside the 63/64 rule at the default transaction gas
 /// limit and well inside the default compute budget, so the forwarded envelope is exactly this.
 const FORWARDED: u64 = 1_000_000;
+
+/// The transaction gas limit is not what binds any fixture here — pinned at compile time, so a
+/// change to the shared limit cannot silently turn a destroyed-remainder case into an
+/// out-of-gas one.
+const _: () = assert!(DEFAULT_TX_GAS_LIMIT > 10 * FORWARDED);
 
 /// The identity precompile.
 const IDENTITY: Address = address!("0000000000000000000000000000000000000004");
@@ -378,16 +383,5 @@ fn test_a_priced_precompile_failure_rewritten_into_a_success_conjures_its_fee() 
         rewritten.inspector_conjured_gas,
         i128::from(kzg_point_evaluation::GAS_COST),
         "the fee the caller reclaimed is gas the transaction was never charged for",
-    );
-}
-
-/// The transaction gas limit is not what binds any of these fixtures — stated once, so a future
-/// change to the shared limit cannot silently turn a destroyed-remainder case into an
-/// out-of-gas one.
-#[test]
-fn test_the_fixtures_are_not_bound_by_the_transaction_gas_limit() {
-    assert!(
-        DEFAULT_TX_GAS_LIMIT > 10 * FORWARDED,
-        "the forwarded envelope must be a small part of the transaction's own",
     );
 }

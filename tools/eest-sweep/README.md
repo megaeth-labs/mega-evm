@@ -89,7 +89,7 @@ The shim refuses that shape and asserts on it, so including it would make the de
 
 ### Narrowing a flagged vector
 
-Three knobs, passed through with `--chaos-arg`:
+One knob, passed through with `--chaos-arg`:
 
 ```bash
 tools/eest-sweep/run.sh --mode chaos \
@@ -97,8 +97,6 @@ tools/eest-sweep/run.sh --mode chaos \
 ```
 
 - `--chaos-shapes LIST` restricts the pool to the named shapes. Narrowing does not reshuffle the decision stream, so each surviving mutation stays where the full run put it; it does leave the mutation budget unspent on rejected draws, so a narrowed run can reach further into a transaction.
-- `--chaos-skip-terminal-counter-edits` makes no gas-counter edit at the `step_end` of a frame's terminating opcode, where the interpreter's counter has already been copied into the frame's action.
-- `--chaos-skip-precompile-reclassification` rewrites no precompile result's classification, whose executed / destroyed split is booked at the precompile's own recording site before any callback sees it.
 
 ## Options
 

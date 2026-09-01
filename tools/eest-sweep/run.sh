@@ -27,7 +27,7 @@
 #                        derived from this and the vector's identity, so a flagged vector
 #                        reproduces exactly.
 #   --chaos-arg ARG      Extra argument passed through to the chaos run; repeatable. Used to
-#                        narrow a flagged vector (`--chaos-shapes`, `--chaos-skip-*`).
+#                        narrow a flagged vector (`--chaos-shapes`).
 #   --corpus-dir DIR     Use an already-unpacked `state_tests` tree instead of downloading.
 #   --cache-dir DIR      Where to keep the downloaded archive (default: .eest-cache).
 #   --report-dir DIR     Where to write the report and log (default: .eest-report).
