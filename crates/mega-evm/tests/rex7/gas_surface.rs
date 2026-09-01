@@ -16,6 +16,13 @@
 //!   that name set against the classification table is a pin with the same reach: a field added
 //!   upstream appears in the rendering, fails to match a table row, and the test names it.
 //!
+//! # The lock
+//!
+//! A verdict of "this reaches the receipt and nothing books it" is nameable — `Coverage` has an arm
+//! for it — but not keepable: [`test_the_table_carries_no_open_gap`] fails on any row that carries
+//! one. Writing a gap down is how it gets closed; leaving it written down is how a table stops
+//! being a statement about the code and becomes a list of things somebody meant to do.
+//!
 //! # What the pins cannot reach, and what covers it instead
 //!
 //! A callback *added* to the `Inspector` trait is not a compile error anywhere — the trait gives
@@ -44,6 +51,11 @@ use std::{collections::BTreeSet, string::String, vec::Vec};
 /// The whole point of the enum is that there is no fifth arm and no catch-all: a field is
 /// measured, or it carries no gas, or it carries gas that reaches nothing `MegaETH` reports, or it
 /// is a hole with a name. "Nobody looked at it" is not one of the options.
+///
+/// The fourth arm exists and is unused, which is the state
+/// [`test_the_table_carries_no_open_gap`] holds the table in. A hole is nameable, so that
+/// discovering one is a change to this file rather than a silence — and it is not *keepable*, so
+/// that adding one means closing it in the same change or taking the decision to an owner.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Coverage {
     /// Measured, and booked on the named `InspectorLedger` lane.
@@ -81,25 +93,26 @@ const GAS_TRACKER_FIELDS: [(&str, Coverage); 5] = [
     ),
     (
         "refunded",
-        Coverage::NotClosed(
-            "a refund written at any callback that holds a `Gas` travels to the caller on frame \
-             return and reaches the receipt's gas used, while the conservation law — stated over \
-             `limit - remaining` — stays closed and every ledger lane stays zero",
+        Coverage::Lane(
+            "refund, at the callback boundary — nominal, because neither the EIP-3529 cap nor the \
+             chain of successful frame returns an edit must survive is attributable to one \
+             callback",
         ),
     ),
     (
         "reservoir",
-        Coverage::NotClosed(
-            "EIP-8037 state gas is structurally zero on every MegaETH path, so a reservoir an \
-             inspector writes is gas the transaction never funded; it moves the envelope and the \
-             terminal cross-check trips on it, with every ledger lane zero",
+        Coverage::Lane(
+            "reservoir, settled once from the figure the transaction ends with: `MegaETH` runs \
+             with EIP-8037 off and produces none of it, and revm propagates it between frames by \
+             replacement, so there is no difference across a callback to take",
         ),
     ),
     (
         "state_gas_spent",
-        Coverage::Inert(
-            "the counterpart of `reservoir` on the spending side, and dead for the same reason: \
-             with EIP-8037 off nothing reads it",
+        Coverage::Lane(
+            "state_gas, settled at the same point — the receipt reports the final figure whether \
+             or not EIP-8037 is on, and a failing frame folds it into its caller's reservoir, \
+             where the lane above picks it up",
         ),
     ),
 ];
@@ -134,9 +147,11 @@ const CALL_INPUTS_FIELDS: [(&str, Coverage); 12] = [
     ),
     (
         "reservoir",
-        Coverage::NotClosed(
-            "the child frame's EIP-8037 state-gas pool, and gas the caller was never debited for \
-             in exactly the way a raised `gas_limit` is; no lane books it",
+        Coverage::Lane(
+            "reservoir, at the transaction's settlement point — the child frame is seeded from \
+             this pool and hands it back, so an edit here reaches the receipt; the rewrite \
+             comparison books it as an intervention as well, which is not a second reading of the \
+             same edit because no lane books anything at this boundary",
         ),
     ),
     ("input", Coverage::NotGas("what the frame does")),
@@ -160,7 +175,7 @@ const CALL_INPUTS_FIELDS: [(&str, Coverage); 12] = [
 /// Everything a creation frame is built from.
 const CREATE_INPUTS_FIELDS: [(&str, Coverage); 8] = [
     ("gas_limit", Coverage::Lane("env, exactly as a call's")),
-    ("reservoir", Coverage::NotClosed("a creation's copy of the call form above")),
+    ("reservoir", Coverage::Lane("reservoir, exactly as a call's")),
     ("caller", Coverage::NotGas("what the frame does")),
     ("scheme", Coverage::NotGas("what the frame does")),
     ("value", Coverage::NotGas("what the frame does")),
@@ -280,28 +295,33 @@ fn sample_result() -> InterpreterResult {
 /// Every field of every gas-carrying object an inspector is handed has a verdict.
 ///
 /// This is the closure the completeness table rests on. It is not a claim that the verdicts are
-/// right — the tests in `measured_inspector.rs`, `inspector_cheat_matrix.rs` and
-/// `interception_gas.rs` are — it is the claim that there is no field without one.
+/// right — the tests in `measured_inspector.rs`, `inspector_cheat_matrix.rs`,
+/// `interception_gas.rs` and `refund_and_state_gas.rs` are — it is the claim that there is no
+/// field without one.
 #[test]
 fn test_every_field_of_every_gas_carrier_has_a_verdict() {
     let gas = sample_gas();
-    assert_classified("Gas", &std::format!("{gas:?}"), &GAS_FIELDS);
-    assert_classified("GasTracker", &std::format!("{:?}", gas.tracker()), &GAS_TRACKER_FIELDS);
-    assert_classified("MemoryGas", &std::format!("{:?}", gas.memory()), &MEMORY_GAS_FIELDS);
-    assert_classified(
-        "CallInputs",
-        &std::format!("{:?}", sample_call_inputs()),
-        &CALL_INPUTS_FIELDS,
-    );
-    assert_classified(
-        "CreateInputs",
-        &std::format!("{:?}", sample_create_inputs()),
-        &CREATE_INPUTS_FIELDS,
-    );
-    assert_classified(
-        "InterpreterResult",
-        &std::format!("{:?}", sample_result()),
-        &INTERPRETER_RESULT_FIELDS,
+    let renderings = [
+        ("Gas", std::format!("{gas:?}")),
+        ("GasTracker", std::format!("{:?}", gas.tracker())),
+        ("MemoryGas", std::format!("{:?}", gas.memory())),
+        ("CallInputs", std::format!("{:?}", sample_call_inputs())),
+        ("CreateInputs", std::format!("{:?}", sample_create_inputs())),
+        ("InterpreterResult", std::format!("{:?}", sample_result())),
+    ];
+    // Looked up rather than listed, so the set of tables the lock walks and the set this test
+    // checks the renderings against cannot drift apart.
+    for (what, rendered) in &renderings {
+        let (_, table) = tables()
+            .into_iter()
+            .find(|(name, _)| name == what)
+            .unwrap_or_else(|| panic!("{what} has a rendering but no table in `tables()`"));
+        assert_classified(what, rendered, table);
+    }
+    assert_eq!(
+        renderings.len(),
+        tables().len(),
+        "every table must have a rendering checked against it",
     );
 }
 
@@ -323,39 +343,70 @@ fn test_the_field_reader_reads_the_top_level_and_stops_there() {
     assert!(field_names("NoFields").is_empty(), "a unit struct has no fields to read");
 }
 
-/// The gaps the table carries are the gaps it says it carries.
-///
-/// A verdict is a claim someone has to be able to act on, so the set of open ones is pinned by
-/// name rather than by count: closing one, or discovering another, has to touch this list and the
-/// table in `src/evm/AGENTS.md` together.
-#[test]
-fn test_the_open_gaps_are_the_ones_the_table_names() {
-    let mut open = Vec::new();
-    for (what, table) in [
+/// Every table this module classifies, by the name its rendering is checked under.
+fn tables() -> [(&'static str, &'static [(&'static str, Coverage)]); 6] {
+    [
         ("Gas", GAS_FIELDS.as_slice()),
         ("GasTracker", GAS_TRACKER_FIELDS.as_slice()),
         ("MemoryGas", MEMORY_GAS_FIELDS.as_slice()),
         ("CallInputs", CALL_INPUTS_FIELDS.as_slice()),
         ("CreateInputs", CREATE_INPUTS_FIELDS.as_slice()),
         ("InterpreterResult", INTERPRETER_RESULT_FIELDS.as_slice()),
-    ] {
-        for (field, coverage) in table {
+    ]
+}
+
+/// The `Owner::Field` names a set of tables leaves with no lane, in sorted order.
+fn open_gaps(tables: &[(&'static str, &'static [(&'static str, Coverage)])]) -> Vec<String> {
+    let mut open = Vec::new();
+    for (what, table) in tables {
+        for (field, coverage) in *table {
             if matches!(coverage, Coverage::NotClosed(_)) {
                 open.push(std::format!("{what}::{field}"));
             }
         }
     }
     open.sort();
+    open
+}
+
+/// ★ The table carries no open gap, and cannot be left carrying one.
+///
+/// Every earlier version of this test named the gaps that were open, which made a hole something a
+/// change could add as long as it also added a line here. There are none left, so the pin becomes
+/// structural: a field that reaches what `MegaETH` reports and that no lane books fails this test
+/// the moment it is written down.
+///
+/// That is deliberately awkward. Closing a surface is work, and a test that merely *records* an
+/// open one lets the work be deferred indefinitely while the table still reads as complete. With
+/// this pin the two options are to close the gap in the same change or to take the decision
+/// somewhere a person owns it — and either way somebody has looked.
+///
+/// It does not, and cannot, stop a hole from being *mis*classified as `Inert` or `NotGas`. Nothing
+/// mechanical can: those verdicts are claims about what the EVM does with a number, and what backs
+/// them is the measurement each one was written from. `state_gas_spent` is the cautionary case —
+/// it sat under `Inert` on the strength of "EIP-8037 is off", which is true and which the receipt
+/// does not care about.
+#[test]
+fn test_the_table_carries_no_open_gap() {
     assert_eq!(
-        open,
-        [
-            "CallInputs::reservoir",
-            "CreateInputs::reservoir",
-            "GasTracker::refunded",
-            "GasTracker::reservoir",
-        ],
-        "the open gaps moved; `src/evm/AGENTS.md`'s table has to move with them",
+        open_gaps(&tables()),
+        Vec::<String>::new(),
+        "a gas surface with no lane cannot be left in the table; close it, or take the decision \
+         to an owner and record it there",
     );
+}
+
+/// The lock detects what it claims to detect.
+///
+/// Without this, the assertion above would pass just as happily against a predicate that never
+/// matched anything — which is the failure mode of every test whose expected value is empty.
+#[test]
+fn test_the_lock_names_an_open_gap_when_there_is_one() {
+    const PROBE: [(&str, Coverage); 2] = [
+        ("measured", Coverage::Lane("somewhere")),
+        ("unmeasured", Coverage::NotClosed("moves the receipt, and no lane books it")),
+    ];
+    assert_eq!(open_gaps(&[("Probe", PROBE.as_slice())]), ["Probe::unmeasured"]);
 }
 
 // --- the shape-level pin -------------------------------------------------------------------------
