@@ -161,6 +161,35 @@ impl StateGrowthTracker {
         self.frame_tracker.add_tx_persistent(amount);
     }
 
+    /// [`check_limit`](TxRuntimeLimit::check_limit) against an explicit reading of the tracker.
+    ///
+    /// The reading is a parameter so that one body can answer both questions asked of this check:
+    /// what it says now, and what it will say once a returning frame has been merged into its
+    /// caller. A frame return needs the second answer before the merge happens, and a second copy
+    /// of the predicates would be free to drift from the first.
+    pub(crate) fn check_limit_on(&self, view: &super::FrameLimitView) -> super::LimitCheck {
+        if self.spec.is_enabled(MegaSpecId::REX4) {
+            let frame_check = view.exceeds_frame_limit(super::LimitKind::StateGrowth);
+            if frame_check.exceeded_limit() {
+                return frame_check;
+            }
+            // TX-level fallthrough: catches Rex5 pre-frame authority usage and any
+            // future TX-level state-growth contribution.
+        }
+        let used = view.net_usage();
+        let limit = self.frame_tracker.tx_limit();
+        if used > limit {
+            super::LimitCheck::ExceedsLimit {
+                kind: super::LimitKind::StateGrowth,
+                limit,
+                used,
+                frame_local: false,
+            }
+        } else {
+            super::LimitCheck::WithinLimit
+        }
+    }
+
     /// Returns the remaining state growth budget for the current call frame, capped by
     /// the TX-level remaining.
     pub(crate) fn current_call_remaining(&self) -> u64 {
@@ -203,27 +232,7 @@ impl TxRuntimeLimit for StateGrowthTracker {
     /// usage — and any frame-level overflow that has already been popped into `tx_entry`.
     /// For pre-Rex4, checks total net growth across all frames against the TX limit.
     fn check_limit(&self) -> super::LimitCheck {
-        if self.spec.is_enabled(MegaSpecId::REX4) {
-            let frame_check =
-                self.frame_tracker.exceeds_current_frame_limit(super::LimitKind::StateGrowth);
-            if frame_check.exceeded_limit() {
-                return frame_check;
-            }
-            // TX-level fallthrough: catches Rex5 pre-frame authority usage and any
-            // future TX-level state-growth contribution.
-        }
-        let used = self.tx_usage();
-        let limit = self.frame_tracker.tx_limit();
-        if used > limit {
-            super::LimitCheck::ExceedsLimit {
-                kind: super::LimitKind::StateGrowth,
-                limit,
-                used,
-                frame_local: false,
-            }
-        } else {
-            super::LimitCheck::WithinLimit
-        }
+        self.check_limit_on(&self.frame_tracker.view())
     }
 
     /// No-op.

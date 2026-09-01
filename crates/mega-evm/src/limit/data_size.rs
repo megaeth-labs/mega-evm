@@ -133,6 +133,46 @@ impl DataSizeTracker {
         self.frame_tracker.add_tx_persistent(amount);
     }
 
+    /// [`check_limit`](TxRuntimeLimit::check_limit) against an explicit reading of the tracker.
+    ///
+    /// The reading is a parameter so that one body can answer both questions asked of this check:
+    /// what it says now, and what it will say once a returning frame has been merged into its
+    /// caller. A frame return needs the second answer before the merge happens, and a second copy
+    /// of the predicates would be free to drift from the first.
+    pub(crate) fn check_limit_on(&self, view: &super::FrameLimitView) -> super::LimitCheck {
+        if self.rex4_enabled {
+            let frame_check = view.exceeds_frame_limit(super::LimitKind::DataSize);
+            if frame_check.exceeded_limit() {
+                return frame_check;
+            }
+            // TX-level fallthrough: defense-in-depth safety net.
+            // In Rex4+ during execution, per-frame budgets are derived from remaining TX
+            // budget, so this should only exceed when no frame exists (intrinsic overflow).
+        }
+        let used = view.net_usage();
+        let limit = self.frame_tracker.tx_limit();
+        if used > limit {
+            // Defense-in-depth: pre-REX5, the only mid-execution writer to `tx_entry` is
+            // `before_tx_start` (which runs before any frame is pushed), so a TX-level
+            // exceed with an active frame indicates a budget-accounting bug. REX5+ adds
+            // `record_oracle_hint_bytes` which legitimately writes to `tx_entry` mid-
+            // execution to meter oracle-hint payloads as TX-scoped side-channel cost, so
+            // the invariant is only asserted on pre-REX5 specs.
+            debug_assert!(
+                !self.rex4_enabled || self.rex5_enabled || !view.has_frame(),
+                "DataSize TX-level exceeded with active frame — budget invariant violated"
+            );
+            super::LimitCheck::ExceedsLimit {
+                kind: super::LimitKind::DataSize,
+                limit,
+                used,
+                frame_local: false,
+            }
+        } else {
+            super::LimitCheck::WithinLimit
+        }
+    }
+
     /// Returns the remaining data size budget for the current call frame, capped by
     /// the TX-level remaining.
     pub(crate) fn current_call_remaining(&self) -> u64 {
@@ -170,38 +210,7 @@ impl TxRuntimeLimit for DataSizeTracker {
     /// (intrinsic usage is recorded in `tx_entry` before the first frame is pushed).
     /// In pre-Rex4, checks total data size across all frames against the TX limit.
     fn check_limit(&self) -> super::LimitCheck {
-        if self.rex4_enabled {
-            let frame_check =
-                self.frame_tracker.exceeds_current_frame_limit(super::LimitKind::DataSize);
-            if frame_check.exceeded_limit() {
-                return frame_check;
-            }
-            // TX-level fallthrough: defense-in-depth safety net.
-            // In Rex4+ during execution, per-frame budgets are derived from remaining TX
-            // budget, so this should only exceed when no frame exists (intrinsic overflow).
-        }
-        let used = self.tx_usage();
-        let limit = self.frame_tracker.tx_limit();
-        if used > limit {
-            // Defense-in-depth: pre-REX5, the only mid-execution writer to `tx_entry` is
-            // `before_tx_start` (which runs before any frame is pushed), so a TX-level
-            // exceed with an active frame indicates a budget-accounting bug. REX5+ adds
-            // `record_oracle_hint_bytes` which legitimately writes to `tx_entry` mid-
-            // execution to meter oracle-hint payloads as TX-scoped side-channel cost, so
-            // the invariant is only asserted on pre-REX5 specs.
-            debug_assert!(
-                !self.rex4_enabled || self.rex5_enabled || !self.frame_tracker.has_active_frame(),
-                "DataSize TX-level exceeded with active frame — budget invariant violated"
-            );
-            super::LimitCheck::ExceedsLimit {
-                kind: super::LimitKind::DataSize,
-                limit,
-                used,
-                frame_local: false,
-            }
-        } else {
-            super::LimitCheck::WithinLimit
-        }
+        self.check_limit_on(&self.frame_tracker.view())
     }
 
     /// Records the data size of a transaction at the start of execution.

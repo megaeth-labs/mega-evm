@@ -32,6 +32,78 @@ pub(crate) struct CallFrameInfo {
     charged_parent_update: bool,
 }
 
+/// The numbers a resource-limit check reads out of a [`FrameLimitTracker`]: the current frame's
+/// budget, when there is one, and the transaction's net usage.
+///
+/// Two of these exist at a frame return — the tracker as it stands, and the tracker as it will
+/// stand once the returning frame has been popped and merged into its caller. Handing the check
+/// bodies a view rather than the tracker is what lets the second reading be taken *before* the
+/// merge without a second copy of the predicates to drift from the first: the same body runs, only
+/// its input differs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct FrameLimitView {
+    /// The current frame's budget, or `None` when no frame is on the stack.
+    frame: Option<FrameBudget>,
+    /// `Σ(persistent + discardable) − Σ refund` across the TX entry and every frame on the stack.
+    net_usage: u64,
+}
+
+/// One frame's budget, as a limit check reads it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FrameBudget {
+    limit: u64,
+    used: u64,
+    refund: u64,
+}
+
+impl FrameLimitView {
+    /// Whether a frame is on the stack — the predicate the TX-level budget invariants assert on.
+    #[inline]
+    pub(crate) fn has_frame(&self) -> bool {
+        self.frame.is_some()
+    }
+
+    /// The transaction's net usage.
+    #[inline]
+    pub(crate) fn net_usage(&self) -> u64 {
+        self.net_usage
+    }
+
+    /// Whether the current frame has exceeded its frame-local budget, evaluated as if `extra` more
+    /// usage had already been recorded against it.
+    #[inline]
+    pub(crate) fn would_exceed_frame_limit(&self, kind: LimitKind, extra: u64) -> LimitCheck {
+        frame_budget_check(self.frame, kind, extra)
+    }
+
+    /// [`would_exceed_frame_limit`](Self::would_exceed_frame_limit) with nothing extra.
+    #[inline]
+    pub(crate) fn exceeds_frame_limit(&self, kind: LimitKind) -> LimitCheck {
+        self.would_exceed_frame_limit(kind, 0)
+    }
+}
+
+/// The one frame-local exceed predicate, shared by every reading of it.
+///
+/// A separate copy per call site — or per view — would be free to drift from the one enforcement
+/// actually uses, which is exactly what a pre-merge reading must not do.
+#[inline]
+fn frame_budget_check(budget: Option<FrameBudget>, kind: LimitKind, extra: u64) -> LimitCheck {
+    match budget {
+        Some(entry)
+            if entry.used.saturating_add(extra).saturating_sub(entry.refund) > entry.limit =>
+        {
+            LimitCheck::ExceedsLimit {
+                kind,
+                limit: entry.limit,
+                used: entry.used.saturating_add(extra),
+                frame_local: true,
+            }
+        }
+        _ => LimitCheck::WithinLimit,
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct FrameLimitTracker<I> {
     /// Top-level (TX-scope) entry. Holds the TX limit and accumulates usage
@@ -98,7 +170,7 @@ impl<I> FrameLimitEntry<I> {
     ///
     /// Computed as `limit - (used - refund)`, clamped to `[0, limit]`.
     /// The net usage (`used - refund`) is computed first to stay consistent with
-    /// the exceed check in `exceeds_current_frame_limit`.
+    /// the exceed check in `frame_budget_check`.
     #[inline]
     pub(crate) fn remaining(&self) -> u64 {
         self.limit.saturating_sub(self.used().saturating_sub(self.refund))
@@ -220,41 +292,24 @@ impl<I> FrameLimitTracker<I> {
         child
     }
 
-    /// Returns whether the current frame has exceeded its frame-local limit.
-    /// If exceeded, `frame_local` is always `true` since this checks per-frame budgets.
-    pub(crate) fn exceeds_current_frame_limit(&self, kind: LimitKind) -> LimitCheck {
-        self.would_exceed_current_frame_limit(kind, 0)
+    /// The current frame's budget, as a limit check reads it.
+    #[inline]
+    fn frame_budget(&self) -> Option<FrameBudget> {
+        self.frame_stack.last().map(|entry| FrameBudget {
+            limit: entry.limit,
+            used: entry.used(),
+            refund: entry.refund,
+        })
     }
 
-    /// [`exceeds_current_frame_limit`](Self::exceeds_current_frame_limit) evaluated as if `extra`
-    /// had already been added to the current frame's usage, without adding it.
-    ///
-    /// A caller that must decide whether to make a charge at all — rather than make it and react
-    /// to the verdict — asks here. The two share one predicate on purpose: a separate copy of
-    /// `used - refund > limit` would be free to drift from the one enforcement actually uses.
-    pub(crate) fn would_exceed_current_frame_limit(
-        &self,
-        kind: LimitKind,
-        extra: u64,
-    ) -> LimitCheck {
-        match self.frame_stack.last() {
-            Some(entry)
-                if entry.used().saturating_add(extra).saturating_sub(entry.refund) >
-                    entry.limit =>
-            {
-                LimitCheck::ExceedsLimit {
-                    kind,
-                    limit: entry.limit,
-                    used: entry.used().saturating_add(extra),
-                    frame_local: true,
-                }
-            }
-            _ => LimitCheck::WithinLimit,
-        }
+    /// What the limit checks read out of this tracker as it stands.
+    #[inline]
+    pub(crate) fn view(&self) -> FrameLimitView {
+        FrameLimitView { frame: self.frame_budget(), net_usage: self.net_usage() }
     }
 
     /// Returns the budget of the current frame, in the same form
-    /// [`exceeds_current_frame_limit`](Self::exceeds_current_frame_limit) reports it on an exceed.
+    /// [`frame_budget_check`] reports it on an exceed.
     ///
     /// If the frame stack is empty (before the first frame is pushed), returns the TX-level limit.
     pub(crate) fn current_frame_limit(&self) -> u64 {
