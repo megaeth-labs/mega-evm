@@ -1855,7 +1855,8 @@ where
             let envelope = additional_limit.borrow_mut().take_inspector_interception_envelope();
             debug_assert!(
                 envelope.is_some() || matches!(frame_init.frame_input, FrameInput::Empty),
-                "every inspector is wrapped in the measurement shim, which stages the envelope of                  any frame a callback answers itself",
+                "every inspector is wrapped in the measurement shim, which stages the envelope \
+                 of any frame a callback answers itself",
             );
 
             // Inspector intercepted — `frame_init()` is skipped entirely, so neither
