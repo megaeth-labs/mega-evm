@@ -448,11 +448,10 @@ impl<CTX, INTR: InterpreterTypes> Inspector<CTX, INTR> for ActionEditor {
     }
 }
 
-/// A `CALL` into a callee that halts on an invalid opcode, its failure flag popped, then `STOP`.
-///
-/// The inner frame reaches a terminating `step_end` holding a *halting* `Return` action, which is
-/// the branch of the settlement where an edit to the action moves nothing.
-fn halting_callee_code() -> Bytes {
+/// A `CALL` into [`CALLEE`], its result flag popped, then `STOP` — so the first terminating
+/// `step_end` of the transaction belongs to an *inner* frame, and what that frame's action carries
+/// is decided by the callee the fixture installs.
+fn call_callee_code() -> Bytes {
     BytecodeBuilder::default()
         .push_number(0u64) // retSize
         .push_number(0u64) // retOffset
@@ -526,11 +525,11 @@ fn test_lowering_a_returning_frames_pending_action_is_booked() {
 fn test_editing_a_halting_frames_pending_action_moves_nothing() {
     let callee = BytecodeBuilder::default().append(INVALID).build();
     let plain =
-        transact(MegaSpecId::REX7, db_with_callee(halting_callee_code(), callee.clone()), limits());
+        transact(MegaSpecId::REX7, db_with_callee(call_callee_code(), callee.clone()), limits());
     let mut inspector = ActionEditor::on_halt();
     let edited = transact_inspected(
         MegaSpecId::REX7,
-        db_with_callee(halting_callee_code(), callee),
+        db_with_callee(call_callee_code(), callee),
         limits(),
         &mut inspector,
     );
@@ -567,5 +566,62 @@ fn test_raising_a_pending_new_frame_action_is_booked_as_an_envelope() {
         edited.total_gas_spent,
         plain.total_gas_spent - ACTION_DELTA,
         "the child hands the extra budget straight back, so the transaction spends less",
+    );
+}
+
+/// Rewrites the classification inside a pending `Return` action, once, at the terminating
+/// `step_end` of the frame that set it.
+#[derive(Debug)]
+struct ActionReclassifier {
+    to: InstructionResult,
+    fired: u32,
+}
+
+impl<CTX, INTR: InterpreterTypes> Inspector<CTX, INTR> for ActionReclassifier {
+    fn step_end(&mut self, interp: &mut Interpreter<INTR>, _context: &mut CTX) {
+        if self.fired > 0 {
+            return;
+        }
+        let Some(InterpreterAction::Return(result)) = interp.bytecode.action() else { return };
+        result.result = self.to;
+        self.fired += 1;
+    }
+}
+
+/// An edit to a pending action that is not to its gas moves nothing and is booked as an
+/// intervention — but it still decides what the frame did, so the frame's state follows it.
+///
+/// The action is what `classify_frame_action` builds the frame's result from, so a classification
+/// written here is the one the caller sees and the one the journal decision is taken on. Nothing
+/// on any gas lane can see that, which is what the intervention counter is for.
+#[test]
+fn test_rewriting_a_pending_actions_classification_is_an_intervention() {
+    let callee =
+        BytecodeBuilder::default().sstore(U256::from(1u64), U256::from(1u64)).append(STOP).build();
+    let plain =
+        transact(MegaSpecId::REX7, db_with_callee(call_callee_code(), callee.clone()), limits());
+    let mut inspector = ActionReclassifier { to: InstructionResult::Revert, fired: 0 };
+    let edited = transact_inspected(
+        MegaSpecId::REX7,
+        db_with_callee(call_callee_code(), callee),
+        limits(),
+        &mut inspector,
+    );
+
+    assert_eq!(inspector.fired, 1, "the fixture must reach a terminating step_end exactly once");
+    assert_eq!(
+        plain.storage_value(CALLEE, U256::from(1u64)),
+        U256::from(1u64),
+        "uninspected, the callee's write is committed",
+    );
+    assert_eq!(
+        edited.inspector_ledger,
+        InspectorLedger { interventions: 1, ..InspectorLedger::default() },
+        "no gas moved, and the only thing left to say is that the transaction was not left alone",
+    );
+    assert_eq!(
+        edited.storage_value(CALLEE, U256::from(1u64)),
+        U256::ZERO,
+        "a frame the caller was told reverted must leave no write behind",
     );
 }

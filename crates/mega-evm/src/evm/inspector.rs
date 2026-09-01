@@ -254,7 +254,10 @@ fn action_rewritten(before: Option<InterpreterAction>, after: Option<&Interprete
 /// - [`ActionLane::Envelope`] is staged for the frame-start callback of the child the action is
 ///   about to build, which is where an envelope edit is booked from;
 /// - [`ActionLane::Counter`] is booked on the spot, on the interpreter lane: with no action left,
-///   the frame carries on spending what it holds, which is exactly what a counter edit does.
+///   the frame carries on spending what it holds, which is exactly what a counter edit does. This
+///   is the algebra's third case rather than a shape an inspector can reach through the API —
+///   `reset_action` only clears revm's `continue_execution` flag and leaves the action in place, so
+///   emptying the slot means writing `None` into it and desynchronising the two.
 #[inline]
 fn book_pending_action<DB: Database, ExtEnvs: ExternalEnvTypes>(
     context: &MegaContext<DB, ExtEnvs>,
