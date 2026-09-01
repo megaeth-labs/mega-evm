@@ -174,16 +174,16 @@ impl StateGrowthTracker {
     /// what it says now, and what it will say once a returning frame has been merged into its
     /// caller. A frame return needs the second answer before the merge happens, and a second copy
     /// of the predicates would be free to drift from the first.
-    pub(crate) fn check_limit_on(&self, view: &super::FrameLimitView) -> super::LimitCheck {
+    pub(crate) fn check_limit_on<R: super::LimitReading>(&self, r: &R) -> super::LimitCheck {
         if self.spec.is_enabled(MegaSpecId::REX4) {
-            let frame_check = view.exceeds_frame_limit(super::LimitKind::StateGrowth);
+            let frame_check = r.frame_check(super::LimitKind::StateGrowth, 0);
             if frame_check.exceeded_limit() {
                 return frame_check;
             }
             // TX-level fallthrough: catches Rex5 pre-frame authority usage and any
             // future TX-level state-growth contribution.
         }
-        let used = view.net_usage();
+        let used = r.net_usage();
         let limit = self.frame_tracker.tx_limit();
         if used > limit {
             super::LimitCheck::ExceedsLimit {
@@ -239,7 +239,7 @@ impl TxRuntimeLimit for StateGrowthTracker {
     /// usage — and any frame-level overflow that has already been popped into `tx_entry`.
     /// For pre-Rex4, checks total net growth across all frames against the TX limit.
     fn check_limit(&self) -> super::LimitCheck {
-        self.check_limit_on(&self.frame_tracker.view())
+        self.check_limit_on(&self.frame_tracker)
     }
 
     /// No-op.

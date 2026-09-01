@@ -276,7 +276,7 @@ impl ComputeGasTracker {
     /// predicate to drift.
     #[inline]
     pub(crate) fn check_limit_with_extra(&self, extra: u64) -> LimitCheck {
-        self.check_limit_with_extra_on(&self.frame_tracker.view(), extra)
+        self.check_limit_with_extra_on(&self.frame_tracker, extra)
     }
 
     /// [`check_limit`](TxRuntimeLimit::check_limit) as it will read once the current frame has
@@ -293,13 +293,13 @@ impl ComputeGasTracker {
     /// what it says now, and what it will say once a returning frame has been merged into its
     /// caller. A frame return needs the second answer before the merge happens, and a second copy
     /// of the predicates would be free to drift from the first.
-    pub(crate) fn check_limit_with_extra_on(
+    pub(crate) fn check_limit_with_extra_on<R: super::LimitReading>(
         &self,
-        view: &super::FrameLimitView,
+        r: &R,
         extra: u64,
     ) -> LimitCheck {
         if self.rex4_enabled {
-            let frame_check = view.would_exceed_frame_limit(LimitKind::ComputeGas, extra);
+            let frame_check = r.frame_check(LimitKind::ComputeGas, extra);
             if frame_check.exceeded_limit() {
                 return frame_check;
             }
@@ -314,12 +314,12 @@ impl ComputeGasTracker {
         // reported `used` is the full settled total, so a halt reason states the usage the
         // transaction actually ends with. The two coincide on every spec before REX7.
         let limit = self.tx_limit();
-        if view.net_usage().saturating_sub(self.burned).saturating_add(extra) > limit {
+        if r.net_usage().saturating_sub(self.burned).saturating_add(extra) > limit {
             LimitCheck::ExceedsLimit {
                 kind: LimitKind::ComputeGas,
                 frame_local: false,
                 limit,
-                used: view.net_usage().saturating_add(extra),
+                used: r.net_usage().saturating_add(extra),
             }
         } else {
             LimitCheck::WithinLimit

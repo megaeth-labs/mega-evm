@@ -32,14 +32,30 @@ pub(crate) struct CallFrameInfo {
     charged_parent_update: bool,
 }
 
-/// The numbers a resource-limit check reads out of a [`FrameLimitTracker`]: the current frame's
+/// The two things a resource-limit check reads out of a [`FrameLimitTracker`]: the current frame's
 /// budget, when there is one, and the transaction's net usage.
 ///
-/// Two of these exist at a frame return — the tracker as it stands, and the tracker as it will
-/// stand once the returning frame has been popped and merged into its caller. Handing the check
-/// bodies a view rather than the tracker is what lets the second reading be taken *before* the
-/// merge without a second copy of the predicates to drift from the first: the same body runs, only
-/// its input differs.
+/// Two readings exist at a frame return — the tracker as it stands, and the tracker as it will
+/// stand once the returning frame has been popped and merged into its caller. Each dimension's
+/// check body is written once against this trait and specialized over both, so the pre-merge
+/// question can be asked with no second copy of the predicates to drift from the first.
+///
+/// A trait rather than a value on purpose: the live reading is the per-opcode hot path, and
+/// materializing a struct for it — eagerly computing a net usage the body may not reach, and
+/// pushing the frame's budget through a reference — costs measurably more than reading the tracker
+/// where the body asks. Monomorphized, the live specialization is the code that was there before
+/// the pre-merge reading existed.
+pub(crate) trait LimitReading {
+    /// Whether the current frame has exceeded its frame-local budget, evaluated as if `extra` more
+    /// usage had already been recorded against it.
+    fn frame_check(&self, kind: LimitKind, extra: u64) -> LimitCheck;
+    /// `Σ(persistent + discardable) − Σ refund` across the TX entry and every frame on the stack.
+    fn net_usage(&self) -> u64;
+    /// Whether a frame is on the stack — the predicate the TX-level budget invariants assert on.
+    fn has_frame(&self) -> bool;
+}
+
+/// The reading a pending pop would produce, computed without popping.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct FrameLimitView {
     /// The current frame's budget, or `None` when no frame is on the stack.
@@ -56,30 +72,37 @@ struct FrameBudget {
     refund: u64,
 }
 
-impl FrameLimitView {
-    /// Whether a frame is on the stack — the predicate the TX-level budget invariants assert on.
+impl LimitReading for FrameLimitView {
     #[inline]
-    pub(crate) fn has_frame(&self) -> bool {
-        self.frame.is_some()
-    }
-
-    /// The transaction's net usage.
-    #[inline]
-    pub(crate) fn net_usage(&self) -> u64 {
-        self.net_usage
-    }
-
-    /// Whether the current frame has exceeded its frame-local budget, evaluated as if `extra` more
-    /// usage had already been recorded against it.
-    #[inline]
-    pub(crate) fn would_exceed_frame_limit(&self, kind: LimitKind, extra: u64) -> LimitCheck {
+    fn frame_check(&self, kind: LimitKind, extra: u64) -> LimitCheck {
         frame_budget_check(self.frame, kind, extra)
     }
 
-    /// [`would_exceed_frame_limit`](Self::would_exceed_frame_limit) with nothing extra.
     #[inline]
-    pub(crate) fn exceeds_frame_limit(&self, kind: LimitKind) -> LimitCheck {
-        self.would_exceed_frame_limit(kind, 0)
+    fn net_usage(&self) -> u64 {
+        self.net_usage
+    }
+
+    #[inline]
+    fn has_frame(&self) -> bool {
+        self.frame.is_some()
+    }
+}
+
+impl<I> LimitReading for FrameLimitTracker<I> {
+    #[inline]
+    fn frame_check(&self, kind: LimitKind, extra: u64) -> LimitCheck {
+        frame_budget_check(self.frame_budget(), kind, extra)
+    }
+
+    #[inline]
+    fn net_usage(&self) -> u64 {
+        Self::net_usage(self)
+    }
+
+    #[inline]
+    fn has_frame(&self) -> bool {
+        self.has_active_frame()
     }
 }
 
@@ -302,12 +325,6 @@ impl<I> FrameLimitTracker<I> {
         })
     }
 
-    /// What the limit checks read out of this tracker as it stands.
-    #[inline]
-    pub(crate) fn view(&self) -> FrameLimitView {
-        FrameLimitView { frame: self.frame_budget(), net_usage: self.net_usage() }
-    }
-
     /// What the limit checks will read out of this tracker once the current frame has been popped
     /// and merged into its caller — computed without popping it.
     ///
@@ -318,7 +335,7 @@ impl<I> FrameLimitTracker<I> {
     pub(crate) fn view_after_pop(&self, success: bool) -> FrameLimitView {
         let Some(child) = self.frame_stack.last() else {
             // Nothing to pop: `pop_frame` on an empty stack changes nothing.
-            return self.view();
+            return FrameLimitView { frame: self.frame_budget(), net_usage: self.net_usage() };
         };
         let frame = self.frame_stack.len().checked_sub(2).map(|parent_index| {
             let parent = &self.frame_stack[parent_index];
@@ -649,6 +666,25 @@ mod tests {
 
     const ADDR: Address = address!("0000000000000000000000000000000000001234");
 
+    /// Every question a dimension's `check_limit` body can put to a reading.
+    ///
+    /// Comparing two readings through this rather than field for field is deliberate: it is what
+    /// the bodies consume, so a reading that agrees here cannot make a body decide differently.
+    fn everything_a_check_body_reads(reading: &impl LimitReading) -> (Vec<LimitCheck>, u64, bool) {
+        let kinds = [
+            LimitKind::DataSize,
+            LimitKind::KVUpdate,
+            LimitKind::ComputeGas,
+            LimitKind::StateGrowth,
+        ];
+        let checks = kinds
+            .into_iter()
+            .flat_map(|kind| [0u64, 1, 7].map(move |extra| (kind, extra)))
+            .map(|(kind, extra)| reading.frame_check(kind, extra))
+            .collect();
+        (checks, reading.net_usage(), reading.has_frame())
+    }
+
     /// The pre-pop reading must be the post-pop reading, exactly.
     ///
     /// A frame return decides whether the returning frame overran its caller's budget from
@@ -690,8 +726,8 @@ mod tests {
                 let predicted = tracker.view_after_pop(success);
                 tracker.pop_frame(success);
                 assert_eq!(
-                    predicted,
-                    tracker.view(),
+                    everything_a_check_body_reads(&predicted),
+                    everything_a_check_body_reads(&tracker),
                     "{label} (success={success}): the pre-pop reading must equal the post-pop one",
                 );
             }
@@ -705,7 +741,10 @@ mod tests {
         let mut tracker = FrameLimitTracker::<()>::new(MegaSpecId::REX7, 10_000);
         tracker.add_tx_persistent(90);
         for success in [true, false] {
-            assert_eq!(tracker.view_after_pop(success), tracker.view());
+            assert_eq!(
+                everything_a_check_body_reads(&tracker.view_after_pop(success)),
+                everything_a_check_body_reads(&tracker),
+            );
         }
     }
 

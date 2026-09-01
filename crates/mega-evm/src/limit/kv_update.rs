@@ -101,9 +101,9 @@ impl KVUpdateTracker {
     /// what it says now, and what it will say once a returning frame has been merged into its
     /// caller. A frame return needs the second answer before the merge happens, and a second copy
     /// of the predicates would be free to drift from the first.
-    pub(crate) fn check_limit_on(&self, view: &super::FrameLimitView) -> super::LimitCheck {
+    pub(crate) fn check_limit_on<R: super::LimitReading>(&self, r: &R) -> super::LimitCheck {
         if self.rex4_enabled {
-            let frame_check = view.exceeds_frame_limit(super::LimitKind::KVUpdate);
+            let frame_check = r.frame_check(super::LimitKind::KVUpdate, 0);
             if frame_check.exceeded_limit() {
                 return frame_check;
             }
@@ -111,11 +111,11 @@ impl KVUpdateTracker {
             // In Rex4+ during execution, per-frame budgets are derived from remaining TX
             // budget, so this should only exceed when no frame exists (intrinsic overflow).
         }
-        let used = view.net_usage();
+        let used = r.net_usage();
         let limit = self.frame_tracker.tx_limit();
         if used > limit {
             debug_assert!(
-                !self.rex4_enabled || !view.has_frame(),
+                !self.rex4_enabled || !r.has_frame(),
                 "KVUpdate TX-level exceeded with active frame — budget invariant violated"
             );
             super::LimitCheck::ExceedsLimit {
@@ -167,7 +167,7 @@ impl TxRuntimeLimit for KVUpdateTracker {
     /// (intrinsic usage is recorded in `tx_entry` before the first frame is pushed).
     /// In pre-Rex4, checks total KV updates across all frames against the TX limit.
     fn check_limit(&self) -> super::LimitCheck {
-        self.check_limit_on(&self.frame_tracker.view())
+        self.check_limit_on(&self.frame_tracker)
     }
 
     /// Records the KV updates at the start of a transaction.

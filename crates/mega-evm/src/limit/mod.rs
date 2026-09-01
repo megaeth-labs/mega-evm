@@ -13,7 +13,7 @@ mod state_growth;
 mod storage_call_stipend;
 
 pub use data_size::*;
-pub(crate) use frame_limit::{FrameLimitTracker, FrameLimitView, TxRuntimeLimit};
+pub(crate) use frame_limit::{FrameLimitTracker, LimitReading, TxRuntimeLimit};
 pub use inspector_ledger::*;
 pub use limit::*;
 
