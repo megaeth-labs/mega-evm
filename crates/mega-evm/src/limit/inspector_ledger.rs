@@ -1,11 +1,13 @@
-//! The ledger of what an inspector did to a transaction's gas accounting.
+//! The ledger of what an inspector did to a transaction.
 //!
 //! `MegaETH` wraps every inspector it is handed in a measurement shim (`MeasuredInspector`), and
-//! the shim books what it measures here. Nothing in this module enforces anything: the numbers it
-//! holds are exactly the part of a transaction's gas movement that the EVM did not produce, kept
-//! separate so that enforcement can ignore it and the conservation law can account for it.
+//! the shim books what it measures here. Nothing in this module enforces anything: the gas lanes
+//! are exactly the part of a transaction's gas movement that the EVM did not produce, kept separate
+//! so that enforcement can ignore it and the conservation law can account for it, and the two
+//! counters record rewrites that move no gas at all.
 
-/// What an inspector conjured, destroyed, or refused, as measured at the callback boundaries.
+/// What an inspector conjured, destroyed, rewrote, or had refused, as measured at the callback
+/// boundaries.
 ///
 /// # Why the boundary is a sound place to measure
 ///
@@ -23,11 +25,15 @@
 ///
 /// # What it does not measure
 ///
-/// Gas movement, and only that. An inspector can change an execution in ways that move no gas at
-/// all — rewriting a frame result's classification, editing the interpreter's stack or memory,
-/// writing the journal directly — and every one of those leaves this all-zero. So an empty ledger
-/// says the transaction's *gas numbers* are the EVM's own; it does not say the transaction is the
-/// one the EVM would have produced alone.
+/// What a callback does behind the shim's back. An inspector reaches state that no argument it is
+/// handed describes — the interpreter's stack and memory, the journal, the pending action — and
+/// telling whether any of those came back changed needs a snapshot of unbounded state that no
+/// callback boundary can take at a cost the inspected path can carry. Those rewrites leave this
+/// all-zero.
+///
+/// So an empty ledger says two things: no gas moved that the EVM did not move, and nothing the
+/// shim was handed came back different. It does not say the transaction is the one the EVM would
+/// have produced alone.
 ///
 /// # What consumes it
 ///
@@ -94,6 +100,30 @@ pub struct InspectorLedger {
     /// journal has already reverted the frame and after the deposit predicates have already
     /// rejected the code, so honouring it would report a deployment that never happened.
     pub rejected_rewrites: u32,
+
+    /// How many rewrites the shim saw that change what the execution *did* rather than what it
+    /// cost.
+    ///
+    /// The three gas lanes above answer "did the transaction's numbers move". This answers the
+    /// other half — "was the transaction left alone" — for the part of it a callback boundary can
+    /// see, which is the arguments the shim itself is handed:
+    ///
+    /// - a frame result whose classification or returned output came back changed, at each of the
+    ///   three callbacks that can change one (`call_end`, `create_end`, `frame_end` — revm runs
+    ///   the variant-specific one and then the generic one over the same result, so each is
+    ///   counted where it happens rather than once at the end);
+    /// - a frame's inputs edited anywhere but in their gas limit, at each of the three callbacks
+    ///   that can edit them (`frame_start`, `call`, `create`);
+    /// - a frame the inspector answered itself, with a synthetic outcome instead of letting the
+    ///   EVM build it.
+    ///
+    /// Gas edits are deliberately excluded — a gas limit or a result's remaining gas moving is
+    /// what the lanes above are for, and counting it here would say the same thing twice.
+    ///
+    /// A classification rewrite is the shape that made this lane necessary: it moves no gas
+    /// anywhere, so every gas lane stays zero while the transaction produces different state and
+    /// a different receipt.
+    pub interventions: u32,
 }
 
 impl InspectorLedger {
@@ -111,7 +141,11 @@ impl InspectorLedger {
     /// the rewrites that move no gas and so leave this true.
     #[inline]
     pub const fn is_zero(&self) -> bool {
-        self.gas == 0 && self.env == 0 && self.result == 0 && self.rejected_rewrites == 0
+        self.gas == 0 &&
+            self.env == 0 &&
+            self.result == 0 &&
+            self.rejected_rewrites == 0 &&
+            self.interventions == 0
     }
 }
 
@@ -124,7 +158,13 @@ mod tests {
     /// unmoved in that case.
     #[test]
     fn test_conjured_gas_is_the_net_of_both_lanes() {
-        let ledger = InspectorLedger { gas: 2_300, env: -2_300, result: 0, rejected_rewrites: 0 };
+        let ledger = InspectorLedger {
+            gas: 2_300,
+            env: -2_300,
+            result: 0,
+            rejected_rewrites: 0,
+            interventions: 0,
+        };
         assert_eq!(ledger.conjured_gas(), 0);
         assert!(!ledger.is_zero(), "the lanes moved, even though they cancel");
     }
@@ -132,7 +172,16 @@ mod tests {
     /// A refused rewrite moves no gas but must still show the transaction was not left alone.
     #[test]
     fn test_a_rejected_rewrite_alone_is_not_zero() {
-        let ledger = InspectorLedger { gas: 0, env: 0, result: 0, rejected_rewrites: 1 };
+        let ledger = InspectorLedger { rejected_rewrites: 1, ..InspectorLedger::default() };
+        assert_eq!(ledger.conjured_gas(), 0);
+        assert!(!ledger.is_zero());
+    }
+
+    /// A classification rewrite is the shape the gas lanes cannot see: it moves nothing, so the
+    /// only thing standing between it and an all-zero ledger is this counter.
+    #[test]
+    fn test_an_intervention_alone_is_not_zero() {
+        let ledger = InspectorLedger { interventions: 1, ..InspectorLedger::default() };
         assert_eq!(ledger.conjured_gas(), 0);
         assert!(!ledger.is_zero());
     }

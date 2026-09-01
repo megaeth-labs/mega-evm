@@ -258,24 +258,33 @@ impl InvalidTxError for MegaBlockLimitExceededError {
 /// transaction itself for a caller to fix.
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum MegaBlockExecutionError {
-    /// A transaction whose gas accounting an inspector adjusted reached the canonical
-    /// block-execution path.
+    /// A transaction an inspector took part in reached the canonical block-execution path.
     ///
     /// Block production and block validation must produce the same numbers for the same block, on
     /// every node, so what the executor reports has to be what the EVM did — and only that. An
-    /// inspector that writes gas into an interpreter's counter, into a frame's envelope, or into a
-    /// returning frame's result is a second producer of gas movement, present on one node's
-    /// configuration and not on another's, whose effect reaches the receipt, the transaction's
-    /// reported compute total, and through it the block's cumulative counters.
+    /// inspector is present on one node's configuration and not on another's, and it can break
+    /// that in two ways:
+    ///
+    /// - by writing gas into an interpreter's counter, into a frame's envelope, or into a
+    ///   returning frame's result, which reaches the receipt, the transaction's reported compute
+    ///   total, and through it the block's cumulative counters;
+    /// - by rewriting what a frame *did* — its classification, its output, or the frame itself
+    ///   through a synthetic outcome — which moves no gas at all and reaches the transaction's
+    ///   state and its receipt directly.
+    ///
+    /// Both are refused. The second is why the criterion is the whole ledger rather than its gas
+    /// lanes: a rewrite that costs nothing is not a rewrite that changes nothing.
     ///
     /// Observation is untouched: a tracer leaves an all-zero ledger, which is what every inspector
     /// on this path today does. An embedder that genuinely wants a rewriting inspector still has
     /// one — [`MegaEvm::execute_transaction`](crate::MegaEvm::execute_transaction) supports it in
     /// full, with the ledger reported on the outcome — it just does not get to call the result a
-    /// block.
+    /// block. That is also what leaves a simulation EVM an embedder drives off the canonical path
+    /// alone, however much its inspector rewrites: this guard sits on the block executor's
+    /// entries, not on the EVM.
     #[error(
-        "transaction {tx_hash} reached the canonical block-execution path with its gas accounting \
-         adjusted by an inspector: {ledger:?}"
+        "transaction {tx_hash} reached the canonical block-execution path after an inspector took \
+         part in it: {ledger:?}"
     )]
     InspectorAdjustedAccounting {
         /// The transaction the adjusted accounting belongs to.

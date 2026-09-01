@@ -78,20 +78,24 @@ impl<C, E, R: OpReceiptBuilder> core::fmt::Debug for MegaBlockExecutor<C, E, R> 
     }
 }
 
-/// Refuses a transaction whose gas accounting an inspector adjusted, on the canonical path.
+/// Refuses a transaction an inspector took part in, on the canonical path.
 ///
 /// Block production and block validation are the two places where what the executor reports has to
-/// be what the EVM did, reproducibly, on every node. An inspector's edits reach the receipt and the
-/// block's counters but live in one node's configuration, so a transaction carrying any is not
-/// something this executor may run or admit — see
+/// be what the EVM did, reproducibly, on every node. An inspector's edits reach the receipt, the
+/// block's counters and the transaction's state, but live in one node's configuration, so a
+/// transaction carrying any is not something this executor may run or admit — see
 /// [`MegaBlockExecutionError::InspectorAdjustedAccounting`].
+///
+/// The criterion is the whole ledger, not its gas lanes. A rewrite of a frame's classification or
+/// output, or a frame the inspector answered itself, moves no gas anywhere and would pass a
+/// gas-only check while producing different state and a different receipt.
 ///
 /// Enforced in release builds, deliberately. This is a boundary the canonical path holds against
 /// its embedder rather than an invariant `MegaETH` maintains internally, so it has to hold in the
 /// binaries that build and validate blocks, and it fails the block rather than the process.
 ///
 /// The check is free on every path that passes it: the ledger is a `Copy` struct already on the
-/// outcome, and this reads four fields of it once per transaction.
+/// outcome, and this reads its fields once per transaction.
 #[inline]
 fn reject_inspector_adjusted_accounting(
     tx_hash: B256,

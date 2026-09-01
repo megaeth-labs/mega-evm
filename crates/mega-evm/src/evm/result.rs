@@ -80,15 +80,18 @@ pub struct MegaTransactionOutcome {
     pub compute_gas_enforced: u64,
     /// The state growth used.
     pub state_growth_used: u64,
-    /// What an inspector did to this transaction's gas accounting, measured rather than inferred.
+    /// What an inspector did to this transaction, measured rather than inferred.
     ///
     /// `MegaETH` wraps every inspector it is handed in a measurement shim. The EVM does not
-    /// execute inside an inspector callback, so anything that moves across one is the inspector's
-    /// doing by construction, and this is what the shim booked: gas written into a live
-    /// interpreter's counter ([`gas`](crate::InspectorLedger::gas)), into the envelope a frame is
-    /// about to be built with ([`env`](crate::InspectorLedger::env)), into a returning frame's
-    /// result ([`result`](crate::InspectorLedger::result)), and how many rewrites the shim refused
-    /// outright ([`rejected_rewrites`](crate::InspectorLedger::rejected_rewrites)).
+    /// execute inside an inspector callback, so anything that changes across one is the
+    /// inspector's doing by construction, and this is what the shim booked: gas written into a
+    /// live interpreter's counter ([`gas`](crate::InspectorLedger::gas)), into the envelope a
+    /// frame is about to be built with ([`env`](crate::InspectorLedger::env)), into a
+    /// returning frame's result ([`result`](crate::InspectorLedger::result)), how many
+    /// rewrites the shim refused
+    /// outright ([`rejected_rewrites`](crate::InspectorLedger::rejected_rewrites)), and how many
+    /// rewrote what the execution *did* without moving any gas at all
+    /// ([`interventions`](crate::InspectorLedger::interventions)).
     ///
     /// # Sign convention
     ///
@@ -107,9 +110,10 @@ pub struct MegaTransactionOutcome {
     /// exactly that reason.
     ///
     /// The converse does not hold, and reading it that way is the mistake this field invites. What
-    /// is measured is gas movement: an inspector that only rewrites a frame result's
-    /// classification, edits the interpreter's stack or memory, or writes the journal directly
-    /// moves no gas and leaves this empty, while changing the state the transaction produces.
+    /// is measured is what the shim can see at a callback boundary: gas that moved, and arguments
+    /// that came back changed. An inspector that reaches past those — editing the interpreter's
+    /// stack or memory, writing the journal directly, or editing the pending action — leaves this
+    /// empty while changing the state the transaction produces.
     ///
     /// # What it is for
     ///

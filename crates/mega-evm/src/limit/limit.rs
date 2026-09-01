@@ -585,6 +585,13 @@ impl AdditionalLimit {
         self.inspector.rejected_rewrites = self.inspector.rejected_rewrites.saturating_add(1);
     }
 
+    /// Counts one rewrite that changes what the execution did rather than what it cost — see
+    /// [`InspectorLedger::interventions`](inspector_ledger::InspectorLedger::interventions).
+    #[inline]
+    pub(crate) fn record_inspector_intervention(&mut self) {
+        self.inspector.interventions = self.inspector.interventions.saturating_add(1);
+    }
+
     /// The EVM gas the transaction has spent that is neither compute work nor destroyed (REX7+,
     /// always 0 before) — the second term of
     /// [`ConservationTerms`](conservation::ConservationTerms).

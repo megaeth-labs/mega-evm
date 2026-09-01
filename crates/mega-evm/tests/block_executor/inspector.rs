@@ -286,9 +286,17 @@ fn test_inspector_early_return_with_additional_limits() {
     // Execute transaction - this triggers a nested CALL that the inspector intercepts
     let tx = create_transaction(0, 1_000_000);
 
-    // Before the fix, this would panic with "frame stack is empty"
-    let result = executor.execute_transaction(&tx);
-    assert!(result.is_ok(), "Transaction should succeed: {:?}", result.err());
+    // Before the fix, this would panic with "frame stack is empty". It runs to completion now,
+    // and the canonical path then declines to admit it — an inspector that answers a frame itself
+    // is a rewriting inspector, which `inspector_guard` covers. That refusal is the assertion the
+    // alignment rests on: reaching it at all means every push found its pop.
+    let err = executor
+        .execute_transaction(&tx)
+        .expect_err("the canonical path refuses an intercepting inspector");
+    assert!(
+        format!("{err:?}").contains("interventions: 1"),
+        "the refusal must name the interception it saw: {err:?}",
+    );
 
     // Verify the inspector intercepted the nested call
     assert_eq!(
@@ -303,13 +311,6 @@ fn test_inspector_early_return_with_additional_limits() {
         2,
         "call_end should be invoked for both the main call and the intercepted nested call"
     );
-
-    // Finish the block
-    let block_result = executor.finish();
-    assert!(block_result.is_ok(), "Block should finish successfully");
-
-    let (_, receipts) = block_result.unwrap();
-    assert_eq!(receipts.receipts.len(), 1, "Should have 1 receipt");
 }
 
 /// An inspector that returns early for create operations, skipping frame execution.
@@ -397,9 +398,16 @@ fn test_inspector_early_return_create_with_additional_limits() {
     let init_code = Bytes::from(vec![0x00]);
     let tx = create_deploy_transaction(0, 10_000_000, init_code);
 
-    // Before the fix, this would panic with "frame stack is empty"
-    let result = executor.execute_transaction(&tx);
-    assert!(result.is_ok(), "Transaction should succeed: {:?}", result.err());
+    // Before the fix, this would panic with "frame stack is empty". As above, the transaction now
+    // runs to completion and the canonical path declines to admit it; getting as far as the
+    // refusal is what says the frame stacks stayed aligned.
+    let err = executor
+        .execute_transaction(&tx)
+        .expect_err("the canonical path refuses an intercepting inspector");
+    assert!(
+        format!("{err:?}").contains("interventions: 1"),
+        "the refusal must name the interception it saw: {err:?}",
+    );
 
     // Verify the inspector intercepted the create operation
     assert_eq!(
@@ -414,11 +422,4 @@ fn test_inspector_early_return_create_with_additional_limits() {
         1,
         "create_end should be invoked for the intercepted create"
     );
-
-    // Finish the block
-    let block_result = executor.finish();
-    assert!(block_result.is_ok(), "Block should finish successfully");
-
-    let (_, receipts) = block_result.unwrap();
-    assert_eq!(receipts.receipts.len(), 1, "Should have 1 receipt");
 }

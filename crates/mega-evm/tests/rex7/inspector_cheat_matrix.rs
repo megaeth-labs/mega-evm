@@ -798,15 +798,24 @@ struct Cell {
 }
 
 fn ledger_gas(gas: i128) -> InspectorLedger {
-    InspectorLedger { gas, env: 0, result: 0, rejected_rewrites: 0 }
+    InspectorLedger { gas, ..InspectorLedger::default() }
 }
 
 fn ledger_env(env: i128) -> InspectorLedger {
-    InspectorLedger { gas: 0, env, result: 0, rejected_rewrites: 0 }
+    InspectorLedger { env, ..InspectorLedger::default() }
 }
 
 fn ledger_result(result: i128) -> InspectorLedger {
-    InspectorLedger { gas: 0, env: 0, result, rejected_rewrites: 0 }
+    InspectorLedger { result, ..InspectorLedger::default() }
+}
+
+/// The ledger of a rewrite that moves no gas: the shim saw the argument it was handed come back
+/// changed, and that is the whole of what it books.
+///
+/// These are the cells that would otherwise be indistinguishable from an observation-only run, and
+/// the reason the canonical block path could not tell them apart before this lane existed.
+fn ledger_intervention() -> InspectorLedger {
+    InspectorLedger { interventions: 1, ..InspectorLedger::default() }
 }
 
 /// The fixture ran to its end and every frame committed: the callee's write, the deployment, and
@@ -929,14 +938,14 @@ fn matrix() -> Vec<Cell> {
             at,
             EditInput,
             Fixture::ReturningCallee,
-            InspectorLedger::default(),
+            ledger_intervention(),
             if deployment_side { state_no_deployment } else { state_callee_write_rolled_back },
         );
         push(
             at,
             Intercept,
             Fixture::ReturningCallee,
-            InspectorLedger::default(),
+            ledger_intervention(),
             if deployment_side { state_no_deployment } else { state_callee_write_rolled_back },
         );
         push(
@@ -969,7 +978,7 @@ fn matrix() -> Vec<Cell> {
             at,
             FailResult,
             Fixture::ReturningCallee,
-            InspectorLedger::default(),
+            ledger_intervention(),
             if creation { state_no_deployment } else { state_callee_write_rolled_back },
         );
         if !creation {
@@ -979,7 +988,7 @@ fn matrix() -> Vec<Cell> {
                 at,
                 ReviveResult,
                 Fixture::RevertingCallee,
-                InspectorLedger::default(),
+                ledger_intervention(),
                 state_callee_write_revived,
             );
         }

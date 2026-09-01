@@ -36,7 +36,7 @@ use alloc as std;
 use std::string::String;
 
 use alloy_evm::Database;
-use alloy_primitives::{Address, Log, U256};
+use alloy_primitives::{Address, Bytes, Log, U256};
 use revm::{
     context::{ContextError, ContextTr},
     handler::FrameResult,
@@ -170,6 +170,85 @@ fn book_env_adjustment<DB: Database, ExtEnvs: ExternalEnvTypes>(
         .record_inspector_env_adjustment(i128::from(after) - i128::from(before));
 }
 
+/// Books one rewrite that changes what the execution *did* rather than what it cost — see
+/// [`InspectorLedger::interventions`](crate::InspectorLedger::interventions).
+///
+/// Every caller answers the same question about the argument it was handed: did it come back
+/// describing something other than what the EVM was about to do? Two things are deliberately not
+/// part of that question:
+///
+/// - **Gas.** A frame input's gas limit and a frame result's remaining gas are booked as gas, on
+///   the ledger's own lanes; counting them here as well would report one rewrite twice.
+/// - **Anything the argument does not describe.** The interpreter's stack and memory, the journal,
+///   the pending action. Telling whether those came back changed needs a snapshot of unbounded
+///   state, which no callback boundary can take at a cost the inspected path can carry.
+#[inline]
+fn book_intervention<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    context: &MegaContext<DB, ExtEnvs>,
+    changed: bool,
+) {
+    if changed {
+        context.additional_limit.borrow_mut().record_inspector_intervention();
+    }
+}
+
+/// Whether two output buffers are the same buffer.
+///
+/// Compared by address and length rather than by content. `Bytes` is immutable, so a callback can
+/// only change an output by putting a different buffer there, and the caller holds its snapshot
+/// across the comparison — which keeps the original alive, so its address cannot be reused
+/// underneath. A replacement that copies the same bytes reads as unchanged, which is what it is.
+#[inline]
+fn same_buffer(before: &Bytes, after: &Bytes) -> bool {
+    before.as_ptr() == after.as_ptr() && before.len() == after.len()
+}
+
+/// Whether a callback rewrote what a finished frame *did*: the classification its caller will see,
+/// or the output it will read.
+///
+/// The classification is the one that carries the most: it decides whether the caller sees a
+/// success, and — through the frame's settlement point — whether the frame's state is committed
+/// and whether its remainder is handed back or destroyed. None of that moves gas by itself, so
+/// none of it leaves a trace in any gas lane.
+#[inline]
+fn result_rewritten(before: (InstructionResult, &Bytes), after: &InterpreterResult) -> bool {
+    before.0 != after.result || !same_buffer(before.1, &after.output)
+}
+
+/// Whether a callback edited a call frame's inputs anywhere but in their gas limit.
+///
+/// Everything else a call input carries — who is called, with what value, under which scheme, with
+/// what calldata, in a static context or not — describes what the frame will do.
+#[inline]
+fn call_inputs_rewritten(mut before: CallInputs, after: &CallInputs) -> bool {
+    before.gas_limit = after.gas_limit;
+    before != *after
+}
+
+/// Whether a callback edited a creation's inputs anywhere but in their gas limit.
+#[inline]
+fn create_inputs_rewritten(mut before: CreateInputs, after: &CreateInputs) -> bool {
+    before.set_gas_limit(after.gas_limit());
+    before != *after
+}
+
+/// [`call_inputs_rewritten`] / [`create_inputs_rewritten`] for the generic callback, which is
+/// handed the variant rather than the inputs. A callback that swapped the variant itself has
+/// rewritten the frame as thoroughly as it is possible to.
+#[inline]
+fn frame_input_rewritten(before: FrameInput, after: &FrameInput) -> bool {
+    match (before, after) {
+        (FrameInput::Call(before), FrameInput::Call(after)) => {
+            call_inputs_rewritten(*before, after)
+        }
+        (FrameInput::Create(before), FrameInput::Create(after)) => {
+            create_inputs_rewritten(*before, after)
+        }
+        (FrameInput::Empty, FrameInput::Empty) => false,
+        _ => true,
+    }
+}
+
 /// Refuses a rewrite that turns a non-successful contract creation into a successful one, and says
 /// so loudly.
 ///
@@ -293,9 +372,15 @@ where
         context: &mut MegaContext<DB, ExtEnvs>,
         frame_input: &mut FrameInput,
     ) -> Option<FrameResult> {
-        let before = frame_input_gas_limit(frame_input);
+        let before = frame_input.clone();
         let outcome = self.inner.frame_start(context, frame_input);
-        book_env_adjustment(context, before, frame_input_gas_limit(frame_input), outcome.is_some());
+        book_env_adjustment(
+            context,
+            frame_input_gas_limit(&before),
+            frame_input_gas_limit(frame_input),
+            outcome.is_some(),
+        );
+        book_intervention(context, outcome.is_some() || frame_input_rewritten(before, frame_input));
         outcome
     }
 
@@ -307,7 +392,12 @@ where
         frame_result: &mut FrameResult,
     ) {
         let before = frame_result.instruction_result();
+        let output = frame_result.interpreter_result().output.clone();
         self.inner.frame_end(context, frame_input, frame_result);
+        book_intervention(
+            context,
+            result_rewritten((before, &output), frame_result.interpreter_result()),
+        );
         // `frame_end` runs after `create_end` and is the last chance to rewrite a creation's
         // classification, so the same refusal applies here.
         if let FrameResult::Create(outcome) = frame_result {
@@ -321,14 +411,21 @@ where
         context: &mut MegaContext<DB, ExtEnvs>,
         inputs: &mut CallInputs,
     ) -> Option<CallOutcome> {
-        let before = inputs.gas_limit;
+        let before = inputs.clone();
         let outcome = self.inner.call(context, inputs);
-        book_env_adjustment(context, Some(before), Some(inputs.gas_limit), outcome.is_some());
+        book_env_adjustment(
+            context,
+            Some(before.gas_limit),
+            Some(inputs.gas_limit),
+            outcome.is_some(),
+        );
+        book_intervention(context, outcome.is_some() || call_inputs_rewritten(before, inputs));
         outcome
     }
 
-    /// `CallInputs` is immutable here and the frame's result gas is deliberately not booked — see
-    /// [`InspectorLedger::env`](crate::InspectorLedger::env) — so this is a plain forward.
+    /// `CallInputs` is immutable here and the frame's result gas is deliberately not booked at this
+    /// boundary — see [`InspectorLedger::env`](crate::InspectorLedger::env) — so the only thing to
+    /// measure is what the callback did to the result's classification and output.
     #[inline]
     fn call_end(
         &mut self,
@@ -336,7 +433,9 @@ where
         inputs: &CallInputs,
         outcome: &mut CallOutcome,
     ) {
+        let before = (outcome.result.result, outcome.result.output.clone());
         self.inner.call_end(context, inputs, outcome);
+        book_intervention(context, result_rewritten((before.0, &before.1), &outcome.result));
     }
 
     #[inline]
@@ -345,9 +444,15 @@ where
         context: &mut MegaContext<DB, ExtEnvs>,
         inputs: &mut CreateInputs,
     ) -> Option<CreateOutcome> {
-        let before = inputs.gas_limit();
+        let before = inputs.clone();
         let outcome = self.inner.create(context, inputs);
-        book_env_adjustment(context, Some(before), Some(inputs.gas_limit()), outcome.is_some());
+        book_env_adjustment(
+            context,
+            Some(before.gas_limit()),
+            Some(inputs.gas_limit()),
+            outcome.is_some(),
+        );
+        book_intervention(context, outcome.is_some() || create_inputs_rewritten(before, inputs));
         outcome
     }
 
@@ -362,9 +467,10 @@ where
         inputs: &CreateInputs,
         outcome: &mut CreateOutcome,
     ) {
-        let before = outcome.result.result;
+        let before = (outcome.result.result, outcome.result.output.clone());
         self.inner.create_end(context, inputs, outcome);
-        reject_forbidden_create_rewrite(context, before, &mut outcome.result);
+        book_intervention(context, result_rewritten((before.0, &before.1), &outcome.result));
+        reject_forbidden_create_rewrite(context, before.0, &mut outcome.result);
     }
 
     /// Everything this callback receives is passed by value, so it cannot change execution state.

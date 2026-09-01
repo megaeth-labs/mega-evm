@@ -513,6 +513,9 @@ fn test_a_raised_child_gas_limit_is_booked_as_conjured_gas() {
 /// Booking the edit anyway would claim gas was conjured for a frame that never existed, and the
 /// conservation law would come out over by the bonus — the same failure as not booking a real one,
 /// with the sign flipped.
+///
+/// The interception itself is booked, on the lane that carries rewrites rather than gas: answering
+/// a frame the EVM was about to build changes what the transaction did, whatever it costs.
 #[test]
 fn test_an_intercepting_callback_books_no_envelope_adjustment() {
     /// Raises the child's gas limit and then intercepts the call, handing back an outcome built
@@ -557,11 +560,13 @@ fn test_an_intercepting_callback_books_no_envelope_adjustment() {
 
     assert_eq!(inspector.intercepted, 1, "the fixture must intercept exactly one call");
     assert!(inspected.result.is_success(), "fixture check: {:?}", inspected.result);
-    assert!(
-        inspected.ledger.is_zero(),
-        "an edit to inputs that never reach a frame conjures nothing; got {:?}",
+    assert_eq!(
         inspected.ledger,
+        InspectorLedger { interventions: 1, ..InspectorLedger::default() },
+        "an edit to inputs that never reach a frame conjures nothing, but answering the frame is \
+         itself a rewrite",
     );
+    assert_eq!(inspected.ledger.conjured_gas(), 0, "no gas lane may move on this shape");
     assert_identity("intercepted", &inspected);
 }
 

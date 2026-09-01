@@ -7,6 +7,12 @@
 //! gas counter reaches the receipt, the transaction's reported compute total, and through it the
 //! block's cumulative counters.
 //!
+//! It can also rewrite what a frame *did* — its classification, its output, or the frame itself,
+//! answered with a synthetic outcome — which moves no gas anywhere and reaches the transaction's
+//! state and its receipt directly. A gas-only criterion would admit every one of those, so the
+//! criterion is the whole ledger: no gas the EVM did not move, and nothing the shim was handed
+//! coming back changed.
+//!
 //! So every entry on the canonical path — the two that run a transaction and the one funnel that
 //! admits a result — refuses a non-zero ledger. The refusal is an error rather than an assertion,
 //! because it is a boundary held against an embedder and has to hold in the binaries that build
@@ -25,13 +31,13 @@ use mega_evm::{
     alloy_evm::block::BlockExecutionError,
     test_utils::{BytecodeBuilder, MemoryDatabase},
     BlockLimits, InspectorLedger, MegaBlockExecutionCtx, MegaBlockExecutorFactory, MegaEvmFactory,
-    MegaHardforkConfig, MegaSpecId, MegaTxEnvelope, TestExternalEnvs,
+    MegaHardforkConfig, MegaSpecId, MegaTransactionNew as _, MegaTxEnvelope, TestExternalEnvs,
 };
 use revm::{
     bytecode::opcode::{CALL, POP, STOP},
-    context::BlockEnv,
+    context::{BlockEnv, ContextTr},
     database::State,
-    interpreter::{Interpreter, InterpreterTypes},
+    interpreter::{CallInputs, CallOutcome, InstructionResult, Interpreter, InterpreterTypes},
     Inspector,
 };
 
@@ -59,6 +65,28 @@ impl<CTX, INTR: InterpreterTypes> Inspector<CTX, INTR> for GasInjector {
         }
         self.applied = true;
         interp.gas.erase_cost(INJECTED);
+    }
+}
+
+/// Rewrites the classification of the fixture's inner call, once — the smallest rewrite that moves
+/// no gas at all.
+///
+/// Every one of the ledger's gas lanes stays at zero under this inspector: the call's remaining
+/// gas, its envelope and every interpreter counter are exactly what the EVM left. What changes is
+/// what the transaction did — the callee's storage write is rolled back and the caller reads a
+/// failure — which is why the guard cannot be a gas-only check.
+#[derive(Default)]
+struct CallFailer {
+    applied: bool,
+}
+
+impl<CTX: ContextTr, INTR: InterpreterTypes> Inspector<CTX, INTR> for CallFailer {
+    fn call_end(&mut self, _context: &mut CTX, inputs: &CallInputs, outcome: &mut CallOutcome) {
+        if self.applied || inputs.target_address != CALLEE {
+            return;
+        }
+        self.applied = true;
+        outcome.result.result = InstructionResult::Revert;
     }
 }
 
@@ -459,4 +487,80 @@ fn test_the_production_tracer_is_admitted() {
     );
     let (_, result) = executor.finish().expect("the block must finish");
     assert_eq!(result.receipts.len(), 1);
+}
+
+/// The rewrite a gas-only guard could not see: a frame's classification, changed at `call_end`.
+///
+/// Nothing moves. The call's remaining gas, its envelope and every interpreter counter are the
+/// EVM's own, so all three gas lanes read zero — and yet the callee's write is rolled back and the
+/// caller is handed a failure, which is a different transaction with a different state root. The
+/// intervention counter is the only thing standing between this and admission.
+#[test]
+fn test_a_rewrite_that_moves_no_gas_is_refused_too() {
+    let mut db = build_db();
+    let mut state = State::builder().with_database(&mut db).build();
+    let mut executor = executor_factory(MegaSpecId::REX7).create_executor_with_inspector(
+        &mut state,
+        block_ctx(),
+        evm_env(MegaSpecId::REX7),
+        CallFailer::default(),
+    );
+
+    let tx = envelope(0);
+    let err = executor
+        .run_transaction(Recovered::new_unchecked(&tx, CALLER))
+        .expect_err("a classification rewrite must be refused like any other");
+
+    assert!(executor.evm().inspector.applied, "the fixture must reach the rewrite point");
+    let ledger = expect_refusal(&err, *tx.hash());
+    assert_eq!(
+        (ledger.gas, ledger.env, ledger.result),
+        (0, 0, 0),
+        "the point of this shape is that no gas lane moves; got {ledger:?}",
+    );
+    assert_eq!(ledger.interventions, 1, "the rewrite must be the thing the refusal names");
+    assert_eq!(
+        executor.block_limiter.block_compute_gas_used, 0,
+        "a refused transaction must leave the block's counters where they were",
+    );
+}
+
+/// An EVM driven off the canonical path is not covered by the guard, however much its inspector
+/// rewrites.
+///
+/// The guard sits on the block executor's entries, not on `MegaEvm`, and this is what makes that a
+/// property rather than an accident of the current call graph. It is what leaves a simulation EVM
+/// — the oracle set-slot preflight the node runs before it publishes a value, and anything else an
+/// embedder drives itself — free to attach a rewriting inspector: such a run never produces a
+/// block, so there is nothing for two nodes to disagree about.
+///
+/// The same transaction is refused by the executor in
+/// [`test_a_rewrite_that_moves_no_gas_is_refused_too`], so the two together say the boundary is
+/// where it is claimed to be rather than nowhere.
+#[test]
+fn test_an_off_path_evm_runs_the_same_rewrite_to_completion() {
+    let mut db = build_db();
+    let mut inspector = CallFailer::default();
+    let mut evm = mega_evm::MegaEvm::new(
+        mega_evm::MegaContext::new(&mut db, MegaSpecId::REX7)
+            .with_tx_runtime_limits(mega_evm::EvmTxRuntimeLimits::from_spec(MegaSpecId::REX7)),
+    )
+    .with_inspector(&mut inspector);
+
+    let mut tx = mega_evm::MegaTransaction::new(
+        revm::context::tx::TxEnvBuilder::default()
+            .caller(CALLER)
+            .call(CONTRACT)
+            .gas_limit(1_000_000)
+            .build_fill(),
+    );
+    tx.enveloped_tx = Some(Bytes::new());
+    let outcome = evm.execute_transaction(tx).expect("the EVM supports the rewrite in full");
+
+    assert!(inspector.applied, "the fixture must reach the rewrite point");
+    assert_eq!(
+        outcome.inspector_ledger.interventions, 1,
+        "the rewrite is still measured and reported — it is simply not refused here",
+    );
+    assert!(outcome.result_and_state.result.is_success(), "and the transaction still completes");
 }
