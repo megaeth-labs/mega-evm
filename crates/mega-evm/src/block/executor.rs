@@ -78,6 +78,34 @@ impl<C, E, R: OpReceiptBuilder> core::fmt::Debug for MegaBlockExecutor<C, E, R> 
     }
 }
 
+/// Refuses a transaction whose gas accounting an inspector adjusted, on the canonical path.
+///
+/// Block production and block validation are the two places where what the executor reports has to
+/// be what the EVM did, reproducibly, on every node. An inspector's edits reach the receipt and the
+/// block's counters but live in one node's configuration, so a transaction carrying any is not
+/// something this executor may run or admit — see
+/// [`MegaBlockExecutionError::InspectorAdjustedAccounting`].
+///
+/// Enforced in release builds, deliberately. This is a boundary the canonical path holds against
+/// its embedder rather than an invariant `MegaETH` maintains internally, so it has to hold in the
+/// binaries that build and validate blocks, and it fails the block rather than the process.
+///
+/// The check is free on every path that passes it: the ledger is a `Copy` struct already on the
+/// outcome, and this reads four fields of it once per transaction.
+#[inline]
+fn reject_inspector_adjusted_accounting(
+    tx_hash: B256,
+    ledger: crate::InspectorLedger,
+) -> Result<(), BlockExecutionError> {
+    if ledger.is_zero() {
+        return Ok(());
+    }
+    Err(BlockExecutionError::other(crate::MegaBlockExecutionError::InspectorAdjustedAccounting {
+        tx_hash,
+        ledger,
+    }))
+}
+
 impl<DB, H, R, INSP, ExtEnvs> MegaBlockExecutor<H, crate::MegaEvm<DB, INSP, ExtEnvs>, R>
 where
     DB: StateDB,
@@ -470,6 +498,14 @@ where
     /// (e.g. the `alloy_evm` `ExecutableTx`-constrained path): they resolve the sizes themselves
     /// and pass them in. Prefer [`MegaBlockExecutor::run_transaction`] otherwise, which resolves
     /// the sizes for you and cross-checks any cached values.
+    ///
+    /// # Contract
+    ///
+    /// A transaction whose gas accounting an inspector adjusted is refused with
+    /// [`MegaBlockExecutionError::InspectorAdjustedAccounting`](
+    /// crate::MegaBlockExecutionError::InspectorAdjustedAccounting) rather than returned. An
+    /// observation-only inspector — which is every tracer — is unaffected; an embedder that wants
+    /// a rewriting one drives [`crate::MegaEvm::execute_transaction`] directly.
     pub fn run_transaction_with_sizes<Tx>(
         &mut self,
         tx: Tx,
@@ -507,6 +543,7 @@ where
             .evm
             .execute_transaction(tx.into_tx_env())
             .map_err(move |err| BlockExecutionError::evm(alloy_op_evm::map_op_err(err), hash))?;
+        reject_inspector_adjusted_accounting(tx.tx().tx_hash(), outcome.inspector_ledger)?;
 
         Ok(BlockMegaTransactionOutcome { tx, tx_size, da_size, depositor, inner: outcome })
     }
@@ -547,6 +584,7 @@ where
             .evm
             .execute_transaction(tx_env)
             .map_err(move |err| BlockExecutionError::evm(alloy_op_evm::map_op_err(err), hash))?;
+        reject_inspector_adjusted_accounting(recovered.tx().tx_hash(), outcome.inspector_ledger)?;
 
         Ok((depositor, outcome))
     }
@@ -578,6 +616,13 @@ where
     ///
     /// Rejection is not a block-level failure — a block that ends without the rejected
     /// transaction is perfectly valid — which is why the error is returned rather than latched.
+    ///
+    /// This is also where a result an inspector took part in is refused, ahead of admission and
+    /// of any other reading: the producers guard their own outputs, but a result reaching this
+    /// funnel may have been produced by another executor instance or built by hand, and the
+    /// outcome's own ledger is the only thing here that knows. See
+    /// [`MegaBlockExecutionError::InspectorAdjustedAccounting`](
+    /// crate::MegaBlockExecutionError::InspectorAdjustedAccounting).
     pub fn commit_tx_result(
         &mut self,
         result: crate::MegaBlockTxResult<<R::Transaction as TransactionEnvelope>::TxType>,
@@ -605,9 +650,13 @@ where
                     compute_gas_destroyed: _,
                     compute_gas_enforced,
                     state_growth_used,
-                    inspector_ledger: _,
+                    inspector_ledger,
                 },
         } = result;
+
+        // Before anything else, including admission: a result an inspector took part in is not
+        // one this block may contain at all, whether or not it would still fit.
+        reject_inspector_adjusted_accounting(tx_hash, inspector_ledger)?;
 
         // Re-validate limits at commit time to handle parallel execution race conditions.
         // Between execution and commit, other transactions may have been committed, potentially

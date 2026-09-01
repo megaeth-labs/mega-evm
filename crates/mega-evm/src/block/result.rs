@@ -249,6 +249,42 @@ impl InvalidTxError for MegaBlockLimitExceededError {
     }
 }
 
+/// A `MegaETH` block executor's own refusals — the ones that are neither a resource limit nor a
+/// transaction the EVM rejected.
+///
+/// These say the executor was asked to do something it must not do, so they are reported as
+/// [`BlockExecutionError::Internal`](alloy_evm::block::BlockExecutionError::Internal) rather than
+/// as a verdict about the transaction: the block is not built, and there is nothing about the
+/// transaction itself for a caller to fix.
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum MegaBlockExecutionError {
+    /// A transaction whose gas accounting an inspector adjusted reached the canonical
+    /// block-execution path.
+    ///
+    /// Block production and block validation must produce the same numbers for the same block, on
+    /// every node, so what the executor reports has to be what the EVM did — and only that. An
+    /// inspector that writes gas into an interpreter's counter, into a frame's envelope, or into a
+    /// returning frame's result is a second producer of gas movement, present on one node's
+    /// configuration and not on another's, whose effect reaches the receipt, the transaction's
+    /// reported compute total, and through it the block's cumulative counters.
+    ///
+    /// Observation is untouched: a tracer leaves an all-zero ledger, which is what every inspector
+    /// on this path today does. An embedder that genuinely wants a rewriting inspector still has
+    /// one — [`MegaEvm::execute_transaction`](crate::MegaEvm::execute_transaction) supports it in
+    /// full, with the ledger reported on the outcome — it just does not get to call the result a
+    /// block.
+    #[error(
+        "transaction {tx_hash} reached the canonical block-execution path with its gas accounting \
+         adjusted by an inspector: {ledger:?}"
+    )]
+    InspectorAdjustedAccounting {
+        /// The transaction the adjusted accounting belongs to.
+        tx_hash: TxHash,
+        /// What the measurement shim booked for that transaction.
+        ledger: crate::InspectorLedger,
+    },
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

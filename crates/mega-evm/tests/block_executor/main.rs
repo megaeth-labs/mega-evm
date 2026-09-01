@@ -5,5 +5,6 @@ mod block_limits;
 mod compute_gas_lanes;
 mod deposit_da_exemption;
 mod inspector;
+mod inspector_guard;
 mod sequencer_registry;
 mod trait_factory_runtime_limits;
