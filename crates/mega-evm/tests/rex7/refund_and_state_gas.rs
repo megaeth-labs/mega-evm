@@ -99,14 +99,21 @@ fn tx() -> MegaTransaction {
     tx
 }
 
-fn context(db: &mut MemoryDatabase) -> MegaContext<&mut MemoryDatabase, EmptyExternalEnv> {
-    let mut context = MegaContext::new(db, MegaSpecId::REX7)
-        .with_tx_runtime_limits(EvmTxRuntimeLimits::from_spec(MegaSpecId::REX7));
+fn context_on(
+    db: &mut MemoryDatabase,
+    spec: MegaSpecId,
+) -> MegaContext<&mut MemoryDatabase, EmptyExternalEnv> {
+    let mut context =
+        MegaContext::new(db, spec).with_tx_runtime_limits(EvmTxRuntimeLimits::from_spec(spec));
     context.modify_chain(|chain| {
         chain.operator_fee_scalar = Some(U256::ZERO);
         chain.operator_fee_constant = Some(U256::ZERO);
     });
     context
+}
+
+fn context(db: &mut MemoryDatabase) -> MegaContext<&mut MemoryDatabase, EmptyExternalEnv> {
+    context_on(db, MegaSpecId::REX7)
 }
 
 fn read(limit: &AdditionalLimit, outcome: MegaTransactionOutcome) -> Reading {
@@ -665,4 +672,77 @@ fn test_a_synthetic_outcome_carries_its_own_figures() {
         "a pool does move the envelope, wherever it came from",
     );
     assert_identity("interception, pooled", &pooled);
+}
+
+// --- the frozen specs
+// -----------------------------------------------------------------------------
+
+/// On a frozen spec the two lanes report and settle nothing.
+///
+/// The shim is not spec-gated, and must not be: the block guard has to see a rewritten receipt
+/// whichever spec produced it. What is gated is the accounting the lanes feed, so a frozen spec's
+/// own numbers have to be exactly what they were — which is what this reads, by comparing an
+/// edited run against an unedited one on the same spec.
+#[test]
+fn test_a_frozen_spec_reports_the_lanes_without_settling_anything() {
+    fn run(edit: Option<Edit>) -> (Reading, u64, u64) {
+        let mut db = db_for(Callee::Returning);
+        let mut editor = edit.map(Editor::new);
+        match &mut editor {
+            Some(editor) => {
+                let mut evm =
+                    MegaEvm::new(context_on(&mut db, MegaSpecId::REX6)).with_inspector(editor);
+                let outcome = evm.execute_transaction(tx()).expect("no EVMError");
+                assert_eq!(alloy_evm::Evm::inspector(&evm).fired, 1, "{edit:?} must land");
+                let compute = outcome.compute_gas_used;
+                let destroyed = outcome.compute_gas_destroyed;
+                let reading = read(&evm.ctx_ref().additional_limit.borrow(), outcome);
+                (reading, compute, destroyed)
+            }
+            None => {
+                let mut evm = MegaEvm::new(context_on(&mut db, MegaSpecId::REX6));
+                let outcome = evm.execute_transaction(tx()).expect("no EVMError");
+                let compute = outcome.compute_gas_used;
+                let destroyed = outcome.compute_gas_destroyed;
+                let reading = read(&evm.ctx_ref().additional_limit.borrow(), outcome);
+                (reading, compute, destroyed)
+            }
+        }
+    }
+
+    let (plain, plain_compute, plain_destroyed) = run(None);
+    assert!(plain.ledger.is_zero());
+
+    for (edit, expected) in [
+        (
+            Edit::RefundAtStep(REFUND),
+            InspectorLedger { refund: i128::from(REFUND), ..InspectorLedger::default() },
+        ),
+        (
+            Edit::ReservoirAtStep,
+            InspectorLedger { reservoir: i128::from(RESERVOIR), ..InspectorLedger::default() },
+        ),
+        (
+            Edit::StateGasAtStep,
+            InspectorLedger { state_gas: i128::from(STATE_GAS), ..InspectorLedger::default() },
+        ),
+    ] {
+        let (edited, compute, destroyed) = run(Some(edit));
+        assert_eq!(edited.ledger, expected, "{edit:?}: the lane reports on every spec");
+        assert_eq!(compute, plain_compute, "{edit:?}: a frozen spec's compute total must not move",);
+        assert_eq!(destroyed, plain_destroyed, "{edit:?}: nor its destroyed lane");
+        // `inspector_conjured_gas` is a reading of the ledger rather than something the
+        // transaction recorded, so it moves with the lane on every spec. Every other term is what
+        // a frozen spec must leave alone.
+        assert_eq!(
+            ConservationTerms { inspector_conjured_gas: 0, ..edited.terms },
+            plain.terms,
+            "{edit:?}: nothing a frozen spec records may move",
+        );
+        assert_eq!(
+            edited.terms.inspector_conjured_gas,
+            edited.ledger.conjured_gas(),
+            "{edit:?}: and the term is the ledger's net, exactly as it is under REX7",
+        );
+    }
 }
