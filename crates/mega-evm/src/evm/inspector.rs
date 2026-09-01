@@ -41,8 +41,9 @@ use revm::{
     context::{ContextError, ContextTr},
     handler::FrameResult,
     interpreter::{
-        CallInputs, CallOutcome, CreateInputs, CreateOutcome, FrameInput, InstructionResult,
-        Interpreter, InterpreterResult, InterpreterTypes,
+        interpreter_types::LoopControl, CallInputs, CallOutcome, CreateInputs, CreateOutcome,
+        FrameInput, InstructionResult, Interpreter, InterpreterAction, InterpreterResult,
+        InterpreterTypes,
     },
     Inspector,
 };
@@ -88,6 +89,46 @@ impl<I> MeasuredInspector<I> {
     pub fn into_inner(self) -> I {
         self.inner
     }
+}
+
+/// Whether an edit to this interpreter's gas counter can still reach the transaction's envelope.
+///
+/// It cannot exactly when the interpreter is holding a `Return` action. revm's inspected loop runs
+/// the terminating instruction first and the callback after it, and that instruction has already
+/// copied the counter into the action it set — the action is what becomes the frame's result and
+/// what the caller reclaims from. Whatever the callback writes into the counter afterwards is
+/// written into an object nobody will read again.
+///
+/// The two neighbouring shapes are live and must stay booked. With no action pending the frame
+/// carries straight on; with a `NewFrame` action pending it suspends into a child and then resumes
+/// on this very counter. "The loop is about to break" is therefore not the question — revm breaks
+/// out of the instruction loop in both the suspending and the terminating case — and a rule phrased
+/// that way would stop booking edits that really do move a frame's budget.
+///
+/// Read *after* the callback returns, because the question is about the counter the callback left
+/// behind: an inspector that sets or clears an action has changed what the EVM does next, and the
+/// answer has to follow it.
+///
+/// # Why this decides booking and not measurement
+///
+/// Only the ledger is gated on it. `MegaETH`'s own tail settlement measures a frame's work as a
+/// drop in this same counter and does read it after the action is set, so the settlement baseline
+/// has to shift for a dead-window edit exactly as it does for a live one — otherwise gas the
+/// inspector wrote in would read as work the frame performed, which is the opposite error.
+///
+/// # What it does not cover
+///
+/// The pending action itself. A callback holding a live interpreter can reach the action through
+/// `LoopControl` and edit the gas inside it, which does move the envelope. Measuring that at the
+/// callback boundary would be unsound rather than merely incomplete: whether such an edit moves
+/// anything depends on the frame's *final* classification, which no callback here knows — a
+/// returning frame hands its remainder back and a halting one does not — so it belongs to the
+/// frame's settlement point, which books edits made at the one callback it can see
+/// ([`InspectorLedger::result`](crate::InspectorLedger::result)). Extending that lane to cover
+/// this one is a per-frame snapshot this shim deliberately does not carry.
+#[inline]
+fn counter_reaches_envelope<INTR: InterpreterTypes>(interp: &mut Interpreter<INTR>) -> bool {
+    !matches!(interp.bytecode.action(), Some(InterpreterAction::Return(_)))
 }
 
 /// The gas limit a frame input carries, for the two variants that have one.
@@ -187,30 +228,39 @@ where
     ) {
         let before = interp.gas.remaining();
         self.inner.initialize_interp(interp, context);
-        context
-            .additional_limit
-            .borrow_mut()
-            .record_inspector_gas_adjustment::<false>(&mut interp.gas, before);
+        let reaches_envelope = counter_reaches_envelope(interp);
+        context.additional_limit.borrow_mut().record_inspector_gas_adjustment::<false>(
+            &mut interp.gas,
+            before,
+            reaches_envelope,
+        );
     }
 
     #[inline]
     fn step(&mut self, interp: &mut Interpreter<INTR>, context: &mut MegaContext<DB, ExtEnvs>) {
         let before = interp.gas.remaining();
         self.inner.step(interp, context);
-        context
-            .additional_limit
-            .borrow_mut()
-            .record_inspector_gas_adjustment::<true>(&mut interp.gas, before);
+        let reaches_envelope = counter_reaches_envelope(interp);
+        context.additional_limit.borrow_mut().record_inspector_gas_adjustment::<true>(
+            &mut interp.gas,
+            before,
+            reaches_envelope,
+        );
     }
 
+    /// The callback that sits in the dead window: revm runs it after the instruction that set the
+    /// frame's action, so on a terminating opcode the counter it hands out has already been copied
+    /// into the result the caller will be given — see [`counter_reaches_envelope`].
     #[inline]
     fn step_end(&mut self, interp: &mut Interpreter<INTR>, context: &mut MegaContext<DB, ExtEnvs>) {
         let before = interp.gas.remaining();
         self.inner.step_end(interp, context);
-        context
-            .additional_limit
-            .borrow_mut()
-            .record_inspector_gas_adjustment::<true>(&mut interp.gas, before);
+        let reaches_envelope = counter_reaches_envelope(interp);
+        context.additional_limit.borrow_mut().record_inspector_gas_adjustment::<true>(
+            &mut interp.gas,
+            before,
+            reaches_envelope,
+        );
     }
 
     /// No interpreter and no frame inputs are reachable here, so there is nothing to measure —
@@ -229,10 +279,12 @@ where
     ) {
         let before = interpreter.gas.remaining();
         self.inner.log_full(interpreter, context, log);
-        context
-            .additional_limit
-            .borrow_mut()
-            .record_inspector_gas_adjustment::<true>(&mut interpreter.gas, before);
+        let reaches_envelope = counter_reaches_envelope(interpreter);
+        context.additional_limit.borrow_mut().record_inspector_gas_adjustment::<true>(
+            &mut interpreter.gas,
+            before,
+            reaches_envelope,
+        );
     }
 
     #[inline]

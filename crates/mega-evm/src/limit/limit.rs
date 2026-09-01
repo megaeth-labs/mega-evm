@@ -459,10 +459,18 @@ impl AdditionalLimit {
     /// `gas.remaining()` is what the callback left behind; the difference is the adjustment,
     /// because the EVM does not execute inside a callback.
     ///
+    /// `reaches_envelope` is whether the counter the callback left behind is one the EVM will read
+    /// again — false exactly when the interpreter is already holding a terminating action, whose
+    /// own copy of the counter is what the caller reclaims from. It gates the ledger and
+    /// nothing else: an edit nobody will read moves no gas and must not be booked, but
+    /// `MegaETH`'s own tail settlement does read this counter after the action is set, so the
+    /// baseline still has to shift or the edit would be measured as work the frame performed.
+    ///
     /// Three things happen, in this order:
     ///
-    /// 1. **The ledger** takes the adjustment, so the conservation law can account for gas nobody
-    ///    funded (or gas that vanished) when it derives the destroyed remainder.
+    /// 1. **The ledger** takes the adjustment, if it can reach the envelope at all, so the
+    ///    conservation law can account for gas nobody funded (or gas that vanished) when it derives
+    ///    the destroyed remainder.
     /// 2. **The open segment is settled against the pre-callback counter** (REX7+,
     ///    `IN_OPEN_SEGMENT`). This is what keeps the adjustment out of enforcement: compute gas is
     ///    measured as a drop in the interpreter's counter, so an injection made mid-segment would
@@ -492,12 +500,15 @@ impl AdditionalLimit {
         &mut self,
         gas: &mut Gas,
         remaining_before: u64,
+        reaches_envelope: bool,
     ) {
         let remaining_after = gas.remaining();
         if remaining_after == remaining_before {
             return;
         }
-        self.inspector.gas += i128::from(remaining_after) - i128::from(remaining_before);
+        if reaches_envelope {
+            self.inspector.gas += i128::from(remaining_after) - i128::from(remaining_before);
+        }
 
         if !IN_OPEN_SEGMENT || !self.rex7_enabled() {
             return;
