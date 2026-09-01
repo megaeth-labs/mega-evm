@@ -9,8 +9,8 @@
 //! The tests here are laid out over the sign of that choice, because the two directions settle
 //! differently and a lane that books one and drops the other is a real failure mode:
 //!
-//! - an outcome that hands back **less** than the envelope makes the caller spend gas no frame
-//!   ever performed work for;
+//! - an outcome that hands back **less** than the envelope makes the caller spend gas no frame ever
+//!   performed work for;
 //! - an outcome that hands back **more** conjures gas the transaction never funded;
 //! - an outcome that hands back **exactly** the envelope — the echo convention every tracer that
 //!   intercepts follows — moves nothing, and must book nothing.
@@ -421,7 +421,11 @@ fn test_an_intercepted_creation_is_measured_against_the_envelope_it_was_handed()
     }
 
     impl<CTX, INTR: InterpreterTypes> Inspector<CTX, INTR> for CreateInterceptor {
-        fn create(&mut self, _context: &mut CTX, inputs: &mut CreateInputs) -> Option<CreateOutcome> {
+        fn create(
+            &mut self,
+            _context: &mut CTX,
+            inputs: &mut CreateInputs,
+        ) -> Option<CreateOutcome> {
             self.intercepted += 1;
             self.envelope = inputs.gas_limit();
             Some(CreateOutcome::new(

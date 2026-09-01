@@ -1849,6 +1849,15 @@ where
 
         // Check if inspector wants to skip this call/create
         if let Some(output) = frame_start(ctx, inspector, &mut frame_init.frame_input) {
+            // What the transaction funded this frame with, staged by the measurement shim at the
+            // callback that answered it. Taken here rather than at the settlement below so that
+            // it cannot outlive this frame init on a spec that settles nothing.
+            let envelope = additional_limit.borrow_mut().take_inspector_interception_envelope();
+            debug_assert!(
+                envelope.is_some() || matches!(frame_init.frame_input, FrameInput::Empty),
+                "every inspector is wrapped in the measurement shim, which stages the envelope of                  any frame a callback answers itself",
+            );
+
             // Inspector intercepted — `frame_init()` is skipped entirely, so neither
             // `frame_result_if_exceeding_limit` nor `before_frame_init` would run. The two
             // guards that stand in front of interceptor dispatch are the same ones the plain
@@ -1868,12 +1877,18 @@ where
                 additional_limit.borrow_mut().push_empty_frame();
             }
 
-            let gas_before_callback = output.gas().remaining();
             frame_end(ctx, inspector, &frame_init.frame_input, &mut output);
-            let inspector_gas_delta =
-                i128::from(output.gas().remaining()) - i128::from(gas_before_callback);
 
             if is_mini_rex_enabled {
+                // No frame ran, so the whole of what this result carries is the inspector's
+                // doing, measured against the envelope rather than across one callback: the
+                // synthetic outcome's own gas, whatever `frame_end` then did to it, and whatever
+                // of an edit to the inputs survived into a guard's replacement result. The
+                // settlement point splits it on the classification the caller ends up seeing,
+                // exactly as it does for a frame that really ran.
+                let inspector_gas_delta = envelope.map_or(0, |envelope| {
+                    i128::from(output.gas().remaining()) - i128::from(envelope)
+                });
                 additional_limit.borrow_mut().finalize_frame(
                     &mut output,
                     exit,
@@ -2148,6 +2163,87 @@ mod mutation_tests {
                 inputs.return_memory_offset.clone(),
             ))
         }
+    }
+
+    /// Raises the child's envelope and then answers the frame itself, echoing the raised figure.
+    ///
+    /// The shape the two override tests below need: an interception whose gas figure is *not* the
+    /// envelope the transaction funded, so that a guard replacing the outcome has something to
+    /// get wrong.
+    #[derive(Default)]
+    struct RaisingStopInspector;
+
+    /// How much [`RaisingStopInspector`] adds to the envelope it is handed.
+    const RAISE: u64 = 4_000;
+
+    impl<CTX: ContextTr, INTR: InterpreterTypes> Inspector<CTX, INTR> for RaisingStopInspector {
+        fn call(&mut self, _context: &mut CTX, inputs: &mut CallInputs) -> Option<CallOutcome> {
+            inputs.gas_limit += RAISE;
+            Some(CallOutcome::new(
+                InterpreterResult::new(
+                    InstructionResult::Stop,
+                    Bytes::new(),
+                    Gas::new(inputs.gas_limit),
+                ),
+                inputs.return_memory_offset.clone(),
+            ))
+        }
+    }
+
+    /// A guard that replaces an interception's outcome still leaves the inspector's edit reaching
+    /// the caller, and it has to be booked.
+    ///
+    /// The depth rejection is built from the frame input the callback edited, and `CallTooDeep`
+    /// is in the revert group — so the caller reclaims the raised figure, not the one the
+    /// transaction funded. Measuring against the envelope the callback was handed catches this
+    /// without the settlement having to know which of the two results it is looking at.
+    #[test]
+    fn test_a_guard_replacing_an_interception_still_books_the_edit_that_reached_the_caller() {
+        let mut evm = MegaEvm::new(MegaContext::new(MemoryDatabase::default(), MegaSpecId::REX5))
+            .with_inspector(RaisingStopInspector);
+        let ItemOrResult::Result(result) = InspectorEvmTr::inspect_frame_init(
+            &mut evm,
+            call_frame_init(CALL_STACK_LIMIT as usize + 1),
+        )
+        .unwrap() else {
+            panic!("depth guard must override the inspector result");
+        };
+        assert_eq!(
+            result.gas().remaining(),
+            TEST_GAS_LIMIT + RAISE,
+            "the rejection is built from the inputs the callback left behind",
+        );
+        assert_eq!(
+            evm.ctx_ref().additional_limit.borrow().inspector_ledger().result,
+            i128::from(RAISE),
+            "the caller reclaims the raise, so the ledger must carry it",
+        );
+        consume_synthetic_limit_frame(evm.ctx_ref(), result);
+    }
+
+    /// The mirror: a rejection the caller reclaims nothing from books nothing, and the sender's
+    /// rescue is taken on the envelope the transaction funded rather than on the raised figure.
+    #[test]
+    fn test_a_halting_guard_rescues_the_funded_envelope_and_not_the_raised_one() {
+        let mut evm =
+            MegaEvm::new(context_with_latched_limit()).with_inspector(RaisingStopInspector);
+        let ItemOrResult::Result(result) =
+            InspectorEvmTr::inspect_frame_init(&mut evm, call_frame_init(1)).unwrap()
+        else {
+            panic!("latched limit must override the inspector result");
+        };
+        let limit = evm.ctx_ref().additional_limit.borrow();
+        assert_eq!(
+            limit.inspector_ledger().result,
+            0,
+            "a halting rejection hands nothing back, so the edit reaches nothing",
+        );
+        assert_eq!(
+            limit.rescued_gas, TEST_GAS_LIMIT,
+            "the sender is refunded what the transaction funded, not what the inspector wrote",
+        );
+        drop(limit);
+        consume_synthetic_limit_frame(evm.ctx_ref(), result);
     }
 
     #[test]

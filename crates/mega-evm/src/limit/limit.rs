@@ -184,6 +184,15 @@ pub struct AdditionalLimit {
     /// and it runs immediately after the action is handed on, with nothing in between that could
     /// stage another one.
     staged_action_env_gas: i128,
+
+    /// The envelope a callback that answered a frame itself was handed, waiting for the
+    /// settlement point of the frame it answered.
+    ///
+    /// An interception produces a whole frame result out of nothing, so the reading its
+    /// settlement needs is not a difference the shim can take — it is this baseline against the
+    /// gas the result turns out to carry. At most one can be outstanding: revm stops at the
+    /// first callback that answers, and the frame init that asked settles a few statements later.
+    staged_interception_envelope: Option<u64>,
 }
 
 /// The usage of the additional limits.
@@ -216,6 +225,7 @@ impl AdditionalLimit {
             staged_precompile: None,
             staged_action_result_gas: 0,
             staged_action_env_gas: 0,
+            staged_interception_envelope: None,
         }
     }
 }
@@ -262,6 +272,7 @@ impl AdditionalLimit {
         self.staged_precompile = None;
         self.staged_action_result_gas = 0;
         self.staged_action_env_gas = 0;
+        self.staged_interception_envelope = None;
     }
 
     /// Whether compute gas settles at checkpoints (REX7+) rather than per opcode.
@@ -626,6 +637,27 @@ impl AdditionalLimit {
     #[inline]
     pub(crate) fn take_inspector_action_env_adjustment(&mut self) -> i128 {
         core::mem::take(&mut self.staged_action_env_gas)
+    }
+
+    /// Stages the envelope a callback that answered a frame itself was handed.
+    ///
+    /// The number recorded is the gas limit as that callback *received* it, not as it left it.
+    /// That is the envelope the transaction actually funded: the caller's `CALL` / `CREATE`
+    /// opcode debited it, and any edit an earlier callback made to it on the way here was booked
+    /// on the envelope lane as it was made. An edit the answering callback itself makes is
+    /// deliberately not part of the baseline — see
+    /// [`record_inspector_env_adjustment`](Self::record_inspector_env_adjustment) for why it
+    /// reaches no frame, and note that whatever of it survives into the result the caller is
+    /// handed is measured here instead, as part of that result.
+    #[inline]
+    pub(crate) fn stage_inspector_interception_envelope(&mut self, envelope: u64) {
+        self.staged_interception_envelope = Some(envelope);
+    }
+
+    /// Takes the staged interception envelope, for the frame init that asked to settle against.
+    #[inline]
+    pub(crate) fn take_inspector_interception_envelope(&mut self) -> Option<u64> {
+        self.staged_interception_envelope.take()
     }
 
     /// Books an adjustment an inspector made to a pending action the same callback then removed,

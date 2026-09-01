@@ -30,6 +30,10 @@
 //!   reclaim from. The counter and the action between them hold everything a frame has, and
 //!   [`held`] is the identity the two lanes split.
 //! - Frame-envelope edits go to [`AdditionalLimit::record_inspector_env_adjustment`].
+//! - A callback that answers a frame itself stages the envelope it was handed, through
+//!   [`AdditionalLimit::stage_inspector_interception_envelope`], so that the frame init it
+//!   short-circuited can settle the gas its synthetic outcome carries against what the transaction
+//!   funded.
 //! - One rewrite shape is refused outright: see [`MeasuredInspector::create_end`].
 //!
 //! Nothing here changes what the inspector is allowed to do to the EVM, and nothing here runs on
@@ -285,12 +289,12 @@ fn frame_input_gas_limit(frame_input: &FrameInput) -> Option<u64> {
 }
 
 /// Books what a callback did to a frame's envelope, together with whatever an earlier callback
-/// staged into the same envelope through the pending `NewFrame` action.
+/// staged into the same envelope through the pending `NewFrame` action — and, when the callback
+/// answered the frame itself, stages that envelope for the frame's settlement point.
 ///
 /// `intercepted` is true when the callback returned a synthetic outcome: the frame is skipped
-/// entirely and the EVM never reads the inputs it edited, so the edit by itself moves nothing. Gas
-/// the inspector then puts into that synthetic outcome travels through the result lane, which this
-/// lane deliberately does not cover — see [`InspectorLedger::env`](crate::InspectorLedger::env).
+/// entirely and the EVM never reads the inputs it edited, so the edit by itself moves nothing on
+/// this lane — see [`InspectorLedger::env`](crate::InspectorLedger::env).
 ///
 /// The staged amount is booked either way, and the asymmetry is not an oversight. An interception
 /// discards inputs *this* callback edited a moment earlier, which is why that edit reaches
@@ -300,6 +304,16 @@ fn frame_input_gas_limit(frame_input: &FrameInput) -> Option<u64> {
 /// later to answer the frame itself cannot un-make that. It is simply the earliest of the two
 /// edits to the one envelope, and the last thing to touch that envelope is what its holder is
 /// sized from.
+///
+/// # Why an interception stages a baseline rather than booking a difference
+///
+/// Every other lane measures a difference across the callback, because the EVM produced the
+/// object on both sides of it. An interception has no such object: the frame is never built, and
+/// the result the caller reclaims from is one the inspector wrote from nothing. What the
+/// transaction funded is the envelope on the way in; what it gets back is whatever gas that
+/// result turns out to carry once the last callback has run. The difference between the two is
+/// the measurement, and only the frame init that asked can take it — so the way in is staged
+/// here, and [`AdditionalLimit::stage_inspector_interception_envelope`] says what the number is.
 #[inline]
 fn book_env_adjustment<DB: Database, ExtEnvs: ExternalEnvTypes>(
     context: &MegaContext<DB, ExtEnvs>,
@@ -312,6 +326,9 @@ fn book_env_adjustment<DB: Database, ExtEnvs: ExternalEnvTypes>(
         (false, Some(before), Some(after)) => i128::from(after) - i128::from(before),
         _ => 0,
     };
+    if let (true, Some(before)) = (intercepted, before) {
+        context.additional_limit.borrow_mut().stage_inspector_interception_envelope(before);
+    }
     if staged + callback == 0 {
         return;
     }
