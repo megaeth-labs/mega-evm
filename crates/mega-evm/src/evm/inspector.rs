@@ -91,44 +91,181 @@ impl<I> MeasuredInspector<I> {
     }
 }
 
-/// Whether an edit to this interpreter's gas counter can still reach the transaction's envelope.
+/// Where the gas an interpreter is holding will go next, read off the action it is holding.
 ///
-/// It cannot exactly when the interpreter is holding a `Return` action. revm's inspected loop runs
-/// the terminating instruction first and the callback after it, and that instruction has already
-/// copied the counter into the action it set — the action is what becomes the frame's result and
-/// what the caller reclaims from. Whatever the callback writes into the counter afterwards is
-/// written into an object nobody will read again.
+/// This is the one thing that decides how gas measured at a live-interpreter callback is booked,
+/// for both of the objects such a callback can write gas into — the interpreter's own counter and
+/// the pending action. The three variants are the three places a frame's budget can be sitting
+/// when a callback runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ActionLane {
+    /// No action pending: the frame carries straight on, so what it holds is its counter.
+    Counter,
+    /// A `NewFrame` action: the frame suspends, and the action carries the envelope a child is
+    /// about to be built with. The frame itself resumes on its counter afterwards.
+    Envelope,
+    /// A `Return` action: the frame is over, and the action carries what its caller reclaims.
+    Result,
+}
+
+impl ActionLane {
+    /// The lane an interpreter holding `action` is on.
+    #[inline]
+    const fn of(action: Option<&InterpreterAction>) -> Self {
+        match action {
+            None => Self::Counter,
+            Some(InterpreterAction::NewFrame(_)) => Self::Envelope,
+            Some(InterpreterAction::Return(_)) => Self::Result,
+        }
+    }
+
+    /// Whether an edit to this interpreter's gas counter can still reach the transaction's
+    /// envelope.
+    ///
+    /// It cannot exactly on [`Result`](Self::Result). revm's inspected loop runs the terminating
+    /// instruction first and the callback after it, and that instruction has already copied the
+    /// counter into the action it set — the action is what becomes the frame's result and what the
+    /// caller reclaims from. Whatever the callback writes into the counter afterwards is written
+    /// into an object nobody will read again.
+    ///
+    /// The two neighbouring shapes are live and must stay booked. With no action pending the frame
+    /// carries straight on; with a `NewFrame` action pending it suspends into a child and then
+    /// resumes on this very counter. "The loop is about to break" is therefore not the question —
+    /// revm breaks out of the instruction loop in both the suspending and the terminating case —
+    /// and a rule phrased that way would stop booking edits that really do move a frame's budget.
+    ///
+    /// Read *after* the callback returns, because the question is about the counter the callback
+    /// left behind: an inspector that sets or clears an action has changed what the EVM does next,
+    /// and the answer has to follow it.
+    ///
+    /// # Why this decides booking and not measurement
+    ///
+    /// Only the ledger is gated on it. `MegaETH`'s own tail settlement measures a frame's work as
+    /// a drop in this same counter and does read it after the action is set, so the settlement
+    /// baseline has to shift for a dead-window edit exactly as it does for a live one — otherwise
+    /// gas the inspector wrote in would read as work the frame performed, which is the opposite
+    /// error.
+    ///
+    /// # The gas the counter no longer speaks for
+    ///
+    /// What a dead-window counter edit cannot reach, an edit to the action itself can — and
+    /// [`measure_pending_action`] measures exactly that, against the same counter reading, so the
+    /// two together account for every unit of gas the frame holds. See [`held`] for the identity
+    /// they split.
+    #[inline]
+    const fn counter_reaches_envelope(self) -> bool {
+        !matches!(self, Self::Result)
+    }
+}
+
+/// The gas a frame and its pending continuation hold, given the action it is carrying and its own
+/// counter.
 ///
-/// The two neighbouring shapes are live and must stay booked. With no action pending the frame
-/// carries straight on; with a `NewFrame` action pending it suspends into a child and then resumes
-/// on this very counter. "The loop is about to break" is therefore not the question — revm breaks
-/// out of the instruction loop in both the suspending and the terminating case — and a rule phrased
-/// that way would stop booking edits that really do move a frame's budget.
+/// This is the quantity the two live-interpreter lanes partition between them:
 ///
-/// Read *after* the callback returns, because the question is about the counter the callback left
-/// behind: an inspector that sets or clears an action has changed what the EVM does next, and the
-/// answer has to follow it.
+/// ```text
+/// held(None,           counter) = counter
+/// held(NewFrame(f),    counter) = counter + f.gas_limit
+/// held(Return(r),      counter) = r.gas.remaining()
+/// ```
 ///
-/// # Why this decides booking and not measurement
+/// A frame with no action pending will spend its counter. A suspending frame will spend its
+/// counter when it resumes and has additionally handed the child's envelope on. A terminating
+/// frame will spend nothing more — the action's own copy is what its caller reclaims, and the
+/// counter is dead.
 ///
-/// Only the ledger is gated on it. `MegaETH`'s own tail settlement measures a frame's work as a
-/// drop in this same counter and does read it after the action is set, so the settlement baseline
-/// has to shift for a dead-window edit exactly as it does for a live one — otherwise gas the
-/// inspector wrote in would read as work the frame performed, which is the opposite error.
-///
-/// # What it does not cover
-///
-/// The pending action itself. A callback holding a live interpreter can reach the action through
-/// `LoopControl` and edit the gas inside it, which does move the envelope. Measuring that at the
-/// callback boundary would be unsound rather than merely incomplete: whether such an edit moves
-/// anything depends on the frame's *final* classification, which no callback here knows — a
-/// returning frame hands its remainder back and a halting one does not — so it belongs to the
-/// frame's settlement point, which books edits made at the one callback it can see
-/// ([`InspectorLedger::result`](crate::InspectorLedger::result)). Extending that lane to cover
-/// this one is a per-frame snapshot this shim deliberately does not carry.
+/// Both readings [`measure_pending_action`] takes use the counter *the EVM left behind*, so the
+/// counter cancels out of the difference wherever it appears on both sides. What is left is
+/// exactly the part of the movement that is not already on the counter lane, whatever the callback
+/// did to the action's shape.
 #[inline]
-fn counter_reaches_envelope<INTR: InterpreterTypes>(interp: &mut Interpreter<INTR>) -> bool {
-    !matches!(interp.bytecode.action(), Some(InterpreterAction::Return(_)))
+fn held(action: Option<&InterpreterAction>, counter: u64) -> i128 {
+    match action {
+        None => i128::from(counter),
+        Some(InterpreterAction::NewFrame(frame_input)) => {
+            i128::from(counter) + frame_input_gas_limit(frame_input).map_or(0, i128::from)
+        }
+        Some(InterpreterAction::Return(result)) => i128::from(result.gas.remaining()),
+    }
+}
+
+/// What a live-interpreter callback did to the interpreter's pending action.
+#[derive(Clone, Copy, Debug)]
+struct ActionChange {
+    /// Gas the callback moved through the action, over and above anything it did to the counter.
+    gas: i128,
+    /// Whether the action came back describing something other than what the EVM decided to do.
+    rewritten: bool,
+    /// Where that gas is now sitting, which is what decides how it is booked.
+    lane: ActionLane,
+}
+
+/// Measures what a callback did to the pending action, against the counter the EVM left behind.
+///
+/// The EVM does not execute inside a callback, so the action is either the one the last
+/// instruction set or one the callback wrote — and the difference between the two readings of
+/// [`held`] is what the callback moved. Taking both readings at the *pre-callback* counter is
+/// what keeps this lane and the counter lane from overlapping: the counter's own movement is
+/// booked by [`record_inspector_gas_adjustment`](crate::AdditionalLimit::
+/// record_inspector_gas_adjustment) exactly when [`ActionLane::counter_reaches_envelope`] says the
+/// EVM will read it again, and it cancels out of this difference in precisely the cases where it
+/// does.
+#[inline]
+fn measure_pending_action(
+    before: Option<InterpreterAction>,
+    after: Option<&InterpreterAction>,
+    counter: u64,
+) -> ActionChange {
+    let gas = held(after, counter) - held(before.as_ref(), counter);
+    ActionChange { gas, rewritten: action_rewritten(before, after), lane: ActionLane::of(after) }
+}
+
+/// Whether a callback left behind an action describing something other than what the EVM decided.
+///
+/// Gas is excluded, exactly as it is at every other boundary: it travels on the lanes
+/// [`measure_pending_action`] routes it to, and counting it here as well would report one rewrite
+/// twice. A callback that installed, removed or swapped an action has rewritten what the EVM does
+/// next as thoroughly as it is possible to, so every shape change counts.
+#[inline]
+fn action_rewritten(before: Option<InterpreterAction>, after: Option<&InterpreterAction>) -> bool {
+    match (before, after) {
+        (None, None) => false,
+        (Some(InterpreterAction::Return(before)), Some(InterpreterAction::Return(after))) => {
+            result_rewritten((before.result, &before.output), after)
+        }
+        (Some(InterpreterAction::NewFrame(before)), Some(InterpreterAction::NewFrame(after))) => {
+            frame_input_rewritten(before, after)
+        }
+        _ => true,
+    }
+}
+
+/// Books what a callback did to the interpreter's pending action.
+///
+/// The gas goes to the lane the action the callback *left behind* names, because that is where the
+/// number now lives and therefore what decides when it can still be settled:
+///
+/// - [`ActionLane::Result`] is staged for the frame's settlement point, like an edit made at the
+///   frame's last callback — whether it moves anything depends on the classification the caller
+///   ends up seeing, which no callback here knows;
+/// - [`ActionLane::Envelope`] is staged for the frame-start callback of the child the action is
+///   about to build, which is where an envelope edit is booked from;
+/// - [`ActionLane::Counter`] is booked on the spot, on the interpreter lane: with no action left,
+///   the frame carries on spending what it holds, which is exactly what a counter edit does.
+#[inline]
+fn book_pending_action<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    context: &MegaContext<DB, ExtEnvs>,
+    change: ActionChange,
+) {
+    if change.gas != 0 {
+        let mut limit = context.additional_limit.borrow_mut();
+        match change.lane {
+            ActionLane::Result => limit.stage_inspector_action_result_adjustment(change.gas),
+            ActionLane::Envelope => limit.stage_inspector_action_env_adjustment(change.gas),
+            ActionLane::Counter => limit.record_inspector_action_counter_adjustment(change.gas),
+        }
+    }
+    book_intervention(context, change.rewritten);
 }
 
 /// The gas limit a frame input carries, for the two variants that have one.
@@ -141,13 +278,22 @@ fn frame_input_gas_limit(frame_input: &FrameInput) -> Option<u64> {
     }
 }
 
-/// Books what a callback did to a frame's envelope, if the edited inputs will actually reach a
-/// frame.
+/// Books what a callback did to a frame's envelope, together with whatever an earlier callback
+/// staged into the same envelope through the pending `NewFrame` action.
 ///
 /// `intercepted` is true when the callback returned a synthetic outcome: the frame is skipped
 /// entirely and the EVM never reads the inputs it edited, so the edit by itself moves nothing. Gas
 /// the inspector then puts into that synthetic outcome travels through the result lane, which this
 /// lane deliberately does not cover — see [`InspectorLedger::env`](crate::InspectorLedger::env).
+///
+/// The staged amount is booked either way, and the asymmetry is not an oversight. An interception
+/// discards inputs *this* callback edited a moment earlier, which is why that edit reaches
+/// nothing. The staged amount was written by a different callback into the action the caller's
+/// `CALL` / `CREATE` opcode had already produced — the caller's debit is behind it, `MegaETH`'s own
+/// CALL settlement excluded the pre-edit amount from the caller's work, and a callback deciding
+/// later to answer the frame itself cannot un-make that. It is simply the earliest of the two
+/// edits to the one envelope, and the last thing to touch that envelope is what its holder is
+/// sized from.
 #[inline]
 fn book_env_adjustment<DB: Database, ExtEnvs: ExternalEnvTypes>(
     context: &MegaContext<DB, ExtEnvs>,
@@ -155,19 +301,15 @@ fn book_env_adjustment<DB: Database, ExtEnvs: ExternalEnvTypes>(
     after: Option<u64>,
     intercepted: bool,
 ) {
-    if intercepted {
-        return;
-    }
-    let (Some(before), Some(after)) = (before, after) else {
-        return;
+    let staged = context.additional_limit.borrow_mut().take_inspector_action_env_adjustment();
+    let callback = match (intercepted, before, after) {
+        (false, Some(before), Some(after)) => i128::from(after) - i128::from(before),
+        _ => 0,
     };
-    if before == after {
+    if staged + callback == 0 {
         return;
     }
-    context
-        .additional_limit
-        .borrow_mut()
-        .record_inspector_env_adjustment(i128::from(after) - i128::from(before));
+    context.additional_limit.borrow_mut().record_inspector_env_adjustment(staged + callback);
 }
 
 /// Books one rewrite that changes what the execution *did* rather than what it cost — see
@@ -305,40 +447,49 @@ where
         interp: &mut Interpreter<INTR>,
         context: &mut MegaContext<DB, ExtEnvs>,
     ) {
+        let action = interp.bytecode.action().clone();
         let before = interp.gas.remaining();
         self.inner.initialize_interp(interp, context);
-        let reaches_envelope = counter_reaches_envelope(interp);
+        let change = measure_pending_action(action, interp.bytecode.action().as_ref(), before);
+        book_pending_action(context, change);
         context.additional_limit.borrow_mut().record_inspector_gas_adjustment::<false>(
             &mut interp.gas,
             before,
-            reaches_envelope,
+            change.lane.counter_reaches_envelope(),
         );
     }
 
     #[inline]
     fn step(&mut self, interp: &mut Interpreter<INTR>, context: &mut MegaContext<DB, ExtEnvs>) {
+        let action = interp.bytecode.action().clone();
         let before = interp.gas.remaining();
         self.inner.step(interp, context);
-        let reaches_envelope = counter_reaches_envelope(interp);
+        let change = measure_pending_action(action, interp.bytecode.action().as_ref(), before);
+        book_pending_action(context, change);
         context.additional_limit.borrow_mut().record_inspector_gas_adjustment::<true>(
             &mut interp.gas,
             before,
-            reaches_envelope,
+            change.lane.counter_reaches_envelope(),
         );
     }
 
-    /// The callback that sits in the dead window: revm runs it after the instruction that set the
-    /// frame's action, so on a terminating opcode the counter it hands out has already been copied
-    /// into the result the caller will be given — see [`counter_reaches_envelope`].
+    /// The one callback that runs with an action already pending: revm runs it after the
+    /// instruction that set the frame's action, so on a terminating opcode the counter it hands
+    /// out has already been copied into the result the caller will be given — see
+    /// [`ActionLane::counter_reaches_envelope`] — and the action holding that copy is reachable
+    /// through `LoopControl`. Both objects are measured, on the lanes
+    /// [`book_pending_action`] routes them to.
     #[inline]
     fn step_end(&mut self, interp: &mut Interpreter<INTR>, context: &mut MegaContext<DB, ExtEnvs>) {
+        let action = interp.bytecode.action().clone();
         let before = interp.gas.remaining();
         self.inner.step_end(interp, context);
-        let reaches_envelope = counter_reaches_envelope(interp);
+        let change = measure_pending_action(action, interp.bytecode.action().as_ref(), before);
+        book_pending_action(context, change);
         context.additional_limit.borrow_mut().record_inspector_gas_adjustment::<true>(
             &mut interp.gas,
             before,
-            reaches_envelope,
+            change.lane.counter_reaches_envelope(),
         );
     }
 
@@ -356,13 +507,16 @@ where
         context: &mut MegaContext<DB, ExtEnvs>,
         log: Log,
     ) {
+        let action = interpreter.bytecode.action().clone();
         let before = interpreter.gas.remaining();
         self.inner.log_full(interpreter, context, log);
-        let reaches_envelope = counter_reaches_envelope(interpreter);
+        let change =
+            measure_pending_action(action, interpreter.bytecode.action().as_ref(), before);
+        book_pending_action(context, change);
         context.additional_limit.borrow_mut().record_inspector_gas_adjustment::<true>(
             &mut interpreter.gas,
             before,
-            reaches_envelope,
+            change.lane.counter_reaches_envelope(),
         );
     }
 

@@ -166,6 +166,24 @@ pub struct AdditionalLimit {
     /// to start in between. [`finalize_frame`](Self::finalize_frame) takes it unconditionally, so
     /// it cannot outlive the frame that staged it.
     staged_precompile: Option<PrecompileEnvelope>,
+
+    /// Gas an inspector wrote into a *terminating* pending action, waiting for the frame that
+    /// action ends to reach its settlement point.
+    ///
+    /// Staged rather than booked for the same reason a frame result's edit is: the action becomes
+    /// the frame's result, and whether an edit to it moves anything depends on the classification
+    /// the caller ends up seeing. Only one frame can have one outstanding — a frame that has set
+    /// its terminating action starts no more children — and
+    /// [`finalize_frame`](Self::finalize_frame) takes it.
+    staged_action_result_gas: i128,
+
+    /// Gas an inspector wrote into a *suspending* pending action, waiting for the frame-start
+    /// callback of the child it is about to build.
+    ///
+    /// That callback is the first point at which the edit can be told apart from an interception,
+    /// and it runs immediately after the action is handed on, with nothing in between that could
+    /// stage another one.
+    staged_action_env_gas: i128,
 }
 
 /// The usage of the additional limits.
@@ -196,6 +214,8 @@ impl AdditionalLimit {
             checkpoint: checkpoint::CheckpointTracker::new(spec),
             inspector: inspector_ledger::InspectorLedger::default(),
             staged_precompile: None,
+            staged_action_result_gas: 0,
+            staged_action_env_gas: 0,
         }
     }
 }
@@ -240,6 +260,8 @@ impl AdditionalLimit {
         self.checkpoint.reset();
         self.inspector = inspector_ledger::InspectorLedger::default();
         self.staged_precompile = None;
+        self.staged_action_result_gas = 0;
+        self.staged_action_env_gas = 0;
     }
 
     /// Whether compute gas settles at checkpoints (REX7+) rather than per opcode.
@@ -576,6 +598,46 @@ impl AdditionalLimit {
     #[inline]
     pub(crate) fn record_inspector_env_adjustment(&mut self, delta: i128) {
         self.inspector.env += delta;
+    }
+
+    /// Stages an adjustment an inspector made to the gas a *terminating* pending action carries.
+    ///
+    /// The action is the object that becomes the frame's result, so this is the same measurement
+    /// as an edit made at the frame's last callback, taken one step earlier — and it is settled at
+    /// the same place, [`finalize_frame`](Self::finalize_frame), for the same reason: whether the
+    /// edit moves anything at all depends on the classification the caller ends up seeing.
+    #[inline]
+    pub(crate) fn stage_inspector_action_result_adjustment(&mut self, delta: i128) {
+        self.staged_action_result_gas += delta;
+    }
+
+    /// Stages an adjustment an inspector made to the gas a *suspending* pending action carries —
+    /// the envelope the child frame is about to be built with.
+    ///
+    /// Same lane as an edit made at the frame-start callback, taken one step earlier. It is staged
+    /// rather than booked on the spot only so that the booking happens at a point that can see the
+    /// whole picture; [`take_inspector_action_env_adjustment`](Self::
+    /// take_inspector_action_env_adjustment) is where it lands.
+    #[inline]
+    pub(crate) fn stage_inspector_action_env_adjustment(&mut self, delta: i128) {
+        self.staged_action_env_gas += delta;
+    }
+
+    /// Takes the staged suspending-action adjustment, for the frame-start callback to book.
+    #[inline]
+    pub(crate) fn take_inspector_action_env_adjustment(&mut self) -> i128 {
+        core::mem::take(&mut self.staged_action_env_gas)
+    }
+
+    /// Books an adjustment an inspector made to a pending action the same callback then removed,
+    /// leaving the frame to carry on from its own counter.
+    ///
+    /// With no action left there is nothing for the edit to travel in, so it lands where the
+    /// frame's remaining budget already lives — the same lane a counter edit takes, and for the
+    /// same reason: the frame will spend what it now holds.
+    #[inline]
+    pub(crate) fn record_inspector_action_counter_adjustment(&mut self, delta: i128) {
+        self.inspector.gas += delta;
     }
 
     /// Counts one rewrite the shim refused because its shape is forbidden — see
@@ -1424,6 +1486,10 @@ impl AdditionalLimit {
 
         // Taken unconditionally, so a staged envelope can never outlive the frame that staged it.
         let staged_precompile = self.staged_precompile.take();
+        // Everything an inspector wrote into this result, whether it wrote it into the frame's
+        // terminating action or into the result the action became. The two are the same number
+        // measured on either side of the classification, so they settle as one.
+        let inspector_gas_delta = inspector_gas_delta + core::mem::take(&mut self.staged_action_result_gas);
         // The gas the EVM itself left in this result. Every settlement below is defined against
         // it: the last callback's edit to the number is the inspector's, and the two are only the
         // same object on a frame no callback touched.
