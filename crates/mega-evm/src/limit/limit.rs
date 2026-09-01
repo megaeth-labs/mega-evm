@@ -957,6 +957,54 @@ impl AdditionalLimit {
         self.has_exceeded_limit
     }
 
+    /// [`check_limit`](Self::check_limit) as it will read once the returning frame has been
+    /// popped and merged into its caller — asked before the merge, and latching nothing.
+    ///
+    /// A per-frame budget is defined by the frame's usage weighed against its *caller's* budget
+    /// after the merge, so that is the only question worth asking at a frame return. Today it can
+    /// only be answered after the merge has already happened, which is too late for the answer to
+    /// change what the merge does with the frame's usage or what the journal does with its state.
+    /// This asks the same question one step earlier.
+    ///
+    /// "The same question" is meant literally: every dimension runs its own `check_limit` body,
+    /// in `check_limit`'s order, over a reading of its tracker taken as if the pop had happened.
+    /// The only thing that differs is where the numbers come from, and
+    /// [`FrameLimitTracker::view_after_pop`](super::FrameLimitTracker::view_after_pop) is the
+    /// single place that computes them. `before_frame_return_result` cross-checks the two readings
+    /// against each other on every frame return in debug builds.
+    ///
+    /// `success` is the merge the pop would perform — the returning frame's classification as it
+    /// stands when this is asked, before anything this answer causes rewrites it.
+    pub(crate) fn peek_check_limit_after_pop(&self, success: bool) -> LimitCheck {
+        // Sticky short-circuit, mirroring `check_limit`: a latched exceed or an exemption is what
+        // that pass would return, whatever the sub-trackers hold.
+        if !self.has_exceeded_limit.within_limit() {
+            return self.has_exceeded_limit;
+        }
+
+        let data_size_check = self.data_size.check_limit_after_pop(success);
+        if data_size_check.exceeded_limit() {
+            return data_size_check;
+        }
+
+        let kv_update_check = self.kv_update.check_limit_after_pop(success);
+        if kv_update_check.exceeded_limit() {
+            return kv_update_check;
+        }
+
+        let compute_gas_check = self.compute_gas.check_limit_after_pop(success);
+        if compute_gas_check.exceeded_limit() {
+            return compute_gas_check;
+        }
+
+        let state_growth_check = self.state_growth.check_limit_after_pop(success);
+        if state_growth_check.exceeded_limit() {
+            return state_growth_check;
+        }
+
+        self.has_exceeded_limit
+    }
+
     /// `true` when a per-tx resource limit has already been latched as exceeded — the exact
     /// condition [`frame_result_if_exceeding_limit`](Self::frame_result_if_exceeding_limit) halts
     /// the transaction on. `WithinLimit` and `Exempt` both return `false`. Reads the latched
@@ -1586,6 +1634,26 @@ impl AdditionalLimit {
 
     /// Hook called when returning a frame result to parent frame in `frame_return_result` or
     /// `last_frame_result`. May modify the frame result in place if the limit is exceeded.
+    ///
+    /// # The late frame-local exceed
+    ///
+    /// A per-frame budget is defined by the frame's usage weighed against its *caller's* budget
+    /// after the merge, so a frame can overrun one without anything having noticed while it ran.
+    /// This hook is where that is first detectable.
+    ///
+    /// REX7 asks the question ahead of the pop, through
+    /// [`peek_check_limit_after_pop`](Self::peek_check_limit_after_pop), and writes the answer onto
+    /// the frame's result before anything acts on it. One classification then drives all three
+    /// things that follow from it: the caller is told the frame reverted, the pop discards the
+    /// frame's usage the way it discards any reverting frame's, and the journal — whose decision
+    /// waits until this hook has run — rolls the frame's state back. Weighing the usage before the
+    /// merge would be a different question with a different answer, which is why the *reading* is
+    /// taken as of after the merge even though the *decision* is taken before it.
+    ///
+    /// Frozen specs keep the split: the check runs after the pop, the merge has already happened
+    /// on the frame's original classification, and revm decided commit-or-revert from that same
+    /// classification before the result ever reached this hook — so a frame that ran to a
+    /// successful exit is already committed and stays committed under the rewritten `Revert`.
     pub(crate) fn before_frame_return_result<const LAST_FRAME: bool>(
         &mut self,
         result: &mut FrameResult,
@@ -1596,6 +1664,27 @@ impl AdditionalLimit {
         // used to distinguish these two cases.
         let duplicate_return_frame_result = LAST_FRAME && !self.data_size.has_active_frame();
 
+        // The merge the pop below is about to perform, read before anything can rewrite it.
+        let merges_usage = result.instruction_result().is_ok();
+        // Frozen specs need this only for the debug cross-check under the pop, and the `cfg!` is a
+        // constant, so their release builds skip it entirely.
+        let peeked = (!duplicate_return_frame_result &&
+            (self.rex7_enabled() || cfg!(debug_assertions)))
+        .then(|| self.peek_check_limit_after_pop(merges_usage));
+
+        if self.rex7_enabled() {
+            if let Some(check) = peeked {
+                if check.is_frame_local() {
+                    // Nothing is latched and nothing needs clearing: the peek only read.
+                    mark_frame_result_as_exceeding_limit(
+                        result,
+                        InstructionResult::Revert,
+                        check.revert_data(),
+                    );
+                }
+            }
+        }
+
         // Pop frame from the frame limit trackers.
         self.state_growth.before_frame_return_result::<LAST_FRAME>(result);
         self.data_size.before_frame_return_result::<LAST_FRAME>(result);
@@ -1605,24 +1694,24 @@ impl AdditionalLimit {
         // Pop stipend from stack and burn unused stipend (Rex4+).
         self.storage_call_stipend.before_frame_return_result::<LAST_FRAME>(result);
 
-        // Frame-level limit handling (Rex4+): check if the child frame exceeded its
-        // frame-local budget. The detection may not have happened during execution, so
-        // we call check_limit() here to ensure it's caught.
-        // If frame-local, absorb it — clear the exceed flag and change to Revert so
-        // remaining gas returns to the caller. This works at any depth including the
-        // top-level frame.
-        //
-        // The rewrite changes the reported result, not the journal. revm decides
-        // commit-or-revert from the frame's original instruction result, before the
-        // `FrameResult` ever reaches this hook, so a frame that ran to a successful exit is
-        // already committed and stays committed under the rewritten Revert.
-        //
-        // Under REX7 an exceed the frame latched while it ran was already absorbed at the frame's
-        // settlement point, ahead of the journal decision, so what reaches here is a first
-        // detection by this hook's own `check_limit` — the frame's usage weighed against its
-        // caller's budget, after the merge. That question is only answerable here, so the absorb
-        // for it stays here on every spec.
         let limit_check = self.check_limit();
+
+        // The peek and this check are one question asked on either side of the merge. Whenever the
+        // merge the peek was asked about is the merge that happened — which is every frame return
+        // on a frozen spec, and every REX7 one the peek did not itself rewrite — the two readings
+        // must be identical, down to the reported `limit` and `used`. This is what stands between
+        // the pre-pop decision and a drift in what counts as a frame-local exceed.
+        debug_assert!(
+            peeked.is_none_or(|peeked| result.instruction_result().is_ok() != merges_usage ||
+                peeked == limit_check),
+            "the pre-pop peek and the post-pop check disagreed: {peeked:?} vs {limit_check:?}"
+        );
+
+        // Frame-level limit handling (Rex4+): if frame-local, absorb it — clear the exceed flag
+        // and change to Revert so remaining gas returns to the caller. This works at any depth
+        // including the top-level frame. Under REX7 the settlement above has already taken the
+        // frame-local case, and what reaches here is a second reading of a caller that the discard
+        // could not bring back within its budget.
         if limit_check.exceeded_limit() && !duplicate_return_frame_result {
             if limit_check.is_frame_local() {
                 let output = limit_check.revert_data();

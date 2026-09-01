@@ -279,6 +279,13 @@ impl ComputeGasTracker {
         self.check_limit_with_extra_on(&self.frame_tracker.view(), extra)
     }
 
+    /// [`check_limit`](TxRuntimeLimit::check_limit) as it will read once the current frame has
+    /// been popped and merged into its caller, computed without popping it.
+    #[inline]
+    pub(crate) fn check_limit_after_pop(&self, success: bool) -> LimitCheck {
+        self.check_limit_with_extra_on(&self.frame_tracker.view_after_pop(success), 0)
+    }
+
     /// [`check_limit_with_extra`](Self::check_limit_with_extra) against an explicit reading of the
     /// tracker.
     ///

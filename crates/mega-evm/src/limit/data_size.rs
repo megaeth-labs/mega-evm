@@ -133,6 +133,13 @@ impl DataSizeTracker {
         self.frame_tracker.add_tx_persistent(amount);
     }
 
+    /// [`check_limit`](TxRuntimeLimit::check_limit) as it will read once the current frame has
+    /// been popped and merged into its caller, computed without popping it.
+    #[inline]
+    pub(crate) fn check_limit_after_pop(&self, success: bool) -> super::LimitCheck {
+        self.check_limit_on(&self.frame_tracker.view_after_pop(success))
+    }
+
     /// [`check_limit`](TxRuntimeLimit::check_limit) against an explicit reading of the tracker.
     ///
     /// The reading is a parameter so that one body can answer both questions asked of this check:

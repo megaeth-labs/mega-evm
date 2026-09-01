@@ -308,6 +308,41 @@ impl<I> FrameLimitTracker<I> {
         FrameLimitView { frame: self.frame_budget(), net_usage: self.net_usage() }
     }
 
+    /// What the limit checks will read out of this tracker once the current frame has been popped
+    /// and merged into its caller — computed without popping it.
+    ///
+    /// This mirrors [`pop_frame`](Self::pop_frame) term for term, and is the *only* place that
+    /// mirrors it: the child's persistent usage always moves up, its discardable usage and refund
+    /// move up on success and vanish otherwise, and the cached totals lose exactly what vanished.
+    /// A frame return cross-checks the two against each other in debug builds.
+    pub(crate) fn view_after_pop(&self, success: bool) -> FrameLimitView {
+        let Some(child) = self.frame_stack.last() else {
+            // Nothing to pop: `pop_frame` on an empty stack changes nothing.
+            return self.view();
+        };
+        let frame = self.frame_stack.len().checked_sub(2).map(|parent_index| {
+            let parent = &self.frame_stack[parent_index];
+            let persistent = parent.persistent_usage + child.persistent_usage;
+            let (discardable, refund) = if success {
+                (parent.discardable_usage + child.discardable_usage, parent.refund + child.refund)
+            } else {
+                (parent.discardable_usage, parent.refund)
+            };
+            FrameBudget {
+                limit: parent.limit,
+                used: persistent.checked_add(discardable).expect("overflow"),
+                refund,
+            }
+        });
+        let net_usage = if success {
+            self.net_usage()
+        } else {
+            (self.cached_total_used - child.discardable_usage)
+                .saturating_sub(self.cached_total_refund - child.refund)
+        };
+        FrameLimitView { frame, net_usage }
+    }
+
     /// Returns the budget of the current frame, in the same form
     /// [`frame_budget_check`] reports it on an exceed.
     ///
@@ -613,6 +648,66 @@ mod tests {
     use super::*;
 
     const ADDR: Address = address!("0000000000000000000000000000000000001234");
+
+    /// The pre-pop reading must be the post-pop reading, exactly.
+    ///
+    /// A frame return decides whether the returning frame overran its caller's budget from
+    /// [`FrameLimitTracker::view_after_pop`], one step before the pop that would produce that
+    /// reading naturally. The whole ordering rests on the two being the same numbers, so drive a
+    /// tracker into every shape the merge distinguishes — persistent-only, discardable, refunds,
+    /// a refund larger than the discardable usage it accompanies, and both depths at which the
+    /// merge target differs (a parent frame, and the TX entry) — and compare the predicted
+    /// reading against the one a real pop produces, field for field.
+    #[test]
+    fn test_view_after_pop_matches_the_view_a_real_pop_produces() {
+        // (label, child persistent, child discardable, child refund, extra frames beneath)
+        let shapes: [(&str, u64, u64, u64, usize); 6] = [
+            ("empty child", 0, 0, 0, 1),
+            ("persistent only", 30, 0, 0, 1),
+            ("discardable only", 0, 40, 0, 1),
+            ("mixed", 7, 40, 11, 1),
+            ("refund above discardable", 7, 5, 40, 1),
+            ("child of the tx entry", 7, 40, 11, 0),
+        ];
+
+        for (label, persistent, discardable, refund, parents) in shapes {
+            for success in [true, false] {
+                let mut tracker = FrameLimitTracker::<()>::new(MegaSpecId::REX7, 10_000);
+                tracker.add_tx_persistent(90);
+                for _ in 0..parents {
+                    tracker.push_frame(());
+                    // Give the parent a reading of its own on every lane, so a merge that
+                    // dropped a term would show up rather than cancel.
+                    tracker.add_frame_persistent(13);
+                    tracker.add_frame_discardable(21);
+                    tracker.add_frame_refund(5);
+                }
+                tracker.push_frame(());
+                tracker.add_frame_persistent(persistent);
+                tracker.add_frame_discardable(discardable);
+                tracker.add_frame_refund(refund);
+
+                let predicted = tracker.view_after_pop(success);
+                tracker.pop_frame(success);
+                assert_eq!(
+                    predicted,
+                    tracker.view(),
+                    "{label} (success={success}): the pre-pop reading must equal the post-pop one",
+                );
+            }
+        }
+    }
+
+    /// The pre-pop reading of an empty stack is the reading itself: `pop_frame` on an empty stack
+    /// changes nothing, and the top-level frame return reaches this with the stack already popped.
+    #[test]
+    fn test_view_after_pop_on_an_empty_stack_is_the_current_view() {
+        let mut tracker = FrameLimitTracker::<()>::new(MegaSpecId::REX7, 10_000);
+        tracker.add_tx_persistent(90);
+        for success in [true, false] {
+            assert_eq!(tracker.view_after_pop(success), tracker.view());
+        }
+    }
 
     /// `set_created_address` on an empty frame stack must be a no-op.
     #[test]
