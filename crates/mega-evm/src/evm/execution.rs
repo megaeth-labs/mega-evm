@@ -1194,9 +1194,19 @@ where
             //
             // `total_gas_spent` rather than the deprecated `spent`: the two are the same
             // subtraction today, and EIP-8037's state-gas split — which is what deprecated the
-            // latter — is pinned off for every `MegaEVM` transaction, so the reservoir is
-            // structurally zero here.
-            additional_limit.settle_destroyed_compute_gas(gas.total_gas_spent());
+            // latter — is pinned off for every `MegaEVM` transaction.
+            //
+            // The reservoir is therefore structurally zero and the subtraction below is a no-op on
+            // every path — but it is the receipt's own arithmetic (`limit - remaining -
+            // reservoir`), and stating it here is what makes the settlement's envelope the one the
+            // receipt reports rather than one that happens to coincide with it. An inspector is
+            // the one thing that can fill a reservoir, and the lane booked a line earlier is what
+            // the law adds back so the two sides still meet.
+            additional_limit
+                .record_inspector_state_gas_dimension(gas.reservoir(), gas.state_gas_spent());
+            additional_limit.settle_destroyed_compute_gas(
+                gas.total_gas_spent().saturating_sub(gas.reservoir()),
+            );
         }
 
         Ok(())

@@ -30,6 +30,14 @@
 //!   reclaim from. The counter and the action between them hold everything a frame has, and
 //!   [`held`] is the identity the two lanes split.
 //! - Frame-envelope edits go to [`AdditionalLimit::record_inspector_env_adjustment`].
+//! - Refund edits go to [`book_refund`], on their own lane: a refund moves what the sender pays
+//!   without moving the envelope the conservation law is stated over, so it needs a lane of its own
+//!   and no term in the law. [`held_refund`] is the reading it is taken against.
+//! - The EIP-8037 state-gas dimension — a `Gas`'s `reservoir` and `state_gas_spent`, and a frame
+//!   input's `reservoir` — is *not* measured here. `MegaETH` runs with EIP-8037 off, so it produces
+//!   none of it and there is no difference to take; the transaction's own settlement point books
+//!   whatever of it survives. See
+//!   [`InspectorLedger::reservoir`](crate::InspectorLedger::reservoir).
 //! - A callback that answers a frame itself stages the envelope it was handed, through
 //!   [`AdditionalLimit::stage_inspector_interception_envelope`], so that the frame init it
 //!   short-circuited can settle the gas its synthetic outcome carries against what the transaction
@@ -50,7 +58,7 @@ use revm::{
     handler::FrameResult,
     interpreter::{
         interpreter_types::LoopControl, CallInputs, CallOutcome, CreateInputs, CreateOutcome,
-        FrameInput, InstructionResult, Interpreter, InterpreterAction, InterpreterResult,
+        FrameInput, Gas, InstructionResult, Interpreter, InterpreterAction, InterpreterResult,
         InterpreterTypes,
     },
     Inspector,
@@ -195,6 +203,68 @@ fn held(action: Option<&InterpreterAction>, counter: u64) -> i128 {
         }
         Some(InterpreterAction::Return(result)) => i128::from(result.gas.remaining()),
     }
+}
+
+/// The refund a frame and its pending continuation hold, given the action it is carrying and its
+/// own gas object.
+///
+/// [`held`]'s counterpart on the refund dimension, and it has the same three cases for the same
+/// reason — the object the EVM will read next is the one the frame is holding:
+///
+/// ```text
+/// held_refund(None,        gas) = gas.refunded()
+/// held_refund(NewFrame(_), gas) = gas.refunded()
+/// held_refund(Return(r),   gas) = r.gas.refunded()
+/// ```
+///
+/// The middle case differs from [`held`]'s: a `NewFrame` action carries a child's *envelope* but
+/// no refund of its own, and the suspending frame resumes on this very counter with the child's
+/// refund added to it. So the counter is the live object in two of the three cases, and only a
+/// terminating action displaces it.
+///
+/// Read on both sides of a callback, the difference is the refund the inspector wrote — wherever
+/// it wrote it, and whichever of the two objects the EVM goes on to read.
+#[inline]
+fn held_refund(action: Option<&InterpreterAction>, gas: &Gas) -> i64 {
+    match action {
+        None | Some(InterpreterAction::NewFrame(_)) => gas.refunded(),
+        Some(InterpreterAction::Return(result)) => result.gas.refunded(),
+    }
+}
+
+/// Books what a callback did to a refund counter.
+///
+/// Nominal: the figure booked is what the inspector wrote, not what survives the EIP-3529 cap or
+/// the chain of frame returns between here and the receipt — see
+/// [`InspectorLedger::refund`](crate::InspectorLedger::refund) for why neither of those is a
+/// quantity a boundary can measure, and why over-stating is the safe direction for the one
+/// consumer this lane has.
+#[inline]
+fn book_refund<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    context: &MegaContext<DB, ExtEnvs>,
+    before: i64,
+    after: i64,
+) {
+    if before != after {
+        context
+            .additional_limit
+            .borrow_mut()
+            .record_inspector_refund_adjustment(i128::from(after) - i128::from(before));
+    }
+}
+
+/// The refund a synthetic outcome carries, for a callback that answered a frame itself.
+///
+/// There is no "before" to difference against: no frame is built, so the EVM produced no refund
+/// here at all and the whole of what the outcome carries is the inspector's — the same argument
+/// the interception's gas baseline rests on, with the baseline being zero rather than the
+/// envelope because a frame that never ran has refunded nothing.
+#[inline]
+fn book_synthetic_refund<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    context: &MegaContext<DB, ExtEnvs>,
+    refunded: i64,
+) {
+    book_refund(context, 0, refunded);
 }
 
 /// What a live-interpreter callback did to the interpreter's pending action.
@@ -471,10 +541,16 @@ where
         context: &mut MegaContext<DB, ExtEnvs>,
     ) {
         let action = interp.bytecode.action().clone();
+        let refund_before = held_refund(action.as_ref(), &interp.gas);
         let before = interp.gas.remaining();
         self.inner.initialize_interp(interp, context);
         let change = measure_pending_action(action, interp.bytecode.action().as_ref(), before);
         book_pending_action(context, change);
+        book_refund(
+            context,
+            refund_before,
+            held_refund(interp.bytecode.action().as_ref(), &interp.gas),
+        );
         context.additional_limit.borrow_mut().record_inspector_gas_adjustment::<false>(
             &mut interp.gas,
             before,
@@ -485,10 +561,16 @@ where
     #[inline]
     fn step(&mut self, interp: &mut Interpreter<INTR>, context: &mut MegaContext<DB, ExtEnvs>) {
         let action = interp.bytecode.action().clone();
+        let refund_before = held_refund(action.as_ref(), &interp.gas);
         let before = interp.gas.remaining();
         self.inner.step(interp, context);
         let change = measure_pending_action(action, interp.bytecode.action().as_ref(), before);
         book_pending_action(context, change);
+        book_refund(
+            context,
+            refund_before,
+            held_refund(interp.bytecode.action().as_ref(), &interp.gas),
+        );
         context.additional_limit.borrow_mut().record_inspector_gas_adjustment::<true>(
             &mut interp.gas,
             before,
@@ -505,10 +587,16 @@ where
     #[inline]
     fn step_end(&mut self, interp: &mut Interpreter<INTR>, context: &mut MegaContext<DB, ExtEnvs>) {
         let action = interp.bytecode.action().clone();
+        let refund_before = held_refund(action.as_ref(), &interp.gas);
         let before = interp.gas.remaining();
         self.inner.step_end(interp, context);
         let change = measure_pending_action(action, interp.bytecode.action().as_ref(), before);
         book_pending_action(context, change);
+        book_refund(
+            context,
+            refund_before,
+            held_refund(interp.bytecode.action().as_ref(), &interp.gas),
+        );
         context.additional_limit.borrow_mut().record_inspector_gas_adjustment::<true>(
             &mut interp.gas,
             before,
@@ -531,10 +619,16 @@ where
         log: Log,
     ) {
         let action = interpreter.bytecode.action().clone();
+        let refund_before = held_refund(action.as_ref(), &interpreter.gas);
         let before = interpreter.gas.remaining();
         self.inner.log_full(interpreter, context, log);
         let change = measure_pending_action(action, interpreter.bytecode.action().as_ref(), before);
         book_pending_action(context, change);
+        book_refund(
+            context,
+            refund_before,
+            held_refund(interpreter.bytecode.action().as_ref(), &interpreter.gas),
+        );
         context.additional_limit.borrow_mut().record_inspector_gas_adjustment::<true>(
             &mut interpreter.gas,
             before,
@@ -556,6 +650,9 @@ where
             frame_input_gas_limit(frame_input),
             outcome.is_some(),
         );
+        if let Some(outcome) = &outcome {
+            book_synthetic_refund(context, outcome.gas().refunded());
+        }
         book_intervention(context, outcome.is_some() || frame_input_rewritten(before, frame_input));
         outcome
     }
@@ -569,7 +666,9 @@ where
     ) {
         let before = frame_result.instruction_result();
         let output = frame_result.interpreter_result().output.clone();
+        let refund_before = frame_result.gas().refunded();
         self.inner.frame_end(context, frame_input, frame_result);
+        book_refund(context, refund_before, frame_result.gas().refunded());
         book_intervention(
             context,
             result_rewritten((before, &output), frame_result.interpreter_result()),
@@ -595,6 +694,9 @@ where
             Some(inputs.gas_limit),
             outcome.is_some(),
         );
+        if let Some(outcome) = &outcome {
+            book_synthetic_refund(context, outcome.result.gas.refunded());
+        }
         book_intervention(context, outcome.is_some() || call_inputs_rewritten(before, inputs));
         outcome
     }
@@ -610,7 +712,9 @@ where
         outcome: &mut CallOutcome,
     ) {
         let before = (outcome.result.result, outcome.result.output.clone());
+        let refund_before = outcome.result.gas.refunded();
         self.inner.call_end(context, inputs, outcome);
+        book_refund(context, refund_before, outcome.result.gas.refunded());
         book_intervention(context, result_rewritten((before.0, &before.1), &outcome.result));
     }
 
@@ -628,6 +732,9 @@ where
             Some(inputs.gas_limit()),
             outcome.is_some(),
         );
+        if let Some(outcome) = &outcome {
+            book_synthetic_refund(context, outcome.result.gas.refunded());
+        }
         book_intervention(context, outcome.is_some() || create_inputs_rewritten(before, inputs));
         outcome
     }
@@ -644,7 +751,9 @@ where
         outcome: &mut CreateOutcome,
     ) {
         let before = (outcome.result.result, outcome.result.output.clone());
+        let refund_before = outcome.result.gas.refunded();
         self.inner.create_end(context, inputs, outcome);
+        book_refund(context, refund_before, outcome.result.gas.refunded());
         book_intervention(context, result_rewritten((before.0, &before.1), &outcome.result));
         reject_forbidden_create_rewrite(context, before.0, &mut outcome.result);
     }

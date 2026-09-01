@@ -671,6 +671,41 @@ impl AdditionalLimit {
         self.inspector.gas += delta;
     }
 
+    /// Books an adjustment an inspector made to a refund counter — see
+    /// [`InspectorLedger::refund`](inspector_ledger::InspectorLedger::refund).
+    ///
+    /// Booked and nothing else: no limit reads it, the conservation law has no term for it, and
+    /// the transaction's gas accounting is unmoved by it. Its one consumer is
+    /// [`InspectorLedger::is_zero`](inspector_ledger::InspectorLedger::is_zero), which is what the
+    /// canonical block path asks before admitting a transaction — and a refund is what the sender
+    /// pays, so a receipt an inspector moved this way has to be refused like any other.
+    #[inline]
+    pub(crate) fn record_inspector_refund_adjustment(&mut self, delta: i128) {
+        self.inspector.refund += delta;
+    }
+
+    /// Books the EIP-8037 state-gas dimension a transaction ends holding, at the one point it is
+    /// final — see [`InspectorLedger::reservoir`](inspector_ledger::InspectorLedger::reservoir).
+    ///
+    /// Both numbers are structurally zero on every `MegaETH` path and every spec: EIP-8037 is off,
+    /// so no instruction charges state gas, no site fills a reservoir, and nothing here fires for
+    /// a transaction that ran without a rewriting inspector. What is non-zero is therefore the
+    /// inspector's in whole, which is why this reads the final figures rather than differencing
+    /// two readings the way every other lane does.
+    ///
+    /// Call this after op-revm has normalised the top-level gas object and before the destroyed
+    /// remainder is settled: the reservoir is what the settlement's envelope has to be reduced by,
+    /// and the conservation law reads the lane back out of that envelope.
+    #[inline]
+    pub(crate) fn record_inspector_state_gas_dimension(
+        &mut self,
+        reservoir: u64,
+        state_gas_spent: i64,
+    ) {
+        self.inspector.reservoir += i128::from(reservoir);
+        self.inspector.state_gas += i128::from(state_gas_spent);
+    }
+
     /// Counts one rewrite the shim refused because its shape is forbidden — see
     /// [`InspectorLedger::rejected_rewrites`](inspector_ledger::InspectorLedger::rejected_rewrites).
     #[inline]
