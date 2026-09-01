@@ -52,6 +52,8 @@ Read the table by the *argument the rewrite reaches through*, not by the tool th
 | A synthetic outcome that skips the frame entirely (`frame_start`, `call`, `create`) | Supported | `InspectorLedger::interventions`; nothing on the `env` lane — the edited inputs never reach a frame — and the gas the outcome carries on the `result` lane, measured against the envelope the answering callback was handed rather than as a difference across it | the frame's envelope is settled at `finalize_frame` as `FrameExit::RefusedSynthetically` |
 | A finished frame result's remaining gas (`call_end`, `create_end`, `frame_end`) | Supported | `InspectorLedger::result`, at the frame's settlement point rather than at the callback boundary | nothing |
 | A finished frame result's returned output (`call_end`, `create_end`, `frame_end`) | Supported | `InspectorLedger::interventions`, at the callback boundary | nothing |
+| A refund written into any `Gas` a callback holds | Supported | `InspectorLedger::refund`, at the callback boundary, nominally | nothing: a refund moves `tx_gas_used`, not the `limit - remaining` the conservation law is stated over |
+| The EIP-8037 state-gas pool or spend counter, on any `Gas` or on a call's inputs | Supported | `InspectorLedger::reservoir` / `::state_gas`, settled once from the figures the transaction ends with | the pool lowers the envelope the receipt reports, so it joins the law's `I` term; the spend counter moves the receipt's state-gas figure and nothing else |
 | A successful frame result rewritten into a revert or a halt | Supported | `InspectorLedger::interventions` — no gas moves | the journal decision follows the final result, so the frame's state is rolled back with it; a precompile's executed/destroyed split follows it too |
 | A failed **call** frame rewritten into a success | Supported | `InspectorLedger::interventions` | the journal commits, so the frame's state follows the result its caller was handed |
 | A failed **contract creation** rewritten into a success | **Refused** | `InspectorLedger::rejected_rewrites`, alongside `interventions` | `reject_forbidden_create_rewrite` restores the original classification and fails the transaction with `EVMError::Custom`; debug builds assert |
@@ -81,7 +83,7 @@ The shape table above is written over rewrites this repository has thought of.
 This one is written over the `Inspector` trait's own signatures, and is closed: `tests/rex7/gas_surface.rs` pins it against what upstream's derived `Debug` renders, field by field, and fails on one that has no verdict here.
 
 Read it by the object the gas sits in.
-The first six rows are the measured lanes; the rest are the numbers that share those objects, each with the reason it needs no lane — or, for two of them, the statement that it does and has none.
+The first six rows are the lanes measured across a callback boundary; the three after them are the numbers that share those objects and are measured somewhere else; the rest are the ones that need no lane, each with the reason.
 
 | Gas carrier | Reachable at | Verdict |
 | --- | --- | --- |
@@ -91,19 +93,21 @@ The first six rows are the measured lanes; the rest are the numbers that share t
 | `FrameInput` / `CallInputs` / `CreateInputs` → `gas_limit` | `frame_start`, `call`, `create` | `InspectorLedger::env`, at the callback boundary — unless the same callback answers the frame, in which case this value is the baseline the row below is measured against |
 | The `Option<FrameResult>` / `Option<CallOutcome>` / `Option<CreateOutcome>` a callback **returns** → `gas` → `remaining` | `frame_start`, `call`, `create` | `InspectorLedger::result`, settled at `finalize_frame` against that baseline |
 | `FrameResult` / `CallOutcome` / `CreateOutcome` → `result.gas` → `remaining` | `frame_end`, `call_end`, `create_end` | `InspectorLedger::result`, at the frame's settlement point |
-| Every `Gas` above → `refunded` | every callback that holds one | **Not closed.** A refund written here travels to the caller on frame return and reaches the receipt's gas used, while the conservation law — stated over `limit - remaining` — stays closed and every ledger lane stays zero. |
-| Every `Gas` above → `reservoir`, and `CallInputs` / `CreateInputs` → `reservoir` | every callback that holds one | **Not closed.** EIP-8037 state gas is structurally zero on every `MegaETH` path, so a reservoir an inspector writes is gas the transaction never funded; it moves the envelope, and the terminal cross-check trips on it with every ledger lane zero. |
+| Every `Gas` above → `refunded` | every callback that holds one | `InspectorLedger::refund`, at the callback boundary. Nominal: neither the EIP-3529 cap nor the chain of successful frame returns an edit must survive is attributable to one callback, and the lane feeds no identity — so over-stating it costs nothing, while under-stating it would let a rewritten receipt into a block. |
+| Every `Gas` above → `reservoir`, and `CallInputs` / `CreateInputs` → `reservoir` | every callback that holds one | `InspectorLedger::reservoir`, settled once from the figure the transaction ends with, and a term of the law because the receipt reports the pool as unspent. `MegaETH` produces none of it, so there is no difference to take; revm propagates it between frames by replacement, so a boundary difference would book edits the EVM goes on to erase. |
 | Every `Gas` above → `gas_limit` | every callback that holds one | Inert. op-revm normalises the top-level gas object to the transaction's own limit before the settlement point, and no REX7 lane reads a frame's limit; the two that do are the REX4 legacy stipend's burn and rescue caps, which REX5 mode does not take. |
-| Every `Gas` above → `state_gas_spent` | every callback that holds one | Inert, for the same reason as `reservoir`'s spending side: with EIP-8037 off, nothing reads it. |
+| Every `Gas` above → `state_gas_spent` | every callback that holds one | `InspectorLedger::state_gas`, settled at the same point. Not a term of the law: it moves the receipt's state-gas figure, not the envelope. Its *other* effect — a failing frame folds it into its caller's pool — arrives inside the reservoir lane, which is read after the fold. |
 | Every `Gas` above → `memory` (`MemoryGas`) | every callback that holds one | Not a budget but a memo of the interpreter's memory size. Editing it without editing the memory desynchronises the two and the EVM reads out of bounds — the stack-and-memory row of the shape table, not a gas lane. |
 | `CallInputs` / `CreateInputs` semantic fields, including `charged_new_account_state_gas`; `InterpreterResult::result` and `::output` | `frame_start`, `call`, `create`, `frame_end`, `call_end`, `create_end` | Not gas. Booked on `InspectorLedger::interventions` by the rewrite comparison. |
 | The interpreter's `stack`, `memory`, `return_data`, `input`, `runtime_flag`, `extend` | the four live-interpreter callbacks | Not gas. The EVM executes on whatever it finds and meters that as its own work, because it is. |
 | `&mut CTX` — the journal, and through `MegaContext`'s `DerefMut` the transaction, the block, the configuration and `MegaETH`'s own trackers | every callback but `selfdestruct` | Not gas the EVM handed over. Unmeasured for the reason the journal is: telling whether any of it came back changed needs a snapshot of unbounded state that no callback boundary can take at a cost the inspected path can carry. The gas schedule is the exception — the schedule pin rejects a rewritten one, at the next transaction rather than within this one. |
 | Everything passed by value (`Log`; `selfdestruct`'s three arguments) and the inputs the `*_end` callbacks take by shared reference | — | No mutable reach at all. |
 
-**The two open rows are open on purpose.**
-They were found by this audit, are not what the interception lane closed, and are recorded rather than fixed so that closing them is a decision with an owner.
-`tests/rex7/gas_surface.rs::test_the_open_gaps_are_the_ones_the_table_names` names them, so closing one has to touch that test and this table together.
+**There are no open rows, and the table cannot be left with one.**
+`Coverage::NotClosed` still exists, so a surface that reaches what `MegaETH` reports and that no lane books is nameable — but `tests/rex7/gas_surface.rs::test_the_table_carries_no_open_gap` fails on any row that carries it.
+Writing a gap down is how it gets closed; leaving it written down is how a table stops being a statement about the code.
+What no test can catch is a gap _mis_-classified as `Inert` or `NotGas`: those verdicts are claims about what the EVM does with a number, and only the measurement each was written from backs them.
+`state_gas_spent` is the cautionary case — it sat under "EIP-8037 is off, so nothing reads it", which is true of every instruction and not of the receipt.
 
 **What the closure pin does and does not reach.**
 A field upstream adds to any of these structs shows up in its `Debug` rendering, matches no row, and fails the test by name.
