@@ -18,6 +18,9 @@
 //!   that should have read it: a terminating opcode's `step_end`, whose counter edit reaches
 //!   nobody, and a precompile's classification, whose split has to follow the callback rather than
 //!   the recording site.
+//! - `interception_gas` — the gas an inspector puts into a synthetic outcome, over the four
+//!   sizings it can choose relative to the envelope it was handed, and the halt direction where
+//!   the choice reaches nothing.
 //! - `interceptor_resume` — the two ways a CALL returns without a child frame ever running: a
 //!   system contract interceptor's synthetic result, and a precompile.
 //! - `keyless_synthetic_halt` — the `KeylessDeploy` interceptor's synthetic halts: the two that
@@ -93,6 +96,7 @@ mod gas_leakage;
 mod guard_pass_static_gas;
 mod inspector_cheat_matrix;
 mod inspector_settlement_window;
+mod interception_gas;
 mod interceptor_resume;
 mod keyless_synthetic_halt;
 mod latch_surfacing;
