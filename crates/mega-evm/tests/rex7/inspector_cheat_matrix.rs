@@ -73,6 +73,12 @@ const ACTION: u64 = 1_500;
 /// Gas an interception cheat's synthetic outcome hands back over, or under, the envelope it was
 /// given.
 const INTERCEPTION: u64 = 4_000;
+/// Refund a refund cheat adds to, or removes from, a `Gas`'s refund counter.
+const REFUND: i64 = 2_000;
+/// The EIP-8037 pool a reservoir cheat fills.
+const RESERVOIR: u64 = 3_500;
+/// The EIP-8037 spend counter a state-gas cheat writes.
+const STATE_GAS: i64 = 1_200;
 
 /// Slot the top frame writes, last of all, so a cheat that fails the top frame is visible.
 const TOP_SLOT: u64 = 0x10;
@@ -80,6 +86,9 @@ const TOP_SLOT: u64 = 0x10;
 const CALLEE_SLOT: u64 = 0x20;
 /// Slot the fixture's constructor writes.
 const INIT_SLOT: u64 = 0x30;
+/// Slot every frame sets and then clears, so each ends holding a refund the EVM itself produced —
+/// which is what the refund-lowering column needs to take from.
+const CLEARED_SLOT: u64 = 0x40;
 /// Value every fixture write stores, so a stack cheat that bumps it is visible as `2`.
 const STORED: u64 = 1;
 
@@ -135,6 +144,10 @@ impl At {
 /// and in which direction it moves it. Two shapes that move the same argument in opposite
 /// directions are separate columns because the ledger's sign convention is exactly that
 /// distinction, and a lane that books one direction and drops the other is a real failure mode.
+///
+/// The EIP-8037 dimensions are the one place that pairing does not apply: `MegaETH` runs with the
+/// EIP off, so a `Gas` reaches every callback with both of its state-gas figures at zero and there
+/// is nothing to lower.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Shape {
     /// Write gas into a live interpreter's counter.
@@ -170,6 +183,15 @@ enum Shape {
     RaiseActionEnvelope,
     /// Lower it.
     LowerActionEnvelope,
+    /// Add to a `Gas`'s refund counter — what the sender is billed, which the envelope does not
+    /// reach.
+    RaiseRefund,
+    /// Take from one.
+    LowerRefund,
+    /// Fill a `Gas`'s or a frame input's EIP-8037 state-gas pool.
+    WriteReservoir,
+    /// Write a `Gas`'s EIP-8037 spend counter.
+    WriteStateGas,
     /// Edit the interpreter's stack or memory — the frame's working state, which the EVM reads
     /// back as operands and as data.
     EditStackOrMemory,
@@ -178,7 +200,7 @@ enum Shape {
 }
 
 impl Shape {
-    const ALL: [Self; 18] = [
+    const ALL: [Self; 22] = [
         Self::InjectGas,
         Self::DrainGas,
         Self::RaiseEnvelope,
@@ -195,6 +217,10 @@ impl Shape {
         Self::LowerActionResultGas,
         Self::RaiseActionEnvelope,
         Self::LowerActionEnvelope,
+        Self::RaiseRefund,
+        Self::LowerRefund,
+        Self::WriteReservoir,
+        Self::WriteStateGas,
         Self::EditStackOrMemory,
         Self::JournalWrite,
     ];
@@ -203,6 +229,16 @@ impl Shape {
     /// build it.
     const fn is_interception(self) -> bool {
         matches!(self, Self::Intercept | Self::RaiseInterceptionGas | Self::LowerInterceptionGas)
+    }
+
+    /// Whether this shape reaches through a `Gas`'s refund counter.
+    const fn is_refund(self) -> bool {
+        matches!(self, Self::RaiseRefund | Self::LowerRefund)
+    }
+
+    /// Whether this shape reaches through the EIP-8037 state-gas dimension.
+    const fn is_state_gas(self) -> bool {
+        matches!(self, Self::WriteReservoir | Self::WriteStateGas)
     }
 
     /// Whether this shape reaches through the interpreter's *pending action* rather than through
@@ -266,6 +302,30 @@ fn inapplicable(at: At, shape: Shape) -> Option<&'static str> {
             "only a callback that runs before the frame is built can answer it instead: the \
              `*_end` callbacks are handed a result the EVM already produced",
         );
+    }
+
+    if shape.is_refund() || shape.is_state_gas() {
+        if !interpreter_facing && !input_facing && !result_facing {
+            return Some("no `Gas` and no frame input is reachable from this callback");
+        }
+        if input_facing && shape != WriteReservoir {
+            return Some(
+                "a frame's inputs carry no refund counter and no state-gas spend counter; the \
+                 pool is the one figure of either dimension they do carry",
+            );
+        }
+        if shape == WriteReservoir && at == Create {
+            return Some(
+                "`CreateInputs` keeps its pool private and offers no setter, so the only rewrite \
+                 that reaches it replaces the whole struct — which is the `EditInput` column",
+            );
+        }
+        if shape == LowerRefund && at == InitializeInterp {
+            return Some(
+                "a frame is handed a fresh `Gas` whose refund counter is zero, so there is \
+                 nothing to lower before its first instruction runs",
+            );
+        }
     }
 
     match shape {
@@ -334,6 +394,22 @@ impl Cheat {
                 self.moved_gas -= i128::from(DRAIN);
                 self.fired += 1;
             }
+            Shape::RaiseRefund => {
+                interp.gas.record_refund(REFUND);
+                self.fired += 1;
+            }
+            Shape::LowerRefund => {
+                interp.gas.record_refund(-REFUND);
+                self.fired += 1;
+            }
+            Shape::WriteReservoir => {
+                interp.gas.set_reservoir(RESERVOIR);
+                self.fired += 1;
+            }
+            Shape::WriteStateGas => {
+                interp.gas.set_state_gas_spent(STATE_GAS);
+                self.fired += 1;
+            }
             Shape::EditStackOrMemory => {
                 // Bump the value an `SSTORE` is about to write, so the edit is visible in the
                 // produced state rather than only in the absence of an accounting change.
@@ -345,6 +421,26 @@ impl Cheat {
             }
             _ => unreachable!("{:?} is not an interpreter-facing shape", self.shape),
         }
+    }
+
+    /// Whether a live-interpreter callback is one this cheat's shape can land at.
+    ///
+    /// Two shapes are choosy about the moment rather than about the callback. A refund the
+    /// interpreter is to *lose* needs one it already holds, which only exists once a frame has
+    /// cleared a storage slot; and any refund edit made while a terminating action is pending is
+    /// written into a counter the action has already copied, so it would land on the action's
+    /// number rather than on this column's mechanism.
+    fn interpreter_moment_is_right<INTR: InterpreterTypes>(
+        &self,
+        interp: &mut Interpreter<INTR>,
+    ) -> bool {
+        if !self.shape.is_refund() {
+            return true;
+        }
+        if matches!(interp.bytecode.action(), Some(InterpreterAction::Return(_))) {
+            return false;
+        }
+        self.shape != Shape::LowerRefund || interp.gas.refunded() >= REFUND
     }
 
     /// Overwrites the frame's first memory word — the edit the three interpreter-facing rows
@@ -417,6 +513,11 @@ impl Cheat {
                 // A static call: the callee's `SSTORE` now fails, which is a change to what the
                 // frame does rather than to what it is allowed to spend.
                 inputs.is_static = true;
+                self.fired += 1;
+                None
+            }
+            Shape::WriteReservoir => {
+                inputs.reservoir += RESERVOIR;
                 self.fired += 1;
                 None
             }
@@ -514,6 +615,27 @@ impl Cheat {
                 result.result = InstructionResult::Stop;
                 self.fired += 1;
             }
+            Shape::RaiseRefund => {
+                result.gas.record_refund(REFUND);
+                self.fired += 1;
+            }
+            Shape::LowerRefund => {
+                assert!(
+                    result.gas.refunded() >= REFUND,
+                    "the fixture must hand this cell a frame that refunded something, got {}",
+                    result.gas.refunded(),
+                );
+                result.gas.record_refund(-REFUND);
+                self.fired += 1;
+            }
+            Shape::WriteReservoir => {
+                result.gas.set_reservoir(RESERVOIR);
+                self.fired += 1;
+            }
+            Shape::WriteStateGas => {
+                result.gas.set_state_gas_spent(STATE_GAS);
+                self.fired += 1;
+            }
             _ => unreachable!("{:?} is not a result-facing shape", self.shape),
         }
     }
@@ -533,6 +655,7 @@ impl<CTX: ContextTr, INTR: InterpreterTypes> Inspector<CTX, INTR> for Cheat {
         match self.shape {
             Shape::JournalWrite => self.hit_journal(context),
             Shape::EditStackOrMemory => self.hit_frame_state(interp),
+            _ if !self.interpreter_moment_is_right(interp) => {}
             _ => self.hit_interpreter(interp),
         }
     }
@@ -550,6 +673,13 @@ impl<CTX: ContextTr, INTR: InterpreterTypes> Inspector<CTX, INTR> for Cheat {
                 self.hit_interpreter(interp)
             }
             Shape::EditStackOrMemory | Shape::JournalWrite => {}
+            // The refund columns fire on the first callback that offers the moment they need,
+            // rather than on a fixed ordinal.
+            _ if self.shape.is_refund() => {
+                if self.interpreter_moment_is_right(interp) {
+                    self.hit_interpreter(interp);
+                }
+            }
             _ if self.steps == self.step_at => self.hit_interpreter(interp),
             _ => {}
         }
@@ -563,6 +693,12 @@ impl<CTX: ContextTr, INTR: InterpreterTypes> Inspector<CTX, INTR> for Cheat {
         // target, not on a fixed ordinal — only a handful of opcodes leave an action behind.
         if self.shape.is_pending_action() {
             self.hit_pending_action(interp);
+            return;
+        }
+        if self.shape.is_refund() {
+            if self.interpreter_moment_is_right(interp) {
+                self.hit_interpreter(interp);
+            }
             return;
         }
         if self.steps != self.step_at {
@@ -582,6 +718,7 @@ impl<CTX: ContextTr, INTR: InterpreterTypes> Inspector<CTX, INTR> for Cheat {
         match self.shape {
             Shape::JournalWrite => self.hit_journal(context),
             Shape::EditStackOrMemory => self.hit_frame_state(interp),
+            _ if !self.interpreter_moment_is_right(interp) => {}
             _ => self.hit_interpreter(interp),
         }
     }
@@ -677,10 +814,10 @@ enum Fixture {
     RevertingCallee,
 }
 
-/// Init code that writes [`INIT_SLOT`] and returns two bytes of runtime code.
+/// Init code that writes [`INIT_SLOT`], leaves a refund behind, and returns two bytes of runtime
+/// code.
 fn init_code() -> Vec<u8> {
-    BytecodeBuilder::default()
-        .sstore(U256::from(INIT_SLOT), U256::from(STORED))
+    clear_a_slot(BytecodeBuilder::default().sstore(U256::from(INIT_SLOT), U256::from(STORED)))
         .push_number(0x6000u64)
         .push_number(0u64)
         .append(MSTORE)
@@ -691,10 +828,24 @@ fn init_code() -> Vec<u8> {
         .to_vec()
 }
 
-/// The transaction's entry contract: one `LOG1`, one inner `CALL`, one `CREATE`, one `SSTORE`.
+/// Sets a slot and clears it again, which leaves the frame holding a refund the EVM produced.
+///
+/// Every frame in the fixture does this, because the refund-lowering column needs a refund to take
+/// from wherever it lands — an interpreter's counter, a finished call's result, or a finished
+/// creation's.
+fn clear_a_slot(builder: BytecodeBuilder) -> BytecodeBuilder {
+    builder
+        .sstore(U256::from(CLEARED_SLOT), U256::from(STORED))
+        .sstore(U256::from(CLEARED_SLOT), U256::ZERO)
+}
+
+/// The transaction's entry contract: one `LOG1`, one inner `CALL`, one `CREATE`, a slot set and
+/// cleared, a second `LOG1`, and one `SSTORE`.
 ///
 /// One fixture rather than one per row, so that every callback fires in the same transaction and
-/// a cell's assertions are about the cheat rather than about which fixture it got.
+/// a cell's assertions are about the cheat rather than about which fixture it got. The second
+/// `LOG1` is there so the `log_full` row has a callback that runs *after* the frame has a refund;
+/// the first one runs before anything has cleared a slot.
 fn caller_code() -> Bytes {
     let init = init_code();
     let mut builder = BytecodeBuilder::default()
@@ -721,19 +872,27 @@ fn caller_code() -> Bytes {
     for (offset, byte) in init.iter().enumerate() {
         builder = builder.push_number(u64::from(*byte)).push_number(offset as u64).append(MSTORE8);
     }
-    builder
+    let builder = builder
         .push_number(init.len() as u64) // size
         .push_number(0u64) // offset
         .push_number(0u64) // value
         .append(CREATE)
-        .append(POP)
+        .append(POP);
+    clear_a_slot(builder)
+        // LOG1(offset=0, size=32, topic=2), now that the frame carries a refund.
+        .push_number(2u64)
+        .push_number(32u64)
+        .push_number(0u64)
+        .append(LOG1)
         .sstore(U256::from(TOP_SLOT), U256::from(STORED))
         .append(STOP)
         .build()
 }
 
 fn callee_code(fixture: Fixture) -> Bytes {
-    let builder = BytecodeBuilder::default().sstore(U256::from(CALLEE_SLOT), U256::from(STORED));
+    let builder = clear_a_slot(
+        BytecodeBuilder::default().sstore(U256::from(CALLEE_SLOT), U256::from(STORED)),
+    );
     match fixture {
         Fixture::ReturningCallee => builder.append(STOP).build(),
         Fixture::RevertingCallee => builder.revert().build(),
@@ -924,6 +1083,22 @@ fn ledger_result(result: i128) -> InspectorLedger {
     InspectorLedger { result, ..InspectorLedger::default() }
 }
 
+/// The ledger a rewrite of one of the receipt's other two numbers books.
+///
+/// Separate helpers rather than one, because which of the three figures a shape moves is exactly
+/// what decides whether the conservation law can see it: only the pool is a term of it.
+fn ledger_refund(refund: i128) -> InspectorLedger {
+    InspectorLedger { refund, ..InspectorLedger::default() }
+}
+
+fn ledger_reservoir(reservoir: i128) -> InspectorLedger {
+    InspectorLedger { reservoir, ..InspectorLedger::default() }
+}
+
+fn ledger_state_gas(state_gas: i128) -> InspectorLedger {
+    InspectorLedger { state_gas, ..InspectorLedger::default() }
+}
+
 /// The ledger of a rewrite that moves no gas: the shim saw the argument it was handed come back
 /// changed, and that is the whole of what it books.
 ///
@@ -1029,6 +1204,37 @@ fn matrix() -> Vec<Cell> {
             InspectorLedger::default(),
             state_all_committed,
         );
+        // The receipt's other two numbers, reached through the same `Gas` as the counter above.
+        push(
+            at,
+            RaiseRefund,
+            Fixture::ReturningCallee,
+            ledger_refund(i128::from(REFUND)),
+            state_all_committed,
+        );
+        if at != InitializeInterp {
+            push(
+                at,
+                LowerRefund,
+                Fixture::ReturningCallee,
+                ledger_refund(-i128::from(REFUND)),
+                state_all_committed,
+            );
+        }
+        push(
+            at,
+            WriteReservoir,
+            Fixture::ReturningCallee,
+            ledger_reservoir(i128::from(RESERVOIR)),
+            state_all_committed,
+        );
+        push(
+            at,
+            WriteStateGas,
+            Fixture::ReturningCallee,
+            ledger_state_gas(i128::from(STATE_GAS)),
+            state_all_committed,
+        );
     }
 
     // The pending action, which only `step_end` ever sees: revm's inspected loop breaks out the
@@ -1128,6 +1334,22 @@ fn matrix() -> Vec<Cell> {
             InspectorLedger::default(),
             state_all_committed,
         );
+        if !deployment_side {
+            // The pool a call's inputs seed the child with. It travels to the child and back, so
+            // it is booked as gas — and the inputs came back changed in a field the envelope lane
+            // does not cover, which the rewrite comparison books separately.
+            push(
+                at,
+                WriteReservoir,
+                Fixture::ReturningCallee,
+                InspectorLedger {
+                    reservoir: i128::from(RESERVOIR),
+                    interventions: 1,
+                    ..InspectorLedger::default()
+                },
+                state_all_committed,
+            );
+        }
     }
 
     // The three callbacks that are handed a finished frame's result.
@@ -1170,6 +1392,34 @@ fn matrix() -> Vec<Cell> {
             JournalWrite,
             Fixture::ReturningCallee,
             InspectorLedger::default(),
+            state_all_committed,
+        );
+        push(
+            at,
+            RaiseRefund,
+            Fixture::ReturningCallee,
+            ledger_refund(i128::from(REFUND)),
+            state_all_committed,
+        );
+        push(
+            at,
+            LowerRefund,
+            Fixture::ReturningCallee,
+            ledger_refund(-i128::from(REFUND)),
+            state_all_committed,
+        );
+        push(
+            at,
+            WriteReservoir,
+            Fixture::ReturningCallee,
+            ledger_reservoir(i128::from(RESERVOIR)),
+            state_all_committed,
+        );
+        push(
+            at,
+            WriteStateGas,
+            Fixture::ReturningCallee,
+            ledger_state_gas(i128::from(STATE_GAS)),
             state_all_committed,
         );
     }
@@ -1267,6 +1517,9 @@ fn test_the_matrix_is_inert_with_the_inspected_loops_switched_off() {
         (At::FrameEnd, Shape::ReviveResult, Fixture::RevertingCallee),
         (At::Step, Shape::JournalWrite, Fixture::ReturningCallee),
         (At::StepEnd, Shape::RaiseActionResultGas, Fixture::ReturningCallee),
+        (At::Step, Shape::LowerRefund, Fixture::ReturningCallee),
+        (At::CallEnd, Shape::WriteReservoir, Fixture::ReturningCallee),
+        (At::FrameEnd, Shape::WriteStateGas, Fixture::ReturningCallee),
     ];
 
     let mut plain: BTreeMap<Fixture, Reading> = BTreeMap::new();
