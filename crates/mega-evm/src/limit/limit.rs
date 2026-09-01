@@ -1848,6 +1848,11 @@ impl AdditionalLimit {
     /// carries, and a precompile that failed after doing work has that work priced by `MegaETH`
     /// rather than spent down in its gas object.
     ///
+    /// Which of the two a result takes is decided by whether its dispatch staged an envelope, not
+    /// by `CallOutcome::was_precompile_called`. The flag is on a result an inspector's `call_end`
+    /// is handed by mutable reference, so it is not something the accounting may key on; the
+    /// staged slot is written before any callback runs and read once.
+    ///
     /// Nothing is booked once a limit is latched, which is also why this runs after the rescue in
     /// [`after_frame_init`](Self::after_frame_init) rather than before it. A TX-level exceed
     /// rescues this same remaining gas for the sender and erases it from the envelope, and a
@@ -1861,12 +1866,6 @@ impl AdditionalLimit {
         evm_remaining: u64,
         staged_precompile: Option<PrecompileEnvelope>,
     ) {
-        debug_assert_eq!(
-            staged_precompile.is_some(),
-            self.checkpoint.rex7_enabled() &&
-                matches!(result, FrameResult::Call(outcome) if outcome.was_precompile_called),
-            "every REX7 precompile call stages an envelope, and nothing else does",
-        );
         if !self.checkpoint.rex7_enabled() || self.limit_exceeded() {
             return;
         }

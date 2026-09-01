@@ -421,10 +421,10 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> PrecompileProvider<MegaContext<DB,
                     address_clears_kzg_gas_gate
                 };
                 let mut additional_limit = context.additional_limit.borrow_mut();
-                if output.result.is_ok_or_revert() {
+                let executed = if output.result.is_ok_or_revert() {
                     let executed = output.gas.total_gas_spent();
                     additional_limit.record_compute_gas(executed);
-                    additional_limit.stage_precompile_envelope(gas_limit, executed);
+                    executed
                 } else if take_kzg_fixed_fee_arm {
                     // Inside the KZG body the halt reason marks how much of the fixed-price work
                     // the call bought before failing. `BlobInvalidInputLength` is the doorway:
@@ -443,7 +443,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> PrecompileProvider<MegaContext<DB,
                     // REX6 and earlier take neither branch's split: they charge the fixed cost for
                     // every halt this arm sees, doorway rejects included.
                     if is_rex7 && matches!(halt, Some(PrecompileHalt::BlobInvalidInputLength)) {
-                        additional_limit.stage_precompile_envelope(gas_limit, 0);
+                        0
                     } else {
                         let executed = kzg_point_evaluation::GAS_COST;
                         // This recording must not latch a limit exceed. If it did, the halt
@@ -465,7 +465,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> PrecompileProvider<MegaContext<DB,
                              remaining compute budget",
                         );
                         additional_limit.record_compute_gas(executed);
-                        additional_limit.stage_precompile_envelope(gas_limit, executed);
+                        executed
                     }
                 } else if is_rex7 {
                     // Every wired precompile that reaches this arm halted on a pre-work input
@@ -477,10 +477,18 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> PrecompileProvider<MegaContext<DB,
                     // REX7 also lands a non-`KzgPointEvaluation` override of the KZG address
                     // here: identity keying sent it off the fixed-fee arm, and a cheap halt is
                     // priced as performed-zero like every other generic halt.
-                    additional_limit.stage_precompile_envelope(gas_limit, 0);
+                    0
                 } else {
-                    additional_limit.record_compute_gas(output.gas.limit());
-                }
+                    let executed = output.gas.limit();
+                    additional_limit.record_compute_gas(executed);
+                    executed
+                };
+                // Hoisted out of the arms on purpose: every arm yields the work it performed, and
+                // the staging that hands it to the settlement point happens once, so a new arm
+                // cannot be written that records work and forgets to stage it. Frozen specs stage
+                // nothing — they have no destroyed lane — which the entry point decides, not the
+                // arms.
+                additional_limit.stage_precompile_envelope(gas_limit, executed);
             } else if context.spec.is_enabled(MegaSpecId::MINI_REX) {
                 context
                     .additional_limit
