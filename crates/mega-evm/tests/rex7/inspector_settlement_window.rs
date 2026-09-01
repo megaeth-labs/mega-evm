@@ -25,7 +25,7 @@
 //! tracker lanes must account for the whole receipt envelope, with the inspector's own term in it.
 
 use crate::common::{
-    transact, transact_inspected, Outcome, CALLER, CONTRACT, DEFAULT_TX_GAS_LIMIT, ONE_ETH,
+    transact, transact_inspected, Outcome, CALLEE, CALLER, CONTRACT, DEFAULT_TX_GAS_LIMIT, ONE_ETH,
 };
 use alloy_primitives::{address, Address, Bytes, U256};
 use mega_evm::{
@@ -34,11 +34,11 @@ use mega_evm::{
     EvmTxRuntimeLimits, InspectorLedger, MegaSpecId,
 };
 use revm::{
-    bytecode::opcode::{CALL, POP, STOP},
+    bytecode::opcode::{CALL, INVALID, POP, STOP},
     context::ContextTr,
     interpreter::{
-        interpreter_types::LoopControl, CallInputs, CallOutcome, InstructionResult, Interpreter,
-        InterpreterAction, InterpreterTypes,
+        interpreter_types::LoopControl, CallInputs, CallOutcome, FrameInput, InstructionResult,
+        Interpreter, InterpreterAction, InterpreterTypes,
     },
     Inspector,
 };
@@ -383,5 +383,206 @@ fn test_a_priced_precompile_failure_rewritten_into_a_success_conjures_its_fee() 
         rewritten.inspector_conjured_gas,
         i128::from(kzg_point_evaluation::GAS_COST),
         "the fee the caller reclaimed is gas the transaction was never charged for",
+    );
+}
+
+// --- C: the pending action itself ---------------------------------------------------------------
+
+/// Gas an action edit moves.
+const ACTION_DELTA: u64 = 700;
+
+/// Reaches past the interpreter's gas counter and into the action the interpreter is holding, once.
+///
+/// The counter and the action are two different objects at exactly one moment — after a
+/// terminating or suspending instruction has run and before the loop hands the action on — and
+/// this is the inspector that edits the second one.
+#[derive(Debug)]
+struct ActionEditor {
+    window: Window,
+    /// Positive raises the gas the action carries, negative lowers it.
+    delta: i64,
+    /// Fire only on an action whose classification is (or is not) an exceptional halt.
+    halting: bool,
+    fired: u32,
+}
+
+impl ActionEditor {
+    fn raise(window: Window) -> Self {
+        Self { window, delta: ACTION_DELTA as i64, halting: false, fired: 0 }
+    }
+
+    fn lower(window: Window) -> Self {
+        Self { window, delta: -(ACTION_DELTA as i64), halting: false, fired: 0 }
+    }
+
+    fn on_halt() -> Self {
+        Self { window: Window::Terminating, delta: ACTION_DELTA as i64, halting: true, fired: 0 }
+    }
+
+    fn move_gas(&self, gas: &mut revm::interpreter::Gas) {
+        if self.delta >= 0 {
+            gas.erase_cost(self.delta.unsigned_abs());
+        } else {
+            assert!(
+                gas.record_regular_cost(self.delta.unsigned_abs()),
+                "the fixture must leave the action enough gas for the removal to land",
+            );
+        }
+    }
+}
+
+impl<CTX, INTR: InterpreterTypes> Inspector<CTX, INTR> for ActionEditor {
+    fn step_end(&mut self, interp: &mut Interpreter<INTR>, _context: &mut CTX) {
+        if self.fired > 0 || Window::of(interp) != self.window {
+            return;
+        }
+        match interp.bytecode.action() {
+            Some(InterpreterAction::Return(result)) => {
+                if result.result.is_ok_or_revert() == self.halting {
+                    return;
+                }
+                let mut gas = result.gas;
+                self.move_gas(&mut gas);
+                result.gas = gas;
+            }
+            Some(InterpreterAction::NewFrame(FrameInput::Call(inputs))) => {
+                inputs.gas_limit = inputs.gas_limit.saturating_add(self.delta.unsigned_abs());
+            }
+            _ => return,
+        }
+        self.fired += 1;
+    }
+}
+
+/// A `CALL` into a callee that halts on an invalid opcode, its failure flag popped, then `STOP`.
+///
+/// The inner frame reaches a terminating `step_end` holding a *halting* `Return` action, which is
+/// the branch of the settlement where an edit to the action moves nothing.
+fn halting_callee_code() -> Bytes {
+    BytecodeBuilder::default()
+        .push_number(0u64) // retSize
+        .push_number(0u64) // retOffset
+        .push_number(0u64) // argsSize
+        .push_number(0u64) // argsOffset
+        .push_number(0u64) // value
+        .push_address(CALLEE)
+        .push_number(FORWARDED)
+        .append(CALL)
+        .append(POP)
+        .append(STOP)
+        .build()
+}
+
+fn db_with_callee(code: Bytes, callee: Bytes) -> MemoryDatabase {
+    db(code).account_code(CALLEE, callee)
+}
+
+/// Gas written into a returning frame's pending action is gas the caller really reclaims, so it
+/// has to be booked — the frame's classification is what says so, and the classification is only
+/// known at the frame's settlement point.
+#[test]
+fn test_raising_a_returning_frames_pending_action_is_booked() {
+    let plain = transact(MegaSpecId::REX7, db(straight_line_code()), limits());
+    let mut inspector = ActionEditor::raise(Window::Terminating);
+    let edited = transact_inspected(
+        MegaSpecId::REX7,
+        db(straight_line_code()),
+        limits(),
+        &mut inspector,
+    );
+
+    assert_eq!(inspector.fired, 1, "the fixture must reach a terminating step_end exactly once");
+    assert_eq!(
+        edited.inspector_ledger,
+        InspectorLedger { result: i128::from(ACTION_DELTA), ..InspectorLedger::default() },
+        "an edit to the action a returning frame hands back is an edit to the envelope",
+    );
+    assert_eq!(
+        edited.total_gas_spent,
+        plain.total_gas_spent - ACTION_DELTA,
+        "the transaction really did spend less, which is why the ledger has to carry it",
+    );
+    assert_eq!(
+        edited.compute_gas, plain.compute_gas,
+        "the edit is not work: the frame performed exactly what it performed uninspected",
+    );
+}
+
+/// The same edit in the other direction.
+#[test]
+fn test_lowering_a_returning_frames_pending_action_is_booked() {
+    let plain = transact(MegaSpecId::REX7, db(straight_line_code()), limits());
+    let mut inspector = ActionEditor::lower(Window::Terminating);
+    let edited = transact_inspected(
+        MegaSpecId::REX7,
+        db(straight_line_code()),
+        limits(),
+        &mut inspector,
+    );
+
+    assert_eq!(inspector.fired, 1, "the fixture must reach a terminating step_end exactly once");
+    assert_eq!(
+        edited.inspector_ledger,
+        InspectorLedger { result: -i128::from(ACTION_DELTA), ..InspectorLedger::default() },
+        "gas taken out of the action is gas the caller never gets back",
+    );
+    assert_eq!(
+        edited.total_gas_spent,
+        plain.total_gas_spent + ACTION_DELTA,
+        "the transaction really did spend more",
+    );
+}
+
+/// The classification branch: a halting frame hands nothing back, so an edit to the gas its action
+/// carries moves nothing and must not be booked — and the remainder it destroys is the EVM's own
+/// number, not the edited one.
+#[test]
+fn test_editing_a_halting_frames_pending_action_moves_nothing() {
+    let callee = BytecodeBuilder::default().append(INVALID).build();
+    let plain = transact(
+        MegaSpecId::REX7,
+        db_with_callee(halting_callee_code(), callee.clone()),
+        limits(),
+    );
+    let mut inspector = ActionEditor::on_halt();
+    let edited = transact_inspected(
+        MegaSpecId::REX7,
+        db_with_callee(halting_callee_code(), callee),
+        limits(),
+        &mut inspector,
+    );
+
+    assert_eq!(inspector.fired, 1, "the fixture must halt an inner frame exactly once");
+    assert_eq!(
+        edited.inspector_ledger,
+        InspectorLedger::default(),
+        "a halting frame hands its remainder to nobody, so an edit to it reaches nobody",
+    );
+    assert_eq!(
+        edited.destroyed, plain.destroyed,
+        "the destroyed remainder is the EVM's own, not the one the inspector wrote",
+    );
+    assert_eq!(edited.total_gas_spent, plain.total_gas_spent, "and the envelope is unmoved");
+}
+
+/// The other action variant: gas written into a pending `NewFrame` action is the envelope a child
+/// frame is about to be built with, which the caller was never debited for.
+#[test]
+fn test_raising_a_pending_new_frame_action_is_booked_as_an_envelope() {
+    let plain = transact(MegaSpecId::REX7, db(suspending_code()), limits());
+    let mut inspector = ActionEditor::raise(Window::Suspending);
+    let edited =
+        transact_inspected(MegaSpecId::REX7, db(suspending_code()), limits(), &mut inspector);
+
+    assert_eq!(inspector.fired, 1, "the fixture must suspend into a child frame exactly once");
+    assert_eq!(
+        edited.inspector_ledger,
+        InspectorLedger { env: i128::from(ACTION_DELTA), ..InspectorLedger::default() },
+        "the child's budget grew by gas the caller's CALL never forwarded",
+    );
+    assert_eq!(
+        edited.total_gas_spent,
+        plain.total_gas_spent - ACTION_DELTA,
+        "the child hands the extra budget straight back, so the transaction spends less",
     );
 }
