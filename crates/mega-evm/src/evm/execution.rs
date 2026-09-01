@@ -600,7 +600,9 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
     /// and before the journal is told what to do with it.
     ///
     /// `inspector_gas_delta` is what that callback did to the result's gas, and is zero on the
-    /// uninspected path, where no callback runs at all.
+    /// uninspected path, where no callback runs at all. An edit an earlier callback made to the
+    /// terminating action this result was built from is staged on the limit tracker and joins it
+    /// there.
     #[inline]
     fn finalize_frame(
         ctx: &MegaContext<DB, ExtEnvs>,

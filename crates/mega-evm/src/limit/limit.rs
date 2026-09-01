@@ -614,10 +614,9 @@ impl AdditionalLimit {
     /// Stages an adjustment an inspector made to the gas a *suspending* pending action carries —
     /// the envelope the child frame is about to be built with.
     ///
-    /// Same lane as an edit made at the frame-start callback, taken one step earlier. It is staged
-    /// rather than booked on the spot only so that the booking happens at a point that can see the
-    /// whole picture; [`take_inspector_action_env_adjustment`](Self::
-    /// take_inspector_action_env_adjustment) is where it lands.
+    /// Same lane as an edit made at the frame-start callback, taken one step earlier, and booked
+    /// there: the shim takes it back out at that callback, which is the first point that can tell
+    /// the edit apart from an interception.
     #[inline]
     pub(crate) fn stage_inspector_action_env_adjustment(&mut self, delta: i128) {
         self.staged_action_env_gas += delta;
@@ -1489,7 +1488,8 @@ impl AdditionalLimit {
         // Everything an inspector wrote into this result, whether it wrote it into the frame's
         // terminating action or into the result the action became. The two are the same number
         // measured on either side of the classification, so they settle as one.
-        let inspector_gas_delta = inspector_gas_delta + core::mem::take(&mut self.staged_action_result_gas);
+        let inspector_gas_delta =
+            inspector_gas_delta + core::mem::take(&mut self.staged_action_result_gas);
         // The gas the EVM itself left in this result. Every settlement below is defined against
         // it: the last callback's edit to the number is the inspector's, and the two are only the
         // same object on a frame no callback touched.
@@ -1520,8 +1520,13 @@ impl AdditionalLimit {
         }
     }
 
-    /// Books what the last mutating callback did to a frame result's gas, and reports the gas the
-    /// EVM itself left in that result.
+    /// Books what an inspector did to a frame result's gas, and reports the gas the EVM itself
+    /// left in that result.
+    ///
+    /// `delta` covers both places such an edit can be made: the frame's last mutating callback,
+    /// and — one step earlier, through `LoopControl` — the terminating action that *becomes* this
+    /// result. They are one number measured on either side of the classification, so they settle
+    /// as one.
     ///
     /// Whether such an edit moves anything depends on the frame's final classification, which is
     /// why this can only run here:

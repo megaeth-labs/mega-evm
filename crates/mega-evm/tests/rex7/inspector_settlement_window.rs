@@ -478,12 +478,8 @@ fn db_with_callee(code: Bytes, callee: Bytes) -> MemoryDatabase {
 fn test_raising_a_returning_frames_pending_action_is_booked() {
     let plain = transact(MegaSpecId::REX7, db(straight_line_code()), limits());
     let mut inspector = ActionEditor::raise(Window::Terminating);
-    let edited = transact_inspected(
-        MegaSpecId::REX7,
-        db(straight_line_code()),
-        limits(),
-        &mut inspector,
-    );
+    let edited =
+        transact_inspected(MegaSpecId::REX7, db(straight_line_code()), limits(), &mut inspector);
 
     assert_eq!(inspector.fired, 1, "the fixture must reach a terminating step_end exactly once");
     assert_eq!(
@@ -507,12 +503,8 @@ fn test_raising_a_returning_frames_pending_action_is_booked() {
 fn test_lowering_a_returning_frames_pending_action_is_booked() {
     let plain = transact(MegaSpecId::REX7, db(straight_line_code()), limits());
     let mut inspector = ActionEditor::lower(Window::Terminating);
-    let edited = transact_inspected(
-        MegaSpecId::REX7,
-        db(straight_line_code()),
-        limits(),
-        &mut inspector,
-    );
+    let edited =
+        transact_inspected(MegaSpecId::REX7, db(straight_line_code()), limits(), &mut inspector);
 
     assert_eq!(inspector.fired, 1, "the fixture must reach a terminating step_end exactly once");
     assert_eq!(
@@ -533,11 +525,8 @@ fn test_lowering_a_returning_frames_pending_action_is_booked() {
 #[test]
 fn test_editing_a_halting_frames_pending_action_moves_nothing() {
     let callee = BytecodeBuilder::default().append(INVALID).build();
-    let plain = transact(
-        MegaSpecId::REX7,
-        db_with_callee(halting_callee_code(), callee.clone()),
-        limits(),
-    );
+    let plain =
+        transact(MegaSpecId::REX7, db_with_callee(halting_callee_code(), callee.clone()), limits());
     let mut inspector = ActionEditor::on_halt();
     let edited = transact_inspected(
         MegaSpecId::REX7,

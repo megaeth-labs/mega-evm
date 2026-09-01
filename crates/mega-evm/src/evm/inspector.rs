@@ -3,11 +3,11 @@
 //! # Why a shim
 //!
 //! An inspector is not a passive observer. Every callback that receives a live interpreter can
-//! write to its gas counter, and every callback that receives a frame's inputs can change the gas
-//! limit the frame is about to be built with. `MegaETH` meters compute gas by watching those exact
-//! counters, and derives what a transaction destroyed from the envelope it spent, so an
-//! unmeasured edit shows up as the EVM having done less work than it did, or as a transaction
-//! having spent less gas than it did.
+//! write to its gas counter and to the action it is holding, and every callback that receives a
+//! frame's inputs can change the gas limit the frame is about to be built with. `MegaETH` meters
+//! compute gas by watching those exact counters, and derives what a transaction destroyed from the
+//! envelope it spent, so an unmeasured edit shows up as the EVM having done less work than it did,
+//! or as a transaction having spent less gas than it did.
 //!
 //! # Why the callback boundary is enough
 //!
@@ -25,6 +25,10 @@
 //! - Interpreter-counter edits go to [`AdditionalLimit::record_inspector_gas_adjustment`], which
 //!   books them, keeps them out of the compute-gas measurement, and re-derives the gas clamp so
 //!   injected gas is not spendable past the compute headroom.
+//! - Pending-action edits go to [`book_pending_action`], which routes them by the action the
+//!   callback left behind — a frame's counter, a child's envelope, or the result its caller will
+//!   reclaim from. The counter and the action between them hold everything a frame has, and
+//!   [`held`] is the identity the two lanes split.
 //! - Frame-envelope edits go to [`AdditionalLimit::record_inspector_env_adjustment`].
 //! - One rewrite shape is refused outright: see [`MeasuredInspector::create_end`].
 //!
@@ -205,11 +209,10 @@ struct ActionChange {
 /// The EVM does not execute inside a callback, so the action is either the one the last
 /// instruction set or one the callback wrote — and the difference between the two readings of
 /// [`held`] is what the callback moved. Taking both readings at the *pre-callback* counter is
-/// what keeps this lane and the counter lane from overlapping: the counter's own movement is
-/// booked by [`record_inspector_gas_adjustment`](crate::AdditionalLimit::
-/// record_inspector_gas_adjustment) exactly when [`ActionLane::counter_reaches_envelope`] says the
-/// EVM will read it again, and it cancels out of this difference in precisely the cases where it
-/// does.
+/// what keeps this lane and the counter lane from overlapping:
+/// [`AdditionalLimit::record_inspector_gas_adjustment`] books the counter's own movement exactly
+/// when [`ActionLane::counter_reaches_envelope`] says the EVM will read it again, and it cancels
+/// out of this difference in precisely the cases where it does.
 #[inline]
 fn measure_pending_action(
     before: Option<InterpreterAction>,
@@ -510,8 +513,7 @@ where
         let action = interpreter.bytecode.action().clone();
         let before = interpreter.gas.remaining();
         self.inner.log_full(interpreter, context, log);
-        let change =
-            measure_pending_action(action, interpreter.bytecode.action().as_ref(), before);
+        let change = measure_pending_action(action, interpreter.bytecode.action().as_ref(), before);
         book_pending_action(context, change);
         context.additional_limit.borrow_mut().record_inspector_gas_adjustment::<true>(
             &mut interpreter.gas,

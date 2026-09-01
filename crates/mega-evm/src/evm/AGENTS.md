@@ -57,7 +57,8 @@ Read the table by the *argument the rewrite reaches through*, not by the tool th
 | A failed **contract creation** rewritten into a success | **Refused** | `InspectorLedger::rejected_rewrites`, alongside `interventions` | `reject_forbidden_create_rewrite` restores the original classification and fails the transaction with `EVMError::Custom`; debug builds assert |
 | The interpreter's stack or memory | Supported, unmeasured | nothing — no argument the shim holds describes it | the EVM executes on the edited state and meters it as its own work, because it is |
 | A direct journal write (`tstore`, `log`, …) | Supported, unmetered | nothing — no argument the shim holds describes it | `MegaETH`'s data-size / KV / state-growth lanes do not see it; it moves no gas, so the conservation law is unaffected |
-| The pending `InterpreterAction`, reached through `LoopControl` | Supported, unmeasured | nothing | an edit to the action's gas does move the envelope; measuring it at the callback boundary would be unsound, because whether it moves anything depends on the frame's final classification |
+| The gas a pending `InterpreterAction` carries, reached through `LoopControl` (`step_end`) | Supported | the lane the action the callback left behind names: `InspectorLedger::result` for a `Return` action, settled at the frame's settlement point because that action *is* the frame's result a moment later; `InspectorLedger::env` for a `NewFrame` one, booked at the child's `frame_start`; `InspectorLedger::gas` when the callback removed the action, because the frame then carries on spending its counter | nothing |
+| A pending action's classification or output, or an action installed, removed or swapped for the other variant | Supported | `InspectorLedger::interventions`, alongside whatever gas the change moved on the lane above | it changes what the EVM does next, not what the frame has spent |
 | `CfgEnv` or the active gas schedule | **Refused** | — | the gas-schedule pin panics; the schedule belongs to the spec, and a rewritten one has no accounting lane that could rescue it |
 
 Two independent stops back the creation refusal: the shim restores the classification, and `frame.rs`'s `FrameJournalVerdict::CreateRejected` carries no code and no commit branch, so even with the refusal removed such a rewrite deposits nothing.
@@ -69,6 +70,10 @@ Booking is a *reported* quantity throughout. No resource limit is ever compared 
 A gas-counter edit made while the interpreter is already holding a `Return` action is written into an object nobody reads again: revm's inspected loop runs `step_end` after the instruction that set the action, and the action carries its own snapshot of the gas, which is what becomes the frame's result.
 The shim books nothing for such an edit and still shifts the settlement baseline for it — `MegaETH`'s tail settlement reads the counter after the action is set, so without the shift the edit would read as work the frame performed.
 The predicate is the pending action's variant, not "the loop is ending": a `NewFrame` action ends the loop too, and that frame resumes on exactly this counter.
+
+What the counter no longer speaks for, the action does, and the shim measures both against the same reading.
+A frame holds `counter` with no action pending, `counter + f.gas_limit` with a `NewFrame` action, and the action's own copy with a `Return` one (`inspector.rs::held`); the counter lane books the counter's movement exactly when the EVM will read it again, and the action lane books the rest.
+The two together account for every unit of gas the frame holds, whatever the callback did to the action's shape.
 
 ### Rules for changing this
 

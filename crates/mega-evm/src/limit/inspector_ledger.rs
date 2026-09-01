@@ -12,9 +12,10 @@
 /// # Why the boundary is a sound place to measure
 ///
 /// The EVM does not execute inside an inspector callback. Every change to an interpreter's gas
-/// counter, or to a frame input's gas limit, that is visible across a callback's entry and exit is
-/// therefore the inspector's, by construction rather than by attribution heuristics. The shim takes
-/// one snapshot before delegating and one after, and the difference lands here.
+/// counter, to the action it is holding, or to a frame input's gas limit that is visible across a
+/// callback's entry and exit is therefore the inspector's, by construction rather than by
+/// attribution heuristics. The shim takes one snapshot before delegating and one after, and the
+/// difference lands here.
 ///
 /// # Sign convention
 ///
@@ -26,10 +27,9 @@
 /// # What it does not measure
 ///
 /// What a callback does behind the shim's back. An inspector reaches state that no argument it is
-/// handed describes — the interpreter's stack and memory, the journal, the pending action — and
-/// telling whether any of those came back changed needs a snapshot of unbounded state that no
-/// callback boundary can take at a cost the inspected path can carry. Those rewrites leave this
-/// all-zero.
+/// handed describes — the interpreter's stack and memory, the journal — and telling whether any of
+/// those came back changed needs a snapshot of unbounded state that no callback boundary can take
+/// at a cost the inspected path can carry. Those rewrites leave this all-zero.
 ///
 /// So an empty ledger says two things: no gas moved that the EVM did not move, and nothing the
 /// shim was handed came back different. It does not say the transaction is the one the EVM would
@@ -62,6 +62,9 @@ pub struct InspectorLedger {
     ///
     /// A running frame's counter is the frame's own budget, so raising it hands the frame gas the
     /// caller never forwarded and lowering it takes gas away that the caller will never get back.
+    ///
+    /// A callback that removed the interpreter's pending action lands here too: with no action
+    /// left the frame carries on spending what it holds, which is exactly what the counter is.
     pub gas: i128,
 
     /// Net gas the inspector wrote into frame *envelopes* — the `gas_limit` a call or create frame
@@ -77,6 +80,13 @@ pub struct InspectorLedger {
     /// edit back and size the synthetic outcome from it. That gas travels through the result lane
     /// below, not through this one.)
     ///
+    /// The same lane carries an edit made one step earlier, to the `gas_limit` inside a pending
+    /// `NewFrame` action — the object the caller's `CALL` / `CREATE` opcode produced, before any
+    /// callback saw the inputs built from it. It is booked whether or not the frame is then
+    /// intercepted: an interception discards inputs the *same* callback edited a moment before,
+    /// which is why that edit reaches nothing, and it cannot un-make an edit another callback made
+    /// to the action the caller's debit is already behind.
+    ///
     /// Adjustments to a frame's *result* gas belong to [`result`](Self::result), which is booked
     /// from the frame's own settlement point rather than from a callback boundary.
     pub env: i128,
@@ -91,6 +101,10 @@ pub struct InspectorLedger {
     /// changes nothing. The frame's settlement point knows the final classification and books
     /// this lane only in the first case; in the second it reconstructs the EVM's own number and
     /// settles the destroyed remainder against that instead.
+    ///
+    /// The same lane carries an edit made one step earlier, to the gas inside a pending `Return`
+    /// action. That action *is* the frame's result a moment later, so the two are one number
+    /// measured on either side of the classification, and they settle together.
     pub result: i128,
 
     /// How many rewrites the shim refused because their shape is forbidden.
