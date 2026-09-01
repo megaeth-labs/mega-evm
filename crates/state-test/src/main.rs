@@ -5,6 +5,7 @@
 
 use clap::Parser;
 use state_test::{
+    chaos::{run_chaos, ChaosClass, ChaosRunConfig, ChaosShape, ChaosSweepTally, ShapeFilter},
     diff::{collect_fixture_files, run_diff, DiffClass, DiffRunConfig, DiffSpecs, DiffTally},
     runner::{
         bench_test_suite, fill_test_suite, fill_test_suite_keep_going, find_all_json_tests,
@@ -91,6 +92,45 @@ pub struct Cmd {
     /// inner frame the transaction's own result hides is reported as unexplained.
     #[arg(long, requires = "diff_spec")]
     diff_no_frame_evidence: bool,
+    /// Execute each fixture three times — with no inspector, with a read-only one, and with a
+    /// deterministic rewriting one seeded from this value and the vector's own identity — and
+    /// report how the three came out.
+    ///
+    /// The spec every run executes under is `--bench-spec`, which is therefore required. Nothing
+    /// is written and nothing is compared against a recorded expectation: the read-only run is
+    /// judged against the run with no inspector, and the rewriting run is judged by whether the
+    /// execution's own gas-accounting cross-checks survive it. Those cross-checks are debug
+    /// assertions, so this mode is only meaningful in a build that keeps them.
+    #[arg(long, value_name = "SEED", requires = "bench_spec", conflicts_with_all = ["bench", "fill", "diff_spec"])]
+    chaos_seed: Option<u64>,
+    /// Write the chaos run's tally and every flagged vector to this file, as JSON.
+    #[arg(long, value_name = "FILE", requires = "chaos_seed")]
+    chaos_report: Option<PathBuf>,
+    /// Restrict the rewriting run to these shapes (comma-separated labels).
+    ///
+    /// For triage: a flagged vector is re-run with the list narrowed until the smallest set that
+    /// still reproduces it is found. Narrowing does not reshuffle the decision stream, so each
+    /// surviving mutation stays where the full run put it; it does leave the mutation budget
+    /// unspent on rejected draws, so a narrowed run can reach further into a transaction.
+    #[arg(long, value_name = "SHAPES", value_delimiter = ',', requires = "chaos_seed")]
+    chaos_shapes: Vec<String>,
+    /// Make no gas-counter edit at the `step_end` of a frame's terminating opcode.
+    ///
+    /// That is the one callback where the interpreter's counter has already been copied into the
+    /// frame's action — revm runs `step_end` after the instruction that set the action, and the
+    /// action carries its own snapshot — so an edit there reaches the counter `MegaETH`'s tail
+    /// settlement reads and nothing the caller ever sees. The other half of the same triage knob
+    /// as `--chaos-shapes`.
+    #[arg(long, requires = "chaos_seed")]
+    chaos_skip_terminal_counter_edits: bool,
+    /// Rewrite no precompile result's classification.
+    ///
+    /// A precompile is answered inside the frame init and never becomes a child frame, so the
+    /// executed / destroyed split of its forwarded envelope is booked at its own recording site,
+    /// before any callback sees the synthetic result. The third triage knob, alongside
+    /// `--chaos-shapes` and `--chaos-skip-terminal-counter-edits`.
+    #[arg(long, requires = "chaos_seed")]
+    chaos_skip_precompile_reclassification: bool,
 }
 
 impl Cmd {
@@ -98,6 +138,9 @@ impl Cmd {
     pub fn run(&self) -> Result<(), TestError> {
         if self.diff_spec.is_some() {
             return self.run_diff();
+        }
+        if self.chaos_seed.is_some() {
+            return self.run_chaos();
         }
         if self.fill {
             return self.run_fill();
@@ -318,6 +361,76 @@ impl Cmd {
         })
     }
 
+    /// Build the chaos run's shape filter from `--chaos-shapes` and
+    /// `--chaos-skip-terminal-counter-edits`.
+    fn resolve_chaos_filter(&self) -> Result<ShapeFilter, TestError> {
+        let mut filter = if self.chaos_shapes.is_empty() {
+            ShapeFilter::default()
+        } else {
+            let shapes = self
+                .chaos_shapes
+                .iter()
+                .map(|label| ChaosShape::parse(label))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|detail| TestError {
+                    name: "--chaos-shapes".to_string(),
+                    path: String::new(),
+                    kind: TestErrorKind::FixtureError(detail),
+                })?;
+            ShapeFilter::only(&shapes)
+        };
+        if self.chaos_skip_terminal_counter_edits {
+            filter = filter.without_terminal_counter_edits();
+        }
+        if self.chaos_skip_precompile_reclassification {
+            filter = filter.without_precompile_reclassification();
+        }
+        Ok(filter)
+    }
+
+    /// Sweep the corpus under a deterministic rewriting inspector (see `--chaos-seed`).
+    fn run_chaos(&self) -> Result<(), TestError> {
+        let seed = self.chaos_seed.expect("run_chaos is only reached with --chaos-seed");
+        // Clap's `requires = "bench_spec"` makes the spec explicit before this point.
+        let spec = self.resolve_spec()?.expect("--chaos-seed requires --bench-spec");
+        let filter = self.resolve_chaos_filter()?;
+        let scan = collect_fixture_files(&self.paths)?;
+
+        let tally = run_chaos(
+            scan,
+            ChaosRunConfig {
+                spec,
+                seed,
+                filter,
+                single_thread: self.single_thread,
+                progress: !self.json,
+            },
+        );
+
+        print_chaos_tally(&tally, spec, seed, filter);
+        if let Some(report) = &self.chaos_report {
+            let json = serde_json::to_string_pretty(&chaos_report_json(&tally, spec, seed, filter))
+                .expect("serialize chaos report");
+            std::fs::write(report, json).map_err(|e| TestError {
+                name: "chaos report".to_string(),
+                path: report.display().to_string(),
+                kind: TestErrorKind::FixtureError(format!("write: {e}")),
+            })?;
+        }
+
+        if !tally.is_failure() {
+            return Ok(());
+        }
+        Err(TestError {
+            name: "chaos summary".to_string(),
+            path: String::new(),
+            kind: TestErrorKind::TestsFailed {
+                failed: tally.flagged.len().max(1),
+                total: tally.total(),
+            },
+        })
+    }
+
     /// Benchmark every fixture under the given paths and print the results as JSON.
     ///
     /// A single benchmarked unit prints one object `{ gas_used, success, bench }`;
@@ -476,6 +589,105 @@ fn print_diff_tally(tally: &DiffTally, target: SpecName, base: SpecName) {
     for error in &tally.file_errors {
         println!("FILE_ERROR\t{}", error.replace('\n', " "));
     }
+}
+
+/// Every chaos verdict, in the order a reader wants them.
+const CHAOS_CLASSES: [ChaosClass; 5] = [
+    ChaosClass::Pass,
+    ChaosClass::ControlDrift,
+    ChaosClass::ChaosRejected,
+    ChaosClass::Skipped,
+    ChaosClass::Panic,
+];
+
+/// Prints the chaos run's tally, plus every vector that needs a human.
+fn print_chaos_tally(tally: &ChaosSweepTally, spec: SpecName, seed: u64, filter: ShapeFilter) {
+    println!("\nChaos run: {spec:?} under seed {seed} over {} vector(s)", tally.total());
+    if !filter.is_complete() {
+        println!("  (shape filter: {})", chaos_filter_label(filter));
+    }
+    for class in CHAOS_CLASSES {
+        println!("  {:<16} {}", class.label(), tally.count(class));
+    }
+    if tally.skipped_files > 0 {
+        println!(
+            "  ({} file(s) skipped by filename, no vector of them judged)",
+            tally.skipped_files
+        );
+    }
+    println!(
+        "Mutations applied: {} over {} callback(s)",
+        tally.shapes.total(),
+        tally.shapes.callbacks
+    );
+    for (shape, count) in &tally.shapes.applied {
+        println!("  {shape:<20} {count}");
+    }
+    for verdict in &tally.flagged {
+        println!(
+            "{}\t{}::{}\tseed={}\t{}",
+            verdict.class.label(),
+            verdict.path,
+            verdict.name,
+            verdict.seed,
+            verdict.detail.as_deref().unwrap_or("-").replace('\n', " ")
+        );
+    }
+    for error in &tally.file_errors {
+        println!("FILE_ERROR\t{}", error.replace('\n', " "));
+    }
+}
+
+/// The machine-readable form of [`print_chaos_tally`], for `--chaos-report`.
+fn chaos_report_json(
+    tally: &ChaosSweepTally,
+    spec: SpecName,
+    seed: u64,
+    filter: ShapeFilter,
+) -> serde_json::Value {
+    json!({
+        "spec": format!("{spec:?}"),
+        "seed": seed,
+        "shapeFilter": chaos_filter_label(filter),
+        "total": tally.total(),
+        "classes": CHAOS_CLASSES
+            .iter()
+            .map(|c| (c.label().to_string(), json!(tally.count(*c))))
+            .collect::<serde_json::Map<_, _>>(),
+        "callbacks": tally.shapes.callbacks,
+        "mutations": tally.shapes.total(),
+        "mutationsByShape": tally.shapes.applied,
+        "fileErrors": tally.file_errors,
+        "skippedFiles": tally.skipped_files,
+        "flagged": tally
+            .flagged
+            .iter()
+            .map(|v| json!({
+                "class": v.class.label(),
+                "path": v.path,
+                "name": v.name,
+                "seed": v.seed,
+                "mutations": v.mutations,
+                "detail": v.detail,
+            }))
+            .collect::<Vec<_>>(),
+    })
+}
+
+/// What a chaos run's shape filter allows, as one line.
+fn chaos_filter_label(filter: ShapeFilter) -> String {
+    let mut parts: Vec<String> = ChaosShape::ALL
+        .into_iter()
+        .filter(|shape| filter.allows(*shape))
+        .map(|shape| shape.label().to_string())
+        .collect();
+    if !filter.allows_terminal_counter_edits() {
+        parts.push("no-terminal-counter-edits".to_string());
+    }
+    if !filter.allows_precompile_reclassification() {
+        parts.push("no-precompile-reclassification".to_string());
+    }
+    parts.join(",")
 }
 
 /// The machine-readable form of [`print_diff_tally`], for `--diff-report`.

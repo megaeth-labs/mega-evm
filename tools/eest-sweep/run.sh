@@ -3,21 +3,31 @@
 # Run the EEST state-test corpus through the mega-evm state-test runner.
 #
 # One command: fetch and verify the pinned fixture release, unpack its `state_tests` subtree, and
-# execute every fixture. Two gates fail the run — a fixture that panics, and a difference between
-# the spec under test and its frozen base that no MegaETH mechanism accounts for. Everything else
-# (fixtures the runner declines, differences the classifier explains) is reported and does not
-# fail.
+# execute every fixture. In the default `diff` mode two gates fail the run — a fixture that panics,
+# and a difference between the spec under test and its frozen base that no MegaETH mechanism
+# accounts for. Everything else (fixtures the runner declines, differences the classifier explains)
+# is reported and does not fail. `chaos` mode has its own gates; see `--mode`.
 #
 # Usage:
 #   tools/eest-sweep/run.sh [options]
 #
 #   --target-spec SPEC   Spec under test (default: Rex7)
 #   --base-spec SPEC     Frozen spec to compare against (default: Rex6)
-#   --mode diff|fill     diff: execute under both specs and classify the differences (default).
+#   --mode diff|fill|chaos
+#                        diff: execute under both specs and classify the differences (default).
 #                        fill: execute under the target spec only and recompute each fixture's
 #                        `post` in place, on a private copy. `diff` runs the target spec through
 #                        the same execution path, so it already covers what `fill` scans for;
 #                        `fill` remains available to exercise the fixture-writing path itself.
+#                        chaos: execute under the target spec three times per vector — with no
+#                        inspector, with a read-only one, and with a deterministic rewriting one —
+#                        and check that observation stays free and that nothing the rewriting run
+#                        does breaks the gas-accounting cross-checks.
+#   --chaos-seed SEED    Global seed for `--mode chaos` (default: 1). Each vector's own seed is
+#                        derived from this and the vector's identity, so a flagged vector
+#                        reproduces exactly.
+#   --chaos-arg ARG      Extra argument passed through to the chaos run; repeatable. Used to
+#                        narrow a flagged vector (`--chaos-shapes`, `--chaos-skip-*`).
 #   --corpus-dir DIR     Use an already-unpacked `state_tests` tree instead of downloading.
 #   --cache-dir DIR      Where to keep the downloaded archive (default: .eest-cache).
 #   --report-dir DIR     Where to write the report and log (default: .eest-report).
@@ -34,6 +44,8 @@ source "$REPO_ROOT/tools/eest-sweep/corpus.env"
 TARGET_SPEC="Rex7"
 BASE_SPEC="Rex6"
 MODE="diff"
+CHAOS_SEED="1"
+CHAOS_ARGS=()
 CORPUS_DIR=""
 CACHE_DIR="$REPO_ROOT/.eest-cache"
 REPORT_DIR="$REPO_ROOT/.eest-report"
@@ -45,6 +57,8 @@ while [ $# -gt 0 ]; do
     --target-spec) TARGET_SPEC="$2"; shift 2 ;;
     --base-spec) BASE_SPEC="$2"; shift 2 ;;
     --mode) MODE="$2"; shift 2 ;;
+    --chaos-seed) CHAOS_SEED="$2"; shift 2 ;;
+    --chaos-arg) CHAOS_ARGS+=("$2"); shift 2 ;;
     --corpus-dir) CORPUS_DIR="$2"; shift 2 ;;
     --cache-dir) CACHE_DIR="$2"; shift 2 ;;
     --report-dir) REPORT_DIR="$2"; shift 2 ;;
@@ -58,8 +72,8 @@ while [ $# -gt 0 ]; do
 done
 
 case "$MODE" in
-  diff|fill) ;;
-  *) echo "--mode must be 'diff' or 'fill', got '$MODE'" >&2; exit 2 ;;
+  diff|fill|chaos) ;;
+  *) echo "--mode must be 'diff', 'fill' or 'chaos', got '$MODE'" >&2; exit 2 ;;
 esac
 
 # `sha256sum` on Linux, `shasum -a 256` on macOS.
@@ -257,6 +271,14 @@ if [ "$MODE" = "diff" ]; then
     --diff-spec "$BASE_SPEC" \
     --diff-report "$REPORT_DIR/diff-report.json" \
     "$CORPUS_DIR" >"$LOG" 2>&1 || STATUS=$?
+elif [ "$MODE" = "chaos" ]; then
+  echo "==> chaos sweep under $TARGET_SPEC, seed $CHAOS_SEED"
+  "$BIN" \
+    --bench-spec "$TARGET_SPEC" \
+    --chaos-seed "$CHAOS_SEED" \
+    --chaos-report "$REPORT_DIR/chaos-report.json" \
+    "${CHAOS_ARGS[@]+"${CHAOS_ARGS[@]}"}" \
+    "$CORPUS_DIR" >"$LOG" 2>&1 || STATUS=$?
 else
   # `--fill` rewrites each fixture in place, so it runs on a private copy and never touches the
   # cached corpus other runs share.
@@ -281,6 +303,12 @@ if [ "$MODE" = "diff" ]; then
   # The CLI already fails on a panic or an unexplained difference, and on nothing else — fixtures
   # it declines and differences it explains leave it at 0. Pass that verdict straight through
   # rather than re-deriving it from parsed output.
+  exit "$STATUS"
+fi
+
+if [ "$MODE" = "chaos" ]; then
+  echo "==> report: $REPORT_DIR/chaos-report.json"
+  # Same reasoning as diff mode: the CLI's own gate is the verdict.
   exit "$STATUS"
 fi
 

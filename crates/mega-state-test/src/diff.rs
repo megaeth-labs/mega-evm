@@ -46,6 +46,7 @@
 //! over-reports instead of granting an exemption on the strength of bytes the fixture chose.
 
 use crate::{
+    chaos::{CallbackCounter, ChaosInspector, ShapeFilter},
     panic_capture,
     runner::{
         configure_max_blobs, execution_status, external_envs_for, find_all_json_tests, halt_reason,
@@ -68,7 +69,7 @@ use mega_evm::{
         interpreter::{interpreter::EthInterpreter, interpreter_action::FrameInput},
         primitives::{Bytes, B256},
     },
-    MegaContext, MegaEvm, MegaHaltReason, MegaLimitExceeded, MegaTransaction,
+    InspectorLedger, MegaContext, MegaEvm, MegaHaltReason, MegaLimitExceeded, MegaTransaction,
     MegaTransactionNew as _, VOLATILE_DATA_ACCESS_DISABLED_SELECTOR,
 };
 use std::{
@@ -791,11 +792,8 @@ pub fn judge(fields: &[DiffField], target: &SpecOutcome, base: &SpecOutcome) -> 
 }
 
 /// Executes one unit's given transaction vector under `spec` and collects its outcome and
-/// evidence.
-///
-/// Mirrors the validation path exactly — the same config, block environment, external
-/// environment, block hashes and `BaseFeeVault` pruning — so the roots it computes are the roots
-/// validation would check.
+/// evidence — the differential classifier's entry point into
+/// [`execute_unit_in_mode`](execute_unit_in_mode).
 ///
 /// `collect_evidence` runs the execution under [`FrameEvidenceInspector`], which is what makes an
 /// inner frame's outcome visible; it costs an inspected interpreter loop, so the differential
@@ -806,6 +804,62 @@ pub fn execute_unit_outcome(
     spec: &SpecName,
     collect_evidence: bool,
 ) -> Result<SpecOutcome, TestErrorKind> {
+    let mode = if collect_evidence { RunMode::Evidence } else { RunMode::Plain };
+    execute_unit_in_mode(unit, indexes, spec, mode).map(|run| run.outcome)
+}
+
+/// Which inspector, if any, drives a unit's execution.
+///
+/// Every mode runs the same setup — the same config, block environment, external environment,
+/// block hashes and `BaseFeeVault` pruning — so that what a mode changes is the inspector and
+/// nothing else. That is what lets a rewriting run be compared against a plain one and the
+/// difference be attributed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunMode {
+    /// No inspector at all: revm's plain frame loops.
+    Plain,
+    /// The read-only [`FrameEvidenceInspector`].
+    Evidence,
+    /// A read-only inspector that counts the callbacks it is handed and changes nothing — the
+    /// control a rewriting run is judged against.
+    Observe,
+    /// [`ChaosInspector`](crate::chaos::ChaosInspector), seeded with `seed` and restricted to
+    /// what `filter` allows.
+    Chaos {
+        /// The stream this run's decisions come from.
+        seed: u64,
+        /// Which mutations the run may make.
+        filter: ShapeFilter,
+    },
+}
+
+/// One unit's execution, with whatever the mode's inspector collected alongside it.
+#[derive(Debug, Clone)]
+pub struct UnitExecution {
+    /// The quantities the differential classifier compares.
+    pub outcome: SpecOutcome,
+    /// What the chaos inspector did, in [`RunMode::Chaos`].
+    pub chaos: Option<crate::chaos::ChaosTally>,
+    /// How many callbacks the observing inspector was handed, in [`RunMode::Observe`].
+    pub observed: u64,
+    /// What the measurement shim booked for the transaction.
+    ///
+    /// Empty for every mode but [`RunMode::Chaos`] — which is itself an assertion the chaos sweep
+    /// makes, since a read-only inspector that moved a lane would not be read-only.
+    pub ledger: InspectorLedger,
+}
+
+/// Executes one unit's given transaction vector under `spec`, with `mode`'s inspector attached.
+///
+/// Mirrors the validation path exactly — the same config, block environment, external
+/// environment, block hashes and `BaseFeeVault` pruning — so the roots it computes are the roots
+/// validation would check.
+pub fn execute_unit_in_mode(
+    unit: &TestUnit,
+    indexes: TxPartIndices,
+    spec: &SpecName,
+    mode: RunMode,
+) -> Result<UnitExecution, TestErrorKind> {
     let mut cfg = CfgEnv::default();
     // See `execute_test_suite`: revm-27 chain-id gate-off (revm 40 default is true).
     cfg.tx_chain_id_check = false;
@@ -832,17 +886,38 @@ pub fn execute_unit_outcome(
     let mut megatx = MegaTransaction::new(tx);
     megatx.enveloped_tx = Some(Bytes::default());
 
-    let (executed, frames, ctx) = if collect_evidence {
-        let mut evm = MegaEvm::new(evm_context).with_inspector(FrameEvidenceInspector::default());
-        let executed = evm.execute_transaction(megatx);
-        let inner = evm.into_inner();
-        let frames = Some(inner.inspector.evidence());
-        (executed, frames, inner.ctx)
-    } else {
-        let mut evm = MegaEvm::new(evm_context);
-        let executed = evm.execute_transaction(megatx);
-        let inner = evm.into_inner();
-        (executed, None, inner.ctx)
+    let mut chaos_tally = None;
+    let mut observed = 0;
+    let (executed, frames, ctx) = match mode {
+        RunMode::Evidence => {
+            let mut evm =
+                MegaEvm::new(evm_context).with_inspector(FrameEvidenceInspector::default());
+            let executed = evm.execute_transaction(megatx);
+            let inner = evm.into_inner();
+            let frames = Some(inner.inspector.evidence());
+            (executed, frames, inner.ctx)
+        }
+        RunMode::Observe => {
+            let mut evm = MegaEvm::new(evm_context).with_inspector(CallbackCounter::default());
+            let executed = evm.execute_transaction(megatx);
+            let inner = evm.into_inner();
+            observed = inner.inspector.callbacks();
+            (executed, None, inner.ctx)
+        }
+        RunMode::Chaos { seed, filter } => {
+            let mut evm =
+                MegaEvm::new(evm_context).with_inspector(ChaosInspector::new(seed, filter));
+            let executed = evm.execute_transaction(megatx);
+            let inner = evm.into_inner();
+            chaos_tally = Some(inner.inspector.tally());
+            (executed, None, inner.ctx)
+        }
+        RunMode::Plain => {
+            let mut evm = MegaEvm::new(evm_context);
+            let executed = evm.execute_transaction(megatx);
+            let inner = evm.into_inner();
+            (executed, None, inner.ctx)
+        }
     };
 
     // Read the trackers before the context is dismantled: they carry the transaction's final
@@ -855,6 +930,7 @@ pub fn execute_unit_outcome(
     let db = ctx.into_inner().journaled_state.database;
 
     let outcome = executed.map_err(|e| TestErrorKind::FixtureError(e.to_string()))?;
+    let ledger = outcome.inspector_ledger;
     let compute_gas_used = outcome.compute_gas_used;
     let compute_gas_destroyed = outcome.compute_gas_destroyed;
     let compute_gas_enforced = outcome.compute_gas_enforced;
@@ -868,7 +944,7 @@ pub fn execute_unit_outcome(
     db.commit(outcome.result_and_state.state);
     prune_base_fee_vault_changes(db);
 
-    Ok(SpecOutcome {
+    let outcome = SpecOutcome {
         state_root: state_merkle_trie_root(db.cache.trie_account()),
         logs_root: log_rlp_hash(result.logs()),
         gas_used: result.tx_gas_used(),
@@ -889,7 +965,8 @@ pub fn execute_unit_outcome(
         detained_limit,
         volatile_access,
         frames,
-    })
+    };
+    Ok(UnitExecution { outcome, chaos: chaos_tally, observed, ledger })
 }
 
 /// Runs the differential comparison over every transaction vector of every unit of one fixture

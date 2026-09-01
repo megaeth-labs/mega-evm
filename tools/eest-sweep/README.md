@@ -68,15 +68,52 @@ run is cleared by removing `<cache-dir>/<release>.unpack.lock`.
 `tests/cache_integrity.sh` drives all of this against a synthetic archive and a stub binary; it
 runs per-PR in CI and needs neither the corpus nor a build.
 
+## Chaos mode
+
+`--mode chaos` asks a different question of the same corpus: not whether two specs agree, but whether the accounting survives an inspector that rewrites what it is handed.
+
+Every vector is executed three times under the target spec — with no inspector, with a read-only one, and with a deterministic rewriting one — and two things are checked.
+
+- **Observation is free.** The read-only run must be identical to the run with no inspector on every quantity the differential classifier compares, and must leave an empty inspector ledger. That is the property every tracer in production depends on, checked against the whole corpus rather than a handful of fixtures.
+- **Rewriting does not break the books.** Every gas-accounting cross-check MegaETH has is a debug assertion, so under the default `hivetests` profile a broken conservation law is a panic, and a panic is that vector's verdict rather than a lost worker thread.
+
+The rewriting inspector's decisions come from a hash of the global seed and the vector's own identity — its fixture path, unit name and transaction indexes.
+No clock, no address, no iteration order.
+The same seed and the same corpus produce the same mutations on any machine, in any thread count, so a flagged vector's report line carries everything needed to re-run exactly it.
+
+What fails the run: a `PANIC`, a `CONTROL_DRIFT` (the read-only run moved something), a `CHAOS_REJECTED` (the rewriting run changed whether the transaction executes at all), a file the sweep could not read, a run that judged no vector — and a run whose inspector mutated nothing, which would report every count truthfully zero while testing nothing.
+
+One rewrite shape is deliberately absent from the pool: turning a failed contract creation into a successful one.
+The shim refuses that shape and asserts on it, so including it would make the detector's own firing the sweep's dominant result.
+`crates/mega-evm/tests/rex7/inspector_cheat_matrix.rs` pins the refusal instead.
+
+### Narrowing a flagged vector
+
+Three knobs, passed through with `--chaos-arg`:
+
+```bash
+tools/eest-sweep/run.sh --mode chaos \
+  --chaos-arg --chaos-shapes --chaos-arg inject_gas,drain_gas
+```
+
+- `--chaos-shapes LIST` restricts the pool to the named shapes. Narrowing does not reshuffle the decision stream, so each surviving mutation stays where the full run put it; it does leave the mutation budget unspent on rejected draws, so a narrowed run can reach further into a transaction.
+- `--chaos-skip-terminal-counter-edits` makes no gas-counter edit at the `step_end` of a frame's terminating opcode, where the interpreter's counter has already been copied into the frame's action.
+- `--chaos-skip-precompile-reclassification` rewrites no precompile result's classification, whose executed / destroyed split is booked at the precompile's own recording site before any callback sees it.
+
 ## Options
 
 ```
 --target-spec SPEC   Spec under test (default: Rex7)
 --base-spec SPEC     Frozen spec to compare against (default: Rex6)
---mode diff|fill     diff (default) executes both specs and classifies the differences.
+--mode diff|fill|chaos
+                     diff (default) executes both specs and classifies the differences.
                      fill executes the target spec only and recomputes each fixture's `post`
                      on a private copy — the older scan, kept because it exercises the
                      fixture-writing path that diff mode does not touch.
+                     chaos executes the target spec three times per vector under three
+                     inspectors; see "Chaos mode" above.
+--chaos-seed SEED    Global seed for chaos mode (default: 1).
+--chaos-arg ARG      Extra argument passed through to the chaos run; repeatable.
 --corpus-dir DIR     Use an already-unpacked `state_tests` tree instead of downloading.
 --cache-dir DIR      Where to keep the downloaded archive (default: .eest-cache).
 --report-dir DIR     Where to write the report and log (default: .eest-report).
