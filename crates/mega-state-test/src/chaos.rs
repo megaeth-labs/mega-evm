@@ -162,8 +162,16 @@ pub enum ChaosShape {
     LowerEnvelope,
     /// A call turned static, so what the frame is allowed to do changes rather than what it costs.
     MakeStatic,
-    /// A synthetic outcome, so no frame is built at all.
+    /// A synthetic outcome, so no frame is built at all. Its gas echoes the envelope the callback
+    /// was handed, which is what every tool that intercepts does.
     Intercept,
+    /// The same, sized above the envelope, so the outcome hands the caller back gas the
+    /// transaction never funded.
+    InterceptOverGas,
+    /// Sized below it, so the caller spends the difference on a frame that never ran.
+    InterceptUnderGas,
+    /// Sized at nothing, the extreme of the same direction: the whole envelope is consumed.
+    InterceptNoGas,
     /// A raised remaining-gas figure on a finished frame's result.
     RaiseResultGas,
     /// A lowered one.
@@ -183,7 +191,7 @@ pub enum ChaosShape {
 
 impl ChaosShape {
     /// Every shape, in the order the labels are listed by `--chaos-shapes`.
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 17] = [
         Self::InjectGas,
         Self::DrainGas,
         Self::EditFrameState,
@@ -192,6 +200,9 @@ impl ChaosShape {
         Self::LowerEnvelope,
         Self::MakeStatic,
         Self::Intercept,
+        Self::InterceptOverGas,
+        Self::InterceptUnderGas,
+        Self::InterceptNoGas,
         Self::RaiseResultGas,
         Self::LowerResultGas,
         Self::FailFrame,
@@ -225,6 +236,9 @@ impl ChaosShape {
             Self::LowerEnvelope => "lower_envelope",
             Self::MakeStatic => "make_static",
             Self::Intercept => "intercept",
+            Self::InterceptOverGas => "intercept_over_gas",
+            Self::InterceptUnderGas => "intercept_under_gas",
+            Self::InterceptNoGas => "intercept_no_gas",
             Self::RaiseResultGas => "raise_result_gas",
             Self::LowerResultGas => "lower_result_gas",
             Self::FailFrame => "fail_frame",
@@ -250,11 +264,19 @@ const INTERPRETER_SHAPES: [ChaosShape; 6] = [
 ];
 
 /// Shapes reachable from a callback that holds a frame's inputs, before the frame is built.
-const INPUT_SHAPES: [ChaosShape; 5] = [
+///
+/// The four interception shapes differ only in how the synthetic outcome's `Gas` is sized against
+/// the envelope. That is the whole of what separates them, and it is the separation that matters:
+/// the echo is the shape every real tool uses, and it is also the one shape whose accounting
+/// closes without anything measuring the figure.
+const INPUT_SHAPES: [ChaosShape; 8] = [
     ChaosShape::RaiseEnvelope,
     ChaosShape::LowerEnvelope,
     ChaosShape::MakeStatic,
     ChaosShape::Intercept,
+    ChaosShape::InterceptOverGas,
+    ChaosShape::InterceptUnderGas,
+    ChaosShape::InterceptNoGas,
     ChaosShape::JournalWrite,
 ];
 
@@ -276,12 +298,12 @@ const RESULT_SHAPES: [ChaosShape; 5] = [
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ShapeFilter {
     /// Bitmask over [`ChaosShape::ALL`], by index.
-    allowed: u16,
+    allowed: u32,
 }
 
 impl Default for ShapeFilter {
     fn default() -> Self {
-        Self { allowed: u16::MAX }
+        Self { allowed: u32::MAX }
     }
 }
 
@@ -305,8 +327,8 @@ impl ShapeFilter {
         ChaosShape::ALL.into_iter().all(|s| self.allows(s))
     }
 
-    const fn index(shape: ChaosShape) -> u16 {
-        shape as u16
+    const fn index(shape: ChaosShape) -> u32 {
+        shape as u32
     }
 }
 
@@ -534,12 +556,15 @@ impl ChaosInspector {
                 inputs.gas_limit = inputs.gas_limit.saturating_sub(Self::amount(entropy));
             }
             ChaosShape::MakeStatic => inputs.is_static = true,
-            ChaosShape::Intercept => {
+            ChaosShape::Intercept |
+            ChaosShape::InterceptOverGas |
+            ChaosShape::InterceptUnderGas |
+            ChaosShape::InterceptNoGas => {
                 outcome = Some(CallOutcome::new(
                     InterpreterResult::new(
                         synthetic_result(entropy),
                         Bytes::new(),
-                        Gas::new(inputs.gas_limit),
+                        Gas::new(interception_gas(shape, inputs.gas_limit, entropy)),
                     ),
                     inputs.return_memory_offset.clone(),
                 ));
@@ -567,12 +592,15 @@ impl ChaosInspector {
             ChaosShape::LowerEnvelope => {
                 inputs.set_gas_limit(inputs.gas_limit().saturating_sub(Self::amount(entropy)));
             }
-            ChaosShape::Intercept => {
+            ChaosShape::Intercept |
+            ChaosShape::InterceptOverGas |
+            ChaosShape::InterceptUnderGas |
+            ChaosShape::InterceptNoGas => {
                 outcome = Some(CreateOutcome::new(
                     InterpreterResult::new(
                         synthetic_result(entropy),
                         Bytes::new(),
-                        Gas::new(inputs.gas_limit()),
+                        Gas::new(interception_gas(shape, inputs.gas_limit(), entropy)),
                     ),
                     None,
                 ));
@@ -624,6 +652,21 @@ impl ChaosInspector {
             _ => return,
         }
         self.applied(shape);
+    }
+}
+
+/// The gas a synthetic outcome hands back, given the envelope the callback was handed.
+///
+/// The four interception shapes are exactly this function's four cases. `Intercept` echoes the
+/// envelope, which is the convention every tool that intercepts follows and the one sizing whose
+/// accounting closes even if nothing measures it; the other three move it, in both directions and
+/// down to nothing, so a lane that books one direction and drops the other is caught.
+const fn interception_gas(shape: ChaosShape, envelope: u64, entropy: u64) -> u64 {
+    match shape {
+        ChaosShape::InterceptOverGas => envelope.saturating_add(entropy % GAS_DELTA_MAX + 1),
+        ChaosShape::InterceptUnderGas => envelope.saturating_sub(entropy % GAS_DELTA_MAX + 1),
+        ChaosShape::InterceptNoGas => 0,
+        _ => envelope,
     }
 }
 
