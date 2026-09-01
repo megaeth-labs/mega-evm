@@ -32,8 +32,8 @@ use revm::{
     context::{result::ExecutionResult, tx::TxEnvBuilder},
     handler::EvmTr,
     interpreter::{
-        interpreter_types::LoopControl, CallInputs, CallOutcome, Interpreter, InterpreterAction,
-        InterpreterTypes,
+        interpreter_types::LoopControl, CallInputs, CallOutcome, Gas, InstructionResult,
+        Interpreter, InterpreterAction, InterpreterResult, InterpreterTypes,
     },
     Inspector,
 };
@@ -197,6 +197,23 @@ enum Edit {
     StateGasAtStep,
     /// Write the finished inner call's spend counter.
     StateGasAtCallEnd,
+    /// Answer the inner call with a synthetic outcome that echoes the envelope and carries
+    /// neither figure — the control the two below are read against.
+    InterceptEcho,
+    /// The same, carrying a refund the frame never earned.
+    InterceptWithRefund,
+    /// The same, carrying an EIP-8037 pool.
+    InterceptWithReservoir,
+}
+
+impl Edit {
+    /// Whether this edit answers the frame itself instead of letting the EVM build it.
+    const fn intercepts(self) -> bool {
+        matches!(
+            self,
+            Self::InterceptEcho | Self::InterceptWithRefund | Self::InterceptWithReservoir
+        )
+    }
 }
 
 /// Applies one [`Edit`], once, and records that it landed.
@@ -243,13 +260,30 @@ impl<CTX, INTR: InterpreterTypes> Inspector<CTX, INTR> for Editor {
     }
 
     fn call(&mut self, _context: &mut CTX, inputs: &mut CallInputs) -> Option<CallOutcome> {
-        if self.fired > 0 || inputs.target_address != CALLEE || self.edit != Edit::ReservoirOnInputs
-        {
+        if self.fired > 0 || inputs.target_address != CALLEE {
             return None;
         }
-        inputs.reservoir += RESERVOIR;
+        if self.edit == Edit::ReservoirOnInputs {
+            inputs.reservoir += RESERVOIR;
+            self.fired += 1;
+            return None;
+        }
+        if !self.edit.intercepts() {
+            return None;
+        }
+        // The echo convention every tool that intercepts follows: hand back exactly what was
+        // forwarded, so the gas lanes see nothing and only the figures under test move.
+        let mut gas = Gas::new(inputs.gas_limit);
+        match self.edit {
+            Edit::InterceptWithRefund => gas.record_refund(REFUND),
+            Edit::InterceptWithReservoir => gas.set_reservoir(RESERVOIR),
+            _ => {}
+        }
         self.fired += 1;
-        None
+        Some(CallOutcome::new(
+            InterpreterResult::new(InstructionResult::Stop, Bytes::new(), gas),
+            inputs.return_memory_offset.clone(),
+        ))
     }
 
     fn call_end(&mut self, _context: &mut CTX, inputs: &CallInputs, outcome: &mut CallOutcome) {
@@ -576,4 +610,59 @@ fn test_state_gas_on_a_failing_frame_becomes_its_callers_reservoir() {
         "so the envelope moves, and the law's term has to move with it",
     );
     assert_identity("state gas on a reverting frame", &edited);
+}
+
+// --- a frame the inspector answers itself
+// ---------------------------------------------------------
+
+/// A synthetic outcome carries figures of its own, and there is no EVM-produced number on the
+/// other side of the callback to difference against — so the whole of what it carries is the
+/// inspector's, measured against nothing rather than against a baseline.
+///
+/// The echo control is what makes the two cells below readings of the figures rather than of the
+/// interception: it moves the gas lanes not at all, which is the convention every tool that
+/// intercepts follows.
+#[test]
+fn test_a_synthetic_outcome_carries_its_own_figures() {
+    let echo = transact_edited(Callee::Returning, Edit::InterceptEcho);
+    assert_eq!(
+        echo.ledger,
+        InspectorLedger { interventions: 1, ..InspectorLedger::default() },
+        "an echoing interception moves no figure at all",
+    );
+    assert_identity("interception, echo", &echo);
+
+    let refunding = transact_edited(Callee::Returning, Edit::InterceptWithRefund);
+    assert_eq!(
+        refunding.ledger,
+        InspectorLedger {
+            refund: i128::from(REFUND),
+            interventions: 1,
+            ..InspectorLedger::default()
+        },
+        "the refund a frame that never ran hands back is the inspector's in whole",
+    );
+    assert_eq!(
+        refunding.refunded,
+        echo.refunded + u64::try_from(REFUND).unwrap(),
+        "and it reaches the receipt: the outcome succeeded, so its caller records it",
+    );
+    assert_eq!(refunding.total_gas_spent, echo.total_gas_spent, "the envelope is unmoved");
+    assert_identity("interception, refunding", &refunding);
+
+    let pooled = transact_edited(Callee::Returning, Edit::InterceptWithReservoir);
+    assert_eq!(
+        pooled.ledger,
+        InspectorLedger {
+            reservoir: i128::from(RESERVOIR),
+            interventions: 1,
+            ..InspectorLedger::default()
+        },
+    );
+    assert_eq!(
+        pooled.total_gas_spent,
+        echo.total_gas_spent - RESERVOIR,
+        "a pool does move the envelope, wherever it came from",
+    );
+    assert_identity("interception, pooled", &pooled);
 }
