@@ -286,12 +286,36 @@ A frame that ran to a successful exit and is then rewritten into a frame-local r
 Under Rex7, a node MUST decide a frame's journal outcome from the frame's **final** result — the result after every settlement and every rewrite the node applies at that frame's exit.
 A frame that reports a revert MUST have its state reverted; a contract creation that reports anything other than success MUST deposit no code.
 
-This closes the split for every exceed the frame itself latched while it ran.
-It does not reach an exceed first detected on the way out to the caller: that check weighs the frame's usage against the caller's budget, after the frame's usage has been merged into it, so it is answerable only once the frame is already back with its caller.
-Such an exceed is absorbed there, on every spec, and the frozen split remains for it.
+This closes the split for every exceed the frame itself latched while it ran, and — with the rule below — for the one it cannot latch.
 
 A node MUST NOT deposit code that its create-return predicates rejected, whatever a later rewrite says the result is.
 The bytes a deployment writes MUST be the bytes those predicates approved.
+
+### A Frame-Local Exceed Detected on the Way Out
+
+#### Previous behavior
+
+A frame-local budget is the frame's usage weighed against its **caller's** budget once the frame's usage has been merged into it, so a frame can overrun one with nothing having observed it while the frame ran.
+Such an exceed is first detectable at the frame return, and a node detects it there — after the merge, and after the journal decision of the previous section.
+The frame is told to revert, but its usage was merged into its caller as a successful frame's is, and its state was committed.
+The caller then carries the frame's usage against its own budget and is failed by it at its next resource check.
+
+#### New behavior
+
+Under Rex7, a node MUST determine a frame-local exceed of this kind **before** it merges the frame's usage into the caller, evaluating it over the state the merge would produce.
+
+The reading a node evaluates MUST be the post-merge reading: the caller's budget, its usage with the frame's merged into it, and the transaction's usage as the merge would leave it.
+What changes is when the answer is taken, not what is asked.
+
+A node that finds such an exceed MUST rewrite the frame's result to a frame-local revert before merging.
+The merge, the journal decision and the result then follow one classification:
+
+- the caller is told the frame reverted, with the same `MegaLimitExceeded(kind, limit)` payload any frame-local exceed carries;
+- the merge MUST discard the frame's usage exactly as it discards a reverting frame's — the reverted lanes of every dimension are dropped, and only usage that survives a revert is carried up;
+- the frame's state MUST be rolled back, by the rule of the previous section.
+
+The caller MUST then be free to continue.
+A node MUST NOT fail the caller on the frame's discarded usage.
 
 ## Developer Impact
 
@@ -317,6 +341,10 @@ Whether the creation succeeds, what it deploys, and the receipt it produces are 
 A frame that reports a frame-local revert leaves no state behind under Rex7, where under Rex6 a frame that had already exited successfully kept its writes.
 A caller that read state written by such a frame after absorbing its revert sees nothing under Rex7.
 
+A caller whose child overran the caller's own budget survives under Rex7 and is failed under Rex6.
+The child reverts either way; what changes is that its usage no longer follows it up.
+Reaching this at all needs the caller's remaining budget in one dimension to be small enough that 2% of it is under one unit of that dimension's charge, so a caller with room to spare cannot be put there by a child that stayed inside its own budget.
+
 ## Safety and Compatibility
 
 Rex7 changes nothing about how blocks under earlier specs are executed.
@@ -333,6 +361,10 @@ On a precompile that fails before performing work, Rex7 enforcement is deliberat
 
 Rex7 rolls back state Rex6 keeps on one path: a frame that exited successfully and was then rewritten into a frame-local revert.
 The rewrite itself is unchanged; what changes is that the journal follows it.
+
+Rex7 keeps a caller alive that Rex6 fails, on one path: a frame whose merge would overrun its caller's budget.
+Rex6 merges the usage first and fails the caller on it; Rex7 rewrites the frame first, so the merge discards that usage the way it discards any reverting frame's.
+The frame's own outcome — a frame-local revert with the same payload — is the same on both.
 
 Rex7 reports less compute gas than Rex6 on one path: a contract creation that fails at its frame exit, whose code-deposit compute gas Rex6 records and Rex7 does not.
 Enforcement is looser there by the same amount, and deliberately so — the EVM charges that amount only for a deposit that happens, so enforcing it against a creation that failed would bind the compute limit with gas nobody spent.

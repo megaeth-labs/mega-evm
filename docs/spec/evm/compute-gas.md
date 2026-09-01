@@ -459,7 +459,7 @@ A node commits or reverts a frame's journal checkpoint from the frame's instruct
 Under Rex7, a node MUST decide a frame's journal outcome from the frame's final result — the result after every settlement and every rewrite the node applies at that frame's exit — so a frame that reports a revert has reverted.
 
 The rule reaches every exceed the frame itself latched while it ran.
-It does not reach one first detected on the way out to the caller, which weighs the frame's usage against the caller's budget after the merge and is therefore only answerable once the frame is back with its caller; that one is absorbed there, as on every spec.
+It reaches one first detected on the way out to the caller too — that one weighs the frame's usage against the caller's budget after the merge, so under Rex7 a node determines it before the merge and rewrites the frame's result first; see [Per-Call-Frame Runtime Budgets](resource-limits.md#per-call-frame-runtime-budgets).
 
 </details>
 

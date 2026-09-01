@@ -173,6 +173,17 @@ Only total gas (the standard EVM gas parameter in CALL-like opcodes) remains und
 If a child call frame exceeds its local budget, it MUST revert with `MegaLimitExceeded(uint8 kind, uint64 limit)`.
 The parent call frame MAY continue execution.
 
+A frame's own budget is not the only one it can overrun: its usage is merged into its caller's when it returns, and that merge can put the caller past its budget even though the frame stayed inside its own.
+Through [Rex6](../upgrades/rex6.md), a node detects that after the merge — the frame is told to revert, its usage is carried up as a successful frame's is, and the caller is failed by it at the caller's next resource check.
+
+<details>
+<summary>Rex7 (unstable): the exceed is determined before the merge</summary>
+
+Under Rex7, a node MUST determine such an exceed before merging, over the reading the merge would produce, and MUST rewrite the frame's result to the same frame-local revert before merging.
+The merge then discards the frame's usage as it discards any reverting frame's, the frame's state is rolled back with it, and the caller MUST be free to continue.
+
+</details>
+
 The top-level call frame's budget MUST equal the transaction limit minus any resource usage already recorded before the first frame begins.
 These deductions include transaction-only intrinsic usage and any DB-dependent pre-execution usage that is resolved before the first frame starts.
 Each resource dimension deducts only the pre-frame items relevant to it:

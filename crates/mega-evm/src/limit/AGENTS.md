@@ -20,6 +20,10 @@ Resource metering subsystem for transaction and frame limits across compute gas,
 - `AdditionalLimit::finalize_frame` is the single point a frame's outcome is settled — the destroyed-remainder booking, the frame-init refusal booking, the gas rescue, and the REX7 frame-local absorb — and it runs after the last callback that can rewrite the frame's classification and before the journal decision.
   Put a new frame-exit settlement there, not in a lifecycle hook on either side of it.
   The pops stay in `before_frame_return_result`: the paths that reach a caller without ever running a frame would double-pop.
+- A frame-local exceed a frame could not latch — the one defined against its *caller's* budget after the merge — is settled in `before_frame_return_result` instead, and under REX7 before the pops rather than after them.
+  `peek_check_limit_after_pop` answers the post-merge question over `FrameLimitTracker::view_after_pop`, so the reading is the merged one and only the timing moves; the pop that follows reads a revert and discards the frame's usage.
+  Every dimension answers it with its own `check_limit` body over a `FrameLimitView`, and the two readings are cross-checked against each other on every frame return in debug builds.
+  Add a dimension's `check_limit_after_pop` when adding a dimension, and extend `view_after_pop` when adding a lane the pop moves.
 - Synthetic frame results still require empty-frame pushes for stack alignment.
 - Gas rescue must exclude any system-granted stipend gas.
 - Revert paths must roll back discardable usage for data/KV/state growth trackers.
@@ -29,7 +33,8 @@ Resource metering subsystem for transaction and frame limits across compute gas,
 - Do not encode frame-local exceeds as halts.
 - They must be reverts with bounded payload.
 - Do not read tracker totals after an exceeded-limit revert path unless using tracker-owned finalized APIs.
-- Do not run a fresh `check_limit()` inside `finalize_frame`: a per-frame exceed is defined by the frame's usage weighed against its *caller's* budget after the merge, which is only answerable once the frame is back with its caller.
+- Do not run a fresh `check_limit()` inside `finalize_frame`: a per-frame exceed is defined by the frame's usage weighed against its *caller's* budget after the merge, which nothing at that point can read.
+  The pre-pop settlement in `before_frame_return_result` is where that question belongs, and it reads the merged numbers rather than the current ones.
 - Avoid duplicating limit checks inside opcode handlers when the tracker already enforces the same dimension.
 
 ## WHERE TO LOOK

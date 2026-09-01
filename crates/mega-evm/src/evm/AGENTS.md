@@ -7,7 +7,7 @@ MegaEVM execution core that wraps revm/op-revm with MegaETH instruction tables, 
 - `mod.rs`: `MegaEvm` wrapper, inspector toggling, execution convenience APIs.
 - `context.rs`: execution context composition and state wiring.
 - `execution.rs`: transaction execution flow, the two frame loops and the two frame-init paths, and result shaping.
-- `frame.rs`: revm's frame-action processing, split so the journal decision can be withheld until the frame's settlement has run — `classify_frame_action` decides the result, `commit_frame_journal` carries the decision out.
+- `frame.rs`: revm's frame-action processing, split so the journal decision can be withheld until the frame's result is final — `classify_frame_action` decides the result, `commit_frame_journal` carries the decision out.
 - `factory.rs`: `MegaEvmFactory` builder for context and external env wiring.
 - `instructions.rs`: spec-layered opcode table and extension wrappers.
 - `host.rs`: host overrides for volatile tracking, oracle reads, SALT gas hooks.
@@ -31,6 +31,9 @@ MegaEVM execution core that wraps revm/op-revm with MegaETH instruction tables, 
 - A rewrite the last mutating callback makes to a frame result's gas is booked from the frame's settlement point rather than from the callback boundary, because whether it moves the transaction's envelope depends on how the frame ends: a returning or reverting frame's remaining gas goes back to its caller, a halting one's does not.
   The gas an intercepting callback puts into a synthetic outcome travels through that same lane.
   One shape is refused outright rather than measured: a `create_end` (or the `frame_end` after it) turning a failed creation into a successful one — see `reject_forbidden_create_rewrite`, and the verdict in `frame.rs` that gives such a rewrite no code to deposit even if the refusal were removed.
+- Under REX7 a frame's journal decision travels: the frame loops park it on `MegaEvm::deferred_journal` and `frame_return_result` carries it out, after `AdditionalLimit::before_frame_return_result` — the last thing that can rewrite a frame's result — and before the caller resumes.
+  There is never more than one decision outstanding and it never survives the step it was parked for; `hold_deferred_journal` asserts that.
+  Anything new that can rewrite a frame's result has to land inside that window, or it reopens the split the deferral closed.
 - Both frame loops and both frame-init paths run the same bodies; the inspected copies add exactly one thing, the callback that can rewrite a frame's classification.
   Add to the shared body, not to one copy: `tests/rex7/frame_loop_parity.rs` compares the two on every frame outcome, state included, and is what a one-sided edit fails.
 

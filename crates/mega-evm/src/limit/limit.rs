@@ -961,10 +961,10 @@ impl AdditionalLimit {
     /// popped and merged into its caller — asked before the merge, and latching nothing.
     ///
     /// A per-frame budget is defined by the frame's usage weighed against its *caller's* budget
-    /// after the merge, so that is the only question worth asking at a frame return. Today it can
-    /// only be answered after the merge has already happened, which is too late for the answer to
-    /// change what the merge does with the frame's usage or what the journal does with its state.
-    /// This asks the same question one step earlier.
+    /// after the merge, so that is the only question worth asking at a frame return. Asked where
+    /// its numbers naturally appear — after the pop — it comes too late for the answer to change
+    /// what the merge did with the frame's usage or what the journal did with its state. This asks
+    /// the same question one step earlier, which is the whole of why it exists.
     ///
     /// "The same question" is meant literally: every dimension runs its own `check_limit` body,
     /// in `check_limit`'s order, over a reading of its tracker taken as if the pop had happened.
