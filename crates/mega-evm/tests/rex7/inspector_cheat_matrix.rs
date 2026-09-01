@@ -665,6 +665,14 @@ impl<CTX: ContextTr, INTR: InterpreterTypes> Inspector<CTX, INTR> for Cheat {
         if !self.arm(At::Step) {
             return;
         }
+        // The refund columns fire on the first callback that offers the moment they need, rather
+        // than on a fixed ordinal.
+        if self.shape.is_refund() {
+            if self.interpreter_moment_is_right(interp) {
+                self.hit_interpreter(interp);
+            }
+            return;
+        }
         match self.shape {
             Shape::JournalWrite if self.steps == self.step_at => self.hit_journal(context),
             // Fire on the first `SSTORE` the transaction reaches, whose operands are on the stack
@@ -673,13 +681,6 @@ impl<CTX: ContextTr, INTR: InterpreterTypes> Inspector<CTX, INTR> for Cheat {
                 self.hit_interpreter(interp)
             }
             Shape::EditStackOrMemory | Shape::JournalWrite => {}
-            // The refund columns fire on the first callback that offers the moment they need,
-            // rather than on a fixed ordinal.
-            _ if self.shape.is_refund() => {
-                if self.interpreter_moment_is_right(interp) {
-                    self.hit_interpreter(interp);
-                }
-            }
             _ if self.steps == self.step_at => self.hit_interpreter(interp),
             _ => {}
         }
