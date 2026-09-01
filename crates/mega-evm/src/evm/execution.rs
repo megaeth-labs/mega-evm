@@ -40,7 +40,7 @@ use revm::{
     Inspector, Journal,
 };
 
-use super::frame::{classify_frame_action, commit_frame_journal};
+use super::frame::{classify_frame_action, commit_frame_journal, PendingJournal};
 use crate::{
     constants, dispatch_system_contract_interceptors, is_deposit_like_transaction,
     is_mega_system_transaction_with, limit::ACCOUNT_INFO_WRITE_SIZE, sent_from_system_address,
@@ -626,7 +626,7 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
         frame: &mut EthFrame<EthInterpreter>,
         action: InterpreterAction,
         last_callback: impl FnOnce(&mut MegaContext<DB, ExtEnvs>, &FrameInput, &mut FrameResult),
-    ) -> FrameInitOrResult<EthFrame<EthInterpreter>> {
+    ) -> (FrameInitOrResult<EthFrame<EthInterpreter>>, Option<PendingJournal>) {
         let gas_remaining_before = match (&action, ctx.spec.is_enabled(MegaSpecId::MINI_REX)) {
             (InterpreterAction::Return(interpreter_result), true) => {
                 Some(interpreter_result.gas.remaining())
@@ -635,7 +635,7 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
         };
 
         let pending = match classify_frame_action(ctx, frame, action) {
-            ItemOrResult::Item(frame_init) => return ItemOrResult::Item(frame_init),
+            ItemOrResult::Item(frame_init) => return (ItemOrResult::Item(frame_init), None),
             ItemOrResult::Result(pending) => pending,
         };
         frame.set_finished(true);
@@ -645,9 +645,14 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
         // same on every spec. Frozen specs take it here, the moment the classification is done,
         // because that is where revm takes it and because what they replay includes the state a
         // frame leaves behind when a later rewrite fails it: a contract creation that commits and
-        // is then rewritten into a halt keeps its deployed code. REX7 withholds the decision until
-        // the settlement below has run, so that the state a frame leaves behind agrees with the
-        // result its caller is handed.
+        // is then rewritten into a halt keeps its deployed code.
+        //
+        // REX7 withholds the decision, so that the state a frame leaves behind agrees with the
+        // result its caller is handed. It is withheld past the end of this function, because the
+        // last thing that can rewrite the result is not here: a frame-local resource exceed
+        // detected only once the frame's usage has been weighed against its caller's budget lands
+        // in `before_frame_return_result`, one step further on. The caller hands the decision back
+        // to `commit_frame_journal` there, still ahead of the caller resuming.
         let mut deferred_journal = None;
         if ctx.spec.is_enabled(MegaSpecId::REX7) {
             deferred_journal = Some(journal);
@@ -664,11 +669,7 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
 
         Self::finalize_frame(ctx, &mut result, FrameExit::Ran, inspector_gas_delta);
 
-        if let Some(journal) = deferred_journal {
-            commit_frame_journal(ctx, journal, &result);
-        }
-
-        ItemOrResult::Result(result)
+        (ItemOrResult::Result(result), deferred_journal)
     }
 }
 
@@ -1411,6 +1412,26 @@ impl<DB, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs>
 where
     DB: Database,
 {
+    /// Parks a frame's journal decision until `frame_return_result`, one step of revm's execution
+    /// loop later.
+    ///
+    /// That step is the only thing that runs in between, and it is where the last rewrite of the
+    /// frame's result happens — a frame-local resource exceed the frame's own budget could not see,
+    /// because it is defined against the caller's budget after the merge. Holding the decision
+    /// across it is what lets a frame that reports a revert have reverted.
+    ///
+    /// A frame that suspended into a child frame parks nothing and clears whatever a previous
+    /// frame left, which is the invariant the assertion states: there is never more than one
+    /// decision outstanding, and it never survives the step it was parked for.
+    #[inline]
+    fn hold_deferred_journal(&mut self, pending: Option<PendingJournal>) {
+        debug_assert!(
+            self.deferred_journal.is_none(),
+            "a frame's journal decision outlived the step it was parked for"
+        );
+        self.deferred_journal = pending;
+    }
+
     /// Everything `frame_init` decides — whether a frame is built at all, and what result stands
     /// in for it when it is not — with the refusal left unsettled.
     ///
@@ -1681,7 +1702,10 @@ where
         // After frame_run instructions Hook
         Self::after_frame_run_instructions(context, frame, &mut action)?;
 
-        Ok(Self::settle_and_commit_frame(context, frame, action, |_, _, _| {}))
+        let (outcome, deferred_journal) =
+            Self::settle_and_commit_frame(context, frame, action, |_, _, _| {});
+        self.hold_deferred_journal(deferred_journal);
+        Ok(outcome)
     }
 
     fn frame_return_result(
@@ -1698,6 +1722,15 @@ where
             // call the `on_frame_return` function to update the `AdditionalLimit` if the limit is
             // exceeded, return the error frame result
             ctx.additional_limit.borrow_mut().before_frame_return_result::<false>(&mut result);
+        }
+
+        // REX7: the journal decision the frame's classification reached, carried out now — after
+        // the last thing that can rewrite the result, and before the caller resumes. A creation's
+        // `set_code` therefore still lands inside this window, with no point at which the caller
+        // could observe a deployed contract the frame's result denies. Frozen specs carry nothing
+        // here; they told the journal at classification time.
+        if let Some(pending) = self.deferred_journal.take() {
+            commit_frame_journal(&mut self.inner.ctx, pending, &result);
         }
 
         // Call the inner frame_return_result function to return the frame result.
@@ -1910,9 +1943,12 @@ where
         // Apply additional limits and storage gas cost
         Self::after_frame_run_instructions(ctx, frame, &mut action)?;
 
-        Ok(Self::settle_and_commit_frame(ctx, frame, action, |ctx, frame_input, frame_result| {
-            frame_end(ctx, inspector, frame_input, frame_result);
-        }))
+        let (outcome, deferred_journal) =
+            Self::settle_and_commit_frame(ctx, frame, action, |ctx, frame_input, frame_result| {
+                frame_end(ctx, inspector, frame_input, frame_result);
+            });
+        self.hold_deferred_journal(deferred_journal);
+        Ok(outcome)
     }
 }
 

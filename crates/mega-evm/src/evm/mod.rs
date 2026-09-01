@@ -117,6 +117,20 @@ pub struct MegaEvm<DB: Database, INSP, ExtEnvTypes: ExternalEnvTypes> {
     /// this view from what execution actually uses. The supported way to change configuration
     /// is to rebuild the EVM from a reconfigured context.
     mega_cfg: CfgEnv<spec::MegaSpecId>,
+    /// The journal decision a frame's classification reached and has not yet carried out (REX7).
+    ///
+    /// A frame's result can still be rewritten after the frame loop has produced it — by a late
+    /// frame-local resource exceed, which is only detectable once the frame's usage has been
+    /// weighed against its caller's budget. So under REX7 the decision travels from the frame
+    /// loop that took it to `frame_return_result`, which is past the last rewrite and still ahead
+    /// of the caller resuming. Frozen specs carry nothing here: they tell the journal at the
+    /// moment of classification, where revm does.
+    ///
+    /// Set by exactly one producer (the frame loops, both of which route through
+    /// `settle_and_commit_frame`) and taken by exactly one consumer, on the very next step of
+    /// revm's execution loop. It is `None` outside that one-step window, which
+    /// `settle_and_commit_frame` asserts in debug builds.
+    deferred_journal: Option<frame::PendingJournal>,
 }
 
 impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> core::fmt::Debug
@@ -173,6 +187,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, NoOpInspector, ExtEnvs
         let mega_cfg = context.cfg().clone().into_megaeth_cfg(spec);
         Self {
             mega_cfg,
+            deferred_journal: None,
             inner: revm::context::Evm::new_with_inspector(
                 context,
                 MeasuredInspector::new(NoOpInspector),
@@ -202,7 +217,7 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
             self.inner.instruction,
             self.inner.precompiles,
         );
-        MegaEvm { inner, inspect: true, mega_cfg }
+        MegaEvm { inner, inspect: true, mega_cfg, deferred_journal: None }
     }
 
     /// Creates a new `MegaETH` EVM instance with the inspector disabled at runtime.
@@ -218,7 +233,7 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
             self.inner.instruction,
             self.inner.precompiles,
         );
-        MegaEvm { inner, inspect: false, mega_cfg }
+        MegaEvm { inner, inspect: false, mega_cfg, deferred_journal: None }
     }
 
     /// Sets the transaction runtime limits for the EVM.
@@ -230,7 +245,12 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
             precompiles: self.inner.precompiles,
             frame_stack: self.inner.frame_stack,
         };
-        Self { inner, inspect: self.inspect, mega_cfg: self.mega_cfg }
+        Self {
+            inner,
+            inspect: self.inspect,
+            mega_cfg: self.mega_cfg,
+            deferred_journal: self.deferred_journal,
+        }
     }
 
     /// Adds or overrides dynamic precompiles in the EVM.
@@ -257,7 +277,12 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
             precompiles,
             frame_stack: self.inner.frame_stack,
         };
-        Self { inner, inspect: self.inspect, mega_cfg: self.mega_cfg }
+        Self {
+            inner,
+            inspect: self.inspect,
+            mega_cfg: self.mega_cfg,
+            deferred_journal: self.deferred_journal,
+        }
     }
 }
 
