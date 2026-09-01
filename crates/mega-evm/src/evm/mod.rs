@@ -497,6 +497,27 @@ where
 /// having burnt the difference; both are carried on the result as their own fields and applied
 /// after the envelope is final, so the envelope this compares against is unaffected by either.
 ///
+/// # The receipt's other two numbers
+///
+/// The law reaches one of the three figures a receipt carries. The other two are checked here, each
+/// on the terms available to it, because a check that looked only at the envelope would pass on a
+/// transaction whose sender was billed a different amount.
+///
+/// The **used** figure is stated against the accounted envelope rather than against the reported
+/// one, so the same lanes have to account for both numbers the receipt carries. It is a
+/// consistency pin rather than an independent measurement of what an inspector did to the refund:
+/// the EIP-3529 cap applies to the transaction's whole refund at once, over a sum in which the
+/// EVM's own refunds and an inspector's are indistinguishable, so no in-process reading separates
+/// them. What stops such a transaction is the block guard, which reads
+/// [`InspectorLedger::is_zero`](crate::InspectorLedger::is_zero) and therefore sees the refund
+/// lane.
+///
+/// The **state-gas** figure is stated against the state-gas lane, and that one does bite. `MegaETH`
+/// runs with EIP-8037 off on every path and every spec, so the transaction's own contribution to
+/// it — the intrinsic state gas, the per-authorization state refund — is structurally zero and the
+/// receipt's figure is exactly what the lane booked. That structural zero is the assumption both
+/// EIP-8037 lanes rest on, and this is where it is pinned.
+///
 /// What this catches that the settlement site's own cross-check cannot: a result whose envelope is
 /// decided *after* settlement, or a path that produces a receipt without settling at all. Both
 /// leave the settlement site's derived-versus-booked comparison perfectly happy and the reported
@@ -533,6 +554,26 @@ fn debug_assert_envelope_accounted(
              (reported compute {}, reported destroyed {}, {terms})",
             outcome.compute_gas_used,
             outcome.compute_gas_destroyed,
+        );
+        let gas = outcome.result_and_state.result.gas();
+        let ledger = outcome.inspector_ledger;
+        let used_accounted = accounted - i128::from(gas.inner_refunded());
+        debug_assert!(
+            i128::from(gas.tx_gas_used()) == used_accounted.max(i128::from(gas.floor_gas())),
+            "the same lanes must account for the used figure the receipt reports: \
+             used {} vs accounted {used_accounted} (refunded {}, floor {}, \
+             inspector refund lane {})",
+            gas.tx_gas_used(),
+            gas.inner_refunded(),
+            gas.floor_gas(),
+            ledger.refund,
+        );
+        debug_assert!(
+            i128::from(gas.state_gas_spent_final()) == ledger.state_gas.max(0),
+            "EIP-8037 is off on every MegaETH path, so the receipt's state gas is exactly what \
+             the inspector lane booked: reported {} vs lane {}",
+            gas.state_gas_spent_final(),
+            ledger.state_gas,
         );
     }
 }
