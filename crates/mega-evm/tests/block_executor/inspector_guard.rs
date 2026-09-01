@@ -51,6 +51,9 @@ const CALLEE: Address = address!("1000000000000000000000000000000000000002");
 /// Gas the injecting inspector writes into the interpreter's counter.
 const INJECTED: u64 = 7_000;
 
+/// Refund the refund-writing inspector records.
+const REFUNDED: i64 = 3_000;
+
 /// Writes gas into the running interpreter's counter, once — the smallest rewrite that moves the
 /// ledger's [`gas`](InspectorLedger::gas) lane.
 #[derive(Default)]
@@ -87,6 +90,28 @@ impl<CTX: ContextTr, INTR: InterpreterTypes> Inspector<CTX, INTR> for CallFailer
         }
         self.applied = true;
         outcome.result.result = InstructionResult::Revert;
+    }
+}
+
+/// Writes a refund into the running interpreter's counter, once — the rewrite that moves what the
+/// sender pays without moving the envelope at all.
+///
+/// Every gas lane stays at zero under this inspector, and so does the conservation law: the law is
+/// stated over `total_gas_spent`, which is `limit - remaining`, and a refund enters neither term.
+/// What moves is the receipt's `gas_used`, which is the number the sender is billed on — so a
+/// gas-lane criterion would admit it and two nodes would disagree about a receipt.
+#[derive(Default)]
+struct RefundWriter {
+    applied: bool,
+}
+
+impl<CTX, INTR: InterpreterTypes> Inspector<CTX, INTR> for RefundWriter {
+    fn step(&mut self, interp: &mut Interpreter<INTR>, _context: &mut CTX) {
+        if self.applied {
+            return;
+        }
+        self.applied = true;
+        interp.gas.record_refund(REFUNDED);
     }
 }
 
@@ -225,6 +250,46 @@ fn test_run_transaction_refuses_an_inspector_adjusted_transaction() {
         "the refusal must carry what was actually injected, so a caller can see the size of it",
     );
     assert_eq!(ledger.env, 0, "no frame envelope was touched");
+    assert_eq!(
+        executor.block_limiter.block_compute_gas_used, 0,
+        "a refused transaction must leave the block's counters where they were",
+    );
+}
+
+/// The refusal is over the whole ledger, not over the lanes the conservation law reads.
+///
+/// A refund rewrite is the shape that makes the distinction load-bearing: it leaves every gas lane
+/// at zero, closes the law exactly as an uninspected run does, and still changes the number the
+/// sender is billed. A node that ran this inspector and a node that did not would build the same
+/// block with different receipts.
+#[test]
+fn test_run_transaction_refuses_a_refund_rewrite() {
+    let mut db = build_db();
+    let mut state = State::builder().with_database(&mut db).build();
+    let mut executor = executor_factory(MegaSpecId::REX7).create_executor_with_inspector(
+        &mut state,
+        block_ctx(),
+        evm_env(MegaSpecId::REX7),
+        RefundWriter::default(),
+    );
+
+    let tx = envelope(0);
+    let err = executor
+        .run_transaction(Recovered::new_unchecked(&tx, CALLER))
+        .expect_err("the canonical path must refuse a transaction whose receipt was rewritten");
+
+    assert!(executor.evm().inspector.applied, "the fixture must reach the refund write");
+    let ledger = expect_refusal(&err, *tx.hash());
+    assert_eq!(
+        ledger.refund,
+        i128::from(REFUNDED),
+        "the refusal must carry the refund that was written",
+    );
+    assert_eq!(
+        ledger.conjured_gas(),
+        0,
+        "no gas moved: a gas-only criterion would have admitted this transaction",
+    );
     assert_eq!(
         executor.block_limiter.block_compute_gas_used, 0,
         "a refused transaction must leave the block's counters where they were",

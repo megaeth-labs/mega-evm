@@ -74,6 +74,10 @@
 //! - `pre_execution_intrinsic_reject` — the one envelope-keeping synthetic halt REX7 cannot reach:
 //!   for an ordinary transaction an intrinsic overrun is a validation error from REX5 on, and a
 //!   validation error produces no receipt for any lane to account for.
+//! - `refund_and_state_gas` — the two numbers on a receipt the conservation law cannot see: the
+//!   EIP-3529 refund, measured at the callback boundary because the EVM produces refunds too, and
+//!   the EIP-8037 state-gas dimension, settled from the transaction's final figures because
+//!   `MegaETH` produces none of it and revm propagates it by replacement.
 //! - `deposit_receipt_rewrite` — the transactions that break that last step. A failed OP deposit
 //!   does get a receipt, rebuilt to report its whole gas limit after every settlement has run; the
 //!   boundary that rebuilds it books the difference as destroyed without moving what enforces.
@@ -111,3 +115,4 @@ mod opcode_set_parity;
 mod parity_shapes;
 mod pre_execution_intrinsic_reject;
 mod precompile_halt;
+mod refund_and_state_gas;

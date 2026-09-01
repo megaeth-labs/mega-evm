@@ -35,6 +35,22 @@
 /// shim was handed came back different. It does not say the transaction is the one the EVM would
 /// have produced alone.
 ///
+/// # The three numbers a receipt carries
+///
+/// A transaction's receipt reports its spent envelope, the refund applied to it, and — under
+/// EIP-8037 — the state gas it consumed. The lanes are grouped by which of the three a rewrite
+/// moves, because that is what decides whether the conservation law can see it:
+///
+/// - [`gas`](Self::gas), [`env`](Self::env), [`result`](Self::result) and
+///   [`reservoir`](Self::reservoir) move the envelope, and are summed into
+///   [`conjured_gas`](Self::conjured_gas), the law's `I` term;
+/// - [`refund`](Self::refund) moves the refund, which the law — stated over `limit - remaining` —
+///   cannot see at all;
+/// - [`state_gas`](Self::state_gas) moves the receipt's state-gas figure, which the law does not
+///   reach either.
+///
+/// All six are read by [`is_zero`](Self::is_zero), which is what the block guard asks.
+///
 /// # What consumes it
 ///
 /// - [`conjured_gas`](Self::conjured_gas) is the term the destroyed-remainder derivation adds to
@@ -115,6 +131,71 @@ pub struct InspectorLedger {
     /// the whole envelope is destroyed whatever figure the outcome claimed.
     pub result: i128,
 
+    /// The EIP-8037 state-gas pool the transaction ends holding, which is gas nothing funded.
+    ///
+    /// `MegaETH` runs with EIP-8037 off on every path and every spec, so no instruction can charge
+    /// against a reservoir and no `MegaETH` site ever fills one: the reservoir a transaction ends
+    /// with is zero unless an inspector wrote it. What a non-zero one does is move the envelope —
+    /// the receipt reports `limit - remaining - reservoir` as spent, and the caller is reimbursed
+    /// `remaining + reservoir + refunded` — so this lane is summed into
+    /// [`conjured_gas`](Self::conjured_gas) alongside the three above.
+    ///
+    /// Unlike them it is settled once, at the transaction's own settlement point, rather than at a
+    /// callback boundary. Two facts make that the only sound reading. revm propagates a reservoir
+    /// between frames by *replacement* — a returning child's reservoir overwrites its caller's —
+    /// so an edit made while a `NewFrame` action is already pending is erased by the child that
+    /// action builds, and a boundary difference would book gas that moved nothing. And the
+    /// `state_gas_spent` counter converts into a reservoir on a frame that fails, at a site no
+    /// callback sees. Reading the final number instead covers both: it is exactly the part of
+    /// every edit that survived, and `MegaETH` contributes none of it, so no difference has to be
+    /// taken to isolate the inspector's share.
+    pub reservoir: i128,
+
+    /// Net EIP-8037 state gas the inspector wrote into the `state_gas_spent` counters.
+    ///
+    /// The reservoir's counterpart on the spending side, and dead for the same reason `MegaETH`
+    /// never fills one — except at the two places revm reads it regardless of whether EIP-8037 is
+    /// enabled: a successful transaction reports its final value on the receipt, and a failing
+    /// frame folds it back into its caller's reservoir.
+    ///
+    /// The second of those two effects is already inside [`reservoir`](Self::reservoir) — the
+    /// final reservoir is read after the fold — so this lane carries the first, and is
+    /// deliberately not part of [`conjured_gas`](Self::conjured_gas): the receipt's state-gas
+    /// figure is not the envelope, and adding it to the law's `I` term would make the law
+    /// wrong by exactly this amount. Settled at the same point and for the same reasons as the
+    /// lane above.
+    pub state_gas: i128,
+
+    /// Net gas the inspector wrote into the `refunded` counters of the `Gas` objects it is handed.
+    ///
+    /// A refund is the one number on a receipt the conservation law cannot see: the law is stated
+    /// over `total_gas_spent`, which is `limit - remaining` and which no refund enters. What a
+    /// refund does reach is `tx_gas_used` — what the sender actually pays — and the caller's
+    /// reimbursement. So the lane exists for [`is_zero`](Self::is_zero) and the block guard behind
+    /// it, and is deliberately kept out of [`conjured_gas`](Self::conjured_gas).
+    ///
+    /// # Nominal, in both senses
+    ///
+    /// The figure booked is what the inspector wrote, not what survived to the receipt.
+    ///
+    /// Not what survived the *cap*, because EIP-3529 caps the transaction's whole refund at a
+    /// fifth of what it burnt, over the sum of every refund the transaction accumulated, at a
+    /// point after the envelope is final and with no frame left standing. Splitting that cap
+    /// between the EVM's own refunds and an inspector's needs a priority rule the protocol
+    /// does not have — EVM-first, inspector-first and pro rata are all defensible, which means
+    /// none of them is a measurement.
+    ///
+    /// And not what survived the *frame chain*, because revm hands a frame's refund to its caller
+    /// only when the frame succeeded: an edit reaches the receipt exactly when every frame from
+    /// the one that was edited up to the top returns successfully. That is a condition no callback
+    /// boundary and no single settlement point can answer without a refund stack aligned to the
+    /// EVM's frame lifecycle, which is the machinery this ledger deliberately does not have.
+    ///
+    /// Both directions of the choice are safe here because the lane feeds no identity.
+    /// Over-stating it costs nothing; under-stating it would let a transaction whose receipt
+    /// an inspector moved into a block, which is the one thing the lane exists to prevent.
+    pub refund: i128,
+
     /// How many rewrites the shim refused because their shape is forbidden.
     ///
     /// Today exactly one shape is: a `create_end` (or the `frame_end` after it) turning a
@@ -153,7 +234,7 @@ impl InspectorLedger {
     /// derivation adds to the transaction's envelope.
     #[inline]
     pub const fn conjured_gas(&self) -> i128 {
-        self.gas + self.env + self.result
+        self.gas + self.env + self.result + self.reservoir
     }
 
     /// Whether the inspector left the transaction's gas accounting exactly as the EVM produced it.
@@ -166,6 +247,9 @@ impl InspectorLedger {
         self.gas == 0 &&
             self.env == 0 &&
             self.result == 0 &&
+            self.reservoir == 0 &&
+            self.state_gas == 0 &&
+            self.refund == 0 &&
             self.rejected_rewrites == 0 &&
             self.interventions == 0
     }
@@ -180,15 +264,34 @@ mod tests {
     /// unmoved in that case.
     #[test]
     fn test_conjured_gas_is_the_net_of_both_lanes() {
-        let ledger = InspectorLedger {
-            gas: 2_300,
-            env: -2_300,
-            result: 0,
-            rejected_rewrites: 0,
-            interventions: 0,
-        };
+        let ledger = InspectorLedger { gas: 2_300, env: -2_300, ..InspectorLedger::default() };
         assert_eq!(ledger.conjured_gas(), 0);
         assert!(!ledger.is_zero(), "the lanes moved, even though they cancel");
+    }
+
+    /// The reservoir is envelope-moving gas and joins the law's term; the refund and the
+    /// state-gas figure are not, and must not.
+    #[test]
+    fn test_only_the_envelope_moving_lanes_are_conjured_gas() {
+        let reservoir = InspectorLedger { reservoir: 10_000, ..InspectorLedger::default() };
+        assert_eq!(
+            reservoir.conjured_gas(),
+            10_000,
+            "a reservoir lowers the envelope the receipt reports, so the law needs it back",
+        );
+        assert!(!reservoir.is_zero());
+
+        for ledger in [
+            InspectorLedger { refund: 20_000, ..InspectorLedger::default() },
+            InspectorLedger { state_gas: 5_000, ..InspectorLedger::default() },
+        ] {
+            assert_eq!(
+                ledger.conjured_gas(),
+                0,
+                "the law is stated over `limit - remaining`, which neither of these enters",
+            );
+            assert!(!ledger.is_zero(), "but the block guard still has to see it: {ledger:?}");
+        }
     }
 
     /// A refused rewrite moves no gas but must still show the transaction was not left alone.
