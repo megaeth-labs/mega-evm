@@ -19,18 +19,17 @@
 //!   goes on to erase. The lane is settled once, from the number the transaction ends with, which
 //!   is exactly the surviving part and is the inspector's in whole.
 
-use crate::common::{CALLEE, CALLER, CONTRACT, ONE_ETH};
+use crate::{
+    common::{transact, transact_inspected, Outcome, CALLEE},
+    inspector_common::{append_call, db_with_callee, limits},
+};
 use alloy_primitives::{Bytes, U256};
 use mega_evm::{
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    AdditionalLimit, ConservationTerms, EmptyExternalEnv, EvmTxRuntimeLimits, InspectorLedger,
-    Lane, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
-    MegaTransactionNew as _, MegaTransactionOutcome,
+    ConservationTerms, EvmTxRuntimeLimits, InspectorLedger, Lane, MegaSpecId,
 };
 use revm::{
-    bytecode::opcode::{CALL, POP, STOP},
-    context::{result::ExecutionResult, tx::TxEnvBuilder},
-    handler::EvmTr,
+    bytecode::opcode::{POP, STOP},
     interpreter::{
         interpreter_types::LoopControl, CallInputs, CallOutcome, Gas, InstructionResult,
         Interpreter, InterpreterAction, InterpreterResult, InterpreterTypes,
@@ -38,102 +37,24 @@ use revm::{
     Inspector,
 };
 
-/// High enough that EVM gas is never what binds.
-const TX_GAS_LIMIT: u64 = 100_000_000;
 /// Gas the fixture's inner `CALL` forwards.
 const INNER_CALL_GAS: u64 = 200_000;
 
-/// Refund an edit writes, small enough that the EIP-3529 cap does not clip it.
+/// The refund an edit writes, small enough to stay under the EIP-3529 cap.
 const REFUND: i64 = 2_000;
-/// Refund the cap test writes, chosen to exceed a fifth of anything the fixture can burn.
+/// A refund large enough that the cap keeps part of it out of the receipt.
 const OVERSIZED_REFUND: i64 = 60_000;
-/// The EIP-8037 pool a reservoir edit fills.
+/// The EIP-8037 pool an edit fills.
 const RESERVOIR: u64 = 10_000;
-/// The EIP-8037 spend counter a state-gas edit writes.
+/// The EIP-8037 spend an edit writes.
 const STATE_GAS: i64 = 5_000;
 
-/// Slot the caller writes.
+/// Slot the top frame writes.
 const TOP_SLOT: u64 = 0x10;
-/// Slot the callee writes and keeps.
+/// Slot the callee writes.
 const CALLEE_SLOT: u64 = 0x20;
-/// Slot the callee sets and clears, so its frame carries a refund the EVM produced.
+/// Slot the callee sets and clears, so the frame ends holding a refund of the EVM's own making.
 const CLEARED_SLOT: u64 = 0x30;
-
-// --- what one run reports ----------------------------------------------------------------------
-
-struct Reading {
-    result: ExecutionResult<MegaHaltReason>,
-    /// Receipt `gas_used`: the envelope less the refund, floored by EIP-7623.
-    gas_used: u64,
-    /// Receipt envelope, which is what the conservation law is stated over.
-    total_gas_spent: u64,
-    /// Receipt refund, after the EIP-3529 cap.
-    refunded: u64,
-    /// Receipt EIP-8037 state gas.
-    state_gas_spent: u64,
-    destroyed: u64,
-    terms: ConservationTerms,
-    ledger: InspectorLedger,
-}
-
-/// The conservation identity, over the envelope the receipt reports.
-fn assert_identity(label: &str, r: &Reading) {
-    assert_eq!(
-        r.terms.inspector_conjured_gas,
-        r.ledger.conjured_gas(),
-        "{label}: the law's `I` term is the ledger's net, and nothing else",
-    );
-    assert_eq!(
-        r.terms.envelope_for(r.destroyed),
-        i128::from(r.total_gas_spent),
-        "{label}: the law must close against the envelope the receipt reports ({})",
-        r.terms,
-    );
-}
-
-fn tx() -> MegaTransaction {
-    let mut tx = MegaTransaction::new(
-        TxEnvBuilder::default().caller(CALLER).call(CONTRACT).gas_limit(TX_GAS_LIMIT).build_fill(),
-    );
-    tx.enveloped_tx = Some(Bytes::new());
-    tx
-}
-
-fn context_on(
-    db: &mut MemoryDatabase,
-    spec: MegaSpecId,
-) -> MegaContext<&mut MemoryDatabase, EmptyExternalEnv> {
-    let mut context =
-        MegaContext::new(db, spec).with_tx_runtime_limits(EvmTxRuntimeLimits::from_spec(spec));
-    context.modify_chain(|chain| {
-        chain.operator_fee_scalar = Some(U256::ZERO);
-        chain.operator_fee_constant = Some(U256::ZERO);
-    });
-    context
-}
-
-fn context(db: &mut MemoryDatabase) -> MegaContext<&mut MemoryDatabase, EmptyExternalEnv> {
-    context_on(db, MegaSpecId::REX7)
-}
-
-fn read(limit: &AdditionalLimit, outcome: MegaTransactionOutcome) -> Reading {
-    assert_eq!(
-        outcome.inspector_ledger,
-        limit.inspector_ledger(),
-        "the outcome must report the ledger the shim booked, unchanged",
-    );
-    let gas = *outcome.result_and_state.result.gas();
-    Reading {
-        result: outcome.result_and_state.result,
-        gas_used: gas.tx_gas_used(),
-        total_gas_spent: gas.total_gas_spent(),
-        refunded: gas.inner_refunded(),
-        state_gas_spent: gas.state_gas_spent_final(),
-        destroyed: outcome.compute_gas_destroyed,
-        terms: limit.conservation_terms(),
-        ledger: outcome.inspector_ledger,
-    }
-}
 
 // --- the fixture -------------------------------------------------------------------------------
 
@@ -147,15 +68,7 @@ enum Callee {
 }
 
 fn caller_code() -> Bytes {
-    BytecodeBuilder::default()
-        .push_number(0u64) // retSize
-        .push_number(0u64) // retOffset
-        .push_number(0u64) // argsSize
-        .push_number(0u64) // argsOffset
-        .push_number(0u64) // value
-        .push_address(CALLEE)
-        .push_number(u128::from(INNER_CALL_GAS))
-        .append(CALL)
+    append_call(BytecodeBuilder::default(), CALLEE, INNER_CALL_GAS, 0)
         .append(POP)
         .sstore(U256::from(TOP_SLOT), U256::from(1u64))
         .append(STOP)
@@ -175,11 +88,7 @@ fn callee_code(callee: Callee) -> Bytes {
 }
 
 fn db_for(callee: Callee) -> MemoryDatabase {
-    MemoryDatabase::default()
-        .account_balance(CALLER, U256::from(10 * ONE_ETH))
-        .account_code(CONTRACT, caller_code())
-        .account_balance(CONTRACT, U256::from(ONE_ETH))
-        .account_code(CALLEE, callee_code(callee))
+    db_with_callee(caller_code(), callee_code(callee))
 }
 
 // --- the edit ----------------------------------------------------------------------------------
@@ -308,27 +217,19 @@ impl<CTX, INTR: InterpreterTypes> Inspector<CTX, INTR> for Editor {
 }
 
 /// Runs the fixture with no inspector at all.
-fn transact_plain(callee: Callee) -> Reading {
-    let mut db = db_for(callee);
-    let mut evm = MegaEvm::new(context(&mut db));
-    let outcome = evm.execute_transaction(tx()).expect("tx should not surface EVMError");
-    let reading = read(&evm.ctx_ref().additional_limit.borrow(), outcome);
-    reading
+fn transact_plain(callee: Callee) -> Outcome {
+    transact(MegaSpecId::REX7, db_for(callee), limits())
 }
 
 /// Runs it with one edit applied, asserting the edit landed exactly once.
-fn transact_edited(callee: Callee, edit: Edit) -> Reading {
-    let mut db = db_for(callee);
+fn transact_edited(callee: Callee, edit: Edit) -> Outcome {
     let mut editor = Editor::new(edit);
-    let mut evm = MegaEvm::new(context(&mut db)).with_inspector(&mut editor);
-    let outcome = evm.execute_transaction(tx()).expect("tx should not surface EVMError");
+    let outcome = transact_inspected(MegaSpecId::REX7, db_for(callee), limits(), &mut editor);
     assert_eq!(
-        alloy_evm::Evm::inspector(&evm).fired,
-        1,
+        editor.fired, 1,
         "{edit:?}: the fixture must reach the edit's callback exactly once",
     );
-    let reading = read(&evm.ctx_ref().additional_limit.borrow(), outcome);
-    reading
+    outcome
 }
 
 // --- the fixture's own assumptions ---------------------------------------------------------------
@@ -340,17 +241,16 @@ fn test_the_fixture_refunds_on_its_own_and_holds_no_state_gas() {
     let plain = transact_plain(Callee::Returning);
     assert!(plain.result.is_success(), "{:?}", plain.result);
     assert!(
-        plain.refunded > 0,
+        plain.refunded() > 0,
         "the callee's cleared slot must leave a refund for the lowering cell to take from",
     );
     assert_eq!(
         plain.gas_used,
-        plain.total_gas_spent - plain.refunded,
+        plain.total_gas_spent - plain.refunded(),
         "the receipt's two gas numbers differ by exactly the refund",
     );
-    assert_eq!(plain.state_gas_spent, 0, "EIP-8037 is off on every MegaETH path");
-    assert!(plain.ledger.is_zero(), "no inspector ran: {:?}", plain.ledger);
-    assert_identity("plain", &plain);
+    assert_eq!(plain.state_gas_spent(), 0, "EIP-8037 is off on every MegaETH path");
+    assert!(plain.inspector_ledger.is_zero(), "no inspector ran: {:?}", plain.inspector_ledger);
 }
 
 // --- the refund lane
@@ -364,7 +264,7 @@ fn test_a_refund_written_into_a_live_interpreter_is_booked() {
     let edited = transact_edited(Callee::Returning, Edit::RefundAtStep(REFUND));
 
     assert_eq!(
-        edited.ledger,
+        edited.inspector_ledger,
         InspectorLedger { refund: Lane::once(i128::from(REFUND)), ..InspectorLedger::default() },
         "the shim must book the refund and nothing else",
     );
@@ -373,8 +273,8 @@ fn test_a_refund_written_into_a_live_interpreter_is_booked() {
         "a refund does not move the envelope, which is why the law cannot see it",
     );
     assert_eq!(
-        edited.refunded,
-        plain.refunded + u64::try_from(REFUND).unwrap(),
+        edited.refunded(),
+        plain.refunded() + u64::try_from(REFUND).unwrap(),
         "but it does move the receipt's refund",
     );
     assert_eq!(
@@ -386,8 +286,7 @@ fn test_a_refund_written_into_a_live_interpreter_is_booked() {
         edited.terms.inspector_conjured_gas, 0,
         "the refund lane is deliberately not a term of the law",
     );
-    assert!(!edited.ledger.is_zero(), "and the block guard has to see it");
-    assert_identity("refund at step", &edited);
+    assert!(!edited.inspector_ledger.is_zero(), "and the block guard has to see it");
 }
 
 /// The same edit made at the last callback that holds the finished frame's result.
@@ -397,12 +296,11 @@ fn test_a_refund_written_into_a_finished_frame_result_is_booked() {
     let edited = transact_edited(Callee::Returning, Edit::RefundAtCallEnd(REFUND));
 
     assert_eq!(
-        edited.ledger,
+        edited.inspector_ledger,
         InspectorLedger { refund: Lane::once(i128::from(REFUND)), ..InspectorLedger::default() },
     );
-    assert_eq!(edited.refunded, plain.refunded + u64::try_from(REFUND).unwrap());
+    assert_eq!(edited.refunded(), plain.refunded() + u64::try_from(REFUND).unwrap());
     assert_eq!(edited.total_gas_spent, plain.total_gas_spent);
-    assert_identity("refund at call_end", &edited);
 }
 
 /// A refund taken *out* is booked with the sign that says so — a lane that only saw one direction
@@ -411,23 +309,22 @@ fn test_a_refund_written_into_a_finished_frame_result_is_booked() {
 fn test_a_refund_taken_out_of_a_frame_is_booked_with_the_sign_that_says_so() {
     let plain = transact_plain(Callee::Returning);
     assert!(
-        plain.refunded >= u64::try_from(REFUND).unwrap(),
+        plain.refunded() >= u64::try_from(REFUND).unwrap(),
         "fixture check: there must be a refund to take from, got {}",
-        plain.refunded,
+        plain.refunded(),
     );
 
     let edited = transact_edited(Callee::Returning, Edit::RefundAtCallEnd(-REFUND));
     assert_eq!(
-        edited.ledger,
+        edited.inspector_ledger,
         InspectorLedger { refund: Lane::once(-i128::from(REFUND)), ..InspectorLedger::default() },
     );
-    assert_eq!(edited.refunded, plain.refunded - u64::try_from(REFUND).unwrap());
+    assert_eq!(edited.refunded(), plain.refunded() - u64::try_from(REFUND).unwrap());
     assert_eq!(
         edited.gas_used,
         plain.gas_used + u64::try_from(REFUND).unwrap(),
         "the sender pays more, by exactly what was taken",
     );
-    assert_identity("refund lowered", &edited);
 }
 
 /// The lane reports what the inspector wrote, not what the EIP-3529 cap let through.
@@ -442,7 +339,7 @@ fn test_the_refund_lane_reports_what_was_written_not_what_the_cap_let_through() 
     let edited = transact_edited(Callee::Returning, Edit::RefundAtStep(OVERSIZED_REFUND));
 
     assert_eq!(
-        edited.ledger,
+        edited.inspector_ledger,
         InspectorLedger {
             refund: Lane::once(i128::from(OVERSIZED_REFUND)),
             ..InspectorLedger::default()
@@ -450,16 +347,15 @@ fn test_the_refund_lane_reports_what_was_written_not_what_the_cap_let_through() 
         "the lane carries the nominal edit",
     );
     assert_eq!(
-        edited.refunded,
+        edited.refunded(),
         edited.total_gas_spent / 5,
         "while the receipt carries the EIP-3529 cap",
     );
     assert!(
-        edited.refunded < plain.refunded + u64::try_from(OVERSIZED_REFUND).unwrap(),
+        edited.refunded() < plain.refunded() + u64::try_from(OVERSIZED_REFUND).unwrap(),
         "fixture check: the cap must actually bind, or this cell asserts nothing",
     );
     assert_eq!(edited.total_gas_spent, plain.total_gas_spent, "the envelope is untouched");
-    assert_identity("oversized refund", &edited);
 }
 
 /// A refund written into a frame the EVM then fails is booked too, even though it reaches nothing.
@@ -475,16 +371,16 @@ fn test_a_refund_the_frame_chain_discards_is_still_booked() {
     let edited = transact_edited(Callee::Reverting, Edit::RefundAtCallEnd(REFUND));
 
     assert_eq!(
-        edited.ledger,
+        edited.inspector_ledger,
         InspectorLedger { refund: Lane::once(i128::from(REFUND)), ..InspectorLedger::default() },
         "the lane books the edit",
     );
     assert_eq!(
-        edited.refunded, plain.refunded,
+        edited.refunded(),
+        plain.refunded(),
         "the receipt is unmoved: a reverting frame hands its caller no refund",
     );
     assert_eq!(edited.gas_used, plain.gas_used);
-    assert_identity("refund on a reverting frame", &edited);
 }
 
 // --- the EIP-8037 state-gas dimension ------------------------------------------------------------
@@ -497,7 +393,7 @@ fn test_a_reservoir_written_into_a_live_interpreter_is_booked_and_the_law_closes
     let edited = transact_edited(Callee::Returning, Edit::ReservoirAtStep);
 
     assert_eq!(
-        edited.ledger,
+        edited.inspector_ledger,
         InspectorLedger {
             reservoir: Lane::once(i128::from(RESERVOIR)),
             ..InspectorLedger::default()
@@ -513,7 +409,6 @@ fn test_a_reservoir_written_into_a_live_interpreter_is_booked_and_the_law_closes
         i128::from(RESERVOIR),
         "which is why this lane, unlike the refund one, is a term of the law",
     );
-    assert_identity("reservoir at step", &edited);
 }
 
 /// The same, written into the pool a call's inputs seed the child frame with.
@@ -523,7 +418,7 @@ fn test_a_reservoir_written_into_a_frame_input_is_booked() {
     let edited = transact_edited(Callee::Returning, Edit::ReservoirOnInputs);
 
     assert_eq!(
-        edited.ledger,
+        edited.inspector_ledger,
         InspectorLedger {
             reservoir: Lane::once(i128::from(RESERVOIR)),
             // The inputs came back changed in a field the envelope lane does not cover, which the
@@ -533,7 +428,6 @@ fn test_a_reservoir_written_into_a_frame_input_is_booked() {
         },
     );
     assert_eq!(edited.total_gas_spent, plain.total_gas_spent - RESERVOIR);
-    assert_identity("reservoir on inputs", &edited);
 }
 
 /// And into the finished frame's own pool, which its caller takes whatever the classification.
@@ -543,14 +437,13 @@ fn test_a_reservoir_written_into_a_finished_frame_result_is_booked() {
     let edited = transact_edited(Callee::Returning, Edit::ReservoirAtCallEnd);
 
     assert_eq!(
-        edited.ledger,
+        edited.inspector_ledger,
         InspectorLedger {
             reservoir: Lane::once(i128::from(RESERVOIR)),
             ..InspectorLedger::default()
         },
     );
     assert_eq!(edited.total_gas_spent, plain.total_gas_spent - RESERVOIR);
-    assert_identity("reservoir at call_end", &edited);
 }
 
 /// A reservoir edit the EVM overwrites books nothing — and there is nothing to book, because the
@@ -565,14 +458,13 @@ fn test_a_reservoir_edit_the_evm_overwrites_books_nothing() {
     let edited = transact_edited(Callee::Returning, Edit::ReservoirAtSuspension);
 
     assert!(
-        edited.ledger.is_zero(),
+        edited.inspector_ledger.is_zero(),
         "an edit the child frame's own pool replaces moved nothing: {:?}",
-        edited.ledger,
+        edited.inspector_ledger,
     );
     assert_eq!(edited.total_gas_spent, plain.total_gas_spent);
     assert_eq!(edited.gas_used, plain.gas_used);
-    assert_eq!(edited.refunded, plain.refunded);
-    assert_identity("reservoir in the dead window", &edited);
+    assert_eq!(edited.refunded(), plain.refunded());
 }
 
 /// The spend counter's own effect on the receipt: a successful transaction reports it, whether or
@@ -582,14 +474,14 @@ fn test_state_gas_written_into_a_live_interpreter_reaches_the_receipt_and_is_boo
     let plain = transact_plain(Callee::Returning);
     let edited = transact_edited(Callee::Returning, Edit::StateGasAtStep);
 
-    assert_eq!(plain.state_gas_spent, 0, "fixture check");
+    assert_eq!(plain.state_gas_spent(), 0, "fixture check");
     assert_eq!(
-        edited.state_gas_spent,
+        edited.state_gas_spent(),
         u64::try_from(STATE_GAS).unwrap(),
         "the receipt reports what was written",
     );
     assert_eq!(
-        edited.ledger,
+        edited.inspector_ledger,
         InspectorLedger {
             state_gas: Lane::once(i128::from(STATE_GAS)),
             ..InspectorLedger::default()
@@ -600,7 +492,6 @@ fn test_state_gas_written_into_a_live_interpreter_reaches_the_receipt_and_is_boo
         "the envelope is untouched, so this lane is not a term of the law either",
     );
     assert_eq!(edited.terms.inspector_conjured_gas, 0);
-    assert_identity("state gas at step", &edited);
 }
 
 /// The counter's *other* effect, at a site no callback sees: a frame that fails folds its spend
@@ -615,7 +506,7 @@ fn test_state_gas_on_a_failing_frame_becomes_its_callers_reservoir() {
     let edited = transact_edited(Callee::Reverting, Edit::StateGasAtCallEnd);
 
     assert_eq!(
-        edited.ledger,
+        edited.inspector_ledger,
         InspectorLedger {
             reservoir: Lane::once(i128::from(STATE_GAS)),
             ..InspectorLedger::default()
@@ -623,7 +514,8 @@ fn test_state_gas_on_a_failing_frame_becomes_its_callers_reservoir() {
         "the spend counter of a reverting frame arrives in its caller as a pool",
     );
     assert_eq!(
-        edited.state_gas_spent, 0,
+        edited.state_gas_spent(),
+        0,
         "and not as a spend: a failing frame's counter is not accumulated",
     );
     assert_eq!(
@@ -631,7 +523,6 @@ fn test_state_gas_on_a_failing_frame_becomes_its_callers_reservoir() {
         plain.total_gas_spent - u64::try_from(STATE_GAS).unwrap(),
         "so the envelope moves, and the law's term has to move with it",
     );
-    assert_identity("state gas on a reverting frame", &edited);
 }
 
 // --- a frame the inspector answers itself
@@ -648,15 +539,14 @@ fn test_state_gas_on_a_failing_frame_becomes_its_callers_reservoir() {
 fn test_a_synthetic_outcome_carries_its_own_figures() {
     let echo = transact_edited(Callee::Returning, Edit::InterceptEcho);
     assert_eq!(
-        echo.ledger,
+        echo.inspector_ledger,
         InspectorLedger { interventions: 1, ..InspectorLedger::default() },
         "an echoing interception moves no figure at all",
     );
-    assert_identity("interception, echo", &echo);
 
     let refunding = transact_edited(Callee::Returning, Edit::InterceptWithRefund);
     assert_eq!(
-        refunding.ledger,
+        refunding.inspector_ledger,
         InspectorLedger {
             refund: Lane::once(i128::from(REFUND)),
             interventions: 1,
@@ -665,16 +555,15 @@ fn test_a_synthetic_outcome_carries_its_own_figures() {
         "the refund a frame that never ran hands back is the inspector's in whole",
     );
     assert_eq!(
-        refunding.refunded,
-        echo.refunded + u64::try_from(REFUND).unwrap(),
+        refunding.refunded(),
+        echo.refunded() + u64::try_from(REFUND).unwrap(),
         "and it reaches the receipt: the outcome succeeded, so its caller records it",
     );
     assert_eq!(refunding.total_gas_spent, echo.total_gas_spent, "the envelope is unmoved");
-    assert_identity("interception, refunding", &refunding);
 
     let pooled = transact_edited(Callee::Returning, Edit::InterceptWithReservoir);
     assert_eq!(
-        pooled.ledger,
+        pooled.inspector_ledger,
         InspectorLedger {
             reservoir: Lane::once(i128::from(RESERVOIR)),
             interventions: 1,
@@ -686,7 +575,6 @@ fn test_a_synthetic_outcome_carries_its_own_figures() {
         echo.total_gas_spent - RESERVOIR,
         "a pool does move the envelope, wherever it came from",
     );
-    assert_identity("interception, pooled", &pooled);
 }
 
 // --- the frozen specs
@@ -700,33 +588,23 @@ fn test_a_synthetic_outcome_carries_its_own_figures() {
 /// edited run against an unedited one on the same spec.
 #[test]
 fn test_a_frozen_spec_reports_the_lanes_without_settling_anything() {
-    fn run(edit: Option<Edit>) -> (Reading, u64, u64) {
-        let mut db = db_for(Callee::Returning);
-        let mut editor = edit.map(Editor::new);
-        match &mut editor {
-            Some(editor) => {
-                let mut evm =
-                    MegaEvm::new(context_on(&mut db, MegaSpecId::REX6)).with_inspector(editor);
-                let outcome = evm.execute_transaction(tx()).expect("no EVMError");
-                assert_eq!(alloy_evm::Evm::inspector(&evm).fired, 1, "{edit:?} must land");
-                let compute = outcome.compute_gas_used;
-                let destroyed = outcome.compute_gas_destroyed;
-                let reading = read(&evm.ctx_ref().additional_limit.borrow(), outcome);
-                (reading, compute, destroyed)
+    const REX6: MegaSpecId = MegaSpecId::REX6;
+    fn run(edit: Option<Edit>) -> Outcome {
+        let db = db_for(Callee::Returning);
+        let limits = EvmTxRuntimeLimits::from_spec(REX6);
+        match edit {
+            Some(edit) => {
+                let mut editor = Editor::new(edit);
+                let outcome = transact_inspected(REX6, db, limits, &mut editor);
+                assert_eq!(editor.fired, 1, "{edit:?} must land");
+                outcome
             }
-            None => {
-                let mut evm = MegaEvm::new(context_on(&mut db, MegaSpecId::REX6));
-                let outcome = evm.execute_transaction(tx()).expect("no EVMError");
-                let compute = outcome.compute_gas_used;
-                let destroyed = outcome.compute_gas_destroyed;
-                let reading = read(&evm.ctx_ref().additional_limit.borrow(), outcome);
-                (reading, compute, destroyed)
-            }
+            None => transact(REX6, db, limits),
         }
     }
 
-    let (plain, plain_compute, plain_destroyed) = run(None);
-    assert!(plain.ledger.is_zero());
+    let plain = run(None);
+    assert!(plain.inspector_ledger.is_zero());
 
     for (edit, expected) in [
         (
@@ -751,10 +629,13 @@ fn test_a_frozen_spec_reports_the_lanes_without_settling_anything() {
             },
         ),
     ] {
-        let (edited, compute, destroyed) = run(Some(edit));
-        assert_eq!(edited.ledger, expected, "{edit:?}: the lane reports on every spec");
-        assert_eq!(compute, plain_compute, "{edit:?}: a frozen spec's compute total must not move",);
-        assert_eq!(destroyed, plain_destroyed, "{edit:?}: nor its destroyed lane");
+        let edited = run(Some(edit));
+        assert_eq!(edited.inspector_ledger, expected, "{edit:?}: the lane reports on every spec");
+        assert_eq!(
+            edited.compute_gas, plain.compute_gas,
+            "{edit:?}: a frozen spec's compute total must not move",
+        );
+        assert_eq!(edited.destroyed, plain.destroyed, "{edit:?}: nor its destroyed lane");
         // `inspector_conjured_gas` is a reading of the ledger rather than something the
         // transaction recorded, so it moves with the lane on every spec. Every other term is what
         // a frozen spec must leave alone.
@@ -765,7 +646,7 @@ fn test_a_frozen_spec_reports_the_lanes_without_settling_anything() {
         );
         assert_eq!(
             edited.terms.inspector_conjured_gas,
-            edited.ledger.conjured_gas(),
+            edited.inspector_ledger.conjured_gas(),
             "{edit:?}: and the term is the ledger's net, exactly as it is under REX7",
         );
     }

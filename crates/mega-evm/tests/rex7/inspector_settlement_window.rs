@@ -27,15 +27,16 @@
 //! Every case here is checked by the identity `common::finish` runs on every transaction: the
 //! tracker lanes must account for the whole receipt envelope, with the inspector's own term in it.
 
-use crate::common::{
-    transact, transact_inspected, transact_inspected_refused, Outcome, Refusal, CALLEE, CALLER,
-    CONTRACT, DEFAULT_TX_GAS_LIMIT, ONE_ETH,
+use crate::{
+    common::{
+        base_db, transact, transact_inspected, transact_inspected_refused, Outcome, Refusal,
+        CALLEE, DEFAULT_TX_GAS_LIMIT,
+    },
+    inspector_common::{call_then_stop, db_with_callee, limits},
 };
 use alloy_primitives::{address, Address, Bytes, U256};
 use mega_evm::{
-    kzg_point_evaluation,
-    test_utils::{BytecodeBuilder, MemoryDatabase},
-    EvmTxRuntimeLimits, InspectorLedger, Lane, MegaSpecId,
+    kzg_point_evaluation, test_utils::BytecodeBuilder, InspectorLedger, Lane, MegaSpecId,
 };
 use revm::{
     bytecode::opcode::{CALL, INVALID, POP, STOP},
@@ -66,17 +67,6 @@ const IDENTITY: Address = address!("0000000000000000000000000000000000000004");
 const BLAKE2F: Address = address!("0000000000000000000000000000000000000009");
 /// KZG point evaluation.
 const KZG: Address = address!("000000000000000000000000000000000000000a");
-
-fn limits() -> EvmTxRuntimeLimits {
-    EvmTxRuntimeLimits::from_spec(MegaSpecId::REX7)
-}
-
-fn db(code: Bytes) -> MemoryDatabase {
-    MemoryDatabase::default()
-        .account_balance(CALLER, U256::from(10 * ONE_ETH))
-        .account_code(CONTRACT, code)
-        .account_balance(CONTRACT, U256::from(ONE_ETH))
-}
 
 // --- A: the window a terminating opcode's `step_end` sits in ---------------------------------
 
@@ -136,24 +126,13 @@ fn straight_line_code() -> Bytes {
 /// A `CALL` into the identity precompile, its success flag popped, then `STOP` — so the frame
 /// suspends once and the `step_end` after the `CALL` opcode sits in [`Window::Suspending`].
 fn suspending_code() -> Bytes {
-    BytecodeBuilder::default()
-        .push_number(0u64) // retSize
-        .push_number(0u64) // retOffset
-        .push_number(0u64) // argsSize
-        .push_number(0u64) // argsOffset
-        .push_number(0u64) // value
-        .push_address(IDENTITY)
-        .push_number(FORWARDED)
-        .append(CALL)
-        .append(POP)
-        .append(STOP)
-        .build()
+    call_then_stop(IDENTITY, FORWARDED)
 }
 
 fn run_counter_edit(code: Bytes, window: Window) -> (Outcome, Outcome, u32) {
-    let plain = transact(MegaSpecId::REX7, db(code.clone()), limits());
+    let plain = transact(MegaSpecId::REX7, base_db(code.clone()), limits());
     let mut inspector = CounterEditor::new(window);
-    let edited = transact_inspected(MegaSpecId::REX7, db(code), limits(), &mut inspector);
+    let edited = transact_inspected(MegaSpecId::REX7, base_db(code), limits(), &mut inspector);
     (plain, edited, inspector.fired)
 }
 
@@ -303,9 +282,10 @@ fn kzg_verification_failure() -> Vec<u8> {
 /// uninspected run's split therefore is.
 fn run_reclassified(target: Address, calldata: &[u8], to: InstructionResult) -> (Outcome, Refusal) {
     let code = call_precompile(target, calldata);
-    let plain = transact(MegaSpecId::REX7, db(code.clone()), limits());
+    let plain = transact(MegaSpecId::REX7, base_db(code.clone()), limits());
     let mut inspector = Reclassifier::new(target, to);
-    let refusal = transact_inspected_refused(MegaSpecId::REX7, db(code), limits(), &mut inspector);
+    let refusal =
+        transact_inspected_refused(MegaSpecId::REX7, base_db(code), limits(), &mut inspector);
     assert_eq!(inspector.fired, 1, "the fixture must reach the precompile's call_end exactly once");
     assert_eq!(refusal.rejected_rewrites, 1, "the shim must count the refusal");
     assert!(
@@ -444,22 +424,7 @@ impl<CTX, INTR: InterpreterTypes> Inspector<CTX, INTR> for ActionEditor {
 /// `step_end` of the transaction belongs to an *inner* frame, and what that frame's action carries
 /// is decided by the callee the fixture installs.
 fn call_callee_code() -> Bytes {
-    BytecodeBuilder::default()
-        .push_number(0u64) // retSize
-        .push_number(0u64) // retOffset
-        .push_number(0u64) // argsSize
-        .push_number(0u64) // argsOffset
-        .push_number(0u64) // value
-        .push_address(CALLEE)
-        .push_number(FORWARDED)
-        .append(CALL)
-        .append(POP)
-        .append(STOP)
-        .build()
-}
-
-fn db_with_callee(code: Bytes, callee: Bytes) -> MemoryDatabase {
-    db(code).account_code(CALLEE, callee)
+    call_then_stop(CALLEE, FORWARDED)
 }
 
 /// Gas written into a returning frame's pending action is gas the caller really reclaims, so it
@@ -467,10 +432,14 @@ fn db_with_callee(code: Bytes, callee: Bytes) -> MemoryDatabase {
 /// known at the frame's settlement point.
 #[test]
 fn test_raising_a_returning_frames_pending_action_is_booked() {
-    let plain = transact(MegaSpecId::REX7, db(straight_line_code()), limits());
+    let plain = transact(MegaSpecId::REX7, base_db(straight_line_code()), limits());
     let mut inspector = ActionEditor::raise(Window::Terminating);
-    let edited =
-        transact_inspected(MegaSpecId::REX7, db(straight_line_code()), limits(), &mut inspector);
+    let edited = transact_inspected(
+        MegaSpecId::REX7,
+        base_db(straight_line_code()),
+        limits(),
+        &mut inspector,
+    );
 
     assert_eq!(inspector.fired, 1, "the fixture must reach a terminating step_end exactly once");
     assert_eq!(
@@ -495,10 +464,14 @@ fn test_raising_a_returning_frames_pending_action_is_booked() {
 /// The same edit in the other direction.
 #[test]
 fn test_lowering_a_returning_frames_pending_action_is_booked() {
-    let plain = transact(MegaSpecId::REX7, db(straight_line_code()), limits());
+    let plain = transact(MegaSpecId::REX7, base_db(straight_line_code()), limits());
     let mut inspector = ActionEditor::lower(Window::Terminating);
-    let edited =
-        transact_inspected(MegaSpecId::REX7, db(straight_line_code()), limits(), &mut inspector);
+    let edited = transact_inspected(
+        MegaSpecId::REX7,
+        base_db(straight_line_code()),
+        limits(),
+        &mut inspector,
+    );
 
     assert_eq!(inspector.fired, 1, "the fixture must reach a terminating step_end exactly once");
     assert_eq!(
@@ -566,10 +539,10 @@ fn test_editing_a_halting_frames_pending_action_moves_nothing() {
 /// frame is about to be built with, which the caller was never debited for.
 #[test]
 fn test_raising_a_pending_new_frame_action_is_booked_as_an_envelope() {
-    let plain = transact(MegaSpecId::REX7, db(suspending_code()), limits());
+    let plain = transact(MegaSpecId::REX7, base_db(suspending_code()), limits());
     let mut inspector = ActionEditor::raise(Window::Suspending);
     let edited =
-        transact_inspected(MegaSpecId::REX7, db(suspending_code()), limits(), &mut inspector);
+        transact_inspected(MegaSpecId::REX7, base_db(suspending_code()), limits(), &mut inspector);
 
     assert_eq!(inspector.fired, 1, "the fixture must suspend into a child frame exactly once");
     assert_eq!(

@@ -19,18 +19,18 @@
 //! inspector wrote in the gas figure changes nothing the transaction spends, and the destroyed
 //! remainder is settled against the envelope instead.
 
-use crate::common::{CALLEE, CALLER, CONTRACT, ONE_ETH};
+use crate::{
+    common::{base_db, transact_inspected, CALLEE},
+    inspector_common::{call_then_stop, db_with_callee, deploy_then_stop, limits, plain_run_code},
+};
 use alloy_primitives::{Bytes, U256};
 use mega_evm::{
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    AdditionalLimit, ConservationTerms, EmptyExternalEnv, EvmTxRuntimeLimits, InspectorLedger,
-    Lane, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
-    MegaTransactionNew as _, MegaTransactionOutcome,
+    EvmTxRuntimeLimits, InspectorLedger, Lane, MegaSpecId,
 };
 use revm::{
-    bytecode::opcode::{CALL, CREATE, MSTORE, MSTORE8, POP, RETURN, STOP},
-    context::{result::ExecutionResult, tx::TxEnvBuilder},
-    handler::{EvmTr, FrameResult},
+    bytecode::opcode::{MSTORE, RETURN},
+    handler::FrameResult,
     interpreter::{
         CallInputs, CallOutcome, CreateInputs, CreateOutcome, FrameInput, Gas, InstructionResult,
         InterpreterResult, InterpreterTypes,
@@ -39,130 +39,12 @@ use revm::{
 };
 use std::vec::Vec;
 
-/// High enough that EVM gas is never what binds.
-const TX_GAS_LIMIT: u64 = 100_000_000;
 /// Gas the fixture's `CALL` forwards, and the envelope every interception is measured against.
 const FORWARDED: u64 = 50_000;
 
-/// Everything one transaction reports, plus what the shim booked for it.
-struct Reading {
-    result: ExecutionResult<MegaHaltReason>,
-    compute_gas: u64,
-    enforced: u64,
-    destroyed: u64,
-    total_gas_spent: u64,
-    terms: ConservationTerms,
-    ledger: InspectorLedger,
-}
-
-/// The conservation identity, stated with the term the measurement shim contributes.
-fn assert_identity(label: &str, r: &Reading) {
-    assert_eq!(
-        r.compute_gas,
-        r.enforced + r.destroyed,
-        "{label}: reported compute must split into enforced + destroyed",
-    );
-    assert_eq!(
-        r.terms.inspector_conjured_gas,
-        r.ledger.conjured_gas(),
-        "{label}: the law's `I` term is the ledger's net, and nothing else",
-    );
-    assert_eq!(
-        r.terms.envelope_for(r.destroyed),
-        i128::from(r.total_gas_spent),
-        "{label}: the law must close against the envelope the receipt reports; \
-         reported compute={} destroyed={} envelope={} ({})",
-        r.compute_gas,
-        r.destroyed,
-        r.total_gas_spent,
-        r.terms,
-    );
-}
-
-fn tx() -> MegaTransaction {
-    let mut tx = MegaTransaction::new(
-        TxEnvBuilder::default().caller(CALLER).call(CONTRACT).gas_limit(TX_GAS_LIMIT).build_fill(),
-    );
-    tx.enveloped_tx = Some(Bytes::new());
-    tx
-}
-
-fn context_for(
-    db: &mut MemoryDatabase,
-    spec: MegaSpecId,
-) -> MegaContext<&mut MemoryDatabase, EmptyExternalEnv> {
-    let mut context =
-        MegaContext::new(db, spec).with_tx_runtime_limits(EvmTxRuntimeLimits::from_spec(spec));
-    context.modify_chain(|chain| {
-        chain.operator_fee_scalar = Some(U256::ZERO);
-        chain.operator_fee_constant = Some(U256::ZERO);
-    });
-    context
-}
-
-fn read(limit: &AdditionalLimit, outcome: MegaTransactionOutcome) -> Reading {
-    assert_eq!(
-        outcome.inspector_ledger,
-        limit.inspector_ledger(),
-        "the outcome must report the ledger the shim booked, unchanged",
-    );
-    let total_gas_spent = outcome.result_and_state.result.gas().total_gas_spent();
-    Reading {
-        result: outcome.result_and_state.result,
-        compute_gas: outcome.compute_gas_used,
-        enforced: outcome.compute_gas_enforced,
-        destroyed: outcome.compute_gas_destroyed,
-        total_gas_spent,
-        terms: limit.conservation_terms(),
-        ledger: outcome.inspector_ledger,
-    }
-}
-
-fn transact_on<I>(spec: MegaSpecId, mut db: MemoryDatabase, inspector: &mut I) -> Reading
-where
-    I: for<'a> Inspector<MegaContext<&'a mut MemoryDatabase, EmptyExternalEnv>>,
-{
-    let mut evm = MegaEvm::new(context_for(&mut db, spec)).with_inspector(inspector);
-    let outcome = evm.execute_transaction(tx()).expect("tx should not surface EVMError");
-    let reading = read(&evm.ctx_ref().additional_limit.borrow(), outcome);
-    reading
-}
-
-fn transact<I>(db: MemoryDatabase, inspector: &mut I) -> Reading
-where
-    I: for<'a> Inspector<MegaContext<&'a mut MemoryDatabase, EmptyExternalEnv>>,
-{
-    transact_on(MegaSpecId::REX7, db, inspector)
-}
-
-/// A straight run of plain opcodes that always succeeds.
-fn plain_run_code(pairs: usize) -> Bytes {
-    let mut builder = BytecodeBuilder::default();
-    for _ in 0..pairs {
-        builder = builder.push_number(1u64).append(POP);
-    }
-    builder.append(STOP).build()
-}
-
 /// The entry contract: one `CALL` to [`CALLEE`] forwarding [`FORWARDED`], then `STOP`.
 fn call_fixture() -> MemoryDatabase {
-    let code = BytecodeBuilder::default()
-        .push_number(0u64)
-        .push_number(0u64)
-        .push_number(0u64)
-        .push_number(0u64)
-        .push_number(0u64)
-        .push_address(CALLEE)
-        .push_number(u128::from(FORWARDED))
-        .append(CALL)
-        .append(POP)
-        .append(STOP)
-        .build();
-    MemoryDatabase::default()
-        .account_balance(CALLER, U256::from(10 * ONE_ETH))
-        .account_code(CONTRACT, code)
-        .account_balance(CONTRACT, U256::from(ONE_ETH))
-        .account_code(CALLEE, plain_run_code(20))
+    db_with_callee(call_then_stop(CALLEE, FORWARDED), plain_run_code(20))
 }
 
 /// How an interception sizes the `Gas` it hands back, relative to the envelope it was given.
@@ -230,13 +112,13 @@ impl<CTX, INTR: InterpreterTypes> Inspector<CTX, INTR> for CallInterceptor {
 #[test]
 fn test_a_half_gas_interception_books_the_gas_it_took_from_the_caller() {
     let mut inspector = CallInterceptor::new(Sizing::Half, InstructionResult::Stop);
-    let reading = transact(call_fixture(), &mut inspector);
+    let reading = transact_inspected(MegaSpecId::REX7, call_fixture(), limits(), &mut inspector);
 
     assert_eq!(inspector.intercepted, 1, "the fixture must intercept exactly one call");
     assert_eq!(inspector.envelope, FORWARDED, "fixture check: the forwarded envelope");
     assert!(reading.result.is_success(), "fixture check: {:?}", reading.result);
     assert_eq!(
-        reading.ledger,
+        reading.inspector_ledger,
         InspectorLedger {
             result: Lane::once(Sizing::Half.expected_delta(FORWARDED)),
             interventions: 1,
@@ -244,18 +126,17 @@ fn test_a_half_gas_interception_books_the_gas_it_took_from_the_caller() {
         },
         "the half the outcome withheld is gas the inspector destroyed",
     );
-    assert_identity("half-gas interception", &reading);
 }
 
 /// The extreme of the same direction: the outcome hands back nothing at all.
 #[test]
 fn test_a_zero_gas_interception_books_the_whole_envelope() {
     let mut inspector = CallInterceptor::new(Sizing::Zero, InstructionResult::Stop);
-    let reading = transact(call_fixture(), &mut inspector);
+    let reading = transact_inspected(MegaSpecId::REX7, call_fixture(), limits(), &mut inspector);
 
     assert_eq!(inspector.intercepted, 1, "the fixture must intercept exactly one call");
     assert_eq!(
-        reading.ledger,
+        reading.inspector_ledger,
         InspectorLedger {
             result: Lane::once(Sizing::Zero.expected_delta(FORWARDED)),
             interventions: 1,
@@ -263,7 +144,6 @@ fn test_a_zero_gas_interception_books_the_whole_envelope() {
         },
         "an outcome that returns nothing consumed the whole envelope",
     );
-    assert_identity("zero-gas interception", &reading);
 }
 
 /// The other direction: an outcome that hands back more than it was given conjures the difference.
@@ -271,11 +151,11 @@ fn test_a_zero_gas_interception_books_the_whole_envelope() {
 fn test_an_over_funded_interception_books_the_gas_it_conjured() {
     const EXTRA: u64 = 7_000;
     let mut inspector = CallInterceptor::new(Sizing::Excess(EXTRA), InstructionResult::Stop);
-    let reading = transact(call_fixture(), &mut inspector);
+    let reading = transact_inspected(MegaSpecId::REX7, call_fixture(), limits(), &mut inspector);
 
     assert_eq!(inspector.intercepted, 1, "the fixture must intercept exactly one call");
     assert_eq!(
-        reading.ledger,
+        reading.inspector_ledger,
         InspectorLedger {
             result: Lane::once(Sizing::Excess(EXTRA).expected_delta(FORWARDED)),
             interventions: 1,
@@ -283,7 +163,6 @@ fn test_an_over_funded_interception_books_the_gas_it_conjured() {
         },
         "gas the transaction never funded is gas the inspector conjured",
     );
-    assert_identity("over-funded interception", &reading);
 }
 
 /// The echo convention moves nothing, and must book nothing.
@@ -296,16 +175,16 @@ fn test_an_over_funded_interception_books_the_gas_it_conjured() {
 fn test_an_echoing_interception_books_no_gas_at_all() {
     for classification in [InstructionResult::Stop, InstructionResult::Revert] {
         let mut inspector = CallInterceptor::new(Sizing::Echo, classification);
-        let reading = transact(call_fixture(), &mut inspector);
+        let reading =
+            transact_inspected(MegaSpecId::REX7, call_fixture(), limits(), &mut inspector);
 
         assert_eq!(inspector.intercepted, 1, "the fixture must intercept exactly one call");
         assert_eq!(
-            reading.ledger,
+            reading.inspector_ledger,
             InspectorLedger { interventions: 1, ..InspectorLedger::default() },
             "{classification:?}: an echoed envelope moves no gas, so no gas lane may move",
         );
-        assert_eq!(reading.ledger.conjured_gas(), 0, "{classification:?}");
-        assert_identity("echoing interception", &reading);
+        assert_eq!(reading.inspector_ledger.conjured_gas(), 0, "{classification:?}");
     }
 }
 
@@ -319,17 +198,18 @@ fn test_an_echoing_interception_books_no_gas_at_all() {
 fn test_a_halting_interception_destroys_the_envelope_whatever_gas_it_reports() {
     for sizing in [Sizing::Echo, Sizing::Half, Sizing::Zero, Sizing::Excess(7_000)] {
         let mut inspector = CallInterceptor::new(sizing, InstructionResult::OutOfGas);
-        let reading = transact(call_fixture(), &mut inspector);
+        let reading =
+            transact_inspected(MegaSpecId::REX7, call_fixture(), limits(), &mut inspector);
 
         assert_eq!(inspector.intercepted, 1, "the fixture must intercept exactly one call");
         assert!(reading.result.is_success(), "the caller absorbs the halt: {:?}", reading.result);
         assert_eq!(
-            reading.ledger.conjured_gas(),
+            reading.inspector_ledger.conjured_gas(),
             0,
             "{sizing:?}: a halting frame hands nothing back, so no gas lane's net may move",
         );
         assert_eq!(
-            reading.ledger,
+            reading.inspector_ledger,
             InspectorLedger {
                 interventions: 1,
                 result: Lane::of(0, sizing.expected_delta(FORWARDED).unsigned_abs()),
@@ -341,7 +221,6 @@ fn test_a_halting_interception_destroys_the_envelope_whatever_gas_it_reports() {
             reading.destroyed, FORWARDED,
             "{sizing:?}: the whole envelope is destroyed, whatever the outcome claimed",
         );
-        assert_identity("halting interception", &reading);
     }
 }
 
@@ -380,11 +259,11 @@ fn test_the_generic_frame_start_interception_is_measured_too() {
     }
 
     let mut inspector = GenericInterceptor::default();
-    let reading = transact(call_fixture(), &mut inspector);
+    let reading = transact_inspected(MegaSpecId::REX7, call_fixture(), limits(), &mut inspector);
 
     assert_eq!(inspector.intercepted, 1, "the fixture must intercept exactly one call");
     assert_eq!(
-        reading.ledger,
+        reading.inspector_ledger,
         InspectorLedger {
             result: Lane::once(Sizing::Half.expected_delta(FORWARDED)),
             interventions: 1,
@@ -392,7 +271,6 @@ fn test_the_generic_frame_start_interception_is_measured_too() {
         },
         "the generic callback's interception books on the same lane as the variant one's",
     );
-    assert_identity("frame_start interception", &reading);
 }
 
 /// Init code that writes one slot and returns two bytes of runtime code.
@@ -411,23 +289,7 @@ fn init_code() -> Vec<u8> {
 
 /// The entry contract: one `CREATE`, then `STOP`.
 fn create_fixture() -> MemoryDatabase {
-    let init = init_code();
-    let mut builder = BytecodeBuilder::default();
-    for (offset, byte) in init.iter().enumerate() {
-        builder = builder.push_number(u64::from(*byte)).push_number(offset as u64).append(MSTORE8);
-    }
-    let code = builder
-        .push_number(init.len() as u64) // size
-        .push_number(0u64) // offset
-        .push_number(0u64) // value
-        .append(CREATE)
-        .append(POP)
-        .append(STOP)
-        .build();
-    MemoryDatabase::default()
-        .account_balance(CALLER, U256::from(10 * ONE_ETH))
-        .account_code(CONTRACT, code)
-        .account_balance(CONTRACT, U256::from(ONE_ETH))
+    base_db(deploy_then_stop(&init_code()))
 }
 
 /// A creation answered by the inspector is measured against the envelope its `CREATE` forwarded.
@@ -463,12 +325,12 @@ fn test_an_intercepted_creation_is_measured_against_the_envelope_it_was_handed()
     }
 
     let mut inspector = CreateInterceptor::default();
-    let reading = transact(create_fixture(), &mut inspector);
+    let reading = transact_inspected(MegaSpecId::REX7, create_fixture(), limits(), &mut inspector);
 
     assert_eq!(inspector.intercepted, 1, "the fixture must intercept exactly one creation");
     assert!(inspector.envelope > 0, "fixture check: the creation must forward an envelope");
     assert_eq!(
-        reading.ledger,
+        reading.inspector_ledger,
         InspectorLedger {
             result: Lane::once(Sizing::Half.expected_delta(inspector.envelope)),
             interventions: 1,
@@ -476,7 +338,6 @@ fn test_an_intercepted_creation_is_measured_against_the_envelope_it_was_handed()
         },
         "a creation's interception is measured against the envelope its CREATE forwarded",
     );
-    assert_identity("intercepted creation", &reading);
 }
 
 /// The envelope an interception is measured against is the one the callback *received*.
@@ -514,11 +375,11 @@ fn test_the_envelope_is_the_one_the_callback_received_not_the_one_it_left() {
     }
 
     let mut inspector = RaisingInterceptor::default();
-    let reading = transact(call_fixture(), &mut inspector);
+    let reading = transact_inspected(MegaSpecId::REX7, call_fixture(), limits(), &mut inspector);
 
     assert_eq!(inspector.intercepted, 1, "the fixture must intercept exactly one call");
     assert_eq!(
-        reading.ledger,
+        reading.inspector_ledger,
         InspectorLedger {
             result: Lane::once(i128::from(BONUS)),
             interventions: 1,
@@ -527,7 +388,6 @@ fn test_the_envelope_is_the_one_the_callback_received_not_the_one_it_left() {
         "the bonus reaches the caller through the outcome, so it is booked once, on the result \
          lane — the env lane stays empty because no frame was ever built from those inputs",
     );
-    assert_identity("raised then intercepted", &reading);
 }
 
 /// The lane reports on a frozen spec too, and reporting it settles nothing there.
@@ -544,19 +404,29 @@ fn test_the_envelope_is_the_one_the_callback_received_not_the_one_it_left() {
 #[test]
 fn test_a_frozen_spec_reports_the_lane_without_settling_anything() {
     let mut echoing = CallInterceptor::new(Sizing::Echo, InstructionResult::Stop);
-    let echo = transact_on(MegaSpecId::REX6, call_fixture(), &mut echoing);
+    let echo = transact_inspected(
+        MegaSpecId::REX6,
+        call_fixture(),
+        EvmTxRuntimeLimits::from_spec(MegaSpecId::REX6),
+        &mut echoing,
+    );
     let mut halving = CallInterceptor::new(Sizing::Half, InstructionResult::Stop);
-    let half = transact_on(MegaSpecId::REX6, call_fixture(), &mut halving);
+    let half = transact_inspected(
+        MegaSpecId::REX6,
+        call_fixture(),
+        EvmTxRuntimeLimits::from_spec(MegaSpecId::REX6),
+        &mut halving,
+    );
 
     assert_eq!(echoing.intercepted, 1, "fixture check");
     assert_eq!(halving.intercepted, 1, "fixture check");
     assert_eq!(
-        echo.ledger,
+        echo.inspector_ledger,
         InspectorLedger { interventions: 1, ..InspectorLedger::default() },
         "REX6: an echoed envelope moves no gas here either",
     );
     assert_eq!(
-        half.ledger,
+        half.inspector_ledger,
         InspectorLedger {
             result: Lane::once(Sizing::Half.expected_delta(FORWARDED)),
             interventions: 1,

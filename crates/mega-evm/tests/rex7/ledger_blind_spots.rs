@@ -32,12 +32,12 @@
 //! What the shim takes now is every constant-time reading of the interpreter, and what pins that is
 //! the `Interpreter` row of `gas_surface.rs`'s closed table.
 
-use crate::common::{transact, transact_inspected, CALLEE, CONTRACT, EMPTY_TARGET, ONE_ETH};
-use alloy_primitives::{address, Address, Bytes, U256};
-use mega_evm::{
-    test_utils::{BytecodeBuilder, MemoryDatabase},
-    EvmTxRuntimeLimits, MegaSpecId,
+use crate::{
+    common::{base_db, transact, transact_inspected, CALLEE, CONTRACT, EMPTY_TARGET},
+    inspector_common::plain_and_cheated,
 };
+use alloy_primitives::{address, Address, Bytes, U256};
+use mega_evm::{test_utils::BytecodeBuilder, EvmTxRuntimeLimits, MegaSpecId};
 use revm::{
     bytecode::opcode::{
         CALL, CALLER, CREATE, GAS, MLOAD, MSTORE, MSTORE8, POP, RETURN, RETURNDATASIZE, SSTORE,
@@ -67,13 +67,6 @@ const RESULT_SLOT: u64 = 0x11;
 /// Small enough to stay well under the EIP-3529 cap on every fixture here, so that what survives
 /// to the receipt is the whole of the surviving half rather than whatever the cap left of it.
 const REFUND: i64 = 2_000;
-
-fn db_with(code: Bytes) -> MemoryDatabase {
-    MemoryDatabase::default()
-        .account_balance(crate::common::CALLER, U256::from(10 * ONE_ETH))
-        .account_code(CONTRACT, code)
-        .account_balance(CONTRACT, U256::from(ONE_ETH))
-}
 
 /// The mainnet memory expansion cost of a memory `words` words long.
 const fn memory_cost(words: u64) -> u64 {
@@ -134,10 +127,8 @@ fn test_a_frame_whose_memory_was_grown_for_free_is_booked() {
         .append(STOP)
         .build();
 
-    let limits = EvmTxRuntimeLimits::from_spec(MegaSpecId::REX7);
-    let plain = transact(MegaSpecId::REX7, db_with(code.clone()), limits);
     let mut inspector = FreeExpansion::default();
-    let cheated = transact_inspected(MegaSpecId::REX7, db_with(code), limits, &mut inspector);
+    let (plain, cheated) = plain_and_cheated(|| base_db(code.clone()), &mut inspector);
 
     assert_eq!(inspector.fired, 1, "the fixture must reach the expanding opcode exactly once");
     assert!(plain.is_success() && cheated.is_success(), "both runs must succeed");
@@ -213,12 +204,10 @@ fn test_a_moved_return_range_is_booked() {
         .push_number(0u64)
         .append(RETURN)
         .build();
-    let db = || db_with(code.clone()).account_code(CALLEE, callee.clone());
+    let db = || base_db(code.clone()).account_code(CALLEE, callee.clone());
 
-    let limits = EvmTxRuntimeLimits::from_spec(MegaSpecId::REX7);
-    let plain = transact(MegaSpecId::REX7, db(), limits);
     let mut inspector = MoveReturnData::default();
-    let cheated = transact_inspected(MegaSpecId::REX7, db(), limits, &mut inspector);
+    let (plain, cheated) = plain_and_cheated(db, &mut inspector);
 
     assert_eq!(inspector.fired, 1, "the fixture must reach `call_end` for the callee once");
     assert_eq!(
@@ -292,12 +281,10 @@ fn test_a_forged_call_output_is_booked() {
         .push_number(0u64)
         .append(RETURN)
         .build();
-    let db = || db_with(code.clone()).account_code(CALLEE, callee.clone());
+    let db = || base_db(code.clone()).account_code(CALLEE, callee.clone());
 
-    let limits = EvmTxRuntimeLimits::from_spec(MegaSpecId::REX7);
-    let plain = transact(MegaSpecId::REX7, db(), limits);
     let mut inspector = ForgeCallOutput::default();
-    let cheated = transact_inspected(MegaSpecId::REX7, db(), limits, &mut inspector);
+    let (plain, cheated) = plain_and_cheated(db, &mut inspector);
 
     assert_eq!(inspector.fired, 1, "the fixture must reach `call_end` for the callee once");
     assert_eq!(
@@ -361,10 +348,8 @@ fn test_a_rewritten_deployment_address_is_booked() {
         .append(STOP)
         .build();
 
-    let limits = EvmTxRuntimeLimits::from_spec(MegaSpecId::REX7);
-    let plain = transact(MegaSpecId::REX7, db_with(code.clone()), limits);
     let mut inspector = MoveDeploymentAddress::default();
-    let cheated = transact_inspected(MegaSpecId::REX7, db_with(code), limits, &mut inspector);
+    let (plain, cheated) = plain_and_cheated(|| base_db(code.clone()), &mut inspector);
 
     assert_eq!(inspector.fired, 1, "the fixture must reach `create_end` once");
     let deployed = plain.storage_value(CONTRACT, U256::from(RESULT_SLOT));
@@ -442,10 +427,8 @@ fn test_a_drained_construction_action_is_booked() {
         .append(STOP)
         .build();
 
-    let limits = EvmTxRuntimeLimits::from_spec(MegaSpecId::REX7);
-    let plain = transact(MegaSpecId::REX7, db_with(code.clone()), limits);
     let mut inspector = DrainConstructionAction::default();
-    let cheated = transact_inspected(MegaSpecId::REX7, db_with(code), limits, &mut inspector);
+    let (plain, cheated) = plain_and_cheated(|| base_db(code.clone()), &mut inspector);
 
     assert_eq!(inspector.fired, 1, "the fixture must reach the construction frame's step_end once");
     assert_ne!(
@@ -532,12 +515,10 @@ fn test_cancelling_action_and_result_edits_are_booked() {
         .append(STOP)
         .build();
     let callee = BytecodeBuilder::default().append(STOP).build();
-    let db = || db_with(code.clone()).account_code(CALLEE, callee.clone());
+    let db = || base_db(code.clone()).account_code(CALLEE, callee.clone());
 
-    let limits = EvmTxRuntimeLimits::from_spec(MegaSpecId::REX7);
-    let plain = transact(MegaSpecId::REX7, db(), limits);
     let mut inspector = CancellingActionAndResultEdits::default();
-    let cheated = transact_inspected(MegaSpecId::REX7, db(), limits, &mut inspector);
+    let (plain, cheated) = plain_and_cheated(db, &mut inspector);
 
     assert_eq!((inspector.raised, inspector.lowered), (1, 1), "both windows must be reached");
     assert_eq!(
@@ -607,9 +588,9 @@ fn test_cancelling_counter_edits_are_booked() {
     // No compute-gas limit, so the REX7 gas clamp hides nothing and the frame's own reading of
     // its remaining gas is the counter the injection moved.
     let limits = EvmTxRuntimeLimits::no_limits();
-    let plain = transact(MegaSpecId::REX7, db_with(code.clone()), limits);
+    let plain = transact(MegaSpecId::REX7, base_db(code.clone()), limits);
     let mut inspector = CancellingCounterEdits::default();
-    let cheated = transact_inspected(MegaSpecId::REX7, db_with(code), limits, &mut inspector);
+    let cheated = transact_inspected(MegaSpecId::REX7, base_db(code), limits, &mut inspector);
 
     assert_eq!(inspector.phase, 2, "both halves of the cancellation must have landed");
     assert_eq!(
@@ -690,15 +671,13 @@ fn test_cancelling_refunds_across_frames_are_booked() {
     let returning = clearing(BytecodeBuilder::default()).append(STOP).build();
     let reverting = clearing(BytecodeBuilder::default()).revert().build();
     let db = || {
-        db_with(code.clone())
+        base_db(code.clone())
             .account_code(CALLEE, returning.clone())
             .account_code(REVERTER, reverting.clone())
     };
 
-    let limits = EvmTxRuntimeLimits::from_spec(MegaSpecId::REX7);
-    let plain = transact(MegaSpecId::REX7, db(), limits);
     let mut inspector = CancellingRefundsAcrossFrames::default();
-    let cheated = transact_inspected(MegaSpecId::REX7, db(), limits, &mut inspector);
+    let (plain, cheated) = plain_and_cheated(db, &mut inspector);
 
     assert_eq!((inspector.added, inspector.removed), (1, 1), "both halves must have landed");
     assert!(
@@ -770,10 +749,8 @@ fn test_a_skipped_opcode_is_booked() {
         .append(STOP)
         .build();
 
-    let limits = EvmTxRuntimeLimits::from_spec(MegaSpecId::REX7);
-    let plain = transact(MegaSpecId::REX7, db_with(code.clone()), limits);
     let mut inspector = SkipTheStore::default();
-    let cheated = transact_inspected(MegaSpecId::REX7, db_with(code), limits, &mut inspector);
+    let (plain, cheated) = plain_and_cheated(|| base_db(code.clone()), &mut inspector);
 
     assert_eq!(inspector.fired, 1, "the fixture must reach the store exactly once");
     assert!(plain.is_success() && cheated.is_success(), "both runs must succeed");
@@ -834,10 +811,8 @@ fn test_a_forged_return_buffer_is_booked() {
         .append(STOP)
         .build();
 
-    let limits = EvmTxRuntimeLimits::from_spec(MegaSpecId::REX7);
-    let plain = transact(MegaSpecId::REX7, db_with(code.clone()), limits);
     let mut inspector = ForgeReturnData::default();
-    let cheated = transact_inspected(MegaSpecId::REX7, db_with(code), limits, &mut inspector);
+    let (plain, cheated) = plain_and_cheated(|| base_db(code.clone()), &mut inspector);
 
     assert_eq!(inspector.fired, 1, "the fixture must reach the read exactly once");
     assert!(plain.is_success() && cheated.is_success(), "both runs must succeed");
@@ -923,10 +898,8 @@ fn test_a_frame_invariant_moved_and_moved_back_is_booked() {
         .append(STOP)
         .build();
 
-    let limits = EvmTxRuntimeLimits::from_spec(MegaSpecId::REX7);
-    let plain = transact(MegaSpecId::REX7, db_with(code.clone()), limits);
     let mut inspector = BorrowTheCaller::default();
-    let cheated = transact_inspected(MegaSpecId::REX7, db_with(code), limits, &mut inspector);
+    let (plain, cheated) = plain_and_cheated(|| base_db(code.clone()), &mut inspector);
 
     assert_eq!((inspector.moved, inspector.restored), (1, 1), "both halves must run once");
     assert_eq!(

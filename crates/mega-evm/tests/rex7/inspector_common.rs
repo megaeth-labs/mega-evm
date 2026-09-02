@@ -17,7 +17,10 @@ use revm::{
 };
 use std::{boxed::Box, string::String, vec::Vec};
 
-use crate::common::{call_contract_tx, context, plain_filler, CALLEE, DEFAULT_TX_GAS_LIMIT};
+use crate::common::{
+    call_contract_tx, context, plain_filler, transact, transact_inspected, Outcome, CALLEE,
+    DEFAULT_TX_GAS_LIMIT,
+};
 
 /// The spec every fixture here runs under, and its default runtime limits.
 pub(crate) fn limits() -> EvmTxRuntimeLimits {
@@ -98,6 +101,22 @@ pub(crate) fn deploy_then_stop(init_code: &[u8]) -> Bytes {
 /// [`crate::common::base_db`] with `callee` installed at [`CALLEE`].
 pub(crate) fn db_with_callee(code: Bytes, callee: Bytes) -> MemoryDatabase {
     crate::common::base_db(code).account_code(CALLEE, callee)
+}
+
+/// Runs one fixture twice: with no inspector, then with `inspector` attached.
+///
+/// Every rewrite in this suite is pinned as a difference between those two runs, so the fixture
+/// has to be built twice from the same recipe — `db` is a closure for that reason.
+pub(crate) fn plain_and_cheated<I>(
+    db: impl Fn() -> MemoryDatabase,
+    inspector: &mut I,
+) -> (Outcome, Outcome)
+where
+    I: for<'a> Inspector<MegaContext<&'a mut MemoryDatabase, EmptyExternalEnv>>,
+{
+    let plain = transact(MegaSpecId::REX7, db(), limits());
+    let cheated = transact_inspected(MegaSpecId::REX7, db(), limits(), inspector);
+    (plain, cheated)
 }
 
 // --- ledgers -------------------------------------------------------------------------------
