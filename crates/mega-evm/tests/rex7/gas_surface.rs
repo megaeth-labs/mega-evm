@@ -12,6 +12,12 @@
 //! cannot be told apart without looking. `CallOutcome::memory_offset` is the case that settled it:
 //! not gas, not bookkeeping, and for a while not in the table at all.
 //!
+//! The live `Interpreter` is in the table for the same reason and at some cost to the module's
+//! name: it is the one argument whose own fields, rather than a field of a field, are what an
+//! inspector reaches. Leaving it out is what let `Interpreter::bytecode` go unclassified while the
+//! interpreter's other fields were named in prose, and an inspector could step the program counter
+//! past an instruction with every lane reading zero.
+//!
 //! # The two levels the enumeration has
 //!
 //! - **Shapes.** Which objects the EVM hands a callback that carry gas at all. Every one of them
@@ -255,6 +261,85 @@ const CREATE_OUTCOME_FIELDS: [(&str, Coverage); 2] = [
     ),
 ];
 
+/// Every field of the live interpreter a callback is handed.
+///
+/// The row this table exists for is `bytecode`. Before it, the interpreter's fields were named in
+/// prose — "stack, memory, `return_data`, input, `runtime_flag`, extend" — and `bytecode` was
+/// simply not in the sentence, so an inspector could step the program counter past an instruction
+/// and delete it from the frame with every lane and every counter reading zero. A prose list is
+/// only as complete as whoever wrote it; this one is checked against what upstream's `Debug`
+/// renders, like every other table here.
+///
+/// The verdicts are stated over *readings*, because that is what a boundary can compare. Every
+/// constant-time reading of every field below is in `inspector.rs::WorkingSet` and books an
+/// intervention when it moves; what is left over in each row is content-class, which is the one
+/// row of the shape table with no lane.
+const INTERPRETER_FIELDS: [(&str, Coverage); 8] = [
+    (
+        "bytecode",
+        Coverage::NotGas(
+            "the code and the position in it. Three constant-time readings — the program counter, \
+             the code buffer's identity, and revm's `continue_execution` flag, which is what the \
+             inspected loop breaks on and is a separate object from the pending action. Moving the \
+             counter deletes an instruction from the frame, which costs the transaction the work \
+             that instruction would have done; nothing meters that, because it never happens. \
+             Booked as interventions, off `WorkingSet`",
+        ),
+    ),
+    (
+        "gas",
+        Coverage::NotGas("a container; its own fields are classified separately"),
+    ),
+    (
+        "stack",
+        Coverage::NotGas(
+            "its length is a constant-time reading and is booked as an intervention; the words in \
+             it are content-class",
+        ),
+    ),
+    (
+        "return_data",
+        Coverage::NotGas(
+            "the buffer a frame's `RETURNDATASIZE` and `RETURNDATACOPY` read. Its identity is a \
+             constant-time reading and is booked as an intervention, so a frame handed data no \
+             call produced is visible; the bytes inside it are content-class",
+        ),
+    ),
+    (
+        "memory",
+        Coverage::NotGas(
+            "its size and the offset of the frame's window into the shared buffer are both \
+             constant-time readings and are booked as interventions — the size because moving it \
+             together with the memo in `gas` skips the next expanding opcode's charge; the bytes \
+             are content-class",
+        ),
+    ),
+    (
+        "input",
+        Coverage::NotGas(
+            "what the frame is: the account its storage instructions resolve against, the code \
+             address, the caller, the value, and the calldata's identity. All constant-time, all \
+             booked as interventions; the calldata's bytes are content-class",
+        ),
+    ),
+    (
+        "runtime_flag",
+        Coverage::NotGas(
+            "the static flag and the spec id, both constant-time and both booked as \
+             interventions — clearing the static flag mid-frame would let a `STATICCALL` write \
+             state",
+        ),
+    ),
+    (
+        "extend",
+        Coverage::NotGas(
+            "the one field with no reading, by construction: `InterpreterTypes::Extend` carries no \
+             trait bound, so a shim generic over the interpreter has nothing it can call on it. \
+             `MegaETH` configures it as `()`, which holds nothing to rewrite",
+        ),
+    ),
+];
+
 /// Everything a finished frame hands back.
 const INTERPRETER_RESULT_FIELDS: [(&str, Coverage); 3] = [
     ("gas", Coverage::NotGas("a container; its own fields are classified separately")),
@@ -369,6 +454,12 @@ fn sample_create_outcome() -> CreateOutcome {
     CreateOutcome::new(sample_result(), None)
 }
 
+/// A live interpreter, for the one table whose object is not a callback argument's field but the
+/// argument itself.
+fn sample_interpreter() -> Interpreter<EthInterpreter> {
+    Interpreter::default()
+}
+
 // --- the field-level pin -------------------------------------------------------------------------
 
 /// Every field of every gas-carrying object an inspector is handed has a verdict.
@@ -389,6 +480,7 @@ fn test_every_field_of_every_gas_carrier_has_a_verdict() {
         ("InterpreterResult", std::format!("{:?}", sample_result())),
         ("CallOutcome", std::format!("{:?}", sample_call_outcome())),
         ("CreateOutcome", std::format!("{:?}", sample_create_outcome())),
+        ("Interpreter", std::format!("{:?}", sample_interpreter())),
     ];
     // Looked up rather than listed, so the set of tables the lock walks and the set this test
     // checks the renderings against cannot drift apart.
@@ -425,7 +517,7 @@ fn test_the_field_reader_reads_the_top_level_and_stops_there() {
 }
 
 /// Every table this module classifies, by the name its rendering is checked under.
-fn tables() -> [(&'static str, &'static [(&'static str, Coverage)]); 8] {
+fn tables() -> [(&'static str, &'static [(&'static str, Coverage)]); 9] {
     [
         ("Gas", GAS_FIELDS.as_slice()),
         ("GasTracker", GAS_TRACKER_FIELDS.as_slice()),
@@ -435,6 +527,7 @@ fn tables() -> [(&'static str, &'static [(&'static str, Coverage)]); 8] {
         ("InterpreterResult", INTERPRETER_RESULT_FIELDS.as_slice()),
         ("CallOutcome", CALL_OUTCOME_FIELDS.as_slice()),
         ("CreateOutcome", CREATE_OUTCOME_FIELDS.as_slice()),
+        ("Interpreter", INTERPRETER_FIELDS.as_slice()),
     ]
 }
 
