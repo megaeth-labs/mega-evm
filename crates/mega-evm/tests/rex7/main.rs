@@ -116,6 +116,7 @@ mod gas_leakage;
 mod gas_surface;
 mod guard_pass_static_gas;
 mod inspector_cheat_matrix;
+mod inspector_common;
 mod inspector_settlement_window;
 mod interception_gas;
 mod interceptor_resume;

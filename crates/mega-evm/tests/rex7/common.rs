@@ -150,7 +150,7 @@ impl Outcome {
 
 /// The transaction every helper here runs unless a test supplies its own: a plain call from
 /// [`CALLER`] into [`CONTRACT`].
-fn call_contract_tx(gas_limit: u64) -> MegaTransaction {
+pub(crate) fn call_contract_tx(gas_limit: u64) -> MegaTransaction {
     let tx =
         TxEnvBuilder::default().caller(CALLER).call(CONTRACT).gas_limit(gas_limit).build_fill();
     let mut tx = MegaTransaction::new(tx);
