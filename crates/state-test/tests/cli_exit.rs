@@ -66,6 +66,14 @@ fn stderr(out: &std::process::Output) -> String {
     String::from_utf8_lossy(&out.stderr).into_owned()
 }
 
+fn stdout(out: &std::process::Output) -> String {
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+fn combined(out: &std::process::Output) -> String {
+    format!("{}\n{}", stdout(out), stderr(out))
+}
+
 #[test]
 fn failing_tests_exit_with_code_1() {
     let path = write_fixture("failing.json", FAILING_SUITE);
@@ -284,6 +292,15 @@ fn diff_run_that_judged_nothing_exits_1() {
     let out =
         run_cli(&[dir.to_str().expect("utf8 path"), "--bench-spec", "Rex7", "--diff-spec", "Rex6"]);
     assert_eq!(out.status.code(), Some(1), "a corpus with no fixture in it must fail");
+    let empty = combined(&out);
+    assert!(
+        empty.contains("no JSON test files found") || empty.contains("no fixture was judged"),
+        "an empty corpus must say nothing was judged: {empty}"
+    );
+    assert!(
+        !empty.contains("Error: 0 tests failed"),
+        "must not claim zero failures while exiting 1: {empty}"
+    );
 
     // A directory holding only fixtures on the validation skip list reaches the runner but judges
     // no unit, which is the same hole one step further in.
@@ -291,6 +308,15 @@ fn diff_run_that_judged_nothing_exits_1() {
     let out =
         run_cli(&[dir.to_str().expect("utf8 path"), "--bench-spec", "Rex7", "--diff-spec", "Rex6"]);
     assert_eq!(out.status.code(), Some(1), "a sweep that judged no unit must fail");
+    let skipped = combined(&out);
+    assert!(
+        skipped.contains("no fixture was judged"),
+        "a sweep that judged no unit must say so: {skipped}"
+    );
+    assert!(
+        !skipped.contains("Error: 0 tests failed"),
+        "must not claim zero failures while exiting 1: {skipped}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -309,12 +335,21 @@ fn diff_run_with_an_unparseable_fixture_exits_1() {
 
     let out =
         run_cli(&[dir.to_str().expect("utf8 path"), "--bench-spec", "Rex7", "--diff-spec", "Rex6"]);
-    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stdout = stdout(&out);
+    let report = combined(&out);
     assert!(
         stdout.lines().any(|l| l.split_whitespace().eq(["PASS", "1"])),
         "the readable fixture still runs: {stdout}"
     );
     assert!(stdout.contains("FILE_ERROR"), "the unreadable one is reported: {stdout}");
+    assert!(
+        report.contains("1 fixtures unreadable"),
+        "the summary must count unreadable fixtures: {report}"
+    );
+    assert!(
+        !report.contains("Error: 0 tests failed"),
+        "must not claim zero failures while exiting 1: {report}"
+    );
     assert_eq!(out.status.code(), Some(1), "a corpus the sweep only partly read is not a pass");
     let _ = std::fs::remove_dir_all(&dir);
 }

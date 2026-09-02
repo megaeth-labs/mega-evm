@@ -334,14 +334,7 @@ impl Cmd {
         if !tally.is_failure() {
             return Ok(());
         }
-        Err(TestError {
-            name: "diff summary".to_string(),
-            path: String::new(),
-            kind: TestErrorKind::TestsFailed {
-                failed: tally.count(DiffClass::Unexplained) + tally.count(DiffClass::Panic),
-                total: tally.total(),
-            },
-        })
+        Err(diff_summary_error(&tally))
     }
 
     /// Build the chaos run's shape filter from `--chaos-shapes`.
@@ -395,14 +388,7 @@ impl Cmd {
         if !tally.is_failure() {
             return Ok(());
         }
-        Err(TestError {
-            name: "chaos summary".to_string(),
-            path: String::new(),
-            kind: TestErrorKind::TestsFailed {
-                failed: tally.flagged.len().max(1),
-                total: tally.total(),
-            },
-        })
+        Err(chaos_summary_error(&tally))
     }
 
     /// Benchmark every fixture under the given paths and print the results as JSON.
@@ -520,6 +506,62 @@ fn parse_spec(flag: &str, value: &str) -> Result<SpecName, TestError> {
     Ok(spec)
 }
 
+/// Why a sweep that judged nothing failed, as a [`TestErrorKind::FixtureError`] detail.
+fn no_work_detail(unit: &str, file_errors: usize) -> String {
+    if file_errors == 0 {
+        format!("no {unit} was judged; the corpus is empty, entirely skipped, or unreachable")
+    } else {
+        format!(
+            "no {unit} was judged ({file_errors} fixtures unreadable); \
+             the corpus is empty, entirely skipped, or unreachable"
+        )
+    }
+}
+
+/// Maps every [`DiffTally::is_failure`] condition onto the CLI's summary error.
+///
+/// Unexplained differences, panics, and unreadable fixtures share [`TestErrorKind::TestsFailed`]
+/// so the `failed` count includes all three. A run that judged nothing uses
+/// [`TestErrorKind::FixtureError`] instead of claiming `0 tests failed out of 0`.
+fn diff_summary_error(tally: &DiffTally) -> TestError {
+    let unexplained = tally.count(DiffClass::Unexplained);
+    let panics = tally.count(DiffClass::Panic);
+    let file_errors = tally.file_errors.len();
+    let total = tally.total();
+    TestError {
+        name: "diff summary".to_string(),
+        path: String::new(),
+        kind: if total == 0 {
+            TestErrorKind::FixtureError(no_work_detail("fixture", file_errors))
+        } else {
+            TestErrorKind::TestsFailed { failed: unexplained + panics + file_errors, total }
+        },
+    }
+}
+
+/// Maps every [`ChaosSweepTally::is_failure`] condition onto the CLI's summary error.
+///
+/// Flagged verdicts and unreadable fixtures share [`TestErrorKind::TestsFailed`]. A run that
+/// judged nothing, or that applied no mutation, uses [`TestErrorKind::FixtureError`] so it cannot
+/// read as `0 tests failed`.
+fn chaos_summary_error(tally: &ChaosSweepTally) -> TestError {
+    let file_errors = tally.file_errors.len();
+    let total = tally.total();
+    TestError {
+        name: "chaos summary".to_string(),
+        path: String::new(),
+        kind: if total == 0 {
+            TestErrorKind::FixtureError(no_work_detail("vector", file_errors))
+        } else if tally.flagged.is_empty() && file_errors == 0 {
+            TestErrorKind::FixtureError(
+                "no mutation was applied; the run tested nothing".to_string(),
+            )
+        } else {
+            TestErrorKind::TestsFailed { failed: tally.flagged.len() + file_errors, total }
+        },
+    }
+}
+
 /// Every class a differential run can produce, in report order.
 const DIFF_CLASSES: [DiffClass; 5] = [
     DiffClass::Pass,
@@ -534,6 +576,9 @@ fn print_diff_tally(tally: &DiffTally, target: SpecName, base: SpecName) {
     println!("\nDifferential run: {target:?} vs {base:?} over {} unit(s)", tally.total());
     for class in DIFF_CLASSES {
         println!("  {:<12} {}", class.label(), tally.count(class));
+    }
+    if !tally.file_errors.is_empty() {
+        println!("  {:<12} {}", "FILE_ERROR", tally.file_errors.len());
     }
     if tally.skipped_files > 0 {
         println!("  ({} file(s) skipped by filename, no unit of them judged)", tally.skipped_files);
@@ -563,6 +608,15 @@ fn print_diff_tally(tally: &DiffTally, target: SpecName, base: SpecName) {
     for error in &tally.file_errors {
         println!("FILE_ERROR\t{}", error.replace('\n', " "));
     }
+    if tally.is_failure() {
+        println!(
+            "Diff failure: {} unexplained, {} panics, {} fixtures unreadable ({} judged)",
+            tally.count(DiffClass::Unexplained),
+            tally.count(DiffClass::Panic),
+            tally.file_errors.len(),
+            tally.total(),
+        );
+    }
 }
 
 /// Every chaos verdict, in the order a reader wants them.
@@ -584,6 +638,9 @@ fn print_chaos_tally(tally: &ChaosSweepTally, spec: SpecName, seed: u64, filter:
     }
     for class in CHAOS_CLASSES {
         println!("  {:<16} {}", class.label(), tally.count(class));
+    }
+    if !tally.file_errors.is_empty() {
+        println!("  {:<16} {}", "FILE_ERROR", tally.file_errors.len());
     }
     if tally.skipped_files > 0 {
         println!(
@@ -611,6 +668,15 @@ fn print_chaos_tally(tally: &ChaosSweepTally, spec: SpecName, seed: u64, filter:
     }
     for error in &tally.file_errors {
         println!("FILE_ERROR\t{}", error.replace('\n', " "));
+    }
+    if tally.is_failure() {
+        println!(
+            "Chaos failure: {} flagged, {} fixtures unreadable, {} mutations ({} judged)",
+            tally.flagged.len(),
+            tally.file_errors.len(),
+            tally.shapes.total(),
+            tally.total(),
+        );
     }
 }
 
@@ -741,5 +807,46 @@ mod tests {
             err.to_string().contains("invalid --bench-spec"),
             "error should be actionable: {err}"
         );
+    }
+
+    #[test]
+    fn test_diff_summary_counts_file_errors_as_failures() {
+        let mut tally = DiffTally::default();
+        *tally.classes.entry(DiffClass::Pass.label()).or_insert(0) += 1;
+        tally.file_errors.push("broken.json".to_string());
+        let err = diff_summary_error(&tally);
+        match err.kind {
+            TestErrorKind::TestsFailed { failed, total } => {
+                assert_eq!((failed, total), (1, 1), "the unreadable fixture is a failure");
+            }
+            other => panic!("expected TestsFailed, got {other:?}"),
+        }
+        assert!(
+            !err.to_string().contains("Error: 0 tests failed"),
+            "must not claim zero failures: {err}"
+        );
+    }
+
+    #[test]
+    fn test_diff_summary_reports_a_run_that_judged_nothing() {
+        let err = diff_summary_error(&DiffTally::default());
+        let text = err.to_string();
+        assert!(text.contains("no fixture was judged"), "{text}");
+        assert!(!text.contains("0 tests failed"), "{text}");
+
+        let mut tally = DiffTally::default();
+        tally.file_errors.push("broken.json".to_string());
+        let err = diff_summary_error(&tally);
+        let text = err.to_string();
+        assert!(text.contains("no fixture was judged"), "{text}");
+        assert!(text.contains("1 fixtures unreadable"), "{text}");
+    }
+
+    #[test]
+    fn test_chaos_summary_reports_a_run_that_judged_nothing() {
+        let err = chaos_summary_error(&ChaosSweepTally::default());
+        let text = err.to_string();
+        assert!(text.contains("no vector was judged"), "{text}");
+        assert!(!text.contains("0 tests failed"), "{text}");
     }
 }
