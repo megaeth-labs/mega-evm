@@ -11,8 +11,8 @@
 //!
 //! # Where the table is read
 //!
-//! Four sites, all inside [`AdditionalLimit::finalize_frame`](super::AdditionalLimit::
-//! finalize_frame): `settle_exceptional_halt_burn`, `settle_frame_init_reject_burn`,
+//! Four sites, all inside [`finalize_frame`](super::AdditionalLimit::finalize_frame):
+//! `settle_exceptional_halt_burn`, `settle_frame_init_reject_burn`,
 //! `settle_precompile_envelope`, and `settle_inspector_result_gas`. The first three book a
 //! destroyed remainder; the fourth books none but answers the same question for an inspector's
 //! edit — an edit to a returned result moves what the transaction spends, an edit to a swallowed
