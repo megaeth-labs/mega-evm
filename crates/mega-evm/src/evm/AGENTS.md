@@ -237,7 +237,7 @@ A *callback* upstream adds to the `Inspector` trait does neither — the trait g
 - **Compare every reading at every callback, not once per frame.**
   The four fields a frame's identity is made of — its target, the address of the code it runs, its caller and its value — together with its calldata identity, its static flag and its spec id, cannot change while it runs, which makes them the readings a cheaper shim would compare once per frame instead of twice per opcode.
   They can change — an inspector writes them — and the shape that exploits a per-frame comparison is an edit made in `step` and undone in `step_end`, which leaves the frame's identity equal to the EVM's at every point outside those two callbacks while the instruction in between reads something else.
-  `tests/rex7/shim_measurement.rs::test_a_frame_invariant_moved_and_moved_back_is_booked` is that shape, and it costs the transaction nothing, so no gas lane can stand in for the comparison.
+  `tests/rex7/shim_blind_spots.rs::test_a_frame_invariant_moved_and_moved_back_is_booked` is that shape, and it costs the transaction nothing, so no gas lane can stand in for the comparison.
   Making a reading cheaper is free to do; taking it less often needs an argument that this test survives.
 - **Book a lane through `Lane::book`, never by writing its net.**
   The gross half is what `is_zero` reads, so a booking that moves only the net is a rewrite the guard admits — and one that cancels against a later booking is exactly the shape that is invisible from the net alone.

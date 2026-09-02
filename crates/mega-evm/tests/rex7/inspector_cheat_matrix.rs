@@ -1,9 +1,9 @@
 //! Every rewrite shape, at every callback that can carry it.
 //!
-//! `tests/rex7/shim_measurement.rs` pins one mechanism per test, chosen because each is a
-//! different half of the measurement shim. This module asks the complementary question: not "does
-//! each mechanism work" but "is there a callback on the `Inspector` trait, or a rewrite shape a
-//! callback admits, that nothing measures". So the cases here are laid out as a matrix over the
+//! `tests/rex7/shim_lanes.rs`, `shim_settlement.rs` and `shim_blind_spots.rs` pin one mechanism
+//! per test. This module asks the complementary question: not "does each mechanism work" but "is
+//! there a callback on the `Inspector` trait, or a rewrite shape a callback admits, that nothing
+//! measures". So the cases here are laid out as a matrix over the
 //! trait's own surface — one row per callback, one column per rewrite shape — rather than over the
 //! shapes any particular tool is known to use. A callback added upstream, or a shape a callback
 //! newly admits, shows up as an empty cell.
@@ -625,7 +625,7 @@ impl Cheat {
     /// A call's return range is shrunk to nothing rather than moved, because moving it past the
     /// caller's allocated memory is a panic in revm and this fixture's caller holds one word. The
     /// visible-effect form, where the caller then reads a word the callee never wrote, is pinned
-    /// in `shim_measurement.rs`.
+    /// in `shim_blind_spots.rs`.
     fn hit_outcome_metadata(&mut self, result: &mut FrameResult) {
         match result {
             FrameResult::Call(outcome) => {
@@ -1203,7 +1203,7 @@ fn matrix() -> Vec<Cell> {
         // The half of a finished outcome that sits outside the `InterpreterResult`: where a call's
         // return data lands, and which address a creation reports. Neither moves gas, and this
         // fixture discards both — the caller asks for a range the callee never fills and pops the
-        // address — so what the cell pins is the booking. `shim_measurement.rs` pins the forms
+        // address — so what the cell pins is the booking. `shim_blind_spots.rs` pins the forms
         // that change the produced state.
         cell!(at, EditOutcomeMetadata, ledger_intervention());
         cell!(at, JournalWrite, InspectorLedger::default());
