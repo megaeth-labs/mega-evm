@@ -26,7 +26,10 @@
 
 use std::convert::Infallible;
 
-use alloy_evm::{block::BlockExecutor, EvmEnv};
+use alloy_evm::{
+    block::{BlockExecutor, BlockExecutorFactory},
+    EvmEnv, EvmFactory,
+};
 use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
 use alloy_primitives::{address, Address, Bytes, Log, Signature, TxHash, TxKind, B256, U256};
 use mega_evm::{
@@ -413,11 +416,15 @@ where
 fn test_run_transaction_refuses_an_undeclared_inspector() {
     let mut db = build_db();
     let mut state = State::builder().with_database(&mut db).build();
-    let mut executor = executor_factory(MegaSpecId::REX7).create_executor_with_inspector(
-        &mut state,
+    let factory = executor_factory(MegaSpecId::REX7);
+    let evm = factory
+        .evm_factory()
+        .create_evm(&mut state, evm_env(MegaSpecId::REX7))
+        .with_inspector(Observer::default());
+    let mut executor = <MegaBlockExecutorFactory<_, _, _> as BlockExecutorFactory>::create_executor(
+        &factory,
+        evm,
         block_ctx(),
-        evm_env(MegaSpecId::REX7),
-        Observer::default(),
     );
 
     let tx = envelope(0);
@@ -444,11 +451,15 @@ fn test_run_transaction_refuses_an_undeclared_inspector() {
 fn test_execute_transaction_without_commit_refuses_it_too() {
     let mut db = build_db();
     let mut state = State::builder().with_database(&mut db).build();
-    let mut executor = executor_factory(MegaSpecId::REX7).create_executor_with_inspector(
-        &mut state,
+    let factory = executor_factory(MegaSpecId::REX7);
+    let evm = factory
+        .evm_factory()
+        .create_evm(&mut state, evm_env(MegaSpecId::REX7))
+        .with_inspector(GasInjector::default());
+    let mut executor = <MegaBlockExecutorFactory<_, _, _> as BlockExecutorFactory>::create_executor(
+        &factory,
+        evm,
         block_ctx(),
-        evm_env(MegaSpecId::REX7),
-        GasInjector::default(),
     );
 
     let tx = envelope(0);
@@ -589,12 +600,17 @@ fn test_the_refusal_is_not_spec_gated() {
     for spec in [MegaSpecId::MINI_REX, MegaSpecId::REX4, MegaSpecId::REX6, MegaSpecId::REX7] {
         let mut db = build_db();
         let mut state = State::builder().with_database(&mut db).build();
-        let mut executor = executor_factory(spec).create_executor_with_inspector(
-            &mut state,
-            block_ctx(),
-            evm_env(spec),
-            GasInjector::default(),
-        );
+        let factory = executor_factory(spec);
+        let evm = factory
+            .evm_factory()
+            .create_evm(&mut state, evm_env(spec))
+            .with_inspector(GasInjector::default());
+        let mut executor =
+            <MegaBlockExecutorFactory<_, _, _> as BlockExecutorFactory>::create_executor(
+                &factory,
+                evm,
+                block_ctx(),
+            );
 
         let tx = envelope(0);
         let err = executor
@@ -730,11 +746,15 @@ fn test_the_production_tracer_without_its_declaration_is_refused() {
 
     let mut db = build_db();
     let mut state = State::builder().with_database(&mut db).build();
-    let mut executor = executor_factory(MegaSpecId::REX7).create_executor_with_inspector(
-        &mut state,
+    let factory = executor_factory(MegaSpecId::REX7);
+    let evm = factory
+        .evm_factory()
+        .create_evm(&mut state, evm_env(MegaSpecId::REX7))
+        .with_inspector(TracingInspector::new(TracingInspectorConfig::all()));
+    let mut executor = <MegaBlockExecutorFactory<_, _, _> as BlockExecutorFactory>::create_executor(
+        &factory,
+        evm,
         block_ctx(),
-        evm_env(MegaSpecId::REX7),
-        TracingInspector::new(TracingInspectorConfig::all()),
     );
 
     let tx = envelope(0);
@@ -759,11 +779,15 @@ fn test_a_system_call_does_not_run_the_inspector() {
 
     let mut db = build_db();
     let mut state = State::builder().with_database(&mut db).build();
-    let mut executor = executor_factory(MegaSpecId::REX7).create_executor_with_inspector(
-        &mut state,
+    let factory = executor_factory(MegaSpecId::REX7);
+    let evm = factory
+        .evm_factory()
+        .create_evm(&mut state, evm_env(MegaSpecId::REX7))
+        .with_inspector(GasInjector::default());
+    let mut executor = <MegaBlockExecutorFactory<_, _, _> as BlockExecutorFactory>::create_executor(
+        &factory,
+        evm,
         block_ctx(),
-        evm_env(MegaSpecId::REX7),
-        GasInjector::default(),
     );
 
     let result = executor

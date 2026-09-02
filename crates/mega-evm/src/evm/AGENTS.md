@@ -141,7 +141,8 @@ Anything supplied by a request — a JavaScript tracer, an RPC-selected tracer c
 
 **How a node reaches it.** `EvmFactory::create_evm_with_inspector` cannot: its bound is `I: Inspector` and its return type is fixed, so it has no way to select the constructor.
 The route is `factory.create_evm(db, env).with_trusted_inspector(tracer)`, which keeps the factory's own dynamic precompiles and differs from the two-step untrusted form only in the method name.
-`MegaBlockExecutorFactory::create_executor_with_trusted_inspector` is that route packaged for the block path, and it is the entry a node tracing block production or validation takes; `create_executor_with_inspector` builds an executor that refuses every transaction it is given, and stays only because the EVM under it is reachable through `evm_mut()`.
+`MegaBlockExecutorFactory::create_executor_with_trusted_inspector` is that route packaged for the block path, and it is the entry a node tracing block production or validation takes.
+There is no undeclared counterpart on the factory: an inspector without a declaration reaches an executor only by building the EVM and passing it to the `BlockExecutorFactory` trait entry below, which is the shape a node already uses and which refuses the transactions rather than the construction.
 `create_executor` (the `BlockExecutorFactory` trait method) takes an EVM the caller already built and checks nothing about its inspector, because the question is a runtime one the executor's own entries ask per transaction — an error that fails the block rather than an assertion that stops the process.
 `bin/mega-evme`'s replay command is the worked example of the whole shape: a `TrustedTracingInspector` newtype declared over `revm-inspectors`' tracer, handed to `create_executor_with_trusted_inspector`.
 

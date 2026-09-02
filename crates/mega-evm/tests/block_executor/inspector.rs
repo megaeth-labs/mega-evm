@@ -6,7 +6,10 @@
 use std::{cell::Cell, convert::Infallible};
 
 use alloy_consensus::{Signed, TxLegacy};
-use alloy_evm::{block::BlockExecutor, EvmEnv, IntoTxEnv};
+use alloy_evm::{
+    block::{BlockExecutor, BlockExecutorFactory},
+    EvmEnv, EvmFactory, IntoTxEnv,
+};
 use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
 use alloy_primitives::{address, Address, Bytes, Signature, TxKind, B256, U256};
 use mega_evm::{
@@ -280,9 +283,18 @@ fn test_inspector_early_return_with_additional_limits() {
     // Create inspector that skips nested calls
     let inspector = SkipNestedCallInspector::default();
 
-    // Create block executor with inspector
-    let mut executor = block_executor_factory
-        .create_executor_with_inspector(&mut state, block_ctx, evm_env, inspector);
+    // Built the way a node builds one: the EVM carries the inspector, and the executor is made
+    // from it through the `alloy_evm` trait entry. The factory has no undeclared-inspector
+    // constructor, because an executor that refuses every transaction is not an API.
+    let evm = block_executor_factory
+        .evm_factory()
+        .create_evm(&mut state, evm_env)
+        .with_inspector(inspector);
+    let mut executor = <MegaBlockExecutorFactory<_, _, _> as BlockExecutorFactory>::create_executor(
+        &block_executor_factory,
+        evm,
+        block_ctx,
+    );
 
     // Execute transaction - this triggers a nested CALL that the inspector intercepts
     let tx = create_transaction(0, 1_000_000);
@@ -392,9 +404,18 @@ fn test_inspector_early_return_create_with_additional_limits() {
     // Create inspector that skips create operations
     let inspector = SkipCreateInspector::default();
 
-    // Create block executor with inspector
-    let mut executor = block_executor_factory
-        .create_executor_with_inspector(&mut state, block_ctx, evm_env, inspector);
+    // Built the way a node builds one: the EVM carries the inspector, and the executor is made
+    // from it through the `alloy_evm` trait entry. The factory has no undeclared-inspector
+    // constructor, because an executor that refuses every transaction is not an API.
+    let evm = block_executor_factory
+        .evm_factory()
+        .create_evm(&mut state, evm_env)
+        .with_inspector(inspector);
+    let mut executor = <MegaBlockExecutorFactory<_, _, _> as BlockExecutorFactory>::create_executor(
+        &block_executor_factory,
+        evm,
+        block_ctx,
+    );
 
     // Execute contract creation transaction - this triggers the CREATE that the inspector
     // intercepts Init code is just STOP (0x00)

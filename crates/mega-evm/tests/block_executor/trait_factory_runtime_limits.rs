@@ -3,8 +3,8 @@
 //!
 //! The factory exposes two paths that produce a `MegaBlockExecutor`:
 //!
-//! 1. The inherent `create_executor` / `create_executor_with_inspector` methods, which build the
-//!    EVM internally and apply `block_ctx.block_limits.to_evm_tx_runtime_limits()` before
+//! 1. The inherent `create_executor` / `create_executor_with_trusted_inspector` methods, which
+//!    build the EVM internally and apply `block_ctx.block_limits.to_evm_tx_runtime_limits()` before
 //!    constructing the executor.
 //!
 //! 2. The trait method `<MegaBlockExecutorFactory as
