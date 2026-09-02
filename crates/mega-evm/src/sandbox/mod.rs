@@ -60,34 +60,42 @@
 //! - `execution` - Core sandbox execution logic and the main entry point
 //!   [`execute_keyless_deploy_call`]
 //! - `observer` - Read-only [`SandboxObserver`] channel into nested sandbox execution
+//! - `inspector` - Rewriting [`SandboxInspector`] channel into nested sandbox execution
 //! - `state` - Type-erased database wrapper ([`SandboxDb`]) for isolated execution
 //! - `state_merge` - Replay-safe merge of sandbox state into the parent journal
 //! - `tx` - Transaction decoding and validation for pre-EIP-155 transactions
 //! - `error` - Error types ([`KeylessDeployError`]) that map to Solidity errors in `IKeylessDeploy`
 //!
-//! # Sandbox observation
+//! # Sandbox hooks
 //!
-//! Nested sandbox execution is otherwise invisible to a parent inspector. Callers may
-//! attach a [`SandboxObserver`] via [`crate::MegaContext::set_keyless_sandbox_observer`]
-//! (also forwarded from [`crate::MegaEvm`] and [`crate::MegaBlockExecutor`]). The observer
-//! sees interpreter hooks inside the sandbox plus a paired `sandbox_start` / `sandbox_end`
-//! lifecycle. Observation cannot short-circuit `CALL`/`CREATE`. A compliant (read-only)
-//! observer does not change execution results; no such guarantee is made for an observer
-//! that mutates interpreter or context state. Reverted inner frames still emit their
-//! events; whether sandbox state was applied to the parent is reported by
-//! [`SandboxEndOutcome::state_applied`]. With no observer attached the sandbox path is
-//! unchanged.
+//! Nested sandbox execution is otherwise invisible to a parent inspector. Two exclusive
+//! channels can attach through [`crate::MegaContext`] (also forwarded from [`crate::MegaEvm`]
+//! and [`crate::MegaBlockExecutor`]):
 //!
-//! Observation does not change sandbox external-env semantics: pre-REX4 sandboxes
+//! - **Read-only (default).** [`SandboxObserver`] via
+//!   [`crate::MegaContext::set_keyless_sandbox_observer`]. Interpreter hooks plus a paired
+//!   `sandbox_start` / `sandbox_end` lifecycle. Cannot short-circuit `CALL`/`CREATE`.
+//! - **Rewriting (explicit).** [`SandboxInspector`] via
+//!   [`crate::MegaContext::set_keyless_sandbox_inspector`]. Same lifecycle, but `&mut` inputs and
+//!   override return values are forwarded so interventions take effect inside the sandbox as they
+//!   would on a top-level EVM.
+//!
+//! A compliant (read-only) observer does not change execution results; no such
+//! guarantee is made for an observer that mutates interpreter or context state.
+//! Reverted inner frames still emit their events; whether sandbox state was applied
+//! to the parent is reported by [`SandboxEndOutcome::state_applied`]. With no hook
+//! attached the sandbox path is unchanged.
+//!
+//! Attaching a hook does not change sandbox external-env semantics: pre-REX4 sandboxes
 //! always run with [`crate::EmptyExternalEnv`] (minimum bucket capacity, no oracle
 //! data), and REX4+ sandboxes always share the parent env. Opcode-level hooks on
-//! pre-REX4 are delivered through a second observer slot typed against
-//! [`crate::EmptyExternalEnv`]. Observers that only implement [`SandboxObserver`]
-//! for the parent env type can use
-//! [`crate::MegaContext::set_keyless_sandbox_observer_for_parent_env`]; pre-REX4
-//! then emits only `sandbox_start` / `sandbox_end`.
+//! pre-REX4 are delivered through a second slot typed against
+//! [`crate::EmptyExternalEnv`]. Handles that only implement the parent env type can use
+//! the `_for_parent_env` setters; pre-REX4 then emits only `sandbox_start` /
+//! `sandbox_end`.
 //!
 //! [`SandboxObserver`]: observer::SandboxObserver
+//! [`SandboxInspector`]: inspector::SandboxInspector
 //! [`SandboxEndOutcome::state_applied`]: observer::SandboxEndOutcome::state_applied
 //!
 //! # Type Erasure Strategy
@@ -121,6 +129,7 @@
 
 mod error;
 mod execution;
+mod inspector;
 mod observer;
 mod state;
 mod state_merge;
@@ -128,6 +137,7 @@ mod tx;
 
 pub use error::*;
 pub use execution::*;
+pub use inspector::*;
 pub use observer::*;
 pub use state::*;
 pub use tx::*;

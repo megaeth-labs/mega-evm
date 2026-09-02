@@ -29,10 +29,11 @@ use revm::{
 };
 
 use crate::{
-    constants, is_system_originated, sandbox::SandboxObserver, AdditionalLimit, BucketId,
-    DynamicGasCost, EmptyExternalEnv, EvmTxRuntimeLimits, ExternalEnvTypes, ExternalEnvs,
-    MegaSpecId, TxRuntimeLimit, VolatileDataAccess, VolatileDataAccessTracker,
-    VolatileDataAccessType,
+    constants, is_system_originated,
+    sandbox::{SandboxHook, SandboxInspector, SandboxObserver},
+    AdditionalLimit, BucketId, DynamicGasCost, EmptyExternalEnv, EvmTxRuntimeLimits,
+    ExternalEnvTypes, ExternalEnvs, MegaSpecId, TxRuntimeLimit, VolatileDataAccess,
+    VolatileDataAccessTracker, VolatileDataAccessType,
 };
 
 /// `MegaETH` EVM context type. This struct wraps [`OpContext`] and implements the [`ContextTr`]
@@ -76,28 +77,25 @@ pub struct MegaContext<DB: Database, ExtEnvs: ExternalEnvTypes> {
     /// before the sandbox runs).
     pub(crate) inside_sandbox: Rc<RefCell<bool>>,
 
-    /// Observer for nested sandbox execution, typed against this context's [`ExtEnvs`].
+    /// Hook for nested sandbox execution, typed against this context's [`ExtEnvs`].
     ///
     /// `None` keeps the historical no-inspector sandbox path. REX4+ sandboxes
     /// share the parent env and deliver opcode-level hooks through this slot.
     /// Changing [`ExtEnvs`] via [`Self::with_external_envs`] resets this field
-    /// and the [`EmptyExternalEnv`] observer slot: the observer cannot be
-    /// carried across an env-type change and must be attached after external
-    /// environments are assembled. A compliant (read-only) observer does not
-    /// change execution results; mutating interpreter or context state through
-    /// its hooks is undefined and may diverge consensus.
+    /// and the [`EmptyExternalEnv`] hook slot: the hook cannot be carried across
+    /// an env-type change and must be attached after external environments are
+    /// assembled. Observer and inspector occupy the same slot exclusively.
     #[debug(ignore)]
-    pub(crate) keyless_sandbox_observer: Option<Rc<RefCell<dyn SandboxObserver<ExtEnvs>>>>,
+    pub(crate) keyless_sandbox_hook: Option<SandboxHook<ExtEnvs>>,
 
-    /// Observer handle typed against [`EmptyExternalEnv`].
+    /// Hook handle typed against [`EmptyExternalEnv`].
     ///
     /// Pre-REX4 sandboxes always execute with [`EmptyExternalEnv`]. Opcode-level
-    /// hooks on that path use this slot so attaching an observer cannot change
-    /// sandbox env semantics. `None` when no observer is attached, or when the
-    /// caller used [`Self::set_keyless_sandbox_observer_for_parent_env`].
+    /// hooks on that path use this slot so attaching a hook cannot change
+    /// sandbox env semantics. `None` when no hook is attached, or when the
+    /// caller used a `_for_parent_env` setter.
     #[debug(ignore)]
-    pub(crate) keyless_sandbox_observer_empty:
-        Option<Rc<RefCell<dyn SandboxObserver<EmptyExternalEnv>>>>,
+    pub(crate) keyless_sandbox_hook_empty: Option<SandboxHook<EmptyExternalEnv>>,
 
     /// The system address for the current block.
     /// Pre-REX5: always `MEGA_SYSTEM_ADDRESS` (the legacy hardcoded constant).
@@ -198,8 +196,8 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
                 tx_limits.oracle_access_compute_gas_limit,
             ))),
             inside_sandbox: Rc::new(RefCell::new(false)),
-            keyless_sandbox_observer: None,
-            keyless_sandbox_observer_empty: None,
+            keyless_sandbox_hook: None,
+            keyless_sandbox_hook_empty: None,
             system_address: crate::MEGA_SYSTEM_ADDRESS,
             inner,
         }
@@ -263,8 +261,8 @@ impl<DB: Database, ExtEnvTypes: ExternalEnvTypes> MegaContext<DB, ExtEnvTypes> {
                 tx_limits.oracle_access_compute_gas_limit,
             ))),
             inside_sandbox: Rc::new(RefCell::new(false)),
-            keyless_sandbox_observer: None,
-            keyless_sandbox_observer_empty: None,
+            keyless_sandbox_hook: None,
+            keyless_sandbox_hook_empty: None,
             system_address: crate::MEGA_SYSTEM_ADDRESS,
             inner,
         }
@@ -293,8 +291,8 @@ impl<DB: Database, ExtEnvTypes: ExternalEnvTypes> MegaContext<DB, ExtEnvTypes> {
             oracle_env: self.oracle_env,
             volatile_data_tracker: self.volatile_data_tracker,
             inside_sandbox: self.inside_sandbox,
-            keyless_sandbox_observer: self.keyless_sandbox_observer,
-            keyless_sandbox_observer_empty: self.keyless_sandbox_observer_empty,
+            keyless_sandbox_hook: self.keyless_sandbox_hook,
+            keyless_sandbox_hook_empty: self.keyless_sandbox_hook_empty,
             system_address: self.system_address,
         }
     }
@@ -371,11 +369,11 @@ impl<DB: Database, ExtEnvTypes: ExternalEnvTypes> MegaContext<DB, ExtEnvTypes> {
     /// external environments, the dynamic gas cost calculator and oracle environment
     /// are reinitialized with the new configurations.
     ///
-    /// Changing `ExtEnvs` resets the sandbox observer (both the parent-env slot
-    /// and the [`EmptyExternalEnv`] slot): the observer is parameterized by env
-    /// type and cannot be carried across this conversion. Attach the observer
-    /// after external environments are assembled. Debug builds assert if an
-    /// observer is already attached (`set observer after external envs are wired`).
+    /// Changing `ExtEnvs` resets the sandbox hook (both the parent-env slot
+    /// and the [`EmptyExternalEnv`] slot): the hook is parameterized by env
+    /// type and cannot be carried across this conversion. Attach the hook
+    /// after external environments are assembled. Debug builds assert if a
+    /// hook is already attached (`set sandbox hook after external envs are wired`).
     ///
     /// # Arguments
     ///
@@ -389,9 +387,8 @@ impl<DB: Database, ExtEnvTypes: ExternalEnvTypes> MegaContext<DB, ExtEnvTypes> {
         external_envs: ExternalEnvs<NewExtEnvTypes>,
     ) -> MegaContext<DB, NewExtEnvTypes> {
         debug_assert!(
-            self.keyless_sandbox_observer.is_none() &&
-                self.keyless_sandbox_observer_empty.is_none(),
-            "set observer after external envs are wired",
+            self.keyless_sandbox_hook.is_none() && self.keyless_sandbox_hook_empty.is_none(),
+            "set sandbox hook after external envs are wired",
         );
         let parent_block_number = self.inner.block.number.to::<u64>().saturating_sub(1);
         let spec = self.spec;
@@ -410,9 +407,9 @@ impl<DB: Database, ExtEnvTypes: ExternalEnvTypes> MegaContext<DB, ExtEnvTypes> {
             oracle_env: Rc::new(RefCell::new(external_envs.oracle_env)),
             volatile_data_tracker: self.volatile_data_tracker,
             inside_sandbox: self.inside_sandbox,
-            // Observer is parameterized by `ExtEnvs`; a type change cannot keep it.
-            keyless_sandbox_observer: None,
-            keyless_sandbox_observer_empty: None,
+            // Hook is parameterized by `ExtEnvs`; a type change cannot keep it.
+            keyless_sandbox_hook: None,
+            keyless_sandbox_hook_empty: None,
             system_address: self.system_address,
         }
     }
@@ -506,9 +503,9 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     /// inspector satisfies both bounds.
     ///
     /// Attaching an observer does not change sandbox external-env semantics at
-    /// any spec.
+    /// any spec. Replaces any attached inspector.
     ///
-    /// Use [`Self::clear_keyless_sandbox_observer`] to detach. Passing `None`
+    /// Use [`Self::clear_keyless_sandbox_hook`] to detach. Passing `None`
     /// also clears both slots, but type inference for `O` often fails on that
     /// path. Observation is read-only: mutating interpreter or context state
     /// through the hooks is undefined and may diverge consensus. There is no
@@ -522,10 +519,10 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
                 let cloned = Rc::clone(&obs);
                 let parent: Rc<RefCell<dyn SandboxObserver<ExtEnvs>>> = cloned;
                 let empty: Rc<RefCell<dyn SandboxObserver<EmptyExternalEnv>>> = obs;
-                self.keyless_sandbox_observer = Some(parent);
-                self.keyless_sandbox_observer_empty = Some(empty);
+                self.keyless_sandbox_hook = Some(SandboxHook::Observer(parent));
+                self.keyless_sandbox_hook_empty = Some(SandboxHook::Observer(empty));
             }
-            None => self.clear_keyless_sandbox_observer(),
+            None => self.clear_keyless_sandbox_hook(),
         }
     }
 
@@ -537,23 +534,75 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     /// only `sandbox_start` / `sandbox_end` through this handle.
     ///
     /// Prefer [`Self::set_keyless_sandbox_observer`] when the observer
-    /// implements both env types. Use [`Self::clear_keyless_sandbox_observer`]
-    /// to detach.
+    /// implements both env types. Use [`Self::clear_keyless_sandbox_hook`]
+    /// to detach. Replaces any attached inspector.
     pub fn set_keyless_sandbox_observer_for_parent_env(
         &mut self,
         observer: Option<Rc<RefCell<dyn SandboxObserver<ExtEnvs>>>>,
     ) {
-        self.keyless_sandbox_observer = observer;
-        self.keyless_sandbox_observer_empty = None;
+        self.keyless_sandbox_hook = observer.map(SandboxHook::Observer);
+        self.keyless_sandbox_hook_empty = None;
     }
 
-    /// Detaches any sandbox observer from both env-type slots.
+    /// Attaches a rewriting inspector for nested sandbox execution on every spec.
     ///
-    /// Restores the no-observer sandbox path. Prefer this over passing `None` to
-    /// [`Self::set_keyless_sandbox_observer`] when `O` cannot be inferred.
-    pub fn clear_keyless_sandbox_observer(&mut self) {
-        self.keyless_sandbox_observer = None;
-        self.keyless_sandbox_observer_empty = None;
+    /// The inspector must implement [`SandboxInspector`] for both this context's
+    /// [`ExtEnvs`] and [`EmptyExternalEnv`]. The same handle is stored as two
+    /// type-erased slots so opcode-level hooks fire for pre-REX4 sandboxes
+    /// (always [`EmptyExternalEnv`]) and for REX4+ sandboxes (shared parent
+    /// env). A type that implements [`revm::Inspector`] for every sandbox
+    /// context lifetime satisfies both bounds via the blanket impl.
+    ///
+    /// Attaching an inspector does not change sandbox external-env semantics at
+    /// any spec. Replaces any attached observer. Interventions take effect
+    /// inside the sandbox as they would on a top-level EVM; reported gas and
+    /// usage are the post-intervention values. The channel is node-local and
+    /// non-consensus.
+    ///
+    /// Use [`Self::clear_keyless_sandbox_hook`] to detach. Passing `None` also
+    /// clears both slots, but type inference for `I` often fails on that path.
+    pub fn set_keyless_sandbox_inspector<I>(&mut self, inspector: Option<Rc<RefCell<I>>>)
+    where
+        I: SandboxInspector<ExtEnvs> + SandboxInspector<EmptyExternalEnv> + 'static,
+    {
+        match inspector {
+            Some(insp) => {
+                let cloned = Rc::clone(&insp);
+                let parent: Rc<RefCell<dyn SandboxInspector<ExtEnvs>>> = cloned;
+                let empty: Rc<RefCell<dyn SandboxInspector<EmptyExternalEnv>>> = insp;
+                self.keyless_sandbox_hook = Some(SandboxHook::Inspector(parent));
+                self.keyless_sandbox_hook_empty = Some(SandboxHook::Inspector(empty));
+            }
+            None => self.clear_keyless_sandbox_hook(),
+        }
+    }
+
+    /// Attaches an inspector that implements [`SandboxInspector`] only for this
+    /// context's [`ExtEnvs`].
+    ///
+    /// Opcode-level inspection is available on REX4+ sandboxes, which share
+    /// the parent env. Pre-REX4 sandboxes keep [`EmptyExternalEnv`] and emit
+    /// only `sandbox_start` / `sandbox_end` through this handle.
+    ///
+    /// Prefer [`Self::set_keyless_sandbox_inspector`] when the inspector
+    /// implements both env types. Use [`Self::clear_keyless_sandbox_hook`]
+    /// to detach. Replaces any attached observer.
+    pub fn set_keyless_sandbox_inspector_for_parent_env(
+        &mut self,
+        inspector: Option<Rc<RefCell<dyn SandboxInspector<ExtEnvs>>>>,
+    ) {
+        self.keyless_sandbox_hook = inspector.map(SandboxHook::Inspector);
+        self.keyless_sandbox_hook_empty = None;
+    }
+
+    /// Detaches any sandbox hook from both env-type slots.
+    ///
+    /// Restores the no-hook sandbox path. Prefer this over passing `None` to
+    /// [`Self::set_keyless_sandbox_observer`] or
+    /// [`Self::set_keyless_sandbox_inspector`] when the generic cannot be inferred.
+    pub fn clear_keyless_sandbox_hook(&mut self) {
+        self.keyless_sandbox_hook = None;
+        self.keyless_sandbox_hook_empty = None;
     }
 
     /// Gets the current total data size generated from transaction execution.
@@ -989,41 +1038,41 @@ mod tests {
     }
 
     #[test]
-    fn test_clear_keyless_sandbox_observer_clears_both_slots() {
+    fn test_clear_keyless_sandbox_hook_clears_both_slots() {
         let mut context = MegaContext::new(EmptyDB::default(), MegaSpecId::REX4);
         context.set_keyless_sandbox_observer(Some(Rc::new(RefCell::new(NopObserver))));
-        assert!(context.keyless_sandbox_observer.is_some());
-        assert!(context.keyless_sandbox_observer_empty.is_some());
+        assert!(context.keyless_sandbox_hook.is_some());
+        assert!(context.keyless_sandbox_hook_empty.is_some());
 
-        context.clear_keyless_sandbox_observer();
-        assert!(context.keyless_sandbox_observer.is_none());
-        assert!(context.keyless_sandbox_observer_empty.is_none());
+        context.clear_keyless_sandbox_hook();
+        assert!(context.keyless_sandbox_hook.is_none());
+        assert!(context.keyless_sandbox_hook_empty.is_none());
     }
 
     #[test]
-    fn test_mega_evm_clear_keyless_sandbox_observer() {
+    fn test_mega_evm_clear_keyless_sandbox_hook() {
         use revm::handler::EvmTr;
 
         let mut context = MegaContext::new(EmptyDB::default(), MegaSpecId::REX4);
         context.set_keyless_sandbox_observer(Some(Rc::new(RefCell::new(NopObserver))));
         let mut evm = crate::MegaEvm::new(context);
-        evm.clear_keyless_sandbox_observer();
-        assert!(evm.ctx_ref().keyless_sandbox_observer.is_none());
-        assert!(evm.ctx_ref().keyless_sandbox_observer_empty.is_none());
+        evm.clear_keyless_sandbox_hook();
+        assert!(evm.ctx_ref().keyless_sandbox_hook.is_none());
+        assert!(evm.ctx_ref().keyless_sandbox_hook_empty.is_none());
     }
 
     #[test]
-    fn test_with_external_envs_without_observer_leaves_slots_empty() {
+    fn test_with_external_envs_without_hook_leaves_slots_empty() {
         let context = MegaContext::new(EmptyDB::default(), MegaSpecId::REX4);
         let context =
             context.with_external_envs(TestExternalEnvs::<std::convert::Infallible>::new().into());
-        assert!(context.keyless_sandbox_observer.is_none());
-        assert!(context.keyless_sandbox_observer_empty.is_none());
+        assert!(context.keyless_sandbox_hook.is_none());
+        assert!(context.keyless_sandbox_hook_empty.is_none());
     }
 
     #[test]
     #[cfg(debug_assertions)]
-    #[should_panic(expected = "set observer after external envs are wired")]
+    #[should_panic(expected = "set sandbox hook after external envs are wired")]
     fn test_with_external_envs_panics_in_debug_when_observer_is_attached() {
         let mut context = MegaContext::new(EmptyDB::default(), MegaSpecId::REX4);
         context.set_keyless_sandbox_observer(Some(Rc::new(RefCell::new(NopObserver))));
