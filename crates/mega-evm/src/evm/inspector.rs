@@ -48,7 +48,7 @@ use revm::{
     Inspector,
 };
 
-use crate::{ExternalEnvTypes, MegaContext, MegaSpecId};
+use crate::{AdditionalLimit, ExternalEnvTypes, MegaContext, MegaSpecId};
 
 /// The message a refused `create_end` rewrite surfaces as `EVMError::Custom`.
 ///
@@ -299,29 +299,10 @@ fn held_refund(action: Option<&InterpreterAction>, counter: i64) -> i64 {
 /// the chain of frame returns between here and the receipt. Neither of those is a quantity a
 /// boundary can measure, and over-stating is the safe direction for the lane's one consumer.
 #[inline]
-fn book_refund<DB: Database, ExtEnvs: ExternalEnvTypes>(
-    context: &MegaContext<DB, ExtEnvs>,
-    before: i64,
-    after: i64,
-) {
+fn book_refund(limit: &mut AdditionalLimit, before: i64, after: i64) {
     if before != after {
-        context
-            .additional_limit
-            .borrow_mut()
-            .record_inspector_refund_adjustment(i128::from(after) - i128::from(before));
+        limit.record_inspector_refund_adjustment(i128::from(after) - i128::from(before));
     }
-}
-
-/// The refund a synthetic outcome carries, for a callback that answered a frame itself.
-///
-/// There is no "before" to difference against, so the whole of it is the inspector's. The baseline
-/// is zero rather than the envelope because a frame that never ran has refunded nothing.
-#[inline]
-fn book_synthetic_refund<DB: Database, ExtEnvs: ExternalEnvTypes>(
-    context: &MegaContext<DB, ExtEnvs>,
-    refunded: i64,
-) {
-    book_refund(context, 0, refunded);
 }
 
 /// What a live-interpreter callback did to the interpreter's pending action.
@@ -404,19 +385,15 @@ impl ActionSnapshot {
 ///   rather than a shape the API offers — `reset_action` leaves the action in place, so emptying
 ///   the slot means writing `None` and desynchronising the two.
 #[inline]
-fn book_pending_action<DB: Database, ExtEnvs: ExternalEnvTypes>(
-    context: &MegaContext<DB, ExtEnvs>,
-    change: ActionChange,
-) {
+fn book_pending_action(limit: &mut AdditionalLimit, change: ActionChange) {
     if change.gas != 0 {
-        let mut limit = context.additional_limit.borrow_mut();
         match change.lane {
             ActionLane::Result => limit.stage_inspector_action_result_adjustment(change.gas),
             ActionLane::Envelope => limit.stage_inspector_action_env_adjustment(change.gas),
             ActionLane::Counter => limit.record_inspector_action_counter_adjustment(change.gas),
         }
     }
-    book_intervention(context, change.rewritten);
+    book_intervention(limit, change.rewritten);
 }
 
 /// The gas limit a frame input carries, for the two variants that have one.
@@ -445,28 +422,28 @@ fn frame_input_gas_limit(frame_input: &FrameInput) -> Option<u64> {
 /// inspector wrote from nothing. What the transaction funded is the envelope on the way in, and
 /// only the frame init that asked can take that difference.
 #[inline]
-fn book_env_adjustment<DB: Database, ExtEnvs: ExternalEnvTypes>(
-    context: &MegaContext<DB, ExtEnvs>,
+fn book_env_adjustment(
+    limit: &mut AdditionalLimit,
     before: Option<u64>,
     after: Option<u64>,
     intercepted: bool,
 ) {
-    let staged = context.additional_limit.borrow_mut().take_inspector_action_env_adjustment();
+    let staged = limit.take_inspector_action_env_adjustment();
     let callback = match (intercepted, before, after) {
         (false, Some(before), Some(after)) => i128::from(after) - i128::from(before),
         _ => 0,
     };
     if let (true, Some(before)) = (intercepted, before) {
-        context.additional_limit.borrow_mut().stage_inspector_interception_envelope(before);
+        limit.stage_inspector_interception_envelope(before);
     }
     // Booked separately rather than summed first: the two were written in different callbacks, so
     // an envelope raised in one and lowered back in the other is two edits, not none. The staged
     // half already counted its own traffic where it was measured, so only its movement lands here.
     if staged != 0 {
-        context.additional_limit.borrow_mut().record_staged_inspector_env_movement(staged);
+        limit.record_staged_inspector_env_movement(staged);
     }
     if callback != 0 {
-        context.additional_limit.borrow_mut().record_inspector_env_adjustment(callback);
+        limit.record_inspector_env_adjustment(callback);
     }
 }
 
@@ -480,12 +457,9 @@ fn book_env_adjustment<DB: Database, ExtEnvs: ExternalEnvTypes>(
 /// telling whether those came back changed needs a snapshot of unbounded state that no per-opcode
 /// boundary can take. Their sizes are constant-time readings and are covered.
 #[inline]
-fn book_intervention<DB: Database, ExtEnvs: ExternalEnvTypes>(
-    context: &MegaContext<DB, ExtEnvs>,
-    changed: bool,
-) {
+fn book_intervention(limit: &mut AdditionalLimit, changed: bool) {
     if changed {
-        context.additional_limit.borrow_mut().record_inspector_intervention();
+        limit.record_inspector_intervention();
     }
 }
 
@@ -822,89 +796,113 @@ impl ResultClass {
     }
 }
 
-/// Refuses a rewrite that moves a frame-init result across the success / revert / halt boundary.
+/// One shape of rewrite the shim refuses.
 ///
-/// Every other classification rewrite is supported because REX7 withholds the journal decision
-/// until the result is final, so a frame rewritten into a revert has its state rolled back with
-/// it. A result out of frame *init* has no such window and cannot be given one from here: upstream
-/// decides inside `make_call_frame` — an empty-code call commits its transfer and returns `Stop`,
-/// a failing precompile reverts and returns its own failure — and `MegaETH`'s interceptors decide
-/// before they return, the `KeylessDeploy` one by merging a whole sandbox's state. Honouring a
-/// rewrite would hand the caller an answer the state behind it contradicts.
+/// Both are detection only: nothing here compensates the journal. The classification is restored,
+/// the ledger counts the refusal, and the error slot carries the reason so the transaction fails
+/// rather than producing a receipt built on the rewrite. What differs is how loud a debug build
+/// is, which is [`Self::note_in_debug`].
 ///
-/// A result an inspector answered the frame with itself is deliberately outside the refusal:
-/// nothing in the EVM decided anything for it, so its classification is the inspector's to state.
-/// What separates the two is which callback site in `inspect_frame_init` ran, which is where the
-/// window is opened.
-///
-/// Detection only; nothing here compensates the journal. The classification is restored, the
-/// ledger counts the refusal, and the error slot carries the reason so the transaction fails
-/// rather than producing a receipt built on the rewrite. Loud but not fatal, unlike
-/// [`reject_forbidden_create_rewrite`]: this is the most ordinary rewrite a tool makes — failing a
-/// call — landing on the one frame kind it cannot be applied to, so a corpus should be able to
-/// report it rather than die on it.
-///
-/// Gated to REX7+: on a frozen spec a rewrite reaches no accounting lane it can make unsound, and
-/// those specs' behaviour is closed.
-#[inline]
-fn reject_forbidden_frame_init_rewrite<DB: Database, ExtEnvs: ExternalEnvTypes>(
-    context: &mut MegaContext<DB, ExtEnvs>,
-    before: InstructionResult,
-    result: &mut InterpreterResult,
-) {
-    if !context.spec.is_enabled(MegaSpecId::REX7) ||
-        ResultClass::of(before) == ResultClass::of(result.result) ||
-        !context.additional_limit.borrow().is_settling_frame_init_result()
-    {
-        return;
-    }
-    result.result = before;
-    context.additional_limit.borrow_mut().record_inspector_rejected_rewrite();
-    let slot = context.error();
-    if slot.is_ok() {
-        *slot = Err(ContextError::Custom(String::from(FORBIDDEN_FRAME_INIT_REWRITE)));
-    }
-    debug_assert_eq!(
-        ResultClass::of(result.result),
-        ResultClass::of(before),
-        "{FORBIDDEN_FRAME_INIT_REWRITE}: the refusal must leave the caller holding the \
-         classification the EVM produced",
-    );
+/// Both are gated to REX7+: on a frozen spec a rewrite reaches no accounting lane it can make
+/// unsound, and those specs' behaviour is closed.
+#[derive(Clone, Copy, Debug)]
+enum Forbidden {
+    /// A result frame init produced, moved across the success / revert / halt boundary.
+    ///
+    /// Every other classification rewrite is supported because REX7 withholds the journal decision
+    /// until the result is final, so a frame rewritten into a revert has its state rolled back
+    /// with it. A result out of frame *init* has no such window and cannot be given one from
+    /// here: upstream decides inside `make_call_frame` — an empty-code call commits its
+    /// transfer and returns `Stop`, a failing precompile reverts and returns its own failure —
+    /// and `MegaETH`'s interceptors decide before they return, the `KeylessDeploy` one by
+    /// merging a whole sandbox's state. Honouring a rewrite would hand the caller an answer
+    /// the state behind it contradicts.
+    ///
+    /// A result an inspector answered the frame with itself is deliberately outside the refusal:
+    /// nothing in the EVM decided anything for it, so its classification is the inspector's to
+    /// state. What separates the two is which callback site in `inspect_frame_init` ran, which is
+    /// where the window is opened.
+    FrameInitRewrite,
+    /// A non-successful contract creation turned into a successful one.
+    ///
+    /// Forbidden rather than supported because there is no state behind it: by the time
+    /// `create_end` runs, revm has reverted the frame's checkpoint and declined to deposit the
+    /// code — the size limit, the `0xEF` prefix rule and the code-deposit charge are all evaluated
+    /// before the callback. Honouring it would report a deployment at an address holding no code.
+    CreateRevival,
 }
 
-/// Refuses a rewrite that turns a non-successful contract creation into a successful one, and says
-/// so loudly.
-///
-/// Forbidden rather than supported because there is no state behind it: by the time `create_end`
-/// runs, revm has reverted the frame's checkpoint and declined to deposit the code — the size
-/// limit, the `0xEF` prefix rule and the code-deposit charge are all evaluated before the
-/// callback. Honouring it would report a deployment at an address holding no code.
-///
-/// Detection only, on the same terms as [`reject_forbidden_frame_init_rewrite`], except that debug
-/// builds assert: this shape is a mistake with no reading behind it, and a corpus that produces it
-/// should stop rather than quietly take the rejection path.
-///
-/// Gated to REX7+ for the same reason as that one.
+impl Forbidden {
+    /// The reason the error slot carries, which is also what a test matches on.
+    const fn message(self) -> &'static str {
+        match self {
+            Self::FrameInitRewrite => FORBIDDEN_FRAME_INIT_REWRITE,
+            Self::CreateRevival => FORBIDDEN_CREATE_REVIVAL,
+        }
+    }
+
+    /// Whether this rewrite is the one that happened.
+    #[inline]
+    fn applies<DB: Database, ExtEnvs: ExternalEnvTypes>(
+        self,
+        context: &MegaContext<DB, ExtEnvs>,
+        before: InstructionResult,
+        after: InstructionResult,
+    ) -> bool {
+        match self {
+            Self::FrameInitRewrite => {
+                ResultClass::of(before) != ResultClass::of(after) &&
+                    context.additional_limit.borrow().is_settling_frame_init_result()
+            }
+            Self::CreateRevival => !before.is_ok() && after.is_ok(),
+        }
+    }
+
+    /// What a debug build does about it, once the refusal has been carried out.
+    ///
+    /// A frame-init rewrite is the most ordinary rewrite a tool makes — failing a call — landing
+    /// on the one frame kind it cannot be applied to, so a corpus should be able to report it
+    /// rather than die on it; all that is asserted is that the refusal did restore the
+    /// classification. A revived creation has no reading behind it at all, so a corpus that
+    /// produces one should stop.
+    #[inline]
+    fn note_in_debug(self, before: InstructionResult, after: InstructionResult) {
+        match self {
+            Self::FrameInitRewrite => debug_assert_eq!(
+                ResultClass::of(after),
+                ResultClass::of(before),
+                "{}: the refusal must leave the caller holding the classification the EVM \
+                 produced",
+                self.message(),
+            ),
+            Self::CreateRevival => debug_assert!(
+                false,
+                "{}: {before:?} was rewritten to a success, which no journal entry and no \
+                 deposited code stands behind",
+                self.message(),
+            ),
+        }
+    }
+}
+
+/// Restores the classification a forbidden rewrite moved, and fails the transaction over it.
 #[inline]
-fn reject_forbidden_create_rewrite<DB: Database, ExtEnvs: ExternalEnvTypes>(
+fn reject_forbidden_rewrite<DB: Database, ExtEnvs: ExternalEnvTypes>(
     context: &mut MegaContext<DB, ExtEnvs>,
+    what: Forbidden,
     before: InstructionResult,
     result: &mut InterpreterResult,
 ) {
-    if !context.spec.is_enabled(MegaSpecId::REX7) || before.is_ok() || !result.result.is_ok() {
+    if !context.spec.is_enabled(MegaSpecId::REX7) || !what.applies(context, before, result.result) {
         return;
     }
     result.result = before;
     context.additional_limit.borrow_mut().record_inspector_rejected_rewrite();
     let slot = context.error();
     if slot.is_ok() {
-        *slot = Err(ContextError::Custom(String::from(FORBIDDEN_CREATE_REVIVAL)));
+        *slot = Err(ContextError::Custom(String::from(what.message())));
     }
-    debug_assert!(
-        false,
-        "{FORBIDDEN_CREATE_REVIVAL}: {before:?} was rewritten to a success, which no journal \
-         entry and no deposited code stands behind",
-    );
+    what.note_in_debug(before, result.result);
 }
 
 /// What the shim reads off a live interpreter on the way into a callback, and settles on the way
@@ -973,20 +971,16 @@ impl LiveReading {
         };
         let refund = held_refund(action, refunded);
 
-        book_intervention(context, moved);
-        book_pending_action(context, change);
-        book_refund(context, self.refund, refund);
-        // `record_inspector_gas_adjustment` returns on its own when the counter did not move, and
-        // the borrow it would take to find that out is not free on a path taken twice per opcode.
+        let mut limit = context.additional_limit.borrow_mut();
+        book_intervention(&mut limit, moved);
+        book_pending_action(&mut limit, change);
+        book_refund(&mut limit, self.refund, refund);
         if gas != self.gas {
-            context
-                .additional_limit
-                .borrow_mut()
-                .record_inspector_gas_adjustment::<IN_OPEN_SEGMENT>(
-                    &mut interp.gas,
-                    self.gas,
-                    lane.counter_reaches_envelope(),
-                );
+            limit.record_inspector_gas_adjustment::<IN_OPEN_SEGMENT>(
+                &mut interp.gas,
+                self.gas,
+                lane.counter_reaches_envelope(),
+            );
         }
     }
 }
@@ -1084,19 +1078,21 @@ impl<I> MeasuredInspector<I> {
 /// when the callback answered the frame itself — the refund its synthetic outcome carries.
 /// `intercepted_refund` is `Some` exactly when it did.
 #[inline]
-fn book_frame_entry<DB: Database, ExtEnvs: ExternalEnvTypes>(
-    context: &MegaContext<DB, ExtEnvs>,
+fn book_frame_entry(
+    limit: &mut AdditionalLimit,
     before: Option<u64>,
     after: Option<u64>,
     intercepted_refund: Option<i64>,
     rewritten: bool,
 ) {
     let intercepted = intercepted_refund.is_some();
-    book_env_adjustment(context, before, after, intercepted);
+    book_env_adjustment(limit, before, after, intercepted);
     if let Some(refund) = intercepted_refund {
-        book_synthetic_refund(context, refund);
+        // A synthetic outcome has no "before" to difference against, so the whole of its refund is
+        // the inspector's; the baseline is zero because a frame that never ran refunded nothing.
+        book_refund(limit, 0, refund);
     }
-    book_intervention(context, intercepted || rewritten);
+    book_intervention(limit, intercepted || rewritten);
 }
 
 /// What a finished frame reads as on the way into an `*_end` callback.
@@ -1126,12 +1122,15 @@ impl<M: PartialEq> FrameEnding<M> {
         metadata: M,
         is_create: bool,
     ) {
-        book_refund(context, self.refund, result.gas.refunded());
-        book_intervention(context, result_rewritten((self.result, &self.output), result));
-        book_intervention(context, metadata != self.metadata);
-        reject_forbidden_frame_init_rewrite(context, self.result, result);
+        {
+            let mut limit = context.additional_limit.borrow_mut();
+            book_refund(&mut limit, self.refund, result.gas.refunded());
+            book_intervention(&mut limit, result_rewritten((self.result, &self.output), result));
+            book_intervention(&mut limit, metadata != self.metadata);
+        }
+        reject_forbidden_rewrite(context, Forbidden::FrameInitRewrite, self.result, result);
         if is_create {
-            reject_forbidden_create_rewrite(context, self.result, result);
+            reject_forbidden_rewrite(context, Forbidden::CreateRevival, self.result, result);
         }
     }
 }
@@ -1212,7 +1211,7 @@ where
         let before = frame_input.clone();
         let outcome = self.inner.frame_start(context, frame_input);
         book_frame_entry(
-            context,
+            &mut context.additional_limit.borrow_mut(),
             frame_input_gas_limit(&before),
             frame_input_gas_limit(frame_input),
             outcome.as_ref().map(|outcome| outcome.gas().refunded()),
@@ -1257,7 +1256,7 @@ where
         let before = inputs.clone();
         let outcome = self.inner.call(context, inputs);
         book_frame_entry(
-            context,
+            &mut context.additional_limit.borrow_mut(),
             Some(before.gas_limit),
             Some(inputs.gas_limit),
             outcome.as_ref().map(|outcome| outcome.result.gas.refunded()),
@@ -1304,7 +1303,7 @@ where
         let before = inputs.clone();
         let outcome = self.inner.create(context, inputs);
         book_frame_entry(
-            context,
+            &mut context.additional_limit.borrow_mut(),
             Some(before.gas_limit()),
             Some(inputs.gas_limit()),
             outcome.as_ref().map(|outcome| outcome.result.gas.refunded()),
