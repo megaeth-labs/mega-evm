@@ -466,9 +466,14 @@ fn open_gaps(tables: &[(&'static str, &'static [(&'static str, Coverage)])]) -> 
 ///
 /// It does not, and cannot, stop a hole from being *mis*classified as `Inert` or `NotGas`. Nothing
 /// mechanical can: those verdicts are claims about what the EVM does with a number, and what backs
-/// them is the measurement each one was written from. `state_gas_spent` is the cautionary case —
-/// it sat under `Inert` on the strength of "EIP-8037 is off", which is true and which the receipt
-/// does not care about.
+/// them is the measurement each one was written from. There are two cautionary cases, and they
+/// failed differently. `state_gas_spent` sat under `Inert` on the strength of "EIP-8037 is off",
+/// which is true and which the receipt does not care about — a wrong verdict. `MemoryGas`'s two
+/// fields had the right verdict and the wrong reason: "editing this desynchronises it from the
+/// memory and the EVM reads out of bounds" is true of each field alone and false of the pair moved
+/// together with the memory, which is a rewrite that leaves every interpreter invariant intact and
+/// is charged for nothing. A reason that only covers half its own input space is the harder of the
+/// two to see, because the row reads as considered.
 #[test]
 fn test_the_table_carries_no_open_gap() {
     assert_eq!(

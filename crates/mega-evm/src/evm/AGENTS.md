@@ -116,7 +116,10 @@ The first six rows are the lanes measured across a callback boundary; the three 
 `Coverage::NotClosed` still exists, so a surface that reaches what `MegaETH` reports and that no lane books is nameable — but `tests/rex7/gas_surface.rs::test_the_table_carries_no_open_gap` fails on any row that carries it.
 Writing a gap down is how it gets closed; leaving it written down is how a table stops being a statement about the code.
 What no test can catch is a gap _mis_-classified as `Inert` or `NotGas`: those verdicts are claims about what the EVM does with a number, and only the measurement each was written from backs them.
-`state_gas_spent` is the cautionary case — it sat under "EIP-8037 is off, so nothing reads it", which is true of every instruction and not of the receipt.
+There are two cautionary cases, and they failed differently.
+`state_gas_spent` sat under "EIP-8037 is off, so nothing reads it", which is true of every instruction and not of the receipt — a wrong verdict.
+`MemoryGas` had the right verdict and the wrong reason: "editing this desynchronises it from the memory and the EVM reads out of bounds" is true of each field alone and false of the pair moved together with the memory, which is exactly the rewrite the row was excusing.
+A reason that only covers half its own input space is the harder of the two to see, because the row reads as considered.
 
 **What the closure pin does and does not reach.**
 A field upstream adds to any of these structs shows up in its `Debug` rendering, matches no row, and fails the test by name.
