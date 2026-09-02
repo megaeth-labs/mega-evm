@@ -14,6 +14,7 @@ use mega_evm::{
         primitives::eip4844,
         DatabaseRef,
     },
+    sandbox::trace::SharedTracingInspector,
     BlockLimits, EvmTxRuntimeLimits, MegaBlockExecutionCtx, MegaBlockExecutorFactory,
     MegaEvmFactory, MegaHardforks, MegaSpecId,
 };
@@ -26,8 +27,7 @@ use crate::{
     common::{
         op_receipt_to_tx_receipt, parse_bucket_capacity, print_execution_summary,
         print_execution_trace, print_receipt, BuildProviderOutput, EvmeExternalEnvs, EvmeOutcome,
-        ExecutionSummary, ExternalEnvSnapshot, OpTxReceipt, RcTracingInspector, RpcCacheStore,
-        TxOverrideArgs,
+        ExecutionSummary, ExternalEnvSnapshot, OpTxReceipt, RpcCacheStore, TxOverrideArgs,
     },
     replay::get_hardfork_config,
     run, ChainArgs, EvmeState,
@@ -471,11 +471,11 @@ impl Cmd {
         );
 
         let start = Instant::now();
-        let outer = RcTracingInspector::new(self.trace_args.create_inspector());
+        let outer = SharedTracingInspector::new(self.trace_args.create_inspector());
         let sandbox = self
             .trace_args
             .is_tracing_enabled()
-            .then(|| RcTracingInspector::new(self.trace_args.create_inspector()));
+            .then(|| SharedTracingInspector::new(self.trace_args.create_inspector()));
         let mut state =
             StateBuilder::new().with_database(&mut database).with_bundle_update().build();
         let mut block_executor = block_executor_factory.create_executor_with_inspector(

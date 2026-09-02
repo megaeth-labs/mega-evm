@@ -61,6 +61,8 @@
 //!   [`execute_keyless_deploy_call`]
 //! - `observer` - Read-only [`SandboxObserver`] channel into nested sandbox execution
 //! - `inspector` - Rewriting [`SandboxInspector`] channel into nested sandbox execution
+//! - `hooks` - [`KeylessSandboxHooks`], the trait view of the hook setters for generic hosts
+//! - `trace` - Shared `revm-inspectors` splicing helpers (`inspectors` feature)
 //! - `state` - Type-erased database wrapper ([`SandboxDb`]) for isolated execution
 //! - `state_merge` - Replay-safe merge of sandbox state into the parent journal
 //! - `tx` - Transaction decoding and validation for pre-EIP-155 transactions
@@ -129,14 +131,18 @@
 
 mod error;
 mod execution;
+mod hooks;
 mod inspector;
 mod observer;
 mod state;
 mod state_merge;
+#[cfg(feature = "inspectors")]
+pub mod trace;
 mod tx;
 
 pub use error::*;
 pub use execution::*;
+pub use hooks::*;
 pub use inspector::*;
 pub use observer::*;
 pub use state::*;
