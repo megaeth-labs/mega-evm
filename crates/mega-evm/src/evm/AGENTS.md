@@ -146,6 +146,14 @@ There is no undeclared counterpart on the factory: an inspector without a declar
 `create_executor` (the `BlockExecutorFactory` trait method) takes an EVM the caller already built and checks nothing about its inspector, because the question is a runtime one the executor's own entries ask per transaction — an error that fails the block rather than an assertion that stops the process.
 `bin/mega-evme`'s replay command is the worked example of the whole shape: a `TrustedTracingInspector` newtype declared over `revm-inspectors`' tracer, handed to `create_executor_with_trusted_inspector`.
 
+**Which shim an EVM ends up with.** `MegaEvm::new` and `without_inspector` build the declared shim over `NoOpInspector`, because `Evm::set_inspector_enabled` is a public trait method: an EVM built with no inspector can have its shim switched on without any constructor being reached, and everything that then runs is `NoOpInspector`.
+`with_trusted_inspector` is the only other route to the declared shim; `with_inspector` and `InspectEvm::set_inspector` build the measured one, the latter even for a type that carries a declaration, since its bound is plain `Inspector`.
+So a swap drops the declaration, which is the safe direction and is what keeps the default shim's declaration from spreading to whatever replaces it.
+
+**Which question each execution entry asks.** `execute_transaction` selects its frame loop on the runtime flag and reports `has_undeclared_inspector`, which reads the same flag — with the flag off the inspector does not run, and reporting no inspector is right.
+The deprecated `inspect_transaction` runs the inspecting loop whatever the flag says, so it reports the declaration off the inspector's type alone.
+Reading the flag there would report a transaction an undeclared inspector took part in as one that had none, and the commit funnel would admit it.
+
 ### The window a counter edit reaches nothing through
 
 A gas-counter edit made while the interpreter is already holding a `Return` action is written into an object nobody reads again: revm's inspected loop runs `step_end` after the instruction that set the action, and the action carries its own snapshot of the gas, which is what becomes the frame's result.

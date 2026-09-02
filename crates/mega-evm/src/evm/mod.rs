@@ -190,7 +190,11 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, NoOpInspector, ExtEnvs
             deferred_journal: None,
             inner: revm::context::Evm::new_with_inspector(
                 context,
-                MeasuredInspector::new(NoOpInspector),
+                // Declared, not merely inert: `enable_inspector()` is a public trait method, so
+                // this shim can start running without another constructor being reached, and an
+                // EVM whose only inspector is `NoOpInspector` must not be refused by the block
+                // path for observing nothing.
+                MeasuredInspector::new_trusted(NoOpInspector),
                 MegaInstructions::new(spec),
                 PrecompilesMap::from_static(MegaPrecompiles::new_with_spec(spec).precompiles()),
             ),
@@ -263,6 +267,11 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
 
     /// Creates a new `MegaETH` EVM instance with the inspector disabled at runtime.
     ///
+    /// The caller's inspector is dropped and replaced by `NoOpInspector`, carrying that type's own
+    /// [`TrustedObserver`] declaration — so an EVM this produces is admitted by the canonical
+    /// block-execution path even if its inspector is switched back on through
+    /// [`Evm::set_inspector_enabled`](alloy_evm::Evm::set_inspector_enabled).
+    ///
     /// # Returns
     ///
     /// A new `Evm` instance with the inspector disabled.
@@ -270,7 +279,7 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
         let mega_cfg = self.mega_cfg;
         let inner = revm::context::Evm::new_with_inspector(
             self.inner.ctx,
-            MeasuredInspector::new(NoOpInspector),
+            MeasuredInspector::new_trusted(NoOpInspector),
             self.inner.instruction,
             self.inner.precompiles,
         );
@@ -484,11 +493,15 @@ where
     /// direct journal write. A declaration is a line someone wrote in source about a type they had
     /// read, which is the only thing that answers that.
     ///
-    /// False for an EVM with no inspector: revm's plain frame loop never calls one, so there is
-    /// nothing to declare. False for one built through
-    /// [`with_trusted_inspector`](Self::with_trusted_inspector). True for every other inspected
-    /// EVM, including one whose inspector only observes — the criterion is the declaration, not
-    /// the behaviour of one run.
+    /// False for an EVM with no inspector, for two independent reasons: revm's plain frame loop
+    /// never calls one, and the shim such an EVM carries wraps `NoOpInspector`, which is declared.
+    /// The second reason is the load-bearing one, because
+    /// [`Evm::set_inspector_enabled`](alloy_evm::Evm::set_inspector_enabled) is a public trait
+    /// method that turns the first one off without changing the inspector.
+    ///
+    /// False for an EVM built through [`with_trusted_inspector`](Self::with_trusted_inspector).
+    /// True for every other inspected EVM, including one whose inspector only observes — the
+    /// criterion is the declaration, not the behaviour of one run.
     pub const fn has_undeclared_inspector(&self) -> bool {
         self.inspect && !self.inner.inspector.is_trusted()
     }
@@ -513,7 +526,11 @@ where
     ) -> Result<MegaTransactionOutcome, EVMError<DB::Error, MegaTransactionError>> {
         let result_and_state = InspectEvm::inspect_tx(self, tx)?;
         let trusted_inspector = self.inner.inspector.is_trusted();
-        let undeclared_inspector = self.has_undeclared_inspector();
+        // Not `has_undeclared_inspector()`: that reads the `inspect` flag, and this entry runs the
+        // inspecting loop whatever the flag says. An inspector swapped in through
+        // `InspectEvm::set_inspector` leaves the flag alone, so asking the flag here would report
+        // a transaction an undeclared inspector took part in as one that had none.
+        let undeclared_inspector = !trusted_inspector;
         let is_inside_sandbox = self.ctx().is_inside_sandbox();
         let spec = self.ctx().spec;
         let additional_limit = self.ctx().additional_limit.borrow();

@@ -877,3 +877,121 @@ fn test_an_off_path_evm_runs_a_free_memory_growth_to_completion() {
     assert_eq!(outcome.inspector_ledger.interventions, 1, "the growth must still be booked");
     assert!(outcome.undeclared_inspector);
 }
+
+/// The default shim is `NoOpInspector`'s own declaration, not an undeclared wrapper around it.
+///
+/// `Evm::set_inspector_enabled` is a public trait method, so an EVM built with no inspector at all
+/// can have its shim switched on without any constructor being reached. Everything that runs then
+/// is `NoOpInspector`, which this crate declares — so the block path must admit the transaction.
+/// Building the shim undeclared would refuse an EVM for observing nothing.
+#[test]
+fn test_an_evm_with_no_inspector_is_admitted_after_its_shim_is_switched_on() {
+    let mut db = build_db();
+    let mut state = State::builder().with_database(&mut db).build();
+    let mut executor = executor_factory(MegaSpecId::REX7).create_executor(
+        &mut state,
+        block_ctx(),
+        evm_env(MegaSpecId::REX7),
+    );
+
+    alloy_evm::Evm::enable_inspector(executor.evm_mut());
+    assert!(
+        !executor.evm().has_undeclared_inspector(),
+        "the inspector an uninspected EVM carries is the declared one",
+    );
+
+    let tx = envelope(0);
+    let outcome = executor
+        .run_transaction(Recovered::new_unchecked(&tx, CALLER))
+        .expect("an EVM observing nothing must not be refused");
+    assert!(outcome.result.is_success(), "fixture check: {:?}", outcome.result);
+    assert!(!outcome.inner.undeclared_inspector, "and must report itself declared");
+    executor.commit_transaction_outcome(outcome).expect("nor at commit");
+    let (_, result) = executor.finish().expect("the block must finish");
+    assert_eq!(result.receipts.len(), 1);
+}
+
+/// Swapping an inspector in through `InspectEvm::set_inspector` drops the declaration, whatever
+/// the type being swapped in.
+///
+/// The constructor whose bound is `TrustedObserver` is the only route to the declared shim, and
+/// `set_inspector`'s bound is plain `Inspector` — so it builds a measured one even for a type that
+/// carries a declaration. That is the safe direction and it is pinned here, because it is what
+/// keeps the default shim's declaration from spreading to whatever replaces it.
+#[test]
+fn test_swapping_an_inspector_in_drops_the_declaration() {
+    let mut db = build_db();
+    let mut evm = mega_evm::MegaEvm::new(
+        mega_evm::MegaContext::new(&mut db, MegaSpecId::REX7)
+            .with_tx_runtime_limits(mega_evm::EvmTxRuntimeLimits::from_spec(MegaSpecId::REX7)),
+    );
+    assert!(evm.has_trusted_inspector(), "the default shim carries `NoOpInspector`'s declaration");
+
+    revm::InspectEvm::set_inspector(&mut evm, NoOpInspector);
+    assert!(
+        !evm.has_trusted_inspector(),
+        "a swapped-in inspector is measured: the declaration belongs to the constructor, not the \
+         type being handed over",
+    );
+}
+
+/// The deprecated `inspect_transaction` runs the inspecting loop whatever the runtime flag says,
+/// so what it reports about the inspector cannot be read off that flag.
+///
+/// `Evm::set_inspector_enabled(false)` turns off the flag `execute_transaction` picks its loop on
+/// and leaves the inspector where it is. Driven through this entry the inspector still runs, so an
+/// outcome saying no inspector took part would let the commit funnel admit a transaction one did.
+#[test]
+fn test_inspect_transaction_reports_an_inspector_the_runtime_flag_hides() {
+    let mut db = build_db();
+    let mut state = State::builder().with_database(&mut db).build();
+    let mut executor = executor_factory(MegaSpecId::REX7).create_executor(
+        &mut state,
+        block_ctx(),
+        evm_env(MegaSpecId::REX7),
+    );
+
+    let mut inspected_db = build_db();
+    let mut evm = mega_evm::MegaEvm::new(
+        mega_evm::MegaContext::new(&mut inspected_db, MegaSpecId::REX7)
+            .with_tx_runtime_limits(mega_evm::EvmTxRuntimeLimits::from_spec(MegaSpecId::REX7)),
+    )
+    .with_inspector(GasInjector::default());
+    alloy_evm::Evm::set_inspector_enabled(&mut evm, false);
+    assert!(
+        !evm.has_undeclared_inspector(),
+        "fixture check: with the flag off, the entry that honours it reports no inspector",
+    );
+
+    let mut tx_env = mega_evm::MegaTransaction::new(
+        revm::context::tx::TxEnvBuilder::default()
+            .caller(CALLER)
+            .call(CONTRACT)
+            .gas_limit(1_000_000)
+            .build_fill(),
+    );
+    tx_env.enveloped_tx = Some(Bytes::new());
+    #[expect(deprecated, reason = "the entry under test is the deprecated one")]
+    let outcome = evm.inspect_transaction(tx_env).expect("the EVM supports the rewrite in full");
+
+    assert!(evm.inspector.applied, "fixture check: the inspector really did run");
+    assert!(
+        outcome.undeclared_inspector,
+        "an entry that always inspects must report the inspector it always runs",
+    );
+
+    let tx = envelope(0);
+    let err = executor
+        .commit_tx_result(mega_evm::MegaBlockTxResult {
+            tx_type: tx.tx_type(),
+            tx_hash: *tx.hash(),
+            gas_limit: 1_000_000,
+            tx_size: 0,
+            da_size: 0,
+            depositor: None,
+            inner: outcome,
+        })
+        .expect_err("and the commit funnel must refuse it");
+    expect_undeclared(&err, *tx.hash());
+    assert!(executor.receipts.is_empty(), "no receipt may have been pushed");
+}
