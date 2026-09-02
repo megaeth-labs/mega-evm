@@ -469,8 +469,8 @@ fn sample_interpreter() -> Interpreter<EthInterpreter> {
 /// Every field of every gas-carrying object an inspector is handed has a verdict.
 ///
 /// This is the closure the completeness table rests on. It is not a claim that the verdicts are
-/// right — the tests in `measured_inspector.rs`, `inspector_cheat_matrix.rs`,
-/// `interception_gas.rs` and `refund_and_state_gas.rs` are — it is the claim that there is no
+/// right — the tests in `shim_measurement.rs` and `inspector_cheat_matrix.rs` are — it is the
+/// claim that there is no
 /// field without one.
 #[test]
 fn test_every_field_of_every_gas_carrier_has_a_verdict() {

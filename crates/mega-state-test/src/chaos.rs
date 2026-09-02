@@ -3,7 +3,7 @@
 //! # What this is for
 //!
 //! `MegaETH` supports rewriting inspectors in full: the measurement shim books what one does to a
-//! transaction's gas, and the conservation law accounts for it. `tests/rex7/measured_inspector.rs`
+//! transaction's gas, and the conservation law accounts for it. `tests/rex7/shim_measurement.rs`
 //! and `tests/rex7/inspector_cheat_matrix.rs` pin that mechanism shape by shape, on fixtures built
 //! to reach each shape. What neither can do is put a rewriting inspector on top of *arbitrary*
 //! execution — the corner of the state space where a rewrite meets a detained frame, a latched
@@ -716,7 +716,7 @@ impl ChaosInspector {
                 // correctly booked nowhere, and would then look to the ledger gate like a rewrite
                 // the shim missed. Leave the counter alone and spend no budget; the same edit
                 // reaches the live object at the next callback, and the dead window itself is
-                // pinned by `tests/rex7/inspector_settlement_window.rs`.
+                // pinned by `tests/rex7/shim_measurement.rs`.
                 if matches!(interp.bytecode.action(), Some(InterpreterAction::Return(_))) {
                     return;
                 }

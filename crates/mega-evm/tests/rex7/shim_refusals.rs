@@ -1,25 +1,33 @@
-//! A result frame init produced itself cannot have its classification rewritten.
+//! The rewrites the shim refuses outright, and the near boundary of each refusal.
 //!
-//! Every other rewrite of a frame's result is supported, because REX7 withholds the journal
-//! decision until the result is final: the frame loops park it and `frame_return_result` carries
-//! it out, so a frame rewritten into a revert has its state rolled back with it.
+//! Almost everything an inspector does is measured and booked. Two shapes are not, because
+//! honouring them would produce a receipt that contradicts state the EVM had already decided on
+//! before any callback ran:
 //!
-//! A result that comes out of frame *init* has no such window. Upstream decides the journal inside
-//! `make_call_frame` — a value-transferring call into an empty-code account commits the transfer
-//! and returns `Stop`, a failing precompile reverts the transfer and returns its own failure — and
-//! `MegaETH`'s interceptors decide it before they return, the `KeylessDeploy` one by merging a
-//! whole sandbox's state. All of that has happened by the time any callback sees the result, and
-//! none of it is reachable from one.
+//! - **A failed contract creation rewritten into a successful one.** By the time `create_end` or
+//!   `frame_end` runs, revm has reverted the frame's checkpoint and declined to deposit any code,
+//!   so the rewrite reports a deployment that did not happen. Both callbacks are covered, because a
+//!   refusal wired only to the earlier one is one an inspector can step past.
+//! - **The classification of a result frame init produced.** A precompile, an empty-code call, and
+//!   the `KeylessDeploy` interceptor's synthetic result all come back out of frame init with the
+//!   journal decision behind them already taken and no frame checkpoint left to unwind. What each
+//!   case below pins is the state that decision left behind, and that the caller is not told
+//!   something else about it.
 //!
-//! So a rewrite that moves such a result across the success / revert / halt boundary hands the
-//! caller an answer the state behind it contradicts. Each test below reaches that split by a
-//! different door, and asserts the absence of the split before it asserts the refusal — so a run
-//! that honours the rewrite reports the two halves that disagree rather than only the missing
-//! counter.
+//! The near boundary is a frame the inspector answered *itself*. That result comes out of frame
+//! init too, and it is not refused — nothing in the EVM decided anything for it, so there is
+//! nothing for the rewrite to contradict.
+//!
+//! Both halves surface the same way in both builds: a debug build asserts (the shape is a
+//! detector, and a corpus that produces it should stop), a release build fails the transaction
+//! with the same message.
 
 use crate::{
     common::{base_db, context, try_drive, CALLEE, CALLER, CONTRACT, EMPTY_TARGET, ONE_ETH},
-    inspector_common::append_call,
+    inspector_common::{
+        append_call, assert_refused, deploy_then_stop, limits, try_transact_inspected,
+        REVERTING_INIT_CODE, REVIVED_CREATION,
+    },
 };
 use alloy_primitives::{address, hex, Address, Bytes, Signature, TxKind, B256, U256};
 use alloy_sol_types::SolCall as _;
@@ -32,13 +40,84 @@ use mega_evm::{
 use revm::{
     bytecode::opcode::{RETURN, SSTORE, STOP},
     context::{result::ExecutionResult, tx::TxEnvBuilder, ContextTr},
+    handler::FrameResult,
     interpreter::{
-        CallInputs, CallOutcome, Gas, InstructionResult, InterpreterResult, InterpreterTypes,
+        CallInputs, CallOutcome, CreateInputs, CreateOutcome, FrameInput, Gas, InstructionResult,
+        InterpreterResult, InterpreterTypes,
     },
     state::EvmState,
     Inspector,
 };
 use std::{string::String, vec::Vec};
+
+// === a failed creation, revived ===============================================================
+
+/// Rewrites every failed contract creation into a successful one, from `create_end`.
+#[derive(Default)]
+struct CreateReviver;
+
+impl<CTX, INTR: InterpreterTypes> Inspector<CTX, INTR> for CreateReviver {
+    fn create_end(
+        &mut self,
+        _context: &mut CTX,
+        _inputs: &CreateInputs,
+        outcome: &mut CreateOutcome,
+    ) {
+        if !outcome.result.result.is_ok() {
+            outcome.result.result = InstructionResult::Return;
+        }
+    }
+}
+
+/// A `create_end` that turns a failed contract creation into a successful one is refused, loudly.
+///
+/// By that point revm has already reverted the frame's journal checkpoint and already declined to
+/// deposit any code, so the rewrite would report a deployment that did not happen. The shim
+/// restores the original classification and refuses to let the transaction produce a receipt at
+/// all.
+#[test]
+fn test_reviving_a_failed_creation_is_refused() {
+    let db = base_db(deploy_then_stop(&REVERTING_INIT_CODE));
+
+    assert_refused(REVIVED_CREATION, || {
+        let mut inspector = CreateReviver;
+        try_transact_inspected(db.clone(), limits(), &mut inspector)
+    });
+}
+
+/// `frame_end` is the last callback that can rewrite a creation's classification, and the refusal
+/// covers it too.
+///
+/// `measured_inspector.rs` pins the `create_end` form. This is the one callback later: revm calls
+/// `create_end` first and `frame_end` after it, so an inspector that leaves `create_end` alone and
+/// rewrites in `frame_end` would slip past a refusal wired only to the earlier one.
+#[test]
+fn test_reviving_a_failed_creation_is_refused_at_frame_end() {
+    /// Rewrites a failed creation into a success, from `frame_end` only.
+    struct LateReviver;
+
+    impl<CTX, INTR: InterpreterTypes> Inspector<CTX, INTR> for LateReviver {
+        fn frame_end(
+            &mut self,
+            _context: &mut CTX,
+            _frame_input: &FrameInput,
+            frame_result: &mut FrameResult,
+        ) {
+            let FrameResult::Create(outcome) = frame_result else { return };
+            if !outcome.result.result.is_ok() {
+                outcome.result.result = InstructionResult::Stop;
+            }
+        }
+    }
+
+    let db = base_db(deploy_then_stop(&REVERTING_INIT_CODE));
+
+    assert_refused(REVIVED_CREATION, || {
+        try_transact_inspected(db.clone(), limits(), &mut LateReviver)
+    });
+}
+
+// === the classification of a result frame init produced =======================================
 
 /// Transaction gas limit: high enough that EVM gas never binds.
 const TX_GAS_LIMIT: u64 = 30_000_000;
@@ -156,7 +235,7 @@ where
 
 /// The two facts every case here pins: the rewrite was counted as refused, and the transaction
 /// failed with an error rather than reporting a receipt built on it.
-fn assert_refused(reading: &Reading) {
+fn assert_reading_refused(reading: &Reading) {
     assert_eq!(reading.rejected_rewrites, 1, "the shim must count the refusal");
     assert!(
         reading.result.is_err(),
@@ -209,7 +288,7 @@ fn test_rewriting_an_empty_code_call_into_a_revert_is_refused() {
         reading.storage(CONTRACT, FLAG_SLOT),
         reading.balance(EMPTY_TARGET),
     );
-    assert_refused(&reading);
+    assert_reading_refused(&reading);
 }
 
 /// A value-transferring `CALL` into a precompile that cannot afford its own fee, rewritten from
@@ -232,7 +311,7 @@ fn test_reviving_a_failed_precompile_call_is_refused() {
         reading.storage(CONTRACT, FLAG_SLOT),
         reading.balance(ECRECOVER),
     );
-    assert_refused(&reading);
+    assert_reading_refused(&reading);
 }
 
 /// A deterministic pre-EIP-155 keyless deployment transaction whose init code returns one byte of
@@ -316,7 +395,7 @@ fn test_rewriting_the_keyless_deploy_synthetic_result_is_refused() {
          deployed code anyway",
         reading.result,
     );
-    assert_refused(&reading);
+    assert_reading_refused(&reading);
 }
 
 /// Answers the frame itself and then moves the classification of its own answer.

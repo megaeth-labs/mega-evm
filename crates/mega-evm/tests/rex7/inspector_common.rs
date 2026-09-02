@@ -6,7 +6,7 @@
 //! here, because a rewrite is only ever pinned by comparing an inspected run against the
 //! uninspected one over the same fixture.
 
-use alloy_primitives::{Address, Bytes, U256};
+use alloy_primitives::{Address, Bytes};
 use mega_evm::{
     test_utils::{BytecodeBuilder, MemoryDatabase},
     EmptyExternalEnv, EvmTxRuntimeLimits, InspectorLedger, Lane, MegaContext, MegaEvm, MegaSpecId,
@@ -220,8 +220,3 @@ pub(crate) const REVIVED_CREATION: &str =
 
 /// Init code that reverts immediately, so the creation it is handed to fails.
 pub(crate) const REVERTING_INIT_CODE: [u8; 5] = [0x60, 0x00, 0x60, 0x00, 0xfd];
-
-/// A slot as the produced state has it, taking the slot as the small integer the fixtures use.
-pub(crate) fn slot_of(outcome: &crate::common::Outcome, address: Address, slot: u64) -> U256 {
-    outcome.storage_value(address, U256::from(slot))
-}

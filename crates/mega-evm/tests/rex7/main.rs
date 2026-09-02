@@ -14,28 +14,20 @@
 //! - `create_code_deposit_charge` — a CREATE's canonical code-deposit compute gas is weighed before
 //!   it is recorded, so a creation that fails at its frame exit is charged nothing for a deposit
 //!   the EVM never makes.
-//! - `inspector_settlement_window` — the two windows where a rewrite lands after the accounting
-//!   that should have read it: a terminating opcode's `step_end`, whose counter edit reaches
-//!   nobody, and a precompile's classification, whose split has to follow the callback rather than
-//!   the recording site.
-//! - `interception_gas` — the gas an inspector puts into a synthetic outcome, over the four sizings
-//!   it can choose relative to the envelope it was handed, and the halt direction where the choice
-//!   reaches nothing.
 //! - `interceptor_resume` — the two ways a CALL returns without a child frame ever running: a
 //!   system contract interceptor's synthetic result, and a precompile.
 //! - `keyless_synthetic_halt` — the `KeylessDeploy` interceptor's synthetic halts: the two that
 //!   keep the envelope book the unperformed part as destroyed, the rescued one books nothing.
 //! - `latch_surfacing` — where a latched data-size / KV-update / state-growth exceed becomes a
 //!   stop.
-//! - `ledger_blind_spots` — the six rewrite shapes an all-zero ledger used to admit: a frame's
-//!   memory grown for free, a call or create outcome's metadata rewritten around the result inside
-//!   it, two edits to one signed lane that cancel — within a frame and across two of them — an
-//!   instruction deleted from a frame by stepping its program counter past it, and a return buffer
-//!   conjured in front of a frame that made no call.
-//! - `measured_inspector` — the shim every inspector is wrapped in: gas an inspector writes into an
-//!   interpreter counter or a frame's gas limit is measured at the callback boundary, booked, and
-//!   kept out of enforcement, with the clamp re-derived on the spot; reviving a failed creation is
-//!   refused; an observation-only inspector is bit-identical to no inspector at all.
+//! - `shim_measurement` — what the measurement shim books, over every shape that can move a number
+//!   it reports: gas written into an interpreter counter or a frame's gas limit, the two windows
+//!   where a rewrite lands after the accounting that should have read it, the shapes an all-zero
+//!   ledger used to admit, the receipt's refund and EIP-8037 dimensions, and the gas a synthetic
+//!   outcome carries.
+//! - `shim_refusals` — the rewrites the shim refuses outright: a failed creation revived (at both
+//!   callbacks that can), and the classification of a result frame init produced; with the near
+//!   boundary, a frame the inspector answered itself, which is supported.
 //! - `gas_surface` — the closed enumeration one level below the cheat matrix: every field of every
 //!   gas-carrying object an inspector callback is handed, each with a verdict, pinned against what
 //!   upstream's own `Debug` renders.
@@ -79,10 +71,6 @@
 //! - `pre_execution_intrinsic_reject` — the one envelope-keeping synthetic halt REX7 cannot reach:
 //!   for an ordinary transaction an intrinsic overrun is a validation error from REX5 on, and a
 //!   validation error produces no receipt for any lane to account for.
-//! - `refund_and_state_gas` — the two numbers on a receipt the conservation law cannot see: the
-//!   EIP-3529 refund, measured at the callback boundary because the EVM produces refunds too, and
-//!   the EIP-8037 state-gas dimension, settled from the transaction's final figures because
-//!   `MegaETH` produces none of it and revm propagates it by replacement.
 //! - `deposit_receipt_rewrite` — the transactions that break that last step. A failed OP deposit
 //!   does get a receipt, rebuilt to report its whole gas limit after every settlement has run; the
 //!   boundary that rebuilds it books the difference as destroyed without moving what enforces.
@@ -109,7 +97,6 @@ mod detention_window;
 mod double_exceed_corner;
 mod exceptional_halt;
 mod frame_init_reject_burn;
-mod frame_init_result_rewrite;
 mod frame_loop_parity;
 mod gas_clamp;
 mod gas_leakage;
@@ -117,19 +104,16 @@ mod gas_surface;
 mod guard_pass_static_gas;
 mod inspector_cheat_matrix;
 mod inspector_common;
-mod inspector_settlement_window;
-mod interception_gas;
 mod interceptor_resume;
 mod keyless_synthetic_halt;
 mod latch_surfacing;
 mod late_frame_local;
-mod ledger_blind_spots;
-mod measured_inspector;
 mod modexp_gas;
 mod opcode_set_parity;
 mod parity_shapes;
 mod pre_execution_intrinsic_reject;
 mod precompile_halt;
-mod refund_and_state_gas;
 mod result_space_tripwire;
+mod shim_measurement;
+mod shim_refusals;
 mod trusted_observer;

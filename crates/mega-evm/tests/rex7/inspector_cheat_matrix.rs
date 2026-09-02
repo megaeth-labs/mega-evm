@@ -1,6 +1,6 @@
 //! Every rewrite shape, at every callback that can carry it.
 //!
-//! `tests/rex7/measured_inspector.rs` pins one mechanism per test, chosen because each is a
+//! `tests/rex7/shim_measurement.rs` pins one mechanism per test, chosen because each is a
 //! different half of the measurement shim. This module asks the complementary question: not "does
 //! each mechanism work" but "is there a callback on the `Inspector` trait, or a rewrite shape a
 //! callback admits, that nothing measures". So the cases here are laid out as a matrix over the
@@ -35,19 +35,18 @@
 
 use crate::{
     common::{
-        base_db, call_contract_tx, context, drive, state_view, transact, Outcome, CALLEE, CALLER,
-        CONTRACT, ONE_ETH,
+        call_contract_tx, context, drive, state_view, transact, Outcome, CALLEE, CALLER, CONTRACT,
+        ONE_ETH,
     },
     inspector_common::{
-        assert_refused, call_then_stop, db_with_callee, deploy_then_stop, ledger_env, ledger_gas,
-        ledger_intervention, ledger_refund, ledger_reservoir, ledger_result, ledger_state_gas,
-        limits, plain_and_cheated, try_transact_inspected, REVERTING_INIT_CODE, REVIVED_CREATION,
+        call_then_stop, db_with_callee, ledger_env, ledger_gas, ledger_intervention, ledger_refund,
+        ledger_reservoir, ledger_result, ledger_state_gas, limits, plain_and_cheated,
     },
 };
 use alloy_primitives::{Address, Bytes, Log, U256};
 use mega_evm::{
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    InspectorLedger, Lane, MegaEvm, MegaSpecId, MegaTransactionNew as _,
+    InspectorLedger, MegaEvm, MegaSpecId,
 };
 use revm::{
     bytecode::opcode::{CALL, CREATE, LOG1, MSTORE, MSTORE8, POP, RETURN, SSTORE, STOP},
@@ -130,13 +129,13 @@ macro_rules! axis {
 
 // --- rows and columns -----------------------------------------------------------------------
 
+axis! {
 /// One row of the matrix: a callback on the `Inspector` trait.
 ///
 /// Every method of the trait is here. `log` is the one that never fires in these fixtures — it is
 /// reached only when a precompile's logs are forwarded, which no wired `MegaETH` precompile
 /// produces — and [`inapplicable`] carries that, together with the reason its every column is
 /// empty anyway.
-axis! {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum At {
     InitializeInterp,
@@ -154,6 +153,7 @@ enum At {
 }
 }
 
+axis! {
 /// One column of the matrix: a shape a rewrite can take.
 ///
 /// The columns are the rewrite's *mechanism*, not its purpose: what argument it reaches through
@@ -164,7 +164,6 @@ enum At {
 /// The EIP-8037 dimensions are the one place that pairing does not apply: `MegaETH` runs with the
 /// EIP off, so a `Gas` reaches every callback with both of its state-gas figures at zero and there
 /// is nothing to lower.
-axis! {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Shape {
     /// Write gas into a live interpreter's counter.
@@ -348,7 +347,7 @@ fn inapplicable(at: At, shape: Shape) -> Option<&'static str> {
         }
         ReviveResult if at == CreateEnd => Some(
             "refused outright rather than measured — `test_reviving_a_failed_creation_is_refused` \
-             in `measured_inspector.rs` pins the refusal at `create_end`, and \
+             in `shim_refusals.rs` pins the refusal at `create_end`, and \
              `test_reviving_a_failed_creation_is_refused_at_frame_end` pins it one callback later",
         ),
         _ => None,
@@ -626,7 +625,7 @@ impl Cheat {
     /// A call's return range is shrunk to nothing rather than moved, because moving it past the
     /// caller's allocated memory is a panic in revm and this fixture's caller holds one word. The
     /// visible-effect form, where the caller then reads a word the callee never wrote, is pinned
-    /// in `ledger_blind_spots.rs`.
+    /// in `shim_measurement.rs`.
     fn hit_outcome_metadata(&mut self, result: &mut FrameResult) {
         match result {
             FrameResult::Call(outcome) => {
@@ -1204,7 +1203,7 @@ fn matrix() -> Vec<Cell> {
         // The half of a finished outcome that sits outside the `InterpreterResult`: where a call's
         // return data lands, and which address a creation reports. Neither moves gas, and this
         // fixture discards both — the caller asks for a range the callee never fills and pops the
-        // address — so what the cell pins is the booking. `ledger_blind_spots.rs` pins the forms
+        // address — so what the cell pins is the booking. `shim_measurement.rs` pins the forms
         // that change the produced state.
         cell!(at, EditOutcomeMetadata, ledger_intervention());
         cell!(at, JournalWrite, InspectorLedger::default());
@@ -1370,38 +1369,6 @@ fn test_the_fixtures_behave_as_the_cells_assume() {
         U256::ZERO,
         "the reverting callee's write must be rolled back without an inspector",
     );
-}
-
-/// `frame_end` is the last callback that can rewrite a creation's classification, and the refusal
-/// covers it too.
-///
-/// `measured_inspector.rs` pins the `create_end` form. This is the one callback later: revm calls
-/// `create_end` first and `frame_end` after it, so an inspector that leaves `create_end` alone and
-/// rewrites in `frame_end` would slip past a refusal wired only to the earlier one.
-#[test]
-fn test_reviving_a_failed_creation_is_refused_at_frame_end() {
-    /// Rewrites a failed creation into a success, from `frame_end` only.
-    struct LateReviver;
-
-    impl<CTX, INTR: InterpreterTypes> Inspector<CTX, INTR> for LateReviver {
-        fn frame_end(
-            &mut self,
-            _context: &mut CTX,
-            _frame_input: &FrameInput,
-            frame_result: &mut FrameResult,
-        ) {
-            let FrameResult::Create(outcome) = frame_result else { return };
-            if !outcome.result.result.is_ok() {
-                outcome.result.result = InstructionResult::Stop;
-            }
-        }
-    }
-
-    let db = base_db(deploy_then_stop(&REVERTING_INIT_CODE));
-
-    assert_refused(REVIVED_CREATION, || {
-        try_transact_inspected(db.clone(), limits(), &mut LateReviver)
-    });
 }
 
 /// An inspector that implements only `selfdestruct` moves nothing.
