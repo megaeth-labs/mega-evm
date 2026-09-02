@@ -46,7 +46,7 @@
 //! over-reports instead of granting an exemption on the strength of bytes the fixture chose.
 
 use crate::{
-    chaos::{CallbackCounter, ChaosInspector, ShapeFilter},
+    chaos::{CallbackCounter, ChaosInspector, ChaosTally, ShapeFilter},
     panic_capture,
     runner::{
         configure_max_blobs, execution_status, external_envs_for, find_all_json_tests, halt_reason,
@@ -860,6 +860,22 @@ pub fn execute_unit_in_mode(
     spec: &SpecName,
     mode: RunMode,
 ) -> Result<UnitExecution, TestErrorKind> {
+    execute_unit_reporting_chaos(unit, indexes, spec, mode, &mut ChaosTally::default())
+}
+
+/// [`execute_unit_in_mode`], with the chaos run's tally written to `chaos_out` whether or not the
+/// run produced a receipt.
+///
+/// The ordinary return carries the tally inside [`UnitExecution`], which a run that did not
+/// execute never reaches — and a run the measurement shim refused is exactly such a run. What it
+/// mutated is the whole of what it has to report, so it cannot travel on the success path.
+pub fn execute_unit_reporting_chaos(
+    unit: &TestUnit,
+    indexes: TxPartIndices,
+    spec: &SpecName,
+    mode: RunMode,
+    chaos_out: &mut ChaosTally,
+) -> Result<UnitExecution, TestErrorKind> {
     let mut cfg = CfgEnv::default();
     // See `execute_test_suite`: revm-27 chain-id gate-off (revm 40 default is true).
     cfg.tx_chain_id_check = false;
@@ -909,7 +925,9 @@ pub fn execute_unit_in_mode(
                 MegaEvm::new(evm_context).with_inspector(ChaosInspector::new(seed, filter));
             let executed = evm.execute_transaction(megatx);
             let inner = evm.into_inner();
-            chaos_tally = Some(inner.inspector.tally());
+            let tally = inner.inspector.tally();
+            *chaos_out = tally.clone();
+            chaos_tally = Some(tally);
             (executed, None, inner.ctx)
         }
         RunMode::Plain => {

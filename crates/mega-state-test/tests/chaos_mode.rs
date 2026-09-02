@@ -6,11 +6,13 @@
 //! narrowing the shape filter narrows and nothing else, that the read-only control is read-only,
 //! and that a sweep which mutated nothing fails its own gate rather than reporting a clean corpus.
 
+use mega_evm::FORBIDDEN_FRAME_INIT_REWRITE;
 use state_test::{
     chaos::{
-        chaos_unit, run_chaos, vector_seed, ChaosClass, ChaosRunConfig, ChaosShape, ShapeFilter,
+        chaos_unit, run_chaos, vector_seed, ChaosClass, ChaosRunConfig, ChaosShape, ChaosTally,
+        ShapeFilter,
     },
-    diff::{execute_unit_in_mode, RunMode},
+    diff::{execute_unit_in_mode, execute_unit_reporting_chaos, RunMode},
     runner::FixtureScan,
     types::{SpecName, TestUnit, TxPartIndices},
 };
@@ -19,6 +21,9 @@ use std::path::PathBuf;
 const SENDER: &str = "0x1000000000000000000000000000000000000001";
 const CALLEE: &str = "0x2000000000000000000000000000000000000002";
 const INNER: &str = "0x3000000000000000000000000000000000000003";
+/// An address with no code and no `pre` entry, so a `CALL` to it comes back out of frame init
+/// without a frame ever being built.
+const EMPTY: &str = "0x4000000000000000000000000000000000000004";
 
 /// The single transaction vector these hand-built fixtures declare.
 const VECTOR_0: TxPartIndices = TxPartIndices { data: 0, gas: 0, value: 0 };
@@ -90,6 +95,19 @@ fn unit() -> TestUnit {
 /// The fixture the ledger-gate test uses — see [`refunding_callee_code`].
 fn refunding_unit() -> TestUnit {
     serde_json::from_value(unit_json_with(refunding_callee_code())).expect("valid unit json")
+}
+
+/// [`callee_code`] pointed at an account with no code, so its `CALL` returns out of frame init
+/// with no child frame ever built.
+fn empty_target_callee_code() -> String {
+    format!("0x600160015560006000600060006000 73{} 612710 f1 50 60006000a000", &EMPTY[2..])
+        .replace(' ', "")
+}
+
+/// The fixture the refused-shape test uses: the cheapest way to reach a result frame init
+/// produced, which is the only kind [`ChaosShape::MoveInitResultClass`] fires on.
+fn init_result_unit() -> TestUnit {
+    serde_json::from_value(unit_json_with(empty_target_callee_code())).expect("valid unit json")
 }
 
 /// The chaos run's tally for `unit` under `seed` and `filter`.
@@ -188,8 +206,10 @@ fn test_narrowing_the_filter_keeps_the_surviving_mutations() {
 /// that would have said so.
 #[test]
 fn test_every_always_booked_shape_moves_the_ledger() {
-    let always_booked: Vec<ChaosShape> =
-        ChaosShape::ALL.into_iter().filter(|s| s.is_always_booked()).collect();
+    let always_booked: Vec<ChaosShape> = ChaosShape::ALL
+        .into_iter()
+        .filter(|s| s.is_always_booked() && *s != ChaosShape::MoveInitResultClass)
+        .collect();
     assert!(!always_booked.is_empty(), "the gate must be stated over something");
 
     let unit = refunding_unit();
@@ -222,6 +242,59 @@ fn test_every_always_booked_shape_moves_the_ledger() {
         }
         assert_eq!(reached, 3, "{}: too few seeds in the sweep applied it", shape.label());
     }
+}
+
+/// The one always-booked shape a successful run cannot be measured on, and the stronger premise
+/// that stands in for it.
+///
+/// The shim answers [`ChaosShape::MoveInitResultClass`] by declining the transaction, so there is
+/// no receipt and no ledger to read — and nothing for the ledger gate to be stated over. What
+/// replaces it is stronger than an all-zero-ledger check: a run that never executed cannot reach a
+/// block at all. What this pins is that the decline really is the shim's refusal, that the sweep
+/// classifies it as the designed outcome rather than as a defect, and that the tally still reports
+/// what such a run mutated even though it produced nothing.
+#[test]
+fn test_the_refused_shape_is_declined_and_counted() {
+    let unit = init_result_unit();
+    let filter = ShapeFilter::only(&[ChaosShape::MoveInitResultClass]);
+    let mut reached = 0u32;
+    for seed in 0u64..1_024 {
+        let mut applied = ChaosTally::default();
+        let run = execute_unit_reporting_chaos(
+            &unit,
+            VECTOR_0,
+            &SpecName::Rex7,
+            RunMode::Chaos { seed, filter },
+            &mut applied,
+        );
+        if applied.total() == 0 {
+            assert!(run.is_ok(), "a run that mutated nothing must execute: {:?}", run.err());
+            continue;
+        }
+        reached += 1;
+        let error = run.expect_err("a refused rewrite declines the transaction").to_string();
+        assert!(
+            error.contains(FORBIDDEN_FRAME_INIT_REWRITE),
+            "seed {seed} was declined for something other than the refusal: {error}",
+        );
+        let verdict = chaos_unit(&unit, VECTOR_0, &SpecName::Rex7, seed, filter);
+        assert_eq!(
+            verdict.class,
+            ChaosClass::Refused,
+            "a refusal is the designed outcome, not a disagreement about whether the \
+             transaction executes",
+        );
+        assert!(!verdict.class.is_failure(), "a refusal must not fail the sweep");
+        assert_eq!(
+            verdict.applied.total(),
+            applied.total(),
+            "a declined run still has to report what it mutated",
+        );
+        if reached == 3 {
+            break;
+        }
+    }
+    assert_eq!(reached, 3, "too few seeds in the sweep reached a result frame init produced");
 }
 
 /// The partition the gate rests on is not vacuous in either direction.

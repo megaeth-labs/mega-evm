@@ -566,8 +566,9 @@ fn print_diff_tally(tally: &DiffTally, target: SpecName, base: SpecName) {
 }
 
 /// Every chaos verdict, in the order a reader wants them.
-const CHAOS_CLASSES: [ChaosClass; 6] = [
+const CHAOS_CLASSES: [ChaosClass; 7] = [
     ChaosClass::Pass,
+    ChaosClass::Refused,
     ChaosClass::ControlDrift,
     ChaosClass::ChaosRejected,
     ChaosClass::LedgerBlind,

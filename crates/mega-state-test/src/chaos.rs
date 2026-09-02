@@ -36,33 +36,51 @@
 //! corpus produce the same mutations on any machine, in any thread count, in any order — so a
 //! flagged vector comes with everything needed to re-run exactly it.
 //!
-//! # What the pool leaves out
+//! # What the pool leaves out, and the one refusal it draws on purpose
 //!
-//! One rewrite shape is missing on purpose: turning a *failed contract creation* into a successful
-//! one. The shim refuses that shape and asserts on it, deliberately — by the time `create_end`
-//! runs, the journal has been reverted and no code was deposited, so a success there reports a
-//! deployment that did not happen, and a corpus that produces it should stop rather than quietly
-//! take the rejection path. Including it here would make the detector's own firing the sweep's
-//! dominant result. The refusal is pinned end-to-end by the two tests named in
+//! One rewrite shape is missing: turning a *failed contract creation* into a successful one. The
+//! shim refuses that shape and asserts on it, deliberately — by the time `create_end` runs, the
+//! journal has been reverted and no code was deposited, so a success there reports a deployment
+//! that did not happen, and a corpus that produces it should stop rather than quietly take the
+//! rejection path. Including it here would make the detector's own firing the sweep's dominant
+//! result. The refusal is pinned end-to-end by the two tests named in
 //! `tests/rex7/inspector_cheat_matrix.rs`'s `inapplicable` table instead.
+//!
+//! The other refused shape *is* in the pool: [`ChaosShape::MoveInitResultClass`], which moves the
+//! classification of a result frame init produced. It is drawn rather than withheld because the
+//! shim answers it by declining the transaction rather than by asserting, and a decline is
+//! something a sweep can count — [`ChaosClass::Refused`] is that count. So the corpus exercises
+//! the refusal at scale instead of leaving it to the fixtures that reach it on purpose, and the
+//! number says how much of the corpus its draws actually land on. The two general shapes
+//! `FailFrame` and `ReviveCall` reach the same refusal whenever they happen to land on an
+//! init-produced result, and are counted the same way.
+//!
+//! The four interception shapes do not, and that is a boundary rather than an omission: a result
+//! an inspector answered a frame with is the inspector's in whole, with no checkpoint opened and
+//! no state written behind it, so rewriting its classification contradicts nothing and is
+//! supported. A draw that intercepts a frame and then reclassifies its own answer therefore
+//! executes, which is what keeps the two halves of the pool composable.
 
 use crate::{
-    diff::{compare, execute_unit_in_mode, RunMode},
+    diff::{compare, execute_unit_in_mode, execute_unit_reporting_chaos, RunMode},
     panic_capture,
     runner::{is_skipped_fixture, skip_test, vector_label, FixtureScan, TestError, TestErrorKind},
     types::{SpecName, TestSuite, TestUnit, TxPartIndices},
 };
 use indicatif::{ProgressBar, ProgressDrawTarget};
-use mega_evm::revm::{
-    context::{Cfg, ContextTr, JournalTr},
-    handler::FrameResult,
-    inspector::Inspector,
-    interpreter::{
-        interpreter_types::{Jumps, LoopControl, MemoryTr, ReturnData, StackTr},
-        CallInputs, CallOutcome, CreateInputs, CreateOutcome, FrameInput, Gas, InstructionResult,
-        Interpreter, InterpreterAction, InterpreterResult, InterpreterTypes,
+use mega_evm::{
+    revm::{
+        context::{Cfg, ContextTr, JournalTr},
+        handler::FrameResult,
+        inspector::Inspector,
+        interpreter::{
+            interpreter_types::{Jumps, LoopControl, MemoryTr, ReturnData, StackTr},
+            CallInputs, CallOutcome, CreateInputs, CreateOutcome, FrameInput, Gas,
+            InstructionResult, Interpreter, InterpreterAction, InterpreterResult, InterpreterTypes,
+        },
+        primitives::{Address, Bytes, Log, U256},
     },
-    primitives::{Address, Bytes, Log, U256},
+    FrameResultOriginTr, FORBIDDEN_CREATE_REVIVAL, FORBIDDEN_FRAME_INIT_REWRITE,
 };
 use std::{
     collections::BTreeMap,
@@ -224,11 +242,15 @@ pub enum ChaosShape {
     /// A return buffer put in front of the frame, so its `RETURNDATASIZE` and `RETURNDATACOPY`
     /// read data no call produced.
     RewriteReturnData,
+    /// The classification of a result *frame init* produced, moved across the success / revert /
+    /// halt boundary. The shim refuses this one, so the run it lands in is declined rather than
+    /// executed — which is the verdict [`ChaosClass::Refused`] names.
+    MoveInitResultClass,
 }
 
 impl ChaosShape {
     /// Every shape, in the order the labels are listed by `--chaos-shapes`.
-    pub const ALL: [Self; 27] = [
+    pub const ALL: [Self; 28] = [
         Self::InjectGas,
         Self::DrainGas,
         Self::EditFrameState,
@@ -256,6 +278,7 @@ impl ChaosShape {
         Self::CancelRefundEdit,
         Self::SkipOpcode,
         Self::RewriteReturnData,
+        Self::MoveInitResultClass,
     ];
 
     /// The shape a label names.
@@ -302,6 +325,7 @@ impl ChaosShape {
             Self::CancelRefundEdit => "cancel_refund_edit",
             Self::SkipOpcode => "skip_opcode",
             Self::RewriteReturnData => "rewrite_return_data",
+            Self::MoveInitResultClass => "move_init_result_class",
         }
     }
 
@@ -344,7 +368,10 @@ impl ChaosShape {
                 // unless the frame is still running, and a rewritten return buffer always gets a
                 // length the current one does not have.
                 Self::SkipOpcode |
-                Self::RewriteReturnData
+                Self::RewriteReturnData |
+                // The rewrite comparison books it before the shim refuses it, and the refusal is
+                // counted beside that — so the ledger carries two reasons to be non-zero.
+                Self::MoveInitResultClass
         )
     }
 }
@@ -393,7 +420,7 @@ const INPUT_SHAPES: [ChaosShape; 9] = [
 ];
 
 /// Shapes reachable from a callback that holds a finished frame's result.
-const RESULT_SHAPES: [ChaosShape; 11] = [
+const RESULT_SHAPES: [ChaosShape; 12] = [
     ChaosShape::RaiseResultGas,
     ChaosShape::LowerResultGas,
     ChaosShape::FailFrame,
@@ -405,6 +432,7 @@ const RESULT_SHAPES: [ChaosShape; 11] = [
     ChaosShape::WriteStateGas,
     ChaosShape::MoveOutcomeMetadata,
     ChaosShape::CancelRefundEdit,
+    ChaosShape::MoveInitResultClass,
 ];
 
 /// Which mutations a chaos run is allowed to make.
@@ -824,13 +852,19 @@ impl ChaosInspector {
 
     /// Applies a result-facing shape to a finished frame's result.
     ///
-    /// `is_creation` withholds the one shape the shim refuses: a failed contract creation rewritten
-    /// into a success. The pool never offers it, so a creation drawing `ReviveCall` leaves the
-    /// result alone and spends no budget.
+    /// `is_creation` withholds the one shape the shim refuses with an assertion: a failed contract
+    /// creation rewritten into a success. The pool never offers it, so a creation drawing
+    /// `ReviveCall` leaves the result alone and spends no budget.
+    ///
+    /// `is_frame_init` is the other way round — it is what *arms*
+    /// [`ChaosShape::MoveInitResultClass`], which is only that shape when the result it lands on
+    /// came out of frame init. A draw for it anywhere else leaves the result alone, so the shape's
+    /// tally counts refusals reached rather than draws made.
     fn hit_result(
         &mut self,
         result: &mut InterpreterResult,
         is_creation: bool,
+        is_frame_init: bool,
         shape: ChaosShape,
         entropy: u64,
     ) {
@@ -873,9 +907,30 @@ impl ChaosInspector {
                 result.gas.record_refund(amount);
                 self.pending_refund = amount;
             }
+            ChaosShape::MoveInitResultClass => {
+                if !is_frame_init {
+                    return;
+                }
+                result.result = across_the_class_boundary(result.result);
+            }
             _ => return,
         }
         self.applied(shape);
+    }
+}
+
+/// The class a result is moved *to*, which is any class but its own.
+///
+/// Stated over all three so the shape reaches every arm of frame init, not only the ones that
+/// return successfully: an empty-code call and a precompile come back `Stop`, a refusal comes back
+/// a halt, and `MegaETH`'s own frame-local exceed comes back a revert.
+const fn across_the_class_boundary(from: InstructionResult) -> InstructionResult {
+    if from.is_ok() {
+        InstructionResult::Revert
+    } else if from.is_revert() {
+        InstructionResult::OutOfGas
+    } else {
+        InstructionResult::Revert
     }
 }
 
@@ -1091,7 +1146,9 @@ fn write_journal<CTX: ContextTr>(context: &mut CTX, entropy: u64) {
     context.journal_mut().tstore(CHAOS_ADDRESS, U256::from(CHAOS_SLOT), U256::from(entropy));
 }
 
-impl<CTX: ContextTr, INTR: InterpreterTypes> Inspector<CTX, INTR> for ChaosInspector {
+impl<CTX: ContextTr + FrameResultOriginTr, INTR: InterpreterTypes> Inspector<CTX, INTR>
+    for ChaosInspector
+{
     fn initialize_interp(&mut self, interp: &mut Interpreter<INTR>, context: &mut CTX) {
         self.settle_pending_gas(interp);
         if let Some((shape, entropy)) = self.pick(&INTERPRETER_SHAPES) {
@@ -1147,8 +1204,9 @@ impl<CTX: ContextTr, INTR: InterpreterTypes> Inspector<CTX, INTR> for ChaosInspe
         self.hit_create_inputs(context, inputs, shape, entropy)
     }
 
-    fn call_end(&mut self, _context: &mut CTX, _inputs: &CallInputs, outcome: &mut CallOutcome) {
+    fn call_end(&mut self, context: &mut CTX, _inputs: &CallInputs, outcome: &mut CallOutcome) {
         self.settle_pending_refund(&mut outcome.result.gas);
+        let is_frame_init = context.is_frame_init_result();
         let Some((shape, entropy)) = self.pick(&RESULT_SHAPES) else { return };
         if shape == ChaosShape::MoveOutcomeMetadata {
             if shrink_return_range(outcome) {
@@ -1156,16 +1214,17 @@ impl<CTX: ContextTr, INTR: InterpreterTypes> Inspector<CTX, INTR> for ChaosInspe
             }
             return;
         }
-        self.hit_result(&mut outcome.result, false, shape, entropy);
+        self.hit_result(&mut outcome.result, false, is_frame_init, shape, entropy);
     }
 
     fn create_end(
         &mut self,
-        _context: &mut CTX,
+        context: &mut CTX,
         _inputs: &CreateInputs,
         outcome: &mut CreateOutcome,
     ) {
         self.settle_pending_refund(&mut outcome.result.gas);
+        let is_frame_init = context.is_frame_init_result();
         let Some((shape, entropy)) = self.pick(&RESULT_SHAPES) else { return };
         if shape == ChaosShape::MoveOutcomeMetadata {
             if relabel_deployment(outcome) {
@@ -1173,16 +1232,17 @@ impl<CTX: ContextTr, INTR: InterpreterTypes> Inspector<CTX, INTR> for ChaosInspe
             }
             return;
         }
-        self.hit_result(&mut outcome.result, true, shape, entropy);
+        self.hit_result(&mut outcome.result, true, is_frame_init, shape, entropy);
     }
 
     fn frame_end(
         &mut self,
-        _context: &mut CTX,
+        context: &mut CTX,
         _frame_input: &FrameInput,
         frame_result: &mut FrameResult,
     ) {
         self.settle_pending_refund(frame_result.gas_mut());
+        let is_frame_init = context.is_frame_init_result();
         let Some((shape, entropy)) = self.pick(&RESULT_SHAPES) else { return };
         if shape == ChaosShape::MoveOutcomeMetadata {
             let moved = match frame_result {
@@ -1195,7 +1255,13 @@ impl<CTX: ContextTr, INTR: InterpreterTypes> Inspector<CTX, INTR> for ChaosInspe
             return;
         }
         let is_creation = matches!(frame_result, FrameResult::Create(_));
-        self.hit_result(frame_result.interpreter_result_mut(), is_creation, shape, entropy);
+        self.hit_result(
+            frame_result.interpreter_result_mut(),
+            is_creation,
+            is_frame_init,
+            shape,
+            entropy,
+        );
     }
 }
 
@@ -1237,8 +1303,20 @@ pub enum ChaosClass {
     ControlDrift,
     /// The rewriting run and the reference disagreed about whether the transaction executes at
     /// all: one produced a receipt and the other an `EVMError`. No inspector callback runs before
-    /// validation, so the two cannot legitimately differ here.
+    /// validation, so the two cannot legitimately differ here — with the one exception the verdict
+    /// below names.
     ChaosRejected,
+    /// The rewriting run was declined because the measurement shim *refused* one of its rewrites.
+    ///
+    /// The one legitimate way an inspector can stop a transaction that would otherwise execute,
+    /// and the designed outcome of two rewrite shapes rather than a defect: moving the
+    /// classification of a result frame init produced, and reviving a failed contract creation.
+    /// Both leave the caller an answer the state behind it contradicts, so the shim restores the
+    /// classification and fails the transaction rather than let a receipt be built on it.
+    ///
+    /// Counted rather than passed, because the number is worth seeing: it says how much of the
+    /// corpus the pool's [`ChaosShape::MoveInitResultClass`] draws actually reach.
+    Refused,
     /// The rewriting run applied a mutation the shim is contracted to book unconditionally — see
     /// [`ChaosShape::is_always_booked`] — and still ended with an all-zero ledger.
     ///
@@ -1262,6 +1340,7 @@ impl ChaosClass {
             Self::Pass => "PASS",
             Self::ControlDrift => "CONTROL_DRIFT",
             Self::ChaosRejected => "CHAOS_REJECTED",
+            Self::Refused => "REFUSED",
             Self::LedgerBlind => "LEDGER_BLIND",
             Self::Skipped => "SKIPPED",
             Self::Panic => "PANIC",
@@ -1352,8 +1431,14 @@ pub fn chaos_unit(
         }
     }
 
-    let chaos = execute_unit_in_mode(unit, indexes, spec, RunMode::Chaos { seed, filter });
-    let applied = chaos.as_ref().ok().and_then(|run| run.chaos.clone()).unwrap_or_default();
+    let mut applied = ChaosTally::default();
+    let chaos = execute_unit_reporting_chaos(
+        unit,
+        indexes,
+        spec,
+        RunMode::Chaos { seed, filter },
+        &mut applied,
+    );
 
     let (class, detail) = match (reference.is_ok(), &chaos) {
         (true, Ok(run)) => match blind_shapes(&applied, run.ledger.is_zero()) {
@@ -1370,6 +1455,10 @@ pub fn chaos_unit(
         // unsupported transaction shape — and declined it the same way with the inspector
         // attached. Nothing executed, so nothing was tested; counted rather than passed.
         (false, Err(_)) => (ChaosClass::Skipped, None),
+        // A decline the shim itself produced is the designed outcome of a refused rewrite, not a
+        // disagreement about whether the transaction executes. It is told apart by the reason the
+        // error carries, which is the shim's own message.
+        (true, Err(e)) if is_refusal(e) => (ChaosClass::Refused, Some(e.to_string())),
         (true, Err(e)) => (
             ChaosClass::ChaosRejected,
             Some(format!("the rewriting run was declined where the reference executed: {e}")),
@@ -1380,6 +1469,15 @@ pub fn chaos_unit(
         ),
     };
     ChaosVerdict { class, applied, detail }
+}
+
+/// Whether a decline is one the measurement shim produced by refusing a rewrite.
+///
+/// Read off the reason the error carries, against the shim's own message constants, so a message
+/// that changes changes here too rather than silently reclassifying a whole corpus.
+fn is_refusal(error: &TestErrorKind) -> bool {
+    let rendered = error.to_string();
+    rendered.contains(FORBIDDEN_FRAME_INIT_REWRITE) || rendered.contains(FORBIDDEN_CREATE_REVIVAL)
 }
 
 /// The shapes a run applied that the shim must have booked, when its ledger says it booked
