@@ -290,31 +290,31 @@ kind = "line"
 category = "equivalent"
 file = "crates/mega-evm/src/limit/state_growth.rs"
 mutant = "crates/mega-evm/src/limit/state_growth.rs:121:1: spec-gate if self.spec.is_enabled(MegaSpecId::REX4) { -> if self.spec.is_enabled(MegaSpecId::REX3) {"
-justification = "Equivalent (coupled): push_frame shifted to REX3 derives per-frame state-growth limits at REX3, but check_limit (line 206, unmutated) skips the per-frame check pre-REX4 and uses TX-level net_usage only. The derived frame limits are never read, so no observable change."
+justification = "Equivalent (coupled): push_frame shifted to REX3 derives per-frame state-growth limits at REX3, but check_limit_on (line 178, unmutated) skips the per-frame check pre-REX4 and uses TX-level net_usage only. The derived frame limits are never read, so no observable change."
 reviewer = "improve-mutation-score (William Aaron Cheung)"
 
 [[suppress]]
 kind = "line"
 category = "equivalent"
 file = "crates/mega-evm/src/limit/state_growth.rs"
-mutant = "crates/mega-evm/src/limit/state_growth.rs:206:1: spec-gate if self.spec.is_enabled(MegaSpecId::REX4) { -> if self.spec.is_enabled(MegaSpecId::REX3) {"
-justification = "Equivalent (coupled): check_limit shifted to REX3 runs the per-frame check at REX3, but push_frame (line 121, unmutated) pushes frames with u64::MAX limit pre-REX4, so exceeds_current_frame_limit never fires and control falls through to the identical TX-level check."
+mutant = "crates/mega-evm/src/limit/state_growth.rs:178:1: spec-gate if self.spec.is_enabled(MegaSpecId::REX4) { -> if self.spec.is_enabled(MegaSpecId::REX3) {"
+justification = "Equivalent (coupled): check_limit_on shifted to REX3 runs the per-frame check at REX3, but push_frame (line 121, unmutated) pushes frames with u64::MAX limit pre-REX4, so exceeds_current_frame_limit never fires and control falls through to the identical TX-level check."
 reviewer = "improve-mutation-score (William Aaron Cheung)"
 
 [[suppress]]
 kind = "line"
 category = "equivalent"
 file = "crates/mega-evm/src/limit/state_growth.rs"
-mutant = "crates/mega-evm/src/limit/state_growth.rs:169:1: spec-gate if self.spec.is_enabled(MegaSpecId::REX4) { -> if self.spec.is_enabled(MegaSpecId::REX3) {"
-justification = "Equivalent: current_call_remaining is only read when building a child sandbox budget (sandbox/execution.rs:1037, KeylessDeploy, REX5+); it is never called at REX3/REX4. And at REX3 frames carry u64::MAX limits (push_frame, line 121), so frame_remaining.min(tx_remaining) == tx_remaining regardless."
+mutant = "crates/mega-evm/src/limit/state_growth.rs:205:1: spec-gate if self.spec.is_enabled(MegaSpecId::REX4) { -> if self.spec.is_enabled(MegaSpecId::REX3) {"
+justification = "Equivalent: current_call_remaining is only read when building a child sandbox budget (sandbox/execution.rs, KeylessDeploy, REX5+); it is never called at REX3/REX4. And at REX3 frames carry u64::MAX limits (push_frame, line 121), so frame_remaining.min(tx_remaining) == tx_remaining regardless."
 reviewer = "improve-mutation-score (William Aaron Cheung)"
 
 [[suppress]]
 kind = "line"
 category = "equivalent"
 file = "crates/mega-evm/src/limit/state_growth.rs"
-mutant = "crates/mega-evm/src/limit/state_growth.rs:169:1: spec-gate if self.spec.is_enabled(MegaSpecId::REX4) { -> if self.spec.is_enabled(MegaSpecId::REX5) {"
-justification = "Equivalent: current_call_remaining is only read by the REX5+ KeylessDeploy sandbox (sandbox/execution.rs:1037). The REX4->REX5 shift differs only at exactly REX4, where the function is never called — no observable change."
+mutant = "crates/mega-evm/src/limit/state_growth.rs:205:1: spec-gate if self.spec.is_enabled(MegaSpecId::REX4) { -> if self.spec.is_enabled(MegaSpecId::REX5) {"
+justification = "Equivalent: current_call_remaining is only read by the REX5+ KeylessDeploy sandbox (sandbox/execution.rs). The REX4->REX5 shift differs only at exactly REX4, where the function is never called — no observable change."
 reviewer = "improve-mutation-score (William Aaron Cheung)"
 
 # --- precompiles.rs:135 legacy Osaka ModExp size check, first `||` (equivalent) ---
