@@ -119,6 +119,19 @@ where
     (plain, cheated)
 }
 
+/// [`crate::common::transact_inspected`] with the shim delegating on the strength of a
+/// `TrustedObserver` declaration instead of measuring.
+pub(crate) fn transact_trusted<I>(db: MemoryDatabase, inspector: &mut I) -> Outcome
+where
+    I: for<'a> Inspector<MegaContext<&'a mut MemoryDatabase, EmptyExternalEnv>>
+        + mega_evm::TrustedObserver,
+{
+    let mut db = db;
+    let mut evm = MegaEvm::new(context(&mut db, MegaSpecId::REX7, limits()))
+        .with_trusted_inspector(inspector);
+    crate::common::drive(MegaSpecId::REX7, &mut evm, call_contract_tx(DEFAULT_TX_GAS_LIMIT))
+}
+
 // --- ledgers -------------------------------------------------------------------------------
 
 /// The ledger of a rewrite that moved gas on exactly one lane.

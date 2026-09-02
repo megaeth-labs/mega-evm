@@ -17,20 +17,21 @@
 //! that honours the rewrite reports the two halves that disagree rather than only the missing
 //! counter.
 
-use crate::common::{CALLEE, CALLER, CONTRACT, EMPTY_TARGET, ONE_ETH};
+use crate::{
+    common::{base_db, context, try_drive, CALLEE, CALLER, CONTRACT, EMPTY_TARGET, ONE_ETH},
+    inspector_common::append_call,
+};
 use alloy_primitives::{address, hex, Address, Bytes, Signature, TxKind, B256, U256};
 use alloy_sol_types::SolCall as _;
 use mega_evm::{
     alloy_consensus::{Signed, TxLegacy},
     test_utils::{BytecodeBuilder, MemoryDatabase},
     EmptyExternalEnv, EvmTxRuntimeLimits, IKeylessDeploy, MegaContext, MegaEvm, MegaHaltReason,
-    MegaSpecId, MegaTransaction, MegaTransactionNew as _, MegaTransactionOutcome, TestExternalEnvs,
-    KEYLESS_DEPLOY_ADDRESS,
+    MegaSpecId, MegaTransaction, MegaTransactionNew as _, KEYLESS_DEPLOY_ADDRESS,
 };
 use revm::{
-    bytecode::opcode::{CALL, RETURN, SSTORE, STOP},
+    bytecode::opcode::{RETURN, SSTORE, STOP},
     context::{result::ExecutionResult, tx::TxEnvBuilder, ContextTr},
-    handler::EvmTr,
     interpreter::{
         CallInputs, CallOutcome, Gas, InstructionResult, InterpreterResult, InterpreterTypes,
     },
@@ -52,7 +53,7 @@ const RELAYER: Address = address!("0000000000000000000000000000000000340009");
 const FLAG_SLOT: U256 = U256::from_limbs([7, 0, 0, 0]);
 
 /// The wei the value-transferring cases send.
-const SENT: u128 = 1;
+const SENT: u64 = 1;
 
 /// What one run produced, in the shape the splits are asserted over.
 struct Reading {
@@ -119,33 +120,38 @@ where
     }
 }
 
-/// Runs `tx` under REX7 with `inspector` attached.
-fn run<I>(mut db: MemoryDatabase, tx: MegaTransaction, inspector: &mut I) -> Reading
+/// Runs `tx` under `spec` with `inspector` attached.
+fn run_on<I>(
+    spec: MegaSpecId,
+    mut db: MemoryDatabase,
+    tx: MegaTransaction,
+    inspector: &mut I,
+) -> Reading
 where
     I: for<'a> Inspector<MegaContext<&'a mut MemoryDatabase, EmptyExternalEnv>>,
 {
-    let mut context = MegaContext::new(&mut db, MegaSpecId::REX7)
-        .with_tx_runtime_limits(EvmTxRuntimeLimits::from_spec(MegaSpecId::REX7));
-    context.modify_chain(|chain| {
-        chain.operator_fee_scalar = Some(U256::ZERO);
-        chain.operator_fee_constant = Some(U256::ZERO);
-    });
-    let mut evm = MegaEvm::new(context).with_inspector(inspector);
-    let outcome: Result<MegaTransactionOutcome, _> = evm.execute_transaction(tx);
-    let rejected_rewrites =
-        evm.ctx_ref().additional_limit.borrow().inspector_ledger().rejected_rewrites;
-    match outcome {
+    let limits = EvmTxRuntimeLimits::from_spec(spec);
+    let mut evm = MegaEvm::new(context(&mut db, spec, limits)).with_inspector(inspector);
+    match try_drive(spec, &mut evm, tx) {
         Ok(outcome) => Reading {
-            result: Ok(outcome.result_and_state.result),
-            rejected_rewrites,
-            state: outcome.result_and_state.state,
+            result: Ok(outcome.result),
+            rejected_rewrites: outcome.inspector_ledger.rejected_rewrites,
+            state: outcome.state,
         },
-        Err(e) => Reading {
-            result: Err(std::format!("{e:?}")),
-            rejected_rewrites,
+        Err(refusal) => Reading {
+            result: Err(refusal.error),
+            rejected_rewrites: refusal.rejected_rewrites,
             state: EvmState::default(),
         },
     }
+}
+
+/// [`run_on`] under REX7, which is where every rewrite below is refused.
+fn run<I>(db: MemoryDatabase, tx: MegaTransaction, inspector: &mut I) -> Reading
+where
+    I: for<'a> Inspector<MegaContext<&'a mut MemoryDatabase, EmptyExternalEnv>>,
+{
+    run_on(MegaSpecId::REX7, db, tx, inspector)
 }
 
 /// The two facts every case here pins: the rewrite was counted as refused, and the transaction
@@ -172,27 +178,12 @@ fn call_tx(to: Address) -> MegaTransaction {
 ///
 /// The recorded flag is what makes the split visible: it is the answer the *caller* was given,
 /// which the state the call left behind has to agree with.
-fn calls_and_records(target: Address, gas: u64, value: u128) -> Bytes {
-    BytecodeBuilder::default()
-        .push_number(0u64) // retSize
-        .push_number(0u64) // retOffset
-        .push_number(0u64) // argsSize
-        .push_number(0u64) // argsOffset
-        .push_number(value)
-        .push_address(target)
-        .push_number(u128::from(gas))
-        .append(CALL)
+fn calls_and_records(target: Address, gas: u64, value: u64) -> Bytes {
+    append_call(BytecodeBuilder::default(), target, gas, value)
         .push_u256(FLAG_SLOT)
         .append(SSTORE)
         .append(STOP)
         .build()
-}
-
-fn caller_db(code: Bytes) -> MemoryDatabase {
-    MemoryDatabase::default()
-        .account_balance(CALLER, U256::from(10 * ONE_ETH))
-        .account_code(CONTRACT, code)
-        .account_balance(CONTRACT, U256::from(ONE_ETH))
 }
 
 /// A value-transferring `CALL` into an empty-code account, rewritten from its `Stop` into a
@@ -206,7 +197,7 @@ fn caller_db(code: Bytes) -> MemoryDatabase {
 fn test_rewriting_an_empty_code_call_into_a_revert_is_refused() {
     let mut inspector = RewriteInitResult::new(EMPTY_TARGET, InstructionResult::Revert);
     let reading = run(
-        caller_db(calls_and_records(EMPTY_TARGET, 200_000, SENT)),
+        base_db(calls_and_records(EMPTY_TARGET, 200_000, SENT)),
         call_tx(CONTRACT),
         &mut inspector,
     );
@@ -233,7 +224,7 @@ fn test_reviving_a_failed_precompile_call_is_refused() {
     // the precompile is reached and cannot pay.
     let mut inspector = RewriteInitResult::new(ECRECOVER, InstructionResult::Stop);
     let reading =
-        run(caller_db(calls_and_records(ECRECOVER, 0, SENT)), call_tx(CONTRACT), &mut inspector);
+        run(base_db(calls_and_records(ECRECOVER, 0, SENT)), call_tx(CONTRACT), &mut inspector);
     assert_eq!(inspector.fired, 1, "the fixture must reach the callback exactly once");
     assert!(
         !reading.succeeded(),
@@ -380,7 +371,7 @@ where
 fn test_rewriting_an_inspector_s_own_synthetic_outcome_is_supported() {
     let mut inspector = AnswerThenRewrite { target: CALLEE, answered: 0, rewrote: 0 };
     let reading = run(
-        caller_db(calls_and_records(CALLEE, 200_000, 0)).account_code(
+        base_db(calls_and_records(CALLEE, 200_000, 0)).account_code(
             CALLEE,
             BytecodeBuilder::default().sstore(U256::from(1), U256::from(7)).stop().build(),
         ),
@@ -410,26 +401,13 @@ fn test_rewriting_an_inspector_s_own_synthetic_outcome_is_supported() {
 #[test]
 fn test_the_frozen_spec_refuses_nothing() {
     let mut inspector = RewriteInitResult::new(EMPTY_TARGET, InstructionResult::Revert);
-    let mut db = caller_db(calls_and_records(EMPTY_TARGET, 200_000, SENT));
-    let mut context = MegaContext::new(&mut db, MegaSpecId::REX6)
-        .with_tx_runtime_limits(EvmTxRuntimeLimits::from_spec(MegaSpecId::REX6));
-    context.modify_chain(|chain| {
-        chain.operator_fee_scalar = Some(U256::ZERO);
-        chain.operator_fee_constant = Some(U256::ZERO);
-    });
-    let mut evm = MegaEvm::new(context).with_inspector(&mut inspector);
-    let outcome = evm.execute_transaction(call_tx(CONTRACT)).expect("REX6 must not refuse");
-    assert_eq!(
-        evm.ctx_ref().additional_limit.borrow().inspector_ledger().rejected_rewrites,
-        0,
-        "a frozen spec refuses nothing",
+    let reading = run_on(
+        MegaSpecId::REX6,
+        base_db(calls_and_records(EMPTY_TARGET, 200_000, SENT)),
+        call_tx(CONTRACT),
+        &mut inspector,
     );
-    assert!(outcome.result_and_state.result.is_success(), "the frozen run must still succeed");
-}
 
-/// Silences the unused-import warning the external-env type would otherwise carry when only the
-/// empty environment is used above.
-#[allow(dead_code)]
-fn _envs() -> TestExternalEnvs {
-    TestExternalEnvs::default()
+    assert_eq!(reading.rejected_rewrites, 0, "a frozen spec refuses nothing");
+    assert!(reading.succeeded(), "the frozen run must still succeed, got {:?}", reading.result);
 }

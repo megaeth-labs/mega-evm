@@ -194,7 +194,24 @@ where
     INSP: Inspector<MegaContext<&'db mut MemoryDatabase, EXT>>,
     EXT: ExternalEnvTypes,
 {
-    let outcome = evm.execute_transaction(tx).expect("tx should not surface EVMError");
+    try_drive(spec, evm, tx)
+        .unwrap_or_else(|refusal| panic!("tx should not surface EVMError, got {}", refusal.error))
+}
+
+/// [`drive`] for a run the shim may refuse.
+///
+/// A refusal produces no receipt at all, so there is no [`Outcome`] to read and the two numbers a
+/// [`Refusal`] carries are the whole of what such a run leaves behind.
+pub(crate) fn try_drive<'db, INSP, EXT>(
+    spec: MegaSpecId,
+    evm: &mut MegaEvm<&'db mut MemoryDatabase, INSP, EXT>,
+    tx: MegaTransaction,
+) -> Result<Outcome, Refusal>
+where
+    INSP: Inspector<MegaContext<&'db mut MemoryDatabase, EXT>>,
+    EXT: ExternalEnvTypes,
+{
+    let executed = evm.execute_transaction(tx);
     let (detained_compute_gas_limit, terms, tracker_ledger) = {
         let additional_limit = EvmTr::ctx_ref(evm).additional_limit.borrow();
         (
@@ -202,6 +219,15 @@ where
             additional_limit.conservation_terms(),
             additional_limit.inspector_ledger(),
         )
+    };
+    let outcome = match executed {
+        Ok(outcome) => outcome,
+        Err(e) => {
+            return Err(Refusal {
+                error: std::format!("{e:?}"),
+                rejected_rewrites: tracker_ledger.rejected_rewrites,
+            })
+        }
     };
     assert_eq!(
         outcome.inspector_ledger, tracker_ledger,
@@ -225,7 +251,7 @@ where
         state: outcome.result_and_state.state,
     };
     assert_terminal_identity(spec, &outcome);
-    outcome
+    Ok(outcome)
 }
 
 /// Runs a single transaction that calls [`CONTRACT`] under `spec` with the given DB and runtime
@@ -298,15 +324,11 @@ where
     I: for<'a> Inspector<MegaContext<&'a mut MemoryDatabase, mega_evm::EmptyExternalEnv>>,
 {
     let mut evm = MegaEvm::new(context(&mut db, spec, limits)).with_inspector(inspector);
-    let outcome = evm.execute_transaction(call_contract_tx(DEFAULT_TX_GAS_LIMIT));
-    let rejected_rewrites =
-        EvmTr::ctx_ref(&evm).additional_limit.borrow().inspector_ledger().rejected_rewrites;
-    match outcome {
-        Ok(outcome) => panic!(
-            "the run was expected to be refused, but produced {:?}",
-            outcome.result_and_state.result,
-        ),
-        Err(e) => Refusal { error: std::format!("{e:?}"), rejected_rewrites },
+    match try_drive(spec, &mut evm, call_contract_tx(DEFAULT_TX_GAS_LIMIT)) {
+        Ok(outcome) => {
+            panic!("the run was expected to be refused, but produced {:?}", outcome.result)
+        }
+        Err(refusal) => refusal,
     }
 }
 
