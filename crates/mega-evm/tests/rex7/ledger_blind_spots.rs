@@ -40,10 +40,12 @@ use mega_evm::{
 };
 use revm::{
     bytecode::opcode::{
-        CALL, CREATE, GAS, MLOAD, MSTORE, MSTORE8, POP, RETURN, RETURNDATASIZE, SSTORE, STOP,
+        CALL, CALLER, CREATE, GAS, MLOAD, MSTORE, MSTORE8, POP, RETURN, RETURNDATASIZE, SSTORE,
+        STOP,
     },
     context::{Cfg, ContextTr},
     interpreter::{
+        interpreter::EthInterpreter,
         interpreter_types::{Jumps, MemoryTr, ReturnData},
         CallInputs, CallOutcome, CreateInputs, CreateOutcome, Interpreter, InterpreterTypes,
     },
@@ -598,6 +600,98 @@ fn test_a_forged_return_buffer_is_booked() {
     assert!(
         !cheated.inspector_ledger.is_zero(),
         "a transaction whose state a forged buffer changed must not read as untouched: {:?}",
+        cheated.inspector_ledger,
+    );
+}
+
+// --- a frame invariant moved and moved back --------------------------------------------------
+
+/// The caller the rewriting inspector shows the frame instead of the one that called it.
+const IMPOSTOR: Address = address!("00000000000000000000000000000000000ca11e");
+
+/// Moves the frame's caller for the length of one instruction, and puts it back.
+///
+/// `CALLER` reads `input.caller_address`, so the frame pushes an address nobody called it from and
+/// goes on to store that. The rewrite is undone in the very next callback, which is what makes the
+/// shape worth pinning: the frame's identity is the one the EVM gave it at every point a *frame*
+/// could be inspected — at its start, at its end, and at every callback but the two this touches.
+///
+/// Nothing about it reaches a gas counter. Both runs execute the same instructions and pay the
+/// same cold `SSTORE`; only the value written differs.
+#[derive(Default)]
+struct BorrowTheCaller {
+    /// The caller the EVM gave the frame, kept so it can be handed back.
+    original: Option<Address>,
+    /// How many times each half of the rewrite ran.
+    moved: u32,
+    restored: u32,
+}
+
+impl<CTX> Inspector<CTX, EthInterpreter> for BorrowTheCaller {
+    fn step(&mut self, interp: &mut Interpreter<EthInterpreter>, _context: &mut CTX) {
+        if self.moved > 0 || interp.bytecode.opcode() != CALLER {
+            return;
+        }
+        self.original = Some(interp.input.caller_address);
+        interp.input.caller_address = IMPOSTOR;
+        self.moved += 1;
+    }
+
+    fn step_end(&mut self, interp: &mut Interpreter<EthInterpreter>, _context: &mut CTX) {
+        let Some(original) = self.original.filter(|_| self.restored == 0) else {
+            return;
+        };
+        interp.input.caller_address = original;
+        self.restored += 1;
+    }
+}
+
+/// ★ A frame invariant moved in `step` and moved back in `step_end` is not an all-zero ledger.
+///
+/// The four addresses and the value a frame is identified by cannot change while it runs, which
+/// makes them the readings a cheaper shim would be tempted to compare once per frame rather than
+/// once per callback. This is the shape that answers that: an inspector borrows one of them for
+/// exactly as long as it takes the frame to read it, and gives it back before anything outside the
+/// two callbacks could look. A per-frame comparison sees the address it started with; a per-opcode
+/// one sees it move twice.
+#[test]
+fn test_a_frame_invariant_moved_and_moved_back_is_booked() {
+    let code = BytecodeBuilder::default()
+        .append(CALLER)
+        .push_number(RESULT_SLOT)
+        .append(SSTORE)
+        .append(STOP)
+        .build();
+
+    let limits = EvmTxRuntimeLimits::from_spec(MegaSpecId::REX7);
+    let plain = transact(MegaSpecId::REX7, db_with(code.clone()), limits);
+    let mut inspector = BorrowTheCaller::default();
+    let cheated = transact_inspected(MegaSpecId::REX7, db_with(code), limits, &mut inspector);
+
+    assert_eq!((inspector.moved, inspector.restored), (1, 1), "both halves must run once");
+    assert_eq!(
+        inspector.original,
+        Some(crate::common::CALLER),
+        "and the half that gives the address back must have the one the EVM gave the frame",
+    );
+    assert!(plain.is_success() && cheated.is_success(), "both runs must succeed");
+    assert_eq!(
+        plain.storage_value(CONTRACT, U256::from(RESULT_SLOT)),
+        U256::from_be_slice(crate::common::CALLER.as_slice()),
+        "without the rewrite the frame stores the address that called it",
+    );
+    assert_eq!(
+        cheated.storage_value(CONTRACT, U256::from(RESULT_SLOT)),
+        U256::from_be_slice(IMPOSTOR.as_slice()),
+        "with it, the frame stores one nobody called it from",
+    );
+    assert_eq!(
+        plain.total_gas_spent, cheated.total_gas_spent,
+        "the two runs cost the same, so no gas lane can tell them apart",
+    );
+    assert!(
+        cheated.inspector_ledger.interventions >= 2,
+        "each half of the rewrite is a rewrite: {:?}",
         cheated.inspector_ledger,
     );
 }
