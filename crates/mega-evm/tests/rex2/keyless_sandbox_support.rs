@@ -119,6 +119,40 @@ pub(crate) fn split_create_initcode() -> Bytes {
         .build()
 }
 
+/// Word the identity-precompile constructor sends and expects back.
+pub(crate) const IDENTITY_INPUT: U256 = U256::from_limbs([0x11, 0, 0, 0]);
+/// Word a short-circuiting hook answers the identity call with instead.
+pub(crate) const IDENTITY_OVERRIDE: U256 = U256::from_limbs([0x42, 0, 0, 0]);
+
+/// Constructor that STATICCALLs the identity precompile with [`IDENTITY_INPUT`] and stores
+/// whatever comes back in slot 0, so a rewritten call outcome is visible in state.
+pub(crate) fn constructor_calls_identity_and_stores_return() -> Bytes {
+    BytecodeBuilder::default()
+        .push_u256(IDENTITY_INPUT)
+        .push_number(0_u8)
+        .append(MSTORE)
+        .push_number(32_u8)
+        .push_number(0_u8)
+        .push_number(32_u8)
+        .push_number(0_u8)
+        .push_address(IDENTITY_PRECOMPILE)
+        .push_number(50_000_u32)
+        .append(STATICCALL)
+        .append(POP)
+        .push_number(0_u8)
+        .append(revm::bytecode::opcode::MLOAD)
+        .push_number(0_u8)
+        .append(revm::bytecode::opcode::SSTORE)
+        .push_number(1_u8)
+        .push_number(0_u8)
+        .push_number(0_u8)
+        .append(revm::bytecode::opcode::CODECOPY)
+        .push_number(1_u8)
+        .push_number(0_u8)
+        .append(RETURN)
+        .build()
+}
+
 pub(crate) fn constructor_calls_identity_precompile() -> Bytes {
     BytecodeBuilder::default()
         .push_number(0_u8)

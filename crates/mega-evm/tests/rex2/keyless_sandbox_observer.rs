@@ -19,21 +19,22 @@ use revm::{
     inspector::NoOpInspector,
     interpreter::{
         interpreter::EthInterpreter, interpreter_types::Jumps, CallInputs, CallOutcome,
-        CreateInputs, CreateOutcome, Interpreter,
+        CreateInputs, CreateOutcome, Gas, InstructionResult, Interpreter, InterpreterResult,
     },
     Inspector,
 };
 
 use super::keyless_sandbox_support::{
-    assert_result_and_state_eq, assert_usage_eq, constructor_calls_identity_precompile,
-    constructor_calls_reverter, constructor_touches_sentinel, create_pre_eip155_deploy_tx,
+    assert_result_and_state_eq, assert_usage_eq, constructor_calls_identity_and_stores_return,
+    constructor_calls_identity_precompile, constructor_calls_reverter,
+    constructor_touches_sentinel, create_pre_eip155_deploy_tx,
     create_pre_eip155_deploy_tx_with_value, crowded_parent_env, empty_code_constructor, funded_db,
     keyless_deploy_call_tx, keyless_deploy_call_tx_with_override_u256, parent_compute_gas_used,
     revert_constructor, run_keyless, run_keyless_with_parent_env,
     run_keyless_with_parent_env_usage, run_keyless_with_usage, split_create_initcode,
-    success_constructor, RunConfig, DEFAULT_OUTER_GAS_LIMIT, IDENTITY_PRECOMPILE,
-    LARGE_GAS_LIMIT_OVERRIDE, MERGE_FAIL_SENTINEL, REVERTER, SIGNED_TX_GAS_LIMIT, SPECS,
-    SPLIT_CREATE_CODE_LEN, SPLIT_CREATE_SLOT, SPLIT_CREATE_SLOT_VALUE,
+    success_constructor, RunConfig, DEFAULT_OUTER_GAS_LIMIT, IDENTITY_INPUT, IDENTITY_OVERRIDE,
+    IDENTITY_PRECOMPILE, LARGE_GAS_LIMIT_OVERRIDE, MERGE_FAIL_SENTINEL, REVERTER,
+    SIGNED_TX_GAS_LIMIT, SPECS, SPLIT_CREATE_CODE_LEN, SPLIT_CREATE_SLOT, SPLIT_CREATE_SLOT_VALUE,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -660,6 +661,95 @@ fn test_event_order_create_wraps_steps() {
         events.iter().rposition(|e| matches!(e, ObservedEvent::StepEnd(_))).unwrap();
     assert!(create < first_step, "create before steps");
     assert!(last_step_end < create_end, "step_end before create_end");
+}
+
+/// A revm inspector that answers every identity-precompile CALL with a fixed return.
+///
+/// Attached through the read-only channel it must have no effect: the blanket
+/// `SandboxObserver` impl hands it a copy of the inputs and discards the override. The
+/// same type attached through the rewriting channel is the control arm proving the
+/// override is real.
+struct OverridingInspector;
+
+impl<CTX> Inspector<CTX> for OverridingInspector {
+    fn call(&mut self, _context: &mut CTX, inputs: &mut CallInputs) -> Option<CallOutcome> {
+        (inputs.target_address == IDENTITY_PRECOMPILE).then(|| {
+            CallOutcome::new(
+                InterpreterResult::new(
+                    InstructionResult::Return,
+                    Bytes::from(IDENTITY_OVERRIDE.to_be_bytes::<32>()),
+                    Gas::new(inputs.gas_limit),
+                ),
+                inputs.return_memory_offset.clone(),
+            )
+        })
+    }
+}
+
+fn slot_zero(result: &ResultAndState<MegaHaltReason>, addr: Address) -> Option<U256> {
+    result
+        .state
+        .get(&addr)
+        .and_then(|account| account.storage.get(&U256::ZERO))
+        .map(|slot| slot.present_value())
+}
+
+/// The read-only channel structurally drops `call` overrides: an inspector that short-circuits
+/// the identity precompile changes nothing when attached as an observer (result, state, and
+/// usage match the no-hook run and slot 0 holds the precompile's echo), while the same
+/// inspector on the rewriting channel lands its override in slot 0.
+#[test]
+fn test_observer_channel_drops_call_overrides() {
+    let (tx_bytes, signer) =
+        create_pre_eip155_deploy_tx(constructor_calls_identity_and_stores_return());
+    let deploy_address = signer.create(0);
+
+    for spec in SPECS {
+        let mut db_base = funded_db(signer);
+        let (baseline, baseline_usage) = run_keyless_with_usage(RunConfig {
+            spec,
+            db: &mut db_base,
+            tx_bytes: tx_bytes.clone(),
+            gas_limit_override: LARGE_GAS_LIMIT_OVERRIDE,
+            observer: None::<Rc<RefCell<OverridingInspector>>>,
+            tx_limits: None,
+            outer_gas_limit: DEFAULT_OUTER_GAS_LIMIT,
+        });
+        assert_eq!(
+            slot_zero(&baseline, deploy_address),
+            Some(IDENTITY_INPUT),
+            "{spec:?}: the real precompile echoes the input"
+        );
+
+        let mut db_obs = funded_db(signer);
+        let (observed, observed_usage) = run_keyless_with_usage(RunConfig {
+            spec,
+            db: &mut db_obs,
+            tx_bytes: tx_bytes.clone(),
+            gas_limit_override: LARGE_GAS_LIMIT_OVERRIDE,
+            observer: Some(Rc::new(RefCell::new(OverridingInspector))),
+            tx_limits: None,
+            outer_gas_limit: DEFAULT_OUTER_GAS_LIMIT,
+        });
+        assert_result_and_state_eq(&observed, &baseline, &format!("{spec:?} observer override"));
+        assert_usage_eq(observed_usage, baseline_usage, &format!("{spec:?} observer override"));
+
+        let mut db_insp = funded_db(signer);
+        let mut context = MegaContext::new(&mut db_insp, spec);
+        context.modify_chain(|chain| {
+            chain.operator_fee_scalar = Some(U256::ZERO);
+            chain.operator_fee_constant = Some(U256::ZERO);
+        });
+        context.set_keyless_sandbox_inspector(Some(Rc::new(RefCell::new(OverridingInspector))));
+        let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);
+        let tx = keyless_deploy_call_tx(tx_bytes.clone(), LARGE_GAS_LIMIT_OVERRIDE);
+        let rewritten = alloy_evm::Evm::transact_raw(&mut evm, tx).expect("inspector channel");
+        assert_eq!(
+            slot_zero(&rewritten, deploy_address),
+            Some(IDENTITY_OVERRIDE),
+            "{spec:?}: the rewriting channel lands the same inspector's override"
+        );
+    }
 }
 
 #[test]

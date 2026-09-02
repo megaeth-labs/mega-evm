@@ -117,7 +117,13 @@ where
 
 /// Returns true when `sandbox` recorded at least one completed frame.
 pub fn sandbox_has_frames(sandbox: &TracingInspector) -> bool {
-    sandbox.traces().nodes().iter().any(|node| {
+    has_frames(sandbox)
+}
+
+/// Whether `inspector` recorded any frame. A fresh or fused arena still holds one default
+/// root node, so emptiness is judged by content, not by node count.
+fn has_frames(inspector: &TracingInspector) -> bool {
+    inspector.traces().nodes().iter().any(|node| {
         node.trace.status.is_some() || !node.trace.steps.is_empty() || !node.children.is_empty()
     })
 }
@@ -134,8 +140,12 @@ pub fn sandbox_has_frames(sandbox: &TracingInspector) -> bool {
 /// call-like opcode in its steps. An intercepted `KeylessDeploy` CALL records no bytecode, so
 /// a CREATE step is grafted onto the parent; without it the sandbox constructor steps would
 /// be omitted from struct-log output instead of nested in execution order.
+///
+/// An `outer` that recorded no frames at all (already fused, or never run) is also left
+/// untouched: its arena holds only the default root node, and grafting the sandbox under
+/// that phantom root would invent a call tree the outer EVM never executed.
 pub fn splice_sandbox_traces(outer: &mut TracingInspector, sandbox: &TracingInspector) {
-    if !sandbox_has_frames(sandbox) {
+    if !has_frames(sandbox) || !has_frames(outer) {
         return;
     }
 

@@ -736,6 +736,25 @@ mod tests {
         );
     }
 
+    /// Splicing sandbox frames into an outer inspector that recorded nothing is a no-op: the
+    /// arena's default root is not a `KeylessDeploy` CALL, and hanging the sandbox under it
+    /// would invent a call tree the outer EVM never executed.
+    #[test]
+    fn test_splice_into_empty_outer_is_a_no_op() {
+        use mega_evm::sandbox::trace::sandbox_has_frames;
+        let outer =
+            SharedTracingInspector::new(TracingInspector::new(TracingInspectorConfig::all()));
+        let sandbox =
+            SharedTracingInspector::new(TracingInspector::new(TracingInspectorConfig::all()));
+        run_traced_keyless(outer, sandbox.clone());
+        assert!(sandbox_has_frames(&sandbox.borrow()), "the sandbox recorded the CREATE");
+
+        let mut empty = TracingInspector::new(TracingInspectorConfig::all());
+        splice_sandbox_traces(&mut empty, &sandbox.borrow());
+        assert!(!sandbox_has_frames(&empty), "nothing was grafted under the default root");
+        assert_eq!(empty.traces().nodes().len(), 1, "the arena keeps only its default root");
+    }
+
     /// The parity rendering (`trace_*` and `debug_traceTransaction` with `flatCallTracer`) of
     /// the spliced trace: the sandbox CREATE is trace address `[0]` under the `KeylessDeploy`
     /// CALL, every nested frame extends that prefix, and `subtraces` counts match the tree.

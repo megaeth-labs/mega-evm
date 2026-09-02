@@ -34,10 +34,15 @@
 //!
 //! [`sandbox_start`](SandboxObserver::sandbox_start) and
 //! [`sandbox_end`](SandboxObserver::sandbox_end) fire exactly once per sandbox
-//! attempt, and only when an observer is attached. A validate-reject path that
-//! never constructs a sandbox EVM still delivers the pair. Reverted inner
-//! frames still emit their events; whether sandbox state was applied to the
-//! parent is reported by [`SandboxEndOutcome::state_applied`].
+//! attempt, and only when an observer is attached. An attempt begins once the
+//! keyless payload has been decoded, its signer recovered, the deploy address
+//! derived and found free, and the gas budget admitted; a call that is rejected
+//! before that point emits no events. From then on the pair is guaranteed: a
+//! sandbox transaction that revm's validation rejects without ever constructing
+//! a sandbox EVM still delivers `sandbox_end` with
+//! [`SandboxRejectKind::Rejected`]. Reverted inner frames still emit their
+//! events; whether sandbox state was applied to the parent is reported by
+//! [`SandboxEndOutcome::state_applied`].
 //!
 //! # External-environment invariance
 //!

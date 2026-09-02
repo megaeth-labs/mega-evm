@@ -16,9 +16,7 @@ use mega_evm::{
     MegaSpecId, TestExternalEnvs,
 };
 use revm::{
-    bytecode::opcode::{
-        CALL, CODECOPY, ISZERO, JUMPDEST, JUMPI, MLOAD, MSTORE8, POP, RETURN, SSTORE, STATICCALL,
-    },
+    bytecode::opcode::{CALL, CODECOPY, ISZERO, JUMPDEST, JUMPI, MSTORE8, POP, RETURN, SSTORE},
     context::{ContextTr, JournalTr},
     handler::EvmTr,
     inspector::NoOpInspector,
@@ -30,13 +28,14 @@ use revm::{
 use revm_inspectors::tracing::{TracingInspector, TracingInspectorConfig};
 
 use super::keyless_sandbox_support::{
-    assert_result_and_state_eq, assert_usage_eq, constructor_calls_reverter,
-    constructor_touches_sentinel, create_pre_eip155_deploy_tx,
+    assert_result_and_state_eq, assert_usage_eq, constructor_calls_identity_and_stores_return,
+    constructor_calls_reverter, constructor_touches_sentinel, create_pre_eip155_deploy_tx,
     create_pre_eip155_deploy_tx_with_value, crowded_parent_env, empty_code_constructor, funded_db,
     keyless_deploy_call_tx, keyless_deploy_call_tx_with_outer_gas, parent_compute_gas_used,
     revert_constructor, run_keyless, run_keyless_with_usage, split_create_initcode,
-    success_constructor, RunConfig, DEFAULT_OUTER_GAS_LIMIT, IDENTITY_PRECOMPILE,
-    LARGE_GAS_LIMIT_OVERRIDE, LARGE_SIGNER_BALANCE, MERGE_FAIL_SENTINEL, REVERTER, SPECS,
+    success_constructor, RunConfig, DEFAULT_OUTER_GAS_LIMIT, IDENTITY_INPUT, IDENTITY_OVERRIDE,
+    IDENTITY_PRECOMPILE, LARGE_GAS_LIMIT_OVERRIDE, LARGE_SIGNER_BALANCE, MERGE_FAIL_SENTINEL,
+    REVERTER, SPECS,
 };
 
 const SUCCESS_TARGET: Address = address!("0000000000000000000000000000000000cccccc");
@@ -46,38 +45,9 @@ const CALLER_SINK: Address = address!("0000000000000000000000000000000000511111"
 const CALLER_SINK_RUNTIME: [u8; 5] = [0x33, 0x60, 0x00, 0x55, 0x00];
 /// The account a prank substitutes as `msg.sender` or as the creator of a nested CREATE.
 const PRANKED: Address = address!("00000000000000000000000000000000009a9a9a");
-const IDENTITY_INPUT: U256 = U256::from_limbs([0x11, 0, 0, 0]);
-const IDENTITY_OVERRIDE: U256 = U256::from_limbs([0x42, 0, 0, 0]);
 const JOURNAL_SLOT: U256 = U256::from_limbs([0x53, 0, 0, 0]);
 const JOURNAL_VALUE: U256 = U256::from_limbs([0x54, 0, 0, 0]);
 const STEP_GAS_SURCHARGE: u64 = 1_000;
-
-fn constructor_calls_identity_and_stores_return() -> Bytes {
-    BytecodeBuilder::default()
-        .push_u256(IDENTITY_INPUT)
-        .push_number(0_u8)
-        .append(revm::bytecode::opcode::MSTORE)
-        .push_number(32_u8)
-        .push_number(0_u8)
-        .push_number(32_u8)
-        .push_number(0_u8)
-        .push_address(IDENTITY_PRECOMPILE)
-        .push_number(50_000_u32)
-        .append(STATICCALL)
-        .append(revm::bytecode::opcode::POP)
-        .push_number(0_u8)
-        .append(MLOAD)
-        .push_number(0_u8)
-        .append(SSTORE)
-        .push_number(1_u8)
-        .push_number(0_u8)
-        .push_number(0_u8)
-        .append(CODECOPY)
-        .push_number(1_u8)
-        .push_number(0_u8)
-        .append(RETURN)
-        .build()
-}
 
 fn constructor_calls_success_target() -> Bytes {
     let prefix = BytecodeBuilder::default()
