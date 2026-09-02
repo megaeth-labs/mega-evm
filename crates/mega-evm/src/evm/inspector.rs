@@ -439,8 +439,10 @@ fn book_intervention<DB: Database, ExtEnvs: ExternalEnvTypes>(
 /// The interpreter's stack and memory *contents* are outside the shim's reach — telling whether
 /// either came back changed needs a snapshot of unbounded state — but their sizes are not, and
 /// neither is the memo of how far the memory has been paid for. Those four readings are `O(1)`,
-/// and the one rewrite they close is the only one in this area that leaves every interpreter
-/// invariant intact:
+/// so the shim takes them on the way in and on the way out and books a difference as an
+/// intervention.
+///
+/// The pair that made them necessary is the memory and its memo, moved together.
 ///
 /// The memo (`Gas::memory`) is what the next expanding opcode compares its requirement against. An
 /// inspector that raises it without growing the memory desynchronises the two and the EVM reads out
@@ -450,8 +452,11 @@ fn book_intervention<DB: Database, ExtEnvs: ExternalEnvTypes>(
 /// moves no gas anywhere at the moment it is made, so no gas lane can see it; what it changes is
 /// what the EVM charges afterwards.
 ///
-/// A stack or memory edit that leaves both sizes where they were is deliberately still invisible:
-/// it is a rewrite of contents, which is the row of the shape table that has no lane.
+/// The stack's length is here for the same reason and at the same cost, and it moves whenever a
+/// callback pushes or pops.
+///
+/// A stack or memory edit that leaves both sizes where they were stays invisible: it is a rewrite
+/// of contents, which is the row of the shape table that has no lane.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct WorkingSet {
     /// How many words the frame has on its stack.
