@@ -1,19 +1,20 @@
 //! Shared helpers for the REX7 test suite.
 
-use alloy_primitives::{address, Address, Bytes, B256, U256};
+use alloy_primitives::{address, hex, Address, Bytes, Signature, TxKind, B256, U256};
 use mega_evm::{
+    alloy_consensus::{Signed, TxLegacy},
     test_utils::{BytecodeBuilder, MemoryDatabase},
     ConservationTerms, EvmTxRuntimeLimits, ExternalEnvTypes, InspectorLedger, MegaContext, MegaEvm,
     MegaHaltReason, MegaSpecId, MegaTransaction, MegaTransactionNew as _, TestExternalEnvs,
 };
 use revm::{
-    bytecode::opcode::POP,
+    bytecode::opcode::{DUP1, JUMPDEST, JUMPI, POP, STOP, SUB, SWAP1},
     context::{result::ExecutionResult, tx::TxEnvBuilder, TxEnv},
     handler::EvmTr,
     state::EvmState,
     Inspector,
 };
-use std::{collections::BTreeMap, string::String};
+use std::{collections::BTreeMap, string::String, vec::Vec};
 
 /// Transaction sender.
 pub(crate) const CALLER: Address = address!("0000000000000000000000000000000000300000");
@@ -48,6 +49,72 @@ pub(crate) fn plain_filler(builder: BytecodeBuilder, pairs: usize) -> BytecodeBu
         builder = builder.push_number(1u64).append(POP);
     }
     builder
+}
+
+/// A countdown loop of plain opcodes with no checkpoint anywhere in the body, after `prefix`, so
+/// the run is one settlement segment and the gas clamp is the only thing enforcing the compute
+/// limit inside it.
+pub(crate) fn countdown_loop_code(prefix: &[u8], iterations: u16) -> Bytes {
+    let mut code = prefix.to_vec();
+    code.push(0x61); // PUSH2
+    code.extend_from_slice(&iterations.to_be_bytes());
+    let loop_target = u8::try_from(code.len()).expect("loop target must fit in a PUSH1");
+    code.push(JUMPDEST);
+    code.extend_from_slice(&[0x60, 0x01]); // PUSH1 1
+    code.push(SWAP1);
+    code.push(SUB);
+    code.push(DUP1);
+    code.extend_from_slice(&[0x60, loop_target]); // PUSH1 loop
+    code.push(JUMPI);
+    code.push(STOP);
+    Bytes::from(code)
+}
+
+/// A contract that does nothing, for measuring what a transaction costs before its code runs.
+pub(crate) fn stop_only() -> Bytes {
+    BytecodeBuilder::default().append(STOP).build()
+}
+
+/// The spec's default runtime limits with the per-transaction compute budget lowered to `limit`.
+pub(crate) fn compute_limit(limit: u64) -> impl Fn(MegaSpecId) -> EvmTxRuntimeLimits {
+    move |spec| EvmTxRuntimeLimits::from_spec(spec).with_tx_compute_gas_limit(limit)
+}
+
+/// [`compute_limit`] under REX7, for the files that never run a second spec.
+pub(crate) fn rex7_compute_limit(limit: u64) -> EvmTxRuntimeLimits {
+    compute_limit(limit)(MegaSpecId::REX7)
+}
+
+/// The spec's default runtime limits with the block-env detention cap lowered to `cap`.
+pub(crate) fn detention_cap(cap: u64) -> impl Fn(MegaSpecId) -> EvmTxRuntimeLimits {
+    move |spec| {
+        let mut limits = EvmTxRuntimeLimits::from_spec(spec);
+        limits.block_env_access_compute_gas_limit = cap;
+        limits
+    }
+}
+
+/// A deterministic pre-EIP-155 keyless deployment transaction, RLP-encoded.
+///
+/// The signature is Nick's Method's: an unrecoverable `r == s` that no key produced, which is what
+/// makes the sender deterministic and the deployment address the same on every chain.
+pub(crate) fn keyless_tx_bytes(init_code: Bytes, gas_limit: u64) -> Bytes {
+    let tx = TxLegacy {
+        nonce: 0,
+        gas_price: 100_000_000_000,
+        gas_limit,
+        to: TxKind::Create,
+        value: U256::ZERO,
+        input: init_code,
+        chain_id: None,
+    };
+    let word = U256::from_be_bytes(hex!(
+        "3333333333333333333333333333333333333333333333333333333333333333"
+    ));
+    let signed = Signed::new_unchecked(tx, Signature::new(word, word, false), B256::ZERO);
+    let mut buf = Vec::new();
+    signed.rlp_encode(&mut buf);
+    Bytes::from(buf)
 }
 
 /// The post-transaction readings compared across specs.
@@ -135,6 +202,12 @@ impl Outcome {
     /// The receipt's final EIP-8037 state-gas spend.
     pub(crate) fn state_gas_spent(&self) -> u64 {
         self.result.gas().state_gas_spent_final()
+    }
+
+    /// The non-compute part of what this transaction's receipt reports — the `MegaETH` storage
+    /// gas and intrinsic share a compute-gas figure does not cover.
+    pub(crate) fn storage_overhead(&self) -> u64 {
+        self.gas_used - self.compute_gas
     }
 
     /// Reads a storage slot out of the produced state, defaulting to zero when the transaction

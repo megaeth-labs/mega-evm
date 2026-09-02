@@ -23,8 +23,8 @@
 //!   is still stopped at the clamp boundary rather than overshooting to the next checkpoint.
 
 use crate::common::{
-    assert_outcomes_identical, base_db as common_base_db, plain_filler, transact, transact_default,
-    Outcome, CALLEE, CONTRACT,
+    assert_outcomes_identical, base_db as common_base_db, compute_limit, detention_cap,
+    plain_filler, transact, transact_default, Outcome, CALLEE, CONTRACT,
 };
 use alloy_primitives::{address, Address, Bytes, U256};
 use alloy_sol_types::SolCall as _;
@@ -51,20 +51,6 @@ const FORWARDED_GAS: u64 = 1_000_000;
 
 fn base_db(code: Bytes) -> MemoryDatabase {
     common_base_db(code).account_code(LIMIT_CONTROL_ADDRESS, LIMIT_CONTROL_CODE)
-}
-
-/// Per-spec runtime limits with the TX compute gas limit replaced.
-fn compute_limit(limit: u64) -> impl Fn(MegaSpecId) -> EvmTxRuntimeLimits {
-    move |spec| EvmTxRuntimeLimits::from_spec(spec).with_tx_compute_gas_limit(limit)
-}
-
-/// Per-spec runtime limits with the block-environment detention cap replaced.
-fn detention_cap(cap: u64) -> impl Fn(MegaSpecId) -> EvmTxRuntimeLimits {
-    move |spec| {
-        let mut limits = EvmTxRuntimeLimits::from_spec(spec);
-        limits.block_env_access_compute_gas_limit = cap;
-        limits
-    }
 }
 
 /// A CALL to `target` forwarding `forwarded_gas`, with `args_size` bytes of calldata taken from

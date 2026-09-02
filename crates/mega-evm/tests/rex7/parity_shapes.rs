@@ -23,14 +23,13 @@
 use std::vec::Vec;
 
 use crate::common::{
-    assert_outcomes_identical, base_db, default_envs, plain_filler, transact_tx, Outcome, CALLEE,
-    CALLER, CONTRACT, DEFAULT_TX_GAS_LIMIT, EMPTY_TARGET, ONE_ETH,
+    assert_outcomes_identical, base_db, default_envs, keyless_tx_bytes, plain_filler, transact_tx,
+    Outcome, CALLEE, CALLER, CONTRACT, DEFAULT_TX_GAS_LIMIT, EMPTY_TARGET, ONE_ETH,
 };
 use alloy_eips::eip7702::{Authorization, RecoveredAuthority, RecoveredAuthorization};
-use alloy_primitives::{address, hex, Address, Bytes, Signature, TxKind, B256, U256};
+use alloy_primitives::{address, Address, Bytes, B256, U256};
 use alloy_sol_types::SolCall as _;
 use mega_evm::{
-    alloy_consensus::{Signed, TxLegacy},
     test_utils::{BytecodeBuilder, MemoryDatabase},
     EvmTxRuntimeLimits, IKeylessDeploy, IOracle, MegaSpecId, TestExternalEnvs,
     KEYLESS_DEPLOY_ADDRESS, ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE_REX2,
@@ -163,26 +162,6 @@ fn test_eip7702_authorization_under_detention_matches_per_opcode() {
     assert!(r7.is_success(), "the authorized transaction must succeed: {:?}", r7.result);
 }
 
-/// Builds a deterministic pre-EIP-155 keyless deployment transaction.
-fn keyless_tx_bytes(init_code: Bytes) -> Bytes {
-    let tx = TxLegacy {
-        nonce: 0,
-        gas_price: 100_000_000_000,
-        gas_limit: 200_000,
-        to: TxKind::Create,
-        value: U256::ZERO,
-        input: init_code,
-        chain_id: None,
-    };
-    let word = U256::from_be_bytes(hex!(
-        "3333333333333333333333333333333333333333333333333333333333333333"
-    ));
-    let signed = Signed::new_unchecked(tx, Signature::new(word, word, false), B256::ZERO);
-    let mut buf = Vec::new();
-    signed.rlp_encode(&mut buf);
-    Bytes::from(buf)
-}
-
 /// `KeylessDeploy` is intercepted at depth 0, so the interception happens before any frame — and
 /// therefore before any checkpoint — has been created. Its sandbox then runs a whole nested
 /// transaction under the same spec, with its own tracker, and merges the usage back.
@@ -198,7 +177,7 @@ fn test_keyless_deploy_sandbox_accounting_matches_per_opcode() {
         .return_with_data(&runtime)
         .build();
     let call_data = IKeylessDeploy::keylessDeployCall {
-        keylessDeploymentTransaction: keyless_tx_bytes(init_code),
+        keylessDeploymentTransaction: keyless_tx_bytes(init_code, 200_000),
         gasLimitOverride: U256::from(1_000_000u64),
     }
     .abi_encode();
@@ -240,7 +219,7 @@ fn test_keyless_deploy_sandbox_under_detention_matches_per_opcode() {
         .return_with_data(&runtime)
         .build();
     let call_data = IKeylessDeploy::keylessDeployCall {
-        keylessDeploymentTransaction: keyless_tx_bytes(init_code),
+        keylessDeploymentTransaction: keyless_tx_bytes(init_code, 200_000),
         gasLimitOverride: U256::from(1_000_000u64),
     }
     .abi_encode();

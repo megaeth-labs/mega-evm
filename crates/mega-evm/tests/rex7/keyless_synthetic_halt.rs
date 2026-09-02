@@ -20,11 +20,10 @@
 //! envelope is measured through the `GasLimitTooLow` revert rather than read back out of the lane
 //! under test.
 
-use crate::common::{transact_tx, Outcome, ONE_ETH};
-use alloy_primitives::{address, hex, Address, Bytes, Signature, TxKind, B256, U256};
+use crate::common::{keyless_tx_bytes, transact_tx, Outcome, ONE_ETH};
+use alloy_primitives::{address, Address, Bytes, U256};
 use alloy_sol_types::{SolCall as _, SolError as _};
 use mega_evm::{
-    alloy_consensus::{Signed, TxLegacy},
     constants::{rex::NEW_ACCOUNT_STORAGE_GAS_BASE, rex2::KEYLESS_DEPLOY_OVERHEAD_GAS},
     test_utils::{BytecodeBuilder, MemoryDatabase},
     EvmTxRuntimeLimits, IKeylessDeploy, MegaSpecId, TestExternalEnvs, KEYLESS_DEPLOY_ADDRESS,
@@ -34,7 +33,6 @@ use revm::{
     bytecode::opcode::STOP,
     context::{result::ExecutionResult, tx::TxEnvBuilder},
 };
-use std::vec::Vec;
 
 /// Relayer that sends the keyless-deploy transactions.
 const RELAYER: Address = address!("0000000000000000000000000000000000340009");
@@ -54,27 +52,6 @@ const MATERIALIZATION_GAS: u64 = NEW_ACCOUNT_STORAGE_GAS_BASE;
 /// the pre-cap check clears; the post-cap re-check at step 4b is what the calibration below reads.
 const INNER_TX_GAS_LIMIT: u64 = 200_000;
 
-/// Builds a deterministic pre-EIP-155 keyless deployment transaction. Its init code never runs on
-/// any path exercised here — every probe fails before the sandbox is built.
-fn keyless_tx_bytes() -> Bytes {
-    let tx = TxLegacy {
-        nonce: 0,
-        gas_price: 100_000_000_000,
-        gas_limit: INNER_TX_GAS_LIMIT,
-        to: TxKind::Create,
-        value: U256::ZERO,
-        input: BytecodeBuilder::default().append(STOP).build(),
-        chain_id: None,
-    };
-    let word = U256::from_be_bytes(hex!(
-        "3333333333333333333333333333333333333333333333333333333333333333"
-    ));
-    let signed = Signed::new_unchecked(tx, Signature::new(word, word, false), B256::ZERO);
-    let mut buf = Vec::new();
-    signed.rlp_encode(&mut buf);
-    Bytes::from(buf)
-}
-
 /// Runs a top-level keyless-deploy call. Depth zero is the only depth the interceptor fires at, so
 /// every probe here has to be a direct transaction.
 fn run(
@@ -84,7 +61,10 @@ fn run(
     tx_compute_gas_limit: Option<u64>,
 ) -> Outcome {
     let call_data = IKeylessDeploy::keylessDeployCall {
-        keylessDeploymentTransaction: keyless_tx_bytes(),
+        keylessDeploymentTransaction: keyless_tx_bytes(
+            BytecodeBuilder::default().append(STOP).build(),
+            INNER_TX_GAS_LIMIT,
+        ),
         gasLimitOverride: U256::from(1_000_000u64),
     }
     .abi_encode();

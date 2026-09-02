@@ -21,11 +21,10 @@
 //! transactions never settle a derivation, because the law is stated over an outer transaction's
 //! final envelope.
 
-use crate::common::{transact_mega_tx, transact_tx, Outcome, ONE_ETH};
-use alloy_primitives::{address, hex, Address, Bytes, Signature, TxKind, B256, U256};
+use crate::common::{keyless_tx_bytes, transact_mega_tx, transact_tx, Outcome, ONE_ETH};
+use alloy_primitives::{address, Address, Bytes, B256, U256};
 use alloy_sol_types::{SolCall as _, SolError as _};
 use mega_evm::{
-    alloy_consensus::{Signed, TxLegacy},
     constants::rex::TX_INTRINSIC_STORAGE_GAS,
     test_utils::{BytecodeBuilder, MemoryDatabase},
     EvmTxRuntimeLimits, IKeylessDeploy, MegaContext, MegaEvm, MegaSpecId, MegaTransaction,
@@ -356,27 +355,6 @@ fn test_exempt_deposit_reject_still_accounts_for_the_envelope() {
 /// validation rather than running.
 const SANDBOX_REJECT_INNER_GAS_LIMIT: u64 = INTRINSIC_REQUIREMENT;
 
-/// Builds a deterministic pre-EIP-155 keyless deployment transaction whose gas limit cannot cover
-/// its own `MegaETH` intrinsic requirement.
-fn underfunded_keyless_tx_bytes() -> Bytes {
-    let tx = TxLegacy {
-        nonce: 0,
-        gas_price: 100_000_000_000,
-        gas_limit: SANDBOX_REJECT_INNER_GAS_LIMIT,
-        to: TxKind::Create,
-        value: U256::ZERO,
-        input: BytecodeBuilder::default().append(INVALID).build(),
-        chain_id: None,
-    };
-    let word = U256::from_be_bytes(hex!(
-        "3333333333333333333333333333333333333333333333333333333333333333"
-    ));
-    let signed = Signed::new_unchecked(tx, Signature::new(word, word, false), B256::ZERO);
-    let mut buf = Vec::new();
-    signed.rlp_encode(&mut buf);
-    Bytes::from(buf)
-}
-
 /// A keyless-deploy sandbox transaction that fails validation is rewritten into a failed deposit
 /// too — inside the sandbox, where no settlement of its own belongs. Its usage is discarded and
 /// the interceptor hands the whole reservation back, so the outer transaction sees only the
@@ -386,7 +364,10 @@ fn underfunded_keyless_tx_bytes() -> Bytes {
 fn test_keyless_sandbox_reject_leaves_the_outer_transaction_alone() {
     const OUTER_GAS_LIMIT: u64 = 1_000_000;
     let call_data = IKeylessDeploy::keylessDeployCall {
-        keylessDeploymentTransaction: underfunded_keyless_tx_bytes(),
+        keylessDeploymentTransaction: keyless_tx_bytes(
+            BytecodeBuilder::default().append(INVALID).build(),
+            SANDBOX_REJECT_INNER_GAS_LIMIT,
+        ),
         gasLimitOverride: U256::from(SANDBOX_REJECT_INNER_GAS_LIMIT),
     }
     .abi_encode();

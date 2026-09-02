@@ -23,16 +23,18 @@
 //! with the same message.
 
 use crate::{
-    common::{base_db, context, try_drive, CALLEE, CALLER, CONTRACT, EMPTY_TARGET, ONE_ETH},
+    common::{
+        base_db, context, keyless_tx_bytes, try_drive, CALLEE, CALLER, CONTRACT, EMPTY_TARGET,
+        ONE_ETH,
+    },
     inspector_common::{
         append_call, assert_refused, deploy_then_stop, limits, try_transact_inspected,
         REVERTING_INIT_CODE, REVIVED_CREATION,
     },
 };
-use alloy_primitives::{address, hex, Address, Bytes, Signature, TxKind, B256, U256};
+use alloy_primitives::{address, Address, Bytes, B256, U256};
 use alloy_sol_types::SolCall as _;
 use mega_evm::{
-    alloy_consensus::{Signed, TxLegacy},
     test_utils::{BytecodeBuilder, MemoryDatabase},
     EmptyExternalEnv, EvmTxRuntimeLimits, IKeylessDeploy, MegaContext, MegaEvm, MegaHaltReason,
     MegaSpecId, MegaTransaction, MegaTransactionNew as _, KEYLESS_DEPLOY_ADDRESS,
@@ -48,7 +50,7 @@ use revm::{
     state::EvmState,
     Inspector,
 };
-use std::{string::String, vec::Vec};
+use std::string::String;
 
 // === a failed creation, revived ===============================================================
 
@@ -314,35 +316,6 @@ fn test_reviving_a_failed_precompile_call_is_refused() {
     assert_reading_refused(&reading);
 }
 
-/// A deterministic pre-EIP-155 keyless deployment transaction whose init code returns one byte of
-/// runtime code, so the deployment it makes is visible in the produced state.
-fn keyless_tx_bytes() -> Bytes {
-    let tx = TxLegacy {
-        nonce: 0,
-        gas_price: 100_000_000_000,
-        gas_limit: 200_000,
-        to: TxKind::Create,
-        value: U256::ZERO,
-        // MSTORE8 a STOP at offset 0, then return that one byte as the runtime code.
-        input: BytecodeBuilder::default()
-            .push_number(u128::from(STOP))
-            .push_number(0u64)
-            .append(0x53) // MSTORE8
-            .push_number(1u64)
-            .push_number(0u64)
-            .append(RETURN)
-            .build(),
-        chain_id: None,
-    };
-    let word = U256::from_be_bytes(hex!(
-        "3333333333333333333333333333333333333333333333333333333333333333"
-    ));
-    let signed = Signed::new_unchecked(tx, Signature::new(word, word, false), B256::ZERO);
-    let mut buf = Vec::new();
-    signed.rlp_encode(&mut buf);
-    Bytes::from(buf)
-}
-
 /// The address the keyless transaction above deploys to, recovered from the receipt of an
 /// unrewritten run.
 fn deployed_address(reading: &Reading) -> Option<Address> {
@@ -361,7 +334,18 @@ fn deployed_address(reading: &Reading) -> Option<Address> {
 fn test_rewriting_the_keyless_deploy_synthetic_result_is_refused() {
     let deploy_tx = || {
         let data = IKeylessDeploy::keylessDeployCall {
-            keylessDeploymentTransaction: keyless_tx_bytes(),
+            keylessDeploymentTransaction: keyless_tx_bytes(
+                // MSTORE8 a STOP at offset 0, then return that one byte as the runtime code.
+                BytecodeBuilder::default()
+                    .push_number(u128::from(STOP))
+                    .push_number(0u64)
+                    .append(0x53) // MSTORE8
+                    .push_number(1u64)
+                    .push_number(0u64)
+                    .append(RETURN)
+                    .build(),
+                200_000,
+            ),
             gasLimitOverride: U256::from(1_000_000u64),
         }
         .abi_encode();

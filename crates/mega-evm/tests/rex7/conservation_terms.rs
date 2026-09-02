@@ -26,13 +26,12 @@
 //!   `test_negative_derivation_is_clamped_to_zero`.
 
 use crate::common::{
-    default_envs, transact_default, transact_tx, Outcome, CALLEE, CALLER, CONTRACT, EMPTY_TARGET,
-    ONE_ETH,
+    default_envs, keyless_tx_bytes, transact_default, transact_tx, Outcome, CALLEE, CALLER,
+    CONTRACT, EMPTY_TARGET, ONE_ETH,
 };
-use alloy_primitives::{address, hex, Address, Bytes, Signature, TxKind, B256, U256};
+use alloy_primitives::{address, Address, Bytes, U256};
 use alloy_sol_types::SolCall as _;
 use mega_evm::{
-    alloy_consensus::{Signed, TxLegacy},
     test_utils::{BytecodeBuilder, MemoryDatabase},
     EvmTxRuntimeLimits, IKeylessDeploy, MegaSpecId, KEYLESS_DEPLOY_ADDRESS,
 };
@@ -40,7 +39,6 @@ use revm::{
     bytecode::opcode::{ADD, CALL, MSTORE8, POP, STOP},
     context::tx::TxEnvBuilder,
 };
-use std::vec::Vec;
 
 /// Empty accounts the value-transferring calls pay into. Each one is fresh, so every call really
 /// transfers value and really mints a stipend.
@@ -266,26 +264,6 @@ fn test_stipend_is_minted_by_a_value_call_whose_child_frame_never_runs() {
         with_destroyed_envelope.booked_destroyed(),
         "the derived remainder and the per-site bookings must agree",
     );
-}
-
-/// Builds a deterministic pre-EIP-155 keyless deployment transaction.
-fn keyless_tx_bytes(init_code: Bytes, gas_limit: u64) -> Bytes {
-    let tx = TxLegacy {
-        nonce: 0,
-        gas_price: 100_000_000_000,
-        gas_limit,
-        to: TxKind::Create,
-        value: U256::ZERO,
-        input: init_code,
-        chain_id: None,
-    };
-    let word = U256::from_be_bytes(hex!(
-        "3333333333333333333333333333333333333333333333333333333333333333"
-    ));
-    let signed = Signed::new_unchecked(tx, Signature::new(word, word, false), B256::ZERO);
-    let mut buf = Vec::new();
-    signed.rlp_encode(&mut buf);
-    Bytes::from(buf)
 }
 
 /// Runs one `KeylessDeploy` whose sandbox executes `init_code` with `gas_limit`.

@@ -14,7 +14,8 @@
 //! remaining, which is what the interceptor reads once the frames have been popped.
 
 use crate::common::{
-    base_db, context, drive, transact, Outcome, CALLEE, CALLER, CONTRACT, DEFAULT_TX_GAS_LIMIT,
+    base_db, context, drive, rex7_compute_limit, stop_only, transact, Outcome, CALLEE, CALLER,
+    CONTRACT, DEFAULT_TX_GAS_LIMIT,
 };
 use alloy_primitives::{Bytes, U256};
 use alloy_sol_types::{SolCall as _, SolError};
@@ -38,10 +39,6 @@ const SELFBALANCE_STATIC_GAS: u64 = 5;
 /// Slot the nested caller stores its `remainingComputeGas` reading into.
 const REMAINING_SLOT: u64 = 0xc0;
 
-fn compute_limit(limit: u64) -> EvmTxRuntimeLimits {
-    EvmTxRuntimeLimits::from_spec(MegaSpecId::REX7).with_tx_compute_gas_limit(limit)
-}
-
 /// Codex / knife-edge program: `TIMESTAMP; POP; STOP`.
 fn timestamp_pop_stop() -> Bytes {
     BytecodeBuilder::default().append(TIMESTAMP).append(POP).stop().build()
@@ -60,10 +57,6 @@ fn selfbalance_pop_stop() -> Bytes {
 /// Dedicated-checkpoint sibling of [`timestamp_stop`]: `SELFBALANCE; STOP`.
 fn selfbalance_stop() -> Bytes {
     BytecodeBuilder::default().append(SELFBALANCE).stop().build()
-}
-
-fn stop_only() -> Bytes {
-    BytecodeBuilder::default().append(STOP).build()
 }
 
 struct GuardPassRun {
@@ -99,10 +92,6 @@ fn intrinsic_stop() -> Outcome {
         base_db(stop_only()),
         EvmTxRuntimeLimits::from_spec(MegaSpecId::REX7),
     )
-}
-
-fn storage_overhead(intrinsic: &Outcome) -> u64 {
-    intrinsic.gas_used - intrinsic.compute_gas
 }
 
 fn assert_timestamp_marked(label: &str, run: &GuardPassRun) {
@@ -190,7 +179,7 @@ fn test_top_frame_timestamp_one_below_static_gas_reverts_after_the_body() {
     let limit = intrinsic.compute_gas + TIMESTAMP_STATIC_GAS - 1;
     assert_eq!(limit, 21_001);
 
-    let run = run(timestamp_pop_stop(), compute_limit(limit));
+    let run = run(timestamp_pop_stop(), rex7_compute_limit(limit));
 
     let decoded = decode_top_revert("headroom=static-1", &run.outcome);
     assert_eq!(decoded.kind, LimitKind::ComputeGas.as_u8());
@@ -210,7 +199,7 @@ fn test_top_frame_timestamp_one_below_static_gas_reverts_after_the_body() {
     assert_eq!(run.outcome.compute_gas, 21_002);
     assert_eq!(
         run.outcome.gas_used,
-        run.outcome.compute_gas + storage_overhead(&intrinsic),
+        run.outcome.compute_gas + intrinsic.storage_overhead(),
         "receipt gas is compute plus the intrinsic storage component"
     );
     assert_eq!(run.outcome.gas_used, 60_002);
@@ -231,7 +220,7 @@ fn test_top_frame_timestamp_at_static_gas_continues() {
     let limit = intrinsic.compute_gas + TIMESTAMP_STATIC_GAS;
     assert_eq!(limit, 21_002);
 
-    let run = run(timestamp_stop(), compute_limit(limit));
+    let run = run(timestamp_stop(), rex7_compute_limit(limit));
 
     assert!(
         run.outcome.is_success(),
@@ -239,7 +228,7 @@ fn test_top_frame_timestamp_at_static_gas_continues() {
         run.outcome.result
     );
     assert_eq!(run.outcome.compute_gas, intrinsic.compute_gas + TIMESTAMP_STATIC_GAS);
-    assert_eq!(run.outcome.gas_used, run.outcome.compute_gas + storage_overhead(&intrinsic),);
+    assert_eq!(run.outcome.gas_used, run.outcome.compute_gas + intrinsic.storage_overhead(),);
     assert_timestamp_marked("headroom=static_gas", &run);
     assert_eq!(run.remaining_compute_gas, 0);
 }
@@ -257,7 +246,7 @@ fn test_nested_timestamp_one_below_static_gas_reverts_after_the_body() {
     let before = empty.outcome.compute_gas;
     let limit = before + TIMESTAMP_STATIC_GAS - 1;
 
-    let run = run_db(nested_db(timestamp_stop()), compute_limit(limit));
+    let run = run_db(nested_db(timestamp_stop()), rex7_compute_limit(limit));
 
     assert_timestamp_marked("nested headroom=static-1", &run);
     assert_eq!(
@@ -298,7 +287,7 @@ fn test_nested_timestamp_at_static_gas_continues() {
     let before = empty.outcome.compute_gas;
     let limit = before + TIMESTAMP_STATIC_GAS;
 
-    let run = run_db(nested_db(timestamp_stop()), compute_limit(limit));
+    let run = run_db(nested_db(timestamp_stop()), rex7_compute_limit(limit));
 
     assert_timestamp_marked("nested headroom=static_gas", &run);
     assert_eq!(run.outcome.compute_gas, before + TIMESTAMP_STATIC_GAS);
@@ -363,7 +352,7 @@ fn test_top_frame_selfbalance_one_below_static_gas_reverts_after_the_body() {
     let limit = intrinsic.compute_gas + SELFBALANCE_STATIC_GAS - 1;
     assert_eq!(limit, 21_004);
 
-    let run = run(selfbalance_pop_stop(), compute_limit(limit));
+    let run = run(selfbalance_pop_stop(), rex7_compute_limit(limit));
 
     let decoded = decode_top_revert("SELFBALANCE headroom=static-1", &run.outcome);
     assert_eq!(decoded.kind, LimitKind::ComputeGas.as_u8());
@@ -383,7 +372,7 @@ fn test_top_frame_selfbalance_one_below_static_gas_reverts_after_the_body() {
     assert_eq!(run.outcome.compute_gas, 21_005);
     assert_eq!(
         run.outcome.gas_used,
-        run.outcome.compute_gas + storage_overhead(&intrinsic),
+        run.outcome.compute_gas + intrinsic.storage_overhead(),
         "receipt gas is compute plus the intrinsic storage component"
     );
     assert_eq!(run.outcome.gas_used, 60_005);
@@ -403,7 +392,7 @@ fn test_top_frame_selfbalance_at_static_gas_continues() {
     let limit = intrinsic.compute_gas + SELFBALANCE_STATIC_GAS;
     assert_eq!(limit, 21_005);
 
-    let run = run(selfbalance_stop(), compute_limit(limit));
+    let run = run(selfbalance_stop(), rex7_compute_limit(limit));
 
     assert!(
         run.outcome.is_success(),
@@ -411,6 +400,6 @@ fn test_top_frame_selfbalance_at_static_gas_continues() {
         run.outcome.result
     );
     assert_eq!(run.outcome.compute_gas, intrinsic.compute_gas + SELFBALANCE_STATIC_GAS);
-    assert_eq!(run.outcome.gas_used, run.outcome.compute_gas + storage_overhead(&intrinsic),);
+    assert_eq!(run.outcome.gas_used, run.outcome.compute_gas + intrinsic.storage_overhead(),);
     assert_eq!(run.remaining_compute_gas, 0);
 }

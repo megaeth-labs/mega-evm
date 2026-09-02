@@ -25,14 +25,13 @@
 //! which side of the enforcing boundary each part lands on.
 
 use crate::common::{
-    base_db, drive, plain_filler, transact, transact_default, transact_tx,
+    base_db, drive, keyless_tx_bytes, plain_filler, transact, transact_default, transact_tx,
     transact_with_bucket_capacity, transact_with_gas_limit, zero_operator_fee, Outcome, CALLEE,
     CALLER, CONTRACT, DEFAULT_TX_GAS_LIMIT, ONE_ETH,
 };
-use alloy_primitives::{address, hex, Address, Bytes, Signature, TxKind, B256, U256};
+use alloy_primitives::{address, Address, Bytes, U256};
 use alloy_sol_types::SolCall as _;
 use mega_evm::{
-    alloy_consensus::{Signed, TxLegacy},
     alloy_op_evm::OpTxError,
     constants::mini_rex::{CODEDEPOSIT_STORAGE_GAS, LOG_DATA_STORAGE_GAS, MAX_CONTRACT_SIZE},
     test_utils::{BytecodeBuilder, MemoryDatabase},
@@ -602,26 +601,6 @@ fn test_the_split_is_the_same_under_an_inspector() {
     );
 }
 
-/// Builds a deterministic pre-EIP-155 keyless deployment transaction.
-fn keyless_tx_bytes(init_code: Bytes) -> Bytes {
-    let tx = TxLegacy {
-        nonce: 0,
-        gas_price: 100_000_000_000,
-        gas_limit: 200_000,
-        to: TxKind::Create,
-        value: U256::ZERO,
-        input: init_code,
-        chain_id: None,
-    };
-    let word = U256::from_be_bytes(hex!(
-        "3333333333333333333333333333333333333333333333333333333333333333"
-    ));
-    let signed = Signed::new_unchecked(tx, Signature::new(word, word, false), B256::ZERO);
-    let mut buf = Vec::new();
-    signed.rlp_encode(&mut buf);
-    Bytes::from(buf)
-}
-
 /// The `KeylessDeploy` sandbox runs a whole nested transaction with its own tracker and merges the
 /// usage back, so the executed / destroyed split has to survive that boundary. A sandbox whose
 /// constructor halts exceptionally reports its destroyed remainder like any other frame; if the
@@ -636,7 +615,7 @@ fn test_sandbox_destroyed_remainder_stays_non_enforcing_across_the_merge() {
     // envelope is destroyed rather than performed.
     let init_code = BytecodeBuilder::default().append(ADD).append(STOP).build();
     let call_data = IKeylessDeploy::keylessDeployCall {
-        keylessDeploymentTransaction: keyless_tx_bytes(init_code),
+        keylessDeploymentTransaction: keyless_tx_bytes(init_code, 200_000),
         gasLimitOverride: U256::from(1_000_000u64),
     }
     .abi_encode();

@@ -16,8 +16,8 @@
 //! enforcement mechanism behind the first — the gas clamp — has its own suite in `gas_clamp`.
 
 use crate::common::{
-    base_db, plain_filler, transact, transact_default, transact_with_bucket_capacity, Outcome,
-    CALLEE, CONTRACT, EMPTY_TARGET,
+    base_db, countdown_loop_code, plain_filler, transact, transact_default,
+    transact_with_bucket_capacity, Outcome, CALLEE, CONTRACT, EMPTY_TARGET,
 };
 use alloy_primitives::{address, Address, Bytes, U256};
 use mega_evm::{
@@ -25,9 +25,8 @@ use mega_evm::{
     EvmTxRuntimeLimits, MegaSpecId,
 };
 use revm::bytecode::opcode::{
-    ADD, BALANCE, CALL, CALLCODE, CREATE, CREATE2, DELEGATECALL, DUP1, EXTCODEHASH, EXTCODESIZE,
-    GAS, JUMPDEST, JUMPI, LOG1, MUL, POP, SELFDESTRUCT, SLOAD, SSTORE, STATICCALL, STOP, SUB,
-    SWAP1, TIMESTAMP,
+    ADD, BALANCE, CALL, CALLCODE, CREATE, CREATE2, DELEGATECALL, EXTCODEHASH, EXTCODESIZE, GAS,
+    LOG1, MUL, POP, SELFDESTRUCT, SLOAD, SSTORE, STATICCALL, STOP, TIMESTAMP,
 };
 
 /// A third contract, so a CALL chain can reach depth 2.
@@ -120,29 +119,6 @@ fn assert_outcomes_match(label: &str, expect_success: bool, r6: &Outcome, r7: &O
         (r7.data_size, r7.kv_updates, r7.state_growth),
         "{label}: the non-compute dimensions must be unchanged",
     );
-}
-
-/// A countdown loop of cheap opcodes with no checkpoint anywhere inside the loop body:
-///
-/// ```text
-/// PUSH2 iterations; loop: JUMPDEST; PUSH1 1; SWAP1; SUB; DUP1; PUSH1 loop; JUMPI; STOP
-/// ```
-///
-/// `prefix` is prepended verbatim and participates in the jump-target offset.
-fn countdown_loop_code(prefix: &[u8], iterations: u16) -> Bytes {
-    let mut code = prefix.to_vec();
-    code.push(0x61); // PUSH2
-    code.extend_from_slice(&iterations.to_be_bytes());
-    let loop_target = u8::try_from(code.len()).expect("loop target must fit in a PUSH1");
-    code.push(JUMPDEST);
-    code.extend_from_slice(&[0x60, 0x01]); // PUSH1 1
-    code.push(SWAP1);
-    code.push(SUB);
-    code.push(DUP1);
-    code.extend_from_slice(&[0x60, loop_target]); // PUSH1 loop
-    code.push(JUMPI);
-    code.push(STOP);
-    Bytes::from(code)
 }
 
 /// A pure arithmetic loop settles only at the frame-exit checkpoint, and that single settlement

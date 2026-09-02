@@ -15,27 +15,18 @@
 //! settlement that runs after the exceed is latched.
 
 use crate::common::{
-    base_db, plain_filler as common_plain_filler, transact, transact_default,
-    transact_with_gas_limit, Outcome, CALLEE,
+    base_db, compute_limit, countdown_loop_code, plain_filler as common_plain_filler, transact,
+    transact_default, transact_with_gas_limit, Outcome, CALLEE,
 };
 use alloy_primitives::{Bytes, U256};
 use alloy_sol_types::SolError;
 use mega_evm::{
-    test_utils::BytecodeBuilder, EvmTxRuntimeLimits, LimitKind, MegaHaltReason, MegaLimitExceeded,
-    MegaSpecId,
+    test_utils::BytecodeBuilder, LimitKind, MegaHaltReason, MegaLimitExceeded, MegaSpecId,
 };
 use revm::{
-    bytecode::opcode::{
-        CALL, DUP1, EXP, JUMPDEST, JUMPI, MSTORE, POP, RETURN, RETURNDATACOPY, RETURNDATASIZE,
-        STOP, SUB, SWAP1,
-    },
+    bytecode::opcode::{CALL, EXP, MSTORE, POP, RETURN, RETURNDATACOPY, RETURNDATASIZE, STOP},
     context::result::ExecutionResult,
 };
-
-/// Per-spec runtime limits with the TX compute gas limit replaced.
-fn compute_limit(limit: u64) -> impl Fn(MegaSpecId) -> EvmTxRuntimeLimits {
-    move |spec| EvmTxRuntimeLimits::from_spec(spec).with_tx_compute_gas_limit(limit)
-}
 
 fn plain_filler(pairs: usize) -> Vec<u8> {
     common_plain_filler(BytecodeBuilder::default(), pairs).build_vec()
@@ -267,23 +258,6 @@ fn test_equal_value_clamp_on_a_spend_all_out_of_gas_matches_rex6_gas_used() {
 // ---------------------------------------------------------------------------------------------
 // The payload a clamp-induced exceed reports.
 // ---------------------------------------------------------------------------------------------
-
-/// A countdown loop of cheap plain opcodes, prefixed verbatim.
-fn countdown_loop_code(prefix: &[u8], iterations: u16) -> Bytes {
-    let mut code = prefix.to_vec();
-    code.push(0x61); // PUSH2
-    code.extend_from_slice(&iterations.to_be_bytes());
-    let loop_target = u8::try_from(code.len()).expect("loop target must fit in a PUSH1");
-    code.push(JUMPDEST);
-    code.extend_from_slice(&[0x60, 0x01]); // PUSH1 1
-    code.push(SWAP1);
-    code.push(SUB);
-    code.push(DUP1);
-    code.extend_from_slice(&[0x60, loop_target]); // PUSH1 loop
-    code.push(JUMPI);
-    code.push(STOP);
-    Bytes::from(code)
-}
 
 /// A caller that CALLs [`CALLEE`] and returns the sub-frame's return data verbatim, so the
 /// `MegaLimitExceeded` payload the sub-frame reverted with is observable from the receipt.

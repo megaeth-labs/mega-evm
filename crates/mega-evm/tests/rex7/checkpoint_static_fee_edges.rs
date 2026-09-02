@@ -15,7 +15,7 @@
 //! Each family has two top-frame edges, calibrated so the named headroom is the remaining compute
 //! at the opcode itself (prefix `PUSH` opcodes are measured out first).
 
-use crate::common::{base_db, transact, Outcome, CONTRACT};
+use crate::common::{base_db, rex7_compute_limit, stop_only, transact, Outcome, CONTRACT};
 use alloy_primitives::{Address, Bytes};
 use alloy_sol_types::SolError;
 use mega_evm::{
@@ -39,24 +39,12 @@ const LOG1_BODY_COMPUTE: u64 = 750;
 /// `CREATE` body fee. The REX7 table entry is 0; revm charges this inside the body.
 const CREATE_BODY_GAS: u64 = 32_000;
 
-fn compute_limit(limit: u64) -> EvmTxRuntimeLimits {
-    EvmTxRuntimeLimits::from_spec(MegaSpecId::REX7).with_tx_compute_gas_limit(limit)
-}
-
 fn run(code: Bytes, limit: u64) -> Outcome {
-    transact(MegaSpecId::REX7, base_db(code), compute_limit(limit))
+    transact(MegaSpecId::REX7, base_db(code), rex7_compute_limit(limit))
 }
 
 fn unconstrained(code: Bytes) -> Outcome {
     transact(MegaSpecId::REX7, base_db(code), EvmTxRuntimeLimits::from_spec(MegaSpecId::REX7))
-}
-
-fn stop_only() -> Bytes {
-    BytecodeBuilder::default().append(STOP).build()
-}
-
-fn storage_overhead(intrinsic: &Outcome) -> u64 {
-    intrinsic.gas_used - intrinsic.compute_gas
 }
 
 fn account_nonce(outcome: &Outcome, address: Address) -> u64 {
@@ -117,7 +105,7 @@ fn test_gas_one_below_static_is_a_plain_segment_crossing() {
         "GAS headroom=static-1",
         &outcome,
         limit,
-        storage_overhead(&intrinsic),
+        intrinsic.storage_overhead(),
     );
 }
 
@@ -136,7 +124,7 @@ fn test_gas_at_static_executes_the_body() {
         outcome.result
     );
     assert_eq!(outcome.compute_gas, intrinsic.compute_gas + GAS_STATIC_GAS);
-    assert_eq!(outcome.gas_used, outcome.compute_gas + storage_overhead(&intrinsic));
+    assert_eq!(outcome.gas_used, outcome.compute_gas + intrinsic.storage_overhead());
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -165,7 +153,7 @@ fn test_log1_one_below_static_is_a_plain_segment_crossing() {
         "LOG1 headroom=static-1",
         &outcome,
         limit,
-        storage_overhead(&intrinsic),
+        intrinsic.storage_overhead(),
     );
     assert!(
         outcome.result.logs().is_empty(),
@@ -203,7 +191,7 @@ fn test_log1_at_full_body_cost_emits_the_log() {
     assert_eq!(outcome.result.logs().len(), 1, "LOG1 body must emit exactly one log");
     assert_eq!(
         outcome.gas_used,
-        outcome.compute_gas + storage_overhead(&intrinsic) + LOG_TOPIC_STORAGE_GAS,
+        outcome.compute_gas + intrinsic.storage_overhead() + LOG_TOPIC_STORAGE_GAS,
         "receipt gas includes the LOG topic storage component"
     );
 }
@@ -265,7 +253,7 @@ fn test_create_one_below_body_fee_runs_then_reverts() {
     assert_eq!(account_nonce(&outcome, CONTRACT), 0, "the creator nonce must not advance");
     assert_eq!(
         outcome.gas_used,
-        outcome.compute_gas + storage_overhead(&intrinsic),
+        outcome.compute_gas + intrinsic.storage_overhead(),
         "empty-initcode CREATE adds no storage gas at minimum bucket capacity"
     );
 }
@@ -294,5 +282,5 @@ fn test_create_at_body_fee_creates_the_account() {
         "CREATE must leave one created account; created={:?}",
         created_addresses(&outcome)
     );
-    assert_eq!(outcome.gas_used, outcome.compute_gas + storage_overhead(&intrinsic));
+    assert_eq!(outcome.gas_used, outcome.compute_gas + intrinsic.storage_overhead());
 }

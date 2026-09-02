@@ -21,8 +21,8 @@
 //! all.
 
 use crate::common::{
-    assert_outcomes_identical, base_db as common_base_db, plain_filler, transact,
-    transact_with_gas_limit, Outcome, CALLEE, CONTRACT,
+    assert_outcomes_identical, base_db as common_base_db, compute_limit, countdown_loop_code,
+    detention_cap, plain_filler, transact, transact_with_gas_limit, Outcome, CALLEE, CONTRACT,
 };
 use alloy_primitives::{Bytes, U256};
 use alloy_sol_types::SolCall as _;
@@ -31,10 +31,7 @@ use mega_evm::{
     EvmTxRuntimeLimits, IMegaLimitControl, MegaHaltReason, MegaSpecId, LIMIT_CONTROL_ADDRESS,
     LIMIT_CONTROL_CODE,
 };
-use revm::bytecode::opcode::{
-    CALL, CREATE, DUP1, GAS, JUMPDEST, JUMPI, MSTORE, POP, RETURN, SSTORE, STOP, SUB, SWAP1,
-    TIMESTAMP,
-};
+use revm::bytecode::opcode::{CALL, CREATE, GAS, MSTORE, POP, RETURN, SSTORE, STOP, TIMESTAMP};
 
 /// Slot the caller stores its post-return `GAS` reading into.
 const GAS_READING_SLOT: u64 = 0x40;
@@ -43,37 +40,6 @@ const CALLEE_SLOT: u64 = 0x41;
 
 fn base_db(code: Bytes) -> MemoryDatabase {
     common_base_db(code).account_code(LIMIT_CONTROL_ADDRESS, LIMIT_CONTROL_CODE)
-}
-
-/// A countdown loop of cheap opcodes with no checkpoint anywhere inside the loop body.
-fn countdown_loop_code(prefix: &[u8], iterations: u16) -> Bytes {
-    let mut code = prefix.to_vec();
-    code.push(0x61); // PUSH2
-    code.extend_from_slice(&iterations.to_be_bytes());
-    let loop_target = u8::try_from(code.len()).expect("loop target must fit in a PUSH1");
-    code.push(JUMPDEST);
-    code.extend_from_slice(&[0x60, 0x01]); // PUSH1 1
-    code.push(SWAP1);
-    code.push(SUB);
-    code.push(DUP1);
-    code.extend_from_slice(&[0x60, loop_target]); // PUSH1 loop
-    code.push(JUMPI);
-    code.push(STOP);
-    Bytes::from(code)
-}
-
-/// Per-spec runtime limits with the TX compute gas limit replaced.
-fn compute_limit(limit: u64) -> impl Fn(MegaSpecId) -> EvmTxRuntimeLimits {
-    move |spec| EvmTxRuntimeLimits::from_spec(spec).with_tx_compute_gas_limit(limit)
-}
-
-/// Per-spec runtime limits with the block-environment detention cap replaced.
-fn detention_cap(cap: u64) -> impl Fn(MegaSpecId) -> EvmTxRuntimeLimits {
-    move |spec| {
-        let mut limits = EvmTxRuntimeLimits::from_spec(spec);
-        limits.block_env_access_compute_gas_limit = cap;
-        limits
-    }
 }
 
 /// A CALL to `target` forwarding `gas`, with no arguments and no return data, followed by the
