@@ -31,24 +31,23 @@ use alloy_evm::{
     EvmEnv, EvmFactory,
 };
 use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
-use alloy_primitives::{address, Address, Bytes, Log, Signature, TxHash, TxKind, B256, U256};
+use alloy_primitives::{address, Address, Bytes, Signature, TxHash, TxKind, B256, U256};
 use mega_evm::{
     alloy_consensus::{transaction::Recovered, Signed, TxLegacy},
     alloy_evm::block::BlockExecutionError,
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    BlockLimits, InspectorLedger, Lane, MegaBlockExecutionCtx, MegaBlockExecutorFactory,
-    MegaEvmFactory, MegaHardforkConfig, MegaSpecId, MegaTransactionNew as _,
-    MegaTransactionOutcome, MegaTxEnvelope, TestExternalEnvs, TrustedObserver,
+    BlockLimits, DeclaredObserver, InspectorLedger, Lane, MegaBlockExecutionCtx,
+    MegaBlockExecutorFactory, MegaEvmFactory, MegaHardforkConfig, MegaSpecId,
+    MegaTransactionNew as _, MegaTransactionOutcome, MegaTxEnvelope, TestExternalEnvs,
 };
 use revm::{
     bytecode::opcode::{CALL, POP, STOP},
     context::{BlockEnv, Cfg, ContextTr},
     database::State,
-    handler::FrameResult,
     inspector::NoOpInspector,
     interpreter::{
-        interpreter_types::MemoryTr, CallInputs, CallOutcome, CreateInputs, CreateOutcome,
-        FrameInput, InstructionResult, Interpreter, InterpreterTypes,
+        interpreter_types::MemoryTr, CallInputs, CallOutcome, InstructionResult, Interpreter,
+        InterpreterTypes,
     },
     Inspector,
 };
@@ -168,102 +167,6 @@ struct Observer {
 impl<CTX, INTR: InterpreterTypes> Inspector<CTX, INTR> for Observer {
     fn step(&mut self, _interp: &mut Interpreter<INTR>, _context: &mut CTX) {
         self.steps += 1;
-    }
-}
-
-/// The same observer, with its author's declaration that it writes nothing back.
-///
-/// A separate type rather than a declaration on [`Observer`], because the pair is the experiment:
-/// the two behave identically and only one of them is admitted, which is what says the criterion
-/// is the declaration and not the behaviour.
-#[derive(Default)]
-struct DeclaredObserver {
-    inner: Observer,
-}
-
-impl TrustedObserver for DeclaredObserver {}
-
-impl<CTX, INTR: InterpreterTypes> Inspector<CTX, INTR> for DeclaredObserver {
-    fn step(&mut self, interp: &mut Interpreter<INTR>, context: &mut CTX) {
-        self.inner.step(interp, context);
-    }
-}
-
-/// A read-only declaration around `revm-inspectors`' geth tracer.
-///
-/// The orphan rule keeps `TrustedObserver` from being implemented for `TracingInspector` directly
-/// — from a downstream node both are foreign — so the declaration is made about a local newtype
-/// that forwards every callback unchanged. `bin/mega-evme`'s replay command carries the same shape
-/// for the same reason, and it is the shape a node writes to keep tracing block production.
-struct TrustedTracer(revm_inspectors::tracing::TracingInspector);
-
-impl TrustedObserver for TrustedTracer {}
-
-impl<CTX, INTR> Inspector<CTX, INTR> for TrustedTracer
-where
-    INTR: InterpreterTypes,
-    revm_inspectors::tracing::TracingInspector: Inspector<CTX, INTR>,
-{
-    fn initialize_interp(&mut self, interp: &mut Interpreter<INTR>, context: &mut CTX) {
-        self.0.initialize_interp(interp, context);
-    }
-
-    fn step(&mut self, interp: &mut Interpreter<INTR>, context: &mut CTX) {
-        self.0.step(interp, context);
-    }
-
-    fn step_end(&mut self, interp: &mut Interpreter<INTR>, context: &mut CTX) {
-        self.0.step_end(interp, context);
-    }
-
-    fn log(&mut self, context: &mut CTX, log: Log) {
-        self.0.log(context, log);
-    }
-
-    fn log_full(&mut self, interp: &mut Interpreter<INTR>, context: &mut CTX, log: Log) {
-        self.0.log_full(interp, context, log);
-    }
-
-    fn frame_start(
-        &mut self,
-        context: &mut CTX,
-        frame_input: &mut FrameInput,
-    ) -> Option<FrameResult> {
-        self.0.frame_start(context, frame_input)
-    }
-
-    fn frame_end(
-        &mut self,
-        context: &mut CTX,
-        frame_input: &FrameInput,
-        frame_result: &mut FrameResult,
-    ) {
-        self.0.frame_end(context, frame_input, frame_result);
-    }
-
-    fn call(&mut self, context: &mut CTX, inputs: &mut CallInputs) -> Option<CallOutcome> {
-        self.0.call(context, inputs)
-    }
-
-    fn call_end(&mut self, context: &mut CTX, inputs: &CallInputs, outcome: &mut CallOutcome) {
-        self.0.call_end(context, inputs, outcome);
-    }
-
-    fn create(&mut self, context: &mut CTX, inputs: &mut CreateInputs) -> Option<CreateOutcome> {
-        self.0.create(context, inputs)
-    }
-
-    fn create_end(
-        &mut self,
-        context: &mut CTX,
-        inputs: &CreateInputs,
-        outcome: &mut CreateOutcome,
-    ) {
-        self.0.create_end(context, inputs, outcome);
-    }
-
-    fn selfdestruct(&mut self, contract: Address, target: Address, value: U256) {
-        self.0.selfdestruct(contract, target, value);
     }
 }
 
@@ -624,9 +527,9 @@ fn test_the_refusal_is_not_spec_gated() {
 /// The green half: a declared observer is left alone, and the block it helps build is bit-identical
 /// to the one built without it.
 ///
-/// [`Observer`] and [`DeclaredObserver`] do exactly the same thing, and only the declared one gets
-/// here — so this and [`test_run_transaction_refuses_an_undeclared_inspector`] together say the
-/// criterion really is the declaration.
+/// The inspector is the same [`Observer`] the refusal test uses, wrapped in `DeclaredObserver` and
+/// so declared — the two runs do exactly the same thing and only one of them is admitted, which is
+/// what says the criterion really is the declaration and not the behaviour of the run.
 #[test]
 fn test_a_declared_observer_still_builds_a_block() {
     let build = |observe: bool| {
@@ -639,7 +542,7 @@ fn test_a_declared_observer_still_builds_a_block() {
                 &mut state,
                 block_ctx(),
                 evm_env(MegaSpecId::REX7),
-                DeclaredObserver::default(),
+                DeclaredObserver(Observer::default()),
             );
             let outcome = executor
                 .run_transaction(Recovered::new_unchecked(&tx, CALLER))
@@ -647,7 +550,7 @@ fn test_a_declared_observer_still_builds_a_block() {
             assert!(!outcome.inner.undeclared_inspector, "and must report itself declared");
             assert!(outcome.inner.inspector_ledger.is_zero(), "and must leave an empty ledger");
             let gas = executor.commit_transaction_outcome(outcome).expect("nor at commit");
-            let steps = executor.evm().inspector.inner.steps;
+            let steps = executor.evm().inspector.0.steps;
             let (_, result) = executor.finish().expect("the block must finish");
             assert_eq!(result.receipts.len(), 1, "the observed block still has its receipt");
             (gas, steps)
@@ -699,7 +602,7 @@ fn test_the_no_op_inspector_is_admitted() {
 /// The real tracer that `mega-evme replay` attaches to this exact path is admitted through its
 /// declaration, and the block it observes is the one built without it.
 ///
-/// The `DeclaredObserver` above is a fixture; this is the production shape, newtype and all.
+/// The observer above is a fixture; this is the production shape, wrapper and all.
 /// `TracingInspector` receives every callback the shim measures — including the ones handed a live
 /// interpreter and the ones handed a frame's inputs — so if observation could move a lane by
 /// accident, it would move one here. Run rather than reasoned about: the refusal's blast radius is
@@ -714,7 +617,7 @@ fn test_the_production_tracer_is_admitted() {
         &mut state,
         block_ctx(),
         evm_env(MegaSpecId::REX7),
-        TrustedTracer(TracingInspector::new(TracingInspectorConfig::all())),
+        DeclaredObserver(TracingInspector::new(TracingInspectorConfig::all())),
     );
 
     let tx = envelope(0);
@@ -738,7 +641,7 @@ fn test_the_production_tracer_is_admitted() {
     assert_eq!(result.receipts.len(), 1);
 }
 
-/// The bare `TracingInspector`, without the newtype, is refused — which is what makes the newtype
+/// The bare `TracingInspector`, without the wrapper, is refused — which is what makes the wrapper
 /// load-bearing rather than decorative.
 #[test]
 fn test_the_production_tracer_without_its_declaration_is_refused() {

@@ -3,6 +3,7 @@
 mod accessed_block_hashes;
 mod block_limits;
 mod compute_gas_lanes;
+mod declared_observer;
 mod deposit_da_exemption;
 mod inspector;
 mod inspector_guard;

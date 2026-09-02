@@ -88,9 +88,9 @@ pub const FORBIDDEN_FRAME_INIT_REWRITE: &str =
 /// - **Do not implement it for anything that intercepts.** An inspector that answers a frame
 ///   itself, edits inputs, or rewrites a result is a rewriting inspector however little it
 ///   rewrites; those are supported, measured, and must stay measured.
-/// - **A foreign inspector needs a newtype.** The orphan rule wants one of the trait and the type
-///   to be local, and for a `revm-inspectors` tracer neither is, so a node declares a forwarding
-///   newtype of its own.
+/// - **A foreign inspector needs a wrapper.** The orphan rule wants one of the trait and the type
+///   to be local, and for a `revm-inspectors` tracer neither is, so a node wraps it in
+///   [`DeclaredObserver`], which is local here and carries the declaration.
 ///
 /// Debug builds measure a declared type anyway and assert the ledger stayed empty after every
 /// callback, so a wrong declaration fails at the callback that broke it.
@@ -105,6 +105,127 @@ impl TrustedObserver for revm::inspector::NoOpInspector {}
 /// back afterwards. This lifts the declaration to the same shape, and it grants nothing: `&mut T`
 /// is declared exactly when `T` is, so no type becomes trusted that was not trusted already.
 impl<T: TrustedObserver + ?Sized> TrustedObserver for &mut T {}
+
+/// Carries a [`TrustedObserver`] declaration for an inspector whose type cannot carry one.
+///
+/// The orphan rule wants one of the trait and the type to be local, and for a `revm-inspectors`
+/// tracer used from a node neither is. This is the local half, supplied once here so that every
+/// embedder does not write it again: it forwards every callback of the `Inspector` trait to the
+/// inspector inside it and adds nothing of its own.
+///
+/// The declaration is still an assertion someone makes in source about one concrete inspector —
+/// `DeclaredObserver` only moves where it is written, from a newtype's definition to the line that
+/// wraps the value. `DeclaredObserver(tracer)` says "I have read this tracer and it writes nothing
+/// back to the EVM", exactly as a hand-written forwarding newtype did, and it is subject to the
+/// same rules: wrapping something that intercepts or rewrites is a false declaration, and a debug
+/// build will fail at the callback that breaks it. It is a way of writing the promise, not a way
+/// around it.
+///
+/// ```ignore
+/// let executor = factory.create_executor_with_trusted_inspector(
+///     db,
+///     block_ctx,
+///     evm_env,
+///     DeclaredObserver(TracingInspector::new(TracingInspectorConfig::all())),
+/// );
+/// ```
+///
+/// Forwarding by hand is what this replaces, and the reason is that a hand-written forwarder fails
+/// quietly: every `Inspector` method has a default body, so a callback revm adds and a forwarder
+/// misses is not a compile error but a callback the wrapped inspector stops receiving.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DeclaredObserver<I>(pub I);
+
+impl<I> DeclaredObserver<I> {
+    /// Declares `inner` read-only and wraps it.
+    pub const fn new(inner: I) -> Self {
+        Self(inner)
+    }
+
+    /// The declared inspector.
+    pub const fn inner(&self) -> &I {
+        &self.0
+    }
+
+    /// The declared inspector, mutably.
+    pub const fn inner_mut(&mut self) -> &mut I {
+        &mut self.0
+    }
+
+    /// Unwraps the declaration, returning the inspector it was made about.
+    pub fn into_inner(self) -> I {
+        self.0
+    }
+}
+
+/// The whole of what the wrapper is for.
+impl<I> TrustedObserver for DeclaredObserver<I> {}
+
+/// Every callback of revm 40's `Inspector`, forwarded unchanged.
+///
+/// Written out in full rather than left to the trait's default bodies: a default body does not
+/// forward, it does nothing, so an unlisted callback would be one the wrapped inspector silently
+/// stops receiving. `tests/block_executor/declared_observer.rs` compares the callback sequence a
+/// recording inspector sees wrapped against the one it sees bare, which is what turns an upstream
+/// callback added here and not forwarded into a failing test.
+impl<CTX, INTR, FI, FR, I> Inspector<CTX, INTR, FI, FR> for DeclaredObserver<I>
+where
+    INTR: InterpreterTypes,
+    I: Inspector<CTX, INTR, FI, FR>,
+{
+    fn initialize_interp(&mut self, interp: &mut Interpreter<INTR>, context: &mut CTX) {
+        self.0.initialize_interp(interp, context);
+    }
+
+    fn step(&mut self, interp: &mut Interpreter<INTR>, context: &mut CTX) {
+        self.0.step(interp, context);
+    }
+
+    fn step_end(&mut self, interp: &mut Interpreter<INTR>, context: &mut CTX) {
+        self.0.step_end(interp, context);
+    }
+
+    fn log(&mut self, context: &mut CTX, log: Log) {
+        self.0.log(context, log);
+    }
+
+    fn log_full(&mut self, interp: &mut Interpreter<INTR>, context: &mut CTX, log: Log) {
+        self.0.log_full(interp, context, log);
+    }
+
+    fn frame_start(&mut self, context: &mut CTX, frame_input: &mut FI) -> Option<FR> {
+        self.0.frame_start(context, frame_input)
+    }
+
+    fn frame_end(&mut self, context: &mut CTX, frame_input: &FI, frame_result: &mut FR) {
+        self.0.frame_end(context, frame_input, frame_result);
+    }
+
+    fn call(&mut self, context: &mut CTX, inputs: &mut CallInputs) -> Option<CallOutcome> {
+        self.0.call(context, inputs)
+    }
+
+    fn call_end(&mut self, context: &mut CTX, inputs: &CallInputs, outcome: &mut CallOutcome) {
+        self.0.call_end(context, inputs, outcome);
+    }
+
+    fn create(&mut self, context: &mut CTX, inputs: &mut CreateInputs) -> Option<CreateOutcome> {
+        self.0.create(context, inputs)
+    }
+
+    fn create_end(
+        &mut self,
+        context: &mut CTX,
+        inputs: &CreateInputs,
+        outcome: &mut CreateOutcome,
+    ) {
+        self.0.create_end(context, inputs, outcome);
+    }
+
+    fn selfdestruct(&mut self, contract: Address, target: Address, value: U256) {
+        self.0.selfdestruct(contract, target, value);
+    }
+}
 
 /// Wraps a user inspector so that what it does to gas accounting is measured and booked.
 ///

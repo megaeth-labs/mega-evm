@@ -281,9 +281,10 @@ pub enum MegaBlockExecutionError {
     /// the type's author declared and not what this run happened to do.
     ///
     /// A tracer keeps working by being declared. `revm-inspectors`' tracers are foreign types and
-    /// the trait is local to this crate, so a node writes a forwarding newtype of its own and
-    /// declares that; `bin/mega-evme`'s replay command does exactly this. An embedder that wants a
-    /// rewriting inspector still has one — [`MegaEvm::execute_transaction`](
+    /// the trait is local to this crate, so a node wraps one in
+    /// [`DeclaredObserver`](crate::DeclaredObserver), which carries the declaration and forwards
+    /// every callback; `bin/mega-evme`'s replay command does exactly this. An embedder that wants
+    /// a rewriting inspector still has one — [`MegaEvm::execute_transaction`](
     /// crate::MegaEvm::execute_transaction) supports it in full — it just does not get to call the
     /// result a block.
     #[error(

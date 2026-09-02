@@ -130,7 +130,9 @@ There is no behavioural fork between the two builds for a declaration that holds
 
 **What may be declared.** Read-only tracers: the `revm-inspectors` `TracingInspector` family (`debug_traceTransaction`, `trace_*`, the call and prestate tracers) and anything else that only records what it is shown.
 `NoOpInspector` is declared here, being the only inspector this crate can reach.
-The rest cannot be declared from here or from `mega-reth`, because the orphan rule wants one of the two to be local and neither the trait nor `TracingInspector` is: a node declares a newtype of its own that forwards every callback, which `benches/common/subject.rs` does for the `inspect_tracer_trusted` rows and is the shape to copy.
+The rest cannot be declared from here or from `mega-reth`, because the orphan rule wants one of the two to be local and neither the trait nor `TracingInspector` is: a node wraps the tracer in `DeclaredObserver`, which is local here, carries the declaration and forwards every callback, so the whole of what an embedder writes is `DeclaredObserver(tracer)`.
+The declaration is still an assertion made in source about one concrete inspector — the wrapper moves where it is written, from a newtype's definition to the line that wraps the value, and is not a way around the rules above.
+`benches/common/subject.rs` uses it for the `inspect_tracer_trusted` rows and is the shape to copy.
 A wrapper that does nothing but forward may lift a declaration — `&mut T` does — but only from a concrete declared type; a wrapper that adds behaviour of its own is a type in its own right and has to be read on its own terms.
 
 **What may not be declared.** Anything that intercepts or rewrites, however little.
@@ -144,7 +146,7 @@ The route is `factory.create_evm(db, env).with_trusted_inspector(tracer)`, which
 `MegaBlockExecutorFactory::create_executor_with_trusted_inspector` is that route packaged for the block path, and it is the entry a node tracing block production or validation takes.
 There is no undeclared counterpart on the factory: an inspector without a declaration reaches an executor only by building the EVM and passing it to the `BlockExecutorFactory` trait entry below, which is the shape a node already uses and which refuses the transactions rather than the construction.
 `create_executor` (the `BlockExecutorFactory` trait method) takes an EVM the caller already built and checks nothing about its inspector, because the question is a runtime one the executor's own entries ask per transaction — an error that fails the block rather than an assertion that stops the process.
-`bin/mega-evme`'s replay command is the worked example of the whole shape: a `TrustedTracingInspector` newtype declared over `revm-inspectors`' tracer, handed to `create_executor_with_trusted_inspector`.
+`bin/mega-evme`'s replay command is the worked example of the whole shape: `DeclaredObserver(TracingInspector::new(..))`, handed to `create_executor_with_trusted_inspector`.
 
 **Which shim an EVM ends up with.** `MegaEvm::new` and `without_inspector` build the declared shim over `NoOpInspector`, because `Evm::set_inspector_enabled` is a public trait method: an EVM built with no inspector can have its shim switched on without any constructor being reached, and everything that then runs is `NoOpInspector`.
 `with_trusted_inspector` is the only other route to the declared shim; `with_inspector` and `InspectEvm::set_inspector` build the measured one, the latter even for a type that carries a declaration, since its bound is plain `Inspector`.

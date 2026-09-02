@@ -110,8 +110,9 @@ where
     /// takes an EVM the caller built and whose transactions are then refused one by one.
     ///
     /// A `revm-inspectors` tracer cannot be declared where both it and the trait are foreign, so a
-    /// node writes a forwarding newtype of its own and declares that; `bin/mega-evme`'s replay
-    /// command is the shape to copy.
+    /// node wraps it in [`DeclaredObserver`](crate::DeclaredObserver), which is local here, carries
+    /// the declaration and forwards every callback; `bin/mega-evme`'s replay command is the shape
+    /// to copy.
     ///
     /// # Parameters
     ///

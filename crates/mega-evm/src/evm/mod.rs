@@ -239,7 +239,7 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
     /// builds measure anyway and assert that the declaration held.
     ///
     /// See [`TrustedObserver`] for what the declaration promises and what it may not be written
-    /// for.
+    /// for, and [`DeclaredObserver`] for how a tracer this crate cannot name gets one.
     ///
     /// [`EvmFactory::create_evm_with_inspector`](alloy_evm::EvmFactory::create_evm_with_inspector)
     /// cannot reach this — its bound is `I: Inspector` and its return type is fixed — so a node
