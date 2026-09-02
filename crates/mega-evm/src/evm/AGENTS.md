@@ -61,8 +61,9 @@ Read the table by the *argument the rewrite reaches through*, not by the tool th
 | A finished outcome's metadata — a call's `memory_offset`, a creation's `address`, the two flags beside them (`call_end`, `create_end`, `frame_end`) | Supported | `InspectorLedger::interventions`, at the callback boundary | nothing: it changes what the caller reads next, not what the frame cost |
 | A refund written into any `Gas` a callback holds | Supported | `InspectorLedger::refund`, at the callback boundary, nominally | nothing: a refund moves `tx_gas_used`, not the `limit - remaining` the conservation law is stated over |
 | The EIP-8037 state-gas pool or spend counter, on any `Gas` or on a call's inputs | Supported | `InspectorLedger::reservoir` / `::state_gas`, settled once from the figures the transaction ends with | the pool lowers the envelope the receipt reports, so it joins the law's `I` term; the spend counter moves the receipt's state-gas figure and nothing else |
-| A successful frame result rewritten into a revert or a halt | Supported | `InspectorLedger::interventions` — no gas moves | the journal decision follows the final result, so the frame's state is rolled back with it; a precompile's executed/destroyed split follows it too |
+| A successful frame result rewritten into a revert or a halt | Supported | `InspectorLedger::interventions` — no gas moves | the journal decision follows the final result, so the frame's state is rolled back with it |
 | A failed **call** frame rewritten into a success | Supported | `InspectorLedger::interventions` | the journal commits, so the frame's state follows the result its caller was handed |
+| The classification of a result **frame init** produced, moved across the success / revert / halt boundary | **Refused** | `InspectorLedger::rejected_rewrites`, alongside `interventions` | `reject_forbidden_frame_init_rewrite` restores the original classification and fails the transaction with `EVMError::Custom` |
 | A failed **contract creation** rewritten into a success | **Refused** | `InspectorLedger::rejected_rewrites`, alongside `interventions` | `reject_forbidden_create_rewrite` restores the original classification and fails the transaction with `EVMError::Custom`; debug builds assert |
 | Any constant-time reading of a live interpreter's working set — its program counter, its code's identity, revm's `continue_execution` flag, the stack's length, the return buffer's identity, the memory's size and window offset, the memo of how far that memory has been paid for (`Gas::memory`), the frame's four identifying fields and its calldata's identity, the static flag, the spec id | Supported | `InspectorLedger::interventions`, at the callback boundary, off `inspector.rs::WorkingSet` | nothing directly — but a stepped program counter deletes an instruction from the frame, and growing the memory and the memo together skips the next expanding opcode's charge, which is why these need a booking at all |
 | The *contents* of the interpreter's stack, memory, return buffer, calldata or code, at unchanged identities | Supported, unmeasured | nothing — telling whether they came back changed needs a snapshot of unbounded state | the EVM executes on the edited state and meters it as its own work, because it is |
@@ -72,6 +73,28 @@ Read the table by the *argument the rewrite reaches through*, not by the tool th
 | `CfgEnv` or the active gas schedule | **Refused** | — | the gas-schedule pin panics; the schedule belongs to the spec, and a rewritten one has no accounting lane that could rescue it |
 
 Two independent stops back the creation refusal: the shim restores the classification, and `frame.rs`'s `FrameJournalVerdict::CreateRejected` carries no code and no commit branch, so even with the refusal removed such a rewrite deposits nothing.
+
+### Why an init-produced result's classification is refused
+
+The rest of the table rests on the REX7 deferral: a frame's journal decision is parked until after the last callback, so a rewrite of its classification is followed by the state it leaves behind.
+A result that comes out of frame init has no such window, and cannot be given one from here.
+revm decides the journal inside `make_call_frame`, statements before it returns — a value-transferring call into an empty-code account commits the transfer and returns `Stop`, a precompile that fails reverts it and returns its own failure — and `MegaETH`'s system contract interceptors decide theirs before they return, the `KeylessDeploy` one by merging a whole sandbox's state.
+All of it has happened by the time a callback sees the result, so honouring a rewrite hands the caller an answer the state behind it contradicts: a transfer the recipient keeps and the sender is told failed, or a deployment the caller is told reverted and that stands anyway.
+
+The refused set is the results `MegaEvm::init_frame_unsettled` returns, taken as a whole rather than arm by arm.
+Some of those arms carry no state a rewrite could contradict — a depth rejection, a limit refusal `MegaETH` took before revm opened a checkpoint — and are covered anyway, because the arms are revm's early-fail returns plus `MegaETH`'s interceptors and guards, a set with no type-level tie to anything here and one a revm bump grows without a compile error.
+A result an inspector answered the frame with itself is deliberately outside the set: nothing in the EVM decided anything for it, no checkpoint was opened and no state written, so its classification is the inspector's to state and rewriting it contradicts nothing.
+`execution.rs::frame_end_on_frame_init_result` is the one place the window is opened, which is what keeps the boundary a call site rather than a judgement repeated per arm.
+
+Gas and output are untouched by the refusal, on both sides of that boundary: they are measured on the lanes above either way.
+
+Unlike the creation refusal this one does not assert.
+The shape it catches is the most ordinary rewrite a tool makes — failing a call — landing on the one kind of frame it cannot be applied to, so a corpus that produces it has to be able to report it rather than die on it.
+`mega-state-test`'s chaos pool draws it on purpose (`ChaosShape::MoveInitResultClass`) and counts the refusals as `ChaosClass::Refused`.
+
+**Reopening condition.** A rewriting inspector could be given the same window a running frame has, by mirroring `make_call_frame` inside `MegaETH` so that the journal decision behind an init-produced result is parked on `deferred_journal` like every other.
+That is roughly a hundred lines of upstream frame-init logic duplicated, with no type-level tie to the original — the same exposure `evm/frame.rs` already carries once — and it buys one rewrite shape.
+Take it only if the shape turns out to be needed.
 
 Booking is a *reported* quantity throughout. No resource limit is ever compared against the ledger, and `MegaTransactionOutcome::compute_gas_enforced` comes off the enforcement lane rather than out of the reported total — so an inspector cannot buy a transaction headroom on any dimension.
 
