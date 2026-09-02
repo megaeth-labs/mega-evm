@@ -67,7 +67,7 @@ use revm::{
             InputsTr, Jumps, LegacyBytecode, LoopControl, MemoryTr, ReturnData, RuntimeFlag,
             StackTr,
         },
-        CallInput, CallInputs, CallOutcome, CreateInputs, CreateOutcome, FrameInput, Gas,
+        CallInput, CallInputs, CallOutcome, CreateInputs, CreateOutcome, FrameInput,
         InstructionResult, Interpreter, InterpreterAction, InterpreterResult, InterpreterTypes,
     },
     primitives::hardfork::SpecId,
@@ -175,9 +175,9 @@ impl ActionLane {
     /// # The gas the counter no longer speaks for
     ///
     /// What a dead-window counter edit cannot reach, an edit to the action itself can — and
-    /// [`measure_pending_action`] measures exactly that, against the same counter reading, so the
-    /// two together account for every unit of gas the frame holds. See [`held`] for the identity
-    /// they split.
+    /// [`LiveReading`] measures exactly that, against the same counter reading, so the two
+    /// together account for every unit of gas the frame holds. See [`held`] for the identity they
+    /// split.
     #[inline]
     const fn counter_reaches_envelope(self) -> bool {
         !matches!(self, Self::Result)
@@ -200,10 +200,10 @@ impl ActionLane {
 /// frame will spend nothing more — the action's own copy is what its caller reclaims, and the
 /// counter is dead.
 ///
-/// Both readings [`measure_pending_action`] takes use the counter *the EVM left behind*, so the
-/// counter cancels out of the difference wherever it appears on both sides. What is left is
-/// exactly the part of the movement that is not already on the counter lane, whatever the callback
-/// did to the action's shape.
+/// Both readings [`LiveReading`] takes use the counter *the EVM left behind*, so the counter
+/// cancels out of the difference wherever it appears on both sides. What is left is exactly the
+/// part of the movement that is not already on the counter lane, whatever the callback did to the
+/// action's shape.
 #[inline]
 fn held(action: Option<&InterpreterAction>, counter: u64) -> i128 {
     match action {
@@ -215,16 +215,16 @@ fn held(action: Option<&InterpreterAction>, counter: u64) -> i128 {
     }
 }
 
-/// The refund a frame and its pending continuation hold, given the action it is carrying and its
-/// own gas object.
+/// The refund a frame and its pending continuation hold, given the action it is carrying and the
+/// refund on its own gas counter.
 ///
 /// [`held`]'s counterpart on the refund dimension, and it has the same three cases for the same
 /// reason — the object the EVM will read next is the one the frame is holding:
 ///
 /// ```text
-/// held_refund(None,        gas) = gas.refunded()
-/// held_refund(NewFrame(_), gas) = gas.refunded()
-/// held_refund(Return(r),   gas) = r.gas.refunded()
+/// held_refund(None,        counter) = counter
+/// held_refund(NewFrame(_), counter) = counter
+/// held_refund(Return(r),   counter) = r.gas.refunded()
 /// ```
 ///
 /// The middle case differs from [`held`]'s: a `NewFrame` action carries a child's *envelope* but
@@ -235,9 +235,9 @@ fn held(action: Option<&InterpreterAction>, counter: u64) -> i128 {
 /// Read on both sides of a callback, the difference is the refund the inspector wrote — wherever
 /// it wrote it, and whichever of the two objects the EVM goes on to read.
 #[inline]
-fn held_refund(action: Option<&InterpreterAction>, gas: &Gas) -> i64 {
+fn held_refund(action: Option<&InterpreterAction>, counter: i64) -> i64 {
     match action {
-        None | Some(InterpreterAction::NewFrame(_)) => gas.refunded(),
+        None | Some(InterpreterAction::NewFrame(_)) => counter,
         Some(InterpreterAction::Return(result)) => result.gas.refunded(),
     }
 }
@@ -288,42 +288,64 @@ struct ActionChange {
     lane: ActionLane,
 }
 
-/// Measures what a callback did to the pending action, against the counter the EVM left behind.
+/// The pending action a callback was handed, in the form the boundary compares it in.
 ///
-/// The EVM does not execute inside a callback, so the action is either the one the last
-/// instruction set or one the callback wrote — and the difference between the two readings of
-/// [`held`] is what the callback moved. Taking both readings at the *pre-callback* counter is
-/// what keeps this lane and the counter lane from overlapping:
-/// [`AdditionalLimit::record_inspector_gas_adjustment`] books the counter's own movement exactly
-/// when [`ActionLane::counter_reaches_envelope`] says the EVM will read it again, and it cancels
-/// out of this difference in precisely the cases where it does.
-#[inline]
-fn measure_pending_action(
-    before: Option<InterpreterAction>,
-    after: Option<&InterpreterAction>,
-    counter: u64,
-) -> ActionChange {
-    let gas = held(after, counter) - held(before.as_ref(), counter);
-    ActionChange { gas, rewritten: action_rewritten(before, after), lane: ActionLane::of(after) }
+/// Only one question is asked of the way-in reading that the numbers beside it in [`LiveReading`]
+/// do not already answer: did the action come back describing something other than what the EVM
+/// decided? So this holds what that comparison reads and nothing else — the gas is taken as
+/// [`held`] at the moment the reading is made, and never needs the action again.
+///
+/// Which matters because the way-in reading is taken twice per opcode. Copying the action itself
+/// would carry an `InterpreterResult`'s output buffer and a frame input's boxed inputs across
+/// every one of them; here the shape a running frame is almost always in costs a discriminant, and
+/// the two that carry something are taken once per frame and once per call.
+///
+/// The output buffer is held rather than reduced to its identity, and that is the point of holding
+/// it: [`same_buffer`] compares by address, and only an owner keeps the address it compares from
+/// being reused underneath it.
+#[derive(Clone, Debug)]
+enum ActionSnapshot {
+    /// No action pending: the frame carries straight on.
+    Empty,
+    /// A `Return` action — the classification and output the frame's caller will be handed.
+    Return(InstructionResult, Bytes),
+    /// A `NewFrame` action — the inputs a child is about to be built from. The one comparison
+    /// here that needs the object rather than a reading off it.
+    NewFrame(FrameInput),
 }
 
-/// Whether a callback left behind an action describing something other than what the EVM decided.
-///
-/// Gas is excluded, exactly as it is at every other boundary: it travels on the lanes
-/// [`measure_pending_action`] routes it to, and counting it here as well would report one rewrite
-/// twice. A callback that installed, removed or swapped an action has rewritten what the EVM does
-/// next as thoroughly as it is possible to, so every shape change counts.
-#[inline]
-fn action_rewritten(before: Option<InterpreterAction>, after: Option<&InterpreterAction>) -> bool {
-    match (before, after) {
-        (None, None) => false,
-        (Some(InterpreterAction::Return(before)), Some(InterpreterAction::Return(after))) => {
-            result_rewritten((before.result, &before.output), after)
+impl ActionSnapshot {
+    /// Takes the way-in reading off the action an interpreter is holding.
+    #[inline(always)]
+    fn of(action: Option<&InterpreterAction>) -> Self {
+        match action {
+            None => Self::Empty,
+            Some(InterpreterAction::Return(result)) => {
+                Self::Return(result.result, result.output.clone())
+            }
+            Some(InterpreterAction::NewFrame(frame_input)) => Self::NewFrame(frame_input.clone()),
         }
-        (Some(InterpreterAction::NewFrame(before)), Some(InterpreterAction::NewFrame(after))) => {
-            frame_input_rewritten(before, after)
+    }
+
+    /// Whether a callback left behind an action describing something other than what the EVM
+    /// decided.
+    ///
+    /// Gas is excluded, exactly as it is at every other boundary: it travels on the lanes
+    /// [`book_pending_action`] routes it to, and counting it here as well would report one rewrite
+    /// twice. A callback that installed, removed or swapped an action has rewritten what the EVM
+    /// does next as thoroughly as it is possible to, so every shape change counts.
+    #[inline(always)]
+    fn rewritten(self, after: Option<&InterpreterAction>) -> bool {
+        match (self, after) {
+            (Self::Empty, None) => false,
+            (Self::Return(result, output), Some(InterpreterAction::Return(after))) => {
+                result_rewritten((result, &output), after)
+            }
+            (Self::NewFrame(before), Some(InterpreterAction::NewFrame(after))) => {
+                frame_input_rewritten(before, after)
+            }
+            _ => true,
         }
-        _ => true,
     }
 }
 
@@ -575,6 +597,44 @@ struct WorkingSet {
 }
 
 impl WorkingSet {
+    /// Whether a live interpreter still reads the way this snapshot recorded it.
+    ///
+    /// The same question as `*self == Self::of(interp)`, asked without building the second
+    /// snapshot. That is the whole difference, and it is worth stating because this is the way-out
+    /// half of a measurement taken twice per opcode: a comparison written that way materialises
+    /// two hundred bytes onto the stack for the length of one `==`, and the optimiser does not
+    /// reliably take them away again.
+    ///
+    /// Every reading in [`of`](Self::of) is compared here, in the same order, and neither list may
+    /// be shortened without the other. What holds them together is the unit tests below: each of
+    /// them moves one reading and asserts both that [`moved`] names it and that this returns
+    /// `false`, so a reading present in the snapshot and missing here is a reading the shim takes
+    /// and never compares.
+    ///
+    /// Left as `inline` rather than `inline(always)` on purpose. Forced into all four callbacks it
+    /// is faster beside an empty inspector and slower beside a real tracer, which is the inspector
+    /// the inspected path actually carries; one copy per interpreter type is faster beside both.
+    #[inline]
+    fn unchanged<INTR: InterpreterTypes>(&self, interp: &Interpreter<INTR>) -> bool {
+        let memory = interp.gas.memory();
+        (self.pc == interp.bytecode.pc()) &&
+            (self.code == BufferId::of(interp.bytecode.bytecode_slice())) &&
+            (self.running == interp.bytecode.is_not_end()) &&
+            (self.stack_len == interp.stack.len()) &&
+            (self.return_data == BufferId::of(interp.return_data.buffer())) &&
+            (self.memory_size == interp.memory.size()) &&
+            (self.memory_offset == interp.memory.local_memory_offset()) &&
+            (self.memory_words == memory.words_num) &&
+            (self.memory_expansion_cost == memory.expansion_cost) &&
+            (self.target_address == interp.input.target_address()) &&
+            (self.bytecode_address.as_ref() == interp.input.bytecode_address()) &&
+            (self.caller_address == interp.input.caller_address()) &&
+            (self.call_value == interp.input.call_value()) &&
+            (self.call_input == CallInputId::of(interp.input.input())) &&
+            (self.is_static == interp.runtime_flag.is_static()) &&
+            (self.spec_id == interp.runtime_flag.spec_id())
+    }
+
     /// Takes every reading off a live interpreter.
     #[inline]
     fn of<INTR: InterpreterTypes>(interp: &Interpreter<INTR>) -> Self {
@@ -748,6 +808,92 @@ fn reject_forbidden_create_rewrite<DB: Database, ExtEnvs: ExternalEnvTypes>(
     );
 }
 
+/// What the shim reads off a live interpreter on the way into a callback, and settles on the way
+/// out.
+///
+/// The four callbacks that are handed a live interpreter run the same measurement, and it is
+/// written once here rather than four times: [`enter`](Self::enter) takes the way-in readings, the
+/// user's inspector runs, and [`leave`](Self::leave) takes them again and books the differences.
+/// The four used to carry a copy of that body each, which is four places for a boundary to be
+/// measured differently at.
+///
+/// `IN_OPEN_SEGMENT` on [`leave`](Self::leave) is the one thing that differs between the four:
+/// `initialize_interp` runs before the frame's settlement window is opened, so there is no open
+/// segment for a counter edit to be moved out of.
+struct LiveReading {
+    /// Every constant-time reading of the interpreter's working set.
+    working_set: WorkingSet,
+    /// The pending action, in the form the rewrite comparison reads it in.
+    action: ActionSnapshot,
+    /// [`held`], taken at the counter below — the way-in half of the action lane's difference.
+    held: i128,
+    /// [`held_refund`], taken at the same moment.
+    refund: i64,
+    /// The interpreter's own gas counter, which is also the counter both [`held`] readings are
+    /// taken at.
+    gas: u64,
+}
+
+impl LiveReading {
+    /// Takes every way-in reading off a live interpreter.
+    #[inline(always)]
+    fn enter<INTR: InterpreterTypes>(interp: &mut Interpreter<INTR>) -> Self {
+        let working_set = WorkingSet::of(interp);
+        let gas = interp.gas.remaining();
+        let refunded = interp.gas.refunded();
+        let action = interp.bytecode.action().as_ref();
+        Self {
+            working_set,
+            held: held(action, gas),
+            refund: held_refund(action, refunded),
+            action: ActionSnapshot::of(action),
+            gas,
+        }
+    }
+
+    /// Takes the readings again and books what the callback moved.
+    #[inline(always)]
+    fn leave<const IN_OPEN_SEGMENT: bool, DB, ExtEnvs, INTR>(
+        self,
+        interp: &mut Interpreter<INTR>,
+        context: &MegaContext<DB, ExtEnvs>,
+    ) where
+        DB: Database,
+        ExtEnvs: ExternalEnvTypes,
+        INTR: InterpreterTypes,
+    {
+        let moved = !self.working_set.unchanged(interp);
+        let gas = interp.gas.remaining();
+        let refunded = interp.gas.refunded();
+        let action = interp.bytecode.action().as_ref();
+        let lane = ActionLane::of(action);
+        let change = ActionChange {
+            // Both readings are taken at the counter the EVM left behind, so the counter cancels
+            // out of the difference wherever it appears on both sides.
+            gas: held(action, self.gas) - self.held,
+            rewritten: self.action.rewritten(action),
+            lane,
+        };
+        let refund = held_refund(action, refunded);
+
+        book_intervention(context, moved);
+        book_pending_action(context, change);
+        book_refund(context, self.refund, refund);
+        // `record_inspector_gas_adjustment` returns on its own when the counter did not move, and
+        // the borrow it would take to find that out is not free on a path taken twice per opcode.
+        if gas != self.gas {
+            context
+                .additional_limit
+                .borrow_mut()
+                .record_inspector_gas_adjustment::<IN_OPEN_SEGMENT>(
+                    &mut interp.gas,
+                    self.gas,
+                    lane.counter_reaches_envelope(),
+                );
+        }
+    }
+}
+
 impl<DB, ExtEnvs, INTR, I> Inspector<MegaContext<DB, ExtEnvs>, INTR> for MeasuredInspector<I>
 where
     DB: Database,
@@ -764,46 +910,16 @@ where
         interp: &mut Interpreter<INTR>,
         context: &mut MegaContext<DB, ExtEnvs>,
     ) {
-        let action = interp.bytecode.action().clone();
-        let refund_before = held_refund(action.as_ref(), &interp.gas);
-        let before = interp.gas.remaining();
-        let working_set = WorkingSet::of(interp);
+        let reading = LiveReading::enter(interp);
         self.inner.initialize_interp(interp, context);
-        book_intervention(context, WorkingSet::of(interp) != working_set);
-        let change = measure_pending_action(action, interp.bytecode.action().as_ref(), before);
-        book_pending_action(context, change);
-        book_refund(
-            context,
-            refund_before,
-            held_refund(interp.bytecode.action().as_ref(), &interp.gas),
-        );
-        context.additional_limit.borrow_mut().record_inspector_gas_adjustment::<false>(
-            &mut interp.gas,
-            before,
-            change.lane.counter_reaches_envelope(),
-        );
+        reading.leave::<false, _, _, _>(interp, context);
     }
 
     #[inline]
     fn step(&mut self, interp: &mut Interpreter<INTR>, context: &mut MegaContext<DB, ExtEnvs>) {
-        let action = interp.bytecode.action().clone();
-        let refund_before = held_refund(action.as_ref(), &interp.gas);
-        let before = interp.gas.remaining();
-        let working_set = WorkingSet::of(interp);
+        let reading = LiveReading::enter(interp);
         self.inner.step(interp, context);
-        book_intervention(context, WorkingSet::of(interp) != working_set);
-        let change = measure_pending_action(action, interp.bytecode.action().as_ref(), before);
-        book_pending_action(context, change);
-        book_refund(
-            context,
-            refund_before,
-            held_refund(interp.bytecode.action().as_ref(), &interp.gas),
-        );
-        context.additional_limit.borrow_mut().record_inspector_gas_adjustment::<true>(
-            &mut interp.gas,
-            before,
-            change.lane.counter_reaches_envelope(),
-        );
+        reading.leave::<true, _, _, _>(interp, context);
     }
 
     /// The one callback that runs with an action already pending: revm runs it after the
@@ -814,24 +930,9 @@ where
     /// [`book_pending_action`] routes them to.
     #[inline]
     fn step_end(&mut self, interp: &mut Interpreter<INTR>, context: &mut MegaContext<DB, ExtEnvs>) {
-        let action = interp.bytecode.action().clone();
-        let refund_before = held_refund(action.as_ref(), &interp.gas);
-        let before = interp.gas.remaining();
-        let working_set = WorkingSet::of(interp);
+        let reading = LiveReading::enter(interp);
         self.inner.step_end(interp, context);
-        book_intervention(context, WorkingSet::of(interp) != working_set);
-        let change = measure_pending_action(action, interp.bytecode.action().as_ref(), before);
-        book_pending_action(context, change);
-        book_refund(
-            context,
-            refund_before,
-            held_refund(interp.bytecode.action().as_ref(), &interp.gas),
-        );
-        context.additional_limit.borrow_mut().record_inspector_gas_adjustment::<true>(
-            &mut interp.gas,
-            before,
-            change.lane.counter_reaches_envelope(),
-        );
+        reading.leave::<true, _, _, _>(interp, context);
     }
 
     /// No interpreter and no frame inputs are reachable here, so there is nothing to measure —
@@ -848,24 +949,9 @@ where
         context: &mut MegaContext<DB, ExtEnvs>,
         log: Log,
     ) {
-        let action = interpreter.bytecode.action().clone();
-        let refund_before = held_refund(action.as_ref(), &interpreter.gas);
-        let before = interpreter.gas.remaining();
-        let working_set = WorkingSet::of(interpreter);
+        let reading = LiveReading::enter(interpreter);
         self.inner.log_full(interpreter, context, log);
-        book_intervention(context, WorkingSet::of(interpreter) != working_set);
-        let change = measure_pending_action(action, interpreter.bytecode.action().as_ref(), before);
-        book_pending_action(context, change);
-        book_refund(
-            context,
-            refund_before,
-            held_refund(interpreter.bytecode.action().as_ref(), &interpreter.gas),
-        );
-        context.additional_limit.borrow_mut().record_inspector_gas_adjustment::<true>(
-            &mut interpreter.gas,
-            before,
-            change.lane.counter_reaches_envelope(),
-        );
+        reading.leave::<true, _, _, _>(interpreter, context);
     }
 
     #[inline]
@@ -1136,6 +1222,11 @@ mod tests {
     /// and asserts that exactly that one name comes back — so a field dropped from
     /// [`WorkingSet::of`] leaves its case detecting nothing, and a field left out of the snapshot
     /// entirely never compiles past [`moved`].
+    ///
+    /// Each case also asserts that [`WorkingSet::unchanged`] sees the same movement, which is the
+    /// third way the rule can fail. That comparison is written out rather than derived from the
+    /// snapshot, so a reading missing from it is a reading the shim takes, stores, and never
+    /// compares — [`moved`] would still name it and the shim would still book nothing.
     #[test]
     fn test_every_reading_moves_exactly_the_reading_it_is_named_for() {
         let unchanged = probe();
@@ -1143,16 +1234,25 @@ mod tests {
             moved(&WorkingSet::of(&unchanged), &WorkingSet::of(&unchanged)).is_empty(),
             "a snapshot compared against itself must report nothing moved",
         );
+        assert!(
+            WorkingSet::of(&unchanged).unchanged(&unchanged),
+            "and an interpreter nothing touched must still read the way it was recorded",
+        );
         assert_ne!(SpecId::default(), SpecId::FRONTIER, "the spec-id case must move something");
 
         for (name, rewrite) in CASES {
             let mut interp = probe();
             let before = WorkingSet::of(&interp);
             rewrite(&mut interp);
+            let after = WorkingSet::of(&interp);
             assert_eq!(
-                moved(&before, &WorkingSet::of(&interp)),
+                moved(&before, &after),
                 [name],
                 "the rewrite for {name} must move that reading and no other",
+            );
+            assert!(
+                !before.unchanged(&interp),
+                "and the comparison the shim makes must see {name} move",
             );
         }
     }
