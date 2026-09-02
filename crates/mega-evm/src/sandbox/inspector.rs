@@ -13,7 +13,9 @@
 //!    the unattached path.
 //! 3. Interventions take effect inside the sandbox as they would on a top-level EVM. Reported
 //!    `gas_used` and usage are the post-intervention values; the parent frame records them as-is
-//!    and does not check conservation.
+//!    and does not check conservation. Malformed synthetic outcomes, such as a `memory_offset`
+//!    outside the frame's memory, panic exactly as they would on a top-level EVM; the sandbox
+//!    neither isolates nor amplifies that.
 //! 4. The channel is node-local and non-consensus. An intervening node may diverge from the
 //!    network; the caller accepts that risk.
 //! 5. Later specs measure interventions and refuse some shapes. Integrators must not depend on this

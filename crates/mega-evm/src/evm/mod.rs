@@ -240,7 +240,7 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
     /// Attaches an observer for nested sandbox execution on every spec.
     ///
     /// Forwards to [`MegaContext::set_keyless_sandbox_observer`]. The observer
-    /// must implement [`SandboxObserver`] for both this EVM's [`ExtEnvs`] and
+    /// must implement [`SandboxObserver`] for both this EVM's `ExtEnvs` and
     /// [`EmptyExternalEnv`]. Use [`Self::clear_keyless_sandbox_hook`] to
     /// detach.
     pub fn set_keyless_sandbox_observer<O>(&mut self, observer: Option<Rc<RefCell<O>>>)
@@ -251,7 +251,7 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
     }
 
     /// Attaches an observer that implements [`SandboxObserver`] only for this
-    /// EVM's [`ExtEnvs`].
+    /// EVM's `ExtEnvs`.
     ///
     /// Forwards to [`MegaContext::set_keyless_sandbox_observer_for_parent_env`].
     /// Pre-REX4 sandboxes emit only `sandbox_start` / `sandbox_end`.
@@ -266,7 +266,7 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
     /// Attaches a rewriting inspector for nested sandbox execution on every spec.
     ///
     /// Forwards to [`MegaContext::set_keyless_sandbox_inspector`]. The inspector
-    /// must implement [`SandboxInspector`] for both this EVM's [`ExtEnvs`] and
+    /// must implement [`SandboxInspector`] for both this EVM's `ExtEnvs` and
     /// [`EmptyExternalEnv`]. Use [`Self::clear_keyless_sandbox_hook`] to detach.
     pub fn set_keyless_sandbox_inspector<I>(&mut self, inspector: Option<Rc<RefCell<I>>>)
     where
@@ -276,7 +276,7 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
     }
 
     /// Attaches an inspector that implements [`SandboxInspector`] only for this
-    /// EVM's [`ExtEnvs`].
+    /// EVM's `ExtEnvs`.
     ///
     /// Forwards to [`MegaContext::set_keyless_sandbox_inspector_for_parent_env`].
     /// Pre-REX4 sandboxes emit only `sandbox_start` / `sandbox_end`.

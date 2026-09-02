@@ -77,11 +77,11 @@ pub struct MegaContext<DB: Database, ExtEnvs: ExternalEnvTypes> {
     /// before the sandbox runs).
     pub(crate) inside_sandbox: Rc<RefCell<bool>>,
 
-    /// Hook for nested sandbox execution, typed against this context's [`ExtEnvs`].
+    /// Hook for nested sandbox execution, typed against this context's `ExtEnvs`.
     ///
     /// `None` keeps the historical no-inspector sandbox path. REX4+ sandboxes
     /// share the parent env and deliver opcode-level hooks through this slot.
-    /// Changing [`ExtEnvs`] via [`Self::with_external_envs`] resets this field
+    /// Changing `ExtEnvs` via [`Self::with_external_envs`] resets this field
     /// and the [`EmptyExternalEnv`] hook slot: the hook cannot be carried across
     /// an env-type change and must be attached after external environments are
     /// assembled. Observer and inspector occupy the same slot exclusively.
@@ -496,7 +496,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     /// Attaches an observer for nested sandbox execution on every spec.
     ///
     /// The observer must implement [`SandboxObserver`] for both this context's
-    /// [`ExtEnvs`] and [`EmptyExternalEnv`]. The same handle is stored as two
+    /// `ExtEnvs` and [`EmptyExternalEnv`]. The same handle is stored as two
     /// type-erased slots so opcode-level hooks fire for pre-REX4 sandboxes
     /// (always [`EmptyExternalEnv`]) and for REX4+ sandboxes (shared parent
     /// env). [`crate::sandbox::InspectorSandboxObserver`] with a fully generic
@@ -527,7 +527,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     }
 
     /// Attaches an observer that implements [`SandboxObserver`] only for this
-    /// context's [`ExtEnvs`].
+    /// context's `ExtEnvs`.
     ///
     /// Opcode-level observation is available on REX4+ sandboxes, which share
     /// the parent env. Pre-REX4 sandboxes keep [`EmptyExternalEnv`] and emit
@@ -547,7 +547,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     /// Attaches a rewriting inspector for nested sandbox execution on every spec.
     ///
     /// The inspector must implement [`SandboxInspector`] for both this context's
-    /// [`ExtEnvs`] and [`EmptyExternalEnv`]. The same handle is stored as two
+    /// `ExtEnvs` and [`EmptyExternalEnv`]. The same handle is stored as two
     /// type-erased slots so opcode-level hooks fire for pre-REX4 sandboxes
     /// (always [`EmptyExternalEnv`]) and for REX4+ sandboxes (shared parent
     /// env). A type that implements [`revm::Inspector`] for every sandbox
@@ -578,7 +578,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     }
 
     /// Attaches an inspector that implements [`SandboxInspector`] only for this
-    /// context's [`ExtEnvs`].
+    /// context's `ExtEnvs`.
     ///
     /// Opcode-level inspection is available on REX4+ sandboxes, which share
     /// the parent env. Pre-REX4 sandboxes keep [`EmptyExternalEnv`] and emit

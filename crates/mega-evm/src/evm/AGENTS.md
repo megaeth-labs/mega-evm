@@ -31,6 +31,7 @@ Contract:
 1. With no hook attached, the sandbox path is unchanged.
 2. Attaching the rewriting channel without intervening leaves result, state, gas, and usage identical to the unattached path.
 3. Interventions take effect inside the sandbox as they would on a top-level EVM; reported `gas_used` and usage are the post-intervention values, and the parent frame records them as-is without a conservation check.
+   Malformed synthetic outcomes, such as a `memory_offset` outside the frame's memory, panic exactly as they would on a top-level EVM; the sandbox neither isolates nor amplifies that.
 4. The channel is node-local and non-consensus; an intervening node may diverge from the network, and the caller accepts that risk.
 5. Later specs measure interventions and refuse some shapes; integrators must not depend on this base being permissive.
 
