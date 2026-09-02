@@ -1,5 +1,11 @@
 //! Read-only observation channel for nested sandbox execution.
 //!
+//! Keyless sandbox execution has two hook channels. This module is the
+//! **read-only default**: attach via [`crate::MegaContext::set_keyless_sandbox_observer`].
+//! The rewriting channel is [`crate::sandbox::SandboxInspector`], attached explicitly
+//! via [`crate::MegaContext::set_keyless_sandbox_inspector`]. The two occupy the same
+//! slot; attaching one replaces the other.
+//!
 //! A [`SandboxObserver`] sees every interpreter hook that revm's [`Inspector`]
 //! would see inside a sandbox, plus a paired [`SandboxObserver::sandbox_start`] /
 //! [`SandboxObserver::sandbox_end`] lifecycle. Observation cannot short-circuit
