@@ -30,6 +30,9 @@
 //!   grown for free, an outcome's metadata rewritten around the result inside it, two edits to one
 //!   signed lane that cancel, an instruction deleted by stepping the program counter past it, and a
 //!   return buffer conjured in front of a frame that made no call.
+//! - `shim_input_comparison` — what the entry callbacks call a rewrite of a frame's inputs: every
+//!   field a creation is built from is compared, and the two `OnceCell` memos a tracer fills by
+//!   asking where a deployment landed are not.
 //! - `shim_refusals` — the rewrites the shim refuses outright: a failed creation revived (at both
 //!   callbacks that can), and the classification of a result frame init produced; with the near
 //!   boundary, a frame the inspector answered itself, which is supported.
@@ -120,6 +123,7 @@ mod pre_execution_intrinsic_reject;
 mod precompile_halt;
 mod result_space_tripwire;
 mod shim_blind_spots;
+mod shim_input_comparison;
 mod shim_lanes;
 mod shim_refusals;
 mod shim_settlement;

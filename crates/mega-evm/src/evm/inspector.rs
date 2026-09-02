@@ -835,6 +835,12 @@ fn result_rewritten(before: (InstructionResult, &Bytes), after: &InterpreterResu
 ///
 /// Everything else a call input carries — who is called, with what value, under which scheme, with
 /// what calldata, in a static context or not — describes what the frame will do.
+///
+/// Taken as the derived equality rather than field by field, which a call's inputs can afford
+/// because every field of `CallInputs` is one of those descriptions: there is no memo among them,
+/// so a field upstream adds joins the comparison by itself. That is a claim about upstream's
+/// struct and it is pinned as one, in `tests/rex7/gas_surface.rs`, which classifies every field of
+/// both input types as semantic or memo and fails if a call's inputs ever grow one of the latter.
 #[inline]
 fn call_inputs_rewritten(mut before: CallInputs, after: &CallInputs) -> bool {
     before.gas_limit = after.gas_limit;
@@ -842,10 +848,34 @@ fn call_inputs_rewritten(mut before: CallInputs, after: &CallInputs) -> bool {
 }
 
 /// Whether a callback edited a creation's inputs anywhere but in their gas limit.
+///
+/// Compared field by field, which the derived equality cannot stand in for here: `CreateInputs`
+/// carries two `OnceCell` memos, of the address the creation will occupy and of the init code's
+/// hash, and both are filled on demand through a shared reference. Filling one is a derived value
+/// being computed, not an input being changed — the frame the EVM builds afterwards is built from
+/// the same six numbers either way — and it is what `created_address` does, which every tracer
+/// that records a deployment calls. Comparing them would report the most ordinary thing an
+/// observation-only tracer does as a rewrite.
+///
+/// What is compared is the whole of what the frame is built from: who creates, under which scheme,
+/// with what value, from what init code, and out of what state-gas pool. The gas limit is left out
+/// for the reason a call's is — it travels on the envelope lane, and comparing it here would
+/// report one edit twice.
+///
+/// What the exclusion costs is one shape, and it is content-class rather than free: the address
+/// memo is derived from a nonce its caller supplies, and revm reads the memo when it builds the
+/// frame, so filling it with a nonce other than the one the EVM would have used redirects the
+/// deployment. Telling that apart needs the caller's pre-bump nonce and, under `CREATE2`, the
+/// keccak of the init code that the memo exists to avoid computing — neither of which a boundary
+/// crossed twice per creation can take. It joins the readings a boundary cannot make at all, and
+/// rests on the declaration a block's admission rests on.
 #[inline]
-fn create_inputs_rewritten(mut before: CreateInputs, after: &CreateInputs) -> bool {
-    before.set_gas_limit(after.gas_limit());
-    before != *after
+fn create_inputs_rewritten(before: &CreateInputs, after: &CreateInputs) -> bool {
+    before.caller() != after.caller() ||
+        before.scheme() != after.scheme() ||
+        before.value() != after.value() ||
+        before.init_code() != after.init_code() ||
+        before.reservoir() != after.reservoir()
 }
 
 /// [`call_inputs_rewritten`] / [`create_inputs_rewritten`] for the generic callback, which is
@@ -858,7 +888,7 @@ fn frame_input_rewritten(before: FrameInput, after: &FrameInput) -> bool {
             call_inputs_rewritten(*before, after)
         }
         (FrameInput::Create(before), FrameInput::Create(after)) => {
-            create_inputs_rewritten(*before, after)
+            create_inputs_rewritten(&before, after)
         }
         (FrameInput::Empty, FrameInput::Empty) => false,
         _ => true,
@@ -1428,7 +1458,7 @@ where
             Some(before.gas_limit()),
             Some(inputs.gas_limit()),
             outcome.as_ref().map(|outcome| outcome.result.gas.refunded()),
-            create_inputs_rewritten(before, inputs),
+            create_inputs_rewritten(&before, inputs),
         );
         verify_trusted(self.trusted, context, "create");
         outcome
@@ -1474,7 +1504,7 @@ mod tests {
         bytecode::Bytecode,
         interpreter::{
             interpreter::{EthInterpreter, ExtBytecode},
-            InputsImpl, InterpreterAction, SharedMemory,
+            CreateScheme, InputsImpl, InterpreterAction, SharedMemory,
         },
     };
 
@@ -1733,5 +1763,120 @@ mod tests {
         let mut all = moved(&before, &everything);
         all.sort_unstable();
         assert_eq!(all, names, "every reading the snapshot holds must have a case, and vice versa");
+    }
+
+    /// One case: the name of a field a creation's inputs are built from, and a rewrite that moves
+    /// it.
+    type CreateCase = (&'static str, fn(&mut CreateInputs));
+
+    /// The creation every case below rewrites one field of.
+    fn create_inputs() -> CreateInputs {
+        CreateInputs::new(
+            Address::ZERO,
+            CreateScheme::Create,
+            U256::ZERO,
+            Bytes::from_static(&[0x60, 0x00]),
+            1_000_000,
+            0,
+        )
+    }
+
+    /// One rewrite per field the comparison is written over, each moving the field it is named
+    /// for.
+    ///
+    /// Every one is something an inspector can do to a creation through the setters upstream
+    /// gives it, and each changes what the frame does: who is recorded as the creator, which
+    /// address the contract lands at, what it is funded with, what code runs, and what state-gas
+    /// pool it draws from.
+    const CREATE_CASES: [CreateCase; 5] = [
+        ("caller", |inputs| inputs.set_call(OTHER)),
+        ("scheme", |inputs| {
+            inputs.set_scheme(CreateScheme::Create2 { salt: U256::from(0x5A17) });
+        }),
+        ("value", |inputs| inputs.set_value(U256::from(1))),
+        ("init_code", |inputs| inputs.set_init_code(Bytes::from_static(&[0x00]))),
+        ("reservoir", |inputs| inputs.set_reservoir(1)),
+    ];
+
+    /// ★ Every field a creation's frame is built from is one an edit to is booked.
+    ///
+    /// `CreateInputs` is compared field by field rather than by the derived equality a call's
+    /// inputs use, which trades a comparison that grows by itself for one someone has to keep
+    /// complete — so each field gets a case that moves it and asserts the shim sees it move. The
+    /// other half of the trade, that the list is still upstream's whole field set, is not a
+    /// question this module can ask; `tests/rex7/gas_surface.rs` asks it against the struct's own
+    /// `Debug` rendering.
+    #[test]
+    fn test_every_semantic_field_of_a_creation_is_compared() {
+        assert!(
+            !create_inputs_rewritten(&create_inputs(), &create_inputs()),
+            "two identical creations must not read as a rewrite",
+        );
+
+        let mut names: Vec<&str> = CREATE_CASES.iter().map(|(name, _)| *name).collect();
+        let declared = names.len();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), declared, "no field may be listed twice");
+
+        for (name, rewrite) in CREATE_CASES {
+            let before = create_inputs();
+            let mut after = create_inputs();
+            rewrite(&mut after);
+            assert!(
+                create_inputs_rewritten(&before, &after),
+                "a rewritten {name} must be visible to the shim",
+            );
+        }
+    }
+
+    /// ★ Filling a creation's memo cells is not a rewrite, in either direction.
+    ///
+    /// This is the whole reason the comparison is written out: `created_address` and
+    /// `init_code_hash` fill an `OnceCell` through a shared reference, so the object a callback
+    /// was handed comes back structurally different having had a derived value computed off it.
+    /// Every tracer that records a deployment calls the first of those, so the derived equality
+    /// booked an intervention for the most ordinary thing an observation-only inspector does.
+    ///
+    /// The other direction is the setters', which clear the cells: an inspector that writes back
+    /// the init code a creation already had has changed nothing and emptied both memos.
+    #[test]
+    fn test_filling_or_clearing_a_creations_memo_is_not_a_rewrite() {
+        let before = create_inputs();
+        let after = create_inputs();
+        after.created_address(0);
+        after.init_code_hash();
+        assert!(
+            !create_inputs_rewritten(&before, &after),
+            "computing the created address and the init code hash changes no input",
+        );
+        assert!(
+            !create_inputs_rewritten(&after, &before),
+            "and neither does a setter clearing the memos back down",
+        );
+
+        let mut moved = create_inputs();
+        moved.set_value(U256::from(1));
+        moved.created_address(0);
+        assert!(
+            create_inputs_rewritten(&before, &moved),
+            "a memo filled beside a real edit must not hide the edit",
+        );
+    }
+
+    /// ★ A creation's gas limit is not part of the comparison.
+    ///
+    /// It travels on the envelope lane, which books the amount rather than the fact, so counting
+    /// it here would report one edit twice. A call's inputs are excluded from their own comparison
+    /// the same way.
+    #[test]
+    fn test_a_creations_gas_limit_is_left_to_the_envelope_lane() {
+        let before = create_inputs();
+        let mut after = create_inputs();
+        after.set_gas_limit(before.gas_limit() + 1);
+        assert!(
+            !create_inputs_rewritten(&before, &after),
+            "the gas limit is booked as an amount, not as an intervention",
+        );
     }
 }

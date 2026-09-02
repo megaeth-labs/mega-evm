@@ -216,9 +216,87 @@ const CREATE_INPUTS_FIELDS: [(&str, Coverage); 8] = [
     ("scheme", Coverage::NotGas("what the frame does")),
     ("value", Coverage::NotGas("what the frame does")),
     ("init_code", Coverage::NotGas("what the frame does")),
-    ("cached_address", Coverage::NotGas("a memo of the init code and scheme above")),
-    ("cached_init_code_hash", Coverage::NotGas("a memo of the init code above")),
+    (
+        "cached_address",
+        Coverage::NotGas(
+            "a memo of the caller, the scheme and the init code above, filled on demand through a \
+             shared reference — so it is left out of the rewrite comparison, which is what \
+             `CREATE_INPUTS_COMPARISON` records",
+        ),
+    ),
+    (
+        "cached_init_code_hash",
+        Coverage::NotGas("a memo of the init code above, left out for the same reason"),
+    ),
 ];
+
+// --- what the rewrite comparison is written over -------------------------------------------------
+
+/// How one field of a frame's inputs enters the rewrite comparison the shim makes at
+/// `frame_start`, `call` and `create`.
+///
+/// The field set is upstream's and is pinned the same way every table here is, against the
+/// struct's own `Debug` rendering. What this table adds is the split the comparison is written
+/// over: a field upstream adds is a field with no verdict until someone decides which of the three
+/// it is, and the decision has teeth in both directions — a `Semantic` row must have a case in
+/// `shim_input_comparison.rs` that proves the shim books an edit to it, and a `Memo` row appearing
+/// on a *call's* inputs breaks the derived equality those are compared by.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Comparison {
+    /// Compared. It says what the frame will do, so an edit to it is what "the inspector rewrote
+    /// this frame" means, and it is booked on the interventions lane.
+    Semantic,
+    /// Left out because it is the frame's budget. It is booked on the env lane as an amount, and
+    /// comparing it here as well would report one edit twice.
+    Envelope,
+    /// Left out because it is a memo of the semantic fields, filled on demand through a shared
+    /// reference. Filling one is a derived value being computed rather than an input being
+    /// changed — `created_address` is the case, and every tracer that records a deployment calls
+    /// it — and the frame the EVM builds afterwards is built from the same numbers either way.
+    Memo,
+}
+
+/// A call's inputs, by how each field enters the comparison.
+///
+/// No `Memo` row, which is exactly what licenses `call_inputs_rewritten` to be the derived
+/// equality with the gas limit normalised out: every field of `CallInputs` says what the frame
+/// does, so one upstream adds joins the comparison by itself.
+pub(crate) const CALL_INPUTS_COMPARISON: [(&str, Comparison); 12] = [
+    ("gas_limit", Comparison::Envelope),
+    ("input", Comparison::Semantic),
+    ("return_memory_offset", Comparison::Semantic),
+    ("reservoir", Comparison::Semantic),
+    ("bytecode_address", Comparison::Semantic),
+    ("known_bytecode", Comparison::Semantic),
+    ("target_address", Comparison::Semantic),
+    ("caller", Comparison::Semantic),
+    ("value", Comparison::Semantic),
+    ("scheme", Comparison::Semantic),
+    ("is_static", Comparison::Semantic),
+    ("charged_new_account_state_gas", Comparison::Semantic),
+];
+
+/// A creation's inputs, by how each field enters the comparison.
+///
+/// The two `Memo` rows are why `create_inputs_rewritten` is written out field by field instead:
+/// the derived equality reads a filled memo as a changed input, so an observation-only tracer that
+/// asked a creation for its address booked an intervention and, under a `TrustedObserver`
+/// declaration, failed the debug verification at the first `CREATE` it saw.
+pub(crate) const CREATE_INPUTS_COMPARISON: [(&str, Comparison); 8] = [
+    ("gas_limit", Comparison::Envelope),
+    ("caller", Comparison::Semantic),
+    ("scheme", Comparison::Semantic),
+    ("value", Comparison::Semantic),
+    ("init_code", Comparison::Semantic),
+    ("reservoir", Comparison::Semantic),
+    ("cached_address", Comparison::Memo),
+    ("cached_init_code_hash", Comparison::Memo),
+];
+
+/// The fields of a table an edit to must be booked as an intervention, in the table's own order.
+pub(crate) fn semantic_fields(table: &[(&'static str, Comparison)]) -> Vec<&'static str> {
+    table.iter().filter(|(_, how)| *how == Comparison::Semantic).map(|(name, _)| *name).collect()
+}
 
 /// Everything a finished call hands back besides the result inside it.
 const CALL_OUTCOME_FIELDS: [(&str, Coverage); 5] = [
@@ -402,8 +480,18 @@ fn field_names(rendered: &str) -> BTreeSet<String> {
 /// the table keeps for a field upstream removed is a verdict about nothing, and stale prose about
 /// a field that no longer exists is how a table stops being evidence.
 fn assert_classified(what: &str, rendered: &str, table: &[(&str, Coverage)]) {
+    assert_every_field_named(what, rendered, table.iter().map(|(name, _)| *name));
+}
+
+/// [`assert_classified`] over the comparison tables, whose verdict type is a different enum.
+fn assert_compared(what: &str, rendered: &str, table: &[(&str, Comparison)]) {
+    assert_every_field_named(what, rendered, table.iter().map(|(name, _)| *name));
+}
+
+/// The body both of those share: the rendered field names are exactly the classified ones.
+fn assert_every_field_named<'a>(what: &str, rendered: &str, names: impl Iterator<Item = &'a str>) {
     let seen = field_names(rendered);
-    let classified: BTreeSet<String> = table.iter().map(|(name, _)| String::from(*name)).collect();
+    let classified: BTreeSet<String> = names.map(String::from).collect();
     let unclassified: Vec<&String> = seen.difference(&classified).collect();
     let vanished: Vec<&String> = classified.difference(&seen).collect();
     assert!(
@@ -499,6 +587,49 @@ fn test_every_field_of_every_gas_carrier_has_a_verdict() {
         renderings.len(),
         tables().len(),
         "every table must have a rendering checked against it",
+    );
+}
+
+/// ★ Every field of a frame's inputs has a verdict on how it is compared, too.
+///
+/// The same closure as the table above, over the same field sets, asking the other question: not
+/// "does an edit to this reach the receipt through a lane" but "is an edit to this what the shim
+/// calls a rewrite". A field upstream adds needs both answers, and the second is the one that was
+/// missing when `CreateInputs` grew its memo cells — they were classified as not-gas, correctly,
+/// while the comparison went on reading a filled memo as a changed input.
+#[test]
+fn test_every_field_of_a_frames_inputs_has_a_comparison_verdict() {
+    assert_compared(
+        "CallInputs",
+        &std::format!("{:?}", sample_call_inputs()),
+        &CALL_INPUTS_COMPARISON,
+    );
+    assert_compared(
+        "CreateInputs",
+        &std::format!("{:?}", sample_create_inputs()),
+        &CREATE_INPUTS_COMPARISON,
+    );
+}
+
+/// ★ A call's inputs carry no memo, which is what the derived equality rests on.
+///
+/// `call_inputs_rewritten` compares the whole struct with the gas limit normalised out, so it
+/// picks up a field upstream adds without anyone noticing — which is the right trade only as long
+/// as every field says what the frame does. A memo added to `CallInputs` would have to be
+/// classified here, and this is what turns that classification into a failure rather than a row
+/// nobody reads: the comparison has to be narrowed the way a creation's was.
+#[test]
+fn test_a_calls_inputs_carry_no_memo_field() {
+    let memos: Vec<&str> = CALL_INPUTS_COMPARISON
+        .iter()
+        .filter(|(_, how)| *how == Comparison::Memo)
+        .map(|(name, _)| *name)
+        .collect();
+    assert_eq!(
+        memos,
+        Vec::<&str>::new(),
+        "a call's inputs are compared by the derived equality, which reads a filled memo as a \
+         changed input; narrow `call_inputs_rewritten` to the semantic fields first",
     );
 }
 
