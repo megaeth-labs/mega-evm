@@ -106,6 +106,7 @@ mod detention_window;
 mod double_exceed_corner;
 mod exceptional_halt;
 mod frame_init_reject_burn;
+mod frame_init_result_rewrite;
 mod frame_loop_parity;
 mod gas_clamp;
 mod gas_leakage;

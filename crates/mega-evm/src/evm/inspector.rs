@@ -77,8 +77,18 @@ use revm::{
 use crate::{ExternalEnvTypes, MegaContext, MegaSpecId};
 
 /// The message a refused `create_end` rewrite surfaces as `EVMError::Custom`.
-pub(crate) const FORBIDDEN_CREATE_REVIVAL: &str =
+///
+/// Public because a refusal is a designed outcome and not an execution failure: a harness that
+/// drives rewriting inspectors over a corpus has to tell the two apart, and the error's message is
+/// what carries the difference.
+pub const FORBIDDEN_CREATE_REVIVAL: &str =
     "inspector rewrote a failed contract creation into a successful one";
+
+/// The message a refused rewrite of a frame-init result surfaces as `EVMError::Custom`.
+///
+/// Public for the same reason as [`FORBIDDEN_CREATE_REVIVAL`].
+pub const FORBIDDEN_FRAME_INIT_REWRITE: &str =
+    "inspector moved the classification of a result frame init produced";
 
 /// Wraps a user inspector so that what it does to gas accounting is measured and booked.
 ///
@@ -768,6 +778,122 @@ fn frame_input_rewritten(before: FrameInput, after: &FrameInput) -> bool {
     }
 }
 
+/// What an inspector can ask `MegaETH` about the frame result it is holding.
+///
+/// One question, with one purpose: telling a result a frame *ran* to produce apart from one frame
+/// init produced without ever building a frame. The two arrive at the same callback holding the
+/// same type, and the difference decides what a rewrite of the classification does — a running
+/// frame's journal decision is still outstanding and follows the rewrite, while an init-produced
+/// result's was taken before the callback existed and is refused (see
+/// [`MeasuredInspector`](MeasuredInspector#impl-Inspector)).
+///
+/// A tool that only observes never needs this. One that rewrites classifications does, because
+/// otherwise the only way to find out which kind of result it is holding is to have its
+/// transaction refused.
+pub trait FrameResultOriginTr {
+    /// Whether the frame result the `*_end` callbacks are being handed came out of frame init.
+    ///
+    /// False everywhere else, including at every callback that is not one of those three.
+    fn is_frame_init_result(&self) -> bool;
+}
+
+impl<DB: Database, ExtEnvs: ExternalEnvTypes> FrameResultOriginTr for MegaContext<DB, ExtEnvs> {
+    #[inline]
+    fn is_frame_init_result(&self) -> bool {
+        self.additional_limit.borrow().is_settling_frame_init_result()
+    }
+}
+
+/// Which of the three things a frame's result says, which is the granularity the refusal below is
+/// stated over.
+///
+/// A result's gas and its returned output move freely — those are what the lanes measure. What
+/// cannot move is which of these three the caller is handed, because that is the question the
+/// journal decision answers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ResultClass {
+    /// The frame returned, and its writes stand.
+    Success,
+    /// The frame reverted, and its writes are rolled back with its gas handed back.
+    Revert,
+    /// The frame halted exceptionally, and its writes are rolled back with its gas destroyed.
+    Halt,
+}
+
+impl ResultClass {
+    #[inline]
+    const fn of(result: InstructionResult) -> Self {
+        if result.is_ok() {
+            Self::Success
+        } else if result.is_revert() {
+            Self::Revert
+        } else {
+            Self::Halt
+        }
+    }
+}
+
+/// Refuses a rewrite that moves a frame-init result across the success / revert / halt boundary.
+///
+/// Every other classification rewrite is supported because REX7 withholds the journal decision
+/// until the result is final: the frame loops park it and `frame_return_result` carries it out
+/// after the last callback, so a frame rewritten into a revert has its state rolled back with it.
+///
+/// A result that comes out of frame *init* has no such window, and cannot be given one from here.
+/// Upstream takes the decision inside `make_call_frame`, statements before it returns — a
+/// value-transferring call into an empty-code account commits the transfer and returns `Stop`, a
+/// precompile that fails reverts it and returns its own failure — and `MegaETH`'s system contract
+/// interceptors take theirs before they return, the `KeylessDeploy` one by merging a whole
+/// sandbox's state into the journal. All of it has happened by the time a callback sees the
+/// result. Honouring a rewrite would hand the caller an answer the state behind it contradicts:
+/// a transfer the recipient keeps and the sender is told failed, or a deployment the caller is
+/// told reverted and that stands anyway.
+///
+/// A result an inspector answered the frame with itself is deliberately outside the refusal, even
+/// though it too reaches a callback with no frame having run: nothing in the EVM decided anything
+/// for it — no checkpoint was opened, no state written — so its classification is the inspector's
+/// to state and rewriting it contradicts nothing. What separates the two is which of the two
+/// callback sites in `inspect_frame_init` ran, and that is where the window is opened; nothing
+/// here can tell them apart on its own.
+///
+/// Detection only; nothing here compensates the journal. The original classification is restored,
+/// the ledger counts the refusal, and the context's error slot carries the reason so the
+/// transaction fails with an error rather than with a receipt built on the rewrite.
+///
+/// Deliberately loud but not fatal, which is where it differs from
+/// [`reject_forbidden_create_rewrite`]. That shape is a mistake with no reading behind it and
+/// asserting on it costs nothing. This one is the most ordinary rewrite a tool makes — failing a
+/// call — landing on the one kind of frame it cannot be applied to, so a corpus that produces it
+/// should be able to report it rather than die on it.
+///
+/// Gated to REX7+. On a frozen spec, an inspector's rewrite reaches no accounting lane that can be
+/// made unsound by it, and the specs' behaviour — including on the inspected path — is closed.
+#[inline]
+fn reject_forbidden_frame_init_rewrite<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    context: &mut MegaContext<DB, ExtEnvs>,
+    before: InstructionResult,
+    result: &mut InterpreterResult,
+) {
+    if !context.spec.is_enabled(MegaSpecId::REX7) ||
+        ResultClass::of(before) == ResultClass::of(result.result) ||
+        !context.additional_limit.borrow().is_settling_frame_init_result()
+    {
+        return;
+    }
+    result.result = before;
+    context.additional_limit.borrow_mut().record_inspector_rejected_rewrite();
+    let slot = context.error();
+    if slot.is_ok() {
+        *slot = Err(ContextError::Custom(String::from(FORBIDDEN_FRAME_INIT_REWRITE)));
+    }
+    debug_assert_eq!(
+        ResultClass::of(result.result),
+        ResultClass::of(before),
+        "{FORBIDDEN_FRAME_INIT_REWRITE}: the refusal must leave the caller holding the \
+         classification the EVM produced",
+    );
+}
+
 /// Refuses a rewrite that turns a non-successful contract creation into a successful one, and says
 /// so loudly.
 ///
@@ -993,8 +1119,10 @@ where
             result_rewritten((before, &output), frame_result.interpreter_result()),
         );
         book_intervention(context, OutcomeMetadata::of(frame_result) != metadata);
-        // `frame_end` runs after `create_end` and is the last chance to rewrite a creation's
-        // classification, so the same refusal applies here.
+        // `frame_end` runs after `call_end` / `create_end` and is the last chance to rewrite a
+        // classification, so both refusals apply here too. The frame-init one runs first: it
+        // restores whatever it refuses, which leaves the creation refusal below nothing to see.
+        reject_forbidden_frame_init_rewrite(context, before, frame_result.interpreter_result_mut());
         if let FrameResult::Create(outcome) = frame_result {
             reject_forbidden_create_rewrite(context, before, &mut outcome.result);
         }
@@ -1038,6 +1166,7 @@ where
         book_refund(context, refund_before, outcome.result.gas.refunded());
         book_intervention(context, result_rewritten((before.0, &before.1), &outcome.result));
         book_intervention(context, CallMetadata::of(outcome) != metadata);
+        reject_forbidden_frame_init_rewrite(context, before.0, &mut outcome.result);
     }
 
     #[inline]
@@ -1079,6 +1208,9 @@ where
         book_refund(context, refund_before, outcome.result.gas.refunded());
         book_intervention(context, result_rewritten((before.0, &before.1), &outcome.result));
         book_intervention(context, outcome.address != address);
+        // The frame-init refusal runs first, and restores whatever it refuses — so a creation
+        // refused as an init result is not counted a second time by the refusal below.
+        reject_forbidden_frame_init_rewrite(context, before.0, &mut outcome.result);
         reject_forbidden_create_rewrite(context, before.0, &mut outcome.result);
     }
 

@@ -15,17 +15,21 @@
 //!
 //! - **A precompile's classification.** A precompile is answered inside the frame init and never
 //!   becomes a child frame, so its recording site is the only place that knows the forwarded
-//!   envelope and the work performed. It is not, however, the place that knows how the call ends:
-//!   `call_end` runs afterwards and can rewrite the classification, and the classification is what
-//!   decides whether the caller reclaims the remainder. So the split has to be settled at the
-//!   frame's settlement point, from what the recording site staged, exactly as an ordinary frame's
-//!   is.
+//!   envelope and the work performed. The split is nonetheless settled at the frame's settlement
+//!   point, from what that site staged, exactly as an ordinary frame's is — because a callback runs
+//!   in between, and the classification is what decides whether the caller reclaims the remainder.
+//!   What that callback may do to the classification is bounded: the journal decision behind a
+//!   result frame init produced was taken before any callback ran and is not reachable from one, so
+//!   a rewrite that moves such a result across the success / revert / halt boundary is refused and
+//!   the settlement reads the classification the EVM produced. The cases below pin the uninspected
+//!   split each precompile arm produces, and the refusal that keeps it the one the settlement sees.
 //!
 //! Every case here is checked by the identity `common::finish` runs on every transaction: the
 //! tracker lanes must account for the whole receipt envelope, with the inspector's own term in it.
 
 use crate::common::{
-    transact, transact_inspected, Outcome, CALLEE, CALLER, CONTRACT, DEFAULT_TX_GAS_LIMIT, ONE_ETH,
+    transact, transact_inspected, transact_inspected_refused, Outcome, Refusal, CALLEE, CALLER,
+    CONTRACT, DEFAULT_TX_GAS_LIMIT, ONE_ETH,
 };
 use alloy_primitives::{address, Address, Bytes, U256};
 use mega_evm::{
@@ -62,9 +66,6 @@ const IDENTITY: Address = address!("0000000000000000000000000000000000000004");
 const BLAKE2F: Address = address!("0000000000000000000000000000000000000009");
 /// KZG point evaluation.
 const KZG: Address = address!("000000000000000000000000000000000000000a");
-
-/// What the identity precompile charges for an empty input: its base cost, with no words to copy.
-const IDENTITY_GAS: u64 = 15;
 
 fn limits() -> EvmTxRuntimeLimits {
     EvmTxRuntimeLimits::from_spec(MegaSpecId::REX7)
@@ -294,95 +295,86 @@ fn kzg_verification_failure() -> Vec<u8> {
     input
 }
 
-fn run_reclassified(
-    target: Address,
-    calldata: &[u8],
-    to: InstructionResult,
-) -> (Outcome, Outcome, u32) {
+/// Runs the fixture twice: once uninspected, and once with the classification rewritten across
+/// the boundary the shim refuses.
+///
+/// The refusal is asserted here rather than in each case, so every case below is left stating the
+/// one thing that differs between them — which arm of the precompile it reaches, and what the
+/// uninspected run's split therefore is.
+fn run_reclassified(target: Address, calldata: &[u8], to: InstructionResult) -> (Outcome, Refusal) {
     let code = call_precompile(target, calldata);
     let plain = transact(MegaSpecId::REX7, db(code.clone()), limits());
     let mut inspector = Reclassifier::new(target, to);
-    let rewritten = transact_inspected(MegaSpecId::REX7, db(code), limits(), &mut inspector);
-    (plain, rewritten, inspector.fired)
+    let refusal = transact_inspected_refused(MegaSpecId::REX7, db(code), limits(), &mut inspector);
+    assert_eq!(inspector.fired, 1, "the fixture must reach the precompile's call_end exactly once");
+    assert_eq!(refusal.rejected_rewrites, 1, "the shim must count the refusal");
+    assert!(
+        refusal.error.contains("classification of a result frame init produced"),
+        "the transaction must fail with the refusal's own reason, got {}",
+        refusal.error,
+    );
+    (plain, refusal)
 }
 
-/// A successful precompile rewritten into a halt destroys the rest of its forwarded envelope, and
-/// the transaction has to report it.
+/// A successful precompile rewritten into a halt is refused, and the uninspected run destroys
+/// nothing.
 ///
-/// The caller reclaims nothing from a halted call, so everything the identity precompile did not
-/// charge for is gone. Its recording site booked a destroyed remainder of zero, because at that
-/// moment the call had succeeded.
+/// The rewrite is the direction with state behind it: `make_call_frame` commits the checkpoint
+/// before it returns a successful precompile's result, so a caller told the call halted would be
+/// told so with the transfer that funded it standing.
 #[test]
-fn test_a_precompile_rewritten_into_a_halt_destroys_its_remainder() {
-    let (plain, rewritten, fired) = run_reclassified(IDENTITY, &[], InstructionResult::OutOfGas);
+fn test_rewriting_a_successful_precompile_into_a_halt_is_refused() {
+    let (plain, _) = run_reclassified(IDENTITY, &[], InstructionResult::OutOfGas);
 
-    assert_eq!(fired, 1, "the fixture must reach the precompile's call_end exactly once");
     assert_eq!(plain.destroyed, 0, "the uninspected run destroys nothing");
     assert_eq!(
-        rewritten.destroyed,
-        FORWARDED - IDENTITY_GAS,
-        "everything the precompile did not spend is destroyed once the call halts",
-    );
-    assert_eq!(
-        rewritten.enforced(),
+        plain.compute_gas,
         plain.enforced(),
-        "the same work ran either way, so the enforcing lane must not move",
-    );
-    assert_eq!(
-        rewritten.compute_gas,
-        plain.compute_gas + rewritten.destroyed,
-        "the destroyed remainder is reported on top of the work performed",
-    );
-}
-
-/// A halted precompile rewritten into a success destroys nothing, because the caller reclaims the
-/// envelope its recording site had already written off.
-#[test]
-fn test_a_precompile_rewritten_into_a_success_destroys_nothing() {
-    let (plain, rewritten, fired) = run_reclassified(BLAKE2F, &[], InstructionResult::Stop);
-
-    assert_eq!(fired, 1, "the fixture must reach the precompile's call_end exactly once");
-    assert_eq!(
-        plain.destroyed, FORWARDED,
-        "blake2f rejects the input before any work, so the uninspected run destroys all of it",
-    );
-    assert_eq!(rewritten.destroyed, 0, "a reclaimed envelope is not a destroyed one");
-    assert_eq!(
-        rewritten.compute_gas,
-        rewritten.enforced(),
         "with nothing destroyed the reported total is the work performed",
     );
 }
 
-/// The corner where the two halves of the split move in opposite directions: a KZG failure that
-/// `MegaETH` prices as work, rewritten into a success.
+/// A rejected precompile rewritten into a success is refused, and the uninspected run destroys the
+/// whole envelope.
 ///
-/// The fixed fee really was performed and stays on the enforcing lane. But the halt's gas object
-/// carries the whole forwarded envelope as remaining — a halting precompile's gas is reset rather
-/// than spent down — so a caller told the call succeeded reclaims all of it, including the fee.
-/// That fee is then gas the execution priced and the envelope never paid: conjured gas, which the
-/// ledger has to carry or the law reads the transaction as having spent less than it did.
+/// The other direction, and the other half of the split: `blake2f` rejects the input before any
+/// work, so `make_call_frame` reverted the checkpoint and nothing was performed.
 #[test]
-fn test_a_priced_precompile_failure_rewritten_into_a_success_conjures_its_fee() {
-    let calldata = kzg_verification_failure();
-    let (plain, rewritten, fired) = run_reclassified(KZG, &calldata, InstructionResult::Stop);
+fn test_reviving_a_rejected_precompile_is_refused() {
+    let (plain, _) = run_reclassified(BLAKE2F, &[], InstructionResult::Stop);
 
-    assert_eq!(fired, 1, "the fixture must reach the precompile's call_end exactly once");
+    assert_eq!(
+        plain.destroyed, FORWARDED,
+        "blake2f rejects the input before any work, so the uninspected run destroys all of it",
+    );
+    assert_eq!(
+        plain.enforced(),
+        plain.compute_gas - plain.destroyed,
+        "nothing was performed, so nothing enforces",
+    );
+}
+
+/// The third arm, and the only one whose failure `MegaETH` prices as work: a KZG verification that
+/// ran and rejected.
+///
+/// The refusal matters most here. A halting precompile's gas object carries the whole forwarded
+/// envelope as remaining — it is reset rather than spent down — so a caller told such a call
+/// succeeded would reclaim all of it, the fixed fee included. That fee is gas the execution priced
+/// and the envelope never paid, which is exactly the shape the refusal keeps out.
+#[test]
+fn test_reviving_a_priced_precompile_failure_is_refused() {
+    let calldata = kzg_verification_failure();
+    let (plain, _) = run_reclassified(KZG, &calldata, InstructionResult::Stop);
+
     assert_eq!(
         plain.destroyed,
         FORWARDED - kzg_point_evaluation::GAS_COST,
         "verification ran, so the uninspected run destroys the envelope less the fixed fee",
     );
-    assert_eq!(rewritten.destroyed, 0, "a reclaimed envelope is not a destroyed one");
     assert_eq!(
-        rewritten.enforced(),
+        plain.compute_gas - plain.destroyed,
         plain.enforced(),
-        "the verification work is the same on both runs",
-    );
-    assert_eq!(
-        rewritten.inspector_conjured_gas,
-        i128::from(kzg_point_evaluation::GAS_COST),
-        "the fee the caller reclaimed is gas the transaction was never charged for",
+        "the fee is the work performed, and it is what enforces",
     );
 }
 

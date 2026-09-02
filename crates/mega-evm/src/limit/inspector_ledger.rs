@@ -290,10 +290,20 @@ pub struct InspectorLedger {
 
     /// How many rewrites the shim refused because their shape is forbidden.
     ///
-    /// Today exactly one shape is: a `create_end` (or the `frame_end` after it) turning a
-    /// non-successful contract creation into a successful one. Such a rewrite runs after the
-    /// journal has already reverted the frame and after the deposit predicates have already
-    /// rejected the code, so honouring it would report a deployment that never happened.
+    /// Two shapes are, and both for the same reason: the journal decision they would need to move
+    /// with was already taken, at a point no callback can reach.
+    ///
+    /// - A `create_end` (or the `frame_end` after it) turning a non-successful contract creation
+    ///   into a successful one. Such a rewrite runs after the journal has already reverted the
+    ///   frame and after the deposit predicates have already rejected the code, so honouring it
+    ///   would report a deployment that never happened.
+    /// - Any of the three `*_end` callbacks moving the classification of a result *frame init*
+    ///   produced across the success / revert / halt boundary. revm decides the journal inside
+    ///   `make_call_frame` and `MegaETH`'s interceptors decide theirs before they return, so
+    ///   honouring it would hand the caller an answer the state behind it contradicts.
+    ///
+    /// A non-zero count means the transaction was failed with an `EVMError::Custom` rather than
+    /// given a receipt.
     pub rejected_rewrites: u32,
 
     /// How many rewrites the shim saw that change what the execution *did* rather than what it

@@ -193,6 +193,15 @@ pub struct AdditionalLimit {
     /// gas the result turns out to carry. At most one can be outstanding: revm stops at the
     /// first callback that answers, and the frame init that asked settles a few statements later.
     staged_interception_envelope: Option<u64>,
+
+    /// Whether the frame result the `*_end` callbacks are being handed came out of frame init
+    /// rather than out of a frame that ran.
+    ///
+    /// Set by the inspected frame-init path around the one place it runs those callbacks over a
+    /// result the EVM produced, and cleared as soon as they return. The measurement shim reads it
+    /// to decide whether a classification rewrite is one the journal decision can still follow —
+    /// see [`is_settling_frame_init_result`](Self::is_settling_frame_init_result).
+    settling_frame_init_result: bool,
 }
 
 /// The usage of the additional limits.
@@ -226,6 +235,7 @@ impl AdditionalLimit {
             staged_action_result_gas: 0,
             staged_action_env_gas: 0,
             staged_interception_envelope: None,
+            settling_frame_init_result: false,
         }
     }
 }
@@ -273,6 +283,7 @@ impl AdditionalLimit {
         self.staged_action_result_gas = 0;
         self.staged_action_env_gas = 0;
         self.staged_interception_envelope = None;
+        self.settling_frame_init_result = false;
     }
 
     /// Whether compute gas settles at checkpoints (REX7+) rather than per opcode.
@@ -658,6 +669,40 @@ impl AdditionalLimit {
     #[inline]
     pub(crate) fn take_inspector_interception_envelope(&mut self) -> Option<u64> {
         self.staged_interception_envelope.take()
+    }
+
+    /// Marks the window in which the `*_end` callbacks are being handed a result frame init
+    /// produced, with no child frame ever built.
+    ///
+    /// The inspected frame-init path opens this immediately before it runs those callbacks over a
+    /// result the frame init produced — an empty-code call, a precompile, a system contract
+    /// interceptor, a refusal — and closes it as soon as they return. The other two shapes that
+    /// reach the same callbacks never open it: a frame that ran settles somewhere else entirely,
+    /// and a result an inspector answered the frame with is the inspector's own, with no journal
+    /// decision behind it for a rewrite to contradict.
+    ///
+    /// It is a plain flag rather than a counter because it cannot nest: the EVM does not execute
+    /// inside a callback, so nothing can start a second frame init while one is open.
+    #[inline]
+    pub(crate) fn set_settling_frame_init_result(&mut self, settling: bool) {
+        debug_assert!(
+            self.settling_frame_init_result != settling,
+            "the frame-init settlement window is opened and closed in pairs, and cannot nest",
+        );
+        self.settling_frame_init_result = settling;
+    }
+
+    /// Whether the frame result a `*_end` callback is holding came out of frame init.
+    ///
+    /// Such a result carries a journal decision that was taken before any callback ran, and that
+    /// no callback can reach: revm's `make_call_frame` commits an empty-code call's value transfer
+    /// and reverts a failing precompile's inside itself, and `MegaETH`'s interceptors decide
+    /// theirs before they return — the `KeylessDeploy` one by merging a sandbox's whole state.
+    /// The REX7 deferral covers the frame loops and not this, so a rewrite that moves such a
+    /// result across the success / revert / halt boundary is refused rather than followed.
+    #[inline]
+    pub fn is_settling_frame_init_result(&self) -> bool {
+        self.settling_frame_init_result
     }
 
     /// Books an adjustment an inspector made to a pending action the same callback then removed,

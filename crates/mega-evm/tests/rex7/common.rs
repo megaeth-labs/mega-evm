@@ -12,7 +12,7 @@ use revm::{
     state::EvmState,
     Inspector,
 };
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, string::String};
 
 /// Transaction sender.
 pub(crate) const CALLER: Address = address!("0000000000000000000000000000000000300000");
@@ -297,6 +297,55 @@ where
         (additional_limit.detained_compute_gas_limit(), additional_limit.conservation_terms())
     };
     finish(spec, outcome, detained_compute_gas_limit, terms)
+}
+
+/// What a transaction the shim refused reports: the error it surfaced and the refusals counted.
+///
+/// A refused rewrite produces no receipt at all, so there is no [`Outcome`] to read — these two
+/// numbers are the whole of what such a run leaves behind.
+pub(crate) struct Refusal {
+    /// The `EVMError` the refusal surfaced, rendered.
+    pub(crate) error: String,
+    /// How many rewrites the shim refused over the transaction.
+    pub(crate) rejected_rewrites: u32,
+}
+
+/// [`transact_inspected`] for a run the shim is expected to refuse.
+///
+/// Panics when the transaction produced a receipt, so a fixture that stops reaching the refused
+/// shape fails rather than passing as a run that was never refused.
+pub(crate) fn transact_inspected_refused<I>(
+    spec: MegaSpecId,
+    mut db: MemoryDatabase,
+    limits: EvmTxRuntimeLimits,
+    inspector: &mut I,
+) -> Refusal
+where
+    I: for<'a> Inspector<MegaContext<&'a mut MemoryDatabase, EmptyExternalEnv>>,
+{
+    let mut context = MegaContext::new(&mut db, spec).with_tx_runtime_limits(limits);
+    context.modify_chain(|chain| {
+        chain.operator_fee_scalar = Some(U256::from(0));
+        chain.operator_fee_constant = Some(U256::from(0));
+    });
+    let tx = TxEnvBuilder::default()
+        .caller(CALLER)
+        .call(CONTRACT)
+        .gas_limit(DEFAULT_TX_GAS_LIMIT)
+        .build_fill();
+    let mut tx = MegaTransaction::new(tx);
+    tx.enveloped_tx = Some(Bytes::new());
+    let mut evm = MegaEvm::new(context).with_inspector(inspector);
+    let outcome = evm.execute_transaction(tx);
+    let rejected_rewrites =
+        evm.ctx_ref().additional_limit.borrow().inspector_ledger().rejected_rewrites;
+    match outcome {
+        Ok(outcome) => panic!(
+            "the run was expected to be refused, but produced {:?}",
+            outcome.result_and_state.result,
+        ),
+        Err(e) => Refusal { error: std::format!("{e:?}"), rejected_rewrites },
+    }
 }
 
 /// Runs [`transact`] with the spec's default runtime limits.

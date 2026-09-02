@@ -1888,6 +1888,11 @@ where
                 additional_limit.borrow_mut().push_empty_frame();
             }
 
+            // Deliberately *not* the marked window below: this result is the inspector's own,
+            // produced by a callback that answered the frame before anything in the EVM decided
+            // anything for it. There is no journal decision behind it for a later rewrite to
+            // contradict — no checkpoint was opened, no state was written — so moving its
+            // classification is supported like any other result rewrite.
             frame_end(ctx, inspector, &frame_init.frame_input, &mut output);
 
             if is_mini_rex_enabled {
@@ -1919,7 +1924,7 @@ where
             forward_precompile_logs(ctx, inspector, logs_before_init, &output);
 
             let gas_before_callback = output.gas().remaining();
-            frame_end(ctx, inspector, &frame_input, &mut output);
+            frame_end_on_frame_init_result(ctx, inspector, &frame_input, &mut output);
             let inspector_gas_delta =
                 i128::from(output.gas().remaining()) - i128::from(gas_before_callback);
 
@@ -1978,6 +1983,37 @@ where
         self.hold_deferred_journal(deferred_journal);
         Ok(outcome)
     }
+}
+
+/// Runs the inspector's last callback over a result [`init_frame_unsettled`] produced, inside the
+/// window the measurement shim reads to tell such a result apart from one a frame produced.
+///
+/// What the shim does inside it is refuse a rewrite that moves the result's classification. The
+/// journal decision behind such a result was taken before any callback ran and no callback can
+/// reach it: revm's `make_call_frame` commits a value-transferring call into an empty-code account
+/// and reverts a failing precompile inside itself, and a system contract interceptor decides its
+/// own before it returns — the `KeylessDeploy` one by merging a whole sandbox's state. Gas and
+/// output are untouched by the window; they are measured on their own lanes either way.
+///
+/// The boundary is the *call site*, not a classification of the arms behind it, and deliberately
+/// so: the arms are revm's early-fail returns plus `MegaETH`'s interceptors and guards, a set with
+/// no type-level tie to anything here, and one that a revm bump grows without a compile error.
+/// Some of them — a depth rejection, a refusal `MegaETH` took before opening a checkpoint — carry
+/// no state a rewrite could contradict, and are covered anyway.
+///
+/// [`init_frame_unsettled`]: MegaEvm::init_frame_unsettled
+#[inline]
+fn frame_end_on_frame_init_result<DB: Database, ExtEnvs: ExternalEnvTypes, INSP>(
+    ctx: &mut MegaContext<DB, ExtEnvs>,
+    inspector: &mut INSP,
+    frame_input: &FrameInput,
+    output: &mut FrameResult,
+) where
+    INSP: Inspector<MegaContext<DB, ExtEnvs>>,
+{
+    ctx.additional_limit.borrow_mut().set_settling_frame_init_result(true);
+    frame_end(ctx, inspector, frame_input, output);
+    ctx.additional_limit.borrow_mut().set_settling_frame_init_result(false);
 }
 
 /// Hands an inspector the logs a precompile emitted, which no other callback would show it.
