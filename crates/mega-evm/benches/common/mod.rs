@@ -97,17 +97,28 @@ const INSPECTED_SPEC_IDS: &[(&str, MegaSpecId)] =
 
 /// Register inspected-path rows for REX6 and REX7 on the current group.
 ///
-/// Each spec gets two extra rows:
+/// Each spec gets four extra rows:
 /// - `<spec>/inspect_noop` — inspect loop + measurement shim around a
 ///   [`NoOpInspector`](revm::inspector::NoOpInspector)
 /// - `<spec>/inspect_tracer` — the same loop with `revm-inspectors`' geth default
 ///   (`debug_traceTransaction`)
+/// - `<spec>/inspect_noop_trusted`, `<spec>/inspect_tracer_trusted` — the same two inspectors
+///   declared read-only, so the shim delegates without measuring. Each trusted row against its
+///   untrusted twin is the measurement's cost; against the pre-shim baseline it is what the
+///   declaration buys back.
 ///
 /// Pair with [`register_all`] (or [`register_mega`]) so the unsuffixed
 /// `<spec>` row remains the plain baseline. Does not re-register that row.
 pub fn register_inspected(group: &mut Group<'_>, w: &Workload) {
     run_subjects(group, "inspect_noop", w, &inspected_subjects(InspectKind::NoOp));
     run_subjects(group, "inspect_tracer", w, &inspected_subjects(InspectKind::GethTracer));
+    run_subjects(group, "inspect_noop_trusted", w, &inspected_subjects(InspectKind::NoOpTrusted));
+    run_subjects(
+        group,
+        "inspect_tracer_trusted",
+        w,
+        &inspected_subjects(InspectKind::GethTracerTrusted),
+    );
 }
 
 fn inspected_subjects(kind: InspectKind) -> Vec<Box<dyn Subject>> {
