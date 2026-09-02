@@ -3,24 +3,20 @@
 
 use std::{cell::RefCell, rc::Rc};
 
-use alloy_primitives::{address, hex, Address, Bytes, Signature, TxKind, B256, U256};
+use alloy_primitives::{hex, Address, Bytes, U256};
 use alloy_sol_types::SolCall;
 use mega_evm::{
-    alloy_consensus::{Signed, TxLegacy},
     constants,
     revm::context::result::{ExecutionResult, ResultAndState},
     sandbox::{
         decode_error_result, InspectorSandboxObserver, KeylessDeployError, SandboxCompletionKind,
         SandboxEndOutcome, SandboxObserver, SandboxRejectKind, SandboxStartInfo,
     },
-    test_utils::{BytecodeBuilder, ErrorInjectingDatabase, MemoryDatabase},
-    EmptyExternalEnv, EvmTxRuntimeLimits, IKeylessDeploy, MegaContext, MegaEvm, MegaHaltReason,
-    MegaSpecId, MegaTransaction, TestExternalEnvs, KEYLESS_DEPLOY_ADDRESS, MIN_BUCKET_SIZE,
+    test_utils::{ErrorInjectingDatabase, MemoryDatabase},
+    EvmTxRuntimeLimits, IKeylessDeploy, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
+    TestExternalEnvs,
 };
 use revm::{
-    bytecode::opcode::{BALANCE, CALL, MSTORE, POP, PUSH0, RETURN, STATICCALL},
-    context::TxEnv,
-    handler::EvmTr,
     inspector::NoOpInspector,
     interpreter::{
         interpreter::EthInterpreter, interpreter_types::Jumps, CallInputs, CallOutcome,
@@ -29,17 +25,17 @@ use revm::{
     Inspector,
 };
 
-const TEST_CALLER: Address = address!("0000000000000000000000000000000000100000");
-const LARGE_GAS_LIMIT_OVERRIDE: u64 = 10_000_000_000;
-const LARGE_SIGNER_BALANCE: u128 = 1_000_000_000_000_000_000_000;
-const SIGNED_TX_GAS_LIMIT: u64 = 1_000_000;
-const REVERTER: Address = address!("0000000000000000000000000000000000aaaaaa");
-const IDENTITY_PRECOMPILE: Address = address!("0000000000000000000000000000000000000004");
-const MERGE_FAIL_SENTINEL: Address = address!("0000000000000000000000000000000000bbbbbb");
-const DEFAULT_OUTER_GAS_LIMIT: u64 = 1_000_000_000_000;
-
-const SPECS: [MegaSpecId; 5] =
-    [MegaSpecId::REX2, MegaSpecId::REX3, MegaSpecId::REX4, MegaSpecId::REX5, MegaSpecId::REX6];
+use super::keyless_sandbox_support::{
+    assert_result_and_state_eq, assert_usage_eq, constructor_calls_identity_precompile,
+    constructor_calls_reverter, constructor_touches_sentinel, create_pre_eip155_deploy_tx,
+    create_pre_eip155_deploy_tx_with_value, crowded_parent_env, empty_code_constructor, funded_db,
+    keyless_deploy_call_tx, keyless_deploy_call_tx_with_override_u256, parent_compute_gas_used,
+    revert_constructor, run_keyless, run_keyless_with_parent_env,
+    run_keyless_with_parent_env_usage, run_keyless_with_usage, split_create_initcode,
+    success_constructor, RunConfig, DEFAULT_OUTER_GAS_LIMIT, IDENTITY_PRECOMPILE,
+    LARGE_GAS_LIMIT_OVERRIDE, MERGE_FAIL_SENTINEL, REVERTER, SIGNED_TX_GAS_LIMIT, SPECS,
+    SPLIT_CREATE_CODE_LEN, SPLIT_CREATE_SLOT, SPLIT_CREATE_SLOT_VALUE,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum ObservedEvent {
@@ -172,253 +168,6 @@ impl<CTX> Inspector<CTX> for GenericCreateCounter {
     }
 }
 
-fn success_constructor() -> Bytes {
-    BytecodeBuilder::default()
-        .sstore(U256::from(0), U256::from(1))
-        .push_number(1_u8)
-        .push_number(0_u8)
-        .push_number(0_u8)
-        .append(revm::bytecode::opcode::CODECOPY)
-        .push_number(1_u8)
-        .push_number(0_u8)
-        .append(RETURN)
-        .build()
-}
-
-fn revert_constructor() -> Bytes {
-    Bytes::from_static(&hex!("60006000fd"))
-}
-
-fn empty_code_constructor() -> Bytes {
-    BytecodeBuilder::default().append_many([PUSH0, PUSH0, RETURN]).build()
-}
-
-fn constructor_calls_reverter() -> Bytes {
-    BytecodeBuilder::default()
-        .push_number(0_u8)
-        .push_number(0_u8)
-        .push_number(0_u8)
-        .push_number(0_u8)
-        .push_number(0_u8)
-        .push_address(REVERTER)
-        .push_number(50_000_u32)
-        .append(CALL)
-        .append(POP)
-        .push_number(1_u8)
-        .push_number(0_u8)
-        .push_number(0_u8)
-        .append(revm::bytecode::opcode::CODECOPY)
-        .push_number(1_u8)
-        .push_number(0_u8)
-        .append(RETURN)
-        .build()
-}
-
-fn constructor_touches_sentinel() -> Bytes {
-    BytecodeBuilder::default()
-        .push_address(MERGE_FAIL_SENTINEL)
-        .append(BALANCE)
-        .append(POP)
-        .sstore(U256::from(0), U256::from(1))
-        .push_number(1_u8)
-        .push_number(0_u8)
-        .push_number(0_u8)
-        .append(revm::bytecode::opcode::CODECOPY)
-        .push_number(1_u8)
-        .push_number(0_u8)
-        .append(RETURN)
-        .build()
-}
-
-/// Words of memory expanded by the constructor `MSTORE`.
-///
-/// Pre-REX5 sandboxes ignore the parent's compute limit and run at the spec
-/// default of 200M (`rex::TX_COMPUTE_GAS_LIMIT`). An 8_000-byte code deposit
-/// is only 1.6M compute, so the constructor has to land in the window
-/// `(200M - 1.6M, 200M)` and then `RETURN` `8_000` bytes so the deposit charge
-/// splits the CREATE. Memory-expansion gas is `3*words + words²/512`; `318_191`
-/// words (~10.18 MiB) costs `198_699_714`, which sits in that window without a
-/// multi-million-iteration loop.
-const SPLIT_CREATE_MEM_WORDS: u64 = 318_191;
-const SPLIT_CREATE_MEM_OFFSET: u32 = (SPLIT_CREATE_MEM_WORDS * 32 - 32) as u32;
-const SPLIT_CREATE_CODE_LEN: u32 = 8_000;
-const SPLIT_CREATE_SLOT: u64 = 2;
-const SPLIT_CREATE_SLOT_VALUE: u64 = 0x2a;
-
-fn split_create_initcode() -> Bytes {
-    BytecodeBuilder::default()
-        .sstore(U256::from(SPLIT_CREATE_SLOT), U256::from(SPLIT_CREATE_SLOT_VALUE))
-        .push_number(0_u8)
-        .push_number(SPLIT_CREATE_MEM_OFFSET)
-        .append(MSTORE)
-        .push_number(SPLIT_CREATE_CODE_LEN)
-        .push_number(0_u8)
-        .append(RETURN)
-        .build()
-}
-
-fn constructor_calls_identity_precompile() -> Bytes {
-    BytecodeBuilder::default()
-        .push_number(0_u8)
-        .push_number(0_u8)
-        .push_number(0_u8)
-        .push_number(0_u8)
-        .push_address(IDENTITY_PRECOMPILE)
-        .push_number(50_000_u32)
-        .append(STATICCALL)
-        .append(POP)
-        .push_number(1_u8)
-        .push_number(0_u8)
-        .push_number(0_u8)
-        .append(revm::bytecode::opcode::CODECOPY)
-        .push_number(1_u8)
-        .push_number(0_u8)
-        .append(RETURN)
-        .build()
-}
-
-fn create_pre_eip155_deploy_tx_with_value(init_code: Bytes, value: U256) -> (Bytes, Address) {
-    let tx = TxLegacy {
-        nonce: 0,
-        gas_price: 100_000_000_000,
-        gas_limit: SIGNED_TX_GAS_LIMIT,
-        to: TxKind::Create,
-        value,
-        input: init_code,
-        chain_id: None,
-    };
-    let r = U256::from_be_bytes(hex!(
-        "2222222222222222222222222222222222222222222222222222222222222222"
-    ));
-    let s = U256::from_be_bytes(hex!(
-        "2222222222222222222222222222222222222222222222222222222222222222"
-    ));
-    let sig = Signature::new(r, s, false);
-    let signed = Signed::new_unchecked(tx, sig, B256::ZERO);
-    let mut buf = Vec::new();
-    signed.rlp_encode(&mut buf);
-    let tx_bytes = Bytes::from(buf);
-    let signer = signed.recover_signer().expect("should recover signer");
-    (tx_bytes, signer)
-}
-
-fn create_pre_eip155_deploy_tx(init_code: Bytes) -> (Bytes, Address) {
-    create_pre_eip155_deploy_tx_with_value(init_code, U256::ZERO)
-}
-
-fn keyless_deploy_call_tx(
-    keyless_deployment_tx: Bytes,
-    gas_limit_override: u64,
-) -> MegaTransaction {
-    keyless_deploy_call_tx_with_outer_gas(
-        keyless_deployment_tx,
-        gas_limit_override,
-        DEFAULT_OUTER_GAS_LIMIT,
-    )
-}
-
-fn keyless_deploy_call_tx_with_outer_gas(
-    keyless_deployment_tx: Bytes,
-    gas_limit_override: u64,
-    outer_gas_limit: u64,
-) -> MegaTransaction {
-    keyless_deploy_call_tx_with_override_u256(
-        keyless_deployment_tx,
-        U256::from(gas_limit_override),
-        outer_gas_limit,
-    )
-}
-
-fn keyless_deploy_call_tx_with_override_u256(
-    keyless_deployment_tx: Bytes,
-    gas_limit_override: U256,
-    outer_gas_limit: u64,
-) -> MegaTransaction {
-    let call_data = IKeylessDeploy::keylessDeployCall {
-        keylessDeploymentTransaction: keyless_deployment_tx,
-        gasLimitOverride: gas_limit_override,
-    }
-    .abi_encode();
-    let tx = TxEnv {
-        caller: TEST_CALLER,
-        kind: TxKind::Call(KEYLESS_DEPLOY_ADDRESS),
-        data: call_data.into(),
-        value: U256::ZERO,
-        gas_limit: outer_gas_limit,
-        gas_price: 0,
-        ..Default::default()
-    };
-    let mut tx = MegaTransaction::new(tx);
-    tx.enveloped_tx = Some(Bytes::new());
-    tx
-}
-
-fn funded_db(signer: Address) -> MemoryDatabase {
-    let mut db = MemoryDatabase::default();
-    db.set_account_balance(signer, U256::from(LARGE_SIGNER_BALANCE));
-    db
-}
-
-struct RunConfig<'a, O> {
-    spec: MegaSpecId,
-    db: &'a mut MemoryDatabase,
-    tx_bytes: Bytes,
-    gas_limit_override: u64,
-    observer: Option<Rc<RefCell<O>>>,
-    tx_limits: Option<EvmTxRuntimeLimits>,
-    outer_gas_limit: u64,
-}
-
-fn run_keyless<O>(config: RunConfig<'_, O>) -> ResultAndState<MegaHaltReason>
-where
-    O: SandboxObserver<EmptyExternalEnv> + 'static,
-{
-    let mut context = MegaContext::new(config.db, config.spec);
-    context.modify_chain(|chain| {
-        chain.operator_fee_scalar = Some(U256::ZERO);
-        chain.operator_fee_constant = Some(U256::ZERO);
-    });
-    if let Some(limits) = config.tx_limits {
-        context = context.with_tx_runtime_limits(limits);
-    }
-    context.set_keyless_sandbox_observer(config.observer);
-    let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);
-    let tx = keyless_deploy_call_tx_with_outer_gas(
-        config.tx_bytes,
-        config.gas_limit_override,
-        config.outer_gas_limit,
-    );
-    alloy_evm::Evm::transact_raw(&mut evm, tx).expect("keyless deploy transact")
-}
-
-fn assert_result_and_state_eq(
-    with_observer: &ResultAndState<MegaHaltReason>,
-    without_observer: &ResultAndState<MegaHaltReason>,
-    case: &str,
-) {
-    assert_eq!(
-        with_observer.result, without_observer.result,
-        "{case}: execution result must match"
-    );
-    assert_eq!(
-        with_observer.result.gas_used(),
-        without_observer.result.gas_used(),
-        "{case}: gas_used must match"
-    );
-    assert_eq!(
-        with_observer.state.len(),
-        without_observer.state.len(),
-        "{case}: state account count must match"
-    );
-    for (addr, account) in &with_observer.state {
-        let other = without_observer
-            .state
-            .get(addr)
-            .unwrap_or_else(|| panic!("{case}: missing account {addr:?} in no-observer state"));
-        assert_eq!(account, other, "{case}: account {addr:?}");
-    }
-}
-
 /// Loud split-CREATE shape: constructor finished (SSTORE stuck, account created) but the
 /// sandbox reported `ExecutionFailed` and the ABI does not claim a deploy. An empty spin
 /// that actually deployed would fail here as `Applied(Deployed)` / empty `errorData`.
@@ -514,7 +263,7 @@ fn parity_pair(
     let mut db_base = db_obs.clone();
     let observer = Rc::new(RefCell::new(RecordingObserver::default()));
 
-    let observed = run_keyless(RunConfig {
+    let (observed, observed_usage) = run_keyless_with_usage(RunConfig {
         spec,
         db: &mut db_obs,
         tx_bytes: tx_bytes.clone(),
@@ -523,7 +272,7 @@ fn parity_pair(
         tx_limits,
         outer_gas_limit: DEFAULT_OUTER_GAS_LIMIT,
     });
-    let baseline = run_keyless(RunConfig {
+    let (baseline, baseline_usage) = run_keyless_with_usage(RunConfig {
         spec,
         db: &mut db_base,
         tx_bytes,
@@ -533,6 +282,7 @@ fn parity_pair(
         outer_gas_limit: DEFAULT_OUTER_GAS_LIMIT,
     });
     assert_result_and_state_eq(&observed, &baseline, case);
+    assert_usage_eq(observed_usage, baseline_usage, case);
 }
 
 fn run_with_recorder(
@@ -592,33 +342,6 @@ fn assert_call_create_balanced(events: &[ObservedEvent]) {
     assert_eq!(create_depth, 0, "unbalanced create frames: {events:?}");
 }
 
-fn crowded_parent_env() -> TestExternalEnvs {
-    TestExternalEnvs::new()
-        .with_default_bucket_capacity((MIN_BUCKET_SIZE as u64) * 8)
-        .with_oracle_storage(U256::ZERO, U256::from(0x42))
-}
-
-fn run_keyless_with_parent_env<O>(
-    spec: MegaSpecId,
-    db: &mut MemoryDatabase,
-    tx_bytes: Bytes,
-    env: TestExternalEnvs,
-    observer: Option<Rc<RefCell<O>>>,
-) -> ResultAndState<MegaHaltReason>
-where
-    O: SandboxObserver<TestExternalEnvs> + SandboxObserver<EmptyExternalEnv> + 'static,
-{
-    let mut context = MegaContext::new(db, spec).with_external_envs(env.into());
-    context.modify_chain(|chain| {
-        chain.operator_fee_scalar = Some(U256::ZERO);
-        chain.operator_fee_constant = Some(U256::ZERO);
-    });
-    context.set_keyless_sandbox_observer(observer);
-    let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);
-    let tx = keyless_deploy_call_tx(tx_bytes, LARGE_GAS_LIMIT_OVERRIDE);
-    alloy_evm::Evm::transact_raw(&mut evm, tx).expect("keyless deploy transact")
-}
-
 #[test]
 fn test_observer_parity_pre_rex4_with_nonempty_parent_env() {
     for spec in [MegaSpecId::REX2, MegaSpecId::REX3] {
@@ -628,14 +351,14 @@ fn test_observer_parity_pre_rex4_with_nonempty_parent_env() {
         let observer = Rc::new(RefCell::new(RecordingObserver::default()));
         let env = crowded_parent_env();
 
-        let observed = run_keyless_with_parent_env(
+        let (observed, observed_usage) = run_keyless_with_parent_env_usage(
             spec,
             &mut db_obs,
             tx_bytes.clone(),
             env.clone(),
             Some(observer),
         );
-        let baseline = run_keyless_with_parent_env(
+        let (baseline, baseline_usage) = run_keyless_with_parent_env_usage(
             spec,
             &mut db_base,
             tx_bytes,
@@ -648,11 +371,9 @@ fn test_observer_parity_pre_rex4_with_nonempty_parent_env() {
             "{spec:?} baseline must succeed: {:?}",
             baseline.result
         );
-        assert_result_and_state_eq(
-            &observed,
-            &baseline,
-            &format!("pre-REX4 nonempty parent env {spec:?}"),
-        );
+        let case = format!("pre-REX4 nonempty parent env {spec:?}");
+        assert_result_and_state_eq(&observed, &baseline, &case);
+        assert_usage_eq(observed_usage, baseline_usage, &case);
     }
 }
 
@@ -665,14 +386,14 @@ fn test_observer_parity_pre_rex4_with_nonempty_parent_env_on_constructor_revert(
         let observer = Rc::new(RefCell::new(RecordingObserver::default()));
         let env = crowded_parent_env();
 
-        let observed = run_keyless_with_parent_env(
+        let (observed, observed_usage) = run_keyless_with_parent_env_usage(
             spec,
             &mut db_obs,
             tx_bytes.clone(),
             env.clone(),
             Some(observer),
         );
-        let baseline = run_keyless_with_parent_env(
+        let (baseline, baseline_usage) = run_keyless_with_parent_env_usage(
             spec,
             &mut db_base,
             tx_bytes,
@@ -685,11 +406,9 @@ fn test_observer_parity_pre_rex4_with_nonempty_parent_env_on_constructor_revert(
             "{spec:?} constructor revert is a success-style outer return: {:?}",
             baseline.result
         );
-        assert_result_and_state_eq(
-            &observed,
-            &baseline,
-            &format!("pre-REX4 nonempty parent env revert {spec:?}"),
-        );
+        let case = format!("pre-REX4 nonempty parent env revert {spec:?}");
+        assert_result_and_state_eq(&observed, &baseline, &case);
+        assert_usage_eq(observed_usage, baseline_usage, &case);
     }
 }
 
@@ -762,20 +481,6 @@ fn test_observer_parity_constructor_revert_across_specs() {
     for spec in SPECS {
         parity_pair(spec, revert_constructor(), true, None, &format!("revert {spec:?}"));
     }
-}
-
-fn parent_compute_gas_used(spec: MegaSpecId, signer: Address, tx_bytes: Bytes) -> u64 {
-    let mut usage_db = funded_db(signer);
-    let mut context = MegaContext::new(&mut usage_db, spec);
-    context.modify_chain(|chain| {
-        chain.operator_fee_scalar = Some(U256::ZERO);
-        chain.operator_fee_constant = Some(U256::ZERO);
-    });
-    let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);
-    let tx = keyless_deploy_call_tx(tx_bytes, LARGE_GAS_LIMIT_OVERRIDE);
-    alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
-    let used = evm.ctx_ref().additional_limit.borrow().get_usage().compute_gas;
-    used
 }
 
 #[test]
@@ -1091,7 +796,7 @@ fn test_observer_parity_split_create_through_interceptor() {
         let mut db_base = db_obs.clone();
         let recorder = Rc::new(RefCell::new(RecordingObserver::default()));
 
-        let observed = run_keyless(RunConfig {
+        let (observed, observed_usage) = run_keyless_with_usage(RunConfig {
             spec,
             db: &mut db_obs,
             tx_bytes: tx_bytes.clone(),
@@ -1100,7 +805,7 @@ fn test_observer_parity_split_create_through_interceptor() {
             tx_limits: None,
             outer_gas_limit: DEFAULT_OUTER_GAS_LIMIT,
         });
-        let baseline = run_keyless(RunConfig {
+        let (baseline, baseline_usage) = run_keyless_with_usage(RunConfig {
             spec,
             db: &mut db_base,
             tx_bytes,
@@ -1113,11 +818,9 @@ fn test_observer_parity_split_create_through_interceptor() {
         let events = recorder.borrow().events.clone();
         assert_split_create_shape(spec, &observed, signer, Some(&events));
         assert_split_create_shape(spec, &baseline, signer, None);
-        assert_result_and_state_eq(
-            &observed,
-            &baseline,
-            &format!("split-CREATE interceptor {spec:?}"),
-        );
+        let case = format!("split-CREATE interceptor {spec:?}");
+        assert_result_and_state_eq(&observed, &baseline, &case);
+        assert_usage_eq(observed_usage, baseline_usage, &case);
     }
 }
 
