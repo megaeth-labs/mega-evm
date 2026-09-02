@@ -633,7 +633,9 @@ A deposit a node would otherwise reject during validation, and a deposit that ha
 The rebuild runs after every recording and settlement site, so it is the last thing that decides the envelope: a node MUST derive the law against the rebuilt envelope rather than against the one the transaction reached on its own.
 The difference between the two is destroyed compute gas, because the receipt burns it and nothing was executed for it.
 The two shapes arrive from opposite positions and the law covers both without distinguishing them — a rejected deposit has recorded only the standard-EVM share of its intrinsic gas and settled nothing, while a halted deposit has already settled against the smaller envelope its resource-limit gas rescue left behind.
-A node MUST NOT let the rebuild change `executed_compute`: nothing was executed for the difference, so a deposit rejected before it ran anything consumes no compute capacity at transaction or block level.
+A node MUST NOT let the rebuild change `executed_compute`: nothing was executed for the difference between the rebuilt envelope and the one the transaction reached on its own, so that difference MUST NOT consume compute capacity at transaction or block level.
+What each shape recorded before the rebuild stands, and is enforced.
+A rejected deposit therefore enforces the standard-EVM share of its intrinsic gas — the amount recorded before validation returned the error — and a halted deposit enforces everything it had settled; on both shapes that is exactly what Rex6 records for the same transaction, and the destroyed remainder is an addition to the reported total rather than a change to the enforced one.
 
 The split MUST be driven by the halt classification rather than by the interpreter's own counter, which an inherited EVM zeroes for ordinary out-of-gas only.
 That zeroing has one consequence a node MUST accept: for an ordinary out-of-gas taken with no clamp in force, the counter is already zero when the frame exits, so the whole segment measures as executed and is enforced in full.
