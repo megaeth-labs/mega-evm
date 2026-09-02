@@ -15,6 +15,15 @@
 //! `0xEF`-prefixed, unaffordable deposit, reverted constructor, occupied address), a call frame's
 //! three outcomes, the frame inits that refuse to build a frame at all, a precompile, and the two
 //! suspension shapes that must settle nothing.
+//!
+//! An observation-only inspector is the wrong tool for one question, though, and the same matrix
+//! answers it with a rewriting one. Whether a frame's result came out of a frame that *ran* or out
+//! of frame init decides whether a classification rewrite can be followed at all: the running
+//! frame's journal decision is withheld until after the last callback, and the init-produced one's
+//! was taken before the first. Each case therefore also declares which of the two its first
+//! completed frame is, and [`test_a_classification_rewrite_is_followed_or_refused_by_that_alone`]
+//! drives every one of them through an inspector that moves the classification across the
+//! boundary.
 
 use crate::common::{CALLEE, CALLER, CONTRACT, EMPTY_TARGET, ONE_ETH};
 use alloy_primitives::{address, Address, Bytes, B256, U256};
@@ -26,10 +35,13 @@ use mega_evm::{
 };
 use revm::{
     bytecode::opcode::{CALL, CREATE, INVALID, MSTORE8, PUSH0, RETURN, REVERT, STATICCALL, STOP},
-    context::{tx::TxEnvBuilder, CfgEnv},
+    context::{tx::TxEnvBuilder, CfgEnv, ContextTr},
+    handler::{EvmTr, FrameResult},
     inspector::NoOpInspector,
+    interpreter::{FrameInput, InstructionResult, InterpreterTypes},
     primitives::TxKind,
     state::EvmState,
+    Inspector,
 };
 use std::{collections::BTreeMap, string::String};
 
@@ -140,6 +152,21 @@ struct Case {
     /// Asserted against the plain run, so a case that stops reaching its shape fails loudly
     /// instead of comparing two runs of something else.
     expect: fn(&Reading),
+    /// Where this case's first completed frame result comes from, which is the whole of what
+    /// decides whether a classification rewrite of it can be followed.
+    origin: Origin,
+}
+
+/// Where a frame result was produced, for the rewrite the second matrix applies to it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Origin {
+    /// A frame ran and reached its own settlement point. Its journal decision is parked until
+    /// after the last callback, so a rewrite is followed and the state follows it.
+    FrameRan,
+    /// Frame init produced the result without ever building a frame — an empty-code call, a
+    /// precompile, a refusal upstream or `MegaETH` declined to build. The journal decision behind
+    /// it was taken before any callback ran, so a rewrite is refused.
+    FrameInit,
 }
 
 fn base_db() -> MemoryDatabase {
@@ -218,6 +245,7 @@ fn cases() -> Vec<Case> {
             code_size_limit: None,
             gas_limit: TX_GAS_LIMIT,
             expect: assert_success,
+            origin: Origin::FrameRan,
         },
         Case {
             name: "CALL reverts and its storage write is rolled back",
@@ -236,6 +264,7 @@ fn cases() -> Vec<Case> {
             code_size_limit: None,
             gas_limit: TX_GAS_LIMIT,
             expect: assert_success,
+            origin: Origin::FrameRan,
         },
         Case {
             name: "CALL halts on INVALID and destroys its forwarded budget",
@@ -252,6 +281,7 @@ fn cases() -> Vec<Case> {
                 assert_success(r);
                 assert_destroyed(r);
             },
+            origin: Origin::FrameRan,
         },
         Case {
             name: "CALL into empty code stops without a frame",
@@ -262,6 +292,7 @@ fn cases() -> Vec<Case> {
             code_size_limit: None,
             gas_limit: TX_GAS_LIMIT,
             expect: assert_success,
+            origin: Origin::FrameInit,
         },
         Case {
             name: "CALL is refused for want of balance",
@@ -273,6 +304,7 @@ fn cases() -> Vec<Case> {
             code_size_limit: None,
             gas_limit: TX_GAS_LIMIT,
             expect: assert_success,
+            origin: Origin::FrameInit,
         },
         Case {
             name: "STATICCALL reaches a precompile, which returns without a frame",
@@ -296,6 +328,7 @@ fn cases() -> Vec<Case> {
             code_size_limit: None,
             gas_limit: TX_GAS_LIMIT,
             expect: assert_success,
+            origin: Origin::FrameInit,
         },
         Case {
             name: "CREATE deposits its code",
@@ -306,6 +339,7 @@ fn cases() -> Vec<Case> {
             code_size_limit: None,
             gas_limit: TX_GAS_LIMIT,
             expect: assert_success,
+            origin: Origin::FrameRan,
         },
         Case {
             name: "CREATE is rejected for an oversized runtime code",
@@ -319,6 +353,7 @@ fn cases() -> Vec<Case> {
                 assert_halt_reason(r, "CreateContractSizeLimit");
                 assert_destroyed(r);
             },
+            origin: Origin::FrameRan,
         },
         Case {
             name: "CREATE is rejected for an 0xEF-prefixed runtime code",
@@ -332,6 +367,7 @@ fn cases() -> Vec<Case> {
                 assert_halt_reason(r, "CreateContractStartingWithEF");
                 assert_destroyed(r);
             },
+            origin: Origin::FrameRan,
         },
         Case {
             name: "CREATE runs out of gas paying for its own code",
@@ -344,6 +380,7 @@ fn cases() -> Vec<Case> {
             code_size_limit: None,
             gas_limit: 150_000,
             expect: |r| assert_halt_reason(r, "OutOfGas"),
+            origin: Origin::FrameRan,
         },
         Case {
             name: "CREATE's constructor reverts",
@@ -354,6 +391,7 @@ fn cases() -> Vec<Case> {
             code_size_limit: None,
             gas_limit: TX_GAS_LIMIT,
             expect: assert_revert,
+            origin: Origin::FrameRan,
         },
         Case {
             name: "CREATE onto an occupied address collides",
@@ -380,6 +418,7 @@ fn cases() -> Vec<Case> {
                 assert_success(r);
                 assert_destroyed(r);
             },
+            origin: Origin::FrameInit,
         },
         Case {
             name: "a nested CALL suspends its caller without settling it",
@@ -393,6 +432,7 @@ fn cases() -> Vec<Case> {
             code_size_limit: None,
             gas_limit: TX_GAS_LIMIT,
             expect: assert_success,
+            origin: Origin::FrameInit,
         },
         Case {
             name: "the top-level frame itself halts",
@@ -403,6 +443,7 @@ fn cases() -> Vec<Case> {
             code_size_limit: None,
             gas_limit: TX_GAS_LIMIT,
             expect: assert_revert,
+            origin: Origin::FrameRan,
         },
     ]
 }
@@ -422,6 +463,216 @@ fn test_both_frame_loops_agree_on_every_frame_outcome() {
         assert_eq!(
             plain, inspected,
             "{}: an observation-only inspector must change nothing",
+            case.name,
+        );
+    }
+}
+
+/// Moves the classification of the first frame result it is handed across the success / revert /
+/// halt boundary, once.
+///
+/// It fires at the generic `frame_end`, which revm runs after the variant-specific callback over
+/// the same result — so one frame receives exactly one rewrite whatever shape it has, and the
+/// count below is the number of frames rewritten rather than the number of callbacks reached.
+#[derive(Debug, Default)]
+struct MoveTheClassification {
+    fired: u32,
+}
+
+/// The class a result is moved *to*, which is any class but its own.
+fn across_the_boundary(from: InstructionResult) -> InstructionResult {
+    if from.is_ok() {
+        InstructionResult::Revert
+    } else if from.is_revert() {
+        InstructionResult::OutOfGas
+    } else {
+        InstructionResult::Revert
+    }
+}
+
+impl<CTX: ContextTr, INTR: InterpreterTypes> Inspector<CTX, INTR> for MoveTheClassification {
+    fn frame_end(
+        &mut self,
+        _context: &mut CTX,
+        _frame_input: &FrameInput,
+        frame_result: &mut FrameResult,
+    ) {
+        if self.fired > 0 {
+            return;
+        }
+        self.fired += 1;
+        let result = frame_result.interpreter_result_mut();
+        result.result = across_the_boundary(result.result);
+    }
+}
+
+/// What one rewritten run came to.
+#[derive(Debug, PartialEq, Eq)]
+enum Rewritten {
+    /// The transaction produced a receipt, and the shim refused nothing.
+    Followed,
+    /// The shim restored the classification and failed the transaction.
+    Refused,
+}
+
+/// Runs `case` under REX7 with the rewriting inspector attached, and says which way it came out.
+fn run_rewritten(case: &Case) -> Rewritten {
+    let mut db = (case.db)();
+    let mut cfg = CfgEnv::default();
+    cfg.spec = MegaSpecId::REX7;
+    cfg.limit_contract_code_size = Some(case.code_size_limit.unwrap_or(MAX_CONTRACT_SIZE));
+    let mut context = MegaContext::new(&mut db, MegaSpecId::REX7)
+        .with_cfg(cfg)
+        .with_tx_runtime_limits(EvmTxRuntimeLimits::from_spec(MegaSpecId::REX7));
+    context.modify_chain(|chain| {
+        chain.operator_fee_scalar = Some(U256::ZERO);
+        chain.operator_fee_constant = Some(U256::ZERO);
+    });
+
+    let mut tx = MegaTransaction::new(
+        TxEnvBuilder::default()
+            .caller(CALLER)
+            .kind(case.kind)
+            .data(case.data.clone())
+            .value(case.value)
+            .gas_limit(case.gas_limit)
+            .build_fill(),
+    );
+    tx.enveloped_tx = Some(Bytes::new());
+
+    let mut inspector = MoveTheClassification::default();
+    let (outcome, ledger) = {
+        let mut evm = MegaEvm::new(context).with_inspector(&mut inspector);
+        let outcome: Result<MegaTransactionOutcome, _> = evm.execute_transaction(tx);
+        let ledger = evm.ctx_ref().additional_limit.borrow().inspector_ledger();
+        (outcome, ledger)
+    };
+    assert_eq!(
+        inspector.fired, 1,
+        "{}: the rewriting inspector must reach exactly one frame result",
+        case.name,
+    );
+    match outcome {
+        Ok(_) => {
+            assert_eq!(
+                ledger.rejected_rewrites, 0,
+                "{}: a followed rewrite refuses nothing",
+                case.name,
+            );
+            assert!(
+                ledger.interventions > 0,
+                "{}: a followed rewrite must still be booked as an intervention",
+                case.name,
+            );
+            Rewritten::Followed
+        }
+        Err(_) => {
+            assert_eq!(
+                ledger.rejected_rewrites, 1,
+                "{}: a refused rewrite is counted exactly once",
+                case.name,
+            );
+            Rewritten::Refused
+        }
+    }
+}
+
+/// Whether a classification rewrite is followed or refused is decided by where the result came
+/// from, and by nothing else.
+///
+/// This is the case the observation-only matrix above cannot reach: an inspector that changes
+/// nothing cannot tell a result the frame loops settled from one frame init produced, because both
+/// arrive at the same callback holding the same type. The difference is in what stands behind
+/// them, and only a rewrite makes it visible — a running frame's journal decision is still
+/// outstanding and follows the rewrite, while an init-produced result's was taken inside
+/// `make_call_frame` or inside an interceptor before the callback existed.
+///
+/// Every case of the matrix runs here, so the split is stated over the whole frame lifecycle
+/// rather than over the three shapes that happen to have their own fixtures.
+#[test]
+fn test_a_classification_rewrite_is_followed_or_refused_by_that_alone() {
+    for case in cases() {
+        let expected = match case.origin {
+            Origin::FrameRan => Rewritten::Followed,
+            Origin::FrameInit => Rewritten::Refused,
+        };
+        assert_eq!(
+            run_rewritten(&case),
+            expected,
+            "{}: a {:?} result must be {expected:?}",
+            case.name,
+            case.origin,
+        );
+    }
+}
+
+/// The matrix covers both origins, so the test above is a comparison rather than a restatement of
+/// one verdict.
+#[test]
+fn test_the_matrix_reaches_both_frame_origins() {
+    let cases = cases();
+    for origin in [Origin::FrameRan, Origin::FrameInit] {
+        assert!(
+            cases.iter().any(|case| case.origin == origin),
+            "the matrix must contain a {origin:?} case",
+        );
+    }
+}
+
+/// The two-loop comparison for the rewriting inspector: with the inspected loops switched off, the
+/// same inspector is handed no callback and the run is the uninspected one, bit for bit.
+///
+/// This is what says the refusal and the marker that drives it live entirely inside the inspected
+/// path — that neither the window `inspect_frame_init` opens nor the comparison the shim makes in
+/// it can move a transaction the plain loops ran.
+#[test]
+fn test_a_rewriting_inspector_with_the_loops_switched_off_changes_nothing() {
+    for case in cases() {
+        let plain = run_under(&case, MegaSpecId::REX7, false);
+        let mut db = (case.db)();
+        let mut cfg = CfgEnv::default();
+        cfg.spec = MegaSpecId::REX7;
+        cfg.limit_contract_code_size = Some(case.code_size_limit.unwrap_or(MAX_CONTRACT_SIZE));
+        let mut context = MegaContext::new(&mut db, MegaSpecId::REX7)
+            .with_cfg(cfg)
+            .with_tx_runtime_limits(EvmTxRuntimeLimits::from_spec(MegaSpecId::REX7));
+        context.modify_chain(|chain| {
+            chain.operator_fee_scalar = Some(U256::ZERO);
+            chain.operator_fee_constant = Some(U256::ZERO);
+        });
+        let mut tx = MegaTransaction::new(
+            TxEnvBuilder::default()
+                .caller(CALLER)
+                .kind(case.kind)
+                .data(case.data.clone())
+                .value(case.value)
+                .gas_limit(case.gas_limit)
+                .build_fill(),
+        );
+        tx.enveloped_tx = Some(Bytes::new());
+
+        let mut inspector = MoveTheClassification::default();
+        let outcome: MegaTransactionOutcome = {
+            let mut evm = MegaEvm::new(context).with_inspector(&mut inspector);
+            alloy_evm::Evm::set_inspector_enabled(&mut evm, false);
+            evm.execute_transaction(tx).expect("tx should not surface EVMError")
+        };
+        assert_eq!(inspector.fired, 0, "{}: no callback may run", case.name);
+        let switched_off = Reading {
+            result: std::format!("{:?}", outcome.result_and_state.result),
+            compute_gas: outcome.compute_gas_used,
+            enforced: outcome.compute_gas_enforced,
+            destroyed: outcome.compute_gas_destroyed,
+            data_size: outcome.data_size,
+            kv_updates: outcome.kv_updates,
+            state_growth: outcome.state_growth_used,
+            gas_used: outcome.result_and_state.result.tx_gas_used(),
+            total_gas_spent: outcome.result_and_state.result.gas().total_gas_spent(),
+            state: render_state(&outcome.result_and_state.state),
+        };
+        assert_eq!(
+            plain, switched_off,
+            "{}: a rewriting inspector with no callbacks must change nothing",
             case.name,
         );
     }
