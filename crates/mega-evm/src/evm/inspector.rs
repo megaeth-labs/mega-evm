@@ -1271,6 +1271,65 @@ impl<I> MeasuredInspector<I> {
     }
 }
 
+/// Books what an entry callback did to the frame it was handed.
+///
+/// `frame_start`, `call` and `create` are one measurement over three argument types, and this is
+/// the body: the envelope moved, whether anything else about the inputs came back changed, and —
+/// when the callback answered the frame itself — the refund its synthetic outcome carries.
+/// `intercepted_refund` is `Some` exactly when it did.
+#[inline]
+fn book_frame_entry<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    context: &MegaContext<DB, ExtEnvs>,
+    before: Option<u64>,
+    after: Option<u64>,
+    intercepted_refund: Option<i64>,
+    rewritten: bool,
+) {
+    let intercepted = intercepted_refund.is_some();
+    book_env_adjustment(context, before, after, intercepted);
+    if let Some(refund) = intercepted_refund {
+        book_synthetic_refund(context, refund);
+    }
+    book_intervention(context, intercepted || rewritten);
+}
+
+/// What a finished frame reads as on the way into an `*_end` callback.
+///
+/// The three `*_end` callbacks are one measurement over three argument types, the way the three
+/// entry callbacks are. `M` is whatever the object carries outside the `InterpreterResult` the
+/// three of them share.
+struct FrameEnding<M> {
+    result: InstructionResult,
+    output: Bytes,
+    metadata: M,
+    refund: i64,
+}
+
+impl<M: PartialEq> FrameEnding<M> {
+    /// Books what the callback did to a finished frame, and refuses the rewrites that are
+    /// forbidden.
+    ///
+    /// `is_create` selects the second refusal. Both read the classification as it stood on the way
+    /// in, and the frame-init one runs first because it restores whatever it refuses — which
+    /// leaves the creation refusal nothing to see.
+    #[inline]
+    fn book<DB: Database, ExtEnvs: ExternalEnvTypes>(
+        self,
+        context: &mut MegaContext<DB, ExtEnvs>,
+        result: &mut InterpreterResult,
+        metadata: M,
+        is_create: bool,
+    ) {
+        book_refund(context, self.refund, result.gas.refunded());
+        book_intervention(context, result_rewritten((self.result, &self.output), result));
+        book_intervention(context, metadata != self.metadata);
+        reject_forbidden_frame_init_rewrite(context, self.result, result);
+        if is_create {
+            reject_forbidden_create_rewrite(context, self.result, result);
+        }
+    }
+}
+
 impl<DB, ExtEnvs, INTR, I> Inspector<MegaContext<DB, ExtEnvs>, INTR> for MeasuredInspector<I>
 where
     DB: Database,
@@ -1346,16 +1405,13 @@ where
         }
         let before = frame_input.clone();
         let outcome = self.inner.frame_start(context, frame_input);
-        book_env_adjustment(
+        book_frame_entry(
             context,
             frame_input_gas_limit(&before),
             frame_input_gas_limit(frame_input),
-            outcome.is_some(),
+            outcome.as_ref().map(|outcome| outcome.gas().refunded()),
+            frame_input_rewritten(before, frame_input),
         );
-        if let Some(outcome) = &outcome {
-            book_synthetic_refund(context, outcome.gas().refunded());
-        }
-        book_intervention(context, outcome.is_some() || frame_input_rewritten(before, frame_input));
         verify_trusted(self.trusted, context, "frame_start");
         outcome
     }
@@ -1370,24 +1426,16 @@ where
         if !self.measures() {
             return self.inner.frame_end(context, frame_input, frame_result);
         }
-        let before = frame_result.instruction_result();
-        let output = frame_result.interpreter_result().output.clone();
-        let metadata = OutcomeMetadata::of(frame_result);
-        let refund_before = frame_result.gas().refunded();
+        let entry = FrameEnding {
+            result: frame_result.instruction_result(),
+            output: frame_result.interpreter_result().output.clone(),
+            metadata: OutcomeMetadata::of(frame_result),
+            refund: frame_result.gas().refunded(),
+        };
         self.inner.frame_end(context, frame_input, frame_result);
-        book_refund(context, refund_before, frame_result.gas().refunded());
-        book_intervention(
-            context,
-            result_rewritten((before, &output), frame_result.interpreter_result()),
-        );
-        book_intervention(context, OutcomeMetadata::of(frame_result) != metadata);
-        // `frame_end` runs after `call_end` / `create_end` and is the last chance to rewrite a
-        // classification, so both refusals apply here too. The frame-init one runs first: it
-        // restores whatever it refuses, which leaves the creation refusal below nothing to see.
-        reject_forbidden_frame_init_rewrite(context, before, frame_result.interpreter_result_mut());
-        if let FrameResult::Create(outcome) = frame_result {
-            reject_forbidden_create_rewrite(context, before, &mut outcome.result);
-        }
+        let metadata = OutcomeMetadata::of(frame_result);
+        let is_create = matches!(frame_result, FrameResult::Create(_));
+        entry.book(context, frame_result.interpreter_result_mut(), metadata, is_create);
         verify_trusted(self.trusted, context, "frame_end");
     }
 
@@ -1402,16 +1450,13 @@ where
         }
         let before = inputs.clone();
         let outcome = self.inner.call(context, inputs);
-        book_env_adjustment(
+        book_frame_entry(
             context,
             Some(before.gas_limit),
             Some(inputs.gas_limit),
-            outcome.is_some(),
+            outcome.as_ref().map(|outcome| outcome.result.gas.refunded()),
+            call_inputs_rewritten(before, inputs),
         );
-        if let Some(outcome) = &outcome {
-            book_synthetic_refund(context, outcome.result.gas.refunded());
-        }
-        book_intervention(context, outcome.is_some() || call_inputs_rewritten(before, inputs));
         verify_trusted(self.trusted, context, "call");
         outcome
     }
@@ -1429,14 +1474,15 @@ where
         if !self.measures() {
             return self.inner.call_end(context, inputs, outcome);
         }
-        let before = (outcome.result.result, outcome.result.output.clone());
-        let metadata = CallMetadata::of(outcome);
-        let refund_before = outcome.result.gas.refunded();
+        let entry = FrameEnding {
+            result: outcome.result.result,
+            output: outcome.result.output.clone(),
+            metadata: CallMetadata::of(outcome),
+            refund: outcome.result.gas.refunded(),
+        };
         self.inner.call_end(context, inputs, outcome);
-        book_refund(context, refund_before, outcome.result.gas.refunded());
-        book_intervention(context, result_rewritten((before.0, &before.1), &outcome.result));
-        book_intervention(context, CallMetadata::of(outcome) != metadata);
-        reject_forbidden_frame_init_rewrite(context, before.0, &mut outcome.result);
+        let metadata = CallMetadata::of(outcome);
+        entry.book(context, &mut outcome.result, metadata, false);
         verify_trusted(self.trusted, context, "call_end");
     }
 
@@ -1451,16 +1497,13 @@ where
         }
         let before = inputs.clone();
         let outcome = self.inner.create(context, inputs);
-        book_env_adjustment(
+        book_frame_entry(
             context,
             Some(before.gas_limit()),
             Some(inputs.gas_limit()),
-            outcome.is_some(),
+            outcome.as_ref().map(|outcome| outcome.result.gas.refunded()),
+            create_inputs_rewritten(before, inputs),
         );
-        if let Some(outcome) = &outcome {
-            book_synthetic_refund(context, outcome.result.gas.refunded());
-        }
-        book_intervention(context, outcome.is_some() || create_inputs_rewritten(before, inputs));
         verify_trusted(self.trusted, context, "create");
         outcome
     }
@@ -1479,17 +1522,15 @@ where
         if !self.measures() {
             return self.inner.create_end(context, inputs, outcome);
         }
-        let before = (outcome.result.result, outcome.result.output.clone());
-        let address = outcome.address;
-        let refund_before = outcome.result.gas.refunded();
+        let entry = FrameEnding {
+            result: outcome.result.result,
+            output: outcome.result.output.clone(),
+            metadata: outcome.address,
+            refund: outcome.result.gas.refunded(),
+        };
         self.inner.create_end(context, inputs, outcome);
-        book_refund(context, refund_before, outcome.result.gas.refunded());
-        book_intervention(context, result_rewritten((before.0, &before.1), &outcome.result));
-        book_intervention(context, outcome.address != address);
-        // The frame-init refusal runs first, and restores whatever it refuses — so a creation
-        // refused as an init result is not counted a second time by the refusal below.
-        reject_forbidden_frame_init_rewrite(context, before.0, &mut outcome.result);
-        reject_forbidden_create_rewrite(context, before.0, &mut outcome.result);
+        let address = outcome.address;
+        entry.book(context, &mut outcome.result, address, true);
         verify_trusted(self.trusted, context, "create_end");
     }
 
