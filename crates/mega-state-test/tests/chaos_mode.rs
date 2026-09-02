@@ -350,6 +350,41 @@ fn test_the_control_inspector_changes_nothing() {
     );
 }
 
+/// The declared control produces the run the other two produce.
+///
+/// Three runs of one vector: no inspector, the control measured, and the control declared
+/// `TrustedObserver` so the shim delegates without measuring. The declaration's whole claim is
+/// that the third is the first, and the field-by-field comparison is what says so — the receipt,
+/// the four resource dimensions, the roots, and everything else `SpecOutcome` carries.
+///
+/// The callback count is asserted equal too, because every other assertion here would also pass
+/// for a fast path that skipped the inspector rather than the measurement.
+#[test]
+fn test_the_declared_control_changes_nothing_either() {
+    let unit = unit();
+    let plain = execute_unit_in_mode(&unit, VECTOR_0, &SpecName::Rex7, RunMode::Plain)
+        .expect("the fixture executes");
+    let observed = execute_unit_in_mode(&unit, VECTOR_0, &SpecName::Rex7, RunMode::Observe)
+        .expect("the fixture executes");
+    let trusted = execute_unit_in_mode(&unit, VECTOR_0, &SpecName::Rex7, RunMode::ObserveTrusted)
+        .expect("the fixture executes");
+
+    assert!(trusted.observed > 0, "the declared control must still be handed callbacks");
+    assert_eq!(
+        trusted.observed, observed.observed,
+        "and the same ones the measured control was handed",
+    );
+    assert!(trusted.ledger.is_zero(), "the fast path books nothing: {:?}", trusted.ledger);
+    assert!(
+        state_test::diff::compare(&trusted.outcome, &plain.outcome).is_empty(),
+        "a declared observation-only inspector moved something",
+    );
+    assert!(
+        state_test::diff::compare(&trusted.outcome, &observed.outcome).is_empty(),
+        "declaring the control changed what its run produced",
+    );
+}
+
 /// A vector the rewriting run leaves executable comes back `Pass`, with mutations to show for it.
 #[test]
 fn test_a_mutated_vector_passes_with_mutations_recorded() {

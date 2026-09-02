@@ -521,6 +521,11 @@ impl CallbackCounter {
     }
 }
 
+/// The control counts callbacks and writes nothing back, which is exactly what the declaration
+/// promises — so it is also what [`RunMode::ObserveTrusted`](crate::diff::RunMode::ObserveTrusted)
+/// drives the shim's fast path with.
+impl mega_evm::TrustedObserver for CallbackCounter {}
+
 impl<CTX, INTR: InterpreterTypes> Inspector<CTX, INTR> for CallbackCounter {
     fn initialize_interp(&mut self, _interp: &mut Interpreter<INTR>, _context: &mut CTX) {
         self.callbacks += 1;

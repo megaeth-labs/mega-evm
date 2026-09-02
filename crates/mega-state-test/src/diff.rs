@@ -823,6 +823,13 @@ pub enum RunMode {
     /// A read-only inspector that counts the callbacks it is handed and changes nothing — the
     /// control a rewriting run is judged against.
     Observe,
+    /// The same control, declared `TrustedObserver`, so the measurement shim delegates to it
+    /// without taking any of its readings.
+    ///
+    /// A third run of one vector rather than a variant of the second: what it is for is to be
+    /// compared against both of the others, since the declaration's whole claim is that skipping
+    /// the measurement changes nothing an execution produces.
+    ObserveTrusted,
     /// [`ChaosInspector`](crate::chaos::ChaosInspector), seeded with `seed` and restricted to
     /// what `filter` allows.
     Chaos {
@@ -840,7 +847,8 @@ pub struct UnitExecution {
     pub outcome: SpecOutcome,
     /// What the chaos inspector did, in [`RunMode::Chaos`].
     pub chaos: Option<crate::chaos::ChaosTally>,
-    /// How many callbacks the observing inspector was handed, in [`RunMode::Observe`].
+    /// How many callbacks the observing inspector was handed, in [`RunMode::Observe`] and
+    /// [`RunMode::ObserveTrusted`].
     pub observed: u64,
     /// What the measurement shim booked for the transaction.
     ///
@@ -915,6 +923,14 @@ pub fn execute_unit_reporting_chaos(
         }
         RunMode::Observe => {
             let mut evm = MegaEvm::new(evm_context).with_inspector(CallbackCounter::default());
+            let executed = evm.execute_transaction(megatx);
+            let inner = evm.into_inner();
+            observed = inner.inspector.callbacks();
+            (executed, None, inner.ctx)
+        }
+        RunMode::ObserveTrusted => {
+            let mut evm =
+                MegaEvm::new(evm_context).with_trusted_inspector(CallbackCounter::default());
             let executed = evm.execute_transaction(megatx);
             let inner = evm.into_inner();
             observed = inner.inspector.callbacks();
