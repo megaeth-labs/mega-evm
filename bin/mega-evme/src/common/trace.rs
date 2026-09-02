@@ -280,11 +280,16 @@ mod tests {
             context::{BlockEnv, CfgEnv, TxEnv},
             database::StateBuilder,
         },
-        test_utils::{BytecodeBuilder, MemoryDatabase},
+        test_utils::{
+            deep_mixed_init, nested_keyless_call_init, revert_after_create_init, BytecodeBuilder,
+            MemoryDatabase, DEEP_MIXED_LOG_TOPIC, REVERTING_RUNTIME,
+        },
         BlockLimits, EmptyExternalEnv, IKeylessDeploy, MegaBlockExecutionCtx,
         MegaBlockExecutorFactory, MegaEvmFactory, MegaHardforkConfig, MegaSpecId, MegaTxEnvelope,
-        KEYLESS_DEPLOY_ADDRESS,
+        KEYLESS_DEPLOY_ADDRESS, KEYLESS_DEPLOY_CODE,
     };
+
+    const REVERTER: Address = address!("0000000000000000000000000000000000aaaaaa");
 
     const TEST_CALLER: Address = address!("0000000000000000000000000000000000100000");
     const LARGE_GAS_LIMIT_OVERRIDE: u64 = 10_000_000_000;
@@ -306,10 +311,17 @@ mod tests {
     }
 
     fn create_pre_eip155_deploy_tx(init_code: Bytes) -> (Bytes, Address) {
+        create_pre_eip155_deploy_tx_with_gas_limit(init_code, SIGNED_TX_GAS_LIMIT)
+    }
+
+    fn create_pre_eip155_deploy_tx_with_gas_limit(
+        init_code: Bytes,
+        gas_limit: u64,
+    ) -> (Bytes, Address) {
         let tx = TxLegacy {
             nonce: 0,
             gas_price: 100_000_000_000,
-            gas_limit: SIGNED_TX_GAS_LIMIT,
+            gas_limit,
             to: TxKind::Create,
             value: U256::ZERO,
             input: init_code,
@@ -330,10 +342,13 @@ mod tests {
         (tx_bytes, signer)
     }
 
-    fn keyless_deploy_tx(keyless_deployment_tx: Bytes) -> MegaTransaction {
+    fn keyless_deploy_tx_with_override(
+        keyless_deployment_tx: Bytes,
+        gas_limit_override: u64,
+    ) -> MegaTransaction {
         let call_data = IKeylessDeploy::keylessDeployCall {
             keylessDeploymentTransaction: keyless_deployment_tx,
-            gasLimitOverride: U256::from(LARGE_GAS_LIMIT_OVERRIDE),
+            gasLimitOverride: U256::from(gas_limit_override),
         }
         .abi_encode();
         let tx = TxEnv {
@@ -373,16 +388,59 @@ mod tests {
         sandbox: SharedTracingInspector,
     ) -> (ResultAndState<MegaHaltReason>, MemoryDatabase, Address) {
         let (tx_bytes, signer) = create_pre_eip155_deploy_tx(success_constructor());
+        run_traced_keyless_bytes(outer, sandbox, tx_bytes, signer, LARGE_GAS_LIMIT_OVERRIDE, |_| {})
+    }
+
+    /// Runs one traced keyless deploy of an already-signed `tx_bytes`, with `setup` applied
+    /// to the funded database first (extra contracts the constructor calls into).
+    fn run_traced_keyless_bytes(
+        outer: SharedTracingInspector,
+        sandbox: SharedTracingInspector,
+        tx_bytes: Bytes,
+        signer: Address,
+        gas_limit_override: u64,
+        setup: impl Fn(&mut MemoryDatabase),
+    ) -> (ResultAndState<MegaHaltReason>, MemoryDatabase, Address) {
         let mut db = funded_db(signer);
+        setup(&mut db);
         let result = {
             let context = keyless_context(&mut db);
             let mut evm = MegaEvm::new(context).with_inspector(outer);
             evm.set_keyless_sandbox_observer(Some(sandbox.as_sandbox_observer()));
-            let result = evm.inspect_tx(keyless_deploy_tx(tx_bytes)).expect("keyless deploy");
+            let result = evm
+                .inspect_tx(keyless_deploy_tx_with_override(tx_bytes, gas_limit_override))
+                .expect("keyless deploy");
             assert!(result.result.is_success(), "deploy should succeed: {:?}", result.result);
             result
         };
         (result, db, signer)
+    }
+
+    /// Traces one keyless deploy and renders the Geth call tree with logs.
+    fn traced_call_frame(
+        tx_bytes: Bytes,
+        signer: Address,
+        gas_limit_override: u64,
+        setup: impl Fn(&mut MemoryDatabase),
+    ) -> (CallFrame, SharedTracingInspector, ResultAndState<MegaHaltReason>, MemoryDatabase) {
+        let outer =
+            SharedTracingInspector::new(TracingInspector::new(TracingInspectorConfig::all()));
+        let sandbox =
+            SharedTracingInspector::new(TracingInspector::new(TracingInspectorConfig::all()));
+        let (result_and_state, db, _signer) = run_traced_keyless_bytes(
+            outer.clone(),
+            sandbox.clone(),
+            tx_bytes,
+            signer,
+            gas_limit_override,
+            setup,
+        );
+        splice_sandbox_traces(&mut outer.borrow_mut(), &sandbox.borrow());
+        let frame = outer.borrow().geth_builder().geth_call_traces(
+            CallConfig { only_top_call: Some(false), with_log: Some(true) },
+            result_and_state.result.gas_used(),
+        );
+        (frame, outer, result_and_state, db)
     }
 
     #[test]
@@ -537,5 +595,142 @@ mod tests {
         assert_eq!(nodes[0].trace.address, KEYLESS_DEPLOY_ADDRESS);
         assert!(!nodes[0].children.is_empty());
         assert!(nodes[nodes[0].children[0]].trace.kind.is_any_create());
+    }
+
+    /// A constructor that CREATEs a child and then reverts: the sandbox CREATE frame carries
+    /// the revert, the child CREATE stays visible beneath it (events stream, they are not
+    /// retroactively truncated), and the prestate diff shows neither contract landing.
+    #[test]
+    fn test_keyless_trace_revert_after_create_keeps_child_frame() {
+        let (tx_bytes, signer) = create_pre_eip155_deploy_tx(revert_after_create_init());
+        let deploy_address = signer.create(0);
+        let child = deploy_address.create(1);
+        let (frame, outer, result_and_state, db) =
+            traced_call_frame(tx_bytes, signer, LARGE_GAS_LIMIT_OVERRIDE, |_| {});
+
+        assert_eq!(frame.typ, "CALL");
+        assert!(frame.error.is_none(), "outer call succeeds with errorData");
+        let create = &frame.calls[0];
+        assert_eq!(create.typ, "CREATE");
+        assert!(create.error.is_some(), "sandbox CREATE reverted: {:?}", create.error);
+        assert_eq!(create.calls.len(), 1, "the child CREATE is still nested under it");
+        assert_eq!(create.calls[0].typ, "CREATE");
+        assert_eq!(create.calls[0].to, Some(child));
+        assert!(create.calls[0].error.is_none(), "the child itself succeeded");
+
+        let prestate = outer
+            .borrow()
+            .geth_builder()
+            .geth_prestate_traces(
+                &result_and_state,
+                &PreStateConfig { diff_mode: Some(true), ..Default::default() },
+                &*db,
+            )
+            .expect("prestate diff");
+        let post = prestate.as_diff().expect("diff mode").post.clone();
+        assert!(!post.contains_key(&deploy_address), "parent rolled back");
+        assert!(!post.contains_key(&child), "child rolled back");
+    }
+
+    /// Three CREATE levels, two reverting CALLs, and a log inside one sandbox: the call tree
+    /// nests the whole shape under the `KeylessDeploy` CALL and the struct logs descend one
+    /// depth level per frame.
+    #[test]
+    fn test_keyless_trace_deep_mixed_nests_three_levels() {
+        let (tx_bytes, signer) = create_pre_eip155_deploy_tx(deep_mixed_init(REVERTER));
+        let parent = signer.create(0);
+        let child = parent.create(1);
+        let grandchild = child.create(1);
+        let (frame, outer, result_and_state, _db) =
+            traced_call_frame(tx_bytes, signer, LARGE_GAS_LIMIT_OVERRIDE, |db| {
+                db.set_account_code(REVERTER, Bytes::from_static(&REVERTING_RUNTIME));
+            });
+
+        let sandbox = &frame.calls[0];
+        assert_eq!((sandbox.typ.as_str(), sandbox.to), ("CREATE", Some(parent)));
+        assert!(sandbox.error.is_none());
+        let kinds: Vec<(String, Option<Address>, bool)> =
+            sandbox.calls.iter().map(|c| (c.typ.clone(), c.to, c.error.is_some())).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                ("CREATE".to_owned(), Some(child), false),
+                ("CALL".to_owned(), Some(REVERTER), true)
+            ],
+            "parent frame: child CREATE then reverting CALL"
+        );
+        let child_frame = &sandbox.calls[0];
+        let child_kinds: Vec<(String, Option<Address>, bool)> =
+            child_frame.calls.iter().map(|c| (c.typ.clone(), c.to, c.error.is_some())).collect();
+        assert_eq!(
+            child_kinds,
+            vec![
+                ("CREATE".to_owned(), Some(grandchild), false),
+                ("CALL".to_owned(), Some(REVERTER), true)
+            ],
+            "child frame: grandchild CREATE then reverting CALL"
+        );
+        assert_eq!(sandbox.logs.len(), 1, "the parent constructor's LOG1");
+        assert_eq!(
+            sandbox.logs[0].topics.as_deref().map(|t| t[0]),
+            Some(B256::from(DEEP_MIXED_LOG_TOPIC))
+        );
+
+        let geth_trace = outer.borrow().geth_builder().geth_traces(
+            result_and_state.result.gas_used(),
+            Bytes::new(),
+            GethDefaultTracingOptions::default(),
+        );
+        let max_depth = geth_trace.struct_logs.iter().map(|s| s.depth).max().unwrap_or(0);
+        assert_eq!(max_depth, 4, "synthetic CREATE at 1, parent 2, child 3, grandchild 4");
+    }
+
+    /// An inner gas budget above the intrinsic cost but below the constructor's needs: the
+    /// sandbox CREATE frame reports out of gas while the outer call still succeeds.
+    #[test]
+    fn test_keyless_trace_sandbox_out_of_gas_marks_create_frame() {
+        const TIGHT_GAS: u64 = 110_000;
+        let (tx_bytes, signer) =
+            create_pre_eip155_deploy_tx_with_gas_limit(success_constructor(), TIGHT_GAS);
+        let (frame, _outer, _result, _db) = traced_call_frame(tx_bytes, signer, TIGHT_GAS, |_| {});
+
+        assert!(frame.error.is_none(), "outer call succeeds with errorData");
+        let create = &frame.calls[0];
+        assert_eq!(create.typ, "CREATE");
+        let error = create.error.as_deref().unwrap_or_default().to_ascii_lowercase();
+        assert!(error.contains("out of gas"), "sandbox CREATE halted out of gas: {error:?}");
+    }
+
+    /// A constructor that CALLs `KeylessDeploy` from inside the sandbox: interception is
+    /// depth-0 only, so the trace shows an ordinary reverted CALL to the system contract
+    /// nested under the sandbox CREATE.
+    #[test]
+    fn test_keyless_trace_nested_keyless_call_is_a_reverted_frame() {
+        let (tx_bytes, signer) = create_pre_eip155_deploy_tx(nested_keyless_call_init());
+        let (frame, outer, result_and_state, _db) =
+            traced_call_frame(tx_bytes, signer, LARGE_GAS_LIMIT_OVERRIDE, |db| {
+                db.set_account_code(KEYLESS_DEPLOY_ADDRESS, KEYLESS_DEPLOY_CODE);
+            });
+
+        let sandbox = &frame.calls[0];
+        assert_eq!(sandbox.typ, "CREATE");
+        assert!(sandbox.error.is_none(), "the constructor ignores the failed call");
+        assert_eq!(sandbox.calls.len(), 1);
+        let nested = &sandbox.calls[0];
+        assert_eq!((nested.typ.as_str(), nested.to), ("CALL", Some(KEYLESS_DEPLOY_ADDRESS)));
+        assert!(nested.error.is_some(), "not intercepted at depth > 0, so it reverted");
+
+        // The contract's dispatcher runs at depth 3 before it reverts, so the struct logs
+        // reach one level below the sandbox constructor.
+        let geth_trace = outer.borrow().geth_builder().geth_traces(
+            result_and_state.result.gas_used(),
+            Bytes::new(),
+            GethDefaultTracingOptions::default(),
+        );
+        let max_depth = geth_trace.struct_logs.iter().map(|s| s.depth).max().unwrap_or(0);
+        assert_eq!(
+            max_depth, 3,
+            "synthetic CREATE at 1, constructor at 2, KeylessDeploy code at 3"
+        );
     }
 }

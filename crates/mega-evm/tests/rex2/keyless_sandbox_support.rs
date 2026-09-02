@@ -143,10 +143,20 @@ pub(crate) fn create_pre_eip155_deploy_tx_with_value(
     init_code: Bytes,
     value: U256,
 ) -> (Bytes, Address) {
+    create_pre_eip155_deploy_tx_with_value_and_gas_limit(init_code, value, SIGNED_TX_GAS_LIMIT)
+}
+
+/// Like [`create_pre_eip155_deploy_tx_with_value`] with an explicit inner gas limit, for
+/// shapes that need the sandbox to run out of gas.
+pub(crate) fn create_pre_eip155_deploy_tx_with_value_and_gas_limit(
+    init_code: Bytes,
+    value: U256,
+    gas_limit: u64,
+) -> (Bytes, Address) {
     let tx = TxLegacy {
         nonce: 0,
         gas_price: 100_000_000_000,
-        gas_limit: SIGNED_TX_GAS_LIMIT,
+        gas_limit,
         to: TxKind::Create,
         value,
         input: init_code,
