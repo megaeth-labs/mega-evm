@@ -33,24 +33,31 @@
 //! transaction, and no callback — every sampled cell must then be bit-identical to a run with no
 //! inspector attached, which is what says the shim itself contributes nothing.
 
-use crate::common::{CALLEE, CALLER, CONTRACT, ONE_ETH};
+use crate::{
+    common::{
+        base_db, call_contract_tx, context, drive, state_view, transact, Outcome, CALLEE, CALLER,
+        CONTRACT, ONE_ETH,
+    },
+    inspector_common::{
+        assert_refused, call_then_stop, db_with_callee, deploy_then_stop, ledger_env, ledger_gas,
+        ledger_intervention, ledger_refund, ledger_reservoir, ledger_result, ledger_state_gas,
+        limits, plain_and_cheated, try_transact_inspected, REVERTING_INIT_CODE, REVIVED_CREATION,
+    },
+};
 use alloy_primitives::{Address, Bytes, Log, U256};
 use mega_evm::{
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    AdditionalLimit, ConservationTerms, EmptyExternalEnv, EvmTxRuntimeLimits, InspectorLedger,
-    Lane, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
-    MegaTransactionNew as _, MegaTransactionOutcome,
+    InspectorLedger, Lane, MegaEvm, MegaSpecId, MegaTransactionNew as _,
 };
 use revm::{
     bytecode::opcode::{CALL, CREATE, LOG1, MSTORE, MSTORE8, POP, RETURN, SSTORE, STOP},
-    context::{result::ExecutionResult, tx::TxEnvBuilder, Cfg, ContextTr, JournalTr},
-    handler::{EvmTr, FrameResult},
+    context::{Cfg, ContextTr, JournalTr},
+    handler::FrameResult,
     interpreter::{
         interpreter_types::{Jumps, LoopControl, MemoryTr, StackTr},
         CallInputs, CallOutcome, CreateInputs, CreateOutcome, FrameInput, Gas, InstructionResult,
         Interpreter, InterpreterAction, InterpreterResult, InterpreterTypes,
     },
-    state::EvmState,
     Inspector,
 };
 use std::{collections::BTreeMap, string::String, vec::Vec};
@@ -102,6 +109,25 @@ fn deployed_address() -> Address {
     CONTRACT.create(0)
 }
 
+/// Declares one axis of the matrix, with the list of its members derived from the declaration.
+///
+/// The two axes are swept exhaustively by `test_the_matrix_leaves_no_cell_unaccounted`, so a
+/// variant added without a corresponding entry in `ALL` would silently shrink the sweep instead of
+/// failing. Deriving the list removes that possibility.
+macro_rules! axis {
+    (
+        $(#[$meta:meta])*
+        enum $name:ident { $($(#[$vmeta:meta])* $variant:ident,)* }
+    ) => {
+        $(#[$meta])*
+        enum $name { $($(#[$vmeta])* $variant,)* }
+
+        impl $name {
+            const ALL: &'static [Self] = &[$(Self::$variant,)*];
+        }
+    };
+}
+
 // --- rows and columns -----------------------------------------------------------------------
 
 /// One row of the matrix: a callback on the `Inspector` trait.
@@ -110,6 +136,7 @@ fn deployed_address() -> Address {
 /// reached only when a precompile's logs are forwarded, which no wired `MegaETH` precompile
 /// produces — and [`inapplicable`] carries that, together with the reason its every column is
 /// empty anyway.
+axis! {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum At {
     InitializeInterp,
@@ -125,22 +152,6 @@ enum At {
     CreateEnd,
     Selfdestruct,
 }
-
-impl At {
-    const ALL: [Self; 12] = [
-        Self::InitializeInterp,
-        Self::Step,
-        Self::StepEnd,
-        Self::Log,
-        Self::LogFull,
-        Self::FrameStart,
-        Self::FrameEnd,
-        Self::Call,
-        Self::CallEnd,
-        Self::Create,
-        Self::CreateEnd,
-        Self::Selfdestruct,
-    ];
 }
 
 /// One column of the matrix: a shape a rewrite can take.
@@ -153,6 +164,7 @@ impl At {
 /// The EIP-8037 dimensions are the one place that pairing does not apply: `MegaETH` runs with the
 /// EIP off, so a `Gas` reaches every callback with both of its state-gas figures at zero and there
 /// is nothing to lower.
+axis! {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Shape {
     /// Write gas into a live interpreter's counter.
@@ -215,35 +227,9 @@ enum Shape {
     /// Write to the journal directly, behind the EVM's back.
     JournalWrite,
 }
+}
 
 impl Shape {
-    const ALL: [Self; 24] = [
-        Self::InjectGas,
-        Self::DrainGas,
-        Self::RaiseEnvelope,
-        Self::LowerEnvelope,
-        Self::EditInput,
-        Self::Intercept,
-        Self::RaiseInterceptionGas,
-        Self::LowerInterceptionGas,
-        Self::RaiseResultGas,
-        Self::LowerResultGas,
-        Self::FailResult,
-        Self::ReviveResult,
-        Self::RaiseActionResultGas,
-        Self::LowerActionResultGas,
-        Self::RaiseActionEnvelope,
-        Self::LowerActionEnvelope,
-        Self::RaiseRefund,
-        Self::LowerRefund,
-        Self::WriteReservoir,
-        Self::WriteStateGas,
-        Self::EditStackOrMemory,
-        Self::GrowMemoryFree,
-        Self::EditOutcomeMetadata,
-        Self::JournalWrite,
-    ];
-
     /// Whether this shape answers the frame with a synthetic outcome instead of letting the EVM
     /// build it.
     const fn is_interception(self) -> bool {
@@ -991,162 +977,35 @@ fn callee_code(fixture: Fixture) -> Bytes {
 }
 
 fn db_for(fixture: Fixture) -> MemoryDatabase {
-    MemoryDatabase::default()
-        .account_balance(CALLER, U256::from(10 * ONE_ETH))
-        .account_code(CONTRACT, caller_code())
-        .account_balance(CONTRACT, U256::from(ONE_ETH))
-        .account_code(CALLEE, callee_code(fixture))
+    db_with_callee(caller_code(), callee_code(fixture))
 }
 
 // --- running one cell -----------------------------------------------------------------------
 
-/// Everything one transaction reports, plus what the shim booked for it.
-struct Reading {
-    result: ExecutionResult<MegaHaltReason>,
-    compute_gas: u64,
-    enforced: u64,
-    destroyed: u64,
-    data_size: u64,
-    kv_updates: u64,
-    state_growth: u64,
-    gas_used: u64,
-    total_gas_spent: u64,
-    terms: ConservationTerms,
-    ledger: InspectorLedger,
-    state: EvmState,
+/// A storage slot as the produced state has it, taking the slot as the small integer the fixtures
+/// use.
+fn slot(outcome: &Outcome, address: Address, slot: u64) -> U256 {
+    outcome.storage_value(address, U256::from(slot))
 }
 
-impl Reading {
-    /// A storage slot as the produced state has it, zero when the transaction never wrote it.
-    fn slot(&self, address: Address, slot: u64) -> U256 {
-        self.state
-            .get(&address)
-            .and_then(|account| account.storage.get(&U256::from(slot)))
-            .map(|value| value.present_value())
-            .unwrap_or_default()
-    }
-
-    /// Whether the fixture's `CREATE` left code behind.
-    fn deployed(&self) -> bool {
-        self.state
-            .get(&deployed_address())
-            .is_some_and(|account| !account.info.is_empty_code_hash())
-    }
-
-    /// The produced state, rendered order-independently for a bit-for-bit comparison.
-    fn render_state(&self) -> String {
-        let canonical: BTreeMap<Address, String> = self
-            .state
-            .iter()
-            .map(|(address, account)| {
-                let storage: BTreeMap<U256, U256> = account
-                    .storage
-                    .iter()
-                    .map(|(slot, value)| (*slot, value.present_value()))
-                    .collect();
-                (
-                    *address,
-                    std::format!(
-                        "{:?}/{}/{:?}/{storage:?}",
-                        account.info.balance,
-                        account.info.nonce,
-                        account.info.code_hash
-                    ),
-                )
-            })
-            .collect();
-        std::format!("{canonical:?}")
-    }
-}
-
-/// The conservation identity, stated with the term the measurement shim contributes.
-///
-/// This is the assertion that goes red when a lane the shim should have booked went unbooked: the
-/// two sides then disagree by precisely the unbooked amount.
-fn assert_identity(label: &str, r: &Reading) {
-    assert_eq!(
-        r.compute_gas,
-        r.enforced + r.destroyed,
-        "{label}: reported compute must split into enforced + destroyed",
-    );
-    assert_eq!(
-        r.terms.inspector_conjured_gas,
-        r.ledger.conjured_gas(),
-        "{label}: the law's `I` term is the ledger's net, and nothing else",
-    );
-    assert_eq!(
-        r.terms.envelope_for(r.destroyed),
-        i128::from(r.total_gas_spent),
-        "{label}: the law must close against the envelope the receipt reports; \
-         reported compute={} destroyed={} envelope={} ({})",
-        r.compute_gas,
-        r.destroyed,
-        r.total_gas_spent,
-        r.terms,
-    );
-}
-
-fn tx() -> MegaTransaction {
-    let mut tx = MegaTransaction::new(
-        TxEnvBuilder::default().caller(CALLER).call(CONTRACT).gas_limit(TX_GAS_LIMIT).build_fill(),
-    );
-    tx.enveloped_tx = Some(Bytes::new());
-    tx
-}
-
-fn context(db: &mut MemoryDatabase) -> MegaContext<&mut MemoryDatabase, EmptyExternalEnv> {
-    let mut context = MegaContext::new(db, MegaSpecId::REX7)
-        .with_tx_runtime_limits(EvmTxRuntimeLimits::from_spec(MegaSpecId::REX7));
-    context.modify_chain(|chain| {
-        chain.operator_fee_scalar = Some(U256::ZERO);
-        chain.operator_fee_constant = Some(U256::ZERO);
-    });
-    context
-}
-
-fn read(limit: &AdditionalLimit, outcome: MegaTransactionOutcome) -> Reading {
-    assert_eq!(
-        outcome.inspector_ledger,
-        limit.inspector_ledger(),
-        "the outcome must report the ledger the shim booked, unchanged",
-    );
-    let gas_used = outcome.result_and_state.result.tx_gas_used();
-    let total_gas_spent = outcome.result_and_state.result.gas().total_gas_spent();
-    Reading {
-        result: outcome.result_and_state.result,
-        compute_gas: outcome.compute_gas_used,
-        enforced: outcome.compute_gas_enforced,
-        destroyed: outcome.compute_gas_destroyed,
-        data_size: outcome.data_size,
-        kv_updates: outcome.kv_updates,
-        state_growth: outcome.state_growth_used,
-        gas_used,
-        total_gas_spent,
-        terms: limit.conservation_terms(),
-        ledger: outcome.inspector_ledger,
-        state: outcome.result_and_state.state,
-    }
+/// Whether the fixture's `CREATE` left code behind.
+fn deployed(outcome: &Outcome) -> bool {
+    outcome.state.get(&deployed_address()).is_some_and(|account| !account.info.is_empty_code_hash())
 }
 
 /// Runs the fixture with no inspector at all.
-fn transact_plain(fixture: Fixture) -> Reading {
-    let mut db = db_for(fixture);
-    let mut evm = MegaEvm::new(context(&mut db));
-    let outcome = evm.execute_transaction(tx()).expect("tx should not surface EVMError");
-    let reading = read(&evm.ctx_ref().additional_limit.borrow(), outcome);
-    reading
+fn transact_plain(fixture: Fixture) -> Outcome {
+    transact(MegaSpecId::REX7, db_for(fixture), limits())
 }
 
 /// Runs the fixture with `cheat` attached, on the inspected loops or with them switched off.
-fn transact_cheating(fixture: Fixture, cheat: &mut Cheat, inspected: bool) -> Reading {
+fn transact_cheating(fixture: Fixture, cheat: &mut Cheat, inspected: bool) -> Outcome {
     let mut db = db_for(fixture);
-    let mut evm = MegaEvm::new(context(&mut db)).with_inspector(cheat);
+    let mut evm = MegaEvm::new(context(&mut db, MegaSpecId::REX7, limits())).with_inspector(cheat);
     if !inspected {
         alloy_evm::Evm::set_inspector_enabled(&mut evm, false);
     }
-    let outcome = evm.execute_transaction(tx()).expect("tx should not surface EVMError");
-    let reading = read(&evm.ctx_ref().additional_limit.borrow(), outcome);
-    reading
+    drive(MegaSpecId::REX7, &mut evm, call_contract_tx(TX_GAS_LIMIT))
 }
 
 // --- the matrix -----------------------------------------------------------------------------
@@ -1159,100 +1018,73 @@ struct Cell {
     /// The ledger the shim must have booked, exactly.
     ledger: InspectorLedger,
     /// What the produced state must show, given that the cheat landed.
-    state: fn(&Reading, &str),
+    state: fn(&Outcome, &str),
 }
 
-fn ledger_gas(gas: i128) -> InspectorLedger {
-    InspectorLedger { gas: Lane::once(gas), ..InspectorLedger::default() }
-}
-
-fn ledger_env(env: i128) -> InspectorLedger {
-    InspectorLedger { env: Lane::once(env), ..InspectorLedger::default() }
-}
-
-fn ledger_result(result: i128) -> InspectorLedger {
-    InspectorLedger { result: Lane::once(result), ..InspectorLedger::default() }
-}
-
-/// The ledger a rewrite of one of the receipt's other two numbers books.
-///
-/// Separate helpers rather than one, because which of the three figures a shape moves is exactly
-/// what decides whether the conservation law can see it: only the pool is a term of it.
-fn ledger_refund(refund: i128) -> InspectorLedger {
-    InspectorLedger { refund: Lane::once(refund), ..InspectorLedger::default() }
-}
-
-fn ledger_reservoir(reservoir: i128) -> InspectorLedger {
-    InspectorLedger { reservoir: Lane::once(reservoir), ..InspectorLedger::default() }
-}
-
-fn ledger_state_gas(state_gas: i128) -> InspectorLedger {
-    InspectorLedger { state_gas: Lane::once(state_gas), ..InspectorLedger::default() }
-}
-
-/// The ledger of a rewrite that moves no gas: the shim saw the argument it was handed come back
-/// changed, and that is the whole of what it books.
-///
-/// These are the cells that would otherwise be indistinguishable from an observation-only run, and
-/// the reason the canonical block path could not tell them apart before this lane existed.
-fn ledger_intervention() -> InspectorLedger {
-    InspectorLedger { interventions: 1, ..InspectorLedger::default() }
+/// A rewrite that moved gas *and* came back changed in something the shim compares.
+fn plus_intervention(mut ledger: InspectorLedger) -> InspectorLedger {
+    ledger.interventions += 1;
+    ledger
 }
 
 /// The fixture ran to its end and every frame committed: the callee's write, the deployment, and
 /// the top frame's own write are all there.
-fn state_all_committed(r: &Reading, label: &str) {
+fn state_all_committed(r: &Outcome, label: &str) {
     assert!(
         r.result.is_success(),
         "{label}: expected a successful transaction, got {:?}",
         r.result
     );
-    assert_eq!(r.slot(CALLEE, CALLEE_SLOT), U256::from(STORED), "{label}: the callee's write");
-    assert!(r.deployed(), "{label}: the fixture's CREATE must have deployed code");
-    assert_eq!(r.slot(CONTRACT, TOP_SLOT), U256::from(STORED), "{label}: the top frame's write");
+    assert_eq!(slot(r, CALLEE, CALLEE_SLOT), U256::from(STORED), "{label}: the callee's write");
+    assert!(deployed(r), "{label}: the fixture's CREATE must have deployed code");
+    assert_eq!(slot(r, CONTRACT, TOP_SLOT), U256::from(STORED), "{label}: the top frame's write");
 }
 
 /// The callee's frame did not commit: whatever ended it, its write is gone.
-fn state_callee_write_rolled_back(r: &Reading, label: &str) {
+fn state_callee_write_rolled_back(r: &Outcome, label: &str) {
     assert!(
         r.result.is_success(),
         "{label}: the caller absorbs the inner failure, got {:?}",
         r.result
     );
     assert_eq!(
-        r.slot(CALLEE, CALLEE_SLOT),
+        slot(r, CALLEE, CALLEE_SLOT),
         U256::ZERO,
         "{label}: a frame the caller was told failed must leave no write behind",
     );
-    assert!(r.deployed(), "{label}: the rest of the transaction must be unaffected");
+    assert!(deployed(r), "{label}: the rest of the transaction must be unaffected");
 }
 
 /// The callee's frame committed a write the EVM had decided to roll back — the journal followed
 /// the rewritten result rather than the classification.
-fn state_callee_write_revived(r: &Reading, label: &str) {
+fn state_callee_write_revived(r: &Outcome, label: &str) {
     assert!(r.result.is_success(), "{label}: {:?}", r.result);
     assert_eq!(
-        r.slot(CALLEE, CALLEE_SLOT),
+        slot(r, CALLEE, CALLEE_SLOT),
         U256::from(STORED),
         "{label}: a reverted frame rewritten into a success must have its state committed with it",
     );
 }
 
 /// The stack edit landed on the callee's `SSTORE` operand.
-fn state_callee_write_bumped(r: &Reading, label: &str) {
+fn state_callee_write_bumped(r: &Outcome, label: &str) {
     assert!(r.result.is_success(), "{label}: {:?}", r.result);
     assert_eq!(
-        r.slot(CALLEE, CALLEE_SLOT),
+        slot(r, CALLEE, CALLEE_SLOT),
         U256::from(STORED + 1),
         "{label}: the value the inspector put on the stack is the value the EVM wrote",
     );
 }
 
 /// The creation did not happen.
-fn state_no_deployment(r: &Reading, label: &str) {
+fn state_no_deployment(r: &Outcome, label: &str) {
     assert!(r.result.is_success(), "{label}: the caller absorbs it, got {:?}", r.result);
-    assert!(!r.deployed(), "{label}: no code may be deployed");
-    assert_eq!(r.slot(deployed_address(), INIT_SLOT), U256::ZERO, "{label}: nor its storage write");
+    assert!(!deployed(r), "{label}: no code may be deployed");
+    assert_eq!(
+        slot(r, deployed_address(), INIT_SLOT),
+        U256::ZERO,
+        "{label}: nor its storage write"
+    );
 }
 
 /// Every cell the matrix covers.
@@ -1261,240 +1093,112 @@ fn matrix() -> Vec<Cell> {
     use Shape::*;
 
     let mut cells = Vec::new();
-    let mut push = |at, shape, fixture, ledger, state: fn(&Reading, &str)| {
-        cells.push(Cell { at, shape, fixture, ledger, state });
-    };
+    /// One cell of the matrix, as a data row.
+    ///
+    /// The fixture defaults to the returning callee and the state check to "every frame
+    /// committed", because that is what a cell wants unless the rewrite it makes is one that
+    /// changes what the transaction leaves behind.
+    macro_rules! cell {
+        ($at:expr, $shape:expr, $ledger:expr $(, $fixture:expr, $state:expr)?) => {{
+            #[allow(unused_mut, unused_assignments)]
+            let mut fixture = Fixture::ReturningCallee;
+            #[allow(unused_mut, unused_assignments)]
+            let mut state: fn(&Outcome, &str) = state_all_committed;
+            $(
+                fixture = $fixture;
+                state = $state;
+            )?
+            cells.push(Cell { at: $at, shape: $shape, fixture, ledger: $ledger, state });
+        }};
+    }
 
     // The four callbacks that are handed a live interpreter.
     for at in [InitializeInterp, Step, StepEnd, LogFull] {
-        push(
-            at,
-            InjectGas,
-            Fixture::ReturningCallee,
-            ledger_gas(i128::from(INJECT)),
-            state_all_committed,
-        );
-        push(
-            at,
-            DrainGas,
-            Fixture::ReturningCallee,
-            ledger_gas(-i128::from(DRAIN)),
-            state_all_committed,
-        );
+        cell!(at, InjectGas, ledger_gas(i128::from(INJECT)));
+        cell!(at, DrainGas, ledger_gas(-i128::from(DRAIN)));
         // The two halves of the working-state column. `step` fires on an `SSTORE`'s operands and
         // pops and pushes the same two words, so both sizes come back where they were and nothing
         // is booked — the contents rewrite that has no lane. The other three rows run where there
         // is no operand to swap, so the cheat leaves a word on the stack instead, and a stack that
         // came back one word longer is a constant-time reading the shim takes.
-        push(
+        cell!(
             at,
             EditStackOrMemory,
+            if at == InitializeInterp { ledger_intervention() } else { InspectorLedger::default() },
             Fixture::ReturningCallee,
-            if at == At::InitializeInterp {
-                ledger_intervention()
-            } else {
-                InspectorLedger::default()
-            },
-            if at == Step { state_callee_write_bumped } else { state_all_committed },
+            if at == Step { state_callee_write_bumped } else { state_all_committed }
         );
         // Growing the memory and its memo together leaves every interpreter invariant intact and
         // still skips the next expansion's charge, so no gas lane sees it and the intervention
         // counter must.
-        push(
-            at,
-            GrowMemoryFree,
-            Fixture::ReturningCallee,
-            ledger_intervention(),
-            state_all_committed,
-        );
-        push(
-            at,
-            JournalWrite,
-            Fixture::ReturningCallee,
-            InspectorLedger::default(),
-            state_all_committed,
-        );
+        cell!(at, GrowMemoryFree, ledger_intervention());
+        cell!(at, JournalWrite, InspectorLedger::default());
         // The receipt's other two numbers, reached through the same `Gas` as the counter above.
-        push(
-            at,
-            RaiseRefund,
-            Fixture::ReturningCallee,
-            ledger_refund(i128::from(REFUND)),
-            state_all_committed,
-        );
+        cell!(at, RaiseRefund, ledger_refund(i128::from(REFUND)));
         if at != InitializeInterp {
-            push(
-                at,
-                LowerRefund,
-                Fixture::ReturningCallee,
-                ledger_refund(-i128::from(REFUND)),
-                state_all_committed,
-            );
+            cell!(at, LowerRefund, ledger_refund(-i128::from(REFUND)));
         }
-        push(
-            at,
-            WriteReservoir,
-            Fixture::ReturningCallee,
-            ledger_reservoir(i128::from(RESERVOIR)),
-            state_all_committed,
-        );
-        push(
-            at,
-            WriteStateGas,
-            Fixture::ReturningCallee,
-            ledger_state_gas(i128::from(STATE_GAS)),
-            state_all_committed,
-        );
+        cell!(at, WriteReservoir, ledger_reservoir(i128::from(RESERVOIR)));
+        cell!(at, WriteStateGas, ledger_state_gas(i128::from(STATE_GAS)));
     }
 
     // The pending action, which only `step_end` ever sees: revm's inspected loop breaks out the
     // moment one is set, so it is the one callback that runs with an instruction's action already
     // in place. Which lane the edit lands on is decided by the action's own variant — a `Return`
     // action is what the frame hands back, a `NewFrame` action is what the child is built with.
-    push(
-        StepEnd,
-        RaiseActionResultGas,
-        Fixture::ReturningCallee,
-        ledger_result(i128::from(ACTION)),
-        state_all_committed,
-    );
-    push(
-        StepEnd,
-        LowerActionResultGas,
-        Fixture::ReturningCallee,
-        ledger_result(-i128::from(ACTION)),
-        state_all_committed,
-    );
-    push(
-        StepEnd,
-        RaiseActionEnvelope,
-        Fixture::ReturningCallee,
-        ledger_env(i128::from(ACTION)),
-        state_all_committed,
-    );
-    push(
-        StepEnd,
-        LowerActionEnvelope,
-        Fixture::ReturningCallee,
-        ledger_env(-i128::from(ACTION)),
-        state_all_committed,
-    );
+    cell!(StepEnd, RaiseActionResultGas, ledger_result(i128::from(ACTION)));
+    cell!(StepEnd, LowerActionResultGas, ledger_result(-i128::from(ACTION)));
+    cell!(StepEnd, RaiseActionEnvelope, ledger_env(i128::from(ACTION)));
+    cell!(StepEnd, LowerActionEnvelope, ledger_env(-i128::from(ACTION)));
 
     // The three callbacks that are handed a frame's inputs before the frame is built. `create`
     // reaches the fixture's `CREATE`; the other two reach its inner `CALL`.
     for at in [FrameStart, Call, Create] {
-        let deployment_side = at == Create;
-        push(
-            at,
-            RaiseEnvelope,
-            Fixture::ReturningCallee,
-            ledger_env(i128::from(ENVELOPE)),
-            state_all_committed,
-        );
-        push(
-            at,
-            LowerEnvelope,
-            Fixture::ReturningCallee,
-            ledger_env(-i128::from(ENVELOPE)),
-            state_all_committed,
-        );
-        push(
-            at,
-            EditInput,
-            Fixture::ReturningCallee,
-            ledger_intervention(),
-            if deployment_side { state_no_deployment } else { state_callee_write_rolled_back },
-        );
-        push(
-            at,
-            Intercept,
-            Fixture::ReturningCallee,
-            ledger_intervention(),
-            if deployment_side { state_no_deployment } else { state_callee_write_rolled_back },
-        );
+        // A rewrite of what the frame will *do* is the one that changes what it leaves behind, and
+        // the creation side of the sweep leaves no deployment where the call side leaves no write.
+        let undone: fn(&Outcome, &str) =
+            if at == Create { state_no_deployment } else { state_callee_write_rolled_back };
+        cell!(at, RaiseEnvelope, ledger_env(i128::from(ENVELOPE)));
+        cell!(at, LowerEnvelope, ledger_env(-i128::from(ENVELOPE)));
+        cell!(at, EditInput, ledger_intervention(), Fixture::ReturningCallee, undone);
+        cell!(at, Intercept, ledger_intervention(), Fixture::ReturningCallee, undone);
         // The same interception, sized against the envelope rather than echoing it. No frame is
         // built, so the whole of what the outcome hands back is the inspector's number, and the
         // difference from what the caller forwarded is what the ledger has to carry.
-        push(
-            at,
-            RaiseInterceptionGas,
-            Fixture::ReturningCallee,
-            InspectorLedger {
-                result: Lane::once(i128::from(INTERCEPTION)),
-                interventions: 1,
-                ..InspectorLedger::default()
-            },
-            if deployment_side { state_no_deployment } else { state_callee_write_rolled_back },
-        );
-        push(
-            at,
-            LowerInterceptionGas,
-            Fixture::ReturningCallee,
-            InspectorLedger {
-                result: Lane::once(-i128::from(INTERCEPTION)),
-                interventions: 1,
-                ..InspectorLedger::default()
-            },
-            if deployment_side { state_no_deployment } else { state_callee_write_rolled_back },
-        );
-        push(
-            at,
-            JournalWrite,
-            Fixture::ReturningCallee,
-            InspectorLedger::default(),
-            state_all_committed,
-        );
-        if !deployment_side {
+        for (shape, sign) in [(RaiseInterceptionGas, 1i128), (LowerInterceptionGas, -1)] {
+            cell!(
+                at,
+                shape,
+                plus_intervention(ledger_result(sign * i128::from(INTERCEPTION))),
+                Fixture::ReturningCallee,
+                undone
+            );
+        }
+        cell!(at, JournalWrite, InspectorLedger::default());
+        if at != Create {
             // The pool a call's inputs seed the child with. It travels to the child and back, so
             // it is booked as gas — and the inputs came back changed in a field the envelope lane
             // does not cover, which the rewrite comparison books separately.
-            push(
-                at,
-                WriteReservoir,
-                Fixture::ReturningCallee,
-                InspectorLedger {
-                    reservoir: Lane::once(i128::from(RESERVOIR)),
-                    interventions: 1,
-                    ..InspectorLedger::default()
-                },
-                state_all_committed,
-            );
+            cell!(at, WriteReservoir, plus_intervention(ledger_reservoir(i128::from(RESERVOIR))));
         }
     }
 
     // The three callbacks that are handed a finished frame's result.
     for at in [FrameEnd, CallEnd, CreateEnd] {
-        let creation = at == CreateEnd;
-        push(
-            at,
-            RaiseResultGas,
-            Fixture::ReturningCallee,
-            ledger_result(i128::from(RESULT)),
-            state_all_committed,
-        );
-        push(
-            at,
-            LowerResultGas,
-            Fixture::ReturningCallee,
-            ledger_result(-i128::from(RESULT)),
-            state_all_committed,
-        );
-        push(
-            at,
-            FailResult,
-            Fixture::ReturningCallee,
-            ledger_intervention(),
-            if creation { state_no_deployment } else { state_callee_write_rolled_back },
-        );
-        if !creation {
+        let undone: fn(&Outcome, &str) =
+            if at == CreateEnd { state_no_deployment } else { state_callee_write_rolled_back };
+        cell!(at, RaiseResultGas, ledger_result(i128::from(RESULT)));
+        cell!(at, LowerResultGas, ledger_result(-i128::from(RESULT)));
+        cell!(at, FailResult, ledger_intervention(), Fixture::ReturningCallee, undone);
+        if at != CreateEnd {
             // Reviving a reverted *call* is honoured; the creation form is refused, and the two
             // tests that pin the refusal are named in `inapplicable`.
-            push(
+            cell!(
                 at,
                 ReviveResult,
-                Fixture::RevertingCallee,
                 ledger_intervention(),
-                state_callee_write_revived,
+                Fixture::RevertingCallee,
+                state_callee_write_revived
             );
         }
         // The half of a finished outcome that sits outside the `InterpreterResult`: where a call's
@@ -1502,48 +1206,12 @@ fn matrix() -> Vec<Cell> {
         // fixture discards both — the caller asks for a range the callee never fills and pops the
         // address — so what the cell pins is the booking. `ledger_blind_spots.rs` pins the forms
         // that change the produced state.
-        push(
-            at,
-            EditOutcomeMetadata,
-            Fixture::ReturningCallee,
-            ledger_intervention(),
-            state_all_committed,
-        );
-        push(
-            at,
-            JournalWrite,
-            Fixture::ReturningCallee,
-            InspectorLedger::default(),
-            state_all_committed,
-        );
-        push(
-            at,
-            RaiseRefund,
-            Fixture::ReturningCallee,
-            ledger_refund(i128::from(REFUND)),
-            state_all_committed,
-        );
-        push(
-            at,
-            LowerRefund,
-            Fixture::ReturningCallee,
-            ledger_refund(-i128::from(REFUND)),
-            state_all_committed,
-        );
-        push(
-            at,
-            WriteReservoir,
-            Fixture::ReturningCallee,
-            ledger_reservoir(i128::from(RESERVOIR)),
-            state_all_committed,
-        );
-        push(
-            at,
-            WriteStateGas,
-            Fixture::ReturningCallee,
-            ledger_state_gas(i128::from(STATE_GAS)),
-            state_all_committed,
-        );
+        cell!(at, EditOutcomeMetadata, ledger_intervention());
+        cell!(at, JournalWrite, InspectorLedger::default());
+        cell!(at, RaiseRefund, ledger_refund(i128::from(REFUND)));
+        cell!(at, LowerRefund, ledger_refund(-i128::from(REFUND)));
+        cell!(at, WriteReservoir, ledger_reservoir(i128::from(RESERVOIR)));
+        cell!(at, WriteStateGas, ledger_state_gas(i128::from(STATE_GAS)));
     }
 
     cells
@@ -1566,19 +1234,18 @@ fn test_every_cheat_shape_is_booked_and_the_law_still_closes() {
 
         assert_eq!(cheat.fired, 1, "{label}: the fixture must reach this callback exactly once");
         assert_eq!(
-            reading.ledger, cell.ledger,
+            reading.inspector_ledger, cell.ledger,
             "{label}: the shim must book exactly what the cheat did, and nothing else",
         );
         // The interpreter lane the cheat measured for itself and the lane the shim booked are two
         // independent readings of the same edit.
         if cheat.moved_gas != 0 {
             assert_eq!(
-                reading.ledger.gas.net(),
+                reading.inspector_ledger.gas.net(),
                 cheat.moved_gas,
                 "{label}: the shim's reading of the counter edit must match the cheat's own",
             );
         }
-        assert_identity(&label, &reading);
         (cell.state)(&reading, &label);
     }
 }
@@ -1594,8 +1261,8 @@ fn test_the_matrix_leaves_no_cell_unaccounted() {
     let mut holes = Vec::new();
     let (mut tested, mut excused) = (0usize, 0usize);
 
-    for at in At::ALL {
-        for shape in Shape::ALL {
+    for &at in At::ALL {
+        for &shape in Shape::ALL {
             match (covered.contains(&(at, shape)), inapplicable(at, shape)) {
                 (true, None) => tested += 1,
                 (false, Some(_)) => excused += 1,
@@ -1647,7 +1314,7 @@ fn test_the_matrix_is_inert_with_the_inspected_loops_switched_off() {
         (At::CreateEnd, Shape::EditOutcomeMetadata, Fixture::ReturningCallee),
     ];
 
-    let mut plain: BTreeMap<Fixture, Reading> = BTreeMap::new();
+    let mut plain: BTreeMap<Fixture, Outcome> = BTreeMap::new();
     for fixture in [Fixture::ReturningCallee, Fixture::RevertingCallee] {
         plain.insert(fixture, transact_plain(fixture));
     }
@@ -1660,9 +1327,9 @@ fn test_the_matrix_is_inert_with_the_inspected_loops_switched_off() {
 
         assert_eq!(cheat.fired, 0, "{label}: no callback may run with the inspected loops off");
         assert!(
-            off.ledger.is_zero(),
+            off.inspector_ledger.is_zero(),
             "{label}: an inert inspector books nothing: {:?}",
-            off.ledger
+            off.inspector_ledger
         );
         assert_eq!(
             std::format!("{:?}", off.result),
@@ -1670,7 +1337,7 @@ fn test_the_matrix_is_inert_with_the_inspected_loops_switched_off() {
             "{label}"
         );
         assert_eq!(off.compute_gas, reference.compute_gas, "{label}");
-        assert_eq!(off.enforced, reference.enforced, "{label}");
+        assert_eq!(off.enforced(), reference.enforced(), "{label}");
         assert_eq!(off.destroyed, reference.destroyed, "{label}");
         assert_eq!(off.data_size, reference.data_size, "{label}");
         assert_eq!(off.kv_updates, reference.kv_updates, "{label}");
@@ -1678,8 +1345,11 @@ fn test_the_matrix_is_inert_with_the_inspected_loops_switched_off() {
         assert_eq!(off.gas_used, reference.gas_used, "{label}");
         assert_eq!(off.total_gas_spent, reference.total_gas_spent, "{label}");
         assert_eq!(off.terms, reference.terms, "{label}");
-        assert_eq!(off.render_state(), reference.render_state(), "{label}: the produced state");
-        assert_identity(&label, &off);
+        assert_eq!(
+            state_view(&off.state),
+            state_view(&reference.state),
+            "{label}: the produced state"
+        );
     }
 }
 
@@ -1692,16 +1362,14 @@ fn test_the_matrix_is_inert_with_the_inspected_loops_switched_off() {
 fn test_the_fixtures_behave_as_the_cells_assume() {
     let returning = transact_plain(Fixture::ReturningCallee);
     state_all_committed(&returning, "returning callee");
-    assert_identity("returning callee", &returning);
 
     let reverting = transact_plain(Fixture::RevertingCallee);
     assert!(reverting.result.is_success(), "the caller absorbs the revert: {:?}", reverting.result);
     assert_eq!(
-        reverting.slot(CALLEE, CALLEE_SLOT),
+        slot(&reverting, CALLEE, CALLEE_SLOT),
         U256::ZERO,
         "the reverting callee's write must be rolled back without an inspector",
     );
-    assert_identity("reverting callee", &reverting);
 }
 
 /// `frame_end` is the last callback that can rewrite a creation's classification, and the refusal
@@ -1729,55 +1397,11 @@ fn test_reviving_a_failed_creation_is_refused_at_frame_end() {
         }
     }
 
-    // Init code that reverts immediately: PUSH1 0, PUSH1 0, REVERT.
-    let init: [u8; 5] = [0x60, 0x00, 0x60, 0x00, 0xfd];
-    let mut builder = BytecodeBuilder::default();
-    for (offset, byte) in init.iter().enumerate() {
-        builder = builder.push_number(u64::from(*byte)).push_number(offset as u64).append(MSTORE8);
-    }
-    let code = builder
-        .push_number(init.len() as u64) // size
-        .push_number(0u64) // offset
-        .push_number(0u64) // value
-        .append(CREATE)
-        .append(POP)
-        .append(STOP)
-        .build();
+    let db = base_db(deploy_then_stop(&REVERTING_INIT_CODE));
 
-    let run = move || {
-        let mut db = MemoryDatabase::default()
-            .account_balance(CALLER, U256::from(10 * ONE_ETH))
-            .account_code(CONTRACT, code.clone())
-            .account_balance(CONTRACT, U256::from(ONE_ETH));
-        let mut inspector = LateReviver;
-        let mut evm = MegaEvm::new(context(&mut db)).with_inspector(&mut inspector);
-        evm.execute_transaction(tx()).map(|_| ()).map_err(|e| std::format!("{e:?}"))
-    };
-
-    assert_refused(run);
-}
-
-/// Drives `run` and asserts the shim refused the rewrite, however this build surfaces a refusal:
-/// a debug build asserts (the shape is a detector, and a corpus that produces it should stop), a
-/// release build fails the transaction with the same message.
-fn assert_refused(run: impl Fn() -> Result<(), String>) {
-    const MESSAGE: &str = "inspector rewrote a failed contract creation into a successful one";
-    if cfg!(debug_assertions) {
-        let previous = std::panic::take_hook();
-        std::panic::set_hook(std::boxed::Box::new(|_| {}));
-        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(run));
-        std::panic::set_hook(previous);
-        let payload = panicked.expect_err("the detector must fire in debug builds");
-        let message = payload
-            .downcast_ref::<String>()
-            .map(String::as_str)
-            .or_else(|| payload.downcast_ref::<&str>().copied())
-            .unwrap_or_default();
-        assert!(message.contains(MESSAGE), "the assertion must name the shape; got {message:?}");
-    } else {
-        let error = run().expect_err("the refusal must surface as an EVMError in release builds");
-        assert!(error.contains(MESSAGE), "the error must name the shape; got {error:?}");
-    }
+    assert_refused(REVIVED_CREATION, || {
+        try_transact_inspected(db.clone(), limits(), &mut LateReviver)
+    });
 }
 
 /// An inspector that implements only `selfdestruct` moves nothing.
@@ -1802,50 +1426,23 @@ fn test_a_selfdestruct_only_inspector_moves_nothing() {
     }
 
     let callee = BytecodeBuilder::default().push_address(CALLER).append(SELFDESTRUCT).build();
-    let code = BytecodeBuilder::default()
-        .push_number(0u64)
-        .push_number(0u64)
-        .push_number(0u64)
-        .push_number(0u64)
-        .push_number(0u64)
-        .push_address(CALLEE)
-        .push_number(u128::from(INNER_CALL_GAS))
-        .append(CALL)
-        .append(POP)
-        .append(STOP)
-        .build();
+    let code = call_then_stop(CALLEE, INNER_CALL_GAS);
     let build_db = || {
-        MemoryDatabase::default()
-            .account_balance(CALLER, U256::from(10 * ONE_ETH))
-            .account_code(CONTRACT, code.clone())
-            .account_balance(CONTRACT, U256::from(ONE_ETH))
-            .account_code(CALLEE, callee.clone())
-            .account_balance(CALLEE, U256::from(ONE_ETH))
-    };
-
-    let plain = {
-        let mut db = build_db();
-        let mut evm = MegaEvm::new(context(&mut db));
-        let outcome = evm.execute_transaction(tx()).expect("tx should not surface EVMError");
-        let reading = read(&evm.ctx_ref().additional_limit.borrow(), outcome);
-        reading
+        db_with_callee(code.clone(), callee.clone()).account_balance(CALLEE, U256::from(ONE_ETH))
     };
 
     let mut watcher = Watcher::default();
-    let watched = {
-        let mut db = build_db();
-        let mut evm = MegaEvm::new(context(&mut db)).with_inspector(&mut watcher);
-        let outcome = evm.execute_transaction(tx()).expect("tx should not surface EVMError");
-        let reading = read(&evm.ctx_ref().additional_limit.borrow(), outcome);
-        reading
-    };
+    let (plain, watched) = plain_and_cheated(build_db, &mut watcher);
 
     assert_eq!(watcher.seen.len(), 1, "the shim must forward the callback: {:?}", watcher.seen);
     assert_eq!(watcher.seen[0].0, CALLEE, "the self-destructing contract");
     assert_eq!(watcher.seen[0].1, CALLER, "the beneficiary");
-    assert!(watched.ledger.is_zero(), "nothing to measure: {:?}", watched.ledger);
+    assert!(
+        watched.inspector_ledger.is_zero(),
+        "nothing to measure: {:?}",
+        watched.inspector_ledger
+    );
     assert_eq!(watched.compute_gas, plain.compute_gas);
     assert_eq!(watched.total_gas_spent, plain.total_gas_spent);
-    assert_eq!(watched.render_state(), plain.render_state());
-    assert_identity("selfdestruct", &watched);
+    assert_eq!(state_view(&watched.state), state_view(&plain.state));
 }
