@@ -32,7 +32,7 @@ use super::keyless_sandbox_support::{
     keyless_deploy_call_tx, keyless_deploy_call_tx_with_outer_gas, parent_compute_gas_used,
     revert_constructor, run_keyless, run_keyless_with_usage, split_create_initcode,
     success_constructor, RunConfig, DEFAULT_OUTER_GAS_LIMIT, IDENTITY_PRECOMPILE,
-    LARGE_GAS_LIMIT_OVERRIDE, MERGE_FAIL_SENTINEL, REVERTER, SPECS,
+    LARGE_GAS_LIMIT_OVERRIDE, LARGE_SIGNER_BALANCE, MERGE_FAIL_SENTINEL, REVERTER, SPECS,
 };
 
 const SUCCESS_TARGET: Address = address!("0000000000000000000000000000000000cccccc");
@@ -450,6 +450,140 @@ fn last_end(events: &[InspectedEvent]) -> SandboxEndOutcome {
         .expect("sandbox_end")
 }
 
+fn sandbox_applied_deployed_gas(events: &[InspectedEvent], case: &str) -> u64 {
+    match last_end(events) {
+        SandboxEndOutcome::Applied { completion: SandboxCompletionKind::Deployed, gas_used } => {
+            gas_used
+        }
+        other => panic!("{case}: expected Applied(Deployed), got {other:?}"),
+    }
+}
+
+/// No-intervention success deploy used as the control arm for CREATE short-circuit cases.
+fn run_unintervened_success_deploy(
+    spec: MegaSpecId,
+    tx_bytes: Bytes,
+    signer: Address,
+) -> ResultAndState<MegaHaltReason> {
+    let rec = Rc::new(RefCell::new(RecordingInspector::default()));
+    let mut db = funded_db(signer);
+    let result = run_keyless_inspector(InspectorRunConfig {
+        spec,
+        db: &mut db,
+        tx_bytes,
+        gas_limit_override: LARGE_GAS_LIMIT_OVERRIDE,
+        inspector: Some(Rc::clone(&rec)),
+        tx_limits: None,
+        outer_gas_limit: DEFAULT_OUTER_GAS_LIMIT,
+    });
+    match last_end(&rec.borrow().events) {
+        SandboxEndOutcome::Applied { completion: SandboxCompletionKind::Deployed, .. } => {}
+        other => panic!("{spec:?}: control arm expected Applied(Deployed), got {other:?}"),
+    }
+    assert!(account_has_code(&result, signer.create(0)), "{spec:?}: control arm deploys code");
+    assert_control_signer_applied(&result, signer, spec);
+    result
+}
+
+fn assert_control_signer_applied(
+    result: &ResultAndState<MegaHaltReason>,
+    signer: Address,
+    spec: MegaSpecId,
+) {
+    let account = result.state.get(&signer).unwrap_or_else(|| {
+        panic!("{spec:?}: control arm parent state must contain signer after apply")
+    });
+    assert!(account.is_touched(), "{spec:?}: control arm signer must be touched after apply");
+    assert_eq!(account.info.nonce, 1, "{spec:?}: control arm signer nonce after apply");
+    if spec.is_enabled(MegaSpecId::REX5) {
+        assert_eq!(
+            account.info.balance,
+            U256::from(LARGE_SIGNER_BALANCE),
+            "{spec:?}: REX5+ control arm signer balance stays at LARGE_SIGNER_BALANCE"
+        );
+    } else {
+        assert!(
+            account.info.balance < U256::from(LARGE_SIGNER_BALANCE),
+            "{spec:?}: pre-REX5 control arm signer balance must drop, got {}",
+            account.info.balance
+        );
+        let beneficiary = result.state.get(&Address::ZERO).unwrap_or_else(|| {
+            panic!(
+                "{spec:?}: pre-REX5 control arm parent state must contain beneficiary after apply"
+            )
+        });
+        assert!(
+            beneficiary.is_touched(),
+            "{spec:?}: pre-REX5 control arm beneficiary must be touched after apply"
+        );
+        assert!(
+            beneficiary.info.balance > U256::ZERO,
+            "{spec:?}: pre-REX5 control arm beneficiary balance must increase after apply, got {}",
+            beneficiary.info.balance
+        );
+    }
+}
+
+fn assert_parent_did_not_receive_sandbox_apply(
+    result: &ResultAndState<MegaHaltReason>,
+    signer: Address,
+    deploy_address: Address,
+    spec: MegaSpecId,
+) {
+    match result.state.get(&signer) {
+        None => {}
+        Some(account) => {
+            assert!(
+                !account.is_touched(),
+                "{spec:?}: signer must not be touched when apply is skipped"
+            );
+            assert_eq!(
+                account.info.balance,
+                U256::from(LARGE_SIGNER_BALANCE),
+                "{spec:?}: signer balance must stay at LARGE_SIGNER_BALANCE when apply is skipped"
+            );
+            assert_eq!(
+                account.info.nonce, 0,
+                "{spec:?}: signer nonce must stay 0 when apply is skipped"
+            );
+        }
+    }
+
+    // Tests use `MegaContext::new`, whose `BlockEnv` beneficiary defaults to `Address::ZERO`.
+    // The outer tx still marks the coinbase touched; apply is visible here as a balance change.
+    match result.state.get(&Address::ZERO) {
+        None => {}
+        Some(account) => {
+            assert_eq!(
+                account.info.balance,
+                U256::ZERO,
+                "{spec:?}: beneficiary balance must be unchanged when apply is skipped"
+            );
+        }
+    }
+
+    assert!(
+        !account_has_code(result, deploy_address),
+        "{spec:?}: parent must not hold code at deploy_address"
+    );
+    assert!(
+        !account_has_code(result, OTHER_DEPLOY_ADDRESS),
+        "{spec:?}: parent must not hold code at OTHER"
+    );
+    assert!(
+        result.state.get(&OTHER_DEPLOY_ADDRESS).is_none_or(|account| {
+            account.storage.is_empty() && account.info.code.as_ref().is_none_or(|c| c.is_empty())
+        }),
+        "{spec:?}: parent must not hold sandbox state at OTHER"
+    );
+    assert!(
+        result.state.get(&deploy_address).is_none_or(|account| {
+            account.storage.is_empty() && account.info.code.as_ref().is_none_or(|c| c.is_empty())
+        }),
+        "{spec:?}: parent must not hold sandbox state at deploy_address"
+    );
+}
+
 #[test]
 fn test_inspector_no_intervention_parity_across_specs_and_constructors() {
     let cases: [(&str, Bytes, bool, bool); 6] = [
@@ -580,36 +714,11 @@ fn test_inspector_create_short_circuit_address_mismatch_skips_apply() {
     for spec in SPECS {
         let (tx_bytes, signer) = create_pre_eip155_deploy_tx(success_constructor());
         let deploy_address = signer.create(0);
-        let mut db_ctrl = funded_db(signer);
-        let mut db_int = db_ctrl.clone();
 
-        let control = run_keyless(RunConfig {
-            spec,
-            db: &mut db_ctrl,
-            tx_bytes: tx_bytes.clone(),
-            gas_limit_override: LARGE_GAS_LIMIT_OVERRIDE,
-            observer: None::<Rc<RefCell<RecordingObserver>>>,
-            tx_limits: None,
-            outer_gas_limit: DEFAULT_OUTER_GAS_LIMIT,
-        });
-        let control_inspector = Rc::new(RefCell::new(RecordingInspector::default()));
-        let mut db_ctrl_rec = funded_db(signer);
-        let _ = run_keyless_inspector(InspectorRunConfig {
-            spec,
-            db: &mut db_ctrl_rec,
-            tx_bytes: tx_bytes.clone(),
-            gas_limit_override: LARGE_GAS_LIMIT_OVERRIDE,
-            inspector: Some(Rc::clone(&control_inspector)),
-            tx_limits: None,
-            outer_gas_limit: DEFAULT_OUTER_GAS_LIMIT,
-        });
-        match last_end(&control_inspector.borrow().events) {
-            SandboxEndOutcome::Applied { completion: SandboxCompletionKind::Deployed, .. } => {}
-            other => panic!("{spec:?}: control arm expected Applied(Deployed), got {other:?}"),
-        }
-        assert!(account_has_code(&control, deploy_address), "{spec:?}: control arm deploys code");
+        let _control = run_unintervened_success_deploy(spec, tx_bytes.clone(), signer);
 
         let inspector = Rc::new(RefCell::new(CreateShortCircuit::new(Some(OTHER_DEPLOY_ADDRESS))));
+        let mut db_int = funded_db(signer);
         let result = run_keyless_inspector(InspectorRunConfig {
             spec,
             db: &mut db_int,
@@ -636,28 +745,7 @@ fn test_inspector_create_short_circuit_address_mismatch_skips_apply() {
             Some(SandboxEndOutcome::NotApplied { reason: SandboxRejectKind::AddressMismatch }) => {}
             other => panic!("{spec:?}: expected NotApplied(AddressMismatch), got {other:?}"),
         }
-        assert!(
-            !account_has_code(&result, deploy_address),
-            "{spec:?}: parent must not hold code at deploy_address"
-        );
-        assert!(
-            !account_has_code(&result, OTHER_DEPLOY_ADDRESS),
-            "{spec:?}: parent must not hold code at OTHER"
-        );
-        assert!(
-            result.state.get(&OTHER_DEPLOY_ADDRESS).is_none_or(|account| {
-                account.storage.is_empty() &&
-                    account.info.code.as_ref().is_none_or(|c| c.is_empty())
-            }),
-            "{spec:?}: parent must not hold sandbox state at OTHER"
-        );
-        assert!(
-            result.state.get(&deploy_address).is_none_or(|account| {
-                account.storage.is_empty() &&
-                    account.info.code.as_ref().is_none_or(|c| c.is_empty())
-            }),
-            "{spec:?}: parent must not hold sandbox state at deploy_address"
-        );
+        assert_parent_did_not_receive_sandbox_apply(&result, signer, deploy_address, spec);
     }
 }
 
@@ -666,6 +754,8 @@ fn test_inspector_create_short_circuit_without_address_is_rejected() {
     for spec in SPECS {
         let (tx_bytes, signer) = create_pre_eip155_deploy_tx(success_constructor());
         let deploy_address = signer.create(0);
+        let _control = run_unintervened_success_deploy(spec, tx_bytes.clone(), signer);
+
         let mut db = funded_db(signer);
         let inspector = Rc::new(RefCell::new(CreateShortCircuit::new(None)));
         let result = run_keyless_inspector(InspectorRunConfig {
@@ -807,9 +897,9 @@ fn test_inspector_step_records_exact_sandbox_gas_surcharge() {
             other => panic!("unexpected spec {other:?}"),
         };
         assert_eq!(
-            result.result.gas_used().saturating_sub(baseline.result.gas_used()),
-            expected_outer_delta,
-            "{spec:?}: outer gas_used delta (got {}, baseline {})",
+            result.result.gas_used(),
+            baseline.result.gas_used() + expected_outer_delta,
+            "{spec:?}: outer gas_used (got {}, baseline {})",
             result.result.gas_used(),
             baseline.result.gas_used()
         );
@@ -884,42 +974,85 @@ fn test_inspector_journal_write_commits_on_success_and_rolls_back_on_revert() {
     }
 }
 
+fn run_inspector_empty_and_crowded_parent_env(
+    spec: MegaSpecId,
+    tx_bytes: Bytes,
+    signer: Address,
+) -> (ResultAndState<MegaHaltReason>, u64, ResultAndState<MegaHaltReason>, u64, Vec<InspectedEvent>)
+{
+    let mut db_empty = funded_db(signer);
+    let mut db_crowded = db_empty.clone();
+
+    let empty_rec = Rc::new(RefCell::new(RecordingInspector::default()));
+    let empty = run_keyless_inspector(InspectorRunConfig {
+        spec,
+        db: &mut db_empty,
+        tx_bytes: tx_bytes.clone(),
+        gas_limit_override: LARGE_GAS_LIMIT_OVERRIDE,
+        inspector: Some(Rc::clone(&empty_rec)),
+        tx_limits: None,
+        outer_gas_limit: DEFAULT_OUTER_GAS_LIMIT,
+    });
+    let empty_sandbox_gas =
+        sandbox_applied_deployed_gas(&empty_rec.borrow().events, &format!("empty {spec:?}"));
+
+    let crowded_rec = Rc::new(RefCell::new(RecordingInspector::default()));
+    let crowded = run_keyless_inspector_with_parent_env(
+        spec,
+        &mut db_crowded,
+        tx_bytes,
+        crowded_parent_env(),
+        Some(Rc::clone(&crowded_rec)),
+    );
+    let crowded_events = crowded_rec.borrow().events.clone();
+    let crowded_sandbox_gas =
+        sandbox_applied_deployed_gas(&crowded_events, &format!("crowded {spec:?}"));
+
+    (empty, empty_sandbox_gas, crowded, crowded_sandbox_gas, crowded_events)
+}
+
 #[test]
 fn test_inspector_pre_rex4_crowded_parent_env_keeps_empty_env_gas() {
     for spec in [MegaSpecId::REX2, MegaSpecId::REX3] {
         let (tx_bytes, signer) = create_pre_eip155_deploy_tx(success_constructor());
-        let mut db_empty = funded_db(signer);
-        let mut db_crowded = db_empty.clone();
+        let (empty, empty_sandbox_gas, crowded, crowded_sandbox_gas, crowded_events) =
+            run_inspector_empty_and_crowded_parent_env(spec, tx_bytes, signer);
 
-        let (empty_baseline, _) = run_keyless_with_usage(RunConfig {
-            spec,
-            db: &mut db_empty,
-            tx_bytes: tx_bytes.clone(),
-            gas_limit_override: LARGE_GAS_LIMIT_OVERRIDE,
-            observer: None::<Rc<RefCell<RecordingObserver>>>,
-            tx_limits: None,
-            outer_gas_limit: DEFAULT_OUTER_GAS_LIMIT,
-        });
-
-        let recorder = Rc::new(RefCell::new(RecordingInspector::default()));
-        let crowded = run_keyless_inspector_with_parent_env(
-            spec,
-            &mut db_crowded,
-            tx_bytes,
-            crowded_parent_env(),
-            Some(Rc::clone(&recorder)),
+        assert_eq!(
+            crowded_sandbox_gas, empty_sandbox_gas,
+            "{spec:?}: crowded parent env must not change pre-REX4 sandbox gas"
         );
         assert_eq!(
             crowded.result.gas_used(),
-            empty_baseline.result.gas_used(),
-            "{spec:?}: crowded parent env must not change pre-REX4 sandbox gas"
+            empty.result.gas_used(),
+            "{spec:?}: crowded parent env must not change pre-REX4 outer gas"
         );
-        let events = recorder.borrow().events.clone();
+        assert_result_and_state_eq(
+            &crowded,
+            &empty,
+            &format!("pre-REX4 crowded vs empty parent env {spec:?}"),
+        );
         assert!(
-            events.iter().any(|e| matches!(e, InspectedEvent::Step(_))),
-            "{spec:?}: opcode event stream must be non-empty: {events:?}"
+            crowded_events.iter().any(|e| matches!(e, InspectedEvent::Step(_))),
+            "{spec:?}: opcode event stream must be non-empty: {crowded_events:?}"
         );
     }
+
+    // REX4 shares the parent env, so crowded buckets must change sandbox gas.
+    // This arm proves the equality above can fail when env freezing is absent.
+    let spec = MegaSpecId::REX4;
+    let (tx_bytes, signer) = create_pre_eip155_deploy_tx(success_constructor());
+    let (_empty, empty_sandbox_gas, _crowded, crowded_sandbox_gas, _) =
+        run_inspector_empty_and_crowded_parent_env(spec, tx_bytes, signer);
+    assert_ne!(
+        crowded_sandbox_gas, empty_sandbox_gas,
+        "{spec:?}: crowded parent env must change sandbox gas once env sharing is on"
+    );
+    assert_eq!(empty_sandbox_gas, 129_528, "{spec:?}: empty-env sandbox gas (env-freeze baseline)");
+    assert_eq!(
+        crowded_sandbox_gas, 493_528,
+        "{spec:?}: crowded-env sandbox gas (env-sharing witness)"
+    );
 }
 
 #[test]
@@ -1026,6 +1159,7 @@ fn test_sandbox_hook_slots_are_exclusive_and_clear_restores_parity() {
     let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);
     let tx = keyless_deploy_call_tx(tx_bytes.clone(), LARGE_GAS_LIMIT_OVERRIDE);
     let cleared = alloy_evm::Evm::transact_raw(&mut evm, tx).expect("transact");
+    let cleared_usage = evm.ctx_ref().additional_limit.borrow().get_usage();
     let (baseline, baseline_usage) = run_keyless_with_usage(RunConfig {
         spec,
         db: &mut db_base,
@@ -1036,7 +1170,7 @@ fn test_sandbox_hook_slots_are_exclusive_and_clear_restores_parity() {
         outer_gas_limit: DEFAULT_OUTER_GAS_LIMIT,
     });
     assert_result_and_state_eq(&cleared, &baseline, "cleared hook");
-    let _ = baseline_usage;
+    assert_usage_eq(cleared_usage, baseline_usage, "cleared hook");
 }
 
 #[test]
@@ -1055,7 +1189,7 @@ fn test_inspector_reaches_all_seven_sandbox_end_outcomes() {
     let rec = Rc::new(RefCell::new(RecordingInspector::default()));
     let (tx_bytes, signer) = create_pre_eip155_deploy_tx(success_constructor());
     let mut db = funded_db(signer);
-    let _ = run_keyless_inspector(InspectorRunConfig {
+    let deployed = run_keyless_inspector(InspectorRunConfig {
         spec,
         db: &mut db,
         tx_bytes,
@@ -1068,6 +1202,7 @@ fn test_inspector_reaches_all_seven_sandbox_end_outcomes() {
         SandboxEndOutcome::Applied { completion: SandboxCompletionKind::Deployed, .. } => {}
         other => panic!("Deployed: {other:?}"),
     }
+    assert_control_signer_applied(&deployed, signer, spec);
 
     let rec = Rc::new(RefCell::new(RecordingInspector::default()));
     let (tx_bytes, signer) = create_pre_eip155_deploy_tx(empty_code_constructor());
@@ -1165,8 +1300,9 @@ fn test_inspector_reaches_all_seven_sandbox_end_outcomes() {
 
     let rec = Rc::new(RefCell::new(CreateShortCircuit::new(Some(OTHER_DEPLOY_ADDRESS))));
     let (tx_bytes, signer) = create_pre_eip155_deploy_tx(success_constructor());
+    let deploy_address = signer.create(0);
     let mut db = funded_db(signer);
-    let _ = run_keyless_inspector(InspectorRunConfig {
+    let mismatch = run_keyless_inspector(InspectorRunConfig {
         spec,
         db: &mut db,
         tx_bytes,
@@ -1180,4 +1316,5 @@ fn test_inspector_reaches_all_seven_sandbox_end_outcomes() {
         Some(SandboxEndOutcome::NotApplied { reason: SandboxRejectKind::AddressMismatch }) => {}
         other => panic!("AddressMismatch: {other:?}"),
     }
+    assert_parent_did_not_receive_sandbox_apply(&mismatch, signer, deploy_address, spec);
 }
