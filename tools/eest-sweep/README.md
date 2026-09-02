@@ -72,16 +72,17 @@ runs per-PR in CI and needs neither the corpus nor a build.
 
 `--mode chaos` asks a different question of the same corpus: not whether two specs agree, but whether the accounting survives an inspector that rewrites what it is handed.
 
-Every vector is executed three times under the target spec — with no inspector, with a read-only one, and with a deterministic rewriting one — and two things are checked.
+Every vector is executed three times under the target spec — with no inspector, with a read-only one, and with a deterministic rewriting one — and three things are checked.
 
 - **Observation is free.** The read-only run must be identical to the run with no inspector on every quantity the differential classifier compares, and must leave an empty inspector ledger. That is the property every tracer in production depends on, checked against the whole corpus rather than a handful of fixtures.
 - **Rewriting does not break the books.** Every gas-accounting cross-check MegaETH has is a debug assertion, so under the default `hivetests` profile a broken conservation law is a panic, and a panic is that vector's verdict rather than a lost worker thread.
+- **The guard can still see the rewrite.** A run that applied a shape the shim is contracted to book unconditionally must not end with an all-zero inspector ledger, because the canonical block-execution path admits a transaction whose ledger is zero. The gate is stated over a subset of the pool on purpose: most shapes are booked only when what they moved still reaches something — gas written into a counter the interpreter is about to stop reading moves nothing, a result's remaining gas edited on a halting frame is never handed back — and a gate over those would fail on a working shim. `ChaosShape::is_always_booked` is the partition.
 
 The rewriting inspector's decisions come from a hash of the global seed and the vector's own identity — its fixture path, unit name and transaction indexes.
 No clock, no address, no iteration order.
 The same seed and the same corpus produce the same mutations on any machine, in any thread count, so a flagged vector's report line carries everything needed to re-run exactly it.
 
-What fails the run: a `PANIC`, a `CONTROL_DRIFT` (the read-only run moved something), a `CHAOS_REJECTED` (the rewriting run changed whether the transaction executes at all), a file the sweep could not read, a run that judged no vector — and a run whose inspector mutated nothing, which would report every count truthfully zero while testing nothing.
+What fails the run: a `PANIC`, a `CONTROL_DRIFT` (the read-only run moved something), a `CHAOS_REJECTED` (the rewriting run changed whether the transaction executes at all), a `LEDGER_BLIND` (the run rewrote something the guard cannot see), a file the sweep could not read, a run that judged no vector — and a run whose inspector mutated nothing, which would report every count truthfully zero while testing nothing.
 
 One rewrite shape is deliberately absent from the pool: turning a failed contract creation into a successful one.
 The shim refuses that shape and asserts on it, so including it would make the detector's own firing the sweep's dominant result.

@@ -23,9 +23,7 @@
 //! books *and* the effect the rewrite had, because a shape that no longer changes anything is a
 //! shape that stopped testing the guard.
 
-use crate::common::{
-    transact, transact_inspected, CALLEE, CONTRACT, DEFAULT_TX_GAS_LIMIT, EMPTY_TARGET, ONE_ETH,
-};
+use crate::common::{transact, transact_inspected, CALLEE, CONTRACT, EMPTY_TARGET, ONE_ETH};
 use alloy_primitives::{address, Address, Bytes, U256};
 use mega_evm::{
     test_utils::{BytecodeBuilder, MemoryDatabase},
@@ -33,6 +31,7 @@ use mega_evm::{
 };
 use revm::{
     bytecode::opcode::{CALL, CREATE, GAS, MLOAD, MSTORE, MSTORE8, POP, RETURN, STOP},
+    context::{Cfg, ContextTr},
     interpreter::{
         interpreter_types::{Jumps, MemoryTr},
         CallInputs, CallOutcome, CreateInputs, CreateOutcome, Interpreter, InterpreterTypes,
@@ -87,18 +86,18 @@ struct FreeExpansion {
     fired: u32,
 }
 
-impl<CTX, INTR: InterpreterTypes> Inspector<CTX, INTR> for FreeExpansion {
-    fn step(&mut self, interp: &mut Interpreter<INTR>, _context: &mut CTX) {
+impl<CTX: ContextTr, INTR: InterpreterTypes> Inspector<CTX, INTR> for FreeExpansion {
+    fn step(&mut self, interp: &mut Interpreter<INTR>, context: &mut CTX) {
         if self.fired > 0 || interp.bytecode.opcode() != MSTORE {
             return;
         }
-        assert!(
-            interp.memory.resize(STOLEN_WORDS as usize * 32),
-            "the fixture must allow the memory to be grown",
-        );
-        let memo = interp.gas.memory_mut();
-        memo.words_num = STOLEN_WORDS as usize;
-        memo.expansion_cost = memory_cost(STOLEN_WORDS);
+        let words = STOLEN_WORDS as usize;
+        assert!(interp.memory.resize(words * 32), "the fixture must allow the memory to be grown",);
+        // Priced through revm's own table, so the memo is exactly what the EVM would have written
+        // had the frame paid; the assertion below restates the formula independently, which is
+        // what makes the two a check rather than one number written twice.
+        let cost = context.cfg().gas_params().memory_cost(words);
+        interp.gas.memory_mut().set_words_num(words, cost);
         self.fired += 1;
     }
 }
@@ -443,5 +442,4 @@ fn test_cancelling_refunds_across_frames_are_booked() {
         "a receipt an inspector moved must not read as untouched: {:?}",
         cheated.inspector_ledger,
     );
-    let _ = DEFAULT_TX_GAS_LIMIT;
 }

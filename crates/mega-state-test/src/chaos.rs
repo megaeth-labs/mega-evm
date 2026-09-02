@@ -21,6 +21,11 @@
 //!   inspector at all, on every quantity the differential classifier compares. That is the property
 //!   every tracer in production depends on, and it is checked here against 44,000 transactions
 //!   rather than against a handful of fixtures.
+//! - **Can the guard still see it?** A rewriting run that applied a mutation the shim is contracted
+//!   to book unconditionally must not end with an all-zero ledger. The canonical block path admits
+//!   a transaction whose ledger is zero, so a rewrite that leaves it zero is a rewrite that reaches
+//!   a block — see [`ChaosClass::LedgerBlind`] and [`ChaosShape::is_always_booked`] for why the
+//!   gate is stated over a subset of the pool rather than over all of it.
 //!
 //! # Why the randomness is not random
 //!
@@ -49,7 +54,7 @@ use crate::{
 };
 use indicatif::{ProgressBar, ProgressDrawTarget};
 use mega_evm::revm::{
-    context::{ContextTr, JournalTr},
+    context::{Cfg, ContextTr, JournalTr},
     handler::FrameResult,
     inspector::Inspector,
     interpreter::{
@@ -199,11 +204,25 @@ pub enum ChaosShape {
     /// An EIP-8037 spend counter written into a `Gas`. Structurally zero for the same reason, and
     /// reachable through two different receipt figures depending on how the frame ends.
     WriteStateGas,
+    /// The frame's memory grown, together with the memo of how far it has been paid for, so that
+    /// the interpreter stays consistent and the next expanding opcode is charged nothing.
+    GrowMemoryFree,
+    /// A finished outcome's metadata rewritten around the `InterpreterResult` inside it: the range
+    /// a call's return data lands in, shrunk to nothing, or the address a creation reports.
+    MoveOutcomeMetadata,
+    /// Gas injected into an interpreter counter and taken straight back out at the next
+    /// live-interpreter callback, so the lane's net is zero and the frame saw a number in between
+    /// that the EVM would never have produced.
+    CancelGasEdit,
+    /// A refund added to one finished frame's result and taken out of the next one's, so the
+    /// lane's net is zero and — whenever the two frames end differently — the receipt's is
+    /// not.
+    CancelRefundEdit,
 }
 
 impl ChaosShape {
     /// Every shape, in the order the labels are listed by `--chaos-shapes`.
-    pub const ALL: [Self; 21] = [
+    pub const ALL: [Self; 25] = [
         Self::InjectGas,
         Self::DrainGas,
         Self::EditFrameState,
@@ -225,6 +244,10 @@ impl ChaosShape {
         Self::LowerRefund,
         Self::WriteReservoir,
         Self::WriteStateGas,
+        Self::GrowMemoryFree,
+        Self::MoveOutcomeMetadata,
+        Self::CancelGasEdit,
+        Self::CancelRefundEdit,
     ];
 
     /// The shape a label names.
@@ -265,7 +288,48 @@ impl ChaosShape {
             Self::LowerRefund => "lower_refund",
             Self::WriteReservoir => "write_reservoir",
             Self::WriteStateGas => "write_state_gas",
+            Self::GrowMemoryFree => "grow_memory_free",
+            Self::MoveOutcomeMetadata => "move_outcome_metadata",
+            Self::CancelGasEdit => "cancel_gas_edit",
+            Self::CancelRefundEdit => "cancel_refund_edit",
         }
+    }
+
+    /// Whether the shim is contracted to book a mutation of this shape unconditionally.
+    ///
+    /// Most shapes are booked *when the thing they moved still reaches something*: gas written into
+    /// a counter the interpreter is about to stop reading moves nothing, a result's remaining gas
+    /// edited on a halting frame is never handed back, an envelope edited by the same callback that
+    /// then answers the frame reaches no frame at all. Those are all correct non-bookings, and a
+    /// gate stated over them would be wrong.
+    ///
+    /// The shapes below have no such escape. Each of them either changes an argument the shim holds
+    /// — which the rewrite comparison reads on the spot — or moves a lane at a boundary that books
+    /// unconditionally. So a run that applied one of them and ended with an all-zero ledger is a
+    /// rewrite the canonical block path would admit, which is what
+    /// [`ChaosClass::LedgerBlind`] names.
+    pub const fn is_always_booked(self) -> bool {
+        matches!(
+            self,
+            // The rewrite comparison sees the argument come back changed.
+            Self::MakeStatic |
+                Self::Intercept |
+                Self::InterceptOverGas |
+                Self::InterceptUnderGas |
+                Self::InterceptNoGas |
+                Self::FailFrame |
+                Self::ReviveCall |
+                Self::GrowMemoryFree |
+                Self::MoveOutcomeMetadata |
+                // Refunds are booked at the callback boundary, whatever becomes of the frame —
+                // which is why the interpreter-facing arm of `hit_interpreter` withholds one that
+                // would land in a counter a terminating action has already displaced. That is the
+                // single window in which a refund edit reaches nothing, and the pool skips it
+                // rather than leaving these three shapes out of the gate.
+                Self::RaiseRefund |
+                Self::LowerRefund |
+                Self::CancelRefundEdit
+        )
     }
 }
 
@@ -274,7 +338,7 @@ impl ChaosShape {
 /// The last two only land at the one callback that runs with an action already pending —
 /// `step_end`, which revm's inspected loop runs after the instruction that set it. A draw for them
 /// anywhere else leaves the interpreter alone and spends no budget.
-const INTERPRETER_SHAPES: [ChaosShape; 10] = [
+const INTERPRETER_SHAPES: [ChaosShape; 12] = [
     ChaosShape::InjectGas,
     ChaosShape::DrainGas,
     ChaosShape::EditFrameState,
@@ -285,6 +349,8 @@ const INTERPRETER_SHAPES: [ChaosShape; 10] = [
     ChaosShape::LowerRefund,
     ChaosShape::WriteReservoir,
     ChaosShape::WriteStateGas,
+    ChaosShape::GrowMemoryFree,
+    ChaosShape::CancelGasEdit,
 ];
 
 /// Shapes reachable from a callback that holds a frame's inputs, before the frame is built.
@@ -306,7 +372,7 @@ const INPUT_SHAPES: [ChaosShape; 9] = [
 ];
 
 /// Shapes reachable from a callback that holds a finished frame's result.
-const RESULT_SHAPES: [ChaosShape; 9] = [
+const RESULT_SHAPES: [ChaosShape; 11] = [
     ChaosShape::RaiseResultGas,
     ChaosShape::LowerResultGas,
     ChaosShape::FailFrame,
@@ -316,6 +382,8 @@ const RESULT_SHAPES: [ChaosShape; 9] = [
     ChaosShape::LowerRefund,
     ChaosShape::WriteReservoir,
     ChaosShape::WriteStateGas,
+    ChaosShape::MoveOutcomeMetadata,
+    ChaosShape::CancelRefundEdit,
 ];
 
 /// Which mutations a chaos run is allowed to make.
@@ -481,6 +549,15 @@ pub struct ChaosInspector {
     tick: u64,
     /// Mutations left in this transaction's budget.
     budget: u32,
+    /// Gas a [`ChaosShape::CancelGasEdit`] injected and has not taken back out yet.
+    ///
+    /// The give-back is taken at the next live-interpreter callback rather than on a second draw,
+    /// so the pair closes tightly and usually inside the same frame. Both halves land on the
+    /// interpreter lane, and their net is zero — which is the whole point of the shape.
+    pending_gas: u64,
+    /// A refund a [`ChaosShape::CancelRefundEdit`] added and has not taken back out yet, settled
+    /// at the next result-facing callback for the same reason.
+    pending_refund: i64,
     tally: ChaosTally,
 }
 
@@ -494,7 +571,15 @@ impl ChaosInspector {
     /// the full run did. Narrowing therefore reproduces a flagged mutation; it does not reproduce
     /// a flagged run.
     pub fn new(seed: u64, filter: ShapeFilter) -> Self {
-        Self { seed, filter, tick: 0, budget: MUTATION_BUDGET, tally: ChaosTally::default() }
+        Self {
+            seed,
+            filter,
+            tick: 0,
+            budget: MUTATION_BUDGET,
+            pending_gas: 0,
+            pending_refund: 0,
+            tally: ChaosTally::default(),
+        }
     }
 
     /// What this run mutated.
@@ -563,17 +648,64 @@ impl ChaosInspector {
                     return;
                 }
             }
-            ChaosShape::RaiseRefund |
-            ChaosShape::LowerRefund |
-            ChaosShape::WriteReservoir |
-            ChaosShape::WriteStateGas => {
+            ChaosShape::RaiseRefund | ChaosShape::LowerRefund => {
+                // A refund written into the interpreter's own counter while a terminating action
+                // is pending lands in an object nobody reads again: the action carries its own
+                // `Gas`, and that is what becomes the frame's result. The edit would be applied,
+                // correctly booked nowhere, and would then look to the ledger gate like a rewrite
+                // the shim missed. Leave the counter alone and spend no budget; the same edit
+                // reaches the live object at the next callback, and the dead window itself is
+                // pinned by `tests/rex7/inspector_settlement_window.rs`.
+                if matches!(interp.bytecode.action(), Some(InterpreterAction::Return(_))) {
+                    return;
+                }
                 if !edit_receipt_figure(&mut interp.gas, shape, entropy) {
                     return;
                 }
             }
+            ChaosShape::WriteReservoir | ChaosShape::WriteStateGas => {
+                if !edit_receipt_figure(&mut interp.gas, shape, entropy) {
+                    return;
+                }
+            }
+            ChaosShape::GrowMemoryFree => {
+                if !grow_memory_free(interp, context) {
+                    return;
+                }
+            }
+            ChaosShape::CancelGasEdit => {
+                // The give-back is taken at the next live-interpreter callback, by
+                // `settle_pending_gas`. A second draw while one is outstanding leaves the
+                // interpreter alone and spends no budget.
+                if self.pending_gas != 0 {
+                    return;
+                }
+                let amount = Self::amount(entropy);
+                interp.gas.erase_cost(amount);
+                self.pending_gas = amount;
+            }
             _ => return,
         }
         self.applied(shape);
+    }
+
+    /// Takes back the gas a [`ChaosShape::CancelGasEdit`] injected, closing the pair.
+    ///
+    /// Skipped when the frame cannot afford it, rather than manufacturing an out-of-gas the EVM
+    /// did not reach — the pair then stays open, its net stays non-zero, and the ledger is
+    /// non-zero either way.
+    fn settle_pending_gas<INTR: InterpreterTypes>(&mut self, interp: &mut Interpreter<INTR>) {
+        if self.pending_gas != 0 && interp.gas.record_regular_cost(self.pending_gas) {
+            self.pending_gas = 0;
+        }
+    }
+
+    /// The refund half of the same mechanism, settled against a finished frame's result.
+    fn settle_pending_refund(&mut self, gas: &mut Gas) {
+        if self.pending_refund != 0 && gas.refunded() >= self.pending_refund {
+            gas.record_refund(-self.pending_refund);
+            self.pending_refund = 0;
+        }
     }
 
     /// Applies an input-facing shape to a call's inputs, or intercepts the frame.
@@ -592,7 +724,14 @@ impl ChaosInspector {
             ChaosShape::LowerEnvelope => {
                 inputs.gas_limit = inputs.gas_limit.saturating_sub(Self::amount(entropy));
             }
-            ChaosShape::MakeStatic => inputs.is_static = true,
+            ChaosShape::MakeStatic => {
+                // A call already made static by its caller would come back unchanged, which is a
+                // mutation nothing has to book; leave it alone and spend no budget.
+                if inputs.is_static {
+                    return None;
+                }
+                inputs.is_static = true;
+            }
             ChaosShape::WriteReservoir => {
                 inputs.reservoir = inputs.reservoir.saturating_add(Self::amount(entropy));
             }
@@ -699,10 +838,43 @@ impl ChaosInspector {
                     return;
                 }
             }
+            ChaosShape::CancelRefundEdit => {
+                if self.pending_refund != 0 {
+                    return;
+                }
+                let amount = Self::amount(entropy) as i64;
+                result.gas.record_refund(amount);
+                self.pending_refund = amount;
+            }
             _ => return,
         }
         self.applied(shape);
     }
+}
+
+/// Grows the frame's memory and moves the memo of how far it has been paid for with it, returning
+/// whether anything moved.
+///
+/// The pair is what makes this a rewrite rather than a corruption: moving the memo alone leaves the
+/// EVM reading out of bounds, moving the memory alone leaves the growth charged for twice, and
+/// moving both leaves the interpreter in a state it could have reached by paying, having paid
+/// nothing. The next expanding opcode inside the new bound is then charged nothing at all.
+///
+/// The memo is priced through revm's own table rather than a restatement of the formula, because
+/// `MemoryGas::set_words_num` hands revm's caller a `checked_sub` it unwraps unchecked: a memo
+/// higher than the schedule would have written is undefined behaviour at the next expansion, not a
+/// wrong number.
+fn grow_memory_free<CTX: ContextTr, INTR: InterpreterTypes>(
+    interp: &mut Interpreter<INTR>,
+    context: &CTX,
+) -> bool {
+    let words = interp.memory.size() / 32 + 1;
+    if !interp.memory.resize(words * 32) {
+        return false;
+    }
+    let cost = context.cfg().gas_params().memory_cost(words);
+    interp.gas.memory_mut().set_words_num(words, cost);
+    true
 }
 
 /// Writes one of the receipt figures that is not the envelope, returning whether anything moved.
@@ -835,24 +1007,28 @@ fn write_journal<CTX: ContextTr>(context: &mut CTX, entropy: u64) {
 
 impl<CTX: ContextTr, INTR: InterpreterTypes> Inspector<CTX, INTR> for ChaosInspector {
     fn initialize_interp(&mut self, interp: &mut Interpreter<INTR>, context: &mut CTX) {
+        self.settle_pending_gas(interp);
         if let Some((shape, entropy)) = self.pick(&INTERPRETER_SHAPES) {
             self.hit_interpreter(interp, context, shape, entropy);
         }
     }
 
     fn step(&mut self, interp: &mut Interpreter<INTR>, context: &mut CTX) {
+        self.settle_pending_gas(interp);
         if let Some((shape, entropy)) = self.pick(&INTERPRETER_SHAPES) {
             self.hit_interpreter(interp, context, shape, entropy);
         }
     }
 
     fn step_end(&mut self, interp: &mut Interpreter<INTR>, context: &mut CTX) {
+        self.settle_pending_gas(interp);
         if let Some((shape, entropy)) = self.pick(&INTERPRETER_SHAPES) {
             self.hit_interpreter(interp, context, shape, entropy);
         }
     }
 
     fn log_full(&mut self, interp: &mut Interpreter<INTR>, context: &mut CTX, _log: Log) {
+        self.settle_pending_gas(interp);
         if let Some((shape, entropy)) = self.pick(&INTERPRETER_SHAPES) {
             self.hit_interpreter(interp, context, shape, entropy);
         }
@@ -886,9 +1062,15 @@ impl<CTX: ContextTr, INTR: InterpreterTypes> Inspector<CTX, INTR> for ChaosInspe
     }
 
     fn call_end(&mut self, _context: &mut CTX, _inputs: &CallInputs, outcome: &mut CallOutcome) {
-        if let Some((shape, entropy)) = self.pick(&RESULT_SHAPES) {
-            self.hit_result(&mut outcome.result, false, shape, entropy);
+        self.settle_pending_refund(&mut outcome.result.gas);
+        let Some((shape, entropy)) = self.pick(&RESULT_SHAPES) else { return };
+        if shape == ChaosShape::MoveOutcomeMetadata {
+            if shrink_return_range(outcome) {
+                self.applied(shape);
+            }
+            return;
         }
+        self.hit_result(&mut outcome.result, false, shape, entropy);
     }
 
     fn create_end(
@@ -897,9 +1079,15 @@ impl<CTX: ContextTr, INTR: InterpreterTypes> Inspector<CTX, INTR> for ChaosInspe
         _inputs: &CreateInputs,
         outcome: &mut CreateOutcome,
     ) {
-        if let Some((shape, entropy)) = self.pick(&RESULT_SHAPES) {
-            self.hit_result(&mut outcome.result, true, shape, entropy);
+        self.settle_pending_refund(&mut outcome.result.gas);
+        let Some((shape, entropy)) = self.pick(&RESULT_SHAPES) else { return };
+        if shape == ChaosShape::MoveOutcomeMetadata {
+            if relabel_deployment(outcome) {
+                self.applied(shape);
+            }
+            return;
         }
+        self.hit_result(&mut outcome.result, true, shape, entropy);
     }
 
     fn frame_end(
@@ -908,10 +1096,45 @@ impl<CTX: ContextTr, INTR: InterpreterTypes> Inspector<CTX, INTR> for ChaosInspe
         _frame_input: &FrameInput,
         frame_result: &mut FrameResult,
     ) {
+        self.settle_pending_refund(frame_result.gas_mut());
         let Some((shape, entropy)) = self.pick(&RESULT_SHAPES) else { return };
+        if shape == ChaosShape::MoveOutcomeMetadata {
+            let moved = match frame_result {
+                FrameResult::Call(outcome) => shrink_return_range(outcome),
+                FrameResult::Create(outcome) => relabel_deployment(outcome),
+            };
+            if moved {
+                self.applied(shape);
+            }
+            return;
+        }
         let is_creation = matches!(frame_result, FrameResult::Create(_));
         self.hit_result(frame_result.interpreter_result_mut(), is_creation, shape, entropy);
     }
+}
+
+/// Shrinks a finished call's return range to nothing, returning whether anything moved.
+///
+/// Shrunk rather than moved: revm copies the callee's output into the caller's memory at this
+/// range and panics if the range is outside what the caller has allocated, so the one edit that is
+/// safe on an arbitrary corpus is the one that copies less. The caller then reads whatever was in
+/// its memory before the call, which is the same semantic change the moved form makes.
+fn shrink_return_range(outcome: &mut CallOutcome) -> bool {
+    if outcome.memory_offset.is_empty() {
+        return false;
+    }
+    outcome.memory_offset = outcome.memory_offset.start..outcome.memory_offset.start;
+    true
+}
+
+/// Reports a successful creation at an address it did not deploy to, returning whether anything
+/// moved.
+fn relabel_deployment(outcome: &mut CreateOutcome) -> bool {
+    if outcome.address.is_none() || outcome.address == Some(CHAOS_ADDRESS) {
+        return false;
+    }
+    outcome.address = Some(CHAOS_ADDRESS);
+    true
 }
 
 // --- the sweep ------------------------------------------------------------------------------
@@ -930,6 +1153,15 @@ pub enum ChaosClass {
     /// all: one produced a receipt and the other an `EVMError`. No inspector callback runs before
     /// validation, so the two cannot legitimately differ here.
     ChaosRejected,
+    /// The rewriting run applied a mutation the shim is contracted to book unconditionally — see
+    /// [`ChaosShape::is_always_booked`] — and still ended with an all-zero ledger.
+    ///
+    /// That is the one thing the ledger exists to prevent: the canonical block path admits a
+    /// transaction whose ledger is zero, so a rewrite that leaves it zero is a rewrite that
+    /// reaches a block. Unlike every other verdict here it is not about the transaction's numbers
+    /// being wrong — they may be exactly what a rewriting inspector should produce — but about the
+    /// guard being unable to tell that anything happened.
+    LedgerBlind,
     /// Neither run executed the transaction, and the runner declined it identically.
     Skipped,
     /// A run panicked — which, in a build with debug assertions live, is how a broken conservation
@@ -944,6 +1176,7 @@ impl ChaosClass {
             Self::Pass => "PASS",
             Self::ControlDrift => "CONTROL_DRIFT",
             Self::ChaosRejected => "CHAOS_REJECTED",
+            Self::LedgerBlind => "LEDGER_BLIND",
             Self::Skipped => "SKIPPED",
             Self::Panic => "PANIC",
         }
@@ -951,7 +1184,7 @@ impl ChaosClass {
 
     /// Whether this verdict fails the gate.
     pub const fn is_failure(self) -> bool {
-        matches!(self, Self::ControlDrift | Self::ChaosRejected | Self::Panic)
+        matches!(self, Self::ControlDrift | Self::ChaosRejected | Self::LedgerBlind | Self::Panic)
     }
 }
 
@@ -1037,7 +1270,16 @@ pub fn chaos_unit(
     let applied = chaos.as_ref().ok().and_then(|run| run.chaos.clone()).unwrap_or_default();
 
     let (class, detail) = match (reference.is_ok(), &chaos) {
-        (true, Ok(_)) => (ChaosClass::Pass, None),
+        (true, Ok(run)) => match blind_shapes(&applied, run.ledger.is_zero()) {
+            None => (ChaosClass::Pass, None),
+            Some(shapes) => (
+                ChaosClass::LedgerBlind,
+                Some(format!(
+                    "the run applied {shapes} and the ledger is still all-zero, so the canonical \
+                     block path would admit it"
+                )),
+            ),
+        },
         // The runner declined this vector before execution — an intrinsic-gas overrun, an
         // unsupported transaction shape — and declined it the same way with the inspector
         // attached. Nothing executed, so nothing was tested; counted rather than passed.
@@ -1052,6 +1294,27 @@ pub fn chaos_unit(
         ),
     };
     ChaosVerdict { class, applied, detail }
+}
+
+/// The shapes a run applied that the shim must have booked, when its ledger says it booked
+/// nothing at all.
+///
+/// `None` when the ledger is non-zero, or when every shape the run applied is one whose booking is
+/// conditional on something the run may not have reached — gas written into a counter the
+/// interpreter is about to stop reading, a result's gas edited on a frame that hands nothing back,
+/// a pool a later frame overwrote. Those non-bookings are correct, and a gate stated over them
+/// would fail on a working shim.
+fn blind_shapes(applied: &ChaosTally, ledger_is_zero: bool) -> Option<String> {
+    if !ledger_is_zero {
+        return None;
+    }
+    let blind: Vec<&str> = applied
+        .applied
+        .keys()
+        .copied()
+        .filter(|label| ChaosShape::parse(label).is_ok_and(ChaosShape::is_always_booked))
+        .collect();
+    (!blind.is_empty()).then(|| blind.join(", "))
 }
 
 /// What one vector's three runs produced.

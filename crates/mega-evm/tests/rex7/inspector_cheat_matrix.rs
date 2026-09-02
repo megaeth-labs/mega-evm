@@ -43,7 +43,7 @@ use mega_evm::{
 };
 use revm::{
     bytecode::opcode::{CALL, CREATE, LOG1, MSTORE, MSTORE8, POP, RETURN, SSTORE, STOP},
-    context::{result::ExecutionResult, tx::TxEnvBuilder, ContextTr, JournalTr},
+    context::{result::ExecutionResult, tx::TxEnvBuilder, Cfg, ContextTr, JournalTr},
     handler::{EvmTr, FrameResult},
     interpreter::{
         interpreter_types::{Jumps, LoopControl, MemoryTr, StackTr},
@@ -400,7 +400,11 @@ impl Cheat {
     }
 
     /// Applies an interpreter-facing shape.
-    fn hit_interpreter<INTR: InterpreterTypes>(&mut self, interp: &mut Interpreter<INTR>) {
+    fn hit_interpreter<CTX: ContextTr, INTR: InterpreterTypes>(
+        &mut self,
+        interp: &mut Interpreter<INTR>,
+        context: &CTX,
+    ) {
         match self.shape {
             Shape::InjectGas => {
                 interp.gas.erase_cost(INJECT);
@@ -443,7 +447,7 @@ impl Cheat {
                 self.fired += 1;
             }
             Shape::GrowMemoryFree => {
-                Self::grow_memory_free(interp);
+                Self::grow_memory_free(interp, context);
                 self.fired += 1;
             }
             _ => unreachable!("{:?} is not an interpreter-facing shape", self.shape),
@@ -492,12 +496,17 @@ impl Cheat {
     /// The fixture's first `MSTORE` then finds its word already paid for, and the transaction
     /// spends exactly that expansion less than the uninspected run — which is what makes this a
     /// rewrite the guard has to see rather than a curiosity.
-    fn grow_memory_free<INTR: InterpreterTypes>(interp: &mut Interpreter<INTR>) {
+    fn grow_memory_free<CTX: ContextTr, INTR: InterpreterTypes>(
+        interp: &mut Interpreter<INTR>,
+        context: &CTX,
+    ) {
         let words = interp.memory.size() / 32 + 1;
         assert!(interp.memory.resize(words * 32), "the fixture must allow a one-word growth");
-        let memo = interp.gas.memory_mut();
-        memo.words_num = words;
-        memo.expansion_cost = 3 * words as u64 + (words * words) as u64 / 512;
+        // Priced through revm's own table rather than a restatement of the formula: the memo has
+        // to be exactly what the EVM would have written, or a later expansion prices its
+        // increment from a baseline that never existed.
+        let cost = context.cfg().gas_params().memory_cost(words);
+        interp.gas.memory_mut().set_words_num(words, cost);
     }
 
     /// Applies a shape that reaches through the interpreter's *pending action* — the object the
@@ -718,7 +727,7 @@ impl<CTX: ContextTr, INTR: InterpreterTypes> Inspector<CTX, INTR> for Cheat {
             Shape::JournalWrite => self.hit_journal(context),
             Shape::EditStackOrMemory => self.hit_frame_state(interp),
             _ if !self.interpreter_moment_is_right(interp) => {}
-            _ => self.hit_interpreter(interp),
+            _ => self.hit_interpreter(interp, context),
         }
     }
 
@@ -731,7 +740,7 @@ impl<CTX: ContextTr, INTR: InterpreterTypes> Inspector<CTX, INTR> for Cheat {
         // than on a fixed ordinal.
         if self.shape.is_refund() {
             if self.interpreter_moment_is_right(interp) {
-                self.hit_interpreter(interp);
+                self.hit_interpreter(interp, context);
             }
             return;
         }
@@ -740,10 +749,10 @@ impl<CTX: ContextTr, INTR: InterpreterTypes> Inspector<CTX, INTR> for Cheat {
             // Fire on the first `SSTORE` the transaction reaches, whose operands are on the stack
             // and about to be consumed.
             Shape::EditStackOrMemory if interp.bytecode.opcode() == SSTORE => {
-                self.hit_interpreter(interp)
+                self.hit_interpreter(interp, context)
             }
             Shape::EditStackOrMemory | Shape::JournalWrite => {}
-            _ if self.steps == self.step_at => self.hit_interpreter(interp),
+            _ if self.steps == self.step_at => self.hit_interpreter(interp, context),
             _ => {}
         }
     }
@@ -760,7 +769,7 @@ impl<CTX: ContextTr, INTR: InterpreterTypes> Inspector<CTX, INTR> for Cheat {
         }
         if self.shape.is_refund() {
             if self.interpreter_moment_is_right(interp) {
-                self.hit_interpreter(interp);
+                self.hit_interpreter(interp, context);
             }
             return;
         }
@@ -770,7 +779,7 @@ impl<CTX: ContextTr, INTR: InterpreterTypes> Inspector<CTX, INTR> for Cheat {
         match self.shape {
             Shape::JournalWrite => self.hit_journal(context),
             Shape::EditStackOrMemory => self.hit_frame_state(interp),
-            _ => self.hit_interpreter(interp),
+            _ => self.hit_interpreter(interp, context),
         }
     }
 
@@ -782,7 +791,7 @@ impl<CTX: ContextTr, INTR: InterpreterTypes> Inspector<CTX, INTR> for Cheat {
             Shape::JournalWrite => self.hit_journal(context),
             Shape::EditStackOrMemory => self.hit_frame_state(interp),
             _ if !self.interpreter_moment_is_right(interp) => {}
-            _ => self.hit_interpreter(interp),
+            _ => self.hit_interpreter(interp, context),
         }
     }
 

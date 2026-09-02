@@ -35,7 +35,22 @@ fn callee_code() -> String {
 /// `SSTORE(2, 2); CREATE(0, 0, 0); POP; STOP` — a child frame the create callbacks see.
 const INNER_CODE: &str = "0x60026002556000600060006000f05000";
 
+/// [`callee_code`] with two things the shape pool needs and the plain fixture does not offer: a
+/// slot set and cleared again, so every frame ends holding a refund the EVM produced, and a `CALL`
+/// that asks for a word of return data, so a finished call outcome has a range to rewrite.
+fn refunding_callee_code() -> String {
+    format!(
+        "0x6001600155 6000600155 6020 6000 6000 6000 6000 73{} 612710 f1 50 60006000a000",
+        &INNER[2..]
+    )
+    .replace(' ', "")
+}
+
 fn unit_json() -> serde_json::Value {
+    unit_json_with(callee_code())
+}
+
+fn unit_json_with(callee: String) -> serde_json::Value {
     serde_json::json!({
         "env": {
             "currentChainID": "0x18c6",
@@ -50,7 +65,7 @@ fn unit_json() -> serde_json::Value {
         },
         "pre": {
             SENDER: { "balance": "0xde0b6b3a7640000", "code": "0x", "nonce": "0x0", "storage": {} },
-            CALLEE: { "balance": "0x0", "code": callee_code(), "nonce": "0x0", "storage": {} },
+            CALLEE: { "balance": "0x0", "code": callee, "nonce": "0x0", "storage": {} },
             INNER: { "balance": "0x0", "code": INNER_CODE, "nonce": "0x0", "storage": {} },
         },
         "transaction": {
@@ -70,6 +85,11 @@ fn unit_json() -> serde_json::Value {
 
 fn unit() -> TestUnit {
     serde_json::from_value(unit_json()).expect("valid unit json")
+}
+
+/// The fixture the ledger-gate test uses — see [`refunding_callee_code`].
+fn refunding_unit() -> TestUnit {
+    serde_json::from_value(unit_json_with(refunding_callee_code())).expect("valid unit json")
 }
 
 /// The chaos run's tally for `unit` under `seed` and `filter`.
@@ -134,9 +154,12 @@ fn test_a_vector_seed_separates_every_part_of_the_identity() {
 /// remain are applied at the same callbacks, so a flagged mutation is still there to be found.
 #[test]
 fn test_narrowing_the_filter_keeps_the_surviving_mutations() {
-    let full = mutations(0xC0FFEE, ShapeFilter::default());
+    // A seed whose full run draws both of the shapes the narrowed one keeps; which seeds those are
+    // is a function of the pool's size, so a shape added to the pool can move it.
+    const SEED: u64 = 3;
+    let full = mutations(SEED, ShapeFilter::default());
     let only = [ChaosShape::InjectGas, ChaosShape::DrainGas];
-    let narrowed = mutations(0xC0FFEE, ShapeFilter::only(&only));
+    let narrowed = mutations(SEED, ShapeFilter::only(&only));
     let kept: Vec<_> = only.iter().map(|s| s.label()).collect();
 
     assert!(!narrowed.is_empty(), "the narrowed run must still mutate something");
@@ -151,6 +174,74 @@ fn test_narrowing_the_filter_keeps_the_surviving_mutations() {
         assert!(
             narrowed_count >= *count,
             "{shape}: narrowing dropped a mutation the full run made ({count} -> {narrowed_count})",
+        );
+    }
+}
+
+/// ★ Every shape the ledger gate is stated over really does move the ledger, run on its own.
+///
+/// [`ChaosClass::LedgerBlind`] fires when a run applied one of these and the ledger is still
+/// all-zero. That verdict is only meaningful if the premise holds — so this checks the premise
+/// directly, shape by shape, rather than trusting the partition. Three of the shapes here
+/// (`grow_memory_free`, `move_outcome_metadata`, `cancel_refund_edit`) were added because the
+/// shim did *not* book them, and this is the test that would have said so.
+#[test]
+fn test_every_always_booked_shape_moves_the_ledger() {
+    let always_booked: Vec<ChaosShape> =
+        ChaosShape::ALL.into_iter().filter(|s| s.is_always_booked()).collect();
+    assert!(!always_booked.is_empty(), "the gate must be stated over something");
+
+    let unit = refunding_unit();
+    for shape in always_booked {
+        let filter = ShapeFilter::only(&[shape]);
+        let mut reached = 0u32;
+        // A narrow filter only lands where the stream happens to draw that shape, so sweep seeds
+        // until enough of them do. A shape no seed reaches is a hole in the pool, not a pass.
+        for seed in 0u64..1_024 {
+            let run = execute_unit_in_mode(
+                &unit,
+                VECTOR_0,
+                &SpecName::Rex7,
+                RunMode::Chaos { seed, filter },
+            )
+            .expect("the fixture executes");
+            if run.chaos.as_ref().expect("a chaos run reports its tally").total() == 0 {
+                continue;
+            }
+            reached += 1;
+            assert!(
+                !run.ledger.is_zero(),
+                "{} applied under seed {seed} and the shim booked nothing: {:?}",
+                shape.label(),
+                run.ledger,
+            );
+            if reached == 3 {
+                break;
+            }
+        }
+        assert_eq!(reached, 3, "{}: too few seeds in the sweep applied it", shape.label());
+    }
+}
+
+/// The partition the gate rests on is not vacuous in either direction.
+///
+/// A gate stated over every shape would fail on a working shim — several shapes are booked only
+/// when what they moved still reaches something — and one stated over none would never fire.
+#[test]
+fn test_the_always_booked_partition_is_not_vacuous() {
+    let (booked, conditional): (Vec<_>, Vec<_>) =
+        ChaosShape::ALL.into_iter().partition(|s| s.is_always_booked());
+    assert!(!booked.is_empty(), "the gate must have shapes to fire on");
+    assert!(
+        !conditional.is_empty(),
+        "a shape whose booking is conditional must stay out of the gate; if none is left, the \
+         gate should be stated over the whole pool instead",
+    );
+    for shape in [ChaosShape::InjectGas, ChaosShape::RaiseResultGas, ChaosShape::WriteReservoir] {
+        assert!(
+            !shape.is_always_booked(),
+            "{} is booked only when what it moved still reaches something",
+            shape.label(),
         );
     }
 }
