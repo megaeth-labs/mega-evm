@@ -1,11 +1,11 @@
 //! The rewrite shapes an all-zero ledger used to admit.
 //!
 //! The measurement shim's contract is that a transaction an inspector rewrote never reaches a
-//! block: the canonical path refuses one whose [`InspectorLedger`] is non-zero, so every rewrite
-//! has to leave a mark on it. `measured_inspector.rs` and `inspector_cheat_matrix.rs` pin that
-//! per mechanism and per callback × shape pair. This module pins the four shapes that slipped
-//! *between* those two questions — each one a rewrite the shim was handed, that changes what the
-//! transaction produces, and that every lane read as nothing:
+//! block: the canonical path refuses one whose `InspectorLedger` is non-zero, so every rewrite has
+//! to leave a mark on it. `measured_inspector.rs` and `inspector_cheat_matrix.rs` pin that per
+//! mechanism and per callback × shape pair. This module pins the shapes that slipped *between*
+//! those two questions — each one a rewrite the shim was handed, that changes what the transaction
+//! produces, and that every lane read as nothing:
 //!
 //! - a frame's memory grown for free, by moving the interpreter's memory and the memo of how far it
 //!   has been paid for in the same step, so that neither goes out of bounds and the next expanding
@@ -18,10 +18,10 @@
 //! - the same cancellation spread across two frames, where only one of the two survives to the
 //!   receipt, so the net is zero and the effect is not.
 //!
-//! The first three shapes are booked on [`InspectorLedger::interventions`]; the last two are what
-//! the per-lane gross activity counters exist for. Every test here asserts the ledger the shim
-//! books *and* the effect the rewrite had, because a shape that no longer changes anything is a
-//! shape that stopped testing the guard.
+//! The first two are booked on `InspectorLedger::interventions`, from a snapshot the shim did not
+//! used to take; the last two are what the per-lane gross activity counters exist for. Every test
+//! here asserts the ledger the shim books *and* the effect the rewrite had, because a shape that no
+//! longer changes anything is a shape that stopped testing the guard.
 
 use crate::common::{transact, transact_inspected, CALLEE, CONTRACT, EMPTY_TARGET, ONE_ETH};
 use alloy_primitives::{address, Address, Bytes, U256};
