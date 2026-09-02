@@ -167,120 +167,118 @@ pub fn vector_seed(global: u64, path: &str, name: &str, indexes: TxPartIndices) 
 
 // --- the shapes ---------------------------------------------------------------------------------
 
-/// A rewrite shape the chaos pool draws from — one legal column of the cheat-shape matrix.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum ChaosShape {
+/// Declares the shape pool as one row per shape.
+///
+/// The enum, the list every sweep iterates and the label a report and `--chaos-shapes` use are
+/// three views of one row. Declared separately, a shape added to the enum and missed in the list
+/// shrinks the sweep silently, and one missed in the labels prints the wrong name in a report.
+macro_rules! shapes {
+    ($( $(#[$meta:meta])* $variant:ident = $label:literal; )*) => {
+        /// A rewrite shape the chaos pool draws from — one legal column of the cheat-shape matrix.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+        pub enum ChaosShape {
+            $($(#[$meta])* $variant,)*
+        }
+
+        impl ChaosShape {
+            /// Every shape, in the order the labels are listed by `--chaos-shapes`, which is also
+            /// the order [`ShapeFilter`]'s bitmask indexes through the discriminant.
+            pub const ALL: [Self; [$(shapes!(@unit $variant)),*].len()] =
+                [$(Self::$variant,)*];
+
+            /// Stable label, for reports.
+            pub const fn label(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $label,)*
+                }
+            }
+        }
+    };
+    // One `()` per row, so the array's length is counted from the declaration rather than
+    // written out beside it.
+    (@unit $variant:ident) => { () };
+}
+
+shapes! {
     /// Gas written into a live interpreter's counter.
-    InjectGas,
+    InjectGas = "inject_gas";
     /// Gas taken out of one.
-    DrainGas,
+    DrainGas = "drain_gas";
     /// The interpreter's own working state — a memory word, or the operand an `SSTORE` is about
     /// to consume.
-    EditFrameState,
+    EditFrameState = "edit_frame_state";
     /// A transient-storage write made behind the EVM's back.
-    JournalWrite,
+    JournalWrite = "journal_write";
     /// A raised `gas_limit` on a frame about to be built.
-    RaiseEnvelope,
+    RaiseEnvelope = "raise_envelope";
     /// A lowered one.
-    LowerEnvelope,
+    LowerEnvelope = "lower_envelope";
     /// A call turned static, so what the frame is allowed to do changes rather than what it costs.
-    MakeStatic,
+    MakeStatic = "make_static";
     /// A synthetic outcome, so no frame is built at all. Its gas echoes the envelope the callback
     /// was handed, which is what every tool that intercepts does.
-    Intercept,
+    Intercept = "intercept";
     /// The same, sized above the envelope, so the outcome hands the caller back gas the
     /// transaction never funded.
-    InterceptOverGas,
+    InterceptOverGas = "intercept_over_gas";
     /// Sized below it, so the caller spends the difference on a frame that never ran.
-    InterceptUnderGas,
+    InterceptUnderGas = "intercept_under_gas";
     /// Sized at nothing, the extreme of the same direction: the whole envelope is consumed.
-    InterceptNoGas,
+    InterceptNoGas = "intercept_no_gas";
     /// A raised remaining-gas figure on a finished frame's result.
-    RaiseResultGas,
+    RaiseResultGas = "raise_result_gas";
     /// A lowered one.
-    LowerResultGas,
+    LowerResultGas = "lower_result_gas";
     /// A successful frame result rewritten into a revert or an exceptional halt.
-    FailFrame,
+    FailFrame = "fail_frame";
     /// A failed *call* frame rewritten into a success. The creation form of this shape is refused
     /// by the shim and is deliberately not in the pool — see the module docs.
-    ReviveCall,
+    ReviveCall = "revive_call";
     /// Gas written into the action the interpreter is already holding — the object a terminating
     /// or suspending instruction left behind, which carries its own copy of what the frame is
     /// handing on.
-    RaiseActionGas,
+    RaiseActionGas = "raise_action_gas";
     /// Gas taken out of one.
-    LowerActionGas,
+    LowerActionGas = "lower_action_gas";
     /// A refund added to a `Gas`'s refund counter — what the sender is billed, which the envelope
     /// the conservation law is stated over does not reach.
-    RaiseRefund,
+    RaiseRefund = "raise_refund";
     /// A refund taken out of one. Skipped when the `Gas` has none, rather than driving the counter
     /// negative — a state revm documents as invalid at the end of a transaction.
-    LowerRefund,
+    LowerRefund = "lower_refund";
     /// An EIP-8037 state-gas pool written into a `Gas` or a call's inputs. `MegaETH` runs with the
     /// EIP off and fills no pool, so anything found in one is gas the transaction never funded.
-    WriteReservoir,
+    WriteReservoir = "write_reservoir";
     /// An EIP-8037 spend counter written into a `Gas`. Structurally zero for the same reason, and
     /// reachable through two different receipt figures depending on how the frame ends.
-    WriteStateGas,
+    WriteStateGas = "write_state_gas";
     /// The frame's memory grown, together with the memo of how far it has been paid for, so that
     /// the interpreter stays consistent and the next expanding opcode is charged nothing.
-    GrowMemoryFree,
+    GrowMemoryFree = "grow_memory_free";
     /// A finished outcome's metadata rewritten around the `InterpreterResult` inside it: the range
     /// a call's return data lands in, shrunk to nothing, or the address a creation reports.
-    MoveOutcomeMetadata,
+    MoveOutcomeMetadata = "move_outcome_metadata";
     /// Gas injected into an interpreter counter and taken straight back out at the next
     /// live-interpreter callback, so the lane's net is zero and the frame saw a number in between
     /// that the EVM would never have produced.
-    CancelGasEdit,
+    CancelGasEdit = "cancel_gas_edit";
     /// A refund added to one finished frame's result and taken out of the next one's, so the
     /// lane's net is zero and — whenever the two frames end differently — the receipt's is
     /// not.
-    CancelRefundEdit,
+    CancelRefundEdit = "cancel_refund_edit";
     /// The program counter stepped past the instruction the frame was about to execute, deleting
     /// it from the frame. The work is never performed, so no counter falls and no lane moves.
-    SkipOpcode,
+    SkipOpcode = "skip_opcode";
     /// A return buffer put in front of the frame, so its `RETURNDATASIZE` and `RETURNDATACOPY`
     /// read data no call produced.
-    RewriteReturnData,
+    RewriteReturnData = "rewrite_return_data";
     /// The classification of a result *frame init* produced, moved across the success / revert /
     /// halt boundary. The shim refuses this one, so the run it lands in is declined rather than
     /// executed — which is the verdict [`ChaosClass::Refused`] names.
-    MoveInitResultClass,
+    MoveInitResultClass = "move_init_result_class";
 }
 
 impl ChaosShape {
-    /// Every shape, in the order the labels are listed by `--chaos-shapes`.
-    pub const ALL: [Self; 28] = [
-        Self::InjectGas,
-        Self::DrainGas,
-        Self::EditFrameState,
-        Self::JournalWrite,
-        Self::RaiseEnvelope,
-        Self::LowerEnvelope,
-        Self::MakeStatic,
-        Self::Intercept,
-        Self::InterceptOverGas,
-        Self::InterceptUnderGas,
-        Self::InterceptNoGas,
-        Self::RaiseResultGas,
-        Self::LowerResultGas,
-        Self::FailFrame,
-        Self::ReviveCall,
-        Self::RaiseActionGas,
-        Self::LowerActionGas,
-        Self::RaiseRefund,
-        Self::LowerRefund,
-        Self::WriteReservoir,
-        Self::WriteStateGas,
-        Self::GrowMemoryFree,
-        Self::MoveOutcomeMetadata,
-        Self::CancelGasEdit,
-        Self::CancelRefundEdit,
-        Self::SkipOpcode,
-        Self::RewriteReturnData,
-        Self::MoveInitResultClass,
-    ];
-
     /// The shape a label names.
     ///
     /// # Errors
@@ -293,40 +291,6 @@ impl ChaosShape {
                 Self::ALL.map(Self::label).join(", ")
             )
         })
-    }
-
-    /// Stable label, for reports.
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::InjectGas => "inject_gas",
-            Self::DrainGas => "drain_gas",
-            Self::EditFrameState => "edit_frame_state",
-            Self::JournalWrite => "journal_write",
-            Self::RaiseEnvelope => "raise_envelope",
-            Self::LowerEnvelope => "lower_envelope",
-            Self::MakeStatic => "make_static",
-            Self::Intercept => "intercept",
-            Self::InterceptOverGas => "intercept_over_gas",
-            Self::InterceptUnderGas => "intercept_under_gas",
-            Self::InterceptNoGas => "intercept_no_gas",
-            Self::RaiseResultGas => "raise_result_gas",
-            Self::LowerResultGas => "lower_result_gas",
-            Self::FailFrame => "fail_frame",
-            Self::ReviveCall => "revive_call",
-            Self::RaiseActionGas => "raise_action_gas",
-            Self::LowerActionGas => "lower_action_gas",
-            Self::RaiseRefund => "raise_refund",
-            Self::LowerRefund => "lower_refund",
-            Self::WriteReservoir => "write_reservoir",
-            Self::WriteStateGas => "write_state_gas",
-            Self::GrowMemoryFree => "grow_memory_free",
-            Self::MoveOutcomeMetadata => "move_outcome_metadata",
-            Self::CancelGasEdit => "cancel_gas_edit",
-            Self::CancelRefundEdit => "cancel_refund_edit",
-            Self::SkipOpcode => "skip_opcode",
-            Self::RewriteReturnData => "rewrite_return_data",
-            Self::MoveInitResultClass => "move_init_result_class",
-        }
     }
 
     /// Whether the shim is contracted to book a mutation of this shape unconditionally.
@@ -775,6 +739,19 @@ impl ChaosInspector {
         }
     }
 
+    /// The body all four live-interpreter callbacks share: settle whatever the previous one left
+    /// pending, then draw one interpreter-facing shape.
+    fn hit_live<CTX: ContextTr, INTR: InterpreterTypes>(
+        &mut self,
+        interp: &mut Interpreter<INTR>,
+        context: &mut CTX,
+    ) {
+        self.settle_pending_gas(interp);
+        if let Some((shape, entropy)) = self.pick(&INTERPRETER_SHAPES) {
+            self.hit_interpreter(interp, context, shape, entropy);
+        }
+    }
+
     /// Applies an input-facing shape to a call's inputs, or intercepts the frame.
     fn hit_call_inputs<CTX: ContextTr>(
         &mut self,
@@ -1169,31 +1146,19 @@ impl<CTX: ContextTr + FrameResultOriginTr, INTR: InterpreterTypes> Inspector<CTX
     for ChaosInspector
 {
     fn initialize_interp(&mut self, interp: &mut Interpreter<INTR>, context: &mut CTX) {
-        self.settle_pending_gas(interp);
-        if let Some((shape, entropy)) = self.pick(&INTERPRETER_SHAPES) {
-            self.hit_interpreter(interp, context, shape, entropy);
-        }
+        self.hit_live(interp, context);
     }
 
     fn step(&mut self, interp: &mut Interpreter<INTR>, context: &mut CTX) {
-        self.settle_pending_gas(interp);
-        if let Some((shape, entropy)) = self.pick(&INTERPRETER_SHAPES) {
-            self.hit_interpreter(interp, context, shape, entropy);
-        }
+        self.hit_live(interp, context);
     }
 
     fn step_end(&mut self, interp: &mut Interpreter<INTR>, context: &mut CTX) {
-        self.settle_pending_gas(interp);
-        if let Some((shape, entropy)) = self.pick(&INTERPRETER_SHAPES) {
-            self.hit_interpreter(interp, context, shape, entropy);
-        }
+        self.hit_live(interp, context);
     }
 
     fn log_full(&mut self, interp: &mut Interpreter<INTR>, context: &mut CTX, _log: Log) {
-        self.settle_pending_gas(interp);
-        if let Some((shape, entropy)) = self.pick(&INTERPRETER_SHAPES) {
-            self.hit_interpreter(interp, context, shape, entropy);
-        }
+        self.hit_live(interp, context);
     }
 
     fn frame_start(
