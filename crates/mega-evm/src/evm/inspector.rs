@@ -44,8 +44,9 @@
 //!   funded.
 //! - Rewrites that move no gas go to [`book_intervention`]: a frame result's classification or
 //!   output, a frame's inputs outside their gas limit, a finished outcome's metadata
-//!   ([`OutcomeMetadata`]) — and the constant-time readings the shim can take off a live
-//!   interpreter ([`WorkingSet`]), which is what makes a frame's memory grown for free visible.
+//!   ([`OutcomeMetadata`]) — and every constant-time reading the shim can take off a live
+//!   interpreter ([`WorkingSet`]), which is what makes a frame's memory grown for free, its program
+//!   counter stepped past an instruction, or its return buffer conjured all visible.
 //! - One rewrite shape is refused outright: see [`MeasuredInspector::create_end`].
 //!
 //! Nothing here changes what the inspector is allowed to do to the EVM, and nothing here runs on
@@ -62,10 +63,14 @@ use revm::{
     context::{ContextError, ContextTr},
     handler::FrameResult,
     interpreter::{
-        interpreter_types::{LoopControl, MemoryTr, StackTr},
-        CallInputs, CallOutcome, CreateInputs, CreateOutcome, FrameInput, Gas, InstructionResult,
-        Interpreter, InterpreterAction, InterpreterResult, InterpreterTypes,
+        interpreter_types::{
+            InputsTr, Jumps, LegacyBytecode, LoopControl, MemoryTr, ReturnData, RuntimeFlag,
+            StackTr,
+        },
+        CallInput, CallInputs, CallOutcome, CreateInputs, CreateOutcome, FrameInput, Gas,
+        InstructionResult, Interpreter, InterpreterAction, InterpreterResult, InterpreterTypes,
     },
+    primitives::hardfork::SpecId,
     Inspector,
 };
 
@@ -434,51 +439,163 @@ fn book_intervention<DB: Database, ExtEnvs: ExternalEnvTypes>(
     }
 }
 
-/// The part of a live interpreter's state a callback boundary can read in constant time.
+/// An `O(1)` identity for a byte buffer: where it starts and how long it is.
 ///
-/// The interpreter's stack and memory *contents* are outside the shim's reach — telling whether
-/// either came back changed needs a snapshot of unbounded state — but their sizes are not, and
-/// neither is the memo of how far the memory has been paid for. Those four readings are `O(1)`,
-/// so the shim takes them on the way in and on the way out and books a difference as an
-/// intervention.
+/// The same comparison [`same_buffer`] makes, in a form that can be stored in a snapshot. Neither
+/// reads a byte: a buffer's *contents* at an unchanged address and length are content-class, which
+/// is the row of the shape table that has no lane. What this does catch is the buffer being
+/// replaced, which is the only way an inspector can change one that is immutable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct BufferId {
+    /// Where the buffer starts, as a bare address rather than a live pointer.
+    addr: usize,
+    /// How long it is.
+    len: usize,
+}
+
+impl BufferId {
+    #[inline]
+    fn of(bytes: &[u8]) -> Self {
+        Self { addr: bytes.as_ptr() as usize, len: bytes.len() }
+    }
+}
+
+/// An `O(1)` identity for a frame's calldata, which is either an owned buffer or a window into the
+/// shared one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CallInputId {
+    /// An owned buffer, identified the way every other buffer here is.
+    Bytes(BufferId),
+    /// A window into the context's shared memory buffer, identified by its bounds. Where the
+    /// window points is the reading; what is inside it lives in the shared buffer and is
+    /// content-class like any other buffer's contents.
+    SharedBuffer(usize, usize),
+}
+
+impl CallInputId {
+    #[inline]
+    fn of(input: &CallInput) -> Self {
+        match input {
+            CallInput::Bytes(bytes) => Self::Bytes(BufferId::of(bytes)),
+            CallInput::SharedBuffer(range) => Self::SharedBuffer(range.start, range.end),
+        }
+    }
+}
+
+/// Every constant-time reading a callback boundary can take off a live interpreter.
 ///
-/// The pair that made them necessary is the memory and its memo, moved together.
+/// # The rule
 ///
-/// The memo (`Gas::memory`) is what the next expanding opcode compares its requirement against. An
-/// inspector that raises it without growing the memory desynchronises the two and the EVM reads out
-/// of bounds; one that grows the memory without raising it is charged for the growth twice over.
-/// Moving *both*, together, is neither — the interpreter is in a state it could have reached by
-/// paying, having paid nothing, and every later expansion inside the new bound is free. That pair
-/// moves no gas anywhere at the moment it is made, so no gas lane can see it; what it changes is
-/// what the EVM charges afterwards.
+/// **Every `O(1)` reading of the interpreter's working set is in this snapshot.** Not a list of
+/// the readings someone thought of — the readings themselves, enumerated field by field against
+/// revm's `Interpreter` and the traits each field is reachable through, and pinned that way by
+/// `tests/rex7/gas_surface.rs`.
 ///
-/// The stack's length is here for the same reason and at the same cost, and it moves whenever a
-/// callback pushes or pops.
+/// The rule is stated over readings rather than over fields because that is the shape of what a
+/// boundary can do. An inspector reaches the whole interpreter; the shim can only compare what it
+/// can *read back* in constant time, and a snapshot the inspected path takes twice per opcode
+/// cannot walk unbounded state. So the line is drawn at the cost of the reading, and everything on
+/// the cheap side of it is taken.
 ///
-/// A stack or memory edit that leaves both sizes where they were stays invisible: it is a rewrite
-/// of contents, which is the row of the shape table that has no lane.
+/// The earlier version of this snapshot held four readings and was written as an enumeration: the
+/// stack's length, the memory's size, and the two halves of the memo of how far that memory has
+/// been paid for. Enumerations of this kind are only as complete as whoever wrote them, and this
+/// one was not — the `bytecode` field was not in it at all, so an inspector could step the program
+/// counter past an instruction and delete it from the frame with every lane reading zero. Stating
+/// the rule over the cost of the reading is what closes that class rather than that instance.
+///
+/// # What is here, by the field it is read from
+///
+/// - `bytecode` — the program counter, the code's identity, and revm's `continue_execution` flag,
+///   which is what the inspected loop breaks on and is a separate object from the pending action.
+/// - `stack` — its length.
+/// - `return_data` — the buffer's identity. A frame's `RETURNDATASIZE` and `RETURNDATACOPY` read
+///   it, so putting a buffer there hands the frame data no call produced.
+/// - `memory` — its size, and the offset of the frame's window into the shared buffer.
+/// - `gas` — the memory memo's two halves. The budget half of a `Gas` is not here: it moves on the
+///   gas lanes, and reading it here as well would report one edit twice.
+/// - `input` — the four addresses and values a frame's identity is made of, and its calldata's
+///   identity. `target_address` is the one every storage instruction resolves against, so moving it
+///   redirects the frame's writes to another account.
+/// - `runtime_flag` — the static flag and the spec id.
+///
+/// `extend` is the one field with no reading, by construction: `InterpreterTypes::Extend` carries
+/// no trait bound at all, so a shim generic over the interpreter has nothing it can call on it.
+///
+/// # What is deliberately not here
+///
+/// The *contents* of the stack, the memory, the return buffer, the calldata and the code. Telling
+/// whether any of those came back changed means walking unbounded state, which is the one thing a
+/// per-opcode boundary cannot do. Their identities and sizes are here; what is inside them is the
+/// row of the shape table that has no lane.
+///
+/// # The pair that made the snapshot necessary
+///
+/// The memory and its memo, moved together. The memo (`Gas::memory`) is what the next expanding
+/// opcode compares its requirement against. An inspector that raises it without growing the memory
+/// desynchronises the two and the EVM reads out of bounds; one that grows the memory without
+/// raising it is charged for the growth twice over. Moving *both* is neither — the interpreter is
+/// in a state it could have reached by paying, having paid nothing, and every later expansion
+/// inside the new bound is free. That pair moves no gas at the moment it is made, so no gas lane
+/// can see it; what it changes is what the EVM charges afterwards.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct WorkingSet {
+    /// Where in its code the frame is about to execute.
+    pc: usize,
+    /// Which code that is.
+    code: BufferId,
+    /// Whether revm's inspected instruction loop will take another turn.
+    running: bool,
     /// How many words the frame has on its stack.
     stack_len: usize,
+    /// The return data the frame's `RETURNDATASIZE` and `RETURNDATACOPY` will read.
+    return_data: BufferId,
     /// How many bytes of memory the frame has.
     memory_size: usize,
+    /// Where the frame's window into the shared memory buffer starts.
+    memory_offset: usize,
     /// How many words of that memory the frame has been charged for.
     memory_words: usize,
     /// What that charge came to.
     memory_expansion_cost: u64,
+    /// The account the frame's storage instructions resolve against.
+    target_address: Address,
+    /// The account whose code the frame is running.
+    bytecode_address: Option<Address>,
+    /// Who called it.
+    caller_address: Address,
+    /// With what value.
+    call_value: U256,
+    /// And with what calldata.
+    call_input: CallInputId,
+    /// Whether the frame may write state.
+    is_static: bool,
+    /// Which gas schedule and opcode set it runs under.
+    spec_id: SpecId,
 }
 
 impl WorkingSet {
-    /// Reads the four numbers off a live interpreter.
+    /// Takes every reading off a live interpreter.
     #[inline]
     fn of<INTR: InterpreterTypes>(interp: &Interpreter<INTR>) -> Self {
         let memory = interp.gas.memory();
         Self {
+            pc: interp.bytecode.pc(),
+            code: BufferId::of(interp.bytecode.bytecode_slice()),
+            running: interp.bytecode.is_not_end(),
             stack_len: interp.stack.len(),
+            return_data: BufferId::of(interp.return_data.buffer()),
             memory_size: interp.memory.size(),
+            memory_offset: interp.memory.local_memory_offset(),
             memory_words: memory.words_num,
             memory_expansion_cost: memory.expansion_cost,
+            target_address: interp.input.target_address(),
+            bytecode_address: interp.input.bytecode_address().copied(),
+            caller_address: interp.input.caller_address(),
+            call_value: interp.input.call_value(),
+            call_input: CallInputId::of(interp.input.input()),
+            is_static: interp.runtime_flag.is_static(),
+            spec_id: interp.runtime_flag.spec_id(),
         }
     }
 }
@@ -883,5 +1000,203 @@ where
     #[inline]
     fn selfdestruct(&mut self, contract: Address, target: Address, value: U256) {
         self.inner.selfdestruct(contract, target, value);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use revm::{
+        bytecode::Bytecode,
+        interpreter::{
+            interpreter::{EthInterpreter, ExtBytecode},
+            InputsImpl, InterpreterAction, SharedMemory,
+        },
+    };
+
+    /// A second address, for the cases that move one of the frame's identifying addresses.
+    const OTHER: Address = Address::repeat_byte(0x0B);
+
+    /// How many bytes of memory the probe starts with.
+    ///
+    /// Non-zero so that the window-offset case can move the frame's checkpoint into the shared
+    /// buffer without the size moving with it.
+    const PROBE_MEMORY: usize = 32;
+
+    /// The interpreter every case moves a reading on.
+    fn probe() -> Interpreter<EthInterpreter> {
+        let mut interp = Interpreter::new(
+            SharedMemory::new(),
+            ExtBytecode::new(Bytecode::new_raw(Bytes::from_static(&[0x5B, 0x5B, 0x00]))),
+            InputsImpl::default(),
+            false,
+            SpecId::default(),
+            1_000_000,
+        );
+        interp.memory.resize(PROBE_MEMORY);
+        interp
+    }
+
+    /// The readings that differ between two snapshots, by name.
+    ///
+    /// Destructured exhaustively rather than compared with `PartialEq`, and that is the whole
+    /// point: a reading added to [`WorkingSet`] is a compile error here until it is named, and one
+    /// removed is a compile error too. Rust cannot enumerate a struct's fields at run time, and
+    /// this is the substitute — the same role the derived `Debug` rendering plays for the foreign
+    /// structs in `tests/rex7/gas_surface.rs`.
+    fn moved(before: &WorkingSet, after: &WorkingSet) -> Vec<&'static str> {
+        let WorkingSet {
+            pc,
+            code,
+            running,
+            stack_len,
+            return_data,
+            memory_size,
+            memory_offset,
+            memory_words,
+            memory_expansion_cost,
+            target_address,
+            bytecode_address,
+            caller_address,
+            call_value,
+            call_input,
+            is_static,
+            spec_id,
+        } = *before;
+        [
+            ("pc", pc == after.pc),
+            ("code", code == after.code),
+            ("running", running == after.running),
+            ("stack_len", stack_len == after.stack_len),
+            ("return_data", return_data == after.return_data),
+            ("memory_size", memory_size == after.memory_size),
+            ("memory_offset", memory_offset == after.memory_offset),
+            ("memory_words", memory_words == after.memory_words),
+            ("memory_expansion_cost", memory_expansion_cost == after.memory_expansion_cost),
+            ("target_address", target_address == after.target_address),
+            ("bytecode_address", bytecode_address == after.bytecode_address),
+            ("caller_address", caller_address == after.caller_address),
+            ("call_value", call_value == after.call_value),
+            ("call_input", call_input == after.call_input),
+            ("is_static", is_static == after.is_static),
+            ("spec_id", spec_id == after.spec_id),
+        ]
+        .into_iter()
+        .filter_map(|(name, same)| (!same).then_some(name))
+        .collect()
+    }
+
+    /// One case: the name of a reading, and a rewrite that moves it.
+    type Case = (&'static str, fn(&mut Interpreter<EthInterpreter>));
+
+    /// One rewrite per reading, each moving the reading it is named for and nothing else.
+    ///
+    /// Every one is something an inspector can do to a live interpreter through the traits the
+    /// shim itself reads through, and several are rewrites with teeth: stepping the program
+    /// counter deletes an instruction from the frame, clearing the static flag lets a
+    /// `STATICCALL` write state, and moving the target address redirects every storage
+    /// instruction to another account.
+    const CASES: [Case; 16] = [
+        ("pc", |interp| interp.bytecode.relative_jump(1)),
+        ("code", |interp| {
+            interp.bytecode = ExtBytecode::new(Bytecode::new_raw(Bytes::from_static(&[0x00])));
+        }),
+        ("running", |interp| {
+            let gas = interp.gas;
+            interp.bytecode.set_action(InterpreterAction::new_halt(InstructionResult::Stop, gas));
+        }),
+        ("stack_len", |interp| assert!(interp.stack.push(U256::ZERO))),
+        ("return_data", |interp| interp.return_data.set_buffer(Bytes::from_static(&[0x01]))),
+        ("memory_size", |interp| interp.memory.resize(PROBE_MEMORY * 2)),
+        ("memory_offset", |interp| {
+            // A child window over the same shared buffer, resized to the size the parent had, so
+            // that the frame's memory looks the same and starts somewhere else.
+            let mut child = interp.memory.new_child_context();
+            child.resize(PROBE_MEMORY);
+            interp.memory = child;
+        }),
+        ("memory_words", |interp| interp.gas.memory_mut().words_num += 1),
+        ("memory_expansion_cost", |interp| interp.gas.memory_mut().expansion_cost += 1),
+        ("target_address", |interp| interp.input.target_address = OTHER),
+        ("bytecode_address", |interp| interp.input.bytecode_address = Some(OTHER)),
+        ("caller_address", |interp| interp.input.caller_address = OTHER),
+        ("call_value", |interp| interp.input.call_value = U256::from(1)),
+        ("call_input", |interp| {
+            interp.input.input = CallInput::Bytes(Bytes::from_static(&[0x01]));
+        }),
+        ("is_static", |interp| interp.runtime_flag.is_static = true),
+        ("spec_id", |interp| interp.runtime_flag.spec_id = SpecId::FRONTIER),
+    ];
+
+    /// ★ Every reading the snapshot holds is one the shim really takes off the interpreter.
+    ///
+    /// The rule the snapshot is built on is "every `O(1)` reading of the interpreter's working
+    /// set", and a rule of that shape fails in two ways: a reading that is declared and never
+    /// read, and a reading that is read and never declared. Each case moves exactly one reading
+    /// and asserts that exactly that one name comes back — so a field dropped from
+    /// [`WorkingSet::of`] leaves its case detecting nothing, and a field left out of the snapshot
+    /// entirely never compiles past [`moved`].
+    #[test]
+    fn test_every_reading_moves_exactly_the_reading_it_is_named_for() {
+        let unchanged = probe();
+        assert!(
+            moved(&WorkingSet::of(&unchanged), &WorkingSet::of(&unchanged)).is_empty(),
+            "a snapshot compared against itself must report nothing moved",
+        );
+        assert_ne!(SpecId::default(), SpecId::FRONTIER, "the spec-id case must move something");
+
+        for (name, rewrite) in CASES {
+            let mut interp = probe();
+            let before = WorkingSet::of(&interp);
+            rewrite(&mut interp);
+            assert_eq!(
+                moved(&before, &WorkingSet::of(&interp)),
+                [name],
+                "the rewrite for {name} must move that reading and no other",
+            );
+        }
+    }
+
+    /// The case list covers the snapshot, and covers each reading once.
+    ///
+    /// [`moved`]'s destructuring is what keeps [`WorkingSet`] and this module in step at compile
+    /// time; this is the run-time half of the same closure. The snapshot below is written out
+    /// field by field with every reading different, so what [`moved`] reports on it is the set of
+    /// readings [`moved`] can see at all — and that set has to be exactly the set the cases above
+    /// exercise. A reading added to the snapshot is a compile error in two places before it gets
+    /// here, and an unexercised one fails this.
+    #[test]
+    fn test_the_case_list_covers_every_reading_exactly_once() {
+        let mut names: Vec<&str> = CASES.iter().map(|(name, _)| *name).collect();
+        let declared = names.len();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), declared, "no reading may be listed twice");
+
+        let before = WorkingSet::of(&probe());
+        let everything = WorkingSet {
+            pc: before.pc + 1,
+            code: BufferId { addr: before.code.addr + 1, len: before.code.len + 1 },
+            running: !before.running,
+            stack_len: before.stack_len + 1,
+            return_data: BufferId {
+                addr: before.return_data.addr + 1,
+                len: before.return_data.len + 1,
+            },
+            memory_size: before.memory_size + 1,
+            memory_offset: before.memory_offset + 1,
+            memory_words: before.memory_words + 1,
+            memory_expansion_cost: before.memory_expansion_cost + 1,
+            target_address: OTHER,
+            bytecode_address: Some(OTHER),
+            caller_address: OTHER,
+            call_value: before.call_value + U256::from(1),
+            call_input: CallInputId::SharedBuffer(0, 1),
+            is_static: !before.is_static,
+            spec_id: SpecId::FRONTIER,
+        };
+        let mut all = moved(&before, &everything);
+        all.sort_unstable();
+        assert_eq!(all, names, "every reading the snapshot holds must have a case, and vice versa");
     }
 }

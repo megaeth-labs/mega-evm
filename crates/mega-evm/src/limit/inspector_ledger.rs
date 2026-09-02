@@ -108,12 +108,14 @@ impl Lane {
 /// # What it does not measure
 ///
 /// What a callback does behind the shim's back. An inspector reaches state that no argument it is
-/// handed describes — the interpreter's stack and memory contents, the journal — and telling
-/// whether any of those came back changed needs a snapshot of unbounded state that no callback
-/// boundary can take at a cost the inspected path can carry. The *sizes* of the interpreter's
-/// stack and memory are the exception, because they are constant-time readings: the shim takes
-/// them, and a frame whose memory was grown lands on [`interventions`](Self::interventions).
-/// A same-size rewrite of what is in them leaves this all-zero.
+/// handed describes — the *contents* of the interpreter's stack, memory, return buffer, calldata
+/// and code, and the journal — and telling whether any of those came back changed needs a snapshot
+/// of unbounded state that no callback boundary can take at a cost the inspected path can carry.
+/// Everything about the interpreter that *is* a constant-time reading is the exception, and the
+/// shim takes all of it: a frame whose memory was grown, whose program counter was stepped past an
+/// instruction, or whose return buffer was conjured lands on
+/// [`interventions`](Self::interventions). A rewrite that leaves every one of those readings where
+/// it was leaves this all-zero.
 ///
 /// So an empty ledger says two things: no gas moved that the EVM did not move, and nothing the
 /// shim was handed came back different. It does not say the transaction is the one the EVM would
@@ -313,10 +315,16 @@ pub struct InspectorLedger {
     ///   that can edit them (`frame_start`, `call`, `create`);
     /// - a frame the inspector answered itself, with a synthetic outcome instead of letting the
     ///   EVM build it;
-    /// - the size of a live interpreter's stack or memory, or the memo of how far that memory has
-    ///   been paid for, at each of the four callbacks handed a live interpreter. Moving the memory
-    ///   and the memo together is the one edit that leaves every interpreter invariant intact and
-    ///   still changes what the next expanding opcode is charged.
+    /// - any constant-time reading of a live interpreter's working set, at each of the four
+    ///   callbacks handed one. The rule the shim's snapshot is built on is stated over the cost of
+    ///   the reading rather than over a list, so it covers the program counter and the code's
+    ///   identity, revm's `continue_execution` flag, the stack's length, the return buffer's
+    ///   identity, the memory's size and window offset, the memo of how far that memory has been
+    ///   paid for, the frame's four identifying fields and its calldata's identity, the static
+    ///   flag and the spec id. Two of those are rewrites with no other trace at all: a stepped
+    ///   program counter deletes an instruction from the frame, and moving the memory together
+    ///   with its memo leaves every interpreter invariant intact while changing what the next
+    ///   expanding opcode is charged.
     ///
     /// Gas edits are deliberately excluded — a gas limit or a result's remaining gas moving is
     /// what the lanes above are for, and counting it here would say the same thing twice.

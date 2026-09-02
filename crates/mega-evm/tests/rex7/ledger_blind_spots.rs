@@ -25,8 +25,12 @@
 //! Four of them are booked on `InspectorLedger::interventions`, from readings the shim did not use
 //! to take; the cancelling pair are what the per-lane gross activity counters exist for. Every test
 //! here asserts the ledger the shim books *and* the effect the rewrite had, because a shape that no
-//! longer changes anything is a shape that stopped testing the guard.
-
+//! longer changes anything is a shape that stopped testing the guard.//!
+//! The last two are also why the snapshot the first shape needed is now a *rule* rather than a
+//! list. A snapshot of four chosen readings caught the memory pair and let the program counter
+//! through, because `Interpreter::bytecode` was not among the things anyone had thought to name.
+//! What the shim takes now is every constant-time reading of the interpreter, and what pins that is
+//! the `Interpreter` row of `gas_surface.rs`'s closed table.
 
 use crate::common::{transact, transact_inspected, CALLEE, CONTRACT, EMPTY_TARGET, ONE_ETH};
 use alloy_primitives::{address, Address, Bytes, U256};
