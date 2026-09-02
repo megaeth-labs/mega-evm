@@ -522,8 +522,12 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
                 let cloned = Rc::clone(&obs);
                 let parent: Rc<RefCell<dyn SandboxObserver<ExtEnvs>>> = cloned;
                 let empty: Rc<RefCell<dyn SandboxObserver<EmptyExternalEnv>>> = obs;
-                self.keyless_sandbox_hook = Some(ReadOnlyHook::handle(parent));
-                self.keyless_sandbox_hook_empty = Some(ReadOnlyHook::handle(empty));
+                let parent: SandboxHookHandle<ExtEnvs> =
+                    Rc::new(RefCell::new(ReadOnlyHook::new(parent)));
+                let empty: SandboxHookHandle<EmptyExternalEnv> =
+                    Rc::new(RefCell::new(ReadOnlyHook::new(empty)));
+                self.keyless_sandbox_hook = Some(parent);
+                self.keyless_sandbox_hook_empty = Some(empty);
             }
             None => self.clear_keyless_sandbox_hook(),
         }

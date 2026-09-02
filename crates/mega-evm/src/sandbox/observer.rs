@@ -66,10 +66,7 @@ use revm::{
 
 use crate::{ExternalEnvTypes, MegaContext, MegaSpecId};
 
-use super::{
-    inspector::{SandboxHookHandle, SandboxInspector},
-    state::SandboxDb,
-};
+use super::{inspector::SandboxInspector, state::SandboxDb};
 
 /// Context available when a sandbox is about to execute.
 #[non_exhaustive]
@@ -368,10 +365,10 @@ pub(crate) struct ReadOnlyHook<E: ExternalEnvTypes> {
     observer: Rc<RefCell<dyn SandboxObserver<E>>>,
 }
 
-impl<E: ExternalEnvTypes + 'static> ReadOnlyHook<E> {
-    /// Wraps a shared observer handle as a type-erased hook handle.
-    pub(crate) fn handle(observer: Rc<RefCell<dyn SandboxObserver<E>>>) -> SandboxHookHandle<E> {
-        Rc::new(RefCell::new(Self { observer }))
+impl<E: ExternalEnvTypes> ReadOnlyHook<E> {
+    /// Wraps a shared observer handle.
+    pub(crate) fn new(observer: Rc<RefCell<dyn SandboxObserver<E>>>) -> Self {
+        Self { observer }
     }
 }
 
@@ -526,8 +523,10 @@ mod tests {
 
     #[test]
     fn test_read_only_hook_is_a_sandbox_inspector_handle() {
+        use super::super::inspector::SandboxHookHandle;
         let observer: Rc<RefCell<dyn SandboxObserver<EmptyExternalEnv>>> =
             Rc::new(RefCell::new(NopObserver));
-        let _handle: SandboxHookHandle<EmptyExternalEnv> = ReadOnlyHook::handle(observer);
+        let _handle: SandboxHookHandle<EmptyExternalEnv> =
+            Rc::new(RefCell::new(ReadOnlyHook::new(observer)));
     }
 }

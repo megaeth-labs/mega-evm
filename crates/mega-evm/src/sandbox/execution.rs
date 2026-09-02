@@ -1830,7 +1830,9 @@ mod tests {
             Some(limits),
             block,
             chain,
-            observer.map(crate::sandbox::ReadOnlyHook::handle),
+            observer.map(|observer| -> SandboxHookHandle<crate::EmptyExternalEnv> {
+                Rc::new(RefCell::new(crate::sandbox::ReadOnlyHook::new(observer)))
+            }),
         )
     }
 
