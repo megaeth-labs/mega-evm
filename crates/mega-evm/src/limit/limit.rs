@@ -2084,16 +2084,12 @@ impl AdditionalLimit {
     ///
     /// and everything in it that was not the work performed is destroyed.
     ///
-    /// # Why the difference can go the other way
-    ///
-    /// A halting precompile's `Gas` is reset rather than spent down, so it reports the whole
-    /// budget as remaining even when `MegaETH` priced the call as having done work — the KZG fixed
-    /// fee for a failure raised inside verification is the one case that exists today. Told that
-    /// such a call succeeded, the caller reclaims all of it, fee included. The work stays on the
-    /// enforcing lane, because it really was performed; the fee nobody paid for is gas the rewrite
-    /// conjured, and goes to the ledger so the conservation law still closes. That direction is
-    /// unreachable without an inspector: no classification the EVM itself produces both prices
-    /// work and hands the budget back.
+    /// The difference cannot go the other way. A swallowed classification consumes the whole
+    /// forwarded envelope, which every arm's `executed` fits inside; a returned one leaves a `Gas`
+    /// normalised onto that envelope and spent down by exactly `executed`. The one shape that
+    /// would break both — a halting precompile whose classification is rewritten to a success,
+    /// whose reset `Gas` then hands the caller the fixed fee back — is refused before this runs,
+    /// because a precompile's result comes out of frame init.
     fn settle_precompile_envelope(
         &mut self,
         staged: PrecompileEnvelope,
@@ -2106,8 +2102,11 @@ impl AdditionalLimit {
             evm_remaining
         };
         let consumed = staged.forwarded.saturating_sub(returned);
+        debug_assert!(
+            consumed >= staged.executed,
+            "a precompile cannot perform more work than the envelope it consumed",
+        );
         self.compute_gas.record_burned_gas(consumed.saturating_sub(staged.executed));
-        self.inspector.result.book(i128::from(staged.executed.saturating_sub(consumed)));
     }
 
     /// Merges resource usage from a sandbox execution into this tracker.
