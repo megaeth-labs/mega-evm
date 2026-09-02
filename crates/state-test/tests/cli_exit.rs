@@ -75,7 +75,7 @@ fn combined(out: &std::process::Output) -> String {
 }
 
 #[test]
-fn failing_tests_exit_with_code_1() {
+fn test_failing_tests_exit_with_code_1() {
     let path = write_fixture("failing.json", FAILING_SUITE);
     let path = path.to_str().expect("utf8 path");
 
@@ -93,14 +93,14 @@ fn failing_tests_exit_with_code_1() {
 }
 
 #[test]
-fn invalid_path_exits_with_code_1() {
+fn test_invalid_path_exits_with_code_1() {
     let out = run_cli(&["/nonexistent/state_test_cli_exit_4928"]);
     assert_eq!(out.status.code(), Some(1));
     assert!(!out.stderr.is_empty(), "stderr should carry the error message");
 }
 
 #[test]
-fn passing_run_exits_with_code_0() {
+fn test_passing_run_exits_with_code_0() {
     // A fixture whose recorded roots are the ones its execution produces. `--fill` computes them,
     // which is also what makes this a run with something in it to pass: the expectation exists and
     // is checked.
@@ -122,7 +122,7 @@ fn passing_run_exits_with_code_0() {
 }
 
 #[test]
-fn validate_run_over_a_unit_with_no_expectation_exits_1() {
+fn test_validate_run_over_a_unit_with_no_expectation_exits_1() {
     // A unit whose `post` is empty is walked, executed against nothing, and counted by nothing.
     // Reading that as a pass makes "the runner checked this file" true of a file that pins no
     // behavior at all — and `--fill --force` writing an empty `post` is one bug away.
@@ -148,7 +148,7 @@ fn validate_run_over_a_unit_with_no_expectation_exits_1() {
 }
 
 #[test]
-fn fill_that_filled_nothing_exits_1() {
+fn test_fill_that_filled_nothing_exits_1() {
     // `--keep-going` decides when a run stops, not whether an empty one counts. Without it the
     // fill loop simply has nothing to fail at, so a corpus that never arrived walks no file,
     // writes no fixture, and used to exit 0 — the one report that must never read as a pass.
@@ -179,7 +179,7 @@ fn fill_that_filled_nothing_exits_1() {
 }
 
 #[test]
-fn fill_tally_counts_transaction_vectors() {
+fn test_fill_tally_counts_transaction_vectors() {
     // The tally a sweep gates on has to count what the differential sweep counts, or the two
     // numbers cannot be compared with each other or against a baseline recorded under the other
     // mode. A unit is a family of transactions; the vector is the unit both modes agree on.
@@ -212,7 +212,7 @@ fn fill_tally_counts_transaction_vectors() {
 }
 
 #[test]
-fn diff_run_with_no_unexplained_difference_exits_with_code_0() {
+fn test_diff_run_with_no_unexplained_difference_exits_with_code_0() {
     let mut suite: serde_json::Value = serde_json::from_str(FAILING_SUITE).expect("parse");
     // The differential run computes both sides itself; the recorded `post` is irrelevant, and an
     // empty one keeps the fixture honest about that.
@@ -241,7 +241,7 @@ fn diff_run_with_no_unexplained_difference_exits_with_code_0() {
 }
 
 #[test]
-fn diff_run_over_an_unauthorized_spec_pair_is_refused() {
+fn test_diff_run_over_an_unauthorized_spec_pair_is_refused() {
     // Every rule in the classifier is a reading of one sentence, the Rex7 precision invariant,
     // which relates Rex7 to Rex6 and states nothing about any other pair. Pointed at another pair
     // it would grant a licence that pair never had — deciding, from mechanisms that are evidence
@@ -263,7 +263,7 @@ fn diff_run_over_an_unauthorized_spec_pair_is_refused() {
 }
 
 #[test]
-fn validate_run_that_judged_nothing_exits_1() {
+fn test_validate_run_that_judged_nothing_exits_1() {
     // Same hole as in the differential mode, one mode over: a corpus whose every file is on the
     // validation skip list walks files, reaches no unit, and reports zero errors.
     let dir = std::env::temp_dir().join("state_test_cli_exit_all_skipped");
@@ -282,7 +282,7 @@ fn validate_run_that_judged_nothing_exits_1() {
 }
 
 #[test]
-fn diff_run_that_judged_nothing_exits_1() {
+fn test_diff_run_that_judged_nothing_exits_1() {
     // A sweep whose corpus never arrived reaches the gate with an empty tally: zero panics, zero
     // unexplained differences, every count truthful and meaningless. It must not read as a pass.
     let dir = std::env::temp_dir().join("state_test_cli_exit_empty_corpus");
@@ -321,7 +321,7 @@ fn diff_run_that_judged_nothing_exits_1() {
 }
 
 #[test]
-fn diff_run_with_an_unparseable_fixture_exits_1() {
+fn test_diff_run_with_an_unparseable_fixture_exits_1() {
     // A file the sweep cannot parse is a fixture it did not judge. Skipping it quietly is how a
     // corpus shrinks without anyone noticing.
     let dir = std::env::temp_dir().join("state_test_cli_exit_bad_fixture");
@@ -355,7 +355,7 @@ fn diff_run_with_an_unparseable_fixture_exits_1() {
 }
 
 #[test]
-fn diff_spec_requires_an_explicit_target_spec() {
+fn test_diff_spec_requires_an_explicit_target_spec() {
     let path = write_fixture("diff_needs_target.json", FAILING_SUITE);
     let out = run_cli(&[path.to_str().expect("utf8 path"), "--diff-spec", "Rex6"]);
     assert_eq!(out.status.code(), Some(2), "clap rejects the incomplete flag combination");
@@ -366,7 +366,7 @@ fn diff_spec_requires_an_explicit_target_spec() {
 }
 
 #[test]
-fn diff_spec_rejects_an_unknown_spec_name() {
+fn test_diff_spec_rejects_an_unknown_spec_name() {
     let path = write_fixture("diff_bad_spec.json", FAILING_SUITE);
     let out = run_cli(&[
         path.to_str().expect("utf8 path"),
