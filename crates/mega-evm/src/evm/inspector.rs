@@ -1433,6 +1433,9 @@ mod tests {
     /// One case: the name of a reading, and a rewrite that moves it.
     type Case = (&'static str, fn(&mut Interpreter<EthInterpreter>));
 
+    /// One case: the name of a field, and a rewrite that moves it.
+    type OutcomeCase = (&'static str, fn(&mut CallOutcome));
+
     /// One rewrite per reading, each moving the reading it is named for and nothing else.
     ///
     /// Every one is something an inspector can do to a live interpreter through the traits the
@@ -1522,7 +1525,7 @@ mod tests {
     /// books nothing for. Three of these move nothing `MegaETH` produces today — it runs with
     /// EIP-8037 off and no wired precompile emits a log — so no fixture can show their effect, and
     /// a per-field check is the only thing that holds the claim that they are seen at all.
-    const OUTCOME_CASES: [(&str, fn(&mut CallOutcome)); 4] = [
+    const OUTCOME_CASES: [OutcomeCase; 4] = [
         ("memory_offset", |outcome| outcome.memory_offset = 1..2),
         ("was_precompile_called", |outcome| outcome.was_precompile_called = true),
         ("precompile_call_logs", |outcome| {
