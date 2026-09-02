@@ -149,14 +149,36 @@ fn fnv1a(bytes: &[u8], mut hash: u64) -> u64 {
     hash
 }
 
+/// The part of a fixture's path a seed is allowed to depend on: its file name, and nothing above
+/// it.
+///
+/// A reported seed has to mean the same thing on the machine that reports it and the machine that
+/// triages it, and the rest of the path does not: the same corpus sits under a different checkout
+/// root on every machine, under whatever directory `--corpus-dir` names, and under the private
+/// fallback directory a sweep falls back to. A fixture triaged on its own is reached by a path
+/// that shares no prefix at all with the one the sweep walked. Every one of those would move the
+/// seed while the fixture stayed the same, which is the one thing a reported seed must not do —
+/// and the failure mode is the worst kind, a nightly failure that quietly stops reproducing.
+///
+/// Two fixtures with the same file name in different directories therefore feed the same bytes
+/// into the hash. That is not a defect: a seed selects a mutation stream, and two vectors drawing
+/// the same stream is exactly as useful as two drawing different ones. What the identity is for is
+/// stability, not uniqueness — and the unit name, which follows it into the hash, carries the test
+/// id that distinguishes them anyway.
+fn fixture_identity(path: &Path) -> std::borrow::Cow<'_, str> {
+    path.file_name().unwrap_or(path.as_os_str()).to_string_lossy()
+}
+
 /// The seed one vector's chaos run uses, derived from the global seed and the vector's identity.
 ///
-/// The identity is everything that distinguishes this transaction from every other in the corpus:
-/// which file it came from, which unit of that file, and which of that unit's transaction vectors.
-/// Two runs of the same corpus with the same global seed therefore mutate the same vectors the
-/// same way, whatever order the files are swept in and however many threads sweep them.
-pub fn vector_seed(global: u64, path: &str, name: &str, indexes: TxPartIndices) -> u64 {
-    let mut hash = fnv1a(path.as_bytes(), 0xCBF2_9CE4_8422_2325);
+/// The identity is everything that distinguishes this transaction from every other in the corpus
+/// *and* means the same thing on every machine: the fixture's file name (see
+/// [`fixture_identity`]), which unit of that file it is, and which of that unit's transaction
+/// vectors. Two runs of the same corpus with the same global seed therefore mutate the same
+/// vectors the same way, whatever order the files are swept in, however many threads sweep them,
+/// and wherever the corpus is checked out.
+pub fn vector_seed(global: u64, path: &Path, name: &str, indexes: TxPartIndices) -> u64 {
+    let mut hash = fnv1a(fixture_identity(path).as_bytes(), 0xCBF2_9CE4_8422_2325);
     hash = fnv1a(&[0], hash);
     hash = fnv1a(name.as_bytes(), hash);
     hash = fnv1a(&[0], hash);
@@ -1596,7 +1618,7 @@ pub fn chaos_test_suite(
         let multi = vectors.len() > 1;
         for indexes in vectors {
             let label = if multi { vector_label(&name, indexes) } else { name.clone() };
-            let seed = vector_seed(global_seed, &path_str, &label, indexes);
+            let seed = vector_seed(global_seed, path, &label, indexes);
             let verdict =
                 match panic_capture::catch(|| chaos_unit(&unit, indexes, spec, seed, filter)) {
                     Ok(verdict) => {

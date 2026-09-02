@@ -9,14 +9,14 @@
 use mega_evm::FORBIDDEN_FRAME_INIT_REWRITE;
 use state_test::{
     chaos::{
-        chaos_unit, run_chaos, vector_seed, ChaosClass, ChaosRunConfig, ChaosShape, ChaosTally,
-        ShapeFilter,
+        chaos_test_suite, chaos_unit, run_chaos, vector_seed, ChaosClass, ChaosRunConfig,
+        ChaosShape, ChaosTally, ShapeFilter,
     },
     diff::{execute_unit_in_mode, execute_unit_reporting_chaos, RunMode},
     runner::FixtureScan,
     types::{SpecName, TestUnit, TxPartIndices},
 };
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const SENDER: &str = "0x1000000000000000000000000000000000000001";
 const CALLEE: &str = "0x2000000000000000000000000000000000000002";
@@ -151,19 +151,68 @@ fn test_different_seeds_produce_different_runs() {
 /// A vector's seed depends on every part of its identity, and on the global seed.
 #[test]
 fn test_a_vector_seed_separates_every_part_of_the_identity() {
-    let base = vector_seed(7, "a.json", "unit", VECTOR_0);
+    let a = Path::new("a.json");
+    let base = vector_seed(7, a, "unit", VECTOR_0);
     let others = [
-        vector_seed(8, "a.json", "unit", VECTOR_0),
-        vector_seed(7, "b.json", "unit", VECTOR_0),
-        vector_seed(7, "a.json", "other", VECTOR_0),
-        vector_seed(7, "a.json", "unit", TxPartIndices { data: 1, gas: 0, value: 0 }),
-        vector_seed(7, "a.json", "unit", TxPartIndices { data: 0, gas: 1, value: 0 }),
-        vector_seed(7, "a.json", "unit", TxPartIndices { data: 0, gas: 0, value: 1 }),
+        vector_seed(8, a, "unit", VECTOR_0),
+        vector_seed(7, Path::new("b.json"), "unit", VECTOR_0),
+        vector_seed(7, a, "other", VECTOR_0),
+        vector_seed(7, a, "unit", TxPartIndices { data: 1, gas: 0, value: 0 }),
+        vector_seed(7, a, "unit", TxPartIndices { data: 0, gas: 1, value: 0 }),
+        vector_seed(7, a, "unit", TxPartIndices { data: 0, gas: 0, value: 1 }),
     ];
     for (i, other) in others.iter().enumerate() {
         assert_ne!(base, *other, "identity component {i} does not reach the seed");
     }
-    assert_eq!(base, vector_seed(7, "a.json", "unit", VECTOR_0), "and the seed is a function");
+    assert_eq!(base, vector_seed(7, a, "unit", VECTOR_0), "and the seed is a function");
+}
+
+/// The directory a fixture is reached through does not reach the seed.
+///
+/// A seed is only worth reporting if the machine that reads it can re-run what produced it. The
+/// same corpus is checked out at a different root on every machine, `--corpus-dir` names whatever
+/// the caller likes, a sweep can fall back to a private copy, and a fixture under triage is passed
+/// on its own rather than walked to. Every one of those changes the path and none of them changes
+/// the fixture.
+#[test]
+fn test_a_vector_seed_ignores_the_directory_the_fixture_was_reached_through() {
+    let roots = [
+        Path::new("/checkout-a/tests/GeneralStateTests/x.json"),
+        Path::new("/somewhere/else/entirely/x.json"),
+        Path::new("/tmp/.private.4928/x.json"),
+        Path::new("x.json"),
+    ];
+    let seeds: Vec<u64> = roots.iter().map(|p| vector_seed(7, p, "unit", VECTOR_0)).collect();
+    for (root, seed) in roots.iter().zip(&seeds) {
+        assert_eq!(
+            *seed,
+            seeds[0],
+            "{}: the path above the file name reached the seed",
+            root.display()
+        );
+    }
+}
+
+/// The same, through the sweep that actually derives the seeds rather than through the function.
+///
+/// `vector_seed` taking a stable identity is only half of it; the other half is that the sweep
+/// hands it one. This writes one fixture into two different directories and runs the real entry
+/// point over each.
+#[test]
+fn test_the_sweep_derives_the_same_seeds_from_two_different_roots() {
+    let seeds = |dir: &str| -> Vec<u64> {
+        let path = write_suite_under(dir, "chaos_mode_same_seed.json");
+        let (verdicts, _) = chaos_test_suite(&path, &SpecName::Rex7, 11, ShapeFilter::default())
+            .expect("the fixture must be readable");
+        assert!(!verdicts.is_empty(), "the fixture must produce at least one vector");
+        verdicts.iter().map(|v| v.seed).collect()
+    };
+
+    assert_eq!(
+        seeds("chaos_mode_root_a"),
+        seeds("chaos_mode_root_b/nested"),
+        "the same fixture under two roots must be mutated the same way",
+    );
 }
 
 /// Narrowing the filter keeps every surviving mutation where the full run put it.
@@ -446,9 +495,15 @@ fn test_a_sweep_that_mutated_passes() {
 
 /// Writes the fixture to a unique temp file and returns its path.
 fn write_suite(file_name: &str) -> PathBuf {
+    write_suite_under("mega_state_test_chaos_mode", file_name)
+}
+
+/// Writes the fixture under a named directory of the temp root, so two copies of one fixture can
+/// be reached through two different paths.
+fn write_suite_under(dir: &str, file_name: &str) -> PathBuf {
     let suite: serde_json::Map<String, serde_json::Value> =
         std::iter::once(("chaos_unit".to_string(), unit_json())).collect();
-    let dir = std::env::temp_dir().join("mega_state_test_chaos_mode");
+    let dir = std::env::temp_dir().join(dir);
     std::fs::create_dir_all(&dir).expect("mkdir");
     let path = dir.join(file_name);
     std::fs::write(&path, serde_json::to_string_pretty(&suite).expect("serialize"))
