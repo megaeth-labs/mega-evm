@@ -2,9 +2,9 @@
 //!
 //! [`crate::common`] drives the transaction and checks the conservation law on every run. What is
 //! left over — the REX7 limits, the bytecode shapes an inspector needs something to reach into, the
-//! one-lane ledgers a test asserts against, and the two ways a refused rewrite surfaces — lives
-//! here, because a rewrite is only ever pinned by comparing an inspected run against the
-//! uninspected one over the same fixture.
+//! magnitudes more than one module edits by, the one-lane ledgers a test asserts against, and the
+//! two ways a refused rewrite surfaces — lives here, because a rewrite is only ever pinned by
+//! comparing an inspected run against the uninspected one over the same fixture.
 
 use alloy_primitives::{Address, Bytes};
 use mega_evm::{
@@ -131,6 +131,19 @@ where
         .with_trusted_inspector(inspector);
     crate::common::drive(MegaSpecId::REX7, &mut evm, call_contract_tx(DEFAULT_TX_GAS_LIMIT))
 }
+
+// --- magnitudes ------------------------------------------------------------------------------
+
+/// Gas an action edit moves, and gas a cancelling pair moves through the result lane's two
+/// windows.
+pub(crate) const ACTION_DELTA: u64 = 700;
+
+/// Refund a refund edit moves, and the magnitude a cancelling pair moves in each direction.
+///
+/// Small enough to stay well under the EIP-3529 cap on every fixture that uses it, so that what
+/// survives to the receipt is the whole of the surviving half rather than whatever the cap left of
+/// it.
+pub(crate) const REFUND: i64 = 2_000;
 
 // --- ledgers -------------------------------------------------------------------------------
 

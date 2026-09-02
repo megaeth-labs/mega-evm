@@ -20,11 +20,16 @@
 //!   keep the envelope book the unperformed part as destroyed, the rescued one books nothing.
 //! - `latch_surfacing` — where a latched data-size / KV-update / state-growth exceed becomes a
 //!   stop.
-//! - `shim_measurement` — what the measurement shim books, over every shape that can move a number
-//!   it reports: gas written into an interpreter counter or a frame's gas limit, the two windows
-//!   where a rewrite lands after the accounting that should have read it, the shapes an all-zero
-//!   ledger used to admit, the receipt's refund and EIP-8037 dimensions, and the gas a synthetic
-//!   outcome carries.
+//! - `shim_lanes` — what each lane of the measurement shim books: gas written into an interpreter
+//!   counter or a frame's gas limit, and the receipt's two other numbers, the EIP-3529 refund and
+//!   the EIP-8037 state-gas dimension.
+//! - `shim_settlement` — where a rewrite is settled when the number the shim reads and the number
+//!   the envelope carries are not the same object: the two windows a rewrite can land in after the
+//!   accounting that should have read it, and the gas a synthetic outcome carries.
+//! - `shim_blind_spots` — the rewrite shapes an all-zero ledger used to admit: a frame's memory
+//!   grown for free, an outcome's metadata rewritten around the result inside it, two edits to one
+//!   signed lane that cancel, an instruction deleted by stepping the program counter past it, and a
+//!   return buffer conjured in front of a frame that made no call.
 //! - `shim_refusals` — the rewrites the shim refuses outright: a failed creation revived (at both
 //!   callbacks that can), and the classification of a result frame init produced; with the near
 //!   boundary, a frame the inspector answered itself, which is supported.
@@ -114,6 +119,8 @@ mod parity_shapes;
 mod pre_execution_intrinsic_reject;
 mod precompile_halt;
 mod result_space_tripwire;
-mod shim_measurement;
+mod shim_blind_spots;
+mod shim_lanes;
 mod shim_refusals;
+mod shim_settlement;
 mod trusted_observer;
