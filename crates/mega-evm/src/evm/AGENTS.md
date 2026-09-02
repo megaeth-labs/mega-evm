@@ -51,7 +51,7 @@ Read the table by the *argument the rewrite reaches through*, not by the tool th
 
 | Rewrite shape | Support | Where it is booked | What enforcement sees |
 | --- | --- | --- | --- |
-| Read-only observation | Supported, free | nothing | an empty ledger, and numbers identical to an uninspected run |
+| Read-only observation | Supported, free — and, when the type is declared, not even measured (see **The declared observer** below) | nothing | an empty ledger, and numbers identical to an uninspected run |
 | Gas written into a live interpreter's counter (`initialize_interp`, `step`, `step_end`, `log_full`) | Supported | `InspectorLedger::gas`, at the callback boundary | nothing: the checkpoint baseline shifts by the same amount, and the gas clamp is re-derived on the spot so injected gas buys no compute headroom |
 | A frame input's `gas_limit`, raised or lowered (`frame_start`, `call`, `create`) | Supported | `InspectorLedger::env`, at the callback boundary | nothing: a frame's compute budget comes from the tracker, not from its gas limit |
 | A frame input's semantic fields — target, caller, value, scheme, calldata, static flag (`frame_start`, `call`, `create`) | Supported | `InspectorLedger::interventions`, at the callback boundary | nothing: it changes what the frame does, not what it costs |
@@ -97,6 +97,45 @@ That is roughly a hundred lines of upstream frame-init logic duplicated, with no
 Take it only if the shape turns out to be needed.
 
 Booking is a *reported* quantity throughout. No resource limit is ever compared against the ledger, and `MegaTransactionOutcome::compute_gas_enforced` comes off the enforcement lane rather than out of the reported total — so an inspector cannot buy a transaction headroom on any dimension.
+
+### The declared observer
+
+Measuring costs about a nanosecond per reading per opcode, and there are sixteen readings taken twice per opcode, which adds between a third and two thirds to a production tracer's run.
+An inspector type whose author has implemented `TrustedObserver` for it is delegated to without any of that: `MeasuredInspector::new_trusted`, reached through `MegaEvm::with_trusted_inspector`, builds a shim that forwards every callback and takes no reading.
+The block guard is unchanged and needs no change — a declared type's ledger is empty by construction, which is the same answer measuring it would have given.
+
+**What the declaration promises.** Every callback of the type leaves the EVM exactly as it found it: nothing written to an interpreter's gas counter or its pending action, nothing to a frame's inputs, nothing to a frame result's classification, gas, output or metadata, nothing to a refund, and no frame answered with a synthetic outcome.
+It may read whatever it likes and write to its own state.
+That is exactly the table's first row, and a type that keeps it is measured to zero on every lane.
+
+**Why a declaration and not a detection.** The shim measures at a callback boundary precisely because it cannot see inside the callback, so "does this type write anything back" is not a question it can ask ahead of time — only one it can answer afterwards, at the cost the declaration exists to avoid.
+
+**Why a trait and not a wrapper.** A `Trusted<I>` wrapper cannot be seen by the shim at all.
+`MeasuredInspector::new` is generic over the inspector, `MegaEvm` names the shim as `MeasuredInspector<INSP>` for whatever the caller chose, and `EvmFactory` hands inspectors in under an `I: Inspector` bound — so asking "is this `I` a `Trusted<_>`" would need either specialisation or a bound on every inspector `MegaETH` can be handed, including the foreign ones it can implement nothing for.
+The question is therefore answered where it can be type-checked, at the one constructor whose bound is the declaration, and carried on the shim as a flag.
+The wrapper's other weakness is worse than its unimplementability: `Trusted::new(inspector)` written once inside a generic function declares whatever that function is handed, which is how an RPC-supplied tracer would arrive on the fast path.
+An implementation names a concrete type and no value can carry one.
+
+**Trust, and verify.** Under `debug_assertions` a declared type takes the measuring path anyway, and the shim asserts the ledger came back empty after every callback it measures.
+`MegaEvm::execute_transaction` asks the same question once more at the end of the transaction, which is the backstop for a callback added later whose own verification was never written — the per-callback assert names the site, the transaction-level one cannot be missing.
+Neither costs anything in release, where a declared type reaches no measuring body at all.
+There is no behavioural fork between the two builds for a declaration that holds: the measurement of a type that writes nothing back is a sequence of reads that books nothing, so debug and release execute the same transaction and only a false declaration tells them apart — by panicking.
+`tests/rex7/trusted_observer.rs` holds both halves, and `mega-state-test`'s `RunMode::ObserveTrusted` holds the three-way comparison against a plain and a measured run of the same observer.
+
+**What may be declared.** Read-only tracers: the `revm-inspectors` `TracingInspector` family (`debug_traceTransaction`, `trace_*`, the call and prestate tracers) and anything else that only records what it is shown.
+`NoOpInspector` is declared here, being the only inspector this crate can reach.
+The rest cannot be declared from here or from `mega-reth`, because the orphan rule wants one of the two to be local and neither the trait nor `TracingInspector` is: a node declares a newtype of its own that forwards every callback, which `benches/common/subject.rs` does for the `inspect_tracer_trusted` rows and is the shape to copy.
+A wrapper that does nothing but forward may lift a declaration — `&mut T` does — but only from a concrete declared type; a wrapper that adds behaviour of its own is a type in its own right and has to be read on its own terms.
+
+**What may not be declared.** Anything that intercepts or rewrites, however little.
+In `mega-reth` that is `OracleSetSlotInspector` (`crates/megaeth/engine/src/oracle/executor.rs`), which answers a call to the oracle contract with a synthetic `CallOutcome` — the "synthetic outcome that skips the frame entirely" row of the table above, and the clearest thing a declaration may not cover.
+`ToggleInspector` (`crates/megaeth/rpc/src/toggle_inspector.rs`) forwards or does nothing, so it may be declared for a concrete declared inner type and never generically over its parameter.
+The firewall `Tracer` (`crates/megaeth/payload/src/tx_firewall_trace/tracer.rs`) writes nothing back to the EVM and is a candidate, but it reads through `db_mut()` during `step`, so declaring it needs someone to have read what that does to the state cache — the marking is `mega-reth`'s to make, and this list is the input to it, not the decision.
+Anything supplied by a request — a JavaScript tracer, an RPC-selected tracer config — cannot be declared at all, because a declaration is about a type and a request carries a value.
+
+**How a node reaches it.** `EvmFactory::create_evm_with_inspector` cannot: its bound is `I: Inspector` and its return type is fixed, so it has no way to select the constructor.
+The route is `factory.create_evm(db, env).with_trusted_inspector(tracer)`, which keeps the factory's own dynamic precompiles and differs from the two-step untrusted form only in the method name.
+The same limitation is a fence: `MegaBlockExecutorFactory` builds its EVM through those two factory methods and nothing else, so a declared observer cannot reach the canonical block-execution path at all — what it reaches is an EVM an embedder drives itself, which is what RPC tracing and off-band simulation are.
 
 ### The window a counter edit reaches nothing through
 
@@ -156,6 +195,8 @@ A *callback* upstream adds to the `Inspector` trait does neither — the trait g
 - **Add the shim's counterpart when adding an `Inspector` callback.**
   An unwrapped callback is an unmeasured hole, not a compile error.
   `tests/rex7/inspector_cheat_matrix.rs` enumerates every callback × shape pair and fails on one that is neither covered nor excused, which is what turns a new callback into a red test.
+  The counterpart is three things, not one: the measurement, the `if !self.measures()` delegation that skips it for a declared observer, and the `verify_trusted` call that checks the declaration held.
+  Leaving out the second costs a declared observer its fast path at that callback and nothing else; leaving out the third is the one that loses something, and it is what the transaction-level backstop in `MegaEvm::execute_transaction` exists to catch.
 - **On a revm bump, re-read the trait's method list against `tests/rex7/gas_surface.rs`'s `CALLBACKS`, and give any new callback a row in the shape table and a column in the cheat matrix.**
   This is the one direction no pin reaches, and it is the direction that adds reach.
   The field-level and variant-level pins in the same file cover everything else, and both fail loudly on their own.
