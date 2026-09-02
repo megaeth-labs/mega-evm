@@ -1668,6 +1668,60 @@ mod tests {
         }
     }
 
+    /// One rewrite per field a finished call carries besides its `InterpreterResult`.
+    ///
+    /// `CallMetadata` is the same kind of snapshot as [`WorkingSet`] over a different object, and
+    /// it fails the same way: a field held and never compared is a rewrite the shim is handed and
+    /// books nothing for. Three of these move nothing `MegaETH` produces today — it runs with
+    /// EIP-8037 off and no wired precompile emits a log — so no fixture can show their effect, and
+    /// a per-field check is the only thing that holds the claim that they are seen at all.
+    const OUTCOME_CASES: [(&str, fn(&mut CallOutcome)); 4] = [
+        ("memory_offset", |outcome| outcome.memory_offset = 1..2),
+        ("was_precompile_called", |outcome| outcome.was_precompile_called = true),
+        ("precompile_call_logs", |outcome| {
+            outcome.precompile_call_logs.push(Log::new_unchecked(OTHER, Vec::new(), Bytes::new()));
+        }),
+        ("charged_new_account_state_gas", |outcome| {
+            outcome.charged_new_account_state_gas = true;
+        }),
+    ];
+
+    fn call_outcome() -> CallOutcome {
+        CallOutcome::new(
+            InterpreterResult::new(
+                InstructionResult::Stop,
+                Bytes::new(),
+                revm::interpreter::Gas::new(0),
+            ),
+            0..0,
+        )
+    }
+
+    /// Every field of a finished call outside its result is compared, and each one on its own.
+    ///
+    /// The derived `PartialEq` is what makes a new upstream field visible: it joins the struct,
+    /// joins the equality, and the identical pair below still agrees until someone gives it a
+    /// case. What the cases add is that each existing field is compared *individually* — one of
+    /// them moving is enough on its own.
+    #[test]
+    fn test_every_finished_call_field_outside_the_result_is_compared() {
+        let base = call_outcome();
+        assert_eq!(
+            CallMetadata::of(&base),
+            CallMetadata::of(&call_outcome()),
+            "two identical outcomes must compare equal",
+        );
+        for (name, rewrite) in OUTCOME_CASES {
+            let mut moved = call_outcome();
+            rewrite(&mut moved);
+            assert_ne!(
+                CallMetadata::of(&base),
+                CallMetadata::of(&moved),
+                "a rewritten {name} must be visible to the shim",
+            );
+        }
+    }
+
     /// The case list covers the snapshot, and covers each reading once.
     ///
     /// [`moved`]'s destructuring is what keeps [`WorkingSet`] and this module in step at compile

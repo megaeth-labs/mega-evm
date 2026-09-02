@@ -238,6 +238,85 @@ fn test_a_moved_return_range_is_booked() {
     );
 }
 
+// --- a frame's returned output ------------------------------------------------------------------
+
+/// The word a rewritten output buffer feeds the caller instead of the one the callee returned.
+const FORGED_OUTPUT: u64 = 0xdead;
+
+/// Replaces the output buffer a finished call hands back, leaving its classification alone.
+///
+/// The classification and the remaining gas are what every other lane reads. The output is
+/// neither, and it is what the caller copies into its own memory.
+#[derive(Default)]
+struct ForgeCallOutput {
+    fired: u32,
+}
+
+impl<CTX, INTR: InterpreterTypes> Inspector<CTX, INTR> for ForgeCallOutput {
+    fn call_end(&mut self, _context: &mut CTX, inputs: &CallInputs, outcome: &mut CallOutcome) {
+        if inputs.target_address != CALLEE || self.fired > 0 {
+            return;
+        }
+        outcome.result.output = Bytes::from(U256::from(FORGED_OUTPUT).to_be_bytes::<32>().to_vec());
+        self.fired += 1;
+    }
+}
+
+/// ★ A call outcome whose returned output was replaced is not an all-zero ledger.
+#[test]
+fn test_a_forged_call_output_is_booked() {
+    // Call the callee for one word of output, then store what landed there.
+    let code = BytecodeBuilder::default()
+        .push_number(32u64) // retSize
+        .push_number(0u64) // retOffset
+        .push_number(0u64) // argsSize
+        .push_number(0u64) // argsOffset
+        .push_number(0u64) // value
+        .push_address(CALLEE)
+        .push_number(100_000u64)
+        .append(CALL)
+        .append(POP)
+        .push_number(0u64)
+        .append(MLOAD)
+        .push_number(RESULT_SLOT)
+        .append(SSTORE)
+        .append(STOP)
+        .build();
+    // The callee returns one word of 0x11s.
+    let callee = BytecodeBuilder::default()
+        .push_u256(U256::from(0x11u64))
+        .push_number(0u64)
+        .append(MSTORE)
+        .push_number(32u64)
+        .push_number(0u64)
+        .append(RETURN)
+        .build();
+    let db = || db_with(code.clone()).account_code(CALLEE, callee.clone());
+
+    let limits = EvmTxRuntimeLimits::from_spec(MegaSpecId::REX7);
+    let plain = transact(MegaSpecId::REX7, db(), limits);
+    let mut inspector = ForgeCallOutput::default();
+    let cheated = transact_inspected(MegaSpecId::REX7, db(), limits, &mut inspector);
+
+    assert_eq!(inspector.fired, 1, "the fixture must reach `call_end` for the callee once");
+    assert_eq!(
+        plain.storage_value(CONTRACT, U256::from(RESULT_SLOT)),
+        U256::from(0x11u64),
+        "without the rewrite the caller reads what the callee returned",
+    );
+    assert_eq!(
+        cheated.storage_value(CONTRACT, U256::from(RESULT_SLOT)),
+        U256::from(FORGED_OUTPUT),
+        "with it, the caller reads a word no frame produced",
+    );
+    assert!(
+        !cheated.inspector_ledger.is_zero(),
+        "a transaction whose state a replaced output buffer changed must not read as untouched: \
+         {:?}",
+        cheated.inspector_ledger,
+    );
+}
+
 /// Reports a different address than the one the creation deployed to.
 #[derive(Default)]
 struct MoveDeploymentAddress {
