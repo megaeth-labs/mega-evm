@@ -6,7 +6,7 @@
 use std::{cell::Cell, convert::Infallible};
 
 use alloy_consensus::{Signed, TxLegacy};
-use alloy_evm::{block::BlockExecutor, EvmEnv};
+use alloy_evm::{block::BlockExecutor, EvmEnv, IntoTxEnv};
 use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
 use alloy_primitives::{address, Address, Bytes, Signature, TxKind, B256, U256};
 use mega_evm::{
@@ -116,12 +116,13 @@ fn test_inspector_works_with_block_executor() {
     let block_ctx =
         MegaBlockExecutionCtx::new(B256::ZERO, None, Bytes::new(), BlockLimits::no_limits());
 
-    // Create inspector
+    // Create inspector. `GasInspector` only records, and its type says so — which is what the
+    // canonical block path admits an inspected transaction on.
     let inspector = GasInspector::new();
 
     // Create block executor with inspector
     let mut executor = block_executor_factory
-        .create_executor_with_inspector(&mut state, block_ctx, evm_env, inspector);
+        .create_executor_with_trusted_inspector(&mut state, block_ctx, evm_env, inspector);
 
     // Execute transaction
     let tx = create_transaction(0, 1_000_000);
@@ -286,16 +287,19 @@ fn test_inspector_early_return_with_additional_limits() {
     // Execute transaction - this triggers a nested CALL that the inspector intercepts
     let tx = create_transaction(0, 1_000_000);
 
-    // Before the fix, this would panic with "frame stack is empty". It runs to completion now,
-    // and the canonical path then declines to admit it — an inspector that answers a frame itself
-    // is a rewriting inspector, which `inspector_guard` covers. That refusal is the assertion the
-    // alignment rests on: reaching it at all means every push found its pop.
-    let err = executor
-        .execute_transaction(&tx)
-        .expect_err("the canonical path refuses an intercepting inspector");
-    assert!(
-        format!("{err:?}").contains("interventions: 1"),
-        "the refusal must name the interception it saw: {err:?}",
+    // Driven through the executor's EVM rather than through the executor: an inspector that
+    // answers a frame itself is a rewriting inspector, and the canonical path admits an inspected
+    // transaction only on a read-only declaration, which this type cannot be given. The EVM
+    // supports the interception in full, which is what this test is about — before the fix it
+    // panicked with "frame stack is empty", so completing at all means every push found its pop.
+    let outcome = executor
+        .evm_mut()
+        .execute_transaction(tx.into_tx_env())
+        .expect("the EVM supports the interception in full");
+    assert_eq!(
+        outcome.inspector_ledger.interventions, 1,
+        "the interception must be measured: {:?}",
+        outcome.inspector_ledger,
     );
 
     // Verify the inspector intercepted the nested call
@@ -398,15 +402,17 @@ fn test_inspector_early_return_create_with_additional_limits() {
     let init_code = Bytes::from(vec![0x00]);
     let tx = create_deploy_transaction(0, 10_000_000, init_code);
 
-    // Before the fix, this would panic with "frame stack is empty". As above, the transaction now
-    // runs to completion and the canonical path declines to admit it; getting as far as the
-    // refusal is what says the frame stacks stayed aligned.
-    let err = executor
-        .execute_transaction(&tx)
-        .expect_err("the canonical path refuses an intercepting inspector");
-    assert!(
-        format!("{err:?}").contains("interventions: 1"),
-        "the refusal must name the interception it saw: {err:?}",
+    // Driven through the EVM for the same reason as above: an intercepting inspector has no place
+    // on the canonical block path, and getting as far as a completed outcome is what says the
+    // frame stacks stayed aligned.
+    let outcome = executor
+        .evm_mut()
+        .execute_transaction(tx.into_tx_env())
+        .expect("the EVM supports the interception in full");
+    assert_eq!(
+        outcome.inspector_ledger.interventions, 1,
+        "the interception must be measured: {:?}",
+        outcome.inspector_ledger,
     );
 
     // Verify the inspector intercepted the create operation

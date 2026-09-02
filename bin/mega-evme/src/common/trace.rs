@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use alloy_primitives::Bytes;
+use alloy_primitives::{Address, Bytes, Log, U256};
 use alloy_rpc_types_trace::geth::{
     CallConfig, CallFrame, GethDefaultTracingOptions, PreStateConfig,
 };
@@ -14,15 +14,102 @@ use mega_evm::{
             ContextTr,
         },
         database::DatabaseRef,
+        handler::FrameResult,
+        interpreter::{
+            CallInputs, CallOutcome, CreateInputs, CreateOutcome, FrameInput, Interpreter,
+            InterpreterTypes,
+        },
         state::EvmState,
-        ExecuteEvm, InspectEvm,
+        ExecuteEvm, InspectEvm, Inspector,
     },
-    MegaContext, MegaEvm, MegaHaltReason, MegaTransaction,
+    MegaContext, MegaEvm, MegaHaltReason, MegaTransaction, TrustedObserver,
 };
 use revm_inspectors::tracing::{TracingInspector, TracingInspectorConfig};
 use tracing::{debug, info, trace};
 
 use super::{EvmeError, EvmeExternalEnvs, EvmeState};
+
+/// A read-only declaration around `revm-inspectors`' tracer, for the block-execution path.
+///
+/// `MegaBlockExecutor` refuses a transaction from an EVM running an inspector whose type carries
+/// no [`TrustedObserver`] declaration, because its measurement shim cannot see an edit made to the
+/// interpreter's stack contents or straight into the journal, and block production and block
+/// validation have to agree on every node. [`TracingInspector`] writes nothing back to the EVM,
+/// but the declaration cannot be made about it here: both it and the trait are foreign to this
+/// crate, so it is made about a local newtype that forwards every callback unchanged. That is the
+/// same shape a node keeping tracing on block production has to write.
+#[derive(Debug)]
+pub struct TrustedTracingInspector(pub TracingInspector);
+
+impl TrustedObserver for TrustedTracingInspector {}
+
+impl<CTX, INTR> Inspector<CTX, INTR> for TrustedTracingInspector
+where
+    INTR: InterpreterTypes,
+    TracingInspector: Inspector<CTX, INTR>,
+{
+    fn initialize_interp(&mut self, interp: &mut Interpreter<INTR>, context: &mut CTX) {
+        self.0.initialize_interp(interp, context);
+    }
+
+    fn step(&mut self, interp: &mut Interpreter<INTR>, context: &mut CTX) {
+        self.0.step(interp, context);
+    }
+
+    fn step_end(&mut self, interp: &mut Interpreter<INTR>, context: &mut CTX) {
+        self.0.step_end(interp, context);
+    }
+
+    fn log(&mut self, context: &mut CTX, log: Log) {
+        self.0.log(context, log);
+    }
+
+    fn log_full(&mut self, interp: &mut Interpreter<INTR>, context: &mut CTX, log: Log) {
+        self.0.log_full(interp, context, log);
+    }
+
+    fn frame_start(
+        &mut self,
+        context: &mut CTX,
+        frame_input: &mut FrameInput,
+    ) -> Option<FrameResult> {
+        self.0.frame_start(context, frame_input)
+    }
+
+    fn frame_end(
+        &mut self,
+        context: &mut CTX,
+        frame_input: &FrameInput,
+        frame_result: &mut FrameResult,
+    ) {
+        self.0.frame_end(context, frame_input, frame_result);
+    }
+
+    fn call(&mut self, context: &mut CTX, inputs: &mut CallInputs) -> Option<CallOutcome> {
+        self.0.call(context, inputs)
+    }
+
+    fn call_end(&mut self, context: &mut CTX, inputs: &CallInputs, outcome: &mut CallOutcome) {
+        self.0.call_end(context, inputs, outcome);
+    }
+
+    fn create(&mut self, context: &mut CTX, inputs: &mut CreateInputs) -> Option<CreateOutcome> {
+        self.0.create(context, inputs)
+    }
+
+    fn create_end(
+        &mut self,
+        context: &mut CTX,
+        inputs: &CreateInputs,
+        outcome: &mut CreateOutcome,
+    ) {
+        self.0.create_end(context, inputs, outcome);
+    }
+
+    fn selfdestruct(&mut self, contract: Address, target: Address, value: U256) {
+        self.0.selfdestruct(contract, target, value);
+    }
+}
 
 /// Tracer type for execution analysis
 #[derive(Debug, Clone, Copy, ValueEnum, Default)]
@@ -101,6 +188,12 @@ impl TraceArgs {
     pub fn create_inspector(&self) -> TracingInspector {
         let config = TracingInspectorConfig::all();
         TracingInspector::new(config)
+    }
+
+    /// The same tracer, wrapped in the declaration the canonical block-execution path admits an
+    /// inspected transaction on.
+    pub fn create_trusted_inspector(&self) -> TrustedTracingInspector {
+        TrustedTracingInspector(self.create_inspector())
     }
 
     /// Creates [`GethDefaultTracingOptions`] from CLI arguments

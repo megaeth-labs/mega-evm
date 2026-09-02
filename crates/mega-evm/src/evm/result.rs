@@ -113,7 +113,9 @@ pub struct MegaTransactionOutcome {
     /// is measured is what the shim can see at a callback boundary: gas that moved, and arguments
     /// that came back changed. An inspector that reaches past those — editing the interpreter's
     /// stack or memory, writing the journal directly, or editing the pending action — leaves this
-    /// empty while changing the state the transaction produces.
+    /// empty while changing the state the transaction produces. That is why block admission rests
+    /// on [`undeclared_inspector`](Self::undeclared_inspector) and this field is only the backstop
+    /// behind it.
     ///
     /// # What it is for
     ///
@@ -125,6 +127,22 @@ pub struct MegaTransactionOutcome {
     /// of the conservation law — see [`ConservationTerms`](crate::ConservationTerms) — which is
     /// why an outcome carrying gas numbers is not fully described without it.
     pub inspector_ledger: crate::InspectorLedger,
+
+    /// Whether an inspector whose type carries no
+    /// [`TrustedObserver`](crate::TrustedObserver) declaration took part in this transaction.
+    ///
+    /// This is the canonical block path's admission criterion, and it is deliberately *not*
+    /// [`inspector_ledger`](Self::inspector_ledger). The ledger reports what the measurement shim
+    /// could see; an inspector that reaches past a callback boundary — editing the interpreter's
+    /// stack or memory contents, or writing the journal directly — changes the transaction while
+    /// leaving every lane at zero. So an execution is admitted into a block on the strength of a
+    /// declaration made in source about the inspector's type, and refused without one.
+    ///
+    /// False for a transaction that ran with no inspector at all, and for one whose inspector was
+    /// built through [`MegaEvm::with_trusted_inspector`](crate::MegaEvm::with_trusted_inspector).
+    /// True for every other inspected run, including one whose inspector only observes: the
+    /// question is what the type's author declared, not what this particular run happened to do.
+    pub undeclared_inspector: bool,
 }
 
 /// Identifies which stage of block execution produced a state change.

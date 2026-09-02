@@ -100,7 +100,61 @@ where
         MegaBlockExecutor::new(evm, block_ctx, self.hardforks.clone(), self.receipt_builder.clone())
     }
 
-    /// Create a new block executor with an inspector.
+    /// Create a new block executor with a read-only inspector its type's author has declared
+    /// [`TrustedObserver`](crate::TrustedObserver).
+    ///
+    /// The declaration is what the canonical block-execution path admits an inspected transaction
+    /// on, so this is the entry a node tracing block production or validation takes.
+    /// [`create_executor_with_inspector`](Self::create_executor_with_inspector) builds an executor
+    /// that refuses every transaction it is given.
+    ///
+    /// A `revm-inspectors` tracer cannot be declared where both it and the trait are foreign, so a
+    /// node writes a forwarding newtype of its own and declares that; `bin/mega-evme`'s replay
+    /// command is the shape to copy.
+    ///
+    /// # Parameters
+    ///
+    /// - `db`: The database to use for EVM state.
+    /// - `evm_env`: The EVM environment, including block and config environments.
+    /// - `block_ctx`: The block execution context for tracking access patterns.
+    /// - `inspector`: The declared read-only inspector to observe execution with.
+    pub fn create_executor_with_trusted_inspector<'a, DB, I>(
+        &self,
+        db: &'a mut State<DB>,
+        block_ctx: MegaBlockExecutionCtx,
+        evm_env: EvmEnv<MegaSpecId>,
+        inspector: I,
+    ) -> MegaBlockExecutor<
+        Hardforks,
+        MegaEvm<&'a mut State<DB>, I, ExtEnvFactory::EnvTypes>,
+        ReceiptBuilder,
+    >
+    where
+        DB: Database + 'a,
+        I: Inspector<crate::MegaContext<&'a mut State<DB>, ExtEnvFactory::EnvTypes>>
+            + crate::TrustedObserver
+            + 'a,
+    {
+        let runtime_limits = block_ctx.block_limits.to_evm_tx_runtime_limits();
+        let evm = self
+            .evm_factory
+            .create_evm(db, evm_env)
+            .with_trusted_inspector(inspector)
+            .with_tx_runtime_limits(runtime_limits);
+        MegaBlockExecutor::new(evm, block_ctx, self.hardforks.clone(), self.receipt_builder.clone())
+    }
+
+    /// Create a new block executor with an inspector that carries no read-only declaration.
+    ///
+    /// The executor this builds refuses every transaction it is asked to run or admit, with
+    /// [`MegaBlockExecutionError::UndeclaredInspector`](
+    /// crate::MegaBlockExecutionError::UndeclaredInspector) — the canonical path admits an
+    /// inspected transaction only on a [`TrustedObserver`](crate::TrustedObserver) declaration,
+    /// which this entry's bound does not ask for. It stays because the EVM underneath it is
+    /// reachable through [`MegaBlockExecutor::evm_mut`], which an embedder can drive itself.
+    ///
+    /// A tracer belongs on
+    /// [`create_executor_with_trusted_inspector`](Self::create_executor_with_trusted_inspector).
     ///
     /// # Parameters
     ///
@@ -177,16 +231,10 @@ where
         DB: StateDB,
         I: Inspector<<Self::EvmFactory as alloy_evm::EvmFactory>::Context<DB>>,
     {
-        // The canonical block path measures every inspector it runs, because the guard that
-        // refuses an inspector-adjusted transaction reads a ledger the measurement fills. A
-        // declared observer is delegated to unmeasured in release builds, so its ledger is empty
-        // by construction and the guard would be reading nothing. The two factory methods cannot
-        // build one; this entry point takes an EVM the caller built, so it says so here.
-        debug_assert!(
-            !evm.has_trusted_inspector(),
-            "a declared TrustedObserver must not be handed to the canonical block path: the \
-             inspector guard reads a ledger that is empty by construction for one",
-        );
+        // Nothing is checked about the inspector here. This entry takes an EVM the caller built,
+        // so its inspector may or may not carry a declaration, and the answer is a runtime one
+        // the executor's own entries ask per transaction — as an error that fails the block, not
+        // an assertion that stops the process. See `MegaBlockExecutionError::UndeclaredInspector`.
 
         // Synchronize EVM tx runtime limits with the block context's BlockLimits.
         // This mirrors the inherent factory paths above which apply this

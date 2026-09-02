@@ -270,6 +270,12 @@ impl GasInspector {
     }
 }
 
+/// Read-only: every callback records into this inspector's own trace tree and returns the EVM
+/// exactly what it was handed — `None` from both frame-entry callbacks, and no write to any
+/// interpreter, frame input or outcome it is shown. Declared so that tests exercising the
+/// canonical block-execution path with an inspector can be admitted by it.
+impl crate::TrustedObserver for GasInspector {}
+
 impl<CTX: ContextTr, INTR: InterpreterTypes> Inspector<CTX, INTR> for GasInspector {
     fn call(&mut self, _context: &mut CTX, inputs: &mut CallInputs) -> Option<CallOutcome> {
         // Create a new trace node for this call

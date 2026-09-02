@@ -21,11 +21,12 @@
 //!   inspector at all, on every quantity the differential classifier compares. That is the property
 //!   every tracer in production depends on, and it is checked here against 44,000 transactions
 //!   rather than against a handful of fixtures.
-//! - **Can the guard still see it?** A rewriting run that applied a mutation the shim is contracted
-//!   to book unconditionally must not end with an all-zero ledger. The canonical block path admits
-//!   a transaction whose ledger is zero, so a rewrite that leaves it zero is a rewrite that reaches
-//!   a block — see [`ChaosClass::LedgerBlind`] and [`ChaosShape::is_always_booked`] for why the
-//!   gate is stated over a subset of the pool rather than over all of it.
+//! - **Can the ledger still see it?** A rewriting run that applied a mutation the shim is
+//!   contracted to book unconditionally must not end with an all-zero ledger. The ledger is what
+//!   the conservation law reads as its inspector term, what the block executor's backstop refuses a
+//!   result over, and the only thing that tells a consumer an execution was inspector-influenced —
+//!   see [`ChaosClass::LedgerBlind`] and [`ChaosShape::is_always_booked`] for why the gate is
+//!   stated over a subset of the pool rather than over all of it.
 //!
 //! # Why the randomness is not random
 //!
@@ -1304,11 +1305,12 @@ pub enum ChaosClass {
     /// The rewriting run applied a mutation the shim is contracted to book unconditionally — see
     /// [`ChaosShape::is_always_booked`] — and still ended with an all-zero ledger.
     ///
-    /// That is the one thing the ledger exists to prevent: the canonical block path admits a
-    /// transaction whose ledger is zero, so a rewrite that leaves it zero is a rewrite that
-    /// reaches a block. Unlike every other verdict here it is not about the transaction's numbers
-    /// being wrong — they may be exactly what a rewriting inspector should produce — but about the
-    /// guard being unable to tell that anything happened.
+    /// The ledger is the inspector term of the conservation law, the backstop the block executor
+    /// refuses a result over, and the only thing that tells a consumer an execution was
+    /// inspector-influenced. A rewrite that leaves it zero is invisible to all three. Unlike every
+    /// other verdict here it is not about the transaction's numbers being wrong — they may be
+    /// exactly what a rewriting inspector should produce — but about nothing being able to tell
+    /// that anything happened.
     LedgerBlind,
     /// Neither run executed the transaction, and the runner declined it identically.
     Skipped,

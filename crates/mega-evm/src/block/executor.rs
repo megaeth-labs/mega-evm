@@ -78,21 +78,48 @@ impl<C, E, R: OpReceiptBuilder> core::fmt::Debug for MegaBlockExecutor<C, E, R> 
     }
 }
 
-/// Refuses a transaction an inspector took part in, on the canonical path.
+/// Refuses a transaction whose inspector was never declared read-only, on the canonical path.
 ///
 /// Block production and block validation are the two places where what the executor reports has to
-/// be what the EVM did, reproducibly, on every node. An inspector's edits reach the receipt, the
-/// block's counters and the transaction's state, but live in one node's configuration, so a
-/// transaction carrying any is not something this executor may run or admit — see
-/// [`MegaBlockExecutionError::InspectorAdjustedAccounting`].
+/// be what the EVM did, reproducibly, on every node. An inspector lives in one node's
+/// configuration and its edits reach the receipt, the block's counters and the transaction's
+/// state, so the canonical path runs one only on the strength of a
+/// [`TrustedObserver`](crate::TrustedObserver) declaration — see
+/// [`MegaBlockExecutionError::UndeclaredInspector`].
 ///
-/// The criterion is the whole ledger, not its gas lanes. A rewrite of a frame's classification or
-/// output, or a frame the inspector answered itself, moves no gas anywhere and would pass a
-/// gas-only check while producing different state and a different receipt.
+/// The criterion is the declaration and not the measurement, because the measurement cannot answer
+/// the question. The shim compares what it is handed across a callback boundary; an inspector that
+/// edits the interpreter's stack or memory contents, or writes the journal directly, changes the
+/// transaction and leaves every lane at zero. A declaration is what someone asserts in source about
+/// a concrete type, which is the only thing that reaches inside a callback.
 ///
 /// Enforced in release builds, deliberately. This is a boundary the canonical path holds against
 /// its embedder rather than an invariant `MegaETH` maintains internally, so it has to hold in the
 /// binaries that build and validate blocks, and it fails the block rather than the process.
+#[inline]
+fn reject_undeclared_inspector(
+    tx_hash: B256,
+    undeclared_inspector: bool,
+) -> Result<(), BlockExecutionError> {
+    if undeclared_inspector {
+        return Err(BlockExecutionError::other(
+            crate::MegaBlockExecutionError::UndeclaredInspector { tx_hash },
+        ));
+    }
+    Ok(())
+}
+
+/// Refuses a result whose gas accounting an inspector is measured to have moved.
+///
+/// The backstop behind [`reject_undeclared_inspector`], for what a declaration does not cover: a
+/// declared type that did not keep its promise, and a result that reaches the commit funnel from
+/// somewhere this executor cannot see — another executor instance, an embedder driving
+/// [`crate::MegaEvm::execute_transaction`] itself, or a value built by hand. The result's own
+/// ledger is the only thing at that funnel that knows anything about how it was produced.
+///
+/// The criterion is the whole ledger, not its gas lanes. A rewrite of a frame's classification or
+/// output, or a frame the inspector answered itself, moves no gas anywhere and would pass a
+/// gas-only check while producing different state and a different receipt.
 ///
 /// The check is free on every path that passes it: the ledger is a `Copy` struct already on the
 /// outcome, and this reads its fields once per transaction.
@@ -106,7 +133,7 @@ fn reject_inspector_adjusted_accounting(
     }
     Err(BlockExecutionError::other(crate::MegaBlockExecutionError::InspectorAdjustedAccounting {
         tx_hash,
-        ledger,
+        ledger: std::boxed::Box::new(ledger),
     }))
 }
 
@@ -505,11 +532,15 @@ where
     ///
     /// # Contract
     ///
-    /// A transaction whose gas accounting an inspector adjusted is refused with
+    /// An EVM running an inspector whose type carries no
+    /// [`TrustedObserver`](crate::TrustedObserver) declaration refuses the transaction with
+    /// [`MegaBlockExecutionError::UndeclaredInspector`](
+    /// crate::MegaBlockExecutionError::UndeclaredInspector) before executing it, and a result
+    /// whose gas accounting an inspector is measured to have moved is refused with
     /// [`MegaBlockExecutionError::InspectorAdjustedAccounting`](
-    /// crate::MegaBlockExecutionError::InspectorAdjustedAccounting) rather than returned. An
-    /// observation-only inspector — which is every tracer — is unaffected; an embedder that wants
-    /// a rewriting one drives [`crate::MegaEvm::execute_transaction`] directly.
+    /// crate::MegaBlockExecutionError::InspectorAdjustedAccounting) after. A declared tracer is
+    /// unaffected; an embedder that wants a rewriting inspector drives
+    /// [`crate::MegaEvm::execute_transaction`] directly.
     pub fn run_transaction_with_sizes<Tx>(
         &mut self,
         tx: Tx,
@@ -519,6 +550,11 @@ where
     where
         Tx: IntoTxEnv<MegaTransaction> + RecoveredTx<R::Transaction> + Copy,
     {
+        // Before anything else, including execution: an undeclared inspector does not run on this
+        // path at all. Refusing after the fact would leave its callbacks a window in which to
+        // reach the executor's own state cache through `db_mut()`.
+        reject_undeclared_inspector(tx.tx().tx_hash(), self.evm.has_undeclared_inspector())?;
+
         let is_deposit = tx.tx().ty() == DEPOSIT_TRANSACTION_TYPE;
 
         // Check transaction-level and block-level limits before transaction execution
@@ -568,6 +604,10 @@ where
     where
         Rec: RecoveredTx<R::Transaction>,
     {
+        // Same order as `run_transaction_with_sizes`: the inspector's declaration is settled
+        // before the transaction runs.
+        reject_undeclared_inspector(recovered.tx().tx_hash(), self.evm.has_undeclared_inspector())?;
+
         let is_deposit = recovered.tx().ty() == DEPOSIT_TRANSACTION_TYPE;
 
         self.block_limiter.pre_execution_check(
@@ -623,8 +663,11 @@ where
     ///
     /// This is also where a result an inspector took part in is refused, ahead of admission and
     /// of any other reading: the producers guard their own outputs, but a result reaching this
-    /// funnel may have been produced by another executor instance or built by hand, and the
-    /// outcome's own ledger is the only thing here that knows. See
+    /// funnel may have been produced by another executor instance, by an embedder driving
+    /// [`crate::MegaEvm::execute_transaction`] itself, or built by hand. What the outcome carries
+    /// is the only thing here that knows how it was produced — the inspector's declaration, and
+    /// then the ledger. See [`MegaBlockExecutionError::UndeclaredInspector`](
+    /// crate::MegaBlockExecutionError::UndeclaredInspector) and
     /// [`MegaBlockExecutionError::InspectorAdjustedAccounting`](
     /// crate::MegaBlockExecutionError::InspectorAdjustedAccounting).
     pub fn commit_tx_result(
@@ -655,11 +698,15 @@ where
                     compute_gas_enforced,
                     state_growth_used,
                     inspector_ledger,
+                    undeclared_inspector,
                 },
         } = result;
 
         // Before anything else, including admission: a result an inspector took part in is not
-        // one this block may contain at all, whether or not it would still fit.
+        // one this block may contain at all, whether or not it would still fit. The declaration
+        // is asked first, because it is the admission rule and the ledger is the backstop behind
+        // it — an undeclared inspector is refused whether or not anything it did was measurable.
+        reject_undeclared_inspector(tx_hash, undeclared_inspector)?;
         reject_inspector_adjusted_accounting(tx_hash, inspector_ledger)?;
 
         // Re-validate limits at commit time to handle parallel execution race conditions.

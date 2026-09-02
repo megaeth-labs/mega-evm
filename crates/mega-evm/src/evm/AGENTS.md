@@ -107,7 +107,7 @@ Booking is a *reported* quantity throughout. No resource limit is ever compared 
 
 Measuring costs about a nanosecond per reading per opcode, and there are sixteen readings taken twice per opcode, which adds between a third and two thirds to a production tracer's run.
 An inspector type whose author has implemented `TrustedObserver` for it is delegated to without any of that: `MeasuredInspector::new_trusted`, reached through `MegaEvm::with_trusted_inspector`, builds a shim that forwards every callback and takes no reading.
-The block guard is unchanged and needs no change — a declared type's ledger is empty by construction, which is the same answer measuring it would have given.
+The declaration is also what the canonical block path admits an inspected transaction on, so the fast path and the block path are reached by the same statement about the type.
 
 **What the declaration promises.** Every callback of the type leaves the EVM exactly as it found it: nothing written to an interpreter's gas counter or its pending action, nothing to a frame's inputs, nothing to a frame result's classification, gas, output or metadata, nothing to a refund, and no frame answered with a synthetic outcome.
 It may read whatever it likes and write to its own state.
@@ -141,11 +141,9 @@ Anything supplied by a request — a JavaScript tracer, an RPC-selected tracer c
 
 **How a node reaches it.** `EvmFactory::create_evm_with_inspector` cannot: its bound is `I: Inspector` and its return type is fixed, so it has no way to select the constructor.
 The route is `factory.create_evm(db, env).with_trusted_inspector(tracer)`, which keeps the factory's own dynamic precompiles and differs from the two-step untrusted form only in the method name.
-The same limitation is most of a fence, and it is worth being exact about where it stops.
-`MegaBlockExecutorFactory`'s own two factory methods cannot produce a declared EVM, so nothing a node reaches *through them* arrives on the canonical block path unmeasured.
-But `create_executor` takes an EVM the caller already built, so `factory.create_evm(db, env).with_trusted_inspector(tracer)` handed to it does reach that path — the fence is a convention the node keeps, not something the types enforce.
-`create_executor` therefore carries a `debug_assert!` on `MegaEvm::has_trusted_inspector`, which is what turns the convention into something a test build checks.
-What a declaration is *for* is an EVM an embedder drives itself, which is what RPC tracing and off-band simulation are.
+`MegaBlockExecutorFactory::create_executor_with_trusted_inspector` is that route packaged for the block path, and it is the entry a node tracing block production or validation takes; `create_executor_with_inspector` builds an executor that refuses every transaction it is given, and stays only because the EVM under it is reachable through `evm_mut()`.
+`create_executor` (the `BlockExecutorFactory` trait method) takes an EVM the caller already built and checks nothing about its inspector, because the question is a runtime one the executor's own entries ask per transaction — an error that fails the block rather than an assertion that stops the process.
+`bin/mega-evme`'s replay command is the worked example of the whole shape: a `TrustedTracingInspector` newtype declared over `revm-inspectors`' tracer, handed to `create_executor_with_trusted_inspector`.
 
 ### The window a counter edit reaches nothing through
 
@@ -228,8 +226,9 @@ A *callback* upstream adds to the `Inspector` trait does neither — the trait g
 - **Book a lane through `Lane::book`, never by writing its net.**
   The gross half is what `is_zero` reads, so a booking that moves only the net is a rewrite the guard admits — and one that cancels against a later booking is exactly the shape that is invisible from the net alone.
 - **Keep every rewrite out of a block.**
-  Supporting a rewrite is not the same as admitting one: the canonical block-execution path refuses a transaction whose ledger is non-zero, in release builds as well as debug, because an inspector is one node's configuration and its edits reach the receipt.
-  That is why a rewrite which moves no gas still has to be booked — on `InspectorLedger::interventions` — or the guard admits it.
+  Supporting a rewrite is not the same as admitting one: the canonical block-execution path refuses a transaction from an EVM running an inspector its type never declared `TrustedObserver`, before running it, in release builds as well as debug — because an inspector is one node's configuration and its edits reach the receipt.
+  The criterion is the declaration rather than the ledger because the ledger cannot answer the question: an inspector that edits the interpreter's stack or memory contents, or writes the journal directly, changes the transaction and leaves every lane at zero.
+  The ledger stays as the backstop behind it, read at the same entries, for a declaration that did not hold and for a result reaching the commit funnel from a producer this executor never saw — which is why a rewrite that moves no gas still has to be booked, on `InspectorLedger::interventions`.
   An EVM an embedder drives itself is deliberately not covered: it produces no block, so there is nothing for two nodes to disagree about.
   See `tests/block_executor/inspector_guard.rs`.
 

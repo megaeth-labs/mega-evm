@@ -1,3 +1,7 @@
+#[cfg(not(feature = "std"))]
+use alloc as std;
+use std::boxed::Box;
+
 use alloy_evm::{block::TxResult, InvalidTxError};
 use alloy_primitives::TxHash;
 use revm::{
@@ -258,6 +262,39 @@ impl InvalidTxError for MegaBlockLimitExceededError {
 /// transaction itself for a caller to fix.
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum MegaBlockExecutionError {
+    /// A transaction reached the canonical block-execution path from an EVM running an inspector
+    /// whose type carries no [`TrustedObserver`](crate::TrustedObserver) declaration.
+    ///
+    /// This is the admission rule, and it is a rule about the *configuration* rather than about
+    /// what one run was observed to do. The measurement shim books what an inspector writes across
+    /// a callback boundary, but an inspector can reach past that boundary — editing the contents
+    /// of the interpreter's stack or memory, or writing the journal directly — and change what the
+    /// transaction produces while leaving every lane of
+    /// [`InspectorLedger`](crate::InspectorLedger) at zero. An empty ledger therefore cannot be
+    /// what a block is admitted on.
+    ///
+    /// What can is a declaration: a line written in source, about one concrete type, by someone
+    /// who had read it. So the canonical path takes an EVM running no inspector, or one whose
+    /// inspector was built through
+    /// [`MegaEvm::with_trusted_inspector`](crate::MegaEvm::with_trusted_inspector), and refuses
+    /// everything else — including an inspector that only observes, because the criterion is what
+    /// the type's author declared and not what this run happened to do.
+    ///
+    /// A tracer keeps working by being declared. `revm-inspectors`' tracers are foreign types and
+    /// the trait is local to this crate, so a node writes a forwarding newtype of its own and
+    /// declares that; `bin/mega-evme`'s replay command does exactly this. An embedder that wants a
+    /// rewriting inspector still has one — [`MegaEvm::execute_transaction`](
+    /// crate::MegaEvm::execute_transaction) supports it in full — it just does not get to call the
+    /// result a block.
+    #[error(
+        "transaction {tx_hash} reached the canonical block-execution path from an EVM running an \
+         inspector whose type carries no `TrustedObserver` declaration"
+    )]
+    UndeclaredInspector {
+        /// The transaction that was refused.
+        tx_hash: TxHash,
+    },
+
     /// A transaction an inspector took part in reached the canonical block-execution path.
     ///
     /// Block production and block validation must produce the same numbers for the same block, on
@@ -275,13 +312,20 @@ pub enum MegaBlockExecutionError {
     /// Both are refused. The second is why the criterion is the whole ledger rather than its gas
     /// lanes: a rewrite that costs nothing is not a rewrite that changes nothing.
     ///
-    /// Observation is untouched: a tracer leaves an all-zero ledger, which is what every inspector
-    /// on this path today does. An embedder that genuinely wants a rewriting inspector still has
-    /// one — [`MegaEvm::execute_transaction`](crate::MegaEvm::execute_transaction) supports it in
-    /// full, with the ledger reported on the outcome — it just does not get to call the result a
-    /// block. That is also what leaves a simulation EVM an embedder drives off the canonical path
-    /// alone, however much its inspector rewrites: this guard sits on the block executor's
-    /// entries, not on the EVM.
+    /// This is the backstop behind [`UndeclaredInspector`](Self::UndeclaredInspector), not the
+    /// admission rule. An undeclared inspector is refused before it runs, so what is left for this
+    /// to catch is a declaration that did not hold — which debug builds measure and assert — and a
+    /// result that arrives at the commit funnel already carrying a non-zero ledger, produced by
+    /// another executor instance, by an embedder driving the EVM itself, or built by hand. The
+    /// commit funnel cannot see the EVM that produced such a result; the result's own ledger is
+    /// the only thing there that knows anything.
+    ///
+    /// An embedder that genuinely wants a rewriting inspector still has one —
+    /// [`MegaEvm::execute_transaction`](crate::MegaEvm::execute_transaction) supports it in full,
+    /// with the ledger reported on the outcome — it just does not get to call the result a block.
+    /// That is also what leaves a simulation EVM an embedder drives off the canonical path alone,
+    /// however much its inspector rewrites: this guard sits on the block executor's entries, not
+    /// on the EVM.
     #[error(
         "transaction {tx_hash} reached the canonical block-execution path after an inspector took \
          part in it: {ledger:?}"
@@ -290,7 +334,12 @@ pub enum MegaBlockExecutionError {
         /// The transaction the adjusted accounting belongs to.
         tx_hash: TxHash,
         /// What the measurement shim booked for that transaction.
-        ledger: crate::InspectorLedger,
+        ///
+        /// Boxed: the ledger is six signed lanes and two counters, which is most of this enum's
+        /// size, and every value of this type is boxed again into
+        /// [`BlockExecutionError::Internal`](alloy_evm::block::BlockExecutionError::Internal) the
+        /// moment it is built.
+        ledger: Box<crate::InspectorLedger>,
     },
 }
 
@@ -333,6 +382,7 @@ mod tests {
             compute_gas_enforced: 2,
             state_growth_used: 4,
             inspector_ledger: crate::InspectorLedger::default(),
+            undeclared_inspector: false,
         };
 
         // One hop: MegaTransactionOutcome -> ResultAndState.

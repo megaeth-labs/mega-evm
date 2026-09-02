@@ -209,6 +209,12 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
     /// # Returns
     ///
     /// A new `Evm` instance with the specified inspector enabled.
+    ///
+    /// The inspector is measured, and the resulting EVM is one the canonical block-execution path
+    /// will not admit a transaction from: admission is on the strength of a
+    /// [`TrustedObserver`] declaration, which this constructor does not ask for. An inspector
+    /// whose type carries one reaches a block through
+    /// [`with_trusted_inspector`](Self::with_trusted_inspector) instead.
     pub fn with_inspector<I>(self, inspector: I) -> MegaEvm<DB, I, ExtEnvs> {
         let mega_cfg = self.mega_cfg;
         let inner = revm::context::Evm::new_with_inspector(
@@ -234,7 +240,13 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
     /// [`EvmFactory::create_evm_with_inspector`](alloy_evm::EvmFactory::create_evm_with_inspector)
     /// cannot reach this — its bound is `I: Inspector` and its return type is fixed — so a node
     /// that builds through the factory takes `create_evm(..).with_trusted_inspector(..)`, which
-    /// keeps the factory's dynamic precompiles.
+    /// keeps the factory's dynamic precompiles. The block executor factory has its own entry,
+    /// [`MegaBlockExecutorFactory::create_executor_with_trusted_inspector`](
+    /// crate::MegaBlockExecutorFactory::create_executor_with_trusted_inspector).
+    ///
+    /// The declaration is also what the canonical block-execution path admits an inspected
+    /// transaction on, so this is the constructor a node tracing block production or validation
+    /// has to reach.
     pub fn with_trusted_inspector<I: TrustedObserver>(
         self,
         inspector: I,
@@ -430,6 +442,7 @@ where
             ExecuteEvm::transact(self, tx)?
         };
         let trusted_inspector = self.inner.inspector.is_trusted();
+        let undeclared_inspector = self.has_undeclared_inspector();
         let is_inside_sandbox = self.ctx().is_inside_sandbox();
         let spec = self.ctx().spec;
         let additional_limit = self.ctx().additional_limit.borrow();
@@ -444,6 +457,7 @@ where
             compute_gas_enforced: additional_limit.enforced_compute_gas(),
             state_growth_used: state_growth,
             inspector_ledger: additional_limit.inspector_ledger(),
+            undeclared_inspector,
         };
         debug_assert_envelope_accounted(spec, is_inside_sandbox, &additional_limit, &outcome);
         debug_assert_trusted_observer_kept_its_promise(trusted_inspector, &outcome);
@@ -453,11 +467,30 @@ where
     /// Whether this EVM's inspector was built from a [`TrustedObserver`](crate::TrustedObserver)
     /// declaration, and so is delegated to unmeasured in release builds.
     ///
-    /// Read by a caller that must not be handed one. The block executor factory is the case that
-    /// matters: it takes an EVM its caller built, so nothing in its own signature keeps a declared
-    /// observer off the canonical block path.
+    /// A declaration is what the canonical block-execution path admits an inspected transaction
+    /// on, so this is the positive half of the question that path asks; the question itself is
+    /// [`has_undeclared_inspector`](Self::has_undeclared_inspector), which also accounts for an
+    /// EVM running no inspector at all.
     pub const fn has_trusted_inspector(&self) -> bool {
         self.inner.inspector.is_trusted()
+    }
+
+    /// Whether this EVM runs an inspector whose type carries no
+    /// [`TrustedObserver`](crate::TrustedObserver) declaration.
+    ///
+    /// The canonical block-execution path refuses such a transaction outright, because what it
+    /// reports has to be what the EVM did on every node and the measurement shim cannot see an
+    /// edit made behind a callback boundary — the interpreter's stack or memory contents, or a
+    /// direct journal write. A declaration is a line someone wrote in source about a type they had
+    /// read, which is the only thing that answers that.
+    ///
+    /// False for an EVM with no inspector: revm's plain frame loop never calls one, so there is
+    /// nothing to declare. False for one built through
+    /// [`with_trusted_inspector`](Self::with_trusted_inspector). True for every other inspected
+    /// EVM, including one whose inspector only observes — the criterion is the declaration, not
+    /// the behaviour of one run.
+    pub const fn has_undeclared_inspector(&self) -> bool {
+        self.inspect && !self.inner.inspector.is_trusted()
     }
 
     /// Inspect a transaction and return the outcome. The inspector used is the one set up already
@@ -480,6 +513,7 @@ where
     ) -> Result<MegaTransactionOutcome, EVMError<DB::Error, MegaTransactionError>> {
         let result_and_state = InspectEvm::inspect_tx(self, tx)?;
         let trusted_inspector = self.inner.inspector.is_trusted();
+        let undeclared_inspector = self.has_undeclared_inspector();
         let is_inside_sandbox = self.ctx().is_inside_sandbox();
         let spec = self.ctx().spec;
         let additional_limit = self.ctx().additional_limit.borrow();
@@ -494,6 +528,7 @@ where
             compute_gas_enforced: additional_limit.enforced_compute_gas(),
             state_growth_used: state_growth,
             inspector_ledger: additional_limit.inspector_ledger(),
+            undeclared_inspector,
         };
         debug_assert_envelope_accounted(spec, is_inside_sandbox, &additional_limit, &outcome);
         debug_assert_trusted_observer_kept_its_promise(trusted_inspector, &outcome);
