@@ -1,8 +1,13 @@
 //! Benchmarks for the `ExecuteEvm::transact()` interface.
 //!
 //! Each workload runs against two vanilla baselines (`revm_pinned`,
-//! `op_revm_pinned`) and four mega specs (`EQUIVALENCE`, `MINI_REX`, `REX4`,
-//! `REX5`) so a single bench produces a cross-row gap table.
+//! `op_revm_pinned`) and the mega specs (`EQUIVALENCE` … `REX7`) on the plain
+//! `transact` path, so a single bench produces a cross-row gap table.
+//!
+//! Every workload also registers inspected-path rows for REX6 and REX7:
+//! `<spec>/inspect_noop` (measurement shim around a `NoOpInspector`) and
+//! `<spec>/inspect_tracer` (`revm-inspectors` geth default). Those rows call
+//! `InspectEvm::inspect_tx`, which is the path RPC tracers take.
 #![allow(missing_docs)]
 
 use alloy_primitives::{address, bytes, Address, Bytes, U256};
@@ -10,7 +15,7 @@ use criterion::{criterion_group, criterion_main, Criterion};
 use revm::primitives::{keccak256, B256};
 
 mod common;
-use common::{register_all, Account, TxSpec, Workload};
+use common::{register_all, register_inspected, Account, TxSpec, Workload};
 
 const CALLER: Address = address!("0000000000000000000000000000000000100000");
 const CALLEE: Address = address!("0000000000000000000000000000000000100001");
@@ -37,6 +42,7 @@ fn bench_empty_transaction(c: &mut Criterion) {
     // the caller needs no balance), matching the original workload.
     let workload = Workload::single(vec![], TxSpec::call(CALLER, CALLEE));
     register_all(&mut group, &workload);
+    register_inspected(&mut group, &workload);
     group.finish();
 }
 
@@ -51,6 +57,7 @@ fn bench_simple_ether_transfer(c: &mut Criterion) {
         TxSpec::call(CALLER, CALLEE),
     );
     register_all(&mut group, &workload);
+    register_inspected(&mut group, &workload);
     group.finish();
 }
 
@@ -83,6 +90,7 @@ fn bench_weth9_transfer(c: &mut Criterion) {
         TxSpec::call(CALLER, WETH9_ADDRESS).data(calldata),
     );
     register_all(&mut group, &workload);
+    register_inspected(&mut group, &workload);
     group.finish();
 }
 
@@ -128,6 +136,7 @@ fn bench_interpreter_hotloop(c: &mut Criterion) {
         TxSpec::call(CALLER, CALLEE),
     );
     register_all(&mut group, &workload);
+    register_inspected(&mut group, &workload);
     group.finish();
 }
 

@@ -20,7 +20,7 @@ use core::convert::Infallible;
 
 use mega_evm::{MegaSpecId, TestExternalEnvs};
 pub use subject::MegaWithEnv;
-use subject::{Mega, OpRevmPinned, RevmPinned, Subject};
+use subject::{InspectKind, Mega, MegaInspected, OpRevmPinned, RevmPinned, Subject};
 pub use workload::{Account, TxSpec, Workload};
 
 /// Mega specs registered by [`register_all`] and [`register_mega`]. Shared so
@@ -87,6 +87,34 @@ pub fn register_mega(group: &mut Group<'_>, w: &Workload) {
 /// [`register_mega`] with a `/variant` suffix on every row.
 pub fn register_mega_suffixed(group: &mut Group<'_>, variant: &str, w: &Workload) {
     run_subjects(group, variant, w, &mega_subjects(SPEC_IDS));
+}
+
+/// Specs the inspected-path rows cover: frozen control (REX6) and the unstable
+/// target (REX7). The plain rows for these specs already come from
+/// [`register_all`]; [`register_inspected`] only adds the inspect variants.
+const INSPECTED_SPEC_IDS: &[(&str, MegaSpecId)] =
+    &[("rex6", MegaSpecId::REX6), ("rex7", MegaSpecId::REX7)];
+
+/// Register inspected-path rows for REX6 and REX7 on the current group.
+///
+/// Each spec gets two extra rows:
+/// - `<spec>/inspect_noop` — inspect loop + measurement shim around a
+///   [`NoOpInspector`](revm::inspector::NoOpInspector)
+/// - `<spec>/inspect_tracer` — the same loop with `revm-inspectors`' geth default
+///   (`debug_traceTransaction`)
+///
+/// Pair with [`register_all`] (or [`register_mega`]) so the unsuffixed
+/// `<spec>` row remains the plain baseline. Does not re-register that row.
+pub fn register_inspected(group: &mut Group<'_>, w: &Workload) {
+    run_subjects(group, "inspect_noop", w, &inspected_subjects(InspectKind::NoOp));
+    run_subjects(group, "inspect_tracer", w, &inspected_subjects(InspectKind::GethTracer));
+}
+
+fn inspected_subjects(kind: InspectKind) -> Vec<Box<dyn Subject>> {
+    INSPECTED_SPEC_IDS
+        .iter()
+        .map(|&(name, spec)| Box::new(MegaInspected { name, spec, kind }) as Box<dyn Subject>)
+        .collect()
 }
 
 /// Register mega rows for a caller-supplied spec list (e.g. a single spec, or
