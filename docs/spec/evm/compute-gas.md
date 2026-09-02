@@ -500,7 +500,8 @@ At each checkpoint a node MUST:
 2. Record that segment amount as compute gas and evaluate the compute-gas limit (and any latched non-compute resource-limit exceed) at that checkpoint — the latch-surface point is the next checkpoint rather than the next per-opcode recording site.
 3. Record the checkpoint opcode's own body under the measurement-window rules for its metering class, then re-open the settlement window.
 
-Non-opcode recording sites on this page (intrinsic gas, successful or reverting precompiles, code deposit, KeylessDeploy) are unchanged.
+Of the non-opcode recording sites on this page, intrinsic gas, successful or reverting precompiles and KeylessDeploy are unchanged.
+Code deposit is not: Rex7 weighs the amount against the frame-local and transaction-level compute budgets before recording it, and records nothing when it does not fit or when the frame had already failed, as specified under [Contract Creation Code Deposit](#contract-creation-code-deposit).
 A precompile that fails is split under the exceptional-halt carve-out below.
 
 For every transaction that stays within every runtime resource limit, in which no frame ends in an exceptional halt, and in which no `disableVolatileDataAccess` guard rejects an opcode, a node MUST produce the same recorded compute-gas total, the same four-dimension usage, the same receipt `gas_used`, the same execution result, and the same state as under Rex6.
