@@ -756,7 +756,9 @@ mod tests {
             .into_parity_builder()
             .into_localized_transaction_traces(TransactionInfo::default());
 
-        let shape: Vec<(Vec<usize>, &str, Option<Address>, usize, bool)> = traces
+        /// `(trace_address, action kind, target, subtraces, errored)` of one flat entry.
+        type FlatEntry = (Vec<usize>, &'static str, Option<Address>, usize, bool);
+        let shape: Vec<FlatEntry> = traces
             .iter()
             .map(|t| {
                 let (kind, to) = match &t.trace.action {

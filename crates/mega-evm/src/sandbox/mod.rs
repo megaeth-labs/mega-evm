@@ -61,7 +61,6 @@
 //!   [`execute_keyless_deploy_call`]
 //! - `observer` - Read-only [`SandboxObserver`] channel into nested sandbox execution
 //! - `inspector` - Rewriting [`SandboxInspector`] channel into nested sandbox execution
-//! - `hooks` - [`KeylessSandboxHooks`], the trait view of the hook setters for generic hosts
 //! - `trace` - Shared `revm-inspectors` splicing helpers (`inspectors` feature)
 //! - `state` - Type-erased database wrapper ([`SandboxDb`]) for isolated execution
 //! - `state_merge` - Replay-safe merge of sandbox state into the parent journal
@@ -92,9 +91,9 @@
 //! always run with [`crate::EmptyExternalEnv`] (minimum bucket capacity, no oracle
 //! data), and REX4+ sandboxes always share the parent env. Opcode-level hooks on
 //! pre-REX4 are delivered through a second slot typed against
-//! [`crate::EmptyExternalEnv`]. Handles that only implement the parent env type can use
-//! the `_for_parent_env` setters; pre-REX4 then emits only `sandbox_start` /
-//! `sandbox_end`.
+//! [`crate::EmptyExternalEnv`], so a hook implements its trait for both the parent env
+//! type and [`crate::EmptyExternalEnv`]; revm inspectors that are generic over the
+//! context satisfy both through the blanket impls.
 //!
 //! [`SandboxObserver`]: observer::SandboxObserver
 //! [`SandboxInspector`]: inspector::SandboxInspector
@@ -131,7 +130,6 @@
 
 mod error;
 mod execution;
-mod hooks;
 mod inspector;
 mod observer;
 mod state;
@@ -142,7 +140,6 @@ mod tx;
 
 pub use error::*;
 pub use execution::*;
-pub use hooks::*;
 pub use inspector::*;
 pub use observer::*;
 pub use state::*;

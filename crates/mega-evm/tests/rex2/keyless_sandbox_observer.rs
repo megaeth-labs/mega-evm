@@ -9,12 +9,11 @@ use mega_evm::{
     constants,
     revm::context::result::{ExecutionResult, ResultAndState},
     sandbox::{
-        decode_error_result, InspectorSandboxObserver, KeylessDeployError, SandboxCompletionKind,
-        SandboxEndOutcome, SandboxObserver, SandboxRejectKind, SandboxStartInfo,
+        decode_error_result, KeylessDeployError, SandboxCompletionKind, SandboxEndOutcome,
+        SandboxObserver, SandboxRejectKind, SandboxStartInfo,
     },
     test_utils::{ErrorInjectingDatabase, MemoryDatabase},
     EvmTxRuntimeLimits, IKeylessDeploy, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
-    TestExternalEnvs,
 };
 use revm::{
     inspector::NoOpInspector,
@@ -442,34 +441,6 @@ fn test_opcode_events_flow_on_pre_rex4_with_nonempty_parent_env() {
 }
 
 #[test]
-fn test_parent_env_only_observer_skips_pre_rex4_opcode_hooks() {
-    let spec = MegaSpecId::REX2;
-    let (tx_bytes, signer) = create_pre_eip155_deploy_tx(success_constructor());
-    let mut db = funded_db(signer);
-    let recorder = Rc::new(RefCell::new(RecordingObserver::default()));
-    let observer: Rc<RefCell<dyn SandboxObserver<TestExternalEnvs>>> = recorder.clone();
-
-    let mut context =
-        MegaContext::new(&mut db, spec).with_external_envs(crowded_parent_env().into());
-    context.modify_chain(|chain| {
-        chain.operator_fee_scalar = Some(U256::ZERO);
-        chain.operator_fee_constant = Some(U256::ZERO);
-    });
-    context.set_keyless_sandbox_observer_for_parent_env(Some(observer));
-    let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);
-    let tx = keyless_deploy_call_tx(tx_bytes, LARGE_GAS_LIMIT_OVERRIDE);
-    let result = alloy_evm::Evm::transact_raw(&mut evm, tx).expect("keyless deploy transact");
-    let events = recorder.borrow().events.clone();
-
-    assert!(result.result.is_success(), "deploy should succeed: {:?}", result.result);
-    assert_single_start_end_pair(&events);
-    assert!(
-        !events.iter().any(|e| matches!(e, ObservedEvent::Step(_) | ObservedEvent::Create)),
-        "parent-env-only observer must not emit opcode hooks on pre-REX4: {events:?}"
-    );
-}
-
-#[test]
 fn test_observer_parity_success_across_specs() {
     for spec in SPECS {
         parity_pair(spec, success_constructor(), true, None, &format!("success {spec:?}"));
@@ -692,10 +663,10 @@ fn test_event_order_create_wraps_steps() {
 }
 
 #[test]
-fn test_inspector_adapter_records_sandbox_create_for_generic_inspector() {
+fn test_blanket_observer_records_sandbox_create_for_generic_inspector() {
     let tracer = GenericCreateCounter::default();
     let creates = Rc::clone(&tracer.creates);
-    let observer = Rc::new(RefCell::new(InspectorSandboxObserver(tracer)));
+    let observer = Rc::new(RefCell::new(tracer));
 
     let (tx_bytes, signer) = create_pre_eip155_deploy_tx(success_constructor());
     let mut db = funded_db(signer);

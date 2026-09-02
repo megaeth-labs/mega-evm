@@ -26,7 +26,8 @@ MegaEVM execution core that wraps revm/op-revm with MegaETH instruction tables, 
 Two exclusive channels into nested keyless-deploy sandbox execution, attached on `MegaContext` (and forwarded from `MegaEvm` / `MegaBlockExecutor`).
 Read-only default: `SandboxObserver` cannot short-circuit `CALL`/`CREATE` and must not mutate interpreter or context state.
 Rewriting explicit: `SandboxInspector` forwards `&mut` inputs and override return values so interventions take effect inside the sandbox as they would on a top-level EVM.
-`sandbox::KeylessSandboxHooks` restates the setters as a trait so a host held behind a generic EVM projection (a node's `ConfigureEvm::Evm`) can attach a hook through a bound.
+Both channels share one type-erased slot (`Rc<RefCell<dyn SandboxInspector<E>>>`, held twice: parent env type and `EmptyExternalEnv`); an observer is installed behind the crate-private `ReadOnlyHook` adapter, which forwards shared references and never answers a `CALL`/`CREATE` override.
+Types generic over revm's `Inspector` get both channels through blanket impls; hosts behind a generic EVM projection (a node's `ConfigureEvm::Evm`) name the attach operation on their own configuration type instead of on mega-evm.
 With the `inspectors` feature, `sandbox::trace` ships the shared `revm-inspectors` pattern: a `SharedTracingInspector` handle for the outer EVM plus a second one on the observer channel, and `splice_sandbox_traces` to graft the sandbox call tree under the intercepted `KeylessDeploy` CALL after execution; `mega-evme` and node tracing RPCs use the same implementation.
 
 Contract:

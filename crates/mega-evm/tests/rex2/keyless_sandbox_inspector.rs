@@ -1140,47 +1140,6 @@ fn test_inspector_pre_rex4_crowded_parent_env_keeps_empty_env_gas() {
 }
 
 #[test]
-fn test_inspector_for_parent_env_skips_pre_rex4_opcode_hooks() {
-    for spec in SPECS {
-        let (tx_bytes, signer) = create_pre_eip155_deploy_tx(success_constructor());
-        let mut db = funded_db(signer);
-        let recorder = Rc::new(RefCell::new(RecordingInspector::default()));
-        let inspector: Rc<RefCell<dyn SandboxInspector<TestExternalEnvs>>> = recorder.clone();
-
-        let mut context =
-            MegaContext::new(&mut db, spec).with_external_envs(crowded_parent_env().into());
-        context.modify_chain(|chain| {
-            chain.operator_fee_scalar = Some(U256::ZERO);
-            chain.operator_fee_constant = Some(U256::ZERO);
-        });
-        context.set_keyless_sandbox_inspector_for_parent_env(Some(inspector));
-        let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);
-        let tx = keyless_deploy_call_tx(tx_bytes, LARGE_GAS_LIMIT_OVERRIDE);
-        let result = alloy_evm::Evm::transact_raw(&mut evm, tx).expect("keyless deploy transact");
-        let events = recorder.borrow().events.clone();
-
-        assert!(result.result.is_success(), "{spec:?} deploy should succeed: {:?}", result.result);
-        let starts = events.iter().filter(|e| matches!(e, InspectedEvent::Start)).count();
-        let ends = events.iter().filter(|e| matches!(e, InspectedEvent::End(_))).count();
-        assert_eq!(starts, 1, "{spec:?}: sandbox_start once");
-        assert_eq!(ends, 1, "{spec:?}: sandbox_end once");
-        let has_opcode =
-            events.iter().any(|e| matches!(e, InspectedEvent::Step(_) | InspectedEvent::Create));
-        if spec.is_enabled(MegaSpecId::REX4) {
-            assert!(
-                has_opcode,
-                "{spec:?}: REX4+ parent-env inspector sees opcode hooks: {events:?}"
-            );
-        } else {
-            assert!(
-                !has_opcode,
-                "{spec:?}: pre-REX4 parent-env inspector must not emit opcode hooks: {events:?}"
-            );
-        }
-    }
-}
-
-#[test]
 fn test_sandbox_hook_slots_are_exclusive_and_clear_restores_parity() {
     let spec = MegaSpecId::REX5;
     let (tx_bytes, signer) = create_pre_eip155_deploy_tx(success_constructor());

@@ -9,18 +9,18 @@
 //! A [`SandboxObserver`] sees every interpreter hook that revm's [`Inspector`]
 //! would see inside a sandbox, plus a paired [`SandboxObserver::sandbox_start`] /
 //! [`SandboxObserver::sandbox_end`] lifecycle. Observation cannot short-circuit
-//! `CALL`/`CREATE`: those hooks have no return value, and [`ObserverBridge`]
-//! always forwards `None` to the EVM.
+//! `CALL`/`CREATE`: those hooks have no return value, and the sandbox installs
+//! the observer behind `ReadOnlyHook`, which always answers `None` to the EVM.
 //!
 //! # Read-only contract
 //!
 //! Two layers close intervention:
 //!
 //! - **Structural.** [`SandboxObserver::call`] / [`SandboxObserver::create`] take shared references
-//!   to [`CallInputs`] / [`CreateInputs`]. [`InspectorSandboxObserver`] clones a temporary copy
-//!   when forwarding to an inner [`Inspector`]; mutations of that copy are discarded, as are `Some`
-//!   override outcomes. Combined with [`ObserverBridge`] always returning `None`, rewriting inputs
-//!   and short-circuiting the frame are both closed.
+//!   to [`CallInputs`] / [`CreateInputs`]. The blanket impl for revm [`Inspector`]s clones a
+//!   temporary copy when forwarding; mutations of that copy are discarded, as are `Some` override
+//!   outcomes. Combined with `ReadOnlyHook` always returning `None`, rewriting inputs and
+//!   short-circuiting the frame are both closed.
 //! - **Contractual.** [`SandboxObserver::step`] / [`SandboxObserver::step_end`] take `&mut
 //!   Interpreter` and hooks take `&mut MegaContext` because those types are not cheaply cloneable.
 //!   Implementations must not mutate them. Debug builds already trip conservation asserts on many
@@ -43,15 +43,12 @@
 //!
 //! Attaching an observer must not change sandbox env semantics at any spec.
 //! Pre-REX4 sandboxes always run with [`crate::EmptyExternalEnv`]; REX4+
-//! sandboxes always share the parent env. Callers that implement
+//! sandboxes always share the parent env. An observer therefore implements
 //! [`SandboxObserver`] for both the parent env type and
-//! [`crate::EmptyExternalEnv`] attach via
-//! [`crate::MegaContext::set_keyless_sandbox_observer`], which stores two
-//! type-erased handles so opcode-level hooks fire on both paths.
-//! [`InspectorSandboxObserver`] with a fully generic inspector satisfies both
-//! bounds. An observer that only implements the parent env type can attach
-//! via [`crate::MegaContext::set_keyless_sandbox_observer_for_parent_env`];
-//! pre-REX4 then emits only `sandbox_start` / `sandbox_end`.
+//! [`crate::EmptyExternalEnv`]; [`crate::MegaContext::set_keyless_sandbox_observer`]
+//! stores two type-erased handles so opcode-level hooks fire on both paths. A
+//! type that implements revm's [`Inspector`] for every sandbox context satisfies
+//! both bounds through the blanket impl.
 
 #[cfg(not(feature = "std"))]
 use alloc as std;
@@ -69,7 +66,10 @@ use revm::{
 
 use crate::{ExternalEnvTypes, MegaContext, MegaSpecId};
 
-use super::state::SandboxDb;
+use super::{
+    inspector::{SandboxHookHandle, SandboxInspector},
+    state::SandboxDb,
+};
 
 /// Context available when a sandbox is about to execute.
 #[non_exhaustive]
@@ -154,8 +154,13 @@ impl SandboxEndOutcome {
 /// A compliant (read-only) observer does not change sandbox execution results.
 /// [`call`](Self::call) / [`create`](Self::create) cannot rewrite inputs or
 /// override the frame; [`step`](Self::step) and context arguments remain
-/// contractually read-only. [`ObserverBridge`] always drops `call`/`create`
-/// override outcomes.
+/// contractually read-only. `ReadOnlyHook` never answers a `call`/`create`
+/// override on the observer's behalf.
+///
+/// Types that already implement [`Inspector`] for every sandbox context
+/// lifetime receive a blanket impl that forwards each hook on a temporary
+/// copy of the inputs. Local types that are not inspectors implement this
+/// trait by hand.
 pub trait SandboxObserver<ExtEnvs: ExternalEnvTypes> {
     /// Called once after the sandbox interpreter is created, before the first opcode.
     #[inline]
@@ -269,20 +274,7 @@ pub trait SandboxObserver<ExtEnvs: ExternalEnvTypes> {
     }
 }
 
-/// Adapts any HRTB-compatible revm [`Inspector`] into a [`SandboxObserver`].
-///
-/// `call`/`create` clone a temporary input copy for the inner inspector; that
-/// copy and any override outcome are discarded. [`SandboxObserver::sandbox_start`]
-/// and [`SandboxObserver::sandbox_end`] keep their default empty implementations.
-pub struct InspectorSandboxObserver<I>(pub I);
-
-impl<I> core::fmt::Debug for InspectorSandboxObserver<I> {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_tuple("InspectorSandboxObserver").finish_non_exhaustive()
-    }
-}
-
-impl<I, E> SandboxObserver<E> for InspectorSandboxObserver<I>
+impl<I, E> SandboxObserver<E> for I
 where
     E: ExternalEnvTypes,
     I: for<'a> Inspector<MegaContext<SandboxDb<'a>, E>, EthInterpreter>,
@@ -293,7 +285,7 @@ where
         interp: &mut Interpreter<EthInterpreter>,
         context: &mut MegaContext<SandboxDb<'_>, E>,
     ) {
-        self.0.initialize_interp(interp, context);
+        Inspector::initialize_interp(self, interp, context);
     }
 
     #[inline]
@@ -302,7 +294,7 @@ where
         interp: &mut Interpreter<EthInterpreter>,
         context: &mut MegaContext<SandboxDb<'_>, E>,
     ) {
-        self.0.step(interp, context);
+        Inspector::step(self, interp, context);
     }
 
     #[inline]
@@ -311,7 +303,7 @@ where
         interp: &mut Interpreter<EthInterpreter>,
         context: &mut MegaContext<SandboxDb<'_>, E>,
     ) {
-        self.0.step_end(interp, context);
+        Inspector::step_end(self, interp, context);
     }
 
     #[inline]
@@ -321,13 +313,14 @@ where
         context: &mut MegaContext<SandboxDb<'_>, E>,
         log: Log,
     ) {
-        self.0.log(interp, context, log);
+        Inspector::log(self, interp, context, log);
     }
 
     #[inline]
     fn call(&mut self, context: &mut MegaContext<SandboxDb<'_>, E>, inputs: &CallInputs) {
+        // The inspector works on a copy: its mutations and any override are discarded.
         let mut inputs = inputs.clone();
-        let _ = self.0.call(context, &mut inputs);
+        let _ = Inspector::call(self, context, &mut inputs);
     }
 
     #[inline]
@@ -337,15 +330,15 @@ where
         inputs: &CallInputs,
         outcome: &CallOutcome,
     ) {
-        // Clone so a mutating inner inspector cannot write back into execution.
+        // Clone so a mutating inspector cannot write back into execution.
         let mut outcome = outcome.clone();
-        self.0.call_end(context, inputs, &mut outcome);
+        Inspector::call_end(self, context, inputs, &mut outcome);
     }
 
     #[inline]
     fn create(&mut self, context: &mut MegaContext<SandboxDb<'_>, E>, inputs: &CreateInputs) {
         let mut inputs = inputs.clone();
-        let _ = self.0.create(context, &mut inputs);
+        let _ = Inspector::create(self, context, &mut inputs);
     }
 
     #[inline]
@@ -355,41 +348,40 @@ where
         inputs: &CreateInputs,
         outcome: &CreateOutcome,
     ) {
-        // Clone so a mutating inner inspector cannot write back into execution.
         let mut outcome = outcome.clone();
-        self.0.create_end(context, inputs, &mut outcome);
+        Inspector::create_end(self, context, inputs, &mut outcome);
     }
 
     #[inline]
     fn selfdestruct(&mut self, contract: Address, target: Address, value: U256) {
-        self.0.selfdestruct(contract, target, value);
+        Inspector::selfdestruct(self, contract, target, value);
     }
 }
 
-/// Inspector that forwards sandbox frames to a [`SandboxObserver`].
+/// Installs a [`SandboxObserver`] on the sandbox's hook slot without a way to intervene.
 ///
-/// `call` and `create` always return `None`, so the observer has no channel
-/// that can override execution.
-pub(crate) struct ObserverBridge<E: ExternalEnvTypes> {
+/// Every hook forwards a shared reference to the observer, `call` / `create` always answer
+/// `None`, and `call_end` / `create_end` hand their outcomes over read-only, so the observer
+/// channel is structurally unable to rewrite execution even though it shares the slot with
+/// [`SandboxInspector`].
+pub(crate) struct ReadOnlyHook<E: ExternalEnvTypes> {
     observer: Rc<RefCell<dyn SandboxObserver<E>>>,
 }
 
-impl<E: ExternalEnvTypes> core::fmt::Debug for ObserverBridge<E> {
+impl<E: ExternalEnvTypes + 'static> ReadOnlyHook<E> {
+    /// Wraps a shared observer handle as a type-erased hook handle.
+    pub(crate) fn handle(observer: Rc<RefCell<dyn SandboxObserver<E>>>) -> SandboxHookHandle<E> {
+        Rc::new(RefCell::new(Self { observer }))
+    }
+}
+
+impl<E: ExternalEnvTypes> core::fmt::Debug for ReadOnlyHook<E> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("ObserverBridge").finish_non_exhaustive()
+        f.debug_struct("ReadOnlyHook").finish_non_exhaustive()
     }
 }
 
-impl<E: ExternalEnvTypes> ObserverBridge<E> {
-    /// Wraps a shared observer handle as a revm inspector.
-    pub(crate) fn new(observer: Rc<RefCell<dyn SandboxObserver<E>>>) -> Self {
-        Self { observer }
-    }
-}
-
-impl<E: ExternalEnvTypes> Inspector<MegaContext<SandboxDb<'_>, E>, EthInterpreter>
-    for ObserverBridge<E>
-{
+impl<E: ExternalEnvTypes> SandboxInspector<E> for ReadOnlyHook<E> {
     #[inline]
     fn initialize_interp(
         &mut self,
@@ -471,6 +463,16 @@ impl<E: ExternalEnvTypes> Inspector<MegaContext<SandboxDb<'_>, E>, EthInterprete
     fn selfdestruct(&mut self, contract: Address, target: Address, value: U256) {
         self.observer.borrow_mut().selfdestruct(contract, target, value);
     }
+
+    #[inline]
+    fn sandbox_start(&mut self, info: &SandboxStartInfo) {
+        self.observer.borrow_mut().sandbox_start(info);
+    }
+
+    #[inline]
+    fn sandbox_end(&mut self, outcome: &SandboxEndOutcome) {
+        self.observer.borrow_mut().sandbox_end(outcome);
+    }
 }
 
 #[cfg(test)]
@@ -505,19 +507,27 @@ mod tests {
     }
 
     #[test]
-    fn test_inspector_adapter_accepts_generic_inspector() {
+    fn test_generic_inspector_is_a_sandbox_observer() {
         fn assert_observer<E: ExternalEnvTypes, T: SandboxObserver<E>>(_: T) {}
-        assert_observer::<EmptyExternalEnv, _>(InspectorSandboxObserver(GenericInspector));
+        assert_observer::<EmptyExternalEnv, _>(GenericInspector);
+        assert_observer::<EmptyExternalEnv, _>(NopObserver);
     }
 
     #[test]
-    fn test_inspector_adapter_satisfies_empty_and_parent_env_observer_bounds() {
+    fn test_blanket_observer_satisfies_empty_and_parent_env_bounds() {
         use crate::TestExternalEnvs;
         fn assert_dual<T: SandboxObserver<EmptyExternalEnv> + SandboxObserver<TestExternalEnvs>>(
             _: T,
         ) {
         }
-        assert_dual(InspectorSandboxObserver(GenericInspector));
+        assert_dual(GenericInspector);
         assert_dual(NopObserver);
+    }
+
+    #[test]
+    fn test_read_only_hook_is_a_sandbox_inspector_handle() {
+        let observer: Rc<RefCell<dyn SandboxObserver<EmptyExternalEnv>>> =
+            Rc::new(RefCell::new(NopObserver));
+        let _handle: SandboxHookHandle<EmptyExternalEnv> = ReadOnlyHook::handle(observer);
     }
 }

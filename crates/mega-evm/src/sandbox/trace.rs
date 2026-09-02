@@ -27,7 +27,6 @@ use revm_inspectors::tracing::{
     TracingInspector,
 };
 
-use super::InspectorSandboxObserver;
 use crate::KEYLESS_DEPLOY_ADDRESS;
 
 /// [`Inspector`] adapter over a [`TracingInspector`] shared via [`Rc`]/[`RefCell`].
@@ -60,8 +59,8 @@ impl SharedTracingInspector {
     }
 
     /// Observer handle for the read-only keyless sandbox channel.
-    pub fn as_sandbox_observer(&self) -> Rc<RefCell<InspectorSandboxObserver<Self>>> {
-        Rc::new(RefCell::new(InspectorSandboxObserver(self.clone())))
+    pub fn as_sandbox_observer(&self) -> Rc<RefCell<Self>> {
+        Rc::new(RefCell::new(self.clone()))
     }
 }
 

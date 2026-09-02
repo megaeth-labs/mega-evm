@@ -163,21 +163,9 @@ where
         O: crate::sandbox::SandboxObserver<ExtEnvs>
             + crate::sandbox::SandboxObserver<crate::EmptyExternalEnv>
             + 'static,
+        ExtEnvs: 'static,
     {
         self.evm.set_keyless_sandbox_observer(observer);
-    }
-
-    /// Attaches an observer that implements [`crate::sandbox::SandboxObserver`]
-    /// only for this executor's `ExtEnvs`.
-    ///
-    /// Forwards to [`crate::MegaEvm::set_keyless_sandbox_observer_for_parent_env`].
-    /// Pre-REX4 sandboxes emit only `sandbox_start` / `sandbox_end`.
-    /// Use [`Self::clear_keyless_sandbox_hook`] to detach.
-    pub fn set_keyless_sandbox_observer_for_parent_env(
-        &mut self,
-        observer: Option<Rc<RefCell<dyn crate::sandbox::SandboxObserver<ExtEnvs>>>>,
-    ) {
-        self.evm.set_keyless_sandbox_observer_for_parent_env(observer);
     }
 
     /// Attaches a rewriting inspector for nested sandbox execution on every spec.
@@ -193,19 +181,6 @@ where
             + 'static,
     {
         self.evm.set_keyless_sandbox_inspector(inspector);
-    }
-
-    /// Attaches an inspector that implements [`crate::sandbox::SandboxInspector`]
-    /// only for this executor's `ExtEnvs`.
-    ///
-    /// Forwards to [`crate::MegaEvm::set_keyless_sandbox_inspector_for_parent_env`].
-    /// Pre-REX4 sandboxes emit only `sandbox_start` / `sandbox_end`.
-    /// Use [`Self::clear_keyless_sandbox_hook`] to detach.
-    pub fn set_keyless_sandbox_inspector_for_parent_env(
-        &mut self,
-        inspector: Option<Rc<RefCell<dyn crate::sandbox::SandboxInspector<ExtEnvs>>>>,
-    ) {
-        self.evm.set_keyless_sandbox_inspector_for_parent_env(inspector);
     }
 
     /// Detaches any sandbox hook from both env-type slots.

@@ -4,7 +4,8 @@
 //! Hook signatures match revm's [`Inspector`] on the sandbox EVM: `&mut` inputs and
 //! override return values are forwarded, so `CALL`/`CREATE` can be short-circuited and
 //! outcomes rewritten. [`InspectorBridge`] installs the handle as the sandbox EVM's
-//! inspector. Attaching an inspector is exclusive with attaching an observer.
+//! inspector. Both channels occupy the same type-erased slot: an observer is installed behind
+//! a read-only adapter, so attaching either replaces the other.
 //!
 //! # Contract
 //!
@@ -40,7 +41,7 @@ use revm::{
 use crate::{ExternalEnvTypes, MegaContext};
 
 use super::{
-    observer::{SandboxEndOutcome, SandboxObserver, SandboxStartInfo},
+    observer::{SandboxEndOutcome, SandboxStartInfo},
     state::SandboxDb,
 };
 
@@ -368,51 +369,11 @@ impl<E: ExternalEnvTypes> Inspector<MegaContext<SandboxDb<'_>, E>, EthInterprete
     }
 }
 
-/// Exclusive hook slot for nested sandbox execution.
+/// The type-erased hook slot for nested sandbox execution.
 ///
-/// Either channel may occupy a slot; attaching one replaces the other.
-pub(crate) enum SandboxHook<E: ExternalEnvTypes> {
-    /// Read-only observer channel.
-    Observer(Rc<RefCell<dyn SandboxObserver<E>>>),
-    /// Rewriting inspector channel.
-    Inspector(Rc<RefCell<dyn SandboxInspector<E>>>),
-}
-
-impl<E: ExternalEnvTypes> Clone for SandboxHook<E> {
-    fn clone(&self) -> Self {
-        match self {
-            Self::Observer(observer) => Self::Observer(Rc::clone(observer)),
-            Self::Inspector(inspector) => Self::Inspector(Rc::clone(inspector)),
-        }
-    }
-}
-
-impl<E: ExternalEnvTypes> SandboxHook<E> {
-    /// Delivers `sandbox_start` to the attached channel.
-    pub(crate) fn notify_start(&self, info: &SandboxStartInfo) {
-        match self {
-            Self::Observer(observer) => observer.borrow_mut().sandbox_start(info),
-            Self::Inspector(inspector) => inspector.borrow_mut().sandbox_start(info),
-        }
-    }
-
-    /// Delivers `sandbox_end` to the attached channel.
-    pub(crate) fn notify_end(&self, outcome: &SandboxEndOutcome) {
-        match self {
-            Self::Observer(observer) => observer.borrow_mut().sandbox_end(outcome),
-            Self::Inspector(inspector) => inspector.borrow_mut().sandbox_end(outcome),
-        }
-    }
-}
-
-impl<E: ExternalEnvTypes> core::fmt::Debug for SandboxHook<E> {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::Observer(_) => f.debug_tuple("Observer").finish_non_exhaustive(),
-            Self::Inspector(_) => f.debug_tuple("Inspector").finish_non_exhaustive(),
-        }
-    }
-}
+/// Both channels share it: an observer is installed behind
+/// [`super::observer::ReadOnlyHook`], an inspector directly. Attaching one replaces the other.
+pub(crate) type SandboxHookHandle<E> = Rc<RefCell<dyn SandboxInspector<E>>>;
 
 #[cfg(test)]
 mod tests {

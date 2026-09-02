@@ -30,7 +30,7 @@ use revm::{
 
 use crate::{
     constants, is_system_originated,
-    sandbox::{SandboxHook, SandboxInspector, SandboxObserver},
+    sandbox::{ReadOnlyHook, SandboxHookHandle, SandboxInspector, SandboxObserver},
     AdditionalLimit, BucketId, DynamicGasCost, EmptyExternalEnv, EvmTxRuntimeLimits,
     ExternalEnvTypes, ExternalEnvs, MegaSpecId, TxRuntimeLimit, VolatileDataAccess,
     VolatileDataAccessTracker, VolatileDataAccessType,
@@ -84,18 +84,19 @@ pub struct MegaContext<DB: Database, ExtEnvs: ExternalEnvTypes> {
     /// Changing `ExtEnvs` via [`Self::with_external_envs`] resets this field
     /// and the [`EmptyExternalEnv`] hook slot: the hook cannot be carried across
     /// an env-type change and must be attached after external environments are
-    /// assembled. Observer and inspector occupy the same slot exclusively.
+    /// assembled. Observer and inspector occupy the same slot exclusively; an
+    /// observer sits behind a read-only adapter.
     #[debug(ignore)]
-    pub(crate) keyless_sandbox_hook: Option<SandboxHook<ExtEnvs>>,
+    pub(crate) keyless_sandbox_hook: Option<SandboxHookHandle<ExtEnvs>>,
 
     /// Hook handle typed against [`EmptyExternalEnv`].
     ///
     /// Pre-REX4 sandboxes always execute with [`EmptyExternalEnv`]. Opcode-level
     /// hooks on that path use this slot so attaching a hook cannot change
-    /// sandbox env semantics. `None` when no hook is attached, or when the
-    /// caller used a `_for_parent_env` setter.
+    /// sandbox env semantics. Set and cleared together with
+    /// [`Self::keyless_sandbox_hook`].
     #[debug(ignore)]
-    pub(crate) keyless_sandbox_hook_empty: Option<SandboxHook<EmptyExternalEnv>>,
+    pub(crate) keyless_sandbox_hook_empty: Option<SandboxHookHandle<EmptyExternalEnv>>,
 
     /// The system address for the current block.
     /// Pre-REX5: always `MEGA_SYSTEM_ADDRESS` (the legacy hardcoded constant).
@@ -496,11 +497,12 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     /// Attaches an observer for nested sandbox execution on every spec.
     ///
     /// The observer must implement [`SandboxObserver`] for both this context's
-    /// `ExtEnvs` and [`EmptyExternalEnv`]. The same handle is stored as two
-    /// type-erased slots so opcode-level hooks fire for pre-REX4 sandboxes
-    /// (always [`EmptyExternalEnv`]) and for REX4+ sandboxes (shared parent
-    /// env). [`crate::sandbox::InspectorSandboxObserver`] with a fully generic
-    /// inspector satisfies both bounds.
+    /// `ExtEnvs` and [`EmptyExternalEnv`]. The same handle is stored, behind a
+    /// read-only adapter, as two type-erased slots so opcode-level hooks fire
+    /// for pre-REX4 sandboxes (always [`EmptyExternalEnv`]) and for REX4+
+    /// sandboxes (shared parent env). A type that implements
+    /// [`revm::Inspector`] for every sandbox context lifetime satisfies both
+    /// bounds via the blanket impl.
     ///
     /// Attaching an observer does not change sandbox external-env semantics at
     /// any spec. Replaces any attached inspector.
@@ -513,35 +515,18 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     pub fn set_keyless_sandbox_observer<O>(&mut self, observer: Option<Rc<RefCell<O>>>)
     where
         O: SandboxObserver<ExtEnvs> + SandboxObserver<EmptyExternalEnv> + 'static,
+        ExtEnvs: 'static,
     {
         match observer {
             Some(obs) => {
                 let cloned = Rc::clone(&obs);
                 let parent: Rc<RefCell<dyn SandboxObserver<ExtEnvs>>> = cloned;
                 let empty: Rc<RefCell<dyn SandboxObserver<EmptyExternalEnv>>> = obs;
-                self.keyless_sandbox_hook = Some(SandboxHook::Observer(parent));
-                self.keyless_sandbox_hook_empty = Some(SandboxHook::Observer(empty));
+                self.keyless_sandbox_hook = Some(ReadOnlyHook::handle(parent));
+                self.keyless_sandbox_hook_empty = Some(ReadOnlyHook::handle(empty));
             }
             None => self.clear_keyless_sandbox_hook(),
         }
-    }
-
-    /// Attaches an observer that implements [`SandboxObserver`] only for this
-    /// context's `ExtEnvs`.
-    ///
-    /// Opcode-level observation is available on REX4+ sandboxes, which share
-    /// the parent env. Pre-REX4 sandboxes keep [`EmptyExternalEnv`] and emit
-    /// only `sandbox_start` / `sandbox_end` through this handle.
-    ///
-    /// Prefer [`Self::set_keyless_sandbox_observer`] when the observer
-    /// implements both env types. Use [`Self::clear_keyless_sandbox_hook`]
-    /// to detach. Replaces any attached inspector.
-    pub fn set_keyless_sandbox_observer_for_parent_env(
-        &mut self,
-        observer: Option<Rc<RefCell<dyn SandboxObserver<ExtEnvs>>>>,
-    ) {
-        self.keyless_sandbox_hook = observer.map(SandboxHook::Observer);
-        self.keyless_sandbox_hook_empty = None;
     }
 
     /// Attaches a rewriting inspector for nested sandbox execution on every spec.
@@ -568,31 +553,13 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
         match inspector {
             Some(insp) => {
                 let cloned = Rc::clone(&insp);
-                let parent: Rc<RefCell<dyn SandboxInspector<ExtEnvs>>> = cloned;
-                let empty: Rc<RefCell<dyn SandboxInspector<EmptyExternalEnv>>> = insp;
-                self.keyless_sandbox_hook = Some(SandboxHook::Inspector(parent));
-                self.keyless_sandbox_hook_empty = Some(SandboxHook::Inspector(empty));
+                let parent: SandboxHookHandle<ExtEnvs> = cloned;
+                let empty: SandboxHookHandle<EmptyExternalEnv> = insp;
+                self.keyless_sandbox_hook = Some(parent);
+                self.keyless_sandbox_hook_empty = Some(empty);
             }
             None => self.clear_keyless_sandbox_hook(),
         }
-    }
-
-    /// Attaches an inspector that implements [`SandboxInspector`] only for this
-    /// context's `ExtEnvs`.
-    ///
-    /// Opcode-level inspection is available on REX4+ sandboxes, which share
-    /// the parent env. Pre-REX4 sandboxes keep [`EmptyExternalEnv`] and emit
-    /// only `sandbox_start` / `sandbox_end` through this handle.
-    ///
-    /// Prefer [`Self::set_keyless_sandbox_inspector`] when the inspector
-    /// implements both env types. Use [`Self::clear_keyless_sandbox_hook`]
-    /// to detach. Replaces any attached observer.
-    pub fn set_keyless_sandbox_inspector_for_parent_env(
-        &mut self,
-        inspector: Option<Rc<RefCell<dyn SandboxInspector<ExtEnvs>>>>,
-    ) {
-        self.keyless_sandbox_hook = inspector.map(SandboxHook::Inspector);
-        self.keyless_sandbox_hook_empty = None;
     }
 
     /// Detaches any sandbox hook from both env-type slots.

@@ -68,11 +68,8 @@ use super::{
 
 use super::{
     error::{encode_error_result, KeylessDeployError},
-    inspector::{InspectorBridge, SandboxHook},
-    observer::{
-        ObserverBridge, SandboxCompletionKind, SandboxEndOutcome, SandboxRejectKind,
-        SandboxStartInfo,
-    },
+    inspector::{InspectorBridge, SandboxHookHandle},
+    observer::{SandboxCompletionKind, SandboxEndOutcome, SandboxRejectKind, SandboxStartInfo},
     state::SandboxDb,
 };
 
@@ -448,7 +445,7 @@ pub fn execute_keyless_deploy_call<DB: AlloyDatabase, ExtEnvs: ExternalEnvTypes>
     // fire exactly once on this path, covering every terminal arm below.
     let hook = ctx.keyless_sandbox_hook.clone();
     if let Some(h) = &hook {
-        h.notify_start(&SandboxStartInfo {
+        h.borrow_mut().sandbox_start(&SandboxStartInfo {
             spec: ctx.spec,
             signer: deploy_signer,
             deploy_address,
@@ -709,7 +706,7 @@ fn run_sandbox_ctx<'db, ExtEnvs: ExternalEnvTypes>(
     sandbox_tx_limits: Option<EvmTxRuntimeLimits>,
     block: BlockEnv,
     chain: L1BlockInfo,
-    hook: Option<SandboxHook<ExtEnvs>>,
+    hook: Option<SandboxHookHandle<ExtEnvs>>,
 ) -> SandboxOutcome {
     let sandbox_ctx = match sandbox_tx_limits {
         Some(limits) => sandbox_ctx.with_tx_runtime_limits(limits),
@@ -719,24 +716,9 @@ fn run_sandbox_ctx<'db, ExtEnvs: ExternalEnvTypes>(
     let is_rex5_enabled = sandbox_ctx.mega_spec().is_enabled(MegaSpecId::REX5);
     let is_rex6_enabled = sandbox_ctx.mega_spec().is_enabled(MegaSpecId::REX6);
     match hook {
-        Some(SandboxHook::Observer(observer)) => {
+        Some(hook) => {
             let mut sandbox_evm =
-                MegaEvm::new(sandbox_ctx).with_inspector(ObserverBridge::new(observer));
-            let result = sandbox_evm.transact_raw(sandbox_tx);
-            let limit_usage = sandbox_evm.ctx.additional_limit.borrow().get_usage();
-            let volatile_accesses =
-                sandbox_evm.ctx.volatile_data_tracker.borrow().get_volatile_data_accessed();
-            process_sandbox_transact_result(
-                result,
-                limit_usage,
-                volatile_accesses,
-                is_rex5_enabled,
-                is_rex6_enabled,
-            )
-        }
-        Some(SandboxHook::Inspector(inspector)) => {
-            let mut sandbox_evm =
-                MegaEvm::new(sandbox_ctx).with_inspector(InspectorBridge::new(inspector));
+                MegaEvm::new(sandbox_ctx).with_inspector(InspectorBridge::new(hook));
             let result = sandbox_evm.transact_raw(sandbox_tx);
             let limit_usage = sandbox_evm.ctx.additional_limit.borrow().get_usage();
             let volatile_accesses =
@@ -770,11 +752,11 @@ fn run_sandbox_ctx<'db, ExtEnvs: ExternalEnvTypes>(
 
 /// Delivers `sandbox_end` when a hook is attached.
 fn notify_sandbox_end<ExtEnvs: ExternalEnvTypes>(
-    hook: &Option<SandboxHook<ExtEnvs>>,
+    hook: &Option<SandboxHookHandle<ExtEnvs>>,
     outcome: SandboxEndOutcome,
 ) {
     if let Some(h) = hook {
-        h.notify_end(&outcome);
+        h.borrow_mut().sandbox_end(&outcome);
     }
 }
 
@@ -1848,7 +1830,7 @@ mod tests {
             Some(limits),
             block,
             chain,
-            observer.map(SandboxHook::Observer),
+            observer.map(crate::sandbox::ReadOnlyHook::handle),
         )
     }
 
