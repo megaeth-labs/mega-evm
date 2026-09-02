@@ -23,8 +23,8 @@
 use std::vec::Vec;
 
 use crate::common::{
-    assert_outcomes_identical, default_envs, transact_tx, Outcome, CALLEE, CALLER, CONTRACT,
-    DEFAULT_TX_GAS_LIMIT, EMPTY_TARGET, ONE_ETH,
+    assert_outcomes_identical, base_db, default_envs, plain_filler, transact_tx, Outcome, CALLEE,
+    CALLER, CONTRACT, DEFAULT_TX_GAS_LIMIT, EMPTY_TARGET, ONE_ETH,
 };
 use alloy_eips::eip7702::{Authorization, RecoveredAuthority, RecoveredAuthorization};
 use alloy_primitives::{address, hex, Address, Bytes, Signature, TxKind, B256, U256};
@@ -52,22 +52,6 @@ const EXISTING_AUTHORITY: Address = address!("0000000000000000000000000000000000
 const NEW_AUTHORITY: Address = address!("0000000000000000000000000000000000330003");
 
 const KEYLESS_RELAYER: Address = address!("0000000000000000000000000000000000330004");
-
-fn base_db(code: Bytes) -> MemoryDatabase {
-    MemoryDatabase::default()
-        .account_balance(CALLER, U256::from(10 * ONE_ETH))
-        .account_code(CONTRACT, code)
-        .account_balance(CONTRACT, U256::from(ONE_ETH))
-}
-
-/// `pairs` PUSH1/POP pairs — plain opcodes that record nothing of their own.
-fn plain_filler(builder: BytecodeBuilder, pairs: usize) -> BytecodeBuilder {
-    let mut builder = builder;
-    for _ in 0..pairs {
-        builder = builder.push_number(1u64).append(POP);
-    }
-    builder
-}
 
 /// A mixed body: plain opcodes around one of every checkpoint family that does not need operands
 /// from the caller — a storage read, a storage write, a log, and a volatile opcode.

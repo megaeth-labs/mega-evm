@@ -21,13 +21,11 @@
 //!   `VolatileDataAccessOutOfGas`.
 
 use crate::common::{
-    transact, transact_default, transact_with_gas_limit, Outcome, CALLEE, CONTRACT, ONE_ETH,
+    base_db, plain_filler, transact, transact_default, transact_with_gas_limit, Outcome, CALLEE,
+    CONTRACT,
 };
 use alloy_primitives::{Address, Bytes, U256};
-use mega_evm::{
-    test_utils::{BytecodeBuilder, MemoryDatabase},
-    EvmTxRuntimeLimits, MegaHaltReason, MegaSpecId,
-};
+use mega_evm::{test_utils::BytecodeBuilder, EvmTxRuntimeLimits, MegaHaltReason, MegaSpecId};
 use revm::bytecode::opcode::{
     CALL, DUP1, EXTCODECOPY, GAS, JUMPDEST, JUMPI, MSTORE, POP, RETURN, SSTORE, STOP, SUB, SWAP1,
     TIMESTAMP,
@@ -37,13 +35,6 @@ use revm::bytecode::opcode::{
 const CALL_RESULT_SLOT: u64 = 0x10;
 /// Slot a callee writes to, so a reverted sub-frame can be told from a committed one.
 const CALLEE_SLOT: u64 = 0x11;
-
-fn base_db(code: Bytes) -> MemoryDatabase {
-    MemoryDatabase::default()
-        .account_balance(crate::common::CALLER, U256::from(10 * ONE_ETH))
-        .account_code(CONTRACT, code)
-        .account_balance(CONTRACT, U256::from(ONE_ETH))
-}
 
 /// A countdown loop of cheap opcodes with no checkpoint anywhere inside the loop body:
 ///
@@ -67,15 +58,6 @@ fn countdown_loop_code(prefix: &[u8], iterations: u16) -> Bytes {
     code.push(JUMPI);
     code.push(STOP);
     Bytes::from(code)
-}
-
-/// `pairs` PUSH1/POP pairs — plain opcodes that record nothing of their own.
-fn plain_filler(builder: BytecodeBuilder, pairs: usize) -> BytecodeBuilder {
-    let mut builder = builder;
-    for _ in 0..pairs {
-        builder = builder.push_number(1u64).append(POP);
-    }
-    builder
 }
 
 /// Per-spec runtime limits with the TX compute gas limit replaced.

@@ -366,7 +366,8 @@ fn test_top_level_create_collision_destroys_the_rest_of_the_envelope() {
         "the rest of the envelope is what the refused frame swallowed",
     );
     assert_eq!(
-        r7.booked_destroyed, r7.destroyed,
+        r7.booked_destroyed(),
+        r7.destroyed,
         "the per-site booking and the conservation law must agree",
     );
 
@@ -428,7 +429,8 @@ fn test_inner_create2_collision_destroys_the_forwarded_budget() {
         "the colliding CREATE2's forwarded budget is swallowed and must be booked",
     );
     assert_eq!(
-        r7.booked_destroyed, r7.destroyed,
+        r7.booked_destroyed(),
+        r7.destroyed,
         "the per-site booking and the conservation law must agree",
     );
     assert_eq!(
@@ -466,7 +468,7 @@ fn test_inner_create_out_of_funds_destroys_nothing() {
     assert!(r7.is_success(), "the caller absorbs the failed CREATE: {:?}", r7.result);
     assert_eq!(r6.gas_used, r7.gas_used, "receipt gas_used must be unchanged");
     assert_eq!(r7.destroyed, 0, "an OutOfFunds create hands its budget back");
-    assert_eq!(r7.booked_destroyed, 0, "and so books nothing");
+    assert_eq!(r7.booked_destroyed(), 0, "and so books nothing");
     assert_eq!(
         r7.compute_gas, r6.compute_gas,
         "with nothing destroyed the two specs report the same compute total",
@@ -496,7 +498,7 @@ fn test_inner_create_nonce_overflow_destroys_nothing() {
     assert!(r7.is_success(), "the caller survives the refused CREATE: {:?}", r7.result);
     assert_eq!(r6.gas_used, r7.gas_used, "receipt gas_used must be unchanged");
     assert_eq!(r7.destroyed, 0, "a nonce-overflow create hands its budget back");
-    assert_eq!(r7.booked_destroyed, 0, "and so books nothing");
+    assert_eq!(r7.booked_destroyed(), 0, "and so books nothing");
     assert_eq!(
         r7.compute_gas, r6.compute_gas,
         "with nothing destroyed the two specs report the same compute total",
@@ -537,7 +539,8 @@ fn test_precompile_halt_stays_booked_once_end_to_end() {
         2 * forwarded,
     );
     assert_eq!(
-        r7.booked_destroyed, r7.destroyed,
+        r7.booked_destroyed(),
+        r7.destroyed,
         "the per-site booking and the conservation law must agree",
     );
 }
@@ -598,7 +601,8 @@ fn test_failed_deposit_whose_create_collides_books_the_envelope_once() {
         "the rewritten envelope, less what was performed, is destroyed exactly once",
     );
     assert_eq!(
-        r7.booked_destroyed, r7.destroyed,
+        r7.booked_destroyed(),
+        r7.destroyed,
         "the per-site bookings and the conservation law must agree after the rewrite too",
     );
 }
@@ -671,7 +675,8 @@ fn test_keyless_sandbox_create_collision_crosses_the_merge_boundary() {
          that across",
     );
     assert_eq!(
-        r7.booked_destroyed, r7.destroyed,
+        r7.booked_destroyed(),
+        r7.destroyed,
         "the per-site booking and the conservation law must agree across the merge",
     );
     assert_eq!(

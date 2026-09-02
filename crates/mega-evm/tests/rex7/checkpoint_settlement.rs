@@ -16,8 +16,8 @@
 //! enforcement mechanism behind the first — the gas clamp — has its own suite in `gas_clamp`.
 
 use crate::common::{
-    transact, transact_default, transact_with_bucket_capacity, Outcome, CALLEE, CALLER, CONTRACT,
-    EMPTY_TARGET, ONE_ETH,
+    base_db, plain_filler, transact, transact_default, transact_with_bucket_capacity, Outcome,
+    CALLEE, CONTRACT, EMPTY_TARGET,
 };
 use alloy_primitives::{address, Address, Bytes, U256};
 use mega_evm::{
@@ -32,13 +32,6 @@ use revm::bytecode::opcode::{
 
 /// A third contract, so a CALL chain can reach depth 2.
 const INNER: Address = address!("0000000000000000000000000000000000300004");
-
-fn base_db(code: Bytes) -> MemoryDatabase {
-    MemoryDatabase::default()
-        .account_balance(CALLER, U256::from(10 * ONE_ETH))
-        .account_code(CONTRACT, code)
-        .account_balance(CONTRACT, U256::from(ONE_ETH))
-}
 
 /// A SALT bucket capacity four times the minimum, so every SALT-scaled storage-gas charge
 /// (`SSTORE` set, new account, contract creation) is non-zero and the settlement sites that have
@@ -150,16 +143,6 @@ fn countdown_loop_code(prefix: &[u8], iterations: u16) -> Bytes {
     code.push(JUMPI);
     code.push(STOP);
     Bytes::from(code)
-}
-
-/// `pairs` PUSH1/POP pairs — plain opcodes that record nothing of their own under checkpoint
-/// accounting.
-fn plain_filler(builder: BytecodeBuilder, pairs: usize) -> BytecodeBuilder {
-    let mut builder = builder;
-    for _ in 0..pairs {
-        builder = builder.push_number(1u64).append(POP);
-    }
-    builder
 }
 
 /// A pure arithmetic loop settles only at the frame-exit checkpoint, and that single settlement

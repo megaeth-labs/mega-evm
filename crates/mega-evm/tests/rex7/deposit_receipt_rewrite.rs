@@ -170,11 +170,13 @@ fn test_underfunded_deposit_reject_settles_the_rewritten_envelope() {
          the whole envelope is compute",
     );
     assert_eq!(
-        outcome.non_compute_gas, 0,
+        outcome.non_compute_gas(),
+        0,
         "the reject returns before the MegaETH share of intrinsic gas is booked",
     );
     assert_eq!(
-        outcome.booked_destroyed, outcome.destroyed,
+        outcome.booked_destroyed(),
+        outcome.destroyed,
         "the per-site booking and the derived total must agree",
     );
 }
@@ -200,7 +202,7 @@ fn test_deposit_runtime_halt_keeps_its_settlement() {
         "the frame's whole budget is destroyed",
     );
     assert_eq!(
-        outcome.non_compute_gas,
+        outcome.non_compute_gas(),
         i128::from(TX_INTRINSIC_STORAGE_GAS),
         "the MegaETH share of intrinsic gas is booked as non-compute",
     );
@@ -264,7 +266,8 @@ fn test_deposit_resource_limit_halt_destroys_what_the_rescue_returned() {
         "the reported total grows by the same amount, so it covers the rewritten receipt",
     );
     assert_eq!(
-        deposit.non_compute_gas, plain.non_compute_gas,
+        deposit.non_compute_gas(),
+        plain.non_compute_gas(),
         "the storage-gas lane is untouched by the rewrite",
     );
 }
@@ -342,8 +345,8 @@ fn test_exempt_deposit_reject_still_accounts_for_the_envelope() {
         "the rest of its rewritten envelope is destroyed, exemption or not",
     );
     assert_eq!(
-        (exempt.compute_gas, exempt.enforced(), exempt.destroyed, exempt.non_compute_gas),
-        (user.compute_gas, user.enforced(), user.destroyed, user.non_compute_gas),
+        (exempt.compute_gas, exempt.enforced(), exempt.destroyed, exempt.non_compute_gas()),
+        (user.compute_gas, user.enforced(), user.destroyed, user.non_compute_gas()),
         "an exemption suppresses limit enforcement, not accounting",
     );
 }

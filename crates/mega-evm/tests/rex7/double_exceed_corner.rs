@@ -25,7 +25,7 @@
 //! measured.
 
 use crate::common::{
-    transact, transact_default, transact_with_gas_limit, Outcome, CALLER, CONTRACT, ONE_ETH,
+    base_db, plain_filler, transact, transact_default, transact_with_gas_limit, Outcome,
 };
 use alloy_primitives::{Bytes, U256};
 use mega_evm::{
@@ -40,22 +40,6 @@ const CROSSING_OFFSET: u64 = 0x2000;
 
 /// How far either side of the knife edge to sweep.
 const SWEEP: i64 = 3;
-
-fn base_db(code: Bytes) -> MemoryDatabase {
-    MemoryDatabase::default()
-        .account_balance(CALLER, U256::from(10 * ONE_ETH))
-        .account_code(CONTRACT, code)
-        .account_balance(CONTRACT, U256::from(ONE_ETH))
-}
-
-/// `pairs` PUSH1/POP pairs — plain opcodes that record nothing of their own.
-fn plain_filler(builder: BytecodeBuilder, pairs: usize) -> BytecodeBuilder {
-    let mut builder = builder;
-    for _ in 0..pairs {
-        builder = builder.push_number(1u64).append(POP);
-    }
-    builder
-}
 
 /// The run leading up to the crossing MSTORE: an optional volatile access, a plain segment, and the
 /// MSTORE's two stack operands. Everything here is cheap and fully paid for in every sweep point.

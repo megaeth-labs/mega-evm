@@ -22,24 +22,12 @@
 //! `MemoryLimitOOG` is not in the sweep: it needs revm's `memory_limit` cfg, which this workspace
 //! does not enable, so no bytecode can reach it.
 
-use crate::common::{
-    transact, transact_with_gas_limit, Outcome, CALLEE, CALLER, CONTRACT, ONE_ETH,
-};
-use alloy_primitives::{Bytes, U256};
-use mega_evm::{
-    test_utils::{BytecodeBuilder, MemoryDatabase},
-    EvmTxRuntimeLimits, MegaSpecId,
-};
+use crate::common::{base_db, transact, transact_with_gas_limit, Outcome, CALLEE};
+use alloy_primitives::Bytes;
+use mega_evm::{test_utils::BytecodeBuilder, EvmTxRuntimeLimits, MegaSpecId};
 use revm::bytecode::opcode::{
     ADD, CALL, DUP1, JUMP, JUMPDEST, JUMPI, MSTORE, POP, STOP, SUB, SWAP1,
 };
-
-fn base_db(code: Bytes) -> MemoryDatabase {
-    MemoryDatabase::default()
-        .account_balance(CALLER, U256::from(10 * ONE_ETH))
-        .account_code(CONTRACT, code)
-        .account_balance(CONTRACT, U256::from(ONE_ETH))
-}
 
 /// The two transaction-intrinsic readings every case below calibrates against, measured from a
 /// transaction that runs a single `STOP`: the total EVM gas the receipt charges before the frame

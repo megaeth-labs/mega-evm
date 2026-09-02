@@ -15,13 +15,12 @@
 //! Each family has two top-frame edges, calibrated so the named headroom is the remaining compute
 //! at the opcode itself (prefix `PUSH` opcodes are measured out first).
 
-use crate::common::{transact, Outcome, CALLER, CONTRACT, ONE_ETH};
-use alloy_primitives::{Address, Bytes, U256};
+use crate::common::{base_db, transact, Outcome, CONTRACT};
+use alloy_primitives::{Address, Bytes};
 use alloy_sol_types::SolError;
 use mega_evm::{
-    constants::mini_rex::LOG_TOPIC_STORAGE_GAS,
-    test_utils::{BytecodeBuilder, MemoryDatabase},
-    EvmTxRuntimeLimits, LimitKind, MegaHaltReason, MegaLimitExceeded, MegaSpecId,
+    constants::mini_rex::LOG_TOPIC_STORAGE_GAS, test_utils::BytecodeBuilder, EvmTxRuntimeLimits,
+    LimitKind, MegaHaltReason, MegaLimitExceeded, MegaSpecId,
 };
 use revm::{
     bytecode::opcode::{CREATE, GAS, LOG1, STOP},
@@ -39,13 +38,6 @@ const LOG1_BODY_COMPUTE: u64 = 750;
 
 /// `CREATE` body fee. The REX7 table entry is 0; revm charges this inside the body.
 const CREATE_BODY_GAS: u64 = 32_000;
-
-fn base_db(code: Bytes) -> MemoryDatabase {
-    MemoryDatabase::default()
-        .account_balance(CALLER, U256::from(10 * ONE_ETH))
-        .account_code(CONTRACT, code)
-        .account_balance(CONTRACT, U256::from(ONE_ETH))
-}
 
 fn compute_limit(limit: u64) -> EvmTxRuntimeLimits {
     EvmTxRuntimeLimits::from_spec(MegaSpecId::REX7).with_tx_compute_gas_limit(limit)

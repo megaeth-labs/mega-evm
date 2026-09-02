@@ -21,15 +21,15 @@
 //! caller's segment.
 
 use crate::common::{
-    assert_outcomes_identical, transact, transact_default, transact_tx, Outcome, CALLER, CONTRACT,
-    DEFAULT_TX_GAS_LIMIT, ONE_ETH,
+    assert_outcomes_identical, base_db, plain_filler, transact, transact_default, transact_tx,
+    Outcome, CALLER, CONTRACT, DEFAULT_TX_GAS_LIMIT,
 };
 use alloy_primitives::{Bytes, B256, U256};
 use alloy_sol_types::{SolCall as _, SolError as _};
 use mega_evm::{
-    test_utils::{BytecodeBuilder, MemoryDatabase},
-    EvmTxRuntimeLimits, IOracle, LimitKind, MegaHaltReason, MegaLimitExceeded, MegaSpecId,
-    TestExternalEnvs, ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE_REX2,
+    test_utils::BytecodeBuilder, EvmTxRuntimeLimits, IOracle, LimitKind, MegaHaltReason,
+    MegaLimitExceeded, MegaSpecId, TestExternalEnvs, ORACLE_CONTRACT_ADDRESS,
+    ORACLE_CONTRACT_CODE_REX2,
 };
 use revm::{
     bytecode::opcode::{CALL, LOG1, POP, STOP},
@@ -41,22 +41,6 @@ use revm::{
 const DOWNSTREAM_SLOT: u64 = 0x31;
 /// Slot written by the latching SSTORE itself.
 const LATCHING_SLOT: u64 = 0x30;
-
-fn base_db(code: Bytes) -> MemoryDatabase {
-    MemoryDatabase::default()
-        .account_balance(CALLER, U256::from(10 * ONE_ETH))
-        .account_code(CONTRACT, code)
-        .account_balance(CONTRACT, U256::from(ONE_ETH))
-}
-
-/// `pairs` PUSH1/POP pairs — plain opcodes that record nothing of their own.
-fn plain_filler(builder: BytecodeBuilder, pairs: usize) -> BytecodeBuilder {
-    let mut builder = builder;
-    for _ in 0..pairs {
-        builder = builder.push_number(1u64).append(POP);
-    }
-    builder
-}
 
 /// The plain segment placed between the latching site and the checkpoint downstream of it. Long
 /// enough that including it in the recorded compute gas would be unmistakable.

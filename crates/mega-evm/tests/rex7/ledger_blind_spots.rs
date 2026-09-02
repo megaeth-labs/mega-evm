@@ -622,7 +622,8 @@ fn test_cancelling_counter_edits_are_booked() {
         "the two edits cancel, so the envelope the receipt reports is unmoved",
     );
     assert_eq!(
-        cheated.inspector_conjured_gas, 0,
+        cheated.inspector_conjured_gas(),
+        0,
         "and so is the law's term: this is exactly the shape a net-only reading cannot see",
     );
     assert!(

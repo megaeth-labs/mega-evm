@@ -125,8 +125,12 @@ fn test_minted_stipend_and_destroyed_envelope_in_one_transaction() {
     );
 
     // Both terms are live, and each is live only where it should be.
-    assert_eq!(alone.minted_call_stipend, 0, "no value transfer, no mint");
-    assert_eq!(together.minted_call_stipend, CALL_STIPEND, "one value transfer mints one stipend");
+    assert_eq!(alone.minted_call_stipend(), 0, "no value transfer, no mint");
+    assert_eq!(
+        together.minted_call_stipend(),
+        CALL_STIPEND,
+        "one value transfer mints one stipend"
+    );
     assert!(together.gas_used > alone.gas_used, "the value transfer must really have happened");
 
     assert_eq!(
@@ -138,7 +142,8 @@ fn test_minted_stipend_and_destroyed_envelope_in_one_transaction() {
         "a minted stipend must not move the destroyed remainder in either direction",
     );
     assert_eq!(
-        together.destroyed, together.booked_destroyed,
+        together.destroyed,
+        together.booked_destroyed(),
         "the derived remainder and the per-site bookings must agree",
     );
 }
@@ -171,7 +176,7 @@ fn test_several_minted_stipends_in_one_transaction() {
 
         assert!(outcome.is_success(), "{transfers} transfers: {:?}", outcome.result);
         assert_eq!(
-            outcome.minted_call_stipend,
+            outcome.minted_call_stipend(),
             CALL_STIPEND * transfers as u64,
             "{transfers} transfers: every value-transferring call mints its own stipend",
         );
@@ -180,7 +185,8 @@ fn test_several_minted_stipends_in_one_transaction() {
             "{transfers} transfers: the destroyed remainder must not drift with the mint count",
         );
         assert_eq!(
-            outcome.destroyed, outcome.booked_destroyed,
+            outcome.destroyed,
+            outcome.booked_destroyed(),
             "{transfers} transfers: the derived remainder and the per-site bookings must agree",
         );
     }
@@ -235,7 +241,8 @@ fn test_stipend_is_minted_by_a_value_call_whose_child_frame_never_runs() {
     );
 
     assert_eq!(
-        alone.minted_call_stipend, CALL_STIPEND,
+        alone.minted_call_stipend(),
+        CALL_STIPEND,
         "the mint is created by the CALL opcode, not by the child frame",
     );
     assert_eq!(
@@ -244,7 +251,8 @@ fn test_stipend_is_minted_by_a_value_call_whose_child_frame_never_runs() {
     );
 
     assert_eq!(
-        with_destroyed_envelope.minted_call_stipend, CALL_STIPEND,
+        with_destroyed_envelope.minted_call_stipend(),
+        CALL_STIPEND,
         "the failed value call still mints, with a destroying sibling alongside it",
     );
     assert_eq!(
@@ -254,7 +262,8 @@ fn test_stipend_is_minted_by_a_value_call_whose_child_frame_never_runs() {
         EXPECTED_DESTROYED - CALL_STIPEND,
     );
     assert_eq!(
-        with_destroyed_envelope.destroyed, with_destroyed_envelope.booked_destroyed,
+        with_destroyed_envelope.destroyed,
+        with_destroyed_envelope.booked_destroyed(),
         "the derived remainder and the per-site bookings must agree",
     );
 }
@@ -359,15 +368,15 @@ fn test_sandbox_refund_drives_the_non_compute_lane_negative() {
     assert!(control.is_success(), "the control deployment must run: {:?}", control.result);
     assert!(refunding.is_success(), "the refunding deployment must run: {:?}", refunding.result);
     assert!(
-        control.non_compute_gas > 0,
+        control.non_compute_gas() > 0,
         "the control must leave the lane positive, or it proves nothing; got {}",
-        control.non_compute_gas,
+        control.non_compute_gas(),
     );
 
     assert!(
-        refunding.non_compute_gas < 0,
+        refunding.non_compute_gas() < 0,
         "the sandbox's refund must drive the lane negative; got {}",
-        refunding.non_compute_gas,
+        refunding.non_compute_gas(),
     );
     // The signature of a negative lane: the transaction records more compute work than its
     // envelope ever paid for.
@@ -378,7 +387,8 @@ fn test_sandbox_refund_drives_the_non_compute_lane_negative() {
         refunding.gas_used,
     );
     assert_eq!(
-        refunding.destroyed, refunding.booked_destroyed,
+        refunding.destroyed,
+        refunding.booked_destroyed(),
         "the derivation must stay exact across the sign change",
     );
 }
@@ -405,12 +415,13 @@ fn test_negative_non_compute_lane_composes_with_a_destroyed_envelope() {
          cross the sandbox boundary as destroyed",
     );
     assert!(
-        outcome.non_compute_gas < 0,
+        outcome.non_compute_gas() < 0,
         "the refunds must still drive the lane negative; got {}",
-        outcome.non_compute_gas,
+        outcome.non_compute_gas(),
     );
     assert_eq!(
-        outcome.destroyed, outcome.booked_destroyed,
+        outcome.destroyed,
+        outcome.booked_destroyed(),
         "the derivation must stay exact with both terms live",
     );
 }

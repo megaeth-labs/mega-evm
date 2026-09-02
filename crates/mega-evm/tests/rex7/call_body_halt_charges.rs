@@ -110,7 +110,7 @@ fn run_arm(opcode: u8, value: Option<u64>, ret_size: u64, budget: u64) -> Outcom
         "an out-of-gas frame's counter is zeroed by the interpreter, so it destroys nothing \
          the frame-exit delta cannot already see as work",
     );
-    assert_eq!(outcome.booked_destroyed, 0, "and no site books a destroyed remainder for it");
+    assert_eq!(outcome.booked_destroyed(), 0, "and no site books a destroyed remainder for it");
     outcome
 }
 

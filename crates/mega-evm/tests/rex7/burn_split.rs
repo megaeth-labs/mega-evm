@@ -25,8 +25,9 @@
 //! which side of the enforcing boundary each part lands on.
 
 use crate::common::{
-    finish, transact, transact_default, transact_tx, transact_with_bucket_capacity,
-    transact_with_gas_limit, Outcome, CALLEE, CALLER, CONTRACT, DEFAULT_TX_GAS_LIMIT, ONE_ETH,
+    base_db, drive, plain_filler, transact, transact_default, transact_tx,
+    transact_with_bucket_capacity, transact_with_gas_limit, zero_operator_fee, Outcome, CALLEE,
+    CALLER, CONTRACT, DEFAULT_TX_GAS_LIMIT, ONE_ETH,
 };
 use alloy_primitives::{address, hex, Address, Bytes, Signature, TxKind, B256, U256};
 use alloy_sol_types::SolCall as _;
@@ -62,22 +63,6 @@ const AFTER_SLOT: u64 = 0xb1;
 const CHILD_PAIRS: usize = 1_000;
 /// Compute gas one `PUSH1 1; POP` pair costs: `PUSH1` is 3, `POP` is 2.
 const PAIR_GAS: u64 = 5;
-
-fn base_db(code: Bytes) -> MemoryDatabase {
-    MemoryDatabase::default()
-        .account_balance(CALLER, U256::from(10 * ONE_ETH))
-        .account_code(CONTRACT, code)
-        .account_balance(CONTRACT, U256::from(ONE_ETH))
-}
-
-/// `pairs` PUSH1/POP pairs — plain opcodes that settle only at the next checkpoint.
-fn plain_filler(builder: BytecodeBuilder, pairs: usize) -> BytecodeBuilder {
-    let mut builder = builder;
-    for _ in 0..pairs {
-        builder = builder.push_number(1u64).append(POP);
-    }
-    builder
-}
 
 /// A callee that performs [`CHILD_PAIRS`] pairs of real work and then ends its frame with a stack
 /// underflow — an exceptional halt that is not a gas shortage, so the interpreter keeps its
@@ -413,24 +398,17 @@ fn transact_create_reject(
     let mut cfg = CfgEnv::default();
     cfg.spec = MegaSpecId::REX7;
     cfg.limit_contract_code_size = code_size_limit.or(Some(MAX_CONTRACT_SIZE));
-    let mut context = MegaContext::new(&mut db, MegaSpecId::REX7)
-        .with_cfg(cfg)
-        .with_tx_runtime_limits(EvmTxRuntimeLimits::from_spec(MegaSpecId::REX7));
-    context.modify_chain(|chain| {
-        chain.operator_fee_scalar = Some(U256::from(0));
-        chain.operator_fee_constant = Some(U256::from(0));
-    });
+    let context = zero_operator_fee(
+        MegaContext::new(&mut db, MegaSpecId::REX7)
+            .with_cfg(cfg)
+            .with_tx_runtime_limits(EvmTxRuntimeLimits::from_spec(MegaSpecId::REX7)),
+    );
     let tx =
         TxEnvBuilder::default().caller(CALLER).call(CONTRACT).gas_limit(gas_limit).build_fill();
     let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
     let mut evm = MegaEvm::new(context);
-    let outcome = evm.execute_transaction(tx).expect("tx should not surface EVMError");
-    let (detained_compute_gas_limit, terms) = {
-        let additional_limit = EvmTr::ctx_ref(&evm).additional_limit.borrow();
-        (additional_limit.detained_compute_gas_limit(), additional_limit.conservation_terms())
-    };
-    finish(MegaSpecId::REX7, outcome, detained_compute_gas_limit, terms)
+    drive(MegaSpecId::REX7, &mut evm, tx)
 }
 
 /// Runtime length the CREATE cases deploy — small enough that the per-byte code-deposit storage

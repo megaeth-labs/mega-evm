@@ -26,7 +26,9 @@
 //! any input. What survives here is the pair that is still decidable: installing the built-in
 //! rate explicitly changes nothing, and installing anything else is turned away.
 
-use crate::common::{default_envs, finish, transact_tx, Outcome, CALLER, ONE_ETH};
+use crate::common::{
+    default_envs, drive, transact_tx, zero_operator_fee, Outcome, CALLER, ONE_ETH,
+};
 use alloy_primitives::{Address, Bytes, TxKind, U256};
 use alloy_sol_types::SolError as _;
 use mega_evm::{
@@ -38,7 +40,6 @@ use revm::{
     bytecode::opcode::{MSTORE, POP, RETURN, TIMESTAMP},
     context::{result::ExecutionResult, tx::TxEnvBuilder, CfgEnv},
     context_interface::cfg::GasId,
-    handler::EvmTr,
     state::EvmState,
 };
 
@@ -185,7 +186,7 @@ fn test_create_frame_local_code_deposit_exceed_records_nothing() {
     // Nothing was destroyed and nothing was latched: with the charge not made, the transaction is
     // within its limits and the reverted frame is an ordinary revert.
     assert_eq!(rex7.destroyed, 0, "a reverted frame keeps its gas; nothing is destroyed");
-    assert_eq!(rex7.booked_destroyed, 0, "no site may book a destroyed remainder here");
+    assert_eq!(rex7.booked_destroyed(), 0, "no site may book a destroyed remainder here");
     assert_eq!(
         rex7.enforced(),
         rex7.compute_gas,
@@ -448,13 +449,11 @@ fn create_at_rate(rate: u64, gas_limit: u64) -> Outcome {
     let mut db = MemoryDatabase::default().account_balance(CALLER, U256::from(10 * ONE_ETH));
     let mut cfg = CfgEnv::new_with_spec(MegaSpecId::REX7);
     cfg.gas_params.override_gas([(GasId::code_deposit_cost(), rate)]);
-    let mut context = MegaContext::new(&mut db, MegaSpecId::REX7)
-        .with_cfg(cfg)
-        .with_tx_runtime_limits(EvmTxRuntimeLimits::no_limits());
-    context.modify_chain(|chain| {
-        chain.operator_fee_scalar = Some(U256::from(0));
-        chain.operator_fee_constant = Some(U256::from(0));
-    });
+    let context = zero_operator_fee(
+        MegaContext::new(&mut db, MegaSpecId::REX7)
+            .with_cfg(cfg)
+            .with_tx_runtime_limits(EvmTxRuntimeLimits::no_limits()),
+    );
     let tx = TxEnvBuilder::default()
         .caller(CALLER)
         .kind(TxKind::Create)
@@ -465,12 +464,7 @@ fn create_at_rate(rate: u64, gas_limit: u64) -> Outcome {
     let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
     let mut evm = MegaEvm::new(context);
-    let outcome = evm.execute_transaction(tx).expect("tx should not surface EVMError");
-    let (detained_compute_gas_limit, terms) = {
-        let additional_limit = EvmTr::ctx_ref(&evm).additional_limit.borrow();
-        (additional_limit.detained_compute_gas_limit(), additional_limit.conservation_terms())
-    };
-    finish(MegaSpecId::REX7, outcome, detained_compute_gas_limit, terms)
+    drive(MegaSpecId::REX7, &mut evm, tx)
 }
 
 /// Installing a rate explicitly is not itself a deviation: a schedule that names revm's built-in

@@ -9,7 +9,9 @@
 //! Each opcode is run twice: once plainly, and once with a detention cap engaged before it so a
 //! clamp is outstanding when its prologue runs. Both runs must be indistinguishable from REX6.
 
-use crate::common::{assert_outcomes_identical, transact, CALLEE, CALLER, CONTRACT, ONE_ETH};
+use crate::common::{
+    assert_outcomes_identical, base_db as common_base_db, plain_filler, transact, CALLEE,
+};
 use alloy_primitives::{Bytes, U256};
 use mega_evm::{
     test_utils::{BytecodeBuilder, MemoryDatabase},
@@ -22,20 +24,7 @@ use revm::bytecode::opcode::{
 };
 
 fn base_db(code: Bytes) -> MemoryDatabase {
-    MemoryDatabase::default()
-        .account_balance(CALLER, U256::from(10 * ONE_ETH))
-        .account_code(CONTRACT, code)
-        .account_balance(CONTRACT, U256::from(ONE_ETH))
-        .account_code(CALLEE, BytecodeBuilder::default().append(STOP).build())
-}
-
-/// `pairs` PUSH1/POP pairs — plain opcodes that record nothing of their own.
-fn plain_filler(builder: BytecodeBuilder, pairs: usize) -> BytecodeBuilder {
-    let mut builder = builder;
-    for _ in 0..pairs {
-        builder = builder.push_number(1u64).append(POP);
-    }
-    builder
+    common_base_db(code).account_code(CALLEE, BytecodeBuilder::default().append(STOP).build())
 }
 
 /// Wraps `snippet` in plain segments on both sides, optionally engaging a detention cap first, so

@@ -16,7 +16,7 @@
 //! - an observation-only inspector changes nothing at all;
 //! - and removing gas is measured with the same machinery as adding it.
 
-use crate::common::{CALLEE, CALLER, CONTRACT, ONE_ETH};
+use crate::common::{base_db, CALLEE, CALLER, CONTRACT};
 use alloy_primitives::{Bytes, U256};
 use mega_evm::{
     test_utils::{BytecodeBuilder, MemoryDatabase},
@@ -187,13 +187,6 @@ fn read(limit: &AdditionalLimit, outcome: MegaTransactionOutcome) -> Reading {
         ledger: outcome.inspector_ledger,
         state: outcome.result_and_state.state,
     }
-}
-
-fn base_db(code: Bytes) -> MemoryDatabase {
-    MemoryDatabase::default()
-        .account_balance(CALLER, U256::from(10 * ONE_ETH))
-        .account_code(CONTRACT, code)
-        .account_balance(CONTRACT, U256::from(ONE_ETH))
 }
 
 /// A countdown loop of plain opcodes with no checkpoint anywhere in the body, so the whole run is

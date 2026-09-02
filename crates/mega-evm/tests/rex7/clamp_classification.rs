@@ -15,13 +15,14 @@
 //! settlement that runs after the exceed is latched.
 
 use crate::common::{
-    transact, transact_default, transact_with_gas_limit, Outcome, CALLEE, CALLER, CONTRACT, ONE_ETH,
+    base_db, plain_filler as common_plain_filler, transact, transact_default,
+    transact_with_gas_limit, Outcome, CALLEE,
 };
 use alloy_primitives::{Bytes, U256};
 use alloy_sol_types::SolError;
 use mega_evm::{
-    test_utils::{BytecodeBuilder, MemoryDatabase},
-    EvmTxRuntimeLimits, LimitKind, MegaHaltReason, MegaLimitExceeded, MegaSpecId,
+    test_utils::BytecodeBuilder, EvmTxRuntimeLimits, LimitKind, MegaHaltReason, MegaLimitExceeded,
+    MegaSpecId,
 };
 use revm::{
     bytecode::opcode::{
@@ -31,25 +32,13 @@ use revm::{
     context::result::ExecutionResult,
 };
 
-fn base_db(code: Bytes) -> MemoryDatabase {
-    MemoryDatabase::default()
-        .account_balance(CALLER, U256::from(10 * ONE_ETH))
-        .account_code(CONTRACT, code)
-        .account_balance(CONTRACT, U256::from(ONE_ETH))
-}
-
 /// Per-spec runtime limits with the TX compute gas limit replaced.
 fn compute_limit(limit: u64) -> impl Fn(MegaSpecId) -> EvmTxRuntimeLimits {
     move |spec| EvmTxRuntimeLimits::from_spec(spec).with_tx_compute_gas_limit(limit)
 }
 
-/// `pairs` PUSH1/POP pairs — plain opcodes that record nothing of their own, five gas each.
 fn plain_filler(pairs: usize) -> Vec<u8> {
-    let mut builder = BytecodeBuilder::default();
-    for _ in 0..pairs {
-        builder = builder.push_number(1u64).append(POP);
-    }
-    builder.build_vec()
+    common_plain_filler(BytecodeBuilder::default(), pairs).build_vec()
 }
 
 // ---------------------------------------------------------------------------------------------

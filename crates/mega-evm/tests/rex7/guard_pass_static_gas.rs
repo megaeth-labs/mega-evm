@@ -14,15 +14,14 @@
 //! remaining, which is what the interceptor reads once the frames have been popped.
 
 use crate::common::{
-    finish, transact, Outcome, CALLEE, CALLER, CONTRACT, DEFAULT_TX_GAS_LIMIT, ONE_ETH,
+    base_db, context, drive, transact, Outcome, CALLEE, CALLER, CONTRACT, DEFAULT_TX_GAS_LIMIT,
 };
 use alloy_primitives::{Bytes, U256};
 use alloy_sol_types::{SolCall as _, SolError};
 use mega_evm::{
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    EvmTxRuntimeLimits, IMegaLimitControl, LimitKind, MegaContext, MegaEvm, MegaLimitExceeded,
-    MegaSpecId, MegaTransaction, MegaTransactionNew as _, VolatileDataAccess,
-    LIMIT_CONTROL_ADDRESS,
+    EvmTxRuntimeLimits, IMegaLimitControl, LimitKind, MegaEvm, MegaLimitExceeded, MegaSpecId,
+    MegaTransaction, MegaTransactionNew as _, VolatileDataAccess, LIMIT_CONTROL_ADDRESS,
 };
 use revm::{
     bytecode::opcode::{CALL, MLOAD, POP, SELFBALANCE, SSTORE, STATICCALL, STOP, TIMESTAMP},
@@ -41,13 +40,6 @@ const REMAINING_SLOT: u64 = 0xc0;
 
 fn compute_limit(limit: u64) -> EvmTxRuntimeLimits {
     EvmTxRuntimeLimits::from_spec(MegaSpecId::REX7).with_tx_compute_gas_limit(limit)
-}
-
-fn base_db(code: Bytes) -> MemoryDatabase {
-    MemoryDatabase::default()
-        .account_balance(CALLER, U256::from(10 * ONE_ETH))
-        .account_code(CONTRACT, code)
-        .account_balance(CONTRACT, U256::from(ONE_ETH))
 }
 
 /// Codex / knife-edge program: `TIMESTAMP; POP; STOP`.
@@ -86,11 +78,7 @@ fn run(code: Bytes, limits: EvmTxRuntimeLimits) -> GuardPassRun {
 }
 
 fn run_db(mut db: MemoryDatabase, limits: EvmTxRuntimeLimits) -> GuardPassRun {
-    let mut context = MegaContext::new(&mut db, MegaSpecId::REX7).with_tx_runtime_limits(limits);
-    context.modify_chain(|chain| {
-        chain.operator_fee_scalar = Some(U256::from(0));
-        chain.operator_fee_constant = Some(U256::from(0));
-    });
+    let mut evm = MegaEvm::new(context(&mut db, MegaSpecId::REX7, limits));
     let tx = TxEnvBuilder::default()
         .caller(CALLER)
         .call(CONTRACT)
@@ -98,18 +86,10 @@ fn run_db(mut db: MemoryDatabase, limits: EvmTxRuntimeLimits) -> GuardPassRun {
         .build_fill();
     let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
-    let mut evm = MegaEvm::new(context);
-    let executed = evm.execute_transaction(tx).expect("tx should not surface EVMError");
-    let (detained_compute_gas_limit, remaining_compute_gas, terms) = {
-        let additional_limit = evm.ctx_ref().additional_limit.borrow();
-        (
-            additional_limit.detained_compute_gas_limit(),
-            additional_limit.current_call_remaining_compute_gas(),
-            additional_limit.conservation_terms(),
-        )
-    };
+    let outcome = drive(MegaSpecId::REX7, &mut evm, tx);
+    let remaining_compute_gas =
+        evm.ctx_ref().additional_limit.borrow().current_call_remaining_compute_gas();
     let accessed = evm.ctx_ref().volatile_data_tracker.borrow().get_volatile_data_accessed();
-    let outcome = finish(MegaSpecId::REX7, executed, detained_compute_gas_limit, terms);
     GuardPassRun { outcome, accessed, remaining_compute_gas }
 }
 
