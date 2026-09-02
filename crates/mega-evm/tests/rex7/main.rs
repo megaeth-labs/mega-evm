@@ -27,9 +27,11 @@
 //!   keep the envelope book the unperformed part as destroyed, the rescued one books nothing.
 //! - `latch_surfacing` — where a latched data-size / KV-update / state-growth exceed becomes a
 //!   stop.
-//! - `ledger_blind_spots` — the four rewrite shapes an all-zero ledger used to admit: a frame's
+//! - `ledger_blind_spots` — the six rewrite shapes an all-zero ledger used to admit: a frame's
 //!   memory grown for free, a call or create outcome's metadata rewritten around the result inside
-//!   it, and two edits to one signed lane that cancel — within a frame and across two of them.
+//!   it, two edits to one signed lane that cancel — within a frame and across two of them — an
+//!   instruction deleted from a frame by stepping its program counter past it, and a return buffer
+//!   conjured in front of a frame that made no call.
 //! - `measured_inspector` — the shim every inspector is wrapped in: gas an inspector writes into an
 //!   interpreter counter or a frame's gas limit is measured at the callback boundary, booked, and
 //!   kept out of enforcement, with the clamp re-derived on the spot; reviving a failed creation is

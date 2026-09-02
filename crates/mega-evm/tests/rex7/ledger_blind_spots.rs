@@ -16,12 +16,17 @@
 //! - two edits to the *same* signed lane in opposite directions, which a net-only reading cancels
 //!   to zero;
 //! - the same cancellation spread across two frames, where only one of the two survives to the
-//!   receipt, so the net is zero and the effect is not.
+//!   receipt, so the net is zero and the effect is not;
+//! - an instruction deleted from a frame, by stepping the program counter past it, so the work is
+//!   never performed and there is nothing for any counter to meter;
+//! - a return buffer put in front of a frame that made no call, so `RETURNDATASIZE` reads a length
+//!   no call produced.
 //!
-//! The first two are booked on `InspectorLedger::interventions`, from a snapshot the shim did not
-//! used to take; the last two are what the per-lane gross activity counters exist for. Every test
+//! Four of them are booked on `InspectorLedger::interventions`, from readings the shim did not use
+//! to take; the cancelling pair are what the per-lane gross activity counters exist for. Every test
 //! here asserts the ledger the shim books *and* the effect the rewrite had, because a shape that no
 //! longer changes anything is a shape that stopped testing the guard.
+
 
 use crate::common::{transact, transact_inspected, CALLEE, CONTRACT, EMPTY_TARGET, ONE_ETH};
 use alloy_primitives::{address, Address, Bytes, U256};
@@ -30,10 +35,12 @@ use mega_evm::{
     EvmTxRuntimeLimits, MegaSpecId,
 };
 use revm::{
-    bytecode::opcode::{CALL, CREATE, GAS, MLOAD, MSTORE, MSTORE8, POP, RETURN, STOP},
+    bytecode::opcode::{
+        CALL, CREATE, GAS, MLOAD, MSTORE, MSTORE8, POP, RETURN, RETURNDATASIZE, SSTORE, STOP,
+    },
     context::{Cfg, ContextTr},
     interpreter::{
-        interpreter_types::{Jumps, MemoryTr},
+        interpreter_types::{Jumps, MemoryTr, ReturnData},
         CallInputs, CallOutcome, CreateInputs, CreateOutcome, Interpreter, InterpreterTypes,
     },
     Inspector,
@@ -187,7 +194,7 @@ fn test_a_moved_return_range_is_booked() {
         .push_number(u64::try_from(RETURN_AT).unwrap())
         .append(MLOAD)
         .push_number(RESULT_SLOT)
-        .append(revm::bytecode::opcode::SSTORE)
+        .append(SSTORE)
         .append(STOP)
         .build();
     // The callee returns one word of 0x11s.
@@ -264,7 +271,7 @@ fn test_a_rewritten_deployment_address_is_booked() {
         .push_number(0u64)
         .append(CREATE)
         .push_number(RESULT_SLOT)
-        .append(revm::bytecode::opcode::SSTORE)
+        .append(SSTORE)
         .append(STOP)
         .build();
 
@@ -328,7 +335,7 @@ fn test_cancelling_counter_edits_are_booked() {
     let code = BytecodeBuilder::default()
         .append(GAS)
         .push_number(RESULT_SLOT)
-        .append(revm::bytecode::opcode::SSTORE)
+        .append(SSTORE)
         .append(STOP)
         .build();
 
@@ -440,6 +447,153 @@ fn test_cancelling_refunds_across_frames_are_booked() {
     assert!(
         !cheated.inspector_ledger.is_zero(),
         "a receipt an inspector moved must not read as untouched: {:?}",
+        cheated.inspector_ledger,
+    );
+}
+
+// --- an opcode skipped, and a return buffer conjured
+// ----------------------------------------------
+
+/// What the fixture's `SSTORE` writes when it runs.
+const STORED: u64 = 0x99;
+
+/// The gas a cold `SSTORE` into a zero slot costs, which is what skipping it saves.
+const COLD_SSTORE_SET: u64 = 22_100;
+
+/// How many bytes of return data the forging inspector conjures.
+///
+/// Non-zero and a whole number of words, so that the `SSTORE` that stores it turns a zero slot
+/// into a non-zero one — which is a different charge as well as a different value.
+const CONJURED_RETURN_DATA: u64 = 96;
+
+/// Advances the program counter past the frame's `SSTORE`, so the EVM never executes it.
+///
+/// revm's inspected loop runs this callback *before* the instruction, and the interpreter reads
+/// the opcode it is about to execute from the very pointer this moves. Stepping the pointer on by
+/// one byte therefore deletes one instruction from the frame: the two operands the `SSTORE` would
+/// have consumed stay on the stack, the `STOP` after it runs instead, and the frame ends where it
+/// was going to end.
+///
+/// Nothing about this reaches a gas counter. The work is not performed, so there is nothing for
+/// the EVM to meter and nothing for a gas lane to see.
+#[derive(Default)]
+struct SkipTheStore {
+    fired: u32,
+}
+
+impl<CTX, INTR: InterpreterTypes> Inspector<CTX, INTR> for SkipTheStore {
+    fn step(&mut self, interp: &mut Interpreter<INTR>, _context: &mut CTX) {
+        if self.fired > 0 || interp.bytecode.opcode() != SSTORE {
+            return;
+        }
+        interp.bytecode.relative_jump(1);
+        self.fired += 1;
+    }
+}
+
+/// ★ A frame with an opcode skipped out from under it is not an all-zero ledger.
+///
+/// The rewrite is the free-expansion shape's twin and is strictly worse: it does not merely make
+/// the frame's next charge cheaper, it deletes an instruction from the frame. The transaction ends
+/// with different storage *and* a smaller bill, and every gas lane reads zero because the gas that
+/// went missing was never spent by anybody.
+#[test]
+fn test_a_skipped_opcode_is_booked() {
+    let code = BytecodeBuilder::default()
+        .sstore(U256::from(RESULT_SLOT), U256::from(STORED))
+        .append(STOP)
+        .build();
+
+    let limits = EvmTxRuntimeLimits::from_spec(MegaSpecId::REX7);
+    let plain = transact(MegaSpecId::REX7, db_with(code.clone()), limits);
+    let mut inspector = SkipTheStore::default();
+    let cheated = transact_inspected(MegaSpecId::REX7, db_with(code), limits, &mut inspector);
+
+    assert_eq!(inspector.fired, 1, "the fixture must reach the store exactly once");
+    assert!(plain.is_success() && cheated.is_success(), "both runs must succeed");
+    assert_eq!(
+        plain.storage_value(CONTRACT, U256::from(RESULT_SLOT)),
+        U256::from(STORED),
+        "without the rewrite the frame stores what its bytecode says",
+    );
+    assert_eq!(
+        cheated.storage_value(CONTRACT, U256::from(RESULT_SLOT)),
+        U256::ZERO,
+        "with it, the store never happens",
+    );
+    assert_eq!(
+        plain.total_gas_spent - cheated.total_gas_spent,
+        COLD_SSTORE_SET,
+        "the deleted instruction is the charge the transaction then did not pay",
+    );
+    assert!(
+        !cheated.inspector_ledger.is_zero(),
+        "a transaction an inspector deleted an instruction from must not read as untouched: {:?}",
+        cheated.inspector_ledger,
+    );
+}
+
+/// Puts return data in front of a frame that has made no call.
+///
+/// `RETURNDATASIZE` reads the buffer's length, so the frame goes on to store a number no call
+/// produced. The buffer is the interpreter's own, reachable through `ReturnData` on any live
+/// interpreter, and its length is a constant-time reading exactly like the memory's size.
+#[derive(Default)]
+struct ForgeReturnData {
+    fired: u32,
+}
+
+impl<CTX, INTR: InterpreterTypes> Inspector<CTX, INTR> for ForgeReturnData {
+    fn step(&mut self, interp: &mut Interpreter<INTR>, _context: &mut CTX) {
+        if self.fired > 0 || interp.bytecode.opcode() != RETURNDATASIZE {
+            return;
+        }
+        interp.return_data.set_buffer(Bytes::from(vec![0u8; CONJURED_RETURN_DATA as usize]));
+        self.fired += 1;
+    }
+}
+
+/// ★ A frame handed return data it never received is not an all-zero ledger.
+///
+/// The frame made no call, so the EVM's own buffer is empty and the store is a zero-to-zero
+/// no-op. With the rewrite the same store turns a zero slot into a non-zero one, which changes the
+/// post-state and costs the transaction more — in the opposite direction to every other shape
+/// here, and just as invisible to a lane that only watches gas counters.
+#[test]
+fn test_a_forged_return_buffer_is_booked() {
+    let code = BytecodeBuilder::default()
+        .append(RETURNDATASIZE)
+        .push_number(RESULT_SLOT)
+        .append(SSTORE)
+        .append(STOP)
+        .build();
+
+    let limits = EvmTxRuntimeLimits::from_spec(MegaSpecId::REX7);
+    let plain = transact(MegaSpecId::REX7, db_with(code.clone()), limits);
+    let mut inspector = ForgeReturnData::default();
+    let cheated = transact_inspected(MegaSpecId::REX7, db_with(code), limits, &mut inspector);
+
+    assert_eq!(inspector.fired, 1, "the fixture must reach the read exactly once");
+    assert!(plain.is_success() && cheated.is_success(), "both runs must succeed");
+    assert_eq!(
+        plain.storage_value(CONTRACT, U256::from(RESULT_SLOT)),
+        U256::ZERO,
+        "a frame that made no call has no return data",
+    );
+    assert_eq!(
+        cheated.storage_value(CONTRACT, U256::from(RESULT_SLOT)),
+        U256::from(CONJURED_RETURN_DATA),
+        "with the rewrite it reads the length of a buffer no call produced",
+    );
+    assert!(
+        cheated.total_gas_spent > plain.total_gas_spent,
+        "and pays for the non-zero store the rewrite turned it into: {} vs {}",
+        cheated.total_gas_spent,
+        plain.total_gas_spent,
+    );
+    assert!(
+        !cheated.inspector_ledger.is_zero(),
+        "a transaction whose state a forged buffer changed must not read as untouched: {:?}",
         cheated.inspector_ledger,
     );
 }
