@@ -58,7 +58,7 @@ use mega_evm::revm::{
     handler::FrameResult,
     inspector::Inspector,
     interpreter::{
-        interpreter_types::{Jumps, LoopControl, MemoryTr, StackTr},
+        interpreter_types::{Jumps, LoopControl, MemoryTr, ReturnData, StackTr},
         CallInputs, CallOutcome, CreateInputs, CreateOutcome, FrameInput, Gas, InstructionResult,
         Interpreter, InterpreterAction, InterpreterResult, InterpreterTypes,
     },
@@ -218,11 +218,17 @@ pub enum ChaosShape {
     /// lane's net is zero and — whenever the two frames end differently — the receipt's is
     /// not.
     CancelRefundEdit,
+    /// The program counter stepped past the instruction the frame was about to execute, deleting
+    /// it from the frame. The work is never performed, so no counter falls and no lane moves.
+    SkipOpcode,
+    /// A return buffer put in front of the frame, so its `RETURNDATASIZE` and `RETURNDATACOPY`
+    /// read data no call produced.
+    RewriteReturnData,
 }
 
 impl ChaosShape {
     /// Every shape, in the order the labels are listed by `--chaos-shapes`.
-    pub const ALL: [Self; 25] = [
+    pub const ALL: [Self; 27] = [
         Self::InjectGas,
         Self::DrainGas,
         Self::EditFrameState,
@@ -248,6 +254,8 @@ impl ChaosShape {
         Self::MoveOutcomeMetadata,
         Self::CancelGasEdit,
         Self::CancelRefundEdit,
+        Self::SkipOpcode,
+        Self::RewriteReturnData,
     ];
 
     /// The shape a label names.
@@ -292,6 +300,8 @@ impl ChaosShape {
             Self::MoveOutcomeMetadata => "move_outcome_metadata",
             Self::CancelGasEdit => "cancel_gas_edit",
             Self::CancelRefundEdit => "cancel_refund_edit",
+            Self::SkipOpcode => "skip_opcode",
+            Self::RewriteReturnData => "rewrite_return_data",
         }
     }
 
@@ -328,17 +338,26 @@ impl ChaosShape {
                 // rather than leaving these three shapes out of the gate.
                 Self::RaiseRefund |
                 Self::LowerRefund |
-                Self::CancelRefundEdit
+                Self::CancelRefundEdit |
+                // Both move a constant-time reading the shim takes off every live interpreter,
+                // and both are drawn only in the window where they move it: a skip is withheld
+                // unless the frame is still running, and a rewritten return buffer always gets a
+                // length the current one does not have.
+                Self::SkipOpcode |
+                Self::RewriteReturnData
         )
     }
 }
 
 /// Shapes reachable from a callback that holds a live interpreter.
 ///
-/// The last two only land at the one callback that runs with an action already pending —
-/// `step_end`, which revm's inspected loop runs after the instruction that set it. A draw for them
-/// anywhere else leaves the interpreter alone and spends no budget.
-const INTERPRETER_SHAPES: [ChaosShape; 12] = [
+/// `RaiseActionGas` and `LowerActionGas` only land at the one callback that runs with an action
+/// already pending — `step_end`, which revm's inspected loop runs after the instruction that set
+/// it. A draw for them anywhere else leaves the interpreter alone and spends no budget.
+/// `SkipOpcode` is withheld in the opposite window, at a callback whose frame is already
+/// terminating, and at an instruction whose deletion would move the frame off an instruction
+/// boundary.
+const INTERPRETER_SHAPES: [ChaosShape; 14] = [
     ChaosShape::InjectGas,
     ChaosShape::DrainGas,
     ChaosShape::EditFrameState,
@@ -351,6 +370,8 @@ const INTERPRETER_SHAPES: [ChaosShape; 12] = [
     ChaosShape::WriteStateGas,
     ChaosShape::GrowMemoryFree,
     ChaosShape::CancelGasEdit,
+    ChaosShape::SkipOpcode,
+    ChaosShape::RewriteReturnData,
 ];
 
 /// Shapes reachable from a callback that holds a frame's inputs, before the frame is built.
@@ -673,6 +694,12 @@ impl ChaosInspector {
                     return;
                 }
             }
+            ChaosShape::SkipOpcode => {
+                if !skip_opcode(interp) {
+                    return;
+                }
+            }
+            ChaosShape::RewriteReturnData => rewrite_return_data(interp, entropy),
             ChaosShape::CancelGasEdit => {
                 // The give-back is taken at the next live-interpreter callback, by
                 // `settle_pending_gas`. A second draw while one is outstanding leaves the
@@ -875,6 +902,65 @@ fn grow_memory_free<CTX: ContextTr, INTR: InterpreterTypes>(
     let cost = context.cfg().gas_params().memory_cost(words);
     interp.gas.memory_mut().set_words_num(words, cost);
     true
+}
+
+/// Steps the program counter past the instruction the frame was about to execute, returning
+/// whether anything moved.
+///
+/// This is the shape with the sharpest teeth in the pool — it does not make an instruction cheaper,
+/// it deletes one — and it is also the only one that can move the frame off an instruction
+/// boundary, so its guard is what keeps the sweep's executions well-formed rather than merely
+/// different.
+///
+/// Three conditions, each load-bearing:
+///
+/// - **The frame is still running.** With a terminating action already pending, revm's inspected
+///   loop breaks without reading the counter again, so a skip there changes nothing about the
+///   execution while still costing budget.
+/// - **The instruction is not a `PUSH`.** A `PUSH` is the one instruction whose bytes are not all
+///   opcodes, so skipping its opcode byte leaves its immediate data to be executed as code and the
+///   whole rest of the frame decodes at the wrong offsets. Skipping any other single-byte
+///   instruction lands exactly on the next instruction boundary: the frame executes its own
+///   bytecode with one instruction removed, which is a well-formed program and a reproducible one.
+/// - **The instruction does not end the frame.** Skipping a `STOP` or a `RETURN` would carry
+///   execution past the point the frame was going to stop, into whatever follows it. That is
+///   bounded — the analysed bytecode is padded with `STOP`, and gas bounds it in any case — but it
+///   makes a frame's cost a function of what happens to sit after its terminator, which is the
+///   opposite of what a corpus sweep wants.
+///
+/// Termination is not at risk under those conditions. Deleting an instruction cannot create a
+/// backward jump the bytecode did not already contain, every path still ends at a terminator or
+/// runs out of gas, and the budget bounds how many instructions one transaction can lose.
+fn skip_opcode<INTR: InterpreterTypes>(interp: &mut Interpreter<INTR>) -> bool {
+    /// `PUSH1` through `PUSH32` — every opcode that carries immediate bytes.
+    const PUSH_RANGE: core::ops::RangeInclusive<u8> = 0x60..=0x7F;
+    /// `STOP`, `RETURN`, `REVERT`, `INVALID`, `SELFDESTRUCT`.
+    const TERMINATORS: [u8; 5] = [0x00, 0xF3, 0xFD, 0xFE, 0xFF];
+
+    if !interp.bytecode.is_not_end() {
+        return false;
+    }
+    let opcode = interp.bytecode.opcode();
+    if PUSH_RANGE.contains(&opcode) || TERMINATORS.contains(&opcode) {
+        return false;
+    }
+    interp.bytecode.relative_jump(1);
+    true
+}
+
+/// Puts a return buffer in front of the frame that no call of its own produced.
+///
+/// The length always differs from the one the buffer has, which is what makes the shape
+/// unconditionally visible: the shim reads the buffer's identity, and a replacement of a different
+/// length moves it whatever the allocator does with the old one. It is also what the frame reads —
+/// `RETURNDATASIZE` returns exactly this number.
+///
+/// Growing rather than shrinking, and by at most a word or so at a time, so that a
+/// `RETURNDATACOPY` the fixture makes can only succeed where it would have reverted, and the
+/// buffer stays small enough that the copy it pays for is bounded by the mutation budget.
+fn rewrite_return_data<INTR: InterpreterTypes>(interp: &mut Interpreter<INTR>, entropy: u64) {
+    let len = interp.return_data.buffer().len() + 1 + (entropy % 32) as usize;
+    interp.return_data.set_buffer(Bytes::from(vec![(entropy % 256) as u8; len]));
 }
 
 /// Writes one of the receipt figures that is not the envelope, returning whether anything moved.

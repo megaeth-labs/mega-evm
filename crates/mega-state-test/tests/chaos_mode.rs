@@ -156,7 +156,7 @@ fn test_a_vector_seed_separates_every_part_of_the_identity() {
 fn test_narrowing_the_filter_keeps_the_surviving_mutations() {
     // A seed whose full run draws both of the shapes the narrowed one keeps; which seeds those are
     // is a function of the pool's size, so a shape added to the pool can move it.
-    const SEED: u64 = 3;
+    const SEED: u64 = 2;
     let full = mutations(SEED, ShapeFilter::default());
     let only = [ChaosShape::InjectGas, ChaosShape::DrainGas];
     let narrowed = mutations(SEED, ShapeFilter::only(&only));
@@ -182,9 +182,10 @@ fn test_narrowing_the_filter_keeps_the_surviving_mutations() {
 ///
 /// [`ChaosClass::LedgerBlind`] fires when a run applied one of these and the ledger is still
 /// all-zero. That verdict is only meaningful if the premise holds — so this checks the premise
-/// directly, shape by shape, rather than trusting the partition. Three of the shapes here
-/// (`grow_memory_free`, `move_outcome_metadata`, `cancel_refund_edit`) were added because the
-/// shim did *not* book them, and this is the test that would have said so.
+/// directly, shape by shape, rather than trusting the partition. Five of the shapes here
+/// (`grow_memory_free`, `move_outcome_metadata`, `cancel_refund_edit`, `skip_opcode`,
+/// `rewrite_return_data`) were added because the shim did *not* book them, and this is the test
+/// that would have said so.
 #[test]
 fn test_every_always_booked_shape_moves_the_ledger() {
     let always_booked: Vec<ChaosShape> =
