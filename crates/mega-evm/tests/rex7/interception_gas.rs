@@ -24,8 +24,8 @@ use alloy_primitives::{Bytes, U256};
 use mega_evm::{
     test_utils::{BytecodeBuilder, MemoryDatabase},
     AdditionalLimit, ConservationTerms, EmptyExternalEnv, EvmTxRuntimeLimits, InspectorLedger,
-    MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction, MegaTransactionNew as _,
-    MegaTransactionOutcome,
+    Lane, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
+    MegaTransactionNew as _, MegaTransactionOutcome,
 };
 use revm::{
     bytecode::opcode::{CALL, CREATE, MSTORE, MSTORE8, POP, RETURN, STOP},
@@ -238,7 +238,7 @@ fn test_a_half_gas_interception_books_the_gas_it_took_from_the_caller() {
     assert_eq!(
         reading.ledger,
         InspectorLedger {
-            result: Sizing::Half.expected_delta(FORWARDED),
+            result: Lane::once(Sizing::Half.expected_delta(FORWARDED)),
             interventions: 1,
             ..InspectorLedger::default()
         },
@@ -257,7 +257,7 @@ fn test_a_zero_gas_interception_books_the_whole_envelope() {
     assert_eq!(
         reading.ledger,
         InspectorLedger {
-            result: Sizing::Zero.expected_delta(FORWARDED),
+            result: Lane::once(Sizing::Zero.expected_delta(FORWARDED)),
             interventions: 1,
             ..InspectorLedger::default()
         },
@@ -277,7 +277,7 @@ fn test_an_over_funded_interception_books_the_gas_it_conjured() {
     assert_eq!(
         reading.ledger,
         InspectorLedger {
-            result: Sizing::Excess(EXTRA).expected_delta(FORWARDED),
+            result: Lane::once(Sizing::Excess(EXTRA).expected_delta(FORWARDED)),
             interventions: 1,
             ..InspectorLedger::default()
         },
@@ -373,7 +373,7 @@ fn test_the_generic_frame_start_interception_is_measured_too() {
     assert_eq!(
         reading.ledger,
         InspectorLedger {
-            result: Sizing::Half.expected_delta(FORWARDED),
+            result: Lane::once(Sizing::Half.expected_delta(FORWARDED)),
             interventions: 1,
             ..InspectorLedger::default()
         },
@@ -457,7 +457,7 @@ fn test_an_intercepted_creation_is_measured_against_the_envelope_it_was_handed()
     assert_eq!(
         reading.ledger,
         InspectorLedger {
-            result: Sizing::Half.expected_delta(inspector.envelope),
+            result: Lane::once(Sizing::Half.expected_delta(inspector.envelope)),
             interventions: 1,
             ..InspectorLedger::default()
         },
@@ -507,7 +507,7 @@ fn test_the_envelope_is_the_one_the_callback_received_not_the_one_it_left() {
     assert_eq!(
         reading.ledger,
         InspectorLedger {
-            result: i128::from(BONUS),
+            result: Lane::once(i128::from(BONUS)),
             interventions: 1,
             ..InspectorLedger::default()
         },
@@ -545,7 +545,7 @@ fn test_a_frozen_spec_reports_the_lane_without_settling_anything() {
     assert_eq!(
         half.ledger,
         InspectorLedger {
-            result: Sizing::Half.expected_delta(FORWARDED),
+            result: Lane::once(Sizing::Half.expected_delta(FORWARDED)),
             interventions: 1,
             ..InspectorLedger::default()
         },

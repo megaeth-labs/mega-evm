@@ -31,7 +31,7 @@ use alloy_primitives::{address, Address, Bytes, U256};
 use mega_evm::{
     kzg_point_evaluation,
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    EvmTxRuntimeLimits, InspectorLedger, MegaSpecId,
+    EvmTxRuntimeLimits, InspectorLedger, Lane, MegaSpecId,
 };
 use revm::{
     bytecode::opcode::{CALL, INVALID, POP, STOP},
@@ -196,7 +196,7 @@ fn test_an_edit_in_mid_frame_is_still_booked() {
     assert_eq!(fired, 1, "the fixture must reach a mid-frame step_end exactly once");
     assert_eq!(
         edited.inspector_ledger.gas,
-        i128::from(INJECT),
+        Lane::once(i128::from(INJECT)),
         "gas written into a counter the frame will keep spending is conjured gas",
     );
 }
@@ -212,7 +212,7 @@ fn test_an_edit_in_the_suspending_window_is_still_booked() {
     assert_eq!(fired, 1, "the fixture must suspend into a child frame exactly once");
     assert_eq!(
         edited.inspector_ledger.gas,
-        i128::from(INJECT),
+        Lane::once(i128::from(INJECT)),
         "a suspended frame resumes on the edited counter, so the edit reaches the envelope",
     );
 }
@@ -483,7 +483,10 @@ fn test_raising_a_returning_frames_pending_action_is_booked() {
     assert_eq!(inspector.fired, 1, "the fixture must reach a terminating step_end exactly once");
     assert_eq!(
         edited.inspector_ledger,
-        InspectorLedger { result: i128::from(ACTION_DELTA), ..InspectorLedger::default() },
+        InspectorLedger {
+            result: Lane::once(i128::from(ACTION_DELTA)),
+            ..InspectorLedger::default()
+        },
         "an edit to the action a returning frame hands back is an edit to the envelope",
     );
     assert_eq!(
@@ -508,7 +511,10 @@ fn test_lowering_a_returning_frames_pending_action_is_booked() {
     assert_eq!(inspector.fired, 1, "the fixture must reach a terminating step_end exactly once");
     assert_eq!(
         edited.inspector_ledger,
-        InspectorLedger { result: -i128::from(ACTION_DELTA), ..InspectorLedger::default() },
+        InspectorLedger {
+            result: Lane::once(-i128::from(ACTION_DELTA)),
+            ..InspectorLedger::default()
+        },
         "gas taken out of the action is gas the caller never gets back",
     );
     assert_eq!(
@@ -559,7 +565,7 @@ fn test_raising_a_pending_new_frame_action_is_booked_as_an_envelope() {
     assert_eq!(inspector.fired, 1, "the fixture must suspend into a child frame exactly once");
     assert_eq!(
         edited.inspector_ledger,
-        InspectorLedger { env: i128::from(ACTION_DELTA), ..InspectorLedger::default() },
+        InspectorLedger { env: Lane::once(i128::from(ACTION_DELTA)), ..InspectorLedger::default() },
         "the child's budget grew by gas the caller's CALL never forwarded",
     );
     assert_eq!(

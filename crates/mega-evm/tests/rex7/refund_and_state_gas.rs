@@ -24,8 +24,8 @@ use alloy_primitives::{Bytes, U256};
 use mega_evm::{
     test_utils::{BytecodeBuilder, MemoryDatabase},
     AdditionalLimit, ConservationTerms, EmptyExternalEnv, EvmTxRuntimeLimits, InspectorLedger,
-    MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction, MegaTransactionNew as _,
-    MegaTransactionOutcome,
+    Lane, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
+    MegaTransactionNew as _, MegaTransactionOutcome,
 };
 use revm::{
     bytecode::opcode::{CALL, POP, STOP},
@@ -365,7 +365,7 @@ fn test_a_refund_written_into_a_live_interpreter_is_booked() {
 
     assert_eq!(
         edited.ledger,
-        InspectorLedger { refund: i128::from(REFUND), ..InspectorLedger::default() },
+        InspectorLedger { refund: Lane::once(i128::from(REFUND)), ..InspectorLedger::default() },
         "the shim must book the refund and nothing else",
     );
     assert_eq!(
@@ -398,7 +398,7 @@ fn test_a_refund_written_into_a_finished_frame_result_is_booked() {
 
     assert_eq!(
         edited.ledger,
-        InspectorLedger { refund: i128::from(REFUND), ..InspectorLedger::default() },
+        InspectorLedger { refund: Lane::once(i128::from(REFUND)), ..InspectorLedger::default() },
     );
     assert_eq!(edited.refunded, plain.refunded + u64::try_from(REFUND).unwrap());
     assert_eq!(edited.total_gas_spent, plain.total_gas_spent);
@@ -419,7 +419,7 @@ fn test_a_refund_taken_out_of_a_frame_is_booked_with_the_sign_that_says_so() {
     let edited = transact_edited(Callee::Returning, Edit::RefundAtCallEnd(-REFUND));
     assert_eq!(
         edited.ledger,
-        InspectorLedger { refund: -i128::from(REFUND), ..InspectorLedger::default() },
+        InspectorLedger { refund: Lane::once(-i128::from(REFUND)), ..InspectorLedger::default() },
     );
     assert_eq!(edited.refunded, plain.refunded - u64::try_from(REFUND).unwrap());
     assert_eq!(
@@ -443,7 +443,10 @@ fn test_the_refund_lane_reports_what_was_written_not_what_the_cap_let_through() 
 
     assert_eq!(
         edited.ledger,
-        InspectorLedger { refund: i128::from(OVERSIZED_REFUND), ..InspectorLedger::default() },
+        InspectorLedger {
+            refund: Lane::once(i128::from(OVERSIZED_REFUND)),
+            ..InspectorLedger::default()
+        },
         "the lane carries the nominal edit",
     );
     assert_eq!(
@@ -473,7 +476,7 @@ fn test_a_refund_the_frame_chain_discards_is_still_booked() {
 
     assert_eq!(
         edited.ledger,
-        InspectorLedger { refund: i128::from(REFUND), ..InspectorLedger::default() },
+        InspectorLedger { refund: Lane::once(i128::from(REFUND)), ..InspectorLedger::default() },
         "the lane books the edit",
     );
     assert_eq!(
@@ -495,7 +498,10 @@ fn test_a_reservoir_written_into_a_live_interpreter_is_booked_and_the_law_closes
 
     assert_eq!(
         edited.ledger,
-        InspectorLedger { reservoir: i128::from(RESERVOIR), ..InspectorLedger::default() },
+        InspectorLedger {
+            reservoir: Lane::once(i128::from(RESERVOIR)),
+            ..InspectorLedger::default()
+        },
     );
     assert_eq!(
         edited.total_gas_spent,
@@ -519,7 +525,7 @@ fn test_a_reservoir_written_into_a_frame_input_is_booked() {
     assert_eq!(
         edited.ledger,
         InspectorLedger {
-            reservoir: i128::from(RESERVOIR),
+            reservoir: Lane::once(i128::from(RESERVOIR)),
             // The inputs came back changed in a field the envelope lane does not cover, which the
             // rewrite comparison books on its own.
             interventions: 1,
@@ -538,7 +544,10 @@ fn test_a_reservoir_written_into_a_finished_frame_result_is_booked() {
 
     assert_eq!(
         edited.ledger,
-        InspectorLedger { reservoir: i128::from(RESERVOIR), ..InspectorLedger::default() },
+        InspectorLedger {
+            reservoir: Lane::once(i128::from(RESERVOIR)),
+            ..InspectorLedger::default()
+        },
     );
     assert_eq!(edited.total_gas_spent, plain.total_gas_spent - RESERVOIR);
     assert_identity("reservoir at call_end", &edited);
@@ -581,7 +590,10 @@ fn test_state_gas_written_into_a_live_interpreter_reaches_the_receipt_and_is_boo
     );
     assert_eq!(
         edited.ledger,
-        InspectorLedger { state_gas: i128::from(STATE_GAS), ..InspectorLedger::default() },
+        InspectorLedger {
+            state_gas: Lane::once(i128::from(STATE_GAS)),
+            ..InspectorLedger::default()
+        },
     );
     assert_eq!(
         edited.total_gas_spent, plain.total_gas_spent,
@@ -604,7 +616,10 @@ fn test_state_gas_on_a_failing_frame_becomes_its_callers_reservoir() {
 
     assert_eq!(
         edited.ledger,
-        InspectorLedger { reservoir: i128::from(STATE_GAS), ..InspectorLedger::default() },
+        InspectorLedger {
+            reservoir: Lane::once(i128::from(STATE_GAS)),
+            ..InspectorLedger::default()
+        },
         "the spend counter of a reverting frame arrives in its caller as a pool",
     );
     assert_eq!(
@@ -643,7 +658,7 @@ fn test_a_synthetic_outcome_carries_its_own_figures() {
     assert_eq!(
         refunding.ledger,
         InspectorLedger {
-            refund: i128::from(REFUND),
+            refund: Lane::once(i128::from(REFUND)),
             interventions: 1,
             ..InspectorLedger::default()
         },
@@ -661,7 +676,7 @@ fn test_a_synthetic_outcome_carries_its_own_figures() {
     assert_eq!(
         pooled.ledger,
         InspectorLedger {
-            reservoir: i128::from(RESERVOIR),
+            reservoir: Lane::once(i128::from(RESERVOIR)),
             interventions: 1,
             ..InspectorLedger::default()
         },
@@ -716,15 +731,24 @@ fn test_a_frozen_spec_reports_the_lanes_without_settling_anything() {
     for (edit, expected) in [
         (
             Edit::RefundAtStep(REFUND),
-            InspectorLedger { refund: i128::from(REFUND), ..InspectorLedger::default() },
+            InspectorLedger {
+                refund: Lane::once(i128::from(REFUND)),
+                ..InspectorLedger::default()
+            },
         ),
         (
             Edit::ReservoirAtStep,
-            InspectorLedger { reservoir: i128::from(RESERVOIR), ..InspectorLedger::default() },
+            InspectorLedger {
+                reservoir: Lane::once(i128::from(RESERVOIR)),
+                ..InspectorLedger::default()
+            },
         ),
         (
             Edit::StateGasAtStep,
-            InspectorLedger { state_gas: i128::from(STATE_GAS), ..InspectorLedger::default() },
+            InspectorLedger {
+                state_gas: Lane::once(i128::from(STATE_GAS)),
+                ..InspectorLedger::default()
+            },
         ),
     ] {
         let (edited, compute, destroyed) = run(Some(edit));

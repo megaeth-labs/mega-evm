@@ -38,8 +38,8 @@ use alloy_primitives::{Address, Bytes, Log, U256};
 use mega_evm::{
     test_utils::{BytecodeBuilder, MemoryDatabase},
     AdditionalLimit, ConservationTerms, EmptyExternalEnv, EvmTxRuntimeLimits, InspectorLedger,
-    MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction, MegaTransactionNew as _,
-    MegaTransactionOutcome,
+    Lane, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
+    MegaTransactionNew as _, MegaTransactionOutcome,
 };
 use revm::{
     bytecode::opcode::{CALL, CREATE, LOG1, MSTORE, MSTORE8, POP, RETURN, SSTORE, STOP},
@@ -91,6 +91,11 @@ const INIT_SLOT: u64 = 0x30;
 const CLEARED_SLOT: u64 = 0x40;
 /// Value every fixture write stores, so a stack cheat that bumps it is visible as `2`.
 const STORED: u64 = 1;
+
+/// The address the outcome-metadata column makes a successful creation report instead of the one
+/// it deployed to.
+const RELABELLED_DEPLOYMENT: Address =
+    alloy_primitives::address!("00000000000000000000000000000000000f00d0");
 
 /// The address the fixture's `CREATE` deploys to.
 fn deployed_address() -> Address {
@@ -194,13 +199,25 @@ enum Shape {
     WriteStateGas,
     /// Edit the interpreter's stack or memory — the frame's working state, which the EVM reads
     /// back as operands and as data.
+    ///
+    /// Two different rewrites share this column, and the shim can see one of them. A push or a pop
+    /// moves the stack's *length*, which is a constant-time reading the shim takes; overwriting a
+    /// word in place moves neither length and is the contents rewrite that has no lane. Which one
+    /// a row gets is decided by what the frame is doing at that callback, and each row's cell
+    /// states the ledger that follows.
     EditStackOrMemory,
+    /// Grow the frame's memory and the memo of how far it has been paid for, together — so the
+    /// interpreter stays consistent and the next expanding opcode is charged nothing.
+    GrowMemoryFree,
+    /// Edit a finished outcome's metadata: the range a call's return data lands in, or the address
+    /// a creation reports. Neither is part of the `InterpreterResult` the same callback holds.
+    EditOutcomeMetadata,
     /// Write to the journal directly, behind the EVM's back.
     JournalWrite,
 }
 
 impl Shape {
-    const ALL: [Self; 22] = [
+    const ALL: [Self; 24] = [
         Self::InjectGas,
         Self::DrainGas,
         Self::RaiseEnvelope,
@@ -222,6 +239,8 @@ impl Shape {
         Self::WriteReservoir,
         Self::WriteStateGas,
         Self::EditStackOrMemory,
+        Self::GrowMemoryFree,
+        Self::EditOutcomeMetadata,
         Self::JournalWrite,
     ];
 
@@ -329,14 +348,16 @@ fn inapplicable(at: At, shape: Shape) -> Option<&'static str> {
     }
 
     match shape {
-        InjectGas | DrainGas | EditStackOrMemory if !interpreter_facing => {
+        InjectGas | DrainGas | EditStackOrMemory | GrowMemoryFree if !interpreter_facing => {
             Some("no live interpreter is reachable from this callback")
         }
         RaiseEnvelope | LowerEnvelope | EditInput if !input_facing => Some(
             "this callback receives no frame input it can build a frame from: the `*_end` \
              callbacks take theirs by shared reference, after the frame has already run",
         ),
-        RaiseResultGas | LowerResultGas | FailResult | ReviveResult if !result_facing => {
+        RaiseResultGas | LowerResultGas | FailResult | ReviveResult | EditOutcomeMetadata
+            if !result_facing =>
+        {
             Some("no frame result exists yet at this callback")
         }
         ReviveResult if at == CreateEnd => Some(
@@ -412,11 +433,17 @@ impl Cheat {
             }
             Shape::EditStackOrMemory => {
                 // Bump the value an `SSTORE` is about to write, so the edit is visible in the
-                // produced state rather than only in the absence of an accounting change.
+                // produced state rather than only in the absence of an accounting change. Two
+                // pops and two pushes, so the stack's length is where it was: this is the
+                // contents half of the column.
                 let [key, value] =
                     interp.stack.popn::<2>().expect("an SSTORE has both its operands on the stack");
                 assert!(interp.stack.push(value.wrapping_add(U256::from(1))));
                 assert!(interp.stack.push(key));
+                self.fired += 1;
+            }
+            Shape::GrowMemoryFree => {
+                Self::grow_memory_free(interp);
                 self.fired += 1;
             }
             _ => unreachable!("{:?} is not an interpreter-facing shape", self.shape),
@@ -457,6 +484,20 @@ impl Cheat {
             assert!(interp.stack.push(U256::from(0xDEADu64)));
         }
         self.fired += 1;
+    }
+
+    /// Grows the frame's memory by one word and moves the memo with it, so that the interpreter
+    /// is left in a state it could have reached by paying, having paid nothing.
+    ///
+    /// The fixture's first `MSTORE` then finds its word already paid for, and the transaction
+    /// spends exactly that expansion less than the uninspected run — which is what makes this a
+    /// rewrite the guard has to see rather than a curiosity.
+    fn grow_memory_free<INTR: InterpreterTypes>(interp: &mut Interpreter<INTR>) {
+        let words = interp.memory.size() / 32 + 1;
+        assert!(interp.memory.resize(words * 32), "the fixture must allow a one-word growth");
+        let memo = interp.gas.memory_mut();
+        memo.words_num = words;
+        memo.expansion_cost = 3 * words as u64 + (words * words) as u64 / 512;
     }
 
     /// Applies a shape that reaches through the interpreter's *pending action* — the object the
@@ -582,6 +623,27 @@ impl Cheat {
             }
             _ => unreachable!("{:?} is not an input-facing shape", self.shape),
         }
+    }
+
+    /// Applies the one result-facing shape that reaches past the `InterpreterResult` — a finished
+    /// outcome's own metadata.
+    ///
+    /// A call's return range is shrunk to nothing rather than moved, because moving it past the
+    /// caller's allocated memory is a panic in revm and this fixture's caller holds one word. The
+    /// visible-effect form, where the caller then reads a word the callee never wrote, is pinned
+    /// in `ledger_blind_spots.rs`.
+    fn hit_outcome_metadata(&mut self, result: &mut FrameResult) {
+        match result {
+            FrameResult::Call(outcome) => {
+                assert!(
+                    !outcome.memory_offset.is_empty(),
+                    "the fixture's inner CALL must ask for a return range, or there is nothing                      to shrink",
+                );
+                outcome.memory_offset = outcome.memory_offset.start..outcome.memory_offset.start;
+            }
+            FrameResult::Create(outcome) => outcome.address = Some(RELABELLED_DEPLOYMENT),
+        }
+        self.fired += 1;
     }
 
     /// Applies a result-facing shape to a finished frame's result.
@@ -748,6 +810,10 @@ impl<CTX: ContextTr, INTR: InterpreterTypes> Inspector<CTX, INTR> for Cheat {
             self.hit_journal(context);
             return;
         }
+        if self.shape == Shape::EditOutcomeMetadata {
+            self.hit_outcome_metadata(result);
+            return;
+        }
         self.hit_result(result.interpreter_result_mut());
     }
 
@@ -768,6 +834,12 @@ impl<CTX: ContextTr, INTR: InterpreterTypes> Inspector<CTX, INTR> for Cheat {
         }
         if self.shape == Shape::JournalWrite {
             self.hit_journal(context);
+            return;
+        }
+        if self.shape == Shape::EditOutcomeMetadata {
+            assert!(!outcome.memory_offset.is_empty(), "the inner CALL must ask for a range");
+            outcome.memory_offset = outcome.memory_offset.start..outcome.memory_offset.start;
+            self.fired += 1;
             return;
         }
         self.hit_result(&mut outcome.result);
@@ -795,6 +867,11 @@ impl<CTX: ContextTr, INTR: InterpreterTypes> Inspector<CTX, INTR> for Cheat {
         }
         if self.shape == Shape::JournalWrite {
             self.hit_journal(context);
+            return;
+        }
+        if self.shape == Shape::EditOutcomeMetadata {
+            outcome.address = Some(RELABELLED_DEPLOYMENT);
+            self.fired += 1;
             return;
         }
         self.hit_result(&mut outcome.result);
@@ -859,8 +936,12 @@ fn caller_code() -> Bytes {
         .push_number(32u64)
         .push_number(0u64)
         .append(LOG1)
-        // CALL(gas, CALLEE, value=0, argsOffset=0, argsSize=0, retOffset=0, retSize=0)
-        .push_number(0u64)
+        // CALL(gas, CALLEE, value=0, argsOffset=0, argsSize=0, retOffset=0, retSize=32).
+        //
+        // The return range is asked for so that the outcome-metadata column has one to shrink; the
+        // callee returns nothing, so no byte is ever copied and no other cell's numbers move — the
+        // word of memory the range covers was already allocated by the `MSTORE` above.
+        .push_number(32u64)
         .push_number(0u64)
         .push_number(0u64)
         .push_number(0u64)
@@ -1073,15 +1154,15 @@ struct Cell {
 }
 
 fn ledger_gas(gas: i128) -> InspectorLedger {
-    InspectorLedger { gas, ..InspectorLedger::default() }
+    InspectorLedger { gas: Lane::once(gas), ..InspectorLedger::default() }
 }
 
 fn ledger_env(env: i128) -> InspectorLedger {
-    InspectorLedger { env, ..InspectorLedger::default() }
+    InspectorLedger { env: Lane::once(env), ..InspectorLedger::default() }
 }
 
 fn ledger_result(result: i128) -> InspectorLedger {
-    InspectorLedger { result, ..InspectorLedger::default() }
+    InspectorLedger { result: Lane::once(result), ..InspectorLedger::default() }
 }
 
 /// The ledger a rewrite of one of the receipt's other two numbers books.
@@ -1089,15 +1170,15 @@ fn ledger_result(result: i128) -> InspectorLedger {
 /// Separate helpers rather than one, because which of the three figures a shape moves is exactly
 /// what decides whether the conservation law can see it: only the pool is a term of it.
 fn ledger_refund(refund: i128) -> InspectorLedger {
-    InspectorLedger { refund, ..InspectorLedger::default() }
+    InspectorLedger { refund: Lane::once(refund), ..InspectorLedger::default() }
 }
 
 fn ledger_reservoir(reservoir: i128) -> InspectorLedger {
-    InspectorLedger { reservoir, ..InspectorLedger::default() }
+    InspectorLedger { reservoir: Lane::once(reservoir), ..InspectorLedger::default() }
 }
 
 fn ledger_state_gas(state_gas: i128) -> InspectorLedger {
-    InspectorLedger { state_gas, ..InspectorLedger::default() }
+    InspectorLedger { state_gas: Lane::once(state_gas), ..InspectorLedger::default() }
 }
 
 /// The ledger of a rewrite that moves no gas: the shim saw the argument it was handed come back
@@ -1191,12 +1272,31 @@ fn matrix() -> Vec<Cell> {
             ledger_gas(-i128::from(DRAIN)),
             state_all_committed,
         );
+        // The two halves of the working-state column. `step` fires on an `SSTORE`'s operands and
+        // pops and pushes the same two words, so both sizes come back where they were and nothing
+        // is booked — the contents rewrite that has no lane. The other three rows run where there
+        // is no operand to swap, so the cheat leaves a word on the stack instead, and a stack that
+        // came back one word longer is a constant-time reading the shim takes.
         push(
             at,
             EditStackOrMemory,
             Fixture::ReturningCallee,
-            InspectorLedger::default(),
+            if at == At::InitializeInterp {
+                ledger_intervention()
+            } else {
+                InspectorLedger::default()
+            },
             if at == Step { state_callee_write_bumped } else { state_all_committed },
+        );
+        // Growing the memory and its memo together leaves every interpreter invariant intact and
+        // still skips the next expansion's charge, so no gas lane sees it and the intervention
+        // counter must.
+        push(
+            at,
+            GrowMemoryFree,
+            Fixture::ReturningCallee,
+            ledger_intervention(),
+            state_all_committed,
         );
         push(
             at,
@@ -1311,7 +1411,7 @@ fn matrix() -> Vec<Cell> {
             RaiseInterceptionGas,
             Fixture::ReturningCallee,
             InspectorLedger {
-                result: i128::from(INTERCEPTION),
+                result: Lane::once(i128::from(INTERCEPTION)),
                 interventions: 1,
                 ..InspectorLedger::default()
             },
@@ -1322,7 +1422,7 @@ fn matrix() -> Vec<Cell> {
             LowerInterceptionGas,
             Fixture::ReturningCallee,
             InspectorLedger {
-                result: -i128::from(INTERCEPTION),
+                result: Lane::once(-i128::from(INTERCEPTION)),
                 interventions: 1,
                 ..InspectorLedger::default()
             },
@@ -1344,7 +1444,7 @@ fn matrix() -> Vec<Cell> {
                 WriteReservoir,
                 Fixture::ReturningCallee,
                 InspectorLedger {
-                    reservoir: i128::from(RESERVOIR),
+                    reservoir: Lane::once(i128::from(RESERVOIR)),
                     interventions: 1,
                     ..InspectorLedger::default()
                 },
@@ -1388,6 +1488,18 @@ fn matrix() -> Vec<Cell> {
                 state_callee_write_revived,
             );
         }
+        // The half of a finished outcome that sits outside the `InterpreterResult`: where a call's
+        // return data lands, and which address a creation reports. Neither moves gas, and this
+        // fixture discards both — the caller asks for a range the callee never fills and pops the
+        // address — so what the cell pins is the booking. `ledger_blind_spots.rs` pins the forms
+        // that change the produced state.
+        push(
+            at,
+            EditOutcomeMetadata,
+            Fixture::ReturningCallee,
+            ledger_intervention(),
+            state_all_committed,
+        );
         push(
             at,
             JournalWrite,
@@ -1452,7 +1564,8 @@ fn test_every_cheat_shape_is_booked_and_the_law_still_closes() {
         // independent readings of the same edit.
         if cheat.moved_gas != 0 {
             assert_eq!(
-                reading.ledger.gas, cheat.moved_gas,
+                reading.ledger.gas.net(),
+                cheat.moved_gas,
                 "{label}: the shim's reading of the counter edit must match the cheat's own",
             );
         }
@@ -1521,6 +1634,8 @@ fn test_the_matrix_is_inert_with_the_inspected_loops_switched_off() {
         (At::Step, Shape::LowerRefund, Fixture::ReturningCallee),
         (At::CallEnd, Shape::WriteReservoir, Fixture::ReturningCallee),
         (At::FrameEnd, Shape::WriteStateGas, Fixture::ReturningCallee),
+        (At::Step, Shape::GrowMemoryFree, Fixture::ReturningCallee),
+        (At::CreateEnd, Shape::EditOutcomeMetadata, Fixture::ReturningCallee),
     ];
 
     let mut plain: BTreeMap<Fixture, Reading> = BTreeMap::new();

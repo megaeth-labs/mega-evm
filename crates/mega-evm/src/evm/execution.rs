@@ -2079,7 +2079,7 @@ fn gen_oog_frame_result(tx_kind: TxKind, gas_limit: u64) -> FrameResult {
 mod mutation_tests {
     use super::*;
     use crate::{
-        test_utils::MemoryDatabase, AdditionalLimit, EmptyExternalEnv, EvmTxRuntimeLimits,
+        test_utils::MemoryDatabase, AdditionalLimit, EmptyExternalEnv, EvmTxRuntimeLimits, Lane,
         LimitCheck, LimitKind,
     };
     use alloy_primitives::{Address, Log};
@@ -2226,7 +2226,7 @@ mod mutation_tests {
         );
         assert_eq!(
             evm.ctx_ref().additional_limit.borrow().inspector_ledger().result,
-            i128::from(RAISE),
+            Lane::once(i128::from(RAISE)),
             "the caller reclaims the raise, so the ledger must carry it",
         );
         consume_synthetic_limit_frame(evm.ctx_ref(), result);
@@ -2246,7 +2246,7 @@ mod mutation_tests {
         let limit = evm.ctx_ref().additional_limit.borrow();
         assert_eq!(
             limit.inspector_ledger().result,
-            0,
+            Lane::default(),
             "a halting rejection hands nothing back, so the edit reaches nothing",
         );
         assert_eq!(

@@ -42,6 +42,10 @@
 //!   [`AdditionalLimit::stage_inspector_interception_envelope`], so that the frame init it
 //!   short-circuited can settle the gas its synthetic outcome carries against what the transaction
 //!   funded.
+//! - Rewrites that move no gas go to [`book_intervention`]: a frame result's classification or
+//!   output, a frame's inputs outside their gas limit, a finished outcome's metadata
+//!   ([`OutcomeMetadata`]) — and the constant-time readings the shim can take off a live
+//!   interpreter ([`WorkingSet`]), which is what makes a frame's memory grown for free visible.
 //! - One rewrite shape is refused outright: see [`MeasuredInspector::create_end`].
 //!
 //! Nothing here changes what the inspector is allowed to do to the EVM, and nothing here runs on
@@ -49,17 +53,18 @@
 
 #[cfg(not(feature = "std"))]
 use alloc as std;
-use std::string::String;
+use std::{string::String, vec::Vec};
 
 use alloy_evm::Database;
 use alloy_primitives::{Address, Bytes, Log, U256};
+use core::ops::Range;
 use revm::{
     context::{ContextError, ContextTr},
     handler::FrameResult,
     interpreter::{
-        interpreter_types::LoopControl, CallInputs, CallOutcome, CreateInputs, CreateOutcome,
-        FrameInput, Gas, InstructionResult, Interpreter, InterpreterAction, InterpreterResult,
-        InterpreterTypes,
+        interpreter_types::{LoopControl, MemoryTr, StackTr},
+        CallInputs, CallOutcome, CreateInputs, CreateOutcome, FrameInput, Gas, InstructionResult,
+        Interpreter, InterpreterAction, InterpreterResult, InterpreterTypes,
     },
     Inspector,
 };
@@ -414,9 +419,11 @@ fn book_env_adjustment<DB: Database, ExtEnvs: ExternalEnvTypes>(
 ///
 /// - **Gas.** A frame input's gas limit and a frame result's remaining gas are booked as gas, on
 ///   the ledger's own lanes; counting them here as well would report one rewrite twice.
-/// - **Anything the argument does not describe.** The interpreter's stack and memory, the journal,
-///   the pending action. Telling whether those came back changed needs a snapshot of unbounded
-///   state, which no callback boundary can take at a cost the inspected path can carry.
+/// - **Anything neither the argument nor a constant-time reading off it describes.** The contents
+///   of the interpreter's stack and memory, and the journal. Telling whether those came back
+///   changed needs a snapshot of unbounded state, which no callback boundary can take at a cost the
+///   inspected path can carry. Their *sizes* are a constant-time reading and are covered, by
+///   [`WorkingSet`]; so is a finished outcome's metadata, by [`OutcomeMetadata`].
 #[inline]
 fn book_intervention<DB: Database, ExtEnvs: ExternalEnvTypes>(
     context: &MegaContext<DB, ExtEnvs>,
@@ -424,6 +431,101 @@ fn book_intervention<DB: Database, ExtEnvs: ExternalEnvTypes>(
 ) {
     if changed {
         context.additional_limit.borrow_mut().record_inspector_intervention();
+    }
+}
+
+/// The part of a live interpreter's state a callback boundary can read in constant time.
+///
+/// The interpreter's stack and memory *contents* are outside the shim's reach — telling whether
+/// either came back changed needs a snapshot of unbounded state — but their sizes are not, and
+/// neither is the memo of how far the memory has been paid for. Those four readings are `O(1)`,
+/// and the one rewrite they close is the only one in this area that leaves every interpreter
+/// invariant intact:
+///
+/// The memo (`Gas::memory`) is what the next expanding opcode compares its requirement against. An
+/// inspector that raises it without growing the memory desynchronises the two and the EVM reads out
+/// of bounds; one that grows the memory without raising it is charged for the growth twice over.
+/// Moving *both*, together, is neither — the interpreter is in a state it could have reached by
+/// paying, having paid nothing, and every later expansion inside the new bound is free. That pair
+/// moves no gas anywhere at the moment it is made, so no gas lane can see it; what it changes is
+/// what the EVM charges afterwards.
+///
+/// A stack or memory edit that leaves both sizes where they were is deliberately still invisible:
+/// it is a rewrite of contents, which is the row of the shape table that has no lane.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct WorkingSet {
+    /// How many words the frame has on its stack.
+    stack_len: usize,
+    /// How many bytes of memory the frame has.
+    memory_size: usize,
+    /// How many words of that memory the frame has been charged for.
+    memory_words: usize,
+    /// What that charge came to.
+    memory_expansion_cost: u64,
+}
+
+impl WorkingSet {
+    /// Reads the four numbers off a live interpreter.
+    #[inline]
+    fn of<INTR: InterpreterTypes>(interp: &Interpreter<INTR>) -> Self {
+        let memory = interp.gas.memory();
+        Self {
+            stack_len: interp.stack.len(),
+            memory_size: interp.memory.size(),
+            memory_words: memory.words_num,
+            memory_expansion_cost: memory.expansion_cost,
+        }
+    }
+}
+
+/// Everything a `CallOutcome` carries besides the `InterpreterResult` inside it.
+///
+/// The result is compared on its own, by [`result_rewritten`]; this is the rest of the object, and
+/// it is not bookkeeping. `memory_offset` is where the caller copies the callee's output to, so
+/// moving it feeds the caller a word the callee never wrote. `charged_new_account_state_gas` tells
+/// the caller whether to refund an EIP-8037 upfront charge. `was_precompile_called` and
+/// `precompile_call_logs` decide which logs an inspector is shown next.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CallMetadata {
+    memory_offset: Range<usize>,
+    was_precompile_called: bool,
+    precompile_call_logs: Vec<Log>,
+    charged_new_account_state_gas: bool,
+}
+
+impl CallMetadata {
+    #[inline]
+    fn of(outcome: &CallOutcome) -> Self {
+        Self {
+            memory_offset: outcome.memory_offset.clone(),
+            was_precompile_called: outcome.was_precompile_called,
+            precompile_call_logs: outcome.precompile_call_logs.clone(),
+            charged_new_account_state_gas: outcome.charged_new_account_state_gas,
+        }
+    }
+}
+
+/// [`CallMetadata`] for the generic callback, which is handed the variant rather than the outcome.
+///
+/// A creation's own metadata is one field: the address the caller's stack is about to receive.
+/// Rewriting it reports a contract at an address holding no code, while the code the EVM deployed
+/// stays where it was — a split the result's classification cannot express, and one no gas lane
+/// sees.
+///
+/// Matched without a catch-all, so a `FrameResult` variant added upstream stops the build here.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum OutcomeMetadata {
+    Call(CallMetadata),
+    Create(Option<Address>),
+}
+
+impl OutcomeMetadata {
+    #[inline]
+    fn of(result: &FrameResult) -> Self {
+        match result {
+            FrameResult::Call(outcome) => Self::Call(CallMetadata::of(outcome)),
+            FrameResult::Create(outcome) => Self::Create(outcome.address),
+        }
     }
 }
 
@@ -543,7 +645,9 @@ where
         let action = interp.bytecode.action().clone();
         let refund_before = held_refund(action.as_ref(), &interp.gas);
         let before = interp.gas.remaining();
+        let working_set = WorkingSet::of(interp);
         self.inner.initialize_interp(interp, context);
+        book_intervention(context, WorkingSet::of(interp) != working_set);
         let change = measure_pending_action(action, interp.bytecode.action().as_ref(), before);
         book_pending_action(context, change);
         book_refund(
@@ -563,7 +667,9 @@ where
         let action = interp.bytecode.action().clone();
         let refund_before = held_refund(action.as_ref(), &interp.gas);
         let before = interp.gas.remaining();
+        let working_set = WorkingSet::of(interp);
         self.inner.step(interp, context);
+        book_intervention(context, WorkingSet::of(interp) != working_set);
         let change = measure_pending_action(action, interp.bytecode.action().as_ref(), before);
         book_pending_action(context, change);
         book_refund(
@@ -589,7 +695,9 @@ where
         let action = interp.bytecode.action().clone();
         let refund_before = held_refund(action.as_ref(), &interp.gas);
         let before = interp.gas.remaining();
+        let working_set = WorkingSet::of(interp);
         self.inner.step_end(interp, context);
+        book_intervention(context, WorkingSet::of(interp) != working_set);
         let change = measure_pending_action(action, interp.bytecode.action().as_ref(), before);
         book_pending_action(context, change);
         book_refund(
@@ -621,7 +729,9 @@ where
         let action = interpreter.bytecode.action().clone();
         let refund_before = held_refund(action.as_ref(), &interpreter.gas);
         let before = interpreter.gas.remaining();
+        let working_set = WorkingSet::of(interpreter);
         self.inner.log_full(interpreter, context, log);
+        book_intervention(context, WorkingSet::of(interpreter) != working_set);
         let change = measure_pending_action(action, interpreter.bytecode.action().as_ref(), before);
         book_pending_action(context, change);
         book_refund(
@@ -666,6 +776,7 @@ where
     ) {
         let before = frame_result.instruction_result();
         let output = frame_result.interpreter_result().output.clone();
+        let metadata = OutcomeMetadata::of(frame_result);
         let refund_before = frame_result.gas().refunded();
         self.inner.frame_end(context, frame_input, frame_result);
         book_refund(context, refund_before, frame_result.gas().refunded());
@@ -673,6 +784,7 @@ where
             context,
             result_rewritten((before, &output), frame_result.interpreter_result()),
         );
+        book_intervention(context, OutcomeMetadata::of(frame_result) != metadata);
         // `frame_end` runs after `create_end` and is the last chance to rewrite a creation's
         // classification, so the same refusal applies here.
         if let FrameResult::Create(outcome) = frame_result {
@@ -712,10 +824,12 @@ where
         outcome: &mut CallOutcome,
     ) {
         let before = (outcome.result.result, outcome.result.output.clone());
+        let metadata = CallMetadata::of(outcome);
         let refund_before = outcome.result.gas.refunded();
         self.inner.call_end(context, inputs, outcome);
         book_refund(context, refund_before, outcome.result.gas.refunded());
         book_intervention(context, result_rewritten((before.0, &before.1), &outcome.result));
+        book_intervention(context, CallMetadata::of(outcome) != metadata);
     }
 
     #[inline]
@@ -751,10 +865,12 @@ where
         outcome: &mut CreateOutcome,
     ) {
         let before = (outcome.result.result, outcome.result.output.clone());
+        let address = outcome.address;
         let refund_before = outcome.result.gas.refunded();
         self.inner.create_end(context, inputs, outcome);
         book_refund(context, refund_before, outcome.result.gas.refunded());
         book_intervention(context, result_rewritten((before.0, &before.1), &outcome.result));
+        book_intervention(context, outcome.address != address);
         reject_forbidden_create_rewrite(context, before.0, &mut outcome.result);
     }
 

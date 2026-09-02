@@ -568,7 +568,7 @@ impl AdditionalLimit {
             return;
         }
         if reaches_envelope {
-            self.inspector.gas += i128::from(remaining_after) - i128::from(remaining_before);
+            self.inspector.gas.book(i128::from(remaining_after) - i128::from(remaining_before));
         }
 
         if !IN_OPEN_SEGMENT || !self.rex7_enabled() {
@@ -608,7 +608,7 @@ impl AdditionalLimit {
     /// being read.
     #[inline]
     pub(crate) fn record_inspector_env_adjustment(&mut self, delta: i128) {
-        self.inspector.env += delta;
+        self.inspector.env.book(delta);
     }
 
     /// Stages an adjustment an inspector made to the gas a *terminating* pending action carries.
@@ -668,7 +668,7 @@ impl AdditionalLimit {
     /// same reason: the frame will spend what it now holds.
     #[inline]
     pub(crate) fn record_inspector_action_counter_adjustment(&mut self, delta: i128) {
-        self.inspector.gas += delta;
+        self.inspector.gas.book(delta);
     }
 
     /// Books an adjustment an inspector made to a refund counter — see
@@ -681,7 +681,7 @@ impl AdditionalLimit {
     /// pays, so a receipt an inspector moved this way has to be refused like any other.
     #[inline]
     pub(crate) fn record_inspector_refund_adjustment(&mut self, delta: i128) {
-        self.inspector.refund += delta;
+        self.inspector.refund.book(delta);
     }
 
     /// Books the EIP-8037 state-gas dimension a transaction ends holding, at the one point it is
@@ -702,8 +702,8 @@ impl AdditionalLimit {
         reservoir: u64,
         state_gas_spent: i64,
     ) {
-        self.inspector.reservoir += i128::from(reservoir);
-        self.inspector.state_gas += i128::from(state_gas_spent);
+        self.inspector.reservoir.book(i128::from(reservoir));
+        self.inspector.state_gas.book(i128::from(state_gas_spent));
     }
 
     /// Counts one rewrite the shim refused because its shape is forbidden — see
@@ -1626,7 +1626,7 @@ impl AdditionalLimit {
         if destroyed::remaining_is_destroyed(result.instruction_result()) {
             evm_remaining
         } else {
-            self.inspector.result += delta;
+            self.inspector.result.book(delta);
             result.gas().remaining()
         }
     }
@@ -2062,7 +2062,7 @@ impl AdditionalLimit {
         };
         let consumed = staged.forwarded.saturating_sub(returned);
         self.compute_gas.record_burned_gas(consumed.saturating_sub(staged.executed));
-        self.inspector.result += i128::from(staged.executed.saturating_sub(consumed));
+        self.inspector.result.book(i128::from(staged.executed.saturating_sub(consumed)));
     }
 
     /// Merges resource usage from a sandbox execution into this tracker.

@@ -30,8 +30,9 @@ use mega_evm::{
     alloy_consensus::{transaction::Recovered, Signed, TxLegacy},
     alloy_evm::block::BlockExecutionError,
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    BlockLimits, InspectorLedger, MegaBlockExecutionCtx, MegaBlockExecutorFactory, MegaEvmFactory,
-    MegaHardforkConfig, MegaSpecId, MegaTransactionNew as _, MegaTxEnvelope, TestExternalEnvs,
+    BlockLimits, InspectorLedger, Lane, MegaBlockExecutionCtx, MegaBlockExecutorFactory,
+    MegaEvmFactory, MegaHardforkConfig, MegaSpecId, MegaTransactionNew as _, MegaTxEnvelope,
+    TestExternalEnvs,
 };
 use revm::{
     bytecode::opcode::{CALL, POP, STOP},
@@ -246,10 +247,10 @@ fn test_run_transaction_refuses_an_inspector_adjusted_transaction() {
     let ledger = expect_refusal(&err, *tx.hash());
     assert_eq!(
         ledger.gas,
-        i128::from(INJECTED),
+        Lane::once(i128::from(INJECTED)),
         "the refusal must carry what was actually injected, so a caller can see the size of it",
     );
-    assert_eq!(ledger.env, 0, "no frame envelope was touched");
+    assert_eq!(ledger.env, Lane::default(), "no frame envelope was touched");
     assert_eq!(
         executor.block_limiter.block_compute_gas_used, 0,
         "a refused transaction must leave the block's counters where they were",
@@ -282,7 +283,7 @@ fn test_run_transaction_refuses_a_refund_rewrite() {
     let ledger = expect_refusal(&err, *tx.hash());
     assert_eq!(
         ledger.refund,
-        i128::from(REFUNDED),
+        Lane::once(i128::from(REFUNDED)),
         "the refusal must carry the refund that was written",
     );
     assert_eq!(
@@ -315,7 +316,7 @@ fn test_execute_transaction_without_commit_refuses_it_too() {
         .execute_transaction_without_commit(&Recovered::new_unchecked(&tx, CALLER))
         .expect_err("the trait entry must refuse it as well");
 
-    assert_eq!(expect_refusal(&err, *tx.hash()).gas, i128::from(INJECTED));
+    assert_eq!(expect_refusal(&err, *tx.hash()).gas, Lane::once(i128::from(INJECTED)));
     assert!(executor.receipts.is_empty(), "nothing may have been recorded");
 }
 
@@ -347,12 +348,12 @@ fn test_commit_refuses_a_result_an_inspector_took_part_in() {
 
     // The shape a result produced elsewhere arrives in: the numbers are execution's, the ledger
     // says an inspector moved some of them.
-    outcome.inner.inspector_ledger = InspectorLedger { gas: 1, ..Default::default() };
+    outcome.inner.inspector_ledger = InspectorLedger { gas: Lane::once(1), ..Default::default() };
 
     let err =
         executor.commit_transaction_outcome(outcome).expect_err("the commit funnel must refuse it");
 
-    assert_eq!(expect_refusal(&err, *tx.hash()).gas, 1);
+    assert_eq!(expect_refusal(&err, *tx.hash()).gas, Lane::once(1));
     assert!(executor.receipts.is_empty(), "no receipt may have been pushed");
     assert_eq!(
         executor.block_limiter.block_gas_used, 0,
@@ -389,14 +390,14 @@ fn test_the_infallible_commit_hook_latches_the_refusal() {
         depositor: outcome.depositor,
         inner: outcome.inner,
     };
-    result.inner.inspector_ledger = InspectorLedger { env: -5, ..Default::default() };
+    result.inner.inspector_ledger = InspectorLedger { env: Lane::once(-5), ..Default::default() };
 
     let gas = executor.commit_transaction(result);
     assert_eq!(gas.tx_gas_used(), 0, "a transaction that contributed nothing must report zero gas",);
     let latched = executor
         .pending_commit_error()
         .expect("the refusal must be latched where `finish` will find it");
-    assert_eq!(expect_refusal(latched, *tx.hash()).env, -5);
+    assert_eq!(expect_refusal(latched, *tx.hash()).env, Lane::once(-5));
 
     let err = executor.finish().expect_err("the block must not finish over a latched refusal");
     expect_refusal(&err, *tx.hash());
@@ -427,7 +428,7 @@ fn test_the_guard_is_not_spec_gated() {
             .unwrap_or_else(|| panic!("{spec:?}: the rewrite must be refused on every spec"));
         assert_eq!(
             expect_refusal(&err, *tx.hash()).gas,
-            i128::from(INJECTED),
+            Lane::once(i128::from(INJECTED)),
             "{spec:?}: and the measurement it is refused over must be the same one",
         );
     }
@@ -580,7 +581,7 @@ fn test_a_rewrite_that_moves_no_gas_is_refused_too() {
     let ledger = expect_refusal(&err, *tx.hash());
     assert_eq!(
         (ledger.gas, ledger.env, ledger.result),
-        (0, 0, 0),
+        (Lane::default(), Lane::default(), Lane::default()),
         "the point of this shape is that no gas lane moves; got {ledger:?}",
     );
     assert_eq!(ledger.interventions, 1, "the rewrite must be the thing the refusal names");

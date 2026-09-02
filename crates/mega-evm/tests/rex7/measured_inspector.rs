@@ -21,8 +21,8 @@ use alloy_primitives::{Bytes, U256};
 use mega_evm::{
     test_utils::{BytecodeBuilder, MemoryDatabase},
     AdditionalLimit, ConservationTerms, EmptyExternalEnv, EvmTxRuntimeLimits, InspectorLedger,
-    MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction, MegaTransactionNew as _,
-    MegaTransactionOutcome,
+    Lane, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
+    MegaTransactionNew as _, MegaTransactionOutcome,
 };
 use revm::{
     bytecode::opcode::{
@@ -397,10 +397,10 @@ fn test_injected_gas_is_booked_and_never_becomes_compute_headroom() {
     );
     assert_eq!(
         inspected.ledger.gas,
-        i128::from(INJECTED),
+        Lane::once(i128::from(INJECTED)),
         "the ledger must hold exactly what was injected",
     );
-    assert_eq!(inspected.ledger.env, 0, "no frame envelope was touched");
+    assert_eq!(inspected.ledger.env, Lane::default(), "no frame envelope was touched");
     assert_eq!(
         i128::from(inspected.total_gas_spent) + i128::from(INJECTED),
         i128::from(plain.total_gas_spent),
@@ -431,7 +431,7 @@ fn test_removed_gas_is_booked_as_a_negative_entry_and_is_not_charged_as_work() {
     assert!(inspected.result.is_success(), "removing gas must not fail the transaction");
     assert_eq!(
         inspected.ledger.gas,
-        -i128::from(REMOVED),
+        Lane::once(-i128::from(REMOVED)),
         "the ledger must hold the removal as a negative entry",
     );
     assert_eq!(
@@ -485,10 +485,10 @@ fn test_a_raised_child_gas_limit_is_booked_as_conjured_gas() {
     assert!(inspected.result.is_success(), "the inner call must still succeed");
     assert_eq!(
         inspected.ledger.env,
-        i128::from(BONUS),
+        Lane::once(i128::from(BONUS)),
         "the ledger must hold exactly the gas the inspector added to the child's envelope",
     );
-    assert_eq!(inspected.ledger.gas, 0, "no interpreter counter was touched");
+    assert_eq!(inspected.ledger.gas, Lane::default(), "no interpreter counter was touched");
     assert_eq!(
         inspected.total_gas_spent + BONUS,
         plain.total_gas_spent,

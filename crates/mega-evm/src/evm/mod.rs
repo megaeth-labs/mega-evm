@@ -566,14 +566,14 @@ fn debug_assert_envelope_accounted(
             gas.tx_gas_used(),
             gas.inner_refunded(),
             gas.floor_gas(),
-            ledger.refund,
+            ledger.refund.net(),
         );
         debug_assert!(
-            i128::from(gas.state_gas_spent_final()) == ledger.state_gas.max(0),
+            i128::from(gas.state_gas_spent_final()) == ledger.state_gas.net().max(0),
             "EIP-8037 is off on every MegaETH path, so the receipt's state gas is exactly what \
              the inspector lane booked: reported {} vs lane {}",
             gas.state_gas_spent_final(),
-            ledger.state_gas,
+            ledger.state_gas.net(),
         );
     }
 }

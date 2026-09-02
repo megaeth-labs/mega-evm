@@ -3,8 +3,14 @@
 //! `inspector_cheat_matrix.rs` asks whether every callback × *rewrite shape* pair is covered. That
 //! question is answered over a shape list this repository writes down, so it can only be as
 //! complete as that list. This module asks the question one level below it, over a list
-//! *upstream* writes down: is there a number that carries gas, reachable through an argument some
-//! callback is handed, that nothing in `MegaETH` has classified?
+//! *upstream* writes down: is there a field, reachable through an argument some callback is
+//! handed, that nothing in `MegaETH` has classified?
+//!
+//! Gas is what the question was originally about and is still what most of the verdicts are about,
+//! but the table covers every field of every object rather than the numeric ones — a field that
+//! carries no gas and changes what the execution *does* needs a verdict just as much, and the two
+//! cannot be told apart without looking. `CallOutcome::memory_offset` is the case that settled it:
+//! not gas, not bookkeeping, and for a while not in the table at all.
 //!
 //! # The two levels the enumeration has
 //!
@@ -127,16 +133,31 @@ const GAS_TRACKER_FIELDS: [(&str, Coverage); 5] = [
 ];
 
 /// The memoisation of how far a frame's memory has been paid for.
+///
+/// Both rows were once excused as "editing this alone desynchronises the memo from the memory, and
+/// the EVM then reads out of bounds" — which is true of each field on its own and not of the pair
+/// with the memory beside it. An inspector that grows the memory *and* moves the memo leaves the
+/// interpreter in a state it could have reached by paying, having paid nothing, and every later
+/// expansion inside the new bound is free. The verdict stands — neither field is a budget, and
+/// nothing here carries gas across the boundary — but the reason it needs no lane is now that it is
+/// booked as an intervention, from the constant-time reading the shim takes off a live interpreter.
 const MEMORY_GAS_FIELDS: [(&str, Coverage); 2] = [
     (
         "words_num",
         Coverage::NotGas(
-            "a memo of the interpreter's memory size, not a budget: editing it without editing \
-             the memory desynchronises the two and the EVM reads out of bounds, which is the \
-             stack-and-memory row of the table rather than a gas lane",
+            "a memo of how far the frame's memory has been paid for, not a budget — but one the \
+             next expanding opcode compares its requirement against, so moving it together with \
+             the memory skips that opcode's charge. Booked as an intervention at each of the four \
+             live-interpreter callbacks, off `WorkingSet`",
         ),
     ),
-    ("expansion_cost", Coverage::NotGas("the memo's other half, and dead for the same reason")),
+    (
+        "expansion_cost",
+        Coverage::NotGas(
+            "the memo's other half, which prices the *next* expansion incrementally; booked \
+             the same way and for the same reason",
+        ),
+    ),
 ];
 
 /// The two halves of a `Gas`.
@@ -191,6 +212,47 @@ const CREATE_INPUTS_FIELDS: [(&str, Coverage); 8] = [
     ("init_code", Coverage::NotGas("what the frame does")),
     ("cached_address", Coverage::NotGas("a memo of the init code and scheme above")),
     ("cached_init_code_hash", Coverage::NotGas("a memo of the init code above")),
+];
+
+/// Everything a finished call hands back besides the result inside it.
+const CALL_OUTCOME_FIELDS: [(&str, Coverage); 5] = [
+    ("result", Coverage::NotGas("a container; its own fields are classified separately")),
+    (
+        "memory_offset",
+        Coverage::NotGas(
+            "the range of its caller's memory the callee's output is copied into — what the \
+             caller reads next, not what the frame cost. Booked as an intervention",
+        ),
+    ),
+    (
+        "was_precompile_called",
+        Coverage::NotGas("which logs the inspector is shown next; booked as an intervention"),
+    ),
+    (
+        "precompile_call_logs",
+        Coverage::NotGas("the logs themselves, carried past a revert; booked as an intervention"),
+    ),
+    (
+        "charged_new_account_state_gas",
+        Coverage::NotGas(
+            "an EIP-8037 refund flag rather than an amount, copied here from the call's inputs \
+             so the caller knows whether to give the upfront charge back; booked as an \
+             intervention like the inputs' own copy of it",
+        ),
+    ),
+];
+
+/// Everything a finished creation hands back besides the result inside it.
+const CREATE_OUTCOME_FIELDS: [(&str, Coverage); 2] = [
+    ("result", Coverage::NotGas("a container; its own fields are classified separately")),
+    (
+        "address",
+        Coverage::NotGas(
+            "the address the caller's stack receives. Not gas, and not the same question as the \
+             classification: the code stays deployed where the EVM put it, so a rewrite here \
+             reports a contract at an address holding nothing. Booked as an intervention",
+        ),
+    ),
 ];
 
 /// Everything a finished frame hands back.
@@ -299,6 +361,14 @@ fn sample_result() -> InterpreterResult {
     InterpreterResult::new(InstructionResult::Stop, Bytes::new(), sample_gas())
 }
 
+fn sample_call_outcome() -> CallOutcome {
+    CallOutcome::new(sample_result(), 0..0)
+}
+
+fn sample_create_outcome() -> CreateOutcome {
+    CreateOutcome::new(sample_result(), None)
+}
+
 // --- the field-level pin -------------------------------------------------------------------------
 
 /// Every field of every gas-carrying object an inspector is handed has a verdict.
@@ -317,6 +387,8 @@ fn test_every_field_of_every_gas_carrier_has_a_verdict() {
         ("CallInputs", std::format!("{:?}", sample_call_inputs())),
         ("CreateInputs", std::format!("{:?}", sample_create_inputs())),
         ("InterpreterResult", std::format!("{:?}", sample_result())),
+        ("CallOutcome", std::format!("{:?}", sample_call_outcome())),
+        ("CreateOutcome", std::format!("{:?}", sample_create_outcome())),
     ];
     // Looked up rather than listed, so the set of tables the lock walks and the set this test
     // checks the renderings against cannot drift apart.
@@ -353,7 +425,7 @@ fn test_the_field_reader_reads_the_top_level_and_stops_there() {
 }
 
 /// Every table this module classifies, by the name its rendering is checked under.
-fn tables() -> [(&'static str, &'static [(&'static str, Coverage)]); 6] {
+fn tables() -> [(&'static str, &'static [(&'static str, Coverage)]); 8] {
     [
         ("Gas", GAS_FIELDS.as_slice()),
         ("GasTracker", GAS_TRACKER_FIELDS.as_slice()),
@@ -361,6 +433,8 @@ fn tables() -> [(&'static str, &'static [(&'static str, Coverage)]); 6] {
         ("CallInputs", CALL_INPUTS_FIELDS.as_slice()),
         ("CreateInputs", CREATE_INPUTS_FIELDS.as_slice()),
         ("InterpreterResult", INTERPRETER_RESULT_FIELDS.as_slice()),
+        ("CallOutcome", CALL_OUTCOME_FIELDS.as_slice()),
+        ("CreateOutcome", CREATE_OUTCOME_FIELDS.as_slice()),
     ]
 }
 
@@ -473,8 +547,8 @@ fn test_every_gas_carrying_shape_is_matched_without_a_catch_all() {
     assert_eq!(action_carrier(&InterpreterAction::Return(sample_result())), Carrier::Gas);
     assert_eq!(action_carrier(&InterpreterAction::NewFrame(call)), Carrier::Envelope);
 
-    let call_result = FrameResult::Call(CallOutcome::new(sample_result(), 0..0));
-    let create_result = FrameResult::Create(CreateOutcome::new(sample_result(), None));
+    let call_result = FrameResult::Call(sample_call_outcome());
+    let create_result = FrameResult::Create(sample_create_outcome());
     assert_eq!(frame_result_carrier(&call_result), Carrier::Gas);
     assert_eq!(frame_result_carrier(&create_result), Carrier::Gas);
 }

@@ -6,30 +6,114 @@
 //! so that enforcement can ignore it and the conservation law can account for it, and the two
 //! counters record rewrites that move no gas at all.
 
+/// One signed lane of the ledger, and how much traffic it carried.
+///
+/// # Why a lane is two numbers
+///
+/// The lanes answer two different questions, and one number cannot answer both.
+///
+/// The conservation law needs the **net**: gas an inspector wrote into one object and took back
+/// out of another really has left the transaction's envelope where it was, and a law stated over
+/// the gross would be wrong by exactly the round trip.
+///
+/// The block guard needs the **gross**: it asks whether the transaction was left alone, and two
+/// edits that cancel are two edits. A `+1` before the frame reads its own remaining gas and a `−1`
+/// after it has read it net to nothing and leave the frame holding a number the EVM would never
+/// have given it — and the same cancellation split across two frames, where only one of the two
+/// survives to the receipt, moves what the sender pays while netting to zero.
+///
+/// So the gross is not a diagnostic beside the net; it is the number
+/// [`InspectorLedger::is_zero`] is defined over. [`book`](Self::book) moves both, which is what
+/// makes it impossible to move a lane without the guard seeing it.
+///
+/// # Saturation
+///
+/// Both halves saturate. A ledger is a reported quantity that feeds no identity beyond the law's
+/// own term, and a saturated lane still answers the guard's question the same way an exact one
+/// would; an overflow panic on the inspected path would not.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Lane {
+    /// The sum of every booking, signed — what the transaction's envelope actually moved by.
+    net: i128,
+    /// The sum of every booking's magnitude — how much traffic this lane carried, in either
+    /// direction.
+    gross: u128,
+}
+
+impl Lane {
+    /// A lane that carried one booking of `net`.
+    ///
+    /// The gross is `|net|`, which is what a single booking always produces. This is the
+    /// constructor for a caller stating an expectation over a lane moved in one direction; a lane
+    /// moved in both needs [`of`](Self::of), because the two numbers are then independent.
+    #[inline]
+    pub const fn once(net: i128) -> Self {
+        Self { net, gross: net.unsigned_abs() }
+    }
+
+    /// A lane with both numbers stated, for a caller expecting bookings in both directions.
+    #[inline]
+    pub const fn of(net: i128, gross: u128) -> Self {
+        Self { net, gross }
+    }
+
+    /// What the transaction's envelope moved by on this lane.
+    #[inline]
+    pub const fn net(self) -> i128 {
+        self.net
+    }
+
+    /// How much traffic this lane carried, counting both directions.
+    #[inline]
+    pub const fn gross(self) -> u128 {
+        self.gross
+    }
+
+    /// Whether nothing was ever booked here.
+    ///
+    /// Read off the gross, not the net: a lane whose bookings cancelled carried traffic, and the
+    /// whole point of the pair is that the guard can tell that from a lane nobody touched.
+    #[inline]
+    pub const fn is_zero(self) -> bool {
+        self.gross == 0
+    }
+
+    /// Books one movement on this lane.
+    #[inline]
+    pub(crate) const fn book(&mut self, delta: i128) {
+        self.net = self.net.saturating_add(delta);
+        self.gross = self.gross.saturating_add(delta.unsigned_abs());
+    }
+}
+
 /// What an inspector conjured, destroyed, rewrote, or had refused, as measured at the callback
 /// boundaries.
 ///
 /// # Why the boundary is a sound place to measure
 ///
 /// The EVM does not execute inside an inspector callback. Every change to an interpreter's gas
-/// counter, to the action it is holding, or to a frame input's gas limit that is visible across a
-/// callback's entry and exit is therefore the inspector's, by construction rather than by
-/// attribution heuristics. The shim takes one snapshot before delegating and one after, and the
-/// difference lands here.
+/// counter, to the action it is holding, to its working state, or to a frame input's gas limit
+/// that is visible across a callback's entry and exit is therefore the inspector's, by
+/// construction rather than by attribution heuristics. The shim takes one snapshot before
+/// delegating and one after, and the difference lands here.
 ///
 /// # Sign convention
 ///
-/// Every field measuring gas is signed and reads *from the transaction's point of view*: a positive
-/// value is gas the inspector conjured — gas that exists in the execution but that nothing debited
-/// from the transaction's envelope — and a negative value is gas it destroyed. Both directions are
-/// recorded, because the conservation law needs the net, not the gross.
+/// Every field measuring gas is a [`Lane`], whose net reads *from the transaction's point of
+/// view*: a positive value is gas the inspector conjured — gas that exists in the execution but
+/// that nothing debited from the transaction's envelope — and a negative value is gas it
+/// destroyed. Both directions are recorded, because the conservation law needs the net; and each
+/// lane carries the gross beside it, because the block guard needs to know a lane moved at all.
 ///
 /// # What it does not measure
 ///
 /// What a callback does behind the shim's back. An inspector reaches state that no argument it is
-/// handed describes — the interpreter's stack and memory, the journal — and telling whether any of
-/// those came back changed needs a snapshot of unbounded state that no callback boundary can take
-/// at a cost the inspected path can carry. Those rewrites leave this all-zero.
+/// handed describes — the interpreter's stack and memory contents, the journal — and telling
+/// whether any of those came back changed needs a snapshot of unbounded state that no callback
+/// boundary can take at a cost the inspected path can carry. The *sizes* of the interpreter's
+/// stack and memory are the exception, because they are constant-time readings: the shim takes
+/// them, and a frame whose memory was grown lands on [`interventions`](Self::interventions).
+/// A same-size rewrite of what is in them leaves this all-zero.
 ///
 /// So an empty ledger says two things: no gas moved that the EVM did not move, and nothing the
 /// shim was handed came back different. It does not say the transaction is the one the EVM would
@@ -42,14 +126,15 @@
 /// moves, because that is what decides whether the conservation law can see it:
 ///
 /// - [`gas`](Self::gas), [`env`](Self::env), [`result`](Self::result) and
-///   [`reservoir`](Self::reservoir) move the envelope, and are summed into
+///   [`reservoir`](Self::reservoir) move the envelope, and their nets are summed into
 ///   [`conjured_gas`](Self::conjured_gas), the law's `I` term;
 /// - [`refund`](Self::refund) moves the refund, which the law — stated over `limit - remaining` —
 ///   cannot see at all;
 /// - [`state_gas`](Self::state_gas) moves the receipt's state-gas figure, which the law does not
 ///   reach either.
 ///
-/// All six are read by [`is_zero`](Self::is_zero), which is what the block guard asks.
+/// All six are read by [`is_zero`](Self::is_zero), which is what the block guard asks — through
+/// their gross halves, so that a lane whose bookings cancelled is not a lane nobody touched.
 ///
 /// # What consumes it
 ///
@@ -73,7 +158,7 @@
 /// window between them, whatever happened inside it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct InspectorLedger {
-    /// Net gas the inspector wrote into interpreter gas counters, across every callback that is
+    /// Gas the inspector wrote into interpreter gas counters, across every callback that is
     /// handed a live [`Interpreter`](revm::interpreter::Interpreter).
     ///
     /// A running frame's counter is the frame's own budget, so raising it hands the frame gas the
@@ -81,9 +166,9 @@ pub struct InspectorLedger {
     ///
     /// A callback that removed the interpreter's pending action lands here too: with no action
     /// left the frame carries on spending what it holds, which is exactly what the counter is.
-    pub gas: i128,
+    pub gas: Lane,
 
-    /// Net gas the inspector wrote into frame *envelopes* — the `gas_limit` a call or create frame
+    /// Gas the inspector wrote into frame *envelopes* — the `gas_limit` a call or create frame
     /// is about to be built with.
     ///
     /// The caller was debited the forwarded amount by its own `CALL` / `CREATE` opcode, before any
@@ -105,9 +190,9 @@ pub struct InspectorLedger {
     ///
     /// Adjustments to a frame's *result* gas belong to [`result`](Self::result), which is booked
     /// from the frame's own settlement point rather than from a callback boundary.
-    pub env: i128,
+    pub env: Lane,
 
-    /// Net gas the inspector wrote into a frame *result* — what the frame hands back to its
+    /// Gas the inspector wrote into a frame *result* — what the frame hands back to its
     /// caller — across the last callback that can rewrite that result.
     ///
     /// Unlike the other two lanes this one cannot be booked at the callback boundary, because
@@ -129,7 +214,7 @@ pub struct InspectorLedger {
     /// question either way, and they settle at the same point for the same reason: a returning or
     /// reverting outcome hands its gas back to the caller, a halting one hands nothing back and
     /// the whole envelope is destroyed whatever figure the outcome claimed.
-    pub result: i128,
+    pub result: Lane,
 
     /// The EIP-8037 state-gas pool the transaction ends holding, which is gas nothing funded.
     ///
@@ -149,9 +234,9 @@ pub struct InspectorLedger {
     /// callback sees. Reading the final number instead covers both: it is exactly the part of
     /// every edit that survived, and `MegaETH` contributes none of it, so no difference has to be
     /// taken to isolate the inspector's share.
-    pub reservoir: i128,
+    pub reservoir: Lane,
 
-    /// Net EIP-8037 state gas the inspector wrote into the `state_gas_spent` counters.
+    /// EIP-8037 state gas the inspector wrote into the `state_gas_spent` counters.
     ///
     /// The reservoir's counterpart on the spending side, and dead for the same reason `MegaETH`
     /// never fills one — except at the two places revm reads it regardless of whether EIP-8037 is
@@ -164,9 +249,9 @@ pub struct InspectorLedger {
     /// figure is not the envelope, and adding it to the law's `I` term would make the law
     /// wrong by exactly this amount. Settled at the same point and for the same reasons as the
     /// lane above.
-    pub state_gas: i128,
+    pub state_gas: Lane,
 
-    /// Net gas the inspector wrote into the `refunded` counters of the `Gas` objects it is handed.
+    /// Gas the inspector wrote into the `refunded` counters of the `Gas` objects it is handed.
     ///
     /// A refund is the one number on a receipt the conservation law cannot see: the law is stated
     /// over `total_gas_spent`, which is `limit - remaining` and which no refund enters. What a
@@ -191,10 +276,15 @@ pub struct InspectorLedger {
     /// boundary and no single settlement point can answer without a refund stack aligned to the
     /// EVM's frame lifecycle, which is the machinery this ledger deliberately does not have.
     ///
+    /// The lane's gross half is what makes the second of those safe. A `+R` on a frame that
+    /// survives and a `−R` on one that is rolled back are equal and opposite where they are
+    /// booked and not where they land, so a net-only reading would call that pair untouched while
+    /// the sender pays `R` less.
+    ///
     /// Both directions of the choice are safe here because the lane feeds no identity.
     /// Over-stating it costs nothing; under-stating it would let a transaction whose receipt
     /// an inspector moved into a block, which is the one thing the lane exists to prevent.
-    pub refund: i128,
+    pub refund: Lane,
 
     /// How many rewrites the shim refused because their shape is forbidden.
     ///
@@ -207,18 +297,26 @@ pub struct InspectorLedger {
     /// How many rewrites the shim saw that change what the execution *did* rather than what it
     /// cost.
     ///
-    /// The three gas lanes above answer "did the transaction's numbers move". This answers the
+    /// The six gas lanes above answer "did the transaction's numbers move". This answers the
     /// other half — "was the transaction left alone" — for the part of it a callback boundary can
-    /// see, which is the arguments the shim itself is handed:
+    /// see, which is the arguments the shim itself is handed and the constant-time readings it
+    /// can take off a live interpreter:
     ///
     /// - a frame result whose classification or returned output came back changed, at each of the
     ///   three callbacks that can change one (`call_end`, `create_end`, `frame_end` — revm runs
     ///   the variant-specific one and then the generic one over the same result, so each is
     ///   counted where it happens rather than once at the end);
+    /// - a finished outcome's metadata — where a call's return data lands in its caller's memory,
+    ///   which address a creation reports, the two EIP-8037 and precompile-log flags beside them —
+    ///   which sits outside the `InterpreterResult` those callbacks also hold;
     /// - a frame's inputs edited anywhere but in their gas limit, at each of the three callbacks
     ///   that can edit them (`frame_start`, `call`, `create`);
     /// - a frame the inspector answered itself, with a synthetic outcome instead of letting the
-    ///   EVM build it.
+    ///   EVM build it;
+    /// - the size of a live interpreter's stack or memory, or the memo of how far that memory has
+    ///   been paid for, at each of the four callbacks handed a live interpreter. Moving the memory
+    ///   and the memo together is the one edit that leaves every interpreter invariant intact and
+    ///   still changes what the next expanding opcode is charged.
     ///
     /// Gas edits are deliberately excluded — a gas limit or a result's remaining gas moving is
     /// what the lanes above are for, and counting it here would say the same thing twice.
@@ -234,7 +332,7 @@ impl InspectorLedger {
     /// derivation adds to the transaction's envelope.
     #[inline]
     pub const fn conjured_gas(&self) -> i128 {
-        self.gas + self.env + self.result + self.reservoir
+        self.gas.net() + self.env.net() + self.result.net() + self.reservoir.net()
     }
 
     /// Whether the inspector left the transaction's gas accounting exactly as the EVM produced it.
@@ -242,14 +340,17 @@ impl InspectorLedger {
     /// True for every observation-only inspector, and for every transaction that ran without one.
     /// Not the converse of "an inspector changed something": see the type's own documentation for
     /// the rewrites that move no gas and so leave this true.
+    ///
+    /// Each lane is asked through its gross half, so a lane an inspector moved and moved back is
+    /// not a lane it left alone.
     #[inline]
     pub const fn is_zero(&self) -> bool {
-        self.gas == 0 &&
-            self.env == 0 &&
-            self.result == 0 &&
-            self.reservoir == 0 &&
-            self.state_gas == 0 &&
-            self.refund == 0 &&
+        self.gas.is_zero() &&
+            self.env.is_zero() &&
+            self.result.is_zero() &&
+            self.reservoir.is_zero() &&
+            self.state_gas.is_zero() &&
+            self.refund.is_zero() &&
             self.rejected_rewrites == 0 &&
             self.interventions == 0
     }
@@ -264,16 +365,89 @@ mod tests {
     /// unmoved in that case.
     #[test]
     fn test_conjured_gas_is_the_net_of_both_lanes() {
-        let ledger = InspectorLedger { gas: 2_300, env: -2_300, ..InspectorLedger::default() };
+        let ledger = InspectorLedger {
+            gas: Lane::once(2_300),
+            env: Lane::once(-2_300),
+            ..InspectorLedger::default()
+        };
         assert_eq!(ledger.conjured_gas(), 0);
         assert!(!ledger.is_zero(), "the lanes moved, even though they cancel");
+    }
+
+    /// ★ Two bookings on *one* lane that cancel are the shape a net-only guard admitted.
+    ///
+    /// The net is what the conservation law needs and it is genuinely zero here — the transaction's
+    /// envelope really did end where it started. What is not zero is that the lane carried
+    /// traffic, and between the two bookings the execution saw a number the EVM would never have
+    /// produced.
+    #[test]
+    fn test_bookings_that_cancel_on_one_lane_are_not_zero() {
+        let mut lane = Lane::default();
+        lane.book(1);
+        lane.book(-1);
+        assert_eq!(lane.net(), 0, "the envelope is unmoved, and the law must read it that way");
+        assert_eq!(lane.gross(), 2, "but the lane carried two bookings");
+        assert!(!lane.is_zero());
+
+        let ledger = InspectorLedger { gas: lane, ..InspectorLedger::default() };
+        assert_eq!(ledger.conjured_gas(), 0);
+        assert!(!ledger.is_zero(), "the guard must refuse a transaction whose lanes cancelled");
+    }
+
+    /// The same, on the lane where the two halves land in different frames — one that survives to
+    /// the receipt and one the journal rolls back.
+    #[test]
+    fn test_refund_bookings_that_cancel_are_not_zero() {
+        let mut refund = Lane::default();
+        refund.book(2_000);
+        refund.book(-2_000);
+        let ledger = InspectorLedger { refund, ..InspectorLedger::default() };
+        assert_eq!(
+            ledger.conjured_gas(),
+            0,
+            "the refund lane is not a term of the law in either direction",
+        );
+        assert!(!ledger.is_zero());
+    }
+
+    /// A lane nobody booked is the only zero lane.
+    #[test]
+    fn test_an_untouched_lane_is_the_only_zero_one() {
+        assert!(Lane::default().is_zero());
+        assert!(!Lane::once(1).is_zero());
+        assert!(!Lane::once(-1).is_zero());
+        assert!(!Lane::of(0, 2).is_zero(), "a cancelled lane is not an untouched one");
+    }
+
+    /// `once` states the gross a single booking produces, which is what a caller expecting one
+    /// booking means.
+    #[test]
+    fn test_once_is_a_single_booking() {
+        let mut lane = Lane::default();
+        lane.book(-2_300);
+        assert_eq!(lane, Lane::once(-2_300));
+    }
+
+    /// Both halves saturate rather than overflow.
+    #[test]
+    fn test_a_lane_saturates() {
+        let mut lane = Lane::of(i128::MAX, u128::MAX);
+        lane.book(i128::MAX);
+        assert_eq!(lane.net(), i128::MAX);
+        assert_eq!(lane.gross(), u128::MAX);
+
+        let mut down = Lane::of(i128::MIN, 0);
+        down.book(i128::MIN);
+        assert_eq!(down.net(), i128::MIN);
+        assert_eq!(down.gross(), i128::MIN.unsigned_abs());
     }
 
     /// The reservoir is envelope-moving gas and joins the law's term; the refund and the
     /// state-gas figure are not, and must not.
     #[test]
     fn test_only_the_envelope_moving_lanes_are_conjured_gas() {
-        let reservoir = InspectorLedger { reservoir: 10_000, ..InspectorLedger::default() };
+        let reservoir =
+            InspectorLedger { reservoir: Lane::once(10_000), ..InspectorLedger::default() };
         assert_eq!(
             reservoir.conjured_gas(),
             10_000,
@@ -282,8 +456,8 @@ mod tests {
         assert!(!reservoir.is_zero());
 
         for ledger in [
-            InspectorLedger { refund: 20_000, ..InspectorLedger::default() },
-            InspectorLedger { state_gas: 5_000, ..InspectorLedger::default() },
+            InspectorLedger { refund: Lane::once(20_000), ..InspectorLedger::default() },
+            InspectorLedger { state_gas: Lane::once(5_000), ..InspectorLedger::default() },
         ] {
             assert_eq!(
                 ledger.conjured_gas(),
