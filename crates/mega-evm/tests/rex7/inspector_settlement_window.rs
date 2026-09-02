@@ -517,8 +517,12 @@ fn test_lowering_a_returning_frames_pending_action_is_booked() {
 }
 
 /// The classification branch: a halting frame hands nothing back, so an edit to the gas its action
-/// carries moves nothing and must not be booked — and the remainder it destroys is the EVM's own
-/// number, not the edited one.
+/// carries moves nothing and must not reach the lane's *net* — and the remainder it destroys is
+/// the EVM's own number, not the edited one.
+///
+/// The lane's gross carries the edit all the same. Whether it moved the envelope is what the
+/// classification decides; whether the inspector made it is not, and the block guard asks the
+/// second question.
 #[test]
 fn test_editing_a_halting_frames_pending_action_moves_nothing() {
     let callee = BytecodeBuilder::default().append(INVALID).build();
@@ -535,8 +539,21 @@ fn test_editing_a_halting_frames_pending_action_moves_nothing() {
     assert_eq!(inspector.fired, 1, "the fixture must halt an inner frame exactly once");
     assert_eq!(
         edited.inspector_ledger,
-        InspectorLedger::default(),
-        "a halting frame hands its remainder to nobody, so an edit to it reaches nobody",
+        InspectorLedger {
+            result: Lane::of(0, u128::from(ACTION_DELTA)),
+            ..InspectorLedger::default()
+        },
+        "a halting frame hands its remainder to nobody, so the edit moves the envelope by nothing \
+         — and the lane still has to show it was made",
+    );
+    assert_eq!(
+        edited.inspector_ledger.conjured_gas(),
+        0,
+        "the conservation law reads the net, which is what stays zero",
+    );
+    assert!(
+        !edited.inspector_ledger.is_zero(),
+        "and the block guard reads the gross, which is what does not",
     );
     assert_eq!(
         edited.destroyed, plain.destroyed,

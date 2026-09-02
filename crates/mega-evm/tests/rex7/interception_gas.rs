@@ -311,6 +311,10 @@ fn test_an_echoing_interception_books_no_gas_at_all() {
 
 /// A halting outcome hands nothing back, so what the inspector wrote in its gas figure changes
 /// nothing the transaction spends — and the envelope is destroyed whole.
+///
+/// What the outcome claimed is still traffic on the result lane: the sizings below differ from the
+/// envelope by different amounts, and each one is an edit the inspector made whether or not the
+/// classification let it reach anybody.
 #[test]
 fn test_a_halting_interception_destroys_the_envelope_whatever_gas_it_reports() {
     for sizing in [Sizing::Echo, Sizing::Half, Sizing::Zero, Sizing::Excess(7_000)] {
@@ -320,9 +324,18 @@ fn test_a_halting_interception_destroys_the_envelope_whatever_gas_it_reports() {
         assert_eq!(inspector.intercepted, 1, "the fixture must intercept exactly one call");
         assert!(reading.result.is_success(), "the caller absorbs the halt: {:?}", reading.result);
         assert_eq!(
+            reading.ledger.conjured_gas(),
+            0,
+            "{sizing:?}: a halting frame hands nothing back, so no gas lane's net may move",
+        );
+        assert_eq!(
             reading.ledger,
-            InspectorLedger { interventions: 1, ..InspectorLedger::default() },
-            "{sizing:?}: a halting frame hands nothing back, so no gas lane may move",
+            InspectorLedger {
+                interventions: 1,
+                result: Lane::of(0, reading.ledger.result.gross()),
+                ..InspectorLedger::default()
+            },
+            "{sizing:?}: and no lane but the result lane's traffic may carry anything",
         );
         assert_eq!(
             reading.destroyed, FORWARDED,

@@ -622,6 +622,14 @@ impl AdditionalLimit {
         self.inspector.env.book(delta);
     }
 
+    /// Books the envelope movement of an edit whose traffic
+    /// [`stage_inspector_action_env_adjustment`](Self::stage_inspector_action_env_adjustment)
+    /// already counted.
+    #[inline]
+    pub(crate) fn record_staged_inspector_env_movement(&mut self, delta: i128) {
+        self.inspector.env.book_movement(delta);
+    }
+
     /// Stages an adjustment an inspector made to the gas a *terminating* pending action carries.
     ///
     /// The action is the object that becomes the frame's result, so this is the same measurement
@@ -630,6 +638,10 @@ impl AdditionalLimit {
     /// edit moves anything at all depends on the classification the caller ends up seeing.
     #[inline]
     pub(crate) fn stage_inspector_action_result_adjustment(&mut self, delta: i128) {
+        // The traffic is booked here, at the boundary that measured it, and only the movement
+        // waits for the classification. Two edits to one frame's action would otherwise sum to
+        // nothing before either was counted.
+        self.inspector.result.book_crossing(delta);
         self.staged_action_result_gas += delta;
     }
 
@@ -641,6 +653,7 @@ impl AdditionalLimit {
     /// the edit apart from an interception.
     #[inline]
     pub(crate) fn stage_inspector_action_env_adjustment(&mut self, delta: i128) {
+        self.inspector.env.book_crossing(delta);
         self.staged_action_env_gas += delta;
     }
 
@@ -1598,8 +1611,11 @@ impl AdditionalLimit {
         // Taken unconditionally, so a staged envelope can never outlive the frame that staged it.
         let staged_precompile = self.staged_precompile.take();
         // Everything an inspector wrote into this result, whether it wrote it into the frame's
-        // terminating action or into the result the action became. The two are the same number
-        // measured on either side of the classification, so they settle as one.
+        // terminating action or into the result the action became. The two settle as one number,
+        // because whether either moved the envelope is the one question the classification below
+        // answers. Their traffic is not summed: the staged half booked its own at the boundary
+        // that measured it, and this books the last callback's.
+        self.inspector.result.book_crossing(inspector_gas_delta);
         let inspector_gas_delta =
             inspector_gas_delta + core::mem::take(&mut self.staged_action_result_gas);
         // The gas the EVM itself left in this result. Every settlement below is defined against
@@ -1671,7 +1687,7 @@ impl AdditionalLimit {
         if destroyed::remaining_is_destroyed(result.instruction_result()) {
             evm_remaining
         } else {
-            self.inspector.result.book(delta);
+            self.inspector.result.book_movement(delta);
             result.gas().remaining()
         }
     }

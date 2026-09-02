@@ -2268,8 +2268,13 @@ mod mutation_tests {
         consume_synthetic_limit_frame(evm.ctx_ref(), result);
     }
 
-    /// The mirror: a rejection the caller reclaims nothing from books nothing, and the sender's
-    /// rescue is taken on the envelope the transaction funded rather than on the raised figure.
+    /// The mirror: a rejection the caller reclaims nothing from moves the envelope by nothing, and
+    /// the sender's rescue is taken on the envelope the transaction funded rather than on the
+    /// raised figure.
+    ///
+    /// The lane's two halves separate here. Its net is zero, because the halting rejection hands
+    /// the raise to nobody; its gross is not, because the inspector still made the edit and the
+    /// block guard's question is whether the transaction was left alone.
     #[test]
     fn test_a_halting_guard_rescues_the_funded_envelope_and_not_the_raised_one() {
         let mut evm =
@@ -2280,10 +2285,16 @@ mod mutation_tests {
             panic!("latched limit must override the inspector result");
         };
         let limit = evm.ctx_ref().additional_limit.borrow();
+        let result_lane = limit.inspector_ledger().result;
         assert_eq!(
-            limit.inspector_ledger().result,
-            Lane::default(),
-            "a halting rejection hands nothing back, so the edit reaches nothing",
+            result_lane.net(),
+            0,
+            "a halting rejection hands nothing back, so the edit reaches the envelope not at all",
+        );
+        assert_eq!(
+            result_lane.gross(),
+            u128::from(RAISE),
+            "but the inspector still wrote it, and the guard has to see that",
         );
         assert_eq!(
             limit.rescued_gas, TEST_GAS_LIMIT,

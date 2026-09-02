@@ -369,6 +369,13 @@ impl ChaosShape {
                 // length the current one does not have.
                 Self::SkipOpcode |
                 Self::RewriteReturnData |
+                // Gas written into a pending action is staged for the point that can say whether
+                // it moved the envelope, and the lane's traffic is booked at this boundary rather
+                // than at that point — so a staged edit shows up whatever the frame's
+                // classification turns out to be. The draw is withheld when the action cannot
+                // take the edit, so every applied one moves a number.
+                Self::RaiseActionGas |
+                Self::LowerActionGas |
                 // The rewrite comparison books it before the shim refuses it, and the refusal is
                 // counted beside that — so the ledger carries two reasons to be non-zero.
                 Self::MoveInitResultClass
@@ -1121,13 +1128,20 @@ fn edit_pending_action_gas<INTR: InterpreterTypes>(
                 result.gas.record_regular_cost(amount)
             }
         }
+        // Both saturate, so an envelope already at either end does not move. Report that as "not
+        // applied" rather than spending the budget on it: the ledger gate below is stated over
+        // shapes that always book, and a mutation that moved nothing has nothing to book.
         Some(InterpreterAction::NewFrame(FrameInput::Call(inputs))) => {
-            inputs.gas_limit = move_envelope(inputs.gas_limit, raise, amount);
-            true
+            let moved = move_envelope(inputs.gas_limit, raise, amount);
+            let applied = moved != inputs.gas_limit;
+            inputs.gas_limit = moved;
+            applied
         }
         Some(InterpreterAction::NewFrame(FrameInput::Create(inputs))) => {
-            inputs.set_gas_limit(move_envelope(inputs.gas_limit(), raise, amount));
-            true
+            let moved = move_envelope(inputs.gas_limit(), raise, amount);
+            let applied = moved != inputs.gas_limit();
+            inputs.set_gas_limit(moved);
+            applied
         }
         _ => false,
     }

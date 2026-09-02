@@ -81,8 +81,32 @@ impl Lane {
     /// Books one movement on this lane.
     #[inline]
     pub(crate) const fn book(&mut self, delta: i128) {
-        self.net = self.net.saturating_add(delta);
+        self.book_crossing(delta);
+        self.book_movement(delta);
+    }
+
+    /// Records that an edit of `delta` crossed a callback boundary, without saying yet whether it
+    /// moved the transaction's envelope.
+    ///
+    /// The pair with [`book_movement`](Self::book_movement), for the lanes that cannot answer the
+    /// second question where they answer the first. An edit to a frame's result moves the envelope
+    /// only if the frame hands its remainder back, which the classification decides and no
+    /// boundary knows — so the traffic is recorded here, at the boundary, and the movement is
+    /// booked at the frame's settlement point.
+    ///
+    /// Splitting them is what keeps the guard's question answerable on those lanes. An edit whose
+    /// frame then halts moves nothing and must stay out of the net, but it is still an edit the
+    /// inspector made, and one that can change what the transaction produces before the
+    /// classification catches up with it.
+    #[inline]
+    pub(crate) const fn book_crossing(&mut self, delta: i128) {
         self.gross = self.gross.saturating_add(delta.unsigned_abs());
+    }
+
+    /// Books a movement whose traffic [`book_crossing`](Self::book_crossing) already recorded.
+    #[inline]
+    pub(crate) const fn book_movement(&mut self, delta: i128) {
+        self.net = self.net.saturating_add(delta);
     }
 }
 

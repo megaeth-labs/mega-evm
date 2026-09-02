@@ -599,10 +599,15 @@ fn book_env_adjustment<DB: Database, ExtEnvs: ExternalEnvTypes>(
     if let (true, Some(before)) = (intercepted, before) {
         context.additional_limit.borrow_mut().stage_inspector_interception_envelope(before);
     }
-    if staged + callback == 0 {
-        return;
+    // Booked separately rather than summed first: the two were written in different callbacks, so
+    // an envelope raised in one and lowered back in the other is two edits, not none. The staged
+    // half already counted its own traffic where it was measured, so only its movement lands here.
+    if staged != 0 {
+        context.additional_limit.borrow_mut().record_staged_inspector_env_movement(staged);
     }
-    context.additional_limit.borrow_mut().record_inspector_env_adjustment(staged + callback);
+    if callback != 0 {
+        context.additional_limit.borrow_mut().record_inspector_env_adjustment(callback);
+    }
 }
 
 /// Books one rewrite that changes what the execution *did* rather than what it cost — see

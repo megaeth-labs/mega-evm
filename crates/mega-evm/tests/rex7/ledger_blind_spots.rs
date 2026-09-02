@@ -46,8 +46,9 @@ use revm::{
     context::{Cfg, ContextTr},
     interpreter::{
         interpreter::EthInterpreter,
-        interpreter_types::{Jumps, MemoryTr, ReturnData},
-        CallInputs, CallOutcome, CreateInputs, CreateOutcome, Interpreter, InterpreterTypes,
+        interpreter_types::{InputsTr, Jumps, LoopControl, MemoryTr, ReturnData},
+        CallInputs, CallOutcome, CreateInputs, CreateOutcome, Interpreter, InterpreterAction,
+        InterpreterTypes,
     },
     Inspector,
 };
@@ -378,6 +379,185 @@ fn test_a_rewritten_deployment_address_is_booked() {
         "a transaction told a contract lives somewhere it does not must not read as untouched: \
          {:?}",
         cheated.inspector_ledger,
+    );
+}
+
+// --- a construction frame's pending action -------------------------------------------------------
+
+/// Drains the gas a construction frame's pending `Return` action carries.
+///
+/// The contract this module's other cases rest on — that an action is the frame's result a moment
+/// later, so an edit to it settles with that result — does not hold for a creation. Between the
+/// two, `classify_frame_action` charges the code deposit out of the gas *this action* carries, and
+/// a creation that cannot pay it becomes an `OutOfGas` that deploys nothing. So this edit changes
+/// what the transaction produces, and it does it by a route that leaves the classification and the
+/// output the boundary compares exactly where they were.
+#[derive(Default)]
+struct DrainConstructionAction {
+    fired: u32,
+}
+
+impl<CTX, INTR: InterpreterTypes> Inspector<CTX, INTR> for DrainConstructionAction {
+    fn step_end(&mut self, interp: &mut Interpreter<INTR>, _context: &mut CTX) {
+        // A construction frame runs no deployed code, so it has no bytecode address.
+        if self.fired > 0 || interp.input.bytecode_address().is_some() {
+            return;
+        }
+        let Some(InterpreterAction::Return(result)) = interp.bytecode.action() else {
+            return;
+        };
+        if !result.result.is_ok() {
+            return;
+        }
+        let remaining = result.gas.remaining();
+        assert!(
+            result.gas.record_regular_cost(remaining),
+            "the fixture must be able to drain the action it found",
+        );
+        self.fired += 1;
+    }
+}
+
+/// ★ A construction frame whose pending action was drained is not an all-zero ledger.
+///
+/// Every lane the boundary reads stays put: the action's classification and output are untouched,
+/// so nothing is an intervention; the gas edit is staged for the frame's settlement point, and
+/// that point declines to book it because the result it finally sees is a swallowed one. The
+/// deposit the drained action could no longer pay is what turned it into one.
+#[test]
+fn test_a_drained_construction_action_is_booked() {
+    // Init code that returns two bytes of runtime code.
+    let init: [u8; 11] = [0x60, 0x00, 0x60, 0x00, 0x52, 0x60, 0x02, 0x60, 0x1e, 0xf3, 0x00];
+    let mut builder = BytecodeBuilder::default();
+    for (offset, byte) in init.iter().enumerate() {
+        builder = builder.push_number(u64::from(*byte)).push_number(offset as u64).append(MSTORE8);
+    }
+    let code = builder
+        .push_number(init.len() as u64)
+        .push_number(0u64)
+        .push_number(0u64)
+        .append(CREATE)
+        .push_number(RESULT_SLOT)
+        .append(SSTORE)
+        .append(STOP)
+        .build();
+
+    let limits = EvmTxRuntimeLimits::from_spec(MegaSpecId::REX7);
+    let plain = transact(MegaSpecId::REX7, db_with(code.clone()), limits);
+    let mut inspector = DrainConstructionAction::default();
+    let cheated = transact_inspected(MegaSpecId::REX7, db_with(code), limits, &mut inspector);
+
+    assert_eq!(inspector.fired, 1, "the fixture must reach the construction frame's step_end once");
+    assert_ne!(
+        plain.storage_value(CONTRACT, U256::from(RESULT_SLOT)),
+        U256::ZERO,
+        "without the edit the creation must succeed",
+    );
+    assert_eq!(
+        cheated.storage_value(CONTRACT, U256::from(RESULT_SLOT)),
+        U256::ZERO,
+        "with it the creation cannot pay its code deposit and deploys nothing",
+    );
+    assert_ne!(
+        plain.gas_used, cheated.gas_used,
+        "and the receipt the sender is billed on moves with it",
+    );
+    assert!(
+        !cheated.inspector_ledger.is_zero(),
+        "a transaction whose contract an inspector deleted must not read as untouched: {:?}",
+        cheated.inspector_ledger,
+    );
+}
+
+/// Gas a cancelling pair moves through the result lane's two windows.
+const ACTION_DELTA: u64 = 700;
+
+/// Raises the gas an inner call frame's pending `Return` action carries, then takes the same
+/// amount back out of the result that action became.
+///
+/// The two windows are one lane and one frame, and the pair nets to zero. They are still two
+/// edits, made in two different callbacks, and the lane's traffic is what says so — the sum alone
+/// reads as an inspector that did nothing.
+#[derive(Default)]
+struct CancellingActionAndResultEdits {
+    raised: u32,
+    lowered: u32,
+}
+
+impl<CTX, INTR: InterpreterTypes> Inspector<CTX, INTR> for CancellingActionAndResultEdits {
+    fn step_end(&mut self, interp: &mut Interpreter<INTR>, _context: &mut CTX) {
+        if self.raised > 0 || interp.input.bytecode_address() != Some(&CALLEE) {
+            return;
+        }
+        let Some(InterpreterAction::Return(result)) = interp.bytecode.action() else {
+            return;
+        };
+        if !result.result.is_ok() {
+            return;
+        }
+        result.gas.erase_cost(ACTION_DELTA);
+        self.raised += 1;
+    }
+
+    fn call_end(&mut self, _context: &mut CTX, inputs: &CallInputs, outcome: &mut CallOutcome) {
+        if self.lowered > 0 || inputs.target_address != CALLEE {
+            return;
+        }
+        assert!(
+            outcome.result.gas.record_regular_cost(ACTION_DELTA),
+            "the fixture must leave the result enough gas for the removal to land",
+        );
+        self.lowered += 1;
+    }
+}
+
+/// ★ An edit staged at one callback and undone at the next is two edits, not none.
+///
+/// Nothing about this transaction changes: a call frame's remaining gas is read by nobody between
+/// the two windows, so the pair really is invisible in what the transaction produces. That is the
+/// point — the lane's traffic is the only thing that separates it from an inspector that never
+/// ran, and on a *creation* frame the same pair is the shape that deletes a contract.
+#[test]
+fn test_cancelling_action_and_result_edits_are_booked() {
+    let code = BytecodeBuilder::default()
+        .push_number(0u64) // retSize
+        .push_number(0u64) // retOffset
+        .push_number(0u64) // argsSize
+        .push_number(0u64) // argsOffset
+        .push_number(0u64) // value
+        .push_address(CALLEE)
+        .push_number(100_000u64)
+        .append(CALL)
+        .append(POP)
+        .append(STOP)
+        .build();
+    let callee = BytecodeBuilder::default().append(STOP).build();
+    let db = || db_with(code.clone()).account_code(CALLEE, callee.clone());
+
+    let limits = EvmTxRuntimeLimits::from_spec(MegaSpecId::REX7);
+    let plain = transact(MegaSpecId::REX7, db(), limits);
+    let mut inspector = CancellingActionAndResultEdits::default();
+    let cheated = transact_inspected(MegaSpecId::REX7, db(), limits, &mut inspector);
+
+    assert_eq!((inspector.raised, inspector.lowered), (1, 1), "both windows must be reached");
+    assert_eq!(
+        cheated.gas_used, plain.gas_used,
+        "the pair cancels, so the receipt really is the one the EVM would have produced",
+    );
+    assert_eq!(
+        cheated.inspector_ledger.conjured_gas(),
+        0,
+        "and the conservation law must read the net, which is zero",
+    );
+    assert!(
+        !cheated.inspector_ledger.is_zero(),
+        "but the guard must still see that the lane carried two edits: {:?}",
+        cheated.inspector_ledger,
+    );
+    assert_eq!(
+        cheated.inspector_ledger.result.gross(),
+        2 * u128::from(ACTION_DELTA),
+        "one edit in each window, counted where each was made",
     );
 }
 
