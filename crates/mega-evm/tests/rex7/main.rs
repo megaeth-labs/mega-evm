@@ -90,6 +90,9 @@
 //!   remainder class (swallow / return / unreachable), with no catch-all, so a revm bump that adds
 //!   a variant fails to compile until a human assigns it; the early-fail arms of frame init are
 //!   listed beside it for the upgrade diff that those arms have no type-level tie to.
+//! - `trusted_observer` — the declared read-only fast path: a declaration that holds produces the
+//!   same transaction as no inspector and as a measured one, and a declaration that does not panics
+//!   in debug builds at the callback that broke it.
 
 mod burn_split;
 mod call_body_halt_charges;
@@ -128,3 +131,4 @@ mod pre_execution_intrinsic_reject;
 mod precompile_halt;
 mod refund_and_state_gas;
 mod result_space_tripwire;
+mod trusted_observer;
