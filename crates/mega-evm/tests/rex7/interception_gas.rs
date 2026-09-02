@@ -332,10 +332,10 @@ fn test_a_halting_interception_destroys_the_envelope_whatever_gas_it_reports() {
             reading.ledger,
             InspectorLedger {
                 interventions: 1,
-                result: Lane::of(0, reading.ledger.result.gross()),
+                result: Lane::of(0, sizing.expected_delta(FORWARDED).unsigned_abs()),
                 ..InspectorLedger::default()
             },
-            "{sizing:?}: and no lane but the result lane's traffic may carry anything",
+            "{sizing:?}: and the traffic is what the outcome claimed, off the envelope",
         );
         assert_eq!(
             reading.destroyed, FORWARDED,
