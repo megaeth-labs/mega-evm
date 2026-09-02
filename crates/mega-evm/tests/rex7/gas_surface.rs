@@ -283,7 +283,11 @@ const INTERPRETER_FIELDS: [(&str, Coverage); 8] = [
              inspected loop breaks on and is a separate object from the pending action. Moving the \
              counter deletes an instruction from the frame, which costs the transaction the work \
              that instruction would have done; nothing meters that, because it never happens. \
-             Booked as interventions, off `WorkingSet`",
+             Booked as interventions, off `WorkingSet`. Two further readings are deliberately \
+             absent: `Jumps::opcode` is derived from the counter and the code buffer, both of \
+             which are here, and `ExtBytecode::bytecode_hash` is a cache on the concrete type \
+             that a shim generic over `InterpreterTypes` cannot reach and that no execution path \
+             reads back",
         ),
     ),
     (

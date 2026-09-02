@@ -117,7 +117,8 @@ The wrapper's other weakness is worse than its unimplementability: `Trusted::new
 An implementation names a concrete type and no value can carry one.
 
 **Trust, and verify.** Under `debug_assertions` a declared type takes the measuring path anyway, and the shim asserts the ledger came back empty after every callback it measures.
-`MegaEvm::execute_transaction` asks the same question once more at the end of the transaction, which is the backstop for a callback added later whose own verification was never written — the per-callback assert names the site, the transaction-level one cannot be missing.
+`MegaEvm::execute_transaction` asks the same question once more at the end of the transaction, which is the backstop for a callback added later whose own verification was never written.
+The per-callback assert names the site for every edit booked at the boundary that measured it, which since the traffic/movement split is every lane but one: an edit to a *finished frame result*'s gas is booked at the frame's settlement point, after the last `*_end` callback has returned, so a declaration broken only there is caught by the transaction-level backstop rather than named at the callback.
 Neither costs anything in release, where a declared type reaches no measuring body at all.
 There is no behavioural fork between the two builds for a declaration that holds: the measurement of a type that writes nothing back is a sequence of reads that books nothing, so debug and release execute the same transaction and only a false declaration tells them apart — by panicking.
 `tests/rex7/trusted_observer.rs` holds both halves, and `mega-state-test`'s `RunMode::ObserveTrusted` holds the three-way comparison against a plain and a measured run of the same observer.
@@ -135,7 +136,11 @@ Anything supplied by a request — a JavaScript tracer, an RPC-selected tracer c
 
 **How a node reaches it.** `EvmFactory::create_evm_with_inspector` cannot: its bound is `I: Inspector` and its return type is fixed, so it has no way to select the constructor.
 The route is `factory.create_evm(db, env).with_trusted_inspector(tracer)`, which keeps the factory's own dynamic precompiles and differs from the two-step untrusted form only in the method name.
-The same limitation is a fence: `MegaBlockExecutorFactory` builds its EVM through those two factory methods and nothing else, so a declared observer cannot reach the canonical block-execution path at all — what it reaches is an EVM an embedder drives itself, which is what RPC tracing and off-band simulation are.
+The same limitation is most of a fence, and it is worth being exact about where it stops.
+`MegaBlockExecutorFactory`'s own two factory methods cannot produce a declared EVM, so nothing a node reaches *through them* arrives on the canonical block path unmeasured.
+But `create_executor` takes an EVM the caller already built, so `factory.create_evm(db, env).with_trusted_inspector(tracer)` handed to it does reach that path — the fence is a convention the node keeps, not something the types enforce.
+`create_executor` therefore carries a `debug_assert!` on `MegaEvm::has_trusted_inspector`, which is what turns the convention into something a test build checks.
+What a declaration is *for* is an EVM an embedder drives itself, which is what RPC tracing and off-band simulation are.
 
 ### The window a counter edit reaches nothing through
 

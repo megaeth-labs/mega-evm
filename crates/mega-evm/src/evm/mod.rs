@@ -450,6 +450,16 @@ where
         Ok(outcome)
     }
 
+    /// Whether this EVM's inspector was built from a [`TrustedObserver`](crate::TrustedObserver)
+    /// declaration, and so is delegated to unmeasured in release builds.
+    ///
+    /// Read by a caller that must not be handed one. The block executor factory is the case that
+    /// matters: it takes an EVM its caller built, so nothing in its own signature keeps a declared
+    /// observer off the canonical block path.
+    pub const fn has_trusted_inspector(&self) -> bool {
+        self.inner.inspector.is_trusted()
+    }
+
     /// Inspect a transaction and return the outcome. The inspector used is the one set up already
     /// in the EVM. Use [`MegaEvm::with_inspector`] to set up a custom inspector.
     ///

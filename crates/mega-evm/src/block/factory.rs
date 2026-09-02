@@ -177,6 +177,17 @@ where
         DB: StateDB,
         I: Inspector<<Self::EvmFactory as alloy_evm::EvmFactory>::Context<DB>>,
     {
+        // The canonical block path measures every inspector it runs, because the guard that
+        // refuses an inspector-adjusted transaction reads a ledger the measurement fills. A
+        // declared observer is delegated to unmeasured in release builds, so its ledger is empty
+        // by construction and the guard would be reading nothing. The two factory methods cannot
+        // build one; this entry point takes an EVM the caller built, so it says so here.
+        debug_assert!(
+            !evm.has_trusted_inspector(),
+            "a declared TrustedObserver must not be handed to the canonical block path: the \
+             inspector guard reads a ledger that is empty by construction for one",
+        );
+
         // Synchronize EVM tx runtime limits with the block context's BlockLimits.
         // This mirrors the inherent factory paths above which apply this
         // unconditionally on every spec since introduction. Without this, the
