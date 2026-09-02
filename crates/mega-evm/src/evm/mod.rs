@@ -220,6 +220,35 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
         MegaEvm { inner, inspect: true, mega_cfg, deferred_journal: None }
     }
 
+    /// Creates a new `MegaETH` EVM instance with the given read-only inspector enabled at
+    /// runtime, and the measurement shim's per-callback work skipped.
+    ///
+    /// The bound is the whole of the difference from [`with_inspector`](Self::with_inspector):
+    /// `I`'s author has declared, in source, that none of its callbacks writes anything back to
+    /// the EVM, so there is nothing for the shim to measure and it delegates directly. Debug
+    /// builds measure anyway and assert that the declaration held.
+    ///
+    /// See [`TrustedObserver`] for what the declaration promises and what it may not be written
+    /// for.
+    ///
+    /// [`EvmFactory::create_evm_with_inspector`](alloy_evm::EvmFactory::create_evm_with_inspector)
+    /// cannot reach this — its bound is `I: Inspector` and its return type is fixed — so a node
+    /// that builds through the factory takes `create_evm(..).with_trusted_inspector(..)`, which
+    /// keeps the factory's dynamic precompiles.
+    pub fn with_trusted_inspector<I: TrustedObserver>(
+        self,
+        inspector: I,
+    ) -> MegaEvm<DB, I, ExtEnvs> {
+        let mega_cfg = self.mega_cfg;
+        let inner = revm::context::Evm::new_with_inspector(
+            self.inner.ctx,
+            MeasuredInspector::new_trusted(inspector),
+            self.inner.instruction,
+            self.inner.precompiles,
+        );
+        MegaEvm { inner, inspect: true, mega_cfg, deferred_journal: None }
+    }
+
     /// Creates a new `MegaETH` EVM instance with the inspector disabled at runtime.
     ///
     /// # Returns
@@ -400,6 +429,7 @@ where
         } else {
             ExecuteEvm::transact(self, tx)?
         };
+        let trusted_inspector = self.inner.inspector.is_trusted();
         let is_inside_sandbox = self.ctx().is_inside_sandbox();
         let spec = self.ctx().spec;
         let additional_limit = self.ctx().additional_limit.borrow();
@@ -416,6 +446,7 @@ where
             inspector_ledger: additional_limit.inspector_ledger(),
         };
         debug_assert_envelope_accounted(spec, is_inside_sandbox, &additional_limit, &outcome);
+        debug_assert_trusted_observer_kept_its_promise(trusted_inspector, &outcome);
         Ok(outcome)
     }
 
@@ -438,6 +469,7 @@ where
         tx: MegaTransaction,
     ) -> Result<MegaTransactionOutcome, EVMError<DB::Error, MegaTransactionError>> {
         let result_and_state = InspectEvm::inspect_tx(self, tx)?;
+        let trusted_inspector = self.inner.inspector.is_trusted();
         let is_inside_sandbox = self.ctx().is_inside_sandbox();
         let spec = self.ctx().spec;
         let additional_limit = self.ctx().additional_limit.borrow();
@@ -454,6 +486,7 @@ where
             inspector_ledger: additional_limit.inspector_ledger(),
         };
         debug_assert_envelope_accounted(spec, is_inside_sandbox, &additional_limit, &outcome);
+        debug_assert_trusted_observer_kept_its_promise(trusted_inspector, &outcome);
         Ok(outcome)
     }
 
@@ -465,6 +498,23 @@ where
     pub fn get_accessed_bucket_ids(&self) -> Vec<BucketId> {
         self.ctx_ref().dynamic_storage_gas_cost.borrow().get_bucket_ids()
     }
+}
+
+/// Debug-only backstop on a `TrustedObserver` declaration, read once per transaction.
+///
+/// The shim verifies the same thing after every callback it measures, which is what names the
+/// callback that broke the promise. This asks it again where nothing can be missing: a rewrite
+/// made at a callback whose own verification was never written — the shape a callback added later
+/// takes — has no later callback to be caught at if it was the transaction's last.
+///
+/// Both are debug-only for the same reason. A declared inspector books nothing, so in a release
+/// build there is nothing here to read that is not zero by construction.
+fn debug_assert_trusted_observer_kept_its_promise(trusted: bool, outcome: &MegaTransactionOutcome) {
+    debug_assert!(
+        !trusted || outcome.inspector_ledger.is_zero(),
+        "an inspector declared `TrustedObserver` wrote something back: {:?}",
+        outcome.inspector_ledger,
+    );
 }
 
 /// Debug-only check that a transaction's tracker lanes account for the whole envelope its receipt

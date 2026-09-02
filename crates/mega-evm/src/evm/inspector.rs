@@ -49,6 +49,15 @@
 //!   counter stepped past an instruction, or its return buffer conjured all visible.
 //! - One rewrite shape is refused outright: see [`MeasuredInspector::create_end`].
 //!
+//! # The one inspector the shim does not measure
+//!
+//! An inspector type whose author has declared it read-only, by implementing [`TrustedObserver`]
+//! in source, is delegated to without any of the above. The declaration is the only way to reach
+//! that path: it is a bound on [`MeasuredInspector::new_trusted`], so an inspector chosen by a
+//! request or by configuration cannot arrive on it. Debug builds take the measuring path anyway
+//! and assert the ledger stayed empty, so a type declared wrongly fails where it is exercised
+//! rather than where it is deployed.
+//!
 //! Nothing here changes what the inspector is allowed to do to the EVM, and nothing here runs on
 //! the uninspected path — revm's plain interpreter loop never calls an inspector at all.
 
@@ -90,6 +99,71 @@ pub const FORBIDDEN_CREATE_REVIVAL: &str =
 pub const FORBIDDEN_FRAME_INIT_REWRITE: &str =
     "inspector moved the classification of a result frame init produced";
 
+/// A promise, made in source about one inspector type, that none of its callbacks writes anything
+/// back to the EVM.
+///
+/// # What implementing this declares
+///
+/// Every callback of this type leaves the EVM exactly as it found it: it writes nothing to an
+/// interpreter's gas counter or its pending action, nothing to a frame's inputs, nothing to a
+/// frame result's classification, gas, output or metadata, nothing to a refund, and it never
+/// answers a frame with a synthetic outcome. It may read whatever it likes and it may write to
+/// its own state. That is the whole of the promise, and it is exactly the "read-only observation"
+/// row of the shape table in `evm/AGENTS.md`.
+///
+/// A type that keeps the promise is measured to zero on every lane of
+/// [`InspectorLedger`](crate::InspectorLedger), which is the same thing the shim would have
+/// concluded by measuring it — so declaring it changes what the measurement *costs* and never
+/// what it *says*.
+///
+/// # What it buys
+///
+/// [`MeasuredInspector`] delegates to a declared type without taking any of its readings, which
+/// puts the inspected path back on revm's own cost. Measuring costs about a nanosecond per
+/// reading per opcode and there are sixteen readings taken twice per opcode, which adds between a
+/// third and two thirds to a production tracer's run.
+///
+/// # Why a declaration and not a detection
+///
+/// There is nothing to detect. The shim measures at a callback boundary precisely because it
+/// cannot see inside the callback, so "does this type write anything back" is not a question it
+/// can ask ahead of time — only one it can answer afterwards, at the cost the declaration exists
+/// to avoid.
+///
+/// # The rules this trait is under
+///
+/// - **No blanket implementation, ever.** Each implementation names one concrete type, so a
+///   declaration is a line someone wrote about a type they had read. A blanket implementation would
+///   make the promise about types nobody has looked at.
+/// - **Not reachable from data.** The only route to the fast path is
+///   [`MeasuredInspector::new_trusted`], whose bound is this trait, so an inspector selected by a
+///   request, a configuration file or any other run-time value cannot arrive on it — an
+///   RPC-supplied tracer is a value, and no value can carry an implementation.
+/// - **Do not implement it for anything that intercepts.** An inspector that answers a frame
+///   itself, edits inputs, or rewrites a result is a rewriting inspector however little it
+///   rewrites; those are supported, measured, and must stay measured.
+/// - **A foreign inspector needs a newtype.** The orphan rule wants one of the trait and the type
+///   to be local, and for a `revm-inspectors` tracer neither is — so a node declares a newtype of
+///   its own that forwards every callback. `benches/common/subject.rs` does exactly that, and is
+///   the shape to copy.
+///
+/// # Verified in debug builds
+///
+/// A declared type still takes the full measurement under `debug_assertions`, and the shim
+/// asserts the ledger stayed empty after every callback. A wrong declaration therefore fails in
+/// tests, in CI and under the chaos sweep, at the callback that broke it.
+pub trait TrustedObserver {}
+
+/// The inspector `MegaETH` runs with when none was supplied observes nothing at all.
+impl TrustedObserver for revm::inspector::NoOpInspector {}
+
+/// A declared observer stays declared when it is handed over by reference.
+///
+/// revm implements `Inspector` for `&mut I`, which is how a caller keeps an inspector it can read
+/// back afterwards. This lifts the declaration to the same shape, and it grants nothing: `&mut T`
+/// is declared exactly when `T` is, so no type becomes trusted that was not trusted already.
+impl<T: TrustedObserver + ?Sized> TrustedObserver for &mut T {}
+
 /// Wraps a user inspector so that what it does to gas accounting is measured and booked.
 ///
 /// `MegaETH` applies this itself — [`MegaEvm::with_inspector`](crate::MegaEvm::with_inspector) and
@@ -97,18 +171,52 @@ pub const FORBIDDEN_FRAME_INIT_REWRITE: &str =
 /// value and store it wrapped, and the accessors hand back the unwrapped inspector — so the wrapper
 /// is not something a caller opts into or can opt out of.
 ///
+/// What a caller *can* opt into is being measured more cheaply, by declaring the inspector's type
+/// [`TrustedObserver`] and building the shim with [`new_trusted`](Self::new_trusted). See
+/// [`measures`](Self::measures) for what that changes and where it stops.
+///
 /// Derefs to the wrapped inspector, so `evm.inspector().whatever()` reaches the user's own type.
 #[derive(Clone, Copy, Debug, Default, derive_more::Deref, derive_more::DerefMut)]
 pub struct MeasuredInspector<I> {
     #[deref]
     #[deref_mut]
     inner: I,
+    /// Whether the wrapped type's author declared it [`TrustedObserver`].
+    ///
+    /// A flag rather than a type parameter, because the type the shim is asked about is chosen by
+    /// whoever calls `with_inspector`, and `MegaEvm` names the shim as `MeasuredInspector<INSP>`
+    /// for whatever `INSP` that is. Answering it in the type system would mean either a bound on
+    /// every inspector `MegaETH` can be handed — including the foreign ones it cannot implement
+    /// anything for — or a second impl of `Inspector` that overlaps the first. So the question is
+    /// answered where it is asked, at the one constructor whose bound is the declaration, and
+    /// carried here.
+    ///
+    /// `Default` leaves it false, which is the safe direction: an unbuilt shim measures.
+    trusted: bool,
 }
 
 impl<I> MeasuredInspector<I> {
     /// Wraps `inner` in the measurement shim.
     pub const fn new(inner: I) -> Self {
-        Self { inner }
+        Self { inner, trusted: false }
+    }
+
+    /// Whether this callback takes the measuring path.
+    ///
+    /// False only for a declared [`TrustedObserver`] in a release build. Under `debug_assertions`
+    /// every inspector is measured, declared or not, and a declared one is additionally asserted
+    /// to have booked nothing — which is what makes the declaration a claim the build system
+    /// checks rather than a comment.
+    ///
+    /// Both halves are compile-time constants beside a `bool` the shim was built with, so the
+    /// release fast path is one predictable branch and the debug path folds away entirely.
+    ///
+    /// This and [`verify_trusted`] read the same `debug_assertions` flag, which is what keeps the
+    /// two builds from disagreeing: a profile that turns assertions on in an optimised build gets
+    /// the measured path *and* the check, never one without the other.
+    #[inline(always)]
+    const fn measures(&self) -> bool {
+        !self.trusted || cfg!(debug_assertions)
     }
 
     /// The wrapped inspector.
@@ -124,6 +232,56 @@ impl<I> MeasuredInspector<I> {
     /// Unwraps the shim, returning the inspector it was measuring.
     pub fn into_inner(self) -> I {
         self.inner
+    }
+
+    /// Whether the wrapped inspector's type was declared [`TrustedObserver`].
+    ///
+    /// True only for a shim built by [`new_trusted`](Self::new_trusted). What it is for is the
+    /// transaction-level backstop in `MegaEvm::execute_transaction`: the per-callback verification
+    /// names the callback that broke a declaration, and this catches one broken at a callback
+    /// whose verification is missing.
+    pub const fn is_trusted(&self) -> bool {
+        self.trusted
+    }
+}
+
+impl<I: TrustedObserver> MeasuredInspector<I> {
+    /// Wraps `inner` in a shim that delegates to it without measuring, on the strength of its
+    /// type's [`TrustedObserver`] declaration.
+    ///
+    /// This is the only constructor that produces the fast path, and its bound is the only way to
+    /// reach it. Debug builds measure anyway and assert the result is empty.
+    pub const fn new_trusted(inner: I) -> Self {
+        Self { inner, trusted: true }
+    }
+}
+
+/// Asserts, in debug builds, that a declared [`TrustedObserver`] really booked nothing.
+///
+/// Called after every measured callback. The ledger accumulates over the whole transaction and is
+/// reset at its start, so the first callback that breaks the promise is the one that fails —
+/// later ones would fail too, but this one names the site.
+///
+/// Compiled out of release builds together with the measurement it checks: a declared type never
+/// reaches a measuring body there at all.
+#[inline]
+fn verify_trusted<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    trusted: bool,
+    context: &MegaContext<DB, ExtEnvs>,
+    callback: &'static str,
+) {
+    #[cfg(debug_assertions)]
+    if trusted {
+        let ledger = context.additional_limit.borrow().inspector_ledger();
+        assert!(
+            ledger.is_zero(),
+            "an inspector declared `TrustedObserver` wrote something back at `{callback}`: \
+             {ledger:?}",
+        );
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        let _ = (trusted, context, callback);
     }
 }
 
@@ -1020,6 +1178,99 @@ impl LiveReading {
     }
 }
 
+/// The measuring bodies of the four live-interpreter callbacks, kept out of line.
+///
+/// Each callback is two things: a branch on the declaration, and — when it is taken — the
+/// measurement. Only the branch belongs in revm's instruction loop, and `inline(never)` is what
+/// puts it there alone. Inlined, the measurement's two hundred bytes of readings are laid down
+/// inside the loop for a declared observer that never executes them, and the loop pays for them
+/// in registers and instruction cache all the same.
+///
+/// That cost is most of what a declared observer was paying. On `interpreter_hotloop` with an
+/// empty inspector, outlining takes the declared path from 1.13× the pre-shim inspected loop to
+/// 1.04× on REX6, and from 1.07× to 1.00× on REX7 — the branch alone is nearly free, and the
+/// bloat was not.
+///
+/// It is not free for the undeclared path, and the trade was measured both ways rather than
+/// assumed. Beside a real tracer — the inspector the inspected path carries in production — the
+/// undeclared path gets 3–6% *faster*, for the same reason the declared one does. Beside an empty
+/// inspector it gets 12–19% slower, because there the call is the whole of the work. The empty
+/// inspector is an instrument for isolating this shim's cost and not a workload, and it is the
+/// only row that moves the wrong way.
+///
+/// Written out four times rather than taken as a function pointer, which would cost the
+/// undeclared path the inlining of the inner inspector's own callback.
+impl<I> MeasuredInspector<I> {
+    #[inline(never)]
+    fn initialize_interp_measured<DB, ExtEnvs, INTR>(
+        &mut self,
+        interp: &mut Interpreter<INTR>,
+        context: &mut MegaContext<DB, ExtEnvs>,
+    ) where
+        DB: Database,
+        ExtEnvs: ExternalEnvTypes,
+        INTR: InterpreterTypes,
+        I: Inspector<MegaContext<DB, ExtEnvs>, INTR>,
+    {
+        let reading = LiveReading::enter(interp);
+        self.inner.initialize_interp(interp, context);
+        reading.leave::<false, _, _, _>(interp, context);
+        verify_trusted(self.trusted, context, "initialize_interp");
+    }
+
+    #[inline(never)]
+    fn step_measured<DB, ExtEnvs, INTR>(
+        &mut self,
+        interp: &mut Interpreter<INTR>,
+        context: &mut MegaContext<DB, ExtEnvs>,
+    ) where
+        DB: Database,
+        ExtEnvs: ExternalEnvTypes,
+        INTR: InterpreterTypes,
+        I: Inspector<MegaContext<DB, ExtEnvs>, INTR>,
+    {
+        let reading = LiveReading::enter(interp);
+        self.inner.step(interp, context);
+        reading.leave::<true, _, _, _>(interp, context);
+        verify_trusted(self.trusted, context, "step");
+    }
+
+    #[inline(never)]
+    fn step_end_measured<DB, ExtEnvs, INTR>(
+        &mut self,
+        interp: &mut Interpreter<INTR>,
+        context: &mut MegaContext<DB, ExtEnvs>,
+    ) where
+        DB: Database,
+        ExtEnvs: ExternalEnvTypes,
+        INTR: InterpreterTypes,
+        I: Inspector<MegaContext<DB, ExtEnvs>, INTR>,
+    {
+        let reading = LiveReading::enter(interp);
+        self.inner.step_end(interp, context);
+        reading.leave::<true, _, _, _>(interp, context);
+        verify_trusted(self.trusted, context, "step_end");
+    }
+
+    #[inline(never)]
+    fn log_full_measured<DB, ExtEnvs, INTR>(
+        &mut self,
+        interp: &mut Interpreter<INTR>,
+        context: &mut MegaContext<DB, ExtEnvs>,
+        log: Log,
+    ) where
+        DB: Database,
+        ExtEnvs: ExternalEnvTypes,
+        INTR: InterpreterTypes,
+        I: Inspector<MegaContext<DB, ExtEnvs>, INTR>,
+    {
+        let reading = LiveReading::enter(interp);
+        self.inner.log_full(interp, context, log);
+        reading.leave::<true, _, _, _>(interp, context);
+        verify_trusted(self.trusted, context, "log_full");
+    }
+}
+
 impl<DB, ExtEnvs, INTR, I> Inspector<MegaContext<DB, ExtEnvs>, INTR> for MeasuredInspector<I>
 where
     DB: Database,
@@ -1030,22 +1281,24 @@ where
     /// Measured, but without settling a segment: this runs after the frame is built and before its
     /// settlement window is opened, so there is nothing open to close. The frame's own entry hook
     /// opens the window on whatever counter this callback leaves behind.
-    #[inline]
+    #[inline(always)]
     fn initialize_interp(
         &mut self,
         interp: &mut Interpreter<INTR>,
         context: &mut MegaContext<DB, ExtEnvs>,
     ) {
-        let reading = LiveReading::enter(interp);
-        self.inner.initialize_interp(interp, context);
-        reading.leave::<false, _, _, _>(interp, context);
+        if !self.measures() {
+            return self.inner.initialize_interp(interp, context);
+        }
+        self.initialize_interp_measured(interp, context);
     }
 
-    #[inline]
+    #[inline(always)]
     fn step(&mut self, interp: &mut Interpreter<INTR>, context: &mut MegaContext<DB, ExtEnvs>) {
-        let reading = LiveReading::enter(interp);
-        self.inner.step(interp, context);
-        reading.leave::<true, _, _, _>(interp, context);
+        if !self.measures() {
+            return self.inner.step(interp, context);
+        }
+        self.step_measured(interp, context);
     }
 
     /// The one callback that runs with an action already pending: revm runs it after the
@@ -1054,11 +1307,12 @@ where
     /// [`ActionLane::counter_reaches_envelope`] — and the action holding that copy is reachable
     /// through `LoopControl`. Both objects are measured, on the lanes
     /// [`book_pending_action`] routes them to.
-    #[inline]
+    #[inline(always)]
     fn step_end(&mut self, interp: &mut Interpreter<INTR>, context: &mut MegaContext<DB, ExtEnvs>) {
-        let reading = LiveReading::enter(interp);
-        self.inner.step_end(interp, context);
-        reading.leave::<true, _, _, _>(interp, context);
+        if !self.measures() {
+            return self.inner.step_end(interp, context);
+        }
+        self.step_end_measured(interp, context);
     }
 
     /// No interpreter and no frame inputs are reachable here, so there is nothing to measure —
@@ -1068,16 +1322,17 @@ where
         self.inner.log(context, log);
     }
 
-    #[inline]
+    #[inline(always)]
     fn log_full(
         &mut self,
         interpreter: &mut Interpreter<INTR>,
         context: &mut MegaContext<DB, ExtEnvs>,
         log: Log,
     ) {
-        let reading = LiveReading::enter(interpreter);
-        self.inner.log_full(interpreter, context, log);
-        reading.leave::<true, _, _, _>(interpreter, context);
+        if !self.measures() {
+            return self.inner.log_full(interpreter, context, log);
+        }
+        self.log_full_measured(interpreter, context, log);
     }
 
     #[inline]
@@ -1086,6 +1341,9 @@ where
         context: &mut MegaContext<DB, ExtEnvs>,
         frame_input: &mut FrameInput,
     ) -> Option<FrameResult> {
+        if !self.measures() {
+            return self.inner.frame_start(context, frame_input);
+        }
         let before = frame_input.clone();
         let outcome = self.inner.frame_start(context, frame_input);
         book_env_adjustment(
@@ -1098,6 +1356,7 @@ where
             book_synthetic_refund(context, outcome.gas().refunded());
         }
         book_intervention(context, outcome.is_some() || frame_input_rewritten(before, frame_input));
+        verify_trusted(self.trusted, context, "frame_start");
         outcome
     }
 
@@ -1108,6 +1367,9 @@ where
         frame_input: &FrameInput,
         frame_result: &mut FrameResult,
     ) {
+        if !self.measures() {
+            return self.inner.frame_end(context, frame_input, frame_result);
+        }
         let before = frame_result.instruction_result();
         let output = frame_result.interpreter_result().output.clone();
         let metadata = OutcomeMetadata::of(frame_result);
@@ -1126,6 +1388,7 @@ where
         if let FrameResult::Create(outcome) = frame_result {
             reject_forbidden_create_rewrite(context, before, &mut outcome.result);
         }
+        verify_trusted(self.trusted, context, "frame_end");
     }
 
     #[inline]
@@ -1134,6 +1397,9 @@ where
         context: &mut MegaContext<DB, ExtEnvs>,
         inputs: &mut CallInputs,
     ) -> Option<CallOutcome> {
+        if !self.measures() {
+            return self.inner.call(context, inputs);
+        }
         let before = inputs.clone();
         let outcome = self.inner.call(context, inputs);
         book_env_adjustment(
@@ -1146,6 +1412,7 @@ where
             book_synthetic_refund(context, outcome.result.gas.refunded());
         }
         book_intervention(context, outcome.is_some() || call_inputs_rewritten(before, inputs));
+        verify_trusted(self.trusted, context, "call");
         outcome
     }
 
@@ -1159,6 +1426,9 @@ where
         inputs: &CallInputs,
         outcome: &mut CallOutcome,
     ) {
+        if !self.measures() {
+            return self.inner.call_end(context, inputs, outcome);
+        }
         let before = (outcome.result.result, outcome.result.output.clone());
         let metadata = CallMetadata::of(outcome);
         let refund_before = outcome.result.gas.refunded();
@@ -1167,6 +1437,7 @@ where
         book_intervention(context, result_rewritten((before.0, &before.1), &outcome.result));
         book_intervention(context, CallMetadata::of(outcome) != metadata);
         reject_forbidden_frame_init_rewrite(context, before.0, &mut outcome.result);
+        verify_trusted(self.trusted, context, "call_end");
     }
 
     #[inline]
@@ -1175,6 +1446,9 @@ where
         context: &mut MegaContext<DB, ExtEnvs>,
         inputs: &mut CreateInputs,
     ) -> Option<CreateOutcome> {
+        if !self.measures() {
+            return self.inner.create(context, inputs);
+        }
         let before = inputs.clone();
         let outcome = self.inner.create(context, inputs);
         book_env_adjustment(
@@ -1187,6 +1461,7 @@ where
             book_synthetic_refund(context, outcome.result.gas.refunded());
         }
         book_intervention(context, outcome.is_some() || create_inputs_rewritten(before, inputs));
+        verify_trusted(self.trusted, context, "create");
         outcome
     }
 
@@ -1201,6 +1476,9 @@ where
         inputs: &CreateInputs,
         outcome: &mut CreateOutcome,
     ) {
+        if !self.measures() {
+            return self.inner.create_end(context, inputs, outcome);
+        }
         let before = (outcome.result.result, outcome.result.output.clone());
         let address = outcome.address;
         let refund_before = outcome.result.gas.refunded();
@@ -1212,6 +1490,7 @@ where
         // refused as an init result is not counted a second time by the refusal below.
         reject_forbidden_frame_init_rewrite(context, before.0, &mut outcome.result);
         reject_forbidden_create_rewrite(context, before.0, &mut outcome.result);
+        verify_trusted(self.trusted, context, "create_end");
     }
 
     /// Everything this callback receives is passed by value, so it cannot change execution state.
