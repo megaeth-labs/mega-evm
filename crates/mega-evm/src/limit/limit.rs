@@ -50,12 +50,12 @@ pub enum FrameExit {
 /// point can decide the split (REX7+).
 ///
 /// A precompile is answered inside the frame init and never becomes a child frame, so its
-/// recording site is the only place that knows both of these numbers: the envelope is the
-/// caller-supplied forwarded amount rather than the REX5-capped effective limit, and the work is
-/// `MegaETH`'s own price for what the call performed, which a halting precompile's gas object does
-/// not carry. What that site cannot know is how the call ends — an inspector's `call_end` runs
-/// afterwards and can rewrite the classification, and the classification is what decides whether
-/// the caller reclaims the remainder.
+/// recording site is the only place that knows both numbers: the envelope is the caller-supplied
+/// forwarded amount rather than the REX5-capped effective limit, and the work is `MegaETH`'s own
+/// price for what the call performed, which a halting precompile's gas object does not carry.
+/// Carrying them to the settlement point is what lets the split be taken against the
+/// classification the caller is finally handed, beside every other frame outcome, rather than
+/// being decided early and separately.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct PrecompileEnvelope {
     /// The gas the caller forwarded, uncapped.
@@ -526,48 +526,35 @@ impl AdditionalLimit {
     /// Books an adjustment an inspector made to a live interpreter's gas counter, and restores
     /// correct accounting and enforcement around it.
     ///
-    /// This is the single entry point for interpreter-counter adjustments. `remaining_before` is
-    /// the counter the shim snapshotted before delegating to the user's callback, and
-    /// `gas.remaining()` is what the callback left behind; the difference is the adjustment,
-    /// because the EVM does not execute inside a callback.
+    /// The single entry point for interpreter-counter adjustments. `remaining_before` is what the
+    /// shim snapshotted before delegating and `gas.remaining()` is what the callback left behind.
     ///
-    /// `reaches_envelope` is whether the counter the callback left behind is one the EVM will read
-    /// again — false exactly when the interpreter is already holding a terminating action, whose
-    /// own copy of the counter is what the caller reclaims from. It gates the ledger and
-    /// nothing else: an edit nobody will read moves no gas and must not be booked, but
-    /// `MegaETH`'s own tail settlement does read this counter after the action is set, so the
-    /// baseline still has to shift or the edit would be measured as work the frame performed.
+    /// `reaches_envelope` is whether the EVM will read that counter again — false exactly when the
+    /// interpreter is already holding a terminating action, whose own copy is what the caller
+    /// reclaims from. It gates the ledger and nothing else: an edit nobody will read moves no gas,
+    /// but `MegaETH`'s tail settlement does read this counter after the action is set, so the
+    /// baseline shifts either way or the edit would be measured as work the frame performed.
     ///
-    /// Three things happen, in this order:
+    /// Then, in order:
     ///
-    /// 1. **The ledger** takes the adjustment, if it can reach the envelope at all, so the
-    ///    conservation law can account for gas nobody funded (or gas that vanished) when it derives
-    ///    the destroyed remainder.
-    /// 2. **The open segment is settled against the pre-callback counter** (REX7+,
-    ///    `IN_OPEN_SEGMENT`). This is what keeps the adjustment out of enforcement: compute gas is
-    ///    measured as a drop in the interpreter's counter, so an injection made mid-segment would
-    ///    otherwise show up as *less* work than the frame performed — the frame would have been
-    ///    handed free compute headroom. Closing the segment at `remaining_before` and re-opening it
-    ///    at the adjusted counter measures exactly the work, and nothing else.
-    /// 3. **The gas clamp is re-derived** from the freshly settled usage, exactly as a checkpoint's
-    ///    epilogue does. Without this, an injection would be spendable past the compute headroom:
-    ///    the clamp hides gas beyond the headroom from the interpreter, and gas written in after
-    ///    the clamp was applied is not hidden by it.
+    /// 1. **The open segment is settled against the pre-callback counter** (REX7+,
+    ///    `IN_OPEN_SEGMENT`), which is what keeps the adjustment out of enforcement. Compute gas is
+    ///    a drop in this counter, so an injection left inside the segment would read as *less* work
+    ///    than the frame performed — free compute headroom. Closing at `remaining_before` and
+    ///    reopening at the adjusted counter measures exactly the work.
+    /// 2. **The clamp is re-derived** from the usage just settled, as a checkpoint's epilogue does.
+    ///    The clamp hides gas beyond the headroom from the interpreter, and gas written in after it
+    ///    was applied is not hidden by it.
     ///
-    /// `IN_OPEN_SEGMENT` is false at `initialize_interp`, the one callback that runs after a frame
-    /// is built but before its settlement window is opened. There is no segment to settle and no
-    /// clamp to re-derive there; the frame's own entry hook opens the window on the adjusted
-    /// counter a moment later, which absorbs the adjustment for free.
+    /// `IN_OPEN_SEGMENT` is false at `initialize_interp`, which runs after a frame is built and
+    /// before its settlement window opens; the frame's entry hook opens that window on the adjusted
+    /// counter a moment later and absorbs the adjustment for free.
     ///
-    /// The settlement records through the unguarded entry point for the same reason the frame-exit
-    /// tail settlement does: a callback can run immediately after an opcode whose pre-inner
-    /// recorder deliberately left a non-compute dimension unlatched, and the latch-protocol guard
-    /// would trip on it.
-    ///
-    /// A settlement that latches an exceed does not stop the interpreter here — a callback has no
-    /// way to fail an instruction. The latch is sticky, so the next checkpoint or the frame's own
-    /// exit surfaces it as it would have anyway; the adjustment only moves *when* the halt lands,
-    /// never whether it does.
+    /// Records through the unguarded entry for the same reason the frame-exit tail settlement does:
+    /// a callback can run right after an opcode whose pre-inner recorder deliberately left a
+    /// non-compute dimension unlatched, and the latch-protocol guard would trip on it. A latched
+    /// exceed does not stop the interpreter here — a callback cannot fail an instruction — and the
+    /// latch is sticky, so this moves *when* a halt lands, never whether it does.
     pub(crate) fn record_inspector_gas_adjustment<const IN_OPEN_SEGMENT: bool>(
         &mut self,
         gas: &mut Gas,
