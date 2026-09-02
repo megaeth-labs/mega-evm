@@ -36,9 +36,12 @@ use mega_evm::{
 };
 use revm::{
     bytecode::opcode::{CALL, POP, STOP},
-    context::{BlockEnv, ContextTr},
+    context::{BlockEnv, Cfg, ContextTr},
     database::State,
-    interpreter::{CallInputs, CallOutcome, InstructionResult, Interpreter, InterpreterTypes},
+    interpreter::{
+        interpreter_types::MemoryTr, CallInputs, CallOutcome, InstructionResult, Interpreter,
+        InterpreterTypes,
+    },
     Inspector,
 };
 
@@ -113,6 +116,37 @@ impl<CTX, INTR: InterpreterTypes> Inspector<CTX, INTR> for RefundWriter {
         }
         self.applied = true;
         interp.gas.record_refund(REFUNDED);
+    }
+}
+
+/// Grows the frame's memory and the memo of how far it has been paid for, once — the rewrite that
+/// reaches through no argument the shim is handed at all.
+///
+/// Neither half is a rewrite on its own: moving the memo alone leaves the EVM reading out of
+/// bounds, moving the memory alone leaves the growth charged for twice. Moving both leaves the
+/// interpreter in a state it could have reached by paying, having paid nothing, and the next
+/// expanding opcode inside the new bound is charged nothing at all. No gas moves at the moment the
+/// edit is made, no frame input and no frame result exists, and the pending action is untouched —
+/// so this is the shape the constant-time working-set reading exists for.
+#[derive(Default)]
+struct MemoryGrower {
+    applied: bool,
+}
+
+impl<CTX: ContextTr, INTR: InterpreterTypes> Inspector<CTX, INTR> for MemoryGrower {
+    fn step(&mut self, interp: &mut Interpreter<INTR>, context: &mut CTX) {
+        if self.applied {
+            return;
+        }
+        let words = interp.memory.size() / 32 + 1;
+        if !interp.memory.resize(words * 32) {
+            return;
+        }
+        // Priced through revm's own table, so the memo is exactly what the EVM would have written
+        // had the frame paid for the growth.
+        let cost = context.cfg().gas_params().memory_cost(words);
+        interp.gas.memory_mut().set_words_num(words, cost);
+        self.applied = true;
     }
 }
 
@@ -585,6 +619,43 @@ fn test_a_rewrite_that_moves_no_gas_is_refused_too() {
         "the point of this shape is that no gas lane moves; got {ledger:?}",
     );
     assert_eq!(ledger.interventions, 1, "the rewrite must be the thing the refusal names");
+    assert_eq!(
+        executor.block_limiter.block_compute_gas_used, 0,
+        "a refused transaction must leave the block's counters where they were",
+    );
+}
+
+/// The other rewrite a gas-only guard could not see: a frame's memory, grown for free.
+///
+/// This one reaches through nothing the shim is *handed* — not a frame input, not a frame result,
+/// not the pending action, not any gas counter. What it moves is the interpreter's own working
+/// state, and it moves the two halves of it that have to agree, so the EVM finds nothing wrong and
+/// simply charges less. The transaction pays less than it would have, which is the one thing the
+/// guard exists to keep out of a block.
+#[test]
+fn test_a_frame_grown_for_free_is_refused_too() {
+    let mut db = build_db();
+    let mut state = State::builder().with_database(&mut db).build();
+    let mut executor = executor_factory(MegaSpecId::REX7).create_executor_with_inspector(
+        &mut state,
+        block_ctx(),
+        evm_env(MegaSpecId::REX7),
+        MemoryGrower::default(),
+    );
+
+    let tx = envelope(0);
+    let err = executor
+        .run_transaction(Recovered::new_unchecked(&tx, CALLER))
+        .expect_err("a frame grown for free must be refused like any other rewrite");
+
+    assert!(executor.evm().inspector.applied, "the fixture must reach the growth point");
+    let ledger = expect_refusal(&err, *tx.hash());
+    assert_eq!(
+        (ledger.gas, ledger.env, ledger.result, ledger.refund),
+        (Lane::default(), Lane::default(), Lane::default(), Lane::default()),
+        "no lane can see this shape; got {ledger:?}",
+    );
+    assert_eq!(ledger.interventions, 1, "the growth must be the thing the refusal names");
     assert_eq!(
         executor.block_limiter.block_compute_gas_used, 0,
         "a refused transaction must leave the block's counters where they were",
