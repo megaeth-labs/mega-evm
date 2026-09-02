@@ -271,6 +271,8 @@ mod tests {
     use super::*;
     use alloy_consensus::{transaction::Recovered, Signed, TxLegacy};
     use alloy_primitives::{address, hex, Address, Signature, TxKind, B256, U256};
+    use alloy_rpc_types_eth::TransactionInfo;
+    use alloy_rpc_types_trace::parity::{Action, TraceOutput};
     use alloy_sol_types::SolCall;
     use mega_evm::{
         alloy_evm::EvmEnv,
@@ -731,6 +733,63 @@ mod tests {
         assert_eq!(
             max_depth, 3,
             "synthetic CREATE at 1, constructor at 2, KeylessDeploy code at 3"
+        );
+    }
+
+    /// The parity rendering (`trace_*` and `debug_traceTransaction` with `flatCallTracer`) of
+    /// the spliced trace: the sandbox CREATE is trace address `[0]` under the `KeylessDeploy`
+    /// CALL, every nested frame extends that prefix, and `subtraces` counts match the tree.
+    #[test]
+    fn test_keyless_flat_trace_addresses_nest_under_sandbox_create() {
+        let (tx_bytes, signer) = create_pre_eip155_deploy_tx(deep_mixed_init(REVERTER));
+        let parent = signer.create(0);
+        let child = parent.create(1);
+        let grandchild = child.create(1);
+        let (_frame, outer, _result, _db) =
+            traced_call_frame(tx_bytes, signer, LARGE_GAS_LIMIT_OVERRIDE, |db| {
+                db.set_account_code(REVERTER, Bytes::from_static(&REVERTING_RUNTIME));
+            });
+
+        let traces = outer
+            .borrow()
+            .clone()
+            .into_parity_builder()
+            .into_localized_transaction_traces(TransactionInfo::default());
+
+        let shape: Vec<(Vec<usize>, &str, Option<Address>, usize, bool)> = traces
+            .iter()
+            .map(|t| {
+                let (kind, to) = match &t.trace.action {
+                    Action::Call(call) => ("call", Some(call.to)),
+                    Action::Create(_) => (
+                        "create",
+                        match &t.trace.result {
+                            Some(TraceOutput::Create(out)) => Some(out.address),
+                            _ => None,
+                        },
+                    ),
+                    other => panic!("unexpected action {other:?}"),
+                };
+                (
+                    t.trace.trace_address.clone(),
+                    kind,
+                    to,
+                    t.trace.subtraces,
+                    t.trace.error.is_some(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            shape,
+            vec![
+                (vec![], "call", Some(KEYLESS_DEPLOY_ADDRESS), 1, false),
+                (vec![0], "create", Some(parent), 2, false),
+                (vec![0, 0], "create", Some(child), 2, false),
+                (vec![0, 0, 0], "create", Some(grandchild), 0, false),
+                (vec![0, 0, 1], "call", Some(REVERTER), 0, true),
+                (vec![0, 1], "call", Some(REVERTER), 0, true),
+            ],
+            "flat traces: {traces:#?}"
         );
     }
 }

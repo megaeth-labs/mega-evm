@@ -356,8 +356,8 @@ fn test_extreme_deep_mixed_streams_every_nested_frame() {
     }
 }
 
-/// An inner gas limit above the CREATE transaction's intrinsic cost (97,198 here: MegaETH's
-/// calldata storage surcharge nearly doubles the standard figure) but below what the
+/// An inner gas limit above the CREATE transaction's intrinsic cost (97,198 here: the calldata
+/// storage surcharge nearly doubles the standard figure) but below what the
 /// constructor's SSTORE and code deposit need: the sandbox halts out of gas, reported as
 /// `ExecutionFailed`, nothing deployed.
 #[test]

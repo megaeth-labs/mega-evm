@@ -9,12 +9,16 @@ use mega_evm::{
         decode_error_result, KeylessDeployError, SandboxCompletionKind, SandboxEndOutcome,
         SandboxInspector, SandboxObserver, SandboxRejectKind, SandboxStartInfo,
     },
-    test_utils::{BytecodeBuilder, ErrorInjectingDatabase, MemoryDatabase},
+    test_utils::{
+        deep_mixed_init, BytecodeBuilder, ErrorInjectingDatabase, MemoryDatabase, REVERTING_RUNTIME,
+    },
     EmptyExternalEnv, EvmTxRuntimeLimits, LimitUsage, MegaContext, MegaEvm, MegaHaltReason,
     MegaSpecId, TestExternalEnvs,
 };
 use revm::{
-    bytecode::opcode::{CODECOPY, ISZERO, JUMPDEST, JUMPI, MLOAD, RETURN, SSTORE, STATICCALL},
+    bytecode::opcode::{
+        CALL, CODECOPY, ISZERO, JUMPDEST, JUMPI, MLOAD, MSTORE8, POP, RETURN, SSTORE, STATICCALL,
+    },
     context::{ContextTr, JournalTr},
     handler::EvmTr,
     inspector::NoOpInspector,
@@ -37,6 +41,11 @@ use super::keyless_sandbox_support::{
 
 const SUCCESS_TARGET: Address = address!("0000000000000000000000000000000000cccccc");
 const OTHER_DEPLOY_ADDRESS: Address = address!("0000000000000000000000000000000000dddddd");
+/// Contract whose runtime stores `msg.sender` in slot 0: `CALLER, PUSH1 0, SSTORE, STOP`.
+const CALLER_SINK: Address = address!("0000000000000000000000000000000000511111");
+const CALLER_SINK_RUNTIME: [u8; 5] = [0x33, 0x60, 0x00, 0x55, 0x00];
+/// The account a prank substitutes as `msg.sender` or as the creator of a nested CREATE.
+const PRANKED: Address = address!("00000000000000000000000000000000009a9a9a");
 const IDENTITY_INPUT: U256 = U256::from_limbs([0x11, 0, 0, 0]);
 const IDENTITY_OVERRIDE: U256 = U256::from_limbs([0x42, 0, 0, 0]);
 const JOURNAL_SLOT: U256 = U256::from_limbs([0x53, 0, 0, 0]);
@@ -101,6 +110,27 @@ fn constructor_calls_success_target() -> Bytes {
     code.push(JUMPDEST);
     code.extend(BytecodeBuilder::default().revert().build_vec());
     Bytes::from(code)
+}
+
+/// Constructor that CALLs [`CALLER_SINK`] and returns a one-byte `STOP` runtime.
+fn constructor_calls_caller_sink() -> Bytes {
+    BytecodeBuilder::default()
+        .push_number(0_u8)
+        .push_number(0_u8)
+        .push_number(0_u8)
+        .push_number(0_u8)
+        .push_number(0_u8)
+        .push_address(CALLER_SINK)
+        .push_number(50_000_u32)
+        .append(CALL)
+        .append(POP)
+        .push_number(0_u8)
+        .push_number(0_u8)
+        .append(MSTORE8)
+        .push_number(1_u8)
+        .push_number(0_u8)
+        .append(RETURN)
+        .build()
 }
 
 struct InspectorRunConfig<'a, I> {
@@ -422,6 +452,60 @@ impl<E: mega_evm::ExternalEnvTypes> SandboxInspector<E> for JournalWriter {
             .journal_mut()
             .sstore(self.deploy_address, JOURNAL_SLOT, JOURNAL_VALUE)
             .expect("journal sstore");
+    }
+}
+
+/// Rewrites `msg.sender` of every CALL to `target` (a `prank`) and records the caller that
+/// `call_end` is handed for that frame.
+struct CallerPrank {
+    target: Address,
+    pranked: Address,
+    call_end_caller: Option<Address>,
+}
+
+impl<E: mega_evm::ExternalEnvTypes> SandboxInspector<E> for CallerPrank {
+    fn call(
+        &mut self,
+        _context: &mut mega_evm::MegaContext<mega_evm::sandbox::SandboxDb<'_>, E>,
+        inputs: &mut CallInputs,
+    ) -> Option<CallOutcome> {
+        if inputs.target_address == self.target {
+            inputs.caller = self.pranked;
+        }
+        None
+    }
+
+    fn call_end(
+        &mut self,
+        _context: &mut mega_evm::MegaContext<mega_evm::sandbox::SandboxDb<'_>, E>,
+        inputs: &CallInputs,
+        _outcome: &mut CallOutcome,
+    ) {
+        if inputs.target_address == self.target {
+            self.call_end_caller = Some(inputs.caller);
+        }
+    }
+}
+
+/// Rewrites the creator of every CREATE issued by `creator` to `pranked`, leaving CREATEs
+/// issued by anyone else (the sandbox's own top-level CREATE, deeper frames) untouched.
+struct CreatorPrank {
+    creator: Address,
+    pranked: Address,
+    rewritten: usize,
+}
+
+impl<E: mega_evm::ExternalEnvTypes> SandboxInspector<E> for CreatorPrank {
+    fn create(
+        &mut self,
+        _context: &mut mega_evm::MegaContext<mega_evm::sandbox::SandboxDb<'_>, E>,
+        inputs: &mut CreateInputs,
+    ) -> Option<CreateOutcome> {
+        if inputs.caller == self.creator {
+            inputs.caller = self.pranked;
+            self.rewritten += 1;
+        }
+        None
     }
 }
 
@@ -1317,4 +1401,136 @@ fn test_inspector_reaches_all_seven_sandbox_end_outcomes() {
         other => panic!("AddressMismatch: {other:?}"),
     }
     assert_parent_did_not_receive_sandbox_apply(&mismatch, signer, deploy_address, spec);
+}
+
+/// Runs `tx_bytes` with `inspector` attached, after `setup` has seeded the funded database.
+fn run_pranked<I>(
+    spec: MegaSpecId,
+    tx_bytes: &Bytes,
+    signer: Address,
+    inspector: Rc<RefCell<I>>,
+    setup: impl Fn(&mut MemoryDatabase),
+) -> ResultAndState<MegaHaltReason>
+where
+    I: SandboxInspector<EmptyExternalEnv> + 'static,
+{
+    let mut db = funded_db(signer);
+    setup(&mut db);
+    run_keyless_inspector(InspectorRunConfig {
+        spec,
+        db: &mut db,
+        tx_bytes: tx_bytes.clone(),
+        gas_limit_override: LARGE_GAS_LIMIT_OVERRIDE,
+        inspector: Some(inspector),
+        tx_limits: None,
+        outer_gas_limit: DEFAULT_OUTER_GAS_LIMIT,
+    })
+}
+
+fn address_word(address: Address) -> U256 {
+    U256::from_be_slice(address.as_slice())
+}
+
+/// A `call` hook that rewrites `inputs.caller` — a Foundry-style `prank`. The callee sees the
+/// pranked `msg.sender`, `call_end` is handed the rewritten inputs, and the rest of the
+/// deployment (address, signer accounting, apply) matches the unpranked control arm.
+#[test]
+fn test_inspector_call_prank_rewrites_msg_sender() {
+    let (tx_bytes, signer) = create_pre_eip155_deploy_tx(constructor_calls_caller_sink());
+    let deploy_address = signer.create(0);
+    let setup = |db: &mut MemoryDatabase| {
+        db.set_account_code(CALLER_SINK, Bytes::from_static(&CALLER_SINK_RUNTIME));
+    };
+
+    for spec in SPECS {
+        let control =
+            run_pranked(spec, &tx_bytes, signer, Rc::new(RefCell::new(NopSandboxInspector)), setup);
+        assert_eq!(
+            slot_value(&control, CALLER_SINK, U256::ZERO),
+            Some(address_word(deploy_address)),
+            "{spec:?}: control arm: the constructor is the callee's msg.sender"
+        );
+        assert!(account_has_code(&control, deploy_address), "{spec:?}: control arm deploys");
+        assert_control_signer_applied(&control, signer, spec);
+
+        let prank = Rc::new(RefCell::new(CallerPrank {
+            target: CALLER_SINK,
+            pranked: PRANKED,
+            call_end_caller: None,
+        }));
+        let pranked = run_pranked(spec, &tx_bytes, signer, Rc::clone(&prank), setup);
+        assert_eq!(
+            slot_value(&pranked, CALLER_SINK, U256::ZERO),
+            Some(address_word(PRANKED)),
+            "{spec:?}: the callee observed the pranked msg.sender"
+        );
+        assert_eq!(
+            prank.borrow().call_end_caller,
+            Some(PRANKED),
+            "{spec:?}: call_end receives the rewritten inputs"
+        );
+        assert!(account_has_code(&pranked, deploy_address), "{spec:?}: prank arm still deploys");
+        assert_control_signer_applied(&pranked, signer, spec);
+        assert_eq!(
+            pranked.result.gas_used(),
+            control.result.gas_used(),
+            "{spec:?}: rewriting the caller does not change the outer gas"
+        );
+    }
+}
+
+/// A `create` hook that rewrites the creator of the nested CREATE: the child lands at the
+/// pranked account's address and consumes that account's nonce instead of the parent's, the
+/// parent stores the moved address, and CREATEs issued by other frames (the sandbox's own
+/// top-level CREATE, the grandchild) are untouched.
+#[test]
+fn test_inspector_create_prank_moves_nested_child_to_pranked_creator() {
+    let (tx_bytes, signer) = create_pre_eip155_deploy_tx(deep_mixed_init(REVERTER));
+    let parent = signer.create(0);
+    let control_child = parent.create(1);
+    let pranked_child = PRANKED.create(0);
+    let grandchild = pranked_child.create(1);
+    let setup = |db: &mut MemoryDatabase| {
+        db.set_account_code(REVERTER, Bytes::from_static(&REVERTING_RUNTIME));
+    };
+
+    for spec in SPECS {
+        let control =
+            run_pranked(spec, &tx_bytes, signer, Rc::new(RefCell::new(NopSandboxInspector)), setup);
+        assert!(account_has_code(&control, parent), "{spec:?}: control arm deploys the parent");
+        assert!(account_has_code(&control, control_child), "{spec:?}: control child address");
+        assert_eq!(
+            slot_value(&control, parent, U256::ZERO),
+            Some(address_word(control_child)),
+            "{spec:?}: control arm stores the child at parent.create(1)"
+        );
+        assert_eq!(control.state[&parent].info.nonce, 2, "{spec:?}: the parent created once");
+        assert!(!control.state.contains_key(&PRANKED), "{spec:?}: control arm never touches it");
+
+        let prank =
+            Rc::new(RefCell::new(CreatorPrank { creator: parent, pranked: PRANKED, rewritten: 0 }));
+        let pranked = run_pranked(spec, &tx_bytes, signer, Rc::clone(&prank), setup);
+        assert_eq!(prank.borrow().rewritten, 1, "{spec:?}: only the parent's CREATE is rewritten");
+        assert!(account_has_code(&pranked, parent), "{spec:?}: prank arm deploys the parent");
+        assert!(account_has_code(&pranked, pranked_child), "{spec:?}: child moved to PRANKED");
+        assert!(!account_has_code(&pranked, control_child), "{spec:?}: nothing at the old slot");
+        assert!(
+            account_has_code(&pranked, grandchild),
+            "{spec:?}: grandchild under the moved child"
+        );
+        assert_eq!(
+            slot_value(&pranked, parent, U256::ZERO),
+            Some(address_word(pranked_child)),
+            "{spec:?}: the constructor stored the moved address"
+        );
+        assert_eq!(
+            pranked.state[&parent].info.nonce, 1,
+            "{spec:?}: the parent's nonce not consumed"
+        );
+        assert_eq!(
+            pranked.state[&PRANKED].info.nonce, 1,
+            "{spec:?}: the pranked creator's nonce is"
+        );
+        assert_control_signer_applied(&pranked, signer, spec);
+    }
 }
