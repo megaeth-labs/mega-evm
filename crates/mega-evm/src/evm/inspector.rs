@@ -1,66 +1,31 @@
 //! The measurement shim every inspector handed to `MegaETH` is wrapped in.
 //!
-//! # Why a shim
-//!
 //! An inspector is not a passive observer. Every callback that receives a live interpreter can
 //! write to its gas counter and to the action it is holding, and every callback that receives a
 //! frame's inputs can change the gas limit the frame is about to be built with. `MegaETH` meters
-//! compute gas by watching those exact counters, and derives what a transaction destroyed from the
-//! envelope it spent, so an unmeasured edit shows up as the EVM having done less work than it did,
-//! or as a transaction having spent less gas than it did.
+//! compute gas by watching those exact counters and derives what a transaction destroyed from the
+//! envelope it spent, so an unmeasured edit reads as the EVM having done less work than it did.
 //!
-//! # Why the callback boundary is enough
+//! The EVM does not execute inside a callback, so anything that changes between the moment the
+//! shim delegates and the moment control comes back is the inspector's by construction. The shim
+//! snapshots on the way in, compares on the way out, and books the difference — which is why it
+//! sits at the `Inspector` implementation layer: wrapping the object reaches every boundary, and
+//! mirroring `inspect_instructions` would take on a core dispatch loop for no additional reach.
 //!
-//! The EVM does not execute inside an inspector callback. Anything that changes between the moment
-//! the shim delegates to the user's inspector and the moment control comes back is therefore the
-//! inspector's doing — not by attribution, but by construction. The shim snapshots the counters it
-//! cares about on the way in, compares on the way out, and books the difference.
-//!
-//! That is why the shim lives at the `Inspector` implementation layer and not inside revm's
-//! dispatch loop: wrapping the object is sufficient to sit on every boundary, and mirroring
-//! `inspect_instructions` would take on a core dispatch loop for no additional reach.
-//!
-//! # What the shim does with what it measures
-//!
-//! - Interpreter-counter edits go to [`AdditionalLimit::record_inspector_gas_adjustment`], which
-//!   books them, keeps them out of the compute-gas measurement, and re-derives the gas clamp so
-//!   injected gas is not spendable past the compute headroom.
-//! - Pending-action edits go to [`book_pending_action`], which routes them by the action the
-//!   callback left behind — a frame's counter, a child's envelope, or the result its caller will
-//!   reclaim from. The counter and the action between them hold everything a frame has, and
-//!   [`held`] is the identity the two lanes split.
-//! - Frame-envelope edits go to [`AdditionalLimit::record_inspector_env_adjustment`].
-//! - Refund edits go to [`book_refund`], on their own lane: a refund moves what the sender pays
-//!   without moving the envelope the conservation law is stated over, so it needs a lane of its own
-//!   and no term in the law. [`held_refund`] is the reading it is taken against.
-//! - The EIP-8037 state-gas dimension — a `Gas`'s `reservoir` and `state_gas_spent`, and a frame
-//!   input's `reservoir` — is *not* measured here. `MegaETH` runs with EIP-8037 off, so it produces
-//!   none of it and there is no difference to take; the transaction's own settlement point books
-//!   whatever of it survives. See
-//!   [`InspectorLedger::reservoir`](crate::InspectorLedger::reservoir).
-//! - A callback that answers a frame itself stages the envelope it was handed, through
-//!   [`AdditionalLimit::stage_inspector_interception_envelope`], so that the frame init it
-//!   short-circuited can settle the gas its synthetic outcome carries against what the transaction
-//!   funded.
-//! - Rewrites that move no gas go to [`book_intervention`]: a frame result's classification or
-//!   output, a frame's inputs outside their gas limit, a finished outcome's metadata
-//!   ([`OutcomeMetadata`]) — and every constant-time reading the shim can take off a live
-//!   interpreter ([`WorkingSet`]), which is what makes a frame's memory grown for free, its program
-//!   counter stepped past an instruction, or its return buffer conjured all visible.
-//! - One rewrite shape is refused outright: see [`MeasuredInspector::create_end`].
-//!
-//! # The one inspector the shim does not measure
+//! Where each measurement goes is [`InspectorLedger`](crate::InspectorLedger)'s own documentation.
+//! Two things here are not differences across a boundary. A callback that answers a frame itself
+//! stages the envelope it was handed, because no frame is built and there is no other side to
+//! compare against. And the EIP-8037 state-gas dimension is settled once by the transaction,
+//! because revm propagates it by replacement and a boundary difference would book edits the EVM
+//! goes on to erase.
 //!
 //! An inspector type whose author has declared it read-only, by implementing [`TrustedObserver`]
-//! in source, is delegated to without any of the above. The declaration is the only way to reach
-//! that path: it is a bound on [`MeasuredInspector::new_trusted`], so an inspector chosen by a
-//! request or by configuration cannot arrive on it. Debug builds take the measuring path anyway
-//! and assert the ledger stayed empty, so a type declared wrongly fails where it is exercised
-//! rather than where it is deployed.
+//! in source, is delegated to without any of this. Debug builds measure it anyway and assert the
+//! ledger stayed empty, so a wrong declaration fails where it is exercised rather than where it is
+//! deployed.
 //!
-//! Nothing here changes what the inspector is allowed to do to the EVM, and nothing here runs on
-//! the uninspected path — revm's plain interpreter loop never calls an inspector at all.
-
+//! Nothing here changes what an inspector may do to the EVM, and nothing here runs on the
+//! uninspected path — revm's plain interpreter loop never calls an inspector at all.
 #[cfg(not(feature = "std"))]
 use alloc as std;
 use std::{string::String, vec::Vec};
@@ -102,56 +67,33 @@ pub const FORBIDDEN_FRAME_INIT_REWRITE: &str =
 /// A promise, made in source about one inspector type, that none of its callbacks writes anything
 /// back to the EVM.
 ///
-/// # What implementing this declares
-///
-/// Every callback of this type leaves the EVM exactly as it found it: it writes nothing to an
-/// interpreter's gas counter or its pending action, nothing to a frame's inputs, nothing to a
+/// Every callback of a declared type leaves the EVM exactly as it found it: it writes nothing to
+/// an interpreter's gas counter or its pending action, nothing to a frame's inputs, nothing to a
 /// frame result's classification, gas, output or metadata, nothing to a refund, and it never
-/// answers a frame with a synthetic outcome. It may read whatever it likes and it may write to
-/// its own state. That is the whole of the promise, and it is exactly the "read-only observation"
-/// row of the shape table in `evm/AGENTS.md`.
+/// answers a frame with a synthetic outcome. It may read whatever it likes and write to its own
+/// state.
 ///
-/// A type that keeps the promise is measured to zero on every lane of
-/// [`InspectorLedger`](crate::InspectorLedger), which is the same thing the shim would have
-/// concluded by measuring it — so declaring it changes what the measurement *costs* and never
-/// what it *says*.
-///
-/// # What it buys
-///
-/// [`MeasuredInspector`] delegates to a declared type without taking any of its readings, which
-/// puts the inspected path back on revm's own cost. Measuring costs about a nanosecond per
-/// reading per opcode and there are sixteen readings taken twice per opcode, which adds between a
-/// third and two thirds to a production tracer's run.
-///
-/// # Why a declaration and not a detection
-///
-/// There is nothing to detect. The shim measures at a callback boundary precisely because it
-/// cannot see inside the callback, so "does this type write anything back" is not a question it
-/// can ask ahead of time — only one it can answer afterwards, at the cost the declaration exists
-/// to avoid.
+/// What the declaration buys is the cost of the measurement, never its verdict: a type that keeps
+/// the promise measures to zero on every lane anyway. It is a declaration rather than a detection
+/// because the shim measures at a boundary precisely because it cannot see inside a callback, so
+/// "does this write anything back" is not a question it can ask ahead of time.
 ///
 /// # The rules this trait is under
 ///
 /// - **No blanket implementation, ever.** Each implementation names one concrete type, so a
-///   declaration is a line someone wrote about a type they had read. A blanket implementation would
-///   make the promise about types nobody has looked at.
+///   declaration is a line someone wrote about a type they had read.
 /// - **Not reachable from data.** The only route to the fast path is
-///   [`MeasuredInspector::new_trusted`], whose bound is this trait, so an inspector selected by a
-///   request, a configuration file or any other run-time value cannot arrive on it — an
-///   RPC-supplied tracer is a value, and no value can carry an implementation.
+///   [`MeasuredInspector::new_trusted`], whose bound is this trait — an RPC-supplied tracer is a
+///   value, and no value can carry an implementation.
 /// - **Do not implement it for anything that intercepts.** An inspector that answers a frame
 ///   itself, edits inputs, or rewrites a result is a rewriting inspector however little it
 ///   rewrites; those are supported, measured, and must stay measured.
 /// - **A foreign inspector needs a newtype.** The orphan rule wants one of the trait and the type
-///   to be local, and for a `revm-inspectors` tracer neither is — so a node declares a newtype of
-///   its own that forwards every callback. `benches/common/subject.rs` does exactly that, and is
-///   the shape to copy.
+///   to be local, and for a `revm-inspectors` tracer neither is, so a node declares a forwarding
+///   newtype of its own.
 ///
-/// # Verified in debug builds
-///
-/// A declared type still takes the full measurement under `debug_assertions`, and the shim
-/// asserts the ledger stayed empty after every callback. A wrong declaration therefore fails in
-/// tests, in CI and under the chaos sweep, at the callback that broke it.
+/// Debug builds measure a declared type anyway and assert the ledger stayed empty after every
+/// callback, so a wrong declaration fails at the callback that broke it.
 pub trait TrustedObserver {}
 
 /// The inspector `MegaETH` runs with when none was supplied observes nothing at all.
@@ -166,14 +108,10 @@ impl<T: TrustedObserver + ?Sized> TrustedObserver for &mut T {}
 
 /// Wraps a user inspector so that what it does to gas accounting is measured and booked.
 ///
-/// `MegaETH` applies this itself — [`MegaEvm::with_inspector`](crate::MegaEvm::with_inspector) and
-/// [`InspectEvm::set_inspector`](revm::InspectEvm::set_inspector) take the user's inspector by
-/// value and store it wrapped, and the accessors hand back the unwrapped inspector — so the wrapper
-/// is not something a caller opts into or can opt out of.
-///
-/// What a caller *can* opt into is being measured more cheaply, by declaring the inspector's type
-/// [`TrustedObserver`] and building the shim with [`new_trusted`](Self::new_trusted). See
-/// [`measures`](Self::measures) for what that changes and where it stops.
+/// `MegaETH` applies this itself, so the wrapper is not something a caller opts into or can opt
+/// out of. What a caller *can* opt into is being measured more cheaply, by declaring the
+/// inspector's type [`TrustedObserver`] and building the shim with
+/// [`new_trusted`](Self::new_trusted).
 ///
 /// Derefs to the wrapped inspector, so `evm.inspector().whatever()` reaches the user's own type.
 #[derive(Clone, Copy, Debug, Default, derive_more::Deref, derive_more::DerefMut)]
@@ -183,15 +121,11 @@ pub struct MeasuredInspector<I> {
     inner: I,
     /// Whether the wrapped type's author declared it [`TrustedObserver`].
     ///
-    /// A flag rather than a type parameter, because the type the shim is asked about is chosen by
-    /// whoever calls `with_inspector`, and `MegaEvm` names the shim as `MeasuredInspector<INSP>`
-    /// for whatever `INSP` that is. Answering it in the type system would mean either a bound on
-    /// every inspector `MegaETH` can be handed — including the foreign ones it cannot implement
-    /// anything for — or a second impl of `Inspector` that overlaps the first. So the question is
-    /// answered where it is asked, at the one constructor whose bound is the declaration, and
-    /// carried here.
-    ///
-    /// `Default` leaves it false, which is the safe direction: an unbuilt shim measures.
+    /// A flag rather than a type parameter: answering it in the type system would need either a
+    /// bound on every inspector `MegaETH` can be handed, including the foreign ones it cannot
+    /// implement anything for, or a second overlapping impl of `Inspector`. So it is answered at
+    /// the one constructor whose bound is the declaration and carried here. `Default` leaves it
+    /// false, which is the safe direction: an unbuilt shim measures.
     trusted: bool,
 }
 
@@ -204,16 +138,11 @@ impl<I> MeasuredInspector<I> {
     /// Whether this callback takes the measuring path.
     ///
     /// False only for a declared [`TrustedObserver`] in a release build. Under `debug_assertions`
-    /// every inspector is measured, declared or not, and a declared one is additionally asserted
-    /// to have booked nothing — which is what makes the declaration a claim the build system
-    /// checks rather than a comment.
+    /// every inspector is measured and a declared one is additionally asserted to have booked
+    /// nothing, which is what makes the declaration a checked claim rather than a comment.
     ///
-    /// Both halves are compile-time constants beside a `bool` the shim was built with, so the
-    /// release fast path is one predictable branch and the debug path folds away entirely.
-    ///
-    /// This and [`verify_trusted`] read the same `debug_assertions` flag, which is what keeps the
-    /// two builds from disagreeing: a profile that turns assertions on in an optimised build gets
-    /// the measured path *and* the check, never one without the other.
+    /// This and [`verify_trusted`] read the same flag, so a profile that turns assertions on in an
+    /// optimised build gets the measured path *and* the check, never one without the other.
     #[inline(always)]
     const fn measures(&self) -> bool {
         !self.trusted || cfg!(debug_assertions)
@@ -236,10 +165,8 @@ impl<I> MeasuredInspector<I> {
 
     /// Whether the wrapped inspector's type was declared [`TrustedObserver`].
     ///
-    /// True only for a shim built by [`new_trusted`](Self::new_trusted). What it is for is the
-    /// transaction-level backstop in `MegaEvm::execute_transaction`: the per-callback verification
-    /// names the callback that broke a declaration, and this catches one broken at a callback
-    /// whose verification is missing.
+    /// Read by the transaction-level backstop, which catches a declaration broken at a callback
+    /// whose own verification is missing.
     pub const fn is_trusted(&self) -> bool {
         self.trusted
     }
@@ -258,12 +185,8 @@ impl<I: TrustedObserver> MeasuredInspector<I> {
 
 /// Asserts, in debug builds, that a declared [`TrustedObserver`] really booked nothing.
 ///
-/// Called after every measured callback. The ledger accumulates over the whole transaction and is
-/// reset at its start, so the first callback that breaks the promise is the one that fails —
-/// later ones would fail too, but this one names the site.
-///
-/// Compiled out of release builds together with the measurement it checks: a declared type never
-/// reaches a measuring body there at all.
+/// Called after every measured callback, so the first one to break the promise is the one that
+/// fails and names the site. Compiled out of release builds along with the measurement it checks.
 #[inline]
 fn verify_trusted<DB: Database, ExtEnvs: ExternalEnvTypes>(
     trusted: bool,
@@ -316,36 +239,17 @@ impl ActionLane {
     /// Whether an edit to this interpreter's gas counter can still reach the transaction's
     /// envelope.
     ///
-    /// It cannot exactly on [`Result`](Self::Result). revm's inspected loop runs the terminating
-    /// instruction first and the callback after it, and that instruction has already copied the
-    /// counter into the action it set — the action is what becomes the frame's result and what the
-    /// caller reclaims from. Whatever the callback writes into the counter afterwards is written
-    /// into an object nobody will read again.
+    /// It cannot exactly on [`Result`](Self::Result): the terminating instruction has already
+    /// copied the counter into the action that becomes the frame's result, so a callback writing
+    /// to the counter afterwards writes into an object nobody reads again. The other two shapes
+    /// are live — a frame with no action carries straight on, and a suspending one resumes on this
+    /// very counter — so "the loop is about to break" is not the question, and a rule phrased that
+    /// way would stop booking edits that really do move a budget.
     ///
-    /// The two neighbouring shapes are live and must stay booked. With no action pending the frame
-    /// carries straight on; with a `NewFrame` action pending it suspends into a child and then
-    /// resumes on this very counter. "The loop is about to break" is therefore not the question —
-    /// revm breaks out of the instruction loop in both the suspending and the terminating case —
-    /// and a rule phrased that way would stop booking edits that really do move a frame's budget.
-    ///
-    /// Read *after* the callback returns, because the question is about the counter the callback
-    /// left behind: an inspector that sets or clears an action has changed what the EVM does next,
-    /// and the answer has to follow it.
-    ///
-    /// # Why this decides booking and not measurement
-    ///
-    /// Only the ledger is gated on it. `MegaETH`'s own tail settlement measures a frame's work as
-    /// a drop in this same counter and does read it after the action is set, so the settlement
-    /// baseline has to shift for a dead-window edit exactly as it does for a live one — otherwise
-    /// gas the inspector wrote in would read as work the frame performed, which is the opposite
-    /// error.
-    ///
-    /// # The gas the counter no longer speaks for
-    ///
-    /// What a dead-window counter edit cannot reach, an edit to the action itself can — and
-    /// [`LiveReading`] measures exactly that, against the same counter reading, so the two
-    /// together account for every unit of gas the frame holds. See [`held`] for the identity they
-    /// split.
+    /// Read *after* the callback returns, because the question is about the counter it left
+    /// behind. Only the ledger is gated on this: the checkpoint baseline shifts for a dead-window
+    /// edit exactly as it does for a live one, or gas the inspector wrote in would read as work
+    /// the frame performed.
     #[inline]
     const fn counter_reaches_envelope(self) -> bool {
         !matches!(self, Self::Result)
@@ -355,23 +259,16 @@ impl ActionLane {
 /// The gas a frame and its pending continuation hold, given the action it is carrying and its own
 /// counter.
 ///
-/// This is the quantity the two live-interpreter lanes partition between them:
-///
 /// ```text
-/// held(None,           counter) = counter
-/// held(NewFrame(f),    counter) = counter + f.gas_limit
-/// held(Return(r),      counter) = r.gas.remaining()
+/// held(None,        counter) = counter          // will spend its counter
+/// held(NewFrame(f), counter) = counter + f.gas_limit  // and has handed the child's on
+/// held(Return(r),   counter) = r.gas.remaining()      // the caller reclaims the action's copy
 /// ```
 ///
-/// A frame with no action pending will spend its counter. A suspending frame will spend its
-/// counter when it resumes and has additionally handed the child's envelope on. A terminating
-/// frame will spend nothing more — the action's own copy is what its caller reclaims, and the
-/// counter is dead.
-///
 /// Both readings [`LiveReading`] takes use the counter *the EVM left behind*, so the counter
-/// cancels out of the difference wherever it appears on both sides. What is left is exactly the
-/// part of the movement that is not already on the counter lane, whatever the callback did to the
-/// action's shape.
+/// cancels out of the difference wherever it appears on both sides. What is left is the part of
+/// the movement that is not already on the counter lane, whatever the callback did to the action's
+/// shape.
 #[inline]
 fn held(action: Option<&InterpreterAction>, counter: u64) -> i128 {
     match action {
@@ -383,25 +280,11 @@ fn held(action: Option<&InterpreterAction>, counter: u64) -> i128 {
     }
 }
 
-/// The refund a frame and its pending continuation hold, given the action it is carrying and the
-/// refund on its own gas counter.
+/// [`held`]'s counterpart on the refund dimension.
 ///
-/// [`held`]'s counterpart on the refund dimension, and it has the same three cases for the same
-/// reason — the object the EVM will read next is the one the frame is holding:
-///
-/// ```text
-/// held_refund(None,        counter) = counter
-/// held_refund(NewFrame(_), counter) = counter
-/// held_refund(Return(r),   counter) = r.gas.refunded()
-/// ```
-///
-/// The middle case differs from [`held`]'s: a `NewFrame` action carries a child's *envelope* but
-/// no refund of its own, and the suspending frame resumes on this very counter with the child's
-/// refund added to it. So the counter is the live object in two of the three cases, and only a
+/// The middle case differs from [`held`]'s: a `NewFrame` action carries a child's envelope but no
+/// refund of its own, so the counter is the live object in two of the three cases and only a
 /// terminating action displaces it.
-///
-/// Read on both sides of a callback, the difference is the refund the inspector wrote — wherever
-/// it wrote it, and whichever of the two objects the EVM goes on to read.
 #[inline]
 fn held_refund(action: Option<&InterpreterAction>, counter: i64) -> i64 {
     match action {
@@ -413,10 +296,8 @@ fn held_refund(action: Option<&InterpreterAction>, counter: i64) -> i64 {
 /// Books what a callback did to a refund counter.
 ///
 /// Nominal: the figure booked is what the inspector wrote, not what survives the EIP-3529 cap or
-/// the chain of frame returns between here and the receipt — see
-/// [`InspectorLedger::refund`](crate::InspectorLedger::refund) for why neither of those is a
-/// quantity a boundary can measure, and why over-stating is the safe direction for the one
-/// consumer this lane has.
+/// the chain of frame returns between here and the receipt. Neither of those is a quantity a
+/// boundary can measure, and over-stating is the safe direction for the lane's one consumer.
 #[inline]
 fn book_refund<DB: Database, ExtEnvs: ExternalEnvTypes>(
     context: &MegaContext<DB, ExtEnvs>,
@@ -433,10 +314,8 @@ fn book_refund<DB: Database, ExtEnvs: ExternalEnvTypes>(
 
 /// The refund a synthetic outcome carries, for a callback that answered a frame itself.
 ///
-/// There is no "before" to difference against: no frame is built, so the EVM produced no refund
-/// here at all and the whole of what the outcome carries is the inspector's — the same argument
-/// the interception's gas baseline rests on, with the baseline being zero rather than the
-/// envelope because a frame that never ran has refunded nothing.
+/// There is no "before" to difference against, so the whole of it is the inspector's. The baseline
+/// is zero rather than the envelope because a frame that never ran has refunded nothing.
 #[inline]
 fn book_synthetic_refund<DB: Database, ExtEnvs: ExternalEnvTypes>(
     context: &MegaContext<DB, ExtEnvs>,
@@ -458,19 +337,13 @@ struct ActionChange {
 
 /// The pending action a callback was handed, in the form the boundary compares it in.
 ///
-/// Only one question is asked of the way-in reading that the numbers beside it in [`LiveReading`]
-/// do not already answer: did the action come back describing something other than what the EVM
-/// decided? So this holds what that comparison reads and nothing else — the gas is taken as
-/// [`held`] at the moment the reading is made, and never needs the action again.
+/// Holds only what the rewrite comparison reads — the gas is taken as [`held`] when the reading is
+/// made and never needs the action again. That matters because this reading is taken twice per
+/// opcode: copying the action itself would carry an output buffer and a frame input's boxed inputs
+/// across every one, while the shape a running frame is almost always in costs a discriminant.
 ///
-/// Which matters because the way-in reading is taken twice per opcode. Copying the action itself
-/// would carry an `InterpreterResult`'s output buffer and a frame input's boxed inputs across
-/// every one of them; here the shape a running frame is almost always in costs a discriminant, and
-/// the two that carry something are taken once per frame and once per call.
-///
-/// The output buffer is held rather than reduced to its identity, and that is the point of holding
-/// it: [`same_buffer`] compares by address, and only an owner keeps the address it compares from
-/// being reused underneath it.
+/// The output buffer is held rather than reduced to its identity because [`same_buffer`] compares
+/// by address, and only an owner keeps that address from being reused underneath it.
 #[derive(Clone, Debug)]
 enum ActionSnapshot {
     /// No action pending: the frame carries straight on.
@@ -498,10 +371,10 @@ impl ActionSnapshot {
     /// Whether a callback left behind an action describing something other than what the EVM
     /// decided.
     ///
-    /// Gas is excluded, exactly as it is at every other boundary: it travels on the lanes
-    /// [`book_pending_action`] routes it to, and counting it here as well would report one rewrite
-    /// twice. A callback that installed, removed or swapped an action has rewritten what the EVM
-    /// does next as thoroughly as it is possible to, so every shape change counts.
+    /// Gas is excluded, as it is at every other boundary: it travels on the lanes
+    /// [`book_pending_action`] routes it to, and counting it here would report one rewrite twice.
+    /// Every shape change counts — installing, removing or swapping an action rewrites what the
+    /// EVM does next as thoroughly as it is possible to.
     #[inline(always)]
     fn rewritten(self, after: Option<&InterpreterAction>) -> bool {
         match (self, after) {
@@ -520,18 +393,16 @@ impl ActionSnapshot {
 /// Books what a callback did to the interpreter's pending action.
 ///
 /// The gas goes to the lane the action the callback *left behind* names, because that is where the
-/// number now lives and therefore what decides when it can still be settled:
+/// number now lives and so what decides when it can still be settled:
 ///
-/// - [`ActionLane::Result`] is staged for the frame's settlement point, like an edit made at the
-///   frame's last callback — whether it moves anything depends on the classification the caller
-///   ends up seeing, which no callback here knows;
-/// - [`ActionLane::Envelope`] is staged for the frame-start callback of the child the action is
-///   about to build, which is where an envelope edit is booked from;
-/// - [`ActionLane::Counter`] is booked on the spot, on the interpreter lane: with no action left,
-///   the frame carries on spending what it holds, which is exactly what a counter edit does. This
-///   is the algebra's third case rather than a shape an inspector can reach through the API —
-///   `reset_action` only clears revm's `continue_execution` flag and leaves the action in place, so
-///   emptying the slot means writing `None` into it and desynchronising the two.
+/// - [`ActionLane::Result`] is staged for the frame's settlement point, like an edit at the frame's
+///   last callback — whether it moves anything depends on the classification the caller ends up
+///   seeing, which no callback here knows;
+/// - [`ActionLane::Envelope`] is staged for the frame-start callback of the child it will build;
+/// - [`ActionLane::Counter`] is booked on the spot: with no action left the frame carries on
+///   spending what it holds, which is what a counter edit does. This is the algebra's third case
+///   rather than a shape the API offers — `reset_action` leaves the action in place, so emptying
+///   the slot means writing `None` and desynchronising the two.
 #[inline]
 fn book_pending_action<DB: Database, ExtEnvs: ExternalEnvTypes>(
     context: &MegaContext<DB, ExtEnvs>,
@@ -562,28 +433,17 @@ fn frame_input_gas_limit(frame_input: &FrameInput) -> Option<u64> {
 /// staged into the same envelope through the pending `NewFrame` action — and, when the callback
 /// answered the frame itself, stages that envelope for the frame's settlement point.
 ///
-/// `intercepted` is true when the callback returned a synthetic outcome: the frame is skipped
-/// entirely and the EVM never reads the inputs it edited, so the edit by itself moves nothing on
-/// this lane — see [`InspectorLedger::env`](crate::InspectorLedger::env).
+/// `intercepted` is true when the callback returned a synthetic outcome: the frame is skipped and
+/// the EVM never reads the inputs it edited, so that edit moves nothing on this lane. The staged
+/// amount is booked either way, and the asymmetry is not an oversight — it was written by a
+/// *different* callback into the action the caller's `CALL` / `CREATE` opcode had already
+/// produced, so the caller's debit is behind it and a later decision to answer the frame cannot
+/// un-make that.
 ///
-/// The staged amount is booked either way, and the asymmetry is not an oversight. An interception
-/// discards inputs *this* callback edited a moment earlier, which is why that edit reaches
-/// nothing. The staged amount was written by a different callback into the action the caller's
-/// `CALL` / `CREATE` opcode had already produced — the caller's debit is behind it, `MegaETH`'s own
-/// CALL settlement excluded the pre-edit amount from the caller's work, and a callback deciding
-/// later to answer the frame itself cannot un-make that. It is simply the earliest of the two
-/// edits to the one envelope, and the last thing to touch that envelope is what its holder is
-/// sized from.
-///
-/// # Why an interception stages a baseline rather than booking a difference
-///
-/// Every other lane measures a difference across the callback, because the EVM produced the
-/// object on both sides of it. An interception has no such object: the frame is never built, and
-/// the result the caller reclaims from is one the inspector wrote from nothing. What the
-/// transaction funded is the envelope on the way in; what it gets back is whatever gas that
-/// result turns out to carry once the last callback has run. The difference between the two is
-/// the measurement, and only the frame init that asked can take it — so the way in is staged
-/// here, and [`AdditionalLimit::stage_inspector_interception_envelope`] says what the number is.
+/// An interception stages a baseline rather than booking a difference because it has no object on
+/// the other side: the frame is never built, and what the caller reclaims from is a result the
+/// inspector wrote from nothing. What the transaction funded is the envelope on the way in, and
+/// only the frame init that asked can take that difference.
 #[inline]
 fn book_env_adjustment<DB: Database, ExtEnvs: ExternalEnvTypes>(
     context: &MegaContext<DB, ExtEnvs>,
@@ -610,20 +470,15 @@ fn book_env_adjustment<DB: Database, ExtEnvs: ExternalEnvTypes>(
     }
 }
 
-/// Books one rewrite that changes what the execution *did* rather than what it cost — see
-/// [`InspectorLedger::interventions`](crate::InspectorLedger::interventions).
+/// Books one rewrite that changes what the execution *did* rather than what it cost.
 ///
 /// Every caller answers the same question about the argument it was handed: did it come back
 /// describing something other than what the EVM was about to do? Two things are deliberately not
-/// part of that question:
-///
-/// - **Gas.** A frame input's gas limit and a frame result's remaining gas are booked as gas, on
-///   the ledger's own lanes; counting them here as well would report one rewrite twice.
-/// - **Anything neither the argument nor a constant-time reading off it describes.** The contents
-///   of the interpreter's stack and memory, and the journal. Telling whether those came back
-///   changed needs a snapshot of unbounded state, which no callback boundary can take at a cost the
-///   inspected path can carry. Their *sizes* are a constant-time reading and are covered, by
-///   [`WorkingSet`]; so is a finished outcome's metadata, by [`OutcomeMetadata`].
+/// part of it. **Gas**, because it is booked on the ledger's own lanes and counting it here would
+/// report one rewrite twice. And **anything neither the argument nor a constant-time reading off
+/// it describes** — the contents of the interpreter's stack and memory, and the journal — because
+/// telling whether those came back changed needs a snapshot of unbounded state that no per-opcode
+/// boundary can take. Their sizes are constant-time readings and are covered.
 #[inline]
 fn book_intervention<DB: Database, ExtEnvs: ExternalEnvTypes>(
     context: &MegaContext<DB, ExtEnvs>,
@@ -636,10 +491,9 @@ fn book_intervention<DB: Database, ExtEnvs: ExternalEnvTypes>(
 
 /// An `O(1)` identity for a byte buffer: where it starts and how long it is.
 ///
-/// The same comparison [`same_buffer`] makes, in a form that can be stored in a snapshot. Neither
-/// reads a byte: a buffer's *contents* at an unchanged address and length are content-class, which
-/// is the row of the shape table that has no lane. What this does catch is the buffer being
-/// replaced, which is the only way an inspector can change one that is immutable.
+/// The same comparison [`same_buffer`] makes, stored. Neither reads a byte — a buffer's contents
+/// at an unchanged address and length are the class with no lane — but replacing the buffer is the
+/// only way to change an immutable one, and that is what this catches.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct BufferId {
     /// Where the buffer starts, as a bare address rather than a live pointer.
@@ -681,58 +535,41 @@ impl CallInputId {
 ///
 /// # The rule
 ///
-/// **Every `O(1)` reading of the interpreter's working set is in this snapshot.** Not a list of
-/// the readings someone thought of — the readings themselves, enumerated field by field against
-/// revm's `Interpreter` and the traits each field is reachable through, and pinned that way by
-/// `tests/rex7/gas_surface.rs`.
+/// **Every `O(1)` reading of the interpreter's working set is in this snapshot** — not a list of
+/// the readings someone thought of, but the readings themselves, enumerated field by field against
+/// revm's `Interpreter` and the traits each field is reachable through.
 ///
-/// The rule is stated over readings rather than over fields because that is the shape of what a
-/// boundary can do. An inspector reaches the whole interpreter; the shim can only compare what it
-/// can *read back* in constant time, and a snapshot the inspected path takes twice per opcode
-/// cannot walk unbounded state. So the line is drawn at the cost of the reading, and everything on
-/// the cheap side of it is taken.
-///
-/// The earlier version of this snapshot held four readings and was written as an enumeration: the
-/// stack's length, the memory's size, and the two halves of the memo of how far that memory has
-/// been paid for. Enumerations of this kind are only as complete as whoever wrote them, and this
-/// one was not — the `bytecode` field was not in it at all, so an inspector could step the program
-/// counter past an instruction and delete it from the frame with every lane reading zero. Stating
-/// the rule over the cost of the reading is what closes that class rather than that instance.
+/// Stated over readings rather than over fields because that is the shape of what a boundary can
+/// do: an inspector reaches the whole interpreter, and a snapshot taken twice per opcode can only
+/// compare what it can read back in constant time. So the line is drawn at the cost of the
+/// reading, and everything on the cheap side of it is taken. An enumeration is only as complete as
+/// whoever wrote it, and the four-reading version this replaced left out `bytecode` — which let an
+/// inspector step the program counter past an instruction, deleting it from the frame, with every
+/// lane reading zero.
 ///
 /// # What is here, by the field it is read from
 ///
 /// - `bytecode` — the program counter, the code's identity, and revm's `continue_execution` flag,
-///   which is what the inspected loop breaks on and is a separate object from the pending action.
+///   which the inspected loop breaks on and which is a separate object from the pending action.
 /// - `stack` — its length.
-/// - `return_data` — the buffer's identity. A frame's `RETURNDATASIZE` and `RETURNDATACOPY` read
-///   it, so putting a buffer there hands the frame data no call produced.
+/// - `return_data` — the buffer's identity, which `RETURNDATASIZE` and `RETURNDATACOPY` read.
 /// - `memory` — its size, and the offset of the frame's window into the shared buffer.
-/// - `gas` — the memory memo's two halves. The budget half of a `Gas` is not here: it moves on the
-///   gas lanes, and reading it here as well would report one edit twice.
+/// - `gas` — the memory memo's two halves. The budget half moves on the gas lanes instead.
 /// - `input` — the four addresses and values a frame's identity is made of, and its calldata's
-///   identity. `target_address` is the one every storage instruction resolves against, so moving it
-///   redirects the frame's writes to another account.
+///   identity. `target_address` is what every storage instruction resolves against.
 /// - `runtime_flag` — the static flag and the spec id.
 ///
 /// `extend` is the one field with no reading, by construction: `InterpreterTypes::Extend` carries
-/// no trait bound at all, so a shim generic over the interpreter has nothing it can call on it.
+/// no trait bound, so a shim generic over the interpreter has nothing to call on it.
 ///
-/// # What is deliberately not here
+/// The *contents* of the stack, memory, return buffer, calldata and code are deliberately absent:
+/// walking unbounded state is the one thing a per-opcode boundary cannot do.
 ///
-/// The *contents* of the stack, the memory, the return buffer, the calldata and the code. Telling
-/// whether any of those came back changed means walking unbounded state, which is the one thing a
-/// per-opcode boundary cannot do. Their identities and sizes are here; what is inside them is the
-/// row of the shape table that has no lane.
-///
-/// # The pair that made the snapshot necessary
-///
-/// The memory and its memo, moved together. The memo (`Gas::memory`) is what the next expanding
-/// opcode compares its requirement against. An inspector that raises it without growing the memory
-/// desynchronises the two and the EVM reads out of bounds; one that grows the memory without
-/// raising it is charged for the growth twice over. Moving *both* is neither — the interpreter is
-/// in a state it could have reached by paying, having paid nothing, and every later expansion
-/// inside the new bound is free. That pair moves no gas at the moment it is made, so no gas lane
-/// can see it; what it changes is what the EVM charges afterwards.
+/// The pair that made the snapshot necessary is the memory and its memo, moved together. Raising
+/// the memo alone desynchronises the two and the EVM reads out of bounds; growing the memory alone
+/// is charged twice. Moving both leaves every interpreter invariant intact, having paid nothing,
+/// and makes every later expansion inside the new bound free — which no gas lane can see, because
+/// what it changes is what the EVM charges afterwards.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct WorkingSet {
     /// Where in its code the frame is about to execute.
@@ -773,20 +610,15 @@ impl WorkingSet {
     /// Whether a live interpreter still reads the way this snapshot recorded it.
     ///
     /// The same question as `*self == Self::of(interp)`, asked without building the second
-    /// snapshot. That is the whole difference, and it is worth stating because this is the way-out
-    /// half of a measurement taken twice per opcode: a comparison written that way materialises
-    /// two hundred bytes onto the stack for the length of one `==`, and the optimiser does not
-    /// reliably take them away again.
+    /// snapshot: written that way it materialises two hundred bytes onto the stack for the length
+    /// of one `==`, twice per opcode, and the optimiser does not reliably take them away again.
     ///
-    /// Every reading in [`of`](Self::of) is compared here, in the same order, and neither list may
-    /// be shortened without the other. What holds them together is the unit tests below: each of
-    /// them moves one reading and asserts both that [`moved`] names it and that this returns
-    /// `false`, so a reading present in the snapshot and missing here is a reading the shim takes
-    /// and never compares.
+    /// Every reading in [`of`](Self::of) is compared here and neither list may be shortened
+    /// without the other. The unit tests below hold them together: a reading in the snapshot and
+    /// missing here is one the shim takes and never compares.
     ///
-    /// Left as `inline` rather than `inline(always)` on purpose. Forced into all four callbacks it
-    /// is faster beside an empty inspector and slower beside a real tracer, which is the inspector
-    /// the inspected path actually carries; one copy per interpreter type is faster beside both.
+    /// `inline` rather than `inline(always)` on purpose — forced into all four callbacks it is
+    /// slower beside the real tracer the inspected path carries.
     #[inline]
     fn unchanged<INTR: InterpreterTypes>(&self, interp: &Interpreter<INTR>) -> bool {
         let memory = interp.gas.memory();
@@ -835,11 +667,11 @@ impl WorkingSet {
 
 /// Everything a `CallOutcome` carries besides the `InterpreterResult` inside it.
 ///
-/// The result is compared on its own, by [`result_rewritten`]; this is the rest of the object, and
-/// it is not bookkeeping. `memory_offset` is where the caller copies the callee's output to, so
-/// moving it feeds the caller a word the callee never wrote. `charged_new_account_state_gas` tells
-/// the caller whether to refund an EIP-8037 upfront charge. `was_precompile_called` and
-/// `precompile_call_logs` decide which logs an inspector is shown next.
+/// The result is compared on its own, by [`result_rewritten`]; this is the rest, and it is not
+/// bookkeeping. `memory_offset` is where the caller copies the callee's output to, so moving it
+/// feeds the caller a word the callee never wrote. `charged_new_account_state_gas` tells the
+/// caller whether to refund an EIP-8037 upfront charge, and the two precompile fields decide which
+/// logs an inspector is shown next.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct CallMetadata {
     memory_offset: Range<usize>,
@@ -863,9 +695,8 @@ impl CallMetadata {
 /// [`CallMetadata`] for the generic callback, which is handed the variant rather than the outcome.
 ///
 /// A creation's own metadata is one field: the address the caller's stack is about to receive.
-/// Rewriting it reports a contract at an address holding no code, while the code the EVM deployed
-/// stays where it was — a split the result's classification cannot express, and one no gas lane
-/// sees.
+/// Rewriting it reports a contract at an address holding no code while the deployed code stays
+/// where it was — a split no classification expresses and no gas lane sees.
 ///
 /// Matched without a catch-all, so a `FrameResult` variant added upstream stops the build here.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -886,10 +717,9 @@ impl OutcomeMetadata {
 
 /// Whether two output buffers are the same buffer.
 ///
-/// Compared by address and length rather than by content. `Bytes` is immutable, so a callback can
-/// only change an output by putting a different buffer there, and the caller holds its snapshot
-/// across the comparison — which keeps the original alive, so its address cannot be reused
-/// underneath. A replacement that copies the same bytes reads as unchanged, which is what it is.
+/// By address and length, not content. `Bytes` is immutable, so a callback can only change an
+/// output by putting a different buffer there, and the caller holds its snapshot across the
+/// comparison — which keeps the original alive, so its address cannot be reused underneath.
 #[inline]
 fn same_buffer(before: &Bytes, after: &Bytes) -> bool {
     before.as_ptr() == after.as_ptr() && before.len() == after.len()
@@ -898,10 +728,9 @@ fn same_buffer(before: &Bytes, after: &Bytes) -> bool {
 /// Whether a callback rewrote what a finished frame *did*: the classification its caller will see,
 /// or the output it will read.
 ///
-/// The classification is the one that carries the most: it decides whether the caller sees a
-/// success, and — through the frame's settlement point — whether the frame's state is committed
-/// and whether its remainder is handed back or destroyed. None of that moves gas by itself, so
-/// none of it leaves a trace in any gas lane.
+/// The classification carries the most — whether the caller sees a success, whether the frame's
+/// state is committed, and whether its remainder is handed back or destroyed — and none of it
+/// moves gas, so none of it leaves a trace in any gas lane.
 #[inline]
 fn result_rewritten(before: (InstructionResult, &Bytes), after: &InterpreterResult) -> bool {
     before.0 != after.result || !same_buffer(before.1, &after.output)
@@ -943,16 +772,14 @@ fn frame_input_rewritten(before: FrameInput, after: &FrameInput) -> bool {
 
 /// What an inspector can ask `MegaETH` about the frame result it is holding.
 ///
-/// One question, with one purpose: telling a result a frame *ran* to produce apart from one frame
-/// init produced without ever building a frame. The two arrive at the same callback holding the
-/// same type, and the difference decides what a rewrite of the classification does — a running
-/// frame's journal decision is still outstanding and follows the rewrite, while an init-produced
-/// result's was taken before the callback existed and is refused (see
-/// [`MeasuredInspector`](MeasuredInspector#impl-Inspector)).
+/// One question: is this a result a frame *ran* to produce, or one frame init produced without
+/// ever building a frame? The two arrive at the same callback holding the same type, and the
+/// difference decides what a classification rewrite does — a running frame's journal decision is
+/// still outstanding and follows the rewrite, an init-produced result's was taken before the
+/// callback existed and is refused.
 ///
-/// A tool that only observes never needs this. One that rewrites classifications does, because
-/// otherwise the only way to find out which kind of result it is holding is to have its
-/// transaction refused.
+/// A tool that only observes never needs this. One that rewrites classifications does, because the
+/// only other way to find out is to have its transaction refused.
 pub trait FrameResultOriginTr {
     /// Whether the frame result the `*_end` callbacks are being handed came out of frame init.
     ///
@@ -967,12 +794,11 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> FrameResultOriginTr for MegaContex
     }
 }
 
-/// Which of the three things a frame's result says, which is the granularity the refusal below is
-/// stated over.
+/// Which of the three things a frame's result says — the granularity the refusals are stated over.
 ///
-/// A result's gas and its returned output move freely — those are what the lanes measure. What
-/// cannot move is which of these three the caller is handed, because that is the question the
-/// journal decision answers.
+/// A result's gas and its returned output move freely; the lanes measure those. What cannot move
+/// is which of these three the caller is handed, because that is what the journal decision
+/// answers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ResultClass {
     /// The frame returned, and its writes stand.
@@ -999,38 +825,27 @@ impl ResultClass {
 /// Refuses a rewrite that moves a frame-init result across the success / revert / halt boundary.
 ///
 /// Every other classification rewrite is supported because REX7 withholds the journal decision
-/// until the result is final: the frame loops park it and `frame_return_result` carries it out
-/// after the last callback, so a frame rewritten into a revert has its state rolled back with it.
+/// until the result is final, so a frame rewritten into a revert has its state rolled back with
+/// it. A result out of frame *init* has no such window and cannot be given one from here: upstream
+/// decides inside `make_call_frame` — an empty-code call commits its transfer and returns `Stop`,
+/// a failing precompile reverts and returns its own failure — and `MegaETH`'s interceptors decide
+/// before they return, the `KeylessDeploy` one by merging a whole sandbox's state. Honouring a
+/// rewrite would hand the caller an answer the state behind it contradicts.
 ///
-/// A result that comes out of frame *init* has no such window, and cannot be given one from here.
-/// Upstream takes the decision inside `make_call_frame`, statements before it returns — a
-/// value-transferring call into an empty-code account commits the transfer and returns `Stop`, a
-/// precompile that fails reverts it and returns its own failure — and `MegaETH`'s system contract
-/// interceptors take theirs before they return, the `KeylessDeploy` one by merging a whole
-/// sandbox's state into the journal. All of it has happened by the time a callback sees the
-/// result. Honouring a rewrite would hand the caller an answer the state behind it contradicts:
-/// a transfer the recipient keeps and the sender is told failed, or a deployment the caller is
-/// told reverted and that stands anyway.
+/// A result an inspector answered the frame with itself is deliberately outside the refusal:
+/// nothing in the EVM decided anything for it, so its classification is the inspector's to state.
+/// What separates the two is which callback site in `inspect_frame_init` ran, which is where the
+/// window is opened.
 ///
-/// A result an inspector answered the frame with itself is deliberately outside the refusal, even
-/// though it too reaches a callback with no frame having run: nothing in the EVM decided anything
-/// for it — no checkpoint was opened, no state written — so its classification is the inspector's
-/// to state and rewriting it contradicts nothing. What separates the two is which of the two
-/// callback sites in `inspect_frame_init` ran, and that is where the window is opened; nothing
-/// here can tell them apart on its own.
+/// Detection only; nothing here compensates the journal. The classification is restored, the
+/// ledger counts the refusal, and the error slot carries the reason so the transaction fails
+/// rather than producing a receipt built on the rewrite. Loud but not fatal, unlike
+/// [`reject_forbidden_create_rewrite`]: this is the most ordinary rewrite a tool makes — failing a
+/// call — landing on the one frame kind it cannot be applied to, so a corpus should be able to
+/// report it rather than die on it.
 ///
-/// Detection only; nothing here compensates the journal. The original classification is restored,
-/// the ledger counts the refusal, and the context's error slot carries the reason so the
-/// transaction fails with an error rather than with a receipt built on the rewrite.
-///
-/// Deliberately loud but not fatal, which is where it differs from
-/// [`reject_forbidden_create_rewrite`]. That shape is a mistake with no reading behind it and
-/// asserting on it costs nothing. This one is the most ordinary rewrite a tool makes — failing a
-/// call — landing on the one kind of frame it cannot be applied to, so a corpus that produces it
-/// should be able to report it rather than die on it.
-///
-/// Gated to REX7+. On a frozen spec, an inspector's rewrite reaches no accounting lane that can be
-/// made unsound by it, and the specs' behaviour — including on the inspected path — is closed.
+/// Gated to REX7+: on a frozen spec a rewrite reaches no accounting lane it can make unsound, and
+/// those specs' behaviour is closed.
 #[inline]
 fn reject_forbidden_frame_init_rewrite<DB: Database, ExtEnvs: ExternalEnvTypes>(
     context: &mut MegaContext<DB, ExtEnvs>,
@@ -1060,21 +875,16 @@ fn reject_forbidden_frame_init_rewrite<DB: Database, ExtEnvs: ExternalEnvTypes>(
 /// Refuses a rewrite that turns a non-successful contract creation into a successful one, and says
 /// so loudly.
 ///
-/// The rewrite is forbidden rather than supported because there is no state behind it. By the time
-/// `create_end` runs, revm has already reverted the frame's journal checkpoint and has already
-/// declined to deposit the code — the size limit, the `0xEF` prefix rule and the code-deposit
-/// charge are all evaluated before the callback. A result rewritten to success therefore reports a
-/// deployment that did not happen, at an address holding no code, with the constructor's state
-/// changes rolled back. Honouring it would hand the caller a contract that does not exist.
+/// Forbidden rather than supported because there is no state behind it: by the time `create_end`
+/// runs, revm has reverted the frame's checkpoint and declined to deposit the code — the size
+/// limit, the `0xEF` prefix rule and the code-deposit charge are all evaluated before the
+/// callback. Honouring it would report a deployment at an address holding no code.
 ///
-/// Detection only; nothing here compensates the journal. The original classification is restored,
-/// the ledger counts the refusal, and the context's error slot carries the reason so that the
-/// transaction fails with an error rather than with a fabricated receipt. Debug builds assert:
-/// this is a detector, and a test corpus that produces this shape should stop rather than quietly
-/// take the rejection path.
+/// Detection only, on the same terms as [`reject_forbidden_frame_init_rewrite`], except that debug
+/// builds assert: this shape is a mistake with no reading behind it, and a corpus that produces it
+/// should stop rather than quietly take the rejection path.
 ///
-/// Gated to REX7+. On a frozen spec, an inspector's rewrite reaches no accounting lane that can be
-/// made unsound by it, and the specs' behaviour — including on the inspected path — is closed.
+/// Gated to REX7+ for the same reason as that one.
 #[inline]
 fn reject_forbidden_create_rewrite<DB: Database, ExtEnvs: ExternalEnvTypes>(
     context: &mut MegaContext<DB, ExtEnvs>,
@@ -1100,11 +910,9 @@ fn reject_forbidden_create_rewrite<DB: Database, ExtEnvs: ExternalEnvTypes>(
 /// What the shim reads off a live interpreter on the way into a callback, and settles on the way
 /// out.
 ///
-/// The four callbacks that are handed a live interpreter run the same measurement, and it is
-/// written once here rather than four times: [`enter`](Self::enter) takes the way-in readings, the
-/// user's inspector runs, and [`leave`](Self::leave) takes them again and books the differences.
-/// The four used to carry a copy of that body each, which is four places for a boundary to be
-/// measured differently at.
+/// The four callbacks handed a live interpreter run the same measurement, written once here:
+/// [`enter`](Self::enter) takes the way-in readings, the user's inspector runs, and
+/// [`leave`](Self::leave) takes them again and books the differences.
 ///
 /// `IN_OPEN_SEGMENT` on [`leave`](Self::leave) is the one thing that differs between the four:
 /// `initialize_interp` runs before the frame's settlement window is opened, so there is no open
@@ -1185,23 +993,16 @@ impl LiveReading {
 
 /// The measuring bodies of the four live-interpreter callbacks, kept out of line.
 ///
-/// Each callback is two things: a branch on the declaration, and — when it is taken — the
-/// measurement. Only the branch belongs in revm's instruction loop, and `inline(never)` is what
-/// puts it there alone. Inlined, the measurement's two hundred bytes of readings are laid down
-/// inside the loop for a declared observer that never executes them, and the loop pays for them
-/// in registers and instruction cache all the same.
+/// Each callback is a branch on the declaration and, when taken, the measurement. Only the branch
+/// belongs in revm's instruction loop, and `inline(never)` is what puts it there alone: inlined,
+/// the measurement's two hundred bytes of readings are laid down inside the loop for a declared
+/// observer that never executes them, and the loop pays for them in registers and instruction
+/// cache regardless.
 ///
-/// That cost is most of what a declared observer was paying. On `interpreter_hotloop` with an
-/// empty inspector, outlining takes the declared path from 1.13× the pre-shim inspected loop to
-/// 1.04× on REX6, and from 1.07× to 1.00× on REX7 — the branch alone is nearly free, and the
-/// bloat was not.
-///
-/// It is not free for the undeclared path, and the trade was measured both ways rather than
-/// assumed. Beside a real tracer — the inspector the inspected path carries in production — the
-/// undeclared path gets 3–6% *faster*, for the same reason the declared one does. Beside an empty
-/// inspector it gets 12–19% slower, because there the call is the whole of the work. The empty
-/// inspector is an instrument for isolating this shim's cost and not a workload, and it is the
-/// only row that moves the wrong way.
+/// The trade was measured both ways. Beside the real tracer the inspected path carries in
+/// production, outlining makes the undeclared path faster too; beside an empty inspector it is
+/// slower, because there the call is the whole of the work — and an empty inspector is an
+/// instrument for isolating this shim's cost, not a workload.
 ///
 /// Written out four times rather than taken as a function pointer, which would cost the
 /// undeclared path the inlining of the inner inspector's own callback.
