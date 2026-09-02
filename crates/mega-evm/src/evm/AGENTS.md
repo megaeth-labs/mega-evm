@@ -39,6 +39,11 @@ The shim's soundness rests on one fact: the EVM does not execute inside an inspe
 Anything that changes between the moment the shim delegates to the user's inspector and the moment control comes back is therefore the inspector's doing by construction, not by attribution — which is what makes the callback boundary a place a measurement can be taken at all.
 The shim snapshots what it cares about on the way in, compares on the way out, and books the difference on `InspectorLedger` (`../limit/inspector_ledger.rs`), which travels out on `MegaTransactionOutcome::inspector_ledger`.
 
+Where a lane is booked also decides which specs book it.
+A lane booked at a callback boundary is booked on every spec, because the shim itself is not spec-gated.
+A lane booked at the frame's settlement point is booked from `MINI_REX` onwards, because `AdditionalLimit`'s frame settlement does not run before it — so under `EQUIVALENCE` a rewrite of a finished frame result's gas reaches the receipt with no lane recording it, and the block guard does not see it.
+`tests/equivalence/pre_mini_rex_gates.rs` pins both halves.
+
 Every gas lane is two numbers, because the ledger's two consumers ask different questions.
 The conservation law needs the **net**, since gas written into one object and taken back out of another really did leave the envelope where it was.
 The block guard needs the **gross**, since two edits that cancel are two edits: a `+1` before a frame reads its own remaining gas and a `−1` after it has read it net to nothing and leave the frame holding a number the EVM would never have produced, and the same pair split across a surviving frame and a rolled-back one moves what the sender pays.

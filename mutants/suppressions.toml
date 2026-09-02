@@ -392,3 +392,55 @@ file = "crates/mega-evm/src/evm/instructions.rs"
 mutant = "replace += with *= in rex7::instruction_table"
 justification = "Dead/non-terminating: i *= 1 does not advance the INHERITED_FROM_REX6 copy loop, so instruction_table (a const fn) never finishes evaluating. The mutant times out at build rather than yielding a wrong table that a test could reject. Structurally unkillable; the += → -= and loop-bound mutants on the same loop are caught."
 reviewer = "RealiCZ (cz)"
+
+# --- execution.rs frame-settlement MINI_REX gates, EQUIVALENCE side (equivalent) --
+#
+# Two of the three spec-gate survivors on the shared frame-exit body are equivalent; the
+# third — the `finalize_frame` gate itself (execution.rs:613) — is a real gap and is killed
+# by `tests/equivalence/pre_mini_rex_gates.rs`
+# (`test_equivalence_does_not_book_a_frame_result_gas_rewrite`), so it has no entry here.
+#
+# `execution.rs` carries the same gate text at several sites (the identical
+# `let is_mini_rex_enabled = self.ctx()...` line also appears in `init_frame_unsettled`), so
+# both entries use the full `file:line:col:` form and suppress exactly one site each.
+
+# `gas_remaining_before` is read by exactly one consumer, `MegaEvm::settle_post_action_charge`,
+# whose own `MINI_REX` gate is a separate (unmutated) site and returns before it looks at the
+# argument. Capturing the value under EQUIVALENCE therefore reads a `u64` that is then thrown
+# away, and no test can distinguish it.
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "crates/mega-evm/src/evm/execution.rs"
+mutant = "crates/mega-evm/src/evm/execution.rs:632:1: spec-gate let gas_remaining_before = match (&action, ctx.spec.is_enabled(MegaSpecId::MINI_REX)) { -> let gas_remaining_before = match (&action, ctx.spec.is_enabled(MegaSpecId::EQUIVALENCE)) {"
+justification = "Equivalent: the captured value's only consumer is MegaEvm::settle_post_action_charge, whose own MINI_REX gate is a different site and is unmutated, so it returns before reading the argument. Nothing else reads the local. Under EQUIVALENCE the mutant only makes a u64 read whose value is discarded. Full mega-evm suite green with the mutant applied."
+reviewer = "RealiCZ (cz) via S1 spec-gate triage"
+
+# The uninspected `frame_init`. Under EQUIVALENCE the mutant runs
+# `AdditionalLimit::finalize_frame(result, exit, 0)`, and every branch of it is structurally
+# inert there:
+#   - `absorb_frame_local_exceed`, `settle_exceptional_halt_burn` and
+#     `settle_frame_init_reject_burn` all return at `checkpoint.rex7_enabled()`;
+#   - `staged_precompile` is always `None`, because `stage_precompile_envelope` returns at the
+#     same REX7 gate;
+#   - the inspector delta is the literal `0` this call site passes (there is no inspector on
+#     this path, and only the measurement shim stages `staged_action_result_gas`), so
+#     `book_crossing` adds `0.unsigned_abs()` to the gross and `settle_inspector_result_gas`
+#     returns immediately without booking;
+#   - `try_rescue_gas` runs on a `Refused` exit, but `check_limit()` cannot latch: every
+#     `EvmTxRuntimeLimits::equivalence()` dimension is `u64::MAX`, every frame-local branch is
+#     `rex4_enabled`-gated off, and no usage is ever recorded because every recorder sits behind
+#     its own MINI_REX gate. Both of its effects are unreadable pre-MINI_REX anyway —
+#     `rescued_gas` is consumed only inside `last_frame_result`'s `is_mini_rex` branch, and every
+#     reader of `has_exceeded_limit` is behind an unmutated MINI_REX gate — so this holds even
+#     for a caller that installs finite limits on an EQUIVALENCE context via
+#     `with_tx_runtime_limits`.
+# `FrameExit::Ran` is unreachable from frame init, so the `Ran` arm's debug_assert is not a
+# `#[should_panic]` candidate.
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "crates/mega-evm/src/evm/execution.rs"
+mutant = "crates/mega-evm/src/evm/execution.rs:1673:1: spec-gate let is_mini_rex_enabled = self.ctx().spec.is_enabled(MegaSpecId::MINI_REX); -> let is_mini_rex_enabled = self.ctx().spec.is_enabled(MegaSpecId::EQUIVALENCE);"
+justification = "Equivalent: this is the uninspected frame_init, so the mutant runs AdditionalLimit::finalize_frame(result, exit, 0) under EQUIVALENCE and every branch is inert. absorb_frame_local_exceed / settle_exceptional_halt_burn / settle_frame_init_reject_burn return at checkpoint.rex7_enabled(); staged_precompile is always None because stage_precompile_envelope returns at the same REX7 gate; the inspector delta is the literal 0 this site passes, so book_crossing books nothing and settle_inspector_result_gas returns without booking; try_rescue_gas's check_limit() cannot latch under EQUIVALENCE (every EvmTxRuntimeLimits::equivalence() dimension is u64::MAX, every frame-local branch is rex4_enabled-gated off, and no usage is ever recorded), and both of its effects are unreadable pre-MINI_REX regardless — rescued_gas is consumed only in last_frame_result's is_mini_rex branch and every reader of has_exceeded_limit is behind an unmutated MINI_REX gate. FrameExit::Ran is unreachable from frame init. Full mega-evm suite green with the mutant applied."
+reviewer = "RealiCZ (cz) via S1 spec-gate triage"
