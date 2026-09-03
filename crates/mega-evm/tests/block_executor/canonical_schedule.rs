@@ -47,8 +47,23 @@ enum Network {
     Mainnet,
 }
 
-fn overview_path() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/spec/upgrades/overview.md")
+/// The overview lives outside the crate root, so it is not part of the published package.
+/// Returns `None` when this crate is not laid out as a repository checkout (a crates.io tarball
+/// or a vendored copy), where the pin has nothing to compare against; in a checkout the file is
+/// mandatory and its absence fails the test.
+fn overview() -> Option<String> {
+    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    if !workspace_root.join("crates/mega-evm/Cargo.toml").is_file() {
+        eprintln!(
+            "skipping: not a repository checkout, docs/spec/upgrades/overview.md is not packaged"
+        );
+        return None;
+    }
+    let path: PathBuf = workspace_root.join("docs/spec/upgrades/overview.md");
+    Some(
+        fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("{} is part of the repository: {e}", path.display())),
+    )
 }
 
 /// Parses the `## Hardfork History` section. Each `### <Fork>` heading (linked or bare) opens an
@@ -105,8 +120,7 @@ fn expected(published: Option<u64>) -> ForkCondition {
 
 #[test]
 fn test_canonical_schedules_match_published_activation_timestamps() {
-    let overview = fs::read_to_string(overview_path())
-        .expect("docs/spec/upgrades/overview.md is part of the repository");
+    let Some(overview) = overview() else { return };
     let published = parse_published(&overview);
 
     // Every documented fork is pinned, and every pinned fork is documented.
