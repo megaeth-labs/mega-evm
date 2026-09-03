@@ -414,4 +414,13 @@ mod tests {
         assert_dual(GenericInspector);
         assert_dual(LocalInspector);
     }
+
+    #[test]
+    fn test_inspector_bridge_debug_names_the_bridge() {
+        use std::format;
+        let inspector: Rc<RefCell<dyn SandboxInspector<EmptyExternalEnv>>> =
+            Rc::new(RefCell::new(LocalInspector));
+        let rendered = format!("{:?}", InspectorBridge::new(inspector));
+        assert!(rendered.starts_with("InspectorBridge"), "{rendered}");
+    }
 }

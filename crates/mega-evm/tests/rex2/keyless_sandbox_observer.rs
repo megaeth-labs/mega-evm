@@ -31,10 +31,11 @@ use super::keyless_sandbox_support::{
     create_pre_eip155_deploy_tx_with_value, crowded_parent_env, empty_code_constructor, funded_db,
     keyless_deploy_call_tx, keyless_deploy_call_tx_with_override_u256, parent_compute_gas_used,
     revert_constructor, run_keyless, run_keyless_with_parent_env,
-    run_keyless_with_parent_env_usage, run_keyless_with_usage, split_create_initcode,
-    success_constructor, RunConfig, DEFAULT_OUTER_GAS_LIMIT, IDENTITY_INPUT, IDENTITY_OVERRIDE,
-    IDENTITY_PRECOMPILE, LARGE_GAS_LIMIT_OVERRIDE, MERGE_FAIL_SENTINEL, REVERTER,
-    SIGNED_TX_GAS_LIMIT, SPECS, SPLIT_CREATE_CODE_LEN, SPLIT_CREATE_SLOT, SPLIT_CREATE_SLOT_VALUE,
+    run_keyless_with_parent_env_usage, run_keyless_with_usage, selfdestructing_constructor,
+    split_create_initcode, success_constructor, RunConfig, DEFAULT_OUTER_GAS_LIMIT, IDENTITY_INPUT,
+    IDENTITY_OVERRIDE, IDENTITY_PRECOMPILE, LARGE_GAS_LIMIT_OVERRIDE, MERGE_FAIL_SENTINEL,
+    REVERTER, SIGNED_TX_GAS_LIMIT, SPECS, SPLIT_CREATE_CODE_LEN, SPLIT_CREATE_SLOT,
+    SPLIT_CREATE_SLOT_VALUE,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -960,5 +961,55 @@ fn test_sandbox_end_not_applied_apply_failed_on_merge_db_error() {
             reason: SandboxRejectKind::ApplyFailed,
         }) => {}
         other => panic!("expected NotApplied(ApplyFailed), got {other:?}"),
+    }
+}
+
+/// An observer that overrides nothing: every hook is the trait's default.
+struct DefaultsOnlyObserver;
+
+impl<E: mega_evm::ExternalEnvTypes> SandboxObserver<E> for DefaultsOnlyObserver {}
+
+/// The trait's default hook bodies are inert: with a defaults-only observer attached, a
+/// deployment that logs, calls, creates, and self-destructs inside the sandbox ends with the
+/// same result, state, and resource usage as the no-hook run.
+#[test]
+fn test_defaults_only_observer_is_inert() {
+    let shapes: [(&str, Bytes); 2] = [
+        ("deep mixed", mega_evm::test_utils::deep_mixed_init(REVERTER)),
+        ("selfdestruct", selfdestructing_constructor()),
+    ];
+    for spec in SPECS {
+        for (name, init_code) in &shapes {
+            let (tx_bytes, signer) = create_pre_eip155_deploy_tx(init_code.clone());
+            let mut db_base = funded_db(signer);
+            db_base.set_account_code(
+                REVERTER,
+                Bytes::from_static(&mega_evm::test_utils::REVERTING_RUNTIME),
+            );
+            let mut db_obs = db_base.clone();
+
+            let (baseline, baseline_usage) = run_keyless_with_usage(RunConfig {
+                spec,
+                db: &mut db_base,
+                tx_bytes: tx_bytes.clone(),
+                gas_limit_override: LARGE_GAS_LIMIT_OVERRIDE,
+                observer: None::<Rc<RefCell<DefaultsOnlyObserver>>>,
+                tx_limits: None,
+                outer_gas_limit: DEFAULT_OUTER_GAS_LIMIT,
+            });
+            let (observed, observed_usage) = run_keyless_with_usage(RunConfig {
+                spec,
+                db: &mut db_obs,
+                tx_bytes,
+                gas_limit_override: LARGE_GAS_LIMIT_OVERRIDE,
+                observer: Some(Rc::new(RefCell::new(DefaultsOnlyObserver))),
+                tx_limits: None,
+                outer_gas_limit: DEFAULT_OUTER_GAS_LIMIT,
+            });
+            let case = format!("defaults-only observer {name} {spec:?}");
+            assert!(baseline.result.is_success(), "{case}: {:?}", baseline.result);
+            assert_result_and_state_eq(&observed, &baseline, &case);
+            assert_usage_eq(observed_usage, baseline_usage, &case);
+        }
     }
 }

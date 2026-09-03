@@ -534,4 +534,13 @@ mod tests {
         let _handle: SandboxHookHandle<EmptyExternalEnv> =
             Rc::new(RefCell::new(ReadOnlyHook::new(observer)));
     }
+
+    #[test]
+    fn test_read_only_hook_debug_names_the_adapter() {
+        use std::format;
+        let observer: Rc<RefCell<dyn SandboxObserver<EmptyExternalEnv>>> =
+            Rc::new(RefCell::new(NopObserver));
+        let rendered = format!("{:?}", ReadOnlyHook::new(observer));
+        assert!(rendered.starts_with("ReadOnlyHook"), "{rendered}");
+    }
 }

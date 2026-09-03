@@ -14,7 +14,7 @@ use mega_evm::{
     MIN_BUCKET_SIZE,
 };
 use revm::{
-    bytecode::opcode::{BALANCE, CALL, MSTORE, POP, PUSH0, RETURN, STATICCALL},
+    bytecode::opcode::{BALANCE, CALL, MSTORE, POP, PUSH0, RETURN, SELFDESTRUCT, STATICCALL},
     context::TxEnv,
     handler::EvmTr,
     inspector::NoOpInspector,
@@ -68,6 +68,12 @@ pub(crate) fn revert_constructor() -> Bytes {
 
 pub(crate) fn empty_code_constructor() -> Bytes {
     BytecodeBuilder::default().append_many([PUSH0, PUSH0, RETURN]).build()
+}
+
+/// Init code that `SELFDESTRUCT`s the contract under construction with `address(0)` as the
+/// beneficiary, so the sandbox emits a `selfdestruct` hook and deploys nothing.
+pub(crate) fn selfdestructing_constructor() -> Bytes {
+    BytecodeBuilder::default().append_many([PUSH0, PUSH0, SELFDESTRUCT]).build()
 }
 
 pub(crate) fn constructor_calls_reverter() -> Bytes {

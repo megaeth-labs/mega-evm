@@ -14,13 +14,13 @@ use alloy_sol_types::SolCall;
 use mega_evm::{
     revm::{context::result::ResultAndState, InspectEvm},
     sandbox::trace::{sandbox_has_frames, splice_sandbox_traces, SharedTracingInspector},
-    test_utils::{deep_mixed_init, BytecodeBuilder, MemoryDatabase, REVERTING_RUNTIME},
+    test_utils::{deep_mixed_init, MemoryDatabase, REVERTING_RUNTIME},
     BlockLimits, IKeylessDeploy, MegaBlockExecutionCtx, MegaBlockExecutorFactory, MegaContext,
     MegaEvm, MegaEvmFactory, MegaHaltReason, MegaHardforkConfig, MegaSpecId, MegaTransaction,
     MegaTxEnvelope, TestExternalEnvs, KEYLESS_DEPLOY_ADDRESS,
 };
 use revm::{
-    bytecode::opcode::{OpCode, CALL, CREATE, PUSH0, SELFDESTRUCT, STOP},
+    bytecode::opcode::{OpCode, CALL, CREATE, STOP},
     context::{BlockEnv, CfgEnv, TxEnv},
     database::State,
 };
@@ -31,9 +31,9 @@ use revm_inspectors::tracing::{
 
 use super::keyless_sandbox_support::{
     assert_result_and_state_eq, constructor_calls_reverter, create_pre_eip155_deploy_tx,
-    empty_code_constructor, funded_db, keyless_deploy_call_tx, success_constructor,
-    DEFAULT_OUTER_GAS_LIMIT, LARGE_GAS_LIMIT_OVERRIDE, LARGE_SIGNER_BALANCE, REVERTER, SPECS,
-    TEST_CALLER,
+    empty_code_constructor, funded_db, keyless_deploy_call_tx, selfdestructing_constructor,
+    success_constructor, DEFAULT_OUTER_GAS_LIMIT, LARGE_GAS_LIMIT_OVERRIDE, LARGE_SIGNER_BALANCE,
+    REVERTER, SPECS, TEST_CALLER,
 };
 
 /// A contract whose runtime is a single `STOP`, for transactions that never enter the sandbox.
@@ -48,12 +48,6 @@ enum Channel {
 
 fn tracer() -> SharedTracingInspector {
     SharedTracingInspector::new(TracingInspector::new(TracingInspectorConfig::all()))
-}
-
-/// Init code that `SELFDESTRUCT`s the contract under construction with `address(0)` as the
-/// beneficiary.
-fn selfdestructing_constructor() -> Bytes {
-    BytecodeBuilder::default().append_many([PUSH0, PUSH0, SELFDESTRUCT]).build()
 }
 
 /// Runs one keyless deploy of `tx_bytes` on a fresh `MegaEvm` with `outer` installed as the

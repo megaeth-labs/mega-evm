@@ -32,10 +32,10 @@ use super::keyless_sandbox_support::{
     constructor_calls_reverter, constructor_touches_sentinel, create_pre_eip155_deploy_tx,
     create_pre_eip155_deploy_tx_with_value, crowded_parent_env, empty_code_constructor, funded_db,
     keyless_deploy_call_tx, keyless_deploy_call_tx_with_outer_gas, parent_compute_gas_used,
-    revert_constructor, run_keyless, run_keyless_with_usage, split_create_initcode,
-    success_constructor, RunConfig, DEFAULT_OUTER_GAS_LIMIT, IDENTITY_INPUT, IDENTITY_OVERRIDE,
-    IDENTITY_PRECOMPILE, LARGE_GAS_LIMIT_OVERRIDE, LARGE_SIGNER_BALANCE, MERGE_FAIL_SENTINEL,
-    REVERTER, SPECS,
+    revert_constructor, run_keyless, run_keyless_with_usage, selfdestructing_constructor,
+    split_create_initcode, success_constructor, RunConfig, DEFAULT_OUTER_GAS_LIMIT, IDENTITY_INPUT,
+    IDENTITY_OVERRIDE, IDENTITY_PRECOMPILE, LARGE_GAS_LIMIT_OVERRIDE, LARGE_SIGNER_BALANCE,
+    MERGE_FAIL_SENTINEL, REVERTER, SPECS,
 };
 
 const SUCCESS_TARGET: Address = address!("0000000000000000000000000000000000cccccc");
@@ -1461,5 +1461,39 @@ fn test_inspector_create_prank_moves_nested_child_to_pranked_creator() {
             "{spec:?}: the pranked creator's nonce is"
         );
         assert_control_signer_applied(&pranked, signer, spec);
+    }
+}
+
+/// The trait's default `selfdestruct` body is inert: a defaults-only inspector attached to a
+/// constructor that self-destructs leaves result, state, and usage identical to the no-hook run.
+#[test]
+fn test_defaults_only_inspector_is_inert_on_selfdestruct() {
+    for spec in SPECS {
+        let (tx_bytes, signer) = create_pre_eip155_deploy_tx(selfdestructing_constructor());
+        let mut db_base = funded_db(signer);
+        let mut db_nop = db_base.clone();
+
+        let (baseline, baseline_usage) = run_keyless_with_usage(RunConfig {
+            spec,
+            db: &mut db_base,
+            tx_bytes: tx_bytes.clone(),
+            gas_limit_override: LARGE_GAS_LIMIT_OVERRIDE,
+            observer: None::<Rc<RefCell<RecordingObserver>>>,
+            tx_limits: None,
+            outer_gas_limit: DEFAULT_OUTER_GAS_LIMIT,
+        });
+        let (inspected, inspected_usage) = run_keyless_inspector_with_usage(InspectorRunConfig {
+            spec,
+            db: &mut db_nop,
+            tx_bytes,
+            gas_limit_override: LARGE_GAS_LIMIT_OVERRIDE,
+            inspector: Some(Rc::new(RefCell::new(NopSandboxInspector))),
+            tx_limits: None,
+            outer_gas_limit: DEFAULT_OUTER_GAS_LIMIT,
+        });
+        let case = format!("defaults-only inspector selfdestruct {spec:?}");
+        assert!(baseline.result.is_success(), "{case}: {:?}", baseline.result);
+        assert_result_and_state_eq(&inspected, &baseline, &case);
+        assert_usage_eq(inspected_usage, baseline_usage, &case);
     }
 }

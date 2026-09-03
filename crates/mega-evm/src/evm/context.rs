@@ -910,6 +910,10 @@ mod tests {
 
     impl<E: ExternalEnvTypes> SandboxObserver<E> for NopObserver {}
 
+    struct NopInspector;
+
+    impl<E: ExternalEnvTypes> crate::sandbox::SandboxInspector<E> for NopInspector {}
+
     #[test]
     fn test_with_cfg_updates_spec() {
         // Create context with initial spec
@@ -1018,6 +1022,31 @@ mod tests {
         context.clear_keyless_sandbox_hook();
         assert!(context.keyless_sandbox_hook.is_none());
         assert!(context.keyless_sandbox_hook_empty.is_none());
+    }
+
+    #[test]
+    fn test_set_keyless_sandbox_inspector_none_clears_both_slots() {
+        let mut context = MegaContext::new(EmptyDB::default(), MegaSpecId::REX4);
+        context.set_keyless_sandbox_observer(Some(Rc::new(RefCell::new(NopObserver))));
+        context.set_keyless_sandbox_inspector(None::<Rc<RefCell<NopInspector>>>);
+        assert!(context.keyless_sandbox_hook.is_none());
+        assert!(context.keyless_sandbox_hook_empty.is_none());
+
+        context.set_keyless_sandbox_inspector(Some(Rc::new(RefCell::new(NopInspector))));
+        assert!(context.keyless_sandbox_hook.is_some());
+        assert!(context.keyless_sandbox_hook_empty.is_some());
+        context.set_keyless_sandbox_observer(None::<Rc<RefCell<NopObserver>>>);
+        assert!(context.keyless_sandbox_hook.is_none());
+        assert!(context.keyless_sandbox_hook_empty.is_none());
+    }
+
+    #[test]
+    fn test_with_db_keeps_the_sandbox_hook() {
+        let mut context = MegaContext::new(EmptyDB::default(), MegaSpecId::REX4);
+        context.set_keyless_sandbox_inspector(Some(Rc::new(RefCell::new(NopInspector))));
+        let context = context.with_db(EmptyDB::default());
+        assert!(context.keyless_sandbox_hook.is_some());
+        assert!(context.keyless_sandbox_hook_empty.is_some());
     }
 
     #[test]
