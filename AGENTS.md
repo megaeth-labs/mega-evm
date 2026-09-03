@@ -64,8 +64,8 @@ Progression: `EQUIVALENCE` → `MINI_REX` → `MINI_REX_1` → `MINI_REX_2` → 
   - _`REX7` is the current unstable spec under active development._
     When a new spec is introduced, this line should be updated to indicate the unstable spec.
   - Frozen and activated are separate properties.
-    `REX6` is frozen but has no activation timestamp on mainnet or testnet, so both chains still execute `REX5`.
-    Freezing forbids further semantic change; scheduling is a later, separate decision.
+    `REX6` is frozen and activated on both networks (see `block/chain.rs`); `REX7` has no activation timestamp yet.
+    Freezing forbids further semantic change; scheduling is a later, separate decision made in the node chainspecs and mirrored here in `block/chain.rs` for replay tooling.
   - Specifications of each behavior-introducing spec can be found in the upgrade pages under `docs/spec/upgrades/`; alias rungs have no page of their own and are recorded in the upgrade overview and `docs/spec/hardfork-spec.md`.
 - **Hardfork** (`MegaHardfork`) defines network upgrade events (when specs activate).
   Every hardfork schedules a spec rung of its own — the fork→spec mapping is 1:1.
@@ -311,7 +311,7 @@ When the agent is requested to implement a new feature or bug fix, it should con
   If editing nearby tests in the same module, align names to the same `test_` style when reasonable.
 - **Do NOT modify behavior for existing stable specs.**
   All specs through `REX6` are frozen; `REX7` is the unstable spec under active development.
-  A spec being frozen is independent of whether any network has scheduled it — `REX6` is frozen and unscheduled, and is still off-limits to behavior changes.
+  A spec being frozen is independent of whether any network has scheduled it — a frozen spec is off-limits to behavior changes whether or not a timestamp has been published.
   New EVM behavior, gas cost changes, or opcode modifications for stable specs **must** introduce a new spec and be gated with `spec.is_enabled(MegaSpecId::NEW_SPEC)`.
   Never change what an existing stable spec does.
 - **System contract changes require a new spec.**
