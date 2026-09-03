@@ -122,7 +122,9 @@ use revm::{
 ///
 /// ## Spec Progression and Opcode Overrides
 ///
-/// Each spec builds on the previous one. Only the opcodes that change are listed:
+/// Each behavior-introducing spec builds on the previous one; the alias specs have no table of
+/// their own and select their behavior target's (see [`MegaInstructions::new`]). Only the
+/// opcodes that change are listed:
 ///
 /// - **EQUIVALENCE**: Standard revm mainnet instruction table (no custom wrappers).
 /// - **`MINI_REX`** (base custom table): All 256 opcodes initialized from scratch.
@@ -193,9 +195,14 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaInstructions<DB, ExtEnvs> {
         // the static gas table is always built from that spec rather than `SpecId::default()`.
         let eth_spec = spec.into_eth_spec();
         let gas_table = gas_table_for_spec(spec);
+        // An alias spec is grouped with its `behavior()` target so it executes exactly the
+        // target's table; the grouping must agree with `behavior()`, pinned by
+        // `test_alias_specs_use_their_behavior_targets_table`.
         let instruction_table = match spec {
-            MegaSpecId::EQUIVALENCE => EthInstructions::new_mainnet_with_spec(eth_spec),
-            MegaSpecId::MINI_REX => EthInstructions::new(
+            MegaSpecId::EQUIVALENCE | MegaSpecId::MINI_REX_1 => {
+                EthInstructions::new_mainnet_with_spec(eth_spec)
+            }
+            MegaSpecId::MINI_REX | MegaSpecId::MINI_REX_2 => EthInstructions::new(
                 mini_rex::instruction_table::<EthInterpreter, MegaContext<DB, ExtEnvs>>(),
                 gas_table,
                 eth_spec,
@@ -250,10 +257,12 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaInstructions<DB, ExtEnvs> {
 /// wrapper has its gas entry adjusted right beside it.
 fn gas_table_for_spec(spec: MegaSpecId) -> GasTable {
     let base = gas_table_spec(spec.into_eth_spec());
+    // An alias spec is grouped with its `behavior()` target, mirroring `MegaInstructions::new`;
+    // the grouping is pinned by `test_alias_specs_use_their_behavior_targets_table`.
     match spec {
         // Vanilla mainnet table and handlers — no volatile wrappers, nothing to zero.
-        MegaSpecId::EQUIVALENCE => base,
-        MegaSpecId::MINI_REX => mini_rex::gas_table(base),
+        MegaSpecId::EQUIVALENCE | MegaSpecId::MINI_REX_1 => base,
+        MegaSpecId::MINI_REX | MegaSpecId::MINI_REX_2 => mini_rex::gas_table(base),
         MegaSpecId::REX | MegaSpecId::REX1 => rex::gas_table(base),
         MegaSpecId::REX2 => rex2::gas_table(base),
         MegaSpecId::REX3 => rex3::gas_table(base),
@@ -2992,19 +3001,7 @@ impl StackInspectTr for Stack {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    const ALL_SPECS: [MegaSpecId; 10] = [
-        MegaSpecId::EQUIVALENCE,
-        MegaSpecId::MINI_REX,
-        MegaSpecId::REX,
-        MegaSpecId::REX1,
-        MegaSpecId::REX2,
-        MegaSpecId::REX3,
-        MegaSpecId::REX4,
-        MegaSpecId::REX5,
-        MegaSpecId::REX6,
-        MegaSpecId::REX7,
-    ];
+    use crate::{test_utils::MemoryDatabase, EmptyExternalEnv};
 
     /// [`STATIC_GAS_TABLE`] is a single table shared by every handler, so the static gas it adds
     /// back is only correct as long as every spec's instruction table was built from the same
@@ -3012,7 +3009,7 @@ mod tests {
     /// table instead of silently metering against this one.
     #[test]
     fn test_static_gas_table_is_spec_invariant() {
-        for spec in ALL_SPECS {
+        for spec in MegaSpecId::ALL.iter().copied() {
             assert_eq!(
                 gas_table_spec(spec.into_eth_spec()),
                 STATIC_GAS_TABLE,
@@ -3107,7 +3104,7 @@ mod tests {
     /// is not a surface this table is used to pin.
     #[test]
     fn test_only_volatile_guarded_opcodes_have_zero_static_gas() {
-        for spec in ALL_SPECS {
+        for spec in MegaSpecId::ALL.iter().copied() {
             let vanilla = gas_table_spec(spec.into_eth_spec());
             let table = gas_table_for_spec(spec);
             let expected = volatile_guarded_opcodes(spec);
@@ -3144,15 +3141,47 @@ mod tests {
     /// (empty formatter write) fails.
     #[test]
     fn test_mega_instructions_debug_fmt_is_non_empty() {
-        let instructions = MegaInstructions::<
-            crate::test_utils::MemoryDatabase,
-            crate::EmptyExternalEnv,
-        >::new(MegaSpecId::REX5);
+        let instructions =
+            MegaInstructions::<MemoryDatabase, EmptyExternalEnv>::new(MegaSpecId::REX5);
         let rendered = format!("{instructions:?}");
         assert!(!rendered.is_empty(), "Debug output must write at least one byte",);
         assert!(
             rendered.contains("MegaethInstructions") || rendered.contains("REX5"),
             "Debug output must identify the type or the configured spec; got {rendered}",
         );
+    }
+
+    /// Every alias spec must select exactly its `behavior()` target's instruction
+    /// table and static gas table — the matches in `MegaInstructions::new` and
+    /// `gas_table_for_spec` each state the alias→target mapping again, and this test is
+    /// the reconciliation between them. Both instruction tables come from the same
+    /// monomorphization, so identical arms produce identical fn pointers. revm wraps each
+    /// entry in an opaque `Instruction` whose pointer is only observable through its `Debug`
+    /// rendering, so that rendering is what gets compared.
+    #[test]
+    fn test_alias_specs_use_their_behavior_targets_table() {
+        for spec in MegaSpecId::ALL {
+            if !spec.is_alias() {
+                continue;
+            }
+            let alias = MegaInstructions::<MemoryDatabase, EmptyExternalEnv>::new(*spec);
+            let target = MegaInstructions::<MemoryDatabase, EmptyExternalEnv>::new(spec.behavior());
+            let (alias_table, target_table) =
+                (alias.instruction_table(), target.instruction_table());
+            for opcode in 0..=0xff_usize {
+                assert_eq!(
+                    format!("{:?}", alias_table[opcode]),
+                    format!("{:?}", target_table[opcode]),
+                    "{spec:?} table diverges from its behavior target {:?} at opcode {opcode:#04x}",
+                    spec.behavior(),
+                );
+            }
+            assert_eq!(
+                alias.gas_table(),
+                target.gas_table(),
+                "{spec:?} static gas table diverges from its behavior target {:?}",
+                spec.behavior(),
+            );
+        }
     }
 }

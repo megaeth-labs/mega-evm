@@ -32,7 +32,7 @@ N/A
 {% endtab %}
 {% endtabs %}
 
-Rollback: reverted to Equivalence spec (maps to `EQUIVALENCE`).
+Rollback: schedules the alias spec `MINI_REX_1`, whose behavior is `EQUIVALENCE`.
 The MiniRex features were deactivated on the network; no chain reorg or state rollback occurred.
 Contracts deployed during MiniRex remained on-chain.
 
@@ -47,7 +47,7 @@ N/A
 {% endtab %}
 {% endtabs %}
 
-Restoration: re-activated MiniRex spec (maps to `MINI_REX`).
+Restoration: schedules the alias spec `MINI_REX_2`, whose behavior is `MINI_REX`.
 All MiniRex features (dual gas model, resource limits, gas detention) were re-enabled.
 
 ### [Rex](rex.md)

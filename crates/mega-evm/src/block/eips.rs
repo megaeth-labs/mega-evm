@@ -15,6 +15,7 @@ use revm::{
 
 use crate::{
     block::hardfork::MegaHardforks, ExternalEnvTypes, MegaContext, MegaEvm, MegaHaltReason,
+    MegaSpecId,
 };
 
 /// Applies the pre-block call to the [EIP-2935] blockhashes contract, using the given block,
@@ -38,7 +39,8 @@ use crate::{
 /// [EIP-2935]: https://eips.ethereum.org/EIPS/eip-2935
 #[inline]
 pub(crate) fn transact_blockhashes_contract_call<H, DB, INSP, ExtEnvs>(
-    spec: H,
+    hardforks: H,
+    setup_spec: MegaSpecId,
     parent_block_hash: B256,
     evm: &mut MegaEvm<DB, INSP, ExtEnvs>,
 ) -> Result<Option<ResultAndState<MegaHaltReason>>, BlockExecutionError>
@@ -49,7 +51,7 @@ where
     INSP: Inspector<MegaContext<DB, ExtEnvs>>,
 {
     let block_timestamp: u64 = evm.block().timestamp.saturating_to();
-    if !spec.is_prague_active_at_timestamp(block_timestamp) {
+    if !hardforks.is_prague_active_at_timestamp(block_timestamp) {
         return Ok(None);
     }
 
@@ -59,7 +61,7 @@ where
         return Ok(None);
     }
 
-    let res = if spec.is_rex_5_active_at_timestamp(block_timestamp) {
+    let res = if setup_spec.reaches(MegaSpecId::REX5) {
         let gas_limit =
             evm.block().gas_limit.max(crate::constants::rex5::SYSTEM_CALL_GAS_LIMIT_FLOOR);
         evm.transact_system_call_with_gas_limit(
@@ -103,7 +105,8 @@ where
 /// [EIP-4788]: https://eips.ethereum.org/EIPS/eip-4788
 #[inline]
 pub(crate) fn transact_beacon_root_contract_call<H, DB, INSP, ExtEnvs>(
-    spec: H,
+    hardforks: H,
+    setup_spec: MegaSpecId,
     parent_beacon_block_root: Option<B256>,
     evm: &mut MegaEvm<DB, INSP, ExtEnvs>,
 ) -> Result<Option<ResultAndState<MegaHaltReason>>, BlockExecutionError>
@@ -114,7 +117,7 @@ where
     INSP: Inspector<MegaContext<DB, ExtEnvs>>,
 {
     let block_timestamp: u64 = evm.block().timestamp.saturating_to();
-    if !spec.is_cancun_active_at_timestamp(block_timestamp) {
+    if !hardforks.is_cancun_active_at_timestamp(block_timestamp) {
         return Ok(None);
     }
 
@@ -133,7 +136,7 @@ where
         return Ok(None);
     }
 
-    let res = if spec.is_rex_5_active_at_timestamp(block_timestamp) {
+    let res = if setup_spec.reaches(MegaSpecId::REX5) {
         let gas_limit =
             evm.block().gas_limit.max(crate::constants::rex5::SYSTEM_CALL_GAS_LIMIT_FLOOR);
         evm.transact_system_call_with_gas_limit(

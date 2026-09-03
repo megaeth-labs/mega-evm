@@ -8,7 +8,7 @@ use alloy_evm::Database;
 use alloy_primitives::{address, Address};
 use revm::state::EvmState;
 
-use crate::{MegaHardforks, SystemContractSpec};
+use crate::{MegaHardforks, MegaSpecId, SystemContractSpec};
 
 /// The address of the `MegaLimitControl` system contract.
 pub const LIMIT_CONTROL_ADDRESS: Address = address!("0x6342000000000000000000000000000000000005");
@@ -29,18 +29,18 @@ pub fn transact_deploy_limit_control_contract<DB: Database>(
     block_timestamp: u64,
     db: &mut DB,
 ) -> Result<Option<EvmState>, DB::Error> {
-    limit_control_spec(&hardforks, block_timestamp)
+    limit_control_spec(hardforks.spec_id(block_timestamp))
         .map(|s| crate::transact_deploy(db, &s))
         .transpose()
 }
 
 /// Builds the [`SystemContractSpec`] for the `MegaLimitControl` contract active
-/// at the given timestamp, or `None` if Rex4 is not yet active.
-pub(crate) fn limit_control_spec(
-    hardforks: &impl MegaHardforks,
-    block_timestamp: u64,
-) -> Option<SystemContractSpec> {
-    hardforks.is_rex_4_active_at_timestamp(block_timestamp).then(|| {
+/// under `spec`, or `None` if `REX4` is not yet enabled.
+///
+/// `spec` is the scheduled spec, compared by position — see
+/// [`oracle_spec`](crate::system::oracle::oracle_spec).
+pub(crate) fn limit_control_spec(spec: MegaSpecId) -> Option<SystemContractSpec> {
+    spec.reaches(MegaSpecId::REX4).then(|| {
         SystemContractSpec::new(LIMIT_CONTROL_ADDRESS, LIMIT_CONTROL_CODE, LIMIT_CONTROL_CODE_HASH)
     })
 }

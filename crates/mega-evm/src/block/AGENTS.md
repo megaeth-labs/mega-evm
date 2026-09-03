@@ -17,18 +17,49 @@ Block execution orchestration for MegaETH, including hardfork-to-spec resolution
 - Pre-execution and post-execution limits are intentionally separated.
 - Pre-checks reject/skip before execution.
 - Post-checks can drop outcomes before commit.
-- System contract deployments are idempotent state patches and are hardfork-gated.
+- System contract deployments are idempotent state patches, position-gated on the resolved spec.
 - Executor constructor asserts hardfork/spec coherence for non-test builds.
 - Block limiter state is cumulative and must be updated only on committed outcomes.
 - `pre_execution_changes` collects `Option<EvmState>` outcomes from each helper into a vector; `commit_system_call_outcomes` walks them and calls `db.commit(state)` for every entry. The state hook that feeds the stateless witness generator lives on the revm `State` database (`State::set_state_hook`) and fires from inside `DatabaseCommit::commit`, so committing is what records the outcome. Helpers must therefore return all accounts and slots they touched (including reads). See `crates/mega-evm/src/system/AGENTS.md` → `PRE-BLOCK STATE CHANGE CONTRACT` for the helper-side contract.
 - `MegaSystemCallOutcome.source` no longer reaches the hook (which sees only the state diff); it is retained for in-crate use.
 - Commit-time block-limit re-validation: `commit_tx_result` / `commit_transaction_outcome` re-run `BlockLimiter::pre_execution_check` and return `Err` without committing anything, because another transaction may have filled the block between execute and commit. The infallible `BlockExecutor::commit_transaction` cannot return that error, so it latches it into `pending_commit_error` and `finish` fails the block with it.
 
+## INVARIANT MAP
+The structural invariants of the spec ladder and fork schedule, indexed by where each is enforced and when it fires.
+Guards live next to the tables they guard; this map is the index, not the home.
+
+Compile time (const assertions and exhaustive matches; a violation fails `cargo build`):
+- `MegaSpecId::ALL` lists every spec in ladder order without gaps: `is_ladder_prefix` assertion in `evm/spec.rs`.
+- The `behavior()` projection is flat — no alias chains or cycles, no upward targets: `is_flat_projection` assertion in `evm/spec.rs`.
+- The fork→spec map is strictly ascending and therefore 1:1: `climbs_the_spec_ladder` assertion in `hardfork.rs`.
+- Every new spec must be placed everywhere it matters: exhaustive matches in `ladder_index` (`evm/spec.rs`), the instruction table (`evm/instructions.rs`), precompiles (`evm/precompiles.rs`), and runtime limits (`evm/limit.rs`) fail compilation until the variant is wired; its fork is forced the same way by the matches on the fork enum in `MegaHardfork::spec_id` (`hardfork.rs`) and block limits (`limit.rs`).
+
+Chain-config load time:
+- A published schedule climbs the ladder in activation order with required params attached: `MegaHardforks::validate_schedule` (`hardfork.rs`); `hardfork_schedule` (`chain.rs`) debug-asserts it, and node startup should call it.
+- Per-fork params invariants hold: `HardforkParams::validate` runs inside `with_params` and panics at load time, not at the fork's first block.
+
+Block execution time:
+- The cfg spec equals the schedule's resolution: executor constructor assert (compiled out under `test`/`test-utils`; pre-block setup reads the same cfg spec as `resolve_system_address`, so a tool overriding the cfg spec gets a coherent what-if rather than a hybrid block).
+- A scheduled fork whose params are missing fails closed at its first block: registry checks in `executor.rs` and `system/sequencer_registry.rs`.
+
+Test time (`cargo test`):
+- Alias dispatch grouping agrees with `behavior()`: reconciliation tests in `evm/instructions.rs`, `evm/precompiles.rs`, `evm/limit.rs`, and `limit.rs`.
+- The resolved spec equals the maximum over activated forks on every schedule shape: `test_resolved_spec_is_the_maximum_over_activated_forks` (`hardfork.rs`).
+- Position projections coincide with raw activation events: parity tests on every canonical schedule (`hardfork.rs`) and on a fully staged synthetic ladder (`tests/mutation/block.rs`).
+- The const checkers themselves reject malformed inputs (the real tables can never exercise the negative path): `test_is_ladder_prefix_rejects_malformed_lists`, `test_is_flat_projection_rejects_malformed_tables`, `test_climbs_the_spec_ladder_rejects_malformed_lists`.
+- Golden tables pin what derivation cannot: spec names and discriminant positions (`ALL_SPECS` in `evm/spec.rs`), the exact fork→spec pairs (`hardfork.rs`), and the pairing of load-time and pre-block params rules (`tests/block_executor/partial_ladder.rs`).
+
+CI:
+- Spec-gate mutation testing probes boundary shifts and dispatch misroutes: `mutants/operators/spec-gate/` (behavior-introducing specs only; alias rungs are not on the behavior axis).
+
 ## ANTI-PATTERNS
 - Do not apply post-execution limit counters before a tx outcome is commit-eligible.
 - Do not bypass `pre_execution_changes` in replay or simulation paths that aim for chain equivalence.
 - Do not infer spec from tx fields.
-- Always derive spec from hardfork activation at block timestamp.
+- Gate on the one resolved spec through the right projection: `spec.is_enabled(MegaSpecId::X)` compares BEHAVIOR (both sides project through `behavior()`, so alias windows roll semantics back), `spec.reaches(MegaSpecId::X)` compares POSITION (one-way setup; alias windows do not retract it). The `is_<fork>_active_at_timestamp` predicates are position projections for behavior-introducing forks and raw event queries for alias forks (`is_mini_rex_1/2_active_at_timestamp`), whose occurrence is not recoverable from the ladder; `mega_fork_activation` answers raw scheduling for any fork.
+- A published chain schedule must pass `MegaHardforks::validate_schedule` (rung gaps, activation ordering, required per-fork params). The execution layer stays tolerant of malformed schedules — position-compared setup stays additive — but that tolerance is the fail-safe, not permission to publish one; `hardfork_schedule` debug-asserts it and node startup should check it. A new `HardforkParams` type must be registered in `validate_schedule`.
+- One spec, two projections. `spec_id` is monotone (forks map 1:1 onto an ascending ladder; rollbacks are alias rungs like `MINI_REX_1`). Behavior (`is_enabled`) gates execution semantics: EVM behavior, block limits, transaction classification — it rolls back inside an alias window. Position (`reaches`) gates one-way chain setup: system-contract predeploys, pre-block rules, expected installed bytecode versions — retracting it during a rollback window would drop the Oracle predeploys' read-only witness entries that the on-state hook feeds to stateless proofs and the state-sync transition shard.
+- Do not express "a chain running spec N" as `with_all_activated().without(fork)`. Removing a middle rung leaves later forks active, so the resolved spec stays at the top of the ladder. Use `with_all_activated_through(MegaSpecId::N)`.
 - Do not hardcode gas-limit assumptions outside `BlockLimits` plumbing.
 - Do not apply pre-block state changes by any route other than `db.commit`. The witness recorder hooks `commit`, so a change written around it is invisible to stateless proofs.
 - Do not `expect`/`unwrap` a commit-time limit re-validation. It fails on a legitimate parallel-execution race, not on a broken invariant.

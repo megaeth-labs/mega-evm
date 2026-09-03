@@ -16,6 +16,8 @@ use serde::{Deserialize, Serialize};
 /// corresponding relations are as follows:
 /// - [`SpecId::EQUIVALENCE`] -> [`OpSpecId::ISTHMUS`] -> [`EthSpecId::PRAGUE`]
 /// - [`SpecId::MINI_REX`] -> [`OpSpecId::ISTHMUS`] -> [`EthSpecId::PRAGUE`]
+/// - [`SpecId::MINI_REX_1`] -> [`OpSpecId::ISTHMUS`] -> [`EthSpecId::PRAGUE`]
+/// - [`SpecId::MINI_REX_2`] -> [`OpSpecId::ISTHMUS`] -> [`EthSpecId::PRAGUE`]
 /// - [`SpecId::REX`] -> [`OpSpecId::ISTHMUS`] -> [`EthSpecId::PRAGUE`]
 /// - [`SpecId::REX1`] -> [`OpSpecId::ISTHMUS`] -> [`EthSpecId::PRAGUE`]
 /// - [`SpecId::REX2`] -> [`OpSpecId::ISTHMUS`] -> [`EthSpecId::PRAGUE`]
@@ -40,6 +42,12 @@ pub enum MegaSpecId {
     EQUIVALENCE,
     /// The EVM version for the *Mini-Rex* hardfork of `MegaETH`.
     MINI_REX,
+    /// Alias spec for the `MiniRex1` hardfork: scheduled as its own rung, executes
+    /// [`MegaSpecId::EQUIVALENCE`] behavior (`behavior()` projects there).
+    MINI_REX_1,
+    /// Alias spec for the `MiniRex2` hardfork: scheduled as its own rung, executes
+    /// [`MegaSpecId::MINI_REX`] behavior (`behavior()` projects there).
+    MINI_REX_2,
     /// The EVM version for the *Rex* hardfork of `MegaETH`.
     REX,
     /// The EVM version for the *Rex1* hardfork of `MegaETH`.
@@ -66,6 +74,10 @@ pub mod name {
     pub const EQUIVALENCE: &str = "Equivalence";
     /// The string identifier for the *Mini-Rex* version of the `MegaETH` EVM.
     pub const MINI_REX: &str = "MiniRex";
+    /// The string identifier for the `MiniRex1` alias spec.
+    pub const MINI_REX_1: &str = "MiniRex1";
+    /// The string identifier for the `MiniRex2` alias spec.
+    pub const MINI_REX_2: &str = "MiniRex2";
     /// The string identifier for the *Rex* version of the `MegaETH` EVM.
     pub const REX: &str = "Rex";
     /// The string identifier for the *Rex1* version of the `MegaETH` EVM.
@@ -85,6 +97,28 @@ pub mod name {
 }
 
 impl MegaSpecId {
+    /// Every spec in the progression, oldest first.
+    ///
+    /// The single point to enumerate specs from: sweeps and tables that list specs by hand
+    /// drift silently when a variant is added. Completeness is enforced in two steps —
+    /// introducing a variant is a compile error in `ladder_index`'s exhaustive match (and the
+    /// `is_ladder_prefix` const assertion ties each entry here to its ladder position), and
+    /// `test_all_ends_at_the_latest_spec` fails until the new spec is appended here.
+    pub const ALL: &'static [Self] = &[
+        Self::EQUIVALENCE,
+        Self::MINI_REX,
+        Self::MINI_REX_1,
+        Self::MINI_REX_2,
+        Self::REX,
+        Self::REX1,
+        Self::REX2,
+        Self::REX3,
+        Self::REX4,
+        Self::REX5,
+        Self::REX6,
+        Self::REX7,
+    ];
+
     /// Converts the [`SpecId`] into its corresponding [`EthSpecId`].
     pub const fn into_eth_spec(self) -> EthSpecId {
         self.into_op_spec().into_eth_spec()
@@ -94,6 +128,8 @@ impl MegaSpecId {
     pub const fn into_op_spec(self) -> OpSpecId {
         match self {
             Self::MINI_REX |
+            Self::MINI_REX_1 |
+            Self::MINI_REX_2 |
             Self::EQUIVALENCE |
             Self::REX |
             Self::REX1 |
@@ -106,15 +142,156 @@ impl MegaSpecId {
         }
     }
 
-    /// Returns `true` if `other` is enabled under `self` — i.e. `other` is at or below `self`
-    /// in [`SpecId`] order.
+    /// The behavior this spec executes: alias specs project to the spec whose behavior they
+    /// reuse; every other spec is its own behavior.
     ///
-    /// Evm versions are backward compatible: the current spec (`self`) enables every version at
-    /// or below it, so a lower-or-equal version is always enabled under a higher one.
+    /// The projection must stay flat — every target is a concrete spec at or below the
+    /// projecting rung, never another alias — which the `is_flat_projection` const assertion
+    /// below pins at compile time.
+    pub const fn behavior(self) -> Self {
+        match self {
+            Self::MINI_REX_1 => Self::EQUIVALENCE,
+            Self::MINI_REX_2 => Self::MINI_REX,
+            other => other,
+        }
+    }
+
+    /// Whether this spec is an alias — a rung whose behavior belongs to another spec.
+    /// Derived from [`behavior`](Self::behavior), so a future alias needs only its projection
+    /// arm; there is no second list to extend.
+    pub const fn is_alias(self) -> bool {
+        self.behavior() as u8 != self as u8
+    }
+
+    /// Returns `true` if `other`'s BEHAVIOR is enabled under `self` — the gate for execution
+    /// semantics. Both sides project through [`behavior`](Self::behavior) first, so an alias
+    /// spec enables exactly what its behavior target enables (`MINI_REX_1` does NOT enable
+    /// `MINI_REX`).
     pub const fn is_enabled(self, other: Self) -> bool {
+        other.behavior() as u8 <= self.behavior() as u8
+    }
+
+    /// Returns `true` if the ladder has REACHED `other`'s rung — the gate for one-way chain
+    /// setup. Position comparison, no behavior projection: during an alias window the ladder
+    /// stands above the specs it rolled back from, so their setup stays in place.
+    pub const fn reaches(self, other: Self) -> bool {
         other as u8 <= self as u8
     }
 }
+
+/// Position on the spec progression, 0 = `EQUIVALENCE`.
+///
+/// Not an API — the `u8` discriminant already carries the ordinal. This exists to be an
+/// exhaustive match: introducing a spec fails compilation here until the variant is placed,
+/// and the const assertion below fails until [`MegaSpecId::ALL`] lists it at that position.
+const fn ladder_index(spec: MegaSpecId) -> usize {
+    match spec {
+        MegaSpecId::EQUIVALENCE => 0,
+        MegaSpecId::MINI_REX => 1,
+        MegaSpecId::MINI_REX_1 => 2,
+        MegaSpecId::MINI_REX_2 => 3,
+        MegaSpecId::REX => 4,
+        MegaSpecId::REX1 => 5,
+        MegaSpecId::REX2 => 6,
+        MegaSpecId::REX3 => 7,
+        MegaSpecId::REX4 => 8,
+        MegaSpecId::REX5 => 9,
+        MegaSpecId::REX6 => 10,
+        MegaSpecId::REX7 => 11,
+    }
+}
+
+/// Whether `list` is a prefix of the spec ladder: entry `i` is exactly the spec at ladder
+/// position `i` — in order, without gaps, starting from `EQUIVALENCE`.
+///
+/// Shared by the compile-time assertion on [`MegaSpecId::ALL`] below and by the test that
+/// feeds it malformed lists, so the checker itself is exercised — a weakened guard here would
+/// otherwise pass silently, since the real `ALL` always satisfies the property it checks.
+const fn is_ladder_prefix(list: &[MegaSpecId]) -> bool {
+    let mut i = 0;
+    while i < list.len() {
+        if ladder_index(list[i]) != i {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+const _: () = assert!(
+    is_ladder_prefix(MegaSpecId::ALL),
+    "MegaSpecId::ALL must list every spec in ladder order, without gaps"
+);
+
+/// The target `spec` projects to under a behavior `table` of `(spec, target)` pairs; a spec
+/// absent from the table is its own target, mirroring [`MegaSpecId::behavior`]'s identity arm.
+const fn project(table: &[(MegaSpecId, MegaSpecId)], spec: MegaSpecId) -> MegaSpecId {
+    let mut i = 0;
+    while i < table.len() {
+        if table[i].0 as u8 == spec as u8 {
+            return table[i].1;
+        }
+        i += 1;
+    }
+    spec
+}
+
+/// Whether a behavior table is flat: every target is a fixed point of the table and sits at
+/// or below the spec projecting onto it.
+///
+/// The fixed-point check rejects chains and cycles in one property — a chain `A→B→C` fails
+/// because `B`'s own target is `C`, a cycle `A→B→A` because `B` projects back to `A` — either
+/// way [`MegaSpecId::behavior`]'s single-step lookup would silently resolve half-way. The
+/// downward check rejects an alias projecting upward, which would execute semantics whose
+/// one-way setup (gated by [`MegaSpecId::reaches`], a position below the target's rung) never
+/// ran.
+///
+/// The table is passed as data so the checker can be fed malformed shapes: the compile-time
+/// assertion below checks the real projection, and the test exercises the rejection cases the
+/// real table can never produce — a weakened guard here would otherwise pass silently.
+const fn is_flat_projection(table: &[(MegaSpecId, MegaSpecId)]) -> bool {
+    let mut i = 0;
+    while i < table.len() {
+        let (spec, target) = table[i];
+        if project(table, target) as u8 != target as u8 {
+            return false;
+        }
+        if target as u8 > spec as u8 {
+            return false;
+        }
+        // A key that appears twice would make `project` ambiguous (first match wins);
+        // reject the table outright rather than trusting the lookup order.
+        let mut j = 0;
+        while j < i {
+            if table[j].0 as u8 == spec as u8 {
+                return false;
+            }
+            j += 1;
+        }
+        i += 1;
+    }
+    true
+}
+
+/// [`MegaSpecId::behavior`] as data: every spec in [`MegaSpecId::ALL`] paired with its
+/// projection target.
+const fn behavior_table() -> [(MegaSpecId, MegaSpecId); MegaSpecId::ALL.len()] {
+    let mut table = [(MegaSpecId::EQUIVALENCE, MegaSpecId::EQUIVALENCE); MegaSpecId::ALL.len()];
+    let mut i = 0;
+    while i < table.len() {
+        table[i] = (MegaSpecId::ALL[i], MegaSpecId::ALL[i].behavior());
+        i += 1;
+    }
+    table
+}
+
+const _: () = {
+    let table = behavior_table();
+    assert!(
+        is_flat_projection(&table),
+        "behavior() targets must be concrete specs at or below the projecting rung"
+    );
+};
 
 impl From<MegaSpecId> for &'static str {
     /// Converts the [`SpecId`] into its corresponding string identifier.
@@ -122,6 +299,8 @@ impl From<MegaSpecId> for &'static str {
         match spec_id {
             MegaSpecId::EQUIVALENCE => name::EQUIVALENCE,
             MegaSpecId::MINI_REX => name::MINI_REX,
+            MegaSpecId::MINI_REX_1 => name::MINI_REX_1,
+            MegaSpecId::MINI_REX_2 => name::MINI_REX_2,
             MegaSpecId::REX => name::REX,
             MegaSpecId::REX1 => name::REX1,
             MegaSpecId::REX2 => name::REX2,
@@ -142,6 +321,8 @@ impl FromStr for MegaSpecId {
         match s {
             name::EQUIVALENCE => Ok(Self::EQUIVALENCE),
             name::MINI_REX => Ok(Self::MINI_REX),
+            name::MINI_REX_1 => Ok(Self::MINI_REX_1),
+            name::MINI_REX_2 => Ok(Self::MINI_REX_2),
             name::REX => Ok(Self::REX),
             name::REX1 => Ok(Self::REX1),
             name::REX2 => Ok(Self::REX2),
@@ -180,22 +361,32 @@ impl Display for MegaSpecId {
 mod tests {
     use super::*;
 
-    const ALL_SPECS: [(MegaSpecId, &str); 10] = [
-        (MegaSpecId::EQUIVALENCE, name::EQUIVALENCE),
-        (MegaSpecId::MINI_REX, name::MINI_REX),
-        (MegaSpecId::REX, name::REX),
-        (MegaSpecId::REX1, name::REX1),
-        (MegaSpecId::REX2, name::REX2),
-        (MegaSpecId::REX3, name::REX3),
-        (MegaSpecId::REX4, name::REX4),
-        (MegaSpecId::REX5, name::REX5),
-        (MegaSpecId::REX6, name::REX6),
-        (MegaSpecId::REX7, name::REX7),
+    /// The one golden spec table: every spec with its string identifier and its pinned ladder
+    /// position. The spec column must be exactly [`MegaSpecId::ALL`] (asserted in the
+    /// round-trip test); the name and position columns stay hand-written — deriving either
+    /// from the code under test would make its check vacuous.
+    const ALL_SPECS: [(MegaSpecId, &str, u8); 12] = [
+        (MegaSpecId::EQUIVALENCE, name::EQUIVALENCE, 0),
+        (MegaSpecId::MINI_REX, name::MINI_REX, 1),
+        (MegaSpecId::MINI_REX_1, name::MINI_REX_1, 2),
+        (MegaSpecId::MINI_REX_2, name::MINI_REX_2, 3),
+        (MegaSpecId::REX, name::REX, 4),
+        (MegaSpecId::REX1, name::REX1, 5),
+        (MegaSpecId::REX2, name::REX2, 6),
+        (MegaSpecId::REX3, name::REX3, 7),
+        (MegaSpecId::REX4, name::REX4, 8),
+        (MegaSpecId::REX5, name::REX5, 9),
+        (MegaSpecId::REX6, name::REX6, 10),
+        (MegaSpecId::REX7, name::REX7, 11),
     ];
 
     #[test]
     fn test_spec_names_roundtrip_and_display() {
-        for (spec, expected_name) in ALL_SPECS {
+        // The spec column must be exactly `MegaSpecId::ALL`, so a newly introduced spec cannot
+        // be forgotten here.
+        assert!(ALL_SPECS.iter().map(|(spec, _, _)| *spec).eq(MegaSpecId::ALL.iter().copied()));
+
+        for (spec, expected_name, _) in ALL_SPECS {
             assert_eq!(<&'static str>::from(spec), expected_name);
             assert_eq!(MegaSpecId::from_str(expected_name).unwrap(), spec);
             assert_eq!(spec.to_string(), expected_name);
@@ -203,6 +394,83 @@ mod tests {
 
         assert_eq!(MegaSpecId::default(), MegaSpecId::REX7);
         assert_eq!(MegaSpecId::from_str("unknown"), Err(UnknownHardfork));
+    }
+
+    /// The completeness anchor for [`MegaSpecId::ALL`]: `Default` tracks the latest spec (its
+    /// own assertion above pins which), so a variant added without extending `ALL` fails here
+    /// once the default advances. The const assertion on `ladder_index` covers order and gaps;
+    /// this covers the tail.
+    #[test]
+    fn test_all_ends_at_the_latest_spec() {
+        assert_eq!(*MegaSpecId::ALL.last().unwrap(), MegaSpecId::default());
+    }
+
+    #[test]
+    fn test_ladder_positions_are_pinned() {
+        // A downstream variant-index codec (bincode-style) of `MegaSpecId` — or of a
+        // container holding it — silently misreads old data if discriminants renumber.
+        // Pinning every position turns any future renumbering into a loud diff on the
+        // golden table, where the review attention is.
+        assert_eq!(ALL_SPECS.len(), MegaSpecId::ALL.len());
+        for (spec, _, position) in ALL_SPECS {
+            assert_eq!(spec as u8, position, "{spec:?} moved on the ladder");
+        }
+    }
+
+    #[test]
+    fn test_is_ladder_prefix_rejects_malformed_lists() {
+        assert!(is_ladder_prefix(MegaSpecId::ALL));
+        assert!(is_ladder_prefix(&[]), "the empty prefix is a ladder prefix");
+        assert!(is_ladder_prefix(&[MegaSpecId::EQUIVALENCE, MegaSpecId::MINI_REX]));
+
+        assert!(
+            !is_ladder_prefix(&[MegaSpecId::MINI_REX, MegaSpecId::EQUIVALENCE]),
+            "reordered entries must be rejected"
+        );
+        assert!(
+            !is_ladder_prefix(&[MegaSpecId::MINI_REX]),
+            "a list not starting at the ladder base must be rejected"
+        );
+        assert!(
+            !is_ladder_prefix(&[MegaSpecId::EQUIVALENCE, MegaSpecId::REX]),
+            "a skipped rung must be rejected"
+        );
+    }
+
+    #[test]
+    fn test_is_flat_projection_rejects_malformed_tables() {
+        assert!(is_flat_projection(&behavior_table()));
+        assert!(is_flat_projection(&[]), "the empty table is flat");
+        assert!(
+            is_flat_projection(&[(MegaSpecId::MINI_REX_1, MegaSpecId::EQUIVALENCE)]),
+            "a target absent from the table projects to itself"
+        );
+
+        assert!(
+            !is_flat_projection(&[
+                (MegaSpecId::MINI_REX_1, MegaSpecId::EQUIVALENCE),
+                (MegaSpecId::MINI_REX_2, MegaSpecId::MINI_REX_1),
+            ]),
+            "a chain — an alias targeting another alias — must be rejected"
+        );
+        assert!(
+            !is_flat_projection(&[
+                (MegaSpecId::EQUIVALENCE, MegaSpecId::MINI_REX),
+                (MegaSpecId::MINI_REX, MegaSpecId::EQUIVALENCE),
+            ]),
+            "a projection cycle must be rejected"
+        );
+        assert!(
+            !is_flat_projection(&[(MegaSpecId::MINI_REX, MegaSpecId::REX)]),
+            "an alias projecting to a higher rung must be rejected"
+        );
+        assert!(
+            !is_flat_projection(&[
+                (MegaSpecId::MINI_REX_1, MegaSpecId::EQUIVALENCE),
+                (MegaSpecId::MINI_REX_1, MegaSpecId::MINI_REX),
+            ]),
+            "a duplicate key must be rejected — it would make the projection ambiguous"
+        );
     }
 
     /// Behavior elsewhere is written against this mapping, so advancing it is not a one-line
@@ -219,7 +487,7 @@ mod tests {
     /// Neither is a reason not to advance the mapping — they are the work that comes with it.
     #[test]
     fn test_all_specs_map_to_isthmus_and_prague() {
-        for (spec, _) in ALL_SPECS {
+        for spec in MegaSpecId::ALL.iter().copied() {
             assert_eq!(spec.into_op_spec(), OpSpecId::ISTHMUS);
             assert_eq!(spec.into_eth_spec(), EthSpecId::PRAGUE);
             assert_eq!(revm::primitives::hardfork::SpecId::from(spec), EthSpecId::PRAGUE);
