@@ -64,8 +64,8 @@ Progression: `EQUIVALENCE` → `MINI_REX` → `REX` → `REX1` → `REX2` → `R
   - _`REX7` is the current unstable spec under active development._
     When a new spec is introduced, this line should be updated to indicate the unstable spec.
   - Frozen and activated are separate properties.
-    `REX6` is frozen but has no activation timestamp on mainnet or testnet, so both chains still execute `REX5`.
-    Freezing forbids further semantic change; scheduling is a later, separate decision.
+    `REX6` is frozen and activated on both networks (testnet `1786330800`, mainnet `1787626800`); `REX7` has no activation timestamp yet.
+    Freezing forbids further semantic change; scheduling is a later, separate decision, recorded in `block/chain.rs`.
   - Specifications of each spec can be found in the upgrade pages under `docs/spec/upgrades/`.
 - **Hardfork** (`MegaHardfork`) defines network upgrade events (when specs activate).
   Multiple hardforks can map to one spec.
@@ -307,7 +307,7 @@ When the agent is requested to implement a new feature or bug fix, it should con
   If editing nearby tests in the same module, align names to the same `test_` style when reasonable.
 - **Do NOT modify behavior for existing stable specs.**
   All specs through `REX6` are frozen; `REX7` is the unstable spec under active development.
-  A spec being frozen is independent of whether any network has scheduled it — `REX6` is frozen and unscheduled, and is still off-limits to behavior changes.
+  A spec being frozen is independent of whether any network has scheduled it — a frozen spec is off-limits to behavior changes whether or not a timestamp has been published.
   New EVM behavior, gas cost changes, or opcode modifications for stable specs **must** introduce a new spec and be gated with `spec.is_enabled(MegaSpecId::NEW_SPEC)`.
   Never change what an existing stable spec does.
 - **System contract changes require a new spec.**
