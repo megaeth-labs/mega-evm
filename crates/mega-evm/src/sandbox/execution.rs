@@ -106,6 +106,18 @@ use super::{
 pub fn execute_keyless_deploy_call<DB: AlloyDatabase, ExtEnvs: ExternalEnvTypes>(
     ctx: &mut MegaContext<DB, ExtEnvs>,
     call_inputs: &revm::interpreter::CallInputs,
+    tx_bytes: &Bytes,
+    gas_limit_override: U256,
+) -> FrameResult {
+    // The interceptor only dispatches top-level calls, so the intercepted frame is at depth 0.
+    execute_keyless_deploy_call_at_depth(ctx, call_inputs, 0, tx_bytes, gas_limit_override)
+}
+
+/// [`execute_keyless_deploy_call`] with the intercepted frame's call depth, which the
+/// interceptor knows and reports to hooks through `OuterCallInfo::depth`.
+pub(crate) fn execute_keyless_deploy_call_at_depth<DB: AlloyDatabase, ExtEnvs: ExternalEnvTypes>(
+    ctx: &mut MegaContext<DB, ExtEnvs>,
+    call_inputs: &revm::interpreter::CallInputs,
     depth: usize,
     tx_bytes: &Bytes,
     gas_limit_override: U256,
@@ -464,12 +476,17 @@ pub fn execute_keyless_deploy_call<DB: AlloyDatabase, ExtEnvs: ExternalEnvTypes>
             gas_limit: call_inputs.gas_limit,
             gas_remaining: outer_gas_remaining,
             value: call_inputs.call_value(),
-            input: call_inputs.input.bytes(ctx),
+            data: call_inputs.input.bytes(ctx),
         },
     });
 
     match execute_keyless_deploy_sandbox(ctx, sandbox_tx, sandbox_tx_limits) {
-        SandboxOutcome::Completed { state, completion, limit_usage, volatile_accesses } => {
+        SandboxRun::Outcome(SandboxOutcome::Completed {
+            state,
+            completion,
+            limit_usage,
+            volatile_accesses,
+        }) => {
             let gas_used = completion.gas_used();
 
             if ctx.spec.is_enabled(MegaSpecId::REX5) {
@@ -556,7 +573,7 @@ pub fn execute_keyless_deploy_call<DB: AlloyDatabase, ExtEnvs: ExternalEnvTypes>
                 }
             }
         }
-        SandboxOutcome::NoContractCreated { gas_used, limit_usage, volatile_accesses } => {
+        SandboxRun::NoContractCreated { gas_used, limit_usage, volatile_accesses } => {
             // The sandbox ran a top-level create frame that produced no address, which only
             // an inspector `create` override can do. The sandbox did execute, so charge it
             // exactly like `AddressMismatch`: REX5+ books gas and usage, nothing is applied.
@@ -579,7 +596,7 @@ pub fn execute_keyless_deploy_call<DB: AlloyDatabase, ExtEnvs: ExternalEnvTypes>
             lifecycle.end(SandboxEndOutcome::NotApplied { reason: SandboxRejectKind::Rejected });
             make_error!(KeylessDeployError::NoContractCreated)
         }
-        SandboxOutcome::Rejected(e) => {
+        SandboxRun::Outcome(SandboxOutcome::Rejected(e)) => {
             // Sandbox bailed before producing a frame — typically a validate-reject
             // (`FailedDeposit` → `InvalidTransaction`) or an internal error. Refund
             // the full reservation; the materialization charge already applied
@@ -637,7 +654,7 @@ pub(crate) fn execute_keyless_deploy_sandbox<DB: AlloyDatabase, ExtEnvs: Externa
     ctx: &mut MegaContext<DB, ExtEnvs>,
     sandbox_tx: MegaTransaction,
     sandbox_tx_limits: Option<EvmTxRuntimeLimits>,
-) -> SandboxOutcome {
+) -> SandboxRun {
     let deploy_signer = sandbox_tx.caller();
     let gas_limit = sandbox_tx.gas_limit();
     let gas_price = sandbox_tx.gas_price();
@@ -683,7 +700,7 @@ pub(crate) fn execute_keyless_deploy_sandbox<DB: AlloyDatabase, ExtEnvs: Externa
                 deploy_signer = ?deploy_signer,
                 "keyless deploy signer balance read failed",
             );
-            return SandboxOutcome::Rejected(KeylessDeployError::InternalError);
+            return SandboxRun::rejected(KeylessDeployError::InternalError);
         }
     };
 
@@ -697,11 +714,11 @@ pub(crate) fn execute_keyless_deploy_sandbox<DB: AlloyDatabase, ExtEnvs: Externa
         let gas_cost = U256::from(gas_limit) * U256::from(gas_price);
         match gas_cost.checked_add(value) {
             Some(total) => total,
-            None => return SandboxOutcome::Rejected(KeylessDeployError::InsufficientBalance),
+            None => return SandboxRun::rejected(KeylessDeployError::InsufficientBalance),
         }
     };
     if signer_account.balance < total_cost {
-        return SandboxOutcome::Rejected(KeylessDeployError::InsufficientBalance);
+        return SandboxRun::rejected(KeylessDeployError::InsufficientBalance);
     }
 
     // Execute sandbox - using type-erased SandboxDb prevents infinite type instantiation.
@@ -730,7 +747,7 @@ fn run_sandbox_ctx<'db, ExtEnvs: ExternalEnvTypes>(
     block: BlockEnv,
     chain: L1BlockInfo,
     hook: Option<SandboxHookHandle<ExtEnvs>>,
-) -> SandboxOutcome {
+) -> SandboxRun {
     let sandbox_ctx = match sandbox_tx_limits {
         Some(limits) => sandbox_ctx.with_tx_runtime_limits(limits),
         None => sandbox_ctx,
@@ -846,6 +863,16 @@ pub enum SandboxOutcome {
     /// or `InternalError`). No state, resource usage, or volatile-access footprint
     /// applies — the outer caller must refund the full pre-debited reservation.
     Rejected(KeylessDeployError),
+}
+
+/// What one sandbox run produced, as seen by the interceptor.
+///
+/// Wraps the public [`SandboxOutcome`] with the one shape that is not an outcome the outer
+/// caller can report as-is: a top-level create frame that produced no address.
+#[derive(Debug)]
+pub(crate) enum SandboxRun {
+    /// The sandbox completed or was rejected; see [`SandboxOutcome`].
+    Outcome(SandboxOutcome),
     /// Sandbox EVM ran, but its top-level create frame produced no address. Only an
     /// inspector `create` override returning `address: None` reaches this arm; the no-hook
     /// path always creates. The sandbox executed, so gas and resource usage are charged
@@ -858,6 +885,12 @@ pub enum SandboxOutcome {
         /// Volatile-access footprint to merge into the parent after sandbox return.
         volatile_accesses: VolatileDataAccess,
     },
+}
+
+impl SandboxRun {
+    fn rejected(error: KeylessDeployError) -> Self {
+        Self::Outcome(SandboxOutcome::Rejected(error))
+    }
 }
 
 /// Wire-shape dispatch for a completed sandbox execution.
@@ -956,12 +989,14 @@ fn process_sandbox_transact_result<E: core::fmt::Display + IsTxError>(
     volatile_accesses: VolatileDataAccess,
     is_rex5_enabled: bool,
     is_rex6_enabled: bool,
-) -> SandboxOutcome {
-    let completed = |state, completion| SandboxOutcome::Completed {
-        state,
-        completion,
-        limit_usage,
-        volatile_accesses,
+) -> SandboxRun {
+    let completed = |state, completion| {
+        SandboxRun::Outcome(SandboxOutcome::Completed {
+            state,
+            completion,
+            limit_usage,
+            volatile_accesses,
+        })
     };
 
     match result {
@@ -973,7 +1008,7 @@ fn process_sandbox_transact_result<E: core::fmt::Display + IsTxError>(
                     // `TxKind::Create`, so revm never produces this on its own; an
                     // inspector `create` override answering `address: None` does. The
                     // sandbox executed, so its gas and usage are reported for charging.
-                    return SandboxOutcome::NoContractCreated {
+                    return SandboxRun::NoContractCreated {
                         gas_used,
                         limit_usage,
                         volatile_accesses,
@@ -1031,7 +1066,7 @@ fn process_sandbox_transact_result<E: core::fmt::Display + IsTxError>(
                 // so we drop the discarded sandbox state and surface as Rejected.
                 if matches!(reason, MegaHaltReason::Base(op_revm::OpHaltReason::FailedDeposit)) {
                     warn!(gas_used, "keyless deploy sandbox failed deposit (validation-reject)",);
-                    return SandboxOutcome::Rejected(KeylessDeployError::InvalidTransaction);
+                    return SandboxRun::rejected(KeylessDeployError::InvalidTransaction);
                 }
                 // The halt `reason` is dropped on the ABI wire (the Solidity error
                 // carries only `gasUsed`) and `decode_error_result` synthesizes a
@@ -1059,14 +1094,14 @@ fn process_sandbox_transact_result<E: core::fmt::Display + IsTxError>(
                 error = %e,
                 "keyless deploy sandbox transaction rejected during validation",
             );
-            SandboxOutcome::Rejected(KeylessDeployError::InvalidTransaction)
+            SandboxRun::rejected(KeylessDeployError::InvalidTransaction)
         }
         Err(e) => {
             error!(
                 error = %e,
                 "keyless deploy sandbox failed with internal error",
             );
-            SandboxOutcome::Rejected(KeylessDeployError::InternalError)
+            SandboxRun::rejected(KeylessDeployError::InternalError)
         }
     }
 }
@@ -1429,7 +1464,7 @@ mod tests {
             false,
         );
         assert!(
-            matches!(out, SandboxOutcome::NoContractCreated { gas_used: 1, .. }),
+            matches!(out, SandboxRun::NoContractCreated { gas_used: 1, .. }),
             "unexpected: {out:?}",
         );
     }
@@ -1457,7 +1492,7 @@ mod tests {
             false,
         );
         assert!(
-            matches!(out, SandboxOutcome::NoContractCreated { gas_used: 1, .. }),
+            matches!(out, SandboxRun::NoContractCreated { gas_used: 1, .. }),
             "unexpected: {out:?}",
         );
     }
@@ -1478,7 +1513,10 @@ mod tests {
             false,
         );
         assert!(
-            matches!(out, SandboxOutcome::Rejected(KeylessDeployError::InternalError)),
+            matches!(
+                out,
+                SandboxRun::Outcome(SandboxOutcome::Rejected(KeylessDeployError::InternalError))
+            ),
             "unexpected: {out:?}",
         );
     }
@@ -1497,7 +1535,12 @@ mod tests {
             false,
         );
         assert!(
-            matches!(out, SandboxOutcome::Rejected(KeylessDeployError::InvalidTransaction)),
+            matches!(
+                out,
+                SandboxRun::Outcome(SandboxOutcome::Rejected(
+                    KeylessDeployError::InvalidTransaction
+                ))
+            ),
             "unexpected: {out:?}",
         );
     }
@@ -1894,7 +1937,7 @@ mod tests {
 
         let limits =
             EvmTxRuntimeLimits::no_limits().with_tx_compute_gas_limit(SPLIT_CREATE_COMPUTE_BUDGET);
-        run_sandbox_ctx(
+        match run_sandbox_ctx(
             context,
             tx,
             Some(limits),
@@ -1903,7 +1946,10 @@ mod tests {
             observer.map(|observer| -> SandboxHookHandle<crate::EmptyExternalEnv> {
                 Rc::new(RefCell::new(crate::sandbox::ReadOnlyHook::new(observer)))
             }),
-        )
+        ) {
+            SandboxRun::Outcome(outcome) => outcome,
+            other => panic!("split-create fixture produced no outcome: {other:?}"),
+        }
     }
 
     fn split_create_slot(outcome: &SandboxOutcome) -> (bool, Option<U256>) {
@@ -1916,7 +1962,7 @@ mod tests {
                 });
                 (created, slot)
             }
-            SandboxOutcome::Rejected(_) | SandboxOutcome::NoContractCreated { .. } => (false, None),
+            SandboxOutcome::Rejected(_) => (false, None),
         }
     }
 

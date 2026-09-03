@@ -125,7 +125,7 @@ pub struct OuterCallInfo {
     /// `msg.value` of the intercepted call.
     pub value: U256,
     /// Full calldata of the intercepted call.
-    pub input: Bytes,
+    pub data: Bytes,
 }
 
 /// Terminal outcome of one sandbox execution, delivered exactly once.

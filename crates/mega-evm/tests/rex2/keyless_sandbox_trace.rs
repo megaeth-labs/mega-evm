@@ -30,9 +30,12 @@ use mega_evm::{
     MegaTxEnvelope, TestExternalEnvs, KEYLESS_DEPLOY_ADDRESS,
 };
 use revm::{
-    bytecode::opcode::{OpCode, BALANCE, CALL, CODECOPY, CREATE, LOG0, POP, PUSH0, RETURN, STOP},
+    bytecode::opcode::{
+        OpCode, BALANCE, CALL, CODECOPY, CREATE, LOG0, POP, PUSH0, RETURN, SELFDESTRUCT, STOP,
+    },
     context::{BlockEnv, CfgEnv, TxEnv},
     database::State,
+    inspector::NoOpInspector,
     interpreter::InstructionResult,
 };
 use revm_inspectors::tracing::{
@@ -369,12 +372,37 @@ fn test_splice_without_the_outer_frame_drops_the_sandbox() {
     // Spliced into an arena that recorded nothing.
     let (outer, sandbox) = paired(all_config());
     let mut db = funded_db(signer);
-    trace_keyless_deploy(MegaSpecId::REX5, &mut db, tx_bytes, outer.clone(), &sandbox);
+    trace_keyless_deploy(MegaSpecId::REX5, &mut db, tx_bytes, outer, &sandbox);
     let mut empty = TracingInspector::new(all_config());
     splice_sandbox_traces(&mut empty, &mut sandbox.borrow_mut());
     assert_eq!(sandbox.borrow().pending(), 0);
     assert_eq!(empty.traces().nodes().len(), 1, "the arena keeps only its default root");
     assert!(empty.traces().nodes()[0].children.is_empty());
+}
+
+/// A sandbox that revm's validation rejects before it enters a frame (the keyless signer
+/// cannot pay) is still recorded: it claims its outer frame at the splice and grafts nothing.
+#[test]
+fn test_validate_rejected_sandbox_claims_its_frame_and_grafts_nothing() {
+    let (tx_bytes, signer) = create_pre_eip155_deploy_tx(success_constructor());
+    let mut db = MemoryDatabase::default();
+    db.set_account_balance(signer, U256::from(1));
+    let (outer, sandbox) = paired(all_config());
+    let result = trace_keyless_deploy(MegaSpecId::REX2, &mut db, tx_bytes, outer.clone(), &sandbox);
+    let error = match &result.result {
+        ExecutionResult::Revert { output, .. } => decode_error_result(output),
+        other => panic!("an unfunded signer is rejected, got {other:?}"),
+    };
+    assert!(matches!(error, Some(KeylessDeployError::InsufficientBalance)), "got {error:?}");
+    assert_eq!(sandbox.borrow().pending(), 1, "the rejected sandbox is still recorded");
+
+    splice_sandbox_traces(&mut outer.borrow_mut(), &mut sandbox.borrow_mut());
+    assert_eq!(sandbox.borrow().pending(), 0, "and consumed by the splice");
+    let outer_ref = outer.borrow();
+    let nodes = outer_ref.traces().nodes();
+    assert_eq!(nodes.len(), 1, "nothing to graft: the sandbox never entered a frame");
+    assert!(nodes[0].children.is_empty());
+    assert!(nodes[0].trace.steps.is_empty(), "no synthetic CREATE step either");
 }
 
 /// `clear` discards recorded sandbox executions, so a later splice grafts nothing.
@@ -576,6 +604,82 @@ fn test_splice_adds_no_create_step_when_the_parent_has_a_call_like_step_per_chil
     assert_eq!(nodes[0].trace.steps.len(), 1, "no synthetic CREATE step is added");
     assert_eq!(nodes[0].trace.steps[0].op.get(), CALL);
     assert_eq!(nodes[0].ordering, vec![TraceMemberOrder::Step(0), TraceMemberOrder::Call(0)]);
+}
+
+/// The outer adapter forwards every hook of a frame the outer EVM itself executes: a plain
+/// CREATE transaction whose constructor logs and self-destructs lands as one CREATE node
+/// with the log and the self-destruct recorded.
+#[test]
+fn test_outer_adapter_forwards_create_log_and_selfdestruct() {
+    let init_code = BytecodeBuilder::default()
+        .append_many([PUSH0, PUSH0, LOG0, PUSH0, PUSH0, SELFDESTRUCT])
+        .build();
+    let mut db = MemoryDatabase::default();
+    let outer = SharedTracingInspector::new(TracingInspector::new(all_config()));
+    let context = configured_context(&mut db, MegaSpecId::REX5);
+    let mut evm = MegaEvm::new(context).with_inspector(outer.clone());
+    let tx = TxEnv {
+        caller: TEST_CALLER,
+        kind: TxKind::Create,
+        data: init_code,
+        gas_limit: DEFAULT_OUTER_GAS_LIMIT,
+        gas_price: 0,
+        ..Default::default()
+    };
+    let mut tx = MegaTransaction::new(tx);
+    tx.enveloped_tx = Some(Bytes::new());
+    let result = evm.inspect_tx(tx).expect("create transact");
+    assert!(result.result.is_success(), "{:?}", result.result);
+
+    let outer_ref = outer.borrow();
+    let nodes = outer_ref.traces().nodes();
+    assert_eq!(nodes.len(), 1);
+    let create = &nodes[0];
+    assert!(create.trace.kind.is_any_create(), "the root is the CREATE frame");
+    assert_eq!(create.trace.address, TEST_CALLER.create(0));
+    assert_eq!(create.logs.len(), 1, "the constructor's LOG0 was forwarded");
+    assert_eq!(create.trace.selfdestruct_address, Some(TEST_CALLER.create(0)));
+    assert!(create.trace.steps.iter().any(|step| step.op.get() == SELFDESTRUCT));
+}
+
+/// A plain `TracingInspector` attached through either channel reaches the sandbox through
+/// the blanket impls, including the `log` and `selfdestruct` hooks.
+#[test]
+fn test_blanket_channels_forward_log_and_selfdestruct_to_a_tracing_inspector() {
+    for attach_as_inspector in [false, true] {
+        for (name, init_code, expect_log, expect_selfdestruct) in [
+            ("deep mixed", deep_mixed_init(REVERTER), true, false),
+            ("selfdestruct", selfdestructing_constructor(), false, true),
+        ] {
+            let (tx_bytes, signer) = create_pre_eip155_deploy_tx(init_code);
+            let mut db = funded_db(signer);
+            db.set_account_code(REVERTER, Bytes::from_static(&REVERTING_RUNTIME));
+            let tracer = Rc::new(RefCell::new(TracingInspector::new(all_config())));
+            let context = configured_context(&mut db, MegaSpecId::REX5);
+            let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);
+            if attach_as_inspector {
+                evm.set_keyless_sandbox_inspector(Rc::clone(&tracer));
+            } else {
+                evm.set_keyless_sandbox_observer(Rc::clone(&tracer));
+            }
+            let result = evm
+                .inspect_tx(keyless_deploy_call_tx(tx_bytes, LARGE_GAS_LIMIT_OVERRIDE))
+                .expect("keyless deploy transact");
+            let case = format!("{name} inspector={attach_as_inspector}");
+            assert!(result.result.is_success(), "{case}: {:?}", result.result);
+
+            let tracer_ref = tracer.borrow();
+            let root = &tracer_ref.traces().nodes()[0];
+            assert!(root.trace.kind.is_any_create(), "{case}: sandbox CREATE recorded");
+            let logs: usize = tracer_ref.traces().nodes().iter().map(|n| n.logs.len()).sum();
+            assert_eq!(logs > 0, expect_log, "{case}: log forwarding, got {logs} logs");
+            assert_eq!(
+                root.trace.selfdestruct_address.is_some(),
+                expect_selfdestruct,
+                "{case}: selfdestruct forwarding"
+            );
+        }
+    }
 }
 
 /// A `SELFDESTRUCT` inside the sandbox reaches the sandbox tracer's `selfdestruct` hook.

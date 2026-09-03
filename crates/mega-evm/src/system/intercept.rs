@@ -16,10 +16,10 @@ use revm::{
 };
 
 use crate::{
-    sandbox::execute_keyless_deploy_call, ExternalEnvTypes, IKeylessDeploy, IMegaAccessControl,
-    IMegaLimitControl, IOracle, MegaContext, MegaSpecId, OracleEnv, ACCESS_CONTROL_ADDRESS,
-    DISABLED_BY_PARENT_REVERT_DATA, KEYLESS_DEPLOY_ADDRESS, LIMIT_CONTROL_ADDRESS,
-    ORACLE_CONTRACT_ADDRESS,
+    sandbox::execute_keyless_deploy_call_at_depth, ExternalEnvTypes, IKeylessDeploy,
+    IMegaAccessControl, IMegaLimitControl, IOracle, MegaContext, MegaSpecId, OracleEnv,
+    ACCESS_CONTROL_ADDRESS, DISABLED_BY_PARENT_REVERT_DATA, KEYLESS_DEPLOY_ADDRESS,
+    LIMIT_CONTROL_ADDRESS, ORACLE_CONTRACT_ADDRESS,
 };
 
 /// The result of a system contract call interception attempt.
@@ -314,7 +314,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> SystemContractInterceptor<DB, ExtE
         }
         let input_bytes = call_inputs.input.bytes(ctx);
         let call = IKeylessDeploy::keylessDeployCall::abi_decode(&input_bytes).ok()?;
-        Some(execute_keyless_deploy_call(
+        Some(execute_keyless_deploy_call_at_depth(
             ctx,
             call_inputs,
             depth,

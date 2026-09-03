@@ -199,7 +199,12 @@ impl SandboxTrace {
 /// `set_keyless_sandbox_observer`; it implements [`SandboxObserver`] for every env type.
 ///
 /// Recording is per execution, so a tracer kept across transactions does not need a reset;
-/// splicing drains what was recorded, and [`Self::clear`] discards it.
+/// splicing drains what was recorded, and [`Self::clear`] discards it. Do one or the other
+/// after every transaction, before the outer inspector moves on: pairing matches a recorded
+/// sandbox to an outer frame by the fields of the intercepted call, and a recording left
+/// behind would match a later call with the same caller, gas, value, and calldata (a retry
+/// of the same payload that the interceptor turns down before it reaches the sandbox, for
+/// instance) even though it belongs to an earlier transaction.
 #[derive(Debug)]
 pub struct SandboxTracer {
     config: TracingInspectorConfig,
@@ -321,6 +326,13 @@ impl<E: ExternalEnvTypes> SandboxObserver<E> for SandboxTracer {
 
     fn sandbox_start(&mut self, info: &SandboxStartInfo) {
         debug_assert!(self.current.is_none(), "sandbox_start while a sandbox is in flight");
+        // The interceptor only sandboxes top-level calls, so a second execution always belongs
+        // to a later transaction: a recording still pending here was neither spliced nor
+        // cleared after the transaction that produced it.
+        debug_assert!(
+            self.finished.is_empty(),
+            "a recorded sandbox was neither spliced nor cleared before the next transaction"
+        );
         self.current = Some(SandboxTrace {
             start: info.clone(),
             tracer: TracingInspector::new(self.config),
@@ -346,7 +358,7 @@ fn is_outer_frame(node: &CallTraceNode, call: &OuterCallInfo) -> bool {
         trace.caller == call.caller &&
         trace.gas_limit == call.gas_limit &&
         trace.value == call.value &&
-        trace.data == call.input
+        trace.data == call.data
 }
 
 /// Grafts every sandbox execution recorded by `sandbox` under the outer `KeylessDeploy` CALL
