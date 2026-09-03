@@ -158,7 +158,7 @@ where
     /// must implement [`crate::sandbox::SandboxObserver`] for both this executor's
     /// `ExtEnvs` and [`crate::EmptyExternalEnv`]. Use
     /// [`Self::clear_keyless_sandbox_hook`] to detach.
-    pub fn set_keyless_sandbox_observer<O>(&mut self, observer: Option<Rc<RefCell<O>>>)
+    pub fn set_keyless_sandbox_observer<O>(&mut self, observer: Rc<RefCell<O>>)
     where
         O: crate::sandbox::SandboxObserver<ExtEnvs>
             + crate::sandbox::SandboxObserver<crate::EmptyExternalEnv>
@@ -174,7 +174,7 @@ where
     /// must implement [`crate::sandbox::SandboxInspector`] for both this executor's
     /// `ExtEnvs` and [`crate::EmptyExternalEnv`]. Use
     /// [`Self::clear_keyless_sandbox_hook`] to detach.
-    pub fn set_keyless_sandbox_inspector<I>(&mut self, inspector: Option<Rc<RefCell<I>>>)
+    pub fn set_keyless_sandbox_inspector<I>(&mut self, inspector: Rc<RefCell<I>>)
     where
         I: crate::sandbox::SandboxInspector<ExtEnvs>
             + crate::sandbox::SandboxInspector<crate::EmptyExternalEnv>

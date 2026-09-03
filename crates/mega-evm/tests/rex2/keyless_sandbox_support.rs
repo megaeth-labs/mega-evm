@@ -305,7 +305,9 @@ where
     if let Some(limits) = config.tx_limits {
         context = context.with_tx_runtime_limits(limits);
     }
-    context.set_keyless_sandbox_observer(config.observer);
+    if let Some(observer) = config.observer {
+        context.set_keyless_sandbox_observer(observer);
+    }
     let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);
     let tx = keyless_deploy_call_tx_with_outer_gas(
         config.tx_bytes,
@@ -383,7 +385,9 @@ where
         chain.operator_fee_scalar = Some(U256::ZERO);
         chain.operator_fee_constant = Some(U256::ZERO);
     });
-    context.set_keyless_sandbox_observer(observer);
+    if let Some(observer) = observer {
+        context.set_keyless_sandbox_observer(observer);
+    }
     let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);
     let tx = keyless_deploy_call_tx(tx_bytes, LARGE_GAS_LIMIT_OVERRIDE);
     let result = alloy_evm::Evm::transact_raw(&mut evm, tx).expect("keyless deploy transact");

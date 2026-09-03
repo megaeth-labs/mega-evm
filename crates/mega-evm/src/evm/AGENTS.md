@@ -28,7 +28,8 @@ Read-only default: `SandboxObserver` cannot short-circuit `CALL`/`CREATE` and mu
 Rewriting explicit: `SandboxInspector` forwards `&mut` inputs and override return values so interventions take effect inside the sandbox as they would on a top-level EVM.
 Both channels share one type-erased slot (`Rc<RefCell<dyn SandboxInspector<E>>>`, held twice: parent env type and `EmptyExternalEnv`); an observer is installed behind the crate-private `ReadOnlyHook` adapter, which forwards shared references and never answers a `CALL`/`CREATE` override.
 Types generic over revm's `Inspector` get both channels through blanket impls; hosts behind a generic EVM projection (a node's `ConfigureEvm::Evm`) name the attach operation on their own configuration type instead of on mega-evm.
-With the `inspectors` feature, `sandbox::trace` ships the shared `revm-inspectors` pattern: a `SharedTracingInspector` handle for the outer EVM plus a second one on the observer channel, and `splice_sandbox_traces` to graft the sandbox call tree under the intercepted `KeylessDeploy` CALL after execution; `mega-evme` and node tracing RPCs use the same implementation.
+With the `inspectors` feature, `sandbox::trace` ships the shared `revm-inspectors` pattern: a `SharedTracingInspector` for the outer EVM paired with a `SandboxTracer` on the observer channel, which records each sandbox execution in an arena of its own keyed by the intercepted call, and `splice_sandbox_traces`, which grafts those arenas under their `KeylessDeploy` CALL frames after execution and leaves the tracer empty; `mega-evme` and node tracing RPCs use the same implementation.
+Lifecycle events (`sandbox_start` / `sandbox_end`) are delivered on the slot that also receives the sandbox's opcode-level hooks: `EmptyExternalEnv` pre-REX4, the parent env from REX4 on.
 
 Contract:
 1. With no hook attached, the sandbox path is unchanged.

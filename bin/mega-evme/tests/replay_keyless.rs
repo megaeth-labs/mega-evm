@@ -93,8 +93,10 @@ fn test_replay_keyless_opcode_tracer_includes_sandbox_steps() {
     // Synthetic CREATE grafted onto the intercepted CALL (depth 1, geth convention).
     assert_eq!(logs[0]["op"].as_str(), Some("CREATE"));
     assert_eq!(logs[0]["depth"].as_u64(), Some(1));
-    assert_eq!(logs[0]["gas"].as_u64(), Some(636_184));
-    assert_eq!(logs[0]["gasCost"].as_u64(), Some(0));
+    // `gas` is the intercepting frame's remaining gas once the 100K dispatch overhead is
+    // charged; `gasCost` is the gas reserved for the sandbox (the caller's override on REX2).
+    assert_eq!(logs[0]["gas"].as_u64(), Some(536_184));
+    assert_eq!(logs[0]["gasCost"].as_u64(), Some(26_018_741));
 
     // Sandbox constructor starts on the next step at intercept-frame depth + 1.
     assert_eq!(logs[1]["op"].as_str(), Some("PUSH1"));

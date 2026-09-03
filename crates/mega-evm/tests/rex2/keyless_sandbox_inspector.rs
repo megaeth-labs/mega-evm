@@ -134,7 +134,9 @@ where
     if let Some(limits) = config.tx_limits {
         context = context.with_tx_runtime_limits(limits);
     }
-    context.set_keyless_sandbox_inspector(config.inspector);
+    if let Some(inspector) = config.inspector {
+        context.set_keyless_sandbox_inspector(inspector);
+    }
     let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);
     let tx = keyless_deploy_call_tx_with_outer_gas(
         config.tx_bytes,
@@ -161,7 +163,9 @@ where
         chain.operator_fee_scalar = Some(U256::ZERO);
         chain.operator_fee_constant = Some(U256::ZERO);
     });
-    context.set_keyless_sandbox_inspector(inspector);
+    if let Some(inspector) = inspector {
+        context.set_keyless_sandbox_inspector(inspector);
+    }
     let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);
     let tx = keyless_deploy_call_tx(tx_bytes, LARGE_GAS_LIMIT_OVERRIDE);
     alloy_evm::Evm::transact_raw(&mut evm, tx).expect("keyless deploy transact")
@@ -803,6 +807,9 @@ fn test_inspector_create_short_circuit_address_mismatch_skips_apply() {
     }
 }
 
+/// A `create` short-circuit that returns no address is rejected like an address mismatch:
+/// the sandbox ran, so the outer call books the same gas and usage as the `Some(OTHER)`
+/// arm, and nothing is applied.
 #[test]
 fn test_inspector_create_short_circuit_without_address_is_rejected() {
     for spec in SPECS {
@@ -810,9 +817,22 @@ fn test_inspector_create_short_circuit_without_address_is_rejected() {
         let deploy_address = signer.create(0);
         let _control = run_unintervened_success_deploy(spec, tx_bytes.clone(), signer);
 
+        let mut db_mismatch = funded_db(signer);
+        let mismatch = Rc::new(RefCell::new(CreateShortCircuit::new(Some(OTHER_DEPLOY_ADDRESS))));
+        let (mismatch_result, mismatch_usage) =
+            run_keyless_inspector_with_usage(InspectorRunConfig {
+                spec,
+                db: &mut db_mismatch,
+                tx_bytes: tx_bytes.clone(),
+                gas_limit_override: LARGE_GAS_LIMIT_OVERRIDE,
+                inspector: Some(Rc::clone(&mismatch)),
+                tx_limits: None,
+                outer_gas_limit: DEFAULT_OUTER_GAS_LIMIT,
+            });
+
         let mut db = funded_db(signer);
         let inspector = Rc::new(RefCell::new(CreateShortCircuit::new(None)));
-        let result = run_keyless_inspector(InspectorRunConfig {
+        let (result, usage) = run_keyless_inspector_with_usage(InspectorRunConfig {
             spec,
             db: &mut db,
             tx_bytes,
@@ -821,6 +841,12 @@ fn test_inspector_create_short_circuit_without_address_is_rejected() {
             tx_limits: None,
             outer_gas_limit: DEFAULT_OUTER_GAS_LIMIT,
         });
+        assert_eq!(
+            result.result.gas_used(),
+            mismatch_result.result.gas_used(),
+            "{spec:?}: address None books the same outer gas as an address mismatch"
+        );
+        assert_usage_eq(usage, mismatch_usage, &format!("{spec:?}: address None vs mismatch"));
         assert!(
             matches!(result.result, ExecutionResult::Revert { .. }),
             "{spec:?}: NoContractCreated reverts the outer CALL: {:?}",
@@ -1122,8 +1148,8 @@ fn test_sandbox_hook_slots_are_exclusive_and_clear_restores_parity() {
         chain.operator_fee_scalar = Some(U256::ZERO);
         chain.operator_fee_constant = Some(U256::ZERO);
     });
-    context.set_keyless_sandbox_observer(Some(Rc::clone(&observer)));
-    context.set_keyless_sandbox_inspector(Some(Rc::clone(&inspector)));
+    context.set_keyless_sandbox_observer(Rc::clone(&observer));
+    context.set_keyless_sandbox_inspector(Rc::clone(&inspector));
     let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);
     let tx = keyless_deploy_call_tx(tx_bytes.clone(), LARGE_GAS_LIMIT_OVERRIDE);
     alloy_evm::Evm::transact_raw(&mut evm, tx).expect("transact");
@@ -1145,8 +1171,8 @@ fn test_sandbox_hook_slots_are_exclusive_and_clear_restores_parity() {
         chain.operator_fee_scalar = Some(U256::ZERO);
         chain.operator_fee_constant = Some(U256::ZERO);
     });
-    context.set_keyless_sandbox_inspector(Some(Rc::clone(&inspector)));
-    context.set_keyless_sandbox_observer(Some(Rc::clone(&observer)));
+    context.set_keyless_sandbox_inspector(Rc::clone(&inspector));
+    context.set_keyless_sandbox_observer(Rc::clone(&observer));
     let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);
     let tx = keyless_deploy_call_tx(tx_bytes.clone(), LARGE_GAS_LIMIT_OVERRIDE);
     alloy_evm::Evm::transact_raw(&mut evm, tx).expect("transact");
@@ -1167,7 +1193,7 @@ fn test_sandbox_hook_slots_are_exclusive_and_clear_restores_parity() {
         chain.operator_fee_scalar = Some(U256::ZERO);
         chain.operator_fee_constant = Some(U256::ZERO);
     });
-    context.set_keyless_sandbox_inspector(Some(Rc::new(RefCell::new(NopSandboxInspector))));
+    context.set_keyless_sandbox_inspector(Rc::new(RefCell::new(NopSandboxInspector)));
     context.clear_keyless_sandbox_hook();
     let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);
     let tx = keyless_deploy_call_tx(tx_bytes.clone(), LARGE_GAS_LIMIT_OVERRIDE);
@@ -1191,7 +1217,7 @@ fn test_sandbox_hook_slots_are_exclusive_and_clear_restores_parity() {
 #[should_panic(expected = "set sandbox hook after external envs are wired")]
 fn test_with_external_envs_panics_in_debug_when_inspector_is_attached() {
     let mut context = MegaContext::new(revm::database::EmptyDB::default(), MegaSpecId::REX4);
-    context.set_keyless_sandbox_inspector(Some(Rc::new(RefCell::new(NopSandboxInspector))));
+    context.set_keyless_sandbox_inspector(Rc::new(RefCell::new(NopSandboxInspector)));
     let _ = context.with_external_envs(TestExternalEnvs::<std::convert::Infallible>::new().into());
 }
 
@@ -1302,7 +1328,7 @@ fn test_inspector_reaches_all_seven_sandbox_end_outcomes() {
         chain.operator_fee_scalar = Some(U256::ZERO);
         chain.operator_fee_constant = Some(U256::ZERO);
     });
-    context.set_keyless_sandbox_inspector(Some(Rc::clone(&rec)));
+    context.set_keyless_sandbox_inspector(Rc::clone(&rec));
     let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);
     let tx = keyless_deploy_call_tx(tx_bytes, LARGE_GAS_LIMIT_OVERRIDE);
     alloy_evm::Evm::transact_raw(&mut evm, tx).expect("outer transact");

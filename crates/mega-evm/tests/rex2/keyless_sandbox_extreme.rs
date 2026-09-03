@@ -176,7 +176,7 @@ fn run_through_inspector_channel(
         chain.operator_fee_scalar = Some(U256::ZERO);
         chain.operator_fee_constant = Some(U256::ZERO);
     });
-    context.set_keyless_sandbox_inspector(Some(Rc::clone(&recorder)));
+    context.set_keyless_sandbox_inspector(Rc::clone(&recorder));
     let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);
     let tx = keyless_deploy_call_tx_with_outer_gas(
         tx_bytes.clone(),

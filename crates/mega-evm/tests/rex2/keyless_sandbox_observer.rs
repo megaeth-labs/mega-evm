@@ -535,9 +535,12 @@ fn test_sandbox_end_applied_execution_failed_on_constructor_revert() {
     }
 }
 
+/// An empty-code deployment is reported as `EmptyCode` on every spec, while the outer
+/// caller's wire shape is the frozen one: `EmptyCodeDeployed` errorData everywhere, with the
+/// constructor's logs forwarded only from REX5 on.
 #[test]
-fn test_sandbox_end_applied_empty_code_on_rex5() {
-    for spec in [MegaSpecId::REX5, MegaSpecId::REX6] {
+fn test_sandbox_end_applied_empty_code_on_every_spec() {
+    for spec in SPECS {
         let (tx_bytes, signer) = create_pre_eip155_deploy_tx(empty_code_constructor());
         let mut db = funded_db(signer);
         let (result, events) = run_with_recorder(spec, &mut db, tx_bytes, None);
@@ -549,6 +552,100 @@ fn test_sandbox_end_applied_empty_code_on_rex5() {
             }) => {}
             other => panic!("{spec:?}: expected Applied(EmptyCode), got {other:?}"),
         }
+        let output = result.result.output().expect("empty-code outer output");
+        let ret = IKeylessDeploy::keylessDeployCall::abi_decode_returns(output)
+            .expect("empty-code ABI return");
+        assert_eq!(ret.deployedAddress, Address::ZERO, "{spec:?}: nothing deployed");
+        assert!(
+            matches!(
+                decode_error_result(&ret.errorData),
+                Some(KeylessDeployError::EmptyCodeDeployed { .. })
+            ),
+            "{spec:?}: the wire shape stays EmptyCodeDeployed"
+        );
+    }
+}
+
+/// Records, per env impl, which hooks a dual-impl observer received.
+#[derive(Default)]
+struct SplitImplObserver {
+    /// Events seen by the `EmptyExternalEnv` impl.
+    empty: Vec<&'static str>,
+    /// Events seen by the parent-env impl.
+    parent: Vec<&'static str>,
+}
+
+impl SandboxObserver<mega_evm::EmptyExternalEnv> for SplitImplObserver {
+    fn step(
+        &mut self,
+        _interp: &mut Interpreter<EthInterpreter>,
+        _context: &mut mega_evm::MegaContext<
+            mega_evm::sandbox::SandboxDb<'_>,
+            mega_evm::EmptyExternalEnv,
+        >,
+    ) {
+        if self.empty.last() != Some(&"step") {
+            self.empty.push("step");
+        }
+    }
+
+    fn sandbox_start(&mut self, _info: &SandboxStartInfo) {
+        self.empty.push("start");
+    }
+
+    fn sandbox_end(&mut self, _outcome: &SandboxEndOutcome) {
+        self.empty.push("end");
+    }
+}
+
+impl SandboxObserver<mega_evm::TestExternalEnvs> for SplitImplObserver {
+    fn step(
+        &mut self,
+        _interp: &mut Interpreter<EthInterpreter>,
+        _context: &mut mega_evm::MegaContext<
+            mega_evm::sandbox::SandboxDb<'_>,
+            mega_evm::TestExternalEnvs,
+        >,
+    ) {
+        if self.parent.last() != Some(&"step") {
+            self.parent.push("step");
+        }
+    }
+
+    fn sandbox_start(&mut self, _info: &SandboxStartInfo) {
+        self.parent.push("start");
+    }
+
+    fn sandbox_end(&mut self, _outcome: &SandboxEndOutcome) {
+        self.parent.push("end");
+    }
+}
+
+/// With a non-empty parent env, an observer with one impl per env sees a sandbox's
+/// lifecycle and opcode hooks on the same impl: `EmptyExternalEnv` pre-REX4, the parent env
+/// from REX4 on.
+#[test]
+fn test_lifecycle_and_opcode_hooks_land_on_the_same_env_impl() {
+    for spec in SPECS {
+        let (tx_bytes, signer) = create_pre_eip155_deploy_tx(success_constructor());
+        let mut db = funded_db(signer);
+        let observer = Rc::new(RefCell::new(SplitImplObserver::default()));
+        let result = run_keyless_with_parent_env(
+            spec,
+            &mut db,
+            tx_bytes,
+            crowded_parent_env(),
+            Some(Rc::clone(&observer)),
+        );
+        assert!(result.result.is_success(), "{spec:?}: {:?}", result.result);
+        let observer = observer.borrow();
+        let (used, idle, label) = if spec.is_enabled(MegaSpecId::REX4) {
+            (&observer.parent, &observer.empty, "parent env")
+        } else {
+            (&observer.empty, &observer.parent, "EmptyExternalEnv")
+        };
+        assert_eq!(used, &["start", "step", "end"], "{spec:?}: whole sandbox on the {label} impl");
+        assert!(idle.is_empty(), "{spec:?}: the other impl sees nothing, got {idle:?}");
     }
 }
 
@@ -741,7 +838,7 @@ fn test_observer_channel_drops_call_overrides() {
             chain.operator_fee_scalar = Some(U256::ZERO);
             chain.operator_fee_constant = Some(U256::ZERO);
         });
-        context.set_keyless_sandbox_inspector(Some(Rc::new(RefCell::new(OverridingInspector))));
+        context.set_keyless_sandbox_inspector(Rc::new(RefCell::new(OverridingInspector)));
         let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);
         let tx = keyless_deploy_call_tx(tx_bytes.clone(), LARGE_GAS_LIMIT_OVERRIDE);
         let rewritten = alloy_evm::Evm::transact_raw(&mut evm, tx).expect("inspector channel");
@@ -897,7 +994,7 @@ fn test_sandbox_start_info_saturates_gas_limit_override_above_u64_max() {
         chain.operator_fee_scalar = Some(U256::ZERO);
         chain.operator_fee_constant = Some(U256::ZERO);
     });
-    context.set_keyless_sandbox_observer(Some(Rc::clone(&recorder)));
+    context.set_keyless_sandbox_observer(Rc::clone(&recorder));
     let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);
     let tx =
         keyless_deploy_call_tx_with_override_u256(tx_bytes, U256::MAX, DEFAULT_OUTER_GAS_LIMIT);
@@ -936,7 +1033,7 @@ fn test_sandbox_end_not_applied_apply_failed_on_merge_db_error() {
         chain.operator_fee_scalar = Some(U256::ZERO);
         chain.operator_fee_constant = Some(U256::ZERO);
     });
-    context.set_keyless_sandbox_observer(Some(Rc::clone(&recorder)));
+    context.set_keyless_sandbox_observer(Rc::clone(&recorder));
     let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);
     let tx = keyless_deploy_call_tx(tx_bytes, LARGE_GAS_LIMIT_OVERRIDE);
     let result = alloy_evm::Evm::transact_raw(&mut evm, tx).expect("outer transact");

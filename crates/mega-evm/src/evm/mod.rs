@@ -243,7 +243,7 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
     /// must implement [`SandboxObserver`] for both this EVM's `ExtEnvs` and
     /// [`EmptyExternalEnv`]. Use [`Self::clear_keyless_sandbox_hook`] to
     /// detach.
-    pub fn set_keyless_sandbox_observer<O>(&mut self, observer: Option<Rc<RefCell<O>>>)
+    pub fn set_keyless_sandbox_observer<O>(&mut self, observer: Rc<RefCell<O>>)
     where
         O: SandboxObserver<ExtEnvs> + SandboxObserver<EmptyExternalEnv> + 'static,
         ExtEnvs: 'static,
@@ -256,7 +256,7 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
     /// Forwards to [`MegaContext::set_keyless_sandbox_inspector`]. The inspector
     /// must implement [`SandboxInspector`] for both this EVM's `ExtEnvs` and
     /// [`EmptyExternalEnv`]. Use [`Self::clear_keyless_sandbox_hook`] to detach.
-    pub fn set_keyless_sandbox_inspector<I>(&mut self, inspector: Option<Rc<RefCell<I>>>)
+    pub fn set_keyless_sandbox_inspector<I>(&mut self, inspector: Rc<RefCell<I>>)
     where
         I: SandboxInspector<ExtEnvs> + SandboxInspector<EmptyExternalEnv> + 'static,
     {

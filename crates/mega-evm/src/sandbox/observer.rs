@@ -44,6 +44,11 @@
 //! events; whether sandbox state was applied to the parent is reported by
 //! [`SandboxEndOutcome::state_applied`].
 //!
+//! Lifecycle events are delivered on the same slot as that sandbox's opcode-level
+//! hooks: the [`crate::EmptyExternalEnv`] impl for pre-REX4 sandboxes, the parent-env
+//! impl for REX4+ (see below). A type with one impl per env therefore always sees a
+//! sandbox's `sandbox_start`, opcode hooks, and `sandbox_end` on the same impl.
+//!
 //! # External-environment invariance
 //!
 //! Attaching an observer must not change sandbox env semantics at any spec.
@@ -60,7 +65,7 @@ use alloc as std;
 use core::cell::RefCell;
 use std::rc::Rc;
 
-use alloy_primitives::{Address, Log, U256};
+use alloy_primitives::{Address, Bytes, Log, U256};
 use revm::{
     interpreter::{
         interpreter::EthInterpreter, CallInputs, CallOutcome, CreateInputs, CreateOutcome,
@@ -94,6 +99,33 @@ pub struct SandboxStartInfo {
     pub effective_gas_limit: u64,
     /// Gas limit carried by the signed keyless transaction itself.
     pub tx_gas_limit: u64,
+    /// The intercepted `KeylessDeploy` call frame, as an inspector on the outer EVM saw it.
+    pub outer_call: OuterCallInfo,
+}
+
+/// The intercepted `KeylessDeploy` call that started a sandbox, described with the fields an
+/// inspector on the outer EVM records for that frame.
+///
+/// A tracer that records the outer EVM and the sandbox separately uses this to pair a
+/// sandbox with the outer frame it belongs under: the fields match what revm's `call` hook
+/// received for the intercepted frame.
+#[non_exhaustive]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OuterCallInfo {
+    /// Call depth of the intercepted frame; `0` for a transaction's top-level call.
+    pub depth: usize,
+    /// `msg.sender` of the intercepted call.
+    pub caller: Address,
+    /// Gas limit of the intercepted call frame, as handed to it by the outer EVM.
+    pub gas_limit: u64,
+    /// Gas remaining in the intercepted frame when the sandbox started: after the dispatch
+    /// overhead and any REX5+ materialization charge, before the sandbox reservation was
+    /// debited.
+    pub gas_remaining: u64,
+    /// `msg.value` of the intercepted call.
+    pub value: U256,
+    /// Full calldata of the intercepted call.
+    pub input: Bytes,
 }
 
 /// Terminal outcome of one sandbox execution, delivered exactly once.
@@ -102,7 +134,7 @@ pub struct SandboxStartInfo {
 pub enum SandboxEndOutcome {
     /// Sandbox completed and its state was applied to the parent journal.
     Applied {
-        /// Wire-shape completion reported to the outer caller.
+        /// How the sandbox EVM completed.
         completion: SandboxCompletionKind,
         /// Gas consumed by the sandbox EVM.
         gas_used: u64,
@@ -115,14 +147,22 @@ pub enum SandboxEndOutcome {
 }
 
 /// Completion kind for a sandbox whose state was applied to the parent.
+///
+/// The kind describes what the sandbox EVM did, on every spec alike. What the outer
+/// caller is told differs by spec only for [`Self::EmptyCode`].
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SandboxCompletionKind {
     /// Inner CREATE succeeded with non-empty runtime bytecode.
     Deployed,
-    /// Inner CREATE succeeded but returned empty runtime bytecode.
+    /// Inner CREATE ran to a successful exit but left no code at the deploy address:
+    /// it returned empty runtime bytecode, or (REX6+) the account self-destructed in the
+    /// same transaction.
+    ///
+    /// The outer caller sees `EmptyCodeDeployed` errorData on every spec. REX5+ forwards
+    /// the constructor's logs into the parent receipt; pre-REX5 drops them.
     EmptyCode,
-    /// Sandbox EVM execution failed (revert or halt) after producing mergeable state.
+    /// Sandbox EVM execution reverted or halted after producing mergeable state.
     ExecutionFailed,
 }
 
@@ -130,7 +170,10 @@ pub enum SandboxCompletionKind {
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SandboxRejectKind {
-    /// Validate-reject or internal error before a mergeable frame was produced.
+    /// Validate-reject or internal error before a mergeable frame was produced, or a
+    /// top-level create result that carries no address. Only an inspector `create`
+    /// override produces the latter; it is charged like [`Self::AddressMismatch`] and
+    /// nothing is applied.
     Rejected,
     /// REX5+ post-execution resource accounting rejected the sandbox.
     PostAccountingHalt,

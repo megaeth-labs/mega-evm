@@ -317,6 +317,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> SystemContractInterceptor<DB, ExtE
         Some(execute_keyless_deploy_call(
             ctx,
             call_inputs,
+            depth,
             &call.keylessDeploymentTransaction,
             call.gasLimitOverride,
         ))

@@ -61,7 +61,7 @@
 //!   [`execute_keyless_deploy_call`]
 //! - `observer` - Read-only [`SandboxObserver`] channel into nested sandbox execution
 //! - `inspector` - Rewriting [`SandboxInspector`] channel into nested sandbox execution
-//! - `trace` - Shared `revm-inspectors` splicing helpers (`inspectors` feature)
+//! - `trace` - Shared `revm-inspectors` recorder and splicing helpers (`inspectors` feature)
 //! - `state` - Type-erased database wrapper ([`SandboxDb`]) for isolated execution
 //! - `state_merge` - Replay-safe merge of sandbox state into the parent journal
 //! - `tx` - Transaction decoding and validation for pre-EIP-155 transactions
@@ -93,7 +93,8 @@
 //! pre-REX4 are delivered through a second slot typed against
 //! [`crate::EmptyExternalEnv`], so a hook implements its trait for both the parent env
 //! type and [`crate::EmptyExternalEnv`]; revm inspectors that are generic over the
-//! context satisfy both through the blanket impls.
+//! context satisfy both through the blanket impls. Lifecycle events follow the same
+//! slot rule, so a hook with one impl per env sees a sandbox entirely on one impl.
 //!
 //! [`SandboxObserver`]: observer::SandboxObserver
 //! [`SandboxInspector`]: inspector::SandboxInspector

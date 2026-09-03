@@ -1,6 +1,6 @@
 //! Trace configuration for mega-evme
 
-use std::path::PathBuf;
+use std::{cell::RefCell, path::PathBuf, rc::Rc};
 
 use alloy_primitives::Bytes;
 use alloy_rpc_types_trace::geth::{
@@ -17,7 +17,7 @@ use mega_evm::{
         state::EvmState,
         ExecuteEvm, InspectEvm,
     },
-    sandbox::trace::{splice_sandbox_traces, SharedTracingInspector},
+    sandbox::trace::{paired, splice_sandbox_traces, SandboxTracer, SharedTracingInspector},
     MegaContext, MegaEvm, MegaHaltReason, MegaTransaction,
 };
 use revm_inspectors::tracing::{TracingInspector, TracingInspectorConfig};
@@ -98,10 +98,14 @@ impl TraceArgs {
         self.trace
     }
 
+    /// The [`TracingInspectorConfig`] every mega-evme tracer records with: everything on.
+    pub fn inspector_config(&self) -> TracingInspectorConfig {
+        TracingInspectorConfig::all()
+    }
+
     /// Creates a [`TracingInspector`] configured for full tracing
     pub fn create_inspector(&self) -> TracingInspector {
-        let config = TracingInspectorConfig::all();
-        TracingInspector::new(config)
+        TracingInspector::new(self.inspector_config())
     }
 
     /// Creates [`GethDefaultTracingOptions`] from CLI arguments
@@ -217,11 +221,11 @@ impl TraceArgs {
     pub(crate) fn generate_trace_with_sandbox(
         &self,
         outer: &SharedTracingInspector,
-        sandbox: &SharedTracingInspector,
+        sandbox: &Rc<RefCell<SandboxTracer>>,
         result_and_state: &ResultAndState<MegaHaltReason>,
         prestate: impl DatabaseRef,
     ) -> String {
-        splice_sandbox_traces(&mut outer.borrow_mut(), &sandbox.borrow());
+        splice_sandbox_traces(&mut outer.borrow_mut(), &mut sandbox.borrow_mut());
         self.generate_trace(&outer.borrow(), result_and_state, prestate)
     }
 
@@ -237,10 +241,9 @@ impl TraceArgs {
     {
         if self.is_tracing_enabled() {
             info!(tracer = ?self.tracer, "Evm executing with tracing");
-            let outer = SharedTracingInspector::new(self.create_inspector());
-            let sandbox = SharedTracingInspector::new(self.create_inspector());
+            let (outer, sandbox) = paired(self.inspector_config());
             let mut evm = MegaEvm::new(evm_context).with_inspector(outer.clone());
-            evm.set_keyless_sandbox_observer(Some(sandbox.as_sandbox_observer()));
+            evm.set_keyless_sandbox_observer(Rc::clone(&sandbox));
 
             let result_and_state = evm
                 .inspect_tx(tx)
@@ -387,7 +390,7 @@ mod tests {
 
     fn run_traced_keyless(
         outer: SharedTracingInspector,
-        sandbox: SharedTracingInspector,
+        sandbox: Rc<RefCell<SandboxTracer>>,
     ) -> (ResultAndState<MegaHaltReason>, MemoryDatabase, Address) {
         let (tx_bytes, signer) = create_pre_eip155_deploy_tx(success_constructor());
         run_traced_keyless_bytes(outer, sandbox, tx_bytes, signer, LARGE_GAS_LIMIT_OVERRIDE, |_| {})
@@ -397,7 +400,7 @@ mod tests {
     /// to the funded database first (extra contracts the constructor calls into).
     fn run_traced_keyless_bytes(
         outer: SharedTracingInspector,
-        sandbox: SharedTracingInspector,
+        sandbox: Rc<RefCell<SandboxTracer>>,
         tx_bytes: Bytes,
         signer: Address,
         gas_limit_override: u64,
@@ -408,7 +411,7 @@ mod tests {
         let result = {
             let context = keyless_context(&mut db);
             let mut evm = MegaEvm::new(context).with_inspector(outer);
-            evm.set_keyless_sandbox_observer(Some(sandbox.as_sandbox_observer()));
+            evm.set_keyless_sandbox_observer(sandbox);
             let result = evm
                 .inspect_tx(keyless_deploy_tx_with_override(tx_bytes, gas_limit_override))
                 .expect("keyless deploy");
@@ -425,10 +428,7 @@ mod tests {
         gas_limit_override: u64,
         setup: impl Fn(&mut MemoryDatabase),
     ) -> (CallFrame, SharedTracingInspector, ResultAndState<MegaHaltReason>, MemoryDatabase) {
-        let outer =
-            SharedTracingInspector::new(TracingInspector::new(TracingInspectorConfig::all()));
-        let sandbox =
-            SharedTracingInspector::new(TracingInspector::new(TracingInspectorConfig::all()));
+        let (outer, sandbox) = paired(TracingInspectorConfig::all());
         let (result_and_state, db, _signer) = run_traced_keyless_bytes(
             outer.clone(),
             sandbox.clone(),
@@ -437,7 +437,7 @@ mod tests {
             gas_limit_override,
             setup,
         );
-        splice_sandbox_traces(&mut outer.borrow_mut(), &sandbox.borrow());
+        splice_sandbox_traces(&mut outer.borrow_mut(), &mut sandbox.borrow_mut());
         let frame = outer.borrow().geth_builder().geth_call_traces(
             CallConfig { only_top_call: Some(false), with_log: Some(true) },
             result_and_state.result.gas_used(),
@@ -447,12 +447,9 @@ mod tests {
 
     #[test]
     fn test_keyless_call_trace_nests_sandbox_create() {
-        let outer =
-            SharedTracingInspector::new(TracingInspector::new(TracingInspectorConfig::all()));
-        let sandbox =
-            SharedTracingInspector::new(TracingInspector::new(TracingInspectorConfig::all()));
+        let (outer, sandbox) = paired(TracingInspectorConfig::all());
         let (result_and_state, _db, _signer) = run_traced_keyless(outer.clone(), sandbox.clone());
-        splice_sandbox_traces(&mut outer.borrow_mut(), &sandbox.borrow());
+        splice_sandbox_traces(&mut outer.borrow_mut(), &mut sandbox.borrow_mut());
 
         let outer_ref = outer.borrow();
         let nodes = outer_ref.traces().nodes();
@@ -480,12 +477,9 @@ mod tests {
 
     #[test]
     fn test_keyless_opcode_trace_includes_sandbox_steps_in_execution_order() {
-        let outer =
-            SharedTracingInspector::new(TracingInspector::new(TracingInspectorConfig::all()));
-        let sandbox =
-            SharedTracingInspector::new(TracingInspector::new(TracingInspectorConfig::all()));
+        let (outer, sandbox) = paired(TracingInspectorConfig::all());
         let (result_and_state, db, _signer) = run_traced_keyless(outer.clone(), sandbox.clone());
-        splice_sandbox_traces(&mut outer.borrow_mut(), &sandbox.borrow());
+        splice_sandbox_traces(&mut outer.borrow_mut(), &mut sandbox.borrow_mut());
 
         let outer_ref = outer.borrow();
         let geth_trace = outer_ref.geth_builder().geth_traces(
@@ -556,10 +550,7 @@ mod tests {
             BlockLimits::no_limits(),
         );
 
-        let outer =
-            SharedTracingInspector::new(TracingInspector::new(TracingInspectorConfig::all()));
-        let sandbox =
-            SharedTracingInspector::new(TracingInspector::new(TracingInspectorConfig::all()));
+        let (outer, sandbox) = paired(TracingInspectorConfig::all());
         let mut executor =
             factory.create_executor_with_inspector(&mut state, block_ctx, evm_env, outer.clone());
         // Skip `apply_pre_execution_changes`: it needs a configured SequencerRegistry on
@@ -569,7 +560,7 @@ mod tests {
             chain.operator_fee_scalar = Some(U256::ZERO);
             chain.operator_fee_constant = Some(U256::ZERO);
         });
-        executor.set_keyless_sandbox_observer(Some(sandbox.as_sandbox_observer()));
+        executor.set_keyless_sandbox_observer(Rc::clone(&sandbox));
 
         let call_data = IKeylessDeploy::keylessDeployCall {
             keylessDeploymentTransaction: tx_bytes,
@@ -591,7 +582,7 @@ mod tests {
         let outcome = executor.run_transaction(&recovered).expect("run keyless deploy");
         assert!(outcome.inner.result.is_success(), "{:?}", outcome.inner.result);
 
-        splice_sandbox_traces(&mut outer.borrow_mut(), &sandbox.borrow());
+        splice_sandbox_traces(&mut outer.borrow_mut(), &mut sandbox.borrow_mut());
         let outer_ref = outer.borrow();
         let nodes = outer_ref.traces().nodes();
         assert_eq!(nodes[0].trace.address, KEYLESS_DEPLOY_ADDRESS);
@@ -736,23 +727,20 @@ mod tests {
         );
     }
 
-    /// Splicing sandbox frames into an outer inspector that recorded nothing is a no-op: the
-    /// arena's default root is not a `KeylessDeploy` CALL, and hanging the sandbox under it
-    /// would invent a call tree the outer EVM never executed.
+    /// Splicing a recorded sandbox into an outer inspector that does not hold its
+    /// `KeylessDeploy` CALL drops the sandbox: the arena's default root is not that frame, and
+    /// hanging the sandbox under it would invent a call tree the outer EVM never executed.
     #[test]
-    fn test_splice_into_empty_outer_is_a_no_op() {
-        use mega_evm::sandbox::trace::sandbox_has_frames;
-        let outer =
-            SharedTracingInspector::new(TracingInspector::new(TracingInspectorConfig::all()));
-        let sandbox =
-            SharedTracingInspector::new(TracingInspector::new(TracingInspectorConfig::all()));
+    fn test_splice_into_empty_outer_drops_the_sandbox() {
+        let (outer, sandbox) = paired(TracingInspectorConfig::all());
         run_traced_keyless(outer, sandbox.clone());
-        assert!(sandbox_has_frames(&sandbox.borrow()), "the sandbox recorded the CREATE");
+        assert_eq!(sandbox.borrow().pending(), 1, "the sandbox recorded the CREATE");
 
         let mut empty = TracingInspector::new(TracingInspectorConfig::all());
-        splice_sandbox_traces(&mut empty, &sandbox.borrow());
-        assert!(!sandbox_has_frames(&empty), "nothing was grafted under the default root");
+        splice_sandbox_traces(&mut empty, &mut sandbox.borrow_mut());
+        assert_eq!(sandbox.borrow().pending(), 0, "the sandbox is consumed either way");
         assert_eq!(empty.traces().nodes().len(), 1, "the arena keeps only its default root");
+        assert!(empty.traces().nodes()[0].children.is_empty(), "nothing was grafted");
     }
 
     /// The parity rendering (`trace_*` and `debug_traceTransaction` with `flatCallTracer`) of

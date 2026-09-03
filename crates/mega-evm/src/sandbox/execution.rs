@@ -56,9 +56,9 @@ use tracing::{error, warn};
 
 use crate::{
     constants, inspect_account_code_hash, mark_frame_result_as_exceeding_limit, AdditionalLimit,
-    EvmTxRuntimeLimits, ExternalEnvTypes, JournalInspectTr, LimitCheck, LimitUsage, MegaContext,
-    MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction, TxRuntimeLimit, VolatileDataAccess,
-    SANDBOX_TX_SOURCE_HASH,
+    EmptyExternalEnv, EvmTxRuntimeLimits, ExternalEnvTypes, JournalInspectTr, LimitCheck,
+    LimitUsage, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction, TxRuntimeLimit,
+    VolatileDataAccess, SANDBOX_TX_SOURCE_HASH,
 };
 
 use super::{
@@ -69,7 +69,10 @@ use super::{
 use super::{
     error::{encode_error_result, KeylessDeployError},
     inspector::{InspectorBridge, SandboxHookHandle},
-    observer::{SandboxCompletionKind, SandboxEndOutcome, SandboxRejectKind, SandboxStartInfo},
+    observer::{
+        OuterCallInfo, SandboxCompletionKind, SandboxEndOutcome, SandboxRejectKind,
+        SandboxStartInfo,
+    },
     state::SandboxDb,
 };
 
@@ -103,6 +106,7 @@ use super::{
 pub fn execute_keyless_deploy_call<DB: AlloyDatabase, ExtEnvs: ExternalEnvTypes>(
     ctx: &mut MegaContext<DB, ExtEnvs>,
     call_inputs: &revm::interpreter::CallInputs,
+    depth: usize,
     tx_bytes: &Bytes,
     gas_limit_override: U256,
 ) -> FrameResult {
@@ -431,6 +435,7 @@ pub fn execute_keyless_deploy_call<DB: AlloyDatabase, ExtEnvs: ExternalEnvTypes>
     // exit). The unconditional success follows from step 4b's
     // `gas_limit_override.min(gas.remaining())` cap — there is no intervening gas
     // movement between the cap and this debit.
+    let outer_gas_remaining = gas.remaining();
     if ctx.spec.is_enabled(MegaSpecId::REX5) {
         let ok = gas.record_cost(effective_gas_limit);
         debug_assert!(
@@ -443,15 +448,25 @@ pub fn execute_keyless_deploy_call<DB: AlloyDatabase, ExtEnvs: ExternalEnvTypes>
     //
     // INVARIANT: when a hook is attached, `sandbox_start` and `sandbox_end`
     // fire exactly once on this path, covering every terminal arm below.
-    let hook = ctx.keyless_sandbox_hook.clone();
-    if let Some(h) = &hook {
-        h.borrow_mut().sandbox_start(&SandboxStartInfo {
+    // Lifecycle events go to the slot that also receives this sandbox's opcode-level
+    // hooks, so a hook with one impl per env sees the whole sandbox on one impl.
+    let lifecycle = LifecycleHook::select(ctx);
+    if lifecycle.is_attached() {
+        lifecycle.start(&SandboxStartInfo {
             spec: ctx.spec,
             signer: deploy_signer,
             deploy_address,
             gas_limit_override: gas_limit_override_u64,
             effective_gas_limit,
             tx_gas_limit,
+            outer_call: OuterCallInfo {
+                depth,
+                caller: call_inputs.caller,
+                gas_limit: call_inputs.gas_limit,
+                gas_remaining: outer_gas_remaining,
+                value: call_inputs.call_value(),
+                input: call_inputs.input.bytes(ctx),
+            },
         });
     }
 
@@ -469,12 +484,9 @@ pub fn execute_keyless_deploy_call<DB: AlloyDatabase, ExtEnvs: ExternalEnvTypes>
                     gas_used,
                     &return_memory_offset,
                 ) {
-                    notify_sandbox_end(
-                        &hook,
-                        SandboxEndOutcome::NotApplied {
-                            reason: SandboxRejectKind::PostAccountingHalt,
-                        },
-                    );
+                    lifecycle.end(SandboxEndOutcome::NotApplied {
+                        reason: SandboxRejectKind::PostAccountingHalt,
+                    });
                     return halt;
                 }
             }
@@ -485,21 +497,16 @@ pub fn execute_keyless_deploy_call<DB: AlloyDatabase, ExtEnvs: ExternalEnvTypes>
             // state on this path.
             if let SandboxCompletion::Deployed { deploy_address: deployed, .. } = &completion {
                 if *deployed != deploy_address {
-                    notify_sandbox_end(
-                        &hook,
-                        SandboxEndOutcome::NotApplied {
-                            reason: SandboxRejectKind::AddressMismatch,
-                        },
-                    );
+                    lifecycle.end(SandboxEndOutcome::NotApplied {
+                        reason: SandboxRejectKind::AddressMismatch,
+                    });
                     return make_error!(KeylessDeployError::AddressMismatch);
                 }
             }
 
             if let Err(e) = apply_sandbox_state(ctx, state, deploy_signer) {
-                notify_sandbox_end(
-                    &hook,
-                    SandboxEndOutcome::NotApplied { reason: SandboxRejectKind::ApplyFailed },
-                );
+                lifecycle
+                    .end(SandboxEndOutcome::NotApplied { reason: SandboxRejectKind::ApplyFailed });
                 return make_error!(e);
             }
 
@@ -512,26 +519,20 @@ pub fn execute_keyless_deploy_call<DB: AlloyDatabase, ExtEnvs: ExternalEnvTypes>
                     for log in logs {
                         ctx.log(log);
                     }
-                    notify_sandbox_end(
-                        &hook,
-                        SandboxEndOutcome::Applied {
-                            completion: SandboxCompletionKind::Deployed,
-                            gas_used,
-                        },
-                    );
+                    lifecycle.end(SandboxEndOutcome::Applied {
+                        completion: SandboxCompletionKind::Deployed,
+                        gas_used,
+                    });
                     make_success!(gas_used, deployed)
                 }
                 SandboxCompletion::EmptyCode { gas_used, logs } => {
                     for log in logs {
                         ctx.log(log);
                     }
-                    notify_sandbox_end(
-                        &hook,
-                        SandboxEndOutcome::Applied {
-                            completion: SandboxCompletionKind::EmptyCode,
-                            gas_used,
-                        },
-                    );
+                    lifecycle.end(SandboxEndOutcome::Applied {
+                        completion: SandboxCompletionKind::EmptyCode,
+                        gas_used,
+                    });
                     make_execution_failure!(
                         gas_used,
                         KeylessDeployError::EmptyCodeDeployed { gas_used }
@@ -542,16 +543,43 @@ pub fn execute_keyless_deploy_call<DB: AlloyDatabase, ExtEnvs: ExternalEnvTypes>
                     // nonce bump from `make_create_frame`, plus any committed sandbox
                     // writes) persists; outer caller sees the failure reason in
                     // `errorData`.
-                    notify_sandbox_end(
-                        &hook,
-                        SandboxEndOutcome::Applied {
-                            completion: SandboxCompletionKind::ExecutionFailed,
-                            gas_used,
-                        },
-                    );
+                    //
+                    // Pre-REX5 empty-code deploys travel this arm on the wire (logs
+                    // dropped, frozen behavior); the hook still learns what the sandbox
+                    // EVM did, so the completion kind is `EmptyCode` on every spec.
+                    let completion =
+                        if matches!(error, KeylessDeployError::EmptyCodeDeployed { .. }) {
+                            SandboxCompletionKind::EmptyCode
+                        } else {
+                            SandboxCompletionKind::ExecutionFailed
+                        };
+                    lifecycle.end(SandboxEndOutcome::Applied { completion, gas_used });
                     make_execution_failure!(gas_used, error)
                 }
             }
+        }
+        SandboxOutcome::NoContractCreated { gas_used, limit_usage, volatile_accesses } => {
+            // The sandbox ran a top-level create frame that produced no address, which only
+            // an inspector `create` override can do. The sandbox did execute, so charge it
+            // exactly like `AddressMismatch`: REX5+ books gas and usage, nothing is applied.
+            if ctx.spec.is_enabled(MegaSpecId::REX5) {
+                if let Some(halt) = apply_sandbox_post_accounting(
+                    ctx,
+                    &mut gas,
+                    limit_usage,
+                    volatile_accesses,
+                    effective_gas_limit,
+                    gas_used,
+                    &return_memory_offset,
+                ) {
+                    lifecycle.end(SandboxEndOutcome::NotApplied {
+                        reason: SandboxRejectKind::PostAccountingHalt,
+                    });
+                    return halt;
+                }
+            }
+            lifecycle.end(SandboxEndOutcome::NotApplied { reason: SandboxRejectKind::Rejected });
+            make_error!(KeylessDeployError::NoContractCreated)
         }
         SandboxOutcome::Rejected(e) => {
             // Sandbox bailed before producing a frame — typically a validate-reject
@@ -562,10 +590,7 @@ pub fn execute_keyless_deploy_call<DB: AlloyDatabase, ExtEnvs: ExternalEnvTypes>
             if ctx.spec.is_enabled(MegaSpecId::REX5) {
                 gas.erase_cost(effective_gas_limit);
             }
-            notify_sandbox_end(
-                &hook,
-                SandboxEndOutcome::NotApplied { reason: SandboxRejectKind::Rejected },
-            );
+            lifecycle.end(SandboxEndOutcome::NotApplied { reason: SandboxRejectKind::Rejected });
             make_error!(e)
         }
     }
@@ -750,13 +775,47 @@ fn run_sandbox_ctx<'db, ExtEnvs: ExternalEnvTypes>(
     }
 }
 
-/// Delivers `sandbox_end` when a hook is attached.
-fn notify_sandbox_end<ExtEnvs: ExternalEnvTypes>(
-    hook: &Option<SandboxHookHandle<ExtEnvs>>,
-    outcome: SandboxEndOutcome,
-) {
-    if let Some(h) = hook {
-        h.borrow_mut().sandbox_end(&outcome);
+/// The hook slot that receives one sandbox's lifecycle events.
+///
+/// Mirrors the slot selection of `execute_keyless_deploy_sandbox`: REX4+ sandboxes share
+/// the parent env and dispatch opcode-level hooks through the parent-env slot, pre-REX4
+/// sandboxes run on `EmptyExternalEnv` and dispatch through that slot. Lifecycle events
+/// follow the same rule so a hook with one impl per env sees a sandbox on one impl only.
+enum LifecycleHook<ExtEnvs: ExternalEnvTypes> {
+    Parent(Option<SandboxHookHandle<ExtEnvs>>),
+    Empty(Option<SandboxHookHandle<EmptyExternalEnv>>),
+}
+
+impl<ExtEnvs: ExternalEnvTypes> LifecycleHook<ExtEnvs> {
+    fn select<DB: AlloyDatabase>(ctx: &MegaContext<DB, ExtEnvs>) -> Self {
+        if ctx.spec.is_enabled(MegaSpecId::REX4) {
+            Self::Parent(ctx.keyless_sandbox_hook.clone())
+        } else {
+            Self::Empty(ctx.keyless_sandbox_hook_empty.clone())
+        }
+    }
+
+    fn is_attached(&self) -> bool {
+        match self {
+            Self::Parent(hook) => hook.is_some(),
+            Self::Empty(hook) => hook.is_some(),
+        }
+    }
+
+    fn start(&self, info: &SandboxStartInfo) {
+        match self {
+            Self::Parent(Some(hook)) => hook.borrow_mut().sandbox_start(info),
+            Self::Empty(Some(hook)) => hook.borrow_mut().sandbox_start(info),
+            Self::Parent(None) | Self::Empty(None) => {}
+        }
+    }
+
+    fn end(&self, outcome: SandboxEndOutcome) {
+        match self {
+            Self::Parent(Some(hook)) => hook.borrow_mut().sandbox_end(&outcome),
+            Self::Empty(Some(hook)) => hook.borrow_mut().sandbox_end(&outcome),
+            Self::Parent(None) | Self::Empty(None) => {}
+        }
     }
 }
 
@@ -794,6 +853,18 @@ pub enum SandboxOutcome {
     /// or `InternalError`). No state, resource usage, or volatile-access footprint
     /// applies — the outer caller must refund the full pre-debited reservation.
     Rejected(KeylessDeployError),
+    /// Sandbox EVM ran, but its top-level create frame produced no address. Only an
+    /// inspector `create` override returning `address: None` reaches this arm; the no-hook
+    /// path always creates. The sandbox executed, so gas and resource usage are charged
+    /// like `Completed`, while no state is applied.
+    NoContractCreated {
+        /// Gas consumed by the sandbox EVM execution.
+        gas_used: u64,
+        /// Resource usage from the sandbox's additional limit trackers.
+        limit_usage: LimitUsage,
+        /// Volatile-access footprint to merge into the parent after sandbox return.
+        volatile_accesses: VolatileDataAccess,
+    },
 }
 
 /// Wire-shape dispatch for a completed sandbox execution.
@@ -905,10 +976,15 @@ fn process_sandbox_transact_result<E: core::fmt::Display + IsTxError>(
             ExecutionResult::Success { gas_used, output, logs, .. } => {
                 let revm::context::result::Output::Create(bytecode, Some(created_addr)) = output
                 else {
-                    // Contract creation didn't return an address — should never happen
-                    // (the sandbox tx always asks for `TxKind::Create`), but we return
-                    // a Rejected outcome instead of panicking to avoid crashing the node.
-                    return SandboxOutcome::Rejected(KeylessDeployError::NoContractCreated);
+                    // Contract creation returned no address. The sandbox tx always asks for
+                    // `TxKind::Create`, so revm never produces this on its own; an
+                    // inspector `create` override answering `address: None` does. The
+                    // sandbox executed, so its gas and usage are reported for charging.
+                    return SandboxOutcome::NoContractCreated {
+                        gas_used,
+                        limit_usage,
+                        volatile_accesses,
+                    };
                 };
                 // REX6: also treat same-tx create + SELFDESTRUCT as empty-code. revm reports
                 // `Success` with the constructor's returned bytecode, but
@@ -1360,13 +1436,14 @@ mod tests {
             false,
         );
         assert!(
-            matches!(out, SandboxOutcome::Rejected(KeylessDeployError::NoContractCreated)),
+            matches!(out, SandboxOutcome::NoContractCreated { gas_used: 1, .. }),
             "unexpected: {out:?}",
         );
     }
 
-    /// `Output::Create(_, None)` — Create succeeded but revm did not return an address.
-    /// Same defensive `NoContractCreated` shape as the Call branch.
+    /// `Output::Create(_, None)` — the create frame produced no address (an inspector `create`
+    /// override). Same `NoContractCreated` shape as the Call branch, carrying the gas used so
+    /// the caller can charge it.
     #[test]
     fn test_process_result_create_without_address_maps_to_no_contract_created() {
         let result: Result<ResultAndState<MegaHaltReason>, FakeTxErr> = Ok(ResultAndState {
@@ -1387,7 +1464,7 @@ mod tests {
             false,
         );
         assert!(
-            matches!(out, SandboxOutcome::Rejected(KeylessDeployError::NoContractCreated)),
+            matches!(out, SandboxOutcome::NoContractCreated { gas_used: 1, .. }),
             "unexpected: {out:?}",
         );
     }
@@ -1846,7 +1923,7 @@ mod tests {
                 });
                 (created, slot)
             }
-            SandboxOutcome::Rejected(_) => (false, None),
+            SandboxOutcome::Rejected(_) | SandboxOutcome::NoContractCreated { .. } => (false, None),
         }
     }
 

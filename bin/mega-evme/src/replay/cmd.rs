@@ -14,7 +14,7 @@ use mega_evm::{
         primitives::eip4844,
         DatabaseRef,
     },
-    sandbox::trace::SharedTracingInspector,
+    sandbox::trace::{SandboxTracer, SharedTracingInspector},
     BlockLimits, EvmTxRuntimeLimits, MegaBlockExecutionCtx, MegaBlockExecutorFactory,
     MegaEvmFactory, MegaHardforks, MegaSpecId,
 };
@@ -475,7 +475,7 @@ impl Cmd {
         let sandbox = self
             .trace_args
             .is_tracing_enabled()
-            .then(|| SharedTracingInspector::new(self.trace_args.create_inspector()));
+            .then(|| SandboxTracer::handle(self.trace_args.inspector_config()));
         let mut state =
             StateBuilder::new().with_database(&mut database).with_bundle_update().build();
         let mut block_executor = block_executor_factory.create_executor_with_inspector(
@@ -527,7 +527,7 @@ impl Cmd {
 
         block_executor.inspector_mut().fuse();
         if let Some(sandbox) = &sandbox {
-            block_executor.set_keyless_sandbox_observer(Some(sandbox.as_sandbox_observer()));
+            block_executor.set_keyless_sandbox_observer(std::rc::Rc::clone(sandbox));
         }
         let outcome = block_executor
             .run_transaction(wrapped_tx)

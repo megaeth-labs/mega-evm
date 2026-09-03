@@ -19,21 +19,27 @@
 #![allow(missing_docs)]
 
 use alloy_eips::eip7702::{Authorization, RecoveredAuthority, RecoveredAuthorization};
-use alloy_primitives::{address, Address, Bytes, U256};
+use alloy_primitives::{address, Address, Bytes, Signature, TxKind, B256, U256};
+use alloy_sol_types::SolCall;
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use mega_evm::{
+    alloy_consensus::{Signed, TxLegacy},
     revm::inspector::NoOpInspector,
+    sandbox::{SandboxDb, SandboxObserver},
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    EmptyExternalEnv, MegaContext, MegaEvm, MegaSpecId, MegaTransaction,
+    EmptyExternalEnv, ExternalEnvTypes, IKeylessDeploy, MegaContext, MegaEvm, MegaSpecId,
+    MegaTransaction, KEYLESS_DEPLOY_ADDRESS,
 };
 use revm::{
     bytecode::opcode::{
-        ADD, CALL, COINBASE, CREATE, CREATE2, DELEGATECALL, GAS, LOG0, LOG1, LOG2, LOG4, NUMBER,
-        POP, PUSH0, SELFDESTRUCT, SLOAD, SSTORE, STATICCALL, STOP, TIMESTAMP,
+        ADD, CALL, CODECOPY, COINBASE, CREATE, CREATE2, DELEGATECALL, GAS, LOG0, LOG1, LOG2, LOG4,
+        NUMBER, POP, PUSH0, RETURN, SELFDESTRUCT, SLOAD, SSTORE, STATICCALL, STOP, TIMESTAMP,
     },
     context::tx::TxEnvBuilder,
+    interpreter::{interpreter::EthInterpreter, CallInputs, CreateInputs, Interpreter},
     ExecuteEvm as _,
 };
+use std::{cell::RefCell, rc::Rc};
 
 mod common;
 use common::{
@@ -950,6 +956,121 @@ fn bench_oracle_real_data(c: &mut Criterion) {
     group.finish();
 }
 
+//
+// ============================================================================
+// Keyless Sandbox Hook Benchmark
+// ============================================================================
+//
+// A `KeylessDeploy` call whose constructor spends most of its gas on a compute
+// loop, run with and without a sandbox observer attached. The `observer` row
+// pays the per-opcode `InspectorBridge` → `ReadOnlyHook` → observer forwarding
+// on top of the plain sandbox interception, which is what `no_hook` measures.
+//
+
+const KEYLESS_SANDBOX_ITERATIONS: usize = 100;
+
+/// The cheapest observer that still exercises every forwarding hop.
+#[derive(Default)]
+struct CountingObserver {
+    steps: u64,
+    frames: u64,
+}
+
+impl<E: ExternalEnvTypes> SandboxObserver<E> for CountingObserver {
+    fn step(
+        &mut self,
+        _interp: &mut Interpreter<EthInterpreter>,
+        _context: &mut MegaContext<SandboxDb<'_>, E>,
+    ) {
+        self.steps += 1;
+    }
+
+    fn call(&mut self, _context: &mut MegaContext<SandboxDb<'_>, E>, _inputs: &CallInputs) {
+        self.frames += 1;
+    }
+
+    fn create(&mut self, _context: &mut MegaContext<SandboxDb<'_>, E>, _inputs: &CreateInputs) {
+        self.frames += 1;
+    }
+}
+
+/// `keylessDeploy` calldata wrapping a pre-EIP-155 deployment of `init_code`, plus the
+/// keyless signer it recovers to.
+fn keyless_deploy_call_data(init_code: Bytes) -> (Bytes, Address) {
+    let tx = TxLegacy {
+        nonce: 0,
+        gas_price: 100_000_000_000,
+        gas_limit: 5_000_000,
+        to: TxKind::Create,
+        value: U256::ZERO,
+        input: init_code,
+        chain_id: None,
+    };
+    let word = U256::from_be_bytes([0x22; 32]);
+    let signed = Signed::new_unchecked(tx, Signature::new(word, word, false), B256::ZERO);
+    let signer = signed.recover_signer().expect("keyless signer recovers");
+    let mut raw = Vec::new();
+    signed.rlp_encode(&mut raw);
+    let call = IKeylessDeploy::keylessDeployCall {
+        keylessDeploymentTransaction: raw.into(),
+        gasLimitOverride: U256::from(100_000_000_u64),
+    }
+    .abi_encode();
+    (call.into(), signer)
+}
+
+fn bench_keyless_sandbox_hook(c: &mut Criterion) {
+    let mut init_code = BytecodeBuilder::default();
+    for _ in 0..KEYLESS_SANDBOX_ITERATIONS {
+        init_code = init_code.push_number(1u64).push_number(2u64).append(ADD).append(POP);
+    }
+    let init_code = init_code
+        .push_number(1u8)
+        .push_number(0u8)
+        .push_number(0u8)
+        .append(CODECOPY)
+        .push_number(1u8)
+        .push_number(0u8)
+        .append(RETURN)
+        .build();
+    let (call_data, signer) = keyless_deploy_call_data(init_code);
+
+    let mut group = c.benchmark_group("keyless_sandbox_hook");
+    group.sample_size(10);
+    for (row, attach_observer) in [("rex5/no_hook", false), ("rex5/observer", true)] {
+        group.bench_function(row, |b| {
+            b.iter(|| {
+                let mut db = MemoryDatabase::default();
+                db.set_account_balance(signer, U256::from(10).pow(U256::from(21)));
+                db.set_account_balance(CALLER, U256::from(10).pow(U256::from(18)));
+                let mut context = MegaContext::new(&mut db, MegaSpecId::REX5);
+                context.modify_chain(|chain| {
+                    chain.operator_fee_scalar = Some(U256::ZERO);
+                    chain.operator_fee_constant = Some(U256::ZERO);
+                });
+                let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);
+                if attach_observer {
+                    evm.set_keyless_sandbox_observer(Rc::new(RefCell::new(
+                        CountingObserver::default(),
+                    )));
+                }
+                let tx = TxEnvBuilder::new()
+                    .caller(CALLER)
+                    .call(KEYLESS_DEPLOY_ADDRESS)
+                    .gas_limit(FEATURE_GAS_LIMIT)
+                    .data(call_data.clone())
+                    .build_fill();
+                let mut tx = MegaTransaction::new(tx);
+                tx.enveloped_tx = Some(Bytes::new());
+                let result = evm.transact(tx).expect("keyless deploy executes");
+                assert!(result.result.is_success(), "keyless deploy should succeed");
+                black_box(result)
+            })
+        });
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_volatile_data,
@@ -967,5 +1088,6 @@ criterion_group!(
     bench_eip7702_authlist,
     bench_staticcall_selfdestruct,
     bench_salt_dynamic_gas,
+    bench_keyless_sandbox_hook,
 );
 criterion_main!(benches);
