@@ -64,8 +64,8 @@ Progression: `EQUIVALENCE` → `MINI_REX` → `MINI_REX_1` → `MINI_REX_2` → 
   - _`REX7` is the current unstable spec under active development._
     When a new spec is introduced, this line should be updated to indicate the unstable spec.
   - Frozen and activated are separate properties.
-    `REX6` is frozen and activated on both networks (testnet `1786330800`, mainnet `1787626800`); `REX7` has no activation timestamp yet.
-    Freezing forbids further semantic change; scheduling is a later, separate decision, recorded in `block/chain.rs`.
+    `REX6` is frozen and activated on both networks (see `block/chain.rs`); `REX7` has no activation timestamp yet.
+    Freezing forbids further semantic change; scheduling is a later, separate decision made in the node chainspecs and mirrored here in `block/chain.rs` for replay tooling.
   - Specifications of each behavior-introducing spec can be found in the upgrade pages under `docs/spec/upgrades/`; alias rungs have no page of their own and are recorded in the upgrade overview and `docs/spec/hardfork-spec.md`.
 - **Hardfork** (`MegaHardfork`) defines network upgrade events (when specs activate).
   Every hardfork schedules a spec rung of its own — the fork→spec mapping is 1:1.

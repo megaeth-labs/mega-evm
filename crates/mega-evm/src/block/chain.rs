@@ -23,6 +23,14 @@ pub const MAINNET_CHAIN_ID: u64 = 4326;
 /// `MegaETH` testnet v2 chain ID.
 pub const TESTNET_CHAIN_ID: u64 = 6343;
 
+/// Governance parameter seeded into the v2.0.0 `SequencerRegistry` at Rex6 init on both
+/// live networks: the minimum scheduling-to-activation delay (`_minRotationDelay`), in
+/// blocks. Must equal the `rex6MinRotationDelay` the operator genesis attaches; the live
+/// value is readable via `minRotationDelay()` on `0x6342…0006`. One constant for both
+/// schedules, so a network diverging from the other is a deliberate edit rather than a
+/// silent difference.
+const REX6_MIN_ROTATION_DELAY: u64 = 21_600;
+
 /// Canonical hardfork schedule for `MegaETH` mainnet (chain `4326`).
 pub fn mainnet_hardforks() -> MegaHardforkConfig {
     MegaHardforkConfig::new()
@@ -44,11 +52,9 @@ pub fn mainnet_hardforks() -> MegaHardforkConfig {
             rex5_initial_sequencer: address!("0x7a49197dd1ebb8d38c67e4eb7626af6ade432445"),
             rex5_initial_admin: address!("0x92e0e0b15e3e99b32c9ed9ad284f939553c7b7d6"),
         })
-        // Governance parameter seeded into the v2.0.0 registry at Rex6 init: the
-        // minimum scheduling-to-activation delay (`_minRotationDelay`), in blocks.
-        // Must equal the `rex6MinRotationDelay` the operator genesis attaches; the
-        // live value is readable via `minRotationDelay()` on 0x6342…0006.
-        .with_params(SequencerRegistryRex6Config { rex6_min_rotation_delay: 21600 })
+        .with_params(SequencerRegistryRex6Config {
+            rex6_min_rotation_delay: REX6_MIN_ROTATION_DELAY,
+        })
 }
 
 /// Canonical hardfork schedule for `MegaETH` testnet v2 (chain `6343`).
@@ -72,11 +78,9 @@ pub fn testnet_hardforks() -> MegaHardforkConfig {
             rex5_initial_sequencer: address!("0xB8DB54eBA7Ae650d14F362de461516a4FF1551FC"),
             rex5_initial_admin: address!("0x1d9BD232C44B39341e670B735c7F423c40426b34"),
         })
-        // Governance parameter seeded into the v2.0.0 registry at Rex6 init: the
-        // minimum scheduling-to-activation delay (`_minRotationDelay`), in blocks.
-        // Must equal the `rex6MinRotationDelay` the operator genesis attaches; the
-        // live value is readable via `minRotationDelay()` on 0x6342…0006.
-        .with_params(SequencerRegistryRex6Config { rex6_min_rotation_delay: 21600 })
+        .with_params(SequencerRegistryRex6Config {
+            rex6_min_rotation_delay: REX6_MIN_ROTATION_DELAY,
+        })
 }
 
 /// All `MegaETH` hardforks activated at genesis.

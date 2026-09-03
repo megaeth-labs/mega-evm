@@ -109,7 +109,7 @@
 //!   must be included in blocks regardless of their DA size to maintain bridge integrity
 //! - **Tracking**: Deposit DA sizes are **not** accumulated into the block DA usage counter
 //!   (`post_execution_update` skips them), so `block_da_size_used` reflects non-deposit
-//!   transactions only; operators estimating L1 posting cost must add deposits separately
+//!   transactions only
 //! - **Other Limits**: Deposit transactions are still subject to all other limits (gas, tx size,
 //!   compute gas, data size, KV updates)
 //!
