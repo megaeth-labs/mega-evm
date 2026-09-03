@@ -136,6 +136,9 @@ impl fmt::Display for ConservationTerms {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(not(feature = "std"))]
+    use alloc as std;
+
     use super::*;
 
     fn terms() -> ConservationTerms {
@@ -232,5 +235,17 @@ mod tests {
         assert_eq!(terms.destroyed_for(0), 0);
         assert_eq!(terms.envelope_for(0), 0);
         assert_eq!(terms.unbooked_for(0), 0);
+    }
+
+    /// The term set is rendered into every assertion message the law raises, and a message that
+    /// names no term is a failing invariant with nothing to debug it by. Pins the full text: the
+    /// order the law states the terms in, and the signed lanes' signs.
+    #[test]
+    fn test_display_renders_every_term_in_the_order_the_law_states_them() {
+        assert_eq!(
+            std::format!("{}", terms()),
+            "enforced compute 21000, non-compute 5000, minted stipend 2300, \
+             inspector conjured -400, booked destroyed 0",
+        );
     }
 }

@@ -380,7 +380,10 @@ impl TxRuntimeLimit for StateGrowthTracker {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{
+        super::{LimitCheck, LimitKind},
+        *,
+    };
 
     /// `reset` must clear accumulated TX-level state-growth usage so a tracker reused
     /// across transactions does not leak growth from the previous one.
@@ -455,5 +458,48 @@ mod tests {
     #[test]
     fn test_tx_limit_reports_configured_limit() {
         assert_eq!(StateGrowthTracker::new(MegaSpecId::REX5, 4_321).tx_limit(), 4_321);
+    }
+
+    /// A frame's growth is weighed against its *caller's* budget only once the two have been
+    /// merged, so the pre-merge reading has to answer a question the live one cannot: the caller
+    /// is already over its budget while the frame on top is still inside its own.
+    ///
+    /// A child receives 98% of its caller's remaining budget, so merging one that stayed inside
+    /// its own budget cannot by itself push the caller past its. What breaks that arithmetic is a
+    /// charge that reaches the caller's lane after the child's budget has already been fixed,
+    /// which is what the parent-lane write below stands for.
+    ///
+    /// The answer depends on how the frame ends: a reverting frame's growth vanishes instead of
+    /// merging, and the caller stays inside its budget.
+    #[test]
+    fn test_check_limit_after_pop_sees_a_frame_local_exceed_the_live_check_cannot() {
+        let mut tracker = StateGrowthTracker::new(MegaSpecId::REX5, 1_000);
+        tracker.push_frame();
+        tracker.push_frame();
+        tracker.record_growth(500);
+        tracker.push_frame();
+        tracker.record_growth(470);
+        tracker.frame_tracker.add_parent_discardable(20);
+
+        assert_eq!(
+            tracker.check_limit(),
+            LimitCheck::WithinLimit,
+            "the top frame is exactly at its own budget, and the transaction is under its limit",
+        );
+        assert_eq!(
+            tracker.check_limit_after_pop(true),
+            LimitCheck::ExceedsLimit {
+                kind: LimitKind::StateGrowth,
+                limit: 980,
+                used: 990,
+                frame_local: true,
+            },
+            "the merged caller is 10 over the budget it was pushed with",
+        );
+        assert_eq!(
+            tracker.check_limit_after_pop(false),
+            LimitCheck::WithinLimit,
+            "a reverting frame's growth vanishes rather than merging",
+        );
     }
 }

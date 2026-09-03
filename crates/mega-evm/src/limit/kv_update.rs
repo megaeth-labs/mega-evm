@@ -299,7 +299,10 @@ impl TxRuntimeLimit for KVUpdateTracker {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{
+        super::{LimitCheck, LimitKind},
+        *,
+    };
 
     /// `record_account_update` must charge exactly one KV update against the current frame
     /// (used by REX5+ SELFDESTRUCT-beneficiary metering); it must not be a no-op.
@@ -316,5 +319,48 @@ mod tests {
     #[test]
     fn test_tx_limit_reports_configured_limit() {
         assert_eq!(KVUpdateTracker::new(MegaSpecId::MINI_REX, 4_321).tx_limit(), 4_321);
+    }
+
+    /// A frame's usage is weighed against its *caller's* budget only once the two have been
+    /// merged, so the pre-merge reading has to answer a question the live one cannot: the caller
+    /// is already over its budget while the frame on top is still inside its own.
+    ///
+    /// A child receives 98% of its caller's remaining budget, so merging one that stayed inside
+    /// its own budget cannot by itself push the caller past its. The charge that breaks that
+    /// arithmetic is the REX6 creator nonce bump, which lands on the caller's lane after the
+    /// child's budget has already been computed — `record_parent_discardable` below.
+    ///
+    /// The answer depends on how the frame ends: a reverting child's discardable updates vanish
+    /// instead of merging, and the caller stays inside its budget.
+    #[test]
+    fn test_check_limit_after_pop_sees_a_frame_local_exceed_the_live_check_cannot() {
+        let mut tracker = KVUpdateTracker::new(MegaSpecId::REX6, 1_000);
+        tracker.frame_tracker.push_dummy_frame();
+        tracker.frame_tracker.push_dummy_frame();
+        tracker.record_discardable(500);
+        tracker.frame_tracker.push_dummy_frame();
+        tracker.record_discardable(470);
+        tracker.record_parent_discardable(20);
+
+        assert_eq!(
+            tracker.check_limit(),
+            LimitCheck::WithinLimit,
+            "the top frame is exactly at its own budget, and the transaction is under its limit",
+        );
+        assert_eq!(
+            tracker.check_limit_after_pop(true),
+            LimitCheck::ExceedsLimit {
+                kind: LimitKind::KVUpdate,
+                limit: 980,
+                used: 990,
+                frame_local: true,
+            },
+            "the merged caller is 10 over the budget it was pushed with",
+        );
+        assert_eq!(
+            tracker.check_limit_after_pop(false),
+            LimitCheck::WithinLimit,
+            "a reverting frame's updates vanish rather than merging",
+        );
     }
 }

@@ -417,4 +417,37 @@ mod tests {
         tracker.record_gas_used(1);
         assert!(tracker.is_detained_exceed(), "usage > detained_limit must be a detained exceed");
     }
+
+    /// A frame's usage is weighed against its *caller's* budget only once the two have been
+    /// merged, so the pre-merge reading has to answer a question the live one cannot: the frame
+    /// below is already over its budget while the frame above is still inside its own.
+    ///
+    /// Compute gas is persistent, so the merge happens whether the frame returns or reverts and
+    /// the answer is the same either way.
+    #[test]
+    fn test_check_limit_after_pop_sees_a_frame_local_exceed_the_live_check_cannot() {
+        let mut tracker = ComputeGasTracker::new(MegaSpecId::REX4, 10_000);
+        tracker.push_frame_with_limit_for_test(100);
+        tracker.record_gas_used(60);
+        tracker.push_frame_with_limit_for_test(60);
+        tracker.record_gas_used(60);
+
+        assert_eq!(
+            tracker.check_limit(),
+            LimitCheck::WithinLimit,
+            "the child is exactly at its own budget, and nothing else is over",
+        );
+        for success in [true, false] {
+            assert_eq!(
+                tracker.check_limit_after_pop(success),
+                LimitCheck::ExceedsLimit {
+                    kind: LimitKind::ComputeGas,
+                    limit: 100,
+                    used: 120,
+                    frame_local: true,
+                },
+                "the merged caller is 20 over its own budget (success: {success})",
+            );
+        }
+    }
 }

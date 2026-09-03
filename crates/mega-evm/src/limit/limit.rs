@@ -2835,6 +2835,80 @@ mod tests {
         assert_eq!(latched_kind(&limit), None, "an affordable charge must not latch");
     }
 
+    /// With no volatile access in play the detained limit was never lowered, so an unaffordable
+    /// code-deposit charge is the transaction's own compute limit and nothing else. Blaming it on
+    /// detention would report `VolatileDataAccessOutOfGas` with a limit figure that never moved.
+    #[test]
+    fn test_create_code_deposit_tx_level_arm_leaves_an_undetained_exceed_undetained() {
+        let mut limits = test_limits();
+        limits.tx_compute_gas_limit = 10;
+        let mut limit = AdditionalLimit::new(MegaSpecId::REX7, limits);
+        // A frame budget far above the charge, so the transaction limit is what binds.
+        limit.compute_gas.push_frame_with_limit_for_test(u64::MAX);
+
+        let rewrite = limit.settle_create_code_deposit_compute_gas(11);
+
+        let (result, _) = rewrite.expect("an unaffordable charge must rewrite the result");
+        assert_eq!(
+            result,
+            AdditionalLimit::EXCEEDING_LIMIT_INSTRUCTION_RESULT,
+            "a TX-level exceed halts the transaction",
+        );
+        assert_eq!(latched_kind(&limit), Some(LimitKind::ComputeGas), "the TX-level arm latches");
+        assert!(
+            limit.detained_compute_gas_halt_reason(VolatileDataAccess::empty()).is_none(),
+            "a limit that was never lowered cannot be what detained the transaction",
+        );
+    }
+
+    /// An inspector's edit to a running frame's counter is booked on its lane whether or not a
+    /// measured segment is open, and the segment is closed only where one is.
+    ///
+    /// `initialize_interp` is the callback with no open segment: the frame was built a moment ago
+    /// and its entry hook has not opened the window yet, so the baseline still belongs to another
+    /// frame. Closing a segment there would settle the distance between that baseline and this
+    /// frame's counter as compute gas this frame performed.
+    #[test]
+    fn test_an_adjustment_outside_an_open_segment_settles_no_segment() {
+        let mut limit = rex7_limit();
+        // A baseline left behind by the frame that is still suspended below this one.
+        limit.checkpoint.sync_baseline(1_000_000);
+        let mut gas = Gas::new(500_064);
+
+        limit.record_inspector_gas_adjustment::<false>(&mut gas, 500_000, true);
+
+        assert_eq!(
+            limit.get_usage().compute_gas,
+            0,
+            "no segment is open, so there is no distance to settle as work",
+        );
+        assert_eq!(gas.remaining(), 500_064, "and the counter is left exactly as the EVM had it");
+        assert_eq!(
+            limit.inspector_ledger().gas.net(),
+            64,
+            "the edit itself is still booked on the counter lane",
+        );
+    }
+
+    /// A callback that removed the frame's pending action leaves the frame carrying on from its
+    /// own counter, so an edit that had travelled in that action lands on the counter lane.
+    ///
+    /// The lane's gross is what the block guard reads, so two edits that cancel are still two
+    /// edits: a transaction an inspector took part in must not read as one the EVM produced alone.
+    #[test]
+    fn test_a_removed_actions_adjustment_is_booked_on_the_counter_lane() {
+        let mut limit = rex7_limit();
+        assert!(limit.inspector_ledger().is_zero(), "a fresh ledger has seen nothing");
+
+        limit.record_inspector_action_counter_adjustment(64);
+        limit.record_inspector_action_counter_adjustment(-64);
+
+        let ledger = limit.inspector_ledger();
+        assert_eq!(ledger.gas.net(), 0, "the two edits cancel on the net");
+        assert_eq!(ledger.gas.gross(), 128, "and the lane still carries both");
+        assert!(!ledger.is_zero(), "so the guard refuses a transaction that saw them");
+    }
+
     /// `mark_frame_result_as_exceeding_limit` rewrites both frame-result variants in place.
     #[test]
     fn test_mark_frame_result_as_exceeding_limit_rewrites_both_variants() {
