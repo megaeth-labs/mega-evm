@@ -1,0 +1,553 @@
+//! Tests for `sandbox::trace`: a `TracingInspector` shared between the outer EVM and the
+//! keyless sandbox through either hook channel, and `splice_sandbox_traces`, which grafts the
+//! sandbox frames under the intercepted `KeylessDeploy` CALL.
+//!
+//! Compiled only with the `inspectors` feature, which gates `sandbox::trace` itself.
+
+use std::convert::Infallible;
+
+use alloy_consensus::{transaction::Recovered, Signed, TxLegacy};
+use alloy_evm::{block::BlockExecutor, EvmEnv};
+use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
+use alloy_primitives::{address, Address, Bytes, Signature, TxKind, B256, U256};
+use alloy_sol_types::SolCall;
+use mega_evm::{
+    revm::{context::result::ResultAndState, InspectEvm},
+    sandbox::trace::{sandbox_has_frames, splice_sandbox_traces, SharedTracingInspector},
+    test_utils::{deep_mixed_init, BytecodeBuilder, MemoryDatabase, REVERTING_RUNTIME},
+    BlockLimits, IKeylessDeploy, MegaBlockExecutionCtx, MegaBlockExecutorFactory, MegaContext,
+    MegaEvm, MegaEvmFactory, MegaHaltReason, MegaHardforkConfig, MegaSpecId, MegaTransaction,
+    MegaTxEnvelope, TestExternalEnvs, KEYLESS_DEPLOY_ADDRESS,
+};
+use revm::{
+    bytecode::opcode::{OpCode, CALL, CREATE, PUSH0, SELFDESTRUCT, STOP},
+    context::{BlockEnv, CfgEnv, TxEnv},
+    database::State,
+};
+use revm_inspectors::tracing::{
+    types::{CallTraceNode, TraceMemberOrder},
+    TracingInspector, TracingInspectorConfig,
+};
+
+use super::keyless_sandbox_support::{
+    assert_result_and_state_eq, constructor_calls_reverter, create_pre_eip155_deploy_tx,
+    empty_code_constructor, funded_db, keyless_deploy_call_tx, success_constructor,
+    DEFAULT_OUTER_GAS_LIMIT, LARGE_GAS_LIMIT_OVERRIDE, LARGE_SIGNER_BALANCE, REVERTER, SPECS,
+    TEST_CALLER,
+};
+
+/// A contract whose runtime is a single `STOP`, for transactions that never enter the sandbox.
+const STOPPER: Address = address!("0000000000000000000000000000000000cccccc");
+
+/// Which keyless sandbox channel the sandbox tracer is attached through.
+#[derive(Clone, Copy, Debug)]
+enum Channel {
+    Observer,
+    Inspector,
+}
+
+fn tracer() -> SharedTracingInspector {
+    SharedTracingInspector::new(TracingInspector::new(TracingInspectorConfig::all()))
+}
+
+/// Init code that `SELFDESTRUCT`s the contract under construction with `address(0)` as the
+/// beneficiary.
+fn selfdestructing_constructor() -> Bytes {
+    BytecodeBuilder::default().append_many([PUSH0, PUSH0, SELFDESTRUCT]).build()
+}
+
+/// Runs one keyless deploy of `tx_bytes` on a fresh `MegaEvm` with `outer` installed as the
+/// EVM inspector and `sandbox` attached through `channel`.
+fn trace_keyless_deploy(
+    spec: MegaSpecId,
+    db: &mut MemoryDatabase,
+    tx_bytes: Bytes,
+    outer: SharedTracingInspector,
+    sandbox: &SharedTracingInspector,
+    channel: Channel,
+) -> ResultAndState<MegaHaltReason> {
+    let mut context = MegaContext::new(db, spec);
+    context.modify_chain(|chain| {
+        chain.operator_fee_scalar = Some(U256::ZERO);
+        chain.operator_fee_constant = Some(U256::ZERO);
+    });
+    let mut evm = MegaEvm::new(context).with_inspector(outer);
+    match channel {
+        Channel::Observer => {
+            evm.set_keyless_sandbox_observer(Some(sandbox.as_sandbox_observer()));
+        }
+        Channel::Inspector => {
+            evm.set_keyless_sandbox_inspector(Some(sandbox.as_sandbox_observer()));
+        }
+    }
+    evm.inspect_tx(keyless_deploy_call_tx(tx_bytes, LARGE_GAS_LIMIT_OVERRIDE))
+        .expect("keyless deploy transact")
+}
+
+/// Runs a plain call to [`STOPPER`] with `outer` installed, so the arena holds a frame that is
+/// not a `KeylessDeploy` CALL.
+fn trace_plain_call(db: &mut MemoryDatabase, outer: SharedTracingInspector) {
+    db.set_account_code(STOPPER, Bytes::from_static(&[STOP]));
+    let mut context = MegaContext::new(db, MegaSpecId::REX5);
+    context.modify_chain(|chain| {
+        chain.operator_fee_scalar = Some(U256::ZERO);
+        chain.operator_fee_constant = Some(U256::ZERO);
+    });
+    let mut evm = MegaEvm::new(context).with_inspector(outer);
+    let tx = TxEnv {
+        caller: TEST_CALLER,
+        kind: TxKind::Call(STOPPER),
+        gas_limit: DEFAULT_OUTER_GAS_LIMIT,
+        gas_price: 0,
+        ..Default::default()
+    };
+    let mut tx = MegaTransaction::new(tx);
+    tx.enveloped_tx = Some(Bytes::new());
+    let result = evm.inspect_tx(tx).expect("plain call transact");
+    assert!(result.result.is_success(), "plain call must succeed: {:?}", result.result);
+}
+
+/// Traces the three-level `deep_mixed_init` deployment through `channel` and returns the outer
+/// tracer with the sandbox frames spliced in, plus the execution result and the deployer.
+fn traced_deep_mixed(
+    spec: MegaSpecId,
+    channel: Channel,
+) -> (SharedTracingInspector, SharedTracingInspector, ResultAndState<MegaHaltReason>, Address) {
+    let (tx_bytes, signer) = create_pre_eip155_deploy_tx(deep_mixed_init(REVERTER));
+    let mut db = funded_db(signer);
+    db.set_account_code(REVERTER, Bytes::from_static(&REVERTING_RUNTIME));
+    let outer = tracer();
+    let sandbox = tracer();
+    assert!(!sandbox_has_frames(&sandbox.borrow()), "{spec:?}: fresh sandbox tracer is empty");
+    let result = trace_keyless_deploy(spec, &mut db, tx_bytes, outer.clone(), &sandbox, channel);
+    assert!(result.result.is_success(), "{spec:?} {channel:?}: {:?}", result.result);
+    assert!(sandbox_has_frames(&sandbox.borrow()), "{spec:?}: sandbox recorded the CREATE");
+    splice_sandbox_traces(&mut outer.borrow_mut(), &sandbox.borrow());
+    (outer, sandbox, result, signer)
+}
+
+/// Checks that arena positions, parent links, child links, and depths agree for every node.
+///
+/// Steps are recorded at the journal depth of the frame that executes them, one level below
+/// the frame's own trace depth, and the splice preserves that relation for grafted frames.
+fn assert_arena_consistent(nodes: &[CallTraceNode], case: &str) {
+    for (idx, node) in nodes.iter().enumerate() {
+        assert_eq!(node.idx, idx, "{case}: node idx must match its arena position");
+        for step in &node.trace.steps {
+            assert_eq!(
+                step.depth,
+                node.trace.depth as u64 + 1,
+                "{case}: step {} of node {idx} must sit one level below its frame",
+                step.op
+            );
+        }
+        for &child in &node.children {
+            assert_eq!(nodes[child].parent, Some(idx), "{case}: child {child} parent link");
+            assert_eq!(
+                nodes[child].trace.depth,
+                node.trace.depth + 1,
+                "{case}: child {child} must sit one level below {idx}"
+            );
+        }
+        if let Some(parent) = node.parent {
+            assert!(
+                nodes[parent].children.contains(&idx),
+                "{case}: parent {parent} must list child {idx}"
+            );
+        }
+    }
+}
+
+/// Asserts the spliced shape of `deep_mixed_init`: CALL `KeylessDeploy` → CREATE parent →
+/// { CREATE child → { CREATE grandchild, reverted CALL }, reverted CALL }.
+fn assert_deep_mixed_shape(outer: &SharedTracingInspector, signer: Address, case: &str) {
+    let parent_addr = signer.create(0);
+    let child_addr = parent_addr.create(1);
+    let grandchild_addr = child_addr.create(1);
+
+    let outer_ref = outer.borrow();
+    let nodes = outer_ref.traces().nodes();
+    assert_arena_consistent(nodes, case);
+    assert_eq!(nodes.len(), 6, "{case}: outer CALL plus five sandbox frames");
+
+    let root = &nodes[0];
+    assert_eq!(
+        root.trace.address, KEYLESS_DEPLOY_ADDRESS,
+        "{case}: root is the KeylessDeploy CALL"
+    );
+    assert_eq!(root.trace.depth, 0, "{case}: root depth");
+    assert!(!root.trace.kind.is_any_create(), "{case}: root is a CALL");
+    assert_eq!(root.children.len(), 1, "{case}: the sandbox CREATE hangs under the root");
+    assert!(
+        root.trace.steps.iter().any(|step| step.op.get() == CREATE),
+        "{case}: the intercepted CALL carries a synthetic CREATE step"
+    );
+    assert!(
+        matches!(root.ordering.last(), Some(TraceMemberOrder::Call(0))),
+        "{case}: the grafted child is the last member of the root, got {:?}",
+        root.ordering.last()
+    );
+
+    let parent = &nodes[root.children[0]];
+    assert!(parent.trace.kind.is_any_create(), "{case}: sandbox root is a CREATE");
+    assert_eq!(
+        parent.trace.address, parent_addr,
+        "{case}: sandbox CREATE lands at signer.create(0)"
+    );
+    assert_eq!(parent.trace.depth, 1, "{case}: sandbox CREATE sits under the CALL");
+    assert!(parent.trace.success, "{case}: the deployment succeeds");
+    assert_eq!(parent.children.len(), 2, "{case}: parent CREATEs a child and CALLs the reverter");
+
+    let child = &nodes[parent.children[0]];
+    assert!(child.trace.kind.is_any_create(), "{case}: first parent child is the CREATE");
+    assert_eq!(child.trace.address, child_addr, "{case}: child address");
+    assert_eq!(
+        child.children.len(),
+        2,
+        "{case}: child CREATEs a grandchild and CALLs the reverter"
+    );
+
+    let grandchild = &nodes[child.children[0]];
+    assert!(grandchild.trace.kind.is_any_create(), "{case}: grandchild is a CREATE");
+    assert_eq!(grandchild.trace.address, grandchild_addr, "{case}: grandchild address");
+    assert_eq!(grandchild.trace.depth, 3, "{case}: grandchild depth");
+    assert!(grandchild.children.is_empty(), "{case}: grandchild is a leaf");
+
+    for (label, idx) in [("child", child.children[1]), ("parent", parent.children[1])] {
+        let call = &nodes[idx];
+        assert!(!call.trace.kind.is_any_create(), "{case}: {label}'s reverter frame is a CALL");
+        assert_eq!(call.trace.address, REVERTER, "{case}: {label} calls the reverter");
+        assert!(!call.trace.success, "{case}: {label}'s reverter call reverts");
+        assert!(call.children.is_empty(), "{case}: reverter frame is a leaf");
+    }
+}
+
+#[test]
+fn test_observer_channel_tracer_splices_deep_mixed_shape() {
+    for spec in SPECS {
+        let (outer, _sandbox, _result, signer) = traced_deep_mixed(spec, Channel::Observer);
+        assert_deep_mixed_shape(&outer, signer, &format!("observer {spec:?}"));
+    }
+}
+
+#[test]
+fn test_inspector_channel_tracer_splices_same_shape_and_result() {
+    for spec in SPECS {
+        let (obs_outer, _, obs_result, signer) = traced_deep_mixed(spec, Channel::Observer);
+        let (insp_outer, _, insp_result, insp_signer) = traced_deep_mixed(spec, Channel::Inspector);
+        assert_eq!(signer, insp_signer);
+        assert_deep_mixed_shape(&insp_outer, signer, &format!("inspector {spec:?}"));
+        assert_result_and_state_eq(&insp_result, &obs_result, &format!("inspector {spec:?}"));
+
+        let obs_ref = obs_outer.borrow();
+        let insp_ref = insp_outer.borrow();
+        let shape = |nodes: &[CallTraceNode]| -> Vec<(usize, bool, Address, Option<usize>)> {
+            nodes
+                .iter()
+                .map(|n| (n.trace.depth, n.trace.kind.is_any_create(), n.trace.address, n.parent))
+                .collect()
+        };
+        assert_eq!(
+            shape(obs_ref.traces().nodes()),
+            shape(insp_ref.traces().nodes()),
+            "{spec:?}: both channels graft the same tree"
+        );
+    }
+}
+
+#[test]
+fn test_fuse_resets_both_tracers() {
+    let (outer, sandbox, _result, _signer) = traced_deep_mixed(MegaSpecId::REX5, Channel::Observer);
+    assert!(sandbox_has_frames(&outer.borrow()));
+    assert!(sandbox_has_frames(&sandbox.borrow()));
+
+    sandbox.fuse();
+    outer.fuse();
+    assert!(!sandbox_has_frames(&sandbox.borrow()), "fused sandbox tracer is empty");
+    assert!(!sandbox_has_frames(&outer.borrow()), "fused outer tracer is empty");
+    assert_eq!(outer.borrow().traces().nodes().len(), 1, "a fused arena keeps its default root");
+}
+
+/// Splicing into an outer tracer that recorded no frames, or one whose frames contain no
+/// `KeylessDeploy` CALL, leaves the outer arena untouched even though the sandbox holds frames.
+#[test]
+fn test_splice_without_keyless_call_in_outer_is_a_no_op() {
+    let (_outer, sandbox, _result, _signer) =
+        traced_deep_mixed(MegaSpecId::REX5, Channel::Observer);
+    assert!(sandbox_has_frames(&sandbox.borrow()));
+
+    let mut empty = TracingInspector::new(TracingInspectorConfig::all());
+    splice_sandbox_traces(&mut empty, &sandbox.borrow());
+    assert!(!sandbox_has_frames(&empty), "nothing is grafted under the default root");
+    assert_eq!(empty.traces().nodes().len(), 1);
+
+    let plain = tracer();
+    let mut db = MemoryDatabase::default();
+    trace_plain_call(&mut db, plain.clone());
+    assert!(sandbox_has_frames(&plain.borrow()), "the plain call recorded a frame");
+    let before = plain.borrow().traces().nodes().len();
+    splice_sandbox_traces(&mut plain.borrow_mut(), &sandbox.borrow());
+    let plain_ref = plain.borrow();
+    let nodes = plain_ref.traces().nodes();
+    assert_eq!(nodes.len(), before, "no sandbox frame is appended to an unrelated trace");
+    assert_eq!(nodes[0].trace.address, STOPPER);
+    assert!(nodes[0].children.is_empty(), "the unrelated frame gains no child");
+    assert!(
+        nodes[0].trace.steps.iter().all(|step| step.op.get() != CREATE),
+        "no synthetic CREATE step is added to an unrelated frame"
+    );
+}
+
+/// A parity-style tracer records no steps, so a leaf sandbox CREATE is a node with a status
+/// but neither steps nor children. It still counts as a frame, is grafted, and the parent
+/// receives the synthetic CREATE step that struct-log rendering needs.
+#[test]
+fn test_tracer_without_steps_still_splices_a_leaf_create() {
+    let (tx_bytes, signer) = create_pre_eip155_deploy_tx(success_constructor());
+    let mut db = funded_db(signer);
+    let outer = SharedTracingInspector::new(TracingInspector::new(
+        TracingInspectorConfig::default_parity(),
+    ));
+    let sandbox = SharedTracingInspector::new(TracingInspector::new(
+        TracingInspectorConfig::default_parity(),
+    ));
+    let result = trace_keyless_deploy(
+        MegaSpecId::REX5,
+        &mut db,
+        tx_bytes,
+        outer.clone(),
+        &sandbox,
+        Channel::Observer,
+    );
+    assert!(result.result.is_success(), "{:?}", result.result);
+    {
+        let sandbox_ref = sandbox.borrow();
+        let create = &sandbox_ref.traces().nodes()[0];
+        assert!(create.trace.kind.is_any_create());
+        assert!(create.trace.status.is_some(), "the CREATE frame completed");
+        assert!(create.trace.steps.is_empty(), "parity config records no steps");
+        assert!(create.children.is_empty(), "success_constructor makes no calls");
+    }
+    assert!(sandbox_has_frames(&sandbox.borrow()), "a completed leaf frame counts");
+    assert!(sandbox_has_frames(&outer.borrow()));
+
+    splice_sandbox_traces(&mut outer.borrow_mut(), &sandbox.borrow());
+    let outer_ref = outer.borrow();
+    let nodes = outer_ref.traces().nodes();
+    assert_arena_consistent(nodes, "parity");
+    assert_eq!(nodes.len(), 2);
+    assert_eq!(nodes[0].children, vec![1]);
+    assert_eq!(nodes[1].trace.address, signer.create(0));
+    assert_eq!(nodes[0].trace.steps.len(), 1, "exactly the synthetic CREATE step");
+    assert_eq!(nodes[0].trace.steps[0].op.get(), CREATE);
+    assert_eq!(nodes[0].trace.steps[0].contract, KEYLESS_DEPLOY_ADDRESS);
+    assert_eq!(
+        nodes[0].ordering,
+        vec![TraceMemberOrder::Step(0), TraceMemberOrder::Call(0)],
+        "the step precedes the child it introduces"
+    );
+}
+
+/// The synthetic CREATE step exists to pair one call-like step with each child. A parent that
+/// already carries a call-like step per child gets no extra step.
+#[test]
+fn test_splice_adds_no_create_step_when_the_parent_has_a_call_like_step_per_child() {
+    let (tx_bytes, signer) = create_pre_eip155_deploy_tx(success_constructor());
+    let mut db = funded_db(signer);
+    let outer = tracer();
+    let sandbox = tracer();
+    let result = trace_keyless_deploy(
+        MegaSpecId::REX5,
+        &mut db,
+        tx_bytes,
+        outer.clone(),
+        &sandbox,
+        Channel::Observer,
+    );
+    assert!(result.result.is_success(), "{:?}", result.result);
+
+    // Give the intercepted CALL one call-like step of its own before grafting.
+    let mut call_step = sandbox.borrow().traces().nodes()[0].trace.steps[0].clone();
+    call_step.op = OpCode::new(CALL).expect("CALL is a defined opcode");
+    call_step.depth = 1;
+    {
+        let mut outer_mut = outer.borrow_mut();
+        let root = &mut outer_mut.traces_mut().nodes_mut()[0];
+        assert!(root.trace.steps.is_empty(), "an intercepted CALL records no steps");
+        root.trace.steps.push(call_step);
+        root.ordering.push(TraceMemberOrder::Step(0));
+    }
+
+    splice_sandbox_traces(&mut outer.borrow_mut(), &sandbox.borrow());
+    let outer_ref = outer.borrow();
+    let nodes = outer_ref.traces().nodes();
+    assert_arena_consistent(nodes, "paired");
+    assert_eq!(nodes[0].children, vec![1], "the sandbox CREATE is still grafted");
+    assert_eq!(nodes[0].trace.steps.len(), 1, "no synthetic CREATE step is added");
+    assert_eq!(nodes[0].trace.steps[0].op.get(), CALL);
+    assert_eq!(nodes[0].ordering, vec![TraceMemberOrder::Step(0), TraceMemberOrder::Call(0)]);
+}
+
+/// A `SELFDESTRUCT` inside the sandbox reaches the sandbox tracer's `selfdestruct` hook
+/// through both channels, as it does on a top-level EVM.
+#[test]
+fn test_sandbox_selfdestruct_reaches_the_tracer() {
+    for channel in [Channel::Observer, Channel::Inspector] {
+        let (tx_bytes, signer) = create_pre_eip155_deploy_tx(selfdestructing_constructor());
+        let mut db = funded_db(signer);
+        let outer = tracer();
+        let sandbox = tracer();
+        let result = trace_keyless_deploy(
+            MegaSpecId::REX5,
+            &mut db,
+            tx_bytes,
+            outer.clone(),
+            &sandbox,
+            channel,
+        );
+        assert!(result.result.is_success(), "{channel:?}: {:?}", result.result);
+
+        let sandbox_ref = sandbox.borrow();
+        let create = sandbox_ref
+            .traces()
+            .nodes()
+            .iter()
+            .find(|node| node.trace.kind.is_any_create())
+            .unwrap_or_else(|| panic!("{channel:?}: sandbox recorded the CREATE frame"));
+        assert_eq!(
+            create.trace.selfdestruct_address,
+            Some(signer.create(0)),
+            "{channel:?}: the tracer saw the constructor self-destruct"
+        );
+        assert_eq!(
+            create.trace.selfdestruct_refund_target,
+            Some(Address::ZERO),
+            "{channel:?}: beneficiary as pushed by the constructor"
+        );
+    }
+}
+
+fn keyless_deploy_envelope(nonce: u64, tx_bytes: Bytes) -> Recovered<MegaTxEnvelope> {
+    let call_data = IKeylessDeploy::keylessDeployCall {
+        keylessDeploymentTransaction: tx_bytes,
+        gasLimitOverride: U256::from(LARGE_GAS_LIMIT_OVERRIDE),
+    }
+    .abi_encode();
+    let tx = TxLegacy {
+        chain_id: Some(1),
+        nonce,
+        gas_price: 0,
+        gas_limit: DEFAULT_OUTER_GAS_LIMIT,
+        to: TxKind::Call(KEYLESS_DEPLOY_ADDRESS),
+        value: U256::ZERO,
+        input: call_data.into(),
+    };
+    let signed = Signed::new_unchecked(tx, Signature::test_signature(), B256::ZERO);
+    Recovered::new_unchecked(MegaTxEnvelope::Legacy(signed), TEST_CALLER)
+}
+
+/// The `MegaBlockExecutor` forwarders: attach through the inspector channel, detach, then
+/// attach through the observer channel, one keyless deployment per step of a single block.
+#[test]
+fn test_block_executor_forwards_sandbox_hooks() {
+    let (tx_a, signer_a) = create_pre_eip155_deploy_tx(success_constructor());
+    let (tx_b, signer_b) = create_pre_eip155_deploy_tx(empty_code_constructor());
+    let (tx_c, signer_c) = create_pre_eip155_deploy_tx(constructor_calls_reverter());
+    assert_ne!(signer_a, signer_b);
+    assert_ne!(signer_b, signer_c);
+
+    let mut db = MemoryDatabase::default();
+    for signer in [signer_a, signer_b, signer_c] {
+        db.set_account_balance(signer, U256::from(LARGE_SIGNER_BALANCE));
+    }
+    db.set_account_code(REVERTER, Bytes::from_static(&REVERTING_RUNTIME));
+    let mut state = State::builder().with_database(&mut db).build();
+
+    let evm_factory =
+        MegaEvmFactory::new().with_external_env_factory(TestExternalEnvs::<Infallible>::new());
+    let hardforks = MegaHardforkConfig::default().with_all_activated();
+    let factory =
+        MegaBlockExecutorFactory::new(&hardforks, evm_factory, OpAlloyReceiptBuilder::default());
+
+    let mut cfg_env = CfgEnv::default();
+    cfg_env.spec = MegaSpecId::REX5;
+    let block_env = BlockEnv { gas_limit: 4 * DEFAULT_OUTER_GAS_LIMIT, ..Default::default() };
+    let evm_env = EvmEnv::new(cfg_env, block_env);
+    let block_ctx =
+        MegaBlockExecutionCtx::new(B256::ZERO, None, Bytes::new(), BlockLimits::no_limits());
+
+    let outer = tracer();
+    let sandbox = tracer();
+    let mut executor =
+        factory.create_executor_with_inspector(&mut state, block_ctx, evm_env, outer.clone());
+    // `apply_pre_execution_changes` needs a configured SequencerRegistry on REX5+, and
+    // KeylessDeploy interception does not depend on the predeploy bytecode.
+    executor.evm.ctx.modify_chain(|chain| {
+        chain.operator_fee_scalar = Some(U256::ZERO);
+        chain.operator_fee_constant = Some(U256::ZERO);
+    });
+
+    // Inspector channel: the sandbox CREATE is recorded and grafted under the CALL.
+    executor.set_keyless_sandbox_inspector(Some(sandbox.as_sandbox_observer()));
+    outer.fuse();
+    executor
+        .execute_transaction_with_result_closure(&keyless_deploy_envelope(0, tx_a), |result| {
+            assert!(result.is_success(), "tx A: {result:?}");
+        })
+        .expect("tx A executes");
+    assert!(sandbox_has_frames(&sandbox.borrow()), "tx A: sandbox recorded the CREATE");
+    splice_sandbox_traces(&mut outer.borrow_mut(), &sandbox.borrow());
+    {
+        let outer_ref = outer.borrow();
+        let nodes = outer_ref.traces().nodes();
+        assert_arena_consistent(nodes, "tx A");
+        assert_eq!(nodes[0].trace.address, KEYLESS_DEPLOY_ADDRESS);
+        assert_eq!(nodes[0].children.len(), 1, "tx A: one grafted CREATE");
+        let create = &nodes[nodes[0].children[0]];
+        assert!(create.trace.kind.is_any_create());
+        assert_eq!(create.trace.address, signer_a.create(0));
+        assert!(create.trace.success);
+    }
+    sandbox.fuse();
+
+    // Detached: the sandbox still runs, nothing is recorded, and the splice is a no-op.
+    executor.clear_keyless_sandbox_hook();
+    outer.fuse();
+    executor
+        .execute_transaction_with_result_closure(&keyless_deploy_envelope(1, tx_b), |result| {
+            assert!(result.is_success(), "tx B: {result:?}");
+        })
+        .expect("tx B executes");
+    assert!(!sandbox_has_frames(&sandbox.borrow()), "tx B: no hook, nothing recorded");
+    splice_sandbox_traces(&mut outer.borrow_mut(), &sandbox.borrow());
+    {
+        let outer_ref = outer.borrow();
+        let nodes = outer_ref.traces().nodes();
+        assert_eq!(nodes[0].trace.address, KEYLESS_DEPLOY_ADDRESS);
+        assert!(nodes[0].children.is_empty(), "tx B: nothing grafted");
+    }
+
+    // Observer channel: frames come back, including the constructor's reverted CALL.
+    executor.set_keyless_sandbox_observer(Some(sandbox.as_sandbox_observer()));
+    outer.fuse();
+    executor
+        .execute_transaction_with_result_closure(&keyless_deploy_envelope(2, tx_c), |result| {
+            assert!(result.is_success(), "tx C: {result:?}");
+        })
+        .expect("tx C executes");
+    assert!(sandbox_has_frames(&sandbox.borrow()), "tx C: sandbox recorded the CREATE");
+    splice_sandbox_traces(&mut outer.borrow_mut(), &sandbox.borrow());
+    {
+        let outer_ref = outer.borrow();
+        let nodes = outer_ref.traces().nodes();
+        assert_arena_consistent(nodes, "tx C");
+        assert_eq!(nodes[0].children.len(), 1, "tx C: one grafted CREATE");
+        let create = &nodes[nodes[0].children[0]];
+        assert_eq!(create.trace.address, signer_c.create(0));
+        assert_eq!(create.children.len(), 1, "tx C: the constructor's CALL");
+        let call = &nodes[create.children[0]];
+        assert_eq!(call.trace.address, REVERTER);
+        assert!(!call.trace.success, "tx C: the reverter call reverts");
+        assert_eq!(call.trace.depth, 2);
+    }
+}

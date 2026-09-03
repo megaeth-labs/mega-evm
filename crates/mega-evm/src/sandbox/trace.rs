@@ -141,22 +141,21 @@ fn has_frames(inspector: &TracingInspector) -> bool {
 /// a CREATE step is grafted onto the parent; without it the sandbox constructor steps would
 /// be omitted from struct-log output instead of nested in execution order.
 ///
-/// An `outer` that recorded no frames at all (already fused, or never run) is also left
-/// untouched: its arena holds only the default root node, and grafting the sandbox under
-/// that phantom root would invent a call tree the outer EVM never executed.
+/// An `outer` without a `KeylessDeploy` CALL frame is also left untouched. That covers an
+/// arena that recorded no frames at all (already fused, or never run) and one that traced a
+/// transaction which never entered the sandbox while `sandbox` still holds frames from an
+/// earlier transaction; grafting under the default root or under an unrelated frame would
+/// invent a call tree the outer EVM never executed.
 pub fn splice_sandbox_traces(outer: &mut TracingInspector, sandbox: &TracingInspector) {
     if !has_frames(sandbox) || !has_frames(outer) {
         return;
     }
 
-    let parent_idx = outer
-        .traces()
-        .nodes()
-        .iter()
-        .rposition(|node| {
-            node.trace.address == KEYLESS_DEPLOY_ADDRESS && !node.trace.kind.is_any_create()
-        })
-        .unwrap_or(0);
+    let Some(parent_idx) = outer.traces().nodes().iter().rposition(|node| {
+        node.trace.address == KEYLESS_DEPLOY_ADDRESS && !node.trace.kind.is_any_create()
+    }) else {
+        return;
+    };
     let depth_offset = outer.traces().nodes()[parent_idx].trace.depth + 1;
     let base = outer.traces().nodes().len();
 
