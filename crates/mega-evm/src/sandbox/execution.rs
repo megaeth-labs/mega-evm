@@ -451,24 +451,22 @@ pub fn execute_keyless_deploy_call<DB: AlloyDatabase, ExtEnvs: ExternalEnvTypes>
     // Lifecycle events go to the slot that also receives this sandbox's opcode-level
     // hooks, so a hook with one impl per env sees the whole sandbox on one impl.
     let lifecycle = LifecycleHook::select(ctx);
-    if lifecycle.is_attached() {
-        lifecycle.start(&SandboxStartInfo {
-            spec: ctx.spec,
-            signer: deploy_signer,
-            deploy_address,
-            gas_limit_override: gas_limit_override_u64,
-            effective_gas_limit,
-            tx_gas_limit,
-            outer_call: OuterCallInfo {
-                depth,
-                caller: call_inputs.caller,
-                gas_limit: call_inputs.gas_limit,
-                gas_remaining: outer_gas_remaining,
-                value: call_inputs.call_value(),
-                input: call_inputs.input.bytes(ctx),
-            },
-        });
-    }
+    lifecycle.start(|| SandboxStartInfo {
+        spec: ctx.spec,
+        signer: deploy_signer,
+        deploy_address,
+        gas_limit_override: gas_limit_override_u64,
+        effective_gas_limit,
+        tx_gas_limit,
+        outer_call: OuterCallInfo {
+            depth,
+            caller: call_inputs.caller,
+            gas_limit: call_inputs.gas_limit,
+            gas_remaining: outer_gas_remaining,
+            value: call_inputs.call_value(),
+            input: call_inputs.input.bytes(ctx),
+        },
+    });
 
     match execute_keyless_deploy_sandbox(ctx, sandbox_tx, sandbox_tx_limits) {
         SandboxOutcome::Completed { state, completion, limit_usage, volatile_accesses } => {
@@ -795,17 +793,12 @@ impl<ExtEnvs: ExternalEnvTypes> LifecycleHook<ExtEnvs> {
         }
     }
 
-    fn is_attached(&self) -> bool {
+    /// Delivers `sandbox_start` when a hook is attached; `info` is only built then, so the
+    /// no-hook path never materializes the intercepted call's calldata.
+    fn start(&self, info: impl FnOnce() -> SandboxStartInfo) {
         match self {
-            Self::Parent(hook) => hook.is_some(),
-            Self::Empty(hook) => hook.is_some(),
-        }
-    }
-
-    fn start(&self, info: &SandboxStartInfo) {
-        match self {
-            Self::Parent(Some(hook)) => hook.borrow_mut().sandbox_start(info),
-            Self::Empty(Some(hook)) => hook.borrow_mut().sandbox_start(info),
+            Self::Parent(Some(hook)) => hook.borrow_mut().sandbox_start(&info()),
+            Self::Empty(Some(hook)) => hook.borrow_mut().sandbox_start(&info()),
             Self::Parent(None) | Self::Empty(None) => {}
         }
     }

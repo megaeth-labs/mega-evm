@@ -36,7 +36,7 @@ use revm::{
     interpreter::InstructionResult,
 };
 use revm_inspectors::tracing::{
-    types::{CallTraceNode, TraceMemberOrder},
+    types::{CallKind, CallTraceNode, TraceMemberOrder},
     TracingInspector, TracingInspectorConfig,
 };
 
@@ -375,6 +375,55 @@ fn test_splice_without_the_outer_frame_drops_the_sandbox() {
     assert_eq!(sandbox.borrow().pending(), 0);
     assert_eq!(empty.traces().nodes().len(), 1, "the arena keeps only its default root");
     assert!(empty.traces().nodes()[0].children.is_empty());
+}
+
+/// `clear` discards recorded sandbox executions, so a later splice grafts nothing.
+#[test]
+fn test_clear_discards_recorded_sandboxes() {
+    let (tx_bytes, signer) = create_pre_eip155_deploy_tx(success_constructor());
+    let mut db = funded_db(signer);
+    let (outer, sandbox) = paired(all_config());
+    trace_keyless_deploy(MegaSpecId::REX5, &mut db, tx_bytes, outer.clone(), &sandbox);
+    assert_eq!(sandbox.borrow().pending(), 1);
+
+    sandbox.borrow_mut().clear();
+    assert_eq!(sandbox.borrow().pending(), 0, "clear drops the recording");
+    splice_sandbox_traces(&mut outer.borrow_mut(), &mut sandbox.borrow_mut());
+    let outer_ref = outer.borrow();
+    let nodes = outer_ref.traces().nodes();
+    assert_eq!(nodes.len(), 1, "nothing left to graft");
+    assert!(nodes[0].children.is_empty());
+}
+
+/// The outer frame a sandbox is grafted under must match the intercepted call on every
+/// field the outer inspector recorded for it; a frame that differs in any one of them is not
+/// that call, and the sandbox is dropped rather than misplaced.
+#[test]
+fn test_outer_frame_pairing_requires_every_field() {
+    type Mutation = fn(&mut CallTraceNode);
+    let mutations: [(&str, Mutation); 7] = [
+        ("address", |node| node.trace.address = STOPPER),
+        ("kind", |node| node.trace.kind = CallKind::Create),
+        ("depth", |node| node.trace.depth += 1),
+        ("caller", |node| node.trace.caller = STOPPER),
+        ("gas_limit", |node| node.trace.gas_limit += 1),
+        ("value", |node| node.trace.value = U256::from(1)),
+        ("data", |node| node.trace.data = Bytes::from_static(&[0xff])),
+    ];
+    for (field, mutate) in mutations {
+        let (tx_bytes, signer) = create_pre_eip155_deploy_tx(success_constructor());
+        let mut db = funded_db(signer);
+        let (outer, sandbox) = paired(all_config());
+        trace_keyless_deploy(MegaSpecId::REX5, &mut db, tx_bytes, outer.clone(), &sandbox);
+        mutate(&mut outer.borrow_mut().traces_mut().nodes_mut()[0]);
+
+        splice_sandbox_traces(&mut outer.borrow_mut(), &mut sandbox.borrow_mut());
+        assert_eq!(sandbox.borrow().pending(), 0, "{field}: the sandbox is consumed");
+        let outer_ref = outer.borrow();
+        let nodes = outer_ref.traces().nodes();
+        assert_eq!(nodes.len(), 1, "{field}: a frame differing in {field} is not the call");
+        assert!(nodes[0].children.is_empty(), "{field}: nothing grafted");
+    }
 }
 
 /// A database error inside a nested sandbox frame aborts the sandbox before the root CREATE
