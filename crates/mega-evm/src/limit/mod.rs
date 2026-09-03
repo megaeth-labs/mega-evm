@@ -1,17 +1,24 @@
 use alloy_primitives::Bytes;
 use alloy_sol_types::SolError;
 
+mod checkpoint;
 mod compute_gas;
+mod conservation;
 mod data_size;
+mod destroyed;
 mod frame_limit;
+mod inspector_ledger;
 mod kv_update;
 #[allow(clippy::module_inception)]
 mod limit;
 mod state_growth;
 mod storage_call_stipend;
 
+pub use conservation::*;
 pub use data_size::*;
-pub(crate) use frame_limit::{FrameLimitTracker, TxRuntimeLimit};
+pub use destroyed::*;
+pub(crate) use frame_limit::{FrameLimitTracker, LimitReading, TxRuntimeLimit};
+pub use inspector_ledger::*;
 pub use limit::*;
 
 use crate::MegaHaltReason;
@@ -65,7 +72,7 @@ impl LimitKind {
 /// see [`crate::is_system_originated`]). The `Exempt` state is **sticky**: once `AdditionalLimit`
 /// stores it in `has_exceeded_limit`, `check_limit` short-circuits and the sub-tracker checks
 /// are skipped, so no later overflow can overwrite it.
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum LimitCheck {
     /// All limits are within their configured thresholds.
     #[default]

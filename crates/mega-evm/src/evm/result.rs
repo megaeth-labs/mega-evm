@@ -29,9 +29,120 @@ pub struct MegaTransactionOutcome {
     /// The number of KV updates.
     pub kv_updates: u64,
     /// The compute gas used.
+    ///
+    /// This is the transaction's full reported total, which under Rex7+ also carries whatever an
+    /// exceptionally halted frame destroyed rather than performed. It is the number to report and
+    /// to accumulate into block-level compute accounting; it is not the number to compare against
+    /// a limit — see [`compute_gas_destroyed`](Self::compute_gas_destroyed).
+    ///
+    /// These two fields are the uninspected execution's split, and an observation-only inspector
+    /// leaves them exactly there. An inspector's edits to interpreter gas counters and to frame
+    /// gas limits are measured at the callback boundary and kept out of the split, and an edit to
+    /// a returning frame's result is booked at that frame's settlement — all three are reported on
+    /// [`inspector_ledger`](Self::inspector_ledger), which is how a consumer tells an execution
+    /// the EVM produced alone from one an inspector took part in.
     pub compute_gas_used: u64,
+    /// The part of [`compute_gas_used`](Self::compute_gas_used) the transaction destroyed rather
+    /// than performed (Rex7+, always 0 before).
+    ///
+    /// Derived from what the transaction spent, not summed from the sites that destroyed it: gas
+    /// the transaction burnt is either work the trackers recorded, `MegaETH` storage gas, or a
+    /// budget something threw away without executing anything for it, and this field is the last
+    /// of the three read off as the remainder.
+    ///
+    /// The derivation runs once, where the transaction's gas envelope is final. A transaction that
+    /// never reaches that point reports zero: a validation reject, which produces no receipt and
+    /// has no envelope to split, and the pre-execution intrinsic overrun, which is a validation
+    /// reject on every spec that has this lane — see `MegaHandler::before_execution`, whose
+    /// short-circuit books the split for a future spec that could reach it but is not itself a
+    /// settlement point.
+    ///
+    /// This is a reported number and nothing else. Destroyed gas is not work the network did, so
+    /// no resource limit is evaluated against it at any level — a consumer that accumulates this
+    /// outcome into a further limit reads
+    /// [`compute_gas_enforced`](Self::compute_gas_enforced), which comes off the enforcement lane
+    /// itself rather than out of this subtraction.
+    ///
+    /// Same inspector caveat as [`compute_gas_used`](Self::compute_gas_used): the field is the
+    /// uninspected split unless [`inspector_ledger`](Self::inspector_ledger) says otherwise.
+    pub compute_gas_destroyed: u64,
+    /// The part of [`compute_gas_used`](Self::compute_gas_used) every compute-gas limit is
+    /// evaluated against: the work the transaction performed, with Rex7+ destroyed remainders left
+    /// out (equal to `compute_gas_used` before Rex7, which destroys nothing).
+    ///
+    /// Read straight off the lane the transaction enforced its own compute limit on, built from
+    /// the per-opcode and checkpoint recordings — deliberately *not* reconstructed as
+    /// `compute_gas_used - compute_gas_destroyed`. The two are equal, and a cross-check in debug
+    /// builds fails loudly if they ever stop being, but they are equal by agreement of two
+    /// independent measurements rather than by construction. Every further limit this outcome
+    /// feeds — today the block compute-gas counter — is enforcement, and enforcement stays on the
+    /// measurement it was always on.
+    pub compute_gas_enforced: u64,
     /// The state growth used.
     pub state_growth_used: u64,
+    /// What an inspector did to this transaction, measured rather than inferred.
+    ///
+    /// `MegaETH` wraps every inspector it is handed in a measurement shim. The EVM does not
+    /// execute inside an inspector callback, so anything that changes across one is the
+    /// inspector's doing by construction, and this is what the shim booked: gas written into a
+    /// live interpreter's counter ([`gas`](crate::InspectorLedger::gas)), into the envelope a
+    /// frame is about to be built with ([`env`](crate::InspectorLedger::env)), into a
+    /// returning frame's result ([`result`](crate::InspectorLedger::result)), how many
+    /// rewrites the shim refused
+    /// outright ([`rejected_rewrites`](crate::InspectorLedger::rejected_rewrites)), and how many
+    /// rewrote what the execution *did* without moving any gas at all
+    /// ([`interventions`](crate::InspectorLedger::interventions)).
+    ///
+    /// # Sign convention
+    ///
+    /// Every gas lane is signed and reads from the transaction's point of view: **positive is gas
+    /// conjured** — gas that exists in the execution but that nothing debited from the
+    /// transaction's envelope — and **negative is gas destroyed** — gas the envelope funded that
+    /// the execution never got the benefit of. The lanes are net, so an injection and a matching
+    /// removal cancel.
+    ///
+    /// # When it is zero
+    ///
+    /// [`InspectorLedger::is_zero`](crate::InspectorLedger::is_zero) holds for every transaction
+    /// that ran without an inspector and for every observation-only inspector — which is every
+    /// tracer. A non-zero ledger means this outcome's gas numbers describe an execution an
+    /// inspector took part in, and the block-execution path refuses to admit one into a block for
+    /// exactly that reason.
+    ///
+    /// The converse does not hold, and reading it that way is the mistake this field invites. What
+    /// is measured is what the shim can see at a callback boundary: gas that moved, and arguments
+    /// that came back changed. An inspector that reaches past those — editing the interpreter's
+    /// stack or memory, writing the journal directly, or editing the pending action — leaves this
+    /// empty while changing the state the transaction produces. That is why block admission rests
+    /// on [`undeclared_inspector`](Self::undeclared_inspector) and this field is only the backstop
+    /// behind it.
+    ///
+    /// # What it is for
+    ///
+    /// Reporting, and that refusal. No resource limit is ever evaluated against it, and no
+    /// adjustment recorded here is ever counted as work: the interpreter-counter lane shifts the
+    /// compute measurement's baseline as it books, so the edit settles outside the measured span
+    /// and the gas clamp is re-derived on the spot, while the other two lanes move a gas budget
+    /// rather than a recording and so never enter the measurement at all. It is also the `I` term
+    /// of the conservation law — see [`ConservationTerms`](crate::ConservationTerms) — which is
+    /// why an outcome carrying gas numbers is not fully described without it.
+    pub inspector_ledger: crate::InspectorLedger,
+
+    /// Whether an inspector whose type carries no
+    /// [`TrustedObserver`](crate::TrustedObserver) declaration took part in this transaction.
+    ///
+    /// This is the canonical block path's admission criterion, and it is deliberately *not*
+    /// [`inspector_ledger`](Self::inspector_ledger). The ledger reports what the measurement shim
+    /// could see; an inspector that reaches past a callback boundary — editing the interpreter's
+    /// stack or memory contents, or writing the journal directly — changes the transaction while
+    /// leaving every lane at zero. So an execution is admitted into a block on the strength of a
+    /// declaration made in source about the inspector's type, and refused without one.
+    ///
+    /// False for a transaction that ran with no inspector at all, and for one whose inspector was
+    /// built through [`MegaEvm::with_trusted_inspector`](crate::MegaEvm::with_trusted_inspector).
+    /// True for every other inspected run, including one whose inspector only observes: the
+    /// question is what the type's author declared, not what this particular run happened to do.
+    pub undeclared_inspector: bool,
 }
 
 /// Identifies which stage of block execution produced a state change.
@@ -109,9 +220,18 @@ pub enum MegaHaltReason {
     },
     /// Compute gas limit exceeded
     ComputeGasLimitExceeded {
-        /// The configured compute gas limit
+        /// The configured compute gas limit that was exceeded.
+        ///
+        /// Relation to `actual` depends on the enforcement model:
+        /// - Per-opcode enforcement (through Rex6): the crossing opcode has already recorded its
+        ///   cost, so `actual > limit`.
+        /// - Gas-clamp enforcement (Rex7+): the crossing opcode is stopped before it executes and
+        ///   its cost is not recorded, so the *enforced* usage stays at or below `limit`. `actual`
+        ///   is the transaction's full reported total, which also carries the remainders of any
+        ///   frame that halted exceptionally earlier in the transaction — those are reported but
+        ///   never enforced, and they can push `actual` above `limit`.
         limit: u64,
-        /// The actual compute gas usage
+        /// The actual compute gas usage at the halt.
         actual: u64,
     },
     /// State growth limit exceeded
@@ -136,9 +256,18 @@ pub enum MegaHaltReason {
         access_type: VolatileDataAccess,
         /// The effective detained compute gas limit that was exceeded.
         /// In REX4+ this is `usage_at_access + cap` (relative); pre-REX4 it equals the raw cap
-        /// (absolute). Always satisfies `actual > limit`.
+        /// (absolute).
+        ///
+        /// Relation to `actual` depends on the enforcement model:
+        /// - Per-opcode enforcement (through Rex6): the crossing opcode has already recorded its
+        ///   cost, so `actual > limit`.
+        /// - Gas-clamp enforcement (Rex7+): the crossing opcode is stopped before it executes and
+        ///   its cost is not recorded, so the *enforced* usage stays at or below `limit`. `actual`
+        ///   is the transaction's full reported total, which also carries the remainders of any
+        ///   frame that halted exceptionally earlier in the transaction — those are reported but
+        ///   never enforced, and they can push `actual` above `limit`.
         limit: u64,
-        /// The actual compute gas usage
+        /// The actual compute gas usage at the halt.
         actual: u64,
     },
 }

@@ -32,6 +32,101 @@ pub(crate) struct CallFrameInfo {
     charged_parent_update: bool,
 }
 
+/// The two things a resource-limit check reads out of a [`FrameLimitTracker`]: the current frame's
+/// budget, when there is one, and the transaction's net usage.
+///
+/// Two readings exist at a frame return — the tracker as it stands, and the tracker as it will
+/// stand once the returning frame has been popped and merged into its caller. Each dimension's
+/// check body is written once against this trait and specialized over both, so the pre-merge
+/// question can be asked with no second copy of the predicates to drift from the first.
+///
+/// A trait rather than a value on purpose: the live reading is the per-opcode hot path, and
+/// materializing a struct for it — eagerly computing a net usage the body may not reach, and
+/// pushing the frame's budget through a reference — costs measurably more than reading the tracker
+/// where the body asks. Monomorphized, the live specialization is the code that was there before
+/// the pre-merge reading existed.
+pub(crate) trait LimitReading {
+    /// Whether the current frame has exceeded its frame-local budget, evaluated as if `extra` more
+    /// usage had already been recorded against it.
+    fn frame_check(&self, kind: LimitKind, extra: u64) -> LimitCheck;
+    /// `Σ(persistent + discardable) − Σ refund` across the TX entry and every frame on the stack.
+    fn net_usage(&self) -> u64;
+    /// Whether a frame is on the stack — the predicate the TX-level budget invariants assert on.
+    fn has_frame(&self) -> bool;
+}
+
+/// The reading a pending pop would produce, computed without popping.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct FrameLimitView {
+    /// The current frame's budget, or `None` when no frame is on the stack.
+    frame: Option<FrameBudget>,
+    /// `Σ(persistent + discardable) − Σ refund` across the TX entry and every frame on the stack.
+    net_usage: u64,
+}
+
+/// One frame's budget, as a limit check reads it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FrameBudget {
+    limit: u64,
+    used: u64,
+    refund: u64,
+}
+
+impl LimitReading for FrameLimitView {
+    #[inline]
+    fn frame_check(&self, kind: LimitKind, extra: u64) -> LimitCheck {
+        frame_budget_check(self.frame, kind, extra)
+    }
+
+    #[inline]
+    fn net_usage(&self) -> u64 {
+        self.net_usage
+    }
+
+    #[inline]
+    fn has_frame(&self) -> bool {
+        self.frame.is_some()
+    }
+}
+
+impl<I> LimitReading for FrameLimitTracker<I> {
+    #[inline]
+    fn frame_check(&self, kind: LimitKind, extra: u64) -> LimitCheck {
+        frame_budget_check(self.frame_budget(), kind, extra)
+    }
+
+    #[inline]
+    fn net_usage(&self) -> u64 {
+        Self::net_usage(self)
+    }
+
+    #[inline]
+    fn has_frame(&self) -> bool {
+        self.has_active_frame()
+    }
+}
+
+/// The one frame-local exceed predicate, shared by every reading of it.
+///
+/// A separate copy per call site — or per view — would be free to drift from the one enforcement
+/// actually uses, which is exactly what a pre-merge reading must not do.
+#[inline]
+fn frame_budget_check(budget: Option<FrameBudget>, kind: LimitKind, extra: u64) -> LimitCheck {
+    match budget {
+        Some(entry)
+            if entry.used.saturating_add(extra).saturating_sub(entry.refund) > entry.limit =>
+        {
+            LimitCheck::ExceedsLimit {
+                kind,
+                limit: entry.limit,
+                used: entry.used.saturating_add(extra),
+                frame_local: true,
+            }
+        }
+        _ => LimitCheck::WithinLimit,
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct FrameLimitTracker<I> {
     /// Top-level (TX-scope) entry. Holds the TX limit and accumulates usage
@@ -98,7 +193,7 @@ impl<I> FrameLimitEntry<I> {
     ///
     /// Computed as `limit - (used - refund)`, clamped to `[0, limit]`.
     /// The net usage (`used - refund`) is computed first to stay consistent with
-    /// the exceed check in `exceeds_current_frame_limit`.
+    /// the exceed check in `frame_budget_check`.
     #[inline]
     pub(crate) fn remaining(&self) -> u64 {
         self.limit.saturating_sub(self.used().saturating_sub(self.refund))
@@ -220,19 +315,59 @@ impl<I> FrameLimitTracker<I> {
         child
     }
 
-    /// Returns whether the current frame has exceeded its frame-local limit.
-    /// If exceeded, `frame_local` is always `true` since this checks per-frame budgets.
-    pub(crate) fn exceeds_current_frame_limit(&self, kind: LimitKind) -> LimitCheck {
-        match self.frame_stack.last() {
-            Some(entry) if entry.used().saturating_sub(entry.refund) > entry.limit => {
-                LimitCheck::ExceedsLimit {
-                    kind,
-                    limit: entry.limit,
-                    used: entry.used(),
-                    frame_local: true,
-                }
+    /// The current frame's budget, as a limit check reads it.
+    #[inline]
+    fn frame_budget(&self) -> Option<FrameBudget> {
+        self.frame_stack.last().map(|entry| FrameBudget {
+            limit: entry.limit,
+            used: entry.used(),
+            refund: entry.refund,
+        })
+    }
+
+    /// What the limit checks will read out of this tracker once the current frame has been popped
+    /// and merged into its caller — computed without popping it.
+    ///
+    /// This mirrors [`pop_frame`](Self::pop_frame) term for term, and is the *only* place that
+    /// mirrors it: the child's persistent usage always moves up, its discardable usage and refund
+    /// move up on success and vanish otherwise, and the cached totals lose exactly what vanished.
+    /// A frame return cross-checks the two against each other in debug builds.
+    pub(crate) fn view_after_pop(&self, success: bool) -> FrameLimitView {
+        let Some(child) = self.frame_stack.last() else {
+            // Nothing to pop: `pop_frame` on an empty stack changes nothing.
+            return FrameLimitView { frame: self.frame_budget(), net_usage: self.net_usage() };
+        };
+        let frame = self.frame_stack.len().checked_sub(2).map(|parent_index| {
+            let parent = &self.frame_stack[parent_index];
+            let persistent = parent.persistent_usage + child.persistent_usage;
+            let (discardable, refund) = if success {
+                (parent.discardable_usage + child.discardable_usage, parent.refund + child.refund)
+            } else {
+                (parent.discardable_usage, parent.refund)
+            };
+            FrameBudget {
+                limit: parent.limit,
+                used: persistent.checked_add(discardable).expect("overflow"),
+                refund,
             }
-            _ => LimitCheck::WithinLimit,
+        });
+        let net_usage = if success {
+            self.net_usage()
+        } else {
+            (self.cached_total_used - child.discardable_usage)
+                .saturating_sub(self.cached_total_refund - child.refund)
+        };
+        FrameLimitView { frame, net_usage }
+    }
+
+    /// Returns the budget of the current frame, in the same form
+    /// [`frame_budget_check`] reports it on an exceed.
+    ///
+    /// If the frame stack is empty (before the first frame is pushed), returns the TX-level limit.
+    pub(crate) fn current_frame_limit(&self) -> u64 {
+        match self.frame_stack.last() {
+            Some(entry) => entry.limit,
+            None => self.tx_entry.limit,
         }
     }
 
@@ -530,6 +665,88 @@ mod tests {
     use super::*;
 
     const ADDR: Address = address!("0000000000000000000000000000000000001234");
+
+    /// Every question a dimension's `check_limit` body can put to a reading.
+    ///
+    /// Comparing two readings through this rather than field for field is deliberate: it is what
+    /// the bodies consume, so a reading that agrees here cannot make a body decide differently.
+    fn everything_a_check_body_reads(reading: &impl LimitReading) -> (Vec<LimitCheck>, u64, bool) {
+        let kinds = [
+            LimitKind::DataSize,
+            LimitKind::KVUpdate,
+            LimitKind::ComputeGas,
+            LimitKind::StateGrowth,
+        ];
+        let checks = kinds
+            .into_iter()
+            .flat_map(|kind| [0u64, 1, 7].map(move |extra| (kind, extra)))
+            .map(|(kind, extra)| reading.frame_check(kind, extra))
+            .collect();
+        (checks, reading.net_usage(), reading.has_frame())
+    }
+
+    /// The pre-pop reading must be the post-pop reading, exactly.
+    ///
+    /// A frame return decides whether the returning frame overran its caller's budget from
+    /// [`FrameLimitTracker::view_after_pop`], one step before the pop that would produce that
+    /// reading naturally. The whole ordering rests on the two being the same numbers, so drive a
+    /// tracker into every shape the merge distinguishes — persistent-only, discardable, refunds,
+    /// a refund larger than the discardable usage it accompanies, and both depths at which the
+    /// merge target differs (a parent frame, and the TX entry) — and compare the predicted
+    /// reading against the one a real pop produces, field for field.
+    #[test]
+    fn test_view_after_pop_matches_the_view_a_real_pop_produces() {
+        // (label, child persistent, child discardable, child refund, extra frames beneath)
+        let shapes: [(&str, u64, u64, u64, usize); 6] = [
+            ("empty child", 0, 0, 0, 1),
+            ("persistent only", 30, 0, 0, 1),
+            ("discardable only", 0, 40, 0, 1),
+            ("mixed", 7, 40, 11, 1),
+            ("refund above discardable", 7, 5, 40, 1),
+            ("child of the tx entry", 7, 40, 11, 0),
+        ];
+
+        for (label, persistent, discardable, refund, parents) in shapes {
+            for success in [true, false] {
+                let mut tracker = FrameLimitTracker::<()>::new(MegaSpecId::REX7, 10_000);
+                tracker.add_tx_persistent(90);
+                for _ in 0..parents {
+                    tracker.push_frame(());
+                    // Give the parent a reading of its own on every lane, so a merge that
+                    // dropped a term would show up rather than cancel.
+                    tracker.add_frame_persistent(13);
+                    tracker.add_frame_discardable(21);
+                    tracker.add_frame_refund(5);
+                }
+                tracker.push_frame(());
+                tracker.add_frame_persistent(persistent);
+                tracker.add_frame_discardable(discardable);
+                tracker.add_frame_refund(refund);
+
+                let predicted = tracker.view_after_pop(success);
+                tracker.pop_frame(success);
+                assert_eq!(
+                    everything_a_check_body_reads(&predicted),
+                    everything_a_check_body_reads(&tracker),
+                    "{label} (success={success}): the pre-pop reading must equal the post-pop one",
+                );
+            }
+        }
+    }
+
+    /// The pre-pop reading of an empty stack is the reading itself: `pop_frame` on an empty stack
+    /// changes nothing, and the top-level frame return reaches this with the stack already popped.
+    #[test]
+    fn test_view_after_pop_on_an_empty_stack_is_the_current_view() {
+        let mut tracker = FrameLimitTracker::<()>::new(MegaSpecId::REX7, 10_000);
+        tracker.add_tx_persistent(90);
+        for success in [true, false] {
+            assert_eq!(
+                everything_a_check_body_reads(&tracker.view_after_pop(success)),
+                everything_a_check_body_reads(&tracker),
+            );
+        }
+    }
 
     /// `set_created_address` on an empty frame stack must be a no-op.
     #[test]

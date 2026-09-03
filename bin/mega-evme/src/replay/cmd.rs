@@ -470,10 +470,12 @@ impl Cmd {
         );
 
         let start = Instant::now();
-        let mut inspector = self.trace_args.create_inspector();
+        // The tracer reaches the canonical block path through its read-only declaration: the
+        // executor refuses a transaction from an EVM running an undeclared inspector.
+        let mut inspector = self.trace_args.create_trusted_inspector();
         let mut state =
             StateBuilder::new().with_database(&mut database).with_bundle_update().build();
-        let mut block_executor = block_executor_factory.create_executor_with_inspector(
+        let mut block_executor = block_executor_factory.create_executor_with_trusted_inspector(
             &mut state,
             block_ctx,
             evm_env,
@@ -520,7 +522,7 @@ impl Cmd {
             .map(|acc| acc.nonce)
             .unwrap_or(0);
 
-        block_executor.inspector_mut().fuse();
+        block_executor.inspector_mut().0.fuse();
         let outcome = block_executor
             .run_transaction(wrapped_tx)
             .map_err(|e| ReplayError::Other(format!("Block execution error: {e}")))?;
@@ -547,7 +549,7 @@ impl Cmd {
 
         let trace_data = self.trace_args.is_tracing_enabled().then(|| {
             self.trace_args.generate_trace(
-                block_executor.inspector(),
+                &block_executor.inspector().0,
                 &result_and_state,
                 block_executor.evm().db_ref(),
             )

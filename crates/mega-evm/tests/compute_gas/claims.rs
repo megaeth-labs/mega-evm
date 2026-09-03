@@ -27,8 +27,9 @@ use revm::{
 
 use crate::{
     base_db, push_call_operands, push_valueless_call_operands, transact, transact_output,
-    transact_with_access_list, transact_with_envs, transact_with_limits, Outcome, CALLEE, CALLER,
-    CONTRACT, EMPTY_TARGET, EXISTING_TARGET, ONE_ETH, PRECOMPILE_IDENTITY, PRECOMPILE_KZG,
+    transact_with_access_list, transact_with_envs, transact_with_limits,
+    transact_with_limits_outcome, Outcome, CALLEE, CALLER, CONTRACT, EMPTY_TARGET, EXISTING_TARGET,
+    ONE_ETH, PRECOMPILE_IDENTITY, PRECOMPILE_KZG,
 };
 
 /// `remainingComputeGas()` — the `MegaLimitControl` selector the interceptor recognizes.
@@ -256,12 +257,18 @@ fn test_refunds_do_not_reduce_compute_gas() {
 /// A direct transaction with empty calldata to the KZG precompile under a 30,000 tx compute
 /// limit: the intrinsic records 21,000, leaving 9,000 of transaction-level remainder. The
 /// forwarded cap is that remainder, which is below the precompile's 100,000 minimum cost, so the
-/// invocation fails and records exactly the 9,000 cap — total recorded compute gas is exactly
-/// the 30,000 limit. A cap that ignored the recorded intrinsic (forwarding 30,000) or one derived
-/// from an undefined frame budget would shift the total away from the limit.
+/// invocation fails without running verification.
+///
+/// Through Rex6 that failure records the 9,000 cap as enforcing usage, so the reported total is
+/// exactly the 30,000 limit. Rex7 still caps the work (verification does not run) but books the
+/// forwarded envelope — the caller-supplied envelope, not the capped remainder — as destroyed,
+/// so the reported total is the intrinsic plus that envelope and the enforced half stays at the
+/// intrinsic alone. A cap that ignored the recorded intrinsic (forwarding 30,000) or one derived
+/// from an undefined frame budget would still shift the enforced total away from these numbers.
 #[test]
 fn test_direct_precompile_transaction_cap_is_the_tx_level_remainder() {
     const TX_COMPUTE_LIMIT: u64 = 30_000;
+    const INTRINSIC_COMPUTE: u64 = 21_000;
 
     for (spec, spec_name) in crate::ALL_SPECS {
         if !spec.is_enabled(MegaSpecId::REX5) {
@@ -269,6 +276,27 @@ fn test_direct_precompile_transaction_cap_is_the_tx_level_remainder() {
         }
         let limits =
             EvmTxRuntimeLimits::from_spec(spec).with_tx_compute_gas_limit(TX_COMPUTE_LIMIT);
+        if spec.is_enabled(MegaSpecId::REX7) {
+            let outcome =
+                transact_with_limits_outcome(spec, base_db(Bytes::new()), PRECOMPILE_KZG, limits);
+            assert!(
+                matches!(outcome.result, ExecutionResult::Halt { .. }),
+                "{spec_name}: the underfunded direct precompile transaction should halt, got \
+                 {:?}",
+                outcome.result
+            );
+            assert_eq!(
+                outcome.compute_gas_used - outcome.compute_gas_destroyed,
+                INTRINSIC_COMPUTE,
+                "{spec_name}: a wrapper OOG performed no work, so only the intrinsic enforces",
+            );
+            assert_eq!(
+                outcome.compute_gas_destroyed, 99_940_000,
+                "{spec_name}: destroyed is the caller-supplied envelope (the 98/100 forward of \
+                 the frame's remaining gas at the CALL), not the capped remainder",
+            );
+            continue;
+        }
         let (result, usage) =
             transact_with_limits(spec, base_db(Bytes::new()), PRECOMPILE_KZG, limits);
         assert!(
@@ -819,24 +847,31 @@ fn test_first_call_to_the_beneficiary_is_charged_cold_from_minirex() {
 /// Pins "Code Deposit": the deposit's compute gas is recorded exactly once when the deposit
 /// occurs, and nothing is recorded when it does not.
 ///
-/// The two initcodes have identical length and opcode sequence and differ only in the byte they
-/// store, so every other cost in the transaction cancels and the difference between the two
-/// recorded totals is the code-deposit charge alone. `0xEF` makes EIP-3541 reject the runtime
-/// code, so the deposit never happens.
+/// The two initcodes have identical length and opcode sequence and differ only in the length they
+/// return, so every other cost in the transaction cancels — the `MSTORE8` has already expanded
+/// memory past both `RETURN` windows — and the difference between the two recorded totals is the
+/// code-deposit charge alone.
+///
+/// The zero-length return is what makes "the deposit does not happen" observable on every spec:
+/// the CREATE still succeeds, so the frame returns its unspent budget to the caller. A CREATE that
+/// fails the deposit instead (EIP-3541, the code-size limit, an unaffordable code-deposit charge)
+/// is an exceptional halt that returns nothing, and Rex7 settles that destroyed budget as compute
+/// gas — a much larger number than the charge under test. Those shapes are pinned by the Rex7
+/// exceptional-halt suite rather than here.
 ///
 /// Two different mechanisms produce this number — `MiniRex` through Rex4 measure it over the
 /// frame-action window, Rex5+ pre-charge the canonical amount before the checkpoint commits — so
 /// the assertion runs on every tracked spec to keep them agreeing.
 #[test]
 fn test_code_deposit_recorded_only_when_deposit_occurs() {
-    /// `PUSH1 <first>, PUSH0, MSTORE8, PUSH1 32, PUSH0, RETURN` — returns 32 bytes of runtime
-    /// code whose first byte is `first`.
-    fn initcode(first: u8) -> [u8; 8] {
-        [0x60, first, 0x5f, 0x53, 0x60, 0x20, 0x5f, 0xf3]
+    /// `PUSH1 0, PUSH0, MSTORE8, PUSH1 <len>, PUSH0, RETURN` — returns `len` bytes of runtime
+    /// code.
+    fn initcode(len: u8) -> [u8; 8] {
+        [0x60, 0x00, 0x5f, 0x53, 0x60, len, 0x5f, 0xf3]
     }
 
-    fn creator(first: u8) -> MemoryDatabase {
-        let code = initcode(first);
+    fn creator(len: u8) -> MemoryDatabase {
+        let code = initcode(len);
         base_db(
             BytecodeBuilder::default()
                 .mstore(0, code)
@@ -856,10 +891,10 @@ fn test_code_deposit_recorded_only_when_deposit_occurs() {
         if !spec.is_enabled(MegaSpecId::MINI_REX) {
             continue; // Equivalence records no compute gas at all.
         }
-        let deposited = transact(spec, creator(0x00));
-        let skipped = transact(spec, creator(0xef));
-        // Both transactions succeed: the EIP-3541 rejection fails the CREATE (it pushes zero),
-        // not the transaction. A non-success outcome means the fixture itself drifted.
+        let deposited = transact(spec, creator(32));
+        let skipped = transact(spec, creator(0));
+        // Both transactions succeed: an empty deploy leaves the CREATE successful (it pushes the
+        // created address). A non-success outcome means the fixture itself drifted.
         assert_eq!(deposited.outcome, "success", "{spec_name}: depositing run should succeed");
         assert_eq!(skipped.outcome, "success", "{spec_name}: skipped-deposit run should succeed");
         let (deposited, skipped) = (deposited.compute_gas, skipped.compute_gas);
@@ -872,7 +907,7 @@ fn test_code_deposit_recorded_only_when_deposit_occurs() {
         });
         assert_eq!(
             delta, EXPECTED_DEPOSIT_GAS,
-            "{spec_name}: the only compute gas separating a deposit from an EIP-3541 rejection \
+            "{spec_name}: the only compute gas separating a 32-byte deposit from an empty one \
              must be the code-deposit charge (deposited={deposited} skipped={skipped})"
         );
     }

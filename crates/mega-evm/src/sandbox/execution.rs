@@ -174,7 +174,9 @@ pub fn execute_keyless_deploy_call<DB: AlloyDatabase, ExtEnvs: ExternalEnvTypes>
     let cost = constants::rex2::KEYLESS_DEPLOY_OVERHEAD_GAS;
     let has_sufficient_gas = gas.record_regular_cost(cost);
     if !has_sufficient_gas {
-        return make_halt!();
+        // The call cannot even pay the dispatch overhead, so nothing has been recorded as
+        // compute gas and nothing is rescued — the whole envelope is destroyed.
+        return destroying_oog_frame_result(ctx, &gas, &return_memory_offset);
     }
     if ctx.spec.is_enabled(MegaSpecId::REX3) {
         let mut additional_limit = ctx.additional_limit.borrow_mut();
@@ -197,8 +199,13 @@ pub fn execute_keyless_deploy_call<DB: AlloyDatabase, ExtEnvs: ExternalEnvTypes>
                 // `last_frame_result` then erases `rescued_gas` from the final spend, so
                 // the receipt's `gas_used` excludes the rescued amount. Pre-REX6 specs
                 // leave the un-rescued full-spend in place for replay parity.
+                //
+                // Nothing is destroyed on this branch under REX7: the rescue hands the whole
+                // post-overhead remainder back to the sender, so the only gas actually lost is
+                // the overhead already recorded as compute above. Booking the rescued remainder
+                // as destroyed as well would report gas that was refunded.
                 if ctx.spec.is_enabled(MegaSpecId::REX6) {
-                    additional_limit.try_rescue_gas(&gas);
+                    additional_limit.try_rescue_gas(&gas, gas.remaining());
                 }
                 let mut result = make_halt!();
                 mark_frame_result_as_exceeding_limit(
@@ -648,7 +655,24 @@ fn run_sandbox_ctx<DB: AlloyDatabase, ExtEnvs: ExternalEnvTypes>(
     let is_rex6_enabled = sandbox_ctx.mega_spec().is_enabled(MegaSpecId::REX6);
     let mut sandbox_evm = MegaEvm::new(sandbox_ctx);
     let result = sandbox_evm.transact_raw(sandbox_tx);
-    let limit_usage = sandbox_evm.ctx.additional_limit.borrow().get_usage();
+    let limit_usage = {
+        let additional_limit = sandbox_evm.ctx.additional_limit.borrow();
+        SandboxUsage {
+            usage: additional_limit.get_usage(),
+            // The per-site booking, deliberately, not the sandbox's own derived report. What
+            // crosses this boundary is the split the parent must *enforce* on: the parent adds
+            // the sandbox's whole total to its own and then declares this much of it
+            // non-enforcing, which is how it inherits the sandbox's executed compute. The
+            // parent's reported destroyed total is settled once, from the conservation law, at
+            // the outer transaction's settlement point — this number is an input to the term
+            // that derivation reads, not a second place destroyed gas gets reported.
+            //
+            // The sandbox never settles a derivation of its own: the law is stated over a
+            // transaction's final envelope, and the sandbox's gas is a charge inside the outer
+            // transaction's envelope rather than one of its own.
+            burned_compute_gas: additional_limit.burned_compute_gas(),
+        }
+    };
     let volatile_accesses =
         sandbox_evm.ctx.volatile_data_tracker.borrow().get_volatile_data_accessed();
     process_sandbox_transact_result(
@@ -686,7 +710,7 @@ pub enum SandboxOutcome {
         /// Wire-shape dispatch for what the outer caller should report.
         completion: SandboxCompletion,
         /// Resource usage from the sandbox's additional limit trackers.
-        limit_usage: LimitUsage,
+        limit_usage: SandboxUsage,
         /// Volatile-access footprint to merge into the parent after sandbox return.
         volatile_accesses: VolatileDataAccess,
     },
@@ -694,6 +718,22 @@ pub enum SandboxOutcome {
     /// or `InternalError`). No state, resource usage, or volatile-access footprint
     /// applies — the outer caller must refund the full pre-debited reservation.
     Rejected(KeylessDeployError),
+}
+
+/// Resource usage a completed sandbox hands to the parent, with Rex7's compute-gas split intact.
+///
+/// [`LimitUsage`] carries one number per dimension, which is all the parent needs for three of
+/// them. Compute gas needs two: the parent must report the sandbox's whole total but must enforce
+/// only the part the sandbox performed, exactly as the sandbox itself did. Collapsing the two at
+/// this boundary would let an ordinary EVM halt inside a sandboxed constructor fail the outer
+/// transaction on a resource limit.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SandboxUsage {
+    /// Full reported usage. `compute_gas` includes `burned_compute_gas`.
+    pub usage: LimitUsage,
+    /// The part of `usage.compute_gas` the sandbox destroyed rather than performed — the
+    /// remainders of exceptionally halted sandbox frames (Rex7+, always 0 before).
+    pub burned_compute_gas: u64,
 }
 
 /// Wire-shape dispatch for a completed sandbox execution.
@@ -793,7 +833,7 @@ impl SandboxCompletion {
 /// surface (`Deployed { addr }` returned for create+SELFDESTRUCT) for replay parity.
 fn process_sandbox_transact_result<E: core::fmt::Display + IsTxError>(
     result: Result<ResultAndState<MegaHaltReason>, E>,
-    limit_usage: LimitUsage,
+    limit_usage: SandboxUsage,
     volatile_accesses: VolatileDataAccess,
     is_rex5_enabled: bool,
     is_rex6_enabled: bool,
@@ -935,13 +975,13 @@ fn process_sandbox_transact_result<E: core::fmt::Display + IsTxError>(
 fn apply_sandbox_post_accounting<DB: AlloyDatabase, ExtEnvs: ExternalEnvTypes>(
     ctx: &MegaContext<DB, ExtEnvs>,
     gas: &mut Gas,
-    limit_usage: LimitUsage,
+    limit_usage: SandboxUsage,
     volatile_accesses: VolatileDataAccess,
     reservation: u64,
     sandbox_gas_used: u64,
     return_memory_offset: &core::ops::Range<usize>,
 ) -> Option<FrameResult> {
-    merge_sandbox_limit_usage(ctx, limit_usage);
+    merge_sandbox_limit_usage(ctx, limit_usage, sandbox_gas_used);
     ctx.volatile_data_tracker.borrow_mut().merge_accesses_from_bitmap(volatile_accesses);
     refund_unused_sandbox_gas(gas, reservation, sandbox_gas_used);
     reject_if_tx_limit_overflow(ctx, gas, return_memory_offset)
@@ -993,8 +1033,13 @@ fn charge_caller_materialization_pre_sandbox<DB: AlloyDatabase, ExtEnvs: Externa
             KeylessDeployError::InternalError
         })?;
     if !gas.record_regular_cost(caller_storage_gas) {
-        return Ok(Some(oog_frame_result(gas.limit(), return_memory_offset)));
+        // Plain OOG with no rescue: the dispatch overhead recorded in step 1 is the only work
+        // performed, and everything the call still held is destroyed.
+        return Ok(Some(destroying_oog_frame_result(ctx, gas, return_memory_offset)));
     }
+    // The charge that just landed is `MegaETH` storage gas, not compute work, so the parent's
+    // REX7 accounting has to see it as such.
+    ctx.additional_limit.borrow_mut().record_non_compute_gas(i128::from(caller_storage_gas));
     // `record_deposit_caller_creation` can latch `has_exceeded_limit` to a non-frame-local
     // `StateGrowthLimitExceeded`. Convert it to the canonical exceeding-limit OOG halt
     // (with rescued gas) here — interceptor short-circuit bypasses `after_frame_run`'s
@@ -1008,15 +1053,25 @@ fn charge_caller_materialization_pre_sandbox<DB: AlloyDatabase, ExtEnvs: Externa
     Ok(None)
 }
 
-/// Merges the sandbox's multidim usage into the parent's trackers.
+/// Merges the sandbox's multidim usage into the parent's trackers, keeping the REX7 split
+/// between compute gas the sandbox performed and compute gas it destroyed.
+///
+/// `sandbox_gas_used` is what the sandbox costs the parent's gas counter, which the parent's
+/// REX7 accounting needs alongside the usage: it is the only place the sandbox's own storage gas
+/// and receipt-level refunds reach the parent's books.
 ///
 /// This merge is intentionally not undone on later halt paths, because
 /// block-level multidim counters survive halts.
 fn merge_sandbox_limit_usage<DB: AlloyDatabase, ExtEnvs: ExternalEnvTypes>(
     ctx: &MegaContext<DB, ExtEnvs>,
-    limit_usage: LimitUsage,
+    limit_usage: SandboxUsage,
+    sandbox_gas_used: u64,
 ) {
-    ctx.additional_limit.borrow_mut().merge_usage(limit_usage);
+    ctx.additional_limit.borrow_mut().merge_usage(
+        limit_usage.usage,
+        limit_usage.burned_compute_gas,
+        sandbox_gas_used,
+    );
 }
 
 /// Returns the unused portion of the sandbox's pre-debited gas reservation to the
@@ -1039,6 +1094,9 @@ fn refund_unused_sandbox_gas(gas: &mut Gas, reservation: u64, sandbox_gas_used: 
 /// (rescue remaining gas, return as exceeding-limit OOG), `None` when the
 /// merged usage fits.
 ///
+/// This is the rescued shape, not the destroying one: the remaining gas goes back to the
+/// sender, so under REX7 nothing on this path is booked as destroyed.
+///
 /// State must not be merged after this returns `Some(_)`; the footprint
 /// side effects already applied by `apply_sandbox_post_accounting` remain.
 fn reject_if_tx_limit_overflow<DB: AlloyDatabase, ExtEnvs: ExternalEnvTypes>(
@@ -1051,7 +1109,7 @@ fn reject_if_tx_limit_overflow<DB: AlloyDatabase, ExtEnvs: ExternalEnvTypes>(
     if !limit_check.exceeded_limit() || limit_check.is_frame_local() {
         return None;
     }
-    limit.rescue_gas(gas);
+    limit.rescue_gas(gas, gas.remaining());
     let mut result = oog_frame_result(gas.limit(), return_memory_offset);
     mark_frame_result_as_exceeding_limit(
         &mut result,
@@ -1059,6 +1117,30 @@ fn reject_if_tx_limit_overflow<DB: AlloyDatabase, ExtEnvs: ExternalEnvTypes>(
         Default::default(),
     );
     Some(result)
+}
+
+/// Builds the [`oog_frame_result`] shape for a synthetic halt that keeps the whole envelope,
+/// recording the part it destroys (REX7+).
+///
+/// The `KeylessDeploy` interceptor produces its results inside `frame_init`, before a child EVM
+/// frame exists, so the frame-exit settlement that splits an ordinary exceptional halt never
+/// sees them. The split is taken here instead, by the same formula that settlement uses: the
+/// gas the frame still held when it gave up is destroyed, and whatever it had already recorded
+/// as compute gas stays on the enforcing lane. `gas` must therefore be read *before* the halt
+/// result is built — the result itself reports zero remaining, because the envelope is gone.
+///
+/// Only for halts that keep the envelope. A halt whose remaining gas is rescued for the sender
+/// destroys nothing: the rescue is a refund, and booking the same gas here as well would report
+/// gas that was handed back.
+fn destroying_oog_frame_result<DB: AlloyDatabase, ExtEnvs: ExternalEnvTypes>(
+    ctx: &MegaContext<DB, ExtEnvs>,
+    gas: &Gas,
+    return_memory_offset: &core::ops::Range<usize>,
+) -> FrameResult {
+    if ctx.spec.is_enabled(MegaSpecId::REX7) {
+        ctx.additional_limit.borrow_mut().record_burned_gas(gas.remaining());
+    }
+    oog_frame_result(gas.limit(), return_memory_offset)
 }
 
 /// Single source of truth for the `OutOfGas` halt `FrameResult` shape (empty return
@@ -1259,7 +1341,7 @@ mod tests {
         });
         let out = process_sandbox_transact_result(
             result,
-            LimitUsage::default(),
+            SandboxUsage::default(),
             VolatileDataAccess::empty(),
             true,
             false,
@@ -1285,7 +1367,7 @@ mod tests {
         });
         let out = process_sandbox_transact_result(
             result,
-            LimitUsage::default(),
+            SandboxUsage::default(),
             VolatileDataAccess::empty(),
             true,
             false,
@@ -1306,7 +1388,7 @@ mod tests {
             Err(FakeTxErr { is_tx: false, msg: "db blew up" });
         let out = process_sandbox_transact_result(
             result,
-            LimitUsage::default(),
+            SandboxUsage::default(),
             VolatileDataAccess::empty(),
             true,
             false,
@@ -1325,7 +1407,7 @@ mod tests {
             Err(FakeTxErr { is_tx: true, msg: "intrinsic gas too low" });
         let out = process_sandbox_transact_result(
             result,
-            LimitUsage::default(),
+            SandboxUsage::default(),
             VolatileDataAccess::empty(),
             true,
             false,

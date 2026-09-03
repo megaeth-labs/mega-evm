@@ -13,8 +13,8 @@ use alloy_primitives::{Bytes, U256};
 use core::convert::Infallible;
 use criterion::black_box;
 use mega_evm::{
-    revm::inspector::NoOpInspector, test_utils::MemoryDatabase, EmptyExternalEnv, MegaContext,
-    MegaEvm, MegaSpecId, MegaTransaction, TestExternalEnvs,
+    revm::inspector::NoOpInspector, test_utils::MemoryDatabase, DeclaredObserver, EmptyExternalEnv,
+    MegaContext, MegaEvm, MegaSpecId, MegaTransaction, TestExternalEnvs, TrustedObserver,
 };
 use op_revm::{
     DefaultOp as _, OpBuilder as _, OpContext as OpContextPinned, OpSpecId as OpSpecIdPinned,
@@ -24,8 +24,10 @@ use revm::{
     context::{tx::TxEnvBuilder, TxEnv},
     database::EmptyDB as EmptyDBPinned,
     primitives::hardfork::SpecId as SpecIdPinned,
-    Context as ContextPinned, ExecuteEvm, MainBuilder as _, MainContext as _,
+    Context as ContextPinned, ExecuteEvm, InspectEvm, Inspector, MainBuilder as _,
+    MainContext as _,
 };
+use revm_inspectors::tracing::{TracingInspector, TracingInspectorConfig};
 use std::{cell::RefCell, rc::Rc};
 
 use super::workload::{Account, TxSpec, Workload};
@@ -178,6 +180,130 @@ impl Subject for Mega {
             },
         );
     }
+}
+
+//
+// ============================================================================
+// Mega inspected-path subject.
+// ============================================================================
+//
+
+/// Which inspector an inspected-path row attaches.
+///
+/// `NoOp` is the floor: the inspect loop and the measurement shim run, but the
+/// inner inspector is empty, so the row is the cost of snapshotting.
+/// `GethTracer` is `revm-inspectors`' `debug_traceTransaction` default — the
+/// production tracer this crate already admits on the block path. `all()` is
+/// not used: it clones memory on every opcode and is not an RPC default.
+///
+/// The two `*Trusted` kinds attach the same two inspectors through
+/// [`MegaEvm::with_trusted_inspector`], so each pair differs only in whether
+/// the shim measures. The gap between a pair is the measurement's whole cost,
+/// and the trusted row is what the inspected path costs without it.
+#[derive(Clone, Copy)]
+pub enum InspectKind {
+    NoOp,
+    NoOpTrusted,
+    GethTracer,
+    GethTracerTrusted,
+}
+
+/// `MegaEvm` on the inspected frame loop, with the measurement shim live.
+///
+/// The plain [`Mega`] row calls `ExecuteEvm::transact`, which never enters an
+/// inspector callback. This subject calls [`InspectEvm::inspect_tx`] after
+/// [`MegaEvm::with_inspector`], which is the path RPC tracers take and the only
+/// path the shim runs on.
+pub struct MegaInspected {
+    pub name: &'static str,
+    pub spec: MegaSpecId,
+    pub kind: InspectKind,
+}
+
+impl Subject for MegaInspected {
+    fn name(&self) -> &str {
+        self.name
+    }
+
+    fn run(&self, workload: &Workload) {
+        match self.kind {
+            InspectKind::NoOp => {
+                run_inspected(self.name, self.spec, workload, || NoOpInspector);
+            }
+            InspectKind::NoOpTrusted => {
+                run_inspected_trusted(self.name, self.spec, workload, || NoOpInspector);
+            }
+            InspectKind::GethTracer => {
+                run_inspected(self.name, self.spec, workload, || {
+                    TracingInspector::new(TracingInspectorConfig::default_geth())
+                });
+            }
+            InspectKind::GethTracerTrusted => {
+                run_inspected_trusted(self.name, self.spec, workload, || {
+                    DeclaredObserver(TracingInspector::new(TracingInspectorConfig::default_geth()))
+                });
+            }
+        }
+    }
+}
+
+fn run_inspected<I, Make>(name: &str, spec: MegaSpecId, workload: &Workload, make_inspector: Make)
+where
+    I: Inspector<MegaContext<MemoryDatabase, EmptyExternalEnv>>,
+    Make: FnOnce() -> I,
+{
+    run_workload(
+        name,
+        workload,
+        || MegaEvm::new(inspected_context(spec, workload)).with_inspector(make_inspector()),
+        inspect_one_tx,
+    );
+}
+
+/// [`run_inspected`] through [`MegaEvm::with_trusted_inspector`].
+///
+/// Everything else is identical, which is the point: the pair of rows differs
+/// only in whether the shim measures.
+fn run_inspected_trusted<I, Make>(
+    name: &str,
+    spec: MegaSpecId,
+    workload: &Workload,
+    make_inspector: Make,
+) where
+    I: Inspector<MegaContext<MemoryDatabase, EmptyExternalEnv>> + TrustedObserver,
+    Make: FnOnce() -> I,
+{
+    run_workload(
+        name,
+        workload,
+        || MegaEvm::new(inspected_context(spec, workload)).with_trusted_inspector(make_inspector()),
+        inspect_one_tx,
+    );
+}
+
+/// The context both inspected variants build their EVM over.
+fn inspected_context(
+    spec: MegaSpecId,
+    workload: &Workload,
+) -> MegaContext<MemoryDatabase, EmptyExternalEnv> {
+    let mut context = MegaContext::new(build_pinned_db(&workload.accounts), spec);
+    context.modify_chain(|chain| zero_operator_fee!(chain));
+    context
+}
+
+/// Runs one transaction on the inspected loop, for either variant.
+fn inspect_one_tx<I>(evm: &mut MegaEvm<MemoryDatabase, I, EmptyExternalEnv>, tx: &TxSpec) -> bool
+where
+    I: Inspector<MegaContext<MemoryDatabase, EmptyExternalEnv>>,
+{
+    let mut mega_tx = MegaTransaction(OpTransactionPinned::new(pinned_tx_env(tx)));
+    mega_tx.enveloped_tx = Some(Bytes::new());
+    // `ExecuteEvm::transact` ignores `inspect` and stays on the plain
+    // loop; `inspect_tx` is the inspected loop the shim actually sits on.
+    let r = InspectEvm::inspect_tx(evm, mega_tx).expect("mega inspect");
+    let success = r.result.is_success();
+    black_box(r);
+    success
 }
 
 //

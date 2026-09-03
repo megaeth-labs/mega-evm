@@ -6,6 +6,25 @@ use super::{
 };
 use crate::{JournalInspectTr, MegaSpecId};
 
+/// The constraint that bounds the gas clamp for one plain-opcode segment.
+///
+/// Captured when the clamp is applied, so a clamp-induced out-of-gas can be classified against the
+/// constraint that was in force at the time rather than against whatever the tracker looks like
+/// once the frame has already failed.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ClampBinding {
+    /// The compute headroom the interpreter is allowed to keep seeing.
+    pub(crate) headroom: u64,
+    /// `true` when the current frame's compute budget is what binds, `false` when the TX-level
+    /// (possibly detained) limit is.
+    pub(crate) frame_local: bool,
+    /// The binding constraint's own limit. A clamp-induced exceed reports this — as
+    /// `MegaLimitExceeded.limit` in the frame-local revert payload, or as
+    /// `ComputeGasLimitExceeded.limit` in the transaction halt — so it has to be the budget that
+    /// actually stopped execution, exactly as the non-clamp check path reports it.
+    pub(crate) limit: u64,
+}
+
 /// A frame-limit-based compute gas tracker using `FrameLimitTracker`.
 ///
 /// Unlike the other trackers (`DataSizeTracker`, `KVUpdateTracker`, `StateGrowthTracker`), compute
@@ -38,6 +57,22 @@ pub(crate) struct ComputeGasTracker {
     /// The effective compute gas limit, which may be dynamically lowered by gas detention
     /// (volatile data access). Always <= `frame_tracker.tx_limit()`.
     detained_limit: u64,
+    /// Compute gas settled from the **destroyed** remainders of exceptionally halted frames
+    /// (REX7+).
+    ///
+    /// Recorded into the TX-level lane of `frame_tracker`, so it shows up in the transaction's
+    /// reported compute total and in block-level accounting, and subtracted back out of every
+    /// limit comparison. A destroyed remainder is gas the EVM threw away without executing
+    /// anything for it; letting it trip a limit would turn an ordinary EVM halt into a
+    /// resource-limit failure with the remaining gas rescued for the sender, changing a receipt
+    /// that must stay identical to per-opcode accounting.
+    ///
+    /// Only the remainder lands here. The work an exceptionally halted frame actually performed
+    /// before it failed is recorded through [`record_gas_used`](Self::record_gas_used) like any
+    /// other work, so it shrinks the parent frame's and the transaction's budgets — otherwise the
+    /// code that runs after the failed frame returns could spend the same headroom twice. Always 0
+    /// before REX7.
+    burned: u64,
     frame_tracker: FrameLimitTracker<()>,
 }
 
@@ -45,6 +80,7 @@ impl ComputeGasTracker {
     pub(crate) fn new(spec: MegaSpecId, tx_limit: u64) -> Self {
         Self {
             detained_limit: tx_limit,
+            burned: 0,
             frame_tracker: FrameLimitTracker::new(spec, tx_limit),
             rex1_enabled: spec.is_enabled(MegaSpecId::REX1),
             rex4_enabled: spec.is_enabled(MegaSpecId::REX4),
@@ -74,7 +110,7 @@ impl ComputeGasTracker {
     pub(crate) fn set_detained_limit(&mut self, cap: u64) {
         let new_limit = if self.rex4_enabled {
             // REX4+: cap is relative to current usage (limits post-access computation)
-            self.tx_usage().saturating_add(cap)
+            self.enforced_tx_usage().saturating_add(cap)
         } else {
             // Pre-REX4: cap is absolute
             cap
@@ -97,7 +133,7 @@ impl ComputeGasTracker {
     /// At that point `frame_stack.last()` is the caller's frame, so
     /// `current_frame_remaining()` gives the caller's remaining compute gas.
     pub(crate) fn current_call_remaining(&self) -> u64 {
-        let tx_remaining = self.tx_limit().saturating_sub(self.tx_usage());
+        let tx_remaining = self.tx_limit().saturating_sub(self.enforced_tx_usage());
         if self.rex4_enabled {
             self.frame_tracker.current_frame_remaining().min(tx_remaining)
         } else {
@@ -110,10 +146,41 @@ impl ComputeGasTracker {
         self.detained_limit
     }
 
+    /// Returns the base (undetained) TX compute gas limit.
+    pub(crate) fn base_tx_limit(&self) -> u64 {
+        self.frame_tracker.tx_limit()
+    }
+
+    /// Returns the constraint the gas clamp must bind to at this point in the transaction.
+    ///
+    /// The headroom is the tighter of the current frame's remaining compute budget (Rex4+) and
+    /// the TX-level remaining under the effective (possibly detained) limit — the same pair
+    /// [`check_limit`](TxRuntimeLimit::check_limit) enforces. Gas hidden beyond this headroom is
+    /// therefore reachable only by a transaction that would exceed one of those two limits.
+    /// Equal remainders bind to the TX-level constraint, so a top-level frame — where the two are
+    /// equal whenever the same base limit still governs both — halts with gas rescue rather than
+    /// absorbing the exceed into a revert.
+    #[inline]
+    pub(crate) fn clamp_binding(&self) -> ClampBinding {
+        let tx_limit = self.tx_limit();
+        let tx_remaining = tx_limit.saturating_sub(self.enforced_tx_usage());
+        if self.rex4_enabled {
+            let frame_remaining = self.frame_tracker.current_frame_remaining();
+            if frame_remaining < tx_remaining {
+                return ClampBinding {
+                    headroom: frame_remaining,
+                    frame_local: true,
+                    limit: self.frame_tracker.current_frame_limit(),
+                };
+            }
+        }
+        ClampBinding { headroom: tx_remaining, frame_local: false, limit: tx_limit }
+    }
+
     /// Returns `true` when gas detention is the binding TX-level constraint, i.e., the detained
     /// limit is tighter than the base TX limit AND actual usage exceeds it.
     pub(crate) fn is_detained_exceed(&self) -> bool {
-        let used = self.tx_usage();
+        let used = self.enforced_tx_usage();
         used > self.detained_limit && self.detained_limit < self.frame_tracker.tx_limit()
     }
 
@@ -146,12 +213,117 @@ impl ComputeGasTracker {
         }
     }
 
+    /// Records the destroyed remainder of an exceptionally halted frame (REX7+).
+    ///
+    /// Counts toward the transaction's reported compute total and block-level accounting, and is
+    /// excluded from every limit comparison — see [`burned`](Self::burned).
+    pub(crate) fn record_burned_gas(&mut self, amount: u64) {
+        self.burned = self.burned.saturating_add(amount);
+        self.frame_tracker.add_tx_persistent(amount);
+    }
+
+    /// Reclassifies `amount` of already-merged usage as a destroyed remainder (REX7+).
+    ///
+    /// The sandbox path merges one compute total through
+    /// [`merge_persistent_usage`](Self::merge_persistent_usage) and then declares how much of it
+    /// the sandbox destroyed, rather than adding the amount a second time.
+    pub(crate) fn merge_burned_usage(&mut self, amount: u64) {
+        self.burned = self.burned.saturating_add(amount);
+    }
+
+    /// The destroyed remainders inside [`tx_usage`](TxRuntimeLimit::tx_usage) — see
+    /// [`burned`](Self::burned).
+    #[inline]
+    pub(crate) fn burned_usage(&self) -> u64 {
+        self.burned
+    }
+
+    /// Total recorded usage minus the destroyed remainders that must not enforce.
+    ///
+    /// This is the transaction's claim about how much compute work it actually performed. It is
+    /// built only from [`record_gas_used`](Self::record_gas_used) and
+    /// [`merge_persistent_usage`](Self::merge_persistent_usage) — a
+    /// [`record_burned_gas`](Self::record_burned_gas) raises `net_usage` and `burned` by the same
+    /// amount and so cancels here — which is what lets the destroyed remainder be re-derived from
+    /// it independently of how it was booked.
+    #[inline]
+    pub(crate) fn enforced_tx_usage(&self) -> u64 {
+        self.frame_tracker.net_usage().saturating_sub(self.burned)
+    }
+
     /// Merges external persistent usage into the TX-level entry.
     ///
     /// Used by `KeylessDeploy` (REX5+) to propagate sandbox compute gas consumption
     /// back to the parent transaction.
     pub(crate) fn merge_persistent_usage(&mut self, amount: u64) {
         self.frame_tracker.add_tx_persistent(amount);
+    }
+
+    /// Pushes a frame with an explicit budget, for tests that need a specific frame-local edge
+    /// without executing a transaction to get there.
+    #[cfg(test)]
+    pub(crate) fn push_frame_with_limit_for_test(&mut self, limit: u64) {
+        self.frame_tracker.push_frame_with_limit(limit, ());
+    }
+
+    /// [`check_limit`](TxRuntimeLimit::check_limit) evaluated as if `extra` gas had already been
+    /// recorded, without recording it.
+    ///
+    /// This is the whole verdict a caller would get by recording and then checking: the Rex4+
+    /// per-frame budget first, then the TX-level (possibly detained) limit, reported exactly as
+    /// enforcement reports them. A caller that must decide whether to make a charge at all asks
+    /// here; `check_limit` is this method at `extra = 0`, so there is no second copy of the
+    /// predicate to drift.
+    #[inline]
+    pub(crate) fn check_limit_with_extra(&self, extra: u64) -> LimitCheck {
+        self.check_limit_with_extra_on(&self.frame_tracker, extra)
+    }
+
+    /// [`check_limit`](TxRuntimeLimit::check_limit) as it will read once the current frame has
+    /// been popped and merged into its caller, computed without popping it.
+    #[inline]
+    pub(crate) fn check_limit_after_pop(&self, success: bool) -> LimitCheck {
+        self.check_limit_with_extra_on(&self.frame_tracker.view_after_pop(success), 0)
+    }
+
+    /// [`check_limit_with_extra`](Self::check_limit_with_extra) against an explicit reading of the
+    /// tracker.
+    ///
+    /// The reading is a parameter so that one body can answer both questions asked of this check:
+    /// what it says now, and what it will say once a returning frame has been merged into its
+    /// caller. A frame return needs the second answer before the merge happens, and a second copy
+    /// of the predicates would be free to drift from the first.
+    pub(crate) fn check_limit_with_extra_on<R: super::LimitReading>(
+        &self,
+        r: &R,
+        extra: u64,
+    ) -> LimitCheck {
+        if self.rex4_enabled {
+            let frame_check = r.frame_check(LimitKind::ComputeGas, extra);
+            if frame_check.exceeded_limit() {
+                return frame_check;
+            }
+            // Do not early-return on frame WithinLimit:
+            // 1) pre-frame intrinsic compute gas is recorded in `tx_entry`, outside current frame
+            //    budget;
+            // 2) `detained_limit` can be lowered at runtime by volatile-data access.
+            // So TX-level detained check must still run even when frame check is within limit.
+        }
+        // TX-level detained check (all specs): total usage vs effective limit (min of tx/detained).
+        // The comparison runs on enforced usage — burned remainders are excluded — while the
+        // reported `used` is the full settled total, so a halt reason states the usage the
+        // transaction actually ends with. The two coincide on every spec before REX7.
+        let limit = self.tx_limit();
+        if r.net_usage().saturating_sub(self.burned).saturating_add(extra) > limit {
+            LimitCheck::ExceedsLimit {
+                kind: LimitKind::ComputeGas,
+                frame_local: false,
+                limit,
+                used: r.net_usage().saturating_add(extra),
+            }
+        } else {
+            LimitCheck::WithinLimit
+        }
     }
 }
 
@@ -172,6 +344,7 @@ impl TxRuntimeLimit for ComputeGasTracker {
     #[inline]
     fn reset(&mut self) {
         self.frame_tracker.reset();
+        self.burned = 0;
         // Rex1+: reset detained limit to original TX limit between transactions.
         // Pre-Rex1: the detained limit persists across transactions.
         if self.rex1_enabled {
@@ -191,30 +364,7 @@ impl TxRuntimeLimit for ComputeGasTracker {
     /// when the current frame budget is still within limit.
     #[inline]
     fn check_limit(&self) -> LimitCheck {
-        if self.rex4_enabled {
-            let frame_check = self.frame_tracker.exceeds_current_frame_limit(LimitKind::ComputeGas);
-            if frame_check.exceeded_limit() {
-                return frame_check;
-            }
-            // Do not early-return on frame WithinLimit:
-            // 1) pre-frame intrinsic compute gas is recorded in `tx_entry`, outside current frame
-            //    budget;
-            // 2) `detained_limit` can be lowered at runtime by volatile-data access.
-            // So TX-level detained check must still run even when frame check is within limit.
-        }
-        // TX-level detained check (all specs): total usage vs effective limit (min of tx/detained).
-        let limit = self.tx_limit();
-        let used = self.tx_usage();
-        if used > limit {
-            LimitCheck::ExceedsLimit {
-                kind: LimitKind::ComputeGas,
-                frame_local: false,
-                limit,
-                used,
-            }
-        } else {
-            LimitCheck::WithinLimit
-        }
+        self.check_limit_with_extra(0)
     }
 
     #[inline]
@@ -266,5 +416,38 @@ mod tests {
         // One unit over the limit: exceeded.
         tracker.record_gas_used(1);
         assert!(tracker.is_detained_exceed(), "usage > detained_limit must be a detained exceed");
+    }
+
+    /// A frame's usage is weighed against its *caller's* budget only once the two have been
+    /// merged, so the pre-merge reading has to answer a question the live one cannot: the frame
+    /// below is already over its budget while the frame above is still inside its own.
+    ///
+    /// Compute gas is persistent, so the merge happens whether the frame returns or reverts and
+    /// the answer is the same either way.
+    #[test]
+    fn test_check_limit_after_pop_sees_a_frame_local_exceed_the_live_check_cannot() {
+        let mut tracker = ComputeGasTracker::new(MegaSpecId::REX4, 10_000);
+        tracker.push_frame_with_limit_for_test(100);
+        tracker.record_gas_used(60);
+        tracker.push_frame_with_limit_for_test(60);
+        tracker.record_gas_used(60);
+
+        assert_eq!(
+            tracker.check_limit(),
+            LimitCheck::WithinLimit,
+            "the child is exactly at its own budget, and nothing else is over",
+        );
+        for success in [true, false] {
+            assert_eq!(
+                tracker.check_limit_after_pop(success),
+                LimitCheck::ExceedsLimit {
+                    kind: LimitKind::ComputeGas,
+                    limit: 100,
+                    used: 120,
+                    frame_local: true,
+                },
+                "the merged caller is 20 over its own budget (success: {success})",
+            );
+        }
     }
 }

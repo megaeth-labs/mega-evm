@@ -1,0 +1,117 @@
+name: EEST Nightly Sweep
+
+# Runs the whole Ethereum execution-spec-tests state-test corpus through the mega-evm runner,
+# nightly, under the unstable spec.
+#
+# Two questions, one pass. Does anything break — a fixture that trips a debug assertion or an
+# internal invariant? And does the unstable spec still differ from the frozen spec it inherits
+# from only where its own precision invariant permits? The second is what an unstable spec cannot
+# get from fixtures alone: nobody has computed expected results for it, so the frozen spec is the
+# only oracle available, and the invariant is what says when the two are allowed to disagree.
+#
+# Both are hard gates. Everything else — fixtures the runner declines before execution,
+# differences the classifier accounts for — is reported and compared against a committed
+# baseline, and drift there is a warning in the summary rather than a red run.
+#
+# Needs no secrets: it builds the repo and runs it against a public, hash-pinned corpus.
+
+on:
+  schedule:
+    # Nightly at 04:00 UTC, after the mutation sweep's 03:00 slot.
+    - cron: "0 4 * * *"
+  # No spec inputs. The comparison is decided by Rex7's precision invariant, which relates Rex7 to
+  # Rex6 and states nothing about any other pair, so there is nothing here to choose: the runner
+  # refuses every other pair. When a later spec becomes the unstable one, its own invariant has to
+  # be written into the classifier, and the pair below changes with it.
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  sweep:
+    name: EEST differential sweep
+    runs-on: ubuntu-24.04
+    # The sweep itself is minutes; the headroom is for a cold dependency build.
+    timeout-minutes: 90
+    env:
+      TARGET_SPEC: "Rex7"
+      BASE_SPEC: "Rex6"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+
+      - name: Read pinned corpus
+        id: corpus
+        run: |
+          # shellcheck disable=SC1091
+          . tools/eest-sweep/corpus.env
+          echo "release=$EEST_RELEASE" >> "$GITHUB_OUTPUT"
+          echo "sha256=$EEST_SHA256" >> "$GITHUB_OUTPUT"
+
+      # Keyed on the corpus hash, not on the release name, so an entry restored here always
+      # belongs to the release the sweep is pinned to.
+      #
+      # The key is not what makes the entry trustworthy. The cache holds both the archive and the
+      # tree unpacked from it; the archive is hash-verified on every run, and the tree — which is
+      # what the sweep actually reads — is restored from wherever a previous run left it, whole or
+      # not. What rules out sweeping a fraction of the corpus is on the other side: `run.sh`
+      # unpacks via a scratch directory and one rename, and records a manifest of every file it
+      # extracted with that file's hash. Before each run the tree is re-derived from its bytes and
+      # compared against that manifest; anything missing, added or edited discards the tree and
+      # unpacks it again.
+      - name: Cache corpus
+        uses: actions/cache@v4
+        with:
+          path: .eest-cache
+          key: eest-corpus-${{ steps.corpus.outputs.sha256 }}
+
+      # `hivetests` is optimized *and* keeps debug assertions live, which is the point: the Rex7
+      # gas-conservation cross-checks are `debug_assert!`s, and a release build would run the
+      # corpus without ever evaluating them.
+      - name: Build state-test
+        run: cargo build --profile hivetests -p state-test
+
+      - name: Run sweep
+        id: sweep
+        run: |
+          tools/eest-sweep/run.sh \
+            --no-build \
+            --target-spec "$TARGET_SPEC" \
+            --base-spec "$BASE_SPEC" \
+            --cache-dir .eest-cache \
+            --report-dir .eest-report
+
+      - name: Write job summary
+        if: always()
+        run: |
+          if [ -f .eest-report/diff-report.json ]; then
+            python3 tools/eest-sweep/summarize.py \
+              .eest-report/diff-report.json \
+              --baseline tools/eest-sweep/baseline.json \
+              >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "The sweep produced no report; see the job log." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eest-sweep-report
+          path: |
+            .eest-report/diff-report.json
+            .eest-report/sweep.log
+          if-no-files-found: warn
+          retention-days: 30

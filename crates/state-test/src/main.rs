@@ -5,9 +5,11 @@
 
 use clap::Parser;
 use state_test::{
+    chaos::{run_chaos, ChaosClass, ChaosRunConfig, ChaosShape, ChaosSweepTally, ShapeFilter},
+    diff::{collect_fixture_files, run_diff, DiffClass, DiffRunConfig, DiffSpecs, DiffTally},
     runner::{
-        bench_test_suite, fill_test_suite, find_all_json_tests, run, TestError, TestErrorKind,
-        UnitBench,
+        bench_test_suite, fill_test_suite, fill_test_suite_keep_going, find_all_json_tests,
+        is_skipped_fixture, run, TestError, TestErrorKind, UnitBench, UnitStatus,
     },
     types::SpecName,
 };
@@ -71,11 +73,58 @@ pub struct Cmd {
     /// Overwrite an existing non-empty `post` when filling with `--fill`.
     #[arg(long, requires = "fill")]
     force: bool,
+    /// Execute each fixture under this spec as well and report how the two differ.
+    ///
+    /// The spec under test is `--bench-spec`, which is therefore required: a differential run
+    /// compares two named specs, and taking the target from each fixture's own `post` would make
+    /// the comparison mean something different from one unit to the next. Nothing is written —
+    /// the comparison is between the two executions, not against a recorded expectation, which is
+    /// what lets an unstable spec with no expectations be checked at all.
+    #[arg(long, value_name = "SPEC", requires = "bench_spec", conflicts_with_all = ["bench", "fill"])]
+    diff_spec: Option<String>,
+    /// Write the differential run's tally and every flagged unit to this file, as JSON.
+    #[arg(long, value_name = "FILE", requires = "diff_spec")]
+    diff_report: Option<PathBuf>,
+    /// Skip the inspected second pass that collects per-frame evidence for a difference the
+    /// cheap evidence did not explain.
+    ///
+    /// Only useful for measuring the cost of that pass: without it, a difference caused by an
+    /// inner frame the transaction's own result hides is reported as unexplained.
+    #[arg(long, requires = "diff_spec")]
+    diff_no_frame_evidence: bool,
+    /// Execute each fixture three times — with no inspector, with a read-only one, and with a
+    /// deterministic rewriting one seeded from this value and the vector's own identity — and
+    /// report how the three came out.
+    ///
+    /// The spec every run executes under is `--bench-spec`, which is therefore required. Nothing
+    /// is written and nothing is compared against a recorded expectation: the read-only run is
+    /// judged against the run with no inspector, and the rewriting run is judged by whether the
+    /// execution's own gas-accounting cross-checks survive it. Those cross-checks are debug
+    /// assertions, so this mode is only meaningful in a build that keeps them.
+    #[arg(long, value_name = "SEED", requires = "bench_spec", conflicts_with_all = ["bench", "fill", "diff_spec"])]
+    chaos_seed: Option<u64>,
+    /// Write the chaos run's tally and every flagged vector to this file, as JSON.
+    #[arg(long, value_name = "FILE", requires = "chaos_seed")]
+    chaos_report: Option<PathBuf>,
+    /// Restrict the rewriting run to these shapes (comma-separated labels).
+    ///
+    /// For triage: a flagged vector is re-run with the list narrowed until the smallest set that
+    /// still reproduces it is found. Narrowing does not reshuffle the decision stream, so each
+    /// surviving mutation stays where the full run put it; it does leave the mutation budget
+    /// unspent on rejected draws, so a narrowed run can reach further into a transaction.
+    #[arg(long, value_name = "SHAPES", value_delimiter = ',', requires = "chaos_seed")]
+    chaos_shapes: Vec<String>,
 }
 
 impl Cmd {
     /// Runs `statetest` command.
     pub fn run(&self) -> Result<(), TestError> {
+        if self.diff_spec.is_some() {
+            return self.run_diff();
+        }
+        if self.chaos_seed.is_some() {
+            return self.run_chaos();
+        }
         if self.fill {
             return self.run_fill();
         }
@@ -92,9 +141,22 @@ impl Cmd {
             }
 
             println!("\nRunning tests in {}...", path.display());
-            let test_files = find_all_json_tests(path);
+            let scan = find_all_json_tests(path);
+            // A directory the walk could not descend into contributes no fixtures, which looks
+            // exactly like a directory that holds none. Fail rather than run the part that was
+            // readable and report it as the whole.
+            if let Some(err) = scan.errors.first() {
+                return Err(TestError {
+                    name: "Path validation".to_string(),
+                    path: path.display().to_string(),
+                    kind: TestErrorKind::FixtureError(format!(
+                        "{} path(s) could not be read; first: {err}",
+                        scan.errors.len()
+                    )),
+                });
+            }
 
-            if test_files.is_empty() {
+            if scan.files.is_empty() {
                 return Err(TestError {
                     name: "Path validation".to_string(),
                     path: path.display().to_string(),
@@ -102,52 +164,26 @@ impl Cmd {
                 });
             }
 
-            run(test_files, self.single_thread, self.json, self.json_outcome, self.keep_going)?
+            run(scan.files, self.single_thread, self.json, self.json_outcome, self.keep_going)?
         }
         Ok(())
     }
 
     /// Parse `--bench-spec` into a [`SpecName`], if given.
     fn resolve_spec(&self) -> Result<Option<SpecName>, TestError> {
-        self.bench_spec
-            .as_deref()
-            .map(|s| {
-                let invalid_spec = || TestError {
-                    name: "spec".to_string(),
-                    path: s.to_string(),
-                    kind: TestErrorKind::FixtureError(format!(
-                        "invalid --bench-spec {s:?}; expected one of: {}",
-                        [
-                            mega_evm::name::EQUIVALENCE,
-                            mega_evm::name::MINI_REX,
-                            mega_evm::name::REX,
-                            mega_evm::name::REX1,
-                            mega_evm::name::REX2,
-                            mega_evm::name::REX3,
-                            mega_evm::name::REX4,
-                            mega_evm::name::REX5,
-                        ]
-                        .join(", ")
-                    )),
-                };
-                let spec = MegaSpecId::from_str(s)
-                    .map(SpecName::from_mega_spec)
-                    .map_err(|_| invalid_spec())?;
-                // A spec id that parses but has no fixture-facing name (a
-                // future `MegaSpecId` this crate does not map yet) would
-                // otherwise fail much later, deep inside execution — reject it
-                // here with the same actionable message.
-                if spec == SpecName::Unknown {
-                    return Err(invalid_spec());
-                }
-                Ok(spec)
-            })
-            .transpose()
+        self.bench_spec.as_deref().map(|s| parse_spec("--bench-spec", s)).transpose()
+    }
+
+    /// Parse `--diff-spec` into a [`SpecName`], if given.
+    fn resolve_diff_spec(&self) -> Result<Option<SpecName>, TestError> {
+        self.diff_spec.as_deref().map(|s| parse_spec("--diff-spec", s)).transpose()
     }
 
     /// Fill every fixture's `post` expectation in place (see `--fill`).
     fn run_fill(&self) -> Result<(), TestError> {
         let spec_override = self.resolve_spec()?;
+        let (mut filled, mut errors, mut panics) = (0usize, 0usize, 0usize);
+        let (mut file_errors, mut skipped_files) = (0usize, 0usize);
         for path in &self.paths {
             if !path.exists() {
                 return Err(TestError {
@@ -156,12 +192,203 @@ impl Cmd {
                     kind: TestErrorKind::InvalidPath,
                 });
             }
-            for file in find_all_json_tests(path) {
-                let n = fill_test_suite(&file, spec_override, self.force)?;
-                println!("Filled post for {n} unit(s) in {}", file.display());
+            let scan = find_all_json_tests(path);
+            // Same hole as in the other modes, reported the way this mode reports a file it could
+            // not read: as a FILE_ERR that the tally's gate counts.
+            for err in &scan.errors {
+                println!("FILE_ERR\t{}\t{}", path.display(), err.replace('\n', " "));
+                file_errors += 1;
+            }
+            if !self.keep_going && !scan.errors.is_empty() {
+                return Err(TestError {
+                    name: "Path validation".to_string(),
+                    path: path.display().to_string(),
+                    kind: TestErrorKind::FixtureError(format!(
+                        "{} path(s) could not be read",
+                        scan.errors.len()
+                    )),
+                });
+            }
+            for file in scan.files {
+                if self.keep_going {
+                    // A file the runner declines as a whole (an unreadable fixture, a filename on
+                    // the validation skip list) must not end the sweep either: record it and move
+                    // on, the same way a declined unit is recorded.
+                    if is_skipped_fixture(&file) {
+                        println!("SKIP_FILE\t{}", file.display());
+                        skipped_files += 1;
+                        continue;
+                    }
+                    let report = match fill_test_suite_keep_going(&file, spec_override, self.force)
+                    {
+                        Ok(report) => report,
+                        Err(e) => {
+                            println!(
+                                "FILE_ERR\t{}\t{}",
+                                file.display(),
+                                e.to_string().replace('\n', " ")
+                            );
+                            file_errors += 1;
+                            continue;
+                        }
+                    };
+                    for vector in &report.vectors {
+                        match &vector.status {
+                            UnitStatus::Ok => {}
+                            UnitStatus::Error(m) => {
+                                println!("ERR\t{}::{}\t{m}", file.display(), vector.name);
+                                errors += 1;
+                            }
+                            UnitStatus::Panic(m) => {
+                                println!(
+                                    "PANIC\t{}::{}\t{}",
+                                    file.display(),
+                                    vector.name,
+                                    m.replace('\n', " ")
+                                );
+                                panics += 1;
+                            }
+                        }
+                    }
+                    filled += report.filled();
+                } else {
+                    let n = fill_test_suite(&file, spec_override, self.force)?;
+                    println!("Filled post for {n} transaction vector(s) in {}", file.display());
+                    filled += n;
+                }
             }
         }
-        Ok(())
+        // A sweep that filled and declined nothing reached no transaction vector at all: an empty
+        // corpus, or one whose every file was unreadable or skipped. Its zeroes are truthful and
+        // meaningless, so they must not read as a pass — in either mode. Without `--keep-going`
+        // the run stops at the first failure, which says nothing about the case where there was
+        // no work to fail at.
+        let total = filled + errors + panics;
+        if self.keep_going {
+            println!(
+                "Fill tally: OK={filled} ERR={errors} PANIC={panics} FILE_ERR={file_errors} \
+                 SKIP_FILE={skipped_files} TOTAL={total}"
+            );
+        }
+        if total == 0 {
+            return Err(TestError {
+                name: "fill summary".to_string(),
+                path: String::new(),
+                kind: TestErrorKind::FixtureError(
+                    "no transaction vector was filled; the corpus is empty or unreachable"
+                        .to_string(),
+                ),
+            });
+        }
+        if !self.keep_going {
+            return Ok(());
+        }
+        if errors + panics + file_errors == 0 {
+            return Ok(());
+        }
+        // `--keep-going` changes when the run stops, not whether it failed: the CLI's exit-code
+        // contract still reports a unit that did not fill.
+        Err(TestError {
+            name: "fill summary".to_string(),
+            path: String::new(),
+            kind: TestErrorKind::TestsFailed { failed: errors + panics + file_errors, total },
+        })
+    }
+
+    /// Execute every fixture under both specs and report how they differ (see `--diff-spec`).
+    fn run_diff(&self) -> Result<(), TestError> {
+        let base = self.resolve_diff_spec()?.expect("run_diff is only reached with --diff-spec");
+        // Clap's `requires = "bench_spec"` makes the target explicit before this point.
+        let target = self.resolve_spec()?.expect("--diff-spec requires --bench-spec");
+        // The comparison is decided by Rex7's precision invariant, which relates Rex7 to Rex6 and
+        // states nothing about any other pair; running it over one would apply that licence where
+        // none was granted.
+        let specs = DiffSpecs::new(target, base).map_err(|detail| TestError {
+            name: "spec pair".to_string(),
+            path: String::new(),
+            kind: TestErrorKind::FixtureError(detail),
+        })?;
+        let scan = collect_fixture_files(&self.paths)?;
+
+        let tally = run_diff(
+            scan,
+            DiffRunConfig {
+                specs,
+                single_thread: self.single_thread,
+                collect_evidence: !self.diff_no_frame_evidence,
+                progress: !self.json,
+            },
+        );
+
+        print_diff_tally(&tally, target, base);
+        if let Some(report) = &self.diff_report {
+            let json = serde_json::to_string_pretty(&diff_report_json(&tally, target, base))
+                .expect("serialize diff report");
+            std::fs::write(report, json).map_err(|e| TestError {
+                name: "diff report".to_string(),
+                path: report.display().to_string(),
+                kind: TestErrorKind::FixtureError(format!("write: {e}")),
+            })?;
+        }
+
+        if !tally.is_failure() {
+            return Ok(());
+        }
+        Err(diff_summary_error(&tally))
+    }
+
+    /// Build the chaos run's shape filter from `--chaos-shapes`.
+    fn resolve_chaos_filter(&self) -> Result<ShapeFilter, TestError> {
+        if self.chaos_shapes.is_empty() {
+            return Ok(ShapeFilter::default());
+        }
+        let shapes = self
+            .chaos_shapes
+            .iter()
+            .map(|label| ChaosShape::parse(label))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|detail| TestError {
+                name: "--chaos-shapes".to_string(),
+                path: String::new(),
+                kind: TestErrorKind::FixtureError(detail),
+            })?;
+        Ok(ShapeFilter::only(&shapes))
+    }
+
+    /// Sweep the corpus under a deterministic rewriting inspector (see `--chaos-seed`).
+    fn run_chaos(&self) -> Result<(), TestError> {
+        let seed = self.chaos_seed.expect("run_chaos is only reached with --chaos-seed");
+        // Clap's `requires = "bench_spec"` makes the spec explicit before this point.
+        let spec = self.resolve_spec()?.expect("--chaos-seed requires --bench-spec");
+        let filter = self.resolve_chaos_filter()?;
+        let scan = collect_fixture_files(&self.paths)?;
+
+        let tally = run_chaos(
+            scan,
+            ChaosRunConfig {
+                spec,
+                seed,
+                filter,
+                single_thread: self.single_thread,
+                progress: !self.json,
+            },
+        );
+
+        print_chaos_tally(&tally, spec, seed, filter);
+        if let Some(report) = &self.chaos_report {
+            let json = serde_json::to_string_pretty(&chaos_report_json(&tally, spec, seed, filter))
+                .expect("serialize chaos report");
+            std::fs::write(report, json).map_err(|e| TestError {
+                name: "chaos report".to_string(),
+                path: report.display().to_string(),
+                kind: TestErrorKind::FixtureError(format!("write: {e}")),
+            })?;
+        }
+
+        if !tally.is_failure() {
+            return Ok(());
+        }
+        Err(chaos_summary_error(&tally))
     }
 
     /// Benchmark every fixture under the given paths and print the results as JSON.
@@ -181,7 +408,18 @@ impl Cmd {
                     kind: TestErrorKind::InvalidPath,
                 });
             }
-            for file in find_all_json_tests(path) {
+            let scan = find_all_json_tests(path);
+            if let Some(err) = scan.errors.first() {
+                return Err(TestError {
+                    name: "Path validation".to_string(),
+                    path: path.display().to_string(),
+                    kind: TestErrorKind::FixtureError(format!(
+                        "{} path(s) could not be read; first: {err}",
+                        scan.errors.len()
+                    )),
+                });
+            }
+            for file in scan.files {
                 all.extend(bench_test_suite(
                     &file,
                     self.bench_runs,
@@ -189,6 +427,21 @@ impl Cmd {
                     spec_override,
                 )?);
             }
+        }
+
+        if all.is_empty() {
+            return Err(TestError {
+                name: "bench".to_string(),
+                path: self
+                    .paths
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                kind: TestErrorKind::FixtureError(
+                    "no unit was benchmarked; the corpus is empty or unreachable".to_string(),
+                ),
+            });
         }
 
         let bench_json = |u: &UnitBench| {
@@ -218,6 +471,288 @@ impl Cmd {
         println!("{}", serde_json::to_string_pretty(&output).expect("serialize bench output"));
         Ok(())
     }
+}
+
+/// Parse a spec-name flag value into a [`SpecName`].
+///
+/// Rejects both an unparseable string and a `MegaSpecId` this crate has no fixture-facing name
+/// for; either would otherwise fail much later, deep inside execution.
+fn parse_spec(flag: &str, value: &str) -> Result<SpecName, TestError> {
+    let invalid_spec = || TestError {
+        name: "spec".to_string(),
+        path: value.to_string(),
+        kind: TestErrorKind::FixtureError(format!(
+            "invalid {flag} {value:?}; expected one of: {}",
+            [
+                mega_evm::name::EQUIVALENCE,
+                mega_evm::name::MINI_REX,
+                mega_evm::name::REX,
+                mega_evm::name::REX1,
+                mega_evm::name::REX2,
+                mega_evm::name::REX3,
+                mega_evm::name::REX4,
+                mega_evm::name::REX5,
+                mega_evm::name::REX6,
+                mega_evm::name::REX7,
+            ]
+            .join(", ")
+        )),
+    };
+    let spec =
+        MegaSpecId::from_str(value).map(SpecName::from_mega_spec).map_err(|_| invalid_spec())?;
+    if spec == SpecName::Unknown {
+        return Err(invalid_spec());
+    }
+    Ok(spec)
+}
+
+/// Why a sweep that judged nothing failed, as a [`TestErrorKind::FixtureError`] detail.
+fn no_work_detail(unit: &str, file_errors: usize) -> String {
+    if file_errors == 0 {
+        format!("no {unit} was judged; the corpus is empty, entirely skipped, or unreachable")
+    } else {
+        format!(
+            "no {unit} was judged ({file_errors} fixtures unreadable); \
+             the corpus is empty, entirely skipped, or unreachable"
+        )
+    }
+}
+
+/// Maps every [`DiffTally::is_failure`] condition onto the CLI's summary error.
+///
+/// Unexplained differences, panics, and unreadable fixtures share [`TestErrorKind::TestsFailed`]
+/// so the `failed` count includes all three. A run that judged nothing uses
+/// [`TestErrorKind::FixtureError`] instead of claiming `0 tests failed out of 0`.
+fn diff_summary_error(tally: &DiffTally) -> TestError {
+    let unexplained = tally.count(DiffClass::Unexplained);
+    let panics = tally.count(DiffClass::Panic);
+    let file_errors = tally.file_errors.len();
+    let total = tally.total();
+    TestError {
+        name: "diff summary".to_string(),
+        path: String::new(),
+        kind: if total == 0 {
+            TestErrorKind::FixtureError(no_work_detail("fixture", file_errors))
+        } else {
+            TestErrorKind::TestsFailed { failed: unexplained + panics + file_errors, total }
+        },
+    }
+}
+
+/// Maps every [`ChaosSweepTally::is_failure`] condition onto the CLI's summary error.
+///
+/// Flagged verdicts and unreadable fixtures share [`TestErrorKind::TestsFailed`]. A run that
+/// judged nothing, or that applied no mutation, uses [`TestErrorKind::FixtureError`] so it cannot
+/// read as `0 tests failed`.
+fn chaos_summary_error(tally: &ChaosSweepTally) -> TestError {
+    let file_errors = tally.file_errors.len();
+    let total = tally.total();
+    TestError {
+        name: "chaos summary".to_string(),
+        path: String::new(),
+        kind: if total == 0 {
+            TestErrorKind::FixtureError(no_work_detail("vector", file_errors))
+        } else if tally.flagged.is_empty() && file_errors == 0 {
+            TestErrorKind::FixtureError(
+                "no mutation was applied; the run tested nothing".to_string(),
+            )
+        } else {
+            TestErrorKind::TestsFailed { failed: tally.flagged.len() + file_errors, total }
+        },
+    }
+}
+
+/// Every class a differential run can produce, in report order.
+const DIFF_CLASSES: [DiffClass; 5] = [
+    DiffClass::Pass,
+    DiffClass::Explained,
+    DiffClass::Unexplained,
+    DiffClass::Skipped,
+    DiffClass::Panic,
+];
+
+/// Prints the differential run's tally, mechanism distribution, and every flagged unit.
+fn print_diff_tally(tally: &DiffTally, target: SpecName, base: SpecName) {
+    println!("\nDifferential run: {target:?} vs {base:?} over {} unit(s)", tally.total());
+    for class in DIFF_CLASSES {
+        println!("  {:<12} {}", class.label(), tally.count(class));
+    }
+    if !tally.file_errors.is_empty() {
+        println!("  {:<12} {}", "FILE_ERROR", tally.file_errors.len());
+    }
+    if tally.skipped_files > 0 {
+        println!("  ({} file(s) skipped by filename, no unit of them judged)", tally.skipped_files);
+    }
+    if !tally.mechanisms.is_empty() {
+        println!("Mechanisms over explained differences:");
+        for (label, count) in &tally.mechanisms {
+            println!("  {label:<28} {count}");
+        }
+    }
+    if !tally.explained_fields.is_empty() {
+        println!("Shapes of explained differences (disagreeing quantities):");
+        for (shape, count) in &tally.explained_fields {
+            println!("  {shape:<48} {count}");
+        }
+    }
+    for diff in &tally.flagged {
+        println!(
+            "{}\t{}::{}\t{}\t{}",
+            diff.class.label(),
+            diff.path,
+            diff.name,
+            diff.fields.iter().map(|f| f.label()).collect::<Vec<_>>().join(","),
+            diff.detail.as_deref().unwrap_or("-").replace('\n', " ")
+        );
+    }
+    for error in &tally.file_errors {
+        println!("FILE_ERROR\t{}", error.replace('\n', " "));
+    }
+    if tally.is_failure() {
+        println!(
+            "Diff failure: {} unexplained, {} panics, {} fixtures unreadable ({} judged)",
+            tally.count(DiffClass::Unexplained),
+            tally.count(DiffClass::Panic),
+            tally.file_errors.len(),
+            tally.total(),
+        );
+    }
+}
+
+/// Every chaos verdict, in the order a reader wants them.
+const CHAOS_CLASSES: [ChaosClass; 7] = [
+    ChaosClass::Pass,
+    ChaosClass::Refused,
+    ChaosClass::ControlDrift,
+    ChaosClass::ChaosRejected,
+    ChaosClass::LedgerBlind,
+    ChaosClass::Skipped,
+    ChaosClass::Panic,
+];
+
+/// Prints the chaos run's tally, plus every vector that needs a human.
+fn print_chaos_tally(tally: &ChaosSweepTally, spec: SpecName, seed: u64, filter: ShapeFilter) {
+    println!("\nChaos run: {spec:?} under seed {seed} over {} vector(s)", tally.total());
+    if !filter.is_complete() {
+        println!("  (shape filter: {})", chaos_filter_label(filter));
+    }
+    for class in CHAOS_CLASSES {
+        println!("  {:<16} {}", class.label(), tally.count(class));
+    }
+    if !tally.file_errors.is_empty() {
+        println!("  {:<16} {}", "FILE_ERROR", tally.file_errors.len());
+    }
+    if tally.skipped_files > 0 {
+        println!(
+            "  ({} file(s) skipped by filename, no vector of them judged)",
+            tally.skipped_files
+        );
+    }
+    println!(
+        "Mutations applied: {} over {} callback(s)",
+        tally.shapes.total(),
+        tally.shapes.callbacks
+    );
+    for (shape, count) in &tally.shapes.applied {
+        println!("  {shape:<20} {count}");
+    }
+    for verdict in &tally.flagged {
+        println!(
+            "{}\t{}::{}\tseed={}\t{}",
+            verdict.class.label(),
+            verdict.path,
+            verdict.name,
+            verdict.seed,
+            verdict.detail.as_deref().unwrap_or("-").replace('\n', " ")
+        );
+    }
+    for error in &tally.file_errors {
+        println!("FILE_ERROR\t{}", error.replace('\n', " "));
+    }
+    if tally.is_failure() {
+        println!(
+            "Chaos failure: {} flagged, {} fixtures unreadable, {} mutations ({} judged)",
+            tally.flagged.len(),
+            tally.file_errors.len(),
+            tally.shapes.total(),
+            tally.total(),
+        );
+    }
+}
+
+/// The machine-readable form of [`print_chaos_tally`], for `--chaos-report`.
+fn chaos_report_json(
+    tally: &ChaosSweepTally,
+    spec: SpecName,
+    seed: u64,
+    filter: ShapeFilter,
+) -> serde_json::Value {
+    json!({
+        "spec": format!("{spec:?}"),
+        "seed": seed,
+        "shapeFilter": chaos_filter_label(filter),
+        "total": tally.total(),
+        "classes": CHAOS_CLASSES
+            .iter()
+            .map(|c| (c.label().to_string(), json!(tally.count(*c))))
+            .collect::<serde_json::Map<_, _>>(),
+        "callbacks": tally.shapes.callbacks,
+        "mutations": tally.shapes.total(),
+        "mutationsByShape": tally.shapes.applied,
+        "fileErrors": tally.file_errors,
+        "skippedFiles": tally.skipped_files,
+        "flagged": tally
+            .flagged
+            .iter()
+            .map(|v| json!({
+                "class": v.class.label(),
+                "path": v.path,
+                "name": v.name,
+                "seed": v.seed,
+                "mutations": v.mutations,
+                "detail": v.detail,
+            }))
+            .collect::<Vec<_>>(),
+    })
+}
+
+/// What a chaos run's shape filter allows, as one line.
+fn chaos_filter_label(filter: ShapeFilter) -> String {
+    ChaosShape::ALL
+        .into_iter()
+        .filter(|shape| filter.allows(*shape))
+        .map(|shape| shape.label().to_string())
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// The machine-readable form of [`print_diff_tally`], for `--diff-report`.
+fn diff_report_json(tally: &DiffTally, target: SpecName, base: SpecName) -> serde_json::Value {
+    json!({
+        "targetSpec": format!("{target:?}"),
+        "baseSpec": format!("{base:?}"),
+        "total": tally.total(),
+        "classes": DIFF_CLASSES
+            .iter()
+            .map(|c| (c.label().to_string(), json!(tally.count(*c))))
+            .collect::<serde_json::Map<_, _>>(),
+        "mechanisms": tally.mechanisms,
+        "explainedFields": tally.explained_fields,
+        "fileErrors": tally.file_errors,
+        "skippedFiles": tally.skipped_files,
+        "flagged": tally
+            .flagged
+            .iter()
+            .map(|d| json!({
+                "class": d.class.label(),
+                "path": d.path,
+                "name": d.name,
+                "fields": d.fields.iter().map(|f| f.label()).collect::<Vec<_>>(),
+                "mechanisms": d.mechanisms.iter().map(|m| m.label()).collect::<Vec<_>>(),
+                "detail": d.detail,
+            }))
+            .collect::<Vec<_>>(),
+    })
 }
 
 fn main() {
@@ -272,5 +807,46 @@ mod tests {
             err.to_string().contains("invalid --bench-spec"),
             "error should be actionable: {err}"
         );
+    }
+
+    #[test]
+    fn test_diff_summary_counts_file_errors_as_failures() {
+        let mut tally = DiffTally::default();
+        *tally.classes.entry(DiffClass::Pass.label()).or_insert(0) += 1;
+        tally.file_errors.push("broken.json".to_string());
+        let err = diff_summary_error(&tally);
+        match err.kind {
+            TestErrorKind::TestsFailed { failed, total } => {
+                assert_eq!((failed, total), (1, 1), "the unreadable fixture is a failure");
+            }
+            other => panic!("expected TestsFailed, got {other:?}"),
+        }
+        assert!(
+            !err.to_string().contains("Error: 0 tests failed"),
+            "must not claim zero failures: {err}"
+        );
+    }
+
+    #[test]
+    fn test_diff_summary_reports_a_run_that_judged_nothing() {
+        let err = diff_summary_error(&DiffTally::default());
+        let text = err.to_string();
+        assert!(text.contains("no fixture was judged"), "{text}");
+        assert!(!text.contains("0 tests failed"), "{text}");
+
+        let mut tally = DiffTally::default();
+        tally.file_errors.push("broken.json".to_string());
+        let err = diff_summary_error(&tally);
+        let text = err.to_string();
+        assert!(text.contains("no fixture was judged"), "{text}");
+        assert!(text.contains("1 fixtures unreadable"), "{text}");
+    }
+
+    #[test]
+    fn test_chaos_summary_reports_a_run_that_judged_nothing() {
+        let err = chaos_summary_error(&ChaosSweepTally::default());
+        let text = err.to_string();
+        assert!(text.contains("no vector was judged"), "{text}");
+        assert!(!text.contains("0 tests failed"), "{text}");
     }
 }

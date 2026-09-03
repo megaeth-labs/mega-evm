@@ -197,17 +197,12 @@ mod tests {
     const CHAIN_ID: u64 = 6342;
     const SENDER: Address = address!("0000000000000000000000000000000000000f00");
     const TARGET: Address = address!("0000000000000000000000000000000000000f01");
-    /// revm's mainnet cost per calldata token.
-    const MAINNET_TX_TOKEN_COST: u64 = 4;
-    /// The per-token cost an embedder installs in place of the mainnet one.
+    /// The per-token cost an embedder might try to install in place of the mainnet one.
     const CUSTOM_TX_TOKEN_COST: u64 = 40;
     /// revm's mainnet EIP-7623 floor cost per calldata token.
     const MAINNET_TX_FLOOR_COST_PER_TOKEN: u64 = 10;
     /// revm's mainnet base cost of a transaction, the constant part of the EIP-7623 floor.
     const MAINNET_TX_BASE_STIPEND: u64 = 21_000;
-    /// Zero calldata bytes are one EIP-7623 token each. This many keeps the transaction above
-    /// every gas floor, so its gas used tracks the per-token cost of the schedule directly.
-    const UNFLOORED_CALLDATA_TOKENS: u64 = 100;
     /// Enough calldata tokens that the EIP-7623 floor rises above the transaction's own cost
     /// (`MegaETH`'s calldata storage gas included), so the floor decides the gas used.
     const FLOOR_BINDING_CALLDATA_TOKENS: u64 = 2_000;
@@ -227,17 +222,18 @@ mod tests {
     }
 
     /// The mainnet `PRAGUE` schedule with the calldata token cost moved off its mainnet value —
-    /// the kind of override an embedder installs for its own chain.
+    /// the kind of override an embedder might reach for, and which the factory rejects.
     fn embedder_gas_params(tx_token_cost: u64) -> GasParams {
         let mut gas_params = GasParams::new_spec(SpecId::PRAGUE);
         gas_params.override_gas([(GasId::tx_token_cost(), tx_token_cost)]);
         gas_params
     }
 
-    fn embedder_cfg(tx_token_cost: u64, disable_eip7623: bool) -> CfgEnv<MegaSpecId> {
+    /// A `REX6` configuration an embedder hands the factory. Only `disable_eip7623` is moved off
+    /// its default — the gas schedule is the spec's, which is the only one the factory admits.
+    fn embedder_cfg(disable_eip7623: bool) -> CfgEnv<MegaSpecId> {
         let mut cfg = CfgEnv::new_with_spec(MegaSpecId::REX6);
         cfg.chain_id = CHAIN_ID;
-        cfg.gas_params = embedder_gas_params(tx_token_cost);
         cfg.disable_eip7623 = disable_eip7623;
         cfg
     }
@@ -286,7 +282,7 @@ mod tests {
     /// neither leg may silently reset a field to its revm default.
     #[test]
     fn test_create_evm_round_trips_embedder_cfg() {
-        let cfg = embedder_cfg(40, true);
+        let cfg = embedder_cfg(true);
         let db = MemoryDatabase::default();
 
         let evm = MegaEvmFactory::new().create_evm(db, evm_env(cfg.clone()));
@@ -295,7 +291,7 @@ mod tests {
         let read_back = evm.cfg_env();
         assert_eq!(read_back.spec, MegaSpecId::REX6);
         assert_eq!(read_back.chain_id, CHAIN_ID);
-        assert_eq!(read_back.gas_params, cfg.gas_params, "custom gas schedule must survive");
+        assert_eq!(read_back.gas_params, cfg.gas_params, "the spec's gas schedule must survive");
         assert!(read_back.disable_eip7623, "revm 40 switches must survive");
 
         // And through `finish`, which hands the config back to the embedder.
@@ -304,6 +300,19 @@ mod tests {
         assert_eq!(evm_env.cfg_env.chain_id, CHAIN_ID);
         assert_eq!(evm_env.cfg_env.gas_params, cfg.gas_params);
         assert!(evm_env.cfg_env.disable_eip7623);
+    }
+
+    /// The gas schedule is the one `CfgEnv` field the factory does not accept from an embedder.
+    /// It belongs to the spec, and `create_evm` — the production entry point an embedder's
+    /// `EvmEnv` arrives through — rejects a rewritten one rather than building an EVM that would
+    /// charge one schedule and account for another.
+    #[test]
+    #[should_panic(expected = "gas params differ from the spec-defined schedule")]
+    fn test_create_evm_rejects_a_gas_schedule_off_the_spec_table() {
+        let mut cfg = embedder_cfg(true);
+        cfg.gas_params = embedder_gas_params(CUSTOM_TX_TOKEN_COST);
+
+        let _ = MegaEvmFactory::new().create_evm(MemoryDatabase::default(), evm_env(cfg));
     }
 
     /// The production path — `create_evm` routing the embedder's `EvmEnv` through `with_cfg` —
@@ -323,34 +332,13 @@ mod tests {
         );
     }
 
-    /// Carrying the config is not enough — it must also drive execution. A custom per-token
-    /// calldata cost moves the same transaction's gas by exactly its per-token delta.
-    #[test]
-    fn test_embedder_gas_schedule_takes_effect_on_gas() {
-        let mainnet_schedule =
-            run_calldata_tx(embedder_cfg(MAINNET_TX_TOKEN_COST, true), UNFLOORED_CALLDATA_TOKENS);
-        let custom_schedule =
-            run_calldata_tx(embedder_cfg(CUSTOM_TX_TOKEN_COST, true), UNFLOORED_CALLDATA_TOKENS);
-
-        assert_eq!(
-            custom_schedule - mainnet_schedule,
-            (CUSTOM_TX_TOKEN_COST - MAINNET_TX_TOKEN_COST) * UNFLOORED_CALLDATA_TOKENS,
-            "the embedder's per-token calldata cost must price the transaction"
-        );
-    }
-
-    /// Same for the `disable_eip7623` switch: with enough calldata for the floor to bind, turning
+    /// Carrying the config is not enough — it must also drive execution. The `disable_eip7623`
+    /// switch is one an embedder does own: with enough calldata for the floor to bind, turning
     /// EIP-7623 off removes exactly revm's floor cost from the transaction's gas.
     #[test]
     fn test_embedder_eip7623_switch_takes_effect_on_gas() {
-        let with_eip7623 = run_calldata_tx(
-            embedder_cfg(MAINNET_TX_TOKEN_COST, false),
-            FLOOR_BINDING_CALLDATA_TOKENS,
-        );
-        let without_eip7623 = run_calldata_tx(
-            embedder_cfg(MAINNET_TX_TOKEN_COST, true),
-            FLOOR_BINDING_CALLDATA_TOKENS,
-        );
+        let with_eip7623 = run_calldata_tx(embedder_cfg(false), FLOOR_BINDING_CALLDATA_TOKENS);
+        let without_eip7623 = run_calldata_tx(embedder_cfg(true), FLOOR_BINDING_CALLDATA_TOKENS);
 
         assert_eq!(
             with_eip7623 - without_eip7623,
@@ -361,18 +349,28 @@ mod tests {
     }
 
     /// A config whose gas schedule prices state gas: the mainnet `PRAGUE` table with Amsterdam's
-    /// charge for setting a fresh storage slot dropped in. An embedder can install exactly this,
-    /// which is what leaves EIP-8037 one flag away from repricing a frozen spec.
+    /// charge for setting a fresh storage slot dropped in. This is the shape the schedule pin
+    /// exists to turn away — a schedule under which EIP-8037 would have something to move.
     fn state_gas_priced_cfg() -> CfgEnv<MegaSpecId> {
         let amsterdam_sstore_set_state_gas =
             GasParams::new_spec(SpecId::AMSTERDAM).get(GasId::sstore_set_state_gas());
         assert_ne!(amsterdam_sstore_set_state_gas, 0, "state gas must be priced for this probe");
 
-        let mut cfg = embedder_cfg(MAINNET_TX_TOKEN_COST, true);
+        let mut cfg = embedder_cfg(true);
         cfg.gas_params
             .override_gas([(GasId::sstore_set_state_gas(), amsterdam_sstore_set_state_gas)]);
         cfg
     }
+
+    /// The entries EIP-8037 splits a charge into. All of them are zero on every schedule
+    /// `MegaSpecId` defines, which is what makes the split inert once the schedule is pinned.
+    const STATE_GAS_IDS: [fn() -> GasId; 5] = [
+        GasId::sstore_set_state_gas,
+        GasId::new_account_state_gas,
+        GasId::code_deposit_state_gas,
+        GasId::create_state_gas,
+        GasId::tx_eip7702_state_gas_bytecode,
+    ];
 
     /// Executes one transaction into [`SSTORE_FRESH_SLOT_CODE`] planted at [`TARGET`] and returns
     /// its gas used.
@@ -407,19 +405,18 @@ mod tests {
         result.result.tx_gas_used()
     }
 
-    /// EIP-8037 is the one `CfgEnv` field an embedder does not own. `MegaETH`'s gas accounting
+    /// EIP-8037 is another `CfgEnv` field an embedder does not own. `MegaETH`'s gas accounting
     /// assumes no state-gas split exists, so the flag is forced off before the EVM is built and
     /// again before every transaction, reads back off, and setting it changes nothing about what a
     /// transaction costs.
     ///
-    /// The probe is a fresh-slot `SSTORE` under a schedule that prices state gas —
-    /// `state_gas_priced_cfg` asserts the Amsterdam charge it installs is non-zero, so a live
-    /// split would land on this transaction. There is deliberately no "forced past the pin"
-    /// control any more: the force now happens inside the transaction, after any window a test
-    /// could write the flag in, which is the property being asserted.
+    /// The probe is a fresh-slot `SSTORE`, the operation the split would reprice first. It runs
+    /// on the spec's schedule because that is the only schedule a transaction can run on — see
+    /// `test_a_state_gas_priced_schedule_is_rejected` for the schedule that would have given the
+    /// split something to move, and why it never reaches execution.
     #[test]
     fn test_embedder_cannot_enable_amsterdam_eip8037() {
-        let mut cfg = state_gas_priced_cfg();
+        let mut cfg = embedder_cfg(true);
         cfg.enable_amsterdam_eip8037 = true;
 
         let evm = MegaEvmFactory::new().create_evm(MemoryDatabase::default(), evm_env(cfg.clone()));
@@ -440,20 +437,35 @@ mod tests {
         );
 
         // And execution never enters state-gas accounting: a fresh-slot `SSTORE` costs the same
-        // whether or not the embedder asked for EIP-8037, even on a schedule that prices state
-        // gas.
+        // whether or not the embedder asked for EIP-8037.
         assert_eq!(
             run_sstore_tx(cfg),
-            run_sstore_tx(state_gas_priced_cfg()),
+            run_sstore_tx(embedder_cfg(true)),
             "an embedder's EIP-8037 request must not reprice a fresh-slot SSTORE"
         );
+    }
 
-        // And the state-gas price in the schedule is inert on its own: installing it changes
-        // nothing either, so no part of execution reads the state-gas table.
-        assert_eq!(
-            run_sstore_tx(state_gas_priced_cfg()),
-            run_sstore_tx(embedder_cfg(MAINNET_TX_TOKEN_COST, true)),
-            "a schedule that prices state gas must not reprice a transaction while the split is off"
-        );
+    /// The second half of the EIP-8037 guarantee, now carried by the schedule pin: the split has
+    /// nothing to move. Every state-gas entry is zero on every schedule `MegaSpecId` defines, and
+    /// a schedule that priced one is rejected before it can run a transaction — so the flag being
+    /// forced off is a second lock on a door the schedule already closed, not the only one.
+    #[test]
+    fn test_state_gas_is_unpriced_on_every_spec_schedule() {
+        for spec in [MegaSpecId::EQUIVALENCE, MegaSpecId::REX5, MegaSpecId::REX6, MegaSpecId::REX7]
+        {
+            let schedule = GasParams::new_spec(SpecId::from(spec));
+            for id in STATE_GAS_IDS {
+                assert_eq!(schedule.get(id()), 0, "{:?} on {spec:?}", id().name());
+            }
+        }
+    }
+
+    /// A schedule that prices state gas is a schedule off the spec table, and is turned away at
+    /// the factory like any other.
+    #[test]
+    #[should_panic(expected = "gas params differ from the spec-defined schedule")]
+    fn test_a_state_gas_priced_schedule_is_rejected() {
+        let _ = MegaEvmFactory::new()
+            .create_evm(MemoryDatabase::default(), evm_env(state_gas_priced_cfg()));
     }
 }

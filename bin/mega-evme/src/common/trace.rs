@@ -17,7 +17,7 @@ use mega_evm::{
         state::EvmState,
         ExecuteEvm, InspectEvm,
     },
-    MegaContext, MegaEvm, MegaHaltReason, MegaTransaction,
+    DeclaredObserver, MegaContext, MegaEvm, MegaHaltReason, MegaTransaction,
 };
 use revm_inspectors::tracing::{TracingInspector, TracingInspectorConfig};
 use tracing::{debug, info, trace};
@@ -101,6 +101,17 @@ impl TraceArgs {
     pub fn create_inspector(&self) -> TracingInspector {
         let config = TracingInspectorConfig::all();
         TracingInspector::new(config)
+    }
+
+    /// The same tracer, wrapped in the declaration the canonical block-execution path admits an
+    /// inspected transaction on.
+    ///
+    /// [`TracingInspector`] writes nothing back to the EVM, but the declaration cannot be made
+    /// about it here — both it and the trait are foreign to this crate — so it is made at the
+    /// point of use, about this one value, by wrapping it. That is the whole of what a node
+    /// keeping tracing on block production has to write.
+    pub fn create_trusted_inspector(&self) -> DeclaredObserver<TracingInspector> {
+        DeclaredObserver(self.create_inspector())
     }
 
     /// Creates [`GethDefaultTracingOptions`] from CLI arguments
@@ -235,7 +246,7 @@ impl TraceArgs {
             trace!(result_and_state = ?result_and_state, "Evm execution result and state");
 
             // Generate trace string based on tracer type
-            let trace_str = self.generate_trace(evm.inspector, &result_and_state, evm.db_ref());
+            let trace_str = self.generate_trace(&evm.inspector, &result_and_state, evm.db_ref());
             trace!(trace_str = ?trace_str, "Generated trace");
 
             Ok((result_and_state.result, result_and_state.state, Some(trace_str)))

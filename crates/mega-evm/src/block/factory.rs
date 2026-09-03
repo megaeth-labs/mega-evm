@@ -100,19 +100,27 @@ where
         MegaBlockExecutor::new(evm, block_ctx, self.hardforks.clone(), self.receipt_builder.clone())
     }
 
-    /// Create a new block executor with an inspector.
+    /// Create a new block executor with a read-only inspector its type's author has declared
+    /// [`TrustedObserver`](crate::TrustedObserver).
+    ///
+    /// The declaration is what the canonical block-execution path admits an inspected transaction
+    /// on, so this is the entry a node tracing block production or validation takes. There is no
+    /// undeclared counterpart: an inspector without a declaration reaches an executor only through
+    /// the [`BlockExecutorFactory`](alloy_evm::block::BlockExecutorFactory) trait entry, which
+    /// takes an EVM the caller built and whose transactions are then refused one by one.
+    ///
+    /// A `revm-inspectors` tracer cannot be declared where both it and the trait are foreign, so a
+    /// node wraps it in [`DeclaredObserver`](crate::DeclaredObserver), which is local here, carries
+    /// the declaration and forwards every callback; `bin/mega-evme`'s replay command is the shape
+    /// to copy.
     ///
     /// # Parameters
     ///
     /// - `db`: The database to use for EVM state.
     /// - `evm_env`: The EVM environment, including block and config environments.
     /// - `block_ctx`: The block execution context for tracking access patterns.
-    /// - `inspector`: The inspector to use for debugging and monitoring.
-    ///
-    /// # Returns
-    ///
-    /// A new `BlockExecutor` instance configured with the provided parameters.
-    pub fn create_executor_with_inspector<'a, DB, I>(
+    /// - `inspector`: The declared read-only inspector to observe execution with.
+    pub fn create_executor_with_trusted_inspector<'a, DB, I>(
         &self,
         db: &'a mut State<DB>,
         block_ctx: MegaBlockExecutionCtx,
@@ -125,12 +133,15 @@ where
     >
     where
         DB: Database + 'a,
-        I: Inspector<crate::MegaContext<&'a mut State<DB>, ExtEnvFactory::EnvTypes>> + 'a,
+        I: Inspector<crate::MegaContext<&'a mut State<DB>, ExtEnvFactory::EnvTypes>>
+            + crate::TrustedObserver
+            + 'a,
     {
         let runtime_limits = block_ctx.block_limits.to_evm_tx_runtime_limits();
         let evm = self
             .evm_factory
-            .create_evm_with_inspector(db, evm_env, inspector)
+            .create_evm(db, evm_env)
+            .with_trusted_inspector(inspector)
             .with_tx_runtime_limits(runtime_limits);
         MegaBlockExecutor::new(evm, block_ctx, self.hardforks.clone(), self.receipt_builder.clone())
     }
@@ -177,6 +188,11 @@ where
         DB: StateDB,
         I: Inspector<<Self::EvmFactory as alloy_evm::EvmFactory>::Context<DB>>,
     {
+        // Nothing is checked about the inspector here. This entry takes an EVM the caller built,
+        // so its inspector may or may not carry a declaration, and the answer is a runtime one
+        // the executor's own entries ask per transaction — as an error that fails the block, not
+        // an assertion that stops the process. See `MegaBlockExecutionError::UndeclaredInspector`.
+
         // Synchronize EVM tx runtime limits with the block context's BlockLimits.
         // This mirrors the inherent factory paths above which apply this
         // unconditionally on every spec since introduction. Without this, the

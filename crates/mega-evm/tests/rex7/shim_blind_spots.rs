@@ -1,0 +1,922 @@
+//! The rewrite shapes an all-zero ledger used to admit.
+//!
+//! The measurement shim's contract is that a transaction an inspector rewrote never reaches a
+//! block: the canonical path refuses one whose `InspectorLedger` is non-zero, so every rewrite has
+//! to leave a mark on it. `shim_lanes.rs`, `shim_settlement.rs` and `inspector_cheat_matrix.rs`
+//! pin that per mechanism and per callback × shape pair. This module pins the shapes that slipped
+//! *between* those two questions — each one a rewrite the shim was handed, that changes what the
+//! transaction produces, and that every lane read as nothing:
+//!
+//! - a frame's memory grown for free, by moving the interpreter's memory and the memo of how far it
+//!   has been paid for in the same step, so that neither goes out of bounds and the next expanding
+//!   opcode charges nothing;
+//! - a `CallOutcome` / `CreateOutcome` metadata field — where the callee's return data lands, and
+//!   which address a creation reports — rewritten without touching the `InterpreterResult` inside
+//!   it, which is the only part the rewrite comparison used to read;
+//! - two edits to the *same* signed lane in opposite directions, which a net-only reading cancels
+//!   to zero;
+//! - the same cancellation spread across two frames, where only one of the two survives to the
+//!   receipt, so the net is zero and the effect is not;
+//! - an instruction deleted from a frame, by stepping the program counter past it, so the work is
+//!   never performed and there is nothing for any counter to meter;
+//! - a return buffer put in front of a frame that made no call, so `RETURNDATASIZE` reads a length
+//!   no call produced.
+//!
+//! Four of them are booked on `InspectorLedger::interventions`, from readings the shim did not use
+//! to take; the cancelling pair are what the per-lane gross activity counters exist for. Every test
+//! here asserts the ledger the shim books *and* the effect the rewrite had, because a shape that no
+//! longer changes anything is a shape that stopped testing the guard.
+//!
+//! The last two are also why the snapshot the first shape needed is now a *rule* rather than a
+//! list. A snapshot of four chosen readings caught the memory pair and let the program counter
+//! through, because `Interpreter::bytecode` was not among the things anyone had thought to name.
+//! What the shim takes now is every constant-time reading of the interpreter, and what pins that is
+//! the `Interpreter` row of `gas_surface.rs`'s closed table.
+
+use crate::{
+    common::{base_db, transact, transact_inspected, CALLEE, CONTRACT, EMPTY_TARGET},
+    inspector_common::{plain_and_cheated, ACTION_DELTA, REFUND},
+};
+use alloy_primitives::{address, Address, Bytes, U256};
+use mega_evm::{test_utils::BytecodeBuilder, EvmTxRuntimeLimits, MegaSpecId};
+use revm::{
+    bytecode::opcode::{
+        CALL, CALLER, CREATE, GAS, MLOAD, MSTORE, MSTORE8, POP, RETURN, RETURNDATASIZE, SSTORE,
+        STOP,
+    },
+    context::{Cfg, ContextTr},
+    interpreter::{
+        interpreter::EthInterpreter,
+        interpreter_types::{InputsTr, Jumps, LoopControl, MemoryTr, ReturnData},
+        CallInputs, CallOutcome, CreateInputs, CreateOutcome, Interpreter, InterpreterAction,
+        InterpreterTypes,
+    },
+    Inspector,
+};
+
+/// A second callee, whose frame reverts.
+const REVERTER: Address = EMPTY_TARGET;
+
+/// The address a rewritten `CreateOutcome` reports instead of the one the code was deployed at.
+const FAKE_DEPLOYMENT: Address = address!("00000000000000000000000000000000000f00d0");
+
+/// Slot the fixtures write their observable result to.
+const RESULT_SLOT: u64 = 0x11;
+
+/// The mainnet memory expansion cost of a memory `words` words long.
+const fn memory_cost(words: u64) -> u64 {
+    3 * words + words * words / 512
+}
+
+// --- a frame's memory, grown for free ------------------------------------------------------------
+
+/// How far the free-expansion inspector grows the frame's memory, in words.
+///
+/// The fixture's own `MSTORE` lands inside it, so the expansion the EVM would have charged for is
+/// exactly the one the inspector already did for nothing.
+const STOLEN_WORDS: u64 = 129;
+
+/// Grows the frame's memory and tells the EVM it is already paid for.
+///
+/// Both halves are needed and neither is a rewrite on its own. Moving the memory alone leaves the
+/// memo behind, and the next expanding opcode charges for an expansion that already happened;
+/// moving the memo alone leaves the memory behind, and the EVM reads out of bounds. Moving both
+/// keeps every invariant the interpreter has and skips the charge, which is why the pair was the
+/// hole and neither half was.
+#[derive(Default)]
+struct FreeExpansion {
+    fired: u32,
+}
+
+impl<CTX: ContextTr, INTR: InterpreterTypes> Inspector<CTX, INTR> for FreeExpansion {
+    fn step(&mut self, interp: &mut Interpreter<INTR>, context: &mut CTX) {
+        if self.fired > 0 || interp.bytecode.opcode() != MSTORE {
+            return;
+        }
+        let words = STOLEN_WORDS as usize;
+        assert!(interp.memory.resize(words * 32), "the fixture must allow the memory to be grown",);
+        // Priced through revm's own table, so the memo is exactly what the EVM would have written
+        // had the frame paid; the assertion below restates the formula independently, which is
+        // what makes the two a check rather than one number written twice.
+        let cost = context.cfg().gas_params().memory_cost(words);
+        interp.gas.memory_mut().set_words_num(words, cost);
+        self.fired += 1;
+    }
+}
+
+/// ★ A frame whose memory was grown for free is not an all-zero ledger.
+///
+/// The rewrite reaches through no argument the shim used to compare: the interpreter's gas counter
+/// is untouched, no action is pending, no frame input and no frame result exists yet. What it
+/// moves is the interpreter's memory and the memo beside it, and the transaction then pays less
+/// than it would have — which is the one thing the guard exists to keep out of a block.
+#[test]
+fn test_a_frame_whose_memory_was_grown_for_free_is_booked() {
+    // MSTORE(offset = STOLEN_WORDS * 32 - 32, value = 0xAA), which expands memory to exactly the
+    // size the inspector already grew it to.
+    let offset = (STOLEN_WORDS - 1) * 32;
+    let code = BytecodeBuilder::default()
+        .push_number(0xAAu64)
+        .push_number(offset)
+        .append(MSTORE)
+        .append(STOP)
+        .build();
+
+    let mut inspector = FreeExpansion::default();
+    let (plain, cheated) = plain_and_cheated(|| base_db(code.clone()), &mut inspector);
+
+    assert_eq!(inspector.fired, 1, "the fixture must reach the expanding opcode exactly once");
+    assert!(plain.is_success() && cheated.is_success(), "both runs must succeed");
+    assert_eq!(
+        plain.total_gas_spent - cheated.total_gas_spent,
+        memory_cost(STOLEN_WORDS),
+        "the expansion the inspector performed is the charge the EVM then skipped",
+    );
+    assert!(
+        !cheated.inspector_ledger.is_zero(),
+        "a transaction that paid less because an inspector moved its memory must not read as \
+         untouched: {:?}",
+        cheated.inspector_ledger,
+    );
+}
+
+// --- a call outcome's metadata -------------------------------------------------------------------
+
+/// Where the fixture's `CALL` asks for its return data, and where the inspector moves it to.
+const RETURN_AT: usize = 0;
+const MOVED_TO: usize = 32;
+
+/// Moves a finished call's return data somewhere else in the caller's memory.
+///
+/// The `InterpreterResult` inside the outcome — its classification, its output bytes, its gas —
+/// comes back exactly as the EVM produced it. Only the range the caller will copy the output into
+/// changes, which is not a field the result carries.
+#[derive(Default)]
+struct MoveReturnData {
+    fired: u32,
+}
+
+impl<CTX, INTR: InterpreterTypes> Inspector<CTX, INTR> for MoveReturnData {
+    fn call_end(&mut self, _context: &mut CTX, inputs: &CallInputs, outcome: &mut CallOutcome) {
+        if inputs.target_address != CALLEE || self.fired > 0 {
+            return;
+        }
+        outcome.memory_offset = MOVED_TO..MOVED_TO + 32;
+        self.fired += 1;
+    }
+}
+
+/// ★ A call outcome whose return range was moved is not an all-zero ledger.
+#[test]
+fn test_a_moved_return_range_is_booked() {
+    // Size the caller's memory to two words, call the callee for one word of output at offset 0,
+    // then store what landed there.
+    let code = BytecodeBuilder::default()
+        .push_number(0u64)
+        .push_number(32u64)
+        .append(MSTORE)
+        .push_number(32u64) // retSize
+        .push_number(u64::try_from(RETURN_AT).unwrap()) // retOffset
+        .push_number(0u64) // argsSize
+        .push_number(0u64) // argsOffset
+        .push_number(0u64) // value
+        .push_address(CALLEE)
+        .push_number(100_000u64)
+        .append(CALL)
+        .append(POP)
+        .push_number(u64::try_from(RETURN_AT).unwrap())
+        .append(MLOAD)
+        .push_number(RESULT_SLOT)
+        .append(SSTORE)
+        .append(STOP)
+        .build();
+    // The callee returns one word of 0x11s.
+    let callee = BytecodeBuilder::default()
+        .push_u256(U256::from(0x11u64))
+        .push_number(0u64)
+        .append(MSTORE)
+        .push_number(32u64)
+        .push_number(0u64)
+        .append(RETURN)
+        .build();
+    let db = || base_db(code.clone()).account_code(CALLEE, callee.clone());
+
+    let mut inspector = MoveReturnData::default();
+    let (plain, cheated) = plain_and_cheated(db, &mut inspector);
+
+    assert_eq!(inspector.fired, 1, "the fixture must reach `call_end` for the callee once");
+    assert_eq!(
+        plain.storage_value(CONTRACT, U256::from(RESULT_SLOT)),
+        U256::from(0x11u64),
+        "without the rewrite the return data lands where the caller asked for it",
+    );
+    assert_eq!(
+        cheated.storage_value(CONTRACT, U256::from(RESULT_SLOT)),
+        U256::ZERO,
+        "with it, the caller reads a word the callee never wrote",
+    );
+    assert!(
+        !cheated.inspector_ledger.is_zero(),
+        "a transaction whose state a rewritten return range changed must not read as untouched: \
+         {:?}",
+        cheated.inspector_ledger,
+    );
+}
+
+// --- a frame's returned output ------------------------------------------------------------------
+
+/// The word a rewritten output buffer feeds the caller instead of the one the callee returned.
+const FORGED_OUTPUT: u64 = 0xdead;
+
+/// Replaces the output buffer a finished call hands back, leaving its classification alone.
+///
+/// The classification and the remaining gas are what every other lane reads. The output is
+/// neither, and it is what the caller copies into its own memory.
+#[derive(Default)]
+struct ForgeCallOutput {
+    fired: u32,
+}
+
+impl<CTX, INTR: InterpreterTypes> Inspector<CTX, INTR> for ForgeCallOutput {
+    fn call_end(&mut self, _context: &mut CTX, inputs: &CallInputs, outcome: &mut CallOutcome) {
+        if inputs.target_address != CALLEE || self.fired > 0 {
+            return;
+        }
+        outcome.result.output = Bytes::from(U256::from(FORGED_OUTPUT).to_be_bytes::<32>().to_vec());
+        self.fired += 1;
+    }
+}
+
+/// ★ A call outcome whose returned output was replaced is not an all-zero ledger.
+#[test]
+fn test_a_forged_call_output_is_booked() {
+    // Call the callee for one word of output, then store what landed there.
+    let code = BytecodeBuilder::default()
+        .push_number(32u64) // retSize
+        .push_number(0u64) // retOffset
+        .push_number(0u64) // argsSize
+        .push_number(0u64) // argsOffset
+        .push_number(0u64) // value
+        .push_address(CALLEE)
+        .push_number(100_000u64)
+        .append(CALL)
+        .append(POP)
+        .push_number(0u64)
+        .append(MLOAD)
+        .push_number(RESULT_SLOT)
+        .append(SSTORE)
+        .append(STOP)
+        .build();
+    // The callee returns one word of 0x11s.
+    let callee = BytecodeBuilder::default()
+        .push_u256(U256::from(0x11u64))
+        .push_number(0u64)
+        .append(MSTORE)
+        .push_number(32u64)
+        .push_number(0u64)
+        .append(RETURN)
+        .build();
+    let db = || base_db(code.clone()).account_code(CALLEE, callee.clone());
+
+    let mut inspector = ForgeCallOutput::default();
+    let (plain, cheated) = plain_and_cheated(db, &mut inspector);
+
+    assert_eq!(inspector.fired, 1, "the fixture must reach `call_end` for the callee once");
+    assert_eq!(
+        plain.storage_value(CONTRACT, U256::from(RESULT_SLOT)),
+        U256::from(0x11u64),
+        "without the rewrite the caller reads what the callee returned",
+    );
+    assert_eq!(
+        cheated.storage_value(CONTRACT, U256::from(RESULT_SLOT)),
+        U256::from(FORGED_OUTPUT),
+        "with it, the caller reads a word no frame produced",
+    );
+    assert!(
+        !cheated.inspector_ledger.is_zero(),
+        "a transaction whose state a replaced output buffer changed must not read as untouched: \
+         {:?}",
+        cheated.inspector_ledger,
+    );
+}
+
+/// Reports a different address than the one the creation deployed to.
+#[derive(Default)]
+struct MoveDeploymentAddress {
+    fired: u32,
+}
+
+impl<CTX, INTR: InterpreterTypes> Inspector<CTX, INTR> for MoveDeploymentAddress {
+    fn create_end(
+        &mut self,
+        _context: &mut CTX,
+        _inputs: &CreateInputs,
+        outcome: &mut CreateOutcome,
+    ) {
+        if self.fired > 0 || outcome.address.is_none() {
+            return;
+        }
+        outcome.address = Some(FAKE_DEPLOYMENT);
+        self.fired += 1;
+    }
+}
+
+/// ★ A creation outcome whose reported address was rewritten is not an all-zero ledger.
+///
+/// The code is still deployed where the EVM put it; only the address the caller's stack receives
+/// changes, so the caller goes on to talk to an account that holds nothing.
+#[test]
+fn test_a_rewritten_deployment_address_is_booked() {
+    // Init code that returns two bytes of runtime code.
+    let init: [u8; 11] = [0x60, 0x00, 0x60, 0x00, 0x52, 0x60, 0x02, 0x60, 0x1e, 0xf3, 0x00];
+    let mut builder = BytecodeBuilder::default();
+    for (offset, byte) in init.iter().enumerate() {
+        builder = builder.push_number(u64::from(*byte)).push_number(offset as u64).append(MSTORE8);
+    }
+    let code = builder
+        .push_number(init.len() as u64)
+        .push_number(0u64)
+        .push_number(0u64)
+        .append(CREATE)
+        .push_number(RESULT_SLOT)
+        .append(SSTORE)
+        .append(STOP)
+        .build();
+
+    let mut inspector = MoveDeploymentAddress::default();
+    let (plain, cheated) = plain_and_cheated(|| base_db(code.clone()), &mut inspector);
+
+    assert_eq!(inspector.fired, 1, "the fixture must reach `create_end` once");
+    let deployed = plain.storage_value(CONTRACT, U256::from(RESULT_SLOT));
+    assert_ne!(deployed, U256::ZERO, "the fixture's CREATE must succeed");
+    assert_eq!(
+        cheated.storage_value(CONTRACT, U256::from(RESULT_SLOT)),
+        U256::from_be_slice(FAKE_DEPLOYMENT.as_slice()),
+        "the caller must have been handed the address the inspector wrote",
+    );
+    assert!(
+        !cheated.inspector_ledger.is_zero(),
+        "a transaction told a contract lives somewhere it does not must not read as untouched: \
+         {:?}",
+        cheated.inspector_ledger,
+    );
+}
+
+// --- a construction frame's pending action -------------------------------------------------------
+
+/// Drains the gas a construction frame's pending `Return` action carries.
+///
+/// The contract this module's other cases rest on — that an action is the frame's result a moment
+/// later, so an edit to it settles with that result — does not hold for a creation. Between the
+/// two, `classify_frame_action` charges the code deposit out of the gas *this action* carries, and
+/// a creation that cannot pay it becomes an `OutOfGas` that deploys nothing. So this edit changes
+/// what the transaction produces, and it does it by a route that leaves the classification and the
+/// output the boundary compares exactly where they were.
+#[derive(Default)]
+struct DrainConstructionAction {
+    fired: u32,
+}
+
+impl<CTX, INTR: InterpreterTypes> Inspector<CTX, INTR> for DrainConstructionAction {
+    fn step_end(&mut self, interp: &mut Interpreter<INTR>, _context: &mut CTX) {
+        // A construction frame runs no deployed code, so it has no bytecode address.
+        if self.fired > 0 || interp.input.bytecode_address().is_some() {
+            return;
+        }
+        let Some(InterpreterAction::Return(result)) = interp.bytecode.action() else {
+            return;
+        };
+        if !result.result.is_ok() {
+            return;
+        }
+        let remaining = result.gas.remaining();
+        assert!(
+            result.gas.record_regular_cost(remaining),
+            "the fixture must be able to drain the action it found",
+        );
+        self.fired += 1;
+    }
+}
+
+/// ★ A construction frame whose pending action was drained is not an all-zero ledger.
+///
+/// Every lane the boundary reads stays put: the action's classification and output are untouched,
+/// so nothing is an intervention; the gas edit is staged for the frame's settlement point, and
+/// that point declines to book it because the result it finally sees is a swallowed one. The
+/// deposit the drained action could no longer pay is what turned it into one.
+#[test]
+fn test_a_drained_construction_action_is_booked() {
+    // Init code that returns two bytes of runtime code.
+    let init: [u8; 11] = [0x60, 0x00, 0x60, 0x00, 0x52, 0x60, 0x02, 0x60, 0x1e, 0xf3, 0x00];
+    let mut builder = BytecodeBuilder::default();
+    for (offset, byte) in init.iter().enumerate() {
+        builder = builder.push_number(u64::from(*byte)).push_number(offset as u64).append(MSTORE8);
+    }
+    let code = builder
+        .push_number(init.len() as u64)
+        .push_number(0u64)
+        .push_number(0u64)
+        .append(CREATE)
+        .push_number(RESULT_SLOT)
+        .append(SSTORE)
+        .append(STOP)
+        .build();
+
+    let mut inspector = DrainConstructionAction::default();
+    let (plain, cheated) = plain_and_cheated(|| base_db(code.clone()), &mut inspector);
+
+    assert_eq!(inspector.fired, 1, "the fixture must reach the construction frame's step_end once");
+    assert_ne!(
+        plain.storage_value(CONTRACT, U256::from(RESULT_SLOT)),
+        U256::ZERO,
+        "without the edit the creation must succeed",
+    );
+    assert_eq!(
+        cheated.storage_value(CONTRACT, U256::from(RESULT_SLOT)),
+        U256::ZERO,
+        "with it the creation cannot pay its code deposit and deploys nothing",
+    );
+    assert_ne!(
+        plain.gas_used, cheated.gas_used,
+        "and the receipt the sender is billed on moves with it",
+    );
+    assert!(
+        !cheated.inspector_ledger.is_zero(),
+        "a transaction whose contract an inspector deleted must not read as untouched: {:?}",
+        cheated.inspector_ledger,
+    );
+}
+
+/// Raises the gas an inner call frame's pending `Return` action carries, then takes the same
+/// amount back out of the result that action became.
+///
+/// The two windows are one lane and one frame, and the pair nets to zero. They are still two
+/// edits, made in two different callbacks, and the lane's traffic is what says so — the sum alone
+/// reads as an inspector that did nothing.
+#[derive(Default)]
+struct CancellingActionAndResultEdits {
+    raised: u32,
+    lowered: u32,
+}
+
+impl<CTX, INTR: InterpreterTypes> Inspector<CTX, INTR> for CancellingActionAndResultEdits {
+    fn step_end(&mut self, interp: &mut Interpreter<INTR>, _context: &mut CTX) {
+        if self.raised > 0 || interp.input.bytecode_address() != Some(&CALLEE) {
+            return;
+        }
+        let Some(InterpreterAction::Return(result)) = interp.bytecode.action() else {
+            return;
+        };
+        if !result.result.is_ok() {
+            return;
+        }
+        result.gas.erase_cost(ACTION_DELTA);
+        self.raised += 1;
+    }
+
+    fn call_end(&mut self, _context: &mut CTX, inputs: &CallInputs, outcome: &mut CallOutcome) {
+        if self.lowered > 0 || inputs.target_address != CALLEE {
+            return;
+        }
+        assert!(
+            outcome.result.gas.record_regular_cost(ACTION_DELTA),
+            "the fixture must leave the result enough gas for the removal to land",
+        );
+        self.lowered += 1;
+    }
+}
+
+/// ★ An edit staged at one callback and undone at the next is two edits, not none.
+///
+/// Nothing about this transaction changes: a call frame's remaining gas is read by nobody between
+/// the two windows, so the pair really is invisible in what the transaction produces. That is the
+/// point — the lane's traffic is the only thing that separates it from an inspector that never
+/// ran, and on a *creation* frame the same pair is the shape that deletes a contract.
+#[test]
+fn test_cancelling_action_and_result_edits_are_booked() {
+    let code = BytecodeBuilder::default()
+        .push_number(0u64) // retSize
+        .push_number(0u64) // retOffset
+        .push_number(0u64) // argsSize
+        .push_number(0u64) // argsOffset
+        .push_number(0u64) // value
+        .push_address(CALLEE)
+        .push_number(100_000u64)
+        .append(CALL)
+        .append(POP)
+        .append(STOP)
+        .build();
+    let callee = BytecodeBuilder::default().append(STOP).build();
+    let db = || base_db(code.clone()).account_code(CALLEE, callee.clone());
+
+    let mut inspector = CancellingActionAndResultEdits::default();
+    let (plain, cheated) = plain_and_cheated(db, &mut inspector);
+
+    assert_eq!((inspector.raised, inspector.lowered), (1, 1), "both windows must be reached");
+    assert_eq!(
+        cheated.gas_used, plain.gas_used,
+        "the pair cancels, so the receipt really is the one the EVM would have produced",
+    );
+    assert_eq!(
+        cheated.inspector_ledger.conjured_gas(),
+        0,
+        "and the conservation law must read the net, which is zero",
+    );
+    assert!(
+        !cheated.inspector_ledger.is_zero(),
+        "but the guard must still see that the lane carried two edits: {:?}",
+        cheated.inspector_ledger,
+    );
+    assert_eq!(
+        cheated.inspector_ledger.result.gross(),
+        2 * u128::from(ACTION_DELTA),
+        "one edit in each window, counted where each was made",
+    );
+}
+
+// --- two edits to one lane, in opposite directions -----------------------------------------------
+
+/// Injects one gas before the frame reads its own remaining gas, and takes it back afterwards.
+///
+/// Both edits land on the interpreter counter, which is one signed lane. Their net is zero and
+/// the transaction's envelope is unmoved — and in between them the frame read a number one higher
+/// than the EVM would have given it, and wrote that number to storage.
+#[derive(Default)]
+struct CancellingCounterEdits {
+    /// 0 before the injection, 1 between the two edits, 2 once both have landed.
+    phase: u8,
+}
+
+impl<CTX, INTR: InterpreterTypes> Inspector<CTX, INTR> for CancellingCounterEdits {
+    fn step(&mut self, interp: &mut Interpreter<INTR>, _context: &mut CTX) {
+        match self.phase {
+            0 if interp.bytecode.opcode() == GAS => {
+                interp.gas.erase_cost(1);
+                self.phase = 1;
+            }
+            1 => {
+                assert!(interp.gas.record_regular_cost(1), "the frame must afford the give-back");
+                self.phase = 2;
+            }
+            _ => {}
+        }
+    }
+}
+
+/// ★ Two edits to the same lane that cancel are not an all-zero ledger.
+///
+/// The net of the gas lane really is zero — the transaction spent exactly what it would have — so
+/// nothing the conservation law reads has moved. What moved is the number the frame read in
+/// between, and a guard that asks the net cannot see it. The gross activity counter is what does.
+#[test]
+fn test_cancelling_counter_edits_are_booked() {
+    let code = BytecodeBuilder::default()
+        .append(GAS)
+        .push_number(RESULT_SLOT)
+        .append(SSTORE)
+        .append(STOP)
+        .build();
+
+    // No compute-gas limit, so the REX7 gas clamp hides nothing and the frame's own reading of
+    // its remaining gas is the counter the injection moved.
+    let limits = EvmTxRuntimeLimits::no_limits();
+    let plain = transact(MegaSpecId::REX7, base_db(code.clone()), limits);
+    let mut inspector = CancellingCounterEdits::default();
+    let cheated = transact_inspected(MegaSpecId::REX7, base_db(code), limits, &mut inspector);
+
+    assert_eq!(inspector.phase, 2, "both halves of the cancellation must have landed");
+    assert_eq!(
+        cheated.storage_value(CONTRACT, U256::from(RESULT_SLOT)),
+        plain.storage_value(CONTRACT, U256::from(RESULT_SLOT)) + U256::from(1),
+        "the frame must have read one gas more than the EVM would have given it",
+    );
+    assert_eq!(
+        cheated.total_gas_spent, plain.total_gas_spent,
+        "the two edits cancel, so the envelope the receipt reports is unmoved",
+    );
+    assert_eq!(
+        cheated.inspector_conjured_gas(),
+        0,
+        "and so is the law's term: this is exactly the shape a net-only reading cannot see",
+    );
+    assert!(
+        !cheated.inspector_ledger.is_zero(),
+        "but the transaction was rewritten, and the guard has to see that: {:?}",
+        cheated.inspector_ledger,
+    );
+}
+
+/// Adds a refund to one child frame's result and takes the same amount out of another's.
+///
+/// The frame that gets the addition returns, so its refund reaches the receipt. The frame that
+/// gets the subtraction reverts, so revm discards its whole refund counter — the subtraction never
+/// reaches anything. Net zero on the lane, one refund's worth of difference on the receipt.
+#[derive(Default)]
+struct CancellingRefundsAcrossFrames {
+    added: u32,
+    removed: u32,
+}
+
+impl<CTX, INTR: InterpreterTypes> Inspector<CTX, INTR> for CancellingRefundsAcrossFrames {
+    fn call_end(&mut self, _context: &mut CTX, inputs: &CallInputs, outcome: &mut CallOutcome) {
+        if inputs.target_address == CALLEE && self.added == 0 {
+            outcome.result.gas.record_refund(REFUND);
+            self.added += 1;
+        } else if inputs.target_address == REVERTER && self.removed == 0 {
+            assert!(
+                outcome.result.gas.refunded() >= REFUND,
+                "the reverting callee must hold a refund of its own to take from, got {}",
+                outcome.result.gas.refunded(),
+            );
+            outcome.result.gas.record_refund(-REFUND);
+            self.removed += 1;
+        }
+    }
+}
+
+/// ★ A cancellation split across a surviving frame and a discarded one is not an all-zero ledger.
+///
+/// This is the previous shape with the asymmetry made explicit: the two halves are equal and
+/// opposite where the ledger books them, and only one of them is still standing by the time the
+/// receipt is built.
+#[test]
+fn test_cancelling_refunds_across_frames_are_booked() {
+    let call_to = |builder: BytecodeBuilder, target: Address| {
+        builder
+            .push_number(0u64)
+            .push_number(0u64)
+            .push_number(0u64)
+            .push_number(0u64)
+            .push_number(0u64)
+            .push_address(target)
+            .push_number(200_000u64)
+            .append(CALL)
+            .append(POP)
+    };
+    let code = call_to(call_to(BytecodeBuilder::default(), CALLEE), REVERTER).append(STOP).build();
+    // Both callees set a slot and clear it again, so each ends holding a refund the EVM produced.
+    let clearing = |builder: BytecodeBuilder| {
+        builder
+            .sstore(U256::from(RESULT_SLOT), U256::from(1u64))
+            .sstore(U256::from(RESULT_SLOT), U256::ZERO)
+    };
+    let returning = clearing(BytecodeBuilder::default()).append(STOP).build();
+    let reverting = clearing(BytecodeBuilder::default()).revert().build();
+    let db = || {
+        base_db(code.clone())
+            .account_code(CALLEE, returning.clone())
+            .account_code(REVERTER, reverting.clone())
+    };
+
+    let mut inspector = CancellingRefundsAcrossFrames::default();
+    let (plain, cheated) = plain_and_cheated(db, &mut inspector);
+
+    assert_eq!((inspector.added, inspector.removed), (1, 1), "both halves must have landed");
+    assert!(
+        plain.total_gas_spent >= 5 * u64::try_from(REFUND).unwrap(),
+        "the fixture must burn enough that the EIP-3529 cap does not hide the difference",
+    );
+    assert_eq!(
+        plain.gas_used - cheated.gas_used,
+        u64::try_from(REFUND).unwrap(),
+        "only the surviving frame's half reaches the receipt, so the sender pays that much less",
+    );
+    assert!(
+        !cheated.inspector_ledger.is_zero(),
+        "a receipt an inspector moved must not read as untouched: {:?}",
+        cheated.inspector_ledger,
+    );
+}
+
+// --- an opcode skipped, and a return buffer conjured
+// ----------------------------------------------
+
+/// What the fixture's `SSTORE` writes when it runs.
+const STORED: u64 = 0x99;
+
+/// The gas a cold `SSTORE` into a zero slot costs, which is what skipping it saves.
+const COLD_SSTORE_SET: u64 = 22_100;
+
+/// How many bytes of return data the forging inspector conjures.
+///
+/// Non-zero and a whole number of words, so that the `SSTORE` that stores it turns a zero slot
+/// into a non-zero one — which is a different charge as well as a different value.
+const CONJURED_RETURN_DATA: u64 = 96;
+
+/// Advances the program counter past the frame's `SSTORE`, so the EVM never executes it.
+///
+/// revm's inspected loop runs this callback *before* the instruction, and the interpreter reads
+/// the opcode it is about to execute from the very pointer this moves. Stepping the pointer on by
+/// one byte therefore deletes one instruction from the frame: the two operands the `SSTORE` would
+/// have consumed stay on the stack, the `STOP` after it runs instead, and the frame ends where it
+/// was going to end.
+///
+/// Nothing about this reaches a gas counter. The work is not performed, so there is nothing for
+/// the EVM to meter and nothing for a gas lane to see.
+#[derive(Default)]
+struct SkipTheStore {
+    fired: u32,
+}
+
+impl<CTX, INTR: InterpreterTypes> Inspector<CTX, INTR> for SkipTheStore {
+    fn step(&mut self, interp: &mut Interpreter<INTR>, _context: &mut CTX) {
+        if self.fired > 0 || interp.bytecode.opcode() != SSTORE {
+            return;
+        }
+        interp.bytecode.relative_jump(1);
+        self.fired += 1;
+    }
+}
+
+/// ★ A frame with an opcode skipped out from under it is not an all-zero ledger.
+///
+/// The rewrite is the free-expansion shape's twin and is strictly worse: it does not merely make
+/// the frame's next charge cheaper, it deletes an instruction from the frame. The transaction ends
+/// with different storage *and* a smaller bill, and every gas lane reads zero because the gas that
+/// went missing was never spent by anybody.
+#[test]
+fn test_a_skipped_opcode_is_booked() {
+    let code = BytecodeBuilder::default()
+        .sstore(U256::from(RESULT_SLOT), U256::from(STORED))
+        .append(STOP)
+        .build();
+
+    let mut inspector = SkipTheStore::default();
+    let (plain, cheated) = plain_and_cheated(|| base_db(code.clone()), &mut inspector);
+
+    assert_eq!(inspector.fired, 1, "the fixture must reach the store exactly once");
+    assert!(plain.is_success() && cheated.is_success(), "both runs must succeed");
+    assert_eq!(
+        plain.storage_value(CONTRACT, U256::from(RESULT_SLOT)),
+        U256::from(STORED),
+        "without the rewrite the frame stores what its bytecode says",
+    );
+    assert_eq!(
+        cheated.storage_value(CONTRACT, U256::from(RESULT_SLOT)),
+        U256::ZERO,
+        "with it, the store never happens",
+    );
+    assert_eq!(
+        plain.total_gas_spent - cheated.total_gas_spent,
+        COLD_SSTORE_SET,
+        "the deleted instruction is the charge the transaction then did not pay",
+    );
+    assert!(
+        !cheated.inspector_ledger.is_zero(),
+        "a transaction an inspector deleted an instruction from must not read as untouched: {:?}",
+        cheated.inspector_ledger,
+    );
+}
+
+/// Puts return data in front of a frame that has made no call.
+///
+/// `RETURNDATASIZE` reads the buffer's length, so the frame goes on to store a number no call
+/// produced. The buffer is the interpreter's own, reachable through `ReturnData` on any live
+/// interpreter, and its length is a constant-time reading exactly like the memory's size.
+#[derive(Default)]
+struct ForgeReturnData {
+    fired: u32,
+}
+
+impl<CTX, INTR: InterpreterTypes> Inspector<CTX, INTR> for ForgeReturnData {
+    fn step(&mut self, interp: &mut Interpreter<INTR>, _context: &mut CTX) {
+        if self.fired > 0 || interp.bytecode.opcode() != RETURNDATASIZE {
+            return;
+        }
+        interp.return_data.set_buffer(Bytes::from(vec![0u8; CONJURED_RETURN_DATA as usize]));
+        self.fired += 1;
+    }
+}
+
+/// ★ A frame handed return data it never received is not an all-zero ledger.
+///
+/// The frame made no call, so the EVM's own buffer is empty and the store is a zero-to-zero
+/// no-op. With the rewrite the same store turns a zero slot into a non-zero one, which changes the
+/// post-state and costs the transaction more — in the opposite direction to every other shape
+/// here, and just as invisible to a lane that only watches gas counters.
+#[test]
+fn test_a_forged_return_buffer_is_booked() {
+    let code = BytecodeBuilder::default()
+        .append(RETURNDATASIZE)
+        .push_number(RESULT_SLOT)
+        .append(SSTORE)
+        .append(STOP)
+        .build();
+
+    let mut inspector = ForgeReturnData::default();
+    let (plain, cheated) = plain_and_cheated(|| base_db(code.clone()), &mut inspector);
+
+    assert_eq!(inspector.fired, 1, "the fixture must reach the read exactly once");
+    assert!(plain.is_success() && cheated.is_success(), "both runs must succeed");
+    assert_eq!(
+        plain.storage_value(CONTRACT, U256::from(RESULT_SLOT)),
+        U256::ZERO,
+        "a frame that made no call has no return data",
+    );
+    assert_eq!(
+        cheated.storage_value(CONTRACT, U256::from(RESULT_SLOT)),
+        U256::from(CONJURED_RETURN_DATA),
+        "with the rewrite it reads the length of a buffer no call produced",
+    );
+    assert!(
+        cheated.total_gas_spent > plain.total_gas_spent,
+        "and pays for the non-zero store the rewrite turned it into: {} vs {}",
+        cheated.total_gas_spent,
+        plain.total_gas_spent,
+    );
+    assert!(
+        !cheated.inspector_ledger.is_zero(),
+        "a transaction whose state a forged buffer changed must not read as untouched: {:?}",
+        cheated.inspector_ledger,
+    );
+}
+
+// --- a frame invariant moved and moved back --------------------------------------------------
+
+/// The caller the rewriting inspector shows the frame instead of the one that called it.
+const IMPOSTOR: Address = address!("00000000000000000000000000000000000ca11e");
+
+/// Moves the frame's caller for the length of one instruction, and puts it back.
+///
+/// `CALLER` reads `input.caller_address`, so the frame pushes an address nobody called it from and
+/// goes on to store that. The rewrite is undone in the very next callback, which is what makes the
+/// shape worth pinning: the frame's identity is the one the EVM gave it at every point a *frame*
+/// could be inspected — at its start, at its end, and at every callback but the two this touches.
+///
+/// Nothing about it reaches a gas counter. Both runs execute the same instructions and pay the
+/// same cold `SSTORE`; only the value written differs.
+#[derive(Default)]
+struct BorrowTheCaller {
+    /// The caller the EVM gave the frame, kept so it can be handed back.
+    original: Option<Address>,
+    /// How many times each half of the rewrite ran.
+    moved: u32,
+    restored: u32,
+}
+
+impl<CTX> Inspector<CTX, EthInterpreter> for BorrowTheCaller {
+    fn step(&mut self, interp: &mut Interpreter<EthInterpreter>, _context: &mut CTX) {
+        if self.moved > 0 || interp.bytecode.opcode() != CALLER {
+            return;
+        }
+        self.original = Some(interp.input.caller_address);
+        interp.input.caller_address = IMPOSTOR;
+        self.moved += 1;
+    }
+
+    fn step_end(&mut self, interp: &mut Interpreter<EthInterpreter>, _context: &mut CTX) {
+        let Some(original) = self.original.filter(|_| self.restored == 0) else {
+            return;
+        };
+        interp.input.caller_address = original;
+        self.restored += 1;
+    }
+}
+
+/// ★ A frame invariant moved in `step` and moved back in `step_end` is not an all-zero ledger.
+///
+/// The four addresses and the value a frame is identified by cannot change while it runs, which
+/// makes them the readings a cheaper shim would be tempted to compare once per frame rather than
+/// once per callback. This is the shape that answers that: an inspector borrows one of them for
+/// exactly as long as it takes the frame to read it, and gives it back before anything outside the
+/// two callbacks could look. A per-frame comparison sees the address it started with; a per-opcode
+/// one sees it move twice.
+#[test]
+fn test_a_frame_invariant_moved_and_moved_back_is_booked() {
+    let code = BytecodeBuilder::default()
+        .append(CALLER)
+        .push_number(RESULT_SLOT)
+        .append(SSTORE)
+        .append(STOP)
+        .build();
+
+    let mut inspector = BorrowTheCaller::default();
+    let (plain, cheated) = plain_and_cheated(|| base_db(code.clone()), &mut inspector);
+
+    assert_eq!((inspector.moved, inspector.restored), (1, 1), "both halves must run once");
+    assert_eq!(
+        inspector.original,
+        Some(crate::common::CALLER),
+        "and the half that gives the address back must have the one the EVM gave the frame",
+    );
+    assert!(plain.is_success() && cheated.is_success(), "both runs must succeed");
+    assert_eq!(
+        plain.storage_value(CONTRACT, U256::from(RESULT_SLOT)),
+        U256::from_be_slice(crate::common::CALLER.as_slice()),
+        "without the rewrite the frame stores the address that called it",
+    );
+    assert_eq!(
+        cheated.storage_value(CONTRACT, U256::from(RESULT_SLOT)),
+        U256::from_be_slice(IMPOSTOR.as_slice()),
+        "with it, the frame stores one nobody called it from",
+    );
+    assert_eq!(
+        plain.total_gas_spent, cheated.total_gas_spent,
+        "the two runs cost the same, so no gas lane can tell them apart",
+    );
+    assert!(
+        cheated.inspector_ledger.interventions >= 2,
+        "each half of the rewrite is a rewrite: {:?}",
+        cheated.inspector_ledger,
+    );
+}

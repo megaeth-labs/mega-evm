@@ -227,6 +227,25 @@ fn transact_with_limits(
     (result.result, usage)
 }
 
+/// [`transact_with_limits`] through [`MegaEvm::execute_transaction`], so a claim can read the
+/// executed / destroyed split.
+pub(crate) fn transact_with_limits_outcome(
+    spec: MegaSpecId,
+    mut db: MemoryDatabase,
+    to: Address,
+    limits: EvmTxRuntimeLimits,
+) -> mega_evm::MegaTransactionOutcome {
+    let mut context = MegaContext::new(&mut db, spec).with_tx_runtime_limits(limits);
+    context.modify_chain(|chain| {
+        chain.operator_fee_scalar = Some(U256::from(0));
+        chain.operator_fee_constant = Some(U256::from(0));
+    });
+    let tx = TxEnvBuilder::default().caller(CALLER).call(to).gas_limit(100_000_000).build_fill();
+    let mut tx = MegaTransaction(op_revm::OpTransaction::new(tx));
+    tx.enveloped_tx = Some(Bytes::new());
+    MegaEvm::new(context).execute_transaction(tx).expect("tx should not surface EVMError")
+}
+
 /// Runs the same transaction as [`transact`] and returns the transaction's output bytes.
 /// Used by the claim tests that read a value the contract computed (e.g. forwarded gas).
 fn transact_output(spec: MegaSpecId, mut db: MemoryDatabase) -> Bytes {
@@ -849,32 +868,58 @@ fn test_compute_gas_snapshot_matches() {
     }
 }
 
-/// Rex7 is the unstable spec and carries no behavior of its own yet: it delegates its instruction
-/// table, runtime limits, and precompile set to Rex6 unchanged.
+/// Rex7's checkpoint settlement is a precision-preserving change: every program that stays inside
+/// its resource limits records the same compute gas, spends the same EVM gas, and ends the same
+/// way as it does under Rex6.
 ///
 /// The snapshot alone does not pin this. Its rows differ by the spec-name column, so a Rex7 row
 /// that drifted from its Rex6 counterpart would still render as a well-formed snapshot and could be
 /// blessed by a regeneration. Comparing the readings directly makes the first accidental Rex7
-/// divergence a failure. When Rex7 gains its first deliberate behavior change, this test is
-/// expected to fail and should be narrowed to the corpus entries that behavior does not reach.
+/// divergence a failure.
+///
+/// The sanctioned divergences are the exceptional-halt carve-out — a frame that halts
+/// exceptionally returns none of its remaining budget, and Rex7 settles that burned remainder as
+/// compute gas where per-opcode recording attributes nothing to it — and the same split applied
+/// at the precompile recording site, which a precompile halt never reaches through frame-exit
+/// settlement. Both move compute gas upward only; the receipt and the outcome still have to match
+/// exactly. `tests/rex7/exceptional_halt.rs` and `tests/rex7/precompile_halt.rs` pin the settled
+/// amounts themselves.
 #[test]
 fn test_rex7_matches_rex6_on_every_program() {
     for program in corpus() {
         let rex6 = transact(MegaSpecId::REX6, (program.build_db)());
         let rex7 = transact(MegaSpecId::REX7, (program.build_db)());
         assert_eq!(
-            (rex7.compute_gas, rex7.gas_used, &rex7.outcome),
-            (rex6.compute_gas, rex6.gas_used, &rex6.outcome),
-            "{}: Rex7 must be behaviorally identical to Rex6 \
-             (Rex6: compute_gas={} gas_used={} outcome={}; \
-             Rex7: compute_gas={} gas_used={} outcome={})",
+            (rex7.gas_used, &rex7.outcome),
+            (rex6.gas_used, &rex6.outcome),
+            "{}: Rex7 must spend the same gas and end the same way as Rex6 \
+             (Rex6: gas_used={} outcome={}; Rex7: gas_used={} outcome={})",
             program.name,
-            rex6.compute_gas,
             rex6.gas_used,
             rex6.outcome,
-            rex7.compute_gas,
             rex7.gas_used,
             rex7.outcome,
+        );
+        // A top-level halt, or a precompile halt the caller absorbs, can raise the reported
+        // total without changing the receipt. The KZG invalid-input program is the corpus
+        // case that takes the latter path: the outer transaction succeeds, so the halt
+        // prefix alone would miss it.
+        if rex7.outcome.starts_with("halt ") || program.name == "precompile_kzg_invalid_input" {
+            assert!(
+                rex7.compute_gas >= rex6.compute_gas,
+                "{}: the exceptional-halt carve-out only ever moves compute gas up \
+                 (Rex6={} Rex7={})",
+                program.name,
+                rex6.compute_gas,
+                rex7.compute_gas,
+            );
+            continue;
+        }
+        assert_eq!(
+            rex7.compute_gas, rex6.compute_gas,
+            "{}: checkpoint settlement must telescope to the per-opcode sum \
+             (Rex6={} Rex7={})",
+            program.name, rex6.compute_gas, rex7.compute_gas,
         );
     }
 }

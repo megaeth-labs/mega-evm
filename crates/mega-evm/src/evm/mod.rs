@@ -28,7 +28,9 @@
 mod context;
 mod execution;
 mod factory;
+mod frame;
 mod host;
+mod inspector;
 mod instructions;
 mod interfaces;
 mod limit;
@@ -46,6 +48,7 @@ pub use context::*;
 pub use execution::*;
 pub use factory::*;
 pub use host::*;
+pub use inspector::*;
 pub use instructions::*;
 #[allow(unused_imports, unreachable_pub)]
 pub use interfaces::*;
@@ -68,7 +71,7 @@ use revm::{
     ExecuteEvm, InspectEvm, Inspector, Journal,
 };
 
-use crate::{BucketId, ExternalEnvTypes, LimitUsage, MegaTransaction};
+use crate::{AdditionalLimit, BucketId, ExternalEnvTypes, LimitUsage, MegaTransaction};
 
 /// The main EVM implementation for the `MegaETH` chain.
 ///
@@ -89,9 +92,14 @@ use crate::{BucketId, ExternalEnvTypes, LimitUsage, MegaTransaction};
 #[allow(missing_debug_implementations)]
 #[allow(clippy::type_complexity)]
 pub struct MegaEvm<DB: Database, INSP, ExtEnvTypes: ExternalEnvTypes> {
+    /// The inner EVM, holding the user's inspector wrapped in the measurement shim.
+    ///
+    /// The wrapper is `MegaETH`'s, not the caller's: every entry point that accepts an inspector
+    /// wraps it here, and every accessor hands the unwrapped one back, so `INSP` stays the type
+    /// the caller named. See [`MeasuredInspector`].
     inner: revm::context::Evm<
         MegaContext<DB, ExtEnvTypes>,
-        INSP,
+        MeasuredInspector<INSP>,
         MegaInstructions<DB, ExtEnvTypes>,
         PrecompilesMap,
         EthFrame<EthInterpreter>,
@@ -109,6 +117,20 @@ pub struct MegaEvm<DB: Database, INSP, ExtEnvTypes: ExternalEnvTypes> {
     /// this view from what execution actually uses. The supported way to change configuration
     /// is to rebuild the EVM from a reconfigured context.
     mega_cfg: CfgEnv<spec::MegaSpecId>,
+    /// The journal decision a frame's classification reached and has not yet carried out (REX7).
+    ///
+    /// A frame's result can still be rewritten after the frame loop has produced it — by a late
+    /// frame-local resource exceed, which is only detectable once the frame's usage has been
+    /// weighed against its caller's budget. So under REX7 the decision travels from the frame
+    /// loop that took it to `frame_return_result`, which is past the last rewrite and still ahead
+    /// of the caller resuming. Frozen specs carry nothing here: they tell the journal at the
+    /// moment of classification, where revm does.
+    ///
+    /// Set by exactly one producer (the frame loops, both of which route through
+    /// `settle_and_commit_frame`) and taken by exactly one consumer, on the very next step of
+    /// revm's execution loop. It is `None` outside that one-step window, which
+    /// `settle_and_commit_frame` asserts in debug builds.
+    deferred_journal: Option<frame::PendingJournal>,
 }
 
 impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> core::fmt::Debug
@@ -124,7 +146,7 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> core::ops::Deref
 {
     type Target = revm::context::Evm<
         MegaContext<DB, ExtEnvs>,
-        INSP,
+        MeasuredInspector<INSP>,
         MegaInstructions<DB, ExtEnvs>,
         PrecompilesMap,
         EthFrame<EthInterpreter>,
@@ -165,9 +187,14 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, NoOpInspector, ExtEnvs
         let mega_cfg = context.cfg().clone().into_megaeth_cfg(spec);
         Self {
             mega_cfg,
+            deferred_journal: None,
             inner: revm::context::Evm::new_with_inspector(
                 context,
-                NoOpInspector,
+                // Declared, not merely inert: `enable_inspector()` is a public trait method, so
+                // this shim can start running without another constructor being reached, and an
+                // EVM whose only inspector is `NoOpInspector` must not be refused by the block
+                // path for observing nothing.
+                MeasuredInspector::new_trusted(NoOpInspector),
                 MegaInstructions::new(spec),
                 PrecompilesMap::from_static(MegaPrecompiles::new_with_spec(spec).precompiles()),
             ),
@@ -186,18 +213,64 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
     /// # Returns
     ///
     /// A new `Evm` instance with the specified inspector enabled.
+    ///
+    /// The inspector is measured, and the resulting EVM is one the canonical block-execution path
+    /// will not admit a transaction from: admission is on the strength of a
+    /// [`TrustedObserver`] declaration, which this constructor does not ask for. An inspector
+    /// whose type carries one reaches a block through
+    /// [`with_trusted_inspector`](Self::with_trusted_inspector) instead.
     pub fn with_inspector<I>(self, inspector: I) -> MegaEvm<DB, I, ExtEnvs> {
         let mega_cfg = self.mega_cfg;
         let inner = revm::context::Evm::new_with_inspector(
             self.inner.ctx,
-            inspector,
+            MeasuredInspector::new(inspector),
             self.inner.instruction,
             self.inner.precompiles,
         );
-        MegaEvm { inner, inspect: true, mega_cfg }
+        MegaEvm { inner, inspect: true, mega_cfg, deferred_journal: None }
+    }
+
+    /// Creates a new `MegaETH` EVM instance with the given read-only inspector enabled at
+    /// runtime, and the measurement shim's per-callback work skipped.
+    ///
+    /// The bound is the whole of the difference from [`with_inspector`](Self::with_inspector):
+    /// `I`'s author has declared, in source, that none of its callbacks writes anything back to
+    /// the EVM, so there is nothing for the shim to measure and it delegates directly. Debug
+    /// builds measure anyway and assert that the declaration held.
+    ///
+    /// See [`TrustedObserver`] for what the declaration promises and what it may not be written
+    /// for, and [`DeclaredObserver`] for how a tracer this crate cannot name gets one.
+    ///
+    /// [`EvmFactory::create_evm_with_inspector`](alloy_evm::EvmFactory::create_evm_with_inspector)
+    /// cannot reach this — its bound is `I: Inspector` and its return type is fixed — so a node
+    /// that builds through the factory takes `create_evm(..).with_trusted_inspector(..)`, which
+    /// keeps the factory's dynamic precompiles. The block executor factory has its own entry,
+    /// [`MegaBlockExecutorFactory::create_executor_with_trusted_inspector`](
+    /// crate::MegaBlockExecutorFactory::create_executor_with_trusted_inspector).
+    ///
+    /// The declaration is also what the canonical block-execution path admits an inspected
+    /// transaction on, so this is the constructor a node tracing block production or validation
+    /// has to reach.
+    pub fn with_trusted_inspector<I: TrustedObserver>(
+        self,
+        inspector: I,
+    ) -> MegaEvm<DB, I, ExtEnvs> {
+        let mega_cfg = self.mega_cfg;
+        let inner = revm::context::Evm::new_with_inspector(
+            self.inner.ctx,
+            MeasuredInspector::new_trusted(inspector),
+            self.inner.instruction,
+            self.inner.precompiles,
+        );
+        MegaEvm { inner, inspect: true, mega_cfg, deferred_journal: None }
     }
 
     /// Creates a new `MegaETH` EVM instance with the inspector disabled at runtime.
+    ///
+    /// The caller's inspector is dropped and replaced by `NoOpInspector`, carrying that type's own
+    /// [`TrustedObserver`] declaration — so an EVM this produces is admitted by the canonical
+    /// block-execution path even if its inspector is switched back on through
+    /// [`Evm::set_inspector_enabled`](alloy_evm::Evm::set_inspector_enabled).
     ///
     /// # Returns
     ///
@@ -206,11 +279,11 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
         let mega_cfg = self.mega_cfg;
         let inner = revm::context::Evm::new_with_inspector(
             self.inner.ctx,
-            NoOpInspector,
+            MeasuredInspector::new_trusted(NoOpInspector),
             self.inner.instruction,
             self.inner.precompiles,
         );
-        MegaEvm { inner, inspect: false, mega_cfg }
+        MegaEvm { inner, inspect: false, mega_cfg, deferred_journal: None }
     }
 
     /// Sets the transaction runtime limits for the EVM.
@@ -222,7 +295,12 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
             precompiles: self.inner.precompiles,
             frame_stack: self.inner.frame_stack,
         };
-        Self { inner, inspect: self.inspect, mega_cfg: self.mega_cfg }
+        Self {
+            inner,
+            inspect: self.inspect,
+            mega_cfg: self.mega_cfg,
+            deferred_journal: self.deferred_journal,
+        }
     }
 
     /// Adds or overrides dynamic precompiles in the EVM.
@@ -249,7 +327,12 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
             precompiles,
             frame_stack: self.inner.frame_stack,
         };
-        Self { inner, inspect: self.inspect, mega_cfg: self.mega_cfg }
+        Self {
+            inner,
+            inspect: self.inspect,
+            mega_cfg: self.mega_cfg,
+            deferred_journal: self.deferred_journal,
+        }
     }
 }
 
@@ -328,7 +411,15 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
         PrecompilesMap,
         EthFrame<EthInterpreter>,
     > {
-        self.inner
+        // The measurement shim is an implementation detail of executing through `MegaEvm`; an
+        // EVM taken apart is no longer executing, so it is handed back unwrapped.
+        revm::context::Evm {
+            ctx: self.inner.ctx,
+            inspector: self.inner.inspector.into_inner(),
+            instruction: self.inner.instruction,
+            precompiles: self.inner.precompiles,
+            frame_stack: self.inner.frame_stack,
+        }
     }
 }
 
@@ -359,16 +450,60 @@ where
         } else {
             ExecuteEvm::transact(self, tx)?
         };
+        let trusted_inspector = self.inner.inspector.is_trusted();
+        let undeclared_inspector = self.has_undeclared_inspector();
+        let is_inside_sandbox = self.ctx().is_inside_sandbox();
+        let spec = self.ctx().spec;
         let additional_limit = self.ctx().additional_limit.borrow();
         let LimitUsage { data_size, kv_updates, compute_gas, state_growth } =
             additional_limit.get_usage();
-        Ok(MegaTransactionOutcome {
+        let outcome = MegaTransactionOutcome {
             result_and_state,
             data_size,
             kv_updates,
             compute_gas_used: compute_gas,
+            compute_gas_destroyed: additional_limit.destroyed_compute_gas(),
+            compute_gas_enforced: additional_limit.enforced_compute_gas(),
             state_growth_used: state_growth,
-        })
+            inspector_ledger: additional_limit.inspector_ledger(),
+            undeclared_inspector,
+        };
+        debug_assert_envelope_accounted(spec, is_inside_sandbox, &additional_limit, &outcome);
+        debug_assert_trusted_observer_kept_its_promise(trusted_inspector, &outcome);
+        Ok(outcome)
+    }
+
+    /// Whether this EVM's inspector was built from a [`TrustedObserver`](crate::TrustedObserver)
+    /// declaration, and so is delegated to unmeasured in release builds.
+    ///
+    /// A declaration is what the canonical block-execution path admits an inspected transaction
+    /// on, so this is the positive half of the question that path asks; the question itself is
+    /// [`has_undeclared_inspector`](Self::has_undeclared_inspector), which also accounts for an
+    /// EVM running no inspector at all.
+    pub const fn has_trusted_inspector(&self) -> bool {
+        self.inner.inspector.is_trusted()
+    }
+
+    /// Whether this EVM runs an inspector whose type carries no
+    /// [`TrustedObserver`](crate::TrustedObserver) declaration.
+    ///
+    /// The canonical block-execution path refuses such a transaction outright, because what it
+    /// reports has to be what the EVM did on every node and the measurement shim cannot see an
+    /// edit made behind a callback boundary — the interpreter's stack or memory contents, or a
+    /// direct journal write. A declaration is a line someone wrote in source about a type they had
+    /// read, which is the only thing that answers that.
+    ///
+    /// False for an EVM with no inspector, for two independent reasons: revm's plain frame loop
+    /// never calls one, and the shim such an EVM carries wraps `NoOpInspector`, which is declared.
+    /// The second reason is the load-bearing one, because
+    /// [`Evm::set_inspector_enabled`](alloy_evm::Evm::set_inspector_enabled) is a public trait
+    /// method that turns the first one off without changing the inspector.
+    ///
+    /// False for an EVM built through [`with_trusted_inspector`](Self::with_trusted_inspector).
+    /// True for every other inspected EVM, including one whose inspector only observes — the
+    /// criterion is the declaration, not the behaviour of one run.
+    pub const fn has_undeclared_inspector(&self) -> bool {
+        self.inspect && !self.inner.inspector.is_trusted()
     }
 
     /// Inspect a transaction and return the outcome. The inspector used is the one set up already
@@ -390,16 +525,31 @@ where
         tx: MegaTransaction,
     ) -> Result<MegaTransactionOutcome, EVMError<DB::Error, MegaTransactionError>> {
         let result_and_state = InspectEvm::inspect_tx(self, tx)?;
+        let trusted_inspector = self.inner.inspector.is_trusted();
+        // Not `has_undeclared_inspector()`: that reads the `inspect` flag, and this entry runs the
+        // inspecting loop whatever the flag says. An inspector swapped in through
+        // `InspectEvm::set_inspector` leaves the flag alone, so asking the flag here would report
+        // a transaction an undeclared inspector took part in as one that had none.
+        let undeclared_inspector = !trusted_inspector;
+        let is_inside_sandbox = self.ctx().is_inside_sandbox();
+        let spec = self.ctx().spec;
         let additional_limit = self.ctx().additional_limit.borrow();
         let LimitUsage { data_size, kv_updates, compute_gas, state_growth } =
             additional_limit.get_usage();
-        Ok(MegaTransactionOutcome {
+        let outcome = MegaTransactionOutcome {
             result_and_state,
             data_size,
             kv_updates,
             compute_gas_used: compute_gas,
+            compute_gas_destroyed: additional_limit.destroyed_compute_gas(),
+            compute_gas_enforced: additional_limit.enforced_compute_gas(),
             state_growth_used: state_growth,
-        })
+            inspector_ledger: additional_limit.inspector_ledger(),
+            undeclared_inspector,
+        };
+        debug_assert_envelope_accounted(spec, is_inside_sandbox, &additional_limit, &outcome);
+        debug_assert_trusted_observer_kept_its_promise(trusted_inspector, &outcome);
+        Ok(outcome)
     }
 
     /// Get the bucket IDs used during transaction execution.
@@ -409,6 +559,134 @@ where
     /// Returns the bucket IDs used during transaction execution.
     pub fn get_accessed_bucket_ids(&self) -> Vec<BucketId> {
         self.ctx_ref().dynamic_storage_gas_cost.borrow().get_bucket_ids()
+    }
+}
+
+/// Debug-only backstop on a `TrustedObserver` declaration, read once per transaction.
+///
+/// The shim verifies the same thing after every callback it measures, which is what names the
+/// callback that broke the promise. This asks it again where nothing can be missing: a rewrite
+/// made at a callback whose own verification was never written — the shape a callback added later
+/// takes — has no later callback to be caught at if it was the transaction's last.
+///
+/// Both are debug-only for the same reason. A declared inspector books nothing, so in a release
+/// build there is nothing here to read that is not zero by construction.
+fn debug_assert_trusted_observer_kept_its_promise(trusted: bool, outcome: &MegaTransactionOutcome) {
+    debug_assert!(
+        !trusted || outcome.inspector_ledger.is_zero(),
+        "an inspector declared `TrustedObserver` wrote something back: {:?}",
+        outcome.inspector_ledger,
+    );
+}
+
+/// Debug-only check that a transaction's tracker lanes account for the whole envelope its receipt
+/// reports (REX7+; before REX7 there is no destroyed lane and no non-compute lane, so there is
+/// nothing to reconcile).
+///
+/// This is the conservation law solved for the envelope —
+/// [`ConservationTerms::envelope_for`](crate::ConservationTerms::envelope_for) — evaluated against
+/// the destroyed remainder the *outcome* reports rather than the one the settlement derived:
+///
+/// ```text
+/// C + S + D − K − I == total_gas_spent
+/// ```
+///
+/// The settlement site solved the same law for `D`, so on a transaction that settled against this
+/// same envelope the check is that identity restated — and that is the point. Its reach is the
+/// paths where the two are *not* the same, named below: the terms are re-read after settlement
+/// finished, and the envelope is the one the receipt ended up carrying.
+///
+/// The inspector term `I` is zero unless a rewriting inspector was attached: it is what the
+/// measurement shim booked for gas the inspector wrote into an interpreter counter, a frame
+/// envelope, or a returning frame's result, none of which the transaction's own envelope funded.
+/// Subtracting it is what keeps the law stated over the EVM's gas rather than over the EVM's gas
+/// plus an inspector's edits.
+///
+/// The reported compute total is checked to be the sum of the two lanes it is supposed to split
+/// into, so a consumer reading either lane and a consumer reading the total cannot disagree.
+///
+/// The EIP-3529 refund and the EIP-7623 floor move the number a receipt reports without anyone
+/// having burnt the difference; both are carried on the result as their own fields and applied
+/// after the envelope is final, so the envelope this compares against is unaffected by either.
+///
+/// # The receipt's other two numbers
+///
+/// The law reaches one of the three figures a receipt carries. The other two are checked here, each
+/// on the terms available to it, because a check that looked only at the envelope would pass on a
+/// transaction whose sender was billed a different amount.
+///
+/// The **used** figure is stated against the accounted envelope rather than against the reported
+/// one, so the same lanes have to account for both numbers the receipt carries. It is a
+/// consistency pin rather than an independent measurement of what an inspector did to the refund:
+/// the EIP-3529 cap applies to the transaction's whole refund at once, over a sum in which the
+/// EVM's own refunds and an inspector's are indistinguishable, so no in-process reading separates
+/// them. What stops such a transaction is the block guard, which reads
+/// [`InspectorLedger::is_zero`](crate::InspectorLedger::is_zero) and therefore sees the refund
+/// lane.
+///
+/// The **state-gas** figure is stated against the state-gas lane, and that one does bite. `MegaETH`
+/// runs with EIP-8037 off on every path and every spec, so the transaction's own contribution to
+/// it — the intrinsic state gas, the per-authorization state refund — is structurally zero and the
+/// receipt's figure is exactly what the lane booked. That structural zero is the assumption both
+/// EIP-8037 lanes rest on, and this is where it is pinned.
+///
+/// What this catches that the settlement site's own cross-check cannot: a result whose envelope is
+/// decided *after* settlement, or a path that produces a receipt without settling at all. Both
+/// leave the settlement site's derived-versus-booked comparison perfectly happy and the reported
+/// total wrong. A failed OP deposit is such a path — its receipt is rebuilt to report the whole
+/// gas limit at the outermost error boundary — and is settled explicitly there.
+///
+/// Skipped inside a keyless-deploy sandbox: a sandbox transaction never settles a derivation of
+/// its own, because the law is stated over an outer transaction's final envelope and the sandbox's
+/// gas is a charge inside its parent's.
+#[inline]
+fn debug_assert_envelope_accounted(
+    spec: MegaSpecId,
+    is_inside_sandbox: bool,
+    additional_limit: &AdditionalLimit,
+    outcome: &MegaTransactionOutcome,
+) {
+    if cfg!(debug_assertions) && spec.is_enabled(MegaSpecId::REX7) && !is_inside_sandbox {
+        let envelope = outcome.result_and_state.result.gas().total_gas_spent();
+        let terms = additional_limit.conservation_terms();
+        debug_assert!(
+            outcome.compute_gas_used ==
+                outcome.compute_gas_enforced + outcome.compute_gas_destroyed,
+            "the reported compute total must be the sum of the lanes it splits into: \
+             reported {} vs enforced {} + destroyed {}",
+            outcome.compute_gas_used,
+            outcome.compute_gas_enforced,
+            outcome.compute_gas_destroyed,
+        );
+        let accounted = terms.envelope_for(outcome.compute_gas_destroyed);
+        debug_assert!(
+            accounted == i128::from(envelope),
+            "the tracker lanes must account for the whole receipt envelope: \
+             accounted {accounted} vs envelope {envelope} \
+             (reported compute {}, reported destroyed {}, {terms})",
+            outcome.compute_gas_used,
+            outcome.compute_gas_destroyed,
+        );
+        let gas = outcome.result_and_state.result.gas();
+        let ledger = outcome.inspector_ledger;
+        let used_accounted = accounted - i128::from(gas.inner_refunded());
+        debug_assert!(
+            i128::from(gas.tx_gas_used()) == used_accounted.max(i128::from(gas.floor_gas())),
+            "the same lanes must account for the used figure the receipt reports: \
+             used {} vs accounted {used_accounted} (refunded {}, floor {}, \
+             inspector refund lane {})",
+            gas.tx_gas_used(),
+            gas.inner_refunded(),
+            gas.floor_gas(),
+            ledger.refund.net(),
+        );
+        debug_assert!(
+            i128::from(gas.state_gas_spent_final()) == ledger.state_gas.net().max(0),
+            "EIP-8037 is off on every MegaETH path, so the receipt's state gas is exactly what \
+             the inspector lane booked: reported {} vs lane {}",
+            gas.state_gas_spent_final(),
+            ledger.state_gas.net(),
+        );
     }
 }
 
@@ -426,7 +704,7 @@ impl<DB: Database + BlockHashes, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, IN
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{test_utils::MemoryDatabase, EmptyExternalEnv};
+    use crate::{test_utils::MemoryDatabase, EmptyExternalEnv, InspectorLedger, Lane};
     use alloy_primitives::{address, Bytes, U256};
     use revm::{
         context::{
@@ -712,5 +990,77 @@ mod tests {
 
         let result = evm.execute_transaction(tx);
         assert!(result.is_err());
+    }
+
+    /// A receipt reporting `envelope` gas over tracker lanes that account for none of it — the
+    /// disagreement both transaction-level tripwires exist to catch, built directly because every
+    /// end-to-end shape that could produce it would have to break the conservation law first.
+    fn unaccounted_outcome(envelope: u64, ledger: InspectorLedger) -> MegaTransactionOutcome {
+        MegaTransactionOutcome {
+            result_and_state: ExecResultAndState {
+                result: ExecutionResult::Success {
+                    reason: revm::context::result::SuccessReason::Stop,
+                    gas: revm::context::result::ResultGas::new_with_state_gas(envelope, 0, 0, 0),
+                    logs: Vec::new(),
+                    output: revm::context::result::Output::Call(Bytes::new()),
+                },
+                state: EvmState::default(),
+            },
+            data_size: 0,
+            kv_updates: 0,
+            compute_gas_used: 0,
+            compute_gas_destroyed: 0,
+            compute_gas_enforced: 0,
+            state_growth_used: 0,
+            inspector_ledger: ledger,
+            undeclared_inspector: false,
+        }
+    }
+
+    fn empty_limit(spec: MegaSpecId) -> AdditionalLimit {
+        AdditionalLimit::new(spec, EvmTxRuntimeLimits::from_spec(spec))
+    }
+
+    /// The terminal check has to fail loudly on a receipt whose envelope no lane accounts for.
+    /// Its reach is the paths where the envelope is decided after settlement, so a version of it
+    /// that reads the lanes and says nothing is the whole failure mode.
+    #[test]
+    #[cfg_attr(
+        debug_assertions,
+        should_panic(expected = "the tracker lanes must account for the whole receipt envelope")
+    )]
+    fn test_envelope_tripwire_fires_when_the_lanes_account_for_nothing() {
+        debug_assert_envelope_accounted(
+            MegaSpecId::REX7,
+            false,
+            &empty_limit(MegaSpecId::REX7),
+            &unaccounted_outcome(21_000, InspectorLedger::default()),
+        );
+    }
+
+    /// A sandbox transaction never settles a derivation of its own — the law is stated over an
+    /// outer transaction's final envelope, and the sandbox's gas is a charge inside its parent's.
+    /// The same lanes that trip the check outside a sandbox must be passed over inside one.
+    #[test]
+    fn test_envelope_tripwire_is_skipped_inside_a_sandbox() {
+        debug_assert_envelope_accounted(
+            MegaSpecId::REX7,
+            true,
+            &empty_limit(MegaSpecId::REX7),
+            &unaccounted_outcome(21_000, InspectorLedger::default()),
+        );
+    }
+
+    /// The declaration is a checked claim, not a comment: an inspector declared
+    /// `TrustedObserver` that booked anything must fail the transaction it took part in, even
+    /// when the booking was made at a callback whose own verification is missing.
+    #[test]
+    #[cfg_attr(
+        debug_assertions,
+        should_panic(expected = "an inspector declared `TrustedObserver` wrote something back")
+    )]
+    fn test_trusted_observer_tripwire_fires_on_a_declaration_that_did_not_hold() {
+        let ledger = InspectorLedger { gas: Lane::once(64), ..Default::default() };
+        debug_assert_trusted_observer_kept_its_promise(true, &unaccounted_outcome(0, ledger));
     }
 }

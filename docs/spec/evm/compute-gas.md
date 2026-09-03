@@ -334,19 +334,35 @@ These conditions apply on every spec; only the point at which the recording happ
 
 | Spec         | Recording point                                                                                                                                                                                    |
 | ------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Rex5+        | Atomically with the deployment commit: recorded when the deployment's pre-commit success conditions hold, at the same point the EVM charges the code-deposit gas and commits the created contract. |
+| Rex5–Rex6    | Atomically with the deployment commit: recorded when the deployment's pre-commit success conditions hold, at the same point the EVM charges the code-deposit gas and commits the created contract. |
 | MiniRex–Rex4 | During frame-return processing, in the window covering the EVM's code-deposit charge.                                                                                                              |
 
 A node MUST NOT record this amount twice.
 
-The recording itself can latch a compute-gas exceed, and the two recording points then produce different deployment outcomes:
+The recording interacts with the compute-gas limit, and the two recording points then produce different outcomes:
 
-- From Rex5, the recording precedes the commit: the frame fails as specified in [Exceed Behavior](#exceed-behavior) and the deployment commits nothing, but the recorded amount stands — recording precedes exceed evaluation, and compute gas is never reverted.
+- Under Rex5 and Rex6, the recording precedes the commit: the frame fails as specified in [Exceed Behavior](#exceed-behavior) and the deployment commits nothing, but the recorded amount stands — recording precedes exceed evaluation, and compute gas is never reverted.
+  The amount stands on every path that fails the frame after it, not only on a compute-gas exceed.
 - Under Rex4, the only earlier spec with a per-frame budget, the recording happens after the EVM has already charged the deposit and committed the created contract.
   A frame-budget exceed latched by this recording therefore produces a split outcome: the frame's result is the frame-local revert, while the deployed code remains committed.
   A node MUST NOT roll the deployment back on this path.
 
 The code-deposit _storage_ gas is charged before this window opens and therefore falls outside it, consistent with the [storage gas exclusion](#storage-gas-exclusion).
+
+<details>
+<summary>Rex7 (unstable): the code-deposit amount is weighed before it is recorded</summary>
+
+Rex7 replaces the Rex5 recording point with a conditional one: the amount is evaluated once the frame's own accounting for the exit is complete, and recorded only if it fits the budgets it is weighed against.
+The full previous/new pairing is on the [Rex7 Network Upgrade](../upgrades/rex7.md) page; the normative rules for implementers follow.
+
+A node MUST evaluate the frame-local and transaction-level compute budgets against the frame's usage plus this amount, and MUST NOT record the amount when either would be exceeded.
+That evaluation MUST happen once the frame's own accounting for the exit is complete — its final segment settled and its frame-exit resource usage merged — so the amount is weighed against the frame's whole usage rather than a total still missing part of it.
+A frame that failed on any dimension before this point never reaches the evaluation: the EVM does not charge a deposit such a frame will not make, so there is nothing to record.
+When the amount does not fit, the frame fails as specified in [Exceed Behavior](#exceed-behavior) and the deployment commits nothing — the same outcome Rex5 and Rex6 produce — but the transaction's compute total reports only what it spent.
+A frame-local exceed on this path MUST NOT be latched: with the amount unrecorded the transaction is within every limit, and the frames above it MAY continue.
+A transaction-level exceed MUST be latched and MUST halt the transaction with the usual gas rescue, and MUST carry the same detention attribution it would have carried had the amount been recorded.
+
+</details>
 
 #### Keyless Deploy Sandbox
 
@@ -434,6 +450,19 @@ The rule admits no exception: the keyless-deploy dispatch path rescues on the sa
 Rescue is specific to a transaction-level exceed.
 A frame-local exceed needs none: the frame reverts and its unspent gas returns to the parent through ordinary frame accounting.
 
+Through Rex6, the frame's state does not follow that revert.
+A node commits or reverts a frame's journal checkpoint from the frame's instruction result when the frame's action is processed, which is before the frame-local rewrite reaches the result; a frame that ran to a successful exit therefore reports the revert over state that stays committed.
+
+<details>
+<summary>Rex7 (unstable): the frame's state follows its final result</summary>
+
+Under Rex7, a node MUST decide a frame's journal outcome from the frame's final result — the result after every settlement and every rewrite the node applies at that frame's exit — so a frame that reports a revert has reverted.
+
+The rule reaches every exceed the frame itself latched while it ran.
+It reaches one first detected on the way out to the caller too — that one weighs the frame's usage against the caller's budget after the merge, so under Rex7 a node determines it before the merge and rewrites the frame's result first; see [Per-Call-Frame Runtime Budgets](resource-limits.md#per-call-frame-runtime-budgets).
+
+</details>
+
 When a `CALL`-family or `CREATE` / `CREATE2` opcode fails on a compute-gas exceed — the frame-local revert and the transaction-level halt alike — its pending child frame is discarded before the child runs.
 A node MUST return the gas already forwarded to that discarded child to the frame before it terminates, so that gas is not charged as consumed: on a frame-local revert it returns to the parent frame, and on a transaction-level halt it is excluded from the transaction's `gas_used`.
 
@@ -443,6 +472,188 @@ The transaction's standard EVM `gas_limit` remains the only bound that can halt 
 
 A node MUST record compute gas before evaluating any exceed, including an exceed already latched on another resource dimension.
 The compute work was performed, and the recorded total feeds the transaction outcome and the block-level compute accounting even for a transaction halted on a different dimension.
+
+<details>
+<summary>Rex7 (unstable): checkpoint settlement and gas-clamp enforcement</summary>
+
+Rex7 replaces per-opcode recording for plain opcodes with checkpoint settlement, and enforces compute-gas and detention limits inside plain segments by clamping interpreter-visible gas.
+The full previous/new pairing is on the [Rex7 Network Upgrade](../upgrades/rex7.md) page; the normative rules for implementers follow.
+
+#### Checkpoint set
+
+A node MUST settle compute gas at each of the following **checkpoints**, and MUST NOT open a per-opcode measurement window for any other opcode:
+
+- storage-gas opcodes: `SSTORE`, `LOG0`–`LOG4`, `SELFDESTRUCT`;
+- call-family opcodes: `CALL`, `CALLCODE`, `DELEGATECALL`, `STATICCALL`;
+- create opcodes: `CREATE`, `CREATE2`;
+- volatile / detention-guarded opcodes: the unconditional block-environment set, the beneficiary-conditional set, and oracle-conditional `SLOAD` (same membership as the Volatile class and the call-family / `SELFDESTRUCT` beneficiary guards above);
+- the `GAS` opcode;
+- frame entry, frame resume after a child returns, and frame exit.
+
+Plain opcodes between checkpoints MUST run without recording compute gas when they finish.
+
+#### Segment settlement
+
+At each checkpoint a node MUST:
+
+1. Settle the open plain-opcode segment as the interpreter-gas delta since the previous checkpoint or frame open/resume, applying the same storage-gas and forwarded-child exclusions as the checkpoint opcode's measurement window under this page's stable rules.
+2. Record that segment amount as compute gas and evaluate the compute-gas limit (and any latched non-compute resource-limit exceed) at that checkpoint — the latch-surface point is the next checkpoint rather than the next per-opcode recording site.
+3. Record the checkpoint opcode's own body under the measurement-window rules for its metering class, then re-open the settlement window.
+
+Of the non-opcode recording sites on this page, intrinsic gas, successful or reverting precompiles and KeylessDeploy are unchanged.
+Code deposit is not: Rex7 weighs the amount against the frame-local and transaction-level compute budgets before recording it, and records nothing when it does not fit or when the frame had already failed, as specified under [Contract Creation Code Deposit](#contract-creation-code-deposit).
+A precompile that fails is split under the exceptional-halt carve-out below.
+
+For every transaction that stays within every runtime resource limit, in which no frame ends in an exceptional halt, and in which no `disableVolatileDataAccess` guard rejects an opcode, a node MUST produce the same recorded compute-gas total, the same four-dimension usage, the same receipt `gas_used`, the same execution result, and the same state as under Rex6.
+
+#### Gas-clamp enforcement
+
+After settlement and body recording at a checkpoint (and at frame entry and resume), a node MUST clamp the interpreter-visible remaining gas to the remaining compute headroom — the minimum of the current frame's remaining per-frame compute budget and the transaction-level remaining budget under the effective limit (including detention) — and MUST restore the hidden amount before the next checkpoint body, before `GAS` is observed, before call-gas forwarding, and before storage-gas charges.
+
+The clamp is in force for the segment that follows whenever the true remaining gas is at or above the headroom, and a node MUST remember which constraint bound it along with that constraint's own limit value.
+An exact equality is a binding clamp that hides nothing, not the absence of a clamp.
+When the true remaining gas is below the headroom, no clamp is in force and an out-of-gas inside the segment is the inherited EVM's own.
+
+Inside a plain-opcode segment:
+
+- An opcode that would cost more than the clamped visible remainder MUST NOT execute.
+- The frame's final result MUST restore the hidden gas.
+- The node MUST reclassify that out-of-gas as the resource-limit exceed the clamp stood for: frame-local budget → frame revert with `MegaLimitExceeded`; transaction-level compute → transaction halt with `OutOfGas` and rescued remaining gas; detained limit → transaction halt with `VolatileDataAccessOutOfGas` and rescued remaining gas.
+
+The `limit` reported by either shape MUST be the constraint that bound the clamp — the frame's own compute budget for a frame-local binding, the effective transaction-level limit otherwise — matching what the per-opcode check path on this page reports.
+
+Because the crossing opcode never executes, a node MUST NOT include its cost in recorded compute-gas usage.
+The `actual` a transaction-level clamp halt reports MUST be the transaction's final compute usage, after the frame-exit settlement has closed the partial segment the crossing opcode stopped inside.
+
+A checkpoint that still carries a non-zero static fee — `GAS` and `LOG0` through `LOG4` — MAY itself be the crossing opcode of the preceding plain-opcode segment.
+When the clamped visible remainder is less than that fee, the inherited per-opcode check stops the opcode before the body runs, and a node MUST treat that stop as a plain-segment crossing.
+The CALL family is the same stop: its static fee is charged before the body, so a clamped remainder below that fee stops the opcode before the target account is read.
+`CREATE` and `CREATE2` charge their inherited creation fee inside the body, after the true remaining gas has been restored, so a compute headroom below that fee MUST NOT stop them before the body.
+
+When the current frame's remaining per-frame compute budget equals the transaction-level remaining budget, a node MUST bind the clamp to the transaction-level constraint (including detention when detention is the effective transaction-level bound).
+A clamp-induced exceed under that binding MUST halt the transaction with gas rescue; a node MUST NOT classify the equality as frame-local.
+Through Rex6, the same equality is classified by the per-opcode check as a frame-local exceed; at the top-level frame that surfaces as a revert rather than a halt.
+
+When the crossing opcode would exhaust both the true remaining EVM gas and the compute headroom, a node MUST attribute the halt to the compute-gas or detention limit (with rescue) rather than to ordinary EVM out-of-gas.
+
+#### Exceptional-halt frame carve-out
+
+A frame that ends in an exceptional halt — ordinary out-of-gas, memory out-of-gas, stack underflow or overflow, invalid jump, unknown opcode, and every other error result — returns none of its remaining budget.
+A node MUST settle that budget as compute gas, apart from any MegaETH storage gas a checkpoint body charged before aborting: that charge was taken on the storage-gas lane, stays there, and belongs to neither part below.
+A node MUST split what remains into two parts that are accounted differently:
+
+- **Executed** — the open plain-opcode segment, measured as the interpreter-gas delta since the previous checkpoint, net of that storage charge.
+  A checkpoint opcode that halts inside its own body never reaches the recording that closes its measurement window, so the EVM gas the body had already charged — the value-transfer surcharge and the argument / return-range memory expansion a call-family body takes before it loads the target account — is still inside that segment when the frame exits, and belongs to this part.
+  This is work the network performed, and a node MUST record it through the ordinary path: it counts toward the transaction's reported total **and** toward the usage every resource limit is evaluated against, exactly as the same opcodes would if the frame had returned normally.
+- **Destroyed** — the budget the frame never spent and never handed back.
+  A node MUST record it in the reported compute-gas total and in block-level compute accounting, and MUST NOT evaluate any resource limit against it, at transaction level or at block level (see [Resource Limits](resource-limits.md)).
+
+The destroyed part is bounded by the sender's gas envelope rather than by the compute limit, and halting on it would rescue gas the EVM already destroyed and change the receipt this carve-out requires to stay identical.
+The executed part carries no such problem: it is work, and leaving it out of enforcement would let a frame that keeps executing after absorbing a failed child spend the same compute headroom a second time.
+
+#### Destroyed compute gas
+
+The destroyed part of a transaction is defined by a conservation law over the gas the transaction spent, not by an enumeration of the places that can destroy an envelope.
+
+Every unit of EVM gas a transaction spends is exactly one of three things: compute work its frames performed, MegaETH storage gas, or budget that was lost without anything being executed for it.
+Two of those three are recorded as they happen, so a node MUST derive the third:
+
+`destroyed = spent + minted_stipends − storage_gas − executed_compute`
+
+- `spent` — the EVM gas the transaction's envelope burnt, read once, at the moment the envelope is final: after the transaction's gas accounting has settled and any resource-limit gas rescue has been returned to the sender, and before the EIP-3529 refund and the EIP-7623 floor are applied.
+  Those two move the number the receipt reports without anything having been burnt, so a node MUST NOT read `spent` after them.
+  Gas rescued for the sender, and gas the clamp was hiding, are both out of the envelope by this point and MUST NOT be added back.
+  A failed deposit transaction, whose result is rebuilt after that point, is the one exception; the rule for it is below.
+- `minted_stipends` — the sum of `CALL_STIPEND` over the transaction's value-transferring `CALL` and `CALLCODE` invocations, counted once per stipend the EVM mints.
+  The inherited EVM grants that stipend to the child's frame budget without debiting the caller's gas counter, so the frames between them record one stipend more work than the envelope funded, per such call, whatever becomes of the stipend afterwards.
+  The mint is created when the invocation is handed to the EVM, before the child is entered, and a node MUST count it from that point rather than from the child frame running: an invocation turned away at frame entry — for want of balance, or at the call-depth limit — hands the whole child budget back to the caller with the stipend inside it, which shrinks the envelope against recorded work by exactly as much as a child that ran and returned it would.
+  An invocation a node halts before handing it to the EVM, which is what a compute-gas limit reached at the call site does, mints nothing and a node MUST NOT count it.
+  A node MUST add the total back; without it the two sides of the law disagree by exactly that amount.
+- `storage_gas` — the MegaETH storage gas the transaction was charged: the storage-gas share of intrinsic gas, the in-frame storage-gas surcharges, the code-deposit charge, and the charges a system contract invocation takes outside an EVM frame.
+  At a nested-execution boundary this term takes the **difference** between what the nested execution cost the outer gas counter and what it recorded as compute, which can be negative when the nested execution's own EIP-3529 refund outgrew its storage gas; a node MUST NOT clamp that contribution at zero.
+- `executed_compute` — the compute gas the transaction is recorded as having performed, fixed site by site by the rules below, and the quantity every resource limit is evaluated against.
+  It equals the reported total less the destroyed part, but that identity is a consequence of the law rather than a definition of either side.
+
+The result is the number a node MUST report as the transaction's destroyed compute gas.
+A node MUST NOT report a negative result: the law cannot produce one on this spec, and a node that computes one MUST report zero rather than a wrapped value.
+
+The law defines a reported quantity, and nothing else.
+Enforcement — the transaction's own compute-gas limit, and the block's enforced compute counter, which accumulates each transaction's `executed_compute` — runs on the recorded work at every level, never on this remainder or on a total with it subtracted back out.
+The two readings agree by construction of the law; keeping enforcement on the recorded side is what confines an error in the derivation to the number it reports.
+
+The rules that follow fix `executed_compute` at each site that can leave budget unspent, which is what makes the law's remainder well defined; they are not themselves the definition of the destroyed total.
+
+A node MUST record each producer at the site the table names, and MUST NOT record it at any other site.
+
+| Producer                                                                                                        | Recording site                                                                                                                  |
+| --------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| A frame that ends in an exceptional halt, including a creation rejected at code deposit                         | The frame's final-result settlement                                                                                             |
+| A call or creation the inherited EVM refuses before it opens a frame                                            | The same settlement, classified by whether the refusal swallows the child budget or hands it back                               |
+| A precompile invocation that fails                                                                              | The same settlement, against the numbers the precompile's own recording site fixed; a node MUST NOT also record it as a refusal |
+| A system-contract invocation answered without an EVM frame, when the answer is a halt that keeps the call's gas | The site that produces the answer                                                                                               |
+| A failed-deposit receipt rebuild                                                                                | The rebuild of the envelope, as the gap between that envelope and every earlier recording                                       |
+| An ordinary transaction rejected during validation because intrinsic gas outgrew the sender's gas limit         | Nowhere: the transaction produces no receipt                                                                                    |
+
+The classification that decides whether a result swallows its remaining budget or hands it back MUST be exhaustive over the inherited instruction-result space.
+Every result the inherited EVM can produce MUST be assigned swallowed, returned, or unreachable.
+A newly introduced result MUST NOT be assigned by a default arm.
+
+A precompile invocation that fails is the same split.
+A precompile never becomes a child EVM frame, so the frame-exit settlement cannot see it; a node MUST take the split from the classification the call returns to its caller, which is what decides whether the caller reclaims the remainder.
+
+- **Executed** — the work the precompile performed: the KZG point-evaluation fixed cost when that precompile reached verification and returned a non-out-of-gas error, and zero when the invocation was rejected before any work.
+  For KZG the dividing line is its own input-length check, which runs before the commitment is read: an input whose length is not `KZG_POINT_EVALUATION_INPUT_LENGTH` is turned away before any work, while every other non-out-of-gas failure is raised once verification is under way and is priced at the whole fixed cost regardless of how far it got.
+  A node MUST price an unrecognised non-out-of-gas KZG failure as verification under way, so an unfamiliar failure can only over-charge.
+  A node MUST record the executed part through the ordinary enforcing path.
+- **Destroyed** — the rest of the call's gas limit: the caller-supplied envelope minus the executed part.
+  On a value-transferring call the envelope includes the protocol-granted call stipend, so it can exceed what the parent itself funded.
+  That loss is the uncapped forwarded envelope, not the Rex5-capped effective gas limit; when the cap binds, the gap belongs to the destroyed part.
+  A node MUST record it in the reported total and MUST NOT evaluate any resource limit against it.
+
+Through Rex6 the generic error arm recorded the effective gas limit as enforcing usage.
+Under Rex7 that arm enforces nothing, which is a deliberate enforcement difference.
+The Rex5 forwarded-gas cap is unchanged: a precompile still MUST NOT perform more work than the remaining compute budget.
+
+A [system contract](../system-contracts/overview.md) invocation a node answers without opening an EVM frame takes the same split, at the site that produces the answer.
+It applies only when the answer is a halt that keeps the call's gas: the part the invocation performed before failing is executed, and the rest of the call's gas limit is destroyed.
+An answer that returns or reverts hands the gas back to the caller, and a halt whose remaining gas is rescued for the sender is a refund; a node MUST NOT record either as destroyed, because that gas was not lost.
+
+A call or creation an inherited EVM refuses before it opens a frame takes the same split, at the site that produces the refusal.
+The refusal hands back a result carrying the whole child budget, and the classification decides that budget's fate.
+A creation onto an address that already holds code or a nonce, and a value transfer that overflows the recipient's balance, are exceptional halts whose budget the caller never sees again; the frame never ran, so nothing was executed and a node MUST record the whole budget as destroyed.
+A refusal classified as a success or a revert — a call or creation past the call-stack limit, a creation whose value exceeds the caller's balance, a creation from an account whose nonce cannot be bumped, a call into an account with no code — hands the budget straight back to the caller, and a node MUST NOT record any of it as destroyed.
+A precompile invocation is answered on this same path and is covered by its own rule above; a node MUST NOT book it a second time here.
+
+An ordinary transaction a node rejects during validation has no envelope to split.
+Since [Rex5](../upgrades/rex5.md) a transaction whose intrinsic gas requirement outgrows the gas limit its sender supplied is rejected during validation — after every MegaETH storage-gas contribution has been folded into the intrinsic total and before the sender is debited — so it produces no receipt.
+A node MUST NOT record such a transaction's gas limit as a destroyed remainder.
+
+A deposit transaction is not allowed to fail, and that is where the exception lies.
+A deposit a node would otherwise reject during validation, and a deposit that halts during execution, are both rebuilt into a receipt reporting the transaction's whole gas limit, with state rolled back to the sender's nonce bump and the deposit's mint.
+The rebuild runs after every recording and settlement site, so it is the last thing that decides the envelope: a node MUST derive the law against the rebuilt envelope rather than against the one the transaction reached on its own.
+The difference between the two is destroyed compute gas, because the receipt burns it and nothing was executed for it.
+The two shapes arrive from opposite positions and the law covers both without distinguishing them — a rejected deposit has recorded only the standard-EVM share of its intrinsic gas and settled nothing, while a halted deposit has already settled against the smaller envelope its resource-limit gas rescue left behind.
+A node MUST NOT let the rebuild change `executed_compute`: nothing was executed for the difference between the rebuilt envelope and the one the transaction reached on its own, so that difference MUST NOT consume compute capacity at transaction or block level.
+What each shape recorded before the rebuild stands, and is enforced.
+A rejected deposit therefore enforces the standard-EVM share of its intrinsic gas — the amount recorded before validation returned the error — and a halted deposit enforces everything it had settled; on both shapes that is exactly what Rex6 records for the same transaction, and the destroyed remainder is an addition to the reported total rather than a change to the enforced one.
+
+The split MUST be driven by the halt classification rather than by the interpreter's own counter, which an inherited EVM zeroes for ordinary out-of-gas only.
+That zeroing has one consequence a node MUST accept: for an ordinary out-of-gas taken with no clamp in force, the counter is already zero when the frame exits, so the whole segment measures as executed and is enforced in full.
+A node MUST NOT try to recover the split in that case.
+It is the one shape where Rex7 enforcement is stricter than per-opcode enforcement through Rex6, which attributes the failing opcode to neither part.
+
+A node MUST take the split from the frame's **final** result, after the create-return processing that can still turn a successful constructor into a canonical code-deposit out-of-gas, an EIP-3541 reject or a runtime code-size reject.
+Each of those destroys the frame's remainder just as a halt from the interpreter loop does.
+
+Under per-opcode recording through Rex6 neither the failing opcode nor the destroyed remainder is attributed to compute gas, so a transaction that halts exceptionally, or that contains an inner call frame which does, MAY report a strictly higher compute-gas total under Rex7 while EVM gas and the receipt remain identical.
+
+A clamp-induced out-of-gas is not an exceptional halt for this rule — the crossing opcode never executed and the remaining gas is rescued rather than destroyed.
+A frame whose exit latches a resource-limit exceed destroys nothing either: it reverts to its parent (frame-local) or halts the transaction with its gas rescued (transaction-level).
+
+When a nested execution merges its usage into an outer one — the [KeylessDeploy](../system-contracts/keyless-deploy.md) sandbox is the only such boundary — a node MUST carry the split across it, reporting the inner total in full while enforcing only the executed part.
+The outer transaction's destroyed total is still derived once, from its own envelope, after the merge.
+
+</details>
 
 #### Keyless Deploy Exceed
 
@@ -466,16 +677,17 @@ See [Resource Accounting](resource-accounting.md#revert-behavior).
 
 ## Constants
 
-| Constant                        | Value         | Spec           | Description                                                                                                      |
-| ------------------------------- | ------------- | -------------- | ---------------------------------------------------------------------------------------------------------------- |
-| `TX_COMPUTE_GAS_LIMIT`          | 200,000,000   | Rex onward     | Maximum compute gas per transaction from Rex onward                                                              |
-| `TX_COMPUTE_GAS_LIMIT`          | 1,000,000,000 | MiniRex        | Maximum compute gas per transaction under MiniRex                                                                |
-| `FRAME_LIMIT_NUMERATOR`         | 98            | Rex4 onward    | Numerator of the per-call-frame budget forwarding fraction                                                       |
-| `FRAME_LIMIT_DENOMINATOR`       | 100           | Rex4 onward    | Denominator of the per-call-frame budget forwarding fraction                                                     |
-| `CALL_STIPEND`                  | 2,300         | All            | Standard EVM value-transfer call stipend, inherited unchanged                                                    |
-| `CODEDEPOSIT`                   | 200           | All            | Standard EVM per-byte code-deposit gas, inherited unchanged                                                      |
-| `KEYLESS_DEPLOY_OVERHEAD_GAS`   | 100,000       | Rex2 onward    | Fixed dispatch overhead for a keyless deploy                                                                     |
-| `KZG_POINT_EVALUATION_GAS_COST` | 100,000       | MiniRex onward | MegaETH's fixed-cost override for the KZG point-evaluation precompile (defined in [Precompiles](precompiles.md)) |
+| Constant                            | Value         | Spec           | Description                                                                                                      |
+| ----------------------------------- | ------------- | -------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `TX_COMPUTE_GAS_LIMIT`              | 200,000,000   | Rex onward     | Maximum compute gas per transaction from Rex onward                                                              |
+| `TX_COMPUTE_GAS_LIMIT`              | 1,000,000,000 | MiniRex        | Maximum compute gas per transaction under MiniRex                                                                |
+| `FRAME_LIMIT_NUMERATOR`             | 98            | Rex4 onward    | Numerator of the per-call-frame budget forwarding fraction                                                       |
+| `FRAME_LIMIT_DENOMINATOR`           | 100           | Rex4 onward    | Denominator of the per-call-frame budget forwarding fraction                                                     |
+| `CALL_STIPEND`                      | 2,300         | All            | Standard EVM value-transfer call stipend, inherited unchanged                                                    |
+| `CODEDEPOSIT`                       | 200           | All            | Standard EVM per-byte code-deposit gas, inherited unchanged                                                      |
+| `KEYLESS_DEPLOY_OVERHEAD_GAS`       | 100,000       | Rex2 onward    | Fixed dispatch overhead for a keyless deploy                                                                     |
+| `KZG_POINT_EVALUATION_GAS_COST`     | 100,000       | MiniRex onward | MegaETH's fixed-cost override for the KZG point-evaluation precompile (defined in [Precompiles](precompiles.md)) |
+| `KZG_POINT_EVALUATION_INPUT_LENGTH` | 192           | All            | Required input length in bytes of the KZG point-evaluation precompile, inherited unchanged                       |
 
 The gas detention caps that lower the effective compute gas limit are defined in [Gas Detention](gas-detention.md).
 
@@ -502,6 +714,16 @@ Permitting both lets an implementation choose whichever is cheaper at a given si
 
 For a value-transferring `CALL` or `CALLCODE`, the inherited EVM adds `CALL_STIPEND` to the child's gas limit without deducting it from the parent's remaining gas.
 Treating the child's full gas limit as forwarded would therefore subtract gas the parent never contributed, under-counting the parent's compute gas by the stipend.
+
+<details>
+<summary>Rex7 (unstable): why destroyed compute gas is defined by a conservation law</summary>
+
+A definition that enumerates the sites which can destroy an envelope is only as complete as the enumeration, and its completeness is not checkable — a site added later, or one an implementation reaches by a path the list did not anticipate, silently under-reports with nothing to notice it.
+The conservation law has no such failure mode: it is stated over quantities a node already tracks for other reasons, so any envelope lost anywhere shows up in the remainder whether or not the loss was foreseen.
+It also gives the site rules something to be checked against, since the two are computed independently and must agree.
+The cost is one correction term — the inherited EVM's minted `CALL_STIPEND`, which makes recorded work exceed the envelope — and one ordering obligation on where the envelope is read.
+
+</details>
 
 **Why is the first `CALL`-family touch of a preload-warm address charged cold?**
 
@@ -572,3 +794,4 @@ System-granted gas leaks to the sender, who recovers gas that was never theirs t
 - [Rex4](../upgrades/rex4.md) — introduced the per-call-frame compute gas budget; made gas detention caps relative to usage at the access point; added beneficiary volatile-access guards to the `CALL` family, `SELFDESTRUCT`, and `SELFBALANCE`.
 - [Rex5](../upgrades/rex5.md) — excluded the `CALL_STIPEND` from the forwarded-gas deduction; moved `CREATE2` memory-expansion recording ahead of the storage-gas charge; made contract-creation code-deposit compute gas atomic with the deployment commit; refined precompile compute-gas recording and bounded it by the remaining compute budget; added the `SELFDESTRUCT` empty-beneficiary storage-gas charge; removed `CALLCODE` from the cold first-touch charge and added `SELFDESTRUCT`'s beneficiary to it; stopped following EIP-7702 delegation in the pre-execution inspection, restoring inherited warmth for delegates.
 - [Rex6](../upgrades/rex6.md) — unified the measurement window across all storage-affecting opcodes and folded `CREATE2` memory expansion into it, ending the two-window exception; returned forwarded gas to the failing frame on a compute-gas exceed; rescued the unused envelope on a keyless-deploy dispatch exceed; made beneficiary detection delegation-aware, returning `CALLCODE` call targets to the cold first-touch charge; exempted system-originated transactions from the compute gas limit and gas detention.
+- [Rex7](../upgrades/rex7.md) _(unstable)_ — settles compute gas at checkpoints rather than after every plain opcode; enforces compute and detention limits inside plain segments by clamping interpreter-visible gas so a crossing opcode does not execute; records an exceptional-halt frame's burned remainder as compute gas at frame exit; splits a failing precompile the same way, from the classification its caller is handed; weighs a contract creation's code-deposit compute gas against the compute budgets before recording it, rather than recording it ahead of the evaluation.

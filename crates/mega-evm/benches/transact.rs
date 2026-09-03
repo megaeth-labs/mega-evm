@@ -1,8 +1,13 @@
 //! Benchmarks for the `ExecuteEvm::transact()` interface.
 //!
 //! Each workload runs against two vanilla baselines (`revm_pinned`,
-//! `op_revm_pinned`) and four mega specs (`EQUIVALENCE`, `MINI_REX`, `REX4`,
-//! `REX5`) so a single bench produces a cross-row gap table.
+//! `op_revm_pinned`) and the mega specs (`EQUIVALENCE` … `REX7`) on the plain
+//! `transact` path, so a single bench produces a cross-row gap table.
+//!
+//! Every workload also registers inspected-path rows for REX6 and REX7:
+//! `<spec>/inspect_noop` (measurement shim around a `NoOpInspector`) and
+//! `<spec>/inspect_tracer` (`revm-inspectors` geth default). Those rows call
+//! `InspectEvm::inspect_tx`, which is the path RPC tracers take.
 #![allow(missing_docs)]
 
 use alloy_primitives::{address, bytes, Address, Bytes, U256};
@@ -10,7 +15,7 @@ use criterion::{criterion_group, criterion_main, Criterion};
 use revm::primitives::{keccak256, B256};
 
 mod common;
-use common::{register_all, Account, TxSpec, Workload};
+use common::{register_all, register_inspected, Account, TxSpec, Workload};
 
 const CALLER: Address = address!("0000000000000000000000000000000000100000");
 const CALLEE: Address = address!("0000000000000000000000000000000000100001");
@@ -37,6 +42,7 @@ fn bench_empty_transaction(c: &mut Criterion) {
     // the caller needs no balance), matching the original workload.
     let workload = Workload::single(vec![], TxSpec::call(CALLER, CALLEE));
     register_all(&mut group, &workload);
+    register_inspected(&mut group, &workload);
     group.finish();
 }
 
@@ -51,6 +57,7 @@ fn bench_simple_ether_transfer(c: &mut Criterion) {
         TxSpec::call(CALLER, CALLEE),
     );
     register_all(&mut group, &workload);
+    register_inspected(&mut group, &workload);
     group.finish();
 }
 
@@ -83,6 +90,53 @@ fn bench_weth9_transfer(c: &mut Criterion) {
         TxSpec::call(CALLER, WETH9_ADDRESS).data(calldata),
     );
     register_all(&mut group, &workload);
+    register_inspected(&mut group, &workload);
+    group.finish();
+}
+
+/// Builds a tight countdown loop of cheap opcodes:
+///
+/// ```text
+/// PUSH3 iterations
+/// loop: JUMPDEST; PUSH1 1; SWAP1; SUB; DUP1; PUSH1 loop; JUMPI
+/// STOP
+/// ```
+///
+/// Each iteration executes 7 opcodes for 26 gas (JUMPDEST 1 + PUSH1 3 + SWAP1 3 +
+/// SUB 3 + DUP1 3 + PUSH1 3 + JUMPI 10), all from the cheap-opcode family that
+/// dominates real interpreter workloads.
+fn hotloop_code(iterations: u32) -> Bytes {
+    let mut code = Vec::with_capacity(14);
+    // PUSH3 <iterations>
+    code.push(0x62);
+    code.extend_from_slice(&iterations.to_be_bytes()[1..4]);
+    // loop target is the JUMPDEST right after the initial PUSH3 (offset 4).
+    let loop_target = code.len() as u8;
+    code.push(0x5b); // JUMPDEST
+    code.push(0x60); // PUSH1
+    code.push(0x01);
+    code.push(0x90); // SWAP1
+    code.push(0x03); // SUB
+    code.push(0x80); // DUP1
+    code.push(0x60); // PUSH1
+    code.push(loop_target);
+    code.push(0x57); // JUMPI
+    code.push(0x00); // STOP
+    Bytes::from(code)
+}
+
+/// Benchmark a cheap-opcode-dense interpreter hot loop (~700k executed opcodes,
+/// ~2.6M gas), the workload shape where per-opcode gas-accounting overhead is
+/// the dominant tax.
+fn bench_interpreter_hotloop(c: &mut Criterion) {
+    let mut group = c.benchmark_group("interpreter_hotloop");
+    // Gas price is zero, so the caller needs no balance. Callee holds the loop body.
+    let workload = Workload::single(
+        vec![Account::new(CALLEE).code(hotloop_code(100_000))],
+        TxSpec::call(CALLER, CALLEE),
+    );
+    register_all(&mut group, &workload);
+    register_inspected(&mut group, &workload);
     group.finish();
 }
 
@@ -90,6 +144,7 @@ criterion_group!(
     benches,
     bench_empty_transaction,
     bench_simple_ether_transfer,
-    bench_weth9_transfer
+    bench_weth9_transfer,
+    bench_interpreter_hotloop
 );
 criterion_main!(benches);

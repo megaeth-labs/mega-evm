@@ -13,8 +13,8 @@ use revm::{
 };
 
 use crate::{
-    constants, ExternalEnvTypes, IntoMegaethCfgEnv, MegaContext, MegaEvm, MegaHaltReason,
-    MegaHandler, MegaSpecId, MegaTransaction, MegaTransactionError,
+    constants, ExternalEnvTypes, IntoMegaethCfgEnv, MeasuredInspector, MegaContext, MegaEvm,
+    MegaHaltReason, MegaHandler, MegaSpecId, MegaTransaction, MegaTransactionError,
 };
 
 /// Implementation of [`alloy_evm::Evm`] for `MegaETH` EVM.
@@ -113,14 +113,19 @@ where
         self.inspect = enabled;
     }
 
+    /// Hands back the caller's own inspector, not the measurement shim it is executed inside.
     fn components(&self) -> (&Self::DB, &Self::Inspector, &Self::Precompiles) {
-        (&self.inner.ctx.journaled_state.database, &self.inner.inspector, &self.inner.precompiles)
+        (
+            &self.inner.ctx.journaled_state.database,
+            self.inner.inspector.inner(),
+            &self.inner.precompiles,
+        )
     }
 
     fn components_mut(&mut self) -> (&mut Self::DB, &mut Self::Inspector, &mut Self::Precompiles) {
         (
             &mut self.inner.ctx.journaled_state.database,
-            &mut self.inner.inspector,
+            self.inner.inspector.inner_mut(),
             &mut self.inner.precompiles,
         )
     }
@@ -177,8 +182,10 @@ where
 {
     type Inspector = INSP;
 
+    /// Takes the caller's inspector by value and stores it wrapped in the measurement shim, so a
+    /// swapped-in inspector is measured exactly like one supplied at construction.
     fn set_inspector(&mut self, inspector: Self::Inspector) {
-        self.inner.inspector = inspector;
+        self.inner.inspector = MeasuredInspector::new(inspector);
     }
 
     fn inspect_one_tx(&mut self, tx: Self::Tx) -> Result<Self::ExecutionResult, Self::Error> {

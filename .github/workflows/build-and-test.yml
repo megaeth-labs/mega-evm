@@ -48,6 +48,18 @@ jobs:
       - name: Run Test
         run: cargo test --workspace
 
+  # The EEST sweep runs nightly, but the cache guards it rests on are shell, and a change that
+  # breaks them would otherwise surface as a green sweep over a fraction of the corpus. The suite
+  # drives `run.sh` against a synthetic archive and a stub binary, so it needs no corpus and no
+  # build.
+  corpus-cache:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run corpus cache integrity suite
+        run: tools/eest-sweep/tests/cache_integrity.sh
+
   no-std:
     runs-on: ubuntu-24.04
     timeout-minutes: 10

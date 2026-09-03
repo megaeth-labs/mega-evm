@@ -34,7 +34,10 @@ use op_alloy_consensus::OpTxEnvelope;
 use op_alloy_rpc_types::Transaction;
 use state_test::{
     runner::{execute_unit_collect, execution_status, halt_reason},
-    types::{AccountInfo, Env, MegaEnv, SpecName, Test, TestSuite, TestUnit, TransactionParts},
+    types::{
+        AccountInfo, Env, MegaEnv, SpecName, Test, TestSuite, TestUnit, TransactionParts,
+        TxPartIndices,
+    },
 };
 
 use super::{ReplayError, Result};
@@ -225,7 +228,10 @@ where
 /// Re-execute the isolated unit through `state-test`, cross-check it against the
 /// observed replay outcome, fill the `post` expectation, and write the fixture.
 pub(crate) fn finalize_and_write(draft: FixtureDraft, path: &std::path::Path) -> Result<()> {
-    let executed = execute_unit_collect(&draft.unit, &draft.spec)
+    // A replayed on-chain transaction is one transaction, so the fixture it produces has exactly
+    // one vector and it is index zero.
+    let indexes = TxPartIndices { data: 0, gas: 0, value: 0 };
+    let executed = execute_unit_collect(&draft.unit, indexes, &draft.spec)
         .map_err(|e| ReplayError::Other(format!("fixture self-execution failed: {e}")))?;
 
     // Cross-check the isolated execution against the full replay. These values
@@ -272,8 +278,13 @@ pub(crate) fn finalize_and_write(draft: FixtureDraft, path: &std::path::Path) ->
 
     let mut unit = draft.unit;
     unit.out = executed.output.clone();
-    let test =
-        Test::for_dump(executed.state_root, executed.logs_root, executed.gas_used, executed.status);
+    let test = Test::for_dump(
+        indexes,
+        executed.state_root,
+        executed.logs_root,
+        executed.gas_used,
+        executed.status,
+    );
     unit.post = BTreeMap::from([(draft.spec, vec![test])]);
 
     let suite = TestSuite(BTreeMap::from([(draft.name, unit)]));

@@ -274,7 +274,7 @@ create2_oversized_initcode      Rex3                 21012    100000000  halt Ba
 create2_oversized_initcode      Rex4                 21012    100000000  halt Base(Base(CreateInitCodeSizeLimit))
 create2_oversized_initcode      Rex5                763907    100000000  halt Base(Base(CreateInitCodeSizeLimit))
 create2_oversized_initcode      Rex6                 21012    100000000  halt Base(Base(CreateInitCodeSizeLimit))
-create2_oversized_initcode      Rex7                 21012    100000000  halt Base(Base(CreateInitCodeSizeLimit))
+create2_oversized_initcode      Rex7              99961000    100000000  halt Base(Base(CreateInitCodeSizeLimit))
 
 selfdestruct_to_empty           Equivalence              0        53603  success
 selfdestruct_to_empty           MiniRex              21003    100000000  halt Base(Base(InvalidFEOpcode))
@@ -340,7 +340,7 @@ precompile_kzg_invalid_input    Rex3                 23633       262633  success
 precompile_kzg_invalid_input    Rex4                 23633       262633  success
 precompile_kzg_invalid_input    Rex5                123633       262633  success
 precompile_kzg_invalid_input    Rex6                123633       262633  success
-precompile_kzg_invalid_input    Rex7                123633       262633  success
+precompile_kzg_invalid_input    Rex7                223633       262633  success
 
 precompile_underfunded          Equivalence              0        21140  success
 precompile_underfunded          MiniRex              23639        23640  success

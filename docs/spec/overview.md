@@ -62,7 +62,8 @@ A new spec may add behavior, but it never changes what an existing frozen spec d
 Contracts deployed under a given spec will continue to behave identically, regardless of future upgrades.
 {% endhint %}
 
-- **EQUIVALENCE** — Baseline. Full Optimism Isthmus compatibility with block environment access tracking for parallel execution.
+- **EQUIVALENCE** — Baseline.
+  Full Optimism Isthmus compatibility with block environment access tracking for parallel execution.
 - **MINI_REX** — Dual gas model, multidimensional resource limits, gas detention, 98/100 gas forwarding, SELFDESTRUCT disabled, Oracle and Timestamp system contracts.
 - **REX** — Revised storage gas economics (`base × (multiplier − 1)`), transaction intrinsic storage gas, state growth tracking, consistent CALL-like opcode behavior.
 - **REX1** — Fix: compute gas limit reset between transactions.
@@ -71,7 +72,8 @@ Contracts deployed under a given spec will continue to behave identically, regar
 - **REX4** — Per-call-frame resource budgets, relative gas detention, [storage gas stipend](glossary.md#storage-gas-stipend), MegaAccessControl and MegaLimitControl system contracts.
 - **REX5** — SequencerRegistry system contract, Oracle v2.0.0 with dynamic system address, caller-account update deduplication, storage-gas-stipend separated-allowance model, value-transfer CALL/CALLCODE parent compute-gas attribution, CREATE code-deposit compute-gas atomicity, EIP-2935/EIP-4788 pre-block gas floor with fail-closed block rejection, CREATE2 empty-initcode short-circuit, KeylessDeploy trailing-bytes rejection and empty-code log forwarding.
 - **REX6** — Unified per-opcode gas metering order, consolidated EIP-7702 authorization accounting, CREATE-frame accounting corrections, KeylessDeploy sandbox hardening, post-execution fee-reward accounting, system-originated transaction metering exemption, extended beneficiary detention coverage, and SequencerRegistry v2.0.0 rotation hardening.
-- **REX7** — The **unstable** spec, currently open for development. No behavioral change over REX6 yet.
+- **REX7** — The **unstable** spec, currently open for development.
+  Checkpoint-settled compute gas accounting with gas-clamp enforcement; plain opcodes record no compute gas between checkpoints.
 
 See [Hardforks and Specs](hardfork-spec.md) for full details.
 
