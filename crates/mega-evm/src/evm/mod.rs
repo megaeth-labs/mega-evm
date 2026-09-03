@@ -39,7 +39,8 @@ mod state;
 
 #[cfg(not(feature = "std"))]
 use alloc as std;
-use std::{collections::BTreeMap, vec::Vec};
+use core::cell::RefCell;
+use std::{collections::BTreeMap, rc::Rc, vec::Vec};
 
 use alloy_primitives::{Address, B256};
 pub use context::*;
@@ -68,7 +69,10 @@ use revm::{
     ExecuteEvm, InspectEvm, Inspector, Journal,
 };
 
-use crate::{BucketId, ExternalEnvTypes, LimitUsage, MegaTransaction};
+use crate::{
+    sandbox::{SandboxInspector, SandboxObserver},
+    BucketId, EmptyExternalEnv, ExternalEnvTypes, LimitUsage, MegaTransaction,
+};
 
 /// The main EVM implementation for the `MegaETH` chain.
 ///
@@ -233,6 +237,39 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
 }
 
 impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
+    /// Attaches an observer for nested sandbox execution on every spec.
+    ///
+    /// Forwards to [`MegaContext::set_keyless_sandbox_observer`]. The observer
+    /// must implement [`SandboxObserver`] for both this EVM's `ExtEnvs` and
+    /// [`EmptyExternalEnv`]. Use [`Self::clear_keyless_sandbox_hook`] to
+    /// detach.
+    pub fn set_keyless_sandbox_observer<O>(&mut self, observer: Rc<RefCell<O>>)
+    where
+        O: SandboxObserver<ExtEnvs> + SandboxObserver<EmptyExternalEnv> + 'static,
+        ExtEnvs: 'static,
+    {
+        self.inner.ctx.set_keyless_sandbox_observer(observer);
+    }
+
+    /// Attaches a rewriting inspector for nested sandbox execution on every spec.
+    ///
+    /// Forwards to [`MegaContext::set_keyless_sandbox_inspector`]. The inspector
+    /// must implement [`SandboxInspector`] for both this EVM's `ExtEnvs` and
+    /// [`EmptyExternalEnv`]. Use [`Self::clear_keyless_sandbox_hook`] to detach.
+    pub fn set_keyless_sandbox_inspector<I>(&mut self, inspector: Rc<RefCell<I>>)
+    where
+        I: SandboxInspector<ExtEnvs> + SandboxInspector<EmptyExternalEnv> + 'static,
+    {
+        self.inner.ctx.set_keyless_sandbox_inspector(inspector);
+    }
+
+    /// Detaches any sandbox hook from both env-type slots.
+    ///
+    /// Forwards to [`MegaContext::clear_keyless_sandbox_hook`].
+    pub fn clear_keyless_sandbox_hook(&mut self) {
+        self.inner.ctx.clear_keyless_sandbox_hook();
+    }
+
     /// Provides a reference to the block environment.
     ///
     /// The block environment contains information about the current block being processed,

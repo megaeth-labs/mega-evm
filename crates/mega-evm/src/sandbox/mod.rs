@@ -59,10 +59,46 @@
 //!
 //! - `execution` - Core sandbox execution logic and the main entry point
 //!   [`execute_keyless_deploy_call`]
+//! - `observer` - Read-only [`SandboxObserver`] channel into nested sandbox execution
+//! - `inspector` - Rewriting [`SandboxInspector`] channel into nested sandbox execution
+//! - `trace` - Shared `revm-inspectors` recorder and splicing helpers (`inspectors` feature)
 //! - `state` - Type-erased database wrapper ([`SandboxDb`]) for isolated execution
 //! - `state_merge` - Replay-safe merge of sandbox state into the parent journal
 //! - `tx` - Transaction decoding and validation for pre-EIP-155 transactions
 //! - `error` - Error types ([`KeylessDeployError`]) that map to Solidity errors in `IKeylessDeploy`
+//!
+//! # Sandbox hooks
+//!
+//! Nested sandbox execution is otherwise invisible to a parent inspector. Two exclusive
+//! channels can attach through [`crate::MegaContext`] (also forwarded from [`crate::MegaEvm`]
+//! and [`crate::MegaBlockExecutor`]):
+//!
+//! - **Read-only (default).** [`SandboxObserver`] via
+//!   [`crate::MegaContext::set_keyless_sandbox_observer`]. Interpreter hooks plus a paired
+//!   `sandbox_start` / `sandbox_end` lifecycle. Cannot short-circuit `CALL`/`CREATE`.
+//! - **Rewriting (explicit).** [`SandboxInspector`] via
+//!   [`crate::MegaContext::set_keyless_sandbox_inspector`]. Same lifecycle, but `&mut` inputs and
+//!   override return values are forwarded so interventions take effect inside the sandbox as they
+//!   would on a top-level EVM.
+//!
+//! A compliant (read-only) observer does not change execution results; no such
+//! guarantee is made for an observer that mutates interpreter or context state.
+//! Reverted inner frames still emit their events; whether sandbox state was applied
+//! to the parent is reported by [`SandboxEndOutcome::state_applied`]. With no hook
+//! attached the sandbox path is unchanged.
+//!
+//! Attaching a hook does not change sandbox external-env semantics: pre-REX4 sandboxes
+//! always run with [`crate::EmptyExternalEnv`] (minimum bucket capacity, no oracle
+//! data), and REX4+ sandboxes always share the parent env. Opcode-level hooks on
+//! pre-REX4 are delivered through a second slot typed against
+//! [`crate::EmptyExternalEnv`], so a hook implements its trait for both the parent env
+//! type and [`crate::EmptyExternalEnv`]; revm inspectors that are generic over the
+//! context satisfy both through the blanket impls. Lifecycle events follow the same
+//! slot rule, so a hook with one impl per env sees a sandbox entirely on one impl.
+//!
+//! [`SandboxObserver`]: observer::SandboxObserver
+//! [`SandboxInspector`]: inspector::SandboxInspector
+//! [`SandboxEndOutcome::state_applied`]: observer::SandboxEndOutcome::state_applied
 //!
 //! # Type Erasure Strategy
 //!
@@ -95,11 +131,17 @@
 
 mod error;
 mod execution;
+mod inspector;
+mod observer;
 mod state;
 mod state_merge;
+#[cfg(feature = "inspectors")]
+pub mod trace;
 mod tx;
 
 pub use error::*;
 pub use execution::*;
+pub use inspector::*;
+pub use observer::*;
 pub use state::*;
 pub use tx::*;

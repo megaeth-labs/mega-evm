@@ -1,0 +1,81 @@
+{
+  "keyless_sandbox_revert_after_create_rex6": {
+    "_info": {
+      "comment": "keyless sandbox corner case (revert_after_create): constructor CREATEs a child then REVERTs: sandbox ExecutionFailed, both contracts rolled back. Hand-built from mega_evm::test_utils::keyless, post filled offline with `state-test --fill --bench-spec Rex6`.",
+      "init_code": "0x69600060005360016000f3600052600a60166000f05060006000fd",
+      "inner_signer": "0xef24829e39a1e6805be20d548c9eb1b7adaa1c07",
+      "deploy_address": "0x4a85c373cd63de73356667c6f3b21e4076092a50"
+    },
+    "env": {
+      "currentChainID": "0x10e6",
+      "currentCoinbase": "0x4200000000000000000000000000000000000011",
+      "currentDifficulty": "0x0",
+      "currentGasLimit": "0x2540be400",
+      "currentNumber": "0x735b75",
+      "currentTimestamp": "0x69858148",
+      "currentBaseFee": "0xf4240",
+      "currentRandom": "0x5ed22b2a6937705d6c9677f844729acf17d94ad1381c5bd88f3aa7ea2f178af6",
+      "currentExcessBlobGas": "0x0"
+    },
+    "pre": {
+      "0x7e5f4552091a69125d5dfcb7b8c2659029395bdf": {
+        "balance": "0x3635c9adc5dea00000",
+        "code": "0x",
+        "nonce": "0x0",
+        "storage": {}
+      },
+      "0xef24829e39a1e6805be20d548c9eb1b7adaa1c07": {
+        "balance": "0x3635c9adc5dea00000",
+        "code": "0x",
+        "nonce": "0x0",
+        "storage": {}
+      }
+    },
+    "post": {
+      "Rex6": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x67b30e3269922fe570a904131b440770a17fa9fc6adbf8dec73d4d0052dea42d",
+          "logs": "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347",
+          "megaGasUsed": 322895,
+          "megaStatus": "success"
+        }
+      ]
+    },
+    "transaction": {
+      "type": 2,
+      "data": [
+        "0x846365d5000000000000000000000000000000000000000000000000000000000000004000000000000000000000000000000000000000000000000000000002540be400000000000000000000000000000000000000000000000000000000000000006ef86c8085174876e800830f424080809b69600060005360016000f3600052600a60166000f05060006000fd1ba02222222222222222222222222222222222222222222222222222222222222222a02222222222222222222222222222222222222222222222222222222222222222000000000000000000000000000000000000"
+      ],
+      "gasLimit": [
+        "0x1e8480"
+      ],
+      "gasPrice": null,
+      "nonce": "0x0",
+      "secretKey": "0x0000000000000000000000000000000000000000000000000000000000000001",
+      "sender": "0x7e5f4552091a69125d5dfcb7b8c2659029395bdf",
+      "to": "0x6342000000000000000000000000000000000003",
+      "value": [
+        "0x0"
+      ],
+      "maxFeePerGas": "0x1e8481",
+      "maxPriorityFeePerGas": "0x1",
+      "initcodes": null,
+      "accessLists": [
+        []
+      ],
+      "authorizationList": null,
+      "blobVersionedHashes": [],
+      "maxFeePerBlobGas": null
+    },
+    "out": "0x0000000000000000000000000000000000000000000000000000000000021b5f000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000600000000000000000000000000000000000000000000000000000000000000064ad2bd1d90000000000000000000000000000000000000000000000000000000000021b5f0000000000000000000000000000000000000000000000000000000000000040000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+    "megaEnv": {
+      "bucketCapacities": [],
+      "oracleStorage": []
+    }
+  }
+}
