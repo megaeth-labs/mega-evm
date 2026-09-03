@@ -704,7 +704,7 @@ impl<DB: Database + BlockHashes, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, IN
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{test_utils::MemoryDatabase, EmptyExternalEnv};
+    use crate::{test_utils::MemoryDatabase, EmptyExternalEnv, InspectorLedger, Lane};
     use alloy_primitives::{address, Bytes, U256};
     use revm::{
         context::{
@@ -990,5 +990,77 @@ mod tests {
 
         let result = evm.execute_transaction(tx);
         assert!(result.is_err());
+    }
+
+    /// A receipt reporting `envelope` gas over tracker lanes that account for none of it — the
+    /// disagreement both transaction-level tripwires exist to catch, built directly because every
+    /// end-to-end shape that could produce it would have to break the conservation law first.
+    fn unaccounted_outcome(envelope: u64, ledger: InspectorLedger) -> MegaTransactionOutcome {
+        MegaTransactionOutcome {
+            result_and_state: ExecResultAndState {
+                result: ExecutionResult::Success {
+                    reason: revm::context::result::SuccessReason::Stop,
+                    gas: revm::context::result::ResultGas::new_with_state_gas(envelope, 0, 0, 0),
+                    logs: Vec::new(),
+                    output: revm::context::result::Output::Call(Bytes::new()),
+                },
+                state: EvmState::default(),
+            },
+            data_size: 0,
+            kv_updates: 0,
+            compute_gas_used: 0,
+            compute_gas_destroyed: 0,
+            compute_gas_enforced: 0,
+            state_growth_used: 0,
+            inspector_ledger: ledger,
+            undeclared_inspector: false,
+        }
+    }
+
+    fn empty_limit(spec: MegaSpecId) -> AdditionalLimit {
+        AdditionalLimit::new(spec, EvmTxRuntimeLimits::from_spec(spec))
+    }
+
+    /// The terminal check has to fail loudly on a receipt whose envelope no lane accounts for.
+    /// Its reach is the paths where the envelope is decided after settlement, so a version of it
+    /// that reads the lanes and says nothing is the whole failure mode.
+    #[test]
+    #[cfg_attr(
+        debug_assertions,
+        should_panic(expected = "the tracker lanes must account for the whole receipt envelope")
+    )]
+    fn test_envelope_tripwire_fires_when_the_lanes_account_for_nothing() {
+        debug_assert_envelope_accounted(
+            MegaSpecId::REX7,
+            false,
+            &empty_limit(MegaSpecId::REX7),
+            &unaccounted_outcome(21_000, InspectorLedger::default()),
+        );
+    }
+
+    /// A sandbox transaction never settles a derivation of its own — the law is stated over an
+    /// outer transaction's final envelope, and the sandbox's gas is a charge inside its parent's.
+    /// The same lanes that trip the check outside a sandbox must be passed over inside one.
+    #[test]
+    fn test_envelope_tripwire_is_skipped_inside_a_sandbox() {
+        debug_assert_envelope_accounted(
+            MegaSpecId::REX7,
+            true,
+            &empty_limit(MegaSpecId::REX7),
+            &unaccounted_outcome(21_000, InspectorLedger::default()),
+        );
+    }
+
+    /// The declaration is a checked claim, not a comment: an inspector declared
+    /// `TrustedObserver` that booked anything must fail the transaction it took part in, even
+    /// when the booking was made at a callback whose own verification is missing.
+    #[test]
+    #[cfg_attr(
+        debug_assertions,
+        should_panic(expected = "an inspector declared `TrustedObserver` wrote something back")
+    )]
+    fn test_trusted_observer_tripwire_fires_on_a_declaration_that_did_not_hold() {
+        let ledger = InspectorLedger { gas: Lane::once(64), ..Default::default() };
+        debug_assert_trusted_observer_kept_its_promise(true, &unaccounted_outcome(0, ledger));
     }
 }

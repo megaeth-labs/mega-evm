@@ -312,9 +312,15 @@ mod tests {
     use alloy_primitives::{address, Address as Addr, U256};
     use revm::{
         context::JournalTr,
-        interpreter::{Gas, InstructionResult, InterpreterResult},
+        context_interface::cfg::{GasId, GasParams},
+        handler::{CallFrame, FrameData},
+        interpreter::{
+            CallInput, CallInputs, CallScheme, CallValue, Gas, InstructionResult,
+            InterpreterAction, InterpreterResult,
+        },
+        primitives::hardfork::SpecId as RevmSpecId,
     };
-    use std::{vec, vec::Vec};
+    use std::{boxed::Box, vec, vec::Vec};
 
     const DEPLOYED: Addr = address!("00000000000000000000000000000000000c0de0");
     /// Ample: the deposit charge for the runtime codes below is a few hundred gas.
@@ -476,6 +482,126 @@ mod tests {
                 expect_committed,
                 "{label}: the frame's write must follow its final result",
             );
+        }
+    }
+
+    fn call_inputs(charged_new_account_state_gas: bool) -> CallInputs {
+        CallInputs {
+            input: CallInput::Bytes(Bytes::new()),
+            return_memory_offset: 0..0,
+            gas_limit: FRAME_GAS,
+            bytecode_address: DEPLOYED,
+            target_address: DEPLOYED,
+            caller: Addr::ZERO,
+            value: CallValue::Transfer(U256::ZERO),
+            scheme: CallScheme::Call,
+            is_static: false,
+            reservoir: 0,
+            known_bytecode: Default::default(),
+            charged_new_account_state_gas,
+        }
+    }
+
+    /// A call frame's outcome carries the EIP-8037 new-account flag its *inputs* were built with,
+    /// so the caller can refund the upfront charge when the call ends in revert or halt. The flag
+    /// lives only on the inputs, and the outcome is the only thing that reaches the caller — read
+    /// it off anything else and a reverted call keeps a charge it never owed.
+    #[test]
+    fn test_a_call_frames_outcome_carries_its_inputs_new_account_state_gas_flag() {
+        for charged in [true, false] {
+            let ctx = context();
+            let mut frame = EthFrame::invalid();
+            frame.data = FrameData::Call(CallFrame { return_memory_range: 0..0 });
+            frame.input = FrameInput::Call(Box::new(call_inputs(charged)));
+
+            let action = InterpreterAction::Return(InterpreterResult::new(
+                InstructionResult::Stop,
+                Bytes::new(),
+                Gas::new(FRAME_GAS),
+            ));
+            let ItemOrResult::Result(pending) = classify_frame_action(&ctx, &mut frame, action)
+            else {
+                panic!("a returning frame classifies into a result, not into a child frame");
+            };
+            let (FrameResult::Call(outcome), _) = pending.split() else {
+                panic!("a call frame classifies into a call outcome");
+            };
+
+            assert_eq!(
+                outcome.charged_new_account_state_gas, charged,
+                "the flag must travel from the frame's inputs onto the outcome",
+            );
+        }
+    }
+
+    /// The configuration the EIP-8037 branch of the classification is written for: the state-gas
+    /// split enabled, and a schedule that prices the code deposit it splits.
+    ///
+    /// No `MegaEVM` transaction can run under it. `force_amsterdam_eip8037_off` pins the flag off
+    /// wherever a configuration comes from, and the gas-schedule pin rejects a rewritten table, so
+    /// the branch is carried for lockstep with upstream rather than for reach. Calling the
+    /// classification directly is what lets the lockstep be checked.
+    fn eip8037_context() -> (MegaContext<MemoryDatabase, EmptyExternalEnv>, u64) {
+        let per_byte =
+            GasParams::new_spec(RevmSpecId::AMSTERDAM).get(GasId::code_deposit_state_gas());
+        assert_ne!(
+            per_byte, 0,
+            "the probe needs a schedule that prices the code deposit's state gas"
+        );
+
+        let mut ctx = context();
+        ctx.inner.cfg.enable_amsterdam_eip8037 = true;
+        ctx.inner.cfg.gas_params.override_gas([(GasId::code_deposit_state_gas(), per_byte)]);
+        (ctx, per_byte)
+    }
+
+    /// With EIP-8037 on, a creation pays two charges past the code deposit — a hash charge and a
+    /// state-gas charge — and is accepted only when it can afford both.
+    #[test]
+    fn test_the_eip8037_split_charges_the_hash_and_the_state_gas_on_top_of_the_deposit() {
+        let (ctx, state_gas_per_byte) = eip8037_context();
+        let code = vec![0x00; 32];
+        let deposit = 32 * revm::interpreter::gas::CODEDEPOSIT;
+        let hash = ctx.cfg().gas_params().keccak256_cost(code.len());
+        let state_gas = state_gas_per_byte * 32;
+        assert_ne!(hash, 0, "the probe needs a priced hash charge to tell the two apart");
+
+        let mut result = returned(code, FRAME_GAS);
+        let verdict = classify_create_return(&ctx, &mut result, DEPLOYED);
+
+        assert!(accepts(&verdict), "a creation that can afford all three charges is accepted");
+        assert_eq!(result.result, InstructionResult::Return);
+        assert_eq!(
+            FRAME_GAS - result.gas.remaining(),
+            deposit + hash + state_gas,
+            "all three charges are taken, and the state gas spills out of an empty reservoir",
+        );
+        assert_eq!(
+            result.gas.state_gas_spent(),
+            i64::try_from(state_gas).expect("the probe's state gas fits an i64"),
+            "the state-gas charge is recorded on the state dimension, not only on the counter",
+        );
+    }
+
+    /// Each of the two EIP-8037 charges fails the creation on its own when the frame is one gas
+    /// short of it, and names the failure out of gas.
+    #[test]
+    fn test_either_eip8037_charge_can_fail_the_creation_on_its_own() {
+        let (ctx, state_gas_per_byte) = eip8037_context();
+        let code = vec![0x00; 32];
+        let deposit = 32 * revm::interpreter::gas::CODEDEPOSIT;
+        let hash = ctx.cfg().gas_params().keccak256_cost(code.len());
+        let state_gas = state_gas_per_byte * 32;
+
+        for (name, gas) in [
+            ("the hash charge", deposit + hash - 1),
+            ("the state-gas charge", deposit + hash + state_gas - 1),
+        ] {
+            let mut result = returned(code.clone(), gas);
+            let verdict = classify_create_return(&ctx, &mut result, DEPLOYED);
+
+            assert!(!accepts(&verdict), "{name}: one gas short must reject the creation");
+            assert_eq!(result.result, InstructionResult::OutOfGas, "{name}: classification");
         }
     }
 }

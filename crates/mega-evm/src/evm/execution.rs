@@ -2185,6 +2185,21 @@ mod mutation_tests {
         consume_synthetic_limit_frame(evm.ctx_ref(), result);
     }
 
+    /// `EvmTr::frame_stack` is an accessor, not a factory. revm's `Handler::execution_result` and
+    /// `Handler::catch_error` reach the EVM's own frame stack through it and clear it there, so a
+    /// fresh stack handed out per call would leave the real one untouched and every caller
+    /// clearing something nobody else can see.
+    #[test]
+    fn test_frame_stack_hands_out_the_evms_own_stack() {
+        let mut evm = MegaEvm::new(MegaContext::new(MemoryDatabase::default(), MegaSpecId::REX5));
+        let own = core::ptr::from_ref(&evm.inner.frame_stack);
+        assert_eq!(
+            core::ptr::from_mut(EvmTr::frame_stack(&mut evm)).cast_const(),
+            own,
+            "the trait accessor must project the EVM's own frame stack",
+        );
+    }
+
     #[test]
     fn test_frame_init_depth_short_circuit_pushes_limit_frame() {
         let mut evm = MegaEvm::new(MegaContext::new(MemoryDatabase::default(), MegaSpecId::REX5));

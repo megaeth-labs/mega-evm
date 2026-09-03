@@ -1500,6 +1500,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{test_utils::MemoryDatabase, EmptyExternalEnv};
     use revm::{
         bytecode::Bytecode,
         interpreter::{
@@ -1861,6 +1862,94 @@ mod tests {
         assert!(
             create_inputs_rewritten(&before, &moved),
             "a memo filled beside a real edit must not hide the edit",
+        );
+    }
+
+    /// ★ Two frame inputs of the same empty variant are not a rewrite.
+    ///
+    /// The variant a frame's inputs carry is itself part of what the shim compares — a callback
+    /// that swapped it has rewritten the frame as thoroughly as it is possible to — so the pair
+    /// that did not move needs an arm of its own. `FrameInput::Empty` is revm's placeholder rather
+    /// than a frame it builds, and without the arm the placeholder compared against itself would
+    /// book an intervention nobody made.
+    #[test]
+    fn test_two_empty_frame_inputs_are_not_a_rewrite() {
+        assert!(
+            !frame_input_rewritten(FrameInput::Empty, &FrameInput::Empty),
+            "the placeholder compared against itself moved nothing",
+        );
+        assert!(
+            frame_input_rewritten(
+                FrameInput::Empty,
+                &FrameInput::Create(Box::new(create_inputs())),
+            ),
+            "a variant swapped out of the placeholder is a rewrite",
+        );
+        assert!(
+            frame_input_rewritten(
+                FrameInput::Create(Box::new(create_inputs())),
+                &FrameInput::Empty,
+            ),
+            "and so is one swapped into it",
+        );
+    }
+
+    /// ★ The frame-init origin question answers the settlement window, in both directions.
+    ///
+    /// It decides what a classification rewrite does — a running frame's journal decision is still
+    /// outstanding and follows the rewrite, an init-produced result's was taken before the
+    /// callback existed and is refused — so an answer stuck at either constant refuses every
+    /// rewrite or follows every one.
+    #[test]
+    fn test_the_frame_init_origin_tracks_the_settlement_window() {
+        let context: MegaContext<MemoryDatabase, EmptyExternalEnv> =
+            MegaContext::new(MemoryDatabase::default(), MegaSpecId::REX7);
+        assert!(
+            !context.is_frame_init_result(),
+            "outside the window, a result is one a frame ran to produce",
+        );
+
+        context.additional_limit.borrow_mut().set_settling_frame_init_result(true);
+        assert!(
+            context.is_frame_init_result(),
+            "inside the window, it is one frame init produced with no frame ever built",
+        );
+
+        context.additional_limit.borrow_mut().set_settling_frame_init_result(false);
+        assert!(!context.is_frame_init_result(), "and the window closes again");
+    }
+
+    /// Counts the logs it is handed, and nothing else.
+    #[derive(Default)]
+    struct LogCollectingInspector {
+        logs: Vec<Log>,
+    }
+
+    impl<CTX: ContextTr, INTR: InterpreterTypes> Inspector<CTX, INTR> for LogCollectingInspector {
+        fn log(&mut self, _context: &mut CTX, log: Log) {
+            self.logs.push(log);
+        }
+    }
+
+    /// ★ The shim forwards the log callback to the inspector it wraps.
+    ///
+    /// This is the one callback with no interpreter and no frame inputs to compare, so there is
+    /// nothing for the shim to measure and its whole job is delegation. `MegaETH` reaches it from
+    /// `forward_precompile_logs`, which is the only way a precompile's logs are ever shown to an
+    /// inspector — a shim that swallowed them would hide them entirely.
+    #[test]
+    fn test_the_shim_forwards_the_log_callback_it_has_nothing_to_measure_on() {
+        let mut context: MegaContext<MemoryDatabase, EmptyExternalEnv> =
+            MegaContext::new(MemoryDatabase::default(), MegaSpecId::REX7);
+        let mut shim = MeasuredInspector::new(LogCollectingInspector::default());
+        let log = Log::new_unchecked(Address::ZERO, Vec::new(), Bytes::from_static(b"emitted"));
+
+        Inspector::<_, EthInterpreter>::log(&mut shim, &mut context, log.clone());
+
+        assert_eq!(shim.inner().logs, vec![log], "the wrapped inspector must see the log");
+        assert!(
+            context.additional_limit.borrow().inspector_ledger().is_zero(),
+            "and a callback with nothing to measure must book nothing",
         );
     }
 
