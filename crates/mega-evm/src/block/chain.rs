@@ -13,8 +13,8 @@ use alloy_hardforks::ForkCondition;
 use alloy_primitives::address;
 
 use crate::{
-    MegaHardfork, MegaHardforkConfig, SequencerRegistryConfig, SequencerRegistryRex6Config,
-    MEGA_SYSTEM_ADDRESS,
+    MegaHardfork, MegaHardforkConfig, MegaHardforks, MegaSpecId, SequencerRegistryConfig,
+    SequencerRegistryRex6Config, MEGA_SYSTEM_ADDRESS,
 };
 
 /// `MegaETH` mainnet chain ID.
@@ -95,12 +95,18 @@ pub fn testnet_hardforks() -> MegaHardforkConfig {
 /// exercise rotations without friction; a real network must attach a
 /// governance-approved value in its published schedule when it schedules Rex6.
 ///
-/// Rex7 is also active at genesis here. It is the unstable spec under active
-/// development and carries no behavior of its own yet, so activating it costs
-/// nothing on an unknown chain while keeping the fallback on the latest spec.
+/// The rung is named explicitly rather than inherited from [`MegaSpecId::default`].
+/// These chains run at genesis, so the rung *is* their semantics from block zero,
+/// with no fork boundary to separate an old rule from a new one. Introducing a spec
+/// must therefore not move them: a devnet that produced history under this fallback
+/// would otherwise replay differently — through [`hardfork_schedule`], which is what
+/// `mega-evme replay` resolves an unknown chain ID with — against the same binary
+/// that produced it. Advancing this rung is a deliberate edit; it currently names
+/// `REX7`, the unstable development head, which carries no behavior of its own yet,
+/// so dev chains track the newest semantics at no cost.
 pub fn all_activated_hardforks() -> MegaHardforkConfig {
     MegaHardforkConfig::new()
-        .with_all_activated()
+        .with_all_activated_through(MegaSpecId::REX7)
         .with_params(SequencerRegistryConfig {
             rex5_initial_sequencer: MEGA_SYSTEM_ADDRESS,
             rex5_initial_admin: MEGA_SYSTEM_ADDRESS,
@@ -113,11 +119,15 @@ pub fn all_activated_hardforks() -> MegaHardforkConfig {
 /// Mainnet (`4326`) and testnet v2 (`6343`) use their published schedules; any
 /// other chain gets [`all_activated_hardforks`].
 pub fn hardfork_schedule(chain_id: u64) -> MegaHardforkConfig {
-    match chain_id {
+    let schedule = match chain_id {
         MAINNET_CHAIN_ID => mainnet_hardforks(),
         TESTNET_CHAIN_ID => testnet_hardforks(),
         _ => all_activated_hardforks(),
-    }
+    };
+    // The canonical schedules are edited by hand; a malformed edit must fail at the first
+    // resolution, not at the first block that happens to expose it.
+    debug_assert_eq!(schedule.validate_schedule(), Ok(()));
+    schedule
 }
 
 #[cfg(test)]
@@ -162,7 +172,7 @@ mod tests {
         assert_eq!(hardfork_schedule(TESTNET_CHAIN_ID).spec_id(1780459200), MegaSpecId::REX5);
         assert_eq!(hardfork_schedule(MAINNET_CHAIN_ID).spec_id(1787626800), MegaSpecId::REX6);
         assert_eq!(hardfork_schedule(TESTNET_CHAIN_ID).spec_id(1786330800), MegaSpecId::REX6);
-        // Unknown chain: everything active at genesis, including the unstable REX7.
+        // Unknown chain: every fork up to the pinned rung, active at genesis.
         assert_eq!(hardfork_schedule(1).spec_id(0), MegaSpecId::REX7);
     }
 
@@ -208,5 +218,35 @@ mod tests {
             .fork_params::<SequencerRegistryRex6Config>()
             .expect("fallback schedule must carry a SequencerRegistryRex6Config");
         assert!(rex6_params.rex6_min_rotation_delay > 0);
+    }
+
+    /// The fallback rung is pinned, not inherited from [`MegaSpecId::default`].
+    ///
+    /// Unknown chains run their rung from genesis, so it is their semantics from block zero with
+    /// no fork boundary. Introducing a spec must therefore leave them alone: registering a fork
+    /// above the pinned rung would rewrite what history they have already produced means, and
+    /// `mega-evme replay` resolves an unknown chain ID through this same schedule.
+    ///
+    /// A newly introduced spec leaves this test green — the pin holding still is the safe
+    /// direction, so nothing fails to force a decision. What the test pins is drift: the
+    /// fallback silently following `MegaSpecId::default` again (it fails here once the default
+    /// advances past the rung), and the rung advancing without this `RUNG` constant being edited
+    /// in the same change.
+    #[test]
+    fn test_unknown_chain_fallback_pins_its_rung() {
+        let hf = all_activated_hardforks();
+        const RUNG: MegaSpecId = MegaSpecId::REX7;
+
+        assert_eq!(hf.spec_id(0), RUNG, "the rung applies from genesis");
+        assert_eq!(hf.spec_id(u64::MAX), RUNG, "and is terminal — no later fork is registered");
+
+        for fork in MegaHardfork::VARIANTS {
+            let registered = hf.mega_fork_activation(*fork) != ForkCondition::Never;
+            assert_eq!(
+                registered,
+                RUNG.is_enabled(fork.spec_id()),
+                "{fork:?} registration must follow the pinned rung, not MegaSpecId::default()"
+            );
+        }
     }
 }

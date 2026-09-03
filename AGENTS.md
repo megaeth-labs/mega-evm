@@ -55,7 +55,7 @@ Git submodules are required — clone with `--recursive` or run `git submodule u
 
 ### Spec System (`MegaSpecId`)
 
-Progression: `EQUIVALENCE` → `MINI_REX` → `REX` → `REX1` → `REX2` → `REX3` → `REX4` → `REX5` → `REX6` → `REX7`
+Progression: `EQUIVALENCE` → `MINI_REX` → `MINI_REX_1` → `MINI_REX_2` → `REX` → `REX1` → `REX2` → `REX3` → `REX4` → `REX5` → `REX6` → `REX7` (`MINI_REX_1`/`MINI_REX_2` are alias rungs executing `EQUIVALENCE` and `MINI_REX` behavior respectively)
 
 - **Spec** defines EVM behavior (what the EVM does).
   Defined in `crates/mega-evm/src/evm/spec.rs`.
@@ -66,10 +66,10 @@ Progression: `EQUIVALENCE` → `MINI_REX` → `REX` → `REX1` → `REX2` → `R
   - Frozen and activated are separate properties.
     `REX6` is frozen and activated on both networks (testnet `1786330800`, mainnet `1787626800`); `REX7` has no activation timestamp yet.
     Freezing forbids further semantic change; scheduling is a later, separate decision, recorded in `block/chain.rs`.
-  - Specifications of each spec can be found in the upgrade pages under `docs/spec/upgrades/`.
+  - Specifications of each behavior-introducing spec can be found in the upgrade pages under `docs/spec/upgrades/`; alias rungs have no page of their own and are recorded in the upgrade overview and `docs/spec/hardfork-spec.md`.
 - **Hardfork** (`MegaHardfork`) defines network upgrade events (when specs activate).
-  Multiple hardforks can map to one spec.
-  `MiniRex1` and `MiniRex2` are hardforks that reuse `EQUIVALENCE` and `MINI_REX` respectively.
+  Every hardfork schedules a spec rung of its own — the fork→spec mapping is 1:1.
+  `MiniRex1` and `MiniRex2` schedule the alias specs `MINI_REX_1` and `MINI_REX_2`, whose `behavior()` projects to `EQUIVALENCE` and `MINI_REX` respectively.
   Defined in `crates/mega-evm/src/block/hardfork.rs`.
 - All specs use `OpSpecId::ISTHMUS` as the Optimism base layer.
   But this is subject to change in the future.
@@ -81,6 +81,10 @@ Progression: `EQUIVALENCE` → `MINI_REX` → `REX` → `REX1` → `REX2` → `R
 - **`block/`** — Block execution: executor, factory, hardfork-to-spec mapping, limit enforcement, and the canonical per-chain hardfork schedules.
   This module defines how a block in MegaETH block should be executed.
   `block/chain.rs` is the single source of truth for the mainnet/testnet chain IDs and activation-timestamp schedules (`hardfork_schedule(chain_id)`, `MAINNET_CHAIN_ID`, `TESTNET_CHAIN_ID`, `mainnet_hardforks()`, `testnet_hardforks()`); look there to find or change when a fork activates on a given chain.
+  Its unknown-chain fallback pins a named spec rather than following the latest one, so introducing a spec does not move chains that run from genesis; advancing that pin is a deliberate edit made when a spec is sealed.
+  Forks map 1:1 onto an ascending spec ladder, so the resolved `spec_id` is monotone; rollbacks are alias specs (`MINI_REX_1`, `MINI_REX_2`) whose `behavior()` projects to an earlier spec.
+  One value, two projections that must not be confused: `is_enabled` compares behavior and gates EVM semantics (rolls back in alias windows); `reaches` compares ladder position and gates one-way chain setup such as predeploys and pre-block rules (never rolls back).
+  The `is_<fork>_active_at_timestamp` predicates are position projections for behavior-introducing forks and raw event queries for alias forks, and `MegaHardforks::validate_schedule` is the load-time check that a published schedule climbs the ladder without gaps.
 - **`limit/`** — Resource limit tracking: compute gas, data size, KV updates, state growth (each in its own module).
   MegaETH introduces additional resource metering mechanism and this module implements their logic as utility structs to be used by mega-evm.
 - **`access/`** — Block env access tracking and volatile data detection for parallel execution.
@@ -99,7 +103,7 @@ Progression: `EQUIVALENCE` → `MINI_REX` → `REX` → `REX1` → `REX2` → `R
 
 #### Backward Compatibility of Specs
 
-The spec system (`MegaSpecId`) forms a linear progression where each newer spec includes all previous behaviors.
+The spec system (`MegaSpecId`) forms a linear progression where each newer behavior-introducing spec includes all previous behaviors; the alias rungs are the exception, re-executing an earlier spec's behavior instead.
 The codebase **MUST** maintain backward-compatibility: EVM semantics must never change for existing (stable) specs.
 The only exception is the latest spec if explicitly marked as **unstable**.
 Consequently:
@@ -315,6 +319,7 @@ When the agent is requested to implement a new feature or bug fix, it should con
 - **Override `HardforkParams::validate()` for every new params type.**
   The default implementation accepts any value silently.
   Override it with field-level invariant checks (e.g., non-zero addresses) so that `with_params()` panics loudly at chain-config load time rather than allowing the error to surface at the first block where the fork activates.
+  Also register the fork-requires-params rule in `MegaHardforks::validate_schedule` so a schedule that activates the fork without its params fails validation, not the fork's first block.
 - **Pre-block helpers must return state, not commit directly.**
   Any helper participating in `pre_execution_changes` (system contract deploys, pre-block system calls, etc.) MUST return `Option<EvmState>` and never call `db.commit(...)` directly.
   Full convention: `crates/mega-evm/src/system/AGENTS.md` → `PRE-BLOCK STATE CHANGE CONTRACT`.
