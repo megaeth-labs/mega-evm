@@ -444,3 +444,109 @@ file = "crates/mega-evm/src/evm/execution.rs"
 mutant = "crates/mega-evm/src/evm/execution.rs:1673:1: spec-gate let is_mini_rex_enabled = self.ctx().spec.is_enabled(MegaSpecId::MINI_REX); -> let is_mini_rex_enabled = self.ctx().spec.is_enabled(MegaSpecId::EQUIVALENCE);"
 justification = "Equivalent: this is the uninspected frame_init, so the mutant runs AdditionalLimit::finalize_frame(result, exit, 0) under EQUIVALENCE and every branch is inert. absorb_frame_local_exceed / settle_exceptional_halt_burn / settle_frame_init_reject_burn return at checkpoint.rex7_enabled(); staged_precompile is always None because stage_precompile_envelope returns at the same REX7 gate; the inspector delta is the literal 0 this site passes, so book_crossing books nothing and settle_inspector_result_gas returns without booking; try_rescue_gas's check_limit() cannot latch under EQUIVALENCE (every EvmTxRuntimeLimits::equivalence() dimension is u64::MAX, every frame-local branch is rex4_enabled-gated off, and no usage is ever recorded), and both of its effects are unreadable pre-MINI_REX regardless — rescued_gas is consumed only in last_frame_result's is_mini_rex branch and every reader of has_exceeded_limit is behind an unmutated MINI_REX gate. FrameExit::Ran is unreachable from frame init. Full mega-evm suite green with the mutant applied."
 reviewer = "RealiCZ (cz) via S1 spec-gate triage"
+
+# --- classify_create_return: the EIP-8037 state-gas guard (equivalent) -------------
+#
+# `if state_gas_for_code > 0 && !gas.record_state_cost(state_gas_for_code)`. The `>` vs `>=`
+# boundary can only differ at `state_gas_for_code == 0`, where the mutant additionally evaluates
+# `record_state_cost(0)`. That call is a no-op that always succeeds: `reservoir >= 0` holds for
+# every `u64`, so it adds 0 to `state_gas_spent`, subtracts 0 from the reservoir and returns
+# `true` — making the conjunction `true && !true == false`, the same branch the original takes.
+# The gas counter, the reservoir and the state-gas dimension are all left where they were.
+#
+# The sibling `>` -> `==` and `>` -> `<` mutants are *not* equivalent (they skip a charge that is
+# owed) and are killed by
+# `test_the_eip8037_split_charges_the_hash_and_the_state_gas_on_top_of_the_deposit`.
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "crates/mega-evm/src/evm/frame.rs"
+mutant = "replace > with >= in classify_create_return"
+justification = "Equivalent: > vs >= differs only at state_gas_for_code == 0, where the mutant evaluates record_state_cost(0). That is a total no-op returning true (reservoir >= 0 holds for every u64; it adds 0 to state_gas_spent and subtracts 0 from the reservoir), so the conjunction is false either way and the same branch is taken with the gas counter, reservoir and state-gas dimension unchanged. The > -> == and > -> < siblings are not equivalent and are killed by test_the_eip8037_split_charges_the_hash_and_the_state_gas_on_top_of_the_deposit."
+reviewer = "RealiCZ (cz)"
+
+# --- the two `if hide > 0` clamp guards (equivalent) -------------------------------
+#
+# Both sites read `let hide = self.checkpoint_clamp_amount(gas.remaining());` and then guard
+# `gas.record_regular_cost(hide)` with `if hide > 0`. `hide` is a `u64`, so `>= 0` is always
+# true and the mutant's only extra work is the `hide == 0` case:
+#
+#   - `record_regular_cost(0)` is `remaining.checked_sub(0)`, which always succeeds and leaves
+#     `remaining` exactly where it was, so the `debug_assert!(clamped, ...)` beside it still
+#     passes;
+#   - in `record_inspector_gas_adjustment` the guarded body also re-runs
+#     `sync_checkpoint_baseline(gas.remaining())`, which is a plain assignment of the value the
+#     line above the clamp derivation already wrote — nothing between the two moves
+#     `gas.remaining()`;
+#   - in `before_frame_run` the baseline sync sits *outside* the guard and runs either way.
+#
+# The `>` -> `==` and `>` -> `<` siblings at both sites skip a clamp that binds and are killed.
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "crates/mega-evm/src/limit/limit.rs"
+mutant = "replace > with >= in AdditionalLimit::record_inspector_gas_adjustment"
+justification = "Equivalent: hide is a u64 so >= 0 is always true, and the hide == 0 body is inert. record_regular_cost(0) is remaining.checked_sub(0) — it always succeeds and leaves remaining unchanged, so the debug_assert beside it still passes — and the sync_checkpoint_baseline(gas.remaining()) it re-runs re-writes the value the line above the clamp derivation already assigned, since nothing in between moves gas.remaining(). The > -> == and > -> < siblings at this site are not equivalent and are killed."
+reviewer = "RealiCZ (cz)"
+
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "crates/mega-evm/src/limit/limit.rs"
+mutant = "replace > with >= in AdditionalLimit::before_frame_run"
+justification = "Equivalent: hide is a u64 so >= 0 is always true, and the hide == 0 body is inert — record_regular_cost(0) is remaining.checked_sub(0), which always succeeds and leaves remaining unchanged, so the debug_assert beside it still passes. The baseline sync at the end of the branch sits outside this guard and runs either way. The > -> == and > -> < siblings at this site are not equivalent and are killed."
+reviewer = "RealiCZ (cz)"
+
+# --- debug-only predicates the mutation gate cannot evaluate ----------------------
+#
+# The three entries below share one shape: the mutated expression contains
+# `cfg!(debug_assertions)`, and every build the test suite is compiled in has assertions ON.
+# Under that constant the mutant and the original reduce to the same value on every input the
+# suite can produce, so no test can kill them. They are recorded here rather than left as
+# survivors, and the profile scope is stated in each justification rather than glossed as full
+# equivalence: with assertions OFF the two forms do differ, which is exactly why they are
+# written this way in the first place.
+#
+# Do not "fix" these by adding a test — there is no assertions-off test build to add one to.
+# What guards the release semantics is different in each case, and is named per entry.
+
+# `measures()` is `!self.trusted || cfg!(debug_assertions)`. In a debug build it is the constant
+# `true` — every inspector takes the measuring path — so both mutants below are that same
+# constant. The release semantics they would change (a declared `TrustedObserver` delegated to
+# unmeasured) is a fast path, not a behavioral one: whichever way `measures` answers, the
+# callback still reaches the wrapped inspector, and a declaration that turns out to be false is
+# caught by `verify_trusted` after every measured callback and by the transaction-level backstop
+# in `evm/mod.rs`, both of which run in exactly the profile that measures.
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "crates/mega-evm/src/evm/inspector.rs"
+mutant = "replace MeasuredInspector<I>::measures -> bool with true"
+justification = "Equivalent in every profile the suite builds: measures() is `!trusted || cfg!(debug_assertions)`, which is the constant true under debug_assertions, so the mutant is the same constant and no test can distinguish it. With assertions off the mutant would take the measuring path for a declared TrustedObserver too — a fast-path difference, not a behavioral one, since the callback reaches the wrapped inspector either way and a false declaration is caught by verify_trusted and by the transaction-level backstop in evm/mod.rs, both of which run in the measuring profile."
+reviewer = "RealiCZ (cz)"
+
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "crates/mega-evm/src/evm/inspector.rs"
+mutant = "delete ! in MeasuredInspector<I>::measures"
+justification = "Equivalent in every profile the suite builds: measures() is `!trusted || cfg!(debug_assertions)`, and deleting the ! leaves `trusted || cfg!(debug_assertions)`, which is the same constant true under debug_assertions. With assertions off the mutant inverts which inspectors are measured; that is guarded by verify_trusted and by the transaction-level backstop in evm/mod.rs, which run in the measuring profile. The sibling `measures -> false` is not equivalent and is killed."
+reviewer = "RealiCZ (cz)"
+
+# `let peeked = (!duplicate && (self.rex7_enabled() || cfg!(debug_assertions))).then(...)`.
+# Under debug_assertions the original is unconditionally true and the mutant reduces to
+# `rex7_enabled()`, so they differ only on a frozen spec — where the peek's sole consumer is the
+# `debug_assert!` cross-check twenty lines below, which `is_none_or` satisfies vacuously when the
+# peek was not taken. `peek_check_limit_after_pop` takes `&self` and mutates nothing, so skipping
+# it has no other effect. The REX7 settlement above reads the peek only inside
+# `if self.rex7_enabled()`, where both forms are true.
+#
+# Making this killable would mean driving the pre-pop peek and the post-pop check to disagree on
+# a frozen spec, which is the drift the assertion exists to catch — i.e. it would require the bug.
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "crates/mega-evm/src/limit/limit.rs"
+mutant = "replace || with && in AdditionalLimit::before_frame_return_result"
+justification = "Equivalent in every profile the suite builds: under debug_assertions the original condition is unconditionally true and the mutant reduces to rex7_enabled(), so the two differ only on a frozen spec. There the peek's only consumer is the debug_assert cross-check below, which is_none_or satisfies vacuously when no peek was taken; peek_check_limit_after_pop takes &self and mutates nothing, and the REX7 settlement reads the peek only inside `if self.rex7_enabled()`, where both forms are true. Killing it would require driving the pre-pop peek and the post-pop check to disagree on a frozen spec, which is the drift the assertion exists to catch. With assertions off the mutant would disable the REX7 pre-pop settlement, which no build the gate produces can observe."
+reviewer = "RealiCZ (cz)"
