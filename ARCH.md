@@ -18,7 +18,7 @@ This document provides detailed technical specifications and implementation deta
 The implementation exposes multiple EVM versions (`MegaSpecId`). String names and hardfork-to-spec
 mapping live in `crates/mega-evm/src/evm/spec.rs` and `crates/mega-evm/src/block/hardfork.rs`.
 
-Available specs: `EQUIVALENCE`, `MINI_REX`, `REX`, `REX1`, `REX2`, `REX3`, `REX4`, `REX5`, `REX6`, `REX7`.
+Available specs: `EQUIVALENCE`, `MINI_REX`, `MINI_REX_1`, `MINI_REX_2`, `REX`, `REX1`, `REX2`, `REX3`, `REX4`, `REX5`, `REX6`, `REX7` (`MINI_REX_1` and `MINI_REX_2` are alias rungs executing `EQUIVALENCE` and `MINI_REX` behavior respectively).
 
 This page details only the first few; the authoritative per-spec behavior is the specification under
 `docs/spec/`, whose upgrade pages cover every spec.

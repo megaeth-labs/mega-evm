@@ -14,6 +14,8 @@
 
 intrinsic_only                  Equivalence              0        21000  success
 intrinsic_only                  MiniRex              21000        21000  success
+intrinsic_only                  MiniRex1                 0        21000  success
+intrinsic_only                  MiniRex2             21000        21000  success
 intrinsic_only                  Rex                  21000        60000  success
 intrinsic_only                  Rex1                 21000        60000  success
 intrinsic_only                  Rex2                 21000        60000  success
@@ -25,6 +27,8 @@ intrinsic_only                  Rex7                 21000        60000  success
 
 plain_arithmetic                Equivalence              0        21352  success
 plain_arithmetic                MiniRex              21352        21352  success
+plain_arithmetic                MiniRex1                 0        21352  success
+plain_arithmetic                MiniRex2             21352        21352  success
 plain_arithmetic                Rex                  21352        60352  success
 plain_arithmetic                Rex1                 21352        60352  success
 plain_arithmetic                Rex2                 21352        60352  success
@@ -36,6 +40,8 @@ plain_arithmetic                Rex7                 21352        60352  success
 
 plain_memory_expansion          Equivalence              0        21437  success
 plain_memory_expansion          MiniRex              21437        21437  success
+plain_memory_expansion          MiniRex1                 0        21437  success
+plain_memory_expansion          MiniRex2             21437        21437  success
 plain_memory_expansion          Rex                  21437        60437  success
 plain_memory_expansion          Rex1                 21437        60437  success
 plain_memory_expansion          Rex2                 21437        60437  success
@@ -47,6 +53,8 @@ plain_memory_expansion          Rex7                 21437        60437  success
 
 volatile_timestamp              Equivalence              0        21004  success
 volatile_timestamp              MiniRex              21004        21004  success
+volatile_timestamp              MiniRex1                 0        21004  success
+volatile_timestamp              MiniRex2             21004        21004  success
 volatile_timestamp              Rex                  21004        60004  success
 volatile_timestamp              Rex1                 21004        60004  success
 volatile_timestamp              Rex2                 21004        60004  success
@@ -58,6 +66,8 @@ volatile_timestamp              Rex7                 21004        60004  success
 
 sstore_zero_to_nonzero          Equivalence              0        43106  success
 sstore_zero_to_nonzero          MiniRex              43106      2043106  success
+sstore_zero_to_nonzero          MiniRex1                 0        43106  success
+sstore_zero_to_nonzero          MiniRex2             43106      2043106  success
 sstore_zero_to_nonzero          Rex                  43106        82106  success
 sstore_zero_to_nonzero          Rex1                 43106        82106  success
 sstore_zero_to_nonzero          Rex2                 43106        82106  success
@@ -69,6 +79,8 @@ sstore_zero_to_nonzero          Rex7                 43106        82106  success
 
 sstore_nonzero_to_nonzero       Equivalence              0        26006  success
 sstore_nonzero_to_nonzero       MiniRex              26006        26006  success
+sstore_nonzero_to_nonzero       MiniRex1                 0        26006  success
+sstore_nonzero_to_nonzero       MiniRex2             26006        26006  success
 sstore_nonzero_to_nonzero       Rex                  26006        65006  success
 sstore_nonzero_to_nonzero       Rex1                 26006        65006  success
 sstore_nonzero_to_nonzero       Rex2                 26006        65006  success
@@ -80,6 +92,8 @@ sstore_nonzero_to_nonzero       Rex7                 26006        65006  success
 
 sstore_nonzero_to_zero          Equivalence              0        21206  success
 sstore_nonzero_to_zero          MiniRex              26006        21206  success
+sstore_nonzero_to_zero          MiniRex1                 0        21206  success
+sstore_nonzero_to_zero          MiniRex2             26006        21206  success
 sstore_nonzero_to_zero          Rex                  26006        60206  success
 sstore_nonzero_to_zero          Rex1                 26006        60206  success
 sstore_nonzero_to_zero          Rex2                 26006        60206  success
@@ -91,6 +105,8 @@ sstore_nonzero_to_zero          Rex7                 26006        60206  success
 
 log0_empty                      Equivalence              0        21381  success
 log0_empty                      MiniRex              21381        21381  success
+log0_empty                      MiniRex1                 0        21381  success
+log0_empty                      MiniRex2             21381        21381  success
 log0_empty                      Rex                  21381        60381  success
 log0_empty                      Rex1                 21381        60381  success
 log0_empty                      Rex2                 21381        60381  success
@@ -102,6 +118,8 @@ log0_empty                      Rex7                 21381        60381  success
 
 log1_32bytes                    Equivalence              0        22027  success
 log1_32bytes                    MiniRex              22027        28337  success
+log1_32bytes                    MiniRex1                 0        22027  success
+log1_32bytes                    MiniRex2             22027        28337  success
 log1_32bytes                    Rex                  22027        67337  success
 log1_32bytes                    Rex1                 22027        67337  success
 log1_32bytes                    Rex2                 22027        67337  success
@@ -113,6 +131,8 @@ log1_32bytes                    Rex7                 22027        67337  success
 
 log4_128bytes                   Equivalence              0        23965  success
 log4_128bytes                   MiniRex              23965        49205  success
+log4_128bytes                   MiniRex1                 0        23965  success
+log4_128bytes                   MiniRex2             23965        49205  success
 log4_128bytes                   Rex                  23965        88205  success
 log4_128bytes                   Rex1                 23965        88205  success
 log4_128bytes                   Rex2                 23965        88205  success
@@ -124,6 +144,8 @@ log4_128bytes                   Rex7                 23965        88205  success
 
 log2_log3_sequence              Equivalence              0        24176  success
 log2_log3_sequence              MiniRex              24176        48046  success
+log2_log3_sequence              MiniRex1                 0        24176  success
+log2_log3_sequence              MiniRex2             24176        48046  success
 log2_log3_sequence              Rex                  24176        87046  success
 log2_log3_sequence              Rex1                 24176        87046  success
 log2_log3_sequence              Rex2                 24176        87046  success
@@ -135,6 +157,8 @@ log2_log3_sequence              Rex7                 24176        87046  success
 
 call_no_value_to_code           Equivalence              0        23621  success
 call_no_value_to_code           MiniRex              23621        23621  success
+call_no_value_to_code           MiniRex1                 0        23621  success
+call_no_value_to_code           MiniRex2             23621        23621  success
 call_no_value_to_code           Rex                  23621        62621  success
 call_no_value_to_code           Rex1                 23621        62621  success
 call_no_value_to_code           Rex2                 23621        62621  success
@@ -146,6 +170,8 @@ call_no_value_to_code           Rex7                 23621        62621  success
 
 call_value_to_empty             Equivalence              0        55321  success
 call_value_to_empty             MiniRex              55321      2055321  success
+call_value_to_empty             MiniRex1                 0        55321  success
+call_value_to_empty             MiniRex2             55321      2055321  success
 call_value_to_empty             Rex                  55321        94321  success
 call_value_to_empty             Rex1                 55321        94321  success
 call_value_to_empty             Rex2                 55321        94321  success
@@ -157,6 +183,8 @@ call_value_to_empty             Rex7                 57621        94321  success
 
 call_value_to_existing          Equivalence              0        30321  success
 call_value_to_existing          MiniRex              30321        30321  success
+call_value_to_existing          MiniRex1                 0        30321  success
+call_value_to_existing          MiniRex2             30321        30321  success
 call_value_to_existing          Rex                  30321        69321  success
 call_value_to_existing          Rex1                 30321        69321  success
 call_value_to_existing          Rex2                 30321        69321  success
@@ -168,6 +196,8 @@ call_value_to_existing          Rex7                 32621        69321  success
 
 callcode_value                  Equivalence              0        30321  success
 callcode_value                  MiniRex              30321        30321  success
+callcode_value                  MiniRex1                 0        30321  success
+callcode_value                  MiniRex2             30321        30321  success
 callcode_value                  Rex                  30321        69321  success
 callcode_value                  Rex1                 30321        69321  success
 callcode_value                  Rex2                 30321        69321  success
@@ -179,6 +209,8 @@ callcode_value                  Rex7                 32621        69321  success
 
 delegatecall                    Equivalence              0        23618  success
 delegatecall                    MiniRex              23618        23618  success
+delegatecall                    MiniRex1                 0        23618  success
+delegatecall                    MiniRex2             23618        23618  success
 delegatecall                    Rex                  23618        62618  success
 delegatecall                    Rex1                 23618        62618  success
 delegatecall                    Rex2                 23618        62618  success
@@ -190,6 +222,8 @@ delegatecall                    Rex7                 23618        62618  success
 
 staticcall                      Equivalence              0        23618  success
 staticcall                      MiniRex              23618        23618  success
+staticcall                      MiniRex1                 0        23618  success
+staticcall                      MiniRex2             23618        23618  success
 staticcall                      Rex                  23618        62618  success
 staticcall                      Rex1                 23618        62618  success
 staticcall                      Rex2                 23618        62618  success
@@ -201,6 +235,8 @@ staticcall                      Rex7                 23618        62618  success
 
 nested_calls_depth3             Equivalence              0        26236  success
 nested_calls_depth3             MiniRex              26236        26236  success
+nested_calls_depth3             MiniRex1                 0        26236  success
+nested_calls_depth3             MiniRex2             26236        26236  success
 nested_calls_depth3             Rex                  26236        65236  success
 nested_calls_depth3             Rex1                 26236        65236  success
 nested_calls_depth3             Rex2                 26236        65236  success
@@ -212,6 +248,8 @@ nested_calls_depth3             Rex7                 26236        65236  success
 
 create_empty_initcode           Equivalence              0        53009  success
 create_empty_initcode           MiniRex              53009      2053009  success
+create_empty_initcode           MiniRex1                 0        53009  success
+create_empty_initcode           MiniRex2             53009      2053009  success
 create_empty_initcode           Rex                  53009        92009  success
 create_empty_initcode           Rex1                 53009        92009  success
 create_empty_initcode           Rex2                 53009        92009  success
@@ -223,6 +261,8 @@ create_empty_initcode           Rex7                 53009        92009  success
 
 create2_empty_initcode          Equivalence              0        53012  success
 create2_empty_initcode          MiniRex              53012      2053012  success
+create2_empty_initcode          MiniRex1                 0        53012  success
+create2_empty_initcode          MiniRex2             53012      2053012  success
 create2_empty_initcode          Rex                  53012        92012  success
 create2_empty_initcode          Rex1                 53012        92012  success
 create2_empty_initcode          Rex2                 53012        92012  success
@@ -234,6 +274,8 @@ create2_empty_initcode          Rex7                 53012        92012  success
 
 create2_with_initcode           Equivalence              0        53032  success
 create2_with_initcode           MiniRex              53032      2053032  success
+create2_with_initcode           MiniRex1                 0        53032  success
+create2_with_initcode           MiniRex2             53032      2053032  success
 create2_with_initcode           Rex                  53032        92032  success
 create2_with_initcode           Rex1                 53032        92032  success
 create2_with_initcode           Rex2                 53032        92032  success
@@ -245,6 +287,8 @@ create2_with_initcode           Rex7                 53032        92032  success
 
 create_deploying_runtime_code   Equivalence              0        59431  success
 create_deploying_runtime_code   MiniRex              59431      2379431  success
+create_deploying_runtime_code   MiniRex1                 0        59431  success
+create_deploying_runtime_code   MiniRex2             59431      2379431  success
 create_deploying_runtime_code   Rex                  59431       418431  success
 create_deploying_runtime_code   Rex1                 59431       418431  success
 create_deploying_runtime_code   Rex2                 59431       418431  success
@@ -256,6 +300,8 @@ create_deploying_runtime_code   Rex7                 59431       418431  success
 
 create2_far_memory_offset       Equivalence              0        67367  success
 create2_far_memory_offset       MiniRex              67367      2067367  success
+create2_far_memory_offset       MiniRex1                 0        67367  success
+create2_far_memory_offset       MiniRex2             67367      2067367  success
 create2_far_memory_offset       Rex                  67367       106367  success
 create2_far_memory_offset       Rex1                 67367       106367  success
 create2_far_memory_offset       Rex2                 67367       106367  success
@@ -267,6 +313,8 @@ create2_far_memory_offset       Rex7                 67367       106367  success
 
 create2_oversized_initcode      Equivalence              0    100000000  halt Base(Base(CreateInitCodeSizeLimit))
 create2_oversized_initcode      MiniRex              21012    100000000  halt Base(Base(CreateInitCodeSizeLimit))
+create2_oversized_initcode      MiniRex1                 0    100000000  halt Base(Base(CreateInitCodeSizeLimit))
+create2_oversized_initcode      MiniRex2             21012    100000000  halt Base(Base(CreateInitCodeSizeLimit))
 create2_oversized_initcode      Rex                  21012    100000000  halt Base(Base(CreateInitCodeSizeLimit))
 create2_oversized_initcode      Rex1                 21012    100000000  halt Base(Base(CreateInitCodeSizeLimit))
 create2_oversized_initcode      Rex2                 21012    100000000  halt Base(Base(CreateInitCodeSizeLimit))
@@ -278,6 +326,8 @@ create2_oversized_initcode      Rex7                 21012    100000000  halt Ba
 
 selfdestruct_to_empty           Equivalence              0        53603  success
 selfdestruct_to_empty           MiniRex              21003    100000000  halt Base(Base(InvalidFEOpcode))
+selfdestruct_to_empty           MiniRex1                 0        53603  success
+selfdestruct_to_empty           MiniRex2             21003    100000000  halt Base(Base(InvalidFEOpcode))
 selfdestruct_to_empty           Rex                  21003    100000000  halt Base(Base(InvalidFEOpcode))
 selfdestruct_to_empty           Rex1                 21003    100000000  halt Base(Base(InvalidFEOpcode))
 selfdestruct_to_empty           Rex2                 53603        92603  success
@@ -289,6 +339,8 @@ selfdestruct_to_empty           Rex7                 53603        92603  success
 
 selfdestruct_to_existing        Equivalence              0        28603  success
 selfdestruct_to_existing        MiniRex              21003    100000000  halt Base(Base(InvalidFEOpcode))
+selfdestruct_to_existing        MiniRex1                 0        28603  success
+selfdestruct_to_existing        MiniRex2             21003    100000000  halt Base(Base(InvalidFEOpcode))
 selfdestruct_to_existing        Rex                  21003    100000000  halt Base(Base(InvalidFEOpcode))
 selfdestruct_to_existing        Rex1                 21003    100000000  halt Base(Base(InvalidFEOpcode))
 selfdestruct_to_existing        Rex2                 28603        67603  success
@@ -300,6 +352,8 @@ selfdestruct_to_existing        Rex7                 28603        67603  success
 
 selfdestruct_to_self            Equivalence              0        26003  success
 selfdestruct_to_self            MiniRex              21003    100000000  halt Base(Base(InvalidFEOpcode))
+selfdestruct_to_self            MiniRex1                 0        26003  success
+selfdestruct_to_self            MiniRex2             21003    100000000  halt Base(Base(InvalidFEOpcode))
 selfdestruct_to_self            Rex                  21003    100000000  halt Base(Base(InvalidFEOpcode))
 selfdestruct_to_self            Rex1                 21003    100000000  halt Base(Base(InvalidFEOpcode))
 selfdestruct_to_self            Rex2                 26003        65003  success
@@ -311,6 +365,8 @@ selfdestruct_to_self            Rex7                 26003        65003  success
 
 precompile_identity             Equivalence              0        21157  success
 precompile_identity             MiniRex              23657        23657  success
+precompile_identity             MiniRex1                 0        21157  success
+precompile_identity             MiniRex2             23657        23657  success
 precompile_identity             Rex                  23657        62657  success
 precompile_identity             Rex1                 23657        62657  success
 precompile_identity             Rex2                 23657        62657  success
@@ -322,6 +378,8 @@ precompile_identity             Rex7                 23657        62657  success
 
 precompile_sha256               Equivalence              0        21211  success
 precompile_sha256               MiniRex              23711        23711  success
+precompile_sha256               MiniRex1                 0        21211  success
+precompile_sha256               MiniRex2             23711        23711  success
 precompile_sha256               Rex                  23711        62711  success
 precompile_sha256               Rex1                 23711        62711  success
 precompile_sha256               Rex2                 23711        62711  success
@@ -333,6 +391,8 @@ precompile_sha256               Rex7                 23711        62711  success
 
 precompile_kzg_invalid_input    Equivalence              0       221133  success
 precompile_kzg_invalid_input    MiniRex              23633       223633  success
+precompile_kzg_invalid_input    MiniRex1                 0       221133  success
+precompile_kzg_invalid_input    MiniRex2             23633       223633  success
 precompile_kzg_invalid_input    Rex                  23633       262633  success
 precompile_kzg_invalid_input    Rex1                 23633       262633  success
 precompile_kzg_invalid_input    Rex2                 23633       262633  success
@@ -344,6 +404,8 @@ precompile_kzg_invalid_input    Rex7                123633       262633  success
 
 precompile_underfunded          Equivalence              0        21140  success
 precompile_underfunded          MiniRex              23639        23640  success
+precompile_underfunded          MiniRex1                 0        21140  success
+precompile_underfunded          MiniRex2             23639        23640  success
 precompile_underfunded          Rex                  23639        62640  success
 precompile_underfunded          Rex1                 23639        62640  success
 precompile_underfunded          Rex2                 23639        62640  success
@@ -355,6 +417,8 @@ precompile_underfunded          Rex7                 23640        62640  success
 
 reverting_subcall               Equivalence              0        24326  success
 reverting_subcall               MiniRex              24326        24326  success
+reverting_subcall               MiniRex1                 0        24326  success
+reverting_subcall               MiniRex2             24326        24326  success
 reverting_subcall               Rex                  24326        63326  success
 reverting_subcall               Rex1                 24326        63326  success
 reverting_subcall               Rex2                 24326        63326  success

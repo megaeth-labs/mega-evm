@@ -90,10 +90,10 @@ fn rex5_chain_spec() -> MegaHardforkConfig {
 }
 
 fn rex4_chain_spec() -> MegaHardforkConfig {
-    // Activate up to Rex4 only — Rex5 stays at `ForkCondition::Never`, so
-    // `is_rex_5_active_at_timestamp(_)` returns false and the new check is
+    // Activate up to Rex4 only — Rex5 stays at `ForkCondition::Never`, so the
+    // activated-spec floor stays below REX5 and the Rex5 fail-closed check is
     // skipped. Sequencer registry is not needed because its deploy is gated
-    // on Rex5 activation.
+    // on the same floor.
     MegaHardforkConfig::default().with(MegaHardfork::Rex4, ForkCondition::Timestamp(0))
 }
 
@@ -273,17 +273,80 @@ fn test_pre_rex5_preserves_silent_pre_block_call_failure() {
         .apply_pre_execution_changes()
         .expect("pre-REX5 must accept a halted pre-block system call");
 
-    // The OOG'd SSTORE never wrote the parent hash to slot 0, so slot 0
-    // must not equal the parent-hash value.
+    // The OOG'd SSTORE never wrote the parent hash to the ring-buffer slot the
+    // contract targets, `(block.number - 1) % 8191`.
     let storage_after = executor
         .evm_mut()
         .db_mut()
-        .storage(alloy_eips::eip2935::HISTORY_STORAGE_ADDRESS, U256::ZERO)
+        .storage(
+            alloy_eips::eip2935::HISTORY_STORAGE_ADDRESS,
+            U256::from((ACTIVATION_BLOCK - 1) % 8191),
+        )
         .unwrap();
     let parent_hash_word = U256::from_be_bytes(B256::from([0x29; 32]).0);
     assert_ne!(
         storage_after, parent_hash_word,
         "history-storage slot 0 must not contain the parent hash; the SSTORE OOG'd",
+    );
+}
+
+/// The counterpart to `test_rex5_block_aware_budget_accepts_pre_block_call_above_30m`: on a
+/// pre-REX5 chain the same ≈100M-per-SSTORE costs must still OOG, because pre-REX5 keeps
+/// revm's upstream-fixed 30M budget for replay parity. The budget selection must follow the
+/// `REX5` spec exactly — a gate at any earlier spec would run these historical blocks with
+/// the block-aware budget and commit writes that mainnet history does not contain. The block
+/// is still accepted (no fail-closed pre-REX5), but neither contract's slot may be written.
+#[test]
+fn test_pre_rex5_keeps_upstream_30m_budget_for_pre_block_calls() {
+    let mut db = MemoryDatabase::default();
+    install_eip2935_history_storage(&mut db);
+    install_eip4788_beacon_roots(&mut db);
+    let mut state = State::builder().with_database(&mut db).build();
+
+    let evm_factory = MegaEvmFactory::new().with_external_env_factory(medium_external_envs());
+    let block_executor_factory = MegaBlockExecutorFactory::new(
+        rex4_chain_spec(),
+        evm_factory,
+        OpAlloyReceiptBuilder::default(),
+    );
+    let mut executor = block_executor_factory.create_executor(
+        &mut state,
+        block_ctx(),
+        create_evm_env(MegaSpecId::REX4, BLOCK_GAS_LIMIT),
+    );
+
+    executor
+        .apply_pre_execution_changes()
+        .expect("pre-REX5 must accept the halted pre-block system calls");
+
+    // EIP-2935: the ≈100M SSTORE OOG'd inside the 30M budget, so the ring-buffer slot the
+    // contract writes the parent hash to — `(block.number - 1) % 8191` — must stay empty.
+    let history_slot = executor
+        .evm_mut()
+        .db_mut()
+        .storage(
+            alloy_eips::eip2935::HISTORY_STORAGE_ADDRESS,
+            U256::from((ACTIVATION_BLOCK - 1) % 8191),
+        )
+        .unwrap();
+    assert_ne!(
+        history_slot,
+        U256::from_be_bytes(B256::from([0x29; 32]).0),
+        "EIP-2935 must stay on the 30M budget pre-REX5, so the ≈100M write cannot land",
+    );
+
+    // EIP-4788: same for the beacon-roots timestamp slot (the contract's ring buffer keys
+    // slots by `timestamp % 8191`).
+    let timestamp_slot = U256::from(1_800_000_000u64 % 8191);
+    let stored_timestamp = executor
+        .evm_mut()
+        .db_mut()
+        .storage(alloy_eips::eip4788::BEACON_ROOTS_ADDRESS, timestamp_slot)
+        .unwrap();
+    assert_ne!(
+        stored_timestamp,
+        U256::from(1_800_000_000u64),
+        "EIP-4788 must stay on the 30M budget pre-REX5, so the ≈100M writes cannot land",
     );
 }
 

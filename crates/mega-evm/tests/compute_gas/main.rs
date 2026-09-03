@@ -73,10 +73,14 @@ const INITCODE_RETURNING_32_BYTES: [u8; 4] = [0x60, 0x20, 0x5f, 0xf3];
 
 const ONE_ETH: u128 = 1_000_000_000_000_000_000;
 
-/// Every spec in the progression, oldest first.
-const ALL_SPECS: [(MegaSpecId, &str); 10] = [
+/// Every spec in the progression, oldest first. The alias rungs are included: their columns
+/// must stay byte-identical to their behavior targets' (`MiniRex1` = `Equivalence`,
+/// `MiniRex2` = `MiniRex`), so an alias diverging from its target surfaces as a snapshot diff.
+const ALL_SPECS: [(MegaSpecId, &str); 12] = [
     (MegaSpecId::EQUIVALENCE, "Equivalence"),
     (MegaSpecId::MINI_REX, "MiniRex"),
+    (MegaSpecId::MINI_REX_1, "MiniRex1"),
+    (MegaSpecId::MINI_REX_2, "MiniRex2"),
     (MegaSpecId::REX, "Rex"),
     (MegaSpecId::REX1, "Rex1"),
     (MegaSpecId::REX2, "Rex2"),
@@ -913,8 +917,8 @@ fn test_compute_gas_survives_reverted_frame() {
     };
 
     for (spec, spec_name) in ALL_SPECS {
-        if spec == MegaSpecId::EQUIVALENCE {
-            continue; // no metering
+        if spec.behavior() == MegaSpecId::EQUIVALENCE {
+            continue; // no metering (covers the `MiniRex1` alias, which executes Equivalence)
         }
         let with_revert = transact(spec, (program.build_db)());
         let baseline = transact(spec, baseline_db());
