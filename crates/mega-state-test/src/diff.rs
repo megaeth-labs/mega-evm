@@ -44,6 +44,12 @@
 //! and would change the execution under observation. So a difference that only a guard rejection
 //! explains is reported for a human rather than licensed, which is the safe direction: the gate
 //! over-reports instead of granting an exemption on the strength of bytes the fixture chose.
+//!
+//! Frame-level evidence is collected by a second, inspected pair of runs, and carries one further
+//! condition: each rerun must reproduce the plain run it stands in for, quantity by quantity,
+//! before its frames may decide anything. An inspector that moved the execution produced frames
+//! that describe a different transaction, and letting those frames license the plain pair's
+//! difference is how an observation-path regression explains itself.
 
 use crate::{
     chaos::{CallbackCounter, ChaosInspector, ChaosTally, ShapeFilter},
@@ -641,26 +647,120 @@ pub fn diff_unit(
 
     // Stage two. The cheap evidence found nothing, so re-run both sides with the frame inspector,
     // which sees the frames the transaction's own result hides. It costs an inspected execution
-    // only for the units that reach here, instead of on every unit in the corpus.
-    let (Ok(target), Ok(base)) = (
+    // only for the units that reach here, instead of on every unit in the corpus. The plain
+    // outcomes stay alive: they are what each rerun has to reproduce before its frames count.
+    let reruns = (
         execute_unit_outcome(unit, indexes, &target_spec, true),
         execute_unit_outcome(unit, indexes, &base_spec, true),
-    ) else {
+    );
+    judge_with_frame_evidence(verdict, &target, &base, reruns)
+}
+
+/// Re-decides an unexplained difference on two inspected reruns' frame evidence — but only once
+/// each rerun has shown that it reproduced the plain run it stands in for.
+///
+/// The inspector attached to a rerun is supposed to observe and change nothing, and the one this
+/// crate attaches implements a single read-only callback. "Supposed to" is not a check, though,
+/// and a rerun that executed differently answers a different question: its frames describe an
+/// execution that did not happen, and can license a difference that execution never produced. An
+/// observation-path regression that introduces an inner exceptional halt on the target while the
+/// compute-gas difference survives is exactly that shape — the regression would explain itself
+/// and clear the nightly gate, hiding both itself and the difference it was called in to judge.
+///
+/// So each side's rerun is compared against its own plain outcome first, over every quantity but
+/// the frames the rerun exists to collect ([`rerun_drift`]). Any movement discards the evidence
+/// and leaves the plain verdict standing, which keeps the difference flagged:
+///
+/// | target rerun    | base rerun | verdict                                                       |
+/// | --------------- | ---------- | ------------------------------------------------------------- |
+/// | did not execute | either     | the plain verdict, unchanged: no evidence was collected        |
+/// | reproduced      | reproduced | judged on the inspected pair, whose frames are admissible      |
+/// | moved           | reproduced | the plain verdict, detail naming what moved on the target      |
+/// | reproduced      | moved      | the plain verdict, detail naming what moved on the base        |
+/// | moved           | moved      | the plain verdict, detail naming both sides' moved quantities  |
+fn judge_with_frame_evidence(
+    verdict: UnitDiffOutcome,
+    plain_target: &SpecOutcome,
+    plain_base: &SpecOutcome,
+    reruns: (Result<SpecOutcome, TestErrorKind>, Result<SpecOutcome, TestErrorKind>),
+) -> UnitDiffOutcome {
+    // A rerun that did not execute collected nothing; there is no evidence to admit or refuse.
+    let (Ok(target), Ok(base)) = reruns else {
         return verdict;
     };
-    let inspected_fields = compare(&target, &base);
-    if inspected_fields.is_empty() {
-        // The inspected pair agrees where the uninspected pair did not: the inspector moved the
-        // execution, so its evidence does not describe the difference under judgement.
-        return UnitDiffOutcome {
-            detail: Some(
-                "uninspected runs disagreed but inspected runs agreed; frame evidence discarded"
-                    .to_string(),
-            ),
-            ..verdict
-        };
+
+    let drifted: Vec<String> =
+        [("target", rerun_drift(plain_target, &target)), ("base", rerun_drift(plain_base, &base))]
+            .into_iter()
+            .filter(|(_, moved)| !moved.is_empty())
+            .map(|(side, moved)| {
+                format!("frame inspector moved the {side} execution: {}", moved.join(", "))
+            })
+            .collect();
+    if !drifted.is_empty() {
+        let mut detail: Vec<String> = verdict.detail.iter().cloned().collect();
+        detail.extend(drifted);
+        detail.push("frame evidence discarded".to_string());
+        return UnitDiffOutcome { detail: Some(detail.join("; ")), ..verdict };
     }
+
+    let inspected_fields = compare(&target, &base);
+    // Each rerun equals its plain run quantity by quantity, so the inspected pair disagrees on
+    // exactly the quantities the plain pair did — the set the caller already judged, and never
+    // an empty one. What the reruns add is the frame evidence the outcomes now carry.
+    debug_assert_eq!(
+        inspected_fields, verdict.fields,
+        "reruns that reproduced both plain outcomes must disagree on the same quantities"
+    );
     judge(&inspected_fields, &target, &base)
+}
+
+/// The quantities on which an inspected rerun departed from the plain run it stands in for.
+///
+/// Naming every field of the outcome rather than defaulting is deliberate: a quantity added to
+/// [`SpecOutcome`] later is a compile error here instead of a silent hole in the check. Two
+/// groups are compared for two reasons — [`compare`]'s ten are what the precision invariant
+/// holds the specs to, and the rest are what [`judge`] reads off an outcome to decide whether a
+/// mechanism was observed, which a rerun could move while leaving the compared ten alone.
+/// [`SpecOutcome::frames`] is the single exclusion: collecting it is what the rerun is for.
+fn rerun_drift(plain: &SpecOutcome, inspected: &SpecOutcome) -> Vec<&'static str> {
+    let SpecOutcome {
+        // Decided by `compare`.
+        state_root: _,
+        logs_root: _,
+        gas_used: _,
+        status: _,
+        halt_reason: _,
+        output: _,
+        compute_gas_used: _,
+        data_size: _,
+        kv_updates: _,
+        state_growth: _,
+        // Evidence read straight off the outcome.
+        halt_kind,
+        compute_gas_destroyed,
+        compute_gas_enforced,
+        rescued_gas,
+        detained_limit,
+        volatile_access,
+        // What the rerun exists to collect.
+        frames: _,
+    } = inspected;
+
+    let mut moved: Vec<&'static str> =
+        compare(plain, inspected).iter().map(|f| f.label()).collect();
+    let mut push = |differs: bool, label: &'static str| {
+        if differs {
+            moved.push(label);
+        }
+    };
+    push(*halt_kind != plain.halt_kind, "halt_kind");
+    push(*compute_gas_destroyed != plain.compute_gas_destroyed, "compute_gas_destroyed");
+    push(*compute_gas_enforced != plain.compute_gas_enforced, "compute_gas_enforced");
+    push(*rescued_gas != plain.rescued_gas, "rescued_gas");
+    push(*detained_limit != plain.detained_limit, "detained_limit");
+    push(*volatile_access != plain.volatile_access, "volatile_access");
+    moved
 }
 
 /// The verdict body of [`UnitDiff`], before the unit's name and path are attached.
@@ -1550,6 +1650,181 @@ mod tests {
         let verdict = judge(&compare(&target, &base), &target, &base);
         assert_eq!(verdict.class, DiffClass::Explained);
         assert!(verdict.mechanisms.contains(&Mechanism::ExceptionalHalt));
+    }
+
+    /// The plain pair a stage-two rerun is called in to settle: the target reports 700 more
+    /// compute gas than the base, with nothing in either outcome to license it.
+    fn unexplained_pair() -> (SpecOutcome, SpecOutcome, UnitDiffOutcome) {
+        let base = quiet();
+        let mut target = base.clone();
+        target.compute_gas_used += 700;
+        let verdict = judge(&compare(&target, &base), &target, &base);
+        assert_eq!(verdict.class, DiffClass::Unexplained);
+        (target, base, verdict)
+    }
+
+    // The admissible case: both reruns reproduce their plain run, so the inner halt only the
+    // frames can see is the execution's own and settles the difference.
+    #[test]
+    fn test_reruns_that_reproduce_their_plain_run_supply_admissible_evidence() {
+        let (target, base, verdict) = unexplained_pair();
+        let inspected_target = SpecOutcome { frames: halted_frames(1), ..target.clone() };
+        let inspected_base = SpecOutcome { frames: Some(FrameEvidence::default()), ..base.clone() };
+
+        let settled = judge_with_frame_evidence(
+            verdict,
+            &target,
+            &base,
+            (Ok(inspected_target), Ok(inspected_base)),
+        );
+        assert_eq!(settled.class, DiffClass::Explained);
+        assert!(settled.mechanisms.contains(&Mechanism::ExceptionalHalt));
+        assert_eq!(settled.fields, vec![DiffField::ComputeGasUsed]);
+    }
+
+    // The regression this gate exists for: the inspector itself introduces the inner halt and
+    // moves the target's numbers. The frames now describe an execution that did not happen, so
+    // they explain nothing and the plain verdict stands.
+    #[test]
+    fn test_a_target_rerun_that_moved_has_its_frame_evidence_discarded() {
+        let (target, base, verdict) = unexplained_pair();
+        let mut inspected_target = target.clone();
+        inspected_target.frames = halted_frames(1);
+        inspected_target.compute_gas_used += 5_000;
+        inspected_target.compute_gas_destroyed = 5_000;
+        let inspected_base = SpecOutcome { frames: Some(FrameEvidence::default()), ..base.clone() };
+
+        let settled = judge_with_frame_evidence(
+            verdict,
+            &target,
+            &base,
+            (Ok(inspected_target), Ok(inspected_base)),
+        );
+        assert_eq!(settled.class, DiffClass::Unexplained);
+        assert!(
+            !settled.mechanisms.contains(&Mechanism::ExceptionalHalt),
+            "a discarded rerun contributes no mechanism: {:?}",
+            settled.mechanisms
+        );
+        let detail = settled.detail.unwrap_or_default();
+        assert!(
+            detail.contains("frame inspector moved the target execution: compute_gas_used"),
+            "detail should name the side that moved: {detail}"
+        );
+        assert!(
+            detail.contains("compute_gas_used, compute_gas_destroyed"),
+            "detail should list every quantity that moved: {detail}"
+        );
+        assert!(!detail.contains("base execution"), "the base rerun did not move: {detail}");
+        assert!(detail.ends_with("frame evidence discarded"), "{detail}");
+    }
+
+    // The same rule on the other side, and over a quantity `compare` does not look at: a rerun
+    // that only moved the evidence `judge` reads is still a rerun of a different execution.
+    #[test]
+    fn test_a_base_rerun_that_moved_has_its_frame_evidence_discarded() {
+        let (target, base, verdict) = unexplained_pair();
+        let inspected_target = SpecOutcome { frames: halted_frames(1), ..target.clone() };
+        let mut inspected_base = base.clone();
+        inspected_base.frames = Some(FrameEvidence::default());
+        inspected_base.rescued_gas = 4_200;
+
+        let settled = judge_with_frame_evidence(
+            verdict,
+            &target,
+            &base,
+            (Ok(inspected_target), Ok(inspected_base)),
+        );
+        assert_eq!(settled.class, DiffClass::Unexplained);
+        assert!(
+            !settled.mechanisms.contains(&Mechanism::GasRescued),
+            "a discarded rerun contributes no mechanism: {:?}",
+            settled.mechanisms
+        );
+        let detail = settled.detail.unwrap_or_default();
+        assert!(
+            detail.contains("frame inspector moved the base execution: rescued_gas"),
+            "detail should name the side and its moved quantity: {detail}"
+        );
+        assert!(!detail.contains("target execution"), "the target rerun did not move: {detail}");
+    }
+
+    // Both sides moving is reported as both, not as whichever was checked first.
+    #[test]
+    fn test_both_reruns_moving_names_both_sides() {
+        let (target, base, verdict) = unexplained_pair();
+        let mut inspected_target = target.clone();
+        inspected_target.frames = halted_frames(1);
+        inspected_target.state_root = B256::repeat_byte(7);
+        let mut inspected_base = base.clone();
+        inspected_base.frames = Some(FrameEvidence::default());
+        inspected_base.detained_limit = Some(50_000);
+
+        let settled = judge_with_frame_evidence(
+            verdict,
+            &target,
+            &base,
+            (Ok(inspected_target), Ok(inspected_base)),
+        );
+        assert_eq!(settled.class, DiffClass::Unexplained);
+        let detail = settled.detail.unwrap_or_default();
+        assert!(
+            detail.contains("frame inspector moved the target execution: state_root") &&
+                detail.contains("frame inspector moved the base execution: detained_limit"),
+            "both sides moved and both should be named: {detail}"
+        );
+    }
+
+    // A rerun that never executed collected no frames at all, which is not evidence of drift and
+    // not evidence of anything else: the plain verdict is returned untouched.
+    #[test]
+    fn test_a_rerun_that_did_not_execute_leaves_the_plain_verdict_alone() {
+        let (target, base, verdict) = unexplained_pair();
+        let inspected_base = SpecOutcome { frames: Some(FrameEvidence::default()), ..base.clone() };
+        let settled = judge_with_frame_evidence(
+            verdict.clone(),
+            &target,
+            &base,
+            (Err(TestErrorKind::FixtureError("rerun declined".to_string())), Ok(inspected_base)),
+        );
+        assert_eq!(settled.class, DiffClass::Unexplained);
+        assert_eq!(settled.fields, verdict.fields);
+        assert_eq!(settled.detail, verdict.detail);
+    }
+
+    /// A quantity outside `compare`'s ten to disturb in a rerun, and its drift label.
+    type DriftProbe = (&'static str, fn(&mut SpecOutcome));
+
+    // The drift check covers the whole outcome but the frames, so a rerun that differs only by
+    // the evidence it was run to collect reads as a faithful rerun.
+    #[test]
+    fn test_only_the_collected_frames_may_differ_between_a_run_and_its_rerun() {
+        let plain = quiet();
+        assert!(rerun_drift(&plain, &plain).is_empty(), "a run must reproduce itself");
+        let inspected = SpecOutcome { frames: halted_frames(3), ..plain.clone() };
+        assert!(
+            rerun_drift(&plain, &inspected).is_empty(),
+            "collecting frame evidence is what the rerun is for"
+        );
+
+        let probes: [DriftProbe; 6] = [
+            ("halt_kind", |o| o.halt_kind = Some(HaltKind::Other)),
+            ("compute_gas_destroyed", |o| o.compute_gas_destroyed += 1),
+            ("compute_gas_enforced", |o| o.compute_gas_enforced += 1),
+            ("rescued_gas", |o| o.rescued_gas += 1),
+            ("detained_limit", |o| o.detained_limit = Some(1)),
+            ("volatile_access", |o| o.volatile_access = 1),
+        ];
+        for (label, mutate) in probes {
+            let mut moved = plain.clone();
+            mutate(&mut moved);
+            assert_eq!(rerun_drift(&plain, &moved), vec![label]);
+        }
+        // And the ten `compare` decides, reported under their own labels.
+        let mut moved = plain.clone();
+        moved.gas_used += 1;
+        moved.kv_updates += 1;
+        assert_eq!(rerun_drift(&plain, &moved), vec!["gas_used", "kv_updates"]);
     }
 
     // Which halts count as a crossed resource limit is read off the typed reason, variant by

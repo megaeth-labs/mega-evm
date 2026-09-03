@@ -21,6 +21,7 @@ The `state-test` CLI (`crates/state-test`) is a thin front-end over this crate.
 - Parallel execution uses shared queue and atomic counters with optional single-thread mode.
 - Differential classification is evidence-based, never a list of fixtures allowed to differ: every `Mechanism` is a fact read off an execution, and the hypothesis it falsifies is what licenses a difference.
 - Only an execution-provenance observation licenses anything. The fixture is the input under test, so a `Mechanism` read out of revert-payload bytes is reported and never falsifies a hypothesis; a derived quantity (the Rex7 destroyed remainder) needs an independent witness rather than certifying itself.
+- Frame evidence is admissible only from a rerun that reproduced the run it stands in for: each inspected rerun is compared against its own plain outcome over every quantity but the frames it was run to collect, and a rerun that moved anything has its evidence discarded with the plain verdict left standing.
 - A differential run is defined for exactly one spec pair, the one whose precision invariant the classifier encodes (`DiffSpecs::new`). There is no general two-spec comparator.
 - A unit is a family of transactions, one per vector its `post` names (`TestUnit::vectors`). Diff, fill and bench each enumerate them; nothing takes index `{0,0,0}` and calls it the unit.
 - The transaction vector is the unit of counting everywhere (`FillReport::vectors`, `diff_test_suite`, validation's judged count), so one corpus produces one total whichever mode swept it.
@@ -32,6 +33,7 @@ The `state-test` CLI (`crates/state-test`) is a thin front-end over this crate.
 
 ## ANTI-PATTERNS
 - Do not explain a differential disagreement with a fixture allowlist; add a `Mechanism` that reads the evidence instead, and state which hypothesis it falsifies.
+- Do not judge a difference on an inspected rerun's frames without first checking the rerun against its plain run; an inspector that changed the execution can explain the very difference it introduced.
 - Do not let a `Mechanism` inferred from bytes the fixture could have written falsify a hypothesis; `Mechanism::provenance` records where an observation came from and the licensing rule follows it.
 - Do not classify a halt by matching its `Debug` rendering; match the `MegaHaltReason` variants with no catch-all arm, so a new variant has to be decided rather than defaulted.
 - Do not drop an entry the fixture-discovery walk could not read; an unreadable directory is a hole in coverage, not an empty one.
@@ -48,6 +50,7 @@ The `state-test` CLI (`crates/state-test`) is a thin front-end over this crate.
 - Change validation semantics for roots/output/exception: `runner.rs::{validate_exception,validate_output,check_evm_execution}`.
 - Change worker behavior or fail-fast policy: `runner.rs::{run_test_worker,run,TestRunnerConfig}`.
 - Change what a differential run compares or what licenses a difference: `diff.rs::{DiffField,Mechanism,Provenance,halt_kind,judge}`.
+- Change when frame evidence may decide a difference: `diff.rs::{judge_with_frame_evidence,rerun_drift}`.
 - Change which spec pair a differential run accepts: `diff.rs::DiffSpecs::new`.
 - Change how a unit's transaction vectors are enumerated: `types/test_unit.rs::TestUnit::vectors`.
 - Change what a fill records per unit or reports per vector: `runner.rs::{fill_unit,fill_suite,FillReport}`.
