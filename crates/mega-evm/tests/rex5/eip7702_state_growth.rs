@@ -10,7 +10,7 @@ use alloy_primitives::{address, Address, Bytes, U256};
 use mega_evm::{
     test_utils::{BytecodeBuilder, MemoryDatabase},
     EvmTxRuntimeLimits, LimitUsage, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
-    MegaTransaction,
+    MegaTransaction, MegaTransactionNew as _,
 };
 use revm::{
     context::{

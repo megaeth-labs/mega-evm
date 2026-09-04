@@ -16,12 +16,13 @@ use std::convert::Infallible;
 
 use alloy_primitives::{address, Address, Bytes, U256};
 use mega_evm::{
+    alloy_op_evm::OpTxError,
     test_utils::{BytecodeBuilder, MemoryDatabase},
     EvmTxRuntimeLimits, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
-    MegaTransactionError, ACCOUNT_INFO_WRITE_SIZE, BASE_TX_SIZE,
+    MegaTransactionNew as _, ACCOUNT_INFO_WRITE_SIZE, BASE_TX_SIZE,
 };
 use revm::{
-    bytecode::opcode::{CALL, CREATE, GAS, INVALID, POP, PUSH0, PUSH1, STOP},
+    bytecode::opcode::{CALL, CREATE, GAS, INVALID, POP, PUSH0, PUSH1, RETURN, REVERT, STOP},
     context::{
         result::{EVMError, ResultAndState},
         tx::TxEnvBuilder,
@@ -41,8 +42,7 @@ fn transact(
     spec: MegaSpecId,
     db: &mut MemoryDatabase,
     tx: TxEnv,
-) -> Result<(ResultAndState<MegaHaltReason>, u64, u64), EVMError<Infallible, MegaTransactionError>>
-{
+) -> Result<(ResultAndState<MegaHaltReason>, u64, u64), EVMError<Infallible, OpTxError>> {
     let mut context = MegaContext::new(db, spec).with_tx_runtime_limits(
         EvmTxRuntimeLimits::no_limits()
             .with_tx_data_size_limit(u64::MAX)
@@ -338,4 +338,82 @@ fn test_rex4_reverted_first_child_flag_not_set() {
     // Note: the first call's CALLEE charge is dropped on revert, so Rex4 also gives 3 here.
     // The overcounting in Rex4 manifests when BOTH calls succeed (tested separately above).
     assert_eq!(kv_updates, 3);
+}
+
+// ============================================================================
+// Reverted first CREATE followed by a successful second CREATE
+// ============================================================================
+
+/// Init code that immediately reverts: `PUSH1 0; PUSH1 0; REVERT`.
+const REVERTING_INIT_CODE: [u8; 5] = [PUSH1, 0x00, PUSH1, 0x00, REVERT];
+/// Init code that immediately returns empty runtime code: `PUSH1 0; PUSH1 0; RETURN`.
+const SUCCEEDING_INIT_CODE: [u8; 5] = [PUSH1, 0x00, PUSH1, 0x00, RETURN];
+
+/// Appends `CREATE(value=0, offset=0, size=init_code.len())` after storing `init_code`
+/// left-aligned at memory offset 0.
+fn append_create_with_init_code(builder: BytecodeBuilder, init_code: &[u8]) -> BytecodeBuilder {
+    builder
+        .mstore(0, init_code)
+        .push_number(init_code.len() as u64) // size
+        .push_number(0_u64) // offset
+        .push_number(0_u64) // value
+        .append(CREATE)
+}
+
+/// CALLEE CREATEs with reverting init code, then CREATEs again with succeeding init code.
+fn create_revert_then_succeed_code() -> Bytes {
+    let mut builder = BytecodeBuilder::default();
+    builder = append_create_with_init_code(builder, &REVERTING_INIT_CODE).append(POP);
+    builder = append_create_with_init_code(builder, &SUCCEEDING_INIT_CODE).append(POP);
+    builder.append(STOP).build()
+}
+
+/// Rex5: when a CREATE child reverts, the creator's `target_updated` dedup flag must be
+/// unwound, so a following successful CREATE from the same parent charges the creator
+/// account update exactly once.
+///
+/// Under Rex5 the creator-side charge lives on the *child* frame's discardable lane, so the
+/// reverted attempt's charge is dropped — without the unwind the retry would be charged zero
+/// times and the creator's surviving nonce bump would go unmetered. Rex6 moves the charge to
+/// the parent lane (where it survives the revert) and therefore does *not* unwind; that
+/// divergence must stay spec-gated and must not leak back into the frozen Rex5 behavior.
+#[test]
+fn test_rex5_reverted_first_create_flag_reset_allows_second_charge() {
+    let mut db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(10_000_000))
+        .account_balance(CALLEE, U256::from(10_000_000))
+        .account_code(CALLEE, create_revert_then_succeed_code());
+
+    let (res, data_size, kv_updates) =
+        transact(MegaSpecId::REX5, &mut db, default_tx(CALLEE)).unwrap();
+    assert!(res.result.is_success());
+
+    // KV updates: 1 (caller nonce) + 1 (CALLEE parent, charged by the successful 2nd CREATE)
+    //           + 1 (2nd created account) = 3.
+    // The 1st CREATE's charges (CALLEE + created account) are discarded with its revert.
+    assert_eq!(
+        kv_updates, 3,
+        "Rex5 must charge the creator once after a reverted-then-retried CREATE"
+    );
+    // Data size: intrinsic + 2 account writes (CALLEE parent + 2nd created account); the
+    // deployed runtime code is empty.
+    assert_eq!(data_size, intrinsic_data_size() + 2 * ACCOUNT_INFO_WRITE_SIZE);
+}
+
+/// Rex6 counterpart: the creator charge lands on the parent lane on the *first* CREATE and
+/// survives its revert, so the retry is not charged again. Total creator charges stay at one,
+/// but they are attributed to a different attempt than under Rex5.
+#[test]
+fn test_rex6_reverted_first_create_charges_creator_on_first_attempt() {
+    let mut db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(10_000_000))
+        .account_balance(CALLEE, U256::from(10_000_000))
+        .account_code(CALLEE, create_revert_then_succeed_code());
+
+    let (res, data_size, kv_updates) =
+        transact(MegaSpecId::REX6, &mut db, default_tx(CALLEE)).unwrap();
+    assert!(res.result.is_success());
+
+    assert_eq!(kv_updates, 3, "Rex6 must charge the creator exactly once as well");
+    assert_eq!(data_size, intrinsic_data_size() + 2 * ACCOUNT_INFO_WRITE_SIZE);
 }

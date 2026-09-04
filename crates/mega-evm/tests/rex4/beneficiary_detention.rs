@@ -13,17 +13,17 @@
 //!
 //! | Path | Trigger | Wrapper / Hook | Test |
 //! |---|---|---|---|
-//! | CALL to beneficiary | `load_account_delegated` | `wrap_call_volatile_check!` + `apply_compute_gas_limit!` | test 1, 1b |
-//! | STATICCALL to beneficiary | `load_account_delegated` | `wrap_call_volatile_check!` + `apply_compute_gas_limit!` | test 2 |
-//! | DELEGATECALL to beneficiary | `load_account_delegated` | `wrap_call_volatile_check!` + `apply_compute_gas_limit!` | test 3 |
-//! | CALLCODE to beneficiary | `load_account_delegated` | `wrap_call_volatile_check!` + `apply_compute_gas_limit!` | test 4 |
+//! | CALL to beneficiary | CALL-family target account load | `wrap_call_volatile_check!` + `apply_compute_gas_limit!` | test 1, 1b |
+//! | STATICCALL to beneficiary | CALL-family target account load | `wrap_call_volatile_check!` + `apply_compute_gas_limit!` | test 2 |
+//! | DELEGATECALL to beneficiary | CALL-family target account load | `wrap_call_volatile_check!` + `apply_compute_gas_limit!` | test 3 |
+//! | CALLCODE to beneficiary | CALL-family target account load | `wrap_call_volatile_check!` + `apply_compute_gas_limit!` | test 4 |
 //! | TX sender = beneficiary | `on_new_tx` eager | `check_tx_beneficiary_access` + sync (REX4) | test 5, 5b |
 //! | TX recipient = beneficiary | `on_new_tx` eager | `check_tx_beneficiary_access` + sync (REX4) | test 6, 6b |
 //! | SELFBALANCE in beneficiary | `host.balance()` | `volatile_data_ext::selfbalance` | test 7 (integration), 9 (address sensitivity) |
 //! | BALANCE(beneficiary) | `host.balance()` | `wrap_op_detain_gas_conditional!` | (covered in `block_env_gas_limit.rs`) |
 //! | CALL to non-beneficiary | — | no trigger | test 8 (negative) |
 //! | SELFBALANCE in non-beneficiary | — | no trigger | test 9 (negative) |
-//! | Child reverts after CALL to beneficiary | `load_account_delegated` | detention persists | test 1b |
+//! | Child reverts after CALL to beneficiary | CALL-family target account load | detention persists | test 1b |
 //! | disableVolatileDataAccess + CALL beneficiary | — | CALL blocked by `wrap_call_volatile_check` | (covered in `access_control.rs`) |
 //! | disableVolatileDataAccess + SELFBALANCE beneficiary | — | revert before exec | test 10 |
 //! | Detention + intrinsic DataSize overflow | `on_new_tx` eager | halt with DataLimitExceeded | test 11 |
@@ -34,9 +34,10 @@ use std::convert::Infallible;
 use alloy_primitives::{address, Address, Bytes, U256};
 use alloy_sol_types::SolCall;
 use mega_evm::{
+    alloy_op_evm::OpTxError,
     test_utils::{BytecodeBuilder, MemoryDatabase},
     EvmTxRuntimeLimits, IMegaAccessControl, IMegaLimitControl, MegaContext, MegaEvm,
-    MegaHaltReason, MegaSpecId, MegaTransaction, MegaTransactionError, ACCESS_CONTROL_ADDRESS,
+    MegaHaltReason, MegaSpecId, MegaTransaction, MegaTransactionNew as _, ACCESS_CONTROL_ADDRESS,
     LIMIT_CONTROL_ADDRESS,
 };
 use revm::{
@@ -73,7 +74,7 @@ fn transact_with_spec(
     compute_gas_limit: u64,
     block_env_access_limit: u64,
     tx: TxEnv,
-) -> Result<(ResultAndState<MegaHaltReason>, u64), EVMError<Infallible, MegaTransactionError>> {
+) -> Result<(ResultAndState<MegaHaltReason>, u64), EVMError<Infallible, OpTxError>> {
     let block = BlockEnv { beneficiary, ..Default::default() };
 
     let mut context = MegaContext::new(db, spec).with_block(block).with_tx_runtime_limits(
@@ -101,15 +102,41 @@ fn transact(
     compute_gas_limit: u64,
     block_env_access_limit: u64,
     tx: TxEnv,
-) -> Result<(ResultAndState<MegaHaltReason>, u64), EVMError<Infallible, MegaTransactionError>> {
-    transact_with_spec(
-        MegaSpecId::REX4,
-        db,
-        beneficiary,
-        compute_gas_limit,
-        block_env_access_limit,
-        tx,
-    )
+) -> Result<(ResultAndState<MegaHaltReason>, u64), EVMError<Infallible, OpTxError>> {
+    let (result, detained_limit, _) =
+        transact_detailed(db, beneficiary, compute_gas_limit, block_env_access_limit, tx)?;
+    Ok((result, detained_limit))
+}
+
+/// REX4 execute + return `(result, detained_limit, beneficiary_balance_marked)`.
+fn transact_detailed(
+    db: &mut MemoryDatabase,
+    beneficiary: Address,
+    compute_gas_limit: u64,
+    block_env_access_limit: u64,
+    tx: TxEnv,
+) -> Result<(ResultAndState<MegaHaltReason>, u64, bool), EVMError<Infallible, OpTxError>> {
+    let block = BlockEnv { beneficiary, ..Default::default() };
+
+    let mut context =
+        MegaContext::new(db, MegaSpecId::REX4).with_block(block).with_tx_runtime_limits(
+            EvmTxRuntimeLimits::no_limits()
+                .with_tx_compute_gas_limit(compute_gas_limit)
+                .with_block_env_access_compute_gas_limit(block_env_access_limit),
+        );
+    context.modify_chain(|chain| {
+        chain.operator_fee_scalar = Some(U256::from(0));
+        chain.operator_fee_constant = Some(U256::from(0));
+    });
+    let mut evm = MegaEvm::new(context);
+    let mut tx = MegaTransaction::new(tx);
+    tx.enveloped_tx = Some(Bytes::new());
+    let r = alloy_evm::Evm::transact_raw(&mut evm, tx)?;
+
+    let detained_limit = evm.ctx_ref().additional_limit.borrow().detained_compute_gas_limit();
+    let beneficiary_marked =
+        evm.ctx_ref().volatile_data_tracker.borrow().has_accessed_beneficiary_balance();
+    Ok((r, detained_limit, beneficiary_marked))
 }
 
 fn default_tx(to: Address) -> TxEnv {
@@ -729,7 +756,7 @@ fn test_detention_plus_intrinsic_data_size_overflow() {
     );
 
     // Gas rescue should have returned most gas since no execution happened.
-    let gas_remaining = 1_000_000_000 - result.result.gas_used();
+    let gas_remaining = 1_000_000_000 - result.result.tx_gas_used();
     assert!(
         gas_remaining > 900_000_000,
         "Expected >900M gas remaining from rescue (not inflated by detention), got {gas_remaining}"
@@ -801,5 +828,259 @@ fn test_detention_does_not_interfere_with_data_size_limit() {
         !result.result.is_success(),
         "Detention active but data size exceeded should not succeed, got {:?}",
         result.result
+    );
+}
+
+// ============================================================================
+// SELFBALANCE XOR corners for the `target == beneficiary && volatile_access_disabled` guard
+// ============================================================================
+
+/// Runs CREATE init-code at `deployer.create(0)`, with that address set as the block beneficiary.
+///
+/// Avoids REX4 eager marking of TX recipient == beneficiary (and CALL-to-beneficiary mark
+/// pollution) so detention / tracker bits can be attributed to opcodes inside the init frame.
+///
+/// The deployer RETURNs the CREATE address (32-byte word) so callers can assert the init frame
+/// actually completed — a reverted init (e.g. `&&`→`||` SELFBALANCE guard) yields address zero
+/// while the outer CALL frame can still succeed.
+fn run_create_init_at_beneficiary(
+    init_code: Bytes,
+) -> (ResultAndState<MegaHaltReason>, u64, bool, Address, Address) {
+    let deployer = CALLEE;
+    let beneficiary = deployer.create(0);
+    let init_len = init_code.len();
+
+    // Deployer: CREATE with the given init code; RETURN the created address word.
+    let deployer_code = BytecodeBuilder::default()
+        .mstore(0, &init_code)
+        .push_number(init_len as u64) // size
+        .push_number(0_u64) // offset
+        .push_number(0_u64) // value
+        .append(CREATE)
+        .push_number(0_u64)
+        .append(MSTORE)
+        .push_number(32_u64)
+        .push_number(0_u64)
+        .append(RETURN)
+        .build();
+
+    let mut db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(1_000_000_000_000u64))
+        .account_code(deployer, deployer_code);
+
+    let tx =
+        TxEnvBuilder::default().caller(CALLER).call(deployer).gas_limit(1_000_000_000).build_fill();
+
+    let (result, detained_limit, marked) =
+        transact_detailed(&mut db, beneficiary, 200_000_000, DETENTION_CAP, tx).unwrap();
+    (result, detained_limit, marked, beneficiary, deployer)
+}
+
+/// Decode the 32-byte CREATE address word returned by [`run_create_init_at_beneficiary`].
+fn decode_create_address(result: &ResultAndState<MegaHaltReason>) -> Address {
+    let output = match &result.result {
+        revm::context::result::ExecutionResult::Success { output, .. } => output.data().clone(),
+        other => panic!("expected success to decode CREATE address, got {other:?}"),
+    };
+    assert_eq!(output.len(), 32, "CREATE address return must be 32 bytes, got {}", output.len());
+    Address::from_word(alloy_primitives::B256::from_slice(&output))
+}
+
+/// XOR corner 1: SELFBALANCE at the beneficiary with volatile access **enabled**
+/// must execute (and mark detention), not revert.
+///
+/// The conjunction `target == beneficiary && volatile_access_disabled` is false
+/// when only the first arm holds. An `&&` → `||` mutant reverts on beneficiary
+/// alone and is killed by the success assertion here.
+///
+/// ## Attribution (differential)
+///
+/// TX-to-beneficiary / CALL-to-beneficiary both mark the beneficiary *before*
+/// SELFBALANCE runs (eager `on_new_tx` recipient check / CALL-family load).
+/// This test instead CREATEs at `deployer.create(0)` with that address as the
+/// block beneficiary, so the init frame's `target_address` is the beneficiary
+/// without those outer marks. Control init (`STOP` only) must leave the tracker
+/// clean; SELFBALANCE init must mark and detain.
+#[test]
+fn test_selfbalance_at_beneficiary_with_access_enabled_executes_and_detains() {
+    // Control: CREATE init with no SELFBALANCE — must NOT mark / detain.
+    let control_init = BytecodeBuilder::default().stop().build();
+    let (control_result, control_detained, control_marked, expected_beneficiary, _) =
+        run_create_init_at_beneficiary(control_init);
+    assert!(
+        control_result.result.is_success(),
+        "control CREATE (STOP init) must succeed: {:?}",
+        control_result.result,
+    );
+    let control_created = decode_create_address(&control_result);
+    assert_eq!(
+        control_created, expected_beneficiary,
+        "control CREATE address must be the block beneficiary",
+    );
+    assert!(
+        !control_marked,
+        "control CREATE must not mark beneficiary balance (would pollute SELFBALANCE attribution)",
+    );
+    assert_eq!(
+        control_detained, 200_000_000,
+        "control CREATE must leave detained limit at TX cap, got {control_detained}",
+    );
+
+    // Treatment: same CREATE layout, but init runs SELFBALANCE at the beneficiary address.
+    let selfbalance_init =
+        BytecodeBuilder::default().append(SELFBALANCE).append(POP).stop().build();
+    let (result, detained_limit, marked, expected_beneficiary, _) =
+        run_create_init_at_beneficiary(selfbalance_init);
+
+    assert!(
+        result.result.is_success(),
+        "outer deployer CALL must succeed; got {:?}",
+        result.result,
+    );
+    let created = decode_create_address(&result);
+    assert_eq!(
+        created, expected_beneficiary,
+        "SELFBALANCE at beneficiary with access enabled must let CREATE complete \
+         (non-zero address == beneficiary). An `&&`→`||` mutant reverts the init frame \
+         on the beneficiary arm alone, so CREATE returns address zero. got {created}",
+    );
+    assert!(
+        marked,
+        "SELFBALANCE at beneficiary must set the beneficiary-balance tracker bit \
+         (attribution: control CREATE without SELFBALANCE left the bit clear)",
+    );
+    // REX4 detention is relative (cap = current compute used + DETENTION_CAP), so the
+    // absolute value can exceed DETENTION_CAP when SELFBALANCE marks mid-tx. The
+    // attribution signal is: control left the TX cap untouched; treatment drops below it.
+    assert!(
+        detained_limit < 200_000_000,
+        "SELFBALANCE at beneficiary must engage detention below the TX compute-gas cap \
+         (detained_limit={detained_limit}, control was 200_000_000)",
+    );
+    assert!(
+        detained_limit <= control_detained,
+        "treatment detained_limit ({detained_limit}) must not exceed control ({control_detained})",
+    );
+}
+
+/// XOR corner 2: SELFBALANCE at a **non-beneficiary** with volatile access **disabled**
+/// must execute normally (not revert).
+///
+/// The conjunction is false when only the second arm holds. An `&&` → `||` mutant
+/// reverts whenever `volatile_access_disabled` is true, regardless of target.
+///
+/// Also asserts the disable call itself succeeds and that detention stays off
+/// (detained limit remains the TX compute-gas cap; beneficiary bit clear).
+#[test]
+fn test_selfbalance_at_non_beneficiary_with_access_disabled_executes() {
+    let disable_selector = IMegaAccessControl::disableVolatileDataAccessCall::SELECTOR;
+
+    // Non-beneficiary callee: disable volatile access (assert success on stack),
+    // then SELFBALANCE, then STOP.
+    let callee_code = BytecodeBuilder::default()
+        .mstore(0x0, disable_selector)
+        .push_number(0_u64) // retSize
+        .push_number(0_u64) // retOffset
+        .push_number(4_u64) // argsSize
+        .push_number(0_u64) // argsOffset
+        .push_number(0_u64) // value
+        .push_address(ACCESS_CONTROL_ADDRESS)
+        .push_number(100_000_u64)
+        .append(CALL)
+        // disableVolatileDataAccess must succeed (success flag == 1 on stack).
+        .assert_stack_value(0, U256::from(1))
+        .append(POP)
+        .append(SELFBALANCE)
+        .append(POP)
+        .stop()
+        .build();
+
+    let mut db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(1_000_000))
+        .account_code(CALLEE, callee_code);
+
+    let tx =
+        TxEnvBuilder::default().caller(CALLER).call(CALLEE).gas_limit(1_000_000_000).build_fill();
+
+    let (result, detained_limit, marked) =
+        transact_detailed(&mut db, BENEFICIARY, 200_000_000, DETENTION_CAP, tx).unwrap();
+
+    assert!(
+        result.result.is_success(),
+        "SELFBALANCE at non-beneficiary with access disabled must execute; \
+         an `&&`→`||` mutant reverts on the disabled arm alone. got {:?}",
+        result.result,
+    );
+    assert_eq!(
+        detained_limit, 200_000_000,
+        "non-beneficiary SELFBALANCE with access disabled must leave detained limit \
+         at the TX compute-gas cap (200M), got {detained_limit}",
+    );
+    assert!(
+        !marked,
+        "non-beneficiary SELFBALANCE must not set the beneficiary-balance tracker bit",
+    );
+}
+
+// ============================================================================
+// TEST 5c: Caller is beneficiary, no volatile opcode — eager sync must stand alone
+// ============================================================================
+
+/// Test 5 lets the callee CALL `MegaLimitControl`, and the CALL-family wrapper re-syncs the
+/// tracker's cap into `AdditionalLimit` on its own. This variant removes every opcode that could
+/// re-sync — the callee is a bare `STOP` — so the detained limit can only come from the eager
+/// `on_new_tx` sync. Without it the transaction would run against the full TX compute-gas cap.
+#[test]
+fn test_caller_is_beneficiary_eager_detention_without_volatile_opcode() {
+    let callee_code = BytecodeBuilder::default().stop().build();
+
+    let mut db = MemoryDatabase::default()
+        .account_balance(BENEFICIARY, U256::from(1_000_000))
+        .account_code(CALLEE, callee_code);
+
+    let tx = TxEnvBuilder::default()
+        .caller(BENEFICIARY)
+        .call(CALLEE)
+        .gas_limit(1_000_000_000)
+        .build_fill();
+
+    let (result, detained_limit) =
+        transact(&mut db, BENEFICIARY, 200_000_000, DETENTION_CAP, tx).unwrap();
+
+    assert!(result.result.is_success());
+    assert!(
+        detained_limit < 200_000_000,
+        "caller=beneficiary must be detained from TX start even when no opcode re-syncs the \
+         cap; detained limit stayed at {detained_limit}",
+    );
+}
+
+// ============================================================================
+// TEST 6c: Recipient is beneficiary, no volatile opcode — eager sync must stand alone
+// ============================================================================
+
+/// Recipient-side mirror of test 5c: the beneficiary's own code is a bare `STOP`.
+#[test]
+fn test_recipient_is_beneficiary_eager_detention_without_volatile_opcode() {
+    let beneficiary_code = BytecodeBuilder::default().stop().build();
+
+    let mut db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(1_000_000))
+        .account_code(BENEFICIARY, beneficiary_code);
+
+    let tx = TxEnvBuilder::default()
+        .caller(CALLER)
+        .call(BENEFICIARY)
+        .gas_limit(1_000_000_000)
+        .build_fill();
+
+    let (result, detained_limit) =
+        transact(&mut db, BENEFICIARY, 200_000_000, DETENTION_CAP, tx).unwrap();
+
+    assert!(result.result.is_success());
+    assert!(
+        detained_limit < 200_000_000,
+        "recipient=beneficiary must be detained from TX start even when no opcode re-syncs the \
+         cap; detained limit stayed at {detained_limit}",
     );
 }

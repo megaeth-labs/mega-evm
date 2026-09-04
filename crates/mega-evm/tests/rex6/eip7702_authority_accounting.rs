@@ -14,9 +14,10 @@ use std::convert::Infallible;
 use alloy_eips::eip7702::{Authorization, RecoveredAuthority, RecoveredAuthorization};
 use alloy_primitives::{address, Address, Bytes, U256};
 use mega_evm::{
-    constants, test_utils::MemoryDatabase, BucketHasher, EVMError, EvmTxRuntimeLimits, LimitUsage,
-    MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction, MegaTransactionError,
-    SimpleBucketHasher, TestExternalEnvs, ACCOUNT_INFO_WRITE_SIZE, MIN_BUCKET_SIZE,
+    alloy_op_evm::OpTxError, constants, test_utils::MemoryDatabase, BucketHasher, EVMError,
+    EvmTxRuntimeLimits, LimitUsage, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
+    MegaTransaction, MegaTransactionError, MegaTransactionNew as _, SimpleBucketHasher,
+    TestExternalEnvs, ACCOUNT_INFO_WRITE_SIZE, MIN_BUCKET_SIZE,
 };
 use revm::{
     context::{
@@ -106,7 +107,7 @@ fn try_transact(
     db: &mut MemoryDatabase,
     envs: &Envs,
     tx: TxEnv,
-) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, MegaTransactionError>> {
+) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, OpTxError>> {
     let mut context =
         MegaContext::new(db, spec).with_external_envs(envs.into()).with_tx_runtime_limits(
             EvmTxRuntimeLimits::from_spec(spec)
@@ -211,7 +212,7 @@ fn test_rex6_new_authority_charges_salt_gas() {
     // The heavy bucket charges exactly `base * (multiplier - 1)` extra new-account gas.
     let expected_salt = constants::rex::NEW_ACCOUNT_STORAGE_GAS_BASE * (HEAVY_MULTIPLIER - 1);
     assert_eq!(
-        res_heavy.result.gas_used() - res_default.result.gas_used(),
+        res_heavy.result.tx_gas_used() - res_default.result.tx_gas_used(),
         expected_salt,
         "REX6 must charge exactly the heavy-bucket SALT gas for the new authority",
     );
@@ -242,7 +243,7 @@ fn test_rex6_authority_salt_gas_enforced_against_gas_limit() {
         tx_with_auths(auths.clone()),
     );
     assert!(res_default.result.is_success(), "default-bucket run should succeed: {res_default:?}");
-    let default_budget = res_default.result.gas_used();
+    let default_budget = res_default.result.tx_gas_used();
 
     // Same authorization, heavy bucket, but only the default run's budget: the heavy SALT pushes
     // initial_gas past gas_limit, so validation rejects before execution.
@@ -258,9 +259,9 @@ fn test_rex6_authority_salt_gas_enforced_against_gas_limit() {
     assert!(
         matches!(
             err,
-            EVMError::Transaction(MegaTransactionError::Base(
+            EVMError::Transaction(OpTxError(MegaTransactionError::Base(
                 InvalidTransaction::CallGasCostMoreThanGasLimit { .. }
-            ))
+            )))
         ),
         "expected CallGasCostMoreThanGasLimit from the unaffordable SALT gas, got {err:?}",
     );
@@ -737,8 +738,8 @@ fn test_rex6_authority_state_growth_overflow_forgoes_refund() {
     // The whole list is skipped in both, so the pre-existing authority's 12_500 refund is forgone:
     // gas_used is identical. Were it applied, only the existing-A run would drop by 12_500.
     assert_eq!(
-        res_existing.result.gas_used(),
-        res_fresh.result.gas_used(),
+        res_existing.result.tx_gas_used(),
+        res_fresh.result.tx_gas_used(),
         "skipping the whole auth list forgoes the pre-existing authority's EIP-7702 refund, so \
          gas_used must not differ on account of A's pre-existence",
     );
@@ -791,7 +792,7 @@ fn test_rex6_recipient_authority_not_double_charged() {
 
     // The with-auth tx adds only authorization overhead (intrinsic + per-auth), well under one
     // heavy SALT (~3.17M). A double charge would inflate gas_used by roughly a full heavy SALT.
-    let delta = res_with_auth.result.gas_used().saturating_sub(res_no_auth.result.gas_used());
+    let delta = res_with_auth.result.tx_gas_used().saturating_sub(res_no_auth.result.tx_gas_used());
     assert!(
         delta < 1_000_000,
         "the recipient authority's heavy SALT must be charged once, not twice (delta={delta})",
@@ -977,5 +978,82 @@ fn test_rex6_unrecoverable_authority_skipped() {
         u_applied.kv_updates - u_skip.kv_updates,
         1,
         "an applied authority charges exactly one more KV update than an unrecoverable one",
+    );
+}
+
+// ============================================================================
+// Application-gate boundaries of the shared authorization scan
+// ============================================================================
+
+/// Installs a real EIP-7702 delegation designator on `authority`, the way an earlier
+/// transaction's `apply_eip7702_auth_list` would have left the account.
+fn set_eip7702_delegation(db: &mut MemoryDatabase, authority: Address, target: Address) {
+    use revm::{bytecode::Bytecode, database::AccountState};
+    let code = Bytecode::new_eip7702(target);
+    let account = db.load_account(authority).expect("cache insert is infallible");
+    account.info.code_hash = code.hash_slow();
+    account.info.code = Some(code);
+    account.account_state = AccountState::None;
+}
+
+/// The code gate skips an authority that already carries *non-7702* code, but must let an
+/// already-delegated authority through: re-delegation is the normal EIP-7702 rotation, and the
+/// scan has to account for it exactly like a first delegation.
+#[test]
+fn test_rex6_applied_authority_with_existing_delegation_is_accounted() {
+    // Baseline: same-shaped type-4 transaction whose single authorization is unrecoverable, so
+    // it is skipped before any account read and contributes no per-authority accounting.
+    let mut baseline_db = funded_db();
+    let baseline_tx = tx_with_auths(vec![auth_unrecoverable(1, 0)]);
+    let (baseline_res, baseline_usage) =
+        transact(MegaSpecId::REX6, &mut baseline_db, &no_heavy_buckets(), baseline_tx);
+    assert!(baseline_res.result.is_success(), "got {:?}", baseline_res.result);
+
+    // Same transaction, plus one applicable authorization whose authority is already delegated.
+    let mut db = funded_db();
+    set_eip7702_delegation(&mut db, AUTHORITY_A, CALLEE);
+    let tx = tx_with_auths(vec![auth(AUTHORITY_A, 1, 0)]);
+    let (res, usage) = transact(MegaSpecId::REX6, &mut db, &no_heavy_buckets(), tx);
+    assert!(res.result.is_success(), "got {:?}", res.result);
+
+    assert_eq!(
+        usage.data_size - baseline_usage.data_size,
+        ACCOUNT_INFO_WRITE_SIZE,
+        "re-delegating an already-delegated authority is an applied authorization and must be \
+         charged one account-info write",
+    );
+    assert_eq!(
+        usage.kv_updates - baseline_usage.kv_updates,
+        1,
+        "an applied authorization is one KV update",
+    );
+}
+
+/// `creates_authority` is a conjunction: the authority account must be empty **and** absent from
+/// state. An account that exists but happens to be empty is not net-new, so applying an
+/// authorization to it must record no state growth.
+#[test]
+fn test_rex6_empty_but_existing_authority_is_not_state_growth() {
+    // Present in state with a zero balance: `basic()` returns `Some(default)`, so the journal
+    // loads it as existing while `is_empty()` is still true.
+    let mut db = funded_db().account_balance(AUTHORITY_A, U256::ZERO);
+    let tx = tx_with_auths(vec![auth(AUTHORITY_A, 1, 0)]);
+    let (res, usage) = transact(MegaSpecId::REX6, &mut db, &no_heavy_buckets(), tx);
+
+    assert!(res.result.is_success(), "got {:?}", res.result);
+    assert_eq!(
+        usage.state_growth, 0,
+        "an authority that already exists in state must not count as state growth",
+    );
+
+    // Contrast: the same authorization against an authority absent from state does grow it.
+    let mut absent_db = funded_db();
+    let absent_tx = tx_with_auths(vec![auth(AUTHORITY_A, 1, 0)]);
+    let (absent_res, absent_usage) =
+        transact(MegaSpecId::REX6, &mut absent_db, &no_heavy_buckets(), absent_tx);
+    assert!(absent_res.result.is_success(), "got {:?}", absent_res.result);
+    assert_eq!(
+        absent_usage.state_growth, 1,
+        "a net-new authority must count as exactly one unit of state growth",
     );
 }

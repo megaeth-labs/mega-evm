@@ -3,7 +3,7 @@
 use std::{collections::BTreeMap, path::PathBuf, str::FromStr};
 
 use alloy_network::Network;
-use alloy_primitives::{map::DefaultHashBuilder, Address, BlockNumber, Bytes, B256, U256};
+use alloy_primitives::{Address, BlockNumber, Bytes, B256, U256};
 use alloy_provider::Provider;
 use clap::Parser;
 use op_alloy_network::Optimism;
@@ -11,7 +11,7 @@ use op_alloy_network::Optimism;
 use mega_evm::revm::{
     database::{AlloyDB, CacheDB, EmptyDB, WrapDatabaseAsync},
     primitives::HashMap,
-    state::{Account, AccountInfo, Bytecode, EvmState, EvmStorageSlot},
+    state::{Account, AccountInfo, Bytecode, EvmState, EvmStorageSlot, TransactionId},
     Database, DatabaseRef,
 };
 use tracing::{debug, info, trace};
@@ -224,10 +224,8 @@ impl PreStateArgs {
                     EvmeError::InvalidInput(format!("Failed to parse prestate JSON: {}", e))
                 })?;
             trace!(loaded_prestate = ?loaded_prestate, "Prestate loaded from file");
-            let mut prestate = EvmState::with_capacity_and_hasher(
-                loaded_prestate.len(),
-                DefaultHashBuilder::default(),
-            );
+            let mut prestate =
+                EvmState::with_capacity_and_hasher(loaded_prestate.len(), Default::default());
             for (address, account_state) in loaded_prestate {
                 let account = account_state.into_account()?;
                 prestate.insert(address, account);
@@ -252,7 +250,7 @@ impl PreStateArgs {
                 .entry(address)
                 .or_default()
                 .storage
-                .insert(slot, EvmStorageSlot::new(value, 0));
+                .insert(slot, EvmStorageSlot::new(value, TransactionId::ZERO));
         }
 
         // Set balance for the sender if specified (overrides prestate)
@@ -438,7 +436,7 @@ impl AccountState {
             .storage
             .unwrap_or_default()
             .into_iter()
-            .map(|(slot, value)| (slot, EvmStorageSlot::new(value, 0)));
+            .map(|(slot, value)| (slot, EvmStorageSlot::new(value, TransactionId::ZERO)));
         Ok(Account::from(info).with_storage(storage))
     }
 }
@@ -540,11 +538,11 @@ where
 
     /// Set the storage for an account.
     pub fn set_account_storage(&mut self, address: Address, storage: HashMap<U256, U256>) {
-        self.prestate
-            .entry(address)
-            .or_default()
-            .storage
-            .extend(storage.into_iter().map(|(slot, value)| (slot, EvmStorageSlot::new(value, 0))));
+        self.prestate.entry(address).or_default().storage.extend(
+            storage
+                .into_iter()
+                .map(|(slot, value)| (slot, EvmStorageSlot::new(value, TransactionId::ZERO))),
+        );
     }
 
     /// Deploys system contracts based on the given spec.

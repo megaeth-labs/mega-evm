@@ -20,7 +20,9 @@ Block execution orchestration for MegaETH, including hardfork-to-spec resolution
 - System contract deployments are idempotent state patches, position-gated on the resolved spec.
 - Executor constructor asserts hardfork/spec coherence for non-test builds.
 - Block limiter state is cumulative and must be updated only on committed outcomes.
-- `pre_execution_changes` collects `Option<EvmState>` outcomes from each helper into a vector; `commit_system_call_outcomes` walks them and calls `system_caller.on_state(source, &state)` **before** `db.commit(state)` for every entry. The `on_state` hook feeds the stateless witness generator with the complete read/write set. Helpers must therefore return all accounts and slots they touched (including reads). See `crates/mega-evm/src/system/AGENTS.md` → `PRE-BLOCK STATE CHANGE CONTRACT` for the helper-side contract.
+- `pre_execution_changes` collects `Option<EvmState>` outcomes from each helper into a vector; `commit_system_call_outcomes` walks them and calls `db.commit(state)` for every entry. The state hook that feeds the stateless witness generator lives on the revm `State` database (`State::set_state_hook`) and fires from inside `DatabaseCommit::commit`, so committing is what records the outcome. Helpers must therefore return all accounts and slots they touched (including reads). See `crates/mega-evm/src/system/AGENTS.md` → `PRE-BLOCK STATE CHANGE CONTRACT` for the helper-side contract.
+- `MegaSystemCallOutcome.source` no longer reaches the hook (which sees only the state diff); it is retained for in-crate use.
+- Commit-time block-limit re-validation: `commit_tx_result` / `commit_transaction_outcome` re-run `BlockLimiter::pre_execution_check` and return `Err` without committing anything, because another transaction may have filled the block between execute and commit. The infallible `BlockExecutor::commit_transaction` cannot return that error, so it latches it into `pending_commit_error` and `finish` fails the block with it.
 
 ## INVARIANT MAP
 The structural invariants of the spec ladder and fork schedule, indexed by where each is enforced and when it fires.
@@ -59,7 +61,8 @@ CI:
 - One spec, two projections. `spec_id` is monotone (forks map 1:1 onto an ascending ladder; rollbacks are alias rungs like `MINI_REX_1`). Behavior (`is_enabled`) gates execution semantics: EVM behavior, block limits, transaction classification — it rolls back inside an alias window. Position (`reaches`) gates one-way chain setup: system-contract predeploys, pre-block rules, expected installed bytecode versions — retracting it during a rollback window would drop the Oracle predeploys' read-only witness entries that the on-state hook feeds to stateless proofs and the state-sync transition shard.
 - Do not express "a chain running spec N" as `with_all_activated().without(fork)`. Removing a middle rung leaves later forks active, so the resolved spec stays at the top of the ladder. Use `with_all_activated_through(MegaSpecId::N)`.
 - Do not hardcode gas-limit assumptions outside `BlockLimits` plumbing.
-- Do not commit outcomes without first firing `on_state`. The two-step `on_state` → `commit` ordering is the witness-recorder contract; swapping or skipping it corrupts stateless proofs.
+- Do not apply pre-block state changes by any route other than `db.commit`. The witness recorder hooks `commit`, so a change written around it is invisible to stateless proofs.
+- Do not `expect`/`unwrap` a commit-time limit re-validation. It fails on a legitimate parallel-execution race, not on a broken invariant.
 
 ## WHERE TO LOOK
 - Add a new hardfork activation condition: `hardfork.rs` and `MegaHardforkConfig` wiring.

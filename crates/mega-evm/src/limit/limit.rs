@@ -247,7 +247,7 @@ impl AdditionalLimit {
         trial.before_tx_start(tx);
 
         let initial_and_floor_gas = calculate_initial_tx_gas_for_tx(tx, spec.into_eth_spec());
-        trial.record_compute_gas(initial_and_floor_gas.initial_gas);
+        trial.record_compute_gas(initial_and_floor_gas.initial_regular_gas);
 
         trial.check_limit()
     }
@@ -632,7 +632,7 @@ impl AdditionalLimit {
             FrameInput::Call(inputs) => {
                 (inputs.gas_limit, Some(inputs.return_memory_offset.clone()))
             }
-            FrameInput::Create(inputs) => (inputs.gas_limit, None),
+            FrameInput::Create(inputs) => (inputs.gas_limit(), None),
             FrameInput::Empty => unreachable!(),
         };
         let output = self.has_exceeded_limit.revert_data();
@@ -778,8 +778,13 @@ impl AdditionalLimit {
         // frame-local budget. The detection may not have happened during execution, so
         // we call check_limit() here to ensure it's caught.
         // If frame-local, absorb it — clear the exceed flag and change to Revert so
-        // remaining gas returns to the caller. State changes are reverted by revm's
-        // Revert handling. This works at any depth including the top-level frame.
+        // remaining gas returns to the caller. This works at any depth including the
+        // top-level frame.
+        //
+        // The rewrite changes the reported result, not the journal. revm decides
+        // commit-or-revert from the frame's original instruction result, before the
+        // `FrameResult` ever reaches this hook, so a frame that ran to a successful exit is
+        // already committed and stays committed under the rewritten Revert.
         let limit_check = self.check_limit();
         if limit_check.exceeded_limit() && !duplicate_return_frame_result {
             if limit_check.is_frame_local() {
@@ -1087,13 +1092,13 @@ mod tests {
 
         // Latch the data-size dimension at its mutation site: intrinsic transaction data
         // (110-byte base + 200 bytes of calldata) exceeds the 100-byte limit.
-        let tx = MegaTransaction::new(
+        let tx = crate::MegaTransaction(op_revm::OpTransaction::new(
             TxEnvBuilder::new()
                 .caller(Address::ZERO)
                 .call(Address::ZERO)
                 .data(vec![0u8; 200].into())
                 .build_fill(),
-        );
+        ));
         limit.before_tx_start(&tx);
         assert_eq!(latched_kind(&limit), Some(LimitKind::DataSize));
 
@@ -1108,6 +1113,21 @@ mod tests {
 
         // The latched kind is preserved (not overwritten by the compute-gas check).
         assert_eq!(latched_kind(&limit), Some(LimitKind::DataSize));
+    }
+
+    #[test]
+    fn test_rex5_authority_creation_latches_state_growth_exceed() {
+        let mut limits = test_limits();
+        limits.tx_state_growth_limit = 1;
+        let mut limit = AdditionalLimit::new(MegaSpecId::REX5, limits);
+
+        limit.on_rex5_eip7702_authority_creations(2);
+
+        assert_eq!(
+            latched_kind(&limit),
+            Some(LimitKind::StateGrowth),
+            "authority creation accounting must latch its TX-level state-growth exceed",
+        );
     }
 
     /// SELFDESTRUCT's beneficiary usage is recorded *before* the inner instruction runs and
@@ -1144,10 +1164,96 @@ mod tests {
     #[should_panic(expected = "REX5")]
     #[cfg(debug_assertions)]
     fn test_intrinsic_check_for_tx_requires_rex5_spec() {
-        let tx = MegaTransaction::new(
+        let tx = crate::MegaTransaction(op_revm::OpTransaction::new(
             TxEnvBuilder::new().caller(Address::ZERO).call(Address::ZERO).build_fill(),
-        );
+        ));
         // REX4 < REX5: the precondition assert must fire.
         let _ = AdditionalLimit::intrinsic_check_for_tx(MegaSpecId::REX4, &tx, test_limits());
+    }
+
+    /// Builds a successful `FrameResult::Call` carrying `gas_limit` gas.
+    fn stopped_call_result(gas_limit: u64) -> FrameResult {
+        FrameResult::Call(CallOutcome::new(
+            InterpreterResult::new(InstructionResult::Stop, Bytes::new(), Gas::new(gas_limit)),
+            0..0,
+        ))
+    }
+
+    /// A frame that returns while a TX-level limit is latched must have its result rewritten to
+    /// the exceeding instruction result, otherwise a transaction that blew its budget would be
+    /// reported as a plain success.
+    ///
+    /// The `duplicate_return_frame_result` guard must suppress the rewrite only for the *second*
+    /// top-level invocation, which is distinguished by an already-empty tracker frame stack.
+    /// Here the frame is still on the stack, so the rewrite is required even with
+    /// `LAST_FRAME == true`.
+    #[test]
+    fn test_before_frame_return_result_marks_latched_tx_level_exceed() {
+        let mut limits = test_limits();
+        limits.tx_data_size_limit = 100;
+        // MINI_REX is pre-Rex4, so the exceed is TX-level (not frame-local) and must halt.
+        let mut limit = AdditionalLimit::new(MegaSpecId::MINI_REX, limits);
+        limit.push_empty_frame();
+        assert!(!limit.on_log(4, 1_000), "an oversized log must latch a data-size exceed");
+
+        let mut result = stopped_call_result(1_000);
+        limit.before_frame_return_result::<true>(&mut result);
+        assert_eq!(
+            result.instruction_result(),
+            AdditionalLimit::EXCEEDING_LIMIT_INSTRUCTION_RESULT,
+            "a returning frame with a latched TX-level exceed must be marked as exceeding",
+        );
+    }
+
+    /// The duplicate top-level invocation (frame stack already emptied by the first one) must
+    /// leave the result untouched — it is the same result object the first call already handled.
+    #[test]
+    fn test_before_frame_return_result_skips_duplicate_top_level_call() {
+        let mut limits = test_limits();
+        limits.tx_data_size_limit = 100;
+        let mut limit = AdditionalLimit::new(MegaSpecId::MINI_REX, limits);
+        limit.push_empty_frame();
+        assert!(!limit.on_log(4, 1_000));
+
+        let mut result = stopped_call_result(1_000);
+        // First call pops the frame and marks the result.
+        limit.before_frame_return_result::<true>(&mut result);
+        // Reset the result to observe whether the duplicate call would mark it again.
+        let mut duplicate = stopped_call_result(1_000);
+        limit.before_frame_return_result::<true>(&mut duplicate);
+        assert_eq!(
+            duplicate.instruction_result(),
+            InstructionResult::Stop,
+            "the duplicate top-level invocation must not re-handle the result",
+        );
+    }
+
+    /// `mark_frame_result_as_exceeding_limit` rewrites both frame-result variants in place.
+    #[test]
+    fn test_mark_frame_result_as_exceeding_limit_rewrites_both_variants() {
+        let output = Bytes::from_static(b"over");
+
+        let mut call = stopped_call_result(50);
+        mark_frame_result_as_exceeding_limit(
+            &mut call,
+            InstructionResult::OutOfGas,
+            output.clone(),
+        );
+        let FrameResult::Call(call_outcome) = &call else { panic!("call frame result") };
+        assert_eq!(call_outcome.result.result, InstructionResult::OutOfGas);
+        assert_eq!(call_outcome.result.output, output);
+
+        let mut create = FrameResult::Create(CreateOutcome::new(
+            InterpreterResult::new(InstructionResult::Stop, Bytes::new(), Gas::new(50)),
+            None,
+        ));
+        mark_frame_result_as_exceeding_limit(
+            &mut create,
+            InstructionResult::OutOfGas,
+            output.clone(),
+        );
+        let FrameResult::Create(create_outcome) = &create else { panic!("create frame result") };
+        assert_eq!(create_outcome.result.result, InstructionResult::OutOfGas);
+        assert_eq!(create_outcome.result.output, output);
     }
 }

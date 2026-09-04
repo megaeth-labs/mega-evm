@@ -20,8 +20,8 @@ use mega_evm::{
     revm::context::result::ExecutionResult,
     sandbox::{calculate_keyless_deploy_address, decode_error_result, KeylessDeployError},
     test_utils::MemoryDatabase,
-    IKeylessDeploy, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction, SaltEnv,
-    TestExternalEnvs, KEYLESS_DEPLOY_ADDRESS, MIN_BUCKET_SIZE,
+    IKeylessDeploy, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
+    MegaTransactionNew as _, SaltEnv, TestExternalEnvs, KEYLESS_DEPLOY_ADDRESS, MIN_BUCKET_SIZE,
 };
 use revm::{
     context::{
@@ -270,6 +270,31 @@ fn test_rex4_unfunded_signer_still_rejected_by_balance_precheck() {
     );
 }
 
+/// A pre-Rex5 sandbox rejection has no reserved sandbox gas to refund.
+/// The fixed dispatch overhead therefore remains charged even when validation rejects the signer.
+#[test]
+fn test_rex4_sandbox_rejection_does_not_refund_unreserved_gas() {
+    let (keyless_tx_bytes, _) =
+        build_keyless_tx_with_init_code(Bytes::from_static(STOP_RUNTIME_INIT_CODE));
+    let mut db = MemoryDatabase::default();
+    db.set_account_balance(RELAYER, U256::from(1_000_000_000u64));
+
+    let result = run_keyless_outer(
+        MegaSpecId::REX4,
+        &mut db,
+        TestExternalEnvs::<std::convert::Infallible>::new(),
+        keyless_tx_bytes,
+        LARGE_GAS_LIMIT_OVERRIDE,
+    );
+
+    assert!(matches!(result, ExecutionResult::Revert { .. }), "unfunded signer must reject");
+    assert!(
+        result.tx_gas_used() >= mega_evm::constants::rex2::KEYLESS_DEPLOY_OVERHEAD_GAS,
+        "sandbox rejection must retain the fixed dispatch charge; got {}",
+        result.tx_gas_used(),
+    );
+}
+
 // ============================================================================
 // 3. value > 0 still requires the signer to fund the transfer (REX5)
 // ============================================================================
@@ -329,6 +354,51 @@ fn test_rex5_value_positive_with_insufficient_signer_balance_rejected() {
     assert!(!has_code(&mut db, calculate_keyless_deploy_address(signer)));
 }
 
+/// Rex5 reserves the sandbox override before execution and must refund it when the
+/// sandbox balance precheck rejects without producing a frame.
+#[test]
+fn test_rex5_sandbox_rejection_refunds_reserved_gas() {
+    let tx = TxLegacy {
+        nonce: 0,
+        gas_price: SIGNED_GAS_PRICE,
+        gas_limit: SIGNED_GAS_LIMIT,
+        to: TxKind::Create,
+        value: U256::from(1u64),
+        input: Bytes::from_static(STOP_RUNTIME_INIT_CODE),
+        chain_id: None,
+    };
+    let signature_word = U256::from_be_bytes(hex!(
+        "2222222222222222222222222222222222222222222222222222222222222222"
+    ));
+    let signed = Signed::new_unchecked(
+        tx,
+        Signature::new(signature_word, signature_word, false),
+        B256::ZERO,
+    );
+    let mut encoded = Vec::new();
+    signed.rlp_encode(&mut encoded);
+
+    let mut db = MemoryDatabase::default();
+    db.set_account_balance(RELAYER, U256::from(1_000_000_000u64));
+    let result = run_keyless_outer(
+        MegaSpecId::REX5,
+        &mut db,
+        TestExternalEnvs::<std::convert::Infallible>::new(),
+        encoded.into(),
+        LARGE_GAS_LIMIT_OVERRIDE,
+    );
+
+    assert!(
+        matches!(result, ExecutionResult::Revert { .. }),
+        "unfunded value transfer must reject"
+    );
+    assert!(
+        result.tx_gas_used() < OUTER_GAS_LIMIT,
+        "rejected sandbox must refund its reservation instead of exhausting outer gas; got {}",
+        result.tx_gas_used(),
+    );
+}
+
 /// REX5: triggering the sandbox-side initcode size check end-to-end with the production
 /// `cfg.max_initcode_size = MAX_INITCODE_SIZE` (~536 KiB) would require a calldata payload
 /// that trips `GasFloorMoreThanGasLimit` at the outer-tx validation layer first. To exercise
@@ -382,6 +452,29 @@ fn test_rex5_oversized_initcode_rejected_with_init_code_too_large() {
     assert!(!has_code(&mut db, deploy_address), "no deployment on InitCodeTooLarge");
 }
 
+/// Rex4 does not apply the Rex5 interceptor-level init-code-size rejection.
+#[test]
+fn test_rex4_oversized_initcode_uses_sandbox_validation_error() {
+    let (keyless_tx_bytes, signer) =
+        build_keyless_tx_with_init_code(Bytes::from_static(&[0x60, 0x00]));
+    let mut db = MemoryDatabase::default();
+    db.set_account_balance(RELAYER, U256::MAX);
+    db.set_account_balance(signer, U256::MAX);
+
+    let result = run_keyless_outer_with(
+        MegaSpecId::REX4,
+        &mut db,
+        TestExternalEnvs::<std::convert::Infallible>::new(),
+        keyless_tx_bytes,
+        LARGE_GAS_LIMIT_OVERRIDE,
+        |ctx| ctx.modify_cfg(|cfg| cfg.limit_contract_initcode_size = Some(1)),
+    );
+    assert!(
+        matches!(result, ExecutionResult::Success { .. }),
+        "Rex4 must not use the Rex5 interceptor-level rejection; got {result:?}"
+    );
+}
+
 // ============================================================================
 // 5. Caller materialization is charged on first deploy, not on retry
 // ============================================================================
@@ -426,7 +519,7 @@ fn test_rex5_caller_materialization_first_deploy_charged_retry_not_recharged() {
     assert_eq!(first_signer_after.nonce, 1, "first call must bump signer nonce");
 
     let first_gas_used = match &first {
-        ExecutionResult::Success { gas_used, .. } => *gas_used,
+        ExecutionResult::Success { gas, .. } => gas.tx_gas_used(),
         other => panic!("first call must return success-style; got {other:?}"),
     };
 
@@ -446,7 +539,7 @@ fn test_rex5_caller_materialization_first_deploy_charged_retry_not_recharged() {
     assert_eq!(second_signer_after.nonce, 1, "retry: signer nonce must remain 1 (already used)");
 
     let second_gas_used = match &second {
-        ExecutionResult::Success { gas_used, .. } => *gas_used,
+        ExecutionResult::Success { gas, .. } => gas.tx_gas_used(),
         other => panic!("second call must return success-style; got {other:?}"),
     };
 
@@ -553,7 +646,7 @@ fn test_rex5_runtime_halt_returns_execution_halted_with_replay_barrier_consumed(
     // success-with-errorData on inner failure); a `Revert(InvalidTransaction)` here
     // would mean the runtime halt was misclassified as a validation rejection.
     let (gas_used, output) = match &result {
-        ExecutionResult::Success { gas_used, output, .. } => (*gas_used, output.data().clone()),
+        ExecutionResult::Success { gas, output, .. } => (gas.tx_gas_used(), output.data().clone()),
         other => panic!("runtime halt must surface as outer Success; got {other:?}"),
     };
     let decoded = IKeylessDeploy::keylessDeployCall::abi_decode_returns(&output)
@@ -874,7 +967,7 @@ fn test_rex5_pre_sandbox_materialization_charged_even_on_sandbox_validate_reject
             keyless_tx_bytes.clone(),
             low_gas_limit,
         );
-        let gas_used = result.gas_used();
+        let gas_used = result.tx_gas_used();
         (result, gas_used)
     };
 

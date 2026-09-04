@@ -26,9 +26,8 @@ use mega_system_contracts::sequencer_registry::storage_slots::{
 };
 use revm::{
     context_interface::result::ResultAndState,
-    database::State,
     primitives::KECCAK_EMPTY,
-    state::{Account, Bytecode, EvmState, EvmStorageSlot},
+    state::{Account, Bytecode, EvmState, EvmStorageSlot, TransactionId},
     Database as RevmDatabase,
 };
 
@@ -138,7 +137,7 @@ fn address_to_storage_value(address: Address) -> U256 {
 
 /// Reads a committed `SequencerRegistry` storage slot.
 fn read_registry_storage<DB: Database>(
-    db: &mut State<DB>,
+    db: &mut DB,
     slot: U256,
 ) -> Result<U256, BlockExecutionError> {
     RevmDatabase::storage(db, SEQUENCER_REGISTRY_ADDRESS, slot).map_err(BlockExecutionError::other)
@@ -147,7 +146,7 @@ fn read_registry_storage<DB: Database>(
 /// Returns whether a pending role change is due and records every storage read into the witness
 /// account.
 fn is_role_due<DB: Database>(
-    db: &mut State<DB>,
+    db: &mut DB,
     account: &mut Account,
     pending_slot: U256,
     activation_slot: U256,
@@ -155,13 +154,15 @@ fn is_role_due<DB: Database>(
 ) -> Result<bool, BlockExecutionError> {
     let pending = read_registry_storage(db, pending_slot)?;
     // Read-only witness entry: record the slot access without marking it as changed.
-    account.storage.insert(pending_slot, EvmStorageSlot::new(pending, 0));
+    account.storage.insert(pending_slot, EvmStorageSlot::new(pending, TransactionId::ZERO));
     if pending.is_zero() {
         return Ok(false);
     }
 
     let activation_block = read_registry_storage(db, activation_slot)?;
-    account.storage.insert(activation_slot, EvmStorageSlot::new(activation_block, 0));
+    account
+        .storage
+        .insert(activation_slot, EvmStorageSlot::new(activation_block, TransactionId::ZERO));
 
     Ok(block_number >= activation_block.saturating_to::<u64>())
 }
@@ -189,7 +190,7 @@ pub fn transact_deploy_sequencer_registry<DB: Database>(
     hardforks: impl MegaHardforks,
     block_timestamp: u64,
     current_block_number: u64,
-    db: &mut State<DB>,
+    db: &mut DB,
     config: &SequencerRegistryConfig,
 ) -> Result<Option<EvmState>, BlockExecutionError> {
     let spec = hardforks.spec_id(block_timestamp);
@@ -208,7 +209,7 @@ pub(crate) fn transact_deploy_sequencer_registry_for<DB: Database>(
     spec: crate::MegaSpecId,
     rex6_config: Option<&SequencerRegistryRex6Config>,
     current_block_number: u64,
-    db: &mut State<DB>,
+    db: &mut DB,
     config: &SequencerRegistryConfig,
 ) -> Result<Option<EvmState>, BlockExecutionError> {
     // Gate and bytecode selection follow the scheduled spec, not per-fork registration:
@@ -252,9 +253,8 @@ pub(crate) fn transact_deploy_sequencer_registry_for<DB: Database>(
     // the Rex6 v1.0.0 → v2.0.0 in-place upgrade. Both are specific to the registry
     // (which carries change history); the generic deploy below otherwise
     // overwrites bytecode in place.
-    let acc =
-        db.load_cache_account(SEQUENCER_REGISTRY_ADDRESS).map_err(BlockExecutionError::other)?;
-    if let Some(account_info) = acc.account_info() {
+    let existing_info = db.basic(SEQUENCER_REGISTRY_ADDRESS).map_err(BlockExecutionError::other)?;
+    if let Some(account_info) = existing_info {
         if rex6 && account_info.code_hash == SEQUENCER_REGISTRY_CODE_HASH {
             // Rex6 boundary: in-place, storage-preserving v1.0.0 → v2.0.0 upgrade. The account
             // is intentionally NOT marked created (that would clear live roles, pending changes
@@ -270,9 +270,10 @@ pub(crate) fn transact_deploy_sequencer_registry_for<DB: Database>(
 
             let original = read_registry_storage(db, MIN_ROTATION_DELAY)?;
             let delay = min_rotation_delay.expect("Rex6 upgrade path implies Rex6 params");
-            revm_acc
-                .storage
-                .insert(MIN_ROTATION_DELAY, EvmStorageSlot::new_changed(original, delay, 0));
+            revm_acc.storage.insert(
+                MIN_ROTATION_DELAY,
+                EvmStorageSlot::new_changed(original, delay, TransactionId::ZERO),
+            );
 
             return Ok(Some(EvmState::from_iter([(SEQUENCER_REGISTRY_ADDRESS, revm_acc)])));
         }
@@ -323,24 +324,24 @@ pub(crate) fn transact_deploy_sequencer_registry_for<DB: Database>(
 /// the pre-block `applyPendingChanges()` system call.
 ///
 /// The returned `EvmState` captures all reads (account + storage slots) as a witness record.
-/// The executor MUST push this into outcomes regardless of `due` so that the reads enter
-/// the stateless witness via `system_caller.on_state()`.
+/// The executor MUST push this into outcomes regardless of `due` so that the reads enter the
+/// stateless witness: the witness-recording state hook lives on the revm `State` database and
+/// fires from inside `DatabaseCommit::commit`, so an outcome that is never committed is never
+/// recorded.
 pub(crate) fn is_apply_pending_changes_due<DB: Database>(
-    db: &mut State<DB>,
+    db: &mut DB,
     block_number: u64,
 ) -> Result<(bool, EvmState), BlockExecutionError> {
-    let acc =
-        db.load_cache_account(SEQUENCER_REGISTRY_ADDRESS).map_err(BlockExecutionError::other)?;
-
-    let Some(info) = acc.account_info() else {
+    let Some(info) = db.basic(SEQUENCER_REGISTRY_ADDRESS).map_err(BlockExecutionError::other)?
+    else {
         // Account does not exist — record a not-existing account entry for the witness.
-        let account = Account::new_not_existing(0);
+        let account = Account::new_not_existing(TransactionId::ZERO);
         let state = EvmState::from_iter([(SEQUENCER_REGISTRY_ADDRESS, account)]);
         return Ok((false, state));
     };
 
     // Account exists — build a read-only account entry to record all slot reads.
-    let mut account = Account { info, ..Default::default() };
+    let mut account = Account::from(info);
 
     let system_address_due = is_role_due(
         db,
@@ -417,11 +418,12 @@ where
 /// which a rollback does not change.
 ///
 /// The optional `EvmState` captures account + slot reads as a witness record.
-/// The executor MUST commit this via `system_caller.on_state()` + `db.commit()`.
+/// The executor MUST commit this via `db.commit()`: the commit is what fires the
+/// witness-recording state hook installed on the revm `State` database.
 pub fn resolve_system_address<DB: Database>(
     hardforks: impl MegaHardforks,
     spec: crate::MegaSpecId,
-    db: &mut State<DB>,
+    db: &mut DB,
 ) -> Result<(Address, Option<EvmState>), BlockExecutionError> {
     // One spec, two projections: `is_enabled` (behavior) gates whether dynamic resolution
     // applies at all; `reaches` (position) selects the installed bytecode version below.
@@ -436,11 +438,9 @@ pub fn resolve_system_address<DB: Database>(
         }
     })?;
 
-    let acc =
-        db.load_cache_account(SEQUENCER_REGISTRY_ADDRESS).map_err(BlockExecutionError::other)?;
-
     // Unreachable: deploy always runs and commits before resolve.
-    let Some(info) = acc.account_info() else {
+    let Some(info) = db.basic(SEQUENCER_REGISTRY_ADDRESS).map_err(BlockExecutionError::other)?
+    else {
         return Err(BlockValidationError::BlockHashContractCall {
             message: "Rex5 active but SequencerRegistry account does not exist".into(),
         }
@@ -467,10 +467,10 @@ pub fn resolve_system_address<DB: Database>(
     }
 
     // Build read-only witness: account entry + slot read.
-    let mut account = Account { info, ..Default::default() };
+    let mut account = Account::from(info);
     let value = read_registry_storage(db, CURRENT_SYSTEM_ADDRESS)?;
     // Read-only witness entry: record the slot access without marking it as changed.
-    account.storage.insert(CURRENT_SYSTEM_ADDRESS, EvmStorageSlot::new(value, 0));
+    account.storage.insert(CURRENT_SYSTEM_ADDRESS, EvmStorageSlot::new(value, TransactionId::ZERO));
 
     // Unreachable: deploy seeds a non-zero initial system address.
     if value.is_zero() {
@@ -492,7 +492,7 @@ mod tests {
     use mega_system_contracts::sequencer_registry::storage_slots::PENDING_ADMIN;
     use revm::{
         context::BlockEnv,
-        database::InMemoryDB,
+        database::{InMemoryDB, State},
         state::{AccountInfo, Bytecode},
     };
 

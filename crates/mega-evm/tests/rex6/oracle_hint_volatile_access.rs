@@ -14,8 +14,9 @@ use alloy_primitives::{address, Address, Bytes, B256, U256};
 use alloy_sol_types::{sol, SolCall};
 use mega_evm::{
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    IMegaAccessControl, MegaContext, MegaEvm, MegaSpecId, MegaTransaction, RecordedHint,
-    TestExternalEnvs, ACCESS_CONTROL_ADDRESS, ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE_REX5,
+    IMegaAccessControl, MegaContext, MegaEvm, MegaSpecId, MegaTransaction, MegaTransactionNew as _,
+    RecordedHint, TestExternalEnvs, ACCESS_CONTROL_ADDRESS, ORACLE_CONTRACT_ADDRESS,
+    ORACLE_CONTRACT_CODE_REX5,
 };
 use revm::{
     bytecode::opcode::*,

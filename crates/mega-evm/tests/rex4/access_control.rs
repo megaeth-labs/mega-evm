@@ -9,9 +9,10 @@ use std::convert::Infallible;
 use alloy_primitives::{address, Address, Bytes, U256};
 use alloy_sol_types::{SolCall, SolError};
 use mega_evm::{
+    alloy_op_evm::OpTxError,
     test_utils::{BytecodeBuilder, MemoryDatabase},
     IMegaAccessControl, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
-    MegaTransactionError, TestExternalEnvs, VolatileDataAccessType, ACCESS_CONTROL_ADDRESS,
+    MegaTransactionNew as _, TestExternalEnvs, VolatileDataAccessType, ACCESS_CONTROL_ADDRESS,
     ORACLE_CONTRACT_ADDRESS,
 };
 use revm::{
@@ -72,7 +73,7 @@ fn decode_volatile_data_access_disabled(
 fn transact(
     db: &mut MemoryDatabase,
     tx: TxEnv,
-) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, MegaTransactionError>> {
+) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, OpTxError>> {
     let mut context = MegaContext::new(db, MegaSpecId::REX4);
     context.modify_chain(|chain| {
         chain.operator_fee_scalar = Some(U256::from(0));
@@ -452,7 +453,7 @@ fn test_reverted_inner_call_returns_gas() {
 
     // The gas used should be relatively small since child reverted immediately
     // and gas was returned to parent
-    let gas_used = result.result.gas_used();
+    let gas_used = result.result.tx_gas_used();
     assert!(gas_used < 5_000_000, "Gas used ({gas_used}) should be relatively small");
 }
 
@@ -1422,7 +1423,7 @@ fn append_callcode(builder: BytecodeBuilder, target: Address, gas: u64) -> Bytec
 fn transact_with_oracle(
     db: &mut MemoryDatabase,
     tx: TxEnv,
-) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, MegaTransactionError>> {
+) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, OpTxError>> {
     let external_envs = TestExternalEnvs::<Infallible>::new()
         .with_oracle_storage(U256::from(0), U256::from(0x1234));
     let mut context =

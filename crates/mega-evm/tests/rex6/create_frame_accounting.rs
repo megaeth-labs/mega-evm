@@ -12,7 +12,7 @@ use alloy_primitives::{Address, Bytes, U256};
 use mega_evm::{
     test_utils::{ErrorInjectingDatabase, MemoryDatabase},
     EmptyExternalEnv, EvmTxRuntimeLimits, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
-    MegaTransaction, ACCOUNT_INFO_WRITE_SIZE,
+    MegaTransaction, MegaTransactionNew as _, ACCOUNT_INFO_WRITE_SIZE,
 };
 use revm::{
     context::{
@@ -255,12 +255,12 @@ fn test_rex6_create_oog_over_limit_matches_rex5_frozen() {
 
     // Same result class → same returned gas; no REX6 burn-vs-refund divergence on this path.
     assert_eq!(
-        r6.result.gas_used(),
-        r5.result.gas_used(),
+        r6.result.tx_gas_used(),
+        r5.result.tx_gas_used(),
         "REX6 must return the absorbed CREATE's gas identically to REX5 \
          (rex5_gas_used={}, rex6_gas_used={})",
-        r5.result.gas_used(),
-        r6.result.gas_used(),
+        r5.result.tx_gas_used(),
+        r6.result.tx_gas_used(),
     );
 }
 

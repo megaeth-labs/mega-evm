@@ -15,7 +15,7 @@ use mega_evm::{
     op_alloy_consensus::{OpTxEnvelope, TxDeposit},
     op_revm::transaction::deposit::DepositTransactionParts,
     revm::{context::tx::TxEnv, primitives::TxKind},
-    Either, MegaTransaction, MegaTxEnvelope, MegaTxType,
+    Either, MegaTransaction, MegaTransactionNew as _, MegaTxEnvelope, MegaTxType,
 };
 use tracing::{debug, trace};
 
@@ -397,14 +397,14 @@ impl DecodedRawTx {
         });
 
         let decoded_chain_id = envelope.chain_id();
-        let (gas_price, gas_priority_fee) = match envelope {
+        let (gas_price, gas_priority_fee) = match &envelope {
             OpTxEnvelope::Legacy(_) | OpTxEnvelope::Eip2930(_) => {
                 (envelope.gas_price().unwrap_or(0), None)
             }
             OpTxEnvelope::Eip1559(_) | OpTxEnvelope::Eip7702(_) => {
                 (envelope.max_fee_per_gas(), envelope.max_priority_fee_per_gas())
             }
-            OpTxEnvelope::Deposit(_) => (0, None),
+            OpTxEnvelope::Deposit(_) | OpTxEnvelope::PostExec(_) => (0, None),
         };
 
         let authorization_list = envelope
@@ -605,5 +605,6 @@ fn create_fake_envelope(tx_env: &TxEnv) -> Result<MegaTxEnvelope> {
             };
             Ok(MegaTxEnvelope::Deposit(Sealed::new_unchecked(tx, B256::ZERO)))
         }
+        MegaTxType::PostExec => Err(EvmeError::UnsupportedTxType(tx_env.tx_type)),
     }
 }

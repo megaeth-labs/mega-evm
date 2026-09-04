@@ -295,4 +295,10 @@ mod tests {
         tracker.record_account_update();
         assert_eq!(tracker.tx_usage(), 1, "record_account_update must add exactly 1 KV update");
     }
+
+    /// The `TxRuntimeLimit::tx_limit` accessor must report the configured TX-level budget.
+    #[test]
+    fn test_tx_limit_reports_configured_limit() {
+        assert_eq!(KVUpdateTracker::new(MegaSpecId::MINI_REX, 4_321).tx_limit(), 4_321);
+    }
 }

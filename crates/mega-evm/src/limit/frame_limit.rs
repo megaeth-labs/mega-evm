@@ -632,6 +632,43 @@ mod tests {
         assert_eq!(t.net_usage(), 0);
     }
 
+    /// Pre-Rex4 specs do not enforce per-frame budgets, so every `CallFrameInfo` frame —
+    /// top-level and nested alike — must be pushed with an unbounded (`u64::MAX`) limit.
+    /// This is what makes the pre-Rex4 branches of `DataSizeTracker` / `KVUpdateTracker`
+    /// (`check_limit`'s frame check and `current_call_remaining`'s frame cap) unreachable
+    /// rather than merely unused: a bounded pre-Rex4 frame would silently re-introduce
+    /// per-frame enforcement the moment either of those gates is widened.
+    #[test]
+    fn test_pre_rex4_call_frames_are_pushed_unbounded() {
+        let mut t = FrameLimitTracker::<CallFrameInfo>::new(MegaSpecId::REX3, 100);
+        t.push_dummy_frame();
+        assert_eq!(
+            t.current_frame_remaining(),
+            u64::MAX,
+            "pre-Rex4 top-level frame must be unbounded"
+        );
+        t.add_frame_discardable(10);
+        t.push_dummy_frame();
+        assert_eq!(
+            t.current_frame_remaining(),
+            u64::MAX,
+            "pre-Rex4 nested frame must be unbounded"
+        );
+    }
+
+    /// Rex4+ counterpart of the above: frames carry a real budget — `tx_entry.remaining()`
+    /// at the top level, parent's remaining × 98/100 when nested.
+    #[test]
+    fn test_rex4_call_frames_carry_per_frame_budget() {
+        let mut t = FrameLimitTracker::<CallFrameInfo>::new(MegaSpecId::REX4, 100);
+        t.push_dummy_frame();
+        assert_eq!(t.current_frame_remaining(), 100, "top-level budget is the TX remaining");
+        t.add_frame_discardable(10);
+        t.push_dummy_frame();
+        // Parent remaining is 90; the child gets 90 * 98 / 100 = 88.
+        assert_eq!(t.current_frame_remaining(), 88, "nested budget is parent remaining × 98/100");
+    }
+
     /// Verifies that a refund exceeding the cumulative usage clamps `net_usage()` to 0,
     /// matching the saturating semantics of the uncached reference. This guards against
     /// signed-style accounting bugs where refunds outrun used and an unsigned subtraction

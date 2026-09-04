@@ -19,13 +19,14 @@
 //! produce byte-identical receipts. The `test_rex4_kzg_*` test below is a
 //! stable-spec replay-preservation guard.
 
-use alloy_primitives::{address, Address, Bytes, U256};
+use alloy_eips::eip2930::{AccessList, AccessListItem};
+use alloy_primitives::{address, Address, Bytes, B256, U256};
 use core::cell::RefCell;
 use mega_evm::{
     kzg_point_evaluation,
     test_utils::{BytecodeBuilder, MemoryDatabase},
     AdditionalLimit, EvmTxRuntimeLimits, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
-    MegaTransaction,
+    MegaTransaction, MegaTransactionNew as _,
 };
 use revm::{
     bytecode::opcode::*,
@@ -168,6 +169,45 @@ fn kzg_wrapper_bytecode(input: &[u8], forwarded_gas: u64) -> Bytes {
         .push_address(KZG)
         .push_number(forwarded_gas) // gas
         .append(CALL)
+        .append(POP)
+        .stop()
+        .build()
+}
+
+/// Same wrapper as [`kzg_wrapper_bytecode`] but reaching the precompile via
+/// DELEGATECALL, so the frame's `target_address` stays the wrapper contract while
+/// its `bytecode_address` is the KZG precompile.
+fn kzg_delegatecall_wrapper_bytecode(input: &[u8], forwarded_gas: u64) -> Bytes {
+    let args_size = input.len() as u64;
+    BytecodeBuilder::default()
+        .mstore(0, input)
+        .push_number(0_u64) // retSize
+        .push_number(args_size) // retOffset (place return data after the input)
+        .push_number(args_size) // argsSize
+        .push_number(0_u64) // argsOffset
+        .push_address(KZG)
+        .push_number(forwarded_gas) // gas
+        .append(DELEGATECALL)
+        .append(POP)
+        .stop()
+        .build()
+}
+
+/// Same wrapper as [`kzg_wrapper_bytecode`] but reaching the precompile via
+/// CALLCODE: value-carrying like CALL, and like DELEGATECALL the frame's
+/// `target_address` stays the wrapper contract.
+fn kzg_callcode_wrapper_bytecode(input: &[u8], forwarded_gas: u64) -> Bytes {
+    let args_size = input.len() as u64;
+    BytecodeBuilder::default()
+        .mstore(0, input)
+        .push_number(0_u64) // retSize
+        .push_number(args_size) // retOffset (place return data after the input)
+        .push_number(args_size) // argsSize
+        .push_number(0_u64) // argsOffset
+        .push_number(0_u64) // value
+        .push_address(KZG)
+        .push_number(forwarded_gas) // gas
+        .append(CALLCODE)
         .append(POP)
         .stop()
         .build()
@@ -395,6 +435,86 @@ fn test_rex5_kzg_invalid_input_length_records_exact_gas_cost() {
         diff, KZG_GAS_COST,
         "REX5 must record exactly KZG_GAS_COST ({KZG_GAS_COST}) more compute gas than REX4 \
          on a wrong-length KZG call (REX5={compute_gas_rex5}, REX4={compute_gas_rex4})."
+    );
+}
+
+/// Differential helper for the non-CALL schemes: run `code` under REX4 and REX5
+/// and return `(compute_gas_rex4, compute_gas_rex5)`. Both outer txs must succeed
+/// (the wrapper swallows the precompile failure).
+fn run_wrapper_code_under_both_specs(code: Bytes, access_list: AccessList) -> (u64, u64) {
+    let mut db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(1_000_000_000u64))
+        .account_code(CONTRACT, code);
+
+    let tx = TxEnvBuilder::default()
+        .caller(CALLER)
+        .call(CONTRACT)
+        .gas_limit(1_000_000)
+        .access_list(access_list)
+        .build_fill();
+
+    let (result_rex5, compute_gas_rex5) = transact(MegaSpecId::REX5, &mut db, tx.clone());
+    assert!(
+        result_rex5.result.is_success(),
+        "REX5 outer tx should succeed (KZG failure caught by the wrapper)"
+    );
+
+    let (result_rex4, compute_gas_rex4) = transact(MegaSpecId::REX4, &mut db, tx);
+    assert!(
+        result_rex4.result.is_success(),
+        "REX4 outer tx should succeed (KZG failure caught by the wrapper)"
+    );
+
+    (compute_gas_rex4, compute_gas_rex5)
+}
+
+/// The KZG fixed-cost arm keys on `bytecode_address` — the address revm dispatches
+/// precompiles by — not `target_address`. Under DELEGATECALL the two differ (the
+/// target stays the wrapper contract), and the arm must still fire: REX5 records
+/// exactly `KZG_GAS_COST`, not the error-path `limit()` fallback.
+#[test]
+fn test_rex5_kzg_delegatecall_records_exact_gas_cost() {
+    let forwarded_gas: u64 = 500_000;
+    let (compute_gas_rex4, compute_gas_rex5) = run_wrapper_code_under_both_specs(
+        kzg_delegatecall_wrapper_bytecode(&invalid_proof_kzg_input(), forwarded_gas),
+        AccessList::default(),
+    );
+
+    let diff = compute_gas_rex5 - compute_gas_rex4;
+    assert_eq!(
+        diff, KZG_GAS_COST,
+        "REX5 must record exactly KZG_GAS_COST ({KZG_GAS_COST}) more compute gas than REX4 \
+         on a failed DELEGATECALL to the KZG precompile (REX5={compute_gas_rex5}, \
+         REX4={compute_gas_rex4}). A diff near the forwarded gas means the fixed-cost arm \
+         missed because dispatch keyed on `target_address` instead of `bytecode_address`."
+    );
+}
+
+/// CALLCODE twin of [`test_rex5_kzg_delegatecall_records_exact_gas_cost`]: the
+/// other scheme where `target_address` and `bytecode_address` diverge.
+#[test]
+fn test_rex5_kzg_callcode_records_exact_gas_cost() {
+    let forwarded_gas: u64 = 500_000;
+    // The KZG address is access-listed WITH a storage key so it is loaded warm on
+    // both specs. Without it the differential is polluted by an unrelated arc:
+    // REX4's CALLCODE wrapper pre-inspects the call target (materializing the
+    // precompile's entry cold, +2,500), while REX5's inspects the executing
+    // account, leaving the precompile to load preload-warm — a 2,500 REX4-only
+    // surcharge that is not what this test pins.
+    let warm_kzg =
+        AccessList(vec![AccessListItem { address: KZG, storage_keys: vec![B256::ZERO] }]);
+    let (compute_gas_rex4, compute_gas_rex5) = run_wrapper_code_under_both_specs(
+        kzg_callcode_wrapper_bytecode(&invalid_proof_kzg_input(), forwarded_gas),
+        warm_kzg,
+    );
+
+    let diff = compute_gas_rex5 - compute_gas_rex4;
+    assert_eq!(
+        diff, KZG_GAS_COST,
+        "REX5 must record exactly KZG_GAS_COST ({KZG_GAS_COST}) more compute gas than REX4 \
+         on a failed CALLCODE to the KZG precompile (REX5={compute_gas_rex5}, \
+         REX4={compute_gas_rex4}). A diff near the forwarded gas means the fixed-cost arm \
+         missed because dispatch keyed on `target_address` instead of `bytecode_address`."
     );
 }
 

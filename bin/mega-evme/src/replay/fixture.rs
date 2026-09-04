@@ -138,7 +138,7 @@ where
         ));
     }
 
-    let actual_gas = inputs.result.gas_used();
+    let actual_gas = inputs.result.tx_gas_used();
     let actual_status = execution_status(inputs.result).to_string();
     let actual_halt_reason = halt_reason(inputs.result);
     let actual_output = inputs.result.output().cloned();
@@ -392,7 +392,6 @@ fn build_env(chain_id: u64, block: &Block<Transaction>) -> Env {
         current_withdrawals_root: None,
         parent_blob_gas_used: None,
         parent_excess_blob_gas: None,
-        parent_target_blobs_per_block: None,
         current_blob_gas_used: None,
     }
 }

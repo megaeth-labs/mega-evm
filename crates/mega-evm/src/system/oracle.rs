@@ -3,7 +3,7 @@
 
 use alloy_evm::Database;
 use alloy_primitives::{address, b256, bytes, Address, Bytes, B256};
-use revm::{database::State, state::EvmState};
+use revm::state::EvmState;
 
 use crate::{MegaHardforks, MegaSpecId, SystemContractSpec};
 
@@ -44,7 +44,7 @@ pub use mega_system_contracts::oracle::IOracle;
 pub fn transact_deploy_oracle_contract<DB: Database>(
     hardforks: impl MegaHardforks,
     block_timestamp: u64,
-    db: &mut State<DB>,
+    db: &mut DB,
 ) -> Result<Option<EvmState>, DB::Error> {
     oracle_spec(hardforks.spec_id(block_timestamp))
         .map(|s| crate::transact_deploy(db, &s))
@@ -106,7 +106,7 @@ pub const HIGH_PRECISION_TIMESTAMP_ORACLE_CODE: Bytes = bytes!("0x60806040523480
 pub fn transact_deploy_high_precision_timestamp_oracle<DB: Database>(
     hardforks: impl MegaHardforks,
     block_timestamp: u64,
-    db: &mut State<DB>,
+    db: &mut DB,
 ) -> Result<Option<EvmState>, DB::Error> {
     high_precision_timestamp_oracle_spec(hardforks.spec_id(block_timestamp))
         .map(|s| crate::transact_deploy(db, &s))
@@ -134,7 +134,7 @@ mod tests {
     use super::*;
     use alloy_primitives::keccak256;
     use revm::{
-        database::InMemoryDB,
+        database::{InMemoryDB, State},
         state::{AccountInfo, Bytecode},
     };
 
@@ -216,6 +216,7 @@ mod tests {
                 nonce: 0,
                 code_hash: ORACLE_CONTRACT_CODE_HASH_REX5,
                 code: Some(Bytecode::new_raw(ORACLE_CONTRACT_CODE_REX5)),
+                account_id: None,
             },
         );
 
@@ -257,6 +258,7 @@ mod tests {
                 nonce: 0,
                 code_hash: wrong_code_hash,
                 code: Some(Bytecode::new_raw(wrong_code)),
+                account_id: None,
             },
         );
 
@@ -368,6 +370,7 @@ mod tests {
                 nonce: 0,
                 code_hash: ORACLE_CONTRACT_CODE_HASH,
                 code: Some(Bytecode::new_raw(ORACLE_CONTRACT_CODE)),
+                account_id: None,
             },
         );
 
@@ -402,6 +405,7 @@ mod tests {
                 nonce: 0,
                 code_hash: ORACLE_CONTRACT_CODE_HASH_REX2,
                 code: Some(Bytecode::new_raw(ORACLE_CONTRACT_CODE_REX2)),
+                account_id: None,
             },
         );
 
@@ -491,6 +495,7 @@ mod tests {
                 nonce: 0,
                 code_hash: ORACLE_CONTRACT_CODE_HASH,
                 code: Some(Bytecode::new_raw(ORACLE_CONTRACT_CODE)),
+                account_id: None,
             },
         );
         db.insert_account_storage(ORACLE_CONTRACT_ADDRESS, stored_slot, stored_value)
@@ -541,6 +546,7 @@ mod tests {
                 nonce: 0,
                 code_hash: ORACLE_CONTRACT_CODE_HASH_REX2,
                 code: Some(Bytecode::new_raw(ORACLE_CONTRACT_CODE_REX2)),
+                account_id: None,
             },
         );
         db.insert_account_storage(ORACLE_CONTRACT_ADDRESS, stored_slot, stored_value)
@@ -583,6 +589,7 @@ mod tests {
                 nonce: 0,
                 code_hash: wrong_code_hash,
                 code: Some(Bytecode::new_raw(wrong_code)),
+                account_id: None,
             },
         );
 

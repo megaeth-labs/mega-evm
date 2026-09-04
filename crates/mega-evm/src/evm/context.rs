@@ -20,7 +20,21 @@ use alloy_evm::Database;
 use alloy_primitives::Address;
 use core::cell::RefCell;
 use delegate::delegate;
-use op_revm::{DefaultOp, L1BlockInfo, OpContext, OpSpecId};
+use op_revm::{DefaultOp, L1BlockInfo, OpSpecId};
+
+/// The revm context underlying [`MegaContext`].
+///
+/// Same shape as `op_revm::OpContext<DB>` except for the transaction type: `MegaETH` uses the
+/// `alloy-op-evm` `OpTx` newtype so the foreign `IntoTxEnv` / `FromRecoveredTx` impls are
+/// available (see [`crate::MegaTransaction`]).
+pub type MegaInnerContext<DB> = revm::Context<
+    revm::context::BlockEnv,
+    crate::MegaTransaction,
+    revm::context::CfgEnv<OpSpecId>,
+    DB,
+    revm::Journal<DB>,
+    L1BlockInfo,
+>;
 use revm::{
     context::{BlockEnv, CfgEnv, ContextSetters, ContextTr, LocalContext},
     context_interface::context::ContextError,
@@ -29,9 +43,10 @@ use revm::{
 };
 
 use crate::{
-    constants, is_system_originated, AdditionalLimit, BucketId, DynamicGasCost, EmptyExternalEnv,
-    EvmTxRuntimeLimits, ExternalEnvTypes, ExternalEnvs, MegaSpecId, TxRuntimeLimit,
-    VolatileDataAccess, VolatileDataAccessTracker, VolatileDataAccessType,
+    constants, evm::host::CallTargetLoadPhase, is_system_originated, AdditionalLimit, BucketId,
+    DynamicGasCost, EmptyExternalEnv, EvmTxRuntimeLimits, ExternalEnvTypes, ExternalEnvs,
+    MegaSpecId, TxRuntimeLimit, VolatileDataAccess, VolatileDataAccessTracker,
+    VolatileDataAccessType,
 };
 
 /// `MegaETH` EVM context type. This struct wraps [`OpContext`] and implements the [`ContextTr`]
@@ -41,7 +56,7 @@ pub struct MegaContext<DB: Database, ExtEnvs: ExternalEnvTypes> {
     /// The inner context.
     #[deref]
     #[deref_mut]
-    pub(crate) inner: OpContext<DB>,
+    pub(crate) inner: MegaInnerContext<DB>,
     /// The `MegaETH` spec id. The inner context contains the `OpSpecId`.
     /// The `OpSpec` in the `inner` context should be the corresponding [`OpSpecId`] for the
     /// [`SpecId`].
@@ -66,6 +81,19 @@ pub struct MegaContext<DB: Database, ExtEnvs: ExternalEnvTypes> {
     /// Tracker for volatile data access (block environment, beneficiary, oracle)
     /// and volatile data access disable (`MegaAccessControl` system contract).
     pub volatile_data_tracker: Rc<RefCell<VolatileDataAccessTracker>>,
+
+    /// Phase of the CALL-family target resolution currently in flight, `Idle` outside one.
+    ///
+    /// Set by the CALL-family instruction handlers through
+    /// [`HostExt::begin_call_target_resolution`](crate::HostExt::begin_call_target_resolution) so
+    /// the host can tell a CALL's raw stack operand apart from its EIP-7702 delegate hop when
+    /// marking beneficiary access. Purely per-instruction state: it is always `Idle` between
+    /// opcodes, so it is not carried over when a context is rebuilt.
+    ///
+    /// A plain field, not a `Cell`: the phase is written from `&mut self` on both sides of revm's
+    /// CALL body, and wrapping it in interior mutability instead costs ~2% on the CALL-heavy
+    /// benchmarks — the writes then act as optimization barriers around that body.
+    pub(crate) call_target_load_phase: CallTargetLoadPhase,
 
     /// Set to `true` when this context is itself a sandbox execution.
     ///
@@ -149,8 +177,20 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
         salt_env: Rc<ExtEnvs::SaltEnv>,
         oracle_env: Rc<RefCell<ExtEnvs::OracleEnv>>,
     ) -> Self {
-        let mut inner =
-            revm::Context::op().with_db(db).with_cfg(CfgEnv::new_with_spec(spec.into_op_spec()));
+        // `Context::op()` builds the transaction as `OpTransaction<TxEnv>`; `MegaETH` uses the
+        // `OpTx` newtype (see `crate::MegaTransaction`), so retype it here.
+        let mut inner: MegaInnerContext<DB> = revm::Context::op()
+            .with_tx(crate::MegaTransaction::default())
+            .with_db(db)
+            .with_cfg(CfgEnv::new_with_spec(spec.into_op_spec()));
+
+        // revm 40 flipped `CfgEnv::tx_chain_id_check` default from `false` (revm 27) to `true`.
+        // With the new default, non-legacy txs with `chain_id: None` (and many unit-test
+        // TxEnvBuilder::default() shapes) fail validation with MissingChainId.
+        // Pin revm-27 semantics: the whole chain-id gate is off unless a caller later
+        // enables it via `with_cfg` / factory `EvmEnv`. Note: with the flag off, a
+        // mismatched `Some(wrong_id)` is also accepted — same as revm 27.
+        inner.cfg.tx_chain_id_check = false;
 
         if spec.is_enabled(MegaSpecId::MINI_REX) {
             inner.cfg.limit_contract_code_size = Some(constants::mini_rex::MAX_CONTRACT_SIZE);
@@ -173,6 +213,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
                 tx_limits.block_env_access_compute_gas_limit,
                 tx_limits.oracle_access_compute_gas_limit,
             ))),
+            call_target_load_phase: CallTargetLoadPhase::Idle,
             inside_sandbox: Rc::new(RefCell::new(false)),
             system_address: crate::MEGA_SYSTEM_ADDRESS,
             inner,
@@ -198,14 +239,27 @@ impl<DB: Database, ExtEnvTypes: ExternalEnvTypes> MegaContext<DB, ExtEnvTypes> {
     /// Returns a new `Context` instance wrapping the provided context.
     #[deprecated(note = "Use `MegaContext::new` instead")]
     pub fn new_with_context(
-        context: OpContext<DB>,
+        context: MegaInnerContext<DB>,
         spec: MegaSpecId,
         external_envs: ExternalEnvs<ExtEnvTypes>,
     ) -> Self {
         let mut inner = context;
 
-        // spec in context must keep the same with parameter `spec`
-        inner.cfg.spec = spec.into_op_spec();
+        // Spec in context must keep the same with parameter `spec`.
+        // revm 40 keeps per-spec `GasParams` in `CfgEnv`, so update both together —
+        // bare `cfg.spec = ...` would leave the caller's (e.g. BEDROCK) params in place.
+        // A context already sitting on the target op-spec has nothing to re-derive, and its
+        // gas schedule — possibly one the caller installed — is left alone.
+        let op_spec = spec.into_op_spec();
+        if inner.cfg.spec != op_spec {
+            inner.cfg.set_spec_and_mainnet_gas_params(op_spec);
+        }
+
+        // Same revm-27 pin as `new_with_shared_ext_envs`, applied unconditionally: this is a
+        // compatibility entry point, and the chain-id gate revm 40 turned on by default is not
+        // part of the pre-upgrade semantics it reproduces. A caller that wants the gate builds
+        // the context through [`MegaContext::with_cfg_unpinned`] instead.
+        inner.cfg.tx_chain_id_check = false;
 
         // For the `MINI_REX` spec, we override the contract size and initcode size limits if they
         // not set in the given `OpContext`.
@@ -236,6 +290,7 @@ impl<DB: Database, ExtEnvTypes: ExternalEnvTypes> MegaContext<DB, ExtEnvTypes> {
                 tx_limits.block_env_access_compute_gas_limit,
                 tx_limits.oracle_access_compute_gas_limit,
             ))),
+            call_target_load_phase: CallTargetLoadPhase::Idle,
             inside_sandbox: Rc::new(RefCell::new(false)),
             system_address: crate::MEGA_SYSTEM_ADDRESS,
             inner,
@@ -264,6 +319,7 @@ impl<DB: Database, ExtEnvTypes: ExternalEnvTypes> MegaContext<DB, ExtEnvTypes> {
             dynamic_storage_gas_cost: self.dynamic_storage_gas_cost,
             oracle_env: self.oracle_env,
             volatile_data_tracker: self.volatile_data_tracker,
+            call_target_load_phase: CallTargetLoadPhase::Idle,
             inside_sandbox: self.inside_sandbox,
             system_address: self.system_address,
         }
@@ -311,6 +367,16 @@ impl<DB: Database, ExtEnvTypes: ExternalEnvTypes> MegaContext<DB, ExtEnvTypes> {
     /// specification, it automatically applies appropriate contract size limits
     /// if they are not already set in the configuration.
     ///
+    /// # `tx_chain_id_check` is pinned off
+    ///
+    /// revm 40 flipped the `CfgEnv::tx_chain_id_check` default from `false` to `true` — a gate
+    /// that rejects transactions with no chain id at all, and transactions whose chain id
+    /// differs from the configuration's. Every `MegaETH` spec froze its semantics with the gate
+    /// off, and an embedder that never touched the field would inherit the flipped default
+    /// silently, so this entry point pins the flag to `false` unconditionally — including over a
+    /// configuration that explicitly set it. An embedder that wants the gate opts in through
+    /// [`with_cfg_unpinned`](Self::with_cfg_unpinned), where the field is taken as provided.
+    ///
     /// # Arguments
     ///
     /// * `cfg` - The configuration environment
@@ -318,9 +384,45 @@ impl<DB: Database, ExtEnvTypes: ExternalEnvTypes> MegaContext<DB, ExtEnvTypes> {
     /// # Returns
     ///
     /// Returns `self` for method chaining.
-    pub fn with_cfg(mut self, cfg: CfgEnv<MegaSpecId>) -> Self {
+    pub fn with_cfg(self, cfg: CfgEnv<MegaSpecId>) -> Self {
+        self.apply_cfg(cfg, CfgIntent::Pinned)
+    }
+
+    /// Sets the [`CfgEnv`] for the EVM, taking `tx_chain_id_check` as provided.
+    ///
+    /// Same as [`with_cfg`](Self::with_cfg) except that the revm-27 compatibility pin described
+    /// there does not run: `tx_chain_id_check` reaches the EVM exactly as the caller set it.
+    /// This is the entry point for an embedder that enables the chain-id gate on purpose —
+    /// accepting that historical `MegaETH` semantics ran without it.
+    ///
+    /// Skipping that pin does not skip `MegaETH`'s own consensus pins:
+    ///
+    /// - EIP-8037 (Amsterdam state gas) is forced off before every transaction runs, wherever the
+    ///   configuration came from — see [`force_amsterdam_eip8037_off`].
+    /// - Under `MINI_REX` and later, the contract size and initcode size limits fill in when the
+    ///   configuration leaves them unset.
+    ///
+    /// # Arguments
+    ///
+    /// * `cfg` - The configuration environment
+    ///
+    /// # Returns
+    ///
+    /// Returns `self` for method chaining.
+    pub fn with_cfg_unpinned(self, cfg: CfgEnv<MegaSpecId>) -> Self {
+        self.apply_cfg(cfg, CfgIntent::Declared)
+    }
+
+    /// Shared body of [`with_cfg`](Self::with_cfg) and
+    /// [`with_cfg_unpinned`](Self::with_cfg_unpinned): both adopt the caller's configuration the
+    /// same way, and differ only in whether `tx_chain_id_check` is pinned to the revm-27 `false`
+    /// or taken as the caller provided it.
+    fn apply_cfg(mut self, cfg: CfgEnv<MegaSpecId>, intent: CfgIntent) -> Self {
         self.spec = cfg.spec;
         self.inner = self.inner.with_cfg(cfg.into_op_cfg());
+        if intent == CfgIntent::Pinned {
+            self.inner.cfg.tx_chain_id_check = false;
+        }
         if self.spec.is_enabled(MegaSpecId::MINI_REX) {
             if self.inner.cfg.limit_contract_code_size.is_none() {
                 self.inner.cfg.limit_contract_code_size =
@@ -368,6 +470,7 @@ impl<DB: Database, ExtEnvTypes: ExternalEnvTypes> MegaContext<DB, ExtEnvTypes> {
             ))),
             oracle_env: Rc::new(RefCell::new(external_envs.oracle_env)),
             volatile_data_tracker: self.volatile_data_tracker,
+            call_target_load_phase: CallTargetLoadPhase::Idle,
             inside_sandbox: self.inside_sandbox,
             system_address: self.system_address,
         }
@@ -488,8 +591,8 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     ///
     /// # Returns
     ///
-    /// Returns the inner `OpContext<DB>`.
-    pub fn into_inner(self) -> OpContext<DB> {
+    /// Returns the inner context.
+    pub fn into_inner(self) -> MegaInnerContext<DB> {
         self.inner
     }
 }
@@ -592,6 +695,8 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     ///
     /// DB-dependent pre-frame usage may still be recorded later during pre-execution.
     pub(crate) fn on_new_tx(&mut self) {
+        force_amsterdam_eip8037_off(&mut self.inner.cfg);
+
         self.reset_volatile_data_access();
 
         // The additional-limit lifecycle (reset → intrinsic accounting) exists only for MINI_REX+.
@@ -656,6 +761,27 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> ContextTr for MegaContext<DB, ExtE
             fn error(&mut self) -> &mut Result<(), ContextError<<Self::Db as revm::Database>::Error>>;
             fn tx_journal_mut(&mut self) -> (&Self::Tx, &mut Self::Journal);
             fn tx_local_mut(&mut self) -> (&Self::Tx, &mut Self::Local);
+            fn all(
+                &self,
+            ) -> (
+                &Self::Block,
+                &Self::Tx,
+                &Self::Cfg,
+                &Self::Db,
+                &Self::Journal,
+                &Self::Chain,
+                &Self::Local,
+            );
+            fn all_mut(
+                &mut self,
+            ) -> (
+                &Self::Block,
+                &Self::Tx,
+                &Self::Cfg,
+                &mut Self::Journal,
+                &mut Self::Chain,
+                &mut Self::Local,
+            );
         }
     }
 }
@@ -671,6 +797,52 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> ContextSetters for MegaContext<DB,
             fn set_tx(&mut self, tx: Self::Tx);
         }
     }
+}
+
+/// How a `MegaContext` entry point treats the caller's `tx_chain_id_check`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CfgIntent {
+    /// Pin `tx_chain_id_check` to the revm-27 `false`, whatever the configuration carries:
+    /// every `MegaETH` spec froze its semantics with the gate off, and revm 40 flipped the
+    /// upstream default to `true` underneath existing embedders.
+    Pinned,
+    /// Take `tx_chain_id_check` exactly as the caller provided it.
+    Declared,
+}
+
+/// Forces EIP-8037 (Amsterdam state gas) off on the configuration a transaction is about to run
+/// with, whatever a caller put there.
+///
+/// `CfgEnv::enable_amsterdam_eip8037` is a free-standing switch in revm 40: the sites that split a
+/// charge into regular gas plus state gas — `SSTORE` on a fresh slot, the `CREATE` account and
+/// code-deposit charge, the new-account cost of a value-bearing `CALL`, the EIP-7702 authority
+/// refund, and the transaction's initial gas / reservoir split — read the flag alone and do not
+/// also require an Amsterdam spec. Left alone, it would turn the state-gas split on underneath a
+/// frozen `MegaSpecId` and change what that spec charges.
+///
+/// `MegaETH`'s gas accounting is built on there being no such split: per-opcode compute gas is
+/// recorded from the gas the opcode actually consumed, storage gas and the storage call stipend
+/// are charged and drawn on top of that same single dimension, and precompile gas is normalized
+/// back onto the caller's one forwarded budget. Nothing in `MegaETH` charges against revm's
+/// state-gas reservoir, so a charge split off into it would escape `MegaETH`'s meters entirely.
+///
+/// Enabling EIP-8037 is therefore a consensus change, and belongs to a `MegaSpecId` gate rather
+/// than to a `CfgEnv` field a caller can set. It is also one `MegaETH` has no reason to want:
+/// storage gas already charges the same operations, scaled by SALT bucket occupancy rather than at
+/// a flat rate, and the state-growth tracker already bounds net new accounts and slots per
+/// transaction. Turning the split on would charge those operations a second time, and the second
+/// charge would land in a reservoir none of the four resource dimensions reads.
+///
+/// Called from [`MegaContext::on_new_tx`], which every execution path passes through — the
+/// transaction path via `MegaHandler::before_run`, system calls via `Handler::run_system_call` —
+/// and which runs before anything reads the flag. Forcing the value at the point of use rather
+/// than pinning it at each entry point is what makes the guarantee independent of how a
+/// configuration arrived: revm's own carriers propagate a set flag (`with_spec_and_gas_params`
+/// moves it across the spec relabel, `set_spec_and_mainnet_gas_params` ORs it back on for an
+/// Amsterdam-or-later spec), so a per-entry-point pin has to be re-derived every time one of them
+/// is rewired or a new path appears, and covers nothing a caller does to a live context.
+pub(crate) fn force_amsterdam_eip8037_off<SPEC>(cfg: &mut CfgEnv<SPEC>) {
+    cfg.enable_amsterdam_eip8037 = false;
 }
 
 /// A convenient trait to convert a `CfgEnv<OpSpecId>` into a `CfgEnv<SpecId>`.
@@ -700,34 +872,24 @@ pub trait IntoOpCfgEnv {
 impl IntoOpCfgEnv for CfgEnv<MegaSpecId> {
     /// Converts to `CfgEnv<OpSpecId>`.
     ///
-    /// This method creates a new `OpStack` configuration environment with the
-    /// same settings as the `MegaETH` configuration, converting the specification ID.
+    /// This method relabels the specification type and carries every other field of the
+    /// caller's configuration — the gas schedule included — into the `OpStack` shape. It is a
+    /// relabel and nothing more: the fields `MegaETH` does not let a caller choose are settled
+    /// where they are read, not here (EIP-8037 by [`force_amsterdam_eip8037_off`]).
     ///
     /// # Returns
     ///
-    /// Returns a new `CfgEnv<OpSpecId>` with all fields copied from `self`.
-    ///
-    /// # Note
-    ///
-    /// When the fields of [`CfgEnv`] change, this function needs to be updated
-    /// to include the new fields.
+    /// Returns a new `CfgEnv<OpSpecId>` with all fields moved from `self`.
     fn into_op_cfg(self) -> CfgEnv<OpSpecId> {
-        let mut op_cfg = CfgEnv::new_with_spec(OpSpecId::from(self.spec));
-        op_cfg.chain_id = self.chain_id;
-        op_cfg.tx_chain_id_check = self.tx_chain_id_check;
-        op_cfg.limit_contract_code_size = self.limit_contract_code_size;
-        op_cfg.limit_contract_initcode_size = self.limit_contract_initcode_size;
-        op_cfg.disable_nonce_check = self.disable_nonce_check;
-        op_cfg.max_blobs_per_tx = self.max_blobs_per_tx;
-        op_cfg.blob_base_fee_update_fraction = self.blob_base_fee_update_fraction;
-        op_cfg.tx_gas_limit_cap = self.tx_gas_limit_cap;
-        op_cfg.memory_limit = self.memory_limit;
-        op_cfg.disable_balance_check = self.disable_balance_check;
-        op_cfg.disable_block_gas_limit = self.disable_block_gas_limit;
-        op_cfg.disable_eip3541 = self.disable_eip3541;
-        op_cfg.disable_eip3607 = self.disable_eip3607;
-        op_cfg.disable_base_fee = self.disable_base_fee;
-        op_cfg
+        let op_spec = OpSpecId::from(self.spec);
+        // Keep the caller's gas schedule instead of re-deriving it from the spec: an embedder
+        // may have installed its own, and a spec-derived one is unaffected either way because
+        // every `MegaSpecId` and its op-spec map to the same eth hardfork.
+        let gas_params = self.gas_params.clone();
+        // `with_spec_and_gas_params` is revm's own whole-struct carrier: it moves every field
+        // (including the ones behind revm cargo features) into the new spec type, so fields
+        // added upstream come along instead of being silently reset to their defaults.
+        self.with_spec_and_gas_params(op_spec, gas_params)
     }
 }
 
@@ -738,8 +900,11 @@ impl IntoOpCfgEnv for CfgEnv<MegaSpecId> {
 impl IntoMegaethCfgEnv for CfgEnv<OpSpecId> {
     /// Converts to `CfgEnv<SpecId>`.
     ///
-    /// This method creates a new `MegaETH` configuration environment with the
-    /// same settings as the `OpStack` configuration, using the provided specification ID.
+    /// The inverse of [`IntoOpCfgEnv::into_op_cfg`]: it relabels the specification type with the
+    /// given `spec` and carries every other field — the gas schedule included — unchanged, so a
+    /// configuration handed to the EVM reads back as the caller wrote it. Reading back a
+    /// configuration the EVM has run at least one transaction with also reads back EIP-8037 off,
+    /// because [`force_amsterdam_eip8037_off`] settles it on the context itself.
     ///
     /// # Arguments
     ///
@@ -747,29 +912,10 @@ impl IntoMegaethCfgEnv for CfgEnv<OpSpecId> {
     ///
     /// # Returns
     ///
-    /// Returns a new `CfgEnv<SpecId>` with all fields copied from `self`.
-    ///
-    /// # Note
-    ///
-    /// When the fields of [`CfgEnv`] change, this function needs to be updated
-    /// to include the new fields.
+    /// Returns a new `CfgEnv<SpecId>` with all fields moved from `self`.
     fn into_megaeth_cfg(self, spec: MegaSpecId) -> CfgEnv<MegaSpecId> {
-        let mut cfg = CfgEnv::new_with_spec(spec);
-        cfg.chain_id = self.chain_id;
-        cfg.tx_chain_id_check = self.tx_chain_id_check;
-        cfg.limit_contract_code_size = self.limit_contract_code_size;
-        cfg.limit_contract_initcode_size = self.limit_contract_initcode_size;
-        cfg.disable_nonce_check = self.disable_nonce_check;
-        cfg.max_blobs_per_tx = self.max_blobs_per_tx;
-        cfg.blob_base_fee_update_fraction = self.blob_base_fee_update_fraction;
-        cfg.tx_gas_limit_cap = self.tx_gas_limit_cap;
-        cfg.memory_limit = self.memory_limit;
-        cfg.disable_balance_check = self.disable_balance_check;
-        cfg.disable_block_gas_limit = self.disable_block_gas_limit;
-        cfg.disable_eip3541 = self.disable_eip3541;
-        cfg.disable_eip3607 = self.disable_eip3607;
-        cfg.disable_base_fee = self.disable_base_fee;
-        cfg
+        let gas_params = self.gas_params.clone();
+        self.with_spec_and_gas_params(spec, gas_params)
     }
 }
 
@@ -778,9 +924,312 @@ mod tests {
     use super::*;
 
     use alloy_primitives::address;
-    use revm::{context::CfgEnv, database::EmptyDB};
+    use revm::{
+        context::CfgEnv,
+        context_interface::cfg::{GasId, GasParams},
+        database::EmptyDB,
+        primitives::hardfork::SpecId,
+    };
 
     use crate::TestExternalEnvs;
+
+    /// A gas schedule an embedder could install: the spec table with one entry moved off its
+    /// mainnet value. Distinct from every `GasParams::new_spec(..)` table, so a conversion that
+    /// re-derives the schedule from the spec instead of carrying it shows up as a diff.
+    fn custom_gas_params() -> GasParams {
+        let mut gas_params = GasParams::new_spec(SpecId::PRAGUE);
+        gas_params.override_gas([(GasId::tx_token_cost(), 40)]);
+        assert_ne!(gas_params, GasParams::new_spec(SpecId::PRAGUE));
+        gas_params
+    }
+
+    /// A [`CfgEnv`] with every field moved off its revm default, so any field the conversion
+    /// drops instead of carrying collapses back to a default and fails an equality assert.
+    fn fully_customized_cfg(spec: MegaSpecId) -> CfgEnv<MegaSpecId> {
+        let mut cfg = CfgEnv::new_with_spec(spec);
+        cfg.gas_params = custom_gas_params();
+        cfg.chain_id = 6342;
+        cfg.tx_chain_id_check = false;
+        cfg.limit_contract_code_size = Some(0x1234);
+        cfg.limit_contract_initcode_size = Some(0x2468);
+        cfg.disable_nonce_check = true;
+        cfg.max_blobs_per_tx = Some(3);
+        cfg.blob_base_fee_update_fraction = Some(7);
+        cfg.tx_gas_limit_cap = Some(12_345);
+        cfg.memory_limit = 1 << 20;
+        cfg.disable_balance_check = true;
+        cfg.disable_block_gas_limit = true;
+        cfg.disable_eip3541 = true;
+        cfg.disable_eip3607 = true;
+        cfg.disable_eip7623 = true;
+        cfg.disable_base_fee = true;
+        cfg.enable_amsterdam_eip8037 = true;
+        cfg.amsterdam_eip7708_disabled = true;
+        cfg.amsterdam_eip7708_delayed_burn_disabled = true;
+        cfg
+    }
+
+    /// The `MegaSpecId` <-> `OpSpecId` config conversions relabel the spec type and nothing else:
+    /// every other field — the gas schedule and the revm 40 switches included — belongs to the
+    /// caller and must survive both legs, EIP-8037 included. What `MegaETH` does not let a caller
+    /// choose is settled where it is read (see `test_eip8037_is_forced_off_before_execution`), not
+    /// by a conversion quietly rewriting a field.
+    #[test]
+    fn test_cfg_conversion_carries_every_field_both_ways() {
+        let cfg = fully_customized_cfg(MegaSpecId::REX6);
+
+        let op_cfg = cfg.clone().into_op_cfg();
+
+        assert_eq!(op_cfg.spec, MegaSpecId::REX6.into_op_spec());
+        assert_eq!(op_cfg.gas_params, cfg.gas_params, "custom gas schedule must survive");
+        assert!(op_cfg.disable_eip7623);
+        assert!(
+            op_cfg.enable_amsterdam_eip8037,
+            "a relabel carries every field, this one included"
+        );
+        assert!(op_cfg.amsterdam_eip7708_disabled);
+        assert!(op_cfg.amsterdam_eip7708_delayed_burn_disabled);
+
+        // Whole-struct equality on the round trip: with every input field off its default, a
+        // field dropped on either leg reverts to a default and trips this assert.
+        assert_eq!(op_cfg.into_megaeth_cfg(MegaSpecId::REX6), cfg);
+    }
+
+    /// `with_cfg` is where an embedder's `CfgEnv` lands. It must reach the inner revm config
+    /// intact — only the `MegaETH` pins (spec, `MINI_REX` size limits) may differ.
+    #[test]
+    fn test_with_cfg_carries_embedder_gas_params_and_switches() {
+        let mut cfg = CfgEnv::new_with_spec(MegaSpecId::REX6);
+        cfg.chain_id = 6342;
+        cfg.gas_params = custom_gas_params();
+        cfg.disable_eip7623 = true;
+
+        let context =
+            MegaContext::new(EmptyDB::default(), MegaSpecId::EQUIVALENCE).with_cfg(cfg.clone());
+
+        assert_eq!(context.inner.cfg.gas_params, cfg.gas_params);
+        assert!(context.inner.cfg.disable_eip7623);
+        assert_eq!(context.inner.cfg.chain_id, 6342);
+    }
+
+    /// The pin is unconditional: a configured cfg — here a blob schedule plus an explicitly
+    /// enabled check — still comes out with the gate off. `with_cfg` is the compatibility entry
+    /// point; enabling the gate requires `with_cfg_unpinned`.
+    #[test]
+    fn test_with_cfg_pins_chain_id_check_off_for_configured_cfg() {
+        let mut cfg = CfgEnv::new_with_spec(MegaSpecId::REX5);
+        cfg.max_blobs_per_tx = Some(6);
+        cfg.tx_chain_id_check = true;
+
+        let context = MegaContext::new(EmptyDB::default(), MegaSpecId::EQUIVALENCE).with_cfg(cfg);
+
+        assert!(
+            !context.inner.cfg.tx_chain_id_check,
+            "with_cfg must pin the chain-id gate off even when the cfg enabled it"
+        );
+    }
+
+    /// The pin does not depend on the rest of the configuration: a custom gas schedule rides
+    /// through while the gate still comes out pinned off.
+    #[test]
+    fn test_with_cfg_pins_chain_id_check_off_with_custom_gas_params() {
+        let mut cfg = CfgEnv::new_with_spec(MegaSpecId::REX5);
+        cfg.gas_params = custom_gas_params();
+
+        let context = MegaContext::new(EmptyDB::default(), MegaSpecId::EQUIVALENCE).with_cfg(cfg);
+
+        assert!(!context.inner.cfg.tx_chain_id_check);
+        assert_eq!(context.inner.cfg.gas_params, custom_gas_params());
+    }
+
+    /// An untouched `CfgEnv::new_with_spec` config carries revm 40's flipped default, which the
+    /// caller never asked for: `with_cfg` re-pins revm 27's `false`.
+    #[test]
+    fn test_with_cfg_repins_untouched_default_cfg() {
+        let context = MegaContext::new(EmptyDB::default(), MegaSpecId::EQUIVALENCE)
+            .with_cfg(CfgEnv::new_with_spec(MegaSpecId::REX5));
+
+        assert!(
+            !context.inner.cfg.tx_chain_id_check,
+            "an untouched revm-40 default cfg must be re-pinned to revm-27 semantics"
+        );
+    }
+
+    /// `with_cfg_unpinned` is the opt-in for the gate: the `tx_chain_id_check` a configuration
+    /// carries — here revm 40's default `true` on an untouched `CfgEnv::new_with_spec` — reaches
+    /// the EVM as provided.
+    #[test]
+    fn test_with_cfg_unpinned_keeps_chain_id_check_on_default_shape() {
+        // Exactly the shape `with_cfg` re-pins: chain 1, check on, nothing else touched.
+        let cfg = CfgEnv::new_with_spec(MegaSpecId::REX5);
+        assert_eq!(cfg.chain_id, 1);
+        assert!(cfg.tx_chain_id_check);
+
+        let context =
+            MegaContext::new(EmptyDB::default(), MegaSpecId::EQUIVALENCE).with_cfg_unpinned(cfg);
+
+        assert!(
+            context.inner.cfg.tx_chain_id_check,
+            "with_cfg_unpinned must take tx_chain_id_check at face value"
+        );
+    }
+
+    /// The escape hatch carries the caller's configuration verbatim: every field reaches the
+    /// inner revm config as written.
+    #[test]
+    fn test_with_cfg_unpinned_carries_every_field() {
+        let mut cfg = fully_customized_cfg(MegaSpecId::REX6);
+        cfg.tx_chain_id_check = true;
+
+        let context = MegaContext::new(EmptyDB::default(), MegaSpecId::EQUIVALENCE)
+            .with_cfg_unpinned(cfg.clone());
+
+        assert!(context.inner.cfg.tx_chain_id_check);
+        assert_eq!(context.inner.cfg, cfg.into_op_cfg());
+    }
+
+    /// The opt-in skips the chain-id pin, not `MegaETH`'s other normalization: the spec is
+    /// adopted and the `MINI_REX` size limits still fill in when unset.
+    #[test]
+    fn test_with_cfg_unpinned_still_applies_mega_pins() {
+        for spec in [MegaSpecId::MINI_REX, MegaSpecId::REX5] {
+            let cfg = CfgEnv::new_with_spec(spec);
+            let context = MegaContext::new(EmptyDB::default(), MegaSpecId::EQUIVALENCE)
+                .with_cfg_unpinned(cfg);
+
+            assert_eq!(context.mega_spec(), spec);
+            assert_eq!(
+                context.inner.cfg.limit_contract_code_size,
+                Some(constants::mini_rex::MAX_CONTRACT_SIZE)
+            );
+            assert_eq!(
+                context.inner.cfg.limit_contract_initcode_size,
+                Some(constants::mini_rex::MAX_INITCODE_SIZE)
+            );
+            // The escape hatch still means what it says alongside those pins.
+            assert!(context.inner.cfg.tx_chain_id_check);
+        }
+    }
+
+    /// EIP-8037 is settled where it is read, not where a configuration enters: the entry points
+    /// carry a caller's flag like any other field, and it is forced off on the way into execution.
+    ///
+    /// Both halves are asserted here. A caller's `true` survives `with_cfg` — that is what makes
+    /// this a real probe rather than one blind to a flag the entry point already cleared — and
+    /// `on_new_tx`, which `MegaHandler::before_run` and `Handler::run_system_call` both call
+    /// before anything reads the flag, clears it.
+    #[test]
+    fn test_eip8037_is_forced_off_before_every_transaction() {
+        let mut cfg = CfgEnv::new_with_spec(MegaSpecId::REX5);
+        cfg.enable_amsterdam_eip8037 = true;
+
+        let mut context =
+            MegaContext::new(EmptyDB::default(), MegaSpecId::EQUIVALENCE).with_cfg(cfg);
+        assert!(
+            context.inner.cfg.enable_amsterdam_eip8037,
+            "the entry point carries the caller's field; clearing it here would make the pin \
+             below untestable",
+        );
+
+        context.on_new_tx();
+        assert!(
+            !context.inner.cfg.enable_amsterdam_eip8037,
+            "every transaction runs with the state-gas split off",
+        );
+
+        // And it is forced every time, not just on the first transaction: a caller that sets the
+        // flag between transactions is cleared again.
+        context.inner.cfg.enable_amsterdam_eip8037 = true;
+        context.on_new_tx();
+        assert!(!context.inner.cfg.enable_amsterdam_eip8037);
+    }
+
+    /// Building the EVM settles the flag too, so the snapshot `alloy_evm::Evm::cfg_env` hands out
+    /// and everything read back through it describe what transactions will run with.
+    #[test]
+    fn test_building_the_evm_forces_eip8037_off() {
+        let mut cfg = CfgEnv::new_with_spec(MegaSpecId::REX5);
+        cfg.enable_amsterdam_eip8037 = true;
+
+        let context = MegaContext::new(EmptyDB::default(), MegaSpecId::EQUIVALENCE).with_cfg(cfg);
+        let evm = crate::MegaEvm::new(context);
+
+        assert!(!evm.ctx.inner.cfg.enable_amsterdam_eip8037);
+        assert!(!alloy_evm::Evm::cfg_env(&evm).enable_amsterdam_eip8037);
+    }
+
+    /// The deprecated constructor re-derives the gas schedule only when it applies a different
+    /// op-spec. A caller already sitting on the `MegaETH` op-spec keeps its own schedule.
+    #[allow(deprecated)]
+    #[test]
+    fn test_new_with_context_keeps_gas_params_when_spec_already_matches() {
+        let mut inner: MegaInnerContext<EmptyDB> = revm::Context::op()
+            .with_tx(crate::MegaTransaction::default())
+            .with_db(EmptyDB::default());
+        inner.cfg.set_spec_and_mainnet_gas_params(MegaSpecId::EQUIVALENCE.into_op_spec());
+        inner.cfg.gas_params = custom_gas_params();
+
+        let context = MegaContext::new_with_context(
+            inner,
+            MegaSpecId::EQUIVALENCE,
+            ExternalEnvs::<EmptyExternalEnv>::default(),
+        );
+
+        assert_eq!(context.inner.cfg.gas_params, custom_gas_params());
+    }
+
+    /// Same unconditional pin at the deprecated constructor: a configured context that enabled
+    /// the check still comes out with the gate off.
+    #[allow(deprecated)]
+    #[test]
+    fn test_new_with_context_pins_chain_id_check_off() {
+        let mut inner: MegaInnerContext<EmptyDB> = revm::Context::op()
+            .with_tx(crate::MegaTransaction::default())
+            .with_db(EmptyDB::default());
+        inner.cfg.chain_id = 4326;
+        inner.cfg.tx_chain_id_check = true;
+
+        let context = MegaContext::new_with_context(
+            inner,
+            MegaSpecId::EQUIVALENCE,
+            ExternalEnvs::<EmptyExternalEnv>::default(),
+        );
+
+        assert!(
+            !context.inner.cfg.tx_chain_id_check,
+            "new_with_context must pin the chain-id gate off even when the caller enabled it"
+        );
+    }
+
+    /// revm 40 keeps per-spec [`GasParams`] in [`CfgEnv`]. The deprecated
+    /// `new_with_context` must update both when applying the `MegaETH` op-spec —
+    /// bare `cfg.spec = ...` would leave the caller's BEDROCK/MERGE params.
+    #[allow(deprecated)]
+    #[test]
+    fn test_new_with_context_syncs_gas_params_with_spec() {
+        // `DefaultOp` seeds BEDROCK (MERGE eth) gas params.
+        let inner: MegaInnerContext<EmptyDB> = revm::Context::op()
+            .with_tx(crate::MegaTransaction::default())
+            .with_db(EmptyDB::default());
+        assert_eq!(inner.cfg.spec, OpSpecId::BEDROCK);
+        assert_eq!(inner.cfg.gas_params, GasParams::new_spec(SpecId::from(OpSpecId::BEDROCK)),);
+
+        let context = MegaContext::new_with_context(
+            inner,
+            MegaSpecId::EQUIVALENCE,
+            ExternalEnvs::<EmptyExternalEnv>::default(),
+        );
+
+        let op_spec = MegaSpecId::EQUIVALENCE.into_op_spec();
+        assert_eq!(context.inner.cfg.spec, op_spec);
+        assert_eq!(context.inner.cfg.gas_params, GasParams::new_spec(SpecId::from(op_spec)));
+        // Distinct from the caller's BEDROCK params so a bare-assignment bug
+        // cannot pass this test by accident.
+        assert_ne!(
+            context.inner.cfg.gas_params,
+            GasParams::new_spec(SpecId::from(OpSpecId::BEDROCK)),
+        );
+    }
 
     #[test]
     fn test_with_cfg_updates_spec() {
@@ -854,6 +1303,111 @@ mod tests {
 
         assert_eq!(parent.accessed_bucket_ids(), parent_bucket_ids);
         assert_ne!(sandbox.accessed_bucket_ids(), parent_bucket_ids);
+    }
+
+    /// revm 40 defaults `tx_chain_id_check` to `true`; `MegaContext` pins revm-27's
+    /// `false` so unit-test txs with `chain_id: None` still validate.
+    #[test]
+    fn test_new_disables_tx_chain_id_check_for_revm27_parity() {
+        let context = MegaContext::new(EmptyDB::default(), MegaSpecId::REX5);
+        assert!(
+            !context.inner.cfg.tx_chain_id_check,
+            "MegaContext::new must pin revm-27 default (tx_chain_id_check=false)"
+        );
+    }
+
+    /// Deprecated constructor must apply the same revm-27 chain-id pin, even when
+    /// the caller's `OpContext` was built with revm 40's default (`true`).
+    #[allow(deprecated)]
+    #[test]
+    fn test_new_with_context_disables_tx_chain_id_check() {
+        let mut inner: MegaInnerContext<EmptyDB> = revm::Context::op()
+            .with_tx(crate::MegaTransaction::default())
+            .with_db(EmptyDB::default());
+        // Simulate a caller that left revm 40's default (true) in place.
+        inner.cfg.tx_chain_id_check = true;
+
+        let context = MegaContext::new_with_context(
+            inner,
+            MegaSpecId::EQUIVALENCE,
+            ExternalEnvs::<EmptyExternalEnv>::default(),
+        );
+        assert!(
+            !context.inner.cfg.tx_chain_id_check,
+            "new_with_context must pin revm-27 default regardless of caller's cfg"
+        );
+    }
+
+    /// The deprecated constructor fills the `MINI_REX` contract-size limits when the caller left
+    /// them unset. Pins the enabled side of the gate: dropping it would silently fall back to
+    /// revm's 24 KiB EIP-170 cap for every `MINI_REX`-and-later context built this way.
+    #[allow(deprecated)]
+    #[test]
+    fn test_new_with_context_fills_mini_rex_contract_size_limits() {
+        let inner: MegaInnerContext<EmptyDB> = revm::Context::op()
+            .with_tx(crate::MegaTransaction::default())
+            .with_db(EmptyDB::default());
+        assert_eq!(inner.cfg.limit_contract_code_size, None, "caller leaves the limits unset");
+        assert_eq!(inner.cfg.limit_contract_initcode_size, None);
+
+        let context = MegaContext::new_with_context(
+            inner,
+            MegaSpecId::MINI_REX,
+            ExternalEnvs::<EmptyExternalEnv>::default(),
+        );
+
+        assert_eq!(
+            context.inner.cfg.limit_contract_code_size,
+            Some(constants::mini_rex::MAX_CONTRACT_SIZE)
+        );
+        assert_eq!(
+            context.inner.cfg.limit_contract_initcode_size,
+            Some(constants::mini_rex::MAX_INITCODE_SIZE)
+        );
+    }
+
+    /// The `EQUIVALENCE` side of the same gate: the enlarged `MINI_REX` sizes must not leak into
+    /// the baseline spec, which keeps revm's EIP-170 / EIP-3860 defaults.
+    #[allow(deprecated)]
+    #[test]
+    fn test_new_with_context_keeps_equivalence_contract_size_defaults() {
+        let inner: MegaInnerContext<EmptyDB> = revm::Context::op()
+            .with_tx(crate::MegaTransaction::default())
+            .with_db(EmptyDB::default());
+
+        let context = MegaContext::new_with_context(
+            inner,
+            MegaSpecId::EQUIVALENCE,
+            ExternalEnvs::<EmptyExternalEnv>::default(),
+        );
+
+        assert_eq!(
+            context.inner.cfg.limit_contract_code_size, None,
+            "EQUIVALENCE must keep revm's EIP-170 default"
+        );
+        assert_eq!(
+            context.inner.cfg.limit_contract_initcode_size, None,
+            "EQUIVALENCE must keep revm's EIP-3860 default"
+        );
+    }
+
+    /// `with_cfg` fills the `MINI_REX` sizes only from `MINI_REX` on; an `EQUIVALENCE` config
+    /// comes out with revm's defaults untouched. Complements
+    /// `test_with_cfg_unpinned_still_applies_mega_pins`, which pins the enabled side.
+    #[test]
+    fn test_with_cfg_keeps_equivalence_contract_size_defaults() {
+        let context = MegaContext::new(EmptyDB::default(), MegaSpecId::EQUIVALENCE)
+            .with_cfg(CfgEnv::new_with_spec(MegaSpecId::EQUIVALENCE));
+
+        assert_eq!(context.mega_spec(), MegaSpecId::EQUIVALENCE);
+        assert_eq!(
+            context.inner.cfg.limit_contract_code_size, None,
+            "EQUIVALENCE must keep revm's EIP-170 default"
+        );
+        assert_eq!(
+            context.inner.cfg.limit_contract_initcode_size, None,
+            "EQUIVALENCE must keep revm's EIP-3860 default"
+        );
     }
 
     /// The test/bench-only `new_with_ext_envs` wrapper builds a `MegaContext`

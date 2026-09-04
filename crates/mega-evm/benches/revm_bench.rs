@@ -4,15 +4,13 @@
 //! workloads through mega-evm's execution pipeline, enabling performance comparison
 //! between vanilla revm, op-revm, and mega-evm.
 //!
-//! Each workload runs against five layers so a single `cargo bench` produces a
-//! comparable table:
+//! Each workload runs against three layers so a single `cargo bench` produces
+//! a comparable table:
 //!
 //! 1. `revm_pinned`     — vanilla `revm::Evm` at the version mega-evm currently pins.
-//! 2. `revm_latest`     — vanilla `revm::Evm` at the latest crates.io release.
-//! 3. `op_revm_pinned`  — `op_revm::OpEvm` at the version mega-evm currently pins (operator fee =
+//! 2. `op_revm_pinned`  — `op_revm::OpEvm` at the version mega-evm currently pins (operator fee =
 //!    0).
-//! 4. `op_revm_latest`  — `op_revm::OpEvm` at the latest crates.io release (operator fee = 0).
-//! 5. `mega_<spec>`     — `MegaEvm` at `EQUIVALENCE` / `MINI_REX` / `REX4` / `REX5`.
+//! 3. `mega_<spec>`     — `MegaEvm` at `EQUIVALENCE` / `MINI_REX` / `REX4` / `REX5`.
 //!
 //! Ported workloads:
 //! - **snailtracer**: CPU-intensive ray tracer exercising many opcodes

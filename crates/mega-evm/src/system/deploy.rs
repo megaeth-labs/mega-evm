@@ -21,10 +21,7 @@ use alloc as std;
 
 use alloy_evm::Database;
 use alloy_primitives::{keccak256, Address, Bytes, B256, U256};
-use revm::{
-    database::State,
-    state::{Account, Bytecode, EvmState, EvmStorageSlot},
-};
+use revm::state::{Account, Bytecode, EvmState, EvmStorageSlot, TransactionId};
 use std::vec::Vec;
 
 use crate::{MegaHardforks, MegaSpecId};
@@ -83,7 +80,7 @@ impl SystemContractSpec {
 /// is returned read-only (marked neither touched nor created, no seeding) so it
 /// is recorded in the witness without changing state.
 pub fn transact_deploy<DB: Database>(
-    db: &mut State<DB>,
+    db: &mut DB,
     spec: &SystemContractSpec,
 ) -> Result<EvmState, DB::Error> {
     // The spec's `code_hash` must be the hash of its `code`. The per-contract
@@ -96,16 +93,12 @@ pub fn transact_deploy<DB: Database>(
         spec.address
     );
 
-    let acc = db.load_cache_account(spec.address)?;
-
-    // Already deployed with the correct code — record the read, change nothing.
-    let existing_info = acc.account_info();
+    // `Database::basic` on revm's `State` is `load_cache_account(..).account_info()` plus the
+    // EIP-7928 BAL overlay, which is inert while BAL is disabled.
+    let existing_info = db.basic(spec.address)?;
     if let Some(account_info) = &existing_info {
         if account_info.code_hash == spec.code_hash {
-            return Ok(EvmState::from_iter([(
-                spec.address,
-                Account { info: account_info.clone(), ..Default::default() },
-            )]));
+            return Ok(EvmState::from_iter([(spec.address, Account::from(account_info.clone()))]));
         }
     }
 
@@ -124,7 +117,10 @@ pub fn transact_deploy<DB: Database>(
         // preserved (an in-place upgrade) would mix genesis slots into live
         // storage and record a wrong `original_value` for an already-set slot.
         for (slot, value) in &spec.seed {
-            revm_acc.storage.insert(*slot, EvmStorageSlot::new_changed(U256::ZERO, *value, 0));
+            revm_acc.storage.insert(
+                *slot,
+                EvmStorageSlot::new_changed(U256::ZERO, *value, TransactionId::ZERO),
+            );
         }
     }
 
@@ -179,7 +175,11 @@ mod tests {
     };
     use alloy_hardforks::ForkCondition;
     use alloy_primitives::address;
-    use revm::{database::InMemoryDB, state::AccountInfo, Database as _, DatabaseCommit};
+    use revm::{
+        database::{InMemoryDB, State},
+        state::AccountInfo,
+        Database as _, DatabaseCommit,
+    };
 
     fn addrs(specs: &[SystemContractSpec]) -> Vec<Address> {
         specs.iter().map(|s| s.address).collect()
@@ -217,6 +217,7 @@ mod tests {
                 nonce: 1,
                 code_hash: keccak256(&existing_code),
                 code: Some(Bytecode::new_raw(existing_code)),
+                account_id: None,
             },
         );
         db.insert_account_storage(SEEDED_ADDR, SEED_SLOT, U256::from(99)).unwrap();
@@ -254,6 +255,7 @@ mod tests {
                 nonce: 1,
                 code_hash: keccak256(&existing_code),
                 code: Some(Bytecode::new_raw(existing_code)),
+                account_id: None,
             },
         );
         // An unrelated live slot that recreation must clear.

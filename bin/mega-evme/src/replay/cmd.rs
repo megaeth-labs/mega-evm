@@ -454,7 +454,7 @@ impl Cmd {
             info!(spec_override = %spec_override, "Overriding EVM spec");
             let spec = MegaSpecId::from_str(spec_override)
                 .map_err(|e| ReplayError::Other(format!("Invalid spec: {e:?}")))?;
-            evm_env.cfg_env.spec = spec;
+            evm_env.cfg_env.set_spec_and_mainnet_gas_params(spec);
             block_limits = block_limits.with_tx_runtime_limits(EvmTxRuntimeLimits::from_spec(spec));
         }
 
@@ -529,10 +529,14 @@ impl Cmd {
         let evm_state = outcome.inner.state.clone();
 
         match &exec_result {
-            ExecutionResult::Success { gas_used, .. } => info!(gas_used, "Execution succeeded"),
-            ExecutionResult::Revert { gas_used, .. } => warn!(gas_used, "Execution reverted"),
-            ExecutionResult::Halt { reason, gas_used } => {
-                warn!(?reason, gas_used, "Execution halted")
+            ExecutionResult::Success { .. } => {
+                info!(gas_used = exec_result.tx_gas_used(), "Execution succeeded")
+            }
+            ExecutionResult::Revert { .. } => {
+                warn!(gas_used = exec_result.tx_gas_used(), "Execution reverted")
+            }
+            ExecutionResult::Halt { reason, .. } => {
+                warn!(?reason, gas_used = exec_result.tx_gas_used(), "Execution halted")
             }
         }
 
@@ -675,6 +679,7 @@ fn retrieve_block_env(block: &Block<Transaction>) -> Result<BlockEnv> {
         difficulty: block.header.difficulty(),
         prevrandao: block.header.mix_hash(),
         blob_excess_gas_and_price: None,
+        slot_num: 0,
     };
 
     let excess_blob_gas = block.header.excess_blob_gas().ok_or_else(|| {

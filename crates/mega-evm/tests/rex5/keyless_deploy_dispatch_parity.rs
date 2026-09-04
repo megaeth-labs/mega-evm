@@ -10,8 +10,8 @@ use alloy_primitives::{address, Address, Bytes, TxKind, U256};
 use alloy_sol_types::SolCall;
 use mega_evm::{
     revm::context::result::ExecutionResult, test_utils::MemoryDatabase, MegaContext, MegaEvm,
-    MegaHaltReason, MegaSpecId, MegaTransaction, TestExternalEnvs, KEYLESS_DEPLOY_ADDRESS,
-    KEYLESS_DEPLOY_CODE,
+    MegaHaltReason, MegaSpecId, MegaTransaction, MegaTransactionNew as _, TestExternalEnvs,
+    KEYLESS_DEPLOY_ADDRESS, KEYLESS_DEPLOY_CODE,
 };
 use revm::context::{result::ResultAndState, tx::TxEnvBuilder};
 

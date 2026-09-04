@@ -743,7 +743,7 @@ fn bench_eip7702_authlist(c: &mut Criterion) {
                     .gas_limit(100_000_000)
                     .authorization_list_recovered(auth_list.clone())
                     .build_fill();
-                let mut mega_tx = MegaTransaction::new(tx);
+                let mut mega_tx = MegaTransaction(op_revm::OpTransaction::new(tx));
                 mega_tx.enveloped_tx = Some(Bytes::new());
                 black_box(evm.transact(mega_tx))
             })

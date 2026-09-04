@@ -9,7 +9,6 @@ use alloy_primitives::{address, Address, Bytes, U256};
 use mega_evm::{
     test_utils::{BytecodeBuilder, MemoryDatabase},
     EvmTxRuntimeLimits, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
-    MegaTransactionError,
 };
 use revm::{
     bytecode::opcode::*,
@@ -40,7 +39,10 @@ fn transact(
     db: &mut MemoryDatabase,
     state_growth_limit: u64,
     tx: TxEnv,
-) -> Result<(ResultAndState<MegaHaltReason>, u64), EVMError<Infallible, MegaTransactionError>> {
+) -> Result<
+    (ResultAndState<MegaHaltReason>, u64),
+    EVMError<Infallible, mega_evm::alloy_op_evm::OpTxError>,
+> {
     let mut context = MegaContext::new(db, spec).with_tx_runtime_limits(
         EvmTxRuntimeLimits::no_limits().with_tx_state_growth_limit(state_growth_limit),
     );
@@ -49,7 +51,7 @@ fn transact(
         chain.operator_fee_constant = Some(U256::from(0));
     });
     let mut evm = MegaEvm::new(context);
-    let mut tx = MegaTransaction::new(tx);
+    let mut tx = MegaTransaction(op_revm::OpTransaction::new(tx));
     tx.enveloped_tx = Some(Bytes::new());
     let r = alloy_evm::Evm::transact_raw(&mut evm, tx)?;
 
@@ -662,7 +664,7 @@ fn test_gas_preserved_on_limit_exceeded() {
     assert!(is_state_growth_limit_exceeded(&result));
 
     // Gas should not all be consumed
-    let gas_used = result.result.gas_used();
+    let gas_used = result.result.tx_gas_used();
     assert!(gas_used < gas_limit, "Gas should be preserved on limit exceeded, not all consumed");
 }
 

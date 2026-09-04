@@ -282,7 +282,7 @@ impl TxRuntimeLimit for StateGrowthTracker {
                     // deployment uses; derive the target and skip the +1 when it already exists
                     // (e.g. a pre-funded balance-only account).
                     let caller_nonce =
-                        journal.inspect_account(create_inputs.caller, false)?.info.nonce;
+                        journal.inspect_account(create_inputs.caller(), false)?.info.nonce;
                     let created_address = create_inputs.created_address(caller_nonce);
                     let to_account = journal.inspect_account(created_address, false)?;
                     if to_account.state_clear_aware_is_empty(SpecId::PRAGUE) {
@@ -376,5 +376,68 @@ mod tests {
 
         tracker.reset();
         assert_eq!(tracker.tx_usage(), 0, "reset must clear accumulated state growth");
+    }
+
+    /// Pre-Rex4 specs enforce state growth at the TX level only, so every frame this tracker
+    /// pushes must be unbounded. The pre-Rex4 branches of `check_limit` and
+    /// `current_call_remaining` rely on it: with `u64::MAX` frame budgets the Rex4 frame check
+    /// can never fire and the Rex4 `min(frame, tx)` cap can never bind, which is what keeps the
+    /// two spec branches observationally identical for pre-Rex4 specs.
+    #[test]
+    fn test_pre_rex4_frames_are_pushed_unbounded() {
+        let mut tracker = StateGrowthTracker::new(MegaSpecId::REX3, 100);
+        tracker.push_frame();
+        assert_eq!(
+            tracker.frame_tracker.current_frame_remaining(),
+            u64::MAX,
+            "pre-Rex4 top-level frame must be unbounded"
+        );
+        tracker.record_growth(10);
+        tracker.push_frame();
+        assert_eq!(
+            tracker.frame_tracker.current_frame_remaining(),
+            u64::MAX,
+            "pre-Rex4 nested frame must be unbounded"
+        );
+    }
+
+    /// Rex4+ reports the per-call state-growth budget as `min(frame remaining, TX remaining)`,
+    /// not the TX remaining alone. `KeylessDeploy` hands this number to the sandbox as its own
+    /// TX-level state-growth limit, so dropping the frame cap would let the sandbox grow state
+    /// beyond what its calling frame is allowed to.
+    #[test]
+    fn test_rex4_current_call_remaining_is_capped_by_frame_budget() {
+        let mut tracker = StateGrowthTracker::new(MegaSpecId::REX5, 1_000);
+        tracker.push_frame(); // top-level frame: budget = TX remaining = 1_000
+        tracker.record_growth(10); // frame remaining = 990
+        tracker.push_frame(); // nested frame: budget = 990 * 98 / 100 = 970
+
+        assert_eq!(
+            tracker.tx_limit() - tracker.tx_usage(),
+            990,
+            "TX-level remaining alone is 990 — the frame cap must be tighter"
+        );
+        assert_eq!(
+            tracker.current_call_remaining(),
+            970,
+            "Rex4+ must cap the reported remaining by the current frame's budget"
+        );
+    }
+
+    /// Pre-Rex4 there is no per-frame budget, so the reported per-call remaining is the
+    /// TX-level remaining.
+    #[test]
+    fn test_pre_rex4_current_call_remaining_is_tx_remaining() {
+        let mut tracker = StateGrowthTracker::new(MegaSpecId::REX3, 1_000);
+        tracker.push_frame();
+        tracker.record_growth(10);
+        tracker.push_frame();
+        assert_eq!(tracker.current_call_remaining(), 990);
+    }
+
+    /// The `TxRuntimeLimit::tx_limit` accessor must report the configured TX-level budget.
+    #[test]
+    fn test_tx_limit_reports_configured_limit() {
+        assert_eq!(StateGrowthTracker::new(MegaSpecId::REX5, 4_321).tx_limit(), 4_321);
     }
 }

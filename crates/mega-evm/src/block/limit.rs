@@ -124,7 +124,7 @@
 //!    - During execution, tx-level limits (4-6) are enforced in EVM
 //!    - If exceeded → Transaction fails but continues to step 3
 //!
-//! 3. **Post-execution update** - [`BlockLimiter::post_execution_update`]
+//! 3. **Post-execution update** - [`BlockLimiter::post_execution_update_raw`]
 //!    - Accumulates resource usage from the executed transaction into block-level counters
 //!    - Does not validate post-execution limits; over-limit enforcement happens before admitting
 //!      the next transaction in [`BlockLimiter::pre_execution_check`]
@@ -187,17 +187,11 @@
 use alloc as std;
 use std::boxed::Box;
 
-use alloy_consensus::Transaction;
-use alloy_evm::{
-    block::{BlockExecutionError, BlockValidationError},
-    RecoveredTx,
-};
+use alloy_evm::block::{BlockExecutionError, BlockValidationError};
 use alloy_primitives::TxHash;
-use op_revm::transaction::deposit::DEPOSIT_TRANSACTION_TYPE;
 
 use crate::{
-    BlockMegaTransactionOutcome, EvmTxRuntimeLimits, MegaBlockLimitExceededError, MegaHardfork,
-    MegaTransactionExt, MegaTxLimitExceededError,
+    EvmTxRuntimeLimits, MegaBlockLimitExceededError, MegaHardfork, MegaTxLimitExceededError,
 };
 
 /// Configuration for block-level resource limits. The block-level resource limits are associated
@@ -658,8 +652,8 @@ impl BlockLimits {
 ///
 ///     let outcome = execute_transaction(tx);
 ///
-///     // Post-execution update
-///     limiter.post_execution_update(&outcome)?;
+///     // Post-execution update (the executor commit path drives this internally)
+///     limiter.post_execution_update_raw(gas, tx_size, da_size, data, kv, compute, growth, is_deposit);
 /// }
 /// ```
 #[derive(Debug, Clone)]
@@ -731,8 +725,8 @@ impl BlockLimiter {
     /// - Remaining block DA size capacity
     ///
     /// **Important**: This method does **not** modify any state. It only performs validation.
-    /// Call [`post_execution_update`](Self::post_execution_update) after execution to update
-    /// usage counters.
+    /// Call [`post_execution_update_raw`](Self::post_execution_update_raw) after execution to
+    /// update usage counters.
     ///
     /// # Parameters
     ///
@@ -899,73 +893,13 @@ impl BlockLimiter {
 
     /// Update usage counters after transaction execution.
     ///
-    /// This method is called **after** transaction execution to accumulate the executed
-    /// transaction's resource usage into the limiter's block-level counters. It does **not**
-    /// validate post-execution limits — over-limit enforcement happens in
-    /// [`pre_execution_check`](Self::pre_execution_check) before admitting the next transaction.
-    /// The transaction may cause the block to exceed limits, which is intentional to maximize
-    /// block utilization.
-    ///
-    /// The return type remains `Result` to leave room for future fallible post-execution logic;
-    /// the current implementation always returns `Ok(())`.
-    ///
-    /// # Parameters
-    ///
-    /// - `outcome`: The transaction execution outcome containing resource usage information
-    ///
-    /// # Returns
-    ///
-    /// - `Ok(())`: Usage counters updated successfully
-    ///
-    /// # State Modification
-    ///
-    /// This method updates all cumulative usage counters:
-    /// - `block_gas_used += gas_used`
-    /// - `block_tx_size_used += tx_size_used`
-    /// - `block_da_size_used += da_size_used` (only for non-deposit transactions)
-    /// - `block_data_used += data_size_used`
-    /// - `block_kv_updates_used += kv_updates_used`
-    /// - `block_compute_gas_used += compute_gas_used`
-    /// - `block_state_growth_used += state_growth_used`
-    ///
-    /// **Note**: The block may exceed limits after this update. This is intentional - the first
-    /// transaction that causes the block to exceed is allowed to be included.
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// let outcome = executor.execute_mega_transaction(tx)?;
-    ///
-    /// // Accumulates usage; may cause block-level counters to exceed limits.
-    /// limiter.post_execution_update(&outcome)?;
-    ///
-    /// // Commit the transaction state
-    /// executor.commit_execution_outcome(outcome)?;
-    /// ```
-    pub fn post_execution_update<T: Transaction + MegaTransactionExt>(
-        &mut self,
-        outcome: &BlockMegaTransactionOutcome<impl RecoveredTx<T>>,
-    ) -> Result<(), BlockExecutionError> {
-        let is_deposit = outcome.tx.tx().ty() == DEPOSIT_TRANSACTION_TYPE;
-
-        self.post_execution_update_raw(
-            outcome.result.gas_used(),
-            outcome.tx_size,
-            outcome.da_size,
-            outcome.data_size,
-            outcome.kv_updates,
-            outcome.compute_gas_used,
-            outcome.state_growth_used,
-            is_deposit,
-        );
-
-        Ok(())
-    }
-
-    /// Update usage counters after transaction execution using raw values.
-    ///
-    /// This mirrors [`post_execution_update`](Self::post_execution_update) but takes precomputed
-    /// resource usage values instead of a full execution outcome.
+    /// Called **after** transaction execution to accumulate the executed transaction's resource
+    /// usage into the limiter's block-level counters. It does **not** validate post-execution
+    /// limits — over-limit enforcement happens in
+    /// [`pre_execution_check`](Self::pre_execution_check) before admitting the next transaction;
+    /// the transaction may push the block over a limit, which is intentional to maximize block
+    /// utilization. `is_deposit` gates only the DA-size counter: deposits are exempt from DA
+    /// accounting.
     #[allow(clippy::too_many_arguments)]
     pub fn post_execution_update_raw(
         &mut self,
