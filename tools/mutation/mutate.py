@@ -44,8 +44,15 @@ LOG_DIR = Path("tools/mutation/logs")
 # Crash-recovery journal: written before each mutant apply, removed after restore.
 DEFAULT_JOURNAL = Path("tools/mutation/.mutate-journal.json")
 
-# Linear MegaSpecId order (must match crates/mega-evm/src/evm/spec.rs enum).
-# Enumeration hard-fails if the source enum diverges from this list.
+# Linear order of the behavior-introducing MegaSpecId variants (must match
+# crates/mega-evm/src/evm/spec.rs, minus the alias rungs). Enumeration
+# hard-fails if the source enum diverges from this list.
+#
+# Alias rungs (MINI_REX_1, MINI_REX_2) are deliberately absent: `is_enabled`
+# compares behavior projections, and an alias executes an earlier spec's
+# behavior instead of introducing its own — on the behavior axis these rungs do
+# not exist, so an adjacent swap onto one would be a double shift in disguise.
+# The alias set is parsed from `MegaSpecId::behavior()` at verification time.
 SPEC_ORDER: Tuple[str, ...] = (
     "EQUIVALENCE",
     "MINI_REX",
@@ -605,27 +612,88 @@ def parse_megaspec_variants(root: Path) -> List[str]:
     return variants
 
 
+def parse_alias_specs(root: Path) -> Dict[str, str]:
+    """Parse the alias projections (`Self::ALIAS => Self::TARGET`) from `MegaSpecId::behavior`.
+
+    Returns {alias: behavior target}. The catch-all `other => other` arm is not an alias.
+    """
+    path = root / SPEC_RS
+    if not path.is_file():
+        raise SystemExit(f"missing MegaSpecId source: {path}")
+    text = path.read_text(encoding="utf-8")
+    m = re.search(r"pub\s+const\s+fn\s+behavior\s*\(\s*self\s*\)\s*->\s*Self\s*\{", text)
+    if not m:
+        raise SystemExit(f"could not find `MegaSpecId::behavior` in {SPEC_RS}")
+    # Brace-match the function body.
+    i = m.end() - 1  # position of '{'
+    depth = 0
+    end = None
+    for j in range(i, len(text)):
+        c = text[j]
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                end = j
+                break
+    if end is None:
+        raise SystemExit(f"unclosed `MegaSpecId::behavior` body in {SPEC_RS}")
+    body = text[i + 1 : end]
+    aliases: Dict[str, str] = {}
+    for am in re.finditer(
+        r"Self::([A-Za-z_][A-Za-z0-9_]*)\s*=>\s*Self::([A-Za-z_][A-Za-z0-9_]*)", body
+    ):
+        alias, target = am.group(1), am.group(2)
+        if alias != target:
+            aliases[alias] = target
+    return aliases
+
+
 def verify_spec_order(root: Path) -> None:
-    """Hard-fail if SPEC_ORDER does not exactly match MegaSpecId in source."""
+    """Hard-fail if SPEC_ORDER does not match the behavior-introducing variants in source.
+
+    The source enum also carries alias rungs (see `MegaSpecId::behavior`); those are
+    removed before the comparison because they have no position on the behavior axis
+    that `adjacent_spec` moves along.
+    """
     found = parse_megaspec_variants(root)
-    if found != list(SPEC_ORDER):
+    aliases = parse_alias_specs(root)
+    unknown = sorted(a for a in aliases if a not in found)
+    if unknown:
+        raise SystemExit(
+            f"alias specs in `MegaSpecId::behavior` are not enum variants: {unknown}"
+        )
+    bad_targets = {a: t for a, t in aliases.items() if t not in SPEC_ORDER}
+    if bad_targets:
+        raise SystemExit(
+            "alias specs must project onto a behavior-introducing spec in SPEC_ORDER; "
+            f"offending projections: {bad_targets}"
+        )
+    behavior_specs = [v for v in found if v not in aliases]
+    if behavior_specs != list(SPEC_ORDER):
         raise SystemExit(
             "MegaSpecId order mismatch between harness SPEC_ORDER and "
-            f"{SPEC_RS}:\n"
+            f"{SPEC_RS} (alias rungs {sorted(aliases)} excluded):\n"
             f"  harness: {list(SPEC_ORDER)}\n"
-            f"  source:  {found}\n"
+            f"  source:  {behavior_specs}\n"
             "Update SPEC_ORDER (and adjacent_spec) before enumerating."
         )
 
 
 def adjacent_specs(name: str) -> Tuple[Optional[str], Optional[str]]:
-    """Return (predecessor, successor) for a MegaSpecId name, or None at ends."""
+    """Return (predecessor, successor) for a MegaSpecId name, or None at ends.
+
+    Alias rungs are not in SPEC_ORDER: a product gate on one has no neighbour on the
+    behavior axis, so enumeration stops rather than guessing a shift.
+    """
     try:
         idx = SPEC_ORDER.index(name)
     except ValueError as e:
         raise SystemExit(
-            f"unknown MegaSpecId variant in product gate: {name!r}. "
-            f"Known: {list(SPEC_ORDER)}"
+            f"MegaSpecId variant in product gate is unknown or an alias rung: {name!r}. "
+            f"adjacent_spec only moves along the behavior-introducing ladder "
+            f"{list(SPEC_ORDER)}; gate on the alias's behavior target instead."
         ) from e
     pred = SPEC_ORDER[idx - 1] if idx > 0 else None
     succ = SPEC_ORDER[idx + 1] if idx + 1 < len(SPEC_ORDER) else None
