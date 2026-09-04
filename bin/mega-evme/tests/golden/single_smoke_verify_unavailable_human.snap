@@ -1,0 +1,14 @@
+# mega-evme replay equivalence baseline
+# case:    single_smoke_verify_unavailable_human
+# capture: replay_offline_smoke.cache.json
+# argv:    replay --rpc.replay-file <CAPTURE> --verify-receipt 0xf0ac58ac093e718e12fb9d00bb79c28c335343f79d8cb4ab804a5e1b6c5c4adf
+
+== exit code ==
+3
+
+== stdout ==
+(empty)
+
+== stderr ==
+error: RPC error: Failed to fetch receipt: cache miss in offline replay file '<CAPTURE>': method=eth_getTransactionReceipt, params=["0xf0ac58ac093e718e12fb9d00bb79c28c335343f79d8cb4ab804a5e1b6c5c4adf"]
+hint: re-capture with `mega-evme replay <tx> --rpc <URL> --rpc.capture-file <CAPTURE>`

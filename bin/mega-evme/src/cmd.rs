@@ -1,5 +1,4 @@
 use clap::{Parser, Subcommand};
-use tracing::error;
 
 use crate::common::LogArgs;
 
@@ -26,6 +25,8 @@ pub enum Commands {
     Tx(crate::tx::Cmd),
     /// Replay a transaction from RPC
     Replay(crate::replay::Cmd),
+    /// Offline RPC cache utilities (`cache merge`, …)
+    Cache(crate::cache::Cmd),
 }
 
 /// Error types for the main command system
@@ -40,29 +41,33 @@ pub enum Error {
 }
 
 impl MainCmd {
-    /// Execute the main command
+    /// Execute the main command.
+    ///
+    /// Failures are returned, never reported here: the binary hands the result
+    /// to [`crate::common::report_command_result`], which owns the single
+    /// failure report and the process exit code.
     pub async fn run(self) -> Result<(), Error> {
         // Initialize logging first
         self.log.init();
 
         match self.command {
-            Commands::Run(cmd) => {
-                cmd.run().await?;
-                Ok(())
-            }
-            Commands::Tx(cmd) => {
-                cmd.run().await?;
-                Ok(())
-            }
-            Commands::Replay(cmd) => {
-                cmd.run().await?;
-                Ok(())
-            }
+            Commands::Run(cmd) => cmd.run().await.map_err(Error::from),
+            Commands::Tx(cmd) => cmd.run().await.map_err(Error::from),
+            Commands::Replay(cmd) => cmd.run().await.map_err(Error::from),
+            Commands::Cache(cmd) => cmd.run().map_err(Error::from),
         }
-        .inspect_err(|e| {
-            error!(err = ?e, "Error executing command");
-            eprintln!("{e}");
-            std::process::exit(1);
-        })
+    }
+
+    /// Whether the selected subcommand was asked for machine-readable output.
+    ///
+    /// Read before [`Self::run`] consumes the command, so a failure is reported
+    /// in the output mode the user asked for. `cache` has no `--json` mode.
+    pub const fn json_output(&self) -> bool {
+        match &self.command {
+            Commands::Run(cmd) => cmd.output_args.json,
+            Commands::Tx(cmd) => cmd.output_args.json,
+            Commands::Replay(cmd) => cmd.output_args.json,
+            Commands::Cache(_) => false,
+        }
     }
 }

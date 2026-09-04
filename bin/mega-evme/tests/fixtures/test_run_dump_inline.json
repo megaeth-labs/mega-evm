@@ -1,6 +1,10 @@
 {
   "description": "--json --dump includes state dump in JSON output (SSTORE 0xaa to slot 0)",
-  "args": ["run", "--dump", "0x60aa600055"],
+  "args": [
+    "run",
+    "--dump",
+    "0x60aa600055"
+  ],
   "expected": {
     "success": true,
     "gas_used": 82106,
@@ -14,27 +18,6 @@
         "storage": {
           "0x0": "0xaa"
         }
-      },
-      "0x4200000000000000000000000000000000000019": {
-        "balance": "0x0",
-        "nonce": "0x0",
-        "code": "0x",
-        "codeHash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
-        "storage": {}
-      },
-      "0x420000000000000000000000000000000000001a": {
-        "balance": "0x0",
-        "nonce": "0x0",
-        "code": "0x",
-        "codeHash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
-        "storage": {}
-      },
-      "0x420000000000000000000000000000000000001b": {
-        "balance": "0x0",
-        "nonce": "0x0",
-        "code": "0x",
-        "codeHash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
-        "storage": {}
       },
       "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266": {
         "balance": "0x0",

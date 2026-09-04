@@ -3,9 +3,13 @@
 //! This module provides functionality to replay historical transactions
 //! by fetching them from an RPC endpoint and re-executing them.
 
+mod batch;
 mod cmd;
+mod coherence;
 mod fixture;
 mod hardforks;
+mod kernel;
+mod verify;
 
 pub use cmd::Cmd;
 pub use hardforks::*;
