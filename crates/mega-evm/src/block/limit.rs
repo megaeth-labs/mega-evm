@@ -107,8 +107,9 @@
 //!   block-level Data Availability size limit checks during pre-execution validation
 //! - **Rationale**: Deposit transactions are trustless L1→L2 messages that cannot be censored. They
 //!   must be included in blocks regardless of their DA size to maintain bridge integrity
-//! - **Tracking**: While exempt from limit checks, deposit DA sizes are still tracked and
-//!   accumulated in block DA usage counters for monitoring purposes
+//! - **Tracking**: Deposit DA sizes are not accumulated into the block DA usage counter
+//!   (`block_da_size_used`). The spec permits tracking them for monitoring (RFC-2119 MAY), but the
+//!   executor opts out, so the counter reflects only non-deposit transactions.
 //! - **Other Limits**: Deposit transactions are still subject to all other limits (gas, tx size,
 //!   compute gas, data size, KV updates)
 //!
