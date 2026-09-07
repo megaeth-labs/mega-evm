@@ -20,9 +20,10 @@ use std::convert::Infallible;
 use alloy_primitives::{address, Address, Bytes, U256};
 use alloy_sol_types::SolError;
 use mega_evm::{
+    alloy_op_evm::OpTxError,
     test_utils::{BytecodeBuilder, MemoryDatabase},
     EvmTxRuntimeLimits, MegaContext, MegaEvm, MegaHaltReason, MegaLimitExceeded, MegaSpecId,
-    MegaTransaction, MegaTransactionError, ACCOUNT_INFO_WRITE_SIZE, BASE_TX_SIZE,
+    MegaTransaction, MegaTransactionNew as _, ACCOUNT_INFO_WRITE_SIZE, BASE_TX_SIZE,
     STORAGE_SLOT_WRITE_SIZE,
 };
 use revm::{
@@ -56,8 +57,7 @@ fn transact_data_kv(
     data_limit: u64,
     kv_limit: u64,
     tx: TxEnv,
-) -> Result<(ResultAndState<MegaHaltReason>, u64, u64), EVMError<Infallible, MegaTransactionError>>
-{
+) -> Result<(ResultAndState<MegaHaltReason>, u64, u64), EVMError<Infallible, OpTxError>> {
     let mut context = MegaContext::new(db, spec).with_tx_runtime_limits(
         EvmTxRuntimeLimits::no_limits()
             .with_tx_data_size_limit(data_limit)
@@ -83,7 +83,7 @@ fn transact_compute(
     db: &mut MemoryDatabase,
     compute_gas_limit: u64,
     tx: TxEnv,
-) -> Result<(ResultAndState<MegaHaltReason>, u64), EVMError<Infallible, MegaTransactionError>> {
+) -> Result<(ResultAndState<MegaHaltReason>, u64), EVMError<Infallible, OpTxError>> {
     let mut context = MegaContext::new(db, spec).with_tx_runtime_limits(
         EvmTxRuntimeLimits::no_limits().with_tx_compute_gas_limit(compute_gas_limit),
     );

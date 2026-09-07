@@ -28,8 +28,17 @@ exclude_globs = [
 
 # Give slow EVM-execution tests headroom before a mutant is ruled a timeout
 # (a timeout is treated as "could not decide", not as a survivor).
-minimum_test_timeout = 120
-timeout_multiplier = 3.0
+#
+# The multiplier applies to the baseline test time, which is measured with the suite running
+# alone, while every mutant is tested with `--jobs $(nproc)` sibling jobs competing for the
+# same cores — so the very same suite needs several times its baseline wall clock to finish.
+# A ceiling near that contended duration does not read "this mutant is slow", it reads "the
+# run was cut off": nextest stops at the first failing test, so a mutant whose killing test
+# sits at the end of the global test queue is caught only in the run's final seconds, and a
+# cut-off run is reported as an inconclusive timeout instead of as caught. Keep the ceiling at
+# a few times the contended duration so only genuine non-termination can reach it.
+minimum_test_timeout = 300
+timeout_multiplier = 8.0
 
 # Seed each scratch build directory from ./target so mutant builds reuse the
 # already-compiled dependencies instead of recompiling them from scratch. Paired

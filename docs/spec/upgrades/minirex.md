@@ -117,7 +117,7 @@ The 98/100 rule reduces this to approximately 10 gas.
 
 #### New behavior
 
-- `SELFDESTRUCT` halts execution with `InvalidFEOpcode`.
+- `SELFDESTRUCT` halts execution and consumes the frame's entire remaining gas.
 - Contracts relying on self-destruct patterns must migrate to alternatives.
 
 ### Contract Size Limits
@@ -171,7 +171,7 @@ Front-load volatile reads and minimize computation after access.
 **Subcalls receive at most 98/100 of remaining gas.**
 Contracts depending on precise 63/64 gas forwarding behavior may need adjustment.
 
-**SELFDESTRUCT is disabled** — contracts using it will halt with `InvalidFEOpcode`.
+**SELFDESTRUCT is disabled** — contracts using it will halt and forfeit all remaining gas.
 
 **Contracts can now be up to 512 KB**, enabling significantly larger deployments.
 

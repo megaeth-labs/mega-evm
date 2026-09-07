@@ -13,24 +13,26 @@ use op_revm::{
 };
 use revm::{
     context::{
-        result::{ExecutionResult, FromStringError, InvalidTransaction},
+        result::{ExecutionResult, FromStringError, InvalidTransaction, ResultGas},
         transaction::{AuthorizationTr, TransactionType},
         Block, Cfg, ContextError, ContextTr, FrameStack, JournalTr, LocalContextTr, Transaction,
     },
     handler::{
         evm::{ContextDbError, FrameInitResult},
         instructions::InstructionProvider,
-        post_execution::output as post_execution_output,
+        post_execution::{build_result_gas, output as post_execution_output},
         pre_execution::validate_account_nonce_and_code,
         EthFrame, EvmTr, EvmTrError, FrameInitOrResult, FrameResult, FrameTr, Handler,
         ItemOrResult,
     },
     inspector::{
         handler::{frame_end, frame_start},
-        inspect_instructions, InspectorEvmTr, InspectorFrame, InspectorHandler,
+        inspect_instructions, InspectorEvmTr, InspectorHandler,
     },
     interpreter::{
-        gas::get_tokens_in_calldata, interpreter::EthInterpreter, interpreter_action::FrameInit,
+        gas::{get_tokens_in_calldata, NON_ZERO_BYTE_MULTIPLIER_ISTANBUL},
+        interpreter::EthInterpreter,
+        interpreter_action::FrameInit,
         CallOutcome, CallScheme, CreateOutcome, FrameInput, Gas, InitialAndFloorGas,
         InstructionResult, InterpreterAction, InterpreterResult,
     },
@@ -134,7 +136,7 @@ where
                             ))
                         })?;
                     validate_account_nonce_and_code(
-                        &mut state_account.info,
+                        &state_account.info,
                         tx_nonce,
                         disable_eip3607,
                         disable_nonce_check,
@@ -165,7 +167,7 @@ where
         // Check if the initial gas exceeds the tx gas limit, if so, we halt with out of gas
         let ctx = evm.ctx();
         let tx = ctx.tx();
-        if tx.gas_limit() < init_and_floor_gas.initial_gas {
+        if tx.gas_limit() < init_and_floor_gas.initial_regular_gas {
             // If not sufficient gas, we halt with out of gas
             let oog_frame_result = gen_oog_frame_result(tx.kind(), tx.gas_limit());
             return Ok(Some(oog_frame_result));
@@ -458,7 +460,7 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
             if frame.data.is_create() && interpreter_result.is_ok() {
                 let code_deposit_storage_gas = constants::mini_rex::CODEDEPOSIT_STORAGE_GAS *
                     interpreter_result.output.len() as u64;
-                if !interpreter_result.gas.record_cost(code_deposit_storage_gas) {
+                if !interpreter_result.gas.record_regular_cost(code_deposit_storage_gas) {
                     interpreter_result.result = InstructionResult::OutOfGas;
                 }
             }
@@ -472,7 +474,7 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
                 if will_return_create_charge_code_deposit(
                     interpreter_result,
                     cfg.max_code_size(),
-                    cfg.spec().into(),
+                    cfg.spec().into_eth_spec(),
                     cfg.is_eip3541_disabled(),
                 ) {
                     let code_len = interpreter_result.output.len() as u64;
@@ -582,14 +584,19 @@ where
             fn validate_against_state_and_deduct_caller(
                 &self,
                 evm: &mut Self::Evm,
+                init_and_floor_gas: &mut InitialAndFloorGas,
             ) -> Result<(), Self::Error>;
             fn reimburse_caller(&self, evm: &mut Self::Evm, exec_result: &mut <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult) -> Result<(), Self::Error>;
             fn refund(&self, evm: &mut Self::Evm, exec_result: &mut <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult, eip7702_refund: i64);
         }
     }
 
-    fn pre_execution(&self, evm: &mut Self::Evm) -> Result<u64, Self::Error> {
-        self.validate_against_state_and_deduct_caller(evm)?;
+    fn pre_execution(
+        &self,
+        evm: &mut Self::Evm,
+        init_and_floor_gas: &mut InitialAndFloorGas,
+    ) -> Result<u64, Self::Error> {
+        self.validate_against_state_and_deduct_caller(evm, init_and_floor_gas)?;
         self.load_accounts(evm)?;
         // EIP-7702 authority state-growth handling, split by spec era. Only type-4 txs reach
         // either branch, and no exempt (system-originated) tx is type-4 here — system txs are
@@ -626,25 +633,34 @@ where
             }
         }
 
-        self.apply_eip7702_auth_list(evm)
+        self.apply_eip7702_auth_list(evm, init_and_floor_gas)
     }
 
     fn run_system_call(
         &mut self,
         evm: &mut Self::Evm,
     ) -> Result<ExecutionResult<Self::HaltReason>, Self::Error> {
-        // system call does not call `pre_execution` and `post_execution`, so we need to extract
-        // some logic from them.
+        // System calls skip validation, pre-execution, and post-execution (reimburse_caller /
+        // reward_beneficiary / operator_fee_refund). That matches:
+        // - pre-migration MegaHandler (revm 27 / op-revm 8)
+        // - revm-handler 20 `Handler::run_system_call` /
+        //   `InspectorHandler::inspect_run_system_call`
+        // Calling `post_execution` here panics under Isthmus when `L1BlockInfo` has no operator
+        // fee scalars (`Missing operator fee scalar for isthmus L1 Block`) and would also charge
+        // fees for pre-block EIP system calls that never deduct the caller.
         let ctx = evm.ctx_mut();
         ctx.on_new_tx();
 
         // dummy values that are not used.
         let init_and_floor_gas = InitialAndFloorGas::new(0, 0);
-        // call execution and than output.
-        match self
-            .execution(evm, &init_and_floor_gas)
-            .and_then(|exec_result| self.execution_result(evm, exec_result))
-        {
+        // call execution then output (no post_execution).
+        match self.execution(evm, &init_and_floor_gas).and_then(|exec_result| {
+            // System calls have no intrinsic gas; build ResultGas from the frame result.
+            // Mirrors revm-handler 20.0.3 `Handler::run_system_call`.
+            let gas = exec_result.gas();
+            let result_gas = build_result_gas(false, gas, init_and_floor_gas);
+            self.execution_result(evm, exec_result, result_gas)
+        }) {
             out @ Ok(_) => out,
             Err(e) => self.catch_error(evm, e),
         }
@@ -656,13 +672,14 @@ where
     ) -> Result<ExecutionResult<Self::HaltReason>, Self::Error> {
         self.before_run(evm)?;
 
-        let init_and_floor_gas = self.validate(evm)?;
-        let eip7702_refund = self.pre_execution(evm)? as i64;
+        let mut init_and_floor_gas = self.validate(evm)?;
+        let eip7702_refund = self.pre_execution(evm, &mut init_and_floor_gas)? as i64;
         let mut exec_result = self.execution(evm, &init_and_floor_gas)?;
-        self.post_execution(evm, &mut exec_result, init_and_floor_gas, eip7702_refund)?;
+        let result_gas =
+            self.post_execution(evm, &mut exec_result, init_and_floor_gas, eip7702_refund)?;
 
         // Prepare the output
-        self.execution_result(evm, exec_result)
+        self.execution_result(evm, exec_result, result_gas)
     }
 
     /// This function copies the logic from `revm::handler::Handler::validate` to and
@@ -699,15 +716,16 @@ where
             // `frame_init` function.
             ctx.additional_limit()
                 .borrow_mut()
-                .record_compute_gas(initial_and_floor_gas.initial_gas);
+                .record_compute_gas(initial_and_floor_gas.initial_regular_gas);
 
             // MegaETH MiniRex modification: calldata storage gas costs (10x the standard EVM rates)
             // - Standard tokens: 40 gas per token (vs 4)
             // - EIP-7623 floor: 100 gas per token (vs 10)
-            let tokens_in_calldata = get_tokens_in_calldata(ctx.tx().input(), true);
+            let tokens_in_calldata =
+                get_tokens_in_calldata(ctx.tx().input(), NON_ZERO_BYTE_MULTIPLIER_ISTANBUL);
             let calldata_storage_gas =
                 constants::mini_rex::CALLDATA_STANDARD_TOKEN_STORAGE_GAS * tokens_in_calldata;
-            initial_and_floor_gas.initial_gas += calldata_storage_gas;
+            initial_and_floor_gas.initial_regular_gas += calldata_storage_gas;
             let floor_calldata_storage_gas =
                 constants::mini_rex::CALLDATA_STANDARD_TOKEN_STORAGE_FLOOR_GAS * tokens_in_calldata;
             initial_and_floor_gas.floor_gas += floor_calldata_storage_gas;
@@ -715,7 +733,8 @@ where
             // MegaETH Rex modification: additional intrinsic storage gas cost
             // Add 39,000 gas on top of base intrinsic gas for all transactions
             if is_rex_enabled {
-                initial_and_floor_gas.initial_gas += constants::rex::TX_INTRINSIC_STORAGE_GAS;
+                initial_and_floor_gas.initial_regular_gas +=
+                    constants::rex::TX_INTRINSIC_STORAGE_GAS;
             }
 
             // Pre-REX5: keep the historical mid-sequence initial-gas check here so existing
@@ -727,10 +746,11 @@ where
             // after CREATE/new-account storage gas has also been added so a transaction that
             // cannot fit its final Mega-side intrinsic+storage gas is rejected as a validation
             // error before pre_execution() debits the sender or bumps the nonce.
-            if !is_rex5_enabled && initial_and_floor_gas.initial_gas > ctx.tx().gas_limit() {
+            if !is_rex5_enabled && initial_and_floor_gas.initial_regular_gas > ctx.tx().gas_limit()
+            {
                 return Err(InvalidTransaction::CallGasCostMoreThanGasLimit {
                     gas_limit: ctx.tx().gas_limit(),
-                    initial_gas: initial_and_floor_gas.initial_gas,
+                    initial_gas: initial_and_floor_gas.initial_regular_gas,
                 }
                 .into());
             }
@@ -792,7 +812,7 @@ where
                     (address, storage_gas)
                 }
             };
-            initial_and_floor_gas.initial_gas += storage_gas.ok_or_else(|| {
+            initial_and_floor_gas.initial_regular_gas += storage_gas.ok_or_else(|| {
                 let err_str =
                     format!("Failed to get storage gas for callee address: {callee_address}",);
                 Self::Error::from_string(err_str)
@@ -808,7 +828,7 @@ where
                             "Failed to get storage gas for EIP-7702 authority: {authority}",
                         ))
                     })?;
-                initial_and_floor_gas.initial_gas += authority_storage_gas;
+                initial_and_floor_gas.initial_regular_gas += authority_storage_gas;
             }
 
             // REX5+: charge dynamic new-account storage gas for a deposit-driven caller
@@ -858,7 +878,7 @@ where
                                     );
                                     Self::Error::from_string(err_str)
                                 })?;
-                            initial_and_floor_gas.initial_gas += storage_gas;
+                            initial_and_floor_gas.initial_regular_gas += storage_gas;
                         }
                         ctx.additional_limit.borrow_mut().record_deposit_caller_creation();
                     }
@@ -872,10 +892,10 @@ where
             // when the tx cannot fit its final intrinsic+storage gas requirement.
             if is_rex5_enabled {
                 let gas_limit = ctx.tx().gas_limit();
-                if initial_and_floor_gas.initial_gas > gas_limit {
+                if initial_and_floor_gas.initial_regular_gas > gas_limit {
                     return Err(InvalidTransaction::CallGasCostMoreThanGasLimit {
                         gas_limit,
-                        initial_gas: initial_and_floor_gas.initial_gas,
+                        initial_gas: initial_and_floor_gas.initial_regular_gas,
                     }
                     .into());
                 }
@@ -904,15 +924,15 @@ where
             return Ok(oog_frame_result);
         }
 
-        let gas_limit = evm.ctx().tx().gas_limit() - init_and_floor_gas.initial_gas;
+        let gas_limit = evm.ctx().tx().gas_limit() - init_and_floor_gas.initial_regular_gas;
         // Create first frame action
-        let first_frame_input = self.first_frame_input(evm, gas_limit)?;
+        let first_frame_input = self.first_frame_input(evm, gas_limit, 0)?;
 
         // Run execution loop
         let mut frame_result = self.run_exec_loop(evm, first_frame_input)?;
 
         // Handle last frame result
-        self.last_frame_result(evm, &mut frame_result)?;
+        self.last_frame_result(evm, 0, &mut frame_result)?;
         Ok(frame_result)
     }
 
@@ -962,6 +982,7 @@ where
     fn last_frame_result(
         &mut self,
         evm: &mut Self::Evm,
+        original_reservoir: u64,
         frame_result: &mut <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult,
     ) -> Result<(), Self::Error> {
         let is_mini_rex = evm.ctx().spec.is_enabled(MegaSpecId::MINI_REX);
@@ -974,7 +995,7 @@ where
         // This will finalize gas accounting according to REVM's rules:
         // - Spends all gas_limit
         // - Only refunds remaining gas if is_ok_or_revert()
-        self.op.last_frame_result(evm, frame_result)?;
+        self.op.last_frame_result(evm, original_reservoir, frame_result)?;
 
         // After REVM's gas accounting, we need to return the rescued gas from additional limits.
         if is_mini_rex {
@@ -992,6 +1013,7 @@ where
         &mut self,
         evm: &mut Self::Evm,
         result: <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult,
+        result_gas: ResultGas,
     ) -> Result<ExecutionResult<Self::HaltReason>, Self::Error> {
         // Capture volatile data info for error reporting
         let volatile_info = evm
@@ -1018,17 +1040,17 @@ where
                 Err(ContextError::Custom(e)) => return Err(Self::Error::from_string(e)),
                 Ok(_) => (),
             }
-            let exec_result =
-                post_execution_output(evm.ctx(), result).map_haltreason(OpHaltReason::Base);
+            let exec_result = post_execution_output(evm.ctx(), result, result_gas)
+                .map_haltreason(OpHaltReason::Base);
             evm.ctx().journal_mut().commit_tx();
             evm.ctx().chain_mut().clear_tx_l1_cost();
             evm.ctx().local_mut().clear();
             evm.frame_stack().clear();
             exec_result
         } else {
-            self.op.execution_result(evm, result)?
+            self.op.execution_result(evm, result, result_gas)?
         };
-        Ok(result.map_haltreason(|reason| {
+        let result = result.map_haltreason(|reason| {
             let mut additional_limit = evm.ctx().additional_limit.borrow_mut();
             if additional_limit.is_exceeding_limit_halt(&reason) {
                 if let Some(access_type) = volatile_info {
@@ -1048,7 +1070,12 @@ where
                 // not due to additional limit exceeded
                 MegaHaltReason::Base(reason)
             }
-        }))
+        });
+        // revm 40 attaches journal logs to Success / Revert / Halt alike. Pre-revm-40, Halt had no
+        // logs field, so a failed receipt was structurally empty. Restore that invariant at the
+        // single result seam shared by transact, inspect, and system-call entry points. Status,
+        // gasUsed, and post-state are untouched — only the receipt log list is cleared.
+        Ok(strip_logs_if_not_success(result))
     }
 
     fn catch_error(
@@ -1057,7 +1084,49 @@ where
         error: Self::Error,
     ) -> Result<ExecutionResult<Self::HaltReason>, Self::Error> {
         let result = self.op.catch_error(evm, error)?;
-        Ok(result.map_haltreason(MegaHaltReason::Base))
+        // Belt-and-braces: op-revm already reverts the journal to the default checkpoint before
+        // building FailedDeposit, so logs are already empty. Clearing is idempotent.
+        Ok(strip_logs_if_not_success(result.map_haltreason(MegaHaltReason::Base)))
+    }
+}
+
+/// Drop logs from any non-`Success` [`ExecutionResult`].
+///
+/// Ethereum consensus receipts carry logs only for successful transactions. revm 40 stores a
+/// `logs` field on `Revert` and `Halt` as well and fills it from `journal.take_logs()`, so a
+/// post-commit result rewrite (limit exceed after CREATE checkpoint commit) can otherwise leak
+/// constructor logs into a failed receipt. Clearing here is the single product-code fix; it is
+/// a no-op when the journal already discarded the logs (mid-frame halt / natural revert).
+///
+/// # Why dropping them unconditionally is safe here, and when to re-check
+///
+/// Upstream added those fields on purpose: logs emitted before a failure used to be discarded,
+/// and revm keeps them now so downstream consumers can see them (revm PR #3424, a marked
+/// breaking change). So this is deliberately throwing away something upstream chose to hand over,
+/// and that is only defensible while nothing legitimate is in there.
+///
+/// Measured under the specs this crate runs — every `MegaSpecId` maps to Prague — nothing is: an
+/// ordinary top-level `REVERT` and an ordinary halt both arrive with an empty list, because the
+/// frame's checkpoint revert truncated the journal long before the result was assembled. The only
+/// upstream path that deliberately survives a revert is a failing precompile's logs, which the
+/// call outcome carries separately and which no `MegaETH` precompile produces. What remains is
+/// exactly the case this exists for: a frame that was committed and then rewritten into a failure.
+///
+/// Two changes invalidate that measurement and require redoing it rather than assuming it holds:
+/// mapping a spec past Prague, which introduces log sources that do not exist today (EIP-7708
+/// emits during result assembly), and adding a `MegaETH` precompile that emits logs.
+/// `test_all_specs_map_to_isthmus_and_prague` is what stands between the first one and this code.
+fn strip_logs_if_not_success<HaltReasonTy>(
+    result: ExecutionResult<HaltReasonTy>,
+) -> ExecutionResult<HaltReasonTy> {
+    match result {
+        ExecutionResult::Success { .. } => result,
+        ExecutionResult::Revert { gas, output, .. } => {
+            ExecutionResult::Revert { gas, logs: Vec::new(), output }
+        }
+        ExecutionResult::Halt { reason, gas, .. } => {
+            ExecutionResult::Halt { reason, gas, logs: Vec::new() }
+        }
     }
 }
 
@@ -1090,11 +1159,12 @@ where
     ) -> Result<ExecutionResult<Self::HaltReason>, Self::Error> {
         self.before_run(evm)?;
 
-        let init_and_floor_gas = self.validate(evm)?;
-        let eip7702_refund = self.pre_execution(evm)? as i64;
+        let mut init_and_floor_gas = self.validate(evm)?;
+        let eip7702_refund = self.pre_execution(evm, &mut init_and_floor_gas)? as i64;
         let mut frame_result = self.inspect_execution(evm, &init_and_floor_gas)?;
-        self.post_execution(evm, &mut frame_result, init_and_floor_gas, eip7702_refund)?;
-        self.execution_result(evm, frame_result)
+        let result_gas =
+            self.post_execution(evm, &mut frame_result, init_and_floor_gas, eip7702_refund)?;
+        self.execution_result(evm, frame_result, result_gas)
     }
 
     /// This function copies the logic from `Handler::execution` to add
@@ -1109,15 +1179,15 @@ where
             return Ok(oog_frame_result);
         }
 
-        let gas_limit = evm.ctx().tx().gas_limit() - init_and_floor_gas.initial_gas;
+        let gas_limit = evm.ctx().tx().gas_limit() - init_and_floor_gas.initial_regular_gas;
         // Create first frame action
-        let first_frame_input = self.first_frame_input(evm, gas_limit)?;
+        let first_frame_input = self.first_frame_input(evm, gas_limit, 0)?;
 
         // Run execution loop with inspector
         let mut frame_result = self.inspect_run_exec_loop(evm, first_frame_input)?;
 
         // Handle last frame result
-        self.last_frame_result(evm, &mut frame_result)?;
+        self.last_frame_result(evm, 0, &mut frame_result)?;
         Ok(frame_result)
     }
 }
@@ -1133,6 +1203,30 @@ where
     type Precompiles = PrecompilesMap;
 
     type Frame = EthFrame<EthInterpreter>;
+
+    #[inline]
+    fn all(
+        &self,
+    ) -> (&Self::Context, &Self::Instructions, &Self::Precompiles, &FrameStack<Self::Frame>) {
+        (&self.inner.ctx, &self.inner.instruction, &self.inner.precompiles, &self.inner.frame_stack)
+    }
+
+    #[inline]
+    fn all_mut(
+        &mut self,
+    ) -> (
+        &mut Self::Context,
+        &mut Self::Instructions,
+        &mut Self::Precompiles,
+        &mut FrameStack<Self::Frame>,
+    ) {
+        (
+            &mut self.inner.ctx,
+            &mut self.inner.instruction,
+            &mut self.inner.precompiles,
+            &mut self.inner.frame_stack,
+        )
+    }
 
     #[inline]
     fn ctx(&mut self) -> &mut Self::Context {
@@ -1304,7 +1398,11 @@ where
         let mut action = if let Some(action) = Self::before_frame_run(context, frame)? {
             action
         } else {
-            frame.interpreter.run_plain(instructions.instruction_table(), context)
+            frame.interpreter.run_plain(
+                instructions.instruction_table(),
+                instructions.gas_table(),
+                context,
+            )
         };
 
         // After frame_run instructions Hook
@@ -1374,6 +1472,44 @@ where
     INSP: Inspector<MegaContext<DB, ExtEnvs>>,
 {
     type Inspector = INSP;
+
+    #[inline]
+    fn all_inspector(
+        &self,
+    ) -> (
+        &Self::Context,
+        &Self::Instructions,
+        &Self::Precompiles,
+        &FrameStack<Self::Frame>,
+        &Self::Inspector,
+    ) {
+        (
+            &self.inner.ctx,
+            &self.inner.instruction,
+            &self.inner.precompiles,
+            &self.inner.frame_stack,
+            &self.inner.inspector,
+        )
+    }
+
+    #[inline]
+    fn all_mut_inspector(
+        &mut self,
+    ) -> (
+        &mut Self::Context,
+        &mut Self::Instructions,
+        &mut Self::Precompiles,
+        &mut FrameStack<Self::Frame>,
+        &mut Self::Inspector,
+    ) {
+        (
+            &mut self.inner.ctx,
+            &mut self.inner.instruction,
+            &mut self.inner.precompiles,
+            &mut self.inner.frame_stack,
+            &mut self.inner.inspector,
+        )
+    }
 
     fn inspector(&mut self) -> &mut Self::Inspector {
         &mut self.inner.inspector
@@ -1479,7 +1615,7 @@ where
 
         // Frame created successfully - initialize the interpreter
         let (ctx, inspector, frame) = self.ctx_inspector_frame();
-        inspector.initialize_interp(frame.interpreter(), ctx);
+        inspector.initialize_interp(&mut frame.interpreter, ctx);
         Ok(ItemOrResult::Item(frame))
     }
 
@@ -1497,9 +1633,10 @@ where
         } else {
             inspect_instructions(
                 ctx,
-                frame.interpreter(),
+                &mut frame.interpreter,
                 inspector,
                 instructions.instruction_table(),
+                instructions.gas_table(),
             )
         };
 
@@ -1530,7 +1667,7 @@ where
         // Call frame_end for inspector callback
         if let ItemOrResult::Result(frame_result) = &mut frame_output {
             let (ctx, inspector, frame) = self.ctx_inspector_frame();
-            frame_end(ctx, inspector, frame.frame_input(), frame_result);
+            frame_end(ctx, inspector, &frame.input, frame_result);
         }
 
         Ok(frame_output)
@@ -1559,11 +1696,11 @@ fn gen_call_too_deep_result(call_inputs: &revm::interpreter::CallInputs) -> Fram
 /// `initial_gas` that exceeds the transaction's `gas_limit` by the time
 /// `before_execution` re-checks it.
 ///
-/// The frame result carries `InstructionResult::OutOfGas` with `Gas::new_spent(gas_limit)`
-/// (entire tx budget burnt, no remaining), matching how an EVM-level OOG halt is
-/// represented for top-level transactions. The `FrameResult` variant (`Call` vs `Create`)
-/// is chosen by `tx_kind` so the downstream output helper can extract the right
-/// fields without re-matching on transaction kind.
+/// The frame result carries `InstructionResult::OutOfGas` with
+/// `Gas::new_spent_with_reservoir(gas_limit)` (entire tx budget burnt, no remaining), matching how
+/// an EVM-level OOG halt is represented for top-level transactions. The `FrameResult` variant
+/// (`Call` vs `Create`) is chosen by `tx_kind` so the downstream output helper can extract the
+/// right fields without re-matching on transaction kind.
 ///
 /// Called from `MegaHandler::before_execution` when `tx.gas_limit() < init_gas`,
 /// which can happen after `MegaHandler::validate` has added any MegaETH-specific
@@ -1575,7 +1712,7 @@ fn gen_oog_frame_result(tx_kind: TxKind, gas_limit: u64) -> FrameResult {
             InterpreterResult::new(
                 InstructionResult::OutOfGas,
                 Bytes::new(),
-                Gas::new_spent(gas_limit),
+                Gas::new_spent_with_reservoir(gas_limit, 0),
             ),
             Default::default(),
         )),
@@ -1583,9 +1720,136 @@ fn gen_oog_frame_result(tx_kind: TxKind, gas_limit: u64) -> FrameResult {
             InterpreterResult::new(
                 InstructionResult::OutOfGas,
                 Bytes::new(),
-                Gas::new_spent(gas_limit),
+                Gas::new_spent_with_reservoir(gas_limit, 0),
             ),
             None,
         )),
+    }
+}
+
+#[cfg(test)]
+mod mutation_tests {
+    use super::*;
+    use crate::{
+        test_utils::MemoryDatabase, AdditionalLimit, EmptyExternalEnv, EvmTxRuntimeLimits,
+        LimitCheck, LimitKind,
+    };
+    use alloy_primitives::Address;
+    use revm::{
+        context::ContextTr,
+        inspector::InspectorEvmTr,
+        interpreter::{
+            interpreter::SharedMemory, interpreter_action::FrameInit, CallInput, CallInputs,
+            CallScheme, CallValue, InterpreterTypes,
+        },
+        primitives::CALL_STACK_LIMIT,
+        Inspector,
+    };
+    use std::{cell::RefCell, rc::Rc};
+
+    const TEST_GAS_LIMIT: u64 = 100_000;
+
+    fn call_frame_init(depth: usize) -> FrameInit {
+        FrameInit {
+            depth,
+            memory: SharedMemory::new(),
+            frame_input: FrameInput::Call(Box::new(CallInputs {
+                input: CallInput::Bytes(Bytes::new()),
+                return_memory_offset: 0..0,
+                gas_limit: TEST_GAS_LIMIT,
+                bytecode_address: Address::ZERO,
+                target_address: Address::ZERO,
+                caller: Address::ZERO,
+                value: CallValue::Transfer(U256::ZERO),
+                scheme: CallScheme::Call,
+                is_static: false,
+                reservoir: 0,
+                known_bytecode: Default::default(),
+                charged_new_account_state_gas: false,
+            })),
+        }
+    }
+
+    fn context_with_latched_limit() -> MegaContext<MemoryDatabase, EmptyExternalEnv> {
+        let mut context = MegaContext::new(MemoryDatabase::default(), MegaSpecId::REX5);
+        let mut additional =
+            AdditionalLimit::new(MegaSpecId::REX5, EvmTxRuntimeLimits::from_spec(MegaSpecId::REX5));
+        additional.set_has_exceeded_limit_for_test(LimitCheck::ExceedsLimit {
+            kind: LimitKind::KVUpdate,
+            limit: 0,
+            used: 1,
+            frame_local: false,
+        });
+        context.additional_limit = Rc::new(RefCell::new(additional));
+        context
+    }
+
+    fn consume_synthetic_limit_frame<DB: Database, ExtEnvs: ExternalEnvTypes>(
+        context: &MegaContext<DB, ExtEnvs>,
+        mut result: FrameResult,
+    ) {
+        context.additional_limit.borrow_mut().before_frame_return_result::<false>(&mut result);
+    }
+
+    #[test]
+    fn test_frame_init_limit_short_circuit_pushes_limit_frame() {
+        let mut evm = MegaEvm::new(context_with_latched_limit());
+        let ItemOrResult::Result(result) = EvmTr::frame_init(&mut evm, call_frame_init(1)).unwrap()
+        else {
+            panic!("latched limit must return a synthetic result");
+        };
+        consume_synthetic_limit_frame(evm.ctx_ref(), result);
+    }
+
+    #[test]
+    fn test_frame_init_depth_short_circuit_pushes_limit_frame() {
+        let mut evm = MegaEvm::new(MegaContext::new(MemoryDatabase::default(), MegaSpecId::REX5));
+        let ItemOrResult::Result(result) =
+            EvmTr::frame_init(&mut evm, call_frame_init(CALL_STACK_LIMIT as usize + 1)).unwrap()
+        else {
+            panic!("depth guard must return a synthetic result");
+        };
+        consume_synthetic_limit_frame(evm.ctx_ref(), result);
+    }
+
+    #[derive(Default)]
+    struct StopInspector;
+
+    impl<CTX: ContextTr, INTR: InterpreterTypes> Inspector<CTX, INTR> for StopInspector {
+        fn call(&mut self, _context: &mut CTX, inputs: &mut CallInputs) -> Option<CallOutcome> {
+            Some(CallOutcome::new(
+                InterpreterResult::new(
+                    InstructionResult::Stop,
+                    Bytes::new(),
+                    Gas::new(inputs.gas_limit),
+                ),
+                inputs.return_memory_offset.clone(),
+            ))
+        }
+    }
+
+    #[test]
+    fn test_inspect_frame_init_limit_short_circuit_pushes_limit_frame() {
+        let mut evm = MegaEvm::new(context_with_latched_limit()).with_inspector(StopInspector);
+        let ItemOrResult::Result(result) =
+            InspectorEvmTr::inspect_frame_init(&mut evm, call_frame_init(1)).unwrap()
+        else {
+            panic!("latched limit must override the inspector result");
+        };
+        consume_synthetic_limit_frame(evm.ctx_ref(), result);
+    }
+
+    #[test]
+    fn test_inspect_frame_init_depth_short_circuit_pushes_limit_frame() {
+        let mut evm = MegaEvm::new(MegaContext::new(MemoryDatabase::default(), MegaSpecId::REX5))
+            .with_inspector(StopInspector);
+        let ItemOrResult::Result(result) = InspectorEvmTr::inspect_frame_init(
+            &mut evm,
+            call_frame_init(CALL_STACK_LIMIT as usize + 1),
+        )
+        .unwrap() else {
+            panic!("depth guard must override the inspector result");
+        };
+        consume_synthetic_limit_frame(evm.ctx_ref(), result);
     }
 }

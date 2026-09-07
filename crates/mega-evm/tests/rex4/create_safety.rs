@@ -15,7 +15,7 @@ use alloy_primitives::{address, Address, Bytes, TxKind, U256};
 use mega_evm::{
     test_utils::{BytecodeBuilder, MemoryDatabase},
     EvmTxRuntimeLimits, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
-    TestExternalEnvs,
+    MegaTransactionNew as _, TestExternalEnvs,
 };
 use revm::{
     bytecode::opcode::*,

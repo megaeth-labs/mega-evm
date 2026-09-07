@@ -16,7 +16,7 @@ use std::{
 };
 
 use alloy_evm::{
-    block::{BlockExecutor, BlockValidationError, OnStateHook, StateChangeSource},
+    block::{BlockExecutor, BlockValidationError, OnStateHook},
     EvmEnv,
 };
 use alloy_hardforks::ForkCondition;
@@ -119,14 +119,16 @@ fn install_eip_contracts(db: &mut MemoryDatabase) {
 }
 
 /// Records every account observed by the on-state hook, so a test can assert that a read-only
-/// pre-block outcome reached the witness path.
+/// pre-block outcome reached the witness path. The hook is installed on the revm `State`
+/// database and fires from inside `DatabaseCommit::commit`, so it must be set before the
+/// executor borrows the database.
 #[derive(Debug, Default, Clone)]
 struct RecordingStateHook {
     accounts: Arc<Mutex<Vec<Address>>>,
 }
 
 impl OnStateHook for RecordingStateHook {
-    fn on_state(&mut self, _source: StateChangeSource, state: &EvmState) {
+    fn on_state(&mut self, state: &EvmState) {
         self.accounts.lock().unwrap().extend(state.keys().copied());
     }
 }
@@ -372,6 +374,9 @@ fn test_rollback_window_still_emits_predeploy_witness_entries() {
         mega_evm::HIGH_PRECISION_TIMESTAMP_ORACLE_CODE,
     );
     let mut state = State::builder().with_database(&mut db).build();
+    let recorder = RecordingStateHook::default();
+    let accounts = recorder.accounts.clone();
+    state.set_state_hook(Some(Box::new(recorder)));
 
     let evm_factory =
         MegaEvmFactory::new().with_external_env_factory(TestExternalEnvs::<Infallible>::new());
@@ -382,10 +387,6 @@ fn test_rollback_window_still_emits_predeploy_witness_entries() {
         block_ctx(),
         create_evm_env(MegaSpecId::MINI_REX_1, timestamp),
     );
-
-    let recorder = RecordingStateHook::default();
-    let accounts = recorder.accounts.clone();
-    BlockExecutor::set_state_hook(&mut executor, Some(Box::new(recorder)));
     executor.apply_pre_execution_changes().expect("rollback-window pre-block setup must succeed");
 
     let observed = accounts.lock().unwrap();

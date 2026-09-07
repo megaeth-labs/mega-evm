@@ -47,7 +47,7 @@ impl ChainArgs {
     pub fn create_cfg_env(&self) -> Result<CfgEnv<MegaSpecId>> {
         let mut cfg = CfgEnv::default();
         cfg.chain_id = self.chain_id;
-        cfg.spec = self.spec_id()?;
+        cfg.set_spec_and_mainnet_gas_params(self.spec_id()?);
         debug!(cfg = ?cfg, "Evm CfgEnv created");
         Ok(cfg)
     }
@@ -106,6 +106,7 @@ impl BlockEnvArgs {
             difficulty: self.block_difficulty,
             prevrandao: Some(self.block_prevrandao),
             blob_excess_gas_and_price: None,
+            slot_num: 0,
         };
 
         // Set blob excess gas if provided

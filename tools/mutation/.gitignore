@@ -1,0 +1,9 @@
+# Per-mutant cargo logs (large; regenerate by re-running).
+logs/*.L1.log
+logs/*.L2.log
+# Local campaign state / crash journal (never commit)
+state*.json
+.mutate-journal.json
+.mutate-journal.json.tmp.*
+# Campaign reports are workflow artifacts; keep them out of the tree.
+reports/

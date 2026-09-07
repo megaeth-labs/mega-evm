@@ -115,14 +115,14 @@ fn transact(spec: MegaSpecId, mut db: MemoryDatabase) -> Outcome {
     });
     let tx =
         TxEnvBuilder::default().caller(CALLER).call(CONTRACT).gas_limit(100_000_000).build_fill();
-    let mut tx = MegaTransaction::new(tx);
+    let mut tx = MegaTransaction(op_revm::OpTransaction::new(tx));
     tx.enveloped_tx = Some(Bytes::new());
 
     let mut evm = MegaEvm::new(context);
     let result =
         alloy_evm::Evm::transact_raw(&mut evm, tx).expect("tx should not surface EVMError");
     let compute_gas = evm.ctx_ref().additional_limit.borrow().get_usage().compute_gas;
-    let gas_used = result.result.gas_used();
+    let gas_used = result.result.tx_gas_used();
 
     let outcome = match &result.result {
         ExecutionResult::Success { .. } => "success".to_string(),
@@ -149,14 +149,14 @@ fn transact_with_envs(
     });
     let tx =
         TxEnvBuilder::default().caller(CALLER).call(CONTRACT).gas_limit(100_000_000).build_fill();
-    let mut tx = MegaTransaction::new(tx);
+    let mut tx = MegaTransaction(op_revm::OpTransaction::new(tx));
     tx.enveloped_tx = Some(Bytes::new());
 
     let mut evm = MegaEvm::new(context);
     let result =
         alloy_evm::Evm::transact_raw(&mut evm, tx).expect("tx should not surface EVMError");
     let compute_gas = evm.ctx_ref().additional_limit.borrow().get_usage().compute_gas;
-    let gas_used = result.result.gas_used();
+    let gas_used = result.result.tx_gas_used();
 
     let outcome = match &result.result {
         ExecutionResult::Success { .. } => "success".to_string(),
@@ -187,14 +187,14 @@ fn transact_with_access_list(
         .access_list(access_list)
         .gas_limit(100_000_000)
         .build_fill();
-    let mut tx = MegaTransaction::new(tx);
+    let mut tx = MegaTransaction(op_revm::OpTransaction::new(tx));
     tx.enveloped_tx = Some(Bytes::new());
 
     let mut evm = MegaEvm::new(context);
     let result =
         alloy_evm::Evm::transact_raw(&mut evm, tx).expect("tx should not surface EVMError");
     let compute_gas = evm.ctx_ref().additional_limit.borrow().get_usage().compute_gas;
-    let gas_used = result.result.gas_used();
+    let gas_used = result.result.tx_gas_used();
 
     let outcome = match &result.result {
         ExecutionResult::Success { .. } => "success".to_string(),
@@ -221,7 +221,7 @@ fn transact_with_limits(
         chain.operator_fee_constant = Some(U256::from(0));
     });
     let tx = TxEnvBuilder::default().caller(CALLER).call(to).gas_limit(100_000_000).build_fill();
-    let mut tx = MegaTransaction::new(tx);
+    let mut tx = MegaTransaction(op_revm::OpTransaction::new(tx));
     tx.enveloped_tx = Some(Bytes::new());
 
     let mut evm = MegaEvm::new(context);
@@ -242,7 +242,7 @@ fn transact_output(spec: MegaSpecId, mut db: MemoryDatabase) -> Bytes {
     });
     let tx =
         TxEnvBuilder::default().caller(CALLER).call(CONTRACT).gas_limit(100_000_000).build_fill();
-    let mut tx = MegaTransaction::new(tx);
+    let mut tx = MegaTransaction(op_revm::OpTransaction::new(tx));
     tx.enveloped_tx = Some(Bytes::new());
 
     let mut evm = MegaEvm::new(context);
@@ -272,14 +272,14 @@ fn transact_create(spec: MegaSpecId, initcode: Bytes) -> Outcome {
         .data(initcode)
         .gas_limit(100_000_000)
         .build_fill();
-    let mut tx = MegaTransaction::new(tx);
+    let mut tx = MegaTransaction(op_revm::OpTransaction::new(tx));
     tx.enveloped_tx = Some(Bytes::new());
 
     let mut evm = MegaEvm::new(context);
     let result =
         alloy_evm::Evm::transact_raw(&mut evm, tx).expect("tx should not surface EVMError");
     let compute_gas = evm.ctx_ref().additional_limit.borrow().get_usage().compute_gas;
-    let gas_used = result.result.gas_used();
+    let gas_used = result.result.tx_gas_used();
 
     let outcome = match &result.result {
         ExecutionResult::Success { .. } => "success".to_string(),

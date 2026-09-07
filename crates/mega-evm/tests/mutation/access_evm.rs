@@ -34,8 +34,8 @@ use alloy_primitives::{address, Address, Bytes, TxKind, U256};
 use mega_evm::{
     constants,
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction, SaltEnv, TestExternalEnvs,
-    VolatileDataAccess, VolatileDataAccessTracker, MIN_BUCKET_SIZE,
+    MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction, MegaTransactionNew as _,
+    SaltEnv, TestExternalEnvs, VolatileDataAccess, VolatileDataAccessTracker, MIN_BUCKET_SIZE,
 };
 use revm::context::{BlockEnv, TxEnv};
 
@@ -335,7 +335,7 @@ fn intrinsic_boundary_result(
     gas_limit: u64,
 ) -> Result<
     revm::context::result::ResultAndState<MegaHaltReason>,
-    revm::context::result::EVMError<Infallible, mega_evm::MegaTransactionError>,
+    revm::context::result::EVMError<Infallible, mega_evm::alloy_op_evm::OpTxError>,
 > {
     let mut db = MemoryDatabase::default().account_balance(CALLER, U256::from(1_000_000_000_u64));
     // Callee already exists (has code) and just STOPs, so the call adds no new-account storage gas
@@ -389,7 +389,7 @@ fn test_before_execution_allows_exact_intrinsic_gas() {
         exact.result
     );
     assert_eq!(
-        exact.result.gas_used(),
+        exact.result.tx_gas_used(),
         intrinsic,
         "the exact-gas call must consume exactly the intrinsic gas"
     );

@@ -11,7 +11,8 @@ use std::convert::Infallible;
 use alloy_primitives::{address, Address, Bytes, TxKind, B256, U256};
 use mega_evm::{
     constants, test_utils::MemoryDatabase, BucketHasher, EvmTxRuntimeLimits, MegaContext, MegaEvm,
-    MegaSpecId, MegaTransaction, SimpleBucketHasher, TestExternalEnvs, MIN_BUCKET_SIZE,
+    MegaSpecId, MegaTransaction, MegaTransactionNew as _, SimpleBucketHasher, TestExternalEnvs,
+    MIN_BUCKET_SIZE,
 };
 use revm::{context::TxEnv, database::Database as _};
 
@@ -139,7 +140,7 @@ fn test_deposit_create_storage_gas_uses_state_nonce() {
     assert_eq!(deployed_address, CALLER.create(STATE_NONCE));
     assert_ne!(deployed_address, CALLER.create(TX_NONCE));
 
-    let gas_used = res.result.gas_used();
+    let gas_used = res.result.tx_gas_used();
     assert!(
         gas_used >= EXPECTED_HEAVY_STORAGE_GAS,
         "expected gas_used ≥ {EXPECTED_HEAVY_STORAGE_GAS} (heavy-bucket storage gas), got \
@@ -159,7 +160,7 @@ fn test_pre_rex5_preserves_tx_nonce_storage_gas_pricing() {
     let res = run(MegaSpecId::REX4, &mut db, &envs, tx);
 
     assert!(res.result.is_success(), "deposit CREATE must succeed: {:?}", res.result);
-    let gas_used = res.result.gas_used();
+    let gas_used = res.result.tx_gas_used();
     assert!(
         gas_used < EXPECTED_HEAVY_STORAGE_GAS,
         "expected gas_used < {EXPECTED_HEAVY_STORAGE_GAS} (cheap bucket), got {gas_used}",
@@ -178,7 +179,7 @@ fn test_non_deposit_create_storage_gas_unchanged_under_rex5() {
     let res = run(MegaSpecId::REX5, &mut db, &envs, tx);
 
     assert!(res.result.is_success(), "CREATE must succeed: {:?}", res.result);
-    let gas_used = res.result.gas_used();
+    let gas_used = res.result.tx_gas_used();
     assert!(gas_used >= EXPECTED_HEAVY_STORAGE_GAS, "got gas_used={gas_used}");
 }
 
@@ -197,7 +198,7 @@ fn test_deposit_create_with_state_nonce_zero_unchanged() {
     let res_rex5 = run(MegaSpecId::REX5, &mut db_rex5, &envs, deposit_create_tx(0, gas_limit));
 
     assert_eq!(res_rex4.result.is_success(), res_rex5.result.is_success());
-    assert_eq!(res_rex4.result.gas_used(), res_rex5.result.gas_used());
+    assert_eq!(res_rex4.result.tx_gas_used(), res_rex5.result.tx_gas_used());
 }
 
 /// Confirms `validate()` reads the caller through the canonical pipeline:

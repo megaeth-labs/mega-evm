@@ -2,6 +2,16 @@
 //!
 //! It groups the constants for different EVM specs as sub-modules.
 
+/// Frozen gas limit for pre-REX5 system calls (EIP-2935 / EIP-4788 pre-block helpers
+/// and the default `SystemCallEvm` / `transact_system_call` entry points).
+///
+/// Value is intentionally independent of
+/// [`revm::handler::system_call::SYSTEM_CALL_GAS_LIMIT`], which revm 40 redefined as
+/// `30_000_000 + state-gas reservoir` (`31_566_720` under bal-devnet-7). Frozen `MegaETH`
+/// specs must keep the historical 30M budget for replay parity; do not alias or follow
+/// the upstream constant.
+pub const PRE_REX5_SYSTEM_CALL_GAS_LIMIT: u64 = 30_000_000;
+
 /// Constants for the `EQUIVALENCE` spec.
 pub mod equivalence {
     use revm::interpreter::gas;
@@ -138,23 +148,18 @@ pub mod rex5 {
     /// `SequencerRegistry.applyPendingChanges()`, EIP-2935 history-storage, and
     /// EIP-4788 beacon-roots pre-block calls.
     ///
-    /// The value (30M) matches the historical revm system-call default at the
-    /// time REX5 was specified — see the `gas_limit(30_000_000)` literal in
-    /// [`revm::handler::SystemCallTx::new_system_tx_with_caller`]'s `TxEnv` impl
-    /// (`revm-handler/src/system_call.rs`).
-    /// revm does not export this as a `pub const`, so we mirror the literal here
-    /// instead of aliasing it. Do NOT raise this value to follow upstream
-    /// changes — the floor must remain at the historical 30M to preserve
-    /// backward compatibility for REX5 chains whose block gas limit is smaller
-    /// than any new upstream default. Lifting it would silently increase the
-    /// minimum guaranteed budget and become observable via the `GAS` opcode
-    /// inside `applyPendingChanges()`.
+    /// Same historical 30M value as [`super::PRE_REX5_SYSTEM_CALL_GAS_LIMIT`],
+    /// and a floor so chains whose block gas limit is smaller still receive
+    /// that budget.
     ///
-    /// Keeping the floor at the historical default ensures test harnesses or
-    /// chains configured with a sub-30M block gas limit still receive the
-    /// budget that pre-REX5 / EIP-2935 / EIP-4788 system calls have always
-    /// gotten.
-    pub const SYSTEM_CALL_GAS_LIMIT_FLOOR: u64 = 30_000_000;
+    /// Do NOT raise this to follow upstream
+    /// [`revm::handler::system_call::SYSTEM_CALL_GAS_LIMIT`]: revm 40 redefined
+    /// it as `30_000_000 + eip8037::SSTORE_SET_BYTES *
+    /// eip8037::CPSB_GLAMSTERDAM * SYSTEM_MAX_SSTORES_PER_CALL` (`31_566_720`),
+    /// and all three factors are bal-devnet-7 parameters that drift as upstream
+    /// evolves. A frozen spec's budget cannot hang off a drifting upstream
+    /// constant.
+    pub const SYSTEM_CALL_GAS_LIMIT_FLOOR: u64 = super::PRE_REX5_SYSTEM_CALL_GAS_LIMIT;
 }
 
 /// Constants for the `REX6` spec.

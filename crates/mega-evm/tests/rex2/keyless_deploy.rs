@@ -384,24 +384,29 @@ fn test_keyless_deploy_contract_already_exists_deploy_address_in_witness_rex6() 
 /// the returned `EvmState` / witness — no retroactive behavior change.
 #[test]
 fn test_keyless_deploy_contract_already_exists_deploy_address_not_in_witness_pre_rex6() {
-    let mut db = MemoryDatabase::default();
-    db.set_account_balance(CREATE2_FACTORY_DEPLOYER, U256::from(1_000_000_000_000_000_000_000u128));
-    db.set_account_code(CREATE2_FACTORY_CONTRACT, Bytes::from_static(&[0x60, 0x00]));
+    for spec in [MegaSpecId::REX2, MegaSpecId::REX5] {
+        let mut db = MemoryDatabase::default();
+        db.set_account_balance(
+            CREATE2_FACTORY_DEPLOYER,
+            U256::from(1_000_000_000_000_000_000_000u128),
+        );
+        db.set_account_code(CREATE2_FACTORY_CONTRACT, Bytes::from_static(&[0x60, 0x00]));
 
-    let result = call_keyless_deploy(
-        MegaSpecId::REX2,
-        &mut db,
-        Bytes::from_static(CREATE2_FACTORY_TX),
-        LARGE_GAS_LIMIT_OVERRIDE,
-        U256::ZERO,
-    );
+        let result = call_keyless_deploy(
+            spec,
+            &mut db,
+            Bytes::from_static(CREATE2_FACTORY_TX),
+            LARGE_GAS_LIMIT_OVERRIDE,
+            U256::ZERO,
+        );
 
-    assert_revert_with_error(&result, KeylessDeployError::ContractAlreadyExists);
-    assert!(
-        !result.state.contains_key(&CREATE2_FACTORY_CONTRACT),
-        "pre-REX6 (sealed) must keep the raw DB read: the deploy address must NOT appear in the \
-         returned EvmState — no retroactive witness change",
-    );
+        assert_revert_with_error(&result, KeylessDeployError::ContractAlreadyExists);
+        assert!(
+            !result.state.contains_key(&CREATE2_FACTORY_CONTRACT),
+            "{spec:?} must keep the raw DB read before REX6: the deploy address must not appear in \
+             the returned EvmState",
+        );
+    }
 }
 
 /// Regression guard for the critical issue this fix's review caught: journaling the deploy-

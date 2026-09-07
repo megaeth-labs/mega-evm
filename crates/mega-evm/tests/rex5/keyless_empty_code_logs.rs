@@ -26,7 +26,7 @@ use mega_evm::{
     sandbox::{calculate_keyless_deploy_address, decode_error_result, KeylessDeployError},
     test_utils::{BytecodeBuilder, MemoryDatabase},
     IKeylessDeploy, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
-    TestExternalEnvs, KEYLESS_DEPLOY_ADDRESS,
+    MegaTransactionNew as _, TestExternalEnvs, KEYLESS_DEPLOY_ADDRESS,
 };
 use revm::{
     bytecode::opcode::{LOG1, MSTORE, RETURN, STOP},

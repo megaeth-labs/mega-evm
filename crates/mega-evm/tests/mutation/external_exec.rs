@@ -54,17 +54,15 @@
 use std::convert::Infallible;
 
 use alloy_consensus::{Signed, TxLegacy};
-use alloy_evm::{
-    block::{BlockExecutor, StateChangePostBlockSource, StateChangeSource},
-    EvmEnv, EvmFactory,
-};
+use alloy_evm::{block::BlockExecutor, EvmEnv, EvmFactory};
 use alloy_hardforks::ForkCondition;
 use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
 use alloy_primitives::{address, Address, Bytes, Signature, TxKind, B256, U256};
 use mega_evm::{
     test_utils::{BytecodeBuilder, MemoryDatabase},
     AHashBucketHasher, BlockLimits, BucketHasher, MegaBlockExecutionCtx, MegaBlockExecutor,
-    MegaEvmFactory, MegaHardfork, MegaHardforkConfig, MegaSpecId, MegaTxEnvelope, TestExternalEnvs,
+    MegaEvmFactory, MegaHardfork, MegaHardforkConfig, MegaSpecId, MegaTxEnvelope,
+    StateChangePostBlockSource, StateChangeSource, TestExternalEnvs,
 };
 use revm::{context::BlockEnv, database::State};
 

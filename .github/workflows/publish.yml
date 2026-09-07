@@ -31,6 +31,16 @@ jobs:
             exit 1
           fi
 
+      # Packaging fails fast on manifests crates.io would reject — e.g. git-pinned
+      # dependencies without a registry version — before anything is uploaded. Without this
+      # check the job publishes the first crates and then fails midway, leaving a partial
+      # release on crates.io.
+      - name: Pre-flight packaging check
+        run: |
+          for crate in mega-system-contracts mega-evm mega-state-test mega-evme; do
+            cargo package -p "$crate" --no-verify --locked
+          done
+
       - name: Publish mega-system-contracts
         run: cargo publish -p mega-system-contracts --locked
         env:

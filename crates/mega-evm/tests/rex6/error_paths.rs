@@ -18,10 +18,11 @@ use std::convert::Infallible;
 
 use alloy_primitives::{Address, Bytes, TxKind, U256};
 use mega_evm::{
+    alloy_op_evm::OpTxError,
     revm::context::result::ResultAndState,
     test_utils::{BytecodeBuilder, MemoryDatabase},
     BucketId, EVMError, EmptyExternalEnv, EvmTxRuntimeLimits, ExternalEnvs, MegaContext, MegaEvm,
-    MegaHaltReason, MegaSpecId, MegaTransaction, MegaTransactionError, SaltEnv,
+    MegaHaltReason, MegaSpecId, MegaTransaction, MegaTransactionNew as _, SaltEnv,
 };
 use revm::{
     bytecode::opcode::{CREATE, CREATE2, SSTORE, STOP},
@@ -59,7 +60,7 @@ impl SaltEnv for FailingSaltEnv {
 fn transact_with_failing_salt(
     spec: MegaSpecId,
     code: Bytes,
-) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, MegaTransactionError>> {
+) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, OpTxError>> {
     let mut db = MemoryDatabase::default()
         .account_balance(CALLER, U256::from(10 * ONE_ETH))
         .account_code(CONTRACT, code);
@@ -91,7 +92,7 @@ fn transact_with_failing_salt(
 }
 
 fn assert_injected_salt_custom_error(
-    result: Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, MegaTransactionError>>,
+    result: Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, OpTxError>>,
 ) {
     match result {
         Err(EVMError::Custom(msg)) => {

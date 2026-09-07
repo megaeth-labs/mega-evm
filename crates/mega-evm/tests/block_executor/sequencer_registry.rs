@@ -586,7 +586,7 @@ fn test_admin_handoff_via_block_executor() {
     let receipt = executor
         .execute_transaction(&tx)
         .expect("transferAdmin tx should be accepted by the executor");
-    assert!(receipt > 0, "transferAdmin tx should report non-zero gas used");
+    assert!(receipt.tx_gas_used() > 0, "transferAdmin tx should report non-zero gas used");
 
     // tx#2: NEW_ADMIN completes the handoff.
     let calldata = ISequencerRegistry::acceptAdminCall {}.abi_encode();
@@ -600,7 +600,7 @@ fn test_admin_handoff_via_block_executor() {
     let receipt = executor
         .execute_transaction(&tx)
         .expect("acceptAdmin tx should be accepted by the executor");
-    assert!(receipt > 0, "acceptAdmin tx should report non-zero gas used");
+    assert!(receipt.tx_gas_used() > 0, "acceptAdmin tx should report non-zero gas used");
 
     // Drop the executor to release the &mut borrow on `state`, then read the post-state.
     drop(executor);

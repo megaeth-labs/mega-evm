@@ -348,65 +348,16 @@ fn test_hardfork_schedule_testnet_arm_returns_testnet_schedule() {
 // * `pre_execution_check` boundary `>` checks (778/789/802/839): an at-limit value must return `Ok`
 //   (kills both `>`→`==` and `>`→`>=`, which error at equality); a strictly over-limit value must
 //   return the expected `Err`.
-// * `post_execution_update` (947) `==`→`!=` on the deposit-type check: a non-deposit tx must
-//   advance `block_da_size_used`; a deposit tx must not. The `!=` mutant inverts both.
+// * `post_execution_update_raw` deposit branch (`if !is_deposit`): a non-deposit call must advance
+//   `block_da_size_used`; a deposit call must not. A `!`-dropping mutant inverts both.
 // * `is_block_limit_reached` (1011-1019): one per-dimension test with only that dimension at `used
 //   == limit` (others strictly below) asserting `true` kills that clause's `>=`→`<` and the
 //   adjacent `||`→`&&` (only one true clause ⇒ `&&` collapses to false); an all-below test
 //   asserting `false` kills the whole-fn `->true`, and the per-dimension trues kill the whole-fn
 //   `->false`.
 
-use alloy_consensus::transaction::Recovered as MegaRecovered;
 use alloy_primitives::B256;
-use mega_evm::{BlockLimiter, BlockMegaTransactionOutcome, MegaHaltReason, MegaTransactionOutcome};
-use revm::{
-    context::result::{ExecutionResult, Output, SuccessReason},
-    state::EvmState,
-};
-
-/// Builds a `BlockMegaTransactionOutcome` wrapping the given recovered tx, with the supplied
-/// `da_size` and otherwise-zero usage, and a trivial `Success` execution result. Used to drive
-/// `post_execution_update` and observe how the deposit-type branch routes the da accounting.
-fn outcome_for(
-    tx: MegaRecovered<MegaTxEnvelope>,
-    da_size: u64,
-) -> BlockMegaTransactionOutcome<MegaRecovered<MegaTxEnvelope>> {
-    BlockMegaTransactionOutcome {
-        tx,
-        tx_size: 0,
-        da_size,
-        depositor: None,
-        inner: MegaTransactionOutcome {
-            result: ExecutionResult::<MegaHaltReason>::Success {
-                reason: SuccessReason::Stop,
-                gas_used: 0,
-                gas_refunded: 0,
-                logs: Vec::new(),
-                output: Output::Call(Bytes::new()),
-            },
-            state: EvmState::default(),
-            data_size: 0,
-            kv_updates: 0,
-            compute_gas_used: 0,
-            state_growth_used: 0,
-        },
-    }
-}
-
-/// A non-deposit (legacy, tx type 0) recovered transaction.
-fn legacy_recovered() -> MegaRecovered<MegaTxEnvelope> {
-    let tx = TxLegacy {
-        chain_id: Some(1),
-        nonce: 0,
-        gas_price: 1,
-        gas_limit: 21_000,
-        to: TxKind::Call(CONTRACT),
-        value: U256::ZERO,
-        input: Bytes::new(),
-    };
-    let signed = Signed::new_unchecked(tx, Signature::test_signature(), B256::ZERO);
-    MegaRecovered::new_unchecked(MegaTxEnvelope::Legacy(signed), CALLER)
-}
+use mega_evm::BlockLimiter;
 
 // ---------------------------------------------------------------------------
 // pre_execution_check boundaries
@@ -497,22 +448,23 @@ fn test_pre_execution_check_block_da_size_boundary() {
 }
 
 // ---------------------------------------------------------------------------
-// post_execution_update — deposit-type branch (947 `==`→`!=`)
+// post_execution_update_raw — deposit branch (`if !is_deposit` on the DA counter)
 // ---------------------------------------------------------------------------
 
-/// 947 (`outcome.tx.tx().ty() == DEPOSIT_TRANSACTION_TYPE`). A non-deposit (legacy) tx must
-/// advance `block_da_size_used` by `da_size`. Under the `==`→`!=` mutant the legacy type is
-/// (mis)classified as a deposit, so the da counter would stay at 0.
+/// The DA counter is the one dimension the deposit flag gates. Both polarities pinned: a
+/// non-deposit call must accumulate `da_size`, a deposit call must not — a mutant dropping or
+/// inverting the `!is_deposit` guard flips exactly one of the two.
 #[test]
-fn test_post_execution_update_advances_da_for_non_deposit() {
+fn test_post_execution_update_raw_da_gated_by_deposit_flag() {
     let mut limiter = BlockLimiter::new(BlockLimits::no_limits());
-    let outcome = outcome_for(legacy_recovered(), 1_234);
 
-    limiter.post_execution_update(&outcome).expect("post_execution_update should succeed");
+    limiter.post_execution_update_raw(0, 0, 1_234, 0, 0, 0, 0, false);
+    assert_eq!(limiter.block_da_size_used, 1_234, "a non-deposit call must accumulate da_size");
 
+    limiter.post_execution_update_raw(0, 0, 5_000, 0, 0, 0, 0, true);
     assert_eq!(
         limiter.block_da_size_used, 1_234,
-        "a non-deposit tx must accumulate da_size; the `==`→`!=` mutant would skip it (0)"
+        "a deposit call must leave the da counter untouched"
     );
 }
 

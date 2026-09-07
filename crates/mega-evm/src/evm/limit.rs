@@ -164,6 +164,31 @@ impl EvmTxRuntimeLimits {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::constants;
+
+    /// `MINI_REX` introduced the per-transaction data-size and KV-update budgets. Both fields
+    /// must come from the `mini_rex` constants: because the constructor fills the rest from
+    /// `EQUIVALENCE` (all-unlimited), a dropped field would silently disable the limit instead
+    /// of failing to compile.
+    #[test]
+    fn test_mini_rex_enforces_its_own_data_and_kv_limits() {
+        let limits = EvmTxRuntimeLimits::mini_rex();
+        assert_eq!(limits.tx_data_size_limit, constants::mini_rex::TX_DATA_LIMIT);
+        assert_eq!(limits.tx_kv_updates_limit, constants::mini_rex::TX_KV_UPDATE_LIMIT);
+        assert_ne!(limits.tx_data_size_limit, u64::MAX, "MINI_REX must bound the data size");
+        assert_ne!(limits.tx_kv_updates_limit, u64::MAX, "MINI_REX must bound the KV updates");
+        assert_eq!(limits.tx_compute_gas_limit, constants::mini_rex::TX_COMPUTE_GAS_LIMIT);
+        // State growth metering only arrives with REX, so MINI_REX inherits the unlimited value.
+        assert_eq!(limits.tx_state_growth_limit, u64::MAX);
+    }
+
+    /// `REX` adds the state-growth budget on top of the `MINI_REX` dimensions.
+    #[test]
+    fn test_rex_enforces_state_growth_limit() {
+        let limits = EvmTxRuntimeLimits::rex();
+        assert_eq!(limits.tx_state_growth_limit, constants::rex::TX_STATE_GROWTH_LIMIT);
+        assert_ne!(limits.tx_state_growth_limit, u64::MAX, "REX must bound the state growth");
+    }
 
     /// Every alias spec must run under exactly its `behavior()` target's limits — the
     /// match in `from_spec` states the alias→target mapping a second time, and this

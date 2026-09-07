@@ -50,6 +50,9 @@ fn make_call_frame_init(target: Address, selector: [u8; 4], depth: usize) -> Fra
             value: CallValue::Transfer(U256::ZERO),
             scheme: CallScheme::Call,
             is_static: false,
+            reservoir: 0,
+            known_bytecode: Default::default(),
+            charged_new_account_state_gas: false,
         })),
     }
 }
@@ -63,7 +66,7 @@ fn assert_call_too_deep(outcome_result: &FrameResult) {
         InstructionResult::CallTooDeep,
         "depth guard should produce CallTooDeep"
     );
-    assert_eq!(outcome.result.gas.spent(), 0, "no gas should be spent on CallTooDeep");
+    assert_eq!(outcome.result.gas.total_gas_spent(), 0, "no gas should be spent on CallTooDeep");
     assert_eq!(
         outcome.result.gas.remaining(),
         GAS_LIMIT,
@@ -202,14 +205,14 @@ struct AlwaysInterceptInspector {
 impl<CTX: ContextTr, INTR: InterpreterTypes> Inspector<CTX, INTR> for AlwaysInterceptInspector {
     fn call(&mut self, _context: &mut CTX, inputs: &mut CallInputs) -> Option<CallOutcome> {
         self.call_count += 1;
-        Some(CallOutcome {
-            result: InterpreterResult {
+        Some(CallOutcome::new(
+            InterpreterResult {
                 result: InstructionResult::Stop,
                 output: Bytes::new(),
                 gas: Gas::new(inputs.gas_limit),
             },
-            memory_offset: inputs.return_memory_offset.clone(),
-        })
+            inputs.return_memory_offset.clone(),
+        ))
     }
 
     fn call_end(&mut self, _context: &mut CTX, _inputs: &CallInputs, _outcome: &mut CallOutcome) {
@@ -250,4 +253,78 @@ fn test_rex5_inspect_frame_init_depth_guard_overrides_inspector() {
     let insp = evm.inspector();
     assert_eq!(insp.call_count, 1, "inspector should see exactly one call_start");
     assert_eq!(insp.call_end_count, 1, "inspector's call_end must be paired");
+}
+
+#[test]
+fn test_rex5_inspect_frame_init_depth_guard_allows_call_at_limit() {
+    // Boundary mirror of `test_rex5_depth_boundary_allows_call_at_limit` on the inspected path:
+    // `depth == CALL_STACK_LIMIT` is the last permitted depth, so the inspector's synthetic
+    // output must survive. A `>=` boundary would swallow it as CallTooDeep.
+    let mut db = MemoryDatabase::default();
+    let context = MegaContext::new(&mut db, MegaSpecId::REX5);
+    let evm = MegaEvm::new(context);
+    let mut evm = evm.with_inspector(AlwaysInterceptInspector::default());
+
+    let target = address!("0000000000000000000000000000000000300002");
+    let frame_init = make_call_frame_init(target, [0u8; 4], CALL_STACK_LIMIT as usize);
+
+    let result = InspectorEvmTr::inspect_frame_init(&mut evm, frame_init)
+        .expect("inspect_frame_init should not error");
+    let ItemOrResult::Result(FrameResult::Call(outcome)) = result else {
+        panic!("expected Call result");
+    };
+    assert_eq!(
+        outcome.result.result,
+        InstructionResult::Stop,
+        "depth == CALL_STACK_LIMIT is still permitted; the inspector's output must survive",
+    );
+}
+
+#[test]
+fn test_rex5_inspect_frame_init_depth_guard_allows_shallow_call() {
+    // The depth guard is a conjunction: only a Call/StaticCall *past* the limit is rejected.
+    // A top-level call must never be turned into CallTooDeep.
+    let mut db = MemoryDatabase::default();
+    let context = MegaContext::new(&mut db, MegaSpecId::REX5);
+    let evm = MegaEvm::new(context);
+    let mut evm = evm.with_inspector(AlwaysInterceptInspector::default());
+
+    let target = address!("0000000000000000000000000000000000300003");
+    let frame_init = make_call_frame_init(target, [0u8; 4], 0);
+
+    let result = InspectorEvmTr::inspect_frame_init(&mut evm, frame_init)
+        .expect("inspect_frame_init should not error");
+    let ItemOrResult::Result(FrameResult::Call(outcome)) = result else {
+        panic!("expected Call result");
+    };
+    assert_eq!(
+        outcome.result.result,
+        InstructionResult::Stop,
+        "a depth-0 call must not be rejected by the depth guard",
+    );
+}
+
+#[test]
+fn test_pre_rex5_inspect_frame_init_depth_guard_disabled() {
+    // REX4 replay pin, mirroring `test_pre_rex5_depth_guard_disabled` on the inspected path:
+    // before REX5 there is no depth guard at all, so an inspector may deliver a synthetic
+    // result at any depth.
+    let mut db = MemoryDatabase::default();
+    let context = MegaContext::new(&mut db, MegaSpecId::REX4);
+    let evm = MegaEvm::new(context);
+    let mut evm = evm.with_inspector(AlwaysInterceptInspector::default());
+
+    let target = address!("0000000000000000000000000000000000300004");
+    let frame_init = make_call_frame_init(target, [0u8; 4], CALL_STACK_LIMIT as usize + 1);
+
+    let result = InspectorEvmTr::inspect_frame_init(&mut evm, frame_init)
+        .expect("inspect_frame_init should not error");
+    let ItemOrResult::Result(FrameResult::Call(outcome)) = result else {
+        panic!("expected Call result");
+    };
+    assert_eq!(
+        outcome.result.result,
+        InstructionResult::Stop,
+        "pre-REX5 must preserve existing behavior (inspector output survives at any depth)",
+    );
 }

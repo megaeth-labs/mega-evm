@@ -44,7 +44,7 @@ impl EvmeOutcome {
         // Build base receipt
         let receipt = Receipt {
             status: Eip658Value::Eip658(self.exec_result.is_success()),
-            cumulative_gas_used: self.exec_result.gas_used(),
+            cumulative_gas_used: self.exec_result.tx_gas_used(),
             logs: self.exec_result.logs().to_vec(),
         };
 
@@ -54,6 +54,7 @@ impl EvmeOutcome {
             MegaTxType::Eip2930 => OpReceiptEnvelope::Eip2930(receipt.with_bloom()),
             MegaTxType::Eip1559 => OpReceiptEnvelope::Eip1559(receipt.with_bloom()),
             MegaTxType::Eip7702 => OpReceiptEnvelope::Eip7702(receipt.with_bloom()),
+            MegaTxType::PostExec => OpReceiptEnvelope::PostExec(receipt.with_bloom()),
             MegaTxType::Deposit => {
                 let deposit_receipt = OpDepositReceipt {
                     inner: receipt,
@@ -124,9 +125,9 @@ pub fn print_execution_summary(
     println!("=== Transaction Summary ===");
 
     match exec_result {
-        ExecutionResult::Success { gas_used, logs, output, .. } => {
+        ExecutionResult::Success { logs, output, .. } => {
             println!("Status:           Success");
-            println!("Gas Used:         {}", gas_used);
+            println!("Gas Used:         {}", exec_result.tx_gas_used());
             println!("Execution Time:   {:?}", exec_time);
             if let Some(addr) = contract_address {
                 println!("Contract Address: {}", addr);
@@ -139,15 +140,15 @@ pub fn print_execution_summary(
                 println!("Output:           0x{}", hex::encode(output_data));
             }
         }
-        ExecutionResult::Revert { gas_used, output } => {
+        ExecutionResult::Revert { output, .. } => {
             println!("Status:           Reverted");
-            println!("Gas Used:         {}", gas_used);
+            println!("Gas Used:         {}", exec_result.tx_gas_used());
             println!("Execution Time:   {:?}", exec_time);
             println!("Revert Reason:    {}", decode_revert_reason(output));
         }
-        ExecutionResult::Halt { gas_used, reason } => {
+        ExecutionResult::Halt { reason, .. } => {
             println!("Status:           Halted");
-            println!("Gas Used:         {}", gas_used);
+            println!("Gas Used:         {}", exec_result.tx_gas_used());
             println!("Execution Time:   {:?}", exec_time);
             println!("Halt Reason:      {}", format_halt_reason(reason));
         }
@@ -320,11 +321,11 @@ impl ExecutionSummary {
         contract_address: Option<Address>,
     ) -> Self {
         match exec_result {
-            ExecutionResult::Success { gas_used, logs, output, .. } => {
+            ExecutionResult::Success { logs, output, .. } => {
                 let output_data = output.data();
                 Self {
                     success: true,
-                    gas_used: *gas_used,
+                    gas_used: exec_result.tx_gas_used(),
                     output: if output_data.is_empty() {
                         None
                     } else {
@@ -335,13 +336,13 @@ impl ExecutionSummary {
                     ..Default::default()
                 }
             }
-            ExecutionResult::Revert { gas_used, output } => Self {
-                gas_used: *gas_used,
+            ExecutionResult::Revert { output, .. } => Self {
+                gas_used: exec_result.tx_gas_used(),
                 revert_reason: Some(decode_revert_reason(output)),
                 ..Default::default()
             },
-            ExecutionResult::Halt { gas_used, reason } => Self {
-                gas_used: *gas_used,
+            ExecutionResult::Halt { reason, .. } => Self {
+                gas_used: exec_result.tx_gas_used(),
                 halt_reason: Some(format!("{:?}", reason)),
                 ..Default::default()
             },

@@ -54,6 +54,14 @@ The **Suppression Hygiene** job (the `orphan-suppressions` job in `.github/workf
 It runs on PRs that touch `suppressions.toml` or `src/`, and weekly.
 For dead code, prefer deleting it or `#[mutants::skip]` over a permanent `kind = "function"` exclude.
 
+## Timed-out mutants
+
+A timeout is **inconclusive**, not a survivor: the mutant was never proven caught, so the gate fails on it exactly as it does on a survivor.
+Before treating one as non-terminating code, read the run log under `mutants.out/log/`.
+nextest stops at the first failing test, so a mutant whose only killing test sits at the end of the global test queue is caught in the run's final seconds — and a ceiling below the *contended* full-suite duration (every mutant is tested while `--jobs $(nproc)` siblings compete for the cores) cuts the run off before it gets there.
+A log that ends mid-queue with everything passing is a mis-sized ceiling (`minimum_test_timeout` / `timeout_multiplier` in `.cargo/mutants.toml`), not a test gap.
+The durable fix is a killing test early in the queue: unit tests in the `mega-evm` lib target run before every integration binary, so detection stops depending on how long the rest of the suite takes.
+
 ## Fixing survivors
 
 Run the `improve-mutation-score` skill: it triages each survivor (equivalent vs. real, cross-checked), writes killing tests for real gaps, suppresses true equivalents with justification, and re-verifies.
