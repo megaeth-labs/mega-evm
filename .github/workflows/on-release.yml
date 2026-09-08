@@ -90,8 +90,13 @@ jobs:
           expected="mega-evme ${TAG#v}"
           actual="$(target/release/mega-evme --version)"
           if [[ "$actual" != "$expected" ]]; then
-            echo "::error::built binary reports '$actual', expected '$expected'; refusing to publish a mislabeled binary"
-            exit 1
+            if [[ "$DRY_RUN" == "true" ]]; then
+              # A rehearsal reports what a real run would refuse, and carries on.
+              echo "::warning::built binary reports '$actual', expected '$expected' — a real release would stop here"
+            else
+              echo "::error::built binary reports '$actual', expected '$expected'; refusing to publish a mislabeled binary"
+              exit 1
+            fi
           fi
           echo "$actual"
 
