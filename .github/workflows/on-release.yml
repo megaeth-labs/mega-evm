@@ -11,7 +11,9 @@ name: On Release
 #               download for the public, to the GitHub Release page
 #
 # Rehearse on a tag ref (the environment below allows only v* tag refs):
-#   gh workflow run on-release.yml --ref vX.Y.Z -f tag=vX.Y.Z -f dry_run=true
+#   gh workflow run on-release.yml --ref vX.Y.Z -f dry_run=true
+# The tag being released is always the run's own ref: the environment
+# authorises that ref, so nothing else may be checked out or published.
 #
 # Credentials (CARGO_REGISTRY_TOKEN, GCP_AUTH_KEY) live in the `publish`
 # environment, whose deployment policy allows only v* tags: a job can read
@@ -22,10 +24,6 @@ on:
     types: [published]
   workflow_dispatch:
     inputs:
-      tag:
-        description: "Existing tag to run against (rehearsal)"
-        required: true
-        type: string
       dry_run:
         description: "Verify and build everything; publish, upload and attach nothing"
         required: false
@@ -36,7 +34,10 @@ permissions:
   contents: read
 
 env:
-  TAG: ${{ github.event.release.tag_name || inputs.tag }}
+  # The run's ref — the released tag on a release event, the dispatched tag
+  # on a rehearsal. Never an input: the publish environment authorises this
+  # ref, so it must also be what gets built and published.
+  TAG: ${{ github.ref_name }}
   # A release event is never a dry run; a dispatch defaults to one.
   DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || false }}
 
@@ -46,6 +47,10 @@ jobs:
     timeout-minutes: 40
     environment: publish
     steps:
+      - name: Require a tag ref
+        run: |
+          [[ "$GITHUB_REF_TYPE" == "tag" ]] || { echo "::error::this workflow publishes the run's own ref, which must be a tag (got $GITHUB_REF_TYPE $GITHUB_REF_NAME); dispatch it with --ref vX.Y.Z"; exit 1; }
+
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           ref: ${{ env.TAG }}
@@ -78,6 +83,10 @@ jobs:
     permissions:
       contents: write # release-assets attaches to the Release
     steps:
+      - name: Require a tag ref
+        run: |
+          [[ "$GITHUB_REF_TYPE" == "tag" ]] || { echo "::error::this workflow publishes the run's own ref, which must be a tag (got $GITHUB_REF_TYPE $GITHUB_REF_NAME); dispatch it with --ref vX.Y.Z"; exit 1; }
+
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           ref: ${{ env.TAG }}
