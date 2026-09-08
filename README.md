@@ -41,7 +41,6 @@ chmod +x mega-evme
 
 The same binary is published to the MegaETH artifact registry for internal use.
 
-
 ## Development
 
 This repository uses git submodules.
