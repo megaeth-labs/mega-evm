@@ -30,7 +30,7 @@ use revm::{
 
 use crate::{
     constants, is_system_originated,
-    sandbox::{ReadOnlyHook, SandboxHookHandle, SandboxInspector, SandboxObserver},
+    sandbox::{SandboxHookHandle, SandboxInspector},
     AdditionalLimit, BucketId, DynamicGasCost, EmptyExternalEnv, EvmTxRuntimeLimits,
     ExternalEnvTypes, ExternalEnvs, MegaSpecId, TxRuntimeLimit, VolatileDataAccess,
     VolatileDataAccessTracker, VolatileDataAccessType,
@@ -84,8 +84,7 @@ pub struct MegaContext<DB: Database, ExtEnvs: ExternalEnvTypes> {
     /// Changing `ExtEnvs` via [`Self::with_external_envs`] resets this field
     /// and the [`EmptyExternalEnv`] hook slot: the hook cannot be carried across
     /// an env-type change and must be attached after external environments are
-    /// assembled. Observer and inspector occupy the same slot exclusively; an
-    /// observer sits behind a read-only adapter.
+    /// assembled. Setting a hook replaces the previous one.
     #[debug(ignore)]
     pub(crate) keyless_sandbox_hook: Option<SandboxHookHandle<ExtEnvs>>,
 
@@ -494,61 +493,31 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
         self
     }
 
-    /// Attaches an observer for nested sandbox execution on every spec.
+    /// Attaches a hook for nested sandbox execution on every spec.
     ///
-    /// The observer must implement [`SandboxObserver`] for both this context's
-    /// `ExtEnvs` and [`EmptyExternalEnv`]. The same handle is stored, behind a
-    /// read-only adapter, as two type-erased slots so opcode-level hooks fire
-    /// for pre-REX4 sandboxes (always [`EmptyExternalEnv`]) and for REX4+
-    /// sandboxes (shared parent env). A type that implements
-    /// [`revm::Inspector`] for every sandbox context lifetime satisfies both
-    /// bounds via the blanket impl.
-    ///
-    /// Attaching an observer does not change sandbox external-env semantics at
-    /// any spec. Replaces any attached inspector.
-    ///
-    /// [`Self::clear_keyless_sandbox_hook`] is the only way to detach. Observation
-    /// is read-only: mutating interpreter or context state through the hooks is
-    /// undefined and may diverge consensus. There is no take/drain API; recorded
-    /// data stays in the caller's observer.
-    pub fn set_keyless_sandbox_observer<O>(&mut self, observer: Rc<RefCell<O>>)
-    where
-        O: SandboxObserver<ExtEnvs> + SandboxObserver<EmptyExternalEnv> + 'static,
-        ExtEnvs: 'static,
-    {
-        let cloned = Rc::clone(&observer);
-        let parent: Rc<RefCell<dyn SandboxObserver<ExtEnvs>>> = cloned;
-        let empty: Rc<RefCell<dyn SandboxObserver<EmptyExternalEnv>>> = observer;
-        let parent: SandboxHookHandle<ExtEnvs> = Rc::new(RefCell::new(ReadOnlyHook::new(parent)));
-        let empty: SandboxHookHandle<EmptyExternalEnv> =
-            Rc::new(RefCell::new(ReadOnlyHook::new(empty)));
-        self.keyless_sandbox_hook = Some(parent);
-        self.keyless_sandbox_hook_empty = Some(empty);
-    }
-
-    /// Attaches a rewriting inspector for nested sandbox execution on every spec.
-    ///
-    /// The inspector must implement [`SandboxInspector`] for both this context's
+    /// The hook must implement [`SandboxInspector`] for both this context's
     /// `ExtEnvs` and [`EmptyExternalEnv`]. The same handle is stored as two
-    /// type-erased slots so opcode-level hooks fire for pre-REX4 sandboxes
-    /// (always [`EmptyExternalEnv`]) and for REX4+ sandboxes (shared parent
-    /// env). A type that implements [`revm::Inspector`] for every sandbox
-    /// context lifetime satisfies both bounds via the blanket impl.
+    /// type-erased slots so hooks fire for pre-REX4 sandboxes (always
+    /// [`EmptyExternalEnv`]) and for REX4+ sandboxes (shared parent env); a
+    /// sandbox's lifecycle events go to the same slot as its opcode-level hooks.
+    /// A type that implements [`revm::Inspector`] for every sandbox context
+    /// lifetime satisfies both bounds via the blanket impl.
     ///
-    /// Attaching an inspector does not change sandbox external-env semantics at
-    /// any spec. Replaces any attached observer. Interventions take effect
+    /// Attaching a hook does not change sandbox external-env semantics at any
+    /// spec. Setting a hook replaces the previous one. Interventions take effect
     /// inside the sandbox as they would on a top-level EVM; reported gas and
-    /// usage are the post-intervention values. The channel is node-local and
-    /// non-consensus.
+    /// usage are the post-intervention values. The hook is node-local and
+    /// non-consensus. There is no take/drain API; recorded data stays in the
+    /// caller's hook.
     ///
     /// [`Self::clear_keyless_sandbox_hook`] is the only way to detach.
-    pub fn set_keyless_sandbox_inspector<I>(&mut self, inspector: Rc<RefCell<I>>)
+    pub fn set_keyless_sandbox_hook<I>(&mut self, hook: Rc<RefCell<I>>)
     where
         I: SandboxInspector<ExtEnvs> + SandboxInspector<EmptyExternalEnv> + 'static,
     {
-        let cloned = Rc::clone(&inspector);
+        let cloned = Rc::clone(&hook);
         let parent: SandboxHookHandle<ExtEnvs> = cloned;
-        let empty: SandboxHookHandle<EmptyExternalEnv> = inspector;
+        let empty: SandboxHookHandle<EmptyExternalEnv> = hook;
         self.keyless_sandbox_hook = Some(parent);
         self.keyless_sandbox_hook_empty = Some(empty);
     }
@@ -891,10 +860,6 @@ mod tests {
 
     use crate::TestExternalEnvs;
 
-    struct NopObserver;
-
-    impl<E: ExternalEnvTypes> SandboxObserver<E> for NopObserver {}
-
     struct NopInspector;
 
     impl<E: ExternalEnvTypes> crate::sandbox::SandboxInspector<E> for NopInspector {}
@@ -1000,7 +965,7 @@ mod tests {
     #[test]
     fn test_clear_keyless_sandbox_hook_clears_both_slots() {
         let mut context = MegaContext::new(EmptyDB::default(), MegaSpecId::REX4);
-        context.set_keyless_sandbox_observer(Rc::new(RefCell::new(NopObserver)));
+        context.set_keyless_sandbox_hook(Rc::new(RefCell::new(NopInspector)));
         assert!(context.keyless_sandbox_hook.is_some());
         assert!(context.keyless_sandbox_hook_empty.is_some());
 
@@ -1010,14 +975,14 @@ mod tests {
     }
 
     #[test]
-    fn test_attaching_one_channel_replaces_the_other() {
+    fn test_setting_a_hook_replaces_the_previous_one() {
         let mut context = MegaContext::new(EmptyDB::default(), MegaSpecId::REX4);
-        let observer = Rc::new(RefCell::new(NopObserver));
-        context.set_keyless_sandbox_observer(Rc::clone(&observer));
-        assert_eq!(Rc::strong_count(&observer), 3, "both slots hold the observer");
+        let first = Rc::new(RefCell::new(NopInspector));
+        context.set_keyless_sandbox_hook(Rc::clone(&first));
+        assert_eq!(Rc::strong_count(&first), 3, "both slots hold the hook");
 
-        context.set_keyless_sandbox_inspector(Rc::new(RefCell::new(NopInspector)));
-        assert_eq!(Rc::strong_count(&observer), 1, "the inspector replaced the observer");
+        context.set_keyless_sandbox_hook(Rc::new(RefCell::new(NopInspector)));
+        assert_eq!(Rc::strong_count(&first), 1, "the new hook replaced the first");
         assert!(context.keyless_sandbox_hook.is_some());
         assert!(context.keyless_sandbox_hook_empty.is_some());
 
@@ -1029,7 +994,7 @@ mod tests {
     #[test]
     fn test_with_db_keeps_the_sandbox_hook() {
         let mut context = MegaContext::new(EmptyDB::default(), MegaSpecId::REX4);
-        context.set_keyless_sandbox_inspector(Rc::new(RefCell::new(NopInspector)));
+        context.set_keyless_sandbox_hook(Rc::new(RefCell::new(NopInspector)));
         let context = context.with_db(EmptyDB::default());
         assert!(context.keyless_sandbox_hook.is_some());
         assert!(context.keyless_sandbox_hook_empty.is_some());
@@ -1040,7 +1005,7 @@ mod tests {
         use revm::handler::EvmTr;
 
         let mut context = MegaContext::new(EmptyDB::default(), MegaSpecId::REX4);
-        context.set_keyless_sandbox_observer(Rc::new(RefCell::new(NopObserver)));
+        context.set_keyless_sandbox_hook(Rc::new(RefCell::new(NopInspector)));
         let mut evm = crate::MegaEvm::new(context);
         evm.clear_keyless_sandbox_hook();
         assert!(evm.ctx_ref().keyless_sandbox_hook.is_none());
@@ -1059,9 +1024,9 @@ mod tests {
     #[test]
     #[cfg(debug_assertions)]
     #[should_panic(expected = "set sandbox hook after external envs are wired")]
-    fn test_with_external_envs_panics_in_debug_when_observer_is_attached() {
+    fn test_with_external_envs_panics_in_debug_when_hook_is_attached() {
         let mut context = MegaContext::new(EmptyDB::default(), MegaSpecId::REX4);
-        context.set_keyless_sandbox_observer(Rc::new(RefCell::new(NopObserver)));
+        context.set_keyless_sandbox_hook(Rc::new(RefCell::new(NopInspector)));
         let _ =
             context.with_external_envs(TestExternalEnvs::<std::convert::Infallible>::new().into());
     }

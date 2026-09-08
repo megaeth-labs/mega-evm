@@ -7,7 +7,7 @@ use alloy_sol_types::SolCall;
 use mega_evm::{
     alloy_consensus::{Signed, TxLegacy},
     revm::context::result::ResultAndState,
-    sandbox::SandboxObserver,
+    sandbox::SandboxInspector,
     test_utils::{BytecodeBuilder, MemoryDatabase},
     EmptyExternalEnv, EvmTxRuntimeLimits, IKeylessDeploy, LimitUsage, MegaContext, MegaEvm,
     MegaHaltReason, MegaSpecId, MegaTransaction, TestExternalEnvs, KEYLESS_DEPLOY_ADDRESS,
@@ -279,14 +279,14 @@ pub(crate) struct RunConfig<'a, O> {
     pub db: &'a mut MemoryDatabase,
     pub tx_bytes: Bytes,
     pub gas_limit_override: u64,
-    pub observer: Option<Rc<RefCell<O>>>,
+    pub hook: Option<Rc<RefCell<O>>>,
     pub tx_limits: Option<EvmTxRuntimeLimits>,
     pub outer_gas_limit: u64,
 }
 
 pub(crate) fn run_keyless<O>(config: RunConfig<'_, O>) -> ResultAndState<MegaHaltReason>
 where
-    O: SandboxObserver<EmptyExternalEnv> + 'static,
+    O: SandboxInspector<EmptyExternalEnv> + 'static,
 {
     run_keyless_with_usage(config).0
 }
@@ -295,7 +295,7 @@ pub(crate) fn run_keyless_with_usage<O>(
     config: RunConfig<'_, O>,
 ) -> (ResultAndState<MegaHaltReason>, LimitUsage)
 where
-    O: SandboxObserver<EmptyExternalEnv> + 'static,
+    O: SandboxInspector<EmptyExternalEnv> + 'static,
 {
     let mut context = MegaContext::new(config.db, config.spec);
     context.modify_chain(|chain| {
@@ -305,8 +305,8 @@ where
     if let Some(limits) = config.tx_limits {
         context = context.with_tx_runtime_limits(limits);
     }
-    if let Some(observer) = config.observer {
-        context.set_keyless_sandbox_observer(observer);
+    if let Some(hook) = config.hook {
+        context.set_keyless_sandbox_hook(hook);
     }
     let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);
     let tx = keyless_deploy_call_tx_with_outer_gas(
@@ -365,7 +365,7 @@ pub(crate) fn run_keyless_with_parent_env<O>(
     observer: Option<Rc<RefCell<O>>>,
 ) -> ResultAndState<MegaHaltReason>
 where
-    O: SandboxObserver<TestExternalEnvs> + SandboxObserver<EmptyExternalEnv> + 'static,
+    O: SandboxInspector<TestExternalEnvs> + SandboxInspector<EmptyExternalEnv> + 'static,
 {
     run_keyless_with_parent_env_usage(spec, db, tx_bytes, env, observer).0
 }
@@ -378,7 +378,7 @@ pub(crate) fn run_keyless_with_parent_env_usage<O>(
     observer: Option<Rc<RefCell<O>>>,
 ) -> (ResultAndState<MegaHaltReason>, LimitUsage)
 where
-    O: SandboxObserver<TestExternalEnvs> + SandboxObserver<EmptyExternalEnv> + 'static,
+    O: SandboxInspector<TestExternalEnvs> + SandboxInspector<EmptyExternalEnv> + 'static,
 {
     let mut context = MegaContext::new(db, spec).with_external_envs(env.into());
     context.modify_chain(|chain| {
@@ -386,7 +386,7 @@ where
         chain.operator_fee_constant = Some(U256::ZERO);
     });
     if let Some(observer) = observer {
-        context.set_keyless_sandbox_observer(observer);
+        context.set_keyless_sandbox_hook(observer);
     }
     let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);
     let tx = keyless_deploy_call_tx(tx_bytes, LARGE_GAS_LIMIT_OVERRIDE);

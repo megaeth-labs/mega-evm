@@ -152,35 +152,19 @@ where
         self.evm.inspector()
     }
 
-    /// Attaches an observer for nested sandbox execution on every spec.
+    /// Attaches a hook for nested sandbox execution on every spec.
     ///
-    /// Forwards to [`crate::MegaEvm::set_keyless_sandbox_observer`]. The observer
-    /// must implement [`crate::sandbox::SandboxObserver`] for both this executor's
+    /// Forwards to [`crate::MegaEvm::set_keyless_sandbox_hook`]. The hook must
+    /// implement [`crate::sandbox::SandboxInspector`] for both this executor's
     /// `ExtEnvs` and [`crate::EmptyExternalEnv`]. Use
     /// [`Self::clear_keyless_sandbox_hook`] to detach.
-    pub fn set_keyless_sandbox_observer<O>(&mut self, observer: Rc<RefCell<O>>)
-    where
-        O: crate::sandbox::SandboxObserver<ExtEnvs>
-            + crate::sandbox::SandboxObserver<crate::EmptyExternalEnv>
-            + 'static,
-        ExtEnvs: 'static,
-    {
-        self.evm.set_keyless_sandbox_observer(observer);
-    }
-
-    /// Attaches a rewriting inspector for nested sandbox execution on every spec.
-    ///
-    /// Forwards to [`crate::MegaEvm::set_keyless_sandbox_inspector`]. The inspector
-    /// must implement [`crate::sandbox::SandboxInspector`] for both this executor's
-    /// `ExtEnvs` and [`crate::EmptyExternalEnv`]. Use
-    /// [`Self::clear_keyless_sandbox_hook`] to detach.
-    pub fn set_keyless_sandbox_inspector<I>(&mut self, inspector: Rc<RefCell<I>>)
+    pub fn set_keyless_sandbox_hook<I>(&mut self, hook: Rc<RefCell<I>>)
     where
         I: crate::sandbox::SandboxInspector<ExtEnvs>
             + crate::sandbox::SandboxInspector<crate::EmptyExternalEnv>
             + 'static,
     {
-        self.evm.set_keyless_sandbox_inspector(inspector);
+        self.evm.set_keyless_sandbox_hook(hook);
     }
 
     /// Detaches any sandbox hook from both env-type slots.

@@ -25,7 +25,7 @@ use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use mega_evm::{
     alloy_consensus::{Signed, TxLegacy},
     revm::inspector::NoOpInspector,
-    sandbox::{SandboxDb, SandboxObserver},
+    sandbox::{SandboxDb, SandboxInspector},
     test_utils::{BytecodeBuilder, MemoryDatabase},
     EmptyExternalEnv, ExternalEnvTypes, IKeylessDeploy, MegaContext, MegaEvm, MegaSpecId,
     MegaTransaction, KEYLESS_DEPLOY_ADDRESS,
@@ -36,7 +36,10 @@ use revm::{
         NUMBER, POP, PUSH0, RETURN, SELFDESTRUCT, SLOAD, SSTORE, STATICCALL, STOP, TIMESTAMP,
     },
     context::tx::TxEnvBuilder,
-    interpreter::{interpreter::EthInterpreter, CallInputs, CreateInputs, Interpreter},
+    interpreter::{
+        interpreter::EthInterpreter, CallInputs, CallOutcome, CreateInputs, CreateOutcome,
+        Interpreter,
+    },
     ExecuteEvm as _,
 };
 use std::{cell::RefCell, rc::Rc};
@@ -962,21 +965,21 @@ fn bench_oracle_real_data(c: &mut Criterion) {
 // ============================================================================
 //
 // A `KeylessDeploy` call whose constructor spends most of its gas on a compute
-// loop, run with and without a sandbox observer attached. The `observer` row
-// pays the per-opcode `InspectorBridge` → `ReadOnlyHook` → observer forwarding
-// on top of the plain sandbox interception, which is what `no_hook` measures.
+// loop, run with and without a sandbox hook attached. The `hook` row pays the
+// per-opcode `InspectorBridge` → hook forwarding on top of the plain sandbox
+// interception, which is what `no_hook` measures.
 //
 
 const KEYLESS_SANDBOX_ITERATIONS: usize = 100;
 
-/// The cheapest observer that still exercises every forwarding hop.
+/// The cheapest hook that still exercises every forwarding hop.
 #[derive(Default)]
-struct CountingObserver {
+struct CountingHook {
     steps: u64,
     frames: u64,
 }
 
-impl<E: ExternalEnvTypes> SandboxObserver<E> for CountingObserver {
+impl<E: ExternalEnvTypes> SandboxInspector<E> for CountingHook {
     fn step(
         &mut self,
         _interp: &mut Interpreter<EthInterpreter>,
@@ -985,12 +988,22 @@ impl<E: ExternalEnvTypes> SandboxObserver<E> for CountingObserver {
         self.steps += 1;
     }
 
-    fn call(&mut self, _context: &mut MegaContext<SandboxDb<'_>, E>, _inputs: &CallInputs) {
+    fn call(
+        &mut self,
+        _context: &mut MegaContext<SandboxDb<'_>, E>,
+        _inputs: &mut CallInputs,
+    ) -> Option<CallOutcome> {
         self.frames += 1;
+        None
     }
 
-    fn create(&mut self, _context: &mut MegaContext<SandboxDb<'_>, E>, _inputs: &CreateInputs) {
+    fn create(
+        &mut self,
+        _context: &mut MegaContext<SandboxDb<'_>, E>,
+        _inputs: &mut CreateInputs,
+    ) -> Option<CreateOutcome> {
         self.frames += 1;
+        None
     }
 }
 
@@ -1037,7 +1050,7 @@ fn bench_keyless_sandbox_hook(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("keyless_sandbox_hook");
     group.sample_size(10);
-    for (row, attach_observer) in [("rex5/no_hook", false), ("rex5/observer", true)] {
+    for (row, attach_hook) in [("rex5/no_hook", false), ("rex5/hook", true)] {
         group.bench_function(row, |b| {
             b.iter(|| {
                 let mut db = MemoryDatabase::default();
@@ -1049,10 +1062,8 @@ fn bench_keyless_sandbox_hook(c: &mut Criterion) {
                     chain.operator_fee_constant = Some(U256::ZERO);
                 });
                 let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);
-                if attach_observer {
-                    evm.set_keyless_sandbox_observer(Rc::new(RefCell::new(
-                        CountingObserver::default(),
-                    )));
+                if attach_hook {
+                    evm.set_keyless_sandbox_hook(Rc::new(RefCell::new(CountingHook::default())));
                 }
                 let tx = TxEnvBuilder::new()
                     .caller(CALLER)

@@ -22,21 +22,19 @@ MegaEVM execution core that wraps revm/op-revm with MegaETH instruction tables, 
 - `MegaEvm` methods read aggregate resource usage from `additional_limit` after execution.
 - Keep inspector and non-inspector paths behaviorally aligned.
 
-## Keyless sandbox hooks
-Two exclusive channels into nested keyless-deploy sandbox execution, attached on `MegaContext` (and forwarded from `MegaEvm` / `MegaBlockExecutor`).
-Read-only default: `SandboxObserver` cannot short-circuit `CALL`/`CREATE` and must not mutate interpreter or context state.
-Rewriting explicit: `SandboxInspector` forwards `&mut` inputs and override return values so interventions take effect inside the sandbox as they would on a top-level EVM.
-Both channels share one type-erased slot (`Rc<RefCell<dyn SandboxInspector<E>>>`, held twice: parent env type and `EmptyExternalEnv`); an observer is installed behind the crate-private `ReadOnlyHook` adapter, which forwards shared references and never answers a `CALL`/`CREATE` override.
-Types generic over revm's `Inspector` get both channels through blanket impls; hosts behind a generic EVM projection (a node's `ConfigureEvm::Evm`) name the attach operation on their own configuration type instead of on mega-evm.
-With the `inspectors` feature, `sandbox::trace` ships the shared `revm-inspectors` pattern: a `SharedTracingInspector` for the outer EVM paired with a `SandboxTracer` on the observer channel, which records each sandbox execution in an arena of its own keyed by the intercepted call, and `splice_sandbox_traces`, which grafts those arenas under their `KeylessDeploy` CALL frames after execution and leaves the tracer empty; `mega-evme` and node tracing RPCs use the same implementation.
-Lifecycle events (`sandbox_start` / `sandbox_end`) are delivered on the slot that also receives the sandbox's opcode-level hooks: `EmptyExternalEnv` pre-REX4, the parent env from REX4 on.
+## Keyless sandbox hook
+One hook channel into nested keyless-deploy sandbox execution: `SandboxInspector`, attached on `MegaContext` via `set_keyless_sandbox_hook` (forwarded from `MegaEvm` / `MegaBlockExecutor`) and detached via `clear_keyless_sandbox_hook`; setting a hook replaces the previous one.
+Hook signatures match revm's `Inspector` on the sandbox EVM: `&mut` inputs and override return values are forwarded, so interventions take effect inside the sandbox as they would on a top-level EVM, and a hook that returns `None` from `call`/`create` and leaves interpreter and context state alone observes without intervening (the same read-only notion the outer EVM's inspector has).
+The slot is one type-erased handle (`Rc<RefCell<dyn SandboxInspector<E>>>`, held twice: parent env type and `EmptyExternalEnv`), and a sandbox's lifecycle events (`sandbox_start` / `sandbox_end`) go to the slot that also receives its opcode-level hooks: `EmptyExternalEnv` pre-REX4, the parent env from REX4 on.
+Types generic over revm's `Inspector` get the hook through a blanket impl; hosts behind a generic EVM projection (a node's `ConfigureEvm::Evm`) name the attach operation on their own configuration type instead of on mega-evm.
+With the `inspectors` feature, `sandbox::trace` ships the shared `revm-inspectors` pattern: a `SharedTracingInspector` for the outer EVM paired with a `SandboxTracer` attached as the hook, which records each sandbox execution in an arena of its own keyed by the intercepted call, and `splice_sandbox_traces`, which grafts those arenas under their `KeylessDeploy` CALL frames after execution and leaves the tracer empty; `mega-evme` and node tracing RPCs use the same implementation.
 
 Contract:
 1. With no hook attached, the sandbox path is unchanged.
-2. Attaching the rewriting channel without intervening leaves result, state, gas, and usage identical to the unattached path.
+2. Attaching a hook without intervening leaves result, state, gas, and usage identical to the unattached path.
 3. Interventions take effect inside the sandbox as they would on a top-level EVM; reported `gas_used` and usage are the post-intervention values, and the parent frame records them as-is without a conservation check.
    Malformed synthetic outcomes, such as a `memory_offset` outside the frame's memory, panic exactly as they would on a top-level EVM; the sandbox neither isolates nor amplifies that.
-4. The channel is node-local and non-consensus; an intervening node may diverge from the network, and the caller accepts that risk.
+4. The hook is node-local and non-consensus; an intervening node may diverge from the network, and the caller accepts that risk.
 5. Later specs measure interventions and refuse some shapes; integrators must not depend on this base being permissive.
 
 ## WHERE TO LOOK

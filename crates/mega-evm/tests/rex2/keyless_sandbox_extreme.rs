@@ -1,9 +1,9 @@
-//! Corner-case sandbox shapes seen through the read-only observer channel.
+//! Corner-case sandbox shapes seen through a non-intervening sandbox hook.
 //!
 //! Each case uses one of the init codes in `mega_evm::test_utils::keyless` — the same bytes
 //! the offline state-test corpus and the end-to-end suite run — and pins two things on every
-//! spec: the exact event stream the observer receives, and that attaching the observer does
-//! not change the result, state, or usage of the transaction.
+//! spec: the exact event stream the hook receives, and that attaching the hook does not
+//! change the result, state, or usage of the transaction.
 
 use std::{cell::RefCell, rc::Rc};
 
@@ -13,7 +13,7 @@ use mega_evm::{
         interpreter::EthInterpreter, CallInputs, CallOutcome, CreateInputs, CreateOutcome,
         Interpreter,
     },
-    sandbox::{SandboxCompletionKind, SandboxEndOutcome, SandboxInspector, SandboxObserver},
+    sandbox::{SandboxCompletionKind, SandboxEndOutcome, SandboxInspector},
     test_utils::{
         deep_mixed_init, nested_keyless_call_init, revert_after_create_init, MemoryDatabase,
         REVERTING_RUNTIME,
@@ -23,9 +23,9 @@ use mega_evm::{
 
 use crate::keyless_sandbox_support::{
     assert_result_and_state_eq, assert_usage_eq, create_pre_eip155_deploy_tx,
-    create_pre_eip155_deploy_tx_with_value_and_gas_limit, funded_db,
-    keyless_deploy_call_tx_with_outer_gas, run_keyless_with_usage, success_constructor, RunConfig,
-    DEFAULT_OUTER_GAS_LIMIT, LARGE_GAS_LIMIT_OVERRIDE, REVERTER, SPECS,
+    create_pre_eip155_deploy_tx_with_value_and_gas_limit, funded_db, run_keyless_with_usage,
+    success_constructor, RunConfig, DEFAULT_OUTER_GAS_LIMIT, LARGE_GAS_LIMIT_OVERRIDE, REVERTER,
+    SPECS,
 };
 
 /// The frame-level events these cases assert on.
@@ -44,60 +44,8 @@ struct Recorder {
     events: Vec<Ev>,
 }
 
-impl<E: ExternalEnvTypes> SandboxObserver<E> for Recorder {
-    fn call(
-        &mut self,
-        _context: &mut MegaContext<mega_evm::sandbox::SandboxDb<'_>, E>,
-        inputs: &CallInputs,
-    ) {
-        self.events.push(Ev::Call { target: inputs.target_address });
-    }
-
-    fn call_end(
-        &mut self,
-        _context: &mut MegaContext<mega_evm::sandbox::SandboxDb<'_>, E>,
-        inputs: &CallInputs,
-        outcome: &CallOutcome,
-    ) {
-        self.events.push(Ev::CallEnd {
-            target: inputs.target_address,
-            reverted: outcome.result.is_revert(),
-        });
-    }
-
-    fn create(
-        &mut self,
-        _context: &mut MegaContext<mega_evm::sandbox::SandboxDb<'_>, E>,
-        _inputs: &CreateInputs,
-    ) {
-        self.events.push(Ev::Create);
-    }
-
-    fn create_end(
-        &mut self,
-        _context: &mut MegaContext<mega_evm::sandbox::SandboxDb<'_>, E>,
-        _inputs: &CreateInputs,
-        outcome: &CreateOutcome,
-    ) {
-        self.events.push(Ev::CreateEnd { ok: outcome.result.is_ok(), address: outcome.address });
-    }
-
-    fn log(
-        &mut self,
-        _interp: &mut Interpreter<EthInterpreter>,
-        _context: &mut MegaContext<mega_evm::sandbox::SandboxDb<'_>, E>,
-        _log: alloy_primitives::Log,
-    ) {
-        self.events.push(Ev::Log);
-    }
-
-    fn sandbox_end(&mut self, outcome: &SandboxEndOutcome) {
-        self.events.push(Ev::End(outcome.clone()));
-    }
-}
-
-/// The same recorder on the rewriting channel: records identically and never intervenes, so
-/// both channels must produce the same stream and the same execution.
+/// Records every hook and never intervenes: `call` / `create` answer `None`, inputs and
+/// outcomes pass through untouched.
 impl<E: ExternalEnvTypes> SandboxInspector<E> for Recorder {
     fn call(
         &mut self,
@@ -152,47 +100,9 @@ impl<E: ExternalEnvTypes> SandboxInspector<E> for Recorder {
     }
 }
 
-/// Runs `tx_bytes` with the recorder attached through the rewriting channel.
-fn run_through_inspector_channel(
-    spec: MegaSpecId,
-    tx_bytes: &Bytes,
-    signer: Address,
-    gas_limit_override: u64,
-    setup: &impl Fn(&mut MemoryDatabase),
-) -> (
-    mega_evm::revm::context::result::ResultAndState<mega_evm::MegaHaltReason>,
-    mega_evm::LimitUsage,
-    Vec<Ev>,
-) {
-    use mega_evm::{
-        revm::{inspector::NoOpInspector, ExecuteEvm},
-        MegaEvm,
-    };
-    let recorder = Rc::new(RefCell::new(Recorder::default()));
-    let mut db = funded_db(signer);
-    setup(&mut db);
-    let mut context = MegaContext::new(&mut db, spec);
-    context.modify_chain(|chain| {
-        chain.operator_fee_scalar = Some(U256::ZERO);
-        chain.operator_fee_constant = Some(U256::ZERO);
-    });
-    context.set_keyless_sandbox_inspector(Rc::clone(&recorder));
-    let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);
-    let tx = keyless_deploy_call_tx_with_outer_gas(
-        tx_bytes.clone(),
-        gas_limit_override,
-        DEFAULT_OUTER_GAS_LIMIT,
-    );
-    let result = evm.transact(tx).expect("keyless deploy through the inspector channel");
-    let usage = evm.ctx.additional_limit.borrow().get_usage();
-    let events = recorder.borrow().events.clone();
-    (result, usage, events)
-}
-
-/// One keyless deploy of `tx_bytes` under `spec`: once with the recorder on the read-only
-/// channel, once with no hook, and once with the recorder on the rewriting channel. The three
-/// runs must agree on result, state, and usage, and both channels must stream the same
-/// events. Returns the observed run and the event stream.
+/// One keyless deploy of `tx_bytes` under `spec`: once with the recorder attached and once
+/// with no hook. The two runs must agree on result, state, and usage. Returns the observed
+/// run and the event stream.
 fn run_case(
     spec: MegaSpecId,
     tx_bytes: &Bytes,
@@ -210,7 +120,7 @@ fn run_case(
         db: &mut db,
         tx_bytes: tx_bytes.clone(),
         gas_limit_override,
-        observer: Some(Rc::clone(&recorder)),
+        hook: Some(Rc::clone(&recorder)),
         tx_limits: None,
         outer_gas_limit: DEFAULT_OUTER_GAS_LIMIT,
     });
@@ -222,7 +132,7 @@ fn run_case(
         db: &mut db,
         tx_bytes: tx_bytes.clone(),
         gas_limit_override,
-        observer: None::<Rc<RefCell<Recorder>>>,
+        hook: None::<Rc<RefCell<Recorder>>>,
         tx_limits: None,
         outer_gas_limit: DEFAULT_OUTER_GAS_LIMIT,
     });
@@ -230,12 +140,6 @@ fn run_case(
     assert_result_and_state_eq(&observed, &baseline, &case);
     assert_usage_eq(observed_usage, baseline_usage, &case);
     let events = recorder.borrow().events.clone();
-
-    let (rewritten, rewritten_usage, rewritten_events) =
-        run_through_inspector_channel(spec, tx_bytes, signer, gas_limit_override, &setup);
-    assert_result_and_state_eq(&rewritten, &baseline, &format!("{case} (inspector channel)"));
-    assert_usage_eq(rewritten_usage, baseline_usage, &format!("{case} (inspector channel)"));
-    assert_eq!(rewritten_events, events, "{case}: both channels must stream the same frame events");
 
     (observed, events)
 }

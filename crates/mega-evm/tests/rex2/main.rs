@@ -2,8 +2,8 @@
 
 mod keyless_deploy;
 mod keyless_sandbox_extreme;
+mod keyless_sandbox_hook;
 mod keyless_sandbox_inspector;
-mod keyless_sandbox_observer;
 mod keyless_sandbox_support;
 #[cfg(feature = "inspectors")]
 mod keyless_sandbox_trace;

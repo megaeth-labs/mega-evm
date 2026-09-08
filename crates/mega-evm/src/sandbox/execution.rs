@@ -68,10 +68,9 @@ use super::{
 
 use super::{
     error::{encode_error_result, KeylessDeployError},
-    inspector::{InspectorBridge, SandboxHookHandle},
-    observer::{
-        OuterCallInfo, SandboxCompletionKind, SandboxEndOutcome, SandboxRejectKind,
-        SandboxStartInfo,
+    inspector::{
+        InspectorBridge, OuterCallInfo, SandboxCompletionKind, SandboxEndOutcome,
+        SandboxHookHandle, SandboxRejectKind, SandboxStartInfo,
     },
     state::SandboxDb,
 };
@@ -1416,8 +1415,6 @@ mod tests {
     use revm::context::result::Output;
     use std::rc::Rc;
 
-    use super::super::observer::SandboxObserver;
-
     /// Test error type that lets us drive `process_sandbox_transact_result`'s
     /// `Err` arms (which map to `SandboxOutcome::Rejected`) directly without
     /// standing up a full sandbox EVM. The two arms differ only by
@@ -1862,7 +1859,7 @@ mod tests {
 
     struct SplitNopObserver;
 
-    impl<E: ExternalEnvTypes> SandboxObserver<E> for SplitNopObserver {}
+    impl<E: ExternalEnvTypes> crate::sandbox::SandboxInspector<E> for SplitNopObserver {}
 
     fn assert_sandbox_outcomes_eq(left: &SandboxOutcome, right: &SandboxOutcome, case: &str) {
         match (left, right) {
@@ -1904,7 +1901,7 @@ mod tests {
 
     fn run_split_create_fixture(
         spec: MegaSpecId,
-        observer: Option<Rc<RefCell<dyn SandboxObserver<crate::EmptyExternalEnv>>>>,
+        observer: Option<SandboxHookHandle<crate::EmptyExternalEnv>>,
     ) -> SandboxOutcome {
         use crate::test_utils::MemoryDatabase;
         use revm::state::EvmState;
@@ -1937,16 +1934,7 @@ mod tests {
 
         let limits =
             EvmTxRuntimeLimits::no_limits().with_tx_compute_gas_limit(SPLIT_CREATE_COMPUTE_BUDGET);
-        match run_sandbox_ctx(
-            context,
-            tx,
-            Some(limits),
-            block,
-            chain,
-            observer.map(|observer| -> SandboxHookHandle<crate::EmptyExternalEnv> {
-                Rc::new(RefCell::new(crate::sandbox::ReadOnlyHook::new(observer)))
-            }),
-        ) {
+        match run_sandbox_ctx(context, tx, Some(limits), block, chain, observer) {
             SandboxRun::Outcome(outcome) => outcome,
             other => panic!("split-create fixture produced no outcome: {other:?}"),
         }
@@ -1970,7 +1958,7 @@ mod tests {
     fn test_observer_parity_pre_rex5_split_create_commits_sstore() {
         for spec in [MegaSpecId::REX2, MegaSpecId::REX3, MegaSpecId::REX4] {
             let baseline = run_split_create_fixture(spec, None);
-            let observer: Rc<RefCell<dyn SandboxObserver<crate::EmptyExternalEnv>>> =
+            let observer: SandboxHookHandle<crate::EmptyExternalEnv> =
                 Rc::new(RefCell::new(SplitNopObserver));
             let observed = run_split_create_fixture(spec, Some(observer));
 
@@ -1988,7 +1976,7 @@ mod tests {
     #[test]
     fn test_observer_parity_rex5_atomic_create_failure() {
         let baseline = run_split_create_fixture(MegaSpecId::REX5, None);
-        let observer: Rc<RefCell<dyn SandboxObserver<crate::EmptyExternalEnv>>> =
+        let observer: SandboxHookHandle<crate::EmptyExternalEnv> =
             Rc::new(RefCell::new(SplitNopObserver));
         let observed = run_split_create_fixture(MegaSpecId::REX5, Some(observer));
 

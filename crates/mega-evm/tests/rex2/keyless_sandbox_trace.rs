@@ -103,7 +103,7 @@ fn configured_context<DB: mega_evm::alloy_evm::Database>(
 }
 
 /// Runs one keyless deploy of `tx_bytes` on a fresh `MegaEvm` with `outer` installed as the
-/// EVM inspector and `sandbox` attached through the observer channel.
+/// EVM inspector and `sandbox` attached as the sandbox hook.
 fn trace_keyless_deploy(
     spec: MegaSpecId,
     db: &mut MemoryDatabase,
@@ -113,7 +113,7 @@ fn trace_keyless_deploy(
 ) -> ResultAndState<MegaHaltReason> {
     let context = configured_context(db, spec);
     let mut evm = MegaEvm::new(context).with_inspector(outer);
-    evm.set_keyless_sandbox_observer(Rc::clone(sandbox));
+    evm.set_keyless_sandbox_hook(Rc::clone(sandbox));
     evm.inspect_tx(keyless_deploy_call_tx(tx_bytes, LARGE_GAS_LIMIT_OVERRIDE))
         .expect("keyless deploy transact")
 }
@@ -128,7 +128,7 @@ fn trace_plain_call(
     db.set_account_code(STOPPER, Bytes::from_static(&[STOP]));
     let context = configured_context(db, MegaSpecId::REX5);
     let mut evm = MegaEvm::new(context).with_inspector(outer);
-    evm.set_keyless_sandbox_observer(Rc::clone(sandbox));
+    evm.set_keyless_sandbox_hook(Rc::clone(sandbox));
     let tx = TxEnv {
         caller: TEST_CALLER,
         kind: TxKind::Call(STOPPER),
@@ -281,7 +281,7 @@ fn test_tracer_splices_deep_mixed_shape_with_no_hook_parity() {
             db: &mut db,
             tx_bytes,
             gas_limit_override: LARGE_GAS_LIMIT_OVERRIDE,
-            observer: None::<Rc<RefCell<SandboxTracer>>>,
+            hook: None::<Rc<RefCell<SandboxTracer>>>,
             tx_limits: None,
             outer_gas_limit: DEFAULT_OUTER_GAS_LIMIT,
         });
@@ -477,7 +477,7 @@ fn test_sandbox_aborted_by_database_error_is_grafted_as_a_fatal_error() {
         let sandbox = SandboxTracer::handle(config);
         let context = configured_context(&mut db, MegaSpecId::REX5);
         let mut evm = MegaEvm::new(context).with_inspector(outer.clone());
-        evm.set_keyless_sandbox_observer(Rc::clone(&sandbox));
+        evm.set_keyless_sandbox_hook(Rc::clone(&sandbox));
         let result = evm
             .inspect_tx(keyless_deploy_call_tx(tx_bytes, LARGE_GAS_LIMIT_OVERRIDE))
             .expect("outer transact");
@@ -642,43 +642,36 @@ fn test_outer_adapter_forwards_create_log_and_selfdestruct() {
     assert!(create.trace.steps.iter().any(|step| step.op.get() == SELFDESTRUCT));
 }
 
-/// A plain `TracingInspector` attached through either channel reaches the sandbox through
-/// the blanket impls, including the `log` and `selfdestruct` hooks.
+/// A plain `TracingInspector` attached as the hook reaches the sandbox through the blanket
+/// impl, including the `log` and `selfdestruct` hooks.
 #[test]
-fn test_blanket_channels_forward_log_and_selfdestruct_to_a_tracing_inspector() {
-    for attach_as_inspector in [false, true] {
-        for (name, init_code, expect_log, expect_selfdestruct) in [
-            ("deep mixed", deep_mixed_init(REVERTER), true, false),
-            ("selfdestruct", selfdestructing_constructor(), false, true),
-        ] {
-            let (tx_bytes, signer) = create_pre_eip155_deploy_tx(init_code);
-            let mut db = funded_db(signer);
-            db.set_account_code(REVERTER, Bytes::from_static(&REVERTING_RUNTIME));
-            let tracer = Rc::new(RefCell::new(TracingInspector::new(all_config())));
-            let context = configured_context(&mut db, MegaSpecId::REX5);
-            let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);
-            if attach_as_inspector {
-                evm.set_keyless_sandbox_inspector(Rc::clone(&tracer));
-            } else {
-                evm.set_keyless_sandbox_observer(Rc::clone(&tracer));
-            }
-            let result = evm
-                .inspect_tx(keyless_deploy_call_tx(tx_bytes, LARGE_GAS_LIMIT_OVERRIDE))
-                .expect("keyless deploy transact");
-            let case = format!("{name} inspector={attach_as_inspector}");
-            assert!(result.result.is_success(), "{case}: {:?}", result.result);
+fn test_blanket_impl_forwards_log_and_selfdestruct_to_a_tracing_inspector() {
+    for (name, init_code, expect_log, expect_selfdestruct) in [
+        ("deep mixed", deep_mixed_init(REVERTER), true, false),
+        ("selfdestruct", selfdestructing_constructor(), false, true),
+    ] {
+        let (tx_bytes, signer) = create_pre_eip155_deploy_tx(init_code);
+        let mut db = funded_db(signer);
+        db.set_account_code(REVERTER, Bytes::from_static(&REVERTING_RUNTIME));
+        let tracer = Rc::new(RefCell::new(TracingInspector::new(all_config())));
+        let context = configured_context(&mut db, MegaSpecId::REX5);
+        let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);
+        evm.set_keyless_sandbox_hook(Rc::clone(&tracer));
+        let result = evm
+            .inspect_tx(keyless_deploy_call_tx(tx_bytes, LARGE_GAS_LIMIT_OVERRIDE))
+            .expect("keyless deploy transact");
+        assert!(result.result.is_success(), "{name}: {:?}", result.result);
 
-            let tracer_ref = tracer.borrow();
-            let root = &tracer_ref.traces().nodes()[0];
-            assert!(root.trace.kind.is_any_create(), "{case}: sandbox CREATE recorded");
-            let logs: usize = tracer_ref.traces().nodes().iter().map(|n| n.logs.len()).sum();
-            assert_eq!(logs > 0, expect_log, "{case}: log forwarding, got {logs} logs");
-            assert_eq!(
-                root.trace.selfdestruct_address.is_some(),
-                expect_selfdestruct,
-                "{case}: selfdestruct forwarding"
-            );
-        }
+        let tracer_ref = tracer.borrow();
+        let root = &tracer_ref.traces().nodes()[0];
+        assert!(root.trace.kind.is_any_create(), "{name}: sandbox CREATE recorded");
+        let logs: usize = tracer_ref.traces().nodes().iter().map(|n| n.logs.len()).sum();
+        assert_eq!(logs > 0, expect_log, "{name}: log forwarding, got {logs} logs");
+        assert_eq!(
+            root.trace.selfdestruct_address.is_some(),
+            expect_selfdestruct,
+            "{name}: selfdestruct forwarding"
+        );
     }
 }
 
@@ -727,9 +720,8 @@ fn keyless_deploy_envelope(nonce: u64, tx_bytes: Bytes) -> Recovered<MegaTxEnvel
     Recovered::new_unchecked(MegaTxEnvelope::Legacy(signed), TEST_CALLER)
 }
 
-/// The `MegaBlockExecutor` forwarders: attach a plain `TracingInspector` through the
-/// inspector channel, detach, then attach a `SandboxTracer` through the observer channel,
-/// one keyless deployment per step of a single block.
+/// The `MegaBlockExecutor` forwarders: attach a plain `TracingInspector`, detach, then attach
+/// a `SandboxTracer`, one keyless deployment per step of a single block.
 #[test]
 fn test_block_executor_forwards_sandbox_hooks() {
     let (tx_a, signer_a) = create_pre_eip155_deploy_tx(success_constructor());
@@ -768,9 +760,9 @@ fn test_block_executor_forwards_sandbox_hooks() {
         chain.operator_fee_constant = Some(U256::ZERO);
     });
 
-    // Inspector channel: a plain tracing inspector records the sandbox CREATE on its own.
+    // A plain tracing inspector records the sandbox CREATE on its own.
     let direct = Rc::new(RefCell::new(TracingInspector::new(all_config())));
-    executor.set_keyless_sandbox_inspector(Rc::clone(&direct));
+    executor.set_keyless_sandbox_hook(Rc::clone(&direct));
     outer.fuse();
     executor
         .execute_transaction_with_result_closure(&keyless_deploy_envelope(0, tx_a), |result| {
@@ -797,9 +789,9 @@ fn test_block_executor_forwards_sandbox_hooks() {
     assert!(direct.borrow().traces().nodes()[0].trace.status.is_none(), "tx B: nothing recorded");
     assert_eq!(sandbox.borrow().pending(), 0, "tx B: nothing recorded");
 
-    // Observer channel: the sandbox tracer records, and the splice grafts the constructor's
-    // reverted CALL under the CREATE.
-    executor.set_keyless_sandbox_observer(Rc::clone(&sandbox));
+    // The sandbox tracer records, and the splice grafts the constructor's reverted CALL under
+    // the CREATE.
+    executor.set_keyless_sandbox_hook(Rc::clone(&sandbox));
     outer.fuse();
     executor
         .execute_transaction_with_result_closure(&keyless_deploy_envelope(2, tx_c), |result| {

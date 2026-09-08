@@ -527,7 +527,7 @@ impl Cmd {
 
         block_executor.inspector_mut().fuse();
         if let Some(sandbox) = &sandbox {
-            block_executor.set_keyless_sandbox_observer(std::rc::Rc::clone(sandbox));
+            block_executor.set_keyless_sandbox_hook(std::rc::Rc::clone(sandbox));
         }
         let outcome = block_executor
             .run_transaction(wrapped_tx)

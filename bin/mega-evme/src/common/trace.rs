@@ -243,7 +243,7 @@ impl TraceArgs {
             info!(tracer = ?self.tracer, "Evm executing with tracing");
             let (outer, sandbox) = paired(self.inspector_config());
             let mut evm = MegaEvm::new(evm_context).with_inspector(outer.clone());
-            evm.set_keyless_sandbox_observer(Rc::clone(&sandbox));
+            evm.set_keyless_sandbox_hook(Rc::clone(&sandbox));
 
             let result_and_state = evm
                 .inspect_tx(tx)
@@ -411,7 +411,7 @@ mod tests {
         let result = {
             let context = keyless_context(&mut db);
             let mut evm = MegaEvm::new(context).with_inspector(outer);
-            evm.set_keyless_sandbox_observer(sandbox);
+            evm.set_keyless_sandbox_hook(sandbox);
             let result = evm
                 .inspect_tx(keyless_deploy_tx_with_override(tx_bytes, gas_limit_override))
                 .expect("keyless deploy");
@@ -560,7 +560,7 @@ mod tests {
             chain.operator_fee_scalar = Some(U256::ZERO);
             chain.operator_fee_constant = Some(U256::ZERO);
         });
-        executor.set_keyless_sandbox_observer(Rc::clone(&sandbox));
+        executor.set_keyless_sandbox_hook(Rc::clone(&sandbox));
 
         let call_data = IKeylessDeploy::keylessDeployCall {
             keylessDeploymentTransaction: tx_bytes,

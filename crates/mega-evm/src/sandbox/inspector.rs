@@ -1,35 +1,61 @@
-//! Rewriting inspector channel for nested sandbox execution.
+//! Hook channel into nested sandbox execution.
 //!
-//! A [`SandboxInspector`] is the intervention counterpart of [`super::SandboxObserver`].
-//! Hook signatures match revm's [`Inspector`] on the sandbox EVM: `&mut` inputs and
-//! override return values are forwarded, so `CALL`/`CREATE` can be short-circuited and
-//! outcomes rewritten. [`InspectorBridge`] installs the handle as the sandbox EVM's
-//! inspector. Both channels occupy the same type-erased slot: an observer is installed behind
-//! a read-only adapter, so attaching either replaces the other.
+//! Keyless sandbox execution is otherwise invisible to a parent inspector. A
+//! [`SandboxInspector`] attached via [`crate::MegaContext::set_keyless_sandbox_hook`]
+//! sees every hook that revm's [`Inspector`] would see on the sandbox EVM, plus a paired
+//! [`sandbox_start`](SandboxInspector::sandbox_start) /
+//! [`sandbox_end`](SandboxInspector::sandbox_end) lifecycle. Hook signatures match revm's:
+//! `&mut` inputs and override return values are forwarded, so a hook can rewrite inputs,
+//! short-circuit `CALL`/`CREATE`, and rewrite outcomes exactly as it could on a top-level
+//! EVM. A hook that only observes returns `None` from `call`/`create` (the default bodies)
+//! and leaves interpreter and context state alone; that is what read-only means here, as it
+//! does for the outer EVM's inspector. [`InspectorBridge`] installs the handle as the sandbox
+//! EVM's inspector.
 //!
 //! # Contract
 //!
 //! 1. With no hook attached, the sandbox path is unchanged.
-//! 2. Attaching this channel without intervening leaves result, state, gas, and usage identical to
-//!    the unattached path.
+//! 2. Attaching a hook without intervening leaves result, state, gas, and usage identical to the
+//!    unattached path.
 //! 3. Interventions take effect inside the sandbox as they would on a top-level EVM. Reported
 //!    `gas_used` and usage are the post-intervention values; the parent frame records them as-is
 //!    and does not check conservation. Malformed synthetic outcomes, such as a `memory_offset`
 //!    outside the frame's memory, panic exactly as they would on a top-level EVM; the sandbox
 //!    neither isolates nor amplifies that.
-//! 4. The channel is node-local and non-consensus. An intervening node may diverge from the
-//!    network; the caller accepts that risk.
+//! 4. The hook is node-local and non-consensus. An intervening node may diverge from the network;
+//!    the caller accepts that risk.
 //! 5. Later specs measure interventions and refuse some shapes. Integrators must not depend on this
 //!    base being permissive.
 //!
-//! `sandbox_start` / `sandbox_end` are informational and cannot veto execution.
+//! # Lifecycle
+//!
+//! `sandbox_start` and `sandbox_end` fire exactly once per sandbox attempt, and only when a
+//! hook is attached. An attempt begins once the keyless payload has been decoded, its signer
+//! recovered, the deploy address derived and found free, and the gas budget admitted; a call
+//! that is rejected before that point emits no events. From then on the pair is guaranteed: a
+//! sandbox transaction that revm's validation rejects without ever constructing a sandbox EVM
+//! still delivers `sandbox_end` with [`SandboxRejectKind::Rejected`]. Reverted inner frames
+//! still emit their events; whether sandbox state was applied to the parent is reported by
+//! [`SandboxEndOutcome::state_applied`]. Both lifecycle hooks are informational and cannot
+//! veto execution.
+//!
+//! # External-environment invariance
+//!
+//! Attaching a hook must not change sandbox env semantics at any spec. Pre-REX4 sandboxes
+//! always run with [`crate::EmptyExternalEnv`]; REX4+ sandboxes always share the parent env.
+//! A hook therefore implements [`SandboxInspector`] for both the parent env type and
+//! [`crate::EmptyExternalEnv`]; the setter stores two type-erased handles so hooks fire on
+//! both paths, and a sandbox's lifecycle events go to the same slot as its opcode-level
+//! hooks (the [`crate::EmptyExternalEnv`] impl pre-REX4, the parent-env impl from REX4 on).
+//! A type that implements revm's [`Inspector`] for every sandbox context satisfies both
+//! bounds through the blanket impl.
 
 #[cfg(not(feature = "std"))]
 use alloc as std;
 use core::cell::RefCell;
 use std::rc::Rc;
 
-use alloy_primitives::{Address, Log, U256};
+use alloy_primitives::{Address, Bytes, Log, U256};
 use revm::{
     interpreter::{
         interpreter::EthInterpreter, CallInputs, CallOutcome, CreateInputs, CreateOutcome,
@@ -38,19 +64,129 @@ use revm::{
     Inspector,
 };
 
-use crate::{ExternalEnvTypes, MegaContext};
+use crate::{ExternalEnvTypes, MegaContext, MegaSpecId};
 
-use super::{
-    observer::{SandboxEndOutcome, SandboxStartInfo},
-    state::SandboxDb,
-};
+use super::state::SandboxDb;
 
-/// Object-safe rewriting inspector for nested sandbox execution.
+/// Context available when a sandbox is about to execute.
+#[non_exhaustive]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SandboxStartInfo {
+    /// Spec used by the parent context that started the sandbox.
+    pub spec: MegaSpecId,
+    /// Recovered signer of the keyless deployment transaction.
+    pub signer: Address,
+    /// Deterministic deploy address derived from the signer.
+    pub deploy_address: Address,
+    /// Caller-supplied gas limit override decoded from the payload.
+    ///
+    /// The ABI value is a `U256` and is saturating-converted to `u64`, so a
+    /// payload larger than [`u64::MAX`] is reported as [`u64::MAX`].
+    pub gas_limit_override: u64,
+    /// Gas limit actually granted to the sandbox after outer-gas capping
+    /// (REX5+ caps to the outer frame's remaining gas; pre-REX5 equals
+    /// [`Self::gas_limit_override`]).
+    pub effective_gas_limit: u64,
+    /// Gas limit carried by the signed keyless transaction itself.
+    pub tx_gas_limit: u64,
+    /// The intercepted `KeylessDeploy` call frame, as an inspector on the outer EVM saw it.
+    pub outer_call: OuterCallInfo,
+}
+
+/// The intercepted `KeylessDeploy` call that started a sandbox, described with the fields an
+/// inspector on the outer EVM records for that frame.
+///
+/// A tracer that records the outer EVM and the sandbox separately uses this to pair a
+/// sandbox with the outer frame it belongs under: the fields match what revm's `call` hook
+/// received for the intercepted frame.
+#[non_exhaustive]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OuterCallInfo {
+    /// Call depth of the intercepted frame; `0` for a transaction's top-level call.
+    pub depth: usize,
+    /// `msg.sender` of the intercepted call.
+    pub caller: Address,
+    /// Gas limit of the intercepted call frame, as handed to it by the outer EVM.
+    pub gas_limit: u64,
+    /// Gas remaining in the intercepted frame when the sandbox started: after the dispatch
+    /// overhead and any REX5+ materialization charge, before the sandbox reservation was
+    /// debited.
+    pub gas_remaining: u64,
+    /// `msg.value` of the intercepted call.
+    pub value: U256,
+    /// Full calldata of the intercepted call.
+    pub data: Bytes,
+}
+
+/// Terminal outcome of one sandbox execution, delivered exactly once.
+#[non_exhaustive]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SandboxEndOutcome {
+    /// Sandbox completed and its state was applied to the parent journal.
+    Applied {
+        /// How the sandbox EVM completed.
+        completion: SandboxCompletionKind,
+        /// Gas consumed by the sandbox EVM.
+        gas_used: u64,
+    },
+    /// Sandbox ran but its state was not applied.
+    NotApplied {
+        /// Why the sandbox state was discarded.
+        reason: SandboxRejectKind,
+    },
+}
+
+/// Completion kind for a sandbox whose state was applied to the parent.
+///
+/// The kind describes what the sandbox EVM did, on every spec alike. What the outer
+/// caller is told differs by spec only for [`Self::EmptyCode`].
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SandboxCompletionKind {
+    /// Inner CREATE succeeded with non-empty runtime bytecode.
+    Deployed,
+    /// Inner CREATE ran to a successful exit but left no code at the deploy address:
+    /// it returned empty runtime bytecode, or (REX6+) the account self-destructed in the
+    /// same transaction.
+    ///
+    /// The outer caller sees `EmptyCodeDeployed` errorData on every spec. REX5+ forwards
+    /// the constructor's logs into the parent receipt; pre-REX5 drops them.
+    EmptyCode,
+    /// Sandbox EVM execution reverted or halted after producing mergeable state.
+    ExecutionFailed,
+}
+
+/// Reason a completed or aborted sandbox did not apply state to the parent.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SandboxRejectKind {
+    /// Validate-reject or internal error before a mergeable frame was produced, or a
+    /// top-level create result that carries no address. Only a hook's `create` override
+    /// produces the latter; it is charged like [`Self::AddressMismatch`] and nothing is
+    /// applied.
+    Rejected,
+    /// REX5+ post-execution resource accounting rejected the sandbox.
+    PostAccountingHalt,
+    /// Applying sandbox state to the parent journal failed.
+    ApplyFailed,
+    /// Deployed address did not match the derived address.
+    AddressMismatch,
+}
+
+impl SandboxEndOutcome {
+    /// Returns `true` when sandbox state was applied to the parent journal.
+    pub fn state_applied(&self) -> bool {
+        matches!(self, Self::Applied { .. })
+    }
+}
+
+/// Object-safe hook into nested sandbox execution.
 ///
 /// Signatures match [`Inspector`]`<`[`MegaContext`]`<`[`SandboxDb`]`<'_>, ExtEnvs>,
 /// `[`EthInterpreter`]`>`. All hooks have empty / `None` defaults so adding a hook is not a
-/// breaking change. Method-level lifetimes on [`MegaContext`]`<`[`SandboxDb`]`<'_>, _>` keep the
-/// trait object-safe.
+/// breaking change, and a type that overrides nothing but the hooks it reads from observes
+/// without intervening. Method-level lifetimes on [`MegaContext`]`<`[`SandboxDb`]`<'_>, _>`
+/// keep the trait object-safe.
 ///
 /// Types that already implement [`Inspector`] for every sandbox context lifetime
 /// receive a blanket [`SandboxInspector`] impl. Local types that are not inspectors
@@ -369,10 +505,8 @@ impl<E: ExternalEnvTypes> Inspector<MegaContext<SandboxDb<'_>, E>, EthInterprete
     }
 }
 
-/// The type-erased hook slot for nested sandbox execution.
-///
-/// Both channels share it: an observer is installed behind
-/// [`super::observer::ReadOnlyHook`], an inspector directly. Attaching one replaces the other.
+/// The type-erased hook slot for nested sandbox execution. Setting a hook replaces the
+/// previous one.
 pub(crate) type SandboxHookHandle<E> = Rc<RefCell<dyn SandboxInspector<E>>>;
 
 #[cfg(test)]
@@ -388,6 +522,16 @@ mod tests {
     struct GenericInspector;
 
     impl<CTX> Inspector<CTX> for GenericInspector {}
+
+    #[test]
+    fn test_sandbox_end_outcome_reports_whether_state_was_applied() {
+        let applied =
+            SandboxEndOutcome::Applied { completion: SandboxCompletionKind::Deployed, gas_used: 1 };
+        assert!(applied.state_applied());
+
+        let not_applied = SandboxEndOutcome::NotApplied { reason: SandboxRejectKind::Rejected };
+        assert!(!not_applied.state_applied());
+    }
 
     #[test]
     fn test_sandbox_inspector_is_object_safe() {

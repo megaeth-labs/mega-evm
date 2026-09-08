@@ -1,5 +1,5 @@
-//! Sandbox observer: parity with the no-observer path, event-stream contracts,
-//! and HRTB adapter coverage for generic inspectors.
+//! Non-intervening sandbox hooks: parity with the no-hook path, event-stream and lifecycle
+//! contracts, and blanket-impl coverage for generic inspectors.
 
 use std::{cell::RefCell, rc::Rc};
 
@@ -10,7 +10,7 @@ use mega_evm::{
     revm::context::result::{ExecutionResult, ResultAndState},
     sandbox::{
         decode_error_result, KeylessDeployError, SandboxCompletionKind, SandboxEndOutcome,
-        SandboxObserver, SandboxRejectKind, SandboxStartInfo,
+        SandboxInspector, SandboxRejectKind, SandboxStartInfo,
     },
     test_utils::{ErrorInjectingDatabase, MemoryDatabase},
     EvmTxRuntimeLimits, IKeylessDeploy, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
@@ -19,23 +19,21 @@ use revm::{
     inspector::NoOpInspector,
     interpreter::{
         interpreter::EthInterpreter, interpreter_types::Jumps, CallInputs, CallOutcome,
-        CreateInputs, CreateOutcome, Gas, InstructionResult, Interpreter, InterpreterResult,
+        CreateInputs, CreateOutcome, Interpreter,
     },
     Inspector,
 };
 
 use super::keyless_sandbox_support::{
-    assert_result_and_state_eq, assert_usage_eq, constructor_calls_identity_and_stores_return,
-    constructor_calls_identity_precompile, constructor_calls_reverter,
-    constructor_touches_sentinel, create_pre_eip155_deploy_tx,
+    assert_result_and_state_eq, assert_usage_eq, constructor_calls_identity_precompile,
+    constructor_calls_reverter, constructor_touches_sentinel, create_pre_eip155_deploy_tx,
     create_pre_eip155_deploy_tx_with_value, crowded_parent_env, empty_code_constructor, funded_db,
     keyless_deploy_call_tx, keyless_deploy_call_tx_with_override_u256, parent_compute_gas_used,
     revert_constructor, run_keyless, run_keyless_with_parent_env,
     run_keyless_with_parent_env_usage, run_keyless_with_usage, selfdestructing_constructor,
-    split_create_initcode, success_constructor, RunConfig, DEFAULT_OUTER_GAS_LIMIT, IDENTITY_INPUT,
-    IDENTITY_OVERRIDE, IDENTITY_PRECOMPILE, LARGE_GAS_LIMIT_OVERRIDE, MERGE_FAIL_SENTINEL,
-    REVERTER, SIGNED_TX_GAS_LIMIT, SPECS, SPLIT_CREATE_CODE_LEN, SPLIT_CREATE_SLOT,
-    SPLIT_CREATE_SLOT_VALUE,
+    split_create_initcode, success_constructor, RunConfig, DEFAULT_OUTER_GAS_LIMIT,
+    IDENTITY_PRECOMPILE, LARGE_GAS_LIMIT_OVERRIDE, MERGE_FAIL_SENTINEL, REVERTER,
+    SIGNED_TX_GAS_LIMIT, SPECS, SPLIT_CREATE_CODE_LEN, SPLIT_CREATE_SLOT, SPLIT_CREATE_SLOT_VALUE,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -69,7 +67,7 @@ struct RecordingObserver {
     events: Vec<ObservedEvent>,
 }
 
-impl<E: mega_evm::ExternalEnvTypes> SandboxObserver<E> for RecordingObserver {
+impl<E: mega_evm::ExternalEnvTypes> SandboxInspector<E> for RecordingObserver {
     fn initialize_interp(
         &mut self,
         _interp: &mut Interpreter<EthInterpreter>,
@@ -97,16 +95,17 @@ impl<E: mega_evm::ExternalEnvTypes> SandboxObserver<E> for RecordingObserver {
     fn call(
         &mut self,
         _context: &mut mega_evm::MegaContext<mega_evm::sandbox::SandboxDb<'_>, E>,
-        inputs: &CallInputs,
-    ) {
+        inputs: &mut CallInputs,
+    ) -> Option<CallOutcome> {
         self.events.push(ObservedEvent::Call { target: inputs.target_address });
+        None
     }
 
     fn call_end(
         &mut self,
         _context: &mut mega_evm::MegaContext<mega_evm::sandbox::SandboxDb<'_>, E>,
         inputs: &CallInputs,
-        _outcome: &CallOutcome,
+        _outcome: &mut CallOutcome,
     ) {
         self.events.push(ObservedEvent::CallEnd { target: inputs.target_address });
     }
@@ -114,16 +113,17 @@ impl<E: mega_evm::ExternalEnvTypes> SandboxObserver<E> for RecordingObserver {
     fn create(
         &mut self,
         _context: &mut mega_evm::MegaContext<mega_evm::sandbox::SandboxDb<'_>, E>,
-        _inputs: &CreateInputs,
-    ) {
+        _inputs: &mut CreateInputs,
+    ) -> Option<CreateOutcome> {
         self.events.push(ObservedEvent::Create);
+        None
     }
 
     fn create_end(
         &mut self,
         _context: &mut mega_evm::MegaContext<mega_evm::sandbox::SandboxDb<'_>, E>,
         _inputs: &CreateInputs,
-        _outcome: &CreateOutcome,
+        _outcome: &mut CreateOutcome,
     ) {
         self.events.push(ObservedEvent::CreateEnd);
     }
@@ -269,7 +269,7 @@ fn parity_pair(
         db: &mut db_obs,
         tx_bytes: tx_bytes.clone(),
         gas_limit_override: LARGE_GAS_LIMIT_OVERRIDE,
-        observer: Some(observer),
+        hook: Some(observer),
         tx_limits,
         outer_gas_limit: DEFAULT_OUTER_GAS_LIMIT,
     });
@@ -278,7 +278,7 @@ fn parity_pair(
         db: &mut db_base,
         tx_bytes,
         gas_limit_override: LARGE_GAS_LIMIT_OVERRIDE,
-        observer: None::<Rc<RefCell<RecordingObserver>>>,
+        hook: None::<Rc<RefCell<RecordingObserver>>>,
         tx_limits,
         outer_gas_limit: DEFAULT_OUTER_GAS_LIMIT,
     });
@@ -299,7 +299,7 @@ fn run_with_recorder(
         db,
         tx_bytes,
         gas_limit_override: LARGE_GAS_LIMIT_OVERRIDE,
-        observer: Some(observer),
+        hook: Some(observer),
         tx_limits,
         outer_gas_limit: DEFAULT_OUTER_GAS_LIMIT,
     });
@@ -575,7 +575,7 @@ struct SplitImplObserver {
     parent: Vec<&'static str>,
 }
 
-impl SandboxObserver<mega_evm::EmptyExternalEnv> for SplitImplObserver {
+impl SandboxInspector<mega_evm::EmptyExternalEnv> for SplitImplObserver {
     fn step(
         &mut self,
         _interp: &mut Interpreter<EthInterpreter>,
@@ -598,7 +598,7 @@ impl SandboxObserver<mega_evm::EmptyExternalEnv> for SplitImplObserver {
     }
 }
 
-impl SandboxObserver<mega_evm::TestExternalEnvs> for SplitImplObserver {
+impl SandboxInspector<mega_evm::TestExternalEnvs> for SplitImplObserver {
     fn step(
         &mut self,
         _interp: &mut Interpreter<EthInterpreter>,
@@ -761,97 +761,8 @@ fn test_event_order_create_wraps_steps() {
     assert!(last_step_end < create_end, "step_end before create_end");
 }
 
-/// A revm inspector that answers every identity-precompile CALL with a fixed return.
-///
-/// Attached through the read-only channel it must have no effect: the blanket
-/// `SandboxObserver` impl hands it a copy of the inputs and discards the override. The
-/// same type attached through the rewriting channel is the control arm proving the
-/// override is real.
-struct OverridingInspector;
-
-impl<CTX> Inspector<CTX> for OverridingInspector {
-    fn call(&mut self, _context: &mut CTX, inputs: &mut CallInputs) -> Option<CallOutcome> {
-        (inputs.target_address == IDENTITY_PRECOMPILE).then(|| {
-            CallOutcome::new(
-                InterpreterResult::new(
-                    InstructionResult::Return,
-                    Bytes::from(IDENTITY_OVERRIDE.to_be_bytes::<32>()),
-                    Gas::new(inputs.gas_limit),
-                ),
-                inputs.return_memory_offset.clone(),
-            )
-        })
-    }
-}
-
-fn slot_zero(result: &ResultAndState<MegaHaltReason>, addr: Address) -> Option<U256> {
-    result
-        .state
-        .get(&addr)
-        .and_then(|account| account.storage.get(&U256::ZERO))
-        .map(|slot| slot.present_value())
-}
-
-/// The read-only channel structurally drops `call` overrides: an inspector that short-circuits
-/// the identity precompile changes nothing when attached as an observer (result, state, and
-/// usage match the no-hook run and slot 0 holds the precompile's echo), while the same
-/// inspector on the rewriting channel lands its override in slot 0.
 #[test]
-fn test_observer_channel_drops_call_overrides() {
-    let (tx_bytes, signer) =
-        create_pre_eip155_deploy_tx(constructor_calls_identity_and_stores_return());
-    let deploy_address = signer.create(0);
-
-    for spec in SPECS {
-        let mut db_base = funded_db(signer);
-        let (baseline, baseline_usage) = run_keyless_with_usage(RunConfig {
-            spec,
-            db: &mut db_base,
-            tx_bytes: tx_bytes.clone(),
-            gas_limit_override: LARGE_GAS_LIMIT_OVERRIDE,
-            observer: None::<Rc<RefCell<OverridingInspector>>>,
-            tx_limits: None,
-            outer_gas_limit: DEFAULT_OUTER_GAS_LIMIT,
-        });
-        assert_eq!(
-            slot_zero(&baseline, deploy_address),
-            Some(IDENTITY_INPUT),
-            "{spec:?}: the real precompile echoes the input"
-        );
-
-        let mut db_obs = funded_db(signer);
-        let (observed, observed_usage) = run_keyless_with_usage(RunConfig {
-            spec,
-            db: &mut db_obs,
-            tx_bytes: tx_bytes.clone(),
-            gas_limit_override: LARGE_GAS_LIMIT_OVERRIDE,
-            observer: Some(Rc::new(RefCell::new(OverridingInspector))),
-            tx_limits: None,
-            outer_gas_limit: DEFAULT_OUTER_GAS_LIMIT,
-        });
-        assert_result_and_state_eq(&observed, &baseline, &format!("{spec:?} observer override"));
-        assert_usage_eq(observed_usage, baseline_usage, &format!("{spec:?} observer override"));
-
-        let mut db_insp = funded_db(signer);
-        let mut context = MegaContext::new(&mut db_insp, spec);
-        context.modify_chain(|chain| {
-            chain.operator_fee_scalar = Some(U256::ZERO);
-            chain.operator_fee_constant = Some(U256::ZERO);
-        });
-        context.set_keyless_sandbox_inspector(Rc::new(RefCell::new(OverridingInspector)));
-        let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);
-        let tx = keyless_deploy_call_tx(tx_bytes.clone(), LARGE_GAS_LIMIT_OVERRIDE);
-        let rewritten = alloy_evm::Evm::transact_raw(&mut evm, tx).expect("inspector channel");
-        assert_eq!(
-            slot_zero(&rewritten, deploy_address),
-            Some(IDENTITY_OVERRIDE),
-            "{spec:?}: the rewriting channel lands the same inspector's override"
-        );
-    }
-}
-
-#[test]
-fn test_blanket_observer_records_sandbox_create_for_generic_inspector() {
+fn test_blanket_impl_records_sandbox_create_for_generic_inspector() {
     let tracer = GenericCreateCounter::default();
     let creates = Rc::clone(&tracer.creates);
     let observer = Rc::new(RefCell::new(tracer));
@@ -863,7 +774,7 @@ fn test_blanket_observer_records_sandbox_create_for_generic_inspector() {
         db: &mut db,
         tx_bytes,
         gas_limit_override: LARGE_GAS_LIMIT_OVERRIDE,
-        observer: Some(observer),
+        hook: Some(observer),
         tx_limits: None,
         outer_gas_limit: DEFAULT_OUTER_GAS_LIMIT,
     });
@@ -876,7 +787,7 @@ fn test_blanket_observer_records_sandbox_create_for_generic_inspector() {
 }
 
 #[test]
-fn test_no_observer_skips_lifecycle_hooks() {
+fn test_no_hook_skips_lifecycle_hooks() {
     let (tx_bytes, signer) = create_pre_eip155_deploy_tx(success_constructor());
     let mut db = funded_db(signer);
     let result = run_keyless(RunConfig {
@@ -884,7 +795,7 @@ fn test_no_observer_skips_lifecycle_hooks() {
         db: &mut db,
         tx_bytes,
         gas_limit_override: LARGE_GAS_LIMIT_OVERRIDE,
-        observer: None::<Rc<RefCell<RecordingObserver>>>,
+        hook: None::<Rc<RefCell<RecordingObserver>>>,
         tx_limits: None,
         outer_gas_limit: DEFAULT_OUTER_GAS_LIMIT,
     });
@@ -905,7 +816,7 @@ fn test_sandbox_start_info_rex5_caps_effective_gas_limit_below_override() {
             db: &mut db,
             tx_bytes,
             gas_limit_override: OVERRIDE,
-            observer: Some(Rc::clone(&recorder)),
+            hook: Some(Rc::clone(&recorder)),
             tx_limits: None,
             outer_gas_limit: OUTER_GAS,
         });
@@ -960,7 +871,7 @@ fn test_observer_parity_split_create_through_interceptor() {
             db: &mut db_obs,
             tx_bytes: tx_bytes.clone(),
             gas_limit_override: LARGE_GAS_LIMIT_OVERRIDE,
-            observer: Some(Rc::clone(&recorder)),
+            hook: Some(Rc::clone(&recorder)),
             tx_limits: None,
             outer_gas_limit: DEFAULT_OUTER_GAS_LIMIT,
         });
@@ -969,7 +880,7 @@ fn test_observer_parity_split_create_through_interceptor() {
             db: &mut db_base,
             tx_bytes,
             gas_limit_override: LARGE_GAS_LIMIT_OVERRIDE,
-            observer: None::<Rc<RefCell<RecordingObserver>>>,
+            hook: None::<Rc<RefCell<RecordingObserver>>>,
             tx_limits: None,
             outer_gas_limit: DEFAULT_OUTER_GAS_LIMIT,
         });
@@ -994,7 +905,7 @@ fn test_sandbox_start_info_saturates_gas_limit_override_above_u64_max() {
         chain.operator_fee_scalar = Some(U256::ZERO);
         chain.operator_fee_constant = Some(U256::ZERO);
     });
-    context.set_keyless_sandbox_observer(Rc::clone(&recorder));
+    context.set_keyless_sandbox_hook(Rc::clone(&recorder));
     let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);
     let tx =
         keyless_deploy_call_tx_with_override_u256(tx_bytes, U256::MAX, DEFAULT_OUTER_GAS_LIMIT);
@@ -1033,7 +944,7 @@ fn test_sandbox_end_not_applied_apply_failed_on_merge_db_error() {
         chain.operator_fee_scalar = Some(U256::ZERO);
         chain.operator_fee_constant = Some(U256::ZERO);
     });
-    context.set_keyless_sandbox_observer(Rc::clone(&recorder));
+    context.set_keyless_sandbox_hook(Rc::clone(&recorder));
     let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);
     let tx = keyless_deploy_call_tx(tx_bytes, LARGE_GAS_LIMIT_OVERRIDE);
     let result = alloy_evm::Evm::transact_raw(&mut evm, tx).expect("outer transact");
@@ -1064,7 +975,7 @@ fn test_sandbox_end_not_applied_apply_failed_on_merge_db_error() {
 /// An observer that overrides nothing: every hook is the trait's default.
 struct DefaultsOnlyObserver;
 
-impl<E: mega_evm::ExternalEnvTypes> SandboxObserver<E> for DefaultsOnlyObserver {}
+impl<E: mega_evm::ExternalEnvTypes> SandboxInspector<E> for DefaultsOnlyObserver {}
 
 /// The trait's default hook bodies are inert: with a defaults-only observer attached, a
 /// deployment that logs, calls, creates, and self-destructs inside the sandbox ends with the
@@ -1090,7 +1001,7 @@ fn test_defaults_only_observer_is_inert() {
                 db: &mut db_base,
                 tx_bytes: tx_bytes.clone(),
                 gas_limit_override: LARGE_GAS_LIMIT_OVERRIDE,
-                observer: None::<Rc<RefCell<DefaultsOnlyObserver>>>,
+                hook: None::<Rc<RefCell<DefaultsOnlyObserver>>>,
                 tx_limits: None,
                 outer_gas_limit: DEFAULT_OUTER_GAS_LIMIT,
             });
@@ -1099,7 +1010,7 @@ fn test_defaults_only_observer_is_inert() {
                 db: &mut db_obs,
                 tx_bytes,
                 gas_limit_override: LARGE_GAS_LIMIT_OVERRIDE,
-                observer: Some(Rc::new(RefCell::new(DefaultsOnlyObserver))),
+                hook: Some(Rc::new(RefCell::new(DefaultsOnlyObserver))),
                 tx_limits: None,
                 outer_gas_limit: DEFAULT_OUTER_GAS_LIMIT,
             });

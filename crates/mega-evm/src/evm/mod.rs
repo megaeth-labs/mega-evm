@@ -70,8 +70,8 @@ use revm::{
 };
 
 use crate::{
-    sandbox::{SandboxInspector, SandboxObserver},
-    BucketId, EmptyExternalEnv, ExternalEnvTypes, LimitUsage, MegaTransaction,
+    sandbox::SandboxInspector, BucketId, EmptyExternalEnv, ExternalEnvTypes, LimitUsage,
+    MegaTransaction,
 };
 
 /// The main EVM implementation for the `MegaETH` chain.
@@ -237,30 +237,16 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
 }
 
 impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
-    /// Attaches an observer for nested sandbox execution on every spec.
+    /// Attaches a hook for nested sandbox execution on every spec.
     ///
-    /// Forwards to [`MegaContext::set_keyless_sandbox_observer`]. The observer
-    /// must implement [`SandboxObserver`] for both this EVM's `ExtEnvs` and
-    /// [`EmptyExternalEnv`]. Use [`Self::clear_keyless_sandbox_hook`] to
-    /// detach.
-    pub fn set_keyless_sandbox_observer<O>(&mut self, observer: Rc<RefCell<O>>)
-    where
-        O: SandboxObserver<ExtEnvs> + SandboxObserver<EmptyExternalEnv> + 'static,
-        ExtEnvs: 'static,
-    {
-        self.inner.ctx.set_keyless_sandbox_observer(observer);
-    }
-
-    /// Attaches a rewriting inspector for nested sandbox execution on every spec.
-    ///
-    /// Forwards to [`MegaContext::set_keyless_sandbox_inspector`]. The inspector
-    /// must implement [`SandboxInspector`] for both this EVM's `ExtEnvs` and
+    /// Forwards to [`MegaContext::set_keyless_sandbox_hook`]. The hook must
+    /// implement [`SandboxInspector`] for both this EVM's `ExtEnvs` and
     /// [`EmptyExternalEnv`]. Use [`Self::clear_keyless_sandbox_hook`] to detach.
-    pub fn set_keyless_sandbox_inspector<I>(&mut self, inspector: Rc<RefCell<I>>)
+    pub fn set_keyless_sandbox_hook<I>(&mut self, hook: Rc<RefCell<I>>)
     where
         I: SandboxInspector<ExtEnvs> + SandboxInspector<EmptyExternalEnv> + 'static,
     {
-        self.inner.ctx.set_keyless_sandbox_inspector(inspector);
+        self.inner.ctx.set_keyless_sandbox_hook(hook);
     }
 
     /// Detaches any sandbox hook from both env-type slots.

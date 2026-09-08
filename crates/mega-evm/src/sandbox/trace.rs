@@ -3,15 +3,15 @@
 //! A [`TracingInspector`] attached to the outer EVM never sees sandbox frames: the sandbox
 //! is a separate EVM whose journal reports its top-level CREATE at depth 0, and recording that
 //! into the outer arena would overwrite the CALL root. The pattern here is two recorders: the
-//! outer [`TracingInspector`] installed on the EVM, and a [`SandboxTracer`] attached through
-//! the keyless sandbox observer channel, which records every sandbox execution into an arena
-//! of its own. After the transaction returns, [`splice_sandbox_traces`] grafts each sandbox
-//! arena under the outer `KeylessDeploy` CALL frame that started it.
+//! outer [`TracingInspector`] installed on the EVM, and a [`SandboxTracer`] attached as the
+//! keyless sandbox hook, which records every sandbox execution into an arena of its own. After the
+//! transaction returns, [`splice_sandbox_traces`] grafts each sandbox arena under the outer
+//! `KeylessDeploy` CALL frame that started it.
 //!
 //! ```ignore
 //! let (outer, sandbox) = paired(TracingInspectorConfig::all());
 //! let mut evm = MegaEvm::new(ctx).with_inspector(outer.clone());
-//! evm.set_keyless_sandbox_observer(sandbox.clone());
+//! evm.set_keyless_sandbox_hook(sandbox.clone());
 //! let result = evm.inspect_tx(tx)?;
 //! splice_sandbox_traces(&mut outer.borrow_mut(), &mut sandbox.borrow_mut());
 //! ```
@@ -48,18 +48,19 @@ use revm_inspectors::tracing::{
 use crate::{ExternalEnvTypes, MegaContext, MegaSpecId, KEYLESS_DEPLOY_ADDRESS};
 
 use super::{
-    observer::{OuterCallInfo, SandboxCompletionKind, SandboxEndOutcome, SandboxStartInfo},
+    inspector::{
+        OuterCallInfo, SandboxCompletionKind, SandboxEndOutcome, SandboxInspector, SandboxStartInfo,
+    },
     state::SandboxDb,
-    SandboxObserver,
 };
 
 /// [`Inspector`] adapter over a [`TracingInspector`] shared via [`Rc`]/[`RefCell`].
 ///
 /// Serves as the outer EVM inspector when the caller wants to keep a handle to read the
 /// recorded traces after execution. It is the outer half of [`paired`]; the sandbox half is a
-/// [`SandboxTracer`]. Do not attach a handle to this type through the sandbox observer
-/// channel: the sandbox would record into the outer arena and overwrite the `KeylessDeploy`
-/// CALL root with its own CREATE.
+/// [`SandboxTracer`]. Do not attach a handle to this type as the sandbox hook: the sandbox
+/// would record into the outer arena and overwrite the `KeylessDeploy` CALL root with its own
+/// CREATE.
 #[derive(Clone, Debug)]
 pub struct SharedTracingInspector(Rc<RefCell<TracingInspector>>);
 
@@ -138,7 +139,7 @@ where
 
 /// Builds an outer inspector and a sandbox tracer with the same `config`, ready to be
 /// attached to one EVM: the first as its inspector, the second through
-/// `set_keyless_sandbox_observer`.
+/// `set_keyless_sandbox_hook`.
 pub fn paired(
     config: TracingInspectorConfig,
 ) -> (SharedTracingInspector, Rc<RefCell<SandboxTracer>>) {
@@ -191,12 +192,13 @@ impl SandboxTrace {
     }
 }
 
-/// Sandbox-side recorder for the keyless sandbox observer channel.
+/// Sandbox-side recorder, attached as the keyless sandbox hook.
 ///
 /// Records each sandbox execution into a fresh [`TracingInspector`] arena and keeps it,
 /// together with the identity of the outer `KeylessDeploy` frame that started it, until
 /// [`splice_sandbox_traces`] grafts it into the outer trace. Attach it via
-/// `set_keyless_sandbox_observer`; it implements [`SandboxObserver`] for every env type.
+/// `set_keyless_sandbox_hook`; it implements [`SandboxInspector`] for every env type and never
+/// intervenes: `call` / `create` answer `None` and inputs and outcomes pass through untouched.
 ///
 /// Recording is per execution, so a tracer kept across transactions does not need a reset;
 /// splicing drains what was recorded, and [`Self::clear`] discards it. Do one or the other
@@ -218,7 +220,7 @@ impl SandboxTracer {
         Self { config, current: None, finished: Vec::new() }
     }
 
-    /// [`Self::new`] wrapped for `set_keyless_sandbox_observer`.
+    /// [`Self::new`] wrapped for `set_keyless_sandbox_hook`.
     pub fn handle(config: TracingInspectorConfig) -> Rc<RefCell<Self>> {
         Rc::new(RefCell::new(Self::new(config)))
     }
@@ -239,7 +241,7 @@ impl SandboxTracer {
     }
 }
 
-impl<E: ExternalEnvTypes> SandboxObserver<E> for SandboxTracer {
+impl<E: ExternalEnvTypes> SandboxInspector<E> for SandboxTracer {
     fn initialize_interp(
         &mut self,
         interp: &mut Interpreter<EthInterpreter>,
@@ -273,44 +275,46 @@ impl<E: ExternalEnvTypes> SandboxObserver<E> for SandboxTracer {
         self.with_current(|t| Inspector::log(&mut t.tracer, interp, context, log));
     }
 
-    fn call(&mut self, context: &mut MegaContext<SandboxDb<'_>, E>, inputs: &CallInputs) {
+    fn call(
+        &mut self,
+        context: &mut MegaContext<SandboxDb<'_>, E>,
+        inputs: &mut CallInputs,
+    ) -> Option<CallOutcome> {
         self.with_current(|t| {
             t.entered = true;
-            let mut inputs = inputs.clone();
-            let _ = Inspector::call(&mut t.tracer, context, &mut inputs);
+            let _ = Inspector::call(&mut t.tracer, context, inputs);
         });
+        None
     }
 
     fn call_end(
         &mut self,
         context: &mut MegaContext<SandboxDb<'_>, E>,
         inputs: &CallInputs,
-        outcome: &CallOutcome,
+        outcome: &mut CallOutcome,
     ) {
-        self.with_current(|t| {
-            let mut outcome = outcome.clone();
-            Inspector::call_end(&mut t.tracer, context, inputs, &mut outcome);
-        });
+        self.with_current(|t| Inspector::call_end(&mut t.tracer, context, inputs, outcome));
     }
 
-    fn create(&mut self, context: &mut MegaContext<SandboxDb<'_>, E>, inputs: &CreateInputs) {
+    fn create(
+        &mut self,
+        context: &mut MegaContext<SandboxDb<'_>, E>,
+        inputs: &mut CreateInputs,
+    ) -> Option<CreateOutcome> {
         self.with_current(|t| {
             t.entered = true;
-            let mut inputs = inputs.clone();
-            let _ = Inspector::create(&mut t.tracer, context, &mut inputs);
+            let _ = Inspector::create(&mut t.tracer, context, inputs);
         });
+        None
     }
 
     fn create_end(
         &mut self,
         context: &mut MegaContext<SandboxDb<'_>, E>,
         inputs: &CreateInputs,
-        outcome: &CreateOutcome,
+        outcome: &mut CreateOutcome,
     ) {
-        self.with_current(|t| {
-            let mut outcome = outcome.clone();
-            Inspector::create_end(&mut t.tracer, context, inputs, &mut outcome);
-        });
+        self.with_current(|t| Inspector::create_end(&mut t.tracer, context, inputs, outcome));
     }
 
     fn selfdestruct(&mut self, contract: Address, target: Address, value: U256) {
