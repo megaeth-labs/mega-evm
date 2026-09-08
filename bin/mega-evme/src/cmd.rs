@@ -5,7 +5,7 @@ use crate::common::LogArgs;
 
 /// Main CLI for the mega-evme tool
 #[derive(Parser, Debug)]
-#[command(name = "mega-evme", infer_subcommands = true, version = "0.1")]
+#[command(name = "mega-evme", infer_subcommands = true, version)]
 pub struct MainCmd {
     /// Logging configuration
     #[command(flatten)]

@@ -59,7 +59,8 @@ jobs:
             mega-state-test
             mega-evme
           version: ${{ env.TAG }}
-          token: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          # A rehearsal never needs the token; do not hand it to the job at all.
+          token: ${{ env.DRY_RUN != 'true' && secrets.CARGO_REGISTRY_TOKEN || '' }}
           dry_run: ${{ env.DRY_RUN }}
 
   mega-evme:
@@ -81,9 +82,18 @@ jobs:
       - uses: foundry-rs/foundry-toolchain@b00af27efadbc7b4ca8b82abbd903b17cc874d2a # v1
 
       - name: Build mega-evme
+        run: cargo build --release --locked -p mega-evme
+
+      - name: Verify the binary reports the release version
         run: |
-          cargo build --release --locked -p mega-evme
-          target/release/mega-evme --version
+          set -euo pipefail
+          expected="mega-evme ${TAG#v}"
+          actual="$(target/release/mega-evme --version)"
+          if [[ "$actual" != "$expected" ]]; then
+            echo "::error::built binary reports '$actual', expected '$expected'; refusing to publish a mislabeled binary"
+            exit 1
+          fi
+          echo "$actual"
 
       - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
         with:

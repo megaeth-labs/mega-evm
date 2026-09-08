@@ -28,6 +28,20 @@ Or build from source:
 cargo build --release -p mega-evme
 ```
 
+### Prebuilt binary
+
+Every release also attaches a prebuilt `mega-evme` (Linux x86_64, built on `ubuntu-24.04`) and a `SHA256SUMS` file to its [GitHub Release](https://github.com/megaeth-labs/mega-evm/releases).
+Download both, verify the checksum, and make the binary executable:
+
+```bash
+sha256sum --check --ignore-missing SHA256SUMS
+chmod +x mega-evme
+./mega-evme --version
+```
+
+The same binary is published to the MegaETH artifact registry for internal use.
+
+
 ## Development
 
 This repository uses git submodules.
