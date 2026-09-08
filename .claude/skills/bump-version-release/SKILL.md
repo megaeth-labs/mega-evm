@@ -16,6 +16,8 @@ Releases are made by the org release pipeline (megaeth-labs/.github).
    This opens a PR onto the release branch with the finalised changelog entry.
    Merging it is the release approval.
 3. **Publish** — automatic on that merge.
-   It creates the annotated tag `vX.Y.Z` and the GitHub Release with the entry as notes; `publish.yml` then publishes the crates to crates.io as before.
+   It creates the annotated tag `vX.Y.Z` and the GitHub Release with the entry as notes.
+4. **Targets** — automatic on the Release: `on-release.yml` publishes the four crates to crates.io and uploads `mega-evme` to the MegaETH artifact registry and the Release page.
+   Rehearse it first on an existing tag: `gh workflow run on-release.yml -f tag=vX.Y.Z -f dry_run=true`.
 
 Do not create tags or Releases by hand; the tag ruleset rejects it.
