@@ -1,4 +1,4 @@
-//! Shared fixtures for keyless-deploy sandbox observer and inspector tests.
+//! Shared fixtures for the keyless-deploy sandbox hook tests.
 
 use std::{cell::RefCell, rc::Rc};
 
@@ -362,12 +362,12 @@ pub(crate) fn run_keyless_with_parent_env<O>(
     db: &mut MemoryDatabase,
     tx_bytes: Bytes,
     env: TestExternalEnvs,
-    observer: Option<Rc<RefCell<O>>>,
+    hook: Option<Rc<RefCell<O>>>,
 ) -> ResultAndState<MegaHaltReason>
 where
     O: SandboxInspector<TestExternalEnvs> + SandboxInspector<EmptyExternalEnv> + 'static,
 {
-    run_keyless_with_parent_env_usage(spec, db, tx_bytes, env, observer).0
+    run_keyless_with_parent_env_usage(spec, db, tx_bytes, env, hook).0
 }
 
 pub(crate) fn run_keyless_with_parent_env_usage<O>(
@@ -375,7 +375,7 @@ pub(crate) fn run_keyless_with_parent_env_usage<O>(
     db: &mut MemoryDatabase,
     tx_bytes: Bytes,
     env: TestExternalEnvs,
-    observer: Option<Rc<RefCell<O>>>,
+    hook: Option<Rc<RefCell<O>>>,
 ) -> (ResultAndState<MegaHaltReason>, LimitUsage)
 where
     O: SandboxInspector<TestExternalEnvs> + SandboxInspector<EmptyExternalEnv> + 'static,
@@ -385,8 +385,8 @@ where
         chain.operator_fee_scalar = Some(U256::ZERO);
         chain.operator_fee_constant = Some(U256::ZERO);
     });
-    if let Some(observer) = observer {
-        context.set_keyless_sandbox_hook(observer);
+    if let Some(hook) = hook {
+        context.set_keyless_sandbox_hook(hook);
     }
     let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);
     let tx = keyless_deploy_call_tx(tx_bytes, LARGE_GAS_LIMIT_OVERRIDE);

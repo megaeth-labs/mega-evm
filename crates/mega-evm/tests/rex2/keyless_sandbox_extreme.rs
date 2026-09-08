@@ -167,7 +167,7 @@ fn count(events: &[Ev], pred: impl Fn(&Ev) -> bool) -> usize {
 }
 
 /// The constructor CREATEs a child and then REVERTs: the nested CREATE streams through the
-/// observer, the sandbox ends as `ExecutionFailed`, and the parent journal receives neither
+/// hook, the sandbox ends as `ExecutionFailed`, and the parent journal receives neither
 /// contract.
 #[test]
 fn test_extreme_revert_after_create_streams_child_then_rolls_back() {
@@ -299,7 +299,7 @@ fn test_extreme_sandbox_out_of_gas_is_applied_execution_failed() {
 }
 
 /// A constructor that CALLs `KeylessDeploy` from inside the sandbox: interception is
-/// depth-0 only, so the call reaches the contract's bytecode and reverts, and the observer
+/// depth-0 only, so the call reaches the contract's bytecode and reverts, and the hook
 /// sees that nested call as an ordinary reverted frame.
 #[test]
 fn test_extreme_nested_keyless_call_reverts_inside_sandbox() {

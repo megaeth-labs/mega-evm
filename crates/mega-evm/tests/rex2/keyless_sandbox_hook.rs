@@ -19,21 +19,23 @@ use revm::{
     inspector::NoOpInspector,
     interpreter::{
         interpreter::EthInterpreter, interpreter_types::Jumps, CallInputs, CallOutcome,
-        CreateInputs, CreateOutcome, Interpreter,
+        CreateInputs, CreateOutcome, Gas, InstructionResult, Interpreter, InterpreterResult,
     },
     Inspector,
 };
 
 use super::keyless_sandbox_support::{
-    assert_result_and_state_eq, assert_usage_eq, constructor_calls_identity_precompile,
-    constructor_calls_reverter, constructor_touches_sentinel, create_pre_eip155_deploy_tx,
+    assert_result_and_state_eq, assert_usage_eq, constructor_calls_identity_and_stores_return,
+    constructor_calls_identity_precompile, constructor_calls_reverter,
+    constructor_touches_sentinel, create_pre_eip155_deploy_tx,
     create_pre_eip155_deploy_tx_with_value, crowded_parent_env, empty_code_constructor, funded_db,
     keyless_deploy_call_tx, keyless_deploy_call_tx_with_override_u256, parent_compute_gas_used,
     revert_constructor, run_keyless, run_keyless_with_parent_env,
     run_keyless_with_parent_env_usage, run_keyless_with_usage, selfdestructing_constructor,
-    split_create_initcode, success_constructor, RunConfig, DEFAULT_OUTER_GAS_LIMIT,
-    IDENTITY_PRECOMPILE, LARGE_GAS_LIMIT_OVERRIDE, MERGE_FAIL_SENTINEL, REVERTER,
-    SIGNED_TX_GAS_LIMIT, SPECS, SPLIT_CREATE_CODE_LEN, SPLIT_CREATE_SLOT, SPLIT_CREATE_SLOT_VALUE,
+    split_create_initcode, success_constructor, RunConfig, DEFAULT_OUTER_GAS_LIMIT, IDENTITY_INPUT,
+    IDENTITY_OVERRIDE, IDENTITY_PRECOMPILE, LARGE_GAS_LIMIT_OVERRIDE, MERGE_FAIL_SENTINEL,
+    REVERTER, SIGNED_TX_GAS_LIMIT, SPECS, SPLIT_CREATE_CODE_LEN, SPLIT_CREATE_SLOT,
+    SPLIT_CREATE_SLOT_VALUE,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -63,11 +65,11 @@ enum ObservedEvent {
 }
 
 #[derive(Default)]
-struct RecordingObserver {
+struct RecordingHook {
     events: Vec<ObservedEvent>,
 }
 
-impl<E: mega_evm::ExternalEnvTypes> SandboxInspector<E> for RecordingObserver {
+impl<E: mega_evm::ExternalEnvTypes> SandboxInspector<E> for RecordingHook {
     fn initialize_interp(
         &mut self,
         _interp: &mut Interpreter<EthInterpreter>,
@@ -262,14 +264,14 @@ fn parity_pair(
     let (tx_bytes, signer) = create_pre_eip155_deploy_tx(init_code);
     let mut db_obs = if fund_signer { funded_db(signer) } else { MemoryDatabase::default() };
     let mut db_base = db_obs.clone();
-    let observer = Rc::new(RefCell::new(RecordingObserver::default()));
+    let hook = Rc::new(RefCell::new(RecordingHook::default()));
 
     let (observed, observed_usage) = run_keyless_with_usage(RunConfig {
         spec,
         db: &mut db_obs,
         tx_bytes: tx_bytes.clone(),
         gas_limit_override: LARGE_GAS_LIMIT_OVERRIDE,
-        hook: Some(observer),
+        hook: Some(hook),
         tx_limits,
         outer_gas_limit: DEFAULT_OUTER_GAS_LIMIT,
     });
@@ -278,7 +280,7 @@ fn parity_pair(
         db: &mut db_base,
         tx_bytes,
         gas_limit_override: LARGE_GAS_LIMIT_OVERRIDE,
-        hook: None::<Rc<RefCell<RecordingObserver>>>,
+        hook: None::<Rc<RefCell<RecordingHook>>>,
         tx_limits,
         outer_gas_limit: DEFAULT_OUTER_GAS_LIMIT,
     });
@@ -292,14 +294,14 @@ fn run_with_recorder(
     tx_bytes: Bytes,
     tx_limits: Option<EvmTxRuntimeLimits>,
 ) -> (ResultAndState<MegaHaltReason>, Vec<ObservedEvent>) {
-    let recorder = Rc::new(RefCell::new(RecordingObserver::default()));
-    let observer = Rc::clone(&recorder);
+    let recorder = Rc::new(RefCell::new(RecordingHook::default()));
+    let hook = Rc::clone(&recorder);
     let result = run_keyless(RunConfig {
         spec,
         db,
         tx_bytes,
         gas_limit_override: LARGE_GAS_LIMIT_OVERRIDE,
-        hook: Some(observer),
+        hook: Some(hook),
         tx_limits,
         outer_gas_limit: DEFAULT_OUTER_GAS_LIMIT,
     });
@@ -344,12 +346,12 @@ fn assert_call_create_balanced(events: &[ObservedEvent]) {
 }
 
 #[test]
-fn test_observer_parity_pre_rex4_with_nonempty_parent_env() {
+fn test_hook_parity_pre_rex4_with_nonempty_parent_env() {
     for spec in [MegaSpecId::REX2, MegaSpecId::REX3] {
         let (tx_bytes, signer) = create_pre_eip155_deploy_tx(success_constructor());
         let mut db_obs = funded_db(signer);
         let mut db_base = db_obs.clone();
-        let observer = Rc::new(RefCell::new(RecordingObserver::default()));
+        let hook = Rc::new(RefCell::new(RecordingHook::default()));
         let env = crowded_parent_env();
 
         let (observed, observed_usage) = run_keyless_with_parent_env_usage(
@@ -357,14 +359,14 @@ fn test_observer_parity_pre_rex4_with_nonempty_parent_env() {
             &mut db_obs,
             tx_bytes.clone(),
             env.clone(),
-            Some(observer),
+            Some(hook),
         );
         let (baseline, baseline_usage) = run_keyless_with_parent_env_usage(
             spec,
             &mut db_base,
             tx_bytes,
             env,
-            None::<Rc<RefCell<RecordingObserver>>>,
+            None::<Rc<RefCell<RecordingHook>>>,
         );
 
         assert!(
@@ -379,12 +381,12 @@ fn test_observer_parity_pre_rex4_with_nonempty_parent_env() {
 }
 
 #[test]
-fn test_observer_parity_pre_rex4_with_nonempty_parent_env_on_constructor_revert() {
+fn test_hook_parity_pre_rex4_with_nonempty_parent_env_on_constructor_revert() {
     for spec in [MegaSpecId::REX2, MegaSpecId::REX3] {
         let (tx_bytes, signer) = create_pre_eip155_deploy_tx(revert_constructor());
         let mut db_obs = funded_db(signer);
         let mut db_base = db_obs.clone();
-        let observer = Rc::new(RefCell::new(RecordingObserver::default()));
+        let hook = Rc::new(RefCell::new(RecordingHook::default()));
         let env = crowded_parent_env();
 
         let (observed, observed_usage) = run_keyless_with_parent_env_usage(
@@ -392,14 +394,14 @@ fn test_observer_parity_pre_rex4_with_nonempty_parent_env_on_constructor_revert(
             &mut db_obs,
             tx_bytes.clone(),
             env.clone(),
-            Some(observer),
+            Some(hook),
         );
         let (baseline, baseline_usage) = run_keyless_with_parent_env_usage(
             spec,
             &mut db_base,
             tx_bytes,
             env,
-            None::<Rc<RefCell<RecordingObserver>>>,
+            None::<Rc<RefCell<RecordingHook>>>,
         );
 
         assert!(
@@ -418,7 +420,7 @@ fn test_opcode_events_flow_on_pre_rex4_with_nonempty_parent_env() {
     for spec in [MegaSpecId::REX2, MegaSpecId::REX3] {
         let (tx_bytes, signer) = create_pre_eip155_deploy_tx(success_constructor());
         let mut db = funded_db(signer);
-        let recorder = Rc::new(RefCell::new(RecordingObserver::default()));
+        let recorder = Rc::new(RefCell::new(RecordingHook::default()));
         let result = run_keyless_with_parent_env(
             spec,
             &mut db,
@@ -443,21 +445,21 @@ fn test_opcode_events_flow_on_pre_rex4_with_nonempty_parent_env() {
 }
 
 #[test]
-fn test_observer_parity_success_across_specs() {
+fn test_hook_parity_success_across_specs() {
     for spec in SPECS {
         parity_pair(spec, success_constructor(), true, None, &format!("success {spec:?}"));
     }
 }
 
 #[test]
-fn test_observer_parity_constructor_revert_across_specs() {
+fn test_hook_parity_constructor_revert_across_specs() {
     for spec in SPECS {
         parity_pair(spec, revert_constructor(), true, None, &format!("revert {spec:?}"));
     }
 }
 
 #[test]
-fn test_observer_parity_rex5_resource_limit_halt() {
+fn test_hook_parity_rex5_resource_limit_halt() {
     for spec in [MegaSpecId::REX5, MegaSpecId::REX6] {
         let (tx_bytes, signer) = create_pre_eip155_deploy_tx(success_constructor());
         let used = parent_compute_gas_used(spec, signer, tx_bytes);
@@ -566,16 +568,16 @@ fn test_sandbox_end_applied_empty_code_on_every_spec() {
     }
 }
 
-/// Records, per env impl, which hooks a dual-impl observer received.
+/// Records, per env impl, which hooks a dual-impl hook type received.
 #[derive(Default)]
-struct SplitImplObserver {
+struct SplitImplHook {
     /// Events seen by the `EmptyExternalEnv` impl.
     empty: Vec<&'static str>,
     /// Events seen by the parent-env impl.
     parent: Vec<&'static str>,
 }
 
-impl SandboxInspector<mega_evm::EmptyExternalEnv> for SplitImplObserver {
+impl SandboxInspector<mega_evm::EmptyExternalEnv> for SplitImplHook {
     fn step(
         &mut self,
         _interp: &mut Interpreter<EthInterpreter>,
@@ -598,7 +600,7 @@ impl SandboxInspector<mega_evm::EmptyExternalEnv> for SplitImplObserver {
     }
 }
 
-impl SandboxInspector<mega_evm::TestExternalEnvs> for SplitImplObserver {
+impl SandboxInspector<mega_evm::TestExternalEnvs> for SplitImplHook {
     fn step(
         &mut self,
         _interp: &mut Interpreter<EthInterpreter>,
@@ -621,7 +623,7 @@ impl SandboxInspector<mega_evm::TestExternalEnvs> for SplitImplObserver {
     }
 }
 
-/// With a non-empty parent env, an observer with one impl per env sees a sandbox's
+/// With a non-empty parent env, a hook with one impl per env sees a sandbox's
 /// lifecycle and opcode hooks on the same impl: `EmptyExternalEnv` pre-REX4, the parent env
 /// from REX4 on.
 #[test]
@@ -629,20 +631,20 @@ fn test_lifecycle_and_opcode_hooks_land_on_the_same_env_impl() {
     for spec in SPECS {
         let (tx_bytes, signer) = create_pre_eip155_deploy_tx(success_constructor());
         let mut db = funded_db(signer);
-        let observer = Rc::new(RefCell::new(SplitImplObserver::default()));
+        let hook = Rc::new(RefCell::new(SplitImplHook::default()));
         let result = run_keyless_with_parent_env(
             spec,
             &mut db,
             tx_bytes,
             crowded_parent_env(),
-            Some(Rc::clone(&observer)),
+            Some(Rc::clone(&hook)),
         );
         assert!(result.result.is_success(), "{spec:?}: {:?}", result.result);
-        let observer = observer.borrow();
+        let hook = hook.borrow();
         let (used, idle, label) = if spec.is_enabled(MegaSpecId::REX4) {
-            (&observer.parent, &observer.empty, "parent env")
+            (&hook.parent, &hook.empty, "parent env")
         } else {
-            (&observer.empty, &observer.parent, "EmptyExternalEnv")
+            (&hook.empty, &hook.parent, "EmptyExternalEnv")
         };
         assert_eq!(used, &["start", "step", "end"], "{spec:?}: whole sandbox on the {label} impl");
         assert!(idle.is_empty(), "{spec:?}: the other impl sees nothing, got {idle:?}");
@@ -765,7 +767,7 @@ fn test_event_order_create_wraps_steps() {
 fn test_blanket_impl_records_sandbox_create_for_generic_inspector() {
     let tracer = GenericCreateCounter::default();
     let creates = Rc::clone(&tracer.creates);
-    let observer = Rc::new(RefCell::new(tracer));
+    let hook = Rc::new(RefCell::new(tracer));
 
     let (tx_bytes, signer) = create_pre_eip155_deploy_tx(success_constructor());
     let mut db = funded_db(signer);
@@ -774,7 +776,7 @@ fn test_blanket_impl_records_sandbox_create_for_generic_inspector() {
         db: &mut db,
         tx_bytes,
         gas_limit_override: LARGE_GAS_LIMIT_OVERRIDE,
-        hook: Some(observer),
+        hook: Some(hook),
         tx_limits: None,
         outer_gas_limit: DEFAULT_OUTER_GAS_LIMIT,
     });
@@ -795,7 +797,7 @@ fn test_no_hook_skips_lifecycle_hooks() {
         db: &mut db,
         tx_bytes,
         gas_limit_override: LARGE_GAS_LIMIT_OVERRIDE,
-        hook: None::<Rc<RefCell<RecordingObserver>>>,
+        hook: None::<Rc<RefCell<RecordingHook>>>,
         tx_limits: None,
         outer_gas_limit: DEFAULT_OUTER_GAS_LIMIT,
     });
@@ -810,7 +812,7 @@ fn test_sandbox_start_info_rex5_caps_effective_gas_limit_below_override() {
     for spec in [MegaSpecId::REX5, MegaSpecId::REX6] {
         let (tx_bytes, signer) = create_pre_eip155_deploy_tx(success_constructor());
         let mut db = funded_db(signer);
-        let recorder = Rc::new(RefCell::new(RecordingObserver::default()));
+        let recorder = Rc::new(RefCell::new(RecordingHook::default()));
         let result = run_keyless(RunConfig {
             spec,
             db: &mut db,
@@ -854,7 +856,7 @@ fn test_sandbox_start_info_rex5_caps_effective_gas_limit_below_override() {
 }
 
 #[test]
-fn test_observer_parity_split_create_through_interceptor() {
+fn test_hook_parity_split_create_through_interceptor() {
     // Parent 1M compute is not forwarded into pre-REX5 sandboxes; the sandbox
     // runs at the 200M spec default. Do not set a parent limit — the initcode
     // itself must overflow that 200M default. EVM gas and compute gas are
@@ -864,7 +866,7 @@ fn test_observer_parity_split_create_through_interceptor() {
         let (tx_bytes, signer) = create_pre_eip155_deploy_tx(split_create_initcode());
         let mut db_obs = funded_db(signer);
         let mut db_base = db_obs.clone();
-        let recorder = Rc::new(RefCell::new(RecordingObserver::default()));
+        let recorder = Rc::new(RefCell::new(RecordingHook::default()));
 
         let (observed, observed_usage) = run_keyless_with_usage(RunConfig {
             spec,
@@ -880,7 +882,7 @@ fn test_observer_parity_split_create_through_interceptor() {
             db: &mut db_base,
             tx_bytes,
             gas_limit_override: LARGE_GAS_LIMIT_OVERRIDE,
-            hook: None::<Rc<RefCell<RecordingObserver>>>,
+            hook: None::<Rc<RefCell<RecordingHook>>>,
             tx_limits: None,
             outer_gas_limit: DEFAULT_OUTER_GAS_LIMIT,
         });
@@ -898,7 +900,7 @@ fn test_observer_parity_split_create_through_interceptor() {
 fn test_sandbox_start_info_saturates_gas_limit_override_above_u64_max() {
     let (tx_bytes, signer) = create_pre_eip155_deploy_tx(success_constructor());
     let mut db = funded_db(signer);
-    let recorder = Rc::new(RefCell::new(RecordingObserver::default()));
+    let recorder = Rc::new(RefCell::new(RecordingHook::default()));
 
     let mut context = MegaContext::new(&mut db, MegaSpecId::REX5);
     context.modify_chain(|chain| {
@@ -938,7 +940,7 @@ fn test_sandbox_end_not_applied_apply_failed_on_merge_db_error() {
     // Occupancy / sandbox execution load the sentinel once; merge inspects it again.
     db.fail_on_account_skip = 1;
 
-    let recorder = Rc::new(RefCell::new(RecordingObserver::default()));
+    let recorder = Rc::new(RefCell::new(RecordingHook::default()));
     let mut context = MegaContext::new(&mut db, spec);
     context.modify_chain(|chain| {
         chain.operator_fee_scalar = Some(U256::ZERO);
@@ -972,16 +974,82 @@ fn test_sandbox_end_not_applied_apply_failed_on_merge_db_error() {
     }
 }
 
-/// An observer that overrides nothing: every hook is the trait's default.
-struct DefaultsOnlyObserver;
+/// A revm inspector that answers every identity-precompile CALL with a fixed return.
+struct OverridingInspector;
 
-impl<E: mega_evm::ExternalEnvTypes> SandboxInspector<E> for DefaultsOnlyObserver {}
+impl<CTX> Inspector<CTX> for OverridingInspector {
+    fn call(&mut self, _context: &mut CTX, inputs: &mut CallInputs) -> Option<CallOutcome> {
+        (inputs.target_address == IDENTITY_PRECOMPILE).then(|| {
+            CallOutcome::new(
+                InterpreterResult::new(
+                    InstructionResult::Return,
+                    Bytes::from(IDENTITY_OVERRIDE.to_be_bytes::<32>()),
+                    Gas::new(inputs.gas_limit),
+                ),
+                inputs.return_memory_offset.clone(),
+            )
+        })
+    }
+}
 
-/// The trait's default hook bodies are inert: with a defaults-only observer attached, a
+fn slot_zero(result: &ResultAndState<MegaHaltReason>, addr: Address) -> Option<U256> {
+    result.state.get(&addr).and_then(|a| a.storage.get(&U256::ZERO)).map(|s| s.present_value())
+}
+
+/// A generic revm `Inspector` attached through the blanket impl lands its `call` override
+/// inside the sandbox: the constructor stores what the short-circuited identity call returned.
+#[test]
+fn test_blanket_impl_forwards_call_overrides() {
+    for spec in SPECS {
+        let (tx_bytes, signer) =
+            create_pre_eip155_deploy_tx(constructor_calls_identity_and_stores_return());
+        let deploy_address = signer.create(0);
+        let mut db_ctrl = funded_db(signer);
+        let mut db_hooked = db_ctrl.clone();
+
+        let control = run_keyless(RunConfig {
+            spec,
+            db: &mut db_ctrl,
+            tx_bytes: tx_bytes.clone(),
+            gas_limit_override: LARGE_GAS_LIMIT_OVERRIDE,
+            hook: None::<Rc<RefCell<OverridingInspector>>>,
+            tx_limits: None,
+            outer_gas_limit: DEFAULT_OUTER_GAS_LIMIT,
+        });
+        assert_eq!(
+            slot_zero(&control, deploy_address),
+            Some(IDENTITY_INPUT),
+            "{spec:?}: without a hook the identity precompile echoes the input"
+        );
+
+        let hooked = run_keyless(RunConfig {
+            spec,
+            db: &mut db_hooked,
+            tx_bytes,
+            gas_limit_override: LARGE_GAS_LIMIT_OVERRIDE,
+            hook: Some(Rc::new(RefCell::new(OverridingInspector))),
+            tx_limits: None,
+            outer_gas_limit: DEFAULT_OUTER_GAS_LIMIT,
+        });
+        assert!(hooked.result.is_success(), "{spec:?}: {:?}", hooked.result);
+        assert_eq!(
+            slot_zero(&hooked, deploy_address),
+            Some(IDENTITY_OVERRIDE),
+            "{spec:?}: the blanket impl forwards the override"
+        );
+    }
+}
+
+/// A hook that overrides nothing: every method is the trait's default.
+struct DefaultsOnlyHook;
+
+impl<E: mega_evm::ExternalEnvTypes> SandboxInspector<E> for DefaultsOnlyHook {}
+
+/// The trait's default method bodies are inert: with a defaults-only hook attached, a
 /// deployment that logs, calls, creates, and self-destructs inside the sandbox ends with the
 /// same result, state, and resource usage as the no-hook run.
 #[test]
-fn test_defaults_only_observer_is_inert() {
+fn test_defaults_only_hook_is_inert() {
     let shapes: [(&str, Bytes); 2] = [
         ("deep mixed", mega_evm::test_utils::deep_mixed_init(REVERTER)),
         ("selfdestruct", selfdestructing_constructor()),
@@ -1001,7 +1069,7 @@ fn test_defaults_only_observer_is_inert() {
                 db: &mut db_base,
                 tx_bytes: tx_bytes.clone(),
                 gas_limit_override: LARGE_GAS_LIMIT_OVERRIDE,
-                hook: None::<Rc<RefCell<DefaultsOnlyObserver>>>,
+                hook: None::<Rc<RefCell<DefaultsOnlyHook>>>,
                 tx_limits: None,
                 outer_gas_limit: DEFAULT_OUTER_GAS_LIMIT,
             });
@@ -1010,11 +1078,11 @@ fn test_defaults_only_observer_is_inert() {
                 db: &mut db_obs,
                 tx_bytes,
                 gas_limit_override: LARGE_GAS_LIMIT_OVERRIDE,
-                hook: Some(Rc::new(RefCell::new(DefaultsOnlyObserver))),
+                hook: Some(Rc::new(RefCell::new(DefaultsOnlyHook))),
                 tx_limits: None,
                 outer_gas_limit: DEFAULT_OUTER_GAS_LIMIT,
             });
-            let case = format!("defaults-only observer {name} {spec:?}");
+            let case = format!("defaults-only hook {name} {spec:?}");
             assert!(baseline.result.is_success(), "{case}: {:?}", baseline.result);
             assert_result_and_state_eq(&observed, &baseline, &case);
             assert_usage_eq(observed_usage, baseline_usage, &case);

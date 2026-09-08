@@ -772,7 +772,7 @@ fn run_sandbox_ctx<'db, ExtEnvs: ExternalEnvTypes>(
         }
         None => {
             // Preserve the existing zero-observation path for every caller which
-            // has not attached a sandbox observer.
+            // has not attached a sandbox hook.
             let mut sandbox_evm = MegaEvm::new(sandbox_ctx);
             let result = sandbox_evm.transact_raw(sandbox_tx);
             let limit_usage = sandbox_evm.ctx.additional_limit.borrow().get_usage();
@@ -1857,9 +1857,9 @@ mod tests {
         ])
     }
 
-    struct SplitNopObserver;
+    struct SplitNopHook;
 
-    impl<E: ExternalEnvTypes> crate::sandbox::SandboxInspector<E> for SplitNopObserver {}
+    impl<E: ExternalEnvTypes> crate::sandbox::SandboxInspector<E> for SplitNopHook {}
 
     fn assert_sandbox_outcomes_eq(left: &SandboxOutcome, right: &SandboxOutcome, case: &str) {
         match (left, right) {
@@ -1887,7 +1887,7 @@ mod tests {
                 assert_eq!(left_state.len(), right_state.len(), "{case}: account count");
                 for (addr, account) in left_state {
                     let other = right_state.get(addr).unwrap_or_else(|| {
-                        panic!("{case}: missing account {addr:?} in observer state")
+                        panic!("{case}: missing account {addr:?} in hooked state")
                     });
                     assert_eq!(account, other, "{case}: account {addr:?}");
                 }
@@ -1901,7 +1901,7 @@ mod tests {
 
     fn run_split_create_fixture(
         spec: MegaSpecId,
-        observer: Option<SandboxHookHandle<crate::EmptyExternalEnv>>,
+        hook: Option<SandboxHookHandle<crate::EmptyExternalEnv>>,
     ) -> SandboxOutcome {
         use crate::test_utils::MemoryDatabase;
         use revm::state::EvmState;
@@ -1934,7 +1934,7 @@ mod tests {
 
         let limits =
             EvmTxRuntimeLimits::no_limits().with_tx_compute_gas_limit(SPLIT_CREATE_COMPUTE_BUDGET);
-        match run_sandbox_ctx(context, tx, Some(limits), block, chain, observer) {
+        match run_sandbox_ctx(context, tx, Some(limits), block, chain, hook) {
             SandboxRun::Outcome(outcome) => outcome,
             other => panic!("split-create fixture produced no outcome: {other:?}"),
         }
@@ -1955,12 +1955,12 @@ mod tests {
     }
 
     #[test]
-    fn test_observer_parity_pre_rex5_split_create_commits_sstore() {
+    fn test_hook_parity_pre_rex5_split_create_commits_sstore() {
         for spec in [MegaSpecId::REX2, MegaSpecId::REX3, MegaSpecId::REX4] {
             let baseline = run_split_create_fixture(spec, None);
-            let observer: SandboxHookHandle<crate::EmptyExternalEnv> =
-                Rc::new(RefCell::new(SplitNopObserver));
-            let observed = run_split_create_fixture(spec, Some(observer));
+            let hook: SandboxHookHandle<crate::EmptyExternalEnv> =
+                Rc::new(RefCell::new(SplitNopHook));
+            let observed = run_split_create_fixture(spec, Some(hook));
 
             let (created, slot) = split_create_slot(&baseline);
             assert!(created, "{spec:?}: pre-REX5 split CREATE must leave the account created");
@@ -1974,11 +1974,10 @@ mod tests {
     }
 
     #[test]
-    fn test_observer_parity_rex5_atomic_create_failure() {
+    fn test_hook_parity_rex5_atomic_create_failure() {
         let baseline = run_split_create_fixture(MegaSpecId::REX5, None);
-        let observer: SandboxHookHandle<crate::EmptyExternalEnv> =
-            Rc::new(RefCell::new(SplitNopObserver));
-        let observed = run_split_create_fixture(MegaSpecId::REX5, Some(observer));
+        let hook: SandboxHookHandle<crate::EmptyExternalEnv> = Rc::new(RefCell::new(SplitNopHook));
+        let observed = run_split_create_fixture(MegaSpecId::REX5, Some(hook));
 
         let (created, slot) = split_create_slot(&baseline);
         assert!(!created, "REX5 atomic CREATE failure must not leave a created account");

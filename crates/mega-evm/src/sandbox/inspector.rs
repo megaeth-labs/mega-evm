@@ -1,4 +1,4 @@
-//! Hook channel into nested sandbox execution.
+//! Hook into nested sandbox execution.
 //!
 //! Keyless sandbox execution is otherwise invisible to a parent inspector. A
 //! [`SandboxInspector`] attached via [`crate::MegaContext::set_keyless_sandbox_hook`]
@@ -7,10 +7,10 @@
 //! [`sandbox_end`](SandboxInspector::sandbox_end) lifecycle. Hook signatures match revm's:
 //! `&mut` inputs and override return values are forwarded, so a hook can rewrite inputs,
 //! short-circuit `CALL`/`CREATE`, and rewrite outcomes exactly as it could on a top-level
-//! EVM. A hook that only observes returns `None` from `call`/`create` (the default bodies)
-//! and leaves interpreter and context state alone; that is what read-only means here, as it
-//! does for the outer EVM's inspector. [`InspectorBridge`] installs the handle as the sandbox
-//! EVM's inspector.
+//! EVM. A hook that only observes returns `None` from `call`/`create` (the default bodies),
+//! leaves the `&mut` inputs and outcomes it is handed unchanged, and leaves interpreter and
+//! context state alone; that is what read-only means here, as it does for the outer EVM's
+//! inspector. [`InspectorBridge`] installs the handle as the sandbox EVM's inspector.
 //!
 //! # Contract
 //!
@@ -184,9 +184,10 @@ impl SandboxEndOutcome {
 ///
 /// Signatures match [`Inspector`]`<`[`MegaContext`]`<`[`SandboxDb`]`<'_>, ExtEnvs>,
 /// `[`EthInterpreter`]`>`. All hooks have empty / `None` defaults so adding a hook is not a
-/// breaking change, and a type that overrides nothing but the hooks it reads from observes
-/// without intervening. Method-level lifetimes on [`MegaContext`]`<`[`SandboxDb`]`<'_>, _>`
-/// keep the trait object-safe.
+/// breaking change; a hook that only reads, returning `None` from `call` / `create` and leaving
+/// its `&mut` inputs, outcomes, interpreter, and context unchanged, observes without
+/// intervening. Method-level lifetimes on
+/// [`MegaContext`]`<`[`SandboxDb`]`<'_>, _>` keep the trait object-safe.
 ///
 /// Types that already implement [`Inspector`] for every sandbox context lifetime
 /// receive a blanket [`SandboxInspector`] impl. Local types that are not inspectors

@@ -247,11 +247,11 @@ impl<E: mega_evm::ExternalEnvTypes> SandboxInspector<E> for RecordingInspector {
 }
 
 #[derive(Default)]
-struct RecordingObserver {
+struct RecordingHook {
     events: Vec<InspectedEvent>,
 }
 
-impl<E: mega_evm::ExternalEnvTypes> SandboxInspector<E> for RecordingObserver {
+impl<E: mega_evm::ExternalEnvTypes> SandboxInspector<E> for RecordingHook {
     fn step(
         &mut self,
         interp: &mut Interpreter<EthInterpreter>,
@@ -672,7 +672,7 @@ fn test_inspector_no_intervention_parity_across_specs_and_constructors() {
                 db: &mut db_base,
                 tx_bytes: tx_bytes.clone(),
                 gas_limit_override: LARGE_GAS_LIMIT_OVERRIDE,
-                hook: None::<Rc<RefCell<RecordingObserver>>>,
+                hook: None::<Rc<RefCell<RecordingHook>>>,
                 tx_limits: None,
                 outer_gas_limit: DEFAULT_OUTER_GAS_LIMIT,
             });
@@ -729,7 +729,7 @@ fn test_inspector_call_short_circuit_writes_override_and_still_emits_call_end() 
             db: &mut db_ctrl,
             tx_bytes: tx_bytes.clone(),
             gas_limit_override: LARGE_GAS_LIMIT_OVERRIDE,
-            hook: None::<Rc<RefCell<RecordingObserver>>>,
+            hook: None::<Rc<RefCell<RecordingHook>>>,
             tx_limits: None,
             outer_gas_limit: DEFAULT_OUTER_GAS_LIMIT,
         });
@@ -1000,7 +1000,7 @@ fn test_inspector_journal_write_commits_on_success_and_rolls_back_on_revert() {
             db: &mut db_base,
             tx_bytes: tx_bytes.clone(),
             gas_limit_override: LARGE_GAS_LIMIT_OVERRIDE,
-            hook: None::<Rc<RefCell<RecordingObserver>>>,
+            hook: None::<Rc<RefCell<RecordingHook>>>,
             tx_limits: None,
             outer_gas_limit: DEFAULT_OUTER_GAS_LIMIT,
         });
@@ -1031,7 +1031,7 @@ fn test_inspector_journal_write_commits_on_success_and_rolls_back_on_revert() {
             db: &mut db_base,
             tx_bytes: tx_bytes.clone(),
             gas_limit_override: LARGE_GAS_LIMIT_OVERRIDE,
-            hook: None::<Rc<RefCell<RecordingObserver>>>,
+            hook: None::<Rc<RefCell<RecordingHook>>>,
             tx_limits: None,
             outer_gas_limit: DEFAULT_OUTER_GAS_LIMIT,
         });
@@ -1142,30 +1142,30 @@ fn test_setting_a_hook_replaces_the_previous_and_clear_restores_parity() {
     let (tx_bytes, signer) = create_pre_eip155_deploy_tx(success_constructor());
 
     let mut db_obs_then_insp = funded_db(signer);
-    let observer = Rc::new(RefCell::new(RecordingObserver::default()));
+    let hook = Rc::new(RefCell::new(RecordingHook::default()));
     let inspector = Rc::new(RefCell::new(RecordingInspector::default()));
     let mut context = MegaContext::new(&mut db_obs_then_insp, spec);
     context.modify_chain(|chain| {
         chain.operator_fee_scalar = Some(U256::ZERO);
         chain.operator_fee_constant = Some(U256::ZERO);
     });
-    context.set_keyless_sandbox_hook(Rc::clone(&observer));
+    context.set_keyless_sandbox_hook(Rc::clone(&hook));
     context.set_keyless_sandbox_hook(Rc::clone(&inspector));
     let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);
     let tx = keyless_deploy_call_tx(tx_bytes.clone(), LARGE_GAS_LIMIT_OVERRIDE);
     alloy_evm::Evm::transact_raw(&mut evm, tx).expect("transact");
     assert!(
-        observer.borrow().events.is_empty(),
-        "observer must be displaced by inspector: {:?}",
-        observer.borrow().events
+        hook.borrow().events.is_empty(),
+        "the first hook must be displaced by the second: {:?}",
+        hook.borrow().events
     );
     assert!(
         inspector.borrow().events.iter().any(|e| matches!(e, InspectedEvent::Start)),
-        "inspector that replaced observer must receive events"
+        "the hook that replaced the first must receive events"
     );
 
     let mut db_insp_then_obs = funded_db(signer);
-    let observer = Rc::new(RefCell::new(RecordingObserver::default()));
+    let hook = Rc::new(RefCell::new(RecordingHook::default()));
     let inspector = Rc::new(RefCell::new(RecordingInspector::default()));
     let mut context = MegaContext::new(&mut db_insp_then_obs, spec);
     context.modify_chain(|chain| {
@@ -1173,18 +1173,18 @@ fn test_setting_a_hook_replaces_the_previous_and_clear_restores_parity() {
         chain.operator_fee_constant = Some(U256::ZERO);
     });
     context.set_keyless_sandbox_hook(Rc::clone(&inspector));
-    context.set_keyless_sandbox_hook(Rc::clone(&observer));
+    context.set_keyless_sandbox_hook(Rc::clone(&hook));
     let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);
     let tx = keyless_deploy_call_tx(tx_bytes.clone(), LARGE_GAS_LIMIT_OVERRIDE);
     alloy_evm::Evm::transact_raw(&mut evm, tx).expect("transact");
     assert!(
         inspector.borrow().events.is_empty(),
-        "inspector must be displaced by observer: {:?}",
+        "the first hook must be displaced by the second: {:?}",
         inspector.borrow().events
     );
     assert!(
-        observer.borrow().events.iter().any(|e| matches!(e, InspectedEvent::Start)),
-        "observer that replaced inspector must receive events"
+        hook.borrow().events.iter().any(|e| matches!(e, InspectedEvent::Start)),
+        "the hook that replaced the first must receive events"
     );
 
     let mut db_cleared = funded_db(signer);
@@ -1205,7 +1205,7 @@ fn test_setting_a_hook_replaces_the_previous_and_clear_restores_parity() {
         db: &mut db_base,
         tx_bytes,
         gas_limit_override: LARGE_GAS_LIMIT_OVERRIDE,
-        hook: None::<Rc<RefCell<RecordingObserver>>>,
+        hook: None::<Rc<RefCell<RecordingHook>>>,
         tx_limits: None,
         outer_gas_limit: DEFAULT_OUTER_GAS_LIMIT,
     });
@@ -1505,7 +1505,7 @@ fn test_defaults_only_inspector_is_inert_on_selfdestruct() {
             db: &mut db_base,
             tx_bytes: tx_bytes.clone(),
             gas_limit_override: LARGE_GAS_LIMIT_OVERRIDE,
-            hook: None::<Rc<RefCell<RecordingObserver>>>,
+            hook: None::<Rc<RefCell<RecordingHook>>>,
             tx_limits: None,
             outer_gas_limit: DEFAULT_OUTER_GAS_LIMIT,
         });

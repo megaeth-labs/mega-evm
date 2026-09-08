@@ -59,7 +59,7 @@
 //!
 //! - `execution` - Core sandbox execution logic and the main entry point
 //!   [`execute_keyless_deploy_call`]
-//! - `inspector` - The [`SandboxInspector`] hook channel into nested sandbox execution
+//! - `inspector` - The [`SandboxInspector`] hook into nested sandbox execution
 //! - `trace` - Shared `revm-inspectors` recorder and splicing helpers (`inspectors` feature)
 //! - `state` - Type-erased database wrapper ([`SandboxDb`]) for isolated execution
 //! - `state_merge` - Replay-safe merge of sandbox state into the parent journal
@@ -73,9 +73,9 @@
 //! (also forwarded from [`crate::MegaEvm`] and [`crate::MegaBlockExecutor`]): interpreter hooks
 //! with revm's `&mut` inputs and override return values, plus a paired `sandbox_start` /
 //! `sandbox_end` lifecycle. Interventions take effect inside the sandbox as they would on a
-//! top-level EVM; a hook that returns `None` from `call`/`create` and leaves interpreter and
-//! context state alone does not change execution results. Reverted inner frames still emit
-//! their events; whether sandbox state was applied to the parent is reported by
+//! top-level EVM; a hook that returns `None` from `call`/`create` and leaves its `&mut` inputs,
+//! outcomes, interpreter, and context unchanged does not change execution results. Reverted inner
+//! frames still emit their events; whether sandbox state was applied to the parent is reported by
 //! [`SandboxEndOutcome::state_applied`]. With no hook attached the sandbox path is unchanged.
 //!
 //! Attaching a hook does not change sandbox external-env semantics: pre-REX4 sandboxes
