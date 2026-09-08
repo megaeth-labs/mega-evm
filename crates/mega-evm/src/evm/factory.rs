@@ -158,10 +158,14 @@ impl<ExtEnvFactory: ExternalEnvFactory + Clone> alloy_evm::EvmFactory
             .with_cfg(evm_env.cfg_env)
             .with_chain(L1BlockInfo::default())
             .with_tx_runtime_limits(runtime_limits);
+        // The builder is an external closure with no exhaustive match over `MegaSpecId`, so it
+        // receives the behavior projection: dynamic precompiles are execution semantics, and a
+        // builder keyed on exact specs must not see an alias rung during a rollback window. The
+        // context above keeps the raw rung.
         MegaEvm::new(ctx).with_dyn_precompiles(
             self.dyn_precompiles_builder
                 .as_ref()
-                .map_or_else(Default::default, |builder| builder(spec_id)),
+                .map_or_else(Default::default, |builder| builder(spec_id.behavior())),
         )
     }
 
@@ -187,5 +191,28 @@ mod tests {
 
         // Verify the getter returns a stable reference to the same field.
         assert!(core::ptr::eq(got, factory.external_env_factory()));
+    }
+
+    #[test]
+    fn test_dyn_precompiles_builder_receives_the_behavior_spec() {
+        use alloy_evm::EvmFactory as _;
+        use core::sync::atomic::{AtomicU8, Ordering};
+
+        // The builder must see the behavior projection, never an alias rung: an external
+        // builder keyed on exact specs would otherwise install a different precompile set
+        // during a rollback window.
+        static SEEN_SPEC: AtomicU8 = AtomicU8::new(u8::MAX);
+
+        let factory =
+            MegaEvmFactory::new().with_dyn_precompiles_builder(std::sync::Arc::new(|spec| {
+                SEEN_SPEC.store(spec as u8, Ordering::SeqCst);
+                revm::primitives::HashMap::default()
+            }));
+
+        let mut evm_env = EvmEnv::<MegaSpecId>::default();
+        evm_env.cfg_env.spec = MegaSpecId::MINI_REX_1;
+        let _evm = factory.create_evm(crate::test_utils::MemoryDatabase::default(), evm_env);
+
+        assert_eq!(SEEN_SPEC.load(Ordering::SeqCst), MegaSpecId::EQUIVALENCE as u8);
     }
 }

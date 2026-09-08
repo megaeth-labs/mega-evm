@@ -9,7 +9,7 @@ use alloy_primitives::{address, Address};
 use alloy_sol_types::SolError;
 use revm::{database::State, state::EvmState};
 
-use crate::{MegaHardforks, SystemContractSpec};
+use crate::{MegaHardforks, MegaSpecId, SystemContractSpec};
 
 /// The address of the access control system contract.
 pub const ACCESS_CONTROL_ADDRESS: Address = address!("0x6342000000000000000000000000000000000004");
@@ -50,18 +50,18 @@ pub fn transact_deploy_access_control_contract<DB: Database>(
     block_timestamp: u64,
     db: &mut State<DB>,
 ) -> Result<Option<EvmState>, DB::Error> {
-    access_control_spec(&hardforks, block_timestamp)
+    access_control_spec(hardforks.spec_id(block_timestamp))
         .map(|s| crate::transact_deploy(db, &s))
         .transpose()
 }
 
-/// Builds the [`SystemContractSpec`] for the access-control contract active at
-/// the given timestamp, or `None` if Rex4 is not yet active.
-pub(crate) fn access_control_spec(
-    hardforks: &impl MegaHardforks,
-    block_timestamp: u64,
-) -> Option<SystemContractSpec> {
-    hardforks.is_rex_4_active_at_timestamp(block_timestamp).then(|| {
+/// Builds the [`SystemContractSpec`] for the access-control contract active under
+/// `spec`, or `None` if `REX4` is not yet enabled.
+///
+/// `spec` is the scheduled spec, compared by position — see
+/// [`oracle_spec`](crate::system::oracle::oracle_spec).
+pub(crate) fn access_control_spec(spec: MegaSpecId) -> Option<SystemContractSpec> {
+    spec.reaches(MegaSpecId::REX4).then(|| {
         SystemContractSpec::new(
             ACCESS_CONTROL_ADDRESS,
             ACCESS_CONTROL_CODE,

@@ -1,0 +1,144 @@
+name: On Release
+
+# Publish targets for a mega-evm release. Runs when the release pipeline
+# publishes the GitHub Release (release-publish creates it after the tag),
+# and on demand for a rehearsal: dispatch with an existing tag and
+# dry_run=true runs every job with nothing published, uploaded or attached.
+#
+# Targets, as independent jobs so one hiccup never blocks the other:
+#   crates    — the four published crates to crates.io (replaces publish.yml)
+#   mega-evme — the CLI binary to the MegaETH artifact registry and, as a
+#               download for the public, to the GitHub Release page
+#
+# Rehearse on a tag ref (the environment below allows only v* tag refs):
+#   gh workflow run on-release.yml --ref vX.Y.Z -f dry_run=true
+# The tag being released is always the run's own ref: the environment
+# authorises that ref, so nothing else may be checked out or published.
+#
+# Credentials (CARGO_REGISTRY_TOKEN, GCP_AUTH_KEY) live in the `publish`
+# environment, whose deployment policy allows only v* tags: a job can read
+# them only when the run's ref is a release tag, never from a branch build.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Verify and build everything; publish, upload and attach nothing"
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+env:
+  # The run's ref — the released tag on a release event, the dispatched tag
+  # on a rehearsal. Never an input: the publish environment authorises this
+  # ref, so it must also be what gets built and published.
+  TAG: ${{ github.ref_name }}
+  # A release event is never a dry run; a dispatch defaults to one.
+  DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || false }}
+
+jobs:
+  crates:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    environment: publish
+    steps:
+      - name: Require a tag ref
+        run: |
+          [[ "$GITHUB_REF_TYPE" == "tag" ]] || { echo "::error::this workflow publishes the run's own ref, which must be a tag (got $GITHUB_REF_TYPE $GITHUB_REF_NAME); dispatch it with --ref vX.Y.Z"; exit 1; }
+
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ env.TAG }}
+          submodules: recursive
+          persist-credentials: false
+
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+        with:
+          cache: false
+
+      - uses: foundry-rs/foundry-toolchain@b00af27efadbc7b4ca8b82abbd903b17cc874d2a # v1
+
+      - uses: megaeth-labs/.github/.github/actions/release-publish-rust-crates@main
+        with:
+          # Explicit allowlist: state-test is publish = false; mega-t8n is not published.
+          crates: |
+            mega-system-contracts
+            mega-evm
+            mega-state-test
+            mega-evme
+          version: ${{ env.TAG }}
+          # A rehearsal never needs the token; do not hand it to the job at all.
+          token: ${{ env.DRY_RUN != 'true' && secrets.CARGO_REGISTRY_TOKEN || '' }}
+          dry_run: ${{ env.DRY_RUN }}
+
+  mega-evme:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    environment: publish
+    permissions:
+      contents: write # release-assets attaches to the Release
+    steps:
+      - name: Require a tag ref
+        run: |
+          [[ "$GITHUB_REF_TYPE" == "tag" ]] || { echo "::error::this workflow publishes the run's own ref, which must be a tag (got $GITHUB_REF_TYPE $GITHUB_REF_NAME); dispatch it with --ref vX.Y.Z"; exit 1; }
+
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ env.TAG }}
+          submodules: recursive
+          persist-credentials: false
+
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+        with:
+          cache: false
+
+      - uses: foundry-rs/foundry-toolchain@b00af27efadbc7b4ca8b82abbd903b17cc874d2a # v1
+
+      - name: Build mega-evme
+        run: cargo build --release --locked -p mega-evme
+
+      - name: Verify the binary reports the release version
+        run: |
+          set -euo pipefail
+          expected="mega-evme ${TAG#v}"
+          actual="$(target/release/mega-evme --version)"
+          if [[ "$actual" != "$expected" ]]; then
+            if [[ "$DRY_RUN" == "true" ]]; then
+              # A rehearsal reports what a real run would refuse, and carries on.
+              echo "::warning::built binary reports '$actual', expected '$expected' — a real release would stop here"
+            else
+              echo "::error::built binary reports '$actual', expected '$expected'; refusing to publish a mislabeled binary"
+              exit 1
+            fi
+          fi
+          echo "$actual"
+
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        with:
+          credentials_json: ${{ secrets.GCP_AUTH_KEY }}
+
+      - uses: megaeth-labs/.github/.github/actions/release-upload-artifact@main
+        id: registry
+        with:
+          file: target/release/mega-evme
+          kind: artifact-registry
+          project: devops-production-464602
+          location: asia-northeast1
+          repository: megaeth-generic-registry
+          package: mega-evme
+          version: ${{ env.TAG }}
+          dry_run: ${{ env.DRY_RUN }}
+
+      - uses: megaeth-labs/.github/.github/actions/release-assets@main
+        with:
+          tag: ${{ env.TAG }}
+          files: |
+            target/release/mega-evme
+          dry_run: ${{ env.DRY_RUN }}
+
+      - run: 'echo "mega-evme ${{ env.TAG }}: registry=${{ steps.registry.outputs.status }} ${{ steps.registry.outputs.uri }} sha256=${{ steps.registry.outputs.sha256 }}"'

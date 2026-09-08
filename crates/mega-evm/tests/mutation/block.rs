@@ -211,36 +211,69 @@ fn staged_config() -> MegaHardforkConfig {
         .with(MegaHardfork::Rex3, ForkCondition::Timestamp(700))
         .with(MegaHardfork::Rex4, ForkCondition::Timestamp(800))
         .with(MegaHardfork::Rex5, ForkCondition::Timestamp(900))
+        .with(MegaHardfork::Rex6, ForkCondition::Timestamp(1000))
+        .with(MegaHardfork::Rex7, ForkCondition::Timestamp(1100))
 }
 
-/// Each `is_*_active_at_timestamp` returns `true` at/after activation and `false` before. This
-/// kills the `-> false` mutants on the MiniRex1/MiniRex2/Rex1/Rex3 predicates (and pins the rest).
+/// Each `is_*_active_at_timestamp` returns `true` at/after activation and `false` before, on a
+/// complete ordered ladder (where the position-projected predicates coincide with the activation
+/// events). This kills the `-> false` mutants on the predicate bodies in
+/// `crates/mega-evm/src/block/hardfork.rs` at the lines referenced below.
+///
+/// Every predicate is probed on **both** sides of its own activation, which is what pins the
+/// spec each one projects. A behavior-introducing predicate's body is
+/// `spec_id(t).reaches(MegaSpecId::X)`, so shifting `X` one rung either way is a
+/// live mutation: shifting down makes the predicate fire at the rung below (caught by the
+/// `false` assertion one second early), shifting up makes it stop firing at its own rung (caught
+/// by the `true` assertion). A one-sided probe kills neither direction.
 #[test]
 fn test_hardfork_activation_predicates_are_true_at_activation() {
     let cfg = staged_config();
 
-    // MiniRex1 (line 144) — false strictly before, true at activation.
+    // MiniRex (hardfork.rs:192) — spec-introducing (MINI_REX). Shifting down lands on
+    // EQUIVALENCE, which is enabled at every timestamp, so only the `false` side catches it.
+    assert!(!cfg.is_mini_rex_active_at_timestamp(99));
+    assert!(cfg.is_mini_rex_active_at_timestamp(100));
+
+    // MiniRex1 (hardfork.rs:203) — alias fork, raw event query.
     assert!(!cfg.is_mini_rex_1_active_at_timestamp(199));
     assert!(cfg.is_mini_rex_1_active_at_timestamp(200));
 
-    // MiniRex2 (line 149).
+    // MiniRex2 (hardfork.rs:213) — alias fork, raw event query.
     assert!(!cfg.is_mini_rex_2_active_at_timestamp(299));
     assert!(cfg.is_mini_rex_2_active_at_timestamp(300));
 
-    // Rex1 (line 159).
+    // Rex (hardfork.rs:220).
+    assert!(!cfg.is_rex_active_at_timestamp(399));
+    assert!(cfg.is_rex_active_at_timestamp(400));
+
+    // Rex1 (hardfork.rs:227).
     assert!(!cfg.is_rex_1_active_at_timestamp(499));
     assert!(cfg.is_rex_1_active_at_timestamp(500));
 
-    // Rex3 (line 169).
+    // Rex2 (hardfork.rs:234).
+    assert!(!cfg.is_rex_2_active_at_timestamp(599));
+    assert!(cfg.is_rex_2_active_at_timestamp(600));
+
+    // Rex3 (hardfork.rs:241).
     assert!(!cfg.is_rex_3_active_at_timestamp(699));
     assert!(cfg.is_rex_3_active_at_timestamp(700));
 
-    // Sanity on the neighbouring predicates so the staged config is self-consistent.
-    assert!(cfg.is_mini_rex_active_at_timestamp(100));
-    assert!(cfg.is_rex_active_at_timestamp(400));
-    assert!(cfg.is_rex_2_active_at_timestamp(600));
+    // Rex4 (hardfork.rs:248).
+    assert!(!cfg.is_rex_4_active_at_timestamp(799));
     assert!(cfg.is_rex_4_active_at_timestamp(800));
+
+    // Rex5 (hardfork.rs:255).
+    assert!(!cfg.is_rex_5_active_at_timestamp(899));
     assert!(cfg.is_rex_5_active_at_timestamp(900));
+
+    // Rex6 (hardfork.rs:262).
+    assert!(!cfg.is_rex_6_active_at_timestamp(999));
+    assert!(cfg.is_rex_6_active_at_timestamp(1000));
+
+    // Rex7 (hardfork.rs:269).
+    assert!(!cfg.is_rex_7_active_at_timestamp(1099));
+    assert!(cfg.is_rex_7_active_at_timestamp(1100));
 }
 
 // ============================================================================

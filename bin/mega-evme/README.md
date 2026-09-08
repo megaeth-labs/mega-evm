@@ -40,6 +40,19 @@ cargo build --release -p mega-evme
 
 The `--locked` flag ensures the exact tested dependency versions are used.
 
+### Prebuilt binary
+
+Every release also attaches a prebuilt `mega-evme` (Linux x86_64, built on `ubuntu-24.04`) and a `SHA256SUMS` file to its [GitHub Release](https://github.com/megaeth-labs/mega-evm/releases).
+Download both, verify the checksum, and make the binary executable:
+
+```bash
+sha256sum --check --ignore-missing SHA256SUMS
+chmod +x mega-evme
+./mega-evme --version
+```
+
+The same binary is published to the MegaETH artifact registry for internal use.
+
 ## Commands
 
 ### run Command
@@ -252,7 +265,7 @@ These options are available across all commands.
 
 | Option                 | Default | Description                               |
 | ---------------------- | ------- | ----------------------------------------- |
-| `--spec <SPEC>`        | Rex7    | Spec: `Equivalence`, `MiniRex`, `Rex`, `Rex1`, `Rex2`, `Rex3`, `Rex4`, `Rex5`, `Rex6`, `Rex7` |
+| `--spec <SPEC>`        | Rex7    | Spec: `Equivalence`, `MiniRex`, `MiniRex1`, `MiniRex2`, `Rex`, `Rex1`, `Rex2`, `Rex3`, `Rex4`, `Rex5`, `Rex6`, `Rex7` (`MiniRex1`/`MiniRex2` are aliases executing `Equivalence`/`MiniRex` behavior) |
 | `--chain-id <ID>`      | 6342    | Chain ID                                  |
 
 ### Block Environment

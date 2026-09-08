@@ -107,8 +107,9 @@
 //!   block-level Data Availability size limit checks during pre-execution validation
 //! - **Rationale**: Deposit transactions are trustless L1→L2 messages that cannot be censored. They
 //!   must be included in blocks regardless of their DA size to maintain bridge integrity
-//! - **Tracking**: While exempt from limit checks, deposit DA sizes are still tracked and
-//!   accumulated in block DA usage counters for monitoring purposes
+//! - **Tracking**: Deposit DA sizes are **not** accumulated into the block DA usage counter
+//!   (`post_execution_update` skips them), so `block_da_size_used` reflects non-deposit
+//!   transactions only
 //! - **Other Limits**: Deposit transactions are still subject to all other limits (gas, tx size,
 //!   compute gas, data size, KV updates)
 //!
@@ -1025,6 +1026,36 @@ impl BlockLimiter {
 mod tests {
     use super::*;
     use alloy_primitives::B256;
+
+    /// Alias forks must configure exactly their behavior target's block limits: the
+    /// hand-written arm grouping in `from_hardfork_and_block_gas_limit` is reconciled with
+    /// `behavior()`, mirroring the instruction-table/precompile/runtime-limit reconciliation
+    /// tests. Driven off `VARIANTS` and `is_alias`, so a future alias fork joins automatically.
+    #[test]
+    fn test_alias_forks_use_their_behavior_targets_block_limits() {
+        const GAS: u64 = 1_000_000;
+        let alias_forks =
+            MegaHardfork::VARIANTS.iter().copied().filter(|fork| fork.spec_id().is_alias());
+        let mut seen = 0;
+        for fork in alias_forks {
+            let limits = BlockLimits::from_hardfork_and_block_gas_limit(fork, GAS);
+            let target = fork.spec_id().behavior();
+            let expected = match MegaHardfork::VARIANTS
+                .iter()
+                .copied()
+                .find(|base| base.spec_id() as u8 == target as u8)
+            {
+                Some(base_fork) => BlockLimits::from_hardfork_and_block_gas_limit(base_fork, GAS),
+                // The target predates every fork (EQUIVALENCE): no block-level limits apply.
+                None => BlockLimits::no_limits()
+                    .with_tx_runtime_limits(EvmTxRuntimeLimits::from_spec(fork.spec_id()))
+                    .with_block_gas_limit(GAS),
+            };
+            assert_eq!(limits, expected, "{fork:?} must mirror its behavior target {target:?}");
+            seen += 1;
+        }
+        assert_eq!(seen, 2, "MiniRex1 and MiniRex2 are the alias forks under reconciliation");
+    }
 
     fn limits_with_block_gas(block_gas_limit: u64) -> BlockLimits {
         let mut limits = BlockLimits::no_limits();

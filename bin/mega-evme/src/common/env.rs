@@ -25,8 +25,9 @@ use super::{EvmeError, Result};
 #[derive(Args, Debug, Clone)]
 #[command(next_help_heading = "Chain Options")]
 pub struct ChainArgs {
-    /// Name of spec to use, possible values: `MiniRex`, `Equivalence`, `Rex`, `Rex1`, `Rex2`,
-    /// `Rex3`, `Rex4`, `Rex5`, `Rex6`, `Rex7`
+    /// Name of spec to use, possible values: `Equivalence`, `MiniRex`, `MiniRex1`, `MiniRex2`,
+    /// `Rex`, `Rex1`, `Rex2`, `Rex3`, `Rex4`, `Rex5`, `Rex6`, `Rex7` (`MiniRex1`/`MiniRex2`
+    /// are alias specs executing `Equivalence`/`MiniRex` behavior)
     #[arg(long = "spec", default_value = "Rex7")]
     pub spec: String,
 

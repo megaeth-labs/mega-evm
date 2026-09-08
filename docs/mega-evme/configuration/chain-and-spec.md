@@ -23,6 +23,8 @@ Spec names are case-sensitive.
 | ------------- | ----------------------------------------------------------------------------------------------------------------------------- |
 | `Equivalence` | Optimism Isthmus compatibility mode                                                                                           |
 | `MiniRex`     | Initial MegaETH execution model with multidimensional gas                                                                     |
+| `MiniRex1`    | Alias rung: executes `Equivalence` behavior (mainnet rollback window)                                                         |
+| `MiniRex2`    | Alias rung: executes `MiniRex` behavior (mainnet restoration)                                                                 |
 | `Rex`         | Revised storage gas economics and gas forwarding                                                                              |
 | `Rex1`        | Compute gas limit reset fix                                                                                                   |
 | `Rex2`        | SELFDESTRUCT restored (EIP-6780), KeylessDeploy system contract                                                               |

@@ -37,10 +37,12 @@ impl MegaPrecompiles {
     /// Create a new precompile provider with the given `MegaETH` spec.
     #[inline]
     pub fn new_with_spec(spec: MegaSpecId) -> Self {
-        // Get base precompiles from op-revm
+        // Get base precompiles from op-revm. An alias spec is grouped with its `behavior()`
+        // target so it gets exactly the target's precompiles; the grouping must agree with
+        // `behavior()`, pinned by `test_alias_specs_use_their_behavior_targets_precompiles`.
         let inner = match spec {
-            MegaSpecId::EQUIVALENCE => op_revm::precompiles::isthmus(),
-            MegaSpecId::MINI_REX => mini_rex(),
+            MegaSpecId::EQUIVALENCE | MegaSpecId::MINI_REX_1 => op_revm::precompiles::isthmus(),
+            MegaSpecId::MINI_REX | MegaSpecId::MINI_REX_2 => mini_rex(),
             MegaSpecId::REX |
             MegaSpecId::REX1 |
             MegaSpecId::REX2 |
@@ -269,6 +271,11 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> PrecompileProvider<MegaContext<DB,
 }
 
 /// A builder function to build dynamic precompiles for a given [`MegaSpecId`].
+///
+/// The spec passed to the builder is the behavior projection and is never an alias spec:
+/// dynamic precompiles are execution semantics, so during an alias window the builder is
+/// invoked with the alias's behavior target (e.g. `EQUIVALENCE` while `MINI_REX_1` is the
+/// resolved spec).
 pub type DynPrecompilesBuilder =
     Arc<dyn Fn(MegaSpecId) -> HashMap<Address, DynPrecompile> + Send + Sync>;
 
@@ -290,6 +297,26 @@ mod tests {
         interpreter::{InputsImpl, InstructionResult},
     };
     use sha2::{Digest, Sha256};
+
+    /// Every alias spec must get exactly its `behavior()` target's precompile set — the
+    /// match in `new_with_spec` states the alias→target mapping a second time, and this
+    /// test is the reconciliation between the two. The sets are `&'static`, so pointer
+    /// identity is the exact form of "same set".
+    #[test]
+    fn test_alias_specs_use_their_behavior_targets_precompiles() {
+        for spec in MegaSpecId::ALL {
+            if !spec.is_alias() {
+                continue;
+            }
+            let alias = MegaPrecompiles::new_with_spec(*spec);
+            let target = MegaPrecompiles::new_with_spec(spec.behavior());
+            assert!(
+                core::ptr::eq(alias.precompiles(), target.precompiles()),
+                "{spec:?} precompiles diverge from its behavior target {:?}",
+                spec.behavior(),
+            );
+        }
+    }
 
     /// Generate valid KZG Point Evaluation test data from EIP-4844 test vectors.
     fn generate_kzg_test_input() -> InputsImpl {

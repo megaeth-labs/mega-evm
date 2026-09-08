@@ -5,7 +5,7 @@ use alloy_evm::Database;
 use alloy_primitives::{address, b256, bytes, Address, Bytes, B256};
 use revm::{database::State, state::EvmState};
 
-use crate::{MegaHardforks, SystemContractSpec};
+use crate::{MegaHardforks, MegaSpecId, SystemContractSpec};
 
 /// The address of the oracle system contract.
 pub const ORACLE_CONTRACT_ADDRESS: Address = address!("0x6342000000000000000000000000000000000001");
@@ -37,39 +37,42 @@ pub use mega_system_contracts::oracle::IOracle;
 /// Note that the database `db` is not modified in this function. The caller is responsible to
 /// commit the changes to database.
 ///
-/// The deployed bytecode depends on the active hardfork:
+/// The deployed bytecode depends on the scheduled spec:
 /// - Pre-Rex2: v1.0.0 bytecode (without `sendHint` function)
-/// - Rex2+: v1.1.0 bytecode (with `sendHint` function for oracle hints)
+/// - Rex2 to Rex4: v1.1.0 bytecode (with `sendHint` function for oracle hints)
+/// - Rex5+: v2.0.0 bytecode (reads the system address from the `SequencerRegistry`)
 pub fn transact_deploy_oracle_contract<DB: Database>(
     hardforks: impl MegaHardforks,
     block_timestamp: u64,
     db: &mut State<DB>,
 ) -> Result<Option<EvmState>, DB::Error> {
-    oracle_spec(&hardforks, block_timestamp).map(|s| crate::transact_deploy(db, &s)).transpose()
+    oracle_spec(hardforks.spec_id(block_timestamp))
+        .map(|s| crate::transact_deploy(db, &s))
+        .transpose()
 }
 
-/// Builds the [`SystemContractSpec`] for the Oracle contract active at the given
-/// timestamp, or `None` if `MiniRex` is not yet active.
+/// Builds the [`SystemContractSpec`] for the Oracle contract active under `spec`,
+/// or `None` if `MINI_REX` is not yet enabled.
 ///
 /// Single source of the Oracle's gate, bytecode-version selection, and upgrade
 /// semantics — shared by [`transact_deploy_oracle_contract`] and the deploy
 /// registry ([`flat_system_contract_specs`](crate::flat_system_contract_specs)).
-pub(crate) fn oracle_spec(
-    hardforks: &impl MegaHardforks,
-    block_timestamp: u64,
-) -> Option<SystemContractSpec> {
-    if !hardforks.is_mini_rex_active_at_timestamp(block_timestamp) {
+///
+/// `spec` is the scheduled spec, gated by position (`reaches`) rather than behavior: an Oracle
+/// already installed under `MINI_REX` stays installed through an alias (rollback) window.
+pub(crate) fn oracle_spec(spec: MegaSpecId) -> Option<SystemContractSpec> {
+    if !spec.reaches(MegaSpecId::MINI_REX) {
         return None;
     }
 
-    // Select the appropriate bytecode based on hardfork.
+    // Select the appropriate bytecode based on the spec.
     // - Pre-Rex2: v1.0.0 (without `sendHint`)
     // - Rex2-Rex4: v1.1.0 (with `sendHint`)
     // - Rex5+: v2.0.0 (reads system address from SequencerRegistry)
-    let rex5 = hardforks.is_rex_5_active_at_timestamp(block_timestamp);
+    let rex5 = spec.reaches(MegaSpecId::REX5);
     let (target_code, target_code_hash) = if rex5 {
         (ORACLE_CONTRACT_CODE_REX5, ORACLE_CONTRACT_CODE_HASH_REX5)
-    } else if hardforks.is_rex_2_active_at_timestamp(block_timestamp) {
+    } else if spec.reaches(MegaSpecId::REX2) {
         (ORACLE_CONTRACT_CODE_REX2, ORACLE_CONTRACT_CODE_HASH_REX2)
     } else {
         (ORACLE_CONTRACT_CODE, ORACLE_CONTRACT_CODE_HASH)
@@ -105,18 +108,17 @@ pub fn transact_deploy_high_precision_timestamp_oracle<DB: Database>(
     block_timestamp: u64,
     db: &mut State<DB>,
 ) -> Result<Option<EvmState>, DB::Error> {
-    high_precision_timestamp_oracle_spec(&hardforks, block_timestamp)
+    high_precision_timestamp_oracle_spec(hardforks.spec_id(block_timestamp))
         .map(|s| crate::transact_deploy(db, &s))
         .transpose()
 }
 
 /// Builds the [`SystemContractSpec`] for the high-precision timestamp Oracle
-/// active at the given timestamp, or `None` if `MiniRex` is not yet active.
-pub(crate) fn high_precision_timestamp_oracle_spec(
-    hardforks: &impl MegaHardforks,
-    block_timestamp: u64,
-) -> Option<SystemContractSpec> {
-    hardforks.is_mini_rex_active_at_timestamp(block_timestamp).then(|| {
+/// active under `spec`, or `None` if `MINI_REX` is not yet enabled.
+///
+/// `spec` is the scheduled spec, compared by position — see [`oracle_spec`].
+pub(crate) fn high_precision_timestamp_oracle_spec(spec: MegaSpecId) -> Option<SystemContractSpec> {
+    spec.reaches(MegaSpecId::MINI_REX).then(|| {
         SystemContractSpec::new(
             HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS,
             HIGH_PRECISION_TIMESTAMP_ORACLE_CODE,
@@ -127,7 +129,7 @@ pub(crate) fn high_precision_timestamp_oracle_spec(
 
 #[cfg(test)]
 mod tests {
-    use crate::{MegaHardfork, MegaHardforkConfig};
+    use crate::MegaHardforkConfig;
 
     use super::*;
     use alloy_primitives::keccak256;
@@ -305,11 +307,8 @@ mod tests {
     fn test_deploy_oracle_contract_pre_rex2() {
         let mut db = InMemoryDB::default();
         let mut state = State::builder().with_database(&mut db).build();
-        // Activate MiniRex only (pre-Rex2, pre-Rex5)
-        let hardforks = MegaHardforkConfig::default()
-            .with_all_activated()
-            .without(MegaHardfork::Rex2)
-            .without(MegaHardfork::Rex5);
+        // A complete ladder topping out at Rex1 (pre-Rex2, pre-Rex5).
+        let hardforks = MegaHardforkConfig::default().with_all_activated_through(MegaSpecId::REX1);
 
         let result = transact_deploy_oracle_contract(&hardforks, 0, &mut state)
             .expect("Deployment should succeed")
@@ -327,8 +326,8 @@ mod tests {
         let mut db = InMemoryDB::default();
         let mut state = State::builder().with_database(&mut db).build();
         // Activate Rex2 but not Rex5
-        let hardforks =
-            MegaHardforkConfig::default().with_all_activated().without(MegaHardfork::Rex5);
+        // A complete ladder topping out at Rex4: Rex2 reached, Rex5 not.
+        let hardforks = MegaHardforkConfig::default().with_all_activated_through(MegaSpecId::REX4);
 
         let result = transact_deploy_oracle_contract(&hardforks, 0, &mut state)
             .expect("Deployment should succeed")
@@ -374,8 +373,8 @@ mod tests {
 
         let mut state = State::builder().with_database(&mut db).build();
         // Rex2 active, Rex5 not active
-        let hardforks =
-            MegaHardforkConfig::default().with_all_activated().without(MegaHardfork::Rex5);
+        // A complete ladder topping out at Rex4: Rex2 reached, Rex5 not.
+        let hardforks = MegaHardforkConfig::default().with_all_activated_through(MegaSpecId::REX4);
 
         let result = transact_deploy_oracle_contract(&hardforks, 0, &mut state)
             .expect("Deployment should succeed")
@@ -499,8 +498,8 @@ mod tests {
 
         let mut state = State::builder().with_database(&mut db).build();
         // Rex2 active, Rex5 NOT active → pre-Rex5 path → old behaviour preserved.
-        let hardforks =
-            MegaHardforkConfig::default().with_all_activated().without(MegaHardfork::Rex5);
+        // A complete ladder topping out at Rex4: Rex2 reached, Rex5 not.
+        let hardforks = MegaHardforkConfig::default().with_all_activated_through(MegaSpecId::REX4);
 
         let result = transact_deploy_oracle_contract(&hardforks, 0, &mut state)
             .expect("Deployment should succeed")

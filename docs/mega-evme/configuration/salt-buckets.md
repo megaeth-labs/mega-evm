@@ -45,5 +45,5 @@ mega-evme tx \
 
 - Without any `--bucket-capacity` flags, all buckets default to the minimum size, which means storage operations incur zero storage gas.
 - This option is available in all commands (`run`, `tx`, and `replay`).
-- SALT-based dynamic gas pricing is active in MiniRex and later specs.
-  In `Equivalence` mode, bucket capacities have no effect.
+- SALT-based dynamic gas pricing is active from the MiniRex behavior onward.
+  In `Equivalence` mode — including the alias spec `MiniRex1`, which executes `Equivalence` behavior — bucket capacities have no effect.
