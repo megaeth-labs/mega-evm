@@ -9,6 +9,13 @@ name: On Release
 #   crates    — the four published crates to crates.io (replaces publish.yml)
 #   mega-evme — the CLI binary to the MegaETH artifact registry and, as a
 #               download for the public, to the GitHub Release page
+#
+# Rehearse on a tag ref (the environment below allows only v* tag refs):
+#   gh workflow run on-release.yml --ref vX.Y.Z -f tag=vX.Y.Z -f dry_run=true
+#
+# Credentials (CARGO_REGISTRY_TOKEN, GCP_AUTH_KEY) live in the `publish`
+# environment, whose deployment policy allows only v* tags: a job can read
+# them only when the run's ref is a release tag, never from a branch build.
 
 on:
   release:
@@ -37,6 +44,7 @@ jobs:
   crates:
     runs-on: ubuntu-24.04
     timeout-minutes: 40
+    environment: publish
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -66,6 +74,7 @@ jobs:
   mega-evme:
     runs-on: ubuntu-24.04
     timeout-minutes: 40
+    environment: publish
     permissions:
       contents: write # release-assets attaches to the Release
     steps:
