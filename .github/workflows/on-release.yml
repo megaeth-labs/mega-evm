@@ -30,6 +30,13 @@ on:
         type: boolean
         default: true
 
+# One run per tag: a release run and a dispatch on the same tag both end in
+# uploads (`--clobber` on Release assets), so overlapping runs would race.
+# Never cancel an upload mid-flight; queue instead.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 permissions:
   contents: read
 
@@ -102,21 +109,14 @@ jobs:
       - name: Build mega-evme
         run: cargo build --release --locked -p mega-evme
 
-      - name: Verify the binary reports the release version
-        run: |
-          set -euo pipefail
-          expected="mega-evme ${TAG#v}"
-          actual="$(target/release/mega-evme --version)"
-          if [[ "$actual" != "$expected" ]]; then
-            if [[ "$DRY_RUN" == "true" ]]; then
-              # A rehearsal reports what a real run would refuse, and carries on.
-              echo "::warning::built binary reports '$actual', expected '$expected' — a real release would stop here"
-            else
-              echo "::error::built binary reports '$actual', expected '$expected'; refusing to publish a mislabeled binary"
-              exit 1
-            fi
-          fi
-          echo "$actual"
+      # The built binary must report the tag's version (`mega-evme X.Y.Z`):
+      # a mismatch warns on a rehearsal and stops a release; a binary that
+      # cannot run stops both.
+      - uses: megaeth-labs/.github/.github/actions/release-verify-version@main
+        with:
+          command: target/release/mega-evme --version
+          version: ${{ env.TAG }}
+          dry_run: ${{ env.DRY_RUN }}
 
       - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
         with:
