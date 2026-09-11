@@ -18,6 +18,9 @@ mega-evme run 0x60016000526001601ff3 --trace
 By default, this uses the [opcode tracer](opcode-tracer.md).
 Use `--tracer` to pick a different tracer.
 
+When tracing is enabled, nested KeylessDeploy sandbox execution is included automatically: the inner CREATE and its child frames appear under the outer call to the KeylessDeploy system contract.
+No extra flag is required.
+
 ## Tracers
 
 | Tracer                          | `--tracer` value                | Description                                                            |
