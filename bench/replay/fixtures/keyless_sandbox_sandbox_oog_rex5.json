@@ -1,0 +1,81 @@
+{
+  "keyless_sandbox_sandbox_oog_rex5": {
+    "_info": {
+      "comment": "keyless sandbox corner case (sandbox_oog): inner gas limit 110000 clears the intrinsic cost but not the constructor: sandbox halts out of gas. Hand-built from mega_evm::test_utils::keyless, post filled offline with `state-test --fill --bench-spec Rex5`.",
+      "init_code": "0x7f00000000000000000000000000000000000000000000000000000000000000017f0000000000000000000000000000000000000000000000000000000000000000556001600060003960016000f3",
+      "inner_signer": "0x2bef1220c12c50f65b3169fe7b01e480738599af",
+      "deploy_address": "0xb07c71c732b5b216e6597892e846d7eb3b3f8887"
+    },
+    "env": {
+      "currentChainID": "0x10e6",
+      "currentCoinbase": "0x4200000000000000000000000000000000000011",
+      "currentDifficulty": "0x0",
+      "currentGasLimit": "0x2540be400",
+      "currentNumber": "0x735b75",
+      "currentTimestamp": "0x69858148",
+      "currentBaseFee": "0xf4240",
+      "currentRandom": "0x5ed22b2a6937705d6c9677f844729acf17d94ad1381c5bd88f3aa7ea2f178af6",
+      "currentExcessBlobGas": "0x0"
+    },
+    "pre": {
+      "0x2bef1220c12c50f65b3169fe7b01e480738599af": {
+        "balance": "0x3635c9adc5dea00000",
+        "code": "0x",
+        "nonce": "0x0",
+        "storage": {}
+      },
+      "0x7e5f4552091a69125d5dfcb7b8c2659029395bdf": {
+        "balance": "0x3635c9adc5dea00000",
+        "code": "0x",
+        "nonce": "0x0",
+        "storage": {}
+      }
+    },
+    "post": {
+      "Rex5": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0xfc73cfc650c0dba8251d962020325a6edb656fa57250d699fc3b37aeec5f346b",
+          "logs": "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347",
+          "megaGasUsed": 296708,
+          "megaStatus": "success"
+        }
+      ]
+    },
+    "transaction": {
+      "type": 2,
+      "data": [
+        "0x846365d50000000000000000000000000000000000000000000000000000000000000040000000000000000000000000000000000000000000000000000000000001adb000000000000000000000000000000000000000000000000000000000000000a3f8a18085174876e8008301adb08080b84f7f00000000000000000000000000000000000000000000000000000000000000017f0000000000000000000000000000000000000000000000000000000000000000556001600060003960016000f31ba02222222222222222222222222222222222222222222222222222222222222222a022222222222222222222222222222222222222222222222222222222222222220000000000000000000000000000000000000000000000000000000000"
+      ],
+      "gasLimit": [
+        "0x1e8480"
+      ],
+      "gasPrice": null,
+      "nonce": "0x0",
+      "secretKey": "0x0000000000000000000000000000000000000000000000000000000000000001",
+      "sender": "0x7e5f4552091a69125d5dfcb7b8c2659029395bdf",
+      "to": "0x6342000000000000000000000000000000000003",
+      "value": [
+        "0x0"
+      ],
+      "maxFeePerGas": "0x1e8481",
+      "maxPriorityFeePerGas": "0x1",
+      "initcodes": null,
+      "accessLists": [
+        []
+      ],
+      "authorizationList": null,
+      "blobVersionedHashes": [],
+      "maxFeePerBlobGas": null
+    },
+    "out": "0x000000000000000000000000000000000000000000000000000000000001adb0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000600000000000000000000000000000000000000000000000000000000000000024de972b6e000000000000000000000000000000000000000000000000000000000001adb000000000000000000000000000000000000000000000000000000000",
+    "megaEnv": {
+      "bucketCapacities": [],
+      "oracleStorage": []
+    }
+  }
+}
