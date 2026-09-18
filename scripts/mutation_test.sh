@@ -8,6 +8,10 @@
 #
 # Results land in $OUT_DIR/mutants.out/ (missed.txt, caught.txt, outcomes.json).
 # Run scripts/mutation_gate.py afterwards to score + gate the run.
+#
+# MUTANTS_SHARD=k/n runs only shard k (0-based) of n of whichever mutant set the
+# subcommand selects (cargo-mutants' own --shard), for a diff too large for one
+# job; give each shard its own OUT_DIR and gate each one. See REVIEW.md.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -35,6 +39,9 @@ fi
 EXCLUDE_ARGS=()
 [[ -n "$exclude_re_output" ]] && mapfile -t EXCLUDE_ARGS <<< "$exclude_re_output"
 
+SHARD_ARGS=()
+[[ -n "${MUTANTS_SHARD:-}" ]] && SHARD_ARGS=(--shard "$MUTANTS_SHARD")
+
 run_mutants() {
     rm -rf "$OUT_DIR"
     mkdir -p "$(dirname "$OUT_DIR")" # cargo-mutants creates OUT_DIR itself but not its parents
@@ -49,6 +56,7 @@ run_mutants() {
         --no-shuffle \
         -vV \
         "${EXCLUDE_ARGS[@]}" \
+        "${SHARD_ARGS[@]}" \
         "$@" || rc=$?
 
     # cargo-mutants exit codes (https://mutants.rs/exit-codes.html): 0 = all caught,
