@@ -179,3 +179,20 @@ file = "crates/mega-evm/src/external/hasher/fallback.rs"
 mutant = "replace > with >= in <impl core::hash::Hasher for DeterministicHasher>::write"
 justification = "Equivalent (line 109 `> 16`): the > vs >= boundary only differs at len == 16, where both the mid branch (front | (back<<64)) and the large branch (read_last_u128, with no loop pass since 16 is not > 16) feed the identical le_u128(bytes[0..16]) to a single large_update. Same buffer, same bucket id; no input distinguishes them. The line-108 and line-112 mutants sharing this text are non-equivalent and are caught by the len-8 / len-32 tests."
 reviewer = "improve-mutation-score (William Aaron Cheung)"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# crates/mega-evm/src/evm/ survivors.
+
+# --- From<MegaSpecId> for EthSpecId (equivalent while revm's default is Osaka) -----
+# `MegaSpecId` has the single variant SATIN, which maps to OSAKA. revm 40's
+# `SpecId::default()` is also OSAKA, so the `Default::default()` mutant returns the
+# same value for every input. A line entry keeps the mutant generated: once a revm
+# upgrade moves the default, `test_all_specs_map_to_karst_and_osaka` kills it and this
+# entry becomes a no-op.
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "crates/mega-evm/src/evm/spec.rs"
+mutant = "replace <impl From<MegaSpecId> for EthSpecId>::from -> Self with Default::default()"
+justification = "Equivalent: the only MegaSpecId (SATIN) maps to EthSpecId::OSAKA, which is revm 40.0.3's SpecId::default(), so Default::default() returns the same value on every input."
+reviewer = "T2.1 author; to be confirmed in the Satin wave-1 PR review"

@@ -339,6 +339,13 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_modify_chain_edits_the_l1_block_info() {
+        let mut ctx = MegaContext::new(EmptyDB::default(), MegaSpecId::SATIN);
+        ctx.modify_chain(|chain| chain.l2_block = Some(U256::from(42)));
+        assert_eq!(ctx.chain().l2_block, Some(U256::from(42)));
+    }
+
     /// The external environments given at construction are the ones the context exposes.
     #[test]
     fn test_new_with_ext_envs_builds_over_configurable_env() {

@@ -362,9 +362,17 @@ mod tests {
         let result = InspectEvm::inspect_one_tx(&mut evm, tx(U256::ZERO)).unwrap();
         assert!(result.is_success());
 
+        // The arena starts with one placeholder root node; the call fills it in.
         let traces = evm.inspector().traces();
         assert_eq!(traces.nodes().len(), 1, "one call frame");
         assert_eq!(traces.nodes()[0].trace.address, CALLEE);
+
+        // A fresh inspector replaces the one that recorded the call.
+        InspectEvm::set_inspector(
+            &mut evm,
+            TracingInspector::new(TracingInspectorConfig::default_parity()),
+        );
+        assert_eq!(evm.inspector().traces().nodes()[0].trace.address, Address::ZERO);
     }
 
     #[test]
