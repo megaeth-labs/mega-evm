@@ -55,3 +55,8 @@ std = [
     "revm/std",
 ]
 test-utils = ["dep:derive_more"]
+
+# T2.2 rebuilds the benchmark suite on Satin; until then `transact` is the only target.
+[[bench]]
+name = "transact"
+harness = false
