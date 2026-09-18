@@ -125,7 +125,7 @@ Every later mechanism plugs into these; a change to one comes back to this layer
   Every other opcode runs revm's instruction unwrapped, and the static gas table is revm's.
 - **Write records.**
   One 40-byte record per account or storage write: a slot's first change in the transaction (taken back on write-back to the original value), a value transfer's sender and recipient, a creation's creator nonce and created account, a `SELFDESTRUCT` moving value to another account, an applied EIP-7702 authority, the transaction's value recipient or created account.
-  The sender's own account is part of the transaction body.
+  The sender's own account is part of the transaction body: it is never a record, and a frame running as the sender (through an EIP-7702 delegation) counts it as recorded.
   Records are deduplicated per frame (a frame's account is recorded once) and live on the frame's lane: a success merges the lane into the caller's, a failure discards it; a creator's nonce record survives the creation's failure once the nonce was bumped.
   The KV count a node reports is the write-record count.
 - **Lanes stay aligned with frames.**
@@ -133,7 +133,9 @@ Every later mechanism plugs into these; a change to one comes back to this layer
 - **The latch.**
   A transaction-level limit stops the transaction with a revert, never a halt: the frame that crosses it reverts with `MegaLimitExceeded(uint8 kind, uint64 limit)`, the transaction is latched (`AdditionalLimit::latch`), no caller resumes (`before_frame_run`), no frame starts, every result returned above is rewritten to the stop, and the outermost frame settles like an EIP-8037 revert, its unspent regular gas and the reservoir back to the sender.
   A frame budget reverts its frame alone, without a latch.
-  A real out-of-gas, a precompile out-of-gas and an invalid opcode still halt and burn.
+  A limit is enforced before the writes it guards: a frame whose start would cross it is answered with the stop before revm builds it (a creation still bumps its creator's nonce, so a stopped creation transaction cannot be replayed), and EIP-7702 authorities whose records would cross it are taken back before the first frame.
+  A real out-of-gas, a precompile out-of-gas and an invalid opcode still halt and burn; an out-of-gas before the first frame takes back what pre-execution counted.
+  The layer's state belongs to one transaction: every entry point of `MegaEvm` resets it before it runs the handler.
   The outcome's `limit_exceeded`, not the output, tells a stop from a contract reverting with the same bytes.
 - **Synthetic frame results carry the caller's pools.**
   A result built without running a frame is a `synthetic_frame_result`: gas untouched with the inherited reservoir (`untouched_call_gas`, `with_pools_of`), never `Gas::new(limit)`, and the calling opcode's upfront state-gas flags, so it settles exactly like revm's own (`settle_frame_result`).

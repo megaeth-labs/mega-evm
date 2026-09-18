@@ -236,8 +236,14 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
     ///    answers the frame with the stop before it runs;
     /// 6. revm builds the frame.
     ///
+    /// Steps 1 and 2 are the pre-frame check: they answer a frame nothing may start. The frame's
+    /// own writes are counted after the interceptor and the rewrite, because the rewrite decides
+    /// which frame starts (a keyless deployment becomes a creation) and an intercepted frame's
+    /// writes are the interceptor's to count.
+    ///
     /// A frame answered before revm builds it gets an empty lane, so the lanes stay aligned with
-    /// the results [`frame_return_result`](EvmTr::frame_return_result) pops.
+    /// the results [`frame_return_result`](EvmTr::frame_return_result) pops. A creation answered
+    /// with a stop still bumps its creator's nonce, as one that starts and reverts does.
     #[inline]
     fn frame_init(
         &mut self,
