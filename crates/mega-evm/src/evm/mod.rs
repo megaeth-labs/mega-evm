@@ -31,12 +31,12 @@ use revm::{
 use crate::{EmptyExternalEnv, ExternalEnvTypes, MegaTransaction, MegaTransactionError};
 
 /// The instruction table of the Satin engine.
-pub type MegaInstructions<DB, ExtEnvs> = EthInstructions<EthInterpreter, MegaContext<DB, ExtEnvs>>;
+pub(crate) type MegaInstructions<DB, ExtEnvs> = EthInstructions<EthInterpreter, MegaContext<DB, ExtEnvs>>;
 
 /// The op-revm EVM a [`MegaEvm`] wraps.
 ///
 /// It runs op-revm's precompile set for the base spec; T3.1 replaces it with the Satin set.
-pub type MegaInnerEvm<DB, INSP, ExtEnvs> =
+pub(crate) type MegaInnerEvm<DB, INSP, ExtEnvs> =
     OpEvm<MegaContext<DB, ExtEnvs>, INSP, MegaInstructions<DB, ExtEnvs>, OpPrecompiles>;
 
 /// The Satin EVM.
@@ -82,7 +82,7 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
     }
 
     /// Consumes the EVM and returns the op-revm EVM it wraps.
-    pub fn into_inner(self) -> MegaInnerEvm<DB, INSP, ExtEnvs> {
+    pub(crate) fn into_inner(self) -> MegaInnerEvm<DB, INSP, ExtEnvs> {
         self.inner
     }
 }
@@ -185,6 +185,11 @@ where
     type HaltReason = OpHaltReason;
     type Spec = MegaSpecId;
     type BlockEnv = BlockEnv;
+    /// op-revm's precompile set for the base spec.
+    ///
+    /// Provisional: the Satin precompile provider replaces this type when it lands, and code that
+    /// names `OpPrecompiles` through this associated type has no source-compatibility promise
+    /// across that change.
     type Precompiles = OpPrecompiles;
     type Inspector = INSP;
 
@@ -222,7 +227,7 @@ where
     }
 
     fn finish(self) -> (Self::DB, EvmEnv<Self::Spec, Self::BlockEnv>) {
-        let (db, cfg_env, block_env) = self.inner.0.ctx.into_parts();
+        let (db, cfg_env, block_env) = self.into_inner().0.ctx.into_parts();
         (db, EvmEnv { cfg_env, block_env })
     }
 

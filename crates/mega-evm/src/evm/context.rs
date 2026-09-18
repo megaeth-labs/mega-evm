@@ -20,7 +20,7 @@ use crate::{
 
 /// The revm context the Satin engine runs on: op-revm's context shape with the `MegaETH`
 /// transaction type.
-pub type MegaInnerContext<DB> =
+pub(crate) type MegaInnerContext<DB> =
     Context<BlockEnv, MegaTransaction, CfgEnv<OpSpecId>, DB, Journal<DB>, L1BlockInfo>;
 
 /// Execution context of the Satin engine.

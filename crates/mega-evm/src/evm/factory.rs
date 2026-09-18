@@ -53,6 +53,11 @@ impl<ExtEnvFactory: ExternalEnvFactory> alloy_evm::EvmFactory for MegaEvmFactory
     type HaltReason = OpHaltReason;
     type Spec = MegaSpecId;
     type BlockEnv = BlockEnv;
+    /// op-revm's precompile set for the base spec.
+    ///
+    /// Provisional: the Satin precompile provider replaces this type when it lands, and code that
+    /// names `OpPrecompiles` through this associated type has no source-compatibility promise
+    /// across that change.
     type Precompiles = OpPrecompiles;
 
     /// Creates an EVM for the block in `evm_env`, with the external environments of that block.
