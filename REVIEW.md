@@ -75,6 +75,57 @@ This is the single most important correctness concern in mega-evm.
   The fixture runners have failed this repeatedly: an exception assertion accepting any `Err`, a setup failure skipping execution, a `zip` letting missing output pass, a duplicate test name silently overwriting, an `unwrap_or(default)` rewriting a contradictory fixture into a valid one, a filename-based skip, an unconditional prune before state-root validation.
   Benchmarks fail it the same way — an unfunded inner call, zero-byte initcode, a discarded inner-call result or an undeployed address means the measured path never runs, and a mock database that cannot fail a lookup cannot test its error path.
 
+## Test gates
+
+These checks guard every change to the Satin engine.
+`lint`, `test`, `no-std` and `require-label` are the required checks on `satin`; the rest inform the review, and the reviewer reads them.
+
+### Differential harness
+
+- `crates/mega-differential` runs every scenario of its corpus (343 today: 23 hand-written, 263 derived from the execution-spec tests of EIP-8037, 57 written for the harness) through `MegaEvm` and through stock revm 43, and compares every gas figure, the outcome, the output, the logs and every touched account.
+- The `differential` check (`.github/workflows/differential.yml`) runs it on every pull request and every push to `satin`; it must pass with no unexplained difference and no stale registry effect.
+- A change that makes `MegaEvm` differ from revm 43 on purpose adds the effects to `crates/mega-differential/deviations.json` (mechanism, reason, exact values), or configures the oracle to model the mechanism.
+  Review a registry change like a spec change: an effect wider than its mechanism (a `*` where an exact value fits, a scenario pattern of `*` for a mechanism a few scenarios reach) hides the next regression.
+- A change that removes a difference removes its effect; the harness fails on an effect that explains nothing.
+
+### Execution-spec tests
+
+- Engine-level execution-spec coverage on `MegaEvm` is the 263 execution-spec-derived scenarios of the differential harness, until the state-test tool is ported to Satin.
+- `.github/workflows/exec-spec.yml` runs the fork's own runner on the execution-spec-test fixtures, at the fork tag `Cargo.lock` pins, and checks the Osaka and Amsterdam executed and skipped counts pinned in the workflow.
+  It checks the fork `MegaEvm` runs on, not `MegaEvm`, and it is not a required check.
+- It runs when `Cargo.toml` or `Cargo.lock` changes (the pin may have moved); a change that moves the pin updates the pinned counts and says why they moved.
+
+### Instruction counts (CodSpeed)
+
+- The bench set is `transact` (`MegaEvm` next to op-revm's `OpEvm`), `corpus` (a slice of the differential corpus through `MegaEvm`) and `factory` (EVM construction through `MegaEvmFactory`), all in `crates/mega-evm/benches`.
+- `codspeed.yml` runs them under instrumentation on every pull request that touches code and on every push to `satin`; the baseline a pull request is compared with is the latest `satin` push.
+- Read regressions from the CodSpeed report on the pull request (the CodSpeed comment and the `CodSpeed Performance Analysis` check).
+  The regression threshold that fails that check is a setting of the repository's CodSpeed project; it is not recorded in this repository or in the reports CodSpeed posts, so this file does not state a number.
+  The check is not required: a flagged regression is fixed, or acknowledged in CodSpeed with the reason stated on the pull request.
+- `corpus` moves when the semantics or the pricing of its scenarios move; a pricing change that moves it says so on the pull request.
+- Locally, `cargo bench -p mega-evm --bench <target>` proves a bench runs to completion; its wall-clock numbers are not evidence.
+
+### Mutation testing
+
+- The `cargo-mutants gate` job mutates the lines a pull request changes and fails on a surviving mutant that no reviewed suppression covers.
+  Reference point, the pull request that brought the Satin skeleton: 115 mutants, 49 caught, 0 survived, 1 suppressed, 65 unviable, in 7m41s on CI and 4m12s on a 15-core laptop with `JOBS=8`.
+- The job is bounded to 330 minutes.
+  Shard a series whose diff lists more than 1,000 mutants (`cargo mutants --list --in-diff <diff> --package mega-evm`): at the reference rate that is about an hour, and the rate falls as the test suite grows.
+  Run shard `k` of `n` with `MUTANTS_SHARD=k/n OUT_DIR=target/mutants-k scripts/mutation_test.sh diff <base>` and gate each shard with `scripts/mutation_gate.py report`; the pull request that first needs it adds a shard matrix to the job, and every shard must pass.
+- The spec-gate operator pack stays in place but finds nothing on Satin: a single-spec engine has no spec gate to mutate, and the suppression-hygiene job accepts the empty plan.
+  It starts to bite with the first `is_enabled` gate of the spec after Satin.
+- The legacy mutant killers were retired with the legacy sources; a survivor in Satin code gets a new killer, next to the code or under `crates/mega-evm/tests/mutation/`.
+
+### Scheduled workflows
+
+- GitHub fires a `schedule` trigger only from the default branch's copy of a workflow, so the schedules in `satin`'s copies (nightly mutation, weekly benchmark, replay-bench, doc-audit, the weekly execution-spec run) stay inert until `satin` is the default branch.
+- Run them on `satin` by hand: `gh workflow run <workflow>.yml --ref satin` runs `satin`'s copy of the workflow on `satin`'s head, so none of them needs a `ref` input.
+  - `mutation.yml`: the whole-crate cargo-mutants run, the spec-gate sweep and suppression hygiene.
+  - `benchmark.yml`: the Satin bench set on `satin`'s head, without a baseline (`-f aa_check=true` measures the noise floor).
+  - `exec-spec.yml`: the execution-spec fixtures at the pinned fork tag.
+  - `doc-audit.yml`: the documentation audit of `satin`'s docs.
+  - `replay-bench.yml`: nothing yet; its bench job is disabled on `satin` until the state-test tool is ported.
+
 ## Dev tools and test infrastructure
 
 Applies to `bin/mega-evme`, `bin/mega-t8n`, `crates/mega-state-test`, `crates/state-test`, test utilities and benches — not consensus code, but `mega-state-test` is a published library and tool output feeds fixtures and indexers. Default severity cap `[Minor]`; raise only when the defect reaches that published API or corrupts a downstream fixture.

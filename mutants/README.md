@@ -12,7 +12,7 @@ Target: **`crates/mega-evm`**.
 |------|---------|
 | `.cargo/mutants.toml` | Canonical `cargo-mutants` config (scope, nextest, excludes, timeouts). |
 | `mutants/suppressions.toml` | Reviewed equivalent / dead-code mutants excluded from gating. |
-| `scripts/mutation_test.sh` | Driver: `diff <base>`, `full`, `file <glob>`. |
+| `scripts/mutation_test.sh` | Driver: `diff <base>`, `full`, `file <glob>`; `MUTANTS_SHARD=k/n` runs one shard. |
 | `scripts/mutation_gate.py` | Scores a run, applies suppressions, gates the PR. |
 | `.github/workflows/mutation.yml` | Diff-scoped PR gate + result comment. |
 
@@ -26,7 +26,13 @@ python3 scripts/mutation_gate.py report --results target/mutants/mutants.out \
 
 # One subsystem while iterating:
 scripts/mutation_test.sh file 'crates/mega-evm/src/limit/**'
+
+# Shard k of n of a large run (cargo-mutants' --shard), each into its own directory:
+MUTANTS_SHARD=0/4 OUT_DIR=target/mutants-0 scripts/mutation_test.sh diff origin/main
 ```
+
+The driver needs bash 4 or later and Python 3.11 or later on `PATH`; with the macOS defaults (bash 3.2, Python 3.9) it fails before mutating anything.
+When to shard is in `REVIEW.md` (Test gates, Mutation testing).
 
 ## The gate
 
