@@ -6,6 +6,7 @@ mod equivalence;
 mod inspector;
 mod outcome;
 mod state;
+mod static_callee;
 mod strategic_stop;
 mod synthetic_frame_gas;
 mod write_records;

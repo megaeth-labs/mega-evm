@@ -108,8 +108,8 @@ A scenario keeps the transaction of its test; the assertions on compute gas (not
 | `rex6/error_paths.rs` | `test_rex6_create2_missing_length_stack_underflow` | `create2_missing_length` |
 | `rex6/error_paths.rs` | `test_rex6_create2_missing_offset_stack_underflow` | `create2_missing_offset` |
 
-The halt reason of a static callee is still owed, not discharged: 6 of these rows asserted it, and a scenario cannot, because the harness compares what the transaction reports and the inner frame's halt reason is not part of that.
-It becomes assertable with the common execution layer, which defines the frame outcome, and inspector support, which reaches an inner frame as it ends; whichever lands first re-adds the assertions next to its own tests.
+6 of these rows also asserted the halt reason of a static callee, which a scenario cannot compare: the harness compares what the transaction reports, and the inner frame's halt reason is not part of that.
+The common execution layer re-added those assertions in `tests/satin/static_callee.rs`, where they read the halt reason off the callee's frame outcome as its caller receives it.
 
 ## Tests ported by the common execution layer
 
