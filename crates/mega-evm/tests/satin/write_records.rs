@@ -660,3 +660,155 @@ fn test_runtime_out_of_gas_after_authorities_keeps_no_record() {
         "the out-of-gas took the delegation back"
     );
 }
+
+/* ---------- which frame's account counts as recorded ---------- */
+
+const D: Address = address!("00000000000000000000000000000000000000D1");
+
+/// A child that received value records its own account then: its own value transfers do not
+/// record it again.
+#[test]
+fn test_value_receiving_child_records_itself_once() {
+    let a =
+        append_value_call(BytecodeBuilder::default(), CONTRACT, 1).append(POP).append(STOP).build();
+    let b = append_value_call(BytecodeBuilder::default(), CONTRACT2, 1)
+        .append(POP)
+        .append(STOP)
+        .build();
+    let db = funded().account_code(CALLEE, a).account_code(CONTRACT, b);
+    let (result, usage) = run(db, call(CALLER, CALLEE, U256::ZERO, GAS_LIMIT));
+    assert!(result.result.is_success());
+    assert_eq!(result.state[&CONTRACT2].info.balance, U256::from(1));
+    assert_eq!(usage, records(3), "CALLEE, CONTRACT once, CONTRACT2");
+}
+
+/// A child that received nothing starts with its own account unrecorded, whatever its caller's
+/// state.
+#[test]
+fn test_zero_value_child_starts_unrecorded() {
+    let a = BytecodeBuilder::default()
+        .append_many([PUSH0, PUSH0, PUSH0, PUSH0, PUSH0])
+        .push_address(CONTRACT)
+        .append(GAS)
+        .append(CALL)
+        .append(POP)
+        .stop()
+        .build();
+    let b = append_value_call(BytecodeBuilder::default(), CONTRACT2, 1)
+        .append(POP)
+        .append(STOP)
+        .build();
+    let db = funded()
+        .account_code(CALLEE, a)
+        .account_code(CONTRACT, b)
+        .account_balance(CONTRACT, U256::from(5));
+    let (result, usage) = run(db, call(CALLER, CALLEE, U256::from(1), GAS_LIMIT));
+    assert!(result.result.is_success());
+    assert_eq!(usage, records(3), "CALLEE as the recipient, CONTRACT, CONTRACT2");
+}
+
+/// Calls `D` with `DELEGATECALL`.
+fn delegate_to_d() -> Bytes {
+    BytecodeBuilder::default()
+        .append_many([PUSH0, PUSH0, PUSH0, PUSH0])
+        .push_address(D)
+        .append(GAS)
+        .append(revm::bytecode::opcode::DELEGATECALL)
+        .append(POP)
+        .stop()
+        .build()
+}
+
+/// A `DELEGATECALL` runs as its caller's account, and inherits whether that account is recorded.
+#[test]
+fn test_delegatecall_child_inherits_the_frame_account_record() {
+    let d = append_value_call(BytecodeBuilder::default(), CONTRACT2, 1)
+        .append(POP)
+        .append(STOP)
+        .build();
+    let db = funded().account_code(CALLEE, delegate_to_d()).account_code(D, d);
+    let (result, usage) = run(db, call(CALLER, CALLEE, U256::from(1), GAS_LIMIT));
+    assert!(result.result.is_success());
+    assert_eq!(result.state[&CONTRACT2].info.balance, U256::from(1), "CALLEE's value moved");
+    assert_eq!(usage, records(2), "CALLEE as the recipient, CONTRACT2");
+}
+
+/// A created frame's account is recorded by the creation; a `DELEGATECALL` from its init code
+/// inherits that.
+#[test]
+fn test_created_frame_delegatecall_inherits_the_created_account_record() {
+    let d = append_value_call(BytecodeBuilder::default(), CONTRACT2, 1)
+        .append(POP)
+        .append(STOP)
+        .build();
+    let db = funded().account_code(D, d);
+    let tx = {
+        let mut tx = create(CALLER, delegate_to_d(), GAS_LIMIT);
+        tx.0.base.value = U256::from(5);
+        tx
+    };
+    let (result, usage) = run(db, tx);
+    assert!(result.result.is_success(), "{:?}", result.result);
+    assert_eq!(result.state[&CONTRACT2].info.balance, U256::from(1));
+    assert_eq!(usage, records(2), "the created account, CONTRACT2");
+}
+
+/// A transaction calling its own sender (delegated) counts the sender as recorded from the start.
+#[test]
+fn test_top_level_self_call_counts_the_sender_as_recorded() {
+    let sender_code = append_value_call(BytecodeBuilder::default(), CONTRACT2, 1)
+        .append(POP)
+        .append(STOP)
+        .build();
+    let mut db = funded().account_code(CONTRACT, sender_code);
+    let delegation = revm::state::Bytecode::new_eip7702(CONTRACT);
+    let account = db.load_account(CALLER).unwrap();
+    account.info.code_hash = delegation.hash_slow();
+    account.info.code = Some(delegation);
+    let (result, usage) = run(db, call(CALLER, CALLER, U256::ZERO, GAS_LIMIT));
+    assert!(result.result.is_success(), "{:?}", result.result);
+    assert_eq!(result.state[&CONTRACT2].info.balance, U256::from(1));
+    assert_eq!(usage, records(1), "CONTRACT2 only");
+}
+
+/// Answers every call to `CONTRACT` itself.
+struct AnswerContract;
+
+impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for AnswerContract {
+    fn call(
+        &mut self,
+        _context: &mut MegaContext<DB>,
+        inputs: &mut revm::interpreter::CallInputs,
+    ) -> Option<revm::interpreter::CallOutcome> {
+        (inputs.target_address == CONTRACT).then(|| {
+            revm::interpreter::CallOutcome::new(
+                revm::interpreter::InterpreterResult::new(
+                    revm::interpreter::InstructionResult::Stop,
+                    Bytes::new(),
+                    revm::interpreter::Gas::new(inputs.gas_limit),
+                ),
+                inputs.return_memory_offset.clone(),
+            )
+        })
+    }
+}
+
+/// A call an inspector answers gets an empty lane of its own, so its caller's lane is intact for
+/// what the caller does next.
+#[test]
+fn test_inspector_answered_call_keeps_the_caller_lane() {
+    let a = BytecodeBuilder::default()
+        .append_many([PUSH0, PUSH0, PUSH0, PUSH0, PUSH0])
+        .push_address(CONTRACT)
+        .append(GAS)
+        .append(CALL)
+        .append(POP);
+    let a = append_value_call(a, CONTRACT2, 1).append(POP).append(STOP).build();
+    let mut evm =
+        MegaEvm::new(context(funded().account_code(CALLEE, a))).with_inspector(AnswerContract);
+    let result =
+        alloy_evm::Evm::transact_raw(&mut evm, call(CALLER, CALLEE, U256::ZERO, GAS_LIMIT))
+            .unwrap();
+    assert!(result.result.is_success());
+    assert_eq!(evm.ctx().additional_limit().usage(), records(2), "CALLEE and CONTRACT2");
+}

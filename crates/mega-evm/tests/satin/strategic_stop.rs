@@ -311,6 +311,8 @@ fn test_cap_crossed_before_the_first_frame_reverts_without_running() {
     assert!(evm.inspector().steps.is_empty(), "the recipient's code never ran");
     assert_eq!(result.state.get(&B).map(|b| b.info.balance).unwrap_or_default(), U256::ZERO);
 
+    assert_eq!(evm.ctx().additional_limit().usage(), mega_evm::LimitUsage::ZERO, "nothing kept");
+
     let (empty_call, _) = run(funded(), cap(u64::MAX), call(CALLER, B, U256::from(5), GAS_LIMIT));
     assert!(empty_call.result.is_success());
     assert_eq!(result.result.gas().tx_gas_used(), empty_call.result.gas().tx_gas_used());
@@ -424,4 +426,20 @@ fn test_create_transaction_stopped_before_its_first_frame_bumps_the_nonce() {
     let tx = crate::common::create(CALLER, writer(), 1_000_000_000);
     let (result, _) = run(MemoryDatabase::default(), cap(39), tx);
     assert_eq!(result.result.gas().reservoir_remaining(), 1_000_000_000 - TX_GAS_LIMIT_CAP);
+}
+
+/// A limit is crossed by usage above it: usage equal to the limit does not stop a transaction or
+/// a frame.
+#[test]
+fn test_usage_equal_to_the_limit_does_not_stop() {
+    // A writes three slots: 120 bytes.
+    let db = || MemoryDatabase::default().account_code(A, writer());
+    let (result, latched) = run(db(), cap(120), call(CALLER, A, U256::ZERO, GAS_LIMIT));
+    assert!(result.result.is_success(), "{:?}", result.result);
+    assert_eq!(latched, None);
+    let budget = EvmTxRuntimeLimits::no_limits().with_frame_data_size_limit(120);
+    let (result, _) = run(db(), budget, call(CALLER, A, U256::ZERO, GAS_LIMIT));
+    assert!(result.result.is_success(), "{:?}", result.result);
+    let (result, _) = run(db(), cap(119), call(CALLER, A, U256::ZERO, GAS_LIMIT));
+    assert_stopped(&result.result, LimitKind::DataSize, 119);
 }
