@@ -1,7 +1,6 @@
 //! Tests for `Rex5` hardfork features.
 
 mod apply_pending_changes_gas_budget;
-mod call_too_deep_guard;
 mod callcode_storage_gas;
 mod db_error;
 mod deposit_caller_accounting;

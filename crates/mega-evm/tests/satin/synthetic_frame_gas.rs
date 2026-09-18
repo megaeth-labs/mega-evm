@@ -2,7 +2,9 @@
 //! inherited and settle like revm's own.
 
 use alloy_primitives::{address, Address, Bytes, U256};
-use mega_evm::{test_utils::MemoryDatabase, MegaEvm};
+use mega_evm::{
+    constants::TX_GAS_LIMIT_CAP, test_utils::MemoryDatabase, EvmTxRuntimeLimits, LimitKind, MegaEvm,
+};
 use revm::{
     context::{ContextTr, JournalTr},
     handler::{EvmTr, FrameResult, ItemOrResult},
@@ -16,7 +18,7 @@ use revm::{
     Inspector,
 };
 
-use crate::common::context;
+use crate::common::{call, context};
 
 const CALLER: Address = address!("0000000000000000000000000000000000300010");
 const TARGET: Address = address!("0000000000000000000000000000000000300001");
@@ -122,4 +124,42 @@ fn test_inspect_frame_init_depth_guard_overrides_inspector() {
         (1, 1),
         "call and call_end pair"
     );
+}
+
+/// A latched transaction's frame is answered with the stop, even past the call-stack limit: the
+/// latch is checked first, and its answer carries the reservoir too.
+#[test]
+fn test_exceeded_tx_limit_wins_over_call_too_deep() {
+    let mut evm = MegaEvm::new(context(MemoryDatabase::default()));
+    let stop = evm.ctx_mut().additional_limit_mut().latch(LimitKind::KVUpdate, 0, 1);
+    let result = EvmTr::frame_init(&mut evm, call_frame_init(CALL_STACK_LIMIT as usize + 1))
+        .expect("frame_init does not fail");
+    let ItemOrResult::Result(FrameResult::Call(outcome)) = result else {
+        panic!("a latched transaction's frame is answered");
+    };
+    assert_eq!(outcome.result.result, InstructionResult::Revert, "the stop, not CallTooDeep");
+    assert_eq!(outcome.result.output, stop.revert_data());
+    assert_eq!(outcome.result.gas.remaining(), GAS_LIMIT);
+    assert_eq!(outcome.result.gas.reservoir(), RESERVOIR);
+}
+
+/// A first frame answered with the stop before it runs gives the whole reservoir back, and costs
+/// the same at a gas limit under the execution cap and far above it.
+#[test]
+fn test_stopped_first_frame_keeps_the_reservoir_at_any_gas_limit() {
+    let at = |gas_limit: u64| {
+        let db = MemoryDatabase::default().account_balance(CALLER, U256::from(1_000));
+        let limits = EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(0);
+        let mut evm = MegaEvm::new(context(db).with_tx_runtime_limits(limits));
+        let result =
+            alloy_evm::Evm::transact_raw(&mut evm, call(CALLER, TARGET, U256::from(1), gas_limit))
+                .unwrap();
+        assert!(!result.result.is_success() && !result.result.is_halt(), "{:?}", result.result);
+        *result.result.gas()
+    };
+    let (small, large) = (at(100_000_000), at(1_000_000_000));
+    assert_eq!(small.reservoir_remaining(), 0);
+    assert_eq!(large.reservoir_remaining(), 1_000_000_000 - TX_GAS_LIMIT_CAP);
+    assert_eq!(small.tx_gas_used(), large.tx_gas_used());
+    assert_eq!(small.state_gas_spent_final(), large.state_gas_spent_final());
 }

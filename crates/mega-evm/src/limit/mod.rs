@@ -41,6 +41,44 @@ pub struct LimitUsage {
     pub write_records: u64,
 }
 
+/// Limits the common execution layer enforces on one transaction, for exercising the abort
+/// protocol before the mechanisms that own the limits land. Both default to unlimited.
+///
+/// The data-size limit replaces them with its own limit and per-frame budget rule.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct EvmTxRuntimeLimits {
+    /// The most data-size bytes the transaction may keep. Crossing it stops the transaction.
+    pub tx_data_size_limit: u64,
+    /// The most data-size bytes one frame may keep, children included, and never more than
+    /// what its caller has left. Crossing it reverts the frame alone.
+    pub frame_data_size_limit: u64,
+}
+
+impl Default for EvmTxRuntimeLimits {
+    fn default() -> Self {
+        Self::no_limits()
+    }
+}
+
+impl EvmTxRuntimeLimits {
+    /// No limit at all.
+    pub const fn no_limits() -> Self {
+        Self { tx_data_size_limit: u64::MAX, frame_data_size_limit: u64::MAX }
+    }
+
+    /// Sets the transaction's data-size limit.
+    pub const fn with_tx_data_size_limit(mut self, limit: u64) -> Self {
+        self.tx_data_size_limit = limit;
+        self
+    }
+
+    /// Sets the per-frame data-size budget.
+    pub const fn with_frame_data_size_limit(mut self, limit: u64) -> Self {
+        self.frame_data_size_limit = limit;
+        self
+    }
+}
+
 /// One write record.
 pub(crate) const WRITE_RECORD: LimitUsage =
     LimitUsage { data_size: WRITE_RECORD_SIZE, write_records: 1 };

@@ -9,8 +9,8 @@ use revm::{
 };
 
 use crate::{
-    constants, AdditionalLimit, EmptyExternalEnv, ExternalEnvTypes, ExternalEnvs, MegaSpecId,
-    MegaTransaction,
+    constants, AdditionalLimit, EmptyExternalEnv, EvmTxRuntimeLimits, ExternalEnvTypes,
+    ExternalEnvs, MegaSpecId, MegaTransaction,
 };
 
 /// The revm context the Satin engine runs on: op-revm's context shape with the `MegaETH`
@@ -109,9 +109,22 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
         &self.external_envs
     }
 
+    /// Enforces `limits` on every transaction from now on.
+    pub fn with_tx_runtime_limits(mut self, limits: EvmTxRuntimeLimits) -> Self {
+        self.additional_limit.set_limits(limits);
+        self
+    }
+
     /// The common execution layer's state for the running (or last) transaction.
     pub const fn additional_limit(&self) -> &AdditionalLimit {
         &self.additional_limit
+    }
+
+    /// The common execution layer's state, mutably. For tests and tools that drive the abort
+    /// protocol directly.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub const fn additional_limit_mut(&mut self) -> &mut AdditionalLimit {
+        &mut self.additional_limit
     }
 
     /// Prepares the common execution layer for a new transaction or system call.

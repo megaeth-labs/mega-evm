@@ -21,22 +21,25 @@ use revm::{
     context_interface::{cfg::gas::GasTracker, journaled_state::entry::JournalEntry},
     handler::{
         evm::{ContextDbError, FrameInitResult, FrameTr},
+        instructions::InstructionProvider,
         EthFrame, EvmTr, EvmTrError, FrameInitOrResult, FrameResult, Handler, ItemOrResult,
         PreExecutionOutput,
     },
     inspector::{
-        handler::{frame_end, frame_start},
+        handler::{frame_end, frame_start, inspect_instructions},
         InspectorEvmTr, InspectorHandler, JournalExt,
     },
     interpreter::{
         interpreter::EthInterpreter, interpreter_action::FrameInit, CallScheme, FrameInput,
-        InitialAndFloorGas, InstructionResult,
+        InitialAndFloorGas, InstructionResult, InterpreterAction,
     },
     primitives::{Address, Bytes, CALL_STACK_LIMIT},
     Database, Inspector, Journal,
 };
 
-use crate::{synthetic_frame_result, ExternalEnvTypes, MegaContext, MegaEvm, MegaInstructions};
+use crate::{
+    synthetic_frame_result, ExternalEnvTypes, LimitCheck, MegaContext, MegaEvm, MegaInstructions,
+};
 
 /// The Satin handler.
 ///
@@ -123,9 +126,11 @@ where
         self.op.validate_against_state_and_deduct_caller(evm, init_and_floor_gas)
     }
 
-    /// Settles the outermost frame: pops its lane, then settles its gas into the transaction's as
-    /// op-revm does (op-revm replaces revm's settlement, so revm's never runs here), and keeps
-    /// the history gas the transaction spent.
+    /// Settles the outermost frame: pops its lane and, when the transaction is latched, turns its
+    /// result into the latched stop; then settles its gas into the transaction's as op-revm does
+    /// (op-revm replaces revm's settlement, so revm's never runs here): a stopped transaction
+    /// settles like an EIP-8037 revert, its unspent regular gas and reservoir back to the sender.
+    /// Keeps the history gas the transaction spent.
     fn last_frame_result(
         &mut self,
         evm: &mut Self::Evm,
@@ -232,12 +237,14 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
 
     /// Starts a frame, in this order:
     ///
-    /// 1. the depth guard: a `CALL` or `STATICCALL` past the call-stack limit is answered with
+    /// 1. the latch: a latched transaction's frame is answered with the stop;
+    /// 2. the depth guard: a `CALL` or `STATICCALL` past the call-stack limit is answered with
     ///    `CallTooDeep` before anything could intercept it;
-    /// 2. system contract interception ([`MegaEvm::intercept`]);
-    /// 3. the keyless deployment rewrite ([`MegaEvm::rewrite_keyless`]);
-    /// 4. the frame's lane is pushed and the writes its start makes are counted;
-    /// 5. revm builds the frame.
+    /// 3. system contract interception ([`MegaEvm::intercept`]);
+    /// 4. the keyless deployment rewrite ([`MegaEvm::rewrite_keyless`]);
+    /// 5. the frame's lane is pushed and the writes its start makes are counted; a limit they cross
+    ///    answers the frame with the stop before it runs;
+    /// 6. revm builds the frame.
     ///
     /// A frame answered before revm builds it gets an empty lane, so the lanes stay aligned with
     /// the results [`frame_return_result`](EvmTr::frame_return_result) pops.
@@ -246,6 +253,10 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
         &mut self,
         frame_init: FrameInit,
     ) -> Result<FrameInitResult<'_, Self::Frame>, ContextDbError<Self::Context>> {
+        if let Some(latched) = self.inner.ctx.additional_limit.latched().copied() {
+            self.inner.ctx.additional_limit.push_empty_frame();
+            return Ok(ItemOrResult::Result(stopped_frame_result(&frame_init, &latched)));
+        }
         if let Some(result) = call_too_deep(&frame_init) {
             self.inner.ctx.additional_limit.push_empty_frame();
             return Ok(ItemOrResult::Result(result));
@@ -256,7 +267,10 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
         }
         let frame_init = self.rewrite_keyless(frame_init);
         let ctx = &mut self.inner.ctx;
-        ctx.additional_limit.on_frame_init(&frame_init.frame_input, frame_init.depth);
+        let check = ctx.additional_limit.on_frame_init(&frame_init.frame_input, frame_init.depth);
+        if check.exceeded_limit() {
+            return Ok(ItemOrResult::Result(stopped_frame_result(&frame_init, &check)));
+        }
         // The creator of a nested creation, to tell afterwards whether revm bumped its nonce.
         let creator = match &frame_init.frame_input {
             FrameInput::Create(inputs) if frame_init.depth > 0 => {
@@ -285,21 +299,39 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
         }
     }
 
+    /// Runs the frame on top of the stack, unless the transaction is latched: then the frame
+    /// returns the stop without running another instruction (see [`before_frame_run`]).
     #[inline]
     fn frame_run(
         &mut self,
     ) -> Result<FrameInitOrResult<Self::Frame>, ContextDbError<Self::Context>> {
-        self.inner.frame_run()
+        let evm = &mut self.inner;
+        let frame = evm.frame_stack.get();
+        let ctx = &mut evm.ctx;
+        let action = match before_frame_run(ctx, frame) {
+            Some(action) => action,
+            None => frame.interpreter.run_plain(
+                evm.instruction.instruction_table(),
+                evm.instruction.gas_table(),
+                ctx,
+            ),
+        };
+        frame.process_next_action(ctx, action).inspect(|next| {
+            if next.is_result() {
+                frame.set_finished(true);
+            }
+        })
     }
 
-    /// Pops the returning frame's lane (merged on success, discarded on failure), then returns the
-    /// result to the caller as revm does.
+    /// Pops the returning frame's lane (merged on success, discarded on failure; under a latch the
+    /// result is first rewritten to the stop), then returns the result to the caller as revm
+    /// does.
     #[inline]
     fn frame_return_result(
         &mut self,
-        result: FrameResult,
+        mut result: FrameResult,
     ) -> Result<Option<FrameResult>, ContextDbError<Self::Context>> {
-        self.inner.ctx.additional_limit.on_frame_return(&result);
+        self.inner.ctx.additional_limit.on_frame_return(&mut result);
         self.inner.frame_return_result(result)
     }
 }
@@ -355,9 +387,12 @@ where
     ) -> Result<FrameInitResult<'_, Self::Frame>, ContextDbError<Self::Context>> {
         let (ctx, inspector) = self.ctx_inspector();
         if let Some(mut output) = frame_start(ctx, inspector, &mut frame_init.frame_input) {
-            // The inspector answered the frame. The depth guard still holds: an answer cannot
+            // The inspector answered the frame. The latch and the depth guard still hold, in
+            // `frame_init`'s order: an answer cannot start a frame of a stopped transaction, nor
             // reach past the call-stack limit.
-            if let Some(too_deep) = call_too_deep(&frame_init) {
+            if let Some(latched) = ctx.additional_limit.latched().copied() {
+                output = stopped_frame_result(&frame_init, &latched);
+            } else if let Some(too_deep) = call_too_deep(&frame_init) {
                 output = too_deep;
             }
             ctx.additional_limit.push_empty_frame();
@@ -391,6 +426,56 @@ where
         inspector.initialize_interp(&mut frame.interpreter, ctx);
         Ok(ItemOrResult::Item(frame))
     }
+
+    /// revm's inspected frame run, with the latch short-circuit of [`EvmTr::frame_run`]: a frame
+    /// of a latched transaction returns the stop without a step, and the inspector sees it end.
+    #[inline]
+    fn inspect_frame_run(
+        &mut self,
+    ) -> Result<FrameInitOrResult<Self::Frame>, ContextDbError<Self::Context>> {
+        let (ctx, inspector, frame, instructions) = self.ctx_inspector_frame_instructions();
+        let action = match before_frame_run(ctx, frame) {
+            Some(action) => action,
+            None => inspect_instructions(
+                ctx,
+                &mut frame.interpreter,
+                &mut *inspector,
+                instructions.instruction_table(),
+                instructions.gas_table(),
+            ),
+        };
+        let mut next = frame.process_next_action(ctx, action);
+        if let Ok(ItemOrResult::Result(result)) = &mut next {
+            frame_end(ctx, inspector, &frame.input, result);
+            frame.set_finished(true);
+        }
+        next
+    }
+}
+
+/// The action of a frame about to run: the latched stop, returned without running an
+/// instruction, when the transaction is latched; `None` otherwise, and the frame runs.
+///
+/// A frame runs here for the first time or after a child returned into it. Under a latch it is
+/// the latter: the child that crossed the limit reverted, and its caller must not resume.
+#[inline]
+fn before_frame_run<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    ctx: &MegaContext<DB, ExtEnvs>,
+    frame: &EthFrame<EthInterpreter>,
+) -> Option<InterpreterAction> {
+    let latched = ctx.additional_limit.latched()?;
+    Some(InterpreterAction::new_return(
+        InstructionResult::Revert,
+        latched.revert_data(),
+        frame.interpreter.gas,
+    ))
+}
+
+/// The result of a frame a limit stopped before it ran: a revert with the stop's
+/// [`MegaLimitExceeded`](crate::MegaLimitExceeded) output, as a
+/// [`synthetic_frame_result`] that settles like a frame revm ran.
+fn stopped_frame_result(frame_init: &FrameInit, check: &LimitCheck) -> FrameResult {
+    synthetic_frame_result(&frame_init.frame_input, InstructionResult::Revert, check.revert_data())
 }
 
 impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {

@@ -8,6 +8,10 @@
 //! 2. run revm's instruction, whose Host call stages the record;
 //! 3. commit the record if the opcode completed, discard it if the opcode failed.
 //!
+//! A commit that crosses a limit stops the opcode's frame with a revert whose output is
+//! [`MegaLimitExceeded`](crate::MegaLimitExceeded) (see
+//! [`AdditionalLimit`](crate::AdditionalLimit) for the abort protocol).
+//!
 //! A wrapper keeps the static gas revm's table charges for its opcode, so the gas schedule is
 //! unchanged.
 
@@ -15,14 +19,15 @@ use revm::{
     bytecode::opcode::{LOG0, LOG1, LOG2, LOG3, LOG4, SELFDESTRUCT, SSTORE},
     handler::instructions::EthInstructions,
     interpreter::{
-        instructions::host, interpreter::EthInterpreter, Instruction, InstructionContext,
-        InstructionExecResult,
+        instructions::host, interpreter::EthInterpreter, interpreter_types::LoopControl,
+        Instruction, InstructionContext, InstructionExecResult, InstructionResult, Interpreter,
+        InterpreterAction,
     },
     primitives::hardfork::SpecId,
     Database,
 };
 
-use crate::{ExternalEnvTypes, MegaContext};
+use crate::{ExternalEnvTypes, LimitCheck, MegaContext};
 
 use super::MegaInstructions;
 
@@ -71,11 +76,36 @@ fn commit_after<DB: Database, ExtEnvs: ExternalEnvTypes>(
         Ok(()) => true,
         Err(result) => result.is_ok(),
     };
-    if completed {
-        host.additional_limit.commit_staged_record();
-    } else {
+    if !completed {
         host.additional_limit.discard_staged_record();
+        return result;
     }
+    let check = host.additional_limit.commit_staged_record();
+    if check.exceeded_limit() {
+        return Err(stop_frame(interpreter, &check));
+    }
+    result
+}
+
+/// Stops the running frame with the revert a crossed limit asks for: its output is
+/// [`MegaLimitExceeded`](crate::MegaLimitExceeded) and its gas is the frame's, so the caller gets
+/// the unspent part back.
+#[cold]
+#[inline(never)]
+fn stop_frame(
+    interpreter: &mut Interpreter<EthInterpreter>,
+    check: &LimitCheck,
+) -> InstructionResult {
+    if interpreter.bytecode.action().is_some() {
+        // A `SELFDESTRUCT` or a return the opcode already set gives way to the stop.
+        let _ = interpreter.take_next_action();
+    }
+    let result = InstructionResult::Revert;
+    interpreter.bytecode.set_action(InterpreterAction::new_return(
+        result,
+        check.revert_data(),
+        interpreter.gas,
+    ));
     result
 }
 

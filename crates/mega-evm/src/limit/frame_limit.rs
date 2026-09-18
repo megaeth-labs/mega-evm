@@ -58,6 +58,16 @@ impl Lane {
     pub(crate) const fn empty() -> Self {
         Self::new(None, false, u64::MAX)
     }
+
+    /// What the frame keeps if it succeeds.
+    pub(crate) const fn net(&self) -> LimitUsage {
+        self.used.saturating_sub(self.refund)
+    }
+
+    /// The data-size bytes the frame may still keep.
+    pub(crate) const fn remaining_budget(&self) -> u64 {
+        self.budget.saturating_sub(self.net().data_size)
+    }
 }
 
 /// The lanes of the running transaction.
@@ -295,7 +305,7 @@ mod tests {
         let frame_1 = t.pop(false).expect("frame 1 popped");
         assert_eq!(t.net(), t.net_uncached());
         assert_eq!(t.net(), bytes(100), "only the transaction's own usage is left");
-        assert_eq!(frame_1.used.saturating_sub(frame_1.refund), bytes(30 + 15 + 6 - 10 - 3 - 1));
+        assert_eq!(frame_1.net(), bytes(30 + 15 + 6 - 10 - 3 - 1));
 
         t.reset();
         assert_eq!(t.net(), t.net_uncached());
