@@ -290,27 +290,42 @@ mod tests {
                 }
             };
             drop(evm);
-            let outcome = outcome.unwrap();
-            records.push(record(&outcome.result, None, &outcome.state));
-            db.commit(outcome.state);
+            records.push(match outcome {
+                Ok(outcome) => {
+                    let record = record(&outcome.result, None, &outcome.state);
+                    db.commit(outcome.state);
+                    record
+                }
+                Err(err) => {
+                    TxRecord { outcome: format!("error:{}", error(&err)), ..Default::default() }
+                }
+            });
         }
         records
     }
 
     /// The probe only reads the reservoir: without that figure, every scenario records the same
-    /// as through revm 43's own `transact` and `system_call_with_caller`.
+    /// as through revm 43's own `transact` and `system_call_with_caller`, rejected transactions
+    /// included.
     #[test]
     fn test_reservoir_probe_changes_nothing_else() {
         let scenarios = crate::load_corpus(&crate::corpus_dir()).unwrap();
-        assert!(scenarios
-            .iter()
-            .any(|s| s.txs.iter().any(|tx| tx.kind == ScenarioTxKind::SystemCall)));
+        let txs = || scenarios.iter().flat_map(|s| &s.txs);
+        assert!(txs().any(|tx| tx.kind == ScenarioTxKind::SystemCall));
+        let mut rejected = 0;
         for scenario in &scenarios {
             let mut probed = run(scenario);
             for record in &mut probed {
-                assert!(record.gas.remove("reservoir_remaining").is_some(), "{}", scenario.name);
+                if record.outcome.starts_with("error:") {
+                    rejected += 1;
+                    assert!(record.gas.is_empty(), "{}", scenario.name);
+                } else {
+                    let reservoir = record.gas.remove("reservoir_remaining");
+                    assert!(reservoir.is_some(), "{}", scenario.name);
+                }
             }
             assert_eq!(probed, run_stock(scenario), "{}", scenario.name);
         }
+        assert!(rejected > 0, "the corpus has a rejected transaction");
     }
 }

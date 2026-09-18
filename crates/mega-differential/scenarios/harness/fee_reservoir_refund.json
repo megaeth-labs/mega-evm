@@ -1,0 +1,21 @@
+{
+  "name": "fee_reservoir_refund",
+  "description": "An empty call at 1 gwei with a gas limit 1,000,000 over the execution cap: the unused reservoir and the unused regular gas are both refunded to the sender.",
+  "coinbase": "0x0000000000000000000000000000000000000c01",
+  "pre": {
+    "0x000000000000000000000000000000000000fee0": {
+      "balance": "0xde0b6b3a7640000"
+    }
+  },
+  "txs": [
+    {
+      "caller": "0x000000000000000000000000000000000000fee0",
+      "to": "0x0000000000000000000000000000000000000b0d",
+      "data": "0x",
+      "value": "0x0",
+      "gas_limit": 201000000,
+      "kind": "call",
+      "gas_price": 1000000000
+    }
+  ]
+}
