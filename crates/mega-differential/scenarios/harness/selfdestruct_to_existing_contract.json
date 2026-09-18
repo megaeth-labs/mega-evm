@@ -1,0 +1,30 @@
+{
+  "name": "selfdestruct_to_existing_contract",
+  "description": "The beneficiary is a contract with code and storage; its code does not run.",
+  "coinbase": "0x0000000000000000000000000000000000000c01",
+  "pre": {
+    "0x0000000000000000000000000000000000000aaa": {
+      "balance": "0xde0b6b3a7640000"
+    },
+    "0x0000000000000000000000000000000000000d35": {
+      "balance": "0x3e8",
+      "code": "0x730000000000000000000000000000000000000becff"
+    },
+    "0x0000000000000000000000000000000000000bec": {
+      "code": "0x600160005500",
+      "storage": {
+        "0x3": "0x3"
+      }
+    }
+  },
+  "txs": [
+    {
+      "caller": "0x0000000000000000000000000000000000000aaa",
+      "to": "0x0000000000000000000000000000000000000d35",
+      "data": "0x",
+      "value": "0x0",
+      "gas_limit": 1000000,
+      "kind": "call"
+    }
+  ]
+}

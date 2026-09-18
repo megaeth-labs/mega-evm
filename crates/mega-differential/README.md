@@ -11,7 +11,7 @@ cargo test -p mega-differential --locked
 The corpus test prints one summary line, for example:
 
 ```text
-differential: 286 scenarios, 10761 fields compared, 858 deviations matched (op-fee-vault-touch x858), 0 unexplained, 0 stale registry effects
+differential: 323 scenarios, 12401 fields compared, 1004 deviations matched (op-fee-vault-touch x996, op-karst-bn254-pairing-input-bound x8), 0 unexplained, 0 stale registry effects
 ```
 
 ## The two arms
@@ -53,7 +53,7 @@ Cargo writes the version requirements of revm 43's optional dependencies into it
 ## The corpus
 
 `scenarios/` holds one JSON file per scenario; the file stem is the scenario name.
-The format is `mega_evm::test_utils::Scenario`: a coinbase, the pre-state accounts (nonce, balance, legacy code, storage) and the transactions, run in order.
+The format is `mega_evm::test_utils::Scenario`: an optional description, a coinbase, the pre-state accounts (nonce, balance, code, storage; code is legacy bytecode or an EIP-7702 delegation designator) and the transactions, run in order.
 A transaction is a `call`, a `create` or a `system_call`; it may carry an EIP-2930 access list and an EIP-7702 authorization list with the signer already recovered (`authority`, absent for a signature that does not recover).
 The block is fixed: number 1, timestamp 1, zero base fee, unlimited gas.
 
@@ -61,12 +61,14 @@ The block is fixed: number 1, timestamp 1, zero base fee, unlimited gas.
 | -------------- | --------: | ---------------------------------------------------------------------------------------------------------------------------------- |
 | `handwritten/` |        23 | the hand-written scenarios of the reference differential of the fork: state-gas spill and refill, creates, nested reverts and halts |
 | `eest/`        |       263 | derived from the execution-spec-test Amsterdam state tests of EIP-8037 (state gas, its reservoir, and its interplay with the EIP-7623 calldata floor); the names keep the fixture test ids |
+| `harness/`     |        37 | written for this harness, for what the reference corpus lacks: EIP-7702 authorizations, access lists, SELFDESTRUCT to existing accounts, logs, precompiles, and the three cases of `crates/mega-evm/tests/satin/equivalence.rs` |
 
-Both sets come from a reference harness that ran them at per-scenario state-gas prices and execution caps.
+The first two sets come from a reference harness that ran them at per-scenario state-gas prices and execution caps.
 Satin fixes both, so the import dropped the `cap` and `prices` fields and moved every gas limit above the reference cap `C` to the Satin cap plus the same reservoir: `G' = 200,000,000 + (G − C)`.
 Gas limits at or below the reference cap are unchanged, and the system call lost its gas limit, since a system call runs with the engine's own.
-Under the Osaka gas table state gas is priced at zero, so today these scenarios exercise the reservoir, refunds and the regular-gas paths; their state-gas paths start to count when the Satin gas table prices state and the oracle takes the same table.
+Under the Osaka gas table state gas is priced at zero, so today those scenarios exercise the reservoir, refunds and the regular-gas paths; their state-gas paths start to count when the Satin gas table prices state and the oracle takes the same table.
 
+Each scenario of `harness/` carries a `description` of what it exercises.
 To add a scenario, drop a JSON file into the directory of its origin; the loader rejects unknown fields, a name that is not the file stem, and a duplicate name.
 
 ## What is compared
@@ -109,10 +111,14 @@ An entry names one mechanism and every effect it has on the compared fields:
   When a mechanism stops producing an effect, remove the effect, or retire the entry when none is left.
 - The `version` field is the format version this crate reads.
 
-The active entry today is op-revm's fee vaults: after every non-deposit transaction op-revm credits the base fee, the L1 data fee and the operator fee to three vault predeploys, which touches them even at a zero amount.
-`tests/claims.rs` checks that state clearing drops those empty accounts when the state is committed.
+The active entries today:
+
+- `op-fee-vault-touch`: after every non-deposit transaction op-revm credits the base fee, the L1 data fee and the operator fee to three vault predeploys, which touches them even at a zero amount.
+  `tests/claims.rs` checks that state clearing drops those empty accounts when the state is committed.
+- `op-karst-bn254-pairing-input-bound`: op-revm's Karst precompile set rejects a BN254 pairing input over 57,600 bytes, which Ethereum's pairing accepts; `harness/precompile_bn254_pairing_over_op_input_limit` crosses the bound and `harness/precompile_bn254_pairing_at_op_input_limit` stays on it.
 
 ## Relation to the equivalence tests
 
 `crates/mega-evm/tests/satin/equivalence.rs` compares `MegaEvm` with op-revm's `OpEvm` on the same fork, which pins that the Satin layer adds nothing to op-revm yet.
 This harness compares `MegaEvm` with an independent implementation, which pins that the fork plus op-revm execute Ethereum semantics.
+The three equivalence cases are also scenarios here (`harness/equivalence_*`); the equivalence tests stay as they are, since they check a different claim that later changes update on purpose.

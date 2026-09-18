@@ -1,0 +1,20 @@
+{
+  "name": "equivalence_sstore",
+  "description": "SSTORE(0, 42) into a fresh slot; the Osaka gas table prices no state gas (equivalence.rs).",
+  "coinbase": "0x0000000000000000000000000000000000000c01",
+  "pre": {
+    "0x5000000000000000000000000000000000000001": {
+      "code": "0x602a60005500"
+    }
+  },
+  "txs": [
+    {
+      "caller": "0x4000000000000000000000000000000000000001",
+      "to": "0x5000000000000000000000000000000000000001",
+      "data": "0x",
+      "value": "0x0",
+      "gas_limit": 1000000,
+      "kind": "call"
+    }
+  ]
+}

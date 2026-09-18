@@ -24,6 +24,45 @@
           "right": "<absent>"
         }
       ]
+    },
+    {
+      "id": "op-karst-bn254-pairing-input-bound",
+      "status": "active",
+      "scenario": "precompile_bn254_pairing_over_op_input_limit",
+      "mechanism": "op-revm's Karst precompile set: the BN254 pairing (0x08) rejects inputs over 57,600 bytes",
+      "reason": "op-revm bounds the BN254 pairing input on OP chains (57,600 bytes, 300 pairs, from Karst on); a longer input fails the precompile, which consumes the gas the call forwarded. Ethereum's pairing has no such bound, so revm 43 runs the 301 pairs and returns 1. The scenario's proxy records the failure: it stores no success flag and no return size, and the hash of empty return data. The failed call also leaves the precompile account untouched.",
+      "effects": [
+        {
+          "field": "tx[0].gas.*",
+          "left": "29561930",
+          "right": "10608872"
+        },
+        {
+          "field": "tx[0].output",
+          "left": "0x",
+          "right": "0x0000000000000000000000000000000000000000000000000000000000000001"
+        },
+        {
+          "field": "tx[0].state[0x0000000000000000000000000000000000000008]",
+          "left": "<absent>",
+          "right": "created=false selfdestructed=false balance=0x0 nonce=0 code_hash=0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470 storage={}"
+        },
+        {
+          "field": "tx[0].state[0x0000000000000000000000000000000000009908].storage[0x0]",
+          "left": "<absent>",
+          "right": "0x1"
+        },
+        {
+          "field": "tx[0].state[0x0000000000000000000000000000000000009908].storage[0x1]",
+          "left": "<absent>",
+          "right": "0x20"
+        },
+        {
+          "field": "tx[0].state[0x0000000000000000000000000000000000009908].storage[0x2]",
+          "left": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+          "right": "0xb10e2d527612073b26eecdfd717e6a320cf44b4afac2b0732d9fcbe2b7fa0cf6"
+        }
+      ]
     }
   ]
 }
