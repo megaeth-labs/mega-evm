@@ -1,14 +1,11 @@
 
 [workspace]
-members = [
-    "bin/mega-evme",
-    "bin/mega-t8n",
-    "crates/mega-evm",
-    "crates/mega-state-test",
-    "crates/state-test",
-    "crates/system-contracts",
-]
-default-members = ["crates/mega-evm", "bin/mega-evme", "bin/mega-t8n"]
+# The tool crates (`bin/mega-evme`, `bin/mega-t8n`, `crates/mega-state-test`,
+# `crates/state-test`) still target the legacy engine; their sources are kept
+# untouched and they rejoin the workspace when T10.1 (state-test), T10.2
+# (mega-evme) and T10.3 (mega-t8n) port them to Satin.
+members = ["crates/mega-evm", "crates/system-contracts"]
+default-members = ["crates/mega-evm"]
 exclude = []
 
 # Explicitly set the resolver to version 2, which is the default for packages with edition >= 2021
