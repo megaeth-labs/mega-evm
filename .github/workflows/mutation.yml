@@ -317,8 +317,12 @@ jobs:
           # --colors never: CI forces CARGO_TERM_COLOR=always, which would otherwise
           #   embed ANSI codes and break exact suppression matching.
           cargo mutants --list --package mega-evm --colors never > universe.txt
-          python3 scripts/umutate.py plan --packs spec-gate \
-            | grep -oE 'crates/mega-evm/[^:]+:[0-9]+:[0-9]+: spec-gate .*' >> universe.txt
+          # The plan runs on its own so a planner failure still fails the step.
+          # Its mutant lines are grepped separately: a single-spec engine (the
+          # satin branch) has no spec gates, the pack finds nothing, and grep's
+          # "no match" exit must not fail the step under pipefail.
+          python3 scripts/umutate.py plan --packs spec-gate > spec-gate-plan.txt
+          grep -oE 'crates/mega-evm/[^:]+:[0-9]+:[0-9]+: spec-gate .*' spec-gate-plan.txt >> universe.txt || true
           echo "universe: $(wc -l < universe.txt) mutants"
       - name: Check for orphan suppressions
         run: |
