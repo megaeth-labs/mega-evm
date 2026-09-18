@@ -25,7 +25,7 @@ Do not add a `_pending/main.rs`.
 
 | Ticket | Tests | From `tests/` | From `src/` | 保留 | 重写 | 待定 |
 |---|---:|---:|---:|---:|---:|---:|
-| T2.1 | 21 | 0 | 21 | 15 | 6 | 0 |
+| T2.1 | 18 | 0 | 18 | 15 | 3 | 0 |
 | T2.2 | 21 | 21 | 0 | 21 | 0 | 0 |
 | T2.3 | 40 | 19 | 21 | 21 | 19 | 0 |
 | T3.1 | 36 | 30 | 6 | 7 | 29 | 0 |
@@ -44,7 +44,7 @@ Do not add a `_pending/main.rs`.
 | T8.1 | 74 | 45 | 29 | 55 | 19 | 0 |
 | T9 | 4 | 4 | 0 | 1 | 3 | 0 |
 | — (undecided: D57 preload-warm cold charging, D58 98/100 forwarding) | 7 | 7 | 0 | 0 | 0 | 7 |
-| **Total** | **872** | **691** | **181** | **516** | **327** | **29** |
+| **Total** | **869** | **691** | **178** | **516** | **324** | **29** |
 
 ## Files
 
@@ -146,7 +146,6 @@ Each cell lists `disposition count (ticket · decision)`.
 | `src/evm/mod.rs` | 11 | 保留 8 (T2.1); 保留 3 (T5.2) |
 | `src/evm/precompiles.rs` | 6 | 保留 6 (T3.1 · D04) |
 | `src/evm/result.rs` | 4 | 重写 4 (T2.3 · D17/D48 (halt-reason set changes)) |
-| `src/evm/spec.rs` | 3 | 重写 3 (T2.1 · single rung; Karst/Osaka; legacy names must error) |
 | `src/evm/state.rs` | 1 | 保留 1 (T8.1) |
 | `src/external/gas.rs` | 9 | 重写 9 (T3.2 · D12/D51) |
 | `src/external/hasher/mod.rs` | 5 | 保留 5 (T3.2) |
