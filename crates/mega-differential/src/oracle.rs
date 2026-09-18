@@ -154,7 +154,8 @@ fn database(scenario: &Scenario) -> OracleDb {
         let mut info =
             AccountInfo { nonce: account.nonce, balance: account.balance, ..Default::default() };
         if !account.code.is_empty() {
-            let code = Bytecode::new_legacy(account.code.clone());
+            let code = Bytecode::new_raw_checked(account.code.clone())
+                .expect("validated: the pre-state code decodes");
             info.code_hash = code.hash_slow();
             info.code = Some(code);
         }
@@ -345,7 +346,7 @@ mod tests {
     /// as through revm 43's own `transact` and `system_call_with_caller`.
     #[test]
     fn test_reservoir_probe_changes_nothing_else() {
-        let scenarios = crate::load_corpus(&crate::corpus_dir().join("handwritten")).unwrap();
+        let scenarios = crate::load_corpus(&crate::corpus_dir()).unwrap();
         assert!(scenarios.iter().any(|s| s.txs.iter().any(|tx| tx.kind == TxSpecKind::SystemCall)));
         for scenario in &scenarios {
             let mut probed = run(scenario);

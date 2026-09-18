@@ -73,6 +73,7 @@ fn test_zero_fee_vault_touch_leaves_no_committed_account() {
     ];
     let scenario = Scenario {
         name: "transfer".into(),
+        description: String::new(),
         coinbase: Address::ZERO,
         pre: BTreeMap::from([(
             CALLER,

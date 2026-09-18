@@ -30,6 +30,7 @@ use revm::{
         },
         BlockEnv, TxEnv,
     },
+    state::{AccountInfo, Bytecode},
     Database, DatabaseCommit,
 };
 use serde::Deserialize;
@@ -49,6 +50,9 @@ pub type ScenarioTxOutcome =
 pub struct Scenario {
     /// Name of the scenario; the harness reports differences under it.
     pub name: String,
+    /// What the scenario exercises, for the reader.
+    #[serde(default)]
+    pub description: String,
     /// The block beneficiary.
     #[serde(default)]
     pub coinbase: Address,
@@ -152,8 +156,14 @@ pub struct AuthorizationEntry {
 }
 
 impl Scenario {
-    /// Checks the fields that depend on the transaction kind.
+    /// Checks that the pre-state code decodes and that each transaction carries the fields its
+    /// kind needs.
     pub fn validate(&self) -> Result<(), String> {
+        for (address, account) in &self.pre {
+            if let Err(err) = Bytecode::new_raw_checked(account.code.clone()) {
+                return Err(format!("{}: code of {address}: {err:?}", self.name));
+            }
+        }
         for (i, tx) in self.txs.iter().enumerate() {
             let problem = match tx.kind {
                 TxSpecKind::Call if tx.to.is_none() => Some("a call needs `to`"),
@@ -183,14 +193,24 @@ impl Scenario {
     }
 
     /// The pre-state as a database.
+    ///
+    /// Code is decoded as the node decodes it: an EIP-7702 delegation designator becomes a
+    /// delegation, anything else legacy bytecode.
     pub fn database(&self) -> MemoryDatabase {
         let mut db = MemoryDatabase::default();
         for (address, account) in &self.pre {
-            db.set_account_nonce(*address, account.nonce);
-            db.set_account_balance(*address, account.balance);
+            let mut info = AccountInfo {
+                nonce: account.nonce,
+                balance: account.balance,
+                ..Default::default()
+            };
             if !account.code.is_empty() {
-                db.set_account_code(*address, account.code.clone());
+                let code = Bytecode::new_raw_checked(account.code.clone())
+                    .expect("validated: the pre-state code decodes");
+                info.code_hash = code.hash_slow();
+                info.code = Some(code);
             }
+            db.insert_account_info(*address, info);
             for (slot, value) in &account.storage {
                 db.set_account_storage(*address, *slot, *value);
             }
@@ -321,6 +341,7 @@ mod tests {
         let code = BytecodeBuilder::default().sstore(U256::ZERO, U256::from(7)).stop().build();
         Scenario {
             name: "sstore".into(),
+            description: String::new(),
             coinbase: Address::ZERO,
             pre: [
                 (CALLER, PreAccount { balance: U256::from(10), ..Default::default() }),
@@ -357,6 +378,22 @@ mod tests {
         assert!(outcomes.iter().all(|outcome| outcome.as_ref().unwrap().result.is_success()));
         assert_eq!(db.basic(CALLER).unwrap().unwrap().nonce, 2);
         assert_eq!(db.storage(CALLEE, U256::ZERO).unwrap(), U256::from(7));
+    }
+
+    /// A delegation designator in the pre-state is a delegation, not legacy code that starts
+    /// with an invalid opcode.
+    #[test]
+    fn test_database_decodes_a_delegation_designator() {
+        let mut scenario = scenario(vec![]);
+        let designator: Bytes = [&[0xef, 0x01, 0x00][..], CALLEE.as_slice()].concat().into();
+        scenario.pre.get_mut(&CALLER).unwrap().code = designator;
+        assert!(scenario.validate().is_ok());
+
+        let code = scenario.database().basic(CALLER).unwrap().unwrap().code.unwrap();
+        assert!(code.is_eip7702());
+
+        scenario.pre.get_mut(&CALLER).unwrap().code = Bytes::from_static(&[0xef, 0x01, 0x00]);
+        assert!(scenario.validate().unwrap_err().starts_with("sstore: code of"));
     }
 
     #[test]
