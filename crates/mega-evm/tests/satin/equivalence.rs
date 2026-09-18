@@ -50,21 +50,35 @@ fn block() -> BlockEnv {
 /// Runs `tx` on `db` through `MegaEvm`, then through op-revm's `OpEvm` configured with the
 /// `CfgEnv` the `MegaEvm` context holds. Returns both outcomes and that `CfgEnv`.
 fn run_both(db: MemoryDatabase, tx: TxEnv) -> (Outcome, Outcome, CfgEnv<OpSpecId>) {
+    run_both_in(db, tx, block())
+}
+
+/// [`run_both`] in `block`.
+fn run_both_in(
+    db: MemoryDatabase,
+    tx: TxEnv,
+    block: BlockEnv,
+) -> (Outcome, Outcome, CfgEnv<OpSpecId>) {
+    let (mut mega, mut op, cfg) = both_evms(db, block);
+    let mega_outcome = mega.transact(OpTx(op_transaction(tx.clone()))).unwrap();
+    let op_outcome = op.transact(op_transaction(tx)).unwrap();
+    (mega_outcome, op_outcome, cfg)
+}
+
+/// A `MegaEvm` and an `OpEvm` over `db` in `block`, on the same `CfgEnv`.
+fn both_evms(
+    db: MemoryDatabase,
+    block: BlockEnv,
+) -> (MegaEvm<MemoryDatabase, NoOpInspector>, OpEvm<OpContext, NoOpInspector>, CfgEnv<OpSpecId>) {
     let ctx = MegaContext::new(db.clone(), MegaSpecId::SATIN)
-        .with_block(block())
+        .with_block(block.clone())
         .with_chain(zero_fee_l1_block_info());
     let cfg = ctx.cfg().clone();
-    let mut mega = MegaEvm::new(ctx);
-    let mega_outcome = mega.transact(OpTx(op_transaction(tx.clone()))).unwrap();
-
     let op_ctx = OpContext::new(db, OpSpecId::KARST)
         .with_cfg(cfg.clone())
-        .with_block(block())
+        .with_block(block)
         .with_chain(zero_fee_l1_block_info());
-    let mut op = OpEvm::new(op_ctx, NoOpInspector);
-    let op_outcome = op.transact(op_transaction(tx)).unwrap();
-
-    (mega_outcome, op_outcome, cfg)
+    (MegaEvm::new(ctx), OpEvm::new(op_ctx, NoOpInspector), cfg)
 }
 
 /// Asserts the two outcomes agree field by field, then as a whole so a field added later is
@@ -152,4 +166,99 @@ fn test_sstore_matches_op_revm() {
     // EIP-8037 on. The Satin gas table prices it; this assertion changes with it.
     assert_eq!(mega.result.gas().state_gas_spent_final(), 0);
     assert_same(&mega, &op);
+}
+
+const COINBASE: Address = address!("0x00000000000000000000000000000000000c0ffe");
+
+/// A priced transaction pays its fee, gets its unused gas back and rewards the beneficiary and
+/// the fee vaults exactly as op-revm has it.
+#[test]
+fn test_fees_match_op_revm() {
+    let db =
+        MemoryDatabase::default().account_balance(CALLER, U256::from(10u64.pow(18))).account_code(
+            CALLEE,
+            BytecodeBuilder::default().sstore(U256::ZERO, U256::from(1)).stop().build(),
+        );
+    let block = BlockEnv { basefee: 7, beneficiary: COINBASE, ..block() };
+    let tx = TxEnv {
+        caller: CALLER,
+        kind: TxKind::Call(CALLEE),
+        value: U256::from(1_000),
+        gas_price: 10,
+        gas_limit: 1_000_000,
+        ..Default::default()
+    };
+    let (mega, op, _) = run_both_in(db, tx, block);
+    assert!(mega.result.is_success());
+    assert!(mega.state[&COINBASE].info.balance > U256::ZERO, "the beneficiary was paid");
+    assert!(
+        mega.state[&CALLER].info.balance > U256::from(10u64.pow(18) - 10 * 1_000_000 - 1_000),
+        "the unused gas came back"
+    );
+    assert_same(&mega, &op);
+}
+
+/// A storage refund is applied exactly as op-revm has it.
+#[test]
+fn test_refund_matches_op_revm() {
+    let code = BytecodeBuilder::default().sstore(U256::ZERO, U256::ZERO).stop().build();
+    let db = MemoryDatabase::default().account_code(CALLEE, code).account_storage(
+        CALLEE,
+        U256::ZERO,
+        U256::from(5),
+    );
+    let tx = TxEnv {
+        caller: CALLER,
+        kind: TxKind::Call(CALLEE),
+        gas_limit: 1_000_000,
+        ..Default::default()
+    };
+    let (mega, op, _) = run_both(db, tx);
+    assert!(mega.result.is_success());
+    assert!(mega.result.gas().inner_refunded() > 0, "the clear is refunded");
+    assert_same(&mega, &op);
+}
+
+/// A system call runs exactly as op-revm runs it.
+#[test]
+fn test_system_call_matches_op_revm() {
+    use revm::handler::system_call::SystemCallEvm;
+    let code = BytecodeBuilder::default().sstore(U256::ZERO, U256::from(3)).stop().build();
+    let (mut mega, mut op, _) =
+        both_evms(MemoryDatabase::default().account_code(CALLEE, code), block());
+    let mega_outcome = mega.system_call_with_caller(CALLER, CALLEE, Default::default()).unwrap();
+    let op_outcome = op.system_call_with_caller(CALLER, CALLEE, Default::default()).unwrap();
+    assert!(mega_outcome.result.is_success());
+    assert_same(&mega_outcome, &op_outcome);
+}
+
+/// A transaction op-revm rejects, Satin rejects with the same error.
+#[test]
+fn test_invalid_transaction_matches_op_revm() {
+    let tx = TxEnv {
+        caller: CALLER,
+        kind: TxKind::Call(CALLEE),
+        gas_limit: 1_000_000,
+        ..Default::default()
+    };
+    let (mut mega, mut op, _) = both_evms(MemoryDatabase::default(), block());
+    let unenveloped = OpTransaction { base: tx, enveloped_tx: None, ..Default::default() };
+    let mega_error = mega.transact(OpTx(unenveloped.clone())).unwrap_err();
+    let op_error = op.transact(unenveloped).unwrap_err();
+    assert_eq!(format!("{mega_error:?}"), format!("{op_error:?}"));
+    assert!(format!("{mega_error:?}").contains("MissingEnvelopedTx"), "{mega_error:?}");
+
+    // A gas limit above the block's is rejected before anything is charged.
+    let small_block = BlockEnv { gas_limit: 500_000, ..block() };
+    let (mut mega, mut op, _) = both_evms(MemoryDatabase::default(), small_block);
+    let tx = TxEnv {
+        caller: CALLER,
+        kind: TxKind::Call(CALLEE),
+        gas_limit: 1_000_000,
+        ..Default::default()
+    };
+    let mega_error = mega.transact(OpTx(op_transaction(tx.clone()))).unwrap_err();
+    let op_error = op.transact(op_transaction(tx)).unwrap_err();
+    assert_eq!(format!("{mega_error:?}"), format!("{op_error:?}"));
+    assert!(format!("{mega_error:?}").contains("CallerGasLimitMoreThanBlock"), "{mega_error:?}");
 }
