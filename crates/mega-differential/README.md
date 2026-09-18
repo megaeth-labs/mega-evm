@@ -14,6 +14,8 @@ The corpus test prints one summary line, for example:
 differential: 323 scenarios, 12401 fields compared, 1004 deviations matched (op-fee-vault-touch x996, op-karst-bn254-pairing-input-bound x8), 0 unexplained, 0 stale registry effects
 ```
 
+CI runs the same command as the `differential` job (`.github/workflows/differential.yml`), on every pull request and every push to `satin`.
+
 ## The two arms
 
 **Left arm: `MegaEvm`.**
