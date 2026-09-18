@@ -319,10 +319,10 @@ jobs:
           cargo mutants --list --package mega-evm --colors never > universe.txt
           # The plan runs on its own so a planner failure still fails the step.
           # Its mutant lines are grepped separately: a single-spec engine (the
-          # satin branch) has no spec gates, the pack finds nothing, and grep's
-          # "no match" exit must not fail the step under pipefail.
+          # satin branch) has no spec gates and the pack finds nothing. grep's
+          # "no match" (exit 1) is accepted; a grep error (exit 2) still fails.
           python3 scripts/umutate.py plan --packs spec-gate > spec-gate-plan.txt
-          grep -oE 'crates/mega-evm/[^:]+:[0-9]+:[0-9]+: spec-gate .*' spec-gate-plan.txt >> universe.txt || true
+          grep -oE 'crates/mega-evm/[^:]+:[0-9]+:[0-9]+: spec-gate .*' spec-gate-plan.txt >> universe.txt || [ $? -eq 1 ]
           echo "universe: $(wc -l < universe.txt) mutants"
       - name: Check for orphan suppressions
         run: |
