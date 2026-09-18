@@ -110,6 +110,8 @@ These checks guard every change to the Satin engine.
 
 - The `cargo-mutants gate` job mutates the lines a pull request changes and fails on a surviving mutant that no reviewed suppression covers.
   Reference point, the pull request that brought the Satin skeleton: 115 mutants, 49 caught, 0 survived, 1 suppressed, 65 unviable, in 7m41s on CI and 4m12s on a 15-core laptop with `JOBS=8`.
+  That population is the diff against `a8f8c7c9`, the last commit of the legacy core, and it is reproduced by `scripts/mutation_test.sh diff a8f8c7c9` followed by `python3 scripts/mutation_gate.py report --results target/mutants/mutants.out --suppressions mutants/suppressions.toml`.
+  Take the numbers from that pair, not from `cargo mutants` on its own: the driver turns the function-scoped suppressions into `--exclude-re` before generation, and the gate filters the line-scoped ones after the run, so the bare command reports a different population and a different survivor count.
 - The job is bounded to 330 minutes.
   Shard a series whose diff lists more than 1,000 mutants (`cargo mutants --list --in-diff <diff> --package mega-evm`): at the reference rate that is about an hour, and the rate falls as the test suite grows.
   Run shard `k` of `n` with `MUTANTS_SHARD=k/n OUT_DIR=target/mutants-k scripts/mutation_test.sh diff <base>` and gate each shard with `scripts/mutation_gate.py report`; the pull request that first needs it adds a shard matrix to the job, and every shard must pass.
