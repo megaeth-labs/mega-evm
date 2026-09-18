@@ -17,6 +17,7 @@ workspace = true
 alloy-consensus = { workspace = true, features = ["k256"] }
 alloy-evm.workspace = true
 alloy-hardforks.workspace = true
+alloy-op-evm.workspace = true
 alloy-primitives.workspace = true
 alloy-sol-types.workspace = true
 op-alloy-consensus.workspace = true
@@ -46,5 +47,11 @@ serde_json = { workspace = true, features = ["std"] }
 
 [features]
 default = ["std", "revm/default", "op-revm/default"]
-std = ["revm/std", "op-revm/std", "mega-system-contracts/std"]
+std = [
+    "alloy-evm/std",
+    "alloy-op-evm/std",
+    "mega-system-contracts/std",
+    "op-revm/std",
+    "revm/std",
+]
 test-utils = []

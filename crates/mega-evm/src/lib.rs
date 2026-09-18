@@ -7,9 +7,12 @@
 extern crate alloc;
 
 mod block;
+pub mod constants;
 mod evm;
 mod external;
+mod types;
 
 pub use block::*;
 pub use evm::*;
 pub use external::*;
+pub use types::*;
