@@ -130,13 +130,22 @@ jobs:
           check() {
             local label=$1 dir=$2 fork=$3 spec=$4 want_executed=$5 want_skipped=$6
             local total ran skipped
-            total=$(defined "$dir" "$fork")
-            # `check` runs under `||`, where errexit is off: a failing run is reported here.
+            # `check` runs under `||`, where errexit is off, so every step is guarded here: a
+            # counting pipeline that prints the expected number and then fails would otherwise
+            # pass the comparison below. Each command substitution is assigned on its own so the
+            # assignment carries the command's status (`local total=$(...)` would mask it).
+            if ! total=$(defined "$dir" "$fork"); then
+              echo "::error::$label: counting the state tests $dir defines failed"
+              return 1
+            fi
             if ! outcomes "$dir"; then
               echo "::error::$label: the runner failed on $dir"
               return 1
             fi
-            ran=$(executed "$spec")
+            if ! ran=$(executed "$spec"); then
+              echo "::error::$label: counting the state tests the runner executed for $spec failed"
+              return 1
+            fi
             skipped=$((total - ran))
             echo "$label: $ran executed, $skipped skipped of $total defined ($dir)"
             echo "| $label | $ran | $skipped | $total |" >> "$GITHUB_STEP_SUMMARY"
