@@ -29,13 +29,14 @@ use revm::{
         InspectorEvmTr, InspectorHandler, JournalExt,
     },
     interpreter::{
-        interpreter::EthInterpreter, interpreter_action::FrameInit, FrameInput, InitialAndFloorGas,
+        interpreter::EthInterpreter, interpreter_action::FrameInit, CallScheme, FrameInput,
+        InitialAndFloorGas, InstructionResult,
     },
-    primitives::Address,
+    primitives::{Address, Bytes, CALL_STACK_LIMIT},
     Database, Inspector, Journal,
 };
 
-use crate::{ExternalEnvTypes, MegaContext, MegaEvm, MegaInstructions};
+use crate::{synthetic_frame_result, ExternalEnvTypes, MegaContext, MegaEvm, MegaInstructions};
 
 /// The Satin handler.
 ///
@@ -231,16 +232,29 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
 
     /// Starts a frame, in this order:
     ///
-    /// 1. the frame's lane is pushed and the writes its start makes are counted;
-    /// 2. system contract interception (the system contract interceptors; nothing is intercepted
-    ///    yet);
-    /// 3. the keyless deployment rewrite (native keyless deployment; nothing is rewritten yet);
-    /// 4. revm builds the frame.
+    /// 1. the depth guard: a `CALL` or `STATICCALL` past the call-stack limit is answered with
+    ///    `CallTooDeep` before anything could intercept it;
+    /// 2. system contract interception ([`MegaEvm::intercept`]);
+    /// 3. the keyless deployment rewrite ([`MegaEvm::rewrite_keyless`]);
+    /// 4. the frame's lane is pushed and the writes its start makes are counted;
+    /// 5. revm builds the frame.
+    ///
+    /// A frame answered before revm builds it gets an empty lane, so the lanes stay aligned with
+    /// the results [`frame_return_result`](EvmTr::frame_return_result) pops.
     #[inline]
     fn frame_init(
         &mut self,
         frame_init: FrameInit,
     ) -> Result<FrameInitResult<'_, Self::Frame>, ContextDbError<Self::Context>> {
+        if let Some(result) = call_too_deep(&frame_init) {
+            self.inner.ctx.additional_limit.push_empty_frame();
+            return Ok(ItemOrResult::Result(result));
+        }
+        if let Some(result) = self.intercept(&frame_init) {
+            self.inner.ctx.additional_limit.push_empty_frame();
+            return Ok(ItemOrResult::Result(result));
+        }
+        let frame_init = self.rewrite_keyless(frame_init);
         let ctx = &mut self.inner.ctx;
         ctx.additional_limit.on_frame_init(&frame_init.frame_input, frame_init.depth);
         // The creator of a nested creation, to tell afterwards whether revm bumped its nonce.
@@ -341,6 +355,11 @@ where
     ) -> Result<FrameInitResult<'_, Self::Frame>, ContextDbError<Self::Context>> {
         let (ctx, inspector) = self.ctx_inspector();
         if let Some(mut output) = frame_start(ctx, inspector, &mut frame_init.frame_input) {
+            // The inspector answered the frame. The depth guard still holds: an answer cannot
+            // reach past the call-stack limit.
+            if let Some(too_deep) = call_too_deep(&frame_init) {
+                output = too_deep;
+            }
             ctx.additional_limit.push_empty_frame();
             frame_end(ctx, inspector, &frame_init.frame_input, &mut output);
             return Ok(ItemOrResult::Result(output));
@@ -372,6 +391,50 @@ where
         inspector.initialize_interp(&mut frame.interpreter, ctx);
         Ok(ItemOrResult::Item(frame))
     }
+}
+
+impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
+    /// System contract interception: a `CALL` or `STATICCALL` to a system contract answered by
+    /// `MegaETH` instead of the contract's code.
+    ///
+    /// The extension point of the system contract interceptors; nothing is intercepted yet. An
+    /// answer is a [`synthetic_frame_result`](crate::synthetic_frame_result), so it settles like
+    /// a frame revm ran.
+    // Takes the EVM mutably: an interceptor reads and writes the context.
+    #[allow(clippy::needless_pass_by_ref_mut)]
+    #[inline]
+    const fn intercept(&mut self, _frame_init: &FrameInit) -> Option<FrameResult> {
+        None
+    }
+
+    /// The keyless deployment rewrite: a keyless deployment call turned into the native creation
+    /// it stands for.
+    ///
+    /// The extension point of native keyless deployment; nothing is rewritten yet.
+    // Takes the EVM mutably: the rewrite validates the deployment against the journal.
+    #[allow(clippy::needless_pass_by_ref_mut)]
+    #[inline]
+    const fn rewrite_keyless(&mut self, frame_init: FrameInit) -> FrameInit {
+        frame_init
+    }
+}
+
+/// The depth guard: a `CALL` or `STATICCALL` past the call-stack limit, answered with
+/// `CallTooDeep`, its gas untouched and its reservoir carried.
+///
+/// revm checks the depth when it builds a frame; an interceptor or an inspector answers before
+/// revm builds anything, so without the guard a system contract could be reached at any depth.
+/// `CALLCODE` and `DELEGATECALL` never reach an interceptor and are left to revm's own check.
+fn call_too_deep(frame_init: &FrameInit) -> Option<FrameResult> {
+    let FrameInput::Call(inputs) = &frame_init.frame_input else { return None };
+    let guarded = matches!(inputs.scheme, CallScheme::Call | CallScheme::StaticCall);
+    (guarded && frame_init.depth > CALL_STACK_LIMIT as usize).then(|| {
+        synthetic_frame_result(
+            &frame_init.frame_input,
+            InstructionResult::CallTooDeep,
+            Bytes::new(),
+        )
+    })
 }
 
 /// Hands the logs journaled since `logs_i` to the inspector, outside any interpreter.

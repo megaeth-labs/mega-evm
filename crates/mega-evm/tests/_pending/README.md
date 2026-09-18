@@ -36,14 +36,14 @@ Do not add a `_pending/main.rs`.
 | the state-growth and KV limits | 56 | 55 | 1 | 0 | 35 | 21 |
 | revert-class aborts | 17 | 17 | 0 | 0 | 17 | 0 |
 | the pre-block system calls | 18 | 15 | 3 | 14 | 4 | 0 |
-| the system contract interceptors | 65 | 57 | 8 | 56 | 9 | 0 |
+| the system contract interceptors | 62 | 54 | 8 | 53 | 9 | 0 |
 | system contract deployment | 67 | 17 | 50 | 62 | 5 | 0 |
 | the oracle and control contracts | 77 | 77 | 0 | 67 | 10 | 0 |
 | native keyless deployment | 75 | 73 | 2 | 29 | 46 | 0 |
 | the block executor | 53 | 23 | 30 | 39 | 14 | 0 |
 | inspector support | 4 | 4 | 0 | 1 | 3 | 0 |
 | — (undecided: D57 preload-warm cold charging, D58 98/100 forwarding) | 7 | 7 | 0 | 0 | 0 | 7 |
-| **Total** | **731** | **607** | **124** | **410** | **293** | **28** |
+| **Total** | **728** | **604** | **124** | **407** | **293** | **28** |
 
 ## Tests ported in place
 
@@ -114,13 +114,14 @@ It becomes assertable with the common execution layer, which defines the frame o
 
 ## Tests ported by the common execution layer
 
-These 40 rows run in a real test target now, adapted to the Satin API, so the counts above are lower than the inventory's by exactly these rows.
+These 43 rows run in a real test target now, adapted to the Satin API, so the counts above are lower than the inventory's by exactly these rows.
 
 | Legacy file | Owner in the inventory | Tests | Now in |
 |---|---|---:|---|
 | `equivalence/evm_state.rs` | the common execution layer (3) | 3 | `tests/satin/state.rs` |
 | `mini_rex/db_error.rs` | the common execution layer (4) | 4 | `tests/satin/db_error.rs` |
 | `rex4/eip7702_delegation_cycle.rs` | the common execution layer (1) | 1 | `tests/satin/state.rs` |
+| `rex5/call_too_deep_guard.rs` | the system contract interceptors (3) | 3 | `tests/satin/synthetic_frame_gas.rs` |
 | `rex5/frame_target_updated_dedup.rs` | the common execution layer (5) | 5 | `tests/satin/write_records.rs` |
 | `rex6/create_frame_accounting.rs` | the common execution layer (2) | 2 | `tests/satin/write_records.rs` |
 | `rex6/self_transfer_account_dedup.rs` | the common execution layer (4) | 4 | `tests/satin/write_records.rs` |
@@ -128,7 +129,7 @@ These 40 rows run in a real test target now, adapted to the Satin API, so the co
 | `src/evm/result.rs` | the common execution layer (4) | 4 | `src/evm/result.rs` |
 | `src/limit/frame_limit.rs` | the common execution layer (4) | 4 | `src/limit/frame_limit.rs` |
 | `src/limit/mod.rs` | the common execution layer (3) | 3 | `src/limit/mod.rs` |
-| **Total** | | **40** | |
+| **Total** | | **43** | |
 
 ## Tests the inventory assigns to the Satin skeleton that are parked under another mechanism
 
@@ -182,7 +183,7 @@ Each cell lists `disposition count (mechanism · decision)`.
 | `rex4/limit_control.rs` | 14 | rewrite 9 (the oracle and control contracts · D40 (remaining compute derived from Gas)); keep 5 (the system contract interceptors) |
 | `rex4/storage_call_stipend.rs` | 12 | rewrite 12 (history gas · D14 (separated history-only allowance 160 x CPHB; three leak paths)) |
 | `rex5/apply_pending_changes_gas_budget.rs` | 4 | rewrite 4 (the pre-block system calls · D51 (system source m = 1; the system-call reservoir split)) |
-| `rex5/call_too_deep_guard.rs` | 4 | keep 4 (the system contract interceptors · the synthetic-result contract of the common execution layer) |
+| `rex5/call_too_deep_guard.rs` | 1 | keep 1 (the system contract interceptors · the synthetic-result contract of the common execution layer) |
 | `rex5/callcode_storage_gas.rs` | 6 | rewrite 3 (SALT pricing · D12); keep 3 (SALT pricing · pricing-failure propagation) |
 | `rex5/db_error.rs` | 4 | rewrite 3 (native keyless deployment · native path surfaces DB errors); keep 1 (the system contract interceptors) |
 | `rex5/deposit_caller_accounting.rs` | 7 | rewrite 7 (the system contract interceptors · D16 (kept; must not double-charge with 2780)) |

@@ -8,6 +8,7 @@
 mod context;
 mod execution;
 mod factory;
+mod frame;
 mod host;
 mod instructions;
 mod result;
@@ -16,6 +17,7 @@ mod spec;
 pub use context::*;
 pub use execution::*;
 pub use factory::*;
+pub use frame::*;
 pub use host::*;
 pub use result::*;
 pub use spec::*;
