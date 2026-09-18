@@ -8,7 +8,7 @@ External dependency abstraction for block-scoped SALT and oracle data consumed d
 - `factory.rs`: `ExternalEnvFactory` trait for block-scoped environment creation.
 - `salt.rs`: SALT trait and bucket-id derivation rules.
 - `oracle.rs`: oracle trait for storage reads and hint side effects.
-- SALT pricing (the state-gas price hook that consumes `SaltEnv`) is not here yet; T3.2 adds it.
+- SALT pricing (the state-gas price hook that consumes `SaltEnv`) is not here yet.
 - `hasher/`: hashing utilities used for deterministic bucket-id computation.
 
 ## KEY PATTERNS
@@ -25,5 +25,5 @@ External dependency abstraction for block-scoped SALT and oracle data consumed d
 
 ## WHERE TO LOOK
 - Add a new external backend implementation: implement `SaltEnv`/`OracleEnv` and an `ExternalEnvFactory`.
-- Change oracle storage retrieval behavior: `oracle.rs` trait impls (the host integration arrives with T6.3).
+- Change oracle storage retrieval behavior: `oracle.rs` trait impls (the host integration is not here yet).
 - Change bucket-id mapping logic: `salt.rs` and `hasher/` helpers.

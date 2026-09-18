@@ -1,6 +1,6 @@
 //! `ExecuteEvm::transact` on the Satin engine next to op-revm's `OpEvm` on the same `CfgEnv`.
 //!
-//! A skeleton that keeps one benchmark target alive; T2.2 rebuilds the benchmark suite. Each
+//! A skeleton that keeps one benchmark target alive until the benchmark suite is rebuilt. Each
 //! workload runs through `MegaEvm` (`satin`) and through `OpEvm` (`op_revm`), so the gap is the
 //! wrapper's own cost. EVM construction is setup and is not measured.
 #![allow(missing_docs)]

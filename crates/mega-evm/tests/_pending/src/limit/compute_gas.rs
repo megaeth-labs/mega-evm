@@ -1,6 +1,6 @@
-//! Unit tests extracted from `crates/mega-evm/src/limit/compute_gas.rs` when T2.1 replaced the legacy core.
+//! Unit tests extracted from `crates/mega-evm/src/limit/compute_gas.rs` when the Satin skeleton replaced the legacy core.
 //! The code they test is at `git show a8f8c7c9:crates/mega-evm/src/limit/compute_gas.rs`.
-//! Owning tickets are listed in `tests/_pending/README.md`.
+//! Owning mechanisms are listed in `tests/_pending/README.md`.
 
 #[cfg(test)]
 mod tests {

@@ -24,7 +24,7 @@ This is the single most important correctness concern in mega-evm.
 - All execution logic must be **deterministic and architecture-independent** — no `mem::transmute`, no native-endian byte conversions, no platform-dependent operations in consensus paths.
 - Pre-block helpers (system contract deploys, pre-exec system calls, etc.) must return `Option<EvmState>` for the block executor to commit — never call `db.commit(...)` directly.
   Even idempotent "no change" paths must return `Some(EvmState)` with a read-only account entry; silently returning `None` drops the account from the stateless witness read set and produces an incomplete proof.
-  On `main` the full contract is in `crates/mega-evm/src/system/AGENTS.md` → `PRE-BLOCK STATE CHANGE CONTRACT`; on `satin` the pre-block helpers arrive with T5.2 and T6.2.
+  On `main` the full contract is in `crates/mega-evm/src/system/AGENTS.md` → `PRE-BLOCK STATE CHANGE CONTRACT`; on `satin` the pre-block helpers arrive with the pre-block system calls and the system contract deployments.
   The same applies inside execution: read through the journal (`inspect_account`), never `journal.database.basic(...)`, or the account driving the result is missing from the returned state — and an early halt placed before the sandbox state merge drops that read set entirely.
 - Per-frame gas mechanisms (stipends, adjustments) must handle all frame termination paths: system contract interception, gas rescue on limit exceed, and frame return.
   Missing any path causes gas leakage.

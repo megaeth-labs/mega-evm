@@ -2,8 +2,7 @@
 [workspace]
 # The tool crates (`bin/mega-evme`, `bin/mega-t8n`, `crates/mega-state-test`,
 # `crates/state-test`) still target the legacy engine; their sources are kept
-# untouched and they rejoin the workspace when T10.1 (state-test), T10.2
-# (mega-evme) and T10.3 (mega-t8n) port them to Satin.
+# untouched and each rejoins the workspace when it is ported to Satin.
 members = ["crates/mega-evm", "crates/system-contracts"]
 default-members = ["crates/mega-evm"]
 exclude = []

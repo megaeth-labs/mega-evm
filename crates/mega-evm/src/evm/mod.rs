@@ -2,7 +2,7 @@
 //!
 //! [`MegaEvm`] wraps op-revm's [`OpEvm`] over a [`MegaContext`] configured for the Satin spec.
 //! It adds no `MegaETH` behavior yet: SALT pricing, history gas, resource limits, detention and
-//! the system contracts arrive with T3 through T8.
+//! the system contracts are not here yet.
 
 mod context;
 mod factory;
@@ -36,7 +36,7 @@ pub(crate) type MegaInstructions<DB, ExtEnvs> =
 
 /// The op-revm EVM a [`MegaEvm`] wraps.
 ///
-/// It runs op-revm's precompile set for the base spec; T3.1 replaces it with the Satin set.
+/// It runs op-revm's precompile set for the base spec until the Satin precompile set lands.
 pub(crate) type MegaInnerEvm<DB, INSP, ExtEnvs> =
     OpEvm<MegaContext<DB, ExtEnvs>, INSP, MegaInstructions<DB, ExtEnvs>, OpPrecompiles>;
 

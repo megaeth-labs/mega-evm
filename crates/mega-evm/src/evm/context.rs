@@ -122,8 +122,8 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
 ///
 /// Satin runs on the Osaka gas table of its Karst base, with EIP-8037 state gas and the EIP-2780
 /// intrinsic cost switched on and gas above the execution cap going to the state-gas reservoir.
-/// The EIP-7708 transfer logs and the system-call reservoir margin stay off until T3.1 and T5.2
-/// switch them on.
+/// The EIP-7708 transfer logs and the system-call reservoir margin stay off until the Satin gas
+/// table and the system-call reservoir split switch them on.
 fn spec_cfg(mut cfg: CfgEnv<MegaSpecId>) -> CfgEnv<MegaSpecId> {
     cfg.gas_params = GasParams::new_spec(cfg.spec.into_eth_spec());
     cfg.enable_amsterdam_eip8037 = true;
@@ -283,8 +283,11 @@ mod tests {
             assert!(eip8037, "EIP-8037 must be on");
             assert!(eip2780, "EIP-2780 must be on");
             assert_eq!(cap, Some(200_000_000), "execution cap");
-            assert!(!eip7708, "EIP-7708 stays off until T3.1");
-            assert!(!margin, "the system-call reservoir margin stays off until T5.2");
+            assert!(!eip7708, "EIP-7708 stays off until the Satin gas table");
+            assert!(
+                !margin,
+                "the system-call reservoir margin stays off until the reservoir split"
+            );
         }
         let osaka = GasParams::new_spec(EthSpecId::OSAKA);
         assert_eq!(mega.gas_params.table(), osaka.table());

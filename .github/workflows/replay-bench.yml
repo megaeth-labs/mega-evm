@@ -105,7 +105,7 @@ jobs:
     name: Replay throughput
     needs: prepare
     # Disabled on the satin branch: this job builds `state-test`, which is not a
-    # workspace member until T10.1 ports it to the Satin engine. T10.1 removes
+    # workspace member until it is ported to the Satin engine; the port removes
     # this line. (`compare` needs this job, so it is skipped with it.) Scheduled
     # and comment-triggered runs use the default branch's copy of this file.
     if: false

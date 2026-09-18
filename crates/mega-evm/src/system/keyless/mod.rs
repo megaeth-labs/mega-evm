@@ -2,9 +2,9 @@
 //! error ABI.
 //!
 //! These are data-only helpers: decoding the pre-EIP-155 transaction, recovering its signer,
-//! deriving the deploy address, and mapping errors to and from the `IKeylessDeploy` ABI. T6.1
-//! adds the interceptor that dispatches `keylessDeploy` calls, and T7 executes the deployment
-//! as a native CREATE sub-frame.
+//! deriving the deploy address, and mapping errors to and from the `IKeylessDeploy` ABI. The
+//! interceptor that dispatches `keylessDeploy` calls and the deployment as a native CREATE
+//! sub-frame are not here yet.
 
 mod error;
 mod tx;

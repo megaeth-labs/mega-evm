@@ -4,18 +4,18 @@
 //! A constant that no code reads yet is here so the whole placeholder set can be reviewed in
 //! one place.
 //!
-//! | Constant | Value | Meaning | Read from |
+//! | Constant | Value | Meaning | Read by |
 //! |---|---:|---|---|
-//! | [`COST_PER_STATE_BYTE`] | 1,530 | gas per byte of new state (EIP-8037 CPSB) | T3.1 |
-//! | [`SLOT_STATE_GAS`] | 97,920 | state gas of one new storage slot (64 bytes) | T3.1 |
-//! | [`ACCOUNT_STATE_GAS`] | 183,600 | state gas of one new account (120 bytes) | T3.1 |
-//! | [`COST_PER_HISTORY_BYTE`] | 88 | gas per history byte (CPHB) | T3.3 |
-//! | [`TX_GAS_LIMIT_CAP`] | 200,000,000 | execution cap: regular gas one transaction may spend | now |
-//! | [`TX_DATA_LIMIT`] | 13,107,200 | data size one transaction may produce (as Rex6) | T4.1 |
-//! | [`BLOCK_DATA_LIMIT`] | 13,107,200 | data size one block may produce (as Rex6) | T4.1 |
+//! | [`COST_PER_STATE_BYTE`] | 1,530 | gas per byte of new state (EIP-8037 CPSB) | the Satin gas table (not yet) |
+//! | [`SLOT_STATE_GAS`] | 97,920 | state gas of one new storage slot (64 bytes) | the Satin gas table (not yet) |
+//! | [`ACCOUNT_STATE_GAS`] | 183,600 | state gas of one new account (120 bytes) | the Satin gas table (not yet) |
+//! | [`COST_PER_HISTORY_BYTE`] | 88 | gas per history byte (CPHB) | history gas (not yet) |
+//! | [`TX_GAS_LIMIT_CAP`] | 200,000,000 | execution cap: regular gas one transaction may spend | the spec configuration |
+//! | [`TX_DATA_LIMIT`] | 13,107,200 | data size one transaction may produce (as Rex6) | the data-size limit (not yet) |
+//! | [`BLOCK_DATA_LIMIT`] | 13,107,200 | data size one block may produce (as Rex6) | the data-size limit (not yet) |
 //!
 //! The storage call stipend and the per-transaction and per-block state-gas limits are further
-//! placeholders; T3.3 and T4.3 add them with the mechanisms that read them.
+//! placeholders; history gas and the state-gas limits add them when they land.
 
 use revm::primitives::eip8037::{NEW_ACCOUNT_BYTES, SSTORE_SET_BYTES};
 

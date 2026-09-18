@@ -1,8 +1,8 @@
 //! Block executor of the Satin engine.
 //!
-//! T8.1 builds block execution here: alloy-evm's `BlockExecutor` over a
-//! [`MegaEvm`](crate::MegaEvm), the Karst block rules, the pre-block system calls (T5.2) and
-//! deployments (T6.2), and the block-level limits.
+//! Block execution lands here with the block executor: alloy-evm's `BlockExecutor` over a
+//! [`MegaEvm`](crate::MegaEvm), the Karst block rules, the pre-block system calls and
+//! system contract deployments, and the block-level limits.
 
 /// Executes the transactions of one block on a Satin EVM.
 ///

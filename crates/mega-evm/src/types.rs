@@ -1,7 +1,7 @@
 //! Common type definitions of the Satin engine.
 //!
-//! The result and error types are aliases of the OP ones for now; T2.3 decides the result and
-//! gas types the engine exposes.
+//! The result and error types are aliases of the OP ones for now; the common execution layer
+//! decides the result and gas types the engine exposes when it lands.
 
 /// `MegaETH` transaction as the EVM executes it.
 ///

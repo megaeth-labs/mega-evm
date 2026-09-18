@@ -10,8 +10,8 @@ This branch (`satin`) builds **Satin**, the new engine: a single spec on the Meg
 Today's `main` is the legacy engine; Satin is the only active spec.
 The legacy engine (specs `Equivalence` through `Rex7`, the 1.x crate line on crates.io revm 27) is frozen and is not edited here.
 
-Satin is being built ticket by ticket from an empty skeleton.
-The module table below says what exists and which ticket fills the rest.
+Satin is being built mechanism by mechanism from an empty skeleton.
+The module table below says what exists and which mechanisms fill the rest.
 
 ## Build & Development Commands
 
@@ -33,7 +33,7 @@ cargo fmt --all --check
 cargo clippy --workspace --lib --examples --tests --benches --all-features --locked
 cargo sort --check --workspace --grouped --order package,workspace,lints,profile,bin,benches,dependencies,dev-dependencies,features
 
-# Benchmarks (`transact` is the only target until T2.2 rebuilds the suite)
+# Benchmarks (`transact` is the only target until the benchmark suite is rebuilt on Satin)
 cargo bench -p mega-evm --bench transact                                  # wall-clock + HTML report
 cargo codspeed build -p mega-evm --bench <target> && cargo codspeed run   # instruction counts (Linux only)
 
@@ -52,13 +52,13 @@ Git submodules are required — clone with `--recursive` or run `git submodule u
 | ----------------------- | ------------------------- | ------ | ------------------------------------------------------------ |
 | `mega-evm`              | `crates/mega-evm`         | yes    | The Satin engine                                             |
 | `mega-system-contracts` | `crates/system-contracts` | yes    | Solidity system contracts with Rust bindings (Foundry-based) |
-| `mega-state-test`       | `crates/mega-state-test`  | no     | State-test runner library; rejoins with T10.1                |
-| `state-test`            | `crates/state-test`       | no     | State-test CLI; rejoins with T10.1                           |
-| `mega-evme`             | `bin/mega-evme`           | no     | EVM execution CLI; rejoins with T10.2                        |
-| `mega-t8n`              | `bin/mega-t8n`            | no     | State transition (t8n) tool; rejoins with T10.3              |
+| `mega-state-test`       | `crates/mega-state-test`  | no     | State-test runner library; rejoins when ported to Satin      |
+| `state-test`            | `crates/state-test`       | no     | State-test CLI; rejoins when ported to Satin                 |
+| `mega-evme`             | `bin/mega-evme`           | no     | EVM execution CLI; rejoins when ported to Satin              |
+| `mega-t8n`              | `bin/mega-t8n`            | no     | State transition (t8n) tool; rejoins when ported to Satin    |
 
 The four tool crates still target the legacy engine.
-They are outside `[workspace] members`, so no workspace command builds them; do not edit their sources until their ticket ports them.
+They are outside `[workspace] members`, so no workspace command builds them; do not edit their sources until they are ported to Satin.
 
 ### Dependencies on the forks
 
@@ -84,17 +84,17 @@ The root `Cargo.toml` pins `revm = "=40.0.3"` and redirects all twelve revm crat
 
 ### Core Source Layout (`crates/mega-evm/src/`)
 
-| Module         | Holds now                                                                                                               | Filled by                                                                                                                          |
-| -------------- | ----------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| `evm/`         | `MegaSpecId`; `MegaContext`; `MegaEvm` over op-revm's `OpEvm`; `MegaEvmFactory` (alloy-evm)                             | T2.3 (frame lifecycle, result and gas types, inspector entry), T3.1–T3.4 (gas table, SALT pricing, history gas, compute), T5, T8.2 |
-| `block/`       | `MegaHardfork`, the chain activation table, a `MegaBlockExecutor` skeleton                                              | T8.1 (executor, Karst block rules), T5.2 (pre-block calls), T6.2 (deployments)                                                     |
-| `external/`    | `ExternalEnvFactory`, `ExternalEnvs`, `SaltEnv`, `OracleEnv`, `EmptyExternalEnv`, the bucket hasher, `TestExternalEnvs` | T3.2 (SALT pricing), T6.3 (oracle)                                                                                                 |
-| `limit/`       | nothing                                                                                                                 | T2.3 (observe-stage-commit layer, abort protocol), T4.1 (data size), T4.2 (detention), T4.3 (state-gas limits, KV count)           |
-| `access/`      | nothing                                                                                                                 | T4.2 (volatile-data access tracking)                                                                                               |
-| `system/`      | `keyless`: the Nick's Method transaction format, validation helpers and error ABI (data only)                           | T6.1 (interceptors), T6.2 (deployment), T6.3 (oracle and control contracts), T7 (keyless as a native CREATE sub-frame)             |
-| `constants.rs` | the provisional numbers (CPSB, slot and account state gas, CPHB, execution cap, data-size limits)                       | read by T3–T4; the numbers are signed off by T14                                                                                   |
-| `types.rs`     | transaction, halt reason, error and envelope aliases                                                                    | T2.3                                                                                                                               |
-| `test_utils/`  | `MemoryDatabase`, `ErrorInjectingDatabase`, `BytecodeBuilder`, `GasInspector`, `transact`                               | T8.2 extends `BytecodeBuilder`                                                                                                     |
+| Module         | Holds now                                                                                                               | Filled by                                                                                                                                                                                                                           |
+| -------------- | ----------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `evm/`         | `MegaSpecId`; `MegaContext`; `MegaEvm` over op-revm's `OpEvm`; `MegaEvmFactory` (alloy-evm)                             | the common execution layer (frame lifecycle, result and gas types, inspector entry); the Satin gas table, SALT pricing, history gas, compute gas; revert-class policy aborts, the system-call reservoir split; EIP-7708 and SLOTNUM |
+| `block/`       | `MegaHardfork`, the chain activation table, a `MegaBlockExecutor` skeleton                                              | the block executor (Karst block rules), the pre-block system calls, the system contract deployments                                                                                                                                 |
+| `external/`    | `ExternalEnvFactory`, `ExternalEnvs`, `SaltEnv`, `OracleEnv`, `EmptyExternalEnv`, the bucket hasher, `TestExternalEnvs` | SALT pricing, the oracle                                                                                                                                                                                                            |
+| `limit/`       | nothing                                                                                                                 | the observe-stage-commit layer and abort protocol, the data-size limit, detention, the state-growth and KV limits                                                                                                                   |
+| `access/`      | nothing                                                                                                                 | volatile-data access tracking (detention)                                                                                                                                                                                           |
+| `system/`      | `keyless`: the Nick's Method transaction format, validation helpers and error ABI (data only)                           | the system contract interceptors, deployment and oracle and control contracts; keyless deployment as a native CREATE sub-frame                                                                                                      |
+| `constants.rs` | the provisional numbers (CPSB, slot and account state gas, CPHB, execution cap, data-size limits)                       | read by the gas and limit mechanisms; the numbers are provisional until the economics sign-off                                                                                                                                      |
+| `types.rs`     | transaction, halt reason, error and envelope aliases                                                                    | the common execution layer                                                                                                                                                                                                          |
+| `test_utils/`  | `MemoryDatabase`, `ErrorInjectingDatabase`, `BytecodeBuilder`, `GasInspector`, `transact`                               | `BytecodeBuilder` is extended with EIP-7708 and SLOTNUM                                                                                                                                                                             |
 
 ### How Satin executes today
 
@@ -102,18 +102,18 @@ The root `Cargo.toml` pins `revm = "=40.0.3"` and redirects all twelve revm crat
   It keeps the configuration twice — the `MegaSpecId` view callers see and the `OpSpecId` view op-revm executes on — and writes both together.
 - The spec fixes part of the configuration, whatever the caller passes (`MegaContext::with_cfg`): the Osaka gas table, EIP-8037 on, the EIP-2780 intrinsic cost on, `tx_gas_limit_cap` = 200,000,000, EIP-7708 off, the system-call reservoir margin off.
   Gas above the 200M execution cap goes to the EIP-8037 reservoir.
-  The Osaka gas table prices state gas at zero, so no transaction draws state gas until T3.1 installs the Satin gas table.
+  The Osaka gas table prices state gas at zero, so no transaction draws state gas until the Satin gas table is installed.
 - Every `Host` and context method delegates to op-revm's context, and `MegaEvm` delegates execution to `OpEvm`.
-  `tests/satin/equivalence.rs` pins that Satin currently equals op-revm on the same `CfgEnv`, field by field; a later ticket that changes behavior on purpose updates that baseline.
+  `tests/satin/equivalence.rs` pins that Satin currently equals op-revm on the same `CfgEnv`, field by field; a later change that alters behavior on purpose updates that baseline.
 - The legacy engine's gas leakage pitfalls, limit-check protocol and storage-gas stipend describe mechanisms that do not exist here.
-  T2.3 defines Satin's frame, abort and write-record contracts; follow those once they land.
+  The common execution layer defines Satin's frame, abort and write-record contracts; follow those once they land.
 
 ## Test Organization (`crates/mega-evm/tests/`)
 
 - `satin/` — tests of the Satin engine (integration tests; add new ones here or in a new directory with a `main.rs`).
-- `_pending/` — the legacy tests the T0 inventory keeps, parked until their ticket ports them.
-  It has no `main.rs`, so Cargo does not build it; its `README.md` names the owner of every file.
-  When a ticket ports a pending test, it deletes it from `_pending/` in the same commit.
+- `_pending/` — the legacy tests the test inventory keeps, parked until the mechanism they test lands.
+  It has no `main.rs`, so Cargo does not build it; its `README.md` names the mechanism that owns every file.
+  The change that ports a pending test deletes it from `_pending/` in the same commit.
 - Unit tests live next to the code in `#[cfg(test)] mod tests`.
 
 ## Version Control
@@ -167,11 +167,11 @@ When the agent is requested to implement a new feature or bug fix, it should con
 ## Caveats for Agents
 
 - **Satin is the only active spec; the legacy engine is frozen.**
-  Do not add legacy specs, alias rungs or spec gates to this crate, and do not port a legacy mechanism the T0 inventory retired.
+  Do not add legacy specs, alias rungs or spec gates to this crate, and do not port a legacy mechanism the legacy test inventory retired.
   Behavior of the legacy specs is changed only on the legacy line, never here.
-- **Build from the skeleton, one ticket at a time.**
-  Each module is filled by the ticket named in the module table; do not implement another ticket's mechanism to make yours work.
-  If a ticket needs an interface that belongs to another ticket, stub the smallest interface and name the owning ticket.
+- **Build from the skeleton, one mechanism at a time.**
+  Each module is filled by the mechanisms named in the module table; do not implement another mechanism to make yours work.
+  If a change needs an interface that belongs to another mechanism, stub the smallest interface and name the mechanism that owns it.
 - **Always test logic changes.**
   Any logic change or modification to mega-evm should be equipped with tests if there is no specific reason of not adding tests.
   The agent should always consider accompanying tests or suggest to add additional tests.
@@ -189,16 +189,16 @@ When the agent is requested to implement a new feature or bug fix, it should con
   New `#[test]` functions should be named with a `test_` prefix for consistency with this repository and upstream revm style.
   If editing nearby tests in the same module, align names to the same `test_` style when reasonable.
 - **System contracts carry over as they are.**
-  Satin reuses the Solidity sources and bindings in `crates/system-contracts`; changing a contract needs a decision of its own, not a side effect of an engine ticket.
-- **Rules for system contract interceptors (T6 onwards).**
+  Satin reuses the Solidity sources and bindings in `crates/system-contracts`; changing a contract needs a decision of its own, not a side effect of an engine change.
+- **Rules for system contract interceptors (once the interceptors land).**
   For read-only or control methods, reject calls with non-zero `transfer_value` in the interceptor; if a method intentionally accepts value, document the reason in spec and code comments and add dedicated tests.
   Do not intercept unknown selectors: they fall through to on-chain bytecode and revert with a stable custom error such as `NotIntercepted()`.
   Only `CALL` and `STATICCALL` reach interceptor dispatch; `CALLCODE` and `DELEGATECALL` are rejected by the call-scheme guard before any interceptor is consulted.
   Interceptor tests cover the intercepted path, non-zero value, unknown selector fallback, and CALL vs DELEGATECALL/CALLCODE boundaries.
-- **Validate per-fork parameters at load time (T8.1 onwards).**
+- **Validate per-fork parameters at load time (once the block executor lands).**
   A hardfork parameters type overrides `HardforkParams::validate()` with field-level invariant checks, so a bad chain config fails when it is loaded rather than at the fork's first block.
   The fork-requires-params rule is registered in the schedule validation too, so a schedule that activates the fork without its params is rejected at load time.
-- **Pre-block helpers must return state, not commit directly (T5.2, T6.2).**
+- **Pre-block helpers must return state, not commit directly (pre-block system calls, system contract deployment).**
   Any helper participating in pre-block execution (system contract deploys, pre-block system calls, etc.) returns `Option<EvmState>` and never calls `db.commit(...)` directly, so the witness generator sees the complete read and write set.
 - **Respect `no_std` in `mega-evm` crate.**
   Do not use `std::` directly.
@@ -220,7 +220,7 @@ When the agent is requested to implement a new feature or bug fix, it should con
   Run `cargo fmt --all --check` before completion.
 - **Keep documentation up to date.**
   When making changes, always check whether related documentation needs updating.
-  The primary documentation is in `docs/`; it still describes the legacy engine until T15 writes the Satin pages.
+  The primary documentation is in `docs/`; it still describes the legacy engine until the Satin specification pages are written.
   The spec documentation is under `docs/spec/`, and the mega-evme documentation is under `docs/mega-evme/`.
   Also update this `AGENTS.md` when relevant (e.g., the module table, the unstable-spec marker).
 - **One sentence, one line.**

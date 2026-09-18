@@ -149,7 +149,7 @@ fn test_sstore_matches_op_revm() {
     assert!(mega.result.is_success());
     assert_eq!(mega.state[&CALLEE].storage[&U256::ZERO].present_value, U256::from(42));
     // The Osaka gas table has no state-gas prices, so the new slot draws no state gas even with
-    // EIP-8037 on. The Satin gas table (T3.1) prices it; this assertion changes with it.
+    // EIP-8037 on. The Satin gas table prices it; this assertion changes with it.
     assert_eq!(mega.result.gas().state_gas_spent_final(), 0);
     assert_same(&mega, &op);
 }
