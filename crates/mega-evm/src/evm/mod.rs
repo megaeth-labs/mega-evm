@@ -157,6 +157,36 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
     }
 }
 
+impl<DB, INSP, ExtEnvs> MegaEvm<DB, INSP, ExtEnvs>
+where
+    DB: Database,
+    INSP: Inspector<MegaContext<DB, ExtEnvs>, EthInterpreter>,
+    ExtEnvs: ExternalEnvTypes,
+{
+    /// Executes `tx`, through the inspector when one is enabled, and returns its outcome: the
+    /// result and state, the gas by ledger, the usage the common execution layer counted and the
+    /// limit that stopped the transaction, if any. Nothing is committed.
+    pub fn execute_transaction(
+        &mut self,
+        tx: MegaTransaction,
+    ) -> Result<MegaTransactionOutcome, EVMError<DB::Error, MegaTransactionError>> {
+        let result_and_state = if self.inspect {
+            InspectEvm::inspect_tx(self, tx)
+        } else {
+            ExecuteEvm::transact(self, tx)
+        }
+        .map_err(map_op_err)?;
+        let layer = &self.inner.ctx.additional_limit;
+        let gas = MegaGasUsage::new(result_and_state.result.gas(), layer.history_gas_spent());
+        Ok(MegaTransactionOutcome {
+            result_and_state,
+            gas,
+            usage: layer.usage(),
+            limit_exceeded: layer.latched().copied(),
+        })
+    }
+}
+
 /// The error a [`MegaEvm`] reports through revm's execution traits.
 pub type MegaEvmError<DBError> = EVMError<DBError, OpTransactionError>;
 

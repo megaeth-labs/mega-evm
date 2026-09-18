@@ -13,7 +13,42 @@
 //! [`gas_used`](MegaGasUsage::gas_used), which is their sum less the refund, at least the EIP-7623
 //! floor.
 
-use revm::context::result::ResultGas;
+use revm::context::result::{ResultAndState, ResultGas};
+
+use crate::{LimitCheck, LimitUsage, MegaHaltReason};
+
+/// What executing one transaction produced: revm's result and state, and what `MegaETH` counts
+/// beside them.
+///
+/// Derefs to the [`ResultAndState`], so `outcome.result` and `outcome.state` read through.
+#[derive(Clone, Debug)]
+pub struct MegaTransactionOutcome {
+    /// The execution result and the post-execution state.
+    pub result_and_state: ResultAndState<MegaHaltReason>,
+    /// The gas by ledger, and what the receipt reports.
+    pub gas: MegaGasUsage,
+    /// The data-size bytes and write records the transaction kept. The KV count a node reports
+    /// is [`LimitUsage::write_records`].
+    pub usage: LimitUsage,
+    /// The transaction-level limit that stopped the transaction, if one did. The result is then a
+    /// revert whose output is its [`MegaLimitExceeded`](crate::MegaLimitExceeded); this, not the
+    /// output, tells a limit stop from a contract reverting with the same bytes.
+    pub limit_exceeded: Option<LimitCheck>,
+}
+
+impl core::ops::Deref for MegaTransactionOutcome {
+    type Target = ResultAndState<MegaHaltReason>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.result_and_state
+    }
+}
+
+impl core::ops::DerefMut for MegaTransactionOutcome {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.result_and_state
+    }
+}
 
 /// The gas one transaction spent, by ledger, and what its receipt reports.
 ///

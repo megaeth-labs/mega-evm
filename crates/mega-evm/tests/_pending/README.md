@@ -26,7 +26,6 @@ Do not add a `_pending/main.rs`.
 
 | Owning mechanism | Tests | From `tests/` | From `src/` | Keep | Rewrite | Undecided |
 |---|---:|---:|---:|---:|---:|---:|
-| the common execution layer | 1 | 0 | 1 | 1 | 0 | 0 |
 | the Satin gas table | 34 | 27 | 7 | 7 | 27 | 0 |
 | SALT pricing | 75 | 64 | 11 | 17 | 58 | 0 |
 | history gas | 28 | 24 | 4 | 4 | 24 | 0 |
@@ -43,7 +42,7 @@ Do not add a `_pending/main.rs`.
 | the block executor | 53 | 23 | 30 | 39 | 14 | 0 |
 | inspector support | 4 | 4 | 0 | 1 | 3 | 0 |
 | — (undecided: D57 preload-warm cold charging, D58 98/100 forwarding) | 7 | 7 | 0 | 0 | 0 | 7 |
-| **Total** | **727** | **603** | **124** | **406** | **293** | **28** |
+| **Total** | **726** | **603** | **123** | **405** | **293** | **28** |
 
 ## Tests ported in place
 
@@ -114,7 +113,7 @@ It becomes assertable with the common execution layer, which defines the frame o
 
 ## Tests ported by the common execution layer
 
-These 44 rows run in a real test target now, adapted to the Satin API, so the counts above are lower than the inventory's by exactly these rows.
+These 45 rows run in a real test target now, adapted to the Satin API, so the counts above are lower than the inventory's by exactly these rows.
 
 | Legacy file | Owner in the inventory | Tests | Now in |
 |---|---|---:|---|
@@ -126,10 +125,11 @@ These 44 rows run in a real test target now, adapted to the Satin API, so the co
 | `rex6/create_frame_accounting.rs` | the common execution layer (2) | 2 | `tests/satin/write_records.rs` |
 | `rex6/self_transfer_account_dedup.rs` | the common execution layer (4) | 4 | `tests/satin/write_records.rs` |
 | `src/evm/host.rs` | the common execution layer (10) | 10 | `src/evm/host.rs` |
+| `src/evm/mod.rs` | the common execution layer (1) | 1 | `tests/satin/outcome.rs` |
 | `src/evm/result.rs` | the common execution layer (4) | 4 | `src/evm/result.rs` |
 | `src/limit/frame_limit.rs` | the common execution layer (4) | 4 | `src/limit/frame_limit.rs` |
 | `src/limit/mod.rs` | the common execution layer (3) | 3 | `src/limit/mod.rs` |
-| **Total** | | **44** | |
+| **Total** | | **45** | |
 
 ## Tests the inventory assigns to the Satin skeleton that are parked under another mechanism
 
@@ -137,7 +137,6 @@ These 44 rows run in a real test target now, adapted to the Satin API, so the co
 |---|---|---|---|
 | `src/evm/context.rs` | `test_shared_salt_env_keeps_dynamic_gas_cache_isolated` | SALT pricing | exercises the dynamic storage-gas cache that SALT pricing brings back |
 | `src/evm/factory.rs` | `test_dyn_precompiles_builder_receives_the_behavior_spec` | the Satin gas table | the dynamic precompile builder returns with the Satin precompile set; the behavior projection it pinned has no counterpart in a single-spec engine |
-| `src/evm/mod.rs` | `test_convenience_execution_methods_work` | the common execution layer | `execute_transaction` returns the transaction outcome type that the common execution layer defines |
 | `src/evm/mod.rs` | `test_mega_evm_exposes_state_wrapper_block_hashes` | the block executor | reads the accessed-block-hash record, which returns with the block executor |
 
 ## Files
@@ -225,7 +224,7 @@ Each cell lists `disposition count (mechanism · decision)`.
 | `src/evm/context.rs` | 1 | keep 1 (SALT pricing · SALT pricing for the SALT cache test) |
 | `src/evm/factory.rs` | 1 | rewrite 1 (the Satin gas table · no behaviour projection) |
 | `src/evm/host.rs` | 1 | keep 1 (SALT pricing) |
-| `src/evm/mod.rs` | 5 | keep 3 (the pre-block system calls); keep 1 (the block executor); keep 1 (the common execution layer) |
+| `src/evm/mod.rs` | 4 | keep 3 (the pre-block system calls); keep 1 (the block executor) |
 | `src/evm/precompiles.rs` | 6 | keep 6 (the Satin gas table · D04) |
 | `src/evm/state.rs` | 1 | keep 1 (the block executor) |
 | `src/external/gas.rs` | 9 | rewrite 9 (SALT pricing · D12/D51) |

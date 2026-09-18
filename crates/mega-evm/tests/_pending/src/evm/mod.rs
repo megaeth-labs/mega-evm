@@ -108,20 +108,4 @@ mod tests {
         let evm = MegaEvm::new(configure_context(&mut state));
         assert_eq!(evm.get_accessed_block_hashes().get(&7), Some(&B256::from([7_u8; 32])));
     }
-
-    #[test]
-    fn test_convenience_execution_methods_work() {
-        let mut db = MemoryDatabase::default()
-            .account_balance(CALLER, U256::from(1_000_000))
-            .account_code(CALLEE, Bytes::new());
-        let mut evm = MegaEvm::new(configure_context(&mut db)).with_inspector(NoOpInspector);
-
-        let executed = evm.execute_transaction(mega_tx()).unwrap();
-        assert!(executed.result.is_success());
-
-        #[allow(deprecated)]
-        let inspected = evm.inspect_transaction(mega_tx()).unwrap();
-        assert!(inspected.result.is_success());
-    }
-
 }
