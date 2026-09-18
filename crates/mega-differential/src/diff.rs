@@ -20,6 +20,8 @@ pub struct Difference {
 /// The differences between two records of one scenario, and how many fields were compared.
 #[derive(Debug, Default)]
 pub struct Comparison {
+    /// Scenario name.
+    pub scenario: String,
     /// Fields on which the arms disagree.
     pub differences: Vec<Difference>,
     /// Number of fields compared.
@@ -27,11 +29,11 @@ pub struct Comparison {
 }
 
 impl Comparison {
-    fn field<T: PartialEq + Display>(&mut self, scenario: &str, field: String, left: T, right: T) {
+    fn field<T: PartialEq + Display>(&mut self, field: String, left: T, right: T) {
         self.compared += 1;
         if left != right {
             self.differences.push(Difference {
-                scenario: scenario.to_string(),
+                scenario: self.scenario.clone(),
                 field,
                 left: left.to_string(),
                 right: right.to_string(),
@@ -42,41 +44,34 @@ impl Comparison {
 
 /// Compares the record `MegaEvm` produced (`left`) with the oracle's (`right`).
 pub fn compare(scenario: &str, left: &ScenarioRecord, right: &ScenarioRecord) -> Comparison {
-    let mut cmp = Comparison::default();
-    cmp.field(scenario, "tx_count".into(), left.len(), right.len());
+    let mut cmp = Comparison { scenario: scenario.to_string(), ..Default::default() };
+    cmp.field("tx_count".into(), left.len(), right.len());
     for (i, (l, r)) in left.iter().zip(right).enumerate() {
-        compare_tx(&mut cmp, scenario, &format!("tx[{i}]"), l, r);
+        compare_tx(&mut cmp, &format!("tx[{i}]"), l, r);
     }
     cmp
 }
 
-fn compare_tx(cmp: &mut Comparison, scenario: &str, at: &str, l: &TxRecord, r: &TxRecord) {
-    cmp.field(scenario, format!("{at}.outcome"), &l.outcome, &r.outcome);
+fn compare_tx(cmp: &mut Comparison, at: &str, l: &TxRecord, r: &TxRecord) {
+    cmp.field(format!("{at}.outcome"), &l.outcome, &r.outcome);
     for name in l.gas.keys().chain(r.gas.keys()).collect::<BTreeSet<_>>() {
-        cmp.field(
-            scenario,
-            format!("{at}.gas.{name}"),
-            render(l.gas.get(name)),
-            render(r.gas.get(name)),
-        );
+        cmp.field(format!("{at}.gas.{name}"), render(l.gas.get(name)), render(r.gas.get(name)));
     }
-    cmp.field(scenario, format!("{at}.output"), &l.output, &r.output);
+    cmp.field(format!("{at}.output"), &l.output, &r.output);
     cmp.field(
-        scenario,
         format!("{at}.created"),
         render(l.created.map(|address| format!("{address:#x}"))),
         render(r.created.map(|address| format!("{address:#x}"))),
     );
-    cmp.field(scenario, format!("{at}.logs.len"), l.logs.len(), r.logs.len());
+    cmp.field(format!("{at}.logs.len"), l.logs.len(), r.logs.len());
     for (j, (ll, rl)) in l.logs.iter().zip(&r.logs).enumerate() {
-        cmp.field(scenario, format!("{at}.logs[{j}]"), ll.render(), rl.render());
+        cmp.field(format!("{at}.logs[{j}]"), ll.render(), rl.render());
     }
     for address in l.state.keys().chain(r.state.keys()).collect::<BTreeSet<_>>() {
         let path = format!("{at}.state[{address:#x}]");
         match (l.state.get(address), r.state.get(address)) {
-            (Some(la), Some(ra)) => compare_account(cmp, scenario, &path, la, ra),
+            (Some(la), Some(ra)) => compare_account(cmp, &path, la, ra),
             (la, ra) => cmp.field(
-                scenario,
                 path,
                 la.map_or_else(|| ABSENT.to_string(), AccountRecord::render),
                 ra.map_or_else(|| ABSENT.to_string(), AccountRecord::render),
@@ -85,21 +80,14 @@ fn compare_tx(cmp: &mut Comparison, scenario: &str, at: &str, l: &TxRecord, r: &
     }
 }
 
-fn compare_account(
-    cmp: &mut Comparison,
-    scenario: &str,
-    at: &str,
-    l: &AccountRecord,
-    r: &AccountRecord,
-) {
-    cmp.field(scenario, format!("{at}.created"), l.created, r.created);
-    cmp.field(scenario, format!("{at}.selfdestructed"), l.selfdestructed, r.selfdestructed);
-    cmp.field(scenario, format!("{at}.balance"), l.balance, r.balance);
-    cmp.field(scenario, format!("{at}.nonce"), l.nonce, r.nonce);
-    cmp.field(scenario, format!("{at}.code_hash"), l.code_hash, r.code_hash);
+fn compare_account(cmp: &mut Comparison, at: &str, l: &AccountRecord, r: &AccountRecord) {
+    cmp.field(format!("{at}.created"), l.created, r.created);
+    cmp.field(format!("{at}.selfdestructed"), l.selfdestructed, r.selfdestructed);
+    cmp.field(format!("{at}.balance"), l.balance, r.balance);
+    cmp.field(format!("{at}.nonce"), l.nonce, r.nonce);
+    cmp.field(format!("{at}.code_hash"), l.code_hash, r.code_hash);
     for slot in l.storage.keys().chain(r.storage.keys()).collect::<BTreeSet<_>>() {
         cmp.field(
-            scenario,
             format!("{at}.storage[{slot:#x}]"),
             render(l.storage.get(slot).map(|value| format!("{value:#x}"))),
             render(r.storage.get(slot).map(|value| format!("{value:#x}"))),

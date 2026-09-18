@@ -21,11 +21,12 @@ CI runs the same command as the `differential` job (`.github/workflows/different
 **Left arm: `MegaEvm`.**
 Each transaction runs on a fresh `MegaEvm` over a `MegaContext` for `MegaSpecId::SATIN`, through alloy-evm's `Evm::transact_raw` (system calls through `Evm::transact_system_call`).
 The configuration is the one the spec fixes (`MegaContext::with_cfg`): the Osaka gas table, EIP-8037 and EIP-2780 on, the 200,000,000 execution cap, EIP-7708 and the system-call reservoir margin off.
-The L1 fees are zero (`test_utils::zero_fee_l1_block_info`), every transaction is a non-deposit one with an empty envelope, and the gas price is zero.
+The L1 fees are zero (`test_utils::zero_fee_l1_block_info`), every transaction is a non-deposit one with an empty envelope, and the gas price is the transaction's own (zero unless the scenario sets one).
 `mega-evm` is built with its default features, so the precompiles run on the same backends as in a node.
 
 **Right arm: the oracle.**
 Stock `revm = "=43.0.0"` from crates.io, on its mainnet handler.
+The requirement pins the `revm` crate itself; its sub-crates resolve to the 43.0.x patch releases the lockfile holds (`revm-context`, `revm-handler`, `revm-inspector` and `revm-precompile` 43.0.2, `revm-context-interface` and `revm-interpreter` 43.0.1, the others 43.0.0).
 Its configuration is copied from the left arm's (`oracle::cfg`): the Ethereum spec the Satin spec runs on (Osaka), the gas table entry by entry, and every switch.
 The fork numbers its gas ids as upstream does and adds its own at the top of the table (`tests/claims.rs` checks both, and that the fork-only prices are zero).
 If `MegaEvm` switches on a mechanism revm 43 cannot run (EIP-7708 before Amsterdam, the system-call state-gas margin), `oracle::cfg` panics: the mechanism that switches it on has to model it or register the difference.
@@ -56,7 +57,7 @@ Cargo writes the version requirements of revm 43's optional dependencies into it
 
 `scenarios/` holds one JSON file per scenario; the file stem is the scenario name.
 The format is `mega_evm::test_utils::Scenario`: an optional description, a coinbase, the pre-state accounts (nonce, balance, code, storage; code is legacy bytecode or an EIP-7702 delegation designator) and the transactions, run in order.
-A transaction is a `call`, a `create` or a `system_call`; it may carry an EIP-2930 access list and an EIP-7702 authorization list with the signer already recovered (`authority`, absent for a signature that does not recover).
+A transaction is a `call`, a `create` or a `system_call`; it may carry a `gas_price`, an EIP-2930 access list and an EIP-7702 authorization list with the signer already recovered (`authority`, absent for a signature that does not recover).
 The block is fixed: number 1, timestamp 1, zero base fee, unlimited gas.
 
 | Directory      | Scenarios | Origin                                                                                                                             |

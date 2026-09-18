@@ -11,8 +11,8 @@
 //! - the block is [`Scenario::block`]: number 1, timestamp 1, the scenario's coinbase, zero base
 //!   fee, unlimited gas;
 //! - the configuration is what [`MegaContext`] fixes for the spec;
-//! - the L1 fees are zero ([`zero_fee_l1_block_info`], [`op_transaction`]), and so is the gas
-//!   price, so the callers need no balance beyond the value they send.
+//! - the L1 fees are zero ([`zero_fee_l1_block_info`], [`op_transaction`]), and the gas price is
+//!   the transaction's own (zero unless it sets one).
 
 #[cfg(not(feature = "std"))]
 use alloc as std;
@@ -27,6 +27,7 @@ use revm::{
         result::{EVMError, ResultAndState},
         transaction::{
             AccessList, AccessListItem, Authorization, RecoveredAuthority, RecoveredAuthorization,
+            TransactionType,
         },
         BlockEnv, TxEnv,
     },
@@ -59,7 +60,7 @@ pub struct Scenario {
     /// The accounts that exist before the first transaction.
     pub pre: BTreeMap<Address, PreAccount>,
     /// The transactions, run in order, each on the state the previous one left.
-    pub txs: Vec<TxSpec>,
+    pub txs: Vec<ScenarioTx>,
 }
 
 /// An account of the pre-state.
@@ -83,7 +84,7 @@ pub struct PreAccount {
 /// How a scenario transaction is run.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum TxSpecKind {
+pub enum ScenarioTxKind {
     /// A message call to `to`.
     #[default]
     Call,
@@ -101,7 +102,7 @@ pub enum TxSpecKind {
 /// list, legacy otherwise.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct TxSpec {
+pub struct ScenarioTx {
     /// Sender.
     pub caller: Address,
     /// Target of a call or a system call; absent for a create.
@@ -117,9 +118,13 @@ pub struct TxSpec {
     /// system-call gas limit and must not set one.
     #[serde(default)]
     pub gas_limit: Option<u64>,
+    /// Gas price. With the block's zero base fee it is the effective price of every
+    /// transaction type; zero by default, so a caller needs no balance for gas.
+    #[serde(default)]
+    pub gas_price: u128,
     /// How the transaction is run.
     #[serde(default)]
-    pub kind: TxSpecKind,
+    pub kind: ScenarioTxKind,
     /// EIP-2930 access list.
     #[serde(default)]
     pub access_list: Vec<AccessListEntry>,
@@ -166,17 +171,18 @@ impl Scenario {
         }
         for (i, tx) in self.txs.iter().enumerate() {
             let problem = match tx.kind {
-                TxSpecKind::Call if tx.to.is_none() => Some("a call needs `to`"),
-                TxSpecKind::Create if tx.to.is_some() => Some("a create must not set `to`"),
-                TxSpecKind::Create if !tx.authorization_list.is_empty() => {
+                ScenarioTxKind::Call if tx.to.is_none() => Some("a call needs `to`"),
+                ScenarioTxKind::Create if tx.to.is_some() => Some("a create must not set `to`"),
+                ScenarioTxKind::Create if !tx.authorization_list.is_empty() => {
                     Some("an EIP-7702 transaction cannot create")
                 }
-                TxSpecKind::Call | TxSpecKind::Create if tx.gas_limit.is_none() => {
+                ScenarioTxKind::Call | ScenarioTxKind::Create if tx.gas_limit.is_none() => {
                     Some("a call or a create needs `gas_limit`")
                 }
-                TxSpecKind::SystemCall if tx.to.is_none() => Some("a system call needs `to`"),
-                TxSpecKind::SystemCall
+                ScenarioTxKind::SystemCall if tx.to.is_none() => Some("a system call needs `to`"),
+                ScenarioTxKind::SystemCall
                     if tx.gas_limit.is_some() ||
+                        tx.gas_price != 0 ||
                         !tx.value.is_zero() ||
                         !tx.access_list.is_empty() ||
                         !tx.authorization_list.is_empty() =>
@@ -196,6 +202,10 @@ impl Scenario {
     ///
     /// Code is decoded as the node decodes it: an EIP-7702 delegation designator becomes a
     /// delegation, anything else legacy bytecode.
+    ///
+    /// # Panics
+    ///
+    /// If the scenario does not [`validate`](Self::validate).
     pub fn database(&self) -> MemoryDatabase {
         let mut db = MemoryDatabase::default();
         for (address, account) in &self.pre {
@@ -232,6 +242,10 @@ impl Scenario {
 
     /// Runs every transaction on a fresh [`MegaEvm`] over `db`, committing the state of each
     /// successful one before the next. Returns the outcomes in order and the final database.
+    ///
+    /// # Panics
+    ///
+    /// If the scenario does not [`validate`](Self::validate).
     pub fn run(&self, mut db: MemoryDatabase) -> (Vec<ScenarioTxOutcome>, MemoryDatabase) {
         let mut outcomes = Vec::with_capacity(self.txs.len());
         for tx in &self.txs {
@@ -240,12 +254,12 @@ impl Scenario {
                 .with_chain(zero_fee_l1_block_info());
             let mut evm = MegaEvm::new(ctx);
             let outcome = match tx.kind {
-                TxSpecKind::SystemCall => evm.transact_system_call(
+                ScenarioTxKind::SystemCall => evm.transact_system_call(
                     tx.caller,
                     tx.to.expect("validated: a system call has a target"),
                     tx.data.clone(),
                 ),
-                TxSpecKind::Call | TxSpecKind::Create => {
+                ScenarioTxKind::Call | ScenarioTxKind::Create => {
                     let nonce = evm.db_mut().basic(tx.caller).unwrap().map_or(0, |info| info.nonce);
                     evm.transact_raw(OpTx(op_transaction(tx.tx_env(nonce))))
                 }
@@ -260,21 +274,26 @@ impl Scenario {
     }
 }
 
-impl TxSpec {
+impl ScenarioTx {
     /// The EIP-2718 transaction type the lists imply.
-    pub fn tx_type(&self) -> u8 {
+    pub fn tx_type(&self) -> TransactionType {
         if !self.authorization_list.is_empty() {
-            4
+            TransactionType::Eip7702
         } else if !self.access_list.is_empty() {
-            1
+            TransactionType::Eip2930
         } else {
-            0
+            TransactionType::Legacy
         }
     }
 
     /// The transaction as the EVM executes it, with `nonce` as the sender's nonce.
     ///
     /// Only meaningful for calls and creates; a system call is built by the engine.
+    ///
+    /// # Panics
+    ///
+    /// If the transaction has no gas limit, which [`Scenario::validate`] rejects for a call or
+    /// a create.
     pub fn tx_env(&self, nonce: u64) -> TxEnv {
         let access_list = AccessList(
             self.access_list
@@ -300,14 +319,16 @@ impl TxSpec {
             })
             .collect();
         TxEnv::builder()
-            .tx_type(Some(self.tx_type()))
+            .tx_type(Some(self.tx_type() as u8))
             .caller(self.caller)
             .kind(self.to.map_or(TxKind::Create, TxKind::Call))
             .data(self.data.clone())
             .value(self.value)
-            .gas_limit(self.gas_limit.unwrap_or_default())
-            .gas_price(0)
-            .gas_priority_fee((self.tx_type() == 4).then_some(0))
+            .gas_limit(self.gas_limit.expect("a call or a create has a gas limit"))
+            .gas_price(self.gas_price)
+            .gas_priority_fee(
+                (self.tx_type() == TransactionType::Eip7702).then_some(self.gas_price),
+            )
             .nonce(nonce)
             .access_list(access_list)
             .authorization_list_recovered(authorizations)
@@ -324,20 +345,21 @@ mod tests {
     const CALLER: Address = address!("0x0000000000000000000000000000000000000aaa");
     const CALLEE: Address = address!("0x0000000000000000000000000000000000000bbb");
 
-    fn call(gas_limit: Option<u64>) -> TxSpec {
-        TxSpec {
+    fn call(gas_limit: Option<u64>) -> ScenarioTx {
+        ScenarioTx {
             caller: CALLER,
             to: Some(CALLEE),
             data: Bytes::new(),
             value: U256::ZERO,
             gas_limit,
-            kind: TxSpecKind::Call,
+            gas_price: 0,
+            kind: ScenarioTxKind::Call,
             access_list: Vec::new(),
             authorization_list: Vec::new(),
         }
     }
 
-    fn scenario(txs: Vec<TxSpec>) -> Scenario {
+    fn scenario(txs: Vec<ScenarioTx>) -> Scenario {
         let code = BytecodeBuilder::default().sstore(U256::ZERO, U256::from(7)).stop().build();
         Scenario {
             name: "sstore".into(),
@@ -362,7 +384,7 @@ mod tests {
 
     #[test]
     fn test_validate_rejects_a_system_call_with_gas_limit() {
-        let tx = TxSpec { kind: TxSpecKind::SystemCall, ..call(Some(100_000)) };
+        let tx = ScenarioTx { kind: ScenarioTxKind::SystemCall, ..call(Some(100_000)) };
         let err = scenario(vec![tx]).validate().unwrap_err();
         assert_eq!(err, "sstore: tx[0]: a system call takes only `caller`, `to` and `data`");
     }
@@ -399,17 +421,19 @@ mod tests {
     #[test]
     fn test_tx_type_follows_the_lists() {
         let mut tx = call(Some(100_000));
-        assert_eq!(tx.tx_env(0).tx_type, 0);
+        assert_eq!(tx.tx_env(0).tx_type, TransactionType::Legacy as u8);
         tx.access_list.push(AccessListEntry { address: CALLEE, storage_keys: vec![U256::ZERO] });
-        assert_eq!(tx.tx_env(0).tx_type, 1);
+        assert_eq!(tx.tx_env(0).tx_type, TransactionType::Eip2930 as u8);
         tx.authorization_list.push(AuthorizationEntry {
             chain_id: U256::ZERO,
             address: CALLEE,
             nonce: 0,
             authority: None,
         });
+        tx.gas_price = 5;
         let env = tx.tx_env(3);
-        assert_eq!((env.tx_type, env.nonce, env.gas_priority_fee), (4, 3, Some(0)));
+        assert_eq!(env.tx_type, TransactionType::Eip7702 as u8);
+        assert_eq!((env.nonce, env.gas_price, env.gas_priority_fee), (3, 5, Some(5)));
     }
 
     #[test]

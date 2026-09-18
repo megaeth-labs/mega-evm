@@ -83,3 +83,67 @@ impl AccountRecord {
         )
     }
 }
+
+/// Builds the [`TxRecord`] of an executed transaction, for either arm.
+///
+/// Both revms expose the same accessors on their execution result, logs and state, but as
+/// types of different crates, so one function cannot take both; this macro is that function, so
+/// the two arms cannot drift apart in what they record.
+///
+/// - `$exec`: the arm's `ExecutionResult` type, to match its variants;
+/// - `$result`, `$state`: the result and the state the transaction produced;
+/// - `$halt`: renders the arm's halt reason;
+/// - `$reservoir`: the leftover reservoir when the arm's `ResultGas` does not serialize it.
+macro_rules! tx_record {
+    ($exec:ident, $result:expr, $state:expr, $halt:expr, $reservoir:expr $(,)?) => {{
+        let result = $result;
+        let gas = result.gas();
+        let mut figures = $crate::serialized_u64_fields(gas);
+        if let Some(reservoir) = $reservoir {
+            figures.insert("reservoir_remaining".to_string(), reservoir);
+        }
+        figures.insert("tx_gas_used".to_string(), gas.tx_gas_used());
+        figures.insert("block_regular_gas_used".to_string(), gas.block_regular_gas_used());
+        figures.insert("block_state_gas_used".to_string(), gas.block_state_gas_used());
+        figures.insert("final_refunded".to_string(), gas.final_refunded());
+        $crate::record::TxRecord {
+            outcome: match result {
+                $exec::Success { .. } => "success".to_string(),
+                $exec::Revert { .. } => "revert".to_string(),
+                $exec::Halt { reason, .. } => format!("halt:{}", $halt(reason)),
+            },
+            gas: figures,
+            output: result.output().cloned().unwrap_or_default(),
+            created: result.created_address(),
+            logs: result
+                .logs()
+                .iter()
+                .map(|log| $crate::record::LogRecord {
+                    address: log.address,
+                    topics: log.topics().to_vec(),
+                    data: log.data.data.clone(),
+                })
+                .collect(),
+            state: $state
+                .iter()
+                .filter(|(_, account)| account.is_touched())
+                .map(|(address, account)| {
+                    let record = $crate::record::AccountRecord {
+                        created: account.is_created(),
+                        selfdestructed: account.is_selfdestructed(),
+                        balance: account.info.balance,
+                        nonce: account.info.nonce,
+                        code_hash: account.info.code_hash,
+                        storage: account
+                            .storage
+                            .iter()
+                            .filter(|(_, slot)| slot.is_changed())
+                            .map(|(key, slot)| (*key, slot.present_value))
+                            .collect(),
+                    };
+                    (*address, record)
+                })
+                .collect(),
+        }
+    }};
+}

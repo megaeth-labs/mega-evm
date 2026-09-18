@@ -17,10 +17,11 @@ use std::{
 
 use mega_evm::test_utils::Scenario;
 
+#[macro_use]
+pub mod record;
 pub mod diff;
 pub mod mega;
 pub mod oracle;
-pub mod record;
 pub mod registry;
 
 use diff::Difference;
@@ -222,6 +223,7 @@ mod tests {
 
     fn comparison(diffs: &[(&str, &str, &str)]) -> Comparison {
         Comparison {
+            scenario: "s".into(),
             differences: diffs
                 .iter()
                 .map(|(field, left, right)| Difference {

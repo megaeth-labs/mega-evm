@@ -10,7 +10,7 @@ use mega_evm::{
         database::{states::bundle_state::BundleRetention, State},
         DatabaseCommit,
     },
-    test_utils::{PreAccount, Scenario, TxSpec, TxSpecKind},
+    test_utils::{PreAccount, Scenario, ScenarioTx, ScenarioTxKind},
     MegaContext, MegaSpecId,
 };
 use revm_oracle::{
@@ -79,13 +79,14 @@ fn test_zero_fee_vault_touch_leaves_no_committed_account() {
             CALLER,
             PreAccount { balance: U256::from(10), ..Default::default() },
         )]),
-        txs: vec![TxSpec {
+        txs: vec![ScenarioTx {
             caller: CALLER,
             to: Some(CALLEE),
             data: Bytes::new(),
             value: U256::from(1),
             gas_limit: Some(100_000),
-            kind: TxSpecKind::Call,
+            gas_price: 0,
+            kind: ScenarioTxKind::Call,
             access_list: Vec::new(),
             authorization_list: Vec::new(),
         }],

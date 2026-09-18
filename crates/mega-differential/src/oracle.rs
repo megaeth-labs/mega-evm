@@ -4,11 +4,11 @@
 //! the same gas table (copied entry by entry), the same switches. It has no OP layer, so the
 //! differences an OP-specific mechanism makes are the registry's to explain.
 
-use std::{cell::Cell, collections::BTreeMap, convert::Infallible, str::FromStr};
+use std::{cell::Cell, convert::Infallible, str::FromStr};
 
 use mega_evm::{
-    revm::context::CfgEnv as MegaCfgEnv,
-    test_utils::{Scenario, TxSpecKind},
+    revm::context::{transaction::TransactionType as ScenarioTxType, CfgEnv as MegaCfgEnv},
+    test_utils::{Scenario, ScenarioTxKind},
     MegaContext, MegaSpecId,
 };
 use revm_oracle::{
@@ -30,7 +30,7 @@ use revm_oracle::{
     Context, Database, DatabaseCommit, MainBuilder, MainContext, MainnetEvm,
 };
 
-use crate::record::{AccountRecord, LogRecord, ScenarioRecord, TxRecord};
+use crate::record::{ScenarioRecord, TxRecord};
 
 type OracleDb = CacheDB<EmptyDB>;
 type OracleEvm<'a> = MainnetEvm<revm_oracle::handler::MainnetContext<&'a mut OracleDb>>;
@@ -50,7 +50,7 @@ pub fn run(scenario: &Scenario) -> ScenarioRecord {
             .build_mainnet();
         let mut probe = ReservoirProbe::default();
         let result = match tx.kind {
-            TxSpecKind::SystemCall => {
+            ScenarioTxKind::SystemCall => {
                 evm.ctx().set_tx(TxEnv::new_system_tx_with_caller(
                     tx.caller,
                     tx.to.expect("validated: a system call has a target"),
@@ -58,7 +58,7 @@ pub fn run(scenario: &Scenario) -> ScenarioRecord {
                 ));
                 probe.run_system_call(&mut evm)
             }
-            TxSpecKind::Call | TxSpecKind::Create => {
+            ScenarioTxKind::Call | ScenarioTxKind::Create => {
                 let nonce =
                     evm.ctx().db_mut().basic(tx.caller).unwrap().map_or(0, |info| info.nonce);
                 evm.ctx().set_tx(tx_env(tx, nonce));
@@ -167,7 +167,7 @@ fn database(scenario: &Scenario) -> OracleDb {
     db
 }
 
-fn tx_env(tx: &mega_evm::test_utils::TxSpec, nonce: u64) -> TxEnv {
+fn tx_env(tx: &mega_evm::test_utils::ScenarioTx, nonce: u64) -> TxEnv {
     let access_list = AccessList(
         tx.access_list
             .iter()
@@ -192,14 +192,14 @@ fn tx_env(tx: &mega_evm::test_utils::TxSpec, nonce: u64) -> TxEnv {
         })
         .collect();
     TxEnv::builder()
-        .tx_type(Some(tx.tx_type()))
+        .tx_type(Some(tx.tx_type() as u8))
         .caller(tx.caller)
         .kind(tx.to.map_or(TxKind::Create, TxKind::Call))
         .data(tx.data.clone())
         .value(tx.value)
-        .gas_limit(tx.gas_limit.unwrap_or_default())
-        .gas_price(0)
-        .gas_priority_fee((tx.tx_type() == 4).then_some(0))
+        .gas_limit(tx.gas_limit.expect("a call or a create has a gas limit"))
+        .gas_price(tx.gas_price)
+        .gas_priority_fee((tx.tx_type() == ScenarioTxType::Eip7702).then_some(tx.gas_price))
         .nonce(nonce)
         .access_list(access_list)
         .authorization_list_recovered(authorizations)
@@ -247,59 +247,14 @@ impl<'a> Handler for ReservoirProbe<'a> {
 }
 
 fn record(result: &ExecutionResult, reservoir: Option<u64>, state: &EvmState) -> TxRecord {
-    TxRecord {
-        outcome: match result {
-            ExecutionResult::Success { .. } => "success".into(),
-            ExecutionResult::Revert { .. } => "revert".into(),
-            ExecutionResult::Halt { reason, .. } => format!("halt:{reason:?}"),
-        },
-        gas: gas(result.gas(), reservoir),
-        output: result.output().cloned().unwrap_or_default(),
-        created: result.created_address(),
-        logs: result
-            .logs()
-            .iter()
-            .map(|log| LogRecord {
-                address: log.address,
-                topics: log.topics().to_vec(),
-                data: log.data.data.clone(),
-            })
-            .collect(),
-        state: state
-            .iter()
-            .filter(|(_, account)| account.is_touched())
-            .map(|(address, account)| {
-                let record = AccountRecord {
-                    created: account.is_created(),
-                    selfdestructed: account.is_selfdestructed(),
-                    balance: account.info.balance,
-                    nonce: account.info.nonce,
-                    code_hash: account.info.code_hash,
-                    storage: account
-                        .storage
-                        .iter()
-                        .filter(|(_, slot)| slot.is_changed())
-                        .map(|(key, slot)| (*key, slot.present_value))
-                        .collect(),
-                };
-                (*address, record)
-            })
-            .collect(),
-    }
-}
-
-/// The gas figures of `gas` as [`crate::mega`] names them, with the probed reservoir in place of
-/// the field revm 43 lacks.
-fn gas(gas: &ResultGas, reservoir: Option<u64>) -> BTreeMap<String, u64> {
-    let mut figures = crate::serialized_u64_fields(gas);
-    if let Some(reservoir) = reservoir {
-        figures.insert("reservoir_remaining".into(), reservoir);
-    }
-    figures.insert("tx_gas_used".into(), gas.tx_gas_used());
-    figures.insert("block_regular_gas_used".into(), gas.block_regular_gas_used());
-    figures.insert("block_state_gas_used".into(), gas.block_state_gas_used());
-    figures.insert("final_refunded".into(), gas.final_refunded());
-    figures
+    // revm 43's `ResultGas` has no `reservoir_remaining`; the probe supplies it.
+    tx_record!(
+        ExecutionResult,
+        result,
+        state,
+        |reason: &HaltReason| format!("{reason:?}"),
+        reservoir
+    )
 }
 
 fn error(err: &OracleError) -> String {
@@ -326,7 +281,7 @@ mod tests {
                 .with_block(block(scenario))
                 .build_mainnet();
             let outcome = match tx.kind {
-                TxSpecKind::SystemCall => {
+                ScenarioTxKind::SystemCall => {
                     evm.system_call_with_caller(tx.caller, tx.to.unwrap(), tx.data.clone())
                 }
                 _ => {
@@ -347,7 +302,9 @@ mod tests {
     #[test]
     fn test_reservoir_probe_changes_nothing_else() {
         let scenarios = crate::load_corpus(&crate::corpus_dir()).unwrap();
-        assert!(scenarios.iter().any(|s| s.txs.iter().any(|tx| tx.kind == TxSpecKind::SystemCall)));
+        assert!(scenarios
+            .iter()
+            .any(|s| s.txs.iter().any(|tx| tx.kind == ScenarioTxKind::SystemCall)));
         for scenario in &scenarios {
             let mut probed = run(scenario);
             for record in &mut probed {
