@@ -685,4 +685,3 @@ fn test_stipend_not_leaked_on_frame_local_limit_exceed() {
         "gas_used {gas_used} is too low — STORAGE_CALL_STIPEND may have leaked to parent"
     );
 }
-

@@ -261,4 +261,3 @@ fn test_rex4_keyless_deploy_constructor_uses_oracle_env() {
     assert_eq!(hints[0].topic, topic, "hint topic should match constructor input");
     assert_eq!(hints[0].data, Bytes::copy_from_slice(hint_data), "hint data should match");
 }
-

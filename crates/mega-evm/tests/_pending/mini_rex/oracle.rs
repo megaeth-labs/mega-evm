@@ -842,4 +842,3 @@ fn test_mega_system_address_exempted_from_oracle_tracking() {
         "Compute gas limit should NOT be set for mega system address transactions"
     );
 }
-

@@ -273,4 +273,3 @@ fn test_rex5_kzg_invalid_input_length_records_exact_gas_cost() {
          on a wrong-length KZG call (REX5={compute_gas_rex5}, REX4={compute_gas_rex4})."
     );
 }
-

@@ -163,4 +163,3 @@ fn test_rex4_system_contract_deployment_is_idempotent() {
         );
     });
 }
-

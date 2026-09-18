@@ -821,4 +821,3 @@ fn test_floor_gas_empty_calldata() {
 fn test_floor_gas_minimal_calldata() {
     floor_gas_test_case(MegaSpecId::MINI_REX, 1, 21_440);
 }
-

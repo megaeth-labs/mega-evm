@@ -481,4 +481,3 @@ fn test_inspect_storage_does_not_pollute_delegate_journal_rex4() {
         "REX4: DELEGATE's slot 1 original_value should be 99 (its own), not 42 (DELEGATOR's)"
     );
 }
-

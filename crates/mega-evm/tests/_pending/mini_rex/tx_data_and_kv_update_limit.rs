@@ -1162,4 +1162,3 @@ impl<CTX: ContextTr> Inspector<CTX> for GasSpendingInspector {
         }
     }
 }
-

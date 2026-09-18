@@ -265,4 +265,3 @@ fn test_rex4_multiple_volatile_accesses_first_wins() {
         "Detained limit should be anchored at first access (~25M), got {detained_limit}"
     );
 }
-

@@ -705,4 +705,3 @@ fn burn_gas_code(target_gas: u64) -> Bytes {
     code.push(STOP);
     Bytes::from(code)
 }
-

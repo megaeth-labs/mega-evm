@@ -253,4 +253,3 @@ fn test_rex5_reverted_first_child_flag_reset_allows_second_charge() {
     );
     assert_eq!(data_size, intrinsic_data_size() + 2 * ACCOUNT_INFO_WRITE_SIZE);
 }
-

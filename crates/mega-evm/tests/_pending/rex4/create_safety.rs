@@ -148,4 +148,3 @@ fn run_create2_and_get_compute_gas(
     let compute_gas = evm.ctx_ref().additional_limit.borrow().get_usage().compute_gas;
     (res.result, compute_gas)
 }
-

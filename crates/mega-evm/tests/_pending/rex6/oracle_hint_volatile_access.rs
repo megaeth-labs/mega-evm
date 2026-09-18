@@ -222,4 +222,3 @@ fn test_rex6_disabled_send_hint_is_not_metered_against_data_size() {
     );
     assert!(hints.is_empty(), "a disabled sendHint call must not forward");
 }
-

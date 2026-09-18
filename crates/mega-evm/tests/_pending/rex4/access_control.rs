@@ -1994,4 +1994,3 @@ fn test_blocked_selfdestruct_beneficiary_does_not_pollute_tracker() {
         "compute_gas_limit should not be set after blocked SELFDESTRUCT to beneficiary"
     );
 }
-
