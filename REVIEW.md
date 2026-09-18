@@ -119,6 +119,8 @@ These checks guard every change to the Satin engine.
   The production scope excludes test helpers as noise and tests only `mega-evm`, so that code is otherwise never mutated, though every later mechanism's verdict rests on it.
   The two scopes are disjoint and the production one keeps its exclusions; a suppression may belong to either, and the suppression-hygiene job lists both scopes into its mutant universe.
   The `cargo-mutants infrastructure` job runs the scope on a pull request that touches those files, either configuration, the driver or the gate, and nightly; it is bounded to 90 minutes and is not a required check.
+  Reference point, its first run on the corpus this file describes: 80 mutants, 73 caught, 0 survived, 3 suppressed, 4 unviable, in 7m46s on a 15-core laptop with `JOBS=8`.
+  The three suppressed ones write a `BlockEnv` field that already holds that value by default, so no test can distinguish them; the test that pins those values kills them the moment a revm upgrade moves a default.
 - `record.rs` builds a transaction record in a macro, and cargo-mutants does not mutate macro bodies, so four mutants cover that file.
   Both arms build their records through that macro, so a fault in it moves both arms together and the comparison cannot see it; what covers it is the absolute values pinned in `crates/mega-differential/tests/claims.rs`, and any claim about a positive result belongs there for the same reason.
 - The spec-gate operator pack stays in place but finds nothing on Satin: a single-spec engine has no spec gate to mutate, and the suppression-hygiene job accepts the empty plan.

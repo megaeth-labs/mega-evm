@@ -382,11 +382,76 @@ mod tests {
         assert_eq!(err, "sstore: tx[0]: a call or a create needs `gas_limit`");
     }
 
+    /// Each kind needs the fields of its own shape; a missing or an excess field is rejected
+    /// with the rule that names it, so a scenario cannot reach the arms as something else.
     #[test]
-    fn test_validate_rejects_a_system_call_with_gas_limit() {
-        let tx = ScenarioTx { kind: ScenarioTxKind::SystemCall, ..call(Some(100_000)) };
-        let err = scenario(vec![tx]).validate().unwrap_err();
-        assert_eq!(err, "sstore: tx[0]: a system call takes only `caller`, `to` and `data`");
+    fn test_validate_rejects_a_transaction_that_does_not_match_its_kind() {
+        let reject = |tx: ScenarioTx| scenario(vec![tx]).validate().unwrap_err();
+        let create =
+            || ScenarioTx { kind: ScenarioTxKind::Create, to: None, ..call(Some(100_000)) };
+
+        assert_eq!(
+            reject(ScenarioTx { to: None, ..call(Some(100_000)) }),
+            "sstore: tx[0]: a call needs `to`"
+        );
+        assert_eq!(
+            reject(ScenarioTx { kind: ScenarioTxKind::Create, ..call(Some(100_000)) }),
+            "sstore: tx[0]: a create must not set `to`"
+        );
+        assert_eq!(
+            reject(ScenarioTx {
+                authorization_list: vec![AuthorizationEntry {
+                    chain_id: U256::ZERO,
+                    address: CALLEE,
+                    nonce: 0,
+                    authority: None,
+                }],
+                ..create()
+            }),
+            "sstore: tx[0]: an EIP-7702 transaction cannot create"
+        );
+        assert!(scenario(vec![create()]).validate().is_ok());
+    }
+
+    /// A system call is built by the engine, so it takes only what the engine does not fix;
+    /// each of the other fields is rejected on its own.
+    #[test]
+    fn test_validate_rejects_a_system_call_that_sets_an_engine_field() {
+        let system_call = || ScenarioTx { kind: ScenarioTxKind::SystemCall, ..call(None) };
+        let reject = |tx: ScenarioTx| scenario(vec![tx]).validate().unwrap_err();
+        let extra = "sstore: tx[0]: a system call takes only `caller`, `to` and `data`";
+        let authorization =
+            AuthorizationEntry { chain_id: U256::ZERO, address: CALLEE, nonce: 0, authority: None };
+        let access = AccessListEntry { address: CALLEE, storage_keys: Vec::new() };
+
+        assert!(scenario(vec![system_call()]).validate().is_ok());
+        assert_eq!(
+            reject(ScenarioTx { to: None, ..system_call() }),
+            "sstore: tx[0]: a system call needs `to`"
+        );
+        assert_eq!(reject(ScenarioTx { gas_limit: Some(100_000), ..system_call() }), extra);
+        assert_eq!(reject(ScenarioTx { gas_price: 1, ..system_call() }), extra);
+        assert_eq!(reject(ScenarioTx { value: U256::from(1), ..system_call() }), extra);
+        assert_eq!(reject(ScenarioTx { access_list: vec![access], ..system_call() }), extra);
+        assert_eq!(
+            reject(ScenarioTx { authorization_list: vec![authorization], ..system_call() }),
+            extra
+        );
+    }
+
+    /// The block is the same for every scenario and for both arms of the differential harness,
+    /// except for the beneficiary, which the scenario sets.
+    #[test]
+    fn test_block_is_fixed_except_for_the_beneficiary() {
+        let mut scenario = scenario(vec![]);
+        scenario.coinbase = CALLEE;
+        let block = scenario.block();
+
+        assert_eq!(block.number, U256::from(1));
+        assert_eq!(block.timestamp, U256::from(1));
+        assert_eq!(block.beneficiary, CALLEE);
+        assert_eq!(block.basefee, 0);
+        assert_eq!(block.gas_limit, u64::MAX);
     }
 
     /// Each transaction runs on the state the previous one committed, with the caller's

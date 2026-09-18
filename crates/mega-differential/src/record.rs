@@ -147,3 +147,49 @@ macro_rules! tx_record {
         }
     }};
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy_primitives::{address, b256, bytes};
+
+    const A: Address = address!("0x0000000000000000000000000000000000000aaa");
+
+    /// Two logs at the same index are compared as this one line, and a registry effect for a log
+    /// is a pattern over it, so the rendering carries every field of the log.
+    #[test]
+    fn test_log_record_renders_address_topics_and_data() {
+        let log = LogRecord {
+            address: A,
+            topics: vec![
+                b256!("0x0000000000000000000000000000000000000000000000000000000000000001"),
+                b256!("0x0000000000000000000000000000000000000000000000000000000000000002"),
+            ],
+            data: bytes!("0xbeef"),
+        };
+        assert_eq!(log.render(), format!("{A:#x} [{},{}] 0xbeef", log.topics[0], log.topics[1]));
+        let empty = LogRecord { topics: Vec::new(), data: Bytes::new(), ..log };
+        assert_eq!(empty.render(), format!("{A:#x} [] 0x"));
+    }
+
+    /// The same for an account only one arm touched, which is reported as its rendering.
+    #[test]
+    fn test_account_record_renders_every_field() {
+        let account = AccountRecord {
+            created: true,
+            selfdestructed: false,
+            balance: U256::from(7),
+            nonce: 3,
+            code_hash: B256::ZERO,
+            storage: BTreeMap::from([(U256::from(1), U256::from(2)), (U256::from(3), U256::ZERO)]),
+        };
+        assert_eq!(
+            account.render(),
+            format!(
+                "created=true selfdestructed=false balance=0x7 nonce=3 code_hash={} \
+                 storage={{0x1=0x2,0x3=0x0}}",
+                B256::ZERO,
+            ),
+        );
+    }
+}

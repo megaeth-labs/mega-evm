@@ -201,6 +201,9 @@ mod tests {
         assert!(!glob("a*b*c", "aXcYb"));
         // The suffix may not reuse characters the prefix consumed.
         assert!(!glob("ab*ba", "aba"));
+        // Nor may a middle segment: each one starts after the one before it ended.
+        assert!(glob("*b*b*", "abb"));
+        assert!(!glob("*b*b*", "ab"));
     }
 
     #[test]
@@ -243,5 +246,22 @@ mod tests {
         .contains("duplicate"));
         assert!(Registry::from_json(r#"{"version": 2, "deviations": []}"#).is_err());
         assert!(registry(&[entry("d", "paused", &[GAS_EFFECT], "")]).is_err());
+    }
+
+    /// An entry names its mechanism and its reason; either one blank is rejected, so a blanket
+    /// excuse cannot be filed under a name that says nothing.
+    #[test]
+    fn test_registry_requires_both_a_mechanism_and_a_reason() {
+        let named = |mechanism: &str, reason: &str| {
+            Registry::from_json(&format!(
+                r#"{{"version": 1, "deviations": [{{"id": "d", "status": "active",
+                    "scenario": "*", "mechanism": "{mechanism}", "reason": "{reason}",
+                    "effects": [{GAS_EFFECT}]}}]}}"#
+            ))
+        };
+        assert!(named("m", "r").is_ok());
+        assert!(named("", "r").unwrap_err().contains("names its mechanism and its reason"));
+        assert!(named("m", "").unwrap_err().contains("names its mechanism and its reason"));
+        assert!(named(" ", " \t ").is_err(), "blank is not a name");
     }
 }

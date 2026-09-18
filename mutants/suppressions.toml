@@ -196,3 +196,40 @@ file = "crates/mega-evm/src/evm/spec.rs"
 mutant = "replace <impl From<MegaSpecId> for EthSpecId>::from -> Self with Default::default()"
 justification = "Equivalent: revm's SpecId::OSAKA carries #[default], and Satin's sole rung (SATIN) maps to EthSpecId::OSAKA, so Default::default() returns the same value on every current input. test_all_specs_map_to_karst_and_osaka pins the mapping; if the upstream default moves, that test kills this mutant and the entry becomes a no-op."
 reviewer = "RealiCZ"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Infrastructure scope (.cargo/mutants-infra.toml) survivors.
+
+# --- Scenario::block field deletions that restore the same value (equivalent) ------
+# `Scenario::block` writes five fields over `..Default::default()`. Three of them write
+# exactly what revm 40's `BlockEnv::default()` already holds — `timestamp: U256::ONE`,
+# `basefee: 0`, `gas_limit: u64::MAX` — so deleting the field yields the identical
+# BlockEnv for every scenario, and no scenario or unit test can distinguish it. The two
+# that do differ from the default (`number`, and `beneficiary`, which carries the
+# scenario's coinbase) are killed by `test_block_is_fixed_except_for_the_beneficiary`,
+# which pins all five values: if a revm upgrade moves one of these defaults, that test
+# kills the mutant and the entry below becomes a no-op. Line entries, so they stay
+# generated and are re-checked on every run.
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "crates/mega-evm/src/test_utils/scenario.rs"
+mutant = "delete field timestamp from struct BlockEnv expression in Scenario::block"
+justification = "Equivalent: the field writes U256::from(1) and revm 40's BlockEnv::default() already has timestamp: U256::ONE, so the struct is identical with or without it. test_block_is_fixed_except_for_the_beneficiary pins the value, so the mutant becomes killable the moment the upstream default moves."
+reviewer = "RealiCZ"
+
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "crates/mega-evm/src/test_utils/scenario.rs"
+mutant = "delete field basefee from struct BlockEnv expression in Scenario::block"
+justification = "Equivalent: the field writes 0 and revm 40's BlockEnv::default() already has basefee: 0, so the struct is identical with or without it. test_block_is_fixed_except_for_the_beneficiary pins the value, so the mutant becomes killable the moment the upstream default moves."
+reviewer = "RealiCZ"
+
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "crates/mega-evm/src/test_utils/scenario.rs"
+mutant = "delete field gas_limit from struct BlockEnv expression in Scenario::block"
+justification = "Equivalent: the field writes u64::MAX and revm 40's BlockEnv::default() already has gas_limit: u64::MAX, so the struct is identical with or without it. test_block_is_fixed_except_for_the_beneficiary pins the value, so the mutant becomes killable the moment the upstream default moves."
+reviewer = "RealiCZ"
