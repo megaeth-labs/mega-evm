@@ -2,7 +2,7 @@
 
 The differential harness of the Satin engine.
 It runs every scenario of a corpus through `MegaEvm` and through stock revm 43, and compares what the two report, field by field.
-Every difference must be explained by the deviation registry, and every active registry entry must explain at least one difference.
+Every difference must be explained by the deviation registry, and every effect an active registry entry lists must explain at least one difference.
 
 ```bash
 cargo test -p mega-differential --locked
@@ -11,7 +11,7 @@ cargo test -p mega-differential --locked
 The corpus test prints one summary line, for example:
 
 ```text
-differential: 286 scenarios, 10761 fields compared, 858 deviations matched (op-base-fee-vault-touch x286, …), 0 unexplained, 0 stale registry entries
+differential: 286 scenarios, 10761 fields compared, 858 deviations matched (op-fee-vault-touch x858), 0 unexplained, 0 stale registry effects
 ```
 
 ## The two arms
@@ -83,28 +83,33 @@ For every transaction:
 ## The deviation registry
 
 `deviations.json` lists the accepted differences.
+An entry names one mechanism and every effect it has on the compared fields:
 
 ```json
 {
-  "id": "op-base-fee-vault-touch",
+  "id": "op-fee-vault-touch",
   "status": "active",
   "scenario": "*",
-  "field": "tx[*].state[0x4200000000000000000000000000000000000019]",
-  "left": "created=false selfdestructed=false balance=0x0 …",
-  "right": "<absent>",
-  "mechanism": "…",
-  "reason": "…"
+  "mechanism": "op-revm fee distribution: the OP handler's reward_beneficiary",
+  "reason": "…",
+  "effects": [
+    {
+      "field": "tx[*].state[0x4200000000000000000000000000000000000019]",
+      "left": "created=false selfdestructed=false balance=0x0 …",
+      "right": "<absent>"
+    }
+  ]
 }
 ```
 
-- `scenario`, `field`, `left` (the `MegaEvm` value) and `right` (the oracle's) are patterns in which `*` stands for any run of characters.
-  Keep them as narrow as the mechanism allows: an entry names one mechanism and the exact values it produces.
+- `scenario` and each effect's `field`, `left` (the `MegaEvm` value) and `right` (the oracle's) are patterns in which `*` stands for any run of characters.
+  Keep them as narrow as the mechanism allows: exact values, and a scenario pattern that covers only the scenarios the mechanism reaches.
 - `status` is `active` or `retired`; a retired entry keeps its history in `retired_reason` and explains nothing.
-- The run fails on a difference no active entry explains, and on an active entry that explains nothing.
-  When a mechanism stops producing its difference, retire its entry.
+- The run fails on a difference no effect of an active entry explains, and on an effect of an active entry that explains nothing.
+  When a mechanism stops producing an effect, remove the effect, or retire the entry when none is left.
 - The `version` field is the format version this crate reads.
 
-The active entries today are op-revm's fee vaults: after every non-deposit transaction op-revm credits the base fee, the L1 data fee and the operator fee to three vault predeploys, which touches them even at a zero amount.
+The active entry today is op-revm's fee vaults: after every non-deposit transaction op-revm credits the base fee, the L1 data fee and the operator fee to three vault predeploys, which touches them even at a zero amount.
 `tests/claims.rs` checks that state clearing drops those empty accounts when the state is committed.
 
 ## Relation to the equivalence tests

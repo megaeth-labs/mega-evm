@@ -3,13 +3,13 @@
 //! Runs every scenario of a corpus through `MegaEvm` (the left arm) and through stock revm 43 on
 //! its mainnet handler (the right arm, the oracle), and compares what they report field by
 //! field: every gas figure, the outcome, the output, the logs and every touched account. Each
-//! difference must be explained by an active entry of the deviation registry, and every active
-//! entry must explain at least one difference.
+//! difference must be explained by an active entry of the deviation registry, and every effect
+//! an active entry lists must explain at least one difference.
 //!
 //! See the crate README for the corpus, the registry and how the two revms coexist.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fmt::Write as _,
     fs,
     path::{Path, PathBuf},
@@ -24,7 +24,7 @@ pub mod record;
 pub mod registry;
 
 use diff::Difference;
-use registry::Registry;
+use registry::{EffectRef, Registry};
 
 /// Directory of the corpus, one subdirectory per origin.
 pub fn corpus_dir() -> PathBuf {
@@ -85,12 +85,13 @@ pub struct Report {
     pub explained: BTreeMap<String, Vec<Difference>>,
     /// Differences no active entry explains, with the retired entry that would have, if any.
     pub unexplained: Vec<(Difference, Option<String>)>,
-    /// Active entries that explained nothing.
-    pub stale: Vec<String>,
+    /// Effects of active entries that explained nothing, with their field pattern.
+    pub stale: Vec<(EffectRef, String)>,
 }
 
 impl Report {
-    /// Whether every difference is explained and every active entry explained one.
+    /// Whether every difference is explained and every effect of every active entry explained
+    /// one.
     pub fn is_clean(&self) -> bool {
         self.unexplained.is_empty() && self.stale.is_empty()
     }
@@ -101,7 +102,7 @@ impl Report {
         let by_entry: Vec<String> =
             self.explained.iter().map(|(id, diffs)| format!("{id} x{}", diffs.len())).collect();
         format!(
-            "differential: {} scenarios, {} fields compared, {} deviations matched{}, {} unexplained, {} stale registry entries",
+            "differential: {} scenarios, {} fields compared, {} deviations matched{}, {} unexplained, {} stale registry effects",
             self.scenarios,
             self.compared,
             matched,
@@ -111,7 +112,7 @@ impl Report {
         )
     }
 
-    /// Every unexplained difference and stale entry, one per line.
+    /// Every unexplained difference and stale effect, one per line.
     pub fn failures(&self) -> String {
         let mut out = String::new();
         for (diff, retired) in &self.unexplained {
@@ -125,8 +126,9 @@ impl Report {
             }
             out.push('\n');
         }
-        for id in &self.stale {
-            let _ = writeln!(out, "stale: active registry entry {id} explained no difference");
+        for ((id, i), field) in &self.stale {
+            let _ =
+                writeln!(out, "stale: effect {i} ({field}) of active entry {id} explained nothing");
         }
         out
     }
@@ -134,28 +136,35 @@ impl Report {
 
 /// Runs every scenario through both arms and checks the differences against `registry`.
 pub fn run(scenarios: &[Scenario], registry: &Registry) -> Report {
-    let comparisons: Vec<diff::Comparison> = parallel_map(scenarios, |scenario| {
+    let comparisons = parallel_map(scenarios, |scenario| {
         diff::compare(&scenario.name, &mega::run(scenario), &oracle::run(scenario))
     });
-    let mut report = Report { scenarios: scenarios.len(), ..Default::default() };
+    check(comparisons, registry)
+}
+
+/// Checks the comparisons of a run against `registry`.
+pub fn check(comparisons: Vec<diff::Comparison>, registry: &Registry) -> Report {
+    let mut report = Report { scenarios: comparisons.len(), ..Default::default() };
+    let mut hit = BTreeSet::new();
     for comparison in comparisons {
         report.compared += comparison.compared;
         for difference in comparison.differences {
             match registry.explain(&difference) {
-                Some(dev) => report.explained.entry(dev.id.clone()).or_default().push(difference),
+                Some(effect) => {
+                    report.explained.entry(effect.0.clone()).or_default().push(difference);
+                    hit.insert(effect);
+                }
                 None => {
-                    let retired = registry.retired_match(&difference).map(|dev| dev.id.clone());
+                    let retired = registry.retired_match(&difference).map(|(id, _)| id);
                     report.unexplained.push((difference, retired));
                 }
             }
         }
     }
     report.stale = registry
-        .deviations
-        .iter()
-        .filter(|dev| dev.status == registry::Status::Active)
-        .filter(|dev| !report.explained.contains_key(&dev.id))
-        .map(|dev| dev.id.clone())
+        .active_effects()
+        .filter(|(effect, _)| !hit.contains(effect))
+        .map(|(effect, spec)| (effect, spec.field.clone()))
         .collect();
     report
 }
@@ -189,4 +198,80 @@ fn serialized_u64_fields(value: &impl serde::Serialize) -> BTreeMap<String, u64>
             (name, value)
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use diff::Comparison;
+
+    fn registry() -> Registry {
+        Registry::from_json(
+            r#"{"version": 1, "deviations": [
+                {"id": "fee", "status": "active", "scenario": "*", "mechanism": "m", "reason": "r",
+                 "effects": [
+                    {"field": "tx[*].gas.gas_spent", "left": "2", "right": "1"},
+                    {"field": "tx[*].output", "left": "0x", "right": "0x01"}]},
+                {"id": "old", "status": "retired", "scenario": "*", "mechanism": "m", "reason": "r",
+                 "retired_reason": "gone",
+                 "effects": [{"field": "tx[*].logs.len", "left": "*", "right": "*"}]}
+            ]}"#,
+        )
+        .unwrap()
+    }
+
+    fn comparison(diffs: &[(&str, &str, &str)]) -> Comparison {
+        Comparison {
+            differences: diffs
+                .iter()
+                .map(|(field, left, right)| Difference {
+                    scenario: "s".into(),
+                    field: (*field).into(),
+                    left: (*left).into(),
+                    right: (*right).into(),
+                })
+                .collect(),
+            compared: 10,
+        }
+    }
+
+    #[test]
+    fn test_check_is_clean_when_every_difference_and_effect_is_matched() {
+        let report = check(
+            vec![
+                comparison(&[("tx[0].gas.gas_spent", "2", "1")]),
+                comparison(&[("tx[1].output", "0x", "0x01")]),
+            ],
+            &registry(),
+        );
+        assert!(report.is_clean(), "{}", report.failures());
+        assert_eq!((report.scenarios, report.compared), (2, 20));
+        assert_eq!(report.explained["fee"].len(), 2);
+    }
+
+    #[test]
+    fn test_check_fails_on_an_unexplained_difference() {
+        let report = check(
+            vec![comparison(&[
+                ("tx[0].gas.gas_spent", "2", "1"),
+                ("tx[0].output", "0x", "0x01"),
+                ("tx[0].gas.gas_spent", "3", "1"),
+                ("tx[0].logs.len", "1", "0"),
+            ])],
+            &registry(),
+        );
+        assert!(!report.is_clean());
+        assert!(report.stale.is_empty());
+        let failures = report.failures();
+        assert!(failures.contains("unexplained: s tx[0].gas.gas_spent: mega=3 oracle=1\n"));
+        assert!(failures.contains("tx[0].logs.len: mega=1 oracle=0 (matches retired entry old)"));
+    }
+
+    #[test]
+    fn test_check_fails_on_an_effect_that_explains_nothing() {
+        let report = check(vec![comparison(&[("tx[0].gas.gas_spent", "2", "1")])], &registry());
+        assert!(!report.is_clean());
+        assert!(report.unexplained.is_empty());
+        assert_eq!(report.stale, vec![(("fee".to_string(), 1), "tx[*].output".to_string())]);
+    }
 }
