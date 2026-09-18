@@ -233,3 +233,56 @@ file = "crates/mega-evm/src/test_utils/scenario.rs"
 mutant = "delete field gas_limit from struct BlockEnv expression in Scenario::block"
 justification = "Equivalent: the field writes u64::MAX and revm 40's BlockEnv::default() already has gas_limit: u64::MAX, so the struct is identical with or without it. test_block_is_fixed_except_for_the_beneficiary pins the value, so the mutant becomes killable the moment the upstream default moves."
 reviewer = "RealiCZ"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# crates/mega-evm/src/ survivors of the common execution layer.
+
+# --- inspect_frame_init: logs journaled by frame init (dead while EIP-7708 is off) --------
+# `inspect_frame_init` mirrors revm's: after `frame_init`, the logs journaled since `logs_i`
+# (EIP-7708 transfer logs, a precompile's logs) go to the inspector's `log` callback. Satin's
+# spec configuration fixes EIP-7708 off (`MegaContext::with_cfg`), and op-revm's precompile set
+# journals no log, so frame init never journals one: the length comparisons are always false
+# and `inspect_logs` is never entered. Flipping `!=` to `==` would call `inspect_logs` over an
+# empty range, a no-op; stubbing it changes nothing reachable. Live again when the Satin gas
+# table switches EIP-7708 on, at which point a transfer-log test kills them.
+[[suppress]]
+kind = "line"
+category = "dead"
+file = "crates/mega-evm/src/evm/execution.rs"
+mutant = "replace != with == in <impl InspectorEvmTr for MegaEvm<DB, INSP, ExtEnvs>>::inspect_frame_init"
+justification = "Dead in Satin: frame init journals no log (EIP-7708 is fixed off by the spec configuration, op-revm's precompiles journal none), so both `logs().len() != logs_i` comparisons are always false; with `==` the call hands the inspector an empty range, a no-op. Becomes live, and killable, when EIP-7708 is switched on."
+reviewer = "RealiCZ"
+
+[[suppress]]
+kind = "line"
+category = "dead"
+file = "crates/mega-evm/src/evm/execution.rs"
+mutant = "replace inspect_logs with ()"
+justification = "Dead in Satin: only called for logs journaled by frame init, which Satin never journals (EIP-7708 fixed off, no logging precompile). Becomes live, and killable, when EIP-7708 is switched on."
+reviewer = "RealiCZ"
+
+# --- DeclaredObserver::log forwarding (dead while EIP-7708 is off) ----------------------
+# revm hands a log to `Inspector::log` (without an interpreter) only from the frame-init path
+# above; every log an opcode emits goes to `log_full`, which the forwarding test covers.
+[[suppress]]
+kind = "line"
+category = "dead"
+file = "crates/mega-evm/src/evm/inspector.rs"
+mutant = "replace <impl Inspector<CTX, INTR> for DeclaredObserver<I>>::log with ()"
+justification = "Dead in Satin: revm calls `Inspector::log` only for logs journaled by frame init, which Satin never journals (EIP-7708 fixed off, no logging precompile); opcode logs reach `log_full`, which test_declared_observer_forwards_every_callback covers. Becomes live when EIP-7708 is switched on."
+reviewer = "RealiCZ"
+
+# --- AdditionalLimit::discard_stale_record (equivalent) ---------------------------------
+# Every wrapper discards a record staged before its opcode on entry. The three wrapped opcodes
+# each stage their own record through the Host whenever they complete (SSTORE through
+# sstore_skip_cold_load, LOG through log, SELFDESTRUCT through selfdestruct), which overwrites a
+# stale one, and a failing opcode's wrapper discards whatever is staged. So a stale record can
+# never be committed with or without the entry discard; it is the contract's guard for a future
+# wrapped opcode that completes without a Host call.
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "crates/mega-evm/src/limit/limit.rs"
+mutant = "replace AdditionalLimit::discard_stale_record with ()"
+justification = "Equivalent: each wrapped opcode (SSTORE, LOG0-4, SELFDESTRUCT) stages its own record through the Host whenever it completes, overwriting a stale one, and a failing opcode's wrapper discards the staged record, so no stale record can be committed with or without the entry discard (test_wrapper_discards_a_stale_record_on_entry shows the stale log is not counted either way)."
+reviewer = "RealiCZ"
