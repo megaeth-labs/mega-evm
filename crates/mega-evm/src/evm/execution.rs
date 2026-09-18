@@ -270,6 +270,8 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
         let ctx = &mut self.inner.ctx;
         let check = ctx.additional_limit.on_frame_init(&frame_init.frame_input, frame_init.depth);
         if check.exceeded_limit() {
+            // The frame never starts, so a creation bumps no nonce: its creator record goes too.
+            ctx.additional_limit.creation_did_not_bump_nonce();
             return Ok(ItemOrResult::Result(stopped_frame_result(&frame_init, &check)));
         }
         // The creator of a nested creation, to tell afterwards whether revm bumped its nonce.

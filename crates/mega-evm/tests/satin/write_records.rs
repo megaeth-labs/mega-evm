@@ -512,3 +512,55 @@ fn test_value_to_an_applied_authority_records_it_once() {
     assert!(result.result.is_success(), "{:?}", result.result);
     assert_eq!(usage, records(1));
 }
+
+/// A creation a frame budget stops before it runs bumps no nonce, so it leaves no creator
+/// record behind: the caller keeps only what it wrote itself.
+#[test]
+fn test_creation_stopped_at_init_leaves_no_creator_record() {
+    // CALLEE creates (two records: created account and creator), which a 60-byte budget stops,
+    // then writes a slot.
+    let code = BytecodeBuilder::default()
+        .append_many([PUSH0, PUSH0, PUSH0])
+        .append(CREATE)
+        .append(POP)
+        .sstore(U256::from(1), U256::from(1))
+        .stop()
+        .build();
+    let db = MemoryDatabase::default().account_code(CALLEE, code);
+    let limits = mega_evm::EvmTxRuntimeLimits::no_limits().with_frame_data_size_limit(60);
+    let mut evm = MegaEvm::new(context(db).with_tx_runtime_limits(limits));
+    let result =
+        alloy_evm::Evm::transact_raw(&mut evm, call(CALLER, CALLEE, U256::ZERO, GAS_LIMIT))
+            .unwrap();
+    assert!(result.result.is_success(), "{:?}", result.result);
+    assert_eq!(result.state[&CALLEE].info.nonce, 0, "the creation never started");
+    assert_eq!(evm.ctx().additional_limit().usage(), records(1), "only CALLEE's slot");
+}
+
+/// A frame running as the transaction's sender (a delegated sender called back) records no
+/// write to the sender's account: the transaction body counts it.
+#[test]
+fn test_frames_running_as_the_sender_do_not_record_it() {
+    // CALLER is delegated to CONTRACT, whose code sends value to CONTRACT2. CALLEE calls CALLER.
+    let relay = BytecodeBuilder::default()
+        .append_many([PUSH0, PUSH0, PUSH0, PUSH0, PUSH0])
+        .push_address(CALLER)
+        .append(GAS)
+        .append(CALL)
+        .append(POP)
+        .stop()
+        .build();
+    let sender_code = append_value_call(BytecodeBuilder::default(), CONTRACT2, 1)
+        .append(POP)
+        .append(STOP)
+        .build();
+    let mut db = funded().account_code(CALLEE, relay).account_code(CONTRACT, sender_code);
+    let delegation = revm::state::Bytecode::new_eip7702(CONTRACT);
+    let account = db.load_account(CALLER).unwrap();
+    account.info.code_hash = delegation.hash_slow();
+    account.info.code = Some(delegation);
+    let (result, usage) = run(db, call(CALLER, CALLEE, U256::ZERO, GAS_LIMIT));
+    assert!(result.result.is_success(), "{:?}", result.result);
+    assert_eq!(result.state[&CONTRACT2].info.balance, U256::from(1), "the transfer happened");
+    assert_eq!(usage, records(1), "CONTRACT2 only; the sender is part of the body");
+}

@@ -41,6 +41,9 @@ pub struct AdditionalLimit {
     /// Whether the transaction's call target is an applied EIP-7702 authority, whose account
     /// write the transaction's lane already counts.
     target_is_authority: bool,
+    /// The transaction's sender, whose account write is part of the transaction body: a frame
+    /// running as the sender never records it.
+    sender: Address,
     /// The history gas the settled transaction spent.
     history_gas_spent: u64,
 }
@@ -67,6 +70,7 @@ impl AdditionalLimit {
         self.staged = None;
         self.latched = None;
         self.target_is_authority = false;
+        self.sender = Address::ZERO;
         self.history_gas_spent = 0;
     }
 
@@ -206,8 +210,11 @@ impl AdditionalLimit {
     /// - a call that transfers value: the sender's account (once per sender frame) and the
     ///   recipient's, one record when they are the same account;
     /// - a creation: the created account, and the creator's nonce (once per creator frame);
-    /// - the transaction's own frame: the value recipient or the created account. The sender's
-    ///   account is part of the transaction body, not a record here.
+    /// - the transaction's own frame: the value recipient or the created account.
+    ///
+    /// The sender's account is part of the transaction body and never a record here: a frame
+    /// running as the sender (reached through an EIP-7702 delegation) counts it as recorded, and
+    /// a value transfer to the sender records no recipient.
     ///
     /// A crossed limit in the verdict means the frame must not run: it is answered with the stop.
     /// So is every frame of a latched transaction, whose lane stays empty.
@@ -230,6 +237,7 @@ impl AdditionalLimit {
                 let target = inputs.target_address;
                 let transfers_value = inputs.transfers_value();
                 if depth == 0 {
+                    self.sender = inputs.caller;
                     let written_outside = target == inputs.caller || self.target_is_authority;
                     self.tracker.push(Lane::new(
                         Some(target),
@@ -244,18 +252,25 @@ impl AdditionalLimit {
                 let inherited = self.tracker.current().is_some_and(|caller| {
                     caller.address == Some(target) && caller.account_recorded
                 });
-                self.tracker.push(Lane::new(Some(target), inherited || transfers_value, budget));
+                let is_sender = target == self.sender;
+                self.tracker.push(Lane::new(
+                    Some(target),
+                    inherited || is_sender || transfers_value,
+                    budget,
+                ));
                 if transfers_value {
                     self.tracker.record_caller(false);
-                    if target != inputs.caller {
+                    if target != inputs.caller && !is_sender {
                         self.tracker.record(WRITE_RECORD);
                     }
                 }
             }
-            FrameInput::Create(_) => {
+            FrameInput::Create(inputs) => {
                 self.tracker.push(Lane::new(None, true, budget));
                 self.tracker.record(WRITE_RECORD);
-                if depth > 0 {
+                if depth == 0 {
+                    self.sender = inputs.caller();
+                } else {
                     self.tracker.record_caller(true);
                 }
             }
