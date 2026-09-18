@@ -1,0 +1,71 @@
+{
+  "name": "test_sstore_restoration_charge_in_ancestor_fork_Amsterdam_call_opcode_DELEGATECALL_state_test_ten_hops",
+  "coinbase": "0x2adc25665018aa1fe0e6bc666dac8fc2697ff9ba",
+  "pre": {
+    "0x15e1618fbcac27dda0fa83b6fac2f735a5a40d60": {
+      "nonce": 1,
+      "code": "0x6000600060006000736b79fec3b146aa3c1c869e589f1de9e26b0558f75af45000"
+    },
+    "0x3b8acc4708b551d849131f41b9d960be2e7c905b": {
+      "nonce": 1,
+      "code": "0x600060006000600073dc81d7b2905163c6159329d5f16820fb6a554d885af45000"
+    },
+    "0x499f3e9c99e571d817950d3d2cdf5a2df9791c84": {
+      "nonce": 1,
+      "code": "0x600060006000600073f4c687e3f29e0aa4f2b0d9b8420aa29b88f8dbdf5af45000"
+    },
+    "0x4e59b44847b379578588920ca78fbf26c0b4956c": {
+      "nonce": 1,
+      "code": "0x7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffe03601600081602082378035828234f58015156039578182fd5b8082525050506014600cf3"
+    },
+    "0x5b75b4547f441a232a390563dc9fae2ede7b7f88": {
+      "nonce": 1,
+      "code": "0x6000600060006000733b8acc4708b551d849131f41b9d960be2e7c905b5af45000"
+    },
+    "0x6b79fec3b146aa3c1c869e589f1de9e26b0558f7": {
+      "nonce": 1,
+      "code": "0x600060005500"
+    },
+    "0x806cf69271662bba0bac32ebd4e3f9e6d7c2b3a4": {
+      "nonce": 1,
+      "code": "0x6001600055600060006000600073ab2f92b511f6ed5cac4f1c8491ec3441019e1d9e5af4506000600060006000600073e4492b6021e10a7b66a358972a0a67e0668817ef6201adc9f1600155"
+    },
+    "0xab2f92b511f6ed5cac4f1c8491ec3441019e1d9e": {
+      "nonce": 1,
+      "code": "0x600060006000600073f822f47c346ae7bed1440f68ab97a3e22b569e895af45000"
+    },
+    "0xadea63edaf70d5cbbf53c24ce8b0cc22edc7e8fe": {
+      "nonce": 1,
+      "code": "0x600060006000600073499f3e9c99e571d817950d3d2cdf5a2df9791c845af45000"
+    },
+    "0xdc81d7b2905163c6159329d5f16820fb6a554d88": {
+      "nonce": 1,
+      "code": "0x60006000600060007315e1618fbcac27dda0fa83b6fac2f735a5a40d605af45000"
+    },
+    "0xe4492b6021e10a7b66a358972a0a67e0668817ef": {
+      "nonce": 1,
+      "code": "0x6001600055"
+    },
+    "0xf4c687e3f29e0aa4f2b0d9b8420aa29b88f8dbdf": {
+      "nonce": 1,
+      "code": "0x6000600060006000735b75b4547f441a232a390563dc9fae2ede7b7f885af45000"
+    },
+    "0xf6c3a9edc1afa0ad5b720e4d42e1437c43d3b3ff": {
+      "balance": "0x033b2e3c9fd0803ce8000000"
+    },
+    "0xf822f47c346ae7bed1440f68ab97a3e22b569e89": {
+      "nonce": 1,
+      "code": "0x600060006000600073adea63edaf70d5cbbf53c24ce8b0cc22edc7e8fe5af45000"
+    }
+  },
+  "txs": [
+    {
+      "caller": "0xf6c3a9edc1afa0ad5b720e4d42e1437c43d3b3ff",
+      "to": "0x806cf69271662bba0bac32ebd4e3f9e6d7c2b3a4",
+      "data": "0x",
+      "value": "0x00",
+      "gas_limit": 200250000,
+      "kind": "call"
+    }
+  ]
+}

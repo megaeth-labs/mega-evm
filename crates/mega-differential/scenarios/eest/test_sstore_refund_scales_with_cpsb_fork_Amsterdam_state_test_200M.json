@@ -1,0 +1,27 @@
+{
+  "name": "test_sstore_refund_scales_with_cpsb_fork_Amsterdam_state_test_200M",
+  "coinbase": "0x2adc25665018aa1fe0e6bc666dac8fc2697ff9ba",
+  "pre": {
+    "0x4e59b44847b379578588920ca78fbf26c0b4956c": {
+      "nonce": 1,
+      "code": "0x7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffe03601600081602082378035828234f58015156039578182fd5b8082525050506014600cf3"
+    },
+    "0x5c81b4ea668898781e0c7d08c23f03b886fd76e8": {
+      "nonce": 1,
+      "code": "0x60016000556000600055"
+    },
+    "0xf6c3a9edc1afa0ad5b720e4d42e1437c43d3b3ff": {
+      "balance": "0x033b2e3c9fd0803ce8000000"
+    }
+  },
+  "txs": [
+    {
+      "caller": "0xf6c3a9edc1afa0ad5b720e4d42e1437c43d3b3ff",
+      "to": "0x5c81b4ea668898781e0c7d08c23f03b886fd76e8",
+      "data": "0x",
+      "value": "0x00",
+      "gas_limit": 200250000,
+      "kind": "call"
+    }
+  ]
+}

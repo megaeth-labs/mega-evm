@@ -1,0 +1,35 @@
+{
+  "name": "test_revert_discards_descendant_storage_clear_credit_through_depth_fork_Amsterdam_state_test_direct",
+  "coinbase": "0x2adc25665018aa1fe0e6bc666dac8fc2697ff9ba",
+  "pre": {
+    "0x4e59b44847b379578588920ca78fbf26c0b4956c": {
+      "nonce": 1,
+      "code": "0x7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffe03601600081602082378035828234f58015156039578182fd5b8082525050506014600cf3"
+    },
+    "0x5104e8dfb400fa45528f1939767450df6969319e": {
+      "nonce": 1,
+      "code": "0x60006000556000600155600060025560006003556000600455"
+    },
+    "0x6f54c4d99a08c1c7e6b8d65b4fd338996e587586": {
+      "nonce": 1,
+      "code": "0x6000600060006000735104e8dfb400fa45528f1939767450df6969319e5af45060006000fd"
+    },
+    "0xb980ec1278699297a811e6a7f34d27d7cb686cda": {
+      "nonce": 1,
+      "code": "0x600160005560016001556001600255600160035560016004556000600060006000736f54c4d99a08c1c7e6b8d65b4fd338996e5875865af4506001600a556001600b556001600c556001600d556001600e55"
+    },
+    "0xf6c3a9edc1afa0ad5b720e4d42e1437c43d3b3ff": {
+      "balance": "0x033b2e3c9fd0803ce8000000"
+    }
+  },
+  "txs": [
+    {
+      "caller": "0xf6c3a9edc1afa0ad5b720e4d42e1437c43d3b3ff",
+      "to": "0xb980ec1278699297a811e6a7f34d27d7cb686cda",
+      "data": "0x",
+      "value": "0x00",
+      "gas_limit": 200250000,
+      "kind": "call"
+    }
+  ]
+}

@@ -1,0 +1,34 @@
+{
+  "name": "test_create_account_charge_reduces_child_gas_fork_Amsterdam_create_opcode_CREATE2_state_test_charge_from_reservoir",
+  "coinbase": "0x2adc25665018aa1fe0e6bc666dac8fc2697ff9ba",
+  "pre": {
+    "0x126f16ee09ef8508c23bc5dd7205236eefcd2317": {
+      "balance": "0x01"
+    },
+    "0x4c162f0a55391f16b0d28bad275badc55f8b4882": {
+      "nonce": 1,
+      "code": "0x60006000600060006000738249de02b4017aec8639b3601fc73ca713d5c85162089685f1"
+    },
+    "0x4e59b44847b379578588920ca78fbf26c0b4956c": {
+      "nonce": 1,
+      "code": "0x7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffe03601600081602082378035828234f58015156039578182fd5b8082525050506014600cf3"
+    },
+    "0x8249de02b4017aec8639b3601fc73ca713d5c851": {
+      "nonce": 1,
+      "code": "0x7f600062070f605260006000f3000000000000000000000000000000000000000060005260006000600c60006000f511600055"
+    },
+    "0xf6c3a9edc1afa0ad5b720e4d42e1437c43d3b3ff": {
+      "balance": "0x033b2e3c9fd0803ce8000000"
+    }
+  },
+  "txs": [
+    {
+      "caller": "0xf6c3a9edc1afa0ad5b720e4d42e1437c43d3b3ff",
+      "to": "0x4c162f0a55391f16b0d28bad275badc55f8b4882",
+      "data": "0x",
+      "value": "0x00",
+      "gas_limit": 200250000,
+      "kind": "call"
+    }
+  ]
+}

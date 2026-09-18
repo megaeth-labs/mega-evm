@@ -1,0 +1,31 @@
+{
+  "name": "test_reservoir_returned_on_revert_fork_Amsterdam_state_test",
+  "coinbase": "0x2adc25665018aa1fe0e6bc666dac8fc2697ff9ba",
+  "pre": {
+    "0x4391c0c575a2677adfab1a4ddb038238f9dd01f0": {
+      "nonce": 1,
+      "code": "0x600060006000600060007343bbb24495f4107ab75aa339644d77b621ec0ee4620186a0f1506001600055"
+    },
+    "0x43bbb24495f4107ab75aa339644d77b621ec0ee4": {
+      "nonce": 1,
+      "code": "0x60006000fd"
+    },
+    "0x4e59b44847b379578588920ca78fbf26c0b4956c": {
+      "nonce": 1,
+      "code": "0x7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffe03601600081602082378035828234f58015156039578182fd5b8082525050506014600cf3"
+    },
+    "0xf6c3a9edc1afa0ad5b720e4d42e1437c43d3b3ff": {
+      "balance": "0x033b2e3c9fd0803ce8000000"
+    }
+  },
+  "txs": [
+    {
+      "caller": "0xf6c3a9edc1afa0ad5b720e4d42e1437c43d3b3ff",
+      "to": "0x4391c0c575a2677adfab1a4ddb038238f9dd01f0",
+      "data": "0x",
+      "value": "0x00",
+      "gas_limit": 200250000,
+      "kind": "call"
+    }
+  ]
+}

@@ -1,0 +1,71 @@
+{
+  "name": "test_sstore_restoration_refund_credits_local_reservoir_fork_Amsterdam_state_test_depth_10_refund_funds_create",
+  "coinbase": "0x2adc25665018aa1fe0e6bc666dac8fc2697ff9ba",
+  "pre": {
+    "0x123351ba1d1b575788d5e7d422dd0d5991bae228": {
+      "nonce": 1,
+      "code": "0x600060006000600073fee8ae183d5743fcd9ca7bb2a818ac8c6222b6955af45000"
+    },
+    "0x12d946c11d5ca6ca04ff5d4a9f42791f03469758": {
+      "nonce": 1,
+      "code": "0x6000600060006000736f802627f1da31fac729620e8749f3faead0d2535af45000"
+    },
+    "0x2bff1dbc074f103d7f14a0838b3e05964be16825": {
+      "nonce": 1,
+      "code": "0x60006000600060007312d946c11d5ca6ca04ff5d4a9f42791f034697585af45000"
+    },
+    "0x4e59b44847b379578588920ca78fbf26c0b4956c": {
+      "nonce": 1,
+      "code": "0x7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffe03601600081602082378035828234f58015156039578182fd5b8082525050506014600cf3"
+    },
+    "0x56508517ac549895c936f4ce69ea05801f2b10a9": {
+      "nonce": 1,
+      "code": "0x600160005560016001556000600060006000736724c7ff678d110c88703b6038f9f3e6e3e571685af45000"
+    },
+    "0x6724c7ff678d110c88703b6038f9f3e6e3e57168": {
+      "nonce": 1,
+      "code": "0x6000600060006000736f969a7bd5f36d33848eeb3fbe25f3ab570f690b5af45000"
+    },
+    "0x6f802627f1da31fac729620e8749f3faead0d253": {
+      "nonce": 1,
+      "code": "0x600060006000600073efeb46955494de7ec79826d87a9dabeed4f5fb635af45000"
+    },
+    "0x6f969a7bd5f36d33848eeb3fbe25f3ab570f690b": {
+      "nonce": 1,
+      "code": "0x600060006000600073123351ba1d1b575788d5e7d422dd0d5991bae2285af45000"
+    },
+    "0x8936a6da1a28684143533123025e622069901dc6": {
+      "nonce": 1,
+      "code": "0x600060006000600073c3886604bfe4b72b4f0189824b227a8549b1a0075af45000"
+    },
+    "0x9308b92176a11e055f973ce308e71afc2faec231": {
+      "nonce": 1,
+      "code": "0x6000600060006000738936a6da1a28684143533123025e622069901dc65af45000"
+    },
+    "0xc3886604bfe4b72b4f0189824b227a8549b1a007": {
+      "nonce": 1,
+      "code": "0x60006000556000600155600060006000f050600160025500"
+    },
+    "0xefeb46955494de7ec79826d87a9dabeed4f5fb63": {
+      "nonce": 1,
+      "code": "0x6000600060006000739308b92176a11e055f973ce308e71afc2faec2315af45000"
+    },
+    "0xf6c3a9edc1afa0ad5b720e4d42e1437c43d3b3ff": {
+      "balance": "0x033b2e3c9fd0803ce8000000"
+    },
+    "0xfee8ae183d5743fcd9ca7bb2a818ac8c6222b695": {
+      "nonce": 1,
+      "code": "0x6000600060006000732bff1dbc074f103d7f14a0838b3e05964be168255af45000"
+    }
+  },
+  "txs": [
+    {
+      "caller": "0xf6c3a9edc1afa0ad5b720e4d42e1437c43d3b3ff",
+      "to": "0x56508517ac549895c936f4ce69ea05801f2b10a9",
+      "data": "0x",
+      "value": "0x00",
+      "gas_limit": 200121910,
+      "kind": "call"
+    }
+  ]
+}

@@ -1,0 +1,35 @@
+{
+  "name": "test_sstore_restoration_refund_credits_local_reservoir_fork_Amsterdam_state_test_depth_1_no_refund_create_oogs",
+  "coinbase": "0x2adc25665018aa1fe0e6bc666dac8fc2697ff9ba",
+  "pre": {
+    "0x310b67f924f29693de45cfcd7e2c97ade1b500d3": {
+      "nonce": 1,
+      "code": "0x6000600060006000733a003c9d9a2b48c4610623b5c025182026d6596b5af45000"
+    },
+    "0x3a003c9d9a2b48c4610623b5c025182026d6596b": {
+      "nonce": 1,
+      "code": "0x60026000556002600155600060006000f050600160025500"
+    },
+    "0x4e59b44847b379578588920ca78fbf26c0b4956c": {
+      "nonce": 1,
+      "code": "0x7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffe03601600081602082378035828234f58015156039578182fd5b8082525050506014600cf3"
+    },
+    "0xf6c3a9edc1afa0ad5b720e4d42e1437c43d3b3ff": {
+      "balance": "0x033b2e3c9fd0803ce8000000"
+    },
+    "0xfa20484013e64b1fd58c2f25bc42d386464cf2c1": {
+      "nonce": 1,
+      "code": "0x60016000556001600155600060006000600073310b67f924f29693de45cfcd7e2c97ade1b500d35af45000"
+    }
+  },
+  "txs": [
+    {
+      "caller": "0xf6c3a9edc1afa0ad5b720e4d42e1437c43d3b3ff",
+      "to": "0xfa20484013e64b1fd58c2f25bc42d386464cf2c1",
+      "data": "0x",
+      "value": "0x00",
+      "gas_limit": 200121910,
+      "kind": "call"
+    }
+  ]
+}

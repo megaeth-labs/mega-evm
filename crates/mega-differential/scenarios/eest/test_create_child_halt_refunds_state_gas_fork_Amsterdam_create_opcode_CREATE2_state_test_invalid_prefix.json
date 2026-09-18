@@ -1,0 +1,31 @@
+{
+  "name": "test_create_child_halt_refunds_state_gas_fork_Amsterdam_create_opcode_CREATE2_state_test_invalid_prefix",
+  "coinbase": "0x2adc25665018aa1fe0e6bc666dac8fc2697ff9ba",
+  "pre": {
+    "0x4e59b44847b379578588920ca78fbf26c0b4956c": {
+      "nonce": 1,
+      "code": "0x7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffe03601600081602082378035828234f58015156039578182fd5b8082525050506014600cf3"
+    },
+    "0x82e020d72434259dc21dc51591598ea7bf43319c": {
+      "nonce": 1,
+      "code": "0x7f60ef60005360016000f3000000000000000000000000000000000000000000006000526000600a60006000f5506001600055"
+    },
+    "0xc08db6086f8b0f2e1c32e65ee46c4696cca5b299": {
+      "nonce": 1,
+      "code": "0x600060006000600060007382e020d72434259dc21dc51591598ea7bf43319c623bd177f1"
+    },
+    "0xf6c3a9edc1afa0ad5b720e4d42e1437c43d3b3ff": {
+      "balance": "0x033b2e3c9fd0803ce8000000"
+    }
+  },
+  "txs": [
+    {
+      "caller": "0xf6c3a9edc1afa0ad5b720e4d42e1437c43d3b3ff",
+      "to": "0xc08db6086f8b0f2e1c32e65ee46c4696cca5b299",
+      "data": "0x",
+      "value": "0x00",
+      "gas_limit": 200250000,
+      "kind": "call"
+    }
+  ]
+}

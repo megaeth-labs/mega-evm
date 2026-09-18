@@ -1,0 +1,28 @@
+{
+  "name": "test_call_value_new_account_state_gas_consumed_on_caller_halt_fork_Amsterdam_state_test_reservoir_in_cap_target_kind_new",
+  "coinbase": "0x2adc25665018aa1fe0e6bc666dac8fc2697ff9ba",
+  "pre": {
+    "0x4e59b44847b379578588920ca78fbf26c0b4956c": {
+      "nonce": 1,
+      "code": "0x7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffe03601600081602082378035828234f58015156039578182fd5b8082525050506014600cf3"
+    },
+    "0xf6c3a9edc1afa0ad5b720e4d42e1437c43d3b3ff": {
+      "balance": "0x033b2e3c9fd0803ce8000000"
+    },
+    "0xf8bdf1c4bfaa8b56bb2c7845f42f74ba94b04fe3": {
+      "nonce": 1,
+      "balance": "0x01",
+      "code": "0x6000600060006000600173c0f6dc9e5836f54caadbf59cc69346c508e1992b6000f1fe"
+    }
+  },
+  "txs": [
+    {
+      "caller": "0xf6c3a9edc1afa0ad5b720e4d42e1437c43d3b3ff",
+      "to": "0xf8bdf1c4bfaa8b56bb2c7845f42f74ba94b04fe3",
+      "data": "0x",
+      "value": "0x00",
+      "gas_limit": 200250000,
+      "kind": "call"
+    }
+  ]
+}

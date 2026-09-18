@@ -11,7 +11,7 @@ cargo test -p mega-differential --locked
 The corpus test prints one summary line, for example:
 
 ```text
-differential: 23 scenarios, 834 fields compared, 69 deviations matched (op-base-fee-vault-touch x23, …), 0 unexplained, 0 stale registry entries
+differential: 286 scenarios, 10761 fields compared, 858 deviations matched (op-base-fee-vault-touch x286, …), 0 unexplained, 0 stale registry entries
 ```
 
 ## The two arms
@@ -60,11 +60,12 @@ The block is fixed: number 1, timestamp 1, zero base fee, unlimited gas.
 | Directory      | Scenarios | Origin                                                                                                                             |
 | -------------- | --------: | ---------------------------------------------------------------------------------------------------------------------------------- |
 | `handwritten/` |        23 | the hand-written scenarios of the reference differential of the fork: state-gas spill and refill, creates, nested reverts and halts |
+| `eest/`        |       263 | derived from the execution-spec-test Amsterdam state tests of EIP-8037 (state gas, its reservoir, and its interplay with the EIP-7623 calldata floor); the names keep the fixture test ids |
 
-The scenarios come from a reference harness that ran them at per-scenario state-gas prices and execution caps.
+Both sets come from a reference harness that ran them at per-scenario state-gas prices and execution caps.
 Satin fixes both, so the import dropped the `cap` and `prices` fields and moved every gas limit above the reference cap `C` to the Satin cap plus the same reservoir: `G' = 200,000,000 + (G − C)`.
 Gas limits at or below the reference cap are unchanged, and the system call lost its gas limit, since a system call runs with the engine's own.
-Under the Osaka gas table state gas is priced at zero, so today the scenarios exercise the reservoir, refunds and the regular-gas paths; their state-gas paths start to count when the Satin gas table prices state and the oracle takes the same table.
+Under the Osaka gas table state gas is priced at zero, so today these scenarios exercise the reservoir, refunds and the regular-gas paths; their state-gas paths start to count when the Satin gas table prices state and the oracle takes the same table.
 
 To add a scenario, drop a JSON file into the directory of its origin; the loader rejects unknown fields, a name that is not the file stem, and a duplicate name.
 

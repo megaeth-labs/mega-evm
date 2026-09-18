@@ -1,0 +1,31 @@
+{
+  "name": "test_cross_frame_refund_advance_fork_Amsterdam_state_test_all_frames_succeed",
+  "coinbase": "0x2adc25665018aa1fe0e6bc666dac8fc2697ff9ba",
+  "pre": {
+    "0x25da3158c44fd21895e84d8f3908acf61c089437": {
+      "nonce": 1,
+      "code": "0x60006000600160006000335af15000"
+    },
+    "0x4e59b44847b379578588920ca78fbf26c0b4956c": {
+      "nonce": 1,
+      "code": "0x7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffe03601600081602082378035828234f58015156039578182fd5b8082525050506014600cf3"
+    },
+    "0xad110f9fa7b6b0f9a9c911e514c0616473e51e39": {
+      "nonce": 1,
+      "code": "0x36603758015760016000556001600155600060006000600060007325da3158c44fd21895e84d8f3908acf61c0894375af160025500600f5801565b60006000556000600155005b"
+    },
+    "0xf6c3a9edc1afa0ad5b720e4d42e1437c43d3b3ff": {
+      "balance": "0x033b2e3c9fd0803ce8000000"
+    }
+  },
+  "txs": [
+    {
+      "caller": "0xf6c3a9edc1afa0ad5b720e4d42e1437c43d3b3ff",
+      "to": "0xad110f9fa7b6b0f9a9c911e514c0616473e51e39",
+      "data": "0x",
+      "value": "0x00",
+      "gas_limit": 200250000,
+      "kind": "call"
+    }
+  ]
+}
