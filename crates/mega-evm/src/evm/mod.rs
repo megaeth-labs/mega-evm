@@ -31,7 +31,8 @@ use revm::{
 use crate::{EmptyExternalEnv, ExternalEnvTypes, MegaTransaction, MegaTransactionError};
 
 /// The instruction table of the Satin engine.
-pub(crate) type MegaInstructions<DB, ExtEnvs> = EthInstructions<EthInterpreter, MegaContext<DB, ExtEnvs>>;
+pub(crate) type MegaInstructions<DB, ExtEnvs> =
+    EthInstructions<EthInterpreter, MegaContext<DB, ExtEnvs>>;
 
 /// The op-revm EVM a [`MegaEvm`] wraps.
 ///
