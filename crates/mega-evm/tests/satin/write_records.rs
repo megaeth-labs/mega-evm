@@ -616,11 +616,18 @@ fn test_creation_stopped_at_init_bumps_the_creator_nonce() {
 /// frame.
 #[test]
 fn test_authorities_crossing_the_cap_are_not_applied() {
-    let db = MemoryDatabase::default().account_balance(CALLER, U256::from(1_000));
-    let limits = mega_evm::EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(39);
-    let outcome = MegaEvm::new(context(db).with_tx_runtime_limits(limits))
-        .execute_transaction(authorizing_call(CONTRACT, 0, &[(AUTHORITY_1, 0)]))
-        .unwrap();
+    let db = || MemoryDatabase::default().account_balance(CALLER, U256::from(1_000));
+    let with_cap = |cap| {
+        let limits = mega_evm::EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(cap);
+        MegaEvm::new(context(db()).with_tx_runtime_limits(limits))
+            .execute_transaction(authorizing_call(CONTRACT, 0, &[(AUTHORITY_1, 0)]))
+            .unwrap()
+    };
+    let at_the_cap = with_cap(40);
+    assert!(at_the_cap.result.is_success(), "records equal to the cap do not cross it");
+    assert_eq!(at_the_cap.usage, records(1));
+
+    let outcome = with_cap(39);
     assert!(!outcome.result.is_success() && !outcome.result.is_halt(), "{:?}", outcome.result);
     assert!(outcome.limit_exceeded.is_some());
     let authority = outcome.state.get(&AUTHORITY_1);
