@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - main
+      - satin
       - 'release-*'
   pull_request:
 

@@ -2,7 +2,7 @@ name: CodSpeed
 
 on:
   push:
-    branches: [main]
+    branches: [main, satin]
   pull_request:
     # Only paths that can move instruction counts (benches, sources, deps,
     # toolchain, or this workflow itself) — doc-only PRs skip the run.
