@@ -25,25 +25,26 @@ Do not add a `_pending/main.rs`.
 
 | Ticket | Tests | From `tests/` | From `src/` | 保留 | 重写 | 待定 |
 |---|---:|---:|---:|---:|---:|---:|
+| T2.1 | 21 | 0 | 21 | 15 | 6 | 0 |
 | T2.2 | 21 | 21 | 0 | 21 | 0 | 0 |
-| T2.3 | 19 | 19 | 0 | 8 | 11 | 0 |
-| T3.1 | 30 | 30 | 0 | 1 | 29 | 0 |
-| T3.2 | 72 | 72 | 0 | 23 | 49 | 0 |
-| T3.3 | 24 | 24 | 0 | 0 | 24 | 0 |
+| T2.3 | 40 | 19 | 21 | 21 | 19 | 0 |
+| T3.1 | 36 | 30 | 6 | 7 | 29 | 0 |
+| T3.2 | 87 | 72 | 15 | 29 | 58 | 0 |
+| T3.3 | 28 | 24 | 4 | 4 | 24 | 0 |
 | T3.4 | 27 | 27 | 0 | 0 | 27 | 0 |
-| T4.1 | 47 | 47 | 0 | 40 | 7 | 0 |
-| T4.2 | 82 | 82 | 0 | 75 | 7 | 0 |
-| T4.3 | 57 | 57 | 0 | 0 | 36 | 21 |
+| T4.1 | 49 | 47 | 2 | 42 | 7 | 0 |
+| T4.2 | 87 | 82 | 5 | 79 | 8 | 0 |
+| T4.3 | 58 | 57 | 1 | 0 | 36 | 22 |
 | T5.1 | 17 | 17 | 0 | 0 | 17 | 0 |
-| T5.2 | 15 | 15 | 0 | 11 | 4 | 0 |
-| T6.1 | 57 | 57 | 0 | 48 | 9 | 0 |
-| T6.2 | 17 | 17 | 0 | 13 | 4 | 0 |
+| T5.2 | 18 | 15 | 3 | 14 | 4 | 0 |
+| T6.1 | 65 | 57 | 8 | 56 | 9 | 0 |
+| T6.2 | 67 | 17 | 50 | 62 | 5 | 0 |
 | T6.3 | 77 | 77 | 0 | 67 | 10 | 0 |
-| T7 | 73 | 73 | 0 | 28 | 45 | 0 |
-| T8.1 | 45 | 45 | 0 | 35 | 10 | 0 |
+| T7 | 89 | 73 | 16 | 43 | 46 | 0 |
+| T8.1 | 74 | 45 | 29 | 55 | 19 | 0 |
 | T9 | 4 | 4 | 0 | 1 | 3 | 0 |
 | — (undecided: D57 preload-warm cold charging, D58 98/100 forwarding) | 7 | 7 | 0 | 0 | 0 | 7 |
-| **Total** | **691** | **691** | **0** | **371** | **292** | **28** |
+| **Total** | **872** | **691** | **181** | **516** | **327** | **29** |
 
 ## Files
 
@@ -132,3 +133,40 @@ Each cell lists `disposition count (ticket · decision)`.
 | `rex6/self_transfer_account_dedup.rs` | 5 | 重写 4 (T2.3 · D50/D56); 保留 1 (T4.1) |
 | `rex6/sequencer_registry_rotation.rs` | 6 | 保留 5 (T6.2); 保留 1 (T8.1 · params validation at load) |
 | `rex6/system_tx_metering_exemption.rs` | 3 | 重写 3 (T3.2 · D51 (m = 1 for system source; history exempt)) |
+| `src/access/volatile.rs` | 4 | 保留 4 (T4.2) |
+| `src/block/chain.rs` | 5 | 重写 4 (T8.1 · Satin activation timestamps; fallback pin = Satin); 保留 1 (T8.1) |
+| `src/block/eips.rs` | 1 | 保留 1 (T8.1) |
+| `src/block/hardfork.rs` | 12 | 重写 3 (T8.1 · single fork); 保留 9 (T8.1) |
+| `src/block/helpers.rs` | 3 | 保留 3 (T8.1) |
+| `src/block/limit.rs` | 5 | 保留 5 (T8.1) |
+| `src/block/result.rs` | 2 | 重写 2 (T8.1 · D48 (error shape)) |
+| `src/evm/context.rs` | 4 | 重写 2 (T2.1 · single spec); 保留 2 (T2.1 · T3.2 for the SALT cache test) |
+| `src/evm/factory.rs` | 2 | 保留 1 (T2.1); 重写 1 (T2.1 · no behaviour projection) |
+| `src/evm/host.rs` | 11 | 保留 10 (T2.3 · Host observation layer (D33) on the revm 40 journal); 保留 1 (T3.2) |
+| `src/evm/mod.rs` | 11 | 保留 8 (T2.1); 保留 3 (T5.2) |
+| `src/evm/precompiles.rs` | 6 | 保留 6 (T3.1 · D04) |
+| `src/evm/result.rs` | 4 | 重写 4 (T2.3 · D17/D48 (halt-reason set changes)) |
+| `src/evm/spec.rs` | 3 | 重写 3 (T2.1 · single rung; Karst/Osaka; legacy names must error) |
+| `src/evm/state.rs` | 1 | 保留 1 (T8.1) |
+| `src/external/gas.rs` | 9 | 重写 9 (T3.2 · D12/D51) |
+| `src/external/hasher/mod.rs` | 5 | 保留 5 (T3.2) |
+| `src/external/mod.rs` | 1 | 保留 1 (T2.1) |
+| `src/external/test_utils.rs` | 1 | 保留 1 (T2.1) |
+| `src/limit/compute_gas.rs` | 1 | 重写 1 (T4.2 · D40/D48) |
+| `src/limit/data_size.rs` | 2 | 保留 2 (T4.1) |
+| `src/limit/frame_limit.rs` | 4 | 重写 4 (T2.3 · data-size-only per-frame tracker) |
+| `src/limit/kv_update.rs` | 1 | 待定 1 (T4.3 · D46) |
+| `src/limit/limit.rs` | 4 | 保留 4 (T3.3 · D51) |
+| `src/limit/mod.rs` | 3 | 保留 3 (T2.3) |
+| `src/sandbox/error.rs` | 4 | 保留 4 (T7 · error types kept (T2.1 list)) |
+| `src/sandbox/execution.rs` | 2 | 保留 1 (T7 · rule); 重写 1 (T7 · D16) |
+| `src/sandbox/tx.rs` | 10 | 保留 10 (T7 · rules 1-9 helpers kept (T2.1 list)) |
+| `src/system/control.rs` | 8 | 保留 8 (T6.2 · T6.1 for selector/revert-data tests) |
+| `src/system/deploy.rs` | 4 | 保留 3 (T6.2); 重写 1 (T6.2 · single version) |
+| `src/system/intercept.rs` | 2 | 保留 2 (T6.1) |
+| `src/system/keyless_deploy.rs` | 2 | 保留 2 (T6.2) |
+| `src/system/limit_control.rs` | 5 | 保留 5 (T6.2) |
+| `src/system/oracle.rs` | 7 | 保留 7 (T6.2 · v2.0.0 only) |
+| `src/system/sequencer_registry.rs` | 24 | 保留 24 (T6.2 · T5.2 for transact_apply_pending_changes) |
+| `src/system/tx.rs` | 6 | 保留 6 (T6.1 · D51) |
+| `src/test_utils/opcode_gen.rs` | 2 | 保留 2 (T2.1) |
