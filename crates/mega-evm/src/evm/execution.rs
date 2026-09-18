@@ -15,8 +15,8 @@ use std::vec::Vec;
 use op_revm::precompiles::OpPrecompiles;
 use revm::{
     context::{
-        result::FromStringError, transaction::TransactionType, Cfg, ContextError, ContextTr,
-        FrameStack, JournalTr, Transaction,
+        result::FromStringError, transaction::TransactionType, ContextError, ContextTr, FrameStack,
+        JournalTr, Transaction,
     },
     context_interface::{cfg::gas::GasTracker, journaled_state::entry::JournalEntry},
     handler::{
@@ -74,30 +74,6 @@ where
     type Evm = EVM;
     type Error = ERROR;
     type HaltReason = OpHaltReason;
-
-    /// Resets the common execution layer, then validates as revm does.
-    fn validate(&self, evm: &mut Self::Evm) -> Result<InitialAndFloorGas, Self::Error> {
-        evm.ctx_mut().on_new_tx();
-        self.validate_env(evm)?;
-        let mut init_and_floor_gas = self.validate_initial_tx_gas(evm)?;
-        self.validate_against_state_and_deduct_caller(evm, &mut init_and_floor_gas)?;
-        Ok(init_and_floor_gas)
-    }
-
-    /// Resets the common execution layer for a system call, then builds its gas as revm does.
-    fn system_call_gas(&self, evm: &mut Self::Evm) -> GasTracker {
-        evm.ctx_mut().on_new_tx();
-        let mut gas = self.tx_gas(evm, &InitialAndFloorGas::new(0, 0));
-        let cfg = evm.ctx_ref().cfg();
-        if cfg.system_call_state_gas_margin_in_reservoir() && cfg.is_amsterdam_eip8037_enabled() {
-            let margin = gas
-                .remaining()
-                .saturating_sub(revm::handler::system_call::SYSTEM_CALL_REGULAR_GAS_LIMIT);
-            gas.set_remaining(gas.remaining() - margin);
-            gas.set_reservoir(gas.reservoir() + margin);
-        }
-        gas
-    }
 
     /// revm's pre-execution, then the write records of the EIP-7702 authorities it applied.
     fn pre_execution(
@@ -254,11 +230,7 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
         &mut self,
         frame_init: FrameInit,
     ) -> Result<FrameInitResult<'_, Self::Frame>, ContextDbError<Self::Context>> {
-        if let Some(latched) = self.inner.ctx.additional_limit.latched().copied() {
-            self.inner.ctx.additional_limit.push_empty_frame();
-            return Ok(ItemOrResult::Result(stopped_frame_result(&frame_init, &latched)));
-        }
-        if let Some(result) = call_too_deep(&frame_init) {
+        if let Some(result) = answer_before_building(&self.inner.ctx, &frame_init) {
             self.inner.ctx.additional_limit.push_empty_frame();
             return Ok(ItemOrResult::Result(result));
         }
@@ -390,13 +362,11 @@ where
     ) -> Result<FrameInitResult<'_, Self::Frame>, ContextDbError<Self::Context>> {
         let (ctx, inspector) = self.ctx_inspector();
         if let Some(mut output) = frame_start(ctx, inspector, &mut frame_init.frame_input) {
-            // The inspector answered the frame. The latch and the depth guard still hold, in
-            // `frame_init`'s order: an answer cannot start a frame of a stopped transaction, nor
-            // reach past the call-stack limit.
-            if let Some(latched) = ctx.additional_limit.latched().copied() {
-                output = stopped_frame_result(&frame_init, &latched);
-            } else if let Some(too_deep) = call_too_deep(&frame_init) {
-                output = too_deep;
+            // The inspector answered the frame. The latch and the depth guard still hold: an
+            // answer cannot start a frame of a stopped transaction, nor reach past the call-stack
+            // limit.
+            if let Some(answer) = answer_before_building(ctx, &frame_init) {
+                output = answer;
             }
             ctx.additional_limit.push_empty_frame();
             frame_end_checked(ctx, inspector, &frame_init.frame_input, &mut output);
@@ -505,6 +475,18 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
     const fn rewrite_keyless(&mut self, frame_init: FrameInit) -> FrameInit {
         frame_init
     }
+}
+
+/// The answer a frame gets before anything builds or answers it otherwise, in this order: the
+/// latched stop of a stopped transaction, then the depth guard's `CallTooDeep`.
+fn answer_before_building<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    ctx: &MegaContext<DB, ExtEnvs>,
+    frame_init: &FrameInit,
+) -> Option<FrameResult> {
+    if let Some(latched) = ctx.additional_limit.latched() {
+        return Some(stopped_frame_result(frame_init, latched));
+    }
+    call_too_deep(frame_init)
 }
 
 /// The depth guard: a `CALL` or `STATICCALL` past the call-stack limit, answered with

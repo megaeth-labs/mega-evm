@@ -170,12 +170,7 @@ where
         &mut self,
         tx: MegaTransaction,
     ) -> Result<MegaTransactionOutcome, EVMError<DB::Error, MegaTransactionError>> {
-        let result_and_state = if self.inspect {
-            InspectEvm::inspect_tx(self, tx)
-        } else {
-            ExecuteEvm::transact(self, tx)
-        }
-        .map_err(map_op_err)?;
+        let result_and_state = self.run_transaction(tx)?;
         let layer = &self.inner.ctx.additional_limit;
         let gas = MegaGasUsage::new(result_and_state.result.gas(), layer.history_gas_spent());
         Ok(MegaTransactionOutcome {
@@ -184,6 +179,26 @@ where
             usage: layer.usage(),
             limit_exceeded: layer.latched().copied(),
         })
+    }
+}
+
+impl<DB, INSP, ExtEnvs> MegaEvm<DB, INSP, ExtEnvs>
+where
+    DB: Database,
+    INSP: Inspector<MegaContext<DB, ExtEnvs>, EthInterpreter>,
+    ExtEnvs: ExternalEnvTypes,
+{
+    /// Runs `tx` through the inspector when one is enabled, without committing.
+    fn run_transaction(
+        &mut self,
+        tx: MegaTransaction,
+    ) -> Result<ResultAndState<OpHaltReason>, EVMError<DB::Error, MegaTransactionError>> {
+        let result = if self.inspect {
+            InspectEvm::inspect_tx(self, tx)
+        } else {
+            ExecuteEvm::transact(self, tx)
+        };
+        result.map_err(map_op_err)
     }
 }
 
@@ -203,6 +218,7 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> ExecuteEvm for MegaEvm<DB, I
 
     fn transact_one(&mut self, tx: Self::Tx) -> Result<Self::ExecutionResult, Self::Error> {
         self.inner.ctx.set_tx(tx);
+        self.inner.ctx.on_new_tx();
         MegaHandler::<_, Self::Error, _>::new().run(self)
     }
 
@@ -213,6 +229,7 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> ExecuteEvm for MegaEvm<DB, I
     fn replay(
         &mut self,
     ) -> Result<ExecResultAndState<Self::ExecutionResult, Self::State>, Self::Error> {
+        self.inner.ctx.on_new_tx();
         let result = MegaHandler::<_, Self::Error, _>::new().run(self)?;
         Ok(ExecResultAndState::new(result, self.finalize()))
     }
@@ -240,6 +257,7 @@ where
 
     fn inspect_one_tx(&mut self, tx: Self::Tx) -> Result<Self::ExecutionResult, Self::Error> {
         self.inner.ctx.set_tx(tx);
+        self.inner.ctx.on_new_tx();
         MegaHandler::<_, Self::Error, _>::new().inspect_run(self)
     }
 }
@@ -264,6 +282,7 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> SystemCallEvm for MegaEvm<DB
             system_contract_address,
             data,
         ));
+        self.inner.ctx.on_new_tx();
         MegaHandler::<_, Self::Error, _>::new().run_system_call(self)
     }
 }
@@ -285,6 +304,7 @@ where
             system_contract_address,
             data,
         ));
+        self.inner.ctx.on_new_tx();
         MegaHandler::<_, Self::Error, _>::new().inspect_run_system_call(self)
     }
 }
@@ -325,12 +345,7 @@ where
         &mut self,
         tx: Self::Tx,
     ) -> Result<ResultAndState<Self::HaltReason>, Self::Error> {
-        let result = if self.inspect {
-            InspectEvm::inspect_tx(self, tx)
-        } else {
-            ExecuteEvm::transact(self, tx)
-        };
-        result.map_err(map_op_err)
+        self.run_transaction(tx)
     }
 
     fn transact_system_call(

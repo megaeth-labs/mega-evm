@@ -127,7 +127,8 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
         &mut self.additional_limit
     }
 
-    /// Prepares the common execution layer for a new transaction or system call.
+    /// Prepares the common execution layer for a new transaction or system call. Every entry
+    /// point of [`MegaEvm`](crate::MegaEvm) calls it before it runs the handler.
     pub(crate) fn on_new_tx(&mut self) {
         self.additional_limit.reset();
     }

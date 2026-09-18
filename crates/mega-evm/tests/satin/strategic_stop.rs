@@ -368,3 +368,42 @@ fn test_first_latch_wins() {
     assert_eq!(layer.latched(), Some(&first));
     assert!(first.exceeded_limit() && !first.is_frame_local());
 }
+
+/// The layer's state belongs to one transaction: a latch and the usage counted do not reach the
+/// next transaction or system call, through any entry point.
+#[test]
+fn test_the_latch_does_not_outlive_its_transaction() {
+    let db = chain().account_code(B, writer());
+    let mut evm =
+        MegaEvm::new(context(db).with_tx_runtime_limits(cap(100))).with_inspector(Probe::default());
+    let stopped =
+        |evm: &MegaEvm<MemoryDatabase, Probe>| evm.ctx().additional_limit().latched().is_some();
+
+    // B writes three slots: 120 bytes cross the cap.
+    alloy_evm::Evm::set_inspector_enabled(&mut evm, false);
+    assert!(!evm.transact_raw(call(CALLER, B, U256::ZERO, GAS_LIMIT)).unwrap().result.is_success());
+    assert!(stopped(&evm));
+    // An empty call runs clean, through the plain and the inspected path.
+    assert!(evm
+        .transact_raw(call(CALLER, CALLER, U256::ZERO, GAS_LIMIT))
+        .unwrap()
+        .result
+        .is_success());
+    assert!(!stopped(&evm));
+    assert_eq!(evm.ctx().additional_limit().usage(), mega_evm::LimitUsage::ZERO);
+
+    assert!(!evm.transact_raw(call(CALLER, B, U256::ZERO, GAS_LIMIT)).unwrap().result.is_success());
+    alloy_evm::Evm::set_inspector_enabled(&mut evm, true);
+    assert!(evm
+        .transact_raw(call(CALLER, CALLER, U256::ZERO, GAS_LIMIT))
+        .unwrap()
+        .result
+        .is_success());
+    assert!(!stopped(&evm));
+
+    // So does a system call.
+    assert!(!evm.transact_raw(call(CALLER, B, U256::ZERO, GAS_LIMIT)).unwrap().result.is_success());
+    let system = evm.transact_system_call(CALLER, CALLER, Bytes::new()).unwrap();
+    assert!(system.result.is_success());
+    assert!(!stopped(&evm));
+}
