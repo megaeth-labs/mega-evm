@@ -82,7 +82,7 @@ These checks guard every change to the Satin engine.
 
 ### Differential harness
 
-- `crates/mega-differential` runs every scenario of its corpus (343 today: 23 hand-written, 263 derived from the execution-spec tests of EIP-8037, 57 written for the harness) through `MegaEvm` and through stock revm 43, and compares every gas figure, the outcome, the output, the logs and every touched account.
+- `crates/mega-differential` runs every scenario of its corpus (listed in its README) through `MegaEvm` and through stock revm 43, and compares every gas figure, the outcome, the output, the logs and every touched account.
 - The `differential` check (`.github/workflows/differential.yml`) runs it on every pull request and every push to `satin`; it must pass with no unexplained difference and no stale registry effect.
 - A change that makes `MegaEvm` differ from revm 43 on purpose adds the effects to `crates/mega-differential/deviations.json` (mechanism, reason, exact values), or configures the oracle to model the mechanism.
   Review a registry change like a spec change: an effect wider than its mechanism (a `*` where an exact value fits, a scenario pattern of `*` for a mechanism a few scenarios reach) hides the next regression.
@@ -91,6 +91,7 @@ These checks guard every change to the Satin engine.
 ### Execution-spec tests
 
 - Engine-level execution-spec coverage on `MegaEvm` is the 263 execution-spec-derived scenarios of the differential harness, until the state-test tool is ported to Satin.
+  They come from the EIP-8037 state tests; while the Osaka gas table prices state gas at zero they exercise the reservoir, refunds and regular gas, and their state-gas paths count once the Satin gas table prices state.
 - `.github/workflows/exec-spec.yml` runs the fork's own runner on the execution-spec-test fixtures, at the fork tag `Cargo.lock` pins, and checks the Osaka and Amsterdam executed and skipped counts pinned in the workflow.
   It checks the fork `MegaEvm` runs on, not `MegaEvm`, and it is not a required check.
 - It runs when `Cargo.toml` or `Cargo.lock` changes (the pin may have moved); a change that moves the pin updates the pinned counts and says why they moved.
