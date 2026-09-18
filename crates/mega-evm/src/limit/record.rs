@@ -1,5 +1,6 @@
 //! The facts the Host observes for the opcode that is running.
 
+use alloy_primitives::Address;
 use revm::interpreter::SStoreResult;
 
 use super::{LimitUsage, LOG_BASE_SIZE, LOG_TOPIC_SIZE, WRITE_RECORD};
@@ -30,6 +31,8 @@ pub enum StagedRecord {
         target_exists: bool,
         /// Whether the beneficiary is another account than the destructed one.
         to_other_account: bool,
+        /// The beneficiary.
+        beneficiary: Address,
     },
 }
 
@@ -50,8 +53,10 @@ impl StagedRecord {
     /// - `SSTORE`: the first change of a slot in the transaction is one write record; writing the
     ///   slot back to its original value takes the record back.
     /// - `LOG`: its bytes, one base record for the address, one per topic and the data.
-    /// - `SELFDESTRUCT`: one write record for the beneficiary, when value moves to another account.
-    pub(crate) fn effect(&self) -> RecordEffect {
+    /// - `SELFDESTRUCT`: one write record for the beneficiary, when value moves to another account
+    ///   than the destructed one and the transaction's `sender`, whose account the transaction body
+    ///   counts.
+    pub(crate) fn effect(&self, sender: Address) -> RecordEffect {
         match self {
             Self::Sstore(slot) => {
                 if slot.is_original_eq_present() {
@@ -72,8 +77,8 @@ impl StagedRecord {
                     .saturating_add(*data_len),
                 write_records: 0,
             }),
-            Self::SelfDestruct { had_value, to_other_account, .. } => {
-                if *had_value && *to_other_account {
+            Self::SelfDestruct { had_value, to_other_account, beneficiary, .. } => {
+                if *had_value && *to_other_account && *beneficiary != sender {
                     RecordEffect::Record(WRITE_RECORD)
                 } else {
                     RecordEffect::None
@@ -86,7 +91,10 @@ impl StagedRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_primitives::U256;
+    use alloy_primitives::{address, U256};
+
+    const SENDER: Address = address!("0000000000000000000000000000000000005e4d");
+    const OTHER: Address = address!("0000000000000000000000000000000000000077");
 
     fn sstore(original: u64, present: u64, new: u64) -> StagedRecord {
         StagedRecord::Sstore(SStoreResult {
@@ -100,18 +108,18 @@ mod tests {
     /// original value takes the record back; every other write counts nothing.
     #[test]
     fn test_sstore_record_rules() {
-        assert_eq!(sstore(0, 0, 1).effect(), RecordEffect::Record(WRITE_RECORD));
-        assert_eq!(sstore(5, 5, 0).effect(), RecordEffect::Record(WRITE_RECORD));
-        assert_eq!(sstore(0, 1, 0).effect(), RecordEffect::Refund(WRITE_RECORD));
-        assert_eq!(sstore(0, 1, 2).effect(), RecordEffect::None);
-        assert_eq!(sstore(3, 3, 3).effect(), RecordEffect::None);
-        assert_eq!(sstore(3, 4, 4).effect(), RecordEffect::None);
+        assert_eq!(sstore(0, 0, 1).effect(SENDER), RecordEffect::Record(WRITE_RECORD));
+        assert_eq!(sstore(5, 5, 0).effect(SENDER), RecordEffect::Record(WRITE_RECORD));
+        assert_eq!(sstore(0, 1, 0).effect(SENDER), RecordEffect::Refund(WRITE_RECORD));
+        assert_eq!(sstore(0, 1, 2).effect(SENDER), RecordEffect::None);
+        assert_eq!(sstore(3, 3, 3).effect(SENDER), RecordEffect::None);
+        assert_eq!(sstore(3, 4, 4).effect(SENDER), RecordEffect::None);
     }
 
     /// A log is 32 bytes for its address, 32 per topic and its data.
     #[test]
     fn test_log_bytes() {
-        let log = |topics, data_len| StagedRecord::Log { topics, data_len }.effect();
+        let log = |topics, data_len| StagedRecord::Log { topics, data_len }.effect(SENDER);
         assert_eq!(log(0, 0), RecordEffect::Record(LimitUsage { data_size: 32, write_records: 0 }));
         assert_eq!(
             log(4, 100),
@@ -127,11 +135,25 @@ mod tests {
     #[test]
     fn test_selfdestruct_record_rules() {
         let sd = |had_value, to_other_account| {
-            StagedRecord::SelfDestruct { had_value, target_exists: true, to_other_account }.effect()
+            let beneficiary = OTHER;
+            StagedRecord::SelfDestruct {
+                had_value,
+                target_exists: true,
+                to_other_account,
+                beneficiary,
+            }
+            .effect(SENDER)
         };
         assert_eq!(sd(true, true), RecordEffect::Record(WRITE_RECORD));
         assert_eq!(sd(true, false), RecordEffect::None);
         assert_eq!(sd(false, true), RecordEffect::None);
         assert_eq!(sd(false, false), RecordEffect::None);
+        let to_sender = StagedRecord::SelfDestruct {
+            had_value: true,
+            target_exists: true,
+            to_other_account: true,
+            beneficiary: SENDER,
+        };
+        assert_eq!(to_sender.effect(SENDER), RecordEffect::None, "the body counts the sender");
     }
 }

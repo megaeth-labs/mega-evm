@@ -124,6 +124,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
             had_value: load.data.had_value,
             target_exists: load.data.target_exists,
             to_other_account: target != address,
+            beneficiary: target,
         });
         Ok(load)
     }

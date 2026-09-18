@@ -159,7 +159,7 @@ impl AdditionalLimit {
     #[inline]
     pub(crate) fn commit_staged_record(&mut self) -> LimitCheck {
         let Some(record) = self.staged.take() else { return LimitCheck::WithinLimit };
-        match record.effect() {
+        match record.effect(self.sender) {
             RecordEffect::None => LimitCheck::WithinLimit,
             RecordEffect::Record(usage) => {
                 self.tracker.record(usage);

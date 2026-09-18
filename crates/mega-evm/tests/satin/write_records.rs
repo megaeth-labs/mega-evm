@@ -310,7 +310,8 @@ fn test_log_counts_its_bytes() {
     assert_eq!(usage, LimitUsage { data_size: 32 + 2 * 32 + 10, write_records: 0 });
 }
 
-/// `SELFDESTRUCT` records the beneficiary only when value moves to another account.
+/// `SELFDESTRUCT` records the beneficiary only when value moves to another account than the
+/// destructed one and the sender, whose account the transaction body counts.
 #[test]
 fn test_selfdestruct_records_the_beneficiary_when_value_moves() {
     let destruct_to = |beneficiary: Address| {
@@ -319,6 +320,7 @@ fn test_selfdestruct_records_the_beneficiary_when_value_moves() {
     let cases = [
         (U256::from(5), CONTRACT, records(1)),
         (U256::from(5), CALLEE, LimitUsage::ZERO),
+        (U256::from(5), CALLER, LimitUsage::ZERO),
         (U256::ZERO, CONTRACT, LimitUsage::ZERO),
     ];
     for (balance, beneficiary, expected) in cases {
