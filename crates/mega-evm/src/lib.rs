@@ -24,6 +24,7 @@ mod types;
 pub use block::*;
 pub use evm::*;
 pub use external::*;
+pub use limit::*;
 pub use types::*;
 
 /* Re-export of upstream crates, so consumers build against the exact versions used here */

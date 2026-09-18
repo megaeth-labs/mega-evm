@@ -6,10 +6,12 @@
 
 mod context;
 mod factory;
+mod result;
 mod spec;
 
 pub use context::*;
 pub use factory::*;
+pub use result::*;
 pub use spec::*;
 
 use alloy_evm::EvmEnv;

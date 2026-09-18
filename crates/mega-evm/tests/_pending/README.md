@@ -26,7 +26,7 @@ Do not add a `_pending/main.rs`.
 
 | Owning mechanism | Tests | From `tests/` | From `src/` | Keep | Rewrite | Undecided |
 |---|---:|---:|---:|---:|---:|---:|
-| the common execution layer | 41 | 19 | 22 | 22 | 19 | 0 |
+| the common execution layer | 34 | 19 | 15 | 19 | 15 | 0 |
 | the Satin gas table | 34 | 27 | 7 | 7 | 27 | 0 |
 | SALT pricing | 75 | 64 | 11 | 17 | 58 | 0 |
 | history gas | 28 | 24 | 4 | 4 | 24 | 0 |
@@ -43,7 +43,7 @@ Do not add a `_pending/main.rs`.
 | the block executor | 53 | 23 | 30 | 39 | 14 | 0 |
 | inspector support | 4 | 4 | 0 | 1 | 3 | 0 |
 | — (undecided: D57 preload-warm cold charging, D58 98/100 forwarding) | 7 | 7 | 0 | 0 | 0 | 7 |
-| **Total** | **771** | **626** | **145** | **431** | **312** | **28** |
+| **Total** | **764** | **626** | **138** | **428** | **308** | **28** |
 
 ## Tests ported in place
 
@@ -111,6 +111,16 @@ A scenario keeps the transaction of its test; the assertions on compute gas (not
 
 The halt reason of a static callee is still owed, not discharged: 6 of these rows asserted it, and a scenario cannot, because the harness compares what the transaction reports and the inner frame's halt reason is not part of that.
 It becomes assertable with the common execution layer, which defines the frame outcome, and inspector support, which reaches an inner frame as it ends; whichever lands first re-adds the assertions next to its own tests.
+
+## Tests ported by the common execution layer
+
+These 7 rows run in a real test target now, adapted to the Satin API, so the counts above are lower than the inventory's by exactly these rows.
+
+| Legacy file | Owner in the inventory | Tests | Now in |
+|---|---|---:|---|
+| `src/evm/result.rs` | the common execution layer (4) | 4 | `src/evm/result.rs` |
+| `src/limit/mod.rs` | the common execution layer (3) | 3 | `src/limit/mod.rs` |
+| **Total** | | **7** | |
 
 ## Tests the inventory assigns to the Satin skeleton that are parked under another mechanism
 
@@ -212,7 +222,6 @@ Each cell lists `disposition count (mechanism · decision)`.
 | `src/evm/host.rs` | 11 | keep 10 (the common execution layer · Host observation layer (D33) on the revm 40 journal); keep 1 (SALT pricing) |
 | `src/evm/mod.rs` | 5 | keep 3 (the pre-block system calls); keep 1 (the block executor); keep 1 (the common execution layer) |
 | `src/evm/precompiles.rs` | 6 | keep 6 (the Satin gas table · D04) |
-| `src/evm/result.rs` | 4 | rewrite 4 (the common execution layer · D17/D48 (halt-reason set changes)) |
 | `src/evm/state.rs` | 1 | keep 1 (the block executor) |
 | `src/external/gas.rs` | 9 | rewrite 9 (SALT pricing · D12/D51) |
 | `src/limit/compute_gas.rs` | 1 | rewrite 1 (detention · D40/D48) |
@@ -220,7 +229,6 @@ Each cell lists `disposition count (mechanism · decision)`.
 | `src/limit/frame_limit.rs` | 4 | rewrite 4 (the common execution layer · data-size-only per-frame tracker) |
 | `src/limit/kv_update.rs` | 1 | undecided 1 (the state-growth and KV limits · D46) |
 | `src/limit/limit.rs` | 4 | keep 4 (history gas · D51) |
-| `src/limit/mod.rs` | 3 | keep 3 (the common execution layer) |
 | `src/sandbox/execution.rs` | 2 | keep 1 (native keyless deployment · rule); rewrite 1 (native keyless deployment · D16) |
 | `src/system/control.rs` | 8 | keep 8 (system contract deployment · the system contract interceptors for selector/revert-data tests) |
 | `src/system/deploy.rs` | 4 | keep 3 (system contract deployment); rewrite 1 (system contract deployment · single version) |
