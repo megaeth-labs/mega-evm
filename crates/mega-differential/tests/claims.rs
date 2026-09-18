@@ -2,9 +2,9 @@
 
 use std::collections::BTreeMap;
 
-use mega_differential::oracle;
+use mega_differential::{corpus_dir, mega, oracle};
 use mega_evm::{
-    alloy_primitives::{address, Address, Bytes, U256},
+    alloy_primitives::{address, hex, keccak256, Address, Bytes, U256},
     revm::{
         context_interface::cfg::gas_params::GasId as ForkGasId,
         database::{states::bundle_state::BundleRetention, State},
@@ -19,6 +19,18 @@ use revm_oracle::{
 
 const CALLER: Address = address!("0x0000000000000000000000000000000000000aaa");
 const CALLEE: Address = address!("0x0000000000000000000000000000000000000bbb");
+
+/// The proxy of the `precompile_point_evaluation_*` scenarios: it calls the precompile and
+/// records the call's status in slot 0, the size of the return data in slot 1 and its hash in
+/// slot 2.
+const KZG_PROXY: Address = address!("0x000000000000000000000000000000000000990a");
+
+/// What a successful point evaluation returns: `FIELD_ELEMENTS_PER_BLOB` and the BLS modulus,
+/// each as a 32-byte big-endian value.
+const POINT_EVALUATION_OUTPUT: [u8; 64] = hex!(
+    "0000000000000000000000000000000000000000000000000000000000001000"
+    "73eda753299d7d483339d80809a1d80553bda402fffe5bfeffffffff00000001"
+);
 
 /// The gas ids the fork adds on top of upstream's. revm 43 has no price at these indexes.
 const FORK_ONLY_GAS_IDS: &[&str] = &["code_deposit_history_gas"];
@@ -106,4 +118,60 @@ fn test_zero_fee_vault_touch_leaves_no_committed_account() {
     for vault in vaults {
         assert!(bundle.account(&vault).is_none(), "{vault}");
     }
+}
+
+/// Reads a scenario of `scenarios/harness/` by name.
+fn harness_scenario(name: &str) -> Scenario {
+    let path = corpus_dir().join("harness").join(format!("{name}.json"));
+    let scenario: Scenario =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    scenario.validate().unwrap();
+    scenario
+}
+
+/// The corpus compares the two arms, and two calls that fail agree as readily as two that
+/// succeed, so the positive KZG case needs a pinned value on the left arm: this is what
+/// `MegaEvm`'s KZG backend returns for a valid proof, and it is only produced after
+/// `verify_kzg_proof` accepts it.
+#[test]
+fn test_point_evaluation_on_a_valid_proof_returns_the_field_parameters() {
+    let scenario = harness_scenario("precompile_point_evaluation_valid");
+    let record = mega::run(&scenario);
+
+    assert_eq!(record.len(), 1);
+    assert_eq!(record[0].outcome, "success");
+    assert_eq!(record[0].output, Bytes::from_static(&POINT_EVALUATION_OUTPUT));
+    // The proxy's record of the inner call: status 1, 64 bytes of return data, its hash.
+    assert_eq!(
+        record[0].state[&KZG_PROXY].storage,
+        BTreeMap::from([
+            (U256::ZERO, U256::from(1)),
+            (U256::from(1), U256::from(64)),
+            (U256::from(2), keccak256(POINT_EVALUATION_OUTPUT).into()),
+        ]),
+    );
+}
+
+/// The wrong-proof scenario differs from the valid one only in the proof, so its versioned hash
+/// still matches its commitment: the call gets past that check and fails in verification, with
+/// no status, no return data and the hash of an empty return.
+#[test]
+fn test_point_evaluation_on_a_wrong_proof_fails_in_verification() {
+    let valid = harness_scenario("precompile_point_evaluation_valid");
+    let scenario = harness_scenario("precompile_point_evaluation_wrong_proof");
+    let (input, valid_input) = (&scenario.txs[0].data, &valid.txs[0].data);
+
+    // | versioned hash 32 | z 32 | y 32 | commitment 48 | proof 48 |
+    assert_eq!(input[..144], valid_input[..144], "same versioned hash, z, y and commitment");
+    assert_ne!(input[144..192], valid_input[144..192], "a different proof");
+
+    let record = mega::run(&scenario);
+    assert_eq!(record.len(), 1);
+    assert_eq!(record[0].outcome, "success");
+    assert_eq!(record[0].output, Bytes::new());
+    assert_eq!(
+        record[0].state[&KZG_PROXY].storage,
+        BTreeMap::from([(U256::from(2), keccak256([]).into())]),
+        "storing zero into an empty slot is not a change, so only the hash slot is recorded",
+    );
 }

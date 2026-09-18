@@ -1,0 +1,23 @@
+{
+  "name": "precompile_point_evaluation_wrong_proof",
+  "description": "KZG point evaluation with the versioned hash of the commitment but the commitment repeated in place of the proof: a well-formed curve point that is not the proof, so the call reaches verification and fails there.",
+  "coinbase": "0x0000000000000000000000000000000000000c01",
+  "pre": {
+    "0x0000000000000000000000000000000000000aaa": {
+      "balance": "0xde0b6b3a7640000"
+    },
+    "0x000000000000000000000000000000000000990a": {
+      "code": "0x3660006000376000600036600073000000000000000000000000000000000000000a5afa6000553d6001553d600060003e3d6000206002553d6000f3"
+    }
+  },
+  "txs": [
+    {
+      "caller": "0x0000000000000000000000000000000000000aaa",
+      "to": "0x000000000000000000000000000000000000990a",
+      "data": "0x01e798154708fe7789429634053cbf9f99b619f9f084048927333fce637f549b73eda753299d7d483339d80809a1d80553bda402fffe5bfeffffffff000000001522a4a7f34e1ea350ae07c29c96c7e79655aa926122e95fe69fcbd932ca49e98f59a8d2a1a625a17f3fea0fe5eb8c896db3764f3185481bc22f91b4aaffcca25f26936857bc3a7c2539ea8ec3a952b78f59a8d2a1a625a17f3fea0fe5eb8c896db3764f3185481bc22f91b4aaffcca25f26936857bc3a7c2539ea8ec3a952b7",
+      "value": "0x0",
+      "gas_limit": 5000000,
+      "kind": "call"
+    }
+  ]
+}
