@@ -31,7 +31,7 @@ pub(crate) type MegaInnerContext<DB> =
 /// written together, only through [`MegaContext::with_cfg`], so they cannot drift apart.
 ///
 /// Every [`Host`](revm::interpreter::Host) method and every context accessor delegates to the
-/// wrapped context; later tickets override the ones `MegaETH` prices or meters differently.
+/// wrapped context; later changes override the ones `MegaETH` prices or meters differently.
 #[derive(Debug)]
 pub struct MegaContext<DB: Database, ExtEnvs: ExternalEnvTypes = EmptyExternalEnv> {
     inner: MegaInnerContext<DB>,

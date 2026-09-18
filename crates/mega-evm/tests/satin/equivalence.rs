@@ -2,7 +2,7 @@
 //!
 //! The same transaction on the same `CfgEnv`, block and L1 info must produce the same result
 //! through `MegaEvm` and through op-revm's `OpEvm`, down to every `ResultGas` field, the logs and
-//! the resulting state. Once later tickets add `MegaETH` behavior (SALT pricing, history gas,
+//! the resulting state. Once later changes add `MegaETH` behavior (SALT pricing, history gas,
 //! limits), these cases stay the baseline that shows where the two diverge on purpose.
 
 use alloy_op_evm::OpTx;
