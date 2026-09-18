@@ -157,3 +157,54 @@ impl BytecodeBuilder {
         self
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use core::convert::Infallible;
+
+    use alloy_primitives::address;
+    use revm::context::result::{EVMError, ResultAndState};
+
+    use crate::{
+        test_utils::{transact, MemoryDatabase},
+        MegaHaltReason, MegaSpecId, MegaTransactionError,
+    };
+
+    use super::*;
+
+    fn execute_bytecode(
+        bytecode: Bytes,
+    ) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, MegaTransactionError>> {
+        let caller = address!("0000000000000000000000000000000000100000");
+        let contract = address!("0000000000000000000000000000000000100001");
+        let mut db = MemoryDatabase::default();
+        db.set_account_code(contract, bytecode);
+        transact(
+            MegaSpecId::SATIN,
+            &mut db,
+            caller,
+            Some(contract),
+            Bytes::new(),
+            U256::ZERO,
+            1_000_000,
+        )
+    }
+
+    #[test]
+    fn test_assert_stack_value_success() {
+        let mut builder = BytecodeBuilder::default().push_number(0x2333u64);
+        builder = builder.assert_stack_value(0, U256::from(0x2333u64));
+        let bytecode = builder.build();
+        let result = execute_bytecode(bytecode);
+        assert!(result.unwrap().result.is_success(), "Transaction should succeed");
+    }
+
+    #[test]
+    fn test_assert_stack_value_failure() {
+        let mut builder = BytecodeBuilder::default().push_number(0x2333u64);
+        builder = builder.assert_stack_value(0, U256::from(0x9999u64));
+        let bytecode = builder.build();
+        let result = execute_bytecode(bytecode);
+        assert!(result.unwrap().result.is_halt(), "Transaction should fail");
+    }
+}

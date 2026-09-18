@@ -7,16 +7,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_external_env_factory_getter() {
-        let factory = MegaEvmFactory::new().with_external_env_factory(EmptyExternalEnv);
-
-        let got: &EmptyExternalEnv = factory.external_env_factory();
-
-        // Verify the getter returns a stable reference to the same field.
-        assert!(core::ptr::eq(got, factory.external_env_factory()));
-    }
-
-    #[test]
     fn test_dyn_precompiles_builder_receives_the_behavior_spec() {
         use alloy_evm::EvmFactory as _;
         use core::sync::atomic::{AtomicU8, Ordering};

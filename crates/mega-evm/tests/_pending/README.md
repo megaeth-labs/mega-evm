@@ -25,11 +25,10 @@ Do not add a `_pending/main.rs`.
 
 | Ticket | Tests | From `tests/` | From `src/` | 保留 | 重写 | 待定 |
 |---|---:|---:|---:|---:|---:|---:|
-| T2.1 | 16 | 0 | 16 | 13 | 3 | 0 |
 | T2.2 | 21 | 21 | 0 | 21 | 0 | 0 |
-| T2.3 | 40 | 19 | 21 | 21 | 19 | 0 |
-| T3.1 | 36 | 30 | 6 | 7 | 29 | 0 |
-| T3.2 | 82 | 72 | 10 | 24 | 58 | 0 |
+| T2.3 | 41 | 19 | 22 | 22 | 19 | 0 |
+| T3.1 | 37 | 30 | 7 | 7 | 30 | 0 |
+| T3.2 | 83 | 72 | 11 | 25 | 58 | 0 |
 | T3.3 | 28 | 24 | 4 | 4 | 24 | 0 |
 | T3.4 | 27 | 27 | 0 | 0 | 27 | 0 |
 | T4.1 | 49 | 47 | 2 | 42 | 7 | 0 |
@@ -41,10 +40,19 @@ Do not add a `_pending/main.rs`.
 | T6.2 | 67 | 17 | 50 | 62 | 5 | 0 |
 | T6.3 | 77 | 77 | 0 | 67 | 10 | 0 |
 | T7 | 89 | 73 | 16 | 43 | 46 | 0 |
-| T8.1 | 74 | 45 | 29 | 55 | 19 | 0 |
+| T8.1 | 75 | 45 | 30 | 56 | 19 | 0 |
 | T9 | 4 | 4 | 0 | 1 | 3 | 0 |
 | — (undecided: D57 preload-warm cold charging, D58 98/100 forwarding) | 7 | 7 | 0 | 0 | 0 | 7 |
-| **Total** | **862** | **691** | **171** | **509** | **324** | **29** |
+| **Total** | **850** | **691** | **159** | **499** | **322** | **29** |
+
+## Tests T0 assigns to T2.1 that are parked under another ticket
+
+| File | Test | Parked under | Reason |
+|---|---|---|---|
+| `src/evm/context.rs` | `test_shared_salt_env_keeps_dynamic_gas_cache_isolated` | T3.2 | exercises the dynamic storage-gas cache that SALT pricing brings back |
+| `src/evm/factory.rs` | `test_dyn_precompiles_builder_receives_the_behavior_spec` | T3.1 | the dynamic precompile builder returns with the Satin precompile set; the behavior projection it pinned has no counterpart in a single-spec engine |
+| `src/evm/mod.rs` | `test_convenience_execution_methods_work` | T2.3 | `execute_transaction` returns the transaction outcome type that T2.3 defines |
+| `src/evm/mod.rs` | `test_mega_evm_exposes_state_wrapper_block_hashes` | T8.1 | reads the accessed-block-hash record, which returns with the block executor |
 
 ## Files
 
@@ -140,10 +148,10 @@ Each cell lists `disposition count (ticket · decision)`.
 | `src/block/helpers.rs` | 3 | 保留 3 (T8.1) |
 | `src/block/limit.rs` | 5 | 保留 5 (T8.1) |
 | `src/block/result.rs` | 2 | 重写 2 (T8.1 · D48 (error shape)) |
-| `src/evm/context.rs` | 4 | 重写 2 (T2.1 · single spec); 保留 2 (T2.1 · T3.2 for the SALT cache test) |
-| `src/evm/factory.rs` | 2 | 保留 1 (T2.1); 重写 1 (T2.1 · no behaviour projection) |
+| `src/evm/context.rs` | 1 | 保留 1 (T3.2 · T3.2 for the SALT cache test) |
+| `src/evm/factory.rs` | 1 | 重写 1 (T3.1 · no behaviour projection) |
 | `src/evm/host.rs` | 11 | 保留 10 (T2.3 · Host observation layer (D33) on the revm 40 journal); 保留 1 (T3.2) |
-| `src/evm/mod.rs` | 11 | 保留 8 (T2.1); 保留 3 (T5.2) |
+| `src/evm/mod.rs` | 5 | 保留 3 (T5.2); 保留 1 (T8.1); 保留 1 (T2.3) |
 | `src/evm/precompiles.rs` | 6 | 保留 6 (T3.1 · D04) |
 | `src/evm/result.rs` | 4 | 重写 4 (T2.3 · D17/D48 (halt-reason set changes)) |
 | `src/evm/state.rs` | 1 | 保留 1 (T8.1) |
@@ -165,4 +173,3 @@ Each cell lists `disposition count (ticket · decision)`.
 | `src/system/oracle.rs` | 7 | 保留 7 (T6.2 · v2.0.0 only) |
 | `src/system/sequencer_registry.rs` | 24 | 保留 24 (T6.2 · T5.2 for transact_apply_pending_changes) |
 | `src/system/tx.rs` | 6 | 保留 6 (T6.1 · D51) |
-| `src/test_utils/opcode_gen.rs` | 2 | 保留 2 (T2.1) |
