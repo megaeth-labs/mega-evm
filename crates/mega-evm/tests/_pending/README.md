@@ -45,6 +45,24 @@ Do not add a `_pending/main.rs`.
 | — (undecided: D57 preload-warm cold charging, D58 98/100 forwarding) | 7 | 7 | 0 | 0 | 0 | 7 |
 | **Total** | **836** | **691** | **145** | **485** | **322** | **29** |
 
+## Tests ported in place
+
+These rows came back with the code they test and run in `crates/mega-evm/src`, so the counts above are lower than T0's per-ticket totals by exactly these rows.
+
+| Legacy file | Owner in T0 | Tests | Now in |
+|---|---|---:|---|
+| `src/evm/context.rs` | T2.1 (3) | 3 | `src/evm/context.rs` |
+| `src/evm/factory.rs` | T2.1 (1) | 1 | `src/evm/factory.rs` |
+| `src/evm/mod.rs` | T2.1 (6) | 6 | `src/evm/mod.rs` |
+| `src/evm/spec.rs` | T2.1 (3) | 3 | `src/evm/spec.rs` |
+| `src/external/hasher/mod.rs` | T3.2 (5) | 5 | `src/external/hasher/mod.rs` |
+| `src/external/mod.rs` | T2.1 (1) | 1 | `src/external/mod.rs` |
+| `src/external/test_utils.rs` | T2.1 (1) | 1 | `src/external/test_utils.rs` |
+| `src/sandbox/error.rs` | T7 (4) | 4 | `src/system/keyless/error.rs` |
+| `src/sandbox/tx.rs` | T7 (10) | 10 | `src/system/keyless/tx.rs` |
+| `src/test_utils/opcode_gen.rs` | T2.1 (2) | 2 | `src/test_utils/opcode_gen.rs` |
+| **Total** | | **36** | |
+
 ## Tests T0 assigns to T2.1 that are parked under another ticket
 
 | File | Test | Parked under | Reason |

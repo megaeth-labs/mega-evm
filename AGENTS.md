@@ -100,8 +100,9 @@ The root `Cargo.toml` pins `revm = "=40.0.3"` and redirects all twelve revm crat
 
 - `MegaContext` wraps op-revm's context shape (`MegaTransaction` = alloy-op-evm's `OpTx`, `L1BlockInfo`) and adds the spec and the external environments.
   It keeps the configuration twice — the `MegaSpecId` view callers see and the `OpSpecId` view op-revm executes on — and writes both together.
-- The spec fixes part of the configuration, whatever the caller passes (`MegaContext::with_cfg`): the Osaka gas table, EIP-8037 state gas on, the EIP-2780 intrinsic cost on, `tx_gas_limit_cap` = 200,000,000, EIP-7708 off, the system-call reservoir margin off.
+- The spec fixes part of the configuration, whatever the caller passes (`MegaContext::with_cfg`): the Osaka gas table, EIP-8037 on, the EIP-2780 intrinsic cost on, `tx_gas_limit_cap` = 200,000,000, EIP-7708 off, the system-call reservoir margin off.
   Gas above the 200M execution cap goes to the EIP-8037 reservoir.
+  The Osaka gas table prices state gas at zero, so no transaction draws state gas until T3.1 installs the Satin gas table.
 - Every `Host` and context method delegates to op-revm's context, and `MegaEvm` delegates execution to `OpEvm`.
   `tests/satin/equivalence.rs` pins that Satin currently equals op-revm on the same `CfgEnv`, field by field; a later ticket that changes behavior on purpose updates that baseline.
 - The legacy engine's gas leakage pitfalls, limit-check protocol and storage-gas stipend describe mechanisms that do not exist here.
@@ -187,12 +188,16 @@ When the agent is requested to implement a new feature or bug fix, it should con
 - **Use `test_` prefix for Rust test function names.**
   New `#[test]` functions should be named with a `test_` prefix for consistency with this repository and upstream revm style.
   If editing nearby tests in the same module, align names to the same `test_` style when reasonable.
-- **System contracts stay unchanged.**
-  Do not modify the Solidity sources or the generated bindings in `crates/system-contracts`; Satin reuses them.
+- **System contracts carry over as they are.**
+  Satin reuses the Solidity sources and bindings in `crates/system-contracts`; changing a contract needs a decision of its own, not a side effect of an engine ticket.
 - **Rules for system contract interceptors (T6 onwards).**
   For read-only or control methods, reject calls with non-zero `transfer_value` in the interceptor; if a method intentionally accepts value, document the reason in spec and code comments and add dedicated tests.
   Do not intercept unknown selectors: they fall through to on-chain bytecode and revert with a stable custom error such as `NotIntercepted()`.
+  Only `CALL` and `STATICCALL` reach interceptor dispatch; `CALLCODE` and `DELEGATECALL` are rejected by the call-scheme guard before any interceptor is consulted.
   Interceptor tests cover the intercepted path, non-zero value, unknown selector fallback, and CALL vs DELEGATECALL/CALLCODE boundaries.
+- **Validate per-fork parameters at load time (T8.1 onwards).**
+  A hardfork parameters type overrides `HardforkParams::validate()` with field-level invariant checks, so a bad chain config fails when it is loaded rather than at the fork's first block.
+  The fork-requires-params rule is registered in the schedule validation too, so a schedule that activates the fork without its params is rejected at load time.
 - **Pre-block helpers must return state, not commit directly (T5.2, T6.2).**
   Any helper participating in pre-block execution (system contract deploys, pre-block system calls, etc.) returns `Option<EvmState>` and never calls `db.commit(...)` directly, so the witness generator sees the complete read and write set.
 - **Respect `no_std` in `mega-evm` crate.**

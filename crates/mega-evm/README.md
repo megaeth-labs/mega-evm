@@ -15,15 +15,18 @@ A consumer redirects all twelve revm crates and `op-revm` to the forks with `[pa
 
 ## Spec and hardfork
 
-- **Spec (`MegaSpecId`)** defines EVM behavior. Satin has a single spec, `SATIN`, running on Optimism Karst (Ethereum Osaka).
-- **Hardfork (`MegaHardfork`)** defines when a spec activates. The single fork `Satin` activates `SATIN`; its timestamps are not scheduled yet.
+- **Spec (`MegaSpecId`)** defines EVM behavior.
+  Satin has a single spec, `SATIN`, running on Optimism Karst (Ethereum Osaka).
+- **Hardfork (`MegaHardfork`)** defines when a spec activates.
+  The single fork `Satin` activates `SATIN`; its timestamps are not scheduled yet.
 
 The legacy spec names do not parse: `"Rex6".parse::<MegaSpecId>()` fails with `ParseMegaSpecError::Legacy`.
 
 ## Status
 
 Satin is under construction.
-Today it runs transactions through op-revm with EIP-8037 state gas, the EIP-2780 intrinsic cost and a 200,000,000 execution cap; gas above the cap goes to the EIP-8037 reservoir.
+Today it runs transactions through op-revm with EIP-8037 and the EIP-2780 intrinsic cost switched on and a 200,000,000 execution cap; gas above the cap goes to the EIP-8037 reservoir.
+It still uses the Osaka gas table, which prices state gas at zero, so no transaction draws state gas yet.
 SALT pricing, history gas, resource limits, gas detention, the system contracts and keyless deployment arrive in later changes.
 
 ## Quick start

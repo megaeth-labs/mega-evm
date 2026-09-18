@@ -1,8 +1,8 @@
 //! Numeric constants of the Satin engine.
 //!
-//! Every value is *provisional*: the numbers follow the default candidate of the Satin work
-//! order and stay open until the economics sign-off. A constant that no code reads yet is here
-//! so the whole placeholder set can be reviewed in one place.
+//! Every value is *provisional*: a placeholder until the economics sign-off fixes the numbers.
+//! A constant that no code reads yet is here so the whole placeholder set can be reviewed in
+//! one place.
 //!
 //! | Constant | Value | Meaning | Read from |
 //! |---|---:|---|---|
@@ -47,7 +47,7 @@ pub const BLOCK_DATA_LIMIT: u64 = 12 * 1024 * 1024 + 512 * 1024;
 mod tests {
     use super::*;
 
-    /// The placeholder values as the Satin work order states them (candidate 1).
+    /// The placeholder values, written out so a change to one is a visible diff.
     #[test]
     fn test_provisional_values_match_the_work_order() {
         assert_eq!(COST_PER_STATE_BYTE, 1_530);

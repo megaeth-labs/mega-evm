@@ -56,7 +56,8 @@ std = [
 ]
 test-utils = ["dep:derive_more"]
 
-# T2.2 rebuilds the benchmark suite on Satin; until then `transact` is the only target.
+# T2.2 rebuilds the benchmark suite on Satin; until then `transact` is the only target. The
+# inputs under benches/data (revm_bench) and benches/fixtures (attack_replay) stay for it.
 [[bench]]
 name = "transact"
 harness = false
