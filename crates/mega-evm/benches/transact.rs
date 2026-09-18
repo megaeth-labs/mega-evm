@@ -6,9 +6,12 @@
 #![allow(missing_docs)]
 
 use alloy_op_evm::OpTx;
-use alloy_primitives::{address, Address, Bytes, TxKind, U256};
+use alloy_primitives::{address, Address, TxKind, U256};
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
-use mega_evm::{test_utils::MemoryDatabase, MegaContext, MegaEvm, MegaSpecId};
+use mega_evm::{
+    test_utils::{op_transaction, zero_fee_l1_block_info, MemoryDatabase},
+    MegaContext, MegaEvm, MegaSpecId,
+};
 use op_revm::{L1BlockInfo, OpEvm, OpSpecId, OpTransaction};
 use revm::{
     context::{BlockEnv, CfgEnv, Context, ContextTr, TxEnv},
@@ -28,30 +31,18 @@ type OpContext = Context<
     L1BlockInfo,
 >;
 
-fn l1_block_info() -> L1BlockInfo {
-    L1BlockInfo {
-        operator_fee_scalar: Some(U256::ZERO),
-        operator_fee_constant: Some(U256::ZERO),
-        ..Default::default()
-    }
-}
-
 fn tx(value: U256) -> OpTransaction<TxEnv> {
-    OpTransaction {
-        base: TxEnv {
-            caller: CALLER,
-            kind: TxKind::Call(CALLEE),
-            value,
-            gas_limit: 1_000_000,
-            ..Default::default()
-        },
-        enveloped_tx: Some(Bytes::new()),
+    op_transaction(TxEnv {
+        caller: CALLER,
+        kind: TxKind::Call(CALLEE),
+        value,
+        gas_limit: 1_000_000,
         ..Default::default()
-    }
+    })
 }
 
 fn mega_context(db: MemoryDatabase) -> MegaContext<MemoryDatabase> {
-    MegaContext::new(db, MegaSpecId::SATIN).with_chain(l1_block_info())
+    MegaContext::new(db, MegaSpecId::SATIN).with_chain(zero_fee_l1_block_info())
 }
 
 fn bench_transact(c: &mut Criterion) {
@@ -75,7 +66,7 @@ fn bench_transact(c: &mut Criterion) {
                 || {
                     let ctx = OpContext::new(db.clone(), OpSpecId::KARST)
                         .with_cfg(cfg.clone())
-                        .with_chain(l1_block_info());
+                        .with_chain(zero_fee_l1_block_info());
                     OpEvm::new(ctx, NoOpInspector)
                 },
                 |mut evm| evm.transact(tx(value)).unwrap(),

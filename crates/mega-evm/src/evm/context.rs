@@ -301,7 +301,7 @@ mod tests {
     /// A caller's configuration cannot switch off what the spec fixes; every other field is
     /// taken from it.
     #[test]
-    fn test_with_cfg_updates_spec() {
+    fn test_with_cfg_keeps_the_spec_switches() {
         let mut cfg = CfgEnv::new_with_spec(MegaSpecId::SATIN);
         cfg.chain_id = 4326;
         cfg.enable_amsterdam_eip8037 = false;

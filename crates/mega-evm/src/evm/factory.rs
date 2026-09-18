@@ -86,7 +86,7 @@ impl<ExtEnvFactory: ExternalEnvFactory> alloy_evm::EvmFactory for MegaEvmFactory
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{test_utils::MemoryDatabase, ExternalEnvs};
+    use crate::{test_utils::MemoryDatabase, ExternalEnvs, SaltEnv, TestExternalEnvs};
     use alloy_evm::{Evm, EvmFactory};
     use alloy_primitives::{BlockNumber, U256};
     use core::cell::Cell;
@@ -94,11 +94,12 @@ mod tests {
 
     #[test]
     fn test_external_env_factory_getter() {
-        let factory = MegaEvmFactory::new().with_external_env_factory(EmptyExternalEnv);
+        let factory = MegaEvmFactory::new()
+            .with_external_env_factory(TestExternalEnvs::new().with_bucket_capacity(7, 1_024));
 
-        let got: &EmptyExternalEnv = factory.external_env_factory();
+        let got: &TestExternalEnvs = factory.external_env_factory();
 
-        assert!(core::ptr::eq(got, factory.external_env_factory()));
+        assert_eq!(got.get_bucket_capacity(7).unwrap(), 1_024);
     }
 
     /// Whatever configuration the caller passes, the EVM runs with the switches the spec fixes.

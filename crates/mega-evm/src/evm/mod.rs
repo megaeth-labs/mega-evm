@@ -244,11 +244,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::MemoryDatabase;
+    use crate::test_utils::{op_transaction, zero_fee_l1_block_info, MemoryDatabase};
     use alloy_evm::{Evm, EvmError};
     use alloy_op_evm::OpTx;
     use alloy_primitives::{address, TxKind, U256};
-    use op_revm::{L1BlockInfo, OpTransaction};
     use revm::{
         context::{result::InvalidTransaction, ContextSetters, TxEnv},
         database::State,
@@ -260,25 +259,17 @@ mod tests {
     const CALLEE: Address = address!("0x5000000000000000000000000000000000000001");
 
     fn context<DB: Database>(db: DB) -> MegaContext<DB> {
-        MegaContext::new(db, MegaSpecId::SATIN).with_chain(L1BlockInfo {
-            operator_fee_scalar: Some(U256::ZERO),
-            operator_fee_constant: Some(U256::ZERO),
-            ..Default::default()
-        })
+        MegaContext::new(db, MegaSpecId::SATIN).with_chain(zero_fee_l1_block_info())
     }
 
     fn tx(value: U256) -> MegaTransaction {
-        OpTx(OpTransaction {
-            base: TxEnv {
-                caller: CALLER,
-                gas_limit: 100_000,
-                kind: TxKind::Call(CALLEE),
-                value,
-                ..Default::default()
-            },
-            enveloped_tx: Some(Bytes::new()),
+        OpTx(op_transaction(TxEnv {
+            caller: CALLER,
+            gas_limit: 100_000,
+            kind: TxKind::Call(CALLEE),
+            value,
             ..Default::default()
-        })
+        }))
     }
 
     fn funded_db() -> MemoryDatabase {

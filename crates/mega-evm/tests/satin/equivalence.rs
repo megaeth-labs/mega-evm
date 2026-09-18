@@ -6,10 +6,10 @@
 //! limits), these cases stay the baseline that shows where the two diverge on purpose.
 
 use alloy_op_evm::OpTx;
-use alloy_primitives::{address, Address, Bytes, TxKind, U256};
+use alloy_primitives::{address, Address, TxKind, U256};
 use mega_evm::{
     constants::TX_GAS_LIMIT_CAP,
-    test_utils::{BytecodeBuilder, MemoryDatabase},
+    test_utils::{op_transaction, zero_fee_l1_block_info, BytecodeBuilder, MemoryDatabase},
     MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
 };
 use op_revm::{L1BlockInfo, OpEvm, OpSpecId, OpTransaction};
@@ -18,7 +18,9 @@ use revm::{
         result::{ExecResultAndState, ExecutionResult},
         BlockEnv, CfgEnv, Context, ContextTr, TxEnv,
     },
+    context_interface::cfg::GasParams,
     inspector::NoOpInspector,
+    primitives::hardfork::SpecId,
     state::EvmState,
     ExecuteEvm, Journal,
 };
@@ -45,34 +47,22 @@ fn block() -> BlockEnv {
     }
 }
 
-fn l1_block_info() -> L1BlockInfo {
-    L1BlockInfo {
-        operator_fee_scalar: Some(U256::ZERO),
-        operator_fee_constant: Some(U256::ZERO),
-        ..Default::default()
-    }
-}
-
-fn op_tx(tx: TxEnv) -> OpTransaction<TxEnv> {
-    OpTransaction { base: tx, enveloped_tx: Some(Bytes::new()), ..Default::default() }
-}
-
 /// Runs `tx` on `db` through `MegaEvm`, then through op-revm's `OpEvm` configured with the
 /// `CfgEnv` the `MegaEvm` context holds. Returns both outcomes and that `CfgEnv`.
 fn run_both(db: MemoryDatabase, tx: TxEnv) -> (Outcome, Outcome, CfgEnv<OpSpecId>) {
     let ctx = MegaContext::new(db.clone(), MegaSpecId::SATIN)
         .with_block(block())
-        .with_chain(l1_block_info());
+        .with_chain(zero_fee_l1_block_info());
     let cfg = ctx.cfg().clone();
     let mut mega = MegaEvm::new(ctx);
-    let mega_outcome = mega.transact(OpTx(op_tx(tx.clone()))).unwrap();
+    let mega_outcome = mega.transact(OpTx(op_transaction(tx.clone()))).unwrap();
 
     let op_ctx = OpContext::new(db, OpSpecId::KARST)
         .with_cfg(cfg.clone())
         .with_block(block())
-        .with_chain(l1_block_info());
+        .with_chain(zero_fee_l1_block_info());
     let mut op = OpEvm::new(op_ctx, NoOpInspector);
-    let op_outcome = op.transact(op_tx(tx)).unwrap();
+    let op_outcome = op.transact(op_transaction(tx)).unwrap();
 
     (mega_outcome, op_outcome, cfg)
 }
@@ -93,13 +83,17 @@ fn assert_same(mega: &Outcome, op: &Outcome) {
     assert_eq!(mega.state, op.state, "state");
 }
 
-/// Both engines run on the Satin configuration: Karst with EIP-8037 and EIP-2780 switched on
-/// and the 200M execution cap.
+/// Both engines run on the Satin configuration: Karst on the Osaka gas table, EIP-8037 and
+/// EIP-2780 switched on, the 200M execution cap, EIP-7708 and the system-call reservoir margin
+/// off.
 fn assert_satin_cfg(cfg: &CfgEnv<OpSpecId>) {
     assert_eq!(cfg.spec, OpSpecId::KARST);
+    assert_eq!(cfg.gas_params.table(), GasParams::new_spec(SpecId::OSAKA).table());
     assert!(cfg.enable_amsterdam_eip8037);
     assert!(cfg.enable_amsterdam_eip2780);
     assert_eq!(cfg.tx_gas_limit_cap, Some(200_000_000));
+    assert!(!cfg.enable_amsterdam_eip7708);
+    assert!(!cfg.system_call_state_gas_margin_in_reservoir);
 }
 
 #[test]
@@ -154,5 +148,8 @@ fn test_sstore_matches_op_revm() {
     assert_satin_cfg(&cfg);
     assert!(mega.result.is_success());
     assert_eq!(mega.state[&CALLEE].storage[&U256::ZERO].present_value, U256::from(42));
+    // The Osaka gas table has no state-gas prices, so the new slot draws no state gas even with
+    // EIP-8037 on. The Satin gas table (T3.1) prices it; this assertion changes with it.
+    assert_eq!(mega.result.gas().state_gas_spent_final(), 0);
     assert_same(&mega, &op);
 }
