@@ -52,6 +52,17 @@ pub enum KeylessDeployError {
         /// The reason
         reason: MegaHaltReason,
     },
+    /// The call's remaining budget in some resource dimension was below the deployment's
+    /// known upfront usage, so the deployment was not started.
+    ParentBudgetExceeded {
+        /// The resource dimension, as the raw `kind` code of the `IKeylessDeploy` error. The
+        /// Satin resource dimensions and their codes are not defined yet.
+        kind: u8,
+        /// The remaining budget in that dimension.
+        limit: u64,
+        /// The deployment's known upfront usage in that dimension.
+        used: u64,
+    },
     /// Contract creation succeeded but returned empty bytecode
     EmptyCodeDeployed {
         /// The gas used
@@ -144,6 +155,9 @@ pub fn encode_error_result(error: KeylessDeployError) -> Bytes {
         KeylessDeployError::ExecutionHalted { gas_used, .. } => {
             IKeylessDeploy::ExecutionHalted { gasUsed: gas_used }.abi_encode().into()
         }
+        KeylessDeployError::ParentBudgetExceeded { kind, limit, used } => {
+            IKeylessDeploy::ParentBudgetExceeded { kind, limit, used }.abi_encode().into()
+        }
         KeylessDeployError::EmptyCodeDeployed { gas_used } => {
             IKeylessDeploy::EmptyCodeDeployed { gasUsed: gas_used }.abi_encode().into()
         }
@@ -225,6 +239,13 @@ pub fn decode_error_result(output: &[u8]) -> Option<KeylessDeployError> {
             )),
         });
     }
+    if let Ok(e) = IKeylessDeploy::ParentBudgetExceeded::abi_decode(output) {
+        return Some(KeylessDeployError::ParentBudgetExceeded {
+            kind: e.kind,
+            limit: e.limit,
+            used: e.used,
+        });
+    }
     if let Ok(e) = IKeylessDeploy::EmptyCodeDeployed::abi_decode(output) {
         return Some(KeylessDeployError::EmptyCodeDeployed { gas_used: e.gasUsed });
     }
@@ -294,6 +315,16 @@ mod tests {
         let encoded = encode_error_result(original.clone());
         let decoded = decode_error_result(&encoded).expect("must decode");
         assert_eq!(decoded, original);
+    }
+
+    /// `ParentBudgetExceeded` keeps every field of the ABI error through a round-trip.
+    #[test]
+    fn test_parent_budget_exceeded_roundtrip_preserves_fields() {
+        let original =
+            KeylessDeployError::ParentBudgetExceeded { kind: 3, limit: 1_000, used: 1_001 };
+        let encoded = encode_error_result(original.clone());
+        assert_eq!(encoded[..4], IKeylessDeploy::ParentBudgetExceeded::SELECTOR);
+        assert_eq!(decode_error_result(&encoded), Some(original));
     }
 
     /// `SignerHasCode` is selector-only; pinning the round-trip catches arm drift.
