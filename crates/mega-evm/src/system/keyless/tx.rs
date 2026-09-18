@@ -1,6 +1,98 @@
-//! Unit tests extracted from `crates/mega-evm/src/sandbox/tx.rs` when T2.1 replaced the legacy core.
-//! The code they test is at `git show a8f8c7c9:crates/mega-evm/src/sandbox/tx.rs`.
-//! Owning tickets are listed in `tests/_pending/README.md`.
+//! Keyless deploy transaction types and functions.
+//!
+//! This module provides functions for decoding and validating pre-EIP-155 legacy transactions
+//! used in Nick's Method for deterministic contract deployment.
+//!
+//! # Two-Phase Validation
+//!
+//! Transaction validation occurs in two distinct phases:
+//!
+//! ## Phase 1: RLP Decoding ([`decode_keyless_tx`])
+//!
+//! Structural validation of the transaction format:
+//! - Valid RLP encoding of a legacy transaction
+//! - No trailing bytes after the RLP payload (rejected as `MalformedEncoding`)
+//! - EIP-2718 typed envelopes (0x01, 0x02, etc.) rejected as `MalformedEncoding`
+//! - `to` field must be empty (contract creation)
+//! - `v` must be 27 or 28 (pre-EIP-155, no chain ID)
+//!
+//! ## Phase 2: Signature Recovery ([`recover_signer`])
+//!
+//! Cryptographic validation of the signature:
+//! - Signature components (r, s) must be valid secp256k1 curve points
+//! - Invalid/corrupted signatures fail with `InvalidSignature`
+//! - Recovery uses alloy's ECDSA implementation
+//!
+//! # Security Notes
+//!
+//! - **Signature modification changes identity**: Altering r or s values produces a different
+//!   recovered signer address, not an invalid signature.
+//! - **Empty initcode is allowed**: Transactions with empty `data` pass decoding but result in
+//!   `EmptyCodeDeployed` during execution.
+
+use alloy_consensus::{transaction::RlpEcdsaDecodableTx, Signed, TxLegacy};
+use alloy_primitives::Address;
+
+use super::error::KeylessDeployError;
+
+/// Decodes a pre-EIP-155 legacy transaction from RLP bytes.
+///
+/// The expected RLP structure is: `[nonce, gasPrice, gasLimit, to, value, data, v, r, s]`
+///
+/// # Validation
+/// - The RLP encoding must be valid
+/// - The input must not contain trailing bytes after the RLP transaction
+/// - The `to` field must be empty (contract creation)
+/// - The `v` value must be 27 or 28 (pre-EIP-155)
+///
+/// # Returns
+/// - `Ok(Signed<TxLegacy>)` if the transaction is valid
+/// - `Err(KeylessDeployError::MalformedEncoding)` on invalid RLP or trailing bytes
+/// - `Err(KeylessDeployError::NotContractCreation)` if `to` is not empty
+/// - `Err(KeylessDeployError::NotPreEIP155)` if a chain id is present
+pub fn decode_keyless_tx(rlp_bytes: &[u8]) -> Result<Signed<TxLegacy>, KeylessDeployError> {
+    let mut buf = rlp_bytes;
+    let signed =
+        TxLegacy::rlp_decode_signed(&mut buf).map_err(|_| KeylessDeployError::MalformedEncoding)?;
+
+    // Reject trailing bytes. The raw input is reused as `enveloped_tx` for L1 data-fee
+    // accounting, so any bytes past the signed RLP payload would otherwise be silently
+    // charged without being part of the signed transaction.
+    if !buf.is_empty() {
+        return Err(KeylessDeployError::MalformedEncoding);
+    }
+
+    if !signed.tx().to.is_create() {
+        return Err(KeylessDeployError::NotContractCreation);
+    }
+    if signed.tx().chain_id.is_some() {
+        return Err(KeylessDeployError::NotPreEIP155);
+    }
+    Ok(signed)
+}
+
+/// Recovers the signer address from a keyless deployment transaction.
+///
+/// Uses alloy's built-in signature recovery to derive the signer address
+/// from the signed transaction.
+///
+/// # Returns
+/// - `Ok(Address)` - The recovered signer address
+/// - `Err(KeylessDeployError::InvalidSignature)` - If signature recovery fails
+pub fn recover_signer(signed_tx: &Signed<TxLegacy>) -> Result<Address, KeylessDeployError> {
+    signed_tx.recover_signer().map_err(|_| KeylessDeployError::InvalidSignature)
+}
+
+/// Calculates the deployment address for a contract created by the given signer.
+///
+/// For Nick's Method, the nonce is always 0, so the deployment address is:
+/// `keccak256(rlp([signer, 0]))[12:]`
+///
+/// This is equivalent to `signer.create(0)` in alloy.
+#[inline]
+pub fn calculate_keyless_deploy_address(signer: Address) -> Address {
+    signer.create(0)
+}
 
 #[allow(missing_docs, unused)]
 #[cfg(any(test, feature = "test-utils"))]
@@ -72,8 +164,8 @@ pub mod tests {
     #[test]
     fn test_decode_create2_factory_deployment() {
         // The canonical CREATE2 factory deployment - a well-known pre-EIP-155 transaction
-        let signed = decode_keyless_tx(CREATE2_FACTORY_TX, MegaSpecId::REX5)
-            .expect("should decode CREATE2 factory tx");
+        let signed =
+            decode_keyless_tx(CREATE2_FACTORY_TX).expect("should decode CREATE2 factory tx");
 
         let tx = signed.tx();
         assert_eq!(tx.nonce, 0);
@@ -105,7 +197,7 @@ pub mod tests {
     #[test]
     fn test_recover_signer_create2_factory() {
         // Verify we can recover the correct signer from the CREATE2 factory tx
-        let tx = decode_keyless_tx(CREATE2_FACTORY_TX, MegaSpecId::REX5).expect("should decode");
+        let tx = decode_keyless_tx(CREATE2_FACTORY_TX).expect("should decode");
         let signer = recover_signer(&tx).expect("should recover signer");
 
         // The canonical CREATE2 factory signer address
@@ -115,7 +207,7 @@ pub mod tests {
     #[test]
     fn test_calculate_create2_factory_deploy_address() {
         // Verify the deployment address calculation matches the known CREATE2 factory address
-        let tx = decode_keyless_tx(CREATE2_FACTORY_TX, MegaSpecId::REX5).expect("should decode");
+        let tx = decode_keyless_tx(CREATE2_FACTORY_TX).expect("should decode");
         let signer = recover_signer(&tx).expect("should recover signer");
         let deploy_address = calculate_keyless_deploy_address(signer);
 
@@ -127,7 +219,7 @@ pub mod tests {
     fn test_decode_rejects_post_eip155_chain_1() {
         // Transaction generated with: cast mktx ... --chain 1 --create 0x6080604052
         // v = 1 * 2 + 35 + 1 = 38 (0x26)
-        let result = decode_keyless_tx(POST_EIP155_CHAIN_1_TX, MegaSpecId::REX5);
+        let result = decode_keyless_tx(POST_EIP155_CHAIN_1_TX);
         assert_eq!(result, Err(KeylessDeployError::NotPreEIP155));
     }
 
@@ -135,7 +227,7 @@ pub mod tests {
     fn test_decode_rejects_post_eip155_chain_1337() {
         // Transaction generated with: cast mktx ... --chain 1337 --create 0x6080604052
         // v = 1337 * 2 + 35 + 0 = 2709 (0x0a95)
-        let result = decode_keyless_tx(POST_EIP155_CHAIN_1337_TX, MegaSpecId::REX5);
+        let result = decode_keyless_tx(POST_EIP155_CHAIN_1337_TX);
         assert_eq!(result, Err(KeylessDeployError::NotPreEIP155));
     }
 
@@ -143,7 +235,7 @@ pub mod tests {
     fn test_decode_rejects_non_contract_creation() {
         // Transaction with to=0x4242...42 (not a contract creation)
         // Generated with: cast mktx ... --legacy 0x4242424242424242424242424242424242424242
-        let result = decode_keyless_tx(NON_CONTRACT_CREATION_TX, MegaSpecId::REX5);
+        let result = decode_keyless_tx(NON_CONTRACT_CREATION_TX);
         assert_eq!(result, Err(KeylessDeployError::NotContractCreation));
     }
 
@@ -151,13 +243,13 @@ pub mod tests {
     fn test_decode_rejects_malformed_rlp() {
         // Random bytes, not valid RLP
         let invalid_rlp = hex!("deadbeef");
-        let result = decode_keyless_tx(&invalid_rlp, MegaSpecId::REX5);
+        let result = decode_keyless_tx(&invalid_rlp);
         assert_eq!(result, Err(KeylessDeployError::MalformedEncoding));
     }
 
     #[test]
     fn test_decode_rejects_empty_input() {
-        let result = decode_keyless_tx(&[], MegaSpecId::REX5);
+        let result = decode_keyless_tx(&[]);
         assert_eq!(result, Err(KeylessDeployError::MalformedEncoding));
     }
 
@@ -165,24 +257,23 @@ pub mod tests {
     fn test_decode_rejects_truncated_rlp() {
         // Truncate the CREATE2 factory tx
         let truncated = &CREATE2_FACTORY_TX[..CREATE2_FACTORY_TX.len() - 10];
-        let result = decode_keyless_tx(truncated, MegaSpecId::REX5);
+        let result = decode_keyless_tx(truncated);
         assert_eq!(result, Err(KeylessDeployError::MalformedEncoding));
     }
 
     #[test]
-    fn test_decode_rejects_trailing_bytes_rex5() {
-        // Rex5+: trailing bytes after the signed RLP payload are rejected to prevent
+    fn test_decode_rejects_trailing_bytes() {
+        // Trailing bytes after the signed RLP payload are rejected to prevent
         // unsigned bytes from affecting `enveloped_tx` / L1 data-fee accounting.
         let mut with_trailing = CREATE2_FACTORY_TX.to_vec();
         with_trailing.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
-        let result = decode_keyless_tx(&with_trailing, MegaSpecId::REX5);
+        let result = decode_keyless_tx(&with_trailing);
         assert_eq!(result, Err(KeylessDeployError::MalformedEncoding));
 
         // A single trailing byte must also be rejected.
         let mut with_one_trailing = CREATE2_FACTORY_TX.to_vec();
         with_one_trailing.push(0x00);
-        let result = decode_keyless_tx(&with_one_trailing, MegaSpecId::REX5);
+        let result = decode_keyless_tx(&with_one_trailing);
         assert_eq!(result, Err(KeylessDeployError::MalformedEncoding));
     }
-
 }

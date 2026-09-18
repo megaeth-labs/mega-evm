@@ -39,11 +39,11 @@ Do not add a `_pending/main.rs`.
 | T6.1 | 65 | 57 | 8 | 56 | 9 | 0 |
 | T6.2 | 67 | 17 | 50 | 62 | 5 | 0 |
 | T6.3 | 77 | 77 | 0 | 67 | 10 | 0 |
-| T7 | 89 | 73 | 16 | 43 | 46 | 0 |
+| T7 | 75 | 73 | 2 | 29 | 46 | 0 |
 | T8.1 | 75 | 45 | 30 | 56 | 19 | 0 |
 | T9 | 4 | 4 | 0 | 1 | 3 | 0 |
 | — (undecided: D57 preload-warm cold charging, D58 98/100 forwarding) | 7 | 7 | 0 | 0 | 0 | 7 |
-| **Total** | **850** | **691** | **159** | **499** | **322** | **29** |
+| **Total** | **836** | **691** | **145** | **485** | **322** | **29** |
 
 ## Tests T0 assigns to T2.1 that are parked under another ticket
 
@@ -162,9 +162,7 @@ Each cell lists `disposition count (ticket · decision)`.
 | `src/limit/kv_update.rs` | 1 | 待定 1 (T4.3 · D46) |
 | `src/limit/limit.rs` | 4 | 保留 4 (T3.3 · D51) |
 | `src/limit/mod.rs` | 3 | 保留 3 (T2.3) |
-| `src/sandbox/error.rs` | 4 | 保留 4 (T7 · error types kept (T2.1 list)) |
 | `src/sandbox/execution.rs` | 2 | 保留 1 (T7 · rule); 重写 1 (T7 · D16) |
-| `src/sandbox/tx.rs` | 10 | 保留 10 (T7 · rules 1-9 helpers kept (T2.1 list)) |
 | `src/system/control.rs` | 8 | 保留 8 (T6.2 · T6.1 for selector/revert-data tests) |
 | `src/system/deploy.rs` | 4 | 保留 3 (T6.2); 重写 1 (T6.2 · single version) |
 | `src/system/intercept.rs` | 2 | 保留 2 (T6.1) |
