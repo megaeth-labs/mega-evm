@@ -5,7 +5,6 @@ mod block_env_access_tracking;
 mod block_env_gas_limit;
 mod compute_gas_limit;
 mod contract_size_limit;
-mod db_error;
 mod gas;
 mod mega_system_transaction;
 mod oracle;

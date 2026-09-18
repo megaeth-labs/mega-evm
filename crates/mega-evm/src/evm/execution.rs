@@ -4,23 +4,36 @@
 //! `MegaETH` extends. [`MegaEvm`] implements revm's [`EvmTr`] and [`InspectorEvmTr`] itself, so the
 //! frame lifecycle (`frame_init`, `frame_run`, `frame_return_result`) is `MegaETH`'s own.
 
+#[cfg(not(feature = "std"))]
+use alloc as std;
 use op_revm::{
     handler::{IsTxError, OpHandler},
     OpHaltReason, OpTransactionError,
 };
-use revm::{
-    context::{result::FromStringError, ContextError, ContextTr, FrameStack},
-    context_interface::cfg::gas::GasTracker,
-    handler::{
-        evm::{ContextDbError, FrameInitResult, FrameTr},
-        EthFrame, EvmTr, EvmTrError, FrameInitOrResult, FrameResult, Handler,
-    },
-    inspector::{InspectorEvmTr, InspectorHandler, JournalExt},
-    interpreter::{interpreter::EthInterpreter, interpreter_action::FrameInit, InitialAndFloorGas},
-    Database, Inspector, Journal,
-};
+use std::vec::Vec;
 
 use op_revm::precompiles::OpPrecompiles;
+use revm::{
+    context::{
+        result::FromStringError, transaction::TransactionType, Cfg, ContextError, ContextTr,
+        FrameStack, JournalTr, Transaction,
+    },
+    context_interface::{cfg::gas::GasTracker, journaled_state::entry::JournalEntry},
+    handler::{
+        evm::{ContextDbError, FrameInitResult, FrameTr},
+        EthFrame, EvmTr, EvmTrError, FrameInitOrResult, FrameResult, Handler, ItemOrResult,
+        PreExecutionOutput,
+    },
+    inspector::{
+        handler::{frame_end, frame_start},
+        InspectorEvmTr, InspectorHandler, JournalExt,
+    },
+    interpreter::{
+        interpreter::EthInterpreter, interpreter_action::FrameInit, FrameInput, InitialAndFloorGas,
+    },
+    primitives::Address,
+    Database, Inspector, Journal,
+};
 
 use crate::{ExternalEnvTypes, MegaContext, MegaEvm, MegaInstructions};
 
@@ -57,6 +70,46 @@ where
     type Error = ERROR;
     type HaltReason = OpHaltReason;
 
+    /// Resets the common execution layer, then validates as revm does.
+    fn validate(&self, evm: &mut Self::Evm) -> Result<InitialAndFloorGas, Self::Error> {
+        evm.ctx_mut().on_new_tx();
+        self.validate_env(evm)?;
+        let mut init_and_floor_gas = self.validate_initial_tx_gas(evm)?;
+        self.validate_against_state_and_deduct_caller(evm, &mut init_and_floor_gas)?;
+        Ok(init_and_floor_gas)
+    }
+
+    /// Resets the common execution layer for a system call, then builds its gas as revm does.
+    fn system_call_gas(&self, evm: &mut Self::Evm) -> GasTracker {
+        evm.ctx_mut().on_new_tx();
+        let mut gas = self.tx_gas(evm, &InitialAndFloorGas::new(0, 0));
+        let cfg = evm.ctx_ref().cfg();
+        if cfg.system_call_state_gas_margin_in_reservoir() && cfg.is_amsterdam_eip8037_enabled() {
+            let margin = gas
+                .remaining()
+                .saturating_sub(revm::handler::system_call::SYSTEM_CALL_REGULAR_GAS_LIMIT);
+            gas.set_remaining(gas.remaining() - margin);
+            gas.set_reservoir(gas.reservoir() + margin);
+        }
+        gas
+    }
+
+    /// revm's pre-execution, then the write records of the EIP-7702 authorities it applied.
+    fn pre_execution(
+        &self,
+        evm: &mut Self::Evm,
+        gas: &mut GasTracker,
+    ) -> Result<Option<PreExecutionOutput>, Self::Error> {
+        self.load_accounts(evm)?;
+        let checkpoint = evm.ctx().journal_mut().checkpoint();
+        let Some(eip7702_refund) = self.apply_eip7702_auth_list(evm, gas)? else {
+            evm.ctx().journal_mut().checkpoint_revert(checkpoint);
+            return Ok(None);
+        };
+        record_applied_authorities(evm.ctx_mut(), checkpoint.journal_i);
+        Ok(Some(PreExecutionOutput { eip7702_refund, checkpoint }))
+    }
+
     fn validate_env(&self, evm: &mut Self::Evm) -> Result<(), Self::Error> {
         self.op.validate_env(evm)
     }
@@ -69,13 +122,20 @@ where
         self.op.validate_against_state_and_deduct_caller(evm, init_and_floor_gas)
     }
 
+    /// Settles the outermost frame: pops its lane, then settles its gas into the transaction's as
+    /// op-revm does (op-revm replaces revm's settlement, so revm's never runs here), and keeps
+    /// the history gas the transaction spent.
     fn last_frame_result(
         &mut self,
         evm: &mut Self::Evm,
         frame_result: &mut FrameResult,
         parent_gas: &mut GasTracker,
     ) -> Result<(), Self::Error> {
-        self.op.last_frame_result(evm, frame_result, parent_gas)
+        evm.ctx_mut().additional_limit.on_last_frame_return(frame_result);
+        self.op.last_frame_result(evm, frame_result, parent_gas)?;
+        let history = frame_result.gas().history_gas_spent().max(0) as u64;
+        evm.ctx_mut().additional_limit.set_history_gas_spent(history);
+        Ok(())
     }
 
     fn reimburse_caller(
@@ -169,12 +229,46 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
         self.inner.all_mut()
     }
 
+    /// Starts a frame, in this order:
+    ///
+    /// 1. the frame's lane is pushed and the writes its start makes are counted;
+    /// 2. system contract interception (the system contract interceptors; nothing is intercepted
+    ///    yet);
+    /// 3. the keyless deployment rewrite (native keyless deployment; nothing is rewritten yet);
+    /// 4. revm builds the frame.
     #[inline]
     fn frame_init(
         &mut self,
         frame_init: FrameInit,
     ) -> Result<FrameInitResult<'_, Self::Frame>, ContextDbError<Self::Context>> {
-        self.inner.frame_init(frame_init)
+        let ctx = &mut self.inner.ctx;
+        ctx.additional_limit.on_frame_init(&frame_init.frame_input, frame_init.depth);
+        // The creator of a nested creation, to tell afterwards whether revm bumped its nonce.
+        let creator = match &frame_init.frame_input {
+            FrameInput::Create(inputs) if frame_init.depth > 0 => {
+                Some((inputs.caller(), account_nonce(ctx, inputs.caller())))
+            }
+            _ => None,
+        };
+        let outcome = match self.inner.frame_init(frame_init)? {
+            ItemOrResult::Item(frame) => Ok(frame.interpreter.input.target_address),
+            ItemOrResult::Result(result) => Err(result),
+        };
+        let ctx = &mut self.inner.ctx;
+        match outcome {
+            Ok(address) => {
+                ctx.additional_limit.set_frame_address(address);
+                Ok(ItemOrResult::Item(self.inner.frame_stack.get()))
+            }
+            Err(result) => {
+                if let Some((creator, nonce)) = creator {
+                    if account_nonce(ctx, creator) == nonce {
+                        ctx.additional_limit.creation_did_not_bump_nonce();
+                    }
+                }
+                Ok(ItemOrResult::Result(result))
+            }
+        }
     }
 
     #[inline]
@@ -184,11 +278,14 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
         self.inner.frame_run()
     }
 
+    /// Pops the returning frame's lane (merged on success, discarded on failure), then returns the
+    /// result to the caller as revm does.
     #[inline]
     fn frame_return_result(
         &mut self,
         result: FrameResult,
     ) -> Result<Option<FrameResult>, ContextDbError<Self::Context>> {
+        self.inner.ctx.additional_limit.on_frame_return(&result);
         self.inner.frame_return_result(result)
     }
 }
@@ -234,4 +331,96 @@ where
             &mut evm.inspector,
         )
     }
+
+    /// revm's inspected frame start, with the lanes kept aligned: a frame the inspector answers
+    /// itself never reaches [`EvmTr::frame_init`], so an empty lane stands in for it.
+    #[inline]
+    fn inspect_frame_init(
+        &mut self,
+        mut frame_init: FrameInit,
+    ) -> Result<FrameInitResult<'_, Self::Frame>, ContextDbError<Self::Context>> {
+        let (ctx, inspector) = self.ctx_inspector();
+        if let Some(mut output) = frame_start(ctx, inspector, &mut frame_init.frame_input) {
+            ctx.additional_limit.push_empty_frame();
+            frame_end(ctx, inspector, &frame_init.frame_input, &mut output);
+            return Ok(ItemOrResult::Result(output));
+        }
+        let frame_input = frame_init.frame_input.clone();
+        let logs_i = ctx.journal().logs().len();
+        if let ItemOrResult::Result(mut output) = self.frame_init(frame_init)? {
+            let (ctx, inspector) = self.ctx_inspector();
+            // Logs the frame journaled without running: the EIP-7708 transfer log, and the logs
+            // of a precompile.
+            if ctx.journal().logs().len() != logs_i {
+                inspect_logs(ctx, inspector, logs_i);
+            }
+            // Custom precompiles gather their logs outside the journal.
+            if let FrameResult::Call(outcome) = &output {
+                if outcome.was_precompile_called {
+                    for log in outcome.precompile_call_logs.clone() {
+                        inspector.log(ctx, log);
+                    }
+                }
+            }
+            frame_end(ctx, inspector, &frame_input, &mut output);
+            return Ok(ItemOrResult::Result(output));
+        }
+        let (ctx, inspector, frame) = self.ctx_inspector_frame();
+        if ctx.journal().logs().len() != logs_i {
+            inspect_logs(ctx, inspector, logs_i);
+        }
+        inspector.initialize_interp(&mut frame.interpreter, ctx);
+        Ok(ItemOrResult::Item(frame))
+    }
+}
+
+/// Hands the logs journaled since `logs_i` to the inspector, outside any interpreter.
+#[cold]
+#[inline(never)]
+fn inspect_logs<DB: Database, ExtEnvs: ExternalEnvTypes, INSP>(
+    ctx: &mut MegaContext<DB, ExtEnvs>,
+    inspector: &mut INSP,
+    logs_i: usize,
+) where
+    INSP: Inspector<MegaContext<DB, ExtEnvs>, EthInterpreter>,
+{
+    let logs = ctx.journal().logs()[logs_i..].to_vec();
+    for log in logs {
+        inspector.log(ctx, log);
+    }
+}
+
+/// The nonce of an account the journal holds; zero for one it does not.
+fn account_nonce<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    ctx: &MegaContext<DB, ExtEnvs>,
+    address: Address,
+) -> u64 {
+    ctx.journal_ref().state.get(&address).map_or(0, |account| account.info.nonce)
+}
+
+/// Records the account writes of the EIP-7702 authorities applied since journal entry
+/// `journal_i`: each applied authorization bumps its authority's nonce once, so the distinct
+/// authorities other than the sender are the accounts written. The sender's write is part of the
+/// transaction body.
+fn record_applied_authorities<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    ctx: &mut MegaContext<DB, ExtEnvs>,
+    journal_i: usize,
+) {
+    if ctx.tx().tx_type() != TransactionType::Eip7702 {
+        return;
+    }
+    let caller = ctx.tx().caller();
+    let target = ctx.tx().kind().to().copied();
+    let mut authorities: Vec<Address> = ctx.journal_ref().journal()[journal_i..]
+        .iter()
+        .filter_map(|entry| match entry {
+            JournalEntry::NonceBump { address } if *address != caller => Some(*address),
+            _ => None,
+        })
+        .collect();
+    authorities.sort_unstable();
+    authorities.dedup();
+    let target_is_authority =
+        target.is_some_and(|target| authorities.binary_search(&target).is_ok());
+    ctx.additional_limit.record_applied_authorities(authorities.len() as u64, target_is_authority);
 }

@@ -4,18 +4,13 @@ use delegate::delegate;
 use op_revm::{L1BlockInfo, OpSpecId};
 use revm::{
     context::{BlockEnv, CfgEnv, Context, ContextError, ContextSetters, ContextTr, LocalContext},
-    context_interface::{
-        cfg::{GasId, GasParams, StateGasCharge, StateGasSite},
-        context::{SStoreResult, SelfDestructResult, StateLoad},
-        host::LoadError,
-        journaled_state::{AccountInfoLoad, AccountLoad},
-    },
-    primitives::{Address, Bytes, Log, StorageKey, StorageValue, B256, U256},
+    context_interface::cfg::GasParams,
     Database, Journal,
 };
 
 use crate::{
-    constants, EmptyExternalEnv, ExternalEnvTypes, ExternalEnvs, MegaSpecId, MegaTransaction,
+    constants, AdditionalLimit, EmptyExternalEnv, ExternalEnvTypes, ExternalEnvs, MegaSpecId,
+    MegaTransaction,
 };
 
 /// The revm context the Satin engine runs on: op-revm's context shape with the `MegaETH`
@@ -30,13 +25,16 @@ pub(crate) type MegaInnerContext<DB> =
 /// [`MegaSpecId`] view that callers see and the [`OpSpecId`] view op-revm executes on. Both are
 /// written together, only through [`MegaContext::with_cfg`], so they cannot drift apart.
 ///
-/// Every [`Host`](revm::interpreter::Host) method and every context accessor delegates to the
-/// wrapped context; later changes override the ones `MegaETH` prices or meters differently.
+/// Every context accessor delegates to the wrapped context, and so does every
+/// [`Host`](revm::interpreter::Host) method except the three that stage what a state-writing
+/// opcode did (see the `host` module). It also carries the common execution layer's state for the
+/// running transaction ([`AdditionalLimit`]).
 #[derive(Debug)]
 pub struct MegaContext<DB: Database, ExtEnvs: ExternalEnvTypes = EmptyExternalEnv> {
-    inner: MegaInnerContext<DB>,
+    pub(crate) inner: MegaInnerContext<DB>,
     cfg: CfgEnv<MegaSpecId>,
     external_envs: ExternalEnvs<ExtEnvs>,
+    pub(crate) additional_limit: AdditionalLimit,
 }
 
 impl<DB: Database> MegaContext<DB, EmptyExternalEnv> {
@@ -55,7 +53,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     ) -> Self {
         let cfg = spec_cfg(CfgEnv::new_with_spec(spec));
         let inner = Context::new(db, spec.into_op_spec()).with_cfg(op_cfg(&cfg));
-        Self { inner, cfg, external_envs }
+        Self { inner, cfg, external_envs, additional_limit: AdditionalLimit::default() }
     }
 
     /// Replaces the configuration.
@@ -109,6 +107,16 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     /// The external environments (SALT, oracle) of this context.
     pub const fn external_envs(&self) -> &ExternalEnvs<ExtEnvs> {
         &self.external_envs
+    }
+
+    /// The common execution layer's state for the running (or last) transaction.
+    pub const fn additional_limit(&self) -> &AdditionalLimit {
+        &self.additional_limit
+    }
+
+    /// Prepares the common execution layer for a new transaction or system call.
+    pub(crate) fn on_new_tx(&mut self) {
+        self.additional_limit.reset();
     }
 
     /// Consumes the context and returns the database, the configuration and the block.
@@ -185,77 +193,11 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> ContextSetters for MegaContext<DB,
     }
 }
 
-impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
-    for MegaContext<DB, ExtEnvs>
-{
-    delegate! {
-        to self.inner {
-            fn basefee(&self) -> U256;
-            fn blob_gasprice(&self) -> U256;
-            fn gas_limit(&self) -> U256;
-            fn difficulty(&self) -> U256;
-            fn prevrandao(&self) -> Option<U256>;
-            fn block_number(&self) -> U256;
-            fn timestamp(&self) -> U256;
-            fn beneficiary(&self) -> Address;
-            fn slot_num(&self) -> U256;
-            fn chain_id(&self) -> U256;
-            fn effective_gas_price(&self) -> U256;
-            fn caller(&self) -> Address;
-            fn blob_hash(&self, number: usize) -> Option<U256>;
-            fn max_initcode_size(&self) -> usize;
-            fn gas_params(&self) -> &GasParams;
-            fn is_amsterdam_eip8037_enabled(&self) -> bool;
-            fn state_gas_price(&mut self, id: GasId, site: StateGasSite) -> Option<u64>;
-            fn state_gas_charge(&mut self, charge: StateGasCharge) -> Option<u64>;
-            fn block_hash(&mut self, number: u64) -> Option<B256>;
-            fn selfdestruct(
-                &mut self,
-                address: Address,
-                target: Address,
-                skip_cold_load: bool,
-            ) -> Result<StateLoad<SelfDestructResult>, LoadError>;
-            fn log(&mut self, log: Log);
-            fn sstore_skip_cold_load(
-                &mut self,
-                address: Address,
-                key: StorageKey,
-                value: StorageValue,
-                skip_cold_load: bool,
-            ) -> Result<StateLoad<SStoreResult>, LoadError>;
-            fn sstore(
-                &mut self,
-                address: Address,
-                key: StorageKey,
-                value: StorageValue,
-            ) -> Option<StateLoad<SStoreResult>>;
-            fn sload_skip_cold_load(
-                &mut self,
-                address: Address,
-                key: StorageKey,
-                skip_cold_load: bool,
-            ) -> Result<StateLoad<StorageValue>, LoadError>;
-            fn sload(&mut self, address: Address, key: StorageKey) -> Option<StateLoad<StorageValue>>;
-            fn tstore(&mut self, address: Address, key: StorageKey, value: StorageValue);
-            fn tload(&mut self, address: Address, key: StorageKey) -> StorageValue;
-            fn load_account_info_skip_cold_load(
-                &mut self,
-                address: Address,
-                load_code: bool,
-                skip_cold_load: bool,
-            ) -> Result<AccountInfoLoad<'_>, LoadError>;
-            fn balance(&mut self, address: Address) -> Option<StateLoad<U256>>;
-            fn load_account_delegated(&mut self, address: Address) -> Option<StateLoad<AccountLoad>>;
-            fn load_account_code(&mut self, address: Address) -> Option<StateLoad<Bytes>>;
-            fn load_account_code_hash(&mut self, address: Address) -> Option<StateLoad<B256>>;
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{EthSpecId, SaltEnv, TestExternalEnvs};
+    use alloy_primitives::U256;
     use core::convert::Infallible;
     use revm::database::EmptyDB;
 

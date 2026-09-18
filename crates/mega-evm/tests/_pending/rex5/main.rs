@@ -8,7 +8,6 @@ mod deposit_caller_accounting;
 mod deposit_create_storage_gas;
 mod eip7702_metering;
 mod eip7702_state_growth;
-mod frame_target_updated_dedup;
 mod gas_validation;
 mod interceptor_selector_probe;
 mod keyless_deploy_dispatch_parity;

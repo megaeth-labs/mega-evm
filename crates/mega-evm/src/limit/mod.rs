@@ -4,9 +4,75 @@
 //! ([`LimitKind`]), the verdict of a check ([`LimitCheck`]) and the revert data a stopped frame
 //! returns ([`MegaLimitExceeded`]). The mechanisms that meter a dimension (the data-size limit,
 //! detention, the state-growth and KV limits) fill these in.
+//!
+//! It also counts what those limits meter at the sites the data-size limit counts: data-size
+//! bytes and write records, on a lane per frame ([`AdditionalLimit`]). The Host stages what it
+//! observes ([`StagedRecord`]) and the opcode commits it once it completed.
+
+mod frame_limit;
+#[allow(clippy::module_inception)]
+mod limit;
+mod record;
+
+pub use limit::AdditionalLimit;
+pub use record::StagedRecord;
 
 use alloy_primitives::Bytes;
 use alloy_sol_types::SolError;
+
+/// Bytes of one write record: the key and value delta one account or storage write leaves in
+/// the state diff.
+pub const WRITE_RECORD_SIZE: u64 = 40;
+
+/// Bytes every log counts for the address it carries.
+pub const LOG_BASE_SIZE: u64 = 32;
+
+/// Bytes every log topic counts.
+pub const LOG_TOPIC_SIZE: u64 = 32;
+
+/// What a transaction or a frame counts: data-size bytes and write records.
+///
+/// The KV count a node reports is the write-record count; it has no tracker of its own.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct LimitUsage {
+    /// Data-size bytes.
+    pub data_size: u64,
+    /// Account and storage write records.
+    pub write_records: u64,
+}
+
+/// One write record.
+pub(crate) const WRITE_RECORD: LimitUsage =
+    LimitUsage { data_size: WRITE_RECORD_SIZE, write_records: 1 };
+
+impl LimitUsage {
+    /// Nothing counted.
+    pub const ZERO: Self = Self { data_size: 0, write_records: 0 };
+
+    /// Both counters added, saturating.
+    pub const fn saturating_add(self, other: Self) -> Self {
+        Self {
+            data_size: self.data_size.saturating_add(other.data_size),
+            write_records: self.write_records.saturating_add(other.write_records),
+        }
+    }
+
+    /// Both counters subtracted, saturating at zero.
+    pub const fn saturating_sub(self, other: Self) -> Self {
+        Self {
+            data_size: self.data_size.saturating_sub(other.data_size),
+            write_records: self.write_records.saturating_sub(other.write_records),
+        }
+    }
+
+    /// Both counters multiplied by `n`, saturating.
+    pub const fn times(self, n: u64) -> Self {
+        Self {
+            data_size: self.data_size.saturating_mul(n),
+            write_records: self.write_records.saturating_mul(n),
+        }
+    }
+}
 
 alloy_sol_types::sol! {
     /// The revert data of a frame a resource limit stopped.
@@ -122,6 +188,19 @@ impl LimitCheck {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_limit_usage_arithmetic_saturates() {
+        let max = LimitUsage { data_size: u64::MAX, write_records: u64::MAX };
+        assert_eq!(max.saturating_add(WRITE_RECORD), max);
+        assert_eq!(LimitUsage::ZERO.saturating_sub(WRITE_RECORD), LimitUsage::ZERO);
+        assert_eq!(WRITE_RECORD.times(3), LimitUsage { data_size: 120, write_records: 3 });
+        assert_eq!(WRITE_RECORD.times(u64::MAX).data_size, u64::MAX);
+        assert_eq!(
+            WRITE_RECORD.saturating_add(WRITE_RECORD).saturating_sub(WRITE_RECORD),
+            WRITE_RECORD
+        );
+    }
 
     /// `Exempt` passes no predicate that would stop a frame, and has no revert data.
     #[test]

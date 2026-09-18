@@ -8,12 +8,15 @@
 mod context;
 mod execution;
 mod factory;
+mod host;
+mod instructions;
 mod result;
 mod spec;
 
 pub use context::*;
 pub use execution::*;
 pub use factory::*;
+pub use host::*;
 pub use result::*;
 pub use spec::*;
 
@@ -75,7 +78,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, NoOpInspector, ExtEnvs
         let inner = revm::context::Evm {
             ctx,
             inspector: NoOpInspector,
-            instruction: EthInstructions::new_mainnet_with_spec(spec.into()),
+            instruction: instructions::mega_instructions(spec.into()),
             precompiles: OpPrecompiles::new_with_spec(spec),
             frame_stack: FrameStack::new_prealloc(8),
         };
