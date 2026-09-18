@@ -1,29 +1,37 @@
 //! The Satin EVM.
 //!
-//! [`MegaEvm`] wraps op-revm's [`OpEvm`] over a [`MegaContext`] configured for the Satin spec.
-//! It adds no `MegaETH` behavior yet; SALT pricing, history gas, resource limits, detention and
-//! the system contracts land on top of it.
+//! [`MegaEvm`] runs transactions on a [`MegaContext`] configured for the Satin spec through
+//! [`MegaHandler`], which wraps op-revm's handler. The EVM implements revm's frame lifecycle
+//! itself (see [`execution`](self::execution)), which is where `MegaETH`'s frame-level mechanisms
+//! plug in.
 
 mod context;
+mod execution;
 mod factory;
 mod result;
 mod spec;
 
 pub use context::*;
+pub use execution::*;
 pub use factory::*;
 pub use result::*;
 pub use spec::*;
 
 use alloy_evm::EvmEnv;
 use alloy_op_evm::map_op_err;
-use op_revm::{precompiles::OpPrecompiles, OpEvm, OpHaltReason, OpTransactionError};
+use op_revm::{precompiles::OpPrecompiles, OpHaltReason, OpTransactionError};
 use revm::{
     context::{
         result::{EVMError, ExecResultAndState, ExecutionResult, ResultAndState},
-        BlockEnv, CfgEnv, ContextTr,
+        BlockEnv, CfgEnv, ContextSetters, ContextTr, FrameStack, JournalTr,
     },
-    handler::{instructions::EthInstructions, system_call::SystemCallEvm},
-    inspector::{InspectCommitEvm, InspectEvm, InspectSystemCallEvm, Inspector, NoOpInspector},
+    handler::{
+        instructions::EthInstructions, system_call::SystemCallEvm, EthFrame, Handler, SystemCallTx,
+    },
+    inspector::{
+        InspectCommitEvm, InspectEvm, InspectSystemCallEvm, Inspector, InspectorHandler,
+        NoOpInspector,
+    },
     interpreter::interpreter::EthInterpreter,
     primitives::{Address, Bytes},
     state::EvmState,
@@ -36,15 +44,20 @@ use crate::{EmptyExternalEnv, ExternalEnvTypes, MegaTransaction, MegaTransaction
 pub(crate) type MegaInstructions<DB, ExtEnvs> =
     EthInstructions<EthInterpreter, MegaContext<DB, ExtEnvs>>;
 
-/// The op-revm EVM a [`MegaEvm`] wraps.
+/// The revm EVM a [`MegaEvm`] wraps.
 ///
 /// It runs op-revm's precompile set for the base spec until the Satin precompile set lands.
-pub(crate) type MegaInnerEvm<DB, INSP, ExtEnvs> =
-    OpEvm<MegaContext<DB, ExtEnvs>, INSP, MegaInstructions<DB, ExtEnvs>, OpPrecompiles>;
+pub(crate) type MegaInnerEvm<DB, INSP, ExtEnvs> = revm::context::Evm<
+    MegaContext<DB, ExtEnvs>,
+    INSP,
+    MegaInstructions<DB, ExtEnvs>,
+    OpPrecompiles,
+    EthFrame<EthInterpreter>,
+>;
 
 /// The Satin EVM.
 ///
-/// Executes transactions through op-revm's handler on a [`MegaContext`]. It implements revm's
+/// Executes transactions through [`MegaHandler`] on a [`MegaContext`]. It implements revm's
 /// execution traits ([`ExecuteEvm`], [`InspectEvm`], [`SystemCallEvm`] and their commit
 /// variants) and alloy-evm's [`Evm`](alloy_evm::Evm), which is what a node's block executor
 /// drives.
@@ -58,7 +71,15 @@ pub struct MegaEvm<DB: Database, INSP, ExtEnvs: ExternalEnvTypes = EmptyExternal
 impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, NoOpInspector, ExtEnvs> {
     /// Creates an EVM over `ctx`, without an inspector.
     pub fn new(ctx: MegaContext<DB, ExtEnvs>) -> Self {
-        Self { inner: OpEvm::new(ctx, NoOpInspector), inspect: false }
+        let spec = ctx.cfg().spec;
+        let inner = revm::context::Evm {
+            ctx,
+            inspector: NoOpInspector,
+            instruction: EthInstructions::new_mainnet_with_spec(spec.into()),
+            precompiles: OpPrecompiles::new_with_spec(spec),
+            frame_stack: FrameStack::new_prealloc(8),
+        };
+        Self { inner, inspect: false }
     }
 }
 
@@ -71,12 +92,17 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
 
     /// The execution context.
     pub const fn ctx(&self) -> &MegaContext<DB, ExtEnvs> {
-        &self.inner.0.ctx
+        &self.inner.ctx
     }
 
     /// The execution context, mutably.
     pub const fn ctx_mut(&mut self) -> &mut MegaContext<DB, ExtEnvs> {
-        &mut self.inner.0.ctx
+        &mut self.inner.ctx
+    }
+
+    /// The inspector.
+    pub const fn inspector(&self) -> &INSP {
+        &self.inner.inspector
     }
 
     /// Whether alloy-evm's [`transact`](alloy_evm::Evm::transact) runs the inspector.
@@ -84,35 +110,40 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
         self.inspect
     }
 
-    /// Consumes the EVM and returns the op-revm EVM it wraps.
+    /// Consumes the EVM and returns the revm EVM it wraps.
     pub(crate) fn into_inner(self) -> MegaInnerEvm<DB, INSP, ExtEnvs> {
         self.inner
     }
 }
 
+/// The error a [`MegaEvm`] reports through revm's execution traits.
+pub type MegaEvmError<DBError> = EVMError<DBError, OpTransactionError>;
+
 impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> ExecuteEvm for MegaEvm<DB, INSP, ExtEnvs> {
     type ExecutionResult = ExecutionResult<OpHaltReason>;
     type State = EvmState;
-    type Error = EVMError<DB::Error, OpTransactionError>;
+    type Error = MegaEvmError<DB::Error>;
     type Tx = MegaTransaction;
     type Block = BlockEnv;
 
     fn set_block(&mut self, block: Self::Block) {
-        self.inner.set_block(block);
+        self.inner.ctx.set_block(block);
     }
 
     fn transact_one(&mut self, tx: Self::Tx) -> Result<Self::ExecutionResult, Self::Error> {
-        self.inner.transact_one(tx)
+        self.inner.ctx.set_tx(tx);
+        MegaHandler::<_, Self::Error, _>::new().run(self)
     }
 
     fn finalize(&mut self) -> Self::State {
-        self.inner.finalize()
+        self.inner.ctx.journal_mut().finalize()
     }
 
     fn replay(
         &mut self,
     ) -> Result<ExecResultAndState<Self::ExecutionResult, Self::State>, Self::Error> {
-        self.inner.replay()
+        let result = MegaHandler::<_, Self::Error, _>::new().run(self)?;
+        Ok(ExecResultAndState::new(result, self.finalize()))
     }
 }
 
@@ -120,7 +151,7 @@ impl<DB: Database + DatabaseCommit, INSP, ExtEnvs: ExternalEnvTypes> ExecuteComm
     for MegaEvm<DB, INSP, ExtEnvs>
 {
     fn commit(&mut self, state: Self::State) {
-        self.inner.commit(state);
+        self.inner.ctx.db_mut().commit(state);
     }
 }
 
@@ -133,11 +164,12 @@ where
     type Inspector = INSP;
 
     fn set_inspector(&mut self, inspector: Self::Inspector) {
-        self.inner.set_inspector(inspector);
+        self.inner.inspector = inspector;
     }
 
     fn inspect_one_tx(&mut self, tx: Self::Tx) -> Result<Self::ExecutionResult, Self::Error> {
-        self.inner.inspect_one_tx(tx)
+        self.inner.ctx.set_tx(tx);
+        MegaHandler::<_, Self::Error, _>::new().inspect_run(self)
     }
 }
 
@@ -156,7 +188,12 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> SystemCallEvm for MegaEvm<DB
         system_contract_address: Address,
         data: Bytes,
     ) -> Result<Self::ExecutionResult, Self::Error> {
-        self.inner.system_call_one_with_caller(caller, system_contract_address, data)
+        self.inner.ctx.set_tx(MegaTransaction::new_system_tx_with_caller(
+            caller,
+            system_contract_address,
+            data,
+        ));
+        MegaHandler::<_, Self::Error, _>::new().run_system_call(self)
     }
 }
 
@@ -172,7 +209,12 @@ where
         system_contract_address: Address,
         data: Bytes,
     ) -> Result<Self::ExecutionResult, Self::Error> {
-        self.inner.inspect_one_system_call_with_caller(caller, system_contract_address, data)
+        self.inner.ctx.set_tx(MegaTransaction::new_system_tx_with_caller(
+            caller,
+            system_contract_address,
+            data,
+        ));
+        MegaHandler::<_, Self::Error, _>::new().inspect_run_system_call(self)
     }
 }
 
@@ -213,9 +255,9 @@ where
         tx: Self::Tx,
     ) -> Result<ResultAndState<Self::HaltReason>, Self::Error> {
         let result = if self.inspect {
-            InspectEvm::inspect_tx(&mut self.inner, tx)
+            InspectEvm::inspect_tx(self, tx)
         } else {
-            ExecuteEvm::transact(&mut self.inner, tx)
+            ExecuteEvm::transact(self, tx)
         };
         result.map_err(map_op_err)
     }
@@ -226,11 +268,11 @@ where
         contract: Address,
         data: Bytes,
     ) -> Result<ResultAndState<Self::HaltReason>, Self::Error> {
-        self.inner.system_call_with_caller(caller, contract, data).map_err(map_op_err)
+        SystemCallEvm::system_call_with_caller(self, caller, contract, data).map_err(map_op_err)
     }
 
     fn finish(self) -> (Self::DB, EvmEnv<Self::Spec, Self::BlockEnv>) {
-        let (db, cfg_env, block_env) = self.into_inner().0.ctx.into_parts();
+        let (db, cfg_env, block_env) = self.into_inner().ctx.into_parts();
         (db, EvmEnv { cfg_env, block_env })
     }
 
@@ -239,12 +281,12 @@ where
     }
 
     fn components(&self) -> (&Self::DB, &Self::Inspector, &Self::Precompiles) {
-        let evm = &self.inner.0;
+        let evm = &self.inner;
         (evm.ctx.db(), &evm.inspector, &evm.precompiles)
     }
 
     fn components_mut(&mut self) -> (&mut Self::DB, &mut Self::Inspector, &mut Self::Precompiles) {
-        let evm = &mut self.inner.0;
+        let evm = &mut self.inner;
         (evm.ctx.db_mut(), &mut evm.inspector, &mut evm.precompiles)
     }
 }
@@ -297,7 +339,7 @@ mod tests {
         assert!(evm.transact_raw(tx(U256::ZERO)).unwrap().result.is_success());
 
         let inner = evm.into_inner();
-        assert_eq!(inner.0.ctx.spec(), MegaSpecId::SATIN);
+        assert_eq!(inner.ctx.spec(), MegaSpecId::SATIN);
     }
 
     #[test]
