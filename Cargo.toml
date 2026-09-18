@@ -14,7 +14,7 @@ resolver = "2"
 [workspace.package]
 version = "2.0.0-alpha.1"
 edition = "2021"
-rust-version = "1.94"
+rust-version = "1.94.1"
 license = "MIT OR Apache-2.0"
 homepage = "https://github.com/megaeth-labs/mega-evm"
 repository = "https://github.com/megaeth-labs/mega-evm"
