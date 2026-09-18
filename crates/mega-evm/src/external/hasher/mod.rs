@@ -1,6 +1,72 @@
-//! Unit tests extracted from `crates/mega-evm/src/external/hasher/mod.rs` when T2.1 replaced the legacy core.
-//! The code they test is at `git show a8f8c7c9:crates/mega-evm/src/external/hasher/mod.rs`.
-//! Owning tickets are listed in `tests/_pending/README.md`.
+//! Deterministic hashing for mapping keys to SALT buckets.
+//!
+//! This module provides the [`AHashBucketHasher`] which implements [`BucketHasher`] using
+//! a vendored subset of `AHash` v0.8.12's deterministic fallback algorithm.
+//! This ensures identical bucket ID results across all platforms, matching the production
+//! `salt` crate's behavior.
+//!
+//! # Attribution
+//!
+//! The hashing implementation is derived from [AHash v0.8.12](https://github.com/tkaitchuck/aHash)
+//! under Apache License 2.0. See [`NOTICE.md`](./NOTICE.md) for full attribution.
+
+mod convert;
+mod fallback;
+
+use self::fallback::RandomState;
+use crate::{BucketHasher, BucketId, MIN_BUCKET_SIZE};
+use core::hash::{BuildHasher, Hasher};
+
+/// Width of each trie level in bits (256-ary trie).
+const TRIE_WIDTH_BITS: usize = 8;
+
+/// Number of levels in the main SALT trie.
+const MAIN_TRIE_LEVELS: usize = 4;
+
+/// Total number of buckets: 256^3 = 16,777,216.
+const NUM_BUCKETS: usize = 1 << ((MAIN_TRIE_LEVELS - 1) * TRIE_WIDTH_BITS);
+
+/// Number of metadata buckets reserved at the start: 65,536.
+const NUM_META_BUCKETS: usize = NUM_BUCKETS / MIN_BUCKET_SIZE;
+
+/// Number of key-value data buckets: 16,711,680.
+const NUM_KV_BUCKETS: usize = NUM_BUCKETS - NUM_META_BUCKETS;
+
+/// Fixed seeds derived from the lower 32 bytes of keccak256("Make Ethereum Great Again").
+const HASHER_SEEDS: [u64; 4] = [0x921321f4, 0x2ccb667e, 0x60d68842, 0x077ada9d];
+
+/// Computes a deterministic 64-bit hash of the input bytes using the `AHash` fallback algorithm.
+#[inline(always)]
+fn hash(bytes: &[u8]) -> u64 {
+    static HASH_BUILDER: RandomState =
+        RandomState::with_seeds(HASHER_SEEDS[0], HASHER_SEEDS[1], HASHER_SEEDS[2], HASHER_SEEDS[3]);
+
+    let mut hasher = HASH_BUILDER.build_hasher();
+    hasher.write(bytes);
+    hasher.finish()
+}
+
+/// Maps a plain key (account address or address+slot) to a SALT bucket ID.
+///
+/// Returns a bucket ID in the range `[NUM_META_BUCKETS, NUM_BUCKETS)`.
+/// The first `NUM_META_BUCKETS` buckets are reserved for metadata storage.
+#[inline(always)]
+fn bucket_id(key: &[u8]) -> BucketId {
+    (hash(key) % NUM_KV_BUCKETS as u64 + NUM_META_BUCKETS as u64) as BucketId
+}
+
+/// AHash-based bucket hasher matching the production `salt` crate's deterministic algorithm.
+///
+/// This hasher uses the vendored `AHash` v0.8.12 fallback (folded-multiply) with fixed seeds
+/// to produce bucket IDs identical to the `salt` crate on all platforms.
+#[derive(Debug, Clone, Copy)]
+pub struct AHashBucketHasher;
+
+impl BucketHasher for AHashBucketHasher {
+    fn bucket_id(key: &[u8]) -> BucketId {
+        bucket_id(key)
+    }
+}
 
 #[cfg(test)]
 mod tests {

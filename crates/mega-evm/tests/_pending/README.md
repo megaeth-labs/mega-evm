@@ -25,11 +25,11 @@ Do not add a `_pending/main.rs`.
 
 | Ticket | Tests | From `tests/` | From `src/` | 保留 | 重写 | 待定 |
 |---|---:|---:|---:|---:|---:|---:|
-| T2.1 | 18 | 0 | 18 | 15 | 3 | 0 |
+| T2.1 | 16 | 0 | 16 | 13 | 3 | 0 |
 | T2.2 | 21 | 21 | 0 | 21 | 0 | 0 |
 | T2.3 | 40 | 19 | 21 | 21 | 19 | 0 |
 | T3.1 | 36 | 30 | 6 | 7 | 29 | 0 |
-| T3.2 | 87 | 72 | 15 | 29 | 58 | 0 |
+| T3.2 | 82 | 72 | 10 | 24 | 58 | 0 |
 | T3.3 | 28 | 24 | 4 | 4 | 24 | 0 |
 | T3.4 | 27 | 27 | 0 | 0 | 27 | 0 |
 | T4.1 | 49 | 47 | 2 | 42 | 7 | 0 |
@@ -44,7 +44,7 @@ Do not add a `_pending/main.rs`.
 | T8.1 | 74 | 45 | 29 | 55 | 19 | 0 |
 | T9 | 4 | 4 | 0 | 1 | 3 | 0 |
 | — (undecided: D57 preload-warm cold charging, D58 98/100 forwarding) | 7 | 7 | 0 | 0 | 0 | 7 |
-| **Total** | **869** | **691** | **178** | **516** | **324** | **29** |
+| **Total** | **862** | **691** | **171** | **509** | **324** | **29** |
 
 ## Files
 
@@ -148,9 +148,6 @@ Each cell lists `disposition count (ticket · decision)`.
 | `src/evm/result.rs` | 4 | 重写 4 (T2.3 · D17/D48 (halt-reason set changes)) |
 | `src/evm/state.rs` | 1 | 保留 1 (T8.1) |
 | `src/external/gas.rs` | 9 | 重写 9 (T3.2 · D12/D51) |
-| `src/external/hasher/mod.rs` | 5 | 保留 5 (T3.2) |
-| `src/external/mod.rs` | 1 | 保留 1 (T2.1) |
-| `src/external/test_utils.rs` | 1 | 保留 1 (T2.1) |
 | `src/limit/compute_gas.rs` | 1 | 重写 1 (T4.2 · D40/D48) |
 | `src/limit/data_size.rs` | 2 | 保留 2 (T4.1) |
 | `src/limit/frame_limit.rs` | 4 | 重写 4 (T2.3 · data-size-only per-frame tracker) |

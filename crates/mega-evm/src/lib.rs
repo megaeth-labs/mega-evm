@@ -8,6 +8,8 @@ extern crate alloc;
 
 mod block;
 mod evm;
+mod external;
 
 pub use block::*;
 pub use evm::*;
+pub use external::*;
