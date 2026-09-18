@@ -163,3 +163,59 @@ fn test_stopped_first_frame_keeps_the_reservoir_at_any_gas_limit() {
     assert_eq!(small.tx_gas_used(), large.tx_gas_used());
     assert_eq!(small.state_gas_spent_final(), large.state_gas_spent_final());
 }
+
+/// `settle_frame_result` settles a result into its caller's gas exactly as revm's frame return
+/// does, for a success, a revert and a halt, with state gas drawn from the reservoir and spilled
+/// onto regular gas.
+#[test]
+fn test_settle_frame_result_matches_revms_frame_return() {
+    use mega_evm::{settle_frame_result, synthetic_frame_result};
+    use revm::context::result::EVMError;
+
+    for result_kind in
+        [InstructionResult::Stop, InstructionResult::Revert, InstructionResult::OutOfGas]
+    {
+        let code = Bytes::from_static(&[revm::bytecode::opcode::STOP]);
+        let mut evm =
+            MegaEvm::new(context(MemoryDatabase::default().account_code(TARGET, code.clone())));
+        let journal = evm.ctx_mut().journal_mut();
+        journal.load_account(CALLER).unwrap();
+        journal.load_account(TARGET).unwrap();
+        let mut caller_init = call_frame_init(1);
+        if let FrameInput::Call(inputs) = &mut caller_init.frame_input {
+            let bytecode = revm::state::Bytecode::new_raw(code.clone());
+            inputs.known_bytecode = (bytecode.hash_slow(), bytecode);
+        }
+        let ItemOrResult::Item(_) = EvmTr::frame_init(&mut evm, caller_init).unwrap() else {
+            panic!("the caller frame is built");
+        };
+
+        // The child the caller starts: 30,000 gas of the caller's, and its reservoir.
+        let (ctx, _, _, frames) = EvmTr::all_mut(&mut evm);
+        let caller_frame = frames.get();
+        assert!(caller_frame.interpreter.gas.record_regular_cost(30_000));
+        let child_input = {
+            let FrameInput::Call(mut inputs) = call_frame_init(2).frame_input else {
+                unreachable!()
+            };
+            inputs.gas_limit = 30_000;
+            inputs.reservoir = caller_frame.interpreter.gas.reservoir();
+            FrameInput::Call(inputs)
+        };
+        let mut result = synthetic_frame_result(&child_input, result_kind, Bytes::new());
+        // The child spent regular gas, and state gas beyond the reservoir that spilled.
+        let child_gas = result.gas_mut();
+        assert!(child_gas.record_regular_cost(1_000));
+        assert!(child_gas.record_state_cost(RESERVOIR + 500));
+
+        let mut expected = *caller_frame.interpreter.gas.tracker();
+        settle_frame_result::<_, EVMError<core::convert::Infallible>>(
+            ctx,
+            &mut expected,
+            &mut result.clone(),
+        )
+        .unwrap();
+        caller_frame.return_result::<_, EVMError<core::convert::Infallible>>(ctx, result).unwrap();
+        assert_eq!(caller_frame.interpreter.gas.tracker(), &expected, "{result_kind:?}");
+    }
+}
