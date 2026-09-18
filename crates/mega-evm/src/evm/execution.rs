@@ -18,7 +18,10 @@ use revm::{
         result::FromStringError, transaction::TransactionType, ContextError, ContextTr, FrameStack,
         JournalTr, Transaction,
     },
-    context_interface::{cfg::gas::GasTracker, journaled_state::entry::JournalEntry},
+    context_interface::{
+        cfg::gas::GasTracker,
+        journaled_state::{account::JournaledAccountTr, entry::JournalEntry},
+    },
     handler::{
         evm::{ContextDbError, FrameInitResult, FrameTr},
         instructions::InstructionProvider,
@@ -76,6 +79,10 @@ where
     type HaltReason = OpHaltReason;
 
     /// revm's pre-execution, then the write records of the EIP-7702 authorities it applied.
+    ///
+    /// When those records would cross a limit, the limit is enforced before the writes it
+    /// guards: the authorizations are taken back with the gas they charged, and the transaction,
+    /// latched, is stopped at its first frame.
     fn pre_execution(
         &self,
         evm: &mut Self::Evm,
@@ -83,11 +90,17 @@ where
     ) -> Result<Option<PreExecutionOutput>, Self::Error> {
         self.load_accounts(evm)?;
         let checkpoint = evm.ctx().journal_mut().checkpoint();
+        let gas_before = *gas;
         let Some(eip7702_refund) = self.apply_eip7702_auth_list(evm, gas)? else {
             evm.ctx().journal_mut().checkpoint_revert(checkpoint);
             return Ok(None);
         };
-        record_applied_authorities(evm.ctx_mut(), checkpoint.journal_i);
+        if record_applied_authorities(evm.ctx_mut(), checkpoint.journal_i).exceeded_limit() {
+            evm.ctx().journal_mut().checkpoint_revert(checkpoint);
+            *gas = gas_before;
+            let checkpoint = evm.ctx().journal_mut().checkpoint();
+            return Ok(Some(PreExecutionOutput { eip7702_refund: 0, checkpoint }));
+        }
         Ok(Some(PreExecutionOutput { eip7702_refund, checkpoint }))
     }
 
@@ -230,7 +243,7 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
         &mut self,
         frame_init: FrameInit,
     ) -> Result<FrameInitResult<'_, Self::Frame>, ContextDbError<Self::Context>> {
-        if let Some(result) = answer_before_building(&self.inner.ctx, &frame_init) {
+        if let Some(result) = answer_before_building(&mut self.inner.ctx, &frame_init)? {
             self.inner.ctx.additional_limit.push_empty_frame();
             return Ok(ItemOrResult::Result(result));
         }
@@ -242,9 +255,7 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
         let ctx = &mut self.inner.ctx;
         let check = ctx.additional_limit.on_frame_init(&frame_init.frame_input, frame_init.depth);
         if check.exceeded_limit() {
-            // The frame never starts, so a creation bumps no nonce: its creator record goes too.
-            ctx.additional_limit.creation_did_not_bump_nonce();
-            return Ok(ItemOrResult::Result(stopped_frame_result(&frame_init, &check)));
+            return Ok(ItemOrResult::Result(stop_before_building(ctx, &frame_init, &check)?));
         }
         // The creator of a nested creation, to tell afterwards whether revm bumped its nonce.
         let creator = match &frame_init.frame_input {
@@ -365,7 +376,7 @@ where
             // The inspector answered the frame. The latch and the depth guard still hold: an
             // answer cannot start a frame of a stopped transaction, nor reach past the call-stack
             // limit.
-            if let Some(answer) = answer_before_building(ctx, &frame_init) {
+            if let Some(answer) = answer_before_building(ctx, &frame_init)? {
                 output = answer;
             }
             ctx.additional_limit.push_empty_frame();
@@ -480,13 +491,29 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
 /// The answer a frame gets before anything builds or answers it otherwise, in this order: the
 /// latched stop of a stopped transaction, then the depth guard's `CallTooDeep`.
 fn answer_before_building<DB: Database, ExtEnvs: ExternalEnvTypes>(
-    ctx: &MegaContext<DB, ExtEnvs>,
+    ctx: &mut MegaContext<DB, ExtEnvs>,
     frame_init: &FrameInit,
-) -> Option<FrameResult> {
-    if let Some(latched) = ctx.additional_limit.latched() {
-        return Some(stopped_frame_result(frame_init, latched));
+) -> Result<Option<FrameResult>, ContextDbError<MegaContext<DB, ExtEnvs>>> {
+    if let Some(latched) = ctx.additional_limit.latched().copied() {
+        return stop_before_building(ctx, frame_init, &latched).map(Some);
     }
-    call_too_deep(frame_init)
+    Ok(call_too_deep(frame_init))
+}
+
+/// Answers a frame a limit stops before it is built with the stop.
+///
+/// A creation still bumps its creator's nonce, as one that starts and reverts does: a nested
+/// creation's caller sees an ordinary failed creation, and a creation transaction stopped before
+/// its first frame cannot be replayed.
+fn stop_before_building<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    ctx: &mut MegaContext<DB, ExtEnvs>,
+    frame_init: &FrameInit,
+    check: &LimitCheck,
+) -> Result<FrameResult, ContextDbError<MegaContext<DB, ExtEnvs>>> {
+    if let FrameInput::Create(inputs) = &frame_init.frame_input {
+        let _ = ctx.journal_mut().load_account_mut(inputs.caller())?.data.bump_nonce();
+    }
+    Ok(stopped_frame_result(frame_init, check))
 }
 
 /// The depth guard: a `CALL` or `STATICCALL` past the call-stack limit, answered with
@@ -538,9 +565,9 @@ fn account_nonce<DB: Database, ExtEnvs: ExternalEnvTypes>(
 fn record_applied_authorities<DB: Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &mut MegaContext<DB, ExtEnvs>,
     journal_i: usize,
-) {
+) -> LimitCheck {
     if ctx.tx().tx_type() != TransactionType::Eip7702 {
-        return;
+        return LimitCheck::WithinLimit;
     }
     let caller = ctx.tx().caller();
     let target = ctx.tx().kind().to().copied();
@@ -555,5 +582,9 @@ fn record_applied_authorities<DB: Database, ExtEnvs: ExternalEnvTypes>(
     authorities.dedup();
     let target_is_authority =
         target.is_some_and(|target| authorities.binary_search(&target).is_ok());
-    ctx.additional_limit.record_applied_authorities(authorities.len() as u64, target_is_authority);
+    ctx.additional_limit.record_applied_authorities(
+        caller,
+        authorities.len() as u64,
+        target_is_authority,
+    )
 }

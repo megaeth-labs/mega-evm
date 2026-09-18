@@ -516,30 +516,6 @@ fn test_value_to_an_applied_authority_records_it_once() {
     assert_eq!(usage, records(1));
 }
 
-/// A creation a frame budget stops before it runs bumps no nonce, so it leaves no creator
-/// record behind: the caller keeps only what it wrote itself.
-#[test]
-fn test_creation_stopped_at_init_leaves_no_creator_record() {
-    // CALLEE creates (two records: created account and creator), which a 60-byte budget stops,
-    // then writes a slot.
-    let code = BytecodeBuilder::default()
-        .append_many([PUSH0, PUSH0, PUSH0])
-        .append(CREATE)
-        .append(POP)
-        .sstore(U256::from(1), U256::from(1))
-        .stop()
-        .build();
-    let db = MemoryDatabase::default().account_code(CALLEE, code);
-    let limits = mega_evm::EvmTxRuntimeLimits::no_limits().with_frame_data_size_limit(60);
-    let mut evm = MegaEvm::new(context(db).with_tx_runtime_limits(limits));
-    let result =
-        alloy_evm::Evm::transact_raw(&mut evm, call(CALLER, CALLEE, U256::ZERO, GAS_LIMIT))
-            .unwrap();
-    assert!(result.result.is_success(), "{:?}", result.result);
-    assert_eq!(result.state[&CALLEE].info.nonce, 0, "the creation never started");
-    assert_eq!(evm.ctx().additional_limit().usage(), records(1), "only CALLEE's slot");
-}
-
 /// A frame running as the transaction's sender (a delegated sender called back) records no
 /// write to the sender's account: the transaction body counts it.
 #[test]
@@ -607,4 +583,80 @@ fn test_colliding_creation_keeps_the_creator_record() {
     assert!(result.result.is_success());
     assert_eq!(result.state[&CALLEE].info.nonce, 1, "the collision comes after the bump");
     assert_eq!(usage, records(1), "the creator's nonce only");
+}
+
+/// A creation a frame budget stops before it runs reverts like one that ran: the creator's nonce
+/// is bumped and its record kept, the created account's record goes.
+#[test]
+fn test_creation_stopped_at_init_bumps_the_creator_nonce() {
+    // CALLEE writes a slot (40 bytes of its 100-byte budget), then creates: the creation's two
+    // records (80 bytes) exceed the 60 bytes left to it. CALLEE stores the created address.
+    let code = BytecodeBuilder::default()
+        .sstore(U256::from(1), U256::from(1))
+        .append_many([PUSH0, PUSH0, PUSH0])
+        .append(CREATE)
+        .append(PUSH0)
+        .append(SSTORE)
+        .stop()
+        .build();
+    let db = MemoryDatabase::default().account_code(CALLEE, code);
+    let limits = mega_evm::EvmTxRuntimeLimits::no_limits().with_frame_data_size_limit(100);
+    let mut evm = MegaEvm::new(context(db).with_tx_runtime_limits(limits));
+    let result =
+        alloy_evm::Evm::transact_raw(&mut evm, call(CALLER, CALLEE, U256::ZERO, GAS_LIMIT))
+            .unwrap();
+    assert!(result.result.is_success(), "{:?}", result.result);
+    assert_eq!(result.state[&CALLEE].info.nonce, 1, "the stopped creation bumped the nonce");
+    assert_eq!(result.state[&CALLEE].storage[&U256::ZERO].present_value(), U256::ZERO, "it failed");
+    assert_eq!(evm.ctx().additional_limit().usage(), records(2), "slot 1 and the creator's nonce");
+}
+
+/// Authorities whose records would cross the transaction's data-size limit are not applied: the
+/// limit is enforced before the writes it guards, and the transaction is stopped before its first
+/// frame.
+#[test]
+fn test_authorities_crossing_the_cap_are_not_applied() {
+    let db = MemoryDatabase::default().account_balance(CALLER, U256::from(1_000));
+    let limits = mega_evm::EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(39);
+    let outcome = MegaEvm::new(context(db).with_tx_runtime_limits(limits))
+        .execute_transaction(authorizing_call(CONTRACT, 0, &[(AUTHORITY_1, 0)]))
+        .unwrap();
+    assert!(!outcome.result.is_success() && !outcome.result.is_halt(), "{:?}", outcome.result);
+    assert!(outcome.limit_exceeded.is_some());
+    let authority = outcome.state.get(&AUTHORITY_1);
+    assert!(
+        authority.is_none_or(|a| a.info.nonce == 0 && a.info.is_empty_code_hash()),
+        "the delegation was not applied: {authority:?}"
+    );
+    assert_eq!(outcome.usage, LimitUsage::ZERO);
+}
+
+/// A transaction that runs out of gas after its authorities were applied, before its first frame,
+/// keeps none of their records: the out-of-gas takes the delegations back.
+#[test]
+fn test_runtime_out_of_gas_after_authorities_keeps_no_record() {
+    // The call target is an authority the transaction delegates: calling it pays for the
+    // delegation target's access after the authorities were applied. Find the gas limit one short
+    // of the whole runtime phase.
+    let db = || MemoryDatabase::default().account_balance(CALLER, U256::from(1_000_000_000));
+    let tx = |gas_limit| {
+        let mut tx = authorizing_call(AUTHORITY_1, 0, &[(AUTHORITY_1, 0)]);
+        tx.0.base.gas_limit = gas_limit;
+        tx
+    };
+    let run_at =
+        |gas_limit| MegaEvm::new(context(db())).execute_transaction(tx(gas_limit)).unwrap();
+    let mut gas_limit = 40_000;
+    while !run_at(gas_limit).result.is_success() {
+        gas_limit += 1;
+        assert!(gas_limit < 200_000, "the transaction never succeeds");
+    }
+    let outcome = run_at(gas_limit - 1);
+    assert!(outcome.result.is_halt(), "{:?}", outcome.result);
+    assert_eq!(outcome.usage, LimitUsage::ZERO);
+    assert_eq!(outcome.limit_exceeded, None);
+    assert!(
+        outcome.state.get(&AUTHORITY_1).is_none_or(|a| a.info.nonce == 0),
+        "the out-of-gas took the delegation back"
+    );
 }

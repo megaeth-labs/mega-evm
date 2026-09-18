@@ -44,6 +44,9 @@ pub struct AdditionalLimit {
     /// The transaction's sender, whose account write is part of the transaction body: a frame
     /// running as the sender never records it.
     sender: Address,
+    /// Whether the transaction's first frame reached frame init. When it did not, the runtime
+    /// phase before it ran out of gas and took back everything counted before it.
+    frame_began: bool,
     /// The history gas the settled transaction spent.
     history_gas_spent: u64,
 }
@@ -71,6 +74,7 @@ impl AdditionalLimit {
         self.latched = None;
         self.target_is_authority = false;
         self.sender = Address::ZERO;
+        self.frame_began = false;
         self.history_gas_spent = 0;
     }
 
@@ -190,17 +194,26 @@ impl AdditionalLimit {
 
     /// Records the account writes of the applied EIP-7702 authorities other than the sender:
     /// `authorities` distinct accounts, `target_is_authority` if the transaction's call target is
-    /// one of them.
+    /// one of them, from the transaction's `sender`.
+    ///
+    /// The limit is checked before the records are made: a crossing latches the transaction and
+    /// records nothing, and the caller takes the authorizations back, so the writes the limit
+    /// guards never happen. The first frame is then answered with the stop without running.
     pub(crate) fn record_applied_authorities(
         &mut self,
+        sender: Address,
         authorities: u64,
         target_is_authority: bool,
-    ) {
+    ) -> LimitCheck {
+        self.sender = sender;
+        let records = WRITE_RECORD.times(authorities);
+        let used = self.tracker.net().saturating_add(records).data_size;
+        if used > self.limits.tx_data_size_limit {
+            return self.latch(LimitKind::DataSize, self.limits.tx_data_size_limit, used);
+        }
         self.target_is_authority = target_is_authority;
-        self.tracker.record(WRITE_RECORD.times(authorities));
-        // Crossing the limit here latches the transaction before its first frame, which is then
-        // answered with the stop without running.
-        self.check();
+        self.tracker.record(records);
+        LimitCheck::WithinLimit
     }
 
     /* Frame lanes */
@@ -219,6 +232,7 @@ impl AdditionalLimit {
     /// A crossed limit in the verdict means the frame must not run: it is answered with the stop.
     /// So is every frame of a latched transaction, whose lane stays empty.
     pub(crate) fn on_frame_init(&mut self, input: &FrameInput, depth: usize) -> LimitCheck {
+        self.frame_began = true;
         if let Some(latched) = self.latched {
             self.push_empty_frame();
             return latched;
@@ -293,6 +307,7 @@ impl AdditionalLimit {
     /// Pushes the lane of a frame answered without running: a result built without an
     /// interpreter keeps the lanes aligned with the frames revm returns.
     pub(crate) fn push_empty_frame(&mut self) {
+        self.frame_began = true;
         self.tracker.push(Lane::empty());
     }
 
@@ -307,7 +322,16 @@ impl AdditionalLimit {
     /// Settles the transaction's outermost frame: pops its lane unless the frame already
     /// returned through [`on_frame_return`](Self::on_frame_return), which is the case whenever
     /// it ran, and rewrites the result to the latched stop.
+    ///
+    /// A transaction whose first frame never reached frame init ran out of gas in the runtime
+    /// phase before it: the out-of-gas took back the authorizations applied before it, so their
+    /// records and any latch they set go too, and the halt stays a halt.
     pub(crate) fn on_last_frame_return(&mut self, result: &mut FrameResult) {
+        if !self.frame_began {
+            self.tracker.reset();
+            self.latched = None;
+            return;
+        }
         debug_assert!(self.tracker.depth() <= 1, "only the outermost lane can be left");
         if self.tracker.depth() == 1 {
             self.on_frame_return(result);
