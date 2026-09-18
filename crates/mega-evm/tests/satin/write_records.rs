@@ -147,7 +147,8 @@ fn test_reverted_then_retried_create_records_the_creator_once() {
     assert_eq!(usage, records(1));
 }
 
-/// A creation that fails before bumping the nonce (the creator cannot fund it) records nothing.
+/// A creation the creator cannot fund never starts (the opcode checks the endowment before it
+/// builds a frame), so it records nothing.
 #[test]
 fn test_creation_without_funds_records_nothing() {
     let code = BytecodeBuilder::default()
@@ -563,4 +564,45 @@ fn test_frames_running_as_the_sender_do_not_record_it() {
     assert!(result.result.is_success(), "{:?}", result.result);
     assert_eq!(result.state[&CONTRACT2].info.balance, U256::from(1), "the transfer happened");
     assert_eq!(usage, records(1), "CONTRACT2 only; the sender is part of the body");
+}
+
+/// Raises the endowment of every creation past what the creator holds.
+struct OverfundCreations;
+
+impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for OverfundCreations {
+    fn create(
+        &mut self,
+        _context: &mut MegaContext<DB>,
+        inputs: &mut revm::interpreter::CreateInputs,
+    ) -> Option<revm::interpreter::CreateOutcome> {
+        inputs.set_value(U256::MAX);
+        None
+    }
+}
+
+/// A creation that fails before bumping the creator's nonce (here, an endowment an inspector
+/// raised past the creator's balance) takes its creator record back with it.
+#[test]
+fn test_creation_failing_before_the_nonce_bump_records_nothing() {
+    let code = append_value_create(BytecodeBuilder::default()).append(POP).append(STOP).build();
+    let mut evm = MegaEvm::new(context(funded().account_code(CALLEE, code)))
+        .with_inspector(OverfundCreations);
+    let result =
+        alloy_evm::Evm::transact_raw(&mut evm, call(CALLER, CALLEE, U256::ZERO, GAS_LIMIT))
+            .unwrap();
+    assert!(result.result.is_success());
+    assert_eq!(result.state[&CALLEE].info.nonce, 0, "the nonce was never bumped");
+    assert_eq!(evm.ctx().additional_limit().usage(), LimitUsage::ZERO);
+}
+
+/// A creation that collides with an existing account fails after bumping the creator's nonce, so
+/// the creator record stays and the created account's goes.
+#[test]
+fn test_colliding_creation_keeps_the_creator_record() {
+    let code = append_value_create(BytecodeBuilder::default()).append(POP).append(STOP).build();
+    let db = funded().account_code(CALLEE, code).account_nonce(CALLEE.create(0), 1);
+    let (result, usage) = run(db, call(CALLER, CALLEE, U256::ZERO, GAS_LIMIT));
+    assert!(result.result.is_success());
+    assert_eq!(result.state[&CALLEE].info.nonce, 1, "the collision comes after the bump");
+    assert_eq!(usage, records(1), "the creator's nonce only");
 }
