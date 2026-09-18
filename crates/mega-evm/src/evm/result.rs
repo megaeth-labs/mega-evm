@@ -91,12 +91,8 @@ impl MegaGasUsage {
 
     /// The regular gas a block counts for the transaction: the regular ledger, at least the
     /// floor (EIP-8037 with EIP-7778). The refund does not lower it.
-    pub const fn block_execution_gas(&self) -> u64 {
-        if self.regular > self.floor {
-            self.regular
-        } else {
-            self.floor
-        }
+    pub fn block_execution_gas(&self) -> u64 {
+        self.regular.max(self.floor)
     }
 }
 

@@ -18,7 +18,7 @@ pub struct BlockGasCounters {
 
 impl BlockGasCounters {
     /// Adds one transaction's gas.
-    pub const fn record(&mut self, gas: &MegaGasUsage) {
+    pub fn record(&mut self, gas: &MegaGasUsage) {
         self.execution = self.execution.saturating_add(gas.block_execution_gas());
         self.state = self.state.saturating_add(gas.state);
         self.history = self.history.saturating_add(gas.history);

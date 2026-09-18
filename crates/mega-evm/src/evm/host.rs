@@ -415,6 +415,8 @@ mod tests {
             "EOA code must stay `None`; the `code_hash != KECCAK_EMPTY` guard keeps \
              `code_by_hash` off the hot path for accounts without on-chain code",
         );
+        let again = journal.inspect_account(EOA, false).expect("occupied read must succeed");
+        assert!(again.info.code.is_none(), "the occupied branch keeps the guard too");
     }
 
     /// `inspect_account_code_hash` returns the account's `code_hash` but must NEVER hydrate
@@ -605,6 +607,58 @@ mod tests {
         assert_eq!(
             slot.present_value, expected,
             "storage is read from the delegator (original address), not the delegate"
+        );
+    }
+
+    /// The Host stages what each state-writing call observed and counts nothing: counting is the
+    /// opcode wrapper's, after the opcode completed.
+    #[test]
+    fn test_host_stages_observations_and_counts_nothing() {
+        use crate::{test_utils::MemoryDatabase, MegaSpecId};
+        use revm::{context_interface::Host, primitives::LogData};
+
+        const CONTRACT: Address = address!("00000000000000000000000000000000000000c1");
+        const BENEFICIARY: Address = address!("00000000000000000000000000000000000000c2");
+        let db = MemoryDatabase::default().account_balance(CONTRACT, U256::from(3));
+        let mut ctx = MegaContext::new(db, MegaSpecId::SATIN);
+        ctx.inner.journaled_state.load_account(CONTRACT).unwrap();
+
+        let slot = Host::sstore(&mut ctx, CONTRACT, U256::from(1), U256::from(9)).unwrap();
+        assert_eq!(
+            ctx.additional_limit.staged_record(),
+            Some(&StagedRecord::Sstore(slot.data.clone())),
+            "the non-Berlin entry point stages too"
+        );
+        assert_eq!(slot.data.new_value, U256::from(9));
+        let slot =
+            Host::sstore_skip_cold_load(&mut ctx, CONTRACT, U256::from(1), U256::from(4), false)
+                .unwrap();
+        assert_eq!(ctx.additional_limit.staged_record(), Some(&StagedRecord::Sstore(slot.data)));
+
+        let log = Log {
+            address: CONTRACT,
+            data: LogData::new(vec![B256::ZERO, B256::ZERO], Bytes::from_static(b"abc")).unwrap(),
+        };
+        Host::log(&mut ctx, log);
+        assert_eq!(
+            ctx.additional_limit.staged_record(),
+            Some(&StagedRecord::Log { topics: 2, data_len: 3 })
+        );
+
+        Host::selfdestruct(&mut ctx, CONTRACT, BENEFICIARY, false).unwrap();
+        assert_eq!(
+            ctx.additional_limit.staged_record(),
+            Some(&StagedRecord::SelfDestruct {
+                had_value: true,
+                target_exists: false,
+                to_other_account: true,
+                beneficiary: BENEFICIARY,
+            })
+        );
+        assert_eq!(
+            ctx.additional_limit.usage(),
+            crate::LimitUsage::ZERO,
+            "the Host counts nothing"
         );
     }
 }

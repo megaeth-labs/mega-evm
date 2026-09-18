@@ -381,5 +381,13 @@ mod tests {
         t.current_mut().unwrap().account_recorded = true;
         t.pop(false);
         assert!(!t.current().unwrap().account_recorded, "a failed child hands nothing back");
+
+        t.push(Lane::new(Some(ADDR), true, u64::MAX));
+        assert_eq!(t.depth(), 3);
+        t.pop(true);
+        assert!(!t.current().unwrap().account_recorded, "another account's flag is its own");
+        t.push(Lane::new(None, true, u64::MAX));
+        t.pop(true);
+        assert!(!t.current().unwrap().account_recorded, "an unknown account is not the caller's");
     }
 }

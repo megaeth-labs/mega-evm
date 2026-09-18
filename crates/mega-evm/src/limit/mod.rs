@@ -264,6 +264,18 @@ mod tests {
         assert!(!exceeded.within_limit());
         assert!(exceeded.exceeded_limit());
         assert!(!exceeded.is_frame_local());
+        assert!(!exceeded.is_exempt());
+        assert!(!LimitCheck::WithinLimit.is_exempt());
+        assert!(!LimitCheck::WithinLimit.exceeded_limit());
+        assert!(LimitCheck::WithinLimit.revert_data().is_empty());
+        let frame_local = LimitCheck::ExceedsLimit {
+            kind: LimitKind::DataSize,
+            limit: 100,
+            used: 150,
+            frame_local: true,
+        };
+        assert!(frame_local.is_frame_local());
+        assert!(frame_local.exceeded_limit());
     }
 
     /// Every discriminant survives the round trip, and an unknown one maps to nothing.
