@@ -1,0 +1,29 @@
+{
+  "name": "create2_static_empty_initcode_low_gas",
+  "description": "CREATE2 with empty initcode inside a STATICCALL that forwards 10,000 gas (ported from the legacy suite).",
+  "coinbase": "0x0000000000000000000000000000000000000c01",
+  "pre": {
+    "0x0000000000000000000000000000000000000aaa": {
+      "balance": "0x8ac7230489e80000"
+    },
+    "0x00000000000000000000000000000000000005c2": {
+      "code": "0x60006000600060007300000000000000000000000000000000000005ce612710fa60005500",
+      "storage": {
+        "0x0": "0x7"
+      }
+    },
+    "0x00000000000000000000000000000000000005ce": {
+      "code": "0x6000600060006000f500"
+    }
+  },
+  "txs": [
+    {
+      "caller": "0x0000000000000000000000000000000000000aaa",
+      "to": "0x00000000000000000000000000000000000005c2",
+      "data": "0x",
+      "value": "0x0",
+      "gas_limit": 100000000,
+      "kind": "call"
+    }
+  ]
+}

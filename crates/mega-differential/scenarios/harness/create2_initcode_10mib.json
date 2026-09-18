@@ -1,0 +1,23 @@
+{
+  "name": "create2_initcode_10mib",
+  "description": "CREATE2 of 10 MiB of initcode, far over the initcode size limit (ported from the legacy suite).",
+  "coinbase": "0x0000000000000000000000000000000000000c01",
+  "pre": {
+    "0x0000000000000000000000000000000000000aaa": {
+      "balance": "0x8ac7230489e80000"
+    },
+    "0x0000000000000000000000000000000000000c2e": {
+      "code": "0x600062a0000060006000f500"
+    }
+  },
+  "txs": [
+    {
+      "caller": "0x0000000000000000000000000000000000000aaa",
+      "to": "0x0000000000000000000000000000000000000c2e",
+      "data": "0x",
+      "value": "0x0",
+      "gas_limit": 100000000,
+      "kind": "call"
+    }
+  ]
+}

@@ -1,0 +1,23 @@
+{
+  "name": "create2_empty_initcode_offset_zero",
+  "description": "CREATE2 with empty initcode at offset 0 deploys empty code (ported from the legacy suite).",
+  "coinbase": "0x0000000000000000000000000000000000000c01",
+  "pre": {
+    "0x0000000000000000000000000000000000000aaa": {
+      "balance": "0x8ac7230489e80000"
+    },
+    "0x0000000000000000000000000000000000000c2e": {
+      "code": "0x6000600060006000f500"
+    }
+  },
+  "txs": [
+    {
+      "caller": "0x0000000000000000000000000000000000000aaa",
+      "to": "0x0000000000000000000000000000000000000c2e",
+      "data": "0x",
+      "value": "0x0",
+      "gas_limit": 100000000,
+      "kind": "call"
+    }
+  ]
+}

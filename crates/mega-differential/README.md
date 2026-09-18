@@ -11,7 +11,7 @@ cargo test -p mega-differential --locked
 The corpus test prints one summary line, for example:
 
 ```text
-differential: 323 scenarios, 12401 fields compared, 1004 deviations matched (op-fee-vault-touch x996, op-karst-bn254-pairing-input-bound x8), 0 unexplained, 0 stale registry effects
+differential: 343 scenarios, 13027 fields compared, 1064 deviations matched (op-fee-vault-touch x1056, op-karst-bn254-pairing-input-bound x8), 0 unexplained, 0 stale registry effects
 ```
 
 CI runs the same command as the `differential` job (`.github/workflows/differential.yml`), on every pull request and every push to `satin`.
@@ -63,7 +63,7 @@ The block is fixed: number 1, timestamp 1, zero base fee, unlimited gas.
 | -------------- | --------: | ---------------------------------------------------------------------------------------------------------------------------------- |
 | `handwritten/` |        23 | the hand-written scenarios of the reference differential of the fork: state-gas spill and refill, creates, nested reverts and halts |
 | `eest/`        |       263 | derived from the execution-spec-test Amsterdam state tests of EIP-8037 (state gas, its reservoir, and its interplay with the EIP-7623 calldata floor); the names keep the fixture test ids |
-| `harness/`     |        37 | written for this harness, for what the reference corpus lacks: EIP-7702 authorizations, access lists, SELFDESTRUCT to existing accounts, logs, precompiles, and the three cases of `crates/mega-evm/tests/satin/equivalence.rs` |
+| `harness/`     |        57 | written for this harness, for what the reference corpus lacks: EIP-7702 authorizations, access lists, SELFDESTRUCT to existing accounts, logs, precompiles, the three cases of `crates/mega-evm/tests/satin/equivalence.rs`, and the CREATE and CREATE2 edge cases of the legacy suite (`create*`, listed in `crates/mega-evm/tests/_pending/README.md`) |
 
 The first two sets come from a reference harness that ran them at per-scenario state-gas prices and execution caps.
 Satin fixes both, so the import dropped the `cap` and `prices` fields and moved every gas limit above the reference cap `C` to the Satin cap plus the same reservoir: `G' = 200,000,000 + (G − C)`.
@@ -83,6 +83,8 @@ For every transaction:
 - the output bytes and the created address;
 - the logs;
 - every touched account: created and self-destructed flags, balance, nonce, code hash, and the value of every slot the transaction changed.
+
+The halt reason of an inner frame is not compared, only what it does to the gas, the state and its caller (a scenario that needs it records the call's success in storage).
 
 ## The deviation registry
 

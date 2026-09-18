@@ -6,7 +6,6 @@
 
 mod beneficiary_detention;
 mod common;
-mod create2_metering_order;
 mod create_frame_accounting;
 mod eip7702_authority_accounting;
 mod error_paths;
