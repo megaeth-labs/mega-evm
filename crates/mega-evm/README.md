@@ -25,9 +25,14 @@ The legacy spec names do not parse: `"Rex6".parse::<MegaSpecId>()` fails with `P
 ## Status
 
 Satin is under construction.
-Today it runs transactions through op-revm with EIP-8037 and the EIP-2780 intrinsic cost switched on and a 200,000,000 execution cap; gas above the cap goes to the EIP-8037 reservoir.
+Today it runs transactions through its own handler over op-revm's, with EIP-8037 and the EIP-2780 intrinsic cost switched on and a 200,000,000 execution cap; gas above the cap goes to the EIP-8037 reservoir.
 It still uses the Osaka gas table, which prices state gas at zero, so no transaction draws state gas yet.
-SALT pricing, history gas, resource limits, gas detention, the system contracts and keyless deployment arrive in later changes.
+
+The common execution layer is in place: the frame lifecycle the later mechanisms plug into, the count of data-size bytes and write records per frame, the abort protocol that stops a transaction crossing a limit with a revert, and the inspector admission gate.
+No limit is enforced by default; `EvmTxRuntimeLimits` sets a data-size cap and a frame budget to exercise the protocol.
+`MegaEvm::execute_transaction` returns the result with the gas split into its regular, state and history ledgers, the usage counted and the limit that stopped the transaction, if any.
+
+SALT pricing, history gas, the resource limits, gas detention, the system contracts and keyless deployment arrive in later changes.
 
 ## Quick start
 
@@ -45,6 +50,15 @@ let tx = OpTx(op_revm::OpTransaction {
     ..Default::default()
 });
 let result = evm.transact_raw(tx)?;
+```
+
+A block executor admits an inspected transaction only from an EVM whose inspector is declared read-only:
+
+```rust,ignore
+use mega_evm::DeclaredObserver;
+
+let evm = MegaEvm::new(context).with_trusted_inspector(DeclaredObserver(tracer));
+assert!(!evm.has_rewriting_inspector());
 ```
 
 ## Documentation
