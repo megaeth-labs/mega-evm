@@ -113,20 +113,30 @@ jobs:
               | xargs -0 jq -r --arg fork "$2" '[.[] | .post[$fork] // [] | length] | add // 0' \
               | awk '{ n += $1 } END { print n + 0 }'
           }
-          # State tests the runner executes for a fork, from its per-test JSON outcome on stderr,
-          # keyed by revm's spec id (`OSAKA`). Other stderr lines are not JSON and are dropped.
-          # shellcheck disable=SC2016
-          executed() {
+          # The script's run prints no counts, so the two state-test trees run once more with the
+          # runner's per-test JSON outcome on stderr (about a minute of the job). The build is
+          # the one the script made.
+          outcomes() {
             cargo run --release -p revme -- statetest --json-outcome --omit-progress "$1" \
               2> outcomes.jsonl > /dev/null
-            jq -Rr --arg spec "$2" 'fromjson? | select(type == "object" and .fork == $spec) | .test' \
+          }
+          # State tests the runner executed for a fork, keyed by revm's spec id (`OSAKA`). Other
+          # stderr lines are not JSON and are dropped. `$spec` in the jq program is a jq variable.
+          # shellcheck disable=SC2016
+          executed() {
+            jq -Rr --arg spec "$1" 'fromjson? | select(type == "object" and .fork == $spec) | .test' \
               outcomes.jsonl | wc -l | tr -d ' '
           }
           check() {
             local label=$1 dir=$2 fork=$3 spec=$4 want_executed=$5 want_skipped=$6
             local total ran skipped
             total=$(defined "$dir" "$fork")
-            ran=$(executed "$dir" "$spec")
+            # `check` runs under `||`, where errexit is off: a failing run is reported here.
+            if ! outcomes "$dir"; then
+              echo "::error::$label: the runner failed on $dir"
+              return 1
+            fi
+            ran=$(executed "$spec")
             skipped=$((total - ran))
             echo "$label: $ran executed, $skipped skipped of $total defined ($dir)"
             echo "| $label | $ran | $skipped | $total |" >> "$GITHUB_STEP_SUMMARY"
