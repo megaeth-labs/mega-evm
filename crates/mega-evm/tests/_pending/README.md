@@ -17,7 +17,7 @@ Do not add a `_pending/main.rs`.
 - `keep` rows keep their scenario and expectation; `rewrite` rows keep the scenario and take the new expectation from the cited decision; `undecided` rows wait for their decision.
 - Delete a row from its file here in the same commit that ports it, and delete the file once it holds no rows.
 - The 44 legacy mutant killers the inventory kept (`tests/mutation/`) are not here: each was keyed to a surviving mutant of the legacy sources, and the test gates found no survivor in the Satin sources to regenerate one for.
-  A mechanism whose code leaves a survivor gets a new killer from the mutation gate, next to the code or as a system test under `tests/mutation/`.
+  A mechanism whose code leaves a survivor gets a new killer from the mutation gate, next to the code or as a system test under `tests/mutation/`; what the retired rows cited is kept in "Retired mutant killers" below.
 - Files under `src/` are the inline unit-test modules of the legacy core, extracted when the Satin skeleton replaced `crates/mega-evm/src`.
   The code they test is at `git show a8f8c7c9:crates/mega-evm/src/<path>`.
 - Helper functions and `main.rs` / `common.rs` harness files were moved as they were; the owner decides what to keep.
@@ -62,6 +62,23 @@ These rows came back with the code they test and run in `crates/mega-evm/src`, s
 | `src/sandbox/tx.rs` | native keyless deployment (10) | 10 | `src/system/keyless/tx.rs` |
 | `src/test_utils/opcode_gen.rs` | the Satin skeleton (2) | 2 | `src/test_utils/opcode_gen.rs` |
 | **Total** | | **36** | |
+
+## Retired mutant killers
+
+What the retired `tests/mutation/` rows cited, for the mechanisms that own them.
+
+| Owning mechanism | Tests | Disposition | Decision |
+|---|---:|---|---|
+| the Satin gas table | 2 | rewrite | D04 |
+| the Satin gas table | 1 | rewrite | D11 |
+| SALT pricing | 8 | keep | the test gates regenerate |
+| compute gas | 1 | rewrite | D53 |
+| the data-size limit | 2 | keep | 13,107,200 unchanged |
+| detention | 6 | keep | the test gates regenerate |
+| the state-growth and KV limits | 1 | undecided | D46 |
+| the state-growth and KV limits | 1 | rewrite | D45 |
+| the block executor | 17 | keep | the test gates regenerate |
+| the block executor | 5 | rewrite | single spec / Satin schedule |
 
 ## Tests ported into the differential harness
 
