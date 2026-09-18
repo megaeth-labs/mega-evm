@@ -1,0 +1,33 @@
+[package]
+name = "mega-differential"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Differential harness: runs transaction scenarios through MegaEvm and through revm 43, field by field"
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+# alloy
+alloy-primitives = { workspace = true, features = ["serde"] }
+
+# revm
+# The oracle: stock revm 43.0.0 from crates.io. The workspace's `[patch.crates-io] revm` points at
+# the fork, whose version (40.0.3) does not satisfy `=43.0.0`, so this requirement resolves to the
+# registry and the two revms sit side by side in this crate only. Default features stay off so the
+# oracle adds no native precompile backend (c-kzg, blst, secp256k1) to the lockfile; it runs the
+# pure-Rust ones. `dev` compiles the same optional configuration fields `mega-evm` compiles on the
+# fork, so the oracle copies every one of them.
+revm-oracle = { package = "revm", version = "=43.0.0", default-features = false, features = ["dev", "serde", "std"] }
+
+# megaeth
+mega-evm = { workspace = true, features = ["default", "test-utils"] }
+
+# misc
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true, features = ["std"] }

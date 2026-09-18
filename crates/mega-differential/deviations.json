@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "deviations": [
+    {
+      "id": "op-base-fee-vault-touch",
+      "status": "active",
+      "scenario": "*",
+      "field": "tx[*].state[0x4200000000000000000000000000000000000019]",
+      "left": "created=false selfdestructed=false balance=0x0 nonce=0 code_hash=0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470 storage={}",
+      "right": "<absent>",
+      "mechanism": "op-revm fee distribution (the OP handler's reward_beneficiary)",
+      "reason": "After every non-deposit transaction op-revm credits the base fee to its vault predeploy 0x4200000000000000000000000000000000000019 with balance_incr, which touches the vault even when the amount is zero. The corpus runs with zero fees, so the vault is touched and stays empty; revm 43's mainnet handler has no vaults. EIP-161 state clearing drops a touched empty account when the state is committed (tests/claims.rs checks it), so the difference never reaches the state root. The entry stops matching once a transaction pays a non-zero fee of this kind: the vault then holds a balance and the difference must be re-attributed."
+    },
+    {
+      "id": "op-l1-fee-vault-touch",
+      "status": "active",
+      "scenario": "*",
+      "field": "tx[*].state[0x420000000000000000000000000000000000001a]",
+      "left": "created=false selfdestructed=false balance=0x0 nonce=0 code_hash=0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470 storage={}",
+      "right": "<absent>",
+      "mechanism": "op-revm fee distribution (the OP handler's reward_beneficiary)",
+      "reason": "After every non-deposit transaction op-revm credits the L1 data fee to its vault predeploy 0x420000000000000000000000000000000000001a with balance_incr, which touches the vault even when the amount is zero. The corpus runs with zero fees, so the vault is touched and stays empty; revm 43's mainnet handler has no vaults. EIP-161 state clearing drops a touched empty account when the state is committed (tests/claims.rs checks it), so the difference never reaches the state root. The entry stops matching once a transaction pays a non-zero fee of this kind: the vault then holds a balance and the difference must be re-attributed."
+    },
+    {
+      "id": "op-operator-fee-vault-touch",
+      "status": "active",
+      "scenario": "*",
+      "field": "tx[*].state[0x420000000000000000000000000000000000001b]",
+      "left": "created=false selfdestructed=false balance=0x0 nonce=0 code_hash=0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470 storage={}",
+      "right": "<absent>",
+      "mechanism": "op-revm fee distribution (the OP handler's reward_beneficiary)",
+      "reason": "After every non-deposit transaction op-revm credits the operator fee to its vault predeploy 0x420000000000000000000000000000000000001b with balance_incr, which touches the vault even when the amount is zero. The corpus runs with zero fees, so the vault is touched and stays empty; revm 43's mainnet handler has no vaults. EIP-161 state clearing drops a touched empty account when the state is committed (tests/claims.rs checks it), so the difference never reaches the state root. The entry stops matching once a transaction pays a non-zero fee of this kind: the vault then holds a balance and the difference must be re-attributed."
+    }
+  ]
+}
