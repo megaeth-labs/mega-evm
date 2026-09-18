@@ -199,10 +199,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # On the satin branch `transact` is the only bench target until the
+        # The Satin bench set: `transact`, `corpus` and `factory`, until the
         # suite is rebuilt on Satin, which restores the full list. Scheduled and
         # comment-triggered runs use the default branch's copy of this file.
-        target: [transact]
+        target: [corpus, factory, transact]
     steps:
       - uses: actions/checkout@v4
         with:

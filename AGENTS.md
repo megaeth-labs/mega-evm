@@ -33,9 +33,12 @@ cargo fmt --all --check
 cargo clippy --workspace --lib --examples --tests --benches --all-features --locked
 cargo sort --check --workspace --grouped --order package,workspace,lints,profile,bin,benches,dependencies,dev-dependencies,features
 
-# Benchmarks (`transact` is the only target until the benchmark suite is rebuilt on Satin)
-cargo bench -p mega-evm --bench transact                                  # wall-clock + HTML report
+# Benchmarks: `transact` (MegaEvm next to op-revm), `corpus` (a slice of the differential corpus), `factory` (EVM construction)
+cargo bench -p mega-evm --bench <target>                                  # wall-clock + HTML report
 cargo codspeed build -p mega-evm --bench <target> && cargo codspeed run   # instruction counts (Linux only)
+
+# Differential harness: MegaEvm against stock revm 43 over the scenario corpus
+cargo test -p mega-differential --locked
 
 # no_std check (run against riscv target)
 cargo check -p mega-evm --target riscv64imac-unknown-none-elf --no-default-features

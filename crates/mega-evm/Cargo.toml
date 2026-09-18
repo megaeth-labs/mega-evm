@@ -56,8 +56,17 @@ std = [
 ]
 test-utils = ["dep:derive_more"]
 
-# `transact` is the only target until the benchmark suite is rebuilt on Satin. The inputs
-# under benches/data (revm_bench) and benches/fixtures (attack_replay) stay for the rebuild.
+# The Satin bench set: `transact` (MegaEvm next to op-revm), `corpus` (a slice of the differential
+# corpus) and `factory` (EVM construction). The inputs under benches/data (revm_bench) and
+# benches/fixtures (attack_replay) stay for the rebuild of the rest of the suite.
+[[bench]]
+name = "corpus"
+harness = false
+
+[[bench]]
+name = "factory"
+harness = false
+
 [[bench]]
 name = "transact"
 harness = false
