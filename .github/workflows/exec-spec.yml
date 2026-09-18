@@ -1,0 +1,147 @@
+name: Execution-spec tests
+
+# Runs the execution-spec-test fixtures with the revm fork's own runner (`scripts/run-tests.sh`,
+# release mode) at the fork tag Cargo.lock pins, then counts the state tests the runner executes
+# and skips for Osaka (the main fixtures) and Amsterdam (the glamsterdam devnet fixtures) and
+# checks them against the numbers pinned below.
+#
+# An interim gate until the state-test tool is ported to Satin. It checks the fork MegaEvm runs
+# on, not MegaEvm; MegaEvm meets execution-spec scenarios in the differential harness
+# (crates/mega-differential/scenarios/eest). Not a required check.
+
+on:
+  workflow_dispatch:
+  # GitHub fires a schedule only from the default branch's copy of a workflow: this one runs
+  # weekly once `satin` is the default branch. Until then, dispatch it by hand on `satin`.
+  schedule:
+    - cron: "0 4 * * 1" # Weekly, Monday 4:00 UTC
+  pull_request:
+    paths:
+      - Cargo.lock
+      - Cargo.toml
+      - .github/workflows/exec-spec.yml
+  push:
+    branches: [satin]
+    paths:
+      - Cargo.lock
+      - Cargo.toml
+      - .github/workflows/exec-spec.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  exec-spec:
+    name: execution-spec tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      # State tests the runner executes and skips, per fork, on the fixture releases
+      # `scripts/run-tests.sh` downloads at the pinned tag (main v5.4.0 develop fixtures,
+      # glamsterdam devnet v8.1.0). The skipped ones are the create-collision fixtures with
+      # storage the runner skips by name, and expected-exception transactions it cannot build
+      # (bad signatures, blob-hash creates). A change that moves the fork pin, and with it the
+      # runner or the fixtures, updates them.
+      OSAKA_EXECUTED: "19465"
+      OSAKA_SKIPPED: "52"
+      AMSTERDAM_EXECUTED: "15754"
+      AMSTERDAM_SKIPPED: "72"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Read the fork pin from Cargo.lock
+        id: pin
+        run: |
+          sources=$(grep -o 'git+https://github.com/megaeth-labs/revm?tag=[^"#]*#[0-9a-f]*' Cargo.lock | sort -u)
+          if [ "$(printf '%s\n' "$sources" | grep -c .)" -ne 1 ]; then
+            printf 'expected exactly one revm fork revision in Cargo.lock, found:\n%s\n' "$sources" >&2
+            exit 1
+          fi
+          tag=${sources#*tag=}
+          tag=${tag%%#*}
+          commit=${sources##*#}
+          echo "fork tag $tag at $commit"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          repository: megaeth-labs/revm
+          ref: ${{ steps.pin.outputs.tag }}
+          path: revm-fork
+          persist-credentials: false
+
+      - name: Check the tag names the locked revision
+        working-directory: revm-fork
+        env:
+          COMMIT: ${{ steps.pin.outputs.commit }}
+        run: test "$(git rev-parse HEAD)" = "$COMMIT"
+
+      - name: Read the fork's toolchain
+        id: rust
+        working-directory: revm-fork
+        run: echo "channel=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.rust.outputs.channel }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: revm-fork
+          cache-on-failure: true
+
+      - name: Run the fork's execution-spec suites
+        working-directory: revm-fork
+        run: ./scripts/run-tests.sh clean cargo release
+
+      - name: Count the Osaka and Amsterdam state tests
+        working-directory: revm-fork
+        run: |
+          set -euo pipefail
+          # State tests a fixture tree defines for a fork: one per post-state entry, keyed by the
+          # fixtures' fork name (`Osaka`). `$fork` in the jq program is a jq variable.
+          # shellcheck disable=SC2016
+          defined() {
+            find "$1" -name '*.json' -print0 \
+              | xargs -0 jq -r --arg fork "$2" '[.[] | .post[$fork] // [] | length] | add // 0' \
+              | awk '{ n += $1 } END { print n + 0 }'
+          }
+          # State tests the runner executes for a fork, from its per-test JSON outcome on stderr,
+          # keyed by revm's spec id (`OSAKA`). Other stderr lines are not JSON and are dropped.
+          # shellcheck disable=SC2016
+          executed() {
+            cargo run --release -p revme -- statetest --json-outcome --omit-progress "$1" \
+              2> outcomes.jsonl > /dev/null
+            jq -Rr --arg spec "$2" 'fromjson? | select(type == "object" and .fork == $spec) | .test' \
+              outcomes.jsonl | wc -l | tr -d ' '
+          }
+          check() {
+            local label=$1 dir=$2 fork=$3 spec=$4 want_executed=$5 want_skipped=$6
+            local total ran skipped
+            total=$(defined "$dir" "$fork")
+            ran=$(executed "$dir" "$spec")
+            skipped=$((total - ran))
+            echo "$label: $ran executed, $skipped skipped of $total defined ($dir)"
+            echo "| $label | $ran | $skipped | $total |" >> "$GITHUB_STEP_SUMMARY"
+            if [ "$ran" != "$want_executed" ] || [ "$skipped" != "$want_skipped" ]; then
+              echo "::error::$label: expected $want_executed executed and $want_skipped skipped, got $ran and $skipped"
+              return 1
+            fi
+          }
+          {
+            echo "| Fixtures | Executed | Skipped | Defined |"
+            echo "|---|---:|---:|---:|"
+          } >> "$GITHUB_STEP_SUMMARY"
+          status=0
+          check Osaka test-fixtures/main/develop/state_tests Osaka OSAKA \
+            "$OSAKA_EXECUTED" "$OSAKA_SKIPPED" || status=1
+          check Amsterdam test-fixtures/devnet/state_tests Amsterdam AMSTERDAM \
+            "$AMSTERDAM_EXECUTED" "$AMSTERDAM_SKIPPED" || status=1
+          exit "$status"
