@@ -10,6 +10,7 @@ mod execution;
 mod factory;
 mod frame;
 mod host;
+mod inspector;
 mod instructions;
 mod result;
 mod spec;
@@ -19,6 +20,7 @@ pub use execution::*;
 pub use factory::*;
 pub use frame::*;
 pub use host::*;
+pub use inspector::*;
 pub use result::*;
 pub use spec::*;
 
@@ -71,6 +73,9 @@ pub struct MegaEvm<DB: Database, INSP, ExtEnvs: ExternalEnvTypes = EmptyExternal
     inner: MegaInnerEvm<DB, INSP, ExtEnvs>,
     /// Whether [`alloy_evm::Evm::transact_raw`] runs the inspector.
     inspect: bool,
+    /// Whether the inspector's type carries a [`TrustedObserver`] declaration. Set only by the
+    /// constructors that require the declaration; true without an inspector.
+    trusted_inspector: bool,
 }
 
 impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, NoOpInspector, ExtEnvs> {
@@ -84,15 +89,46 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, NoOpInspector, ExtEnvs
             precompiles: OpPrecompiles::new_with_spec(spec),
             frame_stack: FrameStack::new_prealloc(8),
         };
-        Self { inner, inspect: false }
+        Self { inner, inspect: false, trusted_inspector: true }
     }
 }
 
 impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
-    /// Replaces the inspector. The new inspector runs on every alloy-evm
+    /// Replaces the inspector with a tool's. The new inspector runs on every alloy-evm
     /// [`transact`](alloy_evm::Evm::transact) until it is disabled again.
+    ///
+    /// The inspector may rewrite what execution produces (see the `inspector` module), so the
+    /// EVM reports [`has_rewriting_inspector`](Self::has_rewriting_inspector) while it runs, and
+    /// block execution refuses it.
     pub fn with_inspector<I>(self, inspector: I) -> MegaEvm<DB, I, ExtEnvs> {
-        MegaEvm { inner: self.inner.with_inspector(inspector), inspect: true }
+        MegaEvm {
+            inner: self.inner.with_inspector(inspector),
+            inspect: true,
+            trusted_inspector: false,
+        }
+    }
+
+    /// Replaces the inspector with one whose type is declared a [`TrustedObserver`]: it writes
+    /// nothing back, so the transactions it observes are the ones the chain executes, and block
+    /// execution admits them.
+    pub fn with_trusted_inspector<I: TrustedObserver>(
+        self,
+        inspector: I,
+    ) -> MegaEvm<DB, I, ExtEnvs> {
+        MegaEvm {
+            inner: self.inner.with_inspector(inspector),
+            inspect: true,
+            trusted_inspector: true,
+        }
+    }
+
+    /// Whether the EVM runs an inspector that may rewrite what execution produces: an enabled
+    /// inspector that did not arrive through
+    /// [`with_trusted_inspector`](Self::with_trusted_inspector).
+    ///
+    /// The admission gate block execution refuses a transaction on.
+    pub const fn has_rewriting_inspector(&self) -> bool {
+        self.inspect && !self.trusted_inspector
     }
 
     /// The execution context.

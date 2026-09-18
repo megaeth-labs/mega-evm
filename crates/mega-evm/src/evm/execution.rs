@@ -26,7 +26,7 @@ use revm::{
         PreExecutionOutput,
     },
     inspector::{
-        handler::{frame_end, frame_start, inspect_instructions},
+        handler::{frame_start, inspect_instructions},
         InspectorEvmTr, InspectorHandler, JournalExt,
     },
     interpreter::{
@@ -38,7 +38,8 @@ use revm::{
 };
 
 use crate::{
-    synthetic_frame_result, ExternalEnvTypes, LimitCheck, MegaContext, MegaEvm, MegaInstructions,
+    evm::inspector::frame_end_checked, synthetic_frame_result, ExternalEnvTypes, LimitCheck,
+    MegaContext, MegaEvm, MegaInstructions,
 };
 
 /// The Satin handler.
@@ -396,7 +397,7 @@ where
                 output = too_deep;
             }
             ctx.additional_limit.push_empty_frame();
-            frame_end(ctx, inspector, &frame_init.frame_input, &mut output);
+            frame_end_checked(ctx, inspector, &frame_init.frame_input, &mut output);
             return Ok(ItemOrResult::Result(output));
         }
         let frame_input = frame_init.frame_input.clone();
@@ -416,7 +417,7 @@ where
                     }
                 }
             }
-            frame_end(ctx, inspector, &frame_input, &mut output);
+            frame_end_checked(ctx, inspector, &frame_input, &mut output);
             return Ok(ItemOrResult::Result(output));
         }
         let (ctx, inspector, frame) = self.ctx_inspector_frame();
@@ -446,7 +447,7 @@ where
         };
         let mut next = frame.process_next_action(ctx, action);
         if let Ok(ItemOrResult::Result(result)) = &mut next {
-            frame_end(ctx, inspector, &frame.input, result);
+            frame_end_checked(ctx, inspector, &frame.input, result);
             frame.set_finished(true);
         }
         next
