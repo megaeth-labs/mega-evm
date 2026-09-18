@@ -443,3 +443,105 @@ fn test_usage_equal_to_the_limit_does_not_stop() {
     let (result, _) = run(db(), cap(119), call(CALLER, A, U256::ZERO, GAS_LIMIT));
     assert_stopped(&result.result, LimitKind::DataSize, 119);
 }
+
+/// A tool's inspector that writes to the running frame's gas or results.
+#[derive(Default)]
+struct Charger {
+    opcode: u8,
+    /// State gas charged after the first `SSTORE` of the transaction.
+    state_gas: u64,
+    /// History gas charged after the first `SSTORE` of the transaction.
+    history_gas: u64,
+    charged: bool,
+    /// Turns every call result into a success.
+    calls_succeed: bool,
+}
+
+impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for Charger {
+    fn step(&mut self, interp: &mut Interpreter<EthInterpreter>, _context: &mut MegaContext<DB>) {
+        self.opcode = interp.bytecode.opcode();
+    }
+
+    fn step_end(
+        &mut self,
+        interp: &mut Interpreter<EthInterpreter>,
+        _context: &mut MegaContext<DB>,
+    ) {
+        if self.opcode == SSTORE && !self.charged {
+            self.charged = true;
+            assert!(interp.gas.record_state_cost(self.state_gas));
+            assert!(interp.gas.record_history_cost(self.history_gas));
+        }
+    }
+
+    fn call_end(
+        &mut self,
+        _context: &mut MegaContext<DB>,
+        _inputs: &CallInputs,
+        outcome: &mut CallOutcome,
+    ) {
+        if self.calls_succeed {
+            outcome.result.result = InstructionResult::Stop;
+        }
+    }
+}
+
+fn execute_with(
+    db: MemoryDatabase,
+    limits: EvmTxRuntimeLimits,
+    charger: Charger,
+    gas_limit: u64,
+) -> mega_evm::MegaTransactionOutcome {
+    MegaEvm::new(context(db).with_tx_runtime_limits(limits))
+        .with_inspector(charger)
+        .execute_transaction(call(CALLER, A, U256::ZERO, gas_limit))
+        .unwrap()
+}
+
+/// State gas drawn from the reservoir before the stop is refilled by it: the stopped transaction
+/// hands the whole reservoir back, where a transaction that kept the state keeps the charge.
+#[test]
+fn test_stop_refills_the_state_gas_drawn_from_the_reservoir() {
+    let gas_limit = 1_000_000_000;
+    let reservoir = gas_limit - TX_GAS_LIMIT_CAP;
+    let charger = || Charger { state_gas: 50_000, ..Default::default() };
+    let kept = execute_with(chain(), EvmTxRuntimeLimits::no_limits(), charger(), gas_limit);
+    assert!(kept.result.is_success());
+    assert_eq!(kept.gas.reservoir_remaining, reservoir - 50_000, "the kept charge");
+    assert_eq!(kept.gas.state, 50_000);
+
+    let stopped = execute_with(chain(), cap(180), charger(), gas_limit);
+    assert_stopped(&stopped.result, LimitKind::DataSize, 180);
+    assert_eq!(stopped.gas.reservoir_remaining, reservoir, "refilled by the stop");
+    assert_eq!(stopped.gas.state, 0);
+}
+
+/// History gas a transaction spent is reported on its outcome, apart from regular gas; a stop
+/// takes it back with the rest.
+#[test]
+fn test_outcome_reports_history_gas() {
+    let charger = || Charger { history_gas: 700, ..Default::default() };
+    let kept = execute_with(chain(), EvmTxRuntimeLimits::no_limits(), charger(), GAS_LIMIT);
+    let plain =
+        execute_with(chain(), EvmTxRuntimeLimits::no_limits(), Charger::default(), GAS_LIMIT);
+    assert!(kept.result.is_success());
+    assert_eq!(kept.gas.history, 700);
+    assert_eq!(kept.gas.regular, plain.gas.regular, "history is not regular gas");
+    assert_eq!(kept.gas.gas_used, plain.gas.gas_used + 700);
+
+    let stopped = execute_with(chain(), cap(180), charger(), GAS_LIMIT);
+    assert_stopped(&stopped.result, LimitKind::DataSize, 180);
+    assert_eq!(stopped.gas.history, 0);
+}
+
+/// Under the latch every returned result is the stop, whatever an inspector made of it: rewriting
+/// the calls' results into successes neither resumes a caller nor lets the transaction succeed.
+#[test]
+fn test_latch_overrides_a_rewritten_result() {
+    let charger = Charger { calls_succeed: true, ..Default::default() };
+    let outcome = execute_with(chain(), cap(180), charger, GAS_LIMIT);
+    assert_stopped(&outcome.result, LimitKind::DataSize, 180);
+    assert!(outcome.limit_exceeded.is_some());
+    assert_eq!(outcome.usage, mega_evm::LimitUsage::ZERO, "every lane failed");
+    assert!(outcome.result.logs().is_empty());
+}
