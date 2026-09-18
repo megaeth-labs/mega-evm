@@ -164,4 +164,3 @@ fn test_rex6_create_net_new_inspect_db_error_surfaces() {
     let res = alloy_evm::Evm::transact_raw(&mut evm, tx);
     assert!(res.is_err(), "DB error during REX6 CREATE net-new inspect must surface as Err");
 }
-
