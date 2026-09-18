@@ -55,10 +55,10 @@ This is the single most important correctness concern in mega-evm.
 - If a change affects cross-component behavior that cannot be covered by unit tests, suggest e2e tests in the review comment (these may live in the `test-client` repo).
 - For stateful systems (resource-limit trackers, gas-stipend lifecycle), assert state-machine invariants after each transition, not just at the end.
 - Tests under `crates/mega-evm/tests/mutation/` are generated mutation-killing system tests, each keyed to a specific surviving mutant.
-  On the `satin` branch the legacy ones are parked under `crates/mega-evm/tests/_pending/mutation/` until they are regenerated against the Satin sources.
+  On the `satin` branch the directory does not exist yet: the legacy killers were keyed to mutants of the legacy sources and were retired, and the Satin sources leave no survivor; the first mechanism whose survivor needs a system-level killer creates it, with the conventions of `main`'s `crates/mega-evm/tests/mutation/main.rs`.
   Their comments — especially the `file:line:col` mutation-location references — must be kept up to date when the referenced source moves.
   Flag any PR that shifts lines in a mutated source file but leaves a now-stale location reference (or an orphaned/renamed test) in `tests/mutation/`; a reference that no longer points at its mutant defeats the purpose of the linkage.
-  These tests should not be hand-edited otherwise — see `crates/mega-evm/tests/mutation/main.rs` (on `satin`: `crates/mega-evm/tests/_pending/mutation/main.rs`).
+  These tests should not be hand-edited otherwise — see `crates/mega-evm/tests/mutation/main.rs`.
 - **Benchmark methodology.**
   A perf-comparison PR must pin comparable hardforks on both arms.
   Missing the required explicit hardfork pin can silently bench the wrong fork when a shared bench subject defaults to a different one.

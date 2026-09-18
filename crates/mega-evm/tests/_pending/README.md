@@ -16,7 +16,8 @@ Do not add a `_pending/main.rs`.
 - Port the rows your mechanism owns into a real test target, adapting them to the Satin API and the decision cited in the table.
 - `keep` rows keep their scenario and expectation; `rewrite` rows keep the scenario and take the new expectation from the cited decision; `undecided` rows wait for their decision.
 - Delete a row from its file here in the same commit that ports it, and delete the file once it holds no rows.
-- Files under `mutation/` are machine-generated mutant killers; the test gates regenerate them against the Satin sources instead of porting them by hand.
+- The 44 legacy mutant killers the inventory kept (`tests/mutation/`) are not here: each was keyed to a surviving mutant of the legacy sources, and the test gates found no survivor in the Satin sources to regenerate one for.
+  A mechanism whose code leaves a survivor gets a new killer from the mutation gate, next to the code or as a system test under `tests/mutation/`.
 - Files under `src/` are the inline unit-test modules of the legacy core, extracted when the Satin skeleton replaced `crates/mega-evm/src`.
   The code they test is at `git show a8f8c7c9:crates/mega-evm/src/<path>`.
 - Helper functions and `main.rs` / `common.rs` harness files were moved as they were; the owner decides what to keep.
@@ -27,23 +28,23 @@ Do not add a `_pending/main.rs`.
 |---|---:|---:|---:|---:|---:|---:|
 | the test gates | 21 | 21 | 0 | 21 | 0 | 0 |
 | the common execution layer | 41 | 19 | 22 | 22 | 19 | 0 |
-| the Satin gas table | 37 | 30 | 7 | 7 | 30 | 0 |
-| SALT pricing | 83 | 72 | 11 | 25 | 58 | 0 |
+| the Satin gas table | 34 | 27 | 7 | 7 | 27 | 0 |
+| SALT pricing | 75 | 64 | 11 | 17 | 58 | 0 |
 | history gas | 28 | 24 | 4 | 4 | 24 | 0 |
-| compute gas | 27 | 27 | 0 | 0 | 27 | 0 |
-| the data-size limit | 49 | 47 | 2 | 42 | 7 | 0 |
-| detention | 87 | 82 | 5 | 79 | 8 | 0 |
-| the state-growth and KV limits | 58 | 57 | 1 | 0 | 36 | 22 |
+| compute gas | 26 | 26 | 0 | 0 | 26 | 0 |
+| the data-size limit | 47 | 45 | 2 | 40 | 7 | 0 |
+| detention | 81 | 76 | 5 | 73 | 8 | 0 |
+| the state-growth and KV limits | 56 | 55 | 1 | 0 | 35 | 21 |
 | revert-class aborts | 17 | 17 | 0 | 0 | 17 | 0 |
 | the pre-block system calls | 18 | 15 | 3 | 14 | 4 | 0 |
 | the system contract interceptors | 65 | 57 | 8 | 56 | 9 | 0 |
 | system contract deployment | 67 | 17 | 50 | 62 | 5 | 0 |
 | the oracle and control contracts | 77 | 77 | 0 | 67 | 10 | 0 |
 | native keyless deployment | 75 | 73 | 2 | 29 | 46 | 0 |
-| the block executor | 75 | 45 | 30 | 56 | 19 | 0 |
+| the block executor | 53 | 23 | 30 | 39 | 14 | 0 |
 | inspector support | 4 | 4 | 0 | 1 | 3 | 0 |
 | — (undecided: D57 preload-warm cold charging, D58 98/100 forwarding) | 7 | 7 | 0 | 0 | 0 | 7 |
-| **Total** | **836** | **691** | **145** | **485** | **322** | **29** |
+| **Total** | **792** | **647** | **145** | **452** | **312** | **28** |
 
 ## Tests ported in place
 
@@ -99,10 +100,6 @@ Each cell lists `disposition count (mechanism · decision)`.
 | `mini_rex/oracle.rs` | 13 | rewrite 3 (revert-class aborts · D48); keep 5 (detention); keep 4 (the oracle and control contracts); rewrite 1 (system contract deployment · deploy at Satin activation) |
 | `mini_rex/state_growth_limit.rs` | 4 | rewrite 4 (the state-growth and KV limits · D45 (state-gas limit)) |
 | `mini_rex/tx_data_and_kv_update_limit.rs` | 28 | keep 18 (the data-size limit · data-size numbers unchanged); rewrite 4 (revert-class aborts · D48); undecided 6 (the state-growth and KV limits · D46 (the KV count stays as an output because the node consumes it; the limit semantics are undecided)) |
-| `mutation/access_evm.rs` | 10 | keep 6 (detention · the test gates regenerate); keep 2 (SALT pricing · the test gates regenerate); keep 1 (the block executor · the test gates regenerate); rewrite 1 (the Satin gas table · D11) |
-| `mutation/block.rs` | 22 | keep 14 (the block executor · the test gates regenerate); rewrite 5 (the block executor · single spec / Satin schedule); undecided 1 (the state-growth and KV limits · D46); rewrite 1 (compute gas · D53); rewrite 1 (the state-growth and KV limits · D45) |
-| `mutation/constants.rs` | 4 | rewrite 2 (the Satin gas table · D04); keep 2 (the data-size limit · 13,107,200 unchanged) |
-| `mutation/external_exec.rs` | 8 | keep 2 (the block executor · the test gates regenerate); keep 6 (SALT pricing · the test gates regenerate) |
 | `rex/oracle.rs` | 3 | rewrite 3 (detention · D08 (mark at actual load: same outcome via SLOAD)) |
 | `rex/storage_gas.rs` | 15 | rewrite 15 (SALT pricing · D12 (base price and min-bucket value change; multiplier logic kept)) |
 | `rex2/keyless_deploy.rs` | 37 | rewrite 13 (native keyless deployment · native CREATE sub-frame; D37/D38); keep 19 (native keyless deployment · validation rules 1-9 unchanged); keep 1 (native keyless deployment · rule 4 (tx nonce == 0) unchanged); rewrite 3 (native keyless deployment · D36); rewrite 1 (system contract deployment · deploy at Satin activation) |
