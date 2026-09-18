@@ -231,7 +231,7 @@ mod tests {
 
     /// Recording a caller on an empty stack, or on a lane with no caller below it, is a no-op.
     #[test]
-    fn test_set_created_address_empty_stack_is_noop() {
+    fn test_record_caller_without_a_caller_lane_is_noop() {
         let mut t = FrameLimitTracker::default();
         t.record_caller(true);
         assert_eq!(t.net(), LimitUsage::ZERO);
@@ -243,7 +243,7 @@ mod tests {
 
     /// A frame's caller is recorded once per caller frame: a second child finds it recorded.
     #[test]
-    fn test_set_created_address_duplicate_panics() {
+    fn test_record_caller_records_a_caller_once() {
         let mut t = FrameLimitTracker::default();
         t.push(Lane::new(Some(ADDR), false, u64::MAX));
         t.push(Lane::new(None, true, u64::MAX));

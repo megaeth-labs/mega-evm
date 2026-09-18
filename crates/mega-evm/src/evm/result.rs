@@ -148,7 +148,7 @@ mod tests {
     /// A limit stop is not a halt: it is a revert whose output is `MegaLimitExceeded`, for every
     /// dimension.
     #[test]
-    fn test_mega_specific_halt_reasons_do_not_convert_to_eth() {
+    fn test_limit_stops_are_reverts_with_mega_limit_exceeded() {
         for kind in [
             LimitKind::DataSize,
             LimitKind::KVUpdate,
@@ -171,7 +171,7 @@ mod tests {
 
     /// No halt reason of Satin's own exists: every one but the failed deposit is Ethereum's.
     #[test]
-    fn test_all_mega_specific_variants_fail_eth_conversion() {
+    fn test_only_the_failed_deposit_is_not_an_ethereum_halt() {
         let reasons = [
             MegaHaltReason::Base(EthHaltReason::OutOfGas(OutOfGasError::Basic)),
             MegaHaltReason::Base(EthHaltReason::OpcodeNotFound),

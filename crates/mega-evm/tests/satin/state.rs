@@ -80,7 +80,7 @@ fn two_calls_returning_the_second(first: Address, second: Address) -> Bytes {
 /// A write through an EIP-7702 delegator goes to the delegator's storage: the delegate's own slot
 /// keeps its original value when the delegate later runs in its own context.
 #[test]
-fn test_inspect_storage_does_not_pollute_delegate_journal_rex4() {
+fn test_write_through_a_delegator_leaves_the_delegate_storage_alone() {
     let delegate_code = BytecodeBuilder::default()
         .sstore(U256::from(1), U256::from(0x77))
         .push_number(1u8)

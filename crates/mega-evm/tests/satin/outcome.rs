@@ -8,7 +8,6 @@ use mega_evm::{
     BlockGasCounters, EvmTxRuntimeLimits, LimitCheck, LimitKind, LimitUsage, MegaEvm,
     MegaLimitExceeded, MegaTransactionOutcome, WRITE_RECORD_SIZE,
 };
-use revm::inspector::NoOpInspector;
 
 use crate::common::{call, context};
 
@@ -88,14 +87,33 @@ fn test_spoofed_revert_data_is_not_a_stop() {
     assert_eq!(outcome.limit_exceeded, None);
 }
 
+/// Counts the steps it sees.
+#[derive(Default)]
+struct Steps(usize);
+
+impl<CTX> revm::Inspector<CTX, revm::interpreter::interpreter::EthInterpreter> for Steps {
+    fn step(
+        &mut self,
+        _interp: &mut revm::interpreter::Interpreter<
+            revm::interpreter::interpreter::EthInterpreter,
+        >,
+        _context: &mut CTX,
+    ) {
+        self.0 += 1;
+    }
+}
+
 /// `execute_transaction` runs the inspector when one is enabled, and not otherwise.
 #[test]
 fn test_convenience_execution_methods_work() {
-    let mut evm = MegaEvm::new(context(writer())).with_inspector(NoOpInspector);
+    let mut evm = MegaEvm::new(context(writer())).with_inspector(Steps::default());
     let inspected = evm.execute_transaction(call(CALLER, CONTRACT, U256::ZERO, 1_000_000)).unwrap();
     assert!(inspected.result.is_success());
+    let steps = evm.inspector().0;
+    assert!(steps > 0, "the enabled inspector ran");
     alloy_evm::Evm::set_inspector_enabled(&mut evm, false);
     let executed = evm.execute_transaction(call(CALLER, CONTRACT, U256::ZERO, 1_000_000)).unwrap();
     assert!(executed.result.is_success());
+    assert_eq!(evm.inspector().0, steps, "the disabled inspector did not run");
     assert_eq!(inspected.gas, executed.gas);
 }

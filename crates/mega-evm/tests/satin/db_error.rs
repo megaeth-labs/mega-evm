@@ -48,7 +48,7 @@ fn funded(code: Bytes) -> MemoryDatabase {
 
 /// A failing storage read in `SSTORE` surfaces as the database error.
 #[test]
-fn test_sstore_db_error_on_inspect_storage() {
+fn test_sstore_storage_read_error_fails_the_transaction() {
     let key = U256::from(0x42);
     let code = BytecodeBuilder::default().sstore(key, U256::from(1)).stop().build();
     let mut db = ErrorInjectingDatabase::new(funded(code));
@@ -71,7 +71,7 @@ fn call_target(opcode: u8) -> Bytes {
 
 /// A failing account read of a value transfer's recipient surfaces as the database error.
 #[test]
-fn test_call_with_transfer_db_error_on_inspect_account() {
+fn test_value_call_account_read_error_fails_the_transaction() {
     let mut db = ErrorInjectingDatabase::new(funded(call_target(CALL)));
     db.fail_on_account = Some(TARGET);
     assert_db_error(transact(db, call(CALLER, CALLEE, U256::ZERO, 1_000_000)), "injected basic()");
@@ -80,7 +80,7 @@ fn test_call_with_transfer_db_error_on_inspect_account() {
 /// A creation that writes storage never reads the created account's storage from the database:
 /// it is empty, and a stateless witness has nothing for it.
 #[test]
-fn test_inspect_storage_skips_db_for_newly_created_account() {
+fn test_created_account_storage_is_never_read_from_the_database() {
     let init_code = BytecodeBuilder::default().sstore(U256::ZERO, U256::from(0x42)).stop().build();
     let created = CALLER.create(0);
     let inner = MemoryDatabase::default()
@@ -94,7 +94,7 @@ fn test_inspect_storage_skips_db_for_newly_created_account() {
 
 /// A failing account read of a `STATICCALL` target surfaces as the database error.
 #[test]
-fn test_staticcall_db_error_on_inspect_account() {
+fn test_staticcall_account_read_error_fails_the_transaction() {
     let mut db = ErrorInjectingDatabase::new(funded(call_target(STATICCALL)));
     db.fail_on_account = Some(TARGET);
     assert_db_error(transact(db, call(CALLER, CALLEE, U256::ZERO, 1_000_000)), "injected basic()");
