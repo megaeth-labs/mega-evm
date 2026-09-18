@@ -1,8 +1,8 @@
 //! The Satin EVM.
 //!
 //! [`MegaEvm`] wraps op-revm's [`OpEvm`] over a [`MegaContext`] configured for the Satin spec.
-//! It adds no `MegaETH` behavior yet: SALT pricing, history gas, resource limits, detention and
-//! the system contracts are not here yet.
+//! It adds no `MegaETH` behavior yet; SALT pricing, history gas, resource limits, detention and
+//! the system contracts land on top of it.
 
 mod context;
 mod factory;
