@@ -2,7 +2,7 @@
 //! admission gate block execution keys on.
 
 use alloy_evm::Evm;
-use alloy_primitives::{address, Address, Bytes, U256};
+use alloy_primitives::{address, Address, Bytes, Log, U256};
 use mega_evm::{
     test_utils::{BytecodeBuilder, GasInspector, MemoryDatabase},
     DeclaredObserver, MegaContext, MegaEvm, FORBIDDEN_CREATE_REVIVAL,
@@ -363,4 +363,191 @@ fn test_frame_start_and_end_stay_paired() {
     let funded = MemoryDatabase::default().account_balance(CALLER, U256::from(10));
     let latched = no_limits.with_tx_data_size_limit(0);
     assert_eq!(pairs(funded, latched, 1), (1, 1, 0, 0), "the stopped first frame ends too");
+}
+
+/// Counts every callback it gets.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct Recorder {
+    initialize_interp: usize,
+    step: usize,
+    step_end: usize,
+    log_full: usize,
+    frame_start: usize,
+    frame_end: usize,
+    call: usize,
+    call_end: usize,
+    create: usize,
+    create_end: usize,
+    selfdestruct: usize,
+}
+
+impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for Recorder {
+    fn initialize_interp(&mut self, _: &mut Interpreter<EthInterpreter>, _: &mut MegaContext<DB>) {
+        self.initialize_interp += 1;
+    }
+    fn step(&mut self, _: &mut Interpreter<EthInterpreter>, _: &mut MegaContext<DB>) {
+        self.step += 1;
+    }
+    fn step_end(&mut self, _: &mut Interpreter<EthInterpreter>, _: &mut MegaContext<DB>) {
+        self.step_end += 1;
+    }
+    fn log_full(&mut self, _: &mut Interpreter<EthInterpreter>, _: &mut MegaContext<DB>, _: Log) {
+        self.log_full += 1;
+    }
+    fn frame_start(
+        &mut self,
+        _: &mut MegaContext<DB>,
+        _: &mut revm::interpreter::FrameInput,
+    ) -> Option<revm::handler::FrameResult> {
+        self.frame_start += 1;
+        None
+    }
+    fn frame_end(
+        &mut self,
+        _: &mut MegaContext<DB>,
+        _: &revm::interpreter::FrameInput,
+        _: &mut revm::handler::FrameResult,
+    ) {
+        self.frame_end += 1;
+    }
+    fn call(&mut self, _: &mut MegaContext<DB>, _: &mut CallInputs) -> Option<CallOutcome> {
+        self.call += 1;
+        None
+    }
+    fn call_end(&mut self, _: &mut MegaContext<DB>, _: &CallInputs, _: &mut CallOutcome) {
+        self.call_end += 1;
+    }
+    fn create(&mut self, _: &mut MegaContext<DB>, _: &mut CreateInputs) -> Option<CreateOutcome> {
+        self.create += 1;
+        None
+    }
+    fn create_end(&mut self, _: &mut MegaContext<DB>, _: &CreateInputs, _: &mut CreateOutcome) {
+        self.create_end += 1;
+    }
+    fn selfdestruct(&mut self, _: Address, _: Address, _: U256) {
+        self.selfdestruct += 1;
+    }
+}
+
+/// A contract that logs, creates a contract, calls `B` and self-destructs.
+fn busy_contract() -> MemoryDatabase {
+    let init_code = [0x60, 0x01, 0x60, 0x00, 0xf3];
+    let mut word = [0u8; 32];
+    word[..init_code.len()].copy_from_slice(&init_code);
+    let code = BytecodeBuilder::default()
+        .append_many([PUSH0, PUSH0])
+        .append(revm::bytecode::opcode::LOG0)
+        .mstore(0, word)
+        .push_number(init_code.len() as u64)
+        .append_many([PUSH0, PUSH0])
+        .append(CREATE)
+        .append(revm::bytecode::opcode::POP)
+        .append_many([PUSH0, PUSH0, PUSH0, PUSH0, PUSH0])
+        .push_address(B)
+        .append(GAS)
+        .append(CALL)
+        .append(revm::bytecode::opcode::POP)
+        .push_address(B)
+        .append(revm::bytecode::opcode::SELFDESTRUCT)
+        .build();
+    MemoryDatabase::default().account_code(A, code).account_code(B, Bytes::from_static(&[0x00]))
+}
+
+/// A declared observer forwards every callback to the inspector inside.
+#[test]
+fn test_declared_observer_forwards_every_callback() {
+    let mut plain = MegaEvm::new(context(busy_contract())).with_inspector(Recorder::default());
+    plain.transact_raw(call(CALLER, A, U256::ZERO, GAS_LIMIT)).unwrap();
+    let mut declared = MegaEvm::new(context(busy_contract()))
+        .with_trusted_inspector(DeclaredObserver::new(Recorder::default()));
+    declared.transact_raw(call(CALLER, A, U256::ZERO, GAS_LIMIT)).unwrap();
+
+    let seen = plain.inspector().clone();
+    assert_eq!(declared.inspector().0, seen);
+    assert!(
+        seen.initialize_interp > 0 &&
+            seen.step > 0 &&
+            seen.step_end > 0 &&
+            seen.log_full > 0 &&
+            seen.frame_start > 0 &&
+            seen.frame_end > 0 &&
+            seen.call > 0 &&
+            seen.call_end > 0 &&
+            seen.create > 0 &&
+            seen.create_end > 0 &&
+            seen.selfdestruct > 0,
+        "every callback ran: {seen:?}"
+    );
+    assert_eq!(DeclaredObserver::new(Recorder::default()).into_inner(), Recorder::default());
+}
+
+/// Edits a frame's inputs, writes to the journal, or rewrites a frame result, one per flag.
+#[derive(Default)]
+struct Writer {
+    edit_inputs: bool,
+    log_in_step: bool,
+    rewrite_frame_end: bool,
+}
+
+impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for Writer {
+    fn step(&mut self, _interp: &mut Interpreter<EthInterpreter>, context: &mut MegaContext<DB>) {
+        if self.log_in_step {
+            let log = Log { address: A, data: Default::default() };
+            revm::context::JournalTr::log(revm::context::ContextTr::journal_mut(context), log);
+        }
+    }
+
+    fn frame_start(
+        &mut self,
+        _context: &mut MegaContext<DB>,
+        frame_input: &mut revm::interpreter::FrameInput,
+    ) -> Option<revm::handler::FrameResult> {
+        if let (true, revm::interpreter::FrameInput::Call(inputs)) = (self.edit_inputs, frame_input)
+        {
+            inputs.gas_limit -= 1;
+        }
+        None
+    }
+
+    fn frame_end(
+        &mut self,
+        _context: &mut MegaContext<DB>,
+        _frame_input: &revm::interpreter::FrameInput,
+        frame_result: &mut revm::handler::FrameResult,
+    ) {
+        if self.rewrite_frame_end {
+            frame_result.interpreter_result_mut().output = Bytes::from_static(b"rewritten");
+        }
+    }
+}
+
+fn run_declared(writer: Writer) {
+    let mut evm =
+        MegaEvm::new(context(writes_two_slots())).with_trusted_inspector(DeclaredObserver(writer));
+    let _ = evm.transact_raw(call(CALLER, A, U256::ZERO, GAS_LIMIT));
+}
+
+/// A declared observer that edits a frame's inputs fails its declaration in a debug build.
+#[test]
+#[cfg(debug_assertions)]
+#[should_panic(expected = "a declared observer rewrote a frame's inputs")]
+fn test_false_declaration_of_an_input_edit_fails_in_debug() {
+    run_declared(Writer { edit_inputs: true, ..Default::default() });
+}
+
+/// A declared observer that writes to the journal fails its declaration in a debug build.
+#[test]
+#[cfg(debug_assertions)]
+#[should_panic(expected = "a declared observer wrote to the journal in `step`")]
+fn test_false_declaration_of_a_journal_write_fails_in_debug() {
+    run_declared(Writer { log_in_step: true, ..Default::default() });
+}
+
+/// A declared observer that rewrites a frame result in `frame_end` fails its declaration in a
+/// debug build.
+#[test]
+#[cfg(debug_assertions)]
+#[should_panic(expected = "a declared observer rewrote a frame result in `frame_end`")]
+fn test_false_declaration_of_a_frame_end_rewrite_fails_in_debug() {
+    run_declared(Writer { rewrite_frame_end: true, ..Default::default() });
 }
