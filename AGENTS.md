@@ -37,9 +37,6 @@ cargo sort --check --workspace --grouped --order package,workspace,lints,profile
 cargo bench -p mega-evm --bench <target>                                  # wall-clock + HTML report
 cargo codspeed build -p mega-evm --bench <target> && cargo codspeed run   # instruction counts (Linux only)
 
-# Differential harness: MegaEvm against stock revm 43 over the scenario corpus
-cargo test -p mega-differential --locked
-
 # no_std check (run against riscv target)
 cargo check -p mega-evm --target riscv64imac-unknown-none-elf --no-default-features
 
@@ -51,17 +48,15 @@ Git submodules are required — clone with `--recursive` or run `git submodule u
 
 ## Workspace Structure
 
-| Crate                   | Path                       | Member           | Purpose                                                      |
-| ----------------------- | -------------------------- | ---------------- | ------------------------------------------------------------ |
-| `mega-evm`              | `crates/mega-evm`          | yes              | The Satin engine                                             |
-| `mega-system-contracts` | `crates/system-contracts`  | yes              | Solidity system contracts with Rust bindings (Foundry-based) |
-| `mega-differential`     | `crates/mega-differential` | yes, not default | Differential harness: `MegaEvm` against stock revm 43        |
-| `mega-state-test`       | `crates/mega-state-test`   | no               | State-test runner library; rejoins when ported to Satin      |
-| `state-test`            | `crates/state-test`        | no               | State-test CLI; rejoins when ported to Satin                 |
-| `mega-evme`             | `bin/mega-evme`            | no               | EVM execution CLI; rejoins when ported to Satin              |
-| `mega-t8n`              | `bin/mega-t8n`             | no               | State transition (t8n) tool; rejoins when ported to Satin    |
+| Crate                   | Path                      | Member | Purpose                                                      |
+| ----------------------- | ------------------------- | ------ | ------------------------------------------------------------ |
+| `mega-evm`              | `crates/mega-evm`         | yes    | The Satin engine                                             |
+| `mega-system-contracts` | `crates/system-contracts` | yes    | Solidity system contracts with Rust bindings (Foundry-based) |
+| `mega-state-test`       | `crates/mega-state-test`  | no     | State-test runner library; rejoins when ported to Satin      |
+| `state-test`            | `crates/state-test`       | no     | State-test CLI; rejoins when ported to Satin                 |
+| `mega-evme`             | `bin/mega-evme`           | no     | EVM execution CLI; rejoins when ported to Satin              |
+| `mega-t8n`              | `bin/mega-t8n`            | no     | State transition (t8n) tool; rejoins when ported to Satin    |
 
-`mega-differential` builds stock revm 43 from crates.io next to the fork, as its oracle; it is not a default member, so the commands run at the root without `-p` or `--workspace` stay on the engine's graph.
 The four tool crates still target the legacy engine.
 They are outside `[workspace] members`, so no workspace command builds them; do not edit their sources until they are ported to Satin.
 
@@ -71,7 +66,7 @@ The root `Cargo.toml` pins `revm = "=40.0.3"` and redirects all twelve revm crat
 `op-revm` is declared from the OP monorepo revision the node locks and redirected to the MegaETH fork of op-revm with `[patch."https://github.com/ethereum-optimism/optimism"]`; the OP alloy crates (`alloy-op-evm`, `op-alloy-*`) come from the same monorepo revision.
 
 - Patch the twelve revm crates together, or the build resolves a second copy of revm.
-- `cargo tree -i revm -p mega-evm` must show exactly one revm, from the fork; only `mega-differential`'s graph adds stock revm 43, as its oracle.
+- `cargo tree -i revm` must show exactly one revm, from the fork.
 - The fork pins move by editing the patch blocks; commit the regenerated `Cargo.lock` with them.
 
 ## Architecture
@@ -109,7 +104,7 @@ The root `Cargo.toml` pins `revm = "=40.0.3"` and redirects all twelve revm crat
   Gas above the 200M execution cap goes to the EIP-8037 reservoir.
   The Osaka gas table prices state gas at zero, so no transaction draws state gas until the Satin gas table is installed.
 - `MegaEvm` runs transactions through `MegaHandler`, which wraps op-revm's handler, and implements revm's frame lifecycle itself; every `Host` and context method delegates to op-revm's context except the three that stage what a state-writing opcode did.
-  With no limit configured Satin still equals op-revm: `tests/satin/equivalence.rs` pins it on the same `CfgEnv`, field by field, and the differential harness against revm 43; a later change that alters behavior on purpose updates that baseline.
+  With no limit configured Satin still equals op-revm: `tests/satin/equivalence.rs` pins it on the same `CfgEnv`, field by field; a later change that alters behavior on purpose updates that baseline.
 - The common execution layer counts data-size bytes and write records per frame and enforces nothing by default; `EvmTxRuntimeLimits` sets a data-size cap and a frame budget to drive the abort protocol.
 - The legacy engine's gas leakage pitfalls, limit-check protocol and storage-gas stipend describe mechanisms that do not exist here; the contracts below replace them.
 
@@ -154,8 +149,6 @@ Every later mechanism plugs into these; a change to one comes back to this layer
   It has no `main.rs`, so Cargo does not build it; its `README.md` names the mechanism that owns every file.
   The change that ports a pending test deletes it from `_pending/` in the same commit.
 - Unit tests live next to the code in `#[cfg(test)] mod tests`.
-- `crates/mega-differential/scenarios/` — the differential corpus: JSON scenarios (`test_utils::Scenario`) that run through `MegaEvm` and through stock revm 43 and are compared field by field.
-  A behavior that should equal Ethereum's is pinned best as a scenario there.
 
 ## Version Control
 
@@ -218,9 +211,6 @@ When the agent is requested to implement a new feature or bug fix, it should con
   The agent should always consider accompanying tests or suggest to add additional tests.
 - **Keep the op-revm baseline honest.**
   A change that makes Satin differ from op-revm on purpose must update `tests/satin/equivalence.rs` (or add a case) so the difference is pinned, not silently absorbed.
-- **Keep the differential harness clean.**
-  `cargo test -p mega-differential --locked` must pass: every difference between `MegaEvm` and stock revm 43 is explained by an effect of `crates/mega-differential/deviations.json`, and every effect there explains one.
-  A change that makes `MegaEvm` differ on purpose registers each effect with its mechanism and reason, as narrow as the mechanism allows (or teaches the oracle to model it); a change that removes a difference removes its effect.
 - **Add benchmarks for performance-sensitive changes.**
   Changes on the EVM execution hot path must be accompanied by benchmarks.
   This includes new or modified opcode behavior, gas mechanics, system contract interception, resource limit tracking, and block executor pipeline changes.

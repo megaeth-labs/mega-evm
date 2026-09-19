@@ -1,9 +1,8 @@
 //! Transaction scenarios: a pre-state and a sequence of transactions, read from JSON.
 //!
-//! A [`Scenario`] is the input format of the differential harness (`crates/mega-differential`),
-//! which runs every scenario through [`MegaEvm`] and through an independent EVM and compares the
-//! two. The benches run slices of the same corpus, so their instruction counts move when the
-//! semantics or the pricing of those scenarios move.
+//! A [`Scenario`] describes a transaction sequence as data, so it can run through [`MegaEvm`]
+//! and through another EVM alike. The `corpus` bench reads its inputs in this format, so its
+//! instruction counts move when the semantics or the pricing of those scenarios move.
 //!
 //! The block, the configuration and the L1 fees are fixed, so a scenario is fully described by
 //! its accounts and transactions:
@@ -439,8 +438,8 @@ mod tests {
         );
     }
 
-    /// The block is the same for every scenario and for both arms of the differential harness,
-    /// except for the beneficiary, which the scenario sets.
+    /// The block is the same for every scenario, except for the beneficiary, which the scenario
+    /// sets.
     #[test]
     fn test_block_is_fixed_except_for_the_beneficiary() {
         let mut scenario = scenario(vec![]);
