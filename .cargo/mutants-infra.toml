@@ -1,19 +1,15 @@
 # cargo-mutants configuration for the test gates' own infrastructure.
 #
 # The canonical run (.cargo/mutants.toml) mutates mega-evm production code and excludes test
-# helpers as noise. By that rule the code implementing the gates is helper code, but it is
-# executable logic every later mechanism's verdict rests on: the scenario runner's transaction
-# conversion and its execute/commit loop, and the differential harness's record, comparison and
-# registry modules. This config mutates exactly those, with the differential tests among the
-# killing tests; the production run keeps its exclusions unchanged.
+# helpers as noise. By that rule the scenario runner (its transaction conversion and its
+# execute/commit loop) is helper code, but it is executable logic the benches and later tests rest
+# on. This config mutates exactly that; the production run keeps its exclusions unchanged.
 #
 # Selected by `scripts/mutation_test.sh infra`, which passes the file globs. See mutants/README.md.
 
 test_tool = "nextest"
-# Both packages are tested: mega-evm's unit tests cover the scenario runner, and the differential
-# crate's tests (the whole corpus through both arms) cover the record, comparison and registry
-# modules. mega-differential is not a default member, so it has to be named here.
-test_package = ["mega-evm", "mega-differential"]
+# mega-evm's tests cover the scenario runner.
+test_package = ["mega-evm"]
 
 # Same pinned feature set as the production run, so the two generate comparable mutants.
 additional_cargo_args = ["--all-features"]

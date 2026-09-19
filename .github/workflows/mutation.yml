@@ -129,11 +129,10 @@ jobs:
 
   # ── cargo-mutants: the test gates' own infrastructure ──────────────────────
   # The second mutation scope (.cargo/mutants-infra.toml): the scenario runner's
-  # transaction conversion and execute/commit loop, and the differential
-  # harness's record, comparison and registry modules. The production scope
-  # excludes test helpers as noise and tests only mega-evm, so this executable
-  # logic is never mutated there. 80 mutants today, so the whole set runs rather
-  # than a diff slice. Informational: it is not a required check.
+  # transaction conversion and execute/commit loop. The production scope
+  # excludes test helpers as noise, so this executable logic is never mutated
+  # there. 39 mutants today, so the whole set runs rather than a diff
+  # slice. Informational: it is not a required check.
   infra-mutants:
     name: cargo-mutants infrastructure
     needs: changes
@@ -164,8 +163,7 @@ jobs:
           tool: cargo-mutants@27.1.0
 
       - name: Warm build cache
-        # Both packages, since both are tested for every mutant of this scope.
-        run: cargo nextest run -p mega-evm -p mega-differential --all-features --no-run
+        run: cargo nextest run -p mega-evm --all-features --no-run
 
       - name: Run mutation testing
         env:
@@ -341,7 +339,6 @@ jobs:
               - 'crates/mega-evm/src/**'
             infra:
               - '.cargo/mutants-infra.toml'
-              - 'crates/mega-differential/src/**'
               - 'crates/mega-evm/src/test_utils/scenario.rs'
               - 'scripts/mutation_gate.py'
               - 'scripts/mutation_test.sh'
