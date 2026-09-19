@@ -3,9 +3,7 @@
 # The tool crates (`bin/mega-evme`, `bin/mega-t8n`, `crates/mega-state-test`,
 # `crates/state-test`) still target the legacy engine; their sources are kept
 # untouched and each rejoins the workspace when it is ported to Satin.
-# `crates/mega-differential` is a member but not a default member: it builds stock revm 43 as the
-# oracle of the differential harness, so the commands run at the root stay on the engine's graph.
-members = ["crates/mega-differential", "crates/mega-evm", "crates/system-contracts"]
+members = ["crates/mega-evm", "crates/system-contracts"]
 default-members = ["crates/mega-evm"]
 exclude = []
 

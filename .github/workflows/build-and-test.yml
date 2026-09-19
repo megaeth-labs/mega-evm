@@ -46,8 +46,7 @@ jobs:
       - name: Build
         run: cargo build
       - name: Run Test
-        # The differential harness has its own job (differential.yml).
-        run: cargo test --workspace --exclude mega-differential
+        run: cargo test --workspace
 
   no-std:
     runs-on: ubuntu-24.04

@@ -6,8 +6,7 @@ name: Execution-spec tests
 # checks them against the numbers pinned below.
 #
 # An interim gate until the state-test tool is ported to Satin. It checks the fork MegaEvm runs
-# on, not MegaEvm; MegaEvm meets execution-spec scenarios in the differential harness
-# (crates/mega-differential/scenarios/eest). Not a required check.
+# on, not MegaEvm. Not a required check.
 
 on:
   workflow_dispatch:
