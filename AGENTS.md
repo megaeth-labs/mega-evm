@@ -33,7 +33,7 @@ cargo fmt --all --check
 cargo clippy --workspace --lib --examples --tests --benches --all-features --locked
 cargo sort --check --workspace --grouped --order package,workspace,lints,profile,bin,benches,dependencies,dev-dependencies,features
 
-# Benchmarks: `transact` (MegaEvm next to op-revm), `corpus` (a slice of the differential corpus), `factory` (EVM construction)
+# Benchmarks: `transact` (MegaEvm next to op-revm), `corpus` (JSON scenarios, a bench input), `factory` (EVM construction)
 cargo bench -p mega-evm --bench <target>                                  # wall-clock + HTML report
 cargo codspeed build -p mega-evm --bench <target> && cargo codspeed run   # instruction counts (Linux only)
 
