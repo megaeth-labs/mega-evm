@@ -1,4 +1,4 @@
-//! REX6 CREATE/SSTORE error-path coverage for the unified-metering refactor.
+//! REX6 CREATE/CREATE2/SSTORE error-path coverage for the unified-metering refactor.
 //!
 //! The REX6 canonical-metering rewrite of `storage_gas_ext` moved the storage-gas charge of
 //! CREATE (`create_rex6`) and SSTORE behind fresh early-return guards, and split CREATE2 operand
@@ -10,6 +10,9 @@
 //!   `EVMError::Custom`, not silently charge zero storage gas.
 //! - **SSTORE storage-gas DB error** (`sstore`): the zero→non-zero `sstore_set_storage_gas` failure
 //!   must do the same.
+//! - **CREATE2 operand underflow** (`compute_created_address`): a CREATE2 missing its `offset` or
+//!   `length` operand must halt with `StackUnderflow` from the wrapper's own `stack.inspect::<1>()`
+//!   / `inspect::<2>()`, before any memory expansion.
 
 use std::convert::Infallible;
 
@@ -21,11 +24,11 @@ use mega_evm::{
     MegaHaltReason, MegaSpecId, MegaTransaction, MegaTransactionError, SaltEnv,
 };
 use revm::{
-    bytecode::opcode::{CREATE, SSTORE, STOP},
+    bytecode::opcode::{CREATE, CREATE2, SSTORE, STOP},
     context::TxEnv,
 };
 
-use crate::common::{CALLER, CONTRACT};
+use crate::common::{transact_default, CALLER, CONTRACT};
 
 const ONE_ETH: u128 = 1_000_000_000_000_000_000;
 
@@ -133,4 +136,45 @@ fn test_rex6_sstore_salt_error_on_sstore_set_storage_gas() {
         .build();
 
     assert_injected_salt_custom_error(transact_with_failing_salt(MegaSpecId::REX6, code));
+}
+
+fn is_stack_underflow(result: &crate::common::Outcome) -> bool {
+    matches!(&result.result, revm::context::result::ExecutionResult::Halt { reason, .. }
+        if format!("{reason:?}").contains("StackUnderflow"))
+}
+
+/// CREATE2 with only the `value` operand on the stack must halt with `StackUnderflow` from the
+/// wrapper's `stack.inspect::<1>()` (the `offset` operand) inside `compute_created_address`,
+/// before any memory expansion.
+#[test]
+fn test_rex6_create2_missing_offset_stack_underflow() {
+    // One operand on the stack (value); `offset` is absent.
+    let code = BytecodeBuilder::default().push_number(0u64).append(CREATE2).append(STOP).build();
+
+    let db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(10 * ONE_ETH))
+        .account_code(CONTRACT, code);
+    let outcome = transact_default(MegaSpecId::REX6, db);
+
+    assert!(is_stack_underflow(&outcome), "expected StackUnderflow, got {:?}", outcome.result);
+}
+
+/// CREATE2 with only `value` and `offset` on the stack must halt with `StackUnderflow` from the
+/// wrapper's `stack.inspect::<2>()` (the `length` operand) inside `compute_created_address`.
+#[test]
+fn test_rex6_create2_missing_length_stack_underflow() {
+    // Two operands on the stack (offset, value); `length` is absent.
+    let code = BytecodeBuilder::default()
+        .push_number(0u64) // offset
+        .push_number(0u64) // value
+        .append(CREATE2)
+        .append(STOP)
+        .build();
+
+    let db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(10 * ONE_ETH))
+        .account_code(CONTRACT, code);
+    let outcome = transact_default(MegaSpecId::REX6, db);
+
+    assert!(is_stack_underflow(&outcome), "expected StackUnderflow, got {:?}", outcome.result);
 }

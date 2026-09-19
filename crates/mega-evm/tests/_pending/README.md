@@ -26,6 +26,7 @@ Do not add a `_pending/main.rs`.
 
 | Owning mechanism | Tests | From `tests/` | From `src/` | Keep | Rewrite | Undecided |
 |---|---:|---:|---:|---:|---:|---:|
+| the common execution layer | 21 | 21 | 0 | 21 | 0 | 0 |
 | the Satin gas table | 34 | 27 | 7 | 7 | 27 | 0 |
 | SALT pricing | 75 | 64 | 11 | 17 | 58 | 0 |
 | history gas | 28 | 24 | 4 | 4 | 24 | 0 |
@@ -42,7 +43,7 @@ Do not add a `_pending/main.rs`.
 | the block executor | 53 | 23 | 30 | 39 | 14 | 0 |
 | inspector support | 4 | 4 | 0 | 1 | 3 | 0 |
 | — (undecided: D57 preload-warm cold charging, D58 98/100 forwarding) | 7 | 7 | 0 | 0 | 0 | 7 |
-| **Total** | **726** | **603** | **123** | **405** | **293** | **28** |
+| **Total** | **747** | **624** | **123** | **426** | **293** | **28** |
 
 ## Tests ported in place
 
@@ -79,37 +80,35 @@ What the retired `tests/mutation/` rows cited, for the mechanisms that own them.
 | the block executor | 17 | keep | the test gates regenerate |
 | the block executor | 5 | rewrite | single spec / Satin schedule |
 
-## Tests ported into the differential harness
+## Tests parked under the common execution layer
 
-These 21 rows, owned by the test gates, pinned canonical CREATE and CREATE2 behavior; they are scenarios of `crates/mega-differential/scenarios/harness/` now, compared field by field against revm 43, so the counts above are lower than the inventory's by exactly these rows.
-A scenario keeps the transaction of its test; the assertions on compute gas (not a Satin mechanism yet) and on the halt reason of a static callee (which the outer transaction does not expose) are not carried over.
+These 21 rows belong to the test gates in the inventory and pin canonical CREATE and CREATE2 behavior.
+The test gates had turned them into scenarios of a differential harness against revm 43; that harness is maintained outside this repository now, so the rows are parked here again, owed to the common execution layer, and counted under it above.
+6 of them also assert the halt reason of a creation in a static callee: those assertions already run in `tests/satin/static_callee.rs`, under the same test names, and a port of one of those rows carries the rest of its assertions.
 
-| Legacy file | Test | Scenarios |
+| Legacy file | Test | Static-callee halt reason |
 |---|---|---|
-| `rex4/create_safety.rs` | `test_create2_with_oversize_initcode_len_does_not_panic` | `create2_initcode_memory_oog` |
-| `rex5/create2_empty_initcode.rs` | `test_create2_len_zero_offset_zero_succeeds_on_both_specs` | `create2_empty_initcode_offset_zero` |
-| `rex5/create2_empty_initcode.rs` | `test_rex5_create2_len_nonzero_offset_max_still_halts` | `create2_nonempty_initcode_offset_max` |
-| `rex5/create2_empty_initcode.rs` | `test_rex5_create2_len_zero_large_offset_skips_memory_expansion` | `create2_empty_initcode_large_offset` |
-| `rex5/create2_empty_initcode.rs` | `test_rex5_create2_len_zero_offset_max_succeeds` | `create2_empty_initcode_offset_max` |
-| `rex5/create2_empty_initcode.rs` | `test_rex5_create2_len_zero_offset_zero_succeeds` | `create2_empty_initcode_offset_zero` |
-| `rex5/create2_resize_gas_metering.rs` | `test_create2_missing_salt_halts_consistently_across_specs` | `create2_missing_salt` |
-| `rex5/create2_resize_gas_metering.rs` | `test_rex5_create2_with_non_trivial_resize_succeeds` | `create2_initcode_32k` |
-| `rex6/create2_metering_order.rs` | `test_create2_exact_boundary_initcode_length` | `create2_initcode_at_limit`, `create2_initcode_over_limit` |
-| `rex6/create2_metering_order.rs` | `test_create2_missing_salt_consistent_rex5_rex6` | `create2_missing_salt` |
-| `rex6/create2_metering_order.rs` | `test_create2_moderately_oversized_initcode_same_reason_both_specs` | `create2_initcode_600k` |
-| `rex6/create2_metering_order.rs` | `test_create2_oversized_initcode_halts_before_prework_rex6` | `create2_initcode_10mib` |
-| `rex6/create2_metering_order.rs` | `test_create2_oversized_len_unrepresentable_offset_halts_initcode_limit_rex6` | `create2_oversized_initcode_unrepresentable_offset` |
-| `rex6/create2_metering_order.rs` | `test_create2_static_hugely_oversized_initcode_halt_reason` | `create2_static_initcode_10mib` |
-| `rex6/create2_metering_order.rs` | `test_create2_static_missing_operands_halt_reason` | `create2_static_missing_operands` |
-| `rex6/create2_metering_order.rs` | `test_create2_static_oversized_initcode_reports_static_rejection` | `create2_static_initcode_600k` |
-| `rex6/create2_metering_order.rs` | `test_create2_static_zero_length_initcode_reports_static_rejection` | `create2_static_empty_initcode` |
-| `rex6/create2_metering_order.rs` | `test_create2_static_zero_length_low_gas_halt_reason` | `create2_static_empty_initcode_low_gas` |
-| `rex6/create2_metering_order.rs` | `test_create_static_low_gas_halt_reason` | `create_static_low_gas` |
-| `rex6/error_paths.rs` | `test_rex6_create2_missing_length_stack_underflow` | `create2_missing_length` |
-| `rex6/error_paths.rs` | `test_rex6_create2_missing_offset_stack_underflow` | `create2_missing_offset` |
-
-6 of these rows also asserted the halt reason of a static callee, which a scenario cannot compare: the harness compares what the transaction reports, and the inner frame's halt reason is not part of that.
-The common execution layer re-added those assertions in `tests/satin/static_callee.rs`, where they read the halt reason off the callee's frame outcome as its caller receives it.
+| `rex4/create_safety.rs` | `test_create2_with_oversize_initcode_len_does_not_panic` | — |
+| `rex5/create2_empty_initcode.rs` | `test_create2_len_zero_offset_zero_succeeds_on_both_specs` | — |
+| `rex5/create2_empty_initcode.rs` | `test_rex5_create2_len_nonzero_offset_max_still_halts` | — |
+| `rex5/create2_empty_initcode.rs` | `test_rex5_create2_len_zero_large_offset_skips_memory_expansion` | — |
+| `rex5/create2_empty_initcode.rs` | `test_rex5_create2_len_zero_offset_max_succeeds` | — |
+| `rex5/create2_empty_initcode.rs` | `test_rex5_create2_len_zero_offset_zero_succeeds` | — |
+| `rex5/create2_resize_gas_metering.rs` | `test_create2_missing_salt_halts_consistently_across_specs` | — |
+| `rex5/create2_resize_gas_metering.rs` | `test_rex5_create2_with_non_trivial_resize_succeeds` | — |
+| `rex6/create2_metering_order.rs` | `test_create2_exact_boundary_initcode_length` | — |
+| `rex6/create2_metering_order.rs` | `test_create2_missing_salt_consistent_rex5_rex6` | — |
+| `rex6/create2_metering_order.rs` | `test_create2_moderately_oversized_initcode_same_reason_both_specs` | — |
+| `rex6/create2_metering_order.rs` | `test_create2_oversized_initcode_halts_before_prework_rex6` | — |
+| `rex6/create2_metering_order.rs` | `test_create2_oversized_len_unrepresentable_offset_halts_initcode_limit_rex6` | — |
+| `rex6/create2_metering_order.rs` | `test_create2_static_hugely_oversized_initcode_halt_reason` | `tests/satin/static_callee.rs` |
+| `rex6/create2_metering_order.rs` | `test_create2_static_missing_operands_halt_reason` | `tests/satin/static_callee.rs` |
+| `rex6/create2_metering_order.rs` | `test_create2_static_oversized_initcode_reports_static_rejection` | `tests/satin/static_callee.rs` |
+| `rex6/create2_metering_order.rs` | `test_create2_static_zero_length_initcode_reports_static_rejection` | `tests/satin/static_callee.rs` |
+| `rex6/create2_metering_order.rs` | `test_create2_static_zero_length_low_gas_halt_reason` | `tests/satin/static_callee.rs` |
+| `rex6/create2_metering_order.rs` | `test_create_static_low_gas_halt_reason` | `tests/satin/static_callee.rs` |
+| `rex6/error_paths.rs` | `test_rex6_create2_missing_length_stack_underflow` | — |
+| `rex6/error_paths.rs` | `test_rex6_create2_missing_offset_stack_underflow` | — |
 
 ## Tests ported by the common execution layer
 
@@ -173,6 +172,7 @@ Each cell lists `disposition count (mechanism · decision)`.
 | `rex3/system_address.rs` | 2 | keep 2 (detention · D51) |
 | `rex4/access_control.rs` | 48 | keep 46 (the oracle and control contracts); rewrite 2 (detention · D07 (rejected volatile read pays static gas)) |
 | `rex4/beneficiary_detention.rs` | 13 | keep 12 (detention · D08); rewrite 1 (revert-class aborts · D48) |
+| `rex4/create_safety.rs` | 1 | keep 1 (the common execution layer · canonical revm behaviour) |
 | `rex4/deployment.rs` | 2 | rewrite 2 (system contract deployment · deploy at Satin activation) |
 | `rex4/eip7702_delegation_cycle.rs` | 8 | keep 8 (SALT pricing · account inspection on the pricing path) |
 | `rex4/frame_limits.rs` | 20 | keep 10 (the data-size limit · data-size per-frame 98% kept); rewrite 1 (revert-class aborts · D48); undecided 9 (the state-growth and KV limits · D46) |
@@ -183,6 +183,8 @@ Each cell lists `disposition count (mechanism · decision)`.
 | `rex4/storage_call_stipend.rs` | 12 | rewrite 12 (history gas · D14 (separated history-only allowance 160 x CPHB; three leak paths)) |
 | `rex5/apply_pending_changes_gas_budget.rs` | 4 | rewrite 4 (the pre-block system calls · D51 (system source m = 1; the system-call reservoir split)) |
 | `rex5/callcode_storage_gas.rs` | 6 | rewrite 3 (SALT pricing · D12); keep 3 (SALT pricing · pricing-failure propagation) |
+| `rex5/create2_empty_initcode.rs` | 5 | keep 5 (the common execution layer · canonical revm behaviour) |
+| `rex5/create2_resize_gas_metering.rs` | 2 | keep 2 (the common execution layer · canonical behaviour) |
 | `rex5/db_error.rs` | 4 | rewrite 3 (native keyless deployment · native path surfaces DB errors); keep 1 (the system contract interceptors) |
 | `rex5/deposit_caller_accounting.rs` | 7 | rewrite 7 (the system contract interceptors · D16 (kept; must not double-charge with 2780)) |
 | `rex5/deposit_create_storage_gas.rs` | 4 | rewrite 4 (SALT pricing · D12/D37) |
@@ -204,9 +206,10 @@ Each cell lists `disposition count (mechanism · decision)`.
 | `rex5/stipend_accounting.rs` | 6 | rewrite 6 (history gas · D14 (history-only allowance lifecycle)) |
 | `rex5/system_tx_replay.rs` | 12 | keep 12 (the system contract interceptors) |
 | `rex6/beneficiary_detention.rs` | 16 | keep 13 (detention · D08); keep 2 (the data-size limit · D50 write record 40 B); rewrite 1 (the state-growth and KV limits · D45) |
+| `rex6/create2_metering_order.rs` | 11 | keep 11 (the common execution layer · canonical halt reasons; D04 512 KiB boundary) |
 | `rex6/create_frame_accounting.rs` | 1 | keep 1 (SALT pricing) |
 | `rex6/eip7702_authority_accounting.rs` | 18 | rewrite 18 (the state-growth and KV limits · D12/D28/D31/D45 (7702 matrix; SALT pricing for the SALT half)) |
-| `rex6/error_paths.rs` | 2 | keep 2 (SALT pricing) |
+| `rex6/error_paths.rs` | 4 | keep 2 (SALT pricing); keep 2 (the common execution layer · canonical) |
 | `rex6/fee_reward_accounting.rs` | 6 | rewrite 6 (history gas · D50/D56 (tx body constant 310 = 110 + 40 x 5) / D45) |
 | `rex6/frame_local_accounting.rs` | 3 | keep 3 (the data-size limit · LOG base 32 unchanged) |
 | `rex6/keyless_sandbox_hardening.rs` | 3 | rewrite 1 (native keyless deployment · D44 / EIP-6780 native); keep 2 (native keyless deployment · canonical CREATE rules) |

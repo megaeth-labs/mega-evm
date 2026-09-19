@@ -3,8 +3,8 @@
 //! A `CREATE` or `CREATE2` in a static frame halts with `StateChangeDuringStaticCall` before it
 //! reads an operand, sizes its init code or charges anything, as in canonical revm. The
 //! transaction does not expose an inner frame's halt reason, so these read it off the frame's
-//! outcome as the caller receives it. The transactions are the differential corpus's
-//! `create2_static_*` and `create_static_low_gas` scenarios.
+//! outcome as the caller receives it. The transactions are those of the parked tests of the same
+//! names (`tests/_pending/rex6/create2_metering_order.rs`).
 
 use alloy_evm::Evm;
 use alloy_primitives::{address, Address, Bytes, U256};

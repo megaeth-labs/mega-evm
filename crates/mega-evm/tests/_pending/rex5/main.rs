@@ -2,6 +2,8 @@
 
 mod apply_pending_changes_gas_budget;
 mod callcode_storage_gas;
+mod create2_empty_initcode;
+mod create2_resize_gas_metering;
 mod db_error;
 mod deposit_caller_accounting;
 mod deposit_create_storage_gas;
