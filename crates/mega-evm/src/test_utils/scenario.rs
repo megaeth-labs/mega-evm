@@ -467,6 +467,21 @@ mod tests {
         assert_eq!(db.storage(CALLEE, U256::ZERO).unwrap(), U256::from(7));
     }
 
+    /// The database holds every field of every pre-state account.
+    #[test]
+    fn test_database_holds_the_pre_state() {
+        let mut scenario = scenario(vec![]);
+        scenario.pre.get_mut(&CALLEE).unwrap().storage.insert(U256::from(1), U256::from(9));
+        let mut db = scenario.database();
+
+        let caller = db.basic(CALLER).unwrap().unwrap();
+        assert_eq!((caller.nonce, caller.balance), (0, U256::from(10)));
+        let callee = db.basic(CALLEE).unwrap().unwrap();
+        assert_eq!((callee.nonce, callee.balance), (1, U256::ZERO));
+        assert_eq!(callee.code.unwrap().original_bytes(), scenario.pre[&CALLEE].code);
+        assert_eq!(db.storage(CALLEE, U256::from(1)).unwrap(), U256::from(9));
+    }
+
     /// A delegation designator in the pre-state is a delegation, not legacy code that starts
     /// with an invalid opcode.
     #[test]
