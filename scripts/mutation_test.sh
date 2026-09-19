@@ -5,16 +5,33 @@
 #   diff  <base-ref>   Mutate only lines changed vs <base-ref> (PR gate mode).
 #   full               Mutate the whole mega-evm crate (nightly mode; slow).
 #   file  <glob>       Mutate files matching <glob> (local iteration).
+#   infra              Mutate the test gates' own infrastructure (see INFRA_FILES below).
+#
+# `diff`, `full` and `file` run the production scope of .cargo/mutants.toml, which excludes test
+# helpers as noise. `infra` runs the second scope, .cargo/mutants-infra.toml: the scenario runner
+# is helper code by that rule, but the benches and later tests rest on it, so it is mutated on its
+# own.
 #
 # Results land in $OUT_DIR/mutants.out/ (missed.txt, caught.txt, outcomes.json).
 # Run scripts/mutation_gate.py afterwards to score + gate the run.
+#
+# MUTANTS_SHARD=k/n runs only shard k (0-based) of n of whichever mutant set the
+# subcommand selects (cargo-mutants' own --shard), for a diff too large for one
+# job; give each shard its own OUT_DIR and gate each one. See REVIEW.md.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT_DIR="${OUT_DIR:-$ROOT_DIR/target/mutants}"
 SUPPRESS="${SUPPRESS:-$ROOT_DIR/mutants/suppressions.toml}"
 JOBS="${JOBS:-$(nproc)}"
-PKG="mega-evm"
+PKG_ARGS=(--package mega-evm)
+CONFIG_ARGS=()
+
+# The test gates' own executable logic: the scenario runner's transaction conversion and its
+# execute/commit loop.
+INFRA_FILES=(
+    crates/mega-evm/src/test_utils/scenario.rs
+)
 
 cd "$ROOT_DIR"
 
@@ -35,6 +52,9 @@ fi
 EXCLUDE_ARGS=()
 [[ -n "$exclude_re_output" ]] && mapfile -t EXCLUDE_ARGS <<< "$exclude_re_output"
 
+SHARD_ARGS=()
+[[ -n "${MUTANTS_SHARD:-}" ]] && SHARD_ARGS=(--shard "$MUTANTS_SHARD")
+
 run_mutants() {
     rm -rf "$OUT_DIR"
     mkdir -p "$(dirname "$OUT_DIR")" # cargo-mutants creates OUT_DIR itself but not its parents
@@ -43,12 +63,14 @@ run_mutants() {
     # -vV: verbose progress + version banner, for diagnosable CI logs.
     local rc=0
     cargo mutants \
-        --package "$PKG" \
+        "${CONFIG_ARGS[@]}" \
+        "${PKG_ARGS[@]}" \
         --jobs "$JOBS" \
         --output "$OUT_DIR" \
         --no-shuffle \
         -vV \
         "${EXCLUDE_ARGS[@]}" \
+        "${SHARD_ARGS[@]}" \
         "$@" || rc=$?
 
     # cargo-mutants exit codes (https://mutants.rs/exit-codes.html): 0 = all caught,
@@ -86,8 +108,14 @@ case "$cmd" in
         glob="${1:?usage: mutation_test.sh file <glob>}"
         run_mutants -f "$glob"
         ;;
+    infra)
+        CONFIG_ARGS=(--config "$ROOT_DIR/.cargo/mutants-infra.toml")
+        FILE_ARGS=()
+        for file in "${INFRA_FILES[@]}"; do FILE_ARGS+=(-f "$file"); done
+        run_mutants "${FILE_ARGS[@]}" "$@"
+        ;;
     *)
-        echo "usage: mutation_test.sh {diff <base-ref>|full|file <glob>}" >&2
+        echo "usage: mutation_test.sh {diff <base-ref>|full|file <glob>|infra}" >&2
         exit 2
         ;;
 esac

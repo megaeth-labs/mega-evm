@@ -1,506 +1,235 @@
-//! Definitions of the `MegaETH` EVM versions (`SpecId`).
+//! The `MegaETH` EVM spec of the Satin engine (`MegaSpecId`).
 
+#[cfg(not(feature = "std"))]
+use alloc as std;
 use core::{
     fmt::{self, Display},
     str::FromStr,
 };
+use std::string::String;
+
 pub use op_revm::OpSpecId;
-pub use revm::primitives::hardfork::{SpecId as EthSpecId, UnknownHardfork};
+pub use revm::primitives::hardfork::SpecId as EthSpecId;
 use serde::{Deserialize, Serialize};
 
-/// `MegaETH` spec id, defining different versions of the `MegaETH` EVM.
+/// `MegaETH` spec id: the EVM behavior the Satin engine executes.
 ///
-/// Each `MegaETH` EVM version corresponds to a version of the Optimism EVM, which means the
-/// behavior of the `MegaETH` EVM inherits and is customized on top of that version of the Optimism
-/// EVM. Similarly, each Optimism EVM version also corresponds to a Ethereum EVM version. The
-/// corresponding relations are as follows:
-/// - [`SpecId::EQUIVALENCE`] -> [`OpSpecId::ISTHMUS`] -> [`EthSpecId::PRAGUE`]
-/// - [`SpecId::MINI_REX`] -> [`OpSpecId::ISTHMUS`] -> [`EthSpecId::PRAGUE`]
-/// - [`SpecId::MINI_REX_1`] -> [`OpSpecId::ISTHMUS`] -> [`EthSpecId::PRAGUE`]
-/// - [`SpecId::MINI_REX_2`] -> [`OpSpecId::ISTHMUS`] -> [`EthSpecId::PRAGUE`]
-/// - [`SpecId::REX`] -> [`OpSpecId::ISTHMUS`] -> [`EthSpecId::PRAGUE`]
-/// - [`SpecId::REX1`] -> [`OpSpecId::ISTHMUS`] -> [`EthSpecId::PRAGUE`]
-/// - [`SpecId::REX2`] -> [`OpSpecId::ISTHMUS`] -> [`EthSpecId::PRAGUE`]
-/// - [`SpecId::REX3`] -> [`OpSpecId::ISTHMUS`] -> [`EthSpecId::PRAGUE`]
-/// - [`SpecId::REX4`] -> [`OpSpecId::ISTHMUS`] -> [`EthSpecId::PRAGUE`]
-/// - [`SpecId::REX5`] -> [`OpSpecId::ISTHMUS`] -> [`EthSpecId::PRAGUE`]
-/// - [`SpecId::REX6`] -> [`OpSpecId::ISTHMUS`] -> [`EthSpecId::PRAGUE`]
-/// - [`SpecId::REX7`] -> [`OpSpecId::ISTHMUS`] -> [`EthSpecId::PRAGUE`]
+/// Satin is a single-spec engine. The specs of the legacy engine (`Equivalence` through `Rex7`)
+/// are not variants here and never parse to one; they are executed by the legacy engine.
 ///
-/// The `Default` variant tracks the latest spec, which may still be unstable;
-/// callers that need a stable spec must select it explicitly instead of
-/// relying on `Default::default()`.
+/// Each spec runs on top of an Optimism spec, which in turn runs on top of an Ethereum spec:
+/// - [`MegaSpecId::SATIN`] -> [`OpSpecId::KARST`] -> [`EthSpecId::OSAKA`]
+///
+/// The discriminants continue after the legacy ladder (`EQUIVALENCE` = 0 through `REX7` = 11),
+/// so a raw `as u8` of a Satin spec never aliases a legacy one.
 #[repr(u8)]
 #[derive(
     Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize,
 )]
-#[allow(non_camel_case_types, clippy::upper_case_acronyms, missing_docs)]
+#[allow(non_camel_case_types, clippy::upper_case_acronyms)]
 #[non_exhaustive]
 pub enum MegaSpecId {
-    /// The EVM version when no `MegaETH` harfork is enabled. The behavior of the EVM
-    /// should be equivalent to the [`OpSpecId::ISTHMUS`] of the Optimism EVM.
-    EQUIVALENCE,
-    /// The EVM version for the *Mini-Rex* hardfork of `MegaETH`.
-    MINI_REX,
-    /// Alias spec for the `MiniRex1` hardfork: scheduled as its own rung, executes
-    /// [`MegaSpecId::EQUIVALENCE`] behavior (`behavior()` projects there).
-    MINI_REX_1,
-    /// Alias spec for the `MiniRex2` hardfork: scheduled as its own rung, executes
-    /// [`MegaSpecId::MINI_REX`] behavior (`behavior()` projects there).
-    MINI_REX_2,
-    /// The EVM version for the *Rex* hardfork of `MegaETH`.
-    REX,
-    /// The EVM version for the *Rex1* hardfork of `MegaETH`.
-    REX1,
-    /// The EVM version for the *Rex2* hardfork of `MegaETH`.
-    REX2,
-    /// The EVM version for the *Rex3* hardfork of `MegaETH`.
-    REX3,
-    /// The EVM version for the *Rex4* hardfork of `MegaETH`.
-    REX4,
-    /// The EVM version for the *Rex5* hardfork of `MegaETH`.
-    REX5,
-    /// The EVM version for the *Rex6* hardfork of `MegaETH`.
-    REX6,
-    /// The EVM version for the *Rex7* hardfork of `MegaETH`.
+    /// The Satin spec: Karst / Osaka base with EIP-8037 state gas and the EIP-2780 intrinsic
+    /// cost, under a 200M execution cap.
     #[default]
-    REX7,
+    SATIN = 12,
 }
 
-/// String identifiers for `MegaETH` EVM versions.
-#[allow(missing_docs)]
+/// String identifiers of the `MegaETH` specs.
 pub mod name {
-    /// The string identifier for the *Equivalence* version of the `MegaETH` EVM.
-    pub const EQUIVALENCE: &str = "Equivalence";
-    /// The string identifier for the *Mini-Rex* version of the `MegaETH` EVM.
-    pub const MINI_REX: &str = "MiniRex";
-    /// The string identifier for the `MiniRex1` alias spec.
-    pub const MINI_REX_1: &str = "MiniRex1";
-    /// The string identifier for the `MiniRex2` alias spec.
-    pub const MINI_REX_2: &str = "MiniRex2";
-    /// The string identifier for the *Rex* version of the `MegaETH` EVM.
-    pub const REX: &str = "Rex";
-    /// The string identifier for the *Rex1* version of the `MegaETH` EVM.
-    pub const REX1: &str = "Rex1";
-    /// The string identifier for the *Rex2* version of the `MegaETH` EVM.
-    pub const REX2: &str = "Rex2";
-    /// The string identifier for the *Rex3* version of the `MegaETH` EVM.
-    pub const REX3: &str = "Rex3";
-    /// The string identifier for the *Rex4* version of the `MegaETH` EVM.
-    pub const REX4: &str = "Rex4";
-    /// The string identifier for the *Rex5* version of the `MegaETH` EVM.
-    pub const REX5: &str = "Rex5";
-    /// The string identifier for the *Rex6* version of the `MegaETH` EVM.
-    pub const REX6: &str = "Rex6";
-    /// The string identifier for the *Rex7* version of the `MegaETH` EVM.
-    pub const REX7: &str = "Rex7";
+    /// The string identifier of [`MegaSpecId::SATIN`](super::MegaSpecId::SATIN).
+    pub const SATIN: &str = "Satin";
 }
+
+/// The string identifiers of the legacy engine's specs.
+///
+/// Parsing one of them fails with [`ParseMegaSpecError::Legacy`]: the Satin engine does not
+/// execute legacy specs, and a legacy name is never mapped to a Satin spec.
+pub const LEGACY_SPEC_NAMES: &[&str] = &[
+    "Equivalence",
+    "MiniRex",
+    "MiniRex1",
+    "MiniRex2",
+    "Rex",
+    "Rex1",
+    "Rex2",
+    "Rex3",
+    "Rex4",
+    "Rex5",
+    "Rex6",
+    "Rex7",
+];
 
 impl MegaSpecId {
-    /// Every spec in the progression, oldest first.
-    ///
-    /// The single point to enumerate specs from: sweeps and tables that list specs by hand
-    /// drift silently when a variant is added. Completeness is enforced in two steps —
-    /// introducing a variant is a compile error in `ladder_index`'s exhaustive match (and the
-    /// `is_ladder_prefix` const assertion ties each entry here to its ladder position), and
-    /// `test_all_ends_at_the_latest_spec` fails until the new spec is appended here.
-    pub const ALL: &'static [Self] = &[
-        Self::EQUIVALENCE,
-        Self::MINI_REX,
-        Self::MINI_REX_1,
-        Self::MINI_REX_2,
-        Self::REX,
-        Self::REX1,
-        Self::REX2,
-        Self::REX3,
-        Self::REX4,
-        Self::REX5,
-        Self::REX6,
-        Self::REX7,
-    ];
+    /// Every spec, oldest first.
+    pub const ALL: &'static [Self] = &[Self::SATIN];
 
-    /// Converts the [`SpecId`] into its corresponding [`EthSpecId`].
+    /// The Optimism spec this spec runs on.
+    pub const fn into_op_spec(self) -> OpSpecId {
+        match self {
+            Self::SATIN => OpSpecId::KARST,
+        }
+    }
+
+    /// The Ethereum spec this spec runs on.
     pub const fn into_eth_spec(self) -> EthSpecId {
         self.into_op_spec().into_eth_spec()
     }
 
-    /// Converts the [`SpecId`] into its corresponding [`OpSpecId`].
-    pub const fn into_op_spec(self) -> OpSpecId {
+    /// The string identifier of this spec.
+    pub const fn name(self) -> &'static str {
         match self {
-            Self::MINI_REX |
-            Self::MINI_REX_1 |
-            Self::MINI_REX_2 |
-            Self::EQUIVALENCE |
-            Self::REX |
-            Self::REX1 |
-            Self::REX2 |
-            Self::REX3 |
-            Self::REX4 |
-            Self::REX5 |
-            Self::REX6 |
-            Self::REX7 => OpSpecId::ISTHMUS,
+            Self::SATIN => name::SATIN,
         }
     }
+}
 
-    /// The behavior this spec executes: alias specs project to the spec whose behavior they
-    /// reuse; every other spec is its own behavior.
-    ///
-    /// The projection must stay flat — every target is a concrete spec at or below the
-    /// projecting rung, never another alias — which the `is_flat_projection` const assertion
-    /// below pins at compile time.
-    pub const fn behavior(self) -> Self {
+/// Error returned when a string does not name a Satin spec.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ParseMegaSpecError {
+    /// The string names a spec of the legacy engine.
+    Legacy(String),
+    /// The string names no known spec.
+    Unknown,
+}
+
+impl Display for ParseMegaSpecError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::MINI_REX_1 => Self::EQUIVALENCE,
-            Self::MINI_REX_2 => Self::MINI_REX,
-            other => other,
-        }
-    }
-
-    /// Whether this spec is an alias — a rung whose behavior belongs to another spec.
-    /// Derived from [`behavior`](Self::behavior), so a future alias needs only its projection
-    /// arm; there is no second list to extend.
-    pub const fn is_alias(self) -> bool {
-        self.behavior() as u8 != self as u8
-    }
-
-    /// Returns `true` if `other`'s BEHAVIOR is enabled under `self` — the gate for execution
-    /// semantics. Both sides project through [`behavior`](Self::behavior) first, so an alias
-    /// spec enables exactly what its behavior target enables (`MINI_REX_1` does NOT enable
-    /// `MINI_REX`).
-    pub const fn is_enabled(self, other: Self) -> bool {
-        other.behavior() as u8 <= self.behavior() as u8
-    }
-
-    /// Returns `true` if the ladder has REACHED `other`'s rung — the gate for one-way chain
-    /// setup. Position comparison, no behavior projection: during an alias window the ladder
-    /// stands above the specs it rolled back from, so their setup stays in place.
-    pub const fn reaches(self, other: Self) -> bool {
-        other as u8 <= self as u8
-    }
-}
-
-/// Position on the spec progression, 0 = `EQUIVALENCE`.
-///
-/// Not an API — the `u8` discriminant already carries the ordinal. This exists to be an
-/// exhaustive match: introducing a spec fails compilation here until the variant is placed,
-/// and the const assertion below fails until [`MegaSpecId::ALL`] lists it at that position.
-const fn ladder_index(spec: MegaSpecId) -> usize {
-    match spec {
-        MegaSpecId::EQUIVALENCE => 0,
-        MegaSpecId::MINI_REX => 1,
-        MegaSpecId::MINI_REX_1 => 2,
-        MegaSpecId::MINI_REX_2 => 3,
-        MegaSpecId::REX => 4,
-        MegaSpecId::REX1 => 5,
-        MegaSpecId::REX2 => 6,
-        MegaSpecId::REX3 => 7,
-        MegaSpecId::REX4 => 8,
-        MegaSpecId::REX5 => 9,
-        MegaSpecId::REX6 => 10,
-        MegaSpecId::REX7 => 11,
-    }
-}
-
-/// Whether `list` is a prefix of the spec ladder: entry `i` is exactly the spec at ladder
-/// position `i` — in order, without gaps, starting from `EQUIVALENCE`.
-///
-/// Shared by the compile-time assertion on [`MegaSpecId::ALL`] below and by the test that
-/// feeds it malformed lists, so the checker itself is exercised — a weakened guard here would
-/// otherwise pass silently, since the real `ALL` always satisfies the property it checks.
-const fn is_ladder_prefix(list: &[MegaSpecId]) -> bool {
-    let mut i = 0;
-    while i < list.len() {
-        if ladder_index(list[i]) != i {
-            return false;
-        }
-        i += 1;
-    }
-    true
-}
-
-const _: () = assert!(
-    is_ladder_prefix(MegaSpecId::ALL),
-    "MegaSpecId::ALL must list every spec in ladder order, without gaps"
-);
-
-/// The target `spec` projects to under a behavior `table` of `(spec, target)` pairs; a spec
-/// absent from the table is its own target, mirroring [`MegaSpecId::behavior`]'s identity arm.
-const fn project(table: &[(MegaSpecId, MegaSpecId)], spec: MegaSpecId) -> MegaSpecId {
-    let mut i = 0;
-    while i < table.len() {
-        if table[i].0 as u8 == spec as u8 {
-            return table[i].1;
-        }
-        i += 1;
-    }
-    spec
-}
-
-/// Whether a behavior table is flat: every target is a fixed point of the table and sits at
-/// or below the spec projecting onto it.
-///
-/// The fixed-point check rejects chains and cycles in one property — a chain `A→B→C` fails
-/// because `B`'s own target is `C`, a cycle `A→B→A` because `B` projects back to `A` — either
-/// way [`MegaSpecId::behavior`]'s single-step lookup would silently resolve half-way. The
-/// downward check rejects an alias projecting upward, which would execute semantics whose
-/// one-way setup (gated by [`MegaSpecId::reaches`], a position below the target's rung) never
-/// ran.
-///
-/// The table is passed as data so the checker can be fed malformed shapes: the compile-time
-/// assertion below checks the real projection, and the test exercises the rejection cases the
-/// real table can never produce — a weakened guard here would otherwise pass silently.
-const fn is_flat_projection(table: &[(MegaSpecId, MegaSpecId)]) -> bool {
-    let mut i = 0;
-    while i < table.len() {
-        let (spec, target) = table[i];
-        if project(table, target) as u8 != target as u8 {
-            return false;
-        }
-        if target as u8 > spec as u8 {
-            return false;
-        }
-        // A key that appears twice would make `project` ambiguous (first match wins);
-        // reject the table outright rather than trusting the lookup order.
-        let mut j = 0;
-        while j < i {
-            if table[j].0 as u8 == spec as u8 {
-                return false;
+            Self::Legacy(name) => {
+                write!(f, "{name} is a spec of the legacy engine; Satin does not execute it")
             }
-            j += 1;
-        }
-        i += 1;
-    }
-    true
-}
-
-/// [`MegaSpecId::behavior`] as data: every spec in [`MegaSpecId::ALL`] paired with its
-/// projection target.
-const fn behavior_table() -> [(MegaSpecId, MegaSpecId); MegaSpecId::ALL.len()] {
-    let mut table = [(MegaSpecId::EQUIVALENCE, MegaSpecId::EQUIVALENCE); MegaSpecId::ALL.len()];
-    let mut i = 0;
-    while i < table.len() {
-        table[i] = (MegaSpecId::ALL[i], MegaSpecId::ALL[i].behavior());
-        i += 1;
-    }
-    table
-}
-
-const _: () = {
-    let table = behavior_table();
-    assert!(
-        is_flat_projection(&table),
-        "behavior() targets must be concrete specs at or below the projecting rung"
-    );
-};
-
-impl From<MegaSpecId> for &'static str {
-    /// Converts the [`SpecId`] into its corresponding string identifier.
-    fn from(spec_id: MegaSpecId) -> Self {
-        match spec_id {
-            MegaSpecId::EQUIVALENCE => name::EQUIVALENCE,
-            MegaSpecId::MINI_REX => name::MINI_REX,
-            MegaSpecId::MINI_REX_1 => name::MINI_REX_1,
-            MegaSpecId::MINI_REX_2 => name::MINI_REX_2,
-            MegaSpecId::REX => name::REX,
-            MegaSpecId::REX1 => name::REX1,
-            MegaSpecId::REX2 => name::REX2,
-            MegaSpecId::REX3 => name::REX3,
-            MegaSpecId::REX4 => name::REX4,
-            MegaSpecId::REX5 => name::REX5,
-            MegaSpecId::REX6 => name::REX6,
-            MegaSpecId::REX7 => name::REX7,
+            Self::Unknown => f.write_str("unknown MegaETH spec name"),
         }
     }
 }
+
+impl core::error::Error for ParseMegaSpecError {}
 
 impl FromStr for MegaSpecId {
-    type Err = UnknownHardfork;
+    type Err = ParseMegaSpecError;
 
-    /// Converts the string identifier into its corresponding [`SpecId`].
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            name::EQUIVALENCE => Ok(Self::EQUIVALENCE),
-            name::MINI_REX => Ok(Self::MINI_REX),
-            name::MINI_REX_1 => Ok(Self::MINI_REX_1),
-            name::MINI_REX_2 => Ok(Self::MINI_REX_2),
-            name::REX => Ok(Self::REX),
-            name::REX1 => Ok(Self::REX1),
-            name::REX2 => Ok(Self::REX2),
-            name::REX3 => Ok(Self::REX3),
-            name::REX4 => Ok(Self::REX4),
-            name::REX5 => Ok(Self::REX5),
-            name::REX6 => Ok(Self::REX6),
-            name::REX7 => Ok(Self::REX7),
-            _ => Err(UnknownHardfork),
+            name::SATIN => Ok(Self::SATIN),
+            legacy if LEGACY_SPEC_NAMES.contains(&legacy) => {
+                Err(ParseMegaSpecError::Legacy(legacy.into()))
+            }
+            _ => Err(ParseMegaSpecError::Unknown),
         }
     }
 }
 
-impl From<MegaSpecId> for revm::primitives::hardfork::SpecId {
-    /// Converts the [`SpecId`] into its corresponding [`EthSpecId`].
-    fn from(spec_id: MegaSpecId) -> Self {
-        spec_id.into_eth_spec()
+impl From<MegaSpecId> for &'static str {
+    fn from(spec: MegaSpecId) -> Self {
+        spec.name()
     }
 }
 
 impl From<MegaSpecId> for OpSpecId {
-    /// Converts the [`SpecId`] into its corresponding [`OpSpecId`].
-    fn from(spec_id: MegaSpecId) -> Self {
-        spec_id.into_op_spec()
+    fn from(spec: MegaSpecId) -> Self {
+        spec.into_op_spec()
+    }
+}
+
+impl From<MegaSpecId> for EthSpecId {
+    fn from(spec: MegaSpecId) -> Self {
+        spec.into_eth_spec()
     }
 }
 
 impl Display for MegaSpecId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let s: &'static str = (*self).into();
-        write!(f, "{}", s)
+        f.write_str(self.name())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use core::str::FromStr;
 
-    /// The one golden spec table: every spec with its string identifier and its pinned ladder
-    /// position. The spec column must be exactly [`MegaSpecId::ALL`] (asserted in the
-    /// round-trip test); the name and position columns stay hand-written — deriving either
-    /// from the code under test would make its check vacuous.
-    const ALL_SPECS: [(MegaSpecId, &str, u8); 12] = [
-        (MegaSpecId::EQUIVALENCE, name::EQUIVALENCE, 0),
-        (MegaSpecId::MINI_REX, name::MINI_REX, 1),
-        (MegaSpecId::MINI_REX_1, name::MINI_REX_1, 2),
-        (MegaSpecId::MINI_REX_2, name::MINI_REX_2, 3),
-        (MegaSpecId::REX, name::REX, 4),
-        (MegaSpecId::REX1, name::REX1, 5),
-        (MegaSpecId::REX2, name::REX2, 6),
-        (MegaSpecId::REX3, name::REX3, 7),
-        (MegaSpecId::REX4, name::REX4, 8),
-        (MegaSpecId::REX5, name::REX5, 9),
-        (MegaSpecId::REX6, name::REX6, 10),
-        (MegaSpecId::REX7, name::REX7, 11),
+    /// Every spec name of the legacy engine, written out by hand so the rejection check does
+    /// not read the list it is checking.
+    const LEGACY_NAMES: [&str; 12] = [
+        "Equivalence",
+        "MiniRex",
+        "MiniRex1",
+        "MiniRex2",
+        "Rex",
+        "Rex1",
+        "Rex2",
+        "Rex3",
+        "Rex4",
+        "Rex5",
+        "Rex6",
+        "Rex7",
     ];
 
     #[test]
     fn test_spec_names_roundtrip_and_display() {
-        // The spec column must be exactly `MegaSpecId::ALL`, so a newly introduced spec cannot
-        // be forgotten here.
-        assert!(ALL_SPECS.iter().map(|(spec, _, _)| *spec).eq(MegaSpecId::ALL.iter().copied()));
-
-        for (spec, expected_name, _) in ALL_SPECS {
-            assert_eq!(<&'static str>::from(spec), expected_name);
-            assert_eq!(MegaSpecId::from_str(expected_name).unwrap(), spec);
-            assert_eq!(spec.to_string(), expected_name);
-        }
-
-        assert_eq!(MegaSpecId::default(), MegaSpecId::REX7);
-        assert_eq!(MegaSpecId::from_str("unknown"), Err(UnknownHardfork));
+        assert_eq!(MegaSpecId::SATIN.to_string(), "Satin");
+        assert_eq!(<&'static str>::from(MegaSpecId::SATIN), "Satin");
+        assert_eq!(MegaSpecId::from_str("Satin"), Ok(MegaSpecId::SATIN));
+        assert_eq!(MegaSpecId::from_str("satin"), Err(ParseMegaSpecError::Unknown));
+        assert_eq!(MegaSpecId::from_str(""), Err(ParseMegaSpecError::Unknown));
     }
 
-    /// The completeness anchor for [`MegaSpecId::ALL`]: `Default` tracks the latest spec (its
-    /// own assertion above pins which), so a variant added without extending `ALL` fails here
-    /// once the default advances. The const assertion on `ladder_index` covers order and gaps;
-    /// this covers the tail.
+    #[test]
+    fn test_legacy_spec_names_are_rejected_not_mapped() {
+        for name in LEGACY_NAMES {
+            assert_eq!(
+                MegaSpecId::from_str(name),
+                Err(ParseMegaSpecError::Legacy(name.into())),
+                "{name} must not parse to a Satin spec"
+            );
+        }
+        assert_eq!(LEGACY_SPEC_NAMES, LEGACY_NAMES.as_slice());
+    }
+
+    #[test]
+    fn test_parse_error_names_the_legacy_engine() {
+        let err = MegaSpecId::from_str("Rex6").unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "Rex6 is a spec of the legacy engine; Satin does not execute it"
+        );
+        assert_eq!(
+            MegaSpecId::from_str("Rex8").unwrap_err().to_string(),
+            "unknown MegaETH spec name"
+        );
+    }
+
+    #[test]
+    fn test_serde_uses_the_variant_name() {
+        assert_eq!(serde_json::to_string(&MegaSpecId::SATIN).unwrap(), "\"SATIN\"");
+        assert_eq!(serde_json::from_str::<MegaSpecId>("\"SATIN\"").unwrap(), MegaSpecId::SATIN);
+        for legacy in ["\"REX6\"", "\"REX7\"", "\"EQUIVALENCE\"", "\"Satin\""] {
+            assert!(
+                serde_json::from_str::<MegaSpecId>(legacy).is_err(),
+                "{legacy} must not deserialize"
+            );
+        }
+    }
+
     #[test]
     fn test_all_ends_at_the_latest_spec() {
+        assert_eq!(MegaSpecId::ALL, &[MegaSpecId::SATIN]);
         assert_eq!(*MegaSpecId::ALL.last().unwrap(), MegaSpecId::default());
     }
 
+    /// A raw `as u8` of a Satin spec never aliases a legacy rung (`EQUIVALENCE` = 0 through
+    /// `REX7` = 11).
     #[test]
-    fn test_ladder_positions_are_pinned() {
-        // A downstream variant-index codec (bincode-style) of `MegaSpecId` — or of a
-        // container holding it — silently misreads old data if discriminants renumber.
-        // Pinning every position turns any future renumbering into a loud diff on the
-        // golden table, where the review attention is.
-        assert_eq!(ALL_SPECS.len(), MegaSpecId::ALL.len());
-        for (spec, _, position) in ALL_SPECS {
-            assert_eq!(spec as u8, position, "{spec:?} moved on the ladder");
-        }
+    fn test_discriminant_continues_after_the_legacy_ladder() {
+        assert_eq!(MegaSpecId::SATIN as u8, 12);
     }
 
     #[test]
-    fn test_is_ladder_prefix_rejects_malformed_lists() {
-        assert!(is_ladder_prefix(MegaSpecId::ALL));
-        assert!(is_ladder_prefix(&[]), "the empty prefix is a ladder prefix");
-        assert!(is_ladder_prefix(&[MegaSpecId::EQUIVALENCE, MegaSpecId::MINI_REX]));
-
-        assert!(
-            !is_ladder_prefix(&[MegaSpecId::MINI_REX, MegaSpecId::EQUIVALENCE]),
-            "reordered entries must be rejected"
-        );
-        assert!(
-            !is_ladder_prefix(&[MegaSpecId::MINI_REX]),
-            "a list not starting at the ladder base must be rejected"
-        );
-        assert!(
-            !is_ladder_prefix(&[MegaSpecId::EQUIVALENCE, MegaSpecId::REX]),
-            "a skipped rung must be rejected"
-        );
-    }
-
-    #[test]
-    fn test_is_flat_projection_rejects_malformed_tables() {
-        assert!(is_flat_projection(&behavior_table()));
-        assert!(is_flat_projection(&[]), "the empty table is flat");
-        assert!(
-            is_flat_projection(&[(MegaSpecId::MINI_REX_1, MegaSpecId::EQUIVALENCE)]),
-            "a target absent from the table projects to itself"
-        );
-
-        assert!(
-            !is_flat_projection(&[
-                (MegaSpecId::MINI_REX_1, MegaSpecId::EQUIVALENCE),
-                (MegaSpecId::MINI_REX_2, MegaSpecId::MINI_REX_1),
-            ]),
-            "a chain — an alias targeting another alias — must be rejected"
-        );
-        assert!(
-            !is_flat_projection(&[
-                (MegaSpecId::EQUIVALENCE, MegaSpecId::MINI_REX),
-                (MegaSpecId::MINI_REX, MegaSpecId::EQUIVALENCE),
-            ]),
-            "a projection cycle must be rejected"
-        );
-        assert!(
-            !is_flat_projection(&[(MegaSpecId::MINI_REX, MegaSpecId::REX)]),
-            "an alias projecting to a higher rung must be rejected"
-        );
-        assert!(
-            !is_flat_projection(&[
-                (MegaSpecId::MINI_REX_1, MegaSpecId::EQUIVALENCE),
-                (MegaSpecId::MINI_REX_1, MegaSpecId::MINI_REX),
-            ]),
-            "a duplicate key must be rejected — it would make the projection ambiguous"
-        );
-    }
-
-    #[test]
-    fn test_all_specs_map_to_isthmus_and_prague() {
-        for spec in MegaSpecId::ALL.iter().copied() {
-            assert_eq!(spec.into_op_spec(), OpSpecId::ISTHMUS);
-            assert_eq!(spec.into_eth_spec(), EthSpecId::PRAGUE);
-            assert_eq!(revm::primitives::hardfork::SpecId::from(spec), EthSpecId::PRAGUE);
-            assert_eq!(OpSpecId::from(spec), OpSpecId::ISTHMUS);
-        }
-    }
-
-    #[test]
-    fn test_spec_order_is_backward_compatible() {
-        assert!(MegaSpecId::REX4.is_enabled(MegaSpecId::REX3));
-        assert!(MegaSpecId::REX4.is_enabled(MegaSpecId::EQUIVALENCE));
-        assert!(MegaSpecId::MINI_REX.is_enabled(MegaSpecId::EQUIVALENCE));
-        assert!(MegaSpecId::REX2.is_enabled(MegaSpecId::REX1));
-        assert!(MegaSpecId::REX5.is_enabled(MegaSpecId::REX4));
-        assert!(MegaSpecId::REX5.is_enabled(MegaSpecId::EQUIVALENCE));
-        assert!(MegaSpecId::REX6.is_enabled(MegaSpecId::REX5));
-        assert!(MegaSpecId::REX6.is_enabled(MegaSpecId::EQUIVALENCE));
-        assert!(MegaSpecId::REX7.is_enabled(MegaSpecId::REX6));
-        assert!(MegaSpecId::REX7.is_enabled(MegaSpecId::EQUIVALENCE));
-
-        assert!(!MegaSpecId::EQUIVALENCE.is_enabled(MegaSpecId::MINI_REX));
-        assert!(!MegaSpecId::REX1.is_enabled(MegaSpecId::REX2));
-        assert!(!MegaSpecId::REX3.is_enabled(MegaSpecId::REX4));
-        assert!(!MegaSpecId::REX4.is_enabled(MegaSpecId::REX5));
-        assert!(!MegaSpecId::REX5.is_enabled(MegaSpecId::REX6));
-        assert!(!MegaSpecId::REX6.is_enabled(MegaSpecId::REX7));
+    fn test_all_specs_map_to_karst_and_osaka() {
+        assert_eq!(MegaSpecId::SATIN.into_op_spec(), OpSpecId::KARST);
+        assert_eq!(MegaSpecId::SATIN.into_eth_spec(), EthSpecId::OSAKA);
+        assert_eq!(OpSpecId::from(MegaSpecId::SATIN), OpSpecId::KARST);
+        assert_eq!(EthSpecId::from(MegaSpecId::SATIN), EthSpecId::OSAKA);
     }
 }

@@ -1,45 +1,52 @@
+use alloy_evm::{Database, Evm};
+use alloy_op_evm::OpTx;
 use alloy_primitives::{Address, Bytes, TxKind, U256};
-use core::fmt::Debug;
-use revm::{
-    context::{
-        result::{EVMError, ResultAndState},
-        TxEnv,
-    },
-    Database,
+use op_revm::{L1BlockInfo, OpTransaction};
+use revm::context::{
+    result::{EVMError, ResultAndState},
+    TxEnv,
 };
 
-use crate::{
-    MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction, MegaTransactionError,
-};
+use crate::{MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransactionError};
 
-/// Executes a transaction on the EVM.
-pub fn transact<DB>(
+/// L1 block info with zero operator fee, so a transaction pays no L1-side fee.
+pub fn zero_fee_l1_block_info() -> L1BlockInfo {
+    L1BlockInfo {
+        operator_fee_scalar: Some(U256::ZERO),
+        operator_fee_constant: Some(U256::ZERO),
+        ..Default::default()
+    }
+}
+
+/// Wraps `tx` as a non-deposit OP transaction with an empty enveloped encoding, so its L1 data
+/// fee is zero.
+pub fn op_transaction(tx: TxEnv) -> OpTransaction<TxEnv> {
+    OpTransaction { base: tx, enveloped_tx: Some(Bytes::new()), ..Default::default() }
+}
+
+/// Executes one transaction on a fresh [`MegaEvm`] over `db` and returns its result and state
+/// without committing.
+///
+/// The L1 fees are zero (see [`zero_fee_l1_block_info`] and [`op_transaction`]) and so is the
+/// gas price, so the caller needs no balance beyond `value`. A `gas_limit` above the execution
+/// cap puts the excess into the state-gas reservoir.
+pub fn transact<DB: Database>(
     spec: MegaSpecId,
     db: DB,
     caller: Address,
     callee: Option<Address>,
     data: Bytes,
     value: U256,
-) -> Result<ResultAndState<MegaHaltReason>, EVMError<DB::Error, MegaTransactionError>>
-where
-    DB: Database + Debug,
-    DB::Error: Send + Sync + Debug + 'static,
-{
-    let mut context = MegaContext::new(db, spec);
-    context.modify_chain(|chain| {
-        chain.operator_fee_scalar = Some(U256::from(0));
-        chain.operator_fee_constant = Some(U256::from(0));
-    });
-    let mut evm = MegaEvm::new(context);
+    gas_limit: u64,
+) -> Result<ResultAndState<MegaHaltReason>, EVMError<DB::Error, MegaTransactionError>> {
+    let context = MegaContext::new(db, spec).with_chain(zero_fee_l1_block_info());
     let tx = TxEnv {
         caller,
         kind: callee.map_or(TxKind::Create, TxKind::Call),
         data,
         value,
-        gas_limit: 1000000000000000000,
+        gas_limit,
         ..Default::default()
     };
-    let mut tx = MegaTransaction::new(tx);
-    tx.enveloped_tx = Some(Bytes::new());
-    alloy_evm::Evm::transact_raw(&mut evm, tx)
+    MegaEvm::new(context).transact_raw(OpTx(op_transaction(tx)))
 }

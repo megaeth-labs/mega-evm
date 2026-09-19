@@ -1,179 +1,27 @@
-use alloy_evm::InvalidTxError;
-use revm::state::AccountInfo;
+//! What a block counts of its transactions' gas.
 
-use crate::MegaTransactionOutcome;
+use crate::MegaGasUsage;
 
-/// The execution outcome of a transaction in `MegaETH`.
+/// A block's gas, on the three ledgers its transactions spend on.
 ///
-/// This struct contains additional information about the transaction execution on top of the
-/// standard EVM's execution result and state.
-#[derive(Debug, Clone, derive_more::Deref, derive_more::DerefMut)]
-pub struct BlockMegaTransactionOutcome<T> {
-    /// The transaction.
-    pub tx: T,
-    /// The transaction size in bytes.
-    pub tx_size: u64,
-    /// The transaction data availability size in bytes.
-    pub da_size: u64,
-    /// The depositor account info.
-    pub depositor: Option<AccountInfo>,
-    /// The transaction execution outcome.
-    #[deref]
-    #[deref_mut]
-    pub inner: MegaTransactionOutcome,
+/// The block executor fills it transaction by transaction with [`record`](Self::record) and
+/// holds each counter to its own block limit.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BlockGasCounters {
+    /// Regular gas: each transaction's regular ledger, at least its EIP-7623 floor.
+    pub execution: u64,
+    /// State gas.
+    pub state: u64,
+    /// History gas.
+    pub history: u64,
 }
 
-/// Error type for additional reasons of an invalid transaction. If one transaction is invalid, it
-/// will never be able to be included in a block and should be discarded.
-#[derive(Debug, Clone, thiserror::Error)]
-pub enum MegaTxLimitExceededError {
-    /// Transaction gas limit exceeded.
-    #[error("Transaction gas limit exceeded: tx_gas_limit={tx_gas_limit} > limit={limit}")]
-    TransactionGasLimit {
-        /// Transaction gas limit used by current transaction
-        tx_gas_limit: u64,
-        /// Transaction gas limit limit
-        limit: u64,
-    },
-    /// Transaction encode size limit exceeded.
-    #[error("Transaction encode size limit exceeded: tx_size={tx_size} > limit={limit}")]
-    TransactionEncodeSizeLimit {
-        /// Transaction encode size used by current transaction
-        tx_size: u64,
-        /// Transaction encode size limit
-        limit: u64,
-    },
-
-    /// Transaction data availability size limit exceeded.
-    #[error(
-        "Transaction data availability size limit exceeded: da_size={da_size} > limit={limit}"
-    )]
-    DataAvailabilitySizeLimit {
-        /// Data availability size used by current transaction
-        da_size: u64,
-        /// Data availability size limit
-        limit: u64,
-    },
-}
-
-impl MegaTxLimitExceededError {
-    /// The amount of the resource used by the current transaction.
-    pub fn usage(&self) -> u64 {
-        match self {
-            Self::TransactionGasLimit { tx_gas_limit, .. } => *tx_gas_limit,
-            Self::TransactionEncodeSizeLimit { tx_size, .. } => *tx_size,
-            Self::DataAvailabilitySizeLimit { da_size, .. } => *da_size,
-        }
-    }
-
-    /// The limit of the resource.
-    pub fn limit(&self) -> u64 {
-        match self {
-            Self::TransactionGasLimit { limit, .. } |
-            Self::TransactionEncodeSizeLimit { limit, .. } |
-            Self::DataAvailabilitySizeLimit { limit, .. } => *limit,
-        }
-    }
-}
-
-impl InvalidTxError for MegaTxLimitExceededError {
-    fn is_nonce_too_low(&self) -> bool {
-        false
-    }
-}
-
-/// Error type for block-level limit exceeded. These errors are thrown when the block has already
-/// exceeded its limit (from a previous transaction) and no more transactions can be added.
-#[derive(Debug, Clone, thiserror::Error)]
-pub enum MegaBlockLimitExceededError {
-    /// Block transactions data limit reached.
-    #[error("Block transactions data limit reached: block_used={block_used} >= limit={limit}")]
-    TransactionDataLimit {
-        /// Transaction data used by block so far
-        block_used: u64,
-        /// Block transactions data limit
-        limit: u64,
-    },
-
-    /// Block KV update limit reached.
-    #[error("Block KV update limit reached: block_used={block_used} >= limit={limit}")]
-    KVUpdateLimit {
-        /// KV updates used by block so far
-        block_used: u64,
-        /// Block KV update limit
-        limit: u64,
-    },
-
-    /// Block compute gas limit reached.
-    #[error("Block compute gas limit reached: block_used={block_used} >= limit={limit}")]
-    ComputeGasLimit {
-        /// Compute gas used by block so far
-        block_used: u64,
-        /// Block compute gas limit
-        limit: u64,
-    },
-
-    /// Block transactions encode size limit exceeded.
-    #[error("Block transactions encode size limit exceeded: block_used={block_used} + tx_used={tx_used} > limit={limit}")]
-    TransactionEncodeSizeLimit {
-        /// Transaction encode size used by block so far
-        block_used: u64,
-        /// Transaction encode size used by current transaction
-        tx_used: u64,
-        /// Block transactions encode size limit
-        limit: u64,
-    },
-
-    /// Block data availability size limit exceeded.
-    #[error("Block data availability size limit exceeded: block_used={block_used} + tx_used={tx_used} > limit={limit}")]
-    DataAvailabilitySizeLimit {
-        /// Data availability size used by block so far
-        block_used: u64,
-        /// Data availability size used by current transaction
-        tx_used: u64,
-        /// Block data availability size limit
-        limit: u64,
-    },
-
-    /// Block state growth limit reached.
-    #[error("Block state growth limit reached: block_used={block_used} >= limit={limit}")]
-    StateGrowthLimit {
-        /// State growth used by block so far
-        block_used: u64,
-        /// Block state growth limit
-        limit: u64,
-    },
-}
-
-impl MegaBlockLimitExceededError {
-    /// The total amount of the resource used by the block so far.
-    pub fn block_used(&self) -> u64 {
-        match self {
-            Self::TransactionDataLimit { block_used, .. } |
-            Self::KVUpdateLimit { block_used, .. } |
-            Self::ComputeGasLimit { block_used, .. } |
-            Self::TransactionEncodeSizeLimit { block_used, .. } |
-            Self::DataAvailabilitySizeLimit { block_used, .. } |
-            Self::StateGrowthLimit { block_used, .. } => *block_used,
-        }
-    }
-
-    /// The limit of the resource.
-    pub fn limit(&self) -> u64 {
-        match self {
-            Self::TransactionDataLimit { limit, .. } |
-            Self::KVUpdateLimit { limit, .. } |
-            Self::ComputeGasLimit { limit, .. } |
-            Self::TransactionEncodeSizeLimit { limit, .. } |
-            Self::DataAvailabilitySizeLimit { limit, .. } |
-            Self::StateGrowthLimit { limit, .. } => *limit,
-        }
-    }
-}
-
-impl InvalidTxError for MegaBlockLimitExceededError {
-    fn is_nonce_too_low(&self) -> bool {
-        false
+impl BlockGasCounters {
+    /// Adds one transaction's gas.
+    pub fn record(&mut self, gas: &MegaGasUsage) {
+        self.execution = self.execution.saturating_add(gas.block_execution_gas());
+        self.state = self.state.saturating_add(gas.state);
+        self.history = self.history.saturating_add(gas.history);
     }
 }
 
@@ -182,59 +30,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_transaction_limit_error_reports_usage_and_limit() {
-        let cases = [
-            (MegaTxLimitExceededError::TransactionGasLimit { tx_gas_limit: 31, limit: 30 }, 31, 30),
-            (
-                MegaTxLimitExceededError::TransactionEncodeSizeLimit { tx_size: 101, limit: 100 },
-                101,
-                100,
-            ),
-            (
-                MegaTxLimitExceededError::DataAvailabilitySizeLimit { da_size: 11, limit: 10 },
-                11,
-                10,
-            ),
-        ];
-
-        for (error, expected_usage, expected_limit) in cases {
-            assert_eq!(error.usage(), expected_usage);
-            assert_eq!(error.limit(), expected_limit);
-            assert!(!error.is_nonce_too_low());
-        }
+    fn test_block_counters_add_each_ledger() {
+        let mut block = BlockGasCounters::default();
+        let first =
+            MegaGasUsage { regular: 10, state: 20, history: 30, floor: 0, ..Default::default() };
+        let floored =
+            MegaGasUsage { regular: 5, state: 1, history: 2, floor: 50, ..Default::default() };
+        block.record(&first);
+        block.record(&floored);
+        assert_eq!(block, BlockGasCounters { execution: 60, state: 21, history: 32 });
     }
 
     #[test]
-    fn test_block_limit_error_reports_block_usage_and_limit() {
-        let cases = [
-            (MegaBlockLimitExceededError::TransactionDataLimit { block_used: 1, limit: 10 }, 1, 10),
-            (MegaBlockLimitExceededError::KVUpdateLimit { block_used: 2, limit: 11 }, 2, 11),
-            (MegaBlockLimitExceededError::ComputeGasLimit { block_used: 3, limit: 12 }, 3, 12),
-            (
-                MegaBlockLimitExceededError::TransactionEncodeSizeLimit {
-                    block_used: 4,
-                    tx_used: 1,
-                    limit: 13,
-                },
-                4,
-                13,
-            ),
-            (
-                MegaBlockLimitExceededError::DataAvailabilitySizeLimit {
-                    block_used: 5,
-                    tx_used: 1,
-                    limit: 14,
-                },
-                5,
-                14,
-            ),
-            (MegaBlockLimitExceededError::StateGrowthLimit { block_used: 6, limit: 15 }, 6, 15),
-        ];
-
-        for (error, expected_block_used, expected_limit) in cases {
-            assert_eq!(error.block_used(), expected_block_used);
-            assert_eq!(error.limit(), expected_limit);
-            assert!(!error.is_nonce_too_low());
-        }
+    fn test_block_counters_saturate() {
+        let mut block =
+            BlockGasCounters { execution: u64::MAX, state: u64::MAX, history: u64::MAX };
+        block.record(&MegaGasUsage { regular: 1, state: 1, history: 1, ..Default::default() });
+        assert_eq!(
+            block,
+            BlockGasCounters { execution: u64::MAX, state: u64::MAX, history: u64::MAX }
+        );
     }
 }

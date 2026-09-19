@@ -24,7 +24,7 @@ This is the single most important correctness concern in mega-evm.
 - All execution logic must be **deterministic and architecture-independent** — no `mem::transmute`, no native-endian byte conversions, no platform-dependent operations in consensus paths.
 - Pre-block helpers (system contract deploys, pre-exec system calls, etc.) must return `Option<EvmState>` for the block executor to commit — never call `db.commit(...)` directly.
   Even idempotent "no change" paths must return `Some(EvmState)` with a read-only account entry; silently returning `None` drops the account from the stateless witness read set and produces an incomplete proof.
-  See `crates/mega-evm/src/system/AGENTS.md` → `PRE-BLOCK STATE CHANGE CONTRACT`.
+  On `main` the full contract is in `crates/mega-evm/src/system/AGENTS.md` → `PRE-BLOCK STATE CHANGE CONTRACT`; on `satin` the pre-block helpers arrive with the pre-block system calls and the system contract deployments.
   The same applies inside execution: read through the journal (`inspect_account`), never `journal.database.basic(...)`, or the account driving the result is missing from the returned state — and an early halt placed before the sandbox state merge drops that read set entirely.
 - Per-frame gas mechanisms (stipends, adjustments) must handle all frame termination paths: system contract interception, gas rescue on limit exceed, and frame return.
   Missing any path causes gas leakage.
@@ -55,6 +55,7 @@ This is the single most important correctness concern in mega-evm.
 - If a change affects cross-component behavior that cannot be covered by unit tests, suggest e2e tests in the review comment (these may live in the `test-client` repo).
 - For stateful systems (resource-limit trackers, gas-stipend lifecycle), assert state-machine invariants after each transition, not just at the end.
 - Tests under `crates/mega-evm/tests/mutation/` are generated mutation-killing system tests, each keyed to a specific surviving mutant.
+  On the `satin` branch the directory does not exist yet: the legacy killers were keyed to mutants of the legacy sources and were retired, and the Satin sources leave no survivor; the first mechanism whose survivor needs a system-level killer creates it, with the conventions of `main`'s `crates/mega-evm/tests/mutation/main.rs`.
   Their comments — especially the `file:line:col` mutation-location references — must be kept up to date when the referenced source moves.
   Flag any PR that shifts lines in a mutated source file but leaves a now-stale location reference (or an orphaned/renamed test) in `tests/mutation/`; a reference that no longer points at its mutant defeats the purpose of the linkage.
   These tests should not be hand-edited otherwise — see `crates/mega-evm/tests/mutation/main.rs`.
@@ -73,6 +74,63 @@ This is the single most important correctness concern in mega-evm.
 - **Would this test still pass if the behavior it claims to check regressed?**
   The fixture runners have failed this repeatedly: an exception assertion accepting any `Err`, a setup failure skipping execution, a `zip` letting missing output pass, a duplicate test name silently overwriting, an `unwrap_or(default)` rewriting a contradictory fixture into a valid one, a filename-based skip, an unconditional prune before state-root validation.
   Benchmarks fail it the same way — an unfunded inner call, zero-byte initcode, a discarded inner-call result or an undeployed address means the measured path never runs, and a mock database that cannot fail a lookup cannot test its error path.
+
+## Test gates
+
+These checks guard every change to the Satin engine.
+`lint`, `test`, `no-std` and `require-label` are the required checks on `satin`; the rest inform the review, and the reviewer reads them.
+
+### Differential harness
+
+- The differential harness, which runs JSON scenarios through `MegaEvm` and through stock revm and compares them field by field, is maintained outside this repository.
+- It is not a check on this repository's pull requests.
+- The scenario format it reads (`test_utils::Scenario`) stays in `mega-evm`, where the `corpus` bench reads its own scenarios.
+
+### Execution-spec tests
+
+- No check in this repository runs execution-spec tests on `MegaEvm` itself until the state-test tool is ported to Satin.
+- `.github/workflows/exec-spec.yml` runs the fork's own runner on the execution-spec-test fixtures, at the fork tag `Cargo.lock` pins, and checks the Osaka and Amsterdam executed and skipped counts pinned in the workflow.
+  It checks the fork `MegaEvm` runs on, not `MegaEvm`, and it is not a required check.
+- It runs when `Cargo.toml` or `Cargo.lock` changes (the pin may have moved); a change that moves the pin updates the pinned counts and says why they moved.
+
+### Instruction counts (CodSpeed)
+
+- The bench set is `transact` (`MegaEvm` next to op-revm's `OpEvm`, from an empty transaction to 64-deep calls and loops of storage writes and logs), `corpus` (the JSON scenarios under `benches/scenarios` through `MegaEvm`, a bench input rather than a conformance suite) and `factory` (EVM construction through `MegaEvmFactory`), all in `crates/mega-evm/benches`.
+- `codspeed.yml` runs them under instrumentation on every pull request that touches code and on every push to `satin`; the baseline a pull request is compared with is the latest `satin` push.
+- Read regressions from the CodSpeed report on the pull request (the CodSpeed comment and the `CodSpeed Performance Analysis` check).
+  The regression threshold that fails that check is a setting of the repository's CodSpeed project; it is not recorded in this repository or in the reports CodSpeed posts, so this file does not state a number.
+  The check is not required: a flagged regression is fixed, or acknowledged in CodSpeed with the reason stated on the pull request.
+- `corpus` moves when the semantics or the pricing of its scenarios move; a pricing change that moves it says so on the pull request.
+- Locally, `cargo bench -p mega-evm --bench <target>` proves a bench runs to completion; its wall-clock numbers are not evidence.
+
+### Mutation testing
+
+- The `cargo-mutants gate` job mutates the lines a pull request changes and fails on a surviving mutant that no reviewed suppression covers.
+  Reference point, the pull request that brought the Satin skeleton: 115 mutants, 49 caught, 0 survived, 1 suppressed, 65 unviable, in 7m41s on CI and 4m12s on a 15-core laptop with `JOBS=8`.
+  That population is the diff against `a8f8c7c9`, the last commit of the legacy core, and it is reproduced by `scripts/mutation_test.sh diff a8f8c7c9` followed by `python3 scripts/mutation_gate.py report --results target/mutants/mutants.out --suppressions mutants/suppressions.toml`.
+  Take the numbers from that pair, not from `cargo mutants` on its own: the driver turns the function-scoped suppressions into `--exclude-re` before generation, and the gate filters the line-scoped ones after the run, so the bare command reports a different population and a different survivor count.
+- The job is bounded to 330 minutes.
+  Shard a series whose diff lists more than 1,000 mutants (`cargo mutants --list --in-diff <diff> --package mega-evm`): at the reference rate that is about an hour, and the rate falls as the test suite grows.
+  Run shard `k` of `n` with `MUTANTS_SHARD=k/n OUT_DIR=target/mutants-k scripts/mutation_test.sh diff <base>` and gate each shard with `scripts/mutation_gate.py report`; the pull request that first needs it adds a shard matrix to the job, and every shard must pass.
+- The gate has a second scope, for its own infrastructure: `.cargo/mutants-infra.toml` and `scripts/mutation_test.sh infra` mutate the scenario runner (`crates/mega-evm/src/test_utils/scenario.rs`) against `mega-evm`'s tests.
+  The production scope excludes test helpers as noise, so that code is otherwise never mutated, though the benches and later tests rest on it.
+  The two scopes are disjoint and the production one keeps its exclusions; a suppression may belong to either, and the suppression-hygiene job lists both scopes into its mutant universe.
+  The `cargo-mutants infrastructure` job runs the scope on a pull request that touches those files, either configuration, the driver or the gate, and nightly; it is bounded to 90 minutes and is not a required check.
+  Reference point: 39 mutants, 34 caught, 0 survived, 3 suppressed, 2 unviable, in 5m45s on a 15-core laptop with `JOBS=8`.
+  The three suppressed ones write a `BlockEnv` field that already holds that value by default, so no test can distinguish them; the test that pins those values kills them the moment a revm upgrade moves a default.
+- The spec-gate operator pack stays in place but finds nothing on Satin: a single-spec engine has no spec gate to mutate, and the suppression-hygiene job accepts the empty plan.
+  It starts to bite with the first `is_enabled` gate of the spec after Satin.
+- The legacy mutant killers were retired with the legacy sources; a survivor in Satin code gets a new killer, next to the code or under `crates/mega-evm/tests/mutation/`.
+
+### Scheduled workflows
+
+- GitHub fires a `schedule` trigger only from the default branch's copy of a workflow, so the schedules in `satin`'s copies (nightly mutation, weekly benchmark, replay-bench, doc-audit, the weekly execution-spec run) stay inert until `satin` is the default branch.
+- Run them on `satin` by hand: `gh workflow run <workflow>.yml --ref satin` runs `satin`'s copy of the workflow on `satin`'s head, so none of them needs a `ref` input.
+  - `mutation.yml`: the whole-crate cargo-mutants run, the spec-gate sweep and suppression hygiene.
+  - `benchmark.yml`: the Satin bench set on `satin`'s head, without a baseline (`-f aa_check=true` measures the noise floor).
+  - `exec-spec.yml`: the execution-spec fixtures at the pinned fork tag.
+  - `doc-audit.yml`: the documentation audit of `satin`'s docs.
+  - `replay-bench.yml`: nothing yet; its bench job is disabled on `satin` until the state-test tool is ported.
 
 ## Dev tools and test infrastructure
 

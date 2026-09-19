@@ -1,0 +1,43 @@
+{
+  "name": "access_list_warm_slots_and_account",
+  "description": "The access list warms slot 0 and slot 2 of the reader and the account it reads the balance of; slot 1 stays cold.",
+  "coinbase": "0x0000000000000000000000000000000000000c01",
+  "pre": {
+    "0x0000000000000000000000000000000000000aaa": {
+      "balance": "0xde0b6b3a7640000"
+    },
+    "0x0000000000000000000000000000000000000ead": {
+      "code": "0x60005450600154507300000000000000000000000000000000000000e43150600960025500",
+      "storage": {
+        "0x0": "0x1",
+        "0x1": "0x2"
+      }
+    },
+    "0x00000000000000000000000000000000000000e4": {
+      "balance": "0x3"
+    }
+  },
+  "txs": [
+    {
+      "caller": "0x0000000000000000000000000000000000000aaa",
+      "to": "0x0000000000000000000000000000000000000ead",
+      "data": "0x",
+      "value": "0x0",
+      "gas_limit": 1000000,
+      "kind": "call",
+      "access_list": [
+        {
+          "address": "0x0000000000000000000000000000000000000ead",
+          "storage_keys": [
+            "0x0",
+            "0x2"
+          ]
+        },
+        {
+          "address": "0x00000000000000000000000000000000000000e4",
+          "storage_keys": []
+        }
+      ]
+    }
+  ]
+}

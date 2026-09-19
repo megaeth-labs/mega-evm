@@ -1,0 +1,34 @@
+{
+  "name": "eip7702_delegate_new_authority",
+  "description": "The authority does not exist: the authorization creates it with the delegation designator and nonce 1, and the call to it runs the delegate's code in its context.",
+  "coinbase": "0x0000000000000000000000000000000000000c01",
+  "pre": {
+    "0x0000000000000000000000000000000000000aaa": {
+      "balance": "0xde0b6b3a7640000"
+    },
+    "0x0000000000000000000000000000000000000de1": {
+      "code": "0x602a6000553060015500"
+    },
+    "0x0000000000000000000000000000000000000de2": {
+      "code": "0x600760025500"
+    }
+  },
+  "txs": [
+    {
+      "caller": "0x0000000000000000000000000000000000000aaa",
+      "to": "0x0000000000000000000000000000000000000a11",
+      "data": "0x",
+      "value": "0x0",
+      "gas_limit": 1000000,
+      "kind": "call",
+      "authorization_list": [
+        {
+          "chain_id": "0x1",
+          "address": "0x0000000000000000000000000000000000000de1",
+          "nonce": 0,
+          "authority": "0x0000000000000000000000000000000000000a11"
+        }
+      ]
+    }
+  ]
+}
