@@ -604,6 +604,7 @@ fn crowded_oracle_slot(m: u64) -> SaltEnvs {
 fn test_the_promoted_system_transaction_prices_at_the_minimum_bucket() {
     let set = entry(GasId::sstore_set_state_gas());
     let mut spends = Vec::new();
+    let mut receipts = Vec::new();
     for m in [1, SYSTEM_TX_MULTIPLIER] {
         let envs = crowded_oracle_slot(m);
         let mut evm = MegaEvm::new(salt_context(system_tx_db(), envs.clone()));
@@ -612,16 +613,38 @@ fn test_the_promoted_system_transaction_prices_at_the_minimum_bucket() {
 
         assert!(evm.ctx().is_system_originated(), "at m = {m}");
         assert_eq!(envs.total_bucket_queries(), 0, "at m = {m}: it reads no capacity at all");
+        assert_eq!(
+            written_oracle_slot(&outcome),
+            U256::from_be_bytes(B256::with_last_byte(0xAB).0),
+            "at m = {m}: the Oracle slot holds what the transaction wrote",
+        );
         spends.push(outcome.gas.state);
+        receipts.push(outcome.gas.gas_used);
     }
 
     assert_eq!(spends[0], spends[1], "the two capacities cost the same");
+    assert_eq!(
+        receipts[0], receipts[1],
+        "and so does the whole receipt, not only its state ledger",
+    );
     assert_eq!(
         spends[0],
         set + entry(GasId::new_account_state_gas()),
         "and both charges are the schedule's own entries: the Oracle's write, and the account \
          the promoted deposit creates for the system address",
     );
+}
+
+/// What [`ORACLE_SLOT`] holds in the state a probe produced.
+fn written_oracle_slot(outcome: &MegaTransactionOutcome) -> U256 {
+    outcome
+        .state
+        .get(&ORACLE_CONTRACT_ADDRESS)
+        .expect("the Oracle is in the transaction's state")
+        .storage
+        .get(&ORACLE_SLOT)
+        .expect("the write reached the slot")
+        .present_value
 }
 
 /// The pre-block system calls likewise: the same call priced across the same two capacities
