@@ -2,10 +2,10 @@
 //!
 //! An ordinary transaction on the same `CfgEnv`, block and L1 info must produce the same result
 //! through `MegaEvm` and through op-revm's `OpEvm`, down to every `ResultGas` field, the logs and
-//! the resulting state. The cases at the end are the ones that diverge on purpose — the system
-//! contract interceptors and the system-address transaction — and they pin both sides, so a
-//! divergence is never silently absorbed. Later changes (SALT pricing, history gas, limits) add
-//! their own.
+//! the resulting state. The four cases at the end are the ones that diverge on purpose — the
+//! system contract interceptors, the `KeylessDeploy` overhead and the system-address transaction
+//! — and they pin both sides, so a divergence is never silently absorbed. Later changes (SALT
+//! pricing, history gas, limits) add their own.
 
 use alloy_op_evm::OpTx;
 use alloy_primitives::{address, Address, TxKind, U256};
@@ -374,5 +374,54 @@ fn test_the_created_deposit_caller_diverges_from_op_revm() {
         op_outcome.result.gas().state_gas_spent_final(),
         0,
         "op-revm charges nothing for it",
+    );
+}
+
+/// A `keylessDeploy` transaction is charged the fixed overhead before its frame runs, where
+/// op-revm charges nothing for it. Both engines then run the contract's bytecode and get its
+/// `NotIntercepted()` revert, because the rewrite that turns the call into a deployment is not
+/// here yet; the whole divergence is the overhead.
+#[test]
+fn test_the_keyless_deploy_overhead_diverges_from_op_revm() {
+    use alloy_primitives::Bytes;
+    use alloy_sol_types::{SolCall, SolError};
+    use mega_evm::system::keyless::{
+        IKeylessDeploy, KEYLESS_DEPLOY_ADDRESS, KEYLESS_DEPLOY_CODE, KEYLESS_DEPLOY_OVERHEAD_GAS,
+    };
+
+    let db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(10u64.pow(18)))
+        .account_code(KEYLESS_DEPLOY_ADDRESS, KEYLESS_DEPLOY_CODE);
+    let tx = TxEnv {
+        caller: CALLER,
+        kind: TxKind::Call(KEYLESS_DEPLOY_ADDRESS),
+        data: IKeylessDeploy::keylessDeployCall {
+            keylessDeploymentTransaction: Bytes::from_static(b"a transaction"),
+            gasLimitOverride: U256::from(1_000_000),
+        }
+        .abi_encode()
+        .into(),
+        gas_limit: 1_000_000,
+        ..Default::default()
+    };
+    let (mega, op, cfg) = run_both(db, tx);
+
+    assert_satin_cfg(&cfg);
+    let revert_data = Bytes::from_static(&IKeylessDeploy::NotIntercepted::SELECTOR);
+    assert_eq!(
+        mega.result.output().cloned().unwrap_or_default(),
+        revert_data,
+        "the bytecode runs after the charge",
+    );
+    assert_eq!(op.result.output().cloned().unwrap_or_default(), revert_data);
+
+    // What each transaction spent, not what its receipt reports: op-revm spends less than the
+    // EIP-7623 calldata floor here, so its receipt is lifted to the floor and Satin's is not.
+    // The two run the same bytecode on the same input, so the whole difference is the charge.
+    let charged = mega.result.gas().total_gas_spent() - op.result.gas().total_gas_spent();
+    assert_eq!(charged, KEYLESS_DEPLOY_OVERHEAD_GAS, "the divergence is the overhead, exactly");
+    assert!(
+        mega.result.gas_used() - op.result.gas_used() < charged,
+        "the floor lifts the cheaper receipt, so the receipts differ by less than the charge",
     );
 }
