@@ -1,10 +1,14 @@
 //! Tests of the Satin engine.
 
 mod common;
+mod contract_size;
 mod db_error;
 mod equivalence;
 mod inspector;
+mod intrinsic;
 mod outcome;
+mod precompile_gas;
+mod schedule;
 mod state;
 mod static_callee;
 mod strategic_stop;
