@@ -28,7 +28,7 @@ Do not add a `_pending/main.rs`.
 | Owning mechanism | Tests | From `tests/` | From `src/` | Keep | Rewrite | Undecided |
 |---|---:|---:|---:|---:|---:|---:|
 | the common execution layer | 21 | 21 | 0 | 21 | 0 | 0 |
-| SALT pricing | 8 | 4 | 4 | 0 | 8 | 0 |
+| SALT pricing | 4 | 4 | 0 | 0 | 4 | 0 |
 | history gas | 28 | 24 | 4 | 4 | 24 | 0 |
 | compute gas | 26 | 26 | 0 | 0 | 26 | 0 |
 | the data-size limit | 47 | 45 | 2 | 40 | 7 | 0 |
@@ -41,7 +41,7 @@ Do not add a `_pending/main.rs`.
 | native keyless deployment | 75 | 73 | 2 | 29 | 46 | 0 |
 | inspector support | 4 | 4 | 0 | 1 | 3 | 0 |
 | — (undecided: D57 preload-warm cold charging, D58 98/100 forwarding) | 7 | 7 | 0 | 0 | 0 | 7 |
-| **Total** | **532** | **461** | **71** | **311** | **193** | **28** |
+| **Total** | **528** | **461** | **67** | **311** | **189** | **28** |
 
 ## Tests ported in place
 
@@ -205,14 +205,15 @@ These 61 rows run in a real test target now, adapted to the Satin API and to the
 
 ## Tests retired after the inventory
 
-These 4 rows were parked when the inventory was applied and have since been retired: the mechanism that owns them landed and left them nothing to pin, so no later mechanism will port them.
+These 8 rows were parked when the inventory was applied and have since been retired: the mechanism that owns them landed and left them nothing to pin, so no later mechanism will port them.
 They are not counted above.
 
 | Legacy file | Owner in the inventory | Tests | Why |
 |---|---|---:|---|
 | `rex5/callcode_storage_gas.rs` | SALT pricing (3) | 3 | Satin's `CALLCODE` cannot reach a state gas pricing site: it sends value to the frame's own account, which exists, so it adds no account leaf and asks for no price. There is no pricing-path account inspection left to fail |
 | `src/evm/host.rs` | SALT pricing (1) | 1 | the pricing hook inspects no account: the fork decides whether a target exists and the hook only prices what it is told to, so there is no delegation walk on the pricing path to guard |
-| **Total** | | **4** | |
+| `src/external/gas.rs` | SALT pricing (4) | 4 | these pin a helper at a legacy spec boundary: it is served from one rung and asserts below it. Satin is a single spec and has no gate of its own, so there is no boundary left for them to pin |
+| **Total** | | **8** | |
 
 ## Tests the inventory assigns to the Satin skeleton that are parked under another mechanism
 
@@ -280,7 +281,6 @@ Each cell lists `disposition count (mechanism · decision)`.
 | `rex6/sequencer_registry_rotation.rs` | 5 | keep 5 (system contract deployment) |
 | `src/access/volatile.rs` | 4 | keep 4 (detention) |
 | `src/evm/mod.rs` | 3 | keep 3 (the pre-block system calls) |
-| `src/external/gas.rs` | 4 | rewrite 4 (SALT pricing · D12/D51) |
 | `src/limit/compute_gas.rs` | 1 | rewrite 1 (detention · D40/D48) |
 | `src/limit/data_size.rs` | 2 | keep 2 (the data-size limit) |
 | `src/limit/kv_update.rs` | 1 | undecided 1 (the state-growth and KV limits · D46) |
