@@ -400,6 +400,53 @@ mod tests {
         assert_eq!(active_satin_prices(), SatinPrices::CONSTANTS);
     }
 
+    /// The name the probe below answers to, spelled out because the parent filters on it. A name
+    /// that drifts from the function filters nothing, which the parent catches: a run that
+    /// selected no test prints no measurement.
+    #[cfg(feature = "satin-price-override")]
+    const PROBE: &str = "evm::prices::tests::test_the_environment_prices_build_the_schedule";
+
+    /// The environment path end to end: a child process of this test binary, started with both
+    /// variables set, builds its schedule at the prices they name.
+    ///
+    /// It has to be a child. The prices of a process are fixed the first time anything builds a
+    /// schedule, and this process has built several, so the only way to watch a variable reach
+    /// the table is to start a process that has not.
+    #[cfg(feature = "satin-price-override")]
+    #[test]
+    fn test_the_environment_prices_reach_a_fresh_process() {
+        let binary = std::env::current_exe().expect("the running test binary");
+        let run = std::process::Command::new(binary)
+            .args([PROBE, "--exact", "--ignored", "--nocapture"])
+            .env(CPSB_ENV_VAR, "312.5")
+            .env(CPHB_ENV_VAR, "400")
+            .output()
+            .expect("the test binary runs");
+        let stdout = String::from_utf8_lossy(&run.stdout);
+        assert!(run.status.success(), "the probe failed:\n{stdout}");
+        assert!(
+            stdout.contains("sstore_set_state_gas = 20000"),
+            "the probe must report the repriced entry; a run that selected no test reports \
+             nothing:\n{stdout}"
+        );
+    }
+
+    /// What [`test_the_environment_prices_reach_a_fresh_process`] runs in its child, and nothing
+    /// else runs: with the variables unset there is no override to observe, so it is ignored.
+    #[cfg(feature = "satin-price-override")]
+    #[test]
+    #[ignore = "runs in the child process of test_the_environment_prices_reach_a_fresh_process"]
+    fn test_the_environment_prices_build_the_schedule() {
+        use revm::context_interface::cfg::GasId;
+
+        let state_gas = crate::satin_gas_params().get(GasId::sstore_set_state_gas());
+        std::println!("sstore_set_state_gas = {state_gas}");
+
+        assert_eq!(active_satin_prices().cpsb, "312.5".parse().unwrap(), "the state byte price");
+        assert_eq!(active_satin_prices().cphb, BytePrice::from_gas(400), "the history byte price");
+        assert_eq!(state_gas, 20_000, "a slot's 64 bytes at 312.5 gas each");
+    }
+
     #[test]
     fn test_price_errors_name_the_variable_and_the_installed_prices() {
         let invalid = SatinPriceError::Invalid {
