@@ -107,7 +107,7 @@ The root `Cargo.toml` pins `revm = "=40.0.3"` and redirects all twelve revm crat
   With no limit configured Satin still equals op-revm: `tests/satin/equivalence.rs` pins it on the same `CfgEnv`, field by field; a later change that alters behavior on purpose updates that baseline.
 - The common execution layer counts data-size bytes and write records per frame and enforces nothing by default; `EvmTxRuntimeLimits` sets a data-size cap and a frame budget to drive the abort protocol.
 - `MegaBlockExecutor` runs a block: alloy-evm's `BlockExecutor` over a `MegaEvm`, mirroring what alloy-op-evm's `OpBlockExecutor` does for an OP chain.
-  It applies the three block rules of the Karst base — an activation block admits only deposits, the data-availability footprint is a block limit reported as the block's blob gas, and the L1 block info is read once at the start of the block — holds every transaction to `BlockLimits` and fills `BlockGasCounters`.
+  It applies the three block rules of the Karst base — an activation block admits only deposits, the data-availability footprint is a block limit reported as the block's blob gas, and the L1 block info is read by the first transaction that prices against it — holds every transaction to `BlockLimits` and fills `BlockGasCounters`.
   `apply_pre_execution_changes` refuses a rewriting inspector and names two hook points that are empty today: system contract deployment and the pre-block system calls.
 - The legacy engine's gas leakage pitfalls, limit-check protocol and storage-gas stipend describe mechanisms that do not exist here; the contracts below replace them.
 

@@ -186,10 +186,19 @@ pub(crate) fn user_tx_with_input(
 
 /// A deposit transaction carrying `input`.
 pub(crate) fn deposit_tx(input: Bytes, gas_limit: u64) -> Recovered<MegaTxEnvelope> {
+    deposit_tx_to(CONTRACT, input, gas_limit)
+}
+
+/// A deposit transaction to `to`, carrying `input`.
+pub(crate) fn deposit_tx_to(
+    to: Address,
+    input: Bytes,
+    gas_limit: u64,
+) -> Recovered<MegaTxEnvelope> {
     let deposit = TxDeposit {
         source_hash: B256::ZERO,
         from: CALLER,
-        to: TxKind::Call(CONTRACT),
+        to: TxKind::Call(to),
         mint: 0,
         value: U256::ZERO,
         gas_limit,

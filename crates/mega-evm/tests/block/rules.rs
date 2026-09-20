@@ -2,7 +2,7 @@
 
 use alloy_evm::block::BlockExecutor;
 use alloy_primitives::{Bytes, U256};
-use mega_evm::BlockLimits;
+use mega_evm::{test_utils::BytecodeBuilder, BlockLimits};
 use op_revm::{
     constants::{
         DA_FOOTPRINT_GAS_SCALAR_OFFSET, DA_FOOTPRINT_GAS_SCALAR_SLOT, L1_BLOCK_CONTRACT,
@@ -10,10 +10,15 @@ use op_revm::{
     },
     L1BlockInfo,
 };
-use revm::{context::ContextTr, database::State, Database};
+use revm::{
+    bytecode::opcode::{CALLDATALOAD, SSTORE},
+    context::ContextTr,
+    database::State,
+    Database,
+};
 
 use crate::common::{
-    self, deposit_tx, executor, unlimited_ctx, user_tx, BLOCK_GAS_LIMIT, BLOCK_NUMBER,
+    self, deposit_tx, executor, unlimited_ctx, user_tx, TestExecutor, BLOCK_GAS_LIMIT, BLOCK_NUMBER,
 };
 
 /// The word the L1 block contract holds at its scalars slot: the data-availability footprint
@@ -35,6 +40,43 @@ fn state_with_scalars(word: U256) -> State<mega_evm::test_utils::MemoryDatabase>
     let mut db = common::database();
     db.set_account_storage(L1_BLOCK_CONTRACT, DA_FOOTPRINT_GAS_SCALAR_SLOT, word);
     State::builder().with_database(db).build()
+}
+
+/// Code that writes its 32 bytes of calldata to the scalars slot, which is what the L1 info
+/// deposit's setter does for the fields this test reads.
+fn l1_block_setter() -> Bytes {
+    BytecodeBuilder::default()
+        .push_number(0_u64)
+        .append(CALLDATALOAD)
+        .push_u256(DA_FOOTPRINT_GAS_SCALAR_SLOT)
+        .append(SSTORE)
+        .stop()
+        .build()
+}
+
+/// The scalars word the L1 block contract holds in the state the block runs on.
+fn state_scalars(executor: &mut TestExecutor<'_>) -> U256 {
+    executor
+        .evm_mut()
+        .ctx_mut()
+        .db_mut()
+        .storage(L1_BLOCK_CONTRACT, DA_FOOTPRINT_GAS_SCALAR_SLOT)
+        .expect("the slot is readable")
+}
+
+/// The operator fee op-revm charges on the Karst formula: gas x scalar x 100.
+fn karst_operator_fee(gas_used: u64, scalar: u32) -> U256 {
+    U256::from(gas_used) * U256::from(scalar) * U256::from(100)
+}
+
+/// What the block paid the operator fee recipient, read once the block has finished.
+fn operator_fee_paid(executor: TestExecutor<'_>) -> U256 {
+    let (evm, _) = executor.finish_with_counters().expect("the block finishes");
+    let (db, _) = alloy_evm::Evm::finish(evm);
+    db.basic(OPERATOR_FEE_RECIPIENT)
+        .expect("the recipient is readable")
+        .map(|account| account.balance)
+        .unwrap_or_default()
 }
 
 /// Rule 1, alloy-op-evm's `no_user_tx_activation_block`: the block a fork activates in carries
@@ -167,32 +209,39 @@ fn test_deposits_do_not_count_towards_the_da_footprint() {
     assert_eq!(executor.limiter().block_da_footprint_used, 0);
 }
 
-/// Rule 3, alloy-op-evm's `l1_block_info`: the read at the start of the block is failable, and
-/// an empty L1 block contract answers with zeroes rather than an error.
+/// Rule 3, alloy-op-evm's `l1_block_info`: block execution fetches nothing, and the first
+/// transaction that prices against the info is what reads it. An empty L1 block contract answers
+/// with zeroes rather than an error.
 #[test]
-fn test_l1_block_info_reads_an_empty_contract_as_zero() {
+fn test_l1_block_info_is_read_by_the_first_transaction_that_prices_against_it() {
     let mut state = common::state();
     let mut executor = executor(&mut state, unlimited_ctx());
 
-    executor.apply_pre_execution_changes().expect("an empty L1 block contract is not an error");
+    executor.apply_pre_execution_changes().expect("the block starts");
+    assert_eq!(executor.evm().ctx().chain().l2_block, None, "the block starts with no info");
+
+    executor
+        .execute_transaction(&user_tx(0, 100_000))
+        .expect("an empty L1 block contract is not an error");
 
     let chain = executor.evm().ctx().chain();
-    assert_eq!(chain.l2_block, Some(U256::from(BLOCK_NUMBER)));
+    assert_eq!(chain.l2_block, Some(U256::from(BLOCK_NUMBER)), "read for this block");
     assert_eq!(chain.da_footprint_gas_scalar, Some(0));
     assert_eq!(chain.operator_fee_scalar, Some(U256::ZERO));
     assert_eq!(chain.l1_base_fee, U256::ZERO);
 }
 
 /// Rule 3: the read is conditioned on the block the info is for, so info a caller placed for
-/// this very block is not overwritten by what state holds.
+/// this very block is what its transactions are priced with, not what state holds.
 #[test]
 fn test_l1_block_info_of_this_block_is_not_overwritten() {
-    let mut state = state_with_scalars(scalars_word(7, 0, 0));
+    const CALLER_SCALAR: u32 = 11;
+    let mut state = state_with_scalars(scalars_word(7, 3, 0));
     let mut executor = executor(&mut state, unlimited_ctx());
     executor.evm_mut().ctx_mut().modify_chain(|chain| {
         *chain = L1BlockInfo {
             l2_block: Some(U256::from(BLOCK_NUMBER)),
-            operator_fee_scalar: Some(U256::from(11)),
+            operator_fee_scalar: Some(U256::from(CALLER_SCALAR)),
             operator_fee_constant: Some(U256::ZERO),
             da_footprint_gas_scalar: Some(5),
             ..Default::default()
@@ -200,10 +249,66 @@ fn test_l1_block_info_of_this_block_is_not_overwritten() {
     });
 
     executor.apply_pre_execution_changes().expect("the block starts");
+    let gas = executor.execute_transaction(&user_tx(0, 100_000)).expect("the transaction executes");
 
     let chain = executor.evm().ctx().chain();
-    assert_eq!(chain.operator_fee_scalar, Some(U256::from(11)), "the caller's info stands");
+    assert_eq!(
+        chain.operator_fee_scalar,
+        Some(U256::from(CALLER_SCALAR)),
+        "the caller's info stands"
+    );
     assert_eq!(chain.da_footprint_gas_scalar, Some(5));
+    assert_eq!(
+        operator_fee_paid(executor),
+        karst_operator_fee(gas.tx_gas_used(), CALLER_SCALAR),
+        "and is what the transaction was charged"
+    );
+}
+
+/// Rule 3: the block's own L1 info deposit is what the transactions after it are priced with.
+/// Reading the info before the block's first transaction would hold every user transaction of
+/// the block to the parent block's values.
+#[test]
+fn test_the_l1_info_deposit_prices_the_transactions_after_it() {
+    const PARENT_SCALAR: u32 = 1;
+    const BLOCK_SCALAR: u32 = 9;
+
+    let mut db = common::database();
+    db.set_account_code(L1_BLOCK_CONTRACT, l1_block_setter());
+    db.set_account_storage(
+        L1_BLOCK_CONTRACT,
+        DA_FOOTPRINT_GAS_SCALAR_SLOT,
+        scalars_word(0, PARENT_SCALAR, 0),
+    );
+    let mut state = State::builder().with_database(db).build();
+    let mut executor = executor(&mut state, unlimited_ctx());
+    executor.apply_pre_execution_changes().expect("the block starts");
+
+    // The chain's own first transaction writes the block's scalars, as the L1 info deposit does.
+    let word = scalars_word(0, BLOCK_SCALAR, 0);
+    executor
+        .execute_transaction(&common::deposit_tx_to(
+            L1_BLOCK_CONTRACT,
+            Bytes::from(word.to_be_bytes::<32>()),
+            200_000,
+        ))
+        .expect("the deposit executes");
+    assert_eq!(state_scalars(&mut executor), word, "the deposit wrote the block's scalars");
+
+    // The deposit bumped the sender's nonce, so the user transaction after it carries nonce 1.
+    let gas = executor.execute_transaction(&user_tx(1, 100_000)).expect("the transaction executes");
+
+    let paid = operator_fee_paid(executor);
+    assert_eq!(
+        paid,
+        karst_operator_fee(gas.tx_gas_used(), BLOCK_SCALAR),
+        "the transaction pays what the block's own deposit set"
+    );
+    assert_ne!(
+        paid,
+        karst_operator_fee(gas.tx_gas_used(), PARENT_SCALAR),
+        "and not what the parent block held"
+    );
 }
 
 /// Rule 3: the operator fee the reward path pays is the one op-revm computes for the Karst
@@ -216,17 +321,10 @@ fn test_operator_fee_is_charged_on_the_karst_formula() {
     executor.apply_pre_execution_changes().expect("the block starts");
 
     let gas = executor.execute_transaction(&user_tx(0, 100_000)).expect("the transaction executes");
-    let (evm, _) = executor.finish_with_counters().expect("the block finishes");
 
-    let (db, _) = alloy_evm::Evm::finish(evm);
-    let paid = db
-        .basic(OPERATOR_FEE_RECIPIENT)
-        .expect("the recipient is readable")
-        .expect("the operator fee created the recipient")
-        .balance;
     assert_eq!(
-        paid,
-        U256::from(gas.tx_gas_used()) * U256::from(OPERATOR_FEE_SCALAR) * U256::from(100),
+        operator_fee_paid(executor),
+        karst_operator_fee(gas.tx_gas_used(), OPERATOR_FEE_SCALAR),
         "the Karst formula multiplies by 100 where the pre-Jovian one divides by 1e6"
     );
 }

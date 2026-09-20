@@ -15,9 +15,12 @@
 //!   against the block's gas limit and reported as the block's blob gas used. With no scalar in
 //!   state the scalar is zero and the rule costs nothing. This mirrors alloy-op-evm's Jovian DA
 //!   footprint block limit.
-//! - **The L1 block info is read once, at the start of the block.** An empty L1 block contract
-//!   reads as zeroes, not as an error, and a caller that placed its own info for this block keeps
-//!   it. This mirrors alloy-op-evm's `l1_block_info`.
+//! - **The L1 block info is read lazily, by the transaction that prices against it.** Block
+//!   execution fetches nothing: op-revm's handler reads the L1 block contract when it deducts the
+//!   caller of the first non-deposit transaction, which is after the block's own L1 info deposit
+//!   has committed, so every transaction prices against the values that deposit set. An empty L1
+//!   block contract reads as zeroes, not as an error, and a caller that placed its own info for
+//!   this block keeps it. alloy-op-evm's executor pre-loads no info either.
 //!
 //! # What later mechanisms fill in
 //!
@@ -240,25 +243,6 @@ where
         self.evm.inspector()
     }
 
-    /// Reads the L1 block info of this block from state, unless the EVM already carries the info
-    /// of this very block.
-    ///
-    /// An empty L1 block contract reads as zeroes — no fee scalars, no data-availability
-    /// footprint scalar — which is a chain that has not set them, not an error. A caller that
-    /// placed its own info for this block number keeps it: this is the same condition op-revm's
-    /// handler reloads on, so the two never disagree about which info the block runs with.
-    fn load_l1_block_info(&mut self) -> Result<(), BlockExecutionError> {
-        let block_number = self.evm.block().number();
-        if self.evm.ctx().chain().l2_block == Some(block_number) {
-            return Ok(());
-        }
-        let spec = self.evm.ctx().cfg().spec;
-        let info = L1BlockInfo::try_fetch(self.evm.ctx_mut().db_mut(), block_number, spec)
-            .map_err(BlockExecutionError::other)?;
-        self.evm.ctx_mut().modify_chain(|chain| *chain = info);
-        Ok(())
-    }
-
     /// The data-availability footprint gas scalar the L1 block contract holds.
     ///
     /// Read per transaction, as the fork's rule is stated: the block's own L1 info transaction
@@ -316,14 +300,19 @@ where
 
     /// Runs what a block does before its transactions.
     ///
-    /// In order: the admission gate, the EIP-2935 and EIP-4788 pre-block calls, and the read of
-    /// the L1 block info. Each call's state is committed here rather than inside its helper, so
-    /// a witness generator sees every step's read and write set.
+    /// In order: the admission gate and the EIP-2935 and EIP-4788 pre-block calls. Each call's
+    /// state is committed here rather than inside its helper, so a witness generator sees every
+    /// step's read and write set.
+    ///
+    /// The L1 block info is not read here. op-revm's handler reads it when it deducts the caller
+    /// of the first non-deposit transaction, which is after the block's own L1 info deposit has
+    /// committed; reading it here would price every transaction of the block against the parent
+    /// block's values.
     ///
     /// Two hook points are empty: system contract deployment, which deploys the chain's system
     /// contracts at the Satin activation, and the pre-block system calls, which apply the
     /// pending changes the sequencer registry holds. Both arrive with the mechanisms of those
-    /// names, between the pre-block calls and the L1 block info read.
+    /// names, after the pre-block calls.
     fn apply_pre_execution_changes(&mut self) -> Result<(), BlockExecutionError> {
         if self.evm.has_rewriting_inspector() {
             return Err(MegaBlockExecutionError::RewritingInspector.into());
@@ -349,8 +338,6 @@ where
 
         // Hook point: system contract deployment.
         // Hook point: the pre-block system calls.
-
-        self.load_l1_block_info()?;
 
         Ok(())
     }
