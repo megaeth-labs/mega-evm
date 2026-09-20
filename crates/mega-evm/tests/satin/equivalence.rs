@@ -421,7 +421,7 @@ fn test_the_keyless_deploy_overhead_diverges_from_op_revm() {
     let charged = mega.result.gas().total_gas_spent() - op.result.gas().total_gas_spent();
     assert_eq!(charged, KEYLESS_DEPLOY_OVERHEAD_GAS, "the divergence is the overhead, exactly");
     assert!(
-        mega.result.gas_used() - op.result.gas_used() < charged,
+        mega.result.gas().tx_gas_used() - op.result.gas().tx_gas_used() < charged,
         "the floor lifts the cheaper receipt, so the receipts differ by less than the charge",
     );
 }
