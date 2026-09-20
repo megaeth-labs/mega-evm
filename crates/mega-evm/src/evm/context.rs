@@ -13,7 +13,7 @@ use revm::{
 };
 
 use crate::{
-    constants, evm::schedule::satin_gas_params, AdditionalLimit, BlockHashRecord,
+    constants, evm::schedule::satin_gas_params, AdditionalLimit, BlockHashRecord, BucketError,
     BucketMultipliers, EmptyExternalEnv, EvmTxRuntimeLimits, ExternalEnvTypes, ExternalEnvs,
     MegaSpecId, MegaTransaction, SaltEnv,
 };
@@ -165,11 +165,13 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     ///
     /// Every account-scoped EIP-8037 state gas charge on `address` is scaled by it. The bucket is
     /// read from the transaction's [`SaltEnv`] the first time the transaction asks for it and
-    /// from [`BucketMultipliers`] afterwards.
+    /// from [`BucketMultipliers`] afterwards. A bucket the environment could not report, and one
+    /// it reported below the minimum capacity a bucket can hold, both fail
+    /// ([`BucketError`](crate::BucketError)).
     pub fn account_bucket_multiplier(
         &mut self,
         address: Address,
-    ) -> Result<u64, <ExtEnvs::SaltEnv as SaltEnv>::Error> {
+    ) -> Result<u64, BucketError<<ExtEnvs::SaltEnv as SaltEnv>::Error>> {
         self.bucket_multipliers.account(&self.external_envs.salt_env, address)
     }
 
@@ -180,7 +182,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
         &mut self,
         address: Address,
         key: StorageKey,
-    ) -> Result<u64, <ExtEnvs::SaltEnv as SaltEnv>::Error> {
+    ) -> Result<u64, BucketError<<ExtEnvs::SaltEnv as SaltEnv>::Error>> {
         self.bucket_multipliers.slot(&self.external_envs.salt_env, address, key)
     }
 

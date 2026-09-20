@@ -18,7 +18,8 @@ External dependency abstraction for block-scoped SALT and oracle data consumed d
 - `EmptyExternalEnv` must stay deterministic and side-effect free.
 - A bucket's capacity is read once per transaction and answered from `BucketMultipliers` afterwards, so a state gas charge and the refill that undoes it are priced at the same capacity by construction.
 - `BucketMultipliers` does not hold the environment; it takes a `&SaltEnv` per call, so there is no second copy of it and no `Clone` bound on the engine's environment types.
-- A capacity below `MIN_BUCKET_SIZE` — which a bucket cannot have — prices at `m = 1`, never at `m = 0`: no environment can make state gas free.
+- `MIN_BUCKET_SIZE` is the smallest capacity a backend may report.
+  A report below it is a broken backend, not a cheap bucket: it is a failed lookup (`BucketError::BelowMinimum`) and fails the transaction, rather than being rounded up to `m = 1` or priced at `m = 0`.
 
 ## ANTI-PATTERNS
 - Do not query live chain state directly from opcode handlers.

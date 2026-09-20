@@ -10,7 +10,7 @@
 use alloy_primitives::{Address, Bytes, TxKind, U256};
 use mega_evm::{
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    MegaEvm, MegaTransaction,
+    MegaEvm, MegaTransaction, MIN_BUCKET_SIZE,
 };
 use revm::{
     bytecode::opcode::{PUSH0, RETURN},
@@ -42,9 +42,20 @@ fn failing_slot(envs: SaltEnvs, address: Address, key: U256) -> SaltEnvs {
 
 /// Runs the probe and requires it to fail with the cause the SALT environment reported.
 fn assert_fails(site: &str, db: MemoryDatabase, envs: SaltEnvs, tx: MegaTransaction) {
+    assert_fails_with(site, UNREACHABLE, db, envs, tx);
+}
+
+/// Runs the probe and requires it to fail with a cause naming `cause`.
+fn assert_fails_with(
+    site: &str,
+    cause: &str,
+    db: MemoryDatabase,
+    envs: SaltEnvs,
+    tx: MegaTransaction,
+) {
     match try_run(db, envs, tx) {
         Err(EVMError::Custom(message)) => assert!(
-            message.contains(UNREACHABLE),
+            message.contains(cause),
             "{site}: the recorded cause must reach the caller, got {message:?}",
         ),
         Err(other) => panic!("{site}: expected the recorded cause, got {other:?}"),
@@ -181,6 +192,38 @@ fn test_an_unpriceable_charge_in_a_reverting_frame_still_fails_the_transaction()
         failing_slot(minimal_envs(), CONTRACT, U256::from(SLOT)),
         call_contract(),
     );
+}
+
+/// A bucket reported below the minimum capacity is a broken backend, not a cheap bucket: it fails
+/// the transaction with a cause of its own rather than being rounded up to the minimum. A bucket
+/// holds at least `MIN_BUCKET_SIZE` entries by construction, so a smaller answer is one the engine
+/// cannot price against, and the one price it must never become is the free one.
+#[test]
+fn test_a_capacity_below_the_minimum_bucket_fails_the_transaction() {
+    let code = BytecodeBuilder::default().sstore(U256::from(SLOT), U256::from(1)).stop().build();
+
+    for capacity in [0, 1, MIN_BUCKET_SIZE as u64 - 1] {
+        let envs =
+            minimal_envs().with_bucket_capacity(slot_bucket(CONTRACT, U256::from(SLOT)), capacity);
+        assert_fails_with(
+            "a sub-minimum capacity",
+            "below the minimum bucket",
+            db(code.clone()),
+            envs,
+            call_contract(),
+        );
+    }
+}
+
+/// The same report at the minimum itself is a bucket, not a misreport: it prices at `m = 1`.
+#[test]
+fn test_the_minimum_capacity_itself_is_priced_not_refused() {
+    let code = BytecodeBuilder::default().sstore(U256::from(SLOT), U256::from(1)).stop().build();
+    let envs = minimal_envs()
+        .with_bucket_capacity(slot_bucket(CONTRACT, U256::from(SLOT)), MIN_BUCKET_SIZE as u64);
+
+    let outcome = run(db(code), envs, call_contract());
+    assert_eq!(outcome.gas.state, entry(GasId::sstore_set_state_gas()));
 }
 
 /// A system-originated transaction is priced at the minimum bucket without reading SALT, so a

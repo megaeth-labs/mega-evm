@@ -24,6 +24,9 @@ pub const MIN_BUCKET_SIZE_BITS: usize = 8;
 /// Buckets hold accounts or storage slots and can grow beyond this size. The gas cost
 /// multiplier is calculated as `capacity / MIN_BUCKET_SIZE`, so a bucket at minimum
 /// capacity has a 1x multiplier.
+///
+/// This is also the smallest capacity a [`SaltEnv`] may report: a smaller answer is one no bucket
+/// can have, and is treated as a failed lookup rather than as the cheapest bucket there is.
 pub const MIN_BUCKET_SIZE: usize = 1 << MIN_BUCKET_SIZE_BITS;
 
 /// Interface for SALT bucket capacity information.
@@ -57,6 +60,9 @@ pub trait SaltEnv: Debug + Unpin {
     /// ```
     /// This multiplier scales the base storage gas costs, making operations more expensive
     /// as buckets grow.
+    ///
+    /// [`MIN_BUCKET_SIZE`] is the smallest capacity an implementation may report. Reporting less
+    /// fails the transaction the way an error here does; it is not rounded up to the minimum.
     ///
     /// # Arguments
     ///

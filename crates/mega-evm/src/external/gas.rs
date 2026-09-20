@@ -10,11 +10,51 @@
 //! that prices state gas runs on every state charge and every refill of one, so the reads are
 //! cached here: [`BucketMultipliers`] queries a bucket once per transaction and answers every
 //! later charge on that bucket from the cache.
+//!
+//! [`MIN_BUCKET_SIZE`] is the smallest capacity a backend may report. A capacity below it is a
+//! broken backend rather than a cheap bucket, and is treated as a failed lookup
+//! ([`BucketError::BelowMinimum`]) rather than rounded up to the minimum: a report the engine
+//! cannot make sense of must not become a price nobody chose.
+
+use core::fmt;
 
 use alloy_primitives::{map::Entry, Address};
 use revm::primitives::{HashMap, StorageKey};
 
 use crate::{BucketId, SaltEnv, MIN_BUCKET_SIZE};
+
+/// Why a SALT bucket's multiplier could not be established.
+///
+/// Both variants fail the transaction the same way: the pricing hook reports nothing and records
+/// the cause, and the charge site bails out. They are kept apart because they say different
+/// things about the backend — one could not answer, the other answered something a bucket cannot
+/// hold.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BucketError<E> {
+    /// The SALT environment could not report the bucket's capacity.
+    Env(E),
+    /// The SALT environment reported a capacity below [`MIN_BUCKET_SIZE`], which is the smallest
+    /// a bucket can hold.
+    BelowMinimum {
+        /// The bucket that was asked for.
+        bucket: BucketId,
+        /// The capacity the environment reported for it.
+        capacity: u64,
+    },
+}
+
+impl<E: fmt::Display> fmt::Display for BucketError<E> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Env(error) => write!(f, "{error}"),
+            Self::BelowMinimum { bucket, capacity } => write!(
+                f,
+                "bucket {bucket} reports capacity {capacity}, below the minimum bucket of \
+                 {MIN_BUCKET_SIZE}",
+            ),
+        }
+    }
+}
 
 /// The SALT bucket multipliers the running transaction has looked up.
 ///
@@ -38,25 +78,28 @@ impl BucketMultipliers {
     }
 
     /// The multiplier a bucket of `capacity` entries prices with: `capacity / MIN_BUCKET_SIZE`,
-    /// never below one.
+    /// or nothing when that capacity is below the minimum a bucket can hold.
     ///
-    /// A bucket cannot hold fewer entries than the minimum, so the floor only guards against an
-    /// environment that reports one that does: without it such a report would price every state
-    /// charge in that bucket at zero, which is the one answer that must not be reachable from
-    /// outside the engine.
+    /// A bucket cannot hold fewer entries than the minimum, so a report that one does is a broken
+    /// backend. Rounding it up to the minimum would let a misreport pass as the cheapest price
+    /// there is; reporting nothing fails the transaction instead, the way any other unanswerable
+    /// lookup does. The one answer that must not be reachable from outside the engine —
+    /// `m = 0`, which prices every state charge in the bucket at zero — is neither.
     #[inline]
-    pub const fn for_capacity(capacity: u64) -> u64 {
-        let multiplier = capacity / MIN_BUCKET_SIZE as u64;
-        if multiplier == 0 {
-            1
-        } else {
-            multiplier
+    pub const fn for_capacity(capacity: u64) -> Option<u64> {
+        match capacity / MIN_BUCKET_SIZE as u64 {
+            0 => None,
+            multiplier => Some(multiplier),
         }
     }
 
     /// The multiplier of the bucket `account`'s own state lives in.
     #[inline]
-    pub fn account<S: SaltEnv>(&mut self, salt_env: &S, account: Address) -> Result<u64, S::Error> {
+    pub fn account<S: SaltEnv>(
+        &mut self,
+        salt_env: &S,
+        account: Address,
+    ) -> Result<u64, BucketError<S::Error>> {
         self.of_bucket(salt_env, S::bucket_id_for_account(account))
     }
 
@@ -67,18 +110,27 @@ impl BucketMultipliers {
         salt_env: &S,
         address: Address,
         key: StorageKey,
-    ) -> Result<u64, S::Error> {
+    ) -> Result<u64, BucketError<S::Error>> {
         self.of_bucket(salt_env, S::bucket_id_for_slot(address, key))
     }
 
     /// The multiplier of `bucket`, read from `salt_env` the first time this transaction asks for
     /// it and from the cache afterwards.
+    ///
+    /// Only a multiplier is cached, so a bucket whose capacity could not be turned into one is
+    /// asked for again rather than remembered as anything.
     #[inline]
-    fn of_bucket<S: SaltEnv>(&mut self, salt_env: &S, bucket: BucketId) -> Result<u64, S::Error> {
+    fn of_bucket<S: SaltEnv>(
+        &mut self,
+        salt_env: &S,
+        bucket: BucketId,
+    ) -> Result<u64, BucketError<S::Error>> {
         match self.cached.entry(bucket) {
             Entry::Occupied(entry) => Ok(*entry.get()),
             Entry::Vacant(entry) => {
-                let multiplier = Self::for_capacity(salt_env.get_bucket_capacity(bucket)?);
+                let capacity = salt_env.get_bucket_capacity(bucket).map_err(BucketError::Env)?;
+                let multiplier = Self::for_capacity(capacity)
+                    .ok_or(BucketError::BelowMinimum { bucket, capacity })?;
                 Ok(*entry.insert(multiplier))
             }
         }
@@ -125,25 +177,45 @@ mod tests {
     fn test_the_multiplier_is_the_capacity_in_minimum_buckets() {
         let min = MIN_BUCKET_SIZE as u64;
         for factor in [1, 2, 8, 1_000, u32::MAX as u64] {
-            assert_eq!(BucketMultipliers::for_capacity(min * factor), factor, "{factor}x");
+            assert_eq!(BucketMultipliers::for_capacity(min * factor), Some(factor), "{factor}x");
         }
         // A capacity between two whole multiples rounds down to the lower one: a bucket pays for
         // the minimum buckets it has filled, not for the one it has started.
-        assert_eq!(BucketMultipliers::for_capacity(min * 2 + min / 2), 2);
-        assert_eq!(BucketMultipliers::for_capacity(u64::MAX), u64::MAX / min);
+        assert_eq!(BucketMultipliers::for_capacity(min * 2 + min / 2), Some(2));
+        assert_eq!(BucketMultipliers::for_capacity(u64::MAX), Some(u64::MAX / min));
     }
 
-    /// A capacity below the minimum — which a bucket cannot have — still prices at one rather
-    /// than at zero, so no environment can make state gas free.
+    /// A capacity below the minimum is a capacity no bucket can have, so it is reported as a
+    /// failed lookup rather than rounded up to the minimum: a backend that misreports must fail
+    /// the transaction, not hand it the cheapest price there is.
     #[test]
-    fn test_a_capacity_below_the_minimum_still_multiplies_by_one() {
+    fn test_a_capacity_below_the_minimum_is_a_failed_lookup() {
         for capacity in [0, 1, MIN_BUCKET_SIZE as u64 - 1] {
-            assert_eq!(BucketMultipliers::for_capacity(capacity), 1, "capacity {capacity}");
+            assert_eq!(BucketMultipliers::for_capacity(capacity), None, "capacity {capacity}");
         }
 
         let bucket = account_bucket(ACCOUNT);
         let env = Env::new().with_bucket_capacity(bucket, 0);
-        assert_eq!(BucketMultipliers::default().account(&env, ACCOUNT), Ok(1));
+        let mut cache = BucketMultipliers::default();
+        assert_eq!(
+            cache.account(&env, ACCOUNT),
+            Err(BucketError::BelowMinimum { bucket, capacity: 0 }),
+        );
+        assert_eq!(cache.cached_buckets().len(), 0, "nothing was cached for it");
+    }
+
+    /// The two failures read differently, so a node can tell a backend that could not answer from
+    /// one that answered something impossible.
+    #[test]
+    fn test_the_two_bucket_failures_say_what_went_wrong() {
+        let unreachable: BucketError<String> = BucketError::Env("salt backend unreachable".into());
+        assert_eq!(unreachable.to_string(), "salt backend unreachable");
+
+        let below: BucketError<String> = BucketError::BelowMinimum { bucket: 7, capacity: 3 };
+        assert_eq!(
+            below.to_string(),
+            format!("bucket 7 reports capacity 3, below the minimum bucket of {MIN_BUCKET_SIZE}"),
+        );
     }
 
     /// A crowded bucket scales every charge on it, and an account and a slot are read through
@@ -203,7 +275,10 @@ mod tests {
             .with_failing_bucket(bucket, "salt backend unreachable".into());
         let mut cache = BucketMultipliers::default();
 
-        assert_eq!(cache.account(&env, ACCOUNT), Err("salt backend unreachable".into()));
+        assert_eq!(
+            cache.account(&env, ACCOUNT),
+            Err(BucketError::Env("salt backend unreachable".into())),
+        );
         assert_eq!(cache.cached_buckets().len(), 0, "a failed lookup caches nothing");
         // It is not cached either, so the next charge asks again.
         assert!(cache.account(&env, ACCOUNT).is_err());
