@@ -250,6 +250,24 @@ mod tests {
         );
     }
 
+    /// `contains` answers for the set the provider carries: every Satin address is a precompile
+    /// and an address outside the set is not. Nothing in revm's execution path asks, so only a
+    /// direct call covers it; a node's RPC is the caller that does.
+    #[test]
+    fn test_contains_answers_for_the_satin_set() {
+        let map = satin_precompiles_map();
+        let contains = |address: &Address| {
+            PrecompileProvider::<MegaContext<&mut MemoryDatabase>>::contains(&map, address)
+        };
+        for address in satin_precompiles().addresses() {
+            assert!(contains(address), "{address} is a precompile");
+        }
+        assert!(contains(&kzg_point_evaluation::ADDRESS));
+        for address in [Address::ZERO, Address::repeat_byte(0xee), Address::with_last_byte(0x7f)] {
+            assert!(!contains(&address), "{address} is not a precompile");
+        }
+    }
+
     /// Every other Karst entry is op-revm's, at the address op-revm has it.
     #[test]
     fn test_every_other_entry_is_the_karst_one() {

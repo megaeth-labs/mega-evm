@@ -14,7 +14,7 @@ use mega_evm::{
     MegaEvm,
 };
 use revm::{
-    bytecode::opcode::{MSTORE, PUSH0, RETURN, STATICCALL},
+    bytecode::opcode::{MSTORE, POP, PUSH0, RETURN, STATICCALL},
     precompile::kzg_point_evaluation::kzg_to_versioned_hash,
     primitives::hex,
 };
@@ -153,6 +153,47 @@ fn test_every_verification_failure_burns_the_forwarded_gas() {
             "{name} burns what was forwarded"
         );
     }
+}
+
+/// The precompile addresses are warm from the start of a transaction, so a call to one pays no
+/// cold-account surcharge where a call to a plain address of the same shape does.
+#[test]
+fn test_the_precompile_addresses_are_warm() {
+    /// The identity precompile: 15 gas for an empty input.
+    const IDENTITY: Address = address!("0000000000000000000000000000000000000004");
+    /// A plain address that holds nothing, so a call to it is a cold account access.
+    const PLAIN: Address = address!("00000000000000000000000000000000000000ee");
+
+    // `STATICCALL(50_000, target, 0, 0, 0, 0)` and stop: the call itself is the only difference.
+    let caller_of = |target: Address| {
+        BytecodeBuilder::default()
+            .push_number(0u64)
+            .push_number(0u64)
+            .push_number(0u64)
+            .push_number(0u64)
+            .push_address(target)
+            .push_number(50_000u64)
+            .append(STATICCALL)
+            .append(POP)
+            .stop()
+            .build()
+    };
+    let gas_of = |target: Address| {
+        let db = MemoryDatabase::default()
+            .account_balance(CALLER, U256::from(10u64.pow(18)))
+            .account_code(CONTRACT, caller_of(target));
+        let mut evm = MegaEvm::new(context(db));
+        let result = evm
+            .transact_raw(call(CALLER, CONTRACT, U256::ZERO, GAS_LIMIT))
+            .expect("the transaction is valid")
+            .result;
+        assert!(result.is_success(), "{result:?}");
+        result.gas().tx_gas_used()
+    };
+
+    // The cold surcharge the plain address pays and the precompile does not, less the 15 gas the
+    // identity precompile charges for an empty input.
+    assert_eq!(gas_of(PLAIN) - gas_of(IDENTITY), 2_500 - 15);
 }
 
 /// A caller that forwards less than the price is out of gas before verification runs, so the
