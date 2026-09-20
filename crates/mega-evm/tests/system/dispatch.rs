@@ -246,3 +246,36 @@ fn test_a_transaction_that_touches_no_system_contract_is_untouched() {
     let result = run(with_contract(code), call_tx(CONTRACT, [], U256::ZERO));
     assert!(result.result.is_success());
 }
+
+/// The two system contracts without an interceptor run their bytecode, whatever the call
+/// carries and whichever scheme makes it: an unknown selector reverts in their dispatcher, where
+/// a call to an account without code would succeed.
+#[test]
+fn test_the_contracts_without_an_interceptor_run_their_bytecode() {
+    use mega_evm::system::{HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS, SEQUENCER_REGISTRY_ADDRESS};
+    use revm::bytecode::opcode::{CALLCODE, DELEGATECALL, STATICCALL};
+
+    for address in [HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS, SEQUENCER_REGISTRY_ADDRESS] {
+        // As a transaction, with a selector neither contract knows and with none at all.
+        for data in [vec![0xde, 0xad, 0xbe, 0xef], Vec::new()] {
+            let result = run(system_db(), call_tx(address, &data, U256::ZERO));
+            assert!(!result.result.is_success(), "{address} answered {data:?} without its code");
+        }
+
+        // Through every call scheme, including the two the scheme guard refuses.
+        for scheme in [CALL, STATICCALL, CALLCODE, DELEGATECALL] {
+            let code = crate::common::calls_with(scheme, address, &[0xde, 0xad, 0xbe, 0xef], 0);
+            let result = run(with_contract(code), call_tx(CONTRACT, [], U256::ZERO));
+            let outcome = output(&result);
+            let (status, _) = crate::common::split_outcome(&outcome);
+            assert!(!status, "{address} answered scheme {scheme:#x} without its code");
+        }
+
+        // A call that carries value is the bytecode's to refuse.
+        let code = crate::common::calls_with(CALL, address, &[0xde, 0xad, 0xbe, 0xef], 1);
+        let result = run(with_contract(code), call_tx(CONTRACT, [], U256::ZERO));
+        let outcome = output(&result);
+        let (status, _) = crate::common::split_outcome(&outcome);
+        assert!(!status, "{address} took value without its code");
+    }
+}
