@@ -11,6 +11,9 @@
 //! module for the dispatch order and the shape of an answer). The timestamp wrapper and the
 //! `SequencerRegistry` run their bytecode.
 //!
+//! [`tx`](tx) holds the system-address transaction: the deposit-like transaction the sequencer
+//! maintains the protocol's own state with.
+//!
 //! Deploying the contracts at the fork that activates them belongs to system contract
 //! deployment; it is not here.
 
@@ -22,6 +25,7 @@ mod limit_control;
 mod oracle;
 mod sequencer_registry;
 mod timestamp;
+mod tx;
 
 pub use control::*;
 pub use intercept::NON_ZERO_TRANSFER_REVERT_DATA;
@@ -29,8 +33,10 @@ pub use limit_control::*;
 pub use oracle::*;
 pub use sequencer_registry::*;
 pub use timestamp::*;
+pub use tx::*;
 
 pub(crate) use intercept::intercept;
+pub(crate) use tx::validate_and_promote;
 
 #[cfg(test)]
 mod tests {
