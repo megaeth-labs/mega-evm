@@ -108,7 +108,7 @@ The root `Cargo.toml` pins `revm = "=40.0.3"` and redirects all twelve revm crat
 - The common execution layer counts data-size bytes and write records per frame and enforces nothing by default; `EvmTxRuntimeLimits` sets a data-size cap and a frame budget to drive the abort protocol.
 - `MegaBlockExecutor` runs a block: alloy-evm's `BlockExecutor` over a `MegaEvm`, mirroring what alloy-op-evm's `OpBlockExecutor` does for an OP chain.
   It applies the three block rules of the Karst base — an activation block admits only deposits, the data-availability footprint is a block limit reported as the block's blob gas, and the L1 block info is read by the first transaction that prices against it — holds every transaction to `BlockLimits` and fills `BlockGasCounters`.
-  `apply_pre_execution_changes` refuses a rewriting inspector and names two hook points that are empty today: system contract deployment and the pre-block system calls.
+  It refuses a rewriting inspector at every entry point, and `apply_pre_execution_changes` names two hook points that are empty today: system contract deployment and the pre-block system calls.
 - The legacy engine's gas leakage pitfalls, limit-check protocol and storage-gas stipend describe mechanisms that do not exist here; the contracts below replace them.
 
 ### Contracts of the common execution layer
@@ -139,6 +139,8 @@ Every later mechanism plugs into these; a change to one comes back to this layer
   A result built without running a frame is a `synthetic_frame_result`: gas untouched with the inherited reservoir (`untouched_call_gas`, `with_pools_of`), never `Gas::new(limit)`, and the calling opcode's upfront state-gas flags, so it settles exactly like revm's own (`settle_frame_result`).
 - **The admission gate.**
   A rewriting inspector is a tool feature; `with_trusted_inspector` requires a `TrustedObserver` declaration, `has_rewriting_inspector` is what block execution refuses, and `DeclaredObserver` carries the declaration for a foreign tracer and proves it in debug builds.
+  alloy-evm's `BlockExecutorFactory` asks for an executor for every `I: Inspector`, so the refusal cannot be a bound on the type: block execution checks it at every entry point — the pre-block changes, a transaction, a commit and the end of the block — because an inspector can be enabled after the block was set up and a caller can run transactions without setting it up.
+  `create_executor_with_trusted_inspector` is the compile-time proof; `create_executor` is the checked route.
   The one rewrite refused is a failed creation turned into a success (`FORBIDDEN_CREATE_REVIVAL`, an `EVMError::Custom`).
   The test utilities' inspectors are not declared.
 - **Three ledgers.**

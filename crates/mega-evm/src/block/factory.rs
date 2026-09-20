@@ -57,8 +57,10 @@ where
     ///
     /// This is the one way an inspected transaction reaches a block: the inspector's type
     /// declares that it writes nothing back ([`TrustedObserver`]), so what the block executes is
-    /// what the chain executes. An inspector without that declaration is refused by
-    /// [`apply_pre_execution_changes`](alloy_evm::block::BlockExecutor::apply_pre_execution_changes).
+    /// what the chain executes, and this bound is the compile-time proof of it. An inspector
+    /// that arrives through [`create_executor`](BlockExecutorFactory::create_executor) carries no
+    /// such proof, so block execution checks it at every entry point instead and refuses it with
+    /// `RewritingInspector`.
     pub fn create_executor_with_trusted_inspector<DB, I>(
         &self,
         db: DB,
@@ -103,10 +105,10 @@ where
 
     /// Creates an executor over an EVM the caller built.
     ///
-    /// The block's transaction-level limits are installed here, so the two ways to reach an
-    /// executor — this one and
-    /// [`create_executor_with_trusted_inspector`](Self::create_executor_with_trusted_inspector) —
-    /// run every transaction under the same limits, whatever the caller did or did not apply.
+    /// alloy-evm asks for an executor for every `I: Inspector`, so this route cannot refuse a
+    /// rewriting inspector by its type; the executor checks the EVM at every entry point instead.
+    /// [`create_executor_with_trusted_inspector`](Self::create_executor_with_trusted_inspector) is
+    /// the route whose bound proves the inspector observes only.
     fn create_executor<'a, DB, I>(
         &'a self,
         evm: MegaEvm<DB, I, ExtEnvFactory::EnvTypes>,

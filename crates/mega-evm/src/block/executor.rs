@@ -22,6 +22,18 @@
 //!   block contract reads as zeroes, not as an error, and a caller that placed its own info for
 //!   this block keeps it. alloy-op-evm's executor pre-loads no info either.
 //!
+//! # The admission gate
+//!
+//! Block execution refuses an inspector that may rewrite what execution produces
+//! ([`MegaEvm::has_rewriting_inspector`]). alloy-evm's `BlockExecutorFactory` asks for an executor
+//! for every `I: Inspector`, so the refusal cannot be a bound on the type: it is checked at every
+//! entry point that runs code or moves the block on — the pre-block changes, the execution of a
+//! transaction, the commit of an outcome and the end of the block — before anything changes. The
+//! trusted route
+//! ([`create_executor_with_trusted_inspector`](crate::MegaBlockExecutorFactory::create_executor_with_trusted_inspector))
+//! is the compile-time proof that an inspector observes and writes nothing back; the generic route
+//! is the checked one.
+//!
 //! # What later mechanisms fill in
 //!
 //! [`apply_pre_execution_changes`](BlockExecutor::apply_pre_execution_changes) names two hook
@@ -261,6 +273,19 @@ where
     fn commit(&mut self, state: EvmState) {
         self.evm.ctx_mut().db_mut().commit(state);
     }
+
+    /// Refuses an EVM that runs an inspector which may rewrite what execution produces.
+    ///
+    /// Checked at every entry point rather than once, because the inspector can be enabled after
+    /// the block was set up ([`Evm::set_inspector_enabled`] through
+    /// [`evm_mut`](BlockExecutor::evm_mut)) and because a caller may run transactions without
+    /// calling [`apply_pre_execution_changes`](BlockExecutor::apply_pre_execution_changes) at all.
+    fn check_admission(&self) -> Result<(), BlockExecutionError> {
+        if self.evm.has_rewriting_inspector() {
+            return Err(MegaBlockExecutionError::RewritingInspector.into());
+        }
+        Ok(())
+    }
 }
 
 impl<DB, INSP, ExtEnvs, R, Spec> MegaBlockExecutor<MegaEvm<DB, INSP, ExtEnvs>, R, Spec>
@@ -314,9 +339,7 @@ where
     /// pending changes the sequencer registry holds. Both arrive with the mechanisms of those
     /// names, after the pre-block calls.
     fn apply_pre_execution_changes(&mut self) -> Result<(), BlockExecutionError> {
-        if self.evm.has_rewriting_inspector() {
-            return Err(MegaBlockExecutionError::RewritingInspector.into());
-        }
+        self.check_admission()?;
 
         let state = eips::transact_blockhashes_contract_call(
             &self.spec,
@@ -489,6 +512,7 @@ where
         &mut self,
         output: MegaBlockTxResult<<R::Transaction as TransactionEnvelope>::TxType>,
     ) -> Result<GasOutput, BlockExecutionError> {
+        self.check_admission()?;
         self.limiter.pre_execution_check(
             output.tx_hash,
             output.gas_limit,
@@ -509,6 +533,8 @@ where
         MegaBlockTxResult<<R::Transaction as TransactionEnvelope>::TxType>,
         BlockExecutionError,
     > {
+        self.check_admission()?;
+
         let (tx_env, tx) = tx.into_parts();
         let inner = tx.tx();
         let is_deposit = inner.ty() == DEPOSIT_TRANSACTION_TYPE;
@@ -609,6 +635,8 @@ where
     pub fn finish_with_counters(
         mut self,
     ) -> Result<MegaFinishedBlock<DB, INSP, ExtEnvs, R>, BlockExecutionError> {
+        self.check_admission()?;
+
         let balance_increments =
             post_block_balance_increments::<Header>(&self.spec, self.evm.block(), &[], None);
         self.evm
