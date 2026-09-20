@@ -264,7 +264,8 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
     /// 1. the latch: a latched transaction's frame is answered with the stop;
     /// 2. the depth guard: a `CALL` or `STATICCALL` past the call-stack limit is answered with
     ///    `CallTooDeep` before anything could intercept it;
-    /// 3. system contract interception ([`MegaEvm::intercept`]);
+    /// 3. system contract interception ([`MegaEvm::intercept`]), which answers the frame or charges
+    ///    it;
     /// 4. the keyless deployment rewrite ([`MegaEvm::rewrite_keyless`]);
     /// 5. the frame's lane is pushed and the writes its start makes are counted; a limit they cross
     ///    answers the frame with the stop before it runs;
@@ -281,13 +282,12 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
     #[inline]
     fn frame_init(
         &mut self,
-        frame_init: FrameInit,
+        mut frame_init: FrameInit,
     ) -> Result<FrameInitResult<'_, Self::Frame>, ContextDbError<Self::Context>> {
         if let Some(result) = answer_before_building(&mut self.inner.ctx, &frame_init)? {
             self.inner.ctx.additional_limit.push_empty_frame();
             return Ok(ItemOrResult::Result(result));
         }
-        let mut frame_init = frame_init;
         if let Some(result) = self.intercept(&mut frame_init) {
             self.inner.ctx.additional_limit.push_empty_frame();
             return Ok(ItemOrResult::Result(result));
