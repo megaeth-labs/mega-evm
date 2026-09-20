@@ -204,6 +204,26 @@ mod tests {
         }))
     }
 
+    /// The factory prints its external environment factory and whether a precompile builder is
+    /// installed. A closure has no `Debug`, so the builder is reported as a flag rather than
+    /// dropped: a reader of a node's log can tell the two configurations apart.
+    #[test]
+    fn test_debug_reports_whether_a_precompile_builder_is_installed() {
+        let factory = MegaEvmFactory::new();
+        assert_eq!(
+            format!("{factory:?}"),
+            "MegaEvmFactory { external_env_factory: EmptyExternalEnv, \
+             dyn_precompiles_builder: false }"
+        );
+
+        let with_builder = factory.with_dyn_precompiles_builder(Arc::new(|_| HashMap::default()));
+        assert_eq!(
+            format!("{with_builder:?}"),
+            "MegaEvmFactory { external_env_factory: EmptyExternalEnv, \
+             dyn_precompiles_builder: true }"
+        );
+    }
+
     /// The builder runs once per EVM, is handed the spec the EVM executes, and what it returns
     /// answers a call to its address.
     #[test]
