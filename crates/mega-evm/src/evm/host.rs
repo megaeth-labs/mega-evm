@@ -10,7 +10,8 @@
 //! back: `SSTORE` charges its dynamic gas after the Host call, and an out-of-gas there halts the
 //! frame with the record already counted.
 //!
-//! Every other Host method delegates to op-revm's context.
+//! `block_hash` serves the read and records it, so a stateless witness learns of a `BLOCKHASH`
+//! that bypassed the journal. Every other Host method delegates to op-revm's context.
 
 use alloy_primitives::map::Entry;
 use delegate::delegate;
@@ -51,7 +52,6 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
             fn is_amsterdam_eip8037_enabled(&self) -> bool;
             fn state_gas_price(&mut self, id: GasId, site: StateGasSite) -> Option<u64>;
             fn state_gas_charge(&mut self, charge: StateGasCharge) -> Option<u64>;
-            fn block_hash(&mut self, number: u64) -> Option<B256>;
             fn sload_skip_cold_load(
                 &mut self,
                 address: Address,
@@ -72,6 +72,17 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
             fn load_account_code(&mut self, address: Address) -> Option<StateLoad<Bytes>>;
             fn load_account_code_hash(&mut self, address: Address) -> Option<StateLoad<B256>>;
         }
+    }
+
+    /// Serves the hash and records that this block read it.
+    ///
+    /// `BLOCKHASH` reads the chain's history through the database, so a witness built from the
+    /// journal alone would miss it; the record is where a node learns of the read.
+    #[inline]
+    fn block_hash(&mut self, number: u64) -> Option<B256> {
+        let hash = self.inner.block_hash(number)?;
+        self.block_hash_record.record(number, hash);
+        Some(hash)
     }
 
     /// Writes the slot and stages the write's values.

@@ -39,6 +39,10 @@ The common execution layer is in place: the frame lifecycle the later mechanisms
 No limit is enforced by default; `EvmTxRuntimeLimits` sets a data-size cap and a frame budget to exercise the protocol.
 `MegaEvm::execute_transaction` returns the result with the gas split into its regular, state and history ledgers, the usage counted and the limit that stopped the transaction, if any.
 
+Block execution is in place too: `MegaBlockExecutor` is alloy-evm's `BlockExecutor` over a `MegaEvm`, with the block rules of the Karst base — a fork's activation block admits only deposit transactions, the data-availability footprint of the block's transactions is held to the block's gas limit and reported as its blob gas, and the L1 block info is read by the first transaction that prices against it, so the block's own L1 info deposit is what the transactions after it are priced with.
+Every transaction is held to the block's `BlockLimits`, and the block counts what its transactions spent on each of the three ledgers.
+`apply_pre_execution_changes` leaves two hook points empty: system contract deployment and the pre-block system calls.
+
 SALT pricing, history gas, the resource limits, gas detention, the system contracts and keyless deployment arrive in later changes.
 Until history gas lands, nothing prices a history byte and the schedule's history entry stays at zero.
 
@@ -60,7 +64,24 @@ let tx = OpTx(op_revm::OpTransaction {
 let result = evm.transact_raw(tx)?;
 ```
 
-A block executor admits an inspected transaction only from an EVM whose inspector is declared read-only:
+A node executes a block through the factory, which installs the block's limits on the EVM:
+
+```rust,ignore
+use alloy_evm::block::{BlockExecutor as _, BlockExecutorFactory as _};
+use mega_evm::{BlockLimits, MegaBlockExecutionCtx, MegaBlockExecutorFactory, MegaEvmFactory};
+
+let factory = MegaBlockExecutorFactory::new(receipt_builder, chain_spec, MegaEvmFactory::new());
+let ctx = MegaBlockExecutionCtx::new(parent_hash, parent_beacon_block_root, extra_data, BlockLimits::no_limits());
+
+let mut executor = factory.create_executor(evm, ctx);
+executor.apply_pre_execution_changes()?;
+for tx in transactions {
+    executor.execute_transaction(tx)?;
+}
+let (evm, result) = executor.finish_with_counters()?;
+```
+
+Block execution admits an inspected transaction only from an EVM whose inspector is declared read-only:
 
 ```rust,ignore
 use mega_evm::DeclaredObserver;

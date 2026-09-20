@@ -8,7 +8,7 @@ use revm::{
 };
 
 use crate::{
-    constants, evm::schedule::satin_gas_params, AdditionalLimit, EmptyExternalEnv,
+    constants, evm::schedule::satin_gas_params, AdditionalLimit, BlockHashRecord, EmptyExternalEnv,
     EvmTxRuntimeLimits, ExternalEnvTypes, ExternalEnvs, MegaSpecId, MegaTransaction,
 };
 
@@ -34,6 +34,7 @@ pub struct MegaContext<DB: Database, ExtEnvs: ExternalEnvTypes = EmptyExternalEn
     cfg: CfgEnv<MegaSpecId>,
     external_envs: ExternalEnvs<ExtEnvs>,
     pub(crate) additional_limit: AdditionalLimit,
+    pub(crate) block_hash_record: BlockHashRecord,
 }
 
 impl<DB: Database> MegaContext<DB, EmptyExternalEnv> {
@@ -52,7 +53,13 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     ) -> Self {
         let cfg = spec_cfg(CfgEnv::new_with_spec(spec));
         let inner = Context::new(db, spec.into_op_spec()).with_cfg(op_cfg(&cfg));
-        Self { inner, cfg, external_envs, additional_limit: AdditionalLimit::default() }
+        Self {
+            inner,
+            cfg,
+            external_envs,
+            additional_limit: AdditionalLimit::default(),
+            block_hash_record: BlockHashRecord::default(),
+        }
     }
 
     /// Replaces the configuration.
@@ -112,6 +119,19 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     pub fn with_tx_runtime_limits(mut self, limits: EvmTxRuntimeLimits) -> Self {
         self.additional_limit.set_limits(limits);
         self
+    }
+
+    /// The block hashes execution has read on this context.
+    ///
+    /// The record belongs to one block: block execution empties it when the block starts, so it
+    /// never carries a hash an earlier block read.
+    pub const fn block_hash_record(&self) -> &BlockHashRecord {
+        &self.block_hash_record
+    }
+
+    /// Forgets the block hashes read so far.
+    pub fn clear_block_hash_record(&mut self) {
+        self.block_hash_record.clear();
     }
 
     /// The common execution layer's state for the running (or last) transaction.

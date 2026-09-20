@@ -2765,9 +2765,11 @@ name = "mega-evm"
 version = "2.0.0-alpha.1"
 dependencies = [
  "alloy-consensus",
+ "alloy-eips",
  "alloy-evm",
  "alloy-hardforks",
  "alloy-op-evm",
+ "alloy-op-hardforks",
  "alloy-primitives",
  "alloy-sol-types",
  "auto_impl",

@@ -39,10 +39,9 @@ Do not add a `_pending/main.rs`.
 | system contract deployment | 67 | 17 | 50 | 62 | 5 | 0 |
 | the oracle and control contracts | 77 | 77 | 0 | 67 | 10 | 0 |
 | native keyless deployment | 75 | 73 | 2 | 29 | 46 | 0 |
-| the block executor | 53 | 23 | 30 | 39 | 14 | 0 |
 | inspector support | 4 | 4 | 0 | 1 | 3 | 0 |
 | — (undecided: D57 preload-warm cold charging, D58 98/100 forwarding) | 7 | 7 | 0 | 0 | 0 | 7 |
-| **Total** | **713** | **597** | **116** | **419** | **266** | **28** |
+| **Total** | **660** | **574** | **86** | **380** | **252** | **28** |
 
 ## Tests ported in place
 
@@ -144,12 +143,33 @@ These 34 rows run in a real test target now, adapted to the Satin API and to the
 | `src/evm/precompiles.rs` | the Satin gas table (6) | 6 | `src/evm/precompiles.rs` |
 | **Total** | | **34** | |
 
+## Tests ported by the block executor
+
+These 53 rows run in a real test target now, adapted to the Satin API, so the counts above are lower than the inventory's by exactly these rows.
+
+| Legacy file | Owner in the inventory | Tests | Now in |
+|---|---|---:|---|
+| `block_executor/accessed_block_hashes.rs` | the block executor (1) | 1 | `tests/block/block_hashes.rs` |
+| `block_executor/block_limits.rs` | the block executor (12) | 12 | `tests/block/limits.rs` |
+| `block_executor/canonical_schedule.rs` | the block executor (1) | 1 | `tests/block/schedule.rs` |
+| `block_executor/deposit_da_exemption.rs` | the block executor (4) | 4 | `tests/block/limits.rs` |
+| `block_executor/trait_factory_runtime_limits.rs` | the block executor (4) | 4 | `tests/block/factory.rs` |
+| `rex6/sequencer_registry_rotation.rs` | the block executor (1) | 1 | `tests/block/schedule.rs` |
+| `src/block/chain.rs` | the block executor (5) | 5 | `src/block/chain.rs` |
+| `src/block/eips.rs` | the block executor (1) | 1 | `src/block/eips.rs` |
+| `src/block/hardfork.rs` | the block executor (12) | 12 | `src/block/hardfork.rs` |
+| `src/block/helpers.rs` | the block executor (3) | 3 | `src/block/helpers.rs` |
+| `src/block/limit.rs` | the block executor (5) | 5 | `src/block/limit.rs` |
+| `src/block/result.rs` | the block executor (2) | 2 | `src/block/result.rs` |
+| `src/evm/mod.rs` | the block executor (1) | 1 | `src/evm/mod.rs` |
+| `src/evm/state.rs` | the block executor (1) | 1 | `src/evm/state.rs` |
+| **Total** | | **53** | |
+
 ## Tests the inventory assigns to the Satin skeleton that are parked under another mechanism
 
 | File | Test | Parked under | Reason |
 |---|---|---|---|
 | `src/evm/context.rs` | `test_shared_salt_env_keeps_dynamic_gas_cache_isolated` | SALT pricing | exercises the dynamic storage-gas cache that SALT pricing brings back |
-| `src/evm/mod.rs` | `test_mega_evm_exposes_state_wrapper_block_hashes` | the block executor | reads the accessed-block-hash record, which returns with the block executor |
 
 ## Files
 
@@ -157,13 +177,9 @@ Each cell lists `disposition count (mechanism · decision)`.
 
 | File | Tests | Owners |
 |---|---:|---|
-| `block_executor/accessed_block_hashes.rs` | 1 | keep 1 (the block executor) |
-| `block_executor/block_limits.rs` | 14 | keep 12 (the block executor · D47); undecided 2 (the state-growth and KV limits · D46) |
-| `block_executor/canonical_schedule.rs` | 1 | rewrite 1 (the block executor · single Satin fork; the specification pages own the doc side) |
-| `block_executor/deposit_da_exemption.rs` | 4 | keep 4 (the block executor · D23) |
+| `block_executor/block_limits.rs` | 2 | undecided 2 (the state-growth and KV limits · D46) |
 | `block_executor/inspector.rs` | 3 | keep 1 (inspector support); rewrite 2 (inspector support · D39/D41) |
 | `block_executor/sequencer_registry.rs` | 8 | keep 8 (system contract deployment) |
-| `block_executor/trait_factory_runtime_limits.rs` | 4 | rewrite 4 (the block executor · D10 (200M execution cap replaces compute-gas runtime limit)) |
 | `compute_gas/claims.rs` | 10 | keep 2 (the system contract interceptors); rewrite 2 (compute gas · D53 (compute = regular spent; state spill excluded)); undecided 5 (— · D57, open: whether preload-warm addresses (precompile / beneficiary / access-list) are charged cold); rewrite 1 (the data-size limit · D33/D48) |
 | `compute_gas/main.rs` | 1 | rewrite 1 (compute gas · D53) |
 | `mini_rex/access_beneficiary_balance.rs` | 10 | keep 9 (detention · D08); rewrite 1 (revert-class aborts · D48) |
@@ -225,19 +241,12 @@ Each cell lists `disposition count (mechanism · decision)`.
 | `rex6/keyless_sandbox_hardening.rs` | 3 | rewrite 1 (native keyless deployment · D44 / EIP-6780 native); keep 2 (native keyless deployment · canonical CREATE rules) |
 | `rex6/oracle_hint_volatile_access.rs` | 4 | keep 4 (the oracle and control contracts) |
 | `rex6/self_transfer_account_dedup.rs` | 1 | keep 1 (the data-size limit) |
-| `rex6/sequencer_registry_rotation.rs` | 6 | keep 5 (system contract deployment); keep 1 (the block executor · params validation at load) |
+| `rex6/sequencer_registry_rotation.rs` | 5 | keep 5 (system contract deployment) |
 | `rex6/system_tx_metering_exemption.rs` | 3 | rewrite 3 (SALT pricing · D51 (m = 1 for system source; history exempt)) |
 | `src/access/volatile.rs` | 4 | keep 4 (detention) |
-| `src/block/chain.rs` | 5 | rewrite 4 (the block executor · Satin activation timestamps; fallback pin = Satin); keep 1 (the block executor) |
-| `src/block/eips.rs` | 1 | keep 1 (the block executor) |
-| `src/block/hardfork.rs` | 12 | rewrite 3 (the block executor · single fork); keep 9 (the block executor) |
-| `src/block/helpers.rs` | 3 | keep 3 (the block executor) |
-| `src/block/limit.rs` | 5 | keep 5 (the block executor) |
-| `src/block/result.rs` | 2 | rewrite 2 (the block executor · D48 (error shape)) |
 | `src/evm/context.rs` | 1 | keep 1 (SALT pricing · SALT pricing for the SALT cache test) |
 | `src/evm/host.rs` | 1 | keep 1 (SALT pricing) |
-| `src/evm/mod.rs` | 4 | keep 3 (the pre-block system calls); keep 1 (the block executor) |
-| `src/evm/state.rs` | 1 | keep 1 (the block executor) |
+| `src/evm/mod.rs` | 3 | keep 3 (the pre-block system calls) |
 | `src/external/gas.rs` | 9 | rewrite 9 (SALT pricing · D12/D51) |
 | `src/limit/compute_gas.rs` | 1 | rewrite 1 (detention · D40/D48) |
 | `src/limit/data_size.rs` | 2 | keep 2 (the data-size limit) |
