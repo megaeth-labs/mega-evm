@@ -16,7 +16,7 @@ use alloy_eips::{
     eip7702::{Authorization, RecoveredAuthority, RecoveredAuthorization},
 };
 use alloy_op_evm::OpTx;
-use alloy_primitives::{address, Address, Bytes, TxKind, U256};
+use alloy_primitives::{address, Address, Bytes, TxKind, B256, U256};
 use mega_evm::{
     satin_gas_params,
     test_utils::{op_transaction, zero_fee_l1_block_info, BytecodeBuilder, MemoryDatabase},
@@ -152,6 +152,23 @@ pub(crate) fn tx_with_gas(
         gas_limit,
         ..Default::default()
     }))
+}
+
+/// A deposit transaction from `CALLER` to `to`, at [`GAS_LIMIT`].
+///
+/// A non-zero source hash is what makes op-revm classify a transaction as a deposit, and
+/// `is_system_transaction` is left off: this is the deposit shape a user can produce, not the
+/// sequencer's own system transaction.
+pub(crate) fn deposit_tx(to: Address) -> MegaTransaction {
+    let mut tx = op_transaction(TxEnv {
+        caller: CALLER,
+        kind: TxKind::Call(to),
+        gas_limit: GAS_LIMIT,
+        ..Default::default()
+    });
+    tx.deposit.source_hash = B256::from([0x42; 32]);
+    tx.deposit.is_system_transaction = false;
+    OpTx(tx)
 }
 
 /// A type-4 transaction from `CALLER` to `to`, delegating `AUTHORITY` to `DELEGATE`.
@@ -522,6 +539,45 @@ fn test_a_user_transaction_into_the_same_bucket_pays_the_crowded_price() {
     assert_eq!(outcome.gas.state, entry(GasId::sstore_set_state_gas()) * 8);
     assert_eq!(envs.total_bucket_queries(), 1);
     assert!(!evm.ctx().is_system_originated());
+}
+
+/// A deposit transaction is deliberately not system-originated, and pays the crowded price like
+/// any other transaction a user sends. A deposit is a shape a user can produce, so matching it
+/// here would be a way around the scaling.
+#[test]
+fn test_a_deposit_transaction_pays_the_crowded_price() {
+    const SLOT: u64 = 7;
+    let code = BytecodeBuilder::default().sstore(U256::from(SLOT), U256::from(1)).stop().build();
+    let envs = crowded_slot(minimal_envs(), CONTRACT, U256::from(SLOT), 8);
+
+    let mut evm = MegaEvm::new(salt_context(db(code), envs.clone()));
+    let tx = deposit_tx(CONTRACT);
+    assert_ne!(tx.0.deposit.source_hash, B256::ZERO, "the probe must be a deposit");
+    assert!(!tx.0.deposit.is_system_transaction, "and not a system deposit");
+
+    let outcome = evm.execute_transaction(tx).expect("the probe is valid");
+    assert!(outcome.result.is_success(), "{:?}", outcome.result);
+
+    assert_eq!(outcome.gas.state, entry(GasId::sstore_set_state_gas()) * 8);
+    assert_eq!(envs.total_bucket_queries(), 1, "the deposit read the bucket it writes into");
+    assert!(!evm.ctx().is_system_originated());
+}
+
+/// And a deposit whose bucket cannot be read fails, exactly as a plain transaction does: not
+/// being system-originated cuts both ways.
+#[test]
+fn test_an_unpriceable_deposit_transaction_fails() {
+    const SLOT: u64 = 7;
+    let code = BytecodeBuilder::default().sstore(U256::from(SLOT), U256::from(1)).stop().build();
+    let envs = minimal_envs()
+        .with_failing_bucket(slot_bucket(CONTRACT, U256::from(SLOT)), "salt backend down".into());
+
+    match try_run(db(code), envs, deposit_tx(CONTRACT)) {
+        Err(EVMError::Custom(message)) => {
+            assert!(message.contains("salt backend down"), "got {message:?}");
+        }
+        other => panic!("expected the recorded cause, got {other:?}"),
+    }
 }
 
 /// The exemption belongs to one transaction: a user transaction run on the same EVM right after
