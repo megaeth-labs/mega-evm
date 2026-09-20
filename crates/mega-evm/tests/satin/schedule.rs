@@ -46,8 +46,11 @@ fn with_code(code: Bytes) -> MemoryDatabase {
 
 /* ---------- the intrinsic numbers ---------- */
 
-/// A call that reaches an existing account and does nothing pays the sender base plus the
-/// recipient's cold access, and draws no state gas.
+/// A call that reaches an existing account and does nothing pays the EIP-2780 sender base of
+/// 12,000 plus 3,000 for reaching the recipient, and draws no state gas.
+///
+/// The 3,000 is EIP-2780's own fixed charge and not the schedule's cold-account entry, which
+/// prices an access inside execution at 2,600.
 #[test]
 fn test_an_empty_call_costs_fifteen_thousand() {
     let spent = spend(with_code(Bytes::new()), call(CALLER, CALLEE, U256::ZERO, GAS_LIMIT));

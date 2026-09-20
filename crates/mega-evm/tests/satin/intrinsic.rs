@@ -31,7 +31,11 @@ const CALLER: Address = address!("0000000000000000000000000000000000800000");
 const CALLEE: Address = address!("0000000000000000000000000000000000800001");
 
 /// The intrinsic gas of a plain call to an account that is not the sender: the EIP-2780 sender
-/// base plus the recipient's cold account access.
+/// base of 12,000 plus 3,000 for reaching the recipient.
+///
+/// The 3,000 is EIP-2780's own fixed charge, not the schedule's cold-account entry: inside
+/// execution the schedule prices a cold account access at 2,600 — 100 for the read and 2,500 for
+/// the cold surcharge — so repricing that entry would leave this number where it is.
 const EMPTY_CALL: u64 = 15_000;
 
 /// What one byte of anything a transaction carries costs in the EIP-7976 / EIP-7981 floor: four
