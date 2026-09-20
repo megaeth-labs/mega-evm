@@ -75,6 +75,19 @@ One probe transaction each, at a 5000000 gas limit. `gas used` is the receipt's 
 | create transaction deploying 0 bytes | 207687 | 24087 | 183600 | 0 |
 | create transaction deploying 32 bytes | 256668 | 24108 | 232560 | 0 |
 
+## SALT scaling
+
+The same probes again, with the SALT bucket the state charge lands in at `m` times the minimum capacity. `m` multiplies the state ledger and nothing else: the regular column is the same on all three rows of a probe, and `gas used` grows by exactly the state column's growth, because these probes run below the execution cap and every state charge spills onto the regular budget.
+
+| Probe | m | gas used | regular | state | history |
+|---|---:|---:|---:|---:|---:|
+| SSTORE 0 -> 1 | 1 | 135026 | 37106 | 97920 | 0 |
+| SSTORE 0 -> 1 | 2 | 232946 | 37106 | 195840 | 0 |
+| SSTORE 0 -> 1 | 8 | 820466 | 37106 | 783360 | 0 |
+| value CALL to an empty account | 1 | 232921 | 49321 | 183600 | 0 |
+| value CALL to an empty account | 2 | 416521 | 49321 | 367200 | 0 |
+| value CALL to an empty account | 8 | 1518121 | 49321 | 1468800 | 0 |
+
 ## The execution cap
 
 Satin pins `tx_gas_limit_cap` at 200000000, so a transaction's EIP-8037 reservoir is `max(0, gas_limit - intrinsic gas)` above it. Every probe above runs well below the cap, so its reservoir is empty and each state charge comes out of the regular budget.
