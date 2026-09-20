@@ -213,6 +213,28 @@ mod tests {
         }
     }
 
+    /// Nothing can put upstream's KZG price back: the engine has one spec, so `set_spec` has
+    /// nothing to switch to and leaves the table — and a node's own entries — alone.
+    #[test]
+    fn test_set_spec_keeps_the_mega_kzg_override() {
+        let mut db = MemoryDatabase::default();
+        let mut context = MegaContext::new(&mut db, MegaSpecId::SATIN);
+        let mut map = satin_precompiles_map();
+
+        for spec in [op_revm::OpSpecId::ISTHMUS, op_revm::OpSpecId::KARST] {
+            let changed =
+                PrecompileProvider::<MegaContext<&mut MemoryDatabase>>::set_spec(&mut map, spec);
+            assert!(!changed, "the table must stay the Satin one");
+        }
+
+        let result = map
+            .run(&mut context, &inputs(kzg_point_evaluation::ADDRESS, kzg_input(), 200_000))
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.result, InstructionResult::Return);
+        assert_eq!(result.gas.total_gas_spent(), kzg_point_evaluation::GAS_COST);
+    }
+
     /// The `MegaETH` entry replaces upstream's rather than sitting beside it: the set holds one
     /// KZG precompile, at the same address, and the price it charges is `MegaETH`'s.
     #[test]

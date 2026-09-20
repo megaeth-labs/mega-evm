@@ -127,6 +127,32 @@ fn deploying(len: u64) -> Bytes {
     BytecodeBuilder::default().push_number(len).append_many([PUSH0, RETURN]).build()
 }
 
+/// A creation that reverts deposits nothing, so it draws no state gas at all: neither the
+/// created account's nor the code's. The state gas a creation draws is charged on the deposit,
+/// not on the attempt.
+#[test]
+fn test_a_reverted_creation_draws_no_state_gas() {
+    let db = MemoryDatabase::default().account_balance(CALLER, U256::from(10u64.pow(18)));
+    let mut evm = MegaEvm::new(context(db));
+    let init_code = BytecodeBuilder::default().mstore(0, [0u8; 32]).revert().build();
+    let result = evm
+        .transact_raw(create(CALLER, init_code, GAS_LIMIT))
+        .expect("the transaction is valid")
+        .result;
+
+    assert!(!result.is_success(), "{result:?}");
+    assert_eq!(result.gas().state_gas_spent_final(), 0);
+}
+
+/// A creation that deposits nothing — empty runtime code — still pays for the account it
+/// created, and nothing for code.
+#[test]
+fn test_a_creation_depositing_no_code_pays_for_the_account_alone() {
+    let db = MemoryDatabase::default().account_balance(CALLER, U256::from(10u64.pow(18)));
+    let spent = spend(db, create(CALLER, deploying(0), GAS_LIMIT));
+    assert_eq!(spent.state, ACCOUNT_STATE_GAS);
+}
+
 /* ---------- the Amsterdam opcodes ---------- */
 
 /// Runs `code` in `CALLEE` and returns the result, so a gated opcode shows up as a halt.

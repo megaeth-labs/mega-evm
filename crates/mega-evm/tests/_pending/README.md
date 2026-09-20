@@ -27,7 +27,6 @@ Do not add a `_pending/main.rs`.
 | Owning mechanism | Tests | From `tests/` | From `src/` | Keep | Rewrite | Undecided |
 |---|---:|---:|---:|---:|---:|---:|
 | the common execution layer | 21 | 21 | 0 | 21 | 0 | 0 |
-| the Satin gas table | 34 | 27 | 7 | 7 | 27 | 0 |
 | SALT pricing | 75 | 64 | 11 | 17 | 58 | 0 |
 | history gas | 28 | 24 | 4 | 4 | 24 | 0 |
 | compute gas | 26 | 26 | 0 | 0 | 26 | 0 |
@@ -43,7 +42,7 @@ Do not add a `_pending/main.rs`.
 | the block executor | 53 | 23 | 30 | 39 | 14 | 0 |
 | inspector support | 4 | 4 | 0 | 1 | 3 | 0 |
 | — (undecided: D57 preload-warm cold charging, D58 98/100 forwarding) | 7 | 7 | 0 | 0 | 0 | 7 |
-| **Total** | **747** | **624** | **123** | **426** | **293** | **28** |
+| **Total** | **713** | **597** | **116** | **419** | **266** | **28** |
 
 ## Tests ported in place
 
@@ -130,12 +129,26 @@ These 45 rows run in a real test target now, adapted to the Satin API, so the co
 | `src/limit/mod.rs` | the common execution layer (3) | 3 | `src/limit/mod.rs` |
 | **Total** | | **45** | |
 
+## Tests ported by the Satin gas table
+
+These 34 rows run in a real test target now, adapted to the Satin API and to the schedule the decision they cite fixes, so the counts above are lower than the inventory's by exactly these rows.
+
+| Legacy file | Owner in the inventory | Tests | Now in |
+|---|---|---:|---|
+| `compute_gas/claims.rs` | the Satin gas table (4) | 4 | `tests/satin/precompile_gas.rs`, `tests/satin/schedule.rs` |
+| `mini_rex/contract_size_limit.rs` | the Satin gas table (12) | 12 | `tests/satin/contract_size.rs` |
+| `mini_rex/gas.rs` | the Satin gas table (4) | 4 | `tests/satin/intrinsic.rs` |
+| `rex5/gas_validation.rs` | the Satin gas table (4) | 4 | `tests/satin/intrinsic.rs` |
+| `rex5/precompile_compute_gas.rs` | the Satin gas table (3) | 3 | `tests/satin/precompile_gas.rs` |
+| `src/evm/factory.rs` | the Satin gas table (1) | 1 | `src/evm/factory.rs` |
+| `src/evm/precompiles.rs` | the Satin gas table (6) | 6 | `src/evm/precompiles.rs` |
+| **Total** | | **34** | |
+
 ## Tests the inventory assigns to the Satin skeleton that are parked under another mechanism
 
 | File | Test | Parked under | Reason |
 |---|---|---|---|
 | `src/evm/context.rs` | `test_shared_salt_env_keeps_dynamic_gas_cache_isolated` | SALT pricing | exercises the dynamic storage-gas cache that SALT pricing brings back |
-| `src/evm/factory.rs` | `test_dyn_precompiles_builder_receives_the_behavior_spec` | the Satin gas table | the dynamic precompile builder returns with the Satin precompile set; the behavior projection it pinned has no counterpart in a single-spec engine |
 | `src/evm/mod.rs` | `test_mega_evm_exposes_state_wrapper_block_hashes` | the block executor | reads the accessed-block-hash record, which returns with the block executor |
 
 ## Files
@@ -151,14 +164,13 @@ Each cell lists `disposition count (mechanism · decision)`.
 | `block_executor/inspector.rs` | 3 | keep 1 (inspector support); rewrite 2 (inspector support · D39/D41) |
 | `block_executor/sequencer_registry.rs` | 8 | keep 8 (system contract deployment) |
 | `block_executor/trait_factory_runtime_limits.rs` | 4 | rewrite 4 (the block executor · D10 (200M execution cap replaces compute-gas runtime limit)) |
-| `compute_gas/claims.rs` | 14 | keep 2 (the system contract interceptors); rewrite 2 (compute gas · D53 (compute = regular spent; state spill excluded)); keep 1 (the Satin gas table · D04 (KZG 100k)); undecided 5 (— · D57, open: whether preload-warm addresses (precompile / beneficiary / access-list) are charged cold); rewrite 2 (the Satin gas table · D13); rewrite 1 (the Satin gas table · D11); rewrite 1 (the data-size limit · D33/D48) |
+| `compute_gas/claims.rs` | 10 | keep 2 (the system contract interceptors); rewrite 2 (compute gas · D53 (compute = regular spent; state spill excluded)); undecided 5 (— · D57, open: whether preload-warm addresses (precompile / beneficiary / access-list) are charged cold); rewrite 1 (the data-size limit · D33/D48) |
 | `compute_gas/main.rs` | 1 | rewrite 1 (compute gas · D53) |
 | `mini_rex/access_beneficiary_balance.rs` | 10 | keep 9 (detention · D08); rewrite 1 (revert-class aborts · D48) |
 | `mini_rex/block_env_access_tracking.rs` | 3 | keep 3 (detention) |
 | `mini_rex/block_env_gas_limit.rs` | 16 | keep 13 (detention · D08 cap 20M/1M unchanged); rewrite 3 (revert-class aborts · D48 (detention halt -> revert-class)) |
 | `mini_rex/compute_gas_limit.rs` | 25 | rewrite 23 (compute gas · D10/D40/D53 (compute derived from Gas; 200M cap)); rewrite 2 (detention · D48) |
-| `mini_rex/contract_size_limit.rs` | 12 | rewrite 12 (the Satin gas table · D04 (512 KiB kept; the decision table does not pin the initcode bound under Osaka/EIP-3860)) |
-| `mini_rex/gas.rs` | 26 | rewrite 14 (SALT pricing · D12 (state gas x m via pricing hook)); rewrite 6 (SALT pricing · D12/D13); undecided 2 (— · D58, open: 98/100 forwarding, while the design has frames follow EIP-8037 (63/64)); rewrite 4 (the Satin gas table · D11/D55 (7976 floor)) |
+| `mini_rex/gas.rs` | 22 | rewrite 14 (SALT pricing · D12 (state gas x m via pricing hook)); rewrite 6 (SALT pricing · D12/D13); undecided 2 (— · D58, open: 98/100 forwarding, while the design has frames follow EIP-8037 (63/64)) |
 | `mini_rex/mega_system_transaction.rs` | 15 | keep 15 (the system contract interceptors · D51) |
 | `mini_rex/oracle.rs` | 13 | rewrite 3 (revert-class aborts · D48); keep 5 (detention); keep 4 (the oracle and control contracts); rewrite 1 (system contract deployment · deploy at Satin activation) |
 | `mini_rex/state_growth_limit.rs` | 4 | rewrite 4 (the state-growth and KV limits · D45 (state-gas limit)) |
@@ -190,7 +202,6 @@ Each cell lists `disposition count (mechanism · decision)`.
 | `rex5/deposit_create_storage_gas.rs` | 4 | rewrite 4 (SALT pricing · D12/D37) |
 | `rex5/eip7702_metering.rs` | 4 | rewrite 4 (SALT pricing · D12/D45) |
 | `rex5/eip7702_state_growth.rs` | 8 | rewrite 8 (the state-growth and KV limits · D28/D31/D45 (7702 authorization matrix)) |
-| `rex5/gas_validation.rs` | 4 | rewrite 4 (the Satin gas table · D49/D55 (intrinsic state component; floor vs cap)) |
 | `rex5/interceptor_selector_probe.rs` | 6 | keep 6 (the system contract interceptors) |
 | `rex5/keyless_deploy_dispatch_parity.rs` | 3 | keep 3 (the system contract interceptors) |
 | `rex5/keyless_empty_code_logs.rs` | 2 | rewrite 2 (native keyless deployment · native sub-frame keeps logs inherently) |
@@ -199,7 +210,6 @@ Each cell lists `disposition count (mechanism · decision)`.
 | `rex5/keyless_replay_barrier.rs` | 3 | rewrite 3 (native keyless deployment · D36 (real nonce increment)) |
 | `rex5/oracle_hint_metering.rs` | 9 | keep 7 (the oracle and control contracts · D50 (hint not charged history; data-size metering kept)); rewrite 1 (the oracle and control contracts · D11 intrinsic number); rewrite 1 (revert-class aborts · D48) |
 | `rex5/pre_block_system_calls.rs` | 11 | keep 11 (the pre-block system calls) |
-| `rex5/precompile_compute_gas.rs` | 3 | rewrite 3 (the Satin gas table · D04/D40 (assert via gas_used)) |
 | `rex5/sandbox_accounting.rs` | 9 | rewrite 9 (native keyless deployment · native sub-frame: parent tracker sees child directly) |
 | `rex5/selfdestruct_beneficiary.rs` | 7 | rewrite 4 (the state-growth and KV limits · D45 (state gas via new-account site)); keep 2 (detention); keep 1 (the data-size limit) |
 | `rex5/sstore_storage_gas_error.rs` | 1 | keep 1 (SALT pricing · pricing-failure path) |
@@ -225,10 +235,8 @@ Each cell lists `disposition count (mechanism · decision)`.
 | `src/block/limit.rs` | 5 | keep 5 (the block executor) |
 | `src/block/result.rs` | 2 | rewrite 2 (the block executor · D48 (error shape)) |
 | `src/evm/context.rs` | 1 | keep 1 (SALT pricing · SALT pricing for the SALT cache test) |
-| `src/evm/factory.rs` | 1 | rewrite 1 (the Satin gas table · no behaviour projection) |
 | `src/evm/host.rs` | 1 | keep 1 (SALT pricing) |
 | `src/evm/mod.rs` | 4 | keep 3 (the pre-block system calls); keep 1 (the block executor) |
-| `src/evm/precompiles.rs` | 6 | keep 6 (the Satin gas table · D04) |
 | `src/evm/state.rs` | 1 | keep 1 (the block executor) |
 | `src/external/gas.rs` | 9 | rewrite 9 (SALT pricing · D12/D51) |
 | `src/limit/compute_gas.rs` | 1 | rewrite 1 (detention · D40/D48) |

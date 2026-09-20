@@ -8,6 +8,7 @@ mod inspector;
 mod intrinsic;
 mod outcome;
 mod precompile_gas;
+mod pricing_table;
 mod schedule;
 mod state;
 mod static_callee;
