@@ -9,11 +9,11 @@ use alloy_primitives::{address, Address, Bytes, U256};
 use mega_evm::{
     constants::{ACCOUNT_STATE_GAS, SLOT_STATE_GAS},
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    MegaEvm,
+    MegaEvm, MegaHaltReason,
 };
 use revm::{
-    bytecode::opcode::{CLZ, DUPN, EXCHANGE, MSTORE, PUSH0, PUSH1, RETURN, SLOTNUM, SWAPN},
-    context::result::ExecutionResult,
+    bytecode::opcode::{CLZ, CREATE, DUPN, EXCHANGE, MSTORE, PUSH0, PUSH1, RETURN, SLOTNUM, SWAPN},
+    context::result::{ExecutionResult, HaltReason},
 };
 
 use crate::common::{call, call_with_data, context, create, runs_at_measurement_prices};
@@ -157,6 +157,61 @@ fn test_a_reverted_creation_draws_no_state_gas() {
 
     assert!(!result.is_success(), "{result:?}");
     assert_eq!(result.gas().state_gas_spent_final(), 0);
+}
+
+/// Init code that returns a single `0xEF` byte as the deployed code, which EIP-3541 rejects.
+fn depositing_an_ef_byte() -> Bytes {
+    BytecodeBuilder::default()
+        .mstore(0, [0xEF])
+        .push_number(1u64)
+        .append_many([PUSH0, RETURN])
+        .build()
+}
+
+/// EIP-3541 rejects deployed code whose first byte is `0xEF`, and the rejection lands before the
+/// deposit is charged: the creation halts and draws no state gas, neither the account's nor the
+/// byte's.
+#[test]
+fn test_a_creation_rejected_for_its_first_byte_draws_no_state_gas() {
+    let db = MemoryDatabase::default().account_balance(CALLER, U256::from(10u64.pow(18)));
+    let mut evm = MegaEvm::new(context(db));
+    let result = evm
+        .transact_raw(create(CALLER, depositing_an_ef_byte(), GAS_LIMIT))
+        .expect("the transaction is valid")
+        .result;
+
+    assert!(
+        matches!(
+            result,
+            ExecutionResult::Halt {
+                reason: MegaHaltReason::Base(HaltReason::CreateContractStartingWithEF),
+                ..
+            }
+        ),
+        "{result:?}"
+    );
+    assert_eq!(result.gas().state_gas_spent_final(), 0);
+}
+
+/// The same from a `CREATE` frame: the frame fails and returns the zero address, the transaction
+/// around it goes through, and the state gas the frame took upfront is back.
+#[test]
+fn test_a_create_frame_rejected_for_its_first_byte_draws_no_state_gas() {
+    let init_code = depositing_an_ef_byte();
+    // `CREATE` pops value, offset and length in that order, so they are pushed the other way
+    // round; the assertion that follows halts the frame unless the created address is zero.
+    let factory = BytecodeBuilder::default()
+        .mstore(0, &init_code)
+        .push_number(init_code.len() as u64)
+        .push_number(0u64)
+        .push_number(0u64)
+        .append(CREATE)
+        .assert_stack_value(0, U256::ZERO)
+        .stop()
+        .build();
+    let spent = spend(with_code(factory), call(CALLER, CALLEE, U256::ZERO, GAS_LIMIT));
+
+    assert_eq!(spent.state, 0, "the created account and its byte are both taken back");
 }
 
 /// A creation that deposits nothing — empty runtime code — still pays for the account it
