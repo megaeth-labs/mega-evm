@@ -11,14 +11,29 @@
 //! frame with the record already counted.
 //!
 //! `block_hash` serves the read and records it, so a stateless witness learns of a `BLOCKHASH`
-//! that bypassed the journal. Every other Host method delegates to op-revm's context.
+//! that bypassed the journal.
+//!
+//! # One hook prices every state charge
+//!
+//! [`state_gas_price`](revm::context_interface::Host::state_gas_price) is the one place an
+//! EIP-8037 state gas charge is priced. Every charge site of the engine asks it, and so does
+//! every site that gives a charge back — the same `(id, site)` pair, so a refill cancels the
+//! charge it undoes exactly, whatever the price was. That is what lets SALT scale the charge by
+//! the capacity of the bucket it lands in without a second table of what to give back.
+//!
+//! Every other Host method delegates to op-revm's context.
+
+#[cfg(not(feature = "std"))]
+use alloc as std;
+use std::format;
 
 use alloy_primitives::map::Entry;
 use delegate::delegate;
 use revm::{
+    context::ContextTr,
     context_interface::{
-        cfg::{GasId, GasParams, StateGasCharge, StateGasSite},
-        context::{SStoreResult, SelfDestructResult, StateLoad},
+        cfg::{GasId, GasParams, StateGasSite},
+        context::{ContextError, SStoreResult, SelfDestructResult, StateLoad},
         host::LoadError,
         journaled_state::{AccountInfoLoad, AccountLoad},
     },
@@ -50,8 +65,6 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
             fn max_initcode_size(&self) -> usize;
             fn gas_params(&self) -> &GasParams;
             fn is_amsterdam_eip8037_enabled(&self) -> bool;
-            fn state_gas_price(&mut self, id: GasId, site: StateGasSite) -> Option<u64>;
-            fn state_gas_charge(&mut self, charge: StateGasCharge) -> Option<u64>;
             fn sload_skip_cold_load(
                 &mut self,
                 address: Address,
@@ -71,6 +84,46 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
             fn load_account_delegated(&mut self, address: Address) -> Option<StateLoad<AccountLoad>>;
             fn load_account_code(&mut self, address: Address) -> Option<StateLoad<Bytes>>;
             fn load_account_code_hash(&mut self, address: Address) -> Option<StateLoad<B256>>;
+        }
+    }
+
+    /// Prices one EIP-8037 state gas unit, scaling the schedule's entry by the SALT bucket
+    /// capacity of the account — or, for a slot-scoped entry, of the storage slot — the charge
+    /// lands on.
+    ///
+    /// `state gas = schedule entry x m`, where `m` is the bucket's capacity in minimum buckets.
+    /// A charge in a minimum-capacity bucket pays the schedule's own number, and a charge in a
+    /// bucket eight times as large pays eight times as much: state that crowds a region of the
+    /// trie costs what it makes everyone else pay to carry it. Only the state dimension scales;
+    /// regular gas is never touched by `m`.
+    ///
+    /// Two charges are priced without reading SALT at all: an entry the schedule prices at zero,
+    /// which `m` cannot move off zero, and every charge of a system-originated transaction,
+    /// which prices at the minimum bucket by rule (see
+    /// [`is_system_originated`](crate::MegaContext::is_system_originated)).
+    ///
+    /// Reporting nothing is how a failed capacity lookup travels: the cause is recorded in the
+    /// context error the way [`Host::sload`](revm::context_interface::Host::sload) records a
+    /// database failure, and the charge site turns it into a bail-out that the transaction
+    /// surfaces as an error. A price the engine could not look up is never replaced by one
+    /// nobody chose.
+    #[inline]
+    fn state_gas_price(&mut self, id: GasId, site: StateGasSite) -> Option<u64> {
+        let base = self.inner.cfg.gas_params.get(id);
+        if base == 0 || self.is_system_originated() {
+            return Some(base);
+        }
+        let multiplier = match site.slot {
+            Some(slot) => self.slot_bucket_multiplier(site.address, slot),
+            None => self.account_bucket_multiplier(site.address),
+        };
+        match multiplier {
+            Ok(multiplier) => Some(base.saturating_mul(multiplier)),
+            Err(error) => {
+                *self.error() =
+                    Err(ContextError::Custom(format!("SALT bucket lookup failed: {error}")));
+                None
+            }
         }
     }
 

@@ -9,6 +9,7 @@ mod intrinsic;
 mod outcome;
 mod precompile_gas;
 mod pricing_table;
+mod salt;
 mod schedule;
 mod state;
 mod static_callee;

@@ -1,9 +1,13 @@
 //! The execution context of the Satin engine.
 
+use alloy_eips::eip4788::SYSTEM_ADDRESS;
 use delegate::delegate;
 use op_revm::{L1BlockInfo, OpSpecId};
 use revm::{
-    context::{BlockEnv, CfgEnv, Context, ContextError, ContextSetters, ContextTr, LocalContext},
+    context::{
+        BlockEnv, CfgEnv, Context, ContextError, ContextSetters, ContextTr, LocalContext,
+        Transaction,
+    },
     primitives::{Address, StorageKey},
     Database, Journal,
 };
@@ -40,6 +44,9 @@ pub struct MegaContext<DB: Database, ExtEnvs: ExternalEnvTypes = EmptyExternalEn
     pub(crate) block_hash_record: BlockHashRecord,
     /// The SALT bucket multipliers the running transaction has read.
     bucket_multipliers: BucketMultipliers,
+    /// Whether the running transaction is system-originated, and so prices its state gas at the
+    /// minimum bucket. See [`is_system_originated`].
+    system_originated: bool,
 }
 
 impl<DB: Database> MegaContext<DB, EmptyExternalEnv> {
@@ -65,6 +72,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
             additional_limit: AdditionalLimit::default(),
             block_hash_record: BlockHashRecord::default(),
             bucket_multipliers: BucketMultipliers::default(),
+            system_originated: false,
         }
     }
 
@@ -181,6 +189,12 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
         &self.bucket_multipliers
     }
 
+    /// Whether the running (or last) transaction is system-originated, and so prices every
+    /// EIP-8037 state gas charge at the minimum bucket. See [`is_system_originated`].
+    pub const fn is_system_originated(&self) -> bool {
+        self.system_originated
+    }
+
     /// Prepares the common execution layer for a new transaction or system call. Every entry
     /// point of [`MegaEvm`](crate::MegaEvm) calls it before it runs the handler.
     ///
@@ -189,6 +203,17 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     pub(crate) fn on_new_tx(&mut self) {
         self.additional_limit.reset();
         self.bucket_multipliers.reset();
+        self.system_originated = is_system_originated(&self.inner.tx);
+    }
+
+    /// Prepares the context for a system call. Every system-call entry point of
+    /// [`MegaEvm`](crate::MegaEvm) calls it instead of [`on_new_tx`](Self::on_new_tx).
+    ///
+    /// A system call is system-originated whatever caller it names: it is the protocol running,
+    /// not a transaction anybody sent.
+    pub(crate) fn on_new_system_call(&mut self) {
+        self.on_new_tx();
+        self.system_originated = true;
     }
 
     /// Consumes the context and returns the database, the configuration and the block.
@@ -196,6 +221,26 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
         let Context { block, journaled_state, .. } = self.inner;
         (journaled_state.database, self.cfg, block)
     }
+}
+
+/// Whether `tx` is system-originated: produced by the protocol itself rather than sent by a user.
+///
+/// A system-originated transaction prices EIP-8037 state gas at the minimum bucket (`m = 1`), so
+/// a state change the protocol mandates costs the same however full the SALT bucket it lands in
+/// happens to be, and can never be priced out of a block by the growth of a region it does not
+/// control.
+///
+/// What it matches today is the transaction whose caller is the EIP-4788 / EIP-2935 system
+/// address, which is how the pre-block system calls are issued; every transaction run through a
+/// system-call entry point is system-originated whatever caller it names
+/// ([`MegaContext::on_new_system_call`]). The sequencer's own system transaction joins this rule
+/// when the system contract mechanisms land, which are what define its caller and the deposit
+/// source hash it is promoted with.
+///
+/// A user's deposit transaction is deliberately not system-originated. A deposit is a shape a
+/// user can produce, so matching it here would be a way around the scaling.
+fn is_system_originated(tx: &MegaTransaction) -> bool {
+    tx.caller() == SYSTEM_ADDRESS
 }
 
 /// Sets the configuration fields the spec fixes.
