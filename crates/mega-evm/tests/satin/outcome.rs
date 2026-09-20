@@ -3,7 +3,7 @@
 use alloy_primitives::{address, Address, Bytes, U256};
 use alloy_sol_types::SolError;
 use mega_evm::{
-    constants::TX_GAS_LIMIT_CAP,
+    constants::{SLOT_STATE_GAS, TX_GAS_LIMIT_CAP},
     test_utils::{BytecodeBuilder, MemoryDatabase},
     BlockGasCounters, EvmTxRuntimeLimits, LimitCheck, LimitKind, LimitUsage, MegaEvm,
     MegaLimitExceeded, MegaTransactionOutcome, WRITE_RECORD_SIZE,
@@ -43,7 +43,9 @@ fn test_outcome_reports_the_ledgers() {
     let result_gas = outcome.result.gas();
     assert_eq!(gas.regular + gas.state + gas.history, result_gas.total_gas_spent());
     assert_eq!(gas.gas_used, result_gas.tx_gas_used());
-    assert_eq!(gas.reservoir_remaining, 1_000_000_000 - TX_GAS_LIMIT_CAP);
+    // Both slots are new, so both draw state gas, and the reservoir is what pays it.
+    assert_eq!(gas.state, 2 * SLOT_STATE_GAS);
+    assert_eq!(gas.reservoir_remaining, 1_000_000_000 - TX_GAS_LIMIT_CAP - 2 * SLOT_STATE_GAS);
     assert_eq!(gas.history, 0, "nothing prices history bytes yet");
     assert_eq!(outcome.usage, LimitUsage { data_size: 2 * WRITE_RECORD_SIZE, write_records: 2 });
     assert_eq!(outcome.limit_exceeded, None);

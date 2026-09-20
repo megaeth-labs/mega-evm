@@ -8,7 +8,8 @@
 use alloy_op_evm::OpTx;
 use alloy_primitives::{address, Address, TxKind, U256};
 use mega_evm::{
-    constants::TX_GAS_LIMIT_CAP,
+    constants::{MAX_CONTRACT_SIZE, MAX_INITCODE_SIZE, SLOT_STATE_GAS, TX_GAS_LIMIT_CAP},
+    satin_gas_params,
     test_utils::{op_transaction, zero_fee_l1_block_info, BytecodeBuilder, MemoryDatabase},
     MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
 };
@@ -18,9 +19,7 @@ use revm::{
         result::{ExecResultAndState, ExecutionResult},
         BlockEnv, CfgEnv, Context, ContextTr, TxEnv,
     },
-    context_interface::cfg::GasParams,
     inspector::NoOpInspector,
-    primitives::hardfork::SpecId,
     state::EvmState,
     ExecuteEvm, Journal,
 };
@@ -97,15 +96,17 @@ fn assert_same(mega: &Outcome, op: &Outcome) {
     assert_eq!(mega.state, op.state, "state");
 }
 
-/// Both engines run on the Satin configuration: Karst on the Osaka gas table, EIP-8037 and
-/// EIP-2780 switched on, the 200M execution cap, EIP-7708 and the system-call reservoir margin
-/// off.
+/// Both engines run on the Satin configuration: Karst on the Satin gas schedule, EIP-8037 and
+/// EIP-2780 switched on, the 200M execution cap, `MegaETH`'s code-size limits, EIP-7708 and the
+/// system-call reservoir margin off.
 fn assert_satin_cfg(cfg: &CfgEnv<OpSpecId>) {
     assert_eq!(cfg.spec, OpSpecId::KARST);
-    assert_eq!(cfg.gas_params.table(), GasParams::new_spec(SpecId::OSAKA).table());
+    assert_eq!(cfg.gas_params.table(), satin_gas_params().table());
     assert!(cfg.enable_amsterdam_eip8037);
     assert!(cfg.enable_amsterdam_eip2780);
-    assert_eq!(cfg.tx_gas_limit_cap, Some(200_000_000));
+    assert_eq!(cfg.tx_gas_limit_cap, Some(TX_GAS_LIMIT_CAP));
+    assert_eq!(cfg.limit_contract_code_size, Some(MAX_CONTRACT_SIZE));
+    assert_eq!(cfg.limit_contract_initcode_size, Some(MAX_INITCODE_SIZE));
     assert!(!cfg.enable_amsterdam_eip7708);
     assert!(!cfg.system_call_state_gas_margin_in_reservoir);
 }
@@ -162,9 +163,9 @@ fn test_sstore_matches_op_revm() {
     assert_satin_cfg(&cfg);
     assert!(mega.result.is_success());
     assert_eq!(mega.state[&CALLEE].storage[&U256::ZERO].present_value, U256::from(42));
-    // The Osaka gas table has no state-gas prices, so the new slot draws no state gas even with
-    // EIP-8037 on. The Satin gas table prices it; this assertion changes with it.
-    assert_eq!(mega.result.gas().state_gas_spent_final(), 0);
+    // The new slot draws the Satin schedule's state gas, which op-revm on the same schedule
+    // draws too: the schedule is configuration, not engine behavior.
+    assert_eq!(mega.result.gas().state_gas_spent_final(), SLOT_STATE_GAS);
     assert_same(&mega, &op);
 }
 

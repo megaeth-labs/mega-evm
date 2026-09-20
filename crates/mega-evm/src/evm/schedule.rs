@@ -19,7 +19,7 @@
 
 use revm::{
     context_interface::cfg::{GasId, GasParams},
-    primitives::{eip8037, hardfork::SpecId},
+    primitives::{eip8037, hardfork::SpecId, OnceLock},
 };
 
 use crate::evm::prices::{active_satin_prices, SatinPrices};
@@ -75,8 +75,12 @@ pub const STATE_GAS_REPRICED: &[ScheduleEntry] = &[
 ///
 /// See the module documentation for what it changes; [`satin_gas_params_at`] is the same schedule
 /// with the byte prices taken as given rather than read from the process.
+///
+/// Built once and handed out as a shared clone, the way revm hands out its own spec schedules:
+/// the prices are fixed for the process, so every configuration gets the same table.
 pub fn satin_gas_params() -> GasParams {
-    satin_gas_params_at(active_satin_prices())
+    static TABLE: OnceLock<GasParams> = OnceLock::new();
+    TABLE.get_or_init(|| satin_gas_params_at(active_satin_prices())).clone()
 }
 
 /// The Satin gas schedule at `prices`.

@@ -402,10 +402,12 @@ mod tests {
         MegaContext::new(db, MegaSpecId::SATIN).with_chain(zero_fee_l1_block_info())
     }
 
+    /// A call to `CALLEE`, with room for the state gas a value transfer to it draws: `CALLEE`
+    /// holds nothing, so a transfer creates it and pays the new account's state gas.
     fn tx(value: U256) -> MegaTransaction {
         OpTx(op_transaction(TxEnv {
             caller: CALLER,
-            gas_limit: 100_000,
+            gas_limit: 300_000,
             kind: TxKind::Call(CALLEE),
             value,
             ..Default::default()
@@ -436,12 +438,12 @@ mod tests {
     fn test_alloy_evm_interface_methods_execute_transactions() {
         let mut db = funded_db();
         let mut evm = MegaEvm::new(
-            context(&mut db).with_block(BlockEnv { gas_limit: 222_222, ..Default::default() }),
+            context(&mut db).with_block(BlockEnv { gas_limit: 2_222_222, ..Default::default() }),
         );
 
         assert_eq!(evm.chain_id(), evm.ctx().cfg().chain_id);
         assert_eq!(evm.cfg_env().spec, MegaSpecId::SATIN);
-        assert_eq!(evm.block().gas_limit, 222_222);
+        assert_eq!(evm.block().gas_limit, 2_222_222);
 
         evm.set_inspector_enabled(true);
         assert!(evm.is_inspecting());
@@ -456,15 +458,15 @@ mod tests {
         let (_db, evm_env) = evm.finish();
         assert_eq!(evm_env.cfg_env.spec, MegaSpecId::SATIN);
         assert_eq!(evm_env.cfg_env.tx_gas_limit_cap, Some(crate::constants::TX_GAS_LIMIT_CAP));
-        assert_eq!(evm_env.block_env.gas_limit, 222_222);
+        assert_eq!(evm_env.block_env.gas_limit, 2_222_222);
     }
 
     #[test]
     fn test_revm_execute_one_finalize_commit_works() {
         let mut db = funded_db();
         let mut evm = MegaEvm::new(context(&mut db));
-        ExecuteEvm::set_block(&mut evm, BlockEnv { gas_limit: 222_222, ..Default::default() });
-        assert_eq!(evm.block().gas_limit, 222_222);
+        ExecuteEvm::set_block(&mut evm, BlockEnv { gas_limit: 2_222_222, ..Default::default() });
+        assert_eq!(evm.block().gas_limit, 2_222_222);
 
         let result = ExecuteEvm::transact_one(&mut evm, tx(U256::from(7))).unwrap();
         assert!(result.is_success());

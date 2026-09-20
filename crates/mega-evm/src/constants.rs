@@ -6,14 +6,18 @@
 //!
 //! | Constant | Value | Meaning | Read by |
 //! |---|---:|---|---|
-//! | [`COST_PER_STATE_BYTE`] | 1,530 | gas per byte of new state (EIP-8037 CPSB) | the Satin gas table (not yet) |
-//! | [`SLOT_STATE_GAS`] | 97,920 | state gas of one new storage slot (64 bytes) | the Satin gas table (not yet) |
-//! | [`ACCOUNT_STATE_GAS`] | 183,600 | state gas of one new account (120 bytes) | the Satin gas table (not yet) |
+//! | [`COST_PER_STATE_BYTE`] | 1,530 | gas per byte of new state (EIP-8037 CPSB) | the Satin gas schedule |
+//! | [`SLOT_STATE_GAS`] | 97,920 | state gas of one new storage slot (64 bytes) | the Satin gas schedule |
+//! | [`ACCOUNT_STATE_GAS`] | 183,600 | state gas of one new account (120 bytes) | the Satin gas schedule |
 //! | [`COST_PER_HISTORY_BYTE`] | 88 | gas per history byte (CPHB) | history gas (not yet) |
 //! | [`TX_GAS_LIMIT_CAP`] | 200,000,000 | execution cap: regular gas one transaction may spend | the spec configuration |
+//! | [`MAX_CONTRACT_SIZE`] | 524,288 | the most bytes a deployed contract may hold | the spec configuration |
+//! | [`MAX_INITCODE_SIZE`] | 1,048,576 | the most bytes an initcode may hold | the spec configuration |
 //! | [`TX_DATA_LIMIT`] | 13,107,200 | data size one transaction may produce (as Rex6) | the data-size limit (not yet) |
 //! | [`BLOCK_DATA_LIMIT`] | 13,107,200 | data size one block may produce (as Rex6) | the data-size limit (not yet) |
 //!
+//! The Satin gas schedule reads the state-gas numbers through [`SatinPrices`](crate::SatinPrices),
+//! so a measurement build can run other byte prices without touching this table.
 //! The storage call stipend and the per-transaction and per-block state-gas limits are further
 //! placeholders; history gas and the state-gas limits add them when they land.
 
@@ -37,6 +41,13 @@ pub const COST_PER_HISTORY_BYTE: u64 = 88;
 /// the EIP-8037 state-gas reservoir. Provisional.
 pub const TX_GAS_LIMIT_CAP: u64 = 200_000_000;
 
+/// The most bytes a deployed contract may hold, replacing the EIP-170 limit. Provisional.
+pub const MAX_CONTRACT_SIZE: usize = 512 * 1024;
+
+/// The most bytes an initcode may hold: twice [`MAX_CONTRACT_SIZE`], the ratio EIP-3860 sets
+/// between the two. Provisional.
+pub const MAX_INITCODE_SIZE: usize = 2 * MAX_CONTRACT_SIZE;
+
 /// The most data one transaction may produce, 12.5 MiB as in Rex6. Provisional.
 pub const TX_DATA_LIMIT: u64 = 12 * 1024 * 1024 + 512 * 1024;
 
@@ -55,6 +66,8 @@ mod tests {
         assert_eq!(ACCOUNT_STATE_GAS, 183_600);
         assert_eq!(COST_PER_HISTORY_BYTE, 88);
         assert_eq!(TX_GAS_LIMIT_CAP, 200_000_000);
+        assert_eq!(MAX_CONTRACT_SIZE, 524_288);
+        assert_eq!(MAX_INITCODE_SIZE, 1_048_576);
         assert_eq!(TX_DATA_LIMIT, 13_107_200);
         assert_eq!(BLOCK_DATA_LIMIT, 13_107_200);
     }

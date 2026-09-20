@@ -28,7 +28,9 @@ const CALLER: Address = address!("0000000000000000000000000000000000100000");
 const CALLEE: Address = address!("0000000000000000000000000000000000100001");
 const CONTRACT: Address = address!("0000000000000000000000000000000000100002");
 const CONTRACT2: Address = address!("0000000000000000000000000000000000100003");
-const GAS_LIMIT: u64 = 10_000_000;
+/// Room for the state gas of several new accounts, including in a frame that resumes after a
+/// child burned the 63/64 it was forwarded.
+const GAS_LIMIT: u64 = 50_000_000;
 
 const fn records(n: u64) -> LimitUsage {
     LimitUsage { data_size: n * WRITE_RECORD_SIZE, write_records: n }
@@ -653,12 +655,21 @@ fn test_runtime_out_of_gas_after_authorities_keeps_no_record() {
     };
     let run_at =
         |gas_limit| MegaEvm::new(context(db())).execute_transaction(tx(gas_limit)).unwrap();
-    let mut gas_limit = 40_000;
-    while !run_at(gas_limit).result.is_success() {
-        gas_limit += 1;
-        assert!(gas_limit < 200_000, "the transaction never succeeds");
+    // Gas is monotone here: every limit above the smallest one that succeeds succeeds too. Search
+    // for that smallest limit rather than walking up to it, which the delegation's state gas puts
+    // several hundred thousand gas away.
+    let (mut fails, mut succeeds) = (40_000u64, 1_000_000u64);
+    assert!(!run_at(fails).result.is_success(), "the low bound must fail");
+    assert!(run_at(succeeds).result.is_success(), "the high bound must succeed");
+    while succeeds - fails > 1 {
+        let middle = fails + (succeeds - fails) / 2;
+        if run_at(middle).result.is_success() {
+            succeeds = middle;
+        } else {
+            fails = middle;
+        }
     }
-    let outcome = run_at(gas_limit - 1);
+    let outcome = run_at(succeeds - 1);
     assert!(outcome.result.is_halt(), "{:?}", outcome.result);
     assert_eq!(outcome.usage, LimitUsage::ZERO);
     assert_eq!(outcome.limit_exceeded, None);

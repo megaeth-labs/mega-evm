@@ -10,7 +10,7 @@ use alloy_evm::Evm;
 use alloy_primitives::{address, Address, Bytes, U256};
 use alloy_sol_types::SolError;
 use mega_evm::{
-    constants::TX_GAS_LIMIT_CAP,
+    constants::{ACCOUNT_STATE_GAS, TX_GAS_LIMIT_CAP},
     test_utils::{BytecodeBuilder, MemoryDatabase},
     EvmTxRuntimeLimits, LimitCheck, LimitKind, MegaContext, MegaEvm, MegaHaltReason,
     MegaLimitExceeded, MegaTransaction,
@@ -32,7 +32,9 @@ const A: Address = address!("00000000000000000000000000000000000000A0");
 const B: Address = address!("00000000000000000000000000000000000000B0");
 const C: Address = address!("00000000000000000000000000000000000000C0");
 const D: Address = address!("00000000000000000000000000000000000000D0");
-const GAS_LIMIT: u64 = 1_000_000;
+/// Room for the state gas the chain's nine new slots draw, all of it out of regular gas: the
+/// limit is below the execution cap, so the transaction has no reservoir.
+const GAS_LIMIT: u64 = 10_000_000;
 
 /// Writes slot 1, calls `next` with all its gas, then writes slot 2 and emits a log: the part
 /// after the call is what a resumed caller would run.
@@ -301,7 +303,8 @@ fn test_child_out_of_gas_under_a_cap_does_not_latch() {
 
 /// A cap crossed by the writes the first frame's start makes (a value transfer's recipient)
 /// reverts the transaction before the frame runs: the recipient's code never runs, its balance
-/// is untouched, and the transaction spends what an empty call does.
+/// is untouched, and the transaction spends the transfer's intrinsic gas alone — the recipient
+/// is never created, so its state gas is never drawn.
 #[test]
 fn test_cap_crossed_before_the_first_frame_reverts_without_running() {
     let funded = || MemoryDatabase::default().account_balance(CALLER, U256::from(1_000_000));
@@ -313,9 +316,14 @@ fn test_cap_crossed_before_the_first_frame_reverts_without_running() {
 
     assert_eq!(evm.ctx().additional_limit().usage(), mega_evm::LimitUsage::ZERO, "nothing kept");
 
-    let (empty_call, _) = run(funded(), cap(u64::MAX), call(CALLER, B, U256::from(5), GAS_LIMIT));
-    assert!(empty_call.result.is_success());
-    assert_eq!(result.result.gas().tx_gas_used(), empty_call.result.gas().tx_gas_used());
+    let (transfer, _) = run(funded(), cap(u64::MAX), call(CALLER, B, U256::from(5), GAS_LIMIT));
+    assert!(transfer.result.is_success());
+    assert_eq!(result.result.gas().tx_gas_used(), 21_000, "the transfer's intrinsic gas");
+    assert_eq!(
+        transfer.result.gas().tx_gas_used(),
+        result.result.gas().tx_gas_used() + ACCOUNT_STATE_GAS,
+        "the transfer that goes through also creates the recipient"
+    );
 }
 
 /// A frame budget reverts the frame that crosses it and nothing else: the caller resumes and the
@@ -505,10 +513,19 @@ fn test_stop_refills_the_state_gas_drawn_from_the_reservoir() {
     let gas_limit = 1_000_000_000;
     let reservoir = gas_limit - TX_GAS_LIMIT_CAP;
     let charger = || Charger { state_gas: 50_000, ..Default::default() };
+    // The chain's own new slots draw state gas from the same reservoir, so the charger's 50,000
+    // is measured against a run that charges nothing extra.
+    let plain =
+        execute_with(chain(), EvmTxRuntimeLimits::no_limits(), Charger::default(), gas_limit);
     let kept = execute_with(chain(), EvmTxRuntimeLimits::no_limits(), charger(), gas_limit);
     assert!(kept.result.is_success());
-    assert_eq!(kept.gas.reservoir_remaining, reservoir - 50_000, "the kept charge");
-    assert_eq!(kept.gas.state, 50_000);
+    assert_eq!(
+        kept.gas.reservoir_remaining,
+        plain.gas.reservoir_remaining - 50_000,
+        "the kept charge"
+    );
+    assert_eq!(kept.gas.state, plain.gas.state + 50_000);
+    assert!(plain.gas.state > 0, "the chain's slots are state gas of their own");
 
     let stopped = execute_with(chain(), cap(180), charger(), gas_limit);
     assert_stopped(&stopped.result, LimitKind::DataSize, 180);
