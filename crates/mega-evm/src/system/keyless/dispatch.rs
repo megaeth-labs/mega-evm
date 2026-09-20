@@ -29,8 +29,10 @@ use crate::{
 /// Only a transaction reaches the deployment: `depth` is the depth of the frame the call would
 /// start, and a call a contract makes (`depth > 0`) is not dispatched, so the deployment's
 /// answer is never something an inner caller can read off its own return data. A call whose
-/// selector is not `keylessDeploy` is not dispatched either; both run the deployed bytecode,
-/// which reverts with `NotIntercepted()`.
+/// selector is not `keylessDeploy` is not dispatched either. Both run the deployed bytecode,
+/// which answers them differently: a `keylessDeploy` call reaches the method body and its
+/// `NotIntercepted()`, while a selector the contract does not declare finds no function and no
+/// fallback, so it reverts with empty data.
 ///
 /// # What it charges
 ///

@@ -50,7 +50,7 @@ Without a SALT environment every bucket is minimal, so the numbers above are wha
 `tests/satin/pricing-table.md` shows two probes at three multipliers.
 
 The six system contracts live at their fixed `0x6342…` addresses, and four of them answer calls through an interceptor instead of running their bytecode.
-A `CALL` or `STATICCALL` is dispatched on its target address, then on the four selector bytes of its input: `CALLCODE` and `DELEGATECALL` never reach an interceptor, and a selector a contract does not intercept falls through to the deployed bytecode, which reverts with `NotIntercepted()`.
+A `CALL` or `STATICCALL` is dispatched on its target address, then on the four selector bytes of its input: `CALLCODE` and `DELEGATECALL` never reach an interceptor, and a selector a contract does not intercept falls through to the deployed bytecode, whose answer is that contract's own — the two control contracts revert with `NotIntercepted()` from their fallback, and `KeylessDeploy` and the Oracle, which have none, revert with empty data on a selector they do not declare.
 A method that takes no value answers a value-bearing call with `NonZeroTransfer()`.
 `MegaAccessControl` and `MegaLimitControl` answer with what the engine knows so far — nothing has switched volatile-data access off, and `remainingComputeGas()` reports the regular gas the call was forwarded — until detention and compute gas fill them in.
 The Oracle forwards a `sendHint` payload to the node's oracle service, and a `keylessDeploy` transaction is charged its fixed 100,000 gas and handed to the keyless rewrite hook that native keyless deployment fills in.

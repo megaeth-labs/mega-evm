@@ -14,9 +14,18 @@
 //!    can be concerned, before a byte of calldata is read ([`intercepted_contract`]).
 //! 3. **The selector.** The contract's own dispatch peeks the first four bytes of the input
 //!    ([`peek_selector`]) without materialising the rest. A selector the contract does not
-//!    intercept is *not* intercepted: the call falls through to the deployed bytecode, which
-//!    reverts with `NotIntercepted()`. A selector matches on its own four bytes, whatever follows
-//!    them.
+//!    intercept is *not* intercepted: the call falls through, which is to say the deployed bytecode
+//!    runs, and what that bytecode answers is the contract's own:
+//!
+//!    - the two control contracts have a fallback that reverts with `NotIntercepted()`, so every
+//!      selector they do not intercept ends there;
+//!    - `KeylessDeploy` has no fallback, so a selector it does not declare reverts with empty data;
+//!      a `keylessDeploy` call the dispatch did not take — one a contract makes — reaches the
+//!      method body and its own `NotIntercepted()`, as a dispatched one does after its charge;
+//!    - the Oracle's other selectors are methods it runs (`getSlot`, `version`), and one it does
+//!      not declare reverts with empty data.
+//!
+//!    A selector matches on its own four bytes, whatever follows them.
 //! 4. **The value policy.** A method that takes no value answers a value-bearing call with
 //!    `NonZeroTransfer()` ([`reject_non_zero_transfer`]), or with the error its own ABI names. The
 //!    policy is per method, after the selector matched, so a value-bearing call to an unknown

@@ -16,7 +16,7 @@ The six system contracts: their addresses and bytecode, the interceptor dispatch
 ## KEY PATTERNS
 - The dispatch order is: the scheme guard (`MegaEvm::intercept`), the address, the selector, then the method's value policy. Each step is cheaper than the next; the address test is one comparison against the shared `0x6342…` prefix and runs on every call a transaction makes.
 - A selector is admitted on its four bytes alone. Trailing bytes are accepted; an input shorter than four bytes is not a selector and is not admitted.
-- An unknown selector is never intercepted: the call falls through to the deployed bytecode, which reverts with `NotIntercepted()` on the contracts that carry that error.
+- An unknown selector is never intercepted: the call falls through to the deployed bytecode, and what that bytecode answers is the contract's own. The two control contracts revert with `NotIntercepted()` from their fallback; `KeylessDeploy` has no fallback, so a selector it does not declare reverts with empty data while a `keylessDeploy` call reaches the method body's `NotIntercepted()`; the Oracle runs its other methods, and reverts with empty data on a selector it does not declare.
 - `CALL` and `STATICCALL` reach the dispatch. `CALLCODE` and `DELEGATECALL` run the callee's code in the caller's context, so they are refused by the scheme guard before any interceptor.
 - A method that takes no value answers a value-bearing call with `NonZeroTransfer()`, or with the error its own ABI names (`KeylessDeploy` answers `NoEtherTransfer()`). The policy is per method and is applied after the selector matched, so a value-bearing call to an unknown selector still falls through.
 - An answer is a `synthetic_call_result`: the forwarded gas untouched, the caller's reservoir carried, the calling opcode's upfront state-gas flags kept. Never `Gas::new(limit)`, which carries no reservoir and bills the sender for the whole state-gas pool.
@@ -26,7 +26,7 @@ The six system contracts: their addresses and bytecode, the interceptor dispatch
 - Accounts read during validation are read without warming them, so the transaction pays what any other transaction would pay for its first touch.
 
 ## ANTI-PATTERNS
-- Do not answer an unknown selector with a synthetic revert: the on-chain bytecode is the fall-through, and a contract's stable error is what a caller decodes.
+- Do not answer an unknown selector with a synthetic revert: the on-chain bytecode is the fall-through, and what it answers is the contract's own business.
 - Do not materialise calldata before the address and the selector matched. `peek_selector` borrows four bytes; `CallInput::bytes` copies the whole payload.
 - Do not build an answer from a bare gas limit. Use `synthetic_call_result`, which carries the reservoir and the upfront-charge flags.
 - Do not add a length check to a selector match. Admission is the four bytes.

@@ -2,9 +2,10 @@
 //! format, its validation rules and the error ABI.
 //!
 //! `keylessDeploy(bytes,uint256)` is intercepted; every other selector falls through to the
-//! deployed bytecode, which reverts with `NotIntercepted()`. What the interceptor does today is
-//! the dispatch and the fixed compute charge; turning the deployment into a native creation
-//! belongs to native keyless deployment.
+//! deployed bytecode, which carries no fallback and reverts with empty data. What the interceptor
+//! does today is the dispatch and the fixed compute charge; turning the deployment into a native
+//! creation belongs to native keyless deployment, so a dispatched call still runs the method body
+//! and its `NotIntercepted()`.
 //!
 //! The rest of the module is data-only: decoding the pre-EIP-155 transaction, recovering its
 //! signer, deriving the deploy address, and mapping errors to and from the `IKeylessDeploy` ABI.

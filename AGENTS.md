@@ -168,7 +168,8 @@ Every later mechanism plugs into these; a change to one comes back to this layer
   The test utilities' inspectors are not declared.
 - **The interceptor dispatch.**
   Its order is the scheme guard, the address, the selector, then the method's value policy, each step cheaper than the next: `CALLCODE` and `DELEGATECALL` never reach an interceptor, because they run the callee's code in the caller's context; the address test is one comparison against the shared `0x6342…` prefix and runs on every call a transaction makes; the selector is peeked without materialising the calldata behind it, and is admitted on its four bytes alone, trailing bytes and all.
-  A selector a contract does not intercept is not intercepted: the call falls through to the deployed bytecode, which reverts with `NotIntercepted()` on the contracts that carry that error, so an unrecognised call cannot succeed silently.
+  A selector a contract does not intercept is not intercepted: the call falls through, which is to say the deployed bytecode runs, and what it answers is that contract's own.
+  The two control contracts have a fallback that reverts with `NotIntercepted()`; `KeylessDeploy` has none, so a selector it does not declare reverts with empty data while a `keylessDeploy` call reaches the method body's `NotIntercepted()`; the Oracle's other selectors are methods it runs, and one it does not declare reverts with empty data.
   A method that takes no value answers a value-bearing call with `NonZeroTransfer()`, or with the error its own ABI names, after the selector matched — so a value-bearing call to an unknown selector still falls through.
   An answer is a synthetic frame result and carries the reservoir; an interceptor that lets the frame run may charge it instead, by taking gas off the frame's limit.
 - **One hook prices every state charge.**

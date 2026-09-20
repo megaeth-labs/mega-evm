@@ -178,7 +178,8 @@ fn test_callcode_and_delegatecall_forward_nothing() {
 }
 
 /// A selector the Oracle's interceptor does not know is not intercepted: the call runs the
-/// contract's bytecode, which reverts on an unknown selector.
+/// contract's bytecode, which reverts with empty data on a selector it does not declare — the
+/// Oracle carries no fallback of its own.
 #[test]
 fn test_an_unknown_selector_runs_the_bytecode() {
     let (result, hints, usage) = run_with_oracle(
@@ -186,6 +187,11 @@ fn test_an_unknown_selector_runs_the_bytecode() {
         call_tx(ORACLE_CONTRACT_ADDRESS, [0xde, 0xad, 0xbe, 0xef], U256::ZERO),
     );
     assert!(!result.result.is_success(), "the Oracle has no such method");
+    assert_eq!(
+        result.result.output().cloned().unwrap_or_default(),
+        Bytes::new(),
+        "the contract has no code to answer a selector it does not declare",
+    );
     assert!(hints.is_empty());
     assert_eq!(usage.data_size, 0);
 }

@@ -107,7 +107,11 @@ fn test_a_call_from_a_contract_is_not_dispatched() {
 }
 
 /// A selector the contract does not know, and an input too short to hold one, are not
-/// dispatched: the bytecode runs and reverts on its own.
+/// dispatched: the bytecode runs and reverts on its own, with empty data.
+///
+/// `KeylessDeploy` carries no fallback, so a selector it does not declare finds no function to
+/// run; `NotIntercepted()` is what its `keylessDeploy` body reverts with, which is a call the
+/// contract does declare.
 #[test]
 fn test_an_unknown_selector_is_not_dispatched() {
     let data = keyless_deploy(b"a transaction");
@@ -115,6 +119,11 @@ fn test_an_unknown_selector_is_not_dispatched() {
     {
         let result = run(system_db(), call_tx(KEYLESS_DEPLOY_ADDRESS, &input, U256::ZERO));
         assert!(!result.result.is_success());
+        assert!(
+            revert_data(&result).is_empty(),
+            "an input of {} bytes reverted with data the contract has no code to return",
+            input.len(),
+        );
         assert!(
             result.result.gas().total_gas_spent() < KEYLESS_DEPLOY_OVERHEAD_GAS,
             "an input of {} bytes paid an overhead it does not owe",
