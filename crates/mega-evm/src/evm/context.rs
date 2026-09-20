@@ -498,6 +498,37 @@ mod tests {
         assert_eq!(env.bucket_queries(bucket), 2, "the next transaction read it again");
     }
 
+    /// Two contexts may read one SALT environment — a node builds an EVM per transaction over
+    /// the block's environments — and each keeps the multipliers it read to itself.
+    #[test]
+    fn test_contexts_sharing_a_salt_environment_keep_their_own_multipliers() {
+        const ONE: alloy_primitives::Address =
+            alloy_primitives::address!("0000000000000000000000000000000000000b01");
+        const OTHER: alloy_primitives::Address =
+            alloy_primitives::address!("0000000000000000000000000000000000000b02");
+        let env = TestExternalEnvs::<Infallible>::new();
+        let context = || {
+            MegaContext::new_with_external_envs(
+                EmptyDB::default(),
+                MegaSpecId::SATIN,
+                ExternalEnvs::from(env.clone()),
+            )
+        };
+        let (mut first, mut second) = (context(), context());
+
+        first.account_bucket_multiplier(ONE).unwrap();
+        second.account_bucket_multiplier(OTHER).unwrap();
+
+        assert_eq!(
+            first.bucket_multipliers().cached_buckets().collect::<Vec<_>>(),
+            vec![<TestExternalEnvs as SaltEnv>::bucket_id_for_account(ONE)],
+        );
+        assert_eq!(
+            second.bucket_multipliers().cached_buckets().collect::<Vec<_>>(),
+            vec![<TestExternalEnvs as SaltEnv>::bucket_id_for_account(OTHER)],
+        );
+    }
+
     /// The external environments given at construction are the ones the context exposes.
     #[test]
     fn test_new_with_ext_envs_builds_over_configurable_env() {

@@ -24,7 +24,7 @@ use mega_evm::{
     MegaTransactionError, MegaTransactionOutcome, SaltEnv, TestExternalEnvs, MIN_BUCKET_SIZE,
 };
 use revm::{
-    bytecode::opcode::{CALL, CREATE, PUSH0, RETURN},
+    bytecode::opcode::{CALL, CREATE, CREATE2, PUSH0, RETURN},
     context::{result::EVMError, tx::TxEnvBuilder, TxEnv},
     context_interface::cfg::GasId,
 };
@@ -81,10 +81,10 @@ pub(crate) fn crowded_slot(envs: SaltEnvs, address: Address, key: U256, m: u64) 
 }
 
 /// A Satin context over `db` reading `envs`, with zero L1 fees.
-pub(crate) fn salt_context(
-    db: MemoryDatabase,
+pub(crate) fn salt_context<DB: revm::Database>(
+    db: DB,
     envs: SaltEnvs,
-) -> MegaContext<MemoryDatabase, SaltEnvs> {
+) -> MegaContext<DB, SaltEnvs> {
     MegaContext::new_with_external_envs(
         db,
         MegaSpecId::SATIN,
@@ -131,14 +131,25 @@ pub(crate) fn call_contract() -> MegaTransaction {
     tx(TxKind::Call(CONTRACT), Bytes::new(), U256::ZERO)
 }
 
-/// A transaction from `CALLER`.
+/// A transaction from `CALLER`, at [`GAS_LIMIT`].
 pub(crate) fn tx(kind: TxKind, data: Bytes, value: U256) -> MegaTransaction {
+    tx_with_gas(kind, data, value, GAS_LIMIT)
+}
+
+/// A transaction from `CALLER` at a gas limit of its own, for a probe whose charge does not fit
+/// in [`GAS_LIMIT`].
+pub(crate) fn tx_with_gas(
+    kind: TxKind,
+    data: Bytes,
+    value: U256,
+    gas_limit: u64,
+) -> MegaTransaction {
     OpTx(op_transaction(TxEnv {
         caller: CALLER,
         kind,
         data,
         value,
-        gas_limit: GAS_LIMIT,
+        gas_limit,
         ..Default::default()
     }))
 }
@@ -538,4 +549,184 @@ fn test_the_minimum_bucket_matches_the_engine_without_a_salt_environment() {
     .gas;
 
     assert_eq!(with_salt, without_salt);
+}
+
+/* What the multiplier has nothing to scale: the writes that add no state. */
+
+/// Runs `probe` at the minimum bucket and at a crowded one and requires both to charge nothing
+/// on the state ledger — a write that adds no state has nothing for `m` to multiply.
+fn assert_charges_no_state_gas(
+    site: &str,
+    crowd: impl Fn(SaltEnvs, u64) -> SaltEnvs,
+    probe: impl Fn() -> (MemoryDatabase, MegaTransaction) + Copy,
+) {
+    for m in [1, 8] {
+        let (db, tx) = probe();
+        let outcome = run(db, crowd(minimal_envs(), m), tx);
+        assert_eq!(outcome.gas.state, 0, "{site} at m = {m}");
+    }
+}
+
+/// Writing over a slot that already held a value adds no state, so it pays no state gas
+/// however crowded its bucket is.
+#[test]
+fn test_writing_over_a_slot_charges_no_state_gas() {
+    assert_charges_no_state_gas(
+        "a reset",
+        |envs, m| crowded_slot(envs, CONTRACT, U256::ZERO, m),
+        || {
+            let code = BytecodeBuilder::default().sstore(U256::ZERO, U256::from(2)).stop().build();
+            (db(code).account_storage(CONTRACT, U256::ZERO, U256::from(1)), call_contract())
+        },
+    );
+}
+
+/// Clearing a slot removes state rather than adding it, so it pays no state gas either.
+#[test]
+fn test_clearing_a_slot_charges_no_state_gas() {
+    assert_charges_no_state_gas(
+        "a clear",
+        |envs, m| crowded_slot(envs, CONTRACT, U256::ZERO, m),
+        || {
+            let code = BytecodeBuilder::default().sstore(U256::ZERO, U256::ZERO).stop().build();
+            (db(code).account_storage(CONTRACT, U256::ZERO, U256::from(1)), call_contract())
+        },
+    );
+}
+
+/// A slot is one leaf however many times the transaction writes it: the first write off zero
+/// pays, the rest pay nothing.
+#[test]
+fn test_a_slot_written_twice_pays_for_one_leaf() {
+    let set = entry(GasId::sstore_set_state_gas());
+    assert_scales(
+        "a slot written twice",
+        set,
+        |envs, m| crowded_slot(envs, CONTRACT, U256::ZERO, m),
+        || {
+            let code = BytecodeBuilder::default()
+                .sstore(U256::ZERO, U256::from(1))
+                .sstore(U256::ZERO, U256::from(2))
+                .stop()
+                .build();
+            (db(code), call_contract())
+        },
+    );
+}
+
+/// Value reaching an account that already exists adds no leaf, at the top level and from a
+/// frame alike.
+#[test]
+fn test_a_transfer_to_an_account_that_exists_charges_no_state_gas() {
+    const FUNDED: Address = address!("0000000000000000000000000000000000c00006");
+
+    assert_charges_no_state_gas(
+        "a top-level transfer to an existing account",
+        |envs, m| crowded_account(envs, FUNDED, m),
+        || {
+            let db = db(Bytes::new()).account_balance(FUNDED, U256::from(1));
+            (db, tx(TxKind::Call(FUNDED), Bytes::new(), U256::from(1)))
+        },
+    );
+
+    assert_charges_no_state_gas(
+        "a transfer from a frame to an existing account",
+        |envs, m| crowded_account(envs, FUNDED, m),
+        || {
+            let db = db(value_call(FUNDED).stop().build()).account_balance(FUNDED, U256::from(1));
+            (db, call_contract())
+        },
+    );
+}
+
+/* The remaining creation sites. */
+
+/// `CREATE2` reaches its deployment address by hashing rather than by nonce, and is priced in
+/// that address's bucket just as `CREATE` is.
+#[test]
+fn test_the_create2_charge_scales_with_the_created_address_s_bucket() {
+    const SALT: U256 = U256::ZERO;
+    let init: [u8; 3] = [PUSH0, PUSH0, RETURN];
+    let created = CONTRACT.create2_from_code(SALT.to_be_bytes::<32>(), init);
+
+    assert_scales(
+        "CREATE2",
+        entry(GasId::create_state_gas()),
+        move |envs, m| crowded_account(envs, created, m),
+        move || {
+            let code = BytecodeBuilder::default()
+                .mstore(0, init)
+                .push_u256(SALT)
+                .push_number(init.len() as u64)
+                .push_number(0u64)
+                .push_number(0u64)
+                .append(CREATE2)
+                .stop()
+                .build();
+            (db(code), call_contract())
+        },
+    );
+}
+
+/// An account leaf costs the same however it comes about: the entry a creation pays and the one
+/// a value transfer pays are the same number, because they buy the same leaf.
+#[test]
+fn test_an_account_leaf_costs_the_same_however_it_is_added() {
+    assert_eq!(entry(GasId::create_state_gas()), entry(GasId::new_account_state_gas()));
+
+    let created = CONTRACT.create(0);
+    let creation = run(
+        db(create_empty_contract().stop().build()),
+        crowded_account(minimal_envs(), created, 8),
+        call_contract(),
+    );
+    let transfer = run(
+        db(value_call(EMPTY).stop().build()),
+        crowded_account(minimal_envs(), EMPTY, 8),
+        call_contract(),
+    );
+
+    assert_eq!(creation.gas.state, transfer.gas.state);
+}
+
+/// A creation that also writes a slot pays for both leaves, each in the bucket it lands in: the
+/// account in the created address's, the slot in its own.
+#[test]
+fn test_a_creation_that_writes_a_slot_pays_both_in_their_own_buckets() {
+    const ACCOUNT_M: u64 = 2;
+    const SLOT_M: u64 = 4;
+    let created = CALLER.create(0);
+    // Init code writing slot 0 of the contract being created, then deploying nothing.
+    let init = BytecodeBuilder::default()
+        .sstore(U256::ZERO, U256::from(1))
+        .append_many([PUSH0, PUSH0, RETURN])
+        .build();
+
+    let envs = crowded_account(minimal_envs(), created, ACCOUNT_M);
+    let envs = crowded_slot(envs, created, U256::ZERO, SLOT_M);
+    let outcome = run(db(Bytes::new()), envs, tx(TxKind::Create, init, U256::ZERO));
+
+    assert_eq!(
+        outcome.gas.state,
+        entry(GasId::create_state_gas()) * ACCOUNT_M +
+            entry(GasId::sstore_set_state_gas()) * SLOT_M,
+    );
+}
+
+/// The multiplier is linear over the whole range a bucket can grow through, not just the small
+/// ones the other probes use. The largest of these charges more than the execution cap allows
+/// in regular gas, so the probe brings a budget that puts the excess in the state reservoir —
+/// which is where a charge this size is meant to be paid from.
+#[test]
+fn test_the_multiplier_is_linear_over_a_wide_range() {
+    const WIDE_GAS_LIMIT: u64 = 400_000_000;
+    let set = entry(GasId::sstore_set_state_gas());
+    let code = || BytecodeBuilder::default().sstore(U256::ZERO, U256::from(1)).stop().build();
+
+    for m in [1, 2, 10, 1_000] {
+        let envs = crowded_slot(minimal_envs(), CONTRACT, U256::ZERO, m);
+        let probe = tx_with_gas(TxKind::Call(CONTRACT), Bytes::new(), U256::ZERO, WIDE_GAS_LIMIT);
+        let outcome = run(db(code()), envs, probe);
+        assert_eq!(outcome.gas.state, set * m, "at m = {m}");
+    }
 }

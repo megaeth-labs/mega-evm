@@ -139,89 +139,9 @@ fn run_with_target_multiplier(spec: MegaSpecId, bytecode: Bytes, target_multipli
 // CALLCODE: Rex5 fix — no new-account storage gas charged
 // ============================================================================
 
-/// Under Rex5, a value-transferring `CALLCODE` to an empty code-source must NOT
-/// charge new-account storage gas, because the storage context is the (non-empty)
-/// caller contract.
-#[test]
-fn test_rex5_callcode_to_empty_no_new_account_storage_gas() {
-    let bytecode = callcode_bytecode(EMPTY_TARGET);
-    let gas_mult1 = run_with_target_multiplier(MegaSpecId::REX5, bytecode.clone(), 1);
-    let gas_mult10 = run_with_target_multiplier(MegaSpecId::REX5, bytecode, 10);
-
-    assert_eq!(
-        gas_mult10, gas_mult1,
-        "Rex5 CALLCODE must not charge new-account storage gas based on the code-source bucket",
-    );
-}
-
 // ============================================================================
 // CALLCODE: Rex5 fix combined with EIP-7702 non-delegating inspection
 // ============================================================================
-
-/// Regression test for the combined Rex5 fix surface where CALLCODE meters
-/// new-account storage gas against the **caller** (current frame) using
-/// non-delegating account inspection.
-///
-/// Setup: the transaction targets `CALLEE`, which carries an EIP-7702 designator
-/// pointing at `DELEGATE`. Revm follows the designator and runs `DELEGATE`'s
-/// CALLCODE-emitting bytecode inside `CALLEE`'s frame, so the in-frame CALLCODE
-/// sees `current = CALLEE` (an authority that holds designator code, hence
-/// non-empty) and `to = EMPTY_TARGET` (empty).
-///
-/// Under the merged Rex5 path:
-/// - `storage_address = current = CALLEE` (per `storage_addr_for_callcode`)
-/// - `inspect_account(CALLEE, false)` returns the authority's own record (designator code,
-///   non-empty), so the new-account premium never fires.
-///
-/// Gas usage must therefore be invariant under both the authority's bucket
-/// multiplier and the code-source's bucket multiplier. The test catches:
-/// - the CALLCODE selector regressing to `storage_addr_from_to` (the code-source multiplier would
-///   start affecting gas), and
-/// - the Rex5 gate being removed (Rex4's frozen behavior would charge against the code-source).
-#[test]
-fn test_rex5_callcode_from_eip7702_authority_no_storage_gas() {
-    let bytecode = callcode_bytecode(EMPTY_TARGET);
-
-    let run = |authority_multiplier: u64, target_multiplier: u64| -> u64 {
-        let mut db = MemoryDatabase::default()
-            .account_balance(CALLER, U256::from(1_000_000_000_000u64))
-            .account_balance(CALLEE, U256::from(1_000_000_000u64))
-            .account_code(DELEGATE, bytecode.clone());
-        set_eip7702_delegation(&mut db, CALLEE, DELEGATE);
-
-        let authority_bucket = TestExternalEnvs::<Infallible>::bucket_id_for_account(CALLEE);
-        let target_bucket = TestExternalEnvs::<Infallible>::bucket_id_for_account(EMPTY_TARGET);
-        let external_envs = TestExternalEnvs::new()
-            .with_bucket_capacity(authority_bucket, MIN_BUCKET_SIZE as u64 * authority_multiplier)
-            .with_bucket_capacity(target_bucket, MIN_BUCKET_SIZE as u64 * target_multiplier);
-
-        let result = transact(
-            MegaSpecId::REX5,
-            &mut db,
-            &external_envs,
-            CALLER,
-            CALLEE,
-            U256::ZERO,
-            10_000_000,
-        )
-        .expect("transaction must succeed");
-        assert!(result.result.is_success(), "execution must succeed: {:?}", result.result);
-        result.result.gas_used()
-    };
-
-    let gas_baseline = run(1, 1);
-    let gas_high_authority = run(10, 1);
-    let gas_high_target = run(1, 10);
-
-    assert_eq!(
-        gas_high_authority, gas_baseline,
-        "authority bucket multiplier must not affect gas — no new-account charge fires against the authority",
-    );
-    assert_eq!(
-        gas_high_target, gas_baseline,
-        "code-source bucket multiplier must not affect gas — Rex5 CALLCODE meters against the caller, not the code-source",
-    );
-}
 
 // ============================================================================
 // CALLCODE: Pre-Rex5 frozen behavior — bug preserved
@@ -230,23 +150,6 @@ fn test_rex5_callcode_from_eip7702_authority_no_storage_gas() {
 // ============================================================================
 // CALL: behavior unchanged — value-transferring CALL to empty target still charges
 // ============================================================================
-
-/// Under Rex5, a value-transferring `CALL` to an empty target still charges
-/// new-account storage gas based on the target's bucket. The fix is scoped to
-/// `CALLCODE` only; `CALL` semantics are unchanged.
-#[test]
-fn test_rex5_call_to_empty_still_charges_new_account_storage_gas() {
-    let bytecode = call_bytecode(EMPTY_TARGET);
-    let gas_mult1 = run_with_target_multiplier(MegaSpecId::REX5, bytecode.clone(), 1);
-    let gas_mult10 = run_with_target_multiplier(MegaSpecId::REX5, bytecode, 10);
-
-    let expected_extra = NEW_ACCOUNT_STORAGE_GAS_BASE * 9;
-    assert_eq!(
-        gas_mult10 - gas_mult1,
-        expected_extra,
-        "Rex5 CALL must continue to charge new-account storage gas against the target bucket",
-    );
-}
 
 // ============================================================================
 // Error-path tests — coverage for FatalExternalError branches in call_code

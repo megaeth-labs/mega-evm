@@ -198,3 +198,28 @@ fn test_a_system_call_is_unaffected_by_an_unreadable_bucket() {
         .expect("a system call does not read SALT");
     assert!(result.result.is_success(), "{:?}", result.result);
 }
+
+/// The read that decides whether a creation adds an account leaf can fail on its own, without
+/// the SALT environment being involved at all. Its failure is the database's, and it surfaces as
+/// such — the pricing hook is never reached, so nothing is charged at a price nobody chose.
+#[test]
+fn test_a_database_error_on_the_create_target_read_fails_the_transaction() {
+    use mega_evm::test_utils::{ErrorInjectingDatabase, InjectedDbError};
+
+    let created = CALLER.create(0);
+    let mut db = ErrorInjectingDatabase::new(db(Bytes::new()));
+    db.fail_on_account = Some(created);
+
+    let result = MegaEvm::new(salt_context(db, minimal_envs())).execute_transaction(tx(
+        TxKind::Create,
+        Bytes::from_static(&[PUSH0, PUSH0, RETURN]),
+        U256::ZERO,
+    ));
+
+    match result {
+        Err(EVMError::Database(InjectedDbError(message))) => {
+            assert!(message.contains("injected basic()"), "got {message}");
+        }
+        other => panic!("expected a database error, got {other:?}"),
+    }
+}

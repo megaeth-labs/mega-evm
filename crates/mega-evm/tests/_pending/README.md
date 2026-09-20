@@ -27,7 +27,7 @@ Do not add a `_pending/main.rs`.
 | Owning mechanism | Tests | From `tests/` | From `src/` | Keep | Rewrite | Undecided |
 |---|---:|---:|---:|---:|---:|---:|
 | the common execution layer | 21 | 21 | 0 | 21 | 0 | 0 |
-| SALT pricing | 75 | 64 | 11 | 17 | 58 | 0 |
+| SALT pricing | 14 | 9 | 5 | 4 | 10 | 0 |
 | history gas | 28 | 24 | 4 | 4 | 24 | 0 |
 | compute gas | 26 | 26 | 0 | 0 | 26 | 0 |
 | the data-size limit | 47 | 45 | 2 | 40 | 7 | 0 |
@@ -41,7 +41,7 @@ Do not add a `_pending/main.rs`.
 | native keyless deployment | 75 | 73 | 2 | 29 | 46 | 0 |
 | inspector support | 4 | 4 | 0 | 1 | 3 | 0 |
 | — (undecided: D57 preload-warm cold charging, D58 98/100 forwarding) | 7 | 7 | 0 | 0 | 0 | 7 |
-| **Total** | **660** | **574** | **86** | **380** | **252** | **28** |
+| **Total** | **599** | **519** | **80** | **367** | **204** | **28** |
 
 ## Tests ported in place
 
@@ -165,11 +165,29 @@ These 53 rows run in a real test target now, adapted to the Satin API, so the co
 | `src/evm/state.rs` | the block executor (1) | 1 | `src/evm/state.rs` |
 | **Total** | | **53** | |
 
+## Tests ported by SALT pricing
+
+These 61 rows run in a real test target now, adapted to the Satin API and to the pricing hook the decision they cite fixes, so the counts above are lower than the inventory's by exactly these rows.
+
+| Legacy file | Owner in the inventory | Tests | Now in |
+|---|---|---:|---|
+| `mini_rex/gas.rs` | SALT pricing (20) | 20 | `tests/satin/salt.rs` |
+| `rex/storage_gas.rs` | SALT pricing (15) | 15 | `tests/satin/salt.rs` |
+| `rex4/eip7702_delegation_cycle.rs` | SALT pricing (8) | 8 | `tests/satin/salt_delegation.rs` |
+| `rex5/callcode_storage_gas.rs` | SALT pricing (3) | 3 | `tests/satin/salt_delegation.rs` |
+| `rex5/eip7702_metering.rs` | SALT pricing (4) | 4 | `tests/satin/salt_delegation.rs` |
+| `rex5/sstore_storage_gas_error.rs` | SALT pricing (1) | 1 | `tests/satin/salt_failure.rs` |
+| `rex6/create_frame_accounting.rs` | SALT pricing (1) | 1 | `tests/satin/salt_failure.rs` |
+| `rex6/error_paths.rs` | SALT pricing (2) | 2 | `tests/satin/salt_failure.rs` |
+| `rex6/system_tx_metering_exemption.rs` | SALT pricing (1) | 1 | `tests/satin/salt.rs` |
+| `src/evm/context.rs` | SALT pricing (1) | 1 | `src/evm/context.rs` |
+| `src/external/gas.rs` | SALT pricing (5) | 5 | `src/external/gas.rs`, `tests/satin/salt.rs` |
+| **Total** | | **61** | |
+
 ## Tests the inventory assigns to the Satin skeleton that are parked under another mechanism
 
 | File | Test | Parked under | Reason |
 |---|---|---|---|
-| `src/evm/context.rs` | `test_shared_salt_env_keeps_dynamic_gas_cache_isolated` | SALT pricing | exercises the dynamic storage-gas cache that SALT pricing brings back |
 
 ## Files
 
@@ -186,13 +204,12 @@ Each cell lists `disposition count (mechanism · decision)`.
 | `mini_rex/block_env_access_tracking.rs` | 3 | keep 3 (detention) |
 | `mini_rex/block_env_gas_limit.rs` | 16 | keep 13 (detention · D08 cap 20M/1M unchanged); rewrite 3 (revert-class aborts · D48 (detention halt -> revert-class)) |
 | `mini_rex/compute_gas_limit.rs` | 25 | rewrite 23 (compute gas · D10/D40/D53 (compute derived from Gas; 200M cap)); rewrite 2 (detention · D48) |
-| `mini_rex/gas.rs` | 22 | rewrite 14 (SALT pricing · D12 (state gas x m via pricing hook)); rewrite 6 (SALT pricing · D12/D13); undecided 2 (— · D58, open: 98/100 forwarding, while the design has frames follow EIP-8037 (63/64)) |
+| `mini_rex/gas.rs` | 2 | undecided 2 (— · D58, open: 98/100 forwarding, while the design has frames follow EIP-8037 (63/64)) |
 | `mini_rex/mega_system_transaction.rs` | 15 | keep 15 (the system contract interceptors · D51) |
 | `mini_rex/oracle.rs` | 13 | rewrite 3 (revert-class aborts · D48); keep 5 (detention); keep 4 (the oracle and control contracts); rewrite 1 (system contract deployment · deploy at Satin activation) |
 | `mini_rex/state_growth_limit.rs` | 4 | rewrite 4 (the state-growth and KV limits · D45 (state-gas limit)) |
 | `mini_rex/tx_data_and_kv_update_limit.rs` | 28 | keep 18 (the data-size limit · data-size numbers unchanged); rewrite 4 (revert-class aborts · D48); undecided 6 (the state-growth and KV limits · D46 (the KV count stays as an output because the node consumes it; the limit semantics are undecided)) |
 | `rex/oracle.rs` | 3 | rewrite 3 (detention · D08 (mark at actual load: same outcome via SLOAD)) |
-| `rex/storage_gas.rs` | 15 | rewrite 15 (SALT pricing · D12 (base price and min-bucket value change; multiplier logic kept)) |
 | `rex2/keyless_deploy.rs` | 37 | rewrite 13 (native keyless deployment · native CREATE sub-frame; D37/D38); keep 19 (native keyless deployment · validation rules 1-9 unchanged); keep 1 (native keyless deployment · rule 4 (tx nonce == 0) unchanged); rewrite 3 (native keyless deployment · D36); rewrite 1 (system contract deployment · deploy at Satin activation) |
 | `rex2/oracle_hint.rs` | 6 | keep 6 (the oracle and control contracts) |
 | `rex3/keyless_deploy.rs` | 2 | rewrite 2 (the system contract interceptors · D15 (explicit 100k compute) / D48) |
@@ -202,7 +219,6 @@ Each cell lists `disposition count (mechanism · decision)`.
 | `rex4/beneficiary_detention.rs` | 13 | keep 12 (detention · D08); rewrite 1 (revert-class aborts · D48) |
 | `rex4/create_safety.rs` | 1 | keep 1 (the common execution layer · canonical revm behaviour) |
 | `rex4/deployment.rs` | 2 | rewrite 2 (system contract deployment · deploy at Satin activation) |
-| `rex4/eip7702_delegation_cycle.rs` | 8 | keep 8 (SALT pricing · account inspection on the pricing path) |
 | `rex4/frame_limits.rs` | 20 | keep 10 (the data-size limit · data-size per-frame 98% kept); rewrite 1 (revert-class aborts · D48); undecided 9 (the state-growth and KV limits · D46) |
 | `rex4/gas_detention.rs` | 5 | keep 3 (detention); rewrite 2 (revert-class aborts · D48/D53) |
 | `rex4/intrinsic_limit_bypass.rs` | 13 | rewrite 6 (the data-size limit · D48/D49 (overflow outcome shape)); undecided 3 (the state-growth and KV limits · D46); keep 3 (the data-size limit); rewrite 1 (inspector support · D41) |
@@ -210,13 +226,12 @@ Each cell lists `disposition count (mechanism · decision)`.
 | `rex4/limit_control.rs` | 14 | rewrite 9 (the oracle and control contracts · D40 (remaining compute derived from Gas)); keep 5 (the system contract interceptors) |
 | `rex4/storage_call_stipend.rs` | 12 | rewrite 12 (history gas · D14 (separated history-only allowance 160 x CPHB; three leak paths)) |
 | `rex5/apply_pending_changes_gas_budget.rs` | 4 | rewrite 4 (the pre-block system calls · D51 (system source m = 1; the system-call reservoir split)) |
-| `rex5/callcode_storage_gas.rs` | 6 | rewrite 3 (SALT pricing · D12); keep 3 (SALT pricing · pricing-failure propagation) |
+| `rex5/callcode_storage_gas.rs` | 3 | keep 3 (SALT pricing · pricing-failure propagation) |
 | `rex5/create2_empty_initcode.rs` | 5 | keep 5 (the common execution layer · canonical revm behaviour) |
 | `rex5/create2_resize_gas_metering.rs` | 2 | keep 2 (the common execution layer · canonical behaviour) |
 | `rex5/db_error.rs` | 4 | rewrite 3 (native keyless deployment · native path surfaces DB errors); keep 1 (the system contract interceptors) |
 | `rex5/deposit_caller_accounting.rs` | 7 | rewrite 7 (the system contract interceptors · D16 (kept; must not double-charge with 2780)) |
 | `rex5/deposit_create_storage_gas.rs` | 4 | rewrite 4 (SALT pricing · D12/D37) |
-| `rex5/eip7702_metering.rs` | 4 | rewrite 4 (SALT pricing · D12/D45) |
 | `rex5/eip7702_state_growth.rs` | 8 | rewrite 8 (the state-growth and KV limits · D28/D31/D45 (7702 authorization matrix)) |
 | `rex5/interceptor_selector_probe.rs` | 6 | keep 6 (the system contract interceptors) |
 | `rex5/keyless_deploy_dispatch_parity.rs` | 3 | keep 3 (the system contract interceptors) |
@@ -228,26 +243,23 @@ Each cell lists `disposition count (mechanism · decision)`.
 | `rex5/pre_block_system_calls.rs` | 11 | keep 11 (the pre-block system calls) |
 | `rex5/sandbox_accounting.rs` | 9 | rewrite 9 (native keyless deployment · native sub-frame: parent tracker sees child directly) |
 | `rex5/selfdestruct_beneficiary.rs` | 7 | rewrite 4 (the state-growth and KV limits · D45 (state gas via new-account site)); keep 2 (detention); keep 1 (the data-size limit) |
-| `rex5/sstore_storage_gas_error.rs` | 1 | keep 1 (SALT pricing · pricing-failure path) |
 | `rex5/stipend_accounting.rs` | 6 | rewrite 6 (history gas · D14 (history-only allowance lifecycle)) |
 | `rex5/system_tx_replay.rs` | 12 | keep 12 (the system contract interceptors) |
 | `rex6/beneficiary_detention.rs` | 16 | keep 13 (detention · D08); keep 2 (the data-size limit · D50 write record 40 B); rewrite 1 (the state-growth and KV limits · D45) |
 | `rex6/create2_metering_order.rs` | 11 | keep 11 (the common execution layer · canonical halt reasons; D04 512 KiB boundary) |
-| `rex6/create_frame_accounting.rs` | 1 | keep 1 (SALT pricing) |
 | `rex6/eip7702_authority_accounting.rs` | 18 | rewrite 18 (the state-growth and KV limits · D12/D28/D31/D45 (7702 matrix; SALT pricing for the SALT half)) |
-| `rex6/error_paths.rs` | 4 | keep 2 (SALT pricing); keep 2 (the common execution layer · canonical) |
+| `rex6/error_paths.rs` | 2 | keep 2 (the common execution layer · canonical) |
 | `rex6/fee_reward_accounting.rs` | 6 | rewrite 6 (history gas · D50/D56 (tx body constant 310 = 110 + 40 x 5) / D45) |
 | `rex6/frame_local_accounting.rs` | 3 | keep 3 (the data-size limit · LOG base 32 unchanged) |
 | `rex6/keyless_sandbox_hardening.rs` | 3 | rewrite 1 (native keyless deployment · D44 / EIP-6780 native); keep 2 (native keyless deployment · canonical CREATE rules) |
 | `rex6/oracle_hint_volatile_access.rs` | 4 | keep 4 (the oracle and control contracts) |
 | `rex6/self_transfer_account_dedup.rs` | 1 | keep 1 (the data-size limit) |
 | `rex6/sequencer_registry_rotation.rs` | 5 | keep 5 (system contract deployment) |
-| `rex6/system_tx_metering_exemption.rs` | 3 | rewrite 3 (SALT pricing · D51 (m = 1 for system source; history exempt)) |
+| `rex6/system_tx_metering_exemption.rs` | 2 | rewrite 2 (SALT pricing · D51 (m = 1 for system source; history exempt)) |
 | `src/access/volatile.rs` | 4 | keep 4 (detention) |
-| `src/evm/context.rs` | 1 | keep 1 (SALT pricing · SALT pricing for the SALT cache test) |
 | `src/evm/host.rs` | 1 | keep 1 (SALT pricing) |
 | `src/evm/mod.rs` | 3 | keep 3 (the pre-block system calls) |
-| `src/external/gas.rs` | 9 | rewrite 9 (SALT pricing · D12/D51) |
+| `src/external/gas.rs` | 4 | rewrite 4 (SALT pricing · D12/D51) |
 | `src/limit/compute_gas.rs` | 1 | rewrite 1 (detention · D40/D48) |
 | `src/limit/data_size.rs` | 2 | keep 2 (the data-size limit) |
 | `src/limit/kv_update.rs` | 1 | undecided 1 (the state-growth and KV limits · D46) |
