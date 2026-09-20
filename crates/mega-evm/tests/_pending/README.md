@@ -16,6 +16,7 @@ Do not add a `_pending/main.rs`.
 - Port the rows your mechanism owns into a real test target, adapting them to the Satin API and the decision cited in the table.
 - `keep` rows keep their scenario and expectation; `rewrite` rows keep the scenario and take the new expectation from the cited decision; `undecided` rows wait for their decision.
 - Delete a row from its file here in the same commit that ports it, and delete the file once it holds no rows.
+- A row whose owning mechanism has landed and left it nothing to pin is retired rather than kept parked: it moves to "Tests retired after the inventory" with the reason, and its row is deleted from the file here in the same commit.
 - The 44 legacy mutant killers the inventory kept (`tests/mutation/`) are not here: each was keyed to a surviving mutant of the legacy sources, and the test gates found no survivor in the Satin sources to regenerate one for.
   A mechanism whose code leaves a survivor gets a new killer from the mutation gate, next to the code or as a system test under `tests/mutation/`; what the retired rows cited is kept in "Retired mutant killers" below.
 - Files under `src/` are the inline unit-test modules of the legacy core, extracted when the Satin skeleton replaced `crates/mega-evm/src`.
@@ -27,7 +28,7 @@ Do not add a `_pending/main.rs`.
 | Owning mechanism | Tests | From `tests/` | From `src/` | Keep | Rewrite | Undecided |
 |---|---:|---:|---:|---:|---:|---:|
 | the common execution layer | 21 | 21 | 0 | 21 | 0 | 0 |
-| SALT pricing | 15 | 10 | 5 | 4 | 11 | 0 |
+| SALT pricing | 11 | 7 | 4 | 0 | 11 | 0 |
 | history gas | 28 | 24 | 4 | 4 | 24 | 0 |
 | compute gas | 26 | 26 | 0 | 0 | 26 | 0 |
 | the data-size limit | 47 | 45 | 2 | 40 | 7 | 0 |
@@ -41,7 +42,7 @@ Do not add a `_pending/main.rs`.
 | native keyless deployment | 75 | 73 | 2 | 29 | 46 | 0 |
 | inspector support | 4 | 4 | 0 | 1 | 3 | 0 |
 | — (undecided: D57 preload-warm cold charging, D58 98/100 forwarding) | 7 | 7 | 0 | 0 | 0 | 7 |
-| **Total** | **600** | **520** | **80** | **367** | **205** | **28** |
+| **Total** | **596** | **517** | **79** | **363** | **205** | **28** |
 
 ## Tests ported in place
 
@@ -183,6 +184,17 @@ These 60 rows run in a real test target now, adapted to the Satin API and to the
 | `src/external/gas.rs` | SALT pricing (5) | 5 | `src/external/gas.rs`, `tests/satin/salt.rs` |
 | **Total** | | **60** | |
 
+## Tests retired after the inventory
+
+These 4 rows were parked when the inventory was applied and have since been retired: the mechanism that owns them landed and left them nothing to pin, so no later mechanism will port them.
+They are not counted above.
+
+| Legacy file | Owner in the inventory | Tests | Why |
+|---|---|---:|---|
+| `rex5/callcode_storage_gas.rs` | SALT pricing (3) | 3 | Satin's `CALLCODE` cannot reach a state gas pricing site: it sends value to the frame's own account, which exists, so it adds no account leaf and asks for no price. There is no pricing-path account inspection left to fail |
+| `src/evm/host.rs` | SALT pricing (1) | 1 | the pricing hook inspects no account: the fork decides whether a target exists and the hook only prices what it is told to, so there is no delegation walk on the pricing path to guard |
+| **Total** | | **4** | |
+
 ## Tests the inventory assigns to the Satin skeleton that are parked under another mechanism
 
 | File | Test | Parked under | Reason |
@@ -225,7 +237,6 @@ Each cell lists `disposition count (mechanism · decision)`.
 | `rex4/limit_control.rs` | 14 | rewrite 9 (the oracle and control contracts · D40 (remaining compute derived from Gas)); keep 5 (the system contract interceptors) |
 | `rex4/storage_call_stipend.rs` | 12 | rewrite 12 (history gas · D14 (separated history-only allowance 160 x CPHB; three leak paths)) |
 | `rex5/apply_pending_changes_gas_budget.rs` | 4 | rewrite 4 (the pre-block system calls · D51 (system source m = 1; the system-call reservoir split)) |
-| `rex5/callcode_storage_gas.rs` | 3 | keep 3 (SALT pricing · pricing-failure propagation) |
 | `rex5/create2_empty_initcode.rs` | 5 | keep 5 (the common execution layer · canonical revm behaviour) |
 | `rex5/create2_resize_gas_metering.rs` | 2 | keep 2 (the common execution layer · canonical behaviour) |
 | `rex5/db_error.rs` | 4 | rewrite 3 (native keyless deployment · native path surfaces DB errors); keep 1 (the system contract interceptors) |
@@ -256,7 +267,6 @@ Each cell lists `disposition count (mechanism · decision)`.
 | `rex6/sequencer_registry_rotation.rs` | 5 | keep 5 (system contract deployment) |
 | `rex6/system_tx_metering_exemption.rs` | 3 | rewrite 3 (SALT pricing · D51 (m = 1 for system source; history exempt)) |
 | `src/access/volatile.rs` | 4 | keep 4 (detention) |
-| `src/evm/host.rs` | 1 | keep 1 (SALT pricing) |
 | `src/evm/mod.rs` | 3 | keep 3 (the pre-block system calls) |
 | `src/external/gas.rs` | 4 | rewrite 4 (SALT pricing · D12/D51) |
 | `src/limit/compute_gas.rs` | 1 | rewrite 1 (detention · D40/D48) |
