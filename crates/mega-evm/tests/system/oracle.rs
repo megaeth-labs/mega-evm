@@ -5,11 +5,12 @@ use core::convert::Infallible;
 
 use alloy_evm::Evm;
 use alloy_primitives::{Bytes, B256, U256};
-use alloy_sol_types::SolCall;
+use alloy_sol_types::{SolCall, SolError};
 use mega_evm::{
     system::{IOracle, ORACLE_CONTRACT_ADDRESS},
     test_utils::{zero_fee_l1_block_info, BytecodeBuilder, MemoryDatabase},
-    ExternalEnvs, LimitUsage, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
+    EvmTxRuntimeLimits, ExternalEnvs, LimitCheck, LimitKind, LimitUsage, MegaContext, MegaEvm,
+    MegaHaltReason, MegaLimitExceeded, MegaSpecId, MegaTransaction, MegaTransactionOutcome,
     RecordedHint, TestExternalEnvs,
 };
 use revm::{
@@ -35,6 +36,17 @@ fn run_with_oracle(
     db: MemoryDatabase,
     tx: MegaTransaction,
 ) -> (ResultAndState<MegaHaltReason>, Vec<RecordedHint>, LimitUsage) {
+    let (outcome, hints) = run_with_oracle_under(db, tx, EvmTxRuntimeLimits::no_limits());
+    (outcome.result_and_state, hints, outcome.usage)
+}
+
+/// [`run_with_oracle`] under `limits`, returning the whole outcome: the stop a crossed limit
+/// latched is what the outcome reports, not the output alone.
+fn run_with_oracle_under(
+    db: MemoryDatabase,
+    tx: MegaTransaction,
+    limits: EvmTxRuntimeLimits,
+) -> (MegaTransactionOutcome, Vec<RecordedHint>) {
     let envs = TestExternalEnvs::<Infallible>::new();
     let ctx = MegaContext::new_with_external_envs(
         db,
@@ -42,11 +54,10 @@ fn run_with_oracle(
         ExternalEnvs::from(envs.clone()),
     )
     .with_block(block())
-    .with_chain(zero_fee_l1_block_info());
-    let mut evm = MegaEvm::new(ctx);
-    let result = evm.transact_raw(tx).expect("the transaction is valid");
-    let usage = evm.ctx().additional_limit().usage();
-    (result, envs.recorded_hints(), usage)
+    .with_chain(zero_fee_l1_block_info())
+    .with_tx_runtime_limits(limits);
+    let outcome = MegaEvm::new(ctx).execute_transaction(tx).expect("the transaction is valid");
+    (outcome, envs.recorded_hints())
 }
 
 /// A `sendHint` transaction reaches the oracle service with the caller, the topic and the
@@ -221,4 +232,59 @@ fn test_a_reverting_frame_does_not_take_the_hint_bytes_back() {
         data.len() as u64,
         "the bytes stay counted: a revert cannot take the hint back",
     );
+}
+
+/// A payload that does not fit in what is left of the transaction's data-size limit is not
+/// forwarded, and the crossing stops the transaction: the hint's bytes are counted before the
+/// payload is decoded, so the limit is crossed before the frame the call would have started.
+///
+/// The bytes stay counted — the crossing is what the transaction is stopped for, and the usage
+/// is what shows it — and the transaction settles as a revert carrying the stop's own data.
+#[test]
+fn test_a_hint_that_crosses_the_data_size_limit_is_not_forwarded() {
+    let data = send_hint(b"a hint one byte too long");
+    let limit = data.len() as u64 - 1;
+    let (outcome, hints) = run_with_oracle_under(
+        system_db(),
+        call_tx(ORACLE_CONTRACT_ADDRESS, data.clone(), U256::ZERO),
+        EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(limit),
+    );
+
+    assert!(hints.is_empty(), "the hint the transaction cannot pay for is not forwarded");
+    assert_eq!(
+        outcome.usage.data_size,
+        data.len() as u64,
+        "the whole payload is counted: the count is what crossed the limit",
+    );
+    assert_eq!(
+        outcome.limit_exceeded,
+        Some(LimitCheck::ExceedsLimit {
+            kind: LimitKind::DataSize,
+            limit,
+            used: data.len() as u64,
+            frame_local: false,
+        }),
+    );
+    assert_eq!(
+        outcome.result.output().cloned().unwrap_or_default(),
+        Bytes::from(MegaLimitExceeded { kind: LimitKind::DataSize.as_u8(), limit }.abi_encode()),
+        "the transaction settles as the stop's revert",
+    );
+}
+
+/// The same payload at exactly the transaction's limit is forwarded: the limit is crossed only
+/// above it.
+#[test]
+fn test_a_hint_at_the_data_size_limit_is_forwarded() {
+    let data = send_hint(b"a hint one byte too long");
+    let (outcome, hints) = run_with_oracle_under(
+        system_db(),
+        call_tx(ORACLE_CONTRACT_ADDRESS, data.clone(), U256::ZERO),
+        EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(data.len() as u64),
+    );
+
+    assert!(outcome.result.is_success(), "{:?}", outcome.result);
+    assert_eq!(hints.len(), 1);
+    assert_eq!(outcome.usage.data_size, data.len() as u64);
+    assert_eq!(outcome.limit_exceeded, None);
 }
