@@ -105,6 +105,26 @@ fn test_a_create_transaction_costs_twenty_four_thousand_plus_the_account_state_g
     assert_eq!(spent.gas_used - spent.state, 24_000, "the fixed part");
 }
 
+/// Init code is transaction data twice over: every byte is a calldata token, and EIP-3860 charges
+/// two gas for each 32-byte word of it. Sixty-four bytes of zeros is two words; sixty-five is
+/// three, so the word charge steps by two where the token charge steps by four.
+#[test]
+fn test_init_code_costs_its_calldata_tokens_and_an_eip3860_word() {
+    let fixed = 24_000;
+    let token = 4;
+    let word = 2;
+    for (len, words) in [(64u64, 2u64), (65, 3)] {
+        let db = MemoryDatabase::default().account_balance(CALLER, U256::from(10u64.pow(18)));
+        // Every byte is `STOP`, so the init code deposits nothing and costs nothing to run.
+        let spent = spend(db, create(CALLER, Bytes::from(vec![0u8; len as usize]), GAS_LIMIT));
+        assert_eq!(
+            spent.gas_used - spent.state,
+            fixed + token * len + word * words,
+            "{len} bytes of init code"
+        );
+    }
+}
+
 /* ---------- the state entries ---------- */
 
 /// A slot's first write to a non-zero value draws the slot's state gas; writing it again does
