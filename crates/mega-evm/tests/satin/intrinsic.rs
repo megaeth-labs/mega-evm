@@ -25,7 +25,7 @@ use revm::{
     Database,
 };
 
-use crate::common::{call, context, create};
+use crate::common::{call, context, create, runs_at_measurement_prices};
 
 const CALLER: Address = address!("0000000000000000000000000000000000800000");
 const CALLEE: Address = address!("0000000000000000000000000000000000800001");
@@ -239,6 +239,9 @@ fn assert_sender_untouched() {
 /// the intrinsic charge alone is accepted and then runs out of gas, charging the sender.
 #[test]
 fn test_a_transfer_that_cannot_pay_the_new_account_runs_out_of_gas() {
+    if runs_at_measurement_prices() {
+        return;
+    }
     let db = MemoryDatabase::default().account_balance(CALLER, U256::from(10u64.pow(18)));
     let mut evm = MegaEvm::new(context(db));
     let outcome = evm
@@ -253,6 +256,9 @@ fn test_a_transfer_that_cannot_pay_the_new_account_runs_out_of_gas() {
 /// at validation.
 #[test]
 fn test_a_creation_that_cannot_pay_its_account_runs_out_of_gas() {
+    if runs_at_measurement_prices() {
+        return;
+    }
     let db = MemoryDatabase::default().account_balance(CALLER, U256::from(10u64.pow(18)));
     let mut evm = MegaEvm::new(context(db));
     let outcome = evm

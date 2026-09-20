@@ -24,6 +24,8 @@ use revm::{
     ExecuteEvm, Journal,
 };
 
+use crate::common::runs_at_measurement_prices;
+
 const CALLER: Address = address!("0x4000000000000000000000000000000000000001");
 const CALLEE: Address = address!("0x5000000000000000000000000000000000000001");
 
@@ -150,6 +152,9 @@ fn test_value_transfer_matches_op_revm() {
 
 #[test]
 fn test_sstore_matches_op_revm() {
+    if runs_at_measurement_prices() {
+        return;
+    }
     let code = BytecodeBuilder::default().sstore(U256::ZERO, U256::from(42)).stop().build();
     let db = MemoryDatabase::default().account_code(CALLEE, code);
     let tx = TxEnv {

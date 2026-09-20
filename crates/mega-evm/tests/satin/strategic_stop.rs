@@ -25,7 +25,7 @@ use revm::{
     Database, Inspector,
 };
 
-use crate::common::{call, context};
+use crate::common::{call, context, runs_at_measurement_prices};
 
 const CALLER: Address = address!("0000000000000000000000000000000000200000");
 const A: Address = address!("00000000000000000000000000000000000000A0");
@@ -307,6 +307,9 @@ fn test_child_out_of_gas_under_a_cap_does_not_latch() {
 /// is never created, so its state gas is never drawn.
 #[test]
 fn test_cap_crossed_before_the_first_frame_reverts_without_running() {
+    if runs_at_measurement_prices() {
+        return;
+    }
     let funded = || MemoryDatabase::default().account_balance(CALLER, U256::from(1_000_000));
     let mut evm = evm_with(funded().account_code(B, writer()), cap(39), Probe::default());
     let result = evm.transact_raw(call(CALLER, B, U256::from(5), GAS_LIMIT)).unwrap();

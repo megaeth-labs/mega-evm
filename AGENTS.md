@@ -26,6 +26,8 @@ cargo test -p mega-evm -- test_name       # single test
 
 # The gas schedule's byte prices are an input; this feature lets a measurement build change them
 cargo test -p mega-evm --features satin-price-override,test-utils
+# Run the suite with MEGA_SATIN_CPSB and MEGA_SATIN_CPHB unset: with either of them set the tests
+# that assert the spec's own byte prices skip, and the suite checks less than it looks like it does
 
 # Regenerate the checked-in pricing table after an intentional schedule or engine change
 UPDATE_SATIN_PRICING_TABLE=1 cargo test -p mega-evm --test satin

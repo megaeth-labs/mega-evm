@@ -9,7 +9,7 @@ use mega_evm::{
     MegaLimitExceeded, MegaTransactionOutcome, WRITE_RECORD_SIZE,
 };
 
-use crate::common::{call, context};
+use crate::common::{call, context, runs_at_measurement_prices};
 
 const CALLER: Address = address!("0000000000000000000000000000000000600000");
 const CONTRACT: Address = address!("0000000000000000000000000000000000600001");
@@ -37,6 +37,9 @@ fn execute(
 /// sender gets back is reported.
 #[test]
 fn test_outcome_reports_the_ledgers() {
+    if runs_at_measurement_prices() {
+        return;
+    }
     let outcome = execute(writer(), EvmTxRuntimeLimits::no_limits(), 1_000_000_000);
     assert!(outcome.result.is_success());
     let gas = outcome.gas;

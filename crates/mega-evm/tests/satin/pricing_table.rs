@@ -28,7 +28,7 @@ use revm::{
     primitives::hardfork::SpecId,
 };
 
-use crate::common::{call, context, create};
+use crate::common::{call, context, create, runs_at_measurement_prices};
 
 const CALLER: Address = address!("0000000000000000000000000000000000b00000");
 const CONTRACT: Address = address!("0000000000000000000000000000000000b00001");
@@ -194,6 +194,9 @@ fn measured() -> Vec<Measured> {
 /// The rendered table is the one checked in. `UPDATE_SATIN_PRICING_TABLE=1` writes it instead.
 #[test]
 fn test_the_pricing_table_is_up_to_date() {
+    if runs_at_measurement_prices() {
+        return;
+    }
     let rendered = render();
     let path = table_path();
     if std::env::var_os("UPDATE_SATIN_PRICING_TABLE").is_some() {
@@ -213,6 +216,9 @@ fn test_the_pricing_table_is_up_to_date() {
 /// cannot drift from what it claims.
 #[test]
 fn test_the_table_shows_where_satin_differs_from_amsterdam() {
+    if runs_at_measurement_prices() {
+        return;
+    }
     let rendered = render();
     let differing: Vec<&str> = rendered
         .lines()

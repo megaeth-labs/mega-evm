@@ -16,7 +16,7 @@ use revm::{
     context::result::ExecutionResult,
 };
 
-use crate::common::{call, call_with_data, context, create};
+use crate::common::{call, call_with_data, context, create, runs_at_measurement_prices};
 
 const CALLER: Address = address!("0000000000000000000000000000000000900000");
 const CALLEE: Address = address!("0000000000000000000000000000000000900001");
@@ -72,6 +72,9 @@ fn test_a_value_transfer_to_an_existing_account_costs_twenty_one_thousand() {
 /// top of the transfer's own cost.
 #[test]
 fn test_a_value_transfer_that_creates_the_recipient_draws_the_account_state_gas() {
+    if runs_at_measurement_prices() {
+        return;
+    }
     let db = MemoryDatabase::default().account_balance(CALLER, U256::from(10u64.pow(18)));
     let spent = spend(db, call(CALLER, CALLEE, U256::from(7), GAS_LIMIT));
     assert_eq!(spent.state, ACCOUNT_STATE_GAS);
@@ -93,6 +96,9 @@ fn test_a_self_transfer_costs_twelve_thousand() {
 /// what is left when the state gas is taken out.
 #[test]
 fn test_a_create_transaction_costs_twenty_four_thousand_plus_the_account_state_gas() {
+    if runs_at_measurement_prices() {
+        return;
+    }
     let db = MemoryDatabase::default().account_balance(CALLER, U256::from(10u64.pow(18)));
     let spent = spend(db, create(CALLER, Bytes::new(), GAS_LIMIT));
     assert_eq!(spent.state, ACCOUNT_STATE_GAS, "the created account");
@@ -105,6 +111,9 @@ fn test_a_create_transaction_costs_twenty_four_thousand_plus_the_account_state_g
 /// not, because the slot is no longer new.
 #[test]
 fn test_a_new_slot_draws_the_slot_state_gas() {
+    if runs_at_measurement_prices() {
+        return;
+    }
     let code = BytecodeBuilder::default().sstore(U256::ZERO, U256::from(1)).stop().build();
     let new = spend(with_code(code.clone()), call(CALLER, CALLEE, U256::ZERO, GAS_LIMIT));
     assert_eq!(new.state, SLOT_STATE_GAS);
@@ -117,6 +126,9 @@ fn test_a_new_slot_draws_the_slot_state_gas() {
 /// Deployed code is priced by the byte on the state dimension, on top of the created account.
 #[test]
 fn test_deployed_code_draws_state_gas_by_the_byte() {
+    if runs_at_measurement_prices() {
+        return;
+    }
     let db = || MemoryDatabase::default().account_balance(CALLER, U256::from(10u64.pow(18)));
     let empty = spend(db(), create(CALLER, Bytes::new(), GAS_LIMIT));
     let thirty_two = spend(db(), create(CALLER, deploying(32), GAS_LIMIT));
@@ -151,6 +163,9 @@ fn test_a_reverted_creation_draws_no_state_gas() {
 /// created, and nothing for code.
 #[test]
 fn test_a_creation_depositing_no_code_pays_for_the_account_alone() {
+    if runs_at_measurement_prices() {
+        return;
+    }
     let db = MemoryDatabase::default().account_balance(CALLER, U256::from(10u64.pow(18)));
     let spent = spend(db, create(CALLER, deploying(0), GAS_LIMIT));
     assert_eq!(spent.state, ACCOUNT_STATE_GAS);

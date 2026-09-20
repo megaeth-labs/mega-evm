@@ -270,6 +270,35 @@ pub fn active_satin_prices() -> SatinPrices {
     }
 }
 
+/// Whether this process prices bytes at something other than the constants.
+///
+/// Only a measurement build can arrange that — the `satin-price-override` feature, through
+/// [`install_satin_prices`] or the two environment variables — and it moves every state-gas
+/// number in the schedule. A test that asserts one of those numbers returns early instead of
+/// failing on a price the developer asked for.
+///
+/// The notice goes straight to stderr and only once: the harness captures the print macros of a
+/// test that passes, so a message written with them would never be read.
+#[cfg(test)]
+pub(crate) fn runs_at_measurement_prices() -> bool {
+    if active_satin_prices().is_constants() {
+        return false;
+    }
+    #[cfg(feature = "satin-price-override")]
+    {
+        use std::io::Write;
+        static NOTICE: std::sync::Once = std::sync::Once::new();
+        NOTICE.call_once(|| {
+            let _ = writeln!(
+                std::io::stderr(),
+                "note: skipping the tests that assert the spec's byte prices, because \
+                 {CPSB_ENV_VAR} or {CPHB_ENV_VAR} fixed other ones; unset them to run those tests"
+            );
+        });
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -346,6 +375,9 @@ mod tests {
     /// them; with it, an unset environment leaves them at the constants too.
     #[test]
     fn test_the_active_prices_default_to_the_constants() {
+        if runs_at_measurement_prices() {
+            return;
+        }
         assert_eq!(active_satin_prices(), SatinPrices::CONSTANTS);
     }
 
@@ -354,6 +386,9 @@ mod tests {
     #[cfg(feature = "satin-price-override")]
     #[test]
     fn test_installing_the_prices_in_effect_is_idempotent() {
+        if runs_at_measurement_prices() {
+            return;
+        }
         assert_eq!(install_satin_prices(SatinPrices::CONSTANTS), Ok(()));
         assert_eq!(install_satin_prices(SatinPrices::CONSTANTS), Ok(()));
 

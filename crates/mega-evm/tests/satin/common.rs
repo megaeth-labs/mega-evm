@@ -4,6 +4,7 @@ use alloy_evm::Evm;
 use alloy_op_evm::OpTx;
 use alloy_primitives::{Address, Bytes, TxKind, U256};
 use mega_evm::{
+    active_satin_prices,
     test_utils::{op_transaction, zero_fee_l1_block_info},
     LimitUsage, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
 };
@@ -56,4 +57,30 @@ pub(crate) fn run<DB: alloy_evm::Database>(
     let result = evm.transact_raw(tx).expect("the transaction is valid");
     let usage = evm.ctx().additional_limit().usage();
     (result, usage)
+}
+
+/// Whether this process prices bytes at something other than the constants the spec fixes.
+///
+/// Only a measurement build can arrange that — the `satin-price-override` feature, through
+/// `install_satin_prices` or the `MEGA_SATIN_CPSB` / `MEGA_SATIN_CPHB` variables — and it moves
+/// every state-gas number. A test that asserts one of those numbers returns early instead of
+/// failing on a price the developer asked for.
+///
+/// The notice goes straight to stderr and only once: the harness captures the print macros of a
+/// test that passes, so a message written with them would never be read.
+pub(crate) fn runs_at_measurement_prices() -> bool {
+    use std::io::Write;
+
+    if active_satin_prices().is_constants() {
+        return false;
+    }
+    static NOTICE: std::sync::Once = std::sync::Once::new();
+    NOTICE.call_once(|| {
+        let _ = writeln!(
+            std::io::stderr(),
+            "note: skipping the tests that assert the spec's byte prices, because \
+             MEGA_SATIN_CPSB or MEGA_SATIN_CPHB fixed other ones; unset them to run those tests"
+        );
+    });
+    true
 }

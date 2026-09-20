@@ -120,7 +120,7 @@ mod tests {
     use super::*;
     use crate::{
         constants::{ACCOUNT_STATE_GAS, COST_PER_STATE_BYTE, SLOT_STATE_GAS},
-        evm::prices::BytePrice,
+        evm::prices::{runs_at_measurement_prices, BytePrice},
     };
 
     fn osaka() -> GasParams {
@@ -241,9 +241,13 @@ mod tests {
     /// The state entries are EIP-8037's byte counts at `MegaETH`'s price. Dividing an entry by
     /// the price recovers the byte count the EIP names, which is the property that survives a
     /// repricing.
+    ///
+    /// Built at the constants rather than read off the process, so the numbers below hold in a
+    /// measurement build too; that the process runs this schedule is
+    /// [`test_the_schedule_at_the_active_prices_is_the_schedule_at_the_constants`].
     #[test]
     fn test_state_entries_recover_the_eip8037_byte_counts() {
-        let satin = satin_gas_params();
+        let satin = satin_gas_params_at(SatinPrices::CONSTANTS);
         for &(id, bytes) in STATE_GAS_REPRICED {
             let id = id();
             assert_eq!(satin.get(id), bytes * COST_PER_STATE_BYTE, "{} at the price", id.name());
@@ -284,9 +288,12 @@ mod tests {
     }
 
     /// The prices in effect are the constants, so the schedule the engine installs is the one
-    /// built at them.
+    /// built at them. A measurement build is the one case where they part, and it skips.
     #[test]
     fn test_the_schedule_at_the_active_prices_is_the_schedule_at_the_constants() {
+        if runs_at_measurement_prices() {
+            return;
+        }
         assert_eq!(satin_gas_params().table(), satin_gas_params_at(SatinPrices::CONSTANTS).table());
     }
 }
