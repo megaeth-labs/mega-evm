@@ -14,7 +14,7 @@
 #[cfg(not(feature = "std"))]
 use alloc as std;
 use core::{fmt, str::FromStr};
-use std::string::String;
+use std::{format, string::String};
 
 use crate::constants::{COST_PER_HISTORY_BYTE, COST_PER_STATE_BYTE};
 
