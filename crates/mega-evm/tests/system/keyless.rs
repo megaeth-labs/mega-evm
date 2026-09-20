@@ -158,3 +158,22 @@ fn test_the_overhead_does_not_depend_on_the_payload() {
     assert!(empty >= KEYLESS_DEPLOY_OVERHEAD_GAS, "{empty} is below the fixed overhead");
     assert!(payload >= KEYLESS_DEPLOY_OVERHEAD_GAS, "{payload} is below the fixed overhead");
 }
+
+/// Admission is the selector alone here too: a payload too short to hold the arguments the ABI
+/// names is still dispatched and charged. What the deployment makes of it is the deployment's
+/// to decide — it rejects a transaction it cannot decode.
+#[test]
+fn test_a_truncated_payload_is_still_dispatched() {
+    let truncated: Bytes =
+        KEYLESS_DEPLOY.iter().copied().chain([0_u8; 16]).collect::<Vec<_>>().into();
+    let dispatched =
+        run(system_db(), call_tx(KEYLESS_DEPLOY_ADDRESS, truncated.clone(), U256::ZERO));
+    let plain =
+        run(system_db(), call_tx(KEYLESS_DEPLOY_ADDRESS, unknown_selector(&truncated), U256::ZERO));
+
+    let charged = dispatched.result.gas().total_gas_spent() - plain.result.gas().total_gas_spent();
+    assert!(
+        charged >= KEYLESS_DEPLOY_OVERHEAD_GAS,
+        "{charged} is below the overhead a dispatched call pays",
+    );
+}

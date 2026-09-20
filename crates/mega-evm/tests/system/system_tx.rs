@@ -548,3 +548,71 @@ where
     let error = evm.execute_transaction(tx).expect_err("the transaction must be rejected");
     format!("{error:?}")
 }
+
+/// The contract a system transaction calls sees the system address as its caller: the promotion
+/// does not put another address in its place.
+#[test]
+fn test_the_callee_sees_the_system_address_as_its_caller() {
+    use mega_evm::test_utils::BytecodeBuilder;
+    use revm::bytecode::opcode::{CALLER as CALLER_OP, MSTORE, RETURN};
+
+    let returns_caller = BytecodeBuilder::default()
+        .append(CALLER_OP)
+        .push_number(0_u64)
+        .append(MSTORE)
+        .push_number(32_u64)
+        .push_number(0_u64)
+        .append(RETURN)
+        .build();
+    let db = chain_db().account_code(ORACLE_CONTRACT_ADDRESS, returns_caller);
+    let outcome = run_outcome(
+        db,
+        legacy_tx(MEGA_SYSTEM_ADDRESS, TxKind::Call(ORACLE_CONTRACT_ADDRESS), Bytes::new(), 0),
+    );
+
+    assert!(outcome.result.is_success(), "{:?}", outcome.result);
+    assert_eq!(
+        Address::from_word(B256::from_slice(outcome.result.output().unwrap())),
+        MEGA_SYSTEM_ADDRESS,
+    );
+}
+
+/// The account a deposit-like transaction creates for its caller is the transaction's own
+/// account: it is part of the transaction body, so it is not a write record of its own.
+#[test]
+fn test_the_created_caller_is_not_a_write_record() {
+    let fresh = run_outcome(chain_db(), system_tx(0, B256::with_last_byte(0x99)));
+    let existing = run_outcome(
+        chain_db().account_balance(MEGA_SYSTEM_ADDRESS, U256::from(1)),
+        system_tx(0, B256::with_last_byte(0x99)),
+    );
+    assert!(fresh.result.is_success() && existing.result.is_success());
+    assert_eq!(
+        fresh.usage, existing.usage,
+        "creating the sender's own account records nothing a transaction with an existing sender \
+         does not record",
+    );
+}
+
+/// A deposit-like transaction that creates a contract pays for the account it creates for its
+/// caller as well as for the contract.
+#[test]
+fn test_a_deposit_that_creates_a_contract_pays_for_its_caller_too() {
+    let creator = address!("0x00000000000000000000000000000000000f0007");
+    let init_code = Bytes::from_static(&[0x60, 0x00, 0x60, 0x00, 0xf3]); // returns empty code
+    let deposit = |db: MemoryDatabase| {
+        let mut tx = legacy_tx(creator, TxKind::Create, init_code.clone(), 0);
+        tx.0.base.gas_price = 0;
+        tx.0.deposit.source_hash = B256::repeat_byte(0x55);
+        run_outcome(db, tx)
+    };
+    let fresh = deposit(chain_db());
+    let existing = deposit(chain_db().account_balance(creator, U256::from(1)));
+
+    assert!(fresh.result.is_success(), "{:?}", fresh.result);
+    assert!(existing.result.is_success(), "{:?}", existing.result);
+    assert!(
+        fresh.gas.state > existing.gas.state,
+        "the created caller costs state gas on top of the created contract",
+    );
+}
