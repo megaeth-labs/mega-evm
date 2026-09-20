@@ -288,20 +288,44 @@ mod tests {
         assert_eq!(over.result, InstructionResult::PrecompileError);
     }
 
-    /// `ModExp` runs on the Osaka formula, which prices a small exponentiation well above the
-    /// 200-gas Berlin minimum the earlier entry charged.
+    /// A `ModExp` header of `base_len`, `exp_len` and `mod_len`, followed by the operands.
+    fn modexp_input(base: &[u8], exponent: &[u8], modulus: &[u8]) -> Bytes {
+        let mut input = std::vec![0u8; 96];
+        input[31] = base.len() as u8;
+        input[63] = exponent.len() as u8;
+        input[95] = modulus.len() as u8;
+        input.extend_from_slice(base);
+        input.extend_from_slice(exponent);
+        input.extend_from_slice(modulus);
+        Bytes::from(input)
+    }
+
+    /// `ModExp` is the Osaka entry: a one-byte exponentiation costs the Osaka 500-gas minimum,
+    /// not the 200 of the Berlin entry Karst removed, and an exponentiation large enough for the
+    /// EIP-7883 formula to bite is priced by the formula rather than by the minimum.
     #[test]
     fn test_modexp_is_priced_on_the_osaka_formula() {
         let address = *revm::precompile::modexp::OSAKA.address();
-        // base = 3 (1 byte), exponent = 2 (1 byte), modulus = 5 (1 byte): 3^2 mod 5 = 4.
-        let mut input = std::vec![0u8; 96];
-        input[31] = 1;
-        input[63] = 1;
-        input[95] = 1;
-        input.extend_from_slice(&[3, 2, 5]);
-        let result = run(address, Bytes::from(input), 100_000);
-        assert_eq!(result.result, InstructionResult::Return);
-        assert_eq!(result.output.as_ref(), &[4]);
-        assert_eq!(result.gas.total_gas_spent(), 500, "the Osaka minimum");
+
+        // base = 3, exponent = 2, modulus = 5, one byte each: 3^2 mod 5 = 4.
+        let small = run(address, modexp_input(&[3], &[2], &[5]), 100_000);
+        assert_eq!(small.result, InstructionResult::Return);
+        assert_eq!(small.output.as_ref(), &[4]);
+        assert_eq!(small.gas.total_gas_spent(), 500, "the Osaka minimum");
+
+        // 32-byte operands with a 32-byte exponent: the formula's cost is above the minimum.
+        let thirty_two = |last: u8| {
+            let mut operand = [0u8; 32];
+            operand[31] = last;
+            operand
+        };
+        let large =
+            run(address, modexp_input(&thirty_two(3), &[0xffu8; 32], &thirty_two(7)), 1_000_000);
+        assert_eq!(large.result, InstructionResult::Return);
+        // EIP-7883 prices this as multiplication complexity (16, for operands of 32 bytes or
+        // fewer) times the iteration count (255, one below the exponent's 256 bits), with no
+        // divisor: 4,080. The Berlin entry Karst removed divided that by three.
+        assert_eq!(large.gas.total_gas_spent(), 16 * 255);
+        assert_eq!(large.gas.total_gas_spent(), 4_080);
     }
 }
