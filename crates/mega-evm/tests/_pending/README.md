@@ -28,7 +28,7 @@ Do not add a `_pending/main.rs`.
 | Owning mechanism | Tests | From `tests/` | From `src/` | Keep | Rewrite | Undecided |
 |---|---:|---:|---:|---:|---:|---:|
 | the common execution layer | 21 | 21 | 0 | 21 | 0 | 0 |
-| SALT pricing | 11 | 7 | 4 | 0 | 11 | 0 |
+| SALT pricing | 8 | 4 | 4 | 0 | 8 | 0 |
 | history gas | 28 | 24 | 4 | 4 | 24 | 0 |
 | compute gas | 26 | 26 | 0 | 0 | 26 | 0 |
 | the data-size limit | 47 | 45 | 2 | 40 | 7 | 0 |
@@ -41,7 +41,7 @@ Do not add a `_pending/main.rs`.
 | native keyless deployment | 75 | 73 | 2 | 29 | 46 | 0 |
 | inspector support | 4 | 4 | 0 | 1 | 3 | 0 |
 | — (undecided: D57 preload-warm cold charging, D58 98/100 forwarding) | 7 | 7 | 0 | 0 | 0 | 7 |
-| **Total** | **535** | **464** | **71** | **311** | **196** | **28** |
+| **Total** | **532** | **461** | **71** | **311** | **193** | **28** |
 
 ## Tests ported in place
 
@@ -167,7 +167,7 @@ These 53 rows run in a real test target now, adapted to the Satin API, so the co
 
 ## Tests ported by SALT pricing
 
-These 60 rows run in a real test target now, adapted to the Satin API and to the pricing hook the decision they cite fixes, so the counts above are lower than the inventory's by exactly these rows.
+These 63 rows run in a real test target now, adapted to the Satin API and to the pricing hook the decision they cite fixes, so the counts above are lower than the inventory's by exactly these rows.
 
 | Legacy file | Owner in the inventory | Tests | Now in |
 |---|---|---:|---|
@@ -179,9 +179,10 @@ These 60 rows run in a real test target now, adapted to the Satin API and to the
 | `rex5/sstore_storage_gas_error.rs` | SALT pricing (1) | 1 | `tests/satin/salt_failure.rs` |
 | `rex6/create_frame_accounting.rs` | SALT pricing (1) | 1 | `tests/satin/salt_failure.rs` |
 | `rex6/error_paths.rs` | SALT pricing (2) | 2 | `tests/satin/salt_failure.rs` |
+| `rex6/system_tx_metering_exemption.rs` | SALT pricing (3) | 3 | `tests/satin/salt.rs` |
 | `src/evm/context.rs` | SALT pricing (1) | 1 | `src/evm/context.rs` |
 | `src/external/gas.rs` | SALT pricing (5) | 5 | `src/external/gas.rs`, `tests/satin/salt.rs` |
-| **Total** | | **60** | |
+| **Total** | | **63** | |
 
 ## Tests ported by the system contract interceptors
 
@@ -277,7 +278,6 @@ Each cell lists `disposition count (mechanism · decision)`.
 | `rex6/oracle_hint_volatile_access.rs` | 4 | keep 4 (the oracle and control contracts) |
 | `rex6/self_transfer_account_dedup.rs` | 1 | keep 1 (the data-size limit) |
 | `rex6/sequencer_registry_rotation.rs` | 5 | keep 5 (system contract deployment) |
-| `rex6/system_tx_metering_exemption.rs` | 3 | rewrite 3 (SALT pricing · D51 (m = 1 for system source; history exempt)) |
 | `src/access/volatile.rs` | 4 | keep 4 (detention) |
 | `src/evm/mod.rs` | 3 | keep 3 (the pre-block system calls) |
 | `src/external/gas.rs` | 4 | rewrite 4 (SALT pricing · D12/D51) |

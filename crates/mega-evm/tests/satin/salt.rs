@@ -17,12 +17,18 @@ use alloy_eips::{
 };
 use alloy_op_evm::OpTx;
 use alloy_primitives::{address, Address, Bytes, TxKind, B256, U256};
+use alloy_sol_types::SolCall;
 use mega_evm::{
     satin_gas_params,
+    system::{
+        IOracle, MEGA_SYSTEM_ADDRESS, ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE,
+        SEQUENCER_REGISTRY_ADDRESS, SEQUENCER_REGISTRY_CODE,
+    },
     test_utils::{op_transaction, zero_fee_l1_block_info, BytecodeBuilder, MemoryDatabase},
     BucketId, ExternalEnvs, MegaContext, MegaEvm, MegaSpecId, MegaTransaction,
     MegaTransactionError, MegaTransactionOutcome, SaltEnv, TestExternalEnvs, MIN_BUCKET_SIZE,
 };
+use mega_system_contracts::sequencer_registry::storage_slots::CURRENT_SYSTEM_ADDRESS;
 use revm::{
     bytecode::opcode::{CALL, CREATE, CREATE2, PUSH0, RETURN, SELFDESTRUCT},
     context::{result::EVMError, tx::TxEnvBuilder, TxEnv},
@@ -539,6 +545,138 @@ fn test_a_user_transaction_into_the_same_bucket_pays_the_crowded_price() {
     assert_eq!(outcome.gas.state, entry(GasId::sstore_set_state_gas()) * 8);
     assert_eq!(envs.total_bucket_queries(), 1);
     assert!(!evm.ctx().is_system_originated());
+}
+
+/* The sequencer's own system transaction. */
+
+/// The Oracle slot the system transactions write. `setSlot` writes the raw slot number, so the
+/// bucket a test crowds is the bucket the write lands in.
+const ORACLE_SLOT: U256 = U256::from_limbs([7, 0, 0, 0]);
+
+/// The capacity the system-transaction arms crowd the Oracle's slot to.
+const SYSTEM_TX_MULTIPLIER: u64 = 8;
+
+/// A database holding the Oracle, the registry naming [`MEGA_SYSTEM_ADDRESS`] the current system
+/// address — which is what lets an Oracle write from it through — and a user contract to send
+/// the control arm's transaction to.
+fn system_tx_db() -> MemoryDatabase {
+    let user_code = BytecodeBuilder::default().sstore(U256::ZERO, U256::from(1)).stop().build();
+    MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(10u64.pow(18)))
+        .account_code(CONTRACT, user_code)
+        .account_code(ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE)
+        .account_code(SEQUENCER_REGISTRY_ADDRESS, SEQUENCER_REGISTRY_CODE)
+        .account_storage(
+            SEQUENCER_REGISTRY_ADDRESS,
+            CURRENT_SYSTEM_ADDRESS,
+            U256::from_be_slice(MEGA_SYSTEM_ADDRESS.as_slice()),
+        )
+}
+
+/// The sequencer's own system transaction: a legacy call from the system address to the
+/// whitelisted Oracle, writing `ORACLE_SLOT`, which the engine promotes to a deposit.
+fn oracle_system_tx() -> MegaTransaction {
+    OpTx(op_transaction(TxEnv {
+        caller: MEGA_SYSTEM_ADDRESS,
+        kind: TxKind::Call(ORACLE_CONTRACT_ADDRESS),
+        data: IOracle::setSlotCall { slot: ORACLE_SLOT, value: B256::with_last_byte(0xAB) }
+            .abi_encode()
+            .into(),
+        chain_id: Some(1),
+        gas_limit: GAS_LIMIT,
+        ..Default::default()
+    }))
+}
+
+/// `envs` with the Oracle's slot at multiplier `m`.
+fn crowded_oracle_slot(m: u64) -> SaltEnvs {
+    crowded_slot(minimal_envs(), ORACLE_CONTRACT_ADDRESS, ORACLE_SLOT, m)
+}
+
+/// The sequencer's system transaction prices at the minimum bucket: it pays the same state gas
+/// whatever the capacity of the bucket it writes into, and never reads the SALT environment.
+///
+/// This is the arm the system-origin predicate gained when the system transaction's definition
+/// landed: the engine promotes it to a deposit, and a promoted system transaction is the
+/// protocol running, so the growth of the Oracle's region cannot price the protocol out of
+/// maintaining it.
+#[test]
+fn test_the_promoted_system_transaction_prices_at_the_minimum_bucket() {
+    let set = entry(GasId::sstore_set_state_gas());
+    let mut spends = Vec::new();
+    for m in [1, SYSTEM_TX_MULTIPLIER] {
+        let envs = crowded_oracle_slot(m);
+        let mut evm = MegaEvm::new(salt_context(system_tx_db(), envs.clone()));
+        let outcome = evm.execute_transaction(oracle_system_tx()).expect("the probe is valid");
+        assert!(outcome.result.is_success(), "at m = {m}: {:?}", outcome.result);
+
+        assert!(evm.ctx().is_system_originated(), "at m = {m}");
+        assert_eq!(envs.total_bucket_queries(), 0, "at m = {m}: it reads no capacity at all");
+        spends.push(outcome.gas.state);
+    }
+
+    assert_eq!(spends[0], spends[1], "the two capacities cost the same");
+    assert_eq!(
+        spends[0],
+        set + entry(GasId::new_account_state_gas()),
+        "and both charges are the schedule's own entries: the Oracle's write, and the account \
+         the promoted deposit creates for the system address",
+    );
+}
+
+/// The pre-block system calls likewise: the same call priced across the same two capacities
+/// costs the same, so a protocol-mandated write cannot be priced out either.
+#[test]
+fn test_a_pre_block_system_call_prices_the_same_at_any_capacity() {
+    use alloy_evm::Evm;
+
+    let mut spends = Vec::new();
+    for m in [1, SYSTEM_TX_MULTIPLIER] {
+        let envs = crowded_oracle_slot(m);
+        let data = IOracle::setSlotCall { slot: ORACLE_SLOT, value: B256::with_last_byte(0xCD) }
+            .abi_encode()
+            .into();
+        let result = MegaEvm::new(salt_context(system_tx_db(), envs.clone()))
+            .transact_system_call(MEGA_SYSTEM_ADDRESS, ORACLE_CONTRACT_ADDRESS, data)
+            .expect("the system call is valid");
+        assert!(result.result.is_success(), "at m = {m}: {:?}", result.result);
+
+        assert_eq!(envs.total_bucket_queries(), 0, "at m = {m}");
+        spends.push(result.result.gas().state_gas_spent_final());
+    }
+
+    assert_eq!(spends[0], spends[1], "the two capacities cost the same");
+    assert_eq!(spends[0], entry(GasId::sstore_set_state_gas()));
+}
+
+/// The control arm: a user transaction in the same block, into a bucket crowded the same way,
+/// still pays the crowded price. The exemption belongs to the protocol's own transactions, not
+/// to the block they run in.
+#[test]
+fn test_a_user_transaction_in_the_same_block_still_pays_the_crowded_price() {
+    let set = entry(GasId::sstore_set_state_gas());
+    let envs = crowded_slot(
+        crowded_oracle_slot(SYSTEM_TX_MULTIPLIER),
+        CONTRACT,
+        U256::ZERO,
+        SYSTEM_TX_MULTIPLIER,
+    );
+    let mut evm = MegaEvm::new(salt_context(system_tx_db(), envs.clone()));
+
+    let system = evm.execute_transaction(oracle_system_tx()).expect("the system probe is valid");
+    assert!(system.result.is_success(), "{:?}", system.result);
+    assert_eq!(
+        system.gas.state,
+        set + entry(GasId::new_account_state_gas()),
+        "the system transaction is exempt",
+    );
+    assert!(evm.ctx().is_system_originated());
+
+    let user = evm.execute_transaction(call_contract()).expect("the user probe is valid");
+    assert!(user.result.is_success(), "{:?}", user.result);
+    assert_eq!(user.gas.state, set * SYSTEM_TX_MULTIPLIER, "the user transaction pays the crowd");
+    assert!(!evm.ctx().is_system_originated());
+    assert_eq!(envs.total_bucket_queries(), 1, "only the user transaction read a capacity");
 }
 
 /// A deposit transaction is deliberately not system-originated, and pays the crowded price like
