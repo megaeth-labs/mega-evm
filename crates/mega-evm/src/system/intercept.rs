@@ -66,6 +66,8 @@ const SYSTEM_CONTRACT_PREFIX: [u8; 19] = {
 /// interceptor and run their bytecode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum InterceptedContract {
+    /// The Oracle: `sendHint` reaches the node's oracle service.
+    Oracle,
     /// `MegaAccessControl`: the volatile-data access switch.
     AccessControl,
     /// `MegaLimitControl`: what the running call has left.
@@ -83,6 +85,7 @@ pub(crate) fn intercepted_contract(address: &Address) -> Option<InterceptedContr
         return None;
     }
     match bytes[SYSTEM_CONTRACT_PREFIX.len()] {
+        1 => Some(InterceptedContract::Oracle),
         4 => Some(InterceptedContract::AccessControl),
         5 => Some(InterceptedContract::LimitControl),
         _ => None,
@@ -93,14 +96,13 @@ pub(crate) fn intercepted_contract(address: &Address) -> Option<InterceptedContr
 /// own bytecode runs.
 ///
 /// The caller has already applied the scheme guard.
-// Takes the context mutably: an interceptor whose answer is a side effect writes it.
-#[allow(clippy::needless_pass_by_ref_mut)]
 #[inline]
 pub(crate) fn intercept<DB: Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &mut MegaContext<DB, ExtEnvs>,
     inputs: &CallInputs,
 ) -> Option<FrameResult> {
     match intercepted_contract(&inputs.target_address)? {
+        InterceptedContract::Oracle => crate::system::oracle::intercept(ctx, inputs),
         InterceptedContract::AccessControl => crate::system::control::intercept(ctx, inputs),
         InterceptedContract::LimitControl => crate::system::limit_control::intercept(ctx, inputs),
     }
@@ -166,11 +168,14 @@ mod tests {
             intercepted_contract(&LIMIT_CONTROL_ADDRESS),
             Some(InterceptedContract::LimitControl)
         );
+        assert_eq!(
+            intercepted_contract(&ORACLE_CONTRACT_ADDRESS),
+            Some(InterceptedContract::Oracle)
+        );
         assert_eq!(intercepted_contract(&HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS), None);
         assert_eq!(intercepted_contract(&SEQUENCER_REGISTRY_ADDRESS), None);
-        // The Oracle's and KeylessDeploy's interceptors follow; their addresses are in the
-        // range the dispatch tests, so they reach it as soon as they land.
-        assert_eq!(intercepted_contract(&ORACLE_CONTRACT_ADDRESS), None);
+        // KeylessDeploy's interceptor follows; its address is in the range the dispatch tests,
+        // so it reaches it as soon as it lands.
         assert_eq!(intercepted_contract(&KEYLESS_DEPLOY_ADDRESS), None);
     }
 
