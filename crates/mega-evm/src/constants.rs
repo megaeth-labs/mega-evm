@@ -7,8 +7,8 @@
 //! | Constant | Value | Meaning | Read by |
 //! |---|---:|---|---|
 //! | [`COST_PER_STATE_BYTE`] | 1,530 | gas per byte of new state (EIP-8037 CPSB) | the Satin gas schedule |
-//! | [`SLOT_STATE_GAS`] | 97,920 | state gas of one new storage slot (64 bytes) | the Satin gas schedule |
-//! | [`ACCOUNT_STATE_GAS`] | 183,600 | state gas of one new account (120 bytes) | the Satin gas schedule |
+//! | [`SLOT_STATE_GAS`] | 97,920 | state gas of one new storage slot (64 bytes) | tests of the Satin gas schedule |
+//! | [`ACCOUNT_STATE_GAS`] | 183,600 | state gas of one new account (120 bytes) | tests of the Satin gas schedule |
 //! | [`COST_PER_HISTORY_BYTE`] | 88 | gas per history byte (CPHB) | history gas (not yet) |
 //! | [`TX_GAS_LIMIT_CAP`] | 200,000,000 | execution cap: regular gas one transaction may spend | the spec configuration |
 //! | [`MAX_CONTRACT_SIZE`] | 524,288 | the most bytes a deployed contract may hold | the spec configuration |
@@ -16,8 +16,11 @@
 //! | [`TX_DATA_LIMIT`] | 13,107,200 | data size one transaction may produce (as Rex6) | the data-size limit (not yet) |
 //! | [`BLOCK_DATA_LIMIT`] | 13,107,200 | data size one block may produce (as Rex6) | the data-size limit (not yet) |
 //!
-//! The Satin gas schedule reads the state-gas numbers through [`SatinPrices`](crate::SatinPrices),
-//! so a measurement build can run other byte prices without touching this table.
+//! The Satin gas schedule builds its state-gas entries from the EIP-8037 byte counts at
+//! [`COST_PER_STATE_BYTE`], read through [`SatinPrices`](crate::SatinPrices) so a measurement
+//! build can run other byte prices without touching this table. [`SLOT_STATE_GAS`] and
+//! [`ACCOUNT_STATE_GAS`] are two of those products written out: the tests assert the schedule
+//! against them, and changing one of the two moves a test rather than a price.
 //! The storage call stipend and the per-transaction and per-block state-gas limits are further
 //! placeholders; history gas and the state-gas limits add them when they land.
 
