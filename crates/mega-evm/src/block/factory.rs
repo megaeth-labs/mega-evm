@@ -72,11 +72,7 @@ where
         DB: StateDB,
         I: TrustedObserver + Inspector<MegaContext<DB, ExtEnvFactory::EnvTypes>>,
     {
-        let evm = self
-            .evm_factory
-            .create_evm(db, evm_env)
-            .with_trusted_inspector(inspector)
-            .with_tx_runtime_limits(ctx.block_limits.to_evm_tx_runtime_limits());
+        let evm = self.evm_factory.create_evm(db, evm_env).with_trusted_inspector(inspector);
         MegaBlockExecutor::new(evm, ctx, &self.spec, &self.receipt_builder)
     }
 }
@@ -105,6 +101,10 @@ where
 
     /// Creates an executor over an EVM the caller built.
     ///
+    /// The block's transaction-level limits are installed by
+    /// [`MegaBlockExecutor::new`], so an EVM the caller built without them still runs the block's
+    /// transactions under them.
+    ///
     /// alloy-evm asks for an executor for every `I: Inspector`, so this route cannot refuse a
     /// rewriting inspector by its type; the executor checks the EVM at every entry point instead.
     /// [`create_executor_with_trusted_inspector`](Self::create_executor_with_trusted_inspector) is
@@ -118,7 +118,6 @@ where
         DB: StateDB,
         I: Inspector<MegaContext<DB, ExtEnvFactory::EnvTypes>>,
     {
-        let evm = evm.with_tx_runtime_limits(ctx.block_limits.to_evm_tx_runtime_limits());
         MegaBlockExecutor::new(evm, ctx, &self.spec, &self.receipt_builder)
     }
 }

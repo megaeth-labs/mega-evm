@@ -220,15 +220,34 @@ impl<E, R: OpReceiptBuilder, Spec> MegaBlockExecutor<E, R, Spec> {
     }
 }
 
-impl<E: Evm, R: OpReceiptBuilder, Spec: MegaHardforks> MegaBlockExecutor<E, R, Spec> {
+impl<DB, INSP, ExtEnvs, R, Spec> MegaBlockExecutor<MegaEvm<DB, INSP, ExtEnvs>, R, Spec>
+where
+    DB: Database,
+    ExtEnvs: ExternalEnvTypes,
+    R: OpReceiptBuilder,
+    Spec: MegaHardforks,
+{
     /// Creates an executor that runs `ctx`'s block on `evm`.
+    ///
+    /// The block's transaction-level limits are installed on the EVM here, so every route to an
+    /// executor — this one and both factory constructors — runs the block's transactions under
+    /// the limits `ctx` carries, whatever the caller did or did not apply.
     ///
     /// The block's gas limit comes from the block environment, whatever `ctx` carries: it is the
     /// number consensus holds the block to, and it is also the budget the data-availability
     /// footprint of the block's transactions is held to.
-    pub fn new(evm: E, ctx: MegaBlockExecutionCtx, spec: Spec, receipt_builder: R) -> Self {
-        let timestamp = evm.block().timestamp().saturating_to();
-        let limits = ctx.block_limits.with_block_gas_limit(evm.block().gas_limit());
+    pub fn new(
+        mut evm: MegaEvm<DB, INSP, ExtEnvs>,
+        ctx: MegaBlockExecutionCtx,
+        spec: Spec,
+        receipt_builder: R,
+    ) -> Self {
+        evm.set_tx_runtime_limits(ctx.block_limits.to_evm_tx_runtime_limits());
+        let (timestamp, block_gas_limit) = {
+            let block = evm.ctx().block();
+            (block.timestamp().saturating_to(), block.gas_limit())
+        };
+        let limits = ctx.block_limits.with_block_gas_limit(block_gas_limit);
         Self {
             is_canyon: spec.is_canyon_active_at_timestamp(timestamp),
             is_regolith: spec.is_regolith_active_at_timestamp(timestamp),

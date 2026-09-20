@@ -146,9 +146,7 @@ fn build(
     env: EvmEnv<MegaSpecId>,
     spec: MegaHardforkConfig,
 ) -> TestExecutor<'_> {
-    let evm = MegaEvmFactory::new()
-        .create_evm(state, env)
-        .with_tx_runtime_limits(ctx.block_limits.to_evm_tx_runtime_limits());
+    let evm = MegaEvmFactory::new().create_evm(state, env);
     MegaBlockExecutor::new(evm, ctx, spec, OpAlloyReceiptBuilder::default())
 }
 
