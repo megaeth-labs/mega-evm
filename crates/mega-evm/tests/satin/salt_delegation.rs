@@ -206,29 +206,62 @@ fn test_a_value_call_to_a_truly_empty_address_pays_the_crowded_price() {
 
 /// A `CREATE` executed inside a delegated frame deploys from the delegating account, so the
 /// charge lands in the bucket of the address *that* account's nonce derives — not the delegate's.
+///
+/// The two accounts carry different nonces, which is what tells the three candidate addresses
+/// apart: the authority's address with its own nonce is where the frame deploys and what the
+/// charge must be priced at; the authority's address with the delegate's nonce, and the
+/// delegate's address with its own nonce, are the two ways of reading the designator too far.
+/// With both nonces at zero the first two collapse into one address and the regression this
+/// guards — the delegate's nonce used with the authority's address — cannot be seen.
 #[test]
 fn test_a_create_inside_a_delegated_frame_is_priced_at_the_authority_s_address() {
     const AUTHORITY: Address = address!("0000000000000000000000000000000000c00013");
     const CODE: Address = address!("0000000000000000000000000000000000c00014");
-    let created = AUTHORITY.create(0);
-    let delegate_created = CODE.create(0);
+    /// The nonce the authority carries, which derives the address the frame deploys at.
+    const AUTHORITY_NONCE: u64 = 5;
+    /// The nonce the delegate carries, which derives nothing here.
+    const DELEGATE_NONCE: u64 = 0;
 
-    let db = db(calls(AUTHORITY)).account_code(CODE, creates(CREATE));
-    let db = with_delegation(db, AUTHORITY, CODE);
+    let created = AUTHORITY.create(AUTHORITY_NONCE);
+    let from_delegate_nonce = AUTHORITY.create(DELEGATE_NONCE);
+    let from_delegate_address = CODE.create(DELEGATE_NONCE);
+    assert_ne!(created, from_delegate_nonce, "the two nonces must derive different addresses");
+    assert_ne!(created, from_delegate_address);
+
+    let build = || {
+        let db = db(calls(AUTHORITY))
+            .account_code(CODE, creates(CREATE))
+            .account_nonce(CODE, DELEGATE_NONCE)
+            .account_balance(AUTHORITY, U256::from(1_000_000u64))
+            .account_nonce(AUTHORITY, AUTHORITY_NONCE);
+        with_delegation(db, AUTHORITY, CODE)
+    };
 
     let envs = crowded_account(minimal_envs(), created, 8);
-    let outcome = run(db.clone(), envs.clone(), call_contract());
+    let outcome = run(build(), envs.clone(), call_contract());
     assert_eq!(
         outcome.gas.state,
         entry(GasId::create_state_gas()) * 8,
         "the authority's own address is what was priced",
     );
     assert_eq!(envs.bucket_queries(account_bucket(created)), 1);
+    assert!(
+        outcome.state.contains_key(&created),
+        "and the authority's own address is where the frame deployed",
+    );
 
-    // Crowding the address the delegate's own nonce would derive changes nothing.
-    let envs = crowded_account(minimal_envs(), delegate_created, 8);
-    let outcome = run(db, envs, call_contract());
+    // Crowding the address the delegate's nonce would derive from the authority changes
+    // nothing, and that bucket is never read.
+    let envs = crowded_account(minimal_envs(), from_delegate_nonce, 8);
+    let outcome = run(build(), envs.clone(), call_contract());
     assert_eq!(outcome.gas.state, entry(GasId::create_state_gas()));
+    assert_eq!(envs.bucket_queries(account_bucket(from_delegate_nonce)), 0);
+
+    // Nor does crowding the address the delegate's own address and nonce derive.
+    let envs = crowded_account(minimal_envs(), from_delegate_address, 8);
+    let outcome = run(build(), envs.clone(), call_contract());
+    assert_eq!(outcome.gas.state, entry(GasId::create_state_gas()));
+    assert_eq!(envs.bucket_queries(account_bucket(from_delegate_address)), 0);
 }
 
 /* CALLCODE: value that never leaves the caller's account. */
