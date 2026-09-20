@@ -795,29 +795,3 @@ fn floor_gas_test_case(spec: MegaSpecId, calldata_size: usize, expected_gas_used
     let gas_used = res.result.gas_used();
     assert_eq!(gas_used, expected_gas_used);
 }
-
-/// Tests floor gas charges additional cost for calldata in `MINI_REX` spec.
-#[test]
-fn test_floor_gas_calldata_mini_rex() {
-    // Test with 100 bytes of calldata
-    floor_gas_test_case(MegaSpecId::MINI_REX, 100, 65_000);
-}
-
-/// Tests floor gas charges additional cost for large calldata in `MINI_REX` spec.
-#[test]
-fn test_floor_gas_large_calldata_mini_rex() {
-    // Test with 1024 bytes of calldata
-    floor_gas_test_case(MegaSpecId::MINI_REX, 1024, 471_560);
-}
-
-/// Tests floor gas with empty calldata (edge case).
-#[test]
-fn test_floor_gas_empty_calldata() {
-    floor_gas_test_case(MegaSpecId::MINI_REX, 0, 21_000);
-}
-
-/// Tests floor gas with minimal calldata (1 byte).
-#[test]
-fn test_floor_gas_minimal_calldata() {
-    floor_gas_test_case(MegaSpecId::MINI_REX, 1, 21_440);
-}

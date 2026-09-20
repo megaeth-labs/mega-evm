@@ -55,6 +55,10 @@ std = [
     "revm/std",
 ]
 test-utils = ["dep:derive_more"]
+# Measurement-only: lets a process fix other Satin byte prices than the constants, through
+# `install_satin_prices` or the `MEGA_SATIN_CPSB` / `MEGA_SATIN_CPHB` environment variables.
+# Off by default, so a normal build prices with the constants and has no way to do otherwise.
+satin-price-override = ["std"]
 
 # The Satin bench set: `transact` (MegaEvm next to op-revm), `corpus` (the JSON scenarios under
 # benches/scenarios, a bench input) and `factory` (EVM construction). The inputs under

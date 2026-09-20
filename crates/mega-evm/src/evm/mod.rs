@@ -12,7 +12,10 @@ mod frame;
 mod host;
 mod inspector;
 mod instructions;
+mod precompiles;
+mod prices;
 mod result;
+mod schedule;
 mod spec;
 
 pub use context::*;
@@ -21,12 +24,18 @@ pub use factory::*;
 pub use frame::*;
 pub use host::*;
 pub use inspector::*;
+pub use precompiles::*;
+pub use prices::*;
 pub use result::*;
+pub use schedule::*;
 pub use spec::*;
 
-use alloy_evm::EvmEnv;
+use alloy_evm::{
+    precompiles::{DynPrecompile, PrecompilesMap},
+    Database, EvmEnv,
+};
 use alloy_op_evm::map_op_err;
-use op_revm::{precompiles::OpPrecompiles, OpHaltReason, OpTransactionError};
+use op_revm::{OpHaltReason, OpTransactionError};
 use revm::{
     context::{
         result::{EVMError, ExecResultAndState, ExecutionResult, ResultAndState},
@@ -40,9 +49,9 @@ use revm::{
         NoOpInspector,
     },
     interpreter::interpreter::EthInterpreter,
-    primitives::{Address, Bytes},
+    primitives::{Address, Bytes, HashMap},
     state::EvmState,
-    Database, DatabaseCommit, ExecuteCommitEvm, ExecuteEvm,
+    DatabaseCommit, ExecuteCommitEvm, ExecuteEvm,
 };
 
 use crate::{EmptyExternalEnv, ExternalEnvTypes, MegaTransaction, MegaTransactionError};
@@ -53,12 +62,13 @@ pub(crate) type MegaInstructions<DB, ExtEnvs> =
 
 /// The revm EVM a [`MegaEvm`] wraps.
 ///
-/// It runs op-revm's precompile set for the base spec until the Satin precompile set lands.
+/// It runs the Satin precompile set, carried as an alloy-evm map so a node can add its own
+/// entries (see the `precompiles` module).
 pub(crate) type MegaInnerEvm<DB, INSP, ExtEnvs> = revm::context::Evm<
     MegaContext<DB, ExtEnvs>,
     INSP,
     MegaInstructions<DB, ExtEnvs>,
-    OpPrecompiles,
+    PrecompilesMap,
     EthFrame<EthInterpreter>,
 >;
 
@@ -86,7 +96,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, NoOpInspector, ExtEnvs
             ctx,
             inspector: NoOpInspector,
             instruction: instructions::mega_instructions(spec.into()),
-            precompiles: OpPrecompiles::new_with_spec(spec),
+            precompiles: satin_precompiles_map(),
             frame_stack: FrameStack::new_prealloc(8),
         };
         Self { inner, inspect: false, trusted_inspector: true }
@@ -149,6 +159,20 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
     /// Whether alloy-evm's [`transact`](alloy_evm::Evm::transact) runs the inspector.
     pub const fn is_inspecting(&self) -> bool {
         self.inspect
+    }
+
+    /// Adds `dyn_precompiles` on top of the Satin set, replacing an entry whose address is
+    /// already taken.
+    ///
+    /// A node's RPC builds these; the chain's own set is the one [`MegaEvm::new`] installs.
+    pub fn with_dyn_precompiles(
+        mut self,
+        dyn_precompiles: HashMap<Address, DynPrecompile>,
+    ) -> Self {
+        for (address, dyn_precompile) in dyn_precompiles {
+            self.inner.precompiles.apply_precompile(&address, move |_| Some(dyn_precompile));
+        }
+        self
     }
 
     /// Consumes the EVM and returns the revm EVM it wraps.
@@ -311,7 +335,7 @@ where
 
 impl<DB, INSP, ExtEnvs> alloy_evm::Evm for MegaEvm<DB, INSP, ExtEnvs>
 where
-    DB: alloy_evm::Database,
+    DB: Database,
     INSP: Inspector<MegaContext<DB, ExtEnvs>, EthInterpreter>,
     ExtEnvs: ExternalEnvTypes,
 {
@@ -321,12 +345,8 @@ where
     type HaltReason = OpHaltReason;
     type Spec = MegaSpecId;
     type BlockEnv = BlockEnv;
-    /// op-revm's precompile set for the base spec.
-    ///
-    /// Provisional: the Satin precompile provider replaces this type when it lands, and code that
-    /// names `OpPrecompiles` through this associated type has no source-compatibility promise
-    /// across that change.
-    type Precompiles = OpPrecompiles;
+    /// The Satin precompile set, with whatever a node added to it.
+    type Precompiles = PrecompilesMap;
     type Inspector = INSP;
 
     fn block(&self) -> &BlockEnv {
@@ -398,10 +418,12 @@ mod tests {
         MegaContext::new(db, MegaSpecId::SATIN).with_chain(zero_fee_l1_block_info())
     }
 
+    /// A call to `CALLEE`, with room for the state gas a value transfer to it draws: `CALLEE`
+    /// holds nothing, so a transfer creates it and pays the new account's state gas.
     fn tx(value: U256) -> MegaTransaction {
         OpTx(op_transaction(TxEnv {
             caller: CALLER,
-            gas_limit: 100_000,
+            gas_limit: 300_000,
             kind: TxKind::Call(CALLEE),
             value,
             ..Default::default()
@@ -432,12 +454,12 @@ mod tests {
     fn test_alloy_evm_interface_methods_execute_transactions() {
         let mut db = funded_db();
         let mut evm = MegaEvm::new(
-            context(&mut db).with_block(BlockEnv { gas_limit: 222_222, ..Default::default() }),
+            context(&mut db).with_block(BlockEnv { gas_limit: 2_222_222, ..Default::default() }),
         );
 
         assert_eq!(evm.chain_id(), evm.ctx().cfg().chain_id);
         assert_eq!(evm.cfg_env().spec, MegaSpecId::SATIN);
-        assert_eq!(evm.block().gas_limit, 222_222);
+        assert_eq!(evm.block().gas_limit, 2_222_222);
 
         evm.set_inspector_enabled(true);
         assert!(evm.is_inspecting());
@@ -452,15 +474,15 @@ mod tests {
         let (_db, evm_env) = evm.finish();
         assert_eq!(evm_env.cfg_env.spec, MegaSpecId::SATIN);
         assert_eq!(evm_env.cfg_env.tx_gas_limit_cap, Some(crate::constants::TX_GAS_LIMIT_CAP));
-        assert_eq!(evm_env.block_env.gas_limit, 222_222);
+        assert_eq!(evm_env.block_env.gas_limit, 2_222_222);
     }
 
     #[test]
     fn test_revm_execute_one_finalize_commit_works() {
         let mut db = funded_db();
         let mut evm = MegaEvm::new(context(&mut db));
-        ExecuteEvm::set_block(&mut evm, BlockEnv { gas_limit: 222_222, ..Default::default() });
-        assert_eq!(evm.block().gas_limit, 222_222);
+        ExecuteEvm::set_block(&mut evm, BlockEnv { gas_limit: 2_222_222, ..Default::default() });
+        assert_eq!(evm.block().gas_limit, 2_222_222);
 
         let result = ExecuteEvm::transact_one(&mut evm, tx(U256::from(7))).unwrap();
         assert!(result.is_success());

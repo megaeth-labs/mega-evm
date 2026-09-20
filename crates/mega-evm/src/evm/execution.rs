@@ -12,7 +12,7 @@ use op_revm::{
 };
 use std::vec::Vec;
 
-use op_revm::precompiles::OpPrecompiles;
+use alloy_evm::{precompiles::PrecompilesMap, Database};
 use revm::{
     context::{
         result::FromStringError, transaction::TransactionType, ContextError, ContextTr, FrameStack,
@@ -37,7 +37,7 @@ use revm::{
         InitialAndFloorGas, InstructionResult, InterpreterAction,
     },
     primitives::{Address, Bytes, CALL_STACK_LIMIT},
-    Database, Inspector, Journal,
+    Inspector, Journal,
 };
 
 use crate::{
@@ -203,7 +203,7 @@ where
 impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, ExtEnvs> {
     type Context = MegaContext<DB, ExtEnvs>;
     type Instructions = MegaInstructions<DB, ExtEnvs>;
-    type Precompiles = OpPrecompiles;
+    type Precompiles = PrecompilesMap;
     type Frame = EthFrame<EthInterpreter>;
 
     #[inline]
