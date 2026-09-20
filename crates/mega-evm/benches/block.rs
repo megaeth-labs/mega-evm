@@ -7,8 +7,9 @@
 //!
 //! - `transfers`: value transfers to accounts with no code — the cheapest transaction there is, so
 //!   the executor's own cost is most of what is measured.
-//! - `storage_writes`: calls to a contract that writes a slot, so every transaction also carries a
-//!   write record through the counters and a log-free receipt.
+//! - `storage_writes`: calls to a contract that writes the slot the transaction names in its
+//!   calldata, so every transaction changes storage and carries a write record through the
+//!   counters, with a log-free receipt.
 //!
 //! The pre-block calls and the state the block is built on are setup, and the measurement runs
 //! `apply_pre_execution_changes`, the transactions and `finish` — the whole block a node
@@ -26,6 +27,7 @@ use mega_evm::{
     MegaSpecId, MegaTxEnvelope,
 };
 use revm::{
+    bytecode::opcode::{CALLDATALOAD, SSTORE},
     context::{BlockEnv, CfgEnv},
     database::State,
 };
@@ -47,9 +49,22 @@ const SENDER: Address = address!("0x2000000000000000000000000000000000000002");
 const RECIPIENT: Address = address!("0x3000000000000000000000000000000000000003");
 const WRITER: Address = address!("0x1000000000000000000000000000000000000001");
 
-/// Code that writes one slot, so a call to it leaves a write record behind.
+/// Code that writes 1 to the slot its first calldata word names, so every call that names a slot
+/// of its own changes storage and leaves a write record behind.
 fn writer_code() -> Bytes {
-    BytecodeBuilder::default().sstore(U256::from(1), U256::from(7)).stop().build()
+    BytecodeBuilder::default()
+        .push_number(1_u64)
+        .push_number(0_u64)
+        .append(CALLDATALOAD)
+        .append(SSTORE)
+        .stop()
+        .build()
+}
+
+/// The slot the transaction with this nonce writes: one per transaction, so none of them writes
+/// a value the slot already holds.
+fn slot_calldata(nonce: u64) -> Bytes {
+    Bytes::from(U256::from(nonce + 1).to_be_bytes::<32>())
 }
 
 /// The database every iteration starts from.
@@ -80,8 +95,13 @@ fn block_ctx() -> MegaBlockExecutionCtx {
     MegaBlockExecutionCtx::new(B256::ZERO, Some(B256::ZERO), Bytes::new(), BlockLimits::no_limits())
 }
 
-/// `N` transactions to `to`, one per nonce.
-fn transactions(to: Address, value: u64, gas_limit: u64) -> Vec<Recovered<MegaTxEnvelope>> {
+/// `N` transactions to `to`, one per nonce, each carrying the input `input` builds for it.
+fn transactions(
+    to: Address,
+    value: u64,
+    gas_limit: u64,
+    input: impl Fn(u64) -> Bytes,
+) -> Vec<Recovered<MegaTxEnvelope>> {
     (0..N)
         .map(|nonce| {
             let tx = TxLegacy {
@@ -91,7 +111,7 @@ fn transactions(to: Address, value: u64, gas_limit: u64) -> Vec<Recovered<MegaTx
                 gas_limit,
                 to: TxKind::Call(to),
                 value: U256::from(value),
-                input: Bytes::new(),
+                input: input(nonce),
             };
             let signed =
                 Signed::new_unchecked(tx, Signature::test_signature(), B256::repeat_byte(1));
@@ -103,14 +123,14 @@ fn transactions(to: Address, value: u64, gas_limit: u64) -> Vec<Recovered<MegaTx
 fn bench_block(c: &mut Criterion) {
     let spec = MegaHardforkConfig::default().with_all_activated();
     let workloads = [
-        ("transfers", transactions(RECIPIENT, 1, 100_000)),
-        ("storage_writes", transactions(WRITER, 0, 200_000)),
+        ("transfers", transactions(RECIPIENT, 1, 100_000, |_| Bytes::new())),
+        ("storage_writes", transactions(WRITER, 0, 200_000, slot_calldata)),
     ];
 
     let mut group = c.benchmark_group("block");
     for (name, txs) in &workloads {
-        // The workload runs once outside the measurement, so a block that does not execute is
-        // caught here rather than being measured.
+        // The workload runs once outside the measurement, so a block that does not execute — or
+        // one whose transactions keep nothing — is caught here rather than being measured.
         {
             let mut state = State::builder().with_database(database()).build();
             let evm = MegaEvmFactory::new().create_evm(&mut state, evm_env());
@@ -118,11 +138,19 @@ fn bench_block(c: &mut Criterion) {
                 MegaBlockExecutor::new(evm, block_ctx(), &spec, OpAlloyReceiptBuilder::default());
             executor.apply_pre_execution_changes().expect("the block starts");
             for tx in txs {
-                executor.execute_transaction(tx).expect("the transaction executes");
+                let outcome =
+                    executor.execute_transaction_without_commit(tx).expect("the transaction runs");
+                assert!(outcome.result.is_success(), "{:?}", outcome.result);
+                assert!(
+                    outcome.usage.write_records > 0,
+                    "every transaction of the workload keeps a write record"
+                );
+                executor.commit_transaction(outcome);
             }
             let (_, result) = executor.finish_with_counters().expect("the block finishes");
             assert_eq!(result.receipts().len(), N as usize);
             assert!(result.gas.execution > 0);
+            assert_eq!(result.usage.write_records, N, "one record per transaction, at least");
         }
 
         group.bench_function(*name, |b| {
