@@ -474,14 +474,20 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
     /// System contract interception: a `CALL` or `STATICCALL` to a system contract answered by
     /// `MegaETH` instead of the contract's code.
     ///
-    /// The extension point of the system contract interceptors; nothing is intercepted yet. An
-    /// answer is a [`synthetic_frame_result`](crate::synthetic_frame_result), so it settles like
-    /// a frame revm ran.
-    // Takes the EVM mutably: an interceptor reads and writes the context.
-    #[allow(clippy::needless_pass_by_ref_mut)]
+    /// The scheme guard is here: `CALLCODE` and `DELEGATECALL` run the callee's code in the
+    /// caller's context, where a system contract's semantics would apply to the wrong account,
+    /// so they never reach an interceptor and revm builds their frame as it does for any other
+    /// contract. A creation reaches no interceptor either.
+    ///
+    /// An answer is a [`synthetic_frame_result`](crate::synthetic_frame_result), so it settles
+    /// like a frame revm ran. What each contract answers is in the `system` module.
     #[inline]
-    const fn intercept(&mut self, _frame_init: &FrameInit) -> Option<FrameResult> {
-        None
+    fn intercept(&mut self, frame_init: &FrameInit) -> Option<FrameResult> {
+        let FrameInput::Call(inputs) = &frame_init.frame_input else { return None };
+        if !matches!(inputs.scheme, CallScheme::Call | CallScheme::StaticCall) {
+            return None;
+        }
+        crate::system::intercept(&mut self.inner.ctx, inputs)
     }
 
     /// The keyless deployment rewrite: a keyless deployment call turned into the native creation

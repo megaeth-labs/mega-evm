@@ -7,8 +7,9 @@
 //! hash the `mega-system-contracts` crate ships, and its ABI.
 //!
 //! Four of them have an interceptor: a `CALL` or `STATICCALL` to one of their intercepted
-//! selectors is answered by the engine instead of by the contract's code. The timestamp wrapper
-//! and the `SequencerRegistry` run their bytecode.
+//! selectors is answered by the engine instead of by the contract's code (see the `intercept`
+//! module for the dispatch order and the shape of an answer). The timestamp wrapper and the
+//! `SequencerRegistry` run their bytecode.
 //!
 //! Deploying the contracts at the fork that activates them belongs to system contract
 //! deployment; it is not here.
@@ -16,16 +17,20 @@
 pub mod keyless;
 
 mod control;
+mod intercept;
 mod limit_control;
 mod oracle;
 mod sequencer_registry;
 mod timestamp;
 
 pub use control::*;
+pub use intercept::NON_ZERO_TRANSFER_REVERT_DATA;
 pub use limit_control::*;
 pub use oracle::*;
 pub use sequencer_registry::*;
 pub use timestamp::*;
+
+pub(crate) use intercept::intercept;
 
 #[cfg(test)]
 mod tests {
