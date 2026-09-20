@@ -163,8 +163,9 @@ Every later mechanism plugs into these; a change to one comes back to this layer
   The one rewrite refused is a failed creation turned into a success (`FORBIDDEN_CREATE_REVIVAL`, an `EVMError::Custom`).
   The test utilities' inspectors are not declared.
 - **One hook prices every state charge.**
-  `Host::state_gas_price(id, site)` is the single place an EIP-8037 state gas charge is priced, and every site that gives a charge back re-prices the same `(id, site)` pair rather than reading a second table, so a refill cancels the charge it undoes exactly whatever the price was.
-  Because a bucket's multiplier is read once per transaction, the two cannot disagree even if the environment's answer would.
+  `Host::state_gas_price(id, site)` is the single place an EIP-8037 state gas charge is priced.
+  A charge is given back two ways, and neither reads a second table: `SSTORE`'s own restore, a caller's upfront charge for a call or creation that did not add the leaf, the transaction-level refund and the settlement of a synthetic frame result re-price the same `(id, site)` pair through the hook; a frame that fails rolls its own charges back by the amounts it recorded while running, without asking for a price at all.
+  Both cancel the charge exactly whatever the price was — the re-priced sites because a bucket's multiplier is read once per transaction, so the two cannot disagree even if the environment's answer would, and the rolled-back amounts because nothing but the hook priced them.
   A mechanism that adds a state charge adds a `StateGasCharge` at the site the state lands on; it must not price the charge itself.
 - **Three ledgers.**
   `MegaGasUsage` splits a transaction's raw spend into regular (compute), state and history gas, all paid from the EIP-8037 pools, reservoir first; state or history gas that spilled onto regular gas stays on its own ledger.

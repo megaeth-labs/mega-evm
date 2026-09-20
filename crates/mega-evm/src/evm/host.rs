@@ -17,9 +17,17 @@
 //!
 //! [`state_gas_price`](revm::context_interface::Host::state_gas_price) is the one place an
 //! EIP-8037 state gas charge is priced. Every charge site of the engine asks it, and so does
-//! every site that gives a charge back — the same `(id, site)` pair, so a refill cancels the
-//! charge it undoes exactly, whatever the price was. That is what lets SALT scale the charge by
-//! the capacity of the bucket it lands in without a second table of what to give back.
+//! every site that names a charge to give back — the same `(id, site)` pair, so the refill
+//! cancels the charge it undoes exactly, whatever the price was. That is what lets SALT scale the
+//! charge by the capacity of the bucket it lands in without a second table of what to give back.
+//!
+//! A charge comes back two ways, and neither reads a second table. `SSTORE`'s own restore, a
+//! caller's upfront charge for a call or creation that did not add the leaf, the transaction-level
+//! refund and the settlement of a synthetic frame result re-price the recorded `(id, site)`
+//! through this hook. A frame that fails instead rolls its own charges back by the amounts it
+//! recorded while running, without asking for a price at all. Both cancel exactly, for different
+//! reasons: the re-priced sites because the multiplier of a bucket is read once per transaction,
+//! the rolled-back amounts because nothing but this hook priced them in the first place.
 //!
 //! Every other Host method delegates to op-revm's context.
 
