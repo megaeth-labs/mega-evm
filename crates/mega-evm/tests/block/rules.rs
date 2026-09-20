@@ -127,6 +127,32 @@ fn test_da_footprint_over_the_block_budget_refuses_the_transaction() {
     assert_eq!(executor.limiter().block_da_footprint_used, 0);
 }
 
+/// Rule 2: the budget is an inclusive bound — a footprint that exactly fills what the block has
+/// is admitted, and the block has nothing left for the next transaction.
+#[test]
+fn test_da_footprint_that_exactly_fills_the_block_budget_is_admitted() {
+    const SCALAR: u16 = 64;
+    const GAS_LIMIT: u64 = 900_000;
+
+    let tx = common::user_tx_with_input(0, common::incompressible(20_000), GAS_LIMIT);
+    let footprint = mega_evm::MegaTransactionExt::estimated_da_size(&tx) * u64::from(SCALAR);
+    assert!(footprint >= GAS_LIMIT, "the block's gas limit must also fit the transaction's gas");
+
+    // The block's gas limit is the footprint's budget, so a block with exactly this gas limit
+    // has exactly this transaction's footprint.
+    let mut env = common::evm_env();
+    env.block_env.gas_limit = footprint;
+
+    let mut state = state_with_scalars(scalars_word(SCALAR, 0, 0));
+    let mut executor = common::executor_with_env(&mut state, unlimited_ctx(), env);
+    executor.apply_pre_execution_changes().expect("the block starts");
+
+    executor.execute_transaction(&tx).expect("a footprint that exactly fills the budget fits");
+
+    assert_eq!(executor.limiter().block_da_footprint_used, footprint);
+    assert_eq!(executor.limiter().available_da_footprint(), 0, "the block has no footprint left");
+}
+
 /// Rule 2: a deposit is exempt from the footprint, as it is from the data-availability size.
 #[test]
 fn test_deposits_do_not_count_towards_the_da_footprint() {

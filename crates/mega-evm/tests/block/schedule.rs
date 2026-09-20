@@ -49,6 +49,13 @@ fn test_canonical_schedules_match_the_chain_activation_table() {
                 activation.condition(*fork),
                 "{fork:?} on chain {chain_id}"
             );
+            // The schedule carries an entry for every fork, including the ones the chain has not
+            // scheduled: attaching a fork's parameters needs its entry to be there.
+            assert_eq!(
+                schedule.get(*fork),
+                Some(&activation.condition(*fork)),
+                "{fork:?} is registered on chain {chain_id}"
+            );
         }
         assert_eq!(schedule.validate_schedule(), Ok(()), "chain {chain_id} loads");
     }

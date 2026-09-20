@@ -129,6 +129,17 @@ pub(crate) fn executor_with_spec(
     build(state, ctx, evm_env(), spec)
 }
 
+/// An executor over `state`, for a block held to `ctx` in the environment `env`, on the chain
+/// `spec` describes.
+pub(crate) fn executor_with_env_and_spec(
+    state: &mut State<MemoryDatabase>,
+    ctx: MegaBlockExecutionCtx,
+    env: EvmEnv<MegaSpecId>,
+    spec: MegaHardforkConfig,
+) -> TestExecutor<'_> {
+    build(state, ctx, env, spec)
+}
+
 fn build(
     state: &mut State<MemoryDatabase>,
     ctx: MegaBlockExecutionCtx,

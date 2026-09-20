@@ -490,6 +490,102 @@ mod tests {
         assert!(std::format!("{err}").contains("Block execution gas limit reached"), "{err}");
     }
 
+    /// Every limit is an inclusive bound: a transaction that exactly fills what the limit — or
+    /// what the block has left of it — is admitted, and one unit more is refused.
+    #[test]
+    fn test_pre_execution_check_admits_what_exactly_fills_a_limit() {
+        const LIMIT: u64 = 1_000;
+        const USED: u64 = 400;
+
+        // Each case names the dimension, the limiter it is checked on, what the limit leaves for
+        // one transaction, and how that figure reaches `pre_execution_check`.
+        type Check = fn(&BlockLimiter, u64) -> Result<(), BlockExecutionError>;
+        let cases: [(&str, BlockLimiter, u64, Check); 6] = [
+            (
+                "a transaction's own gas limit",
+                BlockLimiter::new(BlockLimits::no_limits().with_tx_gas_limit(LIMIT)),
+                LIMIT,
+                |limiter, gas_limit| {
+                    limiter.pre_execution_check(B256::ZERO, gas_limit, 0, 0, false)
+                },
+            ),
+            (
+                "the block's gas limit",
+                BlockLimiter {
+                    block_gas_used: USED,
+                    ..BlockLimiter::new(BlockLimits::no_limits().with_block_gas_limit(LIMIT))
+                },
+                LIMIT - USED,
+                |limiter, gas_limit| {
+                    limiter.pre_execution_check(B256::ZERO, gas_limit, 0, 0, false)
+                },
+            ),
+            (
+                "a transaction's own encoded size",
+                BlockLimiter::new(BlockLimits::no_limits().with_tx_encode_size_limit(LIMIT)),
+                LIMIT,
+                |limiter, tx_size| limiter.pre_execution_check(B256::ZERO, 0, tx_size, 0, false),
+            ),
+            (
+                "the block's encoded size",
+                BlockLimiter {
+                    block_tx_size_used: USED,
+                    ..BlockLimiter::new(
+                        BlockLimits::no_limits().with_block_txs_encode_size_limit(LIMIT),
+                    )
+                },
+                LIMIT - USED,
+                |limiter, tx_size| limiter.pre_execution_check(B256::ZERO, 0, tx_size, 0, false),
+            ),
+            (
+                "a transaction's own data-availability size",
+                BlockLimiter::new(BlockLimits::no_limits().with_tx_da_size_limit(LIMIT)),
+                LIMIT,
+                |limiter, da_size| limiter.pre_execution_check(B256::ZERO, 0, 0, da_size, false),
+            ),
+            (
+                "the block's data-availability size",
+                BlockLimiter {
+                    block_da_size_used: USED,
+                    ..BlockLimiter::new(BlockLimits::no_limits().with_block_da_size_limit(LIMIT))
+                },
+                LIMIT - USED,
+                |limiter, da_size| limiter.pre_execution_check(B256::ZERO, 0, 0, da_size, false),
+            ),
+        ];
+
+        for (name, limiter, bound, check) in cases {
+            assert!(
+                check(&limiter, bound).is_ok(),
+                "{name}: {bound} exactly fills what is left and is admitted"
+            );
+            assert!(check(&limiter, bound + 1).is_err(), "{name}: one unit more is refused");
+        }
+    }
+
+    /// What the block has left is what its refusal reports, and it is the limit minus what the
+    /// block used.
+    #[test]
+    fn test_available_gas_is_the_limit_less_what_the_block_used() {
+        let mut limiter = BlockLimiter::new(limits_with_block_gas(1_000));
+        assert_eq!(limiter.available_gas(), 1_000, "an empty block has all of it");
+
+        limiter.post_execution_update(&BlockUsage { gas_used: 400, ..Default::default() });
+        assert_eq!(limiter.available_gas(), 600);
+
+        let err = limiter
+            .pre_execution_check(B256::ZERO, 601, 0, 0, false)
+            .expect_err("601 does not fit in 600");
+        assert!(
+            std::format!("{err}").contains("blocks available gas 600"),
+            "the refusal reports what the block has left: {err}"
+        );
+
+        // The block cannot owe gas: a counter past the limit reports nothing left.
+        limiter.post_execution_update(&BlockUsage { gas_used: u64::MAX, ..Default::default() });
+        assert_eq!(limiter.available_gas(), 0);
+    }
+
     /// The state and history ledgers and the write-record count are accumulated, and no check
     /// refuses a transaction on them.
     #[test]

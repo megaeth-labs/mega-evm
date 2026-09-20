@@ -399,11 +399,35 @@ mod tests {
     fn test_mega_transaction_ext_works_for_envelope_and_recovered_types() {
         let tx = legacy_envelope();
         let recovered = Recovered::new_unchecked(tx.clone(), CALLER);
+        // A recovered borrow is what a node passes when it keeps the envelope itself.
+        let borrowed = Recovered::new_unchecked(&tx, CALLER);
 
-        assert_eq!(MegaTransactionExt::tx_hash(&tx), tx.tx_hash());
-        assert_eq!(MegaTransactionExt::tx_hash(&recovered), tx.tx_hash());
-        assert!(MegaTransactionExt::estimated_da_size(&tx) > 0);
-        assert!(MegaTransactionExt::tx_size(&tx) > 0);
+        let hash = tx.tx_hash();
+        let da_size = MegaTransactionExt::estimated_da_size(&tx);
+        let tx_size = MegaTransactionExt::tx_size(&tx);
+        assert!(da_size > 0);
+        assert!(tx_size > 0);
+
+        // The three forms are the same transaction, so they report the same figures.
+        for reported in [
+            (
+                MegaTransactionExt::tx_hash(&tx),
+                MegaTransactionExt::estimated_da_size(&tx),
+                MegaTransactionExt::tx_size(&tx),
+            ),
+            (
+                MegaTransactionExt::tx_hash(&recovered),
+                MegaTransactionExt::estimated_da_size(&recovered),
+                MegaTransactionExt::tx_size(&recovered),
+            ),
+            (
+                MegaTransactionExt::tx_hash(&borrowed),
+                MegaTransactionExt::estimated_da_size(&borrowed),
+                MegaTransactionExt::tx_size(&borrowed),
+            ),
+        ] {
+            assert_eq!(reported, (hash, da_size, tx_size));
+        }
     }
 
     #[test]

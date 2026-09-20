@@ -482,8 +482,15 @@ mod tests {
         config.insert(MegaHardfork::Satin, ForkCondition::Timestamp(20));
         assert_eq!(config.get(MegaHardfork::Satin), Some(&ForkCondition::Timestamp(20)));
 
+        // Removing one fork leaves the rest of the schedule as it was.
+        config.insert(EthereumHardfork::Prague, ForkCondition::Timestamp(30));
         let config = config.without(MegaHardfork::Satin);
         assert_eq!(config.get(MegaHardfork::Satin), None);
+        assert_eq!(
+            config.get(EthereumHardfork::Prague),
+            Some(&ForkCondition::Timestamp(30)),
+            "the other entries are untouched"
+        );
 
         let from_iter = MegaHardforkConfig::from(
             [(MegaHardfork::Satin, ForkCondition::Timestamp(1))].into_iter(),
