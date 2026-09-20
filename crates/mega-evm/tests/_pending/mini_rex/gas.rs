@@ -795,4 +795,3 @@ fn floor_gas_test_case(spec: MegaSpecId, calldata_size: usize, expected_gas_used
     let gas_used = res.result.gas_used();
     assert_eq!(gas_used, expected_gas_used);
 }
-
