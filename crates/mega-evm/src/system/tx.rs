@@ -119,9 +119,11 @@ pub fn is_system_originated(tx: &MegaTransaction, system_address: Address) -> bo
 /// chain still wants are made here (see the module documentation), each under the configuration
 /// switch a user transaction obeys.
 ///
-/// A transaction from the system address that is not a system transaction — it creates a
-/// contract, or calls a contract that is not whitelisted — is rejected outright: the sequencer
-/// has no business sending it, and promoting it would give it the deposit path's exemptions.
+/// A transaction from the system address that is not a system transaction is rejected outright:
+/// the sequencer has no business sending it, and promoting it would give it the deposit path's
+/// exemptions. That covers a creation, a call to a contract that is not on the whitelist, and
+/// any shape that is not a legacy transaction — an EIP-1559 one, or one that already carries a
+/// source hash, which has skipped the validation the promotion runs.
 pub(crate) fn validate_and_promote<DB, ExtEnvs, ERROR>(
     ctx: &mut MegaContext<DB, ExtEnvs>,
     system_address: Address,
@@ -136,7 +138,9 @@ where
     }
     if !is_mega_system_transaction_with(ctx.tx(), system_address) {
         return Err(ERROR::from_string(
-            "the callee of a system transaction is not on the whitelist".to_string(),
+            "a transaction from the system address must be a legacy call to a whitelisted \
+             contract"
+                .to_string(),
         ));
     }
 

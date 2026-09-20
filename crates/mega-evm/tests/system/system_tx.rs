@@ -28,6 +28,11 @@ const CHAIN_ID: u64 = 4326;
 /// A contract that is not on the whitelist.
 const OFF_WHITELIST: Address = address!("0x00000000000000000000000000000000000dead1");
 
+/// The refusal every transaction from the system address that is not a system transaction gets:
+/// the rule it broke, whichever way it broke it.
+const NOT_A_SYSTEM_TRANSACTION: &str =
+    "a transaction from the system address must be a legacy call to a whitelisted contract";
+
 /// The Oracle's slot the system transactions write.
 const ORACLE_SLOT: U256 = U256::ZERO;
 
@@ -220,7 +225,7 @@ fn test_the_whitelist_is_what_the_system_address_may_call() {
     let off_whitelist =
         legacy_tx(MEGA_SYSTEM_ADDRESS, TxKind::Call(OFF_WHITELIST), Bytes::new(), 0);
     let refused = rejection(chain_db(), off_whitelist);
-    assert!(refused.contains("whitelist"), "{refused}");
+    assert!(refused.contains(NOT_A_SYSTEM_TRANSACTION), "{refused}");
 
     let creation = legacy_tx(
         MEGA_SYSTEM_ADDRESS,
@@ -229,7 +234,17 @@ fn test_the_whitelist_is_what_the_system_address_may_call() {
         0,
     );
     let refused = rejection(chain_db(), creation);
-    assert!(refused.contains("whitelist"), "{refused}");
+    assert!(refused.contains(NOT_A_SYSTEM_TRANSACTION), "{refused}");
+}
+
+/// A transaction from the system address that is not a legacy one is refused whatever it calls:
+/// the sequencer builds the legacy shape, and the promotion is what turns it into a deposit.
+#[test]
+fn test_a_non_legacy_transaction_from_the_system_address_is_refused() {
+    let mut tx = system_tx(0, B256::with_last_byte(0xaf));
+    tx.0.base.tx_type = 2; // EIP-1559
+    let refused = rejection(chain_db(), tx);
+    assert!(refused.contains(NOT_A_SYSTEM_TRANSACTION), "{refused}");
 }
 
 /// The whitelist holds for the system address alone: anyone else may call anything, and pays
@@ -628,5 +643,8 @@ fn test_a_transaction_that_arrives_promoted_is_refused() {
     let mut tx = system_tx(0, B256::with_last_byte(0xaf));
     tx.0.deposit.source_hash = MEGA_SYSTEM_TRANSACTION_SOURCE_HASH;
     let refused = rejection(chain_db(), tx);
-    assert!(refused.contains("whitelist"), "{refused}");
+    assert!(
+        refused.contains(NOT_A_SYSTEM_TRANSACTION),
+        "the refusal names the rule, not the whitelist alone: {refused}",
+    );
 }
