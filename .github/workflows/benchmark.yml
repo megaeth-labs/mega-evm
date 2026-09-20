@@ -199,10 +199,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # The Satin bench set: `transact`, `corpus` and `factory`, until the
-        # suite is rebuilt on Satin, which restores the full list. Scheduled and
-        # comment-triggered runs use the default branch's copy of this file.
-        target: [corpus, factory, transact]
+        # The Satin bench set: `block`, `transact`, `corpus` and `factory`,
+        # until the suite is rebuilt on Satin, which restores the full list.
+        # Scheduled and comment-triggered runs use the default branch's copy of
+        # this file.
+        target: [block, corpus, factory, transact]
     steps:
       - uses: actions/checkout@v4
         with:

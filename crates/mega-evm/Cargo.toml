@@ -59,9 +59,13 @@ std = [
 test-utils = ["dep:derive_more"]
 
 # The Satin bench set: `transact` (MegaEvm next to op-revm), `corpus` (the JSON scenarios under
-# benches/scenarios, a bench input) and `factory` (EVM construction). The inputs under
-# benches/data (revm_bench) and benches/fixtures (attack_replay) stay for the rebuild of the rest
-# of the suite.
+# benches/scenarios, a bench input), `factory` (EVM construction) and `block` (a block through
+# MegaBlockExecutor). The inputs under benches/data (revm_bench) and benches/fixtures
+# (attack_replay) stay for the rebuild of the rest of the suite.
+[[bench]]
+name = "block"
+harness = false
+
 [[bench]]
 name = "corpus"
 harness = false
