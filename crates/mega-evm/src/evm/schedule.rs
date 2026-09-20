@@ -14,8 +14,9 @@
 //! (`tx_account_write_cost`, `tx_create_access_cost`), the zero `code_deposit_cost` and the floor.
 //! The history entry stays at zero: history gas is its own mechanism and switches it on.
 //!
-//! The schedule is built once per `CfgEnv` — [`MegaContext::with_cfg`](crate::MegaContext) — and
-//! read per opcode out of the table revm already carries, so nothing here runs on the hot path.
+//! The schedule is built once for the process and handed to every configuration as a shared
+//! clone ([`MegaContext::with_cfg`](crate::MegaContext)); an opcode reads its price out of the
+//! table revm already carries. Nothing here runs on the hot path.
 
 use revm::{
     context_interface::cfg::{GasId, GasParams},
