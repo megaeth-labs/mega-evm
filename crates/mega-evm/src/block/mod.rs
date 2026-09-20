@@ -3,9 +3,11 @@
 mod chain;
 mod executor;
 mod hardfork;
+mod limit;
 mod result;
 
 pub use chain::*;
 pub use executor::*;
 pub use hardfork::*;
+pub use limit::*;
 pub use result::*;
