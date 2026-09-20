@@ -4,6 +4,10 @@
 //! - **SALT**: Bucket capacity information for dynamic gas pricing
 //! - **Oracle**: Storage from the `MegaETH` oracle contract
 //!
+//! [`BucketMultipliers`] is what execution reads the SALT side through: it turns the capacities
+//! [`SaltEnv`] reports into the multipliers EIP-8037 state gas is scaled by, and caches them for
+//! the running transaction.
+//!
 //! # Architecture
 //!
 //! External environments follow a factory pattern:
@@ -19,6 +23,7 @@ use auto_impl::auto_impl;
 use core::fmt::Debug;
 
 mod factory;
+mod gas;
 #[cfg(any(test, feature = "test-utils"))]
 mod hasher;
 mod oracle;
@@ -27,6 +32,7 @@ mod salt;
 mod test_utils;
 
 pub use factory::*;
+pub use gas::*;
 #[cfg(any(test, feature = "test-utils"))]
 pub use hasher::*;
 pub use oracle::*;
