@@ -164,6 +164,42 @@ fn test_a_call_without_gas_forwards_nothing() {
     assert_eq!(usage.data_size, 0);
 }
 
+/// A call forwarded one gas does forward its hint, and the frame it was sent from then runs out
+/// of gas: positive gas is what admits a hint, not a promise that the bytecode can run. The hint
+/// is a synchronous side effect, so the service holds it whatever the frame does next.
+#[test]
+fn test_a_call_with_one_gas_forwards_the_hint_it_cannot_deliver() {
+    use revm::bytecode::opcode::{MSTORE, RETURN};
+
+    let data = send_hint(b"one gas");
+    let code = BytecodeBuilder::default()
+        .mstore(0x0, &data)
+        .push_number(0_u64) // retSize
+        .push_number(0_u64) // retOffset
+        .push_number(data.len() as u64) // argsSize
+        .push_number(0_u64) // argsOffset
+        .push_number(0_u64) // value
+        .push_address(ORACLE_CONTRACT_ADDRESS)
+        .push_number(1_u64) // gas: enough to admit the hint, not to run the bytecode
+        .append(CALL)
+        // memory[0..32] = the call's status, and return it
+        .push_number(0_u64)
+        .append(MSTORE)
+        .push_number(32_u64)
+        .push_number(0_u64)
+        .append(RETURN)
+        .build();
+    let (result, hints, usage) =
+        run_with_oracle(with_contract(code), call_tx(CONTRACT, [], U256::ZERO));
+
+    assert!(result.result.is_success(), "the caller survives the failed call");
+    let outcome = result.result.output().cloned().unwrap_or_default();
+    let (status, _) = crate::common::split_outcome(&outcome);
+    assert!(!status, "one gas does not run the contract's dispatcher");
+    assert_eq!(hints.len(), 1, "the hint reached the service before the frame ran out of gas");
+    assert_eq!(usage.data_size, data.len() as u64, "and its bytes stay counted");
+}
+
 /// `CALLCODE` and `DELEGATECALL` never reach the interceptor, so they forward nothing.
 #[test]
 fn test_callcode_and_delegatecall_forward_nothing() {

@@ -30,12 +30,20 @@ pub use mega_system_contracts::oracle::IOracle;
 /// effect rather than an answer. The Oracle's storage methods are ordinary code, and reading
 /// its storage through the node's oracle service is the Host's business.
 ///
-/// The hint is forwarded only by a call that can deliver it:
+/// Two conditions admit a hint, and neither is a statement about the frame that runs afterwards:
 ///
-/// - the call carries no value: `sendHint` is not payable, so a value-bearing call reverts in the
-///   bytecode and its hint would be one the caller never sent;
-/// - the call was forwarded gas: a call with none cannot run the dispatcher of the bytecode, so it
-///   reverts, and its hint would be a free message to the service.
+/// - the call was forwarded gas. A call with none cannot run the dispatcher of the bytecode at all,
+///   so its hint would be a free message to the service;
+/// - the call carries no value. `sendHint` is not payable, so a value-bearing call reverts in the
+///   bytecode and its hint would be one the caller never sent.
+///
+/// The gas condition is the legacy engine's, carried over; the value condition is new.
+///
+/// Gas above zero does not promise that the bytecode succeeds: a hint forwarded with one gas
+/// reaches the service and the frame it was sent from then runs out of gas. An admitted hint is a
+/// synchronous, irreversible side effect — the service holds it whatever the frame, or the
+/// transaction, does next. That is also why its bytes are counted on the transaction rather than
+/// on the frame.
 ///
 /// A `STATICCALL` does forward: `sendHint` is a view method and writes nothing.
 ///
