@@ -60,7 +60,7 @@ mod tests {
 
     /// The placeholder values, written out so a change to one is a visible diff.
     #[test]
-    fn test_provisional_values_match_the_work_order() {
+    fn test_the_provisional_values_are_written_out() {
         assert_eq!(COST_PER_STATE_BYTE, 1_530);
         assert_eq!(SLOT_STATE_GAS, 97_920);
         assert_eq!(ACCOUNT_STATE_GAS, 183_600);
