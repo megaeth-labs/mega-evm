@@ -514,12 +514,14 @@ fn charged_create_input(reservoir: u64) -> FrameInput {
     FrameInput::Create(Box::new(inputs))
 }
 
-/// Requires a settlement to have put both pools back exactly where they were before the charge,
-/// with the state ledger net zero and one capacity read behind the charge and the refill alike.
+/// Requires a settlement to have left the caller whole: the forwarded gas back on the regular
+/// pool with whatever the charge spilled onto it, the reservoir at the value it held before the
+/// charge, the state ledger net zero, and one capacity read behind the charge and the refill
+/// alike.
 fn assert_restores_both_pools(site: &str, envs: &SaltEnvs, reservoir: u64, settled: &Settled) {
     let caller = &settled.caller;
     assert_eq!(caller.remaining(), CALLER_LIMIT, "{site}: the regular pool comes back whole");
-    assert_eq!(caller.reservoir(), reservoir, "{site}: and so does the reservoir");
+    assert_eq!(caller.reservoir(), reservoir, "{site}: and the reservoir is where it started");
     assert_eq!(caller.state_gas_spent(), 0, "{site}: the state ledger nets zero");
     assert_eq!(caller.state_gas_spilled(), 0, "{site}: nothing is left spilled");
     assert_eq!(
