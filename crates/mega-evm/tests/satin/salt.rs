@@ -172,16 +172,22 @@ pub(crate) fn value_call(target: Address) -> BytecodeBuilder {
         .append(CALL)
 }
 
-/// `CREATE(0, 0, len)` of an init code already in memory at offset 0.
-pub(crate) fn create_empty_contract() -> BytecodeBuilder {
-    // Init code `PUSH0 PUSH0 RETURN`: deploys zero bytes of runtime code.
-    let init: [u8; 3] = [PUSH0, PUSH0, RETURN];
+/// `CREATE(value = 0, offset = 0, size)` of `init_code`, written to memory first.
+///
+/// `mstore` right-pads to a whole word, so the init code sits at offset 0 and the `CREATE`
+/// reads it from there.
+pub(crate) fn create_with(init_code: &[u8]) -> BytecodeBuilder {
     BytecodeBuilder::default()
-        .mstore(0, init)
-        .push_number(init.len() as u64)
-        .push_number(32u64 - init.len() as u64)
+        .mstore(0, init_code)
+        .push_number(init_code.len() as u64)
+        .push_number(0u64)
         .push_number(0u64)
         .append(CREATE)
+}
+
+/// A `CREATE` whose init code `PUSH0 PUSH0 RETURN` deploys zero bytes of runtime code.
+pub(crate) fn create_empty_contract() -> BytecodeBuilder {
+    create_with(&[PUSH0, PUSH0, RETURN])
 }
 
 /// One state gas entry of the Satin schedule.
