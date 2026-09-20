@@ -9,20 +9,27 @@
 //! - `storage_writes`: 200 first writes to fresh slots, then 200 writes back, in one frame: the
 //!   `SSTORE` wrapper's commit and refund.
 //! - `logs`: 200 two-topic logs in one frame: the `LOG` wrapper's commit.
+//! - `intercepted_calls`: 200 `STATICCALL`s to `MegaAccessControl`'s
+//!   `isVolatileDataAccessDisabled`, which the interceptor answers: the dispatch and the synthetic
+//!   result, 200 times.
+//! - `system_address_misses`: the same 200 calls with a selector the contract does not intercept,
+//!   so each pays the dispatch's address match and selector peek and then runs the bytecode.
 #![allow(missing_docs)]
 
 use alloy_op_evm::OpTx;
 use alloy_primitives::{address, Address, Bytes, TxKind, U256};
+use alloy_sol_types::SolCall;
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 use mega_evm::{
+    system::{IMegaAccessControl, ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE},
     test_utils::{op_transaction, zero_fee_l1_block_info, BytecodeBuilder, MemoryDatabase},
     MegaContext, MegaEvm, MegaSpecId,
 };
 use op_revm::{L1BlockInfo, OpEvm, OpSpecId, OpTransaction};
 use revm::{
     bytecode::opcode::{
-        ADDRESS, CALL, CALLDATALOAD, DUP1, GAS, ISZERO, JUMPDEST, JUMPI, LOG0, LOG2, MSTORE, PUSH0,
-        PUSH1, SSTORE, STOP, SUB, SWAP1,
+        ADDRESS, CALL, CALLDATALOAD, DUP1, GAS, ISZERO, JUMPDEST, JUMPI, LOG0, LOG2, MSTORE, POP,
+        PUSH0, PUSH1, SSTORE, STATICCALL, STOP, SUB, SWAP1,
     },
     context::{BlockEnv, CfgEnv, Context, ContextTr, TxEnv},
     inspector::NoOpInspector,
@@ -34,6 +41,12 @@ const CALLEE: Address = address!("0x0000000000000000000000000000000000100001");
 const RECURSIVE: Address = address!("0x0000000000000000000000000000000000100002");
 const WRITER: Address = address!("0x0000000000000000000000000000000000100003");
 const LOGGER: Address = address!("0x0000000000000000000000000000000000100004");
+const INTERCEPTED: Address = address!("0x0000000000000000000000000000000000100005");
+const MISSING: Address = address!("0x0000000000000000000000000000000000100006");
+
+/// A selector `MegaAccessControl` intercepts, and one it does not.
+const IS_DISABLED: [u8; 4] = IMegaAccessControl::isVolatileDataAccessDisabledCall::SELECTOR;
+const UNKNOWN_SELECTOR: [u8; 4] = [0xde, 0xad, 0xbe, 0xef];
 
 /// Depth the recursive contract reaches.
 const DEPTH: u8 = 64;
@@ -86,6 +99,23 @@ fn logger_code() -> Bytes {
     code.stop().build()
 }
 
+/// `STATICCALL`s `MegaAccessControl` with `selector` `REPEAT` times, discarding the answers.
+fn system_caller_code(selector: [u8; 4]) -> Bytes {
+    let mut code = BytecodeBuilder::default().mstore(0x0, selector);
+    for _ in 0..REPEAT {
+        code = code
+            .push_number(0_u64) // retSize
+            .push_number(0_u64) // retOffset
+            .push_number(4_u64) // argsSize
+            .push_number(0_u64) // argsOffset
+            .push_address(ACCESS_CONTROL_ADDRESS)
+            .push_number(100_000_u64)
+            .append(STATICCALL)
+            .append(POP);
+    }
+    code.stop().build()
+}
+
 fn call_tx(to: Address, data: Bytes, gas_limit: u64) -> OpTransaction<TxEnv> {
     op_transaction(TxEnv {
         caller: CALLER,
@@ -125,7 +155,10 @@ fn bench_transact(c: &mut Criterion) {
         .account_balance(CALLEE, U256::from(1))
         .account_code(RECURSIVE, recursive_code())
         .account_code(WRITER, writer_code())
-        .account_code(LOGGER, logger_code());
+        .account_code(LOGGER, logger_code())
+        .account_code(INTERCEPTED, system_caller_code(IS_DISABLED))
+        .account_code(MISSING, system_caller_code(UNKNOWN_SELECTOR))
+        .account_code(ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE);
     let cfg = mega_context(db.clone()).cfg().clone();
 
     let mut depth = [0u8; 32];
@@ -136,6 +169,8 @@ fn bench_transact(c: &mut Criterion) {
         ("deep_calls", call_tx(RECURSIVE, Bytes::from(depth.to_vec()), 30_000_000)),
         ("storage_writes", call_tx(WRITER, Bytes::new(), 30_000_000)),
         ("logs", call_tx(LOGGER, Bytes::new(), 30_000_000)),
+        ("intercepted_calls", call_tx(INTERCEPTED, Bytes::new(), 30_000_000)),
+        ("system_address_misses", call_tx(MISSING, Bytes::new(), 30_000_000)),
     ];
 
     let mut group = c.benchmark_group("transact");
