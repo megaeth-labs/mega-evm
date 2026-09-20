@@ -423,7 +423,9 @@ mod tests {
             .output()
             .expect("the test binary runs");
         let stdout = String::from_utf8_lossy(&run.stdout);
-        assert!(run.status.success(), "the probe failed:\n{stdout}");
+        // The probe runs with `--nocapture`, so its panic message is on stderr and nowhere else.
+        let stderr = String::from_utf8_lossy(&run.stderr);
+        assert!(run.status.success(), "the probe failed:\n{stdout}\n{stderr}");
         assert!(
             stdout.contains("sstore_set_state_gas = 20000"),
             "the probe must report the repriced entry; a run that selected no test reports \
