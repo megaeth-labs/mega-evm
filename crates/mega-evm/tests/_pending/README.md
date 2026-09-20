@@ -40,10 +40,10 @@ Do not add a `_pending/main.rs`.
 | system contract deployment | 67 | 17 | 50 | 62 | 5 | 0 |
 | the oracle and control contracts | 77 | 77 | 0 | 67 | 10 | 0 |
 | native keyless deployment | 75 | 73 | 2 | 29 | 46 | 0 |
-| the block executor | 53 | 23 | 30 | 39 | 14 | 0 |
+| the block executor | 36 | 23 | 13 | 29 | 7 | 0 |
 | inspector support | 4 | 4 | 0 | 1 | 3 | 0 |
 | — (undecided: D57 preload-warm cold charging, D58 98/100 forwarding) | 7 | 7 | 0 | 0 | 0 | 7 |
-| **Total** | **747** | **624** | **123** | **426** | **293** | **28** |
+| **Total** | **730** | **624** | **106** | **416** | **286** | **28** |
 
 ## Tests ported in place
 
@@ -129,6 +129,16 @@ These 45 rows run in a real test target now, adapted to the Satin API, so the co
 | `src/limit/frame_limit.rs` | the common execution layer (4) | 4 | `src/limit/frame_limit.rs` |
 | `src/limit/mod.rs` | the common execution layer (3) | 3 | `src/limit/mod.rs` |
 | **Total** | | **45** | |
+
+## Tests ported by the block executor
+
+These 17 rows run in a real test target now, adapted to the Satin API, so the counts above are lower than the inventory's by exactly these rows.
+
+| Legacy file | Owner in the inventory | Tests | Now in |
+|---|---|---:|---|
+| `src/block/chain.rs` | the block executor (5) | 5 | `src/block/chain.rs` |
+| `src/block/hardfork.rs` | the block executor (12) | 12 | `src/block/hardfork.rs` |
+| **Total** | | **17** | |
 
 ## Tests the inventory assigns to the Satin skeleton that are parked under another mechanism
 
@@ -218,9 +228,7 @@ Each cell lists `disposition count (mechanism · decision)`.
 | `rex6/sequencer_registry_rotation.rs` | 6 | keep 5 (system contract deployment); keep 1 (the block executor · params validation at load) |
 | `rex6/system_tx_metering_exemption.rs` | 3 | rewrite 3 (SALT pricing · D51 (m = 1 for system source; history exempt)) |
 | `src/access/volatile.rs` | 4 | keep 4 (detention) |
-| `src/block/chain.rs` | 5 | rewrite 4 (the block executor · Satin activation timestamps; fallback pin = Satin); keep 1 (the block executor) |
 | `src/block/eips.rs` | 1 | keep 1 (the block executor) |
-| `src/block/hardfork.rs` | 12 | rewrite 3 (the block executor · single fork); keep 9 (the block executor) |
 | `src/block/helpers.rs` | 3 | keep 3 (the block executor) |
 | `src/block/limit.rs` | 5 | keep 5 (the block executor) |
 | `src/block/result.rs` | 2 | rewrite 2 (the block executor · D48 (error shape)) |

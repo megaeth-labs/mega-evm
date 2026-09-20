@@ -2768,6 +2768,7 @@ dependencies = [
  "alloy-evm",
  "alloy-hardforks",
  "alloy-op-evm",
+ "alloy-op-hardforks",
  "alloy-primitives",
  "alloy-sol-types",
  "auto_impl",

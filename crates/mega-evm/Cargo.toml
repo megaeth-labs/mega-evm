@@ -18,6 +18,7 @@ alloy-consensus = { workspace = true, features = ["k256"] }
 alloy-evm.workspace = true
 alloy-hardforks.workspace = true
 alloy-op-evm.workspace = true
+alloy-op-hardforks.workspace = true
 alloy-primitives.workspace = true
 alloy-sol-types.workspace = true
 op-alloy-consensus.workspace = true
