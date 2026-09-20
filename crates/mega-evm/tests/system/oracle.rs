@@ -3,7 +3,6 @@
 
 use core::convert::Infallible;
 
-use alloy_evm::Evm;
 use alloy_primitives::{Bytes, B256, U256};
 use alloy_sol_types::{SolCall, SolError};
 use mega_evm::{
