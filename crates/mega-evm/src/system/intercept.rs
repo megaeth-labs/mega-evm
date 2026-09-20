@@ -18,8 +18,9 @@
 //!    reverts with `NotIntercepted()`. A selector matches on its own four bytes, whatever follows
 //!    them.
 //! 4. **The value policy.** A method that takes no value answers a value-bearing call with
-//!    `NonZeroTransfer()` ([`reject_non_zero_transfer`]). The policy is per method, after the
-//!    selector matched, so a value-bearing call to an unknown selector still falls through.
+//!    `NonZeroTransfer()` ([`reject_non_zero_transfer`]), or with the error its own ABI names. The
+//!    policy is per method, after the selector matched, so a value-bearing call to an unknown
+//!    selector still falls through.
 //!
 //! # The answer
 //!
@@ -68,6 +69,8 @@ const SYSTEM_CONTRACT_PREFIX: [u8; 19] = {
 pub(crate) enum InterceptedContract {
     /// The Oracle: `sendHint` reaches the node's oracle service.
     Oracle,
+    /// `KeylessDeploy`: `keylessDeploy` deploys a pre-EIP-155 transaction.
+    KeylessDeploy,
     /// `MegaAccessControl`: the volatile-data access switch.
     AccessControl,
     /// `MegaLimitControl`: what the running call has left.
@@ -86,6 +89,7 @@ pub(crate) fn intercepted_contract(address: &Address) -> Option<InterceptedContr
     }
     match bytes[SYSTEM_CONTRACT_PREFIX.len()] {
         1 => Some(InterceptedContract::Oracle),
+        3 => Some(InterceptedContract::KeylessDeploy),
         4 => Some(InterceptedContract::AccessControl),
         5 => Some(InterceptedContract::LimitControl),
         _ => None,
@@ -95,14 +99,21 @@ pub(crate) fn intercepted_contract(address: &Address) -> Option<InterceptedContr
 /// Answers a call to a system contract, or `None` when nothing intercepts it and the contract's
 /// own bytecode runs.
 ///
-/// The caller has already applied the scheme guard.
+/// `depth` is the depth of the frame the call would start, which is the calling frame's journal
+/// depth. The caller has already applied the scheme guard.
+///
+/// The inputs are taken mutably because an interceptor may charge the frame it hands on
+/// (`KeylessDeploy`'s fixed overhead); an interceptor that answers the call charges its own
+/// answer instead.
 #[inline]
 pub(crate) fn intercept<DB: Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &mut MegaContext<DB, ExtEnvs>,
-    inputs: &CallInputs,
+    inputs: &mut CallInputs,
+    depth: usize,
 ) -> Option<FrameResult> {
     match intercepted_contract(&inputs.target_address)? {
         InterceptedContract::Oracle => crate::system::oracle::intercept(ctx, inputs),
+        InterceptedContract::KeylessDeploy => crate::system::keyless::intercept(ctx, inputs, depth),
         InterceptedContract::AccessControl => crate::system::control::intercept(ctx, inputs),
         InterceptedContract::LimitControl => crate::system::limit_control::intercept(ctx, inputs),
     }
@@ -172,11 +183,12 @@ mod tests {
             intercepted_contract(&ORACLE_CONTRACT_ADDRESS),
             Some(InterceptedContract::Oracle)
         );
+        assert_eq!(
+            intercepted_contract(&KEYLESS_DEPLOY_ADDRESS),
+            Some(InterceptedContract::KeylessDeploy)
+        );
         assert_eq!(intercepted_contract(&HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS), None);
         assert_eq!(intercepted_contract(&SEQUENCER_REGISTRY_ADDRESS), None);
-        // KeylessDeploy's interceptor follows; its address is in the range the dispatch tests,
-        // so it reaches it as soon as it lands.
-        assert_eq!(intercepted_contract(&KEYLESS_DEPLOY_ADDRESS), None);
     }
 
     /// An address next to the range, and one that shares the last byte but not the prefix, are

@@ -253,7 +253,8 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
             self.inner.ctx.additional_limit.push_empty_frame();
             return Ok(ItemOrResult::Result(result));
         }
-        if let Some(result) = self.intercept(&frame_init) {
+        let mut frame_init = frame_init;
+        if let Some(result) = self.intercept(&mut frame_init) {
             self.inner.ctx.additional_limit.push_empty_frame();
             return Ok(ItemOrResult::Result(result));
         }
@@ -480,14 +481,16 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
     /// contract. A creation reaches no interceptor either.
     ///
     /// An answer is a [`synthetic_frame_result`](crate::synthetic_frame_result), so it settles
-    /// like a frame revm ran. What each contract answers is in the `system` module.
+    /// like a frame revm ran. An interceptor that lets the frame run may charge it instead of
+    /// answering it, which is why the frame is taken mutably. What each contract answers is in
+    /// the `system` module.
     #[inline]
-    fn intercept(&mut self, frame_init: &FrameInit) -> Option<FrameResult> {
-        let FrameInput::Call(inputs) = &frame_init.frame_input else { return None };
+    fn intercept(&mut self, frame_init: &mut FrameInit) -> Option<FrameResult> {
+        let FrameInput::Call(inputs) = &mut frame_init.frame_input else { return None };
         if !matches!(inputs.scheme, CallScheme::Call | CallScheme::StaticCall) {
             return None;
         }
-        crate::system::intercept(&mut self.inner.ctx, inputs)
+        crate::system::intercept(&mut self.inner.ctx, inputs, frame_init.depth)
     }
 
     /// The keyless deployment rewrite: a keyless deployment call turned into the native creation

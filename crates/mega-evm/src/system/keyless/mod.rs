@@ -9,11 +9,14 @@
 //! The rest of the module is data-only: decoding the pre-EIP-155 transaction, recovering its
 //! signer, deriving the deploy address, and mapping errors to and from the `IKeylessDeploy` ABI.
 
+mod dispatch;
 mod error;
 mod tx;
 
 pub use error::*;
 pub use tx::*;
+
+pub(crate) use dispatch::intercept;
 
 use alloy_primitives::{address, Address};
 
@@ -27,3 +30,8 @@ pub use mega_system_contracts::keyless_deploy::LATEST_CODE as KEYLESS_DEPLOY_COD
 pub use mega_system_contracts::keyless_deploy::LATEST_CODE_HASH as KEYLESS_DEPLOY_CODE_HASH;
 
 pub use mega_system_contracts::keyless_deploy::IKeylessDeploy;
+
+/// The regular gas a `keylessDeploy` call pays before the deployment runs: the fixed cost of
+/// decoding the transaction, recovering its signer and preparing the deployment. Provisional,
+/// as the rest of the engine's numbers are.
+pub const KEYLESS_DEPLOY_OVERHEAD_GAS: u64 = 100_000;
