@@ -442,10 +442,10 @@ fn test_a_deposit_creates_its_caller_and_pays_for_it_once() {
     // A system transaction whose sender does not exist yet creates it, for the same charge.
     let created = run_outcome(chain_db(), system_tx(0, B256::with_last_byte(0x77)));
     assert!(created.result.is_success(), "{:?}", created.result);
+    // The same transaction from a sender that already exists: what it pays is the slot it
+    // writes, and nothing for its own account.
     let slot_charge = run_outcome(
-        chain_db()
-            .account_nonce(MEGA_SYSTEM_ADDRESS, 0)
-            .account_balance(MEGA_SYSTEM_ADDRESS, U256::from(1)),
+        chain_db().account_balance(MEGA_SYSTEM_ADDRESS, U256::from(1)),
         system_tx(0, B256::with_last_byte(0x77)),
     )
     .gas
