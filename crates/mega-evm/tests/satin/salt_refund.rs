@@ -17,20 +17,28 @@
 //! later: the delegation it wrote survives the revert, so the state gas it paid must survive it
 //! too.
 
-use alloy_primitives::{Address, Bytes, TxKind, U256};
+use alloy_primitives::{address, Address, Bytes, TxKind, U256};
 use mega_evm::{
+    settle_frame_result, synthetic_frame_result,
     test_utils::{BytecodeBuilder, MemoryDatabase},
     MegaEvm, MegaTransaction, MegaTransactionOutcome,
 };
 use revm::{
     bytecode::opcode::{CALL, PUSH0, RETURN, REVERT},
-    context_interface::cfg::GasId,
+    context_interface::{
+        cfg::{gas::GasTracker, GasId, StateGasCharge, StateGasSite},
+        Host,
+    },
+    interpreter::{
+        CallInput, CallInputs, CallScheme, CallValue, CreateInputs, CreateScheme, FrameInput,
+        InstructionResult,
+    },
 };
 
 use crate::salt::{
-    authorization_tx, call_contract, capacity, create_with, crowded_account, crowded_slot, db,
-    entry, minimal_envs, run, salt_context, selfdestruct_to, slot_bucket, try_run, tx, SaltEnvs,
-    AUTHORITY, CALLER, CONTRACT, EMPTY, GAS_LIMIT,
+    account_bucket, authorization_tx, call_contract, capacity, create_with, crowded_account,
+    crowded_slot, db, entry, minimal_envs, run, salt_context, selfdestruct_to, slot_bucket,
+    try_run, tx, SaltEnvs, AUTHORITY, CALLER, CONTRACT, EMPTY, GAS_LIMIT,
 };
 
 /// The contract a probe's inner frame runs in.
@@ -286,8 +294,10 @@ fn test_an_applied_authorization_keeps_its_charge_through_a_revert() {
     );
 }
 
-/// A creation whose deposit is refused gives back everything it charged: the account leaf it
-/// paid for upfront and the bytes it never deposited.
+/// A creation whose deployed code is refused before any deposit charge is made: EIP-3541 turns
+/// down a runtime code starting `0xEF` at validation, so the only state gas in play is the
+/// account leaf the transaction's own create target was charged for upfront, which comes back.
+/// The arm below it is the one where a deposit charge really is made and then rolled back.
 #[test]
 fn test_a_refused_code_deposit_pays_no_state_gas() {
     let created = CALLER.create(0);
@@ -413,4 +423,217 @@ fn test_the_capacity_behind_a_charge_and_its_refill_is_read_once() {
 
     assert_eq!(outcome.gas.state, 0, "every set was restored");
     assert_eq!(envs.bucket_queries(bucket), 1, "two charges and two refills, one capacity read");
+}
+
+/* The refund route that runs without a frame. */
+
+/// The address a synthetic frame would have added a leaf at.
+const SYNTHETIC_TARGET: Address = address!("0000000000000000000000000000000000c00008");
+
+/// The regular gas a caller forwards to the frame the probes below answer without running it.
+const FORWARDED: u64 = 9_000;
+
+/// The caller's own regular gas limit in those probes, wide enough for a crowded charge to spill
+/// onto it in full.
+const CALLER_LIMIT: u64 = 5_000_000;
+
+/// The capacity the synthetic-settlement probes crowd their site to.
+const SYNTHETIC_MULTIPLIER: u64 = 8;
+
+/// What one synthetic settlement did: the caller's tracker afterwards, the price the charge was
+/// made at, and how much of that charge spilled onto regular gas when it was made.
+struct Settled {
+    caller: GasTracker,
+    price: u64,
+    spilled: u64,
+}
+
+/// Charges `charge` through the pricing hook of a context reading `envs`, hands the frame the
+/// reservoir the caller has left, and settles a synthetic failure for it through the public
+/// helper — the route a mechanism takes when it answers a frame rather than running it.
+fn settle_a_synthetic_failure(
+    envs: &SaltEnvs,
+    reservoir: u64,
+    charge: StateGasCharge,
+    input: impl FnOnce(u64) -> FrameInput,
+) -> Settled {
+    let mut ctx = salt_context(db(Bytes::new()), envs.clone());
+    let price = ctx.state_gas_charge(charge).expect("the bucket is readable");
+
+    let mut caller = GasTracker::new(CALLER_LIMIT, CALLER_LIMIT - FORWARDED, reservoir);
+    assert!(caller.record_state_cost(price), "the caller can pay the crowded charge");
+    let spilled = caller.state_gas_spilled();
+
+    let mut result =
+        synthetic_frame_result(&input(caller.reservoir()), InstructionResult::Revert, Bytes::new());
+    settle_frame_result::<_, revm::context::result::EVMError<core::convert::Infallible>>(
+        &mut ctx,
+        &mut caller,
+        &mut result,
+    )
+    .expect("the refund is priced through the same hook");
+
+    Settled { caller, price, spilled }
+}
+
+/// The inputs of a `CALL` whose calling opcode charged the caller for the account it would add.
+fn charged_call_input(reservoir: u64) -> FrameInput {
+    FrameInput::Call(Box::new(CallInputs {
+        input: CallInput::Bytes(Bytes::new()),
+        return_memory_offset: 0..0,
+        gas_limit: FORWARDED,
+        bytecode_address: SYNTHETIC_TARGET,
+        known_bytecode: Default::default(),
+        target_address: SYNTHETIC_TARGET,
+        caller: CALLER,
+        value: CallValue::Transfer(U256::from(1)),
+        scheme: CallScheme::Call,
+        is_static: false,
+        reservoir,
+        charged_new_account_state_gas: true,
+    }))
+}
+
+/// The inputs of a `CREATE` whose calling opcode charged the caller for the account it would
+/// deploy.
+fn charged_create_input(reservoir: u64) -> FrameInput {
+    let mut inputs = CreateInputs::new(
+        CALLER,
+        CreateScheme::Create,
+        U256::ZERO,
+        Bytes::new(),
+        FORWARDED,
+        reservoir,
+    );
+    inputs.set_charged_create_state_gas(true);
+    inputs.set_charged_state_gas_address(SYNTHETIC_TARGET);
+    FrameInput::Create(Box::new(inputs))
+}
+
+/// Requires a settlement to have put both pools back exactly where they were before the charge,
+/// with the state ledger net zero and one capacity read behind the charge and the refill alike.
+fn assert_restores_both_pools(site: &str, envs: &SaltEnvs, reservoir: u64, settled: &Settled) {
+    let caller = &settled.caller;
+    assert_eq!(caller.remaining(), CALLER_LIMIT, "{site}: the regular pool comes back whole");
+    assert_eq!(caller.reservoir(), reservoir, "{site}: and so does the reservoir");
+    assert_eq!(caller.state_gas_spent(), 0, "{site}: the state ledger nets zero");
+    assert_eq!(caller.state_gas_spilled(), 0, "{site}: nothing is left spilled");
+    assert_eq!(
+        envs.bucket_queries(account_bucket(SYNTHETIC_TARGET)),
+        1,
+        "{site}: one capacity read priced the charge and the refund",
+    );
+}
+
+/// A synthetic `CALL` failure settled through the public helper gives back a SALT-priced upfront
+/// charge, both when the reservoir paid for it and when it spilled onto regular gas.
+#[test]
+fn test_a_synthetic_call_failure_refunds_the_crowded_upfront_charge() {
+    let crowded = entry(GasId::new_account_state_gas()) * SYNTHETIC_MULTIPLIER;
+    let charge = StateGasCharge::one(
+        GasId::new_account_state_gas(),
+        StateGasSite::account(SYNTHETIC_TARGET),
+    );
+
+    // The reservoir covers the whole charge.
+    let envs = crowded_account(minimal_envs(), SYNTHETIC_TARGET, SYNTHETIC_MULTIPLIER);
+    let settled = settle_a_synthetic_failure(&envs, CALLER_LIMIT, charge, charged_call_input);
+    assert_eq!(settled.price, crowded, "the charge was priced at the crowded bucket");
+    assert_eq!(settled.spilled, 0, "and the reservoir paid for all of it");
+    assert_restores_both_pools("a call from the reservoir", &envs, CALLER_LIMIT, &settled);
+
+    // The reservoir covers part of it and the rest spills onto regular gas.
+    let reservoir = crowded / 4;
+    let envs = crowded_account(minimal_envs(), SYNTHETIC_TARGET, SYNTHETIC_MULTIPLIER);
+    let settled = settle_a_synthetic_failure(&envs, reservoir, charge, charged_call_input);
+    assert_eq!(settled.price, crowded);
+    assert_eq!(settled.spilled, crowded - reservoir, "the rest of the charge spilled");
+    assert_restores_both_pools("a call that spilled", &envs, reservoir, &settled);
+}
+
+/// The same for a synthetic `CREATE` failure, whose upfront charge is the creation entry at the
+/// address the frame would have deployed to.
+#[test]
+fn test_a_synthetic_creation_failure_refunds_the_crowded_upfront_charge() {
+    let crowded = entry(GasId::create_state_gas()) * SYNTHETIC_MULTIPLIER;
+    let charge =
+        StateGasCharge::one(GasId::create_state_gas(), StateGasSite::account(SYNTHETIC_TARGET));
+
+    let envs = crowded_account(minimal_envs(), SYNTHETIC_TARGET, SYNTHETIC_MULTIPLIER);
+    let settled = settle_a_synthetic_failure(&envs, CALLER_LIMIT, charge, charged_create_input);
+    assert_eq!(settled.price, crowded, "the charge was priced at the crowded bucket");
+    assert_eq!(settled.spilled, 0);
+    assert_restores_both_pools("a creation from the reservoir", &envs, CALLER_LIMIT, &settled);
+
+    let reservoir = crowded / 4;
+    let envs = crowded_account(minimal_envs(), SYNTHETIC_TARGET, SYNTHETIC_MULTIPLIER);
+    let settled = settle_a_synthetic_failure(&envs, reservoir, charge, charged_create_input);
+    assert_eq!(settled.price, crowded);
+    assert_eq!(settled.spilled, crowded - reservoir);
+    assert_restores_both_pools("a creation that spilled", &envs, reservoir, &settled);
+}
+
+/* A deposit charge that is made and then rolled back. */
+
+/// How many bytes of runtime code the creation below deploys when its deposit is meant to fail.
+/// At the crowded price a byte costs `code_deposit_state_gas x 8`, so this many bytes is far
+/// beyond what the transaction brought.
+const UNAFFORDABLE_CODE: u64 = 20_000;
+
+/// How many it deploys when the deposit is meant to go through.
+const AFFORDABLE_CODE: u64 = 32;
+
+/// A creation whose init code writes a slot in a crowded bucket and then returns `deployed`
+/// bytes of runtime code, run from [`CONTRACT`] so the transaction outlives the creation.
+fn creation_depositing(deployed: u64) -> MemoryDatabase {
+    let init = BytecodeBuilder::default()
+        .sstore(U256::from(SLOT), U256::from(1))
+        .push_number(deployed)
+        .append(PUSH0)
+        .append(RETURN)
+        .build();
+    db(create_with(&init).stop().build())
+}
+
+/// A creation that runs out of gas paying for its code deposit takes back both of the charges it
+/// made: the slot its init code wrote in a crowded bucket, and the account leaf the `CREATE`
+/// opcode charged its caller for upfront. The outer frame stops after the failed creation, so
+/// the transaction settles and reports what it kept.
+#[test]
+fn test_a_creation_that_cannot_pay_its_code_deposit_keeps_no_state_gas() {
+    let created = CONTRACT.create(0);
+    let crowd = |envs| {
+        let envs = crowded_account(envs, created, SYNTHETIC_MULTIPLIER);
+        crowded_slot(envs, created, U256::from(SLOT), SYNTHETIC_MULTIPLIER)
+    };
+
+    let envs = crowd(minimal_envs());
+    let outcome = run(creation_depositing(UNAFFORDABLE_CODE), envs.clone(), call_contract());
+    assert_eq!(outcome.gas.state, 0, "the failed creation kept neither charge");
+    assert_eq!(
+        envs.bucket_queries(slot_bucket(created, U256::from(SLOT))),
+        1,
+        "the init code did write the slot, and it was priced before the deposit failed",
+    );
+    assert_eq!(envs.bucket_queries(account_bucket(created)), 1, "and so was the account leaf");
+    assert!(
+        outcome.state.get(&created).is_none_or(|account| account
+            .info
+            .code
+            .as_ref()
+            .is_none_or(|code| code.is_empty())),
+        "and nothing was deployed",
+    );
+
+    // The control: the same program with a deposit it can pay keeps all three charges, scaled.
+    let envs = crowd(minimal_envs());
+    let outcome = run(creation_depositing(AFFORDABLE_CODE), envs, call_contract());
+    assert_eq!(
+        outcome.gas.state,
+        (entry(GasId::create_state_gas()) +
+            entry(GasId::sstore_set_state_gas()) +
+            entry(GasId::code_deposit_state_gas()) * AFFORDABLE_CODE) *
+            SYNTHETIC_MULTIPLIER,
+        "the creation, the slot its init code wrote and the bytes it deposited",
+    );
 }
