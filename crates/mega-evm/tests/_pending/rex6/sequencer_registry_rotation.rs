@@ -396,4 +396,3 @@ fn test_rex6_eip4788_pre_block_call_failure_aborts_block() {
         "expected an EIP-4788 pre-block failure, got: {msg}"
     );
 }
-
