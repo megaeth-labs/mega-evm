@@ -1,17 +1,21 @@
 //! SALT pricing: giving a state gas charge back at the price it was made at.
 //!
-//! A state charge is undone at three kinds of moment, and all three re-price the charge that was
-//! made rather than looking the number up again from somewhere else:
+//! A state charge is undone in two shapes, and neither of them reads a second table.
 //!
-//! - the same opcode takes its own write back (`SSTORE` 0 -> x -> 0),
-//! - a frame that made a charge, or a frame whose child did not create the leaf the charge paid
-//!   for, does not survive, and
-//! - the transaction itself reverts.
+//! One shape names the charge and asks the hook for its price again: the same opcode taking its
+//! own write back (`SSTORE` 0 -> x -> 0), the upfront charge a caller made for a call or a
+//! creation that did not add the leaf after all, the transaction-level refund, and the
+//! settlement of a frame result built without running a frame. Because the site is re-priced
+//! through the one hook, and because the multiplier of a bucket is read once per transaction,
+//! the refill is the charge — a bucket cannot be read at one capacity for the charge and another
+//! for the refill.
 //!
-//! Because the site is re-priced through the one hook, and because the multiplier of a bucket is
-//! read once per transaction, the refill is the charge — a bucket cannot be read at one capacity
-//! for the charge and another for the refill. These tests pin that: what is fully undone nets
-//! zero at every multiplier, what is kept scales, and the environment is asked once.
+//! The other shape asks for no price at all: a frame that fails rolls its own charges back by
+//! the amounts it recorded while running. Nothing but the hook priced those amounts, so they
+//! cancel exactly whatever the price was.
+//!
+//! These tests pin both: what is fully undone nets zero at every multiplier, what is kept
+//! scales, and the environment is asked once.
 //!
 //! Against that, an applied EIP-7702 authorization is *not* undone by a frame that reverts
 //! later: the delegation it wrote survives the revert, so the state gas it paid must survive it
