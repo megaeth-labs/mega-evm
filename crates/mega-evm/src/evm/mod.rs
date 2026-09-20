@@ -14,6 +14,7 @@ mod inspector;
 mod instructions;
 mod result;
 mod spec;
+mod state;
 
 pub use context::*;
 pub use execution::*;
@@ -23,6 +24,11 @@ pub use host::*;
 pub use inspector::*;
 pub use result::*;
 pub use spec::*;
+pub use state::*;
+
+#[cfg(not(feature = "std"))]
+use alloc as std;
+use std::collections::BTreeMap;
 
 use alloy_evm::EvmEnv;
 use alloy_op_evm::map_op_err;
@@ -40,7 +46,7 @@ use revm::{
         NoOpInspector,
     },
     interpreter::interpreter::EthInterpreter,
-    primitives::{Address, Bytes},
+    primitives::{Address, Bytes, B256},
     state::EvmState,
     Database, DatabaseCommit, ExecuteCommitEvm, ExecuteEvm,
 };
@@ -154,6 +160,25 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
     /// Consumes the EVM and returns the revm EVM it wraps.
     pub(crate) fn into_inner(self) -> MegaInnerEvm<DB, INSP, ExtEnvs> {
         self.inner
+    }
+}
+
+impl<DB, INSP, ExtEnvs> MegaEvm<DB, INSP, ExtEnvs>
+where
+    DB: Database + BlockHashes,
+    ExtEnvs: ExternalEnvTypes,
+{
+    /// The block hashes execution has read on this database so far.
+    ///
+    /// `BLOCKHASH` reads bypass the journal, so this is where a stateless witness learns of them.
+    pub fn get_accessed_block_hashes(&self) -> BTreeMap<u64, B256> {
+        self.ctx().db().get_accessed_block_hashes()
+    }
+
+    /// Forgets the block hashes read so far, so the next reads are attributable to one
+    /// transaction. The record is a cache, so clearing it changes no execution result.
+    pub fn clear_accessed_block_hashes(&mut self) {
+        self.ctx_mut().db_mut().clear_accessed_block_hashes();
     }
 }
 
@@ -511,6 +536,21 @@ mod tests {
         let invalid =
             err.as_invalid_tx_err().and_then(alloy_evm::InvalidTxError::as_invalid_tx_err);
         assert!(matches!(invalid, Some(InvalidTransaction::LackOfFundForMaxFee { .. })), "{err:?}");
+    }
+
+    /// The EVM reads the block hashes the wrapped `State` served, which is where a stateless
+    /// witness learns of a `BLOCKHASH` read.
+    #[test]
+    fn test_mega_evm_exposes_state_wrapper_block_hashes() {
+        let mut db = MemoryDatabase::default();
+        let mut state = State::builder().with_database(&mut db).build();
+        state.block_hashes.insert(7, B256::from([7_u8; 32]));
+
+        let mut evm = MegaEvm::new(context(&mut state));
+        assert_eq!(evm.get_accessed_block_hashes().get(&7), Some(&B256::from([7_u8; 32])));
+
+        evm.clear_accessed_block_hashes();
+        assert!(evm.get_accessed_block_hashes().is_empty());
     }
 
     #[test]

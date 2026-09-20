@@ -40,10 +40,10 @@ Do not add a `_pending/main.rs`.
 | system contract deployment | 67 | 17 | 50 | 62 | 5 | 0 |
 | the oracle and control contracts | 77 | 77 | 0 | 67 | 10 | 0 |
 | native keyless deployment | 75 | 73 | 2 | 29 | 46 | 0 |
-| the block executor | 36 | 23 | 13 | 29 | 7 | 0 |
+| the block executor | 34 | 23 | 11 | 27 | 7 | 0 |
 | inspector support | 4 | 4 | 0 | 1 | 3 | 0 |
 | — (undecided: D57 preload-warm cold charging, D58 98/100 forwarding) | 7 | 7 | 0 | 0 | 0 | 7 |
-| **Total** | **730** | **624** | **106** | **416** | **286** | **28** |
+| **Total** | **728** | **624** | **104** | **414** | **286** | **28** |
 
 ## Tests ported in place
 
@@ -132,13 +132,15 @@ These 45 rows run in a real test target now, adapted to the Satin API, so the co
 
 ## Tests ported by the block executor
 
-These 17 rows run in a real test target now, adapted to the Satin API, so the counts above are lower than the inventory's by exactly these rows.
+These 19 rows run in a real test target now, adapted to the Satin API, so the counts above are lower than the inventory's by exactly these rows.
 
 | Legacy file | Owner in the inventory | Tests | Now in |
 |---|---|---:|---|
 | `src/block/chain.rs` | the block executor (5) | 5 | `src/block/chain.rs` |
 | `src/block/hardfork.rs` | the block executor (12) | 12 | `src/block/hardfork.rs` |
-| **Total** | | **17** | |
+| `src/evm/mod.rs` | the block executor (1) | 1 | `src/evm/mod.rs` |
+| `src/evm/state.rs` | the block executor (1) | 1 | `src/evm/state.rs` |
+| **Total** | | **19** | |
 
 ## Tests the inventory assigns to the Satin skeleton that are parked under another mechanism
 
@@ -146,7 +148,6 @@ These 17 rows run in a real test target now, adapted to the Satin API, so the co
 |---|---|---|---|
 | `src/evm/context.rs` | `test_shared_salt_env_keeps_dynamic_gas_cache_isolated` | SALT pricing | exercises the dynamic storage-gas cache that SALT pricing brings back |
 | `src/evm/factory.rs` | `test_dyn_precompiles_builder_receives_the_behavior_spec` | the Satin gas table | the dynamic precompile builder returns with the Satin precompile set; the behavior projection it pinned has no counterpart in a single-spec engine |
-| `src/evm/mod.rs` | `test_mega_evm_exposes_state_wrapper_block_hashes` | the block executor | reads the accessed-block-hash record, which returns with the block executor |
 
 ## Files
 
@@ -235,9 +236,8 @@ Each cell lists `disposition count (mechanism · decision)`.
 | `src/evm/context.rs` | 1 | keep 1 (SALT pricing · SALT pricing for the SALT cache test) |
 | `src/evm/factory.rs` | 1 | rewrite 1 (the Satin gas table · no behaviour projection) |
 | `src/evm/host.rs` | 1 | keep 1 (SALT pricing) |
-| `src/evm/mod.rs` | 4 | keep 3 (the pre-block system calls); keep 1 (the block executor) |
+| `src/evm/mod.rs` | 3 | keep 3 (the pre-block system calls) |
 | `src/evm/precompiles.rs` | 6 | keep 6 (the Satin gas table · D04) |
-| `src/evm/state.rs` | 1 | keep 1 (the block executor) |
 | `src/external/gas.rs` | 9 | rewrite 9 (SALT pricing · D12/D51) |
 | `src/limit/compute_gas.rs` | 1 | rewrite 1 (detention · D40/D48) |
 | `src/limit/data_size.rs` | 2 | keep 2 (the data-size limit) |
