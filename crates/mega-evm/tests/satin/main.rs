@@ -10,6 +10,7 @@ mod outcome;
 mod precompile_gas;
 mod pricing_table;
 mod salt;
+mod salt_failure;
 mod schedule;
 mod state;
 mod static_callee;
