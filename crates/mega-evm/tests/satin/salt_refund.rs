@@ -29,8 +29,8 @@ use revm::{
 
 use crate::salt::{
     authorization_tx, call_contract, capacity, create_with, crowded_account, crowded_slot, db,
-    entry, minimal_envs, run, salt_context, slot_bucket, try_run, tx, SaltEnvs, AUTHORITY, CALLER,
-    CONTRACT, EMPTY, GAS_LIMIT,
+    entry, minimal_envs, run, salt_context, selfdestruct_to, slot_bucket, try_run, tx, SaltEnvs,
+    AUTHORITY, CALLER, CONTRACT, EMPTY, GAS_LIMIT,
 };
 
 /// The contract a probe's inner frame runs in.
@@ -190,6 +190,47 @@ fn test_a_charge_an_inner_frame_keeps_scales_with_its_bucket() {
     assert_eq!(
         net_state_at([1, 2, 8], |envs, m| crowded_slot(envs, SUB, U256::from(SLOT), m), probe),
         [set, set * 2, set * 8],
+    );
+}
+
+/// A `SELFDESTRUCT` charges for the beneficiary's leaf inside the frame that runs it, and a frame
+/// whose caller does not survive gives the charge back: the inner frame self-destructed, the outer
+/// one reverted, and the beneficiary was never created after all.
+#[test]
+fn test_a_selfdestruct_whose_caller_reverts_gives_its_charge_back() {
+    let probe = |outer_reverts: bool| {
+        move || {
+            let sub = selfdestruct_to(EMPTY).build();
+            let mut code = BytecodeBuilder::default()
+                .push_number(0u64)
+                .push_number(0u64)
+                .push_number(0u64)
+                .push_number(0u64)
+                .push_number(0u64)
+                .push_address(SUB)
+                .push_number(2_000_000u64)
+                .append(CALL);
+            code = if outer_reverts { code.revert_with_data([0xaa]) } else { code.stop() };
+            let db = db(code.build())
+                .account_code(SUB, sub)
+                .account_balance(SUB, U256::from(1_000_000u64));
+            (db, call_contract())
+        }
+    };
+    let crowd = |envs, m| crowded_account(envs, EMPTY, m);
+
+    assert_eq!(
+        net_state_at([1, 2, 8], crowd, probe(true)),
+        [0, 0, 0],
+        "the reverting caller takes the beneficiary's leaf back with it",
+    );
+
+    // The control: the same program whose outer frame survives keeps the charge, scaled. Without
+    // it the zeroes above could be passing because nothing was ever charged.
+    let new_account = entry(GasId::new_account_state_gas());
+    assert_eq!(
+        net_state_at([1, 2, 8], crowd, probe(false)),
+        [new_account, new_account * 2, new_account * 8],
     );
 }
 

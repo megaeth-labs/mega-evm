@@ -20,8 +20,8 @@ use revm::{
 
 use crate::salt::{
     account_bucket, authorization_tx, call_contract, create_empty_contract, crowded_account, db,
-    entry, minimal_envs, run, salt_context, slot_bucket, try_run, tx, value_call, SaltEnvs,
-    AUTHORITY, CALLER, CONTRACT, EMPTY,
+    entry, minimal_envs, run, salt_context, selfdestruct_to, slot_bucket, try_run, tx, value_call,
+    SaltEnvs, AUTHORITY, CALLER, CONTRACT, EMPTY,
 };
 
 /// What a broken SALT backend reports.
@@ -81,6 +81,17 @@ fn test_an_unpriceable_new_account_call_fails_the_transaction() {
     assert_fails(
         "CALL to a new account",
         db(value_call(EMPTY).stop().build()),
+        failing_account(minimal_envs(), EMPTY),
+        call_contract(),
+    );
+}
+
+/// And a `SELFDESTRUCT` whose beneficiary does not exist and whose bucket cannot be read.
+#[test]
+fn test_an_unpriceable_selfdestruct_beneficiary_fails_the_transaction() {
+    assert_fails(
+        "a SELFDESTRUCT beneficiary",
+        db(selfdestruct_to(EMPTY).build()),
         failing_account(minimal_envs(), EMPTY),
         call_contract(),
     );
