@@ -22,6 +22,9 @@ use crate::common::{block, call_tx, calls_with, run, system_db, with_contract, C
 /// A topic and payload the tests send.
 const TOPIC: B256 = B256::repeat_byte(0x7a);
 
+/// The hint the two data-size cases send, so the limit they set is the same number.
+const METERED_HINT: &[u8] = b"a hint the transaction is metered for";
+
 /// The calldata of `sendHint(TOPIC, data)`.
 fn send_hint(data: &[u8]) -> Bytes {
     Bytes::from(
@@ -241,7 +244,7 @@ fn test_a_reverting_frame_does_not_take_the_hint_bytes_back() {
 /// is what shows it — and the transaction settles as a revert carrying the stop's own data.
 #[test]
 fn test_a_hint_that_crosses_the_data_size_limit_is_not_forwarded() {
-    let data = send_hint(b"a hint one byte too long");
+    let data = send_hint(METERED_HINT);
     let limit = data.len() as u64 - 1;
     let (outcome, hints) = run_with_oracle_under(
         system_db(),
@@ -275,7 +278,7 @@ fn test_a_hint_that_crosses_the_data_size_limit_is_not_forwarded() {
 /// above it.
 #[test]
 fn test_a_hint_at_the_data_size_limit_is_forwarded() {
-    let data = send_hint(b"a hint one byte too long");
+    let data = send_hint(METERED_HINT);
     let (outcome, hints) = run_with_oracle_under(
         system_db(),
         call_tx(ORACLE_CONTRACT_ADDRESS, data.clone(), U256::ZERO),
