@@ -1,9 +1,14 @@
-//! `MegaEvm` on Satin adds nothing to op-revm yet.
+//! What `MegaEvm` on Satin adds to op-revm, and where it adds nothing.
 //!
 //! The same transaction on the same `CfgEnv`, block and L1 info must produce the same result
 //! through `MegaEvm` and through op-revm's `OpEvm`, down to every `ResultGas` field, the logs and
-//! the resulting state. Once later changes add `MegaETH` behavior (SALT pricing, history gas,
-//! limits), these cases stay the baseline that shows where the two diverge on purpose.
+//! the resulting state. Once later changes add `MegaETH` behavior (history gas, limits), these
+//! cases stay the baseline that shows where the two diverge on purpose.
+//!
+//! One difference is here already: SALT pricing multiplies a state gas charge by the capacity of
+//! the bucket it lands in, and op-revm has no SALT to read. Every case above runs without a SALT
+//! environment, where every bucket is minimal and the multiplier is one, so the baseline holds;
+//! the last case crowds one bucket and pins what the difference is and how large.
 
 use alloy_op_evm::OpTx;
 use alloy_primitives::{address, Address, TxKind, U256};
@@ -267,4 +272,57 @@ fn test_invalid_transaction_matches_op_revm() {
     let op_error = op.transact(op_transaction(tx)).unwrap_err();
     assert_eq!(format!("{mega_error:?}"), format!("{op_error:?}"));
     assert!(format!("{mega_error:?}").contains("CallerGasLimitMoreThanBlock"), "{mega_error:?}");
+}
+
+/// Where Satin leaves op-revm on purpose: a state gas charge in a crowded SALT bucket.
+///
+/// The transaction, the configuration, the block and the database are the ones
+/// [`test_sstore_matches_op_revm`] uses, and every field of the outcome still agrees — except the
+/// state ledger, which Satin multiplies by the bucket's capacity in minimum buckets. op-revm has
+/// no SALT to read, so it charges the schedule's entry, which is Satin's own answer at the
+/// minimum bucket.
+#[test]
+fn test_a_crowded_salt_bucket_is_where_satin_leaves_op_revm() {
+    use crate::salt::{crowded_slot, minimal_envs, salt_context};
+
+    const MULTIPLIER: u64 = 8;
+    if runs_at_measurement_prices() {
+        return;
+    }
+    let code = BytecodeBuilder::default().sstore(U256::ZERO, U256::from(42)).stop().build();
+    let db = MemoryDatabase::default().account_code(CALLEE, code);
+    let tx = TxEnv {
+        caller: CALLER,
+        kind: TxKind::Call(CALLEE),
+        gas_limit: 1_000_000,
+        ..Default::default()
+    };
+
+    let envs = crowded_slot(minimal_envs(), CALLEE, U256::ZERO, MULTIPLIER);
+    let ctx = salt_context(db.clone(), envs).with_block(block());
+    let cfg = ctx.cfg().clone();
+    let mega = MegaEvm::new(ctx).transact(OpTx(op_transaction(tx.clone()))).unwrap();
+    let op_ctx = OpContext::new(db, OpSpecId::KARST)
+        .with_cfg(cfg.clone())
+        .with_block(block())
+        .with_chain(zero_fee_l1_block_info());
+    let op = OpEvm::new(op_ctx, NoOpInspector).transact(op_transaction(tx)).unwrap();
+
+    assert_satin_cfg(&cfg);
+    assert!(mega.result.is_success() && op.result.is_success());
+
+    // The one difference, and its exact size.
+    assert_eq!(op.result.gas().state_gas_spent_final(), SLOT_STATE_GAS);
+    assert_eq!(mega.result.gas().state_gas_spent_final(), SLOT_STATE_GAS * MULTIPLIER);
+    assert_eq!(
+        mega.result.gas().total_gas_spent() - op.result.gas().total_gas_spent(),
+        SLOT_STATE_GAS * (MULTIPLIER - 1),
+        "the extra state gas is the whole of the extra spend",
+    );
+
+    // Everything the transaction did is the same: the fees are zero here, so the multiplier
+    // moves the gas ledgers and nothing else.
+    assert_eq!(mega.result.logs(), op.result.logs(), "logs");
+    assert_eq!(mega.result.output(), op.result.output(), "output");
+    assert_eq!(mega.state, op.state, "state");
 }

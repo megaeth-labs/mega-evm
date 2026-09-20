@@ -1,9 +1,11 @@
 //! The Satin schedule and what it charges, rendered into `pricing-table.md` next to this file.
 //!
-//! Two kinds of row. A *schedule* row reads one entry out of the Osaka, the Amsterdam and the
+//! Three kinds of row. A *schedule* row reads one entry out of the Osaka, the Amsterdam and the
 //! Satin schedules, so the two changes Satin makes are visible side by side. A *measured* row
 //! runs one probe transaction and reports what it cost, split across the ledgers — every number
-//! there comes from a transaction the engine ran, not from arithmetic on the schedule.
+//! there comes from a transaction the engine ran, not from arithmetic on the schedule. A *SALT
+//! scaling* row runs one of those probes again with the bucket its state charge lands in at a
+//! larger capacity, so what the multiplier does to each ledger is visible in the same units.
 //!
 //! The test renders the table and compares it to the checked-in file, so a change to either the
 //! schedule or the engine that moves a number fails here. Regenerate it after an intentional
@@ -28,7 +30,10 @@ use revm::{
     primitives::hardfork::SpecId,
 };
 
-use crate::common::{call, context, create, runs_at_measurement_prices};
+use crate::{
+    common::{call, context, create, runs_at_measurement_prices},
+    salt::{crowded_account, crowded_slot, minimal_envs, salt_context, SaltEnvs},
+};
 
 const CALLER: Address = address!("0000000000000000000000000000000000b00000");
 const CONTRACT: Address = address!("0000000000000000000000000000000000b00001");
@@ -60,12 +65,34 @@ struct Measured {
     gas: MegaGasUsage,
 }
 
+/// One SALT scaling row: a probe run with the bucket its state charge lands in at multiplier
+/// `m`.
+struct Scaled {
+    probe: &'static str,
+    m: u64,
+    gas: MegaGasUsage,
+}
+
 /// Runs `tx` on `db` and reports what it spent by ledger. The probe must succeed.
 fn measure(probe: &'static str, db: MemoryDatabase, tx: MegaTransaction) -> Measured {
     let mut evm = MegaEvm::new(context(db));
     let outcome = evm.execute_transaction(tx).expect("the probe is valid");
     assert!(outcome.result.is_success(), "{probe}: {:?}", outcome.result);
     Measured { probe, gas: outcome.gas }
+}
+
+/// Runs `tx` on `db` with `envs` as the SALT environment and reports what it spent.
+fn measure_scaled(
+    probe: &'static str,
+    m: u64,
+    db: MemoryDatabase,
+    tx: MegaTransaction,
+    envs: SaltEnvs,
+) -> Scaled {
+    let mut evm = MegaEvm::new(salt_context(db, envs));
+    let outcome = evm.execute_transaction(tx).expect("the probe is valid");
+    assert!(outcome.result.is_success(), "{probe} at m = {m}: {:?}", outcome.result);
+    Scaled { probe, m, gas: outcome.gas }
 }
 
 /// Runs `code` in `CONTRACT` as a plain call from `CALLER`.
@@ -149,6 +176,25 @@ fn render() -> String {
         );
     }
 
+    out.push_str("\n## SALT scaling\n\n");
+    out.push_str(
+        "The same probes again, with the SALT bucket the state charge lands in at `m` times the \
+         minimum capacity. `m` multiplies the state ledger and nothing else: the regular column \
+         is the same on all three rows of a probe, and `gas used` grows by exactly the state \
+         column's growth, because these probes run below the execution cap and every state \
+         charge spills onto the regular budget.\n\n",
+    );
+    out.push_str(
+        "| Probe | m | gas used | regular | state | history |\n|---|---:|---:|---:|---:|---:|\n",
+    );
+    for row in scaled() {
+        let _ = writeln!(
+            out,
+            "| {} | {} | {} | {} | {} | {} |",
+            row.probe, row.m, row.gas.gas_used, row.gas.regular, row.gas.state, row.gas.history
+        );
+    }
+
     out.push_str("\n## The execution cap\n\n");
     let _ = writeln!(
         out,
@@ -189,6 +235,34 @@ fn measured() -> Vec<Measured> {
         measure_create("create transaction deploying 0 bytes", 0),
         measure_create("create transaction deploying 32 bytes", 32),
     ]
+}
+
+/// The SALT scaling rows, in the order the table lists them.
+///
+/// One slot-scoped charge and one account-scoped charge, each at the minimum bucket and at two
+/// larger ones. The `m = 1` row of each is the same number as the measured row above it.
+fn scaled() -> Vec<Scaled> {
+    const SLOT: u64 = 0;
+    let mut rows = Vec::new();
+    for m in [1, 2, 8] {
+        rows.push(measure_scaled(
+            "SSTORE 0 -> 1",
+            m,
+            db(sstore(SLOT, 1).stop().build()),
+            call(CALLER, CONTRACT, U256::ZERO, GAS_LIMIT),
+            crowded_slot(minimal_envs(), CONTRACT, U256::from(SLOT), m),
+        ));
+    }
+    for m in [1, 2, 8] {
+        rows.push(measure_scaled(
+            "value CALL to an empty account",
+            m,
+            db(value_call(EMPTY).stop().build()),
+            call(CALLER, CONTRACT, U256::ZERO, GAS_LIMIT),
+            crowded_account(minimal_envs(), EMPTY, m),
+        ));
+    }
+    rows
 }
 
 /// The rendered table is the one checked in. `UPDATE_SATIN_PRICING_TABLE=1` writes it instead.
@@ -256,4 +330,44 @@ fn test_the_table_shows_where_satin_differs_from_amsterdam() {
         ],
         "the entries Satin prices differently from Amsterdam"
     );
+}
+
+/// The SALT scaling section says what it claims: on each probe the regular ledger is the same at
+/// every multiplier and the state ledger is the minimum bucket's times the multiplier. Read off
+/// the rendered table rather than the engine, so the table cannot drift from the claim above it.
+#[test]
+fn test_the_table_shows_the_multiplier_on_the_state_ledger_alone() {
+    if runs_at_measurement_prices() {
+        return;
+    }
+    let rendered = render();
+    let section = rendered.split("## SALT scaling").nth(1).expect("the scaling section");
+    let section = section.split("\n## ").next().expect("the section ends at the next heading");
+
+    let mut baselines: Vec<(String, u64, u64)> = Vec::new();
+    for line in section.lines().filter(|l| l.starts_with("| ") && l.matches('|').count() == 7) {
+        let mut cells = line.split('|').map(str::trim).skip(1);
+        let probe = cells.next().expect("probe").to_string();
+        let m = cells.next().expect("m");
+        if m == "m" {
+            continue;
+        }
+        let m: u64 = m.parse().expect("m is a number");
+        let _gas_used = cells.next();
+        let regular: u64 = cells.next().expect("regular").parse().expect("a number");
+        let state: u64 = cells.next().expect("state").parse().expect("a number");
+
+        match baselines.iter().find(|(name, ..)| *name == probe) {
+            None => {
+                assert_eq!(m, 1, "{probe}: the first row of a probe is the minimum bucket");
+                baselines.push((probe, regular, state));
+            }
+            Some((_, base_regular, base_state)) => {
+                assert_eq!(regular, *base_regular, "{probe} at m = {m}: regular gas moved");
+                assert_eq!(state, base_state * m, "{probe} at m = {m}: state gas");
+            }
+        }
+    }
+    assert_eq!(baselines.len(), 2, "one slot-scoped probe and one account-scoped probe");
+    assert!(baselines.iter().all(|(_, _, state)| *state > 0), "a probe must charge state gas");
 }

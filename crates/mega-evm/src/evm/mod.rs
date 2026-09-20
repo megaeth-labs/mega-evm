@@ -353,7 +353,7 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> SystemCallEvm for MegaEvm<DB
             system_contract_address,
             data,
         ));
-        self.inner.ctx.on_new_tx();
+        self.inner.ctx.on_new_system_call();
         MegaHandler::<_, Self::Error, _>::new().run_system_call(self)
     }
 }
@@ -375,7 +375,7 @@ where
             system_contract_address,
             data,
         ));
-        self.inner.ctx.on_new_tx();
+        self.inner.ctx.on_new_system_call();
         MegaHandler::<_, Self::Error, _>::new().inspect_run_system_call(self)
     }
 }

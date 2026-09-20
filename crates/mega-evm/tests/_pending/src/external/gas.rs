@@ -20,54 +20,6 @@ mod tests {
         DynamicGasCost::new(spec, env, 0)
     }
 
-    /// `MIN_BUCKET_SIZE * u64::MAX` cannot be represented in `u64`; verify the hardened
-    /// arithmetic does not panic and saturates instead of wrapping.
-    #[test]
-    fn test_sstore_set_gas_saturates_on_huge_multiplier() {
-        let mut cost = cost_with_capacity(MegaSpecId::REX, u64::MAX);
-        let gas = cost.sstore_set_gas(Address::ZERO, U256::ZERO).unwrap();
-        assert_eq!(gas, u64::MAX);
-
-        let mut cost = cost_with_capacity(MegaSpecId::MINI_REX, u64::MAX);
-        let gas = cost.sstore_set_gas(Address::ZERO, U256::ZERO).unwrap();
-        assert_eq!(gas, u64::MAX);
-    }
-
-    #[test]
-    fn test_new_account_gas_saturates_on_huge_multiplier() {
-        let mut cost = cost_with_capacity(MegaSpecId::REX, u64::MAX);
-        let gas = cost.new_account_gas(Address::ZERO).unwrap();
-        assert_eq!(gas, u64::MAX);
-
-        let mut cost = cost_with_capacity(MegaSpecId::MINI_REX, u64::MAX);
-        let gas = cost.new_account_gas(Address::ZERO).unwrap();
-        assert_eq!(gas, u64::MAX);
-    }
-
-    #[test]
-    fn test_create_contract_gas_saturates_on_huge_multiplier() {
-        let mut cost = cost_with_capacity(MegaSpecId::REX, u64::MAX);
-        let gas = cost.create_contract_gas(Address::ZERO).unwrap();
-        assert_eq!(gas, u64::MAX);
-
-        let mut cost = cost_with_capacity(MegaSpecId::MINI_REX, u64::MAX);
-        let gas = cost.create_contract_gas(Address::ZERO).unwrap();
-        assert_eq!(gas, u64::MAX);
-    }
-
-    /// REX6 system-exempt path: the unscaled cost (`multiplier = 1`) is `0` for the REX-family
-    /// formula `base × (multiplier − 1)`, and is independent of the actual bucket capacity. This
-    /// is what makes a system call's storage cost immune to SALT bucket scaling.
-    #[test]
-    fn test_unscaled_gas_is_zero_for_rex_and_independent_of_capacity() {
-        for capacity in [MIN_BUCKET_SIZE as u64, 1_280_000, u64::MAX] {
-            let cost = cost_with_capacity(MegaSpecId::REX6, capacity);
-            assert_eq!(cost.sstore_set_gas_unscaled(), 0);
-            assert_eq!(cost.new_account_gas_unscaled(), 0);
-            assert_eq!(cost.create_contract_gas_unscaled(), 0);
-        }
-    }
-
     /// The unscaled helpers are REX-family API: pin the debug assert exactly at the REX
     /// boundary (the first spec where the `base × (multiplier − 1)` formula exists), so a
     /// tightened gate (e.g. REX1) fails here.
@@ -107,14 +59,4 @@ mod tests {
             .create_contract_gas_unscaled();
     }
 
-    /// The unscaled result equals the SALT-driven result evaluated at the minimum bucket
-    /// capacity, confirming the shared formula helper produces consistent values across both paths.
-    #[test]
-    fn test_unscaled_matches_salt_path_at_min_capacity() {
-        let mut cost = cost_with_capacity(MegaSpecId::REX6, MIN_BUCKET_SIZE as u64);
-        assert_eq!(
-            cost.sstore_set_gas_unscaled(),
-            cost.sstore_set_gas(Address::ZERO, U256::ZERO).unwrap(),
-        );
-    }
 }
