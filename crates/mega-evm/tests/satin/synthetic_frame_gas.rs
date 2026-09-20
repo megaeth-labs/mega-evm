@@ -1,20 +1,32 @@
 //! Frame results `MegaETH` builds without running a frame carry the reservoir the frame
 //! inherited and settle like revm's own.
+//!
+//! The matrix at the end runs every method a system contract interceptor answers at a gas limit
+//! under the execution cap, where a transaction has no reservoir, and at one far above it, where
+//! the reservoir is the whole difference. One branch is not reachable that way: a `keylessDeploy`
+//! call forwarded less regular gas than the fixed overhead. A transaction carries a reservoir only
+//! when its gas limit is above the execution cap, and then its own frame is forwarded the cap
+//! itself, which is far above the overhead — so that branch is reached through `frame_init`
+//! instead.
 
-use alloy_primitives::{address, Address, Bytes, U256};
-use alloy_sol_types::SolCall;
+use alloy_primitives::{address, Address, Bytes, B256, U256};
+use alloy_sol_types::{SolCall, SolError};
 use mega_evm::{
     constants::TX_GAS_LIMIT_CAP,
     system::{
-        keyless::{IKeylessDeploy, KEYLESS_DEPLOY_ADDRESS, KEYLESS_DEPLOY_CODE},
-        IMegaAccessControl, IMegaLimitControl, ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE,
-        LIMIT_CONTROL_ADDRESS, LIMIT_CONTROL_CODE,
+        keyless::{
+            IKeylessDeploy, KEYLESS_DEPLOY_ADDRESS, KEYLESS_DEPLOY_CODE,
+            KEYLESS_DEPLOY_OVERHEAD_GAS,
+        },
+        IMegaAccessControl, IMegaLimitControl, IOracle, ACCESS_CONTROL_ADDRESS,
+        ACCESS_CONTROL_CODE, LIMIT_CONTROL_ADDRESS, LIMIT_CONTROL_CODE, ORACLE_CONTRACT_ADDRESS,
+        ORACLE_CONTRACT_CODE,
     },
     test_utils::MemoryDatabase,
     EvmTxRuntimeLimits, LimitKind, MegaEvm,
 };
 use revm::{
-    context::{ContextTr, JournalTr},
+    context::{result::ExecutionResult, ContextTr, JournalTr},
     handler::{EvmTr, FrameResult, ItemOrResult},
     inspector::InspectorEvmTr,
     interpreter::{
@@ -52,6 +64,18 @@ fn call_frame_init(depth: usize) -> FrameInit {
             charged_new_account_state_gas: false,
         })),
     }
+}
+
+/// [`call_frame_init`] carrying `data` to `to`, with `gas_limit` of regular gas.
+fn call_frame_init_to(depth: usize, to: Address, data: Bytes, gas_limit: u64) -> FrameInit {
+    let mut init = call_frame_init(depth);
+    if let FrameInput::Call(inputs) = &mut init.frame_input {
+        inputs.target_address = to;
+        inputs.bytecode_address = to;
+        inputs.input = CallInput::Bytes(data);
+        inputs.gas_limit = gas_limit;
+    }
+    init
 }
 
 fn assert_call_too_deep(result: &FrameResult) {
@@ -234,17 +258,65 @@ const NARROW: u64 = 100_000_000;
 /// A gas limit far above the execution cap: everything above the cap is the reservoir.
 const WIDE: u64 = 1_000_000_000;
 
-/// Runs the same call to `to` at both gas limits and requires the reservoir to come back whole
-/// and the two to cost the same: an answer that carried no reservoir would hand the caller an
-/// empty pool and bill the sender for all of it.
-fn assert_the_reservoir_survives(db: impl Fn() -> MemoryDatabase, to: Address, data: Bytes) {
-    let at = |gas_limit: u64| {
-        let tx = crate::common::call_with_data(CALLER, to, data.clone(), gas_limit);
-        let (result, _) = crate::common::run(db(), tx);
-        *result.result.gas()
-    };
-    let (narrow, wide) = (at(NARROW), at(WIDE));
+/// What a call to a system contract must end as.
+///
+/// The gas comparison alone cannot tell an interceptor's answer from a fall-through into the
+/// contract's own bytecode — both cost the same at both gas limits — so every row of the matrix
+/// says which of the two it expects, and says it at both limits.
+#[derive(Clone, Debug)]
+enum Expected {
+    /// The call succeeded with exactly these bytes.
+    Answer(Bytes),
+    /// The call reverted with exactly this data.
+    Revert(Bytes),
+    /// `remainingComputeGas` answers the regular gas its own frame was forwarded, the one answer
+    /// of the matrix that depends on the transaction's gas limit: under the execution cap it is
+    /// the transaction's limit less what pre-execution took, above the cap it is the cap's. So
+    /// the two answers differ by exactly what the cap holds back at the wider limit.
+    ForwardedRegularGas,
+}
 
+/// Runs the same call to `to` at both gas limits and requires `expected` at both, the reservoir
+/// to come back whole and the two to cost the same: an answer that carried no reservoir would
+/// hand the caller an empty pool and bill the sender for all of it.
+fn assert_the_reservoir_survives(to: Address, data: Bytes, value: U256, expected: Expected) {
+    let at = |gas_limit: u64| {
+        let mut tx = crate::common::call_with_data(CALLER, to, data.clone(), gas_limit);
+        tx.0.base.value = value;
+        let (result, _) = crate::common::run(system_db(), tx);
+        let output = result.result.output().cloned().unwrap_or_default();
+        match &expected {
+            Expected::Answer(answer) => {
+                assert!(result.result.is_success(), "at {gas_limit}: {:?}", result.result);
+                assert_eq!(&output, answer, "at a gas limit of {gas_limit}");
+            }
+            Expected::Revert(revert_data) => {
+                assert!(
+                    matches!(result.result, ExecutionResult::Revert { .. }),
+                    "at {gas_limit}: {:?}",
+                    result.result,
+                );
+                assert_eq!(&output, revert_data, "at a gas limit of {gas_limit}");
+            }
+            Expected::ForwardedRegularGas => {
+                assert!(result.result.is_success(), "at {gas_limit}: {:?}", result.result);
+            }
+        }
+        (*result.result.gas(), output)
+    };
+    let ((narrow, narrow_answer), (wide, wide_answer)) = (at(NARROW), at(WIDE));
+
+    if matches!(expected, Expected::ForwardedRegularGas) {
+        let forwarded = |answer: &Bytes| {
+            IMegaLimitControl::remainingComputeGasCall::abi_decode_returns(answer)
+                .expect("the answer is the method's own return type")
+        };
+        assert_eq!(
+            forwarded(&wide_answer) - forwarded(&narrow_answer),
+            TX_GAS_LIMIT_CAP - NARROW,
+            "the answer is the forwarded regular gas, which the execution cap holds back",
+        );
+    }
     assert_eq!(narrow.reservoir_remaining(), 0, "there is no pool below the cap");
     assert_eq!(
         wide.reservoir_remaining(),
@@ -258,61 +330,190 @@ fn assert_the_reservoir_survives(db: impl Fn() -> MemoryDatabase, to: Address, d
     );
 }
 
-/// A database holding what a call to a system contract needs: the contracts' code, and a
-/// balance for the sender.
+/// A database holding what a call to a system contract needs: the contracts' code, a balance for
+/// the sender, and an account without code, which a transaction reaches for its intrinsic cost
+/// alone.
 fn system_db() -> MemoryDatabase {
     MemoryDatabase::default()
         .account_balance(CALLER, U256::from(1_000_000_000_000_u64))
+        .account_balance(TARGET, U256::from(1))
         .account_balance(ACCESS_CONTROL_ADDRESS, U256::from(1))
         .account_code(ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE)
         .account_code(LIMIT_CONTROL_ADDRESS, LIMIT_CONTROL_CODE)
         .account_code(KEYLESS_DEPLOY_ADDRESS, KEYLESS_DEPLOY_CODE)
+        .account_code(ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE)
 }
 
-/// Every answer a system contract interceptor gives carries the reservoir the frame inherited.
-#[test]
-fn test_an_intercepted_answer_keeps_the_reservoir() {
-    for (to, selector) in [
-        (ACCESS_CONTROL_ADDRESS, IMegaAccessControl::isVolatileDataAccessDisabledCall::SELECTOR),
-        (ACCESS_CONTROL_ADDRESS, IMegaAccessControl::disableVolatileDataAccessCall::SELECTOR),
-        (LIMIT_CONTROL_ADDRESS, IMegaLimitControl::remainingComputeGasCall::SELECTOR),
-    ] {
-        assert_the_reservoir_survives(system_db, to, Bytes::copy_from_slice(&selector));
-    }
-}
-
-/// So does the refusal of a call that carries value to a method that takes none.
-#[test]
-fn test_an_intercepted_refusal_keeps_the_reservoir() {
-    let selector = IMegaAccessControl::isVolatileDataAccessDisabledCall::SELECTOR;
-    let at = |gas_limit: u64| {
-        let mut tx = crate::common::call_with_data(
-            CALLER,
-            ACCESS_CONTROL_ADDRESS,
-            Bytes::copy_from_slice(&selector),
-            gas_limit,
-        );
-        tx.0.base.value = U256::from(1);
-        let (result, _) = crate::common::run(system_db(), tx);
-        assert!(!result.result.is_success(), "the value is refused");
-        *result.result.gas()
-    };
-    let (narrow, wide) = (at(NARROW), at(WIDE));
-    assert_eq!(narrow.reservoir_remaining(), 0);
-    assert_eq!(wide.reservoir_remaining(), WIDE - TX_GAS_LIMIT_CAP);
-    assert_eq!(narrow.tx_gas_used(), wide.tx_gas_used());
-}
-
-/// A dispatched `keylessDeploy` call is charged its overhead out of regular gas, so it costs
-/// the same whether there is a pool or not, and the pool comes back whole.
-#[test]
-fn test_the_keyless_overhead_comes_out_of_regular_gas() {
-    let data = Bytes::from(
+/// The calldata of a `keylessDeploy` call the dispatch recognises.
+fn keyless_deploy_call() -> Bytes {
+    Bytes::from(
         IKeylessDeploy::keylessDeployCall {
             keylessDeploymentTransaction: Bytes::from_static(b"a transaction"),
             gasLimitOverride: U256::from(1_000_000),
         }
         .abi_encode(),
+    )
+}
+
+/// Every method a system contract interceptor answers carries the reservoir the frame inherited,
+/// and answers what its own ABI names rather than falling through to the contract's bytecode.
+#[test]
+fn test_an_intercepted_answer_keeps_the_reservoir() {
+    let answers_nothing = Expected::Answer(Bytes::new());
+    for (to, selector, expected) in [
+        (
+            ACCESS_CONTROL_ADDRESS,
+            IMegaAccessControl::disableVolatileDataAccessCall::SELECTOR,
+            answers_nothing.clone(),
+        ),
+        (
+            ACCESS_CONTROL_ADDRESS,
+            IMegaAccessControl::enableVolatileDataAccessCall::SELECTOR,
+            answers_nothing,
+        ),
+        (
+            ACCESS_CONTROL_ADDRESS,
+            IMegaAccessControl::isVolatileDataAccessDisabledCall::SELECTOR,
+            Expected::Answer(Bytes::from(
+                IMegaAccessControl::isVolatileDataAccessDisabledCall::abi_encode_returns(&false),
+            )),
+        ),
+        (
+            LIMIT_CONTROL_ADDRESS,
+            IMegaLimitControl::remainingComputeGasCall::SELECTOR,
+            Expected::ForwardedRegularGas,
+        ),
+    ] {
+        assert_the_reservoir_survives(to, Bytes::copy_from_slice(&selector), U256::ZERO, expected);
+    }
+}
+
+/// So does the refusal of a call that carries value to a method that takes none, on every method
+/// of the two control contracts.
+#[test]
+fn test_an_intercepted_refusal_keeps_the_reservoir() {
+    let refused =
+        Expected::Revert(Bytes::from_static(&IMegaAccessControl::NonZeroTransfer::SELECTOR));
+    for (to, selector) in [
+        (ACCESS_CONTROL_ADDRESS, IMegaAccessControl::disableVolatileDataAccessCall::SELECTOR),
+        (ACCESS_CONTROL_ADDRESS, IMegaAccessControl::enableVolatileDataAccessCall::SELECTOR),
+        (ACCESS_CONTROL_ADDRESS, IMegaAccessControl::isVolatileDataAccessDisabledCall::SELECTOR),
+        (LIMIT_CONTROL_ADDRESS, IMegaLimitControl::remainingComputeGasCall::SELECTOR),
+    ] {
+        assert_the_reservoir_survives(
+            to,
+            Bytes::copy_from_slice(&selector),
+            U256::from(1),
+            refused.clone(),
+        );
+    }
+}
+
+/// The Oracle's hint is the one dispatch that answers nothing: it forwards the payload and lets
+/// the contract's own bytecode run. What the matrix pins for it is that the pools reach that
+/// bytecode untouched.
+#[test]
+fn test_a_forwarded_hint_keeps_the_reservoir() {
+    let data = Bytes::from(
+        IOracle::sendHintCall { topic: B256::ZERO, data: Bytes::from_static(b"a hint") }
+            .abi_encode(),
     );
-    assert_the_reservoir_survives(system_db, KEYLESS_DEPLOY_ADDRESS, data);
+    assert_the_reservoir_survives(
+        ORACLE_CONTRACT_ADDRESS,
+        data,
+        U256::ZERO,
+        Expected::Answer(Bytes::new()),
+    );
+}
+
+/// A dispatched `keylessDeploy` call is charged its overhead out of regular gas, so it costs the
+/// same whether there is a pool or not and the pool comes back whole. The charge is not an
+/// answer: the deployed bytecode runs after it and reverts with `NotIntercepted()`, because the
+/// rewrite that turns the call into a deployment is not here yet.
+#[test]
+fn test_the_keyless_overhead_comes_out_of_regular_gas() {
+    assert_the_reservoir_survives(
+        KEYLESS_DEPLOY_ADDRESS,
+        keyless_deploy_call(),
+        U256::ZERO,
+        Expected::Revert(Bytes::from_static(&IKeylessDeploy::NotIntercepted::SELECTOR)),
+    );
+}
+
+/// A `keylessDeploy` call that carries value is answered by the dispatch itself, with the ABI's
+/// own `NoEtherTransfer()` and after the overhead was charged: the answer carries the reservoir,
+/// and the overhead is charged once, at either gas limit.
+#[test]
+fn test_the_keyless_value_refusal_keeps_the_reservoir() {
+    let data = keyless_deploy_call();
+    assert_the_reservoir_survives(
+        KEYLESS_DEPLOY_ADDRESS,
+        data.clone(),
+        U256::from(1),
+        Expected::Revert(Bytes::from_static(&IKeylessDeploy::NoEtherTransfer::SELECTOR)),
+    );
+
+    // The same transaction to an account without code spends its intrinsic cost and nothing
+    // else, and the refusal is answered before a frame runs, so what the dispatched call spends
+    // beyond it is the overhead — once.
+    let spent = |to: Address, gas_limit: u64| {
+        let mut tx = crate::common::call_with_data(CALLER, to, data.clone(), gas_limit);
+        tx.0.base.value = U256::from(1);
+        crate::common::run(system_db(), tx).0.result.gas().total_gas_spent()
+    };
+    for gas_limit in [NARROW, WIDE] {
+        assert_eq!(
+            spent(KEYLESS_DEPLOY_ADDRESS, gas_limit) - spent(TARGET, gas_limit),
+            KEYLESS_DEPLOY_OVERHEAD_GAS,
+            "at a gas limit of {gas_limit}",
+        );
+    }
+}
+
+/// A `keylessDeploy` call forwarded less regular gas than the overhead is answered out of gas,
+/// with the reservoir it inherited carried, and that answer settles into a caller exactly as
+/// revm's own frame return settles a frame that ran out.
+#[test]
+fn test_a_keyless_call_below_the_overhead_runs_out_of_gas() {
+    use core::convert::Infallible;
+
+    use mega_evm::settle_frame_result;
+    use revm::context::result::EVMError;
+
+    let forwarded = KEYLESS_DEPLOY_OVERHEAD_GAS - 1;
+    let mut evm = MegaEvm::new(context(system_db()));
+    let init = call_frame_init_to(0, KEYLESS_DEPLOY_ADDRESS, keyless_deploy_call(), forwarded);
+    let ItemOrResult::Result(result) =
+        EvmTr::frame_init(&mut evm, init).expect("frame_init does not fail")
+    else {
+        panic!("a call that cannot pay the overhead starts no frame");
+    };
+    let FrameResult::Call(outcome) = &result else { panic!("expected a call result: {result:?}") };
+    assert_eq!(outcome.result.result, InstructionResult::OutOfGas);
+    assert!(outcome.result.output.is_empty());
+    assert_eq!(outcome.result.gas.remaining(), 0, "an out-of-gas answer spends what it had");
+    assert_eq!(outcome.result.gas.reservoir(), RESERVOIR, "the inherited reservoir is carried");
+
+    // The caller the answer goes back to, built as the settlement test above builds one.
+    let code = Bytes::from_static(&[revm::bytecode::opcode::STOP]);
+    let mut evm = MegaEvm::new(context(system_db().account_code(TARGET, code.clone())));
+    let journal = evm.ctx_mut().journal_mut();
+    journal.load_account(CALLER).unwrap();
+    journal.load_account(TARGET).unwrap();
+    let mut caller_init = call_frame_init(1);
+    if let FrameInput::Call(inputs) = &mut caller_init.frame_input {
+        let bytecode = revm::state::Bytecode::new_raw(code);
+        inputs.known_bytecode = (bytecode.hash_slow(), bytecode);
+    }
+    let ItemOrResult::Item(_) = EvmTr::frame_init(&mut evm, caller_init).unwrap() else {
+        panic!("the caller frame is built");
+    };
+
+    let (ctx, _, _, frames) = EvmTr::all_mut(&mut evm);
+    let caller_frame = frames.get();
+    let mut expected = *caller_frame.interpreter.gas.tracker();
+    settle_frame_result::<_, EVMError<Infallible>>(ctx, &mut expected, &mut result.clone())
+        .unwrap();
+    caller_frame.return_result::<_, EVMError<Infallible>>(ctx, result).unwrap();
+    assert_eq!(caller_frame.interpreter.gas.tracker(), &expected);
 }
