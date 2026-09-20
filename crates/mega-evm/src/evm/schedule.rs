@@ -4,11 +4,19 @@
 //! intrinsic decomposition, the EIP-7976 calldata floor and EIP-7981 access-list data — and
 //! changes exactly two things:
 //!
-//! 1. every entry EIP-8038 repriced goes back to its Osaka value ([`EIP8038_REPRICED`]), so state
-//!    *access* is priced as Osaka prices it and only state *creation* is repriced;
+//! 1. every regular-gas entry the Amsterdam table changed for EIP-8037 or EIP-8038 goes back to its
+//!    Osaka value ([`EIP8038_REPRICED`]) — every one but the state-gas, EIP-2780, floor and
+//!    EIP-7702 entries, which stay Amsterdam's;
 //! 2. the EIP-8037 state-gas entries are rebuilt from `MegaETH`'s own cost per state byte
 //!    ([`STATE_GAS_REPRICED`]), which is what makes the state dimension `MegaETH`'s rather than
 //!    Glamsterdam's.
+//!
+//! The first group includes the three entries EIP-8037 moved onto the state dimension, so at these
+//! prices state creation is charged on both dimensions: a value `CALL` that creates its recipient
+//! pays 25,000 regular and 183,600 state, a `CREATE` opcode 32,000 and 183,600, a slot's first
+//! write 22,100 and 97,920, where the Amsterdam schedule charges 0, 12,000 and 12,100 regular
+//! against the same state charge. Whether creation keeps its Osaka regular price is an open
+//! pricing question; the schedule states the prices, it does not settle them.
 //!
 //! Every other entry is Amsterdam's, including the EIP-2780 decomposition entries
 //! (`tx_account_write_cost`, `tx_create_access_cost`), the zero `code_deposit_cost` and the floor.
@@ -25,15 +33,24 @@ use revm::{
 
 use crate::evm::prices::{active_satin_prices, SatinPrices};
 
-/// The schedule entries EIP-8038 repriced, which Satin keeps at their pre-EIP-8038 values.
+/// The regular-gas entries Amsterdam repriced for EIP-8037 and EIP-8038, which Satin keeps at
+/// their Osaka values.
 ///
-/// EIP-8038 raises the price of *reaching* state — a cold account, a cold slot, a storage write,
-/// an account write. Satin prices state creation on its own dimension instead (EIP-8037 state gas
-/// at [`COST_PER_STATE_BYTE`](crate::constants::COST_PER_STATE_BYTE)), so it does not adopt that
-/// second increase: every entry EIP-8038 moved is pushed back to what the Osaka schedule has.
+/// Amsterdam moves them for two reasons. EIP-8038 raises the price of *reaching* state — a cold
+/// account, a cold slot, a storage write. EIP-8037 lowers the regular price of *creating* state,
+/// having moved that charge onto the state dimension: `new_account_cost`, `create` and
+/// `sstore_set_without_load_cost` are that group. Satin takes neither move, so state creation
+/// keeps its Osaka regular price on top of the state charge at
+/// [`COST_PER_STATE_BYTE`](crate::constants::COST_PER_STATE_BYTE); the module documentation puts
+/// numbers on what that costs. The list is named for EIP-8038 because that is the repricing it
+/// was drawn up against.
 ///
-/// Entries Amsterdam introduced for EIP-2780, EIP-7976 and EIP-7981 are not in this list and keep
-/// their Amsterdam values, even where the number itself is derived from an EIP-8038 constant.
+/// `tx_create_cost` is priced here and read nowhere: under EIP-2780 the intrinsic phase charges a
+/// creation through `tx_create_access_cost`, so pressing this entry back moves no transaction.
+///
+/// The entries Amsterdam introduced for EIP-8037's state gas, EIP-2780, EIP-7976, EIP-7981 and
+/// EIP-7702 are not in this list and keep their Amsterdam values, even where the number itself is
+/// derived from an EIP-8038 constant.
 pub const EIP8038_REPRICED: &[fn() -> GasId] = &[
     GasId::warm_storage_read_cost,
     GasId::cold_account_additional_cost,
@@ -114,7 +131,7 @@ mod tests {
         GasParams::new_spec(SpecId::AMSTERDAM)
     }
 
-    /// The seventeen entries EIP-8038 repriced are back at their Osaka values, written out so a
+    /// The seventeen entries Amsterdam repriced are back at their Osaka values, written out so a
     /// change to the list is a visible diff.
     #[test]
     fn test_the_eip8038_repricing_is_pressed_back_to_osaka() {
