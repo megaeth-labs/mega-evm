@@ -12,7 +12,9 @@ mod frame;
 mod host;
 mod inspector;
 mod instructions;
+mod prices;
 mod result;
+mod schedule;
 mod spec;
 
 pub use context::*;
@@ -21,7 +23,9 @@ pub use factory::*;
 pub use frame::*;
 pub use host::*;
 pub use inspector::*;
+pub use prices::*;
 pub use result::*;
+pub use schedule::*;
 pub use spec::*;
 
 use alloy_evm::EvmEnv;
