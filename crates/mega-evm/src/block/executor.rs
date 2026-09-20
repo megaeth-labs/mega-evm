@@ -27,7 +27,7 @@
 #[cfg(not(feature = "std"))]
 use alloc as std;
 use core::fmt;
-use std::{boxed::Box, vec::Vec};
+use std::{boxed::Box, collections::BTreeMap, vec::Vec};
 
 use alloy_consensus::{Eip658Value, Header, Transaction, TransactionEnvelope, TxReceipt};
 use alloy_eips::{eip7685::Requests, Encodable2718, Typed2718};
@@ -58,9 +58,9 @@ pub type MegaFinishedBlock<DB, INSP, ExtEnvs, R> =
     (MegaEvm<DB, INSP, ExtEnvs>, MegaBlockExecutionResult<<R as OpReceiptBuilder>::Receipt>);
 
 use crate::{
-    block::eips, estimated_da_size, BlockGasCounters, BlockLimiter, BlockLimits, ExternalEnvTypes,
-    MegaBlockExecutionResult, MegaBlockTxResult, MegaContext, MegaEvm, MegaHardforks,
-    MegaTransaction, MegaTransactionExt,
+    block::eips, estimated_da_size, BlockGasCounters, BlockHashes, BlockLimiter, BlockLimits,
+    ExternalEnvTypes, MegaBlockExecutionResult, MegaBlockTxResult, MegaContext, MegaEvm,
+    MegaHardforks, MegaTransaction, MegaTransactionExt,
 };
 
 /// What the node hands block execution beside the EVM.
@@ -276,6 +276,26 @@ where
     /// Commits `state` to the database.
     fn commit(&mut self, state: EvmState) {
         self.evm.ctx_mut().db_mut().commit(state);
+    }
+}
+
+impl<DB, INSP, ExtEnvs, R, Spec> MegaBlockExecutor<MegaEvm<DB, INSP, ExtEnvs>, R, Spec>
+where
+    DB: Database + BlockHashes,
+    ExtEnvs: ExternalEnvTypes,
+    R: OpReceiptBuilder,
+{
+    /// The block hashes the block's transactions have read so far.
+    ///
+    /// `BLOCKHASH` reads bypass the journal, so this is where a stateless witness learns of them.
+    pub fn get_accessed_block_hashes(&self) -> BTreeMap<u64, B256> {
+        self.evm.get_accessed_block_hashes()
+    }
+
+    /// Forgets the block hashes read so far, so the next reads are attributable to one
+    /// transaction. The record is a cache, so clearing it changes no execution result.
+    pub fn clear_accessed_block_hashes(&mut self) {
+        self.evm.clear_accessed_block_hashes();
     }
 }
 
@@ -523,18 +543,19 @@ where
                 );
                 (inner.trie_hash(), inner.encode_2718_len() as u64, da_size)
             },
-            |reported| {
+            |(tx_hash, tx_size, da_size)| {
+                // Only the sizes are cross-checked: they are what the limits are stated over.
+                // The hash names the transaction in an error and decides nothing.
                 debug_assert_eq!(
-                    reported,
+                    (tx_size, da_size),
                     (
-                        inner.trie_hash(),
                         inner.encode_2718_len() as u64,
                         estimated_da_size(inner.encoded_2718().as_ref()),
                     ),
-                    "the transaction's reported hash and sizes do not match a fresh recompute \
-                     from the encoded transaction"
+                    "the transaction's reported sizes do not match a fresh recompute from the \
+                     encoded transaction"
                 );
-                reported
+                (tx_hash, tx_size, da_size)
             },
         );
         let gas_limit = inner.gas_limit();
