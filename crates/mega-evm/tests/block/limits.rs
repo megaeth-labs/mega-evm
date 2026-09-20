@@ -6,6 +6,9 @@ use alloy_primitives::{address, Address, Bytes, U256};
 use mega_evm::{
     test_utils::BytecodeBuilder, BlockLimits, EnrichedMegaTx, MegaTransactionExt, MegaTxEnvelope,
 };
+use op_revm::constants::{
+    DA_FOOTPRINT_GAS_SCALAR_OFFSET, DA_FOOTPRINT_GAS_SCALAR_SLOT, L1_BLOCK_CONTRACT,
+};
 use revm::{
     bytecode::opcode::LOG0,
     context::{BlockEnv, ContextTr},
@@ -39,6 +42,11 @@ fn state_with_log_contract(
 /// A transaction from `caller`, so transactions of one block can come from different senders.
 fn tx_from(caller: Address, nonce: u64, gas_limit: u64) -> Recovered<MegaTxEnvelope> {
     Recovered::new_unchecked(common::tx(nonce, CONTRACT, Bytes::new(), gas_limit), caller)
+}
+
+/// The first transaction of `caller`, carrying `input`.
+fn tx_with_input(caller: Address, input: Bytes, gas_limit: u64) -> Recovered<MegaTxEnvelope> {
+    Recovered::new_unchecked(common::tx(0, CONTRACT, input, gas_limit), caller)
 }
 
 /// The block's data-size limit: the transaction that crosses it is packed, and the next one is
@@ -457,4 +465,54 @@ fn test_mixed_deposit_and_regular_transactions() {
 
     let (_, result) = executor.finish_with_counters().expect("the block finishes");
     assert_eq!(result.receipts().len(), 2);
+}
+
+/// The data-availability footprint is re-checked at commit too: two candidates that each fit the
+/// block's footprint budget on their own do not both commit.
+///
+/// A builder simulates candidates against the same pre-state and then picks among them, so both
+/// are executed before either commits. The first fills the budget; the second is refused before
+/// the block's counters, receipts or state move.
+#[test]
+fn test_commit_time_da_footprint_check_parallel_simulation() {
+    const SCALAR: u16 = u16::MAX;
+    const TX_GAS_LIMIT: u64 = 200_000;
+
+    let first = tx_with_input(CALLER, incompressible(2_000), TX_GAS_LIMIT);
+    let second = tx_with_input(CALLER2, incompressible(1_999), TX_GAS_LIMIT);
+    let footprint = |tx: &Recovered<MegaTxEnvelope>| {
+        MegaTransactionExt::estimated_da_size(tx) * u64::from(SCALAR)
+    };
+    // The block holds exactly the larger of the two, so each fits alone and the two do not.
+    let budget = footprint(&first).max(footprint(&second));
+    assert!(budget >= TX_GAS_LIMIT, "the budget is the block's gas limit, which must fit a tx");
+
+    let mut db = common::database();
+    db.set_account_balance(CALLER2, U256::from(1_000_000_000_000_000_u64));
+    db.set_account_storage(
+        L1_BLOCK_CONTRACT,
+        DA_FOOTPRINT_GAS_SCALAR_SLOT,
+        U256::from(SCALAR) << (8 * (32 - DA_FOOTPRINT_GAS_SCALAR_OFFSET - 2)),
+    );
+    let mut state = revm::database::State::builder().with_database(db).build();
+    let mut env = common::evm_env();
+    env.block_env = BlockEnv { gas_limit: budget, ..env.block_env };
+    let mut executor = common::executor_with_env(&mut state, common::unlimited_ctx(), env);
+    executor.apply_pre_execution_changes().expect("the block starts");
+
+    let first = executor.run_transaction(&first).expect("the block's footprint budget is free");
+    let second = executor.run_transaction(&second).expect("nothing has committed yet");
+
+    executor.commit_transaction_outcome(first).expect("the block has the footprint for it");
+    let err = executor
+        .commit_transaction_outcome(second)
+        .expect_err("the block's footprint was spent while this transaction waited");
+
+    assert!(
+        format!("{err}").contains("DA footprint exceeds available block DA footprint"),
+        "{err}"
+    );
+    let (_, result) = executor.finish_with_counters().expect("the block finishes");
+    assert_eq!(result.receipts().len(), 1, "only the transaction that fit was packed");
+    assert!(result.blob_gas_used <= budget, "the block stays within its footprint budget");
 }

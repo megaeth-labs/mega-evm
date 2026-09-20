@@ -293,6 +293,21 @@ where
         self.evm.ctx_mut().db_mut().commit(state);
     }
 
+    /// Refuses a data-availability footprint the block has no room left for.
+    ///
+    /// The budget is the block's gas limit, as the fork's rule states it.
+    fn check_da_footprint(&self, footprint: u64) -> Result<(), BlockExecutionError> {
+        let available = self.limiter.available_da_footprint();
+        if footprint > available {
+            return Err(MegaBlockExecutionError::TransactionDaFootprintAboveGasLimit {
+                transaction_da_footprint: footprint,
+                available_block_da_footprint: available,
+            }
+            .into());
+        }
+        Ok(())
+    }
+
     /// Refuses an EVM that runs an inspector which may rewrite what execution produces.
     ///
     /// Checked at every entry point rather than once, because the inspector can be enabled after
@@ -525,8 +540,9 @@ where
     /// Re-checks the block's admission and commits `output`.
     ///
     /// The block's counters may have moved between the transaction executing and its commit — a
-    /// builder that executes candidates and then picks among them — so what the transaction adds
-    /// is checked against the block once more.
+    /// builder that executes candidates and then picks among them — so everything the block
+    /// holds a transaction to is checked once more, its data-availability footprint included, and
+    /// nothing changes before the check passes.
     pub fn commit_transaction_outcome(
         &mut self,
         output: MegaBlockTxResult<<R::Transaction as TransactionEnvelope>::TxType>,
@@ -539,6 +555,7 @@ where
             output.da_size,
             output.is_deposit,
         )?;
+        self.check_da_footprint(output.da_footprint)?;
         Ok(self.commit_transaction(output))
     }
 
@@ -600,14 +617,7 @@ where
             0
         } else {
             let footprint = da_size.saturating_mul(self.da_footprint_gas_scalar()?);
-            let available = self.limiter.available_da_footprint();
-            if footprint > available {
-                return Err(MegaBlockExecutionError::TransactionDaFootprintAboveGasLimit {
-                    transaction_da_footprint: footprint,
-                    available_block_da_footprint: available,
-                }
-                .into());
-            }
+            self.check_da_footprint(footprint)?;
             footprint
         };
 
