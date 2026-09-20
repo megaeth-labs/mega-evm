@@ -185,20 +185,22 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
 
 impl<DB, INSP, ExtEnvs> MegaEvm<DB, INSP, ExtEnvs>
 where
-    DB: Database + BlockHashes,
+    DB: Database,
     ExtEnvs: ExternalEnvTypes,
 {
-    /// The block hashes execution has read on this database so far.
+    /// The block hashes execution has read on this EVM so far.
     ///
     /// `BLOCKHASH` reads bypass the journal, so this is where a stateless witness learns of them.
+    /// The record starts empty and is emptied again when block execution starts a block, so it
+    /// holds what this EVM read and not what its database cached earlier.
     pub fn get_accessed_block_hashes(&self) -> BTreeMap<u64, B256> {
-        self.ctx().db().get_accessed_block_hashes()
+        self.ctx().block_hash_record().hashes().clone()
     }
 
     /// Forgets the block hashes read so far, so the next reads are attributable to one
-    /// transaction. The record is a cache, so clearing it changes no execution result.
+    /// transaction. The record decides nothing, so clearing it changes no execution result.
     pub fn clear_accessed_block_hashes(&mut self) {
-        self.ctx_mut().db_mut().clear_accessed_block_hashes();
+        self.ctx_mut().clear_block_hash_record();
     }
 }
 
@@ -558,16 +560,21 @@ mod tests {
         assert!(matches!(invalid, Some(InvalidTransaction::LackOfFundForMaxFee { .. })), "{err:?}");
     }
 
-    /// The EVM reads the block hashes the wrapped `State` served, which is where a stateless
-    /// witness learns of a `BLOCKHASH` read.
+    /// The EVM reports the block hashes its Host served, which is where a stateless witness
+    /// learns of a `BLOCKHASH` read. What the database cached before is not a read of this EVM.
     #[test]
-    fn test_mega_evm_exposes_state_wrapper_block_hashes() {
+    fn test_mega_evm_exposes_the_block_hashes_it_read() {
         let mut db = MemoryDatabase::default();
         let mut state = State::builder().with_database(&mut db).build();
-        state.block_hashes.insert(7, B256::from([7_u8; 32]));
+        state.block_hashes.insert(1, B256::from([1_u8; 32]));
 
         let mut evm = MegaEvm::new(context(&mut state));
-        assert_eq!(evm.get_accessed_block_hashes().get(&7), Some(&B256::from([7_u8; 32])));
+        assert!(evm.get_accessed_block_hashes().is_empty(), "the cache is not a read");
+
+        let served = revm::context_interface::Host::block_hash(evm.ctx_mut(), 7)
+            .expect("the database serves the hash");
+        assert_eq!(evm.get_accessed_block_hashes().get(&7), Some(&served));
+        assert_eq!(evm.get_accessed_block_hashes().len(), 1, "and only the read");
 
         evm.clear_accessed_block_hashes();
         assert!(evm.get_accessed_block_hashes().is_empty());

@@ -73,9 +73,9 @@ pub type MegaFinishedBlock<DB, INSP, ExtEnvs, R> =
     (MegaEvm<DB, INSP, ExtEnvs>, MegaBlockExecutionResult<<R as OpReceiptBuilder>::Receipt>);
 
 use crate::{
-    block::eips, estimated_da_size, BlockGasCounters, BlockHashes, BlockLimiter, BlockLimits,
-    ExternalEnvTypes, MegaBlockExecutionResult, MegaBlockTxResult, MegaContext, MegaEvm,
-    MegaHardforks, MegaTransaction, MegaTransactionExt,
+    block::eips, estimated_da_size, BlockGasCounters, BlockLimiter, BlockLimits, ExternalEnvTypes,
+    MegaBlockExecutionResult, MegaBlockTxResult, MegaContext, MegaEvm, MegaHardforks,
+    MegaTransaction, MegaTransactionExt,
 };
 
 /// What the node hands block execution beside the EVM.
@@ -324,19 +324,23 @@ where
 
 impl<DB, INSP, ExtEnvs, R, Spec> MegaBlockExecutor<MegaEvm<DB, INSP, ExtEnvs>, R, Spec>
 where
-    DB: Database + BlockHashes,
+    DB: Database,
     ExtEnvs: ExternalEnvTypes,
     R: OpReceiptBuilder,
 {
-    /// The block hashes the block's transactions have read so far.
+    /// The block hashes this block's transactions have read so far.
     ///
     /// `BLOCKHASH` reads bypass the journal, so this is where a stateless witness learns of them.
+    /// The record covers this executor's block:
+    /// [`apply_pre_execution_changes`](BlockExecutor::apply_pre_execution_changes) empties it
+    /// when the block starts, so a database reused over a range of blocks does not report the
+    /// reads of an earlier one.
     pub fn get_accessed_block_hashes(&self) -> BTreeMap<u64, B256> {
         self.evm.get_accessed_block_hashes()
     }
 
     /// Forgets the block hashes read so far, so the next reads are attributable to one
-    /// transaction. The record is a cache, so clearing it changes no execution result.
+    /// transaction. The record decides nothing, so clearing it changes no execution result.
     pub fn clear_accessed_block_hashes(&mut self) {
         self.evm.clear_accessed_block_hashes();
     }
@@ -359,9 +363,9 @@ where
 
     /// Runs what a block does before its transactions.
     ///
-    /// In order: the admission gate and the EIP-2935 and EIP-4788 pre-block calls. Each call's
-    /// state is committed here rather than inside its helper, so a witness generator sees every
-    /// step's read and write set.
+    /// In order: the admission gate, the reset of the block-hash record, and the EIP-2935 and
+    /// EIP-4788 pre-block calls. Each call's state is committed here rather than inside its
+    /// helper, so a witness generator sees every step's read and write set.
     ///
     /// The L1 block info is not read here. op-revm's handler reads it when it deducts the caller
     /// of the first non-deposit transaction, which is after the block's own L1 info deposit has
@@ -374,6 +378,10 @@ where
     /// names, after the pre-block calls.
     fn apply_pre_execution_changes(&mut self) -> Result<(), BlockExecutionError> {
         self.check_admission()?;
+
+        // The block starts with an empty block-hash record, so what it holds at the end is what
+        // this block read.
+        self.evm.clear_accessed_block_hashes();
 
         let state = eips::transact_blockhashes_contract_call(
             &self.spec,
