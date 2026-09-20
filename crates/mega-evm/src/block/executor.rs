@@ -60,7 +60,7 @@ pub type MegaFinishedBlock<DB, INSP, ExtEnvs, R> =
 use crate::{
     block::eips, estimated_da_size, BlockGasCounters, BlockLimiter, BlockLimits, ExternalEnvTypes,
     MegaBlockExecutionResult, MegaBlockTxResult, MegaContext, MegaEvm, MegaHardforks,
-    MegaTransaction,
+    MegaTransaction, MegaTransactionExt,
 };
 
 /// What the node hands block execution beside the EVM.
@@ -339,77 +339,7 @@ where
         &mut self,
         tx: impl ExecutableTx<Self>,
     ) -> Result<Self::Result, BlockExecutionError> {
-        let (tx_env, tx) = tx.into_parts();
-        let inner = tx.tx();
-        let is_deposit = inner.ty() == DEPOSIT_TRANSACTION_TYPE;
-
-        // A block that activates a fork carries the chain's own transactions only, so a user
-        // transaction in it is refused before anything runs.
-        if self.ctx.no_user_tx_activation_block && !is_deposit {
-            return Err(MegaBlockExecutionError::UnexpectedNonDepositTxInActivationBlock.into());
-        }
-
-        // The encoding, once: the transaction environment carries it when the node passes an
-        // encoded transaction, and it is encoded here when it does not.
-        let da_size = tx_env.encoded_bytes().map_or_else(
-            || estimated_da_size(inner.encoded_2718().as_ref()),
-            |encoded| estimated_da_size(encoded),
-        );
-        let tx_size = inner.encode_2718_len() as u64;
-        let gas_limit = inner.gas_limit();
-        let tx_hash = inner.trie_hash();
-
-        self.limiter.pre_execution_check(tx_hash, gas_limit, tx_size, da_size, is_deposit)?;
-
-        // A deposit is exempt from the data-availability footprint of the block, as it is from
-        // its data-availability size.
-        let da_footprint = if is_deposit {
-            0
-        } else {
-            let footprint = da_size.saturating_mul(self.da_footprint_gas_scalar()?);
-            let available = self.limiter.available_da_footprint();
-            if footprint > available {
-                return Err(MegaBlockExecutionError::TransactionDaFootprintAboveGasLimit {
-                    transaction_da_footprint: footprint,
-                    available_block_da_footprint: available,
-                }
-                .into());
-            }
-            footprint
-        };
-
-        // Read before execution, so committing the transaction cannot fail.
-        let depositor_nonce = if is_deposit && self.is_regolith {
-            let sender = *tx.signer();
-            Some(
-                self.evm
-                    .ctx_mut()
-                    .db_mut()
-                    .basic(sender)
-                    .map_err(BlockExecutionError::other)?
-                    .unwrap_or_default()
-                    .nonce,
-            )
-        } else {
-            None
-        };
-
-        let outcome = self
-            .evm
-            .execute_transaction(tx_env)
-            .map_err(|err| BlockExecutionError::evm(err, tx_hash))?;
-
-        Ok(MegaBlockTxResult {
-            tx_type: inner.tx_type(),
-            tx_hash,
-            gas_limit,
-            tx_size,
-            da_size,
-            da_footprint,
-            is_deposit,
-            depositor_nonce,
-            inner: outcome,
-        })
+        self.execute(tx, None)
     }
 
     /// Executes `tx` and commits it if `f` says so.
@@ -428,15 +358,7 @@ where
             return Ok(None);
         }
 
-        self.limiter.pre_execution_check(
-            output.tx_hash,
-            output.gas_limit,
-            output.tx_size,
-            output.da_size,
-            output.is_deposit,
-        )?;
-
-        Ok(Some(self.commit_transaction(output)))
+        self.commit_transaction_outcome(output).map(Some)
     }
 
     fn commit_transaction(&mut self, output: Self::Result) -> GasOutput {
@@ -509,6 +431,167 @@ where
     Spec: MegaHardforks,
     MegaTransaction: FromRecoveredTx<R::Transaction> + FromTxWithEncoded<R::Transaction>,
 {
+    /// Executes `tx`, reading its hash and sizes from the transaction rather than computing
+    /// them.
+    ///
+    /// This is the entry point for a caller that already has those figures — a sequencer whose
+    /// mempool computed them at insertion. They feed the transaction-level and block-level size
+    /// limits directly and are not checked against the encoding in release builds, so an
+    /// understated value would pass a limit it should have been refused by; a debug build
+    /// cross-checks them against a fresh recompute and trips there instead. A transaction that
+    /// computes them from its own encoding is unconditionally safe.
+    ///
+    /// Nothing is committed. Hand the result to
+    /// [`commit_transaction`](BlockExecutor::commit_transaction), or to
+    /// [`commit_transaction_outcome`](Self::commit_transaction_outcome) to have the block's
+    /// admission re-checked first.
+    pub fn run_transaction<Tx>(
+        &mut self,
+        tx: Tx,
+    ) -> Result<
+        MegaBlockTxResult<<R::Transaction as TransactionEnvelope>::TxType>,
+        BlockExecutionError,
+    >
+    where
+        Tx: ExecutableTx<Self> + MegaTransactionExt,
+    {
+        let reported = (tx.tx_hash(), tx.tx_size(), tx.estimated_da_size());
+        self.execute(tx, Some(reported))
+    }
+
+    /// Alias of [`run_transaction`](Self::run_transaction).
+    pub fn execute_mega_transaction<Tx>(
+        &mut self,
+        tx: Tx,
+    ) -> Result<
+        MegaBlockTxResult<<R::Transaction as TransactionEnvelope>::TxType>,
+        BlockExecutionError,
+    >
+    where
+        Tx: ExecutableTx<Self> + MegaTransactionExt,
+    {
+        self.run_transaction(tx)
+    }
+
+    /// Re-checks the block's admission and commits `output`.
+    ///
+    /// The block's counters may have moved between the transaction executing and its commit — a
+    /// builder that executes candidates and then picks among them — so what the transaction adds
+    /// is checked against the block once more.
+    pub fn commit_transaction_outcome(
+        &mut self,
+        output: MegaBlockTxResult<<R::Transaction as TransactionEnvelope>::TxType>,
+    ) -> Result<GasOutput, BlockExecutionError> {
+        self.limiter.pre_execution_check(
+            output.tx_hash,
+            output.gas_limit,
+            output.tx_size,
+            output.da_size,
+            output.is_deposit,
+        )?;
+        Ok(self.commit_transaction(output))
+    }
+
+    /// Runs one transaction of the block, with the hash and sizes the caller reported or
+    /// computed from the transaction itself.
+    fn execute(
+        &mut self,
+        tx: impl ExecutableTx<Self>,
+        reported: Option<(alloy_primitives::TxHash, u64, u64)>,
+    ) -> Result<
+        MegaBlockTxResult<<R::Transaction as TransactionEnvelope>::TxType>,
+        BlockExecutionError,
+    > {
+        let (tx_env, tx) = tx.into_parts();
+        let inner = tx.tx();
+        let is_deposit = inner.ty() == DEPOSIT_TRANSACTION_TYPE;
+
+        // A block that activates a fork carries the chain's own transactions only, so a user
+        // transaction in it is refused before anything runs.
+        if self.ctx.no_user_tx_activation_block && !is_deposit {
+            return Err(MegaBlockExecutionError::UnexpectedNonDepositTxInActivationBlock.into());
+        }
+
+        let (tx_hash, tx_size, da_size) = reported.map_or_else(
+            || {
+                // The compressed size is estimated from the encoding, which the transaction
+                // environment carries when the node passes an encoded transaction and which is
+                // produced here when it does not.
+                let da_size = tx_env.encoded_bytes().map_or_else(
+                    || estimated_da_size(inner.encoded_2718().as_ref()),
+                    |encoded| estimated_da_size(encoded),
+                );
+                (inner.trie_hash(), inner.encode_2718_len() as u64, da_size)
+            },
+            |reported| {
+                debug_assert_eq!(
+                    reported,
+                    (
+                        inner.trie_hash(),
+                        inner.encode_2718_len() as u64,
+                        estimated_da_size(inner.encoded_2718().as_ref()),
+                    ),
+                    "the transaction's reported hash and sizes do not match a fresh recompute \
+                     from the encoded transaction"
+                );
+                reported
+            },
+        );
+        let gas_limit = inner.gas_limit();
+
+        self.limiter.pre_execution_check(tx_hash, gas_limit, tx_size, da_size, is_deposit)?;
+
+        // A deposit is exempt from the data-availability footprint of the block, as it is from
+        // its data-availability size.
+        let da_footprint = if is_deposit {
+            0
+        } else {
+            let footprint = da_size.saturating_mul(self.da_footprint_gas_scalar()?);
+            let available = self.limiter.available_da_footprint();
+            if footprint > available {
+                return Err(MegaBlockExecutionError::TransactionDaFootprintAboveGasLimit {
+                    transaction_da_footprint: footprint,
+                    available_block_da_footprint: available,
+                }
+                .into());
+            }
+            footprint
+        };
+
+        // Read before execution, so committing the transaction cannot fail.
+        let depositor_nonce = if is_deposit && self.is_regolith {
+            let sender = *tx.signer();
+            Some(
+                self.evm
+                    .ctx_mut()
+                    .db_mut()
+                    .basic(sender)
+                    .map_err(BlockExecutionError::other)?
+                    .unwrap_or_default()
+                    .nonce,
+            )
+        } else {
+            None
+        };
+
+        let outcome = self
+            .evm
+            .execute_transaction(tx_env)
+            .map_err(|err| BlockExecutionError::evm(err, tx_hash))?;
+
+        Ok(MegaBlockTxResult {
+            tx_type: inner.tx_type(),
+            tx_hash,
+            gas_limit,
+            tx_size,
+            da_size,
+            da_footprint,
+            is_deposit,
+            depositor_nonce,
+            inner: outcome,
+        })
+    }
+
     /// Finishes the block and reports what it counted, on top of what
     /// [`finish`](BlockExecutor::finish) returns.
     ///

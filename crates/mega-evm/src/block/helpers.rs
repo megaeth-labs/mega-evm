@@ -27,48 +27,61 @@ pub fn estimated_da_size(bytes: &[u8]) -> u64 {
 
 /// What block execution reads off a transaction beside its environment.
 ///
-/// The two sizes have defaults that compute them from the transaction's encoding. A type that
-/// already knows them (see [`EnrichedMegaTx`]) answers with what it carries, and the choice is
-/// made at compile time — no caller picks a variant.
+/// A type that computes the two sizes from its own encoding and one that carries them already
+/// computed (see [`EnrichedMegaTx`]) answer the same three questions, so the executor's
+/// transaction path is written once and the choice is made at compile time — no caller picks a
+/// variant.
 #[auto_impl(&)]
 pub trait MegaTransactionExt {
-    /// The size the transaction takes on data availability, in bytes.
-    ///
-    /// The default recomputes it from the encoding on every call.
-    fn estimated_da_size(&self) -> u64
-    where
-        Self: Encodable2718,
-    {
-        estimated_da_size(self.encoded_2718().as_slice())
-    }
-
-    /// The transaction's EIP-2718 encoded size, in bytes.
-    fn tx_size(&self) -> u64
-    where
-        Self: Encodable2718,
-    {
-        self.encode_2718_len() as u64
-    }
-
     /// The transaction's hash.
     fn tx_hash(&self) -> TxHash;
-}
 
-impl MegaTransactionExt for Recovered<MegaTxEnvelope> {
-    fn tx_hash(&self) -> TxHash {
-        self.inner().tx_hash()
-    }
-}
+    /// The transaction's EIP-2718 encoded size, in bytes.
+    fn tx_size(&self) -> u64;
 
-impl MegaTransactionExt for Recovered<&MegaTxEnvelope> {
-    fn tx_hash(&self) -> TxHash {
-        self.inner().tx_hash()
-    }
+    /// The size the transaction takes on data availability, in bytes.
+    fn estimated_da_size(&self) -> u64;
 }
 
 impl MegaTransactionExt for MegaTxEnvelope {
     fn tx_hash(&self) -> TxHash {
         self.tx_hash()
+    }
+
+    fn tx_size(&self) -> u64 {
+        self.encode_2718_len() as u64
+    }
+
+    fn estimated_da_size(&self) -> u64 {
+        estimated_da_size(self.encoded_2718().as_slice())
+    }
+}
+
+impl MegaTransactionExt for Recovered<MegaTxEnvelope> {
+    fn tx_hash(&self) -> TxHash {
+        MegaTransactionExt::tx_hash(self.inner())
+    }
+
+    fn tx_size(&self) -> u64 {
+        MegaTransactionExt::tx_size(self.inner())
+    }
+
+    fn estimated_da_size(&self) -> u64 {
+        MegaTransactionExt::estimated_da_size(self.inner())
+    }
+}
+
+impl MegaTransactionExt for Recovered<&MegaTxEnvelope> {
+    fn tx_hash(&self) -> TxHash {
+        MegaTransactionExt::tx_hash(*self.inner())
+    }
+
+    fn tx_size(&self) -> u64 {
+        MegaTransactionExt::tx_size(*self.inner())
+    }
+
+    fn estimated_da_size(&self) -> u64 {
+        MegaTransactionExt::estimated_da_size(*self.inner())
     }
 }
 
@@ -158,16 +171,16 @@ impl<T: Encodable2718> Encodable2718 for EnrichedMegaTx<T> {
 }
 
 impl<T> MegaTransactionExt for EnrichedMegaTx<T> {
-    fn estimated_da_size(&self) -> u64 {
-        self.da_size
+    fn tx_hash(&self) -> TxHash {
+        self.tx_hash
     }
 
     fn tx_size(&self) -> u64 {
         self.tx_size
     }
 
-    fn tx_hash(&self) -> TxHash {
-        self.tx_hash
+    fn estimated_da_size(&self) -> u64 {
+        self.da_size
     }
 }
 
