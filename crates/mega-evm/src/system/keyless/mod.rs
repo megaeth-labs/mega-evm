@@ -1,7 +1,7 @@
 //! The `KeylessDeploy` system contract, and keyless deployment (Nick's Method): the transaction
 //! format, its validation rules and the error ABI.
 //!
-//! `keylessDeploy(bytes,uint64)` is intercepted; every other selector falls through to the
+//! `keylessDeploy(bytes,uint256)` is intercepted; every other selector falls through to the
 //! deployed bytecode, which reverts with `NotIntercepted()`. What the interceptor does today is
 //! the dispatch and the fixed compute charge; turning the deployment into a native creation
 //! belongs to native keyless deployment.
