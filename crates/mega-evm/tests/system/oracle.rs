@@ -189,3 +189,36 @@ fn test_reading_a_slot_runs_the_bytecode() {
         B256::from(U256::from(42)),
     );
 }
+
+/// A hint cannot be un-sent, so the bytes it cost stay counted even when the frame that sent it
+/// reverts and takes its writes back.
+#[test]
+fn test_a_reverting_frame_does_not_take_the_hint_bytes_back() {
+    use revm::bytecode::opcode::{POP, PUSH0, REVERT};
+
+    let data = send_hint(b"a hint that was sent");
+    let code = BytecodeBuilder::default()
+        .mstore(0x0, &data)
+        .push_number(0_u64) // retSize
+        .push_number(0_u64) // retOffset
+        .push_number(data.len() as u64) // argsSize
+        .push_number(0_u64) // argsOffset
+        .push_number(0_u64) // value
+        .push_address(ORACLE_CONTRACT_ADDRESS)
+        .push_number(200_000_u64)
+        .append(CALL)
+        .append(POP)
+        .append_many([PUSH0, PUSH0, REVERT])
+        .build();
+
+    let (result, hints, usage) =
+        run_with_oracle(with_contract(code), call_tx(CONTRACT, [], U256::ZERO));
+
+    assert!(!result.result.is_success(), "the frame that sent the hint reverted");
+    assert_eq!(hints.len(), 1, "the hint reached the service before the revert");
+    assert_eq!(
+        usage.data_size,
+        data.len() as u64,
+        "the bytes stay counted: a revert cannot take the hint back",
+    );
+}
