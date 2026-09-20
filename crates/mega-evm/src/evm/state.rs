@@ -58,6 +58,7 @@ mod tests {
         record.record(1, B256::ZERO);
         record.record(2, B256::from([2_u8; 32]));
 
+        assert!(!record.is_empty(), "a record that holds a read is not empty");
         assert_eq!(record.hashes().len(), 2);
         assert_eq!(record.hashes().get(&1), Some(&B256::ZERO));
         assert_eq!(record.hashes().get(&2), Some(&B256::from([2_u8; 32])));
