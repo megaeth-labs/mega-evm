@@ -27,6 +27,7 @@ use revm::{
         result::{ExecResultAndState, ExecutionResult},
         BlockEnv, CfgEnv, Context, ContextTr, TxEnv,
     },
+    context_interface::cfg::gas_params::Eip2780TxInfo,
     inspector::NoOpInspector,
     state::EvmState,
     ExecuteEvm, Journal,
@@ -398,15 +399,16 @@ fn test_the_keyless_deploy_overhead_diverges_from_op_revm() {
     let db = MemoryDatabase::default()
         .account_balance(CALLER, U256::from(10u64.pow(18)))
         .account_code(KEYLESS_DEPLOY_ADDRESS, KEYLESS_DEPLOY_CODE);
+    let data: Bytes = IKeylessDeploy::keylessDeployCall {
+        keylessDeploymentTransaction: Bytes::from_static(b"a transaction"),
+        gasLimitOverride: U256::from(1_000_000),
+    }
+    .abi_encode()
+    .into();
     let tx = TxEnv {
         caller: CALLER,
         kind: TxKind::Call(KEYLESS_DEPLOY_ADDRESS),
-        data: IKeylessDeploy::keylessDeployCall {
-            keylessDeploymentTransaction: Bytes::from_static(b"a transaction"),
-            gasLimitOverride: U256::from(1_000_000),
-        }
-        .abi_encode()
-        .into(),
+        data: data.clone(),
         gas_limit: 1_000_000,
         ..Default::default()
     };
@@ -426,6 +428,31 @@ fn test_the_keyless_deploy_overhead_diverges_from_op_revm() {
     // The two run the same bytecode on the same input, so the whole difference is the charge.
     let charged = mega.result.gas().total_gas_spent() - op.result.gas().total_gas_spent();
     assert_eq!(charged, KEYLESS_DEPLOY_OVERHEAD_GAS, "the divergence is the overhead, exactly");
+
+    // Which floor, exactly: the one this transaction's own calldata buys, computed by revm from
+    // the schedule both engines run on. Satin is above it and reports what it spent; op-revm is
+    // below it and reports the floor, so the receipts differ by less than the charge.
+    let floor = cfg
+        .gas_params
+        .initial_tx_gas(
+            &data,
+            false,
+            0,
+            0,
+            0,
+            Some(Eip2780TxInfo { value: U256::ZERO, is_self_transfer: false }),
+        )
+        .floor_gas();
+    assert_eq!(
+        mega.result.gas().tx_gas_used(),
+        mega.result.gas().total_gas_spent(),
+        "Satin spends past the floor, so its receipt is its own spend",
+    );
+    assert_eq!(
+        op.result.gas().tx_gas_used(),
+        floor,
+        "op-revm spends below the floor, so its receipt is the floor",
+    );
     assert!(
         mega.result.gas().tx_gas_used() - op.result.gas().tx_gas_used() < charged,
         "the floor lifts the cheaper receipt, so the receipts differ by less than the charge",
