@@ -2,8 +2,16 @@
 //! inherited and settle like revm's own.
 
 use alloy_primitives::{address, Address, Bytes, U256};
+use alloy_sol_types::SolCall;
 use mega_evm::{
-    constants::TX_GAS_LIMIT_CAP, test_utils::MemoryDatabase, EvmTxRuntimeLimits, LimitKind, MegaEvm,
+    constants::TX_GAS_LIMIT_CAP,
+    system::{
+        keyless::{IKeylessDeploy, KEYLESS_DEPLOY_ADDRESS, KEYLESS_DEPLOY_CODE},
+        IMegaAccessControl, IMegaLimitControl, ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE,
+        LIMIT_CONTROL_ADDRESS, LIMIT_CONTROL_CODE,
+    },
+    test_utils::MemoryDatabase,
+    EvmTxRuntimeLimits, LimitKind, MegaEvm,
 };
 use revm::{
     context::{ContextTr, JournalTr},
@@ -218,4 +226,93 @@ fn test_settle_frame_result_matches_revms_frame_return() {
         caller_frame.return_result::<_, EVMError<core::convert::Infallible>>(ctx, result).unwrap();
         assert_eq!(caller_frame.interpreter.gas.tracker(), &expected, "{result_kind:?}");
     }
+}
+
+/// A gas limit below the execution cap: the transaction has no state-gas reservoir.
+const NARROW: u64 = 100_000_000;
+
+/// A gas limit far above the execution cap: everything above the cap is the reservoir.
+const WIDE: u64 = 1_000_000_000;
+
+/// Runs the same call to `to` at both gas limits and requires the reservoir to come back whole
+/// and the two to cost the same: an answer that carried no reservoir would hand the caller an
+/// empty pool and bill the sender for all of it.
+fn assert_the_reservoir_survives(db: impl Fn() -> MemoryDatabase, to: Address, data: Bytes) {
+    let at = |gas_limit: u64| {
+        let tx = crate::common::call_with_data(CALLER, to, data.clone(), gas_limit);
+        let (result, _) = crate::common::run(db(), tx);
+        *result.result.gas()
+    };
+    let (narrow, wide) = (at(NARROW), at(WIDE));
+
+    assert_eq!(narrow.reservoir_remaining(), 0, "there is no pool below the cap");
+    assert_eq!(
+        wide.reservoir_remaining(),
+        WIDE - TX_GAS_LIMIT_CAP,
+        "the call spends no state gas, so the whole pool comes back",
+    );
+    assert_eq!(
+        narrow.tx_gas_used(),
+        wide.tx_gas_used(),
+        "the call costs the same with a pool and without one",
+    );
+}
+
+/// A database holding what a call to a system contract needs: the contracts' code, and a
+/// balance for the sender.
+fn system_db() -> MemoryDatabase {
+    MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(1_000_000_000_000_u64))
+        .account_balance(ACCESS_CONTROL_ADDRESS, U256::from(1))
+        .account_code(ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE)
+        .account_code(LIMIT_CONTROL_ADDRESS, LIMIT_CONTROL_CODE)
+        .account_code(KEYLESS_DEPLOY_ADDRESS, KEYLESS_DEPLOY_CODE)
+}
+
+/// Every answer a system contract interceptor gives carries the reservoir the frame inherited.
+#[test]
+fn test_an_intercepted_answer_keeps_the_reservoir() {
+    for (to, selector) in [
+        (ACCESS_CONTROL_ADDRESS, IMegaAccessControl::isVolatileDataAccessDisabledCall::SELECTOR),
+        (ACCESS_CONTROL_ADDRESS, IMegaAccessControl::disableVolatileDataAccessCall::SELECTOR),
+        (LIMIT_CONTROL_ADDRESS, IMegaLimitControl::remainingComputeGasCall::SELECTOR),
+    ] {
+        assert_the_reservoir_survives(system_db, to, Bytes::copy_from_slice(&selector));
+    }
+}
+
+/// So does the refusal of a call that carries value to a method that takes none.
+#[test]
+fn test_an_intercepted_refusal_keeps_the_reservoir() {
+    let selector = IMegaAccessControl::isVolatileDataAccessDisabledCall::SELECTOR;
+    let at = |gas_limit: u64| {
+        let mut tx = crate::common::call_with_data(
+            CALLER,
+            ACCESS_CONTROL_ADDRESS,
+            Bytes::copy_from_slice(&selector),
+            gas_limit,
+        );
+        tx.0.base.value = U256::from(1);
+        let (result, _) = crate::common::run(system_db(), tx);
+        assert!(!result.result.is_success(), "the value is refused");
+        *result.result.gas()
+    };
+    let (narrow, wide) = (at(NARROW), at(WIDE));
+    assert_eq!(narrow.reservoir_remaining(), 0);
+    assert_eq!(wide.reservoir_remaining(), WIDE - TX_GAS_LIMIT_CAP);
+    assert_eq!(narrow.tx_gas_used(), wide.tx_gas_used());
+}
+
+/// A dispatched `keylessDeploy` call is charged its overhead out of regular gas, so it costs
+/// the same whether there is a pool or not, and the pool comes back whole.
+#[test]
+fn test_the_keyless_overhead_comes_out_of_regular_gas() {
+    let data = Bytes::from(
+        IKeylessDeploy::keylessDeployCall {
+            keylessDeploymentTransaction: Bytes::from_static(b"a transaction"),
+            gasLimitOverride: U256::from(1_000_000),
+        }
+        .abi_encode(),
+    );
+    assert_the_reservoir_survives(system_db, KEYLESS_DEPLOY_ADDRESS, data);
 }

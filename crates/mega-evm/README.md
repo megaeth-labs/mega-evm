@@ -49,8 +49,17 @@ Capacities come from the transaction's `SaltEnv`, read once per bucket per trans
 Without a SALT environment every bucket is minimal, so the numbers above are what a transaction pays.
 `tests/satin/pricing-table.md` shows two probes at three multipliers.
 
-History gas, the resource limits, gas detention, the system contracts and keyless deployment arrive in later changes.
-Until history gas lands, nothing prices a history byte and the schedule's history entry stays at zero.
+The six system contracts live at their fixed `0x6342…` addresses, and four of them answer calls through an interceptor instead of running their bytecode.
+A `CALL` or `STATICCALL` is dispatched on its target address, then on the four selector bytes of its input: `CALLCODE` and `DELEGATECALL` never reach an interceptor, and a selector a contract does not intercept falls through to the deployed bytecode, which reverts with `NotIntercepted()`.
+A method that takes no value answers a value-bearing call with `NonZeroTransfer()`.
+`MegaAccessControl` and `MegaLimitControl` answer with what the engine knows so far — nothing has switched volatile-data access off, and `remainingComputeGas()` reports the regular gas the call was forwarded — until detention and compute gas fill them in.
+The Oracle forwards a `sendHint` payload to the node's oracle service, and a `keylessDeploy` transaction is charged its fixed 100,000 gas and handed to the keyless rewrite hook that native keyless deployment fills in.
+
+The system address (`MEGA_SYSTEM_ADDRESS`) sends the protocol's own transactions: a legacy transaction from it to a whitelisted contract is validated — the whitelist, the chain id, the nonce and EIP-3607 — and promoted to a deposit, which pays no fee and rewards none.
+The account such a transaction creates for its caller is charged the account-creation state gas exactly once.
+
+History gas, the resource limits, gas detention, system contract deployment and keyless deployment arrive in later changes.
+Until history gas lands, nothing prices a history byte and the schedule's history entry stays at zero, and a system transaction's history ledger is zero with it.
 
 ## Quick start
 

@@ -36,13 +36,12 @@ Do not add a `_pending/main.rs`.
 | the state-growth and KV limits | 56 | 55 | 1 | 0 | 35 | 21 |
 | revert-class aborts | 17 | 17 | 0 | 0 | 17 | 0 |
 | the pre-block system calls | 18 | 15 | 3 | 14 | 4 | 0 |
-| the system contract interceptors | 61 | 53 | 8 | 52 | 9 | 0 |
 | system contract deployment | 67 | 17 | 50 | 62 | 5 | 0 |
 | the oracle and control contracts | 77 | 77 | 0 | 67 | 10 | 0 |
 | native keyless deployment | 75 | 73 | 2 | 29 | 46 | 0 |
 | inspector support | 4 | 4 | 0 | 1 | 3 | 0 |
 | — (undecided: D57 preload-warm cold charging, D58 98/100 forwarding) | 7 | 7 | 0 | 0 | 0 | 7 |
-| **Total** | **596** | **517** | **79** | **363** | **205** | **28** |
+| **Total** | **535** | **464** | **71** | **311** | **196** | **28** |
 
 ## Tests ported in place
 
@@ -184,6 +183,25 @@ These 60 rows run in a real test target now, adapted to the Satin API and to the
 | `src/external/gas.rs` | SALT pricing (5) | 5 | `src/external/gas.rs`, `tests/satin/salt.rs` |
 | **Total** | | **60** | |
 
+## Tests ported by the system contract interceptors
+
+These 61 rows run in a real test target now, adapted to the Satin API and to the dispatch the decision they cite fixes, so the counts above are lower than the inventory's by exactly these rows.
+
+| Legacy file | Owner in the inventory | Tests | Now in |
+|---|---|---:|---|
+| `compute_gas/claims.rs` | the system contract interceptors (2) | 2 | `tests/system/dispatch.rs` |
+| `mini_rex/mega_system_transaction.rs` | the system contract interceptors (15) | 15 | `src/system/tx.rs`, `tests/system/system_tx.rs` |
+| `rex3/keyless_deploy.rs` | the system contract interceptors (2) | 2 | `tests/system/keyless.rs` |
+| `rex4/limit_control.rs` | the system contract interceptors (5) | 5 | `tests/system/dispatch.rs`, `tests/system/limit_control.rs` |
+| `rex5/db_error.rs` | the system contract interceptors (1) | 1 | `tests/system/dispatch.rs` |
+| `rex5/deposit_caller_accounting.rs` | the system contract interceptors (7) | 7 | `tests/system/system_tx.rs` |
+| `rex5/interceptor_selector_probe.rs` | the system contract interceptors (6) | 6 | `tests/system/dispatch.rs`, `tests/system/oracle.rs` |
+| `rex5/keyless_deploy_dispatch_parity.rs` | the system contract interceptors (3) | 3 | `tests/system/keyless.rs` |
+| `rex5/system_tx_replay.rs` | the system contract interceptors (12) | 12 | `tests/system/system_tx.rs` |
+| `src/system/intercept.rs` | the system contract interceptors (2) | 2 | `tests/system/dispatch.rs`, `tests/system/limit_control.rs` |
+| `src/system/tx.rs` | the system contract interceptors (6) | 6 | `src/system/tx.rs` |
+| **Total** | | **61** | |
+
 ## Tests retired after the inventory
 
 These 4 rows were parked when the inventory was applied and have since been retired: the mechanism that owns them landed and left them nothing to pin, so no later mechanism will port them.
@@ -209,21 +227,19 @@ Each cell lists `disposition count (mechanism · decision)`.
 | `block_executor/block_limits.rs` | 2 | undecided 2 (the state-growth and KV limits · D46) |
 | `block_executor/inspector.rs` | 3 | keep 1 (inspector support); rewrite 2 (inspector support · D39/D41) |
 | `block_executor/sequencer_registry.rs` | 8 | keep 8 (system contract deployment) |
-| `compute_gas/claims.rs` | 10 | keep 2 (the system contract interceptors); rewrite 2 (compute gas · D53 (compute = regular spent; state spill excluded)); undecided 5 (— · D57, open: whether preload-warm addresses (precompile / beneficiary / access-list) are charged cold); rewrite 1 (the data-size limit · D33/D48) |
+| `compute_gas/claims.rs` | 8 | rewrite 2 (compute gas · D53 (compute = regular spent; state spill excluded)); undecided 5 (— · D57, open: whether preload-warm addresses (precompile / beneficiary / access-list) are charged cold); rewrite 1 (the data-size limit · D33/D48) |
 | `compute_gas/main.rs` | 1 | rewrite 1 (compute gas · D53) |
 | `mini_rex/access_beneficiary_balance.rs` | 10 | keep 9 (detention · D08); rewrite 1 (revert-class aborts · D48) |
 | `mini_rex/block_env_access_tracking.rs` | 3 | keep 3 (detention) |
 | `mini_rex/block_env_gas_limit.rs` | 16 | keep 13 (detention · D08 cap 20M/1M unchanged); rewrite 3 (revert-class aborts · D48 (detention halt -> revert-class)) |
 | `mini_rex/compute_gas_limit.rs` | 25 | rewrite 23 (compute gas · D10/D40/D53 (compute derived from Gas; 200M cap)); rewrite 2 (detention · D48) |
 | `mini_rex/gas.rs` | 2 | undecided 2 (— · D58, open: 98/100 forwarding, while the design has frames follow EIP-8037 (63/64)) |
-| `mini_rex/mega_system_transaction.rs` | 15 | keep 15 (the system contract interceptors · D51) |
 | `mini_rex/oracle.rs` | 13 | rewrite 3 (revert-class aborts · D48); keep 5 (detention); keep 4 (the oracle and control contracts); rewrite 1 (system contract deployment · deploy at Satin activation) |
 | `mini_rex/state_growth_limit.rs` | 4 | rewrite 4 (the state-growth and KV limits · D45 (state-gas limit)) |
 | `mini_rex/tx_data_and_kv_update_limit.rs` | 28 | keep 18 (the data-size limit · data-size numbers unchanged); rewrite 4 (revert-class aborts · D48); undecided 6 (the state-growth and KV limits · D46 (the KV count stays as an output because the node consumes it; the limit semantics are undecided)) |
 | `rex/oracle.rs` | 3 | rewrite 3 (detention · D08 (mark at actual load: same outcome via SLOAD)) |
 | `rex2/keyless_deploy.rs` | 37 | rewrite 13 (native keyless deployment · native CREATE sub-frame; D37/D38); keep 19 (native keyless deployment · validation rules 1-9 unchanged); keep 1 (native keyless deployment · rule 4 (tx nonce == 0) unchanged); rewrite 3 (native keyless deployment · D36); rewrite 1 (system contract deployment · deploy at Satin activation) |
 | `rex2/oracle_hint.rs` | 6 | keep 6 (the oracle and control contracts) |
-| `rex3/keyless_deploy.rs` | 2 | rewrite 2 (the system contract interceptors · D15 (explicit 100k compute) / D48) |
 | `rex3/oracle_gas_limit.rs` | 8 | keep 7 (detention · D08); rewrite 1 (revert-class aborts · D48) |
 | `rex3/system_address.rs` | 2 | keep 2 (detention · D51) |
 | `rex4/access_control.rs` | 48 | keep 46 (the oracle and control contracts); rewrite 2 (detention · D07 (rejected volatile read pays static gas)) |
@@ -234,17 +250,14 @@ Each cell lists `disposition count (mechanism · decision)`.
 | `rex4/gas_detention.rs` | 5 | keep 3 (detention); rewrite 2 (revert-class aborts · D48/D53) |
 | `rex4/intrinsic_limit_bypass.rs` | 13 | rewrite 6 (the data-size limit · D48/D49 (overflow outcome shape)); undecided 3 (the state-growth and KV limits · D46); keep 3 (the data-size limit); rewrite 1 (inspector support · D41) |
 | `rex4/keyless_deploy.rs` | 2 | keep 2 (native keyless deployment · native sub-frame inherits env) |
-| `rex4/limit_control.rs` | 14 | rewrite 9 (the oracle and control contracts · D40 (remaining compute derived from Gas)); keep 5 (the system contract interceptors) |
+| `rex4/limit_control.rs` | 9 | rewrite 9 (the oracle and control contracts · D40 (remaining compute derived from Gas)) |
 | `rex4/storage_call_stipend.rs` | 12 | rewrite 12 (history gas · D14 (separated history-only allowance 160 x CPHB; three leak paths)) |
 | `rex5/apply_pending_changes_gas_budget.rs` | 4 | rewrite 4 (the pre-block system calls · D51 (system source m = 1; the system-call reservoir split)) |
 | `rex5/create2_empty_initcode.rs` | 5 | keep 5 (the common execution layer · canonical revm behaviour) |
 | `rex5/create2_resize_gas_metering.rs` | 2 | keep 2 (the common execution layer · canonical behaviour) |
-| `rex5/db_error.rs` | 4 | rewrite 3 (native keyless deployment · native path surfaces DB errors); keep 1 (the system contract interceptors) |
-| `rex5/deposit_caller_accounting.rs` | 7 | rewrite 7 (the system contract interceptors · D16 (kept; must not double-charge with 2780)) |
+| `rex5/db_error.rs` | 3 | rewrite 3 (native keyless deployment · native path surfaces DB errors) |
 | `rex5/deposit_create_storage_gas.rs` | 4 | rewrite 4 (SALT pricing · D12/D37) |
 | `rex5/eip7702_state_growth.rs` | 8 | rewrite 8 (the state-growth and KV limits · D28/D31/D45 (7702 authorization matrix)) |
-| `rex5/interceptor_selector_probe.rs` | 6 | keep 6 (the system contract interceptors) |
-| `rex5/keyless_deploy_dispatch_parity.rs` | 3 | keep 3 (the system contract interceptors) |
 | `rex5/keyless_empty_code_logs.rs` | 2 | rewrite 2 (native keyless deployment · native sub-frame keeps logs inherently) |
 | `rex5/keyless_fee_free.rs` | 12 | rewrite 8 (native keyless deployment · D16/D37/D38 (GASPRICE native; materialisation explicit)); keep 4 (native keyless deployment · rules unchanged) |
 | `rex5/keyless_gas_cap_postcap_recheck.rs` | 3 | rewrite 3 (native keyless deployment · native sub-frame gas handling) |
@@ -254,7 +267,6 @@ Each cell lists `disposition count (mechanism · decision)`.
 | `rex5/sandbox_accounting.rs` | 9 | rewrite 9 (native keyless deployment · native sub-frame: parent tracker sees child directly) |
 | `rex5/selfdestruct_beneficiary.rs` | 7 | rewrite 4 (the state-growth and KV limits · D45 (state gas via new-account site)); keep 2 (detention); keep 1 (the data-size limit) |
 | `rex5/stipend_accounting.rs` | 6 | rewrite 6 (history gas · D14 (history-only allowance lifecycle)) |
-| `rex5/system_tx_replay.rs` | 12 | keep 12 (the system contract interceptors) |
 | `rex6/beneficiary_detention.rs` | 16 | keep 13 (detention · D08); keep 2 (the data-size limit · D50 write record 40 B); rewrite 1 (the state-growth and KV limits · D45) |
 | `rex6/create2_metering_order.rs` | 11 | keep 11 (the common execution layer · canonical halt reasons; D04 512 KiB boundary) |
 | `rex6/eip7702_authority_accounting.rs` | 18 | rewrite 18 (the state-growth and KV limits · D12/D28/D31/D45 (7702 matrix; SALT pricing for the SALT half)) |
@@ -276,9 +288,7 @@ Each cell lists `disposition count (mechanism · decision)`.
 | `src/sandbox/execution.rs` | 2 | keep 1 (native keyless deployment · rule); rewrite 1 (native keyless deployment · D16) |
 | `src/system/control.rs` | 8 | keep 8 (system contract deployment · the system contract interceptors for selector/revert-data tests) |
 | `src/system/deploy.rs` | 4 | keep 3 (system contract deployment); rewrite 1 (system contract deployment · single version) |
-| `src/system/intercept.rs` | 2 | keep 2 (the system contract interceptors) |
 | `src/system/keyless_deploy.rs` | 2 | keep 2 (system contract deployment) |
 | `src/system/limit_control.rs` | 5 | keep 5 (system contract deployment) |
 | `src/system/oracle.rs` | 7 | keep 7 (system contract deployment · v2.0.0 only) |
 | `src/system/sequencer_registry.rs` | 24 | keep 24 (system contract deployment · the pre-block system calls for transact_apply_pending_changes) |
-| `src/system/tx.rs` | 6 | keep 6 (the system contract interceptors · D51) |
