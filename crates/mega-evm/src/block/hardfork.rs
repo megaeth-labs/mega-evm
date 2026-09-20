@@ -122,6 +122,21 @@ pub trait MegaHardforks: OpHardforks {
         self.mega_fork_activation(MegaHardfork::Satin).active_at_timestamp(timestamp)
     }
 
+    /// Whether the block at `block_timestamp`, whose parent is at `parent_timestamp`, admits
+    /// only deposit transactions.
+    ///
+    /// A block in which a fork activates carries the chain's own transactions only. This is true
+    /// of a `MegaETH` fork and of an Optimism fork at or after Jovian, which
+    /// [`OpHardforks::is_no_user_tx_activation_block`] answers for; block execution reads one
+    /// flag, so the two are asked together here.
+    fn admits_only_deposits(&self, parent_timestamp: u64, block_timestamp: u64) -> bool {
+        MegaHardfork::VARIANTS.iter().any(|fork| {
+            let activation = self.mega_fork_activation(*fork);
+            activation.active_at_timestamp(block_timestamp) &&
+                !activation.active_at_timestamp(parent_timestamp)
+        }) || self.is_no_user_tx_activation_block(parent_timestamp, block_timestamp)
+    }
+
     /// Refuses a schedule that activates `P::FORK` without attaching `P`.
     ///
     /// This is the rule [`validate_schedule`](Self::validate_schedule) applies to every params
@@ -576,6 +591,19 @@ mod tests {
         let with_params = no_params.with_params(params());
         assert_eq!(with_params.require_params::<TestParams>(), Ok(()));
         assert_eq!(with_params.validate_schedule(), Ok(()));
+    }
+
+    /// The block a fork activates in carries the chain's own transactions only, and only that
+    /// block: the one before it and the ones after it are ordinary.
+    #[test]
+    fn test_activation_block_admits_only_deposits() {
+        let config =
+            MegaHardforkConfig::default().with(MegaHardfork::Satin, ForkCondition::Timestamp(100));
+
+        assert!(config.admits_only_deposits(99, 100), "the first block at the activation");
+        assert!(config.admits_only_deposits(99, 101), "and the first block after a gap");
+        assert!(!config.admits_only_deposits(98, 99), "not before the activation");
+        assert!(!config.admits_only_deposits(100, 101), "and not once the parent had it too");
     }
 
     #[test]

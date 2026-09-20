@@ -157,6 +157,26 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
         self.inspect
     }
 
+    /// Enforces `limits` on every transaction this EVM runs from now on.
+    ///
+    /// Block execution installs the block's limits this way, so a transaction runs under them
+    /// whatever the caller configured when it built the EVM.
+    #[must_use]
+    pub fn with_tx_runtime_limits(mut self, limits: crate::EvmTxRuntimeLimits) -> Self {
+        self.set_tx_runtime_limits(limits);
+        self
+    }
+
+    /// Enforces `limits` on every transaction this EVM runs from now on.
+    pub const fn set_tx_runtime_limits(&mut self, limits: crate::EvmTxRuntimeLimits) {
+        self.inner.ctx.additional_limit.set_limits(limits);
+    }
+
+    /// The limits every transaction this EVM runs is held to.
+    pub const fn tx_runtime_limits(&self) -> &crate::EvmTxRuntimeLimits {
+        self.inner.ctx.additional_limit().limits()
+    }
+
     /// Consumes the EVM and returns the revm EVM it wraps.
     pub(crate) fn into_inner(self) -> MegaInnerEvm<DB, INSP, ExtEnvs> {
         self.inner

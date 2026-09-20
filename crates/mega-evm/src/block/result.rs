@@ -1,11 +1,18 @@
 //! What a block counts of its transactions, and how it refuses one.
 
+#[cfg(not(feature = "std"))]
+use alloc as std;
 use core::fmt;
+use std::vec::Vec;
 
-use alloy_evm::InvalidTxError;
-use revm::context::result::InvalidTransaction;
+use alloy_evm::{
+    block::{BlockExecutionResult, TxResult},
+    InvalidTxError,
+};
+use alloy_primitives::TxHash;
+use revm::context::result::{InvalidTransaction, ResultAndState};
 
-use crate::MegaGasUsage;
+use crate::{BlockUsage, LimitUsage, MegaGasUsage, MegaHaltReason, MegaTransactionOutcome};
 
 /// A block's gas, on the three ledgers its transactions spend on.
 ///
@@ -212,6 +219,119 @@ impl InvalidTxError for MegaBlockLimitExceededError {
     fn as_invalid_tx_err(&self) -> Option<&InvalidTransaction> {
         // A full block has no upstream `InvalidTransaction` counterpart.
         None
+    }
+}
+
+/// What executing one transaction of a block produced.
+///
+/// This is the shape [`BlockExecutor::Result`](alloy_evm::block::BlockExecutor) is instantiated
+/// with, and an associated type cannot carry the transaction: a transaction enters
+/// `execute_transaction_without_commit` as a method-level type parameter, which an associated
+/// type — fixed once per implementation — cannot name. So this carries what the commit path
+/// needs of it instead: the type byte the receipt builder reads, and the hash, gas limit and
+/// sizes the block-level admission re-reads at commit.
+///
+/// Everything execution itself produced travels as the embedded [`MegaTransactionOutcome`], so a
+/// dimension added there flows through without being declared again here.
+#[derive(Clone, Debug)]
+pub struct MegaBlockTxResult<T> {
+    /// The transaction's type, which is what the receipt builder needs of it.
+    pub tx_type: T,
+    /// The transaction's hash, which names it if block admission refuses it at commit.
+    pub tx_hash: TxHash,
+    /// The gas the transaction declared.
+    pub gas_limit: u64,
+    /// The transaction's EIP-2718 encoded size, in bytes.
+    pub tx_size: u64,
+    /// The transaction's data-availability size, in bytes.
+    pub da_size: u64,
+    /// The transaction's data-availability footprint, in gas.
+    pub da_footprint: u64,
+    /// Whether the transaction is a deposit.
+    pub is_deposit: bool,
+    /// The nonce the depositor had before execution, which the deposit receipt reports. `Some`
+    /// only for a deposit.
+    pub depositor_nonce: Option<u64>,
+    /// The execution result, the post-state and what `MegaETH` counted, as execution produced
+    /// them.
+    pub inner: MegaTransactionOutcome,
+}
+
+impl<T> MegaBlockTxResult<T> {
+    /// What this transaction adds to the block's counters.
+    pub const fn block_usage(&self) -> BlockUsage {
+        BlockUsage {
+            gas_used: self.inner.gas.gas_used,
+            gas: self.inner.gas,
+            usage: self.inner.usage,
+            tx_size: self.tx_size,
+            da_size: self.da_size,
+            da_footprint: self.da_footprint,
+            is_deposit: self.is_deposit,
+        }
+    }
+}
+
+impl<T> core::ops::Deref for MegaBlockTxResult<T> {
+    type Target = MegaTransactionOutcome;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl<T> core::ops::DerefMut for MegaBlockTxResult<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner
+    }
+}
+
+impl<T: Send + 'static> TxResult for MegaBlockTxResult<T> {
+    type HaltReason = MegaHaltReason;
+
+    fn result(&self) -> &ResultAndState<Self::HaltReason> {
+        &self.inner.result_and_state
+    }
+
+    fn into_result(self) -> ResultAndState<Self::HaltReason> {
+        self.inner.result_and_state
+    }
+}
+
+/// What executing a whole block produced.
+///
+/// The receipts, requests and the two header figures are alloy-evm's
+/// [`BlockExecutionResult`], which the node consumes as it does for any chain; the block's three
+/// gas ledgers and the data-size and write-record counts are `MegaETH`'s own, and no upstream
+/// type has a place for them.
+#[derive(Clone, Debug)]
+pub struct MegaBlockExecutionResult<R> {
+    /// The receipts, the requests, the gas used and the blob gas used.
+    pub inner: BlockExecutionResult<R>,
+    /// The gas the block's transactions spent, by ledger.
+    pub gas: BlockGasCounters,
+    /// The data-size bytes and write records the block's transactions kept. The KV count a node
+    /// reports is [`LimitUsage::write_records`].
+    pub usage: LimitUsage,
+}
+
+impl<R> MegaBlockExecutionResult<R> {
+    /// The receipts of the block's transactions.
+    pub fn receipts(&self) -> &[R] {
+        &self.inner.receipts
+    }
+
+    /// Consumes the result and returns the receipts.
+    pub fn into_receipts(self) -> Vec<R> {
+        self.inner.receipts
+    }
+}
+
+impl<R> core::ops::Deref for MegaBlockExecutionResult<R> {
+    type Target = BlockExecutionResult<R>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
     }
 }
 
