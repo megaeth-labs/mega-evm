@@ -9,4 +9,5 @@ mod inspector;
 mod limits;
 mod receipts;
 mod rules;
+mod salt;
 mod schedule;

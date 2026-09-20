@@ -179,7 +179,7 @@ These 63 rows run in a real test target now, adapted to the Satin API and to the
 | `rex5/sstore_storage_gas_error.rs` | SALT pricing (1) | 1 | `tests/satin/salt_failure.rs` |
 | `rex6/create_frame_accounting.rs` | SALT pricing (1) | 1 | `tests/satin/salt_failure.rs` |
 | `rex6/error_paths.rs` | SALT pricing (2) | 2 | `tests/satin/salt_failure.rs` |
-| `rex6/system_tx_metering_exemption.rs` | SALT pricing (3) | 3 | `tests/satin/salt.rs` |
+| `rex6/system_tx_metering_exemption.rs` | SALT pricing (3) | 3 | `tests/block/salt.rs`, `tests/satin/salt.rs` |
 | `src/evm/context.rs` | SALT pricing (1) | 1 | `src/evm/context.rs` |
 | `src/external/gas.rs` | SALT pricing (5) | 5 | `src/external/gas.rs`, `tests/satin/salt.rs` |
 | **Total** | | **63** | |

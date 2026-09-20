@@ -647,10 +647,12 @@ fn written_oracle_slot(outcome: &MegaTransactionOutcome) -> U256 {
         .present_value
 }
 
-/// The pre-block system calls likewise: the same call priced across the same two capacities
-/// costs the same, so a protocol-mandated write cannot be priced out either.
+/// The system-call entry point likewise: the same call priced across the same two capacities
+/// costs the same, so a protocol-mandated write cannot be priced out either. This is the entry
+/// point a block issues its pre-block calls through; driving a real block through it is a
+/// block-execution test.
 #[test]
-fn test_a_pre_block_system_call_prices_the_same_at_any_capacity() {
+fn test_the_system_call_entry_point_prices_the_same_at_any_capacity() {
     use alloy_evm::Evm;
 
     let mut spends = Vec::new();
