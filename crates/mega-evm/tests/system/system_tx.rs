@@ -616,3 +616,17 @@ fn test_a_deposit_that_creates_a_contract_pays_for_its_caller_too() {
         "the created caller costs state gas on top of the created contract",
     );
 }
+
+/// A transaction that already carries the system source hash is not executed as one: the
+/// promotion is the engine's own, made once per execution, and a transaction that arrives
+/// promoted has skipped the validation that precedes it.
+///
+/// A block's transactions are decoded from their legacy encoding, which carries no source hash,
+/// so this is the shape a caller hands the engine directly, not one a block holds.
+#[test]
+fn test_a_transaction_that_arrives_promoted_is_refused() {
+    let mut tx = system_tx(0, B256::with_last_byte(0xaf));
+    tx.0.deposit.source_hash = MEGA_SYSTEM_TRANSACTION_SOURCE_HASH;
+    let refused = rejection(chain_db(), tx);
+    assert!(refused.contains("whitelist"), "{refused}");
+}
