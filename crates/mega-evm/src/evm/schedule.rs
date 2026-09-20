@@ -18,6 +18,10 @@
 //! against the same state charge. Whether creation keeps its Osaka regular price is an open
 //! pricing question; the schedule states the prices, it does not settle them.
 //!
+//! The state-gas entries are the price at the *minimum* SALT bucket. A charge is scaled from
+//! there by the capacity of the bucket it lands in, which the pricing hook does
+//! (`Host::state_gas_price`); the schedule holds the number that scaling starts from.
+//!
 //! Every other entry is Amsterdam's, including the EIP-2780 decomposition entries
 //! (`tx_account_write_cost`, `tx_create_access_cost`), the zero `code_deposit_cost` and the floor.
 //! The history entry stays at zero: history gas is its own mechanism and switches it on.

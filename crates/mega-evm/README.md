@@ -43,7 +43,13 @@ Block execution is in place too: `MegaBlockExecutor` is alloy-evm's `BlockExecut
 Every transaction is held to the block's `BlockLimits`, and the block counts what its transactions spent on each of the three ledgers.
 `apply_pre_execution_changes` leaves two hook points empty: system contract deployment and the pre-block system calls.
 
-SALT pricing, history gas, the resource limits, gas detention, the system contracts and keyless deployment arrive in later changes.
+SALT pricing is in place: every EIP-8037 state gas charge costs the schedule's entry times the capacity of the SALT bucket it lands in, counted in minimum buckets, so a slot written into a region eight times as crowded as the minimum costs eight times as much.
+The multiplier applies to the state dimension only; regular gas never scales.
+Capacities come from the transaction's `SaltEnv`, read once per bucket per transaction, and a transaction the protocol itself produced prices at the minimum bucket whatever the bucket holds.
+Without a SALT environment every bucket is minimal, so the numbers above are what a transaction pays.
+`tests/satin/pricing-table.md` shows two probes at three multipliers.
+
+History gas, the resource limits, gas detention, the system contracts and keyless deployment arrive in later changes.
 Until history gas lands, nothing prices a history byte and the schedule's history entry stays at zero.
 
 ## Quick start

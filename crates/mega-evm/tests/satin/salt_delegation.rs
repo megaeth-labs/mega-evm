@@ -30,7 +30,7 @@ use revm::{
 
 use crate::salt::{
     account_bucket, call_contract, crowded_account, db, entry, minimal_envs, run, try_run,
-    SaltEnvs, CONTRACT, EMPTY,
+    SaltEnvs, EMPTY,
 };
 
 /// An account whose code is a delegation designator pointing at itself.
