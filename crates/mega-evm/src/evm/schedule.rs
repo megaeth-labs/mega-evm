@@ -11,7 +11,7 @@
 //!    ([`STATE_GAS_REPRICED`]), which is what makes the state dimension `MegaETH`'s rather than
 //!    Glamsterdam's.
 //!
-//! The first group includes the three entries EIP-8037 moved onto the state dimension, so at these
+//! The first group includes the four entries EIP-8037 moved onto the state dimension, so at these
 //! prices state creation is charged on both dimensions: a value `CALL` that creates its recipient
 //! pays 25,000 regular and 183,600 state, a `CREATE` opcode 32,000 and 183,600, a slot's first
 //! write 22,100 and 97,920, where the Amsterdam schedule charges 0, 12,000 and 12,100 regular
@@ -38,15 +38,15 @@ use crate::evm::prices::{active_satin_prices, SatinPrices};
 ///
 /// Amsterdam moves them for two reasons. EIP-8038 raises the price of *reaching* state — a cold
 /// account, a cold slot, a storage write. EIP-8037 lowers the regular price of *creating* state,
-/// having moved that charge onto the state dimension: `new_account_cost`, `create` and
-/// `sstore_set_without_load_cost` are that group. Satin takes neither move, so state creation
-/// keeps its Osaka regular price on top of the state charge at
-/// [`COST_PER_STATE_BYTE`](crate::constants::COST_PER_STATE_BYTE); the module documentation puts
-/// numbers on what that costs. The list is named for EIP-8038 because that is the repricing it
-/// was drawn up against.
+/// having moved that charge onto the state dimension; `new_account_cost`, `create`,
+/// `tx_create_cost` and `sstore_set_without_load_cost` are that second group. Satin takes neither
+/// move, so state creation keeps its Osaka regular price on top of the state charge at
+/// [`COST_PER_STATE_BYTE`](crate::constants::COST_PER_STATE_BYTE). The list is named for EIP-8038
+/// because that is the repricing it was drawn up against.
 ///
-/// `tx_create_cost` is priced here and read nowhere: under EIP-2780 the intrinsic phase charges a
-/// creation through `tx_create_access_cost`, so pressing this entry back moves no transaction.
+/// `tx_create_cost` is the one of those four that prices nothing: under EIP-2780 the intrinsic
+/// phase charges a creation through `tx_create_access_cost`, so pressing it back moves no
+/// transaction. What the other three cost is in the module documentation.
 ///
 /// The entries Amsterdam introduced for EIP-8037's state gas, EIP-2780, EIP-7976, EIP-7981 and
 /// EIP-7702 are not in this list and keep their Amsterdam values, even where the number itself is
