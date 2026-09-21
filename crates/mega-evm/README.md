@@ -41,7 +41,7 @@ No limit is enforced by default; `EvmTxRuntimeLimits` sets a data-size cap and a
 
 Block execution is in place too: `MegaBlockExecutor` is alloy-evm's `BlockExecutor` over a `MegaEvm`, with the block rules of the Karst base — a fork's activation block admits only deposit transactions, the data-availability footprint of the block's transactions is held to the block's gas limit and reported as its blob gas, and the L1 block info is read by the first transaction that prices against it, so the block's own L1 info deposit is what the transactions after it are priced with.
 Every transaction is held to the block's `BlockLimits`, and the block counts what its transactions spent on each of the three ledgers.
-`apply_pre_execution_changes` leaves two hook points empty: system contract deployment and the pre-block system calls.
+`apply_pre_execution_changes` deploys the six MegaETH system contracts and the EIP-7997 `CREATE2` factory every block, idempotently, and leaves one hook point empty: the pre-block system calls.
 
 SALT pricing is in place: every EIP-8037 state gas charge costs the schedule's entry times the capacity of the SALT bucket it lands in, counted in minimum buckets, so a slot written into a region eight times as crowded as the minimum costs eight times as much.
 The multiplier applies to the state dimension only; regular gas never scales.
@@ -49,7 +49,8 @@ Capacities come from the transaction's `SaltEnv`, read once per bucket per trans
 Without a SALT environment every bucket is minimal, so the numbers above are what a transaction pays.
 `tests/satin/pricing-table.md` shows two probes at three multipliers.
 
-The six system contracts live at their fixed `0x6342…` addresses, and four of them answer calls through an interceptor instead of running their bytecode.
+The six system contracts live at their fixed `0x6342…` addresses and are deployed at Satin activation, together with the EIP-7997 factory at `0x4e59…`.
+Four of them answer calls through an interceptor instead of running their bytecode.
 A `CALL` or `STATICCALL` is dispatched on its target address, then on the four selector bytes of its input: `CALLCODE` and `DELEGATECALL` never reach an interceptor, and a selector a contract does not intercept falls through to the deployed bytecode, whose answer is that contract's own — the two control contracts revert with `NotIntercepted()` from their fallback, and `KeylessDeploy` and the Oracle, which have none, revert with empty data on a selector they do not declare.
 A method that takes no value answers a value-bearing call with `NonZeroTransfer()`.
 `MegaAccessControl` and `MegaLimitControl` answer with what the engine knows so far — nothing has switched volatile-data access off, and `remainingComputeGas()` reports the regular gas the call was forwarded — until detention and compute gas fill them in.
@@ -58,7 +59,7 @@ The Oracle forwards a `sendHint` payload to the node's oracle service, and a `ke
 The system address (`MEGA_SYSTEM_ADDRESS`) sends the protocol's own transactions: a legacy transaction from it to a whitelisted contract is validated — the whitelist, the chain id, the nonce and EIP-3607 — and promoted to a deposit, which pays no fee and rewards none.
 The account such a transaction creates for its caller is charged the account-creation state gas exactly once.
 
-History gas, the resource limits, gas detention, system contract deployment and keyless deployment arrive in later changes.
+History gas, the resource limits, gas detention and keyless deployment arrive in later changes.
 Until history gas lands, nothing prices a history byte and the schedule's history entry stays at zero, and a system transaction's history ledger is zero with it.
 
 ## Quick start

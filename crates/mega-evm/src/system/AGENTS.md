@@ -1,7 +1,7 @@
 # AGENTS.md
 
 ## OVERVIEW
-The six system contracts: their addresses and bytecode, the interceptor dispatch that answers calls to four of them, and the system-address transaction.
+The six system contracts: their addresses and bytecode, the interceptor dispatch that answers calls to four of them, the system-address transaction, and the pre-block deploy of those six plus the EIP-7997 factory.
 
 ## STRUCTURE
 - `oracle.rs`: the Oracle's address, code and ABI, and the `sendHint` side effect.
@@ -9,7 +9,8 @@ The six system contracts: their addresses and bytecode, the interceptor dispatch
 - `keyless/`: the `KeylessDeploy` address, code and ABI (`mod.rs`), the dispatch of `keylessDeploy` (`dispatch.rs`), and the data-only helpers of the pre-EIP-155 transaction (`tx.rs`, `error.rs`).
 - `control.rs`: `MegaAccessControl`'s address, code, ABI and revert payloads, and its interceptor.
 - `limit_control.rs`: `MegaLimitControl`'s address, code, ABI and its interceptor.
-- `sequencer_registry.rs`: the `SequencerRegistry`'s address, code and ABI. No interceptor.
+- `sequencer_registry.rs`: the `SequencerRegistry`'s address, code and ABI, and the [`SequencerRegistryConfig`] that seeds it. No interceptor.
+- `deploy.rs`: the declarative spec, `transact_deploy`, the EIP-7997 factory, and the list of seven predeploys.
 - `intercept.rs`: the dispatch — the address test, the selector peek, the value policy and the shape of an answer.
 - `tx.rs`: the system-address transaction, its whitelist and the validation that precedes its promotion to a deposit.
 
@@ -25,6 +26,21 @@ The six system contracts: their addresses and bytecode, the interceptor dispatch
 - The system-address transaction is validated before it is promoted to a deposit, because the deposit path validates nothing. The whitelist, the chain id, the nonce and EIP-3607 are checked there, each under the configuration switch a user transaction obeys.
 - Accounts read during validation are read without warming them, so the transaction pays what any other transaction would pay for its first touch.
 
+## PRE-BLOCK STATE CHANGE CONTRACT
+
+Pre-block helpers in this module participate in `apply_pre_execution_changes` on `MegaBlockExecutor`.
+The contract for a new or modified helper:
+
+- Never call `db.commit(...)` inside the helper.
+  Return the prepared state; let the executor commit.
+- On an idempotent no-change path (the contract is already deployed with the correct code hash), return `EvmState` that carries the observed account as a read-only entry: neither `touched` nor `created`.
+  Returning nothing here is a bug — the account disappears from the stateless witness read set.
+- On a real-change path, include every account and storage slot the helper touched.
+- Present with different code is an error, not an overwrite.
+  A system address holding foreign bytecode is a broken chain.
+
+The returned `EvmState` is both the commit and the witness record of that step.
+
 ## ANTI-PATTERNS
 - Do not answer an unknown selector with a synthetic revert: the on-chain bytecode is the fall-through, and what it answers is the contract's own business.
 - Do not materialise calldata before the address and the selector matched. `peek_selector` borrows four bytes; `CallInput::bytes` copies the whole payload.
@@ -33,10 +49,17 @@ The six system contracts: their addresses and bytecode, the interceptor dispatch
 - Do not accept value on a read-only or control method without saying why in the interceptor and pinning it with a test.
 - Do not deploy system bytecode from a literal in this crate; the `mega-system-contracts` crate ships the code and its hash. The timestamp wrapper is the one exception, because the Oracle's address is baked into its code.
 - Do not read the system address from a constant in new code once the `SequencerRegistry` is read: the address can be rotated.
+- Do not call `db.commit(...)` inside a helper that participates in `apply_pre_execution_changes`.
+  It hides the step from a witness generator.
+- Do not return nothing from a helper on a "no change needed" path.
+  Return the account entries observed, even when nothing is written.
+- Do not overwrite foreign code at a system address.
 
 ## WHERE TO LOOK
 - Add a method to an intercepted contract: the contract's own module, next to the selectors it already answers, and a boundary test per `tests/system/`.
 - Change what a call to a system contract costs: `intercept.rs` for the dispatch, the contract's module for what its own method charges.
 - Change the system transaction's validation: `tx.rs::validate_and_promote`, which `MegaHandler::validate_env` calls.
 - Change what a deposit-like transaction pays for the account it creates: `evm/execution.rs`, where the charge is made in the pre-execution phase.
-- Deploy the contracts at a fork, read the rotated system address, or run the pre-block calls: not here yet — system contract deployment and the pre-block system calls own those.
+- Add a predeploy: a spec in `deploy.rs::system_contract_specs`, seeded from chain params if it has storage.
+- Change how a block deploys the contracts: `block/executor.rs::apply_pre_execution_changes` iterates the spec list and commits each witness.
+- Read the rotated system address, or run `applyPendingChanges`: the pre-block system calls own those.
