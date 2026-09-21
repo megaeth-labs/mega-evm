@@ -34,13 +34,13 @@ Do not add a `_pending/main.rs`.
 | detention | 81 | 76 | 5 | 73 | 8 | 0 |
 | the state-growth and KV limits | 56 | 55 | 1 | 0 | 35 | 21 |
 | revert-class aborts | 17 | 17 | 0 | 0 | 17 | 0 |
-| the pre-block system calls | 27 | 15 | 12 | 23 | 4 | 0 |
-| system contract deployment | 12 | 5 | 7 | 12 | 0 | 0 |
+| the pre-block system calls | 34 | 22 | 12 | 30 | 4 | 0 |
+| system contract deployment | 13 | 5 | 8 | 13 | 0 | 0 |
 | the oracle and control contracts | 77 | 77 | 0 | 67 | 10 | 0 |
 | native keyless deployment | 75 | 73 | 2 | 29 | 46 | 0 |
 | inspector support | 4 | 4 | 0 | 1 | 3 | 0 |
 | — (undecided: D57 preload-warm cold charging, D58 98/100 forwarding) | 7 | 7 | 0 | 0 | 0 | 7 |
-| **Total** | **478** | **445** | **33** | **270** | **180** | **28** |
+| **Total** | **486** | **452** | **34** | **278** | **180** | **28** |
 
 ## Tests ported in place
 
@@ -205,25 +205,25 @@ These 61 rows run in a real test target now, adapted to the Satin API and to the
 
 ## Tests ported by system contract deployment
 
-These 46 rows run in a real test target now, adapted to the Satin API and to the single-spec deploy, so the counts above are lower than the inventory's by exactly these rows.
+These 27 rows run in a real test target now, adapted to the Satin API and to the single-spec deploy, so the counts above are lower than the inventory's by exactly these rows.
 
 | Legacy file | Owner in the inventory | Tests | Now in |
 |---|---|---:|---|
-| `block_executor/sequencer_registry.rs` | system contract deployment (8) | 8 | `tests/block/deploy.rs` |
+| `block_executor/sequencer_registry.rs` | system contract deployment (1) | 1 | `tests/block/deploy.rs` |
 | `mini_rex/oracle.rs` | system contract deployment (1) | 1 | `tests/block/deploy.rs` |
 | `rex2/keyless_deploy.rs` | system contract deployment (1) | 1 | `tests/block/deploy.rs` |
 | `rex4/deployment.rs` | system contract deployment (2) | 2 | `tests/block/deploy.rs` |
-| `src/system/control.rs` | system contract deployment (8) | 8 | `tests/system/control.rs`, `tests/system/deploy.rs` |
-| `src/system/deploy.rs` | system contract deployment (4) | 4 | `tests/system/deploy.rs` |
-| `src/system/keyless_deploy.rs` | system contract deployment (2) | 2 | `tests/system/deploy.rs` |
-| `src/system/limit_control.rs` | system contract deployment (5) | 5 | `tests/system/deploy.rs` |
-| `src/system/oracle.rs` | system contract deployment (7) | 7 | `tests/system/deploy.rs` |
-| `src/system/sequencer_registry.rs` | system contract deployment (8) | 8 | `tests/block/deploy.rs`, `tests/system/deploy.rs` |
-| **Total** | | **46** | |
+| `src/system/control.rs` | system contract deployment (6) | 6 | `tests/system/control.rs`, `tests/system/deploy.rs` |
+| `src/system/deploy.rs` | system contract deployment (1) | 1 | `tests/system/deploy.rs` |
+| `src/system/keyless_deploy.rs` | system contract deployment (1) | 1 | `tests/system/deploy.rs` |
+| `src/system/limit_control.rs` | system contract deployment (3) | 3 | `tests/system/deploy.rs` |
+| `src/system/oracle.rs` | system contract deployment (4) | 4 | `tests/system/deploy.rs` |
+| `src/system/sequencer_registry.rs` | system contract deployment (7) | 7 | `tests/block/deploy.rs`, `tests/system/deploy.rs` |
+| **Total** | | **27** | |
 
 ## Tests retired after the inventory
 
-These 8 rows were parked when the inventory was applied and have since been retired: the mechanism that owns them landed and left them nothing to pin, so no later mechanism will port them.
+These 19 rows were parked when the inventory was applied and have since been retired: the mechanism that owns them landed and left them nothing to pin, so no later mechanism will port them.
 They are not counted above.
 
 | Legacy file | Owner in the inventory | Tests | Why |
@@ -231,7 +231,12 @@ They are not counted above.
 | `rex5/callcode_storage_gas.rs` | SALT pricing (3) | 3 | Satin's `CALLCODE` cannot reach a state gas pricing site: it sends value to the frame's own account, which exists, so it adds no account leaf and asks for no price. There is no pricing-path account inspection left to fail |
 | `src/evm/host.rs` | SALT pricing (1) | 1 | the pricing hook inspects no account: the fork decides whether a target exists and the hook only prices what it is told to, so there is no delegation walk on the pricing path to guard |
 | `src/external/gas.rs` | SALT pricing (4) | 4 | these pin a helper at a legacy spec boundary: it is served from one rung and asserts below it. Satin is a single spec and has no gate of its own, so there is no boundary left for them to pin |
-| **Total** | | **8** | |
+| `src/system/control.rs` | system contract deployment (2) | 2 | Satin is a single spec with no per-fork deploy gate: the contract is deployed at every block; Satin does not overwrite foreign code: a system address with different code is an error, not an in-place upgrade |
+| `src/system/deploy.rs` | system contract deployment (3) | 3 | Satin has no bytecode upgrade path: a system address with different code is an error, not a storage-preserving upgrade; Satin has no bytecode upgrade path: a system address with different code is an error, not a force-created upgrade; Satin is a single spec and ships one Oracle bytecode; there is no per-fork version table to pin |
+| `src/system/keyless_deploy.rs` | system contract deployment (1) | 1 | Satin does not overwrite foreign code: a system address with different code is an error, not an in-place upgrade |
+| `src/system/limit_control.rs` | system contract deployment (2) | 2 | Satin is a single spec with no per-fork deploy gate: the contract is deployed at every block; Satin does not overwrite foreign code: a system address with different code is an error, not an in-place upgrade |
+| `src/system/oracle.rs` | system contract deployment (3) | 3 | Satin does not overwrite foreign code: a system address with different code is an error, not an in-place upgrade; Satin is a single spec and ships one Oracle bytecode; there is no per-fork version gate to pin |
+| **Total** | | **19** | |
 
 ## Tests the inventory assigns to the Satin skeleton that are parked under another mechanism
 
@@ -251,6 +256,13 @@ They are not counted above.
 | `src/system/sequencer_registry.rs` | `test_transact_apply_pending_changes_respects_30m_floor` | the pre-block system calls | the pre-block system calls own transact_apply_pending_changes |
 | `src/system/sequencer_registry.rs` | `test_transact_apply_pending_changes_updates_and_clears_due_roles` | the pre-block system calls | the pre-block system calls own transact_apply_pending_changes |
 | `src/system/sequencer_registry.rs` | `test_transact_apply_pending_changes_uses_block_gas_limit` | the pre-block system calls | the pre-block system calls own transact_apply_pending_changes |
+| `block_executor/sequencer_registry.rs` | `test_admin_handoff_via_block_executor` | the pre-block system calls | the pre-block system calls own the two-step admin handoff |
+| `block_executor/sequencer_registry.rs` | `test_bootstrap_block_resolves_system_address` | the pre-block system calls | the pre-block system calls own resolving the live system address |
+| `block_executor/sequencer_registry.rs` | `test_dual_change_in_same_block` | the pre-block system calls | the pre-block system calls own applying a pending rotation |
+| `block_executor/sequencer_registry.rs` | `test_pending_not_yet_due_is_noop` | the pre-block system calls | the pre-block system calls own applying a pending rotation |
+| `block_executor/sequencer_registry.rs` | `test_sequencer_change_does_not_affect_system_address` | the pre-block system calls | the pre-block system calls own applying a pending rotation |
+| `block_executor/sequencer_registry.rs` | `test_system_address_change` | the pre-block system calls | the pre-block system calls own applying a pending rotation |
+| `block_executor/sequencer_registry.rs` | `test_system_tx_uses_resolved_system_address` | the pre-block system calls | the pre-block system calls own resolving the live system address |
 
 ## Files
 
@@ -260,6 +272,7 @@ Each cell lists `disposition count (mechanism · decision)`.
 |---|---:|---|
 | `block_executor/block_limits.rs` | 2 | undecided 2 (the state-growth and KV limits · D46) |
 | `block_executor/inspector.rs` | 3 | keep 1 (inspector support); rewrite 2 (inspector support · D39/D41) |
+| `block_executor/sequencer_registry.rs` | 7 | keep 7 (the pre-block system calls) |
 | `compute_gas/claims.rs` | 8 | rewrite 2 (compute gas · D53 (compute = regular spent; state spill excluded)); undecided 5 (— · D57, open: whether preload-warm addresses (precompile / beneficiary / access-list) are charged cold); rewrite 1 (the data-size limit · D33/D48) |
 | `compute_gas/main.rs` | 1 | rewrite 1 (compute gas · D53) |
 | `mini_rex/access_beneficiary_balance.rs` | 10 | keep 9 (detention · D08); rewrite 1 (revert-class aborts · D48) |
@@ -315,4 +328,4 @@ Each cell lists `disposition count (mechanism · decision)`.
 | `src/limit/kv_update.rs` | 1 | undecided 1 (the state-growth and KV limits · D46) |
 | `src/limit/limit.rs` | 4 | keep 4 (history gas · D51) |
 | `src/sandbox/execution.rs` | 2 | keep 1 (native keyless deployment · rule); rewrite 1 (native keyless deployment · D16) |
-| `src/system/sequencer_registry.rs` | 16 | keep 7 (system contract deployment · the pre-block system calls for transact_apply_pending_changes); keep 9 (the pre-block system calls · the pre-block system calls for transact_apply_pending_changes) |
+| `src/system/sequencer_registry.rs` | 17 | keep 8 (system contract deployment · the pre-block system calls for transact_apply_pending_changes); keep 9 (the pre-block system calls · the pre-block system calls for transact_apply_pending_changes) |
