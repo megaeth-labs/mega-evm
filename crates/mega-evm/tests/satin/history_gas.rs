@@ -7,7 +7,8 @@ use alloy_primitives::{address, Address, Bytes, U256};
 use mega_evm::{
     constants::{COST_PER_HISTORY_BYTE, COST_PER_STATE_BYTE},
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    LOG_BASE_SIZE, LOG_TOPIC_SIZE, TX_BODY_SIZE, WRITE_RECORD_SIZE,
+    LOG_BASE_SIZE, LOG_TOPIC_SIZE, TX_BASE_SIZE, TX_BODY_SIZE, TX_FIXED_WRITE_RECORDS,
+    WRITE_RECORD_SIZE,
 };
 use revm::{
     bytecode::opcode::{CALL, GAS, LOG0, POP, PUSH0, RETURN, REVERT},
@@ -262,4 +263,79 @@ fn test_a_failing_frame_gives_its_history_back() {
     assert!(kept.result.is_success() && reverted.result.is_success(), "the caller survives");
     assert_eq!(kept.gas.history - quiet.gas.history, (LOG_BASE_SIZE + LOG_TOPIC_SIZE + 32) * CPHB);
     assert_eq!(reverted.gas.history, quiet.gas.history, "the reverted frame's log is not paid for");
+}
+
+/* ---------- the writes every transaction makes ---------- */
+
+/// The transaction body carries the writes every transaction makes whatever it runs: the sender's
+/// account, and the four accounts its fees are credited to.
+///
+/// They are in the body rather than charged where they happen because the body is priced before
+/// the transaction runs, when how many of the four are actually credited is not yet known — a
+/// zero fee credits none, and a beneficiary that is one of the vaults is one account, not two.
+/// The body carries the bound; nothing counts them again afterwards.
+#[test]
+fn test_the_body_carries_the_writes_every_transaction_makes() {
+    if runs_at_measurement_prices() {
+        return;
+    }
+    assert_eq!(TX_BODY_SIZE, TX_BASE_SIZE + TX_FIXED_WRITE_RECORDS * WRITE_RECORD_SIZE);
+    assert_eq!(TX_BODY_SIZE, 110 + 5 * 40);
+
+    // A transaction that actually pays a fee credits the beneficiary and the fee vaults, and
+    // records none of them: what it pays is what a fee-free transaction pays.
+    let db = || funded().account_code(CALLEE, Bytes::new());
+    let free = execute(db(), call(CALLER, CALLEE, U256::ZERO, GAS_LIMIT));
+    let paid = execute(db(), {
+        let mut tx = call(CALLER, CALLEE, U256::ZERO, GAS_LIMIT);
+        tx.0.base.gas_price = 10;
+        tx
+    });
+
+    assert!(free.result.is_success() && paid.result.is_success());
+    assert_eq!(free.gas.history, body(0), "the body, and the body alone");
+    assert_eq!(paid.gas.history, free.gas.history, "the fee recipients are already in the body");
+    assert_eq!(paid.usage.write_records, 0, "and none of them is recorded again");
+}
+
+/// A deposit credits no fee recipient at all, and is exempt from history besides: it pays for
+/// neither the body nor anything the body carries.
+#[test]
+fn test_a_deposit_pays_for_none_of_the_bodys_writes() {
+    if runs_at_measurement_prices() {
+        return;
+    }
+    let mut tx = call(CALLER, CALLEE, U256::ZERO, GAS_LIMIT);
+    tx.0.deposit.source_hash = alloy_primitives::B256::repeat_byte(0x11);
+    let outcome = execute(funded().account_code(CALLEE, Bytes::new()), tx);
+
+    assert!(outcome.result.is_success(), "{:?}", outcome.result);
+    assert_eq!(outcome.gas.history, 0);
+    assert_eq!(outcome.usage.write_records, 0);
+}
+
+/// The body carries a bound on the fee recipients, not a count of them, so a beneficiary that is
+/// one of the fee vaults is not something anything has to notice: the two transactions pay the
+/// same history, and neither reads a recipient to find out.
+#[test]
+fn test_a_beneficiary_that_is_a_fee_vault_changes_nothing() {
+    if runs_at_measurement_prices() {
+        return;
+    }
+    use op_revm::constants::BASE_FEE_RECIPIENT;
+    let db = || funded().account_code(CALLEE, Bytes::new());
+    let paying = |beneficiary| {
+        let mut tx = call(CALLER, CALLEE, U256::ZERO, GAS_LIMIT);
+        tx.0.base.gas_price = 10;
+        let ctx = crate::common::context(db())
+            .with_block(revm::context::BlockEnv { beneficiary, ..crate::common::block() });
+        mega_evm::MegaEvm::new(ctx).execute_transaction(tx).expect("the transaction is valid")
+    };
+    let distinct = paying(address!("00000000000000000000000000000000000c0ffe"));
+    let a_vault = paying(BASE_FEE_RECIPIENT);
+
+    assert!(distinct.result.is_success() && a_vault.result.is_success());
+    assert_eq!(distinct.gas.history, body(0));
+    assert_eq!(a_vault.gas.history, distinct.gas.history);
+    assert_eq!(a_vault.usage.write_records, 0);
 }

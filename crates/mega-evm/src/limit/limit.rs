@@ -525,3 +525,48 @@ impl FrameCharge {
     /// Nothing charged.
     const NONE: Self = Self { on_lane: 0, caller: 0 };
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy_primitives::{Address, Bytes, U256};
+    use revm::interpreter::{CallInput, CallValue};
+
+    fn call_inputs(scheme: CallScheme, value: U256) -> CallInputs {
+        CallInputs {
+            input: CallInput::Bytes(Bytes::new()),
+            return_memory_offset: 0..0,
+            gas_limit: 100_000,
+            bytecode_address: Address::ZERO,
+            known_bytecode: Default::default(),
+            target_address: Address::ZERO,
+            caller: Address::ZERO,
+            value: CallValue::Transfer(value),
+            scheme,
+            is_static: false,
+            reservoir: 0,
+            charged_new_account_state_gas: false,
+        }
+    }
+
+    /// The allowance follows the transfer, and only the two schemes that can carry one: a `CALL`
+    /// or a `CALLCODE` that moves value is granted one, and nothing else is — a valueless call of
+    /// either scheme, and `DELEGATECALL` and `STATICCALL`, which take no value word at all.
+    #[test]
+    fn test_only_a_value_call_or_callcode_is_granted_an_allowance() {
+        for scheme in [
+            CallScheme::Call,
+            CallScheme::CallCode,
+            CallScheme::DelegateCall,
+            CallScheme::StaticCall,
+        ] {
+            let carries_value = matches!(scheme, CallScheme::Call | CallScheme::CallCode);
+            assert_eq!(
+                grants_stipend(&call_inputs(scheme, U256::from(1))),
+                carries_value,
+                "{scheme:?} with value",
+            );
+            assert!(!grants_stipend(&call_inputs(scheme, U256::ZERO)), "{scheme:?} without value");
+        }
+    }
+}

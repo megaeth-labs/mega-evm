@@ -390,3 +390,122 @@ fn test_an_unspent_allowance_does_not_return_to_the_caller() {
     // The event's own computation is the only difference between the two.
     assert!(logging.gas.regular > silent.gas.regular, "the event still costs what it computes");
 }
+
+/// A chain of value transfers grants each frame its own allowance, and one frame's spending is
+/// not another's: three frames each emit their event and the transaction pays for none of them.
+///
+/// The allowances are on the frames' lanes, which the frame lifecycle keeps aligned with the
+/// frames themselves, so a chain cannot draw on an allowance granted further up.
+#[test]
+fn test_a_chain_of_transfers_grants_each_frame_its_own_allowance() {
+    if runs_at_measurement_prices() {
+        return;
+    }
+    const MIDDLE: Address = address!("0000000000000000000000000000000000500003");
+    // Each hop emits its event and then passes a wei on with a `transfer()`'s gas.
+    let hop = |next: Option<Address>| {
+        let code = event();
+        match next {
+            Some(next) => code
+                .append_many(call_with(CALL, next, 1, TRANSFER_GAS).build().iter().copied())
+                .append(STOP)
+                .build(),
+            None => code.append(STOP).build(),
+        }
+    };
+    let db = db(call_with(CALL, MIDDLE, 1, 1_000_000).append(STOP).build(), hop(None))
+        .account_balance(MIDDLE, U256::from(1))
+        .account_code(MIDDLE, hop(Some(RECEIVER)));
+    let outcome = run(db, call(CALLER, SENDER, U256::ZERO, GAS_LIMIT));
+
+    assert!(outcome.result.is_success(), "{:?}", outcome.result);
+    assert_eq!(outcome.result.logs().len(), 2, "both hops emitted their event");
+    // The first transfer writes the sender's account and the middle one's; the second writes the
+    // receiver's, the middle account being recorded already by the value it received.
+    assert_eq!(
+        outcome.gas.history,
+        body() + 3 * record(),
+        "the transfers' account writes, and no event on any ledger",
+    );
+}
+
+/// A frame budget reverts the frame that crosses it and nothing else; the allowance that frame
+/// held does not come back to its caller with the revert.
+#[test]
+fn test_a_frame_budget_revert_does_not_hand_the_allowance_back() {
+    if runs_at_measurement_prices() {
+        return;
+    }
+    // The receiver spends its allowance on an event and then crosses its own budget with a
+    // second one; the sender carries on and the transaction succeeds.
+    let receiver = event().append_many(event().build().iter().copied()).append(STOP).build();
+    let sender = call_with(CALL, RECEIVER, 1, 1_000_000).append(STOP).build();
+    let limits = EvmTxRuntimeLimits::no_limits().with_frame_data_size_limit(200);
+
+    let spent = run_limited(
+        db(sender.clone(), receiver),
+        limits,
+        call(CALLER, SENDER, U256::ZERO, GAS_LIMIT),
+    );
+    let quiet = run_limited(
+        db(sender, BytecodeBuilder::default().append(STOP).build()),
+        limits,
+        call(CALLER, SENDER, U256::ZERO, GAS_LIMIT),
+    );
+
+    assert!(spent.result.is_success(), "the caller resumes past a frame budget");
+    assert_eq!(spent.limit_exceeded, None, "a frame budget latches nothing");
+    assert_eq!(spent.gas.history, body(), "the reverted frame kept neither event nor record");
+    assert_eq!(quiet.gas.history, body() + 2 * record(), "the frame that returned kept its own");
+    // The reverting frame's records came back to the caller and its computation did not, which
+    // is the whole of the difference: no allowance came back with either.
+    assert!(spent.gas.regular > quiet.gas.regular, "the events still cost what they compute");
+    assert!(
+        spent.gas.regular - quiet.gas.regular < storage_call_stipend(),
+        "and the difference is that computation, not an allowance",
+    );
+}
+
+/// A frame that drained its allowance and then reverted hands nothing back: the caller pays what
+/// the frame computed and gets no allowance with it.
+#[test]
+fn test_a_drained_allowance_is_not_refunded_by_a_revert() {
+    if runs_at_measurement_prices() {
+        return;
+    }
+    let sender = call_with(CALL, RECEIVER, 1, 1_000_000).append(STOP).build();
+    let drained_then_reverts = event().append_many([PUSH0, PUSH0]).append(0xFD).build();
+    let reverts = BytecodeBuilder::default().append_many([PUSH0, PUSH0]).append(0xFD).build();
+
+    let drained =
+        run(db(sender.clone(), drained_then_reverts), call(CALLER, SENDER, U256::ZERO, GAS_LIMIT));
+    let quiet = run(db(sender, reverts), call(CALLER, SENDER, U256::ZERO, GAS_LIMIT));
+
+    assert!(drained.result.is_success(), "the caller survives the revert");
+    assert_eq!(drained.gas.history, body(), "the reverted frame's records went with it");
+    assert_eq!(quiet.gas.history, body());
+    assert!(
+        drained.gas.gas_used > quiet.gas.gas_used,
+        "the caller pays for the event's computation and gets no allowance back",
+    );
+    assert!(
+        drained.gas.gas_used - quiet.gas.gas_used < storage_call_stipend(),
+        "and the difference is that computation, not an allowance",
+    );
+}
+
+/// A call that forwards no gas at all still reaches a `receive()` hook that emits one event: the
+/// EVM's own `CALL_STIPEND` pays for the computation and the allowance for the bytes.
+#[test]
+fn test_a_transfer_forwarding_no_gas_still_buys_its_event() {
+    if runs_at_measurement_prices() {
+        return;
+    }
+    let sender = call_with(CALL, RECEIVER, 1, 0).append(STOP).build();
+    let outcome =
+        run(db(sender, event().append(STOP).build()), call(CALLER, SENDER, U256::ZERO, GAS_LIMIT));
+
+    assert!(outcome.result.is_success(), "{:?}", outcome.result);
+    assert_eq!(outcome.result.logs().len(), 1, "the hook emitted its event");
+    assert_eq!(outcome.gas.history, body() + 2 * record());
+}
