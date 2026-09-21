@@ -18,7 +18,10 @@ use mega_evm::{
     test_utils::{op_transaction, BytecodeBuilder, MemoryDatabase},
     MegaEvm, MegaTransaction,
 };
-use revm::context::TxEnv;
+use revm::{
+    bytecode::opcode::{CALL, CREATE, LOG0, POP},
+    context::TxEnv,
+};
 
 use crate::common::{context, runs_at_measurement_prices};
 
@@ -30,14 +33,20 @@ const PAYEE: Address = address!("0000000000000000000000000000000000400002");
 const GAS_LIMIT: u64 = 50_000_000;
 
 /// The program every transaction here runs: a new slot, a log, a transfer that creates its
-/// recipient, and a deployment — one of each history site the engine charges.
+/// recipient, and a deployment of [`DEPLOYED_BYTES`] bytes — one of each history site the engine
+/// charges, including the one revm charges itself out of the schedule.
 fn program() -> Bytes {
+    program_deploying(DEPLOYED_BYTES)
+}
+
+/// The same program with a creation that deploys `len` bytes.
+fn program_deploying(len: u64) -> Bytes {
     BytecodeBuilder::default()
         .sstore(U256::from(1), U256::from(1))
         .push_number(0u64)
         .push_number(32u64)
         .push_number(0u64)
-        .append(revm::bytecode::opcode::LOG0)
+        .append(LOG0)
         // CALL(gas, PAYEE, 1, 0, 0, 0, 0)
         .push_number(0u64)
         .push_number(0u64)
@@ -46,17 +55,21 @@ fn program() -> Bytes {
         .push_number(1u64)
         .push_address(PAYEE)
         .push_number(1_000_000u64)
-        .append(revm::bytecode::opcode::CALL)
-        .append(revm::bytecode::opcode::POP)
-        // CREATE(0, 0, 0): an empty deployment, which still creates an account
+        .append(CALL)
+        .append(POP)
+        // `PUSH1 len; PUSH0; RETURN` in memory, then a CREATE over those four bytes.
+        .mstore(0, [0x60, len as u8, 0x5f, 0xf3])
+        .push_number(4u64)
         .push_number(0u64)
         .push_number(0u64)
-        .push_number(0u64)
-        .append(revm::bytecode::opcode::CREATE)
-        .append(revm::bytecode::opcode::POP)
+        .append(CREATE)
+        .append(POP)
         .stop()
         .build()
 }
+
+/// Bytes the program's creation deploys, which the schedule prices at a history byte each.
+const DEPLOYED_BYTES: u64 = 32;
 
 fn db() -> MemoryDatabase {
     MemoryDatabase::default()
@@ -97,16 +110,51 @@ fn test_a_user_transaction_pays_history_for_the_program() {
     assert!(state > 0, "and for the state it adds");
 }
 
+/// The one history charge revm makes itself is the deployed code's, out of the schedule; the
+/// exemption reaches it too, by handing an exempt transaction a schedule that prices a deposited
+/// byte at zero.
+///
+/// The program above deploys thirty-two bytes. A user transaction pays for them and a deposit
+/// running the same program pays for nothing at all, so the difference the schedule makes is
+/// visible where a ledger comparison alone would only show two zeroes.
+#[test]
+fn test_the_exempt_schedule_prices_a_deposited_byte_at_zero() {
+    if runs_at_measurement_prices() {
+        return;
+    }
+    let deployed = |code: Bytes| {
+        let db = db().account_code(CONTRACT, code);
+        let outcome = MegaEvm::new(context(db))
+            .execute_transaction(call_from(CALLER, CONTRACT))
+            .expect("the transaction is valid");
+        assert!(outcome.result.is_success(), "{:?}", outcome.result);
+        outcome.gas.history
+    };
+    let thirty_two = deployed(program());
+    let nothing = deployed(program_deploying(0));
+
+    assert_eq!(
+        thirty_two - nothing,
+        DEPLOYED_BYTES * mega_evm::constants::COST_PER_HISTORY_BYTE,
+        "a user transaction pays a history byte per deployed byte",
+    );
+    assert_eq!(ledgers(deposit(call_from(CALLER, CONTRACT))).0, 0, "a deposit pays none of it");
+}
+
+/// `tx` as a deposit: no fee, and a source hash a user's transaction could carry.
+fn deposit(mut tx: MegaTransaction) -> MegaTransaction {
+    tx.0.deposit.source_hash = B256::repeat_byte(0x11);
+    tx.0.base.gas_price = 0;
+    tx
+}
+
 /// A deposit pays no history gas: the bytes it carries were paid for on L1.
 #[test]
 fn test_a_deposit_pays_no_history_gas() {
     if runs_at_measurement_prices() {
         return;
     }
-    let mut tx = call_from(CALLER, CONTRACT);
-    tx.0.deposit.source_hash = B256::repeat_byte(0x11);
-    tx.0.base.gas_price = 0;
-    let (history, state) = ledgers(tx);
+    let (history, state) = ledgers(deposit(call_from(CALLER, CONTRACT)));
     assert_eq!(history, 0, "a deposit pays no history gas");
     assert!(state > 0, "the exemption is history's alone");
 }
@@ -153,10 +201,9 @@ fn test_the_exemption_does_not_outlive_its_transaction() {
     }
     let mut evm = MegaEvm::new(context(db()));
 
-    let mut deposit = call_from(CALLER, CONTRACT);
-    deposit.0.deposit.source_hash = B256::repeat_byte(0x11);
-    deposit.0.base.gas_price = 0;
-    let exempt = evm.execute_transaction(deposit).expect("the deposit is valid");
+    let exempt = evm
+        .execute_transaction(deposit(call_from(CALLER, CONTRACT)))
+        .expect("the deposit is valid");
     assert_eq!(exempt.gas.history, 0);
 
     // Nothing was committed, so the sender's nonce is where it was.

@@ -514,10 +514,35 @@ fn test_applied_authorities_record_once_each() {
 /// recipient.
 #[test]
 fn test_value_to_an_applied_authority_records_it_once() {
-    let db = MemoryDatabase::default().account_balance(CALLER, U256::from(1_000));
-    let (result, usage) = run(db, authorizing_call(AUTHORITY_1, 1, &[(AUTHORITY_1, 0)]));
+    let db = || MemoryDatabase::default().account_balance(CALLER, U256::from(1_000));
+    let (result, usage) = run(db(), authorizing_call(AUTHORITY_1, 1, &[(AUTHORITY_1, 0)]));
     assert!(result.result.is_success(), "{:?}", result.result);
     assert_eq!(usage, records(1));
+
+    // And is charged for once: the transaction's own frame writes no recipient, because the
+    // authority's account is already written. A transfer to an account that is not an authority
+    // pays for the recipient on top of the one authority it applied.
+    if crate::common::runs_at_measurement_prices() {
+        return;
+    }
+    const CPHB: u64 = mega_evm::constants::COST_PER_HISTORY_BYTE;
+    let to_authority =
+        crate::common::execute(db(), authorizing_call(AUTHORITY_1, 1, &[(AUTHORITY_1, 0)]));
+    let to_another =
+        crate::common::execute(db(), authorizing_call(CONTRACT, 1, &[(AUTHORITY_1, 0)]));
+    let body = mega_evm::TX_BODY_SIZE + mega_evm::AUTHORIZATION_SIZE;
+
+    assert!(to_another.result.is_success(), "{:?}", to_another.result);
+    assert_eq!(
+        to_authority.gas.history,
+        (body + WRITE_RECORD_SIZE) * CPHB,
+        "the authority's record, and no recipient record beside it",
+    );
+    assert_eq!(
+        to_another.gas.history,
+        (body + 2 * WRITE_RECORD_SIZE) * CPHB,
+        "the authority's record and the recipient's",
+    );
 }
 
 /// A frame running as the transaction's sender (a delegated sender called back) records no
@@ -1013,4 +1038,50 @@ fn test_every_kept_write_pays_one_record_of_history() {
             case.name,
         );
     }
+}
+
+/// A value call an inspector answers makes none of the writes its caller paid for, so all of that
+/// history comes back — whatever the inspector answered with.
+///
+/// A frame answered without running is the one case where a *successful* result must still give
+/// the caller its charge back: the records were never made. An interceptor's refusal and the
+/// depth guard both fail, so only an inspector reaches this.
+#[test]
+fn test_an_inspector_answered_value_call_gives_its_history_back() {
+    if crate::common::runs_at_measurement_prices() {
+        return;
+    }
+    let code =
+        append_value_call(BytecodeBuilder::default(), CONTRACT, 1).append(POP).append(STOP).build();
+    let run_with = |inspector: Option<AnswerContract>| {
+        let db = funded().account_code(CALLEE, code.clone());
+        let tx = call(CALLER, CALLEE, U256::ZERO, GAS_LIMIT);
+        match inspector {
+            Some(inspector) => {
+                let mut evm = MegaEvm::new(context(db)).with_inspector(inspector);
+                let result = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
+                assert!(result.result.is_success(), "{:?}", result.result);
+                (
+                    evm.ctx().additional_limit().usage(),
+                    evm.ctx().additional_limit().history_gas_spent(),
+                )
+            }
+            None => {
+                let outcome = crate::common::execute(db, tx);
+                assert!(outcome.result.is_success(), "{:?}", outcome.result);
+                (outcome.usage, outcome.gas.history)
+            }
+        }
+    };
+    let (answered_usage, answered_history) = run_with(Some(AnswerContract));
+    let (ran_usage, ran_history) = run_with(None);
+    let body = mega_evm::TX_BODY_SIZE * mega_evm::constants::COST_PER_HISTORY_BYTE;
+
+    assert_eq!(answered_usage, LimitUsage::ZERO, "the answered call wrote nothing");
+    assert_eq!(answered_history, body, "so its caller pays for nothing beyond its body");
+    assert_eq!(ran_usage, records(2), "the transfer that ran wrote two accounts");
+    assert_eq!(
+        ran_history,
+        body + 2 * WRITE_RECORD_SIZE * mega_evm::constants::COST_PER_HISTORY_BYTE
+    );
 }

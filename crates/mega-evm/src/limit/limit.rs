@@ -380,9 +380,7 @@ impl AdditionalLimit {
                 if records.caller {
                     self.tracker.record_caller(false, charge.caller);
                 }
-                if records.on_lane > 0 {
-                    self.tracker.record(WRITE_RECORD.times(records.on_lane));
-                }
+                self.tracker.record(WRITE_RECORD.times(records.on_lane));
                 if grants_stipend(inputs) {
                     self.tracker.grant_stipend(storage_call_stipend());
                 }
@@ -505,11 +503,6 @@ pub(crate) struct FrameStartRecords {
 impl FrameStartRecords {
     /// No record at all.
     pub(crate) const NONE: Self = Self { on_lane: 0, caller: false };
-
-    /// The number of records, whoever keeps them.
-    pub(crate) const fn total(self) -> u64 {
-        self.on_lane.saturating_add(self.caller as u64)
-    }
 }
 
 /// The history gas a caller paid for the records the frame it starts makes.

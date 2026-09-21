@@ -231,9 +231,6 @@ fn charge_frame_start<DB: Database, ExtEnvs: ExternalEnvTypes>(
         return result;
     };
     let records = host.additional_limit.frame_start_records(input);
-    if records.total() == 0 {
-        return result;
-    }
     let (Some(on_lane), Some(caller)) = (
         write_record_history_gas(records.on_lane),
         write_record_history_gas(u64::from(records.caller)),

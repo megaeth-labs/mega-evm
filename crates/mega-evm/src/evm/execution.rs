@@ -224,10 +224,9 @@ where
         // The write record the transaction's own frame makes was charged before execution; a
         // frame that failed keeps no such write, so the charge goes back the way EIP-8037 gives
         // back the state gas of the account that frame would have created.
-        let top_level = evm.ctx_ref().additional_limit.top_level_write_record_gas();
         let instruction_result = frame_result.instruction_result();
-        if top_level > 0 && !instruction_result.is_ok() {
-            parent_gas.refill_history(top_level);
+        if !instruction_result.is_ok() {
+            parent_gas.refill_history(evm.ctx_ref().additional_limit.top_level_write_record_gas());
             if instruction_result.is_halt() {
                 parent_gas.spend_all();
             }
@@ -454,7 +453,7 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
         // The history of the records the caller paid for and the frame did not keep, given back
         // after the merge that adopted the frame's pools. `Some` means the outermost frame
         // returned and there is no caller to give anything back to.
-        if refund > 0 && returned.is_none() {
+        if returned.is_none() {
             self.inner.frame_stack.get().interpreter.gas.refill_history(refund);
         }
         Ok(returned)
@@ -828,7 +827,7 @@ fn charge_records_made_outside_a_frame<DB: Database, ExtEnvs: ExternalEnvTypes>(
     };
     let Some(authorities) = write_record_history_gas(applied_authorities) else { return false };
     let Some(cost) = top_level.checked_add(authorities) else { return false };
-    if cost > 0 && !gas.record_history_cost(cost) {
+    if !gas.record_history_cost(cost) {
         return false;
     }
     ctx.additional_limit.set_top_level_write_record_gas(top_level);
