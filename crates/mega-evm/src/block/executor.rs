@@ -168,6 +168,11 @@ pub enum MegaBlockExecutionError {
     },
     /// Satin is scheduled but the schedule does not carry a [`SequencerRegistryConfig`].
     MissingSequencerRegistryConfig,
+    /// The EIP-7997 factory holds the right runtime but nonce 0.
+    ZeroFactoryNonce {
+        /// The factory address.
+        address: Address,
+    },
 }
 
 impl fmt::Display for MegaBlockExecutionError {
@@ -195,6 +200,10 @@ impl fmt::Display for MegaBlockExecutionError {
             Self::MissingSequencerRegistryConfig => {
                 f.write_str("Satin is scheduled but SequencerRegistryConfig is not configured")
             }
+            Self::ZeroFactoryNonce { address } => write!(
+                f,
+                "EIP-7997 factory at {address} has matching code but nonce 0; refusing to accept a zero-nonce factory"
+            ),
         }
     }
 }
@@ -518,6 +527,9 @@ where
                 SystemContractDeployError::ForeignCode { address, expected, found } => {
                     MegaBlockExecutionError::ForeignSystemContractCode { address, expected, found }
                         .into()
+                }
+                SystemContractDeployError::ZeroFactoryNonce { address } => {
+                    MegaBlockExecutionError::ZeroFactoryNonce { address }.into()
                 }
             })?;
             self.deliver_pre_block(PreBlockStateSource::SystemContract(spec.address), state);

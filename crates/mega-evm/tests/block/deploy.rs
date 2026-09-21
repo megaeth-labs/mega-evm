@@ -192,6 +192,23 @@ fn test_a_pre_existing_factory_with_the_right_code_is_untouched() {
     assert_eq!(info.balance, U256::from(42), "a matching factory keeps its balance");
 }
 
+/// A factory that already holds the right code but nonce 0 fails the block: EIP-7997 requires a
+/// nonzero nonce, and the matching-code path will not rewrite it.
+#[test]
+fn test_a_factory_with_matching_code_and_nonce_zero_fails_the_block() {
+    let mut db = common::database();
+    db.set_account_code(CREATE2_FACTORY_ADDRESS, CREATE2_FACTORY_CODE);
+    db.set_account_nonce(CREATE2_FACTORY_ADDRESS, 0);
+    let mut state = State::builder().with_database(db).build();
+    let mut executor = executor(&mut state, unlimited_ctx());
+    let err = executor
+        .apply_pre_execution_changes()
+        .expect_err("a zero-nonce factory must fail the block");
+    let message = err.to_string();
+    assert!(message.contains("nonce 0"), "unexpected error: {message}");
+    assert!(message.contains(&CREATE2_FACTORY_ADDRESS.to_string()));
+}
+
 /// Foreign code at any of the seven addresses fails the block.
 #[test]
 fn test_foreign_code_at_a_system_address_fails_the_block() {

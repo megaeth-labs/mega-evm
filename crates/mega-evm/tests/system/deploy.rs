@@ -99,6 +99,8 @@ fn test_the_spec_list_is_the_seven_predeploys_in_order() {
         assert_eq!(spec.nonce, 1, "{} starts at nonce 1", spec.address);
         assert_eq!(keccak256(&spec.code), spec.code_hash);
     }
+    assert!(specs[..6].iter().all(|spec| !spec.require_nonzero_nonce));
+    assert!(specs[6].require_nonzero_nonce, "EIP-7997 requires a nonzero factory nonce");
     assert!(specs[..5].iter().all(|spec| spec.seed.is_empty()));
     assert!(specs[6].seed.is_empty(), "the factory has no storage");
     assert_eq!(specs[5].seed.len(), 6, "the registry seeds the six bootstrap slots");
@@ -183,6 +185,59 @@ fn test_foreign_code_at_a_system_address_is_an_error() {
         }
         other => panic!("expected ForeignCode, got {other}"),
     }
+}
+
+/// Matching factory code at nonce 0 is an error: EIP-7997 requires a nonzero nonce, and the
+/// matching-code path does not rewrite one.
+#[test]
+fn test_matching_factory_code_at_nonce_zero_is_an_error() {
+    let mut db = MemoryDatabase::default();
+    db.set_account_code(CREATE2_FACTORY_ADDRESS, CREATE2_FACTORY_CODE);
+    db.set_account_nonce(CREATE2_FACTORY_ADDRESS, 0);
+    let factory = &system_contract_specs(&config())[6];
+    assert!(factory.require_nonzero_nonce);
+
+    let error = transact_deploy(&mut db, factory).expect_err("nonce 0 is invalid for the factory");
+    match error {
+        SystemContractDeployError::ZeroFactoryNonce { address } => {
+            assert_eq!(address, CREATE2_FACTORY_ADDRESS);
+        }
+        other => panic!("expected ZeroFactoryNonce, got {other}"),
+    }
+    assert!(error.to_string().contains("nonce 0"));
+}
+
+/// Matching factory code at nonce 7 is accepted as it is: the helper does not rewrite a valid
+/// existing nonce down to 1.
+#[test]
+fn test_matching_factory_code_keeps_a_nonce_greater_than_one() {
+    let mut db = MemoryDatabase::default();
+    db.set_account_code(CREATE2_FACTORY_ADDRESS, CREATE2_FACTORY_CODE);
+    db.set_account_nonce(CREATE2_FACTORY_ADDRESS, 7);
+    let factory = &system_contract_specs(&config())[6];
+
+    let state = transact_deploy(&mut db, factory).expect("nonce 7 is a valid factory");
+    let account = state.get(&CREATE2_FACTORY_ADDRESS).unwrap();
+    assert!(!account.is_touched());
+    assert!(!account.is_created());
+    assert_eq!(account.info.nonce, 7);
+    assert_eq!(account.info.code_hash, CREATE2_FACTORY_CODE_HASH);
+}
+
+/// The six MegaETH contracts are not EIP-7997: matching code at nonce 0 is a read-only entry,
+/// not an error. Rewriting the nonce would be a state change the matching-code path exists to
+/// avoid.
+#[test]
+fn test_matching_megaeth_code_at_nonce_zero_is_accepted() {
+    let mut db = MemoryDatabase::default();
+    db.set_account_code(ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE);
+    db.set_account_nonce(ORACLE_CONTRACT_ADDRESS, 0);
+
+    let state =
+        transact_deploy(&mut db, &oracle_spec()).expect("MegaETH contracts are not EIP-7997");
+    let account = state.get(&ORACLE_CONTRACT_ADDRESS).unwrap();
+    assert!(!account.is_touched());
+    assert_eq!(account.info.nonce, 0);
 }
 
 /// An account that exists with empty code (an EOA that received value) is a fresh deploy: the

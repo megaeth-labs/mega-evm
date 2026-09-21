@@ -69,17 +69,30 @@ pub struct SystemContractSpec {
     /// Flat storage slots to seed `(slot, value)` on a fresh deploy. Empty for every contract
     /// except the `SequencerRegistry`.
     pub seed: Vec<(U256, U256)>,
+    /// When set, matching code with nonce 0 is an error rather than a read-only entry.
+    ///
+    /// EIP-7997 requires the factory to hold its runtime **and a nonzero nonce**. The six
+    /// MegaETH contracts are not EIP-7997, so they leave this unset: matching code is
+    /// accepted regardless of nonce, because the matching-code path must not rewrite an
+    /// already-deployed contract.
+    pub require_nonzero_nonce: bool,
 }
 
 impl SystemContractSpec {
-    /// A spec with nonce 1 and no seeded storage.
+    /// A spec with nonce 1, no seeded storage, and no nonce requirement on a matching account.
     pub fn new(address: Address, code: Bytes, code_hash: B256) -> Self {
-        Self { address, code, code_hash, nonce: 1, seed: Vec::new() }
+        Self { address, code, code_hash, nonce: 1, seed: Vec::new(), require_nonzero_nonce: false }
     }
 
     /// Sets the seeded storage slots applied on a fresh deploy.
     pub fn with_seed(mut self, seed: Vec<(U256, U256)>) -> Self {
         self.seed = seed;
+        self
+    }
+
+    /// Requires a matching existing account to hold a nonzero nonce (EIP-7997).
+    pub fn require_nonzero_nonce(mut self) -> Self {
+        self.require_nonzero_nonce = true;
         self
     }
 }
@@ -100,6 +113,13 @@ pub enum SystemContractDeployError<DbError> {
         /// The hash already in state.
         found: B256,
     },
+    /// The EIP-7997 factory already holds the right runtime but nonce 0, which the EIP
+    /// forbids. The matching-code path does not rewrite a nonce, so this cannot be repaired
+    /// by deploying again.
+    ZeroFactoryNonce {
+        /// The factory address.
+        address: Address,
+    },
 }
 
 impl<DbError> From<DbError> for SystemContractDeployError<DbError> {
@@ -118,6 +138,12 @@ impl<DbError: fmt::Display> fmt::Display for SystemContractDeployError<DbError> 
                     "system contract at {address} has unexpected code hash {found}, expected {expected}; refusing to overwrite"
                 )
             }
+            Self::ZeroFactoryNonce { address } => {
+                write!(
+                    f,
+                    "EIP-7997 factory at {address} has matching code but nonce 0; refusing to accept a zero-nonce factory"
+                )
+            }
         }
     }
 }
@@ -128,7 +154,7 @@ impl<DbError: core::error::Error + 'static> core::error::Error
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
             Self::Database(error) => Some(error),
-            Self::ForeignCode { .. } => None,
+            Self::ForeignCode { .. } | Self::ZeroFactoryNonce { .. } => None,
         }
     }
 }
@@ -137,7 +163,12 @@ impl<DbError: core::error::Error + 'static> core::error::Error
 /// committed.
 ///
 /// - Already deployed with [`SystemContractSpec::code_hash`]: the account as a read-only entry
-///   (neither touched nor created, no seeding), so the witness records the read.
+///   (neither touched nor created, no seeding), so the witness records the read. A nonce of 7 stays
+///   7. If [`SystemContractSpec::require_nonzero_nonce`] is set (the EIP-7997 factory) and the
+///   nonce is 0, this is [`SystemContractDeployError::ZeroFactoryNonce`] instead: the matching-code
+///   path does not rewrite a nonce, so a genesis factory with the right code and nonce 0 would
+///   otherwise stay invalid forever. The six MegaETH contracts leave that flag unset; they are not
+///   EIP-7997, and matching code is accepted regardless of nonce.
 /// - Absent, or present with empty code: the created account with its bytecode, nonce and every
 ///   seeded slot, all marked. An existing balance is kept.
 /// - Present with different non-empty code: [`SystemContractDeployError::ForeignCode`].
@@ -145,7 +176,9 @@ impl<DbError: core::error::Error + 'static> core::error::Error
 /// # Errors
 ///
 /// [`SystemContractDeployError::Database`] when the account cannot be loaded;
-/// [`SystemContractDeployError::ForeignCode`] when the address already holds other bytecode.
+/// [`SystemContractDeployError::ForeignCode`] when the address already holds other bytecode;
+/// [`SystemContractDeployError::ZeroFactoryNonce`] when the factory holds matching code at
+/// nonce 0.
 pub fn transact_deploy<DB: Database>(
     db: &mut DB,
     spec: &SystemContractSpec,
@@ -161,8 +194,11 @@ pub fn transact_deploy<DB: Database>(
 
     if let Some(info) = &existing {
         if info.code_hash == spec.code_hash {
+            if spec.require_nonzero_nonce && info.nonce == 0 {
+                return Err(SystemContractDeployError::ZeroFactoryNonce { address: spec.address });
+            }
             // `Account::from` copies the info and leaves status empty: neither touched nor
-            // created, which is the read-only witness entry.
+            // created, which is the read-only witness entry. An existing nonce is kept.
             return Ok(EvmState::from_iter([(spec.address, Account::from(info.clone()))]));
         }
         if info.code_hash != KECCAK_EMPTY {
@@ -230,7 +266,8 @@ pub fn system_contract_specs(
             CREATE2_FACTORY_ADDRESS,
             CREATE2_FACTORY_CODE,
             CREATE2_FACTORY_CODE_HASH,
-        ),
+        )
+        .require_nonzero_nonce(),
     ]
 }
 
