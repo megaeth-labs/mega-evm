@@ -9,7 +9,7 @@
 //! | [`COST_PER_STATE_BYTE`] | 1,530 | gas per byte of new state (EIP-8037 CPSB) | the Satin gas schedule |
 //! | [`SLOT_STATE_GAS`] | 97,920 | state gas of one new storage slot (64 bytes) | tests of the Satin gas schedule |
 //! | [`ACCOUNT_STATE_GAS`] | 183,600 | state gas of one new account (120 bytes) | tests of the Satin gas schedule |
-//! | [`COST_PER_HISTORY_BYTE`] | 88 | gas per history byte (CPHB) | history gas (not yet) |
+//! | [`COST_PER_HISTORY_BYTE`] | 88 | gas per history byte (CPHB) | history gas, and the schedule's deposited-code entry |
 //! | [`TX_GAS_LIMIT_CAP`] | 200,000,000 | execution cap: regular gas one transaction may spend | the spec configuration |
 //! | [`MAX_CONTRACT_SIZE`] | 524,288 | the most bytes a deployed contract may hold | the spec configuration |
 //! | [`MAX_INITCODE_SIZE`] | 1,048,576 | the most bytes an initcode may hold | the spec configuration |
@@ -21,8 +21,8 @@
 //! build can run other byte prices without touching this table. [`SLOT_STATE_GAS`] and
 //! [`ACCOUNT_STATE_GAS`] are two of those products written out: the tests assert the schedule
 //! against them, and changing one of the two moves a test rather than a price.
-//! The storage call stipend and the per-transaction and per-block state-gas limits are further
-//! placeholders; history gas and the state-gas limits add them when they land.
+//! The per-transaction and per-block state-gas limits are further placeholders, which the
+//! state-gas limits add when they land.
 
 use revm::primitives::eip8037::{NEW_ACCOUNT_BYTES, SSTORE_SET_BYTES};
 
@@ -38,6 +38,11 @@ pub const SLOT_STATE_GAS: u64 = SSTORE_SET_BYTES * COST_PER_STATE_BYTE;
 pub const ACCOUNT_STATE_GAS: u64 = NEW_ACCOUNT_BYTES * COST_PER_STATE_BYTE;
 
 /// Gas per history byte (logs, deployed code, write records, transaction body). Provisional.
+///
+/// Every history charge is a byte count from the byte table at this price, read through
+/// [`SatinPrices`](crate::SatinPrices) so a measurement build can run other prices; the schedule's
+/// `code_deposit_history_gas` entry is this number, which is the one history charge revm makes
+/// itself.
 pub const COST_PER_HISTORY_BYTE: u64 = 88;
 
 /// The execution cap: the most regular gas one transaction may spend. Gas above it goes to
