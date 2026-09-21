@@ -209,6 +209,22 @@ fn test_a_factory_with_matching_code_and_nonce_zero_fails_the_block() {
     assert!(message.contains(&CREATE2_FACTORY_ADDRESS.to_string()));
 }
 
+/// An empty-code account with a used nonce at a system address fails the block rather than
+/// being reset to a fresh deploy.
+#[test]
+fn test_a_used_empty_account_at_a_system_address_fails_the_block() {
+    let mut db = common::database();
+    db.set_account_nonce(ORACLE_CONTRACT_ADDRESS, 42);
+    let mut state = State::builder().with_database(db).build();
+    let mut executor = executor(&mut state, unlimited_ctx());
+    let err = executor
+        .apply_pre_execution_changes()
+        .expect_err("a used empty account must fail the block");
+    let message = err.to_string();
+    assert!(message.contains("nonce 42"), "unexpected error: {message}");
+    assert!(message.contains(&ORACLE_CONTRACT_ADDRESS.to_string()));
+}
+
 /// Foreign code at any of the seven addresses fails the block.
 #[test]
 fn test_foreign_code_at_a_system_address_fails_the_block() {

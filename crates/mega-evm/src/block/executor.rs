@@ -173,6 +173,13 @@ pub enum MegaBlockExecutionError {
         /// The factory address.
         address: Address,
     },
+    /// A system-contract address has empty code but a used nonce.
+    UsedEmptyAccount {
+        /// The system-contract address.
+        address: Address,
+        /// The nonce already on the account.
+        nonce: u64,
+    },
 }
 
 impl fmt::Display for MegaBlockExecutionError {
@@ -203,6 +210,10 @@ impl fmt::Display for MegaBlockExecutionError {
             Self::ZeroFactoryNonce { address } => write!(
                 f,
                 "EIP-7997 factory at {address} has matching code but nonce 0; refusing to accept a zero-nonce factory"
+            ),
+            Self::UsedEmptyAccount { address, nonce } => write!(
+                f,
+                "system contract at {address} has empty code but nonce {nonce}; refusing to overwrite a used account"
             ),
         }
     }
@@ -530,6 +541,9 @@ where
                 }
                 SystemContractDeployError::ZeroFactoryNonce { address } => {
                     MegaBlockExecutionError::ZeroFactoryNonce { address }.into()
+                }
+                SystemContractDeployError::UsedEmptyAccount { address, nonce } => {
+                    MegaBlockExecutionError::UsedEmptyAccount { address, nonce }.into()
                 }
             })?;
             self.deliver_pre_block(PreBlockStateSource::SystemContract(spec.address), state);

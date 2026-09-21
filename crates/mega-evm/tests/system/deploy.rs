@@ -240,8 +240,9 @@ fn test_matching_megaeth_code_at_nonce_zero_is_accepted() {
     assert_eq!(account.info.nonce, 0);
 }
 
-/// An account that exists with empty code (an EOA that received value) is a fresh deploy: the
-/// balance is kept and the slots are seeded.
+/// An account that exists with empty code and nonce 0 (an EOA that received value) is a fresh
+/// deploy: the balance is kept, the slots are seeded, and marking the account created clears
+/// any storage it had. That is the accepted bootstrap path.
 #[test]
 fn test_an_empty_account_at_the_address_is_a_fresh_deploy() {
     let mut db = MemoryDatabase::default();
@@ -253,10 +254,34 @@ fn test_an_empty_account_at_the_address_is_a_fresh_deploy() {
         .unwrap();
     let state = transact_deploy(&mut db, &spec).expect("empty code is a fresh deploy");
     let account = state.get(&SEQUENCER_REGISTRY_ADDRESS).unwrap();
-    assert!(account.is_created());
+    assert!(account.is_created(), "the bootstrap path marks created, which clears storage");
     assert_eq!(account.info.balance, U256::from(1_000));
+    assert_eq!(account.info.nonce, 1);
     assert_eq!(account.info.code_hash, SEQUENCER_REGISTRY_CODE_HASH);
     assert_eq!(account.storage.len(), 6);
+}
+
+/// An empty-code account with nonce 42 is a used account, not a prefunded EOA: refusing it
+/// avoids resetting the nonce and dropping storage under a `created` mark.
+#[test]
+fn test_an_empty_account_with_a_used_nonce_is_an_error() {
+    let mut db = MemoryDatabase::default();
+    db.set_account_balance(SEQUENCER_REGISTRY_ADDRESS, U256::from(1_000));
+    db.set_account_nonce(SEQUENCER_REGISTRY_ADDRESS, 42);
+
+    let spec = system_contract_specs(&config())
+        .into_iter()
+        .find(|spec| spec.address == SEQUENCER_REGISTRY_ADDRESS)
+        .unwrap();
+    let error = transact_deploy(&mut db, &spec).expect_err("a used empty account must fail");
+    match error {
+        SystemContractDeployError::UsedEmptyAccount { address, nonce } => {
+            assert_eq!(address, SEQUENCER_REGISTRY_ADDRESS);
+            assert_eq!(nonce, 42);
+        }
+        other => panic!("expected UsedEmptyAccount, got {other}"),
+    }
+    assert!(error.to_string().contains("nonce 42"));
 }
 
 /// Zero addresses in the registry config fail at load, not at the first block.

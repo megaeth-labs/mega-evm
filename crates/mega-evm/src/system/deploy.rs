@@ -120,6 +120,14 @@ pub enum SystemContractDeployError<DbError> {
         /// The factory address.
         address: Address,
     },
+    /// The address has empty code but a used nonce. Prefunding with balance alone is the
+    /// bootstrap path; a used account at a system address is not overwritten silently.
+    UsedEmptyAccount {
+        /// The system-contract address.
+        address: Address,
+        /// The nonce already on the account.
+        nonce: u64,
+    },
 }
 
 impl<DbError> From<DbError> for SystemContractDeployError<DbError> {
@@ -144,6 +152,12 @@ impl<DbError: fmt::Display> fmt::Display for SystemContractDeployError<DbError> 
                     "EIP-7997 factory at {address} has matching code but nonce 0; refusing to accept a zero-nonce factory"
                 )
             }
+            Self::UsedEmptyAccount { address, nonce } => {
+                write!(
+                    f,
+                    "system contract at {address} has empty code but nonce {nonce}; refusing to overwrite a used account"
+                )
+            }
         }
     }
 }
@@ -154,7 +168,9 @@ impl<DbError: core::error::Error + 'static> core::error::Error
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
             Self::Database(error) => Some(error),
-            Self::ForeignCode { .. } | Self::ZeroFactoryNonce { .. } => None,
+            Self::ForeignCode { .. } |
+            Self::ZeroFactoryNonce { .. } |
+            Self::UsedEmptyAccount { .. } => None,
         }
     }
 }
@@ -169,8 +185,12 @@ impl<DbError: core::error::Error + 'static> core::error::Error
 ///   path does not rewrite a nonce, so a genesis factory with the right code and nonce 0 would
 ///   otherwise stay invalid forever. The six MegaETH contracts leave that flag unset; they are not
 ///   EIP-7997, and matching code is accepted regardless of nonce.
-/// - Absent, or present with empty code: the created account with its bytecode, nonce and every
-///   seeded slot, all marked. An existing balance is kept.
+/// - Absent, or present with empty code and nonce 0: the created account with its bytecode, nonce
+///   and every seeded slot, all marked. An existing balance is kept. Marking the account created
+///   clears any storage it had; that is the accepted bootstrap path (prefunding with balance
+///   alone). An empty-code account with a nonzero nonce is
+///   [`SystemContractDeployError::UsedEmptyAccount`]: a used account at a system address is not
+///   overwritten silently.
 /// - Present with different non-empty code: [`SystemContractDeployError::ForeignCode`].
 ///
 /// # Errors
@@ -178,7 +198,9 @@ impl<DbError: core::error::Error + 'static> core::error::Error
 /// [`SystemContractDeployError::Database`] when the account cannot be loaded;
 /// [`SystemContractDeployError::ForeignCode`] when the address already holds other bytecode;
 /// [`SystemContractDeployError::ZeroFactoryNonce`] when the factory holds matching code at
-/// nonce 0.
+/// nonce 0;
+/// [`SystemContractDeployError::UsedEmptyAccount`] when the address has empty code and a
+/// used nonce.
 pub fn transact_deploy<DB: Database>(
     db: &mut DB,
     spec: &SystemContractSpec,
@@ -206,6 +228,12 @@ pub fn transact_deploy<DB: Database>(
                 address: spec.address,
                 expected: spec.code_hash,
                 found: info.code_hash,
+            });
+        }
+        if info.nonce != 0 {
+            return Err(SystemContractDeployError::UsedEmptyAccount {
+                address: spec.address,
+                nonce: info.nonce,
             });
         }
     }
