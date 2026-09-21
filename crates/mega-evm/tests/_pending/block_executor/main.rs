@@ -2,4 +2,3 @@
 
 mod block_limits;
 mod inspector;
-mod sequencer_registry;
