@@ -9,9 +9,11 @@ use alloy_evm::{EvmEnv, EvmFactory};
 use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
 use alloy_primitives::{address, Address, Bytes, Signature, TxKind, B256, U256};
 use mega_evm::{
-    test_utils::MemoryDatabase, BlockLimits, EmptyExternalEnv, MegaBlockExecutionCtx,
-    MegaBlockExecutor, MegaBlockExecutorFactory, MegaEvm, MegaEvmFactory, MegaHardforkConfig,
-    MegaSpecId, MegaTxEnvelope,
+    system::{SequencerRegistryConfig, MEGA_SYSTEM_ADDRESS},
+    test_utils::MemoryDatabase,
+    BlockLimits, EmptyExternalEnv, MegaBlockExecutionCtx, MegaBlockExecutor,
+    MegaBlockExecutorFactory, MegaEvm, MegaEvmFactory, MegaHardforkConfig, MegaSpecId,
+    MegaTxEnvelope,
 };
 use op_alloy_consensus::TxDeposit;
 use revm::{
@@ -64,9 +66,25 @@ pub(crate) fn evm_env() -> EvmEnv<MegaSpecId> {
     EvmEnv::new(cfg_env, block_env)
 }
 
-/// A schedule that activates Satin at genesis.
+/// The sequencer the tests seed into the registry, distinct from the system address and admin.
+pub(crate) const SEQUENCER: Address = address!("0x2222222222222222222222222222222222222222");
+
+/// The admin the tests seed into the registry, distinct from the system address and sequencer.
+pub(crate) const ADMIN: Address = address!("0x3333333333333333333333333333333333333333");
+
+/// Registry params the block tests attach to a Satin-at-genesis schedule.
+pub(crate) fn registry_config() -> SequencerRegistryConfig {
+    SequencerRegistryConfig {
+        initial_system_address: MEGA_SYSTEM_ADDRESS,
+        initial_sequencer: SEQUENCER,
+        initial_admin: ADMIN,
+        initial_from_block: 1,
+    }
+}
+
+/// A schedule that activates Satin at genesis and can seed the `SequencerRegistry`.
 pub(crate) fn chain_spec() -> MegaHardforkConfig {
-    MegaHardforkConfig::default().with_all_activated()
+    MegaHardforkConfig::default().with_all_activated().with_params(registry_config())
 }
 
 /// The context of a block held to `limits`.

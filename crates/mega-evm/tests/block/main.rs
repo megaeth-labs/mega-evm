@@ -3,6 +3,7 @@
 mod block_hashes;
 mod common;
 mod counters;
+mod deploy;
 mod eips;
 mod factory;
 mod inspector;
