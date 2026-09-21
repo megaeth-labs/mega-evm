@@ -79,9 +79,10 @@ pub fn testnet_hardforks() -> MegaHardforkConfig {
 /// The schedule an unknown chain runs: every fork up to [`FALLBACK_RUNG`], active at genesis.
 ///
 /// Satin requires a [`SequencerRegistryConfig`]. An unknown chain has no published roles, so
-/// every role is seeded with [`MEGA_SYSTEM_ADDRESS`] and `_initialFromBlock` is zero. The
-/// placeholder only matters when bootstrapping a fresh registry: on a chain whose registry is
-/// already deployed, the live roles are read from storage.
+/// every role is seeded with [`MEGA_SYSTEM_ADDRESS`], `_initialFromBlock` is zero, and
+/// `_minRotationDelay` is [`crate::system::PLACEHOLDER_MIN_ROTATION_DELAY`]. The placeholder
+/// only matters when bootstrapping a fresh registry: on a chain whose registry is already
+/// deployed, the live roles are read from storage.
 pub fn all_activated_hardforks() -> MegaHardforkConfig {
     let mut config = MegaHardforkConfig::new();
     for fork in MegaHardfork::VARIANTS {
@@ -103,7 +104,10 @@ pub fn hardfork_schedule(chain_id: u64) -> MegaHardforkConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{system::MEGA_SYSTEM_ADDRESS, MegaHardforks};
+    use crate::{
+        system::{MEGA_SYSTEM_ADDRESS, PLACEHOLDER_MIN_ROTATION_DELAY},
+        MegaHardforks,
+    };
 
     #[test]
     fn test_known_chains_have_satin_unscheduled() {
@@ -170,6 +174,8 @@ mod tests {
         assert_eq!(params.initial_sequencer, MEGA_SYSTEM_ADDRESS);
         assert_eq!(params.initial_admin, MEGA_SYSTEM_ADDRESS);
         assert_eq!(params.initial_from_block, 0);
+        assert_eq!(params.min_rotation_delay, PLACEHOLDER_MIN_ROTATION_DELAY);
+        assert_ne!(params.min_rotation_delay, 0);
     }
 
     /// The fallback rung is pinned, not inherited from [`MegaSpecId::default`].

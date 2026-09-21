@@ -7,7 +7,7 @@ use mega_evm::{
         keyless::{KEYLESS_DEPLOY_ADDRESS, KEYLESS_DEPLOY_CODE_HASH},
         storage_slots::{
             ADMIN, CURRENT_SEQUENCER, CURRENT_SYSTEM_ADDRESS, INITIAL_FROM_BLOCK,
-            INITIAL_SEQUENCER, INITIAL_SYSTEM_ADDRESS,
+            INITIAL_SEQUENCER, INITIAL_SYSTEM_ADDRESS, MIN_ROTATION_DELAY,
         },
         system_contract_specs, transact_deploy, SequencerRegistryConfig, SystemContractDeployError,
         SystemContractSpec, ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE_HASH,
@@ -32,6 +32,7 @@ fn config() -> SequencerRegistryConfig {
         initial_sequencer: SEQUENCER,
         initial_admin: ADMIN_ADDR,
         initial_from_block: 7,
+        min_rotation_delay: 100,
     }
 }
 
@@ -103,7 +104,7 @@ fn test_the_spec_list_is_the_seven_predeploys_in_order() {
     assert!(specs[6].require_nonzero_nonce, "EIP-7997 requires a nonzero factory nonce");
     assert!(specs[..5].iter().all(|spec| spec.seed.is_empty()));
     assert!(specs[6].seed.is_empty(), "the factory has no storage");
-    assert_eq!(specs[5].seed.len(), 6, "the registry seeds the six bootstrap slots");
+    assert_eq!(specs[5].seed.len(), 7, "the registry seeds the seven bootstrap slots");
 }
 
 /// A fresh deploy creates the account, installs the code and seeds every slot.
@@ -120,7 +121,7 @@ fn test_a_fresh_deploy_creates_the_account_and_seeds_storage() {
     assert!(account.is_created());
     assert_eq!(account.info.code_hash, SEQUENCER_REGISTRY_CODE_HASH);
     assert_eq!(account.info.nonce, 1);
-    assert_eq!(account.storage.len(), 6);
+    assert_eq!(account.storage.len(), 7);
     assert_eq!(
         account.storage.get(&CURRENT_SYSTEM_ADDRESS).unwrap().present_value,
         U256::from_be_bytes(MEGA_SYSTEM_ADDRESS.into_word().0)
@@ -142,6 +143,10 @@ fn test_a_fresh_deploy_creates_the_account_and_seeds_storage() {
         U256::from_be_bytes(SEQUENCER.into_word().0)
     );
     assert_eq!(account.storage.get(&INITIAL_FROM_BLOCK).unwrap().present_value, U256::from(7));
+    assert_eq!(
+        account.storage.get(&MIN_ROTATION_DELAY).unwrap().present_value,
+        U256::from(config().min_rotation_delay)
+    );
     db.commit(state);
 
     let state = transact_deploy(&mut db, factory).expect("the factory deploys");
@@ -258,7 +263,7 @@ fn test_an_empty_account_at_the_address_is_a_fresh_deploy() {
     assert_eq!(account.info.balance, U256::from(1_000));
     assert_eq!(account.info.nonce, 1);
     assert_eq!(account.info.code_hash, SEQUENCER_REGISTRY_CODE_HASH);
-    assert_eq!(account.storage.len(), 6);
+    assert_eq!(account.storage.len(), 7);
 }
 
 /// An empty-code account with nonce 42 is a used account, not a prefunded EOA: refusing it
@@ -301,6 +306,11 @@ fn test_registry_config_rejects_a_zero_address() {
     config.initial_admin = Address::ZERO;
     let err = config.validate().expect_err("zero admin");
     assert!(err.message.contains("initial_admin must not be zero"));
+
+    config = self::config();
+    config.min_rotation_delay = 0;
+    let err = config.validate().expect_err("zero min rotation delay");
+    assert!(err.message.contains("min_rotation_delay must not be zero"));
 }
 
 /// The seeded current-system-address slot is slot 0, which is the slot a later rotation read

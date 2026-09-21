@@ -18,7 +18,7 @@ use std::vec::Vec;
 use alloy_primitives::{address, b256, bytes, keccak256, Address, Bytes, B256, U256};
 use mega_system_contracts::sequencer_registry::storage_slots::{
     ADMIN, CURRENT_SEQUENCER, CURRENT_SYSTEM_ADDRESS, INITIAL_FROM_BLOCK, INITIAL_SEQUENCER,
-    INITIAL_SYSTEM_ADDRESS,
+    INITIAL_SYSTEM_ADDRESS, MIN_ROTATION_DELAY,
 };
 use revm::{
     primitives::KECCAK_EMPTY,
@@ -304,7 +304,7 @@ fn address_to_storage_value(address: Address) -> U256 {
     U256::from_be_bytes(address.into_word().0)
 }
 
-/// The six bootstrap slots the `SequencerRegistry` is created with.
+/// The seven bootstrap slots the `SequencerRegistry` is created with.
 fn registry_seed(config: &SequencerRegistryConfig) -> Vec<(U256, U256)> {
     Vec::from([
         (CURRENT_SYSTEM_ADDRESS, address_to_storage_value(config.initial_system_address)),
@@ -313,5 +313,6 @@ fn registry_seed(config: &SequencerRegistryConfig) -> Vec<(U256, U256)> {
         (INITIAL_SYSTEM_ADDRESS, address_to_storage_value(config.initial_system_address)),
         (INITIAL_SEQUENCER, address_to_storage_value(config.initial_sequencer)),
         (INITIAL_FROM_BLOCK, U256::from(config.initial_from_block)),
+        (MIN_ROTATION_DELAY, U256::from(config.min_rotation_delay)),
     ])
 }

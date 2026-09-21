@@ -27,10 +27,18 @@ pub use mega_system_contracts::sequencer_registry::LATEST_CODE_HASH as SEQUENCER
 
 pub use mega_system_contracts::sequencer_registry::{storage_slots, ISequencerRegistry};
 
+/// Delay the unknown-chain placeholder seeds, in blocks.
+///
+/// A zero delay would disable the reaction window the field exists to guarantee. Ten matches
+/// the contract's own tests: long enough that a rotation cannot activate in the same block.
+pub const PLACEHOLDER_MIN_ROTATION_DELAY: u64 = 10;
+
 /// Bootstrap configuration for the `SequencerRegistry`, attached to Satin via [`HardforkParams`].
 ///
 /// These values seed the registry's storage on a fresh deploy. After that the live roles are
-/// whatever the contract holds; rotating them is a later pre-block system call.
+/// whatever the contract holds; rotating them is a later pre-block system call. The contract
+/// has no setter for `_minRotationDelay`, so a matching-code registry cannot be repaired later
+/// through this helper: the delay must be seeded here, and it must not be zero.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SequencerRegistryConfig {
     /// Seeded into `_currentSystemAddress` and `_initialSystemAddress`.
@@ -41,11 +49,14 @@ pub struct SequencerRegistryConfig {
     pub initial_admin: Address,
     /// Seeded into `_initialFromBlock`: the first block at which historical lookups are valid.
     pub initial_from_block: u64,
+    /// Seeded into `_minRotationDelay`. Must be nonzero: a zero delay disables the reaction
+    /// window the field exists to guarantee.
+    pub min_rotation_delay: u64,
 }
 
 impl SequencerRegistryConfig {
     /// Placeholder roles for a chain that has none published: [`MEGA_SYSTEM_ADDRESS`] for every
-    /// address, and block zero.
+    /// address, block zero, and [`PLACEHOLDER_MIN_ROTATION_DELAY`].
     ///
     /// The unknown-chain fallback schedule uses this so a local chain can start. A real network
     /// attaches the roles governance chose.
@@ -55,6 +66,7 @@ impl SequencerRegistryConfig {
             initial_sequencer: MEGA_SYSTEM_ADDRESS,
             initial_admin: MEGA_SYSTEM_ADDRESS,
             initial_from_block: 0,
+            min_rotation_delay: PLACEHOLDER_MIN_ROTATION_DELAY,
         }
     }
 }
@@ -77,6 +89,11 @@ impl HardforkParams for SequencerRegistryConfig {
         if self.initial_admin.is_zero() {
             return Err(HardforkParamsError {
                 message: "SequencerRegistryConfig.initial_admin must not be zero".into(),
+            });
+        }
+        if self.min_rotation_delay == 0 {
+            return Err(HardforkParamsError {
+                message: "SequencerRegistryConfig.min_rotation_delay must not be zero".into(),
             });
         }
         Ok(())

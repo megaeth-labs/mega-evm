@@ -35,12 +35,12 @@ Do not add a `_pending/main.rs`.
 | the state-growth and KV limits | 56 | 55 | 1 | 0 | 35 | 21 |
 | revert-class aborts | 17 | 17 | 0 | 0 | 17 | 0 |
 | the pre-block system calls | 34 | 22 | 12 | 30 | 4 | 0 |
-| system contract deployment | 13 | 5 | 8 | 13 | 0 | 0 |
+| system contract deployment | 11 | 5 | 6 | 11 | 0 | 0 |
 | the oracle and control contracts | 77 | 77 | 0 | 67 | 10 | 0 |
 | native keyless deployment | 75 | 73 | 2 | 29 | 46 | 0 |
 | inspector support | 4 | 4 | 0 | 1 | 3 | 0 |
 | — (undecided: D57 preload-warm cold charging, D58 98/100 forwarding) | 7 | 7 | 0 | 0 | 0 | 7 |
-| **Total** | **486** | **452** | **34** | **278** | **180** | **28** |
+| **Total** | **484** | **452** | **32** | **276** | **180** | **28** |
 
 ## Tests ported in place
 
@@ -205,7 +205,7 @@ These 61 rows run in a real test target now, adapted to the Satin API and to the
 
 ## Tests ported by system contract deployment
 
-These 27 rows run in a real test target now, adapted to the Satin API and to the single-spec deploy, so the counts above are lower than the inventory's by exactly these rows.
+These 29 rows run in a real test target now, adapted to the Satin API and to the single-spec deploy, so the counts above are lower than the inventory's by exactly these rows.
 
 | Legacy file | Owner in the inventory | Tests | Now in |
 |---|---|---:|---|
@@ -218,8 +218,8 @@ These 27 rows run in a real test target now, adapted to the Satin API and to the
 | `src/system/keyless_deploy.rs` | system contract deployment (1) | 1 | `tests/system/deploy.rs` |
 | `src/system/limit_control.rs` | system contract deployment (3) | 3 | `tests/system/deploy.rs` |
 | `src/system/oracle.rs` | system contract deployment (4) | 4 | `tests/system/deploy.rs` |
-| `src/system/sequencer_registry.rs` | system contract deployment (7) | 7 | `tests/block/deploy.rs`, `tests/system/deploy.rs` |
-| **Total** | | **27** | |
+| `src/system/sequencer_registry.rs` | system contract deployment (9) | 9 | `tests/block/deploy.rs`, `tests/system/deploy.rs` |
+| **Total** | | **29** | |
 
 ## Tests retired after the inventory
 
@@ -328,4 +328,4 @@ Each cell lists `disposition count (mechanism · decision)`.
 | `src/limit/kv_update.rs` | 1 | undecided 1 (the state-growth and KV limits · D46) |
 | `src/limit/limit.rs` | 4 | keep 4 (history gas · D51) |
 | `src/sandbox/execution.rs` | 2 | keep 1 (native keyless deployment · rule); rewrite 1 (native keyless deployment · D16) |
-| `src/system/sequencer_registry.rs` | 17 | keep 8 (system contract deployment · the pre-block system calls for transact_apply_pending_changes); keep 9 (the pre-block system calls · the pre-block system calls for transact_apply_pending_changes) |
+| `src/system/sequencer_registry.rs` | 15 | keep 6 (system contract deployment · the pre-block system calls for transact_apply_pending_changes); keep 9 (the pre-block system calls · the pre-block system calls for transact_apply_pending_changes) |

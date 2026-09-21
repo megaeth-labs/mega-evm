@@ -7,7 +7,7 @@ use mega_evm::{
         keyless::{KEYLESS_DEPLOY_ADDRESS, KEYLESS_DEPLOY_CODE_HASH},
         storage_slots::{
             ADMIN as ADMIN_SLOT, CURRENT_SEQUENCER, CURRENT_SYSTEM_ADDRESS, INITIAL_FROM_BLOCK,
-            INITIAL_SEQUENCER, INITIAL_SYSTEM_ADDRESS,
+            INITIAL_SEQUENCER, INITIAL_SYSTEM_ADDRESS, MIN_ROTATION_DELAY,
         },
         SequencerRegistryConfig, ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE_HASH,
         CREATE2_FACTORY_ADDRESS, CREATE2_FACTORY_CODE, CREATE2_FACTORY_CODE_HASH,
@@ -69,6 +69,7 @@ fn assert_registry_account_seed(account: &Account, config: &SequencerRegistryCon
     assert_eq!(slot(INITIAL_SYSTEM_ADDRESS), addr_val(config.initial_system_address));
     assert_eq!(slot(INITIAL_SEQUENCER), addr_val(config.initial_sequencer));
     assert_eq!(slot(INITIAL_FROM_BLOCK), U256::from(config.initial_from_block));
+    assert_eq!(slot(MIN_ROTATION_DELAY), U256::from(config.min_rotation_delay));
 }
 
 fn assert_registry_seed(state: &mut State<MemoryDatabase>, config: &SequencerRegistryConfig) {
@@ -96,6 +97,10 @@ fn assert_registry_seed(state: &mut State<MemoryDatabase>, config: &SequencerReg
     assert_eq!(
         state.storage(SEQUENCER_REGISTRY_ADDRESS, INITIAL_FROM_BLOCK).unwrap(),
         U256::from(config.initial_from_block)
+    );
+    assert_eq!(
+        state.storage(SEQUENCER_REGISTRY_ADDRESS, MIN_ROTATION_DELAY).unwrap(),
+        U256::from(config.min_rotation_delay)
     );
 }
 

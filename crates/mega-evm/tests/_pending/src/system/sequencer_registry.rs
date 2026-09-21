@@ -51,54 +51,6 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_rejects_zero_min_rotation_delay() {
-        let config = SequencerRegistryRex6Config { rex6_min_rotation_delay: 0 };
-        let err = config.validate().expect_err("zero rex6_min_rotation_delay must be rejected");
-        assert!(
-            err.message.contains("rex6_min_rotation_delay must not be zero"),
-            "unexpected message: {}",
-            err.message,
-        );
-    }
-
-    #[test]
-    fn test_deploy_fresh_at_rex6_seeds_v2_with_min_rotation_delay() {
-        let mut db = InMemoryDB::default();
-        let mut state = State::builder().with_database(&mut db).build();
-
-        let result = transact_deploy_sequencer_registry(
-            &rex6_hardforks(),
-            0,
-            1000,
-            &mut state,
-            &test_config(),
-        )
-        .unwrap()
-        .unwrap();
-
-        let account = result.get(&SEQUENCER_REGISTRY_ADDRESS).unwrap();
-        assert!(account.is_created());
-        assert_eq!(account.info.code_hash, SEQUENCER_REGISTRY_CODE_HASH_REX6);
-        assert_eq!(
-            account.storage.len(),
-            7,
-            "fresh Rex6 deploy writes the 6 bootstrap slots plus _minRotationDelay"
-        );
-        assert_eq!(
-            account.storage.get(&MIN_ROTATION_DELAY).unwrap().present_value(),
-            U256::from(TEST_MIN_ROTATION_DELAY),
-        );
-        assert_eq!(
-            account.storage.get(&ADMIN).unwrap().present_value(),
-            U256::from_be_bytes(TEST_ADMIN.into_word().0),
-        );
-        assert_eq!(
-            account.storage.get(&INITIAL_FROM_BLOCK).unwrap().present_value(),
-            U256::from(1000),
-        );
-    }
-
-    #[test]
     fn test_resolve_rex6_expects_v2_code_hash() {
         // A V2 registry resolves normally at REX6.
         let mut db = InMemoryDB::default();

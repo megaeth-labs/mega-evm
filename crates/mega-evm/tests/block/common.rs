@@ -81,6 +81,7 @@ pub(crate) fn registry_config() -> SequencerRegistryConfig {
         initial_sequencer: SEQUENCER,
         initial_admin: ADMIN,
         initial_from_block: 1,
+        min_rotation_delay: 100,
     }
 }
 
