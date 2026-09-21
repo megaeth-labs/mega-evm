@@ -13,14 +13,16 @@ use mega_evm::{
     test_utils::MemoryDatabase,
     BlockLimits, EmptyExternalEnv, MegaBlockExecutionCtx, MegaBlockExecutor,
     MegaBlockExecutorFactory, MegaEvm, MegaEvmFactory, MegaHardforkConfig, MegaSpecId,
-    MegaTxEnvelope,
+    MegaTxEnvelope, PreBlockStateSource,
 };
 use op_alloy_consensus::TxDeposit;
 use revm::{
     context::{BlockEnv, CfgEnv},
     database::State,
     inspector::NoOpInspector,
+    state::EvmState,
 };
+use std::sync::{Arc, Mutex};
 
 /// The sender every test transaction comes from.
 pub(crate) const CALLER: Address = address!("0x2000000000000000000000000000000000000002");
@@ -166,6 +168,26 @@ fn build(
 ) -> TestExecutor<'_> {
     let evm = MegaEvmFactory::new().create_evm(state, env);
     MegaBlockExecutor::new(evm, ctx, spec, OpAlloyReceiptBuilder::default())
+}
+
+/// Shared log of pre-block states an executor observer records.
+pub(crate) type PreBlockLog = Arc<Mutex<Vec<(PreBlockStateSource, EvmState)>>>;
+
+/// Installs a recording observer on `executor` and returns the log it writes.
+pub(crate) fn record_pre_block(executor: &mut TestExecutor<'_>) -> PreBlockLog {
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let captured = Arc::clone(&log);
+    executor.set_pre_block_observer(Some(Box::new(
+        move |source: PreBlockStateSource, state: &EvmState| {
+            captured.lock().expect("pre-block observer").push((source, state.clone()));
+        },
+    )));
+    log
+}
+
+/// The states the log holds, in execution order.
+pub(crate) fn pre_block_states(log: &PreBlockLog) -> Vec<(PreBlockStateSource, EvmState)> {
+    log.lock().expect("pre-block observer").clone()
 }
 
 /// A legacy transaction from [`CALLER`].

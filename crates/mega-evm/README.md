@@ -41,7 +41,7 @@ No limit is enforced by default; `EvmTxRuntimeLimits` sets a data-size cap and a
 
 Block execution is in place too: `MegaBlockExecutor` is alloy-evm's `BlockExecutor` over a `MegaEvm`, with the block rules of the Karst base — a fork's activation block admits only deposit transactions, the data-availability footprint of the block's transactions is held to the block's gas limit and reported as its blob gas, and the L1 block info is read by the first transaction that prices against it, so the block's own L1 info deposit is what the transactions after it are priced with.
 Every transaction is held to the block's `BlockLimits`, and the block counts what its transactions spent on each of the three ledgers.
-`apply_pre_execution_changes` deploys the six MegaETH system contracts and the EIP-7997 `CREATE2` factory every block, idempotently, and leaves one hook point empty: the pre-block system calls.
+`apply_pre_execution_changes` deploys the six MegaETH system contracts and the EIP-7997 `CREATE2` factory every block, idempotently, hands each pre-block state (the two EIP calls and the seven deploys) to an optional observer before it commits — that sequence is the witness a stateless client needs — and leaves one hook point empty: the pre-block system calls.
 
 SALT pricing is in place: every EIP-8037 state gas charge costs the schedule's entry times the capacity of the SALT bucket it lands in, counted in minimum buckets, so a slot written into a region eight times as crowded as the minimum costs eight times as much.
 The multiplier applies to the state dimension only; regular gas never scales.

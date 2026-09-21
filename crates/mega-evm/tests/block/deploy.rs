@@ -9,21 +9,21 @@ use mega_evm::{
             ADMIN as ADMIN_SLOT, CURRENT_SEQUENCER, CURRENT_SYSTEM_ADDRESS, INITIAL_FROM_BLOCK,
             INITIAL_SEQUENCER, INITIAL_SYSTEM_ADDRESS,
         },
-        system_contract_specs, transact_deploy, SequencerRegistryConfig, ACCESS_CONTROL_ADDRESS,
-        ACCESS_CONTROL_CODE_HASH, CREATE2_FACTORY_ADDRESS, CREATE2_FACTORY_CODE,
-        CREATE2_FACTORY_CODE_HASH, HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS,
-        HIGH_PRECISION_TIMESTAMP_ORACLE_CODE_HASH, LIMIT_CONTROL_ADDRESS, LIMIT_CONTROL_CODE_HASH,
-        MEGA_SYSTEM_ADDRESS, ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE_HASH,
-        SEQUENCER_REGISTRY_ADDRESS, SEQUENCER_REGISTRY_CODE_HASH, SYSTEM_CONTRACT_DEPLOY_COUNT,
+        SequencerRegistryConfig, ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE_HASH,
+        CREATE2_FACTORY_ADDRESS, CREATE2_FACTORY_CODE, CREATE2_FACTORY_CODE_HASH,
+        HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS, HIGH_PRECISION_TIMESTAMP_ORACLE_CODE_HASH,
+        LIMIT_CONTROL_ADDRESS, LIMIT_CONTROL_CODE_HASH, MEGA_SYSTEM_ADDRESS,
+        ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE_HASH, SEQUENCER_REGISTRY_ADDRESS,
+        SEQUENCER_REGISTRY_CODE_HASH, SYSTEM_CONTRACT_DEPLOY_COUNT,
     },
     test_utils::MemoryDatabase,
-    MegaHardfork, MegaHardforkConfig, MegaHardforks,
+    MegaHardfork, MegaHardforkConfig, MegaHardforks, PreBlockStateSource,
 };
-use revm::{context::result::ExecutionResult, database::State, Database};
+use revm::{context::result::ExecutionResult, database::State, state::Account, Database};
 
 use crate::common::{
-    self, executor, executor_with_spec, recovered, registry_config, tx, unlimited_ctx, ADMIN,
-    SEQUENCER,
+    self, executor, executor_with_spec, pre_block_states, record_pre_block, recovered,
+    registry_config, tx, unlimited_ctx, ADMIN, SEQUENCER,
 };
 
 fn expected_hashes() -> [(Address, B256); SYSTEM_CONTRACT_DEPLOY_COUNT] {
@@ -45,6 +45,30 @@ fn assert_deployed(state: &mut State<MemoryDatabase>) {
         assert_eq!(info.nonce, 1, "{address} is a created contract");
         assert!(info.code.is_some(), "{address} carries its bytecode");
     }
+}
+
+fn deploy_sources() -> [PreBlockStateSource; SYSTEM_CONTRACT_DEPLOY_COUNT] {
+    expected_hashes().map(|(address, _)| PreBlockStateSource::SystemContract(address))
+}
+
+fn assert_pre_block_order(outcomes: &[(PreBlockStateSource, revm::state::EvmState)]) {
+    assert_eq!(outcomes.len(), 2 + SYSTEM_CONTRACT_DEPLOY_COUNT);
+    assert_eq!(outcomes[0].0, PreBlockStateSource::Eip2935);
+    assert_eq!(outcomes[1].0, PreBlockStateSource::Eip4788);
+    for (i, source) in deploy_sources().iter().enumerate() {
+        assert_eq!(outcomes[2 + i].0, *source);
+    }
+}
+
+fn assert_registry_account_seed(account: &Account, config: &SequencerRegistryConfig) {
+    let addr_val = |address: Address| U256::from_be_bytes(address.into_word().0);
+    let slot = |key: U256| account.storage.get(&key).expect("seeded").present_value;
+    assert_eq!(slot(CURRENT_SYSTEM_ADDRESS), addr_val(config.initial_system_address));
+    assert_eq!(slot(CURRENT_SEQUENCER), addr_val(config.initial_sequencer));
+    assert_eq!(slot(ADMIN_SLOT), addr_val(config.initial_admin));
+    assert_eq!(slot(INITIAL_SYSTEM_ADDRESS), addr_val(config.initial_system_address));
+    assert_eq!(slot(INITIAL_SEQUENCER), addr_val(config.initial_sequencer));
+    assert_eq!(slot(INITIAL_FROM_BLOCK), U256::from(config.initial_from_block));
 }
 
 fn assert_registry_seed(state: &mut State<MemoryDatabase>, config: &SequencerRegistryConfig) {
@@ -76,22 +100,46 @@ fn assert_registry_seed(state: &mut State<MemoryDatabase>, config: &SequencerReg
 }
 
 /// The first block deploys all seven predeploys with the pinned hashes, nonce 1, and the
-/// registry's seeded slots.
+/// registry's seeded slots. The executor's own observer sees the two EIP calls and then the
+/// seven deploy states, in that order.
 #[test]
 fn test_the_first_block_deploys_every_system_contract() {
     let mut state = common::state();
-    {
+    let outcomes = {
         let mut executor = executor(&mut state, unlimited_ctx());
+        let log = record_pre_block(&mut executor);
         executor.apply_pre_execution_changes().expect("the block starts");
+        assert_eq!(executor.gas().execution, 0);
+        assert_eq!(executor.gas().state, 0);
+        assert_eq!(executor.gas().history, 0);
+        pre_block_states(&log)
+    };
+    assert_pre_block_order(&outcomes);
+    let config = registry_config();
+    for (i, (address, hash)) in expected_hashes().into_iter().enumerate() {
+        let account = outcomes[2 + i]
+            .1
+            .get(&address)
+            .unwrap_or_else(|| panic!("{address} is in the deploy state"));
+        assert!(account.is_touched(), "{address} is touched");
+        assert!(account.is_created(), "{address} is created");
+        assert_eq!(account.info.code_hash, hash, "{address} has the wrong code");
+        assert_eq!(account.info.nonce, 1, "{address} is a created contract");
+        if address == SEQUENCER_REGISTRY_ADDRESS {
+            assert_registry_account_seed(account, &config);
+        } else {
+            assert!(account.storage.is_empty(), "{address} has no seeded storage");
+        }
     }
     assert_deployed(&mut state);
-    assert_registry_seed(&mut state, &registry_config());
-    assert_eq!(registry_config().initial_system_address, MEGA_SYSTEM_ADDRESS);
-    assert_eq!(registry_config().initial_sequencer, SEQUENCER);
-    assert_eq!(registry_config().initial_admin, ADMIN);
+    assert_registry_seed(&mut state, &config);
+    assert_eq!(config.initial_system_address, MEGA_SYSTEM_ADDRESS);
+    assert_eq!(config.initial_sequencer, SEQUENCER);
+    assert_eq!(config.initial_admin, ADMIN);
 }
 
-/// A second block changes nothing: each deploy is a read-only witness entry.
+/// A second block changes nothing in the seven deploys: the executor's own observer reports
+/// exactly seven read-only account entries, and the two EIP calls still precede them.
 #[test]
 fn test_the_second_block_is_seven_read_only_entries() {
     let mut state = common::state();
@@ -100,21 +148,24 @@ fn test_the_second_block_is_seven_read_only_entries() {
         executor.apply_pre_execution_changes().expect("the first block deploys");
     }
 
-    let specs = system_contract_specs(&registry_config());
-    assert_eq!(specs.len(), SYSTEM_CONTRACT_DEPLOY_COUNT);
-    for spec in &specs {
-        let outcome = transact_deploy(&mut state, spec).expect("the idempotent check");
-        assert_eq!(outcome.len(), 1, "{} is one witness account", spec.address);
-        let account = outcome.get(&spec.address).unwrap();
-        assert!(!account.is_touched(), "{} is not touched", spec.address);
-        assert!(!account.is_created(), "{} is not created", spec.address);
-        assert!(account.storage.is_empty(), "{} is not re-seeded", spec.address);
-        assert_eq!(account.info.code_hash, spec.code_hash);
-    }
-
-    {
+    let outcomes = {
         let mut executor = executor(&mut state, unlimited_ctx());
+        let log = record_pre_block(&mut executor);
         executor.apply_pre_execution_changes().expect("the second block is a no-op");
+        assert_eq!(executor.gas().execution, 0);
+        assert_eq!(executor.gas().state, 0);
+        assert_eq!(executor.gas().history, 0);
+        pre_block_states(&log)
+    };
+    assert_pre_block_order(&outcomes);
+    for (i, (address, hash)) in expected_hashes().into_iter().enumerate() {
+        let state = &outcomes[2 + i].1;
+        assert_eq!(state.len(), 1, "{address} is the only account in its witness");
+        let account = state.get(&address).unwrap();
+        assert!(!account.is_touched(), "{address} is not touched");
+        assert!(!account.is_created(), "{address} is not created");
+        assert!(account.storage.is_empty(), "{address} is not re-seeded");
+        assert_eq!(account.info.code_hash, hash);
     }
     assert_deployed(&mut state);
     assert_registry_seed(&mut state, &registry_config());

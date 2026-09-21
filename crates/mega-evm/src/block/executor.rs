@@ -34,6 +34,17 @@
 //! is the compile-time proof that an inspector observes and writes nothing back; the generic route
 //! is the checked one.
 //!
+//! # The pre-block observer
+//!
+//! Each pre-block step — the EIP-2935 call, the EIP-4788 call, and every system-contract deploy —
+//! produces an [`EvmState`] that this executor commits. alloy-evm 0.36 re-exports revm's
+//! `OnStateHook` (`on_state(&EvmState)`) but has no `set_state_hook` on [`BlockExecutor`] and no
+//! source tag, so this crate names the step ([`PreBlockStateSource`]) and carries an optional
+//! [`PreBlockStateObserver`]. Every pre-block state is handed to the observer **before** it is
+//! committed, in execution order. The sequence is the witness a stateless client needs: revm
+//! drops untouched accounts from the committed transition, so a caller that only saw the
+//! database after the commit would miss the read-only deploy entries of a later block.
+//!
 //! # What later mechanisms fill in
 //!
 //! [`apply_pre_execution_changes`](BlockExecutor::apply_pre_execution_changes) deploys the
@@ -196,6 +207,52 @@ impl From<MegaBlockExecutionError> for BlockExecutionError {
     }
 }
 
+/// Where a pre-block state change came from.
+///
+/// alloy-evm 0.36 re-exports revm's `OnStateHook` (`on_state(&EvmState)`) but has no
+/// `set_state_hook` on [`BlockExecutor`] and no source tag, so this crate names the step.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PreBlockStateSource {
+    /// The EIP-2935 history-storage system call.
+    Eip2935,
+    /// The EIP-4788 beacon-root system call.
+    Eip4788,
+    /// A system-contract or factory deploy at this address.
+    SystemContract(Address),
+}
+
+/// Receives each pre-block [`EvmState`] before the executor commits it.
+///
+/// The sequence is the witness a stateless client needs: every read and write a pre-block step
+/// made, tagged with its source, in execution order. Install one with
+/// [`MegaBlockExecutor::set_pre_block_observer`].
+pub trait PreBlockStateObserver: Send + 'static {
+    /// `state` is the witness of this step, not yet committed.
+    fn on_pre_block_state(&mut self, source: PreBlockStateSource, state: &EvmState);
+}
+
+impl<F> PreBlockStateObserver for F
+where
+    F: FnMut(PreBlockStateSource, &EvmState) + Send + 'static,
+{
+    fn on_pre_block_state(&mut self, source: PreBlockStateSource, state: &EvmState) {
+        self(source, state)
+    }
+}
+
+/// [`Debug`] skip for the optional observer: a trait object is not [`Debug`].
+struct OptionalPreBlockObserver(Option<Box<dyn PreBlockStateObserver>>);
+
+impl fmt::Debug for OptionalPreBlockObserver {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.0.is_some() {
+            f.write_str("Some(_)")
+        } else {
+            f.write_str("None")
+        }
+    }
+}
+
 /// Executes the transactions of one block on a Satin EVM.
 #[derive(Debug)]
 pub struct MegaBlockExecutor<E, R: OpReceiptBuilder, Spec> {
@@ -215,6 +272,8 @@ pub struct MegaBlockExecutor<E, R: OpReceiptBuilder, Spec> {
     is_canyon: bool,
     /// Whether Regolith is active, which decides whether a deposit receipt carries a nonce.
     is_regolith: bool,
+    /// Optional observer of each pre-block state, invoked before the state is committed.
+    pre_block_observer: OptionalPreBlockObserver,
 }
 
 impl<E, R: OpReceiptBuilder, Spec> MegaBlockExecutor<E, R, Spec> {
@@ -241,6 +300,13 @@ impl<E, R: OpReceiptBuilder, Spec> MegaBlockExecutor<E, R, Spec> {
     /// The gas the block's transactions have spent so far, by ledger.
     pub const fn gas(&self) -> &BlockGasCounters {
         &self.limiter.gas
+    }
+
+    /// Installs the observer that receives every pre-block state before it is committed.
+    ///
+    /// The sequence is the witness a stateless client needs. `None` turns observation off.
+    pub fn set_pre_block_observer(&mut self, observer: Option<Box<dyn PreBlockStateObserver>>) {
+        self.pre_block_observer = OptionalPreBlockObserver(observer);
     }
 }
 
@@ -281,6 +347,7 @@ where
             evm,
             receipts: Vec::new(),
             limiter: limits.to_block_limiter(),
+            pre_block_observer: OptionalPreBlockObserver(None),
         }
     }
 }
@@ -315,6 +382,14 @@ where
     /// Commits `state` to the database.
     fn commit(&mut self, state: EvmState) {
         self.evm.ctx_mut().db_mut().commit(state);
+    }
+
+    /// Hands `state` to the pre-block observer, then commits it.
+    fn deliver_pre_block(&mut self, source: PreBlockStateSource, state: EvmState) {
+        if let Some(observer) = self.pre_block_observer.0.as_mut() {
+            observer.on_pre_block_state(source, &state);
+        }
+        self.commit(state);
     }
 
     /// Refuses a data-availability footprint the block has no room left for.
@@ -388,9 +463,10 @@ where
     /// Runs what a block does before its transactions.
     ///
     /// In order: the admission gate, the reset of the block-hash record, the EIP-2935 and
-    /// EIP-4788 pre-block calls, and the system-contract deploys. Each step's state is committed
-    /// here rather than inside its helper, so a witness generator sees every step's read and
-    /// write set.
+    /// EIP-4788 pre-block calls, and the system-contract deploys. Each step's state is handed to
+    /// the pre-block observer and then committed here rather than inside its helper, so a
+    /// witness generator sees every step's read and write set. The sequence the observer
+    /// receives is the witness a stateless client needs.
     ///
     /// The L1 block info is not read here. op-revm's handler reads it when it deducts the caller
     /// of the first non-deposit transaction, which is after the block's own L1 info deposit has
@@ -417,7 +493,7 @@ where
             &mut self.evm,
         )?;
         if let Some(ResultAndState { state, .. }) = state {
-            self.commit(state);
+            self.deliver_pre_block(PreBlockStateSource::Eip2935, state);
         }
 
         let state = eips::transact_beacon_root_contract_call(
@@ -426,7 +502,7 @@ where
             &mut self.evm,
         )?;
         if let Some(ResultAndState { state, .. }) = state {
-            self.commit(state);
+            self.deliver_pre_block(PreBlockStateSource::Eip4788, state);
         }
 
         // The EIP-2935 / EIP-4788 calls above do not depend on these predeploys: they target
@@ -444,7 +520,7 @@ where
                         .into()
                 }
             })?;
-            self.commit(state);
+            self.deliver_pre_block(PreBlockStateSource::SystemContract(spec.address), state);
         }
 
         // Hook point: the pre-block system calls.

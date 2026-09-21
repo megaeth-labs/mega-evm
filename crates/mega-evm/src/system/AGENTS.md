@@ -40,6 +40,7 @@ The contract for a new or modified helper:
   A system address holding foreign bytecode is a broken chain.
 
 The returned `EvmState` is both the commit and the witness record of that step.
+The executor hands it to the pre-block observer, then commits: the sequence the observer sees is the witness a stateless client needs.
 
 ## ANTI-PATTERNS
 - Do not answer an unknown selector with a synthetic revert: the on-chain bytecode is the fall-through, and what it answers is the contract's own business.
@@ -61,5 +62,5 @@ The returned `EvmState` is both the commit and the witness record of that step.
 - Change the system transaction's validation: `tx.rs::validate_and_promote`, which `MegaHandler::validate_env` calls.
 - Change what a deposit-like transaction pays for the account it creates: `evm/execution.rs`, where the charge is made in the pre-execution phase.
 - Add a predeploy: a spec in `deploy.rs::system_contract_specs`, seeded from chain params if it has storage.
-- Change how a block deploys the contracts: `block/executor.rs::apply_pre_execution_changes` iterates the spec list and commits each witness.
+- Change how a block deploys the contracts: `block/executor.rs::apply_pre_execution_changes` iterates the spec list, delivers each witness to the pre-block observer, and commits.
 - Read the rotated system address, or run `applyPendingChanges`: the pre-block system calls own those.

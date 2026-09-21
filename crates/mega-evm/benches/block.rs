@@ -24,20 +24,21 @@ use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
 use alloy_primitives::{address, Address, Bytes, Signature, TxKind, B256, U256};
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 use mega_evm::{
-    system::{
-        system_contract_specs, transact_deploy, SequencerRegistryConfig,
-        SYSTEM_CONTRACT_DEPLOY_COUNT,
-    },
+    system::{SequencerRegistryConfig, SYSTEM_CONTRACT_DEPLOY_COUNT},
     test_utils::{BytecodeBuilder, MemoryDatabase},
     BlockLimits, MegaBlockExecutionCtx, MegaBlockExecutor, MegaEvmFactory, MegaHardforkConfig,
-    MegaSpecId, MegaTxEnvelope,
+    MegaSpecId, MegaTxEnvelope, PreBlockStateSource,
 };
 use revm::{
     bytecode::opcode::{CALLDATALOAD, SSTORE},
     context::{BlockEnv, CfgEnv},
     database::State,
+    state::EvmState,
 };
-use std::hint::black_box;
+use std::{
+    hint::black_box,
+    sync::{Arc, Mutex},
+};
 
 /// Transactions in the block.
 const N: u64 = 64;
@@ -204,21 +205,35 @@ fn bench_block(c: &mut Criterion) {
     group.finish();
 
     // The idempotent pre-block path: everything is already deployed, so each of the seven
-    // specs is a read-only witness entry. Checked once before measurement so a broken deploy
-    // does not get timed.
+    // specs is a read-only witness entry. Checked once against the executor's own observer
+    // before measurement so a broken deploy does not get timed.
     {
         let mut state = deployed_state();
-        let config = SequencerRegistryConfig::placeholder();
-        let mut read_only = 0usize;
-        for deploy_spec in system_contract_specs(&config) {
-            let outcome = transact_deploy(&mut state, &deploy_spec).expect("the idempotent check");
-            assert_eq!(outcome.len(), 1, "{} is one witness account", deploy_spec.address);
-            let account = outcome.get(&deploy_spec.address).expect("the account is present");
-            assert!(!account.is_touched(), "{} is not touched", deploy_spec.address);
-            assert!(!account.is_created(), "{} is not created", deploy_spec.address);
-            read_only += 1;
+        let evm = MegaEvmFactory::new().create_evm(&mut state, evm_env());
+        let mut executor =
+            MegaBlockExecutor::new(evm, block_ctx(), &spec, OpAlloyReceiptBuilder::default());
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&log);
+        executor.set_pre_block_observer(Some(Box::new(
+            move |source: PreBlockStateSource, state: &EvmState| {
+                captured.lock().expect("pre-block observer").push((source, state.clone()));
+            },
+        )));
+        executor.apply_pre_execution_changes().expect("the idempotent check");
+        let outcomes = log.lock().expect("pre-block observer");
+        let deploys: Vec<_> = outcomes
+            .iter()
+            .filter(|(source, _)| matches!(source, PreBlockStateSource::SystemContract(_)))
+            .collect();
+        assert_eq!(deploys.len(), SYSTEM_CONTRACT_DEPLOY_COUNT);
+        for (source, state) in &deploys {
+            assert_eq!(state.len(), 1, "{source:?} is one witness account");
+            let account = state.values().next().expect("the account is present");
+            assert!(!account.is_touched(), "{source:?} is not touched");
+            assert!(!account.is_created(), "{source:?} is not created");
         }
-        assert_eq!(read_only, SYSTEM_CONTRACT_DEPLOY_COUNT);
+        assert_eq!(outcomes[0].0, PreBlockStateSource::Eip2935);
+        assert_eq!(outcomes[1].0, PreBlockStateSource::Eip4788);
     }
 
     let mut group = c.benchmark_group("block");
