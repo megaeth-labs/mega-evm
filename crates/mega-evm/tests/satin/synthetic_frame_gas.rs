@@ -45,6 +45,13 @@ const TARGET: Address = address!("0000000000000000000000000000000000300001");
 const GAS_LIMIT: u64 = 100_000;
 const RESERVOIR: u64 = 7_000_000;
 
+/// The history gas the body of a transaction carrying `calldata_len` bytes costs. It is charged
+/// before the first frame and comes out of the reservoir, so a transaction with a pool starts
+/// with this much less of one.
+const fn body_history(calldata_len: u64) -> u64 {
+    (mega_evm::TX_BODY_SIZE + calldata_len) * mega_evm::constants::COST_PER_HISTORY_BYTE
+}
+
 fn call_frame_init(depth: usize) -> FrameInit {
     FrameInit {
         depth,
@@ -191,7 +198,7 @@ fn test_stopped_first_frame_keeps_the_reservoir_at_any_gas_limit() {
     };
     let (small, large) = (at(100_000_000), at(1_000_000_000));
     assert_eq!(small.reservoir_remaining(), 0);
-    assert_eq!(large.reservoir_remaining(), 1_000_000_000 - TX_GAS_LIMIT_CAP);
+    assert_eq!(large.reservoir_remaining(), 1_000_000_000 - TX_GAS_LIMIT_CAP - body_history(0));
     assert_eq!(small.tx_gas_used(), large.tx_gas_used());
     assert_eq!(small.state_gas_spent_final(), large.state_gas_spent_final());
 }
@@ -272,7 +279,8 @@ enum Expected {
     /// `remainingComputeGas` answers the regular gas its own frame was forwarded, the one answer
     /// of the matrix that depends on the transaction's gas limit: under the execution cap it is
     /// the transaction's limit less what pre-execution took, above the cap it is the cap's. So
-    /// the two answers differ by exactly what the cap holds back at the wider limit.
+    /// the two answers differ by what the cap holds back at the wider limit, and by the body's
+    /// history, which the narrow limit has no reservoir to pay from.
     ForwardedRegularGas,
 }
 
@@ -313,15 +321,16 @@ fn assert_the_reservoir_survives(to: Address, data: Bytes, value: U256, expected
         };
         assert_eq!(
             forwarded(&wide_answer) - forwarded(&narrow_answer),
-            TX_GAS_LIMIT_CAP - NARROW,
-            "the answer is the forwarded regular gas, which the execution cap holds back",
+            TX_GAS_LIMIT_CAP - NARROW + body_history(data.len() as u64),
+            "the answer is the forwarded regular gas, which the execution cap holds back; the \
+             narrow limit has no reservoir, so its body's history comes off that budget too",
         );
     }
     assert_eq!(narrow.reservoir_remaining(), 0, "there is no pool below the cap");
     assert_eq!(
         wide.reservoir_remaining(),
-        WIDE - TX_GAS_LIMIT_CAP,
-        "the call spends no state gas, so the whole pool comes back",
+        WIDE - TX_GAS_LIMIT_CAP - body_history(data.len() as u64),
+        "the call spends no state gas, so the whole pool but the body's history comes back",
     );
     assert_eq!(
         narrow.tx_gas_used(),

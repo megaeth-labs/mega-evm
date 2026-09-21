@@ -47,6 +47,9 @@ pub struct AdditionalLimit {
     /// Whether the transaction's first frame reached frame init. When it did not, the runtime
     /// phase before it ran out of gas and took back everything counted before it.
     frame_began: bool,
+    /// The history gas validation charged for the transaction's body, part of
+    /// [`history_gas_spent`](Self::history_gas_spent).
+    intrinsic_history_gas: u64,
     /// The history gas the settled transaction spent.
     history_gas_spent: u64,
 }
@@ -75,6 +78,7 @@ impl AdditionalLimit {
         self.target_is_authority = false;
         self.sender = Address::ZERO;
         self.frame_began = false;
+        self.intrinsic_history_gas = 0;
         self.history_gas_spent = 0;
     }
 
@@ -138,6 +142,20 @@ impl AdditionalLimit {
     /// The history gas the last settled transaction spent.
     pub const fn history_gas_spent(&self) -> u64 {
         self.history_gas_spent
+    }
+
+    /// The history gas validation charged for the transaction's body: the bytes the transaction
+    /// carries and the write records its inclusion makes, which are known before it runs.
+    ///
+    /// It rides in the EIP-8037 intrinsic state-gas slot, so the reservoir pays it first, and the
+    /// settled result takes it back out of the state gas it reports: it is history, not state.
+    pub const fn intrinsic_history_gas(&self) -> u64 {
+        self.intrinsic_history_gas
+    }
+
+    /// Records the history gas validation charged for the transaction's body.
+    pub(crate) const fn set_intrinsic_history_gas(&mut self, gas: u64) {
+        self.intrinsic_history_gas = gas;
     }
 
     /// Records the history gas the settled transaction spent.

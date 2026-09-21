@@ -65,15 +65,15 @@ One probe transaction each, at a 5000000 gas limit. `gas used` is the receipt's 
 
 | Probe | gas used | regular | state | history |
 |---|---:|---:|---:|---:|
-| empty call | 15000 | 15000 | 0 | 0 |
-| value transfer to an existing account | 21000 | 21000 | 0 | 0 |
-| self-transfer | 12000 | 12000 | 0 | 0 |
-| SSTORE 0 -> 1 | 135026 | 37106 | 97920 | 0 |
-| SSTORE 0 -> 1 -> 0 | 29770 | 37212 | 0 | 0 |
-| value CALL to an empty account | 232921 | 49321 | 183600 | 0 |
-| LOG1 with 32 data bytes | 16018 | 16018 | 0 | 0 |
-| create transaction deploying 0 bytes | 207687 | 24087 | 183600 | 0 |
-| create transaction deploying 32 bytes | 259484 | 24108 | 232560 | 2816 |
+| empty call | 42280 | 15000 | 0 | 27280 |
+| value transfer to an existing account | 48280 | 21000 | 0 | 27280 |
+| self-transfer | 39280 | 12000 | 0 | 27280 |
+| SSTORE 0 -> 1 | 162306 | 37106 | 97920 | 27280 |
+| SSTORE 0 -> 1 -> 0 | 51594 | 37212 | 0 | 27280 |
+| value CALL to an empty account | 260201 | 49321 | 183600 | 27280 |
+| LOG1 with 32 data bytes | 43298 | 16018 | 0 | 27280 |
+| create transaction deploying 0 bytes | 235935 | 24087 | 183600 | 28248 |
+| create transaction deploying 32 bytes | 287732 | 24108 | 232560 | 31064 |
 
 ## SALT scaling
 
@@ -81,12 +81,12 @@ The same probes again, with the SALT bucket the state charge lands in at `m` tim
 
 | Probe | m | gas used | regular | state | history |
 |---|---:|---:|---:|---:|---:|
-| SSTORE 0 -> 1 | 1 | 135026 | 37106 | 97920 | 0 |
-| SSTORE 0 -> 1 | 2 | 232946 | 37106 | 195840 | 0 |
-| SSTORE 0 -> 1 | 8 | 820466 | 37106 | 783360 | 0 |
-| value CALL to an empty account | 1 | 232921 | 49321 | 183600 | 0 |
-| value CALL to an empty account | 2 | 416521 | 49321 | 367200 | 0 |
-| value CALL to an empty account | 8 | 1518121 | 49321 | 1468800 | 0 |
+| SSTORE 0 -> 1 | 1 | 162306 | 37106 | 97920 | 27280 |
+| SSTORE 0 -> 1 | 2 | 260226 | 37106 | 195840 | 27280 |
+| SSTORE 0 -> 1 | 8 | 847746 | 37106 | 783360 | 27280 |
+| value CALL to an empty account | 1 | 260201 | 49321 | 183600 | 27280 |
+| value CALL to an empty account | 2 | 443801 | 49321 | 367200 | 27280 |
+| value CALL to an empty account | 8 | 1545401 | 49321 | 1468800 | 27280 |
 
 ## The execution cap
 

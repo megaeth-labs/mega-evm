@@ -653,23 +653,24 @@ fn test_runtime_out_of_gas_after_authorities_keeps_no_record() {
         tx.0.base.gas_limit = gas_limit;
         tx
     };
-    let run_at =
-        |gas_limit| MegaEvm::new(context(db())).execute_transaction(tx(gas_limit)).unwrap();
+    let run_at = |gas_limit| MegaEvm::new(context(db())).execute_transaction(tx(gas_limit));
+    // A limit below the intrinsic charge is a validation rejection rather than a run, which is a
+    // failure for the search all the same.
+    let succeeds_at = |gas_limit| run_at(gas_limit).is_ok_and(|o| o.result.is_success());
     // Gas is monotone here: every limit above the smallest one that succeeds succeeds too. Search
     // for that smallest limit rather than walking up to it, which the delegation's state gas puts
     // several hundred thousand gas away.
-    let (mut fails, mut succeeds) = (40_000u64, 1_000_000u64);
-    assert!(!run_at(fails).result.is_success(), "the low bound must fail");
-    assert!(run_at(succeeds).result.is_success(), "the high bound must succeed");
+    let (mut fails, mut succeeds) = (0u64, 1_000_000u64);
+    assert!(succeeds_at(succeeds), "the high bound must succeed");
     while succeeds - fails > 1 {
         let middle = fails + (succeeds - fails) / 2;
-        if run_at(middle).result.is_success() {
+        if succeeds_at(middle) {
             succeeds = middle;
         } else {
             fails = middle;
         }
     }
-    let outcome = run_at(succeeds - 1);
+    let outcome = run_at(succeeds - 1).expect("one gas short of succeeding is still included");
     assert!(outcome.result.is_halt(), "{:?}", outcome.result);
     assert_eq!(outcome.usage, LimitUsage::ZERO);
     assert_eq!(outcome.limit_exceeded, None);

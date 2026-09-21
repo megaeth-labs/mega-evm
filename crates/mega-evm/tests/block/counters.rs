@@ -123,6 +123,9 @@ fn test_the_execution_limit_packs_the_crossing_transaction_and_skips_the_next() 
 
 /// The state and history ledgers are counted, and nothing refuses a transaction on them: their
 /// block limits belong to the mechanisms that bring those ledgers.
+///
+/// The history a block counts is the sum of its transactions', which is what makes the block's
+/// column readable: three transactions carrying the same body count three bodies.
 #[test]
 fn test_the_state_and_history_ledgers_refuse_nothing() {
     let mut state = state_with_writer();
@@ -135,5 +138,9 @@ fn test_the_state_and_history_ledgers_refuse_nothing() {
 
     let counters = *executor.gas();
     assert!(counters.state > 0, "the Satin gas table prices state gas, and these writes draw it");
-    assert_eq!(counters.history, 0, "history gas arrives with the mechanism that meters it");
+    assert_eq!(
+        counters.history,
+        3 * mega_evm::TX_BODY_SIZE * mega_evm::constants::COST_PER_HISTORY_BYTE,
+        "three empty bodies, and these transactions append nothing else",
+    );
 }

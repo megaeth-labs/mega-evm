@@ -17,8 +17,9 @@ use std::vec::Vec;
 use alloy_evm::{precompiles::PrecompilesMap, Database};
 use revm::{
     context::{
-        result::FromStringError, transaction::TransactionType, ContextError, ContextTr, FrameStack,
-        JournalTr, Transaction,
+        result::{FromStringError, InvalidTransaction, ResultGas},
+        transaction::{AccessListItemTr, TransactionType},
+        ContextError, ContextTr, FrameStack, JournalTr, Transaction,
     },
     context_interface::{
         cfg::{gas::GasTracker, GasId, StateGasCharge, StateGasSite},
@@ -44,8 +45,8 @@ use revm::{
 };
 
 use crate::{
-    evm::inspector::frame_end_checked,
-    synthetic_frame_result,
+    evm::{history::tx_body_history_bytes, inspector::frame_end_checked},
+    history_gas, synthetic_frame_result,
     system::{is_deposit_like_transaction, MEGA_SYSTEM_ADDRESS},
     ExternalEnvTypes, JournalInspectTr, LimitCheck, MegaContext, MegaEvm, MegaInstructions,
 };
@@ -150,11 +151,55 @@ where
         self.op.validate_against_state_and_deduct_caller(evm, init_and_floor_gas)
     }
 
+    /// revm's intrinsic gas, with the history gas of the transaction's body added to the
+    /// EIP-8037 intrinsic state-gas slot.
+    ///
+    /// The body's bytes are fixed before the transaction runs, so their price is part of what a
+    /// gas limit has to cover for the transaction to be valid at all: a limit that falls short is
+    /// rejected before inclusion rather than included as an out-of-gas that burns the whole limit.
+    /// revm made that check on its own figure, so the grown figure is checked again here, with the
+    /// same error naming the same two numbers.
+    ///
+    /// The slot it rides in is the state one because that is the pool EIP-8037 pays it from: the
+    /// reservoir first, spilling onto the regular budget only past it, so a body does not take the
+    /// execution cap away from computation. The cap check revm made stands as it was — it tests
+    /// the regular intrinsic gas, which this does not touch — and
+    /// [`post_execution`](Handler::post_execution) takes the body back out of the state gas the
+    /// result reports.
+    ///
+    /// A transaction exempt from history gas carries none of it
+    /// ([`MegaContext::prices_history`](crate::MegaContext::prices_history)), so its intrinsic gas
+    /// is revm's own.
+    fn validate_initial_tx_gas(
+        &self,
+        evm: &mut Self::Evm,
+    ) -> Result<InitialAndFloorGas, Self::Error> {
+        let mut gas = self.op.validate_initial_tx_gas(evm)?;
+        let history =
+            if evm.ctx_ref().prices_history() { tx_body_history_gas(evm.ctx_ref()) } else { 0 };
+        if history == 0 {
+            return Ok(gas);
+        }
+        let gas_limit = evm.ctx_ref().tx().gas_limit();
+        let initial_gas = gas
+            .initial_regular_gas()
+            .saturating_add(gas.initial_state_gas_final().saturating_add(history));
+        if initial_gas > gas_limit {
+            return Err(
+                InvalidTransaction::CallGasCostMoreThanGasLimit { gas_limit, initial_gas }.into()
+            );
+        }
+        gas.set_initial_state_gas(gas.initial_state_gas_final() + history);
+        evm.ctx_mut().additional_limit.set_intrinsic_history_gas(history);
+        Ok(gas)
+    }
+
     /// Settles the outermost frame: pops its lane and, when the transaction is latched, turns its
     /// result into the latched stop; then settles its gas into the transaction's as op-revm does
     /// (op-revm replaces revm's settlement, so revm's never runs here): a stopped transaction
     /// settles like an EIP-8037 revert, its unspent regular gas and reservoir back to the sender.
-    /// Keeps the history gas the transaction spent.
+    /// Keeps the history gas the transaction spent: what the body was charged, and what the frames
+    /// charged net of what they gave back.
     fn last_frame_result(
         &mut self,
         evm: &mut Self::Evm,
@@ -163,9 +208,28 @@ where
     ) -> Result<(), Self::Error> {
         evm.ctx_mut().additional_limit.on_last_frame_return(frame_result);
         self.op.last_frame_result(evm, frame_result, parent_gas)?;
-        let history = frame_result.gas().history_gas_spent().max(0) as u64;
-        evm.ctx_mut().additional_limit.set_history_gas_spent(history);
+        let layer = &mut evm.ctx_mut().additional_limit;
+        let history = layer
+            .intrinsic_history_gas()
+            .saturating_add_signed(frame_result.gas().history_gas_spent());
+        layer.set_history_gas_spent(history);
         Ok(())
+    }
+
+    /// revm's post-execution, on the intrinsic gas with the body's history taken back out of the
+    /// state slot it rode in: the result's state gas is state gas alone, and the history the
+    /// transaction spent is reported on its own ledger.
+    fn post_execution(
+        &self,
+        evm: &mut Self::Evm,
+        exec_result: &mut FrameResult,
+        init_and_floor_gas: InitialAndFloorGas,
+        eip7702_gas_refund: i64,
+    ) -> Result<ResultGas, Self::Error> {
+        let history = evm.ctx_ref().additional_limit.intrinsic_history_gas();
+        let init_and_floor_gas = init_and_floor_gas
+            .with_initial_state_gas(init_and_floor_gas.initial_state_gas_final() - history);
+        self.op.post_execution(evm, exec_result, init_and_floor_gas, eip7702_gas_refund)
     }
 
     fn reimburse_caller(
@@ -599,6 +663,32 @@ fn inspect_logs<DB: Database, ExtEnvs: ExternalEnvTypes, INSP>(
     for log in logs {
         inspector.log(ctx, log);
     }
+}
+
+/// The history gas a transaction's body costs: its envelope and the write records its inclusion
+/// makes, its calldata, its authorizations and its access list, at the cost per history byte.
+///
+/// A byte count large enough to have no price saturates to `u64::MAX`, which no gas limit covers,
+/// so such a transaction is rejected for not covering its own intrinsic gas.
+fn tx_body_history_gas<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    ctx: &MegaContext<DB, ExtEnvs>,
+) -> u64 {
+    let tx = ctx.tx();
+    let (addresses, slots) = tx
+        .access_list()
+        .map(|items| {
+            items.fold((0_u64, 0_u64), |(addresses, slots), item| {
+                (addresses + 1, slots + item.storage_slots().count() as u64)
+            })
+        })
+        .unwrap_or_default();
+    let bytes = tx_body_history_bytes(
+        tx.input().len() as u64,
+        tx.authorization_list_len() as u64,
+        addresses,
+        slots,
+    );
+    history_gas(bytes).unwrap_or(u64::MAX)
 }
 
 /// Whether executing this transaction creates its caller's account: a deposit-like transaction

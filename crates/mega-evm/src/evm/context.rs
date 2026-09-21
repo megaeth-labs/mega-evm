@@ -1,16 +1,20 @@
 //! The execution context of the Satin engine.
 
 use delegate::delegate;
-use op_revm::{L1BlockInfo, OpSpecId};
+use op_revm::{transaction::deposit::DEPOSIT_TRANSACTION_TYPE, L1BlockInfo, OpSpecId};
 use revm::{
-    context::{BlockEnv, CfgEnv, Context, ContextError, ContextSetters, ContextTr, LocalContext},
+    context::{
+        BlockEnv, CfgEnv, Context, ContextError, ContextSetters, ContextTr, LocalContext,
+        Transaction,
+    },
+    context_interface::cfg::GasId,
     primitives::{Address, StorageKey},
     Database, Journal,
 };
 
 use crate::{
     constants,
-    evm::schedule::satin_gas_params,
+    evm::schedule::{satin_gas_params, satin_gas_params_history_exempt},
     system::{self, MEGA_SYSTEM_ADDRESS},
     AdditionalLimit, BlockHashRecord, BucketError, BucketMultipliers, EmptyExternalEnv,
     EvmTxRuntimeLimits, ExternalEnvTypes, ExternalEnvs, MegaSpecId, MegaTransaction, SaltEnv,
@@ -45,6 +49,8 @@ pub struct MegaContext<DB: Database, ExtEnvs: ExternalEnvTypes = EmptyExternalEn
     /// Whether the running transaction is system-originated, and so prices its state gas at the
     /// minimum bucket. See [`system::is_system_originated`].
     system_originated: bool,
+    /// Whether the running transaction pays history gas. See [`MegaContext::prices_history`].
+    prices_history: bool,
 }
 
 impl<DB: Database> MegaContext<DB, EmptyExternalEnv> {
@@ -71,6 +77,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
             block_hash_record: BlockHashRecord::default(),
             bucket_multipliers: BucketMultipliers::default(),
             system_originated: false,
+            prices_history: true,
         }
     }
 
@@ -195,6 +202,23 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
         self.system_originated
     }
 
+    /// Whether the running (or last) transaction pays history gas for the bytes it appends.
+    ///
+    /// Three kinds of transaction pay none: a deposit, a transaction the protocol itself produced
+    /// ([`system::is_system_originated`]) and a system call. What they append is the chain
+    /// carrying its own weight — a deposit the sequencer relays, the maintenance a system
+    /// transaction performs, the pre-block calls the protocol makes — and there is no sender to
+    /// charge for it.
+    ///
+    /// The two predicates are distinct and both are needed. A deposit is not system-originated:
+    /// it carries a user's source hash and a user's caller, so it prices its state gas by the
+    /// SALT bucket like any other transaction — it is exempt from history alone, because the
+    /// bytes it appends were paid for on L1. A system transaction is both: it prices at the
+    /// minimum bucket *and* pays no history.
+    pub const fn prices_history(&self) -> bool {
+        self.prices_history
+    }
+
     /// Prepares the common execution layer for a new transaction or system call. Every entry
     /// point of [`MegaEvm`](crate::MegaEvm) calls it before it runs the handler.
     ///
@@ -204,6 +228,8 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
         self.additional_limit.reset();
         self.bucket_multipliers.reset();
         self.system_originated = system::is_system_originated(&self.inner.tx, MEGA_SYSTEM_ADDRESS);
+        let exempt = self.inner.tx.tx_type() == DEPOSIT_TRANSACTION_TYPE || self.system_originated;
+        self.set_history_exempt(exempt);
     }
 
     /// Prepares the context for a system call. Every system-call entry point of
@@ -214,6 +240,25 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     pub(crate) fn on_new_system_call(&mut self) {
         self.on_new_tx();
         self.system_originated = true;
+        self.set_history_exempt(true);
+    }
+
+    /// Records whether the running transaction is exempt from history gas, and installs the
+    /// schedule that matches.
+    ///
+    /// The engine's own history charges read [`prices_history`](Self::prices_history); the one
+    /// charge revm makes itself reads the schedule, so an exempt transaction runs the schedule
+    /// that prices a deposited byte at zero. Both configuration views move together, and only
+    /// when the transaction's exemption differs from the one in place: the two tables are built
+    /// once for the process, so the swap is a shared clone.
+    fn set_history_exempt(&mut self, exempt: bool) {
+        self.prices_history = !exempt;
+        let id = GasId::code_deposit_history_gas();
+        let params = if exempt { satin_gas_params_history_exempt() } else { satin_gas_params() };
+        if self.inner.cfg.gas_params.get(id) != params.get(id) {
+            self.cfg.gas_params = params.clone();
+            self.inner.cfg.gas_params = params;
+        }
     }
 
     /// Consumes the context and returns the database, the configuration and the block.

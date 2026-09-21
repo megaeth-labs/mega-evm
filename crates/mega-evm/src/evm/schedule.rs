@@ -115,6 +115,23 @@ pub fn satin_gas_params() -> GasParams {
     TABLE.get_or_init(|| satin_gas_params_at(active_satin_prices())).clone()
 }
 
+/// The Satin gas schedule with no price on a history byte, for a transaction exempt from history
+/// gas.
+///
+/// The one history charge revm makes itself reads the schedule, so the way to keep it off an
+/// exempt transaction is to hand that transaction a schedule that prices it at zero. Built once
+/// and handed out as a shared clone, like [`satin_gas_params`]; every other entry is the same.
+pub fn satin_gas_params_history_exempt() -> GasParams {
+    static TABLE: OnceLock<GasParams> = OnceLock::new();
+    TABLE
+        .get_or_init(|| {
+            let mut params = satin_gas_params();
+            params.override_gas(HISTORY_GAS_PRICED.iter().map(|&(id, _)| (id(), 0)));
+            params
+        })
+        .clone()
+}
+
 /// The Satin gas schedule at `prices`.
 pub fn satin_gas_params_at(prices: SatinPrices) -> GasParams {
     let osaka = GasParams::new_spec(SpecId::OSAKA);
@@ -245,6 +262,22 @@ mod tests {
             let id = GasId::from_name(name).expect("a known gas id");
             assert_eq!(satin.get(id), value, "{name}");
             assert_eq!(amsterdam.get(id), value, "{name} is Amsterdam's");
+        }
+    }
+
+    /// The schedule an exempt transaction runs prices no history byte and is otherwise the same
+    /// table.
+    #[test]
+    fn test_the_exempt_schedule_only_drops_the_history_price() {
+        let exempt = satin_gas_params_history_exempt();
+        let satin = satin_gas_params();
+        assert_eq!(exempt.get(GasId::code_deposit_history_gas()), 0);
+        for slot in 0..=u8::MAX {
+            let id = GasId::new(slot);
+            if HISTORY_GAS_PRICED.iter().any(|&(entry, _)| entry() == id) {
+                continue;
+            }
+            assert_eq!(exempt.get(id), satin.get(id), "{} must not move", id.name());
         }
     }
 

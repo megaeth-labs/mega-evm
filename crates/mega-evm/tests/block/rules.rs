@@ -174,9 +174,10 @@ fn test_da_footprint_over_the_block_budget_refuses_the_transaction() {
 #[test]
 fn test_da_footprint_that_exactly_fills_the_block_budget_is_admitted() {
     const SCALAR: u16 = 128;
-    // Above the transaction's calldata floor under the Satin gas table, and below the footprint
-    // the scalar yields, so the block's gas limit still fits the transaction's gas.
-    const GAS_LIMIT: u64 = 1_300_000;
+    // Above what the transaction has to pay under the Satin gas table — its intrinsic charge and
+    // its body's history — and below the footprint the scalar yields, so the block's gas limit
+    // still fits the transaction's gas.
+    const GAS_LIMIT: u64 = 2_200_000;
 
     let tx = common::user_tx_with_input(0, common::incompressible(20_000), GAS_LIMIT);
     let footprint = mega_evm::MegaTransactionExt::estimated_da_size(&tx) * u64::from(SCALAR);

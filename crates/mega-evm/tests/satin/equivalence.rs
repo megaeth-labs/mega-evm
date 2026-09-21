@@ -1,12 +1,17 @@
 //! What `MegaEvm` on Satin adds to op-revm, and what it does not.
 //!
 //! An ordinary transaction on the same `CfgEnv`, block and L1 info must produce the same result
-//! through `MegaEvm` and through op-revm's `OpEvm`, down to every `ResultGas` field, the logs and
-//! the resulting state. The five cases at the end are the ones that diverge on purpose — the
+//! through `MegaEvm` and through op-revm's `OpEvm` — the same state, the same logs, the same
+//! refund and floor — and the same gas but for the history gas Satin charges, which op-revm has
+//! no ledger for. That is the one divergence every transaction has:
+//! [`assert_same_but_history`] holds each baseline case to `op-revm's total + the history ledger`
+//! and to op-revm's state gas exactly, and
+//! [`test_the_history_ledger_is_what_satin_adds_to_every_transaction`] pins what that ledger is
+//! made of. The six cases at the end are the ones that diverge for a reason of their own — the
 //! system contract interceptors, the `KeylessDeploy` overhead, the system-address transaction,
-//! the account a deposit creates for its sender and a crowded SALT bucket — and they pin both
-//! sides, so a divergence is never silently absorbed. Later changes (history gas, limits) add
-//! their own.
+//! the account a deposit creates for its sender, a crowded SALT bucket and the history ledger —
+//! and they pin both sides, so a divergence is never silently absorbed. Later changes (the
+//! limits) add their own.
 //!
 //! SALT pricing multiplies a state gas charge by the capacity of the bucket it lands in, and
 //! op-revm has no SALT to read. Every baseline case runs without a SALT environment, where every
@@ -14,20 +19,23 @@
 //! bucket and pins what the difference is and how large.
 
 use alloy_op_evm::OpTx;
-use alloy_primitives::{address, Address, TxKind, U256};
+use alloy_primitives::{address, Address, Bytes, TxKind, U256};
 use mega_evm::{
-    constants::{MAX_CONTRACT_SIZE, MAX_INITCODE_SIZE, SLOT_STATE_GAS, TX_GAS_LIMIT_CAP},
+    constants::{
+        COST_PER_HISTORY_BYTE, MAX_CONTRACT_SIZE, MAX_INITCODE_SIZE, SLOT_STATE_GAS,
+        TX_GAS_LIMIT_CAP,
+    },
     satin_gas_params,
     test_utils::{op_transaction, zero_fee_l1_block_info, BytecodeBuilder, MemoryDatabase},
-    MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
+    MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransactionOutcome, TX_BODY_SIZE,
 };
-use op_revm::{L1BlockInfo, OpEvm, OpSpecId, OpTransaction};
+use op_revm::{constants::BASE_FEE_RECIPIENT, L1BlockInfo, OpEvm, OpSpecId, OpTransaction};
 use revm::{
     context::{
         result::{ExecResultAndState, ExecutionResult},
         BlockEnv, CfgEnv, Context, ContextTr, TxEnv,
     },
-    context_interface::cfg::gas_params::Eip2780TxInfo,
+    context_interface::cfg::{gas_params::Eip2780TxInfo, GasId},
     inspector::NoOpInspector,
     state::EvmState,
     ExecuteEvm, Journal,
@@ -58,8 +66,9 @@ fn block() -> BlockEnv {
 }
 
 /// Runs `tx` on `db` through `MegaEvm`, then through op-revm's `OpEvm` configured with the
-/// `CfgEnv` the `MegaEvm` context holds. Returns both outcomes and that `CfgEnv`.
-fn run_both(db: MemoryDatabase, tx: TxEnv) -> (Outcome, Outcome, CfgEnv<OpSpecId>) {
+/// `CfgEnv` the `MegaEvm` context holds. Returns both outcomes — the `MegaEvm` one with its gas
+/// by ledger — and that `CfgEnv`.
+fn run_both(db: MemoryDatabase, tx: TxEnv) -> (MegaTransactionOutcome, Outcome, CfgEnv<OpSpecId>) {
     run_both_in(db, tx, block())
 }
 
@@ -68,9 +77,9 @@ fn run_both_in(
     db: MemoryDatabase,
     tx: TxEnv,
     block: BlockEnv,
-) -> (Outcome, Outcome, CfgEnv<OpSpecId>) {
+) -> (MegaTransactionOutcome, Outcome, CfgEnv<OpSpecId>) {
     let (mut mega, mut op, cfg) = both_evms(db, block);
-    let mega_outcome = mega.transact(OpTx(op_transaction(tx.clone()))).unwrap();
+    let mega_outcome = mega.execute_transaction(OpTx(op_transaction(tx.clone()))).unwrap();
     let op_outcome = op.transact(op_transaction(tx)).unwrap();
     (mega_outcome, op_outcome, cfg)
 }
@@ -91,8 +100,56 @@ fn both_evms(
     (MegaEvm::new(ctx), OpEvm::new(op_ctx, NoOpInspector), cfg)
 }
 
+/// Asserts the two outcomes agree on everything but the history gas Satin charges: `mega` spends
+/// exactly its history ledger more than `op` and nothing else moves. The whole `ResultGas` is
+/// compared against op-revm's with the two fields history touches rebuilt, so a field added later
+/// is covered too.
+///
+/// The reservoir pays history first and the regular budget pays what it cannot, which is why the
+/// reservoir left over saturates at zero rather than going negative.
+///
+/// Two derived figures follow the larger total rather than staying put, and neither is a second
+/// divergence. The EIP-3529 refund cap is a fraction of what the transaction spent, so a Satin
+/// transaction can keep a refund op-revm has to cap — EIP-8037 state gas already raises the cap
+/// the same way, which is why the refund is compared as `at least op-revm's` and pinned exactly
+/// where it matters ([`test_refund_matches_op_revm`]). The receipt's gas used is the spend
+/// against the EIP-7623 floor, so a floor that binds op-revm's receipt need not bind Satin's;
+/// the whole `ResultGas` is still compared, with the two fields history moves rebuilt.
+///
+/// The state is compared as it is, which holds because these transactions carry no gas price: a
+/// priced transaction pays the extra gas out of the sender's balance
+/// ([`test_fees_match_op_revm`]).
+fn assert_same_but_history(mega: &MegaTransactionOutcome, op: &Outcome) {
+    let history = mega.gas.history;
+    assert!(history > 0, "every Satin transaction pays for its own body");
+    let (m, o) = (mega.result.gas(), op.result.gas());
+    assert_eq!(m.total_gas_spent(), o.total_gas_spent() + history, "total gas spent");
+    assert_eq!(m.state_gas_spent_final(), o.state_gas_spent_final(), "state gas spent");
+    assert_eq!(mega.gas.state, o.state_gas_spent_final(), "the state ledger");
+    assert!(m.inner_refunded() >= o.inner_refunded(), "refund");
+    assert_eq!(m.floor_gas(), o.floor_gas(), "EIP-7623 floor");
+    assert_eq!(
+        m.reservoir_remaining(),
+        o.reservoir_remaining().saturating_sub(history),
+        "reservoir remaining"
+    );
+    assert_eq!(
+        m,
+        &(*o)
+            .with_total_gas_spent(o.total_gas_spent() + history)
+            .with_reservoir_remaining(o.reservoir_remaining().saturating_sub(history))
+            .with_refunded(m.inner_refunded()),
+        "ResultGas"
+    );
+    assert_eq!(mega.result.logs(), op.result.logs(), "logs");
+    assert_eq!(mega.result.output(), op.result.output(), "output");
+    assert_eq!(mega.result.is_success(), op.result.is_success(), "success");
+    assert_eq!(mega.state, op.state, "state");
+}
+
 /// Asserts the two outcomes agree field by field, then as a whole so a field added later is
-/// covered too.
+/// covered too. For the paths that charge no history: a system call, which the protocol pays
+/// nothing for.
 fn assert_same(mega: &Outcome, op: &Outcome) {
     let (m, o) = (mega.result.gas(), op.result.gas());
     assert_eq!(m.total_gas_spent(), o.total_gas_spent(), "total gas spent");
@@ -137,8 +194,13 @@ fn test_empty_transaction_matches_op_revm() {
 
     assert_satin_cfg(&cfg);
     assert!(mega.result.is_success());
-    assert_eq!(mega.result.gas().reservoir_remaining(), reservoir);
-    assert_same(&mega, &op);
+    assert_eq!(
+        mega.result.gas().reservoir_remaining(),
+        reservoir - mega.gas.history,
+        "the reservoir paid for the body",
+    );
+    assert_eq!(op.result.gas().reservoir_remaining(), reservoir, "op-revm has nothing to pay");
+    assert_same_but_history(&mega, &op);
 }
 
 #[test]
@@ -156,7 +218,7 @@ fn test_value_transfer_matches_op_revm() {
     assert_satin_cfg(&cfg);
     assert!(mega.result.is_success());
     assert_eq!(mega.state[&CALLEE].info.balance, U256::from(1_000));
-    assert_same(&mega, &op);
+    assert_same_but_history(&mega, &op);
 }
 
 #[test]
@@ -180,7 +242,7 @@ fn test_sstore_matches_op_revm() {
     // The new slot draws the Satin schedule's state gas, which op-revm on the same schedule
     // draws too: the schedule is configuration, not engine behavior.
     assert_eq!(mega.result.gas().state_gas_spent_final(), SLOT_STATE_GAS);
-    assert_same(&mega, &op);
+    assert_same_but_history(&mega, &op);
 }
 
 const COINBASE: Address = address!("0x00000000000000000000000000000000000c0ffe");
@@ -210,7 +272,26 @@ fn test_fees_match_op_revm() {
         mega.state[&CALLER].info.balance > U256::from(10u64.pow(18) - 10 * 1_000_000 - 1_000),
         "the unused gas came back"
     );
-    assert_same(&mega, &op);
+    assert_eq!(
+        mega.result.gas().total_gas_spent(),
+        op.result.gas().total_gas_spent() + mega.gas.history,
+        "the history ledger is the whole of the extra spend",
+    );
+    assert_eq!(mega.result.logs(), op.result.logs(), "logs");
+
+    // The extra gas is paid for at the block's prices: the sender is out all ten wei of it, the
+    // base fee's seven go to the fee vault and the priority fee's three to the beneficiary.
+    let history = U256::from(mega.gas.history);
+    let balance = |state: &EvmState, address: Address| state[&address].info.balance;
+    assert_eq!(balance(&op.state, CALLER) - balance(&mega.state, CALLER), history * U256::from(10),);
+    assert_eq!(
+        balance(&mega.state, BASE_FEE_RECIPIENT) - balance(&op.state, BASE_FEE_RECIPIENT),
+        history * U256::from(7),
+    );
+    assert_eq!(
+        balance(&mega.state, COINBASE) - balance(&op.state, COINBASE),
+        history * U256::from(3),
+    );
 }
 
 /// A storage refund is applied exactly as op-revm has it.
@@ -231,7 +312,22 @@ fn test_refund_matches_op_revm() {
     let (mega, op, _) = run_both(db, tx);
     assert!(mega.result.is_success());
     assert!(mega.result.gas().inner_refunded() > 0, "the clear is refunded");
-    assert_same(&mega, &op);
+
+    // The EIP-3529 cap is a fifth of what the transaction spent, so the history ledger raises it:
+    // op-revm has to cap the clearing refund here and Satin, spending more, keeps all of it.
+    // EIP-8037 state gas raises the same cap; this is that rule applied to the third ledger.
+    let quotient = satin_gas_params().get(GasId::max_refund_quotient());
+    assert_eq!(
+        op.result.gas().inner_refunded(),
+        op.result.gas().total_gas_spent() / quotient,
+        "op-revm is at the cap",
+    );
+    assert_eq!(
+        mega.result.gas().inner_refunded(),
+        satin_gas_params().get(GasId::sstore_clearing_slot_refund()),
+        "Satin keeps the whole clearing refund",
+    );
+    assert_same_but_history(&mega, &op);
 }
 
 /// A system call runs exactly as op-revm runs it.
@@ -425,8 +521,10 @@ fn test_the_keyless_deploy_overhead_diverges_from_op_revm() {
 
     // What each transaction spent, not what its receipt reports: op-revm spends less than the
     // EIP-7623 calldata floor here, so its receipt is lifted to the floor and Satin's is not.
-    // The two run the same bytecode on the same input, so the whole difference is the charge.
-    let charged = mega.result.gas().total_gas_spent() - op.result.gas().total_gas_spent();
+    // The two run the same bytecode on the same input, so what is left once the history ledger
+    // every Satin transaction carries is taken off is the charge.
+    let charged =
+        mega.result.gas().total_gas_spent() - op.result.gas().total_gas_spent() - mega.gas.history;
     assert_eq!(charged, KEYLESS_DEPLOY_OVERHEAD_GAS, "the divergence is the overhead, exactly");
 
     // Which floor, exactly: the one this transaction's own calldata buys, computed by revm from
@@ -454,9 +552,56 @@ fn test_the_keyless_deploy_overhead_diverges_from_op_revm() {
         "op-revm spends below the floor, so its receipt is the floor",
     );
     assert!(
-        mega.result.gas().tx_gas_used() - op.result.gas().tx_gas_used() < charged,
+        mega.result.gas().tx_gas_used() - op.result.gas().tx_gas_used() - mega.gas.history <
+            charged,
         "the floor lifts the cheaper receipt, so the receipts differ by less than the charge",
     );
+}
+
+/// Where Satin leaves op-revm on every transaction: the history gas of the bytes it appends to
+/// the chain.
+///
+/// op-revm charges nothing for them, so Satin's total is op-revm's plus the history ledger, to
+/// the gas — the divergence [`assert_same_but_history`] holds every baseline case to. This pins
+/// what the ledger is made of: an empty call carries its body and nothing else, and a byte of
+/// calldata adds a byte of history on top of the token rate both engines charge for it.
+#[test]
+fn test_the_history_ledger_is_what_satin_adds_to_every_transaction() {
+    if runs_at_measurement_prices() {
+        return;
+    }
+    let tx = |data: Bytes| TxEnv {
+        caller: CALLER,
+        kind: TxKind::Call(CALLEE),
+        data,
+        gas_limit: 1_000_000,
+        ..Default::default()
+    };
+    let (empty, op_empty, cfg) = run_both(MemoryDatabase::default(), tx(Bytes::new()));
+    let (with_data, op_with_data) = {
+        let (m, o, _) = run_both(MemoryDatabase::default(), tx(vec![0xab_u8; 100].into()));
+        (m, o)
+    };
+
+    assert_satin_cfg(&cfg);
+    assert_eq!(empty.gas.history, TX_BODY_SIZE * COST_PER_HISTORY_BYTE, "the body alone");
+    assert_eq!(
+        with_data.gas.history,
+        (TX_BODY_SIZE + 100) * COST_PER_HISTORY_BYTE,
+        "the body and one history byte per calldata byte",
+    );
+    assert_eq!(empty.gas.state, 0, "the body is history, not state");
+    assert_eq!(empty.result.gas().state_gas_spent_final(), 0);
+    assert_eq!(
+        with_data.result.gas().total_gas_spent() - op_with_data.result.gas().total_gas_spent(),
+        with_data.gas.history,
+    );
+    assert_eq!(
+        empty.result.gas().total_gas_spent() - op_empty.result.gas().total_gas_spent(),
+        empty.gas.history,
+    );
+    assert_same_but_history(&empty, &op_empty);
+    assert_same_but_history(&with_data, &op_with_data);
 }
 
 /// Where Satin leaves op-revm on purpose: a state gas charge in a crowded SALT bucket.
@@ -486,7 +631,7 @@ fn test_a_crowded_salt_bucket_is_where_satin_leaves_op_revm() {
     let envs = crowded_slot(minimal_envs(), CALLEE, U256::ZERO, MULTIPLIER);
     let ctx = salt_context(db.clone(), envs).with_block(block());
     let cfg = ctx.cfg().clone();
-    let mega = MegaEvm::new(ctx).transact(OpTx(op_transaction(tx.clone()))).unwrap();
+    let mega = MegaEvm::new(ctx).execute_transaction(OpTx(op_transaction(tx.clone()))).unwrap();
     let op_ctx = OpContext::new(db, OpSpecId::KARST)
         .with_cfg(cfg.clone())
         .with_block(block())
@@ -500,9 +645,9 @@ fn test_a_crowded_salt_bucket_is_where_satin_leaves_op_revm() {
     assert_eq!(op.result.gas().state_gas_spent_final(), SLOT_STATE_GAS);
     assert_eq!(mega.result.gas().state_gas_spent_final(), SLOT_STATE_GAS * MULTIPLIER);
     assert_eq!(
-        mega.result.gas().total_gas_spent() - op.result.gas().total_gas_spent(),
+        mega.result.gas().total_gas_spent() - op.result.gas().total_gas_spent() - mega.gas.history,
         SLOT_STATE_GAS * (MULTIPLIER - 1),
-        "the extra state gas is the whole of the extra spend",
+        "beside the history ledger, the extra state gas is the whole of the extra spend",
     );
 
     // Everything the transaction did is the same: the fees are zero here, so the multiplier
