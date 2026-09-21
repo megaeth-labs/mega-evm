@@ -6,21 +6,24 @@
 
 #[cfg(not(feature = "std"))]
 use alloc as std;
+use core::cell::Cell;
+
 use op_revm::{
     handler::{IsTxError, OpHandler},
     OpHaltReason, OpTransactionError,
 };
 use std::vec::Vec;
 
-use op_revm::precompiles::OpPrecompiles;
+use alloy_evm::{precompiles::PrecompilesMap, Database};
 use revm::{
     context::{
         result::FromStringError, transaction::TransactionType, ContextError, ContextTr, FrameStack,
         JournalTr, Transaction,
     },
     context_interface::{
-        cfg::gas::GasTracker,
+        cfg::{gas::GasTracker, GasId, StateGasCharge, StateGasSite},
         journaled_state::{account::JournaledAccountTr, entry::JournalEntry},
+        Host,
     },
     handler::{
         evm::{ContextDbError, FrameInitResult, FrameTr},
@@ -37,26 +40,34 @@ use revm::{
         InitialAndFloorGas, InstructionResult, InterpreterAction,
     },
     primitives::{Address, Bytes, CALL_STACK_LIMIT},
-    Database, Inspector, Journal,
+    Inspector, Journal,
 };
 
 use crate::{
-    evm::inspector::frame_end_checked, synthetic_frame_result, ExternalEnvTypes, LimitCheck,
-    MegaContext, MegaEvm, MegaInstructions,
+    evm::inspector::frame_end_checked,
+    synthetic_frame_result,
+    system::{is_deposit_like_transaction, MEGA_SYSTEM_ADDRESS},
+    ExternalEnvTypes, JournalInspectTr, LimitCheck, MegaContext, MegaEvm, MegaInstructions,
 };
 
 /// The Satin handler.
 ///
 /// It wraps op-revm's [`OpHandler`] and delegates every phase `MegaETH` does not extend to it.
+/// One handler runs one transaction, so what a phase learns about it is kept here.
 #[derive(Debug)]
 pub struct MegaHandler<EVM, ERROR, FRAME> {
     op: OpHandler<EVM, ERROR, FRAME>,
+    /// Whether validation found the caller of a deposit-like transaction empty, so executing it
+    /// creates that account. Read by the pre-execution phase, which charges for the account
+    /// before the transaction runs; by then the caller has been materialised and the fact is no
+    /// longer visible in the state.
+    deposit_creates_caller: Cell<bool>,
 }
 
 impl<EVM, ERROR, FRAME> MegaHandler<EVM, ERROR, FRAME> {
     /// Creates a handler.
     pub fn new() -> Self {
-        Self { op: OpHandler::new() }
+        Self { op: OpHandler::new(), deposit_creates_caller: Cell::new(false) }
     }
 }
 
@@ -78,7 +89,13 @@ where
     type Error = ERROR;
     type HaltReason = OpHaltReason;
 
-    /// revm's pre-execution, then the write records of the EIP-7702 authorities it applied.
+    /// revm's pre-execution, with the account a deposit-like transaction creates for its caller
+    /// charged first, then the write records of the EIP-7702 authorities it applied.
+    ///
+    /// The caller's account is charged where EIP-2780 charges the recipient's, and before it:
+    /// a transaction that creates both pays for both, and a transaction whose recipient is its
+    /// own caller pays once, because by the time EIP-2780 looks at the recipient the account
+    /// exists.
     ///
     /// When those records would cross a limit, the limit is enforced before the writes it
     /// guards: the authorizations are taken back with the gas they charged, and the transaction,
@@ -90,6 +107,10 @@ where
     ) -> Result<Option<PreExecutionOutput>, Self::Error> {
         self.load_accounts(evm)?;
         let checkpoint = evm.ctx().journal_mut().checkpoint();
+        if self.deposit_creates_caller.get() && !charge_created_caller(evm.ctx_mut(), gas) {
+            evm.ctx().journal_mut().checkpoint_revert(checkpoint);
+            return Ok(None);
+        }
         let gas_before = *gas;
         let Some(eip7702_refund) = self.apply_eip7702_auth_list(evm, gas)? else {
             evm.ctx().journal_mut().checkpoint_revert(checkpoint);
@@ -104,15 +125,28 @@ where
         Ok(Some(PreExecutionOutput { eip7702_refund, checkpoint }))
     }
 
+    /// Validates a transaction sent from the system address and promotes it to a deposit, then
+    /// validates the transaction as op-revm does — as a deposit, when it was promoted.
     fn validate_env(&self, evm: &mut Self::Evm) -> Result<(), Self::Error> {
+        crate::system::validate_and_promote::<_, _, Self::Error>(
+            evm.ctx_mut(),
+            MEGA_SYSTEM_ADDRESS,
+        )?;
         self.op.validate_env(evm)
     }
 
+    /// Notes whether this transaction's caller is an account executing it creates, then deducts
+    /// the caller as op-revm does, which is what creates it.
+    ///
+    /// Only a deposit-like transaction can have one: every other transaction pays a fee, which
+    /// an empty account cannot. The account is charged for in
+    /// [`pre_execution`](Handler::pre_execution).
     fn validate_against_state_and_deduct_caller(
         &self,
         evm: &mut Self::Evm,
         init_and_floor_gas: &mut InitialAndFloorGas,
     ) -> Result<(), Self::Error> {
+        self.deposit_creates_caller.set(deposit_creates_caller(evm.ctx_mut())?);
         self.op.validate_against_state_and_deduct_caller(evm, init_and_floor_gas)
     }
 
@@ -203,7 +237,7 @@ where
 impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, ExtEnvs> {
     type Context = MegaContext<DB, ExtEnvs>;
     type Instructions = MegaInstructions<DB, ExtEnvs>;
-    type Precompiles = OpPrecompiles;
+    type Precompiles = PrecompilesMap;
     type Frame = EthFrame<EthInterpreter>;
 
     #[inline]
@@ -230,7 +264,8 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
     /// 1. the latch: a latched transaction's frame is answered with the stop;
     /// 2. the depth guard: a `CALL` or `STATICCALL` past the call-stack limit is answered with
     ///    `CallTooDeep` before anything could intercept it;
-    /// 3. system contract interception ([`MegaEvm::intercept`]);
+    /// 3. system contract interception ([`MegaEvm::intercept`]), which answers the frame or charges
+    ///    it;
     /// 4. the keyless deployment rewrite ([`MegaEvm::rewrite_keyless`]);
     /// 5. the frame's lane is pushed and the writes its start makes are counted; a limit they cross
     ///    answers the frame with the stop before it runs;
@@ -247,13 +282,13 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
     #[inline]
     fn frame_init(
         &mut self,
-        frame_init: FrameInit,
+        mut frame_init: FrameInit,
     ) -> Result<FrameInitResult<'_, Self::Frame>, ContextDbError<Self::Context>> {
         if let Some(result) = answer_before_building(&mut self.inner.ctx, &frame_init)? {
             self.inner.ctx.additional_limit.push_empty_frame();
             return Ok(ItemOrResult::Result(result));
         }
-        if let Some(result) = self.intercept(&frame_init) {
+        if let Some(result) = self.intercept(&mut frame_init) {
             self.inner.ctx.additional_limit.push_empty_frame();
             return Ok(ItemOrResult::Result(result));
         }
@@ -474,14 +509,22 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
     /// System contract interception: a `CALL` or `STATICCALL` to a system contract answered by
     /// `MegaETH` instead of the contract's code.
     ///
-    /// The extension point of the system contract interceptors; nothing is intercepted yet. An
-    /// answer is a [`synthetic_frame_result`](crate::synthetic_frame_result), so it settles like
-    /// a frame revm ran.
-    // Takes the EVM mutably: an interceptor reads and writes the context.
-    #[allow(clippy::needless_pass_by_ref_mut)]
+    /// The scheme guard is here: `CALLCODE` and `DELEGATECALL` run the callee's code in the
+    /// caller's context, where a system contract's semantics would apply to the wrong account,
+    /// so they never reach an interceptor and revm builds their frame as it does for any other
+    /// contract. A creation reaches no interceptor either.
+    ///
+    /// An answer is a [`synthetic_frame_result`](crate::synthetic_frame_result), so it settles
+    /// like a frame revm ran. An interceptor that lets the frame run may charge it instead of
+    /// answering it, which is why the frame is taken mutably. What each contract answers is in
+    /// the `system` module.
     #[inline]
-    const fn intercept(&mut self, _frame_init: &FrameInit) -> Option<FrameResult> {
-        None
+    fn intercept(&mut self, frame_init: &mut FrameInit) -> Option<FrameResult> {
+        let FrameInput::Call(inputs) = &mut frame_init.frame_input else { return None };
+        if !matches!(inputs.scheme, CallScheme::Call | CallScheme::StaticCall) {
+            return None;
+        }
+        crate::system::intercept(&mut self.inner.ctx, inputs, frame_init.depth)
     }
 
     /// The keyless deployment rewrite: a keyless deployment call turned into the native creation
@@ -556,6 +599,38 @@ fn inspect_logs<DB: Database, ExtEnvs: ExternalEnvTypes, INSP>(
     for log in logs {
         inspector.log(ctx, log);
     }
+}
+
+/// Whether executing this transaction creates its caller's account: a deposit-like transaction
+/// whose caller is empty, which the deposit path materialises by bumping its nonce or by minting
+/// to it.
+///
+/// Read before op-revm deducts the caller, which is what materialises the account. Every other
+/// transaction pays a fee its caller must hold, so it has an account already.
+///
+/// The read does not warm the account: the transaction's own touches of it pay what they would
+/// have paid without the check.
+fn deposit_creates_caller<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    ctx: &mut MegaContext<DB, ExtEnvs>,
+) -> Result<bool, DB::Error> {
+    if !is_deposit_like_transaction(ctx.tx(), MEGA_SYSTEM_ADDRESS) {
+        return Ok(false);
+    }
+    let caller = ctx.tx().caller();
+    Ok(ctx.journal_mut().inspect_account(caller, false)?.info.is_empty())
+}
+
+/// Charges the state gas of the account a deposit-like transaction creates for its caller, as
+/// EIP-2780 charges the account a value transfer creates for its recipient. `false` when the
+/// transaction cannot pay it, which is an out-of-gas before it runs.
+fn charge_created_caller<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    ctx: &mut MegaContext<DB, ExtEnvs>,
+    gas: &mut GasTracker,
+) -> bool {
+    let caller = ctx.tx().caller();
+    let charge = StateGasCharge::one(GasId::new_account_state_gas(), StateGasSite::account(caller));
+    let Some(state_gas) = ctx.state_gas_charge(charge) else { return false };
+    gas.record_state_cost(state_gas)
 }
 
 /// The nonce of an account the journal holds; zero for one it does not.

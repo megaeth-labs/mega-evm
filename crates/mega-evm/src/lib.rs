@@ -56,4 +56,6 @@ pub type EvmFactory<ExtEnvFactory> = MegaEvmFactory<ExtEnvFactory>;
 /// Alias for [`MegaContext`]
 pub type Context<DB, ExtEnvs> = MegaContext<DB, ExtEnvs>;
 /// Alias for [`MegaBlockExecutor`]
-pub type BlockExecutor<E> = MegaBlockExecutor<E>;
+pub type BlockExecutor<E, R, Spec> = MegaBlockExecutor<E, R, Spec>;
+/// Alias for [`MegaBlockExecutorFactory`]
+pub type BlockExecutorFactory<R, Spec, EvmF> = MegaBlockExecutorFactory<R, Spec, EvmF>;

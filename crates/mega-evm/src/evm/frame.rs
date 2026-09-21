@@ -69,14 +69,7 @@ pub fn synthetic_frame_result(
     output: Bytes,
 ) -> FrameResult {
     match input {
-        FrameInput::Call(inputs) => FrameResult::Call(CallOutcome {
-            result: InterpreterResult::new(result, output, untouched_call_gas(inputs)),
-            memory_offset: inputs.return_memory_offset.clone(),
-            was_precompile_called: false,
-            precompile_call_logs: Default::default(),
-            charged_new_account_state_gas: inputs.charged_new_account_state_gas,
-            charged_state_gas_address: inputs.target_address,
-        }),
+        FrameInput::Call(inputs) => synthetic_call_result(inputs, result, output),
         FrameInput::Create(inputs) => FrameResult::Create(CreateOutcome {
             result: InterpreterResult::new(result, output, untouched_create_gas(inputs)),
             address: None,
@@ -85,6 +78,24 @@ pub fn synthetic_frame_result(
         }),
         FrameInput::Empty => unreachable!("a frame input always names a call or a creation"),
     }
+}
+
+/// A result for the call `inputs` would start, built without running it, as
+/// [`synthetic_frame_result`] builds one: for a mechanism that already holds the call's inputs
+/// (a system contract interceptor).
+pub fn synthetic_call_result(
+    inputs: &CallInputs,
+    result: InstructionResult,
+    output: Bytes,
+) -> FrameResult {
+    FrameResult::Call(CallOutcome {
+        result: InterpreterResult::new(result, output, untouched_call_gas(inputs)),
+        memory_offset: inputs.return_memory_offset.clone(),
+        was_precompile_called: false,
+        precompile_call_logs: Default::default(),
+        charged_new_account_state_gas: inputs.charged_new_account_state_gas,
+        charged_state_gas_address: inputs.target_address,
+    })
 }
 
 /// Settles `result`'s gas into `caller_gas` exactly as revm's frame return does: the calling

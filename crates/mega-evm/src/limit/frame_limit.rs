@@ -131,6 +131,13 @@ impl FrameLimitTracker {
         self.total_used = self.total_used.saturating_add(usage);
     }
 
+    /// Counts `usage` on the transaction's own lane, whatever frame is running: what it stands
+    /// for is outside the state, so no frame's failure takes it back.
+    pub(crate) fn record_tx(&mut self, usage: LimitUsage) {
+        self.tx_used = self.tx_used.saturating_add(usage);
+        self.total_used = self.total_used.saturating_add(usage);
+    }
+
     /// Takes `usage` back on the running frame's lane. Outside any frame nothing is taken back.
     pub(crate) fn refund(&mut self, usage: LimitUsage) {
         if let Some(lane) = self.lanes.last_mut() {

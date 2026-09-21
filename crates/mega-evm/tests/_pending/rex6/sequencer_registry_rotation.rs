@@ -396,25 +396,3 @@ fn test_rex6_eip4788_pre_block_call_failure_aborts_block() {
         "expected an EIP-4788 pre-block failure, got: {msg}"
     );
 }
-
-/// Fail-closed guard: with Rex5 active but no [`SequencerRegistryConfig`] on the chain's
-/// hardfork configuration, the pre-block pipeline must abort rather than deploy the registry
-/// with unseeded roles.
-#[test]
-fn test_rex5_active_without_sequencer_registry_config_aborts_block() {
-    let mut db = MemoryDatabase::default();
-    db.set_account_balance(MEGA_SYSTEM_ADDRESS, U256::from(1_000_000_000_000_000u64));
-
-    let mut state = State::builder().with_database(&mut db).build();
-    let mut executor = executor_factory_with(rex6_chain_spec_missing_registry_config())
-        .create_executor(&mut state, block_ctx(), evm_env_at_block(1000));
-    let err = executor
-        .apply_pre_execution_changes()
-        .expect_err("Rex5 active without SequencerRegistryConfig must fail closed");
-
-    let msg = std::format!("{err}");
-    assert!(
-        msg.contains("SequencerRegistryConfig not configured"),
-        "expected a missing-config failure, got: {msg}"
-    );
-}

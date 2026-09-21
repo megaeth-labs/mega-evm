@@ -14,12 +14,21 @@
 //!
 //! A wrapper keeps the static gas revm's table charges for its opcode, so the gas schedule is
 //! unchanged.
+//!
+//! The table also carries the Amsterdam opcodes (`DUPN`, `SWAPN`, `EXCHANGE`, `SLOTNUM`), which
+//! the base spec gates off: Satin takes the Amsterdam schedule, so it takes the opcodes with it.
+//! They are installed before the wrappers go in, because installing them after would replace a
+//! wrapped entry with an unwrapped one. `CLZ` needs no installation — its own gate is Osaka, so
+//! the base spec already has it.
 
 use revm::{
     bytecode::opcode::{LOG0, LOG1, LOG2, LOG3, LOG4, SELFDESTRUCT, SSTORE},
     handler::instructions::EthInstructions,
     interpreter::{
-        instructions::host, interpreter::EthInterpreter, interpreter_types::LoopControl,
+        enable_amsterdam_opcodes, instruction_table,
+        instructions::{gas_table_spec, host},
+        interpreter::EthInterpreter,
+        interpreter_types::LoopControl,
         Instruction, InstructionContext, InstructionExecResult, InstructionResult, Interpreter,
         InterpreterAction,
     },
@@ -37,12 +46,14 @@ type Ctx<'a, DB, ExtEnvs> = InstructionContext<'a, MegaContext<DB, ExtEnvs>, Eth
 /// An instruction of the Satin engine.
 type InstructionFn<DB, ExtEnvs> = fn(Ctx<'_, DB, ExtEnvs>) -> InstructionExecResult;
 
-/// The Satin instruction table: revm's for the base spec, with `SSTORE`, `LOG0`..`LOG4` and
-/// `SELFDESTRUCT` wrapped.
+/// The Satin instruction table: revm's for the base spec, with the Amsterdam opcodes activated
+/// and `SSTORE`, `LOG0`..`LOG4` and `SELFDESTRUCT` wrapped.
 pub(crate) fn mega_instructions<DB: Database, ExtEnvs: ExternalEnvTypes>(
     spec: SpecId,
 ) -> MegaInstructions<DB, ExtEnvs> {
-    let mut instructions = EthInstructions::new_mainnet_with_spec(spec);
+    let mut table = instruction_table();
+    enable_amsterdam_opcodes(&mut table);
+    let mut instructions = EthInstructions::new(table, gas_table_spec(spec), spec);
     let wrappers: [(u8, InstructionFn<DB, ExtEnvs>); 7] = [
         (SSTORE, sstore::<DB, ExtEnvs>),
         (LOG0, log::<0, DB, ExtEnvs>),
@@ -134,13 +145,19 @@ fn selfdestruct<DB: Database, ExtEnvs: ExternalEnvTypes>(
 mod tests {
     use super::*;
     use crate::{test_utils::MemoryDatabase, EmptyExternalEnv};
-    use revm::interpreter::instructions::gas_table_spec;
+    use revm::bytecode::opcode::{CLZ, DUPN, EXCHANGE, SLOTNUM, SWAPN};
 
     /// The wrappers keep the static gas revm charges for their opcodes: the whole table is revm's.
+    ///
+    /// Activating the Amsterdam opcodes does not touch it either — their static gas is the same
+    /// on every spec, which is why the activation is an instruction-table change alone.
     #[test]
     fn test_wrappers_keep_the_static_gas_table() {
         let mega = mega_instructions::<MemoryDatabase, EmptyExternalEnv>(SpecId::OSAKA);
         assert_eq!(mega.gas_table(), &gas_table_spec(SpecId::OSAKA));
         assert_eq!(mega.spec, SpecId::OSAKA);
+        for (opcode, gas) in [(DUPN, 3), (SWAPN, 3), (EXCHANGE, 3), (SLOTNUM, 2), (CLZ, 5)] {
+            assert_eq!(mega.gas_table()[opcode as usize], gas, "opcode {opcode:#04x}");
+        }
     }
 }

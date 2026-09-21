@@ -26,13 +26,40 @@ The legacy spec names do not parse: `"Rex6".parse::<MegaSpecId>()` fails with `P
 
 Satin is under construction.
 Today it runs transactions through its own handler over op-revm's, with EIP-8037 and the EIP-2780 intrinsic cost switched on and a 200,000,000 execution cap; gas above the cap goes to the EIP-8037 reservoir.
-It still uses the Osaka gas table, which prices state gas at zero, so no transaction draws state gas yet.
+
+The gas schedule is Amsterdam's with two changes: the entries EIP-8038 repriced go back to their Osaka values, and the EIP-8037 state-gas entries are rebuilt from MegaETH's own cost per state byte, so a new storage slot draws 97,920 state gas and a new account 183,600.
+The schedule also brings the Amsterdam opcodes (`DUPN`, `SWAPN`, `EXCHANGE`, `SLOTNUM`) and raises the code-size limits to 512 KiB of contract and 1 MiB of initcode.
+Its byte prices are an input: the `satin-price-override` feature, off by default, lets a measurement build install other ones.
+`tests/satin/pricing-table.md` lists every entry next to Osaka's and Amsterdam's, with what a handful of probe transactions spent.
+
+The precompile set is op-revm's Karst set with KZG point evaluation repriced to 100,000.
+It is carried as an alloy-evm `PrecompilesMap`, so a node can add or replace an address through `MegaEvmFactory::with_dyn_precompiles_builder`.
 
 The common execution layer is in place: the frame lifecycle the later mechanisms plug into, the count of data-size bytes and write records per frame, the abort protocol that stops a transaction crossing a limit with a revert, and the inspector admission gate.
 No limit is enforced by default; `EvmTxRuntimeLimits` sets a data-size cap and a frame budget to exercise the protocol.
 `MegaEvm::execute_transaction` returns the result with the gas split into its regular, state and history ledgers, the usage counted and the limit that stopped the transaction, if any.
 
-SALT pricing, history gas, the resource limits, gas detention, the system contracts and keyless deployment arrive in later changes.
+Block execution is in place too: `MegaBlockExecutor` is alloy-evm's `BlockExecutor` over a `MegaEvm`, with the block rules of the Karst base — a fork's activation block admits only deposit transactions, the data-availability footprint of the block's transactions is held to the block's gas limit and reported as its blob gas, and the L1 block info is read by the first transaction that prices against it, so the block's own L1 info deposit is what the transactions after it are priced with.
+Every transaction is held to the block's `BlockLimits`, and the block counts what its transactions spent on each of the three ledgers.
+`apply_pre_execution_changes` leaves two hook points empty: system contract deployment and the pre-block system calls.
+
+SALT pricing is in place: every EIP-8037 state gas charge costs the schedule's entry times the capacity of the SALT bucket it lands in, counted in minimum buckets, so a slot written into a region eight times as crowded as the minimum costs eight times as much.
+The multiplier applies to the state dimension only; regular gas never scales.
+Capacities come from the transaction's `SaltEnv`, read once per bucket per transaction, and a transaction the protocol itself produced prices at the minimum bucket whatever the bucket holds.
+Without a SALT environment every bucket is minimal, so the numbers above are what a transaction pays.
+`tests/satin/pricing-table.md` shows two probes at three multipliers.
+
+The six system contracts live at their fixed `0x6342…` addresses, and four of them answer calls through an interceptor instead of running their bytecode.
+A `CALL` or `STATICCALL` is dispatched on its target address, then on the four selector bytes of its input: `CALLCODE` and `DELEGATECALL` never reach an interceptor, and a selector a contract does not intercept falls through to the deployed bytecode, whose answer is that contract's own — the two control contracts revert with `NotIntercepted()` from their fallback, and `KeylessDeploy` and the Oracle, which have none, revert with empty data on a selector they do not declare.
+A method that takes no value answers a value-bearing call with `NonZeroTransfer()`.
+`MegaAccessControl` and `MegaLimitControl` answer with what the engine knows so far — nothing has switched volatile-data access off, and `remainingComputeGas()` reports the regular gas the call was forwarded — until detention and compute gas fill them in.
+The Oracle forwards a `sendHint` payload to the node's oracle service, and a `keylessDeploy` transaction is charged its fixed 100,000 gas and handed to the keyless rewrite hook that native keyless deployment fills in.
+
+The system address (`MEGA_SYSTEM_ADDRESS`) sends the protocol's own transactions: a legacy transaction from it to a whitelisted contract is validated — the whitelist, the chain id, the nonce and EIP-3607 — and promoted to a deposit, which pays no fee and rewards none.
+The account such a transaction creates for its caller is charged the account-creation state gas exactly once.
+
+History gas, the resource limits, gas detention, system contract deployment and keyless deployment arrive in later changes.
+Until history gas lands, nothing prices a history byte and the schedule's history entry stays at zero, and a system transaction's history ledger is zero with it.
 
 ## Quick start
 
@@ -52,7 +79,24 @@ let tx = OpTx(op_revm::OpTransaction {
 let result = evm.transact_raw(tx)?;
 ```
 
-A block executor admits an inspected transaction only from an EVM whose inspector is declared read-only:
+A node executes a block through the factory, which installs the block's limits on the EVM:
+
+```rust,ignore
+use alloy_evm::block::{BlockExecutor as _, BlockExecutorFactory as _};
+use mega_evm::{BlockLimits, MegaBlockExecutionCtx, MegaBlockExecutorFactory, MegaEvmFactory};
+
+let factory = MegaBlockExecutorFactory::new(receipt_builder, chain_spec, MegaEvmFactory::new());
+let ctx = MegaBlockExecutionCtx::new(parent_hash, parent_beacon_block_root, extra_data, BlockLimits::no_limits());
+
+let mut executor = factory.create_executor(evm, ctx);
+executor.apply_pre_execution_changes()?;
+for tx in transactions {
+    executor.execute_transaction(tx)?;
+}
+let (evm, result) = executor.finish_with_counters()?;
+```
+
+Block execution admits an inspected transaction only from an EVM whose inspector is declared read-only:
 
 ```rust,ignore
 use mega_evm::DeclaredObserver;
