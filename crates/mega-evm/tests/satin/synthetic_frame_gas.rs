@@ -464,7 +464,9 @@ fn test_the_keyless_value_refusal_keeps_the_reservoir() {
 
     // The same transaction to an account without code spends its intrinsic cost and nothing
     // else, and the refusal is answered before a frame runs, so what the dispatched call spends
-    // beyond it is the overhead — once.
+    // beyond it is the overhead — once — less the one thing the refusal takes back: the history
+    // of the write record a transfer that goes through leaves on its recipient.
+    let record = mega_evm::WRITE_RECORD_SIZE * mega_evm::constants::COST_PER_HISTORY_BYTE;
     let spent = |to: Address, gas_limit: u64| {
         let mut tx = crate::common::call_with_data(CALLER, to, data.clone(), gas_limit);
         tx.0.base.value = U256::from(1);
@@ -472,7 +474,7 @@ fn test_the_keyless_value_refusal_keeps_the_reservoir() {
     };
     for gas_limit in [NARROW, WIDE] {
         assert_eq!(
-            spent(KEYLESS_DEPLOY_ADDRESS, gas_limit) - spent(TARGET, gas_limit),
+            spent(KEYLESS_DEPLOY_ADDRESS, gas_limit) + record - spent(TARGET, gas_limit),
             KEYLESS_DEPLOY_OVERHEAD_GAS,
             "at a gas limit of {gas_limit}",
         );

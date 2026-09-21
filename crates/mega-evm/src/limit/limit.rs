@@ -50,6 +50,13 @@ pub struct AdditionalLimit {
     /// The history gas validation charged for the transaction's body, part of
     /// [`history_gas_spent`](Self::history_gas_spent).
     intrinsic_history_gas: u64,
+    /// The history gas of the write record the transaction's own frame makes — its value's
+    /// recipient, or the account it creates — charged before the first frame and given back when
+    /// that frame fails.
+    top_level_write_record_gas: u64,
+    /// The history gas the running opcode charged its own frame for the records the frame it is
+    /// starting will make, waiting for that frame's lane to be pushed.
+    pending_frame_charge: FrameCharge,
     /// The history gas the settled transaction spent.
     history_gas_spent: u64,
 }
@@ -79,6 +86,8 @@ impl AdditionalLimit {
         self.sender = Address::ZERO;
         self.frame_began = false;
         self.intrinsic_history_gas = 0;
+        self.top_level_write_record_gas = 0;
+        self.pending_frame_charge = FrameCharge::NONE;
         self.history_gas_spent = 0;
     }
 
@@ -156,6 +165,37 @@ impl AdditionalLimit {
     /// Records the history gas validation charged for the transaction's body.
     pub(crate) const fn set_intrinsic_history_gas(&mut self, gas: u64) {
         self.intrinsic_history_gas = gas;
+    }
+
+    /// The history gas charged before the first frame for the write record that frame makes: the
+    /// recipient of the transaction's value, or the account it creates.
+    ///
+    /// A first frame that fails keeps no such write, so the charge is given back with the rest of
+    /// what the failure discards.
+    pub(crate) const fn top_level_write_record_gas(&self) -> u64 {
+        self.top_level_write_record_gas
+    }
+
+    /// Records the history gas charged for the transaction's own write record.
+    pub(crate) const fn set_top_level_write_record_gas(&mut self, gas: u64) {
+        self.top_level_write_record_gas = gas;
+    }
+
+    /// Whether the transaction's call target is an applied EIP-7702 authority, whose account
+    /// write the transaction's own lane already counts, so its first frame writes no recipient.
+    pub(crate) const fn target_is_authority(&self) -> bool {
+        self.target_is_authority
+    }
+
+    /// Leaves the history gas the running opcode just charged its frame for the records the frame
+    /// it starts will make: `on_lane` for the records that frame's failure discards, `caller` for
+    /// the record of the caller's own account.
+    ///
+    /// The next lane pushed takes it, whether that is the frame's own or the empty one of a frame
+    /// answered without running.
+    #[inline]
+    pub(crate) const fn stage_frame_charge(&mut self, on_lane: u64, caller: u64) {
+        self.pending_frame_charge = FrameCharge { on_lane, caller };
     }
 
     /// Records the history gas the settled transaction spent.
@@ -278,11 +318,24 @@ impl AdditionalLimit {
         self.check()
     }
 
+    /// Takes a creation's creator record back: the creation failed before bumping the nonce.
+    ///
+    /// The record is gone, so the caller gets its history back when the frame returns: the lane no
+    /// longer holds a creator's record, and a lane that holds none gives its caller's charge back
+    /// with the rest.
+    pub(crate) fn creation_did_not_bump_nonce(&mut self) {
+        self.tracker.drop_caller_record();
+    }
+
     fn push_lane(&mut self, input: &FrameInput, depth: usize) {
         let budget = match self.tracker.current() {
             Some(caller) => caller.remaining_budget().min(self.limits.frame_data_size_limit),
             None => self.limits.frame_data_size_limit,
         };
+        // What the caller paid for these records at its opcode. The transaction's own frame has
+        // no such caller: its record is charged before execution and given back by the settlement
+        // ([`top_level_write_record_gas`](Self::top_level_write_record_gas)).
+        let charge = core::mem::replace(&mut self.pending_frame_charge, FrameCharge::NONE);
         match input {
             FrameInput::Call(inputs) => {
                 let target = inputs.target_address;
@@ -294,12 +347,14 @@ impl AdditionalLimit {
                         Some(target),
                         written_outside || transfers_value,
                         budget,
+                        0,
                     ));
                     if transfers_value && !written_outside {
                         self.tracker.record(WRITE_RECORD);
                     }
                     return;
                 }
+                let records = self.frame_start_records(input);
                 let inherited = self.tracker.current().is_some_and(|caller| {
                     caller.address == Some(target) && caller.account_recorded
                 });
@@ -308,24 +363,50 @@ impl AdditionalLimit {
                     Some(target),
                     inherited || is_sender || transfers_value,
                     budget,
+                    charge.on_lane,
                 ));
-                if transfers_value {
-                    self.tracker.record_caller(false);
-                    if target != inputs.caller && !is_sender {
-                        self.tracker.record(WRITE_RECORD);
-                    }
+                if records.caller {
+                    self.tracker.record_caller(false, charge.caller);
+                }
+                if records.on_lane > 0 {
+                    self.tracker.record(WRITE_RECORD.times(records.on_lane));
                 }
             }
             FrameInput::Create(inputs) => {
-                self.tracker.push(Lane::new(None, true, budget));
-                self.tracker.record(WRITE_RECORD);
+                let records = self.frame_start_records(input);
+                self.tracker.push(Lane::new(None, true, budget, charge.on_lane));
+                self.tracker.record(WRITE_RECORD.times(records.on_lane));
                 if depth == 0 {
                     self.sender = inputs.caller();
-                } else {
-                    self.tracker.record_caller(true);
+                } else if records.caller {
+                    self.tracker.record_caller(true, charge.caller);
                 }
             }
             FrameInput::Empty => self.push_empty_frame(),
+        }
+    }
+
+    /// The write records starting `input` makes at a depth above the transaction's own frame, for
+    /// the opcode that starts it: `on_lane` are the records the frame's failure discards, `caller`
+    /// whether its start also writes the caller's own account.
+    ///
+    /// The caller pays for both at the opcode, before it forwards gas, so the frame's own budget
+    /// carries none of them — which is what lets a value transfer's allowance pay for what the
+    /// recipient does with it. [`push_lane`](Self::push_lane) makes exactly these records, from
+    /// this same answer, so the charge and the count cannot disagree.
+    pub(crate) fn frame_start_records(&self, input: &FrameInput) -> FrameStartRecords {
+        let caller_recorded = self.tracker.current().is_some_and(|lane| lane.account_recorded);
+        match input {
+            FrameInput::Call(inputs) => {
+                if !inputs.transfers_value() {
+                    return FrameStartRecords::NONE;
+                }
+                let target = inputs.target_address;
+                let writes_target = target != inputs.caller && target != self.sender;
+                FrameStartRecords { on_lane: u64::from(writes_target), caller: !caller_recorded }
+            }
+            FrameInput::Create(_) => FrameStartRecords { on_lane: 1, caller: !caller_recorded },
+            FrameInput::Empty => FrameStartRecords::NONE,
         }
     }
 
@@ -336,24 +417,31 @@ impl AdditionalLimit {
         }
     }
 
-    /// Takes a creation's creator record back: the creation failed before bumping the nonce.
-    pub(crate) fn creation_did_not_bump_nonce(&mut self) {
-        self.tracker.drop_caller_record();
-    }
-
     /// Pushes the lane of a frame answered without running: a result built without an
     /// interpreter keeps the lanes aligned with the frames revm returns.
+    ///
+    /// Such a frame records none of the writes its caller paid for, so the whole charge sits on
+    /// the lane and comes back when it is popped, whatever the answer was.
     pub(crate) fn push_empty_frame(&mut self) {
         self.frame_began = true;
-        self.tracker.push(Lane::empty());
+        let charge = core::mem::replace(&mut self.pending_frame_charge, FrameCharge::NONE);
+        self.tracker.push(Lane::empty(charge.on_lane.saturating_add(charge.caller)));
     }
 
     /// Pops the lane of the frame `result` returns from: a success merges it into the caller's,
     /// a failure discards it. Under a latch the result is first rewritten to the latched stop,
     /// whatever produced it (an interceptor, an inspector's rewrite), so no success passes it.
-    pub(crate) fn on_frame_return(&mut self, result: &mut FrameResult) {
+    ///
+    /// Returns the history gas the caller paid for records this frame did not keep, which the
+    /// caller gets back once the frame has merged into it.
+    #[must_use = "the history of the records the frame did not keep goes back to its caller"]
+    pub(crate) fn on_frame_return(&mut self, result: &mut FrameResult) -> u64 {
         self.apply_latch(result);
-        self.tracker.pop(result.instruction_result().is_ok());
+        // A charge an opcode of this frame made for a child that never started died with that
+        // opcode, which failed after making it.
+        self.pending_frame_charge = FrameCharge::NONE;
+        let success = result.instruction_result().is_ok();
+        self.tracker.pop(success).map_or(0, |lane| lane.history_refund(success))
     }
 
     /// Settles the transaction's outermost frame: pops its lane unless the frame already
@@ -371,9 +459,45 @@ impl AdditionalLimit {
         }
         debug_assert!(self.tracker.depth() <= 1, "only the outermost lane can be left");
         if self.tracker.depth() == 1 {
-            self.on_frame_return(result);
+            // The outermost frame has no caller that paid for its records: the transaction did,
+            // before execution, and the settlement gives that charge back.
+            let refund = self.on_frame_return(result);
+            debug_assert_eq!(refund, 0, "the outermost frame's caller is the transaction");
         } else {
             self.apply_latch(result);
         }
     }
+}
+
+/// The write records a frame's start makes, split by whose failure takes them back.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct FrameStartRecords {
+    /// Records on the frame's own lane, which its failure discards.
+    pub(crate) on_lane: u64,
+    /// Whether the frame's start also writes its caller's account.
+    pub(crate) caller: bool,
+}
+
+impl FrameStartRecords {
+    /// No record at all.
+    pub(crate) const NONE: Self = Self { on_lane: 0, caller: false };
+
+    /// The number of records, whoever keeps them.
+    pub(crate) const fn total(self) -> u64 {
+        self.on_lane.saturating_add(self.caller as u64)
+    }
+}
+
+/// The history gas a caller paid for the records the frame it starts makes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct FrameCharge {
+    /// What the records on the frame's own lane cost.
+    on_lane: u64,
+    /// What the record of the caller's own account cost.
+    caller: u64,
+}
+
+impl FrameCharge {
+    /// Nothing charged.
+    const NONE: Self = Self { on_lane: 0, caller: 0 };
 }

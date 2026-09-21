@@ -40,7 +40,7 @@ use revm::{
         interpreter::EthInterpreter, interpreter_action::FrameInit, CallScheme, FrameInput,
         InitialAndFloorGas, InstructionResult, InterpreterAction,
     },
-    primitives::{Address, Bytes, CALL_STACK_LIMIT},
+    primitives::{Address, Bytes, TxKind, CALL_STACK_LIMIT},
     Inspector, Journal,
 };
 
@@ -48,7 +48,8 @@ use crate::{
     evm::{history::tx_body_history_bytes, inspector::frame_end_checked},
     history_gas, synthetic_frame_result,
     system::{is_deposit_like_transaction, MEGA_SYSTEM_ADDRESS},
-    ExternalEnvTypes, JournalInspectTr, LimitCheck, MegaContext, MegaEvm, MegaInstructions,
+    write_record_history_gas, ExternalEnvTypes, JournalInspectTr, LimitCheck, MegaContext, MegaEvm,
+    MegaInstructions,
 };
 
 /// The Satin handler.
@@ -101,6 +102,13 @@ where
     /// When those records would cross a limit, the limit is enforced before the writes it
     /// guards: the authorizations are taken back with the gas they charged, and the transaction,
     /// latched, is stopped at its first frame.
+    ///
+    /// The two kinds of write record made outside any frame are charged their history here, where
+    /// they are made: one per applied authority, and the one the transaction's own frame makes —
+    /// the recipient of its value, or the account it creates. Neither is known at validation: an
+    /// authority applies or does not, and whether the recipient is already written depends on the
+    /// authorities that did. A transaction that cannot pay for them runs out of gas before its
+    /// first frame, the way one that cannot pay its authorizations does.
     fn pre_execution(
         &self,
         evm: &mut Self::Evm,
@@ -117,11 +125,16 @@ where
             evm.ctx().journal_mut().checkpoint_revert(checkpoint);
             return Ok(None);
         };
-        if record_applied_authorities(evm.ctx_mut(), checkpoint.journal_i).exceeded_limit() {
+        let authorities = record_applied_authorities(evm.ctx_mut(), checkpoint.journal_i);
+        if authorities.check.exceeded_limit() {
             evm.ctx().journal_mut().checkpoint_revert(checkpoint);
             *gas = gas_before;
             let checkpoint = evm.ctx().journal_mut().checkpoint();
             return Ok(Some(PreExecutionOutput { eip7702_refund: 0, checkpoint }));
+        }
+        if !charge_records_made_outside_a_frame(evm.ctx_mut(), gas, authorities.applied) {
+            evm.ctx().journal_mut().checkpoint_revert(checkpoint);
+            return Ok(None);
         }
         Ok(Some(PreExecutionOutput { eip7702_refund, checkpoint }))
     }
@@ -208,6 +221,18 @@ where
     ) -> Result<(), Self::Error> {
         evm.ctx_mut().additional_limit.on_last_frame_return(frame_result);
         self.op.last_frame_result(evm, frame_result, parent_gas)?;
+        // The write record the transaction's own frame makes was charged before execution; a
+        // frame that failed keeps no such write, so the charge goes back the way EIP-8037 gives
+        // back the state gas of the account that frame would have created.
+        let top_level = evm.ctx_ref().additional_limit.top_level_write_record_gas();
+        let instruction_result = frame_result.instruction_result();
+        if top_level > 0 && !instruction_result.is_ok() {
+            parent_gas.refill_history(top_level);
+            if instruction_result.is_halt() {
+                parent_gas.spend_all();
+            }
+            *frame_result.gas_mut().tracker_mut() = *parent_gas;
+        }
         let layer = &mut evm.ctx_mut().additional_limit;
         let history = layer
             .intrinsic_history_gas()
@@ -424,8 +449,15 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
         &mut self,
         mut result: FrameResult,
     ) -> Result<Option<FrameResult>, ContextDbError<Self::Context>> {
-        self.inner.ctx.additional_limit.on_frame_return(&mut result);
-        self.inner.frame_return_result(result)
+        let refund = self.inner.ctx.additional_limit.on_frame_return(&mut result);
+        let returned = self.inner.frame_return_result(result)?;
+        // The history of the records the caller paid for and the frame did not keep, given back
+        // after the merge that adopted the frame's pools. `Some` means the outermost frame
+        // returned and there is no caller to give anything back to.
+        if refund > 0 && returned.is_none() {
+            self.inner.frame_stack.get().interpreter.gas.refill_history(refund);
+        }
+        Ok(returned)
     }
 }
 
@@ -738,9 +770,9 @@ fn account_nonce<DB: Database, ExtEnvs: ExternalEnvTypes>(
 fn record_applied_authorities<DB: Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &mut MegaContext<DB, ExtEnvs>,
     journal_i: usize,
-) -> LimitCheck {
+) -> AppliedAuthorities {
     if ctx.tx().tx_type() != TransactionType::Eip7702 {
-        return LimitCheck::WithinLimit;
+        return AppliedAuthorities { check: LimitCheck::WithinLimit, applied: 0 };
     }
     let caller = ctx.tx().caller();
     let target = ctx.tx().kind().to().copied();
@@ -755,9 +787,50 @@ fn record_applied_authorities<DB: Database, ExtEnvs: ExternalEnvTypes>(
     authorities.dedup();
     let target_is_authority =
         target.is_some_and(|target| authorities.binary_search(&target).is_ok());
-    ctx.additional_limit.record_applied_authorities(
-        caller,
-        authorities.len() as u64,
-        target_is_authority,
-    )
+    let applied = authorities.len() as u64;
+    let check =
+        ctx.additional_limit.record_applied_authorities(caller, applied, target_is_authority);
+    AppliedAuthorities { check, applied: if check.exceeded_limit() { 0 } else { applied } }
+}
+
+/// What [`record_applied_authorities`] found: the verdict of the limit check, and how many
+/// authorities were applied — none, when the check stopped them.
+struct AppliedAuthorities {
+    check: LimitCheck,
+    applied: u64,
+}
+
+/// Charges the history of the write records a transaction makes outside any frame: one per
+/// applied authority, and the one its own frame makes — the recipient of its value, or the
+/// account it creates.
+///
+/// The authorities' records are the transaction's own and outlive a first frame that fails; the
+/// first frame's record does not, so what it cost is kept for the settlement to give back.
+/// `false` when the transaction cannot pay, which is an out-of-gas before it runs.
+fn charge_records_made_outside_a_frame<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    ctx: &mut MegaContext<DB, ExtEnvs>,
+    gas: &mut GasTracker,
+    applied_authorities: u64,
+) -> bool {
+    if !ctx.prices_history() {
+        return true;
+    }
+    let top_level_record = match ctx.tx().kind() {
+        TxKind::Create => true,
+        TxKind::Call(to) => {
+            !ctx.tx().value().is_zero() &&
+                to != ctx.tx().caller() &&
+                !ctx.additional_limit.target_is_authority()
+        }
+    };
+    let Some(top_level) = write_record_history_gas(u64::from(top_level_record)) else {
+        return false;
+    };
+    let Some(authorities) = write_record_history_gas(applied_authorities) else { return false };
+    let Some(cost) = top_level.checked_add(authorities) else { return false };
+    if cost > 0 && !gas.record_history_cost(cost) {
+        return false;
+    }
+    ctx.additional_limit.set_top_level_write_record_gas(top_level);
+    true
 }

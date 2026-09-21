@@ -75,13 +75,13 @@ fn test_a_reverted_deployment_pays_no_code_deposit_history() {
     assert!(!reverted.result.is_success(), "the creation reverts");
     assert_eq!(
         deployed.gas.history,
-        body(deploying(32).len() as u64) + 32 * CPHB,
-        "the body the init code travels in, and the deployed bytes",
+        body(deploying(32).len() as u64) + WRITE_RECORD_SIZE * CPHB + 32 * CPHB,
+        "the body the init code travels in, the created account's record, the deployed bytes",
     );
     assert_eq!(
         reverted.gas.history,
         body(reverting().len() as u64),
-        "the body alone: nothing was deployed",
+        "the body alone: nothing was deployed, and the account's record went with the failure",
     );
 }
 

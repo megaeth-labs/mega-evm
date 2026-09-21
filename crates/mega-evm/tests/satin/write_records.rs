@@ -9,7 +9,9 @@
 //! frame that fails.
 
 use alloy_primitives::{address, Address, Bytes, Log, LogData, B256, U256};
+use alloy_sol_types::SolCall;
 use mega_evm::{
+    system::{IMegaAccessControl, ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE},
     test_utils::{BytecodeBuilder, MemoryDatabase},
     LimitUsage, MegaContext, MegaEvm, StagedRecord, WRITE_RECORD_SIZE,
 };
@@ -830,4 +832,185 @@ fn test_inspector_answered_call_keeps_the_caller_lane() {
             .unwrap();
     assert!(result.result.is_success());
     assert_eq!(evm.ctx().additional_limit().usage(), records(2), "CALLEE and CONTRACT2");
+}
+
+/* ---------- every kept write is paid for, once ---------- */
+
+/// One transaction of the corpus below: what it runs, the history bytes it appends beyond its
+/// body that are not write records, and the records it keeps.
+struct Paired {
+    name: &'static str,
+    db: MemoryDatabase,
+    tx: mega_evm::MegaTransaction,
+    /// Log and deployed-code bytes. The calldata travels in the body, so it is not counted here.
+    other_bytes: u64,
+    /// The write records the transaction keeps, beyond the ones its body already carries.
+    records: u64,
+}
+
+/// A call to `MegaAccessControl` carrying one wei, which its interceptor refuses before a frame
+/// runs, followed by a `STOP`.
+fn value_call_a_system_contract_refuses() -> Bytes {
+    BytecodeBuilder::default()
+        .mstore(0, IMegaAccessControl::isVolatileDataAccessDisabledCall::SELECTOR)
+        .append_many([PUSH0, PUSH0])
+        .push_number(4u64)
+        .append(PUSH0)
+        .append(PUSH1)
+        .append(1u8)
+        .push_address(ACCESS_CONTROL_ADDRESS)
+        .append(GAS)
+        .append(CALL)
+        .append(POP)
+        .append(STOP)
+        .build()
+}
+
+/// The corpus, one case per rule the record sites follow.
+fn paired_corpus() -> Vec<Paired> {
+    let case = |name, db: MemoryDatabase, tx, other_bytes, records| Paired {
+        name,
+        db,
+        tx,
+        other_bytes,
+        records,
+    };
+    let to_callee = |code: Bytes| funded().account_code(CALLEE, code);
+    let plain = || call(CALLER, CALLEE, U256::ZERO, GAS_LIMIT);
+    let calling = |target, value| {
+        append_value_call(BytecodeBuilder::default(), target, value)
+            .append(POP)
+            .append(STOP)
+            .build()
+    };
+    let storing = |slots: &[(u64, u64)]| {
+        let mut code = BytecodeBuilder::default();
+        for (slot, value) in slots {
+            code = code.sstore(U256::from(*slot), U256::from(*value));
+        }
+        code.stop().build()
+    };
+    let reverting = Bytes::from_static(&[PUSH0, PUSH0, 0xFD]);
+    vec![
+        case("an empty call", to_callee(Bytes::new()), plain(), 0, 0),
+        case("three fresh slots", to_callee(storing(&[(1, 1), (2, 1), (3, 1)])), plain(), 0, 3),
+        case("a slot written and restored", to_callee(storing(&[(1, 1), (1, 0)])), plain(), 0, 0),
+        case(
+            "a slot rewritten twice",
+            to_callee(storing(&[(1, 1), (1, 2), (1, 3)])),
+            plain(),
+            0,
+            1,
+        ),
+        case("a value transfer", to_callee(calling(CONTRACT, 1)), plain(), 0, 2),
+        case(
+            "a value transfer the callee reverts",
+            to_callee(calling(CONTRACT, 1)).account_code(CONTRACT, reverting.clone()),
+            plain(),
+            0,
+            0,
+        ),
+        case(
+            "a log over one word",
+            to_callee(
+                BytecodeBuilder::default()
+                    .push_number(1u64)
+                    .push_number(1u64)
+                    .push_number(32u64)
+                    .push_number(0u64)
+                    .append(LOG2)
+                    .append(STOP)
+                    .build(),
+            ),
+            plain(),
+            32 + 2 * 32 + 32,
+            0,
+        ),
+        case(
+            "a nested creation",
+            to_callee(
+                append_value_create(BytecodeBuilder::default()).append(POP).append(STOP).build(),
+            ),
+            plain(),
+            0,
+            2,
+        ),
+        case(
+            "a creation whose init code reverts",
+            funded().account_code(OUTER_CREATOR, reverting_creations(1)),
+            call(CALLER, OUTER_CREATOR, U256::ZERO, GAS_LIMIT),
+            0,
+            1,
+        ),
+        case(
+            "a destruction that moves value",
+            to_callee(
+                BytecodeBuilder::default().push_address(CONTRACT).append(SELFDESTRUCT).build(),
+            )
+            .account_balance(CALLEE, U256::from(1)),
+            plain(),
+            0,
+            1,
+        ),
+        case(
+            "a value call a system contract's interceptor refuses",
+            to_callee(value_call_a_system_contract_refuses())
+                .account_balance(ACCESS_CONTROL_ADDRESS, U256::from(1))
+                .account_code(ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE),
+            plain(),
+            0,
+            0,
+        ),
+        case(
+            "a transaction carrying calldata",
+            to_callee(Bytes::new()),
+            call_with_data(CALLER, CALLEE, Bytes::from(vec![7u8; 100]), GAS_LIMIT),
+            0,
+            0,
+        ),
+        case(
+            "a value transaction",
+            funded(),
+            call(CALLER, CONTRACT, U256::from(1), GAS_LIMIT),
+            0,
+            1,
+        ),
+        case(
+            "a value transaction the recipient reverts",
+            funded().account_code(CONTRACT, reverting),
+            call(CALLER, CONTRACT, U256::from(1), GAS_LIMIT),
+            0,
+            0,
+        ),
+        case("a creation transaction", funded(), create(CALLER, Bytes::new(), GAS_LIMIT), 0, 1),
+    ]
+}
+
+/// Every write a transaction keeps is one forty-byte record of history, and nothing it does not
+/// keep is: the history each transaction pays beyond its body, its logs and its deployed code is
+/// exactly the write-record count the layer counted, at the history price.
+///
+/// This is the pairing itself. The layer counts the records and the engine charges for them at
+/// separate sites, on separate rules; the corpus holds the two to the same number, case by case,
+/// and to the number the case says.
+#[test]
+fn test_every_kept_write_pays_one_record_of_history() {
+    if crate::common::runs_at_measurement_prices() {
+        return;
+    }
+    const CPHB: u64 = mega_evm::constants::COST_PER_HISTORY_BYTE;
+    for case in paired_corpus() {
+        let outcome = crate::common::execute(case.db, case.tx.clone());
+        let usage = outcome.usage;
+        assert_eq!(usage.write_records, case.records, "{}: the records kept", case.name);
+        let body = mega_evm::TX_BODY_SIZE + case.tx.0.base.data.len() as u64;
+        let expected = (body + case.other_bytes + case.records * WRITE_RECORD_SIZE) * CPHB;
+        assert_eq!(outcome.gas.history, expected, "{}: the history it pays", case.name);
+        assert_eq!(
+            usage.data_size,
+            case.other_bytes + case.records * WRITE_RECORD_SIZE,
+            "{}: the data size the limit counts is what history prices",
+            case.name,
+        );
+    }
 }

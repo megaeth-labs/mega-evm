@@ -1,8 +1,11 @@
 //! The instruction table of the Satin engine.
 //!
-//! Every opcode runs revm's own instruction, except the three that write state the resource
-//! limits count: `SSTORE`, `LOG0`..`LOG4` and `SELFDESTRUCT`. Each of those runs in a wrapper
-//! that commits what the Host staged for it after the opcode completed:
+//! Every opcode runs revm's own instruction, except the ones that write state the resource
+//! limits count. Three of them write it themselves — `SSTORE`, `LOG0`..`LOG4` and `SELFDESTRUCT`
+//! — and four write it by starting a frame: `CALL`, `CALLCODE`, `CREATE` and `CREATE2`.
+//!
+//! The first three run in a wrapper that commits what the Host staged for them after the opcode
+//! completed:
 //!
 //! 1. discard any record staged before the opcode (nothing may commit it for this one);
 //! 2. run revm's instruction, whose Host call stages the record;
@@ -19,6 +22,12 @@
 //! [`AdditionalLimit`](crate::AdditionalLimit) for the abort protocol). A history charge the frame
 //! cannot pay is an ordinary out-of-gas, which burns the frame's gas the way any other does.
 //!
+//! The other four run in a wrapper that charges their frame for the write records the frame it
+//! starts makes — a value transfer's sender and recipient, a creation's creator nonce and created
+//! account — before the frame runs, so the gas it forwards is not reduced by them and its
+//! allowance is free for what the recipient does. What the frame does not keep goes back to the
+//! caller when it returns.
+//!
 //! A wrapper keeps the static gas revm's table charges for its opcode, so the gas schedule is
 //! unchanged.
 //!
@@ -29,11 +38,13 @@
 //! the base spec already has it.
 
 use revm::{
-    bytecode::opcode::{LOG0, LOG1, LOG2, LOG3, LOG4, SELFDESTRUCT, SSTORE},
+    bytecode::opcode::{
+        CALL, CALLCODE, CREATE, CREATE2, LOG0, LOG1, LOG2, LOG3, LOG4, SELFDESTRUCT, SSTORE,
+    },
     handler::instructions::EthInstructions,
     interpreter::{
         enable_amsterdam_opcodes, instruction_table,
-        instructions::{gas_table_spec, host},
+        instructions::{contract, gas_table_spec, host},
         interpreter::EthInterpreter,
         interpreter_types::LoopControl,
         Instruction, InstructionContext, InstructionExecResult, InstructionResult, Interpreter,
@@ -43,7 +54,10 @@ use revm::{
     Database,
 };
 
-use crate::{history_gas, limit::HistoryBytes, ExternalEnvTypes, LimitCheck, MegaContext};
+use crate::{
+    history_gas, limit::HistoryBytes, write_record_history_gas, ExternalEnvTypes, LimitCheck,
+    MegaContext,
+};
 
 use super::MegaInstructions;
 
@@ -61,7 +75,7 @@ pub(crate) fn mega_instructions<DB: Database, ExtEnvs: ExternalEnvTypes>(
     let mut table = instruction_table();
     enable_amsterdam_opcodes(&mut table);
     let mut instructions = EthInstructions::new(table, gas_table_spec(spec), spec);
-    let wrappers: [(u8, InstructionFn<DB, ExtEnvs>); 7] = [
+    let wrappers: [(u8, InstructionFn<DB, ExtEnvs>); 11] = [
         (SSTORE, sstore::<DB, ExtEnvs>),
         (LOG0, log::<0, DB, ExtEnvs>),
         (LOG1, log::<1, DB, ExtEnvs>),
@@ -69,6 +83,10 @@ pub(crate) fn mega_instructions<DB: Database, ExtEnvs: ExternalEnvTypes>(
         (LOG3, log::<3, DB, ExtEnvs>),
         (LOG4, log::<4, DB, ExtEnvs>),
         (SELFDESTRUCT, selfdestruct::<DB, ExtEnvs>),
+        (CALL, call::<CALL, DB, ExtEnvs>),
+        (CALLCODE, call::<CALLCODE, DB, ExtEnvs>),
+        (CREATE, create::<false, DB, ExtEnvs>),
+        (CREATE2, create::<true, DB, ExtEnvs>),
     ];
     for (opcode, wrapper) in wrappers {
         let static_gas = instructions.gas_table()[opcode as usize];
@@ -178,6 +196,66 @@ fn selfdestruct<DB: Database, ExtEnvs: ExternalEnvTypes>(
     context: Ctx<'_, DB, ExtEnvs>,
 ) -> InstructionExecResult {
     commit_after(context, host::selfdestruct)
+}
+
+/// Runs `inner` and charges the frame the history of the write records the frame `inner` starts
+/// will make.
+///
+/// The charge is made after revm's instruction has computed the gas it forwards, so it comes out
+/// of what the caller kept rather than out of what the callee gets. An opcode that starts no
+/// frame — a call the balance cannot fund, a creation the depth refuses — makes no records and is
+/// charged nothing. A charge the frame cannot pay is an ordinary out-of-gas.
+#[inline(always)]
+fn charge_frame_start<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    context: Ctx<'_, DB, ExtEnvs>,
+    inner: InstructionFn<DB, ExtEnvs>,
+) -> InstructionExecResult {
+    let InstructionContext { interpreter, host } = context;
+    let result = inner(InstructionContext { interpreter: &mut *interpreter, host: &mut *host });
+    if !host.prices_history() {
+        return result;
+    }
+    // An opcode that starts a frame suspends with the frame's input as its action; one that ends
+    // otherwise — a call the balance cannot fund, an out-of-gas — leaves no such action and makes
+    // no records.
+    let Some(InterpreterAction::NewFrame(input)) = interpreter.bytecode.action() else {
+        return result;
+    };
+    let records = host.additional_limit.frame_start_records(input);
+    if records.total() == 0 {
+        return result;
+    }
+    let (Some(on_lane), Some(caller)) = (
+        write_record_history_gas(records.on_lane),
+        write_record_history_gas(u64::from(records.caller)),
+    ) else {
+        return Err(InstructionResult::OutOfGas);
+    };
+    let Some(cost) = on_lane.checked_add(caller) else { return Err(InstructionResult::OutOfGas) };
+    if !interpreter.gas.record_history_cost(cost) {
+        return Err(InstructionResult::OutOfGas);
+    }
+    host.additional_limit.stage_frame_charge(on_lane, caller);
+    result
+}
+
+/// `CALL` and `CALLCODE`, charging the caller for the records a value transfer writes.
+///
+/// `CALLCODE` runs the callee's code in the caller's own account, so the two records of a `CALL`
+/// — the sender's and the recipient's — are one here. `DELEGATECALL` and `STATICCALL` carry no
+/// value and write nothing, so they run revm's instruction unwrapped.
+fn call<const KIND: u8, DB: Database, ExtEnvs: ExternalEnvTypes>(
+    context: Ctx<'_, DB, ExtEnvs>,
+) -> InstructionExecResult {
+    charge_frame_start(context, contract::call::<KIND, _, _>)
+}
+
+/// `CREATE` and `CREATE2`, charging the creator for the created account's record and for its own
+/// nonce.
+fn create<const IS_CREATE2: bool, DB: Database, ExtEnvs: ExternalEnvTypes>(
+    context: Ctx<'_, DB, ExtEnvs>,
+) -> InstructionExecResult {
+    charge_frame_start(context, contract::create::<IS_CREATE2, _, _>)
 }
 
 #[cfg(test)]

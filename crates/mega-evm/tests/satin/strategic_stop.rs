@@ -343,8 +343,10 @@ fn test_cap_crossed_before_the_first_frame_reverts_without_running() {
     );
     assert_eq!(
         transfer.result.gas().tx_gas_used(),
-        result.result.gas().tx_gas_used() + ACCOUNT_STATE_GAS,
-        "the transfer that goes through also creates the recipient"
+        result.result.gas().tx_gas_used() +
+            ACCOUNT_STATE_GAS +
+            mega_evm::WRITE_RECORD_SIZE * mega_evm::constants::COST_PER_HISTORY_BYTE,
+        "the transfer that goes through creates the recipient, and keeps its write record"
     );
 }
 
