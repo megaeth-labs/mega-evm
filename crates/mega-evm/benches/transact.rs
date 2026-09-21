@@ -8,7 +8,10 @@
 //!   every frame pays the frame lifecycle's lanes and every `SSTORE` and `LOG` its commit wrapper.
 //! - `storage_writes`: 200 first writes to fresh slots, then 200 writes back, in one frame: the
 //!   `SSTORE` wrapper's commit and refund.
-//! - `logs`: 200 two-topic logs in one frame: the `LOG` wrapper's commit.
+//! - `logs`: 200 two-topic logs in one frame: the `LOG` wrapper's commit, and the one
+//!   `record_history_cost` each log's bytes cost — no allocation, no second pass over the table.
+//! - `calldata`: a call carrying 4 KiB of calldata, which is 4 KiB of the transaction body's
+//!   history, priced once before the first frame runs.
 //! - `intercepted_calls`: 200 `STATICCALL`s to `MegaAccessControl`'s
 //!   `isVolatileDataAccessDisabled`, which the interceptor answers: the dispatch and the synthetic
 //!   result, 200 times.
@@ -21,6 +24,11 @@
 //! every bucket is minimal, and once (`/crowded`) against a SALT environment holding every bucket
 //! at eight times the minimum capacity. The gap is what the pricing hook costs on the hot path:
 //! one environment read per bucket and a cache hit per charge after it.
+//!
+//! Every workload is run once before it is measured, and the run is held to what it must draw:
+//! each pays its body's history, the logging one pays for the bytes its logs append and the
+//! calldata one for the bytes it carries. A workload that stopped drawing what it is here to
+//! measure would otherwise still benchmark, and measure the wrong thing.
 #![allow(missing_docs)]
 
 use alloy_op_evm::OpTx;
@@ -28,9 +36,11 @@ use alloy_primitives::{address, Address, Bytes, TxKind, U160, U256};
 use alloy_sol_types::SolCall;
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 use mega_evm::{
+    constants::COST_PER_HISTORY_BYTE,
     system::{IMegaAccessControl, ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE},
     test_utils::{op_transaction, zero_fee_l1_block_info, BytecodeBuilder, MemoryDatabase},
-    ExternalEnvs, MegaContext, MegaEvm, MegaSpecId, TestExternalEnvs, MIN_BUCKET_SIZE,
+    ExternalEnvs, MegaContext, MegaEvm, MegaSpecId, TestExternalEnvs, LOG_BASE_SIZE,
+    LOG_TOPIC_SIZE, MIN_BUCKET_SIZE, TX_BODY_SIZE,
 };
 use op_revm::{L1BlockInfo, OpEvm, OpSpecId, OpTransaction};
 use revm::{
@@ -61,6 +71,9 @@ const UNKNOWN_SELECTOR: [u8; 4] = [0xde, 0xad, 0xbe, 0xef];
 const DEPTH: u8 = 64;
 /// Slots written, then written back, by the storage workload; logs emitted by the log workload.
 const REPEAT: u64 = 200;
+
+/// Calldata bytes the `calldata` workload carries, which is what its body's history prices.
+const CALLDATA_LEN: usize = 4 * 1024;
 
 /// Offset of the `JUMPDEST` the recursion ends at.
 const DONE: u8 = 0x1f;
@@ -233,18 +246,41 @@ fn bench_transact(c: &mut Criterion) {
         ("deep_calls", call_tx(RECURSIVE, Bytes::from(depth.to_vec()), 30_000_000)),
         ("storage_writes", call_tx(WRITER, Bytes::new(), 30_000_000)),
         ("logs", call_tx(LOGGER, Bytes::new(), 30_000_000)),
+        ("calldata", call_tx(CALLEE, Bytes::from(vec![0xab_u8; CALLDATA_LEN]), 30_000_000)),
         ("intercepted_calls", call_tx(INTERCEPTED, Bytes::new(), 30_000_000)),
         ("system_address_misses", call_tx(MISSING, Bytes::new(), 30_000_000)),
     ];
 
     let mut group = c.benchmark_group("transact");
     for (workload, tx) in workloads {
-        let satin = MegaEvm::new(mega_context(db.clone())).transact(OpTx(tx.clone())).unwrap();
+        let satin =
+            MegaEvm::new(mega_context(db.clone())).execute_transaction(OpTx(tx.clone())).unwrap();
         assert!(satin.result.is_success(), "{workload}: {:?}", satin.result);
-        if workload == "deep_calls" {
-            let written =
-                satin.state[&RECURSIVE].storage.values().filter(|s| s.is_changed()).count();
-            assert_eq!(written, DEPTH as usize, "every frame of the recursion ran");
+        // Every transaction pays its body's history; the two workloads that are here to measure a
+        // history charge pay what that charge is worth.
+        let body = TX_BODY_SIZE + tx.base.data.len() as u64;
+        assert!(
+            satin.gas.history >= body * COST_PER_HISTORY_BYTE,
+            "{workload}: every transaction pays for its body",
+        );
+        match workload {
+            "deep_calls" => {
+                let written =
+                    satin.state[&RECURSIVE].storage.values().filter(|s| s.is_changed()).count();
+                assert_eq!(written, DEPTH as usize, "every frame of the recursion ran");
+            }
+            "logs" => assert_eq!(
+                satin.gas.history,
+                (TX_BODY_SIZE + REPEAT * (LOG_BASE_SIZE + 2 * LOG_TOPIC_SIZE + 32)) *
+                    COST_PER_HISTORY_BYTE,
+                "the logs must draw history gas, which is what this arm measures",
+            ),
+            "calldata" => assert_eq!(
+                satin.gas.history,
+                body * COST_PER_HISTORY_BYTE,
+                "the calldata must draw history gas, which is what this arm measures",
+            ),
+            _ => {}
         }
         group.bench_function(format!("{workload}/satin"), |b| {
             b.iter_batched(
