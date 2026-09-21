@@ -18,7 +18,7 @@ use mega_evm::{
         ORACLE_CONTRACT_CODE_HASH, SEQUENCER_REGISTRY_ADDRESS, SEQUENCER_REGISTRY_CODE_HASH,
         SYSTEM_CONTRACT_DEPLOY_COUNT,
     },
-    test_utils::MemoryDatabase,
+    test_utils::{ErrorInjectingDatabase, MemoryDatabase},
     HardforkParams,
 };
 use revm::{primitives::KECCAK_EMPTY, DatabaseCommit};
@@ -228,4 +228,21 @@ fn test_registry_config_rejects_a_zero_address() {
 #[test]
 fn test_the_seeded_system_address_slot_is_the_current_one() {
     assert_eq!(CURRENT_SYSTEM_ADDRESS, U256::ZERO);
+}
+
+/// A failed account load is [`SystemContractDeployError::Database`], and that inner error is
+/// the `source` of the deploy error.
+#[test]
+fn test_a_database_error_is_the_source_of_the_deploy_error() {
+    let mut db = ErrorInjectingDatabase::new(MemoryDatabase::default());
+    db.fail_on_account = Some(ORACLE_CONTRACT_ADDRESS);
+    let err = transact_deploy(&mut db, &oracle_spec()).expect_err("the load fails");
+    match &err {
+        SystemContractDeployError::Database(_) => {}
+        other => panic!("expected Database, got {other}"),
+    }
+    assert!(
+        core::error::Error::source(&err).is_some(),
+        "the database error is the source of the deploy error"
+    );
 }
