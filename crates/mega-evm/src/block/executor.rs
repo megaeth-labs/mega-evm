@@ -36,8 +36,9 @@
 //!
 //! # What later mechanisms fill in
 //!
-//! [`apply_pre_execution_changes`](BlockExecutor::apply_pre_execution_changes) names two hook
-//! points that are empty today: system contract deployment, and the pre-block system calls.
+//! [`apply_pre_execution_changes`](BlockExecutor::apply_pre_execution_changes) deploys the
+//! system contracts and the EIP-7997 factory every block (idempotent). The pre-block system
+//! calls that apply a due `SequencerRegistry` change are still an empty hook after that deploy.
 
 #[cfg(not(feature = "std"))]
 use alloc as std;
@@ -55,7 +56,7 @@ use alloy_evm::{
     Database, Evm, FromRecoveredTx, FromTxWithEncoded, RecoveredTx,
 };
 use alloy_op_evm::block::{receipt_builder::OpReceiptBuilder, OpTxEnv};
-use alloy_primitives::{Bytes, B256};
+use alloy_primitives::{Address, Bytes, B256};
 use op_alloy_consensus::OpDepositReceipt;
 use op_revm::{
     constants::L1_BLOCK_CONTRACT, transaction::deposit::DEPOSIT_TRANSACTION_TYPE, L1BlockInfo,
@@ -73,9 +74,13 @@ pub type MegaFinishedBlock<DB, INSP, ExtEnvs, R> =
     (MegaEvm<DB, INSP, ExtEnvs>, MegaBlockExecutionResult<<R as OpReceiptBuilder>::Receipt>);
 
 use crate::{
-    block::eips, estimated_da_size, BlockGasCounters, BlockLimiter, BlockLimits, ExternalEnvTypes,
-    MegaBlockExecutionResult, MegaBlockTxResult, MegaContext, MegaEvm, MegaHardforks,
-    MegaTransaction, MegaTransactionExt,
+    block::eips,
+    estimated_da_size,
+    system::{
+        system_contract_specs, transact_deploy, SequencerRegistryConfig, SystemContractDeployError,
+    },
+    BlockGasCounters, BlockLimiter, BlockLimits, ExternalEnvTypes, MegaBlockExecutionResult,
+    MegaBlockTxResult, MegaContext, MegaEvm, MegaHardforks, MegaTransaction, MegaTransactionExt,
 };
 
 /// What the node hands block execution beside the EVM.
@@ -140,6 +145,18 @@ pub enum MegaBlockExecutionError {
     /// The EVM runs an inspector that may rewrite what execution produces, which block execution
     /// does not admit.
     RewritingInspector,
+    /// A system-contract address already holds bytecode that is not the contract this engine
+    /// deploys.
+    ForeignSystemContractCode {
+        /// The system-contract address that already has code.
+        address: Address,
+        /// The hash this engine deploys.
+        expected: B256,
+        /// The hash already in state.
+        found: B256,
+    },
+    /// Satin is scheduled but the schedule does not carry a [`SequencerRegistryConfig`].
+    MissingSequencerRegistryConfig,
 }
 
 impl fmt::Display for MegaBlockExecutionError {
@@ -160,6 +177,13 @@ impl fmt::Display for MegaBlockExecutionError {
             Self::RewritingInspector => f.write_str(
                 "block execution does not admit an inspector that may rewrite execution",
             ),
+            Self::ForeignSystemContractCode { address, expected, found } => write!(
+                f,
+                "system contract at {address} has unexpected code hash {found}, expected {expected}; refusing to overwrite"
+            ),
+            Self::MissingSequencerRegistryConfig => {
+                f.write_str("Satin is scheduled but SequencerRegistryConfig is not configured")
+            }
         }
     }
 }
@@ -363,19 +387,23 @@ where
 
     /// Runs what a block does before its transactions.
     ///
-    /// In order: the admission gate, the reset of the block-hash record, and the EIP-2935 and
-    /// EIP-4788 pre-block calls. Each call's state is committed here rather than inside its
-    /// helper, so a witness generator sees every step's read and write set.
+    /// In order: the admission gate, the reset of the block-hash record, the EIP-2935 and
+    /// EIP-4788 pre-block calls, and the system-contract deploys. Each step's state is committed
+    /// here rather than inside its helper, so a witness generator sees every step's read and
+    /// write set.
     ///
     /// The L1 block info is not read here. op-revm's handler reads it when it deducts the caller
     /// of the first non-deposit transaction, which is after the block's own L1 info deposit has
     /// committed; reading it here would price every transaction of the block against the parent
     /// block's values.
     ///
-    /// Two hook points are empty: system contract deployment, which deploys the chain's system
-    /// contracts at the Satin activation, and the pre-block system calls, which apply the
-    /// pending changes the sequencer registry holds. Both arrive with the mechanisms of those
-    /// names, after the pre-block calls.
+    /// The EIP-2935 and EIP-4788 calls run before the deploy. They write the parent hash and
+    /// the parent beacon root into their own contracts (`0x0…2935` and `0x0…4788`), which are
+    /// not `MegaETH` system contracts and do not read them, so their outcome does not depend on
+    /// the deploy that follows.
+    ///
+    /// The pre-block system calls that apply a due `SequencerRegistry` change are still an empty
+    /// hook after the deploy.
     fn apply_pre_execution_changes(&mut self) -> Result<(), BlockExecutionError> {
         self.check_admission()?;
 
@@ -401,7 +429,24 @@ where
             self.commit(state);
         }
 
-        // Hook point: system contract deployment.
+        // The EIP-2935 / EIP-4788 calls above do not depend on these predeploys: they target
+        // their own contracts, not the MegaETH system addresses or the factory.
+        let config = self
+            .spec
+            .fork_params::<SequencerRegistryConfig>()
+            .copied()
+            .ok_or(MegaBlockExecutionError::MissingSequencerRegistryConfig)?;
+        for spec in system_contract_specs(&config) {
+            let state = transact_deploy(self.evm.db_mut(), &spec).map_err(|error| match error {
+                SystemContractDeployError::Database(error) => BlockExecutionError::other(error),
+                SystemContractDeployError::ForeignCode { address, expected, found } => {
+                    MegaBlockExecutionError::ForeignSystemContractCode { address, expected, found }
+                        .into()
+                }
+            })?;
+            self.commit(state);
+        }
+
         // Hook point: the pre-block system calls.
 
         Ok(())
