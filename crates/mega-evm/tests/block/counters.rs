@@ -138,9 +138,14 @@ fn test_the_state_and_history_ledgers_refuse_nothing() {
 
     let counters = *executor.gas();
     assert!(counters.state > 0, "the Satin gas table prices state gas, and these writes draw it");
+    // Each transaction carries its body and emits a log over 64 bytes. Only the first writes the
+    // slot: the two after it find it already holding the value, which is no write and no record.
+    let bytes = 3 * mega_evm::TX_BODY_SIZE +
+        mega_evm::WRITE_RECORD_SIZE +
+        3 * (mega_evm::LOG_BASE_SIZE + 64);
     assert_eq!(
         counters.history,
-        3 * mega_evm::TX_BODY_SIZE * mega_evm::constants::COST_PER_HISTORY_BYTE,
-        "three empty bodies, and these transactions append nothing else",
+        bytes * mega_evm::constants::COST_PER_HISTORY_BYTE,
+        "three bodies, three logs and the one write record",
     );
 }

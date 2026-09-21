@@ -569,11 +569,13 @@ fn test_outcome_reports_history_gas() {
     let plain =
         execute_with(chain(), EvmTxRuntimeLimits::no_limits(), Charger::default(), GAS_LIMIT);
     assert!(kept.result.is_success());
-    assert_eq!(kept.gas.history, body_history() + 700);
+    assert_eq!(kept.gas.history, plain.gas.history + 700);
+    assert!(plain.gas.history > body_history(), "the chain's own writes are history too");
     assert_eq!(kept.gas.regular, plain.gas.regular, "history is not regular gas");
     assert_eq!(kept.gas.gas_used, plain.gas.gas_used + 700);
 
-    // The body is charged before the first frame, so the stop keeps it and takes back the rest.
+    // The body is charged before the first frame, so the stop keeps it and takes back every
+    // charge the frames made, the inspector's included.
     let stopped = execute_with(chain(), cap(180), charger(), GAS_LIMIT);
     assert_stopped(&stopped.result, LimitKind::DataSize, 180);
     assert_eq!(stopped.gas.history, body_history());

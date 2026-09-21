@@ -68,10 +68,10 @@ One probe transaction each, at a 5000000 gas limit. `gas used` is the receipt's 
 | empty call | 42280 | 15000 | 0 | 27280 |
 | value transfer to an existing account | 48280 | 21000 | 0 | 27280 |
 | self-transfer | 39280 | 12000 | 0 | 27280 |
-| SSTORE 0 -> 1 | 162306 | 37106 | 97920 | 27280 |
+| SSTORE 0 -> 1 | 165826 | 37106 | 97920 | 30800 |
 | SSTORE 0 -> 1 -> 0 | 51594 | 37212 | 0 | 27280 |
 | value CALL to an empty account | 260201 | 49321 | 183600 | 27280 |
-| LOG1 with 32 data bytes | 43298 | 16018 | 0 | 27280 |
+| LOG1 with 32 data bytes | 51746 | 16018 | 0 | 35728 |
 | create transaction deploying 0 bytes | 235935 | 24087 | 183600 | 28248 |
 | create transaction deploying 32 bytes | 287732 | 24108 | 232560 | 31064 |
 
@@ -81,9 +81,9 @@ The same probes again, with the SALT bucket the state charge lands in at `m` tim
 
 | Probe | m | gas used | regular | state | history |
 |---|---:|---:|---:|---:|---:|
-| SSTORE 0 -> 1 | 1 | 162306 | 37106 | 97920 | 27280 |
-| SSTORE 0 -> 1 | 2 | 260226 | 37106 | 195840 | 27280 |
-| SSTORE 0 -> 1 | 8 | 847746 | 37106 | 783360 | 27280 |
+| SSTORE 0 -> 1 | 1 | 165826 | 37106 | 97920 | 30800 |
+| SSTORE 0 -> 1 | 2 | 263746 | 37106 | 195840 | 30800 |
+| SSTORE 0 -> 1 | 8 | 851266 | 37106 | 783360 | 30800 |
 | value CALL to an empty account | 1 | 260201 | 49321 | 183600 | 27280 |
 | value CALL to an empty account | 2 | 443801 | 49321 | 367200 | 27280 |
 | value CALL to an empty account | 8 | 1545401 | 49321 | 1468800 | 27280 |

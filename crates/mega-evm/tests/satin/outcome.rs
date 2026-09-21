@@ -48,8 +48,13 @@ fn test_outcome_reports_the_ledgers() {
     assert_eq!(gas.gas_used, result_gas.tx_gas_used());
     // Both slots are new, so both draw state gas, and the reservoir is what pays it.
     assert_eq!(gas.state, 2 * SLOT_STATE_GAS);
-    // The body's history comes out of the same reservoir, before the state gas does.
-    assert_eq!(gas.history, TX_BODY_SIZE * COST_PER_HISTORY_BYTE, "the transaction's body");
+    // The body's history comes out of the same reservoir, before the state gas does, and each of
+    // the two new slots leaves a write record that is history too.
+    assert_eq!(
+        gas.history,
+        (TX_BODY_SIZE + 2 * WRITE_RECORD_SIZE) * COST_PER_HISTORY_BYTE,
+        "the transaction's body and the two write records",
+    );
     assert_eq!(
         gas.reservoir_remaining,
         1_000_000_000 - TX_GAS_LIMIT_CAP - 2 * SLOT_STATE_GAS - gas.history,

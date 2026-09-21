@@ -8,7 +8,7 @@ use revm::{
 
 use super::{
     frame_limit::{FrameLimitTracker, Lane},
-    record::{RecordEffect, StagedRecord},
+    record::{HistoryBytes, RecordEffect, StagedRecord},
     EvmTxRuntimeLimits, LimitCheck, LimitKind, LimitUsage, WRITE_RECORD,
 };
 
@@ -176,12 +176,17 @@ impl AdditionalLimit {
         self.staged = Some(record);
     }
 
-    /// Commits the staged record to the running frame's lane. Called by an opcode's wrapper once
-    /// the opcode completed; a crossed limit in the verdict stops the opcode's frame.
+    /// Commits the staged record to the running frame's lane, and reports the history bytes it
+    /// appends or takes back. Called by an opcode's wrapper once the opcode completed; a crossed
+    /// limit in the verdict stops the opcode's frame, and the wrapper charges the history.
     #[inline]
-    pub(crate) fn commit_staged_record(&mut self) -> LimitCheck {
-        let Some(record) = self.staged.take() else { return LimitCheck::WithinLimit };
-        match record.effect(self.sender) {
+    pub(crate) fn commit_staged_record(&mut self) -> (LimitCheck, HistoryBytes) {
+        let Some(record) = self.staged.take() else {
+            return (LimitCheck::WithinLimit, HistoryBytes::None);
+        };
+        let effect = record.effect(self.sender);
+        let history = effect.history_bytes();
+        let check = match effect {
             RecordEffect::None => LimitCheck::WithinLimit,
             RecordEffect::Record(usage) => {
                 self.tracker.record(usage);
@@ -191,7 +196,8 @@ impl AdditionalLimit {
                 self.tracker.refund(usage);
                 LimitCheck::WithinLimit
             }
-        }
+        };
+        (check, history)
     }
 
     /// Discards the staged record. Called by an opcode's wrapper when the opcode failed, which

@@ -6,11 +6,18 @@
 //!
 //! 1. discard any record staged before the opcode (nothing may commit it for this one);
 //! 2. run revm's instruction, whose Host call stages the record;
-//! 3. commit the record if the opcode completed, discard it if the opcode failed.
+//! 3. commit the record if the opcode completed, discard it if the opcode failed;
+//! 4. charge the frame the history gas of what the record appends — and give it back when the
+//!    record was taken away, as a slot written back to its original value takes its own back.
+//!
+//! The history a record costs is its data size, so the charge and the count cannot drift apart:
+//! a log pays for its address, its topics and its data, a storage write or a destructed account's
+//! beneficiary for the forty bytes of one write record.
 //!
 //! A commit that crosses a limit stops the opcode's frame with a revert whose output is
 //! [`MegaLimitExceeded`](crate::MegaLimitExceeded) (see
-//! [`AdditionalLimit`](crate::AdditionalLimit) for the abort protocol).
+//! [`AdditionalLimit`](crate::AdditionalLimit) for the abort protocol). A history charge the frame
+//! cannot pay is an ordinary out-of-gas, which burns the frame's gas the way any other does.
 //!
 //! A wrapper keeps the static gas revm's table charges for its opcode, so the gas schedule is
 //! unchanged.
@@ -36,7 +43,7 @@ use revm::{
     Database,
 };
 
-use crate::{ExternalEnvTypes, LimitCheck, MegaContext};
+use crate::{history_gas, limit::HistoryBytes, ExternalEnvTypes, LimitCheck, MegaContext};
 
 use super::MegaInstructions;
 
@@ -70,7 +77,8 @@ pub(crate) fn mega_instructions<DB: Database, ExtEnvs: ExternalEnvTypes>(
     instructions
 }
 
-/// Runs `inner` and commits the record its Host call staged once it completed.
+/// Runs `inner`, commits the record its Host call staged once it completed, and settles the
+/// history gas the record costs.
 ///
 /// An opcode completes when it returns `Ok` or stops the frame successfully (`SELFDESTRUCT`
 /// returns its own `SelfDestruct` result). Any other result fails the opcode, which takes the
@@ -91,11 +99,42 @@ fn commit_after<DB: Database, ExtEnvs: ExternalEnvTypes>(
         host.additional_limit.discard_staged_record();
         return result;
     }
-    let check = host.additional_limit.commit_staged_record();
+    let (check, history) = host.additional_limit.commit_staged_record();
+    if host.prices_history() {
+        settle_history(interpreter, history)?;
+    }
     if check.exceeded_limit() {
         return Err(stop_frame(interpreter, &check));
     }
     result
+}
+
+/// Charges the running frame the history gas of the bytes a record appends, or gives back the
+/// history of a record that was taken away.
+///
+/// Both sides are priced the same way, so a record taken back cancels its own charge exactly,
+/// whichever frame made it: a refill below zero is reconciled when the frame merges into its
+/// caller. A byte count with no price and a charge the frame cannot pay are both an out-of-gas.
+#[inline]
+fn settle_history(
+    interpreter: &mut Interpreter<EthInterpreter>,
+    history: HistoryBytes,
+) -> Result<(), InstructionResult> {
+    match history {
+        HistoryBytes::None => Ok(()),
+        HistoryBytes::Appended(bytes) => {
+            let Some(cost) = history_gas(bytes) else { return Err(InstructionResult::OutOfGas) };
+            if interpreter.gas.record_history_cost(cost) {
+                Ok(())
+            } else {
+                Err(InstructionResult::OutOfGas)
+            }
+        }
+        HistoryBytes::Taken(bytes) => {
+            interpreter.gas.refill_history(history_gas(bytes).unwrap_or(0));
+            Ok(())
+        }
+    }
 }
 
 /// Stops the running frame with the revert a crossed limit asks for: its output is

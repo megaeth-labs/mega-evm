@@ -22,6 +22,7 @@ mod limit;
 mod record;
 
 pub use limit::AdditionalLimit;
+pub(crate) use record::HistoryBytes;
 pub use record::StagedRecord;
 
 use alloy_primitives::Bytes;
