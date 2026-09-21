@@ -19,6 +19,7 @@ mod salt_refund;
 mod schedule;
 mod state;
 mod static_callee;
+mod storage_call_stipend;
 mod strategic_stop;
 mod synthetic_frame_gas;
 mod write_records;

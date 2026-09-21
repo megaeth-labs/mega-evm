@@ -3,7 +3,7 @@
 use alloy_primitives::Address;
 use revm::{
     handler::FrameResult,
-    interpreter::{FrameInput, InstructionResult},
+    interpreter::{CallInputs, CallScheme, FrameInput, InstructionResult},
 };
 
 use super::{
@@ -11,6 +11,7 @@ use super::{
     record::{HistoryBytes, RecordEffect, StagedRecord},
     EvmTxRuntimeLimits, LimitCheck, LimitKind, LimitUsage, WRITE_RECORD,
 };
+use crate::storage_call_stipend;
 
 /// What the common execution layer tracks for the running transaction: the per-frame lanes of
 /// data-size bytes and write records, the record the Host staged for the running opcode, and the
@@ -179,6 +180,17 @@ impl AdditionalLimit {
     /// Records the history gas charged for the transaction's own write record.
     pub(crate) const fn set_top_level_write_record_gas(&mut self, gas: u64) {
         self.top_level_write_record_gas = gas;
+    }
+
+    /// Draws up to `amount` from the running frame's history allowance and reports what it gave;
+    /// the caller pays the rest out of the frame's own gas.
+    ///
+    /// Only a history charge may draw, and only the one a log makes: a write record, a state
+    /// charge and a unit of computation are all paid for by the frame's gas alone. See
+    /// [`storage_call_stipend`](crate::storage_call_stipend).
+    #[inline]
+    pub(crate) fn try_consume_stipend(&mut self, amount: u64) -> u64 {
+        self.tracker.consume_stipend(amount)
     }
 
     /// Whether the transaction's call target is an applied EIP-7702 authority, whose account
@@ -371,6 +383,9 @@ impl AdditionalLimit {
                 if records.on_lane > 0 {
                     self.tracker.record(WRITE_RECORD.times(records.on_lane));
                 }
+                if grants_stipend(inputs) {
+                    self.tracker.grant_stipend(storage_call_stipend());
+                }
             }
             FrameInput::Create(inputs) => {
                 let records = self.frame_start_records(input);
@@ -467,6 +482,15 @@ impl AdditionalLimit {
             self.apply_latch(result);
         }
     }
+}
+
+/// Whether the frame `inputs` starts is granted a history allowance: a value-transferring `CALL`
+/// or `CALLCODE` below the transaction's own frame.
+///
+/// `DELEGATECALL` and `STATICCALL` carry no value, and the transaction's own frame is not a call
+/// anybody made — its sender chose the gas limit.
+fn grants_stipend(inputs: &CallInputs) -> bool {
+    matches!(inputs.scheme, CallScheme::Call | CallScheme::CallCode) && inputs.transfers_value()
 }
 
 /// The write records a frame's start makes, split by whose failure takes them back.

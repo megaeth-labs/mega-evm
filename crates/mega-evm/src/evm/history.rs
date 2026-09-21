@@ -46,6 +46,26 @@ pub const fn log_history_bytes(topics: u64, data_len: u64) -> u64 {
     LOG_BASE_SIZE.saturating_add(LOG_TOPIC_SIZE.saturating_mul(topics)).saturating_add(data_len)
 }
 
+/// The history bytes the allowance of a value-transferring call covers: one three-topic event
+/// carrying a single word, which is what a `receive()` hook emits.
+pub const STORAGE_CALL_STIPEND_BYTES: u64 = LOG_BASE_SIZE + 3 * LOG_TOPIC_SIZE + 32;
+
+/// The history allowance a value-transferring `CALL` or `CALLCODE` grants the frame it starts.
+///
+/// EVM's own `CALL_STIPEND` buys the recipient of a transfer enough computation to notice it; on
+/// a chain that prices the bytes a log appends it buys no log at all, so a `receive()` hook that
+/// emits an event would be unreachable through `transfer()`. The allowance is that stipend's
+/// counterpart on the history ledger: [`STORAGE_CALL_STIPEND_BYTES`] at the cost per history
+/// byte, enough for one event and nothing else.
+///
+/// It is separate from the frame's gas in every sense. It never enters the frame's `Gas`, so no
+/// settlement can hand it back as gas; it pays history charges and only those, so it cannot buy
+/// computation or a write record; and what it pays for appears on no ledger, because no pool of
+/// the transaction's gas paid it.
+pub fn storage_call_stipend() -> u64 {
+    history_gas(STORAGE_CALL_STIPEND_BYTES).unwrap_or(u64::MAX)
+}
+
 /// The history bytes a transaction's body appends before it runs: the fixed body
 /// ([`TX_BODY_SIZE`]), the calldata, one record per EIP-7702 authorization, and the access list at
 /// the size of its addresses and keys.
@@ -87,6 +107,18 @@ mod tests {
             TX_BODY_SIZE + 100 + 2 * AUTHORIZATION_SIZE + 3 * 20 + 4 * 32
         );
         assert_eq!(tx_body_history_bytes(u64::MAX, 1, 0, 0), u64::MAX, "the count saturates");
+    }
+
+    /// The allowance is one three-topic event carrying one word, at the price of a history byte.
+    #[test]
+    fn test_the_allowance_is_one_three_topic_event() {
+        if runs_at_measurement_prices() {
+            return;
+        }
+        assert_eq!(STORAGE_CALL_STIPEND_BYTES, log_history_bytes(3, 32));
+        assert_eq!(STORAGE_CALL_STIPEND_BYTES, 160);
+        assert_eq!(storage_call_stipend(), 160 * COST_PER_HISTORY_BYTE);
+        assert_eq!(storage_call_stipend(), history_gas(log_history_bytes(3, 32)).unwrap());
     }
 
     /// A charge is its byte count at the cost per history byte, and a count with no price

@@ -102,7 +102,7 @@ pub(crate) fn mega_instructions<DB: Database, ExtEnvs: ExternalEnvTypes>(
 /// returns its own `SelfDestruct` result). Any other result fails the opcode, which takes the
 /// staged write back with it.
 #[inline(always)]
-fn commit_after<DB: Database, ExtEnvs: ExternalEnvTypes>(
+fn commit_after<const FROM_ALLOWANCE: bool, DB: Database, ExtEnvs: ExternalEnvTypes>(
     context: Ctx<'_, DB, ExtEnvs>,
     inner: InstructionFn<DB, ExtEnvs>,
 ) -> InstructionExecResult {
@@ -119,7 +119,7 @@ fn commit_after<DB: Database, ExtEnvs: ExternalEnvTypes>(
     }
     let (check, history) = host.additional_limit.commit_staged_record();
     if host.prices_history() {
-        settle_history(interpreter, history)?;
+        settle_history::<FROM_ALLOWANCE, _, _>(interpreter, host, history)?;
     }
     if check.exceeded_limit() {
         return Err(stop_frame(interpreter, &check));
@@ -133,16 +133,25 @@ fn commit_after<DB: Database, ExtEnvs: ExternalEnvTypes>(
 /// Both sides are priced the same way, so a record taken back cancels its own charge exactly,
 /// whichever frame made it: a refill below zero is reconciled when the frame merges into its
 /// caller. A byte count with no price and a charge the frame cannot pay are both an out-of-gas.
+///
+/// With `FROM_ALLOWANCE` the frame's history allowance pays what it can of the charge before the
+/// frame's gas pays the rest ([`storage_call_stipend`](crate::storage_call_stipend)). Only the
+/// log site sets it: a write record is the frame's own to pay for, and a record taken back gives
+/// back what the frame's gas paid, never what the allowance did — the allowance is spent, not
+/// lent.
 #[inline]
-fn settle_history(
+fn settle_history<const FROM_ALLOWANCE: bool, DB: Database, ExtEnvs: ExternalEnvTypes>(
     interpreter: &mut Interpreter<EthInterpreter>,
+    host: &mut MegaContext<DB, ExtEnvs>,
     history: HistoryBytes,
 ) -> Result<(), InstructionResult> {
     match history {
         HistoryBytes::None => Ok(()),
         HistoryBytes::Appended(bytes) => {
             let Some(cost) = history_gas(bytes) else { return Err(InstructionResult::OutOfGas) };
-            if interpreter.gas.record_history_cost(cost) {
+            let drawn =
+                if FROM_ALLOWANCE { host.additional_limit.try_consume_stipend(cost) } else { 0 };
+            if interpreter.gas.record_history_cost(cost - drawn) {
                 Ok(())
             } else {
                 Err(InstructionResult::OutOfGas)
@@ -181,21 +190,21 @@ fn stop_frame(
 fn sstore<DB: Database, ExtEnvs: ExternalEnvTypes>(
     context: Ctx<'_, DB, ExtEnvs>,
 ) -> InstructionExecResult {
-    commit_after(context, host::sstore)
+    commit_after::<false, _, _>(context, host::sstore)
 }
 
 /// `LOG0`..`LOG4`, committing the log's bytes.
 fn log<const N: usize, DB: Database, ExtEnvs: ExternalEnvTypes>(
     context: Ctx<'_, DB, ExtEnvs>,
 ) -> InstructionExecResult {
-    commit_after(context, host::log::<N, MegaContext<DB, ExtEnvs>>)
+    commit_after::<true, _, _>(context, host::log::<N, MegaContext<DB, ExtEnvs>>)
 }
 
 /// `SELFDESTRUCT`, committing the beneficiary's write record.
 fn selfdestruct<DB: Database, ExtEnvs: ExternalEnvTypes>(
     context: Ctx<'_, DB, ExtEnvs>,
 ) -> InstructionExecResult {
-    commit_after(context, host::selfdestruct)
+    commit_after::<false, _, _>(context, host::selfdestruct)
 }
 
 /// Runs `inner` and charges the frame the history of the write records the frame `inner` starts

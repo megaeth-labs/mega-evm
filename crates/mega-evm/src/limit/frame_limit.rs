@@ -49,6 +49,9 @@ pub(crate) struct Lane {
     pub(crate) creator_record: bool,
     /// The most data-size bytes the frame may keep; `u64::MAX` when it has no budget.
     pub(crate) budget: u64,
+    /// What is left of the history allowance this frame was granted, if it was granted one. It
+    /// never enters the frame's gas, and what it does not spend disappears with the frame.
+    pub(crate) stipend_remaining: u64,
 }
 
 impl Lane {
@@ -71,6 +74,7 @@ impl Lane {
             holds_caller_record: false,
             creator_record: false,
             budget,
+            stipend_remaining: 0,
         }
     }
 
@@ -153,6 +157,25 @@ impl FrameLimitTracker {
     /// The running frame's lane, mutably.
     pub(crate) fn current_mut(&mut self) -> Option<&mut Lane> {
         self.lanes.last_mut()
+    }
+
+    /// Grants the running frame a history allowance of `amount`.
+    ///
+    /// Must run right after the frame's lane was pushed: the allowance belongs to the frame that
+    /// is starting, not to the one that granted it.
+    pub(crate) fn grant_stipend(&mut self, amount: u64) {
+        if let Some(lane) = self.lanes.last_mut() {
+            lane.stipend_remaining = amount;
+        }
+    }
+
+    /// Draws up to `amount` from the running frame's allowance and reports what it gave. The
+    /// caller pays the rest out of the frame's gas.
+    pub(crate) fn consume_stipend(&mut self, amount: u64) -> u64 {
+        let Some(lane) = self.lanes.last_mut() else { return 0 };
+        let drawn = lane.stipend_remaining.min(amount);
+        lane.stipend_remaining -= drawn;
+        drawn
     }
 
     /// Pushes the lane of a frame that starts.
