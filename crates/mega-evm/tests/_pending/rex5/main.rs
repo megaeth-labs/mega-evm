@@ -5,7 +5,6 @@ mod callcode_storage_gas;
 mod create2_empty_initcode;
 mod create2_resize_gas_metering;
 mod db_error;
-mod deposit_create_storage_gas;
 mod eip7702_metering;
 mod eip7702_state_growth;
 mod keyless_empty_code_logs;

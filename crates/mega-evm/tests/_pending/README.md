@@ -28,7 +28,6 @@ Do not add a `_pending/main.rs`.
 | Owning mechanism | Tests | From `tests/` | From `src/` | Keep | Rewrite | Undecided |
 |---|---:|---:|---:|---:|---:|---:|
 | the common execution layer | 21 | 21 | 0 | 21 | 0 | 0 |
-| SALT pricing | 4 | 4 | 0 | 0 | 4 | 0 |
 | history gas | 28 | 24 | 4 | 4 | 24 | 0 |
 | compute gas | 26 | 26 | 0 | 0 | 26 | 0 |
 | the data-size limit | 47 | 45 | 2 | 40 | 7 | 0 |
@@ -41,7 +40,7 @@ Do not add a `_pending/main.rs`.
 | native keyless deployment | 75 | 73 | 2 | 29 | 46 | 0 |
 | inspector support | 4 | 4 | 0 | 1 | 3 | 0 |
 | — (undecided: D57 preload-warm cold charging, D58 98/100 forwarding) | 7 | 7 | 0 | 0 | 0 | 7 |
-| **Total** | **528** | **461** | **67** | **311** | **189** | **28** |
+| **Total** | **524** | **457** | **67** | **311** | **185** | **28** |
 
 ## Tests ported in place
 
@@ -167,7 +166,7 @@ These 53 rows run in a real test target now, adapted to the Satin API, so the co
 
 ## Tests ported by SALT pricing
 
-These 63 rows run in a real test target now, adapted to the Satin API and to the pricing hook the decision they cite fixes, so the counts above are lower than the inventory's by exactly these rows.
+These 67 rows run in a real test target now, adapted to the Satin API and to the pricing hook the decision they cite fixes, so the counts above are lower than the inventory's by exactly these rows.
 
 | Legacy file | Owner in the inventory | Tests | Now in |
 |---|---|---:|---|
@@ -175,6 +174,7 @@ These 63 rows run in a real test target now, adapted to the Satin API and to the
 | `rex/storage_gas.rs` | SALT pricing (15) | 15 | `tests/satin/salt.rs` |
 | `rex4/eip7702_delegation_cycle.rs` | SALT pricing (8) | 8 | `tests/satin/salt_delegation.rs` |
 | `rex5/callcode_storage_gas.rs` | SALT pricing (3) | 3 | `tests/satin/salt_delegation.rs` |
+| `rex5/deposit_create_storage_gas.rs` | SALT pricing (4) | 4 | `tests/satin/salt_deposit.rs` |
 | `rex5/eip7702_metering.rs` | SALT pricing (4) | 4 | `tests/satin/salt_delegation.rs` |
 | `rex5/sstore_storage_gas_error.rs` | SALT pricing (1) | 1 | `tests/satin/salt_failure.rs` |
 | `rex6/create_frame_accounting.rs` | SALT pricing (1) | 1 | `tests/satin/salt_failure.rs` |
@@ -182,7 +182,7 @@ These 63 rows run in a real test target now, adapted to the Satin API and to the
 | `rex6/system_tx_metering_exemption.rs` | SALT pricing (3) | 3 | `tests/block/salt.rs`, `tests/satin/salt.rs` |
 | `src/evm/context.rs` | SALT pricing (1) | 1 | `src/evm/context.rs` |
 | `src/external/gas.rs` | SALT pricing (5) | 5 | `src/external/gas.rs`, `tests/satin/salt.rs` |
-| **Total** | | **63** | |
+| **Total** | | **67** | |
 
 ## Tests ported by the system contract interceptors
 
@@ -258,7 +258,6 @@ Each cell lists `disposition count (mechanism · decision)`.
 | `rex5/create2_empty_initcode.rs` | 5 | keep 5 (the common execution layer · canonical revm behaviour) |
 | `rex5/create2_resize_gas_metering.rs` | 2 | keep 2 (the common execution layer · canonical behaviour) |
 | `rex5/db_error.rs` | 3 | rewrite 3 (native keyless deployment · native path surfaces DB errors) |
-| `rex5/deposit_create_storage_gas.rs` | 4 | rewrite 4 (SALT pricing · D12/D37) |
 | `rex5/eip7702_state_growth.rs` | 8 | rewrite 8 (the state-growth and KV limits · D28/D31/D45 (7702 authorization matrix)) |
 | `rex5/keyless_empty_code_logs.rs` | 2 | rewrite 2 (native keyless deployment · native sub-frame keeps logs inherently) |
 | `rex5/keyless_fee_free.rs` | 12 | rewrite 8 (native keyless deployment · D16/D37/D38 (GASPRICE native; materialisation explicit)); keep 4 (native keyless deployment · rules unchanged) |
