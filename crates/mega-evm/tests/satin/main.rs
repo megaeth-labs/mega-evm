@@ -4,6 +4,7 @@ mod common;
 mod contract_size;
 mod db_error;
 mod equivalence;
+mod history_gas;
 mod inspector;
 mod intrinsic;
 mod outcome;
