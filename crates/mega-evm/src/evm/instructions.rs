@@ -722,6 +722,26 @@ macro_rules! run_inner_instruction_or_abort {
             Err(result) => Err(result),
         };
     };
+    // Same as above, but a plain out-of-gas halt runs `$on_oog` before the early return skips the
+    // wrapper's tail. Unlike the debug-only `on_plain_oog` form below, this one runs in release
+    // builds: its callers use it to restore state the halting body would have created.
+    ($inner_fn:path, $context:expr, $out:ident, on_out_of_gas: $on_oog:expr) => {
+        let ctx = InstructionContext::<'_, H, WIRE> {
+            interpreter: &mut *$context.interpreter,
+            host: &mut *$context.host,
+        };
+        #[allow(unused_variables)]
+        let $out: InstructionExecResult = match $inner_fn(ctx) {
+            Ok(()) => Ok(()),
+            Err(result) if result.is_halt() => {
+                if matches!(result, InstructionResult::OutOfGas) {
+                    $on_oog;
+                }
+                return Err(result);
+            }
+            Err(result) => Err(result),
+        };
+    };
     // Same as above, but a plain out-of-gas halt runs `$tripwire` before the early return skips
     // the wrapper's tail. Debug builds only; see
     // `volatile_data_ext::debug_check_frozen_detention_window` for what the tripwire watches.
@@ -1377,6 +1397,122 @@ pub mod volatile_data_ext {
         );
     }
 
+    /// Materializes the journal entries a CALL-family opcode would have created before the
+    /// pre-revm-40 schedule charged it anything, for a frame that cannot afford the static-gas
+    /// charge this wrapper takes ahead of revm's body.
+    ///
+    /// Two sites create those entries, and both create them *cold*. `MegaETH` prices a
+    /// resident-but-cold entry as a cold access even for an address the pre-warmed sets cover, so
+    /// whether they ran decides what every later access to the address costs in the transaction —
+    /// 2,500 gas for an account. Leaving no entry lets the later access take the fresh-entry path,
+    /// where a precompile is warm. The two sites, in the order the opcode reached them:
+    ///
+    /// 1. The storage-gas wrapper's inspection of the account it meters, which runs ahead of revm's
+    ///    body and is therefore unconditional. `select_addr` must be the same selector that wrapper
+    ///    uses, and the `REX5` split below the same one: `CALLCODE` meters against the current
+    ///    frame from `REX5`, which is why its stack operand legitimately stays unmaterialized
+    ///    there.
+    /// 2. From `REX6`, the stack operand's own entry, materialized by the raw-operand delegate
+    ///    resolution in [`Host::load_account_info_skip_cold_load`]. That sits inside revm's load,
+    ///    which the body reaches only after two memory expansions — so they are replayed first and
+    ///    the operand is left alone when the frame cannot afford them. Materializing an entry the
+    ///    deployed implementation never created diverges just as much, in the other direction.
+    ///
+    /// Only residency is reproduced. The entries are cold, which is the state the frame's
+    /// out-of-gas revert left them in, and nothing here marks beneficiary access — that is a
+    /// separate divergence, watched by [`debug_check_frozen_detention_window`].
+    ///
+    /// `HAS_VALUE_OPERAND` is `true` for the two opcodes carrying a `value` operand (`CALL` and
+    /// `CALLCODE`), whose memory operands sit one stack position deeper.
+    fn materialize_unreached_call_entries<
+        const HAS_VALUE_OPERAND: bool,
+        WIRE: InterpreterTypes<Stack: StackInspectTr>,
+        H: HostExt + ContextTr + JournalInspectTr + ?Sized,
+    >(
+        context: &mut InstructionContext<'_, H, WIRE>,
+        select_addr: fn(MegaSpecId, Address, Address) -> Address,
+    ) -> InstructionExecResult {
+        // A stack too short to hold the target is a stack underflow raised before the storage-gas
+        // wrapper inspected anything.
+        let Some(to) = context.interpreter.stack.inspect::<1>() else { return Ok(()) };
+        let to = to.into_address();
+        let mega_spec = context.host.spec_id();
+        let current_address = context.interpreter.input.target_address();
+        let storage_address = select_addr(mega_spec, current_address, to);
+        let inspected = if mega_spec.is_enabled(MegaSpecId::REX5) {
+            context.host.inspect_account(storage_address, false).map(|_| ())
+        } else {
+            context.host.inspect_account_delegated(mega_spec, storage_address).map(|_| ())
+        };
+        if inspected.is_err() {
+            return Err(InstructionResult::FatalExternalError);
+        }
+
+        if !mega_spec.is_enabled(MegaSpecId::REX6) ||
+            storage_address == to ||
+            !replay_call_memory_expansions::<HAS_VALUE_OPERAND, _, _>(context)
+        {
+            return Ok(());
+        }
+        if context.host.inspect_account_delegated(mega_spec, to).is_err() {
+            return Err(InstructionResult::FatalExternalError);
+        }
+        Ok(())
+    }
+
+    /// Replays the two memory expansions revm's CALL-family body performs before it loads the
+    /// target, reporting whether the frame could afford both.
+    ///
+    /// The expansions charge gas and grow the frame's memory. Neither is observable: the caller
+    /// returns an out-of-gas result either way, and an out-of-gas halt spends the frame's remaining
+    /// gas and discards its memory.
+    fn replay_call_memory_expansions<
+        const HAS_VALUE_OPERAND: bool,
+        WIRE: InterpreterTypes<Stack: StackInspectTr>,
+        H: HostExt + ?Sized,
+    >(
+        context: &mut InstructionContext<'_, H, WIRE>,
+    ) -> bool {
+        let stack = &context.interpreter.stack;
+        let operands = if HAS_VALUE_OPERAND {
+            [stack.inspect::<3>(), stack.inspect::<4>(), stack.inspect::<5>(), stack.inspect::<6>()]
+        } else {
+            [stack.inspect::<2>(), stack.inspect::<3>(), stack.inspect::<4>(), stack.inspect::<5>()]
+        };
+        // A stack too short for the memory operands underflows in the body, ahead of its load.
+        let [Some(in_offset), Some(in_len), Some(out_offset), Some(out_len)] = operands else {
+            return false;
+        };
+        replay_memory_expansion(context, in_offset, in_len) &&
+            replay_memory_expansion(context, out_offset, out_len)
+    }
+
+    /// Expands memory for one of a CALL's `(offset, len)` operand pairs, reporting whether the
+    /// frame could afford it. Mirrors revm's `resize_memory` helper, including its rule that a zero
+    /// length neither reads the offset nor touches memory.
+    fn replay_memory_expansion<WIRE: InterpreterTypes, H: HostExt + ?Sized>(
+        context: &mut InstructionContext<'_, H, WIRE>,
+        offset: U256,
+        len: U256,
+    ) -> bool {
+        let Some(len) = operand_as_usize(len) else { return false };
+        if len == 0 {
+            return true;
+        }
+        let Some(offset) = operand_as_usize(offset) else { return false };
+        context.interpreter.resize_memory(context.host.gas_params(), offset, len).is_ok()
+    }
+
+    /// Converts a memory operand to `usize`, reporting `None` for a value revm's
+    /// `as_usize_or_fail!` would have rejected.
+    fn operand_as_usize(value: U256) -> Option<usize> {
+        let limbs = value.as_limbs();
+        if limbs[0] > usize::MAX as u64 || limbs[1] != 0 || limbs[2] != 0 || limbs[3] != 0 {
+            return None;
+        }
+        Some(limbs[0] as usize)
+    }
+
     /// Rejects the guarded opcode with the `disableVolatileDataAccess` revert data and returns from
     /// the enclosing handler, leaving the frame's gas exactly as it was before the opcode.
     ///
@@ -1716,7 +1852,7 @@ pub mod volatile_data_ext {
     /// by an already-returned inner frame is still propagated into the transaction's compute
     /// budget.
     macro_rules! wrap_call_volatile_check {
-    ($fn_name:ident, $opcode:ident, $inner_fn:path) => {
+    ($fn_name:ident, $opcode:ident, $inner_fn:path, $select_addr:path) => {
         #[doc = concat!("`", stringify!($opcode), "` opcode with volatile data access disabled check for beneficiary.")]
         #[inline]
         pub fn $fn_name<
@@ -1774,6 +1910,22 @@ pub mod volatile_data_ext {
             // does not return early: the detention tail below has to run on this path too.
             const STATIC_GAS: u64 = static_gas(opcode::$opcode);
             if !context.interpreter.gas.record_regular_cost(STATIC_GAS) {
+                // The charge is where revm 40 put it, but it is not where this family's consensus
+                // schedule takes it: the deployed implementation charged from inside revm's body,
+                // so a frame that cannot afford the charge had already materialized journal
+                // entries that decide the cost of later accesses. Recreate them here.
+                const HAS_VALUE_OPERAND: bool =
+                    opcode::$opcode == opcode::CALL || opcode::$opcode == opcode::CALLCODE;
+                {
+                    let mut ctx = InstructionContext::<'_, H, WIRE> {
+                        interpreter: &mut *context.interpreter,
+                        host: &mut *context.host,
+                    };
+                    materialize_unreached_call_entries::<HAS_VALUE_OPERAND, _, _>(
+                        &mut ctx,
+                        $select_addr,
+                    )?;
+                }
                 #[cfg(debug_assertions)]
                 debug_check_frozen_detention_window(context.host, opcode::$opcode, tripwire_target);
                 apply_compute_gas_limit!(context);
@@ -1812,10 +1964,33 @@ pub mod volatile_data_ext {
 
     // Conditionally volatile CALL-like opcodes — volatile only when targeting the block
     // beneficiary. These wrap forward_gas_ext handlers with a pre-execution beneficiary check.
-    wrap_call_volatile_check!(call, CALL, forward_gas_ext::call);
-    wrap_call_volatile_check!(static_call, STATICCALL, forward_gas_ext::static_call);
-    wrap_call_volatile_check!(delegate_call, DELEGATECALL, forward_gas_ext::delegate_call);
-    wrap_call_volatile_check!(call_code, CALLCODE, forward_gas_ext::call_code);
+    // The trailing selector must stay the one `storage_gas_ext`'s wrapper meters this opcode
+    // against: it is what `materialize_unreached_call_entries` reproduces when the frame cannot
+    // afford the static charge above.
+    wrap_call_volatile_check!(
+        call,
+        CALL,
+        forward_gas_ext::call,
+        storage_gas_ext::storage_addr_from_to
+    );
+    wrap_call_volatile_check!(
+        static_call,
+        STATICCALL,
+        forward_gas_ext::static_call,
+        storage_gas_ext::storage_addr_from_to
+    );
+    wrap_call_volatile_check!(
+        delegate_call,
+        DELEGATECALL,
+        forward_gas_ext::delegate_call,
+        storage_gas_ext::storage_addr_from_to
+    );
+    wrap_call_volatile_check!(
+        call_code,
+        CALLCODE,
+        forward_gas_ext::call_code,
+        storage_gas_ext::storage_addr_for_callcode
+    );
 }
 
 /// Extends opcodes with additional limit (kv update limit, data limit, etc.) enforcement.
@@ -1922,7 +2097,11 @@ pub mod storage_gas_ext {
 
     /// Address-selector for opcodes where the storage account is the stack `to` address (e.g.
     /// CALL).
-    fn storage_addr_from_to(_mega_spec: MegaSpecId, _current: Address, to: Address) -> Address {
+    pub(super) fn storage_addr_from_to(
+        _mega_spec: MegaSpecId,
+        _current: Address,
+        to: Address,
+    ) -> Address {
         to
     }
 
@@ -1941,7 +2120,11 @@ pub mod storage_gas_ext {
     /// Address-selector for CALLCODE: Rex5+ uses the current frame's address because CALLCODE
     /// executes borrowed code in the caller's own storage context; pre-Rex5 preserves the frozen
     /// behavior of metering against the code-source (stack `to`).
-    fn storage_addr_for_callcode(mega_spec: MegaSpecId, current: Address, to: Address) -> Address {
+    pub(super) fn storage_addr_for_callcode(
+        mega_spec: MegaSpecId,
+        current: Address,
+        to: Address,
+    ) -> Address {
         if mega_spec.is_enabled(MegaSpecId::REX5) {
             current
         } else {
@@ -2054,7 +2237,25 @@ pub mod storage_gas_ext {
                 // (canonical metering order). Byte-equivalent to the pre-REX6 layering on every
                 // spec because nothing between the `gas_before` capture and the storage charge
                 // above consumes EVM gas.
-                run_inner_instruction_or_abort!($raw_fn, context, inner_outcome);
+                run_inner_instruction_or_abort!(
+                    $raw_fn,
+                    context,
+                    inner_outcome,
+                    on_out_of_gas: {
+                        // revm 40 charges the value-transfer cost ahead of the load that resolves
+                        // the stack operand's delegation; the deployed implementation charged it
+                        // after. From REX6 that load materializes the operand's journal entry
+                        // cold, which prices every later access to it in this transaction, so an
+                        // operand this handler did not already inspect has to be materialized
+                        // here. An operand the body did reach is resident and warm by now, and
+                        // re-inspecting leaves it that way.
+                        if mega_spec.is_enabled(MegaSpecId::REX6) && storage_address != to {
+                            if context.host.inspect_account_delegated(mega_spec, to).is_err() {
+                                return Err(InstructionResult::FatalExternalError);
+                            }
+                        }
+                    }
+                );
                 record_storage_compute_gas!(
                     context,
                     gas_before,
