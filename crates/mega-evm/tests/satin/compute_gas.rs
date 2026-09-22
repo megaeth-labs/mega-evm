@@ -72,9 +72,17 @@ fn arithmetic(count: usize) -> Bytes {
 }
 
 /// The three ledgers split the raw spend, the regular one is what is neither state nor history,
-/// and the figure a block counts is that ledger at least the floor.
-fn assert_ledgers(name: &str, outcome: &MegaTransactionOutcome) {
+/// and the figure a block counts is that ledger at least the floor. Above the execution cap the
+/// reservoir paid the state and history ledgers, and nothing else.
+fn assert_ledgers(name: &str, gas_limit: u64, outcome: &MegaTransactionOutcome) {
     let gas = &outcome.gas;
+    if gas_limit > TX_GAS_LIMIT_CAP {
+        assert_eq!(
+            gas.reservoir_remaining,
+            gas_limit - TX_GAS_LIMIT_CAP - gas.state - gas.history,
+            "{name}: the reservoir paid the state and history ledgers",
+        );
+    }
     let result = outcome.result.gas();
     assert_eq!(
         gas.regular + gas.state + gas.history,
@@ -108,7 +116,7 @@ fn test_a_floor_bound_transaction_counts_its_floor_and_history_comes_out_first()
         let tx = call_with_data(CALLER, CALLEE, Bytes::from(vec![0; CALLDATA as usize]), gas_limit);
         let outcome = execute(funded(), tx);
         assert!(outcome.result.is_success(), "{:?}", outcome.result);
-        assert_ledgers("floor-bound", &outcome);
+        assert_ledgers("floor-bound", gas_limit, &outcome);
 
         let gas = outcome.gas;
         assert_eq!(gas.history, (TX_BODY_SIZE + CALLDATA) * COST_PER_HISTORY_BYTE);
@@ -166,7 +174,7 @@ fn test_gas_an_inspector_edits_moves_the_compute_figure_with_the_receipt() {
             .execute_transaction(call(CALLER, CALLEE, U256::ZERO, gas_limit))
             .expect("the transaction is valid");
         assert!(outcome.result.is_success(), "{:?}", outcome.result);
-        assert_ledgers("edited", &outcome);
+        assert_ledgers("edited", gas_limit, &outcome);
         outcome.gas
     };
 
@@ -195,7 +203,7 @@ fn computes(code: Bytes, gas_limit: u64) -> MegaGasUsage {
     let outcome =
         execute(funded().account_code(CALLEE, code), call(CALLER, CALLEE, U256::ZERO, gas_limit));
     assert!(outcome.result.is_success(), "{:?}", outcome.result);
-    assert_ledgers("computes", &outcome);
+    assert_ledgers("computes", gas_limit, &outcome);
     outcome.gas
 }
 
@@ -488,7 +496,7 @@ fn test_computation_past_the_execution_cap_is_an_ordinary_out_of_gas() {
             outcome.result
         );
         assert_eq!(outcome.limit_exceeded, None, "no limit of this engine stopped it");
-        assert_ledgers("past the cap", &outcome);
+        assert_ledgers("past the cap", gas_limit, &outcome);
         assert_eq!(outcome.gas.regular, TX_GAS_LIMIT_CAP, "the whole execution budget, no more");
         assert_eq!(outcome.gas.history, TX_BODY_SIZE * COST_PER_HISTORY_BYTE);
         assert_eq!(outcome.gas.reservoir_remaining, reservoir - outcome.gas.history);
