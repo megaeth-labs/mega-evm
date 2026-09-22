@@ -178,6 +178,47 @@ mod tests {
         assert_ne!(params.min_rotation_delay, 0);
     }
 
+    /// [`SequencerRegistryConfig::placeholder`] is attached only by the unknown-chain fallback.
+    ///
+    /// [`hardfork_schedule`] returns it exactly when the chain ID is absent from the activation
+    /// table. A known chain ID resolves to that chain's own table, which never carries the
+    /// placeholder.
+    #[test]
+    fn test_the_placeholder_is_only_the_unknown_chain_fallback() {
+        let placeholder = SequencerRegistryConfig::placeholder();
+        let fallback = all_activated_hardforks();
+        assert_eq!(
+            fallback.fork_params::<SequencerRegistryConfig>(),
+            Some(&placeholder),
+            "the unknown-chain fallback is what attaches the placeholder"
+        );
+
+        for chain_id in [0_u64, 1, 999_999] {
+            assert_eq!(chain_activation(chain_id), None, "{chain_id} is not a known chain");
+            assert_eq!(
+                hardfork_schedule(chain_id).fork_params::<SequencerRegistryConfig>(),
+                Some(&placeholder),
+                "chain {chain_id} reaches the placeholder only by taking the fallback"
+            );
+        }
+
+        for activation in CHAIN_ACTIVATIONS {
+            let schedule = hardfork_schedule(activation.chain_id);
+            assert_eq!(
+                schedule.fork_params::<SequencerRegistryConfig>(),
+                activation.hardforks().fork_params::<SequencerRegistryConfig>(),
+                "chain {} resolves to its own table",
+                activation.chain_id
+            );
+            assert_ne!(
+                schedule.fork_params::<SequencerRegistryConfig>(),
+                Some(&placeholder),
+                "chain {} must not return the placeholder",
+                activation.chain_id
+            );
+        }
+    }
+
     /// The fallback rung is pinned, not inherited from [`MegaSpecId::default`].
     ///
     /// Unknown chains run their rung from genesis, so it is their semantics from block zero with
