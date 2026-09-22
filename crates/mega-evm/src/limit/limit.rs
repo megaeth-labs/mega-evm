@@ -201,13 +201,19 @@ impl AdditionalLimit {
 
     /// Leaves the history gas the running opcode just charged its frame for the records the frame
     /// it starts will make: `on_lane` for the records that frame's failure discards, `caller` for
-    /// the record of the caller's own account.
+    /// the record of the caller's own account, and `records`, the answer the charge was computed
+    /// from, for [`push_lane`](Self::push_lane) to check its own against.
     ///
     /// The next lane pushed takes it, whether that is the frame's own or the empty one of a frame
     /// answered without running.
     #[inline]
-    pub(crate) const fn stage_frame_charge(&mut self, on_lane: u64, caller: u64) {
-        self.pending_frame_charge = FrameCharge { on_lane, caller };
+    pub(crate) const fn stage_frame_charge(
+        &mut self,
+        records: FrameStartRecords,
+        on_lane: u64,
+        caller: u64,
+    ) {
+        self.pending_frame_charge = FrameCharge { records: Some(records), on_lane, caller };
     }
 
     /// Records the history gas the settled transaction spent.
@@ -366,7 +372,7 @@ impl AdditionalLimit {
                     }
                     return;
                 }
-                let records = self.frame_start_records(input);
+                let records = self.records_the_caller_paid_for(input, charge.records);
                 let inherited = self.tracker.current().is_some_and(|caller| {
                     caller.address == Some(target) && caller.account_recorded
                 });
@@ -386,7 +392,7 @@ impl AdditionalLimit {
                 }
             }
             FrameInput::Create(inputs) => {
-                let records = self.frame_start_records(input);
+                let records = self.records_the_caller_paid_for(input, charge.records);
                 self.tracker.push(Lane::new(None, true, budget, charge.on_lane));
                 self.tracker.record(WRITE_RECORD.times(records.on_lane));
                 if depth == 0 {
@@ -399,14 +405,38 @@ impl AdditionalLimit {
         }
     }
 
+    /// The records starting `input` makes, checked against the answer the caller's charge was
+    /// computed from.
+    ///
+    /// The two are separate answers to the same question, asked at two points: the charge at the
+    /// opcode, on the input revm's instruction built, and the count here, on the input that
+    /// survived interception and the keyless rewrite. They agree because the rewrite is the
+    /// identity today. The mechanism that makes it rewrite a call into a creation — native
+    /// keyless deployment — changes which records a frame's start makes, and must reconcile the
+    /// charge with them; until it does, a divergence trips here in every debug build rather than
+    /// mis-charging the caller and mis-splitting the refund its failure gets back.
+    fn records_the_caller_paid_for(
+        &self,
+        input: &FrameInput,
+        charged: Option<FrameStartRecords>,
+    ) -> FrameStartRecords {
+        let records = self.frame_start_records(input);
+        if let Some(charged) = charged {
+            debug_assert_eq!(
+                charged, records,
+                "the records a frame's start makes changed after its caller was charged for them",
+            );
+        }
+        records
+    }
+
     /// The write records starting `input` makes at a depth above the transaction's own frame, for
     /// the opcode that starts it: `on_lane` are the records the frame's failure discards, `caller`
     /// whether its start also writes the caller's own account.
     ///
     /// The caller pays for both at the opcode, before it forwards gas, so the frame's own budget
     /// carries none of them — which is what lets a value transfer's allowance pay for what the
-    /// recipient does with it. [`push_lane`](Self::push_lane) makes exactly these records, from
-    /// this same answer, so the charge and the count cannot disagree.
+    /// recipient does with it.
     pub(crate) fn frame_start_records(&self, input: &FrameInput) -> FrameStartRecords {
         let caller_recorded = self.tracker.current().is_some_and(|lane| lane.account_recorded);
         match input {
@@ -508,6 +538,9 @@ impl FrameStartRecords {
 /// The history gas a caller paid for the records the frame it starts makes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct FrameCharge {
+    /// The records the charge was computed from, when an opcode made one. The transaction's own
+    /// frame has no such opcode, and neither has a frame of a transaction that prices no history.
+    records: Option<FrameStartRecords>,
     /// What the records on the frame's own lane cost.
     on_lane: u64,
     /// What the record of the caller's own account cost.
@@ -516,14 +549,19 @@ struct FrameCharge {
 
 impl FrameCharge {
     /// Nothing charged.
-    const NONE: Self = Self { on_lane: 0, caller: 0 };
+    const NONE: Self = Self { records: None, on_lane: 0, caller: 0 };
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_primitives::{Address, Bytes, U256};
+    use crate::WRITE_RECORD_SIZE;
+    use alloy_primitives::{address, Address, Bytes, U256};
     use revm::interpreter::{CallInput, CallValue};
+
+    const SENDER: Address = address!("00000000000000000000000000000000000f0001");
+    const CALLEE: Address = address!("00000000000000000000000000000000000f0002");
+    const TARGET: Address = address!("00000000000000000000000000000000000f0003");
 
     fn call_inputs(scheme: CallScheme, value: U256) -> CallInputs {
         CallInputs {
@@ -540,6 +578,53 @@ mod tests {
             reservoir: 0,
             charged_new_account_state_gas: false,
         }
+    }
+
+    /// A `CALL` from `caller` to `target` carrying `value`.
+    fn call_from_to(caller: Address, target: Address, value: U256) -> FrameInput {
+        FrameInput::Call(Box::new(CallInputs {
+            caller,
+            target_address: target,
+            ..call_inputs(CallScheme::Call, value)
+        }))
+    }
+
+    /// A layer with the transaction's own frame started: `SENDER` calling `CALLEE`, which has
+    /// recorded nothing of its own yet.
+    fn with_the_transactions_frame() -> AdditionalLimit {
+        let mut limit = AdditionalLimit::default();
+        limit.on_frame_init(&call_from_to(SENDER, CALLEE, U256::ZERO), 0);
+        limit
+    }
+
+    /// The records a frame's start makes are counted from the answer its caller was charged for:
+    /// a value transfer records the caller's account and the recipient's, the two the charge was
+    /// computed from.
+    #[test]
+    fn test_the_records_counted_are_the_records_the_caller_was_charged_for() {
+        let mut limit = with_the_transactions_frame();
+        let inner = call_from_to(CALLEE, TARGET, U256::from(1));
+        let records = limit.frame_start_records(&inner);
+        assert_eq!(records, FrameStartRecords { on_lane: 1, caller: true });
+
+        limit.stage_frame_charge(records, 1, 1);
+        limit.on_frame_init(&inner, 1);
+        assert_eq!(
+            limit.usage(),
+            LimitUsage { data_size: 2 * WRITE_RECORD_SIZE, write_records: 2 },
+        );
+    }
+
+    /// A charge computed from a different answer than the count is what a rewrite that turns one
+    /// kind of frame into another would make. It trips rather than passing silently, because the
+    /// charge and the refund its failure gets back would both be wrong.
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "changed after its caller was charged for them")]
+    fn test_a_charge_computed_from_another_answer_trips() {
+        let mut limit = with_the_transactions_frame();
+        limit.stage_frame_charge(FrameStartRecords::NONE, 0, 0);
+        limit.on_frame_init(&call_from_to(CALLEE, TARGET, U256::from(1)), 1);
     }
 
     /// The allowance follows the transfer, and only the two schemes that can carry one: a `CALL`

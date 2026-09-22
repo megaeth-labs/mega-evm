@@ -249,7 +249,7 @@ fn charge_frame_start<DB: Database, ExtEnvs: ExternalEnvTypes>(
         return Err(abandon_frame(interpreter));
     }
     inherit_reservoir(interpreter);
-    host.additional_limit.stage_frame_charge(on_lane, caller);
+    host.additional_limit.stage_frame_charge(records, on_lane, caller);
     result
 }
 
