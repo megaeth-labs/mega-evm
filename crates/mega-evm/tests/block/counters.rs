@@ -4,12 +4,18 @@ use alloy_consensus::transaction::Recovered;
 use alloy_evm::block::BlockExecutor;
 use alloy_primitives::{address, Address, Bytes, U256};
 use mega_evm::{test_utils::BytecodeBuilder, BlockGasCounters, BlockLimits, MegaTxEnvelope};
-use revm::{bytecode::opcode::LOG0, database::State};
+use revm::{
+    bytecode::opcode::{CALL, LOG0, LOG3, POP, PUSH0},
+    database::State,
+};
 
 use crate::common::{self, executor, user_tx, CONTRACT};
 
 /// An account with no code, to transfer to.
 const RECIPIENT: Address = address!("0x3000000000000000000000000000000000000003");
+
+/// An account whose code emits an event when it is paid.
+const RECEIVER: Address = address!("0x3000000000000000000000000000000000000004");
 
 /// Code that writes a slot and emits a log, so a transaction touching it spends on more than
 /// plain execution once the mechanisms that price those land.
@@ -148,4 +154,68 @@ fn test_the_state_and_history_ledgers_refuse_nothing() {
         bytes * mega_evm::constants::COST_PER_HISTORY_BYTE,
         "three bodies, three logs and the one write record",
     );
+    assert_eq!(counters.history_bytes, bytes, "and the block reports the bytes beside the gas");
+}
+
+/// A contract that sends one wei to [`RECEIVER`] with the gas a `transfer()` forwards, and a
+/// receiver that emits the one three-topic event a history allowance pays for.
+fn state_with_allowance() -> State<mega_evm::test_utils::MemoryDatabase> {
+    let sender = BytecodeBuilder::default()
+        .append_many([PUSH0, PUSH0, PUSH0, PUSH0])
+        .push_number(1_u8)
+        .push_address(RECEIVER)
+        .push_number(2_300_u32)
+        .append(CALL)
+        .append(POP)
+        .stop()
+        .build();
+    let receiver = BytecodeBuilder::default()
+        .push_number(1_u8)
+        .push_number(2_u8)
+        .push_number(3_u8)
+        .push_number(32_u8)
+        .push_number(0_u8)
+        .append(LOG3)
+        .stop()
+        .build();
+    let mut db = common::database();
+    db.set_account_code(CONTRACT, sender);
+    db.set_account_balance(CONTRACT, U256::from(1_000));
+    db.set_account_code(RECEIVER, receiver);
+    State::builder().with_database(db).build()
+}
+
+/// A block reports the history bytes its transactions appended beside the history gas they paid,
+/// and the two columns part by what the history allowances paid: here one event per transaction,
+/// which the receiver's allowance paid in full.
+#[test]
+fn test_a_block_reports_the_bytes_its_history_gas_does_not_cover() {
+    if !mega_evm::active_satin_prices().is_constants() {
+        return;
+    }
+    let mut state = state_with_allowance();
+    let mut executor = executor(&mut state, common::unlimited_ctx());
+    executor.apply_pre_execution_changes().expect("the block starts");
+
+    for nonce in 0..2 {
+        let outcome = executor.run_transaction(&user_tx(nonce, 1_000_000)).expect("it executes");
+        assert!(outcome.result.is_success(), "{:?}", outcome.result);
+        assert_eq!(outcome.result.logs().len(), 1, "the receiver emitted its event");
+        executor.commit_transaction_outcome(outcome).expect("the block has room");
+    }
+
+    let counters = *executor.gas();
+    // Each transaction: its body, the transfer's two records and the receiver's event.
+    let per_tx = mega_evm::TX_BODY_SIZE +
+        2 * mega_evm::WRITE_RECORD_SIZE +
+        mega_evm::STORAGE_CALL_STIPEND_BYTES;
+    assert_eq!(counters.history_bytes, 2 * per_tx);
+    assert_eq!(
+        counters.history_bytes * mega_evm::constants::COST_PER_HISTORY_BYTE - counters.history,
+        2 * mega_evm::storage_call_stipend(),
+        "the allowances paid for both events, and no gas ledger has them",
+    );
+
+    let (_, result) = executor.finish_with_counters().expect("the block finishes");
+    assert_eq!(result.gas, counters, "the result carries both columns");
 }

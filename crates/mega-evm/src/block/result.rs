@@ -14,10 +14,11 @@ use revm::context::result::{InvalidTransaction, ResultAndState};
 
 use crate::{BlockUsage, LimitUsage, MegaGasUsage, MegaHaltReason, MegaTransactionOutcome};
 
-/// A block's gas, on the three ledgers its transactions spend on.
+/// A block's gas, on the three ledgers its transactions spend on, and the history bytes they
+/// appended.
 ///
 /// The block executor fills it transaction by transaction with [`record`](Self::record) and
-/// holds each counter to its own block limit.
+/// holds each counter to its own block limit, where it has one.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct BlockGasCounters {
     /// Regular gas: each transaction's regular ledger, at least its EIP-7623 floor.
@@ -26,6 +27,10 @@ pub struct BlockGasCounters {
     pub state: u64,
     /// History gas.
     pub history: u64,
+    /// The history bytes the block's transactions appended, whoever paid for them. At the cost per
+    /// history byte they are worth [`history`](Self::history) plus what the history allowances of
+    /// value transfers paid, which no gas ledger carries.
+    pub history_bytes: u64,
 }
 
 impl BlockGasCounters {
@@ -34,6 +39,7 @@ impl BlockGasCounters {
         self.execution = self.execution.saturating_add(gas.block_execution_gas());
         self.state = self.state.saturating_add(gas.state);
         self.history = self.history.saturating_add(gas.history);
+        self.history_bytes = self.history_bytes.saturating_add(gas.history_bytes);
     }
 }
 
@@ -342,13 +348,28 @@ mod tests {
     #[test]
     fn test_block_counters_add_each_ledger() {
         let mut block = BlockGasCounters::default();
-        let first =
-            MegaGasUsage { regular: 10, state: 20, history: 30, floor: 0, ..Default::default() };
-        let floored =
-            MegaGasUsage { regular: 5, state: 1, history: 2, floor: 50, ..Default::default() };
+        let first = MegaGasUsage {
+            regular: 10,
+            state: 20,
+            history: 30,
+            history_bytes: 7,
+            floor: 0,
+            ..Default::default()
+        };
+        let floored = MegaGasUsage {
+            regular: 5,
+            state: 1,
+            history: 2,
+            history_bytes: 4,
+            floor: 50,
+            ..Default::default()
+        };
         block.record(&first);
         block.record(&floored);
-        assert_eq!(block, BlockGasCounters { execution: 60, state: 21, history: 32 });
+        assert_eq!(
+            block,
+            BlockGasCounters { execution: 60, state: 21, history: 32, history_bytes: 11 }
+        );
     }
 
     #[test]
@@ -412,12 +433,20 @@ mod tests {
 
     #[test]
     fn test_block_counters_saturate() {
-        let mut block =
-            BlockGasCounters { execution: u64::MAX, state: u64::MAX, history: u64::MAX };
-        block.record(&MegaGasUsage { regular: 1, state: 1, history: 1, ..Default::default() });
-        assert_eq!(
-            block,
-            BlockGasCounters { execution: u64::MAX, state: u64::MAX, history: u64::MAX }
-        );
+        let full = BlockGasCounters {
+            execution: u64::MAX,
+            state: u64::MAX,
+            history: u64::MAX,
+            history_bytes: u64::MAX,
+        };
+        let mut block = full;
+        block.record(&MegaGasUsage {
+            regular: 1,
+            state: 1,
+            history: 1,
+            history_bytes: 1,
+            ..Default::default()
+        });
+        assert_eq!(block, full);
     }
 }

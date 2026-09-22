@@ -206,7 +206,7 @@ impl BlockLimiter {
         Self {
             limits,
             block_gas_used: 0,
-            gas: BlockGasCounters { execution: 0, state: 0, history: 0 },
+            gas: BlockGasCounters { execution: 0, state: 0, history: 0, history_bytes: 0 },
             usage: LimitUsage { data_size: 0, write_records: 0 },
             block_tx_size_used: 0,
             block_da_size_used: 0,
@@ -383,6 +383,7 @@ mod tests {
                 regular: u64::MAX,
                 state: u64::MAX,
                 history: u64::MAX,
+                history_bytes: u64::MAX,
                 ..Default::default()
             },
             usage: LimitUsage { data_size: u64::MAX, write_records: u64::MAX },
@@ -429,6 +430,7 @@ mod tests {
             execution: u64::MAX - 1,
             state: u64::MAX - 1,
             history: u64::MAX - 1,
+            history_bytes: u64::MAX - 1,
         };
         limiter.usage = LimitUsage { data_size: u64::MAX - 1, write_records: u64::MAX - 1 };
         limiter.block_tx_size_used = u64::MAX - 1;
@@ -440,7 +442,12 @@ mod tests {
         assert_eq!(limiter.block_gas_used, u64::MAX);
         assert_eq!(
             limiter.gas,
-            BlockGasCounters { execution: u64::MAX, state: u64::MAX, history: u64::MAX }
+            BlockGasCounters {
+                execution: u64::MAX,
+                state: u64::MAX,
+                history: u64::MAX,
+                history_bytes: u64::MAX,
+            }
         );
         assert_eq!(limiter.usage, LimitUsage { data_size: u64::MAX, write_records: u64::MAX });
         assert_eq!(limiter.block_tx_size_used, u64::MAX);

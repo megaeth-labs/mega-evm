@@ -357,6 +357,11 @@ fn test_no_gas_limit_buys_a_write_record_for_nothing() {
                 body(0) + outcome.usage.write_records * WRITE_RECORD_SIZE * CPHB,
                 "at a {limit} gas limit: the records kept are the history paid",
             );
+            assert_eq!(
+                outcome.gas.history_bytes,
+                TX_BODY_SIZE + outcome.usage.write_records * WRITE_RECORD_SIZE,
+                "at a {limit} gas limit: and the bytes reported",
+            );
         }
     }
 }

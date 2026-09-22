@@ -193,6 +193,37 @@ fn test_a_system_call_pays_no_history_gas() {
     assert!(result.result.gas().state_gas_spent_final() > 0, "the exemption is history's alone");
 }
 
+/// The bytes a transaction appended are reported beside its history gas, and they are the bytes
+/// that gas priced: the control reports every byte of the program, each at the price, and an
+/// exempt transaction, which prices none of them, reports none.
+#[test]
+fn test_an_exempt_transaction_reports_no_history_bytes() {
+    if runs_at_measurement_prices() {
+        return;
+    }
+    let gas = |tx: MegaTransaction| {
+        MegaEvm::new(context(db())).execute_transaction(tx).expect("the transaction is valid").gas
+    };
+
+    let paying = gas(call_from(CALLER, CONTRACT));
+    assert!(paying.history_bytes > 0);
+    assert_eq!(
+        paying.history,
+        paying.history_bytes * mega_evm::constants::COST_PER_HISTORY_BYTE,
+        "the control pays for every byte it reports",
+    );
+
+    let deposit = gas(deposit(call_from(CALLER, CONTRACT)));
+    assert_eq!((deposit.history, deposit.history_bytes), (0, 0), "a deposit");
+    let system = gas(call_from(MEGA_SYSTEM_ADDRESS, ORACLE_CONTRACT_ADDRESS));
+    assert_eq!((system.history, system.history_bytes), (0, 0), "a system transaction");
+
+    let mut evm = MegaEvm::new(context(db()));
+    Evm::transact_system_call(&mut evm, CALLER, CONTRACT, Bytes::new())
+        .expect("the system call runs");
+    assert_eq!(evm.ctx().additional_limit().history_bytes(), 0, "a system call");
+}
+
 /// The exemption belongs to one transaction: the next transaction on the same EVM pays again.
 #[test]
 fn test_the_exemption_does_not_outlive_its_transaction() {
