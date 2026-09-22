@@ -145,6 +145,18 @@ pub enum MegaBlockLimitExceededError {
         /// The block's execution-gas limit.
         limit: u64,
     },
+    /// The block's transactions have reached their state gas, and this transaction adds more.
+    ///
+    /// Only a transaction's own execution tells whether it adds state gas, so this one was
+    /// executed before it was refused; a transaction that adds none still fits the block.
+    StateGasLimit {
+        /// The state gas the block has spent.
+        block_used: u64,
+        /// The state gas this transaction would add.
+        tx_used: u64,
+        /// The block's state-gas limit.
+        limit: u64,
+    },
     /// The block's transactions have kept their data-size bytes.
     TransactionDataLimit {
         /// The data-size bytes the block has kept.
@@ -177,6 +189,7 @@ impl MegaBlockLimitExceededError {
     pub const fn block_used(&self) -> u64 {
         match self {
             Self::ExecutionGasLimit { block_used, .. } |
+            Self::StateGasLimit { block_used, .. } |
             Self::TransactionDataLimit { block_used, .. } |
             Self::TransactionEncodeSizeLimit { block_used, .. } |
             Self::DataAvailabilitySizeLimit { block_used, .. } => *block_used,
@@ -187,6 +200,7 @@ impl MegaBlockLimitExceededError {
     pub const fn limit(&self) -> u64 {
         match self {
             Self::ExecutionGasLimit { limit, .. } |
+            Self::StateGasLimit { limit, .. } |
             Self::TransactionDataLimit { limit, .. } |
             Self::TransactionEncodeSizeLimit { limit, .. } |
             Self::DataAvailabilitySizeLimit { limit, .. } => *limit,
@@ -200,6 +214,10 @@ impl fmt::Display for MegaBlockLimitExceededError {
             Self::ExecutionGasLimit { block_used, limit } => {
                 write!(f, "Block execution gas limit reached: block_used={block_used} >= limit={limit}")
             }
+            Self::StateGasLimit { block_used, tx_used, limit } => write!(
+                f,
+                "Block state gas limit reached: block_used={block_used} >= limit={limit}, tx_used={tx_used}"
+            ),
             Self::TransactionDataLimit { block_used, limit } => {
                 write!(f, "Block transactions data limit reached: block_used={block_used} >= limit={limit}")
             }
@@ -402,6 +420,11 @@ mod tests {
     fn test_block_limit_error_reports_block_usage_and_limit() {
         let cases = [
             (MegaBlockLimitExceededError::ExecutionGasLimit { block_used: 3, limit: 12 }, 3, 12),
+            (
+                MegaBlockLimitExceededError::StateGasLimit { block_used: 6, tx_used: 2, limit: 15 },
+                6,
+                15,
+            ),
             (MegaBlockLimitExceededError::TransactionDataLimit { block_used: 1, limit: 10 }, 1, 10),
             (
                 MegaBlockLimitExceededError::TransactionEncodeSizeLimit {

@@ -127,8 +127,9 @@ fn test_the_execution_limit_packs_the_crossing_transaction_and_skips_the_next() 
     assert_eq!(result.receipts().len(), 1);
 }
 
-/// The state and history ledgers are counted, and nothing refuses a transaction on them: their
-/// block limits belong to the mechanisms that bring those ledgers.
+/// The state and history ledgers are counted, and with no limit configured nothing refuses a
+/// transaction on them: history has no block limit, and the state ledger's is unlimited unless a
+/// node sets one.
 ///
 /// The history a block counts is the sum of its transactions', which is what makes the block's
 /// column readable: three transactions carrying the same body count three bodies.

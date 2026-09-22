@@ -696,8 +696,8 @@ where
     ///
     /// The block's counters may have moved between the transaction executing and its commit — a
     /// builder that executes candidates and then picks among them — so everything the block
-    /// holds a transaction to is checked once more, its data-availability footprint included, and
-    /// nothing changes before the check passes.
+    /// holds a transaction to is checked once more, its data-availability footprint and the state
+    /// gas it adds included, and nothing changes before the check passes.
     pub fn commit_transaction_outcome(
         &mut self,
         output: MegaBlockTxResult<<R::Transaction as TransactionEnvelope>::TxType>,
@@ -711,6 +711,7 @@ where
             output.is_deposit,
         )?;
         self.check_da_footprint(output.da_footprint)?;
+        self.limiter.post_execution_check(output.tx_hash, &output.block_usage())?;
         Ok(self.commit_transaction(output))
     }
 
@@ -797,7 +798,7 @@ where
             .execute_transaction(tx_env)
             .map_err(|err| BlockExecutionError::evm(err, tx_hash))?;
 
-        Ok(MegaBlockTxResult {
+        let result = MegaBlockTxResult {
             tx_type: inner.tx_type(),
             tx_hash,
             gas_limit,
@@ -807,7 +808,12 @@ where
             is_deposit,
             depositor_nonce,
             inner: outcome,
-        })
+        };
+        // A block that has reached its state gas refuses a transaction that adds some, and only
+        // its execution tells whether it does. Nothing is committed yet, so the refusal leaves the
+        // block as it was.
+        self.limiter.post_execution_check(tx_hash, &result.block_usage())?;
+        Ok(result)
     }
 
     /// Finishes the block and reports what it counted, on top of what

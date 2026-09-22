@@ -21,8 +21,10 @@
 //! build can run other byte prices without touching this table. [`SLOT_STATE_GAS`] and
 //! [`ACCOUNT_STATE_GAS`] are two of those products written out: the tests assert the schedule
 //! against them, and changing one of the two moves a test rather than a price.
-//! The per-transaction and per-block state-gas limits are further placeholders, which the
-//! state-gas limits add when they land.
+//! The per-transaction state-gas limit is a further placeholder, which the state-gas limits add
+//! when they land. The per-block one is
+//! [`BlockLimits::block_state_gas_limit`](crate::BlockLimits::block_state_gas_limit), which a node
+//! sets and which is unlimited by default; no number for it is fixed here yet.
 
 use revm::primitives::eip8037::{NEW_ACCOUNT_BYTES, SSTORE_SET_BYTES};
 
