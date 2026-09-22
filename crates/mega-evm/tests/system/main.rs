@@ -3,6 +3,7 @@
 
 mod common;
 mod control;
+mod deploy;
 mod dispatch;
 mod keyless;
 mod limit_control;

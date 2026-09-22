@@ -13,7 +13,9 @@
 //!
 //! The pre-block calls and the state the block is built on are setup, and the measurement runs
 //! `apply_pre_execution_changes`, the transactions and `finish` — the whole block a node
-//! executes.
+//! executes. A third arm, `steady_pre_block`, measures `apply_pre_execution_changes` alone on a
+//! block whose seven predeploys are already in state: the per-block cost of the idempotent
+//! check.
 #![allow(missing_docs)]
 
 use alloy_consensus::{transaction::Recovered, Signed, TxLegacy};
@@ -22,16 +24,21 @@ use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
 use alloy_primitives::{address, Address, Bytes, Signature, TxKind, B256, U256};
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 use mega_evm::{
+    system::{SequencerRegistryConfig, SYSTEM_CONTRACT_DEPLOY_COUNT},
     test_utils::{BytecodeBuilder, MemoryDatabase},
     BlockLimits, MegaBlockExecutionCtx, MegaBlockExecutor, MegaEvmFactory, MegaHardforkConfig,
-    MegaSpecId, MegaTxEnvelope,
+    MegaSpecId, MegaTxEnvelope, PreBlockStateSource,
 };
 use revm::{
     bytecode::opcode::{CALLDATALOAD, SSTORE},
     context::{BlockEnv, CfgEnv},
     database::State,
+    state::EvmState,
 };
-use std::hint::black_box;
+use std::{
+    hint::black_box,
+    sync::{Arc, Mutex},
+};
 
 /// Transactions in the block.
 const N: u64 = 64;
@@ -120,8 +127,27 @@ fn transactions(
         .collect()
 }
 
+fn chain_spec() -> MegaHardforkConfig {
+    MegaHardforkConfig::default()
+        .with_all_activated()
+        .with_params(SequencerRegistryConfig::placeholder())
+}
+
+/// A database on which the seven predeploys have already been installed.
+fn deployed_state() -> State<MemoryDatabase> {
+    let spec = chain_spec();
+    let mut state = State::builder().with_database(database()).build();
+    {
+        let evm = MegaEvmFactory::new().create_evm(&mut state, evm_env());
+        let mut executor =
+            MegaBlockExecutor::new(evm, block_ctx(), &spec, OpAlloyReceiptBuilder::default());
+        executor.apply_pre_execution_changes().expect("the first block deploys");
+    }
+    state
+}
+
 fn bench_block(c: &mut Criterion) {
-    let spec = MegaHardforkConfig::default().with_all_activated();
+    let spec = chain_spec();
     let workloads = [
         // Both budgets clear the state gas the Satin gas table charges: a transfer to an account
         // that does not exist yet pays for the new account, a storage write pays for the slot.
@@ -176,6 +202,58 @@ fn bench_block(c: &mut Criterion) {
             );
         });
     }
+    group.finish();
+
+    // The idempotent pre-block path: everything is already deployed, so each of the seven
+    // specs is a read-only witness entry. Checked once against the executor's own observer
+    // before measurement so a broken deploy does not get timed.
+    {
+        let mut state = deployed_state();
+        let evm = MegaEvmFactory::new().create_evm(&mut state, evm_env());
+        let mut executor =
+            MegaBlockExecutor::new(evm, block_ctx(), &spec, OpAlloyReceiptBuilder::default());
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&log);
+        executor.set_pre_block_observer(Some(Box::new(
+            move |source: PreBlockStateSource, state: &EvmState| {
+                captured.lock().expect("pre-block observer").push((source, state.clone()));
+            },
+        )));
+        executor.apply_pre_execution_changes().expect("the idempotent check");
+        let outcomes = log.lock().expect("pre-block observer");
+        let deploys: Vec<_> = outcomes
+            .iter()
+            .filter(|(source, _)| matches!(source, PreBlockStateSource::SystemContract(_)))
+            .collect();
+        assert_eq!(deploys.len(), SYSTEM_CONTRACT_DEPLOY_COUNT);
+        for (source, state) in &deploys {
+            assert_eq!(state.len(), 1, "{source:?} is one witness account");
+            let account = state.values().next().expect("the account is present");
+            assert!(!account.is_touched(), "{source:?} is not touched");
+            assert!(!account.is_created(), "{source:?} is not created");
+        }
+        assert_eq!(outcomes[0].0, PreBlockStateSource::Eip2935);
+        assert_eq!(outcomes[1].0, PreBlockStateSource::Eip4788);
+    }
+
+    let mut group = c.benchmark_group("block");
+    group.bench_function("steady_pre_block", |b| {
+        b.iter_batched(
+            deployed_state,
+            |mut state| {
+                let evm = MegaEvmFactory::new().create_evm(&mut state, evm_env());
+                let mut executor = MegaBlockExecutor::new(
+                    evm,
+                    block_ctx(),
+                    &spec,
+                    OpAlloyReceiptBuilder::default(),
+                );
+                executor.apply_pre_execution_changes().unwrap();
+                black_box(executor.limiter().block_gas_used)
+            },
+            BatchSize::SmallInput,
+        );
+    });
     group.finish();
 }
 

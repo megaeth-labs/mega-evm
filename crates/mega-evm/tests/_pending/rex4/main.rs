@@ -3,7 +3,6 @@
 mod access_control;
 mod beneficiary_detention;
 mod create_safety;
-mod deployment;
 mod eip7702_delegation_cycle;
 mod frame_limits;
 mod gas_detention;

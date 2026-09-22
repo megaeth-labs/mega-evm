@@ -159,9 +159,9 @@ pub trait MegaHardforks: OpHardforks {
     ///   [`ForkCondition::Never`]). Resolution is timestamp-scoped, so a block-number or
     ///   total-difficulty condition would silently never activate the fork.
     /// - The parameters every scheduled fork requires are attached
-    ///   ([`require_params`](Self::require_params)). Satin requires none yet: a mechanism that
-    ///   brings a [`HardforkParams`] type registers it here, in the block marked below, and the
-    ///   requirement is enforced from that change on.
+    ///   ([`require_params`](Self::require_params)). Satin requires
+    ///   [`SequencerRegistryConfig`](crate::system::SequencerRegistryConfig) so the registry can be
+    ///   seeded at the first block.
     ///
     /// There is no ordering or gap check: a single fork has nothing to be out of order with. The
     /// spec that follows Satin brings the ladder back, and with it those checks.
@@ -173,7 +173,8 @@ pub trait MegaHardforks: OpHardforks {
             }
         }
 
-        // Required parameters, one `self.require_params::<P>()?` per params type. Satin has none.
+        // Required parameters, one `self.require_params::<P>()?` per params type.
+        self.require_params::<crate::system::SequencerRegistryConfig>()?;
 
         Ok(())
     }
@@ -412,7 +413,8 @@ mod tests {
     use core::str::FromStr;
 
     /// A params type of this test module alone: the fork-requires-params rule is a mechanism
-    /// here, and Satin has no params type of its own yet.
+    /// here, independent of the [`SequencerRegistryConfig`](crate::system::SequencerRegistryConfig)
+    /// Satin actually requires.
     #[derive(Clone, Debug, PartialEq, Eq)]
     struct TestParams {
         sequencer: alloy_primitives::Address,
@@ -597,7 +599,19 @@ mod tests {
 
         let with_params = no_params.with_params(params());
         assert_eq!(with_params.require_params::<TestParams>(), Ok(()));
-        assert_eq!(with_params.validate_schedule(), Ok(()));
+        // TestParams is not SequencerRegistryConfig, so the schedule still cannot run.
+        assert_eq!(
+            with_params.validate_schedule(),
+            Err(ScheduleError::MissingParams {
+                fork: MegaHardfork::Satin,
+                params: "SequencerRegistryConfig",
+            })
+        );
+
+        let with_registry = MegaHardforkConfig::default()
+            .with_all_activated()
+            .with_params(crate::system::SequencerRegistryConfig::placeholder());
+        assert_eq!(with_registry.validate_schedule(), Ok(()));
     }
 
     /// The block a fork activates in carries the chain's own transactions only, and only that
