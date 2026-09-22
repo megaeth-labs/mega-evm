@@ -221,14 +221,19 @@ fn test_stop_bills_only_what_ran() {
         }
         code.stop().build()
     };
+    // 100 leaves D's second record (80 bytes) inside both the transaction limit and D's own
+    // budget, and D's third (120) over the transaction limit. The frame budget is over too; the
+    // transaction limit is checked first, so the stop is the latch and the code after the call
+    // does not run. A limit of 80 would revert D on its own budget instead, and the callers
+    // would resume.
     let db = MemoryDatabase::default()
         .account_code(A, heavy(B))
         .account_code(B, heavy(C))
         .account_code(C, heavy(D))
         .account_code(D, writer());
-    let mut evm = MegaEvm::new(context(db).with_tx_runtime_limits(cap(80)));
+    let mut evm = MegaEvm::new(context(db).with_tx_runtime_limits(cap(100)));
     let result = evm.transact_raw(call(CALLER, A, U256::ZERO, GAS_LIMIT)).unwrap();
-    assert_stopped(&result.result, LimitKind::DataSize, 80);
+    assert_stopped(&result.result, LimitKind::DataSize, 100);
     let light = |next: Address| {
         BytecodeBuilder::default()
             .append_many([PUSH0, PUSH0, PUSH0, PUSH0, PUSH0])
@@ -244,9 +249,9 @@ fn test_stop_bills_only_what_ran() {
         .account_code(B, light(C))
         .account_code(C, light(D))
         .account_code(D, writer());
-    let mut evm = MegaEvm::new(context(db).with_tx_runtime_limits(cap(80)));
+    let mut evm = MegaEvm::new(context(db).with_tx_runtime_limits(cap(100)));
     let light_result = evm.transact_raw(call(CALLER, A, U256::ZERO, GAS_LIMIT)).unwrap();
-    assert_stopped(&light_result.result, LimitKind::DataSize, 80);
+    assert_stopped(&light_result.result, LimitKind::DataSize, 100);
     assert_eq!(
         result.result.gas().tx_gas_used(),
         light_result.result.gas().tx_gas_used(),
@@ -378,7 +383,8 @@ fn test_frame_budget_reverts_the_frame_without_a_latch() {
     assert_eq!(evm.ctx().additional_limit().latched(), None);
     let (target, outcome, output) = evm.inspector().call_results[0].clone();
     assert_eq!((target, outcome), (B, InstructionResult::Revert));
-    assert_eq!(output, limit_exceeded(LimitKind::DataSize, 100));
+    // B's budget is 98% of the 100 bytes A was capped at, and B had used none of A's own.
+    assert_eq!(output, limit_exceeded(LimitKind::DataSize, 98));
     assert!(evm.inspector().steps.contains(&SSTORE));
 }
 

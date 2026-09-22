@@ -9,7 +9,8 @@ use revm::{
 use super::{
     frame_limit::{FrameLimitTracker, Lane},
     record::{HistoryBytes, RecordEffect, StagedRecord},
-    EvmTxRuntimeLimits, LimitCheck, LimitKind, LimitUsage, WRITE_RECORD,
+    EvmTxRuntimeLimits, LimitCheck, LimitKind, LimitUsage, FRAME_DATA_SHARE_DENOMINATOR,
+    FRAME_DATA_SHARE_NUMERATOR, WRITE_RECORD,
 };
 use crate::storage_call_stipend;
 
@@ -336,6 +337,21 @@ impl AdditionalLimit {
         self.check()
     }
 
+    /// The data-size budget of the frame about to start.
+    ///
+    /// The transaction's own frame gets what the transaction has left, and never more than
+    /// [`frame_data_size_limit`](EvmTxRuntimeLimits::frame_data_size_limit). A child gets
+    /// [`FRAME_DATA_SHARE_NUMERATOR`] / [`FRAME_DATA_SHARE_DENOMINATOR`] of what its parent has
+    /// left, under the same cap. What the parent has left is its budget minus what it has already
+    /// kept, so a parent that has spent part of its budget forwards a smaller share.
+    fn frame_budget(&self) -> u64 {
+        let forwarded = match self.tracker.current() {
+            Some(caller) => share_of_remaining(caller.remaining_budget()),
+            None => self.limits.tx_data_size_limit.saturating_sub(self.tracker.net().data_size),
+        };
+        forwarded.min(self.limits.frame_data_size_limit)
+    }
+
     /// Takes a creation's creator record back: the creation failed before bumping the nonce.
     ///
     /// The record is gone, so the caller gets its history back when the frame returns: the lane no
@@ -346,10 +362,7 @@ impl AdditionalLimit {
     }
 
     fn push_lane(&mut self, input: &FrameInput, depth: usize) {
-        let budget = match self.tracker.current() {
-            Some(caller) => caller.remaining_budget().min(self.limits.frame_data_size_limit),
-            None => self.limits.frame_data_size_limit,
-        };
+        let budget = self.frame_budget();
         // What the caller paid for these records at its opcode. The transaction's own frame has
         // no such caller: its record is charged before execution and given back by the settlement
         // ([`top_level_write_record_gas`](Self::top_level_write_record_gas)).
@@ -512,6 +525,16 @@ impl AdditionalLimit {
     }
 }
 
+/// `remaining` × [`FRAME_DATA_SHARE_NUMERATOR`] / [`FRAME_DATA_SHARE_DENOMINATOR`].
+///
+/// The product is taken in `u128`, so a remaining budget near `u64::MAX` does not wrap.
+const fn share_of_remaining(remaining: u64) -> u64 {
+    let remaining = remaining as u128;
+    let numerator = FRAME_DATA_SHARE_NUMERATOR as u128;
+    let denominator = FRAME_DATA_SHARE_DENOMINATOR as u128;
+    ((remaining * numerator) / denominator) as u64
+}
+
 /// Whether the frame `inputs` starts is granted a history allowance: a value-transferring `CALL`
 /// or `CALLCODE` below the transaction's own frame.
 ///
@@ -625,6 +648,49 @@ mod tests {
         let mut limit = with_the_transactions_frame();
         limit.stage_frame_charge(FrameStartRecords::NONE, 0, 0);
         limit.on_frame_init(&call_from_to(CALLEE, TARGET, U256::from(1)), 1);
+    }
+
+    /// A child frame's budget is 98% of what its parent has left, three frames down, and the
+    /// transaction's own frame gets what the transaction has left. A configured frame cap binds
+    /// when it is the smaller of the two.
+    #[test]
+    fn test_a_child_frame_gets_98_percent_of_what_its_parent_has_left() {
+        let tx_limit = 10_000;
+        let mut limit =
+            AdditionalLimit::new(EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(tx_limit));
+        limit.tracker.record_tx(LimitUsage { data_size: 310, write_records: 0 });
+
+        limit.on_frame_init(&call_from_to(SENDER, CALLEE, U256::ZERO), 0);
+        assert_eq!(limit.tracker.current().unwrap().budget, tx_limit - 310);
+
+        limit.on_frame_init(&call_from_to(CALLEE, TARGET, U256::ZERO), 1);
+        let child = share_of_remaining(tx_limit - 310);
+        assert_eq!(limit.tracker.current().unwrap().budget, child);
+
+        limit.on_frame_init(&call_from_to(TARGET, SENDER, U256::ZERO), 2);
+        let grandchild = share_of_remaining(child);
+        assert_eq!(limit.tracker.current().unwrap().budget, grandchild);
+
+        limit.on_frame_init(&call_from_to(SENDER, CALLEE, U256::ZERO), 3);
+        assert_eq!(
+            limit.tracker.current().unwrap().budget,
+            share_of_remaining(grandchild),
+            "the fourth frame, at depth 3, still takes 98% of what is left"
+        );
+    }
+
+    /// The frame cap binds when it is tighter than the share of what the parent has left.
+    #[test]
+    fn test_the_frame_cap_binds_when_it_is_tighter_than_the_share() {
+        let mut limit = AdditionalLimit::new(
+            EvmTxRuntimeLimits::no_limits()
+                .with_tx_data_size_limit(u64::MAX)
+                .with_frame_data_size_limit(100),
+        );
+        limit.on_frame_init(&call_from_to(SENDER, CALLEE, U256::ZERO), 0);
+        assert_eq!(limit.tracker.current().unwrap().budget, 100);
+        limit.on_frame_init(&call_from_to(CALLEE, TARGET, U256::ZERO), 1);
+        assert_eq!(limit.tracker.current().unwrap().budget, 98);
     }
 
     /// The allowance follows the transfer, and only the two schemes that can carry one: a `CALL`

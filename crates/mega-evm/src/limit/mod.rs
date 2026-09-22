@@ -76,6 +76,16 @@ pub const ACCESS_LIST_ADDRESS_SIZE: u64 = 20;
 /// Bytes one access-list storage key counts: the key itself.
 pub const ACCESS_LIST_SLOT_SIZE: u64 = 32;
 
+/// Numerator of the share of its parent's remaining data-size budget a child frame receives.
+///
+/// A child gets [`FRAME_DATA_SHARE_NUMERATOR`] / [`FRAME_DATA_SHARE_DENOMINATOR`] of what its
+/// parent has left. The fraction is what keeps a deep call from spending the whole transaction
+/// on its innermost frame.
+pub const FRAME_DATA_SHARE_NUMERATOR: u64 = 98;
+
+/// Denominator of [`FRAME_DATA_SHARE_NUMERATOR`].
+pub const FRAME_DATA_SHARE_DENOMINATOR: u64 = 100;
+
 /// What a transaction or a frame counts: data-size bytes and write records.
 ///
 /// The KV count a node reports is the write-record count; it has no tracker of its own.
@@ -87,16 +97,21 @@ pub struct LimitUsage {
     pub write_records: u64,
 }
 
-/// Limits the common execution layer enforces on one transaction, for exercising the abort
-/// protocol before the mechanisms that own the limits land. Both default to unlimited.
+/// Limits one transaction's data size.
 ///
-/// The data-size limit replaces them with its own limit and per-frame budget rule.
+/// [`tx_data_size_limit`](Self::tx_data_size_limit) stops the transaction. A frame's own budget
+/// is derived from it: the transaction's frame gets what the transaction has left, and each
+/// child gets [`FRAME_DATA_SHARE_NUMERATOR`] / [`FRAME_DATA_SHARE_DENOMINATOR`] of what its
+/// parent has left. Crossing a frame budget reverts that frame alone.
+///
+/// [`frame_data_size_limit`](Self::frame_data_size_limit) is a further cap on every frame's
+/// budget. It is unlimited unless a caller sets it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct EvmTxRuntimeLimits {
     /// The most data-size bytes the transaction may keep. Crossing it stops the transaction.
     pub tx_data_size_limit: u64,
-    /// The most data-size bytes one frame may keep, children included, and never more than
-    /// what its caller has left. Crossing it reverts the frame alone.
+    /// A cap on every frame's data-size budget, applied after the share of what its parent has
+    /// left. Crossing it reverts the frame alone.
     pub frame_data_size_limit: u64,
 }
 
@@ -118,7 +133,7 @@ impl EvmTxRuntimeLimits {
         self
     }
 
-    /// Sets the per-frame data-size budget.
+    /// Caps every frame's data-size budget at `limit`.
     pub const fn with_frame_data_size_limit(mut self, limit: u64) -> Self {
         self.frame_data_size_limit = limit;
         self
