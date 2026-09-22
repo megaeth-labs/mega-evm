@@ -28,7 +28,6 @@ Do not add a `_pending/main.rs`.
 | Owning mechanism | Tests | From `tests/` | From `src/` | Keep | Rewrite | Undecided |
 |---|---:|---:|---:|---:|---:|---:|
 | the common execution layer | 21 | 21 | 0 | 21 | 0 | 0 |
-| compute gas | 26 | 26 | 0 | 0 | 26 | 0 |
 | the data-size limit | 47 | 45 | 2 | 40 | 7 | 0 |
 | detention | 81 | 76 | 5 | 73 | 8 | 0 |
 | the state-growth and KV limits | 56 | 55 | 1 | 0 | 35 | 21 |
@@ -39,7 +38,7 @@ Do not add a `_pending/main.rs`.
 | native keyless deployment | 75 | 73 | 2 | 29 | 46 | 0 |
 | inspector support | 4 | 4 | 0 | 1 | 3 | 0 |
 | — (undecided: D57 preload-warm cold charging, D58 98/100 forwarding) | 7 | 7 | 0 | 0 | 0 | 7 |
-| **Total** | **456** | **428** | **28** | **272** | **156** | **28** |
+| **Total** | **430** | **402** | **28** | **272** | **130** | **28** |
 
 ## Tests ported in place
 
@@ -232,13 +231,25 @@ These 29 rows run in a real test target now, adapted to the Satin API and to the
 | `src/system/sequencer_registry.rs` | system contract deployment (9) | 9 | `tests/block/deploy.rs`, `tests/system/deploy.rs` |
 | **Total** | | **29** | |
 
+## Tests ported by compute gas
+
+These 23 rows run in a real test target now, adapted to the Satin API and to a compute figure read off the gas revm settles, so the counts above are lower than the inventory's by exactly these rows.
+
+| Legacy file | Owner in the inventory | Tests | Now in |
+|---|---|---:|---|
+| `compute_gas/claims.rs` | compute gas (2) | 2 | `tests/satin/compute_gas.rs` |
+| `compute_gas/main.rs` | compute gas (1) | 1 | `tests/satin/compute_gas.rs` |
+| `mini_rex/compute_gas_limit.rs` | compute gas (20) | 20 | `tests/satin/compute_gas.rs` |
+| **Total** | | **23** | |
+
 ## Tests retired after the inventory
 
-These 19 rows were parked when the inventory was applied and have since been retired: the mechanism that owns them landed and left them nothing to pin, so no later mechanism will port them.
+These 22 rows were parked when the inventory was applied and have since been retired: the mechanism that owns them landed and left them nothing to pin, so no later mechanism will port them.
 They are not counted above.
 
 | Legacy file | Owner in the inventory | Tests | Why |
 |---|---|---:|---|
+| `mini_rex/compute_gas_limit.rs` | compute gas (3) | 3 | it pins that one legacy spec counts compute gas where the spec below it does not. Satin is a single spec and every transaction reports its compute figure, so there is no boundary left for it to pin; Satin's compute limit is the execution cap the spec fixes, not a limit a caller sets, so there is no zero or one limit to configure; a gas limit below a transaction's intrinsic gas is rejected at validation |
 | `rex5/callcode_storage_gas.rs` | SALT pricing (3) | 3 | Satin's `CALLCODE` cannot reach a state gas pricing site: it sends value to the frame's own account, which exists, so it adds no account leaf and asks for no price. There is no pricing-path account inspection left to fail |
 | `src/evm/host.rs` | SALT pricing (1) | 1 | the pricing hook inspects no account: the fork decides whether a target exists and the hook only prices what it is told to, so there is no delegation walk on the pricing path to guard |
 | `src/external/gas.rs` | SALT pricing (4) | 4 | these pin a helper at a legacy spec boundary: it is served from one rung and asserts below it. Satin is a single spec and has no gate of its own, so there is no boundary left for them to pin |
@@ -247,7 +258,7 @@ They are not counted above.
 | `src/system/keyless_deploy.rs` | system contract deployment (1) | 1 | Satin does not overwrite foreign code: a system address with different code is an error, not an in-place upgrade |
 | `src/system/limit_control.rs` | system contract deployment (2) | 2 | Satin is a single spec with no per-fork deploy gate: the contract is deployed at every block; Satin does not overwrite foreign code: a system address with different code is an error, not an in-place upgrade |
 | `src/system/oracle.rs` | system contract deployment (3) | 3 | Satin does not overwrite foreign code: a system address with different code is an error, not an in-place upgrade; Satin is a single spec and ships one Oracle bytecode; there is no per-fork version gate to pin |
-| **Total** | | **19** | |
+| **Total** | | **22** | |
 
 ## Tests the inventory assigns to the Satin skeleton that are parked under another mechanism
 
@@ -284,12 +295,11 @@ Each cell lists `disposition count (mechanism · decision)`.
 | `block_executor/block_limits.rs` | 2 | undecided 2 (the state-growth and KV limits · D46) |
 | `block_executor/inspector.rs` | 3 | keep 1 (inspector support); rewrite 2 (inspector support · D39/D41) |
 | `block_executor/sequencer_registry.rs` | 7 | keep 7 (the pre-block system calls) |
-| `compute_gas/claims.rs` | 8 | rewrite 2 (compute gas · D53 (compute = regular spent; state spill excluded)); undecided 5 (— · D57, open: whether preload-warm addresses (precompile / beneficiary / access-list) are charged cold); rewrite 1 (the data-size limit · D33/D48) |
-| `compute_gas/main.rs` | 1 | rewrite 1 (compute gas · D53) |
+| `compute_gas/claims.rs` | 6 | undecided 5 (— · D57, open: whether preload-warm addresses (precompile / beneficiary / access-list) are charged cold); rewrite 1 (the data-size limit · D33/D48) |
 | `mini_rex/access_beneficiary_balance.rs` | 10 | keep 9 (detention · D08); rewrite 1 (revert-class aborts · D48) |
 | `mini_rex/block_env_access_tracking.rs` | 3 | keep 3 (detention) |
 | `mini_rex/block_env_gas_limit.rs` | 16 | keep 13 (detention · D08 cap 20M/1M unchanged); rewrite 3 (revert-class aborts · D48 (detention halt -> revert-class)) |
-| `mini_rex/compute_gas_limit.rs` | 25 | rewrite 23 (compute gas · D10/D40/D53 (compute derived from Gas; 200M cap)); rewrite 2 (detention · D48) |
+| `mini_rex/compute_gas_limit.rs` | 2 | rewrite 2 (detention · D48) |
 | `mini_rex/gas.rs` | 2 | undecided 2 (— · D58, open: 98/100 forwarding, while the design has frames follow EIP-8037 (63/64)) |
 | `mini_rex/oracle.rs` | 12 | rewrite 3 (revert-class aborts · D48); keep 5 (detention); keep 4 (the oracle and control contracts) |
 | `mini_rex/state_growth_limit.rs` | 4 | rewrite 4 (the state-growth and KV limits · D45 (state-gas limit)) |
