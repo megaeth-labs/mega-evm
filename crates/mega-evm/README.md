@@ -27,7 +27,7 @@ The legacy spec names do not parse: `"Rex6".parse::<MegaSpecId>()` fails with `P
 Satin is under construction.
 Today it runs transactions through its own handler over op-revm's, with EIP-8037 and the EIP-2780 intrinsic cost switched on and a 200,000,000 execution cap; gas above the cap goes to the EIP-8037 reservoir.
 
-The gas schedule is Amsterdam's with two changes: the entries EIP-8038 repriced go back to their Osaka values, and the EIP-8037 state-gas entries are rebuilt from MegaETH's own cost per state byte, so a new storage slot draws 97,920 state gas and a new account 183,600.
+The gas schedule is Amsterdam's with three changes: the entries EIP-8038 repriced go back to their Osaka values, the EIP-8037 state-gas entries are rebuilt from MegaETH's own cost per state byte, so a new storage slot draws 97,920 state gas and a new account 183,600, and a byte of deployed code is priced at MegaETH's cost per history byte.
 The schedule also brings the Amsterdam opcodes (`DUPN`, `SWAPN`, `EXCHANGE`, `SLOTNUM`) and raises the code-size limits to 512 KiB of contract and 1 MiB of initcode.
 Its byte prices are an input: the `satin-price-override` feature, off by default, lets a measurement build install other ones.
 `tests/satin/pricing-table.md` lists every entry next to Osaka's and Amsterdam's, with what a handful of probe transactions spent.
@@ -58,8 +58,21 @@ The Oracle forwards a `sendHint` payload to the node's oracle service, and a `ke
 The system address (`MEGA_SYSTEM_ADDRESS`) sends the protocol's own transactions: a legacy transaction from it to a whitelisted contract is validated — the whitelist, the chain id, the nonce and EIP-3607 — and promoted to a deposit, which pays no fee and rewards none.
 The account such a transaction creates for its caller is charged the account-creation state gas exactly once.
 
-History gas, the resource limits, gas detention, system contract deployment and keyless deployment arrive in later changes.
-Until history gas lands, nothing prices a history byte and the schedule's history entry stays at zero, and a system transaction's history ledger is zero with it.
+History gas is in place: every byte a transaction appends to the chain is priced at MegaETH's cost per history byte, and the byte counts are the ones the data-size limit meters, so a record's history bytes are its own data size.
+A transaction body is 310 bytes — 110 for the envelope and one 40-byte record for each of the five writes every transaction makes, its sender's account and the four accounts its fees are credited to — plus one byte per calldata byte, 20 per access-list address, 32 per key and 101 per EIP-7702 authorization.
+A log costs 32 bytes for its address, 32 per topic and its data; every account or storage write a transaction keeps costs one 40-byte record; every byte of deployed code costs a byte.
+The body is charged at validation, in the EIP-8037 intrinsic state-gas slot so the reservoir pays it first: a gas limit that cannot cover it is rejected before inclusion, and the receipt's state figure does not include it.
+Everything else is charged where the write is made and given back, at the same price, by whoever's failure takes it back.
+The records a `CALL`, `CALLCODE`, `CREATE` or `CREATE2` starts a frame for are charged to the caller out of what it kept after forwarding gas: a caller that cannot pay halts, and the frame does not start.
+A deposit, a transaction the protocol itself sent and a system call pay no history at all.
+
+The pairing between the two counts is per record, not per transaction.
+An Oracle hint's payload is data size that is never history, because the bytes go to the node's oracle service rather than into a block; and the five records a transaction's body carries are an upper bound on the accounts its inclusion writes, so a transfer to the block beneficiary or a fee vault pays a record the body already bound.
+
+A value-transferring `CALL` or `CALLCODE` grants the frame it starts a history allowance of 160 bytes — one three-topic event carrying a word — so a `receive()` hook reached through Solidity's `transfer()` can still emit an event.
+The allowance is not gas: it never enters the frame's `Gas`, only a log's charge may draw on it, and what it pays for is on no ledger, because no pool of the transaction's gas paid it.
+
+The resource limits, gas detention, system contract deployment and keyless deployment arrive in later changes.
 
 ## Quick start
 

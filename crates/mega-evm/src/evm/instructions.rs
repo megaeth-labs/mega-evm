@@ -1,16 +1,35 @@
 //! The instruction table of the Satin engine.
 //!
-//! Every opcode runs revm's own instruction, except the three that write state the resource
-//! limits count: `SSTORE`, `LOG0`..`LOG4` and `SELFDESTRUCT`. Each of those runs in a wrapper
-//! that commits what the Host staged for it after the opcode completed:
+//! Every opcode runs revm's own instruction, except the ones that write state the resource
+//! limits count. Three of them write it themselves — `SSTORE`, `LOG0`..`LOG4` and `SELFDESTRUCT`
+//! — and four write it by starting a frame: `CALL`, `CALLCODE`, `CREATE` and `CREATE2`.
+//!
+//! The first three run in a wrapper that commits what the Host staged for them after the opcode
+//! completed:
 //!
 //! 1. discard any record staged before the opcode (nothing may commit it for this one);
 //! 2. run revm's instruction, whose Host call stages the record;
-//! 3. commit the record if the opcode completed, discard it if the opcode failed.
+//! 3. commit the record if the opcode completed, discard it if the opcode failed;
+//! 4. charge the frame the history gas of what the record appends — and give it back when the
+//!    record was taken away, as a slot written back to its original value takes its own back.
+//!
+//! The history a record costs is its data size, so the charge and the count cannot drift apart:
+//! a log pays for its address, its topics and its data, a storage write or a destructed account's
+//! beneficiary for the forty bytes of one write record.
 //!
 //! A commit that crosses a limit stops the opcode's frame with a revert whose output is
 //! [`MegaLimitExceeded`](crate::MegaLimitExceeded) (see
-//! [`AdditionalLimit`](crate::AdditionalLimit) for the abort protocol).
+//! [`AdditionalLimit`](crate::AdditionalLimit) for the abort protocol). A history charge the frame
+//! cannot pay is an ordinary out-of-gas, which burns the frame's gas the way any other does.
+//!
+//! The other four run in a wrapper that charges their frame for the write records the frame it
+//! starts makes — a value transfer's sender and recipient, a creation's creator nonce and created
+//! account — before the frame runs, so the gas it forwards is not reduced by them and its
+//! allowance is free for what the recipient does. What the frame does not keep goes back to the
+//! caller when it returns. The frame the opcode is suspending on carries the caller's reservoir,
+//! which the charge has just moved, so the wrapper writes the reservoir it left into the frame's
+//! input; and a caller that cannot pay the charge drops that frame before it fails, because an
+//! interpreter halts on an instruction's error only when no frame is pending.
 //!
 //! A wrapper keeps the static gas revm's table charges for its opcode, so the gas schedule is
 //! unchanged.
@@ -22,21 +41,26 @@
 //! the base spec already has it.
 
 use revm::{
-    bytecode::opcode::{LOG0, LOG1, LOG2, LOG3, LOG4, SELFDESTRUCT, SSTORE},
+    bytecode::opcode::{
+        CALL, CALLCODE, CREATE, CREATE2, LOG0, LOG1, LOG2, LOG3, LOG4, SELFDESTRUCT, SSTORE,
+    },
     handler::instructions::EthInstructions,
     interpreter::{
         enable_amsterdam_opcodes, instruction_table,
-        instructions::{gas_table_spec, host},
+        instructions::{contract, gas_table_spec, host},
         interpreter::EthInterpreter,
         interpreter_types::LoopControl,
-        Instruction, InstructionContext, InstructionExecResult, InstructionResult, Interpreter,
-        InterpreterAction,
+        FrameInput, Instruction, InstructionContext, InstructionExecResult, InstructionResult,
+        Interpreter, InterpreterAction,
     },
     primitives::hardfork::SpecId,
     Database,
 };
 
-use crate::{ExternalEnvTypes, LimitCheck, MegaContext};
+use crate::{
+    history_gas, limit::HistoryBytes, write_record_history_gas, ExternalEnvTypes, LimitCheck,
+    MegaContext,
+};
 
 use super::MegaInstructions;
 
@@ -54,7 +78,7 @@ pub(crate) fn mega_instructions<DB: Database, ExtEnvs: ExternalEnvTypes>(
     let mut table = instruction_table();
     enable_amsterdam_opcodes(&mut table);
     let mut instructions = EthInstructions::new(table, gas_table_spec(spec), spec);
-    let wrappers: [(u8, InstructionFn<DB, ExtEnvs>); 7] = [
+    let wrappers: [(u8, InstructionFn<DB, ExtEnvs>); 11] = [
         (SSTORE, sstore::<DB, ExtEnvs>),
         (LOG0, log::<0, DB, ExtEnvs>),
         (LOG1, log::<1, DB, ExtEnvs>),
@@ -62,6 +86,10 @@ pub(crate) fn mega_instructions<DB: Database, ExtEnvs: ExternalEnvTypes>(
         (LOG3, log::<3, DB, ExtEnvs>),
         (LOG4, log::<4, DB, ExtEnvs>),
         (SELFDESTRUCT, selfdestruct::<DB, ExtEnvs>),
+        (CALL, call::<CALL, DB, ExtEnvs>),
+        (CALLCODE, call::<CALLCODE, DB, ExtEnvs>),
+        (CREATE, create::<false, DB, ExtEnvs>),
+        (CREATE2, create::<true, DB, ExtEnvs>),
     ];
     for (opcode, wrapper) in wrappers {
         let static_gas = instructions.gas_table()[opcode as usize];
@@ -70,13 +98,14 @@ pub(crate) fn mega_instructions<DB: Database, ExtEnvs: ExternalEnvTypes>(
     instructions
 }
 
-/// Runs `inner` and commits the record its Host call staged once it completed.
+/// Runs `inner`, commits the record its Host call staged once it completed, and settles the
+/// history gas the record costs.
 ///
 /// An opcode completes when it returns `Ok` or stops the frame successfully (`SELFDESTRUCT`
 /// returns its own `SelfDestruct` result). Any other result fails the opcode, which takes the
 /// staged write back with it.
 #[inline(always)]
-fn commit_after<DB: Database, ExtEnvs: ExternalEnvTypes>(
+fn commit_after<const FROM_ALLOWANCE: bool, DB: Database, ExtEnvs: ExternalEnvTypes>(
     context: Ctx<'_, DB, ExtEnvs>,
     inner: InstructionFn<DB, ExtEnvs>,
 ) -> InstructionExecResult {
@@ -91,11 +120,51 @@ fn commit_after<DB: Database, ExtEnvs: ExternalEnvTypes>(
         host.additional_limit.discard_staged_record();
         return result;
     }
-    let check = host.additional_limit.commit_staged_record();
+    let (check, history) = host.additional_limit.commit_staged_record();
+    if host.prices_history() {
+        settle_history::<FROM_ALLOWANCE, _, _>(interpreter, host, history)?;
+    }
     if check.exceeded_limit() {
         return Err(stop_frame(interpreter, &check));
     }
     result
+}
+
+/// Charges the running frame the history gas of the bytes a record appends, or gives back the
+/// history of a record that was taken away.
+///
+/// Both sides are priced the same way, so a record taken back cancels its own charge exactly,
+/// whichever frame made it: a refill below zero is reconciled when the frame merges into its
+/// caller. A byte count with no price and a charge the frame cannot pay are both an out-of-gas.
+///
+/// With `FROM_ALLOWANCE` the frame's history allowance pays what it can of the charge before the
+/// frame's gas pays the rest ([`storage_call_stipend`](crate::storage_call_stipend)). Only the
+/// log site sets it: a write record is the frame's own to pay for, and a record taken back gives
+/// back what the frame's gas paid, never what the allowance did — the allowance is spent, not
+/// lent.
+#[inline]
+fn settle_history<const FROM_ALLOWANCE: bool, DB: Database, ExtEnvs: ExternalEnvTypes>(
+    interpreter: &mut Interpreter<EthInterpreter>,
+    host: &mut MegaContext<DB, ExtEnvs>,
+    history: HistoryBytes,
+) -> Result<(), InstructionResult> {
+    match history {
+        HistoryBytes::None => Ok(()),
+        HistoryBytes::Appended(bytes) => {
+            let Some(cost) = history_gas(bytes) else { return Err(InstructionResult::OutOfGas) };
+            let drawn =
+                if FROM_ALLOWANCE { host.additional_limit.try_consume_stipend(cost) } else { 0 };
+            if interpreter.gas.record_history_cost(cost - drawn) {
+                Ok(())
+            } else {
+                Err(InstructionResult::OutOfGas)
+            }
+        }
+        HistoryBytes::Taken(bytes) => {
+            interpreter.gas.refill_history(history_gas(bytes).unwrap_or(0));
+            Ok(())
+        }
+    }
 }
 
 /// Stops the running frame with the revert a crossed limit asks for: its output is
@@ -124,21 +193,117 @@ fn stop_frame(
 fn sstore<DB: Database, ExtEnvs: ExternalEnvTypes>(
     context: Ctx<'_, DB, ExtEnvs>,
 ) -> InstructionExecResult {
-    commit_after(context, host::sstore)
+    commit_after::<false, _, _>(context, host::sstore)
 }
 
 /// `LOG0`..`LOG4`, committing the log's bytes.
 fn log<const N: usize, DB: Database, ExtEnvs: ExternalEnvTypes>(
     context: Ctx<'_, DB, ExtEnvs>,
 ) -> InstructionExecResult {
-    commit_after(context, host::log::<N, MegaContext<DB, ExtEnvs>>)
+    commit_after::<true, _, _>(context, host::log::<N, MegaContext<DB, ExtEnvs>>)
 }
 
 /// `SELFDESTRUCT`, committing the beneficiary's write record.
 fn selfdestruct<DB: Database, ExtEnvs: ExternalEnvTypes>(
     context: Ctx<'_, DB, ExtEnvs>,
 ) -> InstructionExecResult {
-    commit_after(context, host::selfdestruct)
+    commit_after::<false, _, _>(context, host::selfdestruct)
+}
+
+/// Runs `inner` and charges the frame the history of the write records the frame `inner` starts
+/// will make.
+///
+/// The charge is made after revm's instruction has computed the gas it forwards, so it comes out
+/// of what the caller kept rather than out of what the callee gets. An opcode that starts no
+/// frame — a call the balance cannot fund, a creation the depth refuses — makes no records and is
+/// charged nothing. A charge the caller cannot pay fails the opcode with an out-of-gas, which
+/// takes the frame the opcode was suspending on with it ([`abandon_frame`]).
+///
+/// The frame inherits the reservoir the charge left, not the one the caller held before it
+/// ([`inherit_reservoir`]).
+#[inline(always)]
+fn charge_frame_start<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    context: Ctx<'_, DB, ExtEnvs>,
+    inner: InstructionFn<DB, ExtEnvs>,
+) -> InstructionExecResult {
+    let InstructionContext { interpreter, host } = context;
+    let result = inner(InstructionContext { interpreter: &mut *interpreter, host: &mut *host });
+    if !host.prices_history() {
+        return result;
+    }
+    // An opcode that starts a frame suspends with the frame's input as its action; one that ends
+    // otherwise — a call the balance cannot fund, an out-of-gas — leaves no such action and makes
+    // no records.
+    let Some(InterpreterAction::NewFrame(input)) = interpreter.bytecode.action() else {
+        return result;
+    };
+    let records = host.additional_limit.frame_start_records(input);
+    let (Some(on_lane), Some(caller)) = (
+        write_record_history_gas(records.on_lane),
+        write_record_history_gas(u64::from(records.caller)),
+    ) else {
+        return Err(abandon_frame(interpreter));
+    };
+    let Some(cost) = on_lane.checked_add(caller) else { return Err(abandon_frame(interpreter)) };
+    if !interpreter.gas.record_history_cost(cost) {
+        return Err(abandon_frame(interpreter));
+    }
+    inherit_reservoir(interpreter);
+    host.additional_limit.stage_frame_charge(records, on_lane, caller);
+    result
+}
+
+/// Fails the running opcode with an out-of-gas and drops the frame it was suspending on.
+///
+/// The four frame-starting opcodes set the frame's input as the interpreter's action inside
+/// revm's instruction, before this wrapper runs. An interpreter halts on an instruction's error
+/// only when no action is pending, so a frame left pending here would start anyway — and make
+/// write records nobody paid for, at any gas limit at which the caller keeps less after the
+/// 63/64 forward than its records cost.
+#[cold]
+#[inline(never)]
+fn abandon_frame(interpreter: &mut Interpreter<EthInterpreter>) -> InstructionResult {
+    let _ = interpreter.take_next_action();
+    InstructionResult::OutOfGas
+}
+
+/// Hands the frame the running opcode is suspending on the reservoir its caller has now.
+///
+/// revm's `CALL`, `CALLCODE`, `CREATE` and `CREATE2` copy the caller's reservoir into the frame's
+/// input, and they do it before this wrapper charges anything. A returning frame's reservoir is
+/// adopted by its caller rather than merged into it, so a frame that inherited the reservoir as
+/// it stood before the charge would hand the charge straight back — and a frame answered without
+/// running, whose gas is built from the same field, would hand it back a second time. Writing the
+/// post-charge reservoir into the input closes both.
+#[inline]
+fn inherit_reservoir(interpreter: &mut Interpreter<EthInterpreter>) {
+    let reservoir = interpreter.gas.reservoir();
+    if let Some(InterpreterAction::NewFrame(input)) = interpreter.bytecode.action() {
+        match input {
+            FrameInput::Call(inputs) => inputs.reservoir = reservoir,
+            FrameInput::Create(inputs) => inputs.set_reservoir(reservoir),
+            FrameInput::Empty => {}
+        }
+    }
+}
+
+/// `CALL` and `CALLCODE`, charging the caller for the records a value transfer writes.
+///
+/// `CALLCODE` runs the callee's code in the caller's own account, so the two records of a `CALL`
+/// — the sender's and the recipient's — are one here. `DELEGATECALL` and `STATICCALL` carry no
+/// value and write nothing, so they run revm's instruction unwrapped.
+fn call<const KIND: u8, DB: Database, ExtEnvs: ExternalEnvTypes>(
+    context: Ctx<'_, DB, ExtEnvs>,
+) -> InstructionExecResult {
+    charge_frame_start(context, contract::call::<KIND, _, _>)
+}
+
+/// `CREATE` and `CREATE2`, charging the creator for the created account's record and for its own
+/// nonce.
+fn create<const IS_CREATE2: bool, DB: Database, ExtEnvs: ExternalEnvTypes>(
+    context: Ctx<'_, DB, ExtEnvs>,
+) -> InstructionExecResult {
+    charge_frame_start(context, contract::create::<IS_CREATE2, _, _>)
 }
 
 #[cfg(test)]

@@ -476,7 +476,8 @@ fn test_mixed_deposit_and_regular_transactions() {
 #[test]
 fn test_commit_time_da_footprint_check_parallel_simulation() {
     const SCALAR: u16 = u16::MAX;
-    const TX_GAS_LIMIT: u64 = 200_000;
+    // Above what two thousand calldata bytes cost: the intrinsic charge and the body's history.
+    const TX_GAS_LIMIT: u64 = 300_000;
 
     let first = tx_with_input(CALLER, incompressible(2_000), TX_GAS_LIMIT);
     let second = tx_with_input(CALLER2, incompressible(1_999), TX_GAS_LIMIT);

@@ -3,6 +3,10 @@
 //! The intrinsic numbers, the state gas a new slot and a new account draw, and the Amsterdam
 //! opcodes the schedule brings with it. Each number is read off a transaction the engine ran, not
 //! computed from the schedule, so a change to either side shows up here.
+//!
+//! Every transaction also pays the history gas of its body, which is not a schedule entry and is
+//! priced by the history mechanism. The numbers below are what is left once that ledger is taken
+//! out ([`Spend::schedule_gas`]); what the body costs is pinned in `history_gas.rs`.
 
 use alloy_evm::Evm;
 use alloy_primitives::{address, Address, Bytes, U256};
@@ -23,18 +27,27 @@ const CALLEE: Address = address!("0000000000000000000000000000000000900001");
 
 const GAS_LIMIT: u64 = 1_000_000;
 
-/// The gas a transaction used and the state gas inside it.
+/// The gas a transaction used, the state gas inside it and the history gas the schedule does not
+/// price.
 struct Spend {
     gas_used: u64,
     state: u64,
+    history: u64,
+}
+
+impl Spend {
+    /// What the schedule charged: everything the transaction used but the history ledger.
+    const fn schedule_gas(&self) -> u64 {
+        self.gas_used - self.history
+    }
 }
 
 /// Runs `tx` on `db` and returns what it spent. The transaction must succeed.
 fn spend(db: MemoryDatabase, tx: mega_evm::MegaTransaction) -> Spend {
-    let mut evm = MegaEvm::new(context(db));
-    let result = evm.transact_raw(tx).expect("the transaction is valid").result;
-    assert!(result.is_success(), "{result:?}");
-    Spend { gas_used: result.gas().tx_gas_used(), state: result.gas().state_gas_spent_final() }
+    let outcome =
+        MegaEvm::new(context(db)).execute_transaction(tx).expect("the transaction is valid");
+    assert!(outcome.result.is_success(), "{:?}", outcome.result);
+    Spend { gas_used: outcome.gas.gas_used, state: outcome.gas.state, history: outcome.gas.history }
 }
 
 /// A database where `CALLEE` exists and runs `code`.
@@ -54,7 +67,7 @@ fn with_code(code: Bytes) -> MemoryDatabase {
 #[test]
 fn test_an_empty_call_costs_fifteen_thousand() {
     let spent = spend(with_code(Bytes::new()), call(CALLER, CALLEE, U256::ZERO, GAS_LIMIT));
-    assert_eq!(spent.gas_used, 15_000);
+    assert_eq!(spent.schedule_gas(), 15_000);
     assert_eq!(spent.state, 0);
 }
 
@@ -64,7 +77,7 @@ fn test_an_empty_call_costs_fifteen_thousand() {
 fn test_a_value_transfer_to_an_existing_account_costs_twenty_one_thousand() {
     let db = with_code(Bytes::new()).account_balance(CALLEE, U256::from(1));
     let spent = spend(db, call(CALLER, CALLEE, U256::from(7), GAS_LIMIT));
-    assert_eq!(spent.gas_used, 21_000);
+    assert_eq!(spent.schedule_gas(), 21_000);
     assert_eq!(spent.state, 0);
 }
 
@@ -78,7 +91,7 @@ fn test_a_value_transfer_that_creates_the_recipient_draws_the_account_state_gas(
     let db = MemoryDatabase::default().account_balance(CALLER, U256::from(10u64.pow(18)));
     let spent = spend(db, call(CALLER, CALLEE, U256::from(7), GAS_LIMIT));
     assert_eq!(spent.state, ACCOUNT_STATE_GAS);
-    assert_eq!(spent.gas_used, 21_000 + ACCOUNT_STATE_GAS);
+    assert_eq!(spent.schedule_gas(), 21_000 + ACCOUNT_STATE_GAS);
 }
 
 /// A transfer to the sender itself pays the sender base alone: neither the recipient charge nor
@@ -87,7 +100,7 @@ fn test_a_value_transfer_that_creates_the_recipient_draws_the_account_state_gas(
 fn test_a_self_transfer_costs_twelve_thousand() {
     let db = MemoryDatabase::default().account_balance(CALLER, U256::from(10u64.pow(18)));
     let spent = spend(db, call(CALLER, CALLER, U256::from(7), GAS_LIMIT));
-    assert_eq!(spent.gas_used, 12_000);
+    assert_eq!(spent.schedule_gas(), 12_000);
     assert_eq!(spent.state, 0);
 }
 
@@ -102,7 +115,7 @@ fn test_a_create_transaction_costs_twenty_four_thousand_plus_the_account_state_g
     let db = MemoryDatabase::default().account_balance(CALLER, U256::from(10u64.pow(18)));
     let spent = spend(db, create(CALLER, Bytes::new(), GAS_LIMIT));
     assert_eq!(spent.state, ACCOUNT_STATE_GAS, "the created account");
-    assert_eq!(spent.gas_used - spent.state, 24_000, "the fixed part");
+    assert_eq!(spent.schedule_gas() - spent.state, 24_000, "the fixed part");
 }
 
 /// Init code is transaction data twice over: every byte is a calldata token, and EIP-3860 charges
@@ -118,7 +131,7 @@ fn test_init_code_costs_its_calldata_tokens_and_an_eip3860_word() {
         // Every byte is `STOP`, so the init code deposits nothing and costs nothing to run.
         let spent = spend(db, create(CALLER, Bytes::from(vec![0u8; len as usize]), GAS_LIMIT));
         assert_eq!(
-            spent.gas_used - spent.state,
+            spent.schedule_gas() - spent.state,
             fixed + token * len + word * words,
             "{len} bytes of init code"
         );

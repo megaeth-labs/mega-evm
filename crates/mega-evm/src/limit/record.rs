@@ -47,6 +47,33 @@ pub(crate) enum RecordEffect {
     Refund(LimitUsage),
 }
 
+/// The history bytes a committed record appends, or takes back.
+///
+/// They are the record's data size and nothing else: what a log or a write record weighs in a
+/// block is what the data-size limit meters it at, so the two cannot drift apart. That is the
+/// pairing, and it holds per record; a transaction's two totals part where the byte table says
+/// they do.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HistoryBytes {
+    /// Nothing to charge.
+    None,
+    /// Bytes the record appends.
+    Appended(u64),
+    /// Bytes a record that was taken back no longer appends.
+    Taken(u64),
+}
+
+impl RecordEffect {
+    /// The history bytes this effect appends or takes back.
+    pub(crate) const fn history_bytes(self) -> HistoryBytes {
+        match self {
+            Self::None => HistoryBytes::None,
+            Self::Record(usage) => HistoryBytes::Appended(usage.data_size),
+            Self::Refund(usage) => HistoryBytes::Taken(usage.data_size),
+        }
+    }
+}
+
 impl StagedRecord {
     /// What committing the record counts, per site:
     ///
@@ -91,6 +118,7 @@ impl StagedRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{LOG_BASE_SIZE, LOG_TOPIC_SIZE, WRITE_RECORD_SIZE};
     use alloy_primitives::{address, U256};
 
     const SENDER: Address = address!("0000000000000000000000000000000000005e4d");
@@ -128,6 +156,35 @@ mod tests {
         assert_eq!(
             log(1, u64::MAX),
             RecordEffect::Record(LimitUsage { data_size: u64::MAX, write_records: 0 })
+        );
+    }
+
+    /// A record's history bytes are its data size, at every site: a log's own bytes, a write
+    /// record's forty, and nothing for a write that leaves no record.
+    #[test]
+    fn test_history_bytes_are_the_records_data_size() {
+        assert_eq!(
+            sstore(0, 0, 1).effect(SENDER).history_bytes(),
+            HistoryBytes::Appended(WRITE_RECORD_SIZE)
+        );
+        assert_eq!(
+            sstore(0, 1, 0).effect(SENDER).history_bytes(),
+            HistoryBytes::Taken(WRITE_RECORD_SIZE)
+        );
+        assert_eq!(sstore(3, 3, 3).effect(SENDER).history_bytes(), HistoryBytes::None);
+        assert_eq!(
+            StagedRecord::Log { topics: 3, data_len: 32 }.effect(SENDER).history_bytes(),
+            HistoryBytes::Appended(LOG_BASE_SIZE + 3 * LOG_TOPIC_SIZE + 32)
+        );
+        let to_other = StagedRecord::SelfDestruct {
+            had_value: true,
+            target_exists: true,
+            to_other_account: true,
+            beneficiary: OTHER,
+        };
+        assert_eq!(
+            to_other.effect(SENDER).history_bytes(),
+            HistoryBytes::Appended(WRITE_RECORD_SIZE)
         );
     }
 

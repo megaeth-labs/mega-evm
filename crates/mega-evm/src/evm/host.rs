@@ -5,10 +5,12 @@
 //! revm hands the Host the facts of every state-writing opcode: an `SSTORE`'s original, present and
 //! new values, a log's topics and data, a `SELFDESTRUCT`'s balance and beneficiary. The Host
 //! stages them ([`AdditionalLimit::stage_record`](crate::AdditionalLimit)) and records nothing.
-//! The opcode's wrapper commits the staged record after the opcode completed, and discards it when
-//! the opcode failed. Recording in the Host would count a write the opcode's own failure then takes
+//! The opcode's wrapper commits the staged record after the opcode completed, and charges the
+//! frame the history the record costs; it discards the record, and charges nothing, when the
+//! opcode failed. Recording in the Host would count a write the opcode's own failure then takes
 //! back: `SSTORE` charges its dynamic gas after the Host call, and an out-of-gas there halts the
-//! frame with the record already counted.
+//! frame with the record already counted — and would have charged the frame for a byte the chain
+//! never carries.
 //!
 //! `block_hash` serves the read and records it, so a stateless witness learns of a `BLOCKHASH`
 //! that bypassed the journal.

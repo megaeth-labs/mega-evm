@@ -7,6 +7,7 @@ use mega_evm::{
     active_satin_prices,
     test_utils::{op_transaction, zero_fee_l1_block_info},
     LimitUsage, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
+    MegaTransactionOutcome,
 };
 use revm::{
     context::{result::ResultAndState, BlockEnv, TxEnv},
@@ -57,6 +58,15 @@ pub(crate) fn run<DB: alloy_evm::Database>(
     let result = evm.transact_raw(tx).expect("the transaction is valid");
     let usage = evm.ctx().additional_limit().usage();
     (result, usage)
+}
+
+/// Runs `tx` on a fresh Satin EVM over `db` and returns its outcome: the result and state, the
+/// gas by ledger and what the common execution layer counted.
+pub(crate) fn execute<DB: alloy_evm::Database>(
+    db: DB,
+    tx: MegaTransaction,
+) -> MegaTransactionOutcome {
+    MegaEvm::new(context(db)).execute_transaction(tx).expect("the transaction is valid")
 }
 
 /// Whether this process prices bytes at something other than the constants the spec fixes.

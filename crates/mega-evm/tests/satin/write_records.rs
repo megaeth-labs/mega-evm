@@ -9,7 +9,12 @@
 //! frame that fails.
 
 use alloy_primitives::{address, Address, Bytes, Log, LogData, B256, U256};
+use alloy_sol_types::SolCall;
 use mega_evm::{
+    system::{
+        IMegaAccessControl, IOracle, ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE,
+        ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE,
+    },
     test_utils::{BytecodeBuilder, MemoryDatabase},
     LimitUsage, MegaContext, MegaEvm, StagedRecord, WRITE_RECORD_SIZE,
 };
@@ -512,10 +517,35 @@ fn test_applied_authorities_record_once_each() {
 /// recipient.
 #[test]
 fn test_value_to_an_applied_authority_records_it_once() {
-    let db = MemoryDatabase::default().account_balance(CALLER, U256::from(1_000));
-    let (result, usage) = run(db, authorizing_call(AUTHORITY_1, 1, &[(AUTHORITY_1, 0)]));
+    let db = || MemoryDatabase::default().account_balance(CALLER, U256::from(1_000));
+    let (result, usage) = run(db(), authorizing_call(AUTHORITY_1, 1, &[(AUTHORITY_1, 0)]));
     assert!(result.result.is_success(), "{:?}", result.result);
     assert_eq!(usage, records(1));
+
+    // And is charged for once: the transaction's own frame writes no recipient, because the
+    // authority's account is already written. A transfer to an account that is not an authority
+    // pays for the recipient on top of the one authority it applied.
+    if crate::common::runs_at_measurement_prices() {
+        return;
+    }
+    const CPHB: u64 = mega_evm::constants::COST_PER_HISTORY_BYTE;
+    let to_authority =
+        crate::common::execute(db(), authorizing_call(AUTHORITY_1, 1, &[(AUTHORITY_1, 0)]));
+    let to_another =
+        crate::common::execute(db(), authorizing_call(CONTRACT, 1, &[(AUTHORITY_1, 0)]));
+    let body = mega_evm::TX_BODY_SIZE + mega_evm::AUTHORIZATION_SIZE;
+
+    assert!(to_another.result.is_success(), "{:?}", to_another.result);
+    assert_eq!(
+        to_authority.gas.history,
+        (body + WRITE_RECORD_SIZE) * CPHB,
+        "the authority's record, and no recipient record beside it",
+    );
+    assert_eq!(
+        to_another.gas.history,
+        (body + 2 * WRITE_RECORD_SIZE) * CPHB,
+        "the authority's record and the recipient's",
+    );
 }
 
 /// A frame running as the transaction's sender (a delegated sender called back) records no
@@ -653,23 +683,24 @@ fn test_runtime_out_of_gas_after_authorities_keeps_no_record() {
         tx.0.base.gas_limit = gas_limit;
         tx
     };
-    let run_at =
-        |gas_limit| MegaEvm::new(context(db())).execute_transaction(tx(gas_limit)).unwrap();
+    let run_at = |gas_limit| MegaEvm::new(context(db())).execute_transaction(tx(gas_limit));
+    // A limit below the intrinsic charge is a validation rejection rather than a run, which is a
+    // failure for the search all the same.
+    let succeeds_at = |gas_limit| run_at(gas_limit).is_ok_and(|o| o.result.is_success());
     // Gas is monotone here: every limit above the smallest one that succeeds succeeds too. Search
     // for that smallest limit rather than walking up to it, which the delegation's state gas puts
     // several hundred thousand gas away.
-    let (mut fails, mut succeeds) = (40_000u64, 1_000_000u64);
-    assert!(!run_at(fails).result.is_success(), "the low bound must fail");
-    assert!(run_at(succeeds).result.is_success(), "the high bound must succeed");
+    let (mut fails, mut succeeds) = (0u64, 1_000_000u64);
+    assert!(succeeds_at(succeeds), "the high bound must succeed");
     while succeeds - fails > 1 {
         let middle = fails + (succeeds - fails) / 2;
-        if run_at(middle).result.is_success() {
+        if succeeds_at(middle) {
             succeeds = middle;
         } else {
             fails = middle;
         }
     }
-    let outcome = run_at(succeeds - 1);
+    let outcome = run_at(succeeds - 1).expect("one gas short of succeeding is still included");
     assert!(outcome.result.is_halt(), "{:?}", outcome.result);
     assert_eq!(outcome.usage, LimitUsage::ZERO);
     assert_eq!(outcome.limit_exceeded, None);
@@ -829,4 +860,295 @@ fn test_inspector_answered_call_keeps_the_caller_lane() {
             .unwrap();
     assert!(result.result.is_success());
     assert_eq!(evm.ctx().additional_limit().usage(), records(2), "CALLEE and CONTRACT2");
+}
+
+/* ---------- every kept write is paid for, once ---------- */
+
+/// One transaction of the corpus below: what it runs, the history bytes it appends beyond its
+/// body that are not write records, and the records it keeps.
+struct Paired {
+    name: &'static str,
+    db: MemoryDatabase,
+    tx: mega_evm::MegaTransaction,
+    /// Log and deployed-code bytes. The calldata travels in the body, so it is not counted here.
+    other_bytes: u64,
+    /// The write records the transaction keeps, beyond the ones its body already carries.
+    records: u64,
+    /// Data-size bytes that are not history: an Oracle hint's payload, which goes to the node's
+    /// oracle service rather than into a block. Zero for every case but the hint's.
+    hint_bytes: u64,
+    /// The block this case runs in, for a case whose beneficiary is the point of it.
+    beneficiary: Address,
+}
+
+/// A call to `MegaAccessControl` carrying one wei, which its interceptor refuses before a frame
+/// runs, followed by a `STOP`.
+fn value_call_a_system_contract_refuses() -> Bytes {
+    BytecodeBuilder::default()
+        .mstore(0, IMegaAccessControl::isVolatileDataAccessDisabledCall::SELECTOR)
+        .append_many([PUSH0, PUSH0])
+        .push_number(4u64)
+        .append(PUSH0)
+        .append(PUSH1)
+        .append(1u8)
+        .push_address(ACCESS_CONTROL_ADDRESS)
+        .append(GAS)
+        .append(CALL)
+        .append(POP)
+        .append(STOP)
+        .build()
+}
+
+/// The corpus, one case per rule the record sites follow.
+fn paired_corpus() -> Vec<Paired> {
+    let case = |name, db: MemoryDatabase, tx, other_bytes, records| Paired {
+        name,
+        db,
+        tx,
+        other_bytes,
+        records,
+        hint_bytes: 0,
+        beneficiary: Address::ZERO,
+    };
+    let to_callee = |code: Bytes| funded().account_code(CALLEE, code);
+    let plain = || call(CALLER, CALLEE, U256::ZERO, GAS_LIMIT);
+    let calling = |target, value| {
+        append_value_call(BytecodeBuilder::default(), target, value)
+            .append(POP)
+            .append(STOP)
+            .build()
+    };
+    let storing = |slots: &[(u64, u64)]| {
+        let mut code = BytecodeBuilder::default();
+        for (slot, value) in slots {
+            code = code.sstore(U256::from(*slot), U256::from(*value));
+        }
+        code.stop().build()
+    };
+    let reverting = Bytes::from_static(&[PUSH0, PUSH0, 0xFD]);
+    vec![
+        case("an empty call", to_callee(Bytes::new()), plain(), 0, 0),
+        case("three fresh slots", to_callee(storing(&[(1, 1), (2, 1), (3, 1)])), plain(), 0, 3),
+        case("a slot written and restored", to_callee(storing(&[(1, 1), (1, 0)])), plain(), 0, 0),
+        case(
+            "a slot rewritten twice",
+            to_callee(storing(&[(1, 1), (1, 2), (1, 3)])),
+            plain(),
+            0,
+            1,
+        ),
+        case("a value transfer", to_callee(calling(CONTRACT, 1)), plain(), 0, 2),
+        case(
+            "a value transfer the callee reverts",
+            to_callee(calling(CONTRACT, 1)).account_code(CONTRACT, reverting.clone()),
+            plain(),
+            0,
+            0,
+        ),
+        case(
+            "a log over one word",
+            to_callee(
+                BytecodeBuilder::default()
+                    .push_number(1u64)
+                    .push_number(1u64)
+                    .push_number(32u64)
+                    .push_number(0u64)
+                    .append(LOG2)
+                    .append(STOP)
+                    .build(),
+            ),
+            plain(),
+            32 + 2 * 32 + 32,
+            0,
+        ),
+        case(
+            "a nested creation",
+            to_callee(
+                append_value_create(BytecodeBuilder::default()).append(POP).append(STOP).build(),
+            ),
+            plain(),
+            0,
+            2,
+        ),
+        case(
+            "a creation whose init code reverts",
+            funded().account_code(OUTER_CREATOR, reverting_creations(1)),
+            call(CALLER, OUTER_CREATOR, U256::ZERO, GAS_LIMIT),
+            0,
+            1,
+        ),
+        case(
+            "a destruction that moves value",
+            to_callee(
+                BytecodeBuilder::default().push_address(CONTRACT).append(SELFDESTRUCT).build(),
+            )
+            .account_balance(CALLEE, U256::from(1)),
+            plain(),
+            0,
+            1,
+        ),
+        case(
+            "a value call a system contract's interceptor refuses",
+            to_callee(value_call_a_system_contract_refuses())
+                .account_balance(ACCESS_CONTROL_ADDRESS, U256::from(1))
+                .account_code(ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE),
+            plain(),
+            0,
+            0,
+        ),
+        case(
+            "a transaction carrying calldata",
+            to_callee(Bytes::new()),
+            call_with_data(CALLER, CALLEE, Bytes::from(vec![7u8; 100]), GAS_LIMIT),
+            0,
+            0,
+        ),
+        case(
+            "a value transaction",
+            funded(),
+            call(CALLER, CONTRACT, U256::from(1), GAS_LIMIT),
+            0,
+            1,
+        ),
+        case(
+            "a value transaction the recipient reverts",
+            funded().account_code(CONTRACT, reverting),
+            call(CALLER, CONTRACT, U256::from(1), GAS_LIMIT),
+            0,
+            0,
+        ),
+        case("a creation transaction", funded(), create(CALLER, Bytes::new(), GAS_LIMIT), 0, 1),
+        // The two cases where a transaction's data size and its history part company. Both are
+        // decisions, stated in the byte table; each is written out here with the number it pays.
+        Paired {
+            hint_bytes: send_hint(b"a hint the transaction pays data size for").len() as u64,
+            ..case(
+                "a transaction that sends an Oracle hint",
+                funded().account_code(ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE),
+                call_with_data(
+                    CALLER,
+                    ORACLE_CONTRACT_ADDRESS,
+                    send_hint(b"a hint the transaction pays data size for"),
+                    GAS_LIMIT,
+                ),
+                0,
+                0,
+            )
+        },
+        Paired {
+            beneficiary: CONTRACT,
+            ..case(
+                "a value transaction whose recipient is the block beneficiary",
+                MemoryDatabase::default().account_balance(CALLER, U256::from(10u64.pow(18))),
+                {
+                    // A fee the beneficiary is actually credited, so the account the transfer
+                    // records is one the body's five already bound.
+                    let mut tx = call(CALLER, CONTRACT, U256::from(1), GAS_LIMIT);
+                    tx.0.base.gas_price = 10;
+                    tx
+                },
+                0,
+                1,
+            )
+        },
+    ]
+}
+
+/// The calldata of `sendHint(topic, data)`, whose payload the Oracle's interceptor counts on the
+/// transaction's data size before the contract's own bytecode runs.
+fn send_hint(data: &[u8]) -> Bytes {
+    Bytes::from(
+        IOracle::sendHintCall {
+            topic: B256::repeat_byte(0x7a),
+            data: Bytes::copy_from_slice(data),
+        }
+        .abi_encode(),
+    )
+}
+
+/// Every write a transaction keeps is one forty-byte record of history, and nothing it does not
+/// keep is: the history each transaction pays beyond its body, its logs and its deployed code is
+/// exactly the write-record count the layer counted, at the history price.
+///
+/// This is the pairing itself. The layer counts the records and the engine charges for them at
+/// separate sites, on separate rules; the corpus holds the two to the same number, case by case,
+/// and to the number the case says.
+///
+/// The pairing is per record, and the last two cases are where a transaction's two totals part:
+/// an Oracle hint's payload is data size that is not history, and a transfer to the block
+/// beneficiary pays a record the transaction body's five already bound. Both are the byte table's
+/// decisions; each is written out with the number it costs so the divergence reads as intended
+/// rather than as a defect.
+#[test]
+fn test_every_kept_write_pays_one_record_of_history() {
+    if crate::common::runs_at_measurement_prices() {
+        return;
+    }
+    const CPHB: u64 = mega_evm::constants::COST_PER_HISTORY_BYTE;
+    for case in paired_corpus() {
+        let ctx = context(case.db).with_block(revm::context::BlockEnv {
+            beneficiary: case.beneficiary,
+            ..crate::common::block()
+        });
+        let outcome = MegaEvm::new(ctx)
+            .execute_transaction(case.tx.clone())
+            .expect("the transaction is valid");
+        let usage = outcome.usage;
+        assert_eq!(usage.write_records, case.records, "{}: the records kept", case.name);
+        let body = mega_evm::TX_BODY_SIZE + case.tx.0.base.data.len() as u64;
+        let expected = (body + case.other_bytes + case.records * WRITE_RECORD_SIZE) * CPHB;
+        assert_eq!(outcome.gas.history, expected, "{}: the history it pays", case.name);
+        assert_eq!(
+            usage.data_size,
+            case.other_bytes + case.records * WRITE_RECORD_SIZE + case.hint_bytes,
+            "{}: the data size the limit counts",
+            case.name,
+        );
+    }
+}
+
+/// A value call an inspector answers makes none of the writes its caller paid for, so all of that
+/// history comes back — whatever the inspector answered with.
+///
+/// A frame answered without running is the one case where a *successful* result must still give
+/// the caller its charge back: the records were never made. An interceptor's refusal and the
+/// depth guard both fail, so only an inspector reaches this.
+#[test]
+fn test_an_inspector_answered_value_call_gives_its_history_back() {
+    if crate::common::runs_at_measurement_prices() {
+        return;
+    }
+    let code =
+        append_value_call(BytecodeBuilder::default(), CONTRACT, 1).append(POP).append(STOP).build();
+    let run_with = |inspector: Option<AnswerContract>| {
+        let db = funded().account_code(CALLEE, code.clone());
+        let tx = call(CALLER, CALLEE, U256::ZERO, GAS_LIMIT);
+        match inspector {
+            Some(inspector) => {
+                let mut evm = MegaEvm::new(context(db)).with_inspector(inspector);
+                let result = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
+                assert!(result.result.is_success(), "{:?}", result.result);
+                (
+                    evm.ctx().additional_limit().usage(),
+                    evm.ctx().additional_limit().history_gas_spent(),
+                )
+            }
+            None => {
+                let outcome = crate::common::execute(db, tx);
+                assert!(outcome.result.is_success(), "{:?}", outcome.result);
+                (outcome.usage, outcome.gas.history)
+            }
+        }
+    };
+    let (answered_usage, answered_history) = run_with(Some(AnswerContract));
+    let (ran_usage, ran_history) = run_with(None);
+    let body = mega_evm::TX_BODY_SIZE * mega_evm::constants::COST_PER_HISTORY_BYTE;
+
+    assert_eq!(answered_usage, LimitUsage::ZERO, "the answered call wrote nothing");
+    assert_eq!(answered_history, body, "so its caller pays for nothing beyond its body");
+    assert_eq!(ran_usage, records(2), "the transfer that ran wrote two accounts");
+    assert_eq!(
+        ran_history,
+        body + 2 * WRITE_RECORD_SIZE * mega_evm::constants::COST_PER_HISTORY_BYTE
+    );
 }

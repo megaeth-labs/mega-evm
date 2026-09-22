@@ -88,6 +88,17 @@ fn run(
     (result, evm.ctx().additional_limit().latched().copied())
 }
 
+/// The history gas an empty transaction body costs, which every transaction here pays before its
+/// first frame and keeps whatever that frame does.
+const fn body_history() -> u64 {
+    mega_evm::TX_BODY_SIZE * mega_evm::constants::COST_PER_HISTORY_BYTE
+}
+
+/// The same for a creation transaction, whose init code travels as the body's data.
+const fn create_body_history(init_code_len: u64) -> u64 {
+    (mega_evm::TX_BODY_SIZE + init_code_len) * mega_evm::constants::COST_PER_HISTORY_BYTE
+}
+
 fn cap(bytes: u64) -> EvmTxRuntimeLimits {
     EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(bytes)
 }
@@ -255,7 +266,11 @@ fn test_stop_refills_the_reservoir_at_any_gas_limit() {
     let small = at(100_000_000);
     let large = at(1_000_000_000);
     assert_eq!(small.reservoir_remaining(), 0, "a limit under the cap has no reservoir");
-    assert_eq!(large.reservoir_remaining(), 1_000_000_000 - TX_GAS_LIMIT_CAP, "all of it back");
+    assert_eq!(
+        large.reservoir_remaining(),
+        1_000_000_000 - TX_GAS_LIMIT_CAP - body_history(),
+        "all of it back but the body's history, which the stop does not take back",
+    );
     assert_eq!(small.tx_gas_used(), large.tx_gas_used());
     assert_eq!(small.total_gas_spent(), large.total_gas_spent());
 }
@@ -265,7 +280,7 @@ fn test_stop_refills_the_reservoir_at_any_gas_limit() {
 #[test]
 fn test_true_out_of_gas_still_halts_and_burns() {
     let db = MemoryDatabase::default().account_code(A, writer());
-    let gas_limit = 21_000 + 5_000;
+    let gas_limit = 21_000 + body_history() + 5_000;
     let (result, latched) = run(db, cap(0), call(CALLER, A, U256::ZERO, gas_limit));
     assert!(
         matches!(
@@ -321,11 +336,17 @@ fn test_cap_crossed_before_the_first_frame_reverts_without_running() {
 
     let (transfer, _) = run(funded(), cap(u64::MAX), call(CALLER, B, U256::from(5), GAS_LIMIT));
     assert!(transfer.result.is_success());
-    assert_eq!(result.result.gas().tx_gas_used(), 21_000, "the transfer's intrinsic gas");
+    assert_eq!(
+        result.result.gas().tx_gas_used(),
+        21_000 + body_history(),
+        "the transfer's intrinsic gas and its body",
+    );
     assert_eq!(
         transfer.result.gas().tx_gas_used(),
-        result.result.gas().tx_gas_used() + ACCOUNT_STATE_GAS,
-        "the transfer that goes through also creates the recipient"
+        result.result.gas().tx_gas_used() +
+            ACCOUNT_STATE_GAS +
+            mega_evm::WRITE_RECORD_SIZE * mega_evm::constants::COST_PER_HISTORY_BYTE,
+        "the transfer that goes through creates the recipient, and keeps its write record"
     );
 }
 
@@ -434,9 +455,13 @@ fn test_create_transaction_stopped_before_its_first_frame_bumps_the_nonce() {
     assert!(result.result.gas().tx_gas_used() < GAS_LIMIT / 2, "the stop burns nothing");
 
     // The stopped creation's result carries the reservoir back.
-    let tx = crate::common::create(CALLER, writer(), 1_000_000_000);
+    let init_code = writer();
+    let tx = crate::common::create(CALLER, init_code.clone(), 1_000_000_000);
     let (result, _) = run(MemoryDatabase::default(), cap(39), tx);
-    assert_eq!(result.result.gas().reservoir_remaining(), 1_000_000_000 - TX_GAS_LIMIT_CAP);
+    assert_eq!(
+        result.result.gas().reservoir_remaining(),
+        1_000_000_000 - TX_GAS_LIMIT_CAP - create_body_history(init_code.len() as u64),
+    );
 }
 
 /// A limit is crossed by usage above it: usage equal to the limit does not stop a transaction or
@@ -514,7 +539,8 @@ fn execute_with(
 #[test]
 fn test_stop_refills_the_state_gas_drawn_from_the_reservoir() {
     let gas_limit = 1_000_000_000;
-    let reservoir = gas_limit - TX_GAS_LIMIT_CAP;
+    // The body's history comes out of the reservoir too, and the stop does not take it back.
+    let reservoir = gas_limit - TX_GAS_LIMIT_CAP - body_history();
     let charger = || Charger { state_gas: 50_000, ..Default::default() };
     // The chain's own new slots draw state gas from the same reservoir, so the charger's 50,000
     // is measured against a run that charges nothing extra.
@@ -545,13 +571,16 @@ fn test_outcome_reports_history_gas() {
     let plain =
         execute_with(chain(), EvmTxRuntimeLimits::no_limits(), Charger::default(), GAS_LIMIT);
     assert!(kept.result.is_success());
-    assert_eq!(kept.gas.history, 700);
+    assert_eq!(kept.gas.history, plain.gas.history + 700);
+    assert!(plain.gas.history > body_history(), "the chain's own writes are history too");
     assert_eq!(kept.gas.regular, plain.gas.regular, "history is not regular gas");
     assert_eq!(kept.gas.gas_used, plain.gas.gas_used + 700);
 
+    // The body is charged before the first frame, so the stop keeps it and takes back every
+    // charge the frames made, the inspector's included.
     let stopped = execute_with(chain(), cap(180), charger(), GAS_LIMIT);
     assert_stopped(&stopped.result, LimitKind::DataSize, 180);
-    assert_eq!(stopped.gas.history, 0);
+    assert_eq!(stopped.gas.history, body_history());
 }
 
 /// Under the latch every returned result is the stop, whatever an inspector made of it: rewriting

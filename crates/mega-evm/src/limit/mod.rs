@@ -8,6 +8,24 @@
 //! It also counts what those limits meter at the sites the data-size limit counts: data-size
 //! bytes and write records, on a lane per frame ([`AdditionalLimit`]). The Host stages what it
 //! observes ([`StagedRecord`]) and the opcode commits it once it completed.
+//!
+//! # The byte table
+//!
+//! The sizes below are what one of those things weighs, and they are the whole byte table of the
+//! engine. The data-size limit meters a transaction against them and history gas prices the same
+//! counts, and the pairing is **per record**: a record's history bytes are its own data size, so
+//! a log costs history for exactly the bytes the limit counts it at. A mechanism that needs a
+//! size takes it from here rather than writing its own number.
+//!
+//! Per transaction the two totals are not the same number, and are not meant to be. Two sites
+//! part them, both by decision:
+//!
+//! - an Oracle hint's payload is data size the transaction counts and history it does not pay. The
+//!   bytes go to the node's oracle service, not into a block, so there is nothing to price;
+//! - [`TX_FIXED_WRITE_RECORDS`] is an upper bound on the accounts a transaction's inclusion writes,
+//!   and nothing checks afterwards which of them something else wrote again. A transfer whose
+//!   recipient is the block beneficiary or a fee vault pays a record the body already bound. It is
+//!   an over-charge, never an under-charge.
 
 mod frame_limit;
 #[allow(clippy::module_inception)]
@@ -15,6 +33,7 @@ mod limit;
 mod record;
 
 pub use limit::AdditionalLimit;
+pub(crate) use record::HistoryBytes;
 pub use record::StagedRecord;
 
 use alloy_primitives::Bytes;
@@ -29,6 +48,33 @@ pub const LOG_BASE_SIZE: u64 = 32;
 
 /// Bytes every log topic counts.
 pub const LOG_TOPIC_SIZE: u64 = 32;
+
+/// Bytes every transaction counts for its envelope: the fields a transaction carries beside its
+/// calldata, its access list and its authorizations.
+pub const TX_BASE_SIZE: u64 = 110;
+
+/// Write records every transaction makes whatever it runs, counted in its body rather than at the
+/// site that makes them: the sender's account, and the four accounts a transaction's fees are
+/// credited to — the block beneficiary, the L1 fee vault, the base fee vault and the operator fee
+/// vault.
+///
+/// It is an upper bound. The reward credits fewer accounts when a fee is zero or when the
+/// beneficiary is one of the vaults, but the body is priced before the transaction runs, so it
+/// carries the bound rather than the count.
+pub const TX_FIXED_WRITE_RECORDS: u64 = 5;
+
+/// Bytes every transaction's body counts: its envelope and the records of the writes it makes
+/// whatever it runs.
+pub const TX_BODY_SIZE: u64 = TX_BASE_SIZE + WRITE_RECORD_SIZE * TX_FIXED_WRITE_RECORDS;
+
+/// Bytes one EIP-7702 authorization counts: the authorization tuple and its signature.
+pub const AUTHORIZATION_SIZE: u64 = 101;
+
+/// Bytes one access-list address counts: the address itself.
+pub const ACCESS_LIST_ADDRESS_SIZE: u64 = 20;
+
+/// Bytes one access-list storage key counts: the key itself.
+pub const ACCESS_LIST_SLOT_SIZE: u64 = 32;
 
 /// What a transaction or a frame counts: data-size bytes and write records.
 ///
@@ -226,6 +272,20 @@ impl LimitCheck {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The byte table, written out so a change to one of the sizes is a visible diff.
+    #[test]
+    fn test_the_byte_table_is_written_out() {
+        assert_eq!(WRITE_RECORD_SIZE, 40);
+        assert_eq!(LOG_BASE_SIZE, 32);
+        assert_eq!(LOG_TOPIC_SIZE, 32);
+        assert_eq!(TX_BASE_SIZE, 110);
+        assert_eq!(TX_FIXED_WRITE_RECORDS, 5);
+        assert_eq!(TX_BODY_SIZE, 310);
+        assert_eq!(AUTHORIZATION_SIZE, 101);
+        assert_eq!(ACCESS_LIST_ADDRESS_SIZE, 20);
+        assert_eq!(ACCESS_LIST_SLOT_SIZE, 32);
+    }
 
     #[test]
     fn test_limit_usage_arithmetic_saturates() {

@@ -3,10 +3,10 @@
 use alloy_primitives::{address, Address, Bytes, U256};
 use alloy_sol_types::SolError;
 use mega_evm::{
-    constants::{SLOT_STATE_GAS, TX_GAS_LIMIT_CAP},
+    constants::{COST_PER_HISTORY_BYTE, SLOT_STATE_GAS, TX_GAS_LIMIT_CAP},
     test_utils::{BytecodeBuilder, MemoryDatabase},
     BlockGasCounters, EvmTxRuntimeLimits, LimitCheck, LimitKind, LimitUsage, MegaEvm,
-    MegaLimitExceeded, MegaTransactionOutcome, WRITE_RECORD_SIZE,
+    MegaLimitExceeded, MegaTransactionOutcome, TX_BODY_SIZE, WRITE_RECORD_SIZE,
 };
 
 use crate::common::{call, context, runs_at_measurement_prices};
@@ -48,8 +48,17 @@ fn test_outcome_reports_the_ledgers() {
     assert_eq!(gas.gas_used, result_gas.tx_gas_used());
     // Both slots are new, so both draw state gas, and the reservoir is what pays it.
     assert_eq!(gas.state, 2 * SLOT_STATE_GAS);
-    assert_eq!(gas.reservoir_remaining, 1_000_000_000 - TX_GAS_LIMIT_CAP - 2 * SLOT_STATE_GAS);
-    assert_eq!(gas.history, 0, "nothing prices history bytes yet");
+    // The body's history comes out of the same reservoir, before the state gas does, and each of
+    // the two new slots leaves a write record that is history too.
+    assert_eq!(
+        gas.history,
+        (TX_BODY_SIZE + 2 * WRITE_RECORD_SIZE) * COST_PER_HISTORY_BYTE,
+        "the transaction's body and the two write records",
+    );
+    assert_eq!(
+        gas.reservoir_remaining,
+        1_000_000_000 - TX_GAS_LIMIT_CAP - 2 * SLOT_STATE_GAS - gas.history,
+    );
     assert_eq!(outcome.usage, LimitUsage { data_size: 2 * WRITE_RECORD_SIZE, write_records: 2 });
     assert_eq!(outcome.limit_exceeded, None);
 
@@ -58,6 +67,7 @@ fn test_outcome_reports_the_ledgers() {
     block.record(&gas);
     assert_eq!(block.execution, 2 * gas.block_execution_gas());
     assert_eq!(block.state, 2 * gas.state);
+    assert_eq!(block.history, 2 * gas.history);
 }
 
 /// A stopped transaction reports the stop.
