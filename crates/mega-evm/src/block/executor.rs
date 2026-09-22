@@ -869,4 +869,26 @@ mod tests {
         executor.evm_mut().set_inspector_enabled(true);
         assert!(executor.into_evm().is_inspecting());
     }
+
+    /// The executor prints whether a pre-block observer is installed. A trait object has no
+    /// `Debug`, so the observer is reported as a flag rather than dropped: a reader of a node's
+    /// log can tell a block whose pre-block states were witnessed from one whose were not.
+    #[test]
+    fn test_debug_reports_whether_a_pre_block_observer_is_installed() {
+        let ctx = MegaContext::new(MemoryDatabase::default(), MegaSpecId::SATIN);
+        let mut executor = MegaBlockExecutor::new(
+            MegaEvm::new(ctx),
+            MegaBlockExecutionCtx::default(),
+            MegaHardforkConfig::default().with_all_activated(),
+            alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder::default(),
+        );
+
+        assert_eq!(format!("{:?}", executor.pre_block_observer), "None");
+
+        executor.set_pre_block_observer(Some(Box::new(|_: PreBlockStateSource, _: &EvmState| {})));
+        assert_eq!(format!("{:?}", executor.pre_block_observer), "Some(_)");
+
+        executor.set_pre_block_observer(None);
+        assert_eq!(format!("{:?}", executor.pre_block_observer), "None");
+    }
 }
