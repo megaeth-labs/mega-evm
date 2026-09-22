@@ -220,3 +220,27 @@ fn test_a_block_reports_the_bytes_its_history_gas_does_not_cover() {
     let (_, result) = executor.finish_with_counters().expect("the block finishes");
     assert_eq!(result.gas, counters, "the result carries both columns");
 }
+
+/// A transaction bound by its floor adds its floor to the block's execution gas. Its history comes
+/// out before the floor applies, so what the block counts is neither the fork's figure, which
+/// carries history, nor that figure less history, which falls below the floor.
+#[test]
+fn test_a_floor_bound_transaction_adds_its_floor_to_the_block() {
+    if !mega_evm::active_satin_prices().is_constants() {
+        return;
+    }
+    let mut state = common::state();
+    let mut executor = executor(&mut state, common::unlimited_ctx());
+    executor.apply_pre_execution_changes().expect("the block starts");
+
+    let tx = common::user_tx_with_input(0, Bytes::from(vec![0; 1_000]), 1_000_000);
+    let outcome = executor.run_transaction(&tx).expect("the transaction executes");
+    let gas = outcome.gas;
+    let fork_figure = outcome.result.gas().block_regular_gas_used();
+    assert!(gas.floor > gas.regular, "{gas:?}: a kilobyte of calldata and nothing run");
+    executor.commit_transaction_outcome(outcome).expect("the block has room");
+
+    assert_eq!(executor.gas().execution, gas.floor);
+    assert!(fork_figure > gas.floor, "the fork's figure carries the history");
+    assert!(fork_figure - gas.history < gas.floor, "and less history it falls below the floor");
+}
