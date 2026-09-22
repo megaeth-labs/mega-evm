@@ -26,7 +26,9 @@
 //! starts makes — a value transfer's sender and recipient, a creation's creator nonce and created
 //! account — before the frame runs, so the gas it forwards is not reduced by them and its
 //! allowance is free for what the recipient does. What the frame does not keep goes back to the
-//! caller when it returns.
+//! caller when it returns. The frame the opcode is suspending on carries the caller's reservoir,
+//! which the charge has just moved, so the wrapper writes the reservoir it left into the frame's
+//! input.
 //!
 //! A wrapper keeps the static gas revm's table charges for its opcode, so the gas schedule is
 //! unchanged.
@@ -47,8 +49,8 @@ use revm::{
         instructions::{contract, gas_table_spec, host},
         interpreter::EthInterpreter,
         interpreter_types::LoopControl,
-        Instruction, InstructionContext, InstructionExecResult, InstructionResult, Interpreter,
-        InterpreterAction,
+        FrameInput, Instruction, InstructionContext, InstructionExecResult, InstructionResult,
+        Interpreter, InterpreterAction,
     },
     primitives::hardfork::SpecId,
     Database,
@@ -214,6 +216,9 @@ fn selfdestruct<DB: Database, ExtEnvs: ExternalEnvTypes>(
 /// of what the caller kept rather than out of what the callee gets. An opcode that starts no
 /// frame — a call the balance cannot fund, a creation the depth refuses — makes no records and is
 /// charged nothing. A charge the frame cannot pay is an ordinary out-of-gas.
+///
+/// The frame inherits the reservoir the charge left, not the one the caller held before it
+/// ([`inherit_reservoir`]).
 #[inline(always)]
 fn charge_frame_start<DB: Database, ExtEnvs: ExternalEnvTypes>(
     context: Ctx<'_, DB, ExtEnvs>,
@@ -241,8 +246,29 @@ fn charge_frame_start<DB: Database, ExtEnvs: ExternalEnvTypes>(
     if !interpreter.gas.record_history_cost(cost) {
         return Err(InstructionResult::OutOfGas);
     }
+    inherit_reservoir(interpreter);
     host.additional_limit.stage_frame_charge(on_lane, caller);
     result
+}
+
+/// Hands the frame the running opcode is suspending on the reservoir its caller has now.
+///
+/// revm's `CALL`, `CALLCODE`, `CREATE` and `CREATE2` copy the caller's reservoir into the frame's
+/// input, and they do it before this wrapper charges anything. A returning frame's reservoir is
+/// adopted by its caller rather than merged into it, so a frame that inherited the reservoir as
+/// it stood before the charge would hand the charge straight back — and a frame answered without
+/// running, whose gas is built from the same field, would hand it back a second time. Writing the
+/// post-charge reservoir into the input closes both.
+#[inline]
+fn inherit_reservoir(interpreter: &mut Interpreter<EthInterpreter>) {
+    let reservoir = interpreter.gas.reservoir();
+    if let Some(InterpreterAction::NewFrame(input)) = interpreter.bytecode.action() {
+        match input {
+            FrameInput::Call(inputs) => inputs.reservoir = reservoir,
+            FrameInput::Create(inputs) => inputs.set_reservoir(reservoir),
+            FrameInput::Empty => {}
+        }
+    }
 }
 
 /// `CALL` and `CALLCODE`, charging the caller for the records a value transfer writes.

@@ -6,6 +6,7 @@ mod db_error;
 mod equivalence;
 mod history_exemption;
 mod history_gas;
+mod history_reservoir;
 mod inspector;
 mod intrinsic;
 mod outcome;

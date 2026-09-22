@@ -7,7 +7,10 @@
 //! [`assert_same_but_history`] holds each baseline case to `op-revm's total + the history ledger`
 //! and to op-revm's state gas exactly, and
 //! [`test_the_history_ledger_is_what_satin_adds_to_every_transaction`] pins what that ledger is
-//! made of. The six cases at the end are the ones that diverge for a reason of their own — the
+//! made of. One baseline case runs above the execution cap, because a transaction that has an
+//! EIP-8037 reservoir pays its history out of it, and a charge that is given back behind the
+//! ledger's back shows up nowhere else. The six cases at the end are the ones that diverge for a
+//! reason of their own — the
 //! system contract interceptors, the `KeylessDeploy` overhead, the system-address transaction,
 //! the account a deposit creates for its sender, a crowded SALT bucket and the history ledger —
 //! and they pin both sides, so a divergence is never silently absorbed. Later changes (the
@@ -28,9 +31,11 @@ use mega_evm::{
     satin_gas_params,
     test_utils::{op_transaction, zero_fee_l1_block_info, BytecodeBuilder, MemoryDatabase},
     MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransactionOutcome, TX_BODY_SIZE,
+    WRITE_RECORD_SIZE,
 };
 use op_revm::{constants::BASE_FEE_RECIPIENT, L1BlockInfo, OpEvm, OpSpecId, OpTransaction};
 use revm::{
+    bytecode::opcode::{CALL, GAS, POP, PUSH0, PUSH1},
     context::{
         result::{ExecResultAndState, ExecutionResult},
         BlockEnv, CfgEnv, Context, ContextTr, TxEnv,
@@ -218,6 +223,57 @@ fn test_value_transfer_matches_op_revm() {
     assert_satin_cfg(&cfg);
     assert!(mega.result.is_success());
     assert_eq!(mega.state[&CALLEE].info.balance, U256::from(1_000));
+    assert_same_but_history(&mega, &op);
+}
+
+/// A nested value call above the execution cap, where the reservoir is what pays the history.
+///
+/// The frame-start write records are the one history charge made from outside the frame it
+/// belongs to, and the frame carries its caller's reservoir, so a baseline without a reservoir
+/// cannot see whether the charge survived the frame it started. This one runs the same program
+/// above the cap: op-revm charges nothing for the records, and Satin's total must exceed
+/// op-revm's by exactly the history ledger here too.
+#[test]
+fn test_a_nested_value_call_with_a_reservoir_matches_op_revm() {
+    if runs_at_measurement_prices() {
+        return;
+    }
+    let inner = address!("0x5000000000000000000000000000000000000002");
+    let code = BytecodeBuilder::default()
+        .append_many([PUSH0, PUSH0, PUSH0, PUSH0])
+        .append(PUSH1)
+        .append(1u8)
+        .push_address(inner)
+        .append(GAS)
+        .append(CALL)
+        .append(POP)
+        .stop()
+        .build();
+    let db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(10u64.pow(18)))
+        .account_balance(CALLEE, U256::from(10_000_000))
+        .account_code(CALLEE, code);
+    let reservoir = 100_000_000;
+    let tx = TxEnv {
+        caller: CALLER,
+        kind: TxKind::Call(CALLEE),
+        gas_limit: TX_GAS_LIMIT_CAP + reservoir,
+        ..Default::default()
+    };
+    let (mega, op, cfg) = run_both(db, tx);
+
+    assert_satin_cfg(&cfg);
+    assert!(mega.result.is_success(), "{:?}", mega.result);
+    assert_eq!(
+        mega.gas.history,
+        (TX_BODY_SIZE + 2 * WRITE_RECORD_SIZE) * COST_PER_HISTORY_BYTE,
+        "the body, the caller's account and the recipient's",
+    );
+    assert_eq!(
+        mega.gas.reservoir_remaining,
+        reservoir - mega.gas.state - mega.gas.history,
+        "the reservoir paid the state and the history, and nothing came back",
+    );
     assert_same_but_history(&mega, &op);
 }
 
