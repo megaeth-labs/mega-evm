@@ -11,7 +11,7 @@ use mega_evm::{
     WRITE_RECORD_SIZE,
 };
 use revm::{
-    bytecode::opcode::{CALL, GAS, LOG0, POP, PUSH0, RETURN, REVERT},
+    bytecode::opcode::{CALL, CREATE, GAS, LOG0, POP, PUSH0, PUSH1, RETURN, REVERT, STOP},
     context_interface::cfg::GasId,
 };
 
@@ -263,6 +263,102 @@ fn test_a_failing_frame_gives_its_history_back() {
     assert!(kept.result.is_success() && reverted.result.is_success(), "the caller survives");
     assert_eq!(kept.gas.history - quiet.gas.history, (LOG_BASE_SIZE + LOG_TOPIC_SIZE + 32) * CPHB);
     assert_eq!(reverted.gas.history, quiet.gas.history, "the reverted frame's log is not paid for");
+}
+
+/* ---------- a frame-start charge the caller cannot pay ---------- */
+
+/// `CALL(GAS, target, 1 wei, [], [])`, discarding the flag, then `STOP`: a value transfer that
+/// forwards everything the caller may forward, so the caller keeps a sixty-fourth of what it held.
+fn transfers_everything_to(target: Address) -> Bytes {
+    BytecodeBuilder::default()
+        .append_many([PUSH0, PUSH0, PUSH0, PUSH0])
+        .append(PUSH1)
+        .append(1u8)
+        .push_address(target)
+        .append(GAS)
+        .append(CALL)
+        .append(POP)
+        .append(STOP)
+        .build()
+}
+
+/// `CREATE` of empty init code carrying one wei, discarding the address, then `STOP`.
+fn creates_everything() -> Bytes {
+    BytecodeBuilder::default()
+        .append_many([PUSH0, PUSH0])
+        .append(PUSH1)
+        .append(1u8)
+        .append(CREATE)
+        .append(POP)
+        .append(STOP)
+        .build()
+}
+
+/// A funded caller holding `code`, with a balance to transfer.
+fn caller_running(code: Bytes) -> MemoryDatabase {
+    funded().account_balance(CALLEE, U256::from(10_000_000)).account_code(CALLEE, code)
+}
+
+/// The two records a value call's start makes cost more than a caller under roughly 450,000 gas
+/// keeps after the sixty-fourth it may not forward. Such a caller pays for none of them by
+/// halting: the frame it was starting does not run.
+#[test]
+fn test_a_call_whose_caller_cannot_pay_its_records_starts_no_frame() {
+    if runs_at_measurement_prices() {
+        return;
+    }
+    let code = transfers_everything_to(CONTRACT);
+    let short = execute(caller_running(code.clone()), call(CALLER, CALLEE, U256::ZERO, 600_000));
+    let ample = execute(caller_running(code), call(CALLER, CALLEE, U256::ZERO, 1_000_000));
+
+    assert!(!short.result.is_success(), "the caller halts rather than starting the frame");
+    assert_eq!(short.usage.write_records, 0, "the frame that never ran wrote nothing");
+    assert_eq!(short.gas.history, body(0), "and the transaction pays for its body alone");
+
+    assert!(ample.result.is_success(), "{:?}", ample.result);
+    assert_eq!(ample.usage.write_records, 2, "the caller's account and the recipient's");
+    assert_eq!(ample.gas.history, body(0) + 2 * WRITE_RECORD_SIZE * CPHB);
+}
+
+/// The same for a creation, whose start records the created account and the creator's nonce.
+#[test]
+fn test_a_creation_whose_creator_cannot_pay_its_records_starts_no_frame() {
+    if runs_at_measurement_prices() {
+        return;
+    }
+    let code = creates_everything();
+    let short = execute(caller_running(code.clone()), call(CALLER, CALLEE, U256::ZERO, 600_000));
+    let ample = execute(caller_running(code), call(CALLER, CALLEE, U256::ZERO, 1_000_000));
+
+    assert!(!short.result.is_success(), "the creator halts rather than starting the creation");
+    assert_eq!(short.usage.write_records, 0, "the creation that never ran wrote nothing");
+    assert_eq!(short.gas.history, body(0), "and the transaction pays for its body alone");
+
+    assert!(ample.result.is_success(), "{:?}", ample.result);
+    assert_eq!(ample.usage.write_records, 2, "the created account and the creator's nonce");
+    assert_eq!(ample.gas.history, body(0) + 2 * WRITE_RECORD_SIZE * CPHB);
+}
+
+/// Whether a write record is paid for may not depend on how much gas its frame's caller had
+/// left. Across the gas limits that straddle the point where a caller can no longer pay for the
+/// records of the frame it starts, the history a transaction pays beyond its body is exactly the
+/// records it kept.
+#[test]
+fn test_no_gas_limit_buys_a_write_record_for_nothing() {
+    if runs_at_measurement_prices() {
+        return;
+    }
+    for code in [transfers_everything_to(CONTRACT), creates_everything()] {
+        for limit in [300_000, 400_000, 600_000, 800_000, 1_000_000, 5_000_000] {
+            let outcome =
+                execute(caller_running(code.clone()), call(CALLER, CALLEE, U256::ZERO, limit));
+            assert_eq!(
+                outcome.gas.history,
+                body(0) + outcome.usage.write_records * WRITE_RECORD_SIZE * CPHB,
+                "at a {limit} gas limit: the records kept are the history paid",
+            );
+        }
+    }
 }
 
 /* ---------- the writes every transaction makes ---------- */

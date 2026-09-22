@@ -28,7 +28,8 @@
 //! allowance is free for what the recipient does. What the frame does not keep goes back to the
 //! caller when it returns. The frame the opcode is suspending on carries the caller's reservoir,
 //! which the charge has just moved, so the wrapper writes the reservoir it left into the frame's
-//! input.
+//! input; and a caller that cannot pay the charge drops that frame before it fails, because an
+//! interpreter halts on an instruction's error only when no frame is pending.
 //!
 //! A wrapper keeps the static gas revm's table charges for its opcode, so the gas schedule is
 //! unchanged.
@@ -215,7 +216,8 @@ fn selfdestruct<DB: Database, ExtEnvs: ExternalEnvTypes>(
 /// The charge is made after revm's instruction has computed the gas it forwards, so it comes out
 /// of what the caller kept rather than out of what the callee gets. An opcode that starts no
 /// frame — a call the balance cannot fund, a creation the depth refuses — makes no records and is
-/// charged nothing. A charge the frame cannot pay is an ordinary out-of-gas.
+/// charged nothing. A charge the caller cannot pay fails the opcode with an out-of-gas, which
+/// takes the frame the opcode was suspending on with it ([`abandon_frame`]).
 ///
 /// The frame inherits the reservoir the charge left, not the one the caller held before it
 /// ([`inherit_reservoir`]).
@@ -240,15 +242,29 @@ fn charge_frame_start<DB: Database, ExtEnvs: ExternalEnvTypes>(
         write_record_history_gas(records.on_lane),
         write_record_history_gas(u64::from(records.caller)),
     ) else {
-        return Err(InstructionResult::OutOfGas);
+        return Err(abandon_frame(interpreter));
     };
-    let Some(cost) = on_lane.checked_add(caller) else { return Err(InstructionResult::OutOfGas) };
+    let Some(cost) = on_lane.checked_add(caller) else { return Err(abandon_frame(interpreter)) };
     if !interpreter.gas.record_history_cost(cost) {
-        return Err(InstructionResult::OutOfGas);
+        return Err(abandon_frame(interpreter));
     }
     inherit_reservoir(interpreter);
     host.additional_limit.stage_frame_charge(on_lane, caller);
     result
+}
+
+/// Fails the running opcode with an out-of-gas and drops the frame it was suspending on.
+///
+/// The four frame-starting opcodes set the frame's input as the interpreter's action inside
+/// revm's instruction, before this wrapper runs. An interpreter halts on an instruction's error
+/// only when no action is pending, so a frame left pending here would start anyway — and make
+/// write records nobody paid for, at any gas limit at which the caller keeps less after the
+/// 63/64 forward than its records cost.
+#[cold]
+#[inline(never)]
+fn abandon_frame(interpreter: &mut Interpreter<EthInterpreter>) -> InstructionResult {
+    let _ = interpreter.take_next_action();
+    InstructionResult::OutOfGas
 }
 
 /// Hands the frame the running opcode is suspending on the reservoir its caller has now.
