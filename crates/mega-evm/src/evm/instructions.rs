@@ -1342,8 +1342,12 @@ pub mod volatile_data_ext {
     /// accept the revm 40 order; the full-history replay that gates a release is what proves no
     /// historical transaction sits in that window — and this check, compiled only under debug
     /// assertions, is the tripwire such a replay must run with: it fires exactly when a window
-    /// transaction is found, so the wrapper backfill archived for that case gets implemented
-    /// instead of the divergence going unnoticed.
+    /// transaction is found, so the divergence is fixed instead of going unnoticed. The fix it
+    /// calls for is a backfill at the halting exit: recompute the memory-expansion cost revm 27
+    /// charged before its load (zero for EXTCODECOPY, which charged nothing before loading) and,
+    /// when the frame's gas covered it — counting back the interpreter's static pre-charge —
+    /// mark beneficiary access as that load would have. The mark is idempotent, so a backfill
+    /// that turns out to be unnecessary costs nothing.
     ///
     /// The check over-approximates on purpose — it does not reconstruct how far revm 27 would
     /// have gotten — with one exception: a `MemoryOOG` halt is never routed here, because memory
@@ -1368,8 +1372,8 @@ pub mod volatile_data_ext {
             !hits_beneficiary,
             "frozen detention window hit: opcode 0x{opcode:02x} ran out of gas before loading \
              the beneficiary, which revm 27 marked (detaining the rest of the transaction). \
-             Replaying this transaction diverges from its historical execution; implement the \
-             wrapper backfill archived in REVM_40_REVIEW_GUIDE.md (wontfix #20)."
+             Replaying this transaction diverges from its historical execution; the mark has to \
+             be backfilled at this exit for frames whose gas covered revm 27's pre-load charge."
         );
     }
 
