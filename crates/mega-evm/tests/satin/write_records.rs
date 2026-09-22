@@ -11,7 +11,10 @@
 use alloy_primitives::{address, Address, Bytes, Log, LogData, B256, U256};
 use alloy_sol_types::SolCall;
 use mega_evm::{
-    system::{IMegaAccessControl, ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE},
+    system::{
+        IMegaAccessControl, IOracle, ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE,
+        ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE,
+    },
     test_utils::{BytecodeBuilder, MemoryDatabase},
     LimitUsage, MegaContext, MegaEvm, StagedRecord, WRITE_RECORD_SIZE,
 };
@@ -871,6 +874,11 @@ struct Paired {
     other_bytes: u64,
     /// The write records the transaction keeps, beyond the ones its body already carries.
     records: u64,
+    /// Data-size bytes that are not history: an Oracle hint's payload, which goes to the node's
+    /// oracle service rather than into a block. Zero for every case but the hint's.
+    hint_bytes: u64,
+    /// The block this case runs in, for a case whose beneficiary is the point of it.
+    beneficiary: Address,
 }
 
 /// A call to `MegaAccessControl` carrying one wei, which its interceptor refuses before a frame
@@ -899,6 +907,8 @@ fn paired_corpus() -> Vec<Paired> {
         tx,
         other_bytes,
         records,
+        hint_bytes: 0,
+        beneficiary: Address::ZERO,
     };
     let to_callee = |code: Bytes| funded().account_code(CALLEE, code);
     let plain = || call(CALLER, CALLEE, U256::ZERO, GAS_LIMIT);
@@ -1008,7 +1018,52 @@ fn paired_corpus() -> Vec<Paired> {
             0,
         ),
         case("a creation transaction", funded(), create(CALLER, Bytes::new(), GAS_LIMIT), 0, 1),
+        // The two cases where a transaction's data size and its history part company. Both are
+        // decisions, stated in the byte table; each is written out here with the number it pays.
+        Paired {
+            hint_bytes: send_hint(b"a hint the transaction pays data size for").len() as u64,
+            ..case(
+                "a transaction that sends an Oracle hint",
+                funded().account_code(ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE),
+                call_with_data(
+                    CALLER,
+                    ORACLE_CONTRACT_ADDRESS,
+                    send_hint(b"a hint the transaction pays data size for"),
+                    GAS_LIMIT,
+                ),
+                0,
+                0,
+            )
+        },
+        Paired {
+            beneficiary: CONTRACT,
+            ..case(
+                "a value transaction whose recipient is the block beneficiary",
+                MemoryDatabase::default().account_balance(CALLER, U256::from(10u64.pow(18))),
+                {
+                    // A fee the beneficiary is actually credited, so the account the transfer
+                    // records is one the body's five already bound.
+                    let mut tx = call(CALLER, CONTRACT, U256::from(1), GAS_LIMIT);
+                    tx.0.base.gas_price = 10;
+                    tx
+                },
+                0,
+                1,
+            )
+        },
     ]
+}
+
+/// The calldata of `sendHint(topic, data)`, whose payload the Oracle's interceptor counts on the
+/// transaction's data size before the contract's own bytecode runs.
+fn send_hint(data: &[u8]) -> Bytes {
+    Bytes::from(
+        IOracle::sendHintCall {
+            topic: B256::repeat_byte(0x7a),
+            data: Bytes::copy_from_slice(data),
+        }
+        .abi_encode(),
+    )
 }
 
 /// Every write a transaction keeps is one forty-byte record of history, and nothing it does not
@@ -1018,6 +1073,12 @@ fn paired_corpus() -> Vec<Paired> {
 /// This is the pairing itself. The layer counts the records and the engine charges for them at
 /// separate sites, on separate rules; the corpus holds the two to the same number, case by case,
 /// and to the number the case says.
+///
+/// The pairing is per record, and the last two cases are where a transaction's two totals part:
+/// an Oracle hint's payload is data size that is not history, and a transfer to the block
+/// beneficiary pays a record the transaction body's five already bound. Both are the byte table's
+/// decisions; each is written out with the number it costs so the divergence reads as intended
+/// rather than as a defect.
 #[test]
 fn test_every_kept_write_pays_one_record_of_history() {
     if crate::common::runs_at_measurement_prices() {
@@ -1025,7 +1086,13 @@ fn test_every_kept_write_pays_one_record_of_history() {
     }
     const CPHB: u64 = mega_evm::constants::COST_PER_HISTORY_BYTE;
     for case in paired_corpus() {
-        let outcome = crate::common::execute(case.db, case.tx.clone());
+        let ctx = context(case.db).with_block(revm::context::BlockEnv {
+            beneficiary: case.beneficiary,
+            ..crate::common::block()
+        });
+        let outcome = MegaEvm::new(ctx)
+            .execute_transaction(case.tx.clone())
+            .expect("the transaction is valid");
         let usage = outcome.usage;
         assert_eq!(usage.write_records, case.records, "{}: the records kept", case.name);
         let body = mega_evm::TX_BODY_SIZE + case.tx.0.base.data.len() as u64;
@@ -1033,8 +1100,8 @@ fn test_every_kept_write_pays_one_record_of_history() {
         assert_eq!(outcome.gas.history, expected, "{}: the history it pays", case.name);
         assert_eq!(
             usage.data_size,
-            case.other_bytes + case.records * WRITE_RECORD_SIZE,
-            "{}: the data size the limit counts is what history prices",
+            case.other_bytes + case.records * WRITE_RECORD_SIZE + case.hint_bytes,
+            "{}: the data size the limit counts",
             case.name,
         );
     }

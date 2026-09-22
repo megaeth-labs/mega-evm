@@ -50,7 +50,9 @@ pub(crate) enum RecordEffect {
 /// The history bytes a committed record appends, or takes back.
 ///
 /// They are the record's data size and nothing else: what a log or a write record weighs in a
-/// block is what the data-size limit meters it at, so the two cannot drift apart.
+/// block is what the data-size limit meters it at, so the two cannot drift apart. That is the
+/// pairing, and it holds per record; a transaction's two totals part where the byte table says
+/// they do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum HistoryBytes {
     /// Nothing to charge.

@@ -12,9 +12,20 @@
 //! # The byte table
 //!
 //! The sizes below are what one of those things weighs, and they are the whole byte table of the
-//! engine: the data-size limit meters a transaction against them and history gas prices the same
-//! counts, so a log costs history for exactly the bytes the limit counts it at. A mechanism that
-//! needs a size takes it from here rather than writing its own number.
+//! engine. The data-size limit meters a transaction against them and history gas prices the same
+//! counts, and the pairing is **per record**: a record's history bytes are its own data size, so
+//! a log costs history for exactly the bytes the limit counts it at. A mechanism that needs a
+//! size takes it from here rather than writing its own number.
+//!
+//! Per transaction the two totals are not the same number, and are not meant to be. Two sites
+//! part them, both by decision:
+//!
+//! - an Oracle hint's payload is data size the transaction counts and history it does not pay. The
+//!   bytes go to the node's oracle service, not into a block, so there is nothing to price;
+//! - [`TX_FIXED_WRITE_RECORDS`] is an upper bound on the accounts a transaction's inclusion writes,
+//!   and nothing checks afterwards which of them something else wrote again. A transfer whose
+//!   recipient is the block beneficiary or a fee vault pays a record the body already bound. It is
+//!   an over-charge, never an under-charge.
 
 mod frame_limit;
 #[allow(clippy::module_inception)]
