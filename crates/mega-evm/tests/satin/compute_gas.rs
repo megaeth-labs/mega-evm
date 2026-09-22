@@ -413,12 +413,14 @@ fn test_a_reverted_frame_s_computation_stays_on_the_figure() {
 /// same, whatever ran before it.
 #[test]
 fn test_each_transaction_computes_its_own() {
-    let db = funded().account_code(CALLEE, arithmetic(100));
-    let mut evm = MegaEvm::new(context(db));
-    let first = evm.execute_transaction(call(CALLER, CALLEE, U256::ZERO, GAS_LIMITS[0])).unwrap();
-    let second = evm.execute_transaction(call(CALLER, CALLEE, U256::ZERO, GAS_LIMITS[0])).unwrap();
-    assert!(first.result.is_success() && second.result.is_success());
-    assert_eq!(first.gas.regular, second.gas.regular);
+    for gas_limit in GAS_LIMITS {
+        let db = funded().account_code(CALLEE, arithmetic(100));
+        let mut evm = MegaEvm::new(context(db));
+        let first = evm.execute_transaction(call(CALLER, CALLEE, U256::ZERO, gas_limit)).unwrap();
+        let second = evm.execute_transaction(call(CALLER, CALLEE, U256::ZERO, gas_limit)).unwrap();
+        assert!(first.result.is_success() && second.result.is_success());
+        assert_eq!(first.gas.regular, second.gas.regular);
+    }
 }
 
 /// A loop of `iterations` turns, twenty-six gas a turn: `PUSH3 n; JUMPDEST; PUSH1 1; SWAP1; SUB;
