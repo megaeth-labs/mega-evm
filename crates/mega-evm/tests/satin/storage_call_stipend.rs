@@ -25,7 +25,8 @@ use mega_evm::{
     STORAGE_CALL_STIPEND_BYTES, TX_BODY_SIZE, WRITE_RECORD_SIZE,
 };
 use revm::bytecode::opcode::{
-    CALL, CALLCODE, DELEGATECALL, GAS, LOG3, POP, PUSH0, STATICCALL, STOP,
+    ADDRESS, CALL, CALLCODE, CALLDATASIZE, DELEGATECALL, GAS, ISZERO, JUMPDEST, JUMPI, LOG3, POP,
+    PUSH0, PUSH1, STATICCALL, STOP,
 };
 
 use crate::common::{call, context, runs_at_measurement_prices};
@@ -426,6 +427,89 @@ fn test_a_chain_of_transfers_grants_each_frame_its_own_allowance() {
         outcome.gas.history,
         body() + 3 * record(),
         "the transfers' account writes, and no event on any ledger",
+    );
+}
+
+/* ---------- how large the discount is ---------- */
+
+/// How many times the self-calling contract below repeats the grant.
+const GRANTS: u64 = 32;
+
+/// `CALLDATASIZE; ISZERO; JUMPI` to the loop, with the event on the fall-through path, and the
+/// loop calling this same address with one wei and one byte of calldata.
+///
+/// The entry frame is reached with empty calldata and runs the loop; each frame the loop starts
+/// is reached with one byte and runs the event.
+fn self_calling_loop() -> Bytes {
+    /// Bytes of the `CALLDATASIZE; ISZERO; PUSH1 <loop>; JUMPI` header.
+    const HEADER: usize = 5;
+
+    let event = event().append(STOP).build();
+    // The `JUMPDEST` the entry jumps to, past the header and the event.
+    let loop_start =
+        u8::try_from(HEADER + event.len()).expect("the header and one event fit in a byte");
+    let mut code: Vec<u8> =
+        vec![CALLDATASIZE, ISZERO, PUSH1, loop_start, JUMPI].into_iter().collect();
+    code.extend_from_slice(&event);
+    code.push(JUMPDEST);
+    assert_eq!(code[loop_start as usize], JUMPDEST);
+    for _ in 0..GRANTS {
+        // `CALL(GAS, ADDRESS, 1 wei, args = memory[0..1], ret = [])`, discarding the flag.
+        code.extend_from_slice(&[PUSH0, PUSH0, PUSH1, 1, PUSH0, PUSH1, 1, ADDRESS, GAS, CALL, POP]);
+    }
+    code.push(STOP);
+    Bytes::from(code)
+}
+
+/// How far a transaction's history gas can fall behind the bytes it appended, pinned as the known
+/// quantity it is.
+///
+/// The allowance is drawn before the frame's own gas rather than after it, so it is a discount on
+/// the first 160 bytes of every value-transferring call rather than a fallback for a frame that
+/// cannot pay. A contract that calls itself pays its own account's record once and nothing after
+/// that, so the grant is repeatable for as long as the transaction's gas lasts: the loop below
+/// costs about 10,000 gas a turn, which is some twenty thousand turns inside one transaction at
+/// the execution cap — around three megabytes of log bytes, and close to 280,000,000 of history
+/// gas, on no ledger.
+///
+/// The bytes are still counted on the data-size lane, so the limits that meter bytes see all of
+/// them; what falls behind is the history *gas* column. Whether the allowance becomes a fallback,
+/// or a block's history column becomes a byte count beside its gas figure, is a decision for the
+/// block-level accounting, not for this mechanism. This test exists so the size of the gap is a
+/// number on record rather than a rediscovery.
+#[test]
+fn test_the_gap_the_allowance_opens_between_bytes_and_gas_is_pinned() {
+    if runs_at_measurement_prices() {
+        return;
+    }
+    let db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(10u64.pow(18)))
+        .account_balance(SENDER, U256::from(10u64.pow(9)))
+        .account_code(SENDER, self_calling_loop());
+    let outcome = run(db, call(CALLER, SENDER, U256::ZERO, GAS_LIMIT));
+
+    assert!(outcome.result.is_success(), "{:?}", outcome.result);
+    assert_eq!(outcome.result.logs().len(), GRANTS as usize, "every frame emitted its event");
+    // A self-call writes no recipient, and the caller's own account is written once, so the whole
+    // loop leaves one record behind.
+    assert_eq!(outcome.usage.write_records, 1);
+    assert_eq!(
+        outcome.usage.data_size,
+        WRITE_RECORD_SIZE + GRANTS * STORAGE_CALL_STIPEND_BYTES,
+        "the record and every event's bytes are counted",
+    );
+    assert_eq!(
+        outcome.gas.history,
+        body() + record(),
+        "and the history gas is the body and that one record: no event is on it",
+    );
+
+    let bytes_appended = outcome.usage.data_size;
+    let bytes_paid_for = outcome.gas.history / COST_PER_HISTORY_BYTE - TX_BODY_SIZE;
+    assert_eq!(
+        bytes_appended - bytes_paid_for,
+        GRANTS * STORAGE_CALL_STIPEND_BYTES,
+        "one allowance per value call, and every one of them off the gas ledger",
     );
 }
 
