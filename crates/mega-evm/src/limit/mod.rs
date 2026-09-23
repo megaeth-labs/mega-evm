@@ -68,6 +68,7 @@ mod frame_limit;
 #[allow(clippy::module_inception)]
 mod limit;
 mod record;
+mod state_gas;
 
 pub use limit::AdditionalLimit;
 pub(crate) use record::HistoryBytes;
@@ -136,7 +137,7 @@ pub struct LimitUsage {
     pub write_records: u64,
 }
 
-/// Limits one transaction's data size and write records.
+/// Limits one transaction's data size, write records and state gas.
 ///
 /// [`tx_data_size_limit`](Self::tx_data_size_limit) and
 /// [`tx_kv_update_limit`](Self::tx_kv_update_limit) stop the transaction. A frame's own budget in
@@ -146,7 +147,10 @@ pub struct LimitUsage {
 ///
 /// [`frame_data_size_limit`](Self::frame_data_size_limit) and
 /// [`frame_kv_update_limit`](Self::frame_kv_update_limit) are a further cap on every frame's
-/// budget. Every limit is unlimited unless a caller sets it.
+/// budget.
+///
+/// [`tx_state_gas_limit`](Self::tx_state_gas_limit) holds the transaction's state gas and stops
+/// the transaction; it has no frame budget. Every limit is unlimited unless a caller sets it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct EvmTxRuntimeLimits {
     /// The most data-size bytes the transaction may keep. Crossing it stops the transaction.
@@ -160,6 +164,14 @@ pub struct EvmTxRuntimeLimits {
     /// A cap on every frame's write-record budget, applied after the share of what its parent has
     /// left. Crossing it reverts the frame alone.
     pub frame_kv_update_limit: u64,
+    /// The most EIP-8037 state gas the transaction may hold, net of what it refilled and of what
+    /// its failed frames rolled back: the limit on the state it grows. Crossing it stops the
+    /// transaction.
+    ///
+    /// It is a limit on gas, so it counts the state at the price the transaction pays for it: a
+    /// slot or an account in a crowded SALT bucket costs its bucket's multiple of the schedule's
+    /// entry, and reaches the limit that many times sooner.
+    pub tx_state_gas_limit: u64,
 }
 
 impl Default for EvmTxRuntimeLimits {
@@ -176,6 +188,7 @@ impl EvmTxRuntimeLimits {
             frame_data_size_limit: u64::MAX,
             tx_kv_update_limit: u64::MAX,
             frame_kv_update_limit: u64::MAX,
+            tx_state_gas_limit: u64::MAX,
         }
     }
 
@@ -200,6 +213,12 @@ impl EvmTxRuntimeLimits {
     /// Caps every frame's write-record budget at `limit`.
     pub const fn with_frame_kv_update_limit(mut self, limit: u64) -> Self {
         self.frame_kv_update_limit = limit;
+        self
+    }
+
+    /// Sets the transaction's state-gas limit: the most state gas it may hold.
+    pub const fn with_tx_state_gas_limit(mut self, limit: u64) -> Self {
+        self.tx_state_gas_limit = limit;
         self
     }
 
@@ -297,7 +316,9 @@ pub enum LimitKind {
     KVUpdate,
     /// Compute gas, the regular gas a transaction spends; capped by detention.
     ComputeGas,
-    /// Net new state; metered by the state-growth and KV limits.
+    /// Net new state, metered in EIP-8037 state gas by the state-gas limit: the `limit` of its
+    /// stop is the transaction's state-gas limit, in gas. The legacy engine counted the same
+    /// dimension in new accounts and slots.
     StateGrowth,
 }
 

@@ -39,7 +39,7 @@ use revm::{
     interpreter::{
         interpreter::EthInterpreter, interpreter_action::FrameInit, CallInput, CallInputs,
         CallScheme, CallValue, CreateInputs, CreateScheme, FrameInput, InitialAndFloorGas,
-        InstructionResult, InterpreterAction, SharedMemory,
+        InstructionResult, InterpreterAction, InterpreterResult, SharedMemory,
     },
     primitives::{Address, Bytes, TxKind, CALL_STACK_LIMIT},
     Inspector, Journal,
@@ -136,7 +136,8 @@ where
             evm.ctx().journal_mut().checkpoint_revert(checkpoint);
             return Ok(None);
         };
-        let authorities = record_applied_authorities(evm.ctx_mut(), checkpoint.journal_i);
+        let authorities =
+            record_applied_authorities(evm.ctx_mut(), checkpoint.journal_i, gas.state_gas_spent());
         if authorities.check.exceeded_limit() {
             evm.ctx().journal_mut().checkpoint_revert(checkpoint);
             *gas = gas_before;
@@ -229,15 +230,24 @@ where
     /// them would only matter to a gas limit that cannot pay them, which would then report an
     /// out-of-gas in place of the stop that bound first. The input carries no charged flag, so
     /// the stop's settlement gives nothing back that was not charged.
+    ///
+    /// Once revm has built the first frame, the state gas the transaction has been charged is all
+    /// it holds outside its frames: the account a deposit-like transaction creates for its caller,
+    /// the applied authorities, and the new account EIP-2780 charges the first frame's start for.
+    /// It is held to the state-gas limit there, and a crossing latches the transaction: the frame
+    /// is answered with the stop before it runs, and its settlement gives the start's charge back
+    /// as it does for any first frame that fails.
     fn first_frame_input(
         &mut self,
         evm: &mut Self::Evm,
         gas: &mut GasTracker,
     ) -> Result<Option<FrameInit>, Self::Error> {
-        if evm.ctx_ref().additional_limit.latched().is_none() {
-            return self.op.first_frame_input(evm, gas);
+        if evm.ctx_ref().additional_limit.latched().is_some() {
+            return Ok(Some(unbuilt_first_frame(evm.ctx_ref(), gas)));
         }
-        Ok(Some(unbuilt_first_frame(evm.ctx_ref(), gas)))
+        let frame = self.op.first_frame_input(evm, gas)?;
+        evm.ctx_mut().additional_limit.on_state_gas_before_frames(gas.state_gas_spent());
+        Ok(frame)
     }
 
     /// Settles the outermost frame: pops its lane and, when the transaction is latched, turns its
@@ -403,11 +413,21 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
     /// A frame answered before revm builds it gets an empty lane, so the lanes stay aligned with
     /// the results [`frame_return_result`](EvmTr::frame_return_result) pops. A creation answered
     /// with a stop still bumps its creator's nonce, as one that starts and reverts does.
+    ///
+    /// Before any of it, the state gas the caller holds is noted: the frame's lane counts it as
+    /// held outside the frame, for the state-gas limit to add to what the frame charges.
     #[inline]
     fn frame_init(
         &mut self,
         mut frame_init: FrameInit,
     ) -> Result<FrameInitResult<'_, Self::Frame>, ContextDbError<Self::Context>> {
+        // The state gas the caller holds is held outside the frame it starts. The caller is the
+        // frame on top of the stack, suspended on this frame's input; the transaction's own frame
+        // has none, and starts on what was charged before it.
+        if self.inner.frame_stack.index().is_some() {
+            let held = self.inner.frame_stack.get().interpreter.gas.state_gas_spent();
+            self.inner.ctx.additional_limit.note_caller_state_gas(held);
+        }
         if let Some(result) = answer_before_building(&mut self.inner.ctx, &frame_init)? {
             self.inner.ctx.additional_limit.push_empty_frame();
             return Ok(ItemOrResult::Result(result));
@@ -616,10 +636,11 @@ where
     }
 }
 
-/// Counts the bytecode a creation is about to deposit, and turns that return into the stop
-/// when the bytes cross a limit, before revm commits the creation.
+/// Holds the bytecode a creation is about to deposit to the limits, and turns that return into
+/// the stop when it crosses one, before revm commits the creation: first the state gas
+/// `return_create` will charge for the bytes, then the bytes themselves.
 ///
-/// Only code `return_create` would deposit is counted ([`deposits`]). Code it refuses fails the
+/// Only code `return_create` would deposit is held ([`deposits`]). Code it refuses fails the
 /// creation there, alone, and the chain keeps none of it. Counted, those bytes could cross the
 /// transaction's limit and stop every frame above a creation that fails by itself.
 fn meter_deployed_code<DB: Database, ExtEnvs: ExternalEnvTypes>(
@@ -630,11 +651,52 @@ fn meter_deployed_code<DB: Database, ExtEnvs: ExternalEnvTypes>(
     if frame.data.is_create() {
         if let InterpreterAction::Return(result) = &mut action {
             if deposits(ctx.cfg(), &result.output) {
+                hold_deposit_state_gas(ctx, frame.interpreter.input.target_address, result);
                 ctx.additional_limit.on_create_return(result);
             }
         }
     }
     action
+}
+
+/// Holds the state gas `return_create` is about to charge for the code a creation at `address`
+/// deposits to the state-gas limit, and turns the return into the stop when it crosses it.
+///
+/// A crossing after `return_create` would leave the code deployed: the charge is made inside it,
+/// after which it commits the creation's checkpoint. So the charge is priced here, through the
+/// same hook and for the same bytes, and held with what the creation already holds. Unlike every
+/// other state-gas site, the limit binds here before the charge is made, as the data-size limit
+/// does for the same bytes, so a creation that could not have paid for its code is stopped rather
+/// than run out of gas.
+///
+/// A return that is already a revert or a halt deposits nothing, and a schedule that prices
+/// deposited code at no state gas is not asked for a price, as `return_create` does not ask it.
+/// A lookup that fails is left to `return_create`, which asks the hook again and fails the same
+/// way.
+fn hold_deposit_state_gas<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    ctx: &mut MegaContext<DB, ExtEnvs>,
+    address: Address,
+    result: &mut InterpreterResult,
+) {
+    if !result.result.is_ok() {
+        return;
+    }
+    let bytes = result.output.len();
+    if ctx.cfg().gas_params().code_deposit_state_gas(bytes) == 0 {
+        return;
+    }
+    let charge = StateGasCharge::units(
+        GasId::code_deposit_state_gas(),
+        StateGasSite::account(address),
+        bytes as u64,
+    );
+    let Some(cost) = ctx.state_gas_charge(charge) else { return };
+    let running = result.gas.state_gas_spent().saturating_add_unsigned(cost);
+    let check = ctx.additional_limit.check_state_gas(running);
+    if check.exceeded_limit() {
+        result.result = InstructionResult::Revert;
+        result.output = check.revert_data();
+    }
 }
 
 /// Whether `return_create` deposits `code` a creation returns, as far as the code decides it:
@@ -852,9 +914,14 @@ fn account_nonce<DB: Database, ExtEnvs: ExternalEnvTypes>(
 /// `journal_i`: each applied authorization bumps its authority's nonce once, so the distinct
 /// authorities other than the sender are the accounts written. The sender's write is part of the
 /// transaction body.
+///
+/// `state_gas` is what the transaction has been charged before its first frame, the authorities'
+/// new accounts and delegations included, which the state-gas limit holds before the records are
+/// counted.
 fn record_applied_authorities<DB: Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &mut MegaContext<DB, ExtEnvs>,
     journal_i: usize,
+    state_gas: i64,
 ) -> AppliedAuthorities {
     if ctx.tx().tx_type() != TransactionType::Eip7702 {
         return AppliedAuthorities { check: LimitCheck::WithinLimit, applied: 0 };
@@ -873,8 +940,12 @@ fn record_applied_authorities<DB: Database, ExtEnvs: ExternalEnvTypes>(
     let target_is_authority =
         target.is_some_and(|target| authorities.binary_search(&target).is_ok());
     let applied = authorities.len() as u64;
-    let check =
-        ctx.additional_limit.record_applied_authorities(caller, applied, target_is_authority);
+    let check = ctx.additional_limit.record_applied_authorities(
+        caller,
+        applied,
+        target_is_authority,
+        state_gas,
+    );
     AppliedAuthorities { check, applied: if check.exceeded_limit() { 0 } else { applied } }
 }
 

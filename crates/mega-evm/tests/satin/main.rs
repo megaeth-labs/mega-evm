@@ -25,6 +25,7 @@ mod salt_failure;
 mod salt_refund;
 mod schedule;
 mod state;
+mod state_gas_limit;
 mod static_callee;
 mod storage_call_stipend;
 mod strategic_stop;

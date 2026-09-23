@@ -9,6 +9,7 @@ use revm::{
 use super::{
     frame_limit::{FrameLimitTracker, Lane},
     record::{HistoryBytes, RecordEffect, StagedRecord},
+    state_gas::StateGasMeter,
     EvmTxRuntimeLimits, LimitCheck, LimitKind, LimitUsage, FRAME_DATA_SHARE_DENOMINATOR,
     FRAME_DATA_SHARE_NUMERATOR, WRITE_RECORD, WRITE_RECORD_SIZE,
 };
@@ -74,6 +75,8 @@ pub struct AdditionalLimit {
     history_gas_spent: u64,
     /// The history bytes the settled transaction appended.
     history_bytes: u64,
+    /// The state gas the transaction holds outside the running frame, for the state-gas limit.
+    state_gas: StateGasMeter,
 }
 
 impl AdditionalLimit {
@@ -108,6 +111,7 @@ impl AdditionalLimit {
         self.pending_frame_charge = FrameCharge::NONE;
         self.history_gas_spent = 0;
         self.history_bytes = 0;
+        self.state_gas.reset();
     }
 
     /* The latch */
@@ -359,18 +363,24 @@ impl AdditionalLimit {
 
     /// Records the account writes of the applied EIP-7702 authorities other than the sender:
     /// `authorities` distinct accounts, `target_is_authority` if the transaction's call target is
-    /// one of them, from the transaction's `sender`.
+    /// one of them, from the transaction's `sender`, which has been charged `state_gas` so far.
     ///
-    /// The limit is checked before the records are made: a crossing latches the transaction and
-    /// records nothing, and the caller takes the authorizations back, so the writes the limit
-    /// guards never happen. The first frame is then answered with the stop without running.
+    /// The limits are checked before the records are made — the state gas the authorities were
+    /// charged first, then their records: a crossing latches the transaction and records nothing,
+    /// and the caller takes the authorizations back with the gas they charged, so the writes the
+    /// limit guards never happen. The first frame is then answered with the stop without running.
     pub(crate) fn record_applied_authorities(
         &mut self,
         sender: Address,
         authorities: u64,
         target_is_authority: bool,
+        state_gas: i64,
     ) -> LimitCheck {
         self.sender = sender;
+        let check = self.check_state_gas(state_gas);
+        if check.exceeded_limit() {
+            return check;
+        }
         let records = WRITE_RECORD.times(authorities);
         let used = self.tracker.net().saturating_add(records);
         if let Some((kind, limit, used)) = used.crossing(self.limits.tx_usage_limit()) {
@@ -379,6 +389,40 @@ impl AdditionalLimit {
         self.target_is_authority = target_is_authority;
         self.tracker.record(records);
         LimitCheck::WithinLimit
+    }
+
+    /* The state-gas limit */
+
+    /// Holds the state gas the transaction holds to its limit, the running frame — or, outside
+    /// any frame, the transaction — holding `running`, and latches the transaction when it is
+    /// crossed.
+    ///
+    /// Called where state gas has just been charged, so a charge the frame could not pay is an
+    /// out-of-gas whatever the limit: the limit holds what was paid. What a frame refilled, and
+    /// what a failed frame rolled back, is out of what it holds, so a write taken back gives its
+    /// room back.
+    pub(crate) fn check_state_gas(&mut self, running: i64) -> LimitCheck {
+        debug_assert_eq!(self.state_gas.depth(), self.tracker.depth(), "one entry per lane");
+        let used = self.state_gas.held(running);
+        let limit = self.limits.tx_state_gas_limit;
+        if used > limit {
+            return self.latch(LimitKind::StateGrowth, limit, used);
+        }
+        LimitCheck::WithinLimit
+    }
+
+    /// Records the state gas the transaction was charged before its first frame, `spent`, and
+    /// holds it to the limit. A crossing latches the transaction, and its first frame is answered
+    /// with the stop before it is built.
+    pub(crate) fn on_state_gas_before_frames(&mut self, spent: i64) {
+        self.state_gas.set_before_frames(spent);
+        self.check_state_gas(spent);
+    }
+
+    /// Records the state gas `held` by the frame that is starting the next one, which the next
+    /// frame counts as held outside it.
+    pub(crate) const fn note_caller_state_gas(&mut self, held: i64) {
+        self.state_gas.note_caller(held);
     }
 
     /* Frame lanes */
@@ -476,6 +520,7 @@ impl AdditionalLimit {
     }
 
     fn push_lane(&mut self, input: &FrameInput, depth: usize) {
+        self.state_gas.push();
         let budget = self.frame_budget();
         // What the caller paid for these records at its opcode. The transaction's own frame has
         // no such caller: its record is charged before execution and given back by the settlement
@@ -594,6 +639,7 @@ impl AdditionalLimit {
     /// the lane and comes back when it is popped, whatever the answer was.
     pub(crate) fn push_empty_frame(&mut self) {
         self.frame_began = true;
+        self.state_gas.push();
         let charge = core::mem::replace(&mut self.pending_frame_charge, FrameCharge::NONE);
         self.tracker.push(Lane::empty(charge.on_lane.saturating_add(charge.caller)));
     }
@@ -622,6 +668,7 @@ impl AdditionalLimit {
         self.pending_frame_charge = FrameCharge::NONE;
         let success = result.instruction_result().is_ok();
         let refund = self.tracker.pop(success).map_or(0, |lane| lane.history_refund(success));
+        self.state_gas.pop();
         let check = self.check();
         self.resume_stop = check.exceeded_limit().then_some(check);
         refund
