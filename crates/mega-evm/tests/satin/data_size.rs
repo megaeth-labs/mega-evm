@@ -671,3 +671,143 @@ fn test_whichever_of_gas_and_data_size_binds_first_is_reported() {
     assert_eq!(counted_at, FRESH_SLOT_COUNTED_AT);
     assert_eq!(record_history, WRITE_RECORD_SIZE * mega_evm::constants::COST_PER_HISTORY_BYTE);
 }
+
+/* ---------- a body over the limit, at the smallest gas limit validation accepts ---------- */
+
+/// A fresh account nobody has touched.
+const FRESH: Address = address!("0000000000000000000000000000000000300005");
+
+/// The account an EIP-7702 authorization of [`authorizing_call`] delegates.
+const AUTHORITY: Address = address!("0000000000000000000000000000000000300006");
+
+/// A type-4 call from `CALLER` to `A`, carrying one authorization of [`AUTHORITY`] to `B`.
+fn authorizing_call(gas_limit: u64) -> mega_evm::MegaTransaction {
+    use revm::{
+        context::{transaction::TransactionType, TxEnv},
+        context_interface::{
+            either::Either,
+            transaction::{Authorization, RecoveredAuthority, RecoveredAuthorization},
+        },
+    };
+    let authorization = Either::Right(RecoveredAuthorization::new_unchecked(
+        Authorization { chain_id: U256::ZERO, address: B, nonce: 0 },
+        RecoveredAuthority::Valid(AUTHORITY),
+    ));
+    alloy_op_evm::OpTx(mega_evm::test_utils::op_transaction(TxEnv {
+        tx_type: TransactionType::Eip7702 as u8,
+        caller: CALLER,
+        kind: alloy_primitives::TxKind::Call(A),
+        gas_limit,
+        gas_priority_fee: Some(0),
+        authorization_list: vec![authorization],
+        ..Default::default()
+    }))
+}
+
+/// Runs `tx` over [`funded`] under a transaction data-size limit of `limit`; `None` when
+/// validation rejects it.
+fn outcome_at(tx: mega_evm::MegaTransaction, limit: u64) -> Option<MegaTransactionOutcome> {
+    MegaEvm::new(
+        context(funded())
+            .with_tx_runtime_limits(EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(limit)),
+    )
+    .execute_transaction(tx)
+    .ok()
+}
+
+/// The smallest gas limit at which `accepted` holds, knowing it holds at `high` and at every
+/// limit above the smallest.
+fn smallest_gas_limit(high: u64, accepted: impl Fn(u64) -> bool) -> u64 {
+    assert!(accepted(high), "the high bound must be accepted");
+    let (mut low, mut high) = (0_u64, high);
+    while low + 1 < high {
+        let middle = low + (high - low) / 2;
+        if accepted(middle) {
+            high = middle;
+        } else {
+            low = middle;
+        }
+    }
+    high
+}
+
+/// A body over the limit is the stop at every gas limit validation accepts.
+///
+/// A gas limit that covers the intrinsic cost and no more cannot pay what the transaction's start
+/// costs past it: the account a value transfer or a creation adds, the write record of it, and an
+/// authorization's delegation. Without a limit, each of these transactions runs out of gas there,
+/// before its first frame. With the body over the limit none of those writes is made — the first
+/// frame is answered with the stop — so none is charged, and the transaction reports the stop that
+/// bound first. It pays its intrinsic cost and nothing else.
+#[test]
+fn test_a_body_over_the_limit_is_the_stop_at_the_smallest_valid_gas_limit() {
+    type Tx = fn(u64) -> mega_evm::MegaTransaction;
+    let cases: [(&str, Tx, u64); 3] = [
+        ("a value transfer to a fresh account", |gas| call(CALLER, FRESH, U256::from(1), gas), 0),
+        ("a creation", |gas| create(CALLER, constructor_returning(1), gas), 12),
+        ("an authorization", authorizing_call, mega_evm::AUTHORIZATION_SIZE),
+    ];
+    assert_eq!(constructor_returning(1).len(), 12);
+    for (name, tx, extra) in cases {
+        let body = mega_evm::TX_BODY_SIZE + extra;
+        let limit = body - 1;
+        let valid = smallest_gas_limit(GAS_LIMIT, |gas| outcome_at(tx(gas), u64::MAX).is_some());
+        assert_eq!(
+            smallest_gas_limit(GAS_LIMIT, |gas| outcome_at(tx(gas), limit).is_some()),
+            valid,
+            "{name}: the limit does not move validation"
+        );
+
+        let unlimited = outcome_at(tx(valid), u64::MAX).unwrap();
+        assert!(
+            matches!(
+                unlimited.result,
+                ExecutionResult::Halt { reason: MegaHaltReason::Base(HaltReason::OutOfGas(_)), .. }
+            ),
+            "{name}: without a limit the start runs out of gas, got {:?}",
+            unlimited.result
+        );
+
+        let stopped = outcome_at(tx(valid), limit).unwrap();
+        assert_stopped(&stopped, limit, body);
+        assert_eq!(stopped.usage, LimitUsage { data_size: body, write_records: 0 }, "{name}");
+        assert_eq!(stopped.result.gas().tx_gas_used(), valid, "{name}: the intrinsic cost only");
+
+        // A gas limit above the smallest one pays the same: nothing past the intrinsic cost is
+        // charged, so nothing is burnt either.
+        let above = outcome_at(tx(valid + 10_000), limit).unwrap();
+        assert_stopped(&above, limit, body);
+        assert_eq!(above.result.gas().tx_gas_used(), valid, "{name}: the stop burns nothing");
+    }
+}
+
+/// A creation transaction stopped at the smallest gas limit validation accepts still bumps its
+/// sender's nonce, and an authorization its body carried is not applied.
+#[test]
+fn test_a_stopped_start_bumps_a_creators_nonce_and_applies_no_authorization() {
+    let init = constructor_returning(1);
+    let limit = mega_evm::TX_BODY_SIZE + init.len() as u64 - 1;
+    let valid = smallest_gas_limit(GAS_LIMIT, |gas| {
+        outcome_at(create(CALLER, init.clone(), gas), limit).is_some()
+    });
+    let stopped = outcome_at(create(CALLER, init, valid), limit).unwrap();
+    assert!(stopped.limit_exceeded.is_some(), "{:?}", stopped.result);
+    assert_eq!(stopped.state[&CALLER].info.nonce, 1, "the sender's nonce is bumped");
+    assert!(stopped
+        .state
+        .get(&CALLER.create(0))
+        .is_none_or(|account| account.info.is_empty_code_hash() && account.info.nonce == 0));
+
+    let limit = mega_evm::TX_BODY_SIZE + mega_evm::AUTHORIZATION_SIZE - 1;
+    let valid =
+        smallest_gas_limit(GAS_LIMIT, |gas| outcome_at(authorizing_call(gas), limit).is_some());
+    let stopped = outcome_at(authorizing_call(valid), limit).unwrap();
+    assert!(stopped.limit_exceeded.is_some(), "{:?}", stopped.result);
+    assert!(
+        stopped
+            .state
+            .get(&AUTHORITY)
+            .is_none_or(|a| a.info.nonce == 0 && a.info.is_empty_code_hash()),
+        "the delegation was not applied"
+    );
+}

@@ -556,8 +556,14 @@ impl AdditionalLimit {
     ///
     /// A transaction whose first frame never reached frame init ran out of gas in the runtime
     /// phase before it: the out-of-gas took back the authorizations applied before it, so their
-    /// records and any latch they set go too, and the halt stays a halt. The body is not one of
-    /// those records. It is put back after the reset.
+    /// records go too, and the halt stays a halt. The body is not one of those records. It is put
+    /// back after the reset.
+    ///
+    /// A latch goes with the reset. Only the body's can be set by then: authorities whose records
+    /// cross the limit are taken back before anything else is charged, and a latched transaction's
+    /// runtime phase charges nothing but the account a deposit-like transaction creates for its
+    /// caller. That account exists whatever the transaction does, so a transaction that cannot pay
+    /// for it is out of gas with or without a stop, and it reports the halt.
     pub(crate) fn on_last_frame_return(&mut self, result: &mut FrameResult) {
         if !self.frame_began {
             let body = self.body_bytes;

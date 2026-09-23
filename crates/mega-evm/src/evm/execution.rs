@@ -12,7 +12,7 @@ use op_revm::{
     handler::{IsTxError, OpHandler},
     OpHaltReason, OpTransactionError,
 };
-use std::vec::Vec;
+use std::{boxed::Box, vec::Vec};
 
 use alloy_evm::{precompiles::PrecompilesMap, Database};
 use revm::{
@@ -37,8 +37,9 @@ use revm::{
         InspectorEvmTr, InspectorHandler, JournalExt,
     },
     interpreter::{
-        interpreter::EthInterpreter, interpreter_action::FrameInit, CallScheme, FrameInput,
-        InitialAndFloorGas, InstructionResult, InterpreterAction,
+        interpreter::EthInterpreter, interpreter_action::FrameInit, CallInput, CallInputs,
+        CallScheme, CallValue, CreateInputs, CreateScheme, FrameInput, InitialAndFloorGas,
+        InstructionResult, InterpreterAction, SharedMemory,
     },
     primitives::{Address, Bytes, TxKind, CALL_STACK_LIMIT},
     Inspector, Journal,
@@ -109,6 +110,13 @@ where
     /// authority applies or does not, and whether the recipient is already written depends on the
     /// authorities that did. A transaction that cannot pay for them runs out of gas before its
     /// first frame, the way one that cannot pay its authorizations does.
+    ///
+    /// A transaction whose body crossed the data-size limit is latched before it runs, and its
+    /// first frame will be answered with the stop. Nothing after the caller's account is applied
+    /// or charged for it: the authorizations would be taken back, and the records made outside a
+    /// frame are records the limit rejects. So no charge made for them can run the transaction
+    /// out of gas, and the stop that bound first is what it reports. The caller's account is
+    /// charged all the same, because it exists whatever the transaction does.
     fn pre_execution(
         &self,
         evm: &mut Self::Evm,
@@ -119,6 +127,9 @@ where
         if self.deposit_creates_caller.get() && !charge_created_caller(evm.ctx_mut(), gas) {
             evm.ctx().journal_mut().checkpoint_revert(checkpoint);
             return Ok(None);
+        }
+        if evm.ctx_ref().additional_limit.latched().is_some() {
+            return Ok(Some(PreExecutionOutput { eip7702_refund: 0, checkpoint }));
         }
         let gas_before = *gas;
         let Some(eip7702_refund) = self.apply_eip7702_auth_list(evm, gas)? else {
@@ -205,6 +216,26 @@ where
         gas.set_initial_state_gas(gas.initial_state_gas_final() + history);
         evm.ctx_mut().additional_limit.set_intrinsic_history_gas(history);
         Ok(gas)
+    }
+
+    /// revm's first frame, unless the transaction is already latched: then a frame input built on
+    /// what the transaction has left, with nothing charged for the frame's start.
+    ///
+    /// A latched transaction's first frame is answered with the stop before revm builds it, so it
+    /// makes none of the writes revm's EIP-2780 runtime charges price for its start — a value
+    /// recipient's new account, a created account — and reaches no delegation target. Charging
+    /// them would only matter to a gas limit that cannot pay them, which would then report an
+    /// out-of-gas in place of the stop that bound first. The input carries no charged flag, so
+    /// the stop's settlement gives nothing back that was not charged.
+    fn first_frame_input(
+        &mut self,
+        evm: &mut Self::Evm,
+        gas: &mut GasTracker,
+    ) -> Result<Option<FrameInit>, Self::Error> {
+        if evm.ctx_ref().additional_limit.latched().is_none() {
+            return self.op.first_frame_input(evm, gas);
+        }
+        Ok(Some(unbuilt_first_frame(evm.ctx_ref(), gas)))
     }
 
     /// Settles the outermost frame: pops its lane and, when the transaction is latched, turns its
@@ -724,6 +755,42 @@ fn tx_body_history_gas<DB: Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &MegaContext<DB, ExtEnvs>,
 ) -> u64 {
     history_gas(transaction_body_bytes(ctx.tx())).unwrap_or(u64::MAX)
+}
+
+/// The first frame of a latched transaction: the transaction's call or creation on the gas it
+/// has left, for the frame the latch answers with the stop.
+///
+/// Nothing is loaded and nothing is charged. The frame is never built, so its code is never read.
+fn unbuilt_first_frame<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    ctx: &MegaContext<DB, ExtEnvs>,
+    gas: &GasTracker,
+) -> FrameInit {
+    let tx = ctx.tx();
+    let frame_input = match tx.kind() {
+        TxKind::Call(target_address) => FrameInput::Call(Box::new(CallInputs {
+            input: CallInput::Bytes(tx.input().clone()),
+            return_memory_offset: 0..0,
+            gas_limit: gas.remaining(),
+            reservoir: gas.reservoir(),
+            bytecode_address: target_address,
+            known_bytecode: Default::default(),
+            target_address,
+            caller: tx.caller(),
+            value: CallValue::Transfer(tx.value()),
+            scheme: CallScheme::Call,
+            is_static: false,
+            charged_new_account_state_gas: false,
+        })),
+        TxKind::Create => FrameInput::Create(Box::new(CreateInputs::new(
+            tx.caller(),
+            CreateScheme::Create,
+            tx.value(),
+            tx.input().clone(),
+            gas.remaining(),
+            gas.reservoir(),
+        ))),
+    };
+    FrameInit { depth: 0, memory: SharedMemory::new(), frame_input }
 }
 
 /// Whether executing this transaction creates its caller's account: a deposit-like transaction
