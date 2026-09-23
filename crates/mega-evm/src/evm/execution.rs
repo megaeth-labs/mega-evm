@@ -18,7 +18,7 @@ use alloy_evm::{precompiles::PrecompilesMap, Database};
 use revm::{
     context::{
         result::{FromStringError, InvalidTransaction, ResultGas},
-        transaction::{AccessListItemTr, TransactionType},
+        transaction::TransactionType,
         ContextError, ContextTr, FrameStack, JournalTr, Transaction,
     },
     context_interface::{
@@ -45,7 +45,7 @@ use revm::{
 };
 
 use crate::{
-    evm::{history::tx_body_history_bytes, inspector::frame_end_checked},
+    evm::{history::transaction_body_bytes, inspector::frame_end_checked},
     history_gas, synthetic_frame_result,
     system::{is_deposit_like_transaction, MEGA_SYSTEM_ADDRESS},
     write_record_history_gas, ExternalEnvTypes, JournalInspectTr, LimitCheck, MegaContext, MegaEvm,
@@ -433,6 +433,8 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
                 ctx,
             ),
         };
+        // Before `return_create` commits a successful creation. See `on_create_return`.
+        let action = meter_deployed_code(ctx, frame, action);
         frame.process_next_action(ctx, action).inspect(|next| {
             if next.is_result() {
                 frame.set_finished(true);
@@ -566,6 +568,8 @@ where
                 instructions.gas_table(),
             ),
         };
+        // The inspected path commits a creation through the same `return_create`.
+        let action = meter_deployed_code(ctx, frame, action);
         let mut next = frame.process_next_action(ctx, action);
         if let Ok(ItemOrResult::Result(result)) = &mut next {
             frame_end_checked(ctx, inspector, &frame.input, result);
@@ -573,6 +577,21 @@ where
         }
         next
     }
+}
+
+/// Counts the bytecode a creation is about to deposit, and turns that return into the stop
+/// when the bytes cross a limit, before revm commits the creation.
+fn meter_deployed_code<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    ctx: &mut MegaContext<DB, ExtEnvs>,
+    frame: &EthFrame<EthInterpreter>,
+    mut action: InterpreterAction,
+) -> InterpreterAction {
+    if frame.data.is_create() {
+        if let InterpreterAction::Return(result) = &mut action {
+            ctx.additional_limit.on_create_return(result);
+        }
+    }
+    action
 }
 
 /// The action of a frame about to run: the latched stop, returned without running an
@@ -704,22 +723,7 @@ fn inspect_logs<DB: Database, ExtEnvs: ExternalEnvTypes, INSP>(
 fn tx_body_history_gas<DB: Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &MegaContext<DB, ExtEnvs>,
 ) -> u64 {
-    let tx = ctx.tx();
-    let (addresses, slots) = tx
-        .access_list()
-        .map(|items| {
-            items.fold((0_u64, 0_u64), |(addresses, slots), item| {
-                (addresses + 1, slots + item.storage_slots().count() as u64)
-            })
-        })
-        .unwrap_or_default();
-    let bytes = tx_body_history_bytes(
-        tx.input().len() as u64,
-        tx.authorization_list_len() as u64,
-        addresses,
-        slots,
-    );
-    history_gas(bytes).unwrap_or(u64::MAX)
+    history_gas(transaction_body_bytes(ctx.tx())).unwrap_or(u64::MAX)
 }
 
 /// Whether executing this transaction creates its caller's account: a deposit-like transaction

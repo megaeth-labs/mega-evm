@@ -3,7 +3,7 @@
 use alloy_primitives::Address;
 use revm::{
     handler::FrameResult,
-    interpreter::{CallInputs, CallScheme, FrameInput, InstructionResult},
+    interpreter::{CallInputs, CallScheme, FrameInput, InstructionResult, InterpreterResult},
 };
 
 use super::{
@@ -47,8 +47,12 @@ pub struct AdditionalLimit {
     /// running as the sender never records it.
     sender: Address,
     /// Whether the transaction's first frame reached frame init. When it did not, the runtime
-    /// phase before it ran out of gas and took back everything counted before it.
+    /// phase before it ran out of gas and took back the authorizations applied before it. The
+    /// body stays; see [`on_last_frame_return`](Self::on_last_frame_return).
     frame_began: bool,
+    /// Data-size bytes of the transaction's body. Recorded before any frame and kept on every
+    /// path, including an out-of-gas before the first frame, which clears the rest of the tracker.
+    body_bytes: u64,
     /// The history gas validation charged for the transaction's body, part of
     /// [`history_gas_spent`](Self::history_gas_spent).
     intrinsic_history_gas: u64,
@@ -87,6 +91,7 @@ impl AdditionalLimit {
         self.target_is_authority = false;
         self.sender = Address::ZERO;
         self.frame_began = false;
+        self.body_bytes = 0;
         self.intrinsic_history_gas = 0;
         self.top_level_write_record_gas = 0;
         self.pending_frame_charge = FrameCharge::NONE;
@@ -275,6 +280,21 @@ impl AdditionalLimit {
 
     /* Transaction-level records */
 
+    /// Counts the transaction's body: its envelope, the writes its inclusion makes, its calldata,
+    /// its authorizations and its access list.
+    ///
+    /// The bytes are the transaction's, recorded before any frame, so a revert does not take them
+    /// back, and neither does an out-of-gas before the first frame. A body that crosses the
+    /// transaction limit latches it, and the first frame is then answered with the stop.
+    pub(crate) fn record_tx_body(&mut self, bytes: u64) -> LimitCheck {
+        self.body_bytes = bytes;
+        if bytes == 0 {
+            return LimitCheck::WithinLimit;
+        }
+        self.tracker.record_tx(LimitUsage { data_size: bytes, write_records: 0 });
+        self.check()
+    }
+
     /// Counts the `bytes` of an Oracle hint, the payload a `sendHint` call hands to the node's
     /// oracle service.
     ///
@@ -335,6 +355,36 @@ impl AdditionalLimit {
         }
         self.push_lane(input, depth);
         self.check()
+    }
+
+    /// Counts the code a creation is about to deposit, on the creation's own lane, and turns the
+    /// return into the stop when that crosses a limit.
+    ///
+    /// Called from the frame run, on a successful return, before revm's `return_create` commits
+    /// the creation's journal checkpoint. A rewrite after that commit would leave the code
+    /// deployed: the checkpoint is already gone, and flipping the frame result does not reopen
+    /// it. A stop here makes `return_create` revert the checkpoint instead, so the code is not
+    /// written. The bytes stay on the lane until the frame returns; a success merges them into
+    /// the caller, and the failure — the stop included — discards them.
+    ///
+    /// A return that is already a revert or a halt deposits nothing, and its output is the
+    /// revert data, not code. Empty code deposits nothing either.
+    pub(crate) fn on_create_return(&mut self, result: &mut InterpreterResult) {
+        if !result.result.is_ok() {
+            return;
+        }
+        let bytes = result.output.len() as u64;
+        if bytes == 0 {
+            return;
+        }
+        debug_assert!(self.tracker.current().is_some(), "a creation returns on its own lane");
+        self.tracker.record(LimitUsage { data_size: bytes, write_records: 0 });
+        let check = self.check();
+        if !check.exceeded_limit() {
+            return;
+        }
+        result.result = InstructionResult::Revert;
+        result.output = check.revert_data();
     }
 
     /// The data-size budget of the frame about to start.
@@ -506,11 +556,16 @@ impl AdditionalLimit {
     ///
     /// A transaction whose first frame never reached frame init ran out of gas in the runtime
     /// phase before it: the out-of-gas took back the authorizations applied before it, so their
-    /// records and any latch they set go too, and the halt stays a halt.
+    /// records and any latch they set go too, and the halt stays a halt. The body is not one of
+    /// those records. It is put back after the reset.
     pub(crate) fn on_last_frame_return(&mut self, result: &mut FrameResult) {
         if !self.frame_began {
+            let body = self.body_bytes;
             self.tracker.reset();
             self.latched = None;
+            if body > 0 {
+                self.tracker.record_tx(LimitUsage { data_size: body, write_records: 0 });
+            }
             return;
         }
         debug_assert!(self.tracker.depth() <= 1, "only the outermost lane can be left");

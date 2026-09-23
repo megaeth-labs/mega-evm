@@ -16,6 +16,8 @@
 //! so revm charges it where it writes the code. The schedule gives that entry the cost of one byte
 //! (see the `schedule` module), which is what switches it on.
 
+use revm::context::{transaction::AccessListItemTr, Transaction};
+
 use crate::{
     evm::prices::active_satin_prices,
     limit::{
@@ -64,6 +66,27 @@ pub const STORAGE_CALL_STIPEND_BYTES: u64 = LOG_BASE_SIZE + 3 * LOG_TOPIC_SIZE +
 /// the transaction's gas paid it.
 pub fn storage_call_stipend() -> u64 {
     history_gas(STORAGE_CALL_STIPEND_BYTES).unwrap_or(u64::MAX)
+}
+
+/// The data-size bytes of `tx`'s body: the fixed body, the calldata, one record per EIP-7702
+/// authorization and the access list. The same count history gas prices.
+///
+/// A zero calldata byte counts the same as a non-zero one. The count saturates.
+pub fn transaction_body_bytes(tx: &impl Transaction) -> u64 {
+    let (addresses, slots) = tx
+        .access_list()
+        .map(|items| {
+            items.fold((0_u64, 0_u64), |(addresses, slots), item| {
+                (addresses + 1, slots + item.storage_slots().count() as u64)
+            })
+        })
+        .unwrap_or_default();
+    tx_body_history_bytes(
+        tx.input().len() as u64,
+        tx.authorization_list_len() as u64,
+        addresses,
+        slots,
+    )
 }
 
 /// The history bytes a transaction's body appends before it runs: the fixed body

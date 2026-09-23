@@ -14,7 +14,10 @@ use revm::{
 
 use crate::{
     constants,
-    evm::schedule::{satin_gas_params, satin_gas_params_history_exempt},
+    evm::{
+        history::transaction_body_bytes,
+        schedule::{satin_gas_params, satin_gas_params_history_exempt},
+    },
     system::{self, MEGA_SYSTEM_ADDRESS},
     AdditionalLimit, BlockHashRecord, BucketError, BucketMultipliers, EmptyExternalEnv,
     EvmTxRuntimeLimits, ExternalEnvTypes, ExternalEnvs, MegaSpecId, MegaTransaction, SaltEnv,
@@ -230,6 +233,9 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
         self.system_originated = system::is_system_originated(&self.inner.tx, MEGA_SYSTEM_ADDRESS);
         let exempt = self.inner.tx.tx_type() == DEPOSIT_TRANSACTION_TYPE || self.system_originated;
         self.set_history_exempt(exempt);
+        // The body is data size whether or not the transaction pays history for it. A deposit,
+        // a system transaction and a system call are exempt from the charge, not from the count.
+        self.additional_limit.record_tx_body(transaction_body_bytes(self.tx()));
     }
 
     /// Prepares the context for a system call. Every system-call entry point of

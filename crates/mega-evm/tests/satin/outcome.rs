@@ -59,7 +59,10 @@ fn test_outcome_reports_the_ledgers() {
         gas.reservoir_remaining,
         1_000_000_000 - TX_GAS_LIMIT_CAP - 2 * SLOT_STATE_GAS - gas.history,
     );
-    assert_eq!(outcome.usage, LimitUsage { data_size: 2 * WRITE_RECORD_SIZE, write_records: 2 });
+    assert_eq!(
+        outcome.usage,
+        LimitUsage { data_size: TX_BODY_SIZE + 2 * WRITE_RECORD_SIZE, write_records: 2 }
+    );
     assert_eq!(outcome.limit_exceeded, None);
 
     let mut block = BlockGasCounters::default();
@@ -73,19 +76,26 @@ fn test_outcome_reports_the_ledgers() {
 /// A stopped transaction reports the stop.
 #[test]
 fn test_outcome_reports_the_stop() {
-    let outcome =
-        execute(writer(), EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(40), 1_000_000);
+    let outcome = execute(
+        writer(),
+        EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(TX_BODY_SIZE + 40),
+        1_000_000,
+    );
     assert!(!outcome.result.is_success());
     assert_eq!(
         outcome.limit_exceeded,
         Some(LimitCheck::ExceedsLimit {
             kind: LimitKind::DataSize,
-            limit: 40,
-            used: 80,
+            limit: TX_BODY_SIZE + 40,
+            used: TX_BODY_SIZE + 80,
             frame_local: false
         })
     );
-    assert_eq!(outcome.usage, LimitUsage::ZERO, "the stopped transaction keeps nothing");
+    assert_eq!(
+        outcome.usage,
+        LimitUsage { data_size: TX_BODY_SIZE, write_records: 0 },
+        "the stop drops the writes and keeps the body"
+    );
 }
 
 /// A contract reverting with `MegaLimitExceeded`'s bytes on its own is not a stop.

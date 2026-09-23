@@ -25,6 +25,16 @@ const TOPIC: B256 = B256::repeat_byte(0x7a);
 /// The hint the two data-size cases send, so the limit they set is the same number.
 const METERED_HINT: &[u8] = b"a hint the transaction is metered for";
 
+/// A top-level `sendHint`: the body counts the calldata, and the hint counts it again.
+fn top_level_hint(payload: u64) -> u64 {
+    mega_evm::TX_BODY_SIZE + payload + payload
+}
+
+/// A nested hint. The transaction's own calldata is empty, so only the body and the hint count.
+fn nested_hint(payload: u64) -> u64 {
+    mega_evm::TX_BODY_SIZE + payload
+}
+
 /// The calldata of `sendHint(TOPIC, data)`.
 fn send_hint(data: &[u8]) -> Bytes {
     Bytes::from(
@@ -87,14 +97,14 @@ fn test_the_hint_payload_is_counted_on_the_transaction() {
     let (_, hints, usage) =
         run_with_oracle(system_db(), call_tx(ORACLE_CONTRACT_ADDRESS, data.clone(), U256::ZERO));
     assert_eq!(hints.len(), 1);
-    assert_eq!(usage.data_size, data.len() as u64);
+    assert_eq!(usage.data_size, top_level_hint(data.len() as u64));
 
     // The same call with bytes the ABI decoder drops pays for them too.
     let padded: Vec<u8> = data.iter().copied().chain([0_u8; 64]).collect();
     let (_, hints, padded_usage) =
         run_with_oracle(system_db(), call_tx(ORACLE_CONTRACT_ADDRESS, &padded, U256::ZERO));
     assert_eq!(hints.len(), 1, "the trailing bytes do not stop the decoding");
-    assert_eq!(padded_usage.data_size, padded.len() as u64);
+    assert_eq!(padded_usage.data_size, top_level_hint(padded.len() as u64));
 }
 
 /// A payload that does not decode is paid for and forwards nothing.
@@ -105,7 +115,7 @@ fn test_a_malformed_payload_is_paid_for_and_not_forwarded() {
     let (_, hints, usage) =
         run_with_oracle(system_db(), call_tx(ORACLE_CONTRACT_ADDRESS, &data, U256::ZERO));
     assert!(hints.is_empty(), "a payload that does not decode carries no hint");
-    assert_eq!(usage.data_size, data.len() as u64);
+    assert_eq!(usage.data_size, top_level_hint(data.len() as u64));
 }
 
 /// A `STATICCALL` forwards the hint: `sendHint` is a view method.
@@ -133,7 +143,11 @@ fn test_a_value_bearing_call_forwards_nothing() {
     let (status, _) = crate::common::split_outcome(&outcome);
     assert!(!status, "the bytecode refuses the value");
     assert!(hints.is_empty());
-    assert_eq!(usage.data_size, 0, "nothing was materialised for a hint that is not forwarded");
+    assert_eq!(
+        usage.data_size,
+        nested_hint(0),
+        "nothing was materialised for a hint that is not forwarded"
+    );
 }
 
 /// A call forwarded no gas forwards nothing: it cannot run the contract either, so its hint
@@ -161,7 +175,7 @@ fn test_a_call_without_gas_forwards_nothing() {
 
     assert!(result.result.is_success(), "the caller survives the failed call");
     assert!(hints.is_empty());
-    assert_eq!(usage.data_size, 0);
+    assert_eq!(usage.data_size, nested_hint(0));
 }
 
 /// A call forwarded one gas does forward its hint, and the frame it was sent from then runs out
@@ -197,7 +211,7 @@ fn test_a_call_with_one_gas_forwards_the_hint_it_cannot_deliver() {
     let (status, _) = crate::common::split_outcome(&outcome);
     assert!(!status, "one gas does not run the contract's dispatcher");
     assert_eq!(hints.len(), 1, "the hint reached the service before the frame ran out of gas");
-    assert_eq!(usage.data_size, data.len() as u64, "and its bytes stay counted");
+    assert_eq!(usage.data_size, nested_hint(data.len() as u64), "and its bytes stay counted");
 }
 
 /// `CALLCODE` and `DELEGATECALL` never reach the interceptor, so they forward nothing.
@@ -209,7 +223,7 @@ fn test_callcode_and_delegatecall_forward_nothing() {
         let (_, hints, usage) =
             run_with_oracle(with_contract(code), call_tx(CONTRACT, [], U256::ZERO));
         assert!(hints.is_empty(), "scheme {scheme:#x} must not reach the interceptor");
-        assert_eq!(usage.data_size, 0);
+        assert_eq!(usage.data_size, nested_hint(0));
     }
 }
 
@@ -229,7 +243,7 @@ fn test_an_unknown_selector_runs_the_bytecode() {
         "the contract has no code to answer a selector it does not declare",
     );
     assert!(hints.is_empty());
-    assert_eq!(usage.data_size, 0);
+    assert_eq!(usage.data_size, mega_evm::TX_BODY_SIZE + 4);
 }
 
 /// Reading the Oracle's storage is not intercepted: `getSlot` runs the contract's code.
@@ -273,7 +287,7 @@ fn test_a_reverting_frame_does_not_take_the_hint_bytes_back() {
     assert_eq!(hints.len(), 1, "the hint reached the service before the revert");
     assert_eq!(
         usage.data_size,
-        data.len() as u64,
+        nested_hint(data.len() as u64),
         "the bytes stay counted: a revert cannot take the hint back",
     );
 }
@@ -287,7 +301,10 @@ fn test_a_reverting_frame_does_not_take_the_hint_bytes_back() {
 #[test]
 fn test_a_hint_that_crosses_the_data_size_limit_is_not_forwarded() {
     let data = send_hint(METERED_HINT);
-    let limit = data.len() as u64 - 1;
+    // The body already counts the calldata. The hint counts it again, and that second copy is
+    // the byte that crosses.
+    let counted = top_level_hint(data.len() as u64);
+    let limit = counted - 1;
     let (outcome, hints) = run_with_oracle_under(
         system_db(),
         call_tx(ORACLE_CONTRACT_ADDRESS, data.clone(), U256::ZERO),
@@ -296,8 +313,7 @@ fn test_a_hint_that_crosses_the_data_size_limit_is_not_forwarded() {
 
     assert!(hints.is_empty(), "the hint the transaction cannot pay for is not forwarded");
     assert_eq!(
-        outcome.usage.data_size,
-        data.len() as u64,
+        outcome.usage.data_size, counted,
         "the whole payload is counted: the count is what crossed the limit",
     );
     assert_eq!(
@@ -305,7 +321,7 @@ fn test_a_hint_that_crosses_the_data_size_limit_is_not_forwarded() {
         Some(LimitCheck::ExceedsLimit {
             kind: LimitKind::DataSize,
             limit,
-            used: data.len() as u64,
+            used: counted,
             frame_local: false,
         }),
     );
@@ -324,11 +340,11 @@ fn test_a_hint_at_the_data_size_limit_is_forwarded() {
     let (outcome, hints) = run_with_oracle_under(
         system_db(),
         call_tx(ORACLE_CONTRACT_ADDRESS, data.clone(), U256::ZERO),
-        EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(data.len() as u64),
+        EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(top_level_hint(data.len() as u64)),
     );
 
     assert!(outcome.result.is_success(), "{:?}", outcome.result);
     assert_eq!(hints.len(), 1);
-    assert_eq!(outcome.usage.data_size, data.len() as u64);
+    assert_eq!(outcome.usage.data_size, top_level_hint(data.len() as u64));
     assert_eq!(outcome.limit_exceeded, None);
 }

@@ -330,7 +330,8 @@ fn test_a_transaction_level_stop_does_not_hand_the_allowance_back() {
     let gas_limit = mega_evm::constants::TX_GAS_LIMIT_CAP + 50_000_000;
     // The sender's own event is larger than this on its own, so it crosses whatever the receiver
     // appended before it.
-    let limits = EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(400);
+    // 400 bytes above the body: the receiver's event fits, and the sender's log crosses.
+    let limits = EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(TX_BODY_SIZE + 400);
     let sender = call_with(CALL, RECEIVER, 1, TRANSFER_GAS)
         .push_number(1u64)
         .push_number(2u64)
@@ -495,8 +496,8 @@ fn test_the_gap_the_allowance_opens_between_bytes_and_gas_is_pinned() {
     assert_eq!(outcome.usage.write_records, 1);
     assert_eq!(
         outcome.usage.data_size,
-        WRITE_RECORD_SIZE + GRANTS * STORAGE_CALL_STIPEND_BYTES,
-        "the record and every event's bytes are counted",
+        TX_BODY_SIZE + WRITE_RECORD_SIZE + GRANTS * STORAGE_CALL_STIPEND_BYTES,
+        "the body, the record and every event's bytes are counted",
     );
     assert_eq!(
         outcome.gas.history,
@@ -505,7 +506,7 @@ fn test_the_gap_the_allowance_opens_between_bytes_and_gas_is_pinned() {
     );
 
     let bytes_appended = outcome.usage.data_size;
-    let bytes_paid_for = outcome.gas.history / COST_PER_HISTORY_BYTE - TX_BODY_SIZE;
+    let bytes_paid_for = outcome.gas.history / COST_PER_HISTORY_BYTE;
     assert_eq!(
         bytes_appended - bytes_paid_for,
         GRANTS * STORAGE_CALL_STIPEND_BYTES,
