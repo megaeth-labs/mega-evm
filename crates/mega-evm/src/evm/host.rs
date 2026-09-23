@@ -78,6 +78,8 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
     delegate! {
         to self.inner {
             fn chain_id(&self) -> U256;
+            // `DIFFICULTY` reads the randomness on every spec since the merge; see `prevrandao`.
+            fn difficulty(&self) -> U256;
             fn effective_gas_price(&self) -> U256;
             fn caller(&self) -> Address;
             fn blob_hash(&self, number: usize) -> Option<U256>;
@@ -111,14 +113,6 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
             return Default::default();
         }
         self.inner.gas_limit()
-    }
-
-    #[inline]
-    fn difficulty(&self) -> U256 {
-        if !self.read_block_env(VolatileDataAccess::DIFFICULTY) {
-            return Default::default();
-        }
-        self.inner.difficulty()
     }
 
     #[inline]

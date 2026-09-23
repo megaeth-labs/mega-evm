@@ -15,7 +15,7 @@ pub struct VolatileDataAccess(u16);
 
 impl VolatileDataAccess {
     /// The block number (`NUMBER`, and the `BLOCKHASH` that compares against it).
-    pub const BLOCK_NUMBER: Self = Self(1 << 0);
+    pub const BLOCK_NUMBER: Self = Self(1);
     /// The block timestamp (`TIMESTAMP`).
     pub const TIMESTAMP: Self = Self(1 << 1);
     /// The block beneficiary's address (`COINBASE`).

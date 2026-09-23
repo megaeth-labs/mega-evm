@@ -112,11 +112,11 @@ impl Detention {
         self.frames.clear();
     }
 
-    /// Turns detention off for every transaction: the neutral configuration.
+    /// Turns detention off for every transaction from the next one on: the neutral
+    /// configuration.
     #[cfg(any(test, feature = "test-utils"))]
     pub(crate) const fn set_neutral(&mut self, neutral: bool) {
         self.neutral = neutral;
-        self.detains &= !neutral;
     }
 
     /// Starts every transaction with volatile-data access switched off from `depth` down, as if
@@ -339,11 +339,10 @@ impl Detention {
 
     /// Switches volatile-data access off for the frame at `depth` and every frame below it. A
     /// switch already off from a shallower frame stays as it is.
+    ///
+    /// The frame that steers the switch reads it when it resumes, after the call that steered it.
     pub fn disable_access(&mut self, depth: usize) {
-        if self.disabled_from.is_none_or(|from| depth < from) {
-            self.disabled_from = Some(depth);
-        }
-        self.refusing = self.disabled_from.is_some_and(|from| depth >= from);
+        self.disabled_from = Some(self.disabled_from.map_or(depth, |from| from.min(depth)));
     }
 
     /// Switches volatile-data access back on for the frame at `depth`, and reports whether it
@@ -353,7 +352,6 @@ impl Detention {
             Some(from) if depth > from => false,
             _ => {
                 self.disabled_from = None;
-                self.refusing = false;
                 true
             }
         }
@@ -630,7 +628,11 @@ mod tests {
         detention.on_frame_suspend(&frame, 0);
         let mut child = gas(100_000, 0);
         detention.on_frame_run(&mut child, 1, 0);
+        detention.disable_access(2);
+        assert!(!detention.is_access_disabled(1));
         detention.disable_access(1);
+        assert!(!detention.is_refusing(), "the frame reads the switch when it resumes");
+        detention.on_frame_run(&mut child, 1, 0);
         assert!(detention.is_refusing());
         assert!(!detention.is_access_disabled(0));
         assert!(detention.is_access_disabled(1) && detention.is_access_disabled(2));
@@ -646,7 +648,10 @@ mod tests {
         assert!(!detention.is_refusing());
 
         detention.disable_access(0);
+        detention.on_frame_run(&mut frame, 0, 0);
+        assert!(detention.refuses(VolatileDataAccess::TIMESTAMP));
         assert!(detention.enable_access(0), "the frame that switched it off switches it on");
+        detention.on_frame_run(&mut frame, 0, 0);
         assert!(!detention.refuses(VolatileDataAccess::TIMESTAMP));
     }
 
