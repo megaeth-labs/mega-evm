@@ -247,7 +247,7 @@ pub struct BlockUsage {
     /// The transaction's data-availability footprint, in gas.
     pub da_footprint: u64,
     /// Whether the transaction is a deposit, which the data-availability dimensions exempt and the
-    /// execution-gas, state-gas and data-size limits never refuse.
+    /// execution-gas, state-gas, data-size and KV limits never refuse.
     pub is_deposit: bool,
 }
 
