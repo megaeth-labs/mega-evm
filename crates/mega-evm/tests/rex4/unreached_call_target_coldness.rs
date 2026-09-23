@@ -270,22 +270,6 @@ fn probe_discount_with_accounts(
         gas_used(spec, budget, inner_code, IDENTITY, extra_accounts)
 }
 
-/// The verdict for a row whose frame halts at the **static charge** without the deployed
-/// implementation having reached the load: it left no entry, so the probe reads [`LEFT_WARM`].
-///
-/// Except under debug assertions on `Rex6`, where the frozen-window tripwire resolves the
-/// operand's `EIP-7702` delegation to decide whether to fire, and that resolution materializes the
-/// very entry the row expects to be absent. The side effect is the tripwire's and predates these
-/// tests; it reaches only the two exits the tripwire runs on — the static charge and a plain
-/// out-of-gas halt — so rows that end on a memory halt are profile-independent.
-const fn static_exit_left_warm() -> u64 {
-    if cfg!(debug_assertions) {
-        LEFT_COLD
-    } else {
-        LEFT_WARM
-    }
-}
-
 /// The three specs whose CALL family runs through the volatile wrapper that charges static gas
 /// ahead of revm's body.
 const WRAPPED_CALL_SPECS: [MegaSpecId; 3] = [MegaSpecId::REX4, MegaSpecId::REX5, MegaSpecId::REX6];
@@ -366,7 +350,7 @@ fn test_value_transfer_window_matches_the_static_charge_window() {
 /// `CALLCODE` with 59 gas: a 32-byte return range costs 3 gas and a 1,024-byte one costs 98.
 #[test]
 fn test_static_charge_window_skips_operand_when_memory_expansion_is_unaffordable() {
-    for (ret_size, expected) in [(0x20_u64, LEFT_COLD), (0x400, static_exit_left_warm())] {
+    for (ret_size, expected) in [(0x20_u64, LEFT_COLD), (0x400, LEFT_WARM)] {
         let discount = precompile_probe_discount(
             MegaSpecId::REX6,
             STATIC_CHARGE_BUDGET,
@@ -434,9 +418,7 @@ fn test_memory_expansion_window_boundary_is_the_pre_charge_budget() {
 #[test]
 fn test_memory_expansion_window_covers_the_input_range() {
     let args_range = [U256::ZERO, U256::from(1024), U256::ZERO, U256::ZERO];
-    for (gas_at_opcode, expected) in
-        [(97_u64, static_exit_left_warm()), (98, LEFT_COLD), (150, LEFT_COLD)]
-    {
+    for (gas_at_opcode, expected) in [(97_u64, LEFT_WARM), (98, LEFT_COLD), (150, LEFT_COLD)] {
         let discount = probe_discount_with_accounts(
             MegaSpecId::REX6,
             gas_at_opcode + PUSH_GAS,
@@ -548,7 +530,7 @@ fn test_delegated_callcode_recreates_the_operand_and_never_its_delegate() {
             STATIC_CHARGE_BUDGET,
             0,
             1024,
-            static_exit_left_warm(),
+            LEFT_WARM,
         ),
         // Memory the frame could afford only before the relocated static charge.
         ("Rex6 memory expansion", MegaSpecId::REX6, MEMORY_WINDOW_BUDGET, 0, 1024, LEFT_COLD),
@@ -592,9 +574,7 @@ fn test_partial_call_stack_materializes_nothing_extra() {
         .append(CALLCODE)
         .build();
 
-    for (budget, expected) in
-        [(STATIC_CHARGE_BUDGET, static_exit_left_warm()), (SUCCEEDING_BUDGET, LEFT_WARM)]
-    {
+    for (budget, expected) in [(STATIC_CHARGE_BUDGET, LEFT_WARM), (SUCCEEDING_BUDGET, LEFT_WARM)] {
         let discount = precompile_probe_discount(MegaSpecId::REX6, budget, truncated.clone());
         assert_eq!(
             discount, expected,
