@@ -43,6 +43,8 @@ Block execution is in place too: `MegaBlockExecutor` is alloy-evm's `BlockExecut
 Every transaction is held to the block's `BlockLimits`, and the block counts what its transactions spent on each of the three ledgers and the history bytes they appended.
 The execution figure a block counts for a transaction is its regular ledger — its gas less state and history, read off revm's `Gas` — at least its EIP-7623 floor.
 A block's state gas can be capped: the transaction that reaches the cap is packed, and after it only a transaction that adds no state gas is.
+Neither that cap nor the execution-gas cap refuses a deposit, which the block must include; a deposit still counts towards both.
+A builder that executes candidates and chooses among them commits through `commit_transaction_outcome`, which checks the block's counters again; alloy-evm's `commit_transaction` cannot fail and expects each outcome to commit before the next transaction executes, and a debug build asserts it.
 `apply_pre_execution_changes` deploys the six MegaETH system contracts and the EIP-7997 `CREATE2` factory every block, idempotently, hands each pre-block state (the two EIP calls and the seven deploys) to an optional observer before it commits — that sequence is the witness a stateless client needs — and leaves one hook point empty: the pre-block system calls.
 
 SALT pricing is in place: every EIP-8037 state gas charge costs the schedule's entry times the capacity of the SALT bucket it lands in, counted in minimum buckets, so a slot written into a region eight times as crowded as the minimum costs eight times as much.
