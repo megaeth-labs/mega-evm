@@ -1420,6 +1420,13 @@ pub mod volatile_data_ext {
     ///    when the frame could not have afforded them. Materializing an entry the deployed
     ///    implementation never created diverges just as much, in the other direction.
     ///
+    ///    The resolution inspects the operand alone: it reads the delegate's address off the
+    ///    operand's code and never inspects the delegate. revm's own load then brought the
+    ///    delegate in as a fresh entry, which a frame revert leaves priced exactly like an absent
+    ///    one — warm for a pre-warmed address, cold otherwise. So the delegate is not touched
+    ///    here: inspecting it would leave a pre-warmed delegate resident and cold, and a later
+    ///    access to it 2,500 gas dearer than on the deployed implementation.
+    ///
     /// Only residency is reproduced. The entries are cold, which is the state the frame's
     /// out-of-gas revert left them in, and nothing here marks beneficiary access — that is a
     /// separate divergence, watched by [`debug_check_frozen_detention_window`].
@@ -1464,7 +1471,9 @@ pub mod volatile_data_ext {
         if !call_memory_expansions_affordable(context, memory_gas, budget, ranges) {
             return Ok(());
         }
-        if context.host.inspect_account_delegated(mega_spec, to).is_err() {
+        // The operand alone, code hydrated, exactly as the delegate resolution inspects it — not
+        // `inspect_account_delegated`, which would also materialize the delegate.
+        if context.host.inspect_account(to, true).is_err() {
             return Err(InstructionResult::FatalExternalError);
         }
         Ok(())
@@ -2333,9 +2342,9 @@ pub mod storage_gas_ext {
                                 // a static call — stopped the deployed schedule in the same place.
                                 _ => false,
                             };
-                        if reached_load &&
-                            context.host.inspect_account_delegated(mega_spec, to).is_err()
-                        {
+                        // The operand alone, as the delegate resolution inspects it; the
+                        // delegate stays untouched (see `materialize_unreached_call_entries`).
+                        if reached_load && context.host.inspect_account(to, true).is_err() {
                             return Err(InstructionResult::FatalExternalError);
                         }
                     }

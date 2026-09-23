@@ -28,6 +28,9 @@ use mega_evm::{
 use revm::{
     bytecode::opcode::*,
     context::{tx::TxEnvBuilder, BlockEnv},
+    context_interface::transaction::{AccessList, AccessListItem},
+    database::AccountState,
+    state::Bytecode,
 };
 
 const CALLER: Address = address!("0000000000000000000000000000000000410000");
@@ -170,12 +173,50 @@ fn gas_used(
     probe: Address,
     extra_accounts: &[(Address, Bytes)],
 ) -> u64 {
+    gas_used_with_access_list(spec, budget, inner_code, probe, extra_accounts, &[])
+}
+
+/// Installs `code` at `address` as raw bytecode.
+///
+/// `MemoryDatabase::account_code` wraps its bytes as legacy code, so an `EIP-7702` designator
+/// installed through it is an ordinary contract that merely starts with the designator's bytes —
+/// nothing delegates, and a test built on it measures the wrong thing while passing. Raw bytecode
+/// is decoded, and the assertion makes the fixture refuse to run if a designator did not come out
+/// as a real delegation.
+fn install_code(db: &mut MemoryDatabase, address: Address, code: &Bytes) {
+    let bytecode = Bytecode::new_raw(code.clone());
+    if code.starts_with(&[0xef, 0x01, 0x00]) {
+        assert!(
+            bytecode.is_eip7702(),
+            "fixture must install a real EIP-7702 delegation at {address}"
+        );
+    }
+    let code_hash = bytecode.hash_slow();
+    let account = db.load_account(address).expect("in-memory account load");
+    account.info.code = Some(bytecode);
+    account.info.code_hash = code_hash;
+    account.account_state = AccountState::None;
+}
+
+/// [`gas_used`], with `access_list` listed address-only in the transaction's access list.
+///
+/// An address-only entry is pre-warmed, so a fresh load of it is warm, but once something leaves it
+/// resident and cold it prices cold like any resident entry. That makes the residency of an account
+/// that is neither a precompile nor the coinbase observable through the same probe.
+fn gas_used_with_access_list(
+    spec: MegaSpecId,
+    budget: u64,
+    inner_code: Bytes,
+    probe: Address,
+    extra_accounts: &[(Address, Bytes)],
+    access_list: &[Address],
+) -> u64 {
     let mut db = MemoryDatabase::default()
         .account_balance(CALLER, U256::from(1_000_000_000_u64))
         .account_code(OUTER, outer_code(budget, probe))
         .account_code(INNER, inner_code);
     for (address, code) in extra_accounts {
-        db = db.account_code(*address, code.clone());
+        install_code(&mut db, *address, code);
     }
     let block = BlockEnv { beneficiary: BENEFICIARY, ..Default::default() };
     let mut context = MegaContext::new(&mut db, spec).with_block(block);
@@ -184,8 +225,19 @@ fn gas_used(
         chain.operator_fee_constant = Some(U256::ZERO);
     });
     let mut evm = MegaEvm::new(context);
+    let access_list = AccessList(
+        access_list
+            .iter()
+            .map(|&address| AccessListItem { address, storage_keys: vec![] })
+            .collect(),
+    );
     let mut tx = MegaTransaction::new(
-        TxEnvBuilder::default().caller(CALLER).call(OUTER).gas_limit(1_000_000).build_fill(),
+        TxEnvBuilder::default()
+            .caller(CALLER)
+            .call(OUTER)
+            .gas_limit(1_000_000)
+            .access_list(access_list)
+            .build_fill(),
     );
     tx.enveloped_tx = Some(Bytes::new());
     let outcome = alloy_evm::Evm::transact_raw(&mut evm, tx).expect("tx must execute");
@@ -467,33 +519,59 @@ fn test_zero_length_range_ignores_its_offset() {
     }
 }
 
-/// The address whose entry gets recreated is the raw stack operand, never the account it delegates
-/// to. `CALLCODE` from `Rex5` meters against the current frame, and the storage-gas wrapper
-/// inspects without following delegation, so a delegator operand leaves its delegate's entry
-/// untouched on the deployed implementation — and must keep leaving it untouched here.
-/// Over-materializing is as wrong as under-materializing.
+/// A delegator operand. The deployed delegate resolution inspected the operand alone — it reads the
+/// delegate's address off the operand's code — and revm's own load then brought the delegate in as
+/// a fresh entry, which leaves a pre-warmed delegate warm. The recreation has to leave exactly that
+/// footprint: the operand resident and cold wherever the deployed schedule reached its load, and
+/// the delegate untouched everywhere. Over-materializing is as wrong as under-materializing.
+///
+/// Both halves are observable only through pre-warmed addresses, so the delegate is [`IDENTITY`]
+/// and the operand is an address-only access-list entry. Every expectation is the deployed
+/// implementation's measured value.
 #[test]
-fn test_delegated_callcode_operand_leaves_the_delegate_alone() {
-    // Delegating to the probed precompile is what makes the probe report whether the delegate
-    // hop materialized anything.
+fn test_delegated_callcode_recreates_the_operand_and_never_its_delegate() {
     let mut delegation_to_identity = vec![0xef, 0x01, 0x00];
     delegation_to_identity.extend_from_slice(IDENTITY.as_slice());
     let accounts = [(DELEGATOR, Bytes::from(delegation_to_identity))];
+    let listed = [DELEGATOR];
 
-    for spec in [MegaSpecId::REX5, MegaSpecId::REX6] {
-        for (budget, value) in [(STATIC_CHARGE_BUDGET, 0), (VALUE_TRANSFER_BUDGET, 1)] {
-            let discount = probe_discount_with_accounts(
-                spec,
-                budget,
-                inner_call_code(DELEGATOR, value, 0),
-                &accounts,
-            );
-            assert_eq!(
-                discount, LEFT_WARM,
-                "{spec:?}: a CALLCODE to a delegator must leave the delegate's entry alone at a \
-                 budget of {budget}, got a discount of {discount}",
-            );
-        }
+    let rows = [
+        // `CALLCODE` meters against the current frame from `Rex5`, and `Rex5` has no operand
+        // resolution, so nothing touches the operand.
+        ("Rex5 static charge", MegaSpecId::REX5, STATIC_CHARGE_BUDGET, 0, 0, LEFT_WARM),
+        // Nothing to expand: the deployed schedule reached its load.
+        ("Rex6 static charge", MegaSpecId::REX6, STATIC_CHARGE_BUDGET, 0, 0, LEFT_COLD),
+        // The output range costs more than the frame held: the deployed schedule never got there.
+        (
+            "Rex6 static charge, memory unaffordable",
+            MegaSpecId::REX6,
+            STATIC_CHARGE_BUDGET,
+            0,
+            1024,
+            static_exit_left_warm(),
+        ),
+        // Memory the frame could afford only before the relocated static charge.
+        ("Rex6 memory expansion", MegaSpecId::REX6, MEMORY_WINDOW_BUDGET, 0, 1024, LEFT_COLD),
+        // The transfer cost revm 40 charges ahead of its load.
+        ("Rex6 value transfer", MegaSpecId::REX6, VALUE_TRANSFER_BUDGET, 1, 0, LEFT_COLD),
+    ];
+    for (exit, spec, budget, value, ret_size, operand_expected) in rows {
+        let inner = inner_call_code(DELEGATOR, value, ret_size);
+        let probe = |target| {
+            gas_used_with_access_list(spec, budget, inner.clone(), target, &accounts, &listed)
+        };
+        let reference = probe(PLAIN);
+        let operand = reference - probe(DELEGATOR);
+        let delegate = reference - probe(IDENTITY);
+        assert_eq!(
+            operand, operand_expected,
+            "{exit}: the delegator operand's entry must match the deployed implementation",
+        );
+        assert_eq!(
+            delegate, LEFT_WARM,
+            "{exit}: the delegate must stay untouched — a resident cold entry would make every later \
+             access to it 2,500 gas dearer than on the deployed implementation",
+        );
     }
 }
 
