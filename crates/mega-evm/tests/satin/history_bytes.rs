@@ -14,7 +14,10 @@ use alloy_primitives::{address, Address, Bytes, TxKind, B256, U256};
 use alloy_sol_types::SolCall;
 use mega_evm::{
     constants::{COST_PER_HISTORY_BYTE, MAX_CONTRACT_SIZE, TX_GAS_LIMIT_CAP},
-    system::{IMegaAccessControl, ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE},
+    system::{
+        IMegaAccessControl, IOracle, ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE,
+        ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE,
+    },
     test_utils::{op_transaction, BytecodeBuilder, MemoryDatabase},
     untouched_create_gas, EvmTxRuntimeLimits, MegaContext, MegaEvm, MegaTransaction,
     MegaTransactionOutcome, ACCESS_LIST_ADDRESS_SIZE, ACCESS_LIST_SLOT_SIZE, AUTHORIZATION_SIZE,
@@ -813,6 +816,305 @@ fn test_the_bytes_exceed_the_history_gas_by_what_the_allowances_paid() {
                 outcome.gas.history_bytes * CPHB - outcome.gas.history,
                 paid_by_allowances * CPHB,
                 "{name} at {gas_limit}: the gap is what the allowances paid",
+            );
+            assert_reservoir_paid(name, gas_limit, &outcome);
+        }
+    }
+}
+
+/* ---------- the bytes and the data size ---------- */
+
+/// The calldata of `sendHint(topic, payload)`.
+fn hint_call() -> Bytes {
+    let call =
+        IOracle::sendHintCall { topic: B256::repeat_byte(0x7a), data: Bytes::from(vec![7; 40]) };
+    Bytes::from(call.abi_encode())
+}
+
+/// `CALL(GAS, Oracle, 0, hint_call())`, discarding the flag: a hint sent from a frame.
+fn hinting(code: BytecodeBuilder) -> BytecodeBuilder {
+    let data = hint_call();
+    code.mstore(0, &data)
+        .append_many([PUSH0, PUSH0])
+        .push_number(data.len() as u64)
+        .append_many([PUSH0, PUSH0])
+        .push_address(ORACLE_CONTRACT_ADDRESS)
+        .append(GAS)
+        .append(CALL)
+        .append(POP)
+}
+
+/// `funded()` with the Oracle deployed.
+fn beside_the_oracle() -> MemoryDatabase {
+    funded().account_code(ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE)
+}
+
+/// How a case of [`test_the_history_bytes_are_the_data_size_every_record_kept`] runs.
+#[derive(Clone, Copy)]
+enum Run {
+    /// With no limit.
+    Plain,
+    /// Under a transaction data-size limit of this many bytes, which the case crosses.
+    Limited(u64),
+    /// With an inspector that answers every creation without running it.
+    AnsweringCreations,
+}
+
+/// The history bytes a transaction reports and the data size it kept are counted from one byte
+/// table, record by record, so they move together at every site both count — the body, calldata,
+/// the access list, authorizations, logs, write records and deployed code — and on every path
+/// that takes a record back: a failed creation, output revm does not deposit, a frame answered
+/// without running, a stop. The one site they part at is an Oracle hint, whose payload is data
+/// size and never history. None of these cases draws on an allowance, so the history gas is the
+/// bytes at the price as well.
+#[test]
+fn test_the_history_bytes_are_the_data_size_every_record_kept() {
+    if runs_at_measurement_prices() {
+        return;
+    }
+    let hint = hint_call().len() as u64;
+    type Case = (&'static str, fn() -> MemoryDatabase, fn(u64) -> MegaTransaction, Run, u64, u64);
+    let cases: [Case; 23] = [
+        (
+            "the body",
+            || callee_running(BytecodeBuilder::default()),
+            |gas| call(CALLER, CALLEE, U256::ZERO, gas),
+            Run::Plain,
+            TX_BODY_SIZE,
+            0,
+        ),
+        (
+            "calldata",
+            || callee_running(BytecodeBuilder::default()),
+            |gas| call_with_data(CALLER, CALLEE, Bytes::from(vec![0; 100]), gas),
+            Run::Plain,
+            TX_BODY_SIZE + 100,
+            0,
+        ),
+        (
+            "an access list",
+            || callee_running(BytecodeBuilder::default()),
+            |gas| with_access_list(&[(CALLEE, 2), (PAYEE, 1), (FRESH, 0)], gas),
+            Run::Plain,
+            TX_BODY_SIZE + 3 * ACCESS_LIST_ADDRESS_SIZE + 3 * ACCESS_LIST_SLOT_SIZE,
+            0,
+        ),
+        (
+            "authorizations, one applied",
+            || callee_running(BytecodeBuilder::default()),
+            |gas| with_authorizations(&[(AUTHORITY, 0), (OTHER_AUTHORITY, 7)], gas),
+            Run::Plain,
+            TX_BODY_SIZE + 2 * AUTHORIZATION_SIZE + WRITE_RECORD_SIZE,
+            0,
+        ),
+        (
+            "a log",
+            || callee_running(log(BytecodeBuilder::default(), 2, 50)),
+            |gas| call(CALLER, CALLEE, U256::ZERO, gas),
+            Run::Plain,
+            TX_BODY_SIZE + log_bytes(2, 50),
+            0,
+        ),
+        (
+            "a log a reverted child emitted",
+            || {
+                callee_running(calling(BytecodeBuilder::default(), CHILD, 0, 1_000_000))
+                    .account_code(CHILD, log(BytecodeBuilder::default(), 1, 32).revert().build())
+            },
+            |gas| call(CALLER, CALLEE, U256::ZERO, gas),
+            Run::Plain,
+            TX_BODY_SIZE,
+            0,
+        ),
+        (
+            "a storage write",
+            || callee_running(BytecodeBuilder::default().sstore(U256::from(1), U256::from(1))),
+            |gas| call(CALLER, CALLEE, U256::ZERO, gas),
+            Run::Plain,
+            TX_BODY_SIZE + WRITE_RECORD_SIZE,
+            0,
+        ),
+        (
+            "a storage write written back",
+            || {
+                callee_running(
+                    BytecodeBuilder::default()
+                        .sstore(U256::from(1), U256::from(1))
+                        .sstore(U256::from(1), U256::ZERO),
+                )
+            },
+            |gas| call(CALLER, CALLEE, U256::ZERO, gas),
+            Run::Plain,
+            TX_BODY_SIZE,
+            0,
+        ),
+        (
+            "a value transfer's two records",
+            || callee_running(calling(BytecodeBuilder::default(), PAYEE, 1, 100_000)),
+            |gas| call(CALLER, CALLEE, U256::ZERO, gas),
+            Run::Plain,
+            TX_BODY_SIZE + 2 * WRITE_RECORD_SIZE,
+            0,
+        ),
+        (
+            "a SELFDESTRUCT's beneficiary",
+            || funded().account_code(CALLEE, destructs_to(PAYEE)),
+            |gas| call(CALLER, CALLEE, U256::ZERO, gas),
+            Run::Plain,
+            TX_BODY_SIZE + WRITE_RECORD_SIZE,
+            0,
+        ),
+        (
+            "a creation transaction's code",
+            funded,
+            |gas| create(CALLER, deploying(), gas),
+            Run::Plain,
+            TX_BODY_SIZE + deploying().len() as u64 + WRITE_RECORD_SIZE + DEPLOYED,
+            0,
+        ),
+        (
+            "a nested creation's code",
+            || callee_running(creating(BytecodeBuilder::default(), &deploying())),
+            |gas| call(CALLER, CALLEE, U256::ZERO, gas),
+            Run::Plain,
+            TX_BODY_SIZE + 2 * WRITE_RECORD_SIZE + DEPLOYED,
+            0,
+        ),
+        (
+            "a failed creation: its creator's nonce, and no code",
+            || callee_running(creating(BytecodeBuilder::default(), &[PUSH1, 32, PUSH0, REVERT])),
+            |gas| call(CALLER, CALLEE, U256::ZERO, gas),
+            Run::Plain,
+            TX_BODY_SIZE + WRITE_RECORD_SIZE,
+            0,
+        ),
+        (
+            "output EIP-3541 refuses to deposit",
+            || callee_running(creating(BytecodeBuilder::default(), &refused_code())),
+            |gas| call(CALLER, CALLEE, U256::ZERO, gas),
+            Run::Plain,
+            TX_BODY_SIZE + WRITE_RECORD_SIZE,
+            0,
+        ),
+        (
+            "output past the code-size limit",
+            || callee_running(creating(BytecodeBuilder::default(), &oversized_code())),
+            |gas| call(CALLER, CALLEE, U256::ZERO, gas),
+            Run::Plain,
+            TX_BODY_SIZE + WRITE_RECORD_SIZE,
+            0,
+        ),
+        (
+            "a creation transaction whose output EIP-3541 refuses",
+            funded,
+            |gas| create(CALLER, refused_code(), gas),
+            Run::Plain,
+            TX_BODY_SIZE + refused_code().len() as u64,
+            0,
+        ),
+        (
+            "a call an interceptor answers without a frame",
+            || {
+                let code = BytecodeBuilder::default().sstore(U256::from(1), U256::from(1));
+                beside_access_control(asks_access_control(code, 0))
+            },
+            |gas| call(CALLER, CALLEE, U256::ZERO, gas),
+            Run::Plain,
+            TX_BODY_SIZE + WRITE_RECORD_SIZE,
+            0,
+        ),
+        (
+            "a value call an interceptor refuses without a frame",
+            || beside_access_control(asks_access_control(BytecodeBuilder::default(), 1)),
+            |gas| call(CALLER, CALLEE, U256::ZERO, gas),
+            Run::Plain,
+            TX_BODY_SIZE,
+            0,
+        ),
+        (
+            "a creation an inspector answers without running it",
+            || callee_running(creating(BytecodeBuilder::default(), &deploying())),
+            |gas| call(CALLER, CALLEE, U256::ZERO, gas),
+            Run::AnsweringCreations,
+            TX_BODY_SIZE,
+            0,
+        ),
+        (
+            "a first frame answered with the stop",
+            funded,
+            |gas| call(CALLER, FRESH, U256::from(1), gas),
+            Run::Limited(TX_BODY_SIZE + WRITE_RECORD_SIZE - 1),
+            TX_BODY_SIZE,
+            0,
+        ),
+        (
+            "a stop at a child's write",
+            || {
+                callee_running(calling(log(BytecodeBuilder::default(), 0, 0), CHILD, 0, 1_000_000))
+                    .account_code(
+                        CHILD,
+                        BytecodeBuilder::default().sstore(U256::from(1), U256::from(1)).build(),
+                    )
+            },
+            |gas| call(CALLER, CALLEE, U256::ZERO, gas),
+            Run::Limited(TX_BODY_SIZE + LOG_BASE_SIZE + WRITE_RECORD_SIZE - 1),
+            TX_BODY_SIZE,
+            0,
+        ),
+        (
+            "a hint sent by the transaction: its calldata is history, its payload is not",
+            beside_the_oracle,
+            |gas| call_with_data(CALLER, ORACLE_CONTRACT_ADDRESS, hint_call(), gas),
+            Run::Plain,
+            TX_BODY_SIZE + hint_call().len() as u64,
+            1,
+        ),
+        (
+            "a hint sent from a frame",
+            || {
+                beside_the_oracle()
+                    .account_code(CALLEE, hinting(BytecodeBuilder::default()).stop().build())
+            },
+            |gas| call(CALLER, CALLEE, U256::ZERO, gas),
+            Run::Plain,
+            TX_BODY_SIZE,
+            1,
+        ),
+    ];
+
+    for (name, db, tx, run, bytes, hints) in cases {
+        for gas_limit in GAS_LIMITS {
+            let limit = match run {
+                Run::Limited(limit) => limit,
+                Run::Plain | Run::AnsweringCreations => u64::MAX,
+            };
+            let mut evm = MegaEvm::new(context(db()).with_tx_runtime_limits(limited_to(limit)));
+            let outcome = match run {
+                Run::AnsweringCreations => {
+                    evm.with_inspector(AnswersCreations).execute_transaction(tx(gas_limit))
+                }
+                Run::Plain | Run::Limited(_) => evm.execute_transaction(tx(gas_limit)),
+            }
+            .expect("the transaction is valid");
+            assert_eq!(
+                outcome.limit_exceeded.is_some(),
+                matches!(run, Run::Limited(_)),
+                "{name} at {gas_limit}: {:?}",
+                outcome.result,
+            );
+            assert_eq!(
+                outcome.gas.history_bytes, bytes,
+                "{name} at {gas_limit}: the history bytes"
+            );
+            assert_eq!(
+                outcome.usage.data_size,
+                bytes + hints * hint,
+                "{name} at {gas_limit}: the data size is the history bytes and the hints' payloads",
+            );
+            assert_eq!(
+                outcome.gas.history,
+                bytes * CPHB,
+                "{name} at {gas_limit}: the history gas is the bytes at the price",
             );
             assert_reservoir_paid(name, gas_limit, &outcome);
         }
