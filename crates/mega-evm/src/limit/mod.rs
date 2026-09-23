@@ -23,8 +23,8 @@
 //! - the body, before any frame; neither a revert nor an out-of-gas takes it back;
 //! - the records of the applied EIP-7702 authorities, before the first frame;
 //! - the records a frame's start makes, when the frame starts;
-//! - a storage write's record, a log's bytes and the record of a `SELFDESTRUCT`'s beneficiary,
-//!   once the opcode completed;
+//! - a storage write's record, a log's bytes and the record of a `SELFDESTRUCT`'s beneficiary, once
+//!   the opcode completed;
 //! - deployed code, on the creation's lane before the creation is committed, so a crossing leaves
 //!   no code behind;
 //! - an Oracle hint's payload, on the transaction's own lane, before it is forwarded.
