@@ -4,8 +4,9 @@
 //! pricing only `MegaETH` has turned off, so that a fixture fails on what the machinery does and
 //! not on what `MegaETH` charges for. [`MegaContext::with_neutral_cfg`] is the switch; this module
 //! builds what it is switched to for a fixture fork: the fork's gas schedule, its EIP switches,
-//! its execution cap and code-size limits ([`neutral_cfg`]), and its precompile set
-//! ([`neutral_precompiles`]), which the EVM carries rather than the context.
+//! its execution cap and code-size limits ([`neutral_cfg`]); and the two parts of its pricing the
+//! EVM carries rather than the context ([`neutralize_evm`]): its precompile set
+//! ([`neutral_precompiles`]) and its static opcode prices ([`neutral_gas_table`]).
 //!
 //! Satin's base spec is Osaka, and a configuration cannot take a rule the base spec gates on its
 //! own id away or add one: an Osaka rule stays on under an older fork's fixtures, and an
@@ -13,15 +14,17 @@
 //! after it have a neutral configuration; what Amsterdam's cannot express is the gate's to
 //! register, not this module's to hide.
 
-use alloy_evm::precompiles::PrecompilesMap;
+use alloy_evm::{precompiles::PrecompilesMap, Database};
 use revm::{
     context::CfgEnv,
     context_interface::cfg::GasParams,
+    handler::EvmTr,
+    interpreter::instructions::{gas_table_spec, GasTable},
     precompile::{PrecompileSpecId, Precompiles},
     primitives::eip7954,
 };
 
-use crate::{EthSpecId, MegaSpecId};
+use crate::{EthSpecId, ExternalEnvTypes, MegaEvm, MegaSpecId};
 
 /// The configuration `fork`'s fixtures run under on Satin's machinery, or `None` for a fork
 /// Satin's Osaka base cannot be configured to.
@@ -66,6 +69,34 @@ pub fn neutral_cfg(fork: EthSpecId) -> Option<CfgEnv<MegaSpecId>> {
 pub fn neutral_precompiles(fork: EthSpecId) -> Option<PrecompilesMap> {
     neutral_cfg(fork)?;
     Some(PrecompilesMap::from_static(Precompiles::new(PrecompileSpecId::from_spec_id(fork))))
+}
+
+/// `fork`'s static opcode prices, or `None` where [`neutral_cfg`] has none.
+///
+/// revm keeps part of a fork's gas table out of the schedule: the static price every opcode pays
+/// before its dynamic cost lives in the instruction table, keyed on the spec id. Amsterdam's
+/// differs from Osaka's in EIP-8038's two-read base for `EXTCODESIZE` and `EXTCODECOPY`; Satin's
+/// instruction table carries its Osaka base's.
+pub fn neutral_gas_table(fork: EthSpecId) -> Option<GasTable> {
+    neutral_cfg(fork)?;
+    Some(gas_table_spec(fork))
+}
+
+/// Gives `evm` the parts of `fork`'s pricing an EVM carries: its precompile set and its static
+/// opcode prices. The instructions stay Satin's. Returns `None`, changing nothing, where
+/// [`neutral_cfg`] has no configuration for `fork`.
+///
+/// The neutral configuration of the context is
+/// [`MegaContext::with_neutral_cfg`](crate::MegaContext::with_neutral_cfg)'s.
+pub fn neutralize_evm<DB: Database, INSP, ExtEnvs: ExternalEnvTypes>(
+    evm: &mut MegaEvm<DB, INSP, ExtEnvs>,
+    fork: EthSpecId,
+) -> Option<()> {
+    let (precompiles, gas_table) = (neutral_precompiles(fork)?, neutral_gas_table(fork)?);
+    let (_, instructions, evm_precompiles, _) = evm.all_mut();
+    *evm_precompiles = precompiles;
+    *instructions.gas_table_mut() = gas_table;
+    Some(())
 }
 
 #[cfg(test)]
@@ -174,5 +205,37 @@ mod tests {
             assert!(!out_of_gas(Precompiles::osaka()), "upstream's price fits in 60,000");
             assert!(out_of_gas(satin_precompiles()), "MegaETH's does not");
         }
+    }
+
+    /// Satin's instruction table prices opcodes as its Osaka base does, so Osaka's static prices
+    /// change nothing; Amsterdam's differ in EIP-8038's two-read base for `EXTCODESIZE` and
+    /// `EXTCODECOPY` alone.
+    #[test]
+    fn test_neutral_gas_tables() {
+        use revm::bytecode::opcode::{EXTCODECOPY, EXTCODESIZE};
+        let mut evm = MegaEvm::new(context(EthSpecId::OSAKA));
+        let satin = *evm.all_mut().1.gas_table();
+        assert_eq!(neutral_gas_table(EthSpecId::OSAKA), Some(satin));
+
+        let amsterdam = neutral_gas_table(EthSpecId::AMSTERDAM).expect("a neutral fork");
+        let changed: Vec<_> =
+            (0..=u8::MAX).filter(|&op| amsterdam[op as usize] != satin[op as usize]).collect();
+        assert_eq!(changed, vec![EXTCODESIZE, EXTCODECOPY]);
+        assert_eq!(amsterdam[EXTCODESIZE as usize], 200);
+        assert!(neutral_gas_table(EthSpecId::PRAGUE).is_none());
+    }
+
+    /// `neutralize_evm` installs the fork's static prices, and changes nothing for a fork
+    /// without a neutral configuration. That it installs the precompile set is shown by a call
+    /// (`tests/satin/neutral.rs`).
+    #[test]
+    fn test_neutralize_evm_installs_the_fork_s_static_prices() {
+        use revm::bytecode::opcode::EXTCODESIZE;
+        let mut evm = MegaEvm::new(context(EthSpecId::AMSTERDAM));
+        assert!(neutralize_evm(&mut evm, EthSpecId::PRAGUE).is_none());
+        assert_eq!(evm.all_mut().1.gas_table()[EXTCODESIZE as usize], 100);
+
+        assert!(neutralize_evm(&mut evm, EthSpecId::AMSTERDAM).is_some());
+        assert_eq!(evm.all_mut().1.gas_table()[EXTCODESIZE as usize], 200);
     }
 }
