@@ -1,9 +1,14 @@
 
 [workspace]
-# The tool crates (`bin/mega-evme`, `bin/mega-t8n`, `crates/mega-state-test`,
-# `crates/state-test`) still target the legacy engine; their sources are kept
-# untouched and each rejoins the workspace when it is ported to Satin.
-members = ["crates/mega-evm", "crates/system-contracts"]
+# The tool crates `bin/mega-evme` and `bin/mega-t8n` still target the legacy
+# engine; their sources are kept untouched and each rejoins the workspace when it
+# is ported to Satin.
+members = [
+    "crates/mega-evm",
+    "crates/mega-state-test",
+    "crates/state-test",
+    "crates/system-contracts",
+]
 default-members = ["crates/mega-evm"]
 exclude = []
 
@@ -150,6 +155,7 @@ alloy-serde = { version = "2.1.1", default-features = false }
 alloy-sol-types = { version = "1.6.0", default-features = false }
 alloy-transport = { version = "2.1.1", default-features = false }
 alloy-transport-http = { version = "2.1.1", default-features = false }
+alloy-trie = { version = "0.9.5", default-features = false }
 op-alloy-consensus = { git = "https://github.com/ethereum-optimism/optimism", rev = "f67d87cd5c9992b62d215c043917b94e3f019629", default-features = false, features = ["k256"] }
 op-alloy-flz = { version = "0.13.1", default-features = false }
 op-alloy-network = { git = "https://github.com/ethereum-optimism/optimism", rev = "f67d87cd5c9992b62d215c043917b94e3f019629", default-features = false }
