@@ -17,6 +17,12 @@
 //!   result, 200 times.
 //! - `system_address_misses`: the same 200 calls with a selector the contract does not intercept,
 //!   so each pays the dispatch's address match and selector peek and then runs the bytecode.
+//! - `storage_reads`: 200 `SLOAD`s of slots nothing volatile holds: the Host's storage load and the
+//!   read wrapper around `SLOAD`, which finds nothing to settle.
+//! - `volatile_reads`: 200 rounds of `TIMESTAMP`, `NUMBER` and a `BALANCE` of the block
+//!   beneficiary, then a call to the Oracle, whose code loads 200 of its slots. Every one is a read
+//!   gas detention marks in the Host and commits in the opcode's wrapper; the first caps the frame,
+//!   and the call starts and resumes under the limit.
 //! - `data_size_limit`: 200 fresh slots and 200 two-topic logs in one frame, run under a
 //!   transaction data-size limit equal to exactly what the transaction keeps, so every record is
 //!   checked against a limit it is about to reach (`satin`); the same one byte short of it, so the
@@ -44,17 +50,19 @@ use alloy_sol_types::SolCall;
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 use mega_evm::{
     constants::COST_PER_HISTORY_BYTE,
-    system::{IMegaAccessControl, ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE},
+    system::{
+        IMegaAccessControl, ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE, ORACLE_CONTRACT_ADDRESS,
+    },
     test_utils::{op_transaction, zero_fee_l1_block_info, BytecodeBuilder, MemoryDatabase},
     EvmTxRuntimeLimits, ExternalEnvs, LimitCheck, LimitKind, LimitUsage, MegaContext, MegaEvm,
-    MegaSpecId, TestExternalEnvs, LOG_BASE_SIZE, LOG_TOPIC_SIZE, MIN_BUCKET_SIZE, TX_BODY_SIZE,
-    WRITE_RECORD_SIZE,
+    MegaSpecId, TestExternalEnvs, VolatileDataAccess, LOG_BASE_SIZE, LOG_TOPIC_SIZE,
+    MIN_BUCKET_SIZE, TX_BODY_SIZE, WRITE_RECORD_SIZE,
 };
 use op_revm::{L1BlockInfo, OpEvm, OpSpecId, OpTransaction};
 use revm::{
     bytecode::opcode::{
-        ADDRESS, CALL, CALLDATALOAD, DUP1, GAS, ISZERO, JUMPDEST, JUMPI, LOG0, LOG2, MSTORE, POP,
-        PUSH0, PUSH1, SSTORE, STATICCALL, STOP, SUB, SWAP1,
+        ADDRESS, BALANCE, CALL, CALLDATALOAD, DUP1, GAS, ISZERO, JUMPDEST, JUMPI, LOG0, LOG2,
+        MSTORE, NUMBER, POP, PUSH0, PUSH1, SLOAD, SSTORE, STATICCALL, STOP, SUB, SWAP1, TIMESTAMP,
     },
     context::{BlockEnv, CfgEnv, Context, ContextTr, TxEnv},
     inspector::NoOpInspector,
@@ -71,6 +79,11 @@ const SALT_CALLER: Address = address!("0x000000000000000000000000000000000010000
 const INTERCEPTED: Address = address!("0x0000000000000000000000000000000000100007");
 const MISSING: Address = address!("0x0000000000000000000000000000000000100008");
 const LIMITED: Address = address!("0x0000000000000000000000000000000000100009");
+const READER: Address = address!("0x000000000000000000000000000000000010000a");
+const VOLATILE: Address = address!("0x000000000000000000000000000000000010000b");
+
+/// The block beneficiary of the benchmark's block, `BlockEnv`'s default.
+const BENEFICIARY: Address = Address::ZERO;
 
 /// A selector `MegaAccessControl` intercepts, and one it does not.
 const IS_DISABLED: [u8; 4] = IMegaAccessControl::isVolatileDataAccessDisabledCall::SELECTOR;
@@ -138,6 +151,35 @@ fn logger_code() -> Bytes {
             .append(LOG2);
     }
     code.stop().build()
+}
+
+/// Loads `REPEAT` slots of its own storage.
+fn reader_code() -> Bytes {
+    let mut code = BytecodeBuilder::default();
+    for slot in 0..REPEAT {
+        code = code.push_number(slot).append(SLOAD).append(POP);
+    }
+    code.stop().build()
+}
+
+/// Reads the block's timestamp and number and the beneficiary's balance `REPEAT` times, then calls
+/// the Oracle, whose code is [`reader_code`].
+fn volatile_code() -> Bytes {
+    let mut code = BytecodeBuilder::default();
+    for _ in 0..REPEAT {
+        code = code
+            .append_many([TIMESTAMP, POP, NUMBER, POP])
+            .push_address(BENEFICIARY)
+            .append(BALANCE)
+            .append(POP);
+    }
+    code.append_many([PUSH0, PUSH0, PUSH0, PUSH0, PUSH0])
+        .push_address(ORACLE_CONTRACT_ADDRESS)
+        .append(GAS)
+        .append(CALL)
+        .append(POP)
+        .stop()
+        .build()
 }
 
 /// Writes `REPEAT` fresh slots, then emits `REPEAT` two-topic logs of 32 bytes: both kinds of
@@ -269,6 +311,9 @@ fn bench_transact(c: &mut Criterion) {
         .account_code(INTERCEPTED, system_caller_code(IS_DISABLED))
         .account_code(MISSING, system_caller_code(UNKNOWN_SELECTOR))
         .account_code(LIMITED, limited_code())
+        .account_code(READER, reader_code())
+        .account_code(VOLATILE, volatile_code())
+        .account_code(ORACLE_CONTRACT_ADDRESS, reader_code())
         .account_code(ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE);
     let cfg = mega_context(db.clone()).cfg().clone();
 
@@ -283,13 +328,31 @@ fn bench_transact(c: &mut Criterion) {
         ("calldata", call_tx(CALLEE, Bytes::from(vec![0xab_u8; CALLDATA_LEN]), 30_000_000)),
         ("intercepted_calls", call_tx(INTERCEPTED, Bytes::new(), 30_000_000)),
         ("system_address_misses", call_tx(MISSING, Bytes::new(), 30_000_000)),
+        ("storage_reads", call_tx(READER, Bytes::new(), 30_000_000)),
+        ("volatile_reads", call_tx(VOLATILE, Bytes::new(), 30_000_000)),
     ];
 
     let mut group = c.benchmark_group("transact");
     for (workload, tx) in workloads {
-        let satin =
-            MegaEvm::new(mega_context(db.clone())).execute_transaction(OpTx(tx.clone())).unwrap();
+        let mut evm = MegaEvm::new(mega_context(db.clone()));
+        let satin = evm.execute_transaction(OpTx(tx.clone())).unwrap();
         assert!(satin.result.is_success(), "{workload}: {:?}", satin.result);
+        // Only the volatile workload reads what detention caps, and it must read every kind it is
+        // here to measure.
+        let detention = evm.ctx().detention();
+        if workload == "volatile_reads" {
+            assert_eq!(
+                detention.accessed(),
+                VolatileDataAccess::TIMESTAMP |
+                    VolatileDataAccess::BLOCK_NUMBER |
+                    VolatileDataAccess::BENEFICIARY_BALANCE |
+                    VolatileDataAccess::ORACLE,
+                "volatile_reads: every read must be marked",
+            );
+            assert!(detention.compute_limit().is_some(), "volatile_reads: the reads must detain");
+        } else {
+            assert_eq!(detention.compute_limit(), None, "{workload}: nothing here is volatile");
+        }
         // Every transaction pays its body's history; the two workloads that are here to measure a
         // history charge pay what that charge is worth.
         let body = TX_BODY_SIZE + tx.base.data.len() as u64;
