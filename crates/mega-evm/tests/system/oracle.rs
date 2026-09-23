@@ -307,7 +307,7 @@ fn test_a_hint_that_crosses_the_data_size_limit_is_not_forwarded() {
     let limit = counted - 1;
     let (outcome, hints) = run_with_oracle_under(
         system_db(),
-        call_tx(ORACLE_CONTRACT_ADDRESS, data.clone(), U256::ZERO),
+        call_tx(ORACLE_CONTRACT_ADDRESS, data, U256::ZERO),
         EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(limit),
     );
 
