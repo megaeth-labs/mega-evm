@@ -16,7 +16,9 @@
 //! counted, and a child gets [`FRAME_DATA_SHARE_NUMERATOR`] / [`FRAME_DATA_SHARE_DENOMINATOR`] of
 //! what its parent has left, under [`EvmTxRuntimeLimits::frame_data_size_limit`]. A frame that
 //! crosses its budget reverts alone and its caller resumes; a transaction that crosses its limit
-//! is stopped through the latch ([`AdditionalLimit`]).
+//! is stopped through the latch ([`AdditionalLimit`]). A creation stopped at its start still bumps
+//! its creator's nonce, and the record of that write lands on the creator: the creator is held to
+//! its budget with it before it runs on, and reverts alone if it crossed.
 //!
 //! What is counted, and when:
 //!

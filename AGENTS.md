@@ -169,6 +169,7 @@ Every later mechanism plugs into these; a change to one comes back to this layer
   One 40-byte record per account or storage write: a slot's first change in the transaction (taken back on write-back to the original value), a value transfer's sender and recipient, a creation's creator nonce and created account, a `SELFDESTRUCT` moving value to another account, an applied EIP-7702 authority, the transaction's value recipient or created account.
   The sender's own account is part of the transaction body: it is never a record, and a frame running as the sender (through an EIP-7702 delegation) counts it as recorded.
   Records are deduplicated per frame (a frame's account is recorded once) and live on the frame's lane: a success merges the lane into the caller's, a failure discards it; a creator's nonce record survives the creation's failure once the nonce was bumped.
+  That record lands on the creator after the creation's own check, so the creator is held to its budget with it before it runs on, and reverts alone if it crossed (`AdditionalLimit::on_frame_return`).
   The KV count a node reports is the write-record count.
 - **Lanes stay aligned with frames.**
   `frame_init` pushes one lane per frame result revm will return, an empty one for a frame answered without running (the latch, the depth guard, an interceptor, an inspector); `frame_return_result` pops it, and `last_frame_result` pops the outermost one when it never ran.

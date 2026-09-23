@@ -18,8 +18,8 @@ use mega_evm::{
 };
 use revm::{
     bytecode::opcode::{
-        CALL, CREATE, GAS, LOG0, POP, PUSH0, RETURN, RETURNDATACOPY, RETURNDATASIZE, REVERT,
-        SELFDESTRUCT, STOP,
+        CALL, CREATE, CREATE2, GAS, LOG0, POP, PUSH0, RETURN, RETURNDATACOPY, RETURNDATASIZE,
+        REVERT, SELFDESTRUCT, STOP,
     },
     context::result::{ExecutionResult, HaltReason},
     context_interface::cfg::GasId,
@@ -1076,4 +1076,100 @@ fn test_a_body_over_the_limit_is_stopped_before_an_interceptor() {
         }
         .revert_data(),
     );
+}
+
+/* ---------- the nonce record a failed creation leaves its creator ---------- */
+
+/// Logs `data_len` bytes, then attempts an empty creation — `CREATE2` when `create2` — and stops.
+fn log_then_create(data_len: u64, create2: bool) -> Bytes {
+    let builder = BytecodeBuilder::default().push_number(data_len).push_number(0_u64).append(LOG0);
+    let builder = if create2 {
+        builder.append_many([PUSH0, PUSH0, PUSH0, PUSH0]).append(CREATE2)
+    } else {
+        builder.append_many([PUSH0, PUSH0, PUSH0]).append(CREATE)
+    };
+    builder.append(POP).append(STOP).build()
+}
+
+/// Calls `target` with no value and returns whatever it returned or reverted with.
+fn call_and_return_its_output(target: Address) -> Bytes {
+    then_call(BytecodeBuilder::default(), target)
+        .append(RETURNDATASIZE)
+        .append_many([PUSH0, PUSH0])
+        .append(RETURNDATACOPY)
+        .append(RETURNDATASIZE)
+        .append(PUSH0)
+        .append(RETURN)
+        .build()
+}
+
+/// A creation too big for its share still bumps its creator's nonce, and the creator's record of
+/// that write outlives the creation: it lands on the creator's own lane. The creator is held to
+/// its budget with it before it runs on.
+///
+/// `A` calls `B` with 4,000 bytes left, so `B` may keep 3,920. `B` logs, then creates: the
+/// creation's start records the created account and `B`'s nonce, 80 bytes against a share below
+/// 80, so it is stopped with room to spare in the transaction. When the log left `B` 40 bytes,
+/// `B` keeps the nonce record at exactly its budget and succeeds. When it left 39, the record puts
+/// `B` one byte over: `B` reverts alone, its log and its nonce with it, and `A` resumes and
+/// returns `B`'s revert. Either way the history the transaction pays is that of the bytes it
+/// keeps.
+#[test]
+fn test_a_failed_creations_nonce_record_holds_its_creator_to_its_budget() {
+    const A_BUDGET: u64 = 4_000;
+    let b_budget = share(A_BUDGET);
+    let limit = mega_evm::TX_BODY_SIZE + A_BUDGET;
+    let history_of = |usage: LimitUsage| mega_evm::history_gas(usage.data_size).unwrap();
+    let run = |left: u64, create2: bool, inspect: bool| {
+        let logged = b_budget - left - 32;
+        let db = funded()
+            .account_code(A, call_and_return_its_output(B))
+            .account_code(B, log_then_create(logged, create2));
+        let limits = EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(limit);
+        let mut evm = MegaEvm::new(context(db).with_tx_runtime_limits(limits))
+            .with_inspector(Probe::default());
+        Evm::set_inspector_enabled(&mut evm, inspect);
+        let outcome = evm.execute_transaction(call(CALLER, A, U256::ZERO, GAS_LIMIT)).unwrap();
+        (outcome, evm.inspector().clone())
+    };
+
+    for create2 in [false, true] {
+        for inspect in [false, true] {
+            let case = format!("create2 {create2}, inspect {inspect}");
+            let (fits, probe) = run(WRITE_RECORD_SIZE, create2, inspect);
+            assert!(fits.result.is_success(), "{case}: {:?}", fits.result);
+            assert_eq!(fits.limit_exceeded, None, "{case}");
+            assert_eq!(
+                fits.usage,
+                LimitUsage { data_size: mega_evm::TX_BODY_SIZE + b_budget, write_records: 1 },
+                "{case}: B keeps the nonce record at exactly its budget",
+            );
+            assert_eq!(fits.gas.history, history_of(fits.usage), "{case}");
+            assert_eq!(fits.result.logs().len(), 1, "{case}");
+            assert_eq!(fits.state[&B].info.nonce, 1, "{case}");
+            assert_eq!(fits.result.output().unwrap(), &Bytes::new(), "{case}: B stopped");
+            if inspect {
+                assert_eq!(probe.creates.len(), 1, "{case}");
+                assert_eq!(probe.creates[0].0, InstructionResult::Revert, "{case}");
+            }
+
+            let (over, _) = run(WRITE_RECORD_SIZE - 1, create2, inspect);
+            assert!(over.result.is_success(), "{case}: A resumes: {:?}", over.result);
+            assert_eq!(over.limit_exceeded, None, "{case}: a frame budget does not latch");
+            assert_eq!(
+                over.usage,
+                LimitUsage { data_size: mega_evm::TX_BODY_SIZE, write_records: 0 },
+                "{case}: B's log and nonce record went with its revert",
+            );
+            assert_eq!(over.gas.history, history_of(over.usage), "{case}: and their history");
+            assert!(over.result.logs().is_empty(), "{case}");
+            assert!(over.state.get(&B).is_none_or(|b| b.info.nonce == 0), "{case}");
+            assert_eq!(
+                over.result.output().unwrap().as_ref(),
+                MegaLimitExceeded { kind: LimitKind::DataSize.as_u8(), limit: b_budget }
+                    .abi_encode(),
+                "{case}: B reverted on its own budget",
+            );
+        }
+    }
 }

@@ -447,8 +447,9 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
         }
     }
 
-    /// Runs the frame on top of the stack, unless the transaction is latched: then the frame
-    /// returns the stop without running another instruction (see [`before_frame_run`]).
+    /// Runs the frame on top of the stack, unless it has a stop to return: the latched one, or
+    /// its own when a failed creation put it over its budget. Then the frame returns the stop
+    /// without running another instruction (see [`before_frame_run`]).
     #[inline]
     fn frame_run(
         &mut self,
@@ -582,8 +583,8 @@ where
         Ok(ItemOrResult::Item(frame))
     }
 
-    /// revm's inspected frame run, with the latch short-circuit of [`EvmTr::frame_run`]: a frame
-    /// of a latched transaction returns the stop without a step, and the inspector sees it end.
+    /// revm's inspected frame run, with the stop short-circuit of [`EvmTr::frame_run`]: a frame
+    /// with a stop to return returns it without a step, and the inspector sees it end.
     #[inline]
     fn inspect_frame_run(
         &mut self,
@@ -625,20 +626,23 @@ fn meter_deployed_code<DB: Database, ExtEnvs: ExternalEnvTypes>(
     action
 }
 
-/// The action of a frame about to run: the latched stop, returned without running an
-/// instruction, when the transaction is latched; `None` otherwise, and the frame runs.
+/// The action of a frame about to run: the stop it returns without running an instruction, when
+/// it has one ([`stop_before_run`](crate::AdditionalLimit::stop_before_run)); `None` otherwise,
+/// and the frame runs.
 ///
-/// A frame runs here for the first time or after a child returned into it. Under a latch it is
-/// the latter: the child that crossed the limit reverted, and its caller must not resume.
+/// A frame runs here for the first time or after a child returned into it. A stop is always the
+/// latter. Under a latch, the child that crossed the limit reverted, and its caller must not
+/// resume. Without one, the child was a failed creation whose nonce record put its creator over
+/// its budget, and the creator reverts alone.
 #[inline]
 fn before_frame_run<DB: Database, ExtEnvs: ExternalEnvTypes>(
-    ctx: &MegaContext<DB, ExtEnvs>,
+    ctx: &mut MegaContext<DB, ExtEnvs>,
     frame: &EthFrame<EthInterpreter>,
 ) -> Option<InterpreterAction> {
-    let latched = ctx.additional_limit.latched()?;
+    let stop = ctx.additional_limit.stop_before_run()?;
     Some(InterpreterAction::new_return(
         InstructionResult::Revert,
-        latched.revert_data(),
+        stop.revert_data(),
         frame.interpreter.gas,
     ))
 }

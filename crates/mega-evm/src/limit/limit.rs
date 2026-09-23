@@ -40,6 +40,9 @@ pub struct AdditionalLimit {
     limits: EvmTxRuntimeLimits,
     /// The transaction-level stop, once a limit latched one.
     latched: Option<LimitCheck>,
+    /// The stop the frame a child returned into must return instead of running on, when what the
+    /// child left it put it over a limit. See [`on_frame_return`](Self::on_frame_return).
+    resume_stop: Option<LimitCheck>,
     /// Whether the transaction's call target is an applied EIP-7702 authority, whose account
     /// write the transaction's lane already counts.
     target_is_authority: bool,
@@ -88,6 +91,7 @@ impl AdditionalLimit {
         self.tracker.reset();
         self.staged = None;
         self.latched = None;
+        self.resume_stop = None;
         self.target_is_authority = false;
         self.sender = Address::ZERO;
         self.frame_began = false;
@@ -136,6 +140,14 @@ impl AdditionalLimit {
             }
         }
         LimitCheck::WithinLimit
+    }
+
+    /// The stop the running frame returns instead of running another instruction: the latched
+    /// one, or the one [`on_frame_return`](Self::on_frame_return) left for a caller its child put
+    /// over its budget. Taking it clears the latter, which stops one frame.
+    pub(crate) fn stop_before_run(&mut self) -> Option<LimitCheck> {
+        let resume_stop = self.resume_stop.take();
+        self.latched.or(resume_stop)
     }
 
     /// Rewrites `result` to the latched stop, when the transaction is latched: a success or a
@@ -538,6 +550,16 @@ impl AdditionalLimit {
     /// a failure discards it. Under a latch the result is first rewritten to the latched stop,
     /// whatever produced it (an interceptor, an inspector's rewrite), so no success passes it.
     ///
+    /// Then the caller is held to its limits with what it now holds, and a crossing is the stop
+    /// it returns before it runs on ([`stop_before_run`](Self::stop_before_run)): its own
+    /// frame-local revert for its budget, the latch for the transaction's limit. One return adds
+    /// to a caller what no check has held it to: the nonce record a failed creation leaves its
+    /// creator. The creation counted that record on its own lane, against its own share, and a
+    /// creation stopped for crossing that share still bumps the nonce — so a creator with fewer
+    /// bytes left than a record would keep one it may not. Any other return leaves the caller
+    /// within its limits: a failure hands it nothing, and a success hands it no more than the
+    /// share it gave.
+    ///
     /// Returns the history gas the caller paid for records this frame did not keep, which the
     /// caller gets back once the frame has merged into it.
     #[must_use = "the history of the records the frame did not keep goes back to its caller"]
@@ -547,7 +569,10 @@ impl AdditionalLimit {
         // opcode, which failed after making it.
         self.pending_frame_charge = FrameCharge::NONE;
         let success = result.instruction_result().is_ok();
-        self.tracker.pop(success).map_or(0, |lane| lane.history_refund(success))
+        let refund = self.tracker.pop(success).map_or(0, |lane| lane.history_refund(success));
+        let check = self.check();
+        self.resume_stop = check.exceeded_limit().then_some(check);
+        refund
     }
 
     /// Settles the transaction's outermost frame: pops its lane unless the frame already
