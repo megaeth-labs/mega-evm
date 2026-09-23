@@ -119,10 +119,15 @@ jobs:
           devnet_tar=$(read_var DEVNET_TAR)
           # The runner downloads the develop release unless REVM_STATETEST_STABLE is set.
           grep -q '^    MAIN_TAR="fixtures_develop.tar.gz"$' "$script"
+          main="$main_url/$main_version/fixtures_develop.tar.gz"
+          devnet="$devnet_url/$devnet_version/$devnet_tar"
+          # The cache is keyed on the archives themselves: another name or host at the same
+          # version is another download.
+          archives=$(printf '%s\n%s\n' "$main" "$devnet" | sha256sum | cut -c1-16)
           {
-            echo "main=$main_url/$main_version/fixtures_develop.tar.gz"
-            echo "devnet=$devnet_url/$devnet_version/$devnet_tar"
-            echo "key=eest-state-tests-$main_version-$devnet_version"
+            echo "main=$main"
+            echo "devnet=$devnet"
+            echo "key=eest-state-tests-$main_version-$devnet_version-$archives"
           } >> "$GITHUB_OUTPUT"
 
       - name: Restore the fixtures
