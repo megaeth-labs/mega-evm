@@ -337,61 +337,6 @@ fn test_rex6_call_to_eip7702_delegator_to_beneficiary_enabled_marks_beneficiary(
 // Existing-target SELFDESTRUCT accounting
 // ============================================================================
 
-/// REX6: SELFDESTRUCT to an *existing* non-beneficiary target with value must
-/// record `DataSize` +40 and KV +1 for the balance update, but no `StateGrowth`
-/// (the target already exists). REX5 left all three at zero.
-///
-/// Driver contract is not the beneficiary, target is not the beneficiary;
-/// keeps the detention and beneficiary marks out of the way of the accounting
-/// assertion.
-#[test]
-fn test_rex6_selfdestruct_to_existing_target_records_data_size_and_kv() {
-    let code = BytecodeBuilder::default()
-        .push_address(EXISTING_NON_BENEFICIARY)
-        .append(SELFDESTRUCT)
-        .build();
-
-    let build_db = || {
-        MemoryDatabase::default()
-            .account_balance(CALLER, U256::from(1_000_000_000u64))
-            .account_code(MIDDLE, code.clone())
-            .account_balance(MIDDLE, U256::from(1_000_000u64))
-            // Pre-fund EXISTING_NON_BENEFICIARY so it is *not* empty.
-            .account_balance(EXISTING_NON_BENEFICIARY, U256::from(1u64))
-    };
-    let tx = TxEnvBuilder::default().caller(CALLER).call(MIDDLE).gas_limit(1_000_000).build_fill();
-
-    // REX5 records nothing for an existing-target balance update.
-    let (result_rex5, usage_rex5, _, _) =
-        transact_with_beneficiary(MegaSpecId::REX5, &mut build_db(), tx.clone()).unwrap();
-    assert!(result_rex5.result.is_success(), "REX5 tx should succeed: {result_rex5:?}");
-    assert_eq!(usage_rex5.state_growth, 0, "REX5 must not record state growth (target exists)");
-    let baseline_data_size = usage_rex5.data_size;
-    let baseline_kv = usage_rex5.kv_updates;
-
-    // REX6: existing-target arm records DataSize/KV but not StateGrowth.
-    let (result_rex6, usage_rex6, _, _) =
-        transact_with_beneficiary(MegaSpecId::REX6, &mut build_db(), tx).unwrap();
-    assert!(result_rex6.result.is_success(), "REX6 tx should succeed: {result_rex6:?}");
-    assert_eq!(
-        usage_rex6.state_growth, 0,
-        "REX6 existing-target SELFDESTRUCT must NOT record state growth: {}",
-        usage_rex6.state_growth,
-    );
-    assert!(
-        usage_rex6.data_size > baseline_data_size,
-        "REX6 must record DataSize delta vs REX5 baseline ({} > {})",
-        usage_rex6.data_size,
-        baseline_data_size,
-    );
-    assert!(
-        usage_rex6.kv_updates > baseline_kv,
-        "REX6 must record KV update delta vs REX5 baseline ({} > {})",
-        usage_rex6.kv_updates,
-        baseline_kv,
-    );
-}
-
 /// REX6 regression guard: SELFDESTRUCT to an *empty* non-beneficiary target
 /// must still go through the new-target arm (state growth + `DataSize` + KV +
 /// new-account storage gas), matching REX5's behavior for the same case.
@@ -496,37 +441,6 @@ fn test_rex6_selfdestruct_db_error_on_target_surfaces() {
         Ok(result) => !result.result.is_success(), // or a non-success halt
     };
     assert!(surfaced, "a DB error on the SELFDESTRUCT target must surface, not be swallowed");
-}
-
-/// REX6: SELFDESTRUCT to SELF on a non-same-tx-created account is an EIP-6780 balance no-op
-/// (self → self transfer, no account-info write, account not deleted), so the existing-target
-/// accounting arm must record NOTHING — same as REX5. Guards against over-recording `DataSize`
-/// +40 / KV +1 (and a spurious additional-limit revert) for a write that never happens.
-#[test]
-fn test_rex6_selfdestruct_to_self_records_no_existing_target_accounting() {
-    let code = BytecodeBuilder::default().push_address(MIDDLE).append(SELFDESTRUCT).build();
-    let build_db = || {
-        MemoryDatabase::default()
-            .account_balance(CALLER, U256::from(1_000_000_000u64))
-            .account_code(MIDDLE, code.clone())
-            .account_balance(MIDDLE, U256::from(1_000_000u64))
-    };
-    let tx = TxEnvBuilder::default().caller(CALLER).call(MIDDLE).gas_limit(1_000_000).build_fill();
-
-    let (r5, u5, _, _) =
-        transact_with_beneficiary(MegaSpecId::REX5, &mut build_db(), tx.clone()).unwrap();
-    let (r6, u6, _, _) = transact_with_beneficiary(MegaSpecId::REX6, &mut build_db(), tx).unwrap();
-    assert!(r5.result.is_success() && r6.result.is_success());
-    assert_eq!(
-        u6.data_size, u5.data_size,
-        "SELFDESTRUCT to self is a no-op; REX6 must not over-record DataSize (rex6={} rex5={})",
-        u6.data_size, u5.data_size,
-    );
-    assert_eq!(
-        u6.kv_updates, u5.kv_updates,
-        "SELFDESTRUCT to self is a no-op; REX6 must not over-record KV (rex6={} rex5={})",
-        u6.kv_updates, u5.kv_updates,
-    );
 }
 
 /// REX6: a malformed SELFDESTRUCT (stack underflow) executed by the beneficiary with volatile

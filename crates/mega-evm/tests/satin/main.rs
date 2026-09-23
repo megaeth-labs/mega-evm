@@ -3,6 +3,7 @@
 mod common;
 mod contract_size;
 mod data_size;
+mod data_size_counts;
 mod db_error;
 mod equivalence;
 mod history_exemption;

@@ -300,6 +300,8 @@ mod tests {
         assert_eq!(AUTHORIZATION_SIZE, 101);
         assert_eq!(ACCESS_LIST_ADDRESS_SIZE, 20);
         assert_eq!(ACCESS_LIST_SLOT_SIZE, 32);
+        // A storage write and an account write are the same record.
+        assert_eq!(WRITE_RECORD, LimitUsage { data_size: WRITE_RECORD_SIZE, write_records: 1 });
     }
 
     #[test]

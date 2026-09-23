@@ -17,7 +17,10 @@ use mega_evm::{
     FRAME_DATA_SHARE_NUMERATOR, WRITE_RECORD_SIZE,
 };
 use revm::{
-    bytecode::opcode::{CALL, CREATE, GAS, LOG0, POP, PUSH0, RETURN, REVERT, STOP},
+    bytecode::opcode::{
+        CALL, CREATE, GAS, LOG0, POP, PUSH0, RETURN, RETURNDATACOPY, RETURNDATASIZE, REVERT,
+        SELFDESTRUCT, STOP,
+    },
     context::result::{ExecutionResult, HaltReason},
     context_interface::cfg::GasId,
     interpreter::{
@@ -658,34 +661,53 @@ fn gas_where_the_write_is_counted(code: &Bytes, data_limit: u64) -> u64 {
 /// the record is counted, and only for a record the limit keeps.
 const FRESH_SLOT_COUNTED_AT: u64 = 162_306;
 
-/// A fresh slot's write meets two limits, and the one that binds first is the one reported.
+/// A write meets two limits, and the one that binds first is the one reported.
 ///
-/// The `SSTORE` has to finish before its record exists. Below [`FRESH_SLOT_COUNTED_AT`] that is
-/// an out-of-gas, and the record is not counted. At that gas the record is counted: a data-size
-/// limit it crosses stops the transaction, and the record's history is not charged because the
-/// record is not kept. A limit the record fits costs that history on top — one write record at
-/// the cost per history byte — and the write succeeds only once the history is paid. Short of
-/// it, the same write halts out of gas.
+/// The opcode has to finish before its record exists: short of that it is an out-of-gas, and the
+/// record is not counted. Once it finishes the record is counted, and a data-size limit it
+/// crosses stops the transaction; the record's history is not charged, because the record is not
+/// kept. A limit the record fits costs that history on top, and the write succeeds only once the
+/// history is paid. Short of it, the same write halts out of gas. So a crossing limit moves the
+/// out-of-gas boundary down by exactly the record's history, at a storage write, a log and a
+/// `SELFDESTRUCT` alike.
 #[test]
 fn test_whichever_of_gas_and_data_size_binds_first_is_reported() {
+    let selfdestruct = BytecodeBuilder::default().push_address(B).append(SELFDESTRUCT).build();
+    let sites = [
+        ("a fresh slot", fresh_slot(), WRITE_RECORD_SIZE),
+        ("a log of one byte", log0(1), mega_evm::LOG_BASE_SIZE + 1),
+        ("a SELFDESTRUCT that moves value", selfdestruct, WRITE_RECORD_SIZE),
+    ];
+    for (name, code, bytes) in sites {
+        // One byte under the record, the record itself crosses.
+        let crosses = mega_evm::TX_BODY_SIZE + bytes - 1;
+        let fits = mega_evm::TX_BODY_SIZE + bytes;
+        let counted_at = gas_where_the_write_is_counted(&code, crosses);
+        let kept_at = gas_where_the_write_is_counted(&code, fits);
+        let history = mega_evm::history_gas(bytes).expect("the record has a price");
+
+        assert_eq!(kept_at - counted_at, history, "{name}: a kept record costs its history");
+        assert!(matches!(bound_at(&code, counted_at - 1, crosses), Bound::OutOfGas), "{name}");
+        assert!(matches!(bound_at(&code, counted_at, crosses), Bound::DataSize), "{name}");
+        assert!(matches!(bound_at(&code, kept_at, crosses), Bound::DataSize), "{name}");
+        assert!(matches!(bound_at(&code, counted_at, fits), Bound::OutOfGas), "{name}");
+        assert!(matches!(bound_at(&code, kept_at - 1, fits), Bound::OutOfGas), "{name}");
+        assert!(matches!(bound_at(&code, kept_at, fits), Bound::Success), "{name}");
+    }
+}
+
+/// The fresh slot's figure, [`FRESH_SLOT_COUNTED_AT`], taken apart: what the call pays before its
+/// code runs — the gas an empty call spends — then the two pushes and the store's regular and
+/// state gas, all read from the schedule in force. The record's history comes on top only when
+/// the record is kept.
+#[test]
+fn test_the_fresh_slot_boundary_is_the_sum_of_its_parts() {
     let code = fresh_slot();
-    // The write is 40 bytes on top of the body. One byte under that, the write itself crosses.
-    let crosses = mega_evm::TX_BODY_SIZE + WRITE_RECORD_SIZE - 1;
-    let fits = mega_evm::TX_BODY_SIZE + WRITE_RECORD_SIZE;
-    let counted_at = gas_where_the_write_is_counted(&code, crosses);
-    let kept_at = gas_where_the_write_is_counted(&code, fits);
+    let counted_at =
+        gas_where_the_write_is_counted(&code, mega_evm::TX_BODY_SIZE + WRITE_RECORD_SIZE - 1);
+    let kept_at = gas_where_the_write_is_counted(&code, mega_evm::TX_BODY_SIZE + WRITE_RECORD_SIZE);
     let record_history = mega_evm::write_record_history_gas(1).expect("one record has a price");
 
-    assert_eq!(kept_at - counted_at, record_history, "a kept record costs its history and no more");
-    assert!(matches!(bound_at(&code, counted_at - 1, crosses), Bound::OutOfGas));
-    assert!(matches!(bound_at(&code, counted_at, crosses), Bound::DataSize));
-    assert!(matches!(bound_at(&code, kept_at, crosses), Bound::DataSize));
-    assert!(matches!(bound_at(&code, counted_at, fits), Bound::OutOfGas));
-    assert!(matches!(bound_at(&code, kept_at - 1, fits), Bound::OutOfGas));
-    assert!(matches!(bound_at(&code, kept_at, fits), Bound::Success));
-
-    // The figure is what the call pays before its code runs — the gas an empty call spends — then
-    // the two pushes and the store's regular and state gas, all read from the schedule in force.
     let empty_call = MegaEvm::new(context(funded().account_code(A, Bytes::from_static(&[STOP]))))
         .execute_transaction(call(CALLER, A, U256::ZERO, GAS_LIMIT))
         .unwrap();
@@ -867,5 +889,191 @@ fn test_a_stopped_start_bumps_a_creators_nonce_and_applies_no_authorization() {
             .get(&AUTHORITY)
             .is_none_or(|a| a.info.nonce == 0 && a.info.is_empty_code_hash()),
         "the delegation was not applied"
+    );
+}
+
+/* ---------- the 98% share, measured in slots ---------- */
+
+/// Enough gas for a hundred fresh slots and a call or two around them.
+const SLOTS_GAS_LIMIT: u64 = 100_000_000;
+
+/// Appends writes of the fresh slots `0..n`.
+fn write_slots(mut builder: BytecodeBuilder, n: u64) -> BytecodeBuilder {
+    for slot in 0..n {
+        builder = builder.sstore(U256::from(slot), U256::from(slot + 1));
+    }
+    builder
+}
+
+/// Appends a valueless `CALL` to `target` with all the gas, dropping its success flag.
+fn then_call(builder: BytecodeBuilder, target: Address) -> BytecodeBuilder {
+    builder
+        .append_many([PUSH0, PUSH0, PUSH0, PUSH0, PUSH0])
+        .push_address(target)
+        .append(GAS)
+        .append(CALL)
+        .append(POP)
+}
+
+/// A transaction limit that leaves the transaction's own frame room for `slots` fresh slots.
+const fn room_for(slots: u64) -> u64 {
+    mega_evm::TX_BODY_SIZE + slots * WRITE_RECORD_SIZE
+}
+
+/// Runs a call from `CALLER` to `A` over `db` under a transaction limit of `limit`.
+fn run_slots(db: MemoryDatabase, limit: u64) -> MegaTransactionOutcome {
+    MegaEvm::new(
+        context(db)
+            .with_tx_runtime_limits(EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(limit)),
+    )
+    .execute_transaction(call(CALLER, A, U256::ZERO, SLOTS_GAS_LIMIT))
+    .unwrap()
+}
+
+/// With room for 100 slots, a child may keep 98 and a grandchild 96; a parent that kept 20 leaves
+/// its child 78. A frame that crosses its share reverts alone: the transaction succeeds with what
+/// the other frames kept, and a sibling started after it gets its full share.
+#[test]
+fn test_a_child_gets_98_percent_of_what_its_parent_has_left_in_slots() {
+    assert_eq!(share(100 * WRITE_RECORD_SIZE), 98 * WRITE_RECORD_SIZE);
+    assert_eq!(share(98 * WRITE_RECORD_SIZE) / WRITE_RECORD_SIZE, 96);
+    assert_eq!(share(80 * WRITE_RECORD_SIZE) / WRITE_RECORD_SIZE, 78);
+    let stop = || BytecodeBuilder::default().stop().build();
+    let slots = |n| write_slots(BytecodeBuilder::default(), n).stop().build();
+    let calls = |target| then_call(BytecodeBuilder::default(), target).stop().build();
+    let cases: [(&str, Bytes, Bytes, Bytes, u64); 8] = [
+        ("a child that fills its share", calls(B), slots(98), stop(), 98),
+        ("a child one slot over its share", calls(B), slots(99), stop(), 0),
+        (
+            "a child that fills what a parent of 20 slots left",
+            then_call(write_slots(BytecodeBuilder::default(), 20), B).stop().build(),
+            slots(78),
+            stop(),
+            20 + 78,
+        ),
+        (
+            "a child one slot over what a parent of 20 slots left",
+            then_call(write_slots(BytecodeBuilder::default(), 20), B).stop().build(),
+            slots(79),
+            stop(),
+            20,
+        ),
+        ("a grandchild that fills its share", calls(B), calls(C), slots(96), 96),
+        ("a grandchild one slot over its share", calls(B), calls(C), slots(97), 0),
+        (
+            "a sibling after a child that crossed its share",
+            then_call(then_call(BytecodeBuilder::default(), B), C).stop().build(),
+            slots(99),
+            slots(98),
+            98,
+        ),
+        (
+            "a parent that writes after its child crossed",
+            then_call(BytecodeBuilder::default(), B)
+                .sstore(U256::ZERO, U256::from(42))
+                .stop()
+                .build(),
+            slots(99),
+            stop(),
+            1,
+        ),
+    ];
+    for (name, a, b, c, kept) in cases {
+        let db = funded().account_code(A, a).account_code(B, b).account_code(C, c);
+        let outcome = run_slots(db, room_for(100));
+        assert!(outcome.result.is_success(), "{name}: {:?}", outcome.result);
+        assert_eq!(outcome.limit_exceeded, None, "{name}: a frame budget does not latch");
+        assert_eq!(outcome.usage, LimitUsage { data_size: room_for(kept), write_records: kept });
+        if name == "a parent that writes after its child crossed" {
+            let written = |address: Address| {
+                outcome.state.get(&address).is_some_and(|account| {
+                    account.storage.get(&U256::ZERO).is_some_and(|slot| slot.is_changed())
+                })
+            };
+            assert!(written(A), "the parent's write is kept");
+            assert!(!written(B), "the child's writes went with its revert");
+        }
+    }
+}
+
+/// The child that crosses its share reverts with `MegaLimitExceeded` naming the data size and
+/// the share it crossed, which is what its caller reads.
+#[test]
+fn test_a_child_that_crosses_its_share_reverts_with_the_share() {
+    let returns_revert_data = then_call(BytecodeBuilder::default(), B)
+        .append(RETURNDATASIZE)
+        .append_many([PUSH0, PUSH0])
+        .append(RETURNDATACOPY)
+        .append(RETURNDATASIZE)
+        .append(PUSH0)
+        .append(RETURN)
+        .build();
+    let db = funded()
+        .account_code(A, returns_revert_data)
+        .account_code(B, write_slots(BytecodeBuilder::default(), 99).stop().build());
+    let outcome = run_slots(db, room_for(100));
+    assert!(outcome.result.is_success(), "{:?}", outcome.result);
+    let reverted = MegaLimitExceeded::abi_decode(outcome.result.output().unwrap()).unwrap();
+    assert_eq!(reverted.kind, LimitKind::DataSize.as_u8());
+    assert_eq!(reverted.limit, 98 * WRITE_RECORD_SIZE);
+}
+
+/// The transaction's own frame gets what the body leaves: with room for 5 slots, 5 are kept and a
+/// sixth stops the transaction. Its frame's budget is the transaction's own limit, so the
+/// crossing is the transaction's, not a frame-local revert.
+#[test]
+fn test_the_first_frame_gets_what_the_body_leaves() {
+    let run = |n| {
+        run_slots(
+            funded().account_code(A, write_slots(BytecodeBuilder::default(), n).stop().build()),
+            room_for(5),
+        )
+    };
+    let fits = run(5);
+    assert!(fits.result.is_success(), "{:?}", fits.result);
+    assert_eq!(fits.usage.data_size, room_for(5));
+    assert_stopped(&run(6), room_for(5), room_for(6));
+}
+
+/// A body and the execution after it add up: a limit the body fits stops the transaction at the
+/// write that crosses it, calldata or no calldata.
+#[test]
+fn test_the_body_and_the_execution_add_up_to_the_stop() {
+    for calldata in [0_u64, 200] {
+        let limit = mega_evm::TX_BODY_SIZE + calldata + WRITE_RECORD_SIZE;
+        let db =
+            funded().account_code(A, write_slots(BytecodeBuilder::default(), 3).stop().build());
+        let outcome = run_at(
+            db,
+            call_with_data(CALLER, A, Bytes::from(vec![0xab; calldata as usize]), SLOTS_GAS_LIMIT),
+            limit,
+        );
+        assert_stopped(&outcome, limit, limit + WRITE_RECORD_SIZE);
+    }
+}
+
+/// A body over the limit is stopped before an interceptor could answer the transaction's own
+/// call: the stop is the first frame's answer, whatever the frame's target.
+#[test]
+fn test_a_body_over_the_limit_is_stopped_before_an_interceptor() {
+    use alloy_sol_types::SolCall;
+    use mega_evm::system::{IMegaLimitControl, LIMIT_CONTROL_ADDRESS};
+    let selector = IMegaLimitControl::remainingComputeGasCall::SELECTOR;
+    let body = mega_evm::TX_BODY_SIZE + selector.len() as u64;
+    let tx =
+        || call_with_data(CALLER, LIMIT_CONTROL_ADDRESS, Bytes::from(selector.to_vec()), GAS_LIMIT);
+    let answered = run_at(funded(), tx(), body);
+    assert!(answered.result.is_success(), "the interceptor answers: {:?}", answered.result);
+    let stopped = run_at(funded(), tx(), body - 1);
+    assert_stopped(&stopped, body - 1, body);
+    assert_eq!(
+        stopped.result.output().unwrap(),
+        &LimitCheck::ExceedsLimit {
+            kind: LimitKind::DataSize,
+            limit: body - 1,
+            used: body,
+            frame_local: false,
+        }
+        .revert_data(),
     );
 }

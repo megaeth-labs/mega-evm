@@ -301,6 +301,26 @@ mod tests {
         LimitUsage { data_size, write_records: 0 }
     }
 
+    /// The depth and the running lane follow the frame stack: a push adds a lane and a pop takes
+    /// the running one away, whatever the frame's outcome.
+    #[test]
+    fn test_depth_and_the_running_lane_follow_the_frame_stack() {
+        let mut t = FrameLimitTracker::default();
+        assert_eq!(t.depth(), 0);
+        assert!(t.current().is_none(), "no frame has started");
+        t.push(Lane::new(Some(ADDR), false, 7, 0));
+        t.push(Lane::empty(0));
+        assert_eq!(t.depth(), 2);
+        assert_eq!(t.current().unwrap().address, None, "the empty lane is the running one");
+        assert!(t.pop(false).is_some());
+        assert_eq!(t.depth(), 1);
+        assert_eq!(t.current().unwrap().budget, 7);
+        assert!(t.pop(true).is_some());
+        assert_eq!(t.depth(), 0);
+        assert!(t.current().is_none());
+        assert!(t.pop(true).is_none(), "there is nothing left to pop");
+    }
+
     /// Recording a caller on an empty stack, or on a lane with no caller below it, is a no-op.
     #[test]
     fn test_record_caller_without_a_caller_lane_is_noop() {
