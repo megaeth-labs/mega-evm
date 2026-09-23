@@ -104,6 +104,10 @@ pub(crate) fn mega_instructions<DB: Database, ExtEnvs: ExternalEnvTypes>(
 /// An opcode completes when it returns `Ok` or stops the frame successfully (`SELFDESTRUCT`
 /// returns its own `SelfDestruct` result). Any other result fails the opcode, which takes the
 /// staged write back with it.
+///
+/// The data-size check is made before the history charge. A record the limit rejects is not
+/// kept, so its history is not a charge and the stop is what the frame reports. A record the
+/// limit accepts is charged, and a charge the frame cannot pay is an out-of-gas.
 #[inline(always)]
 fn commit_after<const FROM_ALLOWANCE: bool, DB: Database, ExtEnvs: ExternalEnvTypes>(
     context: Ctx<'_, DB, ExtEnvs>,
@@ -121,11 +125,11 @@ fn commit_after<const FROM_ALLOWANCE: bool, DB: Database, ExtEnvs: ExternalEnvTy
         return result;
     }
     let (check, history) = host.additional_limit.commit_staged_record();
-    if host.prices_history() {
-        settle_history::<FROM_ALLOWANCE, _, _>(interpreter, host, history)?;
-    }
     if check.exceeded_limit() {
         return Err(stop_frame(interpreter, &check));
+    }
+    if host.prices_history() {
+        settle_history::<FROM_ALLOWANCE, _, _>(interpreter, host, history)?;
     }
     result
 }
