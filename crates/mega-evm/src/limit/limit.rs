@@ -16,8 +16,8 @@ use super::{
 use crate::storage_call_stipend;
 
 /// What the common execution layer tracks for the running transaction: the per-frame lanes of
-/// data-size bytes and write records, the record the Host staged for the running opcode, and the
-/// latch of a transaction a limit stopped.
+/// data-size bytes and write records, the state gas the transaction holds outside each frame, the
+/// record the Host staged for the running opcode, and the latch of a transaction a limit stopped.
 ///
 /// It lives on the [`MegaContext`](crate::MegaContext), is reset before each transaction and
 /// system call, and is driven by the Host (staging), the opcode wrappers (commit and discard)

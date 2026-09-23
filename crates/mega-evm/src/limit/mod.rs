@@ -2,8 +2,8 @@
 //!
 //! The common execution layer defines what a limit reports when it is crossed: the dimension
 //! ([`LimitKind`]), the verdict of a check ([`LimitCheck`]) and the revert data a stopped frame
-//! returns ([`MegaLimitExceeded`]). The mechanisms that meter a dimension (the data-size limit,
-//! detention, the state-growth and KV limits) fill these in.
+//! returns ([`MegaLimitExceeded`]). The mechanisms that meter a dimension fill these in: the
+//! data-size limit, the KV limit and the state-gas limit below, and detention for compute gas.
 //!
 //! It also counts what those limits meter at the sites the data-size limit counts: data-size
 //! bytes and write records, on a lane per frame ([`AdditionalLimit`]). The Host stages what it
@@ -42,9 +42,47 @@
 //! with the stop. The account a deposit-like transaction creates for its caller is charged all the
 //! same, because it exists whatever the transaction does.
 //!
-//! Both limits are unlimited unless a caller sets them. A block executor installs the ones its
-//! block limits carry, whose default holds a transaction to
-//! [`TX_DATA_LIMIT`](crate::constants::TX_DATA_LIMIT).
+//! # The KV limit
+//!
+//! The KV count is the write-record count the lanes keep: one record per account or storage write
+//! the transaction keeps, deduplicated per frame, taken back with a slot written back to its
+//! original value and with the frame that fails. The sender's account and the accounts fees are
+//! credited to are the body's, not records. [`EvmTxRuntimeLimits::tx_kv_update_limit`] holds it
+//! by the data-size limit's rules in its own unit: the transaction's own frame gets what the
+//! transaction has left, a child the same share of what its parent has left, under
+//! [`EvmTxRuntimeLimits::frame_kv_update_limit`]; a frame over its budget reverts alone and a
+//! transaction over its limit is stopped. Every check holds the data size before the records.
+//!
+//! A record weighs [`WRITE_RECORD_SIZE`] bytes of data size, counted and taken back with them, so
+//! the KV count never weighs more than the data size, and a KV limit binds only below the
+//! data-size limit's fortieth.
+//!
+//! # The state-gas limit
+//!
+//! EIP-8037 charges state gas for exactly the state a transaction adds, so the state a transaction
+//! grows is the state gas it spends: [`EvmTxRuntimeLimits::tx_state_gas_limit`] holds it, and
+//! nothing counts new accounts and slots beside it. What is held is net — what a frame refilled
+//! and what a failed frame rolled back is out of it — and is the state gas charged before the
+//! first frame plus what every frame on the call stack holds (the `state_gas` module). The limit is
+//! per transaction, with no frame budget: a crossing anywhere stops the transaction, reported as
+//! [`LimitKind::StateGrowth`] with the limit in gas.
+//!
+//! The limit holds each charge where it is made, once it is made, so a charge the frame cannot
+//! pay is an out-of-gas whatever the limit: the authorities' before the first frame, which are
+//! taken back on a crossing; the first frame's recipient or created account, which the first frame
+//! is then answered with the stop for; a fresh slot and a destruction's new beneficiary, which
+//! stop the frame; and a new account a `CALL`, `CALLCODE`, `CREATE` or `CREATE2` adds, whose frame
+//! is answered with the stop. Deployed code is held before `return_create` charges it, as its
+//! bytes are, so a crossing leaves no code behind. Wherever the state gas and a record cross
+//! together, the state gas is the stop reported.
+//!
+//! It is a limit on gas, so it counts state at the SALT price: a slot or an account in a bucket
+//! `m` times the minimum costs `m` times the schedule's entry, and reaches the limit that many
+//! times sooner.
+//!
+//! Every limit is unlimited unless a caller sets it. A block executor installs the ones its block
+//! limits carry, whose default holds a transaction to
+//! [`TX_DATA_LIMIT`](crate::constants::TX_DATA_LIMIT) of data size and to nothing else.
 //!
 //! # The byte table
 //!
