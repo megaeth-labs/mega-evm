@@ -35,12 +35,13 @@ As the revm fork's reference runner judges it, and more strictly where that runn
 - the post-state root and the logs hash for a transaction that executes;
 - for one the fixture expects to be rejected, the exception it names, not any error, and the pre-state left as it was (`src/exceptions.rs` maps each validation error to the names that describe it);
 - an expected output must be produced, not merely not contradicted;
-- a fixture value that does not fit its width is a failure, not a value clamped to fit.
+- a fixture value that does not fit its width is a failure, not a value clamped to fit;
+- a test name that appears twice in a file fails the file, rather than one test replacing the other.
 
 Base fees go to Optimism's base-fee vault on Satin, where Ethereum burns them.
 The runner takes the vault back out of the post-state only when the fee routing made it: the pre-state has no vault, and the vault holds exactly the base fee of the gas the transaction used.
 
-The runner skips what the reference runner skips (`src/skips.rs`), for the same reasons: the EIP-7610 collision fixtures with storage, which revm cannot see, and a transaction that cannot be built when the fixture expects it to be invalid.
+The runner skips what the reference runner skips (`src/skips.rs`), for the same reasons: the EIP-7610 collision fixtures with storage, which revm cannot see, and a transaction that cannot be built when the fixture expects it to be invalid — here only when the fixture names the reason it cannot be, an invalid signature or a blob or EIP-7702 transaction without a recipient.
 So the two runners execute the same population, and the executed and skipped counts equal the reference runner's.
 
 ## Running it

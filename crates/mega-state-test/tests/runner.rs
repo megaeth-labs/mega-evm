@@ -241,7 +241,8 @@ fn test_an_expected_output_must_be_produced() {
 
 /// Only the run's fork's entries count; every entry of a file on the skip list is skipped and
 /// counted as defined; a transaction that cannot be built is skipped when the fixture expects it
-/// invalid, and a fixture failure when it does not.
+/// invalid for the reason it cannot be, a wrong exception when the fixture names another reason,
+/// and a fixture failure when it expects none.
 #[test]
 fn test_what_is_counted_and_what_is_skipped() {
     let dir = tempfile::tempdir().unwrap();
@@ -253,31 +254,58 @@ fn test_what_is_counted_and_what_is_skipped() {
     let mut expected_invalid = unbuildable.clone();
     expected_invalid["post"]["Osaka"][0]["expectException"] =
         json!("TransactionException.INVALID_SIGNATURE_VRS");
+    let mut other_reason = unbuildable.clone();
+    other_reason["post"]["Osaka"][0]["expectException"] =
+        json!("TransactionException.INTRINSIC_GAS_TOO_LOW");
     let others = write(
         dir.path(),
         "o.json",
-        json!({ "a_both": both, "b_expected_invalid": expected_invalid, "c_unbuildable": unbuildable }),
+        json!({
+            "a_both": both,
+            "b_expected_invalid": expected_invalid,
+            "c_unbuildable": unbuildable,
+            "d_other_reason": other_reason,
+        }),
     );
 
     let report = run(&[collision, others], config(Mode::Equivalence, Fork::Osaka));
     let outcomes = outcomes(&report);
-    assert_eq!(outcomes.len(), 4, "one entry per unit for Osaka, none for Amsterdam");
+    assert_eq!(outcomes.len(), 5, "one entry per unit for Osaka, none for Amsterdam");
     assert_eq!(outcomes[0], &Outcome::Passed);
     assert_eq!(
         outcomes[1],
         &Outcome::Skipped { reason: SkipReason::UnbuildableInvalidTransaction }
     );
     assert_eq!(failure_kind(outcomes[2]), Some(FailureKind::Fixture));
-    assert_eq!(outcomes[3], &Outcome::Skipped { reason: SkipReason::CreateCollisionWithStorage });
+    assert_eq!(failure_kind(outcomes[3]), Some(FailureKind::WrongException));
+    assert_eq!(outcomes[4], &Outcome::Skipped { reason: SkipReason::CreateCollisionWithStorage });
     let summary = report.summary();
-    assert_eq!((summary.defined, summary.executed, summary.skipped_total()), (4, 2, 2));
+    assert_eq!((summary.defined, summary.executed, summary.skipped_total()), (5, 3, 2));
     assert_eq!(
-        summary.gate(Fork::Osaka, Some(2), Some(2), false),
-        ["1 failed tests no deviation explains"]
+        summary.gate(Fork::Osaka, Some(3), Some(2), false),
+        ["2 failed tests no deviation explains"]
     );
     assert_eq!(
-        summary.gate(Fork::Osaka, Some(3), Some(1), false)[1..],
-        ["2 tests executed, 3 pinned".to_string(), "2 tests skipped, 1 pinned".to_string()]
+        summary.gate(Fork::Osaka, Some(4), Some(1), false)[1..],
+        ["3 tests executed, 4 pinned".to_string(), "2 tests skipped, 1 pinned".to_string()]
+    );
+}
+
+/// A test name that appears twice in a file fails the file, rather than the second test silently
+/// replacing the first.
+#[test]
+fn test_a_duplicate_test_name_fails_the_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let unit = fill_from_ethereum(unit(&[Fork::Osaka], json!({})));
+    let path = dir.path().join("twice.json");
+    std::fs::write(&path, format!("{{\"t\": {unit}, \"t\": {unit}}}")).unwrap();
+    let report = run(&[path], config(Mode::Equivalence, Fork::Osaka));
+    assert!(report.results.is_empty());
+    assert_eq!(report.file_failures.len(), 1);
+    assert!(
+        report.file_failures[0].1.detail.contains("appears twice"),
+        "{:?}",
+        report.file_failures
     );
 }
 

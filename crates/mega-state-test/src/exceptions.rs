@@ -20,6 +20,8 @@ use mega_evm::{
     revm::context::result::{EVMError, InvalidTransaction},
 };
 
+use crate::types::{TestError, TestUnit};
+
 /// The prefix of every transaction exception name.
 const PREFIX: &str = "TransactionException.";
 
@@ -76,12 +78,50 @@ pub fn check<DBError>(
     let EVMError::Transaction(OpTransactionError::Base(invalid)) = error else {
         return Err(Mismatch::Unnamed);
     };
-    let got = names(invalid);
+    check_names(expected, names(invalid))
+}
+
+/// The exception names a transaction the fixture types cannot build satisfies: an invalid
+/// signature for one without a key to sign it or with a key that recovers no sender, a creation
+/// for a blob or EIP-7702 transaction without a recipient. Empty for anything else.
+pub fn unbuildable_names(error: &TestError, unit: &TestUnit) -> &'static [&'static str] {
+    let invalid_type = || {
+        if unit.transaction.max_fee_per_blob_gas.is_some() {
+            &["TYPE_3_TX_CONTRACT_CREATION"][..]
+        } else if unit.transaction.authorization_list.is_some() {
+            &["TYPE_4_TX_CONTRACT_CREATION"][..]
+        } else {
+            &[][..]
+        }
+    };
+    match error {
+        TestError::UnknownPrivateKey(_) => &["INVALID_SIGNATURE_VRS"],
+        TestError::InvalidTransactionType => invalid_type(),
+        TestError::UnexpectedException { got_exception, .. } => match got_exception.as_deref() {
+            Some("Missing secret key") => &["INVALID_SIGNATURE_VRS"],
+            Some("Invalid transaction type") => invalid_type(),
+            _ => &[],
+        },
+    }
+}
+
+/// Whether a transaction the fixture types cannot build is invalid for one of the reasons
+/// `expected` names.
+pub fn check_unbuildable(
+    expected: &str,
+    error: &TestError,
+    unit: &TestUnit,
+) -> Result<(), Mismatch> {
+    check_names(expected, unbuildable_names(error, unit))
+}
+
+/// Whether `got`, the names an error satisfies, includes one of the ones `expected` names.
+fn check_names(expected: &str, got: &'static [&'static str]) -> Result<(), Mismatch> {
     if got.is_empty() {
         return Err(Mismatch::Unnamed);
     }
-    let expected = expected.split('|').map(|name| name.trim().strip_prefix(PREFIX).unwrap_or(name));
-    let mut expected = expected.peekable();
+    let mut expected =
+        expected.split('|').map(|name| name.trim().strip_prefix(PREFIX).unwrap_or(name)).peekable();
     if expected.peek().is_some() && expected.any(|name| got.contains(&name)) {
         Ok(())
     } else {
@@ -174,5 +214,95 @@ mod tests {
         let error = tx_error(InvalidTransaction::EmptyBlobs);
         assert_eq!(check("TYPE_3_TX_ZERO_BLOBS", &error), Ok(()));
         assert!(check("", &error).is_err());
+    }
+
+    fn unit(transaction: serde_json::Value) -> TestUnit {
+        let mut tx = serde_json::json!({
+            "data": ["0x"], "gasLimit": ["0x5208"], "nonce": "0x00", "value": ["0x00"],
+        });
+        for (key, value) in transaction.as_object().unwrap() {
+            tx[key] = value.clone();
+        }
+        serde_json::from_value(serde_json::json!({
+            "env": {
+                "currentCoinbase": "0x0000000000000000000000000000000000000000",
+                "currentGasLimit": "0x01", "currentNumber": "0x01", "currentTimestamp": "0x01",
+            },
+            "pre": {}, "post": {}, "transaction": tx,
+        }))
+        .unwrap()
+    }
+
+    /// A transaction that cannot be built is invalid for the reason its shape says, and a fixture
+    /// that expects another reason does not get a skip.
+    #[test]
+    fn test_unbuildable_transactions_are_matched_by_name() {
+        let missing_key = TestError::UnexpectedException {
+            expected_exception: None,
+            got_exception: Some("Missing secret key".into()),
+        };
+        let plain = unit(serde_json::json!({}));
+        assert_eq!(
+            check_unbuildable("TransactionException.INVALID_SIGNATURE_VRS", &missing_key, &plain),
+            Ok(())
+        );
+        assert_eq!(
+            check_unbuildable("TransactionException.INTRINSIC_GAS_TOO_LOW", &missing_key, &plain),
+            Err(Mismatch::Wrong { got: &["INVALID_SIGNATURE_VRS"] })
+        );
+        let bad_key = TestError::UnknownPrivateKey(Default::default());
+        assert_eq!(
+            check_unbuildable("TransactionException.INVALID_SIGNATURE_VRS", &bad_key, &plain),
+            Ok(())
+        );
+
+        let blob = unit(serde_json::json!({ "maxFeePerBlobGas": "0x01" }));
+        let auth = unit(serde_json::json!({ "authorizationList": [] }));
+        for error in [
+            TestError::InvalidTransactionType,
+            TestError::UnexpectedException {
+                expected_exception: None,
+                got_exception: Some("Invalid transaction type".into()),
+            },
+        ] {
+            assert_eq!(
+                check_unbuildable(
+                    "TransactionException.TYPE_3_TX_CONTRACT_CREATION",
+                    &error,
+                    &blob
+                ),
+                Ok(())
+            );
+            assert!(check_unbuildable(
+                "TransactionException.TYPE_4_TX_CONTRACT_CREATION",
+                &error,
+                &blob
+            )
+            .is_err());
+            assert_eq!(
+                check_unbuildable(
+                    "TransactionException.TYPE_4_TX_CONTRACT_CREATION",
+                    &error,
+                    &auth
+                ),
+                Ok(())
+            );
+            assert_eq!(
+                check_unbuildable(
+                    "TransactionException.TYPE_3_TX_CONTRACT_CREATION",
+                    &error,
+                    &plain
+                ),
+                Err(Mismatch::Unnamed)
+            );
+        }
+        let overflow = TestError::UnexpectedException {
+            expected_exception: None,
+            got_exception: Some("Nonce overflow".into()),
+        };
+        assert_eq!(
+            check_unbuildable("TransactionException.NONCE_IS_MAX", &overflow, &plain),
+            Err(Mismatch::Unnamed)
+        );
     }
 }

@@ -11,7 +11,10 @@
 //! where that runner is lenient:
 //!
 //! - an expected exception must be the one the fixture names ([`exceptions`]), not any error, and
-//!   the state it leaves must be the fixture's post-state;
+//!   the state it leaves must be the fixture's post-state; a transaction the fixture types cannot
+//!   build is skipped only when the fixture names the reason it cannot be;
+//! - a test name that appears twice in a file fails the file, rather than one test replacing the
+//!   other;
 //! - an expected output must be produced, not merely not contradicted;
 //! - a fixture value that does not fit its width is a failure, not a value clamped to fit.
 //!
@@ -47,7 +50,10 @@ use mega_evm::{
         ExecuteCommitEvm,
     },
 };
-use serde::Serialize;
+use serde::{
+    de::{Error as _, MapAccess, Visitor},
+    Deserialize, Deserializer, Serialize,
+};
 use walkdir::WalkDir;
 
 use crate::{
@@ -360,8 +366,9 @@ pub fn run_file(path: &Path, config: Config) -> Result<Vec<TestResult>, Failure>
     let path_str = path.to_string_lossy().into_owned();
     let json = std::fs::read_to_string(path)
         .map_err(|error| Failure::new(FailureKind::Fixture, format!("read: {error}")))?;
-    let suite: TestSuite = serde_json::from_str(&json)
-        .map_err(|error| Failure::new(FailureKind::Fixture, format!("parse: {error}")))?;
+    let suite = serde_json::from_str::<UniqueNames>(&json)
+        .map_err(|error| Failure::new(FailureKind::Fixture, format!("parse: {error}")))?
+        .0;
     let skip = skip_file(&path_str);
 
     let mut results = Vec::new();
@@ -393,6 +400,35 @@ pub fn run_file(path: &Path, config: Config) -> Result<Vec<TestResult>, Failure>
         }
     }
     Ok(results)
+}
+
+/// A fixture file's tests, read so that a name appearing twice is an error rather than one test
+/// silently replacing the other.
+struct UniqueNames(TestSuite);
+
+impl<'de> Deserialize<'de> for UniqueNames {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Tests;
+        impl<'de> Visitor<'de> for Tests {
+            type Value = UniqueNames;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a map of test names to tests")
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+                let mut tests = BTreeMap::new();
+                while let Some(name) = map.next_key::<String>()? {
+                    let unit = map.next_value()?;
+                    if tests.insert(name.clone(), unit).is_some() {
+                        return Err(A::Error::custom(format!("test {name:?} appears twice")));
+                    }
+                }
+                Ok(UniqueNames(TestSuite(tests)))
+            }
+        }
+        deserializer.deserialize_map(Tests)
+    }
 }
 
 /// Names the deviation that explains a failure, in equivalence mode.
@@ -462,12 +498,18 @@ fn execute_and_check(
     eth_cfg.set_max_blobs_per_tx(MAX_BLOBS_PER_TX);
     let block = unit.block_env(&mut eth_cfg);
 
-    let tx = match test.tx_env(unit) {
-        Ok(tx) => tx,
-        Err(_) if test.expect_exception.is_some() => {
-            return Ok(Some(SkipReason::UnbuildableInvalidTransaction))
+    let tx = match (test.tx_env(unit), &test.expect_exception) {
+        (Ok(tx), _) => tx,
+        (Err(error), Some(expected)) => {
+            return match exceptions::check_unbuildable(expected, &error, unit) {
+                Ok(()) => Ok(Some(SkipReason::UnbuildableInvalidTransaction)),
+                Err(_) => Err(Failure::new(
+                    FailureKind::WrongException,
+                    format!("expected {expected}, the transaction cannot be built: {error}"),
+                )),
+            }
         }
-        Err(error) => {
+        (Err(error), None) => {
             return Err(Failure::new(FailureKind::Fixture, format!("transaction: {error}")))
         }
     };
