@@ -185,8 +185,10 @@ impl AdditionalLimit {
     /// Every one of them is priced at the cost per history byte, and
     /// [`history_gas_spent`](Self::history_gas_spent) is what the transaction's own gas paid of
     /// that price. The two part by what the history allowances of its value transfers paid, which
-    /// no gas ledger carries. A transaction exempt from history gas appended none that anybody
-    /// priced, and reports none.
+    /// no gas ledger carries. They are the bytes the schedule prices, not the chain's physical
+    /// growth: a transaction exempt from history gas appended none that anybody priced, and
+    /// reports none, and the body counts its fixed write records whichever fee accounts are
+    /// written.
     pub const fn history_bytes(&self) -> u64 {
         self.history_bytes
     }

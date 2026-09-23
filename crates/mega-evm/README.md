@@ -75,6 +75,7 @@ An Oracle hint's payload is data size that is never history, because the bytes g
 A value-transferring `CALL` or `CALLCODE` grants the frame it starts a history allowance of 160 bytes — one three-topic event carrying a word — so a `receive()` hook reached through Solidity's `transfer()` can still emit an event.
 The allowance is not gas: it never enters the frame's `Gas`, only a log's charge may draw on it, and what it pays for is on no ledger, because no pool of the transaction's gas paid it.
 The history bytes a transaction reports count those bytes all the same, so a block's byte column and its history gas column part by exactly what allowances paid.
+The byte column is the history the schedule prices, not the chain's physical growth: a transaction exempt from history gas reports none, and a body counts its five fixed write records even when fewer fee accounts are written.
 
 The resource limits, gas detention and keyless deployment arrive in later changes.
 

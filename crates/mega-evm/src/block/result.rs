@@ -30,6 +30,11 @@ pub struct BlockGasCounters {
     /// The history bytes the block's transactions appended, whoever paid for them. At the cost per
     /// history byte they are worth [`history`](Self::history) plus what the history allowances of
     /// value transfers paid, which no gas ledger carries.
+    ///
+    /// They are the history bytes the schedule prices, not the chain's physical growth: the
+    /// block's exempt transactions (its deposits, the transactions the protocol sent) add none,
+    /// and each body counts its five fixed write records even when fewer fee accounts are
+    /// written.
     pub history_bytes: u64,
 }
 

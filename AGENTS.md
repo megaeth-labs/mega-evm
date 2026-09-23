@@ -201,6 +201,7 @@ Every later mechanism plugs into these; a change to one comes back to this layer
   The figure a block counts is `max(regular, floor)`, history taken out before the floor applies: the fork's `block_regular_gas_used` keeps history in, and subtracting it afterwards can land below the floor.
   The three add up to the raw spend, which is why what a history allowance paid for is on none of them: no pool of the transaction's gas paid it.
   `history_bytes` counts it all the same — the body, one 40-byte record per kept write, the kept logs and the deposited code — so the bytes at the cost per history byte exceed the history gas by exactly what allowances paid; an exempt transaction reports neither.
+  It is the history the schedule prices, not the chain's physical growth: an exempt transaction's bytes are not in it, and a body counts its five fixed write records even when fewer fee accounts are written.
   `gas_used` is the receipt's figure; `BlockGasCounters` sums the three ledgers and the history bytes per block.
 
 ## Test Organization (`crates/mega-evm/tests/`)

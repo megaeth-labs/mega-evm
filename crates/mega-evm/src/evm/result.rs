@@ -18,6 +18,10 @@
 //! allowance of a value transfer pays for its callee's first event before the callee's gas does,
 //! and what it pays for is on no gas ledger. The byte count is what the transaction appended; the
 //! gas is what its own gas paid for.
+//!
+//! The byte count is the history the schedule prices, not the chain's physical growth: a
+//! transaction exempt from history gas reports none of the bytes it carries, and a body counts
+//! its five fixed write records even when fewer fee accounts are written.
 
 use revm::context::result::{ResultAndState, ResultGas};
 
@@ -73,8 +77,13 @@ pub struct MegaGasUsage {
     /// record per account or storage write it kept, the logs it kept and the code it deposited.
     ///
     /// At the cost per history byte they are worth [`history`](Self::history) plus what the
-    /// history allowances of its value transfers paid, which no gas ledger carries. A transaction
-    /// exempt from history gas reports none.
+    /// history allowances of its value transfers paid, which no gas ledger carries.
+    ///
+    /// They are the history bytes the schedule prices, not the chain's physical growth: a
+    /// transaction exempt from history gas (a deposit, a transaction the protocol sent, a system
+    /// call) reports none, and the body counts its five fixed write records — the sender's
+    /// account and the four accounts fees are credited to — even when fewer fee accounts are
+    /// written.
     pub history_bytes: u64,
     /// The EIP-8037 reservoir left unspent, which the sender gets back.
     pub reservoir_remaining: u64,
