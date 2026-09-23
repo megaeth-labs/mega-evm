@@ -4,14 +4,15 @@ use alloy_consensus::{transaction::Recovered, Transaction};
 use alloy_evm::block::BlockExecutor;
 use alloy_primitives::{address, Address, Bytes, U256};
 use mega_evm::{
-    test_utils::BytecodeBuilder, BlockLimits, EnrichedMegaTx, MegaTransactionExt, MegaTxEnvelope,
+    test_utils::BytecodeBuilder, BlockLimits, EnrichedMegaTx, EvmTxRuntimeLimits, LimitCheck,
+    LimitKind, MegaTransactionExt, MegaTxEnvelope,
 };
 use op_revm::constants::{
     DA_FOOTPRINT_GAS_SCALAR_OFFSET, DA_FOOTPRINT_GAS_SCALAR_SLOT, L1_BLOCK_CONTRACT,
 };
 use revm::{
     bytecode::opcode::LOG0,
-    context::{BlockEnv, ContextTr},
+    context::{result::ExecutionResult, BlockEnv, ContextTr},
     Database as _,
 };
 
@@ -152,11 +153,16 @@ fn test_block_no_state_commit_on_limit_exceeded() {
     assert!(result.receipts().is_empty());
 }
 
-/// A deposit counts towards the block's data size. It is packed when it crosses, and the next
-/// transaction is refused. Its data-availability size stays exempt.
+/// The block's data-size limit never refuses a deposit, and a deposit still counts towards it.
+///
+/// Two data-heavy deposits cross the limit between them, a third finds the block past it and is
+/// still included, and the ordinary transaction after them is refused on the room they used. The
+/// deposits add nothing to the data-availability size.
 #[test]
-fn test_a_deposit_counts_towards_the_block_data_size_limit() {
-    let limit = mega_evm::TX_BODY_SIZE - 1;
+fn test_the_block_data_size_limit_never_refuses_a_deposit() {
+    const CALLDATA: usize = 1_000;
+    let per_deposit = mega_evm::TX_BODY_SIZE + CALLDATA as u64;
+    let limit = per_deposit + per_deposit / 2;
     let mut state = common::state();
     let mut executor = executor(
         &mut state,
@@ -164,21 +170,70 @@ fn test_a_deposit_counts_towards_the_block_data_size_limit() {
     );
     executor.apply_pre_execution_changes().expect("the block starts");
 
-    executor
-        .execute_transaction(&common::deposit_tx(Bytes::new(), 100_000))
-        .expect("the deposit that crosses the data-size limit is packed");
-    assert_eq!(executor.limiter().usage.data_size, mega_evm::TX_BODY_SIZE);
+    for (n, what) in ["the first deposit", "the deposit that crosses", "the deposit past the limit"]
+        .into_iter()
+        .enumerate()
+    {
+        let deposit = common::deposit_tx(incompressible(CALLDATA), 1_000_000);
+        let outcome =
+            executor.run_transaction(&deposit).unwrap_or_else(|err| panic!("{what}: {err}"));
+        assert!(outcome.inner.result.is_success(), "{what}: {:?}", outcome.inner.result);
+        assert_eq!(outcome.inner.usage.data_size, per_deposit, "{what}");
+        executor.commit_transaction_outcome(outcome).unwrap_or_else(|err| panic!("{what}: {err}"));
+        assert_eq!(executor.limiter().usage.data_size, per_deposit * (n as u64 + 1), "{what}");
+    }
+    assert!(executor.limiter().usage.data_size > limit, "the deposits crossed the limit");
     assert_eq!(
         executor.limiter().block_da_size_used,
         0,
-        "the deposit adds no data-availability size"
+        "a deposit adds no data-availability size"
     );
 
-    let err = executor.execute_transaction(&user_tx(0, 100_000)).expect_err("the block is full");
+    let err = executor
+        .execute_transaction(&user_tx(3, 100_000))
+        .expect_err("the deposits used the room an ordinary transaction would need");
     assert!(format!("{err}").contains("Block transactions data limit reached"), "{err}");
+    assert!(format!("{err}").contains(&format!("block_used={}", per_deposit * 3)), "{err}");
 
     let (_, result) = executor.finish_with_counters().expect("the block finishes");
-    assert_eq!(result.receipts().len(), 1, "the transaction after the crossing never ran");
+    assert_eq!(result.receipts().len(), 3, "every deposit is packed, and nothing after them");
+}
+
+/// The per-transaction data-size limit is not a block limit: it stops a deposit's own execution
+/// the way it stops any transaction's, and the deposit is included with the stop as its result.
+#[test]
+fn test_the_transaction_data_size_limit_stops_a_deposit_that_is_still_included() {
+    let limit = mega_evm::TX_BODY_SIZE + 10;
+    let mut state = common::state();
+    let mut executor = executor(
+        &mut state,
+        common::block_ctx(BlockLimits::no_limits().with_tx_runtime_limits(
+            EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(limit),
+        )),
+    );
+    executor.apply_pre_execution_changes().expect("the block starts");
+
+    let deposit = common::deposit_tx(Bytes::from(vec![0xab; 11]), 1_000_000);
+    let outcome = executor.run_transaction(&deposit).expect("a deposit is not refused");
+    assert!(
+        matches!(outcome.inner.result, ExecutionResult::Revert { .. }),
+        "{:?}",
+        outcome.inner.result
+    );
+    let stop = outcome.inner.limit_exceeded.expect("the data-size limit stopped the deposit");
+    assert!(
+        matches!(
+            stop,
+            LimitCheck::ExceedsLimit { kind: LimitKind::DataSize, limit: l, frame_local: false, .. }
+                if l == limit
+        ),
+        "{stop:?}"
+    );
+    executor.commit_transaction_outcome(outcome).expect("the deposit is included");
+
+    let (_, result) = executor.finish_with_counters().expect("the block finishes");
+    assert_eq!(result.receipts().len(), 1);
+    assert!(!result.receipts()[0].status(), "the stopped deposit's receipt reports a failure");
 }
 
 /// With no size limit configured, a transaction of any size is admitted.

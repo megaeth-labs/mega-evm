@@ -16,8 +16,21 @@
 //! transaction kept — is accumulated when the transaction commits and checked before the *next*
 //! transaction starts. The transaction that crosses such a limit is therefore still packed, and
 //! the ones after it are refused; this is what keeps a block full rather than dropping the work
-//! already done. A block whose counter has crossed refuses every later transaction, so the
-//! overshoot is bounded by one transaction per dimension.
+//! already done. A block whose counter has crossed refuses every later transaction — a deposit
+//! excepted, for the data-size bytes — so the overshoot is bounded by one transaction per
+//! dimension, besides what deposits add.
+//!
+//! # Deposits
+//!
+//! A deposit is an L1 message the chain cannot censor: the block derived from L1 must include it,
+//! and the builder does not choose it. So a deposit is exempt from both data-availability limits
+//! and does not count towards the block's. The block's data-size limit is a packing budget for the
+//! transactions the builder chooses, so it never refuses a deposit either. A deposit still counts
+//! towards the block's data size, so the transactions after it find the room it used.
+//!
+//! The per-transaction data-size limit is not a block limit: it holds a deposit's own execution
+//! the way it holds any transaction's, and a deposit that crosses it is included with the stop as
+//! its result.
 //!
 //! # Which dimensions are enforced
 //!
@@ -66,8 +79,9 @@ pub struct BlockLimits {
     pub block_execution_gas_limit: u64,
     /// The most data-size bytes the block's transactions may keep together.
     ///
-    /// [`Default`] is [`BLOCK_DATA_LIMIT`](crate::constants::BLOCK_DATA_LIMIT). A deposit counts
-    /// towards it: the data-availability exemption does not extend here.
+    /// [`Default`] is [`BLOCK_DATA_LIMIT`](crate::constants::BLOCK_DATA_LIMIT). The transaction
+    /// that reaches it is packed; after it, only a deposit is, which it never refuses and which
+    /// counts towards it.
     pub block_txs_data_limit: u64,
     /// The limits every transaction of the block runs under, which the executor installs on the
     /// EVM.
@@ -197,7 +211,8 @@ pub struct BlockUsage {
     pub da_size: u64,
     /// The transaction's data-availability footprint, in gas.
     pub da_footprint: u64,
-    /// Whether the transaction is a deposit, which the data-availability dimensions exempt.
+    /// Whether the transaction is a deposit, which the data-availability dimensions exempt and the
+    /// block's data-size limit never refuses.
     pub is_deposit: bool,
 }
 
@@ -251,7 +266,8 @@ impl BlockLimiter {
 
     /// Whether `tx` may execute in this block.
     ///
-    /// Checks the transaction against its own limits, and against what the block has left. It
+    /// Checks the transaction against its own limits, and against what the block has left; a
+    /// deposit is held to neither data-availability limit nor to the block's data-size limit. It
     /// reads the counters and changes nothing;
     /// [`post_execution_update`](Self::post_execution_update) advances them once the
     /// transaction commits.
@@ -347,9 +363,10 @@ impl BlockLimiter {
             ));
         }
 
-        // Every committed transaction counts, a deposit included. The transaction that crossed
-        // is already packed; this refuses the next one.
-        if self.usage.data_size >= self.limits.block_txs_data_limit {
+        // Every committed transaction counts, a deposit included, in `post_execution_update`. The
+        // transaction that crossed is already packed, so what is refused here is the next one —
+        // never a deposit, which is not the builder's to refuse.
+        if !is_deposit && self.usage.data_size >= self.limits.block_txs_data_limit {
             return Err(invalid_tx(
                 tx_hash,
                 MegaBlockLimitExceededError::TransactionDataLimit {
@@ -530,6 +547,33 @@ mod tests {
             .pre_execution_check(B256::ZERO, 0, 0, 0, false)
             .expect_err("the block's execution gas has reached its limit");
         assert!(std::format!("{err}").contains("Block execution gas limit reached"), "{err}");
+    }
+
+    /// A deposit is never refused by the block's data-size limit, however far past it the block
+    /// is, and still counts towards it: an ordinary transaction after the deposits finds the room
+    /// they used.
+    #[test]
+    fn test_data_size_limit_never_refuses_a_deposit_and_counts_it() {
+        let mut limiter =
+            BlockLimiter::new(BlockLimits::no_limits().with_block_txs_data_limit(1_000));
+        let deposit = BlockUsage {
+            usage: LimitUsage { data_size: 600, write_records: 0 },
+            is_deposit: true,
+            ..Default::default()
+        };
+
+        // Two deposits cross the limit between them, and a third finds the block past it.
+        for _ in 0..3 {
+            assert!(limiter.pre_execution_check(B256::ZERO, 0, 0, 0, true).is_ok());
+            limiter.post_execution_update(&deposit);
+        }
+        assert_eq!(limiter.usage.data_size, 1_800, "every deposit counts");
+
+        let err = limiter
+            .pre_execution_check(B256::ZERO, 0, 0, 0, false)
+            .expect_err("the deposits used the room an ordinary transaction would need");
+        assert!(std::format!("{err}").contains("Block transactions data limit reached"), "{err}");
+        assert!(std::format!("{err}").contains("block_used=1800"), "{err}");
     }
 
     /// Every limit is an inclusive bound: a transaction that exactly fills what the limit — or
