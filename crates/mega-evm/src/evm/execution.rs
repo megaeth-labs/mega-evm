@@ -414,8 +414,9 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
     /// the results [`frame_return_result`](EvmTr::frame_return_result) pops. A creation answered
     /// with a stop still bumps its creator's nonce, as one that starts and reverts does.
     ///
-    /// Before any of it, the state gas the caller holds is noted: the frame's lane counts it as
-    /// held outside the frame, for the state-gas limit to add to what the frame charges.
+    /// Before any of it, the state gas the caller holds is noted: the state-gas limit counts it
+    /// as held outside the frame, with its own entry pushed beside the frame's lane, and adds to
+    /// it what the frame charges.
     #[inline]
     fn frame_init(
         &mut self,
