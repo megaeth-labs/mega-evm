@@ -46,9 +46,7 @@ use revm::{
 };
 
 use crate::{
-    evm::{
-        history::transaction_body_bytes, inspector::frame_end_checked, instructions::minted_gas,
-    },
+    evm::{history::transaction_body_bytes, inspector::frame_end_checked},
     history_gas, synthetic_frame_result,
     system::{is_deposit_like_transaction, MEGA_SYSTEM_ADDRESS},
     write_record_history_gas, ExternalEnvTypes, JournalInspectTr, LimitCheck, LimitKind,
@@ -673,13 +671,7 @@ fn before_frame_run<DB: Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &mut MegaContext<DB, ExtEnvs>,
     frame: &mut EthFrame<EthInterpreter>,
 ) -> Option<InterpreterAction> {
-    // The transaction's own frame is given what the transaction has left, stipend or not.
-    let minted = if frame.depth == 0 {
-        0
-    } else {
-        minted_gas(&frame.input, ctx.gas_params().call_stipend())
-    };
-    ctx.detention.on_frame_run(&mut frame.interpreter.gas, frame.depth, minted);
+    ctx.detention.on_frame_run(&mut frame.interpreter.gas, frame.depth);
     let stop = ctx.additional_limit.stop_before_run()?;
     Some(InterpreterAction::new_return(
         InstructionResult::Revert,

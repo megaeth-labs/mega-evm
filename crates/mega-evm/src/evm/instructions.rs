@@ -452,24 +452,16 @@ fn refuse(
     result
 }
 
-/// The regular gas the running frame forwarded to the frame `input` starts: the frame's limit,
-/// less a value call's stipend, which the caller does not pay.
+/// The regular gas the running frame paid for the frame `input` starts: the frame's limit, less
+/// a value call's stipend, which nobody paid.
 fn forwarded_gas(input: &FrameInput, call_stipend: u64) -> u64 {
     match input {
-        FrameInput::Call(inputs) => {
-            inputs.gas_limit.saturating_sub(minted_gas(input, call_stipend))
+        FrameInput::Call(inputs) if inputs.transfers_value() => {
+            inputs.gas_limit.saturating_sub(call_stipend)
         }
+        FrameInput::Call(inputs) => inputs.gas_limit,
         FrameInput::Create(inputs) => inputs.gas_limit(),
         FrameInput::Empty => 0,
-    }
-}
-
-/// The regular gas the frame `input` starts is given beyond what its caller paid: the stipend of
-/// a call that transfers value.
-pub(crate) fn minted_gas(input: &FrameInput, call_stipend: u64) -> u64 {
-    match input {
-        FrameInput::Call(inputs) if inputs.transfers_value() => call_stipend,
-        _ => 0,
     }
 }
 

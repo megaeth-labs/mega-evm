@@ -181,7 +181,7 @@ Detention caps how much a transaction may still compute once it read such data (
 - **The cap.**
   Compute is the regular gas spent, read off `Gas`: state and history gas that spilled onto regular gas are not compute, and neither is what a halting frame burns.
   A read sets a limit — the transaction's compute at the read plus `BLOCK_ENV_ACCESS_COMPUTE_GAS` or `ORACLE_ACCESS_COMPUTE_GAS`, 20,000,000 each — and the limit only goes down, so the most restrictive read binds.
-  The transaction's compute is the running frame's regular gas spent plus every suspended caller's, less the gas each forwarded, less value-call stipends: the regular ledger at every moment.
+  The transaction's compute is the running frame's regular gas spent plus every suspended caller's, each less its child's gas limit, which takes a value call's stipend off with it: the regular ledger at every moment.
 - **The enforcement point: withheld gas.**
   The interpreter stops a frame on one condition only, running out of regular gas, so every frame that runs keeps no more regular gas than the limit leaves the transaction; the rest moves into its reservoir, where state and history charges still reach it and regular charges cannot.
   The frame is held to the limit at the read (the wrapper), at its start and at every resume (`before_frame_run`), and after an `SSTORE` that restored a slot and so refilled regular gas.

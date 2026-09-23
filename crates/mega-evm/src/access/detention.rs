@@ -19,13 +19,11 @@ use crate::{
 struct DetainedFrame {
     /// Regular gas withheld from the frame, which its reservoir holds until the frame returns.
     withheld: u64,
-    /// Regular gas the frame's limit carries that its caller did not pay: a value call's stipend.
-    minted: u64,
     /// The frame's own compute when it suspended on a child: its regular gas spent, less what
     /// detention withheld.
     at_suspension: u64,
     /// While a child of the frame runs: what the frame adds to the transaction's compute, which is
-    /// [`at_suspension`](Self::at_suspension) less the gas it forwarded to that child.
+    /// [`at_suspension`](Self::at_suspension) less the child's gas limit.
     contribution: u64,
 }
 
@@ -40,10 +38,10 @@ struct DetainedFrame {
 /// is its limit less what it has left, less the state and history gas that spilled onto its
 /// regular gas, which are not compute. The transaction's compute is its frames' compute: the
 /// frame that runs, read off its [`Gas`], and every frame suspended on a child that runs, as it
-/// stood when it suspended, less the gas it forwarded. A value call's stipend is gas nobody paid,
-/// so a frame's stipend is taken off its compute; once the frame returns, its caller's regular gas
-/// spent accounts for it the same way. So the figure follows the regular ledger of the
-/// transaction's frames at every moment, before, during and after each child.
+/// stood when it suspended, less the child's gas limit. A value call's stipend is part of that
+/// limit and gas nobody paid, so taking the whole limit off takes the stipend off too, as the
+/// caller's regular gas spent does once the child returned. So the figure follows the regular
+/// ledger of the transaction's frames at every moment, before, during and after each child.
 ///
 /// The one part of the regular ledger that is not compute is what a halt burns: a frame that
 /// halts consumes the gas it had left without running anything with it. That gas is taken off the
@@ -80,8 +78,6 @@ pub struct Detention {
     limit: Option<u64>,
     /// The compute of the frames suspended on a child that runs.
     suspended: u64,
-    /// The stipends of the frames that run or are suspended.
-    minted: u64,
     /// The regular gas the frames that halted burned without running anything with it.
     burned: u64,
     /// One entry per frame that runs or is suspended, the running one last.
@@ -107,7 +103,6 @@ impl Detention {
         self.accessed = VolatileDataAccess::empty();
         self.limit = None;
         self.suspended = 0;
-        self.minted = 0;
         self.burned = 0;
         self.frames.clear();
     }
@@ -251,27 +246,24 @@ impl Detention {
     /* The frame lifecycle */
 
     /// The frame at `depth`, whose gas is `gas`, is about to run: for the first time, or again
-    /// after a child returned into it. `minted` is the stipend its limit carries, which is
-    /// read the first time only.
+    /// after a child returned into it.
     ///
-    /// A frame's first run adds its caller's compute to the transaction's, now that the gas the
-    /// caller forwarded is known; a resumed frame takes it back out, because its own regular gas
-    /// spent now accounts for the child. Then the frame is held to the limit, and the switch is
-    /// read for it.
+    /// A frame's first run adds its caller's compute to the transaction's, now that the frame's
+    /// gas limit is known — what the caller forwarded, what an interceptor charged it, and a value
+    /// call's stipend; a resumed frame takes it back out, because its own regular gas spent now
+    /// accounts for the child. Then the frame is held to the limit, and the switch is read for it.
     #[inline]
-    pub(crate) fn on_frame_run(&mut self, gas: &mut Gas, depth: usize, minted: u64) {
+    pub(crate) fn on_frame_run(&mut self, gas: &mut Gas, depth: usize) {
         self.refusing = self.disabled_from.is_some_and(|from| depth >= from);
         if !self.detains {
             return;
         }
         if self.frames.len() == depth {
             if let Some(caller) = depth.checked_sub(1).and_then(|i| self.frames.get_mut(i)) {
-                let forwarded = gas.limit().saturating_sub(minted);
-                caller.contribution = caller.at_suspension.saturating_sub(forwarded);
+                caller.contribution = caller.at_suspension.saturating_sub(gas.limit());
                 self.suspended = self.suspended.saturating_add(caller.contribution);
             }
-            self.frames.push(DetainedFrame { minted, ..Default::default() });
-            self.minted = self.minted.saturating_add(minted);
+            self.frames.push(DetainedFrame::default());
         } else if let Some(frame) = self.frames.get_mut(depth) {
             self.suspended = self.suspended.saturating_sub(frame.contribution);
             frame.contribution = 0;
@@ -323,9 +315,7 @@ impl Detention {
         let held_back = withheld.min(gas.reservoir());
         let stop = (held_back > 0 && runs_out_of_gas(result))
             .then(|| (self.limit.unwrap_or(u64::MAX), self.compute(gas, depth)));
-        if let Some(frame) = self.frames.pop() {
-            self.minted = self.minted.saturating_sub(frame.minted);
-        }
+        self.frames.pop();
         release(gas, withheld);
         if stop.is_none() && result.is_halt() {
             // The settlement rolls the spill back into regular gas and burns it all.
@@ -370,7 +360,6 @@ impl Detention {
         self.suspended
             .saturating_add(regular_spent(gas))
             .saturating_sub(own)
-            .saturating_sub(self.minted)
             .saturating_sub(self.burned)
     }
 
@@ -491,7 +480,7 @@ mod tests {
     fn test_a_read_withholds_what_the_cap_leaves_over() {
         let mut detention = detaining();
         let mut frame = gas(100_000_000, 7);
-        detention.on_frame_run(&mut frame, 0, 0);
+        detention.on_frame_run(&mut frame, 0);
         assert!(frame.record_regular_cost(1_000));
         detention.commit_reads(VolatileDataAccess::TIMESTAMP, &mut frame, 0, 0);
 
@@ -510,7 +499,7 @@ mod tests {
     fn test_the_first_limit_binds_when_it_is_lower() {
         let mut detention = detaining();
         let mut frame = gas(100_000_000, 0);
-        detention.on_frame_run(&mut frame, 0, 0);
+        detention.on_frame_run(&mut frame, 0);
         detention.commit_reads(VolatileDataAccess::TIMESTAMP, &mut frame, 0, 0);
         assert!(frame.record_regular_cost(5_000));
         detention.commit_reads(VolatileDataAccess::ORACLE, &mut frame, 0, 0);
@@ -524,7 +513,7 @@ mod tests {
     fn test_release_counts_what_state_drew_as_spilled() {
         let mut detention = detaining();
         let mut frame = gas(100_000_000, 0);
-        detention.on_frame_run(&mut frame, 0, 0);
+        detention.on_frame_run(&mut frame, 0);
         detention.commit_reads(VolatileDataAccess::TIMESTAMP, &mut frame, 0, 0);
         let withheld = 100_000_000 - BLOCK_ENV_ACCESS_COMPUTE_GAS;
         assert!(frame.record_state_cost(withheld + 10));
@@ -543,7 +532,7 @@ mod tests {
     fn test_out_of_gas_is_the_cap_only_with_gas_withheld() {
         let mut detention = detaining();
         let mut frame = gas(100_000_000, 0);
-        detention.on_frame_run(&mut frame, 0, 0);
+        detention.on_frame_run(&mut frame, 0);
         detention.commit_reads(VolatileDataAccess::TIMESTAMP, &mut frame, 0, 0);
         frame.spend_all();
         let stop = detention.on_frame_end(InstructionResult::OutOfGas, &mut frame, 0);
@@ -551,7 +540,7 @@ mod tests {
 
         let mut detention = detaining();
         let mut frame = gas(1_000_000, 0);
-        detention.on_frame_run(&mut frame, 0, 0);
+        detention.on_frame_run(&mut frame, 0);
         detention.commit_reads(VolatileDataAccess::TIMESTAMP, &mut frame, 0, 0);
         assert_eq!(frame.remaining(), 1_000_000, "nothing to withhold");
         assert_eq!(detention.on_frame_end(InstructionResult::OutOfGas, &mut frame, 0), None);
@@ -559,7 +548,7 @@ mod tests {
         // Withheld gas the frame's writes drew dry is spent: the frame ran out of its own gas.
         let mut detention = detaining();
         let mut frame = gas(100_000_000, 0);
-        detention.on_frame_run(&mut frame, 0, 0);
+        detention.on_frame_run(&mut frame, 0);
         detention.commit_reads(VolatileDataAccess::TIMESTAMP, &mut frame, 0, 0);
         assert!(frame.record_state_cost(frame.reservoir()));
         frame.spend_all();
@@ -568,7 +557,7 @@ mod tests {
         for result in [InstructionResult::MemoryLimitOOG, InstructionResult::InvalidFEOpcode] {
             let mut detention = detaining();
             let mut frame = gas(100_000_000, 0);
-            detention.on_frame_run(&mut frame, 0, 0);
+            detention.on_frame_run(&mut frame, 0);
             detention.commit_reads(VolatileDataAccess::TIMESTAMP, &mut frame, 0, 0);
             assert_eq!(detention.on_frame_end(result, &mut frame, 0), None, "{result:?}");
         }
@@ -580,21 +569,21 @@ mod tests {
     fn test_compute_spans_frames() {
         let mut detention = detaining();
         let mut caller = gas(100_000, 0);
-        detention.on_frame_run(&mut caller, 0, 0);
+        detention.on_frame_run(&mut caller, 0);
         assert!(caller.record_regular_cost(9_000 + 60_000));
         detention.on_frame_suspend(&caller, 0);
 
         let mut child = gas(60_000 + 2_300, 0);
-        detention.on_frame_run(&mut child, 1, 2_300);
+        detention.on_frame_run(&mut child, 1);
         assert_eq!(detention.compute(&child, 1), 9_000 - 2_300);
         assert!(child.record_regular_cost(4_000));
         assert_eq!(detention.compute(&child, 1), 9_000 + 4_000 - 2_300);
         detention.on_frame_end(InstructionResult::Stop, &mut child, 1);
 
         caller.erase_cost(child.remaining());
-        detention.on_frame_run(&mut caller, 0, 0);
+        detention.on_frame_run(&mut caller, 0);
         assert_eq!(detention.compute(&caller, 0), 9_000 + 4_000 - 2_300);
-        assert_eq!((detention.suspended, detention.minted), (0, 0));
+        assert_eq!(detention.suspended, 0);
     }
 
     /// What a halting child burns is not compute: its caller's compute after it returns is what
@@ -603,17 +592,17 @@ mod tests {
     fn test_what_a_halt_burns_is_not_compute() {
         let mut detention = detaining();
         let mut caller = gas(1_000_000, 0);
-        detention.on_frame_run(&mut caller, 0, 0);
+        detention.on_frame_run(&mut caller, 0);
         assert!(caller.record_regular_cost(500_000));
         detention.on_frame_suspend(&caller, 0);
         let mut child = gas(500_000, 0);
-        detention.on_frame_run(&mut child, 1, 0);
+        detention.on_frame_run(&mut child, 1);
         assert!(child.record_regular_cost(1_000));
         assert!(child.record_state_cost(3_000));
         assert_eq!(detention.on_frame_end(InstructionResult::InvalidFEOpcode, &mut child, 1), None);
 
         // The caller's regular gas spent now holds everything it forwarded.
-        detention.on_frame_run(&mut caller, 0, 0);
+        detention.on_frame_run(&mut caller, 0);
         assert_eq!(detention.compute(&caller, 0), 1_000);
         assert_eq!(detention.burned, 500_000 - 1_000);
     }
@@ -624,15 +613,15 @@ mod tests {
     fn test_the_switch_is_scoped_to_a_subtree() {
         let mut detention = detaining();
         let mut frame = gas(1_000_000, 0);
-        detention.on_frame_run(&mut frame, 0, 0);
+        detention.on_frame_run(&mut frame, 0);
         detention.on_frame_suspend(&frame, 0);
         let mut child = gas(100_000, 0);
-        detention.on_frame_run(&mut child, 1, 0);
+        detention.on_frame_run(&mut child, 1);
         detention.disable_access(2);
         assert!(!detention.is_access_disabled(1));
         detention.disable_access(1);
         assert!(!detention.is_refusing(), "the frame reads the switch when it resumes");
-        detention.on_frame_run(&mut child, 1, 0);
+        detention.on_frame_run(&mut child, 1);
         assert!(detention.is_refusing());
         assert!(!detention.is_access_disabled(0));
         assert!(detention.is_access_disabled(1) && detention.is_access_disabled(2));
@@ -644,14 +633,14 @@ mod tests {
 
         detention.on_frame_end(InstructionResult::Stop, &mut child, 1);
         assert!(!detention.is_access_disabled(1), "on again once the frame returned");
-        detention.on_frame_run(&mut frame, 0, 0);
+        detention.on_frame_run(&mut frame, 0);
         assert!(!detention.is_refusing());
 
         detention.disable_access(0);
-        detention.on_frame_run(&mut frame, 0, 0);
+        detention.on_frame_run(&mut frame, 0);
         assert!(detention.refuses(VolatileDataAccess::TIMESTAMP));
         assert!(detention.enable_access(0), "the frame that switched it off switches it on");
-        detention.on_frame_run(&mut frame, 0, 0);
+        detention.on_frame_run(&mut frame, 0);
         assert!(!detention.refuses(VolatileDataAccess::TIMESTAMP));
     }
 
@@ -661,7 +650,7 @@ mod tests {
         let mut detention = Detention::default();
         detention.reset(false);
         let mut frame = gas(100_000_000, 0);
-        detention.on_frame_run(&mut frame, 0, 0);
+        detention.on_frame_run(&mut frame, 0);
         detention.observe(VolatileDataAccess::TIMESTAMP);
         assert!(!detention.has_reads());
         detention.mark_before_execution(VolatileDataAccess::BENEFICIARY_BALANCE);
