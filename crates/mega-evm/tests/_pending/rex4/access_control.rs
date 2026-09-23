@@ -430,32 +430,6 @@ fn test_nested_call_volatile_access_reverts() {
 // 5. GAS ACCOUNTING
 // ============================================================================
 
-/// Reverted inner call returns gas to parent.
-#[test]
-fn test_reverted_inner_call_returns_gas() {
-    // Child: reads TIMESTAMP (will revert immediately)
-    let child_code = BytecodeBuilder::default().append(TIMESTAMP).append(POP).stop().build();
-
-    // Parent: disable volatile access, call child with limited gas, log call status
-    let parent_code = call_disable_volatile_data_access(BytecodeBuilder::default());
-    let parent_code = append_call(parent_code, CHILD, 10_000_000);
-    let parent_code = append_log_call_status(parent_code).stop().build();
-
-    let mut db = MemoryDatabase::default()
-        .account_balance(CALLER, U256::from(1_000_000))
-        .account_code(PARENT, parent_code)
-        .account_code(CHILD, child_code);
-
-    let result = transact(&mut db, default_tx(PARENT)).unwrap();
-    assert!(result.result.is_success(), "Parent tx should succeed");
-    assert_log_call_status(&result, 0, false);
-
-    // The gas used should be relatively small since child reverted immediately
-    // and gas was returned to parent
-    let gas_used = result.result.gas_used();
-    assert!(gas_used < 5_000_000, "Gas used ({gas_used}) should be relatively small");
-}
-
 // ============================================================================
 // 6. CALL VARIANTS
 // ============================================================================
@@ -1130,87 +1104,6 @@ fn test_inspector_sees_system_contract_call() {
 // ============================================================================
 // 14. GAS COST OF SYSTEM CONTRACT CALL
 // ============================================================================
-
-/// The system contract call intercepted in `frame_init` should only consume the CALL opcode
-/// overhead (warm account access = 100 gas), not the `gas_limit` forwarded to the child frame.
-/// The child frame's gas is fully refunded since the interception returns `Gas::new(gas_limit)`.
-#[test]
-fn test_system_contract_call_gas_cost() {
-    // Parent bytecode:
-    // 1. GAS                         — push gas_before
-    // 2. CALL(100_000, ACCESS_CONTROL, 0, disableVolatileDataAccess selector)
-    // 3. POP                         — discard CALL success flag
-    // 4. GAS                         — push gas_after
-    // 5. SWAP1                       — [gas_after, gas_before] -> [gas_before, gas_after]
-    // 6. SUB                         — gas_before - gas_after = gas_consumed
-    // 7. MSTORE at 0x20              — store gas_consumed
-    // 8. RETURN 32 bytes from 0x20
-    //
-    // Note: the GAS opcode itself costs 2 gas. The measured delta includes the cost of
-    // setting up the CALL arguments (pushes), the CALL opcode overhead, POP, and one GAS.
-    // The CALL forwards 100,000 gas to the child frame, which should all come back.
-
-    // First, store the selector in memory (needed for CALL input)
-    let parent_code = BytecodeBuilder::default().mstore(0x0, DISABLE_VOLATILE_DATA_ACCESS_SELECTOR);
-
-    let parent_code = parent_code
-        .append(GAS) // gas_before (costs 2 gas, measured AFTER this)
-        // Set up CALL arguments
-        .push_number(0_u64) // retSize
-        .push_number(0_u64) // retOffset
-        .push_number(4_u64) // argsSize
-        .push_number(0_u64) // argsOffset
-        .push_number(0_u64) // value
-        .push_address(ACCESS_CONTROL_ADDRESS)
-        .push_number(100_000_u64) // gas to forward
-        .append(CALL)
-        .append(POP) // discard success flag
-        .append(GAS) // gas_after
-        // gas_before is below gas_after on the stack: [gas_before, gas_after]
-        // SWAP1 to get [gas_after, gas_before], then SUB = gas_before - gas_after
-        .append(SWAP1)
-        .append(SUB) // gas_consumed = gas_before - gas_after
-        // Store and return
-        .push_number(0x20_u64)
-        .append(MSTORE)
-        .push_number(32_u64) // size
-        .push_number(0x20_u64) // offset
-        .append(RETURN)
-        .build();
-
-    let mut db = MemoryDatabase::default()
-        .account_balance(CALLER, U256::from(1_000_000))
-        .account_code(PARENT, parent_code);
-
-    let result = transact(&mut db, default_tx(PARENT)).unwrap();
-    assert!(result.result.is_success(), "Transaction should succeed");
-
-    let output = result.result.output().expect("Should have output");
-    let gas_consumed = U256::from_be_slice(output.as_ref()).to::<u64>();
-
-    // The gas consumed by the measured region includes:
-    // - 7 PUSH instructions (3 gas each = 21 gas) for CALL arguments
-    // - 1 PUSH20 for address (3 gas)
-    // - CALL cold account access (2600 gas, since ACCESS_CONTROL_ADDRESS is first accessed here)
-    // - POP (2 gas)
-    // - GAS (2 gas)
-    // - SWAP1 (3 gas)
-    // Total overhead ≈ 2631 gas
-    //
-    // Critically, it should NOT include the 100,000 gas forwarded to the child frame,
-    // because the intercepted call returns all gas.
-    assert!(
-        gas_consumed < 3000,
-        "System contract call gas delta should be small (CALL overhead only), got: {gas_consumed}. \
-         If this is close to 100,000, the child frame gas was not refunded."
-    );
-
-    // Sanity check: it should at least include the cold CALL cost (2600)
-    assert!(
-        gas_consumed >= 2600,
-        "Gas consumed ({gas_consumed}) should be at least 2600 (cold CALL cost)"
-    );
-}
 
 // ============================================================================
 // 15. BLOCKED VOLATILE ACCESS DOES NOT POLLUTE TRACKER

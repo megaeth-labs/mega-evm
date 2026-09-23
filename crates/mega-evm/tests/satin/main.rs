@@ -29,4 +29,5 @@ mod static_callee;
 mod storage_call_stipend;
 mod strategic_stop;
 mod synthetic_frame_gas;
+mod volatile_access;
 mod write_records;

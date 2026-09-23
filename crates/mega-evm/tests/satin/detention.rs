@@ -28,33 +28,33 @@ use revm::{
     Database, Inspector,
 };
 
-const CALLER: Address = address!("0000000000000000000000000000000000d00000");
-const CONTRACT: Address = address!("0000000000000000000000000000000000d00001");
-const CHILD: Address = address!("0000000000000000000000000000000000d00002");
-const DELEGATOR: Address = address!("0000000000000000000000000000000000d00003");
-const BENEFICIARY: Address = address!("0000000000000000000000000000000000bef000");
+pub(crate) const CALLER: Address = address!("0000000000000000000000000000000000d00000");
+pub(crate) const CONTRACT: Address = address!("0000000000000000000000000000000000d00001");
+pub(crate) const CHILD: Address = address!("0000000000000000000000000000000000d00002");
+pub(crate) const DELEGATOR: Address = address!("0000000000000000000000000000000000d00003");
+pub(crate) const BENEFICIARY: Address = address!("0000000000000000000000000000000000bef000");
 
-const CAP: u64 = BLOCK_ENV_ACCESS_COMPUTE_GAS;
+pub(crate) const CAP: u64 = BLOCK_ENV_ACCESS_COMPUTE_GAS;
 
 /// Below the execution cap: no reservoir.
-const BELOW: u64 = 100_000_000;
+pub(crate) const BELOW: u64 = 100_000_000;
 /// Above it: a reservoir of 100,000,000.
-const ABOVE: u64 = TX_GAS_LIMIT_CAP + 100_000_000;
-const TIERS: [u64; 2] = [BELOW, ABOVE];
+pub(crate) const ABOVE: u64 = TX_GAS_LIMIT_CAP + 100_000_000;
+pub(crate) const TIERS: [u64; 2] = [BELOW, ABOVE];
 
 /// Rounds of [`work`] spent before a read: 5,283,600 of compute.
-const WORK: u32 = 1_700;
+pub(crate) const WORK: u32 = 1_700;
 
 /// The compute one round of [`work`] spends once its memory is expanded.
-const WORK_ROUND: u64 = 3_108;
+pub(crate) const WORK_ROUND: u64 = 3_108;
 
 /// Appends a copy of 32 KiB within memory: 3,075 gas, and 5,120 more to expand the memory the
 /// first time. A round of it costs the interpreter little, whatever it costs in gas.
-fn copy(code: BytecodeBuilder) -> BytecodeBuilder {
+pub(crate) fn copy(code: BytecodeBuilder) -> BytecodeBuilder {
     code.push_number(0x8000_u16).append_many([PUSH0, PUSH0, MCOPY])
 }
 
-fn block() -> BlockEnv {
+pub(crate) fn block() -> BlockEnv {
     BlockEnv {
         number: U256::from(300),
         beneficiary: BENEFICIARY,
@@ -66,22 +66,22 @@ fn block() -> BlockEnv {
     }
 }
 
-fn context<DB: Database>(db: DB) -> MegaContext<DB> {
+pub(crate) fn context<DB: Database>(db: DB) -> MegaContext<DB> {
     MegaContext::new(db, MegaSpecId::SATIN).with_block(block()).with_chain(zero_fee_l1_block_info())
 }
 
-fn tx(caller: Address, to: Address, gas_limit: u64) -> MegaTransaction {
+pub(crate) fn tx(caller: Address, to: Address, gas_limit: u64) -> MegaTransaction {
     OpTx(op_transaction(TxEnv { caller, kind: TxKind::Call(to), gas_limit, ..Default::default() }))
 }
 
 /// What a transaction did, and what detention made of it.
-struct Run {
-    outcome: MegaTransactionOutcome,
-    limit: Option<u64>,
-    accessed: VolatileDataAccess,
+pub(crate) struct Run {
+    pub(crate) outcome: MegaTransactionOutcome,
+    pub(crate) limit: Option<u64>,
+    pub(crate) accessed: VolatileDataAccess,
 }
 
-fn run_on<INSP>(evm: &mut MegaEvm<MemoryDatabase, INSP>, tx: MegaTransaction) -> Run
+pub(crate) fn run_on<INSP>(evm: &mut MegaEvm<MemoryDatabase, INSP>, tx: MegaTransaction) -> Run
 where
     INSP: Inspector<MegaContext<MemoryDatabase>, EthInterpreter>,
 {
@@ -90,26 +90,26 @@ where
     Run { outcome, limit: detention.compute_limit(), accessed: detention.accessed() }
 }
 
-fn execute(db: MemoryDatabase, tx: MegaTransaction) -> Run {
+pub(crate) fn execute(db: MemoryDatabase, tx: MegaTransaction) -> Run {
     run_on(&mut MegaEvm::new(context(db)), tx)
 }
 
 /// The regular gas a call from `CALLER` spends before its first instruction.
-fn intrinsic(gas_limit: u64) -> u64 {
+pub(crate) fn intrinsic(gas_limit: u64) -> u64 {
     let db =
         MemoryDatabase::default().account_code(CONTRACT, BytecodeBuilder::default().stop().build());
     execute(db, tx(CALLER, CONTRACT, gas_limit)).outcome.gas.regular
 }
 
 /// Appends a loop that never ends, 3,094 gas a round.
-fn spin(code: BytecodeBuilder) -> Bytes {
+pub(crate) fn spin(code: BytecodeBuilder) -> Bytes {
     let dest = code.len() as u32;
     copy(code.append(JUMPDEST)).push_number(dest).append(JUMP).build()
 }
 
 /// Appends `rounds` rounds of a counting loop that also copies memory, [`WORK_ROUND`] gas a
 /// round.
-fn work(code: BytecodeBuilder, rounds: u32) -> BytecodeBuilder {
+pub(crate) fn work(code: BytecodeBuilder, rounds: u32) -> BytecodeBuilder {
     let code = code.push_number(rounds);
     let dest = code.len() as u32;
     copy(code.append(JUMPDEST))
@@ -120,7 +120,7 @@ fn work(code: BytecodeBuilder, rounds: u32) -> BytecodeBuilder {
 }
 
 /// Appends `rounds` rounds of a counting loop, twenty-six gas a round.
-fn burn(code: BytecodeBuilder, rounds: u32) -> BytecodeBuilder {
+pub(crate) fn burn(code: BytecodeBuilder, rounds: u32) -> BytecodeBuilder {
     let code = code.push_number(rounds);
     let dest = code.len() as u32;
     code.append(JUMPDEST)
@@ -131,19 +131,19 @@ fn burn(code: BytecodeBuilder, rounds: u32) -> BytecodeBuilder {
 }
 
 /// Appends a call of `scheme` to `to` forwarding all gas, dropping its status.
-fn call(code: BytecodeBuilder, scheme: u8, to: Address) -> BytecodeBuilder {
+pub(crate) fn call(code: BytecodeBuilder, scheme: u8, to: Address) -> BytecodeBuilder {
     let code = code.append_many([PUSH0, PUSH0, PUSH0, PUSH0]);
     let code = if matches!(scheme, CALL | CALLCODE) { code.append(PUSH0) } else { code };
     code.push_address(to).append(GAS).append(scheme).append(POP)
 }
 
 /// The revert data of the detention stop at `limit`.
-fn stop_data(limit: u64) -> Bytes {
+pub(crate) fn stop_data(limit: u64) -> Bytes {
     MegaLimitExceeded { kind: LimitKind::ComputeGas.as_u8(), limit }.abi_encode().into()
 }
 
 /// Asserts the transaction was stopped by detention, having spent exactly its limit.
-fn assert_stopped(run: &Run, intrinsic: u64) -> u64 {
+pub(crate) fn assert_stopped(run: &Run, intrinsic: u64) -> u64 {
     let limit = run.limit.expect("a read set a limit");
     match &run.outcome.result {
         ExecutionResult::Revert { output, .. } => assert_eq!(output, &stop_data(limit)),
@@ -186,11 +186,11 @@ fn no_setup(db: MemoryDatabase) -> MemoryDatabase {
     db
 }
 
-fn op(code: BytecodeBuilder, opcode: u8) -> BytecodeBuilder {
+pub(crate) fn op(code: BytecodeBuilder, opcode: u8) -> BytecodeBuilder {
     code.append(opcode).append(POP)
 }
 
-fn on_beneficiary(code: BytecodeBuilder, opcode: u8) -> BytecodeBuilder {
+pub(crate) fn on_beneficiary(code: BytecodeBuilder, opcode: u8) -> BytecodeBuilder {
     code.push_address(BENEFICIARY).append(opcode).append(POP)
 }
 
@@ -339,7 +339,11 @@ fn reads() -> Vec<Read> {
 }
 
 /// Gives `address` the `0xef0100 || to` designator an applied EIP-7702 authorization leaves.
-fn with_delegation(mut db: MemoryDatabase, address: Address, to: Address) -> MemoryDatabase {
+pub(crate) fn with_delegation(
+    mut db: MemoryDatabase,
+    address: Address,
+    to: Address,
+) -> MemoryDatabase {
     use revm::{database::AccountState, state::Bytecode};
     let bytecode = Bytecode::new_eip7702(to);
     let code_hash = bytecode.hash_slow();
@@ -375,7 +379,7 @@ fn test_every_volatile_read_caps_the_transaction_from_where_it_read() {
 }
 
 /// The cap is relative: a transaction that spent more than the cap before it read may still
-/// spend the cap after.
+/// spend the cap after, and one that stops soon after the read completes.
 #[test]
 fn test_the_cap_counts_from_a_spend_larger_than_itself() {
     let before = 7_000_u32;
@@ -388,6 +392,14 @@ fn test_the_cap_counts_from_a_spend_larger_than_itself() {
         let limit = assert_stopped(&run, intrinsic(gas_limit));
         assert!(limit - CAP > u64::from(before) * WORK_ROUND, "{limit}");
         assert!(limit - CAP > CAP);
+
+        let code = op(work(BytecodeBuilder::default(), before), TIMESTAMP).stop().build();
+        let run = execute(
+            MemoryDatabase::default().account_code(CONTRACT, code),
+            tx(CALLER, CONTRACT, gas_limit),
+        );
+        assert!(run.outcome.result.is_success(), "{:?}", run.outcome.result);
+        assert_eq!(run.limit, Some(limit), "the same read at the same compute");
     }
 }
 
@@ -761,16 +773,16 @@ fn test_a_failed_load_caps_nothing() {
 
 /// Records every call's result and the gas it spent, and every opcode that ran.
 #[derive(Default)]
-struct Calls {
-    calls: Vec<CallRecord>,
-    opcodes: Vec<u8>,
+pub(crate) struct Calls {
+    pub(crate) calls: Vec<CallRecord>,
+    pub(crate) opcodes: Vec<u8>,
 }
 
-struct CallRecord {
-    target: Address,
-    result: InstructionResult,
-    output: Bytes,
-    spent: u64,
+pub(crate) struct CallRecord {
+    pub(crate) target: Address,
+    pub(crate) result: InstructionResult,
+    pub(crate) output: Bytes,
+    pub(crate) spent: u64,
 }
 
 impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for Calls {
