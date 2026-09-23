@@ -138,7 +138,8 @@ impl InvalidTxError for MegaTxLimitExceededError {
 /// what the block [used](Self::block_used) and the [limit](Self::limit) it is held to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MegaBlockLimitExceededError {
-    /// The block's transactions have spent their execution gas.
+    /// The block's transactions have spent their execution gas. A deposit is never refused this
+    /// way.
     ExecutionGasLimit {
         /// The execution gas the block has spent.
         block_used: u64,
