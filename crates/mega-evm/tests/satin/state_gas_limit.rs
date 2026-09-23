@@ -466,47 +466,379 @@ fn test_a_crowded_bucket_reaches_the_limit_sooner() {
 
 /* ---------- authorities ---------- */
 
-/// Authorities whose state gas crosses the limit are not applied: the limit is enforced before
-/// the writes it guards, the gas they charged is taken back, and the transaction is stopped at its
-/// first frame. The state gas is held before their records are, so a transaction that crosses
-/// both limits reports the state gas.
-#[test]
-fn test_authorities_crossing_the_limit_are_not_applied() {
-    let db = || funded().account_code(A, Bytes::from_static(&[STOP]));
-    let tx = || {
-        authorizing_call(
-            CALLER,
-            A,
-            U256::ZERO,
-            BELOW_CAP,
-            DELEGATE,
-            &[(AUTHORITY_1, 0), (AUTHORITY_2, 0)],
-        )
-    };
-    let held = state_gas_of(&db(), &tx());
-    let applied = run_under(db(), tx(), held);
-    assert!(applied.result.is_success());
-    assert_eq!(applied.usage.write_records, 2);
+/// One authorization: its authority — `None` for a signature that recovers to nobody — its chain
+/// id and its nonce.
+type Authorization = (Option<Address>, u64, u64);
 
-    for limits in [
-        EvmTxRuntimeLimits::no_limits().with_tx_state_gas_limit(held - 1),
-        EvmTxRuntimeLimits::no_limits()
-            .with_tx_state_gas_limit(held - 1)
-            .with_tx_kv_update_limit(0),
-    ] {
-        let stopped = MegaEvm::new(context(db()).with_tx_runtime_limits(limits))
-            .execute_transaction(tx())
+/// A type-4 call from `CALLER` to `to` carrying `value` and `authorizations`, each delegating its
+/// authority to `DELEGATE`.
+fn authorizing(to: Address, value: U256, authorizations: &[Authorization]) -> MegaTransaction {
+    use revm::context_interface::{
+        either::Either,
+        transaction::{RecoveredAuthority, RecoveredAuthorization},
+    };
+    let mut tx = authorizing_call(CALLER, to, value, BELOW_CAP, DELEGATE, &[]);
+    tx.0.base.authorization_list = authorizations
+        .iter()
+        .map(|(authority, chain_id, nonce)| {
+            Either::Right(RecoveredAuthorization::new_unchecked(
+                revm::context_interface::transaction::Authorization {
+                    chain_id: U256::from(*chain_id),
+                    address: DELEGATE,
+                    nonce: *nonce,
+                },
+                authority.map_or(RecoveredAuthority::Invalid, RecoveredAuthority::Valid),
+            ))
+        })
+        .collect();
+    tx
+}
+
+/// The schedule's state gas for a new account and for a delegation's bytes.
+fn account_and_delegation() -> (u64, u64) {
+    use crate::salt::entry;
+    use revm::context_interface::cfg::GasId;
+    (entry(GasId::new_account_state_gas()), entry(GasId::tx_eip7702_state_gas_bytecode()))
+}
+
+/// An authorization adds state only when it applies: a new account for an authority that did not
+/// exist, and the delegation's bytes once for an authority that was not delegated. Each authority
+/// it applies to is one write record, however many of its authorizations applied, except the
+/// sender, whose account is the body's. An authorization that does not apply — a wrong nonce, a
+/// wrong chain, a nonce that cannot be bumped, an account with code, a signature that recovers to
+/// nobody — adds nothing and leaves its authority as it was.
+#[test]
+fn test_an_authorization_adds_state_only_when_it_applies() {
+    let (account, delegation) = account_and_delegation();
+    let a1 = Some(AUTHORITY_1);
+    let a2 = Some(AUTHORITY_2);
+    let with_code = || funded().account_code(AUTHORITY_1, Bytes::from_static(&[STOP]));
+    // (case, database, authorizations, state gas, records, AUTHORITY_1's nonce after)
+    type Case = (&'static str, MemoryDatabase, Vec<Authorization>, u64, u64, u64);
+    let cases: Vec<Case> = vec![
+        ("a new authority", funded(), vec![(a1, 0, 0)], account + delegation, 1, 1),
+        (
+            "two new authorities",
+            funded(),
+            vec![(a1, 0, 0), (a2, 0, 0)],
+            2 * (account + delegation),
+            2,
+            1,
+        ),
+        (
+            "one new authority authorized twice at its first nonce",
+            funded(),
+            vec![(a1, 0, 0), (a1, 0, 0)],
+            account + delegation,
+            1,
+            1,
+        ),
+        (
+            "one new authority authorized twice in sequence",
+            funded(),
+            vec![(a1, 0, 0), (a1, 0, 1)],
+            account + delegation,
+            1,
+            2,
+        ),
+        (
+            "an authority that exists",
+            funded().account_balance(AUTHORITY_1, U256::from(1)),
+            vec![(a1, 0, 0)],
+            delegation,
+            1,
+            1,
+        ),
+        (
+            "an authority on the transaction's chain",
+            funded(),
+            vec![(a1, 1, 0)],
+            account + delegation,
+            1,
+            1,
+        ),
+        ("an authority on another chain", funded(), vec![(a1, 999, 0)], 0, 0, 0),
+        ("a wrong nonce", funded(), vec![(a1, 0, 1)], 0, 0, 0),
+        ("a nonce that cannot be bumped", funded(), vec![(a1, 0, u64::MAX)], 0, 0, 0),
+        ("an authority with code", with_code(), vec![(a1, 0, 0)], 0, 0, 0),
+        ("a signature that recovers to nobody", funded(), vec![(None, 0, 0)], 0, 0, 0),
+        (
+            "the sender, at the nonce its transaction leaves it",
+            funded(),
+            vec![(Some(CALLER), 0, 1)],
+            delegation,
+            0,
+            0,
+        ),
+        (
+            "the sender, at its transaction's own nonce",
+            funded(),
+            vec![(Some(CALLER), 0, 0)],
+            0,
+            0,
+            0,
+        ),
+    ];
+    for (name, db, authorizations, state_gas, records, nonce) in cases {
+        let tuples = authorizations.len() as u64 * mega_evm::AUTHORIZATION_SIZE;
+        let outcome = run_under(
+            db.account_code(A, Bytes::from_static(&[STOP])),
+            authorizing(A, U256::ZERO, &authorizations),
+            u64::MAX,
+        );
+        assert!(outcome.result.is_success(), "{name}: {:?}", outcome.result);
+        assert_eq!(outcome.gas.state, state_gas, "{name}: the state gas");
+        assert_eq!(outcome.usage.write_records, records, "{name}: the records");
+        assert_eq!(
+            outcome.usage.data_size,
+            TX_BODY_SIZE + tuples + records * WRITE_RECORD_SIZE,
+            "{name}: the data size",
+        );
+        let authority = outcome.state.get(&AUTHORITY_1);
+        assert_eq!(authority.map_or(0, |a| a.info.nonce), nonce, "{name}: the authority's nonce");
+        let delegated =
+            outcome.state.values().any(|a| a.info.code.as_ref().is_some_and(|c| c.is_eip7702()));
+        assert_eq!(delegated, state_gas >= delegation, "{name}: whether anything was delegated");
+    }
+}
+
+/// An authority in a crowded bucket costs the bucket's multiple of its new account and its
+/// delegation, on the state ledger alone: its record and the data size do not move.
+#[test]
+fn test_a_crowded_authority_moves_the_state_ledger_alone() {
+    use crate::salt::{crowded_account, minimal_envs, salt_context};
+    let (account, delegation) = account_and_delegation();
+    let run = |envs| {
+        MegaEvm::new(salt_context(funded().account_code(A, Bytes::from_static(&[STOP])), envs))
+            .execute_transaction(authorizing(A, U256::ZERO, &[(Some(AUTHORITY_1), 0, 0)]))
+            .unwrap()
+    };
+    let minimal = run(minimal_envs());
+    let crowded = run(crowded_account(minimal_envs(), AUTHORITY_1, 100));
+    assert!(minimal.result.is_success() && crowded.result.is_success());
+    assert_eq!(minimal.gas.state, account + delegation);
+    assert_eq!(crowded.gas.state, 100 * (account + delegation));
+    assert_eq!(crowded.gas.regular, minimal.gas.regular, "the regular ledger does not move");
+    assert_eq!(crowded.usage, minimal.usage, "the record and the data size do not move");
+}
+
+/// The state gas an authority costs is charged before the first frame, from the transaction's
+/// gas. A gas limit that covers it in a minimal bucket but not in a crowded one is not refused at
+/// validation: the transaction runs out of gas before its first frame, and the out-of-gas takes
+/// the authorization back.
+#[test]
+fn test_an_authority_the_transaction_cannot_pay_for_is_not_applied() {
+    use crate::salt::{crowded_account, minimal_envs, salt_context};
+    let tx = |gas_limit| {
+        let mut tx = authorizing(A, U256::ZERO, &[(Some(AUTHORITY_1), 0, 0)]);
+        tx.0.base.gas_limit = gas_limit;
+        tx
+    };
+    let run = |envs, gas_limit| {
+        MegaEvm::new(salt_context(funded().account_code(A, Bytes::from_static(&[STOP])), envs))
+            .execute_transaction(tx(gas_limit))
+            .expect("the transaction is valid")
+    };
+    let minimal = run(minimal_envs(), BELOW_CAP);
+    assert!(minimal.result.is_success());
+    let budget = minimal.gas.gas_used;
+
+    let crowded = run(crowded_account(minimal_envs(), AUTHORITY_1, 100), budget);
+    assert!(crowded.result.is_halt(), "an out-of-gas, not a refusal: {:?}", crowded.result);
+    let authority = crowded.state.get(&AUTHORITY_1);
+    assert!(
+        authority.is_none_or(|a| a.info.nonce == 0 && a.info.is_empty_code_hash()),
+        "the authorization was taken back: {authority:?}"
+    );
+    assert!(run(crowded_account(minimal_envs(), AUTHORITY_1, 100), BELOW_CAP).result.is_success());
+}
+
+/// A value transaction to an authority it creates pays for one new account, not two: by the time
+/// EIP-2780 looks at the recipient the authorization has created it. It is one record too.
+#[test]
+fn test_an_authority_that_is_the_recipient_pays_for_one_account() {
+    let (account, delegation) = account_and_delegation();
+    let outcome = run_under(
+        funded(),
+        authorizing(AUTHORITY_1, U256::from(1), &[(Some(AUTHORITY_1), 0, 0)]),
+        u64::MAX,
+    );
+    assert!(outcome.result.is_success(), "{:?}", outcome.result);
+    assert_eq!(outcome.gas.state, account + delegation);
+    assert_eq!(outcome.usage.write_records, 1);
+
+    let unauthorized =
+        run_under(funded(), call(CALLER, AUTHORITY_1, U256::from(1), BELOW_CAP), u64::MAX);
+    assert_eq!(unauthorized.gas.state, account, "the same transfer without it pays the account");
+}
+
+/// Authorities that cross a limit are not applied, whichever limit it is: the limit is enforced
+/// before the writes it guards, the gas they charged is taken back, and the transaction is stopped
+/// at its first frame. Their state gas is held first, then their records' data size and KV count,
+/// so a transaction that crosses more than one limit reports the first of them. Taking them back
+/// forgoes the refund an authority that existed would have earned: two transactions that differ
+/// in that alone spend the same gas.
+#[test]
+fn test_authorities_crossing_any_limit_are_not_applied() {
+    let (account, delegation) = account_and_delegation();
+    let both = [(Some(AUTHORITY_1), 0, 0), (Some(AUTHORITY_2), 0, 0)];
+    let fresh = || funded().account_code(A, Bytes::from_static(&[STOP]));
+    let existing = || {
+        fresh()
+            .account_balance(AUTHORITY_1, U256::from(1))
+            .account_balance(AUTHORITY_2, U256::from(1))
+    };
+    let held = 2 * (account + delegation);
+    let body = TX_BODY_SIZE + 2 * mega_evm::AUTHORIZATION_SIZE;
+    let limits = EvmTxRuntimeLimits::no_limits;
+    let state_stop = |limit, used| LimitCheck::ExceedsLimit {
+        kind: LimitKind::StateGrowth,
+        limit,
+        used,
+        frame_local: false,
+    };
+    // (case, database, authorizations, limits, the stop)
+    type Case = (&'static str, MemoryDatabase, Vec<Authorization>, EvmTxRuntimeLimits, LimitCheck);
+    let cases: [Case; 6] = [
+        (
+            "a new authority under no state gas at all",
+            fresh(),
+            vec![both[0]],
+            limits().with_tx_state_gas_limit(0),
+            state_stop(0, account + delegation),
+        ),
+        (
+            "two new authorities one gas short",
+            fresh(),
+            both.to_vec(),
+            limits().with_tx_state_gas_limit(held - 1),
+            state_stop(held - 1, held),
+        ),
+        (
+            "two new authorities over the state-gas and the KV limit",
+            fresh(),
+            both.to_vec(),
+            limits().with_tx_state_gas_limit(held - 1).with_tx_kv_update_limit(0),
+            state_stop(held - 1, held),
+        ),
+        (
+            "two existing authorities over the KV limit",
+            existing(),
+            both.to_vec(),
+            limits().with_tx_kv_update_limit(1),
+            LimitCheck::ExceedsLimit {
+                kind: LimitKind::KVUpdate,
+                limit: 1,
+                used: 2,
+                frame_local: false,
+            },
+        ),
+        (
+            "two new authorities over the data-size limit",
+            fresh(),
+            both.to_vec(),
+            limits().with_tx_data_size_limit(body + 2 * WRITE_RECORD_SIZE - 1),
+            LimitCheck::ExceedsLimit {
+                kind: LimitKind::DataSize,
+                limit: body + 2 * WRITE_RECORD_SIZE - 1,
+                used: body + 2 * WRITE_RECORD_SIZE,
+                frame_local: false,
+            },
+        ),
+        (
+            "two existing authorities under no state gas at all",
+            existing(),
+            both.to_vec(),
+            limits().with_tx_state_gas_limit(0),
+            state_stop(0, 2 * delegation),
+        ),
+    ];
+    for (name, db, authorizations, limits, stop) in cases {
+        let stopped = MegaEvm::new(context(db).with_tx_runtime_limits(limits))
+            .execute_transaction(authorizing(A, U256::ZERO, &authorizations))
             .unwrap();
-        assert_state_stopped("two authorities", &stopped, held - 1, held);
-        assert_eq!(stopped.usage.write_records, 0, "no record of them is kept");
+        assert!(!stopped.result.is_success() && !stopped.result.is_halt(), "{name}");
+        assert_eq!(stopped.limit_exceeded, Some(stop), "{name}");
+        assert_eq!(stopped.result.output().unwrap(), &stop.revert_data(), "{name}");
+        assert_eq!(stopped.gas.state, 0, "{name}: their state gas was taken back");
+        assert_eq!(stopped.usage.write_records, 0, "{name}: no record of them is kept");
         for authority in [AUTHORITY_1, AUTHORITY_2] {
             let account = stopped.state.get(&authority);
             assert!(
                 account.is_none_or(|a| a.info.nonce == 0 && a.info.is_empty_code_hash()),
-                "{authority} was not delegated: {account:?}"
+                "{name}: {authority} was not delegated: {account:?}"
             );
         }
     }
+
+    let spent = |db: MemoryDatabase| {
+        MegaEvm::new(context(db).with_tx_runtime_limits(limits().with_tx_state_gas_limit(0)))
+            .execute_transaction(authorizing(A, U256::ZERO, &both))
+            .unwrap()
+            .gas
+            .gas_used
+    };
+    assert_eq!(spent(existing()), spent(fresh()), "no refund for an authority never applied");
+
+    let applied = run_under(fresh(), authorizing(A, U256::ZERO, &both), held);
+    assert!(applied.result.is_success(), "a limit they fit applies them: {:?}", applied.result);
+    assert_eq!(applied.usage.write_records, 2);
+}
+
+/* ---------- destructions ---------- */
+
+/// A `SELFDESTRUCT` grows the state only when the value it moves creates its beneficiary: one new
+/// account, which is also one write record. Moving value to an account that exists is a record
+/// and no state; moving nothing, or to itself, is neither.
+#[test]
+fn test_a_destruction_grows_state_only_when_it_creates_its_beneficiary() {
+    let (account, _) = account_and_delegation();
+    let destroys_to = |beneficiary| {
+        BytecodeBuilder::default().push_address(beneficiary).append(SELFDESTRUCT).build()
+    };
+    let cases: [(&str, MemoryDatabase, u64, u64); 4] = [
+        ("value to a new beneficiary", funded().account_code(A, destroys_to(EMPTY)), account, 1),
+        ("value to a beneficiary that exists", funded().account_code(A, destroys_to(BURNER)), 0, 1),
+        (
+            "nothing to move",
+            funded().account_balance(A, U256::ZERO).account_code(A, destroys_to(EMPTY)),
+            0,
+            0,
+        ),
+        ("value to itself", funded().account_code(A, destroys_to(A)), 0, 0),
+    ];
+    for (name, db, state_gas, records) in cases {
+        let outcome = run_under(db, call(CALLER, A, U256::ZERO, BELOW_CAP), u64::MAX);
+        assert!(outcome.result.is_success(), "{name}: {:?}", outcome.result);
+        assert_eq!(outcome.gas.state, state_gas, "{name}: the state gas");
+        assert_eq!(outcome.usage.write_records, records, "{name}: the records");
+    }
+}
+
+/* ---------- fresh slots ---------- */
+
+/// Three fresh slots fit a limit of three slots' state gas exactly; a fourth crosses it, on the
+/// fourth `SSTORE`, and none of the four is kept.
+#[test]
+fn test_fresh_slots_fit_a_limit_of_their_state_gas_and_one_more_stops() {
+    let slot = one_slot();
+    let run = |slots| {
+        run_under(
+            funded()
+                .account_code(A, write_slots(BytecodeBuilder::default(), 0, slots).stop().build()),
+            call(CALLER, A, U256::ZERO, BELOW_CAP),
+            3 * slot,
+        )
+    };
+    let fits = run(3);
+    assert!(fits.result.is_success(), "{:?}", fits.result);
+    assert_eq!(fits.gas.state, 3 * slot);
+
+    let stopped = run(4);
+    assert_state_stopped("a fourth slot", &stopped, 3 * slot, 4 * slot);
+    let written =
+        stopped.state.get(&A).map_or(0, |a| a.storage.values().filter(|v| v.is_changed()).count());
+    assert_eq!(written, 0, "none of the slots is kept");
 }
 
 /* ---------- which limit binds first ---------- */

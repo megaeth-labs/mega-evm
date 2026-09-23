@@ -22,7 +22,8 @@ use mega_evm::{
     FRAME_DATA_SHARE_NUMERATOR, TX_BODY_SIZE, WRITE_RECORD_SIZE,
 };
 use revm::bytecode::opcode::{
-    CALL, CREATE, GAS, INVALID, POP, PUSH0, PUSH1, RETURN, RETURNDATACOPY, RETURNDATASIZE, STOP,
+    CALL, CREATE, GAS, INVALID, POP, PUSH0, PUSH1, RETURN, RETURNDATACOPY, RETURNDATASIZE,
+    SELFDESTRUCT, STOP,
 };
 
 use crate::common::{authorizing_call, call, call_with_data, context};
@@ -136,7 +137,7 @@ fn slot_written(outcome: &MegaTransactionOutcome, address: Address, slot: u64) -
 /// slot is no change, and the sender is the body's.
 #[test]
 fn test_the_kv_count_is_the_write_records_kept() {
-    let cases: [(&str, Bytes, u64); 6] = [
+    let cases: [(&str, Bytes, u64); 7] = [
         ("an empty call", Bytes::new(), 0),
         ("three fresh slots", slots(3), 3),
         (
@@ -164,8 +165,13 @@ fn test_the_kv_count_is_the_write_records_kept() {
         ),
         (
             "a value transfer: the frame's account and the recipient",
-            { then_call(BytecodeBuilder::default(), B, 1).stop().build() },
+            then_call(BytecodeBuilder::default(), B, 1).stop().build(),
             2,
+        ),
+        (
+            "a destruction that moves value: its beneficiary",
+            BytecodeBuilder::default().push_address(B).append(SELFDESTRUCT).build(),
+            1,
         ),
     ];
     for (name, code, kept) in cases {
