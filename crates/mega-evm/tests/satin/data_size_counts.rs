@@ -244,22 +244,6 @@ fn test_what_each_transaction_keeps() {
             records(1),
         ),
         (
-            "a child that writes a slot back and reverts, under a caller that wrote one",
-            with_code(
-                call_to(CALL, LIBRARY, 0).sstore(U256::from(5), U256::from(1)).stop().build(),
-            )
-            .account_code(
-                LIBRARY,
-                BytecodeBuilder::default()
-                    .sstore(U256::ZERO, U256::from(1))
-                    .sstore(U256::ZERO, U256::ZERO)
-                    .revert()
-                    .build(),
-            ),
-            call(CALLER, CALLEE, U256::ZERO, GAS_LIMIT),
-            records(1),
-        ),
-        (
             "a SELFDESTRUCT that moves value to an existing account",
             with_code(
                 BytecodeBuilder::default().push_address(EXISTING).append(SELFDESTRUCT).build(),
@@ -283,6 +267,39 @@ fn test_what_each_transaction_keeps() {
         assert!(outcome.result.is_success(), "{name}: {:?}", outcome.result);
         assert_eq!(outcome.usage, expected, "{name}");
     }
+}
+
+/// A child that writes a slot, writes it back and reverts runs under a caller that already wrote
+/// one. The child's write and its write-back both go with its revert, so neither reaches the
+/// caller: the caller keeps its own write and that write's record, no more and no less.
+#[test]
+fn test_a_reverted_childs_write_and_write_back_leave_its_callers_write() {
+    const CALLER_SLOT: U256 = U256::from_limbs([5, 0, 0, 0]);
+    let parent = BytecodeBuilder::default()
+        .sstore(CALLER_SLOT, U256::from(1))
+        .append_many(call_to(CALL, LIBRARY, 0).build_vec())
+        .stop()
+        .build();
+    let child = BytecodeBuilder::default()
+        .sstore(U256::ZERO, U256::from(1))
+        .sstore(U256::ZERO, U256::ZERO)
+        .revert()
+        .build();
+    let db = funded().account_code(CALLEE, parent).account_code(LIBRARY, child);
+    let outcome = execute(db, call(CALLER, CALLEE, U256::ZERO, GAS_LIMIT));
+    assert!(outcome.result.is_success(), "{:?}", outcome.result);
+    assert_eq!(outcome.usage, records(1));
+    assert_eq!(
+        outcome.state[&CALLEE].storage.get(&CALLER_SLOT).map(|slot| slot.present_value),
+        Some(U256::from(1)),
+        "the caller's write survives the child's revert",
+    );
+    assert!(
+        outcome.state.get(&LIBRARY).is_none_or(|library| {
+            library.storage.get(&U256::ZERO).is_none_or(|slot| !slot.is_changed())
+        }),
+        "the child's write went with its revert",
+    );
 }
 
 /// The sender's own authorization in [`call_with_body`] applies: its bytes are the body's, and
