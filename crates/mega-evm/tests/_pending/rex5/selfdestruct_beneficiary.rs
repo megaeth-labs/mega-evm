@@ -235,4 +235,3 @@ fn staticcall_once_parent(target: Address, gas_each: u64) -> Bytes {
         .append(STOP)
         .build()
 }
-

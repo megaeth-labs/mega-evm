@@ -284,4 +284,3 @@ fn test_rex6_authority_beneficiary_triggers_detention() {
         "REX5 must not detain from an authority (detained5={detained5})",
     );
 }
-
