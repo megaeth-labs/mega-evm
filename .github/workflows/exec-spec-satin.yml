@@ -1,0 +1,208 @@
+name: Execution-spec tests on Satin
+
+# Runs the execution-spec-test state fixtures through MegaEvm with the state-test runner
+# (crates/mega-state-test), on one download of the fixtures:
+#
+# - equivalence mode, a gate: Satin's machinery priced as each fixture fork prices it, on the
+#   Osaka entries of the main release and the Amsterdam entries of the glamsterdam devnet
+#   release. Every test passes, is skipped for a reason the fork's own runner shares, or fails on
+#   a deviation registered in crates/mega-state-test/src/deviations.rs, whose count is pinned
+#   there; the executed and skipped counts are pinned below.
+# - Satin mode, a report: the same entries under Satin's own configuration, counted by outcome
+#   in the step summary. It does not fail the job.
+#
+# The fixture releases are the ones the revm fork's `scripts/run-tests.sh` names at the tag
+# Cargo.lock pins, so this gate and the fork runner's (exec-spec.yml) judge the same fixtures.
+# Not a required check.
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - Cargo.lock
+      - Cargo.toml
+      - rust-toolchain.toml
+      - crates/mega-evm/**
+      - crates/mega-state-test/**
+      - crates/state-test/**
+      - crates/system-contracts/**
+      - .github/workflows/exec-spec-satin.yml
+  push:
+    branches: [satin]
+    paths:
+      - Cargo.lock
+      - Cargo.toml
+      - rust-toolchain.toml
+      - crates/mega-evm/**
+      - crates/mega-state-test/**
+      - crates/state-test/**
+      - crates/system-contracts/**
+      - .github/workflows/exec-spec-satin.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  exec-spec-satin:
+    name: execution-spec tests on Satin
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      # Tests equivalence mode executes and skips, per fork, on the pinned fixture releases. The
+      # runner skips what the fork's own runner skips, so these are the counts exec-spec.yml pins
+      # for it. A change that moves the fork pin, and with it the fixtures, updates both, and the
+      # deviation counts in crates/mega-state-test/src/deviations.rs.
+      OSAKA_EXECUTED: "19465"
+      OSAKA_SKIPPED: "52"
+      AMSTERDAM_EXECUTED: "15754"
+      AMSTERDAM_SKIPPED: "72"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Read the fork pin from Cargo.lock
+        id: pin
+        run: |
+          sources=$(grep -o 'git+https://github.com/megaeth-labs/revm?tag=[^"#]*#[0-9a-f]*' Cargo.lock | sort -u)
+          if [ "$(printf '%s\n' "$sources" | grep -c .)" -ne 1 ]; then
+            printf 'expected exactly one revm fork revision in Cargo.lock, found:\n%s\n' "$sources" >&2
+            exit 1
+          fi
+          tag=${sources#*tag=}
+          tag=${tag%%#*}
+          commit=${sources##*#}
+          echo "fork tag $tag at $commit"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          repository: megaeth-labs/revm
+          ref: ${{ steps.pin.outputs.tag }}
+          path: revm-fork
+          sparse-checkout: scripts
+          persist-credentials: false
+
+      - name: Check the tag names the locked revision
+        working-directory: revm-fork
+        env:
+          COMMIT: ${{ steps.pin.outputs.commit }}
+        run: test "$(git rev-parse HEAD)" = "$COMMIT"
+
+      - name: Read the fixture releases the fork's runner downloads
+        id: fixtures
+        run: |
+          set -euo pipefail
+          script=revm-fork/scripts/run-tests.sh
+          # One `NAME="value"` assignment each; a script that no longer has one fails the step
+          # rather than downloading something else.
+          read_var() {
+            local value
+            value=$(sed -n "s/^$1=\"\(.*\)\"$/\1/p" "$script")
+            if [ -z "$value" ] || [ "$(printf '%s\n' "$value" | grep -c .)" -ne 1 ]; then
+              echo "::error::$script: no single $1 assignment" >&2
+              return 1
+            fi
+            printf '%s' "$value"
+          }
+          main_version=$(read_var MAIN_VERSION)
+          devnet_version=$(read_var DEVNET_VERSION)
+          main_url=$(read_var FIXTURES_URL)
+          devnet_url=$(read_var DEVNET_FIXTURES_URL)
+          devnet_tar=$(read_var DEVNET_TAR)
+          # The runner downloads the develop release unless REVM_STATETEST_STABLE is set.
+          grep -q '^    MAIN_TAR="fixtures_develop.tar.gz"$' "$script"
+          {
+            echo "main=$main_url/$main_version/fixtures_develop.tar.gz"
+            echo "devnet=$devnet_url/$devnet_version/$devnet_tar"
+            echo "key=eest-state-tests-$main_version-$devnet_version"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Restore the fixtures
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: fixtures
+          key: ${{ steps.fixtures.outputs.key }}
+
+      - name: Download the fixtures
+        if: steps.cache.outputs.cache-hit != 'true'
+        env:
+          MAIN_URL: ${{ steps.fixtures.outputs.main }}
+          DEVNET_URL: ${{ steps.fixtures.outputs.devnet }}
+        run: |
+          set -euo pipefail
+          fetch() {
+            mkdir -p "fixtures/$1"
+            curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors "$2" -o "fixtures/$1.tar.gz"
+            # Only the state tests: the archive's top-level `fixtures/` directory is stripped, as
+            # the fork's runner strips it.
+            tar -xzf "fixtures/$1.tar.gz" --strip-components=1 -C "fixtures/$1" fixtures/state_tests
+            rm "fixtures/$1.tar.gz"
+          }
+          fetch main "$MAIN_URL"
+          fetch devnet "$DEVNET_URL"
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - uses: foundry-rs/foundry-toolchain@v1
+
+      - name: Build the runner
+        run: cargo build --release --locked -p state-test
+
+      - name: Equivalence mode, the gate
+        run: |
+          set -uo pipefail
+          {
+            echo "### Equivalence mode"
+            echo
+            echo "| Fixtures | Executed | Skipped | Passed | Deviated | Unattributed |"
+            echo "|---|---:|---:|---:|---:|---:|"
+          } >> "$GITHUB_STEP_SUMMARY"
+          gate() {
+            local fork=$1 dir=$2 executed=$3 skipped=$4 status=0
+            target/release/state-test --fork "$fork" "$dir" \
+              --expect-executed "$executed" --expect-skipped "$skipped" --expect-deviations \
+              --summary-json "equivalence-$fork.json" || status=$?
+            if [ -f "equivalence-$fork.json" ]; then
+              jq -r --arg fork "$fork" '.summary as $s | "| \($fork) | \($s.executed) | \([$s.skipped[]] | add // 0) | \($s.passed) | \([$s.deviated[]] | add // 0) | \($s.unattributed) |"' \
+                "equivalence-$fork.json" >> "$GITHUB_STEP_SUMMARY"
+            fi
+            if [ "$status" -ne 0 ]; then
+              echo "::error::equivalence mode failed on the $fork fixtures"
+            fi
+            return "$status"
+          }
+          status=0
+          gate Osaka fixtures/main/state_tests "$OSAKA_EXECUTED" "$OSAKA_SKIPPED" || status=1
+          gate Amsterdam fixtures/devnet/state_tests "$AMSTERDAM_EXECUTED" "$AMSTERDAM_SKIPPED" || status=1
+          exit "$status"
+
+      - name: Satin mode, the report
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          {
+            echo "### Satin mode (a report)"
+            echo
+            echo "| Fixtures | Executed | Skipped | Passed | Failed | Failed by kind |"
+            echo "|---|---:|---:|---:|---:|---|"
+          } >> "$GITHUB_STEP_SUMMARY"
+          status=0
+          for run in "Osaka fixtures/main/state_tests" "Amsterdam fixtures/devnet/state_tests"; do
+            read -r fork dir <<< "$run"
+            target/release/state-test --mode satin --fork "$fork" "$dir" \
+              --summary-json "satin-$fork.json" || status=1
+            if [ -f "satin-$fork.json" ]; then
+              jq -r --arg fork "$fork" '.summary as $s | "| \($fork) | \($s.executed) | \([$s.skipped[]] | add // 0) | \($s.passed) | \([$s.failed[]] | add // 0) | \($s.failed | to_entries | map("\(.key) \(.value)") | join(", ")) |"' \
+                "satin-$fork.json" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          done
+          exit "$status"

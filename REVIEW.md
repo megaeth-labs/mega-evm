@@ -93,10 +93,16 @@ These checks guard every change to the Satin engine.
 
 ### Execution-spec tests
 
-- No check in this repository runs execution-spec tests on `MegaEvm` itself until the state-test tool is ported to Satin.
 - `.github/workflows/exec-spec.yml` runs the fork's own runner on the execution-spec-test fixtures, at the fork tag `Cargo.lock` pins, and checks the Osaka and Amsterdam executed and skipped counts pinned in the workflow.
-  It checks the fork `MegaEvm` runs on, not `MegaEvm`, and it is not a required check.
-- It runs when `Cargo.toml` or `Cargo.lock` changes (the pin may have moved); a change that moves the pin updates the pinned counts and says why they moved.
+  It checks the fork `MegaEvm` runs on, not `MegaEvm`.
+  It runs when `Cargo.toml` or `Cargo.lock` changes (the pin may have moved); a change that moves the pin updates the pinned counts and says why they moved.
+- `.github/workflows/exec-spec-satin.yml` runs the same fixture releases through `MegaEvm` with the state-test runner (`crates/mega-state-test`).
+  Equivalence mode is the gate: Satin's machinery priced as the fixture's fork prices it, where every failure must be explained by a deviation registered in `crates/mega-state-test/src/deviations.rs`, with its reason and its pinned count, and the executed and skipped counts equal the fork runner's pins.
+  Satin mode reports the same fixtures under Satin's own configuration in the step summary, and does not fail the job.
+  It runs when the engine, the runner or the lock changes.
+- A deviation is a rule Satin keeps on purpose and is reviewed as one: an entry added to explain a failure that is a bug is the defect, and a count that moves says which fixtures moved and why.
+  `crates/mega-state-test/DEVIATIONS.md` is rendered from the registry, and a test keeps the two equal.
+- Neither workflow is a required check.
 
 ### Instruction counts (CodSpeed)
 
@@ -135,7 +141,7 @@ These checks guard every change to the Satin engine.
   - `benchmark.yml`: the Satin bench set on `satin`'s head, without a baseline (`-f aa_check=true` measures the noise floor).
   - `exec-spec.yml`: the execution-spec fixtures at the pinned fork tag.
   - `doc-audit.yml`: the documentation audit of `satin`'s docs.
-  - `replay-bench.yml`: nothing yet; its bench job is disabled on `satin` until the state-test tool is ported.
+  - `replay-bench.yml`: nothing yet; its bench job is disabled on `satin` until the replay corpus, which is keyed by the legacy Rex5 spec, and a bench mode of the state-test tool exist for Satin.
 
 ## Dev tools and test infrastructure
 

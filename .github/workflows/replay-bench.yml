@@ -104,10 +104,11 @@ jobs:
   bench:
     name: Replay throughput
     needs: prepare
-    # Disabled on the satin branch: this job builds `state-test`, which is not a
-    # workspace member until it is ported to the Satin engine; the port removes
-    # this line. (`compare` needs this job, so it is skipped with it.) Scheduled
-    # and comment-triggered runs use the default branch's copy of this file.
+    # Disabled on the satin branch: the corpus under bench/replay/fixtures is
+    # keyed by the legacy Rex5 spec, and the Satin `state-test` has no `--bench`
+    # mode; the job returns with a corpus and a bench mode for Satin. (`compare`
+    # needs this job, so it is skipped with it.) Scheduled and comment-triggered
+    # runs use the default branch's copy of this file.
     if: false
     runs-on: blacksmith-32vcpu-ubuntu-2404
     timeout-minutes: 90
