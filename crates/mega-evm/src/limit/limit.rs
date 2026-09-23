@@ -665,6 +665,40 @@ mod tests {
         );
     }
 
+    /// A frame answered without running — by the depth guard, the latch, an interceptor or an
+    /// inspector — keeps none of the records its caller paid for, whatever its answer: its lane is
+    /// empty, the whole charge comes back, and the transaction's history bytes are its body alone.
+    ///
+    /// The depth guard's answer is reached here rather than through a transaction: under the
+    /// execution cap no call chain reaches the call-stack limit, because each call forwards at most
+    /// sixty-three sixty-fourths of what its caller has left, and 200,000,000 gas leaves about
+    /// twenty at depth 1,024. The latch's and an interceptor's answers are also reached through
+    /// transactions, in the history-byte tests.
+    #[test]
+    fn test_a_frame_answered_without_running_keeps_nothing_whatever_the_answer() {
+        const BODY: u64 = crate::TX_BODY_SIZE;
+        for answer in
+            [InstructionResult::CallTooDeep, InstructionResult::Revert, InstructionResult::Stop]
+        {
+            let mut limit = with_the_transactions_frame();
+            limit.set_intrinsic_history(1, BODY);
+            let inner = call_from_to(CALLEE, TARGET, U256::from(1));
+            limit.stage_frame_charge(limit.frame_start_records(&inner), 1_000, 2_000);
+            limit.push_empty_frame();
+
+            let mut result = crate::synthetic_frame_result(&inner, answer, Bytes::new());
+            assert_eq!(limit.on_frame_return(&mut result), 3_000, "{answer:?}: all of it back");
+            assert_eq!(limit.usage(), LimitUsage::ZERO, "{answer:?}: nothing kept");
+
+            let outer = call_from_to(SENDER, CALLEE, U256::ZERO);
+            let mut result =
+                crate::synthetic_frame_result(&outer, InstructionResult::Stop, Bytes::new());
+            limit.on_last_frame_return(&mut result);
+            limit.settle_history_bytes(true);
+            assert_eq!(limit.history_bytes(), BODY, "{answer:?}: the body alone");
+        }
+    }
+
     /// A charge computed from a different answer than the count is what a rewrite that turns one
     /// kind of frame into another would make. It trips rather than passing silently, because the
     /// charge and the refund its failure gets back would both be wrong.

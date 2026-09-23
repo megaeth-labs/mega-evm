@@ -9,17 +9,32 @@
 //! Every case runs twice: below the execution cap, where the reservoir is empty and every charge
 //! spills onto regular gas, and above it, where the reservoir pays first.
 
-use alloy_primitives::{address, Address, Bytes, U256};
+use alloy_op_evm::OpTx;
+use alloy_primitives::{address, Address, Bytes, TxKind, B256, U256};
+use alloy_sol_types::SolCall;
 use mega_evm::{
-    constants::{COST_PER_HISTORY_BYTE, TX_GAS_LIMIT_CAP},
-    test_utils::{BytecodeBuilder, MemoryDatabase},
-    MegaContext, MegaEvm, MegaTransaction, MegaTransactionOutcome, LOG_BASE_SIZE, LOG_TOPIC_SIZE,
-    STORAGE_CALL_STIPEND_BYTES, TX_BODY_SIZE, WRITE_RECORD_SIZE,
+    constants::{COST_PER_HISTORY_BYTE, MAX_CONTRACT_SIZE, TX_GAS_LIMIT_CAP},
+    system::{IMegaAccessControl, ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE},
+    test_utils::{op_transaction, BytecodeBuilder, MemoryDatabase},
+    untouched_create_gas, EvmTxRuntimeLimits, MegaContext, MegaEvm, MegaTransaction,
+    MegaTransactionOutcome, ACCESS_LIST_ADDRESS_SIZE, ACCESS_LIST_SLOT_SIZE, AUTHORIZATION_SIZE,
+    LOG_BASE_SIZE, LOG_TOPIC_SIZE, STORAGE_CALL_STIPEND_BYTES, TX_BODY_SIZE, WRITE_RECORD_SIZE,
 };
 use revm::{
-    bytecode::opcode::{CALL, CREATE, LOG0, POP, PUSH0, PUSH1, RETURN, REVERT},
+    bytecode::opcode::{
+        CALL, CALLDATASIZE, CREATE, DELEGATECALL, GAS, JUMPDEST, JUMPI, LOG0, MSTORE8, POP, PUSH0,
+        PUSH1, RETURN, REVERT, SELFDESTRUCT,
+    },
+    context::{
+        transaction::{AccessList, AccessListItem, TransactionType},
+        TxEnv,
+    },
+    context_interface::{
+        either::Either,
+        transaction::{Authorization, RecoveredAuthority, RecoveredAuthorization},
+    },
     interpreter::{
-        interpreter::EthInterpreter, CreateInputs, CreateOutcome, Gas, InstructionResult,
+        interpreter::EthInterpreter, CreateInputs, CreateOutcome, InstructionResult,
         InterpreterResult,
     },
     Inspector,
@@ -112,6 +127,26 @@ fn assert_reservoir_paid(name: &str, gas_limit: u64, outcome: &MegaTransactionOu
         reservoir - outcome.gas.state - outcome.gas.history,
         "{name}: the reservoir paid the state and history ledgers and nothing else",
     );
+}
+
+/// A callee that writes a slot, logs, pays an account it creates and deploys code: every history
+/// site a frame reaches, and state gas beside it.
+fn every_site() -> MemoryDatabase {
+    let code = creating(
+        calling(
+            log(BytecodeBuilder::default().sstore(U256::from(1), U256::from(1)), 3, 64),
+            FRESH,
+            1,
+            1_000_000,
+        ),
+        &deploying(),
+    );
+    callee_running(code)
+}
+
+/// A call to [`every_site`]'s callee carrying ten bytes of calldata.
+fn every_site_called(gas_limit: u64) -> MegaTransaction {
+    call_with_data(CALLER, CALLEE, Bytes::from(vec![1; 10]), gas_limit)
 }
 
 /// With no allowance anywhere, the bytes a transaction reports are its history gas at the price,
@@ -207,19 +242,8 @@ fn test_without_an_allowance_the_bytes_are_the_history_gas_at_the_price() {
         ),
         (
             "every site at once",
-            || {
-                let code = creating(
-                    calling(
-                        log(BytecodeBuilder::default().sstore(U256::from(1), U256::from(1)), 3, 64),
-                        FRESH,
-                        1,
-                        1_000_000,
-                    ),
-                    &deploying(),
-                );
-                callee_running(code)
-            },
-            |gas| call_with_data(CALLER, CALLEE, Bytes::from(vec![1; 10]), gas),
+            every_site,
+            every_site_called,
             // The body and its calldata; the slot; the log; the transfer's two records (the
             // callee's account and the recipient's), which leave the creation none of its own
             // for the callee's nonce; the created account and its code.
@@ -245,6 +269,42 @@ fn test_without_an_allowance_the_bytes_are_the_history_gas_at_the_price() {
             assert_reservoir_paid(name, gas_limit, &outcome);
         }
     }
+}
+
+/// A reservoir too small for what a transaction spends on state and history runs out, and the
+/// rest spills onto regular gas. That changes who paid and nothing else: the bytes, the history
+/// gas and the state gas are the ones an ample reservoir leaves, the regular ledger is too — a
+/// spilled charge stays on its own ledger — and the reservoir is spent to the last gas.
+#[test]
+fn test_a_reservoir_that_runs_out_changes_only_who_paid() {
+    if runs_at_measurement_prices() {
+        return;
+    }
+    let ample = execute(every_site(), every_site_called(TX_GAS_LIMIT_CAP + RESERVOIR));
+    assert!(ample.result.is_success(), "{:?}", ample.result);
+    assert_reservoir_paid("an ample reservoir", TX_GAS_LIMIT_CAP + RESERVOIR, &ample);
+    let spent = ample.gas.state + ample.gas.history;
+
+    // Short of the body; short of everything but the body; short by one gas.
+    for reservoir in [1, TX_BODY_SIZE * CPHB - 1, TX_BODY_SIZE * CPHB + 1, spent - 1] {
+        let outcome = execute(every_site(), every_site_called(TX_GAS_LIMIT_CAP + reservoir));
+        let name = format!("a reservoir of {reservoir}");
+        assert!(outcome.result.is_success(), "{name}: {:?}", outcome.result);
+        assert_eq!(outcome.gas.reservoir_remaining, 0, "{name}: spent to the last gas");
+        assert_eq!(outcome.gas.history_bytes, ample.gas.history_bytes, "{name}: the bytes");
+        assert_eq!(outcome.gas.history, ample.gas.history, "{name}: the history gas");
+        assert_eq!(outcome.gas.state, ample.gas.state, "{name}: the state gas");
+        assert_eq!(outcome.gas.regular, ample.gas.regular, "{name}: the regular ledger");
+        assert_eq!(
+            outcome.gas.regular + outcome.gas.state + outcome.gas.history,
+            outcome.result.gas().total_gas_spent(),
+            "{name}: the three ledgers split the raw spend",
+        );
+    }
+
+    let exact = execute(every_site(), every_site_called(TX_GAS_LIMIT_CAP + spent));
+    assert_eq!(exact.gas.reservoir_remaining, 0, "a reservoir of exactly what is spent");
+    assert_eq!(exact.gas.regular, ample.gas.regular);
 }
 
 /// A transaction whose gas cannot pay for the record its own frame makes runs out of gas before
@@ -275,6 +335,10 @@ fn test_a_transaction_that_cannot_pay_its_first_record_reports_its_body_alone() 
 
 /// Answers every creation itself with a success whose output is a word of bytes, so no frame runs
 /// and nothing is deposited.
+///
+/// The answer's gas is the creation's, untouched, with the reservoir it inherited, as the
+/// engine's own answers build it: a `Gas::new` of the forwarded limit would carry no reservoir,
+/// and the caller that adopts it would lose its own.
 struct AnswersCreations;
 
 impl Inspector<MegaContext<MemoryDatabase>, EthInterpreter> for AnswersCreations {
@@ -287,7 +351,7 @@ impl Inspector<MegaContext<MemoryDatabase>, EthInterpreter> for AnswersCreations
             InterpreterResult::new(
                 InstructionResult::Return,
                 Bytes::from(vec![0xfe; 32]),
-                Gas::new(inputs.gas_limit()),
+                untouched_create_gas(inputs),
             ),
             Some(CHILD),
         ))
@@ -302,16 +366,362 @@ fn test_a_creation_answered_without_running_appends_no_code() {
     if runs_at_measurement_prices() {
         return;
     }
-    let db = callee_running(creating(BytecodeBuilder::default(), &deploying()));
-    let outcome = MegaEvm::new(context(db))
-        .with_inspector(AnswersCreations)
-        .execute_transaction(call(CALLER, CALLEE, U256::ZERO, GAS_LIMITS[0]))
-        .expect("the transaction is valid");
+    for gas_limit in GAS_LIMITS {
+        let db = callee_running(creating(BytecodeBuilder::default(), &deploying()));
+        let outcome = MegaEvm::new(context(db))
+            .with_inspector(AnswersCreations)
+            .execute_transaction(call(CALLER, CALLEE, U256::ZERO, gas_limit))
+            .expect("the transaction is valid");
 
-    assert!(outcome.result.is_success(), "{:?}", outcome.result);
-    assert_eq!(outcome.usage.write_records, 0, "the creation that never ran wrote nothing");
-    assert_eq!(outcome.gas.history_bytes, TX_BODY_SIZE, "and appended nothing: its body alone");
-    assert_eq!(outcome.gas.history, TX_BODY_SIZE * CPHB);
+        assert!(outcome.result.is_success(), "{:?}", outcome.result);
+        assert_eq!(outcome.usage.write_records, 0, "the creation that never ran wrote nothing");
+        assert_eq!(outcome.gas.history_bytes, TX_BODY_SIZE, "and appended nothing: its body");
+        assert_eq!(outcome.gas.history, TX_BODY_SIZE * CPHB);
+        assert_reservoir_paid("a creation answered without running", gas_limit, &outcome);
+    }
+}
+
+/* ---------- the edge paths ---------- */
+
+/// Two authorities, and the account an applied authorization delegates to.
+const AUTHORITY: Address = address!("0000000000000000000000000000000000a00007");
+const OTHER_AUTHORITY: Address = address!("0000000000000000000000000000000000a00008");
+const DELEGATE: Address = address!("0000000000000000000000000000000000a00009");
+
+/// A type-1 call from [`CALLER`] to [`CALLEE`] whose access list names each `(address, keys)`
+/// with that many storage keys.
+fn with_access_list(entries: &[(Address, u64)], gas_limit: u64) -> MegaTransaction {
+    let items = entries.iter().map(|&(address, keys)| AccessListItem {
+        address,
+        storage_keys: (0..keys).map(|key| B256::from(U256::from(key))).collect(),
+    });
+    OpTx(op_transaction(TxEnv {
+        tx_type: TransactionType::Eip2930 as u8,
+        caller: CALLER,
+        kind: TxKind::Call(CALLEE),
+        gas_limit,
+        access_list: AccessList(items.collect()),
+        ..Default::default()
+    }))
+}
+
+/// A type-4 call from [`CALLER`] to [`CALLEE`] carrying authorizations `(authority, nonce)` that
+/// delegate to [`DELEGATE`].
+fn with_authorizations(authorizations: &[(Address, u64)], gas_limit: u64) -> MegaTransaction {
+    let authorization_list = authorizations
+        .iter()
+        .map(|&(authority, nonce)| {
+            Either::Right(RecoveredAuthorization::new_unchecked(
+                Authorization { chain_id: U256::ZERO, address: DELEGATE, nonce },
+                RecoveredAuthority::Valid(authority),
+            ))
+        })
+        .collect();
+    OpTx(op_transaction(TxEnv {
+        tx_type: TransactionType::Eip7702 as u8,
+        caller: CALLER,
+        kind: TxKind::Call(CALLEE),
+        gas_limit,
+        gas_priority_fee: Some(0),
+        authorization_list,
+        ..Default::default()
+    }))
+}
+
+/// `SELFDESTRUCT` to `beneficiary`.
+fn destructs_to(beneficiary: Address) -> Bytes {
+    BytecodeBuilder::default().push_address(beneficiary).append(SELFDESTRUCT).build()
+}
+
+/// `CALL(GAS, MegaAccessControl, value, isVolatileDataAccessDisabled())`, discarding the flag. The
+/// interceptor answers it without a frame, and refuses it when it carries value.
+fn asks_access_control(code: BytecodeBuilder, value: u64) -> BytecodeBuilder {
+    code.mstore(0, IMegaAccessControl::isVolatileDataAccessDisabledCall::SELECTOR)
+        .append_many([PUSH0, PUSH0])
+        .push_number(4u64)
+        .append(PUSH0)
+        .push_number(value)
+        .push_address(ACCESS_CONTROL_ADDRESS)
+        .append(GAS)
+        .append(CALL)
+        .append(POP)
+}
+
+/// `funded()` with `code` at [`CALLEE`] and `MegaAccessControl` deployed.
+fn beside_access_control(code: BytecodeBuilder) -> MemoryDatabase {
+    callee_running(code)
+        .account_balance(ACCESS_CONTROL_ADDRESS, U256::from(1))
+        .account_code(ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE)
+}
+
+/// Init code that returns one byte, `0xEF`, which EIP-3541 refuses to deposit.
+fn refused_code() -> Bytes {
+    Bytes::from_static(&[PUSH1, 0xef, PUSH0, MSTORE8, PUSH1, 1, PUSH0, RETURN])
+}
+
+/// Init code that returns one byte more than a contract may hold.
+fn oversized_code() -> Bytes {
+    BytecodeBuilder::default()
+        .push_number(MAX_CONTRACT_SIZE as u64 + 1)
+        .append_many([PUSH0, RETURN])
+        .build()
+}
+
+/// `DELEGATECALL(GAS, CHILD, 0, 0, 0, 0)`, discarding the flag: [`CHILD`]'s code runs on
+/// [`CALLEE`]'s storage, in a frame of its own.
+fn delegating(code: BytecodeBuilder) -> BytecodeBuilder {
+    code.append_many([PUSH0, PUSH0, PUSH0, PUSH0])
+        .push_address(CHILD)
+        .append(GAS)
+        .append(DELEGATECALL)
+        .append(POP)
+}
+
+/// Code for [`CALLEE`] that sets slot 1 and calls itself with a byte of calldata; called with
+/// calldata, it writes the slot back.
+fn writes_then_calls_itself_to_write_back() -> Bytes {
+    let outer = BytecodeBuilder::default()
+        .sstore(U256::from(1), U256::from(1))
+        .append_many([PUSH0, PUSH0])
+        .push_number(1u64)
+        .append_many([PUSH0, PUSH0])
+        .push_address(CALLEE)
+        .append(GAS)
+        .append(CALL)
+        .append(POP)
+        .stop()
+        .build();
+    let inner = BytecodeBuilder::default()
+        .append(JUMPDEST)
+        .sstore(U256::from(1), U256::ZERO)
+        .stop()
+        .build();
+    // `CALLDATASIZE; PUSH1 inner; JUMPI` takes four bytes ahead of the outer path.
+    let inner_at = u8::try_from(4 + outer.len()).expect("the outer path is short");
+    let mut code = vec![CALLDATASIZE, PUSH1, inner_at, JUMPI];
+    code.extend_from_slice(&outer);
+    code.extend_from_slice(&inner);
+    Bytes::from(code)
+}
+
+/// A transaction-level data-size limit of `bytes`, or none at all.
+fn limited_to(bytes: u64) -> EvmTxRuntimeLimits {
+    EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(bytes)
+}
+
+/// The paths the first table does not take — what the body carries beside calldata, the
+/// accounts a `SELFDESTRUCT` and an authorization write, a frame answered without running, a code
+/// deposit that fails, a slot written back from another frame — each with its exact byte count
+/// and, without an allowance on any of them, the history gas at the price.
+#[test]
+fn test_the_bytes_on_the_edge_paths_are_the_history_gas_at_the_price() {
+    if runs_at_measurement_prices() {
+        return;
+    }
+    type Case = (&'static str, fn() -> MemoryDatabase, fn(u64) -> MegaTransaction, u64, u64);
+    let cases: [Case; 19] = [
+        (
+            "an access list: twenty bytes an address and thirty-two a key",
+            || callee_running(BytecodeBuilder::default()),
+            |gas| with_access_list(&[(CALLEE, 2), (PAYEE, 1), (FRESH, 0)], gas),
+            u64::MAX,
+            TX_BODY_SIZE + 3 * ACCESS_LIST_ADDRESS_SIZE + 3 * ACCESS_LIST_SLOT_SIZE,
+        ),
+        (
+            "authorizations: each in the body, and a record for the one authority applied",
+            || callee_running(BytecodeBuilder::default()),
+            |gas| with_authorizations(&[(AUTHORITY, 0), (OTHER_AUTHORITY, 7)], gas),
+            u64::MAX,
+            TX_BODY_SIZE + 2 * AUTHORIZATION_SIZE + WRITE_RECORD_SIZE,
+        ),
+        (
+            "an authority applied twice is one record",
+            || callee_running(BytecodeBuilder::default()),
+            |gas| with_authorizations(&[(AUTHORITY, 0), (AUTHORITY, 1)], gas),
+            u64::MAX,
+            TX_BODY_SIZE + 2 * AUTHORIZATION_SIZE + WRITE_RECORD_SIZE,
+        ),
+        (
+            "the sender's own authorization: in the body, and no record beside it",
+            || callee_running(BytecodeBuilder::default()),
+            |gas| with_authorizations(&[(CALLER, 1)], gas),
+            u64::MAX,
+            TX_BODY_SIZE + AUTHORIZATION_SIZE,
+        ),
+        (
+            "a SELFDESTRUCT that moves a balance to another account records it",
+            || funded().account_code(CALLEE, destructs_to(PAYEE)),
+            |gas| call(CALLER, CALLEE, U256::ZERO, gas),
+            u64::MAX,
+            TX_BODY_SIZE + WRITE_RECORD_SIZE,
+        ),
+        (
+            "a SELFDESTRUCT that moves a balance to an account it creates records it",
+            || funded().account_code(CALLEE, destructs_to(FRESH)),
+            |gas| call(CALLER, CALLEE, U256::ZERO, gas),
+            u64::MAX,
+            TX_BODY_SIZE + WRITE_RECORD_SIZE,
+        ),
+        (
+            "a SELFDESTRUCT to the sender records nothing: the body carries the sender",
+            || funded().account_code(CALLEE, destructs_to(CALLER)),
+            |gas| call(CALLER, CALLEE, U256::ZERO, gas),
+            u64::MAX,
+            TX_BODY_SIZE,
+        ),
+        (
+            "a SELFDESTRUCT that moves nothing records nothing",
+            || funded().account_code(RECEIVER, destructs_to(PAYEE)),
+            |gas| call(CALLER, RECEIVER, U256::ZERO, gas),
+            u64::MAX,
+            TX_BODY_SIZE,
+        ),
+        (
+            "a call an interceptor answers runs no frame, and its caller's write is kept",
+            || {
+                let code = BytecodeBuilder::default().sstore(U256::from(1), U256::from(1));
+                beside_access_control(asks_access_control(code, 0))
+            },
+            |gas| call(CALLER, CALLEE, U256::ZERO, gas),
+            u64::MAX,
+            TX_BODY_SIZE + WRITE_RECORD_SIZE,
+        ),
+        (
+            "a value call an interceptor refuses keeps none of the records its caller paid for",
+            || beside_access_control(asks_access_control(BytecodeBuilder::default(), 1)),
+            |gas| call(CALLER, CALLEE, U256::ZERO, gas),
+            u64::MAX,
+            TX_BODY_SIZE,
+        ),
+        (
+            "a limit stops the transaction before its first frame: the recipient is not written",
+            funded,
+            |gas| call(CALLER, FRESH, U256::from(1), gas),
+            WRITE_RECORD_SIZE - 1,
+            TX_BODY_SIZE,
+        ),
+        (
+            "a limit stops a value call before its frame is built: nothing the transaction wrote \
+             is kept",
+            || {
+                let code = BytecodeBuilder::default().sstore(U256::from(1), U256::from(1));
+                callee_running(calling(code, PAYEE, 1, 100_000))
+            },
+            |gas| call(CALLER, CALLEE, U256::ZERO, gas),
+            2 * WRITE_RECORD_SIZE - 1,
+            TX_BODY_SIZE,
+        ),
+        (
+            "a limit crossed by a child's write: nothing the transaction wrote or logged is kept",
+            || {
+                callee_running(calling(log(BytecodeBuilder::default(), 0, 0), CHILD, 0, 1_000_000))
+                    .account_code(
+                        CHILD,
+                        BytecodeBuilder::default().sstore(U256::from(1), U256::from(1)).build(),
+                    )
+            },
+            |gas| call(CALLER, CALLEE, U256::ZERO, gas),
+            LOG_BASE_SIZE + WRITE_RECORD_SIZE - 1,
+            TX_BODY_SIZE,
+        ),
+        (
+            "a nested creation whose code EIP-3541 refuses: the creator's nonce outlives it, and \
+             nothing is deposited",
+            || callee_running(creating(BytecodeBuilder::default(), &refused_code())),
+            |gas| call(CALLER, CALLEE, U256::ZERO, gas),
+            u64::MAX,
+            TX_BODY_SIZE + WRITE_RECORD_SIZE,
+        ),
+        (
+            "a nested creation whose code is past the size limit: the same",
+            || callee_running(creating(BytecodeBuilder::default(), &oversized_code())),
+            |gas| call(CALLER, CALLEE, U256::ZERO, gas),
+            u64::MAX,
+            TX_BODY_SIZE + WRITE_RECORD_SIZE,
+        ),
+        (
+            "a creation transaction whose code EIP-3541 refuses: its body and init code alone",
+            funded,
+            |gas| create(CALLER, refused_code(), gas),
+            u64::MAX,
+            TX_BODY_SIZE + refused_code().len() as u64,
+        ),
+        (
+            "a slot written, then written back by a delegate: the record is taken back",
+            || {
+                let code = BytecodeBuilder::default().sstore(U256::from(1), U256::from(1));
+                callee_running(delegating(code)).account_code(
+                    CHILD,
+                    BytecodeBuilder::default().sstore(U256::from(1), U256::ZERO).build(),
+                )
+            },
+            |gas| call(CALLER, CALLEE, U256::ZERO, gas),
+            u64::MAX,
+            TX_BODY_SIZE,
+        ),
+        (
+            "a slot a delegate wrote, written back by its caller",
+            || {
+                let code = delegating(BytecodeBuilder::default());
+                callee_running(code.sstore(U256::from(1), U256::ZERO)).account_code(
+                    CHILD,
+                    BytecodeBuilder::default().sstore(U256::from(1), U256::from(1)).build(),
+                )
+            },
+            |gas| call(CALLER, CALLEE, U256::ZERO, gas),
+            u64::MAX,
+            TX_BODY_SIZE,
+        ),
+        (
+            "a slot written, then written back by a call to itself",
+            || funded().account_code(CALLEE, writes_then_calls_itself_to_write_back()),
+            |gas| call(CALLER, CALLEE, U256::ZERO, gas),
+            u64::MAX,
+            TX_BODY_SIZE,
+        ),
+    ];
+
+    for (name, db, tx, limit, bytes) in cases {
+        for gas_limit in GAS_LIMITS {
+            let outcome = MegaEvm::new(context(db()).with_tx_runtime_limits(limited_to(limit)))
+                .execute_transaction(tx(gas_limit))
+                .expect("the transaction is valid");
+            assert_eq!(
+                outcome.limit_exceeded.is_some(),
+                limit != u64::MAX,
+                "{name} at {gas_limit}: {:?}",
+                outcome.result,
+            );
+            assert_eq!(outcome.gas.history_bytes, bytes, "{name} at {gas_limit}: the bytes");
+            assert_eq!(
+                outcome.gas.history,
+                bytes * CPHB,
+                "{name} at {gas_limit}: the history gas is the bytes at the price",
+            );
+            assert_reservoir_paid(name, gas_limit, &outcome);
+        }
+    }
+}
+
+/// A write-back takes the record back only if the frame that made it is kept: a delegate that
+/// writes the slot back and then reverts takes its write-back with it, and the record stands.
+#[test]
+fn test_a_write_back_dies_with_the_frame_that_made_it() {
+    if runs_at_measurement_prices() {
+        return;
+    }
+    for gas_limit in GAS_LIMITS {
+        let code = BytecodeBuilder::default().sstore(U256::from(1), U256::from(1));
+        let db = callee_running(delegating(code)).account_code(
+            CHILD,
+            BytecodeBuilder::default().sstore(U256::from(1), U256::ZERO).revert().build(),
+        );
+        let outcome = execute(db, call(CALLER, CALLEE, U256::ZERO, gas_limit));
+        assert!(outcome.result.is_success(), "{:?}", outcome.result);
+        assert_eq!(outcome.gas.history_bytes, TX_BODY_SIZE + WRITE_RECORD_SIZE);
+        assert_eq!(outcome.gas.history, outcome.gas.history_bytes * CPHB);
+        assert_reservoir_paid("a write-back that reverts", gas_limit, &outcome);
+    }
 }
 
 /* ---------- where an allowance pays ---------- */
