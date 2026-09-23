@@ -125,24 +125,28 @@ pub const FRAME_DATA_SHARE_DENOMINATOR: u64 = 100;
 
 /// What a transaction or a frame counts: data-size bytes and write records.
 ///
-/// The KV count a node reports is the write-record count; it has no tracker of its own.
+/// The write-record count is the KV count a node reports, and the KV limit holds it; it has no
+/// tracker of its own. Every record weighs [`WRITE_RECORD_SIZE`] bytes of data size and is taken
+/// back with them, so `write_records × WRITE_RECORD_SIZE` never exceeds `data_size`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct LimitUsage {
     /// Data-size bytes.
     pub data_size: u64,
-    /// Account and storage write records.
+    /// Account and storage write records: the KV count.
     pub write_records: u64,
 }
 
-/// Limits one transaction's data size.
+/// Limits one transaction's data size and write records.
 ///
-/// [`tx_data_size_limit`](Self::tx_data_size_limit) stops the transaction. A frame's own budget
-/// is derived from it: the transaction's frame gets what the transaction has left, and each
-/// child gets [`FRAME_DATA_SHARE_NUMERATOR`] / [`FRAME_DATA_SHARE_DENOMINATOR`] of what its
-/// parent has left. Crossing a frame budget reverts that frame alone.
+/// [`tx_data_size_limit`](Self::tx_data_size_limit) and
+/// [`tx_kv_update_limit`](Self::tx_kv_update_limit) stop the transaction. A frame's own budget in
+/// each dimension is derived from them: the transaction's frame gets what the transaction has
+/// left, and each child gets [`FRAME_DATA_SHARE_NUMERATOR`] / [`FRAME_DATA_SHARE_DENOMINATOR`] of
+/// what its parent has left. Crossing a frame budget reverts that frame alone.
 ///
-/// [`frame_data_size_limit`](Self::frame_data_size_limit) is a further cap on every frame's
-/// budget. It is unlimited unless a caller sets it.
+/// [`frame_data_size_limit`](Self::frame_data_size_limit) and
+/// [`frame_kv_update_limit`](Self::frame_kv_update_limit) are a further cap on every frame's
+/// budget. Every limit is unlimited unless a caller sets it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct EvmTxRuntimeLimits {
     /// The most data-size bytes the transaction may keep. Crossing it stops the transaction.
@@ -150,6 +154,12 @@ pub struct EvmTxRuntimeLimits {
     /// A cap on every frame's data-size budget, applied after the share of what its parent has
     /// left. Crossing it reverts the frame alone.
     pub frame_data_size_limit: u64,
+    /// The most write records the transaction may keep: its KV count. Crossing it stops the
+    /// transaction.
+    pub tx_kv_update_limit: u64,
+    /// A cap on every frame's write-record budget, applied after the share of what its parent has
+    /// left. Crossing it reverts the frame alone.
+    pub frame_kv_update_limit: u64,
 }
 
 impl Default for EvmTxRuntimeLimits {
@@ -161,7 +171,12 @@ impl Default for EvmTxRuntimeLimits {
 impl EvmTxRuntimeLimits {
     /// No limit at all.
     pub const fn no_limits() -> Self {
-        Self { tx_data_size_limit: u64::MAX, frame_data_size_limit: u64::MAX }
+        Self {
+            tx_data_size_limit: u64::MAX,
+            frame_data_size_limit: u64::MAX,
+            tx_kv_update_limit: u64::MAX,
+            frame_kv_update_limit: u64::MAX,
+        }
     }
 
     /// Sets the transaction's data-size limit.
@@ -175,15 +190,64 @@ impl EvmTxRuntimeLimits {
         self.frame_data_size_limit = limit;
         self
     }
+
+    /// Sets the transaction's KV limit: the most write records it may keep.
+    pub const fn with_tx_kv_update_limit(mut self, limit: u64) -> Self {
+        self.tx_kv_update_limit = limit;
+        self
+    }
+
+    /// Caps every frame's write-record budget at `limit`.
+    pub const fn with_frame_kv_update_limit(mut self, limit: u64) -> Self {
+        self.frame_kv_update_limit = limit;
+        self
+    }
+
+    /// The transaction's limits on what it keeps, one per dimension of [`LimitUsage`].
+    pub(crate) const fn tx_usage_limit(&self) -> LimitUsage {
+        LimitUsage { data_size: self.tx_data_size_limit, write_records: self.tx_kv_update_limit }
+    }
+
+    /// The caps on every frame's budget, one per dimension of [`LimitUsage`].
+    pub(crate) const fn frame_usage_limit(&self) -> LimitUsage {
+        LimitUsage {
+            data_size: self.frame_data_size_limit,
+            write_records: self.frame_kv_update_limit,
+        }
+    }
 }
 
 /// One write record.
 pub(crate) const WRITE_RECORD: LimitUsage =
     LimitUsage { data_size: WRITE_RECORD_SIZE, write_records: 1 };
 
+/// A budget with no bound in either dimension.
+pub(crate) const UNLIMITED: LimitUsage =
+    LimitUsage { data_size: u64::MAX, write_records: u64::MAX };
+
 impl LimitUsage {
     /// Nothing counted.
     pub const ZERO: Self = Self { data_size: 0, write_records: 0 };
+
+    /// The first dimension in which `self` is over `limit` — data size, then write records — with
+    /// the limit crossed and the usage that crossed it; `None` when both hold.
+    pub(crate) const fn crossing(self, limit: Self) -> Option<(LimitKind, u64, u64)> {
+        if self.data_size > limit.data_size {
+            return Some((LimitKind::DataSize, limit.data_size, self.data_size));
+        }
+        if self.write_records > limit.write_records {
+            return Some((LimitKind::KVUpdate, limit.write_records, self.write_records));
+        }
+        None
+    }
+
+    /// Each counter the smaller of the two.
+    pub(crate) fn min(self, other: Self) -> Self {
+        Self {
+            data_size: self.data_size.min(other.data_size),
+            write_records: self.write_records.min(other.write_records),
+        }
+    }
 
     /// Both counters added, saturating.
     pub const fn saturating_add(self, other: Self) -> Self {
@@ -228,7 +292,8 @@ alloy_sol_types::sol! {
 pub enum LimitKind {
     /// Bytes of data a transaction produces; metered by the data-size limit.
     DataSize,
-    /// Key-value updates; metered by the state-growth and KV limits.
+    /// Key-value updates: the write records a transaction keeps, one per account or storage
+    /// write; metered by the KV limit.
     KVUpdate,
     /// Compute gas, the regular gas a transaction spends; capped by detention.
     ComputeGas,
