@@ -248,7 +248,8 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     }
 
     /// Whether the running (or last) transaction is system-originated, and so prices every
-    /// EIP-8037 state gas charge at the minimum bucket. See [`system::is_system_originated`].
+    /// EIP-8037 state gas charge at the minimum bucket and is held to no per-transaction limit.
+    /// See [`system::is_system_originated`].
     pub const fn is_system_originated(&self) -> bool {
         self.system_originated
     }
@@ -270,20 +271,11 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
         self.prices_history
     }
 
-    /// Prepares the common execution layer for a new transaction or system call. Every entry
-    /// point of [`MegaEvm`](crate::MegaEvm) calls it before it runs the handler.
-    ///
-    /// The SALT bucket multipliers go with it: they are what one transaction read, so the next
-    /// one reads its own.
+    /// Prepares the common execution layer for a new transaction. Every transaction entry point
+    /// of [`MegaEvm`](crate::MegaEvm) calls it before it runs the handler.
     pub(crate) fn on_new_tx(&mut self) {
-        self.additional_limit.reset();
-        self.bucket_multipliers.reset();
-        self.system_originated = system::is_system_originated(&self.inner.tx, MEGA_SYSTEM_ADDRESS);
-        let exempt = self.inner.tx.tx_type() == DEPOSIT_TRANSACTION_TYPE || self.system_originated;
-        self.set_history_exempt(exempt);
-        // The body is data size whether or not the transaction pays history for it. A deposit,
-        // a system transaction and a system call are exempt from the charge, not from the count.
-        self.additional_limit.record_tx_body(transaction_body_bytes(self.tx()));
+        let system_originated = system::is_system_originated(&self.inner.tx, MEGA_SYSTEM_ADDRESS);
+        self.prepare(system_originated);
     }
 
     /// Prepares the context for a system call. Every system-call entry point of
@@ -292,9 +284,32 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     /// A system call is system-originated whatever caller it names: it is the protocol running,
     /// not a transaction anybody sent.
     pub(crate) fn on_new_system_call(&mut self) {
-        self.on_new_tx();
-        self.system_originated = true;
-        self.set_history_exempt(true);
+        self.prepare(true);
+    }
+
+    /// Prepares the common execution layer for a transaction or a system call that is, or is not,
+    /// `system_originated`.
+    ///
+    /// The SALT bucket multipliers go with it: they are what one transaction read, so the next
+    /// one reads its own.
+    ///
+    /// A system-originated transaction is exempt from every per-transaction limit — the data size,
+    /// the KV count, the state gas, and the frame budgets of the first two — before anything is
+    /// counted, its body included: the protocol's own work must not fail on a resource limit, as
+    /// it pays no history gas for the same reason. What it uses is counted all the same. A user's
+    /// deposit is not system-originated and is held to every one of them.
+    fn prepare(&mut self, system_originated: bool) {
+        self.additional_limit.reset();
+        self.bucket_multipliers.reset();
+        self.system_originated = system_originated;
+        let exempt = self.inner.tx.tx_type() == DEPOSIT_TRANSACTION_TYPE || system_originated;
+        self.set_history_exempt(exempt);
+        if system_originated {
+            self.additional_limit.exempt();
+        }
+        // The body is data size whether or not the transaction pays history for it. A deposit,
+        // a system transaction and a system call are exempt from the charge, not from the count.
+        self.additional_limit.record_tx_body(transaction_body_bytes(self.tx()));
     }
 
     /// Records whether the running transaction is exempt from history gas, and installs the

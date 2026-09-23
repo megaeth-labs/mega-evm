@@ -94,6 +94,17 @@
 //! limits carry, whose default holds a transaction to
 //! [`TX_DATA_LIMIT`](crate::constants::TX_DATA_LIMIT) of data size and to nothing else.
 //!
+//! # The exemption
+//!
+//! The protocol's own work is held to none of these per-transaction limits: a system-originated
+//! transaction ([`crate::system::is_system_originated`]) and a system call — the pre-block calls
+//! among them — run under [`LimitCheck::Exempt`], sticky for the transaction, which the one place
+//! every stop comes from answers whatever they cross: the data size, the KV count, the state gas
+//! and the frame budgets of the first two. It is the set that pays no history gas, exempt for the
+//! same reason: the protocol's maintenance must not fail on a resource limit. What such a
+//! transaction uses is counted all the same and reported in its usage and in the block's
+//! counters, as a deposit's is. A user's deposit is not in the set and is held to every limit.
+//!
 //! # The byte table
 //!
 //! The sizes below are what one of those things weighs, and they are the whole byte table of the
@@ -415,7 +426,7 @@ pub enum LimitCheck {
         /// Whether the limit is a frame budget rather than a transaction-level limit.
         frame_local: bool,
     },
-    /// The transaction is exempt from metering.
+    /// The transaction is exempt from every per-transaction limit: it is the protocol's own work.
     Exempt,
 }
 

@@ -77,6 +77,8 @@ The body is charged at validation, in the EIP-8037 intrinsic state-gas slot so t
 Everything else is charged where the write is made and given back, at the same price, by whoever's failure takes it back.
 The records a `CALL`, `CALLCODE`, `CREATE` or `CREATE2` starts a frame for are charged to the caller out of what it kept after forwarding gas: a caller that cannot pay halts, and the frame does not start.
 A deposit, a transaction the protocol itself sent and a system call pay no history at all.
+The last two are held to no per-transaction limit either, for the same reason — the protocol's maintenance must not fail on a resource limit: no data-size, KV or state-gas limit and no frame budget stops them, and what they use is counted and reported all the same.
+A user's deposit is held to every limit.
 
 The pairing between the two counts is per record, not per transaction.
 An Oracle hint's payload is data size that is never history, because the bytes go to the node's oracle service rather than into a block; and the five records a transaction's body carries are an upper bound on the accounts its inclusion writes, so a transfer to the block beneficiary or a fee vault pays a record the body already bound.

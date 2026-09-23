@@ -15,6 +15,7 @@ mod history_reservoir;
 mod inspector;
 mod intrinsic;
 mod kv_limit;
+mod limit_exemption;
 mod neutral;
 mod outcome;
 mod precompile_gas;
