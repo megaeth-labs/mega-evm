@@ -24,6 +24,7 @@ Equivalence mode is built from test tooling in `mega-evm`, behind its `test-util
 - `test_utils::neutral_cfg(fork)` is that configuration for Osaka or Amsterdam: the fork's gas schedule, its EIP-8037, EIP-2780 and EIP-7708 switches, EIP-7825's execution cap and its code-size limits.
 - `test_utils::neutralize_evm(evm, fork)` gives the EVM the two parts of the fork's pricing it carries: Ethereum's precompile set for the fork, not op-revm's Karst set with MegaETH's KZG price, and the fork's static opcode prices.
 - SALT pricing needs nothing: without a SALT environment every bucket is minimal.
+- The runtime limits are MegaETH's, so equivalence mode installs `EvmTxRuntimeLimits::no_limits()` itself rather than rely on the engine's default.
 
 What stays Satin's is the machinery, and with it two rules no configuration can change: the instruction table's Amsterdam opcodes, and the rules revm gates on the spec id, which is Osaka's.
 Both are in the registry.
