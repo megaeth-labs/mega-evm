@@ -152,6 +152,35 @@ fn test_block_no_state_commit_on_limit_exceeded() {
     assert!(result.receipts().is_empty());
 }
 
+/// A deposit counts towards the block's data size. It is packed when it crosses, and the next
+/// transaction is refused. Its data-availability size stays exempt.
+#[test]
+fn test_a_deposit_counts_towards_the_block_data_size_limit() {
+    let limit = mega_evm::TX_BODY_SIZE - 1;
+    let mut state = common::state();
+    let mut executor = executor(
+        &mut state,
+        common::block_ctx(BlockLimits::no_limits().with_block_txs_data_limit(limit)),
+    );
+    executor.apply_pre_execution_changes().expect("the block starts");
+
+    executor
+        .execute_transaction(&common::deposit_tx(Bytes::new(), 100_000))
+        .expect("the deposit that crosses the data-size limit is packed");
+    assert_eq!(executor.limiter().usage.data_size, mega_evm::TX_BODY_SIZE);
+    assert_eq!(
+        executor.limiter().block_da_size_used,
+        0,
+        "the deposit adds no data-availability size"
+    );
+
+    let err = executor.execute_transaction(&user_tx(0, 100_000)).expect_err("the block is full");
+    assert!(format!("{err}").contains("Block transactions data limit reached"), "{err}");
+
+    let (_, result) = executor.finish_with_counters().expect("the block finishes");
+    assert_eq!(result.receipts().len(), 1, "the transaction after the crossing never ran");
+}
+
 /// With no size limit configured, a transaction of any size is admitted.
 #[test]
 fn test_block_tx_size_limit_default_unlimited() {

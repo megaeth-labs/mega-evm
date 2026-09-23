@@ -1,8 +1,10 @@
 //! What a block admits, and what it counts of the transactions it packed.
 //!
 //! [`BlockLimits`] is the configuration a node passes in the block execution context;
-//! [`BlockLimiter`] is the state one block keeps while it executes. Every limit defaults to
-//! unlimited, so a caller that configures nothing gets op-revm's block rules and nothing else.
+//! [`BlockLimiter`] is the state one block keeps while it executes. Data size defaults to the
+//! production caps — [`BLOCK_DATA_LIMIT`](crate::constants::BLOCK_DATA_LIMIT) for the block and
+//! [`TX_DATA_LIMIT`](crate::constants::TX_DATA_LIMIT) for each transaction — and every other
+//! limit defaults to unlimited. [`BlockLimits::no_limits`] clears the data-size caps too.
 //!
 //! # When each limit is checked
 //!
@@ -39,8 +41,9 @@ use crate::{
 
 /// The limits one block holds its transactions to.
 ///
-/// [`no_limits`](Self::no_limits) is the neutral value every field starts from; a node sets the
-/// ones its chain configures, and the block executor always sets
+/// [`Default`] carries the production data-size caps and leaves every other dimension unlimited.
+/// [`no_limits`](Self::no_limits) clears the data-size caps too. A node sets the dimensions its
+/// chain configures, and the block executor always sets
 /// [`block_gas_limit`](Self::block_gas_limit) from the block environment.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct BlockLimits {
@@ -62,15 +65,22 @@ pub struct BlockLimits {
     /// The most execution gas the block's transactions may spend together.
     pub block_execution_gas_limit: u64,
     /// The most data-size bytes the block's transactions may keep together.
+    ///
+    /// [`Default`] is [`BLOCK_DATA_LIMIT`](crate::constants::BLOCK_DATA_LIMIT). A deposit counts
+    /// towards it: the data-availability exemption does not extend here.
     pub block_txs_data_limit: u64,
     /// The limits every transaction of the block runs under, which the executor installs on the
     /// EVM.
+    ///
+    /// [`Default`] sets the transaction data-size limit to
+    /// [`TX_DATA_LIMIT`](crate::constants::TX_DATA_LIMIT) and leaves the frame cap unlimited, so a
+    /// frame's budget is the 98% share of what its parent has left.
     pub tx_runtime_limits: EvmTxRuntimeLimits,
 }
 
 impl Default for BlockLimits {
     fn default() -> Self {
-        Self::no_limits()
+        Self::with_production_data_limits()
     }
 }
 
@@ -88,6 +98,20 @@ impl BlockLimits {
             block_txs_data_limit: u64::MAX,
             tx_runtime_limits: EvmTxRuntimeLimits::no_limits(),
         }
+    }
+
+    /// The limits a block runs under when its caller configures nothing else.
+    ///
+    /// Every dimension is unlimited except data size: the block holds
+    /// [`BLOCK_DATA_LIMIT`](crate::constants::BLOCK_DATA_LIMIT) bytes, and each transaction holds
+    /// [`TX_DATA_LIMIT`](crate::constants::TX_DATA_LIMIT). The block executor installs the
+    /// transaction half on the EVM.
+    pub const fn with_production_data_limits() -> Self {
+        let mut limits = Self::no_limits();
+        limits.block_txs_data_limit = crate::constants::BLOCK_DATA_LIMIT;
+        limits.tx_runtime_limits = EvmTxRuntimeLimits::no_limits()
+            .with_tx_data_size_limit(crate::constants::TX_DATA_LIMIT);
+        limits
     }
 
     /// Sets the per-transaction gas limit.
@@ -323,6 +347,8 @@ impl BlockLimiter {
             ));
         }
 
+        // Every committed transaction counts, a deposit included. The transaction that crossed
+        // is already packed; this refuses the next one.
         if self.usage.data_size >= self.limits.block_txs_data_limit {
             return Err(invalid_tx(
                 tx_hash,
@@ -371,6 +397,22 @@ fn invalid_tx(
 mod tests {
     use super::*;
     use alloy_primitives::B256;
+
+    /// A block that configures nothing holds the production data-size caps and nothing else.
+    #[test]
+    fn test_the_default_limits_are_the_production_data_size_caps() {
+        let limits = BlockLimits::default();
+        assert_eq!(limits, BlockLimits::with_production_data_limits());
+        assert_eq!(limits.block_txs_data_limit, crate::constants::BLOCK_DATA_LIMIT);
+        assert_eq!(limits.tx_runtime_limits.tx_data_size_limit, crate::constants::TX_DATA_LIMIT);
+        assert_eq!(limits.tx_runtime_limits.frame_data_size_limit, u64::MAX);
+        assert_eq!(limits.tx_gas_limit, u64::MAX);
+        assert_eq!(limits.block_execution_gas_limit, u64::MAX);
+
+        let unlimited = BlockLimits::no_limits();
+        assert_eq!(unlimited.block_txs_data_limit, u64::MAX);
+        assert_eq!(unlimited.tx_runtime_limits.tx_data_size_limit, u64::MAX);
+    }
 
     fn limits_with_block_gas(block_gas_limit: u64) -> BlockLimits {
         BlockLimits::no_limits().with_block_gas_limit(block_gas_limit).with_tx_gas_limit(u64::MAX)

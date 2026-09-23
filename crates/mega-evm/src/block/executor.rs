@@ -866,6 +866,16 @@ mod tests {
 
         assert_eq!(executor.evm().block().gas_limit, 30_000_000);
         assert_eq!(executor.limiter().limits.block_gas_limit, 30_000_000);
+        assert_eq!(
+            executor.evm().tx_runtime_limits().tx_data_size_limit,
+            crate::constants::TX_DATA_LIMIT,
+            "a default block installs the production per-transaction data-size cap"
+        );
+        assert_eq!(executor.evm().tx_runtime_limits().frame_data_size_limit, u64::MAX);
+        assert_eq!(
+            executor.limiter().limits.block_txs_data_limit,
+            crate::constants::BLOCK_DATA_LIMIT
+        );
         executor.evm_mut().set_inspector_enabled(true);
         assert!(executor.into_evm().is_inspecting());
     }
