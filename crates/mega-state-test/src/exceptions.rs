@@ -11,32 +11,38 @@
 //! One pair of names labels a single rule. The execution specs reject a gas limit below the
 //! intrinsic cost or below the EIP-7623 calldata floor with one error; the fixtures' two names,
 //! `INTRINSIC_GAS_TOO_LOW` and `INTRINSIC_GAS_BELOW_FLOOR_GAS_COST`, label which of the two costs
-//! the test drew the larger, in the fixture's own accounting. From Amsterdam on that accounting
+//! the test drew the larger, in the fixture's own accounting. The Amsterdam fixtures' accounting
 //! can call `INTRINSIC_GAS_TOO_LOW` a limit revm finds above the intrinsic cost and below the
-//! floor, so a floor shortfall satisfies both names; an intrinsic shortfall satisfies only its own.
+//! floor, so on the Amsterdam fixtures a floor shortfall satisfies both names. The Osaka fixtures
+//! never do, and on them each shortfall satisfies only its own name; an intrinsic shortfall
+//! satisfies only its own on both.
 
 use mega_evm::{
     op_revm::OpTransactionError,
     revm::context::result::{EVMError, InvalidTransaction},
 };
 
-use crate::types::{TestError, TestUnit};
+use crate::{
+    types::{TestError, TestUnit},
+    Fork,
+};
 
 /// The prefix of every transaction exception name.
 const PREFIX: &str = "TransactionException.";
 
-/// The execution-spec exception names `error` satisfies, without the `TransactionException.`
-/// prefix; empty for an error no fixture exception describes.
-pub fn names(error: &InvalidTransaction) -> &'static [&'static str] {
+/// The execution-spec exception names `error` satisfies on `fork`'s fixtures, without the
+/// `TransactionException.` prefix; empty for an error no fixture exception describes.
+pub fn names(fork: Fork, error: &InvalidTransaction) -> &'static [&'static str] {
     use InvalidTransaction as E;
     match error {
         E::PriorityFeeGreaterThanMaxFee => &["PRIORITY_GREATER_THAN_MAX_FEE_PER_GAS"],
         E::GasPriceLessThanBasefee => &["INSUFFICIENT_MAX_FEE_PER_GAS"],
         E::CallerGasLimitMoreThanBlock => &["GAS_ALLOWANCE_EXCEEDED"],
         E::CallGasCostMoreThanGasLimit { .. } => &["INTRINSIC_GAS_TOO_LOW"],
-        E::GasFloorMoreThanGasLimit { .. } => {
-            &["INTRINSIC_GAS_BELOW_FLOOR_GAS_COST", "INTRINSIC_GAS_TOO_LOW"]
-        }
+        E::GasFloorMoreThanGasLimit { .. } => match fork {
+            Fork::Osaka => &["INTRINSIC_GAS_BELOW_FLOOR_GAS_COST"],
+            Fork::Amsterdam => &["INTRINSIC_GAS_BELOW_FLOOR_GAS_COST", "INTRINSIC_GAS_TOO_LOW"],
+        },
         E::RejectCallerWithCode => &["SENDER_NOT_EOA"],
         E::LackOfFundForMaxFee { .. } => &["INSUFFICIENT_ACCOUNT_FUNDS"],
         E::OverflowPaymentInTransaction => &["GASLIMIT_PRICE_PRODUCT_OVERFLOW"],
@@ -70,15 +76,16 @@ pub enum Mismatch {
     Unnamed,
 }
 
-/// Whether `error` is one of the exceptions `expected` names.
+/// Whether `error` is one of the exceptions `expected`, in a fixture of `fork`, names.
 pub fn check<DBError>(
+    fork: Fork,
     expected: &str,
     error: &EVMError<DBError, OpTransactionError>,
 ) -> Result<(), Mismatch> {
     let EVMError::Transaction(OpTransactionError::Base(invalid)) = error else {
         return Err(Mismatch::Unnamed);
     };
-    check_names(expected, names(invalid))
+    check_names(expected, names(fork, invalid))
 }
 
 /// The exception names a transaction the fixture types cannot build satisfies: an invalid
@@ -141,7 +148,7 @@ mod tests {
     #[test]
     fn test_check_accepts_a_named_exception() {
         let error = tx_error(InvalidTransaction::RejectCallerWithCode);
-        assert_eq!(check("TransactionException.SENDER_NOT_EOA", &error), Ok(()));
+        assert_eq!(check(Fork::Osaka, "TransactionException.SENDER_NOT_EOA", &error), Ok(()));
     }
 
     #[test]
@@ -151,8 +158,7 @@ mod tests {
             balance: Box::default(),
         });
         assert_eq!(
-            check(
-                "TransactionException.INTRINSIC_GAS_TOO_LOW|TransactionException.INSUFFICIENT_ACCOUNT_FUNDS",
+            check(Fork::Osaka, "TransactionException.INTRINSIC_GAS_TOO_LOW|TransactionException.INSUFFICIENT_ACCOUNT_FUNDS",
                 &error
             ),
             Ok(())
@@ -163,7 +169,7 @@ mod tests {
     fn test_check_rejects_the_wrong_reason() {
         let error = tx_error(InvalidTransaction::NonceTooLow { tx: 0, state: 1 });
         assert_eq!(
-            check("TransactionException.INTRINSIC_GAS_TOO_LOW", &error),
+            check(Fork::Osaka, "TransactionException.INTRINSIC_GAS_TOO_LOW", &error),
             Err(Mismatch::Wrong { got: &["NONCE_MISMATCH_TOO_LOW"] })
         );
     }
@@ -172,39 +178,47 @@ mod tests {
     fn test_check_rejects_an_unnamed_error() {
         let error = tx_error(InvalidTransaction::Eip7873NotSupported);
         assert_eq!(
-            check("TransactionException.INTRINSIC_GAS_TOO_LOW", &error),
+            check(Fork::Osaka, "TransactionException.INTRINSIC_GAS_TOO_LOW", &error),
             Err(Mismatch::Unnamed)
         );
         let error: EVMError<Infallible, OpTransactionError> = EVMError::Custom("boom".into());
         assert_eq!(
-            check("TransactionException.INTRINSIC_GAS_TOO_LOW", &error),
+            check(Fork::Osaka, "TransactionException.INTRINSIC_GAS_TOO_LOW", &error),
             Err(Mismatch::Unnamed)
         );
         let error = EVMError::Transaction(OpTransactionError::MissingEnvelopedTx);
         assert_eq!(
-            check::<Infallible>("TransactionException.INTRINSIC_GAS_TOO_LOW", &error),
+            check::<Infallible>(Fork::Osaka, "TransactionException.INTRINSIC_GAS_TOO_LOW", &error),
             Err(Mismatch::Unnamed)
         );
     }
 
-    /// A gas limit below the calldata floor satisfies either name of the one rule; one below the
-    /// intrinsic cost only its own.
+    /// On the Amsterdam fixtures a gas limit below the calldata floor satisfies either name of the
+    /// one rule, and on the Osaka fixtures only its own; one below the intrinsic cost satisfies
+    /// only its own on both.
     #[test]
     fn test_floor_and_intrinsic_shortfalls() {
+        const FLOOR: &str = "TransactionException.INTRINSIC_GAS_BELOW_FLOOR_GAS_COST";
+        const TOO_LOW: &str = "TransactionException.INTRINSIC_GAS_TOO_LOW";
         let floor =
             tx_error(InvalidTransaction::GasFloorMoreThanGasLimit { gas_floor: 2, gas_limit: 1 });
-        assert_eq!(
-            check("TransactionException.INTRINSIC_GAS_BELOW_FLOOR_GAS_COST", &floor),
-            Ok(())
-        );
-        assert_eq!(check("TransactionException.INTRINSIC_GAS_TOO_LOW", &floor), Ok(()));
         let intrinsic = tx_error(InvalidTransaction::CallGasCostMoreThanGasLimit {
             initial_gas: 2,
             gas_limit: 1,
         });
-        assert_eq!(check("TransactionException.INTRINSIC_GAS_TOO_LOW", &intrinsic), Ok(()));
-        assert!(
-            check("TransactionException.INTRINSIC_GAS_BELOW_FLOOR_GAS_COST", &intrinsic).is_err()
+        for fork in Fork::ALL {
+            assert_eq!(check(fork, FLOOR, &floor), Ok(()), "{fork}");
+            assert_eq!(check(fork, TOO_LOW, &intrinsic), Ok(()), "{fork}");
+            assert_eq!(
+                check(fork, FLOOR, &intrinsic),
+                Err(Mismatch::Wrong { got: &["INTRINSIC_GAS_TOO_LOW"] }),
+                "{fork}"
+            );
+        }
+        assert_eq!(check(Fork::Amsterdam, TOO_LOW, &floor), Ok(()));
+        assert_eq!(
+            check(Fork::Osaka, TOO_LOW, &floor),
+            Err(Mismatch::Wrong { got: &["INTRINSIC_GAS_BELOW_FLOOR_GAS_COST"] })
         );
     }
 
@@ -212,8 +226,8 @@ mod tests {
     #[test]
     fn test_check_reads_names_with_or_without_the_prefix() {
         let error = tx_error(InvalidTransaction::EmptyBlobs);
-        assert_eq!(check("TYPE_3_TX_ZERO_BLOBS", &error), Ok(()));
-        assert!(check("", &error).is_err());
+        assert_eq!(check(Fork::Osaka, "TYPE_3_TX_ZERO_BLOBS", &error), Ok(()));
+        assert!(check(Fork::Osaka, "", &error).is_err());
     }
 
     fn unit(transaction: serde_json::Value) -> TestUnit {

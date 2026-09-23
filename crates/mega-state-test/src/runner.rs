@@ -640,7 +640,7 @@ fn execute_and_check(
     if let Ok(result) = &result {
         undo_fee_vault_credit(unit, &mut state, basefee, result.tx_gas_used());
     }
-    check(test, unit.out.as_ref(), &result, &state)?;
+    check(config.fork, test, unit.out.as_ref(), &result, &state)?;
     Ok(None)
 }
 
@@ -667,20 +667,21 @@ fn undo_fee_vault_credit(unit: &TestUnit, state: &mut State<EmptyDB>, basefee: u
     }
 }
 
-/// Judges an executed entry against its fixture.
+/// Judges an executed entry of `fork` against its fixture.
 ///
 /// A rejected transaction must be rejected for the reason the fixture names and must leave the
 /// fixture's post-state, which is its pre-state; an executed one must produce the fixture's
 /// output, logs and post-state. A logs or state-root mismatch carries the hashes produced, the
 /// state root included when the logs already differ.
 fn check<DBError: fmt::Debug>(
+    fork: Fork,
     test: &Test,
     expected_output: Option<&Bytes>,
     result: &Result<ExecutionResult<OpHaltReason>, EVMError<DBError, OpTransactionError>>,
     state: &State<EmptyDB>,
 ) -> Result<(), Failure> {
     match (&test.expect_exception, result) {
-        (Some(expected), Err(error)) => match exceptions::check(expected, error) {
+        (Some(expected), Err(error)) => match exceptions::check(fork, expected, error) {
             Ok(()) => {}
             Err(Mismatch::Wrong { got }) => {
                 return Err(Failure::new(
