@@ -180,7 +180,11 @@ fn test_a_reverting_child_gives_its_records_back_to_the_reservoir() {
         });
 
     assert!(outcome.result.is_success(), "the caller survives its child's revert");
-    assert_eq!(outcome.usage, LimitUsage::ZERO, "the reverted transfer kept nothing");
+    assert_eq!(
+        outcome.usage,
+        LimitUsage { data_size: mega_evm::TX_BODY_SIZE, write_records: 0 },
+        "the reverted transfer kept nothing but the body"
+    );
     assert_eq!(outcome.gas.history, BODY, "the body alone");
     assert_eq!(
         outcome.gas.reservoir_remaining,
@@ -210,7 +214,11 @@ fn test_an_intercepted_value_call_gives_its_records_back_once() {
     );
 
     assert!(outcome.result.is_success(), "the caller survives the refusal");
-    assert_eq!(outcome.usage, LimitUsage::ZERO, "the refused call wrote nothing");
+    assert_eq!(
+        outcome.usage,
+        LimitUsage { data_size: mega_evm::TX_BODY_SIZE, write_records: 0 },
+        "the refused call wrote nothing but the body"
+    );
     assert_eq!(outcome.gas.history, BODY, "the body alone");
     assert_eq!(
         outcome.gas.reservoir_remaining,

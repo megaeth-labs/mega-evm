@@ -28,7 +28,6 @@ Do not add a `_pending/main.rs`.
 | Owning mechanism | Tests | From `tests/` | From `src/` | Keep | Rewrite | Undecided |
 |---|---:|---:|---:|---:|---:|---:|
 | the common execution layer | 21 | 21 | 0 | 21 | 0 | 0 |
-| the data-size limit | 47 | 45 | 2 | 40 | 7 | 0 |
 | detention | 81 | 76 | 5 | 73 | 8 | 0 |
 | the state-growth and KV limits | 56 | 55 | 1 | 0 | 35 | 21 |
 | revert-class aborts | 17 | 17 | 0 | 0 | 17 | 0 |
@@ -38,7 +37,7 @@ Do not add a `_pending/main.rs`.
 | native keyless deployment | 75 | 73 | 2 | 29 | 46 | 0 |
 | inspector support | 4 | 4 | 0 | 1 | 3 | 0 |
 | — (undecided: D57 preload-warm cold charging, D58 98/100 forwarding) | 7 | 7 | 0 | 0 | 0 | 7 |
-| **Total** | **430** | **402** | **28** | **272** | **130** | **28** |
+| **Total** | **383** | **357** | **26** | **232** | **123** | **28** |
 
 ## Tests ported in place
 
@@ -242,6 +241,23 @@ These 24 rows run in a real test target now, adapted to the Satin API and to a c
 | `mini_rex/compute_gas_limit.rs` | compute gas (21) | 21 | `tests/satin/compute_gas.rs` |
 | **Total** | | **24** | |
 
+## Tests ported by the data-size limit
+
+These 47 rows run in a real test target now, adapted to the Satin API and to the byte table and budget rule the decision they cite fixes, so the counts above are lower than the inventory's by exactly these rows.
+
+| Legacy file | Owner in the inventory | Tests | Now in |
+|---|---|---:|---|
+| `compute_gas/claims.rs` | the data-size limit (1) | 1 | `tests/satin/data_size.rs` |
+| `mini_rex/tx_data_and_kv_update_limit.rs` | the data-size limit (18) | 18 | `tests/satin/data_size_counts.rs` |
+| `rex4/frame_limits.rs` | the data-size limit (10) | 10 | `tests/satin/data_size.rs` |
+| `rex4/intrinsic_limit_bypass.rs` | the data-size limit (9) | 9 | `tests/satin/data_size.rs`, `tests/satin/data_size_counts.rs` |
+| `rex5/selfdestruct_beneficiary.rs` | the data-size limit (1) | 1 | `tests/satin/data_size_counts.rs` |
+| `rex6/beneficiary_detention.rs` | the data-size limit (2) | 2 | `tests/satin/data_size_counts.rs` |
+| `rex6/frame_local_accounting.rs` | the data-size limit (3) | 3 | `tests/satin/data_size_counts.rs` |
+| `rex6/self_transfer_account_dedup.rs` | the data-size limit (1) | 1 | `tests/satin/data_size_counts.rs` |
+| `src/limit/data_size.rs` | the data-size limit (2) | 2 | `crates/mega-evm/src/limit/frame_limit.rs`, `crates/mega-evm/src/limit/mod.rs` |
+| **Total** | | **47** | |
+
 ## Tests retired after the inventory
 
 These 21 rows were parked when the inventory was applied and have since been retired: the mechanism that owns them landed and left them nothing to pin, so no later mechanism will port them.
@@ -295,7 +311,7 @@ Each cell lists `disposition count (mechanism · decision)`.
 | `block_executor/block_limits.rs` | 2 | undecided 2 (the state-growth and KV limits · D46) |
 | `block_executor/inspector.rs` | 3 | keep 1 (inspector support); rewrite 2 (inspector support · D39/D41) |
 | `block_executor/sequencer_registry.rs` | 7 | keep 7 (the pre-block system calls) |
-| `compute_gas/claims.rs` | 6 | undecided 5 (— · D57, open: whether preload-warm addresses (precompile / beneficiary / access-list) are charged cold); rewrite 1 (the data-size limit · D33/D48) |
+| `compute_gas/claims.rs` | 5 | undecided 5 (— · D57, open: whether preload-warm addresses (precompile / beneficiary / access-list) are charged cold) |
 | `mini_rex/access_beneficiary_balance.rs` | 10 | keep 9 (detention · D08); rewrite 1 (revert-class aborts · D48) |
 | `mini_rex/block_env_access_tracking.rs` | 3 | keep 3 (detention) |
 | `mini_rex/block_env_gas_limit.rs` | 16 | keep 13 (detention · D08 cap 20M/1M unchanged); rewrite 3 (revert-class aborts · D48 (detention halt -> revert-class)) |
@@ -303,7 +319,7 @@ Each cell lists `disposition count (mechanism · decision)`.
 | `mini_rex/gas.rs` | 2 | undecided 2 (— · D58, open: 98/100 forwarding, while the design has frames follow EIP-8037 (63/64)) |
 | `mini_rex/oracle.rs` | 12 | rewrite 3 (revert-class aborts · D48); keep 5 (detention); keep 4 (the oracle and control contracts) |
 | `mini_rex/state_growth_limit.rs` | 4 | rewrite 4 (the state-growth and KV limits · D45 (state-gas limit)) |
-| `mini_rex/tx_data_and_kv_update_limit.rs` | 28 | keep 18 (the data-size limit · data-size numbers unchanged); rewrite 4 (revert-class aborts · D48); undecided 6 (the state-growth and KV limits · D46 (the KV count stays as an output because the node consumes it; the limit semantics are undecided)) |
+| `mini_rex/tx_data_and_kv_update_limit.rs` | 10 | rewrite 4 (revert-class aborts · D48); undecided 6 (the state-growth and KV limits · D46 (the KV count stays as an output because the node consumes it; the limit semantics are undecided)) |
 | `rex/oracle.rs` | 3 | rewrite 3 (detention · D08 (mark at actual load: same outcome via SLOAD)) |
 | `rex2/keyless_deploy.rs` | 36 | rewrite 13 (native keyless deployment · native CREATE sub-frame; D37/D38); keep 19 (native keyless deployment · validation rules 1-9 unchanged); keep 1 (native keyless deployment · rule 4 (tx nonce == 0) unchanged); rewrite 3 (native keyless deployment · D36) |
 | `rex2/oracle_hint.rs` | 6 | keep 6 (the oracle and control contracts) |
@@ -312,9 +328,9 @@ Each cell lists `disposition count (mechanism · decision)`.
 | `rex4/access_control.rs` | 48 | keep 46 (the oracle and control contracts); rewrite 2 (detention · D07 (rejected volatile read pays static gas)) |
 | `rex4/beneficiary_detention.rs` | 13 | keep 12 (detention · D08); rewrite 1 (revert-class aborts · D48) |
 | `rex4/create_safety.rs` | 1 | keep 1 (the common execution layer · canonical revm behaviour) |
-| `rex4/frame_limits.rs` | 20 | keep 10 (the data-size limit · data-size per-frame 98% kept); rewrite 1 (revert-class aborts · D48); undecided 9 (the state-growth and KV limits · D46) |
+| `rex4/frame_limits.rs` | 10 | rewrite 1 (revert-class aborts · D48); undecided 9 (the state-growth and KV limits · D46) |
 | `rex4/gas_detention.rs` | 5 | keep 3 (detention); rewrite 2 (revert-class aborts · D48/D53) |
-| `rex4/intrinsic_limit_bypass.rs` | 13 | rewrite 6 (the data-size limit · D48/D49 (overflow outcome shape)); undecided 3 (the state-growth and KV limits · D46); keep 3 (the data-size limit); rewrite 1 (inspector support · D41) |
+| `rex4/intrinsic_limit_bypass.rs` | 4 | undecided 3 (the state-growth and KV limits · D46); rewrite 1 (inspector support · D41) |
 | `rex4/keyless_deploy.rs` | 2 | keep 2 (native keyless deployment · native sub-frame inherits env) |
 | `rex4/limit_control.rs` | 9 | rewrite 9 (the oracle and control contracts · D40 (remaining compute derived from Gas)) |
 | `rex5/apply_pending_changes_gas_budget.rs` | 4 | rewrite 4 (the pre-block system calls · D51 (system source m = 1; the system-call reservoir split)) |
@@ -329,20 +345,17 @@ Each cell lists `disposition count (mechanism · decision)`.
 | `rex5/oracle_hint_metering.rs` | 9 | keep 7 (the oracle and control contracts · D50 (hint not charged history; data-size metering kept)); rewrite 1 (the oracle and control contracts · D11 intrinsic number); rewrite 1 (revert-class aborts · D48) |
 | `rex5/pre_block_system_calls.rs` | 11 | keep 11 (the pre-block system calls) |
 | `rex5/sandbox_accounting.rs` | 9 | rewrite 9 (native keyless deployment · native sub-frame: parent tracker sees child directly) |
-| `rex5/selfdestruct_beneficiary.rs` | 7 | rewrite 4 (the state-growth and KV limits · D45 (state gas via new-account site)); keep 2 (detention); keep 1 (the data-size limit) |
-| `rex6/beneficiary_detention.rs` | 16 | keep 13 (detention · D08); keep 2 (the data-size limit · D50 write record 40 B); rewrite 1 (the state-growth and KV limits · D45) |
+| `rex5/selfdestruct_beneficiary.rs` | 6 | rewrite 4 (the state-growth and KV limits · D45 (state gas via new-account site)); keep 2 (detention) |
+| `rex6/beneficiary_detention.rs` | 14 | keep 13 (detention · D08); rewrite 1 (the state-growth and KV limits · D45) |
 | `rex6/create2_metering_order.rs` | 11 | keep 11 (the common execution layer · canonical halt reasons; D04 512 KiB boundary) |
 | `rex6/eip7702_authority_accounting.rs` | 18 | rewrite 18 (the state-growth and KV limits · D12/D28/D31/D45 (7702 matrix; SALT pricing for the SALT half)) |
 | `rex6/error_paths.rs` | 2 | keep 2 (the common execution layer · canonical) |
-| `rex6/frame_local_accounting.rs` | 3 | keep 3 (the data-size limit · LOG base 32 unchanged) |
 | `rex6/keyless_sandbox_hardening.rs` | 3 | rewrite 1 (native keyless deployment · D44 / EIP-6780 native); keep 2 (native keyless deployment · canonical CREATE rules) |
 | `rex6/oracle_hint_volatile_access.rs` | 4 | keep 4 (the oracle and control contracts) |
-| `rex6/self_transfer_account_dedup.rs` | 1 | keep 1 (the data-size limit) |
 | `rex6/sequencer_registry_rotation.rs` | 5 | keep 5 (system contract deployment) |
 | `src/access/volatile.rs` | 4 | keep 4 (detention) |
 | `src/evm/mod.rs` | 3 | keep 3 (the pre-block system calls) |
 | `src/limit/compute_gas.rs` | 1 | rewrite 1 (detention · D40/D48) |
-| `src/limit/data_size.rs` | 2 | keep 2 (the data-size limit) |
 | `src/limit/kv_update.rs` | 1 | undecided 1 (the state-growth and KV limits · D46) |
 | `src/sandbox/execution.rs` | 2 | keep 1 (native keyless deployment · rule); rewrite 1 (native keyless deployment · D16) |
 | `src/system/sequencer_registry.rs` | 15 | keep 6 (system contract deployment · the pre-block system calls for transact_apply_pending_changes); keep 9 (the pre-block system calls · the pre-block system calls for transact_apply_pending_changes) |

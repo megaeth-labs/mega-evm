@@ -504,7 +504,8 @@ fn writes_then_calls_itself_to_write_back() -> Bytes {
     Bytes::from(code)
 }
 
-/// A transaction-level data-size limit of `bytes`, or none at all.
+/// A transaction-level data-size limit of `bytes`, or none at all. The body counts towards it, so
+/// a limit that stops a write the transaction makes is the body's bytes and more.
 fn limited_to(bytes: u64) -> EvmTxRuntimeLimits {
     EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(bytes)
 }
@@ -597,7 +598,7 @@ fn test_the_bytes_on_the_edge_paths_are_the_history_gas_at_the_price() {
             "a limit stops the transaction before its first frame: the recipient is not written",
             funded,
             |gas| call(CALLER, FRESH, U256::from(1), gas),
-            WRITE_RECORD_SIZE - 1,
+            TX_BODY_SIZE + WRITE_RECORD_SIZE - 1,
             TX_BODY_SIZE,
         ),
         (
@@ -608,7 +609,7 @@ fn test_the_bytes_on_the_edge_paths_are_the_history_gas_at_the_price() {
                 callee_running(calling(code, PAYEE, 1, 100_000))
             },
             |gas| call(CALLER, CALLEE, U256::ZERO, gas),
-            2 * WRITE_RECORD_SIZE - 1,
+            TX_BODY_SIZE + 2 * WRITE_RECORD_SIZE - 1,
             TX_BODY_SIZE,
         ),
         (
@@ -621,7 +622,7 @@ fn test_the_bytes_on_the_edge_paths_are_the_history_gas_at_the_price() {
                     )
             },
             |gas| call(CALLER, CALLEE, U256::ZERO, gas),
-            LOG_BASE_SIZE + WRITE_RECORD_SIZE - 1,
+            TX_BODY_SIZE + LOG_BASE_SIZE + WRITE_RECORD_SIZE - 1,
             TX_BODY_SIZE,
         ),
         (
@@ -682,6 +683,9 @@ fn test_the_bytes_on_the_edge_paths_are_the_history_gas_at_the_price() {
     ];
 
     for (name, db, tx, limit, bytes) in cases {
+        // A limit the body alone crosses would stop every case before its first write, and the
+        // case would pin the body's stop rather than its own.
+        assert!(limit > TX_BODY_SIZE, "{name}: the body fits under the limit");
         for gas_limit in GAS_LIMITS {
             let outcome = MegaEvm::new(context(db()).with_tx_runtime_limits(limited_to(limit)))
                 .execute_transaction(tx(gas_limit))

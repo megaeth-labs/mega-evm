@@ -72,7 +72,7 @@ pub struct SystemContractSpec {
     /// When set, matching code with nonce 0 is an error rather than a read-only entry.
     ///
     /// EIP-7997 requires the factory to hold its runtime **and a nonzero nonce**. The six
-    /// MegaETH contracts are not EIP-7997, so they leave this unset: matching code is
+    /// `MegaETH` contracts are not EIP-7997, so they leave this unset: matching code is
     /// accepted regardless of nonce, because the matching-code path must not rewrite an
     /// already-deployed contract.
     pub require_nonzero_nonce: bool,
@@ -183,8 +183,8 @@ impl<DbError: core::error::Error + 'static> core::error::Error
 ///   7. If [`SystemContractSpec::require_nonzero_nonce`] is set (the EIP-7997 factory) and the
 ///   nonce is 0, this is [`SystemContractDeployError::ZeroFactoryNonce`] instead: the matching-code
 ///   path does not rewrite a nonce, so a genesis factory with the right code and nonce 0 would
-///   otherwise stay invalid forever. The six MegaETH contracts leave that flag unset; they are not
-///   EIP-7997, and matching code is accepted regardless of nonce.
+///   otherwise stay invalid forever. The six `MegaETH` contracts leave that flag unset; they
+///   are not EIP-7997, and matching code is accepted regardless of nonce.
 /// - Absent, or present with empty code and nonce 0: the created account with its bytecode, nonce
 ///   and every seeded slot, all marked. An existing balance is kept. Marking the account created
 ///   clears any storage it had; that is the accepted bootstrap path (prefunding with balance

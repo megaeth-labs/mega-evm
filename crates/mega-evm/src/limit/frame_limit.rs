@@ -6,9 +6,9 @@
 //! records of applied EIP-7702 authorities) and what the outermost frame kept sit on the
 //! transaction's own lane.
 //!
-//! The history bytes a frame appends beside its write records — its logs, and the code its
-//! creations deposit — ride on the same lanes and follow the same rule, so what a transaction
-//! reports it appended is what it kept.
+//! The history bytes a frame appends beside its write records — its logs, and the code it
+//! deposits when it is a creation — ride on the same lanes and follow the same rule, so what a
+//! transaction reports it appended is what it kept.
 //!
 //! Every operation is O(1): the totals are cached and kept in step with each change.
 
@@ -57,8 +57,8 @@ pub(crate) struct Lane {
     /// never enters the frame's gas, and what it does not spend disappears with the frame.
     pub(crate) stipend_remaining: u64,
     /// The history bytes the frame, and the children it kept, appended that are not write
-    /// records: the logs it emitted and the code its creations deposited. Its write records are
-    /// history too, and are counted in [`used`](Self::used).
+    /// records: the logs it emitted and, when it is a creation, the code it deposits. Its write
+    /// records are history too, and are counted in [`used`](Self::used), as are these bytes.
     pub(crate) log_and_code_bytes: u64,
 }
 
@@ -271,8 +271,9 @@ impl FrameLimitTracker {
     /// Pops the lane of the frame that returned: `success` merges it into its caller's lane (or
     /// the transaction's), a failure discards it.
     ///
-    /// A creator's record outlives the creation's failure; any other record of the caller dies
-    /// with it, and the caller's account stops counting as recorded.
+    /// A creator's record outlives the creation's failure and lands on the caller's lane, which
+    /// nothing here holds to its budget; any other record of the caller dies with it, and the
+    /// caller's account stops counting as recorded.
     pub(crate) fn pop(&mut self, success: bool) -> Option<Lane> {
         let lane = self.lanes.pop()?;
         if success {
@@ -329,6 +330,26 @@ mod tests {
 
     const fn bytes(data_size: u64) -> LimitUsage {
         LimitUsage { data_size, write_records: 0 }
+    }
+
+    /// The depth and the running lane follow the frame stack: a push adds a lane and a pop takes
+    /// the running one away, whatever the frame's outcome.
+    #[test]
+    fn test_depth_and_the_running_lane_follow_the_frame_stack() {
+        let mut t = FrameLimitTracker::default();
+        assert_eq!(t.depth(), 0);
+        assert!(t.current().is_none(), "no frame has started");
+        t.push(Lane::new(Some(ADDR), false, 7, 0));
+        t.push(Lane::empty(0));
+        assert_eq!(t.depth(), 2);
+        assert_eq!(t.current().unwrap().address, None, "the empty lane is the running one");
+        assert!(t.pop(false).is_some());
+        assert_eq!(t.depth(), 1);
+        assert_eq!(t.current().unwrap().budget, 7);
+        assert!(t.pop(true).is_some());
+        assert_eq!(t.depth(), 0);
+        assert!(t.current().is_none());
+        assert!(t.pop(true).is_none(), "there is nothing left to pop");
     }
 
     /// Recording a caller on an empty stack, or on a lane with no caller below it, is a no-op.

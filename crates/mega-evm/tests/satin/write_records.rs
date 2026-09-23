@@ -16,12 +16,13 @@ use mega_evm::{
         ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE,
     },
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    LimitUsage, MegaContext, MegaEvm, StagedRecord, WRITE_RECORD_SIZE,
+    LimitCheck, LimitKind, LimitUsage, MegaContext, MegaEvm, StagedRecord, TX_BODY_SIZE,
+    WRITE_RECORD_SIZE,
 };
 use revm::{
     bytecode::opcode::{
-        CALL, CALLDATASIZE, CREATE, GAS, INVALID, JUMPDEST, JUMPI, LOG2, POP, PUSH0, PUSH1,
-        SELFDESTRUCT, SSTORE, STOP,
+        CALL, CALLDATASIZE, CREATE, GAS, INVALID, JUMPDEST, JUMPI, LOG2, POP, PUSH0, PUSH1, RETURN,
+        REVERT, SELFDESTRUCT, SSTORE, STOP,
     },
     interpreter::{interpreter::EthInterpreter, interpreter_types::Jumps, Interpreter},
     Database, Inspector,
@@ -37,8 +38,23 @@ const CONTRACT2: Address = address!("0000000000000000000000000000000000100003");
 /// child burned the 63/64 it was forwarded.
 const GAS_LIMIT: u64 = 50_000_000;
 
+/// The transaction body and nothing else.
+const fn body_only() -> LimitUsage {
+    LimitUsage { data_size: TX_BODY_SIZE, write_records: 0 }
+}
+
+/// `n` write records on top of the transaction body.
 const fn records(n: u64) -> LimitUsage {
+    LimitUsage { data_size: TX_BODY_SIZE + n * WRITE_RECORD_SIZE, write_records: n }
+}
+
+/// `n` write records and no body: the difference between two transactions that carry the same one.
+const fn records_only(n: u64) -> LimitUsage {
     LimitUsage { data_size: n * WRITE_RECORD_SIZE, write_records: n }
+}
+
+fn with_extra(usage: LimitUsage, bytes: u64) -> LimitUsage {
+    LimitUsage { data_size: usage.data_size + bytes, ..usage }
 }
 
 fn funded() -> MemoryDatabase {
@@ -107,7 +123,7 @@ fn test_failed_child_discards_its_transfer_records() {
         funded().account_code(CALLEE, code).account_code(CONTRACT, Bytes::from_static(&[INVALID]));
     let (result, usage) = run(db, call(CALLER, CALLEE, U256::ZERO, GAS_LIMIT));
     assert!(result.result.is_success(), "the outer call succeeds although the child halts");
-    assert_eq!(usage, LimitUsage::ZERO);
+    assert_eq!(usage, body_only());
 }
 
 /// After a failed transfer the sender can be recorded again by the next one.
@@ -168,7 +184,7 @@ fn test_creation_without_funds_records_nothing() {
     let db = MemoryDatabase::default().account_code(CALLEE, code);
     let (result, usage) = run(db, call(CALLER, CALLEE, U256::ZERO, GAS_LIMIT));
     assert!(result.result.is_success());
-    assert_eq!(usage, LimitUsage::ZERO);
+    assert_eq!(usage, body_only());
     assert_eq!(result.state[&CALLEE].info.nonce, 0, "the nonce was never bumped");
 }
 
@@ -193,7 +209,7 @@ fn test_top_level_self_transfer_no_double_count() {
 /// A top-level transfer to another account records the recipient.
 #[test]
 fn test_top_level_transfer_counts_the_recipient() {
-    assert_eq!(value_delta(B), records(1));
+    assert_eq!(value_delta(B), records_only(1));
 }
 
 /// `CALLDATASIZE; JUMPI` to a body that calls `targets` with `value`, so an inner call with empty
@@ -234,14 +250,14 @@ fn nested_delta(targets: &[Address]) -> LimitUsage {
 /// A nested transfer to the frame's own account is one account write.
 #[test]
 fn test_nested_self_call_with_value_counts_once() {
-    assert_eq!(nested_delta(&[SELF_CALLER]), records(1));
+    assert_eq!(nested_delta(&[SELF_CALLER]), records_only(1));
 }
 
 /// After a transfer to another account recorded the frame's account, a transfer to itself adds
 /// nothing.
 #[test]
 fn test_nested_self_transfer_after_recorded_sender_counts_nothing() {
-    assert_eq!(nested_delta(&[B, SELF_CALLER]), records(2));
+    assert_eq!(nested_delta(&[B, SELF_CALLER]), records_only(2));
 }
 
 /* ---------- storage, logs, selfdestruct ---------- */
@@ -253,7 +269,7 @@ fn test_sstore_first_change_records_and_write_back_refunds() {
     let cases: [(Writes, u64, LimitUsage); 4] = [
         (&[(0, 1)], 0, records(1)),
         (&[(0, 1), (0, 2)], 0, records(1)),
-        (&[(0, 1), (0, 0)], 0, LimitUsage::ZERO),
+        (&[(0, 1), (0, 0)], 0, body_only()),
         (&[(0, 0)], 5, records(1)),
     ];
     for (writes, original, expected) in cases {
@@ -277,7 +293,7 @@ fn test_write_back_in_a_child_refunds_the_caller_record() {
     let child = BytecodeBuilder::default().sstore(U256::ZERO, U256::ZERO).stop().build();
     let failing_child =
         BytecodeBuilder::default().sstore(U256::ZERO, U256::ZERO).append(INVALID).build();
-    for (code, expected) in [(child, LimitUsage::ZERO), (failing_child, records(1))] {
+    for (code, expected) in [(child, body_only()), (failing_child, records(1))] {
         // CALLEE writes slot 0, then DELEGATECALLs CONTRACT, which writes it back in CALLEE's
         // storage.
         let parent = BytecodeBuilder::default()
@@ -314,7 +330,7 @@ fn test_log_counts_its_bytes() {
     );
     assert!(result.result.is_success());
     assert_eq!(result.result.logs().len(), 1);
-    assert_eq!(usage, LimitUsage { data_size: 32 + 2 * 32 + 10, write_records: 0 });
+    assert_eq!(usage, with_extra(body_only(), 32 + 2 * 32 + 10));
 }
 
 /// `SELFDESTRUCT` records the beneficiary only when value moves to another account than the
@@ -326,9 +342,9 @@ fn test_selfdestruct_records_the_beneficiary_when_value_moves() {
     };
     let cases = [
         (U256::from(5), CONTRACT, records(1)),
-        (U256::from(5), CALLEE, LimitUsage::ZERO),
-        (U256::from(5), CALLER, LimitUsage::ZERO),
-        (U256::ZERO, CONTRACT, LimitUsage::ZERO),
+        (U256::from(5), CALLEE, body_only()),
+        (U256::from(5), CALLER, body_only()),
+        (U256::ZERO, CONTRACT, body_only()),
     ];
     for (balance, beneficiary, expected) in cases {
         let db = MemoryDatabase::default()
@@ -343,15 +359,16 @@ fn test_selfdestruct_records_the_beneficiary_when_value_moves() {
 /// A top-level creation records the created account, and nothing when it fails.
 #[test]
 fn test_top_level_create_records_the_created_account() {
+    // `STOP` is one byte of init code and deposits nothing.
     let (result, usage) =
         run(MemoryDatabase::default(), create(CALLER, Bytes::from_static(&[STOP]), GAS_LIMIT));
     assert!(result.result.is_success());
-    assert_eq!(usage, records(1));
+    assert_eq!(usage, with_extra(records(1), 1));
 
     let (result, usage) =
         run(MemoryDatabase::default(), create(CALLER, Bytes::from_static(&[INVALID]), GAS_LIMIT));
     assert!(!result.result.is_success());
-    assert_eq!(usage, LimitUsage::ZERO);
+    assert_eq!(usage, with_extra(body_only(), 1));
 }
 
 /* ---------- the commit happens after the opcode ---------- */
@@ -437,7 +454,7 @@ fn test_sstore_out_of_gas_after_the_write_discards_the_record() {
     let steps = probe(db, GAS_LIMIT, false);
     let (staged, usage) = after_sstore(&steps);
     assert!(!staged, "the record is discarded, not left for the next opcode");
-    assert_eq!(usage, LimitUsage::ZERO, "a failed opcode's write is not counted");
+    assert_eq!(usage, body_only(), "a failed opcode's write is not counted");
 }
 
 /// A record staged outside an opcode's wrapper is discarded when the next wrapper starts, so it
@@ -502,15 +519,24 @@ fn test_applied_authorities_record_once_each() {
         authorizing_call(CONTRACT, 0, &[(AUTHORITY_1, 0), (AUTHORITY_2, 0), (AUTHORITY_1, 1)]),
     );
     assert!(result.result.is_success(), "{:?}", result.result);
-    assert_eq!(usage, records(2));
+    // Three authorization tuples travel in the body; two distinct authorities are applied.
+    assert_eq!(usage, with_extra(records(2), 3 * mega_evm::AUTHORIZATION_SIZE));
 
     let (result, usage) = run(db(), authorizing_call(CONTRACT, 0, &[(AUTHORITY_1, 7)]));
     assert!(result.result.is_success());
-    assert_eq!(usage, LimitUsage::ZERO, "a wrong nonce applies nothing");
+    assert_eq!(
+        usage,
+        with_extra(body_only(), mega_evm::AUTHORIZATION_SIZE),
+        "a wrong nonce applies nothing, and its tuple is still in the body"
+    );
 
     let (result, usage) = run(db(), authorizing_call(CONTRACT, 0, &[(CALLER, 1)]));
     assert!(result.result.is_success());
-    assert_eq!(usage, LimitUsage::ZERO, "the sender's own account is part of the body");
+    assert_eq!(
+        usage,
+        with_extra(body_only(), mega_evm::AUTHORIZATION_SIZE),
+        "the sender's own account is part of the body"
+    );
 }
 
 /// A value transfer to an applied authority records the authority once, not again as the
@@ -520,7 +546,7 @@ fn test_value_to_an_applied_authority_records_it_once() {
     let db = || MemoryDatabase::default().account_balance(CALLER, U256::from(1_000));
     let (result, usage) = run(db(), authorizing_call(AUTHORITY_1, 1, &[(AUTHORITY_1, 0)]));
     assert!(result.result.is_success(), "{:?}", result.result);
-    assert_eq!(usage, records(1));
+    assert_eq!(usage, with_extra(records(1), mega_evm::AUTHORIZATION_SIZE));
 
     // And is charged for once: the transaction's own frame writes no recipient, because the
     // authority's account is already written. A transfer to an account that is not an authority
@@ -602,7 +628,7 @@ fn test_creation_failing_before_the_nonce_bump_records_nothing() {
             .unwrap();
     assert!(result.result.is_success());
     assert_eq!(result.state[&CALLEE].info.nonce, 0, "the nonce was never bumped");
-    assert_eq!(evm.ctx().additional_limit().usage(), LimitUsage::ZERO);
+    assert_eq!(evm.ctx().additional_limit().usage(), body_only());
 }
 
 /// A creation that collides with an existing account fails after bumping the creator's nonce, so
@@ -655,19 +681,31 @@ fn test_authorities_crossing_the_cap_are_not_applied() {
             .execute_transaction(authorizing_call(CONTRACT, 0, &[(AUTHORITY_1, 0)]))
             .unwrap()
     };
-    let at_the_cap = with_cap(40);
+    // The body carries the authorization tuple; the applied authority is one record on top.
+    let tuple = mega_evm::AUTHORIZATION_SIZE;
+    let at_the_cap = with_cap(TX_BODY_SIZE + tuple + WRITE_RECORD_SIZE);
     assert!(at_the_cap.result.is_success(), "records equal to the cap do not cross it");
-    assert_eq!(at_the_cap.usage, records(1));
+    assert_eq!(at_the_cap.usage, with_extra(records(1), tuple));
 
-    let outcome = with_cap(39);
+    let limit = TX_BODY_SIZE + tuple + WRITE_RECORD_SIZE - 1;
+    let outcome = with_cap(limit);
     assert!(!outcome.result.is_success() && !outcome.result.is_halt(), "{:?}", outcome.result);
-    assert!(outcome.limit_exceeded.is_some());
+    assert_eq!(
+        outcome.limit_exceeded,
+        Some(LimitCheck::ExceedsLimit {
+            kind: LimitKind::DataSize,
+            limit,
+            used: limit + 1,
+            frame_local: false,
+        }),
+        "the authority record is the byte that crosses, and nothing after it is counted"
+    );
     let authority = outcome.state.get(&AUTHORITY_1);
     assert!(
         authority.is_none_or(|a| a.info.nonce == 0 && a.info.is_empty_code_hash()),
         "the delegation was not applied: {authority:?}"
     );
-    assert_eq!(outcome.usage, LimitUsage::ZERO);
+    assert_eq!(outcome.usage, with_extra(body_only(), mega_evm::AUTHORIZATION_SIZE));
 }
 
 /// A transaction that runs out of gas after its authorities were applied, before its first frame,
@@ -702,7 +740,11 @@ fn test_runtime_out_of_gas_after_authorities_keeps_no_record() {
     }
     let outcome = run_at(succeeds - 1).expect("one gas short of succeeding is still included");
     assert!(outcome.result.is_halt(), "{:?}", outcome.result);
-    assert_eq!(outcome.usage, LimitUsage::ZERO);
+    assert_eq!(
+        outcome.usage,
+        with_extra(body_only(), mega_evm::AUTHORIZATION_SIZE),
+        "the out-of-gas takes the authority record back and keeps the body"
+    );
     assert_eq!(outcome.limit_exceeded, None);
     assert!(
         outcome.state.get(&AUTHORITY_1).is_none_or(|a| a.info.nonce == 0),
@@ -799,7 +841,12 @@ fn test_created_frame_delegatecall_inherits_the_created_account_record() {
     let (result, usage) = run(db, tx);
     assert!(result.result.is_success(), "{:?}", result.result);
     assert_eq!(result.state[&CONTRACT2].info.balance, U256::from(1));
-    assert_eq!(usage, records(2), "the created account, CONTRACT2");
+    // The init code travels in the body. `STOP` deploys nothing.
+    assert_eq!(
+        usage,
+        with_extra(records(2), delegate_to_d().len() as u64),
+        "the created account, CONTRACT2"
+    );
 }
 
 /// A transaction calling its own sender (delegated) counts the sender as recorded from the start.
@@ -897,6 +944,16 @@ fn value_call_a_system_contract_refuses() -> Bytes {
         .append(POP)
         .append(STOP)
         .build()
+}
+
+/// Init code that returns `size` zero bytes as the deployed contract.
+fn constructor_returning(size: u8) -> Bytes {
+    BytecodeBuilder::default().push_number(size).push_number(0_u8).append(RETURN).build()
+}
+
+/// Init code that reverts with `len` bytes of data and deploys nothing.
+fn reverting_with(len: u8) -> Bytes {
+    BytecodeBuilder::default().push_number(len).push_number(0_u8).append(REVERT).build()
 }
 
 /// The corpus, one case per rule the record sites follow.
@@ -1018,6 +1075,20 @@ fn paired_corpus() -> Vec<Paired> {
             0,
         ),
         case("a creation transaction", funded(), create(CALLER, Bytes::new(), GAS_LIMIT), 0, 1),
+        case(
+            "a creation that deploys code",
+            funded(),
+            create(CALLER, constructor_returning(32), GAS_LIMIT),
+            32,
+            1,
+        ),
+        case(
+            "a creation whose revert data is not deployed code",
+            funded(),
+            create(CALLER, reverting_with(10), GAS_LIMIT),
+            0,
+            0,
+        ),
         // The two cases where a transaction's data size and its history part company. Both are
         // decisions, stated in the byte table; each is written out here with the number it pays.
         Paired {
@@ -1095,12 +1166,12 @@ fn test_every_kept_write_pays_one_record_of_history() {
             .expect("the transaction is valid");
         let usage = outcome.usage;
         assert_eq!(usage.write_records, case.records, "{}: the records kept", case.name);
-        let body = mega_evm::TX_BODY_SIZE + case.tx.0.base.data.len() as u64;
+        let body = mega_evm::transaction_body_bytes(&case.tx);
         let expected = (body + case.other_bytes + case.records * WRITE_RECORD_SIZE) * CPHB;
         assert_eq!(outcome.gas.history, expected, "{}: the history it pays", case.name);
         assert_eq!(
             usage.data_size,
-            case.other_bytes + case.records * WRITE_RECORD_SIZE + case.hint_bytes,
+            body + case.other_bytes + case.records * WRITE_RECORD_SIZE + case.hint_bytes,
             "{}: the data size the limit counts",
             case.name,
         );
@@ -1144,7 +1215,7 @@ fn test_an_inspector_answered_value_call_gives_its_history_back() {
     let (ran_usage, ran_history) = run_with(None);
     let body = mega_evm::TX_BODY_SIZE * mega_evm::constants::COST_PER_HISTORY_BYTE;
 
-    assert_eq!(answered_usage, LimitUsage::ZERO, "the answered call wrote nothing");
+    assert_eq!(answered_usage, body_only(), "the answered call wrote nothing");
     assert_eq!(answered_history, body, "so its caller pays for nothing beyond its body");
     assert_eq!(ran_usage, records(2), "the transfer that ran wrote two accounts");
     assert_eq!(

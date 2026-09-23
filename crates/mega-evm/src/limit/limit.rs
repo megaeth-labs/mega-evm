@@ -3,13 +3,14 @@
 use alloy_primitives::Address;
 use revm::{
     handler::FrameResult,
-    interpreter::{CallInputs, CallScheme, FrameInput, InstructionResult},
+    interpreter::{CallInputs, CallScheme, FrameInput, InstructionResult, InterpreterResult},
 };
 
 use super::{
     frame_limit::{FrameLimitTracker, Lane},
     record::{HistoryBytes, RecordEffect, StagedRecord},
-    EvmTxRuntimeLimits, LimitCheck, LimitKind, LimitUsage, WRITE_RECORD, WRITE_RECORD_SIZE,
+    EvmTxRuntimeLimits, LimitCheck, LimitKind, LimitUsage, FRAME_DATA_SHARE_DENOMINATOR,
+    FRAME_DATA_SHARE_NUMERATOR, WRITE_RECORD, WRITE_RECORD_SIZE,
 };
 use crate::storage_call_stipend;
 
@@ -39,6 +40,9 @@ pub struct AdditionalLimit {
     limits: EvmTxRuntimeLimits,
     /// The transaction-level stop, once a limit latched one.
     latched: Option<LimitCheck>,
+    /// The stop the frame a child returned into must return instead of running on, when what the
+    /// child left it put it over a limit. See [`on_frame_return`](Self::on_frame_return).
+    resume_stop: Option<LimitCheck>,
     /// Whether the transaction's call target is an applied EIP-7702 authority, whose account
     /// write the transaction's lane already counts.
     target_is_authority: bool,
@@ -46,8 +50,12 @@ pub struct AdditionalLimit {
     /// running as the sender never records it.
     sender: Address,
     /// Whether the transaction's first frame reached frame init. When it did not, the runtime
-    /// phase before it ran out of gas and took back everything counted before it.
+    /// phase before it ran out of gas and took back the authorizations applied before it. The
+    /// body stays; see [`on_last_frame_return`](Self::on_last_frame_return).
     frame_began: bool,
+    /// Data-size bytes of the transaction's body. Recorded before any frame and kept on every
+    /// path, including an out-of-gas before the first frame, which clears the rest of the tracker.
+    body_bytes: u64,
     /// The history gas validation charged for the transaction's body, part of
     /// [`history_gas_spent`](Self::history_gas_spent).
     intrinsic_history_gas: u64,
@@ -89,9 +97,11 @@ impl AdditionalLimit {
         self.tracker.reset();
         self.staged = None;
         self.latched = None;
+        self.resume_stop = None;
         self.target_is_authority = false;
         self.sender = Address::ZERO;
         self.frame_began = false;
+        self.body_bytes = 0;
         self.intrinsic_history_gas = 0;
         self.intrinsic_history_bytes = 0;
         self.top_level_write_record_gas = 0;
@@ -138,6 +148,14 @@ impl AdditionalLimit {
             }
         }
         LimitCheck::WithinLimit
+    }
+
+    /// The stop the running frame returns instead of running another instruction: the latched
+    /// one, or the one [`on_frame_return`](Self::on_frame_return) left for a caller its child put
+    /// over its budget. Taking it clears the latter, which stops one frame.
+    pub(crate) fn stop_before_run(&mut self) -> Option<LimitCheck> {
+        let resume_stop = self.resume_stop.take();
+        self.latched.or(resume_stop)
     }
 
     /// Rewrites `result` to the latched stop, when the transaction is latched: a success or a
@@ -316,6 +334,21 @@ impl AdditionalLimit {
 
     /* Transaction-level records */
 
+    /// Counts the transaction's body: its envelope, the writes its inclusion makes, its calldata,
+    /// its authorizations and its access list.
+    ///
+    /// The bytes are the transaction's, recorded before any frame, so a revert does not take them
+    /// back, and neither does an out-of-gas before the first frame. A body that crosses the
+    /// transaction limit latches it, and the first frame is then answered with the stop.
+    pub(crate) fn record_tx_body(&mut self, bytes: u64) -> LimitCheck {
+        self.body_bytes = bytes;
+        if bytes == 0 {
+            return LimitCheck::WithinLimit;
+        }
+        self.tracker.record_tx(LimitUsage { data_size: bytes, write_records: 0 });
+        self.check()
+    }
+
     /// Counts the `bytes` of an Oracle hint, the payload a `sendHint` call hands to the node's
     /// oracle service.
     ///
@@ -378,6 +411,58 @@ impl AdditionalLimit {
         self.check()
     }
 
+    /// Counts the code a creation is about to deposit, on the creation's own lane, and turns the
+    /// return into the stop when that crosses a limit.
+    ///
+    /// Called from the frame run, on a successful return whose code `return_create` would accept,
+    /// before it charges for the deposit and commits the creation's journal checkpoint. A rewrite
+    /// after that commit would leave the code deployed: the checkpoint is already gone, and
+    /// flipping the frame result does not reopen it. A stop here makes `return_create` revert the
+    /// checkpoint instead, so the code is not written. The bytes stay on the lane until the frame
+    /// returns; a success merges them into the caller, and the failure — the stop included —
+    /// discards them.
+    ///
+    /// A return that is already a revert or a halt deposits nothing, and its output is the
+    /// revert data, not code. Empty code deposits nothing either, and neither does code
+    /// `return_create` refuses: that fails the creation there, and is never counted.
+    ///
+    /// The same bytes are history beside the write records, counted here on the same lane, so
+    /// the history a transaction reports it appended and the data size it kept move together:
+    /// a creation that deposits nothing, or whose deposit fails, appends neither.
+    pub(crate) fn on_create_return(&mut self, result: &mut InterpreterResult) {
+        if !result.result.is_ok() {
+            return;
+        }
+        let bytes = result.output.len() as u64;
+        if bytes == 0 {
+            return;
+        }
+        debug_assert!(self.tracker.current().is_some(), "a creation returns on its own lane");
+        self.tracker.record(LimitUsage { data_size: bytes, write_records: 0 });
+        self.tracker.record_log_and_code_bytes(bytes);
+        let check = self.check();
+        if !check.exceeded_limit() {
+            return;
+        }
+        result.result = InstructionResult::Revert;
+        result.output = check.revert_data();
+    }
+
+    /// The data-size budget of the frame about to start.
+    ///
+    /// The transaction's own frame gets what the transaction has left, and never more than
+    /// [`frame_data_size_limit`](EvmTxRuntimeLimits::frame_data_size_limit). A child gets
+    /// [`FRAME_DATA_SHARE_NUMERATOR`] / [`FRAME_DATA_SHARE_DENOMINATOR`] of what its parent has
+    /// left, under the same cap. What the parent has left is its budget minus what it has already
+    /// kept, so a parent that has spent part of its budget forwards a smaller share.
+    fn frame_budget(&self) -> u64 {
+        let forwarded = match self.tracker.current() {
+            Some(caller) => share_of_remaining(caller.remaining_budget()),
+            None => self.limits.tx_data_size_limit.saturating_sub(self.tracker.net().data_size),
+        };
+        forwarded.min(self.limits.frame_data_size_limit)
+    }
+
     /// Takes a creation's creator record back: the creation failed before bumping the nonce.
     ///
     /// The record is gone, so the caller gets its history back when the frame returns: the lane no
@@ -388,10 +473,7 @@ impl AdditionalLimit {
     }
 
     fn push_lane(&mut self, input: &FrameInput, depth: usize) {
-        let budget = match self.tracker.current() {
-            Some(caller) => caller.remaining_budget().min(self.limits.frame_data_size_limit),
-            None => self.limits.frame_data_size_limit,
-        };
+        let budget = self.frame_budget();
         // What the caller paid for these records at its opcode. The transaction's own frame has
         // no such caller: its record is charged before execution and given back by the settlement
         // ([`top_level_write_record_gas`](Self::top_level_write_record_gas)).
@@ -517,9 +599,15 @@ impl AdditionalLimit {
     /// a failure discards it. Under a latch the result is first rewritten to the latched stop,
     /// whatever produced it (an interceptor, an inspector's rewrite), so no success passes it.
     ///
-    /// A creation that ran and succeeded deposited its output as code, which its caller keeps as
-    /// history bytes of its own: the creation's lane is gone by then, and the code goes wherever
-    /// the caller's writes go.
+    /// Then the caller is held to its limits with what it now holds, and a crossing is the stop
+    /// it returns before it runs on ([`stop_before_run`](Self::stop_before_run)): its own
+    /// frame-local revert for its budget, the latch for the transaction's limit. One return adds
+    /// to a caller what no check has held it to: the nonce record a failed creation leaves its
+    /// creator. The creation counted that record on its own lane, against its own share, and a
+    /// creation stopped for crossing that share still bumps the nonce — so a creator with fewer
+    /// bytes left than a record would keep one it may not. Any other return leaves the caller
+    /// within its limits: a failure hands it nothing, and a success hands it no more than the
+    /// share it gave.
     ///
     /// Returns the history gas the caller paid for records this frame did not keep, which the
     /// caller gets back once the frame has merged into it.
@@ -530,13 +618,10 @@ impl AdditionalLimit {
         // opcode, which failed after making it.
         self.pending_frame_charge = FrameCharge::NONE;
         let success = result.instruction_result().is_ok();
-        let Some(lane) = self.tracker.pop(success) else { return 0 };
-        if success && lane.records_made {
-            if let FrameResult::Create(outcome) = &*result {
-                self.tracker.record_log_and_code_bytes(outcome.output().len() as u64);
-            }
-        }
-        lane.history_refund(success)
+        let refund = self.tracker.pop(success).map_or(0, |lane| lane.history_refund(success));
+        let check = self.check();
+        self.resume_stop = check.exceeded_limit().then_some(check);
+        refund
     }
 
     /// Settles the transaction's outermost frame: pops its lane unless the frame already
@@ -545,11 +630,20 @@ impl AdditionalLimit {
     ///
     /// A transaction whose first frame never reached frame init ran out of gas in the runtime
     /// phase before it: the out-of-gas took back the authorizations applied before it, so their
-    /// records and any latch they set go too, and the halt stays a halt.
+    /// records go too, and the halt stays a halt. The body is not one of those records. It is put
+    /// back after the reset.
+    ///
+    /// A latch goes with the reset. Only the body's can be set by then: authorities whose records
+    /// cross the limit are taken back before anything else is charged, and a latched transaction's
+    /// runtime phase charges nothing but the account a deposit-like transaction creates for its
+    /// caller. That account exists whatever the transaction does, so a transaction that cannot pay
+    /// for it is out of gas with or without a stop, and it reports the halt.
     pub(crate) fn on_last_frame_return(&mut self, result: &mut FrameResult) {
         if !self.frame_began {
+            let body = self.body_bytes;
             self.tracker.reset();
             self.latched = None;
+            self.tracker.record_tx(LimitUsage { data_size: body, write_records: 0 });
             return;
         }
         debug_assert!(self.tracker.depth() <= 1, "only the outermost lane can be left");
@@ -562,6 +656,16 @@ impl AdditionalLimit {
             self.apply_latch(result);
         }
     }
+}
+
+/// `remaining` × [`FRAME_DATA_SHARE_NUMERATOR`] / [`FRAME_DATA_SHARE_DENOMINATOR`].
+///
+/// The product is taken in `u128`, so a remaining budget near `u64::MAX` does not wrap.
+const fn share_of_remaining(remaining: u64) -> u64 {
+    let remaining = remaining as u128;
+    let numerator = FRAME_DATA_SHARE_NUMERATOR as u128;
+    let denominator = FRAME_DATA_SHARE_DENOMINATOR as u128;
+    ((remaining * numerator) / denominator) as u64
 }
 
 /// Whether the frame `inputs` starts is granted a history allowance: a value-transferring `CALL`
@@ -711,6 +815,49 @@ mod tests {
         let mut limit = with_the_transactions_frame();
         limit.stage_frame_charge(FrameStartRecords::NONE, 0, 0);
         limit.on_frame_init(&call_from_to(CALLEE, TARGET, U256::from(1)), 1);
+    }
+
+    /// A child frame's budget is 98% of what its parent has left, three frames down, and the
+    /// transaction's own frame gets what the transaction has left. A configured frame cap binds
+    /// when it is the smaller of the two.
+    #[test]
+    fn test_a_child_frame_gets_98_percent_of_what_its_parent_has_left() {
+        let tx_limit = 10_000;
+        let mut limit =
+            AdditionalLimit::new(EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(tx_limit));
+        limit.tracker.record_tx(LimitUsage { data_size: 310, write_records: 0 });
+
+        limit.on_frame_init(&call_from_to(SENDER, CALLEE, U256::ZERO), 0);
+        assert_eq!(limit.tracker.current().unwrap().budget, tx_limit - 310);
+
+        limit.on_frame_init(&call_from_to(CALLEE, TARGET, U256::ZERO), 1);
+        let child = share_of_remaining(tx_limit - 310);
+        assert_eq!(limit.tracker.current().unwrap().budget, child);
+
+        limit.on_frame_init(&call_from_to(TARGET, SENDER, U256::ZERO), 2);
+        let grandchild = share_of_remaining(child);
+        assert_eq!(limit.tracker.current().unwrap().budget, grandchild);
+
+        limit.on_frame_init(&call_from_to(SENDER, CALLEE, U256::ZERO), 3);
+        assert_eq!(
+            limit.tracker.current().unwrap().budget,
+            share_of_remaining(grandchild),
+            "the fourth frame, at depth 3, still takes 98% of what is left"
+        );
+    }
+
+    /// The frame cap binds when it is tighter than the share of what the parent has left.
+    #[test]
+    fn test_the_frame_cap_binds_when_it_is_tighter_than_the_share() {
+        let mut limit = AdditionalLimit::new(
+            EvmTxRuntimeLimits::no_limits()
+                .with_tx_data_size_limit(u64::MAX)
+                .with_frame_data_size_limit(100),
+        );
+        limit.on_frame_init(&call_from_to(SENDER, CALLEE, U256::ZERO), 0);
+        assert_eq!(limit.tracker.current().unwrap().budget, 100);
+        limit.on_frame_init(&call_from_to(CALLEE, TARGET, U256::ZERO), 1);
+        assert_eq!(limit.tracker.current().unwrap().budget, 98);
     }
 
     /// The allowance follows the transfer, and only the two schemes that can carry one: a `CALL`

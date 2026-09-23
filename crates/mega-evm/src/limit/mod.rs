@@ -9,6 +9,43 @@
 //! bytes and write records, on a lane per frame ([`AdditionalLimit`]). The Host stages what it
 //! observes ([`StagedRecord`]) and the opcode commits it once it completed.
 //!
+//! # The data-size limit
+//!
+//! A transaction is held to [`EvmTxRuntimeLimits::tx_data_size_limit`] and every frame to a
+//! budget. The transaction's own frame gets what the transaction has left once its body is
+//! counted, and a child gets [`FRAME_DATA_SHARE_NUMERATOR`] / [`FRAME_DATA_SHARE_DENOMINATOR`] of
+//! what its parent has left, under [`EvmTxRuntimeLimits::frame_data_size_limit`]. A frame that
+//! crosses its budget reverts alone and its caller resumes; a transaction that crosses its limit
+//! is stopped through the latch ([`AdditionalLimit`]). A creation stopped at its start still bumps
+//! its creator's nonce, and the record of that write lands on the creator: the creator is held to
+//! its budget with it before it runs on, and reverts alone if it crossed.
+//!
+//! What is counted, and when:
+//!
+//! - the body, before any frame; neither a revert nor an out-of-gas takes it back;
+//! - the records of the applied EIP-7702 authorities, before the first frame;
+//! - the records a frame's start makes, when the frame starts;
+//! - a storage write's record, a log's bytes and the record of a `SELFDESTRUCT`'s beneficiary, once
+//!   the opcode completed;
+//! - deployed code, on the creation's lane before the creation is committed, so a crossing leaves
+//!   no code behind. Only code revm would deposit counts: code starting with `0xEF` or over the
+//!   code-size limit fails the creation alone and is not counted;
+//! - an Oracle hint's payload, on the transaction's own lane, before it is forwarded.
+//!
+//! A record is checked against the limits before its history is charged: a record the limit
+//! rejects is not kept, so it is not charged, and the stop is what its frame reports. At a frame
+//! start the order is the other way round — the caller pays for the records at its opcode, before
+//! the frame starts and its records are counted — so a caller that cannot pay runs out of gas
+//! first. A body over the limit latches the transaction before it runs, and then nothing is
+//! charged for what the stop takes back: no authorization is applied, no record made outside a
+//! frame is charged, the first frame's start is charged nothing, and the first frame is answered
+//! with the stop. The account a deposit-like transaction creates for its caller is charged all the
+//! same, because it exists whatever the transaction does.
+//!
+//! Both limits are unlimited unless a caller sets them. A block executor installs the ones its
+//! block limits carry, whose default holds a transaction to
+//! [`TX_DATA_LIMIT`](crate::constants::TX_DATA_LIMIT).
+//!
 //! # The byte table
 //!
 //! The sizes below are what one of those things weighs, and they are the whole byte table of the
@@ -76,6 +113,16 @@ pub const ACCESS_LIST_ADDRESS_SIZE: u64 = 20;
 /// Bytes one access-list storage key counts: the key itself.
 pub const ACCESS_LIST_SLOT_SIZE: u64 = 32;
 
+/// Numerator of the share of its parent's remaining data-size budget a child frame receives.
+///
+/// A child gets [`FRAME_DATA_SHARE_NUMERATOR`] / [`FRAME_DATA_SHARE_DENOMINATOR`] of what its
+/// parent has left. The fraction is what keeps a deep call from spending the whole transaction
+/// on its innermost frame.
+pub const FRAME_DATA_SHARE_NUMERATOR: u64 = 98;
+
+/// Denominator of [`FRAME_DATA_SHARE_NUMERATOR`].
+pub const FRAME_DATA_SHARE_DENOMINATOR: u64 = 100;
+
 /// What a transaction or a frame counts: data-size bytes and write records.
 ///
 /// The KV count a node reports is the write-record count; it has no tracker of its own.
@@ -87,16 +134,21 @@ pub struct LimitUsage {
     pub write_records: u64,
 }
 
-/// Limits the common execution layer enforces on one transaction, for exercising the abort
-/// protocol before the mechanisms that own the limits land. Both default to unlimited.
+/// Limits one transaction's data size.
 ///
-/// The data-size limit replaces them with its own limit and per-frame budget rule.
+/// [`tx_data_size_limit`](Self::tx_data_size_limit) stops the transaction. A frame's own budget
+/// is derived from it: the transaction's frame gets what the transaction has left, and each
+/// child gets [`FRAME_DATA_SHARE_NUMERATOR`] / [`FRAME_DATA_SHARE_DENOMINATOR`] of what its
+/// parent has left. Crossing a frame budget reverts that frame alone.
+///
+/// [`frame_data_size_limit`](Self::frame_data_size_limit) is a further cap on every frame's
+/// budget. It is unlimited unless a caller sets it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct EvmTxRuntimeLimits {
     /// The most data-size bytes the transaction may keep. Crossing it stops the transaction.
     pub tx_data_size_limit: u64,
-    /// The most data-size bytes one frame may keep, children included, and never more than
-    /// what its caller has left. Crossing it reverts the frame alone.
+    /// A cap on every frame's data-size budget, applied after the share of what its parent has
+    /// left. Crossing it reverts the frame alone.
     pub frame_data_size_limit: u64,
 }
 
@@ -118,7 +170,7 @@ impl EvmTxRuntimeLimits {
         self
     }
 
-    /// Sets the per-frame data-size budget.
+    /// Caps every frame's data-size budget at `limit`.
     pub const fn with_frame_data_size_limit(mut self, limit: u64) -> Self {
         self.frame_data_size_limit = limit;
         self
@@ -285,6 +337,8 @@ mod tests {
         assert_eq!(AUTHORIZATION_SIZE, 101);
         assert_eq!(ACCESS_LIST_ADDRESS_SIZE, 20);
         assert_eq!(ACCESS_LIST_SLOT_SIZE, 32);
+        // A storage write and an account write are the same record.
+        assert_eq!(WRITE_RECORD, LimitUsage { data_size: WRITE_RECORD_SIZE, write_records: 1 });
     }
 
     #[test]

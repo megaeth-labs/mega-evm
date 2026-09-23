@@ -229,7 +229,7 @@ fn test_matching_factory_code_keeps_a_nonce_greater_than_one() {
     assert_eq!(account.info.code_hash, CREATE2_FACTORY_CODE_HASH);
 }
 
-/// The six MegaETH contracts are not EIP-7997: matching code at nonce 0 is a read-only entry,
+/// The six `MegaETH` contracts are not EIP-7997: matching code at nonce 0 is a read-only entry,
 /// not an error. Rewriting the nonce would be a state change the matching-code path exists to
 /// avoid.
 #[test]
