@@ -5,8 +5,8 @@ name: Execution-spec tests
 # and skips for Osaka (the main fixtures) and Amsterdam (the glamsterdam devnet fixtures) and
 # checks them against the numbers pinned below.
 #
-# An interim gate until the state-test tool is ported to Satin. It checks the fork MegaEvm runs
-# on, not MegaEvm. Not a required check.
+# It checks the fork MegaEvm runs on, not MegaEvm; exec-spec-satin.yml runs the same fixture
+# releases through MegaEvm. Not a required check.
 
 on:
   workflow_dispatch:

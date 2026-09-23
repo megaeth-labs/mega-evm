@@ -12,6 +12,9 @@
 //! - the configuration is what [`MegaContext`] fixes for the spec;
 //! - the L1 fees are zero ([`zero_fee_l1_block_info`], [`op_transaction`]), and the gas price is
 //!   the transaction's own (zero unless it sets one).
+//!
+//! A scenario is one block: its transactions run in order on one EVM ([`Scenario::evm`]), each
+//! committed before the next, as a block executor runs a block.
 
 #[cfg(not(feature = "std"))]
 use alloc as std;
@@ -30,6 +33,7 @@ use revm::{
         },
         BlockEnv, TxEnv,
     },
+    inspector::NoOpInspector,
     state::{AccountInfo, Bytecode},
     Database, DatabaseCommit,
 };
@@ -239,19 +243,30 @@ impl Scenario {
         }
     }
 
-    /// Runs every transaction on a fresh [`MegaEvm`] over `db`, committing the state of each
-    /// successful one before the next. Returns the outcomes in order and the final database.
+    /// The [`MegaEvm`] the scenario runs on, over `db`: the scenario's block, the spec's
+    /// configuration and zero L1 fees.
+    ///
+    /// A scenario is one block, and a block executor builds one EVM for a block and runs every
+    /// transaction on it, so this is built once per scenario, not per transaction.
+    pub fn evm(&self, db: MemoryDatabase) -> MegaEvm<MemoryDatabase, NoOpInspector> {
+        let ctx = MegaContext::new(db, MegaSpecId::SATIN)
+            .with_block(self.block())
+            .with_chain(zero_fee_l1_block_info());
+        MegaEvm::new(ctx)
+    }
+
+    /// Runs every transaction on `evm`, committing the state of each successful one to its
+    /// database before the next, as a block executor runs a block. Returns the outcomes in order.
     ///
     /// # Panics
     ///
     /// If the scenario does not [`validate`](Self::validate).
-    pub fn run(&self, mut db: MemoryDatabase) -> (Vec<ScenarioTxOutcome>, MemoryDatabase) {
+    pub fn run_on(
+        &self,
+        evm: &mut MegaEvm<MemoryDatabase, NoOpInspector>,
+    ) -> Vec<ScenarioTxOutcome> {
         let mut outcomes = Vec::with_capacity(self.txs.len());
         for tx in &self.txs {
-            let ctx = MegaContext::new(&mut db, MegaSpecId::SATIN)
-                .with_block(self.block())
-                .with_chain(zero_fee_l1_block_info());
-            let mut evm = MegaEvm::new(ctx);
             let outcome = match tx.kind {
                 ScenarioTxKind::SystemCall => evm.transact_system_call(
                     tx.caller,
@@ -263,12 +278,24 @@ impl Scenario {
                     evm.transact_raw(OpTx(op_transaction(tx.tx_env(nonce))))
                 }
             };
-            drop(evm);
             if let Ok(outcome) = &outcome {
-                db.commit(outcome.state.clone());
+                evm.db_mut().commit(outcome.state.clone());
             }
             outcomes.push(outcome);
         }
+        outcomes
+    }
+
+    /// Runs every transaction on one [`MegaEvm`] over `db` ([`evm`](Self::evm),
+    /// [`run_on`](Self::run_on)). Returns the outcomes in order and the final database.
+    ///
+    /// # Panics
+    ///
+    /// If the scenario does not [`validate`](Self::validate).
+    pub fn run(&self, db: MemoryDatabase) -> (Vec<ScenarioTxOutcome>, MemoryDatabase) {
+        let mut evm = self.evm(db);
+        let outcomes = self.run_on(&mut evm);
+        let (db, _) = evm.finish();
         (outcomes, db)
     }
 }
@@ -465,6 +492,60 @@ mod tests {
         assert!(outcomes.iter().all(|outcome| outcome.as_ref().unwrap().result.is_success()));
         assert_eq!(db.basic(CALLER).unwrap().unwrap().nonce, 2);
         assert_eq!(db.storage(CALLEE, U256::ZERO).unwrap(), U256::from(7));
+    }
+
+    /// The outcomes as a comparable value: the validation error type has no equality, so an error
+    /// compares by its rendering.
+    fn comparable(
+        outcomes: &[ScenarioTxOutcome],
+    ) -> Vec<Result<&ResultAndState<MegaHaltReason>, String>> {
+        outcomes.iter().map(|o| o.as_ref().map_err(|e| format!("{e:?}"))).collect()
+    }
+
+    /// `run` is `run_on` over the scenario's EVM, which carries the scenario's block and zero L1
+    /// fees; the EVM goes on from what it committed, as the next transaction of a block does.
+    #[test]
+    fn test_run_is_run_on_the_scenario_s_evm() {
+        let scenario = scenario(vec![call(Some(200_000))]);
+        let mut evm = scenario.evm(scenario.database());
+        assert_eq!(evm.block(), &scenario.block());
+        assert_eq!(revm::context::ContextTr::chain(evm.ctx()), &zero_fee_l1_block_info());
+
+        let first = scenario.run_on(&mut evm);
+        assert_eq!(comparable(&first), comparable(&scenario.run(scenario.database()).0));
+        let second = scenario.run_on(&mut evm);
+        assert!(second[0].as_ref().unwrap().result.is_success());
+        assert_eq!(evm.db_mut().basic(CALLER).unwrap().unwrap().nonce, 2);
+    }
+
+    /// One EVM for the whole scenario gives every bench scenario exactly what a fresh EVM per
+    /// transaction gives: the outcomes and the final state. The engine resets what one
+    /// transaction leaves behind before the next, which is what a block executor relies on.
+    #[test]
+    fn test_one_evm_per_scenario_is_one_evm_per_transaction() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("benches/scenarios");
+        let mut ran = 0;
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let text = std::fs::read_to_string(entry.unwrap().path()).unwrap();
+            let scenario: Scenario = serde_json::from_str(&text).unwrap();
+            scenario.validate().unwrap();
+
+            let mut db = scenario.database();
+            let mut fresh = Vec::new();
+            for tx in &scenario.txs {
+                let one = Scenario { txs: vec![tx.clone()], ..scenario.clone() };
+                let mut evm = one.evm(db);
+                fresh.extend(one.run_on(&mut evm));
+                db = evm.finish().0;
+            }
+            let (shared, mut shared_db) = scenario.run(scenario.database());
+            assert_eq!(comparable(&shared), comparable(&fresh), "{}", scenario.name);
+            for address in scenario.pre.keys() {
+                assert_eq!(shared_db.basic(*address).unwrap(), db.basic(*address).unwrap());
+            }
+            ran += 1;
+        }
+        assert!(ran >= 13, "the bench scenarios are all here");
     }
 
     /// The database holds every field of every pre-state account.

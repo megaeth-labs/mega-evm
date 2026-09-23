@@ -32,6 +32,13 @@ cargo test -p mega-evm --features satin-price-override,test-utils
 # Regenerate the checked-in pricing table after an intentional schedule or engine change
 UPDATE_SATIN_PRICING_TABLE=1 cargo test -p mega-evm --test satin
 
+# The execution-spec gate (see Test Gates): Ethereum's state-test fixtures through MegaEvm, per fork
+cargo run --release -p state-test -- --fork Osaka <main-fixtures>/state_tests
+cargo run --release -p state-test -- --fork Amsterdam <devnet-fixtures>/state_tests
+cargo run --release -p state-test -- --mode satin --fork Osaka <main-fixtures>/state_tests  # the report
+# Regenerate the rendered deviation registry after changing crates/mega-state-test/src/deviations.rs
+UPDATE_DEVIATIONS=1 cargo test -p mega-state-test --lib deviations
+
 # Check compiler errors (preferred over clippy for quick checks)
 cargo check
 cargo check -p mega-evm
@@ -56,16 +63,16 @@ Git submodules are required — clone with `--recursive` or run `git submodule u
 
 ## Workspace Structure
 
-| Crate                   | Path                      | Member | Purpose                                                      |
-| ----------------------- | ------------------------- | ------ | ------------------------------------------------------------ |
-| `mega-evm`              | `crates/mega-evm`         | yes    | The Satin engine                                             |
-| `mega-system-contracts` | `crates/system-contracts` | yes    | Solidity system contracts with Rust bindings (Foundry-based) |
-| `mega-state-test`       | `crates/mega-state-test`  | no     | State-test runner library; rejoins when ported to Satin      |
-| `state-test`            | `crates/state-test`       | no     | State-test CLI; rejoins when ported to Satin                 |
-| `mega-evme`             | `bin/mega-evme`           | no     | EVM execution CLI; rejoins when ported to Satin              |
-| `mega-t8n`              | `bin/mega-t8n`            | no     | State transition (t8n) tool; rejoins when ported to Satin    |
+| Crate                   | Path                      | Member | Purpose                                                                     |
+| ----------------------- | ------------------------- | ------ | --------------------------------------------------------------------------- |
+| `mega-evm`              | `crates/mega-evm`         | yes    | The Satin engine                                                            |
+| `mega-system-contracts` | `crates/system-contracts` | yes    | Solidity system contracts with Rust bindings (Foundry-based)                |
+| `mega-state-test`       | `crates/mega-state-test`  | yes    | Execution-spec state-test runner on Satin: the equivalence gate, the report |
+| `state-test`            | `crates/state-test`       | yes    | The runner's CLI                                                            |
+| `mega-evme`             | `bin/mega-evme`           | no     | EVM execution CLI; rejoins when ported to Satin                             |
+| `mega-t8n`              | `bin/mega-t8n`            | no     | State transition (t8n) tool; rejoins when ported to Satin                   |
 
-The four tool crates still target the legacy engine.
+The two tool binaries `mega-evme` and `mega-t8n` still target the legacy engine.
 They are outside `[workspace] members`, so no workspace command builds them; do not edit their sources until they are ported to Satin.
 
 ### Dependencies on the forks
@@ -102,7 +109,7 @@ The root `Cargo.toml` pins `revm = "=40.0.3"` and redirects all twelve revm crat
 | `system/`      | the six contracts' addresses, code and ABIs, one module each; the interceptor dispatch and the value policy (`intercept.rs`); the `MegaAccessControl` and `MegaLimitControl` interceptors (`control.rs`, `limit_control.rs`); the Oracle's hint path (`oracle.rs`); the `KeylessDeploy` dispatch and its fixed overhead (`keyless/dispatch.rs`) next to the Nick's Method transaction format, validation helpers and error ABI (data only); the system-address transaction and its whitelist (`tx.rs`); the deploy helper, the EIP-7997 factory and `SequencerRegistryConfig` (`deploy.rs`, `sequencer_registry.rs`)                                                                                                                                                                                                                                                                                                                                                                                                 | the oracle and control contracts (the detention and compute-ledger semantics the two control contracts answer with, and the Host's oracle reads); keyless deployment as a native CREATE sub-frame                                 |
 | `constants.rs` | the provisional numbers (CPSB, slot and account state gas, CPHB, execution cap, contract and initcode size, data-size limits)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        | the Satin gas schedule reads the state-gas and history numbers and the spec configuration reads the caps and the size limits; the rest are read by the limit mechanisms. The numbers are provisional until the economics sign-off |
 | `types.rs`     | transaction, halt reason, error and envelope aliases, kept because Satin adds nothing to them (its halt set is op-revm's)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            | —                                                                                                                                                                                                                                 |
-| `test_utils/`  | `MemoryDatabase`, `ErrorInjectingDatabase`, `BytecodeBuilder`, `GasInspector`, `transact`, the JSON `Scenario` format                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                | `BytecodeBuilder` is extended with EIP-7708 and SLOTNUM                                                                                                                                                                           |
+| `test_utils/`  | `MemoryDatabase`, `ErrorInjectingDatabase`, `BytecodeBuilder`, `GasInspector`, `transact`, the JSON `Scenario` format (one EVM per scenario, as a block runs); the execution-spec gate's neutral configuration (`neutral_cfg`, `neutralize_evm`, over `MegaContext::with_neutral_cfg`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               | `BytecodeBuilder` is extended with EIP-7708 and SLOTNUM                                                                                                                                                                           |
 
 ### How Satin executes today
 
@@ -225,6 +232,16 @@ Every later mechanism plugs into these; a change to one comes back to this layer
   The change that ports a pending test deletes it from `_pending/` in the same commit.
 - Unit tests live next to the code in `#[cfg(test)] mod tests`.
 
+## Test Gates
+
+`REVIEW.md` lists every check a pull request meets; two of them are this repository's own execution gates.
+
+- **The op-revm baseline** (`tests/satin/equivalence.rs`): an ordinary transaction through `MegaEvm` against op-revm on the same configuration, which Satin differs from by its history ledger alone.
+- **The execution-spec gate** (`crates/mega-state-test`, `.github/workflows/exec-spec-satin.yml`): Ethereum's state-test fixtures through `MegaEvm`, on the fixture releases the fork's own runner (`.github/workflows/exec-spec.yml`) uses.
+  - Equivalence mode is the gate: Satin's machinery — handler, frame lifecycle, Host, instruction table — priced as the fixture's fork prices it, through the neutral configuration (`MegaContext::with_neutral_cfg`, `test_utils::{neutral_cfg, neutralize_evm}`), which exists only behind `test-utils`.
+    Every failure must be explained by a deviation in `crates/mega-state-test/src/deviations.rs`, with its rule, its reason and the exact entries it explains, each with the hashes Satin produces, and every listed entry must fail exactly as listed; the executed and skipped counts are pinned in the workflow and equal the fork runner's.
+  - Satin mode is a report: the same fixtures under Satin's own configuration, counted by outcome in the step summary; it never fails the job.
+
 ## Version Control
 
 `satin` is the integration branch of the new engine; pull requests for Satin target `satin`.
@@ -286,6 +303,9 @@ When the agent is requested to implement a new feature or bug fix, it should con
   The agent should always consider accompanying tests or suggest to add additional tests.
 - **Keep the op-revm baseline honest.**
   A change that makes Satin differ from op-revm on purpose must update `tests/satin/equivalence.rs` (or add a case) so the difference is pinned, not silently absorbed.
+- **Keep the execution-spec gate honest.**
+  A change that makes Satin's machinery differ from Ethereum's fixtures on purpose registers a deviation (its rule, its reason, the entries it fails with the hashes Satin produces for them) and regenerates `crates/mega-state-test/DEVIATIONS.md`; a failure that is a bug is fixed, never registered.
+  A price `MegaETH` sets is not a deviation: the neutral configuration takes it out of equivalence mode, and a new pricing dimension extends the neutral configuration rather than the registry.
 - **Add benchmarks for performance-sensitive changes.**
   Changes on the EVM execution hot path must be accompanied by benchmarks.
   This includes new or modified opcode behavior, gas mechanics, system contract interception, resource limit tracking, and block executor pipeline changes.

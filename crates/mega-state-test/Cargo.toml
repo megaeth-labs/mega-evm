@@ -6,10 +6,8 @@ rust-version.workspace = true
 license.workspace = true
 homepage.workspace = true
 repository.workspace = true
-description = "Self-contained EEST-compatible state-test fixtures and runner for mega-evm"
-# The integration tests read fixtures from `bench/replay/fixtures/`, which is
-# outside this crate directory and thus absent from the published package.
-exclude = ["tests/"]
+description = "Execution-spec state-test runner for the mega-evm Satin engine"
+readme = "README.md"
 
 [lints]
 workspace = true
@@ -17,25 +15,24 @@ workspace = true
 [dependencies]
 mega-evm = { workspace = true, features = ["default", "test-utils"] }
 
+# revm
+# `test-types` brings the fork's own state-test fixture types, the ones its runner reads.
+revm = { workspace = true, features = ["std", "test-types", "tracer"] }
+
 # alloy
-alloy-eips = { workspace = true, features = ["serde"] }
-alloy-primitives.workspace = true
-alloy-rlp.workspace = true
-alloy-serde.workspace = true
+alloy-rlp = { workspace = true, features = ["std"] }
+alloy-trie = { workspace = true, features = ["std", "ethereum"] }
 
 # misc
-hash-db.workspace = true
-indicatif.workspace = true
-k256.workspace = true
-plain_hasher.workspace = true
-serde.workspace = true
-serde_json.workspace = true
-thiserror.workspace = true
-triehash.workspace = true
+serde = { workspace = true, features = ["derive", "std"] }
+serde_json = { workspace = true, features = ["std"] }
+thiserror = { workspace = true, features = ["std"] }
 walkdir.workspace = true
 
-# Published as `mega-state-test`; the library keeps the `state_test` import name
-# so the `state-test` CLI and the mega-evme / mega-t8n consumers are unaffected.
+[dev-dependencies]
+tempfile.workspace = true
+
+# Published as `mega-state-test`; the library keeps the `state_test` import name.
 [lib]
 name = "state_test"
 path = "src/lib.rs"
