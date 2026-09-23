@@ -3,15 +3,19 @@
 
 use alloy_consensus::{transaction::Recovered, Signed, TxLegacy};
 use alloy_evm::{block::BlockExecutor, Evm as _};
+use alloy_op_evm::OpTx;
 use alloy_primitives::{address, Address, Bytes, Signature, TxKind, B256, U256};
 use mega_evm::{
-    constants::TX_GAS_LIMIT_CAP, test_utils::BytecodeBuilder, BlockLimits, MegaTxEnvelope,
+    constants::TX_GAS_LIMIT_CAP,
+    test_utils::{op_transaction, zero_fee_l1_block_info, BytecodeBuilder},
+    BlockLimits, MegaContext, MegaEvm, MegaSpecId, MegaTxEnvelope,
 };
 use revm::{
     bytecode::opcode::{CALLDATALOAD, PUSH0, SSTORE},
-    context::BlockEnv,
+    context::{BlockEnv, TxEnv},
     database::State,
-    Database,
+    interpreter::{interpreter::EthInterpreter, Interpreter},
+    Database, Inspector,
 };
 
 use crate::common::{self, executor, CALLER, CHAIN_ID, CONTRACT};
@@ -22,6 +26,12 @@ const CALLER3: Address = address!("0x2000000000000000000000000000000000000033");
 
 /// An account with no code: a call to it adds no state gas.
 const EMPTY: Address = address!("0x3000000000000000000000000000000000000003");
+
+/// Runs [`slot_toggler`].
+const TOGGLER: Address = address!("0x1000000000000000000000000000000000000004");
+
+/// Runs [`reverting_slot_writer`].
+const REVERTER: Address = address!("0x1000000000000000000000000000000000000005");
 
 /// Below the execution cap, where the reservoir is empty and state gas spills onto regular gas.
 const GAS_LIMIT: u64 = 1_000_000;
@@ -40,9 +50,39 @@ fn slot_writer() -> Bytes {
         .build()
 }
 
+/// Code that fills the slot the first calldata word names and empties it again: the first
+/// `SSTORE` charges the slot's state gas, and the second gives it back.
+fn slot_toggler() -> Bytes {
+    BytecodeBuilder::default()
+        .push_number(1_u8)
+        .append(PUSH0)
+        .append(CALLDATALOAD)
+        .append(SSTORE)
+        .append(PUSH0)
+        .append(PUSH0)
+        .append(CALLDATALOAD)
+        .append(SSTORE)
+        .stop()
+        .build()
+}
+
+/// Code that fills the slot the first calldata word names and reverts: the frame's failure rolls
+/// the slot's state gas back.
+fn reverting_slot_writer() -> Bytes {
+    BytecodeBuilder::default()
+        .push_number(1_u8)
+        .append(PUSH0)
+        .append(CALLDATALOAD)
+        .append(SSTORE)
+        .revert()
+        .build()
+}
+
 fn state() -> State<mega_evm::test_utils::MemoryDatabase> {
     let mut db = common::database();
     db.set_account_code(CONTRACT, slot_writer());
+    db.set_account_code(TOGGLER, slot_toggler());
+    db.set_account_code(REVERTER, reverting_slot_writer());
     for caller in [CALLER2, CALLER3] {
         db.set_account_balance(caller, U256::from(1_000_000_000_000_000_u64));
     }
@@ -199,6 +239,93 @@ fn test_the_state_gas_limit_is_checked_again_at_commit() {
     let (_, result) = executor.finish_with_counters().expect("the block finishes");
     assert_eq!(result.receipts().len(), 2);
     assert_eq!(result.gas.state, slot);
+}
+
+/// Reads the transaction's own frame's state gas after every instruction it runs, and keeps the
+/// most it rose above where the frame started.
+#[derive(Default)]
+struct PeakStateGas {
+    start: Option<i64>,
+    peak: i64,
+}
+
+impl<CTX> Inspector<CTX, EthInterpreter> for PeakStateGas {
+    fn step(&mut self, interp: &mut Interpreter<EthInterpreter>, _context: &mut CTX) {
+        self.start.get_or_insert(interp.gas.state_gas_spent());
+    }
+
+    fn step_end(&mut self, interp: &mut Interpreter<EthInterpreter>, _context: &mut CTX) {
+        let start = self.start.expect("a step starts before it ends");
+        self.peak = self.peak.max(interp.gas.state_gas_spent() - start);
+    }
+}
+
+/// The state gas a call from [`CALLER2`] to `to` carrying `input` draws partway through, on an EVM
+/// of its own: the most its frame's state gas rose while it ran. The transaction ends with none.
+fn state_gas_drawn_partway(to: Address, input: Bytes) -> u64 {
+    let ctx = MegaContext::new(state(), MegaSpecId::SATIN)
+        .with_block(BlockEnv { gas_limit: GAS_LIMIT, ..Default::default() })
+        .with_chain(zero_fee_l1_block_info());
+    let mut evm = MegaEvm::new(ctx).with_inspector(PeakStateGas::default());
+    let tx = OpTx(op_transaction(TxEnv {
+        caller: CALLER2,
+        kind: TxKind::Call(to),
+        data: input,
+        gas_limit: GAS_LIMIT,
+        ..Default::default()
+    }));
+    let outcome = evm.execute_transaction(tx).expect("the transaction is valid");
+    assert_eq!(outcome.gas.state, 0, "it ends with no state gas");
+    u64::try_from(evm.inspector().peak).expect("state gas does not fall below where it started")
+}
+
+/// A transaction whose state gas rises while it runs and comes back to zero before it ends adds
+/// none: after the block reached its limit it still fits, whether a write-back gave the slot's
+/// state gas back or its frame's failure rolled it back. The limit reads the state gas a
+/// transaction ends with, not what it drew on the way. Below the execution cap and above it.
+#[test]
+fn test_a_transaction_whose_state_gas_comes_back_to_zero_still_fits() {
+    let slot = one_slot();
+    let slot_word = |slot: u64| Bytes::from(U256::from(slot).to_be_bytes::<32>());
+    assert_eq!(state_gas_drawn_partway(TOGGLER, slot_word(7)), slot, "the write-back's");
+    assert_eq!(state_gas_drawn_partway(REVERTER, slot_word(8)), slot, "the reverted write's");
+
+    for gas_limit in [GAS_LIMIT, ABOVE_CAP] {
+        let mut state = state();
+        let mut env = common::evm_env();
+        env.block_env = BlockEnv { gas_limit: 10_000_000_000, ..env.block_env };
+        let mut executor =
+            common::executor_with_env(&mut state, common::block_ctx(limits(slot)), env);
+        executor.apply_pre_execution_changes().expect("the block starts");
+
+        executor.execute_transaction(&writes(0, 1, gas_limit)).expect("the block has room");
+        executor.execute_transaction(&writes(1, 2, gas_limit)).expect("the crossing is packed");
+        assert_eq!(executor.gas().state, 2 * slot, "the block has reached its limit");
+
+        for (caller, to, slot_index) in [(CALLER2, TOGGLER, 7), (CALLER3, REVERTER, 8)] {
+            let outcome = executor
+                .run_transaction(&tx_from(caller, 0, to, slot_word(slot_index), gas_limit))
+                .expect("a transaction that ends with no state gas fits");
+            assert_eq!(outcome.gas.state, 0, "{to} at {gas_limit}");
+            if gas_limit > TX_GAS_LIMIT_CAP {
+                assert_eq!(
+                    outcome.gas.reservoir_remaining,
+                    gas_limit - TX_GAS_LIMIT_CAP - outcome.gas.history,
+                    "{to} at {gas_limit}: what the reservoir paid for the slot came back to it",
+                );
+            }
+            executor.commit_transaction_outcome(outcome).expect("and it commits");
+        }
+
+        let err = executor
+            .execute_transaction(&writes(2, 3, gas_limit))
+            .expect_err("one that ends with state gas is still refused");
+        assert!(format!("{err}").contains("Block state gas limit reached"), "{err}");
+
+        let (_, result) = executor.finish_with_counters().expect("the block finishes");
+        assert_eq!(result.receipts().len(), 4);
+        assert_eq!(result.gas.state, 2 * slot);
+    }
 }
 
 /// alloy-evm's commit cannot refuse, and its contract is that an outcome commits before the next
