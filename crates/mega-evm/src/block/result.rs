@@ -148,7 +148,8 @@ pub enum MegaBlockLimitExceededError {
     /// The block's transactions have reached their state gas, and this transaction adds more.
     ///
     /// Only a transaction's own execution tells whether it adds state gas, so this one was
-    /// executed before it was refused; a transaction that adds none still fits the block.
+    /// executed before it was refused; a transaction that adds none still fits the block, and a
+    /// deposit is never refused this way.
     StateGasLimit {
         /// The state gas the block has spent.
         block_used: u64,

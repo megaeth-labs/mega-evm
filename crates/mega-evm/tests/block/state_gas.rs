@@ -134,6 +134,39 @@ fn test_the_crossing_transaction_is_packed_and_the_next_that_adds_state_is_skipp
     assert_eq!(result.gas.state, 2 * slot, "the skipped transaction counted nothing");
 }
 
+/// A deposit is not a transaction the builder chose: the block derived from L1 must include it,
+/// so the state-gas limit never refuses one, however far past it the block is. It still counts,
+/// so an ordinary transaction after the deposits finds the room they used.
+#[test]
+fn test_a_deposit_is_never_refused_by_the_state_gas_limit() {
+    let slot = one_slot();
+    let mut state = state();
+    let mut executor = executor(&mut state, common::block_ctx(limits(slot)));
+    executor.apply_pre_execution_changes().expect("the block starts");
+
+    let slot_word = |slot: u64| Bytes::from(U256::from(slot).to_be_bytes::<32>());
+    let deposit = |slot: u64| common::deposit_tx_to(CONTRACT, slot_word(slot), GAS_LIMIT);
+
+    executor.execute_transaction(&deposit(1)).expect("the block has room");
+    executor.execute_transaction(&deposit(2)).expect("the deposit that crosses the limit");
+    assert_eq!(executor.gas().state, 2 * slot, "two deposits crossed the limit between them");
+
+    executor
+        .execute_transaction(&deposit(3))
+        .expect("a deposit is included whatever the block's state gas");
+    assert_eq!(executor.gas().state, 3 * slot, "and it counts");
+
+    let err = executor
+        .execute_transaction(&tx_from(CALLER2, 0, CONTRACT, slot_word(4), GAS_LIMIT))
+        .expect_err("an ordinary transaction that adds state gas finds no room left");
+    assert!(format!("{err}").contains("Block state gas limit reached"), "{err}");
+    assert!(format!("{err}").contains(&format!("block_used={}", 3 * slot)), "{err}");
+
+    let (_, result) = executor.finish_with_counters().expect("the block finishes");
+    assert_eq!(result.receipts().len(), 3);
+    assert_eq!(result.gas.state, 3 * slot);
+}
+
 /// A builder that executes candidates against the same pre-state and then picks among them gets
 /// the same rule at commit: the block's state gas may have been reached while a candidate waited.
 #[test]

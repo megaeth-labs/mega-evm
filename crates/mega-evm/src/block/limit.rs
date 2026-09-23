@@ -23,6 +23,14 @@
 //!   reached its limit refuses a later transaction only if it adds state gas. One that adds none
 //!   still fits, and only its own execution can tell which it is.
 //!
+//! # Deposits
+//!
+//! A deposit is an L1 message the chain cannot censor: the block derived from L1 must include it,
+//! and the builder does not choose it. So a deposit is exempt from both data-availability limits
+//! and does not count towards the block's. The state-gas limit is a packing budget for the
+//! transactions the builder chooses, so it never refuses a deposit either. A deposit still counts
+//! towards the state ledger, so the transactions after it find the room it used.
+//!
 //! # Which dimensions are enforced
 //!
 //! Of the three gas ledgers the block counts ([`BlockGasCounters`]), execution and state have a
@@ -68,7 +76,8 @@ pub struct BlockLimits {
     /// The most execution gas the block's transactions may spend together.
     pub block_execution_gas_limit: u64,
     /// The most state gas the block's transactions may spend together. The transaction that
-    /// reaches it is packed; after it, only a transaction that adds no state gas is.
+    /// reaches it is packed; after it, only a transaction that adds no state gas is, or a deposit,
+    /// which it never refuses and which counts towards it.
     pub block_state_gas_limit: u64,
     /// The most data-size bytes the block's transactions may keep together.
     pub block_txs_data_limit: u64,
@@ -189,7 +198,8 @@ pub struct BlockUsage {
     pub da_size: u64,
     /// The transaction's data-availability footprint, in gas.
     pub da_footprint: u64,
-    /// Whether the transaction is a deposit, which the data-availability dimensions exempt.
+    /// Whether the transaction is a deposit, which the data-availability dimensions exempt and the
+    /// state-gas limit never refuses.
     pub is_deposit: bool,
 }
 
@@ -364,18 +374,24 @@ impl BlockLimiter {
     /// only such a transaction: whether one does is known only once it has run. The transaction
     /// that reaches the limit is itself packed — the block had not reached it when that
     /// transaction came — so the block overshoots its limit by at most one transaction's state
-    /// gas. Like [`pre_execution_check`](Self::pre_execution_check) it changes nothing.
+    /// gas, besides what deposits add: a deposit is never refused. Like
+    /// [`pre_execution_check`](Self::pre_execution_check) it changes nothing.
     ///
     /// # Errors
     ///
     /// A [`MegaBlockLimitExceededError::StateGasLimit`] when the block has no state gas left and
-    /// the transaction adds some, which a builder answers by trying the next transaction.
+    /// the transaction, not a deposit, adds some, which a builder answers by trying the next
+    /// transaction.
     pub fn post_execution_check(
         &self,
         tx_hash: TxHash,
         usage: &BlockUsage,
     ) -> Result<(), BlockExecutionError> {
-        if usage.gas.state > 0 && self.gas.state >= self.limits.block_state_gas_limit {
+        // A deposit is not the builder's to refuse; it still counts, in `post_execution_update`.
+        if !usage.is_deposit &&
+            usage.gas.state > 0 &&
+            self.gas.state >= self.limits.block_state_gas_limit
+        {
             return Err(invalid_tx(
                 tx_hash,
                 MegaBlockLimitExceededError::StateGasLimit {
@@ -697,6 +713,33 @@ mod tests {
         // One that adds none still fits, before execution and after it.
         assert!(limiter.pre_execution_check(B256::ZERO, 0, 0, 0, false).is_ok());
         assert!(limiter.post_execution_check(B256::ZERO, &adds_state(0)).is_ok());
+    }
+
+    /// A deposit is never refused by the state-gas limit, however far past it the block is, and
+    /// still counts towards it: an ordinary transaction after the deposits finds the room they
+    /// used.
+    #[test]
+    fn test_state_gas_limit_never_refuses_a_deposit_and_counts_it() {
+        let mut limiter =
+            BlockLimiter::new(BlockLimits::no_limits().with_block_state_gas_limit(1_000));
+        let deposit = |state| BlockUsage { is_deposit: true, ..adds_state(state) };
+
+        // Two deposits cross the limit between them.
+        for _ in 0..2 {
+            assert!(limiter.post_execution_check(B256::ZERO, &deposit(600)).is_ok());
+            limiter.post_execution_update(&deposit(600));
+        }
+        assert_eq!(limiter.gas.state, 1_200);
+
+        // A third finds the block past its limit and is still admitted.
+        assert!(limiter.post_execution_check(B256::ZERO, &deposit(600)).is_ok());
+        limiter.post_execution_update(&deposit(600));
+        assert_eq!(limiter.gas.state, 1_800, "every deposit counts");
+
+        let err = limiter
+            .post_execution_check(B256::ZERO, &adds_state(1))
+            .expect_err("the deposits used the room an ordinary transaction would need");
+        assert!(std::format!("{err}").contains("block_used=1800"), "{err}");
     }
 
     /// The state-gas limit is an inclusive bound like every other: a block may spend exactly its
