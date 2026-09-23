@@ -201,6 +201,34 @@ fn test_the_state_gas_limit_is_checked_again_at_commit() {
     assert_eq!(result.gas.state, slot);
 }
 
+/// alloy-evm's commit cannot refuse, and its contract is that an outcome commits before the next
+/// transaction executes. A builder that breaks it — two candidates executed against the same
+/// pre-state, then both committed through the trait — would pack what the checked commit above
+/// refuses. The trait's commit makes the same check in a debug build and trips on it.
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "an outcome the block no longer has room for")]
+fn test_the_trait_commit_trips_on_an_outcome_the_block_has_no_room_for() {
+    let slot = one_slot();
+    let mut state = state();
+    let limits = BlockLimits::no_limits().with_block_state_gas_limit(slot);
+    let mut executor = executor(&mut state, common::block_ctx(limits));
+    executor.apply_pre_execution_changes().expect("the block starts");
+
+    let slot_word = |slot: u64| Bytes::from(U256::from(slot).to_be_bytes::<32>());
+    let first = executor
+        .execute_transaction_without_commit(&writes(0, 1, GAS_LIMIT))
+        .expect("the block has room");
+    let second = executor
+        .execute_transaction_without_commit(&tx_from(CALLER2, 0, CONTRACT, slot_word(2), GAS_LIMIT))
+        .expect("nothing has committed yet");
+    assert!(second.gas.state > 0);
+
+    BlockExecutor::commit_transaction(&mut executor, first);
+    assert_eq!(executor.gas().state, slot, "the block has spent exactly its limit");
+    BlockExecutor::commit_transaction(&mut executor, second);
+}
+
 /// Above the execution cap the reservoir pays the state gas, and the block counts and caps it the
 /// same way: the ledger is the state gas spent, whichever pool paid it.
 #[test]
