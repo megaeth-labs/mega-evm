@@ -8,7 +8,9 @@
 //! history, and taking history out of it afterwards could land below the floor.
 //!
 //! Every case runs below the execution cap, where the reservoir is empty and state and history
-//! spill onto regular gas, and above it, where the reservoir pays them first.
+//! spill onto regular gas, and above it, where the reservoir pays them first; every outcome is held
+//! to the ledger identities, and above the cap to the reservoir's. The cases about the budget
+//! itself run on the side where it binds, and say so.
 
 use alloy_evm::{Evm as _, EvmError, InvalidTxError};
 use alloy_op_evm::OpTx;
@@ -325,6 +327,7 @@ fn test_a_refund_does_not_lower_the_compute_figure() {
         );
         let outcome = execute(db, call(CALLER, CALLEE, U256::ZERO, gas_limit));
         assert!(outcome.result.is_success(), "{:?}", outcome.result);
+        assert_ledgers("a slot written with a refund", gas_limit, &outcome);
         outcome.gas
     };
     for gas_limit in GAS_LIMITS {
@@ -348,7 +351,9 @@ fn test_state_gas_stays_off_the_compute_figure_whatever_it_costs() {
     let destructs = |m: u64, gas_limit: u64| {
         let db = funded().account_code(CALLEE, code.clone()).account_balance(CALLEE, U256::from(5));
         let envs = crowded_account(minimal_envs(), FRESH, m);
-        crate::salt::run(db, envs, call(CALLER, CALLEE, U256::ZERO, gas_limit)).gas
+        let outcome = crate::salt::run(db, envs, call(CALLER, CALLEE, U256::ZERO, gas_limit));
+        assert_ledgers("a SELFDESTRUCT to a new account", gas_limit, &outcome);
+        outcome.gas
     };
     let regular = destructs(1, GAS_LIMITS[0]).regular;
     for gas_limit in GAS_LIMITS {
@@ -384,6 +389,7 @@ fn with_child(rounds: usize, reverts: bool, gas_limit: u64) -> MegaGasUsage {
     let db = funded().account_code(CALLEE, caller).account_code(CHILD, child(rounds, reverts));
     let outcome = execute(db, call(CALLER, CALLEE, U256::ZERO, gas_limit));
     assert!(outcome.result.is_success(), "{:?}", outcome.result);
+    assert_ledgers("a caller and its child", gas_limit, &outcome);
     outcome.gas
 }
 
@@ -419,6 +425,8 @@ fn test_each_transaction_computes_its_own() {
         let first = evm.execute_transaction(call(CALLER, CALLEE, U256::ZERO, gas_limit)).unwrap();
         let second = evm.execute_transaction(call(CALLER, CALLEE, U256::ZERO, gas_limit)).unwrap();
         assert!(first.result.is_success() && second.result.is_success());
+        assert_ledgers("the first transaction", gas_limit, &first);
+        assert_ledgers("the second transaction", gas_limit, &second);
         assert_eq!(first.gas.regular, second.gas.regular);
     }
 }
@@ -456,13 +464,19 @@ fn past_the_cap() -> Bytes {
 
 /// Below the cap the gas limit is the compute budget, to the gas: a transaction whose limit is
 /// exactly what it spends succeeds, and one gas less runs out.
+///
+/// Only below the cap: above it the gas limit is not the budget, the cap is, and running out of
+/// the reservoir spills onto regular gas rather than halting — which the history-byte tests hold
+/// to the ledgers with reservoirs that run out.
 #[test]
 fn test_below_the_cap_the_gas_limit_is_the_compute_budget() {
     let run = |gas_limit: u64| {
-        execute(
+        let outcome = execute(
             funded().account_code(CALLEE, arithmetic(2_000)),
             call(CALLER, CALLEE, U256::ZERO, gas_limit),
-        )
+        );
+        assert_ledgers("the compute budget", gas_limit, &outcome);
+        outcome
     };
     let spent = run(GAS_LIMITS[0]).gas.gas_used;
     let exact = run(spent);
@@ -509,6 +523,8 @@ fn test_computation_past_the_execution_cap_is_an_ordinary_out_of_gas() {
 /// A nested call cannot compute past the cap either. Its callee is forwarded what the cap leaves,
 /// runs out of gas and fails; its caller resumes on the sixty-fourth it kept, and the transaction
 /// computes less than the cap.
+///
+/// Only above the cap: below it the gas limit bounds the callee long before the cap does.
 #[test]
 fn test_a_nested_call_cannot_compute_past_the_cap() {
     let caller = BytecodeBuilder::default()
@@ -523,6 +539,7 @@ fn test_a_nested_call_cannot_compute_past_the_cap() {
     let db = funded().account_code(CALLEE, caller).account_code(CHILD, past_the_cap());
     let outcome = execute(db, call(CALLER, CALLEE, U256::ZERO, GAS_LIMITS[1]));
     assert!(outcome.result.is_success(), "{:?}", outcome.result);
+    assert_ledgers("a nested call past the cap", GAS_LIMITS[1], &outcome);
     assert_eq!(
         outcome.state[&CALLEE].storage[&U256::ZERO].present_value,
         U256::ZERO,
@@ -562,6 +579,7 @@ fn test_intrinsic_gas_past_the_execution_cap_is_rejected_before_it_runs() {
 
     let admitted = execute(funded(), with_addresses(83_327));
     assert!(admitted.result.is_success(), "{:?}", admitted.result);
+    assert_ledgers("an access list just inside the cap", TX_GAS_LIMIT_CAP + 200_000_000, &admitted);
     assert_eq!(admitted.gas.regular, EMPTY_CALL + 2_400 * 83_327);
     assert_eq!(
         rejection(with_addresses(83_328)),
@@ -671,6 +689,7 @@ fn test_a_precompile_in_a_nested_call_is_computed() {
                 .account_code(CHILD, child(gas).stop().build());
             let outcome = execute(db, call(CALLER, CALLEE, U256::ZERO, gas_limit));
             assert!(outcome.result.is_success(), "{:?}", outcome.result);
+            assert_ledgers("a precompile in a nested call", gas_limit, &outcome);
             outcome.gas.regular
         };
         run(100_000) - run(0)
