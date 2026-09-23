@@ -6,6 +6,7 @@ mod contract_size;
 mod data_size;
 mod data_size_counts;
 mod db_error;
+mod detention;
 mod equivalence;
 mod history_bytes;
 mod history_exemption;
