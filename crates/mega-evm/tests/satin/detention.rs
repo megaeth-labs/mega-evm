@@ -22,6 +22,7 @@ use mega_evm::{
 use revm::{
     bytecode::opcode::*,
     context::{result::ExecutionResult, BlockEnv, TxEnv},
+    context_interface::block::BlobExcessGasAndPrice,
     interpreter::{
         interpreter::EthInterpreter, CallInputs, CallOutcome, InstructionResult, Interpreter,
     },
@@ -60,7 +61,12 @@ pub(crate) fn block() -> BlockEnv {
         beneficiary: BENEFICIARY,
         timestamp: U256::from(1_700_000_000),
         gas_limit: 10_000_000_000,
+        basefee: 0,
         prevrandao: Some(B256::repeat_byte(7)),
+        blob_excess_gas_and_price: Some(BlobExcessGasAndPrice {
+            excess_blob_gas: 0,
+            blob_gasprice: 3,
+        }),
         slot_num: 9,
         ..Default::default()
     }
@@ -79,6 +85,7 @@ pub(crate) struct Run {
     pub(crate) outcome: MegaTransactionOutcome,
     pub(crate) limit: Option<u64>,
     pub(crate) accessed: VolatileDataAccess,
+    pub(crate) detains: bool,
 }
 
 pub(crate) fn run_on<INSP>(evm: &mut MegaEvm<MemoryDatabase, INSP>, tx: MegaTransaction) -> Run
@@ -87,7 +94,12 @@ where
 {
     let outcome = evm.execute_transaction(tx).expect("the transaction is valid");
     let detention = evm.ctx().detention();
-    Run { outcome, limit: detention.compute_limit(), accessed: detention.accessed() }
+    Run {
+        outcome,
+        limit: detention.compute_limit(),
+        accessed: detention.accessed(),
+        detains: detention.detains(),
+    }
 }
 
 pub(crate) fn execute(db: MemoryDatabase, tx: MegaTransaction) -> Run {
@@ -505,6 +517,61 @@ fn test_blobhash_is_not_volatile() {
     assert_eq!(run.accessed, VolatileDataAccess::empty());
 }
 
+/// A read answers with the block's own field: the Host marks the read and serves the value it
+/// loaded, whether or not the read caps anything.
+#[test]
+fn test_a_read_answers_with_the_blocks_field() {
+    let reads = [
+        (NUMBER, U256::from(300)),
+        (TIMESTAMP, U256::from(1_700_000_000)),
+        (COINBASE, U256::from_be_slice(BENEFICIARY.as_slice())),
+        (DIFFICULTY, U256::from_be_bytes(B256::repeat_byte(7).0)),
+        (GASLIMIT, U256::from(10_000_000_000_u64)),
+        (BASEFEE, U256::from(1)),
+        (BLOBBASEFEE, U256::from(3)),
+        (SLOTNUM, U256::from(9)),
+    ];
+    let mut code = BytecodeBuilder::default();
+    for (slot, (opcode, _)) in reads.iter().enumerate() {
+        code = code.append(*opcode).push_number(slot as u8).append(SSTORE);
+    }
+    // BLOCKHASH of the parent, and the beneficiary's balance.
+    let code = code
+        .push_number(299_u16)
+        .append(BLOCKHASH)
+        .push_number(8_u8)
+        .append(SSTORE)
+        .push_address(BENEFICIARY)
+        .append(BALANCE)
+        .push_number(9_u8)
+        .append(SSTORE)
+        .stop()
+        .build();
+    let db = MemoryDatabase::default()
+        .account_code(CONTRACT, code)
+        .account_balance(BENEFICIARY, U256::from(42))
+        .account_balance(CALLER, U256::from(1_000_000_000_000_u64));
+    let mut ctx = context(db).with_block(BlockEnv { basefee: 1, ..block() });
+    ctx.modify_chain(|chain| chain.l1_base_fee = U256::ZERO);
+    let tx = OpTx(op_transaction(TxEnv {
+        caller: CALLER,
+        kind: TxKind::Call(CONTRACT),
+        gas_limit: BELOW,
+        gas_price: 1,
+        ..Default::default()
+    }));
+    let run = run_on(&mut MegaEvm::new(ctx), tx);
+    assert!(run.outcome.result.is_success(), "{:?}", run.outcome.result);
+    let storage = &run.outcome.state[&CONTRACT].storage;
+    for (slot, (opcode, value)) in reads.iter().enumerate() {
+        assert_eq!(storage[&U256::from(slot)].present_value, *value, "{opcode:#04x}");
+    }
+    let hash = revm::Database::block_hash(&mut MemoryDatabase::default(), 299).unwrap();
+    assert_eq!(storage[&U256::from(8)].present_value, U256::from_be_bytes(hash.0), "BLOCKHASH");
+    assert_eq!(storage[&U256::from(9)].present_value, U256::from(42), "BALANCE");
+    assert!(run.limit.is_some());
+}
+
 /* ---------- the limit ---------- */
 
 /// A later read lowers the limit only when its own is lower: with equal caps the first read
@@ -573,6 +640,48 @@ fn test_spending_exactly_the_cap_completes() {
         );
         assert_stopped(&run, intrinsic(gas_limit));
     }
+}
+
+/// A value call's stipend is gas nobody paid, so what the callee runs on it is not compute beyond
+/// what its caller's ledger shows: a value-carrying child that reads and spins stops with the
+/// regular ledger at exactly the limit, and so does a transaction carrying value, whose own frame
+/// is given what the transaction has left and no stipend.
+#[test]
+fn test_a_stipend_is_not_compute() {
+    let child = spin(op(BytecodeBuilder::default(), TIMESTAMP));
+    let parent = BytecodeBuilder::default()
+        .append_many([PUSH0, PUSH0, PUSH0, PUSH0])
+        .push_number(1_u8)
+        .push_address(CHILD)
+        .append_many([GAS, CALL, POP, STOP])
+        .build();
+    for gas_limit in TIERS {
+        let db = MemoryDatabase::default()
+            .account_code(CONTRACT, parent.clone())
+            .account_balance(CONTRACT, U256::from(1))
+            .account_code(CHILD, child.clone());
+        let run = execute(db, tx(CALLER, CONTRACT, gas_limit));
+        assert_stopped(&run, intrinsic(gas_limit));
+
+        let db = MemoryDatabase::default()
+            .account_code(CONTRACT, spin(op(BytecodeBuilder::default(), TIMESTAMP)))
+            .account_balance(CALLER, U256::from(1));
+        let mut valued = tx(CALLER, CONTRACT, gas_limit);
+        valued.0.base.value = U256::from(1);
+        let run = execute(db, valued);
+        let limit = assert_stopped(&run, intrinsic_of_a_value_call(gas_limit));
+        assert_eq!(limit, CAP + 2, "TIMESTAMP was the first opcode");
+    }
+}
+
+/// The regular gas a call from `CALLER` carrying one wei spends before its first instruction.
+fn intrinsic_of_a_value_call(gas_limit: u64) -> u64 {
+    let db = MemoryDatabase::default()
+        .account_code(CONTRACT, BytecodeBuilder::default().stop().build())
+        .account_balance(CALLER, U256::from(1));
+    let mut valued = tx(CALLER, CONTRACT, gas_limit);
+    valued.0.base.value = U256::from(1);
+    execute(db, valued).outcome.gas.regular
 }
 
 /* ---------- across frames ---------- */
@@ -766,6 +875,38 @@ fn test_a_failed_load_caps_nothing() {
             assert_eq!(run.limit, None, "{callee}");
             assert_eq!(run.accessed, VolatileDataAccess::empty(), "{callee}");
         }
+    }
+}
+
+/// Reads the block's timestamp through the Host before every step, as a tracer might.
+struct ReadsTheTimestamp;
+
+impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for ReadsTheTimestamp {
+    fn step(&mut self, _interp: &mut Interpreter<EthInterpreter>, context: &mut MegaContext<DB>) {
+        let _ = revm::context_interface::Host::timestamp(context);
+    }
+}
+
+/// What an inspector reads through the Host is the inspector's, not the transaction's: it is
+/// neither committed as the next opcode's read nor refused as one. A transaction that loads a
+/// slot and computes past the cap under a tracer reading the timestamp at every step is not
+/// detained, and with volatile-data access off it still loads its slot.
+#[test]
+fn test_an_inspectors_reads_are_not_the_transactions() {
+    let code = work(BytecodeBuilder::default().append_many([PUSH0, SLOAD, POP]), 7_000);
+    let code = code.stop().build();
+    for disabled in [false, true] {
+        let db = MemoryDatabase::default().account_code(CONTRACT, code.clone());
+        let mut ctx = context(db);
+        if disabled {
+            ctx = ctx.with_volatile_access_disabled_from(0);
+        }
+        let mut evm = MegaEvm::new(ctx).with_inspector(ReadsTheTimestamp);
+        let run = run_on(&mut evm, tx(CALLER, CONTRACT, BELOW));
+        assert!(run.outcome.result.is_success(), "disabled {disabled}: {:?}", run.outcome.result);
+        assert_eq!(run.limit, None, "disabled {disabled}");
+        assert_eq!(run.accessed, VolatileDataAccess::empty(), "disabled {disabled}");
+        assert!(run.detains, "a user's transaction is detained when it reads");
     }
 }
 

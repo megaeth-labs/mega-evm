@@ -360,11 +360,13 @@ fn test_the_system_address_is_not_detained() {
     });
     let run = execute(db(), alloy_op_evm::OpTx(system));
     assert!(run.outcome.result.is_success(), "{:?}", run.outcome.result);
+    assert!(!run.detains);
     assert_eq!(run.accessed, VolatileDataAccess::empty());
     assert_eq!(run.limit, None);
     assert!(run.outcome.gas.regular > CAP);
 
     let run = execute(db(), tx(CALLER, ORACLE_CONTRACT_ADDRESS, BELOW));
+    assert!(run.detains);
     assert!(
         matches!(
             run.outcome.limit_exceeded,
