@@ -31,6 +31,20 @@
 //! input; and a caller that cannot pay the charge drops that frame before it fails, because an
 //! interpreter halts on an instruction's error only when no frame is pending.
 //!
+//! Every opcode that can read volatile data — the block-environment opcodes, the account opcodes,
+//! `SLOAD`, the four calls and `SELFDESTRUCT` — runs in a wrapper that settles the reads its Host
+//! calls made (see the `access` module):
+//!
+//! 1. discard any read observed or refused before the opcode;
+//! 2. keep the frame's gas, when the frame's reads are refused;
+//! 3. run the instruction (or the wrapper above it), whose Host calls observe or refuse the reads;
+//! 4. on a refusal, hand the frame back the gas it had before the opcode and revert it with
+//!    `VolatileDataAccessDisabled`; otherwise, once the opcode completed, commit the reads, which
+//!    caps the frame at what the compute limit leaves it.
+//!
+//! `SSTORE` also holds its frame to the compute limit again once it completed: a slot restored to
+//! its original value refills regular gas.
+//!
 //! A wrapper keeps the static gas revm's table charges for its opcode, so the gas schedule is
 //! unchanged.
 //!
@@ -42,15 +56,19 @@
 
 use revm::{
     bytecode::opcode::{
-        CALL, CALLCODE, CREATE, CREATE2, LOG0, LOG1, LOG2, LOG3, LOG4, SELFDESTRUCT, SSTORE,
+        BALANCE, BASEFEE, BLOBBASEFEE, BLOCKHASH, CALL, CALLCODE, COINBASE, CREATE, CREATE2,
+        DELEGATECALL, DIFFICULTY, EXTCODECOPY, EXTCODEHASH, EXTCODESIZE, GASLIMIT, LOG0, LOG1,
+        LOG2, LOG3, LOG4, NUMBER, SELFBALANCE, SELFDESTRUCT, SLOAD, SLOTNUM, SSTORE, STATICCALL,
+        TIMESTAMP,
     },
+    context_interface::Host,
     handler::instructions::EthInstructions,
     interpreter::{
         enable_amsterdam_opcodes, instruction_table,
-        instructions::{contract, gas_table_spec, host},
+        instructions::{block_info, contract, gas_table_spec, host},
         interpreter::EthInterpreter,
         interpreter_types::LoopControl,
-        FrameInput, Instruction, InstructionContext, InstructionExecResult, InstructionResult,
+        FrameInput, Gas, Instruction, InstructionContext, InstructionExecResult, InstructionResult,
         Interpreter, InterpreterAction,
     },
     primitives::hardfork::SpecId,
@@ -58,8 +76,8 @@ use revm::{
 };
 
 use crate::{
-    history_gas, limit::HistoryBytes, write_record_history_gas, ExternalEnvTypes, LimitCheck,
-    MegaContext,
+    history_gas, limit::HistoryBytes, volatile_data_access_disabled_revert_data,
+    write_record_history_gas, ExternalEnvTypes, LimitCheck, MegaContext, VolatileDataAccess,
 };
 
 use super::MegaInstructions;
@@ -70,15 +88,16 @@ type Ctx<'a, DB, ExtEnvs> = InstructionContext<'a, MegaContext<DB, ExtEnvs>, Eth
 /// An instruction of the Satin engine.
 type InstructionFn<DB, ExtEnvs> = fn(Ctx<'_, DB, ExtEnvs>) -> InstructionExecResult;
 
-/// The Satin instruction table: revm's for the base spec, with the Amsterdam opcodes activated
-/// and `SSTORE`, `LOG0`..`LOG4` and `SELFDESTRUCT` wrapped.
+/// The Satin instruction table: revm's for the base spec, with the Amsterdam opcodes activated,
+/// the opcodes that write state the limits count wrapped, and the opcodes that can read volatile
+/// data wrapped.
 pub(crate) fn mega_instructions<DB: Database, ExtEnvs: ExternalEnvTypes>(
     spec: SpecId,
 ) -> MegaInstructions<DB, ExtEnvs> {
     let mut table = instruction_table();
     enable_amsterdam_opcodes(&mut table);
     let mut instructions = EthInstructions::new(table, gas_table_spec(spec), spec);
-    let wrappers: [(u8, InstructionFn<DB, ExtEnvs>); 11] = [
+    let wrappers: [(u8, InstructionFn<DB, ExtEnvs>); 28] = [
         (SSTORE, sstore::<DB, ExtEnvs>),
         (LOG0, log::<0, DB, ExtEnvs>),
         (LOG1, log::<1, DB, ExtEnvs>),
@@ -88,8 +107,25 @@ pub(crate) fn mega_instructions<DB: Database, ExtEnvs: ExternalEnvTypes>(
         (SELFDESTRUCT, selfdestruct::<DB, ExtEnvs>),
         (CALL, call::<CALL, DB, ExtEnvs>),
         (CALLCODE, call::<CALLCODE, DB, ExtEnvs>),
+        (DELEGATECALL, volatile_call::<DELEGATECALL, DB, ExtEnvs>),
+        (STATICCALL, volatile_call::<STATICCALL, DB, ExtEnvs>),
         (CREATE, create::<false, DB, ExtEnvs>),
         (CREATE2, create::<true, DB, ExtEnvs>),
+        (COINBASE, coinbase::<DB, ExtEnvs>),
+        (TIMESTAMP, timestamp::<DB, ExtEnvs>),
+        (NUMBER, number::<DB, ExtEnvs>),
+        (DIFFICULTY, difficulty::<DB, ExtEnvs>),
+        (GASLIMIT, gaslimit::<DB, ExtEnvs>),
+        (BASEFEE, basefee::<DB, ExtEnvs>),
+        (BLOBBASEFEE, blobbasefee::<DB, ExtEnvs>),
+        (SLOTNUM, slotnum::<DB, ExtEnvs>),
+        (BLOCKHASH, blockhash::<DB, ExtEnvs>),
+        (BALANCE, balance::<DB, ExtEnvs>),
+        (SELFBALANCE, selfbalance::<DB, ExtEnvs>),
+        (EXTCODESIZE, extcodesize::<DB, ExtEnvs>),
+        (EXTCODECOPY, extcodecopy::<DB, ExtEnvs>),
+        (EXTCODEHASH, extcodehash::<DB, ExtEnvs>),
+        (SLOAD, sload::<DB, ExtEnvs>),
     ];
     for (opcode, wrapper) in wrappers {
         let static_gas = instructions.gas_table()[opcode as usize];
@@ -193,11 +229,21 @@ fn stop_frame(
     result
 }
 
-/// `SSTORE`, committing the slot's write record.
+/// `SSTORE`, committing the slot's write record, then holding the frame to the compute limit
+/// again: a slot restored to its original value refills the state and history gas that spilled
+/// onto regular gas, and the spill may predate the limit.
 fn sstore<DB: Database, ExtEnvs: ExternalEnvTypes>(
     context: Ctx<'_, DB, ExtEnvs>,
 ) -> InstructionExecResult {
-    commit_after::<false, _, _>(context, host::sstore)
+    let InstructionContext { interpreter, host } = context;
+    let result = commit_after::<false, _, _>(
+        InstructionContext { interpreter: &mut *interpreter, host: &mut *host },
+        host::sstore,
+    );
+    // Only a restore refills, and a restore takes a record back rather than adding one, so it
+    // never crosses a limit: no stop's result is pending when the frame is capped again.
+    host.detention.recap(&mut interpreter.gas, interpreter.input.depth);
+    result
 }
 
 /// `LOG0`..`LOG4`, committing the log's bytes.
@@ -207,11 +253,12 @@ fn log<const N: usize, DB: Database, ExtEnvs: ExternalEnvTypes>(
     commit_after::<true, _, _>(context, host::log::<N, MegaContext<DB, ExtEnvs>>)
 }
 
-/// `SELFDESTRUCT`, committing the beneficiary's write record.
+/// `SELFDESTRUCT`, committing the beneficiary's write record and the read of the block
+/// beneficiary's account when it is either end.
 fn selfdestruct<DB: Database, ExtEnvs: ExternalEnvTypes>(
     context: Ctx<'_, DB, ExtEnvs>,
 ) -> InstructionExecResult {
-    commit_after::<false, _, _>(context, host::selfdestruct)
+    read_volatile(context, |context| commit_after::<false, _, _>(context, host::selfdestruct))
 }
 
 /// Runs `inner` and charges the frame the history of the write records the frame `inner` starts
@@ -291,15 +338,25 @@ fn inherit_reservoir(interpreter: &mut Interpreter<EthInterpreter>) {
     }
 }
 
-/// `CALL` and `CALLCODE`, charging the caller for the records a value transfer writes.
+/// `CALL` and `CALLCODE`, charging the caller for the records a value transfer writes and
+/// committing the read of the block beneficiary's account when the callee, or the EIP-7702
+/// delegate it runs, is the beneficiary.
 ///
 /// `CALLCODE` runs the callee's code in the caller's own account, so the two records of a `CALL`
-/// — the sender's and the recipient's — are one here. `DELEGATECALL` and `STATICCALL` carry no
-/// value and write nothing, so they run revm's instruction unwrapped.
+/// — the sender's and the recipient's — are one here.
 fn call<const KIND: u8, DB: Database, ExtEnvs: ExternalEnvTypes>(
     context: Ctx<'_, DB, ExtEnvs>,
 ) -> InstructionExecResult {
-    charge_frame_start(context, contract::call::<KIND, _, _>)
+    read_volatile(context, |context| charge_frame_start(context, contract::call::<KIND, _, _>))
+}
+
+/// `DELEGATECALL` and `STATICCALL`, committing the read of the block beneficiary's account when
+/// the callee, or the EIP-7702 delegate it runs, is the beneficiary. They carry no value and write
+/// nothing, so no record is charged.
+fn volatile_call<const KIND: u8, DB: Database, ExtEnvs: ExternalEnvTypes>(
+    context: Ctx<'_, DB, ExtEnvs>,
+) -> InstructionExecResult {
+    read_volatile(context, contract::call::<KIND, _, _>)
 }
 
 /// `CREATE` and `CREATE2`, charging the creator for the created account's record and for its own
@@ -308,6 +365,159 @@ fn create<const IS_CREATE2: bool, DB: Database, ExtEnvs: ExternalEnvTypes>(
     context: Ctx<'_, DB, ExtEnvs>,
 ) -> InstructionExecResult {
     charge_frame_start(context, contract::create::<IS_CREATE2, _, _>)
+}
+
+/// Runs `inner` and settles the reads of volatile data its Host calls made: a refused read
+/// reverts the frame with `VolatileDataAccessDisabled`, and a read the opcode completed is
+/// committed, capping the frame at what the compute limit leaves it.
+///
+/// A refusal hands the frame back the gas it had when the wrapper started, which is after the
+/// interpreter charged the opcode's static gas: the Host refuses before it loads anything, but an
+/// opcode may charge part of its dynamic gas before its load (a copy's memory, a call's value
+/// transfer), and none of that is owed for a read that did not happen.
+///
+/// A read the opcode did not complete — the opcode failed after the load — is dropped: it reached
+/// no computation, and the frame is failing anyway.
+#[inline(always)]
+fn read_volatile<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    context: Ctx<'_, DB, ExtEnvs>,
+    inner: impl FnOnce(Ctx<'_, DB, ExtEnvs>) -> InstructionExecResult,
+) -> InstructionExecResult {
+    let InstructionContext { interpreter, host } = context;
+    host.detention.discard_stale_reads();
+    let gas = host.detention.is_refusing().then_some(interpreter.gas);
+    let result = inner(InstructionContext { interpreter: &mut *interpreter, host: &mut *host });
+    if !host.detention.has_reads() {
+        return result;
+    }
+    settle_reads(interpreter, host, result, gas)
+}
+
+/// The slow half of [`read_volatile`]: the Host observed or refused a read.
+#[inline(never)]
+fn settle_reads<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    interpreter: &mut Interpreter<EthInterpreter>,
+    host: &mut MegaContext<DB, ExtEnvs>,
+    result: InstructionExecResult,
+    gas: Option<Gas>,
+) -> InstructionExecResult {
+    let observed = host.detention.take_observed();
+    if let Some(refused) = host.detention.take_refused() {
+        return Err(refuse(interpreter, refused, gas));
+    }
+    let completed = match result {
+        Ok(()) => true,
+        Err(result) => {
+            result.is_ok() ||
+                matches!(interpreter.bytecode.action(), Some(InterpreterAction::NewFrame(_)))
+        }
+    };
+    if !completed {
+        return result;
+    }
+    // A completed opcode leaves no result pending: a `SELFDESTRUCT`'s is built from the frame's
+    // gas once the wrapper returned, and a stop fails the opcode.
+    let forwarded = match interpreter.bytecode.action() {
+        Some(InterpreterAction::NewFrame(input)) => {
+            forwarded_gas(input, host.gas_params().call_stipend())
+        }
+        _ => 0,
+    };
+    let depth = interpreter.input.depth;
+    host.detention.commit_reads(observed, &mut interpreter.gas, depth, forwarded);
+    // A frame the opcode is about to start inherits the reservoir the cap moved gas into.
+    inherit_reservoir(interpreter);
+    result
+}
+
+/// Reverts the running frame with `VolatileDataAccessDisabled` for the read `refused`, on the gas
+/// it had before the opcode (`gas`, when the wrapper kept it).
+#[cold]
+#[inline(never)]
+fn refuse(
+    interpreter: &mut Interpreter<EthInterpreter>,
+    refused: VolatileDataAccess,
+    gas: Option<Gas>,
+) -> InstructionResult {
+    // The Host refuses a load before the opcode builds a frame, so no action is pending.
+    if let Some(gas) = gas {
+        interpreter.gas = gas;
+    }
+    let result = InstructionResult::Revert;
+    interpreter.bytecode.set_action(InterpreterAction::new_return(
+        result,
+        volatile_data_access_disabled_revert_data(refused),
+        interpreter.gas,
+    ));
+    result
+}
+
+/// The regular gas the running frame forwarded to the frame `input` starts: the frame's limit,
+/// less a value call's stipend, which the caller does not pay.
+fn forwarded_gas(input: &FrameInput, call_stipend: u64) -> u64 {
+    match input {
+        FrameInput::Call(inputs) => {
+            inputs.gas_limit.saturating_sub(minted_gas(input, call_stipend))
+        }
+        FrameInput::Create(inputs) => inputs.gas_limit(),
+        FrameInput::Empty => 0,
+    }
+}
+
+/// The regular gas the frame `input` starts is given beyond what its caller paid: the stipend of
+/// a call that transfers value.
+pub(crate) fn minted_gas(input: &FrameInput, call_stipend: u64) -> u64 {
+    match input {
+        FrameInput::Call(inputs) if inputs.transfers_value() => call_stipend,
+        _ => 0,
+    }
+}
+
+/// Defines an opcode that reads a block-environment field, as revm's instruction in
+/// [`read_volatile`].
+macro_rules! block_env_read {
+    ($($name:ident => $inner:path, $opcode:literal;)*) => {$(
+        #[doc = concat!("`", $opcode, "`, committing the read of the field.")]
+        fn $name<DB: Database, ExtEnvs: ExternalEnvTypes>(
+            context: Ctx<'_, DB, ExtEnvs>,
+        ) -> InstructionExecResult {
+            read_volatile(context, $inner)
+        }
+    )*};
+}
+
+block_env_read! {
+    coinbase => block_info::coinbase, "COINBASE";
+    timestamp => block_info::timestamp, "TIMESTAMP";
+    number => block_info::block_number, "NUMBER";
+    difficulty => block_info::difficulty, "PREVRANDAO";
+    gaslimit => block_info::gaslimit, "GASLIMIT";
+    basefee => block_info::basefee, "BASEFEE";
+    blobbasefee => block_info::blob_basefee, "BLOBBASEFEE";
+    slotnum => block_info::slot_num_enabled, "SLOTNUM";
+    blockhash => host::blockhash, "BLOCKHASH";
+}
+
+/// Defines an opcode that loads an account or a slot, as revm's instruction in
+/// [`read_volatile`].
+macro_rules! state_read {
+    ($($name:ident => $inner:path, $opcode:literal, $what:literal;)*) => {$(
+        #[doc = concat!("`", $opcode, "`, committing the read of ", $what, ".")]
+        fn $name<DB: Database, ExtEnvs: ExternalEnvTypes>(
+            context: Ctx<'_, DB, ExtEnvs>,
+        ) -> InstructionExecResult {
+            read_volatile(context, $inner)
+        }
+    )*};
+}
+
+state_read! {
+    balance => host::balance, "BALANCE", "the block beneficiary's account";
+    selfbalance => host::selfbalance, "SELFBALANCE", "the block beneficiary's account";
+    extcodesize => host::extcodesize, "EXTCODESIZE", "the block beneficiary's account";
+    extcodecopy => host::extcodecopy, "EXTCODECOPY", "the block beneficiary's account";
+    extcodehash => host::extcodehash, "EXTCODEHASH", "the block beneficiary's account";
+    sload => host::sload, "SLOAD", "the Oracle's storage";
 }
 
 #[cfg(test)]

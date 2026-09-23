@@ -45,12 +45,15 @@ pub const VOLATILE_DATA_ACCESS_DISABLED_SELECTOR: [u8; 4] =
 ///
 /// # What the three methods do today
 ///
-/// The switch itself belongs to detention, which brings the tracker that remembers a frame's
-/// answer and the volatile reads that consult it. Until then the interceptor is the dispatch
-/// and the value policy: `disableVolatileDataAccess` and `enableVolatileDataAccess` succeed and
-/// change nothing, and `isVolatileDataAccessDisabled` answers `false`, which is what the common
-/// execution layer knows — no frame has ever switched access off. `DisabledByParent()`, the
-/// answer to a frame that re-enables what a frame above it disabled, is the tracker's to give.
+/// The switch is gas detention's: [`Detention`](crate::Detention) holds it, the Host consults it
+/// before every volatile load, and a refused read reverts its frame with
+/// `VolatileDataAccessDisabled`. The interceptor does not steer it yet — that is the control
+/// contracts' semantics, which land on their own. Until then the interceptor is the dispatch and
+/// the value policy: `disableVolatileDataAccess` and `enableVolatileDataAccess` succeed and change
+/// nothing, and `isVolatileDataAccessDisabled` answers `false`, which is what the switch holds
+/// when no call steered it. `DisabledByParent()`, the answer to a frame that re-enables what a
+/// frame above it disabled, is what [`Detention::enable_access`](crate::Detention::enable_access)
+/// refuses.
 ///
 /// All three take no value: they read or steer execution, and the contract holds no balance.
 pub(crate) fn intercept<DB: Database, ExtEnvs: ExternalEnvTypes>(

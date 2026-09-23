@@ -46,11 +46,13 @@ use revm::{
 };
 
 use crate::{
-    evm::{history::transaction_body_bytes, inspector::frame_end_checked},
+    evm::{
+        history::transaction_body_bytes, inspector::frame_end_checked, instructions::minted_gas,
+    },
     history_gas, synthetic_frame_result,
     system::{is_deposit_like_transaction, MEGA_SYSTEM_ADDRESS},
-    write_record_history_gas, ExternalEnvTypes, JournalInspectTr, LimitCheck, MegaContext, MegaEvm,
-    MegaInstructions,
+    write_record_history_gas, ExternalEnvTypes, JournalInspectTr, LimitCheck, LimitKind,
+    MegaContext, MegaEvm, MegaInstructions, VolatileDataAccess,
 };
 
 /// The Satin handler.
@@ -455,6 +457,9 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
     /// Runs the frame on top of the stack, unless it has a stop to return: the latched one, or
     /// its own when a failed creation put it over its budget. Then the frame returns the stop
     /// without running another instruction (see [`before_frame_run`]).
+    ///
+    /// Gas detention holds the frame to the compute limit before it runs, and settles what it
+    /// withheld once the frame suspends on a child or returns (see [`after_frame_run`]).
     #[inline]
     fn frame_run(
         &mut self,
@@ -472,7 +477,9 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
         };
         // Before `return_create` commits a successful creation. See `on_create_return`.
         let action = meter_deployed_code(ctx, frame, action);
-        frame.process_next_action(ctx, action).inspect(|next| {
+        let mut next = frame.process_next_action(ctx, action);
+        after_frame_run(ctx, frame, &mut next);
+        next.inspect(|next| {
             if next.is_result() {
                 frame.set_finished(true);
             }
@@ -608,6 +615,7 @@ where
         // The inspected path commits a creation through the same `return_create`.
         let action = meter_deployed_code(ctx, frame, action);
         let mut next = frame.process_next_action(ctx, action);
+        after_frame_run(ctx, frame, &mut next);
         if let Ok(ItemOrResult::Result(result)) = &mut next {
             frame_end_checked(ctx, inspector, &frame.input, result);
             frame.set_finished(true);
@@ -656,17 +664,62 @@ fn deposits(cfg: &impl Cfg, code: &[u8]) -> bool {
 /// latter. Under a latch, the child that crossed the limit reverted, and its caller must not
 /// resume. Without one, the child was a failed creation whose nonce record put its creator over
 /// its budget, and the creator reverts alone.
+///
+/// Either way gas detention sees the frame first: a frame's first run adds its caller's compute
+/// to the transaction's, a resume takes it back, and the frame is held to what the compute limit
+/// leaves it — which is how a child's read of volatile data caps every caller it returns into.
 #[inline]
 fn before_frame_run<DB: Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &mut MegaContext<DB, ExtEnvs>,
-    frame: &EthFrame<EthInterpreter>,
+    frame: &mut EthFrame<EthInterpreter>,
 ) -> Option<InterpreterAction> {
+    // The transaction's own frame is given what the transaction has left, stipend or not.
+    let minted = if frame.depth == 0 {
+        0
+    } else {
+        minted_gas(&frame.input, ctx.gas_params().call_stipend())
+    };
+    ctx.detention.on_frame_run(&mut frame.interpreter.gas, frame.depth, minted);
     let stop = ctx.additional_limit.stop_before_run()?;
     Some(InterpreterAction::new_return(
         InstructionResult::Revert,
         stop.revert_data(),
         frame.interpreter.gas,
     ))
+}
+
+/// Settles gas detention once the frame ran: a frame that suspends on a child keeps its compute
+/// for the child's start to add to the transaction's; a frame that returns gets the regular gas
+/// detention withheld from it back into its result.
+///
+/// A frame that ran out of gas while detention withheld some of it crossed the compute limit
+/// rather than its own gas: its halt becomes the transaction-level stop, a revert carrying
+/// `MegaLimitExceeded` (kind: compute), and the transaction is latched, so no caller resumes.
+/// The withheld gas goes back with the revert, to the caller and in the end to the sender.
+#[inline]
+fn after_frame_run<DB: Database, ExtEnvs: ExternalEnvTypes, E>(
+    ctx: &mut MegaContext<DB, ExtEnvs>,
+    frame: &EthFrame<EthInterpreter>,
+    next: &mut Result<FrameInitOrResult<EthFrame<EthInterpreter>>, E>,
+) {
+    match next {
+        Ok(ItemOrResult::Item(_)) => {
+            ctx.detention.on_frame_suspend(&frame.interpreter.gas, frame.depth);
+        }
+        Ok(ItemOrResult::Result(result)) => {
+            let instruction_result = result.instruction_result();
+            let Some((limit, compute)) =
+                ctx.detention.on_frame_end(instruction_result, result.gas_mut(), frame.depth)
+            else {
+                return;
+            };
+            let stop = ctx.additional_limit.latch(LimitKind::ComputeGas, limit, compute);
+            let result = result.interpreter_result_mut();
+            result.result = InstructionResult::Revert;
+            result.output = stop.revert_data();
+        }
+        Err(_) => {}
+    }
 }
 
 /// The result of a frame a limit stopped before it ran: a revert with the stop's
@@ -875,7 +928,14 @@ fn record_applied_authorities<DB: Database, ExtEnvs: ExternalEnvTypes>(
     let applied = authorities.len() as u64;
     let check =
         ctx.additional_limit.record_applied_authorities(caller, applied, target_is_authority);
-    AppliedAuthorities { check, applied: if check.exceeded_limit() { 0 } else { applied } }
+    if check.exceeded_limit() {
+        return AppliedAuthorities { check, applied: 0 };
+    }
+    // An applied authority that is the block beneficiary wrote the beneficiary's account.
+    if authorities.binary_search(&ctx.block().beneficiary).is_ok() {
+        ctx.detention.mark_before_execution(VolatileDataAccess::BENEFICIARY_BALANCE);
+    }
+    AppliedAuthorities { check, applied }
 }
 
 /// What [`record_applied_authorities`] found: the verdict of the limit check, and how many
