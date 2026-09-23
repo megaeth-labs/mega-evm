@@ -17,6 +17,11 @@
 //!   result, 200 times.
 //! - `system_address_misses`: the same 200 calls with a selector the contract does not intercept,
 //!   so each pays the dispatch's address match and selector peek and then runs the bytecode.
+//! - `data_size_limit`: 200 fresh slots and 200 two-topic logs in one frame, run under a
+//!   transaction data-size limit equal to exactly what the transaction keeps, so every record is
+//!   checked against a limit it is about to reach (`satin`); the same one byte short of it, so the
+//!   last log crosses and the transaction is stopped (`stopped`); and through op-revm, which has no
+//!   limit to check (`op_revm`).
 //!
 //! Two more run through `MegaEvm` alone, because they price something op-revm has no equivalent
 //! of: `salt_storage_writes` and `salt_new_accounts` each draw one EIP-8037 state gas charge per
@@ -27,8 +32,10 @@
 //!
 //! Every workload is run once before it is measured, and the run is held to what it must draw:
 //! each pays its body's history, the logging one pays for the bytes its logs append and the
-//! calldata one for the bytes it carries. A workload that stopped drawing what it is here to
-//! measure would otherwise still benchmark, and measure the wrong thing.
+//! calldata one for the bytes it carries, and the data-size one keeps exactly the bytes and
+//! records it is sized for, and stops at its last log one byte short of them. A workload that
+//! stopped drawing what it is here to measure would otherwise still benchmark, and measure the
+//! wrong thing.
 #![allow(missing_docs)]
 
 use alloy_op_evm::OpTx;
@@ -39,8 +46,9 @@ use mega_evm::{
     constants::COST_PER_HISTORY_BYTE,
     system::{IMegaAccessControl, ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE},
     test_utils::{op_transaction, zero_fee_l1_block_info, BytecodeBuilder, MemoryDatabase},
-    ExternalEnvs, MegaContext, MegaEvm, MegaSpecId, TestExternalEnvs, LOG_BASE_SIZE,
-    LOG_TOPIC_SIZE, MIN_BUCKET_SIZE, TX_BODY_SIZE,
+    EvmTxRuntimeLimits, ExternalEnvs, LimitCheck, LimitKind, LimitUsage, MegaContext, MegaEvm,
+    MegaSpecId, TestExternalEnvs, LOG_BASE_SIZE, LOG_TOPIC_SIZE, MIN_BUCKET_SIZE, TX_BODY_SIZE,
+    WRITE_RECORD_SIZE,
 };
 use op_revm::{L1BlockInfo, OpEvm, OpSpecId, OpTransaction};
 use revm::{
@@ -62,6 +70,7 @@ const SALT_WRITER: Address = address!("0x000000000000000000000000000000000010000
 const SALT_CALLER: Address = address!("0x0000000000000000000000000000000000100006");
 const INTERCEPTED: Address = address!("0x0000000000000000000000000000000000100007");
 const MISSING: Address = address!("0x0000000000000000000000000000000000100008");
+const LIMITED: Address = address!("0x0000000000000000000000000000000000100009");
 
 /// A selector `MegaAccessControl` intercepts, and one it does not.
 const IS_DISABLED: [u8; 4] = IMegaAccessControl::isVolatileDataAccessDisabledCall::SELECTOR;
@@ -130,6 +139,30 @@ fn logger_code() -> Bytes {
     }
     code.stop().build()
 }
+
+/// Writes `REPEAT` fresh slots, then emits `REPEAT` two-topic logs of 32 bytes: both kinds of
+/// bytes the data-size limit counts, each checked against the limit as it is kept.
+fn limited_code() -> Bytes {
+    let mut code = BytecodeBuilder::default();
+    for slot in 0..REPEAT {
+        code = code.sstore(U256::from(slot), U256::from(1));
+    }
+    for topic in 0..REPEAT {
+        code = code
+            .push_number(topic)
+            .push_number(topic)
+            .push_number(32_u8)
+            .append(PUSH0)
+            .append(LOG2);
+    }
+    code.stop().build()
+}
+
+/// What [`limited_code`] keeps: its body, one write record per slot, and each log's bytes.
+const LIMITED_KEPT: u64 =
+    TX_BODY_SIZE + REPEAT * WRITE_RECORD_SIZE + REPEAT * (LOG_BASE_SIZE + 2 * LOG_TOPIC_SIZE + 32);
+/// Room for `REPEAT` fresh slots and `REPEAT` logs, far below the execution cap.
+const LIMITED_GAS_LIMIT: u64 = 60_000_000;
 
 /// Writes `SALT_REPEAT` fresh slots, each drawing one state gas charge the pricing hook prices.
 fn salt_writer_code() -> Bytes {
@@ -235,6 +268,7 @@ fn bench_transact(c: &mut Criterion) {
         .account_code(SALT_CALLER, salt_caller_code())
         .account_code(INTERCEPTED, system_caller_code(IS_DISABLED))
         .account_code(MISSING, system_caller_code(UNKNOWN_SELECTOR))
+        .account_code(LIMITED, limited_code())
         .account_code(ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE);
     let cfg = mega_context(db.clone()).cfg().clone();
 
@@ -302,6 +336,56 @@ fn bench_transact(c: &mut Criterion) {
             );
         });
     }
+
+    // The data-size arms: one transaction under a limit it exactly reaches and under one a byte
+    // short of it, next to op-revm running it with no limit at all.
+    let limited_tx = call_tx(LIMITED, Bytes::new(), LIMITED_GAS_LIMIT);
+    let limited = |limit| {
+        mega_context(db.clone())
+            .with_tx_runtime_limits(EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(limit))
+    };
+    let at_limit =
+        MegaEvm::new(limited(LIMITED_KEPT)).execute_transaction(OpTx(limited_tx.clone())).unwrap();
+    assert!(at_limit.result.is_success(), "data_size_limit: {:?}", at_limit.result);
+    assert_eq!(
+        at_limit.usage,
+        LimitUsage { data_size: LIMITED_KEPT, write_records: REPEAT },
+        "data_size_limit: the arm must keep every byte and record it is sized for",
+    );
+    let stopped = MegaEvm::new(limited(LIMITED_KEPT - 1))
+        .execute_transaction(OpTx(limited_tx.clone()))
+        .unwrap();
+    assert_eq!(
+        stopped.limit_exceeded,
+        Some(LimitCheck::ExceedsLimit {
+            kind: LimitKind::DataSize,
+            limit: LIMITED_KEPT - 1,
+            used: LIMITED_KEPT,
+            frame_local: false,
+        }),
+        "data_size_limit/stopped: the last log must be the byte that crosses",
+    );
+    for (arm, limit) in [("satin", LIMITED_KEPT), ("stopped", LIMITED_KEPT - 1)] {
+        group.bench_function(format!("data_size_limit/{arm}"), |b| {
+            b.iter_batched(
+                || MegaEvm::new(limited(limit)),
+                |mut evm| evm.transact(OpTx(limited_tx.clone())).unwrap(),
+                BatchSize::SmallInput,
+            );
+        });
+    }
+    group.bench_function("data_size_limit/op_revm", |b| {
+        b.iter_batched(
+            || {
+                let ctx = OpContext::new(db.clone(), OpSpecId::KARST)
+                    .with_cfg(cfg.clone())
+                    .with_chain(zero_fee_l1_block_info());
+                OpEvm::new(ctx, NoOpInspector)
+            },
+            |mut evm| evm.transact(limited_tx.clone()).unwrap(),
+            BatchSize::SmallInput,
+        );
+    });
 
     // The SALT arms: the same transaction against a minimal environment and against one where
     // every bucket is crowded, both through `MegaEvm` — op-revm has nothing to compare to.
