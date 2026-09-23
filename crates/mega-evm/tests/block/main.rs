@@ -4,6 +4,7 @@ mod block_hashes;
 mod common;
 mod counters;
 mod deploy;
+mod deposits;
 mod eips;
 mod factory;
 mod inspector;
