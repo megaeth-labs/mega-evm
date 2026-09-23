@@ -36,7 +36,14 @@ The precompile set is op-revm's Karst set with KZG point evaluation repriced to 
 It is carried as an alloy-evm `PrecompilesMap`, so a node can add or replace an address through `MegaEvmFactory::with_dyn_precompiles_builder`.
 
 The common execution layer is in place: the frame lifecycle the later mechanisms plug into, the count of data-size bytes and write records per frame, the abort protocol that stops a transaction crossing a limit with a revert, and the inspector admission gate.
-No limit is enforced by default; `EvmTxRuntimeLimits` sets a data-size cap and a frame budget to exercise the protocol.
+
+The data-size limit is in place on top of it.
+A transaction is held to a data-size limit, and every frame to a budget: the transaction's own frame gets what its body leaves, and a child 98% of what its parent has left.
+The bytes are the ones history gas prices — the body, every write record, every log, every byte of deployed code — plus an Oracle hint's payload.
+A frame that crosses its budget reverts alone; a transaction that crosses its limit is stopped with a revert carrying `MegaLimitExceeded`, and pays only for what ran.
+A record is checked before its history is charged, so a record the limit rejects costs nothing and the stop is what the transaction reports.
+`EvmTxRuntimeLimits` sets the limits on a bare EVM, where they default to none; a block executor installs its `BlockLimits`, whose default holds each transaction and the block to 12.5 MiB.
+The block's data size is a packing budget: the transaction that crosses it is packed and the next one refused, and a deposit is never refused but still counts.
 `MegaEvm::execute_transaction` returns the result with the gas split into its regular, state and history ledgers, the usage counted and the limit that stopped the transaction, if any.
 
 Block execution is in place too: `MegaBlockExecutor` is alloy-evm's `BlockExecutor` over a `MegaEvm`, with the block rules of the Karst base — a fork's activation block admits only deposit transactions, the data-availability footprint of the block's transactions is held to the block's gas limit and reported as its blob gas, and the L1 block info is read by the first transaction that prices against it, so the block's own L1 info deposit is what the transactions after it are priced with.
@@ -73,7 +80,7 @@ An Oracle hint's payload is data size that is never history, because the bytes g
 A value-transferring `CALL` or `CALLCODE` grants the frame it starts a history allowance of 160 bytes — one three-topic event carrying a word — so a `receive()` hook reached through Solidity's `transfer()` can still emit an event.
 The allowance is not gas: it never enters the frame's `Gas`, only a log's charge may draw on it, and what it pays for is on no ledger, because no pool of the transaction's gas paid it.
 
-The resource limits, gas detention and keyless deployment arrive in later changes.
+The state-growth and KV limits, gas detention and keyless deployment arrive in later changes.
 
 ## Quick start
 

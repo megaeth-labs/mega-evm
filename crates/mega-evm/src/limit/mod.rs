@@ -9,6 +9,40 @@
 //! bytes and write records, on a lane per frame ([`AdditionalLimit`]). The Host stages what it
 //! observes ([`StagedRecord`]) and the opcode commits it once it completed.
 //!
+//! # The data-size limit
+//!
+//! A transaction is held to [`EvmTxRuntimeLimits::tx_data_size_limit`] and every frame to a
+//! budget. The transaction's own frame gets what the transaction has left once its body is
+//! counted, and a child gets [`FRAME_DATA_SHARE_NUMERATOR`] / [`FRAME_DATA_SHARE_DENOMINATOR`] of
+//! what its parent has left, under [`EvmTxRuntimeLimits::frame_data_size_limit`]. A frame that
+//! crosses its budget reverts alone and its caller resumes; a transaction that crosses its limit
+//! is stopped through the latch ([`AdditionalLimit`]).
+//!
+//! What is counted, and when:
+//!
+//! - the body, before any frame; neither a revert nor an out-of-gas takes it back;
+//! - the records of the applied EIP-7702 authorities, before the first frame;
+//! - the records a frame's start makes, when the frame starts;
+//! - a storage write's record, a log's bytes and the record of a `SELFDESTRUCT`'s beneficiary,
+//!   once the opcode completed;
+//! - deployed code, on the creation's lane before the creation is committed, so a crossing leaves
+//!   no code behind;
+//! - an Oracle hint's payload, on the transaction's own lane, before it is forwarded.
+//!
+//! A record is checked against the limits before its history is charged: a record the limit
+//! rejects is not kept, so it is not charged, and the stop is what its frame reports. At a frame
+//! start the order is the other way round — the caller pays for the records at its opcode, before
+//! the frame starts and its records are counted — so a caller that cannot pay runs out of gas
+//! first. A body over the limit latches the transaction before it runs, and then nothing is
+//! charged for what the stop takes back: no authorization is applied, no record made outside a
+//! frame is charged, the first frame's start is charged nothing, and the first frame is answered
+//! with the stop. The account a deposit-like transaction creates for its caller is charged all the
+//! same, because it exists whatever the transaction does.
+//!
+//! Both limits are unlimited unless a caller sets them. A block executor installs the ones its
+//! block limits carry, whose default holds a transaction to
+//! [`TX_DATA_LIMIT`](crate::constants::TX_DATA_LIMIT).
+//!
 //! # The byte table
 //!
 //! The sizes below are what one of those things weighs, and they are the whole byte table of the
