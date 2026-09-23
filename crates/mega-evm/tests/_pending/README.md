@@ -28,7 +28,7 @@ Do not add a `_pending/main.rs`.
 | Owning mechanism | Tests | From `tests/` | From `src/` | Keep | Rewrite | Undecided |
 |---|---:|---:|---:|---:|---:|---:|
 | the common execution layer | 21 | 21 | 0 | 21 | 0 | 0 |
-| detention | 81 | 76 | 5 | 73 | 8 | 0 |
+| detention | 77 | 76 | 1 | 69 | 8 | 0 |
 | the state-growth and KV limits | 56 | 55 | 1 | 0 | 35 | 21 |
 | revert-class aborts | 17 | 17 | 0 | 0 | 17 | 0 |
 | the pre-block system calls | 34 | 22 | 12 | 30 | 4 | 0 |
@@ -37,7 +37,7 @@ Do not add a `_pending/main.rs`.
 | native keyless deployment | 75 | 73 | 2 | 29 | 46 | 0 |
 | inspector support | 4 | 4 | 0 | 1 | 3 | 0 |
 | — (undecided: D57 preload-warm cold charging, D58 98/100 forwarding) | 7 | 7 | 0 | 0 | 0 | 7 |
-| **Total** | **383** | **357** | **26** | **232** | **123** | **28** |
+| **Total** | **379** | **357** | **22** | **228** | **123** | **28** |
 
 ## Tests ported in place
 
@@ -258,6 +258,15 @@ These 47 rows run in a real test target now, adapted to the Satin API and to the
 | `src/limit/data_size.rs` | the data-size limit (2) | 2 | `crates/mega-evm/src/limit/frame_limit.rs`, `crates/mega-evm/src/limit/mod.rs` |
 | **Total** | | **47** | |
 
+## Tests ported by detention
+
+These 4 rows run in a real test target now, adapted to the Satin API and to the relative cap, the revert-class stop and the load-time marking the decisions they cite fix, so the counts above are lower than the inventory's by exactly these rows.
+
+| Legacy file | Owner in the inventory | Tests | Now in |
+|---|---|---:|---|
+| `src/access/volatile.rs` | detention (4) | 4 | `crates/mega-evm/src/access/volatile.rs` |
+| **Total** | | **4** | |
+
 ## Tests retired after the inventory
 
 These 21 rows were parked when the inventory was applied and have since been retired: the mechanism that owns them landed and left them nothing to pin, so no later mechanism will port them.
@@ -353,7 +362,6 @@ Each cell lists `disposition count (mechanism · decision)`.
 | `rex6/keyless_sandbox_hardening.rs` | 3 | rewrite 1 (native keyless deployment · D44 / EIP-6780 native); keep 2 (native keyless deployment · canonical CREATE rules) |
 | `rex6/oracle_hint_volatile_access.rs` | 4 | keep 4 (the oracle and control contracts) |
 | `rex6/sequencer_registry_rotation.rs` | 5 | keep 5 (system contract deployment) |
-| `src/access/volatile.rs` | 4 | keep 4 (detention) |
 | `src/evm/mod.rs` | 3 | keep 3 (the pre-block system calls) |
 | `src/limit/compute_gas.rs` | 1 | rewrite 1 (detention · D40/D48) |
 | `src/limit/kv_update.rs` | 1 | undecided 1 (the state-growth and KV limits · D46) |
