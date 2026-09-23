@@ -574,7 +574,11 @@ impl AdditionalLimit {
                     self.tracker.record_caller(true, charge.caller);
                 }
             }
-            FrameInput::Empty => self.push_empty_frame(),
+            // No frame starts from an empty input: revm's own frame init is `unreachable!` on
+            // one. The state-gas entry pushed above is the lane's, one per lane.
+            FrameInput::Empty => unreachable!(
+                "a frame input always names a call or a creation, as revm's frame init asserts"
+            ),
         }
     }
 
