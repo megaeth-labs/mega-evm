@@ -427,6 +427,30 @@ mod tests {
         assert_eq!(WRITE_RECORD, LimitUsage { data_size: WRITE_RECORD_SIZE, write_records: 1 });
     }
 
+    /// `no_limits` leaves every dimension unlimited: it is what the execution-spec gate installs
+    /// in equivalence mode, and what a bare context runs under. Every field is named, so a limit
+    /// added later cannot be left out of it.
+    #[test]
+    fn test_no_limits_leaves_every_dimension_unlimited() {
+        let EvmTxRuntimeLimits {
+            tx_data_size_limit,
+            frame_data_size_limit,
+            tx_kv_update_limit,
+            frame_kv_update_limit,
+            tx_state_gas_limit,
+        } = EvmTxRuntimeLimits::no_limits();
+        for limit in [
+            tx_data_size_limit,
+            frame_data_size_limit,
+            tx_kv_update_limit,
+            frame_kv_update_limit,
+            tx_state_gas_limit,
+        ] {
+            assert_eq!(limit, u64::MAX);
+        }
+        assert_eq!(EvmTxRuntimeLimits::default(), EvmTxRuntimeLimits::no_limits());
+    }
+
     #[test]
     fn test_limit_usage_arithmetic_saturates() {
         let max = LimitUsage { data_size: u64::MAX, write_records: u64::MAX };
