@@ -29,7 +29,8 @@
 //!   the opcode completed;
 //! - deployed code, on the creation's lane before the creation is committed, so a crossing leaves
 //!   no code behind. Only code revm would deposit counts: code starting with `0xEF` or over the
-//!   code-size limit fails the creation alone and is not counted;
+//!   code-size limit, and a creation that cannot pay for its deposit, fail the creation alone and
+//!   are not counted;
 //! - an Oracle hint's payload, on the transaction's own lane, before it is forwarded.
 //!
 //! A record is checked against the limits before its history is charged: a record the limit
@@ -72,8 +73,10 @@
 //! taken back on a crossing; the first frame's recipient or created account, which the first frame
 //! is then answered with the stop for; a fresh slot and a destruction's new beneficiary, which
 //! stop the frame; and a new account a `CALL`, `CALLCODE`, `CREATE` or `CREATE2` adds, whose frame
-//! is answered with the stop. Deployed code is held before `return_create` charges it, as its
-//! bytes are, so a crossing leaves no code behind. Wherever the state gas and a record cross
+//! is answered with the stop. Deployed code is held just before `return_create` charges it, as its
+//! bytes are, so a crossing leaves no code behind — and only once `return_create` is sure to make
+//! the charge: a creation that cannot pay the regular costs it charges first, or the state gas
+//! itself, runs out of gas there whatever the limit. Wherever the state gas and a record cross
 //! together, the state gas is the stop reported.
 //!
 //! It is a limit on gas, so it counts state at the SALT price: a slot or an account in a bucket

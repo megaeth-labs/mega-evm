@@ -12,7 +12,7 @@ use alloy_evm::Evm;
 use alloy_primitives::{address, keccak256, Address, Bytes, U256};
 use alloy_sol_types::SolError;
 use mega_evm::{
-    constants::MAX_CONTRACT_SIZE,
+    constants::{MAX_CONTRACT_SIZE, TX_GAS_LIMIT_CAP},
     test_utils::{BytecodeBuilder, MemoryDatabase},
     EvmTxRuntimeLimits, LimitCheck, LimitKind, LimitUsage, MegaContext, MegaEvm, MegaHaltReason,
     MegaLimitExceeded, MegaTransactionOutcome, FRAME_DATA_SHARE_DENOMINATOR,
@@ -458,7 +458,9 @@ fn factory_noting_failure(init: &Bytes) -> Bytes {
 /// Only code `return_create` would deposit is counted. Code it refuses — starting with `0xEF`
 /// (EIP-3541), or over the code-size limit — fails the creation alone, as it would with no limit:
 /// the caller catches the failure and the transaction succeeds. The same number of bytes it would
-/// deposit crosses the transaction's limit and stops it.
+/// deposit, with the gas to pay for them, crosses the transaction's limit and stops it: the
+/// reservoir of a gas limit far above the execution cap pays the state gas and the history of a
+/// contract of the largest size.
 ///
 /// `A` has 100 bytes left: the creation's start records the created account and `A`'s nonce, and
 /// the output comes on top. Afterwards `A` writes a slot to note the failure: the transaction
@@ -473,12 +475,12 @@ fn test_code_return_create_refuses_is_not_counted() {
         ("0xEF first", 0xEF, 21, InstructionResult::CreateContractStartingWithEF),
         ("over the code-size limit", 0x00, max + 1, InstructionResult::CreateContractSizeLimit),
     ];
-    let run = |init: &Bytes, inspect: bool| {
+    let run = |init: &Bytes, inspect: bool, gas_limit: u64| {
         let db = funded().account_code(A, factory_noting_failure(init));
         let mut evm = MegaEvm::new(context(db).with_tx_runtime_limits(limits))
             .with_inspector(Probe::default());
         Evm::set_inspector_enabled(&mut evm, inspect);
-        let outcome = evm.execute_transaction(call(CALLER, A, U256::ZERO, GAS_LIMIT)).unwrap();
+        let outcome = evm.execute_transaction(call(CALLER, A, U256::ZERO, gas_limit)).unwrap();
         (outcome, evm.inspector().clone())
     };
     let failure_noted = |outcome: &MegaTransactionOutcome| {
@@ -488,7 +490,7 @@ fn test_code_return_create_refuses_is_not_counted() {
     for (name, first, len, refusal) in cases {
         for inspect in [false, true] {
             let case = format!("{name}, inspect {inspect}");
-            let (refused, probe) = run(&constructor_returning_from(first, len), inspect);
+            let (refused, probe) = run(&constructor_returning_from(first, len), inspect, GAS_LIMIT);
             assert!(refused.result.is_success(), "{case}: {:?}", refused.result);
             assert_eq!(refused.limit_exceeded, None, "{case}: the refused code is not counted");
             assert_eq!(failure_noted(&refused), Some(U256::from(1)), "{case}: A caught it");
@@ -508,8 +510,9 @@ fn test_code_return_create_refuses_is_not_counted() {
                 assert_eq!(probe.creates[0].0, refusal, "{case}: revm's own refusal");
             }
 
-            // The same length, deployable: counted, and it crosses.
-            let (stopped, _) = run(&constructor_returning_from(0x00, len.min(max)), inspect);
+            // The same length, deployable and paid for: counted, and it crosses.
+            let deployable = constructor_returning_from(0x00, len.min(max));
+            let (stopped, _) = run(&deployable, inspect, TX_GAS_LIMIT_CAP + 2_000_000_000);
             assert_eq!(
                 stopped.limit_exceeded,
                 Some(LimitCheck::ExceedsLimit {
