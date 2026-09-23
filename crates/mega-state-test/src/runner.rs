@@ -2,9 +2,10 @@
 //!
 //! [`run`] executes every entry the fixtures under a set of paths define for one [`Fork`], in one
 //! [`Mode`], and reports each: passed, skipped (with the [reason](SkipReason) the reference
-//! runner shares) or failed (with the [kind](FailureKind) of failure and, in equivalence mode,
-//! the [deviation](crate::deviations::Deviation) that explains it, if one does).
-//! [`Report::summary`] counts them, and [`Summary::gate`] is what the gate checks.
+//! runner shares) or failed (with the [kind](FailureKind) of failure, the hashes it
+//! [produced](Produced) when it failed on them and, in equivalence mode, the
+//! [deviation](crate::deviations::Deviation) that explains it, if one does).
+//! [`Report::summary`] counts them, and [`Report::gate`] is what the gate checks.
 //!
 //! A test is judged the way the reference runner judges it — the post-state root and the logs
 //! hash for a transaction that executes, the exception for one that must not — and more strictly
@@ -46,7 +47,7 @@ use mega_evm::{
         },
         database::{EmptyDB, State},
         inspector::{inspectors::TracerEip3155, InspectCommitEvm},
-        primitives::{Bytes, KECCAK_EMPTY, U256},
+        primitives::{Bytes, B256, KECCAK_EMPTY, U256},
         ExecuteCommitEvm,
     },
 };
@@ -57,7 +58,7 @@ use serde::{
 use walkdir::WalkDir;
 
 use crate::{
-    deviations,
+    deviations::{self, Deviation},
     exceptions::{self, Mismatch},
     mode::MAX_BLOBS_PER_TX,
     roots::{logs_hash, state_root},
@@ -79,6 +80,9 @@ pub struct Config {
     pub json_outcome: bool,
     /// Run each test under an EIP-3155 tracer writing to standard error.
     pub trace: bool,
+    /// The registry equivalence mode attributes failures to: [`deviations::DEVIATIONS`] for the
+    /// gate.
+    pub deviations: &'static [Deviation],
 }
 
 /// Which test a result is about.
@@ -135,11 +139,50 @@ impl FailureKind {
     }
 }
 
+/// The hashes a test produced where its fixture expects others.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Produced {
+    /// The post-state root, the logs hash being the fixture's.
+    StateRoot(B256),
+    /// The logs hash, and the post-state root beside it, whether or not the fixture expects that
+    /// root.
+    Logs {
+        /// The logs hash.
+        logs: B256,
+        /// The post-state root.
+        state_root: B256,
+    },
+}
+
+impl Produced {
+    /// The failure these hashes are.
+    pub const fn kind(self) -> FailureKind {
+        match self {
+            Self::StateRoot(_) => FailureKind::StateRootMismatch,
+            Self::Logs { .. } => FailureKind::LogsMismatch,
+        }
+    }
+}
+
+impl fmt::Display for Produced {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::StateRoot(root) => write!(f, "state root {root}"),
+            Self::Logs { logs, state_root } => {
+                write!(f, "logs hash {logs}, state root {state_root}")
+            }
+        }
+    }
+}
+
 /// A failed test.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Failure {
     /// How it failed.
     pub kind: FailureKind,
+    /// The hashes it produced, when it failed on them: a state-root or a logs mismatch.
+    pub produced: Option<Produced>,
     /// What was expected and what happened.
     pub detail: String,
     /// The deviation that explains it, in equivalence mode, if one does.
@@ -148,7 +191,16 @@ pub struct Failure {
 
 impl Failure {
     fn new(kind: FailureKind, detail: impl Into<String>) -> Self {
-        Self { kind, detail: detail.into(), deviation: None }
+        Self { kind, produced: None, detail: detail.into(), deviation: None }
+    }
+
+    fn produced(produced: Produced, detail: impl Into<String>) -> Self {
+        Self {
+            kind: produced.kind(),
+            produced: Some(produced),
+            detail: detail.into(),
+            deviation: None,
+        }
     }
 }
 
@@ -183,6 +235,9 @@ pub struct Report {
     pub mode: Mode,
     /// The fork whose entries ran.
     pub fork: Fork,
+    /// The registry failures were attributed to.
+    #[serde(skip)]
+    pub deviations: &'static [Deviation],
     /// The fixture files the run found.
     pub files: usize,
     /// Every test, ordered by file, name and entry.
@@ -210,6 +265,8 @@ pub struct Summary {
     pub deviated: BTreeMap<&'static str, usize>,
     /// The failed tests no deviation explains.
     pub unattributed: usize,
+    /// The entries a deviation lists for the fork that did not fail as listed, by deviation.
+    pub unreproduced: BTreeMap<&'static str, usize>,
     /// The fixture files that could not be read or parsed. No deviation explains one, and the
     /// entries such a file defines are counted nowhere else.
     pub file_failures: usize,
@@ -229,48 +286,6 @@ impl Summary {
     /// The tests a deviation explains.
     pub fn deviated_total(&self) -> usize {
         self.deviated.values().sum()
-    }
-
-    /// What equivalence mode's gate finds wrong with this run: an unattributed failure, and, for
-    /// each count given, a count that differs from it. Empty when the gate passes.
-    ///
-    /// With `check_deviations`, every registered deviation's count must equal its pin for `fork`
-    /// — a deviation that explains fewer failures than it pins is as much a change as one that
-    /// explains more.
-    pub fn gate(
-        &self,
-        fork: Fork,
-        expected_executed: Option<usize>,
-        expected_skipped: Option<usize>,
-        check_deviations: bool,
-    ) -> Vec<String> {
-        let mut problems = Vec::new();
-        if self.file_failures > 0 {
-            problems.push(format!("{} fixture files could not be read", self.file_failures));
-        }
-        if self.unattributed > 0 {
-            problems.push(format!("{} failed tests no deviation explains", self.unattributed));
-        }
-        if let Some(expected) = expected_executed.filter(|&n| n != self.executed) {
-            problems.push(format!("{} tests executed, {expected} pinned", self.executed));
-        }
-        let skipped = self.skipped_total();
-        if let Some(expected) = expected_skipped.filter(|&n| n != skipped) {
-            problems.push(format!("{skipped} tests skipped, {expected} pinned"));
-        }
-        if check_deviations {
-            for deviation in deviations::DEVIATIONS {
-                let got = self.deviated.get(deviation.id).copied().unwrap_or(0);
-                let pinned = deviation.pinned(fork);
-                if got != pinned {
-                    problems.push(format!(
-                        "deviation {} explains {got} failed tests on {fork}, {pinned} pinned",
-                        deviation.id
-                    ));
-                }
-            }
-        }
-        problems
     }
 }
 
@@ -300,6 +315,9 @@ impl Report {
                 }
             }
         }
+        for unreproduced in self.unreproduced() {
+            *summary.unreproduced.entry(unreproduced.deviation.id).or_default() += 1;
+        }
         summary
     }
 
@@ -310,6 +328,90 @@ impl Report {
             _ => None,
         })
     }
+
+    /// The entries the registry lists for the run's fork that did not fail as listed, in
+    /// equivalence mode. Satin mode attributes nothing, and has nothing to reproduce.
+    ///
+    /// An entry fails as listed when exactly one result of the run is the entry's and its
+    /// deviation explains that result, which it does only for the hashes it lists.
+    pub fn unreproduced(&self) -> impl Iterator<Item = Unreproduced<'_>> {
+        let registry = if self.mode == Mode::Equivalence { self.deviations } else { &[] };
+        registry.iter().flat_map(move |deviation| {
+            deviation.listed(self.fork).iter().filter_map(move |entry| {
+                let seen: Vec<_> =
+                    self.results.iter().filter(|result| entry.is(&result.id)).collect();
+                let reproduced = matches!(
+                    seen.as_slice(),
+                    [TestResult { outcome: Outcome::Failed(failure), .. }]
+                        if failure.deviation == Some(deviation.id)
+                );
+                (!reproduced).then_some(Unreproduced { deviation, entry, seen })
+            })
+        })
+    }
+
+    /// What equivalence mode's gate finds wrong with this run: an unattributed failure, and, for
+    /// each count given, a count that differs from it. Empty when the gate passes.
+    ///
+    /// With `check_deviations`, every entry a registered deviation lists for the run's fork must
+    /// fail exactly as listed — an entry that passes, fails another way or does not run is as much
+    /// a change as a failure no entry explains — and, derived from that, each deviation explains
+    /// as many failures as it lists.
+    pub fn gate(
+        &self,
+        expected_executed: Option<usize>,
+        expected_skipped: Option<usize>,
+        check_deviations: bool,
+    ) -> Vec<String> {
+        let summary = self.summary();
+        let mut problems = Vec::new();
+        if summary.file_failures > 0 {
+            problems.push(format!("{} fixture files could not be read", summary.file_failures));
+        }
+        if summary.unattributed > 0 {
+            problems.push(format!("{} failed tests no deviation explains", summary.unattributed));
+        }
+        if let Some(expected) = expected_executed.filter(|&n| n != summary.executed) {
+            problems.push(format!("{} tests executed, {expected} pinned", summary.executed));
+        }
+        let skipped = summary.skipped_total();
+        if let Some(expected) = expected_skipped.filter(|&n| n != skipped) {
+            problems.push(format!("{skipped} tests skipped, {expected} pinned"));
+        }
+        if check_deviations {
+            for deviation in self.deviations {
+                let listed = deviation.listed(self.fork).len();
+                let unreproduced = summary.unreproduced.get(deviation.id).copied().unwrap_or(0);
+                if unreproduced > 0 {
+                    problems.push(format!(
+                        "deviation {}: {unreproduced} of the {listed} entries it lists on {} did \
+                         not fail as listed",
+                        deviation.id, self.fork
+                    ));
+                }
+                let explained = summary.deviated.get(deviation.id).copied().unwrap_or(0);
+                if explained != listed {
+                    problems.push(format!(
+                        "deviation {} explains {explained} failed tests on {}, {listed} listed",
+                        deviation.id, self.fork
+                    ));
+                }
+            }
+        }
+        problems
+    }
+}
+
+/// An entry a deviation lists that did not fail as listed.
+#[derive(Debug)]
+pub struct Unreproduced<'a> {
+    /// The deviation.
+    pub deviation: &'static Deviation,
+    /// The entry it lists.
+    pub entry: &'static deviations::Entry,
+    /// The results the run has for the entry: none when the run did not execute it, and more than
+    /// one when the entry's id names several.
+    pub seen: Vec<&'a TestResult>,
 }
 
 impl fmt::Display for TestId {
@@ -357,7 +459,14 @@ pub fn run(files: &[PathBuf], config: Config) -> Report {
         results.into_inner().expect("no worker panics holding the lock");
     results.sort_by(|a, b| a.id.cmp(&b.id));
     file_failures.sort_by(|a, b| a.0.cmp(&b.0));
-    Report { mode: config.mode, fork: config.fork, files: files.len(), results, file_failures }
+    Report {
+        mode: config.mode,
+        fork: config.fork,
+        deviations: config.deviations,
+        files: files.len(),
+        results,
+        file_failures,
+    }
 }
 
 /// Every entry the file at `path` defines for `config.fork`, and what happened to each; or why
@@ -391,7 +500,7 @@ pub fn run_file(path: &Path, config: Config) -> Result<Vec<TestResult>, Failure>
                             Outcome::Failed(Failure::new(FailureKind::Panic, panic_message(&panic)))
                         }),
                 };
-                let outcome = attribute(config, &path_str, outcome);
+                let outcome = attribute(config, &id, outcome);
                 if config.json_outcome {
                     print_outcome(config, &id, &outcome);
                 }
@@ -431,12 +540,13 @@ impl<'de> Deserialize<'de> for UniqueNames {
     }
 }
 
-/// Names the deviation that explains a failure, in equivalence mode.
-fn attribute(config: Config, path: &str, outcome: Outcome) -> Outcome {
+/// Names the deviation that explains a failure of the entry `id`, in equivalence mode.
+fn attribute(config: Config, id: &TestId, outcome: Outcome) -> Outcome {
     match outcome {
         Outcome::Failed(mut failure) if config.mode == Mode::Equivalence => {
-            failure.deviation = deviations::attribute(config.fork, path, failure.kind)
-                .map(|deviation| deviation.id);
+            failure.deviation =
+                deviations::attribute(config.deviations, config.fork, id, failure.produced)
+                    .map(|deviation| deviation.id);
             Outcome::Failed(failure)
         }
         outcome => outcome,
@@ -561,7 +671,8 @@ fn undo_fee_vault_credit(unit: &TestUnit, state: &mut State<EmptyDB>, basefee: u
 ///
 /// A rejected transaction must be rejected for the reason the fixture names and must leave the
 /// fixture's post-state, which is its pre-state; an executed one must produce the fixture's
-/// output, logs and post-state.
+/// output, logs and post-state. A logs or state-root mismatch carries the hashes produced, the
+/// state root included when the logs already differ.
 fn check<DBError: fmt::Debug>(
     test: &Test,
     expected_output: Option<&Bytes>,
@@ -597,17 +708,20 @@ fn check<DBError: fmt::Debug>(
     }
     let logs: &[_] = result.as_ref().map(ExecutionResult::logs).unwrap_or_default();
     let logs_hash = logs_hash(logs);
+    let root = state_root(state.cache.trie_account());
+    let executed = result.as_ref().map(|r| format!("; {}", describe(r))).unwrap_or_default();
     if logs_hash != test.logs {
-        return Err(Failure::new(
-            FailureKind::LogsMismatch,
-            format!("logs hash {logs_hash}, expected {}", test.logs),
+        return Err(Failure::produced(
+            Produced::Logs { logs: logs_hash, state_root: root },
+            format!(
+                "logs hash {logs_hash}, expected {}; state root {root}, expected {}{executed}",
+                test.logs, test.hash
+            ),
         ));
     }
-    let root = state_root(state.cache.trie_account());
     if root != test.hash {
-        let executed = result.as_ref().map(|r| format!("; {}", describe(r))).unwrap_or_default();
-        return Err(Failure::new(
-            FailureKind::StateRootMismatch,
+        return Err(Failure::produced(
+            Produced::StateRoot(root),
             format!("state root {root}, expected {}{executed}", test.hash),
         ));
     }

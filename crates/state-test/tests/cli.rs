@@ -104,10 +104,18 @@ fn test_a_count_off_its_pin_exits_non_zero() {
     assert_eq!(output.status.code(), Some(1));
     assert!(stdout(&output).contains("gate: 1 tests executed, 2 pinned"), "{}", stdout(&output));
 
-    // Every registered deviation pins a count on the full release; one test explains none.
+    // Every registered deviation lists entries of the full release; one test runs none of them.
     let output = state_test(&["--fork", "Osaka", "--expect-deviations"], &path);
     assert_eq!(output.status.code(), Some(1));
-    assert!(stdout(&output).contains("deviation amsterdam-opcodes-on-osaka explains 0"));
+    let out = stdout(&output);
+    assert!(
+        out.contains(
+            "gate: deviation amsterdam-opcodes-on-osaka: 2 of the 2 entries it lists on Osaka \
+             did not fail as listed"
+        ) && out.contains("gate: deviation amsterdam-opcodes-on-osaka explains 0 failed tests"),
+        "{out}"
+    );
+    assert!(out.contains("unreproduced 2") && out.contains("the run did not execute it"), "{out}");
 }
 
 #[test]

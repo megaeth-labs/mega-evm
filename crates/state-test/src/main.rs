@@ -12,11 +12,11 @@ use std::{path::PathBuf, process::ExitCode};
 use clap::Parser;
 use state_test::{
     deviations,
-    runner::{find_json_files, run, Config, Report, Summary},
+    runner::{find_json_files, run, Config, Outcome, Report, Summary, TestResult},
     Fork, Mode,
 };
 
-/// How many unattributed failures the summary lists.
+/// How many unattributed failures, and how many unreproduced entries, the summary lists.
 const LISTED_FAILURES: usize = 50;
 
 /// Command-line arguments.
@@ -50,8 +50,8 @@ struct Cmd {
     /// Equivalence mode: fail unless exactly this many tests are skipped.
     #[arg(long, value_name = "N")]
     expect_skipped: Option<usize>,
-    /// Equivalence mode: fail unless every registered deviation explains exactly as many failed
-    /// tests as it pins for the fork.
+    /// Equivalence mode: fail unless every entry a registered deviation lists for the fork fails
+    /// exactly as listed, with the hashes listed.
     #[arg(long)]
     expect_deviations: bool,
 }
@@ -83,6 +83,7 @@ fn main() -> ExitCode {
         threads,
         json_outcome: cmd.json_outcome,
         trace: cmd.trace,
+        deviations: deviations::DEVIATIONS,
     };
     let report = run(&files, config);
     let summary = report.summary();
@@ -100,12 +101,8 @@ fn main() -> ExitCode {
 
     match cmd.mode {
         Mode::Equivalence => {
-            let problems = summary.gate(
-                cmd.fork,
-                cmd.expect_executed,
-                cmd.expect_skipped,
-                cmd.expect_deviations,
-            );
+            let problems =
+                report.gate(cmd.expect_executed, cmd.expect_skipped, cmd.expect_deviations);
             for problem in &problems {
                 println!("gate: {problem}");
             }
@@ -140,9 +137,12 @@ fn print_summary(report: &Report, summary: &Summary) {
         println!("  failed   {:<34} {count}", kind.name());
     }
     if report.mode == Mode::Equivalence {
-        for (id, count) in &summary.deviated {
-            let pinned = deviations::by_id(id).map_or(0, |d| d.pinned(report.fork));
-            println!("  deviated {id:<34} {count} (pinned {pinned})");
+        for deviation in report.deviations {
+            let listed = deviation.listed(report.fork).len();
+            if listed > 0 {
+                let explained = summary.deviated.get(deviation.id).copied().unwrap_or(0);
+                println!("  deviated {:<34} {explained} (listed {listed})", deviation.id);
+            }
         }
         println!("  unattributed {}", summary.unattributed);
         for (id, failure) in report.unattributed().take(LISTED_FAILURES) {
@@ -151,8 +151,38 @@ fn print_summary(report: &Report, summary: &Summary) {
         if summary.unattributed > LISTED_FAILURES {
             println!("    ... and {} more", summary.unattributed - LISTED_FAILURES);
         }
+        let unreproduced: usize = summary.unreproduced.values().sum();
+        println!("  unreproduced {unreproduced}");
+        for entry in report.unreproduced().take(LISTED_FAILURES) {
+            println!(
+                "    {}\n      {} lists {}, {}; {}",
+                entry.entry,
+                entry.deviation.id,
+                entry.entry.produced.kind().name(),
+                entry.entry.produced,
+                seen(&entry.seen)
+            );
+        }
+        if unreproduced > LISTED_FAILURES {
+            println!("    ... and {} more", unreproduced - LISTED_FAILURES);
+        }
     }
     for (path, failure) in &report.file_failures {
         println!("  unreadable {path}\n      {}", failure.detail);
+    }
+}
+
+/// What a run did with a listed entry, given the results it has for it.
+fn seen(results: &[&TestResult]) -> String {
+    match results {
+        [] => "the run did not execute it".into(),
+        [result] => match &result.outcome {
+            Outcome::Passed => "it passed".into(),
+            Outcome::Skipped { reason } => format!("it was skipped: {}", reason.name()),
+            Outcome::Failed(failure) => {
+                format!("it failed: {}: {}", failure.kind.name(), failure.detail)
+            }
+        },
+        results => format!("{} results of the run are the entry's", results.len()),
     }
 }

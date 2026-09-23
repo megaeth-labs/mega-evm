@@ -13,6 +13,7 @@ use mega_evm::revm::{
 };
 use serde_json::{json, Value};
 use state_test::{
+    deviations::{Deviation, Entry, DEVIATIONS},
     roots::{logs_hash, state_root},
     runner::{run, Config, FailureKind, Outcome, Report},
     skips::SkipReason,
@@ -30,7 +31,7 @@ const BASE_FEE_VAULT: &str = "0x4200000000000000000000000000000000000019";
 const STORE_AND_LOG: &str = "0x602a5f5560075f5260205fa000";
 
 fn config(mode: Mode, fork: Fork) -> Config {
-    Config { mode, fork, threads: 2, json_outcome: false, trace: false }
+    Config { mode, fork, threads: 2, json_outcome: false, trace: false, deviations: DEVIATIONS }
 }
 
 /// A unit calling `CONTRACT` with `transaction` fields over the defaults, and one entry per fork
@@ -144,7 +145,7 @@ fn test_a_fixture_ethereum_filled_passes_in_equivalence_mode() {
         assert_eq!(outcomes(&report), [&Outcome::Passed], "{fork}");
         let summary = report.summary();
         assert_eq!((summary.defined, summary.executed, summary.passed), (1, 1, 1));
-        assert!(summary.gate(fork, Some(1), Some(0), false).is_empty());
+        assert!(report.gate(Some(1), Some(0), false).is_empty());
     }
 }
 
@@ -180,12 +181,8 @@ fn test_wrong_roots_fail() {
     let report = run(&[path], config(Mode::Equivalence, Fork::Osaka));
     let kinds: Vec<_> = outcomes(&report).into_iter().map(failure_kind).collect();
     assert_eq!(kinds, [Some(FailureKind::StateRootMismatch), Some(FailureKind::LogsMismatch)]);
-    let summary = report.summary();
-    assert_eq!(summary.unattributed, 2);
-    assert_eq!(
-        summary.gate(Fork::Osaka, None, None, false),
-        ["2 failed tests no deviation explains"]
-    );
+    assert_eq!(report.summary().unattributed, 2);
+    assert_eq!(report.gate(None, None, false), ["2 failed tests no deviation explains"]);
 }
 
 /// An expected exception must be the one raised, and must leave the pre-state; an unexpected one,
@@ -281,12 +278,9 @@ fn test_what_is_counted_and_what_is_skipped() {
     assert_eq!(outcomes[4], &Outcome::Skipped { reason: SkipReason::CreateCollisionWithStorage });
     let summary = report.summary();
     assert_eq!((summary.defined, summary.executed, summary.skipped_total()), (5, 3, 2));
+    assert_eq!(report.gate(Some(3), Some(2), false), ["2 failed tests no deviation explains"]);
     assert_eq!(
-        summary.gate(Fork::Osaka, Some(3), Some(2), false),
-        ["2 failed tests no deviation explains"]
-    );
-    assert_eq!(
-        summary.gate(Fork::Osaka, Some(4), Some(1), false)[1..],
+        report.gate(Some(4), Some(1), false)[1..],
         ["3 tests executed, 4 pinned".to_string(), "2 tests skipped, 1 pinned".to_string()]
     );
 }
@@ -319,7 +313,7 @@ fn test_an_unreadable_file_fails_the_gate() {
     assert_eq!(report.file_failures.len(), 1);
     let summary = report.summary();
     assert_eq!((summary.file_failures, summary.defined), (1, 0));
-    assert_eq!(summary.gate(Fork::Osaka, None, None, false), ["1 fixture files could not be read"]);
+    assert_eq!(report.gate(None, None, false), ["1 fixture files could not be read"]);
 }
 
 /// The base-fee vault Satin credits is taken back only when the fee routing made it: a vault the
@@ -356,37 +350,146 @@ fn test_bad_fixture_values_fail_their_own_test() {
     assert_eq!(kinds, [Some(FailureKind::Fixture), Some(FailureKind::Panic), None]);
 }
 
-/// In equivalence mode a registered deviation explains a failure of its kind in its files on its
-/// fork, and nothing else; Satin mode attributes nothing.
-#[test]
-fn test_deviations_explain_their_own_failures_only() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut wrong = fill_from_ethereum(unit(&[Fork::Osaka], json!({})));
-    wrong["post"]["Osaka"][0]["hash"] = json!(B256::repeat_byte(1));
-    let mut wrong_logs = fill_from_ethereum(unit(&[Fork::Osaka], json!({})));
-    wrong_logs["post"]["Osaka"][0]["logs"] = json!(B256::repeat_byte(1));
-    let registered = write(
-        dir.path(),
-        "frontier/opcodes/test_all_opcodes.json",
-        json!({ "a_root": wrong.clone(), "b_logs": wrong_logs }),
-    );
-    let elsewhere = write(dir.path(), "frontier/opcodes/other.json", json!({ "a_root": wrong }));
-
-    let report =
-        run(&[registered.clone(), elsewhere.clone()], config(Mode::Equivalence, Fork::Osaka));
-    let deviations: Vec<_> = report
+/// A registry of one Osaka deviation listing every failure of `report`, in the file at `path`
+/// under the run's directory, with the hashes it produced.
+fn registry_of(report: &Report, path: &'static str) -> &'static [Deviation] {
+    let entries: Vec<_> = report
         .results
         .iter()
-        .map(|result| match &result.outcome {
-            Outcome::Failed(failure) => failure.deviation,
-            _ => panic!("every test fails"),
+        .filter_map(|result| match &result.outcome {
+            Outcome::Failed(failure) => Some(Entry {
+                path,
+                name: result.id.name.clone().leak(),
+                indexes: result.id.indexes,
+                produced: failure.produced.expect("a hash mismatch"),
+            }),
+            _ => None,
         })
         .collect();
-    assert_eq!(deviations, [None, Some("amsterdam-opcodes-on-osaka"), None]);
-    let summary = report.summary();
-    assert_eq!(summary.deviated.get("amsterdam-opcodes-on-osaka"), Some(&1));
-    assert_eq!(summary.unattributed, 2);
+    Box::leak(Box::new([Deviation {
+        id: "listed",
+        rule: "the rule",
+        reason: "the reason",
+        fork: Fork::Osaka,
+        entries: entries.leak(),
+    }]))
+}
 
-    let report = run(&[registered, elsewhere], config(Mode::Satin, Fork::Osaka));
-    assert_eq!(report.summary().unattributed, 3);
+/// A deviation explains exactly the entries it lists, with the hashes they produce, and the gate
+/// holds every one of them to its listing. Each edit below fails the gate on its own: a listed
+/// failure made to pass, an unlisted entry of the same file broken — the two together keep the
+/// count the deviation explains, which is all a count could see — and a listed entry that fails
+/// with other hashes, the state root of a logs mismatch included.
+#[test]
+fn test_a_deviation_holds_the_entries_it_lists() {
+    let dir = tempfile::tempdir().unwrap();
+    let filled = fill_from_ethereum(unit(&[Fork::Osaka], json!({})));
+    let root = filled["post"]["Osaka"][0]["hash"].clone();
+    let mut wrong_root = filled.clone();
+    wrong_root["post"]["Osaka"][0]["hash"] = json!(B256::repeat_byte(1));
+    let mut wrong_logs = filled.clone();
+    wrong_logs["post"]["Osaka"][0]["logs"] = json!(B256::repeat_byte(1));
+    let units = json!({ "a_root": wrong_root, "b_logs": wrong_logs, "c_passes": filled });
+
+    const PATH: &str = "cancun/deviated.json";
+    let path = write(dir.path(), PATH, units.clone());
+    let equivalence = config(Mode::Equivalence, Fork::Osaka);
+    let registry = registry_of(&run(std::slice::from_ref(&path), equivalence), PATH);
+    assert_eq!(registry[0].entries.len(), 2);
+    let run_with = |units: &Value| {
+        write(dir.path(), PATH, units.clone());
+        run(std::slice::from_ref(&path), Config { deviations: registry, ..equivalence })
+    };
+    let gate = |units: &Value| run_with(units).gate(None, None, true);
+
+    let report = run_with(&units);
+    assert_eq!(report.gate(None, None, true), Vec::<String>::new());
+    let summary = report.summary();
+    assert_eq!(summary.deviated.get("listed"), Some(&2));
+    assert_eq!((summary.unattributed, summary.unreproduced.len()), (0, 0));
+
+    let unreproduced =
+        "deviation listed: 1 of the 2 entries it lists on Osaka did not fail as listed";
+    let explains_one = "deviation listed explains 1 failed tests on Osaka, 2 listed";
+    let unattributed = "1 failed tests no deviation explains";
+
+    // The listed state-root failure made to pass.
+    let mut passes = units.clone();
+    passes["a_root"]["post"]["Osaka"][0]["hash"] = root;
+    assert_eq!(gate(&passes), [unreproduced, explains_one]);
+    let report = run_with(&passes);
+    let seen: Vec<_> = report.unreproduced().collect();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].entry.name, "a_root");
+    assert!(matches!(seen[0].seen.as_slice(), [result] if result.outcome == Outcome::Passed));
+
+    // The passing entry of the same file broken.
+    let mut broken = units.clone();
+    broken["c_passes"]["post"]["Osaka"][0]["hash"] = json!(B256::repeat_byte(2));
+    assert_eq!(gate(&broken), [unattributed]);
+
+    // Both at once: two failures in the file, as the deviation lists, and the gate still fails.
+    let mut both = passes.clone();
+    both["c_passes"] = broken["c_passes"].clone();
+    let report = run_with(&both);
+    assert_eq!(report.summary().failed_total(), 2);
+    assert_eq!(report.gate(None, None, true), [unattributed, unreproduced, explains_one]);
+
+    // The listed entries failing with other hashes: a sender that starts with one more wei moves
+    // the post-state root, and leaves the logs as they were.
+    for name in ["a_root", "b_logs"] {
+        let mut other = units.clone();
+        other[name]["pre"][SENDER]["balance"] = json!("0x3635c9adc5dea00001");
+        let report = run_with(&other);
+        let failure = report
+            .results
+            .iter()
+            .find_map(|result| match &result.outcome {
+                Outcome::Failed(failure) if result.id.name == name => Some(failure.clone()),
+                _ => None,
+            })
+            .expect("the entry fails");
+        assert_eq!(
+            failure.kind,
+            registry[0].entries.iter().find(|e| e.name == name).unwrap().produced.kind()
+        );
+        assert_eq!(failure.deviation, None, "{name}");
+        assert_eq!(
+            report.gate(None, None, true),
+            [unattributed, unreproduced, explains_one],
+            "{name}"
+        );
+    }
+
+    // The same tests in another file are not the listed entries.
+    let elsewhere = write(dir.path(), "cancun/elsewhere.json", units);
+    let report = run(&[elsewhere], Config { deviations: registry, ..equivalence });
+    assert_eq!(report.summary().unattributed, 2);
+    assert_eq!(report.summary().unreproduced.get("listed"), Some(&2));
+
+    // Satin mode attributes nothing, and has nothing to reproduce.
+    let report = run(&[path], Config { deviations: registry, ..config(Mode::Satin, Fork::Osaka) });
+    let summary = report.summary();
+    assert!(summary.deviated.is_empty() && summary.unreproduced.is_empty());
+}
+
+/// A failure of an entry the registry lists, with hashes the registry does not list, is
+/// unattributed: the registry explains its own failures, not the place they are in.
+#[test]
+fn test_the_registry_does_not_absorb_another_failure_of_its_entries() {
+    let dir = tempfile::tempdir().unwrap();
+    let listed = &DEVIATIONS
+        .iter()
+        .find(|deviation| deviation.fork == Fork::Osaka)
+        .expect("an Osaka deviation")
+        .entries[0];
+    let mut wrong = fill_from_ethereum(unit(&[Fork::Osaka], json!({})));
+    wrong["post"]["Osaka"][0]["hash"] = json!(B256::repeat_byte(1));
+    let path = write(dir.path(), listed.path, json!({ listed.name: wrong }));
+    let report = run(&[path], config(Mode::Equivalence, Fork::Osaka));
+    assert!(matches!(
+        &report.results[0].outcome,
+        Outcome::Failed(failure) if failure.kind == listed.produced.kind() && failure.deviation.is_none()
+    ));
+    assert_eq!(report.summary().unattributed, 1);
 }

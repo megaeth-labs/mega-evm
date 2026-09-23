@@ -6,8 +6,9 @@ name: Execution-spec tests on Satin
 # - equivalence mode, a gate: Satin's machinery priced as each fixture fork prices it, on the
 #   Osaka entries of the main release and the Amsterdam entries of the glamsterdam devnet
 #   release. Every test passes, is skipped for a reason the fork's own runner shares, or fails on
-#   a deviation registered in crates/mega-state-test/src/deviations.rs, whose count is pinned
-#   there; the executed and skipped counts are pinned below.
+#   a deviation registered in crates/mega-state-test/src/deviations.rs, which lists the exact
+#   entries it explains with the hashes Satin produces, and every listed entry fails exactly as
+#   listed; the executed and skipped counts are pinned below.
 # - Satin mode, a report: the same entries under Satin's own configuration, counted by outcome
 #   in the step summary. It does not fail the job.
 #
@@ -55,7 +56,7 @@ jobs:
       # Tests equivalence mode executes and skips, per fork, on the pinned fixture releases. The
       # runner skips what the fork's own runner skips, so these are the counts exec-spec.yml pins
       # for it. A change that moves the fork pin, and with it the fixtures, updates both, and the
-      # deviation counts in crates/mega-state-test/src/deviations.rs.
+      # entries the deviations in crates/mega-state-test/src/deviations.rs list.
       OSAKA_EXECUTED: "19465"
       OSAKA_SKIPPED: "52"
       AMSTERDAM_EXECUTED: "15754"
@@ -162,8 +163,8 @@ jobs:
           {
             echo "### Equivalence mode"
             echo
-            echo "| Fixtures | Executed | Skipped | Passed | Deviated | Unattributed |"
-            echo "|---|---:|---:|---:|---:|---:|"
+            echo "| Fixtures | Executed | Skipped | Passed | Deviated | Unattributed | Unreproduced |"
+            echo "|---|---:|---:|---:|---:|---:|---:|"
           } >> "$GITHUB_STEP_SUMMARY"
           gate() {
             local fork=$1 dir=$2 executed=$3 skipped=$4 status=0
@@ -171,7 +172,7 @@ jobs:
               --expect-executed "$executed" --expect-skipped "$skipped" --expect-deviations \
               --summary-json "equivalence-$fork.json" || status=$?
             if [ -f "equivalence-$fork.json" ]; then
-              jq -r --arg fork "$fork" '.summary as $s | "| \($fork) | \($s.executed) | \([$s.skipped[]] | add // 0) | \($s.passed) | \([$s.deviated[]] | add // 0) | \($s.unattributed) |"' \
+              jq -r --arg fork "$fork" '.summary as $s | "| \($fork) | \($s.executed) | \([$s.skipped[]] | add // 0) | \($s.passed) | \([$s.deviated[]] | add // 0) | \($s.unattributed) | \([$s.unreproduced[]] | add // 0) |"' \
                 "equivalence-$fork.json" >> "$GITHUB_STEP_SUMMARY"
             fi
             if [ "$status" -ne 0 ]; then

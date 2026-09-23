@@ -12,7 +12,7 @@ The `state-test` CLI (`crates/state-test`) is a thin front end over this crate.
 - `src/fork.rs`: the fixture forks a run executes (Osaka, Amsterdam).
 - `src/exceptions.rs`: validation errors mapped to the execution-spec exception names.
 - `src/skips.rs`: the reference runner's skips, with their reasons.
-- `src/deviations.rs`: the registry of places Satin differs on purpose, each with its pinned count; `DEVIATIONS.md` is rendered from it.
+- `src/deviations.rs`: the registry of places Satin differs on purpose, each with the exact entries it explains and the hashes Satin produces for them; `DEVIATIONS.md` is rendered from it.
 - `src/roots.rs`: the post-state root and the logs hash.
 - `tests/runner.rs`: the runner on fixtures written in the test, filled from revm's mainnet EVM on the fixture's fork.
 
@@ -21,7 +21,7 @@ The fixture types are the revm fork's own (`revm::statetest_types`, the `test-ty
 ## KEY PATTERNS
 - A fixture's expectation is Ethereum's; a test here that needs one fills it from revm's mainnet EVM, never from `MegaEvm`.
 - Every failure is a `FailureKind`; equivalence mode names the deviation that explains it, and one it does not name is unattributed.
-- A deviation matches on fork, failure kind and a path fragment, and pins its count; the gate checks the pins with `--expect-deviations`.
+- A deviation lists the exact entries it explains — file, test, data, gas and value indices — with the hashes Satin produces; a failure is its only with those hashes, and `--expect-deviations` requires every listed entry to fail exactly as listed.
 - Skips mirror the reference runner's, so the executed and skipped counts equal the ones `.github/workflows/exec-spec.yml` pins for it.
 
 ## ANTI-PATTERNS
@@ -31,7 +31,7 @@ The fixture types are the revm fork's own (`revm::statetest_types`, the `test-ty
 - Do not reach an engine switch from here; the neutral configuration lives in `mega-evm` behind `test-utils`.
 
 ## WHERE TO LOOK
-- Add or move a deviation: `src/deviations.rs`, then `UPDATE_DEVIATIONS=1 cargo test -p mega-state-test --lib deviations`.
+- Add or move a deviation: `src/deviations.rs`, its entries taken from a `--json-outcome` run, then `UPDATE_DEVIATIONS=1 cargo test -p mega-state-test --lib deviations`.
 - Change what a mode configures: `src/mode.rs`, and `mega-evm`'s `src/test_utils/neutral.rs`.
 - Change how a test is judged: `src/runner.rs::check`, `src/exceptions.rs`.
-- Change the pinned counts: `.github/workflows/exec-spec-satin.yml`.
+- Change the pinned executed and skipped counts: `.github/workflows/exec-spec-satin.yml`.

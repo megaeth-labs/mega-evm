@@ -230,7 +230,7 @@ Every later mechanism plugs into these; a change to one comes back to this layer
 - **The op-revm baseline** (`tests/satin/equivalence.rs`): an ordinary transaction through `MegaEvm` against op-revm on the same configuration, which Satin differs from by its history ledger alone.
 - **The execution-spec gate** (`crates/mega-state-test`, `.github/workflows/exec-spec-satin.yml`): Ethereum's state-test fixtures through `MegaEvm`, on the fixture releases the fork's own runner (`.github/workflows/exec-spec.yml`) uses.
   - Equivalence mode is the gate: Satin's machinery — handler, frame lifecycle, Host, instruction table — priced as the fixture's fork prices it, through the neutral configuration (`MegaContext::with_neutral_cfg`, `test_utils::{neutral_cfg, neutralize_evm}`), which exists only behind `test-utils`.
-    Every failure must be explained by a deviation in `crates/mega-state-test/src/deviations.rs`, with its rule, its reason and its pinned count; the executed and skipped counts are pinned in the workflow and equal the fork runner's.
+    Every failure must be explained by a deviation in `crates/mega-state-test/src/deviations.rs`, with its rule, its reason and the exact entries it explains, each with the hashes Satin produces, and every listed entry must fail exactly as listed; the executed and skipped counts are pinned in the workflow and equal the fork runner's.
   - Satin mode is a report: the same fixtures under Satin's own configuration, counted by outcome in the step summary; it never fails the job.
 
 ## Version Control
@@ -295,7 +295,7 @@ When the agent is requested to implement a new feature or bug fix, it should con
 - **Keep the op-revm baseline honest.**
   A change that makes Satin differ from op-revm on purpose must update `tests/satin/equivalence.rs` (or add a case) so the difference is pinned, not silently absorbed.
 - **Keep the execution-spec gate honest.**
-  A change that makes Satin's machinery differ from Ethereum's fixtures on purpose registers a deviation (its rule, its reason, the fixtures it fails, its pinned count) and regenerates `crates/mega-state-test/DEVIATIONS.md`; a failure that is a bug is fixed, never registered.
+  A change that makes Satin's machinery differ from Ethereum's fixtures on purpose registers a deviation (its rule, its reason, the entries it fails with the hashes Satin produces for them) and regenerates `crates/mega-state-test/DEVIATIONS.md`; a failure that is a bug is fixed, never registered.
   A price `MegaETH` sets is not a deviation: the neutral configuration takes it out of equivalence mode, and a new pricing dimension extends the neutral configuration rather than the registry.
 - **Add benchmarks for performance-sensitive changes.**
   Changes on the EVM execution hot path must be accompanied by benchmarks.

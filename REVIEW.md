@@ -97,10 +97,10 @@ These checks guard every change to the Satin engine.
   It checks the fork `MegaEvm` runs on, not `MegaEvm`.
   It runs when `Cargo.toml` or `Cargo.lock` changes (the pin may have moved); a change that moves the pin updates the pinned counts and says why they moved.
 - `.github/workflows/exec-spec-satin.yml` runs the same fixture releases through `MegaEvm` with the state-test runner (`crates/mega-state-test`).
-  Equivalence mode is the gate: Satin's machinery priced as the fixture's fork prices it, where every failure must be explained by a deviation registered in `crates/mega-state-test/src/deviations.rs`, with its reason and its pinned count, and the executed and skipped counts equal the fork runner's pins.
+  Equivalence mode is the gate: Satin's machinery priced as the fixture's fork prices it, where every failure must be explained by a deviation registered in `crates/mega-state-test/src/deviations.rs`, with its reason and the exact entries it explains, each with the hashes Satin produces; every listed entry must fail exactly as listed, and the executed and skipped counts equal the fork runner's pins.
   Satin mode reports the same fixtures under Satin's own configuration in the step summary, and does not fail the job.
   It runs when the engine, the runner or the lock changes.
-- A deviation is a rule Satin keeps on purpose and is reviewed as one: an entry added to explain a failure that is a bug is the defect, and a count that moves says which fixtures moved and why.
+- A deviation is a rule Satin keeps on purpose and is reviewed as one: an entry added to explain a failure that is a bug is the defect, and an entry added, removed or given new hashes says which fixtures moved and why.
   `crates/mega-state-test/DEVIATIONS.md` is rendered from the registry, and a test keeps the two equal.
 - Neither workflow is a required check.
 

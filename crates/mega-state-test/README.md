@@ -54,6 +54,12 @@ cargo run --release -p state-test -- --mode satin --fork Osaka <main>/state_test
 ```
 
 `--expect-executed`, `--expect-skipped` and `--expect-deviations` turn a full run into the pinned gate CI runs (`.github/workflows/exec-spec-satin.yml`).
-`--json-outcome` prints one JSON line per test, and `--trace` runs each test under an EIP-3155 tracer.
+`--json-outcome` prints one JSON line per test, a failure's produced hashes included, and `--trace` runs each test under an EIP-3155 tracer.
 
-A deviation added or moved updates `src/deviations.rs` and regenerates [`DEVIATIONS.md`](DEVIATIONS.md) with `UPDATE_DEVIATIONS=1 cargo test -p mega-state-test --lib deviations`.
+## Deviations
+
+A deviation lists the exact entries it explains: the fixture file (relative to the release's `state_tests` directory), the test, the data, gas and value indices, and the hashes Satin produces — the state root, or for a logs mismatch the logs hash and the state root.
+A failure is the deviation's only when its entry is listed and it produced those hashes; any other failure is unattributed, in whatever file it is.
+`--expect-deviations` requires every listed entry to fail exactly as listed, so an entry that starts to pass, fails another way or no longer runs fails the gate; the count a deviation explains is derived from its list.
+
+A deviation added or moved updates `src/deviations.rs`, its entries taken from a `--json-outcome` run, and regenerates [`DEVIATIONS.md`](DEVIATIONS.md) with `UPDATE_DEVIATIONS=1 cargo test -p mega-state-test --lib deviations`.
