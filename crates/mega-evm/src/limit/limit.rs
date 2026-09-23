@@ -569,9 +569,7 @@ impl AdditionalLimit {
             let body = self.body_bytes;
             self.tracker.reset();
             self.latched = None;
-            if body > 0 {
-                self.tracker.record_tx(LimitUsage { data_size: body, write_records: 0 });
-            }
+            self.tracker.record_tx(LimitUsage { data_size: body, write_records: 0 });
             return;
         }
         debug_assert!(self.tracker.depth() <= 1, "only the outermost lane can be left");
