@@ -459,4 +459,3 @@ fn test_both_volatile_data_access_oog_does_not_consume_all_gas() {
         gas_used
     );
 }
-

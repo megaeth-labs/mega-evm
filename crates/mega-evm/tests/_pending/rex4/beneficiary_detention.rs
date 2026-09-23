@@ -325,4 +325,3 @@ fn test_detention_plus_intrinsic_data_size_overflow() {
 // TEST 12: Detention + execution data limit — detained compute gas does not
 //          interfere with data size enforcement
 // ============================================================================
-

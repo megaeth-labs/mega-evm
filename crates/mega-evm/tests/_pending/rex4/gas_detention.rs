@@ -180,4 +180,3 @@ fn test_rex4_non_binding_detention_reports_normal_compute_limit() {
         "Should resolve as normal compute-limit failure, not volatile-data OOG"
     );
 }
-
