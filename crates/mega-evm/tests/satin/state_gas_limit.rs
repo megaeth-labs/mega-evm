@@ -11,16 +11,20 @@
 //! The figures are read off the engine rather than written out: each case first runs without a
 //! limit, and the state gas it reports is what the limit is set against.
 
-use alloy_primitives::{address, Address, Bytes, U256};
+use alloy_primitives::{address, Address, Bytes, B256, U256};
 use mega_evm::{
     constants::TX_GAS_LIMIT_CAP,
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    EvmTxRuntimeLimits, LimitCheck, LimitKind, MegaEvm, MegaTransaction, MegaTransactionOutcome,
-    TX_BODY_SIZE, WRITE_RECORD_SIZE,
+    EvmTxRuntimeLimits, LimitCheck, LimitKind, MegaContext, MegaEvm, MegaTransaction,
+    MegaTransactionOutcome, TX_BODY_SIZE, WRITE_RECORD_SIZE,
 };
-use revm::bytecode::opcode::{
-    CALL, CREATE, CREATE2, DELEGATECALL, GAS, INVALID, POP, PUSH0, PUSH1, RETURN, REVERT,
-    SELFDESTRUCT, STOP,
+use revm::{
+    bytecode::opcode::{
+        CALL, CALLCODE, CREATE, CREATE2, DELEGATECALL, GAS, INVALID, POP, PUSH0, PUSH1, RETURN,
+        REVERT, SELFDESTRUCT, STOP,
+    },
+    interpreter::{interpreter::EthInterpreter, CallInputs, CallOutcome, InstructionResult},
+    Database, Inspector,
 };
 
 use crate::common::{authorizing_call, call, context, create};
@@ -287,6 +291,204 @@ fn test_a_reverting_creation_is_not_held_for_its_revert_data() {
     assert!(outcome.result.is_success(), "{:?}", outcome.result);
     assert_eq!(outcome.limit_exceeded, None);
     assert_eq!(outcome.gas.state, 0, "the failed creation's account charge came back");
+}
+
+/* ---------- a frame's upfront charge, held once revm has decided the frame ---------- */
+
+/// The state gas one account a creation or a value transfer adds costs.
+fn one_account() -> u64 {
+    state_gas_of(
+        &funded().account_code(A, then_call(BytecodeBuilder::default(), EMPTY, 1).stop().build()),
+        &call(CALLER, A, U256::ZERO, BELOW_CAP),
+    )
+}
+
+/// Appends a `CALL` or `CALLCODE` to `target` with all the gas and `value`, dropping its success
+/// flag.
+fn then_call_with(
+    builder: BytecodeBuilder,
+    opcode: u8,
+    target: Address,
+    value: u64,
+) -> BytecodeBuilder {
+    builder
+        .append_many([PUSH0, PUSH0, PUSH0, PUSH0])
+        .push_number(value)
+        .push_address(target)
+        .append(GAS)
+        .append(opcode)
+        .append(POP)
+}
+
+/// Appends a `CREATE`, or a `CREATE2` with salt zero, of empty init code carrying `value`,
+/// dropping the address.
+fn then_create_with(builder: BytecodeBuilder, create2: bool, value: u64) -> BytecodeBuilder {
+    let builder = if create2 { builder.push_number(0_u64) } else { builder };
+    builder
+        .push_number(0_u64)
+        .push_number(0_u64)
+        .push_number(value)
+        .append(if create2 { CREATE2 } else { CREATE })
+        .append(POP)
+}
+
+/// A frame revm refuses once its caller's opcode charged the state gas of the account it would add
+/// gives the charge back, and adds nothing: the limit does not hold it. Each case writes a fresh
+/// slot after the refused frame and runs under limits the refused charge would cross — what the
+/// transaction ends up holding, and one account less one gas — and succeeds exactly as it does
+/// without a limit.
+///
+/// Only the value `CALL` its caller cannot fund reaches revm with the charge made: its opcode
+/// charges the new account before the balance is known, and revm refuses the frame when it moves
+/// the value. The other cases pin that nothing is held where nothing is charged: `CALLCODE` moves
+/// value within its caller's own account and never adds one, and under EIP-8037 `CREATE` and
+/// `CREATE2` refuse a creation their caller cannot fund before they charge it, and charge only a
+/// destination with nothing at it, which cannot collide. A frame past the call-stack limit is
+/// refused with the charge made too; no transaction reaches that depth under the execution cap,
+/// and the unit tests of the frame lifecycle pin it.
+#[test]
+fn test_a_frame_revm_refuses_is_not_held_for_its_upfront_charge() {
+    let account = one_account();
+    let empty_init = Bytes::new();
+    let taken = |address: Address| funded().account_nonce(address, 1);
+    let cases: [(&str, MemoryDatabase, BytecodeBuilder); 6] = [
+        (
+            "a CALL its caller cannot fund",
+            funded(),
+            then_call_with(BytecodeBuilder::default(), CALL, EMPTY, 2_000),
+        ),
+        (
+            "a CALLCODE its caller cannot fund",
+            funded(),
+            then_call_with(BytecodeBuilder::default(), CALLCODE, EMPTY, 2_000),
+        ),
+        (
+            "a CREATE its caller cannot fund",
+            funded(),
+            then_create_with(BytecodeBuilder::default(), false, 2_000),
+        ),
+        (
+            "a CREATE2 its caller cannot fund",
+            funded(),
+            then_create_with(BytecodeBuilder::default(), true, 2_000),
+        ),
+        (
+            "a CREATE whose address is taken",
+            taken(A.create(0)),
+            then_create_with(BytecodeBuilder::default(), false, 0),
+        ),
+        (
+            "a CREATE2 whose address is taken",
+            taken(A.create2_from_code(B256::ZERO, &empty_init)),
+            then_create_with(BytecodeBuilder::default(), true, 0),
+        ),
+    ];
+    for (name, db, site) in cases {
+        let db = db.account_code(A, write_slots(site, 0, 1).stop().build());
+        let tx = call(CALLER, A, U256::ZERO, BELOW_CAP);
+        let free = run_under(db.clone(), tx.clone(), u64::MAX);
+        assert!(free.result.is_success(), "{name}: {:?}", free.result);
+        assert_eq!(free.gas.state, one_slot(), "{name}: the slot alone");
+
+        for limit in [free.gas.state, account - 1] {
+            let limited = run_under(db.clone(), tx.clone(), limit);
+            assert!(limited.result.is_success(), "{name}, limit {limit}: {:?}", limited.result);
+            assert_eq!(limited.limit_exceeded, None, "{name}, limit {limit}");
+            assert_eq!(limited.gas, free.gas, "{name}, limit {limit}: as without the limit");
+            assert!(
+                limited.state.get(&EMPTY).is_none_or(|account| account.info.balance.is_zero()),
+                "{name}, limit {limit}: nothing moved"
+            );
+        }
+    }
+}
+
+/// The result of each call to [`EMPTY`] an inspector saw end.
+#[derive(Default)]
+struct CallsToEmpty(Vec<(InstructionResult, Bytes)>);
+
+impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for CallsToEmpty {
+    fn call_end(
+        &mut self,
+        _: &mut MegaContext<DB>,
+        inputs: &CallInputs,
+        outcome: &mut CallOutcome,
+    ) {
+        if inputs.target_address == EMPTY {
+            self.0.push((outcome.result.result, outcome.result.output.clone()));
+        }
+    }
+}
+
+/// A frame revm decides to run, or answers with a success, adds the account its caller's opcode
+/// was charged for, so the charge is held, and a crossing latches the transaction — one case per
+/// opcode family. A value call to an account with no code is answered by revm without running and
+/// rewritten to the stop at once, so an inspector sees the answer the caller gets. The stop keeps
+/// none of what the frame's start wrote: no value moved, no account created, and the history of
+/// its records given back.
+#[test]
+fn test_a_frame_revm_decides_is_held_for_its_upfront_charge() {
+    let account = one_account();
+    let body = mega_evm::history_gas(TX_BODY_SIZE).expect("a body has a price");
+    let cases: [(&str, BytecodeBuilder); 3] = [
+        (
+            "a value CALL that creates its recipient",
+            then_call(BytecodeBuilder::default(), EMPTY, 1),
+        ),
+        ("a CREATE", then_create_with(BytecodeBuilder::default(), false, 0)),
+        ("a CREATE2", then_create_with(BytecodeBuilder::default(), true, 0)),
+    ];
+    for (name, site) in cases {
+        let db = funded().account_code(A, site.stop().build());
+        let stopped = run_under(db.clone(), call(CALLER, A, U256::ZERO, BELOW_CAP), account - 1);
+        assert_state_stopped(name, &stopped, account - 1, account);
+        assert_eq!(stopped.gas.state, 0, "{name}");
+        assert_eq!(stopped.gas.history, body, "{name}: the records' history came back");
+        assert!(stopped.state.get(&EMPTY).is_none_or(|account| account.info.balance.is_zero()));
+        assert!(stopped.state.get(&A.create(0)).is_none_or(|account| !account.is_created()));
+    }
+
+    let db =
+        funded().account_code(A, then_call(BytecodeBuilder::default(), EMPTY, 1).stop().build());
+    let mut evm = MegaEvm::new(context(db).with_tx_runtime_limits(
+        EvmTxRuntimeLimits::no_limits().with_tx_state_gas_limit(account - 1),
+    ))
+    .with_inspector(CallsToEmpty::default());
+    let outcome = evm.execute_transaction(call(CALLER, A, U256::ZERO, BELOW_CAP)).unwrap();
+    let stop = outcome.limit_exceeded.expect("the call is stopped");
+    assert_eq!(evm.inspector().0, [(InstructionResult::Revert, stop.revert_data())]);
+}
+
+/// The records a frame's start makes are held before revm builds the frame, and its upfront state
+/// gas after revm has decided it. A value call whose records cross the data-size limit is answered
+/// with that stop, adds no account, and gives its upfront charge back: the state-gas limit that
+/// charge would have crossed is not.
+#[test]
+fn test_a_frame_start_whose_records_cross_is_stopped_for_its_records() {
+    let account = one_account();
+    let limit = TX_BODY_SIZE + 2 * WRITE_RECORD_SIZE - 1;
+    let db =
+        funded().account_code(A, then_call(BytecodeBuilder::default(), EMPTY, 1).stop().build());
+    let outcome = MegaEvm::new(
+        context(db).with_tx_runtime_limits(
+            EvmTxRuntimeLimits::no_limits()
+                .with_tx_state_gas_limit(account - 1)
+                .with_tx_data_size_limit(limit),
+        ),
+    )
+    .execute_transaction(call(CALLER, A, U256::ZERO, BELOW_CAP))
+    .unwrap();
+    assert_eq!(
+        outcome.limit_exceeded,
+        Some(LimitCheck::ExceedsLimit {
+            kind: LimitKind::DataSize,
+            limit,
+            used: limit + 1,
+            frame_local: false,
+        }),
+        "the caller's account and the recipient's, over the limit by one byte",
+    );
+    assert_eq!(outcome.gas.state, 0);
 }
 
 /* ---------- one limit for the whole call stack ---------- */

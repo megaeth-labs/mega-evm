@@ -72,12 +72,19 @@
 //! pay is an out-of-gas whatever the limit: the authorities' before the first frame, which are
 //! taken back on a crossing; the first frame's recipient or created account, which the first frame
 //! is then answered with the stop for; a fresh slot and a destruction's new beneficiary, which
-//! stop the frame; and a new account a `CALL`, `CALLCODE`, `CREATE` or `CREATE2` adds, whose frame
-//! is answered with the stop. Deployed code is held just before `return_create` charges it, as its
-//! bytes are, so a crossing leaves no code behind — and only once `return_create` is sure to make
-//! the charge: a creation that cannot pay the regular costs it charges first, or the state gas
-//! itself, runs out of gas there whatever the limit. Wherever the state gas and a record cross
-//! together, the state gas is the stop reported.
+//! stop the frame; and a new account a `CALL`, `CREATE` or `CREATE2` adds, which its opcode is
+//! charged for upfront and the limit holds once revm has decided the frame. A frame revm refuses —
+//! a value call its caller cannot fund, one past the call-stack limit — gives that charge back and
+//! is never held for it; a frame revm builds, or answers with a success, returns the stop.
+//!
+//! Deployed code is held just before `return_create` charges it, as its bytes are, so a crossing
+//! leaves no code behind — and only once `return_create` is sure to make the charge: a creation
+//! that cannot pay the regular costs it charges first, or the state gas itself, runs out of gas
+//! there whatever the limit.
+//!
+//! Wherever the state gas and a record cross together at one site, the state gas is the stop
+//! reported. At a frame start the records are held before revm builds the frame, and a frame they
+//! stop adds no account, so its upfront state gas is given back rather than held.
 //!
 //! It is a limit on gas, so it counts state at the SALT price: a slot or an account in a bucket
 //! `m` times the minimum costs `m` times the schedule's entry, and reaches the limit that many

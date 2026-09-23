@@ -159,7 +159,7 @@ impl AdditionalLimit {
 
     /// Rewrites `result` to the latched stop, when the transaction is latched: a success or a
     /// revert becomes the latched revert. A halt stays what it is.
-    fn apply_latch(&self, result: &mut FrameResult) {
+    pub(crate) fn apply_latch(&self, result: &mut FrameResult) {
         let Some(latched) = &self.latched else { return };
         let interpreter_result = result.interpreter_result_mut();
         if interpreter_result.result.is_ok_or_revert() {

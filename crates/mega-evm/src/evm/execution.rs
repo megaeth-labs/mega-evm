@@ -403,7 +403,10 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
     /// 4. the keyless deployment rewrite ([`MegaEvm::rewrite_keyless`]);
     /// 5. the frame's lane is pushed and the writes its start makes are counted; a limit they cross
     ///    answers the frame with the stop before it runs;
-    /// 6. revm builds the frame.
+    /// 6. revm builds the frame, or answers it;
+    /// 7. the state gas the caller was charged upfront for the frame's start is held to the
+    ///    state-gas limit, unless revm refused the frame and so gives it back
+    ///    ([`hold_upfront_state_gas`]).
     ///
     /// Steps 1 and 2 are the pre-frame check: they answer a frame nothing may start. The frame's
     /// own writes are counted after the interceptor and the rewrite, because the rewrite decides
@@ -416,7 +419,7 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
     ///
     /// Before any of it, the state gas the caller holds is noted: the state-gas limit counts it
     /// as held outside the frame, with its own entry pushed beside the frame's lane, and adds to
-    /// it what the frame charges.
+    /// it what the frame charges. An interceptor's answer is held as revm's own is at step 7.
     #[inline]
     fn frame_init(
         &mut self,
@@ -433,8 +436,9 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
             self.inner.ctx.additional_limit.push_empty_frame();
             return Ok(ItemOrResult::Result(result));
         }
-        if let Some(result) = self.intercept(&mut frame_init) {
+        if let Some(mut result) = self.intercept(&mut frame_init) {
             self.inner.ctx.additional_limit.push_empty_frame();
+            hold_upfront_state_gas(&mut self.inner.ctx, Some(&mut result));
             return Ok(ItemOrResult::Result(result));
         }
         let frame_init = self.rewrite_keyless(frame_init);
@@ -460,14 +464,16 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
         match outcome {
             Ok(address) => {
                 ctx.additional_limit.set_frame_address(address);
+                hold_upfront_state_gas(ctx, None);
                 Ok(ItemOrResult::Item(self.inner.frame_stack.get()))
             }
-            Err(result) => {
+            Err(mut result) => {
                 if let Some((creator, nonce)) = creator {
                     if account_nonce(ctx, creator) == nonce {
                         ctx.additional_limit.creation_did_not_bump_nonce();
                     }
                 }
+                hold_upfront_state_gas(ctx, Some(&mut result));
                 Ok(ItemOrResult::Result(result))
             }
         }
@@ -563,7 +569,8 @@ where
     }
 
     /// revm's inspected frame start, with the lanes kept aligned: a frame the inspector answers
-    /// itself never reaches [`EvmTr::frame_init`], so an empty lane stands in for it.
+    /// itself never reaches [`EvmTr::frame_init`], so an empty lane stands in for it, and its
+    /// answer is held to the state-gas limit as revm's own is ([`hold_upfront_state_gas`]).
     #[inline]
     fn inspect_frame_init(
         &mut self,
@@ -578,6 +585,7 @@ where
                 output = answer;
             }
             ctx.additional_limit.push_empty_frame();
+            hold_upfront_state_gas(ctx, Some(&mut output));
             frame_end_checked(ctx, inspector, &frame_init.frame_input, &mut output);
             return Ok(ItemOrResult::Result(output));
         }
@@ -813,6 +821,40 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
     }
 }
 
+/// Holds the state gas the caller was charged upfront for the frame that is starting — the new
+/// account a value `CALL` adds, a creation's account — to the state-gas limit, once revm has
+/// decided the frame. `answer` is the frame's result when it was answered without running; a
+/// frame revm built has none yet.
+///
+/// revm's `CALL`, `CREATE` and `CREATE2` make that charge before anything knows whether the frame
+/// can start, and a frame that adds no account gives it back when its answer returns
+/// ([`FrameResult::refundable_state_gas_charge`]): a value call its caller cannot fund, a call past
+/// the call-stack limit, an answer that fails. Such a charge is never held. A charge that stands —
+/// the frame is built, or answered with a success, as a value call to an account with no code is
+/// — is held, and a crossing latches the transaction: a built frame returns the stop before its
+/// first instruction, and an answer is rewritten to it here, so an inspector sees the answer the
+/// caller gets. The writes the frame's start made go with the frames the stop reverts. A built
+/// frame that later fails gives the charge back too, but by then it has started, and a crossing
+/// inside a frame that later fails is a crossing.
+///
+/// The frame's own entry is on top by now, and holds what its caller held, the charge included;
+/// the frame itself holds nothing yet. Every other charge was held where it was made, so only the
+/// upfront one can cross here.
+fn hold_upfront_state_gas<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    ctx: &mut MegaContext<DB, ExtEnvs>,
+    answer: Option<&mut FrameResult>,
+) {
+    let Some(answer) = answer else {
+        ctx.additional_limit.check_state_gas(0);
+        return;
+    };
+    if answer.refundable_state_gas_charge().is_none() &&
+        ctx.additional_limit.check_state_gas(0).exceeded_limit()
+    {
+        ctx.additional_limit.apply_latch(answer);
+    }
+}
+
 /// The answer a frame gets before anything builds or answers it otherwise, in this order: the
 /// latched stop of a stopped transaction, then the depth guard's `CallTooDeep`.
 fn answer_before_building<DB: Database, ExtEnvs: ExternalEnvTypes>(
@@ -1030,4 +1072,104 @@ fn charge_records_made_outside_a_frame<DB: Database, ExtEnvs: ExternalEnvTypes>(
     }
     ctx.additional_limit.set_top_level_write_record_gas(top_level);
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        test_utils::MemoryDatabase, EvmTxRuntimeLimits, LimitKind, MegaLimitExceeded, MegaSpecId,
+    };
+    use alloy_primitives::{address, U256};
+    use alloy_sol_types::SolError;
+
+    const CALLER: Address = address!("00000000000000000000000000000000000e0001");
+    const TARGET: Address = address!("00000000000000000000000000000000000e0002");
+
+    /// A `CALL` from `caller` to `target` of `value` wei, which its opcode charged a new account
+    /// for when `charged`.
+    fn call(caller: Address, target: Address, value: u64, charged: bool) -> FrameInput {
+        FrameInput::Call(Box::new(CallInputs {
+            input: CallInput::Bytes(Bytes::new()),
+            return_memory_offset: 0..0,
+            gas_limit: 100_000,
+            reservoir: 0,
+            bytecode_address: target,
+            known_bytecode: Default::default(),
+            target_address: target,
+            caller,
+            value: CallValue::Transfer(U256::from(value)),
+            scheme: CallScheme::Call,
+            is_static: false,
+            charged_new_account_state_gas: charged,
+        }))
+    }
+
+    /// A `CALL` of one wei to `TARGET`, which its opcode charged a new account for.
+    fn value_call() -> FrameInput {
+        call(CALLER, TARGET, 1, true)
+    }
+
+    /// A `CREATE` its opcode charged the created account for.
+    fn creation() -> FrameInput {
+        let mut inputs =
+            CreateInputs::new(CALLER, CreateScheme::Create, U256::ZERO, Bytes::new(), 100_000, 0);
+        inputs.set_charged_create_state_gas(true);
+        inputs.set_charged_state_gas_address(TARGET);
+        FrameInput::Create(Box::new(inputs))
+    }
+
+    /// A context under a state-gas limit of 99, with the transaction's own frame on the call stack
+    /// holding 100 — the upfront charge of the frame it starts — and the entry of that frame
+    /// pushed.
+    fn starting_a_frame_charged_100() -> MegaContext<MemoryDatabase> {
+        let mut ctx = MegaContext::new(MemoryDatabase::default(), MegaSpecId::SATIN)
+            .with_tx_runtime_limits(EvmTxRuntimeLimits::no_limits().with_tx_state_gas_limit(99));
+        let _ = ctx.additional_limit.on_frame_init(&call(CALLER, CALLER, 0, false), 0);
+        ctx.additional_limit.note_caller_state_gas(100);
+        ctx.additional_limit.push_empty_frame();
+        ctx
+    }
+
+    /// A frame revm refuses — past the call-stack limit, which no transaction reaches under the
+    /// execution cap — gives its caller's upfront charge back, so the charge is not held, for a
+    /// call and a creation alike; the answer stays what it was.
+    #[test]
+    fn test_a_refused_frame_is_not_held_for_its_upfront_charge() {
+        for input in [value_call(), creation()] {
+            let mut ctx = starting_a_frame_charged_100();
+            let mut refused =
+                synthetic_frame_result(&input, InstructionResult::CallTooDeep, Bytes::new());
+            assert!(refused.refundable_state_gas_charge().is_some(), "{input:?}");
+            hold_upfront_state_gas(&mut ctx, Some(&mut refused));
+            assert_eq!(ctx.additional_limit.latched(), None, "{input:?}");
+            assert_eq!(refused.instruction_result(), InstructionResult::CallTooDeep);
+        }
+    }
+
+    /// A charge that stands is held: a frame revm built latches the transaction, and a success
+    /// answer carrying the charge latches it and is rewritten to the stop.
+    #[test]
+    fn test_a_charge_that_stands_is_held() {
+        let stop = LimitCheck::ExceedsLimit {
+            kind: LimitKind::StateGrowth,
+            limit: 99,
+            used: 100,
+            frame_local: false,
+        };
+        let mut ctx = starting_a_frame_charged_100();
+        hold_upfront_state_gas(&mut ctx, None);
+        assert_eq!(ctx.additional_limit.latched(), Some(&stop), "a built frame");
+
+        let mut ctx = starting_a_frame_charged_100();
+        let mut answered =
+            synthetic_frame_result(&value_call(), InstructionResult::Stop, Bytes::new());
+        hold_upfront_state_gas(&mut ctx, Some(&mut answered));
+        assert_eq!(ctx.additional_limit.latched(), Some(&stop), "a success answer");
+        assert_eq!(answered.instruction_result(), InstructionResult::Revert);
+        assert_eq!(
+            answered.interpreter_result().output,
+            Bytes::from(MegaLimitExceeded { kind: 3, limit: 99 }.abi_encode()),
+        );
+    }
 }

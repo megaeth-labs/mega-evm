@@ -24,16 +24,17 @@
 //! [`AdditionalLimit`](crate::AdditionalLimit) for the abort protocol). A history charge the frame
 //! cannot pay is an ordinary out-of-gas, which burns the frame's gas the way any other does.
 //!
-//! The other four run in a wrapper that holds the state gas revm's instruction charged for the
-//! account the frame would add to the state-gas limit — a crossing answers the frame with the stop
-//! before it is built — and then charges their frame for the write records the frame it starts
-//! makes — a value transfer's sender and recipient, a creation's creator nonce and created
+//! The other four run in a wrapper that charges their frame for the write records the frame it
+//! starts makes — a value transfer's sender and recipient, a creation's creator nonce and created
 //! account — before the frame runs, so the gas it forwards is not reduced by them and its
 //! allowance is free for what the recipient does. What the frame does not keep goes back to the
 //! caller when it returns. The frame the opcode is suspending on carries the caller's reservoir,
 //! which the charge has just moved, so the wrapper writes the reservoir it left into the frame's
 //! input; and a caller that cannot pay the charge drops that frame before it fails, because an
-//! interpreter halts on an instruction's error only when no frame is pending.
+//! interpreter halts on an instruction's error only when no frame is pending. The state gas revm's
+//! instruction charged for the account the frame would add is held to the state-gas limit later,
+//! once revm has decided the frame: revm refuses some frames after the charge — a value call its
+//! caller cannot fund, one past the call-stack limit — and gives the charge back.
 //!
 //! A wrapper keeps the static gas revm's table charges for its opcode, so the gas schedule is
 //! unchanged.
@@ -226,22 +227,21 @@ fn selfdestruct<DB: Database, ExtEnvs: ExternalEnvTypes>(
     commit_after::<false, _, _>(context, host::selfdestruct)
 }
 
-/// Runs `inner`, holds the state gas it charged to the state-gas limit, and charges the frame the
-/// history of the write records the frame `inner` starts will make.
+/// Runs `inner` and charges the frame the history of the write records the frame `inner` starts
+/// will make.
 ///
-/// revm's instruction charges the caller the state gas of the account the frame would add — a
-/// value transfer's new recipient, a created account — before it builds the frame's input. A
-/// crossing latches the transaction, and the frame is answered with the stop before it is built,
-/// as a frame whose start crosses the data-size limit is: the gas the opcode forwarded and the
-/// state gas it charged come back to the caller the way they come back from any frame that
-/// reverts, and the caller returns the stop without running on. Such a frame makes no records, so
-/// it is charged no history.
+/// The charge is made after revm's instruction has computed the gas it forwards, so it comes out
+/// of what the caller kept rather than out of what the callee gets. An opcode that starts no frame
+/// — a creation the balance, the nonce or the depth refuses, an out-of-gas — makes no records and
+/// is charged nothing. A frame revm refuses once it has it — a value call the caller cannot fund,
+/// one past the call-stack limit — makes no records either, and its failure gives the charge
+/// back. A charge the caller cannot pay fails the opcode with an out-of-gas, which takes the frame
+/// the opcode was suspending on with it ([`abandon_frame`]).
 ///
-/// The history charge is made after revm's instruction has computed the gas it forwards, so it
-/// comes out of what the caller kept rather than out of what the callee gets. An opcode that
-/// starts no frame — a call the balance cannot fund, a creation the depth refuses — makes no
-/// records and is charged nothing. A charge the caller cannot pay fails the opcode with an
-/// out-of-gas, which takes the frame the opcode was suspending on with it ([`abandon_frame`]).
+/// revm's instruction has also charged the caller the state gas of the account the frame would
+/// add — a value transfer's new recipient, a created account. That charge is held to the state-gas
+/// limit when revm has decided the frame, not here: a frame revm refuses gives it back, and a
+/// limit that held it would stop the transaction for an account nobody adds.
 ///
 /// The frame inherits the reservoir the charge left, not the one the caller held before it
 /// ([`inherit_reservoir`]).
@@ -261,8 +261,7 @@ fn charge_frame_start<DB: Database, ExtEnvs: ExternalEnvTypes>(
         }
         _ => return result,
     };
-    let check = host.additional_limit.check_state_gas(interpreter.gas.state_gas_spent());
-    if check.exceeded_limit() || !host.prices_history() {
+    if !host.prices_history() {
         return result;
     }
     let (Some(on_lane), Some(caller)) = (
