@@ -1701,14 +1701,18 @@ pub mod volatile_data_ext {
                 context,
                 inner_outcome,
                 on_halt: |halt| {
-                    // Every halt past the operand pop followed the deployed load; a stack
-                    // underflow is the one raised before it. For the members of this family whose
-                    // revm body loads first, the halt came after the host already marked, and
-                    // marking again changes nothing. The wrapper still aborts here without
-                    // applying the cap, as the deployed one did, so the mark caps the transaction
-                    // only once a later tail applies it.
-                    if !matches!(halt, InstructionResult::StackUnderflow) &&
-                        target == Some(context.host.beneficiary_address())
+                    // Every halt past the operand pop followed the deployed load. Two are raised
+                    // before it, on both schedules: a stack underflow, and SELFDESTRUCT's
+                    // rejection in a static frame, which precedes its pop. For the members of this
+                    // family whose revm body loads first, the halt came after the host already
+                    // marked, and marking again changes nothing. The wrapper still aborts here
+                    // without applying the cap, as the deployed one did, so the mark caps the
+                    // transaction only once a later tail applies it.
+                    if !matches!(
+                        halt,
+                        InstructionResult::StackUnderflow |
+                            InstructionResult::StateChangeDuringStaticCall
+                    ) && target == Some(context.host.beneficiary_address())
                     {
                         context
                             .host

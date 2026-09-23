@@ -262,6 +262,27 @@ fn test_value_call_in_static_frame_is_not_detained() {
     assert!(!detained(setup, STATIC_CHARGE_BUDGET, inner_call(CALL, BENEFICIARY, 1, 0)));
 }
 
+/// `SELFDESTRUCT` rejects a static frame before it pops its target, on both schedules, so a
+/// static frame never loads the beneficiary whatever its budget; the same frame reached through a
+/// plain `CALL` loads it and is detained.
+#[test]
+fn test_selfdestruct_to_beneficiary_in_static_frame_is_not_detained() {
+    let destruct =
+        || BytecodeBuilder::default().push_address(BENEFICIARY).append(SELFDESTRUCT).build();
+    for spec in [MegaSpecId::REX4, MegaSpecId::REX5, MegaSpecId::REX6] {
+        for budget in [40, 2_000, 5_100, 100_000] {
+            assert!(
+                !detained(Setup { static_frame: true, ..Setup::on(spec) }, budget, destruct()),
+                "{spec:?}: a static-frame SELFDESTRUCT to the beneficiary with a budget of {budget}",
+            );
+            assert!(
+                detained(Setup::on(spec), budget, destruct()),
+                "{spec:?}: a SELFDESTRUCT to the beneficiary with a budget of {budget}",
+            );
+        }
+    }
+}
+
 /// A valued call to an empty beneficiary first pays the storage-gas wrapper's new-account charge,
 /// which the deployed schedule took before its load. Free at the minimum SALT multiplier; at the
 /// base cost the frame cannot afford it unless a storage stipend covers most of it.
