@@ -680,6 +680,33 @@ fn test_running_out_of_the_frames_own_gas_still_halts() {
     }
 }
 
+/// Writes after a read are held to the cap by the regular gas they spend. With room in the
+/// reservoir for their state and history gas, a thousand fresh slots — 22,100,000 of compute —
+/// cross it and stop the transaction. Without that room the writes drain the withheld gas first
+/// and the frame runs out of its own gas where it would have undetained: it halts.
+#[test]
+fn test_writes_after_a_read_stop_at_the_cap_or_run_out_of_their_own_gas() {
+    let mut code = op(BytecodeBuilder::default(), TIMESTAMP);
+    for slot in 1..=1_000_u64 {
+        code = code.sstore(U256::from(slot), U256::from(1));
+    }
+    let code = code.stop().build();
+
+    let run = execute(
+        MemoryDatabase::default().account_code(CONTRACT, code.clone()),
+        tx(CALLER, CONTRACT, ABOVE),
+    );
+    assert_stopped(&run, intrinsic(ABOVE));
+
+    let run = execute(
+        MemoryDatabase::default().account_code(CONTRACT, code),
+        tx(CALLER, CONTRACT, BELOW),
+    );
+    assert!(matches!(run.outcome.result, ExecutionResult::Halt { .. }), "{:?}", run.outcome.result);
+    assert_eq!(run.outcome.limit_exceeded, None);
+    assert_eq!(run.outcome.result.gas().tx_gas_used(), BELOW, "a halt burns the gas");
+}
+
 /* ---------- what is not marked ---------- */
 
 /// A read that does not happen marks nothing, and neither does one whose opcode fails after it:

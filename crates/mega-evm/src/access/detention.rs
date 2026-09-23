@@ -297,8 +297,14 @@ impl Detention {
     /// off. When the frame halts, what the halt burns is not compute.
     ///
     /// Returns the limit, and the compute the transaction had spent, when the frame ran out of
-    /// gas while detention withheld some of it: the cap bound before the frame's own gas, and the
-    /// frame must stop the transaction rather than halt.
+    /// gas while detention still held back some of what it withheld: the cap bound before the
+    /// frame's own gas, and the frame must stop the transaction rather than halt.
+    ///
+    /// Without detention the frame would have had `min(withheld, reservoir)` more regular gas when
+    /// it ran out ([`release`]). While that is above zero the charge that failed may have been one
+    /// the cap refused, and the cap is the tighter of the two bounds, so it is the one reported.
+    /// Once the frame's state and history charges have drawn the reservoir dry, the withheld gas
+    /// is spent and the frame ran out exactly where it would have undetained: its own gas.
     #[inline]
     pub(crate) fn on_frame_end(
         &mut self,
@@ -314,7 +320,8 @@ impl Detention {
         }
         debug_assert_eq!(self.frames.len(), depth + 1, "the frame that returns is the last");
         let withheld = self.frames.last().map_or(0, |frame| frame.withheld);
-        let stop = (withheld > 0 && runs_out_of_gas(result))
+        let held_back = withheld.min(gas.reservoir());
+        let stop = (held_back > 0 && runs_out_of_gas(result))
             .then(|| (self.limit.unwrap_or(u64::MAX), self.compute(gas, depth)));
         if let Some(frame) = self.frames.pop() {
             self.minted = self.minted.saturating_sub(frame.minted);
@@ -549,6 +556,15 @@ mod tests {
         detention.on_frame_run(&mut frame, 0, 0);
         detention.commit_reads(VolatileDataAccess::TIMESTAMP, &mut frame, 0, 0);
         assert_eq!(frame.remaining(), 1_000_000, "nothing to withhold");
+        assert_eq!(detention.on_frame_end(InstructionResult::OutOfGas, &mut frame, 0), None);
+
+        // Withheld gas the frame's writes drew dry is spent: the frame ran out of its own gas.
+        let mut detention = detaining();
+        let mut frame = gas(100_000_000, 0);
+        detention.on_frame_run(&mut frame, 0, 0);
+        detention.commit_reads(VolatileDataAccess::TIMESTAMP, &mut frame, 0, 0);
+        assert!(frame.record_state_cost(frame.reservoir()));
+        frame.spend_all();
         assert_eq!(detention.on_frame_end(InstructionResult::OutOfGas, &mut frame, 0), None);
 
         for result in [InstructionResult::MemoryLimitOOG, InstructionResult::InvalidFEOpcode] {

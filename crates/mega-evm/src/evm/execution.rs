@@ -692,10 +692,10 @@ fn before_frame_run<DB: Database, ExtEnvs: ExternalEnvTypes>(
 /// for the child's start to add to the transaction's; a frame that returns gets the regular gas
 /// detention withheld from it back into its result.
 ///
-/// A frame that ran out of gas while detention withheld some of it crossed the compute limit
-/// rather than its own gas: its halt becomes the transaction-level stop, a revert carrying
-/// `MegaLimitExceeded` (kind: compute), and the transaction is latched, so no caller resumes.
-/// The withheld gas goes back with the revert, to the caller and in the end to the sender.
+/// A frame that ran out of gas while detention still held back some of what it withheld crossed
+/// the compute limit rather than its own gas: its halt becomes the transaction-level stop, a revert
+/// carrying `MegaLimitExceeded` (kind: compute), and the transaction is latched, so no caller
+/// resumes. The withheld gas goes back with the revert, to the caller and in the end to the sender.
 #[inline]
 fn after_frame_run<DB: Database, ExtEnvs: ExternalEnvTypes, E>(
     ctx: &mut MegaContext<DB, ExtEnvs>,

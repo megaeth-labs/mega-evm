@@ -52,15 +52,17 @@
 //! - **a storage write restored to its original value**: it refills state and history gas that
 //!   spilled onto regular gas, possibly before the read, so the frame is held to the limit again.
 //!
-//! A frame that runs out of regular gas while detention withheld some of it has crossed the cap,
-//! not its own gas: detention holds the frame to less than it was given, so the charge that
-//! failed was one the cap refused. The frame then stops the transaction the way every
+//! A frame that runs out of regular gas while detention still holds back some of what it withheld
+//! has crossed the cap, not its own gas: undetained, the frame would have had that gas to charge
+//! against, so the cap is the tighter bound. The frame then stops the transaction the way every
 //! transaction-level limit does — it reverts with `MegaLimitExceeded` (kind: compute), the
 //! transaction is latched, no caller resumes, and the transaction settles like an EIP-8037 revert
 //! (see [`AdditionalLimit`](crate::AdditionalLimit)). What the frame had left of its allowance when
 //! the charge failed is spent; the withheld gas is not, and goes back to the sender. A frame
 //! detention withheld nothing from runs out of its own gas, and halts: a child forwarded less
-//! than the limit leaves the transaction halts on its own, and its caller resumes.
+//! than the limit leaves the transaction halts on its own, and its caller resumes. So does a frame
+//! whose state and history charges drew the withheld gas dry: it ran out where it would have
+//! undetained.
 //!
 //! State and history charges are not held back. They draw on the reservoir first, where the
 //! withheld gas sits, so a detained frame pays for what it writes and appends as it would have.
