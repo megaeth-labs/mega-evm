@@ -22,6 +22,10 @@
 //!   checked against a limit it is about to reach (`satin`); the same one byte short of it, so the
 //!   last log crosses and the transaction is stopped (`stopped`); and through op-revm, which has no
 //!   limit to check (`op_revm`).
+//! - `state_limits`: the same transaction under a state-gas limit and a KV limit equal to exactly
+//!   the state gas and the write records it keeps, so every fresh slot is held to both as it is
+//!   written (`satin`); and under a state-gas limit one gas short, so the last slot crosses and the
+//!   transaction is stopped (`stopped`). Its op-revm baseline is `data_size_limit/op_revm`.
 //!
 //! Two more run through `MegaEvm` alone, because they price something op-revm has no equivalent
 //! of: `salt_storage_writes` and `salt_new_accounts` each draw one EIP-8037 state gas charge per
@@ -33,7 +37,9 @@
 //! Every workload is run once before it is measured, and the run is held to what it must draw:
 //! each pays its body's history, the logging one pays for the bytes its logs append and the
 //! calldata one for the bytes it carries, and the data-size one keeps exactly the bytes and
-//! records it is sized for, and stops at its last log one byte short of them. A workload that
+//! records it is sized for, and stops at its last log one byte short of them; the state-limit one
+//! keeps exactly the state gas and records its limits allow, and stops at its last slot one gas
+//! short of them. A workload that
 //! stopped drawing what it is here to measure would otherwise still benchmark, and measure the
 //! wrong thing.
 #![allow(missing_docs)]
@@ -386,6 +392,49 @@ fn bench_transact(c: &mut Criterion) {
             BatchSize::SmallInput,
         );
     });
+
+    // The state-limit arms: the same transaction under a state-gas and a KV limit it exactly
+    // reaches, and under a state-gas limit one gas short of it.
+    let state_gas = MegaEvm::new(mega_context(db.clone()))
+        .execute_transaction(OpTx(limited_tx.clone()))
+        .unwrap()
+        .gas
+        .state;
+    let state_limited = |limit| {
+        mega_context(db.clone()).with_tx_runtime_limits(
+            EvmTxRuntimeLimits::no_limits()
+                .with_tx_state_gas_limit(limit)
+                .with_tx_kv_update_limit(REPEAT),
+        )
+    };
+    let at_limit = MegaEvm::new(state_limited(state_gas))
+        .execute_transaction(OpTx(limited_tx.clone()))
+        .unwrap();
+    assert!(at_limit.result.is_success(), "state_limits: {:?}", at_limit.result);
+    assert_eq!(at_limit.gas.state, state_gas, "state_limits: the arm must reach its state gas");
+    assert_eq!(at_limit.usage.write_records, REPEAT, "state_limits: and its records");
+    let stopped = MegaEvm::new(state_limited(state_gas - 1))
+        .execute_transaction(OpTx(limited_tx.clone()))
+        .unwrap();
+    assert_eq!(
+        stopped.limit_exceeded,
+        Some(LimitCheck::ExceedsLimit {
+            kind: LimitKind::StateGrowth,
+            limit: state_gas - 1,
+            used: state_gas,
+            frame_local: false,
+        }),
+        "state_limits/stopped: the last slot must be the gas that crosses",
+    );
+    for (arm, limit) in [("satin", state_gas), ("stopped", state_gas - 1)] {
+        group.bench_function(format!("state_limits/{arm}"), |b| {
+            b.iter_batched(
+                || MegaEvm::new(state_limited(limit)),
+                |mut evm| evm.transact(OpTx(limited_tx.clone())).unwrap(),
+                BatchSize::SmallInput,
+            );
+        });
+    }
 
     // The SALT arms: the same transaction against a minimal environment and against one where
     // every bucket is crowded, both through `MegaEvm` — op-revm has nothing to compare to.
