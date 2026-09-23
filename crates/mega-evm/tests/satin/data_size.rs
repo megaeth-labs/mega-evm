@@ -19,6 +19,7 @@ use mega_evm::{
 use revm::{
     bytecode::opcode::{CALL, CREATE, GAS, LOG0, POP, PUSH0, RETURN, REVERT, STOP},
     context::result::{ExecutionResult, HaltReason},
+    context_interface::cfg::GasId,
     interpreter::{
         interpreter::EthInterpreter, CreateInputs, CreateOutcome, InstructionResult, Interpreter,
     },
@@ -567,24 +568,41 @@ fn test_an_account_write_one_byte_over_stops_on_the_recipient() {
     }));
 }
 
-/// What one gas limit did with the fresh-slot write.
+/// What one gas limit did with a transaction whose data size approaches the limit.
 enum Bound {
     /// The gas limit did not cover the intrinsic cost, so the transaction was not included.
     Rejected,
-    /// The write ran out of gas before its record was counted.
+    /// The transaction ran out of gas before the write that approaches the limit was counted.
     OutOfGas,
-    /// The write completed, and the data-size stop is what the transaction reports.
+    /// The write was counted, and the data-size stop is what the transaction reports.
     DataSize,
-    /// The write completed inside the data-size limit.
+    /// The write was counted inside the data-size limit and the transaction succeeded.
     Success,
 }
 
+/// `A`'s code for the store sweep: one fresh slot.
 fn fresh_slot() -> Bytes {
     BytecodeBuilder::default().sstore(U256::ZERO, U256::from(1)).stop().build()
 }
 
-fn bound_at(gas_limit: u64, data_limit: u64) -> Bound {
-    let db = funded().account_code(A, fresh_slot());
+/// `A`'s code for the frame-start sweep: a value `CALL` of one wei to [`FRESH`], which writes
+/// two accounts, `A`'s and [`FRESH`]'s.
+fn value_call_to_fresh() -> Bytes {
+    BytecodeBuilder::default()
+        .append_many([PUSH0, PUSH0, PUSH0, PUSH0])
+        .push_number(1_u8)
+        .push_address(FRESH)
+        .append(GAS)
+        .append(CALL)
+        .append(POP)
+        .stop()
+        .build()
+}
+
+/// A call from `CALLER` to `A` running `code`, at `gas_limit`, under a transaction data-size limit
+/// of `data_limit`.
+fn bound_at(code: &Bytes, gas_limit: u64, data_limit: u64) -> Bound {
+    let db = funded().account_code(A, code.clone()).account_balance(A, U256::from(1));
     let limits = EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(data_limit);
     match MegaEvm::new(context(db).with_tx_runtime_limits(limits)).execute_transaction(call(
         CALLER,
@@ -614,30 +632,30 @@ fn bound_at(gas_limit: u64, data_limit: u64) -> Bound {
     }
 }
 
-/// The smallest gas limit at which the fresh slot's write completes.
-fn gas_where_the_write_completes(data_limit: u64) -> u64 {
-    let mut low = 0_u64;
-    let mut high = 1_000_000_u64;
-    assert!(
-        !matches!(bound_at(high, data_limit), Bound::Rejected | Bound::OutOfGas),
-        "the high bound must reach the write"
-    );
-    while low + 1 < high {
-        let middle = low + (high - low) / 2;
-        if matches!(bound_at(middle, data_limit), Bound::Rejected | Bound::OutOfGas) {
-            low = middle;
-        } else {
-            high = middle;
-        }
-    }
-    high
+/// The smallest gas limit at which `code`'s write is counted rather than run out of gas.
+fn gas_where_the_write_is_counted(code: &Bytes, data_limit: u64) -> u64 {
+    smallest_gas_limit(1_000_000, |gas| {
+        !matches!(bound_at(code, gas, data_limit), Bound::Rejected | Bound::OutOfGas)
+    })
 }
 
-/// Gas limit at which a top-level fresh `SSTORE` completes and its record is counted.
+/// The smallest gas limit at which a top-level fresh `SSTORE` is counted at the spec's byte
+/// prices.
 ///
-/// The sweep measures it at the spec's byte prices. Below it the transaction halts out of gas
-/// and the record is not counted. The legacy engine quoted 62,325 for a prototype of this
-/// boundary; that figure is not this threshold.
+/// It is what the transaction pays up to and including the store, and nothing after it:
+///
+/// | Part | Gas |
+/// |---|---:|
+/// | the call's intrinsic regular gas | 15,000 |
+/// | the body's history: 310 bytes at 88 | 27,280 |
+/// | two `PUSH32` | 6 |
+/// | the `SSTORE`'s regular gas: 100 static, 2,100 cold, 19,900 set | 22,100 |
+/// | the `SSTORE`'s state gas: a slot's 64 bytes at 1,530 | 97,920 |
+/// | **total** | **162,306** |
+///
+/// Below it the transaction runs out of gas before the store completes, whatever the data-size
+/// limit. The record's history — 40 bytes at 88, 3,520 — is not part of it: it is charged after
+/// the record is counted, and only for a record the limit keeps.
 const FRESH_SLOT_COUNTED_AT: u64 = 162_306;
 
 /// A fresh slot's write meets two limits, and the one that binds first is the one reported.
@@ -650,26 +668,66 @@ const FRESH_SLOT_COUNTED_AT: u64 = 162_306;
 /// it, the same write halts out of gas.
 #[test]
 fn test_whichever_of_gas_and_data_size_binds_first_is_reported() {
+    let code = fresh_slot();
     // The write is 40 bytes on top of the body. One byte under that, the write itself crosses.
     let crosses = mega_evm::TX_BODY_SIZE + WRITE_RECORD_SIZE - 1;
     let fits = mega_evm::TX_BODY_SIZE + WRITE_RECORD_SIZE;
-    let counted_at = gas_where_the_write_completes(crosses);
-    let kept_at = gas_where_the_write_completes(fits);
+    let counted_at = gas_where_the_write_is_counted(&code, crosses);
+    let kept_at = gas_where_the_write_is_counted(&code, fits);
     let record_history = mega_evm::write_record_history_gas(1).expect("one record has a price");
 
     assert_eq!(kept_at - counted_at, record_history, "a kept record costs its history and no more");
-    assert!(matches!(bound_at(counted_at - 1, crosses), Bound::OutOfGas));
-    assert!(matches!(bound_at(counted_at, crosses), Bound::DataSize));
-    assert!(matches!(bound_at(kept_at, crosses), Bound::DataSize));
-    assert!(matches!(bound_at(counted_at, fits), Bound::OutOfGas));
-    assert!(matches!(bound_at(kept_at - 1, fits), Bound::OutOfGas));
-    assert!(matches!(bound_at(kept_at, fits), Bound::Success));
+    assert!(matches!(bound_at(&code, counted_at - 1, crosses), Bound::OutOfGas));
+    assert!(matches!(bound_at(&code, counted_at, crosses), Bound::DataSize));
+    assert!(matches!(bound_at(&code, kept_at, crosses), Bound::DataSize));
+    assert!(matches!(bound_at(&code, counted_at, fits), Bound::OutOfGas));
+    assert!(matches!(bound_at(&code, kept_at - 1, fits), Bound::OutOfGas));
+    assert!(matches!(bound_at(&code, kept_at, fits), Bound::Success));
+
+    // The figure is what the call pays before its code runs — the gas an empty call spends — then
+    // the two pushes and the store's regular and state gas, all read from the schedule in force.
+    let empty_call = MegaEvm::new(context(funded().account_code(A, Bytes::from_static(&[STOP]))))
+        .execute_transaction(call(CALLER, A, U256::ZERO, GAS_LIMIT))
+        .unwrap();
+    assert!(empty_call.result.is_success());
+    let params = mega_evm::satin_gas_params();
+    let pushes = 2 * 3;
+    let store_regular = params.get(GasId::sstore_static()) +
+        params.get(GasId::cold_storage_cost()) +
+        params.get(GasId::sstore_set_without_load_cost());
+    let store_state = params.get(GasId::sstore_set_state_gas());
+    assert_eq!(counted_at, empty_call.gas.gas_used + pushes + store_regular + store_state);
+    assert_eq!(kept_at, counted_at + record_history);
 
     if crate::common::runs_at_measurement_prices() {
         return;
     }
     assert_eq!(counted_at, FRESH_SLOT_COUNTED_AT);
+    assert_eq!(empty_call.gas.gas_used, 15_000 + 310 * 88);
+    assert_eq!((store_regular, store_state), (22_100, 97_920));
+    assert_eq!(store_state, mega_evm::constants::SLOT_STATE_GAS);
     assert_eq!(record_history, WRITE_RECORD_SIZE * mega_evm::constants::COST_PER_HISTORY_BYTE);
+}
+
+/// At a frame start the order is the other way round, and so is the rule's outcome: the caller
+/// pays for the records the frame's start makes at its opcode, before the frame is started and
+/// its records are counted. So the data-size limit does not move the out-of-gas boundary of a
+/// value `CALL`: the smallest gas limit that is not an out-of-gas is the same whether the two
+/// records cross the limit or fit it, and one gas below it is an out-of-gas under either.
+#[test]
+fn test_a_frame_start_is_charged_before_its_records_are_counted() {
+    let code = value_call_to_fresh();
+    // `A`'s account and `FRESH`'s: 80 bytes on top of the body.
+    let records = 2 * WRITE_RECORD_SIZE;
+    let crosses = mega_evm::TX_BODY_SIZE + records - 1;
+    let fits = mega_evm::TX_BODY_SIZE + records;
+    let charged_at = gas_where_the_write_is_counted(&code, crosses);
+
+    assert_eq!(gas_where_the_write_is_counted(&code, fits), charged_at);
+    assert!(matches!(bound_at(&code, charged_at - 1, crosses), Bound::OutOfGas));
+    assert!(matches!(bound_at(&code, charged_at, crosses), Bound::DataSize));
+    assert!(matches!(bound_at(&code, charged_at - 1, fits), Bound::OutOfGas));
+    assert!(matches!(bound_at(&code, charged_at, fits), Bound::Success));
 }
 
 /* ---------- a body over the limit, at the smallest gas limit validation accepts ---------- */
