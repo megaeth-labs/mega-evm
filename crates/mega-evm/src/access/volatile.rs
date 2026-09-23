@@ -233,6 +233,19 @@ mod tests {
         assert_eq!(all_block_env.block_env_only(), all_block_env);
     }
 
+    /// A union keeps a kind both sides hold: it is a union, not a difference.
+    #[test]
+    fn test_a_union_keeps_what_both_sides_hold() {
+        let both = VolatileDataAccess::TIMESTAMP | VolatileDataAccess::ORACLE;
+        assert_eq!(both | VolatileDataAccess::TIMESTAMP, both);
+        let mut assigned = both;
+        assigned |= VolatileDataAccess::ORACLE;
+        assert_eq!(assigned, both);
+        let mut inserted = both;
+        inserted.insert(both);
+        assert_eq!(inserted, both);
+    }
+
     /// Inserting is a union, and `contains` asks for every bit of its argument.
     #[test]
     fn test_insert_and_contains() {

@@ -674,6 +674,32 @@ fn test_a_stipend_is_not_compute() {
     }
 }
 
+/// A read made by a call is counted from the compute the caller paid at it: its pushes, its
+/// static and dynamic gas, and the gas it forwards to the callee less a value call's stipend,
+/// which nobody paid. The limit is exact for a plain call and for one carrying value.
+#[test]
+fn test_a_call_that_reads_counts_from_what_its_caller_paid() {
+    for (value, compute) in [
+        // PUSH0 x4, PUSH0, PUSH20, GAS and a warm CALL.
+        (false, 2 * 4 + 2 + 3 + 2 + 100),
+        // PUSH0 x4, PUSH1, PUSH20, GAS, a warm CALL and the value transfer.
+        (true, 2 * 4 + 3 + 3 + 2 + 100 + 9_000),
+    ] {
+        let code = BytecodeBuilder::default().append_many([PUSH0, PUSH0, PUSH0, PUSH0]);
+        let code = if value { code.push_number(1_u8) } else { code.append(PUSH0) };
+        let code = code.push_address(BENEFICIARY).append_many([GAS, CALL, POP, STOP]).build();
+        for gas_limit in TIERS {
+            let db = MemoryDatabase::default()
+                .account_code(CONTRACT, code.clone())
+                .account_balance(CONTRACT, U256::from(1))
+                .account_balance(BENEFICIARY, U256::from(1));
+            let run = execute(db, tx(CALLER, CONTRACT, gas_limit));
+            assert!(run.outcome.result.is_success(), "value {value}: {:?}", run.outcome.result);
+            assert_eq!(run.limit, Some(compute + CAP), "value {value}");
+        }
+    }
+}
+
 /// The regular gas a call from `CALLER` carrying one wei spends before its first instruction.
 fn intrinsic_of_a_value_call(gas_limit: u64) -> u64 {
     let db = MemoryDatabase::default()
