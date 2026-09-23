@@ -251,7 +251,7 @@ struct PeakStateGas {
 
 impl<CTX> Inspector<CTX, EthInterpreter> for PeakStateGas {
     fn step(&mut self, interp: &mut Interpreter<EthInterpreter>, _context: &mut CTX) {
-        self.start.get_or_insert(interp.gas.state_gas_spent());
+        self.start.get_or_insert_with(|| interp.gas.state_gas_spent());
     }
 
     fn step_end(&mut self, interp: &mut Interpreter<EthInterpreter>, _context: &mut CTX) {
