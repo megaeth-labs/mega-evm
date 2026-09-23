@@ -158,8 +158,9 @@ That read follows the operand consumption, the new-account storage gas where one
 A CALL-family frame that halts on the base access cost or the value-transfer cost therefore still registers the access, and one that halts on any earlier step does not.
 From Rex6, a CALL-family opcode whose target delegates through EIP-7702 to the beneficiary registers the access in the same way.
 The reduced compute gas limit binds at detention enforcement points.
-These are the volatile-guarded opcodes that complete, and, before Rex3, a call into the oracle contract that registers oracle access, as its frame starts.
-A volatile-guarded opcode that halts, or that `disableVolatileDataAccess()` rejects, enforces nothing, with one exception: from Rex4 the CALL-family opcodes are themselves volatile-guarded and enforce the limit even when their frame halts, so a registration they make binds at once.
+Once execution has started, these are the volatile-guarded opcodes that complete, and, before Rex3, a call into the oracle contract that registers oracle access, as its frame starts.
+The volatile-guarded opcodes are the block-environment opcodes listed above together with `BALANCE`, `EXTCODESIZE`, `EXTCODECOPY` and `EXTCODEHASH`, `SLOAD` from Rex3, and `SELFBALANCE`, `SELFDESTRUCT` and the CALL-family opcodes from Rex4; each is an enforcement point whatever account or slot it reads.
+A volatile-guarded opcode that halts, or that `disableVolatileDataAccess()` rejects, enforces nothing, with one exception: from Rex4 the CALL-family opcodes enforce the limit even when their frame halts, so a registration they make binds at once.
 A registration made by any other halting frame takes effect at the next enforcement point the transaction reaches, in any frame.
 A transaction whose halting read is its final volatile access reaches no further enforcement point, and its remainder runs under the limit already in effect.
 An access blocked by [`disableVolatileDataAccess()`](../system-contracts/mega-access-control.md) is the exception: the blocked opcode never runs, so it reads nothing and triggers nothing.
