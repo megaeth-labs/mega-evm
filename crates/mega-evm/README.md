@@ -64,7 +64,7 @@ The six system contracts live at their fixed `0x6342…` addresses and are deplo
 Four of them answer calls through an interceptor instead of running their bytecode.
 A `CALL` or `STATICCALL` is dispatched on its target address, then on the four selector bytes of its input: `CALLCODE` and `DELEGATECALL` never reach an interceptor, and a selector a contract does not intercept falls through to the deployed bytecode, whose answer is that contract's own — the two control contracts revert with `NotIntercepted()` from their fallback, and `KeylessDeploy` and the Oracle, which have none, revert with empty data on a selector they do not declare.
 A method that takes no value answers a value-bearing call with `NonZeroTransfer()`.
-`MegaAccessControl` and `MegaLimitControl` answer with what the engine knows so far — nothing has switched volatile-data access off, and `remainingComputeGas()` reports the regular gas the call was forwarded — until detention and the control contracts' compute-ledger semantics fill them in.
+`MegaAccessControl` and `MegaLimitControl` answer with what the engine knows so far — nothing has switched volatile-data access off, and `remainingComputeGas()` reports the regular gas the call was forwarded — until the control contracts' semantics fill them in: steering gas detention's switch, and answering with the compute ledger.
 The Oracle forwards a `sendHint` payload to the node's oracle service, and a `keylessDeploy` transaction is charged its fixed 100,000 gas and handed to the keyless rewrite hook that native keyless deployment fills in.
 
 The system address (`MEGA_SYSTEM_ADDRESS`) sends the protocol's own transactions: a legacy transaction from it to a whitelisted contract is validated — the whitelist, the chain id, the nonce and EIP-3607 — and promoted to a deposit, which pays no fee and rewards none.
@@ -86,7 +86,16 @@ The allowance is not gas: it never enters the frame's `Gas`, only a log's charge
 The history bytes a transaction reports count those bytes all the same, so a block's byte column and its history gas column part by exactly what allowances paid.
 The byte column is the history the schedule prices, not the chain's physical growth: a transaction exempt from history gas reports none, and a body counts its five fixed write records even when fewer fee accounts are written.
 
-The state-growth and KV limits, gas detention and keyless deployment arrive in later changes.
+Gas detention is in place: a transaction that reads volatile data — the block environment, the block beneficiary's account, the Oracle's storage — may compute at most 20,000,000 more gas after the read than it had spent at it.
+Compute is the regular gas spent: the state and history gas that spilled onto regular gas are not compute, and neither is what a halting frame burns.
+The Host marks the read where it loads the value, and the most restrictive read binds.
+Every frame keeps no more regular gas than the limit leaves the transaction; the rest waits in its reservoir, where state and history charges still reach it, and goes back into the frame's regular gas when the frame returns.
+A frame that runs out of gas while gas is still withheld from it crossed the cap: the transaction is stopped with a revert carrying `MegaLimitExceeded` of kind compute, and the sender gets back everything withheld.
+A frame that runs out of its own gas still halts.
+While `MegaAccessControl`'s switch is off for a frame, its volatile reads are refused: the frame reverts with `VolatileDataAccessDisabled`, having paid the opcode's static gas and nothing more.
+The protocol's own transactions, the system calls and the execution-spec gate's neutral configuration are not detained.
+
+The state-growth and KV limits and keyless deployment arrive in later changes.
 
 ## Quick start
 

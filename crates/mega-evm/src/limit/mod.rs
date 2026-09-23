@@ -5,6 +5,11 @@
 //! returns ([`MegaLimitExceeded`]). The mechanisms that meter a dimension (the data-size limit,
 //! detention, the state-growth and KV limits) fill these in.
 //!
+//! Gas detention caps compute, [`LimitKind::ComputeGas`]: its state lives beside this module, in
+//! [`Detention`](crate::Detention), because what it meters is gas rather than anything the lanes
+//! count. It stops a transaction through the same latch ([`AdditionalLimit::latch`]), with the
+//! compute the transaction may reach as the limit.
+//!
 //! It also counts what those limits meter at the sites the data-size limit counts: data-size
 //! bytes and write records, on a lane per frame ([`AdditionalLimit`]). The Host stages what it
 //! observes ([`StagedRecord`]) and the opcode commits it once it completed.
