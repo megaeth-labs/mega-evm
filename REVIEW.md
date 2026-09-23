@@ -99,10 +99,10 @@ These checks guard every change to the Satin engine.
 - `.github/workflows/exec-spec-satin.yml` runs the same fixture releases through `MegaEvm` with the state-test runner (`crates/mega-state-test`).
   Equivalence mode is the gate: Satin's machinery priced as the fixture's fork prices it, where every failure must be explained by a deviation registered in `crates/mega-state-test/src/deviations.rs`, with its reason and the exact entries it explains, each with the hashes Satin produces; every listed entry must fail exactly as listed, and the executed and skipped counts equal the fork runner's pins.
   Satin mode reports the same fixtures under Satin's own configuration in the step summary, and does not fail the job.
-  It runs when the engine, the runner or the lock changes.
+  The gate runs when a pull request changes the engine, the runner, the system contracts, the toolchain or the lock; the workflow's `execution-spec gate on Satin` job runs on every pull request and reports it, passing when the gate passed or had nothing to run.
 - A deviation is a rule Satin keeps on purpose and is reviewed as one: an entry added to explain a failure that is a bug is the defect, and an entry added, removed or given new hashes says which fixtures moved and why.
   `crates/mega-state-test/DEVIATIONS.md` is rendered from the registry, and a test keeps the two equal.
-- Neither workflow is a required check.
+- Neither workflow is a required check; `execution-spec gate on Satin` is the job a branch rule would require.
 
 ### Instruction counts (CodSpeed)
 

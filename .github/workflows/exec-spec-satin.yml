@@ -14,20 +14,16 @@ name: Execution-spec tests on Satin
 #
 # The fixture releases are the ones the revm fork's `scripts/run-tests.sh` names at the tag
 # Cargo.lock pins, so this gate and the fork runner's (exec-spec.yml) judge the same fixtures.
-# Not a required check.
+#
+# The `execution-spec gate on Satin` job always runs and reports the gate: it passes when the gate
+# passed, or when a pull request changes nothing the gate covers and the gate did not run. It is
+# the check a branch rule can require; a path filter on the pull request trigger would leave that
+# check pending on every pull request it filters out, so pull requests are filtered by the
+# `changes` job instead.
 
 on:
   workflow_dispatch:
   pull_request:
-    paths:
-      - Cargo.lock
-      - Cargo.toml
-      - rust-toolchain.toml
-      - crates/mega-evm/**
-      - crates/mega-state-test/**
-      - crates/state-test/**
-      - crates/system-contracts/**
-      - .github/workflows/exec-spec-satin.yml
   push:
     branches: [satin]
     paths:
@@ -48,8 +44,51 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  changes:
+    name: changes the gate covers
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      run: ${{ steps.diff.outputs.run }}
+    steps:
+      - uses: actions/checkout@v4
+        if: github.event_name == 'pull_request'
+        with:
+          # The merge commit and its parents; the first parent is the base it merges into.
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Compare the pull request with its base
+        id: diff
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          # A push to satin passed the push trigger's path filter, and a manual run asks for the gate.
+          if [ "$EVENT" != pull_request ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if ! git rev-parse --verify -q 'HEAD^2' > /dev/null; then
+            echo "::warning::HEAD is not the pull request's merge commit; running the gate"
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # The paths the push trigger filters on; the two lists stay equal. A rename lists both of
+          # its paths, so a file moved out of a covered path counts.
+          covered='^(Cargo\.lock|Cargo\.toml|rust-toolchain\.toml|\.github/workflows/exec-spec-satin\.yml)$|^crates/(mega-evm|mega-state-test|state-test|system-contracts)/'
+          if git diff --name-only --no-renames 'HEAD^1' HEAD | grep -qE "$covered"; then
+            run=true
+          else
+            run=false
+          fi
+          echo "the gate runs: $run"
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+
   exec-spec-satin:
     name: execution-spec tests on Satin
+    needs: changes
+    if: needs.changes.outputs.run == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
@@ -212,3 +251,31 @@ jobs:
             fi
           done
           exit "$status"
+
+  gate:
+    name: execution-spec gate on Satin
+    needs: [changes, exec-spec-satin]
+    # Always, a cancelled run included: a required check that is skipped counts as passed.
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Report the gate's outcome
+        env:
+          CHANGES: ${{ needs.changes.result }}
+          RUN: ${{ needs.changes.outputs.run }}
+          GATE: ${{ needs.exec-spec-satin.result }}
+        run: |
+          if [ "$CHANGES" != success ]; then
+            echo "::error::could not tell whether the gate had to run: the changes job ended $CHANGES"
+            exit 1
+          fi
+          if [ "$RUN" != true ]; then
+            echo "nothing the gate covers changed; the gate did not run"
+            exit 0
+          fi
+          if [ "$GATE" != success ]; then
+            echo "::error::the gate ended $GATE"
+            exit 1
+          fi
+          echo "the gate passed"
