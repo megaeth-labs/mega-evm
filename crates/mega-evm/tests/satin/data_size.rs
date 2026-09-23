@@ -433,3 +433,135 @@ fn test_a_reverting_creation_does_not_count_its_output() {
         LimitUsage { data_size: mega_evm::TX_BODY_SIZE + init.len() as u64, write_records: 0 },
     );
 }
+
+fn run_at(db: MemoryDatabase, tx: mega_evm::MegaTransaction, limit: u64) -> MegaTransactionOutcome {
+    MegaEvm::new(
+        context(db)
+            .with_tx_runtime_limits(EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(limit)),
+    )
+    .execute_transaction(tx)
+    .unwrap()
+}
+
+fn assert_stopped(outcome: &MegaTransactionOutcome, limit: u64, used: u64) {
+    assert!(!outcome.result.is_success() && !outcome.result.is_halt(), "{:?}", outcome.result);
+    assert_eq!(
+        outcome.limit_exceeded,
+        Some(LimitCheck::ExceedsLimit {
+            kind: LimitKind::DataSize,
+            limit,
+            used,
+            frame_local: false,
+        })
+    );
+}
+
+/// Calldata is in the body. One byte over that count stops the transaction before the callee
+/// runs, so a store the callee would have made is not part of the crossing figure.
+#[test]
+fn test_calldata_one_byte_over_stops_before_the_callee() {
+    let data = Bytes::from(vec![0xab; 50]);
+    let body = mega_evm::TX_BODY_SIZE + data.len() as u64;
+    let db = || {
+        funded().account_code(
+            A,
+            BytecodeBuilder::default().sstore(U256::ZERO, U256::from(1)).stop().build(),
+        )
+    };
+
+    let fits = run_at(db(), call_with_data(CALLER, A, data.clone(), GAS_LIMIT), body + 40);
+    assert!(fits.result.is_success(), "{:?}", fits.result);
+    assert_eq!(fits.usage, LimitUsage { data_size: body + 40, write_records: 1 });
+
+    let over = run_at(db(), call_with_data(CALLER, A, data, GAS_LIMIT), body - 1);
+    assert_stopped(&over, body - 1, body);
+    assert_eq!(over.usage, LimitUsage { data_size: body, write_records: 0 });
+    assert!(over.result.logs().is_empty());
+    assert!(over.state.get(&A).is_none_or(|account| {
+        account.storage.get(&U256::ZERO).is_none_or(|slot| !slot.is_changed())
+    }));
+}
+
+/// A log is 32 bytes for its address plus its data. One byte over that stops on the log: the
+/// store after it is not in the crossing figure.
+#[test]
+fn test_a_log_one_byte_over_stops_on_the_log() {
+    let data_len = 10u64;
+    let log_bytes = 32 + data_len;
+    let code = BytecodeBuilder::default()
+        .push_number(data_len)
+        .push_number(0_u64)
+        .append(LOG0)
+        .sstore(U256::from(1), U256::from(1))
+        .stop()
+        .build();
+    let db = || funded().account_code(A, code.clone());
+    let body = mega_evm::TX_BODY_SIZE;
+
+    let fits = run_at(db(), call(CALLER, A, U256::ZERO, GAS_LIMIT), body + log_bytes + 40);
+    assert!(fits.result.is_success(), "{:?}", fits.result);
+    assert_eq!(fits.result.logs().len(), 1);
+    assert_eq!(fits.result.logs()[0].data.data.len(), data_len as usize);
+    assert_eq!(fits.usage, LimitUsage { data_size: body + log_bytes + 40, write_records: 1 });
+
+    let over = run_at(db(), call(CALLER, A, U256::ZERO, GAS_LIMIT), body + log_bytes - 1);
+    assert_stopped(&over, body + log_bytes - 1, body + log_bytes);
+    assert!(over.result.logs().is_empty(), "the log that crossed was dropped");
+    assert_eq!(over.usage.data_size, body, "the store after the log never counted");
+}
+
+/// A storage write is one 40-byte record. One byte over that stops on the write: the log after
+/// it is not in the crossing figure.
+#[test]
+fn test_a_storage_write_one_byte_over_stops_on_the_write() {
+    let code = BytecodeBuilder::default()
+        .sstore(U256::ZERO, U256::from(1))
+        .push_number(10_u64)
+        .push_number(0_u64)
+        .append(LOG0)
+        .stop()
+        .build();
+    let db = || funded().account_code(A, code.clone());
+    let body = mega_evm::TX_BODY_SIZE;
+    let record = 40;
+
+    let fits = run_at(db(), call(CALLER, A, U256::ZERO, GAS_LIMIT), body + record + 32 + 10);
+    assert!(fits.result.is_success(), "{:?}", fits.result);
+    assert_eq!(fits.result.logs().len(), 1);
+    assert_eq!(fits.usage, LimitUsage { data_size: body + record + 42, write_records: 1 });
+
+    let over = run_at(db(), call(CALLER, A, U256::ZERO, GAS_LIMIT), body + record - 1);
+    assert_stopped(&over, body + record - 1, body + record);
+    assert!(over.result.logs().is_empty(), "the log after the write never ran");
+    assert_eq!(over.usage, LimitUsage { data_size: body, write_records: 0 });
+}
+
+/// A value transfer's recipient is one 40-byte record. One byte over that stops on the record,
+/// before the recipient's code runs.
+#[test]
+fn test_an_account_write_one_byte_over_stops_on_the_recipient() {
+    let db = || {
+        funded().account_code(
+            B,
+            BytecodeBuilder::default().sstore(U256::ZERO, U256::from(1)).stop().build(),
+        )
+    };
+    let body = mega_evm::TX_BODY_SIZE;
+    let record = 40;
+
+    let fits = run_at(db(), call(CALLER, B, U256::from(1), GAS_LIMIT), body + record + record);
+    assert!(fits.result.is_success(), "{:?}", fits.result);
+    assert_eq!(fits.state[&B].info.balance, U256::from(1));
+    assert_eq!(fits.usage, LimitUsage { data_size: body + record + record, write_records: 2 });
+
+    let over = run_at(db(), call(CALLER, B, U256::from(1), GAS_LIMIT), body + record - 1);
+    assert_stopped(&over, body + record - 1, body + record);
+    assert_eq!(over.usage, LimitUsage { data_size: body, write_records: 0 });
+    assert_eq!(
+        over.state.get(&B).map(|account| account.info.balance).unwrap_or_default(),
+        U256::ZERO
+    );
+    assert!(over.state.get(&B).is_none_or(|account| {
+        account.storage.get(&U256::ZERO).is_none_or(|slot| !slot.is_changed())
+    }));
+}

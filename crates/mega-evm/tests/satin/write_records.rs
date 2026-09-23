@@ -16,7 +16,8 @@ use mega_evm::{
         ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE,
     },
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    LimitUsage, MegaContext, MegaEvm, StagedRecord, TX_BODY_SIZE, WRITE_RECORD_SIZE,
+    LimitCheck, LimitKind, LimitUsage, MegaContext, MegaEvm, StagedRecord, TX_BODY_SIZE,
+    WRITE_RECORD_SIZE,
 };
 use revm::{
     bytecode::opcode::{
@@ -686,9 +687,19 @@ fn test_authorities_crossing_the_cap_are_not_applied() {
     assert!(at_the_cap.result.is_success(), "records equal to the cap do not cross it");
     assert_eq!(at_the_cap.usage, with_extra(records(1), tuple));
 
-    let outcome = with_cap(TX_BODY_SIZE + tuple + WRITE_RECORD_SIZE - 1);
+    let limit = TX_BODY_SIZE + tuple + WRITE_RECORD_SIZE - 1;
+    let outcome = with_cap(limit);
     assert!(!outcome.result.is_success() && !outcome.result.is_halt(), "{:?}", outcome.result);
-    assert!(outcome.limit_exceeded.is_some());
+    assert_eq!(
+        outcome.limit_exceeded,
+        Some(LimitCheck::ExceedsLimit {
+            kind: LimitKind::DataSize,
+            limit,
+            used: limit + 1,
+            frame_local: false,
+        }),
+        "the authority record is the byte that crosses, and nothing after it is counted"
+    );
     let authority = outcome.state.get(&AUTHORITY_1);
     assert!(
         authority.is_none_or(|a| a.info.nonce == 0 && a.info.is_empty_code_hash()),
