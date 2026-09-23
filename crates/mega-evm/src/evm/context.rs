@@ -30,7 +30,8 @@ pub(crate) type MegaInnerContext<DB> =
 /// It wraps op-revm's context and adds what `MegaETH` execution needs on top: the `MegaETH`
 /// spec and the external environments (SALT, oracle). The configuration is kept twice: the
 /// [`MegaSpecId`] view that callers see and the [`OpSpecId`] view op-revm executes on. Both are
-/// written together, only through [`MegaContext::with_cfg`], so they cannot drift apart.
+/// written together, only through [`MegaContext::with_cfg`] (and the test tooling's neutral
+/// configuration), so they cannot drift apart.
 ///
 /// Every context accessor delegates to the wrapped context, and so does every
 /// [`Host`](revm::interpreter::Host) method except the three that stage what a state-writing
@@ -51,6 +52,9 @@ pub struct MegaContext<DB: Database, ExtEnvs: ExternalEnvTypes = EmptyExternalEn
     system_originated: bool,
     /// Whether the running transaction pays history gas. See [`MegaContext::prices_history`].
     prices_history: bool,
+    /// Whether the context runs the neutral configuration. See [`MegaContext::with_neutral_cfg`].
+    #[cfg(any(test, feature = "test-utils"))]
+    neutral: bool,
 }
 
 impl<DB: Database> MegaContext<DB, EmptyExternalEnv> {
@@ -78,6 +82,8 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
             bucket_multipliers: BucketMultipliers::default(),
             system_originated: false,
             prices_history: true,
+            #[cfg(any(test, feature = "test-utils"))]
+            neutral: false,
         }
     }
 
@@ -87,11 +93,53 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     /// the EIP-8037 and EIP-2780 switches, the execution cap, the EIP-7708 switch, the
     /// system-call state-gas margin and the two code-size limits. Every other field (chain id,
     /// disabled checks, blob schedule) is taken from `cfg`.
+    ///
+    /// A context that ran the neutral configuration returns to the spec's.
     pub fn with_cfg(mut self, cfg: CfgEnv<MegaSpecId>) -> Self {
         let cfg = spec_cfg(cfg);
         self.inner = self.inner.with_cfg(op_cfg(&cfg));
         self.cfg = cfg;
+        #[cfg(any(test, feature = "test-utils"))]
+        {
+            self.neutral = false;
+        }
         self
+    }
+
+    /// Replaces the configuration with `cfg` as it is given, and turns off every dimension of
+    /// pricing only `MegaETH` has: the neutral configuration.
+    ///
+    /// It is test tooling, behind the `test-utils` feature, for the execution-spec gate, which
+    /// runs Ethereum's fixtures through Satin's machinery — its handler, frame lifecycle, Host
+    /// and instruction table — priced as the fixture's own fork prices them, so that what is
+    /// left to differ is what the machinery does rather than what `MegaETH` charges for.
+    ///
+    /// - Every field is taken from `cfg`, including the ones [`with_cfg`](Self::with_cfg) sets from
+    ///   the spec: the gas schedule, the EIP-8037, EIP-2780 and EIP-7708 switches, the execution
+    ///   cap and the code-size limits.
+    /// - No transaction pays history gas, and none has its schedule swapped for its history
+    ///   exemption: every transaction runs `cfg`'s schedule.
+    /// - SALT pricing needs nothing here: without a SALT environment every bucket is minimal, and
+    ///   the multiplier is one.
+    ///
+    /// The spec stays [`MegaSpecId::SATIN`], and with it the base spec the handler and the
+    /// journal execute. The precompile set is the EVM's, not the context's: a caller that wants
+    /// the fixture fork's replaces it on the [`MegaEvm`](crate::MegaEvm).
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn with_neutral_cfg(mut self, cfg: CfgEnv<MegaSpecId>) -> Self {
+        self.inner = self.inner.with_cfg(op_cfg(&cfg));
+        self.cfg = cfg;
+        self.neutral = true;
+        self.prices_history = false;
+        self
+    }
+
+    /// Whether the context runs the neutral configuration ([`with_neutral_cfg`]).
+    ///
+    /// [`with_neutral_cfg`]: Self::with_neutral_cfg
+    #[cfg(any(test, feature = "test-utils"))]
+    pub const fn is_neutral(&self) -> bool {
+        self.neutral
     }
 
     /// Replaces the block environment.
@@ -251,7 +299,14 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     /// that prices a deposited byte at zero. Both configuration views move together, and only
     /// when the transaction's exemption differs from the one in place: the two tables are built
     /// once for the process, so the swap is a shared clone.
+    ///
+    /// The neutral configuration prices no history and keeps its own schedule.
     fn set_history_exempt(&mut self, exempt: bool) {
+        #[cfg(any(test, feature = "test-utils"))]
+        if self.neutral {
+            self.prices_history = false;
+            return;
+        }
         self.prices_history = !exempt;
         let id = GasId::code_deposit_history_gas();
         let params = if exempt { satin_gas_params_history_exempt() } else { satin_gas_params() };
@@ -567,5 +622,106 @@ mod tests {
         assert_eq!(ctx.spec(), MegaSpecId::SATIN);
         assert_eq!(ctx.external_envs().salt_env.get_bucket_capacity(7).unwrap(), 1_024);
         assert_satin_cfg(&ctx);
+    }
+
+    /// An Osaka configuration, every field the spec fixes set the other way from Satin's.
+    fn osaka_cfg() -> CfgEnv<MegaSpecId> {
+        let mut cfg = CfgEnv::new_with_spec(MegaSpecId::SATIN);
+        cfg.chain_id = 1;
+        cfg.gas_params = GasParams::new_spec(EthSpecId::OSAKA);
+        cfg.enable_amsterdam_eip8037 = false;
+        cfg.enable_amsterdam_eip2780 = false;
+        cfg.tx_gas_limit_cap = None;
+        cfg.enable_amsterdam_eip7708 = true;
+        cfg.limit_contract_code_size = None;
+        cfg.limit_contract_initcode_size = None;
+        cfg
+    }
+
+    /// Asserts both configuration views carry `cfg` field for field.
+    fn assert_cfg_is(ctx: &MegaContext<EmptyDB, impl ExternalEnvTypes>, cfg: &CfgEnv<MegaSpecId>) {
+        assert_eq!(ctx.mega_cfg(), cfg);
+        assert_eq!(ctx.cfg(), &op_cfg(cfg));
+        assert_eq!(ctx.cfg().gas_params.table(), cfg.gas_params.table());
+    }
+
+    fn call_from(caller: Address) -> MegaTransaction {
+        alloy_op_evm::OpTx(crate::test_utils::op_transaction(revm::context::TxEnv {
+            caller,
+            ..Default::default()
+        }))
+    }
+
+    /// The neutral configuration takes every field from the caller — the ones the spec fixes
+    /// included — and prices no history.
+    #[test]
+    fn test_neutral_cfg_takes_every_field_as_given() {
+        let cfg = osaka_cfg();
+        let ctx =
+            MegaContext::new(EmptyDB::default(), MegaSpecId::SATIN).with_neutral_cfg(cfg.clone());
+
+        assert!(ctx.is_neutral());
+        assert!(!ctx.prices_history());
+        assert_eq!(ctx.spec(), MegaSpecId::SATIN);
+        assert_eq!(ctx.cfg().spec, OpSpecId::KARST);
+        assert_cfg_is(&ctx, &cfg);
+    }
+
+    /// A new transaction neither prices history nor swaps the schedule for its history
+    /// exemption, whichever kind of transaction it is: a user's, a system call, a deposit.
+    #[test]
+    fn test_neutral_cfg_survives_every_kind_of_transaction() {
+        let cfg = osaka_cfg();
+        let mut ctx =
+            MegaContext::new(EmptyDB::default(), MegaSpecId::SATIN).with_neutral_cfg(cfg.clone());
+
+        ctx.set_tx(call_from(Address::repeat_byte(0x11)));
+        ctx.on_new_tx();
+        assert!(!ctx.prices_history(), "a user's transaction pays no history");
+        assert_cfg_is(&ctx, &cfg);
+
+        ctx.on_new_system_call();
+        assert!(!ctx.prices_history());
+        assert_cfg_is(&ctx, &cfg);
+
+        let mut deposit = call_from(Address::repeat_byte(0x22));
+        deposit.0.deposit.source_hash = revm::primitives::B256::repeat_byte(1);
+        deposit.0.base.tx_type = DEPOSIT_TRANSACTION_TYPE;
+        ctx.set_tx(deposit);
+        ctx.on_new_tx();
+        assert!(!ctx.prices_history());
+        assert_cfg_is(&ctx, &cfg);
+
+        // And back to a user's transaction, after an exempt one would have swapped the schedule.
+        ctx.set_tx(call_from(Address::repeat_byte(0x11)));
+        ctx.on_new_tx();
+        assert!(!ctx.prices_history());
+        assert_cfg_is(&ctx, &cfg);
+    }
+
+    /// [`MegaContext::with_cfg`] returns a neutral context to the spec's configuration, and its
+    /// transactions pay history again.
+    #[test]
+    fn test_with_cfg_leaves_the_neutral_configuration() {
+        let mut ctx = MegaContext::new(EmptyDB::default(), MegaSpecId::SATIN)
+            .with_neutral_cfg(osaka_cfg())
+            .with_cfg(osaka_cfg());
+
+        assert!(!ctx.is_neutral());
+        assert_satin_cfg(&ctx);
+        ctx.set_tx(call_from(Address::repeat_byte(0x11)));
+        ctx.on_new_tx();
+        assert!(ctx.prices_history());
+        assert_satin_cfg(&ctx);
+    }
+
+    /// A context is not neutral unless it is asked to be.
+    #[test]
+    fn test_a_new_context_is_not_neutral() {
+        let mut ctx = MegaContext::new(EmptyDB::default(), MegaSpecId::SATIN);
+        assert!(!ctx.is_neutral());
+        ctx.set_tx(call_from(Address::repeat_byte(0x11)));
+        ctx.on_new_tx();
+        assert!(ctx.prices_history());
     }
 }
