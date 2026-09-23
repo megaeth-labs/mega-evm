@@ -461,8 +461,8 @@ fn self_calling_loop() -> Bytes {
     Bytes::from(code)
 }
 
-/// How far a transaction's history gas can fall behind the bytes it appended, pinned as the known
-/// quantity it is.
+/// How far a transaction's history gas can fall behind the bytes it appended, and the column that
+/// reports the bytes regardless.
 ///
 /// The allowance is drawn before the frame's own gas rather than after it, so it is a discount on
 /// the first 160 bytes of every value-transferring call rather than a fallback for a frame that
@@ -470,13 +470,12 @@ fn self_calling_loop() -> Bytes {
 /// that, so the grant is repeatable for as long as the transaction's gas lasts: the loop below
 /// costs about 10,000 gas a turn, which is some twenty thousand turns inside one transaction at
 /// the execution cap — around three megabytes of log bytes, and close to 280,000,000 of history
-/// gas, on no ledger.
+/// gas, on no gas ledger.
 ///
-/// The bytes are still counted on the data-size lane, so the limits that meter bytes see all of
-/// them; what falls behind is the history *gas* column. Whether the allowance becomes a fallback,
-/// or a block's history column becomes a byte count beside its gas figure, is a decision for the
-/// block-level accounting, not for this mechanism. This test exists so the size of the gap is a
-/// number on record rather than a rediscovery.
+/// The allowance keeps paying first. What closes the gap for a reader is the byte column beside
+/// the gas: the transaction reports every byte it appended, the block sums them, and the
+/// difference between the two columns is what the allowances paid, a number on record rather than
+/// a rediscovery.
 #[test]
 fn test_the_gap_the_allowance_opens_between_bytes_and_gas_is_pinned() {
     if runs_at_measurement_prices() {
@@ -503,11 +502,15 @@ fn test_the_gap_the_allowance_opens_between_bytes_and_gas_is_pinned() {
         body() + record(),
         "and the history gas is the body and that one record: no event is on it",
     );
-
-    let bytes_appended = outcome.usage.data_size;
-    let bytes_paid_for = outcome.gas.history / COST_PER_HISTORY_BYTE - TX_BODY_SIZE;
     assert_eq!(
-        bytes_appended - bytes_paid_for,
+        outcome.gas.history_bytes,
+        TX_BODY_SIZE + WRITE_RECORD_SIZE + GRANTS * STORAGE_CALL_STIPEND_BYTES,
+        "the byte column has every event on it",
+    );
+
+    let bytes_paid_for = outcome.gas.history / COST_PER_HISTORY_BYTE;
+    assert_eq!(
+        outcome.gas.history_bytes - bytes_paid_for,
         GRANTS * STORAGE_CALL_STIPEND_BYTES,
         "one allowance per value call, and every one of them off the gas ledger",
     );

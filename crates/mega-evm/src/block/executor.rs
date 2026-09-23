@@ -34,6 +34,21 @@
 //! is the compile-time proof that an inspector observes and writes nothing back; the generic route
 //! is the checked one.
 //!
+//! # Committing an outcome
+//!
+//! alloy-evm's [`commit_transaction`](BlockExecutor::commit_transaction) cannot fail. Its contract
+//! is that a caller commits an outcome before it executes the next transaction, so the block's
+//! counters have not moved since the outcome was checked against them. A builder that executes
+//! several candidates and chooses among them commits through
+//! [`commit_transaction_outcome`](MegaBlockExecutor::commit_transaction_outcome), which checks the
+//! counters again and refuses an outcome the block no longer has room for. The trait's commit
+//! cannot refuse, and must not accept such an outcome silently either: a debug build makes the
+//! same check there and panics.
+//!
+//! Neither path checks the state a candidate executed against. A candidate executed before
+//! another commit changed that state is stale whatever the counters say, and executing it again
+//! is the builder's responsibility.
+//!
 //! # The pre-block observer
 //!
 //! Each pre-block step — the EIP-2935 call, the EIP-4788 call, and every system-contract deploy —
@@ -427,6 +442,26 @@ where
         Ok(())
     }
 
+    /// Whether the block, as its counters are now, still has room for the executed transaction
+    /// `output`: every check its execution held it to, before it ran and after, made again. It
+    /// reads the counters and changes nothing.
+    ///
+    /// Both commit paths share it: [`commit_transaction_outcome`](Self::commit_transaction_outcome)
+    /// refuses what it refuses, and [`commit_transaction`](BlockExecutor::commit_transaction)
+    /// asserts it in a debug build. It checks the counters only, not the state `output` executed
+    /// against.
+    fn check_room<T>(&self, output: &MegaBlockTxResult<T>) -> Result<(), BlockExecutionError> {
+        self.limiter.pre_execution_check(
+            output.tx_hash,
+            output.gas_limit,
+            output.tx_size,
+            output.da_size,
+            output.is_deposit,
+        )?;
+        self.check_da_footprint(output.da_footprint)?;
+        self.limiter.post_execution_check(output.tx_hash, &output.block_usage())
+    }
+
     /// Refuses an EVM that runs an inspector which may rewrite what execution produces.
     ///
     /// Checked at every entry point rather than once, because the inspector can be enabled after
@@ -580,7 +615,30 @@ where
         self.commit_transaction_outcome(output).map(Some)
     }
 
+    /// Commits `output`: builds its receipt, adds it to the block's counters and commits its
+    /// state.
+    ///
+    /// This commit cannot fail, and its contract is alloy-evm's: `output` is the outcome of the
+    /// transaction executed last, committed before the next one executes. The block's counters
+    /// are then the ones `output` was checked against, and a release build checks nothing again.
+    /// A caller that executes several candidates before it commits any commits through
+    /// [`commit_transaction_outcome`](MegaBlockExecutor::commit_transaction_outcome), which
+    /// refuses an outcome the block no longer has room for.
+    ///
+    /// Neither commit checks the state `output` executed against: an outcome executed before
+    /// another commit changed that state is the caller's to execute again.
+    ///
+    /// # Panics
+    ///
+    /// In a debug build, when the block no longer has room for `output` — a caller that broke the
+    /// contract, which would otherwise pack the block past a limit.
     fn commit_transaction(&mut self, output: Self::Result) -> GasOutput {
+        debug_assert!(
+            self.check_room(&output).is_ok(),
+            "commit_transaction was handed an outcome the block no longer has room for, which \
+             commit_transaction_outcome refuses: {}",
+            self.check_room(&output).expect_err("the check just failed"),
+        );
         self.limiter.post_execution_update(&output.block_usage());
 
         let MegaBlockTxResult { tx_type, is_deposit, depositor_nonce, inner, .. } = output;
@@ -661,9 +719,9 @@ where
     /// computes them from its own encoding is unconditionally safe.
     ///
     /// Nothing is committed. Hand the result to
-    /// [`commit_transaction`](BlockExecutor::commit_transaction), or to
-    /// [`commit_transaction_outcome`](Self::commit_transaction_outcome) to have the block's
-    /// admission re-checked first.
+    /// [`commit_transaction`](BlockExecutor::commit_transaction) before the next transaction
+    /// executes, or to [`commit_transaction_outcome`](Self::commit_transaction_outcome) when
+    /// another outcome may commit first.
     pub fn run_transaction<Tx>(
         &mut self,
         tx: Tx,
@@ -694,23 +752,21 @@ where
 
     /// Re-checks the block's admission and commits `output`.
     ///
-    /// The block's counters may have moved between the transaction executing and its commit — a
-    /// builder that executes candidates and then picks among them — so everything the block
-    /// holds a transaction to is checked once more, its data-availability footprint included, and
-    /// nothing changes before the check passes.
+    /// This is the commit for a builder that executes several candidates and then chooses among
+    /// them: the block's counters may have moved between a candidate executing and its commit, so
+    /// everything the block holds a transaction to is checked once more — its data-availability
+    /// footprint and the state gas it adds included — and nothing changes before the check
+    /// passes.
+    ///
+    /// The check covers the block's counters, not the state `output` executed against. A
+    /// candidate executed before another commit changed that state is stale whatever the counters
+    /// say, and executing it again is the builder's responsibility.
     pub fn commit_transaction_outcome(
         &mut self,
         output: MegaBlockTxResult<<R::Transaction as TransactionEnvelope>::TxType>,
     ) -> Result<GasOutput, BlockExecutionError> {
         self.check_admission()?;
-        self.limiter.pre_execution_check(
-            output.tx_hash,
-            output.gas_limit,
-            output.tx_size,
-            output.da_size,
-            output.is_deposit,
-        )?;
-        self.check_da_footprint(output.da_footprint)?;
+        self.check_room(&output)?;
         Ok(self.commit_transaction(output))
     }
 
@@ -797,7 +853,7 @@ where
             .execute_transaction(tx_env)
             .map_err(|err| BlockExecutionError::evm(err, tx_hash))?;
 
-        Ok(MegaBlockTxResult {
+        let result = MegaBlockTxResult {
             tx_type: inner.tx_type(),
             tx_hash,
             gas_limit,
@@ -807,7 +863,12 @@ where
             is_deposit,
             depositor_nonce,
             inner: outcome,
-        })
+        };
+        // A block that has reached its state gas refuses a transaction that adds some, and only
+        // its execution tells whether it does. Nothing is committed yet, so the refusal leaves the
+        // block as it was.
+        self.limiter.post_execution_check(tx_hash, &result.block_usage())?;
+        Ok(result)
     }
 
     /// Finishes the block and reports what it counted, on top of what

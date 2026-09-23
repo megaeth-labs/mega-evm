@@ -12,6 +12,16 @@
 //! so it is not compute. The ledgers are raw spend, before the refund; the receipt reports
 //! [`gas_used`](MegaGasUsage::gas_used), which is their sum less the refund, at least the EIP-7623
 //! floor.
+//!
+//! Beside the history ledger's gas sits the byte count it stands for,
+//! [`history_bytes`](MegaGasUsage::history_bytes). The two are not a price apart: the history
+//! allowance of a value transfer pays for its callee's first event before the callee's gas does,
+//! and what it pays for is on no gas ledger. The byte count is what the transaction appended; the
+//! gas is what its own gas paid for.
+//!
+//! The byte count is the history the schedule prices, not the chain's physical growth: a
+//! transaction exempt from history gas reports none of the bytes it carries, and a body counts
+//! its five fixed write records even when fewer fee accounts are written.
 
 use revm::context::result::{ResultAndState, ResultGas};
 
@@ -54,7 +64,7 @@ impl core::ops::DerefMut for MegaTransactionOutcome {
 ///
 /// `regular + state + history` is the transaction's raw spend,
 /// [`ResultGas::total_gas_spent`]; [`gas_used`](Self::gas_used) is
-/// [`ResultGas::tx_gas_used`].
+/// [`ResultGas::tx_gas_used`]. [`history_bytes`](Self::history_bytes) is a byte count, not gas.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct MegaGasUsage {
     /// Regular gas spent: everything that is neither state nor history gas, before the refund.
@@ -63,6 +73,18 @@ pub struct MegaGasUsage {
     pub state: u64,
     /// History gas spent, net of refills.
     pub history: u64,
+    /// The bytes the transaction appended to history, whoever paid for them: its body, one write
+    /// record per account or storage write it kept, the logs it kept and the code it deposited.
+    ///
+    /// At the cost per history byte they are worth [`history`](Self::history) plus what the
+    /// history allowances of its value transfers paid, which no gas ledger carries.
+    ///
+    /// They are the history bytes the schedule prices, not the chain's physical growth: a
+    /// transaction exempt from history gas (a deposit, a transaction the protocol sent, a system
+    /// call) reports none, and the body counts its five fixed write records — the sender's
+    /// account and the four accounts fees are credited to — even when fewer fee accounts are
+    /// written.
+    pub history_bytes: u64,
     /// The EIP-8037 reservoir left unspent, which the sender gets back.
     pub reservoir_remaining: u64,
     /// The EIP-7623 floor the receipt's gas used cannot fall below.
@@ -72,17 +94,18 @@ pub struct MegaGasUsage {
 }
 
 impl MegaGasUsage {
-    /// The ledgers of a transaction that settled into `result_gas` and spent `history` gas on
-    /// history.
+    /// The ledgers of a transaction that settled into `result_gas`, spent `history` gas on
+    /// history and appended `history_bytes` bytes of it.
     ///
     /// [`ResultGas`] has no history field; its total includes history gas, which is taken back
     /// out of regular here.
-    pub const fn new(result_gas: &ResultGas, history: u64) -> Self {
+    pub const fn new(result_gas: &ResultGas, history: u64, history_bytes: u64) -> Self {
         let state = result_gas.state_gas_spent_final();
         Self {
             regular: result_gas.total_gas_spent().saturating_sub(state).saturating_sub(history),
             state,
             history,
+            history_bytes,
             reservoir_remaining: result_gas.reservoir_remaining(),
             floor: result_gas.floor_gas(),
             gas_used: result_gas.tx_gas_used(),
@@ -116,10 +139,11 @@ mod tests {
     /// The three ledgers add up to the raw spend; the receipt figure is the spend less the refund.
     #[test]
     fn test_ledgers_split_the_raw_spend() {
-        let gas = MegaGasUsage::new(&result_gas(100_000, 30_000, 4_000, 21_000), 10_000);
+        let gas = MegaGasUsage::new(&result_gas(100_000, 30_000, 4_000, 21_000), 10_000, 125);
         assert_eq!(gas.regular, 60_000);
         assert_eq!(gas.state, 30_000);
         assert_eq!(gas.history, 10_000);
+        assert_eq!(gas.history_bytes, 125, "a byte count, carried as it was given");
         assert_eq!(gas.regular + gas.state + gas.history, 100_000);
         assert_eq!(gas.reservoir_remaining, 5_000);
         assert_eq!(gas.gas_used, 96_000);
@@ -129,7 +153,7 @@ mod tests {
     /// The floor binds the receipt figure and the block's execution gas, not the ledgers.
     #[test]
     fn test_floor_binds_receipt_and_block_execution_gas() {
-        let gas = MegaGasUsage::new(&result_gas(50_000, 20_000, 10_000, 45_000), 5_000);
+        let gas = MegaGasUsage::new(&result_gas(50_000, 20_000, 10_000, 45_000), 5_000, 0);
         assert_eq!(gas.regular, 25_000);
         assert_eq!(gas.floor, 45_000);
         assert_eq!(gas.gas_used, 45_000);

@@ -6,6 +6,10 @@
 //! records of applied EIP-7702 authorities) and what the outermost frame kept sit on the
 //! transaction's own lane.
 //!
+//! The history bytes a frame appends beside its write records — its logs, and the code its
+//! creations deposit — ride on the same lanes and follow the same rule, so what a transaction
+//! reports it appended is what it kept.
+//!
 //! Every operation is O(1): the totals are cached and kept in step with each change.
 
 #[cfg(not(feature = "std"))]
@@ -52,6 +56,10 @@ pub(crate) struct Lane {
     /// What is left of the history allowance this frame was granted, if it was granted one. It
     /// never enters the frame's gas, and what it does not spend disappears with the frame.
     pub(crate) stipend_remaining: u64,
+    /// The history bytes the frame, and the children it kept, appended that are not write
+    /// records: the logs it emitted and the code its creations deposited. Its write records are
+    /// history too, and are counted in [`used`](Self::used).
+    pub(crate) log_and_code_bytes: u64,
 }
 
 impl Lane {
@@ -75,6 +83,7 @@ impl Lane {
             creator_record: false,
             budget,
             stipend_remaining: 0,
+            log_and_code_bytes: 0,
         }
     }
 
@@ -127,6 +136,8 @@ pub(crate) struct FrameLimitTracker {
     total_used: LimitUsage,
     /// `tx_refund` plus every lane's `refund`.
     total_refund: LimitUsage,
+    /// The log and code bytes the outermost frame kept, plus every lane's.
+    log_and_code_bytes: u64,
 }
 
 impl FrameLimitTracker {
@@ -137,6 +148,7 @@ impl FrameLimitTracker {
         self.lanes.clear();
         self.total_used = LimitUsage::ZERO;
         self.total_refund = LimitUsage::ZERO;
+        self.log_and_code_bytes = 0;
     }
 
     /// The number of lanes, which is the number of frames on the call stack.
@@ -147,6 +159,12 @@ impl FrameLimitTracker {
     /// What the transaction keeps if every running frame succeeds.
     pub(crate) const fn net(&self) -> LimitUsage {
         self.total_used.saturating_sub(self.total_refund)
+    }
+
+    /// The history bytes the transaction appended beside its write records — its logs and the
+    /// code it deposited — with every running frame counted as if it succeeds.
+    pub(crate) const fn log_and_code_bytes(&self) -> u64 {
+        self.log_and_code_bytes
     }
 
     /// The running frame's lane.
@@ -192,6 +210,15 @@ impl FrameLimitTracker {
             None => self.tx_used = self.tx_used.saturating_add(usage),
         }
         self.total_used = self.total_used.saturating_add(usage);
+    }
+
+    /// Counts `bytes` of a log or of deposited code on the running frame's lane, or on the
+    /// transaction's outside any frame.
+    pub(crate) fn record_log_and_code_bytes(&mut self, bytes: u64) {
+        if let Some(lane) = self.lanes.last_mut() {
+            lane.log_and_code_bytes = lane.log_and_code_bytes.saturating_add(bytes);
+        }
+        self.log_and_code_bytes = self.log_and_code_bytes.saturating_add(bytes);
     }
 
     /// Counts `usage` on the transaction's own lane, whatever frame is running: what it stands
@@ -253,6 +280,8 @@ impl FrameLimitTracker {
                 Some(caller) => {
                     caller.used = caller.used.saturating_add(lane.used);
                     caller.refund = caller.refund.saturating_add(lane.refund);
+                    caller.log_and_code_bytes =
+                        caller.log_and_code_bytes.saturating_add(lane.log_and_code_bytes);
                     if lane.address.is_some() && lane.address == caller.address {
                         caller.account_recorded |= lane.account_recorded;
                     }
@@ -266,6 +295,7 @@ impl FrameLimitTracker {
         }
         self.total_used = self.total_used.saturating_sub(lane.used);
         self.total_refund = self.total_refund.saturating_sub(lane.refund);
+        self.log_and_code_bytes = self.log_and_code_bytes.saturating_sub(lane.log_and_code_bytes);
         if let Some(caller) = self.lanes.last_mut() {
             if lane.creator_record {
                 caller.used = caller.used.saturating_add(WRITE_RECORD);
@@ -383,6 +413,45 @@ mod tests {
         assert_eq!(t.net(), t.net_uncached());
         assert_eq!(t.net(), LimitUsage::ZERO);
         assert_eq!(t.depth(), 0);
+    }
+
+    /// Log and code bytes follow the frame that appended them: a running frame counts as if it
+    /// succeeds, a success hands them to its caller, a failure discards them, and what was
+    /// counted outside any frame is the transaction's.
+    #[test]
+    fn test_log_and_code_bytes_follow_their_frame() {
+        let mut t = FrameLimitTracker::default();
+        t.record_log_and_code_bytes(5);
+        t.push(Lane::new(Some(ADDR), false, u64::MAX, 0));
+        t.record_log_and_code_bytes(10);
+        t.push(Lane::new(None, false, u64::MAX, 0));
+        t.record_log_and_code_bytes(100);
+        assert_eq!(t.log_and_code_bytes(), 115);
+
+        let failed = t.pop(false).expect("the child popped");
+        assert_eq!(failed.log_and_code_bytes, 100);
+        assert_eq!(t.log_and_code_bytes(), 15, "the failed child's bytes are gone");
+
+        t.push(Lane::new(None, false, u64::MAX, 0));
+        t.record_log_and_code_bytes(20);
+        t.pop(true);
+        assert_eq!(t.log_and_code_bytes(), 35);
+        assert_eq!(
+            t.current().unwrap().log_and_code_bytes,
+            30,
+            "the kept child's are its caller's"
+        );
+
+        t.pop(false);
+        assert_eq!(t.log_and_code_bytes(), 5, "only what was outside the outermost frame is left");
+
+        t.push(Lane::new(Some(ADDR), false, u64::MAX, 0));
+        t.record_log_and_code_bytes(7);
+        t.pop(true);
+        assert_eq!(t.log_and_code_bytes(), 12, "the outermost frame's success keeps its bytes");
+
+        t.reset();
+        assert_eq!(t.log_and_code_bytes(), 0);
     }
 
     /// A refund larger than the usage clamps the net at zero.

@@ -1,9 +1,11 @@
 //! Tests of the Satin engine.
 
 mod common;
+mod compute_gas;
 mod contract_size;
 mod db_error;
 mod equivalence;
+mod history_bytes;
 mod history_exemption;
 mod history_gas;
 mod history_reservoir;

@@ -9,7 +9,7 @@ use revm::{
 use super::{
     frame_limit::{FrameLimitTracker, Lane},
     record::{HistoryBytes, RecordEffect, StagedRecord},
-    EvmTxRuntimeLimits, LimitCheck, LimitKind, LimitUsage, WRITE_RECORD,
+    EvmTxRuntimeLimits, LimitCheck, LimitKind, LimitUsage, WRITE_RECORD, WRITE_RECORD_SIZE,
 };
 use crate::storage_call_stipend;
 
@@ -51,6 +51,10 @@ pub struct AdditionalLimit {
     /// The history gas validation charged for the transaction's body, part of
     /// [`history_gas_spent`](Self::history_gas_spent).
     intrinsic_history_gas: u64,
+    /// The bytes of the transaction's body that
+    /// [`intrinsic_history_gas`](Self::intrinsic_history_gas) paid for, part of
+    /// [`history_bytes`](Self::history_bytes).
+    intrinsic_history_bytes: u64,
     /// The history gas of the write record the transaction's own frame makes — its value's
     /// recipient, or the account it creates — charged before the first frame and given back when
     /// that frame fails.
@@ -60,6 +64,8 @@ pub struct AdditionalLimit {
     pending_frame_charge: FrameCharge,
     /// The history gas the settled transaction spent.
     history_gas_spent: u64,
+    /// The history bytes the settled transaction appended.
+    history_bytes: u64,
 }
 
 impl AdditionalLimit {
@@ -87,9 +93,11 @@ impl AdditionalLimit {
         self.sender = Address::ZERO;
         self.frame_began = false;
         self.intrinsic_history_gas = 0;
+        self.intrinsic_history_bytes = 0;
         self.top_level_write_record_gas = 0;
         self.pending_frame_charge = FrameCharge::NONE;
         self.history_gas_spent = 0;
+        self.history_bytes = 0;
     }
 
     /* The latch */
@@ -163,9 +171,39 @@ impl AdditionalLimit {
         self.intrinsic_history_gas
     }
 
-    /// Records the history gas validation charged for the transaction's body.
-    pub(crate) const fn set_intrinsic_history_gas(&mut self, gas: u64) {
+    /// Records the history gas validation charged for the transaction's body, and the `bytes` of
+    /// the body it paid for.
+    pub(crate) const fn set_intrinsic_history(&mut self, gas: u64, bytes: u64) {
         self.intrinsic_history_gas = gas;
+        self.intrinsic_history_bytes = bytes;
+    }
+
+    /// The history bytes the last settled transaction appended, whoever paid for them: its body,
+    /// one write record per account or storage write it kept, the logs it kept and the code it
+    /// deposited.
+    ///
+    /// Every one of them is priced at the cost per history byte, and
+    /// [`history_gas_spent`](Self::history_gas_spent) is what the transaction's own gas paid of
+    /// that price. The two part by what the history allowances of its value transfers paid, which
+    /// no gas ledger carries. They are the bytes the schedule prices, not the chain's physical
+    /// growth: a transaction exempt from history gas appended none that anybody priced, and
+    /// reports none, and the body counts its fixed write records whichever fee accounts are
+    /// written.
+    pub const fn history_bytes(&self) -> u64 {
+        self.history_bytes
+    }
+
+    /// Settles [`history_bytes`](Self::history_bytes) from what the transaction kept: `priced` is
+    /// whether it pays history at all. Called once the outermost frame's lane is popped, when
+    /// everything the transaction kept sits on its own lane.
+    pub(crate) fn settle_history_bytes(&mut self, priced: bool) {
+        self.history_bytes = if priced {
+            self.intrinsic_history_bytes
+                .saturating_add(WRITE_RECORD_SIZE.saturating_mul(self.tracker.net().write_records))
+                .saturating_add(self.tracker.log_and_code_bytes())
+        } else {
+            0
+        };
     }
 
     /// The history gas charged before the first frame for the write record that frame makes: the
@@ -244,6 +282,10 @@ impl AdditionalLimit {
         };
         let effect = record.effect(self.sender);
         let history = effect.history_bytes();
+        // A log's bytes are history beside the write records; a record's are counted as one.
+        if let (StagedRecord::Log { .. }, HistoryBytes::Appended(bytes)) = (&record, history) {
+            self.tracker.record_log_and_code_bytes(bytes);
+        }
         let check = match effect {
             RecordEffect::None => LimitCheck::WithinLimit,
             RecordEffect::Record(usage) => {
@@ -475,6 +517,10 @@ impl AdditionalLimit {
     /// a failure discards it. Under a latch the result is first rewritten to the latched stop,
     /// whatever produced it (an interceptor, an inspector's rewrite), so no success passes it.
     ///
+    /// A creation that ran and succeeded deposited its output as code, which its caller keeps as
+    /// history bytes of its own: the creation's lane is gone by then, and the code goes wherever
+    /// the caller's writes go.
+    ///
     /// Returns the history gas the caller paid for records this frame did not keep, which the
     /// caller gets back once the frame has merged into it.
     #[must_use = "the history of the records the frame did not keep goes back to its caller"]
@@ -484,7 +530,13 @@ impl AdditionalLimit {
         // opcode, which failed after making it.
         self.pending_frame_charge = FrameCharge::NONE;
         let success = result.instruction_result().is_ok();
-        self.tracker.pop(success).map_or(0, |lane| lane.history_refund(success))
+        let Some(lane) = self.tracker.pop(success) else { return 0 };
+        if success && lane.records_made {
+            if let FrameResult::Create(outcome) = &*result {
+                self.tracker.record_log_and_code_bytes(outcome.output().len() as u64);
+            }
+        }
+        lane.history_refund(success)
     }
 
     /// Settles the transaction's outermost frame: pops its lane unless the frame already
@@ -613,6 +665,40 @@ mod tests {
             limit.usage(),
             LimitUsage { data_size: 2 * WRITE_RECORD_SIZE, write_records: 2 },
         );
+    }
+
+    /// A frame answered without running — by the depth guard, the latch, an interceptor or an
+    /// inspector — keeps none of the records its caller paid for, whatever its answer: its lane is
+    /// empty, the whole charge comes back, and the transaction's history bytes are its body alone.
+    ///
+    /// The depth guard's answer is reached here rather than through a transaction: under the
+    /// execution cap no call chain reaches the call-stack limit, because each call forwards at most
+    /// sixty-three sixty-fourths of what its caller has left, and 200,000,000 gas leaves about
+    /// twenty at depth 1,024. The latch's and an interceptor's answers are also reached through
+    /// transactions, in the history-byte tests.
+    #[test]
+    fn test_a_frame_answered_without_running_keeps_nothing_whatever_the_answer() {
+        const BODY: u64 = crate::TX_BODY_SIZE;
+        for answer in
+            [InstructionResult::CallTooDeep, InstructionResult::Revert, InstructionResult::Stop]
+        {
+            let mut limit = with_the_transactions_frame();
+            limit.set_intrinsic_history(1, BODY);
+            let inner = call_from_to(CALLEE, TARGET, U256::from(1));
+            limit.stage_frame_charge(limit.frame_start_records(&inner), 1_000, 2_000);
+            limit.push_empty_frame();
+
+            let mut result = crate::synthetic_frame_result(&inner, answer, Bytes::new());
+            assert_eq!(limit.on_frame_return(&mut result), 3_000, "{answer:?}: all of it back");
+            assert_eq!(limit.usage(), LimitUsage::ZERO, "{answer:?}: nothing kept");
+
+            let outer = call_from_to(SENDER, CALLEE, U256::ZERO);
+            let mut result =
+                crate::synthetic_frame_result(&outer, InstructionResult::Stop, Bytes::new());
+            limit.on_last_frame_return(&mut result);
+            limit.settle_history_bytes(true);
+            assert_eq!(limit.history_bytes(), BODY, "{answer:?}: the body alone");
+        }
     }
 
     /// A charge computed from a different answer than the count is what a rewrite that turns one

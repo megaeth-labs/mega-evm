@@ -5,7 +5,7 @@
 
 use alloy_primitives::{address, Address, Bytes, U256};
 use mega_evm::{
-    constants::{COST_PER_HISTORY_BYTE, COST_PER_STATE_BYTE},
+    constants::{COST_PER_HISTORY_BYTE, COST_PER_STATE_BYTE, TX_GAS_LIMIT_CAP},
     test_utils::{BytecodeBuilder, MemoryDatabase},
     LOG_BASE_SIZE, LOG_TOPIC_SIZE, TX_BASE_SIZE, TX_BODY_SIZE, TX_FIXED_WRITE_RECORDS,
     WRITE_RECORD_SIZE,
@@ -343,19 +343,41 @@ fn test_a_creation_whose_creator_cannot_pay_its_records_starts_no_frame() {
 /// left. Across the gas limits that straddle the point where a caller can no longer pay for the
 /// records of the frame it starts, the history a transaction pays beyond its body is exactly the
 /// records it kept.
+///
+/// Above the execution cap the same holds whatever the reservoir: one that runs out before the
+/// body is paid for, one that runs out partway through the records, and ample ones. Each pays
+/// what it can of the state and history ledgers and spills the rest onto regular gas.
 #[test]
 fn test_no_gas_limit_buys_a_write_record_for_nothing() {
     if runs_at_measurement_prices() {
         return;
     }
+    let reservoirs = [1, body(0) / 2, body(0) + WRITE_RECORD_SIZE * CPHB, 1_000_000, 100_000_000];
+    let above_the_cap = reservoirs.map(|reservoir| TX_GAS_LIMIT_CAP + reservoir);
     for code in [transfers_everything_to(CONTRACT), creates_everything()] {
-        for limit in [300_000, 400_000, 600_000, 800_000, 1_000_000, 5_000_000] {
+        for limit in [300_000, 400_000, 600_000, 800_000, 1_000_000, 5_000_000]
+            .into_iter()
+            .chain(above_the_cap)
+        {
             let outcome =
                 execute(caller_running(code.clone()), call(CALLER, CALLEE, U256::ZERO, limit));
+            if let Some(reservoir) = limit.checked_sub(TX_GAS_LIMIT_CAP) {
+                assert!(outcome.result.is_success(), "{:?}", outcome.result);
+                assert_eq!(
+                    outcome.gas.reservoir_remaining,
+                    reservoir.saturating_sub(outcome.gas.state + outcome.gas.history),
+                    "at a {limit} gas limit: the reservoir paid what it could of state and history",
+                );
+            }
             assert_eq!(
                 outcome.gas.history,
                 body(0) + outcome.usage.write_records * WRITE_RECORD_SIZE * CPHB,
                 "at a {limit} gas limit: the records kept are the history paid",
+            );
+            assert_eq!(
+                outcome.gas.history_bytes,
+                TX_BODY_SIZE + outcome.usage.write_records * WRITE_RECORD_SIZE,
+                "at a {limit} gas limit: and the bytes reported",
             );
         }
     }

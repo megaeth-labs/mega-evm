@@ -188,11 +188,13 @@ where
         evm: &mut Self::Evm,
     ) -> Result<InitialAndFloorGas, Self::Error> {
         let mut gas = self.op.validate_initial_tx_gas(evm)?;
-        let history =
-            if evm.ctx_ref().prices_history() { tx_body_history_gas(evm.ctx_ref()) } else { 0 };
-        if history == 0 {
+        if !evm.ctx_ref().prices_history() {
             return Ok(gas);
         }
+        let bytes = tx_body_history_bytes_of(evm.ctx_ref());
+        // A byte count with no price saturates, which no gas limit covers: the transaction is
+        // rejected for not covering its own intrinsic gas.
+        let history = history_gas(bytes).unwrap_or(u64::MAX);
         let gas_limit = evm.ctx_ref().tx().gas_limit();
         let initial_gas = gas
             .initial_regular_gas()
@@ -203,7 +205,7 @@ where
             );
         }
         gas.set_initial_state_gas(gas.initial_state_gas_final() + history);
-        evm.ctx_mut().additional_limit.set_intrinsic_history_gas(history);
+        evm.ctx_mut().additional_limit.set_intrinsic_history(history, bytes);
         Ok(gas)
     }
 
@@ -212,7 +214,8 @@ where
     /// (op-revm replaces revm's settlement, so revm's never runs here): a stopped transaction
     /// settles like an EIP-8037 revert, its unspent regular gas and reservoir back to the sender.
     /// Keeps the history gas the transaction spent: what the body was charged, and what the frames
-    /// charged net of what they gave back.
+    /// charged net of what they gave back; and the history bytes it appended, which are what those
+    /// charges were made for.
     fn last_frame_result(
         &mut self,
         evm: &mut Self::Evm,
@@ -232,11 +235,13 @@ where
             }
             *frame_result.gas_mut().tracker_mut() = *parent_gas;
         }
+        let priced = evm.ctx_ref().prices_history();
         let layer = &mut evm.ctx_mut().additional_limit;
         let history = layer
             .intrinsic_history_gas()
             .saturating_add_signed(frame_result.gas().history_gas_spent());
         layer.set_history_gas_spent(history);
+        layer.settle_history_bytes(priced);
         Ok(())
     }
 
@@ -696,12 +701,9 @@ fn inspect_logs<DB: Database, ExtEnvs: ExternalEnvTypes, INSP>(
     }
 }
 
-/// The history gas a transaction's body costs: its envelope and the write records its inclusion
-/// makes, its calldata, its authorizations and its access list, at the cost per history byte.
-///
-/// A byte count large enough to have no price saturates to `u64::MAX`, which no gas limit covers,
-/// so such a transaction is rejected for not covering its own intrinsic gas.
-fn tx_body_history_gas<DB: Database, ExtEnvs: ExternalEnvTypes>(
+/// The history bytes a transaction's body appends: its envelope and the write records its
+/// inclusion makes, its calldata, its authorizations and its access list.
+fn tx_body_history_bytes_of<DB: Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &MegaContext<DB, ExtEnvs>,
 ) -> u64 {
     let tx = ctx.tx();
@@ -713,13 +715,12 @@ fn tx_body_history_gas<DB: Database, ExtEnvs: ExternalEnvTypes>(
             })
         })
         .unwrap_or_default();
-    let bytes = tx_body_history_bytes(
+    tx_body_history_bytes(
         tx.input().len() as u64,
         tx.authorization_list_len() as u64,
         addresses,
         slots,
-    );
-    history_gas(bytes).unwrap_or(u64::MAX)
+    )
 }
 
 /// Whether executing this transaction creates its caller's account: a deposit-like transaction
