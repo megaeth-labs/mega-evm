@@ -15,6 +15,8 @@
 //! | [`MAX_INITCODE_SIZE`] | 1,048,576 | the most bytes an initcode may hold | the spec configuration |
 //! | [`TX_DATA_LIMIT`] | 13,107,200 | data size one transaction may produce (as Rex6) | the block's default transaction limits |
 //! | [`BLOCK_DATA_LIMIT`] | 13,107,200 | data size one block may produce (as Rex6) | the block's default data-size limit |
+//! | [`BLOCK_ENV_ACCESS_COMPUTE_GAS`] | 20,000,000 | compute a transaction may still spend once it read the block environment or the beneficiary (as Rex6) | gas detention |
+//! | [`ORACLE_ACCESS_COMPUTE_GAS`] | 20,000,000 | compute a transaction may still spend once it read the Oracle's storage (as Rex6) | gas detention |
 //!
 //! The Satin gas schedule builds its state-gas entries from the EIP-8037 byte counts at
 //! [`COST_PER_STATE_BYTE`], read through [`SatinPrices`](crate::SatinPrices) so a measurement
@@ -64,6 +66,16 @@ pub const TX_DATA_LIMIT: u64 = 12 * 1024 * 1024 + 512 * 1024;
 /// The most data one block may produce, 12.5 MiB as in Rex6. Provisional.
 pub const BLOCK_DATA_LIMIT: u64 = 12 * 1024 * 1024 + 512 * 1024;
 
+/// The compute a transaction may still spend once it read the block environment or the block
+/// beneficiary's account: its compute at the read plus this. The value and its relative reading
+/// are Rex6's. Provisional.
+pub const BLOCK_ENV_ACCESS_COMPUTE_GAS: u64 = 20_000_000;
+
+/// The compute a transaction may still spend once it read the Oracle's storage: its compute at
+/// the read plus this. The value and its relative reading are Rex6's; the legacy engine's first
+/// specs capped an Oracle read at 1,000,000. Provisional.
+pub const ORACLE_ACCESS_COMPUTE_GAS: u64 = 20_000_000;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -80,5 +92,7 @@ mod tests {
         assert_eq!(MAX_INITCODE_SIZE, 1_048_576);
         assert_eq!(TX_DATA_LIMIT, 13_107_200);
         assert_eq!(BLOCK_DATA_LIMIT, 13_107_200);
+        assert_eq!(BLOCK_ENV_ACCESS_COMPUTE_GAS, 20_000_000);
+        assert_eq!(ORACLE_ACCESS_COMPUTE_GAS, 20_000_000);
     }
 }
