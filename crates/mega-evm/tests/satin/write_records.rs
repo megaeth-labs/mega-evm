@@ -1223,3 +1223,58 @@ fn test_an_inspector_answered_value_call_gives_its_history_back() {
         body + 2 * WRITE_RECORD_SIZE * mega_evm::constants::COST_PER_HISTORY_BYTE
     );
 }
+
+/* ---------- the KV count and the data size ---------- */
+
+/// Watches the usage the layer counts after every instruction, and keeps the first one whose
+/// write records weigh more than its data size.
+#[derive(Default)]
+struct KvWeighsNoMore {
+    steps: usize,
+    over: Option<LimitUsage>,
+}
+
+impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for KvWeighsNoMore {
+    fn step_end(&mut self, _: &mut Interpreter<EthInterpreter>, context: &mut MegaContext<DB>) {
+        self.steps += 1;
+        let usage = context.additional_limit().usage();
+        if usage.write_records * WRITE_RECORD_SIZE > usage.data_size {
+            self.over.get_or_insert(usage);
+        }
+    }
+}
+
+/// The KV count a node reads is the write-record count, and it never weighs more than the data
+/// size: every record is forty bytes of it, counted with it and taken back with it. Across the
+/// corpus — slots written back, a slot rewritten, accounts recorded once per frame, failed
+/// children, a hint — `KV × 40 ≤ data size` holds after every instruction a transaction runs, and
+/// what it keeps parts from the records by exactly the bytes that are not records: the body, the
+/// logs, the deployed code and the hint's payload.
+///
+/// So a KV limit binds only below the data-size limit's fortieth: at the production data-size
+/// caps a transaction keeps at most 327,680 records, whatever its KV limit.
+#[test]
+fn test_the_kv_count_never_weighs_more_than_the_data_size() {
+    assert_eq!(mega_evm::constants::TX_DATA_LIMIT / WRITE_RECORD_SIZE, 327_680);
+    let mut ran = 0;
+    for case in paired_corpus() {
+        let ctx = context(case.db).with_block(revm::context::BlockEnv {
+            beneficiary: case.beneficiary,
+            ..crate::common::block()
+        });
+        let mut evm = MegaEvm::new(ctx).with_inspector(KvWeighsNoMore::default());
+        let outcome = evm.execute_transaction(case.tx.clone()).expect("the transaction is valid");
+        let usage = outcome.usage;
+        assert_eq!(usage.write_records, case.records, "{}: the KV count", case.name);
+        assert_eq!(
+            usage.data_size - usage.write_records * WRITE_RECORD_SIZE,
+            mega_evm::transaction_body_bytes(&case.tx) + case.other_bytes + case.hint_bytes,
+            "{}: what is kept beside the records",
+            case.name,
+        );
+        let probe = evm.inspector();
+        assert_eq!(probe.over, None, "{}: after every instruction", case.name);
+        ran += probe.steps;
+    }
+    assert!(ran > 100, "the corpus runs code: {ran} instructions");
+}
