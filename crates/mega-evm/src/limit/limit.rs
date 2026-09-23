@@ -372,15 +372,17 @@ impl AdditionalLimit {
     /// Counts the code a creation is about to deposit, on the creation's own lane, and turns the
     /// return into the stop when that crosses a limit.
     ///
-    /// Called from the frame run, on a successful return, before revm's `return_create` commits
-    /// the creation's journal checkpoint. A rewrite after that commit would leave the code
-    /// deployed: the checkpoint is already gone, and flipping the frame result does not reopen
-    /// it. A stop here makes `return_create` revert the checkpoint instead, so the code is not
-    /// written. The bytes stay on the lane until the frame returns; a success merges them into
-    /// the caller, and the failure — the stop included — discards them.
+    /// Called from the frame run, on a successful return whose code `return_create` would accept,
+    /// before it charges for the deposit and commits the creation's journal checkpoint. A rewrite
+    /// after that commit would leave the code deployed: the checkpoint is already gone, and
+    /// flipping the frame result does not reopen it. A stop here makes `return_create` revert the
+    /// checkpoint instead, so the code is not written. The bytes stay on the lane until the frame
+    /// returns; a success merges them into the caller, and the failure — the stop included —
+    /// discards them.
     ///
     /// A return that is already a revert or a halt deposits nothing, and its output is the
-    /// revert data, not code. Empty code deposits nothing either.
+    /// revert data, not code. Empty code deposits nothing either, and neither does code
+    /// `return_create` refuses: that fails the creation there, and is never counted.
     pub(crate) fn on_create_return(&mut self, result: &mut InterpreterResult) {
         if !result.result.is_ok() {
             return;

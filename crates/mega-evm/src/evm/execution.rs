@@ -19,7 +19,7 @@ use revm::{
     context::{
         result::{FromStringError, InvalidTransaction, ResultGas},
         transaction::TransactionType,
-        ContextError, ContextTr, FrameStack, JournalTr, Transaction,
+        Cfg, ContextError, ContextTr, FrameStack, JournalTr, Transaction,
     },
     context_interface::{
         cfg::{gas::GasTracker, GasId, StateGasCharge, StateGasSite},
@@ -613,6 +613,10 @@ where
 
 /// Counts the bytecode a creation is about to deposit, and turns that return into the stop
 /// when the bytes cross a limit, before revm commits the creation.
+///
+/// Only code `return_create` would deposit is counted ([`deposits`]). Code it refuses fails the
+/// creation there, alone, and the chain keeps none of it. Counted, those bytes could cross the
+/// transaction's limit and stop every frame above a creation that fails by itself.
 fn meter_deployed_code<DB: Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &mut MegaContext<DB, ExtEnvs>,
     frame: &EthFrame<EthInterpreter>,
@@ -620,10 +624,23 @@ fn meter_deployed_code<DB: Database, ExtEnvs: ExternalEnvTypes>(
 ) -> InterpreterAction {
     if frame.data.is_create() {
         if let InterpreterAction::Return(result) = &mut action {
-            ctx.additional_limit.on_create_return(result);
+            if deposits(ctx.cfg(), &result.output) {
+                ctx.additional_limit.on_create_return(result);
+            }
         }
     }
     action
+}
+
+/// Whether `return_create` deposits `code` a creation returns, as far as the code decides it:
+/// no longer than the code-size limit, and not starting with `0xEF` unless EIP-3541 is off, both
+/// read from the configuration `return_create` reads.
+///
+/// What `return_create` charges for the deposit is not part of it: the count comes before that
+/// charge, so a crossing is the stop and not an out-of-gas. `return_create` also gates the two
+/// checks on EIP-170 and London, which Satin's base spec, Osaka, enables.
+fn deposits(cfg: &impl Cfg, code: &[u8]) -> bool {
+    code.len() <= cfg.max_code_size() && (cfg.is_eip3541_disabled() || code.first() != Some(&0xEF))
 }
 
 /// The action of a frame about to run: the stop it returns without running an instruction, when

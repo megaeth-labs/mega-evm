@@ -5,12 +5,14 @@
 //! through the same latch every other transaction-level limit uses.
 //!
 //! The body is counted before any frame and kept on every path. Deployed code is counted on the
-//! creation's lane, one byte per byte, before the creation is committed.
+//! creation's lane, one byte per byte, before the creation is committed, and only when revm would
+//! deposit it.
 
 use alloy_evm::Evm;
 use alloy_primitives::{address, keccak256, Address, Bytes, U256};
 use alloy_sol_types::SolError;
 use mega_evm::{
+    constants::MAX_CONTRACT_SIZE,
     test_utils::{BytecodeBuilder, MemoryDatabase},
     EvmTxRuntimeLimits, LimitCheck, LimitKind, LimitUsage, MegaContext, MegaEvm, MegaHaltReason,
     MegaLimitExceeded, MegaTransactionOutcome, FRAME_DATA_SHARE_DENOMINATOR,
@@ -18,8 +20,8 @@ use mega_evm::{
 };
 use revm::{
     bytecode::opcode::{
-        CALL, CREATE, CREATE2, GAS, LOG0, POP, PUSH0, RETURN, RETURNDATACOPY, RETURNDATASIZE,
-        REVERT, SELFDESTRUCT, STOP,
+        CALL, CREATE, CREATE2, GAS, ISZERO, LOG0, POP, PUSH0, RETURN, RETURNDATACOPY,
+        RETURNDATASIZE, REVERT, SELFDESTRUCT, SSTORE, STOP,
     },
     context::result::{ExecutionResult, HaltReason},
     context_interface::cfg::GasId,
@@ -421,6 +423,102 @@ fn test_deployed_code_over_the_frame_budget_reverts_the_creation_alone() {
                 probe.creates[0].1.as_ref(),
                 MegaLimitExceeded { kind: LimitKind::DataSize.as_u8(), limit: child_budget }
                     .abi_encode()
+            );
+        }
+    }
+}
+
+/// Init code that returns `len` bytes as the deployed contract, the first of them `first` and
+/// the rest zeros.
+fn constructor_returning_from(first: u8, len: u64) -> Bytes {
+    BytecodeBuilder::default()
+        .mstore(0, [first])
+        .push_number(len)
+        .push_number(0_u8)
+        .append(RETURN)
+        .build()
+}
+
+/// A contract that runs `init` through `CREATE`, then writes whether the creation failed to slot
+/// 1, and stops.
+fn factory_noting_failure(init: &Bytes) -> Bytes {
+    BytecodeBuilder::default()
+        .mstore(0, init)
+        .push_number(init.len() as u64)
+        .push_number(0_u64)
+        .push_number(0_u64)
+        .append(CREATE)
+        .append(ISZERO)
+        .push_number(1_u64)
+        .append(SSTORE)
+        .append(STOP)
+        .build()
+}
+
+/// Only code `return_create` would deposit is counted. Code it refuses — starting with `0xEF`
+/// (EIP-3541), or over the code-size limit — fails the creation alone, as it would with no limit:
+/// the caller catches the failure and the transaction succeeds. The same number of bytes it would
+/// deposit crosses the transaction's limit and stops it.
+///
+/// `A` has 100 bytes left: the creation's start records the created account and `A`'s nonce, and
+/// the output comes on top. Afterwards `A` writes a slot to note the failure: the transaction
+/// keeps the nonce record and that slot's.
+#[test]
+fn test_code_return_create_refuses_is_not_counted() {
+    let limit = mega_evm::TX_BODY_SIZE + 100;
+    let limits = EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(limit);
+    let at_start = 2 * WRITE_RECORD_SIZE;
+    let max = MAX_CONTRACT_SIZE as u64;
+    let cases = [
+        ("0xEF first", 0xEF, 21, InstructionResult::CreateContractStartingWithEF),
+        ("over the code-size limit", 0x00, max + 1, InstructionResult::CreateContractSizeLimit),
+    ];
+    let run = |init: &Bytes, inspect: bool| {
+        let db = funded().account_code(A, factory_noting_failure(init));
+        let mut evm = MegaEvm::new(context(db).with_tx_runtime_limits(limits))
+            .with_inspector(Probe::default());
+        Evm::set_inspector_enabled(&mut evm, inspect);
+        let outcome = evm.execute_transaction(call(CALLER, A, U256::ZERO, GAS_LIMIT)).unwrap();
+        (outcome, evm.inspector().clone())
+    };
+    let failure_noted = |outcome: &MegaTransactionOutcome| {
+        outcome.state[&A].storage.get(&U256::from(1)).map(|slot| slot.present_value)
+    };
+
+    for (name, first, len, refusal) in cases {
+        for inspect in [false, true] {
+            let case = format!("{name}, inspect {inspect}");
+            let (refused, probe) = run(&constructor_returning_from(first, len), inspect);
+            assert!(refused.result.is_success(), "{case}: {:?}", refused.result);
+            assert_eq!(refused.limit_exceeded, None, "{case}: the refused code is not counted");
+            assert_eq!(failure_noted(&refused), Some(U256::from(1)), "{case}: A caught it");
+            assert_eq!(
+                refused.usage,
+                LimitUsage { data_size: mega_evm::TX_BODY_SIZE + at_start, write_records: 2 },
+                "{case}: the nonce record and the slot",
+            );
+            assert_eq!(
+                refused.gas.history,
+                mega_evm::history_gas(refused.usage.data_size).unwrap(),
+                "{case}: history prices the same bytes",
+            );
+            assert_eq!(refused.state[&A].info.nonce, 1, "{case}");
+            if inspect {
+                assert_eq!(probe.creates.len(), 1, "{case}");
+                assert_eq!(probe.creates[0].0, refusal, "{case}: revm's own refusal");
+            }
+
+            // The same length, deployable: counted, and it crosses.
+            let (stopped, _) = run(&constructor_returning_from(0x00, len.min(max)), inspect);
+            assert_eq!(
+                stopped.limit_exceeded,
+                Some(LimitCheck::ExceedsLimit {
+                    kind: LimitKind::DataSize,
+                    limit,
+                    used: mega_evm::TX_BODY_SIZE + at_start + len.min(max),
+                    frame_local: false,
+                }),
+                "{case}",
             );
         }
     }

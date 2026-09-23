@@ -28,7 +28,8 @@
 //! - a storage write's record, a log's bytes and the record of a `SELFDESTRUCT`'s beneficiary, once
 //!   the opcode completed;
 //! - deployed code, on the creation's lane before the creation is committed, so a crossing leaves
-//!   no code behind;
+//!   no code behind. Only code revm would deposit counts: code starting with `0xEF` or over the
+//!   code-size limit fails the creation alone and is not counted;
 //! - an Oracle hint's payload, on the transaction's own lane, before it is forwarded.
 //!
 //! A record is checked against the limits before its history is charged: a record the limit
