@@ -197,9 +197,13 @@ fn test_the_state_and_history_ledgers_refuse_nothing() {
     let bytes = 3 * mega_evm::TX_BODY_SIZE +
         mega_evm::WRITE_RECORD_SIZE +
         3 * (mega_evm::LOG_BASE_SIZE + 64);
+    // Each is charged where it is made, so the gas is the sum of the three prices.
+    let priced = |bytes| mega_evm::history_gas(bytes).expect("the bytes have a price");
     assert_eq!(
         counters.history,
-        bytes * mega_evm::constants::COST_PER_HISTORY_BYTE,
+        3 * priced(mega_evm::TX_BODY_SIZE) +
+            priced(mega_evm::WRITE_RECORD_SIZE) +
+            3 * priced(mega_evm::LOG_BASE_SIZE + 64),
         "three bodies, three logs and the one write record",
     );
     assert_eq!(counters.history_bytes, bytes, "and the block reports the bytes beside the gas");

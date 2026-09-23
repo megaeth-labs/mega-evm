@@ -47,9 +47,9 @@ const RESERVOIR: u64 = 7_000_000;
 
 /// The history gas the body of a transaction carrying `calldata_len` bytes costs. It is charged
 /// before the first frame and comes out of the reservoir, so a transaction with a pool starts
-/// with this much less of one.
-const fn body_history(calldata_len: u64) -> u64 {
-    (mega_evm::TX_BODY_SIZE + calldata_len) * mega_evm::constants::COST_PER_HISTORY_BYTE
+/// with this much less of one. It is read at the price the engine runs.
+fn body_history(calldata_len: u64) -> u64 {
+    mega_evm::history_gas(mega_evm::TX_BODY_SIZE + calldata_len).expect("a body has a price")
 }
 
 fn call_frame_init(depth: usize) -> FrameInit {
@@ -466,7 +466,7 @@ fn test_the_keyless_value_refusal_keeps_the_reservoir() {
     // else, and the refusal is answered before a frame runs, so what the dispatched call spends
     // beyond it is the overhead — once — less the one thing the refusal takes back: the history
     // of the write record a transfer that goes through leaves on its recipient.
-    let record = mega_evm::WRITE_RECORD_SIZE * mega_evm::constants::COST_PER_HISTORY_BYTE;
+    let record = mega_evm::write_record_history_gas(1).expect("a record has a price");
     let spent = |to: Address, gas_limit: u64| {
         let mut tx = crate::common::call_with_data(CALLER, to, data.clone(), gas_limit);
         tx.0.base.value = U256::from(1);

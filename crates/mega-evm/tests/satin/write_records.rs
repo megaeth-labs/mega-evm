@@ -127,10 +127,23 @@ fn test_failed_child_discards_its_transfer_records() {
 }
 
 /// After a failed transfer the sender can be recorded again by the next one.
+///
+/// The first child burns the gas it was forwarded, so the second transfer forwards none: its
+/// recipient runs no code, and the records it makes are paid out of what the caller keeps, which
+/// then does not depend on the price of the recipient's new account.
 #[test]
 fn test_failed_first_child_lets_the_next_transfer_record_the_sender() {
     let code = append_value_call(BytecodeBuilder::default(), CONTRACT, 1).append(POP);
-    let code = append_value_call(code, CONTRACT2, 1).append(POP).append(STOP).build();
+    let code = code
+        .append_many([PUSH0, PUSH0, PUSH0, PUSH0])
+        .append(PUSH1)
+        .append(1u8)
+        .push_address(CONTRACT2)
+        .append(PUSH0)
+        .append(CALL)
+        .append(POP)
+        .append(STOP)
+        .build();
     let db =
         funded().account_code(CALLEE, code).account_code(CONTRACT, Bytes::from_static(&[INVALID]));
     let (result, usage) = run(db, call(CALLER, CALLEE, U256::ZERO, GAS_LIMIT));
