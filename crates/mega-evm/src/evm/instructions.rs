@@ -1432,26 +1432,61 @@ pub mod volatile_data_ext {
             };
             budget = left;
         }
-        if IS_CALL && has_transfer && context.interpreter.runtime_flag.is_static() {
+        if !deployed_body_reaches_load::<HAS_VALUE_OPERAND, IS_CALL, _, _>(
+            context,
+            has_transfer,
+            budget,
+        ) {
             return Ok(());
+        }
+        recreate_reached_load(context.host, to, storage_address)
+    }
+
+    /// Whether revm's CALL-family body, entered with `budget` gas, got through the steps it takes
+    /// ahead of its load on the deployed schedule: the rejection of a valued `CALL` from a static
+    /// frame, and its two memory expansions. Must be asked before the body runs, which pops the
+    /// memory operands; a stack too short to hold them is a stack underflow raised before the load.
+    pub(super) fn deployed_body_reaches_load<
+        const HAS_VALUE_OPERAND: bool,
+        const IS_CALL: bool,
+        WIRE: InterpreterTypes<Stack: StackInspectTr>,
+        H: HostExt + ?Sized,
+    >(
+        context: &InstructionContext<'_, H, WIRE>,
+        has_transfer: bool,
+        budget: u64,
+    ) -> bool {
+        if IS_CALL && has_transfer && context.interpreter.runtime_flag.is_static() {
+            return false;
         }
         let Some(ranges) = call_memory_ranges::<HAS_VALUE_OPERAND, _, _>(context) else {
-            return Ok(());
+            return false;
         };
-        let memory_gas = *context.interpreter.gas.memory();
-        if !call_memory_expansions_affordable(context, memory_gas, budget, ranges) {
-            return Ok(());
-        }
+        call_memory_expansions_affordable(
+            context,
+            *context.interpreter.gas.memory(),
+            budget,
+            ranges,
+        )
+    }
 
-        // The deployed schedule reached its load.
-        if mega_spec.is_enabled(MegaSpecId::REX6) && storage_address != to {
+    /// Recreates what the deployed host did as revm's CALL-family body loaded its target, for a
+    /// frame that halted before revm 40's body got there although the deployed schedule did: from
+    /// `REX6` the stack operand's own journal entry, when the storage-gas wrapper did not already
+    /// inspect it, and the beneficiary-access mark (see [`mark_call_target_beneficiary`]).
+    pub(super) fn recreate_reached_load<H: HostExt + JournalInspectTr + ?Sized>(
+        host: &mut H,
+        to: Address,
+        storage_address: Address,
+    ) -> InstructionExecResult {
+        if host.spec_id().is_enabled(MegaSpecId::REX6) && storage_address != to {
             // The operand alone, code hydrated, exactly as the delegate resolution inspects it —
             // not `inspect_account_delegated`, which would also materialize the delegate.
-            if context.host.inspect_account(to, true).is_err() {
+            if host.inspect_account(to, true).is_err() {
                 return Err(InstructionResult::FatalExternalError);
             }
         }
-        mark_call_target_beneficiary(context.host, to);
+        mark_call_target_beneficiary(host, to);
         Ok(())
     }
 
@@ -2272,7 +2307,35 @@ pub mod storage_gas_ext {
                         .borrow_mut()
                         .try_consume_storage_stipend(new_account_storage_gas);
                     let charged = new_account_storage_gas - drained;
-                    gas!(context.interpreter, charged);
+                    if !context.interpreter.gas.record_regular_cost(charged) {
+                        // The deployed schedule took this charge with the opcode's static gas
+                        // still in the frame — revm 40 debits it first, through this family's
+                        // wrapper or the interpreter's pre-charge — so a frame short of the charge
+                        // by less than that static gas paid it there and went on towards its load.
+                        // A failed charge debits nothing, so the frame's gas is as it was.
+                        const IS_CALL: bool = opcode::$opcode == opcode::CALL;
+                        let budget = context
+                            .interpreter
+                            .gas
+                            .remaining()
+                            .saturating_add(static_gas(opcode::$opcode))
+                            .checked_sub(charged);
+                        if budget.is_some_and(|budget| {
+                            volatile_data_ext::deployed_body_reaches_load::<
+                                $has_transfer_logic,
+                                IS_CALL,
+                                _,
+                                _,
+                            >(&context, has_transfer, budget)
+                        }) {
+                            volatile_data_ext::recreate_reached_load(
+                                context.host,
+                                to,
+                                storage_address,
+                            )?;
+                        }
+                        return Err(InstructionResult::OutOfGas);
+                    }
                     charged
                 } else {
                     0
@@ -2288,10 +2351,6 @@ pub mod storage_gas_ext {
                 let memory_ranges =
                     volatile_data_ext::call_memory_ranges::<$has_transfer_logic, _, _>(&context);
                 let memory_gas_before = *context.interpreter.gas.memory();
-                // Only an operand this handler does not already inspect needs its journal entry
-                // recreated, which is CALLCODE from REX5 on.
-                let unreached_operand_at_stake =
-                    mega_spec.is_enabled(MegaSpecId::REX6) && storage_address != to;
 
                 // Run the raw opcode and record compute gas once after the body completes
                 // (canonical metering order). Byte-equivalent to the pre-REX6 layering on every
@@ -2330,14 +2389,11 @@ pub mod storage_gas_ext {
                             _ => false,
                         };
                         if reached_load {
-                            // The operand alone, as the delegate resolution inspects it; the
-                            // delegate stays untouched (see `recreate_unreached_call_load`).
-                            if unreached_operand_at_stake &&
-                                context.host.inspect_account(to, true).is_err()
-                            {
-                                return Err(InstructionResult::FatalExternalError);
-                            }
-                            volatile_data_ext::mark_call_target_beneficiary(context.host, to);
+                            volatile_data_ext::recreate_reached_load(
+                                context.host,
+                                to,
+                                storage_address,
+                            )?;
                         }
                     }
                 );

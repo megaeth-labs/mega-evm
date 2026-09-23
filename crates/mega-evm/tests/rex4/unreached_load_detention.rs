@@ -53,6 +53,10 @@ const MEMORY_WINDOW_BUDGET: u64 = 171;
 const MEMORY_UNAFFORDABLE_BUDGET: u64 = 80;
 /// Clears `EXTCODECOPY`'s static charge but not a 32 KiB copy.
 const COPY_WINDOW_BUDGET: u64 = 5_000;
+/// Gas the seven operand pushes ahead of a valued CALL consume.
+const CALL_PUSHES_GAS: u64 = 21;
+/// The new-account storage charge at SALT multiplier 2.
+const NEW_ACCOUNT_CHARGE_AT_2X: u64 = mega_evm::constants::rex::NEW_ACCOUNT_STORAGE_GAS_BASE;
 
 const CALL_FAMILY: [u8; 4] = [CALL, STATICCALL, DELEGATECALL, CALLCODE];
 const WRAPPED_CALL_SPECS: [MegaSpecId; 3] = [MegaSpecId::REX4, MegaSpecId::REX5, MegaSpecId::REX6];
@@ -281,6 +285,31 @@ fn test_value_call_to_empty_beneficiary_follows_the_new_account_charge() {
         ),
         "a storage stipend that covers the charge let the deployed schedule reach its load",
     );
+}
+
+/// A frame short of the new-account charge by less than the static charge: the deployed schedule
+/// took the storage charge with the static gas still in the frame, paid it, reached its load and
+/// marked; revm 40 debits the static charge first and then fails the storage charge. The two
+/// outer rows pin the window's edges, where both schedules agree.
+#[test]
+fn test_storage_charge_window_follows_the_deployed_static_charge() {
+    let at_opcode = |gas: u64| gas + CALL_PUSHES_GAS;
+    let rows = [
+        (at_opcode(NEW_ACCOUNT_CHARGE_AT_2X - 1), false),
+        (at_opcode(NEW_ACCOUNT_CHARGE_AT_2X), true),
+        (at_opcode(NEW_ACCOUNT_CHARGE_AT_2X + 99), true),
+        (at_opcode(NEW_ACCOUNT_CHARGE_AT_2X + 100), true),
+    ];
+    for spec in WRAPPED_CALL_SPECS {
+        let setup = Setup { beneficiary_funded: false, salt_multiplier: 2, ..Setup::on(spec) };
+        for (budget, expected) in rows {
+            assert_eq!(
+                detained(setup, budget, inner_call(CALL, BENEFICIARY, 1, 0)),
+                expected,
+                "{spec:?}: a valued CALL to an empty beneficiary with a budget of {budget}",
+            );
+        }
+    }
 }
 
 /// From `Rex6` the deployed host also marked the operand's one-hop EIP-7702 delegate.
