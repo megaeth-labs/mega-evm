@@ -233,23 +233,23 @@ These 29 rows run in a real test target now, adapted to the Satin API and to the
 
 ## Tests ported by compute gas
 
-These 23 rows run in a real test target now, adapted to the Satin API and to a compute figure read off the gas revm settles, so the counts above are lower than the inventory's by exactly these rows.
+These 24 rows run in a real test target now, adapted to the Satin API and to a compute figure read off the gas revm settles, so the counts above are lower than the inventory's by exactly these rows.
 
 | Legacy file | Owner in the inventory | Tests | Now in |
 |---|---|---:|---|
 | `compute_gas/claims.rs` | compute gas (2) | 2 | `tests/satin/compute_gas.rs` |
 | `compute_gas/main.rs` | compute gas (1) | 1 | `tests/satin/compute_gas.rs` |
-| `mini_rex/compute_gas_limit.rs` | compute gas (20) | 20 | `tests/satin/compute_gas.rs` |
-| **Total** | | **23** | |
+| `mini_rex/compute_gas_limit.rs` | compute gas (21) | 21 | `tests/satin/compute_gas.rs` |
+| **Total** | | **24** | |
 
 ## Tests retired after the inventory
 
-These 22 rows were parked when the inventory was applied and have since been retired: the mechanism that owns them landed and left them nothing to pin, so no later mechanism will port them.
+These 21 rows were parked when the inventory was applied and have since been retired: the mechanism that owns them landed and left them nothing to pin, so no later mechanism will port them.
 They are not counted above.
 
 | Legacy file | Owner in the inventory | Tests | Why |
 |---|---|---:|---|
-| `mini_rex/compute_gas_limit.rs` | compute gas (3) | 3 | it pins that one legacy spec counts compute gas where the spec below it does not. Satin is a single spec and every transaction reports its compute figure, so there is no boundary left for it to pin; Satin's compute limit is the execution cap the spec fixes, not a limit a caller sets, so there is no zero or one limit to configure; a gas limit below a transaction's intrinsic gas is rejected at validation |
+| `mini_rex/compute_gas_limit.rs` | compute gas (2) | 2 | Satin's compute limit is the execution cap the spec fixes, not a limit a caller sets, so there is no zero or one limit to configure; a gas limit below a transaction's intrinsic gas is rejected at validation |
 | `rex5/callcode_storage_gas.rs` | SALT pricing (3) | 3 | Satin's `CALLCODE` cannot reach a state gas pricing site: it sends value to the frame's own account, which exists, so it adds no account leaf and asks for no price. There is no pricing-path account inspection left to fail |
 | `src/evm/host.rs` | SALT pricing (1) | 1 | the pricing hook inspects no account: the fork decides whether a target exists and the hook only prices what it is told to, so there is no delegation walk on the pricing path to guard |
 | `src/external/gas.rs` | SALT pricing (4) | 4 | these pin a helper at a legacy spec boundary: it is served from one rung and asserts below it. Satin is a single spec and has no gate of its own, so there is no boundary left for them to pin |
@@ -258,7 +258,7 @@ They are not counted above.
 | `src/system/keyless_deploy.rs` | system contract deployment (1) | 1 | Satin does not overwrite foreign code: a system address with different code is an error, not an in-place upgrade |
 | `src/system/limit_control.rs` | system contract deployment (2) | 2 | Satin is a single spec with no per-fork deploy gate: the contract is deployed at every block; Satin does not overwrite foreign code: a system address with different code is an error, not an in-place upgrade |
 | `src/system/oracle.rs` | system contract deployment (3) | 3 | Satin does not overwrite foreign code: a system address with different code is an error, not an in-place upgrade; Satin is a single spec and ships one Oracle bytecode; there is no per-fork version gate to pin |
-| **Total** | | **22** | |
+| **Total** | | **21** | |
 
 ## Tests the inventory assigns to the Satin skeleton that are parked under another mechanism
 
