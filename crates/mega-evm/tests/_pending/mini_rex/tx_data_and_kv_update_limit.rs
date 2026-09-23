@@ -93,10 +93,10 @@ const LIBRARY: Address = address!("0000000000000000000000000000000000100002");
 /// {
 ///     // Read first uint256 (number of topics) from calldata offset 0
 ///      let numTopics := calldataload(0)
-///          
+///
 ///      // Read second uint256 (length of log data) from calldata offset 32
 ///      let dataLength := calldataload(0x20)
-///  
+///
 ///      switch numTopics
 ///      case 0 {
 ///          // LOG0: log(offset, length)
@@ -117,7 +117,7 @@ const LIBRARY: Address = address!("0000000000000000000000000000000000100002");
 ///      default {
 ///          invalid()
 ///      }
-///  
+///
 ///      stop()
 ///  }
 /// ```
