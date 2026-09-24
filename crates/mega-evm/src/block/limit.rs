@@ -394,10 +394,15 @@ impl BlockLimiter {
             }
         }
 
-        // The dimensions a transaction's own execution reveals: the transaction that crossed one
-        // is already packed, so what is refused here is the next one. A deposit is not the
-        // builder's to refuse on the execution ledger; it still counts, in `post_execution_update`.
-        if !is_deposit && self.gas.execution >= self.limits.block_execution_gas_limit {
+        // The packing budgets: the dimensions a transaction's own execution reveals. The
+        // transaction that crossed one is already packed, so what is refused here is the next
+        // one — never a deposit, which is not the builder's to refuse. Every committed
+        // transaction counts towards them, a deposit included, in `post_execution_update`.
+        if is_deposit {
+            return Ok(());
+        }
+
+        if self.gas.execution >= self.limits.block_execution_gas_limit {
             return Err(invalid_tx(
                 tx_hash,
                 MegaBlockLimitExceededError::ExecutionGasLimit {
@@ -407,10 +412,7 @@ impl BlockLimiter {
             ));
         }
 
-        // Every committed transaction counts, a deposit included, in `post_execution_update`. The
-        // transaction that crossed is already packed, so what is refused here is the next one —
-        // never a deposit, which is not the builder's to refuse.
-        if !is_deposit && self.usage.data_size >= self.limits.block_txs_data_limit {
+        if self.usage.data_size >= self.limits.block_txs_data_limit {
             return Err(invalid_tx(
                 tx_hash,
                 MegaBlockLimitExceededError::TransactionDataLimit {
@@ -420,8 +422,8 @@ impl BlockLimiter {
             ));
         }
 
-        // The same for the write records, the block's KV count.
-        if !is_deposit && self.usage.write_records >= self.limits.block_kv_update_limit {
+        // The block's KV count.
+        if self.usage.write_records >= self.limits.block_kv_update_limit {
             return Err(invalid_tx(
                 tx_hash,
                 MegaBlockLimitExceededError::KVUpdateLimit {
