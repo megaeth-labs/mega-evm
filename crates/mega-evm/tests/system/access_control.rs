@@ -509,6 +509,63 @@ fn test_disable_in_reverted_child_does_not_affect_sibling() {
     assert_eq!(run.word(), U256::ONE, "the sibling read");
 }
 
+/// A switch set by a child that then halted goes with the child, whether the child ran into an
+/// invalid opcode or out of gas: a sibling reads.
+#[test]
+fn test_disable_in_halted_child_does_not_affect_sibling() {
+    let invalid = disable(BytecodeBuilder::default()).append(INVALID).build();
+    // A loop that runs until the child's gas is gone.
+    let mut out_of_gas = disable(BytecodeBuilder::default()).build_vec();
+    let start = u8::try_from(out_of_gas.len()).expect("the loop starts within a PUSH1");
+    out_of_gas.extend([JUMPDEST, PUSH1, start, JUMP]);
+
+    for child in [invalid, Bytes::from(out_of_gas)] {
+        let parent = log_status(call(BytecodeBuilder::default(), CALL, CHILD, 1_000_000));
+        let parent = return_word(call(parent, CALL, SIBLING, 1_000_000));
+        let run = run(&[(PARENT, parent), (CHILD, child), (SIBLING, reads(TIMESTAMP))]);
+        assert!(!run.logged_status(0), "the child halted");
+        assert_eq!(run.word(), U256::ONE, "the sibling read");
+    }
+}
+
+/// A switch does not outlive its transaction: after a transaction whose own frame switched access
+/// off, had a child refused, and then stopped or halted, the next transaction on the same EVM
+/// reads.
+#[test]
+fn test_the_switch_does_not_carry_into_the_next_transaction() {
+    let refused = || log_status(call(disable(BytecodeBuilder::default()), CALL, CHILD, 1_000_000));
+    for (first, halts) in
+        [(refused().stop().build(), false), (refused().append(INVALID).build(), true)]
+    {
+        let db = system_db()
+            .account_code(PARENT, first)
+            .account_code(CHILD, reads(TIMESTAMP))
+            .account_code(SIBLING, reads(TIMESTAMP));
+        let ctx = MegaContext::new(db, MegaSpecId::SATIN)
+            .with_block(block())
+            .with_chain(zero_fee_l1_block_info());
+        let mut evm = MegaEvm::new(ctx);
+
+        let one = evm
+            .execute_transaction(tx(PARENT, &[], U256::ZERO, GAS_LIMIT))
+            .expect("the transaction is valid");
+        if halts {
+            assert!(one.result.is_halt(), "{:?}", one.result);
+        } else {
+            assert!(one.result.is_success(), "{:?}", one.result);
+            let status = U256::from_be_slice(&one.result.logs()[0].data.data);
+            assert_eq!(status, U256::ZERO, "the child was refused");
+        }
+        assert_eq!(evm.ctx().detention().accessed(), VolatileDataAccess::empty());
+
+        let two = evm
+            .execute_transaction(tx(SIBLING, &[], U256::ZERO, GAS_LIMIT))
+            .expect("the transaction is valid");
+        assert!(two.result.is_success(), "halted first: {halts}: {:?}", two.result);
+        assert_eq!(evm.ctx().detention().accessed(), VolatileDataAccess::TIMESTAMP);
+    }
+}
+
 /* ---------- 7. enableVolatileDataAccess() ---------- */
 
 /// The frame that switched access off can switch it back on, and its child then reads.
