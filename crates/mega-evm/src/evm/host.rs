@@ -348,8 +348,10 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     /// and it is in the transaction's state, which a stateless witness is built from, even when
     /// the environment's value was the one used.
     ///
-    /// A frame that could not pay the cold access reads nothing, as revm's own skipped cold load
-    /// does, and the environment is not asked.
+    /// A frame whose regular gas, the part detention withholds included, cannot pay the cold
+    /// access reads nothing and asks nothing, as revm's own skipped cold load does. A detained
+    /// frame that holds the gas but may not spend it does read and ask, and the charge then stops
+    /// the transaction at the compute limit.
     ///
     /// It is a read of volatile data: it is refused while the frame's volatile-data access is off,
     /// and marked for gas detention, under the Oracle's cap, once it succeeded.
