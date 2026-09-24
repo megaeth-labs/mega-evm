@@ -40,7 +40,10 @@ use mega_evm::{
 };
 use revm::{
     bytecode::opcode::{ADDRESS, CALL, GAS, POP, PUSH0, PUSH1, REVERT, SELFDESTRUCT, STOP},
-    context::TxEnv,
+    context::{
+        result::{ExecutionResult, Output},
+        TxEnv,
+    },
 };
 
 use crate::common::context;
@@ -834,6 +837,59 @@ fn test_a_deposit_its_depositor_cannot_fund_fails_as_without_a_limit() {
         assert_eq!(limited.result, free.result, "{kind:?}");
         assert_eq!(limited.usage, free.usage, "{kind:?}");
     }
+}
+
+/// A creation from an account whose nonce cannot be bumped is answered by revm with a success
+/// that creates nothing and moves nothing: a `Return` with no address, and no log. It keeps
+/// nothing either, and no limit stops it for what it did not do.
+///
+/// No account reaches that nonce by executing: a transaction, a creation and an authorization
+/// each add one and stop below it. So this takes a state the chain did not produce, as a genesis
+/// allocation or a state override does. A deposit runs from it, its nonce being unchecked, and so
+/// does a user's creation run with the nonce check off, as a simulation may, which pays history
+/// for its body alone.
+#[test]
+fn test_a_creation_whose_nonce_cannot_be_bumped_keeps_nothing() {
+    let created_nothing = |outcome: &MegaTransactionOutcome| {
+        matches!(outcome.result, ExecutionResult::Success { output: Output::Create(_, None), .. }) &&
+            outcome.result.logs().is_empty()
+    };
+
+    let tx = deposit(TxKind::Create, 1_000, 5);
+    let body = transaction_body_bytes(&tx);
+    let limit = body + WRITE_RECORD_SIZE + TRANSFER_LOG_SIZE - 1;
+    for limits in [
+        EvmTxRuntimeLimits::no_limits(),
+        EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(limit),
+    ] {
+        let db = MemoryDatabase::default().account_nonce(DEPOSITOR, u64::MAX);
+        let outcome = execute(db, tx.clone(), limits);
+        assert!(created_nothing(&outcome), "{limits:?}: {:?}", outcome.result);
+        assert_eq!(outcome.limit_exceeded, None, "{limits:?}");
+        assert_eq!(outcome.usage, LimitUsage { data_size: body, write_records: 0 }, "{limits:?}");
+    }
+
+    let db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(10u64.pow(18)))
+        .account_nonce(CALLER, u64::MAX);
+    let ctx = context(db);
+    let mut cfg = ctx.mega_cfg().clone();
+    cfg.disable_nonce_check = true;
+    let tx = OpTx(op_transaction(TxEnv {
+        caller: CALLER,
+        kind: TxKind::Create,
+        value: U256::from(VALUE),
+        gas_limit: 20_000_000,
+        ..Default::default()
+    }));
+    let body = transaction_body_bytes(&tx);
+    let outcome = MegaEvm::new(ctx.with_cfg(cfg))
+        .execute_transaction(tx)
+        .expect("the transaction is valid with the nonce check off");
+    assert!(created_nothing(&outcome), "{:?}", outcome.result);
+    assert_eq!(outcome.usage, LimitUsage { data_size: body, write_records: 0 });
+    assert_eq!(outcome.gas.history_bytes, body, "its body alone");
+    assert_eq!(outcome.gas.history, history_gas(body).unwrap(), "and the history of its body");
 }
 
 /// A system transaction moves no value in the shape the sequencer builds it, so it logs nothing.

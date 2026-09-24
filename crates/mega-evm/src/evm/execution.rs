@@ -455,9 +455,8 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
                 return Ok(ItemOrResult::Result(stop_before_building(ctx, &frame_init, &check)?));
             }
         }
-        // The creator of a creation, to tell afterwards whether revm bumped its nonce. The
-        // transaction's own creation has no creator record to take back, so the check is a
-        // no-op there.
+        // The creator of a creation, to tell afterwards whether revm bumped its nonce: a creation
+        // revm answers without the bump made nothing its start counted.
         let creator = match &frame_init.frame_input {
             FrameInput::Create(inputs) => {
                 Some((inputs.caller(), account_nonce(ctx, inputs.caller())))
