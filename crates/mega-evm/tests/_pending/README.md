@@ -31,11 +31,10 @@ Do not add a `_pending/main.rs`.
 | revert-class aborts | 17 | 17 | 0 | 0 | 17 | 0 |
 | the pre-block system calls | 34 | 22 | 12 | 30 | 4 | 0 |
 | system contract deployment | 11 | 5 | 6 | 11 | 0 | 0 |
-| the oracle and control contracts | 9 | 9 | 0 | 0 | 9 | 0 |
 | native keyless deployment | 75 | 73 | 2 | 29 | 46 | 0 |
 | inspector support | 4 | 4 | 0 | 1 | 3 | 0 |
 | — (undecided: D57 preload-warm cold charging, D58 98/100 forwarding) | 7 | 7 | 0 | 0 | 0 | 7 |
-| **Total** | **178** | **158** | **20** | **92** | **79** | **7** |
+| **Total** | **169** | **149** | **20** | **92** | **70** | **7** |
 
 ## Tests ported in place
 
@@ -300,16 +299,17 @@ These 83 rows run in a real test target now, adapted to the Satin API and to the
 
 ## Tests ported by the oracle and control contracts
 
-These 68 rows run in a real test target now, adapted to the Satin API: the Oracle's storage is read through the oracle environment, `MegaAccessControl` steers gas detention's switch, and `remainingComputeGas()` answers from the caller's regular gas and detention's allowance, as the decisions they cite fix. The counts above are lower than the inventory's by exactly these rows.
+These 77 rows run in a real test target now, adapted to the Satin API: the Oracle's storage is read through the oracle environment, `MegaAccessControl` steers gas detention's switch, and `remainingComputeGas()` answers from the caller's regular gas and detention's allowance, as the decisions they cite fix. The counts above are lower than the inventory's by exactly these rows.
 
 | Legacy file | Owner in the inventory | Tests | Now in |
 |---|---|---:|---|
 | `mini_rex/oracle.rs` | the oracle and control contracts (4) | 4 | `tests/system/oracle_storage.rs` |
 | `rex2/oracle_hint.rs` | the oracle and control contracts (6) | 6 | `tests/system/oracle.rs` |
 | `rex4/access_control.rs` | the oracle and control contracts (46) | 46 | `tests/system/access_control.rs` |
+| `rex4/limit_control.rs` | the oracle and control contracts (9) | 9 | `tests/system/remaining_compute_gas.rs` |
 | `rex5/oracle_hint_metering.rs` | the oracle and control contracts (8) | 8 | `tests/system/oracle.rs` |
 | `rex6/oracle_hint_volatile_access.rs` | the oracle and control contracts (4) | 4 | `tests/system/oracle.rs` |
-| **Total** | | **68** | |
+| **Total** | | **77** | |
 
 ## Tests retired after the inventory
 
@@ -377,7 +377,6 @@ Each cell lists `disposition count (mechanism · decision)`.
 | `rex4/gas_detention.rs` | 2 | rewrite 2 (revert-class aborts · D48/D53) |
 | `rex4/intrinsic_limit_bypass.rs` | 1 | rewrite 1 (inspector support · D41) |
 | `rex4/keyless_deploy.rs` | 2 | keep 2 (native keyless deployment · native sub-frame inherits env) |
-| `rex4/limit_control.rs` | 9 | rewrite 9 (the oracle and control contracts · D40 (remaining compute derived from Gas)) |
 | `rex5/apply_pending_changes_gas_budget.rs` | 4 | rewrite 4 (the pre-block system calls · D51 (system source m = 1; the system-call reservoir split)) |
 | `rex5/create2_empty_initcode.rs` | 5 | keep 5 (the common execution layer · canonical revm behaviour) |
 | `rex5/create2_resize_gas_metering.rs` | 2 | keep 2 (the common execution layer · canonical behaviour) |

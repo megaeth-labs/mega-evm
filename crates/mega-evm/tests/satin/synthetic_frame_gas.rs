@@ -276,8 +276,9 @@ enum Expected {
     Answer(Bytes),
     /// The call reverted with exactly this data.
     Revert(Bytes),
-    /// `remainingComputeGas` answers the regular gas its own frame was forwarded, the one answer
-    /// of the matrix that depends on the transaction's gas limit: under the execution cap it is
+    /// `remainingComputeGas`, called by the transaction itself, answers the regular gas the
+    /// transaction's own frame was forwarded, the one answer of the matrix that depends on the
+    /// transaction's gas limit: under the execution cap it is
     /// the transaction's limit less what pre-execution took, above the cap it is the cap's. So
     /// the two answers differ by what the cap holds back at the wider limit, and by the body's
     /// history, which the narrow limit has no reservoir to pay from.

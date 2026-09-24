@@ -7,5 +7,4 @@ mod frame_limits;
 mod gas_detention;
 mod intrinsic_limit_bypass;
 mod keyless_deploy;
-mod limit_control;
 mod storage_call_stipend;
