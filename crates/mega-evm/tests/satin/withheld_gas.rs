@@ -103,6 +103,9 @@ fn store_status(code: BytecodeBuilder) -> Bytes {
     code.push_number(0_u8).append(SSTORE).stop().build()
 }
 
+/// A piece of code that ends a frame on an out-of-gas, appended to a program.
+type Fail = fn(BytecodeBuilder) -> BytecodeBuilder;
+
 /// An operand above `usize`: the instruction fails before any charge, whatever the gas.
 fn invalid_operand(code: BytecodeBuilder) -> BytecodeBuilder {
     code.push_u256(U256::MAX).append(MLOAD)
@@ -221,7 +224,7 @@ fn test_the_sstore_sentry_reads_the_whole_regular_gas() {
 /// an operand above `usize`, and a memory expansion beyond everything the transaction has.
 #[test]
 fn test_an_out_of_gas_nothing_could_pay_halts_as_without_the_read() {
-    let cases: [(&str, fn(BytecodeBuilder) -> BytecodeBuilder, OutOfGasError); 3] = [
+    let cases: [(&str, Fail, OutOfGasError); 3] = [
         ("an operand above usize", invalid_operand, OutOfGasError::InvalidOperand),
         ("a 16 MiB memory expansion", huge_memory, OutOfGasError::Memory),
         ("a hash of 2^40 bytes", huge_hash, OutOfGasError::Basic),
@@ -275,7 +278,7 @@ fn test_a_creation_that_cannot_pay_its_deposit_halts_as_without_the_read() {
 /// failure and completes, as without the read.
 #[test]
 fn test_a_callees_out_of_gas_is_caught_as_without_the_read() {
-    let cases: [(&str, fn(BytecodeBuilder) -> BytecodeBuilder); 4] = [
+    let cases: [(&str, Fail); 4] = [
         ("an operand above usize", invalid_operand),
         ("a 16 MiB memory expansion", huge_memory),
         ("a hash of 2^40 bytes", huge_hash),
