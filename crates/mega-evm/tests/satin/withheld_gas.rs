@@ -555,6 +555,32 @@ fn test_the_stop_reports_the_limit_whatever_a_callee_burned() {
     }
 }
 
+/// What a halting callee burns is what it had when it halted, not what it had at an opcode before
+/// it: a callee that hashes, then works through 260,000 gas, then hits an invalid opcode burns
+/// what it had at the invalid opcode. The transaction its caller stops after it bills that burn
+/// beside the limit, to the gas, so the work between the hash and the halt is compute.
+#[test]
+fn test_a_halt_burns_what_its_frame_had_when_it_halted() {
+    let hashes = BytecodeBuilder::default().push_number(32_u8).append_many([PUSH0, KECCAK256, POP]);
+    let child = burn(hashes, 10_000).append(INVALID).build();
+    for gas_limit in TIERS {
+        let parent =
+            call_keeping_status(op(BytecodeBuilder::default(), TIMESTAMP), CHILD, Some(5_000_000));
+        let db = MemoryDatabase::default()
+            .account_code(CONTRACT, spin(parent.append(POP)))
+            .account_code(CHILD, child.clone());
+        let mut evm = MegaEvm::new(context(db)).with_inspector(Calls::default());
+        let run = run_on(&mut evm, tx(CALLER, CONTRACT, gas_limit));
+        let call = evm.inspector().calls.iter().find(|call| call.target == CHILD).unwrap();
+        assert_eq!(call.result, InstructionResult::InvalidFEOpcode);
+        assert!(call.spent > 260_000, "{}", call.spent);
+        let limit = run.limit.unwrap();
+        assert_eq!(run.outcome.result.output(), Some(&stop_data(limit)));
+        let burned = run.outcome.gas.regular - intrinsic(gas_limit) - limit;
+        assert_eq!(burned, 5_000_000 - call.spent, "the callee burned what it had at the halt");
+    }
+}
+
 /* ---------- the same bill ---------- */
 
 /// Answers every call to `CHILD` itself, with the gas it was forwarded untouched.
