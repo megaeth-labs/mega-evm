@@ -101,8 +101,8 @@ pub(crate) struct KeylessCall {
 ///
 /// In this order, each refusal an answer with the call's gas as it stands:
 ///
-/// 1. [`KEYLESS_DEPLOY_OVERHEAD_GAS`] of regular gas, whatever the deployment does; a call that
-///    cannot pay it is answered out of gas.
+/// 1. [`KEYLESS_DEPLOY_OVERHEAD_GAS`] of regular gas, whatever the deployment does: decoding the
+///    transaction and recovering its signer. A call that cannot pay it is answered out of gas.
 /// 2. The call carries no value (`NoEtherTransfer()`).
 /// 3. Its arguments decode, and so does the transaction they carry: a signed legacy creation, no
 ///    chain id, no trailing bytes (`MalformedEncoding()`, `NotContractCreation()`,
@@ -120,10 +120,11 @@ pub(crate) struct KeylessCall {
 /// 11. The deploy address holds no code (`ContractAlreadyExists()`), read cold and without its
 ///     code, so the address is in the transaction's state and in a witness without its bytecode.
 /// 12. The signer can fund the transaction's value (`InsufficientBalance()`).
-/// 13. What the `CREATE` opcode charges its frame for the creation's start: the created account
-///     when the deploy address is empty — state gas, priced by the deploy address's SALT bucket —
-///     and the write records of the two accounts, as history. A call that cannot pay is answered
-///     out of gas.
+/// 13. What the `CREATE` opcode charges its frame for the creation's start, in the opcode's order:
+///     its regular gas — the schedule's `create` entry and EIP-3860's cost per word of init code —
+///     the created account when the deploy address is empty — state gas, priced by the deploy
+///     address's SALT bucket — and the write records of the two accounts, as history. A call that
+///     cannot pay is answered out of gas.
 /// 14. The gas the creation is forwarded is `gasLimitOverride`, capped to what the call has left,
 ///     and must still cover the signed gas limit (`GasLimitTooLow`).
 ///
@@ -372,7 +373,13 @@ fn prepare<DB: Database, ExtEnvs: ExternalEnvTypes>(
         refuse!(KeylessDeployError::InsufficientBalance);
     }
 
-    // What the `CREATE` opcode charges its frame for the creation's start, after every rule.
+    // What the `CREATE` opcode charges its frame for the creation's start, in the opcode's order
+    // and after every rule: its regular gas, the created account, then the records.
+    let params = ctx.cfg().gas_params();
+    let regular = params.create_cost().saturating_add(params.initcode_cost(tx.input.len()));
+    if !gas.record_regular_cost(regular) {
+        return Ok(Err(Refusal::OutOfGas));
+    }
     let charged_create_state_gas =
         ctx.journal_ref().state.get(&deploy_address).is_none_or(|account| account.info.is_empty());
     if charged_create_state_gas {

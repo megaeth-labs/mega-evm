@@ -326,8 +326,8 @@ fn test_a_deployment_within_every_limit_deploys() {
 }
 
 /// An answer built without a frame carries the reservoir the call inherited: a call refused after
-/// it paid for the creation's start — the forward capped below the signed gas limit, which only a
-/// signed gas limit near the execution cap reaches above it — gives the charges back to the
+/// it paid for the signer's account — the forward capped below the signed gas limit, which only a
+/// signed gas limit near the execution cap reaches above it — gives the charge back to the
 /// reservoir and the sender gets all of it but the body's history.
 #[test]
 fn test_a_refusal_after_the_charges_gives_the_reservoir_back() {
@@ -348,9 +348,51 @@ fn test_a_refusal_after_the_charges_gives_the_reservoir_back() {
     );
 }
 
+/// And a call refused after the charges of the creation's start — the forward the `CREATE`
+/// opcode's regular gas takes below the signed gas limit, which above the execution cap only a
+/// signed gas limit just under what the call has left reaches — gives their state and history gas
+/// back to the reservoir, and keeps their regular gas, as it keeps the overhead.
+#[test]
+fn test_a_refusal_after_the_creations_charges_gives_the_reservoir_back() {
+    let gas_limit = GAS_LIMITS[1];
+    let init_code = deploying(&runtime(1));
+    // Above the cap the call has what the execution cap leaves once the body's regular gas — all
+    // the reference spends — and the overhead are paid. The signed gas limit is one less, and is
+    // part of the calldata the body is priced by, so the two are settled together.
+    let mut signed = TX_GAS_LIMIT_CAP - 200_000;
+    let (deployment, left) = (0..10)
+        .find_map(|_| {
+            let deployment = Deployment::signed(0, signed, U256::ZERO, init_code.clone());
+            let reference = reference(deployment.call_data(LARGE_OVERRIDE), gas_limit);
+            let left = TX_GAS_LIMIT_CAP - reference.gas.regular - KEYLESS_DEPLOY_OVERHEAD_GAS;
+            let settled = left - 1 == signed;
+            signed = left - 1;
+            settled.then_some((deployment, left))
+        })
+        .expect("the signed gas limit settles");
+    let outcome = limited(&deployment, gas_limit, EvmTxRuntimeLimits::no_limits());
+    let opcode = create_regular(init_code.len());
+    assert_eq!(
+        refusal(&outcome),
+        KeylessDeployError::GasLimitTooLow {
+            tx_gas_limit: signed,
+            provided_gas_limit: left - opcode
+        },
+    );
+    let reference = reference(deployment.call_data(LARGE_OVERRIDE), gas_limit);
+    let [total, regular, state, history_gas, _] = beyond(&outcome, &reference);
+    let kept = KEYLESS_DEPLOY_OVERHEAD_GAS + opcode;
+    assert_eq!([total, regular, state, history_gas], [kept, kept, 0, 0]);
+    assert_eq!(
+        outcome.result.gas().reservoir_remaining(),
+        reference.result.gas().reservoir_remaining(),
+    );
+}
+
 /// The call gets back what its creation did not spend, the same way whether the creation
-/// succeeds or reverts: the transaction spends the overhead, what the call kept of the creation's
-/// start, and the creation's `gasUsed`, and nothing else, below and above the execution cap.
+/// succeeds or reverts: the transaction spends the overhead, the `CREATE` opcode's regular gas,
+/// what the call kept of the creation's start, and the creation's `gasUsed`, and nothing else,
+/// below and above the execution cap.
 #[test]
 fn test_the_unspent_forward_comes_back_on_success_and_revert_alike() {
     let succeeding = Deployment::new(deploying(&runtime(1)));
@@ -363,6 +405,7 @@ fn test_the_unspent_forward_comes_back_on_success_and_revert_alike() {
         assert_eq!(
             total,
             KEYLESS_DEPLOY_OVERHEAD_GAS +
+                create_regular(deploying(&runtime(1)).len()) +
                 new_account +
                 entry(GasId::create_state_gas()) +
                 2 * record() +
@@ -375,7 +418,11 @@ fn test_the_unspent_forward_comes_back_on_success_and_revert_alike() {
             beyond(&revert, &reference(reverting.call_data(LARGE_OVERRIDE), gas_limit));
         assert_eq!(
             total,
-            KEYLESS_DEPLOY_OVERHEAD_GAS + new_account + record() + returned(&revert).gasUsed,
+            KEYLESS_DEPLOY_OVERHEAD_GAS +
+                create_regular(3) +
+                new_account +
+                record() +
+                returned(&revert).gasUsed,
             "revert at {gas_limit}",
         );
     }

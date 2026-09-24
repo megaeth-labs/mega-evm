@@ -193,7 +193,8 @@ fn test_a_constructor_out_of_gas_is_execution_halted() {
 }
 
 /// A halted deployment is paid for, and its nonce is spent: the transaction spends the overhead,
-/// the signer's account and its nonce record, and the whole forward.
+/// the `CREATE` opcode's regular gas, the signer's account and its nonce record, and the whole
+/// forward.
 #[test]
 fn test_a_halted_deployment_is_paid_for_and_spends_the_nonce() {
     let deployment = Deployment::new(Bytes::from_static(&[INVALID]));
@@ -207,7 +208,11 @@ fn test_a_halted_deployment_is_paid_for_and_spends_the_nonce() {
         let new_account = entry(GasId::new_account_state_gas());
         assert_eq!(
             total,
-            KEYLESS_DEPLOY_OVERHEAD_GAS + new_account + record() + SIGNED_GAS_LIMIT,
+            KEYLESS_DEPLOY_OVERHEAD_GAS +
+                create_regular(1) +
+                new_account +
+                record() +
+                SIGNED_GAS_LIMIT,
             "at {gas_limit}",
         );
     }

@@ -5,7 +5,7 @@
 //! beyond it is the overhead, the charges its call makes for the creation's start, and what the
 //! creation itself spent — its `gasUsed`.
 
-use mega_evm::system::keyless::KEYLESS_DEPLOY_OVERHEAD_GAS;
+use mega_evm::{constants::MAX_INITCODE_SIZE, system::keyless::KEYLESS_DEPLOY_OVERHEAD_GAS};
 use revm::bytecode::opcode::{PUSH0, REVERT};
 
 use super::*;
@@ -16,7 +16,7 @@ const RUNTIME_LEN: usize = 5;
 /// Every charge of a deployment by a signer with no account, to an empty address, is accounted
 /// for exactly, and the transaction spends the same below and above the execution cap:
 ///
-/// - the overhead, as regular gas;
+/// - the overhead, and the regular gas the `CREATE` opcode charges its frame;
 /// - the signer's account and the created account, as state gas, once each;
 /// - the two write records the creation's start makes — the signer's nonce and the created account
 ///   — as history;
@@ -24,7 +24,9 @@ const RUNTIME_LEN: usize = 5;
 ///   deposited and the history of the same bytes.
 #[test]
 fn test_every_charge_of_a_deployment_is_accounted_for() {
-    let deployment = Deployment::new(deploying(&runtime(RUNTIME_LEN)));
+    let init_code = deploying(&runtime(RUNTIME_LEN));
+    let opcode = create_regular(init_code.len());
+    let deployment = Deployment::new(init_code);
     let len = RUNTIME_LEN as u64;
     let deposit_state = satin_gas_params().code_deposit_state_gas(RUNTIME_LEN);
     let mut spent = None;
@@ -38,14 +40,18 @@ fn test_every_charge_of_a_deployment_is_accounted_for() {
         let created = entry(GasId::create_state_gas());
         assert_eq!(
             total,
-            KEYLESS_DEPLOY_OVERHEAD_GAS + new_account + created + 2 * record() + gas_used,
+            KEYLESS_DEPLOY_OVERHEAD_GAS + opcode + new_account + created + 2 * record() + gas_used,
             "at {gas_limit}",
         );
         assert_eq!(state, new_account + created + deposit_state, "at {gas_limit}");
         assert_eq!(history_gas, 2 * record() + history(len), "at {gas_limit}");
         assert_eq!(history_bytes, 2 * 40 + len, "at {gas_limit}");
         let creation_regular = gas_used - deposit_state - history(len);
-        assert_eq!(regular, KEYLESS_DEPLOY_OVERHEAD_GAS + creation_regular, "at {gas_limit}");
+        assert_eq!(
+            regular,
+            KEYLESS_DEPLOY_OVERHEAD_GAS + opcode + creation_regular,
+            "at {gas_limit}"
+        );
         assert_eq!(outcome.usage.write_records, 2, "the signer's nonce and the created account");
 
         let previous = *spent.get_or_insert((total, gas_used));
@@ -130,10 +136,50 @@ fn test_a_failed_deployment_gives_the_created_account_back() {
         assert_eq!(state, new_account, "at {gas_limit}");
         assert_eq!(history_gas, record(), "at {gas_limit}");
         assert_eq!(history_bytes, 40, "at {gas_limit}");
-        assert_eq!(regular, KEYLESS_DEPLOY_OVERHEAD_GAS + gas_used, "at {gas_limit}");
+        assert_eq!(
+            regular,
+            KEYLESS_DEPLOY_OVERHEAD_GAS + create_regular(3) + gas_used,
+            "at {gas_limit}"
+        );
         assert_eq!(total, regular + state + history_gas);
         assert_eq!(nonce(&outcome, deployment.signer), 1, "the nonce stays spent");
         assert_eq!(outcome.usage.write_records, 1, "the signer's nonce");
+    }
+}
+
+/// The call pays the regular gas the `CREATE` opcode charges its frame on top of the overhead,
+/// whatever the pools: the schedule's `create` entry, 32,000, and EIP-3860's 2 gas per word of
+/// init code, 65,536 for init code of the maximum size. Init code of zero bytes stops at once and
+/// deploys nothing, so the creation itself spends nothing, and every other charge of the call is
+/// state and history gas.
+#[test]
+fn test_the_call_pays_the_create_opcodes_regular_gas() {
+    assert_eq!(create_regular(1), 32_000 + 2);
+    assert_eq!(create_regular(33), 32_000 + 4);
+    assert_eq!(create_regular(MAX_INITCODE_SIZE), 32_000 + 65_536);
+    let state = entry(GasId::new_account_state_gas()) + entry(GasId::create_state_gas());
+    for len in [1, 33, MAX_INITCODE_SIZE] {
+        let deployment = Deployment::new(vec![0; len].into());
+        // Gas limits that cover the body of a transaction carrying a mebibyte of calldata, below
+        // and above the execution cap.
+        for gas_limit in [TX_GAS_LIMIT_CAP * 3 / 4, 10 * TX_GAS_LIMIT_CAP] {
+            let outcome = deploy(system_db(), &deployment, gas_limit);
+            let KeylessDeployError::EmptyCodeDeployed { gas_used } = failure(&outcome) else {
+                panic!("expected EmptyCodeDeployed: {:?}", outcome.result);
+            };
+            assert_eq!(gas_used, 0);
+            let reference = reference(deployment.call_data(LARGE_OVERRIDE), gas_limit);
+            let [total, regular, state_gas, history_gas, _] = beyond(&outcome, &reference);
+            let regular_expected = KEYLESS_DEPLOY_OVERHEAD_GAS + create_regular(len);
+            assert_eq!(regular, regular_expected, "{len} bytes at {gas_limit}");
+            assert_eq!(state_gas, state, "{len} bytes at {gas_limit}");
+            assert_eq!(history_gas, 2 * record(), "{len} bytes at {gas_limit}");
+            assert_eq!(
+                total,
+                regular_expected + state + 2 * record(),
+                "{len} bytes at {gas_limit}"
+            );
+        }
     }
 }
 

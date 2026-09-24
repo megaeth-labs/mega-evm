@@ -241,6 +241,13 @@ pub(crate) fn entry(id: GasId) -> u64 {
     satin_gas_params().get(id)
 }
 
+/// The regular gas the `CREATE` opcode charges its frame for init code of `len` bytes, which a
+/// `keylessDeploy` call pays on top of its overhead: the schedule's `create` entry and EIP-3860's
+/// cost per word.
+pub(crate) fn create_regular(len: usize) -> u64 {
+    satin_gas_params().create_cost() + satin_gas_params().initcode_cost(len)
+}
+
 /// The history gas of one write record.
 pub(crate) fn record() -> u64 {
     write_record_history_gas(1).expect("a record has a price")

@@ -198,11 +198,13 @@ fn test_a_failed_deployment_ends_as_a_revert_in_the_trace() {
 
 /// An inspector that answers the creation itself — a tool's rewrite — starts no creation: the
 /// signer's nonce is not spent, so neither its account nor the created one is charged, and the
-/// call reports what the inspector answered. The transaction spends the overhead and the
-/// reference's gas, and nothing else.
+/// call reports what the inspector answered. The transaction spends the overhead, the regular gas
+/// the `CREATE` opcode charges whatever its frame does, and the reference's gas, and nothing
+/// else.
 #[test]
 fn test_a_creation_an_inspector_answers_charges_nothing_it_did_not_start() {
     let deployment = Deployment::new(deploying(&runtime(1)));
+    let opcode = KEYLESS_DEPLOY_OVERHEAD_GAS + create_regular(deploying(&runtime(1)).len());
     for gas_limit in GAS_LIMITS {
         let recorder = Recorder { answer_creations: true, ..Default::default() };
         let (outcome, recorder) = inspect(&deployment, recorder, gas_limit);
@@ -212,7 +214,7 @@ fn test_a_creation_an_inspector_answers_charges_nothing_it_did_not_start() {
             beyond(&outcome, &reference(deployment.call_data(LARGE_OVERRIDE), gas_limit));
         assert_eq!(
             [total, regular, state, history_gas, history_bytes],
-            [KEYLESS_DEPLOY_OVERHEAD_GAS, KEYLESS_DEPLOY_OVERHEAD_GAS, 0, 0, 0],
+            [opcode, opcode, 0, 0, 0],
             "at {gas_limit}",
         );
         assert_eq!(
