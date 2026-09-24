@@ -75,7 +75,8 @@ It then starts the creation as the signer, below it, with `gasLimitOverride` cap
 From there the creation is an ordinary frame, priced, limited, journaled and traced as one, and its `ORIGIN` and `GASPRICE` are the transaction's.
 Once the creation returns the call answers in the contract's ABI — the deployed address, or the error the creation failed with; a transaction limit the deployment crosses stops the transaction and takes the deployment back whole.
 A signer is refused once its nonce is above 1.
-A deployment that succeeds spends the signer's nonce, and one that fails spends it only from 0 to 1: a signer at nonce 1 stays there however often its deployment fails, so nobody can use up its attempts.
+A deployment spends the signer's nonce from 0 to 1 and takes no signer past 1, as the legacy engine did.
+A signer at nonce 1 stays there however often its deployment fails, so nobody can use up its attempts, and once it deploys, so a resubmission finds the address taken (`ContractAlreadyExists()`).
 A `keylessDeploy` call a contract makes is not a deployment: it runs the method body, which reverts with `NotIntercepted()`.
 
 The system address (`MEGA_SYSTEM_ADDRESS`) sends the protocol's own transactions: a legacy transaction from it to a whitelisted contract is validated — the whitelist, the chain id, the nonce and EIP-3607 — and promoted to a deposit, which pays no fee and rewards none.
