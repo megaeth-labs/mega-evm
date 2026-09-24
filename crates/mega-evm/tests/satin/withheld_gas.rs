@@ -814,7 +814,7 @@ fn recording_modexp(runs: &Runs) -> DynPrecompile {
 /// The calldata of a modexp that is costly to compute: a 1,024-byte base with no zero byte, an
 /// exponent of `exponent_len` bytes, all ones, and an odd 1,024-byte modulus, then `padding`
 /// zero bytes the precompile ignores. Its price grows with the exponent, and so does the work.
-fn costly_modexp_input(exponent_len: usize, padding: usize) -> Vec<u8> {
+pub(crate) fn costly_modexp_input(exponent_len: usize, padding: usize) -> Vec<u8> {
     let mut input = Vec::new();
     for len in [1_024_usize, exponent_len, 1_024] {
         input.extend_from_slice(&U256::from(len).to_be_bytes::<32>());
@@ -860,7 +860,7 @@ fn tx_with(input: &[u8], gas_limit: u64) -> mega_evm::MegaTransaction {
 }
 
 /// What a transaction carrying `input` spends before its first instruction.
-fn intrinsic_with(input: &[u8], gas_limit: u64) -> u64 {
+pub(crate) fn intrinsic_with(input: &[u8], gas_limit: u64) -> u64 {
     let stops =
         MemoryDatabase::default().account_code(CONTRACT, BytecodeBuilder::default().stop().build());
     execute(stops, tx_with(input, gas_limit)).outcome.gas.regular

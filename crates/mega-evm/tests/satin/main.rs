@@ -7,6 +7,7 @@ mod data_size;
 mod data_size_counts;
 mod db_error;
 mod deposit_charge;
+mod detained_transfers;
 mod detention;
 mod equivalence;
 mod history_bytes;
