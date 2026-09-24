@@ -261,6 +261,21 @@ fn test_revert_data_contains_error_with_access_type() {
     assert_eq!(refused_type(&output), VolatileDataAccessType::Timestamp);
 }
 
+/// A refused `SLOTNUM` names access type 12, which the contract's enum does not declare: the
+/// engine's decoder names it, and the enum-typed binding cannot.
+#[test]
+fn test_a_slotnum_refusal_names_access_type_12() {
+    use mega_evm::{decode_volatile_data_access_disabled, system::SLOT_NUM_ACCESS_TYPE};
+
+    let parent = call_and_return_data(disable(BytecodeBuilder::default()), CHILD);
+    let run = run(&[(PARENT, parent), (CHILD, reads(SLOTNUM))]);
+    let output = run.output();
+    assert_eq!(output.len(), 36);
+    assert_eq!(output[35], SLOT_NUM_ACCESS_TYPE);
+    assert_eq!(decode_volatile_data_access_disabled(&output), Some(VolatileDataAccess::SLOT_NUM));
+    assert_eq!(refused_type(&output), VolatileDataAccessType::__Invalid);
+}
+
 /* ---------- 3. nested calls and call schemes ---------- */
 
 /// The restriction reaches every frame below the one that switched it off: a grandchild's read is

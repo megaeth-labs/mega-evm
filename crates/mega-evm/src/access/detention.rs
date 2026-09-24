@@ -561,6 +561,27 @@ pub fn volatile_data_access_disabled_revert_data(access: VolatileDataAccess) -> 
     data.into()
 }
 
+/// The kind of volatile data the revert data of a refused read names:
+/// `VolatileDataAccessDisabled(accessType)`, decoded with its argument as the `uint8` it is
+/// encoded as. `None` when `revert_data` is not that error, or names no kind.
+///
+/// Decoding the argument as the contract's `VolatileDataAccessType` cannot name a `SLOTNUM`
+/// refusal, whose access type, [`SLOT_NUM_ACCESS_TYPE`](crate::system::SLOT_NUM_ACCESS_TYPE), the
+/// enum does not declare: the `IMegaAccessControl` binding decodes it to its `__Invalid`
+/// placeholder.
+pub fn decode_volatile_data_access_disabled(revert_data: &[u8]) -> Option<VolatileDataAccess> {
+    let (selector, word) = revert_data.split_first_chunk::<4>()?;
+    if *selector != VOLATILE_DATA_ACCESS_DISABLED_SELECTOR || word.len() != 32 {
+        return None;
+    }
+    // A `uint8` word: 31 zero bytes, then the value.
+    let (high, low) = word.split_at(31);
+    if high.iter().any(|byte| *byte != 0) {
+        return None;
+    }
+    VolatileDataAccess::from_access_type(low[0])
+}
+
 /// The regular gas a frame spent: its limit, less what it has left — the withheld part included —
 /// less the state and history gas that spilled onto its regular gas.
 #[inline]
@@ -888,6 +909,71 @@ mod tests {
         assert!(detention.enable_access(0), "the frame that switched it off switches it on");
         detention.on_frame_run(&mut frame, 0);
         assert!(!detention.refuses(VolatileDataAccess::TIMESTAMP));
+    }
+
+    /// A refusal's revert data decodes back to the kind it names, for every kind the engine
+    /// names, the slot number's access type 12 included, which the contract's own ABI type cannot
+    /// name.
+    #[test]
+    fn test_a_refusal_decodes_to_the_kind_it_names() {
+        use crate::system::{IMegaAccessControl, VolatileDataAccessType, SLOT_NUM_ACCESS_TYPE};
+        use alloy_sol_types::SolError;
+
+        for access_type in 0..=SLOT_NUM_ACCESS_TYPE {
+            let access = VolatileDataAccess::from_access_type(access_type).unwrap();
+            let data = volatile_data_access_disabled_revert_data(access);
+            assert_eq!(data.len(), 36);
+            assert_eq!(decode_volatile_data_access_disabled(&data), Some(access));
+        }
+        // The enum-typed decoder loses 12 to its placeholder for an undeclared variant, and its
+        // validating form refuses it: the argument is a `uint8`, and is decoded as one.
+        let slot_num = volatile_data_access_disabled_revert_data(VolatileDataAccess::SLOT_NUM);
+        assert_eq!(
+            IMegaAccessControl::VolatileDataAccessDisabled::abi_decode(&slot_num)
+                .unwrap()
+                .accessType,
+            VolatileDataAccessType::__Invalid,
+        );
+        assert!(
+            IMegaAccessControl::VolatileDataAccessDisabled::abi_decode_validate(&slot_num).is_err()
+        );
+        let oracle = volatile_data_access_disabled_revert_data(VolatileDataAccess::ORACLE);
+        assert_eq!(
+            IMegaAccessControl::VolatileDataAccessDisabled::abi_decode_validate(&oracle)
+                .unwrap()
+                .accessType,
+            VolatileDataAccessType::Oracle,
+        );
+    }
+
+    /// Anything else decodes to nothing: another selector, a short or long payload, a word that is
+    /// not a `uint8`, and an access type past the slot number's.
+    #[test]
+    fn test_other_revert_data_decodes_to_nothing() {
+        let valid = volatile_data_access_disabled_revert_data(VolatileDataAccess::TIMESTAMP);
+        let mut other_selector = valid.to_vec();
+        other_selector[0] ^= 1;
+        let mut wide = valid.to_vec();
+        wide[4] = 1;
+        let mut wide_low = valid.to_vec();
+        wide_low[34] = 1;
+        let mut past = valid.to_vec();
+        past[35] = 13;
+        let mut long = valid.to_vec();
+        long.push(0);
+        for data in [
+            other_selector,
+            valid[..35].to_vec(),
+            valid[..4].to_vec(),
+            valid[..3].to_vec(),
+            long,
+            wide,
+            wide_low,
+            past,
+            vec![],
+        ] {
+            assert_eq!(decode_volatile_data_access_disabled(&data), None, "{data:?}");
+        }
     }
 
     /// A transaction that is not detained records nothing and caps nothing: a system-originated

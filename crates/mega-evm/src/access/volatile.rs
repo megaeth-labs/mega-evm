@@ -2,14 +2,15 @@
 
 use core::ops::{BitOr, BitOrAssign};
 
-use crate::system::VolatileDataAccessType;
+use crate::system::{VolatileDataAccessType, SLOT_NUM_ACCESS_TYPE};
 
 /// A set of the kinds of volatile data a transaction read.
 ///
 /// One bit per kind. A bit's position is the discriminant of the kind in `MegaAccessControl`'s
 /// `VolatileDataAccessType`, which is how a refused read names what it refused: bits 0 to 9 are
 /// block-environment fields, bit 10 the block beneficiary's account and bit 11 the Oracle's
-/// storage. Bit 12 is the block's slot number, which the contract's enum does not declare.
+/// storage. Bit 12 is the block's slot number, which the contract's enum does not declare
+/// ([`SLOT_NUM_ACCESS_TYPE`]).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct VolatileDataAccess(u16);
 
@@ -40,8 +41,8 @@ impl VolatileDataAccess {
     pub const BENEFICIARY_BALANCE: Self = Self(1 << 10);
     /// The Oracle contract's storage.
     pub const ORACLE: Self = Self(1 << 11);
-    /// The block's slot number (`SLOTNUM`).
-    pub const SLOT_NUM: Self = Self(1 << 12);
+    /// The block's slot number (`SLOTNUM`), at [`SLOT_NUM_ACCESS_TYPE`].
+    pub const SLOT_NUM: Self = Self(1 << SLOT_NUM_ACCESS_TYPE);
 
     /// The block-environment kinds: bits 0 to 9, and the slot number.
     const BLOCK_ENV_MASK: u16 = 0b0001_0011_1111_1111;
@@ -105,6 +106,15 @@ impl VolatileDataAccess {
     /// The block-environment kinds of the set.
     pub const fn block_env_only(self) -> Self {
         Self(self.0 & Self::BLOCK_ENV_MASK)
+    }
+
+    /// The kind a refusal names with `access_type`: its discriminant in `VolatileDataAccessType`,
+    /// or [`SLOT_NUM_ACCESS_TYPE`] for the slot number. `None` for any other value.
+    pub const fn from_access_type(access_type: u8) -> Option<Self> {
+        if access_type > SLOT_NUM_ACCESS_TYPE {
+            return None;
+        }
+        Some(Self(1 << access_type))
     }
 
     /// The position of the set's lowest bit, which for a single kind is its discriminant in
@@ -208,6 +218,25 @@ mod tests {
         }
         // The slot number has no variant of its own: its bit is the one after the enum's.
         assert_eq!(VolatileDataAccess::SLOT_NUM.as_u8(), 12);
+        assert_eq!(SLOT_NUM_ACCESS_TYPE, VolatileDataAccessType::Oracle as u8 + 1);
+    }
+
+    /// Every access type the engine names maps back to its kind, the slot number's 12 included,
+    /// and nothing past it does.
+    #[test]
+    fn test_from_access_type_maps_every_kind_and_nothing_else() {
+        for access_type in 0..=SLOT_NUM_ACCESS_TYPE {
+            let access = VolatileDataAccess::from_access_type(access_type).unwrap();
+            assert_eq!(access.as_u8(), access_type);
+            assert_eq!(access.bits().count_ones(), 1);
+        }
+        assert_eq!(
+            VolatileDataAccess::from_access_type(SLOT_NUM_ACCESS_TYPE),
+            Some(VolatileDataAccess::SLOT_NUM)
+        );
+        for access_type in [SLOT_NUM_ACCESS_TYPE + 1, 15, 16, u8::MAX] {
+            assert_eq!(VolatileDataAccess::from_access_type(access_type), None, "{access_type}");
+        }
     }
 
     /// Every block-environment kind, the slot number included, counts as one; the beneficiary

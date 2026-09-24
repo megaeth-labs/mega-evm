@@ -40,6 +40,20 @@ pub const DISABLED_BY_PARENT_REVERT_DATA: [u8; 4] = IMegaAccessControl::Disabled
 pub const VOLATILE_DATA_ACCESS_DISABLED_SELECTOR: [u8; 4] =
     IMegaAccessControl::VolatileDataAccessDisabled::SELECTOR;
 
+/// The access type a refused `SLOTNUM` names in `VolatileDataAccessDisabled`: 12, one past the
+/// last variant of the contract's `VolatileDataAccessType`.
+///
+/// The enum was written before the block's slot number became volatile data, and the system
+/// contracts are deployed as they are, so it has no variant for it. The error's argument is
+/// encoded as the `uint8` an enum encodes as, so a refused `SLOTNUM` carries 12 like any other
+/// kind carries its variant. A handler that decodes the argument as `VolatileDataAccessType`
+/// cannot name 12: Solidity's ABI decoder reverts on an enum value out of range, and this crate's
+/// `IMegaAccessControl` binding decodes it to the placeholder `__Invalid`. Solidity handlers must
+/// decode the argument as `uint8`.
+/// [`decode_volatile_data_access_disabled`](crate::decode_volatile_data_access_disabled) is the
+/// Rust side's decoder, and maps every access type the engine names, 12 included.
+pub const SLOT_NUM_ACCESS_TYPE: u8 = 12;
+
 /// Answers a call to `MegaAccessControl`, or `None` when the selector is not one of its three
 /// and the deployed bytecode runs. `depth` is the depth of the frame the call would start.
 ///

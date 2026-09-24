@@ -1176,6 +1176,11 @@ fn test_the_refusal_names_the_access_type() {
     let slot_num = volatile_data_access_disabled_revert_data(VolatileDataAccess::SLOT_NUM);
     assert_eq!(&slot_num[..4], IMegaAccessControl::VolatileDataAccessDisabled::SELECTOR.as_slice());
     assert_eq!(U256::from_be_slice(&slot_num[4..]), U256::from(12));
+    assert_eq!(mega_evm::system::SLOT_NUM_ACCESS_TYPE, 12);
+    assert_eq!(
+        mega_evm::decode_volatile_data_access_disabled(&slot_num),
+        Some(VolatileDataAccess::SLOT_NUM)
+    );
 }
 
 /// The switch holds for the frame it is off from and every frame below, and a frame above it
