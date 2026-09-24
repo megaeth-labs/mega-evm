@@ -103,9 +103,11 @@
 //! answers as it would without the read. Priced past it, it answers out of gas without computing;
 //! the answer is marked as a crossing, and the same rule stops the transaction. The price is not
 //! known without running the precompile, so one priced past its whole forward runs out of the
-//! allowance too, and is the stop, where without the read it would be a failed call that burns
-//! its forward and that its caller survives. A precompile run on the allowance also sees the
-//! allowance as its gas limit.
+//! allowance too, and is the stop, where without the read it would be a failed call that burns its
+//! forward and that its caller survives. So is one priced between the allowance and its forward
+//! whose input fails a check made after its gas check: it runs out of the allowance before that
+//! check, where without the read the check fails the call, which burns its forward and which its
+//! caller survives. A precompile run on the allowance also sees the allowance as its gas limit.
 //!
 //! An interceptor builds its answer on all the gas the caller forwarded, the caller's withheld
 //! part included: an answer that spent more than the allowance the frame would have run on is

@@ -449,7 +449,9 @@ impl Detention {
     /// and [`on_answer`](Self::on_answer) settles it as the stop.
     ///
     /// The precompile's price is not known without running it, so a precompile priced above its
-    /// whole forward runs out of the allowance as well, and is the stop too.
+    /// whole forward runs out of the allowance as well, and is the stop too. So is one priced
+    /// within its forward, past the allowance, whose input fails a check made after its gas check,
+    /// which without the read fails the call instead.
     pub(crate) fn restore_forward(result: &mut InterpreterResult, withheld: NonZeroU64) {
         let forward = result.gas.limit().saturating_add(withheld.get());
         result.gas.tracker_mut().set_limit(forward);
