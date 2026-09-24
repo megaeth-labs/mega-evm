@@ -34,4 +34,5 @@ mod storage_call_stipend;
 mod strategic_stop;
 mod synthetic_frame_gas;
 mod volatile_access;
+mod withheld_gas;
 mod write_records;

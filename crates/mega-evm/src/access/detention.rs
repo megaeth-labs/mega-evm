@@ -378,9 +378,12 @@ impl Detention {
             return None;
         }
         // The answer spent more than the allowance, and no more than the gas limit, so the gas
-        // limit is above the allowance and the frame would have had the rest withheld.
+        // limit is above the allowance and the frame would have had the rest withheld. An
+        // interceptor that charged by taking gas off the frame's limit answered on less than it
+        // was forwarded; the frame is settled on what it was forwarded.
         let withheld = NonZeroU64::new(gas_limit - allowance)?;
         result.result = InstructionResult::OutOfGas;
+        result.gas.tracker_mut().set_limit(gas_limit);
         result.gas.set_withheld_crossing(Some(WithheldCrossing::new(withheld)));
         self.stop(&mut result.gas)
     }
