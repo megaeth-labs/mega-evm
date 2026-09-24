@@ -24,9 +24,9 @@
 //!   gas detention marks in the Host and commits in the opcode's wrapper; the first caps the frame,
 //!   and the call starts and resumes under the limit.
 //! - `hashes_and_copies`: 200 rounds of a 32-byte `KECCAK256`, `MCOPY`, `CALLDATACOPY` and
-//!   `CODECOPY` and an empty `RETURNDATACOPY`: the wrapper each of them runs in, which notes the
-//!   frame's gas for gas detention when the opcode's charge fails and compares a result when it
-//!   does not.
+//!   `CODECOPY`, an empty `RETURNDATACOPY` and an `EXP` of a one-byte exponent: the wrapper each of
+//!   them runs in, which notes the frame's gas for gas detention when the opcode's charge fails and
+//!   compares a result when it does not.
 //! - `data_size_limit`: 200 fresh slots and 200 two-topic logs in one frame, run under a
 //!   transaction data-size limit equal to exactly what the transaction keeps, so every record is
 //!   checked against a limit it is about to reach (`satin`); the same one byte short of it, so the
@@ -71,9 +71,9 @@ use mega_evm::{
 use op_revm::{L1BlockInfo, OpEvm, OpSpecId, OpTransaction};
 use revm::{
     bytecode::opcode::{
-        ADDRESS, BALANCE, CALL, CALLDATACOPY, CALLDATALOAD, CODECOPY, DUP1, GAS, ISZERO, JUMPDEST,
-        JUMPI, KECCAK256, LOG0, LOG2, MCOPY, MSTORE, NUMBER, POP, PUSH0, PUSH1, RETURNDATACOPY,
-        SLOAD, SSTORE, STATICCALL, STOP, SUB, SWAP1, TIMESTAMP,
+        ADDRESS, BALANCE, CALL, CALLDATACOPY, CALLDATALOAD, CODECOPY, DUP1, EXP, GAS, ISZERO,
+        JUMPDEST, JUMPI, KECCAK256, LOG0, LOG2, MCOPY, MSTORE, NUMBER, POP, PUSH0, PUSH1,
+        RETURNDATACOPY, SLOAD, SSTORE, STATICCALL, STOP, SUB, SWAP1, TIMESTAMP,
     },
     context::{BlockEnv, CfgEnv, Context, ContextTr, TxEnv},
     inspector::NoOpInspector,
@@ -188,7 +188,10 @@ fn hasher_code() -> Bytes {
             .append_many([PUSH0, PUSH0, CALLDATACOPY])
             .push_number(32_u8)
             .append_many([PUSH0, PUSH0, CODECOPY])
-            .append_many([PUSH0, PUSH0, PUSH0, RETURNDATACOPY]);
+            .append_many([PUSH0, PUSH0, PUSH0, RETURNDATACOPY])
+            .push_number(0xff_u8)
+            .push_number(3_u8)
+            .append_many([EXP, POP]);
     }
     code.stop().build()
 }
