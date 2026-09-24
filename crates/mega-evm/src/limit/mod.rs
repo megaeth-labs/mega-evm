@@ -201,7 +201,8 @@ pub struct LimitUsage {
     pub write_records: u64,
 }
 
-/// Limits one transaction's data size, write records and state gas.
+/// Limits one transaction's data size, write records, state gas and compute after a read of
+/// volatile data.
 ///
 /// [`tx_data_size_limit`](Self::tx_data_size_limit) and
 /// [`tx_kv_update_limit`](Self::tx_kv_update_limit) stop the transaction. A frame's own budget in
@@ -214,7 +215,17 @@ pub struct LimitUsage {
 /// budget.
 ///
 /// [`tx_state_gas_limit`](Self::tx_state_gas_limit) holds the transaction's state gas and stops
-/// the transaction; it has no frame budget. Every limit is unlimited unless a caller sets it.
+/// the transaction; it has no frame budget.
+///
+/// [`block_env_access_compute_gas_limit`](Self::block_env_access_compute_gas_limit) and
+/// [`oracle_access_compute_gas_limit`](Self::oracle_access_compute_gas_limit) are gas detention's
+/// caps: the compute a transaction may still spend once it read volatile data. They default to
+/// the spec's, [`BLOCK_ENV_ACCESS_COMPUTE_GAS`] and [`ORACLE_ACCESS_COMPUTE_GAS`]; every other
+/// limit is unlimited unless a caller sets it. [`no_limits`](Self::no_limits) leaves every one
+/// unlimited, the caps included, and a transaction whose caps are both unlimited is not detained.
+///
+/// [`BLOCK_ENV_ACCESS_COMPUTE_GAS`]: crate::constants::BLOCK_ENV_ACCESS_COMPUTE_GAS
+/// [`ORACLE_ACCESS_COMPUTE_GAS`]: crate::constants::ORACLE_ACCESS_COMPUTE_GAS
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct EvmTxRuntimeLimits {
     /// The most data-size bytes the transaction may keep. Crossing it stops the transaction.
@@ -236,16 +247,27 @@ pub struct EvmTxRuntimeLimits {
     /// slot or an account in a crowded SALT bucket costs its bucket's multiple of the schedule's
     /// entry, and reaches the limit that many times sooner.
     pub tx_state_gas_limit: u64,
+    /// The compute a transaction may still spend once it read the block environment or the block
+    /// beneficiary's account: its compute at the read plus this. Crossing it stops the
+    /// transaction. `u64::MAX` caps nothing.
+    pub block_env_access_compute_gas_limit: u64,
+    /// The compute a transaction may still spend once it read the Oracle's storage: its compute
+    /// at the read plus this. Crossing it stops the transaction. `u64::MAX` caps nothing.
+    pub oracle_access_compute_gas_limit: u64,
 }
 
 impl Default for EvmTxRuntimeLimits {
+    /// Gas detention's caps at the spec's, every other limit unlimited.
     fn default() -> Self {
         Self::no_limits()
+            .with_block_env_access_compute_gas_limit(crate::constants::BLOCK_ENV_ACCESS_COMPUTE_GAS)
+            .with_oracle_access_compute_gas_limit(crate::constants::ORACLE_ACCESS_COMPUTE_GAS)
     }
 }
 
 impl EvmTxRuntimeLimits {
-    /// No limit at all.
+    /// No limit at all: gas detention's caps are unlimited too, so no read of volatile data caps
+    /// anything.
     pub const fn no_limits() -> Self {
         Self {
             tx_data_size_limit: u64::MAX,
@@ -253,6 +275,8 @@ impl EvmTxRuntimeLimits {
             tx_kv_update_limit: u64::MAX,
             frame_kv_update_limit: u64::MAX,
             tx_state_gas_limit: u64::MAX,
+            block_env_access_compute_gas_limit: u64::MAX,
+            oracle_access_compute_gas_limit: u64::MAX,
         }
     }
 
@@ -283,6 +307,19 @@ impl EvmTxRuntimeLimits {
     /// Sets the transaction's state-gas limit: the most state gas it may hold.
     pub const fn with_tx_state_gas_limit(mut self, limit: u64) -> Self {
         self.tx_state_gas_limit = limit;
+        self
+    }
+
+    /// Sets the compute a transaction may still spend once it read the block environment or the
+    /// block beneficiary's account.
+    pub const fn with_block_env_access_compute_gas_limit(mut self, limit: u64) -> Self {
+        self.block_env_access_compute_gas_limit = limit;
+        self
+    }
+
+    /// Sets the compute a transaction may still spend once it read the Oracle's storage.
+    pub const fn with_oracle_access_compute_gas_limit(mut self, limit: u64) -> Self {
+        self.oracle_access_compute_gas_limit = limit;
         self
     }
 
@@ -502,6 +539,8 @@ mod tests {
             tx_kv_update_limit,
             frame_kv_update_limit,
             tx_state_gas_limit,
+            block_env_access_compute_gas_limit,
+            oracle_access_compute_gas_limit,
         } = EvmTxRuntimeLimits::no_limits();
         for limit in [
             tx_data_size_limit,
@@ -509,10 +548,34 @@ mod tests {
             tx_kv_update_limit,
             frame_kv_update_limit,
             tx_state_gas_limit,
+            block_env_access_compute_gas_limit,
+            oracle_access_compute_gas_limit,
         ] {
             assert_eq!(limit, u64::MAX);
         }
-        assert_eq!(EvmTxRuntimeLimits::default(), EvmTxRuntimeLimits::no_limits());
+    }
+
+    /// The default holds gas detention's caps at the spec's and leaves every other limit
+    /// unlimited; a caller's limits change either cap alone.
+    #[test]
+    fn test_the_default_caps_detention_at_the_specs_and_nothing_else() {
+        use crate::constants::{BLOCK_ENV_ACCESS_COMPUTE_GAS, ORACLE_ACCESS_COMPUTE_GAS};
+        let default = EvmTxRuntimeLimits::default();
+        assert_eq!(default.block_env_access_compute_gas_limit, BLOCK_ENV_ACCESS_COMPUTE_GAS);
+        assert_eq!(default.oracle_access_compute_gas_limit, ORACLE_ACCESS_COMPUTE_GAS);
+        assert_eq!(
+            default
+                .with_block_env_access_compute_gas_limit(u64::MAX)
+                .with_oracle_access_compute_gas_limit(u64::MAX),
+            EvmTxRuntimeLimits::no_limits()
+        );
+        let limits = EvmTxRuntimeLimits::no_limits()
+            .with_block_env_access_compute_gas_limit(3)
+            .with_oracle_access_compute_gas_limit(4);
+        assert_eq!(
+            (limits.block_env_access_compute_gas_limit, limits.oracle_access_compute_gas_limit),
+            (3, 4)
+        );
     }
 
     #[test]

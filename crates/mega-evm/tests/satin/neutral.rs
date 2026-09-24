@@ -21,7 +21,8 @@ use mega_evm::{
         neutral_cfg, neutralize_evm, op_transaction, zero_fee_l1_block_info, BytecodeBuilder,
         MemoryDatabase,
     },
-    EthSpecId, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, VolatileDataAccess,
+    EthSpecId, EvmTxRuntimeLimits, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
+    VolatileDataAccess,
 };
 use op_revm::{
     constants::{BASE_FEE_RECIPIENT, L1_FEE_RECIPIENT, OPERATOR_FEE_RECIPIENT},
@@ -74,6 +75,7 @@ fn block() -> BlockEnv {
 fn run_both(fork: EthSpecId, db: MemoryDatabase, tx: TxEnv) -> (Outcome, Outcome, u64) {
     let ctx = MegaContext::new(db.clone(), MegaSpecId::SATIN)
         .with_neutral_cfg(neutral_cfg(fork).expect("a neutral fork"))
+        .with_tx_runtime_limits(EvmTxRuntimeLimits::no_limits())
         .with_block(block())
         .with_chain(zero_fee_l1_block_info());
     let op_ctx = OpContext::new(db, OpSpecId::KARST)
@@ -217,6 +219,7 @@ fn run_against_ethereum(fork: EthSpecId, db: MemoryDatabase, tx: TxEnv) -> (Outc
     let tx = TxEnv { gas_price: 0, ..tx };
     let ctx = MegaContext::new(db.clone(), MegaSpecId::SATIN)
         .with_neutral_cfg(neutral_cfg(fork).expect("a neutral fork"))
+        .with_tx_runtime_limits(EvmTxRuntimeLimits::no_limits())
         .with_block(block.clone())
         .with_chain(zero_fee_l1_block_info());
     let mut mega = MegaEvm::new(ctx);
@@ -287,8 +290,10 @@ fn test_neutral_programs_match_ethereum() {
     }
 }
 
-/// The neutral configuration detains nothing: a program that reads the block environment and the
-/// block beneficiary's account records no read and sets no compute limit, and matches Ethereum.
+/// The neutral configuration, under the limits the gate's runner installs with it, detains
+/// nothing: `no_limits` leaves detention's caps unlimited, so a program that reads the block
+/// environment and the block beneficiary's account records no read and sets no compute limit, and
+/// matches Ethereum.
 #[test]
 fn test_neutral_reads_of_volatile_data_detain_nothing() {
     let code = BytecodeBuilder::default()
@@ -300,6 +305,7 @@ fn test_neutral_reads_of_volatile_data_detain_nothing() {
     for fork in FORKS {
         let ctx = MegaContext::new(with_code(code.clone()), MegaSpecId::SATIN)
             .with_neutral_cfg(neutral_cfg(fork).expect("a neutral fork"))
+            .with_tx_runtime_limits(EvmTxRuntimeLimits::no_limits())
             .with_block(block.clone())
             .with_chain(zero_fee_l1_block_info());
         let mut mega = MegaEvm::new(ctx);

@@ -16,8 +16,9 @@ use mega_evm::{
     constants::{BLOCK_ENV_ACCESS_COMPUTE_GAS, ORACLE_ACCESS_COMPUTE_GAS, TX_GAS_LIMIT_CAP},
     system::{IMegaLimitControl, LIMIT_CONTROL_ADDRESS, ORACLE_CONTRACT_ADDRESS},
     test_utils::{op_transaction, zero_fee_l1_block_info, BytecodeBuilder, MemoryDatabase},
-    volatile_data_access_disabled_revert_data, LimitCheck, LimitKind, MegaContext, MegaEvm,
-    MegaLimitExceeded, MegaSpecId, MegaTransaction, MegaTransactionOutcome, VolatileDataAccess,
+    volatile_data_access_disabled_revert_data, EvmTxRuntimeLimits, LimitCheck, LimitKind,
+    MegaContext, MegaEvm, MegaLimitExceeded, MegaSpecId, MegaTransaction, MegaTransactionOutcome,
+    VolatileDataAccess,
 };
 use revm::{
     bytecode::opcode::*,
@@ -607,6 +608,52 @@ fn test_the_most_restrictive_limit_binds_whatever_the_order() {
             assert!(limit < CAP + 100_000, "the first read set the limit: {limit}");
             assert_eq!(run.accessed, VolatileDataAccess::TIMESTAMP | VolatileDataAccess::ORACLE);
         }
+    }
+}
+
+/// The caps are runtime limits: a caller's limits set either one, and each kind of read is held
+/// to its own. Under `no_limits` both are unlimited and a transaction that reads is not detained:
+/// it computes on until its own gas is gone, and halts.
+#[test]
+fn test_a_callers_limits_set_the_caps() {
+    let oracle = BytecodeBuilder::default().append_many([PUSH0, SLOAD, POP, STOP]).build();
+    let limits = EvmTxRuntimeLimits::default()
+        .with_block_env_access_compute_gas_limit(1_000_000)
+        .with_oracle_access_compute_gas_limit(2_000_000);
+    for gas_limit in TIERS {
+        let intrinsic = intrinsic(gas_limit);
+        let run_under = |limits: EvmTxRuntimeLimits, code: Bytes| {
+            let db = MemoryDatabase::default()
+                .account_code(CONTRACT, code)
+                .account_code(ORACLE_CONTRACT_ADDRESS, oracle.clone());
+            let mut evm = MegaEvm::new(context(db).with_tx_runtime_limits(limits));
+            run_on(&mut evm, tx(CALLER, CONTRACT, gas_limit))
+        };
+
+        // `TIMESTAMP` is the first instruction: 2 of compute at the read.
+        let run = run_under(limits, spin(op(BytecodeBuilder::default(), TIMESTAMP)));
+        assert_eq!(assert_stopped(&run, intrinsic), 2 + 1_000_000);
+
+        let run = run_under(
+            limits,
+            spin(call(BytecodeBuilder::default(), CALL, ORACLE_CONTRACT_ADDRESS)),
+        );
+        let limit = assert_stopped(&run, intrinsic);
+        assert!((2_000_000..2_100_000).contains(&limit), "the Oracle's own cap: {limit}");
+        assert_eq!(run.accessed, VolatileDataAccess::ORACLE);
+
+        let run = run_under(
+            EvmTxRuntimeLimits::no_limits(),
+            spin(op(work(BytecodeBuilder::default(), WORK), TIMESTAMP)),
+        );
+        assert!(!run.detains);
+        assert_eq!(run.limit, None);
+        assert_eq!(run.outcome.limit_exceeded, None);
+        assert!(
+            matches!(run.outcome.result, ExecutionResult::Halt { .. }),
+            "{:?}",
+            run.outcome.result
+        );
     }
 }
 

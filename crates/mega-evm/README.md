@@ -104,7 +104,8 @@ Every frame keeps no more regular gas than the limit leaves the transaction; the
 A frame that runs out of gas while gas is still withheld from it crossed the cap: the transaction is stopped with a revert carrying `MegaLimitExceeded` of kind compute, and the sender gets back everything withheld.
 A frame that runs out of its own gas still halts.
 While `MegaAccessControl`'s switch is off for a frame, its volatile reads are refused: the frame reverts with `VolatileDataAccessDisabled`, having paid the opcode's static gas and nothing more.
-The protocol's own transactions, the system calls and the execution-spec gate's neutral configuration are not detained.
+The two caps are runtime limits, 20,000,000 each by default; `EvmTxRuntimeLimits::no_limits()` leaves them unlimited, and a transaction whose caps are both unlimited is not detained.
+The protocol's own transactions and the system calls are not detained either.
 
 Keyless deployment arrives in a later change.
 

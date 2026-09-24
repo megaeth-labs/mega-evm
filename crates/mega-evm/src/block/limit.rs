@@ -3,8 +3,9 @@
 //! [`BlockLimits`] is the configuration a node passes in the block execution context;
 //! [`BlockLimiter`] is the state one block keeps while it executes. Data size defaults to the
 //! production caps — [`BLOCK_DATA_LIMIT`](crate::constants::BLOCK_DATA_LIMIT) for the block and
-//! [`TX_DATA_LIMIT`](crate::constants::TX_DATA_LIMIT) for each transaction — and every other
-//! limit defaults to unlimited. [`BlockLimits::no_limits`] clears the data-size caps too.
+//! [`TX_DATA_LIMIT`](crate::constants::TX_DATA_LIMIT) for each transaction — gas detention's caps
+//! to the spec's, and every other limit to unlimited. [`BlockLimits::no_limits`] clears the
+//! data-size and detention caps too.
 //!
 //! # When each limit is checked
 //!
@@ -109,7 +110,8 @@ pub struct BlockLimits {
     ///
     /// [`Default`] sets the transaction data-size limit to
     /// [`TX_DATA_LIMIT`](crate::constants::TX_DATA_LIMIT) and leaves the frame cap unlimited, so a
-    /// frame's budget is the 98% share of what its parent has left.
+    /// frame's budget is the 98% share of what its parent has left; gas detention's caps are the
+    /// spec's, as [`EvmTxRuntimeLimits::default`] holds them.
     pub tx_runtime_limits: EvmTxRuntimeLimits,
 }
 
@@ -139,15 +141,18 @@ impl BlockLimits {
 
     /// The limits a block runs under when its caller configures nothing else.
     ///
-    /// Every dimension is unlimited except data size: the block holds
-    /// [`BLOCK_DATA_LIMIT`](crate::constants::BLOCK_DATA_LIMIT) bytes, and each transaction holds
-    /// [`TX_DATA_LIMIT`](crate::constants::TX_DATA_LIMIT). The block executor installs the
-    /// transaction half on the EVM.
+    /// Every dimension is unlimited except data size and gas detention's caps: the block holds
+    /// [`BLOCK_DATA_LIMIT`](crate::constants::BLOCK_DATA_LIMIT) bytes, each transaction holds
+    /// [`TX_DATA_LIMIT`](crate::constants::TX_DATA_LIMIT), and a read of volatile data caps the
+    /// transaction's compute at the spec's caps. The block executor installs the transaction half
+    /// on the EVM.
     pub const fn with_production_data_limits() -> Self {
         let mut limits = Self::no_limits();
         limits.block_txs_data_limit = crate::constants::BLOCK_DATA_LIMIT;
         limits.tx_runtime_limits = EvmTxRuntimeLimits::no_limits()
-            .with_tx_data_size_limit(crate::constants::TX_DATA_LIMIT);
+            .with_tx_data_size_limit(crate::constants::TX_DATA_LIMIT)
+            .with_block_env_access_compute_gas_limit(crate::constants::BLOCK_ENV_ACCESS_COMPUTE_GAS)
+            .with_oracle_access_compute_gas_limit(crate::constants::ORACLE_ACCESS_COMPUTE_GAS);
         limits
     }
 
@@ -499,13 +504,18 @@ mod tests {
     use super::*;
     use alloy_primitives::B256;
 
-    /// A block that configures nothing holds the production data-size caps and nothing else.
+    /// A block that configures nothing holds the production data-size caps and gas detention's
+    /// caps, and nothing else.
     #[test]
     fn test_the_default_limits_are_the_production_data_size_caps() {
         let limits = BlockLimits::default();
         assert_eq!(limits, BlockLimits::with_production_data_limits());
         assert_eq!(limits.block_txs_data_limit, crate::constants::BLOCK_DATA_LIMIT);
         assert_eq!(limits.tx_runtime_limits.tx_data_size_limit, crate::constants::TX_DATA_LIMIT);
+        assert_eq!(
+            limits.tx_runtime_limits,
+            EvmTxRuntimeLimits::default().with_tx_data_size_limit(crate::constants::TX_DATA_LIMIT)
+        );
         assert_eq!(limits.tx_runtime_limits.frame_data_size_limit, u64::MAX);
         assert_eq!(limits.tx_gas_limit, u64::MAX);
         assert_eq!(limits.block_execution_gas_limit, u64::MAX);

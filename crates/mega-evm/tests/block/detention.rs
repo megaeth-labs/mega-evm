@@ -4,7 +4,8 @@
 use alloy_evm::block::BlockExecutor;
 use alloy_primitives::Bytes;
 use mega_evm::{
-    constants::BLOCK_ENV_ACCESS_COMPUTE_GAS, test_utils::BytecodeBuilder, LimitCheck, LimitKind,
+    constants::BLOCK_ENV_ACCESS_COMPUTE_GAS, test_utils::BytecodeBuilder, BlockLimits, LimitCheck,
+    LimitKind,
 };
 use revm::{
     bytecode::opcode::{JUMP, JUMPDEST, MCOPY, POP, PUSH0, TIMESTAMP},
@@ -12,7 +13,7 @@ use revm::{
     database::State,
 };
 
-use crate::common::{self, executor_with_env, unlimited_ctx, user_tx};
+use crate::common::{self, block_ctx, executor_with_env, user_tx};
 
 /// Reads the block's timestamp, then copies memory forever.
 fn read_then_spin() -> Bytes {
@@ -37,7 +38,8 @@ fn test_a_stopped_transaction_is_included_with_a_failed_receipt_that_bills_what_
     let mut state = State::builder().with_database(db).build();
     let mut env = common::evm_env();
     env.block_env.gas_limit = 100_000_000;
-    let mut executor = executor_with_env(&mut state, unlimited_ctx(), env);
+    // The production limits: the block's default holds the spec's detention caps.
+    let mut executor = executor_with_env(&mut state, block_ctx(BlockLimits::default()), env);
     executor.apply_pre_execution_changes().expect("the block starts");
 
     let gas_limit = 29_000_000;

@@ -238,7 +238,7 @@ fn test_detention_leaves_a_data_size_stop_to_the_data_size_limit() {
     for gas_limit in TIERS {
         let db = MemoryDatabase::default().account_code(CONTRACT, code.clone());
         let mut evm = MegaEvm::new(context(db).with_tx_runtime_limits(
-            EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(data_limit),
+            EvmTxRuntimeLimits::default().with_tx_data_size_limit(data_limit),
         ));
         let run = run_on(&mut evm, tx(CALLER, CONTRACT, gas_limit));
         assert!(run.limit.is_some(), "the call read the beneficiary");

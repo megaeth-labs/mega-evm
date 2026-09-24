@@ -9,10 +9,7 @@ use alloy_primitives::{Bytes, U256};
 use revm::interpreter::{Gas, InstructionResult};
 
 use super::VolatileDataAccess;
-use crate::{
-    constants::{BLOCK_ENV_ACCESS_COMPUTE_GAS, ORACLE_ACCESS_COMPUTE_GAS},
-    system::VOLATILE_DATA_ACCESS_DISABLED_SELECTOR,
-};
+use crate::system::VOLATILE_DATA_ACCESS_DISABLED_SELECTOR;
 
 /// What detention keeps of one frame that runs.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -60,11 +57,13 @@ pub struct Detention {
     observed: Cell<VolatileDataAccess>,
     /// What the Host refused to load for the running opcode, waiting for its wrapper.
     refused: Cell<VolatileDataAccess>,
-    /// Whether the transaction's reads are held to a cap. A system-originated transaction and the
-    /// neutral configuration's are not.
+    /// Whether the transaction's reads are held to a cap. A system-originated transaction's are
+    /// not, and neither are a transaction's whose caps are both unlimited.
     detains: bool,
-    /// Whether the neutral configuration runs, which detains no transaction.
-    neutral: bool,
+    /// The cap a read of the block environment or of the beneficiary's account sets.
+    block_env_cap: u64,
+    /// The cap a read of the Oracle's storage sets.
+    oracle_cap: u64,
     /// Whether the running frame's volatile reads are refused.
     refusing: bool,
     /// The depth of the shallowest frame that switched volatile-data access off, if one did.
@@ -85,12 +84,17 @@ pub struct Detention {
 }
 
 impl Detention {
-    /// Clears the state for a new transaction, keeping its allocation. `detains` is whether the
-    /// transaction's reads are held to a cap.
-    pub(crate) fn reset(&mut self, detains: bool) {
+    /// Clears the state for a new transaction, keeping its allocation.
+    ///
+    /// `detains` is whether the transaction's reads may be held to a cap at all;
+    /// `block_env_cap` and `oracle_cap` are the caps its reads set, `u64::MAX` for none. A
+    /// transaction whose caps are both unlimited is not detained: nothing it reads can cap it.
+    pub(crate) fn reset(&mut self, detains: bool, block_env_cap: u64, oracle_cap: u64) {
         self.observed.set(VolatileDataAccess::empty());
         self.refused.set(VolatileDataAccess::empty());
-        self.detains = detains && !self.neutral;
+        self.detains = detains && (block_env_cap != u64::MAX || oracle_cap != u64::MAX);
+        self.block_env_cap = block_env_cap;
+        self.oracle_cap = oracle_cap;
         self.refusing = false;
         #[cfg(any(test, feature = "test-utils"))]
         {
@@ -105,13 +109,6 @@ impl Detention {
         self.suspended = 0;
         self.burned = 0;
         self.frames.clear();
-    }
-
-    /// Turns detention off for every transaction from the next one on: the neutral
-    /// configuration.
-    #[cfg(any(test, feature = "test-utils"))]
-    pub(crate) const fn set_neutral(&mut self, neutral: bool) {
-        self.neutral = neutral;
     }
 
     /// Starts every transaction with volatile-data access switched off from `depth` down, as if
@@ -130,7 +127,7 @@ impl Detention {
 
     /// The most compute the transaction may reach, once it read volatile data: its compute at the
     /// read plus the read's cap, the lowest of these when it read more than once. `None` while it
-    /// read nothing.
+    /// read nothing a cap holds.
     ///
     /// Compute here is the transaction's regular gas spent in its frames, without its intrinsic
     /// gas.
@@ -214,8 +211,12 @@ impl Detention {
         forwarded: u64,
     ) {
         self.accessed |= observed;
+        let cap = self.cap_of(observed);
+        if cap == u64::MAX {
+            return;
+        }
         let compute = self.compute(gas, depth).saturating_sub(forwarded);
-        let limit = compute.saturating_add(cap_of(observed));
+        let limit = compute.saturating_add(cap);
         self.limit = Some(self.limit.map_or(limit, |current| current.min(limit)));
         self.cap_frame(gas, depth, compute);
     }
@@ -228,8 +229,10 @@ impl Detention {
             return;
         }
         self.accessed |= access;
-        let limit = cap_of(access);
-        self.limit = Some(self.limit.map_or(limit, |current| current.min(limit)));
+        let limit = self.cap_of(access);
+        if limit != u64::MAX {
+            self.limit = Some(self.limit.map_or(limit, |current| current.min(limit)));
+        }
     }
 
     /// Holds the running frame at `depth` to the limit again, after an opcode that can hand it
@@ -363,6 +366,19 @@ impl Detention {
             .saturating_sub(self.burned)
     }
 
+    /// The cap a read of `access` sets: the lowest of the caps of the kinds it holds, `u64::MAX`
+    /// when none of them is capped.
+    fn cap_of(&self, access: VolatileDataAccess) -> u64 {
+        let mut cap = u64::MAX;
+        if access.has_block_env_access() || access.has_beneficiary_balance_access() {
+            cap = cap.min(self.block_env_cap);
+        }
+        if access.has_oracle_access() {
+            cap = cap.min(self.oracle_cap);
+        }
+        cap
+    }
+
     /// Withholds from the frame at `depth` the regular gas it has beyond what the limit leaves
     /// the transaction, `compute` being the transaction's compute now.
     ///
@@ -391,18 +407,6 @@ pub fn volatile_data_access_disabled_revert_data(access: VolatileDataAccess) -> 
     data.extend_from_slice(&VOLATILE_DATA_ACCESS_DISABLED_SELECTOR);
     data.extend_from_slice(&U256::from(access.as_u8()).to_be_bytes::<32>());
     data.into()
-}
-
-/// The cap a read of `access` sets: the lowest of the caps of the kinds it holds.
-fn cap_of(access: VolatileDataAccess) -> u64 {
-    let mut cap = u64::MAX;
-    if access.has_block_env_access() || access.has_beneficiary_balance_access() {
-        cap = cap.min(BLOCK_ENV_ACCESS_COMPUTE_GAS);
-    }
-    if access.has_oracle_access() {
-        cap = cap.min(ORACLE_ACCESS_COMPUTE_GAS);
-    }
-    cap
 }
 
 /// The regular gas a frame spent: its limit, less what it has left, less the state and history
@@ -447,6 +451,7 @@ pub(crate) fn release(gas: &mut Gas, withheld: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::constants::{BLOCK_ENV_ACCESS_COMPUTE_GAS, ORACLE_ACCESS_COMPUTE_GAS};
 
     /// A frame's gas: `limit` regular gas and `reservoir`.
     fn gas(limit: u64, reservoir: u64) -> Gas {
@@ -455,23 +460,21 @@ mod tests {
 
     fn detaining() -> Detention {
         let mut detention = Detention::default();
-        detention.reset(true);
+        detention.reset(true, BLOCK_ENV_ACCESS_COMPUTE_GAS, ORACLE_ACCESS_COMPUTE_GAS);
         detention
     }
 
-    /// The cap of a read is the lowest of the caps of the kinds it holds; both caps are the
-    /// same today, so every kind sets the same one.
+    /// The cap of a read is the lowest of the caps of the kinds it holds.
     #[test]
     fn test_the_cap_of_a_read_is_its_kinds_lowest() {
-        assert_eq!(cap_of(VolatileDataAccess::TIMESTAMP), BLOCK_ENV_ACCESS_COMPUTE_GAS);
-        assert_eq!(cap_of(VolatileDataAccess::SLOT_NUM), BLOCK_ENV_ACCESS_COMPUTE_GAS);
-        assert_eq!(cap_of(VolatileDataAccess::BENEFICIARY_BALANCE), BLOCK_ENV_ACCESS_COMPUTE_GAS);
-        assert_eq!(cap_of(VolatileDataAccess::ORACLE), ORACLE_ACCESS_COMPUTE_GAS);
-        assert_eq!(
-            cap_of(VolatileDataAccess::ORACLE | VolatileDataAccess::TIMESTAMP),
-            BLOCK_ENV_ACCESS_COMPUTE_GAS.min(ORACLE_ACCESS_COMPUTE_GAS)
-        );
-        assert_eq!(cap_of(VolatileDataAccess::empty()), u64::MAX);
+        let mut detention = Detention::default();
+        detention.reset(true, 7, 5);
+        assert_eq!(detention.cap_of(VolatileDataAccess::TIMESTAMP), 7);
+        assert_eq!(detention.cap_of(VolatileDataAccess::SLOT_NUM), 7);
+        assert_eq!(detention.cap_of(VolatileDataAccess::BENEFICIARY_BALANCE), 7);
+        assert_eq!(detention.cap_of(VolatileDataAccess::ORACLE), 5);
+        assert_eq!(detention.cap_of(VolatileDataAccess::ORACLE | VolatileDataAccess::TIMESTAMP), 5);
+        assert_eq!(detention.cap_of(VolatileDataAccess::empty()), u64::MAX);
     }
 
     /// A read caps the frame at its compute then plus the cap: the regular gas beyond it moves
@@ -644,17 +647,36 @@ mod tests {
         assert!(!detention.refuses(VolatileDataAccess::TIMESTAMP));
     }
 
-    /// A transaction that is not detained records nothing and caps nothing.
+    /// A transaction that is not detained records nothing and caps nothing: a system-originated
+    /// one, and one whose caps are both unlimited. One unlimited cap leaves its kind uncapped.
     #[test]
-    fn test_an_exempt_transaction_is_not_detained() {
+    fn test_an_exempt_or_unlimited_transaction_is_not_detained() {
+        for (detains, block_env_cap, oracle_cap) in [
+            (false, BLOCK_ENV_ACCESS_COMPUTE_GAS, ORACLE_ACCESS_COMPUTE_GAS),
+            (true, u64::MAX, u64::MAX),
+        ] {
+            let mut detention = Detention::default();
+            detention.reset(detains, block_env_cap, oracle_cap);
+            assert!(!detention.detains());
+            let mut frame = gas(100_000_000, 0);
+            detention.on_frame_run(&mut frame, 0);
+            detention.observe(VolatileDataAccess::TIMESTAMP);
+            assert!(!detention.has_reads());
+            detention.mark_before_execution(VolatileDataAccess::BENEFICIARY_BALANCE);
+            assert_eq!(detention.compute_limit(), None);
+            assert_eq!(detention.accessed(), VolatileDataAccess::empty());
+        }
+
         let mut detention = Detention::default();
-        detention.reset(false);
+        detention.reset(true, u64::MAX, 5);
+        assert!(detention.detains());
         let mut frame = gas(100_000_000, 0);
         detention.on_frame_run(&mut frame, 0);
-        detention.observe(VolatileDataAccess::TIMESTAMP);
-        assert!(!detention.has_reads());
+        detention.commit_reads(VolatileDataAccess::TIMESTAMP, &mut frame, 0, 0);
         detention.mark_before_execution(VolatileDataAccess::BENEFICIARY_BALANCE);
-        assert_eq!(detention.compute_limit(), None);
-        assert_eq!(detention.accessed(), VolatileDataAccess::empty());
+        assert_eq!(detention.compute_limit(), None, "an unlimited cap sets no limit");
+        assert_eq!(frame.remaining(), 100_000_000);
+        detention.commit_reads(VolatileDataAccess::ORACLE, &mut frame, 0, 0);
+        assert_eq!(detention.compute_limit(), Some(5));
     }
 }

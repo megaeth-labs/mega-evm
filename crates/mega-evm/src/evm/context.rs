@@ -110,7 +110,6 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
         #[cfg(any(test, feature = "test-utils"))]
         {
             self.neutral = false;
-            self.detention.set_neutral(false);
         }
         self
     }
@@ -130,7 +129,9 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     ///   exemption: every transaction runs `cfg`'s schedule.
     /// - SALT pricing needs nothing here: without a SALT environment every bucket is minimal, and
     ///   the multiplier is one.
-    /// - No transaction is detained: a read of volatile data caps nothing.
+    /// - Gas detention is not part of the configuration: its caps are runtime limits, which the
+    ///   gate's runner leaves unlimited with every other one ([`EvmTxRuntimeLimits::no_limits`]),
+    ///   and then no read of volatile data caps anything.
     ///
     /// The spec stays [`MegaSpecId::SATIN`], and with it the base spec the handler and the
     /// journal execute. The precompile set is the EVM's, not the context's: a caller that wants
@@ -141,7 +142,6 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
         self.cfg = cfg;
         self.neutral = true;
         self.prices_history = false;
-        self.detention.set_neutral(true);
         self
     }
 
@@ -338,7 +338,12 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
         // a system transaction and a system call are exempt from the charge, not from the count.
         self.additional_limit.record_tx_body(transaction_body_bytes(self.tx()));
         // The protocol's own transactions are not detained: they maintain the volatile data.
-        self.detention.reset(!system_originated);
+        let limits = self.additional_limit.limits();
+        self.detention.reset(
+            !system_originated,
+            limits.block_env_access_compute_gas_limit,
+            limits.oracle_access_compute_gas_limit,
+        );
         self.mark_beneficiary_transaction();
     }
 

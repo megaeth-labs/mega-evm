@@ -15,8 +15,8 @@
 //! | [`MAX_INITCODE_SIZE`] | 1,048,576 | the most bytes an initcode may hold | the spec configuration |
 //! | [`TX_DATA_LIMIT`] | 13,107,200 | data size one transaction may produce (as Rex6) | the block's default transaction limits |
 //! | [`BLOCK_DATA_LIMIT`] | 13,107,200 | data size one block may produce (as Rex6) | the block's default data-size limit |
-//! | [`BLOCK_ENV_ACCESS_COMPUTE_GAS`] | 20,000,000 | compute a transaction may still spend once it read the block environment or the beneficiary (as Rex6) | gas detention |
-//! | [`ORACLE_ACCESS_COMPUTE_GAS`] | 20,000,000 | compute a transaction may still spend once it read the Oracle's storage (as Rex6) | gas detention |
+//! | [`BLOCK_ENV_ACCESS_COMPUTE_GAS`] | 20,000,000 | compute a transaction may still spend once it read the block environment or the beneficiary (as Rex6) | the default detention cap of the runtime limits |
+//! | [`ORACLE_ACCESS_COMPUTE_GAS`] | 20,000,000 | compute a transaction may still spend once it read the Oracle's storage (as Rex6) | the default detention cap of the runtime limits |
 //!
 //! The Satin gas schedule builds its state-gas entries from the EIP-8037 byte counts at
 //! [`COST_PER_STATE_BYTE`], read through [`SatinPrices`](crate::SatinPrices) so a measurement
