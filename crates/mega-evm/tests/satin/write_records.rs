@@ -721,20 +721,25 @@ fn test_authorities_crossing_the_cap_are_not_applied() {
     assert_eq!(outcome.usage, with_extra(body_only(), mega_evm::AUTHORIZATION_SIZE));
 }
 
-/// A transaction that runs out of gas after its authorities were applied, before its first frame,
-/// keeps none of their records: the out-of-gas takes the delegations back.
-#[test]
-fn test_runtime_out_of_gas_after_authorities_keeps_no_record() {
-    // The call target is an authority the transaction delegates: calling it pays for the
-    // delegation target's access after the authorities were applied. Find the gas limit one short
-    // of the whole runtime phase.
-    let db = || MemoryDatabase::default().account_balance(CALLER, U256::from(1_000_000_000));
-    let tx = |gas_limit| {
-        let mut tx = authorizing_call(AUTHORITY_1, 0, &[(AUTHORITY_1, 0)]);
-        tx.0.base.gas_limit = gas_limit;
-        tx
+/// A funded caller's database, for the runtime out-of-gas tests.
+fn runtime_oog_db() -> MemoryDatabase {
+    MemoryDatabase::default().account_balance(CALLER, U256::from(1_000_000_000))
+}
+
+/// A call to an authority the transaction delegates, at `gas_limit`: calling it pays for the
+/// delegation target's access after the authorities were applied.
+fn runtime_oog_tx(gas_limit: u64) -> mega_evm::MegaTransaction {
+    let mut tx = authorizing_call(AUTHORITY_1, 0, &[(AUTHORITY_1, 0)]);
+    tx.0.base.gas_limit = gas_limit;
+    tx
+}
+
+/// The gas limit one short of [`runtime_oog_tx`]'s whole runtime phase: the transaction is
+/// included, its authorities are applied, and it runs out of gas before its first frame.
+fn one_short_of_the_runtime_phase() -> u64 {
+    let run_at = |gas_limit| {
+        MegaEvm::new(context(runtime_oog_db())).execute_transaction(runtime_oog_tx(gas_limit))
     };
-    let run_at = |gas_limit| MegaEvm::new(context(db())).execute_transaction(tx(gas_limit));
     // A limit below the intrinsic charge is a validation rejection rather than a run, which is a
     // failure for the search all the same.
     let succeeds_at = |gas_limit| run_at(gas_limit).is_ok_and(|o| o.result.is_success());
@@ -751,7 +756,16 @@ fn test_runtime_out_of_gas_after_authorities_keeps_no_record() {
             fails = middle;
         }
     }
-    let outcome = run_at(succeeds - 1).expect("one gas short of succeeding is still included");
+    succeeds - 1
+}
+
+/// A transaction that runs out of gas after its authorities were applied, before its first frame,
+/// keeps none of their records: the out-of-gas takes the delegations back.
+#[test]
+fn test_runtime_out_of_gas_after_authorities_keeps_no_record() {
+    let outcome = MegaEvm::new(context(runtime_oog_db()))
+        .execute_transaction(runtime_oog_tx(one_short_of_the_runtime_phase()))
+        .expect("one gas short of succeeding is still included");
     assert!(outcome.result.is_halt(), "{:?}", outcome.result);
     assert_eq!(
         outcome.usage,
@@ -763,6 +777,30 @@ fn test_runtime_out_of_gas_after_authorities_keeps_no_record() {
         outcome.state.get(&AUTHORITY_1).is_none_or(|a| a.info.nonce == 0),
         "the out-of-gas took the delegation back"
     );
+}
+
+/// The inspected path unwinds a transaction that runs out of gas before its first frame as the
+/// plain one does: the delegation is taken back, and the result, the ledgers, the usage and the
+/// state are the same.
+#[test]
+fn test_an_inspected_runtime_out_of_gas_unwinds_as_a_plain_one() {
+    let gas_limit = one_short_of_the_runtime_phase();
+    let plain = MegaEvm::new(context(runtime_oog_db()))
+        .execute_transaction(runtime_oog_tx(gas_limit))
+        .expect("included");
+    let inspected = MegaEvm::new(context(runtime_oog_db()))
+        .with_inspector(revm::inspector::NoOpInspector)
+        .execute_transaction(runtime_oog_tx(gas_limit))
+        .expect("included");
+    assert!(inspected.result.is_halt(), "{:?}", inspected.result);
+    assert!(
+        inspected.state.get(&AUTHORITY_1).is_none_or(|a| a.info.nonce == 0),
+        "the out-of-gas took the delegation back"
+    );
+    assert_eq!(inspected.result, plain.result);
+    assert_eq!(inspected.gas, plain.gas);
+    assert_eq!(inspected.usage, plain.usage);
+    assert_eq!(inspected.state, plain.state);
 }
 
 /* ---------- which frame's account counts as recorded ---------- */
