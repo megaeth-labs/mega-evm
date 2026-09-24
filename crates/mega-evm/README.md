@@ -69,8 +69,13 @@ The six system contracts live at their fixed `0x6342…` addresses and are deplo
 Four of them answer calls through an interceptor instead of running their bytecode.
 A `CALL` or `STATICCALL` is dispatched on its target address, then on the four selector bytes of its input: `CALLCODE` and `DELEGATECALL` never reach an interceptor, and a selector a contract does not intercept falls through to the deployed bytecode, whose answer is that contract's own — the two control contracts revert with `NotIntercepted()` from their fallback, and `KeylessDeploy` and the Oracle, which have none, revert with empty data on a selector they do not declare.
 A method that takes no value answers a value-bearing call with `NonZeroTransfer()`.
-`MegaAccessControl` and `MegaLimitControl` answer with what the engine knows so far — nothing has switched volatile-data access off, and `remainingComputeGas()` reports the regular gas the call was forwarded — until the control contracts' semantics fill them in: steering gas detention's switch, and answering with the compute ledger.
-The Oracle forwards a `sendHint` payload to the node's oracle service, and a `keylessDeploy` transaction is charged its fixed 100,000 gas and handed to the keyless rewrite hook that native keyless deployment fills in.
+`MegaAccessControl` steers gas detention's switch: `disableVolatileDataAccess()` switches volatile-data access off for the calling frame and every frame below it, until that frame switches it back on or returns, `enableVolatileDataAccess()` reverts with `DisabledByParent()` in a frame below the one that switched it off, and `isVolatileDataAccessDisabled()` answers for the caller.
+`MegaLimitControl.remainingComputeGas()` answers the compute the calling frame could still spend: the lesser of its own regular gas, with the gas the call forwarded counted back, and what gas detention leaves the transaction once it read volatile data.
+It is regular gas only, so a transaction above the execution cap hears at most the cap's share.
+The Oracle forwards a `sendHint` payload to the node's oracle service, unless the calling frame's volatile-data access is off, and a `keylessDeploy` transaction is charged its fixed 100,000 gas and handed to the keyless rewrite hook that native keyless deployment fills in.
+
+The Oracle's storage is read through the node's oracle service: an `SLOAD` in the Oracle's own frame asks `OracleEnv` first and reads the chain's state for a slot the service has no value for.
+Every such read is priced as a cold access, whichever source answered, so a replaying node that cannot tell which one the building node read prices it the same.
 
 The system address (`MEGA_SYSTEM_ADDRESS`) sends the protocol's own transactions: a legacy transaction from it to a whitelisted contract is validated — the whitelist, the chain id, the nonce and EIP-3607 — and promoted to a deposit, which pays no fee and rewards none.
 The account such a transaction creates for its caller is charged the account-creation state gas exactly once.
@@ -115,6 +120,7 @@ So is one priced between what the limit leaves its frame and its forward whose i
 An interceptor's own charge on a frame is compute whether it answers the call or lets the frame run.
 Every other out-of-gas halts and burns as it would without the read.
 While `MegaAccessControl`'s switch is off for a frame, its volatile reads are refused: the frame reverts with `VolatileDataAccessDisabled`, having paid the opcode's static gas and nothing more.
+The error's argument is a `uint8`: a refused `SLOTNUM` names access type 12, which the contract's `VolatileDataAccessType` does not declare, so a Solidity handler must decode it as `uint8`, and `decode_volatile_data_access_disabled` decodes it on the Rust side.
 The two caps are runtime limits, 20,000,000 each by default; `EvmTxRuntimeLimits::no_limits()` leaves them unlimited, and a transaction whose caps are both unlimited is not detained.
 The protocol's own transactions and the system calls are not detained either.
 
