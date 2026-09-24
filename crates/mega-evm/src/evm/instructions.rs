@@ -8,8 +8,10 @@
 //! completed:
 //!
 //! 1. discard any record staged before the opcode (nothing may commit it for this one);
-//! 2. run revm's instruction, whose Host call stages the record;
-//! 3. commit the record if the opcode completed, discard it if the opcode failed;
+//! 2. run revm's instruction, whose Host call stages the record and which charges the state gas of
+//!    a fresh slot or a new beneficiary;
+//! 3. discard the record if the opcode failed; if it completed, hold the state gas it charged to
+//!    the state-gas limit, then commit the record;
 //! 4. charge the frame the history gas of what the record appends — and give it back when the
 //!    record was taken away, as a slot written back to its original value takes its own back.
 //!
@@ -17,8 +19,8 @@
 //! a log pays for its address, its topics and its data, a storage write or a destructed account's
 //! beneficiary for the forty bytes of one write record.
 //!
-//! A commit that crosses a limit stops the opcode's frame with a revert whose output is
-//! [`MegaLimitExceeded`](crate::MegaLimitExceeded) (see
+//! A state charge or a commit that crosses a limit stops the opcode's frame with a revert whose
+//! output is [`MegaLimitExceeded`](crate::MegaLimitExceeded) (see
 //! [`AdditionalLimit`](crate::AdditionalLimit) for the abort protocol). A history charge the frame
 //! cannot pay is an ordinary out-of-gas, which burns the frame's gas the way any other does.
 //!
@@ -29,7 +31,10 @@
 //! caller when it returns. The frame the opcode is suspending on carries the caller's reservoir,
 //! which the charge has just moved, so the wrapper writes the reservoir it left into the frame's
 //! input; and a caller that cannot pay the charge drops that frame before it fails, because an
-//! interpreter halts on an instruction's error only when no frame is pending.
+//! interpreter halts on an instruction's error only when no frame is pending. The state gas revm's
+//! instruction charged for the account the frame would add is held to the state-gas limit later,
+//! once revm has decided the frame: revm refuses some frames after the charge — a value call its
+//! caller cannot fund, one past the call-stack limit — and gives the charge back.
 //!
 //! A wrapper keeps the static gas revm's table charges for its opcode, so the gas schedule is
 //! unchanged.
@@ -105,9 +110,12 @@ pub(crate) fn mega_instructions<DB: Database, ExtEnvs: ExternalEnvTypes>(
 /// returns its own `SelfDestruct` result). Any other result fails the opcode, which takes the
 /// staged write back with it.
 ///
-/// The data-size check is made before the history charge. A record the limit rejects is not
+/// The state gas the opcode charged is held to the state-gas limit first — `SSTORE` charges a
+/// fresh slot's and `SELFDESTRUCT` a new beneficiary's inside revm's instruction — and a crossing
+/// stops the frame and discards the record with the write. Then the record is held to the
+/// data-size and KV limits, and only then is its history charged. A record a limit rejects is not
 /// kept, so its history is not a charge and the stop is what the frame reports. A record the
-/// limit accepts is charged, and a charge the frame cannot pay is an out-of-gas.
+/// limits accept is charged, and a charge the frame cannot pay is an out-of-gas.
 #[inline(always)]
 fn commit_after<const FROM_ALLOWANCE: bool, DB: Database, ExtEnvs: ExternalEnvTypes>(
     context: Ctx<'_, DB, ExtEnvs>,
@@ -123,6 +131,11 @@ fn commit_after<const FROM_ALLOWANCE: bool, DB: Database, ExtEnvs: ExternalEnvTy
     if !completed {
         host.additional_limit.discard_staged_record();
         return result;
+    }
+    let check = host.additional_limit.check_state_gas(interpreter.gas.state_gas_spent());
+    if check.exceeded_limit() {
+        host.additional_limit.discard_staged_record();
+        return Err(stop_frame(interpreter, &check));
     }
     let (check, history) = host.additional_limit.commit_staged_record();
     if check.exceeded_limit() {
@@ -218,10 +231,17 @@ fn selfdestruct<DB: Database, ExtEnvs: ExternalEnvTypes>(
 /// will make.
 ///
 /// The charge is made after revm's instruction has computed the gas it forwards, so it comes out
-/// of what the caller kept rather than out of what the callee gets. An opcode that starts no
-/// frame — a call the balance cannot fund, a creation the depth refuses — makes no records and is
-/// charged nothing. A charge the caller cannot pay fails the opcode with an out-of-gas, which
-/// takes the frame the opcode was suspending on with it ([`abandon_frame`]).
+/// of what the caller kept rather than out of what the callee gets. An opcode that starts no frame
+/// — a creation the balance, the nonce or the depth refuses, an out-of-gas — makes no records and
+/// is charged nothing. A frame revm refuses once it has it — a value call the caller cannot fund,
+/// one past the call-stack limit — makes no records either, and its failure gives the charge
+/// back. A charge the caller cannot pay fails the opcode with an out-of-gas, which takes the frame
+/// the opcode was suspending on with it ([`abandon_frame`]).
+///
+/// revm's instruction has also charged the caller the state gas of the account the frame would
+/// add — a value transfer's new recipient, a created account. That charge is held to the state-gas
+/// limit when revm has decided the frame, not here: a frame revm refuses gives it back, and a
+/// limit that held it would stop the transaction for an account nobody adds.
 ///
 /// The frame inherits the reservoir the charge left, not the one the caller held before it
 /// ([`inherit_reservoir`]).
@@ -232,16 +252,18 @@ fn charge_frame_start<DB: Database, ExtEnvs: ExternalEnvTypes>(
 ) -> InstructionExecResult {
     let InstructionContext { interpreter, host } = context;
     let result = inner(InstructionContext { interpreter: &mut *interpreter, host: &mut *host });
-    if !host.prices_history() {
-        return result;
-    }
     // An opcode that starts a frame suspends with the frame's input as its action; one that ends
     // otherwise — a call the balance cannot fund, an out-of-gas — leaves no such action and makes
     // no records.
-    let Some(InterpreterAction::NewFrame(input)) = interpreter.bytecode.action() else {
-        return result;
+    let records = match interpreter.bytecode.action() {
+        Some(InterpreterAction::NewFrame(input)) => {
+            host.additional_limit.frame_start_records(input)
+        }
+        _ => return result,
     };
-    let records = host.additional_limit.frame_start_records(input);
+    if !host.prices_history() {
+        return result;
+    }
     let (Some(on_lane), Some(caller)) = (
         write_record_history_gas(records.on_lane),
         write_record_history_gas(u64::from(records.caller)),

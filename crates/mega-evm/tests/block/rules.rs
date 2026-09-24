@@ -173,22 +173,29 @@ fn test_da_footprint_over_the_block_budget_refuses_the_transaction() {
 /// is admitted, and the block has nothing left for the next transaction.
 #[test]
 fn test_da_footprint_that_exactly_fills_the_block_budget_is_admitted() {
-    const SCALAR: u16 = 128;
-    // Above what the transaction has to pay under the Satin gas table — its intrinsic charge and
-    // its body's history — and below the footprint the scalar yields, so the block's gas limit
-    // still fits the transaction's gas.
-    const GAS_LIMIT: u64 = 2_200_000;
+    const CALLDATA: u64 = 20_000;
+    // Above what the transaction has to pay under the Satin gas table: its body's history, at the
+    // price the engine runs, and 64 gas a calldata byte, which covers both its intrinsic charge and
+    // its floor.
+    let gas_limit = mega_evm::history_gas(mega_evm::TX_BODY_SIZE + CALLDATA)
+        .expect("the body has a price") +
+        15_000 +
+        64 * CALLDATA;
 
-    let tx = common::user_tx_with_input(0, common::incompressible(20_000), GAS_LIMIT);
-    let footprint = mega_evm::MegaTransactionExt::estimated_da_size(&tx) * u64::from(SCALAR);
-    assert!(footprint >= GAS_LIMIT, "the block's gas limit must also fit the transaction's gas");
+    let tx = common::user_tx_with_input(0, common::incompressible(CALLDATA as usize), gas_limit);
+    let da_size = mega_evm::MegaTransactionExt::estimated_da_size(&tx);
+    // The smallest scalar whose footprint fits the transaction's gas, so the block's gas limit —
+    // the footprint's budget — still fits it too.
+    let scalar = u16::try_from(gas_limit.div_ceil(da_size)).expect("the scalar fits its field");
+    let footprint = da_size * u64::from(scalar);
+    assert!(footprint >= gas_limit, "the block's gas limit must also fit the transaction's gas");
 
     // The block's gas limit is the footprint's budget, so a block with exactly this gas limit
     // has exactly this transaction's footprint.
     let mut env = common::evm_env();
     env.block_env.gas_limit = footprint;
 
-    let mut state = state_with_scalars(scalars_word(SCALAR, 0, 0));
+    let mut state = state_with_scalars(scalars_word(scalar, 0, 0));
     let mut executor = common::executor_with_env(&mut state, unlimited_ctx(), env);
     executor.apply_pre_execution_changes().expect("the block starts");
 

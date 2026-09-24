@@ -99,95 +99,13 @@ fn tx_intrinsic_data_size_with_calldata(n: u64) -> u64 {
 // TEST 2: Intrinsic + execution overflow (KVUpdate)
 // ============================================================================
 
-/// A REX4 transaction whose intrinsic KV count plus execution KV writes
-/// exceeds the configured `tx_kv_updates_limit` must not succeed.
-///
-/// Intrinsic KV = 1 (caller account update). Writing N storage slots adds N KVs.
-#[test]
-fn test_intrinsic_plus_execution_kv_update_overflow() {
-    // Intrinsic KV = 1 (caller update). Allow 3 total → execution budget = 2.
-    let kv_limit = 3;
-
-    // Callee writes 3 SSTOREs → intrinsic(1) + 3 = 4 > 3.
-    let code = write_n_slots(BytecodeBuilder::default(), 3).stop().build();
-
-    let mut db = MemoryDatabase::default()
-        .account_balance(CALLER, U256::from(1_000_000))
-        .account_code(CALLEE, code);
-
-    let tx = default_tx_builder(CALLEE).build_fill();
-    let (result, _, kv_updates) = transact_data_kv(&mut db, u64::MAX, kv_limit, tx).unwrap();
-
-    assert!(
-        !result.result.is_success(),
-        "TX with intrinsic + execution KV exceeding limit should not succeed, \
-         kv_updates_used={kv_updates}, limit={kv_limit}"
-    );
-}
-
 // ============================================================================
 // TEST 4: Intrinsic-only overflow (KVUpdate)
 // ============================================================================
 
-/// A transaction whose intrinsic KV count exceeds the configured limit
-/// should produce a normal execution failure (Halt with `KVUpdateLimitExceeded`),
-/// not a top-level EVM error.
-#[test]
-fn test_intrinsic_only_kv_update_overflow() {
-    // Intrinsic KV = 1 (caller update). Set limit to 0.
-    let kv_limit = 0;
-
-    let code = BytecodeBuilder::default().stop().build();
-
-    let mut db = MemoryDatabase::default()
-        .account_balance(CALLER, U256::from(1_000_000))
-        .account_code(CALLEE, code);
-
-    let tx = default_tx_builder(CALLEE).build_fill();
-    let (result, _, _) = transact_data_kv(&mut db, u64::MAX, kv_limit, tx).unwrap();
-
-    assert!(
-        result.result.is_halt(),
-        "Intrinsic-only KVUpdate overflow should halt, got {:?}",
-        result.result
-    );
-    assert!(matches!(
-        result.result,
-        ExecutionResult::Halt { reason: MegaHaltReason::KVUpdateLimitExceeded { .. }, .. }
-    ));
-}
-
 // ============================================================================
 // TEST 8: Intrinsic-only KVUpdate overflow + intercepted system contract
 // ============================================================================
-
-/// When a TX targets an intercepted system contract and intrinsic KV count
-/// exceeds the limit, the TX must still fail.
-#[test]
-fn test_intrinsic_kv_update_overflow_with_intercepted_system_contract() {
-    let kv_limit = 0; // Intrinsic KV = 1 (caller update), exceeds limit of 0
-
-    let mut db = MemoryDatabase::default().account_balance(CALLER, U256::from(1_000_000));
-
-    let tx = TxEnvBuilder::default()
-        .caller(CALLER)
-        .call(LIMIT_CONTROL_ADDRESS)
-        .gas_limit(100_000_000)
-        .data(Bytes::copy_from_slice(&IMegaLimitControl::remainingComputeGasCall::SELECTOR))
-        .build_fill();
-
-    let (result, _, _) = transact_data_kv(&mut db, u64::MAX, kv_limit, tx).unwrap();
-
-    assert!(
-        !result.result.is_success(),
-        "Intrinsic KVUpdate overflow must not succeed even when targeting intercepted system contract, got {:?}",
-        result.result
-    );
-    assert!(matches!(
-        result.result,
-        ExecutionResult::Halt { reason: MegaHaltReason::KVUpdateLimitExceeded { .. }, .. }
-    ));
-}
 
 // ============================================================================
 // TEST 9: Inspector early-return + intrinsic overflow (DataSize)

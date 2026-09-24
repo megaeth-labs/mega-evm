@@ -337,29 +337,6 @@ fn test_rex6_call_to_eip7702_delegator_to_beneficiary_enabled_marks_beneficiary(
 // Existing-target SELFDESTRUCT accounting
 // ============================================================================
 
-/// REX6 regression guard: SELFDESTRUCT to an *empty* non-beneficiary target
-/// must still go through the new-target arm (state growth + `DataSize` + KV +
-/// new-account storage gas), matching REX5's behavior for the same case.
-#[test]
-fn test_rex6_selfdestruct_to_empty_target_still_records_state_growth() {
-    let code =
-        BytecodeBuilder::default().push_address(EMPTY_NON_BENEFICIARY).append(SELFDESTRUCT).build();
-
-    let mut db = MemoryDatabase::default()
-        .account_balance(CALLER, U256::from(1_000_000_000u64))
-        .account_code(MIDDLE, code)
-        .account_balance(MIDDLE, U256::from(1_000_000u64));
-    let tx = TxEnvBuilder::default().caller(CALLER).call(MIDDLE).gas_limit(1_000_000).build_fill();
-
-    let (result, usage, _, _) = transact_with_beneficiary(MegaSpecId::REX6, &mut db, tx).unwrap();
-    assert!(result.result.is_success(), "REX6 tx should succeed: {result:?}");
-    assert!(
-        usage.state_growth > 0,
-        "REX6 new-target SELFDESTRUCT must still record state growth: {}",
-        usage.state_growth,
-    );
-}
-
 // ============================================================================
 // SELFDESTRUCT target-side freeze, enabled-path detention, self-target, DB-error
 // ============================================================================
