@@ -13,14 +13,17 @@ use mega_evm::{
     system::{IOracle, ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE},
     test_utils::{op_transaction, zero_fee_l1_block_info, BytecodeBuilder, MemoryDatabase},
     volatile_data_access_disabled_revert_data, EmptyExternalEnv, EvmTxRuntimeLimits, ExternalEnvs,
-    MegaContext, MegaEvm, MegaSpecId, MegaTransaction, MegaTransactionOutcome, OracleEnv,
-    VolatileDataAccess,
+    LimitCheck, LimitKind, MegaContext, MegaEvm, MegaSpecId, MegaTransaction,
+    MegaTransactionOutcome, OracleEnv, VolatileDataAccess,
 };
 use revm::{
     bytecode::opcode::{
-        CALL, DELEGATECALL, DUP2, GAS, MSTORE, POP, PUSH0, RETURN, SLOAD, SSTORE, STOP, SUB, SWAP1,
+        CALL, CALLDATASIZE, DELEGATECALL, DUP2, GAS, JUMPDEST, JUMPI, MSTORE, POP, PUSH0, PUSH1,
+        RETURN, SLOAD, SSTORE, STOP, SUB, SWAP1, TIMESTAMP,
     },
     context::TxEnv,
+    interpreter::{interpreter::EthInterpreter, interpreter_types::Jumps, Interpreter},
+    Inspector,
 };
 
 use crate::common::{
@@ -456,6 +459,36 @@ fn test_the_deployed_oracle_reads_through_the_service() {
     );
 }
 
+/// A detained frame whose regular gas holds the cold access, but which may not spend it past the
+/// compute limit, reads and asks the service all the same: the read's charge then stops the
+/// transaction at the limit, and the Oracle read is not marked. A frame whose regular gas cannot
+/// hold the cold access at all asks nothing
+/// ([`test_a_read_the_frame_cannot_pay_for_asks_nothing`]).
+#[test]
+fn test_a_detained_frame_that_may_not_spend_the_cold_access_asks_and_is_stopped() {
+    let code = BytecodeBuilder::default().append_many([TIMESTAMP, POP, PUSH0, SLOAD, STOP]).build();
+    let service = Service::default();
+    let run = run_under(
+        system_db().account_code(ORACLE_CONTRACT_ADDRESS, code),
+        &service,
+        EvmTxRuntimeLimits::default().with_block_env_access_compute_gas_limit(1_500),
+        |ctx| ctx,
+        call_tx(ORACLE_CONTRACT_ADDRESS, [], U256::ZERO),
+    );
+
+    assert_eq!(service.seen(), vec![Seen::Read(U256::ZERO)], "the service was asked");
+    assert!(
+        matches!(
+            run.outcome.limit_exceeded,
+            Some(LimitCheck::ExceedsLimit { kind: LimitKind::ComputeGas, .. })
+        ),
+        "{:?}",
+        run.outcome.limit_exceeded
+    );
+    assert_eq!(run.accessed, VolatileDataAccess::TIMESTAMP, "the Oracle read is not marked");
+    assert_eq!(run.limit, Some(2 + 1_500), "the timestamp's limit binds");
+}
+
 /* ---------- which source answered leaves no trace ---------- */
 
 /// Below the execution cap, and above it, where the reservoir pays state and history gas first.
@@ -574,5 +607,110 @@ fn test_the_read_slot_is_in_the_transactions_state_whichever_source_answered() {
             .unwrap_or_else(|| panic!("answered {answered}: the slot is in the state"));
         assert_eq!((slot.original_value, slot.present_value), (STATE_VALUE, STATE_VALUE));
         assert!(!slot.is_changed(), "answered {answered}");
+    }
+}
+
+/* ---------- reads next to writes and in nested frames ---------- */
+
+/// A read after the Oracle's frame wrote the slot answers the service's value over the one the
+/// frame stored, as on the legacy engine, and costs the cold access like every other read; with
+/// no value from the service it answers what the frame stored.
+#[test]
+fn test_the_services_value_wins_over_the_frames_own_write() {
+    let params = mega_evm::satin_gas_params();
+    // The push of the slot, the `SLOAD` and the `GAS` after it.
+    let cold = 3 + params.warm_storage_read_cost() + params.cold_storage_additional_cost() + 2;
+    let code = BytecodeBuilder::default()
+        .push_number(99_u8)
+        .push_u256(SLOT)
+        .append_many([SSTORE, GAS])
+        .push_u256(SLOT)
+        // [g0, value, g1]: the value at 0, g0 - g1 at 0x20.
+        .append_many([SLOAD, GAS, SWAP1, PUSH0, MSTORE, SWAP1, SUB])
+        .push_number(0x20_u8)
+        .append(MSTORE)
+        .push_number(0x40_u8)
+        .append_many([PUSH0, RETURN])
+        .build();
+
+    for (service, expected) in [
+        (Service::holding(SLOT, SERVICE_VALUE), SERVICE_VALUE),
+        (Service::default(), U256::from(99)),
+    ] {
+        let run = run(
+            db_with_state().account_code(ORACLE_CONTRACT_ADDRESS, code.clone()),
+            &service,
+            call_tx(ORACLE_CONTRACT_ADDRESS, [], U256::ZERO),
+        );
+        assert!(run.outcome.result.is_success(), "{:?}", run.outcome.result);
+        let output = run.outcome.result.output().cloned().unwrap_or_default();
+        assert_eq!(U256::from_be_slice(&output[..32]), expected);
+        assert_eq!(U256::from_be_slice(&output[32..64]).to::<u64>(), cold, "the read is cold");
+        assert_eq!(service.seen(), vec![Seen::Read(SLOT)]);
+    }
+}
+
+/// Records what every `SLOAD` cost the frame that ran it, with the frame's depth.
+#[derive(Debug, Default)]
+struct SloadCosts {
+    running: Option<(usize, u64)>,
+    costs: Vec<(usize, u64)>,
+}
+
+impl<CTX> Inspector<CTX, EthInterpreter> for SloadCosts {
+    fn step(&mut self, interp: &mut Interpreter<EthInterpreter>, _context: &mut CTX) {
+        if interp.bytecode.opcode() == SLOAD {
+            self.running = Some((interp.input.depth, interp.gas.remaining()));
+        }
+    }
+
+    fn step_end(&mut self, interp: &mut Interpreter<EthInterpreter>, _context: &mut CTX) {
+        if let Some((depth, before)) = self.running.take() {
+            self.costs.push((depth, before - interp.gas.remaining()));
+        }
+    }
+}
+
+/// Every read of a nested Oracle frame goes through the service and costs the cold access too:
+/// the Oracle reads the slot once, calls itself, and the nested frame reads it twice.
+#[test]
+fn test_reads_in_a_nested_oracle_frame_are_cold_and_ask() {
+    let params = mega_evm::satin_gas_params();
+    let cold = params.warm_storage_read_cost() + params.cold_storage_additional_cost();
+    // Called with calldata, the code jumps to the nested frame's reads.
+    let outer = BytecodeBuilder::default()
+        .push_u256(SLOT)
+        .append_many([SLOAD, POP, PUSH0, PUSH0])
+        .push_number(1_u8) // argsSize
+        .append_many([PUSH0, PUSH0]) // argsOffset, value
+        .push_address(ORACLE_CONTRACT_ADDRESS)
+        .append_many([GAS, CALL, POP, STOP])
+        .build_vec();
+    let nested = BytecodeBuilder::default()
+        .append(JUMPDEST)
+        .push_u256(SLOT)
+        .append_many([SLOAD, POP])
+        .push_u256(SLOT)
+        .append_many([SLOAD, POP, STOP])
+        .build_vec();
+    let mut code = vec![CALLDATASIZE, PUSH1, (4 + outer.len()) as u8, JUMPI];
+    code.extend(outer);
+    code.extend(nested);
+
+    for service in [Service::holding(SLOT, SERVICE_VALUE), Service::default()] {
+        let envs: ExternalEnvs<Envs> =
+            ExternalEnvs { salt_env: EmptyExternalEnv, oracle_env: service.clone() };
+        let db = db_with_state().account_code(ORACLE_CONTRACT_ADDRESS, Bytes::from(code.clone()));
+        let ctx = MegaContext::new_with_external_envs(db, MegaSpecId::SATIN, envs)
+            .with_block(block())
+            .with_chain(zero_fee_l1_block_info());
+        let mut evm = MegaEvm::new(ctx).with_inspector(SloadCosts::default());
+        let outcome = evm
+            .execute_transaction(call_tx(ORACLE_CONTRACT_ADDRESS, [], U256::ZERO))
+            .expect("the transaction is valid");
+
+        assert!(outcome.result.is_success(), "{:?}", outcome.result);
+        assert_eq!(evm.inspector().costs, vec![(0, cold), (1, cold), (1, cold)]);
+        assert_eq!(service.seen(), vec![Seen::Read(SLOT); 3]);
     }
 }
