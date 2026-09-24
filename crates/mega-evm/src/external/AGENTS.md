@@ -15,7 +15,8 @@ External dependency abstraction for block-scoped SALT and oracle data consumed d
 - Block context is captured at environment creation time, not passed per query.
 - SALT and oracle are independent traits but consumed together via `ExternalEnvs` bundle.
 - External errors are propagated to host and then stashed in EVM context error channel.
-- `EmptyExternalEnv` must stay deterministic and side-effect free.
+- `EmptyExternalEnv` must stay deterministic and side-effect free. It answers no oracle slot, so the Oracle's storage is read from the database.
+- A read of the Oracle's storage is priced cold whichever source answered it, so its price cannot depend on whether the oracle service had a value.
 - A bucket's capacity is read once per transaction and answered from `BucketMultipliers` afterwards, so a state gas charge and the refill that undoes it are priced at the same capacity by construction.
 - `BucketMultipliers` does not hold the environment; it takes a `&SaltEnv` per call, so there is no second copy of it and no `Clone` bound on the engine's environment types.
 - `MIN_BUCKET_SIZE` is the smallest capacity a backend may report.
@@ -29,6 +30,6 @@ External dependency abstraction for block-scoped SALT and oracle data consumed d
 
 ## WHERE TO LOOK
 - Add a new external backend implementation: implement `SaltEnv`/`OracleEnv` and an `ExternalEnvFactory`.
-- Change oracle storage retrieval behavior: `oracle.rs` trait impls (the host integration is not here yet).
+- Change oracle storage retrieval behavior: `oracle.rs` trait impls; the Host reads through them in `evm/host.rs` (`oracle_sload`): the service first, the database for a slot it has no value for, always priced cold.
 - Change bucket-id mapping logic: `salt.rs` and `hasher/` helpers.
 - Change how a bucket capacity becomes a gas multiplier: `gas.rs`. What that multiplier is applied to is the pricing hook in `evm/host.rs`.

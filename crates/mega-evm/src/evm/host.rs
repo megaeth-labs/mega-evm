@@ -30,6 +30,13 @@
 //! accessor answers zero. Nothing is loaded, and the opcode's wrapper turns the refusal into the
 //! frame's revert.
 //!
+//! # The Oracle's storage
+//!
+//! A storage load whose owner is the Oracle reads the slot from the node's oracle service
+//! ([`OracleEnv`]) and falls back to the database for a slot the service has no value for. Every
+//! such read is priced as a cold access, because a node replaying a block cannot tell which of the
+//! two sources the node that built it read.
+//!
 //! # One hook prices every state charge
 //!
 //! [`state_gas_price`](revm::context_interface::Host::state_gas_price) is the one place an
@@ -68,7 +75,7 @@ use revm::{
 };
 
 use crate::{
-    system::ORACLE_CONTRACT_ADDRESS, ExternalEnvTypes, MegaContext, StagedRecord,
+    system::ORACLE_CONTRACT_ADDRESS, ExternalEnvTypes, MegaContext, OracleEnv, StagedRecord,
     VolatileDataAccess,
 };
 
@@ -155,7 +162,8 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
         self.inner.slot_num()
     }
 
-    /// Loads the slot, marking a read of the Oracle's storage.
+    /// Loads the slot; a slot of the Oracle's storage is read through the oracle environment
+    /// ([`oracle_sload`](Self::oracle_sload)).
     #[inline]
     fn sload_skip_cold_load(
         &mut self,
@@ -163,15 +171,10 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
         key: StorageKey,
         skip_cold_load: bool,
     ) -> Result<StateLoad<StorageValue>, LoadError> {
-        let oracle = address == ORACLE_CONTRACT_ADDRESS;
-        if oracle && self.detention.refuses(VolatileDataAccess::ORACLE) {
-            return Err(LoadError::ColdLoadSkipped);
+        if address == ORACLE_CONTRACT_ADDRESS {
+            return self.oracle_sload(key, skip_cold_load);
         }
-        let load = self.inner.sload_skip_cold_load(address, key, skip_cold_load)?;
-        if oracle {
-            self.detention.observe(VolatileDataAccess::ORACLE);
-        }
-        Ok(load)
+        self.inner.sload_skip_cold_load(address, key, skip_cold_load)
     }
 
     /// Loads the account, marking a read of the block beneficiary's.
@@ -324,6 +327,47 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
         }
         self.detention.observe(access);
         true
+    }
+
+    /// Reads the slot `key` of the Oracle's storage, in the Oracle's own frame: a storage load
+    /// whose owner is the Oracle, so an `SLOAD` of any other contract, and a `DELEGATECALL` into
+    /// the Oracle's code, which runs on its caller's storage, are ordinary loads.
+    ///
+    /// The oracle environment answers first ([`OracleEnv::get_oracle_storage`]); a slot it has no
+    /// value for is read from the database through the journal. Hints reach the environment
+    /// synchronously as the `sendHint` call is made, so a read that follows a hint in execution
+    /// finds the environment told, as the trait promises.
+    ///
+    /// The read is always cold, whichever source answered and however often the transaction read
+    /// the slot before. A node replaying a block cannot tell whether the node that built it
+    /// answered a read from its oracle service or from the chain, so the price may depend on
+    /// neither: every read costs the cold access. A frame that could not pay it reads nothing, as
+    /// revm's own skipped cold load does, and the environment is not asked.
+    ///
+    /// It is a read of volatile data: it is refused while the frame's volatile-data access is off,
+    /// and marked for gas detention, under the Oracle's cap, once it succeeded.
+    fn oracle_sload(
+        &mut self,
+        key: StorageKey,
+        skip_cold_load: bool,
+    ) -> Result<StateLoad<StorageValue>, LoadError> {
+        if self.detention.refuses(VolatileDataAccess::ORACLE) || skip_cold_load {
+            return Err(LoadError::ColdLoadSkipped);
+        }
+        let value = match self.external_envs().oracle_env.get_oracle_storage(key) {
+            Some(value) => value,
+            None => {
+                revm::context_interface::Host::sload_skip_cold_load(
+                    &mut self.inner,
+                    ORACLE_CONTRACT_ADDRESS,
+                    key,
+                    false,
+                )?
+                .data
+            }
+        };
+        self.detention.observe(VolatileDataAccess::ORACLE);
+        Ok(StateLoad::new(value, true))
     }
 }
 
