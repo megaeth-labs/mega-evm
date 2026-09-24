@@ -86,7 +86,8 @@ where
     // The creation's start is what creates an empty signer's account. revm bumps the nonce of
     // every creation it is asked to build, and a creation the limits stop at its start is bumped
     // all the same; one an inspector answered in its place never started, and adds no account.
-    if call.signer_account_charge > 0 && account_nonce(ctx, call.signer) == call.signer_nonce {
+    // A signer that had an account was charged nothing, and gets nothing back.
+    if account_nonce(ctx, call.signer) == call.signer_nonce {
         call.gas.refill_reservoir(call.signer_account_charge);
     }
 
@@ -127,21 +128,22 @@ fn answer<DB: Database, ExtEnvs: ExternalEnvTypes>(
         return failed(KeylessDeployError::ExecutionReverted { gas_used, output }, gas_used);
     }
     if !instruction_result.is_ok() {
-        let reason = match SuccessOrHalt::<MegaHaltReason>::from(instruction_result) {
-            SuccessOrHalt::Halt(reason) => reason,
-            _ => MegaHaltReason::Base(HaltReason::OutOfGas(OutOfGasError::Basic)),
-        };
+        let reason = halt_reason(instruction_result);
         return failed(KeylessDeployError::ExecutionHalted { gas_used, reason }, gas_used);
     }
-    let FrameResult::Create(outcome) = result else {
-        return refused(KeylessDeployError::NoContractCreated);
+    let created = match result {
+        FrameResult::Create(outcome) => outcome.address,
+        FrameResult::Call(_) => None,
     };
-    let Some(address) = outcome.address else {
-        return refused(KeylessDeployError::NoContractCreated);
-    };
-    if address != call.deploy_address {
-        return refused(KeylessDeployError::AddressMismatch);
+    if created != Some(call.deploy_address) {
+        let error = if created.is_some() {
+            KeylessDeployError::AddressMismatch
+        } else {
+            KeylessDeployError::NoContractCreated
+        };
+        return (InstructionResult::Revert, encode_error_result(error));
     }
+    let address = call.deploy_address;
     // The code the journal holds, not the code the constructor returned: a constructor that
     // destroyed its own account (EIP-6780) returned code the account does not keep.
     let deployed = ctx.journal_ref().state.get(&address).is_some_and(|account| {
@@ -182,9 +184,13 @@ fn returned(
     (InstructionResult::Return, output.into())
 }
 
-/// A revert of the call with `error`.
-fn refused(error: KeylessDeployError) -> (InstructionResult, Bytes) {
-    (InstructionResult::Revert, encode_error_result(error))
+/// Why a creation that ended with `result` halted. The ABI's `ExecutionHalted` carries no reason,
+/// so this is what the error value, and whoever handles it off-chain, is told.
+fn halt_reason(result: InstructionResult) -> MegaHaltReason {
+    match SuccessOrHalt::<MegaHaltReason>::from(result) {
+        SuccessOrHalt::Halt(reason) => reason,
+        _ => MegaHaltReason::Base(HaltReason::OutOfGas(OutOfGasError::Basic)),
+    }
 }
 
 /// What a creation whose gas settled into `gas` spent, from either pool: its regular gas, and the
@@ -204,6 +210,24 @@ fn creation_gas_used(gas: &Gas) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A halt is reported with its own reason.
+    #[test]
+    fn test_a_halt_keeps_its_reason() {
+        assert_eq!(
+            halt_reason(InstructionResult::InvalidFEOpcode),
+            MegaHaltReason::Base(HaltReason::InvalidFEOpcode),
+        );
+        assert_eq!(
+            halt_reason(InstructionResult::CreateContractStartingWithEF),
+            MegaHaltReason::Base(HaltReason::CreateContractStartingWithEF),
+        );
+        assert_eq!(
+            halt_reason(InstructionResult::Return),
+            MegaHaltReason::Base(HaltReason::OutOfGas(OutOfGasError::Basic)),
+            "what is not a halt is reported as running out of gas",
+        );
+    }
 
     /// The creation's spend is the same figure whichever pool paid its state and history gas.
     #[test]
