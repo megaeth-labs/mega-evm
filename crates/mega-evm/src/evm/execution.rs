@@ -47,7 +47,7 @@ use revm::{
 
 use crate::{
     evm::{history::transaction_body_bytes, inspector::frame_end_checked},
-    history_gas, synthetic_frame_result,
+    history_gas, synthetic_call_result, synthetic_frame_result,
     system::{is_deposit_like_transaction, MEGA_SYSTEM_ADDRESS},
     write_record_history_gas, Detention, ExternalEnvTypes, JournalInspectTr, LimitCheck, LimitKind,
     MegaContext, MegaEvm, MegaInstructions, VolatileDataAccess,
@@ -449,6 +449,8 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
             hold_upfront_state_gas(&mut self.inner.ctx, Some(&mut result));
             return Ok(ItemOrResult::Result(result));
         }
+        // What an interceptor that lets the frame run charged it, by taking it off its limit.
+        let charge = gas_limit.saturating_sub(input_gas_limit(&frame_init.frame_input));
         let mut frame_init = self.rewrite_keyless(frame_init);
         let ctx = &mut self.inner.ctx;
         let check = ctx.additional_limit.on_frame_init(&frame_init.frame_input, frame_init.depth);
@@ -473,6 +475,7 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
         match outcome {
             Ok(address) => {
                 ctx.additional_limit.set_frame_address(address);
+                ctx.detention.on_charged_frame_built(depth, charge);
                 hold_upfront_state_gas(ctx, None);
                 Ok(ItemOrResult::Item(self.inner.frame_stack.get()))
             }
@@ -930,13 +933,26 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
     /// like a frame revm ran. An interceptor that lets the frame run may charge it instead of
     /// answering it, which is why the frame is taken mutably. What each contract answers is in
     /// the `system` module.
+    ///
+    /// The charge is compute for gas detention. One that crosses the compute limit is answered
+    /// here, as a frame that spent the charge and nothing else, which the answer's settlement
+    /// turns into the stop ([`settle_answer`]), as it does an interceptor's answer that spent
+    /// past the limit.
     #[inline]
     fn intercept(&mut self, frame_init: &mut FrameInit) -> Option<FrameResult> {
         let FrameInput::Call(inputs) = &mut frame_init.frame_input else { return None };
         if !matches!(inputs.scheme, CallScheme::Call | CallScheme::StaticCall) {
             return None;
         }
-        crate::system::intercept(&mut self.inner.ctx, inputs, frame_init.depth)
+        let forwarded = inputs.gas_limit;
+        let ctx = &mut self.inner.ctx;
+        if let Some(answer) = crate::system::intercept(ctx, inputs, frame_init.depth) {
+            return Some(answer);
+        }
+        let charge = forwarded - inputs.gas_limit;
+        ctx.detention
+            .charge_crosses(frame_init.depth, forwarded, charge)
+            .then(|| synthetic_call_result(inputs, InstructionResult::Stop, Bytes::new()))
     }
 
     /// The keyless deployment rewrite: a keyless deployment call turned into the native creation

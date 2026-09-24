@@ -19,7 +19,10 @@ use alloy_sol_types::{SolCall, SolError};
 use mega_evm::{
     constants::TX_GAS_LIMIT_CAP,
     system::{
-        keyless::{IKeylessDeploy, KEYLESS_DEPLOY_ADDRESS, KEYLESS_DEPLOY_OVERHEAD_GAS},
+        keyless::{
+            IKeylessDeploy, KEYLESS_DEPLOY_ADDRESS, KEYLESS_DEPLOY_CODE,
+            KEYLESS_DEPLOY_OVERHEAD_GAS,
+        },
         IMegaAccessControl, VolatileDataAccessType,
     },
     test_utils::{op_transaction, BytecodeBuilder, MemoryDatabase},
@@ -925,11 +928,17 @@ fn test_a_precompile_priced_past_the_cap_computes_nothing() {
     }
 }
 
-/// An interceptor that charges its frame by taking gas off the frame's limit and then answers is
-/// held to the allowance as a precompile is: a `keylessDeploy` call carrying value, from the
-/// beneficiary under a cap below the keyless overhead, stops at the cap instead of answering. The
-/// stop's gas is the frame's as its caller forwarded it, so a tracer reading the answer sees the
-/// allowance spent and the rest left.
+/// An interceptor that charges its frame by taking gas off the frame's limit charges compute,
+/// whether it then answers the call or lets the frame run: a `keylessDeploy` call from the
+/// beneficiary, carrying value (answered, `NoEtherTransfer()`) or not (the frame runs the deployed
+/// contract to `NotIntercepted()`), against the same call from another sender.
+///
+/// - Under a cap below the keyless overhead, the charge alone crosses the limit: both stop at it,
+///   and the stop's gas is the frame's as its caller forwarded it, so a tracer reading the answer
+///   sees the allowance spent and the rest left.
+/// - Under a cap a hundred gas above the overhead, the charge fits: the answer is the same as
+///   without the read, and the frame that runs has a hundred gas of compute left for itself, so it
+///   stops at the limit where it would run on.
 #[test]
 fn test_an_interceptors_charge_is_held_to_what_the_limit_leaves() {
     let calldata: Bytes = IKeylessDeploy::keylessDeployCall {
@@ -938,15 +947,16 @@ fn test_an_interceptors_charge_is_held_to_what_the_limit_leaves() {
     }
     .abi_encode()
     .into();
-    let cap = KEYLESS_DEPLOY_OVERHEAD_GAS / 2;
-    let limits = EvmTxRuntimeLimits::default().with_block_env_access_compute_gas_limit(cap);
-    let run = |caller: Address| {
-        let db = MemoryDatabase::default().account_balance(caller, U256::from(10));
+    let run = |caller: Address, value: u64, cap: u64| {
+        let limits = EvmTxRuntimeLimits::default().with_block_env_access_compute_gas_limit(cap);
+        let db = MemoryDatabase::default()
+            .account_balance(caller, U256::from(10))
+            .account_code(KEYLESS_DEPLOY_ADDRESS, KEYLESS_DEPLOY_CODE);
         let tx = OpTx(op_transaction(TxEnv {
             caller,
             kind: TxKind::Call(KEYLESS_DEPLOY_ADDRESS),
             gas_limit: BELOW,
-            value: U256::from(1),
+            value: U256::from(value),
             data: calldata.clone(),
             ..Default::default()
         }));
@@ -955,17 +965,51 @@ fn test_an_interceptors_charge_is_held_to_what_the_limit_leaves() {
         let run = run_on(&mut evm, tx);
         (run, evm.inspector().calls[0].spent)
     };
-    let ((detained, stop_spent), (plain, answer_spent)) = (run(BENEFICIARY), run(CALLER));
-    assert_eq!(answer_spent, 0, "the answer spent nothing of the limit it was left");
-    assert_eq!(stop_spent, cap, "the stop spent the allowance of the limit it was forwarded");
+    // What each call spends before its first instruction: the answered one spends the overhead,
+    // taken off the limit it answers on, and nothing of that limit.
+    let (answered, spent) = run(CALLER, 1, KEYLESS_DEPLOY_OVERHEAD_GAS / 2);
+    assert_eq!(spent, 0);
     assert_eq!(
-        plain.outcome.result.output(),
+        answered.outcome.result.output(),
         Some(&Bytes::from(IKeylessDeploy::NoEtherTransfer::SELECTOR.to_vec())),
         "the answer without detention"
     );
+    let answered_intrinsic = answered.outcome.gas.regular - KEYLESS_DEPLOY_OVERHEAD_GAS;
+    let (runs, _) = run(CALLER, 0, KEYLESS_DEPLOY_OVERHEAD_GAS / 2);
+    assert!(!runs.outcome.result.is_success(), "the contract's own NotIntercepted()");
+    let ran = runs.outcome.gas.regular - intrinsic_of_keyless(&calldata);
+    assert!(ran > KEYLESS_DEPLOY_OVERHEAD_GAS + 100, "{ran}");
+
+    let cap = KEYLESS_DEPLOY_OVERHEAD_GAS / 2;
+    let (detained, stop_spent) = run(BENEFICIARY, 1, cap);
     assert_eq!(detained.limit, Some(cap), "the sender is the beneficiary");
-    let intrinsic = plain.outcome.gas.regular - KEYLESS_DEPLOY_OVERHEAD_GAS;
-    assert_stopped(&detained, intrinsic);
+    assert_eq!(stop_spent, cap, "the stop spent the allowance of the limit it was forwarded");
+    assert_stopped(&detained, answered_intrinsic);
+    let (detained, stop_spent) = run(BENEFICIARY, 0, cap);
+    assert_eq!(stop_spent, cap, "stopped before it ran, on the same allowance");
+    assert_stopped(&detained, intrinsic_of_keyless(&calldata));
+
+    let cap = KEYLESS_DEPLOY_OVERHEAD_GAS + 100;
+    let (detained, _) = run(BENEFICIARY, 1, cap);
+    assert_eq!(detained.outcome.result, answered.outcome.result, "the charge fits the allowance");
+    assert_eq!(detained.outcome.gas, answered.outcome.gas);
+    let (detained, _) = run(BENEFICIARY, 0, cap);
+    assert_stopped(&detained, intrinsic_of_keyless(&calldata));
+}
+
+/// What a `keylessDeploy` call without value, from `CALLER`, spends before its first
+/// instruction: the same call with the contract not deployed spends the overhead and nothing else.
+fn intrinsic_of_keyless(calldata: &Bytes) -> u64 {
+    let tx = OpTx(op_transaction(TxEnv {
+        caller: CALLER,
+        kind: TxKind::Call(KEYLESS_DEPLOY_ADDRESS),
+        gas_limit: BELOW,
+        data: calldata.clone(),
+        ..Default::default()
+    }));
+    let run = execute(MemoryDatabase::default(), tx);
+    assert!(run.outcome.result.is_success(), "no code: the call stops at once");
+    run.outcome.gas.regular - KEYLESS_DEPLOY_OVERHEAD_GAS
 }
 
 /* ---------- the refusal's access type ---------- */

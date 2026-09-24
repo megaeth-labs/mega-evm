@@ -98,7 +98,11 @@
 //!
 //! An interceptor builds its answer on all the gas the caller forwarded, the caller's withheld
 //! part included: an answer that spent more than the allowance the frame would have run on is
-//! answered out of gas and marked as a crossing, and the same rule stops the transaction.
+//! answered out of gas and marked as a crossing, and the same rule stops the transaction. An
+//! interceptor may instead charge the frame, by taking gas off its limit, and let it run. The
+//! charge is the interceptor's own work, and compute whether the call is then answered or runs:
+//! one the allowance cannot pay stops the transaction before the frame runs, and one it can pay
+//! leaves the frame the rest.
 //!
 //! # Nothing withheld leaks
 //!

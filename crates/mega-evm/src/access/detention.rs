@@ -43,9 +43,16 @@ struct DetainedFrame {
 ///
 /// ```text
 /// compute = Σ suspended callers (spent at suspension − child's gas limit)
+///         + an interceptor's charge on the transaction's own frame
 ///         + regular_spent(running frame)
 ///         − burned
 /// ```
+///
+/// An interceptor that charges a frame by taking gas off its limit charges compute: its own work,
+/// decoding and recovering a signer, whether it then answers the call or lets the frame run. A
+/// caller's regular gas spent holds all it forwarded, and its contribution takes only the frame's
+/// limit off, so the charge is in it; the transaction's own frame has no caller, and its charge is
+/// added when the frame is built.
 ///
 /// The one part of the regular ledger that is not compute is what a halt burns (`burned`): a
 /// frame that halts consumes the gas it had left, and its spill, without running anything with
@@ -84,7 +91,8 @@ pub struct Detention {
     accessed: VolatileDataAccess,
     /// The most compute the transaction may reach, once it read volatile data.
     limit: Option<u64>,
-    /// The compute of the frames suspended on a child that runs.
+    /// The compute of the frames suspended on a child that runs, and an interceptor's charge on
+    /// the transaction's own frame.
     suspended: u64,
     /// The regular gas the frames that halted burned without running anything with it.
     burned: u64,
@@ -355,6 +363,27 @@ impl Detention {
     pub(crate) fn allowance(&self, depth: usize, gas_limit: u64) -> Option<u64> {
         let limit = self.limit?;
         Some(limit.saturating_sub(self.compute_at_start(depth, gas_limit)))
+    }
+
+    /// Whether an interceptor's `charge` on a frame at `depth` that its caller forwarded
+    /// `gas_limit` crosses the limit. The interceptor took the charge off the frame's limit and
+    /// lets the frame run; the charge is its own work — decoding, recovering a signer — and
+    /// compute, whether the frame then runs or is answered. A charge the allowance cannot pay is
+    /// a regular charge past the limit, and the frame must be answered for the stop rather than
+    /// run ([`on_answer`](Self::on_answer)).
+    pub(crate) fn charge_crosses(&self, depth: usize, gas_limit: u64, charge: u64) -> bool {
+        self.allowance(depth, gas_limit).is_some_and(|allowance| charge > allowance)
+    }
+
+    /// The frame at `depth` was built on a gas limit an interceptor took `charge` off
+    /// ([`charge_crosses`](Self::charge_crosses)), and the charge is compute. A deeper frame's
+    /// caller already holds it: the caller's regular gas spent carries all it forwarded, and its
+    /// contribution takes only the frame's limit off. The transaction's own frame has no caller,
+    /// so its charge is added to the transaction's compute here.
+    pub(crate) fn on_charged_frame_built(&mut self, depth: usize, charge: u64) {
+        if depth == 0 {
+            self.suspended = self.suspended.saturating_add(charge);
+        }
     }
 
     /// The frame at `depth`, whose gas limit was `gas_limit`, was answered without running —
@@ -779,6 +808,29 @@ mod tests {
         assert_eq!(out_of_gas.gas.remaining(), withheld.get(), "the allowance counts as spent");
         assert_eq!(out_of_gas.gas.withheld_crossing(), None);
         assert_eq!(detention.burned, 0, "a crossing burns nothing");
+    }
+
+    /// An interceptor's charge is compute, counted once: the transaction's own frame has no
+    /// caller, so its charge is added when the frame is built; a deeper frame's caller already
+    /// holds its charge in what it forwarded. A charge past the allowance crosses the limit.
+    #[test]
+    fn test_an_interceptors_charge_is_compute() {
+        let mut detention = detaining();
+        detention.mark_before_execution(VolatileDataAccess::BENEFICIARY_BALANCE);
+        assert!(!detention.charge_crosses(0, 100_000_000, BLOCK_ENV_ACCESS_COMPUTE_GAS));
+        assert!(detention.charge_crosses(0, 100_000_000, BLOCK_ENV_ACCESS_COMPUTE_GAS + 1));
+
+        detention.on_charged_frame_built(0, 100_000);
+        let mut frame = gas(100_000_000 - 100_000, 0);
+        detention.on_frame_run(&mut frame, 0);
+        assert_eq!(frame.spendable(), BLOCK_ENV_ACCESS_COMPUTE_GAS - 100_000);
+
+        assert!(frame.record_withheld_first_cost(500_000));
+        detention.on_frame_suspend(&frame, 0);
+        detention.on_charged_frame_built(1, 100_000);
+        let mut child = gas(500_000 - 100_000, 0);
+        detention.on_frame_run(&mut child, 1);
+        assert_eq!(detention.compute(&child), 200_000, "each charge once");
     }
 
     /// The switch holds for the frame that turned it off and every frame below it, turns back on
