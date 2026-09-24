@@ -9,24 +9,28 @@
 mod charges;
 mod deploy;
 mod dispatch;
+mod rules;
 
 use alloy_primitives::{address, hex, Address, Bytes, Signature, TxKind, B256, U256};
 use alloy_sol_types::SolCall;
 use mega_evm::{
     alloy_consensus::{Signed, TxLegacy},
     constants::TX_GAS_LIMIT_CAP,
+    satin_gas_params,
     system::keyless::{
         decode_error_result, IKeylessDeploy, KeylessDeployError, KEYLESS_DEPLOY_ADDRESS,
     },
     test_utils::MemoryDatabase,
-    EvmTxRuntimeLimits, MegaEvm, MegaTransactionOutcome,
+    write_record_history_gas, BucketId, EvmTxRuntimeLimits, ExternalEnvs, MegaContext, MegaEvm,
+    MegaSpecId, MegaTransactionOutcome, SaltEnv, TestExternalEnvs, MIN_BUCKET_SIZE,
 };
 use revm::{
     bytecode::opcode::{CODECOPY, PUSH0, RETURN},
     context::result::ExecutionResult,
+    context_interface::cfg::GasId,
 };
 
-use crate::common::{call_tx, context, system_db};
+use crate::common::{block, call_tx, context, system_db};
 
 /// A gas limit under the execution cap, and one above it.
 pub(crate) const GAS_LIMITS: [u64; 2] = [TX_GAS_LIMIT_CAP / 4, TX_GAS_LIMIT_CAP * 2];
@@ -104,8 +108,16 @@ pub(crate) fn keyless_deploy_call(tx: &[u8], gas_limit_override: U256) -> Bytes 
 
 /// Init code that deploys `runtime`.
 pub(crate) fn deploying(runtime: &[u8]) -> Bytes {
+    constructor(&[], runtime)
+}
+
+/// Init code that runs `prefix`, then deploys `runtime`, which it copies from its own tail.
+pub(crate) fn constructor(prefix: &[u8], runtime: &[u8]) -> Bytes {
     let len = u8::try_from(runtime.len()).expect("a short runtime");
-    let mut code = vec![0x60, len, 0x60, 10, PUSH0, CODECOPY, 0x60, len, PUSH0, RETURN];
+    let tail = u16::try_from(prefix.len() + 11).expect("a short prefix").to_be_bytes();
+    let mut code = prefix.to_vec();
+    code.extend_from_slice(&[0x60, len, 0x61, tail[0], tail[1], PUSH0, CODECOPY]);
+    code.extend_from_slice(&[0x60, len, PUSH0, RETURN]);
     code.extend_from_slice(runtime);
     code.into()
 }
@@ -125,7 +137,7 @@ pub(crate) fn db_for(deployment: &Deployment, balance: U256) -> MemoryDatabase {
     db.account_balance(deployment.signer, balance)
 }
 
-/// Runs the `keylessDeploy` transaction `data` from [`CALLER`] over `db` at `gas_limit`, under
+/// Runs the `keylessDeploy` transaction `data` from the relayer over `db` at `gas_limit`, under
 /// `limits`.
 pub(crate) fn run_with(
     db: MemoryDatabase,
@@ -133,8 +145,20 @@ pub(crate) fn run_with(
     gas_limit: u64,
     limits: EvmTxRuntimeLimits,
 ) -> MegaTransactionOutcome {
+    run_nth(db, data, gas_limit, limits, 0)
+}
+
+/// [`run_with`], as the relayer's transaction at `nonce`.
+pub(crate) fn run_nth(
+    db: MemoryDatabase,
+    data: Bytes,
+    gas_limit: u64,
+    limits: EvmTxRuntimeLimits,
+    nonce: u64,
+) -> MegaTransactionOutcome {
     let mut tx = call_tx(KEYLESS_DEPLOY_ADDRESS, data, U256::ZERO);
     tx.0.base.gas_limit = gas_limit;
+    tx.0.base.nonce = nonce;
     MegaEvm::new(context(db).with_tx_runtime_limits(limits))
         .execute_transaction(tx)
         .expect("the transaction is valid")
@@ -207,4 +231,52 @@ pub(crate) fn beyond(
         outcome.gas.history - reference.gas.history,
         outcome.gas.history_bytes - reference.gas.history_bytes,
     ]
+}
+
+/// The schedule's entry `id`.
+pub(crate) fn entry(id: GasId) -> u64 {
+    satin_gas_params().get(id)
+}
+
+/// The history gas of one write record.
+pub(crate) fn record() -> u64 {
+    write_record_history_gas(1).expect("a record has a price")
+}
+
+/// The history gas of `bytes` bytes.
+pub(crate) fn history(bytes: u64) -> u64 {
+    mega_evm::history_gas(bytes).expect("a byte count has a price")
+}
+
+/// A Satin context over `db` reading `envs`.
+pub(crate) fn salt_run(
+    db: MemoryDatabase,
+    envs: TestExternalEnvs<String>,
+    deployment: &Deployment,
+    gas_limit: u64,
+) -> MegaTransactionOutcome {
+    let context = MegaContext::<_, TestExternalEnvs<String>>::new_with_external_envs(
+        db,
+        MegaSpecId::SATIN,
+        ExternalEnvs { salt_env: envs.clone(), oracle_env: envs },
+    )
+    .with_block(block())
+    .with_chain(mega_evm::test_utils::zero_fee_l1_block_info());
+    let mut tx = call_tx(KEYLESS_DEPLOY_ADDRESS, deployment.call_data(LARGE_OVERRIDE), U256::ZERO);
+    tx.0.base.gas_limit = gas_limit;
+    MegaEvm::new(context).execute_transaction(tx).expect("the transaction is valid")
+}
+
+/// The bucket `account`'s own state lives in.
+pub(crate) fn bucket(account: Address) -> BucketId {
+    <TestExternalEnvs<String> as SaltEnv>::bucket_id_for_account(account)
+}
+
+/// `envs` with `account`'s bucket at multiplier `m`.
+pub(crate) fn crowded(
+    envs: TestExternalEnvs<String>,
+    account: Address,
+    m: u64,
+) -> TestExternalEnvs<String> {
+    envs.with_bucket_capacity(bucket(account), MIN_BUCKET_SIZE as u64 * m)
 }

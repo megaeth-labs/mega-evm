@@ -5,36 +5,13 @@
 //! beyond it is the overhead, the charges its call makes for the creation's start, and what the
 //! creation itself spent — its `gasUsed`.
 
-use alloy_primitives::Address;
-use mega_evm::{
-    satin_gas_params, system::keyless::KEYLESS_DEPLOY_OVERHEAD_GAS, write_record_history_gas,
-    BucketId, ExternalEnvs, MegaContext, MegaSpecId, SaltEnv, TestExternalEnvs, MIN_BUCKET_SIZE,
-};
-use revm::{
-    bytecode::opcode::{PUSH0, REVERT},
-    context_interface::cfg::GasId,
-};
+use mega_evm::system::keyless::KEYLESS_DEPLOY_OVERHEAD_GAS;
+use revm::bytecode::opcode::{PUSH0, REVERT};
 
 use super::*;
-use crate::common::block;
 
 /// The length of the runtime the tests deploy.
 const RUNTIME_LEN: usize = 5;
-
-/// The schedule's entry `id`.
-fn entry(id: GasId) -> u64 {
-    satin_gas_params().get(id)
-}
-
-/// The history gas of one write record.
-fn record() -> u64 {
-    write_record_history_gas(1).expect("a record has a price")
-}
-
-/// The history gas of `bytes` bytes.
-fn history(bytes: u64) -> u64 {
-    mega_evm::history_gas(bytes).expect("a byte count has a price")
-}
 
 /// Every charge of a deployment by a signer with no account, to an empty address, is accounted
 /// for exactly, and the transaction spends the same below and above the execution cap:
@@ -158,35 +135,6 @@ fn test_a_failed_deployment_gives_the_created_account_back() {
         assert_eq!(nonce(&outcome, deployment.signer), 1, "the nonce stays spent");
         assert_eq!(outcome.usage.write_records, 1, "the signer's nonce");
     }
-}
-
-/// A Satin context over `db` reading `envs`.
-fn salt_run(
-    db: MemoryDatabase,
-    envs: TestExternalEnvs<String>,
-    deployment: &Deployment,
-    gas_limit: u64,
-) -> MegaTransactionOutcome {
-    let context = MegaContext::<_, TestExternalEnvs<String>>::new_with_external_envs(
-        db,
-        MegaSpecId::SATIN,
-        ExternalEnvs { salt_env: envs.clone(), oracle_env: envs },
-    )
-    .with_block(block())
-    .with_chain(mega_evm::test_utils::zero_fee_l1_block_info());
-    let mut tx = call_tx(KEYLESS_DEPLOY_ADDRESS, deployment.call_data(LARGE_OVERRIDE), U256::ZERO);
-    tx.0.base.gas_limit = gas_limit;
-    MegaEvm::new(context).execute_transaction(tx).expect("the transaction is valid")
-}
-
-/// The bucket `account`'s own state lives in.
-fn bucket(account: Address) -> BucketId {
-    <TestExternalEnvs<String> as SaltEnv>::bucket_id_for_account(account)
-}
-
-/// `envs` with `account`'s bucket at multiplier `m`.
-fn crowded(envs: TestExternalEnvs<String>, account: Address, m: u64) -> TestExternalEnvs<String> {
-    envs.with_bucket_capacity(bucket(account), MIN_BUCKET_SIZE as u64 * m)
 }
 
 /// Both upfront charges are priced by the SALT bucket they land in — the signer's account in the

@@ -33,10 +33,10 @@ Do not add a `_pending/main.rs`.
 | the pre-block system calls | 34 | 22 | 12 | 30 | 4 | 0 |
 | system contract deployment | 11 | 5 | 6 | 11 | 0 | 0 |
 | the oracle and control contracts | 77 | 77 | 0 | 67 | 10 | 0 |
-| native keyless deployment | 75 | 73 | 2 | 29 | 46 | 0 |
+| native keyless deployment | 39 | 39 | 0 | 7 | 32 | 0 |
 | inspector support | 4 | 4 | 0 | 1 | 3 | 0 |
 | — (undecided: D57 preload-warm cold charging, D58 98/100 forwarding) | 7 | 7 | 0 | 0 | 0 | 7 |
-| **Total** | **329** | **304** | **25** | **232** | **90** | **7** |
+| **Total** | **293** | **270** | **23** | **210** | **76** | **7** |
 
 ## Tests ported in place
 
@@ -275,6 +275,20 @@ These 54 rows run in a real test target now, adapted to the Satin API: the state
 | `src/limit/kv_update.rs` | the state-growth and KV limits (1) | 1 | `tests/satin/kv_limit.rs` |
 | **Total** | | **54** | |
 
+## Tests ported by native keyless deployment
+
+These 36 rows run in a real test target now, adapted to the Satin API: a keyless deployment is a native creation below its `keylessDeploy` call, validated by the same rules and answered in the same error ABI, so what the sandbox merged back is counted, charged and limited as any frame's is. The counts above are lower than the inventory's by exactly these rows.
+
+| Legacy file | Owner in the inventory | Tests | Now in |
+|---|---|---:|---|
+| `rex2/keyless_deploy.rs` | native keyless deployment (18) | 18 | `tests/system/keyless/rules.rs` |
+| `rex5/db_error.rs` | native keyless deployment (3) | 3 | `tests/system/keyless/rules.rs` |
+| `rex5/keyless_fee_free.rs` | native keyless deployment (9) | 9 | `tests/system/keyless/rules.rs` |
+| `rex5/keyless_gas_cap_postcap_recheck.rs` | native keyless deployment (3) | 3 | `tests/system/keyless/rules.rs` |
+| `rex5/keyless_replay_barrier.rs` | native keyless deployment (1) | 1 | `tests/system/keyless/rules.rs` |
+| `src/sandbox/execution.rs` | native keyless deployment (2) | 2 | `tests/system/keyless/rules.rs` |
+| **Total** | | **36** | |
+
 ## Tests retired after the inventory
 
 These 21 rows were parked when the inventory was applied and have since been retired: the mechanism that owns them landed and left them nothing to pin, so no later mechanism will port them.
@@ -338,7 +352,7 @@ Each cell lists `disposition count (mechanism · decision)`.
 | `mini_rex/oracle.rs` | 12 | rewrite 3 (revert-class aborts · D48); keep 5 (detention); keep 4 (the oracle and control contracts) |
 | `mini_rex/tx_data_and_kv_update_limit.rs` | 4 | rewrite 4 (revert-class aborts · D48) |
 | `rex/oracle.rs` | 3 | rewrite 3 (detention · D08 (mark at actual load: same outcome via SLOAD)) |
-| `rex2/keyless_deploy.rs` | 36 | rewrite 13 (native keyless deployment · native CREATE sub-frame; D37/D38); keep 19 (native keyless deployment · validation rules 1-9 unchanged); keep 1 (native keyless deployment · rule 4 (tx nonce == 0) unchanged); rewrite 3 (native keyless deployment · D36) |
+| `rex2/keyless_deploy.rs` | 18 | rewrite 13 (native keyless deployment · native CREATE sub-frame; D37/D38); keep 3 (native keyless deployment · validation rules 1-9 unchanged); rewrite 2 (native keyless deployment · D36) |
 | `rex2/oracle_hint.rs` | 6 | keep 6 (the oracle and control contracts) |
 | `rex3/oracle_gas_limit.rs` | 8 | keep 7 (detention · D08); rewrite 1 (revert-class aborts · D48) |
 | `rex3/system_address.rs` | 2 | keep 2 (detention · D51) |
@@ -353,11 +367,9 @@ Each cell lists `disposition count (mechanism · decision)`.
 | `rex5/apply_pending_changes_gas_budget.rs` | 4 | rewrite 4 (the pre-block system calls · D51 (system source m = 1; the system-call reservoir split)) |
 | `rex5/create2_empty_initcode.rs` | 5 | keep 5 (the common execution layer · canonical revm behaviour) |
 | `rex5/create2_resize_gas_metering.rs` | 2 | keep 2 (the common execution layer · canonical behaviour) |
-| `rex5/db_error.rs` | 3 | rewrite 3 (native keyless deployment · native path surfaces DB errors) |
 | `rex5/keyless_empty_code_logs.rs` | 2 | rewrite 2 (native keyless deployment · native sub-frame keeps logs inherently) |
-| `rex5/keyless_fee_free.rs` | 12 | rewrite 8 (native keyless deployment · D16/D37/D38 (GASPRICE native; materialisation explicit)); keep 4 (native keyless deployment · rules unchanged) |
-| `rex5/keyless_gas_cap_postcap_recheck.rs` | 3 | rewrite 3 (native keyless deployment · native sub-frame gas handling) |
-| `rex5/keyless_replay_barrier.rs` | 3 | rewrite 3 (native keyless deployment · D36 (real nonce increment)) |
+| `rex5/keyless_fee_free.rs` | 3 | rewrite 3 (native keyless deployment · D16/D37/D38 (GASPRICE native; materialisation explicit)) |
+| `rex5/keyless_replay_barrier.rs` | 2 | rewrite 2 (native keyless deployment · D36 (real nonce increment)) |
 | `rex5/oracle_hint_metering.rs` | 9 | keep 7 (the oracle and control contracts · D50 (hint not charged history; data-size metering kept)); rewrite 1 (the oracle and control contracts · D11 intrinsic number); rewrite 1 (revert-class aborts · D48) |
 | `rex5/pre_block_system_calls.rs` | 11 | keep 11 (the pre-block system calls) |
 | `rex5/sandbox_accounting.rs` | 9 | rewrite 9 (native keyless deployment · native sub-frame: parent tracker sees child directly) |
@@ -372,5 +384,4 @@ Each cell lists `disposition count (mechanism · decision)`.
 | `src/access/volatile.rs` | 4 | keep 4 (detention) |
 | `src/evm/mod.rs` | 3 | keep 3 (the pre-block system calls) |
 | `src/limit/compute_gas.rs` | 1 | rewrite 1 (detention · D40/D48) |
-| `src/sandbox/execution.rs` | 2 | keep 1 (native keyless deployment · rule); rewrite 1 (native keyless deployment · D16) |
 | `src/system/sequencer_registry.rs` | 15 | keep 6 (system contract deployment · the pre-block system calls for transact_apply_pending_changes); keep 9 (the pre-block system calls · the pre-block system calls for transact_apply_pending_changes) |
