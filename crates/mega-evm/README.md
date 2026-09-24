@@ -69,7 +69,7 @@ The six system contracts live at their fixed `0x6342…` addresses and are deplo
 Four of them answer calls through an interceptor instead of running their bytecode.
 A `CALL` or `STATICCALL` is dispatched on its target address, then on the four selector bytes of its input: `CALLCODE` and `DELEGATECALL` never reach an interceptor, and a selector a contract does not intercept falls through to the deployed bytecode, whose answer is that contract's own — the two control contracts revert with `NotIntercepted()` from their fallback, and `KeylessDeploy` and the Oracle, which have none, revert with empty data on a selector they do not declare.
 A method that takes no value answers a value-bearing call with `NonZeroTransfer()`.
-`MegaAccessControl` and `MegaLimitControl` answer with what the engine knows so far — nothing has switched volatile-data access off, and `remainingComputeGas()` reports the regular gas the call was forwarded — until detention and the control contracts' compute-ledger semantics fill them in.
+`MegaAccessControl` and `MegaLimitControl` answer with what the engine knows so far — nothing has switched volatile-data access off, and `remainingComputeGas()` reports the regular gas the call was forwarded — until the control contracts' semantics fill them in: steering gas detention's switch, and answering with the compute ledger.
 The Oracle forwards a `sendHint` payload to the node's oracle service, and a `keylessDeploy` transaction is charged its fixed 100,000 gas and handed to the keyless rewrite hook that native keyless deployment fills in.
 
 The system address (`MEGA_SYSTEM_ADDRESS`) sends the protocol's own transactions: a legacy transaction from it to a whitelisted contract is validated — the whitelist, the chain id, the nonce and EIP-3607 — and promoted to a deposit, which pays no fee and rewards none.
@@ -102,7 +102,23 @@ A transaction's state growth is the EIP-8037 state gas it spends, so the state-g
 It is a limit on gas, so a slot or an account in a crowded SALT bucket reaches it sooner.
 Every one of these limits is unlimited unless a node sets it.
 
-Gas detention and keyless deployment arrive in later changes.
+
+Gas detention is in place: a transaction that reads volatile data — the block environment, the block beneficiary's account, the Oracle's storage — may compute at most 20,000,000 more gas after the read than it had spent at it.
+Compute is the regular gas spent: the state and history gas that spilled onto regular gas are not compute, and neither is what a halting frame burns.
+The one exception is what a frame has left when an opcode's static gas fails, which counts as compute: under that charge's price per halting frame, so the stop only comes earlier.
+The Host marks the read where it loads the value, and the most restrictive read binds.
+Every frame's spendable gas is held to what the limit leaves the transaction, and the rest is withheld, with the revm fork's withheld part of a frame's regular gas: a regular charge cannot draw it, and every other reader of the frame's gas — `GAS`, the gas a call forwards, the `SSTORE` sentry, what a callee returns — counts it.
+So a transaction that reads runs as it would without the read until a regular charge needs the withheld gas.
+That charge crossed the cap: the transaction is stopped with a revert carrying `MegaLimitExceeded` of kind compute, billed its compute up to the limit, and the sender gets back everything withheld.
+A precompile is run on what the limit leaves its frame, not on all its caller forwarded: one priced past that computes nothing and is the same crossing, as is an interceptor's answer that spent more than it.
+A precompile priced past its whole forward is the crossing too, where without the read it would be a failed call its caller survives.
+An interceptor's own charge on a frame is compute whether it answers the call or lets the frame run.
+Every other out-of-gas halts and burns as it would without the read.
+While `MegaAccessControl`'s switch is off for a frame, its volatile reads are refused: the frame reverts with `VolatileDataAccessDisabled`, having paid the opcode's static gas and nothing more.
+The two caps are runtime limits, 20,000,000 each by default; `EvmTxRuntimeLimits::no_limits()` leaves them unlimited, and a transaction whose caps are both unlimited is not detained.
+The protocol's own transactions and the system calls are not detained either.
+
+Keyless deployment arrives in a later change.
 
 ## Quick start
 

@@ -28,7 +28,6 @@ Do not add a `_pending/main.rs`.
 | Owning mechanism | Tests | From `tests/` | From `src/` | Keep | Rewrite | Undecided |
 |---|---:|---:|---:|---:|---:|---:|
 | the common execution layer | 21 | 21 | 0 | 21 | 0 | 0 |
-| detention | 83 | 78 | 5 | 73 | 10 | 0 |
 | revert-class aborts | 17 | 17 | 0 | 0 | 17 | 0 |
 | the pre-block system calls | 34 | 22 | 12 | 30 | 4 | 0 |
 | system contract deployment | 11 | 5 | 6 | 11 | 0 | 0 |
@@ -36,7 +35,7 @@ Do not add a `_pending/main.rs`.
 | native keyless deployment | 75 | 73 | 2 | 29 | 46 | 0 |
 | inspector support | 4 | 4 | 0 | 1 | 3 | 0 |
 | — (undecided: D57 preload-warm cold charging, D58 98/100 forwarding) | 7 | 7 | 0 | 0 | 0 | 7 |
-| **Total** | **329** | **304** | **25** | **232** | **90** | **7** |
+| **Total** | **246** | **226** | **20** | **159** | **80** | **7** |
 
 ## Tests ported in place
 
@@ -275,6 +274,30 @@ These 54 rows run in a real test target now, adapted to the Satin API: the state
 | `src/limit/kv_update.rs` | the state-growth and KV limits (1) | 1 | `tests/satin/kv_limit.rs` |
 | **Total** | | **54** | |
 
+## Tests ported by detention
+
+These 83 rows run in a real test target now, adapted to the Satin API and to the relative cap, the revert-class stop and the load-time marking the decisions they cite fix, so the counts above are lower than the inventory's by exactly these rows.
+
+| Legacy file | Owner in the inventory | Tests | Now in |
+|---|---|---:|---|
+| `mini_rex/access_beneficiary_balance.rs` | detention (9) | 9 | `tests/satin/detention.rs`, `tests/satin/volatile_access.rs` |
+| `mini_rex/block_env_access_tracking.rs` | detention (3) | 3 | `tests/satin/volatile_access.rs` |
+| `mini_rex/block_env_gas_limit.rs` | detention (13) | 13 | `tests/satin/detention.rs`, `tests/satin/volatile_access.rs` |
+| `mini_rex/compute_gas_limit.rs` | detention (2) | 2 | `tests/satin/detention.rs`, `tests/satin/volatile_access.rs` |
+| `mini_rex/oracle.rs` | detention (5) | 5 | `tests/satin/detention.rs`, `tests/satin/volatile_access.rs` |
+| `rex/oracle.rs` | detention (3) | 3 | `tests/satin/volatile_access.rs` |
+| `rex3/oracle_gas_limit.rs` | detention (7) | 7 | `tests/satin/detention.rs`, `tests/satin/volatile_access.rs` |
+| `rex3/system_address.rs` | detention (2) | 2 | `tests/satin/volatile_access.rs` |
+| `rex4/access_control.rs` | detention (2) | 2 | `tests/satin/detention.rs`, `tests/satin/volatile_access.rs` |
+| `rex4/beneficiary_detention.rs` | detention (12) | 12 | `tests/satin/detention.rs`, `tests/satin/volatile_access.rs` |
+| `rex4/gas_detention.rs` | detention (3) | 3 | `tests/satin/detention.rs`, `tests/satin/volatile_access.rs` |
+| `rex5/selfdestruct_beneficiary.rs` | detention (2) | 2 | `tests/satin/detention.rs`, `tests/satin/volatile_access.rs` |
+| `rex6/beneficiary_detention.rs` | detention (13) | 13 | `tests/satin/detention.rs`, `tests/satin/volatile_access.rs` |
+| `rex6/eip7702_authority_accounting.rs` | detention (2) | 2 | `tests/satin/volatile_access.rs` |
+| `src/access/volatile.rs` | detention (4) | 4 | `crates/mega-evm/src/access/volatile.rs` |
+| `src/limit/compute_gas.rs` | detention (1) | 1 | `tests/satin/detention.rs` |
+| **Total** | | **83** | |
+
 ## Tests retired after the inventory
 
 These 21 rows were parked when the inventory was applied and have since been retired: the mechanism that owns them landed and left them nothing to pin, so no later mechanism will port them.
@@ -318,8 +341,6 @@ They are not counted above.
 | `block_executor/sequencer_registry.rs` | `test_sequencer_change_does_not_affect_system_address` | the pre-block system calls | the pre-block system calls own applying a pending rotation |
 | `block_executor/sequencer_registry.rs` | `test_system_address_change` | the pre-block system calls | the pre-block system calls own applying a pending rotation |
 | `block_executor/sequencer_registry.rs` | `test_system_tx_uses_resolved_system_address` | the pre-block system calls | the pre-block system calls own resolving the live system address |
-| `rex6/eip7702_authority_accounting.rs` | `test_rex6_authority_beneficiary_triggers_detention` | detention | detention owns whether an applied authority that is the block beneficiary lowers the compute cap, and what a compute overflow before the first frame does to the authorizations |
-| `rex6/eip7702_authority_accounting.rs` | `test_rex6_authority_compute_overflow_skips_authorities` | detention | detention owns whether an applied authority that is the block beneficiary lowers the compute cap, and what a compute overflow before the first frame does to the authorizations |
 
 ## Files
 
@@ -330,23 +351,19 @@ Each cell lists `disposition count (mechanism · decision)`.
 | `block_executor/inspector.rs` | 3 | keep 1 (inspector support); rewrite 2 (inspector support · D39/D41) |
 | `block_executor/sequencer_registry.rs` | 7 | keep 7 (the pre-block system calls) |
 | `compute_gas/claims.rs` | 5 | undecided 5 (— · D57, open: whether preload-warm addresses (precompile / beneficiary / access-list) are charged cold) |
-| `mini_rex/access_beneficiary_balance.rs` | 10 | keep 9 (detention · D08); rewrite 1 (revert-class aborts · D48) |
-| `mini_rex/block_env_access_tracking.rs` | 3 | keep 3 (detention) |
-| `mini_rex/block_env_gas_limit.rs` | 16 | keep 13 (detention · D08 cap 20M/1M unchanged); rewrite 3 (revert-class aborts · D48 (detention halt -> revert-class)) |
-| `mini_rex/compute_gas_limit.rs` | 2 | rewrite 2 (detention · D48) |
+| `mini_rex/access_beneficiary_balance.rs` | 1 | rewrite 1 (revert-class aborts · D48) |
+| `mini_rex/block_env_gas_limit.rs` | 3 | rewrite 3 (revert-class aborts · D48 (detention halt -> revert-class)) |
 | `mini_rex/gas.rs` | 2 | undecided 2 (— · D58, open: 98/100 forwarding, while the design has frames follow EIP-8037 (63/64)) |
-| `mini_rex/oracle.rs` | 12 | rewrite 3 (revert-class aborts · D48); keep 5 (detention); keep 4 (the oracle and control contracts) |
+| `mini_rex/oracle.rs` | 7 | rewrite 3 (revert-class aborts · D48); keep 4 (the oracle and control contracts) |
 | `mini_rex/tx_data_and_kv_update_limit.rs` | 4 | rewrite 4 (revert-class aborts · D48) |
-| `rex/oracle.rs` | 3 | rewrite 3 (detention · D08 (mark at actual load: same outcome via SLOAD)) |
 | `rex2/keyless_deploy.rs` | 36 | rewrite 13 (native keyless deployment · native CREATE sub-frame; D37/D38); keep 19 (native keyless deployment · validation rules 1-9 unchanged); keep 1 (native keyless deployment · rule 4 (tx nonce == 0) unchanged); rewrite 3 (native keyless deployment · D36) |
 | `rex2/oracle_hint.rs` | 6 | keep 6 (the oracle and control contracts) |
-| `rex3/oracle_gas_limit.rs` | 8 | keep 7 (detention · D08); rewrite 1 (revert-class aborts · D48) |
-| `rex3/system_address.rs` | 2 | keep 2 (detention · D51) |
-| `rex4/access_control.rs` | 48 | keep 46 (the oracle and control contracts); rewrite 2 (detention · D07 (rejected volatile read pays static gas)) |
-| `rex4/beneficiary_detention.rs` | 13 | keep 12 (detention · D08); rewrite 1 (revert-class aborts · D48) |
+| `rex3/oracle_gas_limit.rs` | 1 | rewrite 1 (revert-class aborts · D48) |
+| `rex4/access_control.rs` | 46 | keep 46 (the oracle and control contracts) |
+| `rex4/beneficiary_detention.rs` | 1 | rewrite 1 (revert-class aborts · D48) |
 | `rex4/create_safety.rs` | 1 | keep 1 (the common execution layer · canonical revm behaviour) |
 | `rex4/frame_limits.rs` | 1 | rewrite 1 (revert-class aborts · D48) |
-| `rex4/gas_detention.rs` | 5 | keep 3 (detention); rewrite 2 (revert-class aborts · D48/D53) |
+| `rex4/gas_detention.rs` | 2 | rewrite 2 (revert-class aborts · D48/D53) |
 | `rex4/intrinsic_limit_bypass.rs` | 1 | rewrite 1 (inspector support · D41) |
 | `rex4/keyless_deploy.rs` | 2 | keep 2 (native keyless deployment · native sub-frame inherits env) |
 | `rex4/limit_control.rs` | 9 | rewrite 9 (the oracle and control contracts · D40 (remaining compute derived from Gas)) |
@@ -361,16 +378,11 @@ Each cell lists `disposition count (mechanism · decision)`.
 | `rex5/oracle_hint_metering.rs` | 9 | keep 7 (the oracle and control contracts · D50 (hint not charged history; data-size metering kept)); rewrite 1 (the oracle and control contracts · D11 intrinsic number); rewrite 1 (revert-class aborts · D48) |
 | `rex5/pre_block_system_calls.rs` | 11 | keep 11 (the pre-block system calls) |
 | `rex5/sandbox_accounting.rs` | 9 | rewrite 9 (native keyless deployment · native sub-frame: parent tracker sees child directly) |
-| `rex5/selfdestruct_beneficiary.rs` | 2 | keep 2 (detention) |
-| `rex6/beneficiary_detention.rs` | 13 | keep 13 (detention · D08) |
 | `rex6/create2_metering_order.rs` | 11 | keep 11 (the common execution layer · canonical halt reasons; D04 512 KiB boundary) |
-| `rex6/eip7702_authority_accounting.rs` | 2 | rewrite 2 (detention · D12/D28/D31/D45 (7702 matrix; SALT pricing for the SALT half)) |
 | `rex6/error_paths.rs` | 2 | keep 2 (the common execution layer · canonical) |
 | `rex6/keyless_sandbox_hardening.rs` | 3 | rewrite 1 (native keyless deployment · D44 / EIP-6780 native); keep 2 (native keyless deployment · canonical CREATE rules) |
 | `rex6/oracle_hint_volatile_access.rs` | 4 | keep 4 (the oracle and control contracts) |
 | `rex6/sequencer_registry_rotation.rs` | 5 | keep 5 (system contract deployment) |
-| `src/access/volatile.rs` | 4 | keep 4 (detention) |
 | `src/evm/mod.rs` | 3 | keep 3 (the pre-block system calls) |
-| `src/limit/compute_gas.rs` | 1 | rewrite 1 (detention · D40/D48) |
 | `src/sandbox/execution.rs` | 2 | keep 1 (native keyless deployment · rule); rewrite 1 (native keyless deployment · D16) |
 | `src/system/sequencer_registry.rs` | 15 | keep 6 (system contract deployment · the pre-block system calls for transact_apply_pending_changes); keep 9 (the pre-block system calls · the pre-block system calls for transact_apply_pending_changes) |

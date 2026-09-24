@@ -5,6 +5,7 @@ mod common;
 mod counters;
 mod deploy;
 mod deposits;
+mod detention;
 mod eips;
 mod factory;
 mod inspector;

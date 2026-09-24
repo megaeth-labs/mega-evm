@@ -6,7 +6,7 @@
 
 #[cfg(not(feature = "std"))]
 use alloc as std;
-use core::cell::Cell;
+use core::{cell::Cell, num::NonZeroU64};
 
 use op_revm::{
     handler::{IsTxError, OpHandler},
@@ -47,10 +47,10 @@ use revm::{
 
 use crate::{
     evm::{history::transaction_body_bytes, inspector::frame_end_checked},
-    history_gas, synthetic_frame_result,
+    history_gas, synthetic_call_result, synthetic_frame_result,
     system::{is_deposit_like_transaction, MEGA_SYSTEM_ADDRESS},
-    write_record_history_gas, ExternalEnvTypes, JournalInspectTr, LimitCheck, MegaContext, MegaEvm,
-    MegaInstructions,
+    write_record_history_gas, Detention, ExternalEnvTypes, JournalInspectTr, LimitCheck, LimitKind,
+    MegaContext, MegaEvm, MegaInstructions, VolatileDataAccess,
 };
 
 /// The Satin handler.
@@ -410,6 +410,11 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
     ///    state-gas limit, unless revm refused the frame and so gives it back
     ///    ([`hold_upfront_state_gas`]).
     ///
+    /// A frame answered at step 3 or 6 — an interceptor's answer, a precompile's, revm's for a call
+    /// it did not start — is held to the compute limit before step 7, as a frame that ran would be
+    /// ([`settle_answer`]). A precompile, which revm runs at step 6, is run on the gas the compute
+    /// limit leaves the frame rather than on all its caller forwarded ([`hold_precompile`]).
+    ///
     /// Steps 1 and 2 are the pre-frame check: they answer a frame nothing may start. The frame's
     /// own writes are counted after the interceptor and the rewrite, because the rewrite decides
     /// which frame starts (a keyless deployment becomes a creation) and an intercepted frame's
@@ -438,12 +443,17 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
             self.inner.ctx.additional_limit.push_empty_frame();
             return Ok(ItemOrResult::Result(result));
         }
+        // What the caller forwarded, before an interceptor takes anything off it.
+        let (depth, gas_limit) = (frame_init.depth, input_gas_limit(&frame_init.frame_input));
         if let Some(mut result) = self.intercept(&mut frame_init) {
             self.inner.ctx.additional_limit.push_empty_frame();
+            settle_answer(&mut self.inner.ctx, depth, gas_limit, &mut result);
             hold_upfront_state_gas(&mut self.inner.ctx, Some(&mut result));
             return Ok(ItemOrResult::Result(result));
         }
-        let frame_init = self.rewrite_keyless(frame_init);
+        // What an interceptor that lets the frame run charged it, by taking it off its limit.
+        let charge = gas_limit.saturating_sub(input_gas_limit(&frame_init.frame_input));
+        let mut frame_init = self.rewrite_keyless(frame_init);
         let ctx = &mut self.inner.ctx;
         let refused = caller_refuses_start(ctx, &frame_init.frame_input);
         if refused {
@@ -469,6 +479,7 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
             refused,
             ctx.journal_ref().logs().len(),
         );
+        let withheld = hold_precompile(ctx, &self.inner.precompiles, &mut frame_init);
         let outcome = match self.inner.frame_init(frame_init)? {
             ItemOrResult::Item(frame) => Ok(frame.interpreter.input.target_address),
             ItemOrResult::Result(result) => Err(result),
@@ -479,6 +490,7 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
         match outcome {
             Ok(address) => {
                 ctx.additional_limit.set_frame_address(address);
+                ctx.detention.on_charged_frame_built(depth, charge);
                 hold_upfront_state_gas(ctx, None);
                 Ok(ItemOrResult::Item(self.inner.frame_stack.get()))
             }
@@ -488,6 +500,10 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
                         ctx.additional_limit.creation_did_not_bump_nonce();
                     }
                 }
+                if let Some(withheld) = withheld {
+                    Detention::restore_forward(result.interpreter_result_mut(), withheld);
+                }
+                settle_answer(ctx, depth, gas_limit, &mut result);
                 hold_upfront_state_gas(ctx, Some(&mut result));
                 Ok(ItemOrResult::Result(result))
             }
@@ -497,6 +513,9 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
     /// Runs the frame on top of the stack, unless it has a stop to return: the latched one, or
     /// its own when a failed creation put it over its budget. Then the frame returns the stop
     /// without running another instruction (see [`before_frame_run`]).
+    ///
+    /// Gas detention holds the frame to the compute limit before it runs, and settles the frame
+    /// once it suspends on a child or returns (see [`after_frame_run`]).
     #[inline]
     fn frame_run(
         &mut self,
@@ -514,7 +533,9 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
         };
         // Before `return_create` commits a successful creation. See `on_create_return`.
         let action = meter_deployed_code(ctx, frame, action);
-        frame.process_next_action(ctx, action).inspect(|next| {
+        let mut next = frame.process_next_action(ctx, action);
+        after_frame_run(ctx, frame, &mut next);
+        next.inspect(|next| {
             if next.is_result() {
                 frame.set_finished(true);
             }
@@ -600,6 +621,8 @@ where
                 output = answer;
             }
             ctx.additional_limit.push_empty_frame();
+            let gas_limit = input_gas_limit(&frame_init.frame_input);
+            settle_answer(ctx, frame_init.depth, gas_limit, &mut output);
             hold_upfront_state_gas(ctx, Some(&mut output));
             frame_end_checked(ctx, inspector, &frame_init.frame_input, &mut output);
             return Ok(ItemOrResult::Result(output));
@@ -652,6 +675,7 @@ where
         // The inspected path commits a creation through the same `return_create`.
         let action = meter_deployed_code(ctx, frame, action);
         let mut next = frame.process_next_action(ctx, action);
+        after_frame_run(ctx, frame, &mut next);
         if let Ok(ItemOrResult::Result(result)) = &mut next {
             frame_end_checked(ctx, inspector, &frame.input, result);
             frame.set_finished(true);
@@ -782,17 +806,126 @@ fn deposit_state_gas<DB: Database, ExtEnvs: ExternalEnvTypes>(
 /// latter. Under a latch, the child that crossed the limit reverted, and its caller must not
 /// resume. Without one, the child was a failed creation whose nonce record put its creator over
 /// its budget, and the creator reverts alone.
+///
+/// Either way gas detention sees the frame first: a frame's first run adds its caller's compute
+/// to the transaction's, a resume takes it back, and the frame's spendable gas is held to what the
+/// compute limit leaves it — which is how a child's read of volatile data caps every caller it
+/// returns into.
 #[inline]
 fn before_frame_run<DB: Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &mut MegaContext<DB, ExtEnvs>,
-    frame: &EthFrame<EthInterpreter>,
+    frame: &mut EthFrame<EthInterpreter>,
 ) -> Option<InterpreterAction> {
+    ctx.detention.on_frame_run(&mut frame.interpreter.gas, frame.depth);
     let stop = ctx.additional_limit.stop_before_run()?;
     Some(InterpreterAction::new_return(
         InstructionResult::Revert,
         stop.revert_data(),
         frame.interpreter.gas,
     ))
+}
+
+/// Settles gas detention once the frame ran: a frame that suspends on a child keeps its compute
+/// for the child's start to add to the transaction's; a frame that returns is classified.
+///
+/// The frame's result is read here, after revm processed its last action — `return_create`
+/// included, whose deposit and hash charges are the creating frame's own compute — and before
+/// revm hands it to the caller or, for the transaction's own frame, to
+/// [`last_frame_result`](Handler::last_frame_result), which overwrites its gas with the
+/// transaction's.
+///
+/// A frame that ran out of gas on a charge the withheld part of its gas would have paid crossed
+/// the compute limit rather than its own gas: its halt becomes the transaction-level stop
+/// ([`stop_at_the_compute_limit`]). Every other out-of-gas halts, as it would without the read.
+#[inline]
+fn after_frame_run<DB: Database, ExtEnvs: ExternalEnvTypes, E>(
+    ctx: &mut MegaContext<DB, ExtEnvs>,
+    frame: &EthFrame<EthInterpreter>,
+    next: &mut Result<FrameInitOrResult<EthFrame<EthInterpreter>>, E>,
+) {
+    match next {
+        Ok(ItemOrResult::Item(_)) => {
+            ctx.detention.on_frame_suspend(&frame.interpreter.gas, frame.depth);
+        }
+        Ok(ItemOrResult::Result(result)) => {
+            let instruction_result = result.instruction_result();
+            if let Some(limit) =
+                ctx.detention.on_frame_end(instruction_result, result.gas_mut(), frame.depth)
+            {
+                stop_at_the_compute_limit(ctx, result.interpreter_result_mut(), limit);
+            }
+        }
+        Err(_) => {}
+    }
+}
+
+/// Holds a frame answered without running to the compute limit: the answer to a frame of
+/// `gas_limit` at `depth`, which its caller forwarded.
+///
+/// An interceptor builds its answer on the whole gas the caller forwarded, the part gas detention
+/// withholds from the caller's regular charges included. An answer that spent more than the frame
+/// could have run on is answered out of gas and marked as a crossing, and becomes the stop as a
+/// frame that ran would ([`Detention::on_answer`]); so does a precompile that ran out of the
+/// allowance it was run on ([`hold_precompile`]). An answer that halts otherwise burns what it was
+/// given.
+fn settle_answer<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    ctx: &mut MegaContext<DB, ExtEnvs>,
+    depth: usize,
+    gas_limit: u64,
+    answer: &mut FrameResult,
+) {
+    let answer = answer.interpreter_result_mut();
+    if let Some(limit) = ctx.detention.on_answer(answer, depth, gas_limit) {
+        stop_at_the_compute_limit(ctx, answer, limit);
+    }
+}
+
+/// Holds a precompile the frame `frame_init` is about to call to what gas detention's limit leaves
+/// it, and returns what it took off the forward: revm runs the precompile inside the frame's start,
+/// against its gas limit, so a precompile forwarded more than the allowance would otherwise
+/// compute past the limit before its answer could be classified.
+///
+/// The precompile runs on the allowance and sees it as its gas limit; its answer gets the rest
+/// back ([`Detention::restore_forward`]) before it is settled. A call to anything else, and a
+/// forward within the allowance, run as they are.
+fn hold_precompile<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    ctx: &MegaContext<DB, ExtEnvs>,
+    precompiles: &PrecompilesMap,
+    frame_init: &mut FrameInit,
+) -> Option<NonZeroU64> {
+    let FrameInput::Call(inputs) = &mut frame_init.frame_input else { return None };
+    let allowance = ctx.detention.allowance(frame_init.depth, inputs.gas_limit)?;
+    let withheld = NonZeroU64::new(inputs.gas_limit.saturating_sub(allowance))?;
+    precompiles.get(&inputs.bytecode_address)?;
+    inputs.gas_limit = allowance;
+    Some(withheld)
+}
+
+/// The gas limit of the frame `input` starts.
+const fn input_gas_limit(input: &FrameInput) -> u64 {
+    match input {
+        FrameInput::Call(inputs) => inputs.gas_limit,
+        FrameInput::Create(inputs) => inputs.gas_limit(),
+        FrameInput::Empty => 0,
+    }
+}
+
+/// Turns a frame that crossed gas detention's compute `limit` into the transaction-level stop: a
+/// revert carrying `MegaLimitExceeded` (kind: compute), with the transaction latched, so no caller
+/// resumes. The frame's gas is what detention left it — the withheld part at the crossing — which
+/// goes back with the revert, to the caller and in the end to the sender.
+///
+/// The crossing charge's size is not kept, so the stop reports the limit as what was used
+/// ([`LimitCheck::ExceedsLimit`]): the transaction's compute reached it exactly, the spendable gas
+/// the frame had counting as spent.
+fn stop_at_the_compute_limit<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    ctx: &mut MegaContext<DB, ExtEnvs>,
+    result: &mut InterpreterResult,
+    limit: u64,
+) {
+    let stop = ctx.additional_limit.latch(LimitKind::ComputeGas, limit, limit);
+    result.result = InstructionResult::Revert;
+    result.output = stop.revert_data();
 }
 
 /// The result of a frame a limit stopped before it ran: a revert with the stop's
@@ -815,13 +948,26 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
     /// like a frame revm ran. An interceptor that lets the frame run may charge it instead of
     /// answering it, which is why the frame is taken mutably. What each contract answers is in
     /// the `system` module.
+    ///
+    /// The charge is compute for gas detention. One that crosses the compute limit is answered
+    /// here, as a frame that spent the charge and nothing else, which the answer's settlement
+    /// turns into the stop ([`settle_answer`]), as it does an interceptor's answer that spent
+    /// past the limit.
     #[inline]
     fn intercept(&mut self, frame_init: &mut FrameInit) -> Option<FrameResult> {
         let FrameInput::Call(inputs) = &mut frame_init.frame_input else { return None };
         if !matches!(inputs.scheme, CallScheme::Call | CallScheme::StaticCall) {
             return None;
         }
-        crate::system::intercept(&mut self.inner.ctx, inputs, frame_init.depth)
+        let forwarded = inputs.gas_limit;
+        let ctx = &mut self.inner.ctx;
+        if let Some(answer) = crate::system::intercept(ctx, inputs, frame_init.depth) {
+            return Some(answer);
+        }
+        let charge = forwarded - inputs.gas_limit;
+        ctx.detention
+            .charge_crosses(frame_init.depth, forwarded, charge)
+            .then(|| synthetic_call_result(inputs, InstructionResult::Stop, Bytes::new()))
     }
 
     /// The keyless deployment rewrite: a keyless deployment call turned into the native creation
@@ -1138,7 +1284,14 @@ fn record_applied_authorities<DB: Database, ExtEnvs: ExternalEnvTypes>(
         target_is_authority,
         state_gas,
     );
-    AppliedAuthorities { check, applied: if check.exceeded_limit() { 0 } else { applied } }
+    if check.exceeded_limit() {
+        return AppliedAuthorities { check, applied: 0 };
+    }
+    // An applied authority that is the block beneficiary wrote the beneficiary's account.
+    if authorities.binary_search(&ctx.block().beneficiary).is_ok() {
+        ctx.detention.mark_before_execution(VolatileDataAccess::BENEFICIARY_BALANCE);
+    }
+    AppliedAuthorities { check, applied }
 }
 
 /// What [`record_applied_authorities`] found: the verdict of the limit check, and how many

@@ -13,6 +13,5 @@ mod keyless_replay_barrier;
 mod oracle_hint_metering;
 mod pre_block_system_calls;
 mod sandbox_accounting;
-mod selfdestruct_beneficiary;
 mod sstore_storage_gas_error;
 mod stipend_accounting;

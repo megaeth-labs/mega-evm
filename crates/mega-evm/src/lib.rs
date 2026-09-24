@@ -21,6 +21,7 @@ pub mod system;
 pub mod test_utils;
 mod types;
 
+pub use access::*;
 pub use block::*;
 pub use evm::*;
 pub use external::*;

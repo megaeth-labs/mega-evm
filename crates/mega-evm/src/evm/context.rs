@@ -19,8 +19,10 @@ use crate::{
         schedule::{satin_gas_params, satin_gas_params_history_exempt},
     },
     system::{self, MEGA_SYSTEM_ADDRESS},
-    AdditionalLimit, BlockHashRecord, BucketError, BucketMultipliers, EmptyExternalEnv, EthSpecId,
+    AdditionalLimit, BlockHashRecord, BucketError, BucketMultipliers, Detention, EmptyExternalEnv,
+    EthSpecId,
     EvmTxRuntimeLimits, ExternalEnvTypes, ExternalEnvs, MegaSpecId, MegaTransaction, SaltEnv,
+    VolatileDataAccess,
 };
 
 /// The revm context the Satin engine runs on: op-revm's context shape with the `MegaETH`
@@ -38,15 +40,18 @@ pub(crate) type MegaInnerContext<DB> =
 ///
 /// Every context accessor delegates to the wrapped context, and so does every
 /// [`Host`](revm::interpreter::Host) method except the three that stage what a state-writing
-/// opcode did (see the `host` module). It also carries the common execution layer's state for the
-/// running transaction ([`AdditionalLimit`]) and the SALT bucket multipliers that transaction has
-/// priced state gas with ([`BucketMultipliers`]).
+/// opcode did and the ones that load volatile data (see the `host` module). It also carries the
+/// common execution layer's state for the running transaction ([`AdditionalLimit`]), gas
+/// detention's ([`Detention`]) and the SALT bucket multipliers that transaction has priced state
+/// gas with ([`BucketMultipliers`]).
 #[derive(Debug)]
 pub struct MegaContext<DB: Database, ExtEnvs: ExternalEnvTypes = EmptyExternalEnv> {
     pub(crate) inner: MegaInnerContext<DB>,
     cfg: CfgEnv<MegaSpecId>,
     external_envs: ExternalEnvs<ExtEnvs>,
     pub(crate) additional_limit: AdditionalLimit,
+    /// Gas detention for the running transaction.
+    pub(crate) detention: Detention,
     pub(crate) block_hash_record: BlockHashRecord,
     /// The SALT bucket multipliers the running transaction has read.
     bucket_multipliers: BucketMultipliers,
@@ -81,6 +86,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
             cfg,
             external_envs,
             additional_limit: AdditionalLimit::default(),
+            detention: Detention::default(),
             block_hash_record: BlockHashRecord::default(),
             bucket_multipliers: BucketMultipliers::default(),
             system_originated: false,
@@ -124,6 +130,9 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     ///   exemption: every transaction runs `cfg`'s schedule.
     /// - SALT pricing needs nothing here: without a SALT environment every bucket is minimal, and
     ///   the multiplier is one.
+    /// - Gas detention is not part of the configuration: its caps are runtime limits, which the
+    ///   gate's runner leaves unlimited with every other one ([`EvmTxRuntimeLimits::no_limits`]),
+    ///   and then no read of volatile data caps anything.
     ///
     /// The spec stays [`MegaSpecId::SATIN`], and with it the base spec the handler and the
     /// journal execute. The precompile set is the EVM's, not the context's: a caller that wants
@@ -226,6 +235,25 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
         &mut self.additional_limit
     }
 
+    /// Gas detention for the running (or last) transaction: the volatile data it read and the
+    /// compute limit that set. See the `access` module.
+    pub const fn detention(&self) -> &Detention {
+        &self.detention
+    }
+
+    /// Starts every transaction with volatile-data access switched off for the frame at `depth`
+    /// and every frame below it, as if that frame had called
+    /// `MegaAccessControl.disableVolatileDataAccess()` before its first instruction. The switch
+    /// turns back on when that frame returns.
+    ///
+    /// It is test tooling, behind the `test-utils` feature: the contract's interceptor steers the
+    /// switch once the control contracts' semantics land.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn with_volatile_access_disabled_from(mut self, depth: usize) -> Self {
+        self.detention.set_disabled_from_at_start(Some(depth));
+        self
+    }
+
     /// The SALT bucket multiplier of the account `address`'s own state lives in: the capacity of
     /// its bucket in minimum buckets, never below one.
     ///
@@ -321,6 +349,25 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
         // The body is data size whether or not the transaction pays history for it. A deposit,
         // a system transaction and a system call are exempt from the charge, not from the count.
         self.additional_limit.record_tx_body(transaction_body_bytes(self.tx()));
+        // The protocol's own transactions are not detained: they maintain the volatile data.
+        let limits = self.additional_limit.limits();
+        self.detention.reset(
+            !system_originated,
+            limits.block_env_access_compute_gas_limit,
+            limits.oracle_access_compute_gas_limit,
+        );
+        self.mark_beneficiary_transaction();
+    }
+
+    /// Marks a read of the block beneficiary's account when the transaction's sender or its
+    /// recipient is the beneficiary: the transaction reads and writes that account whatever it
+    /// runs, so it is detained from its first instruction.
+    fn mark_beneficiary_transaction(&mut self) {
+        let beneficiary = self.inner.block.beneficiary;
+        let tx = &self.inner.tx;
+        if tx.caller() == beneficiary || tx.kind().to() == Some(&beneficiary) {
+            self.detention.mark_before_execution(VolatileDataAccess::BENEFICIARY_BALANCE);
+        }
     }
 
     /// Records whether the running transaction is exempt from history gas, and installs the

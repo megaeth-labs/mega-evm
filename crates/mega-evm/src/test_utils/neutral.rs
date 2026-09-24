@@ -12,8 +12,9 @@
 //! common execution layer, and the gate's runner installs
 //! [`EvmTxRuntimeLimits::no_limits`](crate::EvmTxRuntimeLimits::no_limits) in equivalence mode,
 //! under which neither the data-size, the KV nor the state-gas limit binds, at the transaction or
-//! at a frame. A limit added later is unlimited there as long as `no_limits` leaves it unlimited,
-//! which the limit module's own test pins field by field.
+//! at a frame, and gas detention's caps are unlimited, so no transaction is detained. A limit
+//! added later is unlimited there as long as `no_limits` leaves it unlimited, which the limit
+//! module's own test pins field by field.
 //!
 //! Satin's base spec is Osaka, and a configuration cannot take a rule the base spec gates on its
 //! own id away or add one: an Osaka rule stays on under an older fork's fixtures, and an
