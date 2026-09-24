@@ -408,6 +408,10 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
     ///    state-gas limit, unless revm refused the frame and so gives it back
     ///    ([`hold_upfront_state_gas`]).
     ///
+    /// A frame answered at step 3 or 6 — an interceptor's answer, a precompile's, revm's for a call
+    /// it did not start — is held to the compute limit before step 7, as a frame that ran would be
+    /// ([`settle_answer`]).
+    ///
     /// Steps 1 and 2 are the pre-frame check: they answer a frame nothing may start. The frame's
     /// own writes are counted after the interceptor and the rewrite, because the rewrite decides
     /// which frame starts (a keyless deployment becomes a creation) and an intercepted frame's
@@ -436,8 +440,11 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
             self.inner.ctx.additional_limit.push_empty_frame();
             return Ok(ItemOrResult::Result(result));
         }
+        // What the caller forwarded, before an interceptor takes anything off it.
+        let (depth, gas_limit) = (frame_init.depth, input_gas_limit(&frame_init.frame_input));
         if let Some(mut result) = self.intercept(&mut frame_init) {
             self.inner.ctx.additional_limit.push_empty_frame();
+            settle_answer(&mut self.inner.ctx, depth, gas_limit, &mut result);
             hold_upfront_state_gas(&mut self.inner.ctx, Some(&mut result));
             return Ok(ItemOrResult::Result(result));
         }
@@ -473,6 +480,7 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
                         ctx.additional_limit.creation_did_not_bump_nonce();
                     }
                 }
+                settle_answer(ctx, depth, gas_limit, &mut result);
                 hold_upfront_state_gas(ctx, Some(&mut result));
                 Ok(ItemOrResult::Result(result))
             }
@@ -483,8 +491,8 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
     /// its own when a failed creation put it over its budget. Then the frame returns the stop
     /// without running another instruction (see [`before_frame_run`]).
     ///
-    /// Gas detention holds the frame to the compute limit before it runs, and settles what it
-    /// withheld once the frame suspends on a child or returns (see [`after_frame_run`]).
+    /// Gas detention holds the frame to the compute limit before it runs, and settles the frame
+    /// once it suspends on a child or returns (see [`after_frame_run`]).
     #[inline]
     fn frame_run(
         &mut self,
@@ -590,6 +598,8 @@ where
                 output = answer;
             }
             ctx.additional_limit.push_empty_frame();
+            let gas_limit = input_gas_limit(&frame_init.frame_input);
+            settle_answer(ctx, frame_init.depth, gas_limit, &mut output);
             hold_upfront_state_gas(ctx, Some(&mut output));
             frame_end_checked(ctx, inspector, &frame_init.frame_input, &mut output);
             return Ok(ItemOrResult::Result(output));
@@ -775,8 +785,9 @@ fn deposit_state_gas<DB: Database, ExtEnvs: ExternalEnvTypes>(
 /// its budget, and the creator reverts alone.
 ///
 /// Either way gas detention sees the frame first: a frame's first run adds its caller's compute
-/// to the transaction's, a resume takes it back, and the frame is held to what the compute limit
-/// leaves it — which is how a child's read of volatile data caps every caller it returns into.
+/// to the transaction's, a resume takes it back, and the frame's spendable gas is held to what the
+/// compute limit leaves it — which is how a child's read of volatile data caps every caller it
+/// returns into.
 #[inline]
 fn before_frame_run<DB: Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &mut MegaContext<DB, ExtEnvs>,
@@ -792,13 +803,17 @@ fn before_frame_run<DB: Database, ExtEnvs: ExternalEnvTypes>(
 }
 
 /// Settles gas detention once the frame ran: a frame that suspends on a child keeps its compute
-/// for the child's start to add to the transaction's; a frame that returns gets the regular gas
-/// detention withheld from it back into its result.
+/// for the child's start to add to the transaction's; a frame that returns is classified.
 ///
-/// A frame that ran out of gas while detention still held back some of what it withheld crossed
-/// the compute limit rather than its own gas: its halt becomes the transaction-level stop, a revert
-/// carrying `MegaLimitExceeded` (kind: compute), and the transaction is latched, so no caller
-/// resumes. The withheld gas goes back with the revert, to the caller and in the end to the sender.
+/// The frame's result is read here, after revm processed its last action — `return_create`
+/// included, whose deposit and hash charges are the creating frame's own compute — and before
+/// revm hands it to the caller or, for the transaction's own frame, to
+/// [`last_frame_result`](Handler::last_frame_result), which overwrites its gas with the
+/// transaction's.
+///
+/// A frame that ran out of gas on a charge the withheld part of its gas would have paid crossed
+/// the compute limit rather than its own gas: its halt becomes the transaction-level stop
+/// ([`stop_at_the_compute_limit`]). Every other out-of-gas halts, as it would without the read.
 #[inline]
 fn after_frame_run<DB: Database, ExtEnvs: ExternalEnvTypes, E>(
     ctx: &mut MegaContext<DB, ExtEnvs>,
@@ -811,18 +826,61 @@ fn after_frame_run<DB: Database, ExtEnvs: ExternalEnvTypes, E>(
         }
         Ok(ItemOrResult::Result(result)) => {
             let instruction_result = result.instruction_result();
-            let Some((limit, compute)) =
+            if let Some(limit) =
                 ctx.detention.on_frame_end(instruction_result, result.gas_mut(), frame.depth)
-            else {
-                return;
-            };
-            let stop = ctx.additional_limit.latch(LimitKind::ComputeGas, limit, compute);
-            let result = result.interpreter_result_mut();
-            result.result = InstructionResult::Revert;
-            result.output = stop.revert_data();
+            {
+                stop_at_the_compute_limit(ctx, result.interpreter_result_mut(), limit);
+            }
         }
         Err(_) => {}
     }
+}
+
+/// Holds a frame answered without running to the compute limit: the answer to a frame of
+/// `gas_limit` at `depth`, which its caller forwarded.
+///
+/// revm runs a precompile inside frame init against the whole gas the caller forwarded, the part
+/// gas detention withholds from the caller's regular charges included; an interceptor's answer is
+/// built the same way. An answer that spent more than the frame could have run on is answered out
+/// of gas and marked as a crossing, and becomes the stop as a frame that ran would
+/// ([`Detention::on_answer`](crate::Detention)). An answer that halts burns what it was given.
+fn settle_answer<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    ctx: &mut MegaContext<DB, ExtEnvs>,
+    depth: usize,
+    gas_limit: u64,
+    answer: &mut FrameResult,
+) {
+    let answer = answer.interpreter_result_mut();
+    if let Some(limit) = ctx.detention.on_answer(answer, depth, gas_limit) {
+        stop_at_the_compute_limit(ctx, answer, limit);
+    }
+}
+
+/// The gas limit of the frame `input` starts.
+const fn input_gas_limit(input: &FrameInput) -> u64 {
+    match input {
+        FrameInput::Call(inputs) => inputs.gas_limit,
+        FrameInput::Create(inputs) => inputs.gas_limit(),
+        FrameInput::Empty => 0,
+    }
+}
+
+/// Turns a frame that crossed gas detention's compute `limit` into the transaction-level stop: a
+/// revert carrying `MegaLimitExceeded` (kind: compute), with the transaction latched, so no caller
+/// resumes. The frame's gas is what detention left it — the withheld part at the crossing — which
+/// goes back with the revert, to the caller and in the end to the sender.
+///
+/// The crossing charge's size is not kept, so the stop reports the limit as what was used
+/// ([`LimitCheck::ExceedsLimit`]): the transaction's compute reached it exactly, the spendable gas
+/// the frame had counting as spent.
+fn stop_at_the_compute_limit<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    ctx: &mut MegaContext<DB, ExtEnvs>,
+    result: &mut InterpreterResult,
+    limit: u64,
+) {
+    let stop = ctx.additional_limit.latch(LimitKind::ComputeGas, limit, limit);
+    result.result = InstructionResult::Revert;
+    result.output = stop.revert_data();
 }
 
 /// The result of a frame a limit stopped before it ran: a revert with the stop's

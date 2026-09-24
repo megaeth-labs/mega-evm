@@ -45,10 +45,15 @@
 //! 3. run the instruction (or the wrapper above it), whose Host calls observe or refuse the reads;
 //! 4. on a refusal, hand the frame back the gas it had before the opcode and revert it with
 //!    `VolatileDataAccessDisabled`; otherwise, once the opcode completed, commit the reads, which
-//!    caps the frame at what the compute limit leaves it.
+//!    holds the frame's spendable gas to what the compute limit leaves it.
 //!
 //! `SSTORE` also holds its frame to the compute limit again once it completed: a slot restored to
 //! its original value refills regular gas.
+//!
+//! An opcode whose charge fails with an out-of-gas halts its frame, and the halt zeroes the gas
+//! the frame had left before the frame returns. Every wrapper above notes that gas for gas
+//! detention first, which does not count what a halt burns as compute; so does a wrapper around
+//! the opcodes whose own charge has no bound, `KECCAK256` and the four copies into memory.
 //!
 //! A wrapper keeps the static gas revm's table charges for its opcode, so the gas schedule is
 //! unchanged.
@@ -61,16 +66,16 @@
 
 use revm::{
     bytecode::opcode::{
-        BALANCE, BASEFEE, BLOBBASEFEE, BLOCKHASH, CALL, CALLCODE, COINBASE, CREATE, CREATE2,
-        DELEGATECALL, DIFFICULTY, EXTCODECOPY, EXTCODEHASH, EXTCODESIZE, GASLIMIT, LOG0, LOG1,
-        LOG2, LOG3, LOG4, NUMBER, SELFBALANCE, SELFDESTRUCT, SLOAD, SLOTNUM, SSTORE, STATICCALL,
-        TIMESTAMP,
+        BALANCE, BASEFEE, BLOBBASEFEE, BLOCKHASH, CALL, CALLCODE, CALLDATACOPY, CODECOPY, COINBASE,
+        CREATE, CREATE2, DELEGATECALL, DIFFICULTY, EXTCODECOPY, EXTCODEHASH, EXTCODESIZE, GASLIMIT,
+        KECCAK256, LOG0, LOG1, LOG2, LOG3, LOG4, MCOPY, NUMBER, RETURNDATACOPY, SELFBALANCE,
+        SELFDESTRUCT, SLOAD, SLOTNUM, SSTORE, STATICCALL, TIMESTAMP,
     },
     context_interface::Host,
     handler::instructions::EthInstructions,
     interpreter::{
         enable_amsterdam_opcodes, instruction_table,
-        instructions::{block_info, contract, gas_table_spec, host},
+        instructions::{block_info, contract, gas_table_spec, host, memory, system},
         interpreter::EthInterpreter,
         interpreter_types::LoopControl,
         FrameInput, Gas, Instruction, InstructionContext, InstructionExecResult, InstructionResult,
@@ -102,7 +107,7 @@ pub(crate) fn mega_instructions<DB: Database, ExtEnvs: ExternalEnvTypes>(
     let mut table = instruction_table();
     enable_amsterdam_opcodes(&mut table);
     let mut instructions = EthInstructions::new(table, gas_table_spec(spec), spec);
-    let wrappers: [(u8, InstructionFn<DB, ExtEnvs>); 28] = [
+    let wrappers: [(u8, InstructionFn<DB, ExtEnvs>); 33] = [
         (SSTORE, sstore::<DB, ExtEnvs>),
         (LOG0, log::<0, DB, ExtEnvs>),
         (LOG1, log::<1, DB, ExtEnvs>),
@@ -131,6 +136,11 @@ pub(crate) fn mega_instructions<DB: Database, ExtEnvs: ExternalEnvTypes>(
         (EXTCODECOPY, extcodecopy::<DB, ExtEnvs>),
         (EXTCODEHASH, extcodehash::<DB, ExtEnvs>),
         (SLOAD, sload::<DB, ExtEnvs>),
+        (KECCAK256, keccak256::<DB, ExtEnvs>),
+        (CALLDATACOPY, calldatacopy::<DB, ExtEnvs>),
+        (CODECOPY, codecopy::<DB, ExtEnvs>),
+        (RETURNDATACOPY, returndatacopy::<DB, ExtEnvs>),
+        (MCOPY, mcopy::<DB, ExtEnvs>),
     ];
     for (opcode, wrapper) in wrappers {
         let static_gas = instructions.gas_table()[opcode as usize];
@@ -166,7 +176,7 @@ fn commit_after<const FROM_ALLOWANCE: bool, DB: Database, ExtEnvs: ExternalEnvTy
     };
     if !completed {
         host.additional_limit.discard_staged_record();
-        return result;
+        return note_halt(interpreter, host, result);
     }
     let check = host.additional_limit.check_state_gas(interpreter.gas.state_gas_spent());
     if check.exceeded_limit() {
@@ -178,7 +188,10 @@ fn commit_after<const FROM_ALLOWANCE: bool, DB: Database, ExtEnvs: ExternalEnvTy
         return Err(stop_frame(interpreter, &check));
     }
     if host.prices_history() {
-        settle_history::<FROM_ALLOWANCE, _, _>(interpreter, host, history)?;
+        let settled = settle_history::<FROM_ALLOWANCE, _, _>(interpreter, host, history);
+        if settled.is_err() {
+            return note_halt(interpreter, host, settled);
+        }
     }
     result
 }
@@ -254,8 +267,8 @@ fn sstore<DB: Database, ExtEnvs: ExternalEnvTypes>(
         host::sstore,
     );
     // Only a restore refills, and a restore takes a record back rather than adding one, so it
-    // never crosses a limit: no stop's result is pending when the frame is capped again.
-    host.detention.recap(&mut interpreter.gas, interpreter.input.depth);
+    // never crosses a limit: no stop's result is pending when the frame is held again.
+    host.detention.hold(&mut interpreter.gas);
     result
 }
 
@@ -306,7 +319,7 @@ fn charge_frame_start<DB: Database, ExtEnvs: ExternalEnvTypes>(
         Some(InterpreterAction::NewFrame(input)) => {
             host.additional_limit.frame_start_records(input)
         }
-        _ => return result,
+        _ => return note_halt(interpreter, host, result),
     };
     if !host.prices_history() {
         return result;
@@ -315,11 +328,11 @@ fn charge_frame_start<DB: Database, ExtEnvs: ExternalEnvTypes>(
         write_record_history_gas(records.on_lane),
         write_record_history_gas(u64::from(records.caller)),
     ) else {
-        return Err(abandon_frame(interpreter));
+        return abandon_frame(interpreter, host);
     };
-    let Some(cost) = on_lane.checked_add(caller) else { return Err(abandon_frame(interpreter)) };
+    let Some(cost) = on_lane.checked_add(caller) else { return abandon_frame(interpreter, host) };
     if !interpreter.gas.record_history_cost(cost) {
-        return Err(abandon_frame(interpreter));
+        return abandon_frame(interpreter, host);
     }
     inherit_reservoir(interpreter);
     host.additional_limit.stage_frame_charge(records, on_lane, caller);
@@ -333,11 +346,38 @@ fn charge_frame_start<DB: Database, ExtEnvs: ExternalEnvTypes>(
 /// only when no action is pending, so a frame left pending here would start anyway — and make
 /// write records nobody paid for, at any gas limit at which the caller keeps less after the
 /// 63/64 forward than its records cost.
+///
+/// The gas the opcode forwarded to the dropped frame goes back to the caller, which the halt then
+/// burns with the rest: it never ran, so gas detention counts it with what the halt burns rather
+/// than as compute. A value call's stipend was never the caller's, and is not handed back.
 #[cold]
 #[inline(never)]
-fn abandon_frame(interpreter: &mut Interpreter<EthInterpreter>) -> InstructionResult {
-    let _ = interpreter.take_next_action();
-    InstructionResult::OutOfGas
+fn abandon_frame<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    interpreter: &mut Interpreter<EthInterpreter>,
+    host: &mut MegaContext<DB, ExtEnvs>,
+) -> InstructionExecResult {
+    if let InterpreterAction::NewFrame(input) = interpreter.take_next_action() {
+        interpreter.gas.erase_cost(forwarded_gas(&input, host.gas_params().call_stipend()));
+    }
+    note_halt(interpreter, host, Err(InstructionResult::OutOfGas))
+}
+
+/// Passes `result` on, first noting for gas detention what the running frame has left when
+/// `result` is an out-of-gas the interpreter will halt the frame on: the halt zeroes it before the
+/// frame returns, and it is what the halt burns rather than what the frame ran.
+///
+/// The interpreter halts on an instruction's error only when no action is pending; an opcode that
+/// set one ends its frame with that action instead, and burns nothing.
+#[inline(always)]
+fn note_halt<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    interpreter: &mut Interpreter<EthInterpreter>,
+    host: &mut MegaContext<DB, ExtEnvs>,
+    result: InstructionExecResult,
+) -> InstructionExecResult {
+    if result == Err(InstructionResult::OutOfGas) && interpreter.bytecode.action().is_none() {
+        host.detention.note_halt(interpreter.gas.remaining());
+    }
+    result
 }
 
 /// Hands the frame the running opcode is suspending on the reservoir its caller has now.
@@ -410,7 +450,7 @@ fn read_volatile<DB: Database, ExtEnvs: ExternalEnvTypes>(
     let gas = host.detention.is_refusing().then_some(interpreter.gas);
     let result = inner(InstructionContext { interpreter: &mut *interpreter, host: &mut *host });
     if !host.detention.has_reads() {
-        return result;
+        return note_halt(interpreter, host, result);
     }
     settle_reads(interpreter, host, result, gas)
 }
@@ -435,7 +475,7 @@ fn settle_reads<DB: Database, ExtEnvs: ExternalEnvTypes>(
         }
     };
     if !completed {
-        return result;
+        return note_halt(interpreter, host, result);
     }
     // A completed opcode leaves no result pending: a `SELFDESTRUCT`'s is built from the frame's
     // gas once the wrapper returned, and a stop fails the opcode.
@@ -445,10 +485,7 @@ fn settle_reads<DB: Database, ExtEnvs: ExternalEnvTypes>(
         }
         _ => 0,
     };
-    let depth = interpreter.input.depth;
-    host.detention.commit_reads(observed, &mut interpreter.gas, depth, forwarded);
-    // A frame the opcode is about to start inherits the reservoir the cap moved gas into.
-    inherit_reservoir(interpreter);
+    host.detention.commit_reads(observed, &mut interpreter.gas, forwarded);
     result
 }
 
@@ -532,6 +569,29 @@ state_read! {
     extcodecopy => host::extcodecopy, "EXTCODECOPY", "the block beneficiary's account";
     extcodehash => host::extcodehash, "EXTCODEHASH", "the block beneficiary's account";
     sload => host::sload, "SLOAD", "the Oracle's storage";
+}
+
+/// Defines an opcode whose own charge has no bound, as revm's instruction with what the frame had
+/// left noted when the charge fails ([`note_halt`]).
+macro_rules! unbounded_charge {
+    ($($name:ident => $inner:path, $opcode:literal;)*) => {$(
+        #[doc = concat!("`", $opcode, "`, noting what the frame had when its charge fails.")]
+        fn $name<DB: Database, ExtEnvs: ExternalEnvTypes>(
+            context: Ctx<'_, DB, ExtEnvs>,
+        ) -> InstructionExecResult {
+            let InstructionContext { interpreter, host } = context;
+            let result = $inner(InstructionContext { interpreter: &mut *interpreter, host: &mut *host });
+            note_halt(interpreter, host, result)
+        }
+    )*};
+}
+
+unbounded_charge! {
+    keccak256 => system::keccak256, "KECCAK256";
+    calldatacopy => system::calldatacopy, "CALLDATACOPY";
+    codecopy => system::codecopy, "CODECOPY";
+    returndatacopy => system::returndatacopy, "RETURNDATACOPY";
+    mcopy => memory::mcopy, "MCOPY";
 }
 
 #[cfg(test)]

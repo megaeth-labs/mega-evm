@@ -1179,8 +1179,9 @@ fn test_the_switch_is_scoped_to_its_subtree() {
 /* ---------- withheld gas does not leak ---------- */
 
 /// An interceptor's answer carries the forwarded gas back without running a frame: the caller
-/// is held to the limit as it resumes, and what it hears from `remainingComputeGas()` is no more
-/// than the limit leaves it.
+/// is held to the limit as it resumes. The call forwards what it forwards without the read — the
+/// withheld part of the caller's gas is part of the 63/64 — so what the caller hears from
+/// `remainingComputeGas()`, the gas it forwarded, is what it hears after a push of the same price.
 #[test]
 fn test_an_interceptors_answer_does_not_lift_the_cap() {
     let calldata = IMegaLimitControl::remainingComputeGasCall {}.abi_encode();
@@ -1207,27 +1208,32 @@ fn test_an_interceptors_answer_does_not_lift_the_cap() {
         );
         assert_stopped(&run, intrinsic);
 
-        // The answer, read without the loop.
-        let code = op(BytecodeBuilder::default(), TIMESTAMP)
-            .mstore(0, &calldata)
-            .push_number(32_u8)
-            .push_number(0_u8)
-            .push_number(4_u8)
-            .push_number(0_u8)
-            .push_address(LIMIT_CONTROL_ADDRESS)
-            .append(GAS)
-            .append(STATICCALL)
-            .append(POP)
-            .push_number(32_u8)
-            .push_number(0_u8)
-            .append(RETURN)
-            .build();
-        let run = execute(
-            MemoryDatabase::default().account_code(CONTRACT, code),
-            tx(CALLER, CONTRACT, gas_limit),
-        );
-        let answer = U256::from_be_slice(run.outcome.result.output().unwrap());
-        assert!(answer < U256::from(CAP), "the call was forwarded from the capped frame: {answer}");
+        // The answer, read without the loop, after the read and after a push in its place.
+        let answer = |first: u8| {
+            let code = op(BytecodeBuilder::default(), first)
+                .mstore(0, &calldata)
+                .push_number(32_u8)
+                .push_number(0_u8)
+                .push_number(4_u8)
+                .push_number(0_u8)
+                .push_address(LIMIT_CONTROL_ADDRESS)
+                .append(GAS)
+                .append(STATICCALL)
+                .append(POP)
+                .push_number(32_u8)
+                .push_number(0_u8)
+                .append(RETURN)
+                .build();
+            let run = execute(
+                MemoryDatabase::default().account_code(CONTRACT, code),
+                tx(CALLER, CONTRACT, gas_limit),
+            );
+            assert!(run.outcome.result.is_success(), "{:?}", run.outcome.result);
+            U256::from_be_slice(run.outcome.result.output().unwrap())
+        };
+        let detained = answer(TIMESTAMP);
+        assert!(detained > U256::from(CAP), "the whole forward: {detained}");
+        assert_eq!(detained, answer(PUSH0), "the forward the call makes without the read");
     }
 }
 
