@@ -28,7 +28,6 @@ Do not add a `_pending/main.rs`.
 | Owning mechanism | Tests | From `tests/` | From `src/` | Keep | Rewrite | Undecided |
 |---|---:|---:|---:|---:|---:|---:|
 | the common execution layer | 21 | 21 | 0 | 21 | 0 | 0 |
-| detention | 2 | 2 | 0 | 0 | 2 | 0 |
 | revert-class aborts | 17 | 17 | 0 | 0 | 17 | 0 |
 | the pre-block system calls | 34 | 22 | 12 | 30 | 4 | 0 |
 | system contract deployment | 11 | 5 | 6 | 11 | 0 | 0 |
@@ -36,7 +35,7 @@ Do not add a `_pending/main.rs`.
 | native keyless deployment | 75 | 73 | 2 | 29 | 46 | 0 |
 | inspector support | 4 | 4 | 0 | 1 | 3 | 0 |
 | — (undecided: D57 preload-warm cold charging, D58 98/100 forwarding) | 7 | 7 | 0 | 0 | 0 | 7 |
-| **Total** | **248** | **228** | **20** | **159** | **82** | **7** |
+| **Total** | **246** | **226** | **20** | **159** | **80** | **7** |
 
 ## Tests ported in place
 
@@ -277,7 +276,7 @@ These 54 rows run in a real test target now, adapted to the Satin API: the state
 
 ## Tests ported by detention
 
-These 81 rows run in a real test target now, adapted to the Satin API and to the relative cap, the revert-class stop and the load-time marking the decisions they cite fix, so the counts above are lower than the inventory's by exactly these rows.
+These 83 rows run in a real test target now, adapted to the Satin API and to the relative cap, the revert-class stop and the load-time marking the decisions they cite fix, so the counts above are lower than the inventory's by exactly these rows.
 
 | Legacy file | Owner in the inventory | Tests | Now in |
 |---|---|---:|---|
@@ -294,9 +293,10 @@ These 81 rows run in a real test target now, adapted to the Satin API and to the
 | `rex4/gas_detention.rs` | detention (3) | 3 | `tests/satin/detention.rs`, `tests/satin/volatile_access.rs` |
 | `rex5/selfdestruct_beneficiary.rs` | detention (2) | 2 | `tests/satin/detention.rs`, `tests/satin/volatile_access.rs` |
 | `rex6/beneficiary_detention.rs` | detention (13) | 13 | `tests/satin/detention.rs`, `tests/satin/volatile_access.rs` |
+| `rex6/eip7702_authority_accounting.rs` | detention (2) | 2 | `tests/satin/volatile_access.rs` |
 | `src/access/volatile.rs` | detention (4) | 4 | `crates/mega-evm/src/access/volatile.rs` |
 | `src/limit/compute_gas.rs` | detention (1) | 1 | `tests/satin/detention.rs` |
-| **Total** | | **81** | |
+| **Total** | | **83** | |
 
 ## Tests retired after the inventory
 
@@ -341,8 +341,6 @@ They are not counted above.
 | `block_executor/sequencer_registry.rs` | `test_sequencer_change_does_not_affect_system_address` | the pre-block system calls | the pre-block system calls own applying a pending rotation |
 | `block_executor/sequencer_registry.rs` | `test_system_address_change` | the pre-block system calls | the pre-block system calls own applying a pending rotation |
 | `block_executor/sequencer_registry.rs` | `test_system_tx_uses_resolved_system_address` | the pre-block system calls | the pre-block system calls own resolving the live system address |
-| `rex6/eip7702_authority_accounting.rs` | `test_rex6_authority_beneficiary_triggers_detention` | detention | detention owns whether an applied authority that is the block beneficiary lowers the compute cap, and what a compute overflow before the first frame does to the authorizations |
-| `rex6/eip7702_authority_accounting.rs` | `test_rex6_authority_compute_overflow_skips_authorities` | detention | detention owns whether an applied authority that is the block beneficiary lowers the compute cap, and what a compute overflow before the first frame does to the authorizations |
 
 ## Files
 
@@ -381,7 +379,6 @@ Each cell lists `disposition count (mechanism · decision)`.
 | `rex5/pre_block_system_calls.rs` | 11 | keep 11 (the pre-block system calls) |
 | `rex5/sandbox_accounting.rs` | 9 | rewrite 9 (native keyless deployment · native sub-frame: parent tracker sees child directly) |
 | `rex6/create2_metering_order.rs` | 11 | keep 11 (the common execution layer · canonical halt reasons; D04 512 KiB boundary) |
-| `rex6/eip7702_authority_accounting.rs` | 2 | rewrite 2 (detention · D12/D28/D31/D45 (7702 matrix; SALT pricing for the SALT half)) |
 | `rex6/error_paths.rs` | 2 | keep 2 (the common execution layer · canonical) |
 | `rex6/keyless_sandbox_hardening.rs` | 3 | rewrite 1 (native keyless deployment · D44 / EIP-6780 native); keep 2 (native keyless deployment · canonical CREATE rules) |
 | `rex6/oracle_hint_volatile_access.rs` | 4 | keep 4 (the oracle and control contracts) |

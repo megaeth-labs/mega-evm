@@ -21,9 +21,9 @@ use mega_evm::{
 use revm::{bytecode::opcode::*, context::TxEnv, interpreter::InstructionResult, state::Bytecode};
 
 use crate::detention::{
-    assert_stopped, call, context, execute, intrinsic, on_beneficiary, op, run_on, spin, tx,
-    with_delegation, work, Calls, BELOW, BENEFICIARY, CALLER, CAP, CHILD, CONTRACT, DELEGATOR,
-    TIERS,
+    assert_stopped, burn, call, context, execute, intrinsic, on_beneficiary, op, run_on, spin,
+    stop_data, tx, with_delegation, work, Calls, BELOW, BENEFICIARY, CALLER, CAP, CHILD, CONTRACT,
+    DELEGATOR, TIERS,
 };
 
 /// A second contract, never the beneficiary.
@@ -595,4 +595,109 @@ fn test_a_call_to_the_access_control_contract_costs_its_overhead() {
     let consumed = U256::from_be_slice(run.outcome.result.output().unwrap());
     // The pushes (2 + 2 + 3 + 2 + 2 + 3 + 3), the cold call (2,600), POP and GAS.
     assert_eq!(consumed, U256::from(17 + 2_600 + 2 + 2));
+}
+
+/* ---------- an applied authority ---------- */
+
+/// A transaction authorizing `authority` to delegate to `CHILD`, from `CALLER` to `CONTRACT`.
+fn authorizing(authority: Address, gas_limit: u64) -> mega_evm::MegaTransaction {
+    use alloy_op_evm::OpTx;
+    use revm::{
+        context::transaction::TransactionType,
+        context_interface::{
+            either::Either,
+            transaction::{Authorization, RecoveredAuthority, RecoveredAuthorization},
+        },
+    };
+    let authorization = Either::Right(RecoveredAuthorization::new_unchecked(
+        Authorization { chain_id: U256::ZERO, address: CHILD, nonce: 0 },
+        RecoveredAuthority::Valid(authority),
+    ));
+    OpTx(op_transaction(TxEnv {
+        tx_type: TransactionType::Eip7702 as u8,
+        caller: CALLER,
+        kind: TxKind::Call(CONTRACT),
+        gas_limit,
+        gas_priority_fee: Some(0),
+        authorization_list: vec![authorization],
+        ..Default::default()
+    }))
+}
+
+/// Whether `account` carries the designator of a delegation to `CHILD` after the run.
+fn delegates_to_child(run: &crate::detention::Run, account: Address) -> bool {
+    run.outcome.state.get(&account).is_some_and(|account| {
+        account.info.code.as_ref().is_some_and(|code| code == &Bytecode::new_eip7702(CHILD))
+    })
+}
+
+/// An applied EIP-7702 authority that is the block beneficiary writes the beneficiary's account:
+/// the transaction is detained from its first frame, its limit the cap, though neither its sender
+/// nor its recipient is the beneficiary. An authority that is not the beneficiary detains nothing.
+#[test]
+fn test_an_applied_authority_that_is_the_beneficiary_detains() {
+    let code = work(BytecodeBuilder::default(), 10).stop().build();
+    for gas_limit in TIERS {
+        let run = execute(
+            MemoryDatabase::default().account_code(CONTRACT, code.clone()),
+            authorizing(BENEFICIARY, gas_limit),
+        );
+        assert!(run.outcome.result.is_success(), "{:?}", run.outcome.result);
+        assert!(delegates_to_child(&run, BENEFICIARY), "the authority applied");
+        assert_eq!(run.limit, Some(CAP));
+        assert_eq!(run.accessed, VolatileDataAccess::BENEFICIARY_BALANCE);
+
+        let run = execute(
+            MemoryDatabase::default().account_code(CONTRACT, code.clone()),
+            authorizing(OTHER, gas_limit),
+        );
+        assert!(run.outcome.result.is_success(), "{:?}", run.outcome.result);
+        assert!(delegates_to_child(&run, OTHER), "the authority applied");
+        assert_eq!(run.limit, None);
+        assert_eq!(run.accessed, VolatileDataAccess::empty());
+    }
+}
+
+/// Compute is what the frames spend, not the transaction's intrinsic gas: under a cap far below
+/// what an authorization costs before any frame, an authority that is the beneficiary stops
+/// nothing before the first frame, and stays applied. The first frame is held to the cap: a frame
+/// within it completes, and one past it stops the transaction, its authorization standing.
+#[test]
+fn test_a_cap_below_the_intrinsic_gas_stops_nothing_before_the_first_frame() {
+    let tiny = 1_000;
+    let limits = EvmTxRuntimeLimits::default().with_block_env_access_compute_gas_limit(tiny);
+    for gas_limit in TIERS {
+        let run = |code: Bytes| {
+            let db = MemoryDatabase::default().account_code(CONTRACT, code);
+            let mut evm = MegaEvm::new(context(db).with_tx_runtime_limits(limits));
+            run_on(&mut evm, authorizing(BENEFICIARY, gas_limit))
+        };
+
+        // A frame that only stops spends no compute: its bill is the intrinsic gas.
+        let stops = run(BytecodeBuilder::default().stop().build());
+        assert!(stops.outcome.result.is_success(), "{:?}", stops.outcome.result);
+        let intrinsic = stops.outcome.gas.regular;
+        assert!(intrinsic > tiny, "the authorization costs more than the cap before any frame");
+        assert!(delegates_to_child(&stops, BENEFICIARY));
+        assert_eq!(stops.limit, Some(tiny));
+
+        let within = run(burn(BytecodeBuilder::default(), 10).stop().build());
+        assert!(within.outcome.result.is_success(), "{:?}", within.outcome.result);
+
+        // The stop takes back what the frame did, not the authorization or its state gas.
+        let past = run(spin(BytecodeBuilder::default()));
+        assert_eq!(
+            past.outcome.limit_exceeded,
+            Some(LimitCheck::ExceedsLimit {
+                kind: LimitKind::ComputeGas,
+                limit: tiny,
+                used: tiny,
+                frame_local: false
+            })
+        );
+        assert_eq!(past.outcome.result.output(), Some(&stop_data(tiny)));
+        assert_eq!(past.outcome.gas.regular, intrinsic + tiny);
+        assert_eq!(past.outcome.gas.state, stops.outcome.gas.state);
+        assert!(delegates_to_child(&past, BENEFICIARY), "the authorization stands");
+    }
 }
