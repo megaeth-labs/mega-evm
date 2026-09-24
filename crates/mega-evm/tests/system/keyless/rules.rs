@@ -324,6 +324,20 @@ fn test_init_code_over_the_limit_is_refused() {
     }
 }
 
+/// Init code of exactly the limit passes rule 8. Its zero bytes stop at once, so the creation
+/// deploys nothing.
+#[test]
+fn test_init_code_at_the_limit_is_admitted() {
+    let deployment = Deployment::new(vec![0; MAX_INITCODE_SIZE].into());
+    for gas_limit in [TX_GAS_LIMIT_CAP * 3 / 4, 10 * TX_GAS_LIMIT_CAP] {
+        let outcome = submit(system_db(), &deployment.tx, LARGE_OVERRIDE, gas_limit);
+        assert!(
+            matches!(failure(&outcome), KeylessDeployError::EmptyCodeDeployed { .. }),
+            "at {gas_limit}",
+        );
+    }
+}
+
 /// Rule 4: the signer's nonce is at most 1.
 #[test]
 fn test_keyless_deploy_signer_nonce_too_high() {

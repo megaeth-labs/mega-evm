@@ -90,6 +90,26 @@ fn assert_stopped_whole(outcome: &Outcome, deployment: &Deployment, gas_limit: u
     }
 }
 
+/// A transaction whose body alone crosses its data-size limit is stopped before its first frame,
+/// and that frame is not a deployment: the call is answered with the stop, and no rule reads the
+/// signer.
+#[test]
+fn test_a_transaction_latched_by_its_body_deploys_nothing() {
+    let deployment = Deployment::new(deploying(&runtime(1)));
+    for gas_limit in GAS_LIMITS {
+        let outcome = limited(
+            &deployment,
+            gas_limit,
+            EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(100),
+        );
+        assert_eq!(stop(&outcome), MegaLimitExceeded { kind: 0, limit: 100 }, "at {gas_limit}");
+        assert!(!outcome.state.contains_key(&deployment.signer), "no rule read the signer");
+        let [total, ..] =
+            beyond(&outcome, &reference(deployment.call_data(LARGE_OVERRIDE), gas_limit));
+        assert_eq!(total, 0, "not even the overhead is charged");
+    }
+}
+
 /// A log that crosses the transaction's data-size limit stops the transaction: the call reverts
 /// with the stop, and the deployment is taken back whole.
 #[test]

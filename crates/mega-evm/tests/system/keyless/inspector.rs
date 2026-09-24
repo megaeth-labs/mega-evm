@@ -215,3 +215,23 @@ fn test_a_creation_an_inspector_answers_charges_nothing_it_did_not_start() {
         );
     }
 }
+
+/// A transaction the latch stopped before its first frame is not rewritten on the inspected path
+/// either, where the rewrite runs before the latch is consulted: the inspector sees the call and
+/// its stop, and no creation.
+#[test]
+fn test_a_latched_transaction_is_seen_as_the_call_it_is() {
+    let deployment = Deployment::new(deploying(&runtime(1)));
+    for gas_limit in GAS_LIMITS {
+        let limits = mega_evm::EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(100);
+        let mut evm = MegaEvm::new(context(system_db()).with_tx_runtime_limits(limits))
+            .with_inspector(Recorder::default());
+        let outcome = evm.execute_transaction(keyless_tx(&deployment, gas_limit)).expect("valid");
+        assert!(outcome.limit_exceeded.is_some(), "at {gas_limit}");
+        assert_eq!(
+            evm.inspector().events,
+            [Event::Call(KEYLESS_DEPLOY_ADDRESS), Event::CallEnd(InstructionResult::Revert)],
+        );
+        assert!(!outcome.state.contains_key(&deployment.signer));
+    }
+}

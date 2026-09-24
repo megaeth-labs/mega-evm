@@ -196,3 +196,26 @@ fn test_a_failed_deployment_gives_the_created_account_back_at_its_price() {
         }
     }
 }
+
+/// A signer that sends its own deployment is the transaction's sender, whose account the body
+/// counts: the creation's nonce bump makes no record of its own, only the created account does,
+/// and the signer, an account already, is charged nothing for it.
+#[test]
+fn test_a_signer_that_sends_its_own_deployment_makes_no_record_of_its_own() {
+    let deployment = Deployment::new(deploying(&runtime(RUNTIME_LEN)));
+    for gas_limit in GAS_LIMITS {
+        let mut tx =
+            call_tx(KEYLESS_DEPLOY_ADDRESS, deployment.call_data(LARGE_OVERRIDE), U256::ZERO);
+        tx.0.base.gas_limit = gas_limit;
+        tx.0.base.caller = deployment.signer;
+        let outcome = MegaEvm::new(context(system_db()))
+            .execute_transaction(tx)
+            .expect("a valid transaction");
+        assert_eq!(returned(&outcome).deployedAddress, deployment.address, "at {gas_limit}");
+        // The transaction bumped its sender from 0 to 1, and the creation from 1 to 2.
+        assert_eq!(nonce(&outcome, deployment.signer), 2);
+        assert_eq!(outcome.usage.write_records, 1, "the created account alone");
+        let deposit_state = satin_gas_params().code_deposit_state_gas(RUNTIME_LEN);
+        assert_eq!(outcome.gas.state, entry(GasId::create_state_gas()) + deposit_state);
+    }
+}
