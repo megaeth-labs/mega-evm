@@ -65,6 +65,9 @@ const MODEXP: Address = address!("0000000000000000000000000000000000000005");
 /// The BN254 point addition precompile.
 const EC_ADD: Address = address!("0000000000000000000000000000000000000006");
 
+/// The BN254 pairing precompile.
+const EC_PAIRING: Address = address!("0000000000000000000000000000000000000008");
+
 /// Runs the transaction `build` makes for a first instruction that reads the timestamp, then for
 /// one that pushes a zero at the same price: detained, then not.
 fn with_and_without_read(build: impl Fn(u8) -> (MemoryDatabase, u64)) -> (Run, Run) {
@@ -1004,9 +1007,10 @@ fn test_a_precompile_is_held_to_what_the_limit_leaves() {
 }
 
 /// A modexp priced far above the cap, 58,687,488 and 125,796,352 gas, called after a read with all
-/// the gas, is run on the allowance, computes nothing, and the transaction is billed the limit. A
-/// transaction the beneficiary sends straight to the precompile is detained from the start, so the
-/// precompile runs on the cap itself. The same transaction from another sender computes.
+/// the gas, is run on the allowance, computes nothing, and the transaction is billed the limit, in
+/// the built-in precompile set the chain runs as in the recording one. A transaction the
+/// beneficiary sends straight to the precompile is detained from the start, so the precompile runs
+/// on the cap itself. The same transaction from another sender computes.
 #[test]
 fn test_a_precompile_priced_past_the_cap_computes_nothing() {
     for (exponent_len, price) in [(128, 58_687_488), (256, 125_796_352)] {
@@ -1027,8 +1031,11 @@ fn test_a_precompile_priced_past_the_cap_computes_nothing() {
         for gas_limit in TIERS {
             let code = calls_precompile(TIMESTAMP, MODEXP, None);
             let db = MemoryDatabase::default().account_code(CONTRACT, code);
-            let called = run_precompile(db, MODEXP, recording_modexp, tx_with(&input, gas_limit));
+            let called =
+                run_precompile(db.clone(), MODEXP, recording_modexp, tx_with(&input, gas_limit));
             assert_stopped(&called.run, intrinsic_with(&input, gas_limit));
+            let built_in = execute(db, tx_with(&input, gas_limit));
+            assert_stopped(&built_in, intrinsic_with(&input, gas_limit));
             assert!(
                 matches!(called.ran_on[..], [(gas, false)] if gas < CAP),
                 "{:?}",
@@ -1042,6 +1049,33 @@ fn test_a_precompile_priced_past_the_cap_computes_nothing() {
             assert_eq!(sent.spent, CAP);
             assert_stopped(&sent.run, intrinsic);
         }
+    }
+}
+
+/// A precompile priced between the allowance and its forward whose input fails a check made after
+/// its gas check: the BN254 pairing of three pairs and a stray byte, priced 147,000, which checks
+/// the input's length after its gas. Under a cap of 100,000 it runs out of the allowance before the
+/// length check, and the transaction stops; without the read the length check fails the call,
+/// which burns its forward, and the caller goes on to store the failure. Under the default cap the
+/// allowance pays the price, and the call fails on its input as without the read.
+#[test]
+fn test_a_precompile_whose_input_fails_past_its_gas_check_stops_past_the_allowance() {
+    let input = vec![0_u8; 3 * 192 + 1];
+    for gas_limit in TIERS {
+        let run = |first, cap| {
+            let limits = EvmTxRuntimeLimits::default().with_block_env_access_compute_gas_limit(cap);
+            let code = calls_precompile(first, EC_PAIRING, None);
+            let db = MemoryDatabase::default().account_code(CONTRACT, code);
+            let mut evm = MegaEvm::new(context(db).with_tx_runtime_limits(limits));
+            run_on(&mut evm, tx_with(&input, gas_limit))
+        };
+        let (detained, plain) = (run(TIMESTAMP, 100_000), run(PUSH0, 100_000));
+        assert_stopped(&detained, intrinsic_with(&input, gas_limit));
+        assert!(plain.outcome.result.is_success());
+        assert_eq!(slot(&plain, 0), Some(U256::ZERO), "without the read the call fails");
+        let (detained, plain) = (run(TIMESTAMP, CAP), run(PUSH0, CAP));
+        assert_as_without_read(&detained, &plain, "a price the allowance pays");
+        assert_eq!(slot(&detained, 0), Some(U256::ZERO), "the call fails on its input");
     }
 }
 
