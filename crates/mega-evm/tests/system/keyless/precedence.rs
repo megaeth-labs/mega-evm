@@ -8,6 +8,10 @@
 //! start is this engine's alone, and comes after every rule: a call a rule refuses is refused
 //! with that rule, whether or not it could have paid those charges. The last test pins what those
 //! charges refuse on their own, where the legacy engine charged nothing.
+//!
+//! One pair reports an error the legacy engine never reported: a call carrying value whose
+//! arguments do not decode is refused for the value, where the legacy engine ran the bytecode and
+//! reverted with empty data.
 
 use mega_evm::{
     system::keyless::{decode_error_result, KEYLESS_DEPLOY_OVERHEAD_GAS},
@@ -132,6 +136,36 @@ fn test_a_call_two_rules_refuse_reports_the_first_the_legacy_engine_checked() {
             },
         ];
         cases.into_iter().for_each(Case::check);
+    }
+}
+
+/// A call that carries value and whose arguments do not decode, or carry a transaction that does
+/// not, is refused for the value: the value rule comes before decoding. The same call without
+/// value is refused `MalformedEncoding()`. The legacy engine let both fall through to the
+/// bytecode, which reverted with empty data.
+#[test]
+fn test_a_value_bearing_call_that_does_not_decode_is_refused_for_the_value() {
+    let truncated: Bytes =
+        IKeylessDeploy::keylessDeployCall::SELECTOR.iter().copied().chain([0; 16]).collect();
+    let undecodable_tx = keyless_deploy_call(b"a transaction", U256::from(LARGE_OVERRIDE));
+    for gas_limit in GAS_LIMITS {
+        for (payload, data) in [("arguments", &truncated), ("transaction", &undecodable_tx)] {
+            for (value, answer) in [
+                (0, KeylessDeployError::MalformedEncoding),
+                (1, KeylessDeployError::NoEtherTransfer),
+            ] {
+                let mut tx = call_tx(KEYLESS_DEPLOY_ADDRESS, data.clone(), U256::from(value));
+                tx.0.base.gas_limit = gas_limit;
+                let outcome = MegaEvm::new(context(system_db()))
+                    .execute_transaction(tx)
+                    .expect("a valid transaction");
+                assert_eq!(
+                    refusal(&outcome),
+                    answer,
+                    "undecodable {payload}, value {value}, at {gas_limit}",
+                );
+            }
+        }
     }
 }
 
