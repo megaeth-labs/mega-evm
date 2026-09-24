@@ -11,7 +11,7 @@ use super::{
     record::{HistoryBytes, RecordEffect, StagedRecord},
     state_gas::StateGasMeter,
     EvmTxRuntimeLimits, LimitCheck, LimitKind, LimitUsage, FRAME_DATA_SHARE_DENOMINATOR,
-    FRAME_DATA_SHARE_NUMERATOR, WRITE_RECORD, WRITE_RECORD_SIZE,
+    FRAME_DATA_SHARE_NUMERATOR, TRANSFER_LOG, WRITE_RECORD, WRITE_RECORD_SIZE,
 };
 use crate::storage_call_stipend;
 
@@ -90,6 +90,9 @@ pub struct AdditionalLimit {
     history_bytes: u64,
     /// The state gas the transaction holds outside the running frame, for the state-gas limit.
     state_gas: StateGasMeter,
+    /// Whether the running transaction's value movements journal EIP-7708 transfer logs, which
+    /// revm emits itself and the data size counts where the value moves.
+    transfer_logs: bool,
 }
 
 impl AdditionalLimit {
@@ -125,6 +128,19 @@ impl AdditionalLimit {
         self.history_gas_spent = 0;
         self.history_bytes = 0;
         self.state_gas.reset();
+        self.transfer_logs = false;
+    }
+
+    /// Records whether the running transaction's value movements journal EIP-7708 transfer logs.
+    /// Called for every transaction, after the reset, from the configuration revm emits them by.
+    pub(crate) const fn set_transfer_logs(&mut self, emitted: bool) {
+        self.transfer_logs = emitted;
+    }
+
+    /// Whether starting `input` journals an EIP-7708 transfer log in the running transaction.
+    /// See [`moves_value`].
+    pub(crate) fn frame_start_transfer_log(&self, input: &FrameInput) -> bool {
+        self.transfer_logs && moves_value(input)
     }
 
     /* The latch and the exemption */
@@ -239,8 +255,9 @@ impl AdditionalLimit {
     }
 
     /// The history bytes the last settled transaction appended, whoever paid for them: its body,
-    /// one write record per account or storage write it kept, the logs it kept and the code it
-    /// deposited.
+    /// one write record per account or storage write it kept, the logs it emitted and kept and
+    /// the code it deposited. The EIP-7708 transfer logs of its value movements are data size and
+    /// not history, and are not among them.
     ///
     /// Every one of them is priced at the cost per history byte, and
     /// [`history_gas_spent`](Self::history_gas_spent) is what the transaction's own gas paid of
@@ -335,6 +352,12 @@ impl AdditionalLimit {
     /// Commits the staged record to the running frame's lane, and reports the history bytes it
     /// appends or takes back. Called by an opcode's wrapper once the opcode completed; a crossed
     /// limit in the verdict stops the opcode's frame, and the wrapper charges the history.
+    ///
+    /// A `SELFDESTRUCT` that moved value to another account also counts the EIP-7708 transfer log
+    /// revm journaled for the move, with the beneficiary's record and in the same check. The log
+    /// is the running frame's, as the move is: the frame's own journal checkpoint takes both back
+    /// when the frame fails, and its lane the bytes. It is data size and nothing else — no write
+    /// record, and no history: the bytes reported are the record's alone.
     #[inline]
     pub(crate) fn commit_staged_record(&mut self) -> (LimitCheck, HistoryBytes) {
         let Some(record) = self.staged.take() else {
@@ -346,18 +369,24 @@ impl AdditionalLimit {
         if let (StagedRecord::Log { .. }, HistoryBytes::Appended(bytes)) = (&record, history) {
             self.tracker.record_log_and_code_bytes(bytes);
         }
-        let check = match effect {
-            RecordEffect::None => LimitCheck::WithinLimit,
-            RecordEffect::Record(usage) => {
-                self.tracker.record(usage);
-                self.check()
-            }
+        let counted = match effect {
+            RecordEffect::None => LimitUsage::ZERO,
+            RecordEffect::Record(usage) => usage,
             RecordEffect::Refund(usage) => {
                 self.tracker.refund(usage);
-                LimitCheck::WithinLimit
+                return (LimitCheck::WithinLimit, history);
             }
         };
-        (check, history)
+        let counted = if self.transfer_logs && record.moves_value() {
+            counted.saturating_add(TRANSFER_LOG)
+        } else {
+            counted
+        };
+        if counted == LimitUsage::ZERO {
+            return (LimitCheck::WithinLimit, history);
+        }
+        self.tracker.record(counted);
+        (self.check(), history)
     }
 
     /// Discards the staged record. Called by an opcode's wrapper when the opcode failed, which
@@ -484,6 +513,25 @@ impl AdditionalLimit {
     /// running as the sender (reached through an EIP-7702 delegation) counts it as recorded, and
     /// a value transfer to the sender records no recipient.
     ///
+    /// A frame whose start moves value to another account also counts the EIP-7708 transfer log
+    /// revm journals for the move, on the frame's own lane and in the same check as its records.
+    /// revm moves the value, and emits the log, only once it builds the frame, inside the journal
+    /// checkpoint it makes for it; the count comes before that, so a crossing answers the frame
+    /// with the stop before any value moves. After the checkpoint it could not: a frame revm
+    /// answers without running — a call to an account with no code, a precompile — has committed
+    /// its checkpoint by the time its answer returns, and rewriting the answer would not take the
+    /// move back. The lane follows the checkpoint from then on: a frame that fails discards both
+    /// the log and its bytes.
+    ///
+    /// So the count is a prediction of what revm will do, and it is called only for a start revm
+    /// makes as far as the caller's account decides it. A start revm refuses there — a value its
+    /// caller cannot fund, a creation whose creator's nonce cannot be bumped — moves and writes
+    /// nothing, and gets an empty lane instead ([`push_empty_frame`](Self::push_empty_frame)).
+    /// The one refusal decided after the count is a creation onto an occupied address: revm reads
+    /// the created address's account only once it builds the frame. Its records and transfer log
+    /// are counted, a crossing they cause stops the creation before revm could refuse it, and
+    /// without a crossing revm's refusal fails the creation and discards them.
+    ///
     /// A crossed limit in the verdict means the frame must not run: it is answered with the stop.
     /// So is every frame of a latched transaction, whose lane stays empty.
     pub(crate) fn on_frame_init(&mut self, input: &FrameInput, depth: usize) -> LimitCheck {
@@ -493,6 +541,9 @@ impl AdditionalLimit {
             return latched;
         }
         self.push_lane(input, depth);
+        if self.frame_start_transfer_log(input) {
+            self.tracker.record(TRANSFER_LOG);
+        }
         self.check()
     }
 
@@ -557,13 +608,19 @@ impl AdditionalLimit {
         forwarded.min(self.limits.frame_usage_limit())
     }
 
-    /// Takes a creation's creator record back: the creation failed before bumping the nonce.
+    /// Takes back what a creation's start counted: revm answered the creation without bumping its
+    /// creator's nonce, so the start wrote nothing and moved nothing — no creator's nonce, no
+    /// created account, no transfer log.
     ///
-    /// The record is gone, so the caller gets its history back when the frame returns: the lane no
-    /// longer holds a creator's record, and a lane that holds none gives its caller's charge back
-    /// with the rest.
+    /// A failure would discard the lane anyway, but not the creator's record, which outlives a
+    /// failed creation once the nonce was bumped. And one answer of this kind is a success: a
+    /// creator whose nonce cannot be bumped is answered with a `Return` and no address, which
+    /// would merge the lane into the caller's. Such a start is predicted and counts nothing in
+    /// the first place ([`on_frame_init`](Self::on_frame_init)); this holds the lane to revm's
+    /// answer whatever was counted. The caller gets back all it paid for the records when the
+    /// frame returns.
     pub(crate) fn creation_did_not_bump_nonce(&mut self) {
-        self.tracker.drop_caller_record();
+        self.tracker.undo_frame_start();
     }
 
     fn push_lane(&mut self, input: &FrameInput, depth: usize) {
@@ -772,6 +829,24 @@ const fn share_of_remaining(remaining: u64) -> u64 {
     ((remaining * numerator) / denominator) as u64
 }
 
+/// Whether starting `input` moves value from one account to another, which is what revm journals
+/// an EIP-7708 transfer log for: a call that transfers value to an account other than its caller —
+/// the transaction's own value, a value `CALL` — and a creation with an endowment, the
+/// transaction's own or a `CREATE`'s or a `CREATE2`'s.
+///
+/// A `CALLCODE` transfers its value from the calling account to itself, as a `CALL` to itself does,
+/// and revm moves nothing and emits nothing for either. `DELEGATECALL` and `STATICCALL` transfer
+/// no value at all.
+fn moves_value(input: &FrameInput) -> bool {
+    match input {
+        FrameInput::Call(inputs) => {
+            inputs.transfers_value() && inputs.target_address != inputs.caller
+        }
+        FrameInput::Create(inputs) => !inputs.value().is_zero(),
+        FrameInput::Empty => false,
+    }
+}
+
 /// Whether the frame `inputs` starts is granted a history allowance: a value-transferring `CALL`
 /// or `CALLCODE` below the transaction's own frame.
 ///
@@ -815,7 +890,7 @@ impl FrameCharge {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::WRITE_RECORD_SIZE;
+    use crate::{TRANSFER_LOG_SIZE, WRITE_RECORD_SIZE};
     use alloy_primitives::{address, Address, Bytes, U256};
     use revm::interpreter::{CallInput, CallValue};
 
@@ -1080,6 +1155,273 @@ mod tests {
         assert!(!limit.is_exempt());
         let [body, ..] = count_a_transaction(&mut limit);
         assert!(body.exceeded_limit(), "after a reset the body latches again");
+    }
+
+    /// A layer whose transaction's value movements journal transfer logs, under `limits`.
+    fn logging(limits: EvmTxRuntimeLimits) -> AdditionalLimit {
+        let mut limit = AdditionalLimit::new(limits);
+        limit.set_transfer_logs(true);
+        limit
+    }
+
+    /// A creation from `caller` endowing the account it creates with `value`.
+    fn creation(caller: Address, value: U256) -> FrameInput {
+        FrameInput::Create(Box::new(revm::interpreter::CreateInputs::new(
+            caller,
+            revm::interpreter::CreateScheme::Create,
+            value,
+            Bytes::new(),
+            100_000,
+            0,
+        )))
+    }
+
+    /// A creation revm answers without bumping its creator's nonce keeps nothing its start
+    /// counted, whatever the answer: a failure, and the success a creator whose nonce cannot be
+    /// bumped is answered with. The created account's record, the transfer log and the creator's
+    /// record all go, the caller gets back all it paid for them, and the creator's account is no
+    /// longer counted as recorded, so its next value transfer records it.
+    #[test]
+    fn test_a_creation_that_did_not_bump_the_nonce_keeps_nothing() {
+        let inner = creation(CALLEE, U256::from(1));
+        for answer in [InstructionResult::Return, InstructionResult::OutOfFunds] {
+            let mut limit = logging(EvmTxRuntimeLimits::no_limits());
+            limit.on_frame_init(&call_from_to(SENDER, CALLEE, U256::ZERO), 0);
+            limit.stage_frame_charge(limit.frame_start_records(&inner), 1_000, 2_000);
+            limit.on_frame_init(&inner, 1);
+            assert_eq!(
+                limit.usage(),
+                LimitUsage {
+                    data_size: 2 * WRITE_RECORD_SIZE + TRANSFER_LOG_SIZE,
+                    write_records: 2,
+                },
+                "{answer:?}: the created account, the creator and the log",
+            );
+
+            limit.creation_did_not_bump_nonce();
+            let mut result = crate::synthetic_frame_result(&inner, answer, Bytes::new());
+            assert_eq!(limit.on_frame_return(&mut result), 3_000, "{answer:?}: all of it back");
+            assert_eq!(limit.usage(), LimitUsage::ZERO, "{answer:?}: nothing kept");
+            let next = limit.frame_start_records(&call_from_to(CALLEE, TARGET, U256::from(1)));
+            assert!(next.caller, "{answer:?}: the creator is not recorded");
+        }
+    }
+
+    /// Exactly the frame starts that move value to another account count a transfer log: a value
+    /// call to another account and an endowed creation, at the transaction's own frame and below
+    /// it. A call to itself, a `CALLCODE`, a valueless call of any scheme, a `DELEGATECALL`, a
+    /// `STATICCALL` and a creation without an endowment count none; and nothing counts one when
+    /// the transaction's value movements journal no log.
+    #[test]
+    fn test_a_frame_start_counts_a_transfer_log_where_value_moves() {
+        let one = U256::from(1);
+        let scheme = |scheme, value| {
+            FrameInput::Call(Box::new(CallInputs {
+                caller: CALLEE,
+                target_address: if scheme == CallScheme::CallCode { CALLEE } else { TARGET },
+                ..call_inputs(scheme, value)
+            }))
+        };
+        for (input, moves) in [
+            (call_from_to(CALLEE, TARGET, one), true),
+            (call_from_to(CALLEE, CALLEE, one), false),
+            (call_from_to(CALLEE, TARGET, U256::ZERO), false),
+            (scheme(CallScheme::CallCode, one), false),
+            (scheme(CallScheme::StaticCall, U256::ZERO), false),
+            (creation(CALLEE, one), true),
+            (creation(CALLEE, U256::ZERO), false),
+        ] {
+            assert_eq!(moves_value(&input), moves, "{input:?}");
+            assert!(!with_the_transactions_frame().frame_start_transfer_log(&input), "off");
+            let mut limit = logging(EvmTxRuntimeLimits::no_limits());
+            limit.on_frame_init(&call_from_to(SENDER, CALLEE, U256::ZERO), 0);
+            assert_eq!(limit.frame_start_transfer_log(&input), moves, "{input:?}");
+            let before = limit.usage();
+            limit.on_frame_init(&input, 1);
+            let records = limit.usage().write_records - before.write_records;
+            assert_eq!(
+                limit.usage().data_size - before.data_size,
+                WRITE_RECORD_SIZE * records + if moves { TRANSFER_LOG_SIZE } else { 0 },
+                "{input:?}",
+            );
+        }
+        let delegate = FrameInput::Call(Box::new(CallInputs {
+            value: CallValue::Apparent(one),
+            ..call_inputs(CallScheme::DelegateCall, one)
+        }));
+        assert!(!moves_value(&delegate), "a delegate call carries its caller's value, no transfer");
+
+        // The transaction's own frame: its value to another account, and its endowed creation.
+        for (input, moves) in [
+            (call_from_to(SENDER, CALLEE, one), true),
+            (call_from_to(SENDER, SENDER, one), false),
+            (creation(SENDER, one), true),
+        ] {
+            let mut limit = logging(EvmTxRuntimeLimits::no_limits());
+            limit.on_frame_init(&input, 0);
+            let log = limit.usage().data_size - WRITE_RECORD_SIZE * limit.usage().write_records;
+            assert_eq!(log, if moves { TRANSFER_LOG_SIZE } else { 0 }, "{input:?}");
+        }
+    }
+
+    /// A transfer log is data size and nothing else: no write record, and no history byte — the
+    /// transaction's history is its body and its records, whatever it moved.
+    #[test]
+    fn test_a_transfer_log_is_data_size_and_never_history() {
+        let mut limit = logging(EvmTxRuntimeLimits::no_limits());
+        limit.set_intrinsic_history(1, crate::TX_BODY_SIZE);
+        limit.record_tx_body(crate::TX_BODY_SIZE);
+        let outer = call_from_to(SENDER, CALLEE, U256::from(1));
+        limit.on_frame_init(&outer, 0);
+        let inner = call_from_to(CALLEE, TARGET, U256::from(1));
+        limit.stage_frame_charge(limit.frame_start_records(&inner), 0, 0);
+        limit.on_frame_init(&inner, 1);
+        assert_eq!(
+            limit.usage(),
+            LimitUsage {
+                data_size: crate::TX_BODY_SIZE + 2 * WRITE_RECORD_SIZE + 2 * TRANSFER_LOG_SIZE,
+                write_records: 2,
+            },
+            "the recipient of each move — the inner one's caller is the outer one's — and two logs",
+        );
+
+        let mut result =
+            crate::synthetic_frame_result(&inner, InstructionResult::Stop, Bytes::new());
+        let _ = limit.on_frame_return(&mut result);
+        let mut result =
+            crate::synthetic_frame_result(&outer, InstructionResult::Stop, Bytes::new());
+        limit.on_last_frame_return(&mut result);
+        limit.settle_history_bytes(true);
+        assert_eq!(limit.history_bytes(), crate::TX_BODY_SIZE + 2 * WRITE_RECORD_SIZE);
+    }
+
+    /// A frame that fails takes its transfer log back with its records, as revm's checkpoint
+    /// takes back the move and the log.
+    #[test]
+    fn test_a_failed_frame_gives_its_transfer_log_back() {
+        let mut limit = logging(EvmTxRuntimeLimits::no_limits());
+        limit.on_frame_init(&call_from_to(SENDER, CALLEE, U256::ZERO), 0);
+        let inner = call_from_to(CALLEE, TARGET, U256::from(1));
+        limit.on_frame_init(&inner, 1);
+        assert_eq!(limit.usage().data_size, 2 * WRITE_RECORD_SIZE + TRANSFER_LOG_SIZE);
+
+        let mut result =
+            crate::synthetic_frame_result(&inner, InstructionResult::Revert, Bytes::new());
+        let _ = limit.on_frame_return(&mut result);
+        assert_eq!(limit.usage(), LimitUsage::ZERO);
+    }
+
+    /// A frame start whose transfer log crosses a limit is stopped there, before revm moves the
+    /// value: its own budget reverts it alone, the transaction's limit latches. The records alone
+    /// fit, so it is the log that crosses; at exactly the limit it holds.
+    #[test]
+    fn test_a_frame_start_whose_transfer_log_crosses_is_stopped() {
+        let records = 2 * WRITE_RECORD_SIZE;
+        let needs = records + TRANSFER_LOG_SIZE;
+        let inner = call_from_to(CALLEE, TARGET, U256::from(1));
+        // The smallest frame cap whose share, the budget of a child of the first frame, holds it.
+        let cap = (needs..).find(|cap| share_of_remaining(*cap) >= needs).unwrap();
+        assert_eq!(share_of_remaining(cap), needs);
+        for (cap, fits) in [(cap, true), (cap - 1, false)] {
+            let mut limit =
+                logging(EvmTxRuntimeLimits::no_limits().with_frame_data_size_limit(cap));
+            limit.on_frame_init(&call_from_to(SENDER, CALLEE, U256::ZERO), 0);
+            let check = limit.on_frame_init(&inner, 1);
+            if fits {
+                assert_eq!(check, LimitCheck::WithinLimit, "exactly the budget");
+            } else {
+                assert_eq!(
+                    check,
+                    LimitCheck::ExceedsLimit {
+                        kind: LimitKind::DataSize,
+                        limit: needs - 1,
+                        used: needs,
+                        frame_local: true,
+                    },
+                );
+                assert_eq!(limit.latched(), None, "a frame budget does not latch");
+            }
+        }
+
+        // The transaction's own value: one record, the recipient's, and the log.
+        let first = call_from_to(SENDER, CALLEE, U256::from(1));
+        let needs = WRITE_RECORD_SIZE + TRANSFER_LOG_SIZE;
+        for (tx_limit, fits) in [(needs, true), (needs - 1, false), (WRITE_RECORD_SIZE, false)] {
+            let mut limit =
+                logging(EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(tx_limit));
+            let check = limit.on_frame_init(&first, 0);
+            if fits {
+                assert_eq!(check, LimitCheck::WithinLimit, "exactly the limit");
+                continue;
+            }
+            assert_eq!(
+                check,
+                LimitCheck::ExceedsLimit {
+                    kind: LimitKind::DataSize,
+                    limit: tx_limit,
+                    used: needs,
+                    frame_local: false,
+                },
+            );
+            assert_eq!(limit.latched(), Some(&check));
+        }
+    }
+
+    /// A `SELFDESTRUCT` that moved value to another account counts its transfer log with the
+    /// beneficiary's record, in one check, and reports the record's history alone. To the sender,
+    /// whose account the body counts, it is the log alone, and the log alone can cross.
+    #[test]
+    fn test_a_destruction_counts_its_transfer_log_with_its_beneficiary() {
+        let destruction = |beneficiary| StagedRecord::SelfDestruct {
+            had_value: true,
+            target_exists: true,
+            to_other_account: true,
+            beneficiary,
+        };
+        let mut limit = logging(EvmTxRuntimeLimits::no_limits());
+        limit.on_frame_init(&call_from_to(SENDER, CALLEE, U256::ZERO), 0);
+        limit.stage_record(destruction(TARGET));
+        let (check, history) = limit.commit_staged_record();
+        assert_eq!(check, LimitCheck::WithinLimit);
+        assert_eq!(history, HistoryBytes::Appended(WRITE_RECORD_SIZE), "the record's alone");
+        assert_eq!(
+            limit.usage(),
+            LimitUsage { data_size: WRITE_RECORD_SIZE + TRANSFER_LOG_SIZE, write_records: 1 },
+        );
+
+        let mut limit =
+            logging(EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(TRANSFER_LOG_SIZE - 1));
+        limit.on_frame_init(&call_from_to(SENDER, CALLEE, U256::ZERO), 0);
+        limit.stage_record(destruction(SENDER));
+        let (check, history) = limit.commit_staged_record();
+        assert_eq!(history, HistoryBytes::None);
+        assert_eq!(
+            check,
+            LimitCheck::ExceedsLimit {
+                kind: LimitKind::DataSize,
+                limit: TRANSFER_LOG_SIZE - 1,
+                used: TRANSFER_LOG_SIZE,
+                frame_local: false,
+            },
+            "the log alone crosses",
+        );
+
+        let mut limit = AdditionalLimit::default();
+        limit.on_frame_init(&call_from_to(SENDER, CALLEE, U256::ZERO), 0);
+        limit.stage_record(destruction(TARGET));
+        let _ = limit.commit_staged_record();
+        assert_eq!(limit.usage(), WRITE_RECORD, "no log, no bytes");
+    }
+
+    /// The transfer logs are the transaction's to set: a reset turns them off until the next
+    /// transaction sets them again.
+    #[test]
+    fn test_a_reset_turns_the_transfer_logs_off() {
+        let mut limit = logging(EvmTxRuntimeLimits::no_limits());
+        let input = call_from_to(SENDER, CALLEE, U256::from(1));
+        assert!(limit.frame_start_transfer_log(&input));
+        limit.reset();
+        assert!(!limit.frame_start_transfer_log(&input));
     }
 
     /// The allowance follows the transfer, and only the two schemes that can carry one: a `CALL`

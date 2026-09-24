@@ -3,7 +3,10 @@
 use alloy_consensus::transaction::Recovered;
 use alloy_evm::block::BlockExecutor;
 use alloy_primitives::{address, Address, Bytes, U256};
-use mega_evm::{test_utils::BytecodeBuilder, BlockGasCounters, BlockLimits, MegaTxEnvelope};
+use mega_evm::{
+    test_utils::{transfer_log, BytecodeBuilder},
+    BlockGasCounters, BlockLimits, MegaTxEnvelope,
+};
 use revm::{
     bytecode::opcode::{CALL, LOG0, LOG3, POP, PUSH0},
     database::State,
@@ -239,7 +242,8 @@ fn state_with_allowance() -> State<mega_evm::test_utils::MemoryDatabase> {
 
 /// A block reports the history bytes its transactions appended beside the history gas they paid,
 /// and the two columns part by what the history allowances paid: here one event per transaction,
-/// which the receiver's allowance paid in full.
+/// which the receiver's allowance paid in full. The transfer log each transfer leaves is in the
+/// receipt and in the block's data size, and in neither history column.
 #[test]
 fn test_a_block_reports_the_bytes_its_history_gas_does_not_cover() {
     if !mega_evm::active_satin_prices().is_constants() {
@@ -252,7 +256,9 @@ fn test_a_block_reports_the_bytes_its_history_gas_does_not_cover() {
     for nonce in 0..2 {
         let outcome = executor.run_transaction(&user_tx(nonce, 1_000_000)).expect("it executes");
         assert!(outcome.result.is_success(), "{:?}", outcome.result);
-        assert_eq!(outcome.result.logs().len(), 1, "the receiver emitted its event");
+        let logs = outcome.result.logs();
+        assert_eq!(logs.len(), 2, "the transfer's log and the receiver's event");
+        assert_eq!(logs[0], transfer_log(CONTRACT, RECEIVER, U256::from(1)));
         executor.commit_transaction_outcome(outcome).expect("the block has room");
     }
 
@@ -270,6 +276,11 @@ fn test_a_block_reports_the_bytes_its_history_gas_does_not_cover() {
 
     let (_, result) = executor.finish_with_counters().expect("the block finishes");
     assert_eq!(result.gas, counters, "the result carries both columns");
+    assert_eq!(
+        result.usage.data_size,
+        2 * (per_tx + mega_evm::TRANSFER_LOG_SIZE),
+        "the data size counts the transfer logs the history columns leave out",
+    );
 }
 
 /// A transaction bound by its floor adds its floor to the block's execution gas. Its history comes

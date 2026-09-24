@@ -20,8 +20,9 @@
 //! gas is what its own gas paid for.
 //!
 //! The byte count is the history the schedule prices, not the chain's physical growth: a
-//! transaction exempt from history gas reports none of the bytes it carries, and a body counts
-//! its five fixed write records even when fewer fee accounts are written.
+//! transaction exempt from history gas reports none of the bytes it carries, a body counts its
+//! five fixed write records even when fewer fee accounts are written, and the EIP-7708 transfer
+//! logs of its value movements, which nothing prices, are not in it.
 
 use revm::context::result::{ResultAndState, ResultGas};
 
@@ -74,7 +75,9 @@ pub struct MegaGasUsage {
     /// History gas spent, net of refills.
     pub history: u64,
     /// The bytes the transaction appended to history, whoever paid for them: its body, one write
-    /// record per account or storage write it kept, the logs it kept and the code it deposited.
+    /// record per account or storage write it kept, the logs it emitted and kept and the code it
+    /// deposited. The EIP-7708 transfer logs revm emits for its value movements are not among
+    /// them: nothing prices them.
     ///
     /// At the cost per history byte they are worth [`history`](Self::history) plus what the
     /// history allowances of its value transfers paid, which no gas ledger carries.

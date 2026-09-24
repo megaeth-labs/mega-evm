@@ -17,6 +17,9 @@
 //!   result, 200 times.
 //! - `system_address_misses`: the same 200 calls with a selector the contract does not intercept,
 //!   so each pays the dispatch's address match and selector peek and then runs the bytecode.
+//! - `value_calls`: 200 one-wei `CALL`s to an account with no code, which revm answers without
+//!   running: each frame start counts its records and its EIP-7708 transfer log before revm moves
+//!   the value and journals the log, and op-revm journals the same 200 logs.
 //! - `data_size_limit`: 200 fresh slots and 200 two-topic logs in one frame, run under a
 //!   transaction data-size limit equal to exactly what the transaction keeps, so every record is
 //!   checked against a limit it is about to reach (`satin`); the same one byte short of it, so the
@@ -51,10 +54,12 @@ use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 use mega_evm::{
     constants::COST_PER_HISTORY_BYTE,
     system::{IMegaAccessControl, ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE},
-    test_utils::{op_transaction, zero_fee_l1_block_info, BytecodeBuilder, MemoryDatabase},
+    test_utils::{
+        is_transfer_log, op_transaction, zero_fee_l1_block_info, BytecodeBuilder, MemoryDatabase,
+    },
     EvmTxRuntimeLimits, ExternalEnvs, LimitCheck, LimitKind, LimitUsage, MegaContext, MegaEvm,
-    MegaSpecId, TestExternalEnvs, LOG_BASE_SIZE, LOG_TOPIC_SIZE, MIN_BUCKET_SIZE, TX_BODY_SIZE,
-    WRITE_RECORD_SIZE,
+    MegaSpecId, TestExternalEnvs, LOG_BASE_SIZE, LOG_TOPIC_SIZE, MIN_BUCKET_SIZE,
+    TRANSFER_LOG_SIZE, TX_BODY_SIZE, WRITE_RECORD_SIZE,
 };
 use op_revm::{L1BlockInfo, OpEvm, OpSpecId, OpTransaction};
 use revm::{
@@ -77,6 +82,7 @@ const SALT_CALLER: Address = address!("0x000000000000000000000000000000000010000
 const INTERCEPTED: Address = address!("0x0000000000000000000000000000000000100007");
 const MISSING: Address = address!("0x0000000000000000000000000000000000100008");
 const LIMITED: Address = address!("0x0000000000000000000000000000000000100009");
+const VALUE_CALLER: Address = address!("0x000000000000000000000000000000000010000a");
 
 /// A selector `MegaAccessControl` intercepts, and one it does not.
 const IS_DISABLED: [u8; 4] = IMegaAccessControl::isVolatileDataAccessDisabledCall::SELECTOR;
@@ -198,6 +204,15 @@ fn salt_caller_code() -> Bytes {
     code.stop().build()
 }
 
+/// Sends one wei to [`CALLEE`], an account with no code, `REPEAT` times.
+fn value_caller_code() -> Bytes {
+    let mut code = BytecodeBuilder::default();
+    for _ in 0..REPEAT {
+        code = code.call(CALLEE, U256::from(1)).append(POP);
+    }
+    code.stop().build()
+}
+
 /// A SALT environment holding every bucket at `m` times the minimum capacity.
 fn salt_envs(m: u64) -> TestExternalEnvs {
     TestExternalEnvs::new().with_default_bucket_capacity(MIN_BUCKET_SIZE as u64 * m)
@@ -275,6 +290,8 @@ fn bench_transact(c: &mut Criterion) {
         .account_code(INTERCEPTED, system_caller_code(IS_DISABLED))
         .account_code(MISSING, system_caller_code(UNKNOWN_SELECTOR))
         .account_code(LIMITED, limited_code())
+        .account_balance(VALUE_CALLER, U256::from(REPEAT))
+        .account_code(VALUE_CALLER, value_caller_code())
         .account_code(ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE);
     let cfg = mega_context(db.clone()).cfg().clone();
 
@@ -289,6 +306,7 @@ fn bench_transact(c: &mut Criterion) {
         ("calldata", call_tx(CALLEE, Bytes::from(vec![0xab_u8; CALLDATA_LEN]), 30_000_000)),
         ("intercepted_calls", call_tx(INTERCEPTED, Bytes::new(), 30_000_000)),
         ("system_address_misses", call_tx(MISSING, Bytes::new(), 30_000_000)),
+        ("value_calls", call_tx(VALUE_CALLER, Bytes::new(), 30_000_000)),
     ];
 
     let mut group = c.benchmark_group("transact");
@@ -320,6 +338,15 @@ fn bench_transact(c: &mut Criterion) {
                 body * COST_PER_HISTORY_BYTE,
                 "the calldata must draw history gas, which is what this arm measures",
             ),
+            "value_calls" => {
+                let logs = satin.result.logs().iter().filter(|log| is_transfer_log(log)).count();
+                assert_eq!(logs, REPEAT as usize, "every call moved its wei and logged it");
+                assert_eq!(
+                    satin.usage.data_size - satin.usage.write_records * WRITE_RECORD_SIZE,
+                    body + REPEAT * TRANSFER_LOG_SIZE,
+                    "every transfer log was counted, which is what this arm measures",
+                );
+            }
             _ => {}
         }
         group.bench_function(format!("{workload}/satin"), |b| {

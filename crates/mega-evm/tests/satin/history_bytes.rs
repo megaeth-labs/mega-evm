@@ -18,10 +18,11 @@ use mega_evm::{
         IMegaAccessControl, IOracle, ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE,
         ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE,
     },
-    test_utils::{op_transaction, BytecodeBuilder, MemoryDatabase},
+    test_utils::{is_transfer_log, op_transaction, BytecodeBuilder, MemoryDatabase},
     untouched_create_gas, EvmTxRuntimeLimits, MegaContext, MegaEvm, MegaTransaction,
     MegaTransactionOutcome, ACCESS_LIST_ADDRESS_SIZE, ACCESS_LIST_SLOT_SIZE, AUTHORIZATION_SIZE,
-    LOG_BASE_SIZE, LOG_TOPIC_SIZE, STORAGE_CALL_STIPEND_BYTES, TX_BODY_SIZE, WRITE_RECORD_SIZE,
+    LOG_BASE_SIZE, LOG_TOPIC_SIZE, STORAGE_CALL_STIPEND_BYTES, TRANSFER_LOG_SIZE, TX_BODY_SIZE,
+    WRITE_RECORD_SIZE,
 };
 use revm::{
     bytecode::opcode::{
@@ -864,16 +865,18 @@ enum Run {
 /// table, record by record, so they move together at every site both count — the body, calldata,
 /// the access list, authorizations, logs, write records and deployed code — and on every path
 /// that takes a record back: a failed creation, output revm does not deposit, a frame answered
-/// without running, a stop. The one site they part at is an Oracle hint, whose payload is data
-/// size and never history. None of these cases draws on an allowance, so the history gas is the
-/// bytes at the price as well.
+/// without running, a stop. They part at two sites: an Oracle hint, whose payload is data size and
+/// never history, and the transfer log a kept value movement leaves, which is data size and never
+/// history either — the history columns stay where they are, and the receipt carries the log. None
+/// of these cases draws on an allowance, so the history gas is the bytes at the price as well.
 #[test]
 fn test_the_history_bytes_are_the_data_size_every_record_kept() {
     if runs_at_measurement_prices() {
         return;
     }
     let hint = hint_call().len() as u64;
-    type Case = (&'static str, fn() -> MemoryDatabase, fn(u64) -> MegaTransaction, Run, u64, u64);
+    type Case =
+        (&'static str, fn() -> MemoryDatabase, fn(u64) -> MegaTransaction, Run, u64, u64, u64);
     let cases: [Case; 23] = [
         (
             "the body",
@@ -881,6 +884,7 @@ fn test_the_history_bytes_are_the_data_size_every_record_kept() {
             |gas| call(CALLER, CALLEE, U256::ZERO, gas),
             Run::Plain,
             TX_BODY_SIZE,
+            0,
             0,
         ),
         (
@@ -890,6 +894,7 @@ fn test_the_history_bytes_are_the_data_size_every_record_kept() {
             Run::Plain,
             TX_BODY_SIZE + 100,
             0,
+            0,
         ),
         (
             "an access list",
@@ -897,6 +902,7 @@ fn test_the_history_bytes_are_the_data_size_every_record_kept() {
             |gas| with_access_list(&[(CALLEE, 2), (PAYEE, 1), (FRESH, 0)], gas),
             Run::Plain,
             TX_BODY_SIZE + 3 * ACCESS_LIST_ADDRESS_SIZE + 3 * ACCESS_LIST_SLOT_SIZE,
+            0,
             0,
         ),
         (
@@ -906,6 +912,7 @@ fn test_the_history_bytes_are_the_data_size_every_record_kept() {
             Run::Plain,
             TX_BODY_SIZE + 2 * AUTHORIZATION_SIZE + WRITE_RECORD_SIZE,
             0,
+            0,
         ),
         (
             "a log",
@@ -913,6 +920,7 @@ fn test_the_history_bytes_are_the_data_size_every_record_kept() {
             |gas| call(CALLER, CALLEE, U256::ZERO, gas),
             Run::Plain,
             TX_BODY_SIZE + log_bytes(2, 50),
+            0,
             0,
         ),
         (
@@ -925,6 +933,7 @@ fn test_the_history_bytes_are_the_data_size_every_record_kept() {
             Run::Plain,
             TX_BODY_SIZE,
             0,
+            0,
         ),
         (
             "a storage write",
@@ -932,6 +941,7 @@ fn test_the_history_bytes_are_the_data_size_every_record_kept() {
             |gas| call(CALLER, CALLEE, U256::ZERO, gas),
             Run::Plain,
             TX_BODY_SIZE + WRITE_RECORD_SIZE,
+            0,
             0,
         ),
         (
@@ -947,6 +957,7 @@ fn test_the_history_bytes_are_the_data_size_every_record_kept() {
             Run::Plain,
             TX_BODY_SIZE,
             0,
+            0,
         ),
         (
             "a value transfer's two records",
@@ -955,6 +966,7 @@ fn test_the_history_bytes_are_the_data_size_every_record_kept() {
             Run::Plain,
             TX_BODY_SIZE + 2 * WRITE_RECORD_SIZE,
             0,
+            1,
         ),
         (
             "a SELFDESTRUCT's beneficiary",
@@ -963,6 +975,7 @@ fn test_the_history_bytes_are_the_data_size_every_record_kept() {
             Run::Plain,
             TX_BODY_SIZE + WRITE_RECORD_SIZE,
             0,
+            1,
         ),
         (
             "a creation transaction's code",
@@ -970,6 +983,7 @@ fn test_the_history_bytes_are_the_data_size_every_record_kept() {
             |gas| create(CALLER, deploying(), gas),
             Run::Plain,
             TX_BODY_SIZE + deploying().len() as u64 + WRITE_RECORD_SIZE + DEPLOYED,
+            0,
             0,
         ),
         (
@@ -979,6 +993,7 @@ fn test_the_history_bytes_are_the_data_size_every_record_kept() {
             Run::Plain,
             TX_BODY_SIZE + 2 * WRITE_RECORD_SIZE + DEPLOYED,
             0,
+            0,
         ),
         (
             "a failed creation: its creator's nonce, and no code",
@@ -986,6 +1001,7 @@ fn test_the_history_bytes_are_the_data_size_every_record_kept() {
             |gas| call(CALLER, CALLEE, U256::ZERO, gas),
             Run::Plain,
             TX_BODY_SIZE + WRITE_RECORD_SIZE,
+            0,
             0,
         ),
         (
@@ -995,6 +1011,7 @@ fn test_the_history_bytes_are_the_data_size_every_record_kept() {
             Run::Plain,
             TX_BODY_SIZE + WRITE_RECORD_SIZE,
             0,
+            0,
         ),
         (
             "output past the code-size limit",
@@ -1003,6 +1020,7 @@ fn test_the_history_bytes_are_the_data_size_every_record_kept() {
             Run::Plain,
             TX_BODY_SIZE + WRITE_RECORD_SIZE,
             0,
+            0,
         ),
         (
             "a creation transaction whose output EIP-3541 refuses",
@@ -1010,6 +1028,7 @@ fn test_the_history_bytes_are_the_data_size_every_record_kept() {
             |gas| create(CALLER, refused_code(), gas),
             Run::Plain,
             TX_BODY_SIZE + refused_code().len() as u64,
+            0,
             0,
         ),
         (
@@ -1022,6 +1041,7 @@ fn test_the_history_bytes_are_the_data_size_every_record_kept() {
             Run::Plain,
             TX_BODY_SIZE + WRITE_RECORD_SIZE,
             0,
+            0,
         ),
         (
             "a value call an interceptor refuses without a frame",
@@ -1029,6 +1049,7 @@ fn test_the_history_bytes_are_the_data_size_every_record_kept() {
             |gas| call(CALLER, CALLEE, U256::ZERO, gas),
             Run::Plain,
             TX_BODY_SIZE,
+            0,
             0,
         ),
         (
@@ -1038,6 +1059,7 @@ fn test_the_history_bytes_are_the_data_size_every_record_kept() {
             Run::AnsweringCreations,
             TX_BODY_SIZE,
             0,
+            0,
         ),
         (
             "a first frame answered with the stop",
@@ -1045,6 +1067,7 @@ fn test_the_history_bytes_are_the_data_size_every_record_kept() {
             |gas| call(CALLER, FRESH, U256::from(1), gas),
             Run::Limited(TX_BODY_SIZE + WRITE_RECORD_SIZE - 1),
             TX_BODY_SIZE,
+            0,
             0,
         ),
         (
@@ -1060,6 +1083,7 @@ fn test_the_history_bytes_are_the_data_size_every_record_kept() {
             Run::Limited(TX_BODY_SIZE + LOG_BASE_SIZE + WRITE_RECORD_SIZE - 1),
             TX_BODY_SIZE,
             0,
+            0,
         ),
         (
             "a hint sent by the transaction: its calldata is history, its payload is not",
@@ -1068,6 +1092,7 @@ fn test_the_history_bytes_are_the_data_size_every_record_kept() {
             Run::Plain,
             TX_BODY_SIZE + hint_call().len() as u64,
             1,
+            0,
         ),
         (
             "a hint sent from a frame",
@@ -1079,10 +1104,11 @@ fn test_the_history_bytes_are_the_data_size_every_record_kept() {
             Run::Plain,
             TX_BODY_SIZE,
             1,
+            0,
         ),
     ];
 
-    for (name, db, tx, run, bytes, hints) in cases {
+    for (name, db, tx, run, bytes, hints, moves) in cases {
         for gas_limit in GAS_LIMITS {
             let limit = match run {
                 Run::Limited(limit) => limit,
@@ -1107,9 +1133,15 @@ fn test_the_history_bytes_are_the_data_size_every_record_kept() {
                 "{name} at {gas_limit}: the history bytes"
             );
             assert_eq!(
+                outcome.result.logs().iter().filter(|log| is_transfer_log(log)).count() as u64,
+                moves,
+                "{name} at {gas_limit}: the transfer logs kept",
+            );
+            assert_eq!(
                 outcome.usage.data_size,
-                bytes + hints * hint,
-                "{name} at {gas_limit}: the data size is the history bytes and the hints' payloads",
+                bytes + hints * hint + moves * TRANSFER_LOG_SIZE,
+                "{name} at {gas_limit}: the data size is the history bytes, the hints' payloads \
+                 and the transfer logs",
             );
             assert_eq!(
                 outcome.gas.history,

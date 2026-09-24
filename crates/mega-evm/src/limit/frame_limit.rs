@@ -269,6 +269,24 @@ impl FrameLimitTracker {
         self.total_used = self.total_used.saturating_sub(WRITE_RECORD);
     }
 
+    /// Takes back everything the running frame's start counted, its caller's record included
+    /// ([`drop_caller_record`](Self::drop_caller_record)): the start did not happen after all, so
+    /// the lane keeps nothing whatever the frame's answer, and its caller gets back all it paid
+    /// for the records. Must run before the frame runs, when its start is all the lane holds.
+    pub(crate) fn undo_frame_start(&mut self) {
+        self.drop_caller_record();
+        let Some(lane) = self.lanes.last_mut() else { return };
+        debug_assert_eq!(
+            lane.refund,
+            LimitUsage::ZERO,
+            "a frame that has not run took nothing back"
+        );
+        debug_assert_eq!(lane.log_and_code_bytes, 0, "a frame that has not run logged nothing");
+        self.total_used = self.total_used.saturating_sub(lane.used);
+        lane.used = LimitUsage::ZERO;
+        lane.records_made = false;
+    }
+
     /// Pops the lane of the frame that returned: `success` merges it into its caller's lane (or
     /// the transaction's), a failure discards it.
     ///

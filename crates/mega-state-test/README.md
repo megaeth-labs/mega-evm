@@ -11,7 +11,7 @@ The library keeps the `state_test` import name.
   Every test either passes, is skipped for a reason the reference runner shares, or fails on a [registered deviation](DEVIATIONS.md); one failure no deviation explains fails the gate.
 - **Satin** — a report.
   The same fixtures under Satin's own configuration, counted by outcome.
-  Satin prices state, history and the access entries it pressed back on purpose, so almost every stateful fixture differs; the count is what CI shows, and it never fails the job.
+  Satin prices state, history and the access entries it pressed back on purpose, and logs every value movement (EIP-7708) where Osaka's fixtures log none, so almost every stateful fixture differs; the count is what CI shows, and it never fails the job.
 
 A run executes the entries one fork defines: Osaka's in the main fixture release, Amsterdam's in the glamsterdam devnet release.
 Satin's base spec is Osaka, so those are the two forks it can be configured to.

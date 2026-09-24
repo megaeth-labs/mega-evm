@@ -13,6 +13,10 @@
 //! running neither takes one nor leaves one behind. The three leak paths below are the three
 //! places where a frame's allowance could escape the frame: an interceptor answering in its
 //! place, a transaction-level stop unwinding it, and the frame returning to its caller.
+//!
+//! The transfer log a value call leaves is not the callee's event and draws nothing from the
+//! allowance: it costs no history at all, so the event still has the whole allowance to itself.
+//! The events below are counted apart from it.
 
 use alloy_primitives::{address, Address, Bytes, U256};
 use alloy_sol_types::SolCall;
@@ -20,9 +24,9 @@ use mega_evm::{
     constants::COST_PER_HISTORY_BYTE,
     storage_call_stipend,
     system::{IMegaAccessControl, ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE},
-    test_utils::{BytecodeBuilder, MemoryDatabase},
+    test_utils::{is_transfer_log, transfer_log, BytecodeBuilder, MemoryDatabase},
     EvmTxRuntimeLimits, LimitKind, MegaEvm, MegaTransaction, MegaTransactionOutcome,
-    STORAGE_CALL_STIPEND_BYTES, TX_BODY_SIZE, WRITE_RECORD_SIZE,
+    STORAGE_CALL_STIPEND_BYTES, TRANSFER_LOG_SIZE, TX_BODY_SIZE, WRITE_RECORD_SIZE,
 };
 use revm::bytecode::opcode::{
     ADDRESS, CALL, CALLCODE, CALLDATASIZE, DELEGATECALL, GAS, ISZERO, JUMPDEST, JUMPI, LOG3, POP,
@@ -84,6 +88,11 @@ fn db(sender_code: Bytes, receiver_code: Bytes) -> MemoryDatabase {
         .account_code(RECEIVER, receiver_code)
 }
 
+/// The events the contracts emitted: the logs without the transfer logs of the value moved.
+fn events(outcome: &MegaTransactionOutcome) -> Vec<&alloy_primitives::Log> {
+    outcome.result.logs().iter().filter(|log| !is_transfer_log(log)).collect()
+}
+
 fn run(db: MemoryDatabase, tx: MegaTransaction) -> MegaTransactionOutcome {
     MegaEvm::new(context(db)).execute_transaction(tx).expect("the transaction is valid")
 }
@@ -126,7 +135,12 @@ fn test_a_transfer_can_emit_one_event_because_of_the_allowance() {
     let outcome = run(db(sender, receiver), call(CALLER, SENDER, U256::ZERO, GAS_LIMIT));
 
     assert!(outcome.result.is_success(), "{:?}", outcome.result);
-    assert_eq!(outcome.result.logs().len(), 1, "the hook emitted its event");
+    assert_eq!(events(&outcome).len(), 1, "the hook emitted its event");
+    assert_eq!(
+        outcome.result.logs()[0],
+        transfer_log(SENDER, RECEIVER, U256::from(1)),
+        "after the transfer's own log, which took nothing from the allowance",
+    );
     assert_eq!(
         outcome.gas.history,
         body() + 2 * record(),
@@ -303,7 +317,7 @@ fn test_an_intercepted_call_neither_takes_nor_adds_an_allowance() {
 
     let one = run(with_controls(one_event), call(CALLER, SENDER, U256::ZERO, GAS_LIMIT));
     assert!(one.result.is_success(), "{:?}", one.result);
-    assert_eq!(one.result.logs().len(), 1, "the receiver still had its allowance");
+    assert_eq!(events(&one).len(), 1, "the receiver still had its allowance");
     assert_eq!(one.gas.history, body() + 2 * record(), "the refusal cost no history");
 
     let two = run(with_controls(two_events), call(CALLER, SENDER, U256::ZERO, GAS_LIMIT));
@@ -421,7 +435,8 @@ fn test_a_chain_of_transfers_grants_each_frame_its_own_allowance() {
     let outcome = run(db, call(CALLER, SENDER, U256::ZERO, GAS_LIMIT));
 
     assert!(outcome.result.is_success(), "{:?}", outcome.result);
-    assert_eq!(outcome.result.logs().len(), 2, "both hops emitted their event");
+    assert_eq!(events(&outcome).len(), 2, "both hops emitted their event");
+    assert_eq!(outcome.result.logs().len(), 4, "beside the two transfers' logs");
     // The first transfer writes the sender's account and the middle one's; the second writes the
     // receiver's, the middle account being recorded already by the value it received.
     assert_eq!(
@@ -525,10 +540,16 @@ fn test_a_frame_budget_revert_does_not_hand_the_allowance_back() {
         return;
     }
     // The receiver spends its allowance on an event and then crosses its own budget with a
-    // second one; the sender carries on and the transaction succeeds.
+    // second one; the sender carries on and the transaction succeeds. Its budget is 98% of the
+    // sender's 500 bytes, 490: its start — the two records and the transfer log — and one event
+    // fit, a second event does not.
     let receiver = event().append_many(event().build().iter().copied()).append(STOP).build();
     let sender = call_with(CALL, RECEIVER, 1, 1_000_000).append(STOP).build();
-    let limits = EvmTxRuntimeLimits::no_limits().with_frame_data_size_limit(200);
+    let limits = EvmTxRuntimeLimits::no_limits().with_frame_data_size_limit(500);
+    let start = 2 * WRITE_RECORD_SIZE + TRANSFER_LOG_SIZE;
+    assert!(
+        start + STORAGE_CALL_STIPEND_BYTES <= 490 && start + 2 * STORAGE_CALL_STIPEND_BYTES > 490
+    );
 
     let spent = run_limited(
         db(sender.clone(), receiver),
@@ -594,6 +615,6 @@ fn test_a_transfer_forwarding_no_gas_still_buys_its_event() {
         run(db(sender, event().append(STOP).build()), call(CALLER, SENDER, U256::ZERO, GAS_LIMIT));
 
     assert!(outcome.result.is_success(), "{:?}", outcome.result);
-    assert_eq!(outcome.result.logs().len(), 1, "the hook emitted its event");
+    assert_eq!(events(&outcome).len(), 1, "the hook emitted its event");
     assert_eq!(outcome.gas.history, body() + 2 * record());
 }

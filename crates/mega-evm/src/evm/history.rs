@@ -144,6 +144,165 @@ mod tests {
         assert_eq!(storage_call_stipend(), history_gas(log_history_bytes(3, 32)).unwrap());
     }
 
+    /// Every way a transaction moves value, as a name, a database, the transaction at a gas limit
+    /// and the transfer logs it keeps.
+    #[allow(clippy::type_complexity)]
+    fn value_movements() -> Vec<(
+        &'static str,
+        crate::test_utils::MemoryDatabase,
+        fn(u64) -> crate::MegaTransaction,
+        u64,
+    )> {
+        use crate::test_utils::{BytecodeBuilder, MemoryDatabase};
+        use alloy_primitives::{address, Address, Bytes, TxKind, U256};
+        use revm::bytecode::opcode::{
+            CALL, CREATE, CREATE2, GAS, LOG3, POP, PUSH0, PUSH1, REVERT, SELFDESTRUCT, STOP,
+        };
+
+        const CALLER: Address = address!("00000000000000000000000000000000000c0001");
+        const ACTOR: Address = address!("00000000000000000000000000000000000c0002");
+        const RECEIVER: Address = address!("00000000000000000000000000000000000c0003");
+        const IDENTITY: Address = address!("0000000000000000000000000000000000000004");
+
+        fn tx(to: TxKind, value: u64, gas_limit: u64) -> crate::MegaTransaction {
+            alloy_op_evm::OpTx(crate::test_utils::op_transaction(revm::context::TxEnv {
+                caller: CALLER,
+                kind: to,
+                value: U256::from(value),
+                gas_limit,
+                ..Default::default()
+            }))
+        }
+        let calling = |target: Address, gas: Option<u64>| {
+            let code = BytecodeBuilder::default()
+                .append_many([PUSH0, PUSH0, PUSH0, PUSH0])
+                .append(PUSH1)
+                .append(1)
+                .push_address(target);
+            let code = match gas {
+                Some(gas) => code.push_number(gas),
+                None => code.append(GAS),
+            };
+            code.append(CALL).append(POP)
+        };
+        let funded = || {
+            MemoryDatabase::default()
+                .account_balance(CALLER, U256::from(10u64.pow(18)))
+                .account_balance(ACTOR, U256::from(1_000))
+        };
+        let actor = |code: BytecodeBuilder| funded().account_code(ACTOR, code.stop().build());
+        let event = BytecodeBuilder::default()
+            .append_many([PUSH0, PUSH0, PUSH0])
+            .push_number(32_u8)
+            .append(PUSH0)
+            .append(LOG3)
+            .stop()
+            .build();
+        let endowing = |opcode| {
+            let code = BytecodeBuilder::default();
+            let code = if opcode == CREATE2 { code.append(PUSH0) } else { code };
+            code.append_many([PUSH0, PUSH0, PUSH1, 1, opcode, POP])
+        };
+        vec![
+            ("the transaction's value", funded(), |gas| tx(TxKind::Call(RECEIVER), 5, gas), 1),
+            ("a creation transaction's endowment", funded(), |gas| tx(TxKind::Create, 5, gas), 1),
+            (
+                "a value CALL revm builds a frame for",
+                actor(calling(RECEIVER, None)).account_code(RECEIVER, Bytes::from_static(&[STOP])),
+                |gas| tx(TxKind::Call(ACTOR), 0, gas),
+                1,
+            ),
+            (
+                "a value CALL revm answers, to an account with no code",
+                actor(calling(RECEIVER, None)),
+                |gas| tx(TxKind::Call(ACTOR), 0, gas),
+                1,
+            ),
+            (
+                "a value CALL to a precompile",
+                actor(calling(IDENTITY, None)),
+                |gas| tx(TxKind::Call(ACTOR), 0, gas),
+                1,
+            ),
+            (
+                "a CREATE's and a CREATE2's endowments",
+                actor(BytecodeBuilder::default().append_many(
+                    endowing(CREATE).append_many(endowing(CREATE2).build_vec()).build_vec(),
+                )),
+                |gas| tx(TxKind::Call(ACTOR), 0, gas),
+                2,
+            ),
+            (
+                "a SELFDESTRUCT's balance",
+                funded().account_code(
+                    ACTOR,
+                    BytecodeBuilder::default().push_address(RECEIVER).append(SELFDESTRUCT).build(),
+                ),
+                |gas| tx(TxKind::Call(ACTOR), 0, gas),
+                1,
+            ),
+            (
+                "a transfer passed on to a hook whose event its allowance pays",
+                actor(calling(RECEIVER, Some(2_300))).account_code(RECEIVER, event),
+                |gas| tx(TxKind::Call(ACTOR), 7, gas),
+                2,
+            ),
+            (
+                "a value CALL whose callee reverts",
+                actor(calling(RECEIVER, None))
+                    .account_code(RECEIVER, Bytes::from_static(&[PUSH0, PUSH0, REVERT])),
+                |gas| tx(TxKind::Call(ACTOR), 0, gas),
+                0,
+            ),
+        ]
+    }
+
+    /// A transfer log costs nothing: every way a transaction moves value spends the same gas on
+    /// every ledger with EIP-7708 switched on as with it off, reports the same history bytes and
+    /// write records, and ends in the same state — below the execution cap and above it. What
+    /// differs is the log in the receipt, beside the events the contracts emitted, and its 160
+    /// bytes of data size, one per movement the transaction keeps. The allowance a value call
+    /// grants pays for its callee's event either way: the transfer log draws nothing from it.
+    #[test]
+    fn test_a_transfer_log_costs_no_gas_on_any_ledger() {
+        use crate::{
+            constants::TX_GAS_LIMIT_CAP,
+            test_utils::{is_transfer_log, zero_fee_l1_block_info},
+            MegaContext, MegaEvm, MegaSpecId, TRANSFER_LOG_SIZE,
+        };
+        use revm::context::BlockEnv;
+
+        let block = BlockEnv { gas_limit: 10_000_000_000, ..Default::default() };
+        for (name, db, tx, moves) in value_movements() {
+            for gas_limit in [20_000_000, TX_GAS_LIMIT_CAP + 100_000_000] {
+                let context = || {
+                    MegaContext::new(db.clone(), MegaSpecId::SATIN)
+                        .with_block(block.clone())
+                        .with_chain(zero_fee_l1_block_info())
+                };
+                let run = |ctx| MegaEvm::new(ctx).execute_transaction(tx(gas_limit)).unwrap();
+                let on = run(context());
+                let off = run(context().without_transfer_logs());
+                let case = format!("{name} at {gas_limit}");
+
+                assert!(on.result.is_success(), "{case}: {:?}", on.result);
+                assert_eq!(on.gas, off.gas, "{case}: every ledger");
+                assert_eq!(on.state, off.state, "{case}: the state");
+                assert_eq!(on.usage.write_records, off.usage.write_records, "{case}: the records");
+                assert_eq!(
+                    on.usage.data_size,
+                    off.usage.data_size + moves * TRANSFER_LOG_SIZE,
+                    "{case}: the data size",
+                );
+                let (logs, events): (Vec<_>, Vec<_>) =
+                    on.result.logs().iter().cloned().partition(is_transfer_log);
+                assert_eq!(logs.len() as u64, moves, "{case}: the transfer logs");
+                assert_eq!(events, off.result.logs(), "{case}: the events");
+                assert!(!off.result.logs().iter().any(is_transfer_log), "{case}: none without");
+            }
+        }
+    }
+
     /// A charge is its byte count at the cost per history byte, and a count with no price
     /// reports none.
     #[test]

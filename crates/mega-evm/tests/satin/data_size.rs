@@ -16,7 +16,7 @@ use mega_evm::{
     test_utils::{BytecodeBuilder, MemoryDatabase},
     EvmTxRuntimeLimits, LimitCheck, LimitKind, LimitUsage, MegaContext, MegaEvm, MegaHaltReason,
     MegaLimitExceeded, MegaTransactionOutcome, FRAME_DATA_SHARE_DENOMINATOR,
-    FRAME_DATA_SHARE_NUMERATOR, WRITE_RECORD_SIZE,
+    FRAME_DATA_SHARE_NUMERATOR, TRANSFER_LOG_SIZE, WRITE_RECORD_SIZE,
 };
 use revm::{
     bytecode::opcode::{
@@ -642,8 +642,9 @@ fn test_a_storage_write_one_byte_over_stops_on_the_write() {
     assert_eq!(over.usage, LimitUsage { data_size: body, write_records: 0 });
 }
 
-/// A value transfer's recipient is one 40-byte record. One byte over that stops on the record,
-/// before the recipient's code runs.
+/// A value transfer's recipient is one 40-byte record, and the move leaves a transfer log; both are
+/// counted when the transaction's frame starts. A limit either of them crosses stops the frame
+/// there, before any value moves and before the recipient's code runs.
 #[test]
 fn test_an_account_write_one_byte_over_stops_on_the_recipient() {
     let db = || {
@@ -654,22 +655,26 @@ fn test_an_account_write_one_byte_over_stops_on_the_recipient() {
     };
     let body = mega_evm::TX_BODY_SIZE;
     let record = 40;
+    let start = record + TRANSFER_LOG_SIZE;
 
-    let fits = run_at(db(), call(CALLER, B, U256::from(1), GAS_LIMIT), body + record + record);
+    let fits = run_at(db(), call(CALLER, B, U256::from(1), GAS_LIMIT), body + start + record);
     assert!(fits.result.is_success(), "{:?}", fits.result);
     assert_eq!(fits.state[&B].info.balance, U256::from(1));
-    assert_eq!(fits.usage, LimitUsage { data_size: body + record + record, write_records: 2 });
+    assert_eq!(fits.usage, LimitUsage { data_size: body + start + record, write_records: 2 });
 
-    let over = run_at(db(), call(CALLER, B, U256::from(1), GAS_LIMIT), body + record - 1);
-    assert_stopped(&over, body + record - 1, body + record);
-    assert_eq!(over.usage, LimitUsage { data_size: body, write_records: 0 });
-    assert_eq!(
-        over.state.get(&B).map(|account| account.info.balance).unwrap_or_default(),
-        U256::ZERO
-    );
-    assert!(over.state.get(&B).is_none_or(|account| {
-        account.storage.get(&U256::ZERO).is_none_or(|slot| !slot.is_changed())
-    }));
+    for limit in [body + record - 1, body + start - 1] {
+        let over = run_at(db(), call(CALLER, B, U256::from(1), GAS_LIMIT), limit);
+        assert_stopped(&over, limit, body + start);
+        assert!(over.result.logs().is_empty(), "limit {limit}: no transfer log");
+        assert_eq!(over.usage, LimitUsage { data_size: body, write_records: 0 });
+        assert_eq!(
+            over.state.get(&B).map(|account| account.info.balance).unwrap_or_default(),
+            U256::ZERO
+        );
+        assert!(over.state.get(&B).is_none_or(|account| {
+            account.storage.get(&U256::ZERO).is_none_or(|slot| !slot.is_changed())
+        }));
+    }
 }
 
 /// What one gas limit did with a transaction whose data size approaches the limit.
@@ -771,21 +776,30 @@ const FRESH_SLOT_COUNTED_AT: u64 = 162_306;
 /// history is paid. Short of it, the same write halts out of gas. So a crossing limit moves the
 /// out-of-gas boundary down by exactly the record's history, at a storage write, a log and a
 /// `SELFDESTRUCT` alike.
+///
+/// A `SELFDESTRUCT` that moves value counts its transfer log with its beneficiary's record, in one
+/// check, so the two cross together; the log is data size and not history, so the boundary moves
+/// by the record's history alone.
 #[test]
 fn test_whichever_of_gas_and_data_size_binds_first_is_reported() {
     let selfdestruct = BytecodeBuilder::default().push_address(B).append(SELFDESTRUCT).build();
     let sites = [
-        ("a fresh slot", fresh_slot(), WRITE_RECORD_SIZE),
-        ("a log of one byte", log0(1), mega_evm::LOG_BASE_SIZE + 1),
-        ("a SELFDESTRUCT that moves value", selfdestruct, WRITE_RECORD_SIZE),
+        ("a fresh slot", fresh_slot(), WRITE_RECORD_SIZE, WRITE_RECORD_SIZE),
+        ("a log of one byte", log0(1), mega_evm::LOG_BASE_SIZE + 1, mega_evm::LOG_BASE_SIZE + 1),
+        (
+            "a SELFDESTRUCT that moves value",
+            selfdestruct,
+            WRITE_RECORD_SIZE + TRANSFER_LOG_SIZE,
+            WRITE_RECORD_SIZE,
+        ),
     ];
-    for (name, code, bytes) in sites {
+    for (name, code, bytes, history_bytes) in sites {
         // One byte under the record, the record itself crosses.
         let crosses = mega_evm::TX_BODY_SIZE + bytes - 1;
         let fits = mega_evm::TX_BODY_SIZE + bytes;
         let counted_at = gas_where_the_write_is_counted(&code, crosses);
         let kept_at = gas_where_the_write_is_counted(&code, fits);
-        let history = mega_evm::history_gas(bytes).expect("the record has a price");
+        let history = mega_evm::history_gas(history_bytes).expect("the record has a price");
 
         assert_eq!(kept_at - counted_at, history, "{name}: a kept record costs its history");
         assert!(matches!(bound_at(&code, counted_at - 1, crosses), Bound::OutOfGas), "{name}");
@@ -836,14 +850,15 @@ fn test_the_fresh_slot_boundary_is_the_sum_of_its_parts() {
 /// pays for the records the frame's start makes at its opcode, before the frame is started and
 /// its records are counted. So the data-size limit does not move the out-of-gas boundary of a
 /// value `CALL`: the smallest gas limit that is not an out-of-gas is the same whether the two
-/// records cross the limit or fit it, and one gas below it is an out-of-gas under either.
+/// records and the transfer log cross the limit or fit it, and one gas below it is an out-of-gas
+/// under either. The log is charged nothing at all.
 #[test]
 fn test_a_frame_start_is_charged_before_its_records_are_counted() {
     let code = value_call_to_fresh();
-    // `A`'s account and `FRESH`'s: 80 bytes on top of the body.
-    let records = 2 * WRITE_RECORD_SIZE;
-    let crosses = mega_evm::TX_BODY_SIZE + records - 1;
-    let fits = mega_evm::TX_BODY_SIZE + records;
+    // `A`'s account and `FRESH`'s, and the transfer log: 240 bytes on top of the body.
+    let start = 2 * WRITE_RECORD_SIZE + TRANSFER_LOG_SIZE;
+    let crosses = mega_evm::TX_BODY_SIZE + start - 1;
+    let fits = mega_evm::TX_BODY_SIZE + start;
     let charged_at = gas_where_the_write_is_counted(&code, crosses);
 
     assert_eq!(gas_where_the_write_is_counted(&code, fits), charged_at);
