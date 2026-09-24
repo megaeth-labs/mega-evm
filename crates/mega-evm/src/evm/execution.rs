@@ -23,11 +23,12 @@ use revm::{
     },
     context_interface::{
         cfg::{gas::GasTracker, GasId, StateGasCharge, StateGasSite},
-        journaled_state::{account::JournaledAccountTr, entry::JournalEntry},
+        journaled_state::{account::JournaledAccountTr, entry::JournalEntry, JournalCheckpoint},
         Host,
     },
     handler::{
         evm::{ContextDbError, FrameInitResult, FrameTr},
+        execution::runtime_oog_unwind,
         instructions::InstructionProvider,
         EthFrame, EvmTr, EvmTrError, FrameInitOrResult, FrameResult, Handler, ItemOrResult,
         PreExecutionOutput,
@@ -266,8 +267,9 @@ where
     /// started, and the call is the transaction's own frame: the creation's result is settled into
     /// the call first, which answers in the `IKeylessDeploy` ABI ([`keyless::settle`]). The
     /// translation is made here, where every first-frame result arrives — a creation answered at
-    /// its start never returns through the frame lifecycle — and after the inspector saw the
-    /// creation end.
+    /// its start never returns through the frame lifecycle. The inspected path settles it earlier,
+    /// to tell the inspector the call ended ([`InspectorHandler::inspect_execution`]), and the
+    /// settlement here then finds nothing to do.
     fn last_frame_result(
         &mut self,
         evm: &mut Self::Evm,
@@ -378,6 +380,33 @@ where
         + IsTxError,
 {
     type IT = EthInterpreter;
+
+    /// revm's inspected execution, with the end of a keyless deployment's call reported.
+    ///
+    /// The call is the transaction's own frame, which runs no code, and its creation is the
+    /// outermost frame revm runs: revm's loop tells the inspector the creation ended, and nothing
+    /// tells it the call did. So the creation is settled into the call here, before
+    /// [`last_frame_result`](Handler::last_frame_result) would settle it, and the inspector is
+    /// told the call ended with the answer the settlement made. The rest is revm's.
+    fn inspect_execution(
+        &mut self,
+        evm: &mut Self::Evm,
+        checkpoint: JournalCheckpoint,
+        gas: &mut GasTracker,
+    ) -> Result<Option<FrameResult>, Self::Error> {
+        let Some(first_frame_input) = self.first_frame_input(evm, gas)? else {
+            unwind_runtime_oog(evm.ctx(), checkpoint)?;
+            return Ok(None);
+        };
+        evm.ctx().journal_mut().checkpoint_commit();
+        let mut frame_result = self.inspect_run_exec_loop(evm, first_frame_input)?;
+        let (ctx, inspector) = evm.ctx_inspector();
+        if let Some(call) = keyless::settle::<_, _, Self::Error>(ctx, &mut frame_result)? {
+            frame_end_checked(ctx, inspector, &FrameInput::Call(call), &mut frame_result);
+        }
+        self.last_frame_result(evm, &mut frame_result, gas)?;
+        Ok(Some(frame_result))
+    }
 }
 
 impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, ExtEnvs> {
@@ -593,34 +622,37 @@ where
     /// itself never reaches [`EvmTr::frame_init`], so an empty lane stands in for it, and its
     /// answer is held to the state-gas limit as revm's own is ([`hold_upfront_state_gas`]).
     ///
-    /// The keyless rewrite runs before the inspector is told the frame starts, so a keyless
-    /// deployment starts as the creation it is: the inspector sees `create` and `create_end`, and
-    /// every step of the init code between them. A `keylessDeploy` call the rewrite answers is
-    /// seen as the call it is, `call` and `call_end` paired around the answer.
+    /// A keyless deployment is seen as the frames it is made of. The inspector is told the
+    /// transaction's `keylessDeploy` call starts; the keyless rewrite then turns it into its
+    /// creation, and the inspector is told the creation starts, as the call's child, one journal
+    /// depth below it. Every step of the init code follows, then the creation's end, and the
+    /// call's end once the creation is settled into it
+    /// ([`inspect_execution`](InspectorHandler::inspect_execution)). A `keylessDeploy` call the
+    /// rewrite answers is seen as the call it is, `call` and `call_end` paired around the answer.
     #[inline]
     fn inspect_frame_init(
         &mut self,
         mut frame_init: FrameInit,
     ) -> Result<FrameInitResult<'_, Self::Frame>, ContextDbError<Self::Context>> {
         let (ctx, inspector) = self.ctx_inspector();
-        let keyless = keyless::rewrite(ctx, &mut frame_init)?;
-        if let Some(mut output) = frame_start(ctx, inspector, &mut frame_init.frame_input) {
-            // The inspector answered the frame. The latch and the depth guard still hold: an
-            // answer cannot start a frame of a stopped transaction, nor reach past the call-stack
-            // limit.
-            if let Some(answer) = answer_before_building(ctx, &frame_init)? {
-                output = answer;
-            }
-            ctx.additional_limit.push_empty_frame();
-            hold_upfront_state_gas(ctx, Some(&mut output));
-            frame_end_checked(ctx, inspector, &frame_init.frame_input, &mut output);
-            return Ok(ItemOrResult::Result(output));
+        if let Some(output) = frame_start(ctx, inspector, &mut frame_init.frame_input) {
+            return answered_by_inspector(ctx, inspector, &frame_init, output)
+                .map(ItemOrResult::Result);
         }
-        if let Rewrite::Answered(mut output) = keyless {
-            ctx.additional_limit.push_empty_frame();
-            hold_upfront_state_gas(ctx, Some(&mut output));
-            frame_end_checked(ctx, inspector, &frame_init.frame_input, &mut output);
-            return Ok(ItemOrResult::Result(output));
+        match keyless::rewrite(ctx, &mut frame_init)? {
+            Rewrite::NotKeyless => {}
+            Rewrite::Answered(mut output) => {
+                ctx.additional_limit.push_empty_frame();
+                hold_upfront_state_gas(ctx, Some(&mut output));
+                frame_end_checked(ctx, inspector, &frame_init.frame_input, &mut output);
+                return Ok(ItemOrResult::Result(output));
+            }
+            Rewrite::Rewritten => {
+                if let Some(output) = frame_start(ctx, inspector, &mut frame_init.frame_input) {
+                    return answered_by_inspector(ctx, inspector, &frame_init, output)
+                        .map(ItemOrResult::Result);
+                }
+            }
         }
         let frame_input = frame_init.frame_input.clone();
         let logs_i = ctx.journal().logs().len();
@@ -873,6 +905,39 @@ fn hold_upfront_state_gas<DB: Database, ExtEnvs: ExternalEnvTypes>(
     {
         ctx.additional_limit.apply_latch(answer);
     }
+}
+
+/// revm's unwinding of a runtime phase that ran out of gas before the first frame.
+///
+/// Called through this function rather than directly: the inspector handler's bounds keep the
+/// compiler from reading the journal's database error as `DB::Error`, and here nothing does.
+fn unwind_runtime_oog<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    ctx: &mut MegaContext<DB, ExtEnvs>,
+    checkpoint: JournalCheckpoint,
+) -> Result<(), DB::Error> {
+    runtime_oog_unwind(ctx, checkpoint)
+}
+
+/// Settles `output`, the answer the inspector gave the frame `frame_init` starts in its place.
+/// The latch and the depth guard still hold: an answer cannot start a frame of a stopped
+/// transaction, nor reach past the call-stack limit. An empty lane stands in for the frame, and
+/// the inspector is told it ended.
+fn answered_by_inspector<DB: Database, ExtEnvs: ExternalEnvTypes, INSP>(
+    ctx: &mut MegaContext<DB, ExtEnvs>,
+    inspector: &mut INSP,
+    frame_init: &FrameInit,
+    mut output: FrameResult,
+) -> Result<FrameResult, ContextDbError<MegaContext<DB, ExtEnvs>>>
+where
+    INSP: Inspector<MegaContext<DB, ExtEnvs>, EthInterpreter>,
+{
+    if let Some(answer) = answer_before_building(ctx, frame_init)? {
+        output = answer;
+    }
+    ctx.additional_limit.push_empty_frame();
+    hold_upfront_state_gas(ctx, Some(&mut output));
+    frame_end_checked(ctx, inspector, &frame_init.frame_input, &mut output);
+    Ok(output)
 }
 
 /// The answer a frame gets before anything builds or answers it otherwise, in this order: the

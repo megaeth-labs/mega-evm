@@ -4,7 +4,6 @@
 
 #[cfg(not(feature = "std"))]
 use alloc as std;
-use core::ops::Range;
 use std::boxed::Box;
 
 use alloy_evm::Database;
@@ -60,6 +59,9 @@ pub(crate) enum Rewrite {
 /// child, and returns into it as a creation returns into the frame whose `CREATE` started it.
 #[derive(Debug)]
 pub(crate) struct KeylessCall {
+    /// The call's inputs, as the transaction's frame was started with them: what the call
+    /// returns into, and what an inspector is told the call ended from.
+    pub(super) inputs: Box<CallInputs>,
     /// The call's gas: the gas and the reservoir the transaction's frame was forwarded, less the
     /// overhead, the upfront charges and the gas forwarded to the creation.
     pub(super) gas: Gas,
@@ -78,10 +80,6 @@ pub(crate) struct KeylessCall {
     pub(super) signer_record_charge: u64,
     /// Whether the creation moves value out of the signer's account.
     pub(super) moves_value: bool,
-    /// The call's return range.
-    pub(super) memory_offset: Range<usize>,
-    /// Whether the transaction's own start charged the call a new account.
-    pub(super) charged_new_account_state_gas: bool,
     /// The history the creation's lane gave back for the records the creation did not keep.
     pub(super) returned_history: u64,
 }
@@ -165,8 +163,6 @@ fn rewrite_dispatched<DB: Database, ExtEnvs: ExternalEnvTypes>(
         Ok(deployment) => deployment,
         Err(refusal) => return Ok(Rewrite::Answered(refusal.answer(inputs, gas))),
     };
-    let memory_offset = inputs.return_memory_offset.clone();
-    let charged_new_account_state_gas = inputs.charged_new_account_state_gas;
 
     // The call's own lane, as the transaction's frame pushes it. A call carrying no value makes
     // no record, so its start crosses nothing the body did not.
@@ -188,7 +184,13 @@ fn rewrite_dispatched<DB: Database, ExtEnvs: ExternalEnvTypes>(
     );
     create.set_charged_create_state_gas(deployment.charged_create_state_gas);
     create.set_charged_state_gas_address(deployment.deploy_address);
+    let FrameInput::Call(inputs) =
+        core::mem::replace(&mut frame_init.frame_input, FrameInput::Create(Box::new(create)))
+    else {
+        unreachable!("the rewrite starts from the call it dispatched")
+    };
     ctx.keyless_call = Some(KeylessCall {
+        inputs,
         gas,
         checkpoint,
         deploy_address: deployment.deploy_address,
@@ -197,11 +199,8 @@ fn rewrite_dispatched<DB: Database, ExtEnvs: ExternalEnvTypes>(
         signer_account_charge: deployment.signer_account_charge,
         signer_record_charge: deployment.record_charges.map_or(0, |(_, caller)| caller),
         moves_value: !deployment.value.is_zero(),
-        memory_offset,
-        charged_new_account_state_gas,
         returned_history: 0,
     });
-    frame_init.frame_input = FrameInput::Create(Box::new(create));
     frame_init.depth += 1;
     Ok(Rewrite::Rewritten)
 }

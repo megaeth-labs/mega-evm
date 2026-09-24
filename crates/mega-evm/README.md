@@ -68,7 +68,7 @@ A method that takes no value answers a value-bearing call with `NonZeroTransfer(
 The Oracle forwards a `sendHint` payload to the node's oracle service.
 
 `KeylessDeploy` deploys a pre-EIP-155 signed creation — Nick's Method — at the address its signer's first creation gets on every chain, with the gas limit the caller chooses.
-A `keylessDeploy` call a transaction makes becomes a native creation before any interceptor or inspector sees it.
+A `keylessDeploy` call a transaction makes becomes a native creation before any interceptor sees it; a tracer sees the call, and the creation as its child.
 The call pays a fixed 100,000 gas, is held to the legacy engine's nine rules and error ABI, and pays what a `CREATE` opcode charges its frame: the signer's account when the creation's nonce bump is what creates it, the created account, and the two write records of the creation's start.
 It then starts the creation as the signer, below it, with `gasLimitOverride` capped to what it has left.
 From there the creation is an ordinary frame, priced, limited, journaled and traced as one, and its `ORIGIN` and `GASPRICE` are the transaction's.

@@ -1,6 +1,7 @@
-//! What an inspector sees of a keyless deployment: the creation it is, from its start to its end,
-//! and every step of its init code. The rewrite runs before the inspector is told the frame
-//! starts, so the root of the trace is a `create` from the signer, not an opaque call.
+//! What an inspector sees of a keyless deployment: the frames it is made of. The transaction calls
+//! `KeylessDeploy`, and that call creates: the inspector is told the call starts, then the
+//! creation, one journal depth below it, then every step of the init code, the creation's end and
+//! the call's, each with the gas and the output it had.
 
 use mega_evm::{
     system::keyless::KEYLESS_DEPLOY_OVERHEAD_GAS, test_utils::BytecodeBuilder, MegaTransaction,
@@ -14,9 +15,10 @@ use revm::{
     },
     Database, Inspector,
 };
+use revm_inspectors::tracing::{types::CallKind, TracingInspector, TracingInspectorConfig};
 
 use super::*;
-use crate::common::context;
+use crate::common::{context, CALLER};
 
 /// What an inspector was told, in order.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -103,11 +105,11 @@ fn inspect(deployment: &Deployment, recorder: Recorder, gas_limit: u64) -> (Outc
 
 type Outcome = MegaTransactionOutcome;
 
-/// The root of a keyless deployment's trace is the creation: the signer creates at its
-/// Nick's-Method address, the inspector sees every step of the init code and its log, and the
-/// creation ends at that address. No `call` to `KeylessDeploy` is reported.
+/// The inspector sees the call to `KeylessDeploy` start, then the creation it starts — the signer
+/// creating at its Nick's-Method address — every step of the init code and its log, the creation
+/// ending at that address, and last the call ending with the answer it gave.
 #[test]
-fn test_the_inspector_sees_the_deployment_as_a_creation() {
+fn test_the_inspector_sees_the_call_and_the_creation_it_starts() {
     let prefix =
         BytecodeBuilder::default().push_number(0_u64).push_number(0_u64).append(LOG0).build_vec();
     let init_code = constructor(&prefix, &runtime(1));
@@ -117,17 +119,22 @@ fn test_the_inspector_sees_the_deployment_as_a_creation() {
         assert_eq!(returned(&outcome).deployedAddress, deployment.address);
         let events = recorder.events;
         assert_eq!(
-            events.first(),
-            Some(&Event::Create(
-                deployment.signer,
-                CreateScheme::Custom { address: deployment.address }
-            )),
+            events[..2],
+            [
+                Event::Call(KEYLESS_DEPLOY_ADDRESS),
+                Event::Create(
+                    deployment.signer,
+                    CreateScheme::Custom { address: deployment.address }
+                ),
+            ],
         );
         assert_eq!(
-            events.last(),
-            Some(&Event::CreateEnd(InstructionResult::Return, Some(deployment.address))),
+            events[events.len() - 2..],
+            [
+                Event::CreateEnd(InstructionResult::Return, Some(deployment.address)),
+                Event::CallEnd(InstructionResult::Return),
+            ],
         );
-        assert!(!events.iter().any(|event| matches!(event, Event::Call(_) | Event::CallEnd(_))));
         let steps: Vec<u8> = events
             .iter()
             .filter_map(|event| match event {
@@ -170,16 +177,21 @@ fn test_a_refused_call_is_seen_as_a_call() {
     }
 }
 
-/// A creation whose init code reverts ends as a revert in the trace, and the call reports it.
+/// A creation whose init code reverts ends as a revert in the trace, and the call, which reports
+/// the failure in its return, ends as a success.
 #[test]
 fn test_a_failed_deployment_ends_as_a_revert_in_the_trace() {
     for gas_limit in GAS_LIMITS {
         let deployment = Deployment::new(Bytes::from_static(&[PUSH0, PUSH0, REVERT]));
         let (outcome, recorder) = inspect(&deployment, Recorder::default(), gas_limit);
         assert!(matches!(failure(&outcome), KeylessDeployError::ExecutionReverted { .. }));
+        let events = recorder.events;
         assert_eq!(
-            recorder.events.last(),
-            Some(&Event::CreateEnd(InstructionResult::Revert, Some(deployment.address))),
+            events[events.len() - 2..],
+            [
+                Event::CreateEnd(InstructionResult::Revert, Some(deployment.address)),
+                Event::CallEnd(InstructionResult::Return),
+            ],
         );
     }
 }
@@ -206,19 +218,20 @@ fn test_a_creation_an_inspector_answers_charges_nothing_it_did_not_start() {
         assert_eq!(
             recorder.events,
             [
+                Event::Call(KEYLESS_DEPLOY_ADDRESS),
                 Event::Create(
                     deployment.signer,
                     CreateScheme::Custom { address: deployment.address }
                 ),
                 Event::CreateEnd(InstructionResult::Revert, None),
+                Event::CallEnd(InstructionResult::Return),
             ],
         );
     }
 }
 
 /// A transaction the latch stopped before its first frame is not rewritten on the inspected path
-/// either, where the rewrite runs before the latch is consulted: the inspector sees the call and
-/// its stop, and no creation.
+/// either: the inspector sees the call and its stop, and no creation.
 #[test]
 fn test_a_latched_transaction_is_seen_as_the_call_it_is() {
     let deployment = Deployment::new(deploying(&runtime(1)));
@@ -234,4 +247,90 @@ fn test_a_latched_transaction_is_seen_as_the_call_it_is() {
         );
         assert!(!outcome.state.contains_key(&deployment.signer));
     }
+}
+
+/// A tracer sees the frames a keyless deployment is made of: at the root, at journal depth 0, the
+/// transaction's call to `KeylessDeploy`, which returns the ABI answer; as its one child, one
+/// depth below, the creation from the signer at the deploy address, which returns the runtime it
+/// deploys. Each reports the gas it took from its gas limit — the call what the transaction spent
+/// beyond its intrinsic gas, the creation its `gasUsed` — less, above the execution cap, the state
+/// and history gas the reservoir paid, as for any frame. The parity and geth call traces built
+/// from it say the same, and no trace has a frame of its own.
+#[test]
+fn test_a_tracer_sees_the_call_and_the_creation_it_starts() {
+    let deployment = Deployment::new(deploying(&runtime(3)));
+    for gas_limit in GAS_LIMITS {
+        let tracer = TracingInspector::new(TracingInspectorConfig::default_parity());
+        let mut evm = MegaEvm::new(context(system_db())).with_inspector(tracer);
+        let outcome = evm.execute_transaction(keyless_tx(&deployment, gas_limit)).expect("valid");
+        let answer = returned(&outcome);
+        assert_eq!(answer.deployedAddress, deployment.address);
+        let tracer = evm.inspector().clone();
+
+        let [root, child] = tracer.traces().nodes() else {
+            panic!("expected two frames: {:#?}", tracer.traces().nodes());
+        };
+        let reference = reference(deployment.call_data(LARGE_OVERRIDE), gas_limit);
+        let [spent, regular, ..] = beyond(&outcome, &reference);
+        let deposit = satin_gas_params().code_deposit_state_gas(3) + history(3);
+        let (call_took, creation_took) = if gas_limit > TX_GAS_LIMIT_CAP {
+            (regular, answer.gasUsed - deposit)
+        } else {
+            (spent, answer.gasUsed)
+        };
+        assert_eq!(
+            (root.trace.kind, root.trace.depth, root.trace.caller, root.trace.address),
+            (CallKind::Call, 0, CALLER, KEYLESS_DEPLOY_ADDRESS),
+        );
+        assert_eq!((root.parent, root.children.as_slice()), (None, &[1][..]));
+        assert_eq!(root.trace.status, Some(InstructionResult::Return));
+        assert_eq!(Some(&root.trace.output), outcome.result.output());
+        assert_eq!(root.trace.gas_used, call_took, "at {gas_limit}");
+        assert_eq!(
+            (child.trace.kind, child.trace.depth, child.trace.caller, child.trace.address),
+            (CallKind::Create, 1, deployment.signer, deployment.address),
+        );
+        assert_eq!(child.parent, Some(0));
+        assert_eq!(child.trace.status, Some(InstructionResult::Return));
+        assert_eq!(child.trace.output, Bytes::from(runtime(3)));
+        assert_eq!(child.trace.gas_used, creation_took, "at {gas_limit}");
+
+        let parity =
+            serde_json::to_value(tracer.clone().into_parity_builder().into_transaction_traces())
+                .unwrap();
+        let [call, create] = parity.as_array().expect("a list of traces").as_slice() else {
+            panic!("expected two parity traces: {parity:#}");
+        };
+        assert_eq!(call["type"], "call", "{parity:#}");
+        assert_eq!(call["action"]["from"], json_address(CALLER));
+        assert_eq!(call["action"]["to"], json_address(KEYLESS_DEPLOY_ADDRESS));
+        assert_eq!(call["traceAddress"], serde_json::json!([]));
+        assert_eq!(call["subtraces"], 1);
+        assert_eq!(create["type"], "create", "{parity:#}");
+        assert_eq!(create["action"]["from"], json_address(deployment.signer));
+        assert_eq!(create["result"]["address"], json_address(deployment.address));
+        assert_eq!(create["traceAddress"], serde_json::json!([0]));
+
+        let geth = serde_json::to_value(
+            tracer
+                .into_geth_builder()
+                .geth_call_traces(Default::default(), outcome.result.gas().tx_gas_used()),
+        )
+        .unwrap();
+        assert_eq!(geth["type"], "CALL", "{geth:#}");
+        assert_eq!(geth["from"], json_address(CALLER));
+        assert_eq!(geth["to"], json_address(KEYLESS_DEPLOY_ADDRESS));
+        let [create] = geth["calls"].as_array().expect("the call's children").as_slice() else {
+            panic!("expected one child: {geth:#}");
+        };
+        assert_eq!(create["type"], "CREATE", "{geth:#}");
+        assert_eq!(create["from"], json_address(deployment.signer));
+        assert_eq!(create["to"], json_address(deployment.address));
+        assert!(create.get("calls").is_none(), "{geth:#}");
+    }
+}
+
+/// `address` as a trace's JSON holds it.
+fn json_address(address: Address) -> serde_json::Value {
+    serde_json::to_value(address).unwrap()
 }

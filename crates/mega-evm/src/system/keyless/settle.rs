@@ -3,7 +3,7 @@
 
 #[cfg(not(feature = "std"))]
 use alloc as std;
-use std::vec::Vec;
+use std::{boxed::Box, vec::Vec};
 
 use alloy_evm::Database;
 use alloy_primitives::{Address, Bytes};
@@ -15,7 +15,9 @@ use revm::{
     },
     context_interface::journaled_state::account::JournaledAccountTr,
     handler::FrameResult,
-    interpreter::{CallOutcome, Gas, InstructionResult, InterpreterResult, SuccessOrHalt},
+    interpreter::{
+        CallInputs, CallOutcome, Gas, InstructionResult, InterpreterResult, SuccessOrHalt,
+    },
     primitives::KECCAK_EMPTY,
 };
 
@@ -42,8 +44,9 @@ pub(crate) fn give_back_history<DB: Database, ExtEnvs: ExternalEnvTypes>(
 }
 
 /// Settles the result of a keyless deployment's creation into the `keylessDeploy` call that
-/// started it, and replaces `result` with the call's own. Nothing to do for a transaction that
-/// started no keyless deployment.
+/// started it, and replaces `result` with the call's own; returns the call's inputs, which an
+/// inspector is told the call ended from. Nothing to do for a transaction that started no keyless
+/// deployment.
 ///
 /// The call's gas takes the creation's back exactly as a `CREATE`'s frame does
 /// ([`settle_frame_result`]): the unspent forward, the reservoir, the creation's state and history
@@ -75,13 +78,13 @@ pub(crate) fn give_back_history<DB: Database, ExtEnvs: ExternalEnvTypes>(
 pub(crate) fn settle<DB, ExtEnvs, ERROR>(
     ctx: &mut MegaContext<DB, ExtEnvs>,
     result: &mut FrameResult,
-) -> Result<(), ERROR>
+) -> Result<Option<Box<CallInputs>>, ERROR>
 where
     DB: Database,
     ExtEnvs: ExternalEnvTypes,
     ERROR: From<DB::Error> + FromStringError,
 {
-    let Some(mut call) = ctx.keyless_call.take() else { return Ok(()) };
+    let Some(mut call) = ctx.keyless_call.take() else { return Ok(None) };
     // The call's lane and the creation's: the creation returned through the frame lifecycle when
     // it ran, and never reached it when it was answered at its start.
     if ctx.additional_limit.frame_depth() > 1 {
@@ -114,13 +117,13 @@ where
     }
     *result = FrameResult::Call(CallOutcome {
         result: InterpreterResult::new(status, output, call.gas),
-        memory_offset: call.memory_offset,
+        memory_offset: call.inputs.return_memory_offset.clone(),
         was_precompile_called: false,
         precompile_call_logs: Vec::new(),
-        charged_new_account_state_gas: call.charged_new_account_state_gas,
+        charged_new_account_state_gas: call.inputs.charged_new_account_state_gas,
         charged_state_gas_address: KEYLESS_DEPLOY_ADDRESS,
     });
-    Ok(())
+    Ok(Some(call.inputs))
 }
 
 /// The `keylessDeploy` answer of a call whose creation settled into `result`.
