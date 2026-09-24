@@ -11,7 +11,7 @@
 //! EIP-8037 reservoir pays its history out of it, and a charge that is given back behind the
 //! ledger's back shows up nowhere else. The six cases at the end are the ones that diverge for a
 //! reason of their own — the
-//! system contract interceptors, the `KeylessDeploy` overhead, the system-address transaction,
+//! system contract interceptors, keyless deployment, the system-address transaction,
 //! the account a deposit creates for its sender, a crowded SALT bucket and the history ledger —
 //! and they pin both sides, so a divergence is never silently absorbed. Later changes (the
 //! limits) add their own.
@@ -40,7 +40,7 @@ use revm::{
         result::{ExecResultAndState, ExecutionResult},
         BlockEnv, CfgEnv, Context, ContextTr, TxEnv,
     },
-    context_interface::cfg::{gas_params::Eip2780TxInfo, GasId},
+    context_interface::cfg::GasId,
     inspector::NoOpInspector,
     state::EvmState,
     ExecuteEvm, Journal,
@@ -536,82 +536,79 @@ fn test_the_created_deposit_caller_diverges_from_op_revm() {
     );
 }
 
-/// A `keylessDeploy` transaction is charged the fixed overhead before its frame runs, where
-/// op-revm charges nothing for it. Both engines then run the contract's bytecode and get its
-/// `NotIntercepted()` revert, because the rewrite that turns the call into a deployment is not
-/// here yet; the whole divergence is the overhead.
+/// A `keylessDeploy` transaction is a deployment in Satin and a call to the contract's bytecode in
+/// op-revm, which has no keyless rewrite: Satin deploys the canonical `CREATE2` factory at its
+/// canonical address, while op-revm runs the method body, which reverts with `NotIntercepted()`
+/// and deploys nothing.
+///
+/// What a deployment costs beyond op-revm is pinned charge by charge in the system tests. Here the
+/// divergence of a call the rules refuse is pinned exactly: Satin charges the fixed overhead,
+/// runs no bytecode and keeps nothing else, so it spends what op-revm spends on the same calldata
+/// sent to an account with no code, plus the overhead and the history ledger.
 #[test]
-fn test_the_keyless_deploy_overhead_diverges_from_op_revm() {
-    use alloy_primitives::Bytes;
+fn test_a_keyless_deployment_diverges_from_op_revm() {
     use alloy_sol_types::{SolCall, SolError};
     use mega_evm::system::keyless::{
+        tests::{CREATE2_FACTORY_CODE_HASH, CREATE2_FACTORY_CONTRACT, CREATE2_FACTORY_TX},
         IKeylessDeploy, KEYLESS_DEPLOY_ADDRESS, KEYLESS_DEPLOY_CODE, KEYLESS_DEPLOY_OVERHEAD_GAS,
     };
 
     let db = MemoryDatabase::default()
         .account_balance(CALLER, U256::from(10u64.pow(18)))
         .account_code(KEYLESS_DEPLOY_ADDRESS, KEYLESS_DEPLOY_CODE);
-    let data: Bytes = IKeylessDeploy::keylessDeployCall {
-        keylessDeploymentTransaction: Bytes::from_static(b"a transaction"),
-        gasLimitOverride: U256::from(1_000_000),
-    }
-    .abi_encode()
-    .into();
-    let tx = TxEnv {
+    let keyless_deploy = |tx: &[u8]| -> Bytes {
+        IKeylessDeploy::keylessDeployCall {
+            keylessDeploymentTransaction: Bytes::copy_from_slice(tx),
+            gasLimitOverride: U256::from(1_000_000),
+        }
+        .abi_encode()
+        .into()
+    };
+    let call = |to: Address, data: Bytes| TxEnv {
         caller: CALLER,
-        kind: TxKind::Call(KEYLESS_DEPLOY_ADDRESS),
-        data: data.clone(),
-        gas_limit: 1_000_000,
+        kind: TxKind::Call(to),
+        data,
+        gas_limit: 10_000_000,
         ..Default::default()
     };
-    let (mega, op, cfg) = run_both(db, tx);
 
+    let (mega, op, cfg) =
+        run_both(db.clone(), call(KEYLESS_DEPLOY_ADDRESS, keyless_deploy(CREATE2_FACTORY_TX)));
     assert_satin_cfg(&cfg);
-    let revert_data = Bytes::from_static(&IKeylessDeploy::NotIntercepted::SELECTOR);
+    let output = mega.result.output().cloned().unwrap_or_default();
+    let deployed = IKeylessDeploy::keylessDeployCall::abi_decode_returns(&output).unwrap();
+    assert_eq!(deployed.deployedAddress, CREATE2_FACTORY_CONTRACT, "Satin deploys");
+    assert_eq!(
+        mega.state.get(&CREATE2_FACTORY_CONTRACT).map(|account| account.info.code_hash),
+        Some(CREATE2_FACTORY_CODE_HASH),
+    );
+    assert_eq!(
+        op.result.output().cloned().unwrap_or_default(),
+        Bytes::from_static(&IKeylessDeploy::NotIntercepted::SELECTOR),
+        "op-revm runs the method body",
+    );
+    assert!(
+        op.state.get(&CREATE2_FACTORY_CONTRACT).is_none_or(|account| account.info.is_empty()),
+        "op-revm deploys nothing",
+    );
+
+    // A call the rules refuse: bytes that are not a signed transaction.
+    let refused = keyless_deploy(b"a transaction");
+    let (mut mega_evm, mut op_evm, _) = both_evms(db, block());
+    let mega = mega_evm
+        .execute_transaction(OpTx(op_transaction(call(KEYLESS_DEPLOY_ADDRESS, refused.clone()))))
+        .unwrap();
+    let op = op_evm.transact(op_transaction(call(CALLEE, refused))).unwrap();
     assert_eq!(
         mega.result.output().cloned().unwrap_or_default(),
-        revert_data,
-        "the bytecode runs after the charge",
+        Bytes::from_static(&IKeylessDeploy::MalformedEncoding::SELECTOR),
     );
-    assert_eq!(op.result.output().cloned().unwrap_or_default(), revert_data);
-
-    // What each transaction spent, not what its receipt reports: op-revm spends less than the
-    // EIP-7623 calldata floor here, so its receipt is lifted to the floor and Satin's is not.
-    // The two run the same bytecode on the same input, so what is left once the history ledger
-    // every Satin transaction carries is taken off is the charge.
+    assert!(op.result.is_success(), "the reference call runs no code");
+    // What each transaction spent, not what its receipt reports: the EIP-7623 calldata floor
+    // lifts op-revm's receipt above what it spent.
     let charged =
         mega.result.gas().total_gas_spent() - op.result.gas().total_gas_spent() - mega.gas.history;
     assert_eq!(charged, KEYLESS_DEPLOY_OVERHEAD_GAS, "the divergence is the overhead, exactly");
-
-    // Which floor, exactly: the one this transaction's own calldata buys, computed by revm from
-    // the schedule both engines run on. Satin is above it and reports what it spent; op-revm is
-    // below it and reports the floor, so the receipts differ by less than the charge.
-    let floor = cfg
-        .gas_params
-        .initial_tx_gas(
-            &data,
-            false,
-            0,
-            0,
-            0,
-            Some(Eip2780TxInfo { value: U256::ZERO, is_self_transfer: false }),
-        )
-        .floor_gas();
-    assert_eq!(
-        mega.result.gas().tx_gas_used(),
-        mega.result.gas().total_gas_spent(),
-        "Satin spends past the floor, so its receipt is its own spend",
-    );
-    assert_eq!(
-        op.result.gas().tx_gas_used(),
-        floor,
-        "op-revm spends below the floor, so its receipt is the floor",
-    );
-    assert!(
-        mega.result.gas().tx_gas_used() - op.result.gas().tx_gas_used() - mega.gas.history <
-            charged,
-        "the floor lifts the cheaper receipt, so the receipts differ by less than the charge",
-    );
 }
 
 /// Where Satin leaves op-revm on every transaction: the history gas of the bytes it appends to

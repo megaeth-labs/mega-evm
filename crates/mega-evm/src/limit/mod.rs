@@ -130,6 +130,7 @@ mod record;
 mod state_gas;
 
 pub use limit::AdditionalLimit;
+pub(crate) use limit::FrameStartRecords;
 pub(crate) use record::HistoryBytes;
 pub use record::StagedRecord;
 

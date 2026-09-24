@@ -632,12 +632,12 @@ impl AdditionalLimit {
     /// computed from.
     ///
     /// The two are separate answers to the same question, asked at two points: the charge at the
-    /// opcode, on the input revm's instruction built, and the count here, on the input that
-    /// survived interception and the keyless rewrite. They agree because the rewrite is the
-    /// identity today. The mechanism that makes it rewrite a call into a creation — native
-    /// keyless deployment — changes which records a frame's start makes, and must reconcile the
-    /// charge with them; until it does, a divergence trips here in every debug build rather than
-    /// mis-charging the caller and mis-splitting the refund its failure gets back.
+    /// opcode, on the input revm's instruction built, or at the keyless rewrite, on the creation
+    /// it starts; and the count here, on the input that survived interception. They agree because
+    /// nothing between the two changes the input: the keyless rewrite runs at the transaction's
+    /// own frame, which no opcode starts, and charges for the creation it builds itself. A
+    /// divergence trips here in every debug build rather than mis-charging the caller and
+    /// mis-splitting the refund its failure gets back.
     fn records_the_caller_paid_for(
         &self,
         input: &FrameInput,
@@ -681,6 +681,26 @@ impl AdditionalLimit {
         if let Some(lane) = self.tracker.current_mut() {
             lane.address = Some(address);
         }
+    }
+
+    /// Makes the running frame start its creation as `creator`: the frame of a `keylessDeploy`
+    /// call, which runs no code of its own and starts the creation its signer signed.
+    ///
+    /// The creation's start writes the creator's nonce, so the frame's lane runs as the creator:
+    /// the creation records that write as its creator's, on the frame's lane once the creation
+    /// fails, unless the creator is the transaction's sender, whose account the body counts.
+    pub(crate) fn set_frame_creator(&mut self, creator: Address) {
+        let sender = self.sender;
+        if let Some(lane) = self.tracker.current_mut() {
+            lane.address = Some(creator);
+            lane.account_recorded = creator == sender;
+        }
+    }
+
+    /// The number of frames with a lane: the frames on the call stack, and a `keylessDeploy` call
+    /// whose creation is running.
+    pub(crate) fn frame_depth(&self) -> usize {
+        self.tracker.depth()
     }
 
     /// Pushes the lane of a frame answered without running: a result built without an

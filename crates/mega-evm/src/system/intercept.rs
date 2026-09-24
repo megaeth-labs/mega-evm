@@ -20,8 +20,8 @@
 //!    - the two control contracts have a fallback that reverts with `NotIntercepted()`, so every
 //!      selector they do not intercept ends there;
 //!    - `KeylessDeploy` has no fallback, so a selector it does not declare reverts with empty data;
-//!      a `keylessDeploy` call the dispatch did not take — one a contract makes — reaches the
-//!      method body and its own `NotIntercepted()`, as a dispatched one does after its charge;
+//!      a `keylessDeploy` call the keyless rewrite did not take — one a contract makes — reaches
+//!      the method body and its own `NotIntercepted()`;
 //!    - the Oracle's other selectors are methods it runs (`getSlot`, `version`), and one it does
 //!      not declare reverts with empty data.
 //!
@@ -70,15 +70,17 @@ const SYSTEM_CONTRACT_PREFIX: [u8; 19] = {
     prefix
 };
 
-/// A system contract whose calls an interceptor answers.
+/// A system contract whose calls the engine answers or rewrites.
 ///
 /// The High-Precision Timestamp wrapper and the `SequencerRegistry` are not here: they have no
-/// interceptor and run their bytecode.
+/// interceptor and run their bytecode. `KeylessDeploy` is, but its `keylessDeploy` calls are taken
+/// by the keyless rewrite before interception (see [`crate::system::keyless`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum InterceptedContract {
     /// The Oracle: `sendHint` reaches the node's oracle service.
     Oracle,
-    /// `KeylessDeploy`: `keylessDeploy` deploys a pre-EIP-155 transaction.
+    /// `KeylessDeploy`: `keylessDeploy` deploys a pre-EIP-155 transaction, through the keyless
+    /// rewrite rather than an interceptor.
     KeylessDeploy,
     /// `MegaAccessControl`: the volatile-data access switch.
     AccessControl,
@@ -108,21 +110,20 @@ pub(crate) fn intercepted_contract(address: &Address) -> Option<InterceptedContr
 /// Answers a call to a system contract, or `None` when nothing intercepts it and the contract's
 /// own bytecode runs.
 ///
-/// `depth` is the depth of the frame the call would start, which is the calling frame's journal
-/// depth. The caller has already applied the scheme guard.
+/// The caller has already applied the scheme guard, and the keyless rewrite has already taken
+/// the `keylessDeploy` calls it deploys: a call to `KeylessDeploy` that reaches here is one it
+/// did not take, and runs the contract's bytecode.
 ///
-/// The inputs are taken mutably because an interceptor may charge the frame it hands on
-/// (`KeylessDeploy`'s fixed overhead); an interceptor that answers the call charges its own
-/// answer instead.
+/// An interceptor that answers a call charges its own answer; one that lets the call run, as the
+/// Oracle's hint does, charges nothing, so the frame is started as it was built.
 #[inline]
 pub(crate) fn intercept<DB: Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &mut MegaContext<DB, ExtEnvs>,
-    inputs: &mut CallInputs,
-    depth: usize,
+    inputs: &CallInputs,
 ) -> Option<FrameResult> {
     match intercepted_contract(&inputs.target_address)? {
         InterceptedContract::Oracle => crate::system::oracle::intercept(ctx, inputs),
-        InterceptedContract::KeylessDeploy => crate::system::keyless::intercept(ctx, inputs, depth),
+        InterceptedContract::KeylessDeploy => None,
         InterceptedContract::AccessControl => crate::system::control::intercept(ctx, inputs),
         InterceptedContract::LimitControl => crate::system::limit_control::intercept(ctx, inputs),
     }

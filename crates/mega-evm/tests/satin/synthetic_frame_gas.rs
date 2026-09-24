@@ -436,16 +436,16 @@ fn test_a_forwarded_hint_keeps_the_reservoir() {
 }
 
 /// A dispatched `keylessDeploy` call is charged its overhead out of regular gas, so it costs the
-/// same whether there is a pool or not and the pool comes back whole. The charge is not an
-/// answer: the deployed bytecode runs after it and reverts with `NotIntercepted()`, because the
-/// rewrite that turns the call into a deployment is not here yet.
+/// same whether there is a pool or not and the pool comes back whole. A call the rules refuse —
+/// here one whose bytes are not a signed transaction — is answered after the overhead with the
+/// rule's error, and the answer carries the reservoir.
 #[test]
 fn test_the_keyless_overhead_comes_out_of_regular_gas() {
     assert_the_reservoir_survives(
         KEYLESS_DEPLOY_ADDRESS,
         keyless_deploy_call(),
         U256::ZERO,
-        Expected::Revert(Bytes::from_static(&IKeylessDeploy::NotIntercepted::SELECTOR)),
+        Expected::Revert(Bytes::from_static(&IKeylessDeploy::MalformedEncoding::SELECTOR)),
     );
 }
 
