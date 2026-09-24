@@ -118,13 +118,25 @@ fn inner_call(opcode: u8, target: Address, value: u64, ret_size: u64) -> Bytes {
 
 /// `INNER` bytecode: one `EXTCODECOPY` of `len` bytes of `target`'s code to memory offset 0.
 fn inner_extcodecopy(target: Address, len: u128) -> Bytes {
+    inner_extcodecopy_to(target, len, 0)
+}
+
+/// `INNER` bytecode: one `EXTCODECOPY` of `len` bytes of `target`'s code to memory offset
+/// `mem_offset`.
+fn inner_extcodecopy_to(target: Address, len: u128, mem_offset: u128) -> Bytes {
     BytecodeBuilder::default()
         .push_number(len)
         .push_number(0_u64)
-        .push_number(0_u64)
+        .push_number(mem_offset)
         .push_address(target)
         .append(EXTCODECOPY)
         .build()
+}
+
+/// `INNER` bytecode: one single-operand account read (`BALANCE`, `EXTCODESIZE`, `EXTCODEHASH`) of
+/// `target`, its result discarded.
+fn inner_account_read(opcode: u8, target: Address) -> Bytes {
+    BytecodeBuilder::default().push_address(target).append(opcode).append(POP).build()
 }
 
 fn outer_code(budget: u64, setup: Setup) -> Bytes {
@@ -378,6 +390,48 @@ fn test_extcodecopy_invalid_length_still_marks() {
         COPY_WINDOW_BUDGET,
         inner_extcodecopy(BENEFICIARY, 1 << 64)
     ));
+}
+
+/// The rest of `EXTCODECOPY`'s pre-load halts in revm 40 — an unrepresentable memory offset, and a
+/// memory expansion the frame cannot afford — also came after the deployed load.
+#[test]
+fn test_extcodecopy_memory_operand_halts_still_mark() {
+    for spec in WRAPPED_CALL_SPECS {
+        for (mem_offset, halt) in [(1_u128 << 64, "unrepresentable offset"), (0x10000, "expansion")]
+        {
+            assert!(
+                detained(
+                    Setup::on(spec),
+                    COPY_WINDOW_BUDGET,
+                    inner_extcodecopy_to(BENEFICIARY, 32, mem_offset)
+                ),
+                "{spec:?}: an EXTCODECOPY of the beneficiary halting on its {halt}",
+            );
+        }
+    }
+}
+
+/// The other account reads load their target — and the host marks it — before anything they can
+/// run out of gas on, so a frame that cannot afford the read still marks, with no help from the
+/// wrapper.
+#[test]
+fn test_account_read_below_its_charge_still_marks() {
+    for spec in WRAPPED_CALL_SPECS {
+        for opcode in [BALANCE, EXTCODESIZE, EXTCODEHASH] {
+            assert!(
+                detained(
+                    Setup::on(spec),
+                    STATIC_CHARGE_BUDGET,
+                    inner_account_read(opcode, BENEFICIARY)
+                ),
+                "{spec:?}: opcode 0x{opcode:02x} on the beneficiary below its charge",
+            );
+            assert!(
+                !detained(Setup::on(spec), STATIC_CHARGE_BUDGET, inner_account_read(opcode, PLAIN)),
+                "{spec:?}: opcode 0x{opcode:02x} on another account below its charge",
+            );
+        }
+    }
 }
 
 /// Before `Rex4` the CALL family has no volatile wrapper to apply the cap, so a halt past the

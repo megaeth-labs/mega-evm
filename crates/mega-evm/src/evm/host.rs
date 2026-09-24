@@ -185,12 +185,14 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> Host for MegaContext<DB, ExtEnvs> 
         self.inner.sstore_skip_cold_load(address, key, value, skip_cold_load)
     }
 
-    /// The single beneficiary-marking site for account loads.
+    /// The beneficiary-marking site for the account loads that happen.
     ///
     /// Every account-reading opcode — BALANCE, EXTCODESIZE, EXTCODECOPY, EXTCODEHASH and the CALL
-    /// family — reaches the journal through here, so marking here rather than in the instruction
-    /// wrappers keeps each mark at the exact point the account is read (an opcode that runs out of
-    /// gas before its load marks nothing) and makes a double mark structurally impossible.
+    /// family — reaches the journal through here, and marks here before the load can give up on a
+    /// cold account it cannot afford, so the mark lands where the account is read. The instruction
+    /// layer marks in one other case only: a CALL-family or EXTCODECOPY frame that revm 40 halts
+    /// before its load, where the deployed implementation, which loaded before charging, had
+    /// already marked. Marking is idempotent.
     ///
     /// `account_load_marks_beneficiary` owns the one case where the loaded address alone does not
     /// decide the mark: a CALL-family EIP-7702 delegate hop.

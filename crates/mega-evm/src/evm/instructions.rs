@@ -1688,31 +1688,28 @@ pub mod volatile_data_ext {
                 }
             }
 
-            // The raw stack target, captured before the body pops it. The deployed schedule
-            // loaded it — and the host marked beneficiary access — right after popping the
-            // operands, before charging anything. revm 40's EXTCODECOPY instead validates its
-            // length, charges the copy cost and expands memory ahead of the load, so a halt on any
-            // of those leaves the target unmarked where the deployed implementation had marked it.
-            let target: Option<Address> =
-                context.interpreter.stack.inspect::<0>().map(|w| w.into_address());
+            // `EXTCODECOPY` is the one member whose revm 40 body halts between its operand pop and
+            // its load: it validates its operands, charges the copy cost and expands memory
+            // first. The deployed schedule loaded — and the host marked beneficiary access — right
+            // after the pop, so a halt on any of those steps left the target marked there. The
+            // other members load, and the host marks, before anything they can halt on after the
+            // pop, so their raw target is not needed. Captured before the body pops it.
+            let target: Option<Address> = if opcode::$opcode == opcode::EXTCODECOPY {
+                context.interpreter.stack.inspect::<0>().map(|w| w.into_address())
+            } else {
+                None
+            };
 
             run_inner_instruction_or_abort!(
                 $original_fn,
                 context,
                 inner_outcome,
                 on_halt: |halt| {
-                    // Every halt past the operand pop followed the deployed load. Two are raised
-                    // before it, on both schedules: a stack underflow, and SELFDESTRUCT's
-                    // rejection in a static frame, which precedes its pop. For the members of this
-                    // family whose revm body loads first, the halt came after the host already
-                    // marked, and marking again changes nothing. The wrapper still aborts here
-                    // without applying the cap, as the deployed one did, so the mark caps the
-                    // transaction only once a later tail applies it.
-                    if !matches!(
-                        halt,
-                        InstructionResult::StackUnderflow |
-                            InstructionResult::StateChangeDuringStaticCall
-                    ) && target == Some(context.host.beneficiary_address())
+                    // A stack underflow is raised by the pop itself, ahead of the deployed load.
+                    // The wrapper still aborts here without applying the cap, as the deployed one
+                    // did, so the mark caps the transaction only once a later tail applies it.
+                    if halt != InstructionResult::StackUnderflow &&
+                        target == Some(context.host.beneficiary_address())
                     {
                         context
                             .host
@@ -1944,11 +1941,12 @@ pub mod volatile_data_ext {
     /// for a frame that can afford them.
     ///
     /// A frame that *cannot* afford the charge is the case where that order shows: the body never
-    /// runs, so it never loads the target and never marks beneficiary access. That divergence is
-    /// unreachable from a wrapper. What is reachable is the tail: the detention cap below is
-    /// applied on every path out of this handler, including the out-of-gas one, so an access marked
-    /// by an already-returned inner frame is still propagated into the transaction's compute
-    /// budget.
+    /// runs, so it never loads the target, where the deployed implementation, which loaded before
+    /// charging, did. The out-of-gas exit therefore recreates what that load left behind whenever
+    /// the deployed body would have reached it (see [`recreate_unreached_call_load`]). The
+    /// detention cap below is applied on every path out of this handler, including the
+    /// out-of-gas one, so an access marked there, or by an already-returned inner frame, is
+    /// propagated into the transaction's compute budget.
     macro_rules! wrap_call_volatile_check {
     ($fn_name:ident, $opcode:ident, $inner_fn:path, $select_addr:path) => {
         #[doc = concat!("`", stringify!($opcode), "` opcode with volatile data access disabled check for beneficiary.")]
