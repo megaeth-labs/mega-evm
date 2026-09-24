@@ -44,6 +44,7 @@ The data-size limit is in place on top of it.
 A transaction is held to a data-size limit, and every frame to a budget: the transaction's own frame gets what its body leaves, and a child 98% of what its parent has left.
 The bytes are the ones history gas prices — the body, every write record, every log, every byte of deployed code — plus an Oracle hint's payload and the EIP-7708 transfer logs.
 A transfer log counts what a `LOG3` of one word counts, 160 bytes, where the value moves: with the records of the frame start that moves it, before any value moves, or with a `SELFDESTRUCT`'s beneficiary.
+A frame start revm refuses on its caller's account — a value the caller cannot fund, a creation whose creator's nonce cannot be bumped — counts nothing; a creation onto an occupied address is counted, and revm refuses it after the count.
 A frame that crosses its budget reverts alone; a transaction that crosses its limit is stopped with a revert carrying `MegaLimitExceeded`, and pays only for what ran.
 A record is checked before its history is charged, so a record the limit rejects costs nothing and the stop is what the transaction reports.
 `EvmTxRuntimeLimits` sets the limits on a bare EVM, where they default to none; a block executor installs its `BlockLimits`, whose default holds each transaction and the block to 12.5 MiB of data size.
