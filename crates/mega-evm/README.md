@@ -103,7 +103,8 @@ The Host marks the read where it loads the value, and the most restrictive read 
 Every frame's spendable gas is held to what the limit leaves the transaction, and the rest is withheld, with the revm fork's withheld part of a frame's regular gas: a regular charge cannot draw it, and every other reader of the frame's gas — `GAS`, the gas a call forwards, the `SSTORE` sentry, what a callee returns — counts it.
 So a transaction that reads runs as it would without the read until a regular charge needs the withheld gas.
 That charge crossed the cap: the transaction is stopped with a revert carrying `MegaLimitExceeded` of kind compute, billed its compute up to the limit, and the sender gets back everything withheld.
-A precompile or an interceptor's answer that spent more than the limit left the frame is the same crossing.
+A precompile is run on what the limit leaves its frame, not on all its caller forwarded: one priced past that computes nothing and is the same crossing, as is an interceptor's answer that spent more than it.
+A precompile priced past its whole forward is the crossing too, where without the read it would be a failed call its caller survives.
 Every other out-of-gas halts and burns as it would without the read.
 While `MegaAccessControl`'s switch is off for a frame, its volatile reads are refused: the frame reverts with `VolatileDataAccessDisabled`, having paid the opcode's static gas and nothing more.
 The two caps are runtime limits, 20,000,000 each by default; `EvmTxRuntimeLimits::no_limits()` leaves them unlimited, and a transaction whose caps are both unlimited is not detained.

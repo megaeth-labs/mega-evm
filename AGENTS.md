@@ -216,9 +216,11 @@ Detention caps how much a transaction may still compute once it read such data (
   The stop reports the limit as what was used (`LimitCheck::ExceedsLimit`): the size of the charge that crossed is not kept.
   Every other out-of-gas halts and burns as it would without the read: an operand above `usize`, a failed state or history charge, a regular charge beyond the frame's whole gas.
 - **Answers.**
-  revm runs a precompile inside the frame's start against the whole forward, the caller's withheld part included, and an interceptor builds its answer the same way.
-  An answer that spent more regular gas than the allowance the frame would have run on is answered out of gas, marked with `set_withheld_crossing`, and stopped by the same classification (`settle_answer` in `MegaEvm::frame_init`, and on an inspector's answer); an interceptor that charged by taking gas off the frame's limit is settled on the limit the caller forwarded.
-  An answer that halts burns its whole gas limit.
+  revm runs a precompile inside the frame's start, against the frame's gas limit, so a precompile forwarded more than the allowance its frame would start with is run on the allowance (`hold_precompile` in `MegaEvm::frame_init`), and its answer gets the rest of the forward back (`Detention::restore_forward`).
+  Priced within the allowance, it answers as it would without the read; priced past it, it answers out of gas without computing, is marked with `set_withheld_crossing`, and is stopped by the same classification.
+  The price is not known without running the precompile, so one priced past its whole forward is the stop too, where without the read it would be a failed call that burns its forward and that its caller survives; and a precompile run on the allowance sees the allowance as its gas limit.
+  An interceptor builds its answer on the whole forward, the caller's withheld part included: an answer that spent more regular gas than the allowance the frame would have run on is answered out of gas, marked with `set_withheld_crossing`, and stopped by the same classification (`settle_answer` in `MegaEvm::frame_init`, and on an inspector's answer); an interceptor that charged by taking gas off the frame's limit is settled on the limit the caller forwarded.
+  An answer that halts otherwise burns its whole gas limit.
 - **What a halt burns.**
   An out-of-gas zeroes a frame's gas before the frame returns, so the wrapper of the opcode whose charge failed notes what the frame had first (`Detention::note_halt`); `KECCAK256` and the four copies into memory are wrapped for that alone, their charge having no bound, and a frame-starting opcode that cannot pay its records hands the dropped frame's forward back before it fails.
   The two charges no wrapper sees, an opcode's static gas and `EXP`'s exponent, are bounded by their own price, and what a frame had below it counts as compute.

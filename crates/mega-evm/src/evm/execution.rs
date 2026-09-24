@@ -6,7 +6,7 @@
 
 #[cfg(not(feature = "std"))]
 use alloc as std;
-use core::cell::Cell;
+use core::{cell::Cell, num::NonZeroU64};
 
 use op_revm::{
     handler::{IsTxError, OpHandler},
@@ -49,7 +49,7 @@ use crate::{
     evm::{history::transaction_body_bytes, inspector::frame_end_checked},
     history_gas, synthetic_frame_result,
     system::{is_deposit_like_transaction, MEGA_SYSTEM_ADDRESS},
-    write_record_history_gas, ExternalEnvTypes, JournalInspectTr, LimitCheck, LimitKind,
+    write_record_history_gas, Detention, ExternalEnvTypes, JournalInspectTr, LimitCheck, LimitKind,
     MegaContext, MegaEvm, MegaInstructions, VolatileDataAccess,
 };
 
@@ -410,7 +410,8 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
     ///
     /// A frame answered at step 3 or 6 — an interceptor's answer, a precompile's, revm's for a call
     /// it did not start — is held to the compute limit before step 7, as a frame that ran would be
-    /// ([`settle_answer`]).
+    /// ([`settle_answer`]). A precompile, which revm runs at step 6, is run on the gas the compute
+    /// limit leaves the frame rather than on all its caller forwarded ([`hold_precompile`]).
     ///
     /// Steps 1 and 2 are the pre-frame check: they answer a frame nothing may start. The frame's
     /// own writes are counted after the interceptor and the rewrite, because the rewrite decides
@@ -448,7 +449,7 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
             hold_upfront_state_gas(&mut self.inner.ctx, Some(&mut result));
             return Ok(ItemOrResult::Result(result));
         }
-        let frame_init = self.rewrite_keyless(frame_init);
+        let mut frame_init = self.rewrite_keyless(frame_init);
         let ctx = &mut self.inner.ctx;
         let check = ctx.additional_limit.on_frame_init(&frame_init.frame_input, frame_init.depth);
         if check.exceeded_limit() {
@@ -463,6 +464,7 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
             }
             _ => None,
         };
+        let withheld = hold_precompile(ctx, &self.inner.precompiles, &mut frame_init);
         let outcome = match self.inner.frame_init(frame_init)? {
             ItemOrResult::Item(frame) => Ok(frame.interpreter.input.target_address),
             ItemOrResult::Result(result) => Err(result),
@@ -479,6 +481,9 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
                     if account_nonce(ctx, creator) == nonce {
                         ctx.additional_limit.creation_did_not_bump_nonce();
                     }
+                }
+                if let Some(withheld) = withheld {
+                    Detention::restore_forward(result.interpreter_result_mut(), withheld);
                 }
                 settle_answer(ctx, depth, gas_limit, &mut result);
                 hold_upfront_state_gas(ctx, Some(&mut result));
@@ -839,11 +844,12 @@ fn after_frame_run<DB: Database, ExtEnvs: ExternalEnvTypes, E>(
 /// Holds a frame answered without running to the compute limit: the answer to a frame of
 /// `gas_limit` at `depth`, which its caller forwarded.
 ///
-/// revm runs a precompile inside frame init against the whole gas the caller forwarded, the part
-/// gas detention withholds from the caller's regular charges included; an interceptor's answer is
-/// built the same way. An answer that spent more than the frame could have run on is answered out
-/// of gas and marked as a crossing, and becomes the stop as a frame that ran would
-/// ([`Detention::on_answer`](crate::Detention)). An answer that halts burns what it was given.
+/// An interceptor builds its answer on the whole gas the caller forwarded, the part gas detention
+/// withholds from the caller's regular charges included. An answer that spent more than the frame
+/// could have run on is answered out of gas and marked as a crossing, and becomes the stop as a
+/// frame that ran would ([`Detention::on_answer`]); so does a precompile that ran out of the
+/// allowance it was run on ([`hold_precompile`]). An answer that halts otherwise burns what it was
+/// given.
 fn settle_answer<DB: Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &mut MegaContext<DB, ExtEnvs>,
     depth: usize,
@@ -854,6 +860,27 @@ fn settle_answer<DB: Database, ExtEnvs: ExternalEnvTypes>(
     if let Some(limit) = ctx.detention.on_answer(answer, depth, gas_limit) {
         stop_at_the_compute_limit(ctx, answer, limit);
     }
+}
+
+/// Holds a precompile the frame `frame_init` is about to call to what gas detention's limit leaves
+/// it, and returns what it took off the forward: revm runs the precompile inside the frame's start,
+/// against its gas limit, so a precompile forwarded more than the allowance would otherwise
+/// compute past the limit before its answer could be classified.
+///
+/// The precompile runs on the allowance and sees it as its gas limit; its answer gets the rest
+/// back ([`Detention::restore_forward`]) before it is settled. A call to anything else, and a
+/// forward within the allowance, run as they are.
+fn hold_precompile<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    ctx: &MegaContext<DB, ExtEnvs>,
+    precompiles: &PrecompilesMap,
+    frame_init: &mut FrameInit,
+) -> Option<NonZeroU64> {
+    let FrameInput::Call(inputs) = &mut frame_init.frame_input else { return None };
+    let allowance = ctx.detention.allowance(frame_init.depth, inputs.gas_limit)?;
+    let withheld = NonZeroU64::new(inputs.gas_limit.saturating_sub(allowance))?;
+    precompiles.get(&inputs.bytecode_address)?;
+    inputs.gas_limit = allowance;
+    Some(withheld)
 }
 
 /// The gas limit of the frame `input` starts.

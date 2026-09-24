@@ -349,14 +349,24 @@ impl Detention {
         None
     }
 
+    /// The regular gas a frame at `depth` that its caller forwarded `gas_limit` may spend before
+    /// the transaction's compute reaches the limit: the spendable part the frame would start
+    /// with. `None` while no read set a limit.
+    pub(crate) fn allowance(&self, depth: usize, gas_limit: u64) -> Option<u64> {
+        let limit = self.limit?;
+        Some(limit.saturating_sub(self.compute_at_start(depth, gas_limit)))
+    }
+
     /// The frame at `depth`, whose gas limit was `gas_limit`, was answered without running —
     /// `result` is the answer: a precompile's, an interceptor's, an inspector's, or revm's for a
     /// call it did not start.
     ///
-    /// An answer that halts burns the whole gas limit: nothing ran with it. An answer that spent
-    /// more regular gas than the limit leaves the frame — the allowance it would have run on — is
-    /// a charge the frame could not have made: it is answered out of gas, marked as a crossing
-    /// of what the frame would have had withheld, and settled by the same rule as a frame that ran
+    /// An answer marked as a crossing — a precompile that ran out of the allowance it was held to
+    /// ([`restore_forward`](Self::restore_forward)) — crossed the limit. Otherwise, an answer that
+    /// halts burns the whole gas limit: nothing ran with it. An answer that spent more regular gas
+    /// than the limit leaves the frame — the allowance it would have run on — is a charge the
+    /// frame could not have made: it is answered out of gas and marked as a crossing of what the
+    /// frame would have had withheld. A crossing is settled by the same rule as a frame that ran
     /// ([`stop`](Self::stop)). Returns the limit when it crossed.
     pub(crate) fn on_answer(
         &mut self,
@@ -367,24 +377,44 @@ impl Detention {
         if !self.detains {
             return None;
         }
-        if result.result.is_halt() {
-            self.burned = self.burned.saturating_add(gas_limit);
-            return None;
+        if result.gas.withheld_crossing().is_none() {
+            if result.result.is_halt() {
+                self.burned = self.burned.saturating_add(gas_limit);
+                return None;
+            }
+            let allowance = self.allowance(depth, gas_limit)?;
+            if gas_limit.saturating_sub(result.gas.remaining()) <= allowance {
+                return None;
+            }
+            // The answer spent more than the allowance, and no more than the gas limit, so the
+            // gas limit is above the allowance and the frame would have had the rest withheld. An
+            // interceptor that charged by taking gas off the frame's limit answered on less than
+            // it was forwarded; the frame is settled on what it was forwarded.
+            let withheld = NonZeroU64::new(gas_limit - allowance)?;
+            result.result = InstructionResult::OutOfGas;
+            result.gas.tracker_mut().set_limit(gas_limit);
+            result.gas.set_withheld_crossing(Some(WithheldCrossing::new(withheld)));
         }
-        let limit = self.limit?;
-        let allowance = limit.saturating_sub(self.compute_at_start(depth, gas_limit));
-        if gas_limit.saturating_sub(result.gas.remaining()) <= allowance {
-            return None;
-        }
-        // The answer spent more than the allowance, and no more than the gas limit, so the gas
-        // limit is above the allowance and the frame would have had the rest withheld. An
-        // interceptor that charged by taking gas off the frame's limit answered on less than it
-        // was forwarded; the frame is settled on what it was forwarded.
-        let withheld = NonZeroU64::new(gas_limit - allowance)?;
-        result.result = InstructionResult::OutOfGas;
-        result.gas.tracker_mut().set_limit(gas_limit);
-        result.gas.set_withheld_crossing(Some(WithheldCrossing::new(withheld)));
         self.stop(&mut result.gas)
+    }
+
+    /// Gives a precompile's answer, which ran on `withheld` less than its caller forwarded — the
+    /// allowance, not the forward — the rest back, as the frame would have had it withheld: the
+    /// answer's gas limit is the forward again, and an answer that did not halt keeps the
+    /// withheld part unspent. A precompile that ran out of gas on the allowance ran out of what
+    /// the limit left the transaction: the answer is marked as a crossing of the withheld part,
+    /// and [`on_answer`](Self::on_answer) settles it as the stop.
+    ///
+    /// The precompile's price is not known without running it, so a precompile priced above its
+    /// whole forward runs out of the allowance as well, and is the stop too.
+    pub(crate) fn restore_forward(result: &mut InterpreterResult, withheld: NonZeroU64) {
+        let forward = result.gas.limit().saturating_add(withheld.get());
+        result.gas.tracker_mut().set_limit(forward);
+        if result.result == InstructionResult::PrecompileOOG {
+            result.gas.set_withheld_crossing(Some(WithheldCrossing::new(withheld)));
+        } else if !result.result.is_halt() {
+            result.gas.erase_cost(withheld.get());
+        }
     }
 
     /// Settles a frame whose regular gas ran out on a charge the withheld part would have paid —
@@ -701,6 +731,54 @@ mod tests {
         );
         assert_eq!(beyond.result, InstructionResult::OutOfGas);
         assert_eq!(beyond.gas.remaining(), 90_000_000 - BLOCK_ENV_ACCESS_COMPUTE_GAS);
+    }
+
+    /// A precompile run on the allowance gets the rest of the forward back: a success keeps it
+    /// unspent, a halt burns the forward as it would without the read, and an out-of-gas on the
+    /// allowance is a crossing, which the answer's settlement stops with the rest left.
+    #[test]
+    fn test_a_precompile_run_on_the_allowance_is_settled_on_the_forward() {
+        let mut detention = detaining();
+        let mut caller = gas(100_000_000, 0);
+        detention.on_frame_run(&mut caller, 0);
+        detention.commit_reads(VolatileDataAccess::TIMESTAMP, &mut caller, 0);
+        assert!(caller.record_withheld_first_cost(90_000_000));
+        detention.on_frame_suspend(&caller, 0);
+        let allowance = detention.allowance(1, 90_000_000).unwrap();
+        assert_eq!(allowance, BLOCK_ENV_ACCESS_COMPUTE_GAS);
+        let withheld = NonZeroU64::new(90_000_000 - allowance).unwrap();
+        let answer = |result: InstructionResult, spent: u64| {
+            let mut gas = gas(allowance, 0);
+            assert!(gas.record_regular_cost(spent));
+            if result.is_halt() {
+                gas.spend_all();
+            }
+            let mut answer = InterpreterResult::new(result, Bytes::new(), gas);
+            Detention::restore_forward(&mut answer, withheld);
+            assert_eq!(answer.gas.limit(), 90_000_000, "{result:?}");
+            answer
+        };
+
+        let mut answered = answer(InstructionResult::Return, 1_000);
+        assert_eq!(answered.gas.remaining(), 90_000_000 - 1_000);
+        assert_eq!(answered.gas.withheld_crossing(), None);
+        assert_eq!(detention.on_answer(&mut answered, 1, 90_000_000), None);
+
+        let mut failed = answer(InstructionResult::PrecompileError, 0);
+        assert_eq!(failed.gas.remaining(), 0);
+        assert_eq!(detention.on_answer(&mut failed, 1, 90_000_000), None);
+        assert_eq!(detention.burned, 90_000_000, "the forward burns");
+        detention.burned = 0;
+
+        let mut out_of_gas = answer(InstructionResult::PrecompileOOG, 0);
+        assert_eq!(out_of_gas.gas.withheld_crossing(), Some(WithheldCrossing::new(withheld)));
+        assert_eq!(
+            detention.on_answer(&mut out_of_gas, 1, 90_000_000),
+            Some(BLOCK_ENV_ACCESS_COMPUTE_GAS)
+        );
+        assert_eq!(out_of_gas.gas.remaining(), withheld.get(), "the allowance counts as spent");
+        assert_eq!(out_of_gas.gas.withheld_crossing(), None);
+        assert_eq!(detention.burned, 0, "a crossing burns nothing");
     }
 
     /// The switch holds for the frame that turned it off and every frame below it, turns back on

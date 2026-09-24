@@ -10,6 +10,9 @@
 //! Each case runs twice: with a read of the block's timestamp, and with `PUSH0`, which costs the
 //! same two gas and reads nothing, in its place.
 
+use std::sync::{Arc, Mutex};
+
+use alloy_evm::precompiles::DynPrecompile;
 use alloy_op_evm::OpTx;
 use alloy_primitives::{address, Address, Bytes, TxKind, U256};
 use alloy_sol_types::{SolCall, SolError};
@@ -34,6 +37,8 @@ use revm::{
         interpreter::EthInterpreter, CallInputs, CallOutcome, Gas, InstructionResult,
         InterpreterResult,
     },
+    precompile::{modexp, PrecompileHalt, PrecompileId, PrecompileOutput},
+    primitives::HashMap,
     Database, Inspector,
 };
 
@@ -654,29 +659,63 @@ fn test_a_call_that_reads_the_beneficiary_costs_what_a_warm_account_costs() {
 
 /* ---------- answers ---------- */
 
-/// The calldata of a modexp of a 1,024-byte zero base to an exponent of `exponent_len` bytes, all
-/// ones, modulo a 1,024-byte modulus of one: its price grows with the exponent, and its result is
-/// cheap to compute.
-fn modexp_input(exponent_len: usize) -> Vec<u8> {
+/// A precompile that charges the price its input names, as one big-endian word.
+const PRICED: Address = address!("0000000000000000000000000000000000d00013");
+
+/// The gas limits a precompile was run on, in order, each with whether its price was within it:
+/// a precompile that cannot pay its price answers out of gas without computing anything.
+type Runs = Arc<Mutex<Vec<(u64, bool)>>>;
+
+/// The precompile at [`PRICED`], recording what it runs on into `runs`.
+fn priced(runs: &Runs) -> DynPrecompile {
+    let runs = Arc::clone(runs);
+    DynPrecompile::new(PrecompileId::Custom("priced".into()), move |input| {
+        let price = U256::from_be_slice(input.data).saturating_to::<u64>();
+        let within = price <= input.gas;
+        runs.lock().unwrap().push((input.gas, within));
+        Ok(if within {
+            PrecompileOutput::new(price, Bytes::new(), input.reservoir)
+        } else {
+            PrecompileOutput::halt(PrecompileHalt::OutOfGas, input.reservoir)
+        })
+    })
+}
+
+/// Modexp as the Satin set runs it, recording what it runs on into `runs`.
+fn recording_modexp(runs: &Runs) -> DynPrecompile {
+    let runs = Arc::clone(runs);
+    DynPrecompile::new(PrecompileId::ModExp, move |input| {
+        let result = modexp::osaka_run(input.data, input.gas);
+        runs.lock().unwrap().push((input.gas, result.is_ok()));
+        Ok(PrecompileOutput::from_eth_result(result, input.reservoir))
+    })
+}
+
+/// The calldata of a modexp that is costly to compute: a 1,024-byte base with no zero byte, an
+/// exponent of `exponent_len` bytes, all ones, and an odd 1,024-byte modulus, then `padding`
+/// zero bytes the precompile ignores. Its price grows with the exponent, and so does the work.
+fn costly_modexp_input(exponent_len: usize, padding: usize) -> Vec<u8> {
     let mut input = Vec::new();
     for len in [1_024_usize, exponent_len, 1_024] {
         input.extend_from_slice(&U256::from(len).to_be_bytes::<32>());
     }
-    input.extend(core::iter::repeat_n(0_u8, 1_024));
+    input.extend((0..1_024_u32).map(|i| (i % 251) as u8 + 1));
     input.extend(core::iter::repeat_n(0xff_u8, exponent_len));
-    let mut modulus = vec![0_u8; 1_024];
-    modulus[1_023] = 1;
+    let mut modulus: Vec<u8> = (0..1_024_u32).map(|i| (i % 241) as u8).collect();
+    modulus[0] = 0xff;
+    modulus[1_023] |= 1;
     input.extend(modulus);
+    input.extend(core::iter::repeat_n(0_u8, padding));
     input
 }
 
-/// A contract that copies its calldata into memory and calls modexp with it and `gas` (all of it
+/// A contract that copies its calldata into memory and calls `to` with it and `gas` (all of it
 /// when `None`), after `first`, storing the call's status.
-fn calls_modexp(first: u8, gas: Option<u32>) -> Bytes {
+fn calls_precompile(first: u8, to: Address, gas: Option<u32>) -> Bytes {
     let code = op(BytecodeBuilder::default(), first)
         .append_many([CALLDATASIZE, PUSH0, PUSH0, CALLDATACOPY])
         .append_many([PUSH0, PUSH0, CALLDATASIZE, PUSH0])
-        .push_address(MODEXP);
+        .push_address(to);
     let code = match gas {
         Some(gas) => code.push_number(gas),
         None => code.append(GAS),
@@ -684,63 +723,205 @@ fn calls_modexp(first: u8, gas: Option<u32>) -> Bytes {
     store_status(code.append(STATICCALL))
 }
 
-/// A transaction from `CALLER` to `CONTRACT` carrying `input`.
-fn tx_with(input: &[u8], gas_limit: u64) -> mega_evm::MegaTransaction {
+/// A transaction from `caller` to `to` carrying `input`.
+fn tx_to(caller: Address, to: Address, input: &[u8], gas_limit: u64) -> mega_evm::MegaTransaction {
     OpTx(op_transaction(TxEnv {
-        caller: CALLER,
-        kind: TxKind::Call(CONTRACT),
+        caller,
+        kind: TxKind::Call(to),
         gas_limit,
         data: input.to_vec().into(),
         ..Default::default()
     }))
 }
 
-/// The regular gas modexp charges for `input`, read off the call's own result.
-fn modexp_price(input: &[u8]) -> u64 {
-    let db = MemoryDatabase::default().account_code(CONTRACT, calls_modexp(PUSH0, None));
-    let mut evm = MegaEvm::new(context(db)).with_inspector(Calls::default());
-    let run = run_on(&mut evm, tx_with(input, BELOW));
-    assert!(run.outcome.result.is_success());
-    let call = evm.inspector().calls.iter().find(|call| call.target == MODEXP).unwrap();
-    assert_eq!(call.result, InstructionResult::Return);
-    call.spent
+/// A transaction from `CALLER` to `CONTRACT` carrying `input`.
+fn tx_with(input: &[u8], gas_limit: u64) -> mega_evm::MegaTransaction {
+    tx_to(CALLER, CONTRACT, input, gas_limit)
 }
 
-/// revm runs a precompile inside the frame's start, against all the gas the caller forwarded, the
-/// part detention withholds from the caller's own charges included. A precompile whose price is
-/// within what the limit leaves the transaction runs as without the read; one whose price is above
-/// it, though within what the caller forwarded, crosses the cap and stops the transaction at the
-/// limit; and one whose price is above what it was forwarded runs out of gas as without the read.
+/// What a transaction carrying `input` spends before its first instruction.
+fn intrinsic_with(input: &[u8], gas_limit: u64) -> u64 {
+    let stops =
+        MemoryDatabase::default().account_code(CONTRACT, BytecodeBuilder::default().stop().build());
+    execute(stops, tx_with(input, gas_limit)).outcome.gas.regular
+}
+
+/// A precompile's run in a transaction: what the transaction did, what the precompile ran on,
+/// and the gas its call spent as the caller got it back.
+struct PrecompileRun {
+    run: Run,
+    ran_on: Vec<(u64, bool)>,
+    spent: u64,
+}
+
+/// Runs `tx` against `db` with the precompile `make` builds installed at `at`.
+fn run_precompile(
+    db: MemoryDatabase,
+    at: Address,
+    make: fn(&Runs) -> DynPrecompile,
+    tx: mega_evm::MegaTransaction,
+) -> PrecompileRun {
+    let runs = Runs::default();
+    let evm =
+        MegaEvm::new(context(db)).with_dyn_precompiles(HashMap::from_iter([(at, make(&runs))]));
+    let mut evm = evm.with_inspector(Calls::default());
+    let run = run_on(&mut evm, tx);
+    let spent = evm.inspector().calls.iter().find(|call| call.target == at).unwrap().spent;
+    let ran_on = runs.lock().unwrap().clone();
+    PrecompileRun { run, ran_on, spent }
+}
+
+/// revm runs a precompile inside the frame's start, against the gas limit of the frame, so after
+/// a read the precompile is run on the allowance the frame would have — what the limit leaves the
+/// transaction — and never on what its caller forwarded past it. Without the read, it runs on the
+/// forward.
+///
+/// Priced within the allowance, it answers as without the read. Priced at the allowance exactly,
+/// it answers, and its caller's next charge crosses the limit. Priced a unit past it, it answers
+/// out of gas without computing, and the transaction stops, billed exactly the allowance the
+/// precompile ran on.
 #[test]
-fn test_a_precompile_is_held_to_what_the_limit_leaves() {
-    let (within, above) = (modexp_input(32), modexp_input(64));
-    let (within_price, above_price) = (modexp_price(&within), modexp_price(&above));
-    assert!(within_price < CAP / 2, "{within_price}");
-    assert!(above_price > CAP + CAP / 10, "{above_price}");
+fn test_a_precompile_runs_on_the_allowance() {
     for gas_limit in TIERS {
-        let run = |first, gas, input: &[u8]| {
-            let db = MemoryDatabase::default().account_code(CONTRACT, calls_modexp(first, gas));
-            run_on(&mut MegaEvm::new(context(db)), tx_with(input, gas_limit))
+        let run = |first, price: u64| {
+            let code = calls_precompile(first, PRICED, None);
+            let db = MemoryDatabase::default().account_code(CONTRACT, code);
+            let input = U256::from(price).to_be_bytes::<32>();
+            run_precompile(db, PRICED, priced, tx_with(&input, gas_limit))
+        };
+        let stopped = |run: &PrecompileRun, price: u64| {
+            let input = U256::from(price).to_be_bytes::<32>();
+            assert_stopped(&run.run, intrinsic_with(&input, gas_limit));
         };
 
-        let (detained, plain) = (run(TIMESTAMP, None, &within), run(PUSH0, None, &within));
-        assert_as_without_read(&detained, &plain, "a price within the allowance");
-        assert_eq!(slot(&detained, 0), Some(U256::from(1)));
+        // Priced past every allowance: the stop, whose bill says what the allowance was.
+        let past = run(TIMESTAMP, CAP + 1);
+        stopped(&past, CAP + 1);
+        let allowance = past.spent;
+        assert!(allowance < CAP, "{allowance}");
+        assert_eq!(past.ran_on, [(allowance, false)], "run on the allowance, computing nothing");
+
+        for price in [allowance - 100_000, allowance, allowance + 1] {
+            let (detained, plain) = (run(TIMESTAMP, price), run(PUSH0, price));
+            assert_eq!(detained.ran_on, [(allowance, price <= allowance)], "priced {price}");
+            assert!(matches!(plain.ran_on[..], [(forward, true)] if forward > CAP), "{price}");
+            assert_eq!(slot(&plain.run, 0), Some(U256::from(1)));
+            if price < allowance {
+                assert_as_without_read(&detained.run, &plain.run, "a price the allowance pays");
+            } else {
+                stopped(&detained, price);
+            }
+        }
+    }
+}
+
+/// Modexp on a costly input, after a read, against the same call without it:
+///
+/// - priced within the allowance, it computes on the allowance and answers as without the read;
+/// - priced past the allowance but within what its caller forwarded, it runs out of the allowance
+///   without computing, and the transaction stops at the limit — without the read it computes;
+/// - forwarded less than its price, within the allowance, it runs out of gas as without the read;
+/// - forwarded less than its price, past the allowance, it runs out of the allowance too, and the
+///   transaction stops at the limit. Without the read the call fails and its caller goes on: the
+///   precompile's price is not known without running it, so it cannot be told from one priced
+///   within the forward.
+///
+/// The cheap input is padded to the length of the costly one, so the two calls leave the same
+/// allowance, which the stop's bill reads out.
+#[test]
+fn test_a_precompile_is_held_to_what_the_limit_leaves() {
+    let (within, above) = (costly_modexp_input(32, 32), costly_modexp_input(64, 0));
+    assert_eq!(within.len(), above.len());
+    for gas_limit in TIERS {
+        let run = |first, gas, input: &[u8]| {
+            let db = MemoryDatabase::default()
+                .account_code(CONTRACT, calls_precompile(first, MODEXP, gas));
+            run_precompile(db, MODEXP, recording_modexp, tx_with(input, gas_limit))
+        };
 
         let (detained, plain) = (run(TIMESTAMP, None, &above), run(PUSH0, None, &above));
-        assert_eq!(slot(&plain, 0), Some(U256::from(1)), "the precompile runs without the read");
-        // What a transaction carrying the same input spends before its first instruction.
-        let stops = MemoryDatabase::default()
-            .account_code(CONTRACT, BytecodeBuilder::default().stop().build());
-        let intrinsic = execute(stops, tx_with(&above, gas_limit)).outcome.gas.regular;
-        let limit = assert_stopped(&detained, intrinsic);
-        assert!(limit < above_price, "the stop billed the allowance, not the price");
+        assert_stopped(&detained.run, intrinsic_with(&above, gas_limit));
+        let allowance = detained.spent;
+        assert_eq!(detained.ran_on, [(allowance, false)], "past the allowance, nothing computed");
+        let above_price = plain.spent;
+        assert!(allowance < CAP && CAP < above_price, "{allowance} {above_price}");
+        assert!(plain.ran_on[0].1, "without the read it computes");
+        assert_eq!(slot(&plain.run, 0), Some(U256::from(1)));
 
-        // Forwarded less than its price: a precompile's out-of-gas, the call's failure.
-        let short = Some(u32::try_from(within_price).unwrap() - 1);
-        let (detained, plain) = (run(TIMESTAMP, short, &within), run(PUSH0, short, &within));
-        assert_as_without_read(&detained, &plain, "a price above the forward");
-        assert_eq!(slot(&detained, 0), Some(U256::ZERO));
+        let (detained, plain) = (run(TIMESTAMP, None, &within), run(PUSH0, None, &within));
+        assert_as_without_read(&detained.run, &plain.run, "a price within the allowance");
+        assert_eq!(detained.ran_on, [(allowance, true)], "run on the allowance");
+        assert_eq!(slot(&detained.run, 0), Some(U256::from(1)));
+        let within_price = plain.spent;
+        assert!(within_price < allowance, "{within_price}");
+
+        // Forwarded less than its price, within the allowance: the call's own out-of-gas.
+        let short = u32::try_from(within_price).unwrap() - 1;
+        let (detained, plain) =
+            (run(TIMESTAMP, Some(short), &within), run(PUSH0, Some(short), &within));
+        assert_as_without_read(
+            &detained.run,
+            &plain.run,
+            "a price above a forward the allowance holds",
+        );
+        assert_eq!(detained.ran_on, [(u64::from(short), false)]);
+        assert_eq!(slot(&detained.run, 0), Some(U256::ZERO));
+
+        // Forwarded less than its price, past the allowance: the stop, where the call would fail.
+        let short = u32::try_from(above_price).unwrap() - 1;
+        let (detained, plain) =
+            (run(TIMESTAMP, Some(short), &above), run(PUSH0, Some(short), &above));
+        assert_stopped(&detained.run, intrinsic_with(&above, gas_limit));
+        assert!(
+            matches!(detained.ran_on[..], [(gas, false)] if gas < CAP),
+            "{:?}",
+            detained.ran_on
+        );
+        assert_eq!(plain.ran_on, [(u64::from(short), false)]);
+        assert!(plain.run.outcome.result.is_success());
+        assert_eq!(slot(&plain.run, 0), Some(U256::ZERO), "without the read the call fails");
+    }
+}
+
+/// A modexp priced far above the cap, 58,687,488 and 125,796,352 gas, called after a read with all
+/// the gas, is run on the allowance, computes nothing, and the transaction is billed the limit. A
+/// transaction the beneficiary sends straight to the precompile is detained from the start, so the
+/// precompile runs on the cap itself. The same transaction from another sender computes.
+#[test]
+fn test_a_precompile_priced_past_the_cap_computes_nothing() {
+    for (exponent_len, price) in [(128, 58_687_488), (256, 125_796_352)] {
+        let input = costly_modexp_input(exponent_len, 0);
+        // Without the read, it computes, and costs its price on top of what the transaction spends
+        // before its first instruction.
+        let plain = run_precompile(
+            MemoryDatabase::default(),
+            MODEXP,
+            recording_modexp,
+            tx_to(CALLER, MODEXP, &input, ABOVE),
+        );
+        assert!(plain.run.outcome.result.is_success());
+        assert!(matches!(plain.ran_on[..], [(_, true)]), "{:?}", plain.ran_on);
+        assert_eq!(plain.spent, price);
+        let intrinsic = plain.run.outcome.gas.regular - price;
+
+        for gas_limit in TIERS {
+            let code = calls_precompile(TIMESTAMP, MODEXP, None);
+            let db = MemoryDatabase::default().account_code(CONTRACT, code);
+            let called = run_precompile(db, MODEXP, recording_modexp, tx_with(&input, gas_limit));
+            assert_stopped(&called.run, intrinsic_with(&input, gas_limit));
+            assert!(
+                matches!(called.ran_on[..], [(gas, false)] if gas < CAP),
+                "{:?}",
+                called.ran_on
+            );
+
+            let tx = tx_to(BENEFICIARY, MODEXP, &input, gas_limit);
+            let sent = run_precompile(MemoryDatabase::default(), MODEXP, recording_modexp, tx);
+            assert_eq!(sent.run.limit, Some(CAP), "the sender is the beneficiary");
+            assert_eq!(sent.ran_on, [(CAP, false)], "run on the cap, computing nothing");
+            assert_eq!(sent.spent, CAP);
+            assert_stopped(&sent.run, intrinsic);
+        }
     }
 }
 

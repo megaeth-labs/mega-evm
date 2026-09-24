@@ -56,7 +56,8 @@
 //!
 //! Every frame that runs has its spendable part held at what the limit leaves the transaction
 //! (`Gas::limit_spendable`); the rest is withheld. Three points hold this, and between them no
-//! frame can compute past the limit:
+//! frame can compute past the limit (a frame answered without running is held by the rule under
+//! the stop below):
 //!
 //! - **the read**: the opcode that read volatile data holds its own frame once it committed the
 //!   read, so the instructions after it run on what the cap leaves;
@@ -85,10 +86,19 @@
 //! a failed state or history charge, and a regular charge the frame's whole gas could not pay.
 //!
 //! A frame answered without running is held the same way. revm runs a precompile inside the
-//! frame's start against all the gas the caller forwarded, the caller's withheld part included, and
-//! an interceptor builds its answer likewise: an answer that spent more than the allowance the
-//! frame would have run on is answered out of gas and marked as a crossing, and the same rule stops
-//! the transaction.
+//! frame's start, against the frame's gas limit, before its answer can be classified, so after a
+//! read a precompile forwarded more than the allowance its frame would start with is run on that
+//! allowance, and its answer gets the rest of the forward back. Priced within the allowance, it
+//! answers as it would without the read. Priced past it, it answers out of gas without computing;
+//! the answer is marked as a crossing, and the same rule stops the transaction. The price is not
+//! known without running the precompile, so one priced past its whole forward runs out of the
+//! allowance too, and is the stop, where without the read it would be a failed call that burns
+//! its forward and that its caller survives. A precompile run on the allowance also sees the
+//! allowance as its gas limit.
+//!
+//! An interceptor builds its answer on all the gas the caller forwarded, the caller's withheld
+//! part included: an answer that spent more than the allowance the frame would have run on is
+//! answered out of gas and marked as a crossing, and the same rule stops the transaction.
 //!
 //! # Nothing withheld leaks
 //!
