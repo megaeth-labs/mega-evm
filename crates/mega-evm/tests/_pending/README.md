@@ -28,14 +28,14 @@ Do not add a `_pending/main.rs`.
 | Owning mechanism | Tests | From `tests/` | From `src/` | Keep | Rewrite | Undecided |
 |---|---:|---:|---:|---:|---:|---:|
 | the common execution layer | 21 | 21 | 0 | 21 | 0 | 0 |
-| detention | 88 | 83 | 5 | 73 | 15 | 0 |
+| detention | 89 | 84 | 5 | 73 | 16 | 0 |
 | revert-class aborts | 17 | 17 | 0 | 0 | 17 | 0 |
 | the pre-block system calls | 34 | 22 | 12 | 30 | 4 | 0 |
 | system contract deployment | 11 | 5 | 6 | 11 | 0 | 0 |
 | the oracle and control contracts | 77 | 77 | 0 | 67 | 10 | 0 |
 | inspector support | 4 | 4 | 0 | 1 | 3 | 0 |
 | — (undecided: D57 preload-warm cold charging, D58 98/100 forwarding) | 7 | 7 | 0 | 0 | 0 | 7 |
-| **Total** | **259** | **236** | **23** | **203** | **49** | **7** |
+| **Total** | **260** | **237** | **23** | **203** | **50** | **7** |
 
 ## Tests ported in place
 
@@ -294,14 +294,13 @@ These 69 rows run in a real test target now, adapted to the Satin API: a keyless
 
 ## Tests retired after the inventory
 
-These 22 rows were parked when the inventory was applied and have since been retired: the mechanism that owns them landed and left them nothing to pin, so no later mechanism will port them.
+These 21 rows were parked when the inventory was applied and have since been retired: the mechanism that owns them landed and left them nothing to pin, so no later mechanism will port them.
 They are not counted above.
 
 | Legacy file | Owner in the inventory | Tests | Why |
 |---|---|---:|---|
 | `mini_rex/compute_gas_limit.rs` | compute gas (2) | 2 | Satin's compute limit is the execution cap the spec fixes, not a limit a caller sets, so there is no zero or one limit to configure; a gas limit below a transaction's intrinsic gas is rejected at validation |
 | `rex5/callcode_storage_gas.rs` | SALT pricing (3) | 3 | Satin's `CALLCODE` cannot reach a state gas pricing site: it sends value to the frame's own account, which exists, so it adds no account leaf and asks for no price. There is no pricing-path account inspection left to fail |
-| `rex5/sandbox_accounting.rs` | native keyless deployment (1) | 1 | The residual-overflow halt was the sandbox's safety net for the usage it merged after the deployment ran; a native deployment is held to every limit as it runs, and a crossing stops it as it stops any frame |
 | `src/evm/host.rs` | SALT pricing (1) | 1 | the pricing hook inspects no account: the fork decides whether a target exists and the hook only prices what it is told to, so there is no delegation walk on the pricing path to guard |
 | `src/external/gas.rs` | SALT pricing (4) | 4 | these pin a helper at a legacy spec boundary: it is served from one rung and asserts below it. Satin is a single spec and has no gate of its own, so there is no boundary left for them to pin |
 | `src/system/control.rs` | system contract deployment (2) | 2 | Satin is a single spec with no per-fork deploy gate: the contract is deployed at every block; Satin does not overwrite foreign code: a system address with different code is an error, not an in-place upgrade |
@@ -309,7 +308,7 @@ They are not counted above.
 | `src/system/keyless_deploy.rs` | system contract deployment (1) | 1 | Satin does not overwrite foreign code: a system address with different code is an error, not an in-place upgrade |
 | `src/system/limit_control.rs` | system contract deployment (2) | 2 | Satin is a single spec with no per-fork deploy gate: the contract is deployed at every block; Satin does not overwrite foreign code: a system address with different code is an error, not an in-place upgrade |
 | `src/system/oracle.rs` | system contract deployment (3) | 3 | Satin does not overwrite foreign code: a system address with different code is an error, not an in-place upgrade; Satin is a single spec and ships one Oracle bytecode; there is no per-fork version gate to pin |
-| **Total** | | **22** | |
+| **Total** | | **21** | |
 
 ## Tests the inventory assigns to the Satin skeleton that are parked under another mechanism
 
@@ -340,6 +339,7 @@ They are not counted above.
 | `rex5/sandbox_accounting.rs` | `test_rex5_sandbox_block_env_access_merged_into_parent_volatile_tracker` | detention | a keyless deployment's volatile-data access is its creation frame's, as any frame's is; the tracker that sees it is detention's |
 | `rex5/sandbox_accounting.rs` | `test_rex5_sandbox_coinbase_access_merged_into_parent_volatile_tracker` | detention | a keyless deployment's volatile-data access is its creation frame's, as any frame's is; the tracker that sees it is detention's |
 | `rex5/sandbox_accounting.rs` | `test_rex5_sandbox_oracle_access_merged_into_parent_volatile_tracker` | detention | a keyless deployment's volatile-data access is its creation frame's, as any frame's is; the tracker that sees it is detention's |
+| `rex5/sandbox_accounting.rs` | `test_rex5_sandbox_volatile_bitmap_survives_residual_overflow_halt` | detention | a keyless deployment a transaction limit stops still reports the volatile data its creation read, and the stop stays the limit's |
 | `rex5/sandbox_accounting.rs` | `test_rex5_sandbox_volatile_merge_runs_on_in_sandbox_failure_empty_code` | detention | a keyless deployment's volatile-data access is its creation frame's, as any frame's is; the tracker that sees it is detention's |
 | `rex6/eip7702_authority_accounting.rs` | `test_rex6_authority_beneficiary_triggers_detention` | detention | detention owns whether an applied authority that is the block beneficiary lowers the compute cap, and what a compute overflow before the first frame does to the authorizations |
 | `rex6/eip7702_authority_accounting.rs` | `test_rex6_authority_compute_overflow_skips_authorities` | detention | detention owns whether an applied authority that is the block beneficiary lowers the compute cap, and what a compute overflow before the first frame does to the authorizations |
@@ -376,7 +376,7 @@ Each cell lists `disposition count (mechanism · decision)`.
 | `rex5/create2_resize_gas_metering.rs` | 2 | keep 2 (the common execution layer · canonical behaviour) |
 | `rex5/oracle_hint_metering.rs` | 9 | keep 7 (the oracle and control contracts · D50 (hint not charged history; data-size metering kept)); rewrite 1 (the oracle and control contracts · D11 intrinsic number); rewrite 1 (revert-class aborts · D48) |
 | `rex5/pre_block_system_calls.rs` | 11 | keep 11 (the pre-block system calls) |
-| `rex5/sandbox_accounting.rs` | 5 | rewrite 5 (detention · native sub-frame: parent tracker sees child directly) |
+| `rex5/sandbox_accounting.rs` | 6 | rewrite 6 (detention · native sub-frame: parent tracker sees child directly) |
 | `rex5/selfdestruct_beneficiary.rs` | 2 | keep 2 (detention) |
 | `rex6/beneficiary_detention.rs` | 13 | keep 13 (detention · D08) |
 | `rex6/create2_metering_order.rs` | 11 | keep 11 (the common execution layer · canonical halt reasons; D04 512 KiB boundary) |

@@ -574,3 +574,117 @@ fn test_rex5_sandbox_volatile_merge_runs_on_in_sandbox_failure_empty_code() {
 // ============================================================================
 // OUTER EVM GAS DEBIT (REX5+)
 // ============================================================================
+
+/// REX5 sandbox: when the merged sandbox usage pushes the parent over a
+/// TX-level compute-gas cap, `reject_if_tx_limit_overflow` halts the outer
+/// call. Per the halt invariant the tx footprint side effects survive while
+/// the state diff does not:
+/// - Sandbox state diff NOT merged (deploy address has no code).
+/// - Parent volatile bitmap IS merged (footprint survives halt).
+/// - Parent multidim usage IS merged (footprint survives halt).
+///
+/// Uses `constructor_reads_timestamp` so the sandbox actually accesses
+/// volatile data — without that the volatile assertion would be a no-op.
+/// The tight `tx_compute_gas_limit` is derived from a successful baseline
+/// of the same constructor, then shaved by 1 so the merged usage overshoots
+/// by exactly one opcode.
+///
+/// Note: the alternative outer-OOG path (where the outer `Gas` cannot absorb the
+/// sandbox's eventual cost) is unreachable under REX5. The sandbox enters under a
+/// `gas.record_cost(gas_limit_override)` reservation that is capped to the outer's
+/// remaining gas, so `sandbox_gas_used ≤ reservation` is structural — the post-frame
+/// step is a pure `erase_cost` refund of the unused tail, never a `record_cost`.
+#[test]
+fn test_rex5_sandbox_volatile_bitmap_survives_residual_overflow_halt() {
+    let init_code = constructor_reads_timestamp();
+    // Get baseline usage for the same constructor on a successful deploy.
+    let (tx_bytes, signer, deploy_address, baseline_usage) = rex5_baseline(init_code);
+    assert!(baseline_usage.compute_gas > 0, "baseline should consume compute gas");
+
+    // Tighten the parent's compute_gas budget so the sandbox's merged usage
+    // overshoots by a single opcode, forcing the residual-overflow safety net
+    // to halt the outer call after the sandbox has already merged its
+    // multidim usage and volatile bitmap.
+    let tx_limits = EvmTxRuntimeLimits::no_limits()
+        .with_tx_compute_gas_limit(baseline_usage.compute_gas.saturating_sub(1));
+
+    // Run the keyless deploy with the tight limits AND extract the parent's
+    // volatile tracker bitmap after the call returns. (`execute_keyless_deploy_with_limits`
+    // drops the EVM internally, so we inline the EVM construction here to keep
+    // the tracker reachable.)
+    let mut db = funded_signer_db(signer);
+    let external_envs = TestExternalEnvs::<std::convert::Infallible>::new();
+    let mut context = MegaContext::new(&mut db, MegaSpecId::REX5)
+        .with_external_envs((&external_envs).into())
+        .with_tx_runtime_limits(tx_limits);
+    context.modify_chain(|chain| {
+        chain.operator_fee_scalar = Some(U256::from(0));
+        chain.operator_fee_constant = Some(U256::from(0));
+    });
+    let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);
+    let outer_tx = keyless_deploy_call_tx(tx_bytes, LARGE_GAS_LIMIT_OVERRIDE);
+    let result_and_state = alloy_evm::Evm::transact_raw(&mut evm, outer_tx).unwrap();
+    let usage = evm.ctx_ref().additional_limit.borrow().get_usage();
+    let volatile = evm.ctx_ref().volatile_data_tracker.borrow().get_volatile_data_accessed();
+    let result = result_and_state.result;
+
+    // Outer halts at `reject_if_tx_limit_overflow` because the parent's
+    // compute-gas cap was overshot by the merged sandbox usage.
+    assert!(
+        result.is_halt(),
+        "outer should halt on residual compute-gas overflow, got: {result:?}"
+    );
+
+    // The halt reason must be the generic `ComputeGasLimitExceeded`, NOT the
+    // volatile-specific `VolatileDataAccessOutOfGas`. The footprint merge
+    // propagates the bitmap into the parent's volatile tracker but does NOT
+    // call `set_compute_gas_limit` on the parent's `AdditionalLimit`; the
+    // halt-reason classifier at `MegaHandler::execution_result` therefore
+    // takes the generic `check_limit().maybe_halt_reason()` branch rather
+    // than the `detained_compute_gas_halt_reason` branch. See the doc comment
+    // on `VolatileDataAccessTracker::merge_accesses_from_bitmap` for the
+    // intentional footprint-only scoping.
+    match &result {
+        ExecutionResult::Halt { reason, .. } => {
+            assert!(
+                matches!(reason, MegaHaltReason::ComputeGasLimitExceeded { .. }),
+                "halt reason should be generic ComputeGasLimitExceeded; got {reason:?}"
+            );
+            assert!(
+                !matches!(reason, MegaHaltReason::VolatileDataAccessOutOfGas { .. }),
+                "halt reason MUST NOT be remapped to volatile-specific variant for \
+                 a sandbox-only volatile access — detention state is not merged; \
+                 got {reason:?}"
+            );
+        }
+        other => panic!("expected Halt, got: {other:?}"),
+    }
+
+    // (1) State diff NOT merged — deployed account must not survive.
+    let deployed_account = result_and_state.state.get(&deploy_address);
+    let has_code = deployed_account
+        .map(|acc| acc.info.code.as_ref().map(|c| !c.is_empty()).unwrap_or(false))
+        .unwrap_or(false);
+    assert!(!has_code, "sandbox state must NOT be merged on residual overflow halt");
+
+    // (2) Parent volatile bitmap IS merged — footprint survives the halt.
+    assert!(
+        volatile.contains(VolatileDataAccess::TIMESTAMP),
+        "parent volatile tracker MUST include sandbox TIMESTAMP read on \
+         residual overflow halt; got {:?}",
+        volatile,
+    );
+
+    // (3) Parent's multidim usage IS merged. The dispatch path records the
+    // fixed overhead into compute_gas BEFORE entering the sandbox, so any
+    // proof that the sandbox's contribution survived must show compute_gas
+    // strictly greater than that overhead alone.
+    assert!(
+        usage.compute_gas > constants::rex2::KEYLESS_DEPLOY_OVERHEAD_GAS,
+        "parent additional_limit.compute_gas must include sandbox contribution \
+         on top of the {} dispatch overhead; got {} (multidim merge should \
+         survive halt)",
+        constants::rex2::KEYLESS_DEPLOY_OVERHEAD_GAS,
+        usage.compute_gas,
+    );
+}
