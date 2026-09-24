@@ -113,16 +113,24 @@ pub(crate) struct KeylessCall {
 /// 7. The signer's nonce is at most 1 (`SignerNonceTooHigh`).
 /// 8. Unless EIP-3607 is disabled, the signer has no code other than an EIP-7702 delegation
 ///    (`SignerHasCode()`).
-/// 9. The deploy address holds no code (`ContractAlreadyExists()`), read cold and without its code,
-///    so the address is in the transaction's state and in a witness without its bytecode.
-/// 10. The signer can fund the transaction's value (`InsufficientBalance()`).
-/// 11. What the `CREATE` opcode would charge its frame for the creation's start: the signer's
-///     account when the creation's nonce bump is what creates it, the created account when the
-///     deploy address is empty — both state gas, priced by the SALT bucket they land in — and the
-///     write records of the two accounts, as history. A call that cannot pay is answered out of
-///     gas.
-/// 12. The gas the creation is forwarded is `gasLimitOverride`, capped to what the call has left,
+/// 9. The signer's account, when the creation's nonce bump is what creates it: state gas, priced by
+///    the signer's SALT bucket. A call that cannot pay is answered out of gas.
+/// 10. `gasLimitOverride`, capped to what the call has left, still covers the signed gas limit
+///     (`GasLimitTooLow`).
+/// 11. The deploy address holds no code (`ContractAlreadyExists()`), read cold and without its
+///     code, so the address is in the transaction's state and in a witness without its bytecode.
+/// 12. The signer can fund the transaction's value (`InsufficientBalance()`).
+/// 13. What the `CREATE` opcode charges its frame for the creation's start: the created account
+///     when the deploy address is empty — state gas, priced by the deploy address's SALT bucket —
+///     and the write records of the two accounts, as history. A call that cannot pay is answered
+///     out of gas.
+/// 14. The gas the creation is forwarded is `gasLimitOverride`, capped to what the call has left,
 ///     and must still cover the signed gas limit (`GasLimitTooLow`).
+///
+/// The order is the legacy engine's, so a call several rules refuse is refused with the error the
+/// legacy engine reported: it charged the signer's account at step 9 and re-checked the forward
+/// right after, before the deploy address and the balance. The charges of step 13 are this
+/// engine's, made after every rule, and step 14 holds the forward to them.
 ///
 /// A refusal writes nothing, so the answer takes back every charge but the overhead with it. A
 /// database read or a SALT lookup that fails fails the transaction with its cause, as it does at
@@ -313,6 +321,20 @@ fn prepare<DB: Database, ExtEnvs: ExternalEnvTypes>(
             provided_gas_limit: override_gas_limit,
         });
     }
+    // The forward: `gasLimitOverride`, capped to what the call has left, which must still cover
+    // the signed gas limit.
+    macro_rules! forward {
+        () => {{
+            let gas_limit = override_gas_limit.min(gas.remaining());
+            if gas_limit < tx.gas_limit {
+                refuse!(KeylessDeployError::GasLimitTooLow {
+                    tx_gas_limit: tx.gas_limit,
+                    provided_gas_limit: gas_limit,
+                });
+            }
+            gas_limit
+        }};
+    }
     let signer = match recover_signer(&signed) {
         Ok(signer) => signer,
         Err(error) => refuse!(error),
@@ -329,15 +351,10 @@ fn prepare<DB: Database, ExtEnvs: ExternalEnvTypes>(
     {
         refuse!(KeylessDeployError::SignerHasCode);
     }
-    if ctx.journal_mut().inspect_account_code_hash(deploy_address)? != KECCAK_EMPTY {
-        refuse!(KeylessDeployError::ContractAlreadyExists);
-    }
-    if signer_info.balance < tx.value {
-        refuse!(KeylessDeployError::InsufficientBalance);
-    }
 
-    // What the `CREATE` opcode charges its frame for the creation's start. The signer's nonce bump
-    // is what creates an empty signer's account; a caller the opcode starts from exists already.
+    // The signer's nonce bump is what creates an empty signer's account: a caller the `CREATE`
+    // opcode starts from exists already. It is charged where the legacy engine charged it, and
+    // the forward checked right after, before the deploy address and the balance are.
     let mut signer_account_charge = 0;
     if signer_info.is_empty() {
         let charge =
@@ -347,6 +364,15 @@ fn prepare<DB: Database, ExtEnvs: ExternalEnvTypes>(
             return Ok(Err(Refusal::OutOfGas));
         }
     }
+    forward!();
+    if ctx.journal_mut().inspect_account_code_hash(deploy_address)? != KECCAK_EMPTY {
+        refuse!(KeylessDeployError::ContractAlreadyExists);
+    }
+    if signer_info.balance < tx.value {
+        refuse!(KeylessDeployError::InsufficientBalance);
+    }
+
+    // What the `CREATE` opcode charges its frame for the creation's start, after every rule.
     let charged_create_state_gas =
         ctx.journal_ref().state.get(&deploy_address).is_none_or(|account| account.info.is_empty());
     if charged_create_state_gas {
@@ -372,13 +398,7 @@ fn prepare<DB: Database, ExtEnvs: ExternalEnvTypes>(
         None
     };
 
-    let gas_limit = override_gas_limit.min(gas.remaining());
-    if gas_limit < tx.gas_limit {
-        refuse!(KeylessDeployError::GasLimitTooLow {
-            tx_gas_limit: tx.gas_limit,
-            provided_gas_limit: gas_limit,
-        });
-    }
+    let gas_limit = forward!();
     let forwarded = gas.record_regular_cost(gas_limit);
     debug_assert!(forwarded, "the forward is capped to what the call has left");
 

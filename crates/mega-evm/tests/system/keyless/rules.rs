@@ -1,7 +1,8 @@
 //! The rules a `keylessDeploy` call is held to before its creation starts, and what a refusal
 //! leaves behind: nothing but the overhead.
 //!
-//! The rules and the error ABI are the legacy engine's. What moved is the balance rule, which
+//! The rules, their order and the error ABI are the legacy engine's; `precedence` pins the error a
+//! call several rules refuse reports. What moved is the balance rule, which
 //! asks the signer for the transaction's value alone — a deployment pays no gas out of the
 //! signer's balance — and rule 4, which now counts real nonces: a deployment that succeeds bumps
 //! the signer's nonce as any creation does, and one that fails keeps the bump only from 0 to 1.

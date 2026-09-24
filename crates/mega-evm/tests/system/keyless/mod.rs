@@ -11,6 +11,7 @@ mod deploy;
 mod dispatch;
 mod inspector;
 mod limits;
+mod precedence;
 mod rules;
 
 use alloy_primitives::{address, hex, Address, Bytes, Signature, TxKind, B256, U256};
