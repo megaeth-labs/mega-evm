@@ -23,6 +23,10 @@
 //!   beneficiary, then a call to the Oracle, whose code loads 200 of its slots. Every one is a read
 //!   gas detention marks in the Host and commits in the opcode's wrapper; the first caps the frame,
 //!   and the call starts and resumes under the limit.
+//! - `hashes_and_copies`: 200 rounds of a 32-byte `KECCAK256`, `MCOPY`, `CALLDATACOPY` and
+//!   `CODECOPY` and an empty `RETURNDATACOPY`: the wrapper each of them runs in, which notes the
+//!   frame's gas for gas detention when the opcode's charge fails and compares a result when it
+//!   does not.
 //! - `data_size_limit`: 200 fresh slots and 200 two-topic logs in one frame, run under a
 //!   transaction data-size limit equal to exactly what the transaction keeps, so every record is
 //!   checked against a limit it is about to reach (`satin`); the same one byte short of it, so the
@@ -67,8 +71,9 @@ use mega_evm::{
 use op_revm::{L1BlockInfo, OpEvm, OpSpecId, OpTransaction};
 use revm::{
     bytecode::opcode::{
-        ADDRESS, BALANCE, CALL, CALLDATALOAD, DUP1, GAS, ISZERO, JUMPDEST, JUMPI, LOG0, LOG2,
-        MSTORE, NUMBER, POP, PUSH0, PUSH1, SLOAD, SSTORE, STATICCALL, STOP, SUB, SWAP1, TIMESTAMP,
+        ADDRESS, BALANCE, CALL, CALLDATACOPY, CALLDATALOAD, CODECOPY, DUP1, GAS, ISZERO, JUMPDEST,
+        JUMPI, KECCAK256, LOG0, LOG2, MCOPY, MSTORE, NUMBER, POP, PUSH0, PUSH1, RETURNDATACOPY,
+        SLOAD, SSTORE, STATICCALL, STOP, SUB, SWAP1, TIMESTAMP,
     },
     context::{BlockEnv, CfgEnv, Context, ContextTr, TxEnv},
     inspector::NoOpInspector,
@@ -87,6 +92,7 @@ const MISSING: Address = address!("0x0000000000000000000000000000000000100008");
 const LIMITED: Address = address!("0x0000000000000000000000000000000000100009");
 const READER: Address = address!("0x000000000000000000000000000000000010000a");
 const VOLATILE: Address = address!("0x000000000000000000000000000000000010000b");
+const HASHER: Address = address!("0x000000000000000000000000000000000010000c");
 
 /// The block beneficiary of the benchmark's block, `BlockEnv`'s default.
 const BENEFICIARY: Address = Address::ZERO;
@@ -164,6 +170,25 @@ fn reader_code() -> Bytes {
     let mut code = BytecodeBuilder::default();
     for slot in 0..REPEAT {
         code = code.push_number(slot).append(SLOAD).append(POP);
+    }
+    code.stop().build()
+}
+
+/// Hashes a word, copies a word within memory, from calldata and from code, and copies no return
+/// data, `REPEAT` times.
+fn hasher_code() -> Bytes {
+    let mut code = BytecodeBuilder::default();
+    for _ in 0..REPEAT {
+        code = code
+            .push_number(32_u8)
+            .append_many([PUSH0, KECCAK256, POP])
+            .push_number(32_u8)
+            .append_many([PUSH0, PUSH0, MCOPY])
+            .push_number(32_u8)
+            .append_many([PUSH0, PUSH0, CALLDATACOPY])
+            .push_number(32_u8)
+            .append_many([PUSH0, PUSH0, CODECOPY])
+            .append_many([PUSH0, PUSH0, PUSH0, RETURNDATACOPY]);
     }
     code.stop().build()
 }
@@ -319,6 +344,7 @@ fn bench_transact(c: &mut Criterion) {
         .account_code(LIMITED, limited_code())
         .account_code(READER, reader_code())
         .account_code(VOLATILE, volatile_code())
+        .account_code(HASHER, hasher_code())
         .account_code(ORACLE_CONTRACT_ADDRESS, reader_code())
         .account_code(ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE);
     let cfg = mega_context(db.clone()).cfg().clone();
@@ -336,6 +362,7 @@ fn bench_transact(c: &mut Criterion) {
         ("system_address_misses", call_tx(MISSING, Bytes::new(), 30_000_000)),
         ("storage_reads", call_tx(READER, Bytes::new(), 30_000_000)),
         ("volatile_reads", call_tx(VOLATILE, Bytes::new(), 30_000_000)),
+        ("hashes_and_copies", call_tx(HASHER, Bytes::from(vec![0xab_u8; 32]), 30_000_000)),
     ];
 
     let mut group = c.benchmark_group("transact");
@@ -411,7 +438,7 @@ fn bench_transact(c: &mut Criterion) {
     let limited_tx = call_tx(LIMITED, Bytes::new(), LIMITED_GAS_LIMIT);
     let limited = |limit| {
         mega_context(db.clone())
-            .with_tx_runtime_limits(EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(limit))
+            .with_tx_runtime_limits(EvmTxRuntimeLimits::default().with_tx_data_size_limit(limit))
     };
     let at_limit =
         MegaEvm::new(limited(LIMITED_KEPT)).execute_transaction(OpTx(limited_tx.clone())).unwrap();
@@ -465,7 +492,7 @@ fn bench_transact(c: &mut Criterion) {
         .state;
     let state_limited = |limit| {
         mega_context(db.clone()).with_tx_runtime_limits(
-            EvmTxRuntimeLimits::no_limits()
+            EvmTxRuntimeLimits::default()
                 .with_tx_state_gas_limit(limit)
                 .with_tx_kv_update_limit(REPEAT),
         )
