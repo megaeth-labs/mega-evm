@@ -19,9 +19,10 @@
 //!   so each pays the dispatch's address match and selector peek and then runs the bytecode.
 //! - `remaining_compute_gas`: 200 `STATICCALL`s to `MegaLimitControl`'s `remainingComputeGas`,
 //!   which the interceptor answers from the caller's gas and gas detention's allowance.
-//! - `oracle_reads`: a transaction to the Oracle, whose code loads 200 of its slots: each load asks
-//!   the oracle service, finds nothing, reads the database and is priced cold, and gas detention
-//!   marks and commits it. op-revm reads the same 200 slots from the database.
+//! - `oracle_reads`: a transaction to the Oracle, whose code loads 200 of its slots: each load
+//!   reads the database through the journal, asks the oracle service, finds nothing and is priced
+//!   cold, and gas detention marks and commits it. op-revm reads the same 200 slots from the
+//!   database.
 //! - `value_calls`: 200 one-wei `CALL`s to an account with no code, which revm answers without
 //!   running: each frame start counts its records and its EIP-7708 transfer log before revm moves
 //!   the value and journals the log, and op-revm journals the same 200 logs.
@@ -46,7 +47,8 @@
 //!   transaction is stopped (`stopped`). Its op-revm baseline is `data_size_limit/op_revm`.
 //!
 //! `oracle_reads` runs once more through `MegaEvm` alone (`/service`), against an oracle service
-//! that answers all 200 slots, so no load reaches the database.
+//! that answers all 200 slots; every slot is loaded all the same, so the two arms differ by the
+//! answers alone.
 //!
 //! Two more run through `MegaEvm` alone, because they price something op-revm has no equivalent
 //! of: `salt_storage_writes` and `salt_new_accounts` each draw one EIP-8037 state gas charge per
@@ -576,8 +578,8 @@ fn bench_transact(c: &mut Criterion) {
         });
     }
 
-    // The Oracle's storage answered by the oracle service, every slot of it: no load reaches the
-    // database, and each is priced as the database's would be.
+    // The Oracle's storage answered by the oracle service, every slot of it: each slot is loaded
+    // all the same, and each read is priced as the database's is.
     let service = (0..REPEAT).fold(TestExternalEnvs::new(), |envs, slot| {
         envs.with_oracle_storage(U256::from(slot), U256::ONE)
     });

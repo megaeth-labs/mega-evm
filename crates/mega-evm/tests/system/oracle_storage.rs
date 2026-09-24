@@ -1,24 +1,31 @@
 //! The Oracle's storage, read through the oracle environment: an `SLOAD` in the Oracle's own
-//! frame asks the node's oracle service first and the database when the service has no value,
-//! is always priced as a cold access, and is a read of volatile data for gas detention.
+//! frame loads the slot through the journal, answers the node's oracle service's value when it
+//! has one and the loaded value otherwise, is always priced as a cold access, and is a read of
+//! volatile data for gas detention.
 
 use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
-use alloy_primitives::{address, Address, Bytes, B256, U256};
+use alloy_op_evm::OpTx;
+use alloy_primitives::{address, Address, Bytes, TxKind, B256, U256};
 use alloy_sol_types::SolCall;
 use mega_evm::{
-    constants::ORACLE_ACCESS_COMPUTE_GAS,
+    constants::{ORACLE_ACCESS_COMPUTE_GAS, TX_GAS_LIMIT_CAP},
     system::{IOracle, ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE},
-    test_utils::{zero_fee_l1_block_info, BytecodeBuilder, MemoryDatabase},
+    test_utils::{op_transaction, zero_fee_l1_block_info, BytecodeBuilder, MemoryDatabase},
     volatile_data_access_disabled_revert_data, EmptyExternalEnv, EvmTxRuntimeLimits, ExternalEnvs,
     MegaContext, MegaEvm, MegaSpecId, MegaTransaction, MegaTransactionOutcome, OracleEnv,
     VolatileDataAccess,
 };
-use revm::bytecode::opcode::{
-    CALL, DELEGATECALL, DUP2, GAS, MSTORE, POP, PUSH0, RETURN, SLOAD, STOP, SUB, SWAP1,
+use revm::{
+    bytecode::opcode::{
+        CALL, DELEGATECALL, DUP2, GAS, MSTORE, POP, PUSH0, RETURN, SLOAD, SSTORE, STOP, SUB, SWAP1,
+    },
+    context::TxEnv,
 };
 
-use crate::common::{block, call_tx, calls_with, split_outcome, system_db, CALLER, CONTRACT};
+use crate::common::{
+    block, call_tx, calls_with, split_outcome, system_db, CALLER, CONTRACT, GAS_LIMIT,
+};
 
 /// A second contract, which never is the Oracle.
 const OTHER: Address = address!("0x0000000000000000000000000000000000300002");
@@ -182,7 +189,7 @@ fn test_oracle_storage_sload_fallback_to_database() {
     );
 
     assert_eq!(returned_word(&run), STATE_VALUE);
-    assert_eq!(service.seen(), vec![Seen::Read(SLOT)], "the service was asked first");
+    assert_eq!(service.seen(), vec![Seen::Read(SLOT)], "the service was asked");
     assert_eq!(run.accessed, VolatileDataAccess::ORACLE);
 }
 
@@ -447,4 +454,125 @@ fn test_the_deployed_oracle_reads_through_the_service() {
         IOracle::getSlotCall::abi_decode_returns(run.outcome.result.output().unwrap()).unwrap(),
         B256::from(SERVICE_VALUE),
     );
+}
+
+/* ---------- which source answered leaves no trace ---------- */
+
+/// Below the execution cap, and above it, where the reservoir pays state and history gas first.
+const TIERS: [u64; 2] = [GAS_LIMIT, TX_GAS_LIMIT_CAP + GAS_LIMIT];
+
+/// A transaction from [`CALLER`] to `to` with `data`, carrying `gas_limit`.
+fn tx_with_gas(to: Address, data: &[u8], gas_limit: u64) -> MegaTransaction {
+    OpTx(op_transaction(TxEnv {
+        caller: CALLER,
+        kind: TxKind::Call(to),
+        data: Bytes::copy_from_slice(data),
+        gas_limit,
+        ..Default::default()
+    }))
+}
+
+/// Code for the Oracle's own frame that reads `SLOT` when `read` is set, then writes 7 to it and
+/// returns what the write cost the frame's regular gas, with the two pushes and the `GAS` that
+/// measure it.
+fn write_after(read: bool) -> Bytes {
+    let code = BytecodeBuilder::default();
+    let code = if read { code.push_u256(SLOT).append_many([SLOAD, POP]) } else { code };
+    code.append(GAS)
+        .push_number(7_u8)
+        .push_u256(SLOT)
+        // [g0, g1]: return g0 - g1.
+        .append_many([SSTORE, GAS, SWAP1, SUB, PUSH0, MSTORE])
+        .push_number(32_u8)
+        .append_many([PUSH0, RETURN])
+        .build()
+}
+
+/// A write after a read of the Oracle's slot costs the same whether the oracle service answered
+/// the read or the chain's state did, below and above the execution cap: both load the slot
+/// through the journal, so the write finds it warm either way, and a node that replays the block
+/// without the service prices it as the node that built it did. The chain holds the value the
+/// service answers, as it does for the replaying node. Without the read the same write pays the
+/// cold access.
+#[test]
+fn test_a_write_after_a_read_costs_the_same_whichever_source_answered() {
+    let cold_write = mega_evm::satin_gas_params().cold_storage_cost();
+    for gas_limit in TIERS {
+        let at = |read: bool, service: &Service| {
+            let db = system_db()
+                .account_code(ORACLE_CONTRACT_ADDRESS, write_after(read))
+                .account_storage(ORACLE_CONTRACT_ADDRESS, SLOT, SERVICE_VALUE);
+            let run = run(db, service, tx_with_gas(ORACLE_CONTRACT_ADDRESS, &[], gas_limit));
+            assert!(run.outcome.result.is_success(), "{:?}", run.outcome.result);
+            let cost = U256::from_be_slice(run.outcome.result.output().unwrap()).to::<u64>();
+            (cost, run.outcome)
+        };
+        let service = Service::holding(SLOT, SERVICE_VALUE);
+        let (from_service, served) = at(true, &service);
+        assert_eq!(service.seen(), vec![Seen::Read(SLOT)], "at {gas_limit}: the service answered");
+        let (from_state, read) = at(true, &Service::default());
+        let (unread, _) = at(false, &Service::default());
+
+        assert_eq!(from_service, from_state, "at {gas_limit}: the write costs the same");
+        assert_eq!(served.result.tx_gas_used(), read.result.tx_gas_used(), "at {gas_limit}");
+        assert_eq!(served.gas, read.gas, "at {gas_limit}: every ledger is the same");
+        assert_eq!(unread, from_state + cold_write, "at {gas_limit}: the read warmed the slot");
+    }
+}
+
+/// The same through the deployed Oracle, which any sender reaches: `multiCall` runs `getSlot`,
+/// then `setSlot`, whose body writes the slot before its check reverts the call for a sender that
+/// is not the system address. The transaction costs the same whichever source answered the read,
+/// below and above the execution cap.
+#[test]
+fn test_a_multicall_read_then_write_costs_the_same_whichever_source_answered() {
+    let get = IOracle::getSlotCall { slot: SLOT }.abi_encode();
+    let set = IOracle::setSlotCall { slot: SLOT, value: B256::from(U256::from(7)) }.abi_encode();
+    let data = IOracle::multiCallCall { data: vec![get.into(), set.into()] }.abi_encode();
+    let not_system_address = &alloy_primitives::keccak256("NotSystemAddress()")[..4];
+    for gas_limit in TIERS {
+        let at = |service: &Service| {
+            let db = system_db().account_storage(ORACLE_CONTRACT_ADDRESS, SLOT, SERVICE_VALUE);
+            let run = run(db, service, tx_with_gas(ORACLE_CONTRACT_ADDRESS, &data, gas_limit));
+            let output = run.outcome.result.output().cloned().unwrap_or_default();
+            assert!(!run.outcome.result.is_success(), "at {gas_limit}: {:?}", run.outcome.result);
+            assert_eq!(&output[..], not_system_address, "at {gas_limit}");
+            run.outcome
+        };
+        let service = Service::holding(SLOT, SERVICE_VALUE);
+        let served = at(&service);
+        assert_eq!(service.seen(), vec![Seen::Read(SLOT)], "at {gas_limit}: the service answered");
+        let read = at(&Service::default());
+
+        assert_eq!(served.result.tx_gas_used(), read.result.tx_gas_used(), "at {gas_limit}");
+        assert_eq!(served.gas, read.gas, "at {gas_limit}: every ledger is the same");
+    }
+}
+
+/// The slot a read loaded is in the transaction's state, which a stateless witness is built
+/// from, whichever source answered: a node that replays the block without the service finds it
+/// there. The state holds the chain's value, not the service's, and the read changed nothing.
+#[test]
+fn test_the_read_slot_is_in_the_transactions_state_whichever_source_answered() {
+    for (service, answered) in
+        [(Service::holding(SLOT, SERVICE_VALUE), SERVICE_VALUE), (Service::default(), STATE_VALUE)]
+    {
+        let run = run(
+            db_with_state(),
+            &service,
+            call_tx(ORACLE_CONTRACT_ADDRESS, get_slot(SLOT), U256::ZERO),
+        );
+        assert!(run.outcome.result.is_success(), "{:?}", run.outcome.result);
+        assert_eq!(
+            IOracle::getSlotCall::abi_decode_returns(run.outcome.result.output().unwrap()).unwrap(),
+            B256::from(answered),
+        );
+
+        let slot = run.outcome.state[&ORACLE_CONTRACT_ADDRESS]
+            .storage
+            .get(&SLOT)
+            .unwrap_or_else(|| panic!("answered {answered}: the slot is in the state"));
+        assert_eq!((slot.original_value, slot.present_value), (STATE_VALUE, STATE_VALUE));
+        assert!(!slot.is_changed(), "answered {answered}");
+    }
 }
