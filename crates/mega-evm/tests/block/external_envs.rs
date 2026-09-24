@@ -30,6 +30,10 @@ const WRITER: Address = address!("0x1000000000000000000000000000000000000abc");
 const ORACLE_SLOT: U256 = U256::from_limbs([5, 0, 0, 0]);
 const ORACLE_VALUE: U256 = U256::from_limbs([0xabc, 0, 0, 0]);
 
+/// Room for a slot's first write at eight times the minimum bucket, at the spec's byte prices and
+/// at the higher ones a measurement build may run.
+const TX_GAS_LIMIT: u64 = 10_000_000;
+
 /// A node's factory: it hands every block the same environments and records which blocks asked.
 #[derive(Clone, Debug)]
 struct Factory {
@@ -91,7 +95,7 @@ fn test_a_blocks_environments_come_from_the_factory() {
     let entry = satin_gas_params().get(GasId::sstore_set_state_gas());
     let mut regular = vec![];
     for (nonce, m) in [(0, 1), (1, 2), (2, 8)] {
-        let tx = common::recovered(common::tx(nonce, WRITER, vec![m as u8].into(), 1_000_000));
+        let tx = common::recovered(common::tx(nonce, WRITER, vec![m as u8].into(), TX_GAS_LIMIT));
         let outcome = executor.run_transaction(&tx).expect("it executes");
         assert!(outcome.result.is_success(), "{:?}", outcome.result);
         assert_eq!(outcome.gas.state, entry * m, "the slot's bucket at m = {m}");
@@ -104,7 +108,7 @@ fn test_a_blocks_environments_come_from_the_factory() {
     );
 
     let read = IOracle::getSlotCall { slot: ORACLE_SLOT }.abi_encode();
-    let tx = common::recovered(common::tx(3, ORACLE_CONTRACT_ADDRESS, read.into(), 1_000_000));
+    let tx = common::recovered(common::tx(3, ORACLE_CONTRACT_ADDRESS, read.into(), TX_GAS_LIMIT));
     let outcome = executor.run_transaction(&tx).expect("it executes");
     assert_eq!(
         IOracle::getSlotCall::abi_decode_returns(outcome.result.output().unwrap()).unwrap(),
