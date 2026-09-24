@@ -31,7 +31,14 @@
 //!   no code behind. Only code revm would deposit counts: code starting with `0xEF` or over the
 //!   code-size limit, and a creation that cannot pay for its deposit, fail the creation alone and
 //!   are not counted;
-//! - an Oracle hint's payload, on the transaction's own lane, before it is forwarded.
+//! - an Oracle hint's payload, on the transaction's own lane, before it is forwarded;
+//! - an EIP-7708 transfer log, which revm journals itself for every value movement, where the value
+//!   moves: with the records of the frame start that moves it — the transaction's own value, a
+//!   value `CALL`, a creation's endowment — before revm builds the frame, so a crossing answers the
+//!   frame with the stop before any value moves; and with a `SELFDESTRUCT`'s beneficiary once the
+//!   opcode completed. Each is counted by the rule a `LOG3` of one word is ([`TRANSFER_LOG_SIZE`]),
+//!   on the lane of the frame whose journal checkpoint holds the move, so the failure that takes
+//!   the move back takes the bytes back.
 //!
 //! A record is checked against the limits before its history is charged: a record the limit
 //! rejects is not kept, so it is not charged, and the stop is what its frame reports. At a frame
@@ -113,11 +120,15 @@
 //! a log costs history for exactly the bytes the limit counts it at. A mechanism that needs a
 //! size takes it from here rather than writing its own number.
 //!
-//! Per transaction the two totals are not the same number, and are not meant to be. Two sites
-//! part them, both by decision:
+//! Per transaction the two totals are not the same number, and are not meant to be. Three sites
+//! part them, each by decision:
 //!
 //! - an Oracle hint's payload is data size the transaction counts and history it does not pay. The
 //!   bytes go to the node's oracle service, not into a block, so there is nothing to price;
+//! - an EIP-7708 transfer log is data size and never history. The protocol writes it for every
+//!   value movement and Ethereum prices it at nothing: it is not a byte the transaction chose to
+//!   append. It is no write record either — the accounts the move writes are recorded as they are
+//!   without it;
 //! - [`TX_FIXED_WRITE_RECORDS`] is an upper bound on the accounts a transaction's inclusion writes,
 //!   and nothing checks afterwards which of them something else wrote again. A transfer whose
 //!   recipient is the block beneficiary or a fee vault pays a record the body already bound. It is
@@ -145,6 +156,11 @@ pub const LOG_BASE_SIZE: u64 = 32;
 
 /// Bytes every log topic counts.
 pub const LOG_TOPIC_SIZE: u64 = 32;
+
+/// Bytes an EIP-7708 transfer log counts: its address, its three topics — the event, the sender
+/// and the recipient — and one word of data, the amount. It is what a `LOG3` carrying one word
+/// counts, by the same rule.
+pub const TRANSFER_LOG_SIZE: u64 = LOG_BASE_SIZE + 3 * LOG_TOPIC_SIZE + 32;
 
 /// Bytes every transaction counts for its envelope: the fields a transaction carries beside its
 /// calldata, its access list and its authorizations.
@@ -298,6 +314,10 @@ impl EvmTxRuntimeLimits {
 /// One write record.
 pub(crate) const WRITE_RECORD: LimitUsage =
     LimitUsage { data_size: WRITE_RECORD_SIZE, write_records: 1 };
+
+/// One EIP-7708 transfer log: data size, and no write record.
+pub(crate) const TRANSFER_LOG: LimitUsage =
+    LimitUsage { data_size: TRANSFER_LOG_SIZE, write_records: 0 };
 
 /// A budget with no bound in either dimension.
 pub(crate) const UNLIMITED: LimitUsage =
@@ -476,6 +496,7 @@ mod tests {
         assert_eq!(WRITE_RECORD_SIZE, 40);
         assert_eq!(LOG_BASE_SIZE, 32);
         assert_eq!(LOG_TOPIC_SIZE, 32);
+        assert_eq!(TRANSFER_LOG_SIZE, 160);
         assert_eq!(TX_BASE_SIZE, 110);
         assert_eq!(TX_FIXED_WRITE_RECORDS, 5);
         assert_eq!(TX_BODY_SIZE, 310);

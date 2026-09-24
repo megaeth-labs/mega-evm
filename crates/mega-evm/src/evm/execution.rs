@@ -456,11 +456,18 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
             }
             _ => None,
         };
+        #[cfg(debug_assertions)]
+        let transfer_log = (
+            ctx.additional_limit.frame_start_transfer_log(&frame_init.frame_input),
+            ctx.journal_ref().logs().len(),
+        );
         let outcome = match self.inner.frame_init(frame_init)? {
             ItemOrResult::Item(frame) => Ok(frame.interpreter.input.target_address),
             ItemOrResult::Result(result) => Err(result),
         };
         let ctx = &mut self.inner.ctx;
+        #[cfg(debug_assertions)]
+        assert_transfer_log_journaled(ctx, transfer_log, outcome.as_ref().err());
         match outcome {
             Ok(address) => {
                 ctx.additional_limit.set_frame_address(address);
@@ -901,6 +908,39 @@ fn call_too_deep(frame_init: &FrameInit) -> Option<FrameResult> {
     })
 }
 
+/// Asserts that revm journaled the EIP-7708 transfer log the data size counted for a frame's
+/// start, once revm has built the frame or answered it: `counted` is whether
+/// [`on_frame_init`](crate::AdditionalLimit) counted one, `logs_i` the journal's log count before
+/// revm acted, and `answer` revm's answer when it did not build the frame.
+///
+/// The count is made before revm moves the value, from the frame's input, so this is where a
+/// divergence from revm's own rule would show. A built frame has run no instruction yet, so the
+/// move is all revm has done. An answered call moved the value when it succeeded — a call to an
+/// account with no code, a precompile — and took the move back when it failed. A creation revm
+/// answers never moved value: it refused before its checkpoint, or reverted it. Only transfer
+/// logs are compared: a precompile may journal logs of its own.
+#[cfg(debug_assertions)]
+fn assert_transfer_log_journaled<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    ctx: &MegaContext<DB, ExtEnvs>,
+    (counted, logs_i): (bool, usize),
+    answer: Option<&FrameResult>,
+) {
+    let moved = match answer {
+        None => true,
+        Some(FrameResult::Call(outcome)) => outcome.result.result.is_ok(),
+        Some(FrameResult::Create(_)) => false,
+    };
+    let journaled = ctx.journal_ref().logs()[logs_i..]
+        .iter()
+        .filter(|log| log.address == revm::primitives::eip7708::ETH_TRANSFER_LOG_ADDRESS)
+        .count();
+    debug_assert_eq!(
+        journaled,
+        usize::from(counted && moved),
+        "the transfer log counted is the one revm journaled"
+    );
+}
+
 /// Hands the logs journaled since `logs_i` to the inspector, outside any interpreter.
 #[cold]
 #[inline(never)]
@@ -1145,6 +1185,33 @@ mod tests {
             assert_eq!(ctx.additional_limit.latched(), None, "{input:?}");
             assert_eq!(refused.instruction_result(), InstructionResult::CallTooDeep);
         }
+    }
+
+    /// The guard trips on a transfer log the data size counted for a frame revm built and did not
+    /// journal.
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "the transfer log counted is the one revm journaled")]
+    fn test_a_transfer_log_counted_and_not_journaled_trips() {
+        let ctx = MegaContext::new(MemoryDatabase::default(), MegaSpecId::SATIN);
+        assert_transfer_log_journaled(&ctx, (true, 0), None);
+    }
+
+    /// The guard expects no log where nothing moved, whatever was counted: a creation revm
+    /// answers — the nonce-overflow answer is a `Return` — and a call it answers with a failure;
+    /// and none for a frame nothing was counted for.
+    #[test]
+    #[cfg(debug_assertions)]
+    fn test_the_guard_expects_no_transfer_log_where_nothing_moved() {
+        let ctx = MegaContext::new(MemoryDatabase::default(), MegaSpecId::SATIN);
+        assert_transfer_log_journaled(&ctx, (false, 0), None);
+        let refused = synthetic_frame_result(&creation(), InstructionResult::Return, Bytes::new());
+        assert_transfer_log_journaled(&ctx, (true, 0), Some(&refused));
+        let unfunded =
+            synthetic_frame_result(&value_call(), InstructionResult::OutOfFunds, Bytes::new());
+        assert_transfer_log_journaled(&ctx, (true, 0), Some(&unfunded));
+        let answered = synthetic_frame_result(&value_call(), InstructionResult::Stop, Bytes::new());
+        assert_transfer_log_journaled(&ctx, (false, 0), Some(&answered));
     }
 
     /// A charge that stands is held: a frame revm built latches the transaction, and a success

@@ -4,7 +4,7 @@ use delegate::delegate;
 use op_revm::{transaction::deposit::DEPOSIT_TRANSACTION_TYPE, L1BlockInfo, OpSpecId};
 use revm::{
     context::{
-        BlockEnv, CfgEnv, Context, ContextError, ContextSetters, ContextTr, LocalContext,
+        BlockEnv, Cfg, CfgEnv, Context, ContextError, ContextSetters, ContextTr, LocalContext,
         Transaction,
     },
     context_interface::cfg::GasId,
@@ -19,7 +19,7 @@ use crate::{
         schedule::{satin_gas_params, satin_gas_params_history_exempt},
     },
     system::{self, MEGA_SYSTEM_ADDRESS},
-    AdditionalLimit, BlockHashRecord, BucketError, BucketMultipliers, EmptyExternalEnv,
+    AdditionalLimit, BlockHashRecord, BucketError, BucketMultipliers, EmptyExternalEnv, EthSpecId,
     EvmTxRuntimeLimits, ExternalEnvTypes, ExternalEnvs, MegaSpecId, MegaTransaction, SaltEnv,
 };
 
@@ -300,6 +300,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     /// deposit is not system-originated and is held to every one of them.
     fn prepare(&mut self, system_originated: bool) {
         self.additional_limit.reset();
+        self.additional_limit.set_transfer_logs(emits_transfer_logs(&self.inner.cfg));
         self.bucket_multipliers.reset();
         self.system_originated = system_originated;
         let exempt = self.inner.tx.tx_type() == DEPOSIT_TRANSACTION_TYPE || system_originated;
@@ -364,6 +365,16 @@ fn spec_cfg(mut cfg: CfgEnv<MegaSpecId>) -> CfgEnv<MegaSpecId> {
     cfg.limit_contract_code_size = Some(constants::MAX_CONTRACT_SIZE);
     cfg.limit_contract_initcode_size = Some(constants::MAX_INITCODE_SIZE);
     cfg
+}
+
+/// Whether a value movement journals an EIP-7708 transfer log under `cfg`: from Amsterdam on, or
+/// with the switch on, unless EIP-7708 is disabled. It is the rule revm's journal applies, read
+/// off the configuration the journal was synced with, so the data size counts a transfer log
+/// exactly where revm emits one.
+fn emits_transfer_logs(cfg: &CfgEnv<OpSpecId>) -> bool {
+    let spec = EthSpecId::from(cfg.spec);
+    (spec.is_enabled_in(EthSpecId::AMSTERDAM) || cfg.enable_amsterdam_eip7708()) &&
+        !cfg.is_eip7708_disabled()
 }
 
 /// The op-revm view of `cfg`: the same fields, keyed by the Optimism spec.
@@ -734,6 +745,43 @@ mod tests {
         ctx.on_new_tx();
         assert!(ctx.prices_history());
         assert_satin_cfg(&ctx);
+    }
+
+    /// Whether a transaction counts transfer logs follows the rule revm's journal emits them by:
+    /// the switch turns them on below Amsterdam, and disabling EIP-7708 wins over it. Each
+    /// transaction reads the configuration afresh.
+    #[test]
+    fn test_a_transaction_counts_transfer_logs_where_revm_emits_them() {
+        let endowed_creation =
+            revm::interpreter::FrameInput::Create(Box::new(revm::interpreter::CreateInputs::new(
+                Address::repeat_byte(0x11),
+                revm::interpreter::CreateScheme::Create,
+                U256::from(1),
+                revm::primitives::Bytes::new(),
+                0,
+                0,
+            )));
+        let counts = |cfg: CfgEnv<MegaSpecId>| {
+            let mut ctx =
+                MegaContext::new(EmptyDB::default(), MegaSpecId::SATIN).with_neutral_cfg(cfg);
+            ctx.set_tx(call_from(Address::repeat_byte(0x11)));
+            ctx.on_new_tx();
+            assert_eq!(
+                ctx.additional_limit.frame_start_transfer_log(&endowed_creation),
+                emits_transfer_logs(ctx.cfg()),
+            );
+            emits_transfer_logs(ctx.cfg())
+        };
+        let with = |enabled: bool, disabled: bool| {
+            let mut cfg = osaka_cfg();
+            cfg.enable_amsterdam_eip7708 = enabled;
+            cfg.amsterdam_eip7708_disabled = disabled;
+            cfg
+        };
+        assert!(counts(with(true, false)));
+        assert!(!counts(with(false, false)), "the base spec is below Amsterdam");
+        assert!(!counts(with(true, true)), "disabling wins over the switch");
+        assert!(!counts(with(false, true)));
     }
 
     /// A context is not neutral unless it is asked to be.

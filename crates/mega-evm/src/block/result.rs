@@ -33,8 +33,9 @@ pub struct BlockGasCounters {
     ///
     /// They are the history bytes the schedule prices, not the chain's physical growth: the
     /// block's exempt transactions (its deposits, the transactions the protocol sent) add none,
-    /// and each body counts its five fixed write records even when fewer fee accounts are
-    /// written.
+    /// each body counts its five fixed write records even when fewer fee accounts are written,
+    /// and the EIP-7708 transfer logs in the block's receipts, which nothing prices, are not in
+    /// them.
     pub history_bytes: u64,
 }
 
