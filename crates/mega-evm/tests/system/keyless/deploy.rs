@@ -123,7 +123,7 @@ fn test_keyless_deploy_increments_nonce_from_zero() {
 }
 
 /// A signer at nonce 1 still deploys at its Nick's-Method address, which is its first creation's
-/// and not its nonce's, and ends at nonce 2: the creation bumps the real nonce.
+/// and not its nonce's, and stays at nonce 1: a deployment takes no signer past 1.
 #[test]
 fn test_a_signer_at_nonce_one_deploys_at_the_same_address() {
     for gas_limit in GAS_LIMITS {
@@ -131,7 +131,7 @@ fn test_a_signer_at_nonce_one_deploys_at_the_same_address() {
         let db = system_db().account_nonce(deployment.signer, 1);
         let outcome = deploy(db, &deployment, gas_limit);
         assert_eq!(returned(&outcome).deployedAddress, deployment.address);
-        assert_eq!(nonce(&outcome, deployment.signer), 2);
+        assert_eq!(nonce(&outcome, deployment.signer), 1);
     }
 }
 

@@ -18,10 +18,13 @@
 //!
 //! - `ORIGIN` and `GASPRICE` in the init code are the transaction's own.
 //! - The signer's nonce is bumped by the creation, as any creator's is, and a deployment is refused
-//!   once the signer's nonce is above 1 (`SignerNonceTooHigh`). A deployment that fails keeps the
-//!   bump only from 0 to 1, which is the replay barrier; from nonce 1 it leaves the nonce at 1, and
-//!   keeps no record of the bump. The call is permissionless and the signed transaction public, so
-//!   no number of failing calls, whoever makes them, gets a signer's deployment refused.
+//!   once the signer's nonce is above 1 (`SignerNonceTooHigh`). A deployment keeps the bump only
+//!   from 0 to 1, which is the replay barrier; from nonce 1, whether it succeeds or fails, it
+//!   leaves the nonce at 1 and keeps no record of the bump, as the legacy engine never took a
+//!   signer past 1. The call is permissionless and the signed transaction public, so no number of
+//!   failing calls, whoever makes them, gets a signer's deployment refused, and a deployment that
+//!   succeeded answers a resubmission with `ContractAlreadyExists()`. Nonces a delegated signer's
+//!   own code spends in the constructor stay spent.
 //! - A signer with no account is charged its account as state gas, once, by the call: the nonce
 //!   bump creates it, and no other charge does.
 //! - The call pays what the `CREATE` opcode charges its frame: its regular gas, which stays spent,

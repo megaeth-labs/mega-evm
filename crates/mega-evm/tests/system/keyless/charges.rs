@@ -280,7 +280,8 @@ fn test_a_failed_deployment_gives_the_created_account_back_at_its_price() {
 
 /// A signer that sends its own deployment is the transaction's sender, whose account the body
 /// counts: the creation's nonce bump makes no record of its own, only the created account does,
-/// and the signer, an account already, is charged nothing for it.
+/// and the signer, an account already, is charged nothing for it. The transaction's own bump took
+/// it to nonce 1, and a deployment takes no signer past 1.
 #[test]
 fn test_a_signer_that_sends_its_own_deployment_makes_no_record_of_its_own() {
     let deployment = Deployment::new(deploying(&runtime(RUNTIME_LEN)));
@@ -293,8 +294,8 @@ fn test_a_signer_that_sends_its_own_deployment_makes_no_record_of_its_own() {
             .execute_transaction(tx)
             .expect("a valid transaction");
         assert_eq!(returned(&outcome).deployedAddress, deployment.address, "at {gas_limit}");
-        // The transaction bumped its sender from 0 to 1, and the creation from 1 to 2.
-        assert_eq!(nonce(&outcome, deployment.signer), 2);
+        // The transaction bumped its sender from 0 to 1; the creation's bump is taken back.
+        assert_eq!(nonce(&outcome, deployment.signer), 1);
         assert_eq!(outcome.usage.write_records, 1, "the created account alone");
         let deposit_state = satin_gas_params().code_deposit_state_gas(RUNTIME_LEN);
         assert_eq!(outcome.gas.state, entry(GasId::create_state_gas()) + deposit_state);

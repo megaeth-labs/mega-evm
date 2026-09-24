@@ -55,10 +55,14 @@ pub(crate) fn give_back_history<DB: Database, ExtEnvs: ExternalEnvTypes>(
 /// back too. The creation's lane was popped when it returned, or is popped here when it never
 /// ran.
 ///
-/// A deployment that failed keeps the signer's nonce bump only when it took the signer from 0 to
-/// 1: a failed deployment from nonce 1 leaves it at 1 ([`keep_no_second_bump`]). The call is
-/// permissionless and the signed transaction public, so a nonce every failure spent would let
-/// anybody make a signer's address undeployable with two failing calls.
+/// A deployment keeps the creation's nonce bump only when it took the signer from 0 to 1: a
+/// deployment from nonce 1, whether it succeeded or failed, leaves the nonce at 1
+/// ([`take_back_bump`]), as the legacy engine did. The call is permissionless and the signed
+/// transaction public, so a nonce every failure spent would let anybody make a signer's address
+/// undeployable with two failing calls; and a success that spent it would answer a resubmission
+/// with `SignerNonceTooHigh` rather than `ContractAlreadyExists`. Only the creation's own bump is
+/// taken back: the nonces a delegated signer's code spent in the constructor, creating accounts at
+/// them, stay spent, so the nonce never goes back below an account the signer created.
 ///
 /// Then the call answers, as a frame that resumes after its child returned would:
 ///
@@ -97,13 +101,15 @@ where
     // every creation it is asked to build, and a creation the limits stop at its start is bumped
     // all the same; one an inspector answered in its place never started, and adds no account.
     // A signer that had an account was charged nothing, and gets nothing back.
-    let bumped = account_nonce(ctx, call.signer) != call.signer_nonce;
-    if !bumped {
+    let nonce = account_nonce(ctx, call.signer);
+    if nonce == call.signer_nonce {
         call.gas.refill_reservoir(call.signer_account_charge);
     }
-    // A deployment that failed from nonce 1 keeps no bump: the address stays deployable.
-    if bumped && call.signer_nonce > 0 && !holds_code(ctx, call.deploy_address) {
-        keep_no_second_bump(ctx, &mut call, result)?;
+    // A deployment from nonce 1 keeps no bump of its own: a failure leaves the address
+    // deployable, a success leaves it occupied. The creation's bump is the one above the nonce
+    // the call started from; any further one the signer's own code spent.
+    if call.signer_nonce > 0 && nonce == call.signer_nonce + 1 {
+        take_back_bump(ctx, &mut call, result)?;
     }
 
     let (status, output) = match ctx.additional_limit.stop_before_run() {
@@ -176,14 +182,14 @@ fn holds_code<DB: Database, ExtEnvs: ExternalEnvTypes>(
     })
 }
 
-/// Takes back the nonce bump of a failed deployment by a signer whose nonce was already 1, with
-/// its write record and that record's history, so what stands is what would stand had the
-/// creation's start not bumped the nonce: the signer stays at 1, however many deployments fail.
+/// Takes back the creation's nonce bump of a signer whose nonce was already 1, with its write
+/// record and that record's history, so what stands is what would stand had the creation's start
+/// not bumped the nonce: the signer stays at 1, however many deployments it makes.
 ///
 /// The record goes unless the signer's account keeps another write it stands for: the value a
-/// creation that succeeded moved out of it, having deployed no code. A creation that failed took
-/// its value transfer back with the rest of its writes.
-fn keep_no_second_bump<DB, ExtEnvs, ERROR>(
+/// creation that succeeded moved out of it. A creation that failed took its value transfer back
+/// with the rest of its writes.
+fn take_back_bump<DB, ExtEnvs, ERROR>(
     ctx: &mut MegaContext<DB, ExtEnvs>,
     call: &mut KeylessCall,
     result: &FrameResult,
