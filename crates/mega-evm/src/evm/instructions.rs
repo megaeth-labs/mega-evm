@@ -546,7 +546,20 @@ block_env_read! {
     basefee => block_info::basefee, "BASEFEE";
     blobbasefee => block_info::blob_basefee, "BLOBBASEFEE";
     slotnum => block_info::slot_num_enabled, "SLOTNUM";
-    blockhash => host::blockhash, "BLOCKHASH";
+}
+
+/// `BLOCKHASH`, committing the read of the block number and of the hash.
+///
+/// revm's instruction reads the block number before the hash, so a refusal is of the number
+/// first; it is named for the hash, the kind `BLOCKHASH` reads, as the legacy engine named it.
+fn blockhash<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    context: Ctx<'_, DB, ExtEnvs>,
+) -> InstructionExecResult {
+    read_volatile(context, |InstructionContext { interpreter, host }| {
+        let result = host::blockhash(InstructionContext { interpreter, host: &mut *host });
+        host.detention.name_refusal(VolatileDataAccess::BLOCK_HASH);
+        result
+    })
 }
 
 /// Defines an opcode that loads an account or a slot, as revm's instruction in

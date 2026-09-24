@@ -199,6 +199,15 @@ impl Detention {
         !(self.observed.get() | self.refused.get()).is_empty()
     }
 
+    /// Names a refusal the running opcode's Host calls made `access`, whichever load was refused:
+    /// the kind the opcode reads, for an opcode that loads another kind first.
+    #[inline]
+    pub(crate) fn name_refusal(&self, access: VolatileDataAccess) {
+        if !self.refused.get().is_empty() {
+            self.refused.set(access);
+        }
+    }
+
     /// Takes what the Host refused for the running opcode, if it refused anything.
     pub(crate) fn take_refused(&self) -> Option<VolatileDataAccess> {
         let refused = self.refused.replace(VolatileDataAccess::empty());
@@ -713,8 +722,11 @@ mod tests {
         detention.disable_access(2);
         assert!(detention.is_access_disabled(1), "a deeper frame keeps the shallower switch");
         assert!(!detention.enable_access(2), "a frame below cannot switch it back on");
-        assert!(detention.refuses(VolatileDataAccess::TIMESTAMP));
-        assert_eq!(detention.take_refused(), Some(VolatileDataAccess::TIMESTAMP));
+        assert!(detention.refuses(VolatileDataAccess::BLOCK_NUMBER));
+        detention.name_refusal(VolatileDataAccess::BLOCK_HASH);
+        assert_eq!(detention.take_refused(), Some(VolatileDataAccess::BLOCK_HASH));
+        detention.name_refusal(VolatileDataAccess::BLOCK_HASH);
+        assert_eq!(detention.take_refused(), None, "nothing refused, nothing named");
 
         detention.on_frame_end(InstructionResult::Stop, &mut child, 1);
         assert!(!detention.is_access_disabled(1), "on again once the frame returned");

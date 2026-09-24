@@ -1045,7 +1045,7 @@ fn test_a_refused_read_reverts_the_frame_and_charges_its_static_gas() {
             "BLOCKHASH",
             BytecodeBuilder::default().push_number(299_u16).append(BLOCKHASH).build(),
             3 + 20,
-            VolatileDataAccess::BLOCK_NUMBER,
+            VolatileDataAccess::BLOCK_HASH,
         ),
         (
             "BALANCE",
@@ -1122,19 +1122,24 @@ fn test_a_refused_read_reverts_the_frame_and_charges_its_static_gas() {
 }
 
 /// The refusal of a `SLOTNUM` names access type 12, one past the contract's enum; the others name
-/// their enum variant.
+/// their enum variant, `BLOCKHASH`'s the hash it reads (7), as on the legacy engine, although
+/// revm's instruction loads the block number first.
 #[test]
 fn test_the_refusal_names_the_access_type() {
     use mega_evm::system::{IMegaAccessControl, VolatileDataAccessType};
-    assert_eq!(
-        volatile_data_access_disabled_revert_data(VolatileDataAccess::ORACLE),
-        Bytes::from(
-            IMegaAccessControl::VolatileDataAccessDisabled {
-                accessType: VolatileDataAccessType::Oracle
-            }
-            .abi_encode()
-        )
-    );
+    for (access, variant) in [
+        (VolatileDataAccess::ORACLE, VolatileDataAccessType::Oracle),
+        (VolatileDataAccess::BLOCK_HASH, VolatileDataAccessType::BlockHash),
+        (VolatileDataAccess::BLOCK_NUMBER, VolatileDataAccessType::BlockNumber),
+    ] {
+        assert_eq!(
+            volatile_data_access_disabled_revert_data(access),
+            Bytes::from(
+                IMegaAccessControl::VolatileDataAccessDisabled { accessType: variant }.abi_encode()
+            )
+        );
+    }
+    assert_eq!(VolatileDataAccessType::BlockHash as u8, 7);
     let slot_num = volatile_data_access_disabled_revert_data(VolatileDataAccess::SLOT_NUM);
     assert_eq!(&slot_num[..4], IMegaAccessControl::VolatileDataAccessDisabled::SELECTOR.as_slice());
     assert_eq!(U256::from_be_slice(&slot_num[4..]), U256::from(12));
