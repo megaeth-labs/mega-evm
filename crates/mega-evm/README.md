@@ -102,7 +102,6 @@ A transaction's state growth is the EIP-8037 state gas it spends, so the state-g
 It is a limit on gas, so a slot or an account in a crowded SALT bucket reaches it sooner.
 Every one of these limits is unlimited unless a node sets it.
 
-
 Gas detention is in place: a transaction that reads volatile data — the block environment, the block beneficiary's account, the Oracle's storage — may compute at most 20,000,000 more gas after the read than it had spent at it.
 Compute is the regular gas spent: the state and history gas that spilled onto regular gas are not compute, and neither is what a halting frame burns.
 The one exception is what a frame has left when an opcode's static gas fails, which counts as compute: under that charge's price per halting frame, so the stop only comes earlier.
@@ -111,7 +110,7 @@ Every frame's spendable gas is held to what the limit leaves the transaction, an
 So a transaction that reads runs as it would without the read until a regular charge needs the withheld gas.
 That charge crossed the cap: the transaction is stopped with a revert carrying `MegaLimitExceeded` of kind compute, billed its compute up to the limit, and the sender gets back everything withheld.
 A precompile is run on what the limit leaves its frame, not on all its caller forwarded: one priced past that computes nothing and is the same crossing, as is an interceptor's answer that spent more than it.
-A precompile priced past its whole forward is the crossing too, where without the read it would be a failed call its caller survives.
+A precompile forwarded more than what the limit leaves its frame, and priced past its whole forward, is the crossing too, where without the read it would be a failed call its caller survives.
 An interceptor's own charge on a frame is compute whether it answers the call or lets the frame run.
 Every other out-of-gas halts and burns as it would without the read.
 While `MegaAccessControl`'s switch is off for a frame, its volatile reads are refused: the frame reverts with `VolatileDataAccessDisabled`, having paid the opcode's static gas and nothing more.
