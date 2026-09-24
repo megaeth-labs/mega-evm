@@ -295,22 +295,24 @@ fn test_clz_runs_on_the_base_spec() {
     assert!(result.is_success(), "{result:?}");
 }
 
-/// `SLOTNUM` pushes what the host reports, which is zero until the block executor sets it.
+/// `SLOTNUM` pushes the block's slot number, `BlockEnv::slot_num`, which the node supplies, and
+/// zero for a block that does not set it.
 #[test]
-fn test_slotnum_pushes_the_host_slot_number() {
-    let code = BytecodeBuilder::default()
-        .append(SLOTNUM)
-        .push_number(0u64)
-        .append(MSTORE)
-        .push_number(32u64)
-        .push_number(0u64)
-        .append(RETURN)
-        .build();
-    let mut evm = MegaEvm::new(context(with_code(code)));
-    let result = evm
-        .transact_raw(call_with_data(CALLER, CALLEE, Bytes::new(), GAS_LIMIT))
-        .expect("the transaction is valid")
-        .result;
-    assert!(result.is_success(), "{result:?}");
-    assert_eq!(result.output().map(Bytes::as_ref), Some([0u8; 32].as_slice()));
+fn test_slotnum_pushes_the_blocks_slot_number() {
+    let code = BytecodeBuilder::default().append(SLOTNUM).return_top().build();
+    for (slot_num, name) in [(0x0123_4567_89ab_u64, "a slot the node set"), (0, "no slot set")] {
+        let block = revm::context::BlockEnv { slot_num, ..crate::common::block() };
+        let mut evm = MegaEvm::new(context(with_code(code.clone())).with_block(block));
+        let result = evm
+            .transact_raw(call_with_data(CALLER, CALLEE, Bytes::new(), GAS_LIMIT))
+            .expect("the transaction is valid")
+            .result;
+        assert!(result.is_success(), "{name}: {result:?}");
+        assert_eq!(
+            result.output().map(|output| U256::from_be_slice(output)),
+            Some(U256::from(slot_num)),
+            "{name}",
+        );
+    }
+    assert_eq!(crate::common::block().slot_num, 0, "the tests' block leaves it unset");
 }
