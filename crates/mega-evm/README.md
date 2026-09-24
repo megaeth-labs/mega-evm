@@ -29,6 +29,9 @@ Today it runs transactions through its own handler over op-revm's, with EIP-8037
 
 The gas schedule is Amsterdam's with three changes: the entries EIP-8038 repriced go back to their Osaka values, the EIP-8037 state-gas entries are rebuilt from MegaETH's own cost per state byte, so a new storage slot draws 97,920 state gas and a new account 183,600, and a byte of deployed code is priced at MegaETH's cost per history byte.
 The schedule also brings the Amsterdam opcodes (`DUPN`, `SWAPN`, `EXCHANGE`, `SLOTNUM`) and raises the code-size limits to 512 KiB of contract and 1 MiB of initcode.
+`SLOTNUM` pushes the slot number the node supplies in `BlockEnv::slot_num`, zero when it leaves it unset.
+Satin takes EIP-7708 from Amsterdam too: every value movement — a transaction's value, a value `CALL`, a creation's endowment, a `SELFDESTRUCT`'s balance moved to another account — emits a `Transfer(from, to, amount)` log from `0xff…fe` into the receipt, in execution order among the contracts' own logs.
+A deposit's value is logged and its mint is not, and a destruction to itself burns the balance without a log.
 Its byte prices are an input: the `satin-price-override` feature, off by default, lets a measurement build install other ones.
 `tests/satin/pricing-table.md` lists every entry next to Osaka's and Amsterdam's, with what a handful of probe transactions spent.
 
@@ -39,7 +42,8 @@ The common execution layer is in place: the frame lifecycle the later mechanisms
 
 The data-size limit is in place on top of it.
 A transaction is held to a data-size limit, and every frame to a budget: the transaction's own frame gets what its body leaves, and a child 98% of what its parent has left.
-The bytes are the ones history gas prices — the body, every write record, every log, every byte of deployed code — plus an Oracle hint's payload.
+The bytes are the ones history gas prices — the body, every write record, every log, every byte of deployed code — plus an Oracle hint's payload and the EIP-7708 transfer logs.
+A transfer log counts what a `LOG3` of one word counts, 160 bytes, where the value moves: with the records of the frame start that moves it, before any value moves, or with a `SELFDESTRUCT`'s beneficiary.
 A frame that crosses its budget reverts alone; a transaction that crosses its limit is stopped with a revert carrying `MegaLimitExceeded`, and pays only for what ran.
 A record is checked before its history is charged, so a record the limit rejects costs nothing and the stop is what the transaction reports.
 `EvmTxRuntimeLimits` sets the limits on a bare EVM, where they default to none; a block executor installs its `BlockLimits`, whose default holds each transaction and the block to 12.5 MiB of data size.
@@ -81,12 +85,13 @@ The last two are held to no per-transaction limit either, for the same reason �
 A user's deposit is held to every limit.
 
 The pairing between the two counts is per record, not per transaction.
-An Oracle hint's payload is data size that is never history, because the bytes go to the node's oracle service rather than into a block; and the five records a transaction's body carries are an upper bound on the accounts its inclusion writes, so a transfer to the block beneficiary or a fee vault pays a record the body already bound.
+An Oracle hint's payload is data size that is never history, because the bytes go to the node's oracle service rather than into a block; an EIP-7708 transfer log is data size that is never history either, because Ethereum prices it at nothing and it is not a byte the transaction chose to write; and the five records a transaction's body carries are an upper bound on the accounts its inclusion writes, so a transfer to the block beneficiary or a fee vault pays a record the body already bound.
 
 A value-transferring `CALL` or `CALLCODE` grants the frame it starts a history allowance of 160 bytes — one three-topic event carrying a word — so a `receive()` hook reached through Solidity's `transfer()` can still emit an event.
 The allowance is not gas: it never enters the frame's `Gas`, only a log's charge may draw on it, and what it pays for is on no ledger, because no pool of the transaction's gas paid it.
 The history bytes a transaction reports count those bytes all the same, so a block's byte column and its history gas column part by exactly what allowances paid.
-The byte column is the history the schedule prices, not the chain's physical growth: a transaction exempt from history gas reports none, and a body counts its five fixed write records even when fewer fee accounts are written.
+The transfer log of the value that granted an allowance draws nothing from it.
+The byte column is the history the schedule prices, not the chain's physical growth: a transaction exempt from history gas reports none, a body counts its five fixed write records even when fewer fee accounts are written, and the transfer logs are not in it.
 
 The KV and state-gas limits are in place too.
 The KV count is the write-record count the layer keeps — one record per account or storage write the transaction keeps, the sender and the fee accounts being the body's — and the KV limit holds it by the data-size limit's rules: a transaction limit that stops the transaction, and a record budget per frame, 98% of what the parent has left.
