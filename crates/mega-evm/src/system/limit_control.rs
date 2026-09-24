@@ -53,12 +53,18 @@ pub use mega_system_contracts::limit_control::IMegaLimitControl;
 ///   detention does not hold, has no such limit.
 ///
 /// Detention holds a frame's spendable gas at the lesser of the two at all times, so the answer is
-/// the caller's spendable part before the forward. For a transaction that calls the contract
-/// directly, the caller's own gas is the regular gas its frame was given.
+/// the caller's spendable regular gas before the forward, which detention caps. For a transaction
+/// that calls the contract directly, the caller's own gas is the regular gas its frame was given;
+/// a transaction whose sender is the block beneficiary is detained from its start, so it hears
+/// what a block-environment read's cap leaves it when its frame holds more.
 ///
-/// The figure is taken before the forward, as the legacy engine's was: its compute gas never
-/// counted the gas a call forwarded, so its answer did not fall by the forward either. Taken after
-/// it, a caller that forwards what `GAS` reports would hear back one sixty-fourth of its gas.
+/// The figure is taken before the forward: taken after it, a caller that forwards what `GAS`
+/// reports would hear back one sixty-fourth of its gas. That is the one property carried over
+/// from the legacy engine, whose compute never counted the gas a call forwarded. The figure
+/// itself departs from the legacy engine's, which came from a separate compute ledger, with
+/// per-frame budgets of 98/100 of the caller's remaining compute under the transaction's compute
+/// limit, so it could exceed the caller's gas. Here compute is regular gas, and the answer is at
+/// most the caller's own.
 ///
 /// It is regular gas only, capped at the execution cap: the state-gas reservoir is not compute,
 /// and a transaction above the cap hears the cap's share at most. It is not a promise of compute

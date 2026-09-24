@@ -72,6 +72,7 @@ A method that takes no value answers a value-bearing call with `NonZeroTransfer(
 `MegaAccessControl` steers gas detention's switch: `disableVolatileDataAccess()` switches volatile-data access off for the calling frame and every frame below it, until that frame switches it back on or returns, `enableVolatileDataAccess()` reverts with `DisabledByParent()` in a frame below the one that switched it off, and `isVolatileDataAccessDisabled()` answers for the caller.
 `MegaLimitControl.remainingComputeGas()` answers the compute the calling frame could still spend: the lesser of its own regular gas, with the gas the call forwarded counted back, and what gas detention leaves the transaction once it read volatile data.
 It is regular gas only, so a transaction above the execution cap hears at most the cap's share.
+Only one property of the legacy engine's answer carries over, that the gas a call forwards is not counted: the legacy answer came from a separate compute ledger and could exceed the caller's gas, while this one is at most the caller's own.
 The Oracle forwards a `sendHint` payload to the node's oracle service, unless the calling frame's volatile-data access is off, and a `keylessDeploy` transaction is charged its fixed 100,000 gas and handed to the keyless rewrite hook that native keyless deployment fills in.
 
 The Oracle's storage is read through the node's oracle service: an `SLOAD` in the Oracle's own frame loads the slot from the chain's state, then asks `OracleEnv`, and answers the service's value when it has one and the loaded value otherwise.
