@@ -137,12 +137,13 @@ fn slot_written(outcome: &MegaTransactionOutcome, address: Address, slot: u64) -
 /// slot is no change, and the sender is the body's.
 #[test]
 fn test_the_kv_count_is_the_write_records_kept() {
-    let cases: [(&str, Bytes, u64); 7] = [
-        ("an empty call", Bytes::new(), 0),
-        ("three fresh slots", slots(3), 3),
+    let cases: [(&str, Bytes, u64, u64); 7] = [
+        ("an empty call", Bytes::new(), 0, 0),
+        ("three fresh slots", slots(3), 3, 0),
         (
             "zero written to an empty slot",
             BytecodeBuilder::default().sstore(U256::ZERO, U256::ZERO).stop().build(),
+            0,
             0,
         ),
         (
@@ -153,6 +154,7 @@ fn test_the_kv_count_is_the_write_records_kept() {
                 .stop()
                 .build(),
             1,
+            0,
         ),
         (
             "one slot written and written back",
@@ -162,22 +164,31 @@ fn test_the_kv_count_is_the_write_records_kept() {
                 .stop()
                 .build(),
             0,
+            0,
         ),
         (
             "a value transfer: the frame's account and the recipient",
             then_call(BytecodeBuilder::default(), B, 1).stop().build(),
             2,
+            1,
         ),
         (
             "a destruction that moves value: its beneficiary",
             BytecodeBuilder::default().push_address(B).append(SELFDESTRUCT).build(),
             1,
+            1,
         ),
     ];
-    for (name, code, kept) in cases {
+    for (name, code, kept, transfer_logs) in cases {
         let outcome = run_kv(funded().account_code(A, code), u64::MAX);
         assert!(outcome.result.is_success(), "{name}: {:?}", outcome.result);
-        assert_eq!(outcome.usage, records(kept), "{name}");
+        let transfer_log_bytes = transfer_logs * mega_evm::TRANSFER_LOG_SIZE;
+        let expected = records(kept);
+        assert_eq!(
+            outcome.usage,
+            LimitUsage { data_size: expected.data_size + transfer_log_bytes, ..expected },
+            "{name}: the records, and the transfer log of the value it moved"
+        );
     }
 
     let transfer = run_under(
@@ -186,7 +197,14 @@ fn test_the_kv_count_is_the_write_records_kept() {
         EvmTxRuntimeLimits::no_limits(),
     );
     assert!(transfer.result.is_success());
-    assert_eq!(transfer.usage, records(1), "a value transaction records its recipient alone");
+    assert_eq!(
+        transfer.usage,
+        LimitUsage {
+            data_size: records(1).data_size + mega_evm::TRANSFER_LOG_SIZE,
+            write_records: 1
+        },
+        "a value transaction records its recipient alone, beside its transfer log"
+    );
 }
 
 /* ---------- the transaction's limit ---------- */

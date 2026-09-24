@@ -3,7 +3,8 @@
 //! Every transaction keeps its body: the envelope, the five records of the writes its inclusion
 //! makes, its calldata, its access list and its authorizations. What its execution keeps comes on
 //! top: a 40-byte record per account or storage write, a log's 32 bytes plus 32 per topic plus its
-//! data, and the code a creation deploys. A frame that fails keeps nothing, except a creator's
+//! data, the transfer log every value movement leaves — a log of three topics and one word, 160
+//! bytes — and the code a creation deploys. A frame that fails keeps nothing, except a creator's
 //! nonce record once the nonce was bumped.
 
 use alloy_evm::Evm;
@@ -11,7 +12,7 @@ use alloy_primitives::{address, Address, Bytes, B256, U256};
 use mega_evm::{
     test_utils::{BytecodeBuilder, MemoryDatabase},
     EvmTxRuntimeLimits, LimitUsage, MegaEvm, MegaTransaction, AUTHORIZATION_SIZE, LOG_BASE_SIZE,
-    LOG_TOPIC_SIZE, TX_BODY_SIZE, WRITE_RECORD_SIZE,
+    LOG_TOPIC_SIZE, TRANSFER_LOG_SIZE, TX_BODY_SIZE, WRITE_RECORD_SIZE,
 };
 use revm::{
     bytecode::opcode::{
@@ -43,6 +44,11 @@ const fn kept(extra: u64, bytes: u64, records: u64) -> LimitUsage {
 /// `records` write records and nothing else.
 const fn records(records: u64) -> LimitUsage {
     kept(0, records * WRITE_RECORD_SIZE, records)
+}
+
+/// `records` write records and the transfer logs of `moves` value movements.
+const fn records_and_moves(records: u64, moves: u64) -> LimitUsage {
+    kept(0, records * WRITE_RECORD_SIZE + moves * TRANSFER_LOG_SIZE, records)
 }
 
 /// Init code that returns `size` zero bytes as the deployed contract.
@@ -157,19 +163,35 @@ fn test_what_each_transaction_keeps() {
             "a value transfer to an existing account",
             funded().account_balance(CALLEE, U256::from(100)),
             call(CALLER, CALLEE, U256::from(1), GAS_LIMIT),
-            records(1),
+            records_and_moves(1, 1),
         ),
         (
             "a value transfer to an account that does not exist",
             funded(),
             call(CALLER, CALLEE, U256::from(1), GAS_LIMIT),
-            records(1),
+            records_and_moves(1, 1),
+        ),
+        (
+            "a value transfer to the sender itself, which moves nothing",
+            funded(),
+            call(CALLER, CALLER, U256::from(1), GAS_LIMIT),
+            kept(0, 0, 0),
         ),
         (
             "a creation deploying 10 bytes",
             funded(),
             create(CALLER, init.clone(), GAS_LIMIT),
             kept(init.len() as u64, WRITE_RECORD_SIZE + 10, 1),
+        ),
+        (
+            "a creation endowing the account it creates",
+            funded(),
+            {
+                let mut tx = create(CALLER, Bytes::new(), GAS_LIMIT);
+                tx.0.base.value = U256::from(1);
+                tx
+            },
+            records_and_moves(1, 1),
         ),
         (
             "a factory creating a contract of 10 bytes",
@@ -224,7 +246,7 @@ fn test_what_each_transaction_keeps() {
             "a value transfer the recipient passes on: its account is recorded once",
             with_code(call_to(CALL, LIBRARY, 1).stop().build()),
             call(CALLER, CALLEE, U256::from(100), GAS_LIMIT),
-            records(2),
+            records_and_moves(2, 2),
         ),
         (
             "a child that writes a slot and halts",
@@ -251,7 +273,14 @@ fn test_what_each_transaction_keeps() {
             .account_balance(CALLEE, U256::from(1_000))
             .account_balance(EXISTING, U256::from(1)),
             call(CALLER, CALLEE, U256::ZERO, GAS_LIMIT),
-            records(1),
+            records_and_moves(1, 1),
+        ),
+        (
+            "a SELFDESTRUCT that moves value to the sender: the body counts the sender",
+            with_code(BytecodeBuilder::default().push_address(CALLER).append(SELFDESTRUCT).build())
+                .account_balance(CALLEE, U256::from(1_000)),
+            call(CALLER, CALLEE, U256::ZERO, GAS_LIMIT),
+            records_and_moves(0, 1),
         ),
         (
             "a SELFDESTRUCT to itself, which moves nothing",

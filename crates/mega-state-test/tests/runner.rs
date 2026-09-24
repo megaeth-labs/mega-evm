@@ -151,20 +151,25 @@ fn test_a_fixture_ethereum_filled_passes_in_equivalence_mode() {
 
 /// The same call fails in Satin mode: Satin's own configuration charges history gas and prices
 /// state its own way, so a sender with gas enough for both pays more than Ethereum's post-state
-/// says.
+/// says; and it emits the EIP-7708 transfer log of the call's value, which Osaka's logs do not
+/// carry, so a call that moves value fails on its logs before its state root is compared.
 #[test]
 fn test_the_same_fixture_fails_in_satin_mode() {
     let dir = tempfile::tempdir().unwrap();
-    let unit = unit(&[Fork::Osaka], json!({ "gasLimit": ["0x0f4240"] }));
-    let path = write(dir.path(), "a.json", json!({ "call": fill_from_ethereum(unit) }));
-    let report = run(std::slice::from_ref(&path), config(Mode::Equivalence, Fork::Osaka));
-    assert_eq!(outcomes(&report), [&Outcome::Passed]);
+    for (value, kind) in
+        [("0x00", FailureKind::StateRootMismatch), ("0x01", FailureKind::LogsMismatch)]
+    {
+        let unit = unit(&[Fork::Osaka], json!({ "gasLimit": ["0x0f4240"], "value": [value] }));
+        let path = write(dir.path(), "a.json", json!({ "call": fill_from_ethereum(unit) }));
+        let report = run(std::slice::from_ref(&path), config(Mode::Equivalence, Fork::Osaka));
+        assert_eq!(outcomes(&report), [&Outcome::Passed], "value {value}");
 
-    let report = run(&[path], config(Mode::Satin, Fork::Osaka));
-    assert_eq!(failure_kind(outcomes(&report)[0]), Some(FailureKind::StateRootMismatch));
-    let summary = report.summary();
-    assert_eq!(summary.unattributed, 1, "Satin mode attributes nothing");
-    assert!(summary.deviated.is_empty());
+        let report = run(&[path], config(Mode::Satin, Fork::Osaka));
+        assert_eq!(failure_kind(outcomes(&report)[0]), Some(kind), "value {value}");
+        let summary = report.summary();
+        assert_eq!(summary.unattributed, 1, "Satin mode attributes nothing");
+        assert!(summary.deviated.is_empty());
+    }
 }
 
 /// A post-state root or a logs hash that is not what executes is a failure no deviation explains.

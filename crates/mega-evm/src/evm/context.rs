@@ -93,9 +93,9 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     /// Replaces the configuration.
     ///
     /// The fields the spec fixes are set from the spec, whatever `cfg` holds: the gas schedule,
-    /// the EIP-8037 and EIP-2780 switches, the execution cap, the EIP-7708 switch, the
-    /// system-call state-gas margin and the two code-size limits. Every other field (chain id,
-    /// disabled checks, blob schedule) is taken from `cfg`.
+    /// the EIP-8037 and EIP-2780 switches, the execution cap, the EIP-7708 switch and its
+    /// disabling flag, the system-call state-gas margin and the two code-size limits. Every other
+    /// field (chain id, disabled checks, blob schedule) is taken from `cfg`.
     ///
     /// A context that ran the neutral configuration returns to the spec's.
     pub fn with_cfg(mut self, cfg: CfgEnv<MegaSpecId>) -> Self {
@@ -351,16 +351,21 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
 /// state gas and the EIP-2780 intrinsic cost switched on and gas above the execution cap going to
 /// the state-gas reservoir. It raises the code-size limits to `MegaETH`'s own.
 ///
-/// Two switches are set off rather than left alone, because the base spec would turn them on and
-/// Satin does not take them: EIP-7708 mints a transfer log for every value movement, which
-/// `MegaETH` meters through its own write records instead, and the system-call reservoir margin
-/// belongs to the system-call reservoir split.
+/// It takes EIP-7708 from Amsterdam as well: every value movement emits a transfer log into the
+/// receipt. The switch is set on and EIP-7708 is not left disabled, because a log in a receipt is
+/// part of what a block commits to, not something a caller's configuration may take out. A
+/// transfer log is data size like any log, and pays no history gas: Ethereum prices it at
+/// nothing, and it is not a byte the transaction chose to write (see the `limit` module).
+///
+/// The system-call reservoir margin is set off rather than left alone: it belongs to the
+/// system-call reservoir split.
 fn spec_cfg(mut cfg: CfgEnv<MegaSpecId>) -> CfgEnv<MegaSpecId> {
     cfg.gas_params = satin_gas_params();
     cfg.enable_amsterdam_eip8037 = true;
     cfg.enable_amsterdam_eip2780 = true;
     cfg.tx_gas_limit_cap = Some(constants::TX_GAS_LIMIT_CAP);
-    cfg.enable_amsterdam_eip7708 = false;
+    cfg.enable_amsterdam_eip7708 = true;
+    cfg.amsterdam_eip7708_disabled = false;
     cfg.system_call_state_gas_margin_in_reservoir = false;
     cfg.limit_contract_code_size = Some(constants::MAX_CONTRACT_SIZE);
     cfg.limit_contract_initcode_size = Some(constants::MAX_INITCODE_SIZE);
@@ -445,7 +450,8 @@ mod tests {
             assert!(cfg.eip8037, "EIP-8037 must be on");
             assert!(cfg.eip2780, "EIP-2780 must be on");
             assert_eq!(cfg.cap, Some(constants::TX_GAS_LIMIT_CAP), "execution cap");
-            assert!(!cfg.eip7708, "EIP-7708 stays off");
+            assert!(cfg.eip7708, "EIP-7708 must be on");
+            assert!(!cfg.eip7708_disabled, "EIP-7708 must not be disabled");
             assert!(!cfg.margin, "the system-call reservoir margin stays off");
             assert_eq!(cfg.code_size, Some(constants::MAX_CONTRACT_SIZE), "contract size");
             assert_eq!(cfg.initcode_size, Some(constants::MAX_INITCODE_SIZE), "initcode size");
@@ -459,6 +465,7 @@ mod tests {
         eip2780: bool,
         cap: Option<u64>,
         eip7708: bool,
+        eip7708_disabled: bool,
         margin: bool,
         code_size: Option<usize>,
         initcode_size: Option<usize>,
@@ -472,6 +479,7 @@ mod tests {
                 eip2780: cfg.enable_amsterdam_eip2780,
                 cap: cfg.tx_gas_limit_cap,
                 eip7708: cfg.enable_amsterdam_eip7708,
+                eip7708_disabled: cfg.amsterdam_eip7708_disabled,
                 margin: cfg.system_call_state_gas_margin_in_reservoir,
                 code_size: cfg.limit_contract_code_size,
                 initcode_size: cfg.limit_contract_initcode_size,
@@ -503,7 +511,8 @@ mod tests {
             cfg.enable_amsterdam_eip8037 = false;
             cfg.enable_amsterdam_eip2780 = false;
             cfg.tx_gas_limit_cap = Some(1 << 24);
-            cfg.enable_amsterdam_eip7708 = true;
+            cfg.enable_amsterdam_eip7708 = false;
+            cfg.amsterdam_eip7708_disabled = true;
             cfg.system_call_state_gas_margin_in_reservoir = true;
             cfg.limit_contract_code_size = Some(24 * 1024);
             cfg.limit_contract_initcode_size = Some(48 * 1024);
@@ -528,8 +537,13 @@ mod tests {
     }
 
     #[test]
-    fn test_eip7708_stays_off() {
-        assert_satin_cfg(&context_with(|cfg| cfg.enable_amsterdam_eip7708 = true));
+    fn test_eip7708_stays_on() {
+        assert_satin_cfg(&context_with(|cfg| cfg.enable_amsterdam_eip7708 = false));
+    }
+
+    #[test]
+    fn test_eip7708_cannot_be_disabled() {
+        assert_satin_cfg(&context_with(|cfg| cfg.amsterdam_eip7708_disabled = true));
     }
 
     #[test]
@@ -664,7 +678,8 @@ mod tests {
         cfg.enable_amsterdam_eip8037 = false;
         cfg.enable_amsterdam_eip2780 = false;
         cfg.tx_gas_limit_cap = None;
-        cfg.enable_amsterdam_eip7708 = true;
+        cfg.enable_amsterdam_eip7708 = false;
+        cfg.amsterdam_eip7708_disabled = true;
         cfg.limit_contract_code_size = None;
         cfg.limit_contract_initcode_size = None;
         cfg
@@ -749,7 +764,7 @@ mod tests {
 
     /// Whether a transaction counts transfer logs follows the rule revm's journal emits them by:
     /// the switch turns them on below Amsterdam, and disabling EIP-7708 wins over it. Each
-    /// transaction reads the configuration afresh.
+    /// transaction reads the configuration afresh, and Satin's emits them.
     #[test]
     fn test_a_transaction_counts_transfer_logs_where_revm_emits_them() {
         let endowed_creation =
@@ -782,6 +797,15 @@ mod tests {
         assert!(!counts(with(false, false)), "the base spec is below Amsterdam");
         assert!(!counts(with(true, true)), "disabling wins over the switch");
         assert!(!counts(with(false, true)));
+
+        // Satin's own configuration emits them, whatever the caller's said.
+        let mut ctx = context_with(|cfg| {
+            cfg.enable_amsterdam_eip7708 = false;
+            cfg.amsterdam_eip7708_disabled = true;
+        });
+        ctx.set_tx(call_from(Address::repeat_byte(0x11)));
+        ctx.on_new_tx();
+        assert!(ctx.additional_limit.frame_start_transfer_log(&endowed_creation));
     }
 
     /// A context is not neutral unless it is asked to be.

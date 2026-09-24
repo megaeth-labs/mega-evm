@@ -29,7 +29,9 @@ use mega_evm::{
         TX_GAS_LIMIT_CAP,
     },
     satin_gas_params,
-    test_utils::{op_transaction, zero_fee_l1_block_info, BytecodeBuilder, MemoryDatabase},
+    test_utils::{
+        op_transaction, transfer_log, zero_fee_l1_block_info, BytecodeBuilder, MemoryDatabase,
+    },
     MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransactionOutcome, TX_BODY_SIZE,
     WRITE_RECORD_SIZE,
 };
@@ -169,9 +171,10 @@ fn assert_same(mega: &Outcome, op: &Outcome) {
     assert_eq!(mega.state, op.state, "state");
 }
 
-/// Both engines run on the Satin configuration: Karst on the Satin gas schedule, EIP-8037 and
-/// EIP-2780 switched on, the 200M execution cap, `MegaETH`'s code-size limits, EIP-7708 and the
-/// system-call reservoir margin off.
+/// Both engines run on the Satin configuration: Karst on the Satin gas schedule, EIP-8037,
+/// EIP-2780 and EIP-7708 switched on, the 200M execution cap, `MegaETH`'s code-size limits, and the
+/// system-call reservoir margin off. So op-revm journals the same transfer logs, and the logs of
+/// the two are compared as they are.
 fn assert_satin_cfg(cfg: &CfgEnv<OpSpecId>) {
     assert_eq!(cfg.spec, OpSpecId::KARST);
     assert_eq!(cfg.gas_params.table(), satin_gas_params().table());
@@ -180,7 +183,8 @@ fn assert_satin_cfg(cfg: &CfgEnv<OpSpecId>) {
     assert_eq!(cfg.tx_gas_limit_cap, Some(TX_GAS_LIMIT_CAP));
     assert_eq!(cfg.limit_contract_code_size, Some(MAX_CONTRACT_SIZE));
     assert_eq!(cfg.limit_contract_initcode_size, Some(MAX_INITCODE_SIZE));
-    assert!(!cfg.enable_amsterdam_eip7708);
+    assert!(cfg.enable_amsterdam_eip7708);
+    assert!(!cfg.amsterdam_eip7708_disabled);
     assert!(!cfg.system_call_state_gas_margin_in_reservoir);
 }
 
@@ -223,7 +227,13 @@ fn test_value_transfer_matches_op_revm() {
     assert_satin_cfg(&cfg);
     assert!(mega.result.is_success());
     assert_eq!(mega.state[&CALLEE].info.balance, U256::from(1_000));
+    assert_eq!(mega.result.logs(), [transfer_log(CALLER, CALLEE, U256::from(1_000))]);
     assert_same_but_history(&mega, &op);
+    // The transfer log is in the receipt and costs no history: the ledger is the body and the
+    // recipient's record, as it is for the same transfer without the log.
+    if !runs_at_measurement_prices() {
+        assert_eq!(mega.gas.history, (TX_BODY_SIZE + WRITE_RECORD_SIZE) * COST_PER_HISTORY_BYTE);
+    }
 }
 
 /// A nested value call above the execution cap, where the reservoir is what pays the history.

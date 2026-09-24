@@ -460,13 +460,13 @@ fn test_a_frame_revm_decides_is_held_for_its_upfront_charge() {
 }
 
 /// The records a frame's start makes are held before revm builds the frame, and its upfront state
-/// gas after revm has decided it. A value call whose records cross the data-size limit is answered
-/// with that stop, adds no account, and gives its upfront charge back: the state-gas limit that
-/// charge would have crossed is not.
+/// gas after revm has decided it. A value call whose records and transfer log cross the data-size
+/// limit is answered with that stop, adds no account, and gives its upfront charge back: the
+/// state-gas limit that charge would have crossed is not.
 #[test]
 fn test_a_frame_start_whose_records_cross_is_stopped_for_its_records() {
     let account = one_account();
-    let limit = TX_BODY_SIZE + 2 * WRITE_RECORD_SIZE - 1;
+    let limit = TX_BODY_SIZE + 2 * WRITE_RECORD_SIZE + mega_evm::TRANSFER_LOG_SIZE - 1;
     let db =
         funded().account_code(A, then_call(BytecodeBuilder::default(), EMPTY, 1).stop().build());
     let outcome = MegaEvm::new(
@@ -486,7 +486,7 @@ fn test_a_frame_start_whose_records_cross_is_stopped_for_its_records() {
             used: limit + 1,
             frame_local: false,
         }),
-        "the caller's account and the recipient's, over the limit by one byte",
+        "the caller's account, the recipient's and the transfer log, over the limit by one byte",
     );
     assert_eq!(outcome.gas.state, 0);
 }
