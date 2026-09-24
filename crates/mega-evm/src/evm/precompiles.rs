@@ -45,6 +45,9 @@ pub fn satin_precompiles_map() -> PrecompilesMap {
 ///
 /// The spec is passed so a builder can key on it; Satin is a single spec, so it is always
 /// [`MegaSpecId::SATIN`] today.
+///
+/// Logs a precompile added here writes itself are not counted in the data size, which counts a
+/// log where a `LOG` opcode completes.
 pub type DynPrecompilesBuilder =
     Arc<dyn Fn(MegaSpecId) -> HashMap<Address, DynPrecompile> + Send + Sync>;
 
