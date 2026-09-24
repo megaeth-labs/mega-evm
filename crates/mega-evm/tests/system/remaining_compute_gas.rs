@@ -548,6 +548,34 @@ fn test_the_answer_is_what_the_caller_resumes_with() {
     }
 }
 
+/// A callee a value call started hears the stipend counted, whether or not the transaction is
+/// detained: detention counts the stipend outside compute, so its allowance carries it as the
+/// callee's own gas does, and the callee hears the stipend more than the same callee a call
+/// without value started.
+#[test]
+fn test_a_value_called_callee_hears_its_stipend_whether_or_not_detained() {
+    let stipend = 2_300;
+    let answer = |caller_reads: bool, value: u64| {
+        let caller = BytecodeBuilder::default();
+        let caller = if caller_reads { reads_timestamp(caller) } else { caller };
+        let db = system_db()
+            .account_code(CONTRACT, calls(caller, CONTRACT2, 50_000, value).stop().build())
+            .account_balance(CONTRACT, U256::from(10))
+            .account_code(CONTRACT2, queries());
+        let pairs = answers_and_resumes(db, Address::ZERO, tx(CONTRACT, &[], BELOW));
+        assert_eq!(pairs.len(), 1);
+        pairs[0].0
+    };
+    for caller_reads in [false, true] {
+        assert_eq!(
+            answer(caller_reads, 1),
+            answer(caller_reads, 0) + stipend,
+            "read: {caller_reads}"
+        );
+    }
+    assert_eq!(answer(false, 1), answer(true, 1), "detained or not, the same answer");
+}
+
 /// A caller that acts on the answer can spend it and no more: after a read, a loop that spends a
 /// little less than the answer completes, and one that spends a little more is stopped at the
 /// compute limit.
