@@ -41,40 +41,84 @@ pub const VOLATILE_DATA_ACCESS_DISABLED_SELECTOR: [u8; 4] =
     IMegaAccessControl::VolatileDataAccessDisabled::SELECTOR;
 
 /// Answers a call to `MegaAccessControl`, or `None` when the selector is not one of its three
-/// and the deployed bytecode runs.
+/// and the deployed bytecode runs. `depth` is the depth of the frame the call would start.
 ///
-/// # What the three methods do today
+/// # The switch
 ///
-/// The switch is gas detention's: [`Detention`](crate::Detention) holds it, the Host consults it
-/// before every volatile load, and a refused read reverts its frame with
-/// `VolatileDataAccessDisabled`. The interceptor does not steer it yet — that is the control
-/// contracts' semantics, which land on their own. Until then the interceptor is the dispatch and
-/// the value policy: `disableVolatileDataAccess` and `enableVolatileDataAccess` succeed and change
-/// nothing, and `isVolatileDataAccessDisabled` answers `false`, which is what the switch holds
-/// when no call steered it. `DisabledByParent()`, the answer to a frame that re-enables what a
-/// frame above it disabled, is what [`Detention::enable_access`](crate::Detention::enable_access)
-/// refuses.
+/// The three methods steer and read gas detention's switch ([`Detention`](crate::Detention)),
+/// for the frame that made the call — the caller, one level above the frame the call would start:
 ///
-/// All three take no value: they read or steer execution, and the contract holds no balance.
+/// - `disableVolatileDataAccess()` switches volatile-data access off for the caller and every frame
+///   below it. A switch already off from a frame above stays as it is.
+/// - `enableVolatileDataAccess()` switches it back on, and reverts with `DisabledByParent()` when a
+///   frame above the caller switched it off: a frame cannot lift a restriction its caller placed.
+///   Switching on what is not off succeeds and changes nothing.
+/// - `isVolatileDataAccessDisabled()` answers whether the switch is off for the caller.
+///
+/// While the switch is off, the Host refuses every volatile read of the caller's subtree and the
+/// reading frame reverts with `VolatileDataAccessDisabled`. The caller reads the switch as it
+/// resumes after the call, and it turns back on when the frame that switched it off returns,
+/// whatever it returns with, so a sibling called afterwards is not restricted.
+///
+/// A transaction that calls the contract directly has no frame of its own above the one the call
+/// starts: nothing runs after the answer, so disabling changes nothing, enabling succeeds and the
+/// query answers `false`.
+///
+/// All three take no value: they read or steer execution, and the contract holds no balance. A
+/// `STATICCALL` reaches them too, because the switch is not state: it lives for the transaction
+/// and leaves nothing behind.
 pub(crate) fn intercept<DB: Database, ExtEnvs: ExternalEnvTypes>(
-    ctx: &MegaContext<DB, ExtEnvs>,
+    ctx: &mut MegaContext<DB, ExtEnvs>,
     inputs: &CallInputs,
+    depth: usize,
 ) -> Option<FrameResult> {
     let selector = peek_selector(&inputs.input, ctx)?;
     // Selector-only admission: the four bytes decide, whatever follows them.
-    let output = if selector == IMegaAccessControl::disableVolatileDataAccessCall::SELECTOR ||
-        selector == IMegaAccessControl::enableVolatileDataAccessCall::SELECTOR
-    {
-        Bytes::new()
+    let method = if selector == IMegaAccessControl::disableVolatileDataAccessCall::SELECTOR {
+        Method::Disable
+    } else if selector == IMegaAccessControl::enableVolatileDataAccessCall::SELECTOR {
+        Method::Enable
     } else if selector == IMegaAccessControl::isVolatileDataAccessDisabledCall::SELECTOR {
-        Bytes::from(IMegaAccessControl::isVolatileDataAccessDisabledCall::abi_encode_returns(
-            &false,
-        ))
+        Method::IsDisabled
     } else {
         return None;
     };
     if let Some(rejected) = reject_non_zero_transfer(inputs) {
         return Some(rejected);
     }
-    Some(synthetic_call_result(inputs, InstructionResult::Return, output))
+    let caller = depth.checked_sub(1);
+    let detention = &mut ctx.detention;
+    let (result, output) = match method {
+        Method::Disable => {
+            if let Some(caller) = caller {
+                detention.disable_access(caller);
+            }
+            (InstructionResult::Return, Bytes::new())
+        }
+        Method::Enable => {
+            if caller.is_none_or(|caller| detention.enable_access(caller)) {
+                (InstructionResult::Return, Bytes::new())
+            } else {
+                (InstructionResult::Revert, Bytes::from_static(&DISABLED_BY_PARENT_REVERT_DATA))
+            }
+        }
+        Method::IsDisabled => {
+            let disabled = caller.is_some_and(|caller| detention.is_access_disabled(caller));
+            let output =
+                IMegaAccessControl::isVolatileDataAccessDisabledCall::abi_encode_returns(&disabled);
+            (InstructionResult::Return, Bytes::from(output))
+        }
+    };
+    Some(synthetic_call_result(inputs, result, output))
+}
+
+/// The three methods `MegaAccessControl` intercepts.
+#[derive(Clone, Copy, Debug)]
+enum Method {
+    /// `disableVolatileDataAccess()`.
+    Disable,
+    /// `enableVolatileDataAccess()`.
+    Enable,
+    /// `isVolatileDataAccessDisabled()`.
+    IsDisabled,
 }

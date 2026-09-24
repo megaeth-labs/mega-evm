@@ -31,11 +31,11 @@ Do not add a `_pending/main.rs`.
 | revert-class aborts | 17 | 17 | 0 | 0 | 17 | 0 |
 | the pre-block system calls | 34 | 22 | 12 | 30 | 4 | 0 |
 | system contract deployment | 11 | 5 | 6 | 11 | 0 | 0 |
-| the oracle and control contracts | 73 | 73 | 0 | 63 | 10 | 0 |
+| the oracle and control contracts | 27 | 27 | 0 | 17 | 10 | 0 |
 | native keyless deployment | 75 | 73 | 2 | 29 | 46 | 0 |
 | inspector support | 4 | 4 | 0 | 1 | 3 | 0 |
 | — (undecided: D57 preload-warm cold charging, D58 98/100 forwarding) | 7 | 7 | 0 | 0 | 0 | 7 |
-| **Total** | **242** | **222** | **20** | **155** | **80** | **7** |
+| **Total** | **196** | **176** | **20** | **109** | **80** | **7** |
 
 ## Tests ported in place
 
@@ -300,12 +300,13 @@ These 83 rows run in a real test target now, adapted to the Satin API and to the
 
 ## Tests ported by the oracle and control contracts
 
-These 4 rows run in a real test target now, adapted to the Satin API: the Oracle's storage is read through the oracle environment, `MegaAccessControl` steers gas detention's switch, and `remainingComputeGas()` answers from the caller's regular gas and detention's allowance, as the decisions they cite fix. The counts above are lower than the inventory's by exactly these rows.
+These 50 rows run in a real test target now, adapted to the Satin API: the Oracle's storage is read through the oracle environment, `MegaAccessControl` steers gas detention's switch, and `remainingComputeGas()` answers from the caller's regular gas and detention's allowance, as the decisions they cite fix. The counts above are lower than the inventory's by exactly these rows.
 
 | Legacy file | Owner in the inventory | Tests | Now in |
 |---|---|---:|---|
 | `mini_rex/oracle.rs` | the oracle and control contracts (4) | 4 | `tests/system/oracle_storage.rs` |
-| **Total** | | **4** | |
+| `rex4/access_control.rs` | the oracle and control contracts (46) | 46 | `tests/system/access_control.rs` |
+| **Total** | | **50** | |
 
 ## Tests retired after the inventory
 
@@ -368,7 +369,6 @@ Each cell lists `disposition count (mechanism · decision)`.
 | `rex2/keyless_deploy.rs` | 36 | rewrite 13 (native keyless deployment · native CREATE sub-frame; D37/D38); keep 19 (native keyless deployment · validation rules 1-9 unchanged); keep 1 (native keyless deployment · rule 4 (tx nonce == 0) unchanged); rewrite 3 (native keyless deployment · D36) |
 | `rex2/oracle_hint.rs` | 6 | keep 6 (the oracle and control contracts) |
 | `rex3/oracle_gas_limit.rs` | 1 | rewrite 1 (revert-class aborts · D48) |
-| `rex4/access_control.rs` | 46 | keep 46 (the oracle and control contracts) |
 | `rex4/beneficiary_detention.rs` | 1 | rewrite 1 (revert-class aborts · D48) |
 | `rex4/create_safety.rs` | 1 | keep 1 (the common execution layer · canonical revm behaviour) |
 | `rex4/frame_limits.rs` | 1 | rewrite 1 (revert-class aborts · D48) |

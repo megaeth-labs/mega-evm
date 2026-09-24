@@ -80,7 +80,8 @@ struct DetainedFrame {
 /// A frame in a subtree where volatile-data access is switched off does not read volatile data:
 /// the Host refuses the load and the opcode's wrapper reverts the frame with
 /// `VolatileDataAccessDisabled`. The switch is scoped to the frame that turned it off and the
-/// frames below it, and turns back on when that frame returns.
+/// frames below it, and turns back on when that frame returns. `MegaAccessControl`'s interceptor
+/// steers it for the frame that calls the contract.
 #[derive(Clone, Debug, Default)]
 pub struct Detention {
     /// What the Host loaded for the running opcode, waiting for its wrapper.

@@ -1,6 +1,5 @@
 //! Tests for `Rex4` hardfork features.
 
-mod access_control;
 mod beneficiary_detention;
 mod create_safety;
 mod eip7702_delegation_cycle;

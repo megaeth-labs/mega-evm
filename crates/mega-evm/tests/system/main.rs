@@ -1,6 +1,7 @@
 //! Tests of the system contracts: the interceptor dispatch, what each contract answers, and the
 //! system-address transaction.
 
+mod access_control;
 mod common;
 mod control;
 mod deploy;
