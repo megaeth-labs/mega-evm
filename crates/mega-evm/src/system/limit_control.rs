@@ -63,8 +63,9 @@ pub use mega_system_contracts::limit_control::IMegaLimitControl;
 /// It is regular gas only, capped at the execution cap: the state-gas reservoir is not compute,
 /// and a transaction above the cap hears the cap's share at most. It is not a promise of compute
 /// either: state or history gas the caller later pays out of its regular gas comes out of the
-/// same figure. A frame a value call started holds its stipend in its own regular gas, so an
-/// undetained one hears it counted.
+/// same figure. A frame a value call started holds its stipend in its own regular gas, and
+/// detention counts the stipend outside compute, so the frame hears it counted whether or not it
+/// is detained.
 ///
 /// The method reads and takes no value.
 pub(crate) fn intercept<DB: Database, ExtEnvs: ExternalEnvTypes>(
