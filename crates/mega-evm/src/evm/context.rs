@@ -20,9 +20,8 @@ use crate::{
     },
     system::{self, MEGA_SYSTEM_ADDRESS},
     AdditionalLimit, BlockHashRecord, BucketError, BucketMultipliers, Detention, EmptyExternalEnv,
-    EthSpecId,
-    EvmTxRuntimeLimits, ExternalEnvTypes, ExternalEnvs, MegaSpecId, MegaTransaction, SaltEnv,
-    VolatileDataAccess,
+    EthSpecId, EvmTxRuntimeLimits, ExternalEnvTypes, ExternalEnvs, MegaSpecId, MegaTransaction,
+    SaltEnv, VolatileDataAccess,
 };
 
 /// The revm context the Satin engine runs on: op-revm's context shape with the `MegaETH`
