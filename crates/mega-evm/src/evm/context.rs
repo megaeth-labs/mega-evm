@@ -137,6 +137,16 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
         self
     }
 
+    /// The spec's configuration with EIP-7708 switched off in both views, for the unit tests that
+    /// hold a transaction with its transfer logs to the same transaction without them. No
+    /// configuration a caller can build runs Satin without them.
+    #[cfg(test)]
+    pub(crate) fn without_transfer_logs(mut self) -> Self {
+        self.cfg.enable_amsterdam_eip7708 = false;
+        self.inner = self.inner.with_cfg(op_cfg(&self.cfg));
+        self
+    }
+
     /// Whether the context runs the neutral configuration ([`with_neutral_cfg`]).
     ///
     /// [`with_neutral_cfg`]: Self::with_neutral_cfg
