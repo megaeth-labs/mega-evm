@@ -41,7 +41,7 @@ use revm::{
         CallScheme, CallValue, CreateInputs, CreateScheme, FrameInput, InitialAndFloorGas,
         InstructionResult, InterpreterAction, InterpreterResult, SharedMemory,
     },
-    primitives::{Address, Bytes, TxKind, CALL_STACK_LIMIT},
+    primitives::{Address, Bytes, TxKind, CALL_STACK_LIMIT, U256},
     Inspector, Journal,
 };
 
@@ -402,7 +402,9 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
     ///    it;
     /// 4. the keyless deployment rewrite ([`MegaEvm::rewrite_keyless`]);
     /// 5. the frame's lane is pushed and the writes its start makes are counted; a limit they cross
-    ///    answers the frame with the stop before it runs;
+    ///    answers the frame with the stop before it runs. A start revm refuses on its caller's
+    ///    account ([`caller_refuses_start`]) makes no write and journals no transfer log, so it
+    ///    gets an empty lane and nothing is counted;
     /// 6. revm builds the frame, or answers it;
     /// 7. the state gas the caller was charged upfront for the frame's start is held to the
     ///    state-gas limit, unless revm refused the frame and so gives it back
@@ -443,9 +445,15 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
         }
         let frame_init = self.rewrite_keyless(frame_init);
         let ctx = &mut self.inner.ctx;
-        let check = ctx.additional_limit.on_frame_init(&frame_init.frame_input, frame_init.depth);
-        if check.exceeded_limit() {
-            return Ok(ItemOrResult::Result(stop_before_building(ctx, &frame_init, &check)?));
+        let refused = caller_refuses_start(ctx, &frame_init.frame_input);
+        if refused {
+            ctx.additional_limit.push_empty_frame();
+        } else {
+            let check =
+                ctx.additional_limit.on_frame_init(&frame_init.frame_input, frame_init.depth);
+            if check.exceeded_limit() {
+                return Ok(ItemOrResult::Result(stop_before_building(ctx, &frame_init, &check)?));
+            }
         }
         // The creator of a creation, to tell afterwards whether revm bumped its nonce. The
         // transaction's own creation has no creator record to take back, so the check is a
@@ -457,8 +465,9 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
             _ => None,
         };
         #[cfg(debug_assertions)]
-        let transfer_log = (
+        let counted = (
             ctx.additional_limit.frame_start_transfer_log(&frame_init.frame_input),
+            refused,
             ctx.journal_ref().logs().len(),
         );
         let outcome = match self.inner.frame_init(frame_init)? {
@@ -467,7 +476,7 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
         };
         let ctx = &mut self.inner.ctx;
         #[cfg(debug_assertions)]
-        assert_transfer_log_journaled(ctx, transfer_log, outcome.as_ref().err());
+        assert_start_as_counted(ctx, counted, outcome.as_ref().err());
         match outcome {
             Ok(address) => {
                 ctx.additional_limit.set_frame_address(address);
@@ -908,23 +917,38 @@ fn call_too_deep(frame_init: &FrameInit) -> Option<FrameResult> {
     })
 }
 
-/// Asserts that revm journaled the EIP-7708 transfer log the data size counted for a frame's
-/// start, once revm has built the frame or answered it: `counted` is whether
-/// [`on_frame_init`](crate::AdditionalLimit) counted one, `logs_i` the journal's log count before
-/// revm acted, and `answer` revm's answer when it did not build the frame.
+/// Asserts that revm started a frame the way the data size counted its start, once revm has built
+/// the frame or answered it: that revm refused exactly the start [`caller_refuses_start`]
+/// predicted, and journaled exactly the EIP-7708 transfer log counted. `counted` is whether the
+/// start counts a transfer log when revm makes it
+/// ([`frame_start_transfer_log`](crate::AdditionalLimit)), `refused` whether it was predicted
+/// refused and so counted nothing, `logs_i` the journal's log count before revm acted, and
+/// `answer` revm's answer when it did not build the frame.
 ///
-/// The count is made before revm moves the value, from the frame's input, so this is where a
-/// divergence from revm's own rule would show. A built frame has run no instruction yet, so the
-/// move is all revm has done. An answered call moved the value when it succeeded — a call to an
-/// account with no code, a precompile — and took the move back when it failed. A creation revm
-/// answers never moved value: it refused before its checkpoint, or reverted it. Only transfer
-/// logs are compared: a precompile may journal logs of its own.
+/// The count is made before revm decides, from the frame's input and its caller's account, so this
+/// is where a divergence from revm's own rules would show. revm refuses a start on its caller's
+/// account with `OutOfFunds`, for a value the caller cannot fund, and with a `Return` for a
+/// creation whose creator's nonce cannot be bumped — the one creation it answers with a success.
+/// A built frame has run no instruction yet, so the move is all revm has done. An answered call
+/// moved the value when it succeeded — a call to an account with no code, a precompile — and took
+/// the move back when it failed. A creation revm answers never moved value: it refused before its
+/// checkpoint, or reverted it (a creation onto an occupied address). Only transfer logs are
+/// compared: a precompile may journal logs of its own.
 #[cfg(debug_assertions)]
-fn assert_transfer_log_journaled<DB: Database, ExtEnvs: ExternalEnvTypes>(
+fn assert_start_as_counted<DB: Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &MegaContext<DB, ExtEnvs>,
-    (counted, logs_i): (bool, usize),
+    (counted, refused, logs_i): (bool, bool, usize),
     answer: Option<&FrameResult>,
 ) {
+    let refused_by_revm = match answer {
+        None => false,
+        Some(FrameResult::Call(outcome)) => outcome.result.result == InstructionResult::OutOfFunds,
+        Some(FrameResult::Create(outcome)) => matches!(
+            outcome.result.result,
+            InstructionResult::OutOfFunds | InstructionResult::Return
+        ),
+    };
+    debug_assert_eq!(refused, refused_by_revm, "the start revm refused is the one predicted");
     let moved = match answer {
         None => true,
         Some(FrameResult::Call(outcome)) => outcome.result.result.is_ok(),
@@ -1025,6 +1049,52 @@ fn charge_created_caller<DB: Database, ExtEnvs: ExternalEnvTypes>(
     gas.record_state_cost(state_gas)
 }
 
+/// Whether revm refuses to start the frame `input` asks for on what its caller's account holds:
+/// a value the caller cannot fund, which revm answers with `OutOfFunds`, and a creation whose
+/// creator's nonce cannot be bumped, which it answers with a `Return` and no address. revm checks
+/// both before it moves or writes anything, so a start it refuses makes no write record and
+/// journals no transfer log: it is charged nothing and counted nothing.
+///
+/// A creation onto an occupied address is the one refusal not predicted. revm decides it on the
+/// created address's account after the start is counted, and reading that account here would load
+/// it, changing what the transaction has warmed. So the creation's records and transfer log are
+/// counted, and a crossing they cause stops the creation before revm could refuse it; without a
+/// crossing, revm's refusal fails the creation and its lane goes with it.
+pub(crate) fn caller_refuses_start<DB: revm::Database, ExtEnvs: ExternalEnvTypes>(
+    ctx: &MegaContext<DB, ExtEnvs>,
+    input: &FrameInput,
+) -> bool {
+    match input {
+        FrameInput::Call(inputs) => {
+            inputs.transfers_value() &&
+                caller_refuses(ctx, inputs.caller, inputs.call_value(), false)
+        }
+        FrameInput::Create(inputs) => caller_refuses(ctx, inputs.caller(), inputs.value(), true),
+        FrameInput::Empty => false,
+    }
+}
+
+/// Whether `caller`'s account refuses a frame start that moves `value` and, for a `creation`,
+/// bumps its nonce: the balance revm's transfer checks, and the nonce revm's creation bumps.
+///
+/// The account is read from the journal as it stands, without loading or warming anything, and it
+/// is always there. A transaction's sender is loaded by validation, which also credits a deposit's
+/// mint (`validate_against_state_and_deduct_caller`, revm's and op-revm's). Any other caller is the
+/// account a running frame runs as, which revm loaded to start that frame: a call's target before
+/// its value moves, a creation's address when it creates the account.
+fn caller_refuses<DB: revm::Database, ExtEnvs: ExternalEnvTypes>(
+    ctx: &MegaContext<DB, ExtEnvs>,
+    caller: Address,
+    value: U256,
+    creation: bool,
+) -> bool {
+    let account = ctx.journal_ref().state.get(&caller);
+    debug_assert!(account.is_some(), "a frame's caller is loaded before the frame starts");
+    account.is_some_and(|account| {
+        account.info.balance < value || (creation && account.info.nonce == u64::MAX)
+    })
+}
+
 /// The nonce of an account the journal holds; zero for one it does not.
 fn account_nonce<DB: Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &MegaContext<DB, ExtEnvs>,
@@ -1084,7 +1154,11 @@ struct AppliedAuthorities {
 /// account it creates.
 ///
 /// The authorities' records are the transaction's own and outlive a first frame that fails; the
-/// first frame's record does not, so what it cost is kept for the settlement to give back.
+/// first frame's record does not, so what it cost is kept for the settlement to give back. A first
+/// frame revm refuses to start on its sender's account makes no record, and is charged none
+/// ([`caller_refuses_start`]): among the transactions that pay history, that is a creation from an
+/// account whose nonce cannot be bumped, which only a caller that turned the nonce check off can
+/// run, and which revm answers with a success.
 /// `false` when the transaction cannot pay, which is an out-of-gas before it runs.
 fn charge_records_made_outside_a_frame<DB: Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &mut MegaContext<DB, ExtEnvs>,
@@ -1094,14 +1168,17 @@ fn charge_records_made_outside_a_frame<DB: Database, ExtEnvs: ExternalEnvTypes>(
     if !ctx.prices_history() {
         return true;
     }
-    let top_level_record = match ctx.tx().kind() {
+    let tx = ctx.tx();
+    let writes_a_record = match tx.kind() {
         TxKind::Create => true,
         TxKind::Call(to) => {
-            !ctx.tx().value().is_zero() &&
-                to != ctx.tx().caller() &&
+            !tx.value().is_zero() &&
+                to != tx.caller() &&
                 !ctx.additional_limit.target_is_authority()
         }
     };
+    let top_level_record =
+        writes_a_record && !caller_refuses(ctx, tx.caller(), tx.value(), tx.kind().is_create());
     let Some(top_level) = write_record_history_gas(u64::from(top_level_record)) else {
         return false;
     };
@@ -1194,24 +1271,54 @@ mod tests {
     #[should_panic(expected = "the transfer log counted is the one revm journaled")]
     fn test_a_transfer_log_counted_and_not_journaled_trips() {
         let ctx = MegaContext::new(MemoryDatabase::default(), MegaSpecId::SATIN);
-        assert_transfer_log_journaled(&ctx, (true, 0), None);
+        assert_start_as_counted(&ctx, (true, false, 0), None);
     }
 
-    /// The guard expects no log where nothing moved, whatever was counted: a creation revm
-    /// answers — the nonce-overflow answer is a `Return` — and a call it answers with a failure;
-    /// and none for a frame nothing was counted for.
+    /// The guard trips on a start revm refused on its caller's account that was not predicted,
+    /// which the data size would have counted.
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "the start revm refused is the one predicted")]
+    fn test_a_refusal_not_predicted_trips() {
+        let ctx = MegaContext::new(MemoryDatabase::default(), MegaSpecId::SATIN);
+        let unfunded =
+            synthetic_frame_result(&value_call(), InstructionResult::OutOfFunds, Bytes::new());
+        assert_start_as_counted(&ctx, (true, false, 0), Some(&unfunded));
+    }
+
+    /// The guard trips on a start predicted refused that revm made, which the data size did not
+    /// count.
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "the start revm refused is the one predicted")]
+    fn test_a_predicted_refusal_revm_did_not_make_trips() {
+        let ctx = MegaContext::new(MemoryDatabase::default(), MegaSpecId::SATIN);
+        assert_start_as_counted(&ctx, (false, true, 0), None);
+    }
+
+    /// The guard expects no log where nothing moved, whatever the input would count: a start
+    /// revm refuses on its caller's account, predicted — a value call it answers `OutOfFunds`, a
+    /// creation whose creator's nonce cannot be bumped, answered with a `Return` — and one it
+    /// fails otherwise — a creation onto an occupied address, a failing precompile; and none for
+    /// a frame nothing was counted for.
     #[test]
     #[cfg(debug_assertions)]
     fn test_the_guard_expects_no_transfer_log_where_nothing_moved() {
         let ctx = MegaContext::new(MemoryDatabase::default(), MegaSpecId::SATIN);
-        assert_transfer_log_journaled(&ctx, (false, 0), None);
-        let refused = synthetic_frame_result(&creation(), InstructionResult::Return, Bytes::new());
-        assert_transfer_log_journaled(&ctx, (true, 0), Some(&refused));
+        assert_start_as_counted(&ctx, (false, false, 0), None);
+        let overflow = synthetic_frame_result(&creation(), InstructionResult::Return, Bytes::new());
+        assert_start_as_counted(&ctx, (true, true, 0), Some(&overflow));
         let unfunded =
             synthetic_frame_result(&value_call(), InstructionResult::OutOfFunds, Bytes::new());
-        assert_transfer_log_journaled(&ctx, (true, 0), Some(&unfunded));
+        assert_start_as_counted(&ctx, (true, true, 0), Some(&unfunded));
+        let collision =
+            synthetic_frame_result(&creation(), InstructionResult::CreateCollision, Bytes::new());
+        assert_start_as_counted(&ctx, (true, false, 0), Some(&collision));
+        let failed =
+            synthetic_frame_result(&value_call(), InstructionResult::PrecompileError, Bytes::new());
+        assert_start_as_counted(&ctx, (true, false, 0), Some(&failed));
         let answered = synthetic_frame_result(&value_call(), InstructionResult::Stop, Bytes::new());
-        assert_transfer_log_journaled(&ctx, (false, 0), Some(&answered));
+        assert_start_as_counted(&ctx, (false, false, 0), Some(&answered));
     }
 
     /// A charge that stands is held: a frame revm built latches the transaction, and a success

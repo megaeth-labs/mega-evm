@@ -67,7 +67,7 @@ use crate::{
     MegaContext,
 };
 
-use super::MegaInstructions;
+use super::{caller_refuses_start, MegaInstructions};
 
 /// The context an instruction of the Satin engine runs with.
 type Ctx<'a, DB, ExtEnvs> = InstructionContext<'a, MegaContext<DB, ExtEnvs>, EthInterpreter>;
@@ -233,10 +233,11 @@ fn selfdestruct<DB: Database, ExtEnvs: ExternalEnvTypes>(
 /// The charge is made after revm's instruction has computed the gas it forwards, so it comes out
 /// of what the caller kept rather than out of what the callee gets. An opcode that starts no frame
 /// — a creation the balance, the nonce or the depth refuses, an out-of-gas — makes no records and
-/// is charged nothing. A frame revm refuses once it has it — a value call the caller cannot fund,
-/// one past the call-stack limit — makes no records either, and its failure gives the charge
-/// back. A charge the caller cannot pay fails the opcode with an out-of-gas, which takes the frame
-/// the opcode was suspending on with it ([`abandon_frame`]).
+/// is charged nothing. Neither is a frame revm will refuse on its caller's account — a value call
+/// the caller cannot fund ([`caller_refuses_start`]) — which the data size does not count either.
+/// A frame revm refuses for another reason — one past the call-stack limit — makes no records,
+/// and its failure gives the charge back. A charge the caller cannot pay fails the opcode with an
+/// out-of-gas, which takes the frame the opcode was suspending on with it ([`abandon_frame`]).
 ///
 /// revm's instruction has also charged the caller the state gas of the account the frame would
 /// add — a value transfer's new recipient, a created account. That charge is held to the state-gas
@@ -253,10 +254,10 @@ fn charge_frame_start<DB: Database, ExtEnvs: ExternalEnvTypes>(
     let InstructionContext { interpreter, host } = context;
     let result = inner(InstructionContext { interpreter: &mut *interpreter, host: &mut *host });
     // An opcode that starts a frame suspends with the frame's input as its action; one that ends
-    // otherwise — a call the balance cannot fund, an out-of-gas — leaves no such action and makes
-    // no records.
+    // otherwise — a creation the balance cannot fund, an out-of-gas — leaves no such action and
+    // makes no records.
     let records = match interpreter.bytecode.action() {
-        Some(InterpreterAction::NewFrame(input)) => {
+        Some(InterpreterAction::NewFrame(input)) if !caller_refuses_start(host, input) => {
             host.additional_limit.frame_start_records(input)
         }
         _ => return result,

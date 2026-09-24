@@ -520,8 +520,17 @@ impl AdditionalLimit {
     /// with the stop before any value moves. After the checkpoint it could not: a frame revm
     /// answers without running — a call to an account with no code, a precompile — has committed
     /// its checkpoint by the time its answer returns, and rewriting the answer would not take the
-    /// move back. The lane follows the checkpoint from then on: a frame that fails, revm's own
-    /// refusal of a move its caller cannot fund included, discards both the log and its bytes.
+    /// move back. The lane follows the checkpoint from then on: a frame that fails discards both
+    /// the log and its bytes.
+    ///
+    /// So the count is a prediction of what revm will do, and it is called only for a start revm
+    /// makes as far as the caller's account decides it. A start revm refuses there — a value its
+    /// caller cannot fund, a creation whose creator's nonce cannot be bumped — moves and writes
+    /// nothing, and gets an empty lane instead ([`push_empty_frame`](Self::push_empty_frame)).
+    /// The one refusal decided after the count is a creation onto an occupied address: revm reads
+    /// the created address's account only once it builds the frame. Its records and transfer log
+    /// are counted, a crossing they cause stops the creation before revm could refuse it, and
+    /// without a crossing revm's refusal fails the creation and discards them.
     ///
     /// A crossed limit in the verdict means the frame must not run: it is answered with the stop.
     /// So is every frame of a latched transaction, whose lane stays empty.

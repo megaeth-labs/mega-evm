@@ -40,6 +40,16 @@
 //!   on the lane of the frame whose journal checkpoint holds the move, so the failure that takes
 //!   the move back takes the bytes back.
 //!
+//! A frame start is counted before revm decides it, so what it counts is a prediction of what revm
+//! will do. As far as the caller's account decides it, the prediction is revm's own: a start revm
+//! refuses there — a value its caller cannot fund, a creation whose creator's nonce cannot be
+//! bumped — moves and writes nothing, so it counts nothing and is charged nothing, and no limit
+//! stops it. The caller's account is read from the journal without loading anything. The one
+//! refusal decided after the count is a creation onto an occupied address, which revm reads off
+//! the created address's account only once it builds the frame: its records and transfer log are
+//! counted, so a crossing they cause stops the creation where revm would have failed it, and
+//! without a crossing the failure discards them.
+//!
 //! A record is checked against the limits before its history is charged: a record the limit
 //! rejects is not kept, so it is not charged, and the stop is what its frame reports. At a frame
 //! start the order is the other way round — the caller pays for the records at its opcode, before
