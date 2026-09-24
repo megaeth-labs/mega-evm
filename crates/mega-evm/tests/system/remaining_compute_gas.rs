@@ -12,19 +12,23 @@ use alloy_primitives::{address, Address, Bytes, TxKind, U256};
 use alloy_sol_types::SolCall;
 use mega_evm::{
     constants::{BLOCK_ENV_ACCESS_COMPUTE_GAS, TX_GAS_LIMIT_CAP},
-    system::{IMegaLimitControl, LIMIT_CONTROL_ADDRESS},
+    system::{IMegaLimitControl, IOracle, LIMIT_CONTROL_ADDRESS, ORACLE_CONTRACT_ADDRESS},
     test_utils::{op_transaction, zero_fee_l1_block_info, BytecodeBuilder, MemoryDatabase},
-    MegaContext, MegaEvm, MegaSpecId, MegaTransaction, MegaTransactionOutcome,
+    EvmTxRuntimeLimits, LimitCheck, LimitKind, MegaContext, MegaEvm, MegaSpecId, MegaTransaction,
+    MegaTransactionOutcome,
 };
 use revm::{
     bytecode::opcode::*,
     context::{BlockEnv, TxEnv},
+    interpreter::{interpreter::EthInterpreter, CallInputs, CallOutcome, Interpreter},
+    Inspector,
 };
 
 use crate::common::{system_db, CALLER};
 
 const CONTRACT: Address = address!("0x0000000000000000000000000000000000300001");
 const CONTRACT2: Address = address!("0x0000000000000000000000000000000000300002");
+const CONTRACT3: Address = address!("0x0000000000000000000000000000000000300003");
 
 /// The cap a read of the block environment sets.
 const CAP: u64 = BLOCK_ENV_ACCESS_COMPUTE_GAS;
@@ -355,4 +359,238 @@ fn test_a_childs_read_binds_its_callers_answer() {
     let words = words(&execute(db, tx(CONTRACT, &[], BELOW)));
     assert!(words[0] < CAP && words[0] > CAP - 10_000, "what the cap leaves: {}", words[0]);
     assert!(words[1] + READING > CAP, "not the caller's own gas");
+}
+
+/* ---------- the answer is what the caller can spend when it resumes ---------- */
+
+/// Records every answer a query returns, next to the spendable regular gas its caller resumes
+/// with: what a regular charge of the caller could draw at its next instruction.
+#[derive(Debug, Default)]
+struct AnswerAndResume {
+    pending: Option<u64>,
+    pairs: Vec<(u64, u64)>,
+}
+
+impl<CTX> Inspector<CTX, EthInterpreter> for AnswerAndResume {
+    fn step(&mut self, interp: &mut Interpreter<EthInterpreter>, _context: &mut CTX) {
+        if let Some(answer) = self.pending.take() {
+            self.pairs.push((answer, interp.gas.tracker().spendable()));
+        }
+    }
+
+    fn call_end(&mut self, _context: &mut CTX, inputs: &CallInputs, outcome: &mut CallOutcome) {
+        if inputs.target_address == LIMIT_CONTROL_ADDRESS && outcome.result.is_ok() {
+            self.pending = Some(U256::from_be_slice(&outcome.result.output).to::<u64>());
+        }
+    }
+}
+
+/// Runs `tx` over `db` in a block whose beneficiary is `beneficiary`, under the default limits,
+/// and returns every answer with the spendable gas its caller resumed with.
+fn answers_and_resumes(
+    db: MemoryDatabase,
+    beneficiary: Address,
+    tx: MegaTransaction,
+) -> Vec<(u64, u64)> {
+    let ctx = MegaContext::new(db, MegaSpecId::SATIN)
+        .with_block(block(beneficiary))
+        .with_chain(zero_fee_l1_block_info());
+    let mut evm = MegaEvm::new(ctx).with_inspector(AnswerAndResume::default());
+    let outcome = evm.execute_transaction(tx).expect("the transaction is valid");
+    assert!(outcome.result.is_success(), "{:?}", outcome.result);
+    let answers = evm.inspector();
+    assert_eq!(answers.pending, None, "every answer was followed by its caller's next step");
+    answers.pairs.clone()
+}
+
+/// Appends a `CALL` of `target` forwarding `gas` and carrying `value`, discarding its status.
+fn calls(code: BytecodeBuilder, target: Address, gas: u64, value: u64) -> BytecodeBuilder {
+    code.append_many([PUSH0, PUSH0, PUSH0, PUSH0])
+        .push_number(value)
+        .push_address(target)
+        .push_number(gas)
+        .append_many([CALL, POP])
+}
+
+/// Code that reads the block's timestamp.
+fn reads_timestamp(code: BytecodeBuilder) -> BytecodeBuilder {
+    code.append_many([TIMESTAMP, POP])
+}
+
+/// Code that queries through `CALL`, forwarding all it has, and stops.
+fn queries() -> Bytes {
+    query(BytecodeBuilder::default(), CALL, None, 0).stop().build()
+}
+
+/// The answer is exactly the spendable regular gas the caller resumes with — what it can still
+/// spend — whether nothing detains it, its own read does, a child's read does before a child that
+/// halted, it was started by a value call from a caller detained or not, its sender is the
+/// beneficiary, or it read the Oracle's storage; below and above the execution cap.
+#[test]
+fn test_the_answer_is_what_the_caller_resumes_with() {
+    let get_slot = IOracle::getSlotCall { slot: U256::ZERO }.abi_encode();
+    let reads_oracle = || {
+        BytecodeBuilder::default()
+            .mstore(0x0, &get_slot)
+            .append_many([PUSH0, PUSH0])
+            .push_number(get_slot.len() as u64)
+            .append_many([PUSH0, PUSH0])
+            .push_address(ORACLE_CONTRACT_ADDRESS)
+            .append_many([GAS, CALL, POP])
+    };
+    let halts = BytecodeBuilder::default().append(INVALID).build();
+
+    for gas_limit in TIERS {
+        let cases: [(&str, MemoryDatabase, Address, usize); 8] = [
+            ("undetained", system_db().account_code(CONTRACT, queries()), Address::ZERO, 1),
+            (
+                "detained by its own read, a small forward and a STATICCALL",
+                system_db().account_code(
+                    CONTRACT,
+                    query(
+                        query(reads_timestamp(BytecodeBuilder::default()), CALL, Some(100), 0),
+                        STATICCALL,
+                        None,
+                        2,
+                    )
+                    .stop()
+                    .build(),
+                ),
+                Address::ZERO,
+                2,
+            ),
+            (
+                "detained by a child's read, after a child that halted",
+                system_db()
+                    .account_code(
+                        CONTRACT,
+                        query(
+                            calls(
+                                calls(BytecodeBuilder::default(), CONTRACT2, 1_000_000, 0),
+                                CONTRACT3,
+                                500_000,
+                                0,
+                            ),
+                            CALL,
+                            None,
+                            0,
+                        )
+                        .stop()
+                        .build(),
+                    )
+                    .account_code(
+                        CONTRACT2,
+                        reads_timestamp(BytecodeBuilder::default()).stop().build(),
+                    )
+                    .account_code(CONTRACT3, halts.clone()),
+                Address::ZERO,
+                1,
+            ),
+            (
+                "a value-called callee",
+                system_db()
+                    .account_code(
+                        CONTRACT,
+                        calls(BytecodeBuilder::default(), CONTRACT2, 50_000, 1).stop().build(),
+                    )
+                    .account_balance(CONTRACT, U256::from(10))
+                    .account_code(CONTRACT2, queries()),
+                Address::ZERO,
+                1,
+            ),
+            (
+                "a value-called callee that read",
+                system_db()
+                    .account_code(
+                        CONTRACT,
+                        calls(BytecodeBuilder::default(), CONTRACT2, 50_000, 1).stop().build(),
+                    )
+                    .account_balance(CONTRACT, U256::from(10))
+                    .account_code(
+                        CONTRACT2,
+                        query(reads_timestamp(BytecodeBuilder::default()), CALL, None, 0)
+                            .stop()
+                            .build(),
+                    ),
+                Address::ZERO,
+                1,
+            ),
+            (
+                "a value-called callee of a caller that read",
+                system_db()
+                    .account_code(
+                        CONTRACT,
+                        calls(reads_timestamp(BytecodeBuilder::default()), CONTRACT2, 50_000, 1)
+                            .stop()
+                            .build(),
+                    )
+                    .account_balance(CONTRACT, U256::from(10))
+                    .account_code(CONTRACT2, queries()),
+                Address::ZERO,
+                1,
+            ),
+            ("a beneficiary sender", system_db().account_code(CONTRACT, queries()), CALLER, 1),
+            (
+                "after an Oracle read",
+                system_db()
+                    .account_code(CONTRACT, query(reads_oracle(), CALL, None, 0).stop().build()),
+                Address::ZERO,
+                1,
+            ),
+        ];
+        for (case, db, beneficiary, queries) in cases {
+            let pairs = answers_and_resumes(db, beneficiary, tx(CONTRACT, &[], gas_limit));
+            assert_eq!(pairs.len(), queries, "{case}, at {gas_limit}");
+            for (answer, spendable) in pairs {
+                assert_eq!(answer, spendable, "{case}, at {gas_limit}");
+            }
+        }
+    }
+}
+
+/// A caller that acts on the answer can spend it and no more: after a read, a loop that spends a
+/// little less than the answer completes, and one that spends a little more is stopped at the
+/// compute limit.
+#[test]
+fn test_a_caller_can_spend_the_answer_and_no_more() {
+    // After the query, `answer / 26 + extra` rounds of a loop whose body costs 26 gas:
+    // JUMPDEST 1, PUSH1 3, SWAP1 3, SUB 3, DUP1 3, PUSH1 3, JUMPI 10.
+    for extra in [-4_i64, 4] {
+        let code = query(reads_timestamp(BytecodeBuilder::default()), CALL, None, 0)
+            .append_many([PUSH0, MLOAD])
+            .push_number(26_u8)
+            .append_many([SWAP1, DIV])
+            .push_number(extra.unsigned_abs());
+        let code = if extra < 0 { code.append_many([SWAP1, SUB]) } else { code.append(ADD) };
+        let mut code = code.build_vec();
+        let start = u8::try_from(code.len()).expect("the loop starts within a PUSH1");
+        code.extend([JUMPDEST, PUSH1, 1, SWAP1, SUB, DUP1, PUSH1, start, JUMPI, STOP]);
+
+        let ctx = MegaContext::new(
+            system_db().account_code(CONTRACT, Bytes::from(code)),
+            MegaSpecId::SATIN,
+        )
+        .with_block(block(Address::ZERO))
+        .with_chain(zero_fee_l1_block_info())
+        .with_tx_runtime_limits(
+            EvmTxRuntimeLimits::default().with_block_env_access_compute_gas_limit(100_000),
+        );
+        let outcome = MegaEvm::new(ctx)
+            .execute_transaction(tx(CONTRACT, &[], BELOW))
+            .expect("the transaction is valid");
+
+        if extra < 0 {
+            assert!(outcome.result.is_success(), "{:?}", outcome.result);
+            assert_eq!(outcome.limit_exceeded, None);
+        } else {
+            assert!(
+                matches!(
+                    outcome.limit_exceeded,
+                    Some(LimitCheck::ExceedsLimit { kind: LimitKind::ComputeGas, .. })
+                ),
+                "{:?}",
+                outcome.limit_exceeded
+            );
+        }
+    }
 }
