@@ -61,11 +61,20 @@ Without a SALT environment every bucket is minimal, so the numbers above are wha
 `tests/satin/pricing-table.md` shows two probes at three multipliers.
 
 The six system contracts live at their fixed `0x6342…` addresses and are deployed at Satin activation, together with the EIP-7997 factory at `0x4e59…`.
-Four of them answer calls through an interceptor instead of running their bytecode.
+Three of them answer calls through an interceptor instead of running their bytecode, and `KeylessDeploy` turns the `keylessDeploy` calls a transaction makes into the deployments they stand for.
 A `CALL` or `STATICCALL` is dispatched on its target address, then on the four selector bytes of its input: `CALLCODE` and `DELEGATECALL` never reach an interceptor, and a selector a contract does not intercept falls through to the deployed bytecode, whose answer is that contract's own — the two control contracts revert with `NotIntercepted()` from their fallback, and `KeylessDeploy` and the Oracle, which have none, revert with empty data on a selector they do not declare.
 A method that takes no value answers a value-bearing call with `NonZeroTransfer()`.
 `MegaAccessControl` and `MegaLimitControl` answer with what the engine knows so far — nothing has switched volatile-data access off, and `remainingComputeGas()` reports the regular gas the call was forwarded — until detention and the control contracts' compute-ledger semantics fill them in.
-The Oracle forwards a `sendHint` payload to the node's oracle service, and a `keylessDeploy` transaction is charged its fixed 100,000 gas and handed to the keyless rewrite hook that native keyless deployment fills in.
+The Oracle forwards a `sendHint` payload to the node's oracle service.
+
+`KeylessDeploy` deploys a pre-EIP-155 signed creation — Nick's Method — at the address its signer's first creation gets on every chain, with the gas limit the caller chooses.
+A `keylessDeploy` call a transaction makes becomes a native creation before any interceptor or inspector sees it.
+The call pays a fixed 100,000 gas, is held to the legacy engine's nine rules and error ABI, and pays what a `CREATE` opcode charges its frame: the signer's account when the creation's nonce bump is what creates it, the created account, and the two write records of the creation's start.
+It then starts the creation as the signer, below it, with `gasLimitOverride` capped to what it has left.
+From there the creation is an ordinary frame, priced, limited, journaled and traced as one, and its `ORIGIN` and `GASPRICE` are the transaction's.
+Once the creation returns the call answers in the contract's ABI — the deployed address, or the error the creation failed with — and the signer's nonce stays spent either way; a transaction limit the deployment crosses stops the transaction and takes the deployment back whole.
+A signer is refused once its nonce is above 1, so it gets two deployments that fail and not a third.
+A `keylessDeploy` call a contract makes is not a deployment: it runs the method body, which reverts with `NotIntercepted()`.
 
 The system address (`MEGA_SYSTEM_ADDRESS`) sends the protocol's own transactions: a legacy transaction from it to a whitelisted contract is validated — the whitelist, the chain id, the nonce and EIP-3607 — and promoted to a deposit, which pays no fee and rewards none.
 The account such a transaction creates for its caller is charged the account-creation state gas exactly once.
@@ -96,7 +105,7 @@ A transaction's state growth is the EIP-8037 state gas it spends, so the state-g
 It is a limit on gas, so a slot or an account in a crowded SALT bucket reaches it sooner.
 Every one of these limits is unlimited unless a node sets it.
 
-Gas detention and keyless deployment arrive in later changes.
+Gas detention arrives in a later change.
 
 ## Quick start
 
