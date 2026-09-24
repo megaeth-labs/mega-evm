@@ -133,9 +133,10 @@ pub(crate) struct KeylessCall {
 /// right after, before the deploy address and the balance. The charges of step 13 are this
 /// engine's, made after every rule, and step 14 holds the forward to them.
 ///
-/// A refusal writes nothing, so the answer takes back every charge but the overhead with it. A
-/// database read or a SALT lookup that fails fails the transaction with its cause, as it does at
-/// every other site.
+/// A refusal writes nothing, so the answer takes back the state and history gas the call was
+/// charged; the regular gas it spent stays spent, as a frame's does — the overhead, and, for the
+/// refusal at step 14, the `CREATE` opcode's regular gas. A database read or a SALT lookup that
+/// fails fails the transaction with its cause, as it does at every other site.
 ///
 /// # The creation
 ///

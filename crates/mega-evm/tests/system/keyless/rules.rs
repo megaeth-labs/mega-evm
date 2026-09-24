@@ -1,5 +1,6 @@
 //! The rules a `keylessDeploy` call is held to before its creation starts, and what a refusal
-//! leaves behind: nothing but the overhead.
+//! leaves behind: nothing but the regular gas the call spent — the overhead, and after the
+//! creation's charges the `CREATE` opcode's regular gas.
 //!
 //! The rules, their order and the error ABI are the legacy engine's; `precedence` pins the error a
 //! call several rules refuse reports. What moved is the balance rule, which asks the signer for
