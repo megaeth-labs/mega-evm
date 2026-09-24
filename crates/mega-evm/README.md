@@ -74,8 +74,8 @@ A method that takes no value answers a value-bearing call with `NonZeroTransfer(
 It is regular gas only, so a transaction above the execution cap hears at most the cap's share.
 The Oracle forwards a `sendHint` payload to the node's oracle service, unless the calling frame's volatile-data access is off, and a `keylessDeploy` transaction is charged its fixed 100,000 gas and handed to the keyless rewrite hook that native keyless deployment fills in.
 
-The Oracle's storage is read through the node's oracle service: an `SLOAD` in the Oracle's own frame asks `OracleEnv` first and reads the chain's state for a slot the service has no value for.
-Every such read is priced as a cold access, whichever source answered, so a replaying node that cannot tell which one the building node read prices it the same.
+The Oracle's storage is read through the node's oracle service: an `SLOAD` in the Oracle's own frame loads the slot from the chain's state, then asks `OracleEnv`, and answers the service's value when it has one and the loaded value otherwise.
+A node that replays a block without the service must price and witness it as the node that built it did, and it cannot tell which source the building node read, so nothing may depend on the source: every such read is priced as a cold access, and the slot is loaded either way, so a later write to it finds it warm and a stateless witness carries it.
 
 The system address (`MEGA_SYSTEM_ADDRESS`) sends the protocol's own transactions: a legacy transaction from it to a whitelisted contract is validated — the whitelist, the chain id, the nonce and EIP-3607 — and promoted to a deposit, which pays no fee and rewards none.
 The account such a transaction creates for its caller is charged the account-creation state gas exactly once.

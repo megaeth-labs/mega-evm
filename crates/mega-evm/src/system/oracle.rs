@@ -4,6 +4,12 @@
 //! through which a contract reaches the node's oracle service: `sendHint` carries a message to
 //! the service backend. Its Solidity source is
 //! `crates/system-contracts/contracts/Oracle.sol`.
+//!
+//! Its storage is read through the service too, by the Host: an `SLOAD` in the Oracle's own frame
+//! loads the slot through the journal and answers the service's value when it has one, the loaded
+//! value otherwise. A node that replays a block without the service must price and witness it as
+//! the node that built it did, so the read is always priced cold and the slot is loaded whichever
+//! source answered.
 
 use alloy_evm::Database;
 use alloy_primitives::{address, Address};
