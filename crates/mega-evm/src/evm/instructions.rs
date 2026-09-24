@@ -53,7 +53,9 @@
 //! An opcode whose charge fails with an out-of-gas halts its frame, and the halt zeroes the gas
 //! the frame had left before the frame returns. Every wrapper above notes that gas for gas
 //! detention first, which does not count what a halt burns as compute; so does a wrapper around
-//! the opcodes whose own charge has no bound, `KECCAK256` and the four copies into memory.
+//! the opcodes whose own charge has no bound, `KECCAK256` and the four copies into memory, and
+//! around `EXP`, whose exponent charge reaches 1,600. The one charge no wrapper sees is an
+//! opcode's static gas, which the interpreter's step loop makes before the opcode runs.
 //!
 //! A wrapper keeps the static gas revm's table charges for its opcode, so the gas schedule is
 //! unchanged.
@@ -67,15 +69,15 @@
 use revm::{
     bytecode::opcode::{
         BALANCE, BASEFEE, BLOBBASEFEE, BLOCKHASH, CALL, CALLCODE, CALLDATACOPY, CODECOPY, COINBASE,
-        CREATE, CREATE2, DELEGATECALL, DIFFICULTY, EXTCODECOPY, EXTCODEHASH, EXTCODESIZE, GASLIMIT,
-        KECCAK256, LOG0, LOG1, LOG2, LOG3, LOG4, MCOPY, NUMBER, RETURNDATACOPY, SELFBALANCE,
-        SELFDESTRUCT, SLOAD, SLOTNUM, SSTORE, STATICCALL, TIMESTAMP,
+        CREATE, CREATE2, DELEGATECALL, DIFFICULTY, EXP, EXTCODECOPY, EXTCODEHASH, EXTCODESIZE,
+        GASLIMIT, KECCAK256, LOG0, LOG1, LOG2, LOG3, LOG4, MCOPY, NUMBER, RETURNDATACOPY,
+        SELFBALANCE, SELFDESTRUCT, SLOAD, SLOTNUM, SSTORE, STATICCALL, TIMESTAMP,
     },
     context_interface::Host,
     handler::instructions::EthInstructions,
     interpreter::{
         enable_amsterdam_opcodes, instruction_table,
-        instructions::{block_info, contract, gas_table_spec, host, memory, system},
+        instructions::{arithmetic, block_info, contract, gas_table_spec, host, memory, system},
         interpreter::EthInterpreter,
         interpreter_types::LoopControl,
         FrameInput, Gas, Instruction, InstructionContext, InstructionExecResult, InstructionResult,
@@ -107,7 +109,7 @@ pub(crate) fn mega_instructions<DB: Database, ExtEnvs: ExternalEnvTypes>(
     let mut table = instruction_table();
     enable_amsterdam_opcodes(&mut table);
     let mut instructions = EthInstructions::new(table, gas_table_spec(spec), spec);
-    let wrappers: [(u8, InstructionFn<DB, ExtEnvs>); 33] = [
+    let wrappers: [(u8, InstructionFn<DB, ExtEnvs>); 34] = [
         (SSTORE, sstore::<DB, ExtEnvs>),
         (LOG0, log::<0, DB, ExtEnvs>),
         (LOG1, log::<1, DB, ExtEnvs>),
@@ -141,6 +143,7 @@ pub(crate) fn mega_instructions<DB: Database, ExtEnvs: ExternalEnvTypes>(
         (CODECOPY, codecopy::<DB, ExtEnvs>),
         (RETURNDATACOPY, returndatacopy::<DB, ExtEnvs>),
         (MCOPY, mcopy::<DB, ExtEnvs>),
+        (EXP, exp::<DB, ExtEnvs>),
     ];
     for (opcode, wrapper) in wrappers {
         let static_gas = instructions.gas_table()[opcode as usize];
@@ -584,8 +587,9 @@ state_read! {
     sload => host::sload, "SLOAD", "the Oracle's storage";
 }
 
-/// Defines an opcode whose own charge has no bound, as revm's instruction with what the frame had
-/// left noted when the charge fails ([`note_halt`]).
+/// Defines an opcode whose own charge no other wrapper sees, as revm's instruction with what the
+/// frame had left noted when the charge fails ([`note_halt`]): the charge of `KECCAK256` and of
+/// the four copies into memory has no bound, and `EXP`'s exponent charge reaches 1,600.
 macro_rules! unbounded_charge {
     ($($name:ident => $inner:path, $opcode:literal;)*) => {$(
         #[doc = concat!("`", $opcode, "`, noting what the frame had when its charge fails.")]
@@ -605,6 +609,7 @@ unbounded_charge! {
     codecopy => system::codecopy, "CODECOPY";
     returndatacopy => system::returndatacopy, "RETURNDATACOPY";
     mcopy => memory::mcopy, "MCOPY";
+    exp => arithmetic::exp, "EXP";
 }
 
 #[cfg(test)]

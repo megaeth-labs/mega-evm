@@ -40,6 +40,9 @@
 //! Compute is the regular gas the transaction spends on what it runs, read off revm's `Gas`: state
 //! and history gas that spilled onto regular gas are not compute, gas withheld from regular
 //! charges is never spent, and what a halting frame burns is not compute either ([`Detention`]).
+//! The one burn counted as compute is what a frame has left when an opcode's static gas fails,
+//! which no wrapper sees: per halting frame, under the failed charge's price (at most 4,999, on
+//! `SELFDESTRUCT`). Burned gas is counted as compute, so the stop comes earlier, never later.
 //! A read sets a limit: the transaction's compute at the read plus the read's cap. The limit only
 //! goes down, so the most restrictive of several reads is the one that binds, whatever their
 //! order.

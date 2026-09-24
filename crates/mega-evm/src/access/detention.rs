@@ -58,8 +58,16 @@ struct DetainedFrame {
 /// frame that halts consumes the gas it had left, and its spill, without running anything with
 /// it. A frame answered without running that halts burns its whole gas limit. An out-of-gas zeroes
 /// what the frame had before the frame returns; the wrapper of the opcode whose charge failed
-/// notes it first. The two charges no wrapper sees — an opcode's static gas and `EXP`'s exponent —
-/// are bounded by their own price, and what a frame had left below it counts as compute.
+/// notes it first, `EXP`'s and the unbounded charges of `KECCAK256` and the copies into memory
+/// included.
+///
+/// The one charge no wrapper sees is an opcode's static gas, which the interpreter's step loop
+/// makes before the opcode runs. When it fails, what the halting frame had left counts as
+/// compute: per halting frame, under the failed charge's price, which is at most 4,999, on
+/// `SELFDESTRUCT`. Burned gas is counted as compute, so the stop comes earlier, never later. A
+/// frame whose leftover takes the compute past the limit does so without a crossing, so the stop
+/// is its caller's next charge, and the regular ledger at the stop holds that leftover's part
+/// past the limit beside the limit.
 ///
 /// # Refused reads
 ///

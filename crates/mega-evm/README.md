@@ -99,6 +99,7 @@ Every one of these limits is unlimited unless a node sets it.
 
 Gas detention is in place: a transaction that reads volatile data — the block environment, the block beneficiary's account, the Oracle's storage — may compute at most 20,000,000 more gas after the read than it had spent at it.
 Compute is the regular gas spent: the state and history gas that spilled onto regular gas are not compute, and neither is what a halting frame burns.
+The one exception is what a frame has left when an opcode's static gas fails, which counts as compute: under that charge's price per halting frame, so the stop only comes earlier.
 The Host marks the read where it loads the value, and the most restrictive read binds.
 Every frame's spendable gas is held to what the limit leaves the transaction, and the rest is withheld, with the revm fork's withheld part of a frame's regular gas: a regular charge cannot draw it, and every other reader of the frame's gas — `GAS`, the gas a call forwards, the `SSTORE` sentry, what a callee returns — counts it.
 So a transaction that reads runs as it would without the read until a regular charge needs the withheld gas.

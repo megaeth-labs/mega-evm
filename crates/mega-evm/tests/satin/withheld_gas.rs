@@ -46,8 +46,8 @@ use revm::{
 };
 
 use crate::detention::{
-    assert_stopped, burn, context, execute, intrinsic, op, run_on, spin, tx, work, Calls, Run,
-    ABOVE, BELOW, BENEFICIARY, CALLER, CAP, CHILD, CONTRACT, TIERS,
+    assert_stopped, burn, context, execute, intrinsic, op, run_on, spin, stop_data, tx, work,
+    Calls, Run, ABOVE, BELOW, BENEFICIARY, CALLER, CAP, CHILD, CONTRACT, TIERS,
 };
 
 /// A contract between the transaction's frame and `CHILD`.
@@ -384,6 +384,97 @@ fn test_what_a_halting_callee_burns_is_not_compute() {
         });
         assert_as_without_read(&detained, &plain, "a precompile rejecting its input");
         assert_eq!(slot(&detained, 0), Some(U256::ZERO), "the addition failed");
+    }
+}
+
+/// Runs the transaction `build` makes, under a block-environment cap of `cap`, for a first
+/// instruction that reads the timestamp, then for one that pushes a zero at the same price.
+fn with_and_without_read_under(
+    cap: u64,
+    build: impl Fn(u8) -> (MemoryDatabase, u64),
+) -> (Run, Run) {
+    let limits = EvmTxRuntimeLimits::default().with_block_env_access_compute_gas_limit(cap);
+    let run = |first| {
+        let (db, gas_limit) = build(first);
+        let mut evm = MegaEvm::new(context(db).with_tx_runtime_limits(limits));
+        run_on(&mut evm, tx(CALLER, CONTRACT, gas_limit))
+    };
+    (run(TIMESTAMP), run(PUSH0))
+}
+
+/// Appends `rounds` calls to `CHILD`, each forwarding `gas`, dropping their status.
+fn calls_to_child(code: BytecodeBuilder, rounds: u32, gas: u32) -> BytecodeBuilder {
+    (0..rounds).fold(code, |code, _| {
+        code.append_many([PUSH0, PUSH0, PUSH0, PUSH0, PUSH0])
+            .push_address(CHILD)
+            .push_number(gas)
+            .append_many([CALL, POP])
+    })
+}
+
+/// `EXP`'s exponent charge — fifty gas a byte of the exponent, 1,600 for a full word — is noted
+/// when it fails: a hundred children forwarded 1,500 gas each, which halt on an `EXP` of a
+/// 32-byte exponent with 1,484 left, burn that, and the caller completes under a cap of 100,000,
+/// as without the read. Counted as compute, the hundred burns would pass the cap.
+#[test]
+fn test_an_exp_that_cannot_pay_its_exponent_burns_what_its_frame_had() {
+    let child =
+        BytecodeBuilder::default().push_u256(U256::MAX).push_number(2_u8).append(EXP).build();
+    for gas_limit in TIERS {
+        let (detained, plain) = with_and_without_read_under(100_000, |first| {
+            let code = calls_to_child(op(BytecodeBuilder::default(), first), 100, 1_500);
+            let db = MemoryDatabase::default()
+                .account_code(CONTRACT, code.stop().build())
+                .account_code(CHILD, child.clone());
+            (db, gas_limit)
+        });
+        assert_as_without_read(&detained, &plain, "a hundred halts on EXP");
+        let burned = 100 * 1_484;
+        assert!(plain.outcome.gas.regular - intrinsic(gas_limit) > burned, "the halts burned");
+    }
+}
+
+/// A charge the interpreter's step loop makes before the opcode runs — its static gas — is seen by
+/// no wrapper, so what a frame had when it fails counts as compute: burned gas counted as compute,
+/// which brings the stop earlier, never later, and by less than the failed charge's price per
+/// halting frame.
+///
+/// Fifty children forwarded 5,002 gas each run a `PUSH20` and a `SELFDESTRUCT`, whose static
+/// charge of 5,000 fails with 4,999 left. Under a cap of 200,000 the caller stops, though about
+/// 8,500 gas of instructions ran after its read. The child that took the compute past the limit
+/// did so without a charge crossing it, so the stop is its caller's next charge, and the regular
+/// ledger holds the limit and that child's overshoot, under the 5,000 it failed to pay. Under a
+/// cap of 300,000, above fifty times the forward and the caller's own work, the caller completes
+/// as without the read.
+#[test]
+fn test_a_halt_on_a_static_charge_counts_what_its_frame_had_as_compute() {
+    let child = BytecodeBuilder::default().push_address(CALLER).append(SELFDESTRUCT).build();
+    for gas_limit in TIERS {
+        let build = |first| {
+            let code = calls_to_child(op(BytecodeBuilder::default(), first), 50, 5_002);
+            let db = MemoryDatabase::default()
+                .account_code(CONTRACT, code.stop().build())
+                .account_code(CHILD, child.clone());
+            (db, gas_limit)
+        };
+        let (detained, plain) = with_and_without_read_under(200_000, build);
+        let limit = detained.limit.unwrap();
+        assert_eq!(limit, 2 + 200_000);
+        assert_eq!(detained.outcome.result.output(), Some(&stop_data(limit)));
+        assert_eq!(
+            detained.outcome.limit_exceeded,
+            Some(LimitCheck::ExceedsLimit {
+                kind: LimitKind::ComputeGas,
+                limit,
+                used: limit,
+                frame_local: false
+            })
+        );
+        let overshoot = detained.outcome.gas.regular - intrinsic(gas_limit) - limit;
+        assert!(overshoot < 5_000, "{overshoot}");
+        assert!(plain.outcome.result.is_success());
+        let (detained, plain) = with_and_without_read_under(300_000, build);
+        assert_as_without_read(&detained, &plain, "fifty halts on a static charge");
     }
 }
 
