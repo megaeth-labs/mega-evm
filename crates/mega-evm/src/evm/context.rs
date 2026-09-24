@@ -245,8 +245,8 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     /// `MegaAccessControl.disableVolatileDataAccess()` before its first instruction. The switch
     /// turns back on when that frame returns.
     ///
-    /// It is test tooling, behind the `test-utils` feature: the contract's interceptor steers the
-    /// switch once the control contracts' semantics land.
+    /// It is test tooling, behind the `test-utils` feature, for a switch set without a call: on
+    /// the chain, a frame switches it off by calling the contract, whose interceptor steers it.
     #[cfg(any(test, feature = "test-utils"))]
     pub fn with_volatile_access_disabled_from(mut self, depth: usize) -> Self {
         self.detention.set_disabled_from_at_start(Some(depth));

@@ -7,6 +7,7 @@ mod deploy;
 mod deposits;
 mod detention;
 mod eips;
+mod external_envs;
 mod factory;
 mod inspector;
 mod limits;

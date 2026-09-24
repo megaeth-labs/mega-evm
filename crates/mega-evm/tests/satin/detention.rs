@@ -1176,6 +1176,11 @@ fn test_the_refusal_names_the_access_type() {
     let slot_num = volatile_data_access_disabled_revert_data(VolatileDataAccess::SLOT_NUM);
     assert_eq!(&slot_num[..4], IMegaAccessControl::VolatileDataAccessDisabled::SELECTOR.as_slice());
     assert_eq!(U256::from_be_slice(&slot_num[4..]), U256::from(12));
+    assert_eq!(mega_evm::system::SLOT_NUM_ACCESS_TYPE, 12);
+    assert_eq!(
+        mega_evm::decode_volatile_data_access_disabled(&slot_num),
+        Some(VolatileDataAccess::SLOT_NUM)
+    );
 }
 
 /// The switch holds for the frame it is off from and every frame below, and a frame above it
@@ -1218,8 +1223,14 @@ fn test_the_switch_is_scoped_to_its_subtree() {
 
 /// An interceptor's answer carries the forwarded gas back without running a frame: the caller
 /// is held to the limit as it resumes. The call forwards what it forwards without the read — the
-/// withheld part of the caller's gas is part of the 63/64 — so what the caller hears from
-/// `remainingComputeGas()`, the gas it forwarded, is what it hears after a push of the same price.
+/// withheld part of the caller's gas is part of the 63/64 — and gets all of it back, so the
+/// caller holds the same gas after the call with the read and without it.
+///
+/// What `remainingComputeGas()` answers is what the caller could still spend: without the read,
+/// its own regular gas with the forward counted back, the gas `GAS` reads after the call plus the
+/// `POP` and the `GAS` it costs to read it; after the read, the cap less what the caller spent
+/// since the read — the read's `POP`, the calldata's `MSTORE` with its push and its memory, the
+/// call's five pushes and its `GAS`, and the cold access to the contract: 2,631.
 #[test]
 fn test_an_interceptors_answer_does_not_lift_the_cap() {
     let calldata = IMegaLimitControl::remainingComputeGasCall {}.abi_encode();
@@ -1246,7 +1257,8 @@ fn test_an_interceptors_answer_does_not_lift_the_cap() {
         );
         assert_stopped(&run, intrinsic);
 
-        // The answer, read without the loop, after the read and after a push in its place.
+        // The answer and the gas the caller holds after the call, read without the loop, after
+        // the read and after a push in its place.
         let answer = |first: u8| {
             let code = op(BytecodeBuilder::default(), first)
                 .mstore(0, &calldata)
@@ -1258,7 +1270,10 @@ fn test_an_interceptors_answer_does_not_lift_the_cap() {
                 .append(GAS)
                 .append(STATICCALL)
                 .append(POP)
+                .append(GAS)
                 .push_number(32_u8)
+                .append(MSTORE)
+                .push_number(64_u8)
                 .push_number(0_u8)
                 .append(RETURN)
                 .build();
@@ -1267,11 +1282,14 @@ fn test_an_interceptors_answer_does_not_lift_the_cap() {
                 tx(CALLER, CONTRACT, gas_limit),
             );
             assert!(run.outcome.result.is_success(), "{:?}", run.outcome.result);
-            U256::from_be_slice(run.outcome.result.output().unwrap())
+            let output = run.outcome.result.output().unwrap().clone();
+            (U256::from_be_slice(&output[..32]), U256::from_be_slice(&output[32..64]))
         };
-        let detained = answer(TIMESTAMP);
-        assert!(detained > U256::from(CAP), "the whole forward: {detained}");
-        assert_eq!(detained, answer(PUSH0), "the forward the call makes without the read");
+        let (detained, held) = answer(TIMESTAMP);
+        let (undetained, held_without_the_read) = answer(PUSH0);
+        assert_eq!(held, held_without_the_read, "the forward came back whole");
+        assert_eq!(undetained, held + U256::from(2 + 2), "the caller's own gas: POP and GAS");
+        assert_eq!(detained, U256::from(CAP - 2_631), "what the cap leaves");
     }
 }
 

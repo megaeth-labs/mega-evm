@@ -960,8 +960,16 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
             return None;
         }
         let forwarded = inputs.gas_limit;
+        // The calling frame is on top of the stack, suspended on this call; the transaction's own
+        // call has none.
+        let caller_remaining = match self.inner.frame_stack.index() {
+            Some(_) => self.inner.frame_stack.get().interpreter.gas.remaining(),
+            None => 0,
+        };
         let ctx = &mut self.inner.ctx;
-        if let Some(answer) = crate::system::intercept(ctx, inputs, frame_init.depth) {
+        if let Some(answer) =
+            crate::system::intercept(ctx, inputs, frame_init.depth, caller_remaining)
+        {
             return Some(answer);
         }
         let charge = forwarded - inputs.gas_limit;

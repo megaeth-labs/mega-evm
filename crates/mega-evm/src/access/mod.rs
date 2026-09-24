@@ -135,11 +135,16 @@
 //! reads nothing and caps nothing, and the frame keeps the gas it had before the opcode: the
 //! opcode's static gas is charged, as for any instruction that ran, and nothing else. A refusal
 //! names the kind the opcode reads — `BLOCKHASH`'s names the hash, though the opcode loads the
-//! block number first — and a `SLOTNUM` refusal names access type 12, which the contract's
-//! `VolatileDataAccessType` does not declare.
+//! block number first — and a `SLOTNUM` refusal names access type 12
+//! ([`SLOT_NUM_ACCESS_TYPE`](crate::system::SLOT_NUM_ACCESS_TYPE)), which the contract's
+//! `VolatileDataAccessType` does not declare. The error's argument is encoded as a `uint8`, and
+//! Solidity handlers must decode it as `uint8`: Solidity's ABI decoder reverts on an enum value
+//! out of range. [`decode_volatile_data_access_disabled`] is the Rust side's decoder.
 
 mod detention;
 mod volatile;
 
-pub use detention::{volatile_data_access_disabled_revert_data, Detention};
+pub use detention::{
+    decode_volatile_data_access_disabled, volatile_data_access_disabled_revert_data, Detention,
+};
 pub use volatile::VolatileDataAccess;
