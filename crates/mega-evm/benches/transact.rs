@@ -17,6 +17,11 @@
 //!   result, 200 times.
 //! - `system_address_misses`: the same 200 calls with a selector the contract does not intercept,
 //!   so each pays the dispatch's address match and selector peek and then runs the bytecode.
+//! - `remaining_compute_gas`: 200 `STATICCALL`s to `MegaLimitControl`'s `remainingComputeGas`,
+//!   which the interceptor answers from the caller's gas and gas detention's allowance.
+//! - `oracle_reads`: a transaction to the Oracle, whose code loads 200 of its slots: each load asks
+//!   the oracle service, finds nothing, reads the database and is priced cold, and gas detention
+//!   marks and commits it. op-revm reads the same 200 slots from the database.
 //! - `value_calls`: 200 one-wei `CALL`s to an account with no code, which revm answers without
 //!   running: each frame start counts its records and its EIP-7708 transfer log before revm moves
 //!   the value and journals the log, and op-revm journals the same 200 logs.
@@ -39,6 +44,9 @@
 //!   the state gas and the write records it keeps, so every fresh slot is held to both as it is
 //!   written (`satin`); and under a state-gas limit one gas short, so the last slot crosses and the
 //!   transaction is stopped (`stopped`). Its op-revm baseline is `data_size_limit/op_revm`.
+//!
+//! `oracle_reads` runs once more through `MegaEvm` alone (`/service`), against an oracle service
+//! that answers all 200 slots, so no load reaches the database.
 //!
 //! Two more run through `MegaEvm` alone, because they price something op-revm has no equivalent
 //! of: `salt_storage_writes` and `salt_new_accounts` each draw one EIP-8037 state gas charge per
@@ -64,7 +72,8 @@ use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 use mega_evm::{
     constants::COST_PER_HISTORY_BYTE,
     system::{
-        IMegaAccessControl, ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE, ORACLE_CONTRACT_ADDRESS,
+        IMegaAccessControl, IMegaLimitControl, ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE,
+        LIMIT_CONTROL_ADDRESS, LIMIT_CONTROL_CODE, ORACLE_CONTRACT_ADDRESS,
     },
     test_utils::{
         is_transfer_log, op_transaction, zero_fee_l1_block_info, BytecodeBuilder, MemoryDatabase,
@@ -99,6 +108,7 @@ const READER: Address = address!("0x000000000000000000000000000000000010000a");
 const VOLATILE: Address = address!("0x000000000000000000000000000000000010000b");
 const HASHER: Address = address!("0x000000000000000000000000000000000010000c");
 const VALUE_CALLER: Address = address!("0x000000000000000000000000000000000010000d");
+const QUERIER: Address = address!("0x000000000000000000000000000000000010000e");
 
 /// The block beneficiary of the benchmark's block, `BlockEnv`'s default.
 const BENEFICIARY: Address = Address::ZERO;
@@ -106,6 +116,8 @@ const BENEFICIARY: Address = Address::ZERO;
 /// A selector `MegaAccessControl` intercepts, and one it does not.
 const IS_DISABLED: [u8; 4] = IMegaAccessControl::isVolatileDataAccessDisabledCall::SELECTOR;
 const UNKNOWN_SELECTOR: [u8; 4] = [0xde, 0xad, 0xbe, 0xef];
+/// The selector `MegaLimitControl` intercepts.
+const REMAINING_COMPUTE_GAS: [u8; 4] = IMegaLimitControl::remainingComputeGasCall::SELECTOR;
 
 /// Depth the recursive contract reaches.
 const DEPTH: u8 = 64;
@@ -297,8 +309,9 @@ fn salt_context(
         .with_chain(zero_fee_l1_block_info())
 }
 
-/// `STATICCALL`s `MegaAccessControl` with `selector` `REPEAT` times, discarding the answers.
-fn system_caller_code(selector: [u8; 4]) -> Bytes {
+/// `STATICCALL`s the system contract at `target` with `selector` `REPEAT` times, discarding the
+/// answers.
+fn system_caller_code(target: Address, selector: [u8; 4]) -> Bytes {
     let mut code = BytecodeBuilder::default().mstore(0x0, selector);
     for _ in 0..REPEAT {
         code = code
@@ -306,7 +319,7 @@ fn system_caller_code(selector: [u8; 4]) -> Bytes {
             .push_number(0_u64) // retOffset
             .push_number(4_u64) // argsSize
             .push_number(0_u64) // argsOffset
-            .push_address(ACCESS_CONTROL_ADDRESS)
+            .push_address(target)
             .push_number(100_000_u64)
             .append(STATICCALL)
             .append(POP);
@@ -357,8 +370,9 @@ fn bench_transact(c: &mut Criterion) {
         .account_code(SALT_WRITER, salt_writer_code())
         .account_balance(SALT_CALLER, U256::from(10u64.pow(9)))
         .account_code(SALT_CALLER, salt_caller_code())
-        .account_code(INTERCEPTED, system_caller_code(IS_DISABLED))
-        .account_code(MISSING, system_caller_code(UNKNOWN_SELECTOR))
+        .account_code(INTERCEPTED, system_caller_code(ACCESS_CONTROL_ADDRESS, IS_DISABLED))
+        .account_code(MISSING, system_caller_code(ACCESS_CONTROL_ADDRESS, UNKNOWN_SELECTOR))
+        .account_code(QUERIER, system_caller_code(LIMIT_CONTROL_ADDRESS, REMAINING_COMPUTE_GAS))
         .account_code(LIMITED, limited_code())
         .account_balance(VALUE_CALLER, U256::from(REPEAT))
         .account_code(VALUE_CALLER, value_caller_code())
@@ -366,7 +380,8 @@ fn bench_transact(c: &mut Criterion) {
         .account_code(VOLATILE, volatile_code())
         .account_code(HASHER, hasher_code())
         .account_code(ORACLE_CONTRACT_ADDRESS, reader_code())
-        .account_code(ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE);
+        .account_code(ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE)
+        .account_code(LIMIT_CONTROL_ADDRESS, LIMIT_CONTROL_CODE);
     let cfg = mega_context(db.clone()).cfg().clone();
 
     let mut depth = [0u8; 32];
@@ -380,10 +395,12 @@ fn bench_transact(c: &mut Criterion) {
         ("calldata", call_tx(CALLEE, Bytes::from(vec![0xab_u8; CALLDATA_LEN]), 30_000_000)),
         ("intercepted_calls", call_tx(INTERCEPTED, Bytes::new(), 30_000_000)),
         ("system_address_misses", call_tx(MISSING, Bytes::new(), 30_000_000)),
+        ("remaining_compute_gas", call_tx(QUERIER, Bytes::new(), 30_000_000)),
         ("value_calls", call_tx(VALUE_CALLER, Bytes::new(), 30_000_000)),
         ("storage_reads", call_tx(READER, Bytes::new(), 30_000_000)),
         ("volatile_reads", call_tx(VOLATILE, Bytes::new(), 30_000_000)),
         ("hashes_and_copies", call_tx(HASHER, Bytes::from(vec![0xab_u8; 32]), 30_000_000)),
+        ("oracle_reads", call_tx(ORACLE_CONTRACT_ADDRESS, Bytes::new(), 30_000_000)),
     ];
 
     let mut group = c.benchmark_group("transact");
@@ -391,10 +408,13 @@ fn bench_transact(c: &mut Criterion) {
         let mut evm = MegaEvm::new(mega_context(db.clone()));
         let satin = evm.execute_transaction(OpTx(tx.clone())).unwrap();
         assert!(satin.result.is_success(), "{workload}: {:?}", satin.result);
-        // Only the volatile workload reads what detention caps, and it must read every kind it is
-        // here to measure.
+        // Only the two volatile workloads read what detention caps, and each must read every kind
+        // it is here to measure.
         let detention = evm.ctx().detention();
-        if workload == "volatile_reads" {
+        if workload == "oracle_reads" {
+            assert_eq!(detention.accessed(), VolatileDataAccess::ORACLE, "oracle_reads: marked");
+            assert!(detention.compute_limit().is_some(), "oracle_reads: the reads must detain");
+        } else if workload == "volatile_reads" {
             assert_eq!(
                 detention.accessed(),
                 VolatileDataAccess::TIMESTAMP |
@@ -555,6 +575,31 @@ fn bench_transact(c: &mut Criterion) {
             );
         });
     }
+
+    // The Oracle's storage answered by the oracle service, every slot of it: no load reaches the
+    // database, and each is priced as the database's would be.
+    let service = (0..REPEAT).fold(TestExternalEnvs::new(), |envs, slot| {
+        envs.with_oracle_storage(U256::from(slot), U256::ONE)
+    });
+    let oracle_tx = call_tx(ORACLE_CONTRACT_ADDRESS, Bytes::new(), 30_000_000);
+    let from_service = MegaEvm::new(salt_context(db.clone(), service.clone()))
+        .execute_transaction(OpTx(oracle_tx.clone()))
+        .unwrap();
+    let from_state = MegaEvm::new(mega_context(db.clone()))
+        .execute_transaction(OpTx(oracle_tx.clone()))
+        .unwrap();
+    assert!(from_service.result.is_success(), "oracle_reads/service: {:?}", from_service.result);
+    assert_eq!(
+        from_service.gas, from_state.gas,
+        "oracle_reads/service: a read the service answers costs what the database's does",
+    );
+    group.bench_function("oracle_reads/service", |b| {
+        b.iter_batched(
+            || MegaEvm::new(salt_context(db.clone(), service.clone())),
+            |mut evm| evm.transact(OpTx(oracle_tx.clone())).unwrap(),
+            BatchSize::SmallInput,
+        );
+    });
 
     // The SALT arms: the same transaction against a minimal environment and against one where
     // every bucket is crowded, both through `MegaEvm` — op-revm has nothing to compare to.
