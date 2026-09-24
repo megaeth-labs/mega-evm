@@ -121,7 +121,7 @@ pub(crate) fn intercept<DB: Database, ExtEnvs: ExternalEnvTypes>(
     depth: usize,
 ) -> Option<FrameResult> {
     match intercepted_contract(&inputs.target_address)? {
-        InterceptedContract::Oracle => crate::system::oracle::intercept(ctx, inputs),
+        InterceptedContract::Oracle => crate::system::oracle::intercept(ctx, inputs, depth),
         InterceptedContract::KeylessDeploy => crate::system::keyless::intercept(ctx, inputs, depth),
         InterceptedContract::AccessControl => crate::system::control::intercept(ctx, inputs, depth),
         InterceptedContract::LimitControl => crate::system::limit_control::intercept(ctx, inputs),
