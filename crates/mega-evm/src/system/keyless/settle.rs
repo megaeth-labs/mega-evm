@@ -83,6 +83,12 @@ where
     }
     settle_frame_result::<_, ERROR>(ctx, call.gas.tracker_mut(), result)?;
     call.gas.refill_history(call.returned_history);
+    // The creation's start is what creates an empty signer's account. revm bumps the nonce of
+    // every creation it is asked to build, and a creation the limits stop at its start is bumped
+    // all the same; one an inspector answered in its place never started, and adds no account.
+    if call.signer_account_charge > 0 && account_nonce(ctx, call.signer) == call.signer_nonce {
+        call.gas.refill_reservoir(call.signer_account_charge);
+    }
 
     let (status, output) = match ctx.additional_limit.stop_before_run() {
         Some(stop) => (InstructionResult::Revert, stop.revert_data()),
@@ -145,6 +151,14 @@ fn answer<DB: Database, ExtEnvs: ExternalEnvTypes>(
         return failed(KeylessDeployError::EmptyCodeDeployed { gas_used }, gas_used);
     }
     returned(gas_used, address, Bytes::new())
+}
+
+/// The nonce of an account the journal holds; zero for one it does not.
+fn account_nonce<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    ctx: &MegaContext<DB, ExtEnvs>,
+    address: Address,
+) -> u64 {
+    ctx.journal_ref().state.get(&address).map_or(0, |account| account.info.nonce)
 }
 
 /// `keylessDeploy`'s return for a deployment that failed with `error`.

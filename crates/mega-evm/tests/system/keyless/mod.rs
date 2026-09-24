@@ -9,6 +9,7 @@
 mod charges;
 mod deploy;
 mod dispatch;
+mod inspector;
 mod rules;
 
 use alloy_primitives::{address, hex, Address, Bytes, Signature, TxKind, B256, U256};

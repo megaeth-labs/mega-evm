@@ -67,6 +67,12 @@ pub(crate) struct KeylessCall {
     pub(super) checkpoint: JournalCheckpoint,
     /// The address the creation deploys at.
     pub(super) deploy_address: Address,
+    /// The signer, and its nonce before the creation's start bumped it.
+    pub(super) signer: Address,
+    pub(super) signer_nonce: u64,
+    /// What the call was charged for the signer's account, which the creation's start creates:
+    /// zero when the signer had one.
+    pub(super) signer_account_charge: u64,
     /// The call's return range.
     pub(super) memory_offset: Range<usize>,
     /// Whether the transaction's own start charged the call a new account.
@@ -181,6 +187,9 @@ fn rewrite_dispatched<DB: Database, ExtEnvs: ExternalEnvTypes>(
         gas,
         checkpoint,
         deploy_address: deployment.deploy_address,
+        signer: deployment.signer,
+        signer_nonce: deployment.signer_nonce,
+        signer_account_charge: deployment.signer_account_charge,
         memory_offset,
         charged_new_account_state_gas,
         returned_history: 0,
@@ -212,6 +221,9 @@ fn is_dispatched<DB: Database, ExtEnvs: ExternalEnvTypes>(
 /// A creation the call passed every rule for and paid the start of.
 struct Deployment {
     signer: Address,
+    signer_nonce: u64,
+    /// What the call was charged for the signer's account, when the signer has none.
+    signer_account_charge: u64,
     deploy_address: Address,
     value: U256,
     init_code: Bytes,
@@ -320,10 +332,12 @@ fn prepare<DB: Database, ExtEnvs: ExternalEnvTypes>(
 
     // What the `CREATE` opcode charges its frame for the creation's start. The signer's nonce bump
     // is what creates an empty signer's account; a caller the opcode starts from exists already.
+    let mut signer_account_charge = 0;
     if signer_info.is_empty() {
         let charge =
             StateGasCharge::one(GasId::new_account_state_gas(), StateGasSite::account(signer));
-        if !gas.record_state_cost(state_gas(ctx, charge)?) {
+        signer_account_charge = state_gas(ctx, charge)?;
+        if !gas.record_state_cost(signer_account_charge) {
             return Ok(Err(Refusal::OutOfGas));
         }
     }
@@ -364,6 +378,8 @@ fn prepare<DB: Database, ExtEnvs: ExternalEnvTypes>(
 
     Ok(Ok(Deployment {
         signer,
+        signer_nonce: signer_info.nonce,
+        signer_account_charge,
         deploy_address,
         value: tx.value,
         init_code: tx.input.clone(),
