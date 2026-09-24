@@ -162,7 +162,7 @@ Once execution has started, these are the volatile-guarded opcodes that complete
 The volatile-guarded opcodes are the block-environment opcodes listed above together with `BALANCE`, `EXTCODESIZE`, `EXTCODECOPY` and `EXTCODEHASH`, `SLOAD` from Rex3, and `SELFBALANCE`, `SELFDESTRUCT` and the CALL-family opcodes from Rex4; each is an enforcement point whatever account or slot it reads.
 A volatile-guarded opcode that halts, or that `disableVolatileDataAccess()` rejects, enforces nothing, with one exception: from Rex4 the CALL-family opcodes enforce the limit even when their frame halts, so a registration they make binds at once.
 A registration made by any other halting frame takes effect at the next enforcement point the transaction reaches, in any frame.
-A transaction whose halting read is its final volatile access reaches no further enforcement point, and its remainder runs under the limit already in effect.
+If a halting read leaves a registration unapplied and the transaction reaches no later enforcement point, its remainder runs under the limit already in effect.
 An access blocked by [`disableVolatileDataAccess()`](../system-contracts/mega-access-control.md) is the exception: the blocked opcode never runs, so it reads nothing and triggers nothing.
 
 ## Constants
