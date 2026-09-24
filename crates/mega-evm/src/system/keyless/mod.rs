@@ -24,10 +24,12 @@
 //!   no number of failing calls, whoever makes them, gets a signer's deployment refused.
 //! - A signer with no account is charged its account as state gas, once, by the call: the nonce
 //!   bump creates it, and no other charge does.
-//! - The deployed contract's account is charged as the `CREATE` opcode charges it, and given back
-//!   when the deployment fails, at the price it was charged.
+//! - The call pays what the `CREATE` opcode charges its frame: its regular gas, which stays spent,
+//!   and the deployed contract's account, given back when the deployment fails, at the price it was
+//!   charged.
 //! - `gasUsed` is what the creation spent, with no transaction intrinsic: the sandbox of the legacy
-//!   engine ran the deployment as a transaction of its own, this engine does not.
+//!   engine ran the deployment as a transaction of its own, this engine does not. It is counted
+//!   before refunds: a refund the creation earns goes to the transaction, as any frame's does.
 //! - A limit the deployment crosses stops it as it stops any frame: a frame budget reverts the
 //!   creation, and the call returns `ExecutionReverted` with the limit's revert data; a transaction
 //!   limit stops the transaction, and the call reverts with the stop, taking back the signer's
@@ -35,7 +37,8 @@
 //!
 //! # The error ABI
 //!
-//! The contract's errors are unchanged, and so are the rules that produce them. Four of them have
+//! The contract's errors are unchanged, and so are the rules that produce them and the order they
+//! are checked in, so a call several rules refuse reports the legacy engine's error. Four have
 //! no producer here: `ParentBudgetExceeded` and `InvalidTransaction` were the sandbox's, which had
 //! a budget of its own to preflight and a transaction of its own to validate;
 //! `InsufficientComputeGas` was the compute-gas limit's, which is the execution cap on the regular
@@ -46,9 +49,10 @@
 //!
 //! # The contract
 //!
-//! Every selector but `keylessDeploy` runs the deployed bytecode, which carries no fallback and
-//! reverts with empty data, and so does a `keylessDeploy` call a contract makes: its method body
-//! reverts with `NotIntercepted()`.
+//! Every selector but `keylessDeploy` runs the deployed bytecode: a method the contract declares,
+//! such as `version()`, answers, and a selector it does not declare finds no fallback and reverts
+//! with empty data. A `keylessDeploy` call a contract makes runs the bytecode too, and its method
+//! body reverts with `NotIntercepted()`.
 //!
 //! The rest of the module is data: decoding the pre-EIP-155 transaction, recovering its signer,
 //! deriving the deploy address, and mapping errors to and from the `IKeylessDeploy` ABI.
