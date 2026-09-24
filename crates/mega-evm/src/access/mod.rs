@@ -38,56 +38,67 @@
 //! # The cap
 //!
 //! Compute is the regular gas the transaction spends on what it runs, read off revm's `Gas`: state
-//! and history gas that spilled onto regular gas are not compute, and neither is what a halting
-//! frame burns ([`Detention`]). A read sets a limit: the transaction's compute at the read plus
-//! the read's cap. The limit only goes down, so the most restrictive of several reads is the one
-//! that binds, whatever their order.
+//! and history gas that spilled onto regular gas are not compute, gas withheld from regular
+//! charges is never spent, and what a halting frame burns is not compute either ([`Detention`]).
+//! A read sets a limit: the transaction's compute at the read plus the read's cap. The limit only
+//! goes down, so the most restrictive of several reads is the one that binds, whatever their
+//! order.
 //!
 //! # How the cap is enforced
 //!
 //! The engine has no counter per opcode, and the interpreter stops a frame on one condition only:
-//! the frame runs out of regular gas. So the cap is enforced through the frame's gas. Every frame
-//! that runs keeps no more regular gas than the limit leaves the transaction; the rest is
-//! *withheld* — moved into the frame's reservoir — until the frame returns. Three points hold
-//! this, and between them no frame can compute past the limit:
+//! the frame runs out of regular gas. So the cap is enforced through the frame's gas, with the
+//! revm fork's two parts of a frame's regular gas: a spendable part, the only one a regular charge
+//! draws, and a withheld part. Every other reader of the frame's gas sees the two together — `GAS`,
+//! the 63/64 forward and the clamp on an explicit call gas, the `SSTORE` sentry, the skip-cold
+//! checks, the gas a child returns, the reimbursement — and a forward or a state or history spill
+//! draws the withheld part first.
 //!
-//! - **the read**: the opcode that read volatile data withholds from its own frame, right after the
-//!   Host's load, so the instructions after it run on what the cap leaves;
+//! Every frame that runs has its spendable part held at what the limit leaves the transaction
+//! (`Gas::limit_spendable`); the rest is withheld. Three points hold this, and between them no
+//! frame can compute past the limit:
+//!
+//! - **the read**: the opcode that read volatile data holds its own frame once it committed the
+//!   read, so the instructions after it run on what the cap leaves;
 //! - **a frame's start and every resume**: a frame that starts, and a caller a child returned into,
-//!   is held to what the limit leaves then. A child's read caps its callers as they resume, and the
-//!   gas a child hands back cannot be computed with past the limit;
+//!   is held to what the limit leaves then. A child's read holds its callers as they resume, and
+//!   the gas a child hands back cannot be computed with past the limit;
 //! - **a storage write restored to its original value**: it refills state and history gas that
-//!   spilled onto regular gas, possibly before the read, so the frame is held to the limit again.
+//!   spilled onto regular gas, possibly before the read, onto the spendable part.
 //!
-//! A frame that runs out of regular gas while detention still holds back some of what it withheld
-//! has crossed the cap, not its own gas: undetained, the frame would have had that gas to charge
-//! against, so the cap is the tighter bound. The frame then stops the transaction the way every
+//! So a transaction that read volatile data runs exactly as it would without the read until a
+//! regular charge needs the withheld part. That charge fails as it would with nothing withheld,
+//! and the fork records the crossing, with the withheld part it could not draw.
+//!
+//! # The stop
+//!
+//! A frame whose result carries a crossing record crossed the cap, not its own gas: undetained,
+//! the withheld part would have paid the charge. The frame stops the transaction the way every
 //! transaction-level limit does — it reverts with `MegaLimitExceeded` (kind: compute), the
 //! transaction is latched, no caller resumes, and the transaction settles like an EIP-8037 revert
-//! (see [`AdditionalLimit`](crate::AdditionalLimit)). What the frame had left of its allowance when
-//! the charge failed is spent; the withheld gas is not, and goes back to the sender. A frame
-//! detention withheld nothing from runs out of its own gas, and halts: a child forwarded less
-//! than the limit leaves the transaction halts on its own, and its caller resumes. So does a frame
-//! whose state and history charges drew the withheld gas dry: it ran out where it would have
-//! undetained.
+//! (see [`AdditionalLimit`](crate::AdditionalLimit)). The stopped frame's gas is the withheld part
+//! at the crossing: the spendable part it had counts as spent, which brings the transaction's
+//! compute to the limit exactly, and the withheld part goes back to the sender. The stop reports
+//! the limit as what was used; the size of the charge that crossed is not kept.
 //!
-//! State and history charges are not held back. They draw on the reservoir first, where the
-//! withheld gas sits, so a detained frame pays for what it writes and appends as it would have.
+//! Every other out-of-gas halts and burns as it would without the read: an operand above `usize`,
+//! a failed state or history charge, and a regular charge the frame's whole gas could not pay.
 //!
-//! # Withheld gas does not leak
+//! A frame answered without running is held the same way. revm runs a precompile inside the
+//! frame's start against all the gas the caller forwarded, the caller's withheld part included, and
+//! an interceptor builds its answer likewise: an answer that spent more than the allowance the
+//! frame would have run on is answered out of gas and marked as a crossing, and the same rule stops
+//! the transaction.
 //!
-//! Withheld gas is regular gas the frame was given and must neither be lost nor escape the cap.
-//! A frame's end hands it back into the frame's regular gas before the result settles, as if it
-//! had never been withheld ([`release`](detention::release)), on every path:
+//! # Nothing withheld leaks
 //!
-//! - **a frame answered without running** — an interceptor's answer, the latch, the depth guard, an
-//!   inspector — never runs, so nothing is withheld from it; the answer carries the forwarded gas
-//!   back to its caller, and the caller is held to the limit when it resumes;
-//! - **the transaction-level stop** returns the stopped frame's withheld gas with the revert, and
-//!   every caller's with its own, so the sender gets back what nobody spent;
-//! - **the frame's return** releases on success, revert and halt alike: a success or a revert hands
-//!   the unspent gas to the caller, which is held to the limit as it resumes, and a halt burns it
-//!   as it would have burned it undetained.
+//! Withheld gas never leaves the frame's tracker, so there is nothing to release and nothing that
+//! can escape the cap: a child's withheld part goes back to its caller with the rest of its gas,
+//! and the caller is held again as it resumes; a frame answered without running starts with
+//! nothing withheld and hands its forwarded gas back; the stop hands the withheld part back with
+//! its revert; and a halt burns the frame's gas, withheld part included, as it would undetained.
+//! `return_create`'s deposit and hash charges, the creating frame's own compute, draw the spendable
+//! part like any other regular charge.
 //!
 //! # Refused reads
 //!
@@ -95,8 +106,10 @@
 //! The Host then refuses the load and the opcode's wrapper reverts the frame with
 //! `VolatileDataAccessDisabled(accessType)`. The refusal comes before the load, so a refused read
 //! reads nothing and caps nothing, and the frame keeps the gas it had before the opcode: the
-//! opcode's static gas is charged, as for any instruction that ran, and nothing else. A `SLOTNUM`
-//! refusal names access type 12, which the contract's `VolatileDataAccessType` does not declare.
+//! opcode's static gas is charged, as for any instruction that ran, and nothing else. A refusal
+//! names the kind the opcode reads — `BLOCKHASH`'s names the hash, though the opcode loads the
+//! block number first — and a `SLOTNUM` refusal names access type 12, which the contract's
+//! `VolatileDataAccessType` does not declare.
 
 mod detention;
 mod volatile;

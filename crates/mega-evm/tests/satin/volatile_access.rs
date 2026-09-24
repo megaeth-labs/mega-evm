@@ -129,8 +129,8 @@ fn test_detention_starts_afresh_for_every_transaction() {
     assert!(second.outcome.gas.regular > CAP);
 }
 
-/// A read that stays within the cap costs what it ran: the gas detention withheld goes back
-/// when the transaction ends, below and above the execution cap.
+/// A read that stays within the cap costs what it ran: the gas detention withheld is never
+/// spent, below and above the execution cap.
 #[test]
 fn test_a_read_within_the_cap_bills_what_ran() {
     for gas_limit in TIERS {

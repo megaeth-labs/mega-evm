@@ -30,9 +30,9 @@ struct DetainedFrame {
 ///
 /// Compute is the regular gas the transaction spends on what it runs. A frame's regular gas spent
 /// is read off its [`Gas`]: its limit, less what it has left, less the state and history gas that
-/// spilled onto its regular gas, which are not compute ([`regular_spent`]). What it has left is
-/// the whole of its regular gas, the part withheld from regular charges included, so withheld gas
-/// is never spent, and every other reader of the frame's gas sees the same figure.
+/// spilled onto its regular gas, which are not compute. What it has left is the whole of its
+/// regular gas, the part withheld from regular charges included, so withheld gas is never spent,
+/// and every other reader of the frame's gas sees the same figure.
 ///
 /// The transaction's compute is its frames' compute: the frame that runs, and every frame
 /// suspended on a child that runs, as it stood when it suspended, less the child's gas limit. A
@@ -51,9 +51,8 @@ struct DetainedFrame {
 /// frame that halts consumes the gas it had left, and its spill, without running anything with
 /// it. A frame answered without running that halts burns its whole gas limit. An out-of-gas zeroes
 /// what the frame had before the frame returns; the wrapper of the opcode whose charge failed
-/// notes it first ([`note_halt`](Self::note_halt)). The two charges no wrapper sees — an opcode's
-/// static gas and `EXP`'s exponent — are bounded by their own price, and what a frame had left
-/// below it counts as compute.
+/// notes it first. The two charges no wrapper sees — an opcode's static gas and `EXP`'s exponent —
+/// are bounded by their own price, and what a frame had left below it counts as compute.
 ///
 /// # Refused reads
 ///

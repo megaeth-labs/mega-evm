@@ -7,8 +7,9 @@
 //!
 //! Gas detention caps compute, [`LimitKind::ComputeGas`]: its state lives beside this module, in
 //! [`Detention`](crate::Detention), because what it meters is gas rather than anything the lanes
-//! count. It stops a transaction through the same latch ([`AdditionalLimit::latch`]), with the
-//! compute the transaction may reach as the limit.
+//! count, and it holds a frame to the cap with the gas the frame may spend. It stops a transaction
+//! through the same latch ([`AdditionalLimit::latch`]), with the compute the transaction may reach
+//! as the limit, and the limit as what was used ([`LimitCheck::ExceedsLimit`]).
 //!
 //! It also counts what those limits meter at the sites the data-size limit counts: data-size
 //! bytes and write records, on a lane per frame ([`AdditionalLimit`]). The Host stages what it
@@ -464,6 +465,11 @@ pub enum LimitCheck {
         /// The limit crossed.
         limit: u64,
         /// The usage that crossed it.
+        ///
+        /// For [`LimitKind::ComputeGas`] it is the limit itself. Gas detention stops a frame on a
+        /// regular charge its spendable gas could not pay, and the charge's size is not kept; the
+        /// spendable gas the frame had counts as spent, which brings the transaction's compute to
+        /// the limit exactly.
         used: u64,
         /// Whether the limit is a frame budget rather than a transaction-level limit.
         frame_local: bool,
