@@ -103,8 +103,9 @@ pub fn is_deposit_like_transaction(tx: &MegaTransaction, system_address: Address
 /// caller.
 ///
 /// It is what exempts the protocol's own work from the metering `MegaETH` holds users to — the
-/// history gas of a system transaction is not charged, so the protocol's maintenance cannot fail
-/// on a resource limit. The mechanisms that meter read it as they land.
+/// history gas of a system transaction is not charged, and no per-transaction limit stops it, so
+/// the protocol's maintenance cannot fail on a resource limit. The mechanisms that meter read it
+/// as they land.
 pub fn is_system_originated(tx: &MegaTransaction, system_address: Address) -> bool {
     tx.caller() == alloy_eips::eip4788::SYSTEM_ADDRESS ||
         tx.deposit.source_hash == MEGA_SYSTEM_TRANSACTION_SOURCE_HASH ||

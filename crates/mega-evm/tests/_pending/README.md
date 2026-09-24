@@ -28,7 +28,7 @@ Do not add a `_pending/main.rs`.
 | Owning mechanism | Tests | From `tests/` | From `src/` | Keep | Rewrite | Undecided |
 |---|---:|---:|---:|---:|---:|---:|
 | the common execution layer | 21 | 21 | 0 | 21 | 0 | 0 |
-| the state-growth and KV limits | 56 | 55 | 1 | 0 | 35 | 21 |
+| detention | 2 | 2 | 0 | 0 | 2 | 0 |
 | revert-class aborts | 17 | 17 | 0 | 0 | 17 | 0 |
 | the pre-block system calls | 34 | 22 | 12 | 30 | 4 | 0 |
 | system contract deployment | 11 | 5 | 6 | 11 | 0 | 0 |
@@ -36,7 +36,7 @@ Do not add a `_pending/main.rs`.
 | native keyless deployment | 75 | 73 | 2 | 29 | 46 | 0 |
 | inspector support | 4 | 4 | 0 | 1 | 3 | 0 |
 | — (undecided: D57 preload-warm cold charging, D58 98/100 forwarding) | 7 | 7 | 0 | 0 | 0 | 7 |
-| **Total** | **302** | **281** | **21** | **159** | **115** | **28** |
+| **Total** | **248** | **228** | **20** | **159** | **82** | **7** |
 
 ## Tests ported in place
 
@@ -257,6 +257,24 @@ These 47 rows run in a real test target now, adapted to the Satin API and to the
 | `src/limit/data_size.rs` | the data-size limit (2) | 2 | `crates/mega-evm/src/limit/frame_limit.rs`, `crates/mega-evm/src/limit/mod.rs` |
 | **Total** | | **47** | |
 
+## Tests ported by the state-growth and KV limits
+
+These 54 rows run in a real test target now, adapted to the Satin API: the state growth they pin is held as EIP-8037 state gas by a per-transaction state-gas limit, and the KV updates they count are the write records the common execution layer keeps, held to a KV limit that follows the data-size limit's transaction and frame rules. The counts above are lower than the inventory's by exactly these rows.
+
+| Legacy file | Owner in the inventory | Tests | Now in |
+|---|---|---:|---|
+| `block_executor/block_limits.rs` | the state-growth and KV limits (2) | 2 | `tests/block/limits.rs` |
+| `mini_rex/state_growth_limit.rs` | the state-growth and KV limits (4) | 4 | `tests/satin/state_gas_limit.rs` |
+| `mini_rex/tx_data_and_kv_update_limit.rs` | the state-growth and KV limits (6) | 6 | `tests/satin/kv_limit.rs` |
+| `rex4/frame_limits.rs` | the state-growth and KV limits (9) | 9 | `tests/satin/kv_limit.rs` |
+| `rex4/intrinsic_limit_bypass.rs` | the state-growth and KV limits (3) | 3 | `tests/satin/kv_limit.rs` |
+| `rex5/eip7702_state_growth.rs` | the state-growth and KV limits (8) | 8 | `tests/satin/state_gas_limit.rs` |
+| `rex5/selfdestruct_beneficiary.rs` | the state-growth and KV limits (4) | 4 | `tests/satin/state_gas_limit.rs` |
+| `rex6/beneficiary_detention.rs` | the state-growth and KV limits (1) | 1 | `tests/satin/state_gas_limit.rs` |
+| `rex6/eip7702_authority_accounting.rs` | the state-growth and KV limits (16) | 16 | `tests/satin/state_gas_limit.rs` |
+| `src/limit/kv_update.rs` | the state-growth and KV limits (1) | 1 | `tests/satin/kv_limit.rs` |
+| **Total** | | **54** | |
+
 ## Tests ported by detention
 
 These 81 rows run in a real test target now, adapted to the Satin API and to the relative cap, the revert-class stop and the load-time marking the decisions they cite fix, so the counts above are lower than the inventory's by exactly these rows.
@@ -323,6 +341,8 @@ They are not counted above.
 | `block_executor/sequencer_registry.rs` | `test_sequencer_change_does_not_affect_system_address` | the pre-block system calls | the pre-block system calls own applying a pending rotation |
 | `block_executor/sequencer_registry.rs` | `test_system_address_change` | the pre-block system calls | the pre-block system calls own applying a pending rotation |
 | `block_executor/sequencer_registry.rs` | `test_system_tx_uses_resolved_system_address` | the pre-block system calls | the pre-block system calls own resolving the live system address |
+| `rex6/eip7702_authority_accounting.rs` | `test_rex6_authority_beneficiary_triggers_detention` | detention | detention owns whether an applied authority that is the block beneficiary lowers the compute cap, and what a compute overflow before the first frame does to the authorizations |
+| `rex6/eip7702_authority_accounting.rs` | `test_rex6_authority_compute_overflow_skips_authorities` | detention | detention owns whether an applied authority that is the block beneficiary lowers the compute cap, and what a compute overflow before the first frame does to the authorizations |
 
 ## Files
 
@@ -330,7 +350,6 @@ Each cell lists `disposition count (mechanism · decision)`.
 
 | File | Tests | Owners |
 |---|---:|---|
-| `block_executor/block_limits.rs` | 2 | undecided 2 (the state-growth and KV limits · D46) |
 | `block_executor/inspector.rs` | 3 | keep 1 (inspector support); rewrite 2 (inspector support · D39/D41) |
 | `block_executor/sequencer_registry.rs` | 7 | keep 7 (the pre-block system calls) |
 | `compute_gas/claims.rs` | 5 | undecided 5 (— · D57, open: whether preload-warm addresses (precompile / beneficiary / access-list) are charged cold) |
@@ -338,24 +357,22 @@ Each cell lists `disposition count (mechanism · decision)`.
 | `mini_rex/block_env_gas_limit.rs` | 3 | rewrite 3 (revert-class aborts · D48 (detention halt -> revert-class)) |
 | `mini_rex/gas.rs` | 2 | undecided 2 (— · D58, open: 98/100 forwarding, while the design has frames follow EIP-8037 (63/64)) |
 | `mini_rex/oracle.rs` | 7 | rewrite 3 (revert-class aborts · D48); keep 4 (the oracle and control contracts) |
-| `mini_rex/state_growth_limit.rs` | 4 | rewrite 4 (the state-growth and KV limits · D45 (state-gas limit)) |
-| `mini_rex/tx_data_and_kv_update_limit.rs` | 10 | rewrite 4 (revert-class aborts · D48); undecided 6 (the state-growth and KV limits · D46 (the KV count stays as an output because the node consumes it; the limit semantics are undecided)) |
+| `mini_rex/tx_data_and_kv_update_limit.rs` | 4 | rewrite 4 (revert-class aborts · D48) |
 | `rex2/keyless_deploy.rs` | 36 | rewrite 13 (native keyless deployment · native CREATE sub-frame; D37/D38); keep 19 (native keyless deployment · validation rules 1-9 unchanged); keep 1 (native keyless deployment · rule 4 (tx nonce == 0) unchanged); rewrite 3 (native keyless deployment · D36) |
 | `rex2/oracle_hint.rs` | 6 | keep 6 (the oracle and control contracts) |
 | `rex3/oracle_gas_limit.rs` | 1 | rewrite 1 (revert-class aborts · D48) |
 | `rex4/access_control.rs` | 46 | keep 46 (the oracle and control contracts) |
 | `rex4/beneficiary_detention.rs` | 1 | rewrite 1 (revert-class aborts · D48) |
 | `rex4/create_safety.rs` | 1 | keep 1 (the common execution layer · canonical revm behaviour) |
-| `rex4/frame_limits.rs` | 10 | rewrite 1 (revert-class aborts · D48); undecided 9 (the state-growth and KV limits · D46) |
+| `rex4/frame_limits.rs` | 1 | rewrite 1 (revert-class aborts · D48) |
 | `rex4/gas_detention.rs` | 2 | rewrite 2 (revert-class aborts · D48/D53) |
-| `rex4/intrinsic_limit_bypass.rs` | 4 | undecided 3 (the state-growth and KV limits · D46); rewrite 1 (inspector support · D41) |
+| `rex4/intrinsic_limit_bypass.rs` | 1 | rewrite 1 (inspector support · D41) |
 | `rex4/keyless_deploy.rs` | 2 | keep 2 (native keyless deployment · native sub-frame inherits env) |
 | `rex4/limit_control.rs` | 9 | rewrite 9 (the oracle and control contracts · D40 (remaining compute derived from Gas)) |
 | `rex5/apply_pending_changes_gas_budget.rs` | 4 | rewrite 4 (the pre-block system calls · D51 (system source m = 1; the system-call reservoir split)) |
 | `rex5/create2_empty_initcode.rs` | 5 | keep 5 (the common execution layer · canonical revm behaviour) |
 | `rex5/create2_resize_gas_metering.rs` | 2 | keep 2 (the common execution layer · canonical behaviour) |
 | `rex5/db_error.rs` | 3 | rewrite 3 (native keyless deployment · native path surfaces DB errors) |
-| `rex5/eip7702_state_growth.rs` | 8 | rewrite 8 (the state-growth and KV limits · D28/D31/D45 (7702 authorization matrix)) |
 | `rex5/keyless_empty_code_logs.rs` | 2 | rewrite 2 (native keyless deployment · native sub-frame keeps logs inherently) |
 | `rex5/keyless_fee_free.rs` | 12 | rewrite 8 (native keyless deployment · D16/D37/D38 (GASPRICE native; materialisation explicit)); keep 4 (native keyless deployment · rules unchanged) |
 | `rex5/keyless_gas_cap_postcap_recheck.rs` | 3 | rewrite 3 (native keyless deployment · native sub-frame gas handling) |
@@ -363,15 +380,12 @@ Each cell lists `disposition count (mechanism · decision)`.
 | `rex5/oracle_hint_metering.rs` | 9 | keep 7 (the oracle and control contracts · D50 (hint not charged history; data-size metering kept)); rewrite 1 (the oracle and control contracts · D11 intrinsic number); rewrite 1 (revert-class aborts · D48) |
 | `rex5/pre_block_system_calls.rs` | 11 | keep 11 (the pre-block system calls) |
 | `rex5/sandbox_accounting.rs` | 9 | rewrite 9 (native keyless deployment · native sub-frame: parent tracker sees child directly) |
-| `rex5/selfdestruct_beneficiary.rs` | 4 | rewrite 4 (the state-growth and KV limits · D45 (state gas via new-account site)) |
-| `rex6/beneficiary_detention.rs` | 1 | rewrite 1 (the state-growth and KV limits · D45) |
 | `rex6/create2_metering_order.rs` | 11 | keep 11 (the common execution layer · canonical halt reasons; D04 512 KiB boundary) |
-| `rex6/eip7702_authority_accounting.rs` | 18 | rewrite 18 (the state-growth and KV limits · D12/D28/D31/D45 (7702 matrix; SALT pricing for the SALT half)) |
+| `rex6/eip7702_authority_accounting.rs` | 2 | rewrite 2 (detention · D12/D28/D31/D45 (7702 matrix; SALT pricing for the SALT half)) |
 | `rex6/error_paths.rs` | 2 | keep 2 (the common execution layer · canonical) |
 | `rex6/keyless_sandbox_hardening.rs` | 3 | rewrite 1 (native keyless deployment · D44 / EIP-6780 native); keep 2 (native keyless deployment · canonical CREATE rules) |
 | `rex6/oracle_hint_volatile_access.rs` | 4 | keep 4 (the oracle and control contracts) |
 | `rex6/sequencer_registry_rotation.rs` | 5 | keep 5 (system contract deployment) |
 | `src/evm/mod.rs` | 3 | keep 3 (the pre-block system calls) |
-| `src/limit/kv_update.rs` | 1 | undecided 1 (the state-growth and KV limits · D46) |
 | `src/sandbox/execution.rs` | 2 | keep 1 (native keyless deployment · rule); rewrite 1 (native keyless deployment · D16) |
 | `src/system/sequencer_registry.rs` | 15 | keep 6 (system contract deployment · the pre-block system calls for transact_apply_pending_changes); keep 9 (the pre-block system calls · the pre-block system calls for transact_apply_pending_changes) |

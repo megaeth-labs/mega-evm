@@ -89,14 +89,14 @@ fn run(
 }
 
 /// The history gas an empty transaction body costs, which every transaction here pays before its
-/// first frame and keeps whatever that frame does.
-const fn body_history() -> u64 {
-    mega_evm::TX_BODY_SIZE * mega_evm::constants::COST_PER_HISTORY_BYTE
+/// first frame and keeps whatever that frame does, at the price the engine runs.
+fn body_history() -> u64 {
+    mega_evm::history_gas(mega_evm::TX_BODY_SIZE).expect("a body has a price")
 }
 
 /// The same for a creation transaction, whose init code travels as the body's data.
-const fn create_body_history(init_code_len: u64) -> u64 {
-    (mega_evm::TX_BODY_SIZE + init_code_len) * mega_evm::constants::COST_PER_HISTORY_BYTE
+fn create_body_history(init_code_len: u64) -> u64 {
+    mega_evm::history_gas(mega_evm::TX_BODY_SIZE + init_code_len).expect("a body has a price")
 }
 
 /// A transaction limit that leaves `execution_bytes` above the body.

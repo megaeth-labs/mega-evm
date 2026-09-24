@@ -11,7 +11,7 @@ use op_revm::constants::{
     DA_FOOTPRINT_GAS_SCALAR_OFFSET, DA_FOOTPRINT_GAS_SCALAR_SLOT, L1_BLOCK_CONTRACT,
 };
 use revm::{
-    bytecode::opcode::LOG0,
+    bytecode::opcode::{ADD, DUP1, LOG0, SLOAD, SSTORE},
     context::{result::ExecutionResult, BlockEnv, ContextTr},
     Database as _,
 };
@@ -119,6 +119,79 @@ fn test_block_data_limit_exceeded_mid_block() {
 
     let (_, result) = executor.finish_with_counters().expect("the block finishes");
     assert_eq!(result.receipts().len(), 3, "the fourth transaction never ran");
+}
+
+/// Code that adds one to each of the slots `1..=writes`, so every call keeps `writes` write
+/// records whatever the calls before it wrote.
+fn incrementing_contract(writes: u64) -> Bytes {
+    let mut code = BytecodeBuilder::default();
+    for slot in 1..=writes {
+        code = code
+            .push_number(slot)
+            .append(DUP1)
+            .append(SLOAD)
+            .push_number(1_u8)
+            .append(ADD)
+            .append(revm::bytecode::opcode::SWAP1)
+            .append(SSTORE);
+    }
+    code.stop().build()
+}
+
+/// A state whose callee keeps `writes` write records on every call.
+fn state_with_incrementing_contract(
+    writes: u64,
+) -> revm::database::State<mega_evm::test_utils::MemoryDatabase> {
+    let mut db = common::database();
+    db.set_account_code(CONTRACT, incrementing_contract(writes));
+    revm::database::State::builder().with_database(db).build()
+}
+
+/// The block's KV limit: the transaction that crosses it is packed, however far past the limit
+/// it takes the block, and the next one is refused before it runs.
+#[test]
+fn test_block_custom_kv_update_limit() {
+    let mut state = state_with_incrementing_contract(50);
+    let mut executor = executor(
+        &mut state,
+        common::block_ctx(BlockLimits::no_limits().with_block_kv_update_limit(1)),
+    );
+    executor.apply_pre_execution_changes().expect("the block starts");
+
+    executor.execute_transaction(&user_tx(0, 10_000_000)).expect("the crossing transaction");
+    assert_eq!(executor.limiter().usage.write_records, 50, "the block has crossed its limit");
+
+    let err = executor
+        .execute_transaction(&user_tx(1, 10_000_000))
+        .expect_err("the block has no write records left");
+    assert!(format!("{err}").contains("Block KV update limit reached"), "{err}");
+    assert!(format!("{err}").contains("block_used=50"), "{err}");
+}
+
+/// The same limit mid-block, one record a transaction: the transactions up to the one that
+/// reaches the limit are packed, and the block ends there.
+#[test]
+fn test_block_kv_limit_exceeded_mid_block() {
+    let mut state = state_with_incrementing_contract(1);
+    let mut executor = executor(
+        &mut state,
+        common::block_ctx(BlockLimits::no_limits().with_block_kv_update_limit(3)),
+    );
+    executor.apply_pre_execution_changes().expect("the block starts");
+
+    for nonce in 0..3 {
+        let tx = user_tx(nonce, 10_000_000);
+        let gas = executor.execute_transaction(&tx).expect("packed");
+        assert!(gas.tx_gas_used() < tx.gas_limit(), "transaction {nonce}");
+    }
+    assert!(
+        executor.execute_transaction(&user_tx(3, 10_000_000)).is_err(),
+        "the block has no write records left"
+    );
+
+    let (_, result) = executor.finish_with_counters().expect("the block finishes");
+    assert_eq!(result.receipts().len(), 3, "the fourth transaction never ran");
+    assert_eq!(result.usage.write_records, 3, "the block reports its KV count");
 }
 
 /// A transaction refused before it runs changes nothing: no receipt, and no state.

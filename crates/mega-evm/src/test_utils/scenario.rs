@@ -385,6 +385,16 @@ mod tests {
         }
     }
 
+    /// Room for what the first transaction pays — its regular gas, its body's history, and its
+    /// new slot's state gas and record — at the prices the engine runs.
+    fn room_for_a_new_slot() -> u64 {
+        let slot = crate::satin_gas_params()
+            .get(revm::context_interface::cfg::GasId::sstore_set_state_gas());
+        let history = crate::history_gas(crate::TX_BODY_SIZE + crate::WRITE_RECORD_SIZE)
+            .expect("the bytes have a price");
+        100_000 + slot + history
+    }
+
     fn scenario(txs: Vec<ScenarioTx>) -> Scenario {
         let code = BytecodeBuilder::default().sstore(U256::ZERO, U256::from(7)).stop().build();
         Scenario {
@@ -484,8 +494,8 @@ mod tests {
     /// current nonce.
     #[test]
     fn test_run_commits_each_transaction_before_the_next() {
-        // Room for the state gas the first transaction's new slot draws.
-        let scenario = scenario(vec![call(Some(200_000)), call(Some(200_000))]);
+        let scenario =
+            scenario(vec![call(Some(room_for_a_new_slot())), call(Some(room_for_a_new_slot()))]);
         let (outcomes, mut db) = scenario.run(scenario.database());
 
         assert_eq!(outcomes.len(), 2);
@@ -506,7 +516,7 @@ mod tests {
     /// fees; the EVM goes on from what it committed, as the next transaction of a block does.
     #[test]
     fn test_run_is_run_on_the_scenario_s_evm() {
-        let scenario = scenario(vec![call(Some(200_000))]);
+        let scenario = scenario(vec![call(Some(room_for_a_new_slot()))]);
         let mut evm = scenario.evm(scenario.database());
         assert_eq!(evm.block(), &scenario.block());
         assert_eq!(revm::context::ContextTr::chain(evm.ctx()), &zero_fee_l1_block_info());

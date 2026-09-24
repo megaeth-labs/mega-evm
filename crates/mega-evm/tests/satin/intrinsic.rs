@@ -47,12 +47,14 @@ const EMPTY_CALL: u64 = 15_000;
 /// floor tokens at 16 gas each.
 const FLOOR_PER_BYTE: u64 = 64;
 
-/// What one byte of anything a transaction carries costs on the history ledger.
+/// What one byte of anything a transaction carries costs on the history ledger, at the spec's own
+/// price.
 const HISTORY_PER_BYTE: u64 = COST_PER_HISTORY_BYTE;
 
-/// The history gas a transaction carrying `bytes` bytes beside its envelope pays for its body.
-const fn body_history(bytes: u64) -> u64 {
-    (TX_BODY_SIZE + bytes) * HISTORY_PER_BYTE
+/// The history gas a transaction carrying `bytes` bytes beside its envelope pays for its body, at
+/// the price the engine runs.
+fn body_history(bytes: u64) -> u64 {
+    mega_evm::history_gas(TX_BODY_SIZE + bytes).expect("a body has a price")
 }
 
 /// A database where the sender can pay and `CALLEE` exists.

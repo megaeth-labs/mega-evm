@@ -2,8 +2,8 @@
 //!
 //! The common execution layer defines what a limit reports when it is crossed: the dimension
 //! ([`LimitKind`]), the verdict of a check ([`LimitCheck`]) and the revert data a stopped frame
-//! returns ([`MegaLimitExceeded`]). The mechanisms that meter a dimension (the data-size limit,
-//! detention, the state-growth and KV limits) fill these in.
+//! returns ([`MegaLimitExceeded`]). The mechanisms that meter a dimension fill these in: the
+//! data-size limit, the KV limit and the state-gas limit below, and detention for compute gas.
 //!
 //! Gas detention caps compute, [`LimitKind::ComputeGas`]: its state lives beside this module, in
 //! [`Detention`](crate::Detention), because what it meters is gas rather than anything the lanes
@@ -34,7 +34,8 @@
 //!   the opcode completed;
 //! - deployed code, on the creation's lane before the creation is committed, so a crossing leaves
 //!   no code behind. Only code revm would deposit counts: code starting with `0xEF` or over the
-//!   code-size limit fails the creation alone and is not counted;
+//!   code-size limit, and a creation that cannot pay for its deposit, fail the creation alone and
+//!   are not counted;
 //! - an Oracle hint's payload, on the transaction's own lane, before it is forwarded.
 //!
 //! A record is checked against the limits before its history is charged: a record the limit
@@ -47,9 +48,67 @@
 //! with the stop. The account a deposit-like transaction creates for its caller is charged all the
 //! same, because it exists whatever the transaction does.
 //!
-//! Both limits are unlimited unless a caller sets them. A block executor installs the ones its
-//! block limits carry, whose default holds a transaction to
-//! [`TX_DATA_LIMIT`](crate::constants::TX_DATA_LIMIT).
+//! # The KV limit
+//!
+//! The KV count is the write-record count the lanes keep: one record per account or storage write
+//! the transaction keeps, deduplicated per frame, taken back with a slot written back to its
+//! original value and with the frame that fails. The sender's account and the accounts fees are
+//! credited to are the body's, not records. [`EvmTxRuntimeLimits::tx_kv_update_limit`] holds it
+//! by the data-size limit's rules in its own unit: the transaction's own frame gets what the
+//! transaction has left, a child the same share of what its parent has left, under
+//! [`EvmTxRuntimeLimits::frame_kv_update_limit`]; a frame over its budget reverts alone and a
+//! transaction over its limit is stopped. Every check holds the data size before the records.
+//!
+//! A record weighs [`WRITE_RECORD_SIZE`] bytes of data size, counted and taken back with them, so
+//! the KV count never weighs more than the data size, and a KV limit binds only below the
+//! data-size limit's fortieth.
+//!
+//! # The state-gas limit
+//!
+//! EIP-8037 charges state gas for exactly the state a transaction adds, so the state a transaction
+//! grows is the state gas it spends: [`EvmTxRuntimeLimits::tx_state_gas_limit`] holds it, and
+//! nothing counts new accounts and slots beside it. What is held is net — what a frame refilled
+//! and what a failed frame rolled back is out of it — and is the state gas charged before the
+//! first frame plus what every frame on the call stack holds (the `state_gas` module). The limit is
+//! per transaction, with no frame budget: a crossing anywhere stops the transaction, reported as
+//! [`LimitKind::StateGrowth`] with the limit in gas.
+//!
+//! The limit holds each charge where it is made, once it is made, so a charge the frame cannot
+//! pay is an out-of-gas whatever the limit: the authorities' before the first frame, which are
+//! taken back on a crossing; the first frame's recipient or created account, which the first frame
+//! is then answered with the stop for; a fresh slot and a destruction's new beneficiary, which
+//! stop the frame; and a new account a `CALL`, `CREATE` or `CREATE2` adds, which its opcode is
+//! charged for upfront and the limit holds once revm has decided the frame. A frame revm refuses —
+//! a value call its caller cannot fund, one past the call-stack limit — gives that charge back and
+//! is never held for it; a frame revm builds, or answers with a success, returns the stop.
+//!
+//! Deployed code is held just before `return_create` charges it, as its bytes are, so a crossing
+//! leaves no code behind — and only once `return_create` is sure to make the charge: a creation
+//! that cannot pay the regular costs it charges first, or the state gas itself, runs out of gas
+//! there whatever the limit.
+//!
+//! Wherever the state gas and a record cross together at one site, the state gas is the stop
+//! reported. At a frame start the records are held before revm builds the frame, and a frame they
+//! stop adds no account, so its upfront state gas is given back rather than held.
+//!
+//! It is a limit on gas, so it counts state at the SALT price: a slot or an account in a bucket
+//! `m` times the minimum costs `m` times the schedule's entry, and reaches the limit that many
+//! times sooner.
+//!
+//! Every limit is unlimited unless a caller sets it. A block executor installs the ones its block
+//! limits carry, whose default holds a transaction to
+//! [`TX_DATA_LIMIT`](crate::constants::TX_DATA_LIMIT) of data size and to nothing else.
+//!
+//! # The exemption
+//!
+//! The protocol's own work is held to none of these per-transaction limits: a system-originated
+//! transaction ([`crate::system::is_system_originated`]) and a system call — the pre-block calls
+//! among them — run under [`LimitCheck::Exempt`], sticky for the transaction, which the one place
+//! every stop comes from answers whatever they cross: the data size, the KV count, the state gas
+//! and the frame budgets of the first two. It is the set that pays no history gas, exempt for the
+//! same reason: the protocol's maintenance must not fail on a resource limit. What such a
+//! transaction uses is counted all the same and reported in its usage and in the block's
+//! counters, as a deposit's is. A user's deposit is not in the set and is held to every limit.
 //!
 //! # The byte table
 //!
@@ -73,6 +132,7 @@ mod frame_limit;
 #[allow(clippy::module_inception)]
 mod limit;
 mod record;
+mod state_gas;
 
 pub use limit::AdditionalLimit;
 pub(crate) use record::HistoryBytes;
@@ -130,24 +190,31 @@ pub const FRAME_DATA_SHARE_DENOMINATOR: u64 = 100;
 
 /// What a transaction or a frame counts: data-size bytes and write records.
 ///
-/// The KV count a node reports is the write-record count; it has no tracker of its own.
+/// The write-record count is the KV count a node reports, and the KV limit holds it; it has no
+/// tracker of its own. Every record weighs [`WRITE_RECORD_SIZE`] bytes of data size and is taken
+/// back with them, so `write_records × WRITE_RECORD_SIZE` never exceeds `data_size`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct LimitUsage {
     /// Data-size bytes.
     pub data_size: u64,
-    /// Account and storage write records.
+    /// Account and storage write records: the KV count.
     pub write_records: u64,
 }
 
-/// Limits one transaction's data size.
+/// Limits one transaction's data size, write records and state gas.
 ///
-/// [`tx_data_size_limit`](Self::tx_data_size_limit) stops the transaction. A frame's own budget
-/// is derived from it: the transaction's frame gets what the transaction has left, and each
-/// child gets [`FRAME_DATA_SHARE_NUMERATOR`] / [`FRAME_DATA_SHARE_DENOMINATOR`] of what its
-/// parent has left. Crossing a frame budget reverts that frame alone.
+/// [`tx_data_size_limit`](Self::tx_data_size_limit) and
+/// [`tx_kv_update_limit`](Self::tx_kv_update_limit) stop the transaction. A frame's own budget in
+/// each dimension is derived from them: the transaction's frame gets what the transaction has
+/// left, and each child gets [`FRAME_DATA_SHARE_NUMERATOR`] / [`FRAME_DATA_SHARE_DENOMINATOR`] of
+/// what its parent has left. Crossing a frame budget reverts that frame alone.
 ///
-/// [`frame_data_size_limit`](Self::frame_data_size_limit) is a further cap on every frame's
-/// budget. It is unlimited unless a caller sets it.
+/// [`frame_data_size_limit`](Self::frame_data_size_limit) and
+/// [`frame_kv_update_limit`](Self::frame_kv_update_limit) are a further cap on every frame's
+/// budget.
+///
+/// [`tx_state_gas_limit`](Self::tx_state_gas_limit) holds the transaction's state gas and stops
+/// the transaction; it has no frame budget. Every limit is unlimited unless a caller sets it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct EvmTxRuntimeLimits {
     /// The most data-size bytes the transaction may keep. Crossing it stops the transaction.
@@ -155,6 +222,20 @@ pub struct EvmTxRuntimeLimits {
     /// A cap on every frame's data-size budget, applied after the share of what its parent has
     /// left. Crossing it reverts the frame alone.
     pub frame_data_size_limit: u64,
+    /// The most write records the transaction may keep: its KV count. Crossing it stops the
+    /// transaction.
+    pub tx_kv_update_limit: u64,
+    /// A cap on every frame's write-record budget, applied after the share of what its parent has
+    /// left. Crossing it reverts the frame alone.
+    pub frame_kv_update_limit: u64,
+    /// The most EIP-8037 state gas the transaction may hold, net of what it refilled and of what
+    /// its failed frames rolled back: the limit on the state it grows. Crossing it stops the
+    /// transaction.
+    ///
+    /// It is a limit on gas, so it counts the state at the price the transaction pays for it: a
+    /// slot or an account in a crowded SALT bucket costs its bucket's multiple of the schedule's
+    /// entry, and reaches the limit that many times sooner.
+    pub tx_state_gas_limit: u64,
 }
 
 impl Default for EvmTxRuntimeLimits {
@@ -166,7 +247,13 @@ impl Default for EvmTxRuntimeLimits {
 impl EvmTxRuntimeLimits {
     /// No limit at all.
     pub const fn no_limits() -> Self {
-        Self { tx_data_size_limit: u64::MAX, frame_data_size_limit: u64::MAX }
+        Self {
+            tx_data_size_limit: u64::MAX,
+            frame_data_size_limit: u64::MAX,
+            tx_kv_update_limit: u64::MAX,
+            frame_kv_update_limit: u64::MAX,
+            tx_state_gas_limit: u64::MAX,
+        }
     }
 
     /// Sets the transaction's data-size limit.
@@ -180,15 +267,70 @@ impl EvmTxRuntimeLimits {
         self.frame_data_size_limit = limit;
         self
     }
+
+    /// Sets the transaction's KV limit: the most write records it may keep.
+    pub const fn with_tx_kv_update_limit(mut self, limit: u64) -> Self {
+        self.tx_kv_update_limit = limit;
+        self
+    }
+
+    /// Caps every frame's write-record budget at `limit`.
+    pub const fn with_frame_kv_update_limit(mut self, limit: u64) -> Self {
+        self.frame_kv_update_limit = limit;
+        self
+    }
+
+    /// Sets the transaction's state-gas limit: the most state gas it may hold.
+    pub const fn with_tx_state_gas_limit(mut self, limit: u64) -> Self {
+        self.tx_state_gas_limit = limit;
+        self
+    }
+
+    /// The transaction's limits on what it keeps, one per dimension of [`LimitUsage`].
+    pub(crate) const fn tx_usage_limit(&self) -> LimitUsage {
+        LimitUsage { data_size: self.tx_data_size_limit, write_records: self.tx_kv_update_limit }
+    }
+
+    /// The caps on every frame's budget, one per dimension of [`LimitUsage`].
+    pub(crate) const fn frame_usage_limit(&self) -> LimitUsage {
+        LimitUsage {
+            data_size: self.frame_data_size_limit,
+            write_records: self.frame_kv_update_limit,
+        }
+    }
 }
 
 /// One write record.
 pub(crate) const WRITE_RECORD: LimitUsage =
     LimitUsage { data_size: WRITE_RECORD_SIZE, write_records: 1 };
 
+/// A budget with no bound in either dimension.
+pub(crate) const UNLIMITED: LimitUsage =
+    LimitUsage { data_size: u64::MAX, write_records: u64::MAX };
+
 impl LimitUsage {
     /// Nothing counted.
     pub const ZERO: Self = Self { data_size: 0, write_records: 0 };
+
+    /// The first dimension in which `self` is over `limit` — data size, then write records — with
+    /// the limit crossed and the usage that crossed it; `None` when both hold.
+    pub(crate) const fn crossing(self, limit: Self) -> Option<(LimitKind, u64, u64)> {
+        if self.data_size > limit.data_size {
+            return Some((LimitKind::DataSize, limit.data_size, self.data_size));
+        }
+        if self.write_records > limit.write_records {
+            return Some((LimitKind::KVUpdate, limit.write_records, self.write_records));
+        }
+        None
+    }
+
+    /// Each counter the smaller of the two.
+    pub(crate) fn min(self, other: Self) -> Self {
+        Self {
+            data_size: self.data_size.min(other.data_size),
+            write_records: self.write_records.min(other.write_records),
+        }
+    }
 
     /// Both counters added, saturating.
     pub const fn saturating_add(self, other: Self) -> Self {
@@ -233,11 +375,14 @@ alloy_sol_types::sol! {
 pub enum LimitKind {
     /// Bytes of data a transaction produces; metered by the data-size limit.
     DataSize,
-    /// Key-value updates; metered by the state-growth and KV limits.
+    /// Key-value updates: the write records a transaction keeps, one per account or storage
+    /// write; metered by the KV limit.
     KVUpdate,
     /// Compute gas, the regular gas a transaction spends; capped by detention.
     ComputeGas,
-    /// Net new state; metered by the state-growth and KV limits.
+    /// Net new state, metered in EIP-8037 state gas by the state-gas limit: the `limit` of its
+    /// stop is the transaction's state-gas limit, in gas. The legacy engine counted the same
+    /// dimension in new accounts and slots.
     StateGrowth,
 }
 
@@ -286,7 +431,7 @@ pub enum LimitCheck {
         /// Whether the limit is a frame budget rather than a transaction-level limit.
         frame_local: bool,
     },
-    /// The transaction is exempt from metering.
+    /// The transaction is exempt from every per-transaction limit: it is the protocol's own work.
     Exempt,
 }
 
@@ -344,6 +489,30 @@ mod tests {
         assert_eq!(ACCESS_LIST_SLOT_SIZE, 32);
         // A storage write and an account write are the same record.
         assert_eq!(WRITE_RECORD, LimitUsage { data_size: WRITE_RECORD_SIZE, write_records: 1 });
+    }
+
+    /// `no_limits` leaves every dimension unlimited: it is what the execution-spec gate installs
+    /// in equivalence mode, and what a bare context runs under. Every field is named, so a limit
+    /// added later cannot be left out of it.
+    #[test]
+    fn test_no_limits_leaves_every_dimension_unlimited() {
+        let EvmTxRuntimeLimits {
+            tx_data_size_limit,
+            frame_data_size_limit,
+            tx_kv_update_limit,
+            frame_kv_update_limit,
+            tx_state_gas_limit,
+        } = EvmTxRuntimeLimits::no_limits();
+        for limit in [
+            tx_data_size_limit,
+            frame_data_size_limit,
+            tx_kv_update_limit,
+            frame_kv_update_limit,
+            tx_state_gas_limit,
+        ] {
+            assert_eq!(limit, u64::MAX);
+        }
+        assert_eq!(EvmTxRuntimeLimits::default(), EvmTxRuntimeLimits::no_limits());
     }
 
     #[test]
