@@ -69,7 +69,7 @@ struct DetainedFrame {
 ///
 /// The one charge no wrapper sees is an opcode's static gas, which the interpreter's step loop
 /// makes before the opcode runs. When it fails, what the halting frame had left counts as
-/// compute: per halting frame, under the failed charge's price, which is at most 4,999, on
+/// compute: per halting frame, less than the failed charge's price, so at most 4,999, on
 /// `SELFDESTRUCT`. Burned gas is counted as compute, so the stop comes earlier, never later. A
 /// frame whose leftover takes the compute past the limit does so without a crossing, so the stop
 /// is its caller's next charge, and the regular ledger at the stop holds that leftover's part
