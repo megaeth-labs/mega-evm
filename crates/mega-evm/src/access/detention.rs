@@ -48,6 +48,12 @@ struct DetainedFrame {
 ///         − burned
 /// ```
 ///
+/// The stipend stays outside compute on purpose: compute is regular gas drawn from the
+/// transaction's own pools. A callee may run up to 2,300 gas on each value call's stipend beyond
+/// the compute counted, and each value call costs its caller at least 9,100 of compute — the
+/// 9,000 of the value transfer and a warm access of 100 — so the gas run after a read is at most
+/// about 25% (2,300 / 9,100) more than the cap.
+///
 /// An interceptor that charges a frame by taking gas off its limit charges compute: its own work,
 /// decoding and recovering a signer, whether it then answers the call or lets the frame run. A
 /// caller's regular gas spent holds all it forwarded, and its contribution takes only the frame's

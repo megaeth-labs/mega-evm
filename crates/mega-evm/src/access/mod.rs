@@ -20,11 +20,14 @@
 //! [`ORACLE_ACCESS_COMPUTE_GAS`](crate::constants::ORACLE_ACCESS_COMPUTE_GAS), by default, and a
 //! caller's limits may set either. A cap of `u64::MAX` caps nothing, and a transaction whose caps
 //! are both unlimited — under [`no_limits`](crate::EvmTxRuntimeLimits::no_limits), as the
-//! execution-spec gate runs — is not detained.
+//! execution-spec gate runs — is not detained. `no_limits` turns detention off together with
+//! every other per-transaction limit: it is for the gate's equivalence mode and for tests, not for
+//! executing the chain.
 //!
 //! `BLOBHASH` is not on the list: it reads the transaction's own blob hashes, which nothing else
-//! decides. A system-originated transaction and a system call are not detained: they are the
-//! protocol maintaining its own state, the Oracle's included.
+//! decides. A system-originated transaction and a system call are not detained, whatever they
+//! read, the block environment included: they are the protocol maintaining its own state, the
+//! Oracle's included, and the same rule exempts them from every per-transaction limit.
 //!
 //! # Where a read is marked
 //!
@@ -43,6 +46,11 @@
 //! The one burn counted as compute is what a frame has left when an opcode's static gas fails,
 //! which no wrapper sees: per halting frame, under the failed charge's price (at most 4,999, on
 //! `SELFDESTRUCT`). Burned gas is counted as compute, so the stop comes earlier, never later.
+//! A value call's stipend is not compute either: compute is regular gas drawn from the
+//! transaction's own pools, and the stipend is gas nobody paid. A callee may run up to 2,300 gas
+//! on each value call's stipend, and each value call costs its caller at least 9,100 of compute,
+//! so the gas run after a read is at most about 25% more than the cap.
+//!
 //! A read sets a limit: the transaction's compute at the read plus the read's cap. The limit only
 //! goes down, so the most restrictive of several reads is the one that binds, whatever their
 //! order.

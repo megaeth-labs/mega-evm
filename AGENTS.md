@@ -194,14 +194,17 @@ Detention caps how much a transaction may still compute once it read such data (
 - **What is volatile.**
   The block environment (`NUMBER`, `TIMESTAMP`, `COINBASE`, `PREVRANDAO`, `GASLIMIT`, `BASEFEE`, `BLOBBASEFEE`, `SLOTNUM`, `BLOCKHASH`); the block beneficiary's account, through every account opcode, the four calls and the EIP-7702 delegate they follow, `SELFDESTRUCT` at either end, a sender or recipient that is the beneficiary and an applied EIP-7702 authority that is; the Oracle's storage, through `SLOAD` in the Oracle's own frame.
   `BLOBHASH` is not: it reads the transaction's own blob hashes.
-  A system-originated transaction and a system call are not detained, and neither is a transaction under `no_limits()`, which the execution-spec gate's runner installs.
+  A system-originated transaction and a system call are not detained, whatever they read, the block environment included: the same rule exempts them from every per-transaction limit.
+  Neither is a transaction under `no_limits()`, which the execution-spec gate's runner installs.
 - **Where a read is marked.**
   Where the Host loads the value (`evm/host.rs`), and committed by the opcode's wrapper once the opcode completed (`evm/instructions.rs`), as a write record is; a load that fails, and a read whose opcode then fails, mark nothing.
 - **The cap.**
   Compute is the regular gas the transaction spends on what it runs, read off `Gas`: a frame's limit less what it has left — its withheld part included, so withheld gas is never spent — less the state and history gas that spilled onto its regular gas; what a halting frame burns is not compute either.
   The transaction's compute is the running frame's regular gas spent plus every suspended caller's, each less its child's gas limit, which takes a value call's stipend off with it, less what halts burned: the regular ledger at every moment, the burns taken out.
+  The stipend stays outside compute on purpose, compute being regular gas drawn from the transaction's own pools: a callee may run up to 2,300 gas on each value call's stipend, and each value call costs its caller at least 9,100 of compute, so the gas run after a read is at most about 25% more than the cap.
   A read sets a limit — the transaction's compute at the read plus its cap, `EvmTxRuntimeLimits::block_env_access_compute_gas_limit` or `oracle_access_compute_gas_limit`, 20,000,000 each by default (`BLOCK_ENV_ACCESS_COMPUTE_GAS`, `ORACLE_ACCESS_COMPUTE_GAS`) — and the limit only goes down, so the most restrictive read binds.
   `no_limits()` leaves both caps unlimited, and a transaction whose caps are both unlimited is not detained: that is how the neutral configuration's runner turns detention off.
+  It turns detention off together with every other per-transaction limit, so it is for equivalence mode and tests, not for executing the chain; `EvmTxRuntimeLimits::default()` and `BlockLimits::default()` detain.
 - **The enforcement point: the withheld part.**
   The revm fork keeps a frame's regular gas in two parts (`GasTracker`): a spendable part, the only one a regular charge draws, and a withheld part.
   Every other reader sees their sum — `GAS`, the 63/64 forward and the clamp on an explicit call gas, the `SSTORE` sentry, the skip-cold checks, the gas a child returns, the reimbursement — and a forward or a state or history spill draws the withheld part first.

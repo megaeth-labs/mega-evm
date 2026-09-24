@@ -223,7 +223,8 @@ pub struct LimitUsage {
 /// caps: the compute a transaction may still spend once it read volatile data. They default to
 /// the spec's, [`BLOCK_ENV_ACCESS_COMPUTE_GAS`] and [`ORACLE_ACCESS_COMPUTE_GAS`]; every other
 /// limit is unlimited unless a caller sets it. [`no_limits`](Self::no_limits) leaves every one
-/// unlimited, the caps included, and a transaction whose caps are both unlimited is not detained.
+/// unlimited, the caps included, and a transaction whose caps are both unlimited is not detained:
+/// limits built from it do not execute the chain.
 ///
 /// [`BLOCK_ENV_ACCESS_COMPUTE_GAS`]: crate::constants::BLOCK_ENV_ACCESS_COMPUTE_GAS
 /// [`ORACLE_ACCESS_COMPUTE_GAS`]: crate::constants::ORACLE_ACCESS_COMPUTE_GAS
@@ -250,10 +251,18 @@ pub struct EvmTxRuntimeLimits {
     pub tx_state_gas_limit: u64,
     /// The compute a transaction may still spend once it read the block environment or the block
     /// beneficiary's account: its compute at the read plus this. Crossing it stops the
-    /// transaction. `u64::MAX` caps nothing.
+    /// transaction.
+    ///
+    /// `u64::MAX` caps nothing, and with the Oracle's cap unlimited too the transaction is not
+    /// detained at all, as under [`no_limits`](Self::no_limits): that is for equivalence runs and
+    /// tests, not for executing the chain, which runs on the spec's cap, the default.
     pub block_env_access_compute_gas_limit: u64,
     /// The compute a transaction may still spend once it read the Oracle's storage: its compute
-    /// at the read plus this. Crossing it stops the transaction. `u64::MAX` caps nothing.
+    /// at the read plus this. Crossing it stops the transaction.
+    ///
+    /// `u64::MAX` caps nothing, and with the block-environment cap unlimited too the transaction
+    /// is not detained at all, as under [`no_limits`](Self::no_limits): that is for equivalence
+    /// runs and tests, not for executing the chain, which runs on the spec's cap, the default.
     pub oracle_access_compute_gas_limit: u64,
 }
 
@@ -268,7 +277,11 @@ impl Default for EvmTxRuntimeLimits {
 
 impl EvmTxRuntimeLimits {
     /// No limit at all: gas detention's caps are unlimited too, so no read of volatile data caps
-    /// anything.
+    /// anything, and no transaction is detained.
+    ///
+    /// It turns detention off together with every other per-transaction limit. It is what the
+    /// execution-spec gate's equivalence mode installs, and what tests use to take the limits
+    /// out; the chain executes on [`Default`], which holds detention's caps at the spec's.
     pub const fn no_limits() -> Self {
         Self {
             tx_data_size_limit: u64::MAX,

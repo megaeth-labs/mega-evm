@@ -122,7 +122,9 @@ impl Default for BlockLimits {
 }
 
 impl BlockLimits {
-    /// No limit at all.
+    /// No limit at all, gas detention's caps included, so no transaction of the block is
+    /// detained ([`EvmTxRuntimeLimits::no_limits`]): for benches and tests, not for executing the
+    /// chain.
     pub const fn no_limits() -> Self {
         Self {
             tx_gas_limit: u64::MAX,
