@@ -28,15 +28,14 @@ Do not add a `_pending/main.rs`.
 | Owning mechanism | Tests | From `tests/` | From `src/` | Keep | Rewrite | Undecided |
 |---|---:|---:|---:|---:|---:|---:|
 | the common execution layer | 21 | 21 | 0 | 21 | 0 | 0 |
-| detention | 83 | 78 | 5 | 73 | 10 | 0 |
+| detention | 88 | 83 | 5 | 73 | 15 | 0 |
 | revert-class aborts | 17 | 17 | 0 | 0 | 17 | 0 |
 | the pre-block system calls | 34 | 22 | 12 | 30 | 4 | 0 |
 | system contract deployment | 11 | 5 | 6 | 11 | 0 | 0 |
 | the oracle and control contracts | 77 | 77 | 0 | 67 | 10 | 0 |
-| native keyless deployment | 39 | 39 | 0 | 7 | 32 | 0 |
 | inspector support | 4 | 4 | 0 | 1 | 3 | 0 |
 | — (undecided: D57 preload-warm cold charging, D58 98/100 forwarding) | 7 | 7 | 0 | 0 | 0 | 7 |
-| **Total** | **293** | **270** | **23** | **210** | **76** | **7** |
+| **Total** | **259** | **236** | **23** | **203** | **49** | **7** |
 
 ## Tests ported in place
 
@@ -277,27 +276,32 @@ These 54 rows run in a real test target now, adapted to the Satin API: the state
 
 ## Tests ported by native keyless deployment
 
-These 36 rows run in a real test target now, adapted to the Satin API: a keyless deployment is a native creation below its `keylessDeploy` call, validated by the same rules and answered in the same error ABI, so what the sandbox merged back is counted, charged and limited as any frame's is. The counts above are lower than the inventory's by exactly these rows.
+These 69 rows run in a real test target now, adapted to the Satin API: a keyless deployment is a native creation below its `keylessDeploy` call, validated by the same rules and answered in the same error ABI, so what the sandbox merged back is counted, charged and limited as any frame's is. The counts above are lower than the inventory's by exactly these rows.
 
 | Legacy file | Owner in the inventory | Tests | Now in |
 |---|---|---:|---|
-| `rex2/keyless_deploy.rs` | native keyless deployment (18) | 18 | `tests/system/keyless/rules.rs` |
+| `rex2/keyless_deploy.rs` | native keyless deployment (36) | 36 | `tests/system/keyless/charges.rs`, `tests/system/keyless/deploy.rs`, `tests/system/keyless/rules.rs` |
+| `rex4/keyless_deploy.rs` | native keyless deployment (2) | 2 | `tests/system/keyless/deploy.rs` |
 | `rex5/db_error.rs` | native keyless deployment (3) | 3 | `tests/system/keyless/rules.rs` |
-| `rex5/keyless_fee_free.rs` | native keyless deployment (9) | 9 | `tests/system/keyless/rules.rs` |
+| `rex5/keyless_empty_code_logs.rs` | native keyless deployment (2) | 2 | `tests/system/keyless/deploy.rs` |
+| `rex5/keyless_fee_free.rs` | native keyless deployment (12) | 12 | `tests/system/keyless/deploy.rs`, `tests/system/keyless/rules.rs` |
 | `rex5/keyless_gas_cap_postcap_recheck.rs` | native keyless deployment (3) | 3 | `tests/system/keyless/rules.rs` |
-| `rex5/keyless_replay_barrier.rs` | native keyless deployment (1) | 1 | `tests/system/keyless/rules.rs` |
+| `rex5/keyless_replay_barrier.rs` | native keyless deployment (3) | 3 | `tests/system/keyless/deploy.rs`, `tests/system/keyless/rules.rs` |
+| `rex5/sandbox_accounting.rs` | native keyless deployment (3) | 3 | `tests/system/keyless/charges.rs`, `tests/system/keyless/deploy.rs` |
+| `rex6/keyless_sandbox_hardening.rs` | native keyless deployment (3) | 3 | `tests/system/keyless/deploy.rs` |
 | `src/sandbox/execution.rs` | native keyless deployment (2) | 2 | `tests/system/keyless/rules.rs` |
-| **Total** | | **36** | |
+| **Total** | | **69** | |
 
 ## Tests retired after the inventory
 
-These 21 rows were parked when the inventory was applied and have since been retired: the mechanism that owns them landed and left them nothing to pin, so no later mechanism will port them.
+These 22 rows were parked when the inventory was applied and have since been retired: the mechanism that owns them landed and left them nothing to pin, so no later mechanism will port them.
 They are not counted above.
 
 | Legacy file | Owner in the inventory | Tests | Why |
 |---|---|---:|---|
 | `mini_rex/compute_gas_limit.rs` | compute gas (2) | 2 | Satin's compute limit is the execution cap the spec fixes, not a limit a caller sets, so there is no zero or one limit to configure; a gas limit below a transaction's intrinsic gas is rejected at validation |
 | `rex5/callcode_storage_gas.rs` | SALT pricing (3) | 3 | Satin's `CALLCODE` cannot reach a state gas pricing site: it sends value to the frame's own account, which exists, so it adds no account leaf and asks for no price. There is no pricing-path account inspection left to fail |
+| `rex5/sandbox_accounting.rs` | native keyless deployment (1) | 1 | The residual-overflow halt was the sandbox's safety net for the usage it merged after the deployment ran; a native deployment is held to every limit as it runs, and a crossing stops it as it stops any frame |
 | `src/evm/host.rs` | SALT pricing (1) | 1 | the pricing hook inspects no account: the fork decides whether a target exists and the hook only prices what it is told to, so there is no delegation walk on the pricing path to guard |
 | `src/external/gas.rs` | SALT pricing (4) | 4 | these pin a helper at a legacy spec boundary: it is served from one rung and asserts below it. Satin is a single spec and has no gate of its own, so there is no boundary left for them to pin |
 | `src/system/control.rs` | system contract deployment (2) | 2 | Satin is a single spec with no per-fork deploy gate: the contract is deployed at every block; Satin does not overwrite foreign code: a system address with different code is an error, not an in-place upgrade |
@@ -305,7 +309,7 @@ They are not counted above.
 | `src/system/keyless_deploy.rs` | system contract deployment (1) | 1 | Satin does not overwrite foreign code: a system address with different code is an error, not an in-place upgrade |
 | `src/system/limit_control.rs` | system contract deployment (2) | 2 | Satin is a single spec with no per-fork deploy gate: the contract is deployed at every block; Satin does not overwrite foreign code: a system address with different code is an error, not an in-place upgrade |
 | `src/system/oracle.rs` | system contract deployment (3) | 3 | Satin does not overwrite foreign code: a system address with different code is an error, not an in-place upgrade; Satin is a single spec and ships one Oracle bytecode; there is no per-fork version gate to pin |
-| **Total** | | **21** | |
+| **Total** | | **22** | |
 
 ## Tests the inventory assigns to the Satin skeleton that are parked under another mechanism
 
@@ -332,6 +336,11 @@ They are not counted above.
 | `block_executor/sequencer_registry.rs` | `test_sequencer_change_does_not_affect_system_address` | the pre-block system calls | the pre-block system calls own applying a pending rotation |
 | `block_executor/sequencer_registry.rs` | `test_system_address_change` | the pre-block system calls | the pre-block system calls own applying a pending rotation |
 | `block_executor/sequencer_registry.rs` | `test_system_tx_uses_resolved_system_address` | the pre-block system calls | the pre-block system calls own resolving the live system address |
+| `rex5/sandbox_accounting.rs` | `test_rex5_sandbox_beneficiary_balance_access_merged_into_parent_volatile_tracker` | detention | a keyless deployment's volatile-data access is its creation frame's, as any frame's is; the tracker that sees it is detention's |
+| `rex5/sandbox_accounting.rs` | `test_rex5_sandbox_block_env_access_merged_into_parent_volatile_tracker` | detention | a keyless deployment's volatile-data access is its creation frame's, as any frame's is; the tracker that sees it is detention's |
+| `rex5/sandbox_accounting.rs` | `test_rex5_sandbox_coinbase_access_merged_into_parent_volatile_tracker` | detention | a keyless deployment's volatile-data access is its creation frame's, as any frame's is; the tracker that sees it is detention's |
+| `rex5/sandbox_accounting.rs` | `test_rex5_sandbox_oracle_access_merged_into_parent_volatile_tracker` | detention | a keyless deployment's volatile-data access is its creation frame's, as any frame's is; the tracker that sees it is detention's |
+| `rex5/sandbox_accounting.rs` | `test_rex5_sandbox_volatile_merge_runs_on_in_sandbox_failure_empty_code` | detention | a keyless deployment's volatile-data access is its creation frame's, as any frame's is; the tracker that sees it is detention's |
 | `rex6/eip7702_authority_accounting.rs` | `test_rex6_authority_beneficiary_triggers_detention` | detention | detention owns whether an applied authority that is the block beneficiary lowers the compute cap, and what a compute overflow before the first frame does to the authorizations |
 | `rex6/eip7702_authority_accounting.rs` | `test_rex6_authority_compute_overflow_skips_authorities` | detention | detention owns whether an applied authority that is the block beneficiary lowers the compute cap, and what a compute overflow before the first frame does to the authorizations |
 
@@ -352,7 +361,6 @@ Each cell lists `disposition count (mechanism · decision)`.
 | `mini_rex/oracle.rs` | 12 | rewrite 3 (revert-class aborts · D48); keep 5 (detention); keep 4 (the oracle and control contracts) |
 | `mini_rex/tx_data_and_kv_update_limit.rs` | 4 | rewrite 4 (revert-class aborts · D48) |
 | `rex/oracle.rs` | 3 | rewrite 3 (detention · D08 (mark at actual load: same outcome via SLOAD)) |
-| `rex2/keyless_deploy.rs` | 18 | rewrite 13 (native keyless deployment · native CREATE sub-frame; D37/D38); keep 3 (native keyless deployment · validation rules 1-9 unchanged); rewrite 2 (native keyless deployment · D36) |
 | `rex2/oracle_hint.rs` | 6 | keep 6 (the oracle and control contracts) |
 | `rex3/oracle_gas_limit.rs` | 8 | keep 7 (detention · D08); rewrite 1 (revert-class aborts · D48) |
 | `rex3/system_address.rs` | 2 | keep 2 (detention · D51) |
@@ -362,23 +370,18 @@ Each cell lists `disposition count (mechanism · decision)`.
 | `rex4/frame_limits.rs` | 1 | rewrite 1 (revert-class aborts · D48) |
 | `rex4/gas_detention.rs` | 5 | keep 3 (detention); rewrite 2 (revert-class aborts · D48/D53) |
 | `rex4/intrinsic_limit_bypass.rs` | 1 | rewrite 1 (inspector support · D41) |
-| `rex4/keyless_deploy.rs` | 2 | keep 2 (native keyless deployment · native sub-frame inherits env) |
 | `rex4/limit_control.rs` | 9 | rewrite 9 (the oracle and control contracts · D40 (remaining compute derived from Gas)) |
 | `rex5/apply_pending_changes_gas_budget.rs` | 4 | rewrite 4 (the pre-block system calls · D51 (system source m = 1; the system-call reservoir split)) |
 | `rex5/create2_empty_initcode.rs` | 5 | keep 5 (the common execution layer · canonical revm behaviour) |
 | `rex5/create2_resize_gas_metering.rs` | 2 | keep 2 (the common execution layer · canonical behaviour) |
-| `rex5/keyless_empty_code_logs.rs` | 2 | rewrite 2 (native keyless deployment · native sub-frame keeps logs inherently) |
-| `rex5/keyless_fee_free.rs` | 3 | rewrite 3 (native keyless deployment · D16/D37/D38 (GASPRICE native; materialisation explicit)) |
-| `rex5/keyless_replay_barrier.rs` | 2 | rewrite 2 (native keyless deployment · D36 (real nonce increment)) |
 | `rex5/oracle_hint_metering.rs` | 9 | keep 7 (the oracle and control contracts · D50 (hint not charged history; data-size metering kept)); rewrite 1 (the oracle and control contracts · D11 intrinsic number); rewrite 1 (revert-class aborts · D48) |
 | `rex5/pre_block_system_calls.rs` | 11 | keep 11 (the pre-block system calls) |
-| `rex5/sandbox_accounting.rs` | 9 | rewrite 9 (native keyless deployment · native sub-frame: parent tracker sees child directly) |
+| `rex5/sandbox_accounting.rs` | 5 | rewrite 5 (detention · native sub-frame: parent tracker sees child directly) |
 | `rex5/selfdestruct_beneficiary.rs` | 2 | keep 2 (detention) |
 | `rex6/beneficiary_detention.rs` | 13 | keep 13 (detention · D08) |
 | `rex6/create2_metering_order.rs` | 11 | keep 11 (the common execution layer · canonical halt reasons; D04 512 KiB boundary) |
 | `rex6/eip7702_authority_accounting.rs` | 2 | rewrite 2 (detention · D12/D28/D31/D45 (7702 matrix; SALT pricing for the SALT half)) |
 | `rex6/error_paths.rs` | 2 | keep 2 (the common execution layer · canonical) |
-| `rex6/keyless_sandbox_hardening.rs` | 3 | rewrite 1 (native keyless deployment · D44 / EIP-6780 native); keep 2 (native keyless deployment · canonical CREATE rules) |
 | `rex6/oracle_hint_volatile_access.rs` | 4 | keep 4 (the oracle and control contracts) |
 | `rex6/sequencer_registry_rotation.rs` | 5 | keep 5 (system contract deployment) |
 | `src/access/volatile.rs` | 4 | keep 4 (detention) |
