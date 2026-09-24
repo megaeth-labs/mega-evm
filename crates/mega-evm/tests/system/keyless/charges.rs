@@ -183,6 +183,41 @@ fn test_the_call_pays_the_create_opcodes_regular_gas() {
     }
 }
 
+/// `gasUsed` is what the creation spent before refunds: a constructor that fills a slot and
+/// clears it again earns a refund, which is the transaction's, as any frame's is. The charges add
+/// up to the transaction's spend before its refund, and the receipt's gas is that spend less the
+/// refund.
+#[test]
+fn test_gas_used_counts_the_creations_spend_before_its_refund() {
+    let prefix = mega_evm::test_utils::BytecodeBuilder::default()
+        .sstore(U256::ZERO, U256::ONE)
+        .sstore(U256::ZERO, U256::ZERO)
+        .build_vec();
+    let init_code = constructor(&prefix, &runtime(1));
+    let opcode = create_regular(init_code.len());
+    let deployment = Deployment::new(init_code);
+    let upfront =
+        entry(GasId::new_account_state_gas()) + entry(GasId::create_state_gas()) + 2 * record();
+    for gas_limit in GAS_LIMITS {
+        let outcome = deploy(system_db(), &deployment, gas_limit);
+        let gas_used = returned(&outcome).gasUsed;
+        let refund = outcome.result.gas().inner_refunded();
+        assert!(refund > 0, "the constructor earns a refund at {gas_limit}");
+        let [total, ..] =
+            beyond(&outcome, &reference(deployment.call_data(LARGE_OVERRIDE), gas_limit));
+        assert_eq!(
+            total,
+            KEYLESS_DEPLOY_OVERHEAD_GAS + opcode + upfront + gas_used,
+            "at {gas_limit}"
+        );
+        assert_eq!(
+            outcome.result.gas().tx_gas_used(),
+            outcome.result.gas().total_gas_spent() - refund,
+            "at {gas_limit}",
+        );
+    }
+}
+
 /// Both upfront charges are priced by the SALT bucket they land in — the signer's account in the
 /// signer's, the created account in the deploy address's — and regular gas does not move with it.
 #[test]
