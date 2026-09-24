@@ -76,8 +76,7 @@ fn test_a_blocks_environments_come_from_the_factory() {
     let factory = MegaBlockExecutorFactory::new(
         OpAlloyReceiptBuilder::default(),
         common::chain_spec(),
-        MegaEvmFactory::new()
-            .with_external_env_factory(Factory { envs: envs.clone(), asked: asked.clone() }),
+        MegaEvmFactory::new().with_external_env_factory(Factory { envs, asked: asked.clone() }),
     );
 
     let mut db = common::database();
