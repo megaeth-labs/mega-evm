@@ -16,9 +16,9 @@ use mega_evm::{
     constants::{BLOCK_ENV_ACCESS_COMPUTE_GAS, ORACLE_ACCESS_COMPUTE_GAS, TX_GAS_LIMIT_CAP},
     system::{IMegaLimitControl, LIMIT_CONTROL_ADDRESS, ORACLE_CONTRACT_ADDRESS},
     test_utils::{op_transaction, zero_fee_l1_block_info, BytecodeBuilder, MemoryDatabase},
-    volatile_data_access_disabled_revert_data, EvmTxRuntimeLimits, LimitCheck, LimitKind,
-    MegaContext, MegaEvm, MegaLimitExceeded, MegaSpecId, MegaTransaction, MegaTransactionOutcome,
-    VolatileDataAccess,
+    volatile_data_access_disabled_revert_data, BlockLimits, EvmTxRuntimeLimits, LimitCheck,
+    LimitKind, MegaContext, MegaEvm, MegaLimitExceeded, MegaSpecId, MegaTransaction,
+    MegaTransactionOutcome, VolatileDataAccess,
 };
 use revm::{
     bytecode::opcode::*,
@@ -654,6 +654,39 @@ fn test_a_callers_limits_set_the_caps() {
             "{:?}",
             run.outcome.result
         );
+    }
+}
+
+/// The default runtime limits detain: [`EvmTxRuntimeLimits::default`], and the transaction half
+/// of [`BlockLimits::default`] that a block executor installs, hold each kind of read to the
+/// spec's cap. It is `no_limits` that turns detention off, with every other per-transaction limit.
+#[test]
+fn test_the_default_limits_detain() {
+    let oracle = BytecodeBuilder::default().append_many([PUSH0, SLOAD, POP, STOP]).build();
+    let timestamp = op(BytecodeBuilder::default(), TIMESTAMP).stop().build();
+    let reads_oracle =
+        call(BytecodeBuilder::default(), CALL, ORACLE_CONTRACT_ADDRESS).stop().build();
+    for limits in [EvmTxRuntimeLimits::default(), BlockLimits::default().tx_runtime_limits] {
+        let run_under = |limits: EvmTxRuntimeLimits, code: &Bytes| {
+            let db = MemoryDatabase::default()
+                .account_code(CONTRACT, code.clone())
+                .account_code(ORACLE_CONTRACT_ADDRESS, oracle.clone());
+            let mut evm = MegaEvm::new(context(db).with_tx_runtime_limits(limits));
+            run_on(&mut evm, tx(CALLER, CONTRACT, BELOW))
+        };
+        let run = run_under(limits, &timestamp);
+        assert!(run.detains);
+        assert_eq!(run.limit, Some(2 + BLOCK_ENV_ACCESS_COMPUTE_GAS), "TIMESTAMP was the first");
+        let run = run_under(limits, &reads_oracle);
+        let limit = run.limit.unwrap();
+        assert!(
+            (ORACLE_ACCESS_COMPUTE_GAS..ORACLE_ACCESS_COMPUTE_GAS + 100_000).contains(&limit),
+            "{limit}"
+        );
+
+        let run = run_under(EvmTxRuntimeLimits::no_limits(), &timestamp);
+        assert!(!run.detains);
+        assert_eq!(run.limit, None);
     }
 }
 
