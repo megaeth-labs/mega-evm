@@ -31,11 +31,11 @@ Do not add a `_pending/main.rs`.
 | revert-class aborts | 17 | 17 | 0 | 0 | 17 | 0 |
 | the pre-block system calls | 34 | 22 | 12 | 30 | 4 | 0 |
 | system contract deployment | 11 | 5 | 6 | 11 | 0 | 0 |
-| the oracle and control contracts | 23 | 23 | 0 | 13 | 10 | 0 |
+| the oracle and control contracts | 9 | 9 | 0 | 0 | 9 | 0 |
 | native keyless deployment | 75 | 73 | 2 | 29 | 46 | 0 |
 | inspector support | 4 | 4 | 0 | 1 | 3 | 0 |
 | — (undecided: D57 preload-warm cold charging, D58 98/100 forwarding) | 7 | 7 | 0 | 0 | 0 | 7 |
-| **Total** | **192** | **172** | **20** | **105** | **80** | **7** |
+| **Total** | **178** | **158** | **20** | **92** | **79** | **7** |
 
 ## Tests ported in place
 
@@ -300,14 +300,16 @@ These 83 rows run in a real test target now, adapted to the Satin API and to the
 
 ## Tests ported by the oracle and control contracts
 
-These 54 rows run in a real test target now, adapted to the Satin API: the Oracle's storage is read through the oracle environment, `MegaAccessControl` steers gas detention's switch, and `remainingComputeGas()` answers from the caller's regular gas and detention's allowance, as the decisions they cite fix. The counts above are lower than the inventory's by exactly these rows.
+These 68 rows run in a real test target now, adapted to the Satin API: the Oracle's storage is read through the oracle environment, `MegaAccessControl` steers gas detention's switch, and `remainingComputeGas()` answers from the caller's regular gas and detention's allowance, as the decisions they cite fix. The counts above are lower than the inventory's by exactly these rows.
 
 | Legacy file | Owner in the inventory | Tests | Now in |
 |---|---|---:|---|
 | `mini_rex/oracle.rs` | the oracle and control contracts (4) | 4 | `tests/system/oracle_storage.rs` |
+| `rex2/oracle_hint.rs` | the oracle and control contracts (6) | 6 | `tests/system/oracle.rs` |
 | `rex4/access_control.rs` | the oracle and control contracts (46) | 46 | `tests/system/access_control.rs` |
+| `rex5/oracle_hint_metering.rs` | the oracle and control contracts (8) | 8 | `tests/system/oracle.rs` |
 | `rex6/oracle_hint_volatile_access.rs` | the oracle and control contracts (4) | 4 | `tests/system/oracle.rs` |
-| **Total** | | **54** | |
+| **Total** | | **68** | |
 
 ## Tests retired after the inventory
 
@@ -368,7 +370,6 @@ Each cell lists `disposition count (mechanism · decision)`.
 | `mini_rex/oracle.rs` | 3 | rewrite 3 (revert-class aborts · D48) |
 | `mini_rex/tx_data_and_kv_update_limit.rs` | 4 | rewrite 4 (revert-class aborts · D48) |
 | `rex2/keyless_deploy.rs` | 36 | rewrite 13 (native keyless deployment · native CREATE sub-frame; D37/D38); keep 19 (native keyless deployment · validation rules 1-9 unchanged); keep 1 (native keyless deployment · rule 4 (tx nonce == 0) unchanged); rewrite 3 (native keyless deployment · D36) |
-| `rex2/oracle_hint.rs` | 6 | keep 6 (the oracle and control contracts) |
 | `rex3/oracle_gas_limit.rs` | 1 | rewrite 1 (revert-class aborts · D48) |
 | `rex4/beneficiary_detention.rs` | 1 | rewrite 1 (revert-class aborts · D48) |
 | `rex4/create_safety.rs` | 1 | keep 1 (the common execution layer · canonical revm behaviour) |
@@ -385,7 +386,7 @@ Each cell lists `disposition count (mechanism · decision)`.
 | `rex5/keyless_fee_free.rs` | 12 | rewrite 8 (native keyless deployment · D16/D37/D38 (GASPRICE native; materialisation explicit)); keep 4 (native keyless deployment · rules unchanged) |
 | `rex5/keyless_gas_cap_postcap_recheck.rs` | 3 | rewrite 3 (native keyless deployment · native sub-frame gas handling) |
 | `rex5/keyless_replay_barrier.rs` | 3 | rewrite 3 (native keyless deployment · D36 (real nonce increment)) |
-| `rex5/oracle_hint_metering.rs` | 9 | keep 7 (the oracle and control contracts · D50 (hint not charged history; data-size metering kept)); rewrite 1 (the oracle and control contracts · D11 intrinsic number); rewrite 1 (revert-class aborts · D48) |
+| `rex5/oracle_hint_metering.rs` | 1 | rewrite 1 (revert-class aborts · D48) |
 | `rex5/pre_block_system_calls.rs` | 11 | keep 11 (the pre-block system calls) |
 | `rex5/sandbox_accounting.rs` | 9 | rewrite 9 (native keyless deployment · native sub-frame: parent tracker sees child directly) |
 | `rex6/create2_metering_order.rs` | 11 | keep 11 (the common execution layer · canonical halt reasons; D04 512 KiB boundary) |
