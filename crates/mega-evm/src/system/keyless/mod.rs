@@ -17,10 +17,11 @@
 //! What the native frame means for a deployment:
 //!
 //! - `ORIGIN` and `GASPRICE` in the init code are the transaction's own.
-//! - The signer's nonce is bumped by the creation, as any creator's is, and stays bumped when the
-//!   deployment fails: that is the replay barrier. A deployment is refused once the signer's nonce
-//!   is above 1 (`SignerNonceTooHigh`), so a signer gets at most two attempts that fail — the first
-//!   bumps its nonce to 1, the second to 2 — and a third is refused.
+//! - The signer's nonce is bumped by the creation, as any creator's is, and a deployment is refused
+//!   once the signer's nonce is above 1 (`SignerNonceTooHigh`). A deployment that fails keeps the
+//!   bump only from 0 to 1, which is the replay barrier; from nonce 1 it leaves the nonce at 1, and
+//!   keeps no record of the bump. The call is permissionless and the signed transaction public, so
+//!   no number of failing calls, whoever makes them, gets a signer's deployment refused.
 //! - A signer with no account is charged its account as state gas, once, by the call: the nonce
 //!   bump creates it, and no other charge does.
 //! - The deployed contract's account is charged as the `CREATE` opcode charges it, and given back

@@ -3,8 +3,9 @@
 //!
 //! The rules and the error ABI are the legacy engine's. What moved is the balance rule, which
 //! asks the signer for the transaction's value alone — a deployment pays no gas out of the
-//! signer's balance — and rule 4, which now counts real nonces: the creation bumps the signer's
-//! nonce whether it succeeds or not, so a signer gets two attempts that fail and not a third.
+//! signer's balance — and rule 4, which now counts real nonces: a deployment that succeeds bumps
+//! the signer's nonce as any creation does, and one that fails keeps the bump only from 0 to 1.
+//! A signer at nonce 1 stays there however often its deployment fails, whoever submits it.
 
 use alloy_primitives::{address, keccak256, Signature};
 use mega_evm::{
@@ -13,18 +14,20 @@ use mega_evm::{
     system::keyless::{
         tests::{
             CREATE2_FACTORY_CONTRACT, CREATE2_FACTORY_DEPLOYER, CREATE2_FACTORY_TX,
-            NON_CONTRACT_CREATION_TX, POST_EIP155_CHAIN_1_TX,
+            EIP1820_CONTRACT, EIP1820_DEPLOYER, EIP1820_TX, NON_CONTRACT_CREATION_TX,
+            POST_EIP155_CHAIN_1_TX,
         },
         KEYLESS_DEPLOY_OVERHEAD_GAS,
     },
-    test_utils::{ErrorInjectingDatabase, InjectedDbError},
+    test_utils::{BytecodeBuilder, ErrorInjectingDatabase, InjectedDbError},
     MegaSpecId, MegaTransactionError, TestExternalEnvs,
 };
 use revm::{
-    bytecode::opcode::{PUSH0, REVERT},
+    bytecode::opcode::{INVALID, MSTORE, PUSH0, REVERT},
     context::{result::EVMError, CfgEnv},
     context_interface::cfg::GasId,
     state::{AccountInfo, Bytecode},
+    DatabaseCommit,
 };
 
 use super::*;
@@ -350,37 +353,195 @@ fn test_keyless_deploy_signer_nonce_too_high() {
     }
 }
 
-/// Rule 4 counts the creation's own nonce bumps: a signer whose deployment fails twice — the
-/// first bump takes it from 0 to 1, the second from 1 to 2 — is refused the third time. The
-/// deploy address stays the same through all three.
+/// Rule 4 counts real nonces, and a deployment that fails takes its signer from 0 to 1 and no
+/// further: a signer at nonce 1 stays there however often its deployment fails.
 #[test]
-fn test_satin_caps_a_signer_at_two_failing_attempts() {
+fn test_a_signer_at_nonce_one_stays_there_however_often_it_fails() {
+    let deployment = Deployment::new(Bytes::from_static(&[PUSH0, PUSH0, REVERT]));
     for gas_limit in GAS_LIMITS {
-        let deployment = Deployment::new(Bytes::from_static(&[PUSH0, PUSH0, REVERT]));
-        let mut db = system_db();
-        for attempt in 1..=2 {
+        let mut db = system_db().account_nonce(deployment.signer, 1);
+        for attempt in 0..10 {
             let outcome = run_nth(
                 db.clone(),
                 deployment.call_data(LARGE_OVERRIDE),
                 gas_limit,
                 EvmTxRuntimeLimits::no_limits(),
-                attempt - 1,
+                attempt,
             );
             assert!(
                 matches!(failure(&outcome), KeylessDeployError::ExecutionReverted { .. }),
-                "attempt {attempt}",
+                "attempt {attempt} at {gas_limit}",
             );
-            assert_eq!(nonce(&outcome, deployment.signer), attempt, "attempt {attempt}");
-            revm::DatabaseCommit::commit(&mut db, outcome.result_and_state.state);
+            assert_eq!(nonce(&outcome, deployment.signer), 1, "attempt {attempt} at {gas_limit}");
+            db.commit(outcome.result_and_state.state);
         }
-        let third = run_nth(
-            db,
-            deployment.call_data(LARGE_OVERRIDE),
-            gas_limit,
+    }
+}
+
+/// Anybody may submit a signer's public transaction with a gas limit it cannot deploy on — here,
+/// the signed gas limit, which is too little — and make it fail, as often as it likes: the signer
+/// ends at nonce 1, and a relayer that forwards enough gas deploys at the signer's address.
+#[test]
+fn test_failing_attempts_by_anybody_leave_the_address_deployable() {
+    // Signed for chains that charge no state gas for deployed code: without a reservoir, the
+    // signed gas limit does not cover the code a canonical deployment deposits.
+    for deploying_at in GAS_LIMITS {
+        for (tx, signed, signer, address) in [
+            (CREATE2_FACTORY_TX, 100_000, CREATE2_FACTORY_DEPLOYER, CREATE2_FACTORY_CONTRACT),
+            (EIP1820_TX, 800_000, EIP1820_DEPLOYER, EIP1820_CONTRACT),
+        ] {
+            fail_then_deploy(tx, signed, signer, address, GAS_LIMITS[0], deploying_at);
+        }
+    }
+    // Init code that expands memory past what its signed gas limit pays for fails on it, whatever
+    // the pools.
+    let expanding =
+        BytecodeBuilder::default().push_number(0_u64).push_number(0x1_0000_u64).append(MSTORE);
+    let tight =
+        Deployment::signed(0, 10_000, U256::ZERO, constructor(&expanding.build_vec(), &runtime(1)));
+    for failing_at in GAS_LIMITS {
+        for deploying_at in GAS_LIMITS {
+            fail_then_deploy(
+                &tight.tx,
+                10_000,
+                tight.signer,
+                tight.address,
+                failing_at,
+                deploying_at,
+            );
+        }
+    }
+}
+
+/// Submits `tx` three times with `gasLimitOverride` at its `signed` gas limit, at `failing_at`,
+/// and requires each to fail with the signer at nonce 1; then submits it with a large override
+/// at `deploying_at`, and requires it to deploy at `address`.
+fn fail_then_deploy(
+    tx: &[u8],
+    signed: u64,
+    signer: Address,
+    address: Address,
+    failing_at: u64,
+    deploying_at: u64,
+) {
+    let mut db = system_db();
+    for attempt in 0..3 {
+        let outcome = run_nth(
+            db.clone(),
+            keyless_deploy_call(tx, U256::from(signed)),
+            failing_at,
+            EvmTxRuntimeLimits::no_limits(),
+            attempt,
+        );
+        assert!(
+            matches!(failure(&outcome), KeylessDeployError::ExecutionHalted { .. }),
+            "attempt {attempt} at {failing_at}",
+        );
+        assert_eq!(nonce(&outcome, signer), 1, "attempt {attempt} at {failing_at}");
+        db.commit(outcome.result_and_state.state);
+    }
+    let deployed = run_nth(
+        db,
+        keyless_deploy_call(tx, U256::from(LARGE_OVERRIDE)),
+        deploying_at,
+        EvmTxRuntimeLimits::no_limits(),
+        3,
+    );
+    assert_eq!(returned(&deployed).deployedAddress, address, "at {deploying_at}");
+    assert_eq!(nonce(&deployed, signer), 2, "a deployment that succeeds bumps the nonce");
+}
+
+/// A deployment that fails from nonce 1 keeps nothing of the signer: its records, its data size,
+/// its history gas and its history bytes are those of a transaction that bumped no nonce — the
+/// reference, which pays the same intrinsic gas and writes nothing — and it spends exactly one
+/// record's history less than the same failure from nonce 0, which keeps its bump.
+#[test]
+fn test_a_failure_from_nonce_one_keeps_no_record_of_the_signer() {
+    let deployment = Deployment::new(Bytes::from_static(&[PUSH0, PUSH0, REVERT]));
+    for gas_limit in GAS_LIMITS {
+        let at_one =
+            deploy(system_db().account_nonce(deployment.signer, 1), &deployment, gas_limit);
+        let at_zero = deploy(db_for(&deployment, U256::ONE), &deployment, gas_limit);
+        assert_eq!(nonce(&at_one, deployment.signer), 1, "at {gas_limit}");
+        assert_eq!(nonce(&at_zero, deployment.signer), 1, "at {gas_limit}");
+
+        let reference = reference(deployment.call_data(LARGE_OVERRIDE), gas_limit);
+        let [_, _, state, history_gas, history_bytes] = beyond(&at_one, &reference);
+        assert_eq!([state, history_gas, history_bytes], [0; 3], "at {gas_limit}");
+        assert_eq!(at_one.usage, reference.usage, "at {gas_limit}");
+
+        assert_eq!(at_zero.usage.write_records, 1, "the signer's nonce record");
+        assert_eq!(beyond(&at_zero, &at_one), [record(), 0, 0, record(), 40], "at {gas_limit}");
+    }
+}
+
+/// However a deployment from nonce 1 fails — its init code reverts or halts, it deploys no code,
+/// or a limit stops its creation at its start — the signer stays at 1 and its nonce record goes.
+/// The record stays only when a creation that deployed no code moved value out of the signer's
+/// account: the record then stands for that write. A deployment that deployed no code keeps the
+/// record of the account it created.
+#[test]
+fn test_every_way_a_deployment_from_nonce_one_fails_leaves_the_nonce_at_one() {
+    let one = U256::ONE;
+    let kv_share_of_one = EvmTxRuntimeLimits::no_limits().with_tx_kv_update_limit(2);
+    let cases = [
+        (
+            "revert carrying value",
+            Deployment::with_value(Bytes::from_static(&[PUSH0, PUSH0, REVERT]), one),
+            EvmTxRuntimeLimits::no_limits(),
+            0,
+        ),
+        (
+            "halt",
+            Deployment::new(Bytes::from_static(&[INVALID])),
+            EvmTxRuntimeLimits::no_limits(),
+            0,
+        ),
+        ("no code", Deployment::new(Bytes::new()), EvmTxRuntimeLimits::no_limits(), 1),
+        (
+            "no code carrying value",
+            Deployment::with_value(Bytes::new(), one),
             EvmTxRuntimeLimits::no_limits(),
             2,
-        );
-        assert_eq!(refusal(&third), KeylessDeployError::SignerNonceTooHigh { signer_nonce: 2 });
+        ),
+        ("stopped at its start", Deployment::new(deploying(&runtime(1))), kv_share_of_one, 0),
+    ];
+    for gas_limit in GAS_LIMITS {
+        for (name, deployment, limits, records) in &cases {
+            let db = db_for(deployment, U256::from(1_000)).account_nonce(deployment.signer, 1);
+            let outcome = run_with(db, deployment.call_data(LARGE_OVERRIDE), gas_limit, *limits);
+            failure(&outcome);
+            assert_eq!(nonce(&outcome, deployment.signer), 1, "{name} at {gas_limit}");
+            assert_eq!(outcome.usage.write_records, *records, "{name} at {gas_limit}");
+            let reference = reference(deployment.call_data(LARGE_OVERRIDE), gas_limit);
+            let [_, _, _, history_gas, history_bytes] = beyond(&outcome, &reference);
+            assert_eq!(
+                [history_gas, history_bytes],
+                [records * record(), records * 40],
+                "{name} at {gas_limit}",
+            );
+        }
+    }
+}
+
+/// A signer that sends its own deployment is at nonce 1 once its transaction bumped it, so a
+/// deployment that fails leaves it there; it makes no record of its own to take back.
+#[test]
+fn test_a_signer_that_sends_its_failing_deployment_ends_at_nonce_one() {
+    let deployment = Deployment::new(Bytes::from_static(&[PUSH0, PUSH0, REVERT]));
+    for gas_limit in GAS_LIMITS {
+        let mut tx =
+            call_tx(KEYLESS_DEPLOY_ADDRESS, deployment.call_data(LARGE_OVERRIDE), U256::ZERO);
+        tx.0.base.gas_limit = gas_limit;
+        tx.0.base.caller = deployment.signer;
+        let outcome = MegaEvm::new(context(system_db()))
+            .execute_transaction(tx)
+            .expect("a valid transaction");
+        assert!(matches!(failure(&outcome), KeylessDeployError::ExecutionReverted { .. }));
+        assert_eq!(nonce(&outcome, deployment.signer), 1, "the transaction's own bump alone");
+        assert_eq!(outcome.usage.write_records, 0, "at {gas_limit}");
+        let reference = reference(deployment.call_data(LARGE_OVERRIDE), gas_limit);
+        assert_eq!(outcome.usage.data_size, reference.usage.data_size, "at {gas_limit}");
     }
 }
 

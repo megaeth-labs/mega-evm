@@ -186,6 +186,27 @@ fn test_the_signers_record_can_put_the_call_over_its_budget() {
     }
 }
 
+/// A failed creation by a signer at nonce 1 leaves no record on the call: its nonce bump is taken
+/// back, and the record with it. The same budget then holds the call, which answers with the
+/// creation's own stop, and the signer stays at 1.
+#[test]
+fn test_a_failure_from_nonce_one_leaves_the_call_within_its_budget() {
+    let deployment = Deployment::new(deploying(&runtime(1)));
+    for gas_limit in GAS_LIMITS {
+        let outcome = run_with(
+            system_db().account_nonce(deployment.signer, 1),
+            deployment.call_data(LARGE_OVERRIDE),
+            gas_limit,
+            EvmTxRuntimeLimits::no_limits().with_frame_data_size_limit(39),
+        );
+        // The call's lane gets the frame cap, and its creation 98% of that.
+        assert_eq!(creation_stop(&outcome), MegaLimitExceeded { kind: 0, limit: 38 });
+        assert_eq!(outcome.limit_exceeded, None);
+        assert_eq!(nonce(&outcome, deployment.signer), 1, "at {gas_limit}");
+        assert_eq!(outcome.usage.write_records, 0, "at {gas_limit}");
+    }
+}
+
 /// A transaction KV limit reaches the creation as its share: 98% of what the call has left,
 /// rounded down. A limit of two leaves the creation one, and the two records its start makes cross
 /// it: the creation is stopped before its init code runs, alone, and the signer's nonce is spent.

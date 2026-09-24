@@ -72,8 +72,9 @@ A `keylessDeploy` call a transaction makes becomes a native creation before any 
 The call pays a fixed 100,000 gas, is held to the legacy engine's nine rules and error ABI, and pays what a `CREATE` opcode charges its frame: the signer's account when the creation's nonce bump is what creates it, the created account, and the two write records of the creation's start.
 It then starts the creation as the signer, below it, with `gasLimitOverride` capped to what it has left.
 From there the creation is an ordinary frame, priced, limited, journaled and traced as one, and its `ORIGIN` and `GASPRICE` are the transaction's.
-Once the creation returns the call answers in the contract's ABI — the deployed address, or the error the creation failed with — and the signer's nonce stays spent either way; a transaction limit the deployment crosses stops the transaction and takes the deployment back whole.
-A signer is refused once its nonce is above 1, so it gets two deployments that fail and not a third.
+Once the creation returns the call answers in the contract's ABI — the deployed address, or the error the creation failed with; a transaction limit the deployment crosses stops the transaction and takes the deployment back whole.
+A signer is refused once its nonce is above 1.
+A deployment that succeeds spends the signer's nonce, and one that fails spends it only from 0 to 1: a signer at nonce 1 stays there however often its deployment fails, so nobody can use up its attempts.
 A `keylessDeploy` call a contract makes is not a deployment: it runs the method body, which reverts with `NotIntercepted()`.
 
 The system address (`MEGA_SYSTEM_ADDRESS`) sends the protocol's own transactions: a legacy transaction from it to a whitelisted contract is validated — the whitelist, the chain id, the nonce and EIP-3607 — and promoted to a deposit, which pays no fee and rewards none.

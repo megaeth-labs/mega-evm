@@ -73,6 +73,11 @@ pub(crate) struct KeylessCall {
     /// What the call was charged for the signer's account, which the creation's start creates:
     /// zero when the signer had one.
     pub(super) signer_account_charge: u64,
+    /// The history the call paid for the signer's nonce record: zero when the signer is the
+    /// transaction's sender, which makes no record, or when the transaction pays no history.
+    pub(super) signer_record_charge: u64,
+    /// Whether the creation moves value out of the signer's account.
+    pub(super) moves_value: bool,
     /// The call's return range.
     pub(super) memory_offset: Range<usize>,
     /// Whether the transaction's own start charged the call a new account.
@@ -190,6 +195,8 @@ fn rewrite_dispatched<DB: Database, ExtEnvs: ExternalEnvTypes>(
         signer: deployment.signer,
         signer_nonce: deployment.signer_nonce,
         signer_account_charge: deployment.signer_account_charge,
+        signer_record_charge: deployment.record_charges.map_or(0, |(_, caller)| caller),
+        moves_value: !deployment.value.is_zero(),
         memory_offset,
         charged_new_account_state_gas,
         returned_history: 0,

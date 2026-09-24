@@ -269,6 +269,20 @@ impl FrameLimitTracker {
         self.total_used = self.total_used.saturating_sub(WRITE_RECORD);
     }
 
+    /// Takes the record of the running frame's own account back from its lane, where a child
+    /// left it: the nonce record of a creation that failed, whose bump is being taken back.
+    /// Returns whether the account was recorded, and so whether there was a record to take.
+    pub(crate) fn take_back_own_record(&mut self) -> bool {
+        let Some(lane) = self.lanes.last_mut() else { return false };
+        if !lane.account_recorded {
+            return false;
+        }
+        lane.account_recorded = false;
+        lane.used = lane.used.saturating_sub(WRITE_RECORD);
+        self.total_used = self.total_used.saturating_sub(WRITE_RECORD);
+        true
+    }
+
     /// Pops the lane of the frame that returned: `success` merges it into its caller's lane (or
     /// the transaction's), a failure discards it.
     ///
@@ -526,6 +540,27 @@ mod tests {
         assert!(!t.lanes[0].account_recorded);
         t.pop(false);
         assert_eq!(t.net(), LimitUsage::ZERO);
+        assert_eq!(t.net(), t.net_uncached());
+    }
+
+    /// The creator record a failed creation left its creator is taken back once, and a lane with
+    /// no record of its own account has nothing to take.
+    #[test]
+    fn test_take_back_own_record_takes_the_creator_record_once() {
+        let mut t = FrameLimitTracker::default();
+        assert!(!t.take_back_own_record(), "no lane");
+        t.push(Lane::new(Some(ADDR), false, UNLIMITED, 0));
+        t.record(bytes(7));
+        t.push(Lane::new(None, true, UNLIMITED, 0));
+        t.record_caller(true, 0);
+        t.pop(false);
+        assert_eq!(t.net(), bytes(7).saturating_add(WRITE_RECORD));
+
+        assert!(t.take_back_own_record());
+        assert_eq!(t.net(), bytes(7), "the record, and nothing else, is gone");
+        assert!(!t.current().unwrap().account_recorded);
+        assert!(!t.take_back_own_record(), "taken once");
+        assert_eq!(t.net(), bytes(7));
         assert_eq!(t.net(), t.net_uncached());
     }
 

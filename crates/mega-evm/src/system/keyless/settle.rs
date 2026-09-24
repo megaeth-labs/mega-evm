@@ -13,6 +13,7 @@ use revm::{
         result::{FromStringError, HaltReason, OutOfGasError},
         ContextTr, JournalTr,
     },
+    context_interface::journaled_state::account::JournaledAccountTr,
     handler::FrameResult,
     interpreter::{CallOutcome, Gas, InstructionResult, InterpreterResult, SuccessOrHalt},
     primitives::KECCAK_EMPTY,
@@ -51,16 +52,22 @@ pub(crate) fn give_back_history<DB: Database, ExtEnvs: ExternalEnvTypes>(
 /// back too. The creation's lane was popped when it returned, or is popped here when it never
 /// ran.
 ///
+/// A deployment that failed keeps the signer's nonce bump only when it took the signer from 0 to
+/// 1: a failed deployment from nonce 1 leaves it at 1 ([`keep_no_second_bump`]). The call is
+/// permissionless and the signed transaction public, so a nonce every failure spent would let
+/// anybody make a signer's address undeployable with two failing calls.
+///
 /// Then the call answers, as a frame that resumes after its child returned would:
 ///
 /// - with the stop a limit left it, when there is one: the latched one, or its own budget's, which
-///   the creator's nonce record a failed creation leaves on its lane can cross. The call reverts
-///   with it, and its journal checkpoint goes with the revert, the signer's nonce included;
+///   the nonce record a failed creation leaves a signer at nonce 0 on the call's lane can cross.
+///   The call reverts with it, and its journal checkpoint goes with the revert, the signer's nonce
+///   included;
 /// - otherwise with `keylessDeploy`'s return: the deployed address when the creation left code at
 ///   it, or the zero address and the error the creation failed with — `ExecutionReverted`,
 ///   `ExecutionHalted`, or `EmptyCodeDeployed` for a creation that left no code, having deployed
 ///   none or destroyed itself. The call succeeds, and keeps what the creation's start wrote: a
-///   signer whose deployment failed has spent its nonce all the same.
+///   signer at nonce 0 whose deployment failed has spent its nonce all the same.
 ///
 /// `gasUsed` is what the creation spent: its regular gas and the state and history gas it kept,
 /// from whichever pool paid it. It is the same whether the transaction has a state-gas reservoir
@@ -87,8 +94,13 @@ where
     // every creation it is asked to build, and a creation the limits stop at its start is bumped
     // all the same; one an inspector answered in its place never started, and adds no account.
     // A signer that had an account was charged nothing, and gets nothing back.
-    if account_nonce(ctx, call.signer) == call.signer_nonce {
+    let bumped = account_nonce(ctx, call.signer) != call.signer_nonce;
+    if !bumped {
         call.gas.refill_reservoir(call.signer_account_charge);
+    }
+    // A deployment that failed from nonce 1 keeps no bump: the address stays deployable.
+    if bumped && call.signer_nonce > 0 && !holds_code(ctx, call.deploy_address) {
+        keep_no_second_bump(ctx, &mut call, result)?;
     }
 
     let (status, output) = match ctx.additional_limit.stop_before_run() {
@@ -143,16 +155,47 @@ fn answer<DB: Database, ExtEnvs: ExternalEnvTypes>(
         };
         return (InstructionResult::Revert, encode_error_result(error));
     }
-    let address = call.deploy_address;
-    // The code the journal holds, not the code the constructor returned: a constructor that
-    // destroyed its own account (EIP-6780) returned code the account does not keep.
-    let deployed = ctx.journal_ref().state.get(&address).is_some_and(|account| {
-        account.info.code_hash != KECCAK_EMPTY && !account.is_selfdestructed()
-    });
-    if !deployed {
+    if !holds_code(ctx, call.deploy_address) {
         return failed(KeylessDeployError::EmptyCodeDeployed { gas_used }, gas_used);
     }
-    returned(gas_used, address, Bytes::new())
+    returned(gas_used, call.deploy_address, Bytes::new())
+}
+
+/// Whether the deployment left code at `address`. The code the journal holds, not the code the
+/// constructor returned: a constructor that destroyed its own account (EIP-6780) returned code
+/// the account does not keep.
+fn holds_code<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    ctx: &MegaContext<DB, ExtEnvs>,
+    address: Address,
+) -> bool {
+    ctx.journal_ref().state.get(&address).is_some_and(|account| {
+        account.info.code_hash != KECCAK_EMPTY && !account.is_selfdestructed()
+    })
+}
+
+/// Takes back the nonce bump of a failed deployment by a signer whose nonce was already 1, with
+/// its write record and that record's history, so what stands is what would stand had the
+/// creation's start not bumped the nonce: the signer stays at 1, however many deployments fail.
+///
+/// The record goes unless the signer's account keeps another write it stands for: the value a
+/// creation that succeeded moved out of it, having deployed no code. A creation that failed took
+/// its value transfer back with the rest of its writes.
+fn keep_no_second_bump<DB, ExtEnvs, ERROR>(
+    ctx: &mut MegaContext<DB, ExtEnvs>,
+    call: &mut KeylessCall,
+    result: &FrameResult,
+) -> Result<(), ERROR>
+where
+    DB: Database,
+    ExtEnvs: ExternalEnvTypes,
+    ERROR: From<DB::Error>,
+{
+    ctx.journal_mut().load_account_mut(call.signer)?.data.set_nonce(call.signer_nonce);
+    let moved_value = call.moves_value && result.instruction_result().is_ok();
+    if !moved_value && ctx.additional_limit.take_back_creator_record() {
+        call.gas.refill_history(call.signer_record_charge);
+    }
+    Ok(())
 }
 
 /// The nonce of an account the journal holds; zero for one it does not.

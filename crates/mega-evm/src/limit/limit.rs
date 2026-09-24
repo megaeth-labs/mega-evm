@@ -697,6 +697,25 @@ impl AdditionalLimit {
         }
     }
 
+    /// Takes back the nonce record a failed creation left its creator, when the nonce bump it
+    /// stands for is taken back: the running frame is a `keylessDeploy` call whose lane runs as
+    /// the signer ([`set_frame_creator`](Self::set_frame_creator)). A signer that is the
+    /// transaction's sender has no such record, its account being the body's.
+    ///
+    /// A stop the record left the frame, by putting it over its budget, goes with it: the frame is
+    /// held to its limits again without the record. Returns whether a record was taken back.
+    pub(crate) fn take_back_creator_record(&mut self) -> bool {
+        let sender = self.sender;
+        if self.tracker.current().is_none_or(|lane| lane.address == Some(sender)) ||
+            !self.tracker.take_back_own_record()
+        {
+            return false;
+        }
+        let check = self.check();
+        self.resume_stop = check.exceeded_limit().then_some(check);
+        true
+    }
+
     /// The number of frames with a lane: the frames on the call stack, and a `keylessDeploy` call
     /// whose creation is running.
     pub(crate) fn frame_depth(&self) -> usize {
