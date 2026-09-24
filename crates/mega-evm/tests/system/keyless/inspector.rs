@@ -159,25 +159,29 @@ fn test_an_inspected_deployment_costs_what_a_plain_one_does() {
 /// refusal; no creation starts.
 #[test]
 fn test_a_refused_call_is_seen_as_a_call() {
-    let deployment = Deployment::with_value(deploying(&runtime(1)), U256::from(1));
-    let (outcome, recorder) = inspect(&deployment, Recorder::default(), GAS_LIMITS[0]);
-    assert_eq!(refusal(&outcome), KeylessDeployError::InsufficientBalance);
-    assert_eq!(
-        recorder.events,
-        [Event::Call(KEYLESS_DEPLOY_ADDRESS), Event::CallEnd(InstructionResult::Revert)],
-    );
+    for gas_limit in GAS_LIMITS {
+        let deployment = Deployment::with_value(deploying(&runtime(1)), U256::from(1));
+        let (outcome, recorder) = inspect(&deployment, Recorder::default(), gas_limit);
+        assert_eq!(refusal(&outcome), KeylessDeployError::InsufficientBalance);
+        assert_eq!(
+            recorder.events,
+            [Event::Call(KEYLESS_DEPLOY_ADDRESS), Event::CallEnd(InstructionResult::Revert)],
+        );
+    }
 }
 
 /// A creation whose init code reverts ends as a revert in the trace, and the call reports it.
 #[test]
 fn test_a_failed_deployment_ends_as_a_revert_in_the_trace() {
-    let deployment = Deployment::new(Bytes::from_static(&[PUSH0, PUSH0, REVERT]));
-    let (outcome, recorder) = inspect(&deployment, Recorder::default(), GAS_LIMITS[0]);
-    assert!(matches!(failure(&outcome), KeylessDeployError::ExecutionReverted { .. }));
-    assert_eq!(
-        recorder.events.last(),
-        Some(&Event::CreateEnd(InstructionResult::Revert, Some(deployment.address))),
-    );
+    for gas_limit in GAS_LIMITS {
+        let deployment = Deployment::new(Bytes::from_static(&[PUSH0, PUSH0, REVERT]));
+        let (outcome, recorder) = inspect(&deployment, Recorder::default(), gas_limit);
+        assert!(matches!(failure(&outcome), KeylessDeployError::ExecutionReverted { .. }));
+        assert_eq!(
+            recorder.events.last(),
+            Some(&Event::CreateEnd(InstructionResult::Revert, Some(deployment.address))),
+        );
+    }
 }
 
 /// An inspector that answers the creation itself — a tool's rewrite — starts no creation: the
