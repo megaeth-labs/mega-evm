@@ -211,7 +211,7 @@ The root `Cargo.toml` pins `revm = "=40.0.3"` and redirects all twelve revm crat
 Detention caps how much a transaction may still compute once it read such data (`access/`).
 
 - **What is volatile.**
-  The block environment (`NUMBER`, `TIMESTAMP`, `COINBASE`, `PREVRANDAO`, `GASLIMIT`, `BASEFEE`, `BLOBBASEFEE`, `SLOTNUM`, `BLOCKHASH`); the block beneficiary's account, through every account opcode, the four calls and the EIP-7702 delegate they follow, `SELFDESTRUCT` at either end, a sender or recipient that is the beneficiary and an applied EIP-7702 authority that is; the Oracle's storage, through `SLOAD` in the Oracle's own frame.
+  The block environment (`NUMBER`, `TIMESTAMP`, `COINBASE`, `PREVRANDAO`, `GASLIMIT`, `BASEFEE`, `BLOBBASEFEE`, `SLOTNUM`, `BLOCKHASH`); the block beneficiary's account, through every account opcode, the four calls and the EIP-7702 delegate they follow, `SELFDESTRUCT` at either end, a sender or recipient that is the beneficiary, a recipient that delegates to it, and an applied EIP-7702 authority that is; the Oracle's storage, through `SLOAD` in the Oracle's own frame.
   `BLOBHASH` is not: it reads the transaction's own blob hashes.
   A system-originated transaction and a system call are not detained, whatever they read, the block environment included: the same rule exempts them from every per-transaction limit.
   Neither is a transaction under `no_limits()`, which the execution-spec gate's runner installs.

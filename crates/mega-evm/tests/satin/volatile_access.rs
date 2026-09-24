@@ -658,6 +658,35 @@ fn test_an_applied_authority_that_is_the_beneficiary_detains() {
     }
 }
 
+/// A transaction whose recipient is an EIP-7702 delegator of the beneficiary runs the
+/// beneficiary's code, as a call a contract makes to that delegator does: it is detained from its
+/// first frame, its limit the cap. A delegator of another account detains nothing.
+#[test]
+fn test_a_transaction_to_a_delegator_of_the_beneficiary_detains() {
+    let code = work(BytecodeBuilder::default(), 10).stop().build();
+    for gas_limit in TIERS {
+        let db = with_delegation(
+            MemoryDatabase::default().account_code(BENEFICIARY, code.clone()),
+            DELEGATOR,
+            BENEFICIARY,
+        );
+        let run = execute(db, tx(CALLER, DELEGATOR, gas_limit));
+        assert!(run.outcome.result.is_success(), "{:?}", run.outcome.result);
+        assert_eq!(run.limit, Some(CAP));
+        assert_eq!(run.accessed, VolatileDataAccess::BENEFICIARY_BALANCE);
+
+        let db = with_delegation(
+            MemoryDatabase::default().account_code(OTHER, code.clone()),
+            DELEGATOR,
+            OTHER,
+        );
+        let run = execute(db, tx(CALLER, DELEGATOR, gas_limit));
+        assert!(run.outcome.result.is_success(), "{:?}", run.outcome.result);
+        assert_eq!(run.limit, None);
+        assert_eq!(run.accessed, VolatileDataAccess::empty());
+    }
+}
+
 /// Compute is what the frames spend, not the transaction's intrinsic gas: under a cap far below
 /// what an authorization costs before any frame, an authority that is the beneficiary stops
 /// nothing before the first frame, and stays applied. The first frame is held to the cap: a frame

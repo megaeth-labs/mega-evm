@@ -369,6 +369,28 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
         }
     }
 
+    /// Marks a read of the block beneficiary's account when the transaction's recipient is an
+    /// EIP-7702 delegator whose delegate is the beneficiary: its first frame runs the
+    /// beneficiary's code, as a call a contract makes to the same delegator does.
+    ///
+    /// revm resolves the delegate of the transaction's own frame through the journal rather than
+    /// through the Host, so the load the Host marks for a contract's call never happens for it.
+    /// Called once revm has prepared the first frame, when the recipient is loaded with the
+    /// delegation any applied authorization left; read from the journal as it stands, without
+    /// loading or warming anything.
+    pub(crate) fn mark_beneficiary_delegate(&mut self) {
+        let Some(&recipient) = self.inner.tx.kind().to() else { return };
+        let delegate = self
+            .journal_ref()
+            .state
+            .get(&recipient)
+            .and_then(|account| account.info.code.as_ref())
+            .and_then(|code| code.eip7702_address());
+        if delegate == Some(self.inner.block.beneficiary) {
+            self.detention.mark_before_execution(VolatileDataAccess::BENEFICIARY_BALANCE);
+        }
+    }
+
     /// Records whether the running transaction is exempt from history gas, and installs the
     /// schedule that matches.
     ///

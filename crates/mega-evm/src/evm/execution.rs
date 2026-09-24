@@ -247,6 +247,7 @@ where
         }
         let frame = self.op.first_frame_input(evm, gas)?;
         evm.ctx_mut().additional_limit.on_state_gas_before_frames(gas.state_gas_spent());
+        evm.ctx_mut().mark_beneficiary_delegate();
         Ok(frame)
     }
 

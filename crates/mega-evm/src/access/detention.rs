@@ -264,8 +264,8 @@ impl Detention {
     }
 
     /// Records a read the transaction makes by being what it is, before any frame: a sender or a
-    /// recipient that is the block beneficiary, or an EIP-7702 authority that is. No compute has
-    /// been spent, so the limit is the read's cap.
+    /// recipient that is the block beneficiary, an EIP-7702 authority that is, or a recipient that
+    /// delegates to it. No compute has been spent, so the limit is the read's cap.
     pub(crate) fn mark_before_execution(&mut self, access: VolatileDataAccess) {
         if !self.detains {
             return;
