@@ -786,14 +786,14 @@ fn test_a_call_that_reads_the_beneficiary_costs_what_a_warm_account_costs() {
 /* ---------- answers ---------- */
 
 /// A precompile that charges the price its input names, as one big-endian word.
-const PRICED: Address = address!("0000000000000000000000000000000000d00013");
+pub(crate) const PRICED: Address = address!("0000000000000000000000000000000000d00013");
 
 /// The gas limits a precompile was run on, in order, each with whether its price was within it:
 /// a precompile that cannot pay its price answers out of gas without computing anything.
-type Runs = Arc<Mutex<Vec<(u64, bool)>>>;
+pub(crate) type Runs = Arc<Mutex<Vec<(u64, bool)>>>;
 
 /// The precompile at [`PRICED`], recording what it runs on into `runs`.
-fn priced(runs: &Runs) -> DynPrecompile {
+pub(crate) fn priced(runs: &Runs) -> DynPrecompile {
     let runs = Arc::clone(runs);
     DynPrecompile::new(PrecompileId::Custom("priced".into()), move |input| {
         let price = U256::from_be_slice(input.data).saturating_to::<u64>();
