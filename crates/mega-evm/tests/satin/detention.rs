@@ -810,7 +810,7 @@ fn test_a_childs_read_caps_its_caller() {
 }
 
 /// When a child crosses the cap, no caller resumes: the caller's code after the call — a write
-/// and a log — never runs, and every frame returns the stop.
+/// and a log — never runs, the child runs the last step, and every frame returns the stop.
 #[test]
 fn test_no_caller_resumes_after_the_stop() {
     let child = spin(op(BytecodeBuilder::default(), TIMESTAMP));
@@ -837,6 +837,9 @@ fn test_no_caller_resumes_after_the_stop() {
             ]
         );
         assert!(!evm.inspector().opcodes.contains(&SSTORE), "the caller did not resume");
+        // A caller that resumed would fail its first charge on the withheld part, before its
+        // write, and report the same stop on the same bill: only its step shows it ran.
+        assert_eq!(evm.inspector().last_frame, Some(CHILD), "the child ran the last step");
     }
 }
 
@@ -1018,11 +1021,13 @@ fn test_an_inspectors_reads_are_not_the_transactions() {
 
 /* ---------- refused reads ---------- */
 
-/// Records every call's result and the gas it spent, and every opcode that ran.
+/// Records every call's result and the gas it spent, every opcode that ran, and the frame the
+/// last one ran in.
 #[derive(Default)]
 pub(crate) struct Calls {
     pub(crate) calls: Vec<CallRecord>,
     pub(crate) opcodes: Vec<u8>,
+    pub(crate) last_frame: Option<Address>,
 }
 
 pub(crate) struct CallRecord {
@@ -1036,6 +1041,7 @@ impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for Calls {
     fn step(&mut self, interp: &mut Interpreter<EthInterpreter>, _context: &mut MegaContext<DB>) {
         use revm::interpreter::interpreter_types::Jumps;
         self.opcodes.push(interp.bytecode.opcode());
+        self.last_frame = Some(interp.input.target_address);
     }
 
     fn call_end(

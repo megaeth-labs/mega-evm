@@ -216,15 +216,19 @@ impl AdditionalLimit {
         self.latched().copied().or(resume_stop)
     }
 
-    /// Rewrites `result` to the latched stop, when the transaction is latched: a success or a
-    /// revert becomes the latched revert. A halt stays what it is.
+    /// Rewrites `result` to the latched stop, when the transaction is latched: a success, a revert
+    /// or a halt becomes the latched revert, on the gas the result carries.
+    ///
+    /// No frame runs an instruction once the transaction is latched, so no out-of-gas can happen
+    /// after the latch: the frame that crossed returns the stop, and every frame above it returns
+    /// it again without running. A halt that reaches here under the latch was made by an
+    /// inspector's rewrite, which cannot turn the stop into a halt any more than into a success.
+    /// A real halt before the latch is left alone: it was returned before the latch was set.
     pub(crate) fn apply_latch(&self, result: &mut FrameResult) {
         let Some(latched) = self.latched() else { return };
         let interpreter_result = result.interpreter_result_mut();
-        if interpreter_result.result.is_ok_or_revert() {
-            interpreter_result.result = InstructionResult::Revert;
-            interpreter_result.output = latched.revert_data();
-        }
+        interpreter_result.result = InstructionResult::Revert;
+        interpreter_result.output = latched.revert_data();
     }
 
     /// What the transaction keeps so far: its data-size bytes and write records, with every
@@ -793,7 +797,8 @@ impl AdditionalLimit {
 
     /// Pops the lane of the frame `result` returns from: a success merges it into the caller's,
     /// a failure discards it. Under a latch the result is first rewritten to the latched stop,
-    /// whatever produced it (an interceptor, an inspector's rewrite), so no success passes it.
+    /// whatever produced it (an interceptor, an inspector's rewrite), so neither a success nor a
+    /// halt passes it.
     ///
     /// Then the caller is held to its limits with what it now holds, and a crossing is the stop
     /// it returns before it runs on ([`stop_before_run`](Self::stop_before_run)): its own
