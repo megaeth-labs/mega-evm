@@ -84,6 +84,11 @@ pub struct AdditionalLimit {
     /// The history gas the running opcode charged its own frame for the records the frame it is
     /// starting will make, waiting for that frame's lane to be pushed.
     pending_frame_charge: FrameCharge,
+    /// Whether revm refuses, on its caller's account, the start of the frame the last
+    /// frame-starting opcode suspended on — or, before the first frame, the transaction's own
+    /// frame — as that opcode, or the charge of the transaction's record, found it. See
+    /// [`stage_start_refused`](Self::stage_start_refused).
+    pending_start_refused: Option<bool>,
     /// The history gas the settled transaction spent.
     history_gas_spent: u64,
     /// The history bytes the settled transaction appended.
@@ -125,6 +130,7 @@ impl AdditionalLimit {
         self.intrinsic_history_bytes = 0;
         self.top_level_write_record_gas = 0;
         self.pending_frame_charge = FrameCharge::NONE;
+        self.pending_start_refused = None;
         self.history_gas_spent = 0;
         self.history_bytes = 0;
         self.state_gas.reset();
@@ -206,6 +212,19 @@ impl AdditionalLimit {
             }
         }
         LimitCheck::WithinLimit
+    }
+
+    /// Whether [`check`](Self::check) would find nothing to stop the running frame for, asked
+    /// without latching anything: the transaction keeps no more than its limits, and the running
+    /// frame no more than its budget. An exempt transaction is stopped by nothing, and a latched
+    /// one by nothing but the latch, which [`stop_before_run`](Self::stop_before_run) takes
+    /// first.
+    fn check_finds_nothing(&self) -> bool {
+        if self.is_exempt() || self.latched().is_some() {
+            return true;
+        }
+        self.tracker.net().crossing(self.limits.tx_usage_limit()).is_none() &&
+            self.tracker.current().is_none_or(|lane| lane.net().crossing(lane.budget).is_none())
     }
 
     /// The stop the running frame returns instead of running another instruction: the latched
@@ -333,6 +352,31 @@ impl AdditionalLimit {
         caller: u64,
     ) {
         self.pending_frame_charge = FrameCharge { records: Some(records), on_lane, caller };
+    }
+
+    /// Leaves whether revm refuses the start of the frame about to start on its caller's account,
+    /// for the frame's init to take ([`take_start_refused`](Self::take_start_refused)) rather than
+    /// read the caller's account again: found by the opcode starting the frame, or, for the
+    /// transaction's own frame, by the charge of its record before execution.
+    ///
+    /// Only a start revm can refuse there — a call that transfers value, a creation — takes it.
+    /// One an opcode makes finds the answer that opcode staged, which stages one for every frame
+    /// it starts and so replaces whatever an earlier start left. The transaction's own frame finds
+    /// the one its record's charge staged, or none: the reset cleared what the transaction before
+    /// it left. A start answered before its init leaves its answer for no other start to take.
+    /// The one start past the first frame no opcode makes, a keyless deployment's creation, is
+    /// cleared for ([`set_frame_creator`](Self::set_frame_creator)), and so is every start on the
+    /// inspected path, whose inspector may rewrite the input.
+    #[inline]
+    pub(crate) const fn stage_start_refused(&mut self, refused: bool) {
+        self.pending_start_refused = Some(refused);
+    }
+
+    /// Takes what [`stage_start_refused`](Self::stage_start_refused) left for the frame about to
+    /// start, if anything.
+    #[inline]
+    pub(crate) const fn take_start_refused(&mut self) -> Option<bool> {
+        self.pending_start_refused.take()
     }
 
     /// Records the history gas the settled transaction spent.
@@ -750,7 +794,11 @@ impl AdditionalLimit {
     /// The creation's start writes the creator's nonce, so the frame's lane runs as the creator:
     /// the creation records that write as its creator's, on the frame's lane once the creation
     /// fails, unless the creator is the transaction's sender, whose account the body counts.
+    ///
+    /// No opcode starts the creation, so nothing staged the answer to whether its creator's
+    /// account refuses it; one staged for the call's own start is not the creation's.
     pub(crate) fn set_frame_creator(&mut self, creator: Address) {
+        self.pending_start_refused = None;
         let sender = self.sender;
         if let Some(lane) = self.tracker.current_mut() {
             lane.address = Some(creator);
@@ -800,15 +848,22 @@ impl AdditionalLimit {
     /// whatever produced it (an interceptor, an inspector's rewrite), so neither a success nor a
     /// halt passes it.
     ///
-    /// Then the caller is held to its limits with what it now holds, and a crossing is the stop
-    /// it returns before it runs on ([`stop_before_run`](Self::stop_before_run)): its own
-    /// frame-local revert for its budget, the latch for the transaction's limit. One return adds
-    /// to a caller what no check has held it to: the nonce record a failed creation leaves its
-    /// creator. The creation counted that record on its own lane, against its own share, and a
-    /// creation stopped for crossing that share still bumps the nonce — so a creator with fewer
-    /// bytes left than a record would keep one it may not. Any other return leaves the caller
-    /// within its limits: a failure hands it nothing, and a success hands it no more than the
-    /// share it gave.
+    /// Two returns add to a caller what no check has held it to, and after them the caller is held
+    /// to its limits with what it now holds; a crossing is the stop it returns before it runs on
+    /// ([`stop_before_run`](Self::stop_before_run)): its own frame-local revert for its budget,
+    /// the latch for the transaction's limit.
+    ///
+    /// - A failed creation leaves its creator the nonce record. The creation counted that record on
+    ///   its own lane, against its own share, and a creation stopped for crossing that share still
+    ///   bumps the nonce — so a creator with fewer bytes left than a record would keep one it may
+    ///   not.
+    /// - A success past the frame's own budget hands the caller more than the share it gave. Only
+    ///   an inspector that rewrote the frame's stop into a success returns one.
+    ///
+    /// Any other return leaves the caller within its limits, and is not checked: a failure hands
+    /// it nothing, and a success hands it no more than the share it gave. Neither is the return of
+    /// the transaction's own frame, which has no caller to hold. A debug build asserts that the
+    /// check would have found nothing to stop.
     ///
     /// Returns the history gas the caller paid for records this frame did not keep, which the
     /// caller gets back once the frame has merged into it.
@@ -819,10 +874,20 @@ impl AdditionalLimit {
         // opcode, which failed after making it.
         self.pending_frame_charge = FrameCharge::NONE;
         let success = result.instruction_result().is_ok();
-        let refund = self.tracker.pop(success).map_or(0, |lane| lane.history_refund(success));
+        let lane = self.tracker.pop(success);
+        let refund = lane.as_ref().map_or(0, |lane| lane.history_refund(success));
         self.state_gas.pop();
-        let check = self.check();
-        self.resume_stop = check.exceeded_limit().then_some(check);
+        let unchecked = lane.is_some_and(|lane| self.tracker.hands_unchecked(&lane, success));
+        self.resume_stop = if unchecked {
+            let check = self.check();
+            check.exceeded_limit().then_some(check)
+        } else {
+            debug_assert!(
+                self.check_finds_nothing(),
+                "a frame's return put its caller over a limit no check held it to"
+            );
+            None
+        };
         refund
     }
 
@@ -863,14 +928,18 @@ impl AdditionalLimit {
     }
 }
 
-/// `remaining` × [`FRAME_DATA_SHARE_NUMERATOR`] / [`FRAME_DATA_SHARE_DENOMINATOR`].
+/// `remaining` × [`FRAME_DATA_SHARE_NUMERATOR`] / [`FRAME_DATA_SHARE_DENOMINATOR`], rounded down.
 ///
-/// The product is taken in `u128`, so a remaining budget near `u64::MAX` does not wrap.
+/// The share is `N / D = 1 − 1 / K` with `K = D / (D − N)` a whole number, so the floor of the
+/// product is `remaining − ⌈remaining / K⌉`, which stays in `u64` and never wraps. A `u128`
+/// product would call the 128-bit division routine on every frame start, where a division of a
+/// `u64` by a constant compiles to a multiplication.
 const fn share_of_remaining(remaining: u64) -> u64 {
-    let remaining = remaining as u128;
-    let numerator = FRAME_DATA_SHARE_NUMERATOR as u128;
-    let denominator = FRAME_DATA_SHARE_DENOMINATOR as u128;
-    ((remaining * numerator) / denominator) as u64
+    const N: u64 = FRAME_DATA_SHARE_NUMERATOR;
+    const D: u64 = FRAME_DATA_SHARE_DENOMINATOR;
+    const _: () = assert!(N < D && D.is_multiple_of(D - N));
+    const K: u64 = D / (D - N);
+    remaining - remaining.div_ceil(K)
 }
 
 /// Whether starting `input` moves value from one account to another, which is what revm journals
@@ -941,6 +1010,24 @@ mod tests {
     const SENDER: Address = address!("00000000000000000000000000000000000f0001");
     const CALLEE: Address = address!("00000000000000000000000000000000000f0002");
     const TARGET: Address = address!("00000000000000000000000000000000000f0003");
+
+    #[test]
+    fn test_share_of_remaining_is_the_floor_of_the_exact_product() {
+        let exact = |x: u64| {
+            (u128::from(x) * u128::from(FRAME_DATA_SHARE_NUMERATOR) /
+                u128::from(FRAME_DATA_SHARE_DENOMINATOR)) as u64
+        };
+        let mut x = 0x9e37_79b9_7f4a_7c15_u64;
+        let edges = [0, 1, 49, 50, 51, 99, 100, 101, u64::MAX, u64::MAX - 1, u64::MAX / 100 * 100];
+        for v in edges.into_iter().chain((0..100_000).map(|_| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x >> (x % 64)
+        })) {
+            assert_eq!(share_of_remaining(v), exact(v), "{v}");
+        }
+    }
 
     fn call_inputs(scheme: CallScheme, value: U256) -> CallInputs {
         CallInputs {
@@ -1114,6 +1201,81 @@ mod tests {
             limit.tracker.current().unwrap().budget,
             LimitUsage { data_size: 980, write_records: 9 }
         );
+    }
+
+    /// A layer with a frame cap of 100 bytes and the transaction's own frame started, which is
+    /// what the cap gives it; `CALLEE`'s call to `TARGET`, the child, is started below it with
+    /// 98 of them.
+    fn with_a_child_of_a_capped_frame() -> (AdditionalLimit, FrameInput) {
+        let mut limit =
+            AdditionalLimit::new(EvmTxRuntimeLimits::no_limits().with_frame_data_size_limit(100));
+        limit.on_frame_init(&call_from_to(SENDER, CALLEE, U256::ZERO), 0);
+        let child = call_from_to(CALLEE, TARGET, U256::ZERO);
+        limit.on_frame_init(&child, 1);
+        assert_eq!(limit.tracker.current().unwrap().budget.data_size, 98);
+        (limit, child)
+    }
+
+    /// A success is checked on its return only when it kept more than its own budget, which an
+    /// inspector that rewrote the frame's stop into a success returns. Within its budget it hands
+    /// the caller no more than the caller's share, and the caller runs on unchecked; past it, the
+    /// caller is held to its own budget with what it now keeps, and stops when that crosses it.
+    #[test]
+    fn test_a_success_past_its_budget_holds_its_caller_to_the_caller_budget() {
+        for (kept, caller_stopped) in [(98, false), (99, false), (100, false), (101, true)] {
+            let (mut limit, child) = with_a_child_of_a_capped_frame();
+            limit.tracker.record(LimitUsage { data_size: kept, write_records: 0 });
+            let mut result =
+                crate::synthetic_frame_result(&child, InstructionResult::Stop, Bytes::new());
+            let _ = limit.on_frame_return(&mut result);
+            let stop = limit.stop_before_run();
+            let expected = caller_stopped.then_some(LimitCheck::ExceedsLimit {
+                kind: LimitKind::DataSize,
+                limit: 100,
+                used: kept,
+                frame_local: true,
+            });
+            assert_eq!(stop, expected, "a child that kept {kept} bytes");
+            assert_eq!(limit.usage().data_size, kept, "the success merged what it kept");
+        }
+    }
+
+    /// The premise the unchecked returns rest on is asserted in a debug build. A success within a
+    /// budget wider than the share its caller gave it — what a share computed wrong would give —
+    /// puts the caller over its own budget with no check to catch it, and trips.
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "no check held it to")]
+    fn test_a_success_that_hands_its_caller_more_than_its_share_trips() {
+        let (mut limit, child) = with_a_child_of_a_capped_frame();
+        limit.tracker.current_mut().unwrap().budget = crate::limit::UNLIMITED;
+        limit.tracker.record(LimitUsage { data_size: 101, write_records: 0 });
+        let mut result =
+            crate::synthetic_frame_result(&child, InstructionResult::Stop, Bytes::new());
+        let _ = limit.on_frame_return(&mut result);
+    }
+
+    /// Whether a start's caller refuses it is staged by the opcode that found it and taken once,
+    /// by the frame's init. Nothing is left for a later start: a reset drops what the transaction
+    /// before it left, and a keyless deployment's creation, which no opcode starts, drops what was
+    /// staged for its call.
+    #[test]
+    fn test_a_staged_start_answer_is_taken_once() {
+        let mut limit = with_the_transactions_frame();
+        assert_eq!(limit.take_start_refused(), None, "nothing staged");
+        for refused in [false, true] {
+            limit.stage_start_refused(refused);
+            assert_eq!(limit.take_start_refused(), Some(refused));
+            assert_eq!(limit.take_start_refused(), None, "taken once");
+        }
+
+        limit.stage_start_refused(true);
+        limit.set_frame_creator(TARGET);
+        assert_eq!(limit.take_start_refused(), None, "the creation's is not the call's");
+
+        limit.stage_start_refused(true);
+        limit.reset();
+        assert_eq!(limit.take_start_refused(), None, "the next transaction's is not this one's");
     }
 
     /// Limits every dimension holds at zero: anything a transaction counts crosses one.
