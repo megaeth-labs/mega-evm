@@ -28,13 +28,12 @@ Do not add a `_pending/main.rs`.
 | Owning mechanism | Tests | From `tests/` | From `src/` | Keep | Rewrite | Undecided |
 |---|---:|---:|---:|---:|---:|---:|
 | the common execution layer | 21 | 21 | 0 | 21 | 0 | 0 |
-| detention | 6 | 6 | 0 | 0 | 6 | 0 |
 | revert-class aborts | 17 | 17 | 0 | 0 | 17 | 0 |
 | the pre-block system calls | 34 | 22 | 12 | 30 | 4 | 0 |
 | system contract deployment | 11 | 5 | 6 | 11 | 0 | 0 |
 | inspector support | 4 | 4 | 0 | 1 | 3 | 0 |
 | — (undecided: D57 preload-warm cold charging, D58 98/100 forwarding) | 7 | 7 | 0 | 0 | 0 | 7 |
-| **Total** | **100** | **82** | **18** | **63** | **30** | **7** |
+| **Total** | **94** | **76** | **18** | **63** | **24** | **7** |
 
 ## Tests ported in place
 
@@ -275,7 +274,7 @@ These 54 rows run in a real test target now, adapted to the Satin API: the state
 
 ## Tests ported by detention
 
-These 83 rows run in a real test target now, adapted to the Satin API and to the relative cap, the revert-class stop and the load-time marking the decisions they cite fix, so the counts above are lower than the inventory's by exactly these rows.
+These 89 rows run in a real test target now, adapted to the Satin API and to the relative cap, the revert-class stop and the load-time marking the decisions they cite fix, so the counts above are lower than the inventory's by exactly these rows.
 
 | Legacy file | Owner in the inventory | Tests | Now in |
 |---|---|---:|---|
@@ -290,12 +289,13 @@ These 83 rows run in a real test target now, adapted to the Satin API and to the
 | `rex4/access_control.rs` | detention (2) | 2 | `tests/satin/detention.rs`, `tests/satin/volatile_access.rs` |
 | `rex4/beneficiary_detention.rs` | detention (12) | 12 | `tests/satin/detention.rs`, `tests/satin/volatile_access.rs` |
 | `rex4/gas_detention.rs` | detention (3) | 3 | `tests/satin/detention.rs`, `tests/satin/volatile_access.rs` |
+| `rex5/sandbox_accounting.rs` | detention (6) | 6 | `tests/system/keyless/detention.rs` |
 | `rex5/selfdestruct_beneficiary.rs` | detention (2) | 2 | `tests/satin/detention.rs`, `tests/satin/volatile_access.rs` |
 | `rex6/beneficiary_detention.rs` | detention (13) | 13 | `tests/satin/detention.rs`, `tests/satin/volatile_access.rs` |
 | `rex6/eip7702_authority_accounting.rs` | detention (2) | 2 | `tests/satin/volatile_access.rs` |
 | `src/access/volatile.rs` | detention (4) | 4 | `crates/mega-evm/src/access/volatile.rs` |
 | `src/limit/compute_gas.rs` | detention (1) | 1 | `tests/satin/detention.rs` |
-| **Total** | | **83** | |
+| **Total** | | **89** | |
 
 ## Tests ported by the oracle and control contracts
 
@@ -372,12 +372,6 @@ They are not counted above.
 | `block_executor/sequencer_registry.rs` | `test_sequencer_change_does_not_affect_system_address` | the pre-block system calls | the pre-block system calls own applying a pending rotation |
 | `block_executor/sequencer_registry.rs` | `test_system_address_change` | the pre-block system calls | the pre-block system calls own applying a pending rotation |
 | `block_executor/sequencer_registry.rs` | `test_system_tx_uses_resolved_system_address` | the pre-block system calls | the pre-block system calls own resolving the live system address |
-| `rex5/sandbox_accounting.rs` | `test_rex5_sandbox_beneficiary_balance_access_merged_into_parent_volatile_tracker` | detention | a keyless deployment's volatile-data access is its creation frame's, as any frame's is; the tracker that sees it is detention's |
-| `rex5/sandbox_accounting.rs` | `test_rex5_sandbox_block_env_access_merged_into_parent_volatile_tracker` | detention | a keyless deployment's volatile-data access is its creation frame's, as any frame's is; the tracker that sees it is detention's |
-| `rex5/sandbox_accounting.rs` | `test_rex5_sandbox_coinbase_access_merged_into_parent_volatile_tracker` | detention | a keyless deployment's volatile-data access is its creation frame's, as any frame's is; the tracker that sees it is detention's |
-| `rex5/sandbox_accounting.rs` | `test_rex5_sandbox_oracle_access_merged_into_parent_volatile_tracker` | detention | a keyless deployment's volatile-data access is its creation frame's, as any frame's is; the tracker that sees it is detention's |
-| `rex5/sandbox_accounting.rs` | `test_rex5_sandbox_volatile_bitmap_survives_residual_overflow_halt` | detention | a keyless deployment a transaction limit stops still reports the volatile data its creation read, and the stop stays the limit's |
-| `rex5/sandbox_accounting.rs` | `test_rex5_sandbox_volatile_merge_runs_on_in_sandbox_failure_empty_code` | detention | a keyless deployment's volatile-data access is its creation frame's, as any frame's is; the tracker that sees it is detention's |
 
 ## Files
 
@@ -404,7 +398,6 @@ Each cell lists `disposition count (mechanism · decision)`.
 | `rex5/create2_resize_gas_metering.rs` | 2 | keep 2 (the common execution layer · canonical behaviour) |
 | `rex5/oracle_hint_metering.rs` | 1 | rewrite 1 (revert-class aborts · D48) |
 | `rex5/pre_block_system_calls.rs` | 11 | keep 11 (the pre-block system calls) |
-| `rex5/sandbox_accounting.rs` | 6 | rewrite 6 (detention · native sub-frame: parent tracker sees child directly) |
 | `rex6/create2_metering_order.rs` | 11 | keep 11 (the common execution layer · canonical halt reasons; D04 512 KiB boundary) |
 | `rex6/error_paths.rs` | 2 | keep 2 (the common execution layer · canonical) |
 | `rex6/sequencer_registry_rotation.rs` | 5 | keep 5 (system contract deployment) |

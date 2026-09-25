@@ -26,10 +26,11 @@ use mega_evm::{
 };
 use revm::{
     bytecode::opcode::{
-        CALL, DUP1, GAS, JUMPDEST, JUMPI, MLOAD, POP, PUSH0, SSTORE, STATICCALL, SUB, SWAP1,
-        TIMESTAMP,
+        BALANCE, CALL, COINBASE, DUP1, GAS, JUMPDEST, JUMPI, MLOAD, POP, PUSH0, SSTORE, STATICCALL,
+        STOP, SUB, SWAP1, TIMESTAMP,
     },
     context::{BlockEnv, TxEnv},
+    context_interface::cfg::GasId,
     interpreter::{interpreter::EthInterpreter, CallInputs, CallOutcome, Interpreter},
     primitives::KECCAK_EMPTY,
     Inspector,
@@ -479,5 +480,75 @@ fn test_a_constructor_reads_the_oracle_as_any_frame_does() {
         let stopped = run_tx(oracle_context(db(), service.clone(), 1_000), tx(), true);
         assert_stopped(&stopped, &deployment, gas_limit);
         assert_eq!(stopped.accessed, VolatileDataAccess::ORACLE);
+    }
+}
+
+/* ---------- what a deployment reports it read ---------- */
+
+/// The volatile data a constructor reads is the transaction's: the block environment, the
+/// coinbase — which is not a read of the beneficiary's account — the beneficiary's balance, and
+/// the Oracle's storage, each recorded as the kind it is, and each capping the transaction.
+#[test]
+fn test_a_constructors_reads_are_the_transactions() {
+    let balance_of_coinbase = BytecodeBuilder::default().append_many([COINBASE, BALANCE, POP]);
+    let cases = [
+        (reads_then_burns(TIMESTAMP, 1), VolatileDataAccess::TIMESTAMP),
+        (reads_then_burns(COINBASE, 1), VolatileDataAccess::COINBASE),
+        (
+            constructor(&balance_of_coinbase.build_vec(), &runtime(1)),
+            VolatileDataAccess::COINBASE | VolatileDataAccess::BENEFICIARY_BALANCE,
+        ),
+        (reads_the_oracle(1), VolatileDataAccess::ORACLE),
+    ];
+    for (init_code, read) in cases {
+        let deployment = Deployment::new(init_code);
+        for gas_limit in GAS_LIMITS {
+            let run = run_both(&deployment, gas_limit, capped(CAP));
+            assert_eq!(returned(&run.outcome).deployedAddress, deployment.address);
+            assert_eq!(run.accessed, read, "at {gas_limit}");
+            assert!(run.limit.is_some(), "the read caps the transaction");
+        }
+    }
+}
+
+/// A deployment that fails still keeps the reads its creation made: a constructor that reads the
+/// timestamp and deploys no code fails with `EmptyCodeDeployed`, and the read stands.
+#[test]
+fn test_a_failed_deployment_keeps_the_reads_its_creation_made() {
+    let deployment =
+        Deployment::new(BytecodeBuilder::default().append_many([TIMESTAMP, POP, STOP]).build());
+    for gas_limit in GAS_LIMITS {
+        let run = run_both(&deployment, gas_limit, capped(CAP));
+        assert!(
+            matches!(failure(&run.outcome), KeylessDeployError::EmptyCodeDeployed { .. }),
+            "at {gas_limit}"
+        );
+        assert_eq!(run.accessed, VolatileDataAccess::TIMESTAMP);
+        assert!(run.limit.is_some());
+    }
+}
+
+/// A deployment another limit stops still reports the reads its creation made, and the stop stays
+/// that limit's: a constructor that reads the timestamp and fills a slot the state-gas limit has no
+/// room for stops the transaction on state growth, not on compute.
+#[test]
+fn test_a_deployment_another_limit_stops_keeps_the_reads_its_creation_made() {
+    let prefix =
+        BytecodeBuilder::default().append_many([TIMESTAMP, POP]).sstore(U256::ZERO, U256::ONE);
+    let deployment = Deployment::new(constructor(&prefix.build_vec(), &runtime(1)));
+    let upfront = entry(GasId::new_account_state_gas()) + entry(GasId::create_state_gas());
+    let limit = upfront + entry(GasId::sstore_set_state_gas()) - 1;
+    for gas_limit in GAS_LIMITS {
+        let run = run_both(&deployment, gas_limit, capped(CAP).with_tx_state_gas_limit(limit));
+        let ExecutionResult::Revert { output, .. } = &run.outcome.result else {
+            panic!("expected the state-gas stop, got {:?}", run.outcome.result);
+        };
+        assert_eq!(
+            MegaLimitExceeded::abi_decode(output).unwrap(),
+            MegaLimitExceeded { kind: LimitKind::StateGrowth.as_u8(), limit },
+        );
+        assert_eq!(run.accessed, VolatileDataAccess::TIMESTAMP);
+        assert!(run.limit.is_some());
+        assert_eq!(nonce(&run.outcome, deployment.signer), 0, "the deployment is taken back");
     }
 }
