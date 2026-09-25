@@ -1255,6 +1255,29 @@ mod tests {
         let _ = limit.on_frame_return(&mut result);
     }
 
+    /// Whether a start's caller refuses it is staged by the opcode that found it and taken once,
+    /// by the frame's init. Nothing is left for a later start: a reset drops what the transaction
+    /// before it left, and a keyless deployment's creation, which no opcode starts, drops what was
+    /// staged for its call.
+    #[test]
+    fn test_a_staged_start_answer_is_taken_once() {
+        let mut limit = with_the_transactions_frame();
+        assert_eq!(limit.take_start_refused(), None, "nothing staged");
+        for refused in [false, true] {
+            limit.stage_start_refused(refused);
+            assert_eq!(limit.take_start_refused(), Some(refused));
+            assert_eq!(limit.take_start_refused(), None, "taken once");
+        }
+
+        limit.stage_start_refused(true);
+        limit.set_frame_creator(TARGET);
+        assert_eq!(limit.take_start_refused(), None, "the creation's is not the call's");
+
+        limit.stage_start_refused(true);
+        limit.reset();
+        assert_eq!(limit.take_start_refused(), None, "the next transaction's is not this one's");
+    }
+
     /// Limits every dimension holds at zero: anything a transaction counts crosses one.
     fn zero_limits() -> EvmTxRuntimeLimits {
         EvmTxRuntimeLimits::no_limits()
