@@ -15,6 +15,9 @@
 //! twin of each transaction: the same frames, each reverting where the stopped one crossed its
 //! limit or would have resumed. The twin runs without limits and revm settles its reverts itself,
 //! so it bills exactly what the stop should, plus the two pushes each of its reverts costs.
+//!
+//! A column of creations holds the same under that inspector, which revives a stopped creation:
+//! once the transaction is latched the revival is not refused, and the creation reports the stop.
 
 use alloy_primitives::{address, Address, Bytes, U256};
 use mega_evm::{
@@ -35,13 +38,13 @@ use revm::{
     context::result::ExecutionResult,
     interpreter::{
         interpreter::EthInterpreter, interpreter_types::Jumps, CallInputs, CallOutcome,
-        InstructionResult, Interpreter,
+        CreateInputs, CreateOutcome, InstructionResult, Interpreter,
     },
     Database, Inspector,
 };
 
 use crate::{
-    common::{call, call_with_data},
+    common::{call, call_with_data, create},
     detention::{context, work, BENEFICIARY},
 };
 
@@ -187,15 +190,18 @@ fn execute(
 }
 
 /// Records the steps and the result of every frame it sees end, then rewrites that result into a
-/// success with no output: a tool's inspector the latch must see through.
+/// success with no output — a creation's too, which revives a creation that failed: a tool's
+/// inspector the latch must see through.
 #[derive(Clone, Default)]
 struct Rewriter {
     /// The frame and opcode of the last step, and the slot it named when it was an `SSTORE`.
     last: Option<(Address, u8, Option<U256>)>,
     /// How many writes of [`MARKER`] ran.
     marker_writes: usize,
-    /// The frames that ended, deepest first, with the result each had before the rewrite.
+    /// The calls that ended, deepest first, with the result each had before the rewrite.
     ended: Vec<(Address, InstructionResult, Bytes)>,
+    /// The creations that ended, with the result each had before the rewrite.
+    created: Vec<(InstructionResult, Bytes)>,
 }
 
 impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for Rewriter {
@@ -215,6 +221,18 @@ impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for Rewriter {
         let result = &mut outcome.result;
         self.ended.push((inputs.target_address, result.result, result.output.clone()));
         result.result = InstructionResult::Stop;
+        result.output = Bytes::new();
+    }
+
+    fn create_end(
+        &mut self,
+        _context: &mut MegaContext<DB>,
+        _inputs: &CreateInputs,
+        outcome: &mut CreateOutcome,
+    ) {
+        let result = &mut outcome.result;
+        self.created.push((result.result, result.output.clone()));
+        result.result = InstructionResult::Return;
         result.output = Bytes::new();
     }
 }
@@ -416,6 +434,147 @@ fn limits_of(limit: Limit, crossing: usize, slot: u64) -> (EvmTxRuntimeLimits, O
             (EvmTxRuntimeLimits::default().with_tx_state_gas_limit(value), Some(value))
         }
         Limit::Compute => (EvmTxRuntimeLimits::default(), None),
+    }
+}
+
+/* ---------- creations under an inspector that revives them ---------- */
+
+/// Where a creation meets the limit it crosses.
+#[derive(Clone, Copy, Debug)]
+enum Creation {
+    /// The transaction is a creation, and its init code crosses the limit.
+    Transaction,
+    /// The transaction's own frame creates a contract whose init code crosses the limit.
+    Nested,
+    /// The transaction's own frame creates a contract whose start crosses the limit — its write
+    /// records, or the account it adds — so its init code never runs.
+    NestedStart,
+}
+
+/// Init code that logs, then crosses `limit`: a fresh slot's write, or a read of the block's
+/// timestamp and more compute than the cap.
+fn crossing_init_code(limit: Limit) -> Vec<u8> {
+    let code = log(BytecodeBuilder::default());
+    let code = match limit {
+        Limit::Compute => work(code.append_many([TIMESTAMP, POP]), ROUNDS),
+        _ => code.sstore(CROSSING_SLOT, U256::from(1)),
+    };
+    code.stop().build_vec()
+}
+
+/// The database and the transaction of `creation`, for `limit`.
+fn creation_run(
+    creation: Creation,
+    limit: Limit,
+    gas_limit: u64,
+) -> (MemoryDatabase, mega_evm::MegaTransaction) {
+    let init_code = crossing_init_code(limit);
+    match creation {
+        Creation::Transaction => {
+            (MemoryDatabase::default(), create(CALLER, init_code.into(), gas_limit))
+        }
+        Creation::Nested | Creation::NestedStart => {
+            let code = BytecodeBuilder::default().create(U256::ZERO, init_code).append(POP);
+            let db = MemoryDatabase::default().account_code(A, code.stop().build());
+            (db, call(CALLER, A, U256::ZERO, gas_limit))
+        }
+    }
+}
+
+/// The limits under which `creation` crosses `limit` by one unit at the place it names.
+///
+/// Where the init code crosses, the limit is one unit below what the whole transaction uses without
+/// limits, whose last write is the init code's; the compute limit is the spec's cap. Where the
+/// start crosses, the limit is what the transaction used before it.
+fn creation_limits(creation: Creation, limit: Limit, gas_limit: u64) -> EvmTxRuntimeLimits {
+    let limits = EvmTxRuntimeLimits::default();
+    if let Creation::NestedStart = creation {
+        return match limit {
+            Limit::DataSize => limits.with_tx_data_size_limit(TX_BODY_SIZE),
+            Limit::KvUpdates => limits.with_tx_kv_update_limit(0),
+            Limit::StateGas => limits.with_tx_state_gas_limit(0),
+            Limit::Compute => unreachable!("a start charges no compute past the cap"),
+        };
+    }
+    let (db, tx) = creation_run(creation, limit, gas_limit);
+    let unlimited =
+        MegaEvm::new(context(db).with_tx_runtime_limits(EvmTxRuntimeLimits::no_limits()))
+            .execute_transaction(tx)
+            .expect("the transaction is valid");
+    assert!(unlimited.result.is_success(), "{creation:?}, {limit:?}: {:?}", unlimited.result);
+    match limit {
+        Limit::DataSize => limits.with_tx_data_size_limit(unlimited.usage.data_size - 1),
+        Limit::KvUpdates => limits.with_tx_kv_update_limit(unlimited.usage.write_records - 1),
+        Limit::StateGas => limits.with_tx_state_gas_limit(unlimited.gas.state - 1),
+        Limit::Compute => limits,
+    }
+}
+
+/// Under the latch a revived creation reports the stop, as a revived call does: an inspector that
+/// rewrites a stopped creation into a success is not refused, because once the transaction is
+/// stopped every frame's result is the stop, whatever produced it. A creation transaction whose
+/// init code crosses a limit, a nested creation whose init code crosses one, and a nested creation
+/// whose start crosses one each report the stop on the bill they have without the inspector,
+/// below the execution cap and above it.
+///
+/// A nested creation's init code cannot be the first to cross the KV limit. A record is one unit,
+/// so the record that crosses the transaction's limit comes when the creation already holds all
+/// the transaction had left, and its budget — 98% of that, rounded down — is less unless nothing
+/// was left, when the start's own records cross: the budget stops the creation alone first.
+#[test]
+fn test_a_revived_creation_reports_the_stop() {
+    let cases = [
+        (Creation::Transaction, Limit::ALL.as_slice()),
+        (Creation::Nested, [Limit::DataSize, Limit::StateGas, Limit::Compute].as_slice()),
+        (Creation::NestedStart, [Limit::DataSize, Limit::KvUpdates, Limit::StateGas].as_slice()),
+    ];
+    for (creation, limits) in cases {
+        for &limit in limits {
+            for gas_limit in TIERS {
+                let case = format!("{creation:?}, {limit:?}, gas limit {gas_limit}");
+                let configured = creation_limits(creation, limit, gas_limit);
+                let (db, tx) = creation_run(creation, limit, gas_limit);
+                let plain = MegaEvm::new(context(db.clone()).with_tx_runtime_limits(configured))
+                    .execute_transaction(tx.clone())
+                    .expect("the transaction is valid");
+                let stop = plain.limit_exceeded.expect("the transaction is stopped");
+                assert!(
+                    matches!(
+                        stop,
+                        LimitCheck::ExceedsLimit { kind, frame_local: false, .. }
+                            if kind == limit.kind()
+                    ),
+                    "{case}: {stop:?}"
+                );
+                assert!(
+                    matches!(&plain.result, ExecutionResult::Revert { output, .. }
+                        if output == &stop.revert_data()),
+                    "{case}: {:?}",
+                    plain.result
+                );
+
+                let mut evm = MegaEvm::new(context(db).with_tx_runtime_limits(configured))
+                    .with_inspector(Rewriter::default());
+                let revived = evm.execute_transaction(tx).expect("the revival is not refused");
+                assert_eq!(revived.result, plain.result, "{case}: the stop");
+                assert_eq!(revived.limit_exceeded, plain.limit_exceeded, "{case}");
+                assert_eq!(revived.gas, plain.gas, "{case}: the plain run's bill");
+                assert_eq!(revived.usage, plain.usage, "{case}");
+                let rewriter = evm.inspector();
+                assert_eq!(
+                    rewriter.created,
+                    [(InstructionResult::Revert, stop.revert_data())],
+                    "{case}: the creation ended with the stop before its revival"
+                );
+                let ended = match creation {
+                    Creation::Transaction => vec![],
+                    Creation::Nested | Creation::NestedStart => {
+                        vec![(A, InstructionResult::Revert, stop.revert_data())]
+                    }
+                };
+                assert_eq!(rewriter.ended, ended, "{case}: its creator returned the stop");
+            }
+        }
     }
 }
 

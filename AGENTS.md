@@ -303,6 +303,7 @@ Every later mechanism plugs into these; a change to one comes back to this layer
 - **The latch.**
   A transaction-level limit stops the transaction with a revert, never a halt: the frame that crosses it reverts with `MegaLimitExceeded(uint8 kind, uint64 limit)`, the transaction is latched (`AdditionalLimit::latch`), no caller resumes (`before_frame_run`), no frame starts, every result returned above is rewritten to the stop, and the outermost frame settles like an EIP-8037 revert, its unspent regular gas and the reservoir back to the sender.
   The rewrite takes every result, whatever produced it — revm, an interceptor, or an inspector that turned it into a success or a halt (`AdditionalLimit::apply_latch`): no frame runs an instruction under the latch, so a halt there can only be an inspector's.
+  A stopped creation an inspector revived is one of them: the creation-revival refusal puts it back and leaves a latched transaction to the latch rather than failing it.
   Nothing is rescued for the sender on a stop, because nothing was taken from it: the stop settles on the gas the frames hold, and detention withholds inside a frame's own tracker.
   A frame budget reverts its frame alone, without a latch.
   A limit is enforced before the writes it guards: a frame whose start would cross it is answered with the stop before revm builds it (a creation still bumps its creator's nonce, so a stopped creation transaction cannot be replayed), and EIP-7702 authorities whose state gas or records would cross it are taken back before the first frame.
@@ -312,7 +313,7 @@ Every later mechanism plugs into these; a change to one comes back to this layer
   A real out-of-gas, a precompile out-of-gas and an invalid opcode still halt and burn; an out-of-gas before the first frame takes back what pre-execution counted and keeps the body — only the account a deposit-like transaction creates for its caller can still run a latched transaction out of gas there, and then the halt clears the latch.
   The layer's state belongs to one transaction: every entry point of `MegaEvm` resets it before it runs the handler.
   The outcome's `limit_exceeded`, not the output, tells a stop from a contract reverting with the same bytes.
-  `tests/satin/stops.rs` pins the protocol as a matrix: every limit crossed by the transaction's own frame and three calls down, below and above the execution cap, with and without an inspector that rewrites every result.
+  `tests/satin/stops.rs` pins the protocol as a matrix: every limit crossed by the transaction's own frame and three calls down, below and above the execution cap, with and without an inspector that rewrites every result, and a column of stopped creations that inspector revives.
 - **A per-frame gas cap stays inside the frame's tracker.**
   Detention caps a frame's regular gas with the fork's withheld part (`Gas::limit_spendable`), which every reader of the frame's gas but a regular charge counts, so it moves no gas between pools and has nothing to release: a child's withheld part goes back to its caller with the rest of its gas, and a stop settles on the crossing record where the frame ends (`after_frame_run`).
   A later mechanism that caps a frame's gas uses the same part; it limits the frame at its start and again after every credit — a child's return, `SSTORE`'s refill — and never releases a creating frame's withheld part before `return_create`, whose charges are the frame's own regular charges.
@@ -322,7 +323,8 @@ Every later mechanism plugs into these; a change to one comes back to this layer
   A rewriting inspector is a tool feature; `with_trusted_inspector` requires a `TrustedObserver` declaration, `has_rewriting_inspector` is what block execution refuses, and `DeclaredObserver` carries the declaration for a foreign tracer and proves it in debug builds.
   alloy-evm's `BlockExecutorFactory` asks for an executor for every `I: Inspector`, so the refusal cannot be a bound on the type: block execution checks it at every entry point — the pre-block changes, a transaction, a commit and the end of the block — because an inspector can be enabled after the block was set up and a caller can run transactions without setting it up.
   `create_executor_with_trusted_inspector` is the compile-time proof; `create_executor` is the checked route.
-  The one rewrite refused is a failed creation turned into a success (`FORBIDDEN_CREATE_REVIVAL`, an `EVMError::Custom`).
+  The one rewrite refused is a failed creation turned into a success (`FORBIDDEN_CREATE_REVIVAL`, an `EVMError::Custom`), unless the transaction is latched: the creation is put back, and the latch reports the stop.
+  A creation stopped by its own frame budget latches nothing, and its revival is refused.
   The test utilities' inspectors are not declared.
 - **The interceptor dispatch.**
   Its order is the scheme guard, the address, the selector, then the method's value policy, each step cheaper than the next: `CALLCODE` and `DELEGATECALL` never reach an interceptor, because they run the callee's code in the caller's context; the address test is one comparison against the shared `0x6342…` prefix and runs on every call a transaction makes; the selector is peeked without materialising the calldata behind it, and is admitted on its four bytes alone, trailing bytes and all.
