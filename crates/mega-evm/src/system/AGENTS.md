@@ -1,7 +1,7 @@
 # AGENTS.md
 
 ## OVERVIEW
-The six system contracts: their addresses and bytecode, the interceptor dispatch that answers calls to four of them, the system-address transaction, and the pre-block deploy of those six plus the EIP-7997 factory.
+The six system contracts: their addresses and bytecode, the interceptor dispatch that answers calls to four of them, the system-address transaction, and the pre-block deploy of those six plus the EIP-7997 factory, and the `SequencerRegistry`'s pre-block steps: the due-change read, the `applyPendingChanges()` system call and the read of the live system address.
 
 ## STRUCTURE
 - `oracle.rs`: the Oracle's address, code and ABI, and the `sendHint` side effect. Its storage is read by the Host (`evm/host.rs`), through the oracle environment.
@@ -9,7 +9,7 @@ The six system contracts: their addresses and bytecode, the interceptor dispatch
 - `keyless/`: native keyless deployment. The `KeylessDeploy` address, code and ABI and the semantics of a deployment (`mod.rs`); the dispatch, the overhead, the nine rules, the charges of the creation's start and the rewrite into a creation (`dispatch.rs`); the settlement of the creation into its call and the ABI answer (`settle.rs`); the pre-EIP-155 transaction format and the error ABI (`tx.rs`, `error.rs`).
 - `control.rs`: `MegaAccessControl`'s address, code, ABI and revert payloads, `SLOT_NUM_ACCESS_TYPE`, and its interceptor, which steers gas detention's switch.
 - `limit_control.rs`: `MegaLimitControl`'s address, code, ABI and its interceptor, which answers the compute the calling frame could still spend.
-- `sequencer_registry.rs`: the `SequencerRegistry`'s address, code and ABI, and the [`SequencerRegistryConfig`] that seeds it. No interceptor.
+- `sequencer_registry.rs`: the `SequencerRegistry`'s address, code and ABI, the [`SequencerRegistryConfig`] that seeds it, and its three pre-block helpers — `is_apply_pending_changes_due` (the read-only due check and its witness), `transact_apply_pending_changes` (the system call on `pre_block_call_gas_limit`) and `resolve_system_address` (fail-closed read of `_currentSystemAddress`). No interceptor.
 - `deploy.rs`: the declarative spec, `transact_deploy`, the EIP-7997 factory, and the list of seven predeploys.
 - `intercept.rs`: the dispatch — the address test, the selector peek, the value policy and the shape of an answer.
 - `tx.rs`: the system-address transaction, its whitelist and the validation that precedes its promotion to a deposit.
@@ -72,4 +72,4 @@ The executor hands it to the pre-block observer, then commits: the sequence the 
 - Change what a deposit-like transaction pays for the account it creates: `evm/execution.rs`, where the charge is made in the pre-execution phase.
 - Add a predeploy: a spec in `deploy.rs::system_contract_specs`, seeded from chain params if it has storage.
 - Change how a block deploys the contracts: `block/executor.rs::apply_pre_execution_changes` iterates the spec list, delivers each witness to the pre-block observer, and commits.
-- Read the rotated system address, or run `applyPendingChanges`: the pre-block system calls own those.
+- Change when a role change is applied or how the live system address is read: `sequencer_registry.rs`, whose three helpers `block/executor.rs::apply_pre_execution_changes` calls after the deploys, in that order; the result lives on the context (`MegaContext::system_address`).

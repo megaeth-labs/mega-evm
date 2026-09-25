@@ -1,10 +1,11 @@
 //! The system-address transaction: how the protocol maintains its own state.
 //!
 //! The sequencer writes what the protocol owes the chain — the oracle values it served, for one
-//! — through transactions sent from [`MEGA_SYSTEM_ADDRESS`]. They carry no signature and pay no
-//! fee, so they are executed as deposit transactions: the engine stamps
-//! [`MEGA_SYSTEM_TRANSACTION_SOURCE_HASH`] on one before it validates it, and op-revm's deposit
-//! path takes it from there.
+//! — through transactions sent from the system address the `SequencerRegistry` names
+//! ([`MegaContext::system_address`](crate::MegaContext::system_address); [`MEGA_SYSTEM_ADDRESS`]
+//! until a block has read it). They carry no signature and pay no fee, so they are executed as
+//! deposit transactions: the engine stamps [`MEGA_SYSTEM_TRANSACTION_SOURCE_HASH`] on one before
+//! it validates it, and op-revm's deposit path takes it from there.
 //!
 //! A deposit is unvalidated by construction, so the engine validates what still matters itself
 //! before promoting the transaction ([`validate_and_promote`]):
