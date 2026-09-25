@@ -29,11 +29,11 @@ Do not add a `_pending/main.rs`.
 |---|---:|---:|---:|---:|---:|---:|
 | the common execution layer | 21 | 21 | 0 | 21 | 0 | 0 |
 | revert-class aborts | 17 | 17 | 0 | 0 | 17 | 0 |
-| the pre-block system calls | 20 | 11 | 9 | 16 | 4 | 0 |
+| the pre-block system calls | 10 | 10 | 0 | 7 | 3 | 0 |
 | system contract deployment | 11 | 5 | 6 | 11 | 0 | 0 |
 | inspector support | 4 | 4 | 0 | 1 | 3 | 0 |
 | — (undecided: D57 preload-warm cold charging, D58 98/100 forwarding) | 7 | 7 | 0 | 0 | 0 | 7 |
-| **Total** | **80** | **65** | **15** | **49** | **24** | **7** |
+| **Total** | **70** | **64** | **6** | **40** | **23** | **7** |
 
 ## Tests ported in place
 
@@ -331,13 +331,15 @@ These 69 rows run in a real test target now, adapted to the Satin API: a keyless
 
 ## Tests ported by the pre-block system calls
 
-These 14 rows run in a real test target now, adapted to the Satin API: a system call runs on at most 30,000,000 of regular gas with the rest of its gas limit as its state-gas reservoir, priced at the minimum SALT bucket and held to no per-transaction limit; a pre-block call that does not succeed refuses the block; and a due `SequencerRegistry` change is applied by a pre-block call before the live system address is read out of the registry. The counts above are lower than the inventory's by exactly these rows.
+These 24 rows run in a real test target now, adapted to the Satin API: a system call runs on at most 30,000,000 of regular gas with the rest of its gas limit as its state-gas reservoir, priced at the minimum SALT bucket and held to no per-transaction limit; a pre-block call that does not succeed refuses the block; and a due `SequencerRegistry` change is applied by a pre-block call before the live system address is read out of the registry. The counts above are lower than the inventory's by exactly these rows.
 
 | Legacy file | Owner in the inventory | Tests | Now in |
 |---|---|---:|---|
+| `rex5/apply_pending_changes_gas_budget.rs` | the pre-block system calls (1) | 1 | `tests/block/sequencer_registry.rs` |
 | `rex5/pre_block_system_calls.rs` | the pre-block system calls (11) | 11 | `tests/block/eips.rs` |
 | `src/evm/mod.rs` | the pre-block system calls (3) | 3 | `src/evm/mod.rs` |
-| **Total** | | **14** | |
+| `src/system/sequencer_registry.rs` | the pre-block system calls (9) | 9 | `src/system/sequencer_registry.rs` |
+| **Total** | | **24** | |
 
 ## Tests retired after the inventory
 
@@ -366,15 +368,6 @@ They are not counted above.
 
 | File | Test | Parked under | Reason |
 |---|---|---|---|
-| `src/system/sequencer_registry.rs` | `test_is_apply_pending_changes_due_checks_sequencer_when_system_not_due` | the pre-block system calls | the pre-block system calls own transact_apply_pending_changes |
-| `src/system/sequencer_registry.rs` | `test_is_apply_pending_changes_due_no_pending` | the pre-block system calls | the pre-block system calls own transact_apply_pending_changes |
-| `src/system/sequencer_registry.rs` | `test_is_apply_pending_changes_due_no_registry` | the pre-block system calls | the pre-block system calls own transact_apply_pending_changes |
-| `src/system/sequencer_registry.rs` | `test_is_apply_pending_changes_due_sequencer_due` | the pre-block system calls | the pre-block system calls own transact_apply_pending_changes |
-| `src/system/sequencer_registry.rs` | `test_is_apply_pending_changes_due_system_address_due` | the pre-block system calls | the pre-block system calls own transact_apply_pending_changes |
-| `src/system/sequencer_registry.rs` | `test_transact_apply_pending_changes_errors_when_registry_reverts` | the pre-block system calls | the pre-block system calls own transact_apply_pending_changes |
-| `src/system/sequencer_registry.rs` | `test_transact_apply_pending_changes_respects_30m_floor` | the pre-block system calls | the pre-block system calls own transact_apply_pending_changes |
-| `src/system/sequencer_registry.rs` | `test_transact_apply_pending_changes_updates_and_clears_due_roles` | the pre-block system calls | the pre-block system calls own transact_apply_pending_changes |
-| `src/system/sequencer_registry.rs` | `test_transact_apply_pending_changes_uses_block_gas_limit` | the pre-block system calls | the pre-block system calls own transact_apply_pending_changes |
 | `block_executor/sequencer_registry.rs` | `test_admin_handoff_via_block_executor` | the pre-block system calls | the pre-block system calls own the two-step admin handoff |
 | `block_executor/sequencer_registry.rs` | `test_bootstrap_block_resolves_system_address` | the pre-block system calls | the pre-block system calls own resolving the live system address |
 | `block_executor/sequencer_registry.rs` | `test_dual_change_in_same_block` | the pre-block system calls | the pre-block system calls own applying a pending rotation |
@@ -403,11 +396,11 @@ Each cell lists `disposition count (mechanism · decision)`.
 | `rex4/frame_limits.rs` | 1 | rewrite 1 (revert-class aborts · D48) |
 | `rex4/gas_detention.rs` | 2 | rewrite 2 (revert-class aborts · D48/D53) |
 | `rex4/intrinsic_limit_bypass.rs` | 1 | rewrite 1 (inspector support · D41) |
-| `rex5/apply_pending_changes_gas_budget.rs` | 4 | rewrite 4 (the pre-block system calls · D51 (system source m = 1; the system-call reservoir split)) |
+| `rex5/apply_pending_changes_gas_budget.rs` | 3 | rewrite 3 (the pre-block system calls · D51 (system source m = 1; the system-call reservoir split)) |
 | `rex5/create2_empty_initcode.rs` | 5 | keep 5 (the common execution layer · canonical revm behaviour) |
 | `rex5/create2_resize_gas_metering.rs` | 2 | keep 2 (the common execution layer · canonical behaviour) |
 | `rex5/oracle_hint_metering.rs` | 1 | rewrite 1 (revert-class aborts · D48) |
 | `rex6/create2_metering_order.rs` | 11 | keep 11 (the common execution layer · canonical halt reasons; D04 512 KiB boundary) |
 | `rex6/error_paths.rs` | 2 | keep 2 (the common execution layer · canonical) |
 | `rex6/sequencer_registry_rotation.rs` | 5 | keep 5 (system contract deployment) |
-| `src/system/sequencer_registry.rs` | 15 | keep 6 (system contract deployment · the pre-block system calls for transact_apply_pending_changes); keep 9 (the pre-block system calls · the pre-block system calls for transact_apply_pending_changes) |
+| `src/system/sequencer_registry.rs` | 6 | keep 6 (system contract deployment · the pre-block system calls for transact_apply_pending_changes) |

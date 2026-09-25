@@ -165,66 +165,6 @@ fn assert_30m_system_call_oog(result: &ExecutionResult<MegaHaltReason>, system_c
     );
 }
 
-/// Without the fix, `applyPendingChanges()` would OOG on the first
-/// zero→nonzero `SSTORE` (≈ 40M storage gas alone, > the upstream 30M cap)
-/// and `apply_pre_execution_changes()` would error. With the fix, the live
-/// 250M block budget is used and the rotation commits.
-#[test]
-fn test_rex5_apply_pending_changes_succeeds_under_heavy_storage_gas() {
-    let mut db = seed_db_with_pending_change();
-    let mut state = State::builder().with_database(&mut db).build();
-
-    let evm_factory = MegaEvmFactory::new().with_external_env_factory(heavy_external_envs());
-    let chain_spec = MegaHardforkConfig::default()
-        .with(MegaHardfork::Rex5, ForkCondition::Timestamp(0))
-        .with_params(sequencer_registry_config());
-    let receipt_builder = OpAlloyReceiptBuilder::default();
-    let block_executor_factory =
-        MegaBlockExecutorFactory::new(chain_spec, evm_factory, receipt_builder);
-
-    let block_ctx = MegaBlockExecutionCtx::new(
-        B256::ZERO,
-        Some(B256::ZERO),
-        Bytes::new(),
-        BlockLimits::no_limits(),
-    );
-
-    let mut executor = block_executor_factory.create_executor(
-        &mut state,
-        block_ctx,
-        create_evm_env(BLOCK_GAS_LIMIT),
-    );
-    executor.apply_pre_execution_changes().expect(
-        "applyPendingChanges() must succeed under the live block gas budget — \
-         a regression here means the system call was capped at the upstream 30M default",
-    );
-
-    // The system address rotation only takes effect if `applyPendingChanges()` ran
-    // to completion. This proves the inflated SSTOREs were actually charged and
-    // committed, not that the call simply early-returned.
-    let resolved = executor.evm().ctx_ref().system_address();
-    assert_eq!(resolved, NEW_SYSTEM_ADDRESS, "Pending system address change must be applied");
-
-    assert_eq!(
-        executor
-            .evm_mut()
-            .db_mut()
-            .storage(SEQUENCER_REGISTRY_ADDRESS, PENDING_SYSTEM_ADDRESS)
-            .unwrap(),
-        U256::ZERO,
-        "Pending system address slot must be cleared after applyPendingChanges() commits",
-    );
-    assert_eq!(
-        executor
-            .evm_mut()
-            .db_mut()
-            .storage(SEQUENCER_REGISTRY_ADDRESS, SYSTEM_ADDRESS_ACTIVATION_BLOCK)
-            .unwrap(),
-        U256::ZERO,
-        "System address activation slot must be cleared after applyPendingChanges() commits",
-    );
-}
-
 /// Pins the regression *baseline*: under the same heavy-SALT scenario, a
 /// system call issued with the upstream-fixed 30M cap MUST fail. If this test
 /// ever starts to pass, role rotation has become cheap enough for the
