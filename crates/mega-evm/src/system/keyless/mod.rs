@@ -4,15 +4,15 @@
 //!
 //! # A native creation
 //!
-//! A `keylessDeploy(bytes,uint256)` call a transaction makes is rewritten into the creation it
-//! stands for, before the frame starts and before any interceptor sees it ([`rewrite`]). The call
-//! becomes a frame no code runs in: it pays the fixed overhead and what the `CREATE` opcode charges
-//! its frame, then starts the creation as its child — as the signer, at the signer's Nick's-Method
-//! address, with `gasLimitOverride` capped to what the call has left. From there the creation is
-//! an ordinary `CREATE` frame: priced, limited and journaled as one, and returned into the call as
-//! one returns into the frame that started it. The call then answers in the `IKeylessDeploy` ABI
-//! ([`settle`]). An inspector sees both frames: the call, and the creation as its child. There is
-//! no second EVM and no state to merge.
+//! A `keylessDeploy(bytes,uint256)` call a transaction makes is dispatched before any interceptor
+//! sees it ([`is_dispatched`]), and its frame is built as any call's is, but runs no code: its
+//! actions are made by hand ([`run`]). On its first run it pays the fixed overhead and what the
+//! `CREATE` opcode charges its frame, then starts the creation as its child — as the signer, at
+//! the signer's Nick's-Method address, with `gasLimitOverride` capped to what the call has left.
+//! From there the creation is an ordinary `CREATE` frame: priced, limited and journaled as one,
+//! and returned into the call as one returns into the frame that started it ([`settle`]). On its
+//! resume the call answers in the `IKeylessDeploy` ABI. An inspector sees both frames: the call,
+//! and the creation as its child. There is no second EVM and no state to merge.
 //!
 //! What the native frame means for a deployment:
 //!
@@ -81,8 +81,8 @@ mod tx;
 pub use error::*;
 pub use tx::*;
 
-pub(crate) use dispatch::{rewrite, KeylessCall, Rewrite};
-pub(crate) use settle::{give_back_history, settle};
+pub(crate) use dispatch::{is_dispatched, ready, run, runs, KeylessFrame};
+pub(crate) use settle::{returning, settle};
 
 use alloy_primitives::{address, Address};
 

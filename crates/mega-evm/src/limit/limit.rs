@@ -693,12 +693,12 @@ impl AdditionalLimit {
     /// computed from.
     ///
     /// The two are separate answers to the same question, asked at two points: the charge at the
-    /// opcode, on the input revm's instruction built, or at the keyless rewrite, on the creation
-    /// it starts; and the count here, on the input that survived interception. They agree because
-    /// nothing between the two changes the input: the keyless rewrite runs at the transaction's
-    /// own frame, which no opcode starts, and charges for the creation it builds itself. A
-    /// divergence trips here in every debug build rather than mis-charging the caller and
-    /// mis-splitting the refund its failure gets back.
+    /// opcode, on the input revm's instruction built, or at a `keylessDeploy` call's first run, on
+    /// the creation it starts; and the count here, on the input that survived interception. They
+    /// agree because nothing between the two changes the input: an interceptor answers a frame or
+    /// lets it start as it is, and a creation reaches none. A divergence trips here in every debug
+    /// build rather than mis-charging the caller and mis-splitting the refund its failure gets
+    /// back.
     fn records_the_caller_paid_for(
         &self,
         input: &FrameInput,
@@ -775,12 +775,6 @@ impl AdditionalLimit {
         let check = self.check();
         self.resume_stop = check.exceeded_limit().then_some(check);
         true
-    }
-
-    /// The number of frames with a lane: the frames on the call stack, and a `keylessDeploy` call
-    /// whose creation is running.
-    pub(crate) fn frame_depth(&self) -> usize {
-        self.tracker.depth()
     }
 
     /// Pushes the lane of a frame answered without running: a result built without an

@@ -482,9 +482,9 @@ fn test_the_keyless_value_refusal_keeps_the_reservoir() {
     }
 }
 
-/// A `keylessDeploy` call forwarded less regular gas than the overhead is answered out of gas,
-/// with the reservoir it inherited carried, and that answer settles into a caller exactly as
-/// revm's own frame return settles a frame that ran out.
+/// A `keylessDeploy` call forwarded less regular gas than the overhead runs out of gas on its
+/// first run, with the reservoir it inherited carried, and that result settles into a caller
+/// exactly as revm's own frame return settles a frame that ran out.
 #[test]
 fn test_a_keyless_call_below_the_overhead_runs_out_of_gas() {
     use core::convert::Infallible;
@@ -494,11 +494,19 @@ fn test_a_keyless_call_below_the_overhead_runs_out_of_gas() {
 
     let forwarded = KEYLESS_DEPLOY_OVERHEAD_GAS - 1;
     let mut evm = MegaEvm::new(context(system_db()));
+    // The accounts a transaction's validation and its first frame input load.
+    let journal = evm.ctx_mut().journal_mut();
+    journal.load_account(CALLER).unwrap();
+    journal.load_account_with_code(KEYLESS_DEPLOY_ADDRESS).unwrap();
     let init = call_frame_init_to(0, KEYLESS_DEPLOY_ADDRESS, keyless_deploy_call(), forwarded);
-    let ItemOrResult::Result(result) =
+    let ItemOrResult::Item(_) =
         EvmTr::frame_init(&mut evm, init).expect("frame_init does not fail")
     else {
-        panic!("a call that cannot pay the overhead starts no frame");
+        panic!("the call's frame is built");
+    };
+    let ItemOrResult::Result(result) = EvmTr::frame_run(&mut evm).expect("frame_run does not fail")
+    else {
+        panic!("a call that cannot pay the overhead starts no creation");
     };
     let FrameResult::Call(outcome) = &result else { panic!("expected a call result: {result:?}") };
     assert_eq!(outcome.result.result, InstructionResult::OutOfGas);

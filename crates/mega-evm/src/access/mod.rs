@@ -116,10 +116,11 @@
 //!
 //! A keyless deployment's call is the transaction's own frame, and runs no code: it charges its
 //! own work — the overhead of decoding and recovering the signer, then the `CREATE` opcode's
-//! regular gas — on gas held to the limit as a running frame's is, so a charge past the limit
-//! is a crossing, whether a rule would then refuse the call or its creation would run. A call
-//! that starts its creation is kept as a frame suspended on it, and its charges are compute as a
-//! caller's are; a call a rule refuses is an answer held by the rule above. The call reads its
+//! regular gas — on its frame's gas, held to the limit as any frame's is, so a charge past the
+//! limit is a crossing, whether a rule would then refuse the call or its creation would run. A
+//! call that starts its creation suspends on it, and its charges are compute as a caller's are; a
+//! call carrying value is refused before its frame is built, an answer held by the rule above.
+//! The call reads its
 //! signer's account through the journal, where the Host marks nothing, so a signer that is the
 //! beneficiary is marked there, at the call's compute then: the creation runs for that account,
 //! as a `CREATE` runs in a frame of it, which a read of the account started.

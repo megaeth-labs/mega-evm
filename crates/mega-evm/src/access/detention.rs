@@ -55,10 +55,9 @@ struct DetainedFrame {
 ///
 /// A keyless deployment's call is the transaction's own frame, and runs no code: it charges its
 /// own work — the overhead of decoding the signed transaction and recovering its signer, and the
-/// `CREATE` opcode's regular gas — on its own gas, held to the limit as a running frame's is, then
-/// starts its creation. It is kept as a frame suspended on the creation
-/// ([`on_call_rewritten`](Self::on_call_rewritten)), so its charges are compute as a caller's
-/// are, whether a rule then refuses the call or its creation runs.
+/// `CREATE` opcode's regular gas — on its own gas, held to the limit as any frame's is when it
+/// runs, then suspends on its creation. Its charges are compute as a caller's are, whether a rule
+/// then refuses the call or its creation runs.
 ///
 /// The one part of the regular ledger that is not compute is what a halt burns (`burned`): a
 /// frame that halts consumes the gas it had left, and its spill, without running anything with
@@ -338,19 +337,6 @@ impl Detention {
         }
     }
 
-    /// The transaction's own frame, a keyless deployment's call whose gas is `gas`, was rewritten
-    /// into the creation it starts, without running: it is kept as the frame at depth 0,
-    /// suspended on the creation with the regular gas it spent — its own charges and the gas it
-    /// forwarded — so the creation's first run adds the charges to the transaction's compute, as
-    /// a caller's work before a `CREATE` is added.
-    ///
-    /// The call's charges were held to the limit as they were made: its gas was held as a
-    /// running frame's is ([`hold`](Self::hold)) before it charged anything.
-    pub(crate) fn on_call_rewritten(&mut self, gas: &Gas) {
-        debug_assert!(self.frames.is_empty(), "the call is the transaction's own frame");
-        self.frames.push(DetainedFrame { at_suspension: regular_spent(gas), contribution: 0 });
-    }
-
     /// Records a read of `access` the running frame, whose gas is `gas`, makes itself rather than
     /// through an opcode — a keyless deployment's call reading its signer's account — and holds
     /// the frame to the limit it sets, as an opcode's read is committed
@@ -404,8 +390,8 @@ impl Detention {
     }
 
     /// The frame at `depth`, whose gas limit was `gas_limit`, was answered without running —
-    /// `result` is the answer: a precompile's, an interceptor's, a refused `keylessDeploy` call's,
-    /// an inspector's, or revm's for a call it did not start.
+    /// `result` is the answer: a precompile's, an interceptor's, a `keylessDeploy` call's that
+    /// carries value, an inspector's, or revm's for a call it did not start.
     ///
     /// An answer marked as a crossing — a precompile that ran out of the allowance it was held to
     /// ([`restore_forward`](Self::restore_forward)) — crossed the limit. Otherwise, an answer that
@@ -441,8 +427,8 @@ impl Detention {
             }
             // The answer spent more than the allowance, and no more than the gas limit, so the
             // gas limit is above the allowance and the frame would have had the rest withheld. The
-            // one answer of the engine's own that spends regular gas is a refused `keylessDeploy`
-            // call's, built on the whole forward; the limit is set to the forward all the same, so
+            // one answer of the engine's own that spends regular gas is that of a `keylessDeploy`
+            // call carrying value; the limit is set to the forward all the same, so
             // an inspector's answer built on another limit is settled on what the frame was
             // forwarded.
             //
@@ -882,12 +868,12 @@ mod tests {
         let mut detention = detaining();
         detention.mark_before_execution(VolatileDataAccess::BENEFICIARY_BALANCE);
         let mut call = gas(100_000_000, 0);
-        detention.hold(&mut call);
+        detention.on_frame_run(&mut call, 0);
         assert_eq!(call.spendable(), BLOCK_ENV_ACCESS_COMPUTE_GAS);
 
         assert!(call.record_regular_cost(132_000));
         assert!(call.record_withheld_first_cost(50_000_000));
-        detention.on_call_rewritten(&call);
+        detention.on_frame_suspend(&call, 0);
         let mut creation = gas(50_000_000, 0);
         detention.on_frame_run(&mut creation, 1);
         assert_eq!(detention.compute(&creation), 132_000, "the charges, not the forward");
