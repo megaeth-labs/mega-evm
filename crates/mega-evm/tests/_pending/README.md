@@ -29,11 +29,11 @@ Do not add a `_pending/main.rs`.
 |---|---:|---:|---:|---:|---:|---:|
 | the common execution layer | 21 | 21 | 0 | 21 | 0 | 0 |
 | revert-class aborts | 17 | 17 | 0 | 0 | 17 | 0 |
-| the pre-block system calls | 34 | 22 | 12 | 30 | 4 | 0 |
+| the pre-block system calls | 31 | 22 | 9 | 27 | 4 | 0 |
 | system contract deployment | 11 | 5 | 6 | 11 | 0 | 0 |
 | inspector support | 4 | 4 | 0 | 1 | 3 | 0 |
 | — (undecided: D57 preload-warm cold charging, D58 98/100 forwarding) | 7 | 7 | 0 | 0 | 0 | 7 |
-| **Total** | **94** | **76** | **18** | **63** | **24** | **7** |
+| **Total** | **91** | **76** | **15** | **60** | **24** | **7** |
 
 ## Tests ported in place
 
@@ -329,6 +329,15 @@ These 69 rows run in a real test target now, adapted to the Satin API: a keyless
 | `src/sandbox/execution.rs` | native keyless deployment (2) | 2 | `tests/system/keyless/rules.rs` |
 | **Total** | | **69** | |
 
+## Tests ported by the pre-block system calls
+
+These 3 rows run in a real test target now, adapted to the Satin API: a system call runs on at most 30,000,000 of regular gas with the rest of its gas limit as its state-gas reservoir, priced at the minimum SALT bucket and held to no per-transaction limit; a pre-block call that does not succeed refuses the block; and a due `SequencerRegistry` change is applied by a pre-block call before the live system address is read out of the registry. The counts above are lower than the inventory's by exactly these rows.
+
+| Legacy file | Owner in the inventory | Tests | Now in |
+|---|---|---:|---|
+| `src/evm/mod.rs` | the pre-block system calls (3) | 3 | `src/evm/mod.rs` |
+| **Total** | | **3** | |
+
 ## Tests retired after the inventory
 
 These 21 rows were parked when the inventory was applied and have since been retired: the mechanism that owns them landed and left them nothing to pin, so no later mechanism will port them.
@@ -401,5 +410,4 @@ Each cell lists `disposition count (mechanism · decision)`.
 | `rex6/create2_metering_order.rs` | 11 | keep 11 (the common execution layer · canonical halt reasons; D04 512 KiB boundary) |
 | `rex6/error_paths.rs` | 2 | keep 2 (the common execution layer · canonical) |
 | `rex6/sequencer_registry_rotation.rs` | 5 | keep 5 (system contract deployment) |
-| `src/evm/mod.rs` | 3 | keep 3 (the pre-block system calls) |
 | `src/system/sequencer_registry.rs` | 15 | keep 6 (system contract deployment · the pre-block system calls for transact_apply_pending_changes); keep 9 (the pre-block system calls · the pre-block system calls for transact_apply_pending_changes) |
