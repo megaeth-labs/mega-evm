@@ -449,7 +449,8 @@ mod tests {
         assert!(err.to_string().contains("injected basic() error"), "{err}");
     }
 
-    /// A registry whose code reverts fails the call, and the block with it.
+    /// A registry whose code reverts fails the call, and the block with it: the refusal is a
+    /// validation error, a verdict on the block, and not an internal one a node would retry.
     #[test]
     fn test_transact_apply_pending_changes_errors_when_registry_reverts() {
         let revert = Bytecode::new_legacy(Bytes::from_static(&[0x60, 0x00, 0x60, 0x00, 0xfd]));
@@ -460,6 +461,18 @@ mod tests {
         );
         let err = transact_apply_pending_changes(&mut evm(&mut db, 30_000_000))
             .expect_err("a reverting registry fails closed");
+        let BlockExecutionError::Validation(alloy_evm::block::BlockValidationError::Other(error)) =
+            &err
+        else {
+            panic!("a reverting registry refuses the block: {err:?}");
+        };
+        assert!(
+            matches!(
+                error.downcast_ref(),
+                Some(MegaBlockExecutionError::ApplyPendingChangesFailed { .. })
+            ),
+            "{err:?}"
+        );
         assert!(err.to_string().contains("reverted or halted"), "{err}");
     }
 
