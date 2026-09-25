@@ -110,7 +110,9 @@ fn test_a_transaction_latched_by_its_body_deploys_nothing() {
     }
 }
 
-/// A log that crosses the transaction's data-size limit stops the transaction: the call reverts
+/// A log that crosses the transaction's data-size limit stops the transaction. The limit holds the
+/// body, the two records of the creation's start and 100 bytes more, so the body passes and the
+/// creation starts, and the constructor's `LOG0` of 2,000 bytes is what crosses: the call reverts
 /// with the stop, and the deployment is taken back whole.
 #[test]
 fn test_a_deployment_crossing_the_transaction_data_size_limit_stops_it() {
