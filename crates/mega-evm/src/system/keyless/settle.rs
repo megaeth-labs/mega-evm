@@ -46,9 +46,8 @@ pub(crate) struct Creation {
 /// that waits for it, is that creation's, returning into the call; `None` for every other result.
 ///
 /// It is read here, before revm merges it into the call, which keeps nothing of it but its gas and
-/// whether it succeeded. The call is the frame at depth 0: the creation's result lands in it when
-/// the frame on top of the stack is the creation, finished, or the call itself, which a creation
-/// answered without a frame of its own returns into directly.
+/// whether it succeeded. The frame stack says whether the result lands in the call
+/// ([`returns_into_the_call`]).
 pub(crate) fn returning<DB: Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &MegaContext<DB, ExtEnvs>,
     stack: &mut FrameStack<EthFrame<EthInterpreter>>,
@@ -57,8 +56,7 @@ pub(crate) fn returning<DB: Database, ExtEnvs: ExternalEnvTypes>(
     if !matches!(ctx.keyless_frame, Some(KeylessFrame::Deploying(_))) {
         return None;
     }
-    let top = stack.index()?;
-    if top != usize::from(stack.get().is_finished()) {
+    if !returns_into_the_call(stack) {
         return None;
     }
     let result_code = result.instruction_result();
@@ -75,6 +73,19 @@ pub(crate) fn returning<DB: Database, ExtEnvs: ExternalEnvTypes>(
             FrameResult::Call(_) => None,
         },
     })
+}
+
+/// Whether the result about to be returned lands in the frame at the bottom of the stack, which in
+/// a keyless deployment is the `keylessDeploy` call.
+///
+/// It does in two cases: the top of the stack is the creation, at index 1 and finished, which revm
+/// pops before it hands the result to the frame below; or the top is the call itself, at index 0
+/// and not finished, which a creation answered without a frame of its own returns into directly.
+/// A frame the creation started returning (index 2, finished) or answered while the creation runs
+/// (index 1, not finished) lands in the creation instead.
+fn returns_into_the_call(stack: &mut FrameStack<EthFrame<EthInterpreter>>) -> bool {
+    let Some(top) = stack.index() else { return false };
+    top == usize::from(stack.get().is_finished())
 }
 
 /// Settles `creation`, which revm has just merged into the `keylessDeploy` call whose gas is
