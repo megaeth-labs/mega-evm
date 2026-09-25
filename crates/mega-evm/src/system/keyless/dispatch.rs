@@ -112,7 +112,7 @@ pub(crate) fn ready<DB: Database, ExtEnvs: ExternalEnvTypes>(
     if inputs.call_value().is_zero() {
         if inputs.known_bytecode.1.is_empty() {
             inputs.known_bytecode =
-                (KEYLESS_DEPLOY_CODE_HASH, Bytecode::new_raw(KEYLESS_DEPLOY_CODE.clone()));
+                (KEYLESS_DEPLOY_CODE_HASH, Bytecode::new_raw(KEYLESS_DEPLOY_CODE));
         }
         return Ok(None);
     }

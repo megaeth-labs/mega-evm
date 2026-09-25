@@ -700,7 +700,7 @@ fn scenarios() -> Vec<Scenario> {
             gas_limit,
         ));
         let relaying = BytecodeBuilder::default()
-            .mstore(0, &small.call_data(LARGE_OVERRIDE))
+            .mstore(0, small.call_data(LARGE_OVERRIDE))
             .push_number(0_u8)
             .push_number(0_u8)
             .push_number(u16::try_from(small.call_data(LARGE_OVERRIDE).len()).unwrap())
@@ -720,7 +720,7 @@ fn scenarios() -> Vec<Scenario> {
             .to(relayer),
         );
         let static_relaying = BytecodeBuilder::default()
-            .mstore(0, &small.call_data(LARGE_OVERRIDE))
+            .mstore(0, small.call_data(LARGE_OVERRIDE))
             .push_number(0_u8)
             .push_number(0_u8)
             .push_number(u16::try_from(small.call_data(LARGE_OVERRIDE).len()).unwrap())
@@ -1026,8 +1026,10 @@ fn render_state(state: &EvmState) -> String {
     let mut out = String::new();
     for (address, account) in accounts {
         let info = &account.info;
-        let code =
-            info.code.as_ref().map_or("unloaded".to_string(), |code| format!("{}", code.len()));
+        let code = info
+            .code
+            .as_ref()
+            .map_or_else(|| "unloaded".to_string(), |code| format!("{}", code.len()));
         writeln!(
             out,
             "  {address}: status={:?} tx={:?} nonce={} balance={} code_hash={} code={code}",
