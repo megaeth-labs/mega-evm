@@ -230,6 +230,10 @@ where
 pub(crate) fn inspect_system_address<J: JournalInspectTr>(
     journal: &mut J,
 ) -> Result<Option<Address>, J::DBError> {
+    // The expected hash is the registry code this engine deploys, the latest version. When the
+    // registry is next upgraded under a later spec, the hash compared here must be chosen per
+    // spec: compared with the newer code alone, a block of this spec replayed by the newer binary
+    // finds no system address, and its system transactions are silently demoted to ordinary ones.
     if journal.inspect_account_code_hash(SEQUENCER_REGISTRY_ADDRESS)? !=
         SEQUENCER_REGISTRY_CODE_HASH
     {
