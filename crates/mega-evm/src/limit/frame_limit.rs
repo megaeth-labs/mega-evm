@@ -307,6 +307,7 @@ impl FrameLimitTracker {
     /// A creator's record outlives the creation's failure and lands on the caller's lane, which
     /// nothing here holds to its budget; any other record of the caller dies with it, and the
     /// caller's account stops counting as recorded.
+    #[inline]
     pub(crate) fn pop(&mut self, success: bool) -> Option<Lane> {
         let lane = self.lanes.pop()?;
         if success {
