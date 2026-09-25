@@ -464,6 +464,9 @@ fn system_address_transaction(gas_limit: u64) -> (TxEnv, OpTransaction<TxEnv>) {
 /// whole gas limit is regular gas, and above it the reservoir is what exceeds the cap, as for the
 /// deposit op-revm runs for it — never the system call's 30M split, which the rows between 30M and
 /// the cap would see.
+///
+/// The one difference from op-revm's deposit is in the state: Satin's validation read the live
+/// system address out of the `SequencerRegistry`, a read-only entry holding the one slot.
 #[test]
 fn test_a_system_address_transaction_is_split_by_the_execution_cap() {
     for (gas_limit, reservoir) in [
@@ -474,7 +477,8 @@ fn test_a_system_address_transaction_is_split_by_the_execution_cap() {
     ] {
         let db = MemoryDatabase::default()
             .account_balance(MEGA_SYSTEM_ADDRESS, U256::from(1))
-            .account_code(ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE);
+            .account_code(ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE)
+            .sequencer_registry(MEGA_SYSTEM_ADDRESS);
         let (mut mega, mut op) = both_evms(db);
         let (tx, deposit) = system_address_transaction(gas_limit);
 
@@ -485,6 +489,10 @@ fn test_a_system_address_transaction_is_split_by_the_execution_cap() {
         assert!(mega_outcome.result.is_success(), "{:?}", mega_outcome.result);
         assert_eq!(mega_outcome.gas.history, 0);
         assert_eq!(mega_outcome.result.gas().reservoir_remaining(), reservoir, "{gas_limit}");
-        assert_same(&mega_outcome.result_and_state, &op_outcome);
+        let mut satin = mega_outcome.result_and_state;
+        let registry = satin.state.remove(&SEQUENCER_REGISTRY_ADDRESS).expect("the read");
+        assert!(!registry.is_touched(), "a read-only entry");
+        assert_eq!(registry.storage.keys().collect::<Vec<_>>(), [&CURRENT_SYSTEM_ADDRESS]);
+        assert_same(&satin, &op_outcome);
     }
 }

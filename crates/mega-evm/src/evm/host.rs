@@ -402,7 +402,8 @@ pub trait JournalInspectTr {
 
     /// The slot `key` of the account at `address`, which is always the account's own storage (an
     /// EIP-7702 delegation does not move it). A slot of an account created in this transaction
-    /// is zero without a database read.
+    /// is zero without a database read. Never loads the account's code: a slot read needs only
+    /// the account and the slot in a witness, not its bytecode.
     fn inspect_storage(
         &mut self,
         address: Address,
@@ -467,8 +468,9 @@ impl<DB: Database> JournalInspectTr for Journal<DB> {
         key: StorageKey,
     ) -> Result<&EvmStorageSlot, DB::Error> {
         let transaction_id = self.transaction_id;
-        let is_newly_created = self.inspect_account(address, true)?.is_created();
+        self.inspect_account_code_hash(address)?;
         let account = self.inner.state.get_mut(&address).expect("inspected above");
+        let is_newly_created = account.is_created();
         match account.storage.entry(key) {
             Entry::Occupied(entry) => Ok(entry.into_mut()),
             Entry::Vacant(entry) => {
@@ -854,6 +856,25 @@ mod tests {
             slot.present_value, expected,
             "storage is read from the delegator (original address), not the delegate"
         );
+    }
+
+    /// `inspect_storage` reads the slot without hydrating the account's code, on either branch,
+    /// so a slot read leaves no bytecode in a stateless witness.
+    #[test]
+    fn test_inspect_storage_never_hydrates_code() {
+        const ADDR: Address = address!("00000000000000000000000000000000000000ee");
+        let bytecode = Bytes::from_static(&[0x5b]); // JUMPDEST
+        let db = LazyCodeDatabase::default().with_account_code(ADDR, bytecode);
+        let mut journal = Journal::new(db);
+        let code_is_loaded =
+            |journal: &Journal<LazyCodeDatabase>| journal.inner.state[&ADDR].info.code.is_some();
+
+        journal.inspect_storage(ADDR, U256::from(1)).expect("vacant read must succeed");
+        assert!(!code_is_loaded(&journal), "the vacant branch must not hydrate info.code");
+
+        journal.inspect_storage(ADDR, U256::from(2)).expect("occupied read must succeed");
+        assert!(!code_is_loaded(&journal), "the occupied branch must not hydrate info.code");
+        assert!(journal.inner.state[&ADDR].is_cold_transaction_id(journal.transaction_id));
     }
 
     /// The Host stages what each state-writing call observed and counts nothing: counting is the

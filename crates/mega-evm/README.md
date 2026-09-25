@@ -57,8 +57,8 @@ The execution figure a block counts for a transaction is its regular ledger — 
 A block's state gas can be capped: the transaction that reaches the cap is packed, and after it only a transaction that adds no state gas is.
 No block cap on execution gas, state gas, data size or write records refuses a deposit, which the block must include; a deposit still counts towards all four.
 A builder that executes candidates and chooses among them commits through `commit_transaction_outcome`, which checks the block's counters again; alloy-evm's `commit_transaction` cannot fail and expects each outcome to commit before the next transaction executes, and a debug build asserts it.
-`apply_pre_execution_changes` makes the EIP-2935 and EIP-4788 calls, deploys the six MegaETH system contracts and the EIP-7997 `CREATE2` factory every block, idempotently, applies a role change the `SequencerRegistry` has due in the block with its `applyPendingChanges()` call, and reads the live system address out of the registry.
-It hands each pre-block state — the two EIP calls, the seven deploys, the registry's two reads and its call — to an optional observer before it commits; that sequence is the witness a stateless client needs.
+`apply_pre_execution_changes` makes the EIP-2935 and EIP-4788 calls, deploys the six MegaETH system contracts and the EIP-7997 `CREATE2` factory every block, idempotently, and applies a role change the `SequencerRegistry` has due in the block with its `applyPendingChanges()` call.
+It hands each pre-block state — the two EIP calls, the seven deploys, the read of the registry's pending changes and its call — to an optional observer before it commits; that sequence is the witness a stateless client needs.
 
 A system call runs as EIP-8037 has it: at most 30,000,000 of its gas limit is regular gas, which is what `GAS` reads inside it, and the rest is its state-gas reservoir, which the state it writes draws first.
 revm's default system-call gas limit, 31,566,720, is 30,000,000 and a reservoir of sixteen fresh slots.
@@ -102,9 +102,12 @@ The creation's bump is taken back with its write record, which stays only when a
 The exception is a signer whose own code spends a nonce in the constructor that survives it — on a default configuration, a delegated signer's `CREATE` or `CREATE2`, successful or not: every bump stays, the creation's included, because a later bump may stand for an account, so the signer ends above 1 and every later deployment of it is refused.
 A `keylessDeploy` call a contract makes is not a deployment: it runs the method body, which reverts with `NotIntercepted()`.
 
-The system address sends the protocol's own transactions: a legacy transaction from it to a whitelisted contract is validated — the whitelist, the chain id, the nonce and EIP-3607 — and promoted to a deposit, which pays no fee and rewards none.
-It is the address the `SequencerRegistry` holds, which block execution reads before each block's transactions, once a rotation due in the block has been applied (`MegaContext::system_address`); a context no block has been started on uses `MEGA_SYSTEM_ADDRESS` unless it is given one.
-A node that builds an EVM outside block execution — an RPC call, the replay of a block's transactions for a trace — reads the live address from the registry itself and sets it (`MegaContext::set_system_address`, `MegaContext::with_system_address`).
+The system address sends the protocol's own transactions: a legacy transaction from it to a whitelisted contract is validated — the chain id, the nonce and EIP-3607 — and promoted to a deposit, which pays no fee and rewards none.
+It is the address the `SequencerRegistry` holds, and the transaction reads it itself: a transaction of that shape reads the registry's `_currentSystemAddress` from the journal when it is validated, without warming it, and compares it with its caller.
+Every other transaction reads nothing, and one of another shape from the system address is an ordinary transaction.
+The registry cannot change the address inside a block after its pre-block call, so every transaction of a block reads the address a rotation due in the block left, and an EVM a node builds outside block execution — an RPC call, the replay of a block's transactions for a trace — reads the one in the state it runs on, with nothing to set.
+A registry that is absent, holds other code or names a zero address promotes nothing.
+The read is in the system-address transaction's own state and witness; the pre-block steps no longer carry it.
 The account such a transaction creates for its caller is charged the account-creation state gas exactly once.
 
 History gas is in place: every byte a transaction appends to the chain is priced at MegaETH's cost per history byte, and the byte counts are the ones the data-size limit meters, so a record's history bytes are its own data size.

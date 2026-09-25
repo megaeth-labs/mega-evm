@@ -52,8 +52,8 @@
 //! # The pre-block observer
 //!
 //! Each pre-block step — the EIP-2935 call, the EIP-4788 call, every system-contract deploy, the
-//! read of the `SequencerRegistry`'s pending changes, the `applyPendingChanges()` call and the read
-//! of the live system address — produces an [`EvmState`] that this executor commits. alloy-evm 0.36
+//! read of the `SequencerRegistry`'s pending changes and the `applyPendingChanges()` call —
+//! produces an [`EvmState`] that this executor commits. alloy-evm 0.36
 //! re-exports revm's `OnStateHook` (`on_state(&EvmState)`) but has no `set_state_hook` on
 //! [`BlockExecutor`] and no source tag, so this crate names the step ([`PreBlockStateSource`]) and
 //! carries an optional [`PreBlockStateObserver`]. Every pre-block state is handed to the observer
@@ -65,10 +65,13 @@
 //!
 //! [`apply_pre_execution_changes`](BlockExecutor::apply_pre_execution_changes) makes the EIP-2935
 //! and EIP-4788 calls, deploys the system contracts and the EIP-7997 factory (idempotent), then
-//! applies a role change the `SequencerRegistry` has due in this block and reads the live system
-//! address out of it ([`MegaContext::system_address`]). Every call is a system call on the
-//! pre-block budget ([`pre_block_call_gas_limit`](crate::pre_block_call_gas_limit)), and one that
-//! does not succeed refuses the block.
+//! applies a role change the `SequencerRegistry` has due in this block. Every call is a system call
+//! on the pre-block budget ([`pre_block_call_gas_limit`](crate::pre_block_call_gas_limit)), and
+//! one that does not succeed refuses the block.
+//!
+//! The executor does not read the live system address: a transaction of the system shape reads it
+//! out of the registry itself when it is validated, and the pre-block step is what leaves the
+//! registry naming this block's address.
 
 #[cfg(not(feature = "std"))]
 use alloc as std;
@@ -107,9 +110,8 @@ use crate::{
     block::eips,
     estimated_da_size,
     system::{
-        is_apply_pending_changes_due, resolve_system_address, system_contract_specs,
-        transact_apply_pending_changes, transact_deploy, SequencerRegistryConfig,
-        SystemContractDeployError,
+        is_apply_pending_changes_due, system_contract_specs, transact_apply_pending_changes,
+        transact_deploy, SequencerRegistryConfig, SystemContractDeployError,
     },
     BlockGasCounters, BlockLimiter, BlockLimits, ExternalEnvTypes, MegaBlockExecutionResult,
     MegaBlockTxResult, MegaContext, MegaEvm, MegaHardforks, MegaTransaction, MegaTransactionExt,
@@ -207,18 +209,6 @@ pub enum MegaBlockExecutionError {
         /// What the call ended with: its result, or the error that stopped it.
         message: String,
     },
-    /// The live system address cannot be read: the `SequencerRegistry` has no account.
-    MissingSequencerRegistry,
-    /// The live system address cannot be read: the `SequencerRegistry` holds other code than
-    /// the contract this engine deploys.
-    SequencerRegistryCodeMismatch {
-        /// The hash this engine deploys.
-        expected: B256,
-        /// The hash in state.
-        found: B256,
-    },
-    /// The `SequencerRegistry` holds a zero system address.
-    ZeroSystemAddress,
 }
 
 impl fmt::Display for MegaBlockExecutionError {
@@ -257,16 +247,6 @@ impl fmt::Display for MegaBlockExecutionError {
             Self::ApplyPendingChangesFailed { message } => {
                 write!(f, "the SequencerRegistry's pending changes could not be applied: {message}")
             }
-            Self::MissingSequencerRegistry => {
-                f.write_str("the SequencerRegistry does not exist; the system address cannot be read")
-            }
-            Self::SequencerRegistryCodeMismatch { expected, found } => write!(
-                f,
-                "SequencerRegistry code hash mismatch: expected {expected}, found {found}; the system address cannot be read"
-            ),
-            Self::ZeroSystemAddress => {
-                f.write_str("the SequencerRegistry holds a zero system address")
-            }
         }
     }
 }
@@ -296,8 +276,6 @@ pub enum PreBlockStateSource {
     PendingChanges,
     /// The `SequencerRegistry.applyPendingChanges()` system call.
     ApplyPendingChanges,
-    /// The read of the live system address out of the `SequencerRegistry`.
-    SystemAddress,
 }
 
 /// Receives each pre-block [`EvmState`] before the executor commits it.
@@ -562,8 +540,8 @@ where
     /// Runs what a block does before its transactions.
     ///
     /// In order: the admission gate, the reset of the block-hash record, the EIP-2935 and
-    /// EIP-4788 pre-block calls, the system-contract deploys, the `SequencerRegistry`'s due role
-    /// changes, and the read of the live system address. Each step's state is handed to the
+    /// EIP-4788 pre-block calls, the system-contract deploys and the `SequencerRegistry`'s due
+    /// role changes. Each step's state is handed to the
     /// pre-block observer and then committed here rather than inside its helper, so a witness
     /// generator sees every step's read and write set. The sequence the observer receives is
     /// the witness a stateless client needs.
@@ -583,9 +561,10 @@ where
     /// The registry's role changes come after the deploy, which is what puts the registry in
     /// state on the chain's first block. Its pending slots are read and handed on whatever they
     /// say, and when a change is due in this block the `applyPendingChanges()` call applies it on
-    /// the same pre-block budget, refusing the block if it does not succeed. The system address
-    /// is read last, so a rotation due in this block governs this block's system-address
-    /// transactions; the EVM holds it for every transaction the block runs.
+    /// the same pre-block budget, refusing the block if it does not succeed. So a rotation due in
+    /// this block governs this block's system-address transactions: each reads the live system
+    /// address out of the registry when it is validated, after these steps are committed, and
+    /// nothing inside the block can change it again.
     fn apply_pre_execution_changes(&mut self) -> Result<(), BlockExecutionError> {
         self.check_admission()?;
 
@@ -643,10 +622,6 @@ where
             let ResultAndState { state, .. } = transact_apply_pending_changes(&mut self.evm)?;
             self.deliver_pre_block(PreBlockStateSource::ApplyPendingChanges, state);
         }
-
-        let (system_address, read) = resolve_system_address(self.evm.db_mut())?;
-        self.deliver_pre_block(PreBlockStateSource::SystemAddress, read);
-        self.evm.ctx_mut().set_system_address(system_address);
 
         Ok(())
     }

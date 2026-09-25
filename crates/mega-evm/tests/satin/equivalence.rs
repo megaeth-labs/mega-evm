@@ -486,13 +486,18 @@ fn test_an_intercepted_call_diverges_from_op_revm() {
 }
 
 /// A legacy transaction from the system address is a fee-free deposit on Satin, where op-revm
-/// sees an ordinary transaction and refuses it for want of a balance to pay with.
+/// sees an ordinary transaction and refuses it for want of a balance to pay with. Satin knows
+/// the address from the `SequencerRegistry`, which the transaction's validation reads: its state
+/// carries the read, which op-revm has no reason to make.
 #[test]
 fn test_a_system_address_transaction_diverges_from_op_revm() {
-    use mega_evm::system::{IOracle, MEGA_SYSTEM_ADDRESS, ORACLE_CONTRACT_ADDRESS};
+    use mega_evm::system::{
+        IOracle, MEGA_SYSTEM_ADDRESS, ORACLE_CONTRACT_ADDRESS, SEQUENCER_REGISTRY_ADDRESS,
+    };
 
     let db = MemoryDatabase::default()
-        .account_code(ORACLE_CONTRACT_ADDRESS, mega_evm::system::ORACLE_CONTRACT_CODE);
+        .account_code(ORACLE_CONTRACT_ADDRESS, mega_evm::system::ORACLE_CONTRACT_CODE)
+        .sequencer_registry(MEGA_SYSTEM_ADDRESS);
     let tx = TxEnv {
         caller: MEGA_SYSTEM_ADDRESS,
         kind: TxKind::Call(ORACLE_CONTRACT_ADDRESS),
@@ -514,6 +519,10 @@ fn test_a_system_address_transaction_diverges_from_op_revm() {
             .get(&MEGA_SYSTEM_ADDRESS)
             .is_none_or(|account| account.info.balance.is_zero()),
         "the sender pays no fee and needed no balance",
+    );
+    assert!(
+        mega_outcome.state.get(&SEQUENCER_REGISTRY_ADDRESS).is_some_and(|a| !a.is_touched()),
+        "the read of the live system address is a read-only entry of the transaction's state",
     );
 
     let error = op.transact(op_transaction(tx)).expect_err("op-revm wants a fee");
