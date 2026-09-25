@@ -96,7 +96,8 @@ pub(crate) struct KeylessCall {
 /// selector the contract does not declare, run the deployed bytecode: a `keylessDeploy` call
 /// reaches the method body and its `NotIntercepted()`, and an undeclared selector finds no
 /// function and no fallback, so it reverts with empty data. A transaction the latch already
-/// stopped is not dispatched either: its frame is answered with the stop.
+/// stopped never reaches the rewrite: both frame-start paths answer its frame with the stop before
+/// the rewrite runs.
 ///
 /// # What the call pays, and what it is held to
 ///
@@ -224,8 +225,7 @@ fn rewrite_dispatched<DB: Database, ExtEnvs: ExternalEnvTypes>(
 }
 
 /// Whether `inputs` is a `keylessDeploy` call the rewrite takes: a `CALL` at `depth` 0 to
-/// [`KEYLESS_DEPLOY_ADDRESS`] carrying the `keylessDeploy` selector, in a transaction the latch
-/// has not stopped.
+/// [`KEYLESS_DEPLOY_ADDRESS`] carrying the `keylessDeploy` selector.
 ///
 /// The depth is tested first: every frame below the transaction's own leaves after one
 /// comparison.
@@ -238,7 +238,6 @@ fn is_dispatched<DB: Database, ExtEnvs: ExternalEnvTypes>(
     depth == 0 &&
         inputs.target_address == KEYLESS_DEPLOY_ADDRESS &&
         inputs.scheme == CallScheme::Call &&
-        ctx.additional_limit.latched().is_none() &&
         peek_selector(&inputs.input, ctx) == Some(IKeylessDeploy::keylessDeployCall::SELECTOR)
 }
 

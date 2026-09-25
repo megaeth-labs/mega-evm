@@ -475,15 +475,7 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
         &mut self,
         mut frame_init: FrameInit,
     ) -> Result<FrameInitResult<'_, Self::Frame>, ContextDbError<Self::Context>> {
-        // The state gas the caller holds is held outside the frame it starts. The caller is the
-        // frame on top of the stack, suspended on this frame's input; the transaction's own frame
-        // has none, and starts on what was charged before it.
-        if self.inner.frame_stack.index().is_some() {
-            let held = self.inner.frame_stack.get().interpreter.gas.state_gas_spent();
-            self.inner.ctx.additional_limit.note_caller_state_gas(held);
-        }
-        if let Some(result) = answer_before_building(&mut self.inner.ctx, &frame_init)? {
-            self.inner.ctx.additional_limit.push_empty_frame();
+        if let Some(result) = self.answered_before_building(&frame_init)? {
             return Ok(ItemOrResult::Result(result));
         }
         let answer = match keyless::rewrite(&mut self.inner.ctx, &mut frame_init)? {
@@ -662,6 +654,10 @@ where
     /// call's end once the creation is settled into it
     /// ([`inspect_execution`](InspectorHandler::inspect_execution)). A `keylessDeploy` call the
     /// rewrite answers is seen as the call it is, `call` and `call_end` paired around the answer.
+    ///
+    /// A frame nothing may start — a latched transaction's, one past the call-stack limit — is
+    /// answered after the inspector's `frame_start` and before the keyless rewrite, at the point
+    /// the plain path answers it ([`EvmTr::frame_init`]), and the inspector is told it ended.
     #[inline]
     fn inspect_frame_init(
         &mut self,
@@ -672,6 +668,12 @@ where
             return answered_by_inspector(ctx, inspector, &frame_init, output)
                 .map(ItemOrResult::Result);
         }
+        if let Some(mut output) = self.answered_before_building(&frame_init)? {
+            let (ctx, inspector) = self.ctx_inspector();
+            frame_end_checked(ctx, inspector, &frame_init.frame_input, &mut output);
+            return Ok(ItemOrResult::Result(output));
+        }
+        let (ctx, inspector) = self.ctx_inspector();
         match keyless::rewrite(ctx, &mut frame_init)? {
             Rewrite::NotKeyless => {}
             Rewrite::Answered(output) => {
@@ -1021,6 +1023,31 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
             None => 0,
         };
         crate::system::intercept(&mut self.inner.ctx, inputs, frame_init.depth, caller_remaining)
+    }
+
+    /// Steps 1 and 2 of [`EvmTr::frame_init`], the pre-frame check: answers a frame nothing may
+    /// start ([`answer_before_building`]), with the empty lane that stands in for it. Both paths
+    /// make it before the keyless rewrite, so the rewrite never sees a latched transaction; on the
+    /// inspected path it comes after the inspector's `frame_start`, and the check `frame_init`
+    /// makes again finds nothing to answer.
+    ///
+    /// Before it, the state gas the caller holds is noted: it is held outside the frame it starts.
+    /// The caller is the frame on top of the stack, suspended on this frame's input; the
+    /// transaction's own frame has none, and starts on what was charged before it.
+    #[inline]
+    fn answered_before_building(
+        &mut self,
+        frame_init: &FrameInit,
+    ) -> Result<Option<FrameResult>, ContextDbError<MegaContext<DB, ExtEnvs>>> {
+        if self.inner.frame_stack.index().is_some() {
+            let held = self.inner.frame_stack.get().interpreter.gas.state_gas_spent();
+            self.inner.ctx.additional_limit.note_caller_state_gas(held);
+        }
+        let answer = answer_before_building(&mut self.inner.ctx, frame_init)?;
+        if answer.is_some() {
+            self.inner.ctx.additional_limit.push_empty_frame();
+        }
+        Ok(answer)
     }
 }
 
