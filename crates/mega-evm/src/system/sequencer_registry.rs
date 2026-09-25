@@ -14,25 +14,18 @@
 //! Then it reads the live system address out of the registry ([`resolve_system_address`]), which
 //! the block's system-address transactions must come from.
 
-#[cfg(not(feature = "std"))]
-use alloc as std;
-use std::format;
-
 use alloy_evm::block::BlockExecutionError;
 use alloy_primitives::{address, Address, Bytes, U256};
 use alloy_sol_types::SolCall;
 use op_revm::OpHaltReason;
 use revm::{
-    context::{
-        result::{EVMError, ResultAndState},
-        Block, ContextTr,
-    },
+    context::result::ResultAndState,
     state::{Account, EvmState, EvmStorageSlot, TransactionId},
 };
 
 use super::MEGA_SYSTEM_ADDRESS;
 use crate::{
-    pre_block_call_gas_limit, ExternalEnvTypes, HardforkParams, HardforkParamsError,
+    transact_pre_block_call, ExternalEnvTypes, HardforkParams, HardforkParamsError,
     MegaBlockExecutionError, MegaEvm, MegaHardfork,
 };
 use storage_slots::{
@@ -188,15 +181,17 @@ fn read_slot<DB: revm::Database>(
 /// state. Nothing is committed.
 ///
 /// It is a system call from the EIP-4788 system address on the pre-block budget
-/// ([`pre_block_call_gas_limit`]): at most 30M of regular gas, the rest reservoir, its state
-/// priced at the minimum SALT bucket. One call applies whichever of the two roles is due; the
-/// block executor makes it only when [`is_apply_pending_changes_due`] says one is.
+/// ([`pre_block_call_gas_limit`](crate::pre_block_call_gas_limit)): at most 30M of regular gas,
+/// the rest reservoir, its state priced at the minimum SALT bucket. One call applies whichever of
+/// the two roles is due; the block executor makes it only when [`is_apply_pending_changes_due`]
+/// says one is.
 ///
 /// # Errors
 ///
 /// [`MegaBlockExecutionError::ApplyPendingChangesFailed`] when the call reverts or halts, or an
 /// error other than the database's stops it: a change the registry scheduled for this block must
-/// be applied in it. A database error is the database's.
+/// be applied in it. A database error is an internal error, as for every pre-block call: it says
+/// nothing about the block.
 pub fn transact_apply_pending_changes<DB, INSP, ExtEnvs>(
     evm: &mut MegaEvm<DB, INSP, ExtEnvs>,
 ) -> Result<ResultAndState<OpHaltReason>, BlockExecutionError>
@@ -204,25 +199,9 @@ where
     DB: alloy_evm::Database,
     ExtEnvs: ExternalEnvTypes,
 {
-    let calldata = ISequencerRegistry::applyPendingChangesCall {}.abi_encode();
-    let gas_limit = pre_block_call_gas_limit(evm.ctx().block().gas_limit());
-    let failed = |message| MegaBlockExecutionError::ApplyPendingChangesFailed { message };
-    let outcome = match evm.transact_system_call_with_gas_limit(
-        alloy_eips::eip4788::SYSTEM_ADDRESS,
-        SEQUENCER_REGISTRY_ADDRESS,
-        Bytes::from(calldata),
-        gas_limit,
-    ) {
-        Ok(outcome) => outcome,
-        // A read the database could not serve says nothing about the block, as for the registry
-        // reads on either side of the call.
-        Err(EVMError::Database(error)) => return Err(BlockExecutionError::other(error)),
-        Err(error) => return Err(failed(format!("{error}")).into()),
-    };
-    if !outcome.result.is_success() {
-        return Err(failed(format!("{:?}", outcome.result)).into());
-    }
-    Ok(outcome)
+    let data = Bytes::from(ISequencerRegistry::applyPendingChangesCall {}.abi_encode());
+    let refused = |message| MegaBlockExecutionError::ApplyPendingChangesFailed { message }.into();
+    transact_pre_block_call(evm, "applyPendingChanges()", SEQUENCER_REGISTRY_ADDRESS, data, refused)
 }
 
 /// Reads the live system address out of the registry: the address a system-address transaction
@@ -270,7 +249,7 @@ mod tests {
     use crate::{MegaContext, MegaSpecId};
     use alloy_primitives::address;
     use revm::{
-        context::{BlockEnv, Transaction},
+        context::{BlockEnv, ContextTr, Transaction},
         database::{InMemoryDB, State},
         handler::SYSTEM_CALL_REGULAR_GAS_LIMIT,
         state::{AccountInfo, Bytecode},

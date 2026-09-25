@@ -479,38 +479,24 @@ fn failing_on(address: Address) -> ErrorInjectingDatabase {
     db
 }
 
-/// A database error in the block hashes call refuses the block with the EIP-2935 error, carrying
-/// the database's message.
+/// A database error in the block hashes call is an internal error carrying the database's
+/// message, not a verdict on the block: the block is not refused as invalid.
 #[test]
-fn test_blockhashes_pre_block_call_db_error_returns_validation_error() {
+fn test_a_database_error_in_the_block_hashes_call_is_internal() {
     let err = start_block_over(failing_on(HISTORY_STORAGE_ADDRESS))
-        .expect_err("a failed read refuses the block");
-    assert!(
-        matches!(
-            &err,
-            BlockExecutionError::Validation(BlockValidationError::BlockHashContractCall { message })
-                if message.contains("injected basic() error")
-        ),
-        "{err}"
-    );
+        .expect_err("a failed read stops the block");
+    assert!(matches!(err, BlockExecutionError::Internal(_)), "{err:?}");
+    assert!(err.to_string().contains("injected basic() error"), "{err}");
 }
 
-/// A database error in the beacon root call refuses the block with the EIP-4788 error; the block
-/// hashes call before it read what it needed.
+/// A database error in the beacon root call is an internal error carrying the database's
+/// message, not a verdict on the block; the block hashes call before it read what it needed.
 #[test]
-fn test_beacon_root_pre_block_call_db_error_returns_validation_error() {
+fn test_a_database_error_in_the_beacon_root_call_is_internal() {
     let err = start_block_over(failing_on(BEACON_ROOTS_ADDRESS))
-        .expect_err("a failed read refuses the block");
-    assert!(
-        matches!(
-            &err,
-            BlockExecutionError::Validation(BlockValidationError::BeaconRootContractCall {
-                message,
-                ..
-            }) if message.contains("injected basic() error")
-        ),
-        "{err}"
-    );
+        .expect_err("a failed read stops the block");
+    assert!(matches!(err, BlockExecutionError::Internal(_)), "{err:?}");
+    assert!(err.to_string().contains("injected basic() error"), "{err}");
 }
 
 /// What the observer receives for a pre-block call is the state op-revm's own system call

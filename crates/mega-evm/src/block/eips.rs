@@ -7,19 +7,28 @@
 //! A pre-block call is a system call on [`pre_block_call_gas_limit`], and a block whose
 //! pre-block call does not succeed is refused: the state the protocol maintains before the
 //! block's transactions is not optional, and a block that could not write it is not one the
-//! chain can build on.
+//! chain can build on. A database error is not a verdict on the block: it is an internal error.
+//! Every pre-block call runs through [`transact_pre_block_call`], which holds that rule for all of
+//! them.
 
 #[cfg(not(feature = "std"))]
 use alloc as std;
-use std::{boxed::Box, format, string::ToString};
+use std::{
+    boxed::Box,
+    format,
+    string::{String, ToString},
+};
 
 use alloy_eips::{eip2935::HISTORY_STORAGE_ADDRESS, eip4788::BEACON_ROOTS_ADDRESS};
 use alloy_evm::block::{BlockExecutionError, BlockValidationError};
 use alloy_hardforks::EthereumHardforks;
-use alloy_primitives::{Address, B256, U256};
+use alloy_primitives::{Address, Bytes, B256, U256};
 use op_revm::OpHaltReason;
 use revm::{
-    context::{result::ResultAndState, Block, ContextTr},
+    context::{
+        result::{EVMError, ResultAndState},
+        Block, ContextTr,
+    },
     database::State,
     handler::SYSTEM_CALL_REGULAR_GAS_LIMIT,
     state::{Account, EvmState},
@@ -47,11 +56,49 @@ pub fn pre_block_call_gas_limit(block_gas_limit: u64) -> u64 {
     block_gas_limit.max(SYSTEM_CALL_REGULAR_GAS_LIMIT)
 }
 
+/// Runs the pre-block call `name`: a system call from [`SYSTEM_ADDRESS`] to `target` with `data`,
+/// on the pre-block budget of the block `evm` is set up for ([`pre_block_call_gas_limit`]).
+/// Answers its result and state; nothing is committed.
+///
+/// One rule holds for every pre-block call:
+///
+/// - a database error is an internal error ([`BlockExecutionError::other`]): a read the database
+///   could not serve says nothing about the block, and a node must not refuse a valid block because
+///   its storage failed;
+/// - any other failure refuses the block with the call's own error, which `refused` builds from a
+///   message: an EVM error other than the database's, and an outcome that is not a success, whether
+///   the call reverted or halted.
+pub(crate) fn transact_pre_block_call<DB, INSP, ExtEnvs>(
+    evm: &mut MegaEvm<DB, INSP, ExtEnvs>,
+    name: &str,
+    target: Address,
+    data: Bytes,
+    refused: impl FnOnce(String) -> BlockExecutionError,
+) -> Result<ResultAndState<OpHaltReason>, BlockExecutionError>
+where
+    DB: alloy_evm::Database,
+    ExtEnvs: ExternalEnvTypes,
+{
+    let gas_limit = pre_block_call_gas_limit(evm.ctx().block().gas_limit());
+    let outcome =
+        match evm.transact_system_call_with_gas_limit(SYSTEM_ADDRESS, target, data, gas_limit) {
+            Ok(outcome) => outcome,
+            Err(EVMError::Database(error)) => return Err(BlockExecutionError::other(error)),
+            Err(error) => return Err(refused(error.to_string())),
+        };
+    if !outcome.result.is_success() {
+        let message = format!("the {name} pre-block call did not succeed: {:?}", outcome.result);
+        return Err(refused(message));
+    }
+    Ok(outcome)
+}
+
 /// Runs the pre-block call to the [EIP-2935] block hashes contract.
 ///
 /// Answers `None`, having run nothing, when Prague is not active or the block is the genesis
-/// block, where EIP-2935 makes no call. A call that does not succeed refuses the block, and its
-/// state is handed to nobody. The state is not committed.
+/// block, where EIP-2935 makes no call. A call that does not succeed refuses the block with
+/// [`BlockValidationError::BlockHashContractCall`], and its state is handed to nobody; a database
+/// error is an internal error, as for every pre-block call. The state is not committed.
 ///
 /// [EIP-2935]: https://eips.ethereum.org/EIPS/eip-2935
 pub fn transact_blockhashes_contract_call<H, DB, INSP, ExtEnvs>(
@@ -74,29 +121,18 @@ where
         return Ok(None);
     }
 
-    let gas_limit = pre_block_call_gas_limit(block.gas_limit());
-    let outcome = evm
-        .transact_system_call_with_gas_limit(
-            SYSTEM_ADDRESS,
-            HISTORY_STORAGE_ADDRESS,
-            parent_block_hash.0.into(),
-            gas_limit,
-        )
-        .map_err(|e| BlockValidationError::BlockHashContractCall { message: e.to_string() })?;
-    if !outcome.result.is_success() {
-        return Err(BlockValidationError::BlockHashContractCall {
-            message: format!("the EIP-2935 pre-block call did not succeed: {:?}", outcome.result),
-        }
-        .into());
-    }
-    Ok(Some(outcome))
+    let refused = |message| BlockValidationError::BlockHashContractCall { message }.into();
+    let data = parent_block_hash.0.into();
+    transact_pre_block_call(evm, "EIP-2935", HISTORY_STORAGE_ADDRESS, data, refused).map(Some)
 }
 
 /// Runs the pre-block call to the [EIP-4788] beacon block root contract.
 ///
 /// Answers `None`, having run nothing, when Cancun is not active or the block is the genesis
 /// block, where EIP-4788 makes no call and requires a zero root. A call that does not succeed
-/// refuses the block, and its state is handed to nobody. The state is not committed.
+/// refuses the block with [`BlockValidationError::BeaconRootContractCall`], and its state is
+/// handed to nobody; a database error is an internal error, as for every pre-block call. The
+/// state is not committed.
 ///
 /// [EIP-4788]: https://eips.ethereum.org/EIPS/eip-4788
 pub fn transact_beacon_root_contract_call<H, DB, INSP, ExtEnvs>(
@@ -127,27 +163,15 @@ where
         return Ok(None);
     }
 
-    let gas_limit = pre_block_call_gas_limit(block.gas_limit());
-    let refused = |message: std::string::String| BlockValidationError::BeaconRootContractCall {
-        parent_beacon_block_root: Box::new(parent_beacon_block_root),
-        message,
+    let refused = |message| {
+        BlockValidationError::BeaconRootContractCall {
+            parent_beacon_block_root: Box::new(parent_beacon_block_root),
+            message,
+        }
+        .into()
     };
-    let outcome = evm
-        .transact_system_call_with_gas_limit(
-            SYSTEM_ADDRESS,
-            BEACON_ROOTS_ADDRESS,
-            parent_beacon_block_root.0.into(),
-            gas_limit,
-        )
-        .map_err(|e| refused(e.to_string()))?;
-    if !outcome.result.is_success() {
-        return Err(refused(format!(
-            "the EIP-4788 pre-block call did not succeed: {:?}",
-            outcome.result
-        ))
-        .into());
-    }
-    Ok(Some(outcome))
+    let data = parent_beacon_block_root.0.into();
+    transact_pre_block_call(evm, "EIP-4788", BEACON_ROOTS_ADDRESS, data, refused).map(Some)
 }
 
 /// The state that applying `balances` to `db` would produce. Nothing is committed.
