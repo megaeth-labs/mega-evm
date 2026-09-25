@@ -14,6 +14,13 @@
 //! shape reads nothing and is never a system-address transaction, whoever sent it: one from the
 //! system address is an ordinary transaction, validated and charged as a user's is.
 //!
+//! "Ordinary" is the engine's view, not the contracts': the Oracle's `onlySystemAddress` tests
+//! the sender alone. So a non-legacy transaction signed by the system key to the Oracle is
+//! accepted by the Oracle, and its writes land, executed as a user's transaction: it pays fees,
+//! is held to every per-transaction limit, is detained, is priced by bucket, and pays history.
+//! Both the legacy engine and this one refused it at validation before the shape test came
+//! first.
+//!
 //! A deposit is unvalidated by construction, so the engine validates what still matters itself
 //! before promoting the transaction ([`validate_and_promote`]):
 //!
