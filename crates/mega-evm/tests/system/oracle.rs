@@ -569,11 +569,13 @@ fn test_consecutive_hints_add_up_on_the_transaction() {
 /// its gas limit.
 #[test]
 fn test_data_size_overflow_blocks_forwarding_and_stops_the_transaction() {
+    use revm::context::result::ExecutionResult;
+
     const LIMIT: u64 = 2_048;
     let data = send_hint(&[0_u8; 4_096]);
-    let code = return_status(call_oracle(BytecodeBuilder::default(), &data, 1_000_000));
+    let call = || call_oracle(BytecodeBuilder::default(), &data, 1_000_000);
     let (outcome, hints) = run_with_oracle_under(
-        with_contract(code),
+        with_contract(return_status(call())),
         call_tx(CONTRACT, [], U256::ZERO),
         EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(LIMIT),
     );
@@ -586,13 +588,23 @@ fn test_data_size_overflow_blocks_forwarding_and_stops_the_transaction() {
         frame_local: false,
     };
     assert_eq!(outcome.limit_exceeded, Some(stop));
-    assert!(!outcome.result.is_halt(), "{:?}", outcome.result);
-    assert_eq!(outcome.result.output(), Some(&stop.revert_data()), "the stop, not the status");
     assert!(
-        outcome.gas.gas_used < crate::common::GAS_LIMIT / 10,
-        "the stop burns nothing: {}",
-        outcome.gas.gas_used
+        matches!(&outcome.result, ExecutionResult::Revert { output, .. }
+            if output == &stop.revert_data()),
+        "the stop, not the status: {:?}",
+        outcome.result
     );
+
+    // What ran is the contract's code up to its call, which the stop answered at the Oracle's
+    // start, handing back what it forwarded: the same code stopping after a call to an Oracle with
+    // no code, without limits, runs exactly that.
+    let (ran, _) = run_with_oracle_under(
+        with_contract(call().stop().build()).account_code(ORACLE_CONTRACT_ADDRESS, Bytes::new()),
+        call_tx(CONTRACT, [], U256::ZERO),
+        EvmTxRuntimeLimits::no_limits(),
+    );
+    assert!(ran.result.is_success(), "{:?}", ran.result);
+    assert_eq!(outcome.gas, ran.gas, "billed what ran");
 }
 
 /// A frame that switched its volatile-data access off sends no hint: `sendHint` still runs and

@@ -654,8 +654,12 @@ fn test_a_callee_that_reads_the_timestamp_does_not_make_its_callers_burn_their_g
                     used: limit,
                     frame_local: false,
                 };
-                assert_eq!(outcome.result.output(), Some(&stop.revert_data()), "{case}");
-                assert!(!outcome.result.is_halt(), "{case}");
+                assert!(
+                    matches!(&outcome.result, ExecutionResult::Revert { output, .. }
+                        if output == &stop.revert_data()),
+                    "{case}: {:?}",
+                    outcome.result
+                );
                 assert_eq!(outcome.limit_exceeded, Some(stop), "{case}");
                 // The read came after the callers' calls and the callee's log: its compute then is
                 // theirs alone, a sliver of the cap.
@@ -998,8 +1002,12 @@ fn assert_detention_stop(
         used: limit,
         frame_local: false,
     };
-    assert!(!outcome.result.is_halt(), "a revert, not a halt: {:?}", outcome.result);
-    assert_eq!(outcome.result.output(), Some(&stop.revert_data()));
+    assert!(
+        matches!(&outcome.result, ExecutionResult::Revert { output, .. }
+            if output == &stop.revert_data()),
+        "a revert carrying the stop: {:?}",
+        outcome.result
+    );
     assert_eq!(outcome.limit_exceeded, Some(stop));
     assert_eq!(outcome.gas.regular, intrinsic.gas.regular + limit);
     assert_eq!(outcome.gas.gas_used, intrinsic.gas.gas_used + limit);
@@ -1184,8 +1192,12 @@ fn test_data_limit_just_exceed() {
         used: TX_BODY_SIZE,
         frame_local: false,
     };
-    assert!(!outcome.result.is_halt(), "{:?}", outcome.result);
-    assert_eq!(outcome.result.output(), Some(&stop.revert_data()));
+    assert!(
+        matches!(&outcome.result, ExecutionResult::Revert { output, .. }
+            if output == &stop.revert_data()),
+        "{:?}",
+        outcome.result
+    );
     assert_eq!(outcome.limit_exceeded, Some(stop));
     assert_eq!(outcome.usage, LimitUsage { data_size: TX_BODY_SIZE, write_records: 0 });
     assert_eq!(outcome.gas.gas_used, intrinsic(BELOW).gas.gas_used, "nothing ran");
@@ -1207,8 +1219,12 @@ fn test_data_limit_exceed_in_nested_call() {
         used: TX_BODY_SIZE + WRITE_RECORD_SIZE,
         frame_local: false,
     };
-    assert!(!outcome.result.is_halt(), "{:?}", outcome.result);
-    assert_eq!(outcome.result.output(), Some(&stop.revert_data()));
+    assert!(
+        matches!(&outcome.result, ExecutionResult::Revert { output, .. }
+            if output == &stop.revert_data()),
+        "{:?}",
+        outcome.result
+    );
     assert_eq!(outcome.limit_exceeded, Some(stop));
     assert!(outcome.gas.gas_used < 200_000, "the stop burns nothing: {}", outcome.gas.gas_used);
 }
@@ -1225,11 +1241,21 @@ fn test_state_revert_when_exceeding_limit() {
     ))
     .execute_transaction(call(CALLER, A, U256::from(100), BELOW))
     .unwrap();
-    assert!(!outcome.result.is_halt(), "{:?}", outcome.result);
-    assert!(matches!(
-        outcome.limit_exceeded,
-        Some(LimitCheck::ExceedsLimit { kind: LimitKind::DataSize, frame_local: false, .. })
-    ));
+    let stop = outcome.limit_exceeded.expect("the transaction is stopped");
+    assert!(
+        matches!(
+            stop,
+            LimitCheck::ExceedsLimit { kind: LimitKind::DataSize, limit, frame_local: false, .. }
+                if limit == TX_BODY_SIZE + 1
+        ),
+        "{stop:?}"
+    );
+    assert!(
+        matches!(&outcome.result, ExecutionResult::Revert { output, .. }
+            if output == &stop.revert_data()),
+        "{:?}",
+        outcome.result
+    );
     assert_eq!(outcome.usage, LimitUsage { data_size: TX_BODY_SIZE, write_records: 0 });
     assert!(outcome.state.get(&A).is_none_or(|a| a.storage.is_empty() && a.info.balance.is_zero()));
     assert_eq!(outcome.state[&CALLER].info.balance, U256::from(10_000), "the value did not move");
@@ -1263,29 +1289,35 @@ fn test_check_limit_priority_data_size_before_kv_update() {
 
 /// A transaction detained from its start — its sender is the block's beneficiary — whose body
 /// crosses the data-size limit is the data-size stop, billed its intrinsic gas: detention adds
-/// nothing to what it pays.
+/// nothing to what it pays, which is what the same transaction pays within the limits.
 #[test]
 fn test_detention_plus_intrinsic_data_size_overflow() {
     let db =
         || MemoryDatabase::default().account_code(A, BytecodeBuilder::default().stop().build());
     let run = |limits| {
-        MegaEvm::new(context(db()).with_tx_runtime_limits(limits))
-            .execute_transaction(call(BENEFICIARY, A, U256::ZERO, ROOMY))
-            .unwrap()
+        let mut evm = MegaEvm::new(context(db()).with_tx_runtime_limits(limits));
+        let outcome = evm.execute_transaction(call(BENEFICIARY, A, U256::ZERO, ROOMY)).unwrap();
+        (outcome, evm.ctx().detention().compute_limit())
     };
-    let unlimited = run(EvmTxRuntimeLimits::default());
-    let stopped = run(EvmTxRuntimeLimits::default().with_tx_data_size_limit(100));
-    assert!(!stopped.result.is_halt(), "{:?}", stopped.result);
-    assert_eq!(
-        stopped.limit_exceeded,
-        Some(LimitCheck::ExceedsLimit {
-            kind: LimitKind::DataSize,
-            limit: 100,
-            used: TX_BODY_SIZE,
-            frame_local: false,
-        })
+    let (within_limits, detained) = run(EvmTxRuntimeLimits::default());
+    assert_eq!(detained, Some(CAP), "the beneficiary's transaction is detained from its start");
+    assert!(within_limits.result.is_success(), "{:?}", within_limits.result);
+    let (stopped, detained) = run(EvmTxRuntimeLimits::default().with_tx_data_size_limit(100));
+    assert_eq!(detained, Some(CAP), "the stopped one too");
+    let stop = LimitCheck::ExceedsLimit {
+        kind: LimitKind::DataSize,
+        limit: 100,
+        used: TX_BODY_SIZE,
+        frame_local: false,
+    };
+    assert!(
+        matches!(&stopped.result, ExecutionResult::Revert { output, .. }
+            if output == &stop.revert_data()),
+        "{:?}",
+        stopped.result
     );
-    assert_eq!(stopped.gas, unlimited.gas, "the intrinsic gas alone, the reservoir back");
+    assert_eq!(stopped.limit_exceeded, Some(stop));
+    assert_eq!(stopped.gas, within_limits.gas, "the intrinsic gas alone, the reservoir back");
 }
 
 /// The transaction's own frame crossing its frame budget — a frame cap of a hundred records' bytes,
@@ -1305,8 +1337,12 @@ fn test_data_size_top_level_exceed_is_frame_local_revert() {
         used: 0,
         frame_local: true,
     };
-    assert!(!outcome.result.is_halt(), "{:?}", outcome.result);
-    assert_eq!(outcome.result.output(), Some(&stop.revert_data()));
+    assert!(
+        matches!(&outcome.result, ExecutionResult::Revert { output, .. }
+            if output == &stop.revert_data()),
+        "{:?}",
+        outcome.result
+    );
     assert_eq!(outcome.limit_exceeded, None, "a frame budget latches nothing");
     assert_eq!(outcome.usage, LimitUsage { data_size: TX_BODY_SIZE, write_records: 0 });
 }
