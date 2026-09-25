@@ -23,7 +23,10 @@ use alloy_primitives::{address, Address, Bytes, U256};
 use alloy_sol_types::SolCall;
 use op_revm::OpHaltReason;
 use revm::{
-    context::{result::ResultAndState, Block, ContextTr},
+    context::{
+        result::{EVMError, ResultAndState},
+        Block, ContextTr,
+    },
     state::{Account, EvmState, EvmStorageSlot, TransactionId},
 };
 
@@ -192,7 +195,8 @@ fn read_slot<DB: revm::Database>(
 /// # Errors
 ///
 /// [`MegaBlockExecutionError::ApplyPendingChangesFailed`] when the call reverts or halts, or an
-/// error stops it: a change the registry scheduled for this block must be applied in it.
+/// error other than the database's stops it: a change the registry scheduled for this block must
+/// be applied in it. A database error is the database's.
 pub fn transact_apply_pending_changes<DB, INSP, ExtEnvs>(
     evm: &mut MegaEvm<DB, INSP, ExtEnvs>,
 ) -> Result<ResultAndState<OpHaltReason>, BlockExecutionError>
@@ -203,14 +207,18 @@ where
     let calldata = ISequencerRegistry::applyPendingChangesCall {}.abi_encode();
     let gas_limit = pre_block_call_gas_limit(evm.ctx().block().gas_limit());
     let failed = |message| MegaBlockExecutionError::ApplyPendingChangesFailed { message };
-    let outcome = evm
-        .transact_system_call_with_gas_limit(
-            alloy_eips::eip4788::SYSTEM_ADDRESS,
-            SEQUENCER_REGISTRY_ADDRESS,
-            Bytes::from(calldata),
-            gas_limit,
-        )
-        .map_err(|error| failed(format!("{error}")))?;
+    let outcome = match evm.transact_system_call_with_gas_limit(
+        alloy_eips::eip4788::SYSTEM_ADDRESS,
+        SEQUENCER_REGISTRY_ADDRESS,
+        Bytes::from(calldata),
+        gas_limit,
+    ) {
+        Ok(outcome) => outcome,
+        // A read the database could not serve says nothing about the block, as for the registry
+        // reads on either side of the call.
+        Err(EVMError::Database(error)) => return Err(BlockExecutionError::other(error)),
+        Err(error) => return Err(failed(format!("{error}")).into()),
+    };
     if !outcome.result.is_success() {
         return Err(failed(format!("{:?}", outcome.result)).into());
     }
@@ -445,6 +453,21 @@ mod tests {
         let outcome = transact_apply_pending_changes(&mut evm).expect("the call succeeds");
         assert_eq!(evm.ctx().tx().gas_limit(), SYSTEM_CALL_REGULAR_GAS_LIMIT);
         assert_eq!(outcome.result.gas().reservoir_remaining(), 0);
+    }
+
+    /// A read the database cannot serve during the call is the database's error, not a verdict on
+    /// the block.
+    #[test]
+    fn test_transact_apply_pending_changes_reports_a_database_error_as_one() {
+        use crate::test_utils::{ErrorInjectingDatabase, MemoryDatabase};
+        let mut db = ErrorInjectingDatabase::new(MemoryDatabase::default());
+        db.fail_on_account = Some(SEQUENCER_REGISTRY_ADDRESS);
+        let block =
+            BlockEnv { number: U256::from(1_000), gas_limit: 30_000_000, ..Default::default() };
+        let mut evm = MegaEvm::new(MegaContext::new(&mut db, MegaSpecId::SATIN).with_block(block));
+        let err = transact_apply_pending_changes(&mut evm).expect_err("the read fails");
+        assert!(matches!(err, BlockExecutionError::Internal(_)), "{err:?}");
+        assert!(err.to_string().contains("injected basic() error"), "{err}");
     }
 
     /// A registry whose code reverts fails the call, and the block with it.
