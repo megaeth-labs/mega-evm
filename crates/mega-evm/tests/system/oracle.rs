@@ -563,6 +563,38 @@ fn test_consecutive_hints_add_up_on_the_transaction() {
     ));
 }
 
+/// A contract's hint whose payload crosses the transaction's data-size limit is not forwarded, and
+/// the crossing stops the transaction with a revert carrying the stop, not a halt: the contract
+/// never runs on to return its call's status, and the transaction is billed what ran rather than
+/// its gas limit.
+#[test]
+fn test_data_size_overflow_blocks_forwarding_and_stops_the_transaction() {
+    const LIMIT: u64 = 2_048;
+    let data = send_hint(&[0_u8; 4_096]);
+    let code = return_status(call_oracle(BytecodeBuilder::default(), &data, 1_000_000));
+    let (outcome, hints) = run_with_oracle_under(
+        with_contract(code),
+        call_tx(CONTRACT, [], U256::ZERO),
+        EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(LIMIT),
+    );
+
+    assert!(hints.is_empty(), "the hint the transaction cannot pay for is not forwarded");
+    let stop = LimitCheck::ExceedsLimit {
+        kind: LimitKind::DataSize,
+        limit: LIMIT,
+        used: nested_hint(data.len() as u64),
+        frame_local: false,
+    };
+    assert_eq!(outcome.limit_exceeded, Some(stop));
+    assert!(!outcome.result.is_halt(), "{:?}", outcome.result);
+    assert_eq!(outcome.result.output(), Some(&stop.revert_data()), "the stop, not the status");
+    assert!(
+        outcome.gas.gas_used < crate::common::GAS_LIMIT / 10,
+        "the stop burns nothing: {}",
+        outcome.gas.gas_used
+    );
+}
+
 /// A frame that switched its volatile-data access off sends no hint: `sendHint` still runs and
 /// succeeds, and nothing reaches the service.
 #[test]

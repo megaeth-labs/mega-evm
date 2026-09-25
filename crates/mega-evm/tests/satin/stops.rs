@@ -18,7 +18,10 @@
 
 use alloy_primitives::{address, Address, Bytes, U256};
 use mega_evm::{
-    constants::{BLOCK_ENV_ACCESS_COMPUTE_GAS, TX_DATA_LIMIT, TX_GAS_LIMIT_CAP},
+    constants::{
+        BLOCK_ENV_ACCESS_COMPUTE_GAS, ORACLE_ACCESS_COMPUTE_GAS, TX_DATA_LIMIT, TX_GAS_LIMIT_CAP,
+    },
+    system::ORACLE_CONTRACT_ADDRESS,
     test_utils::{BytecodeBuilder, MemoryDatabase},
     EvmTxRuntimeLimits, LimitCheck, LimitKind, LimitUsage, MegaContext, MegaEvm, MegaHaltReason,
     MegaTransactionOutcome, FRAME_DATA_SHARE_DENOMINATOR, FRAME_DATA_SHARE_NUMERATOR,
@@ -26,8 +29,8 @@ use mega_evm::{
 };
 use revm::{
     bytecode::opcode::{
-        CALL, GAS, JUMP, JUMPDEST, LOG0, MLOAD, POP, PUSH0, RETURNDATACOPY, RETURNDATASIZE, REVERT,
-        SSTORE, TIMESTAMP,
+        ADD, BALANCE, CALL, GAS, JUMP, JUMPDEST, LOG0, MLOAD, POP, PUSH0, RETURNDATACOPY,
+        RETURNDATASIZE, REVERT, SLOAD, SSTORE, TIMESTAMP,
     },
     context::result::ExecutionResult,
     interpreter::{
@@ -39,7 +42,7 @@ use revm::{
 
 use crate::{
     common::{call, call_with_data},
-    detention::{context, work},
+    detention::{context, work, BENEFICIARY},
 };
 
 const CALLER: Address = address!("0000000000000000000000000000000000500000");
@@ -724,4 +727,371 @@ fn test_the_transactions_own_frame_that_halts_burns_its_regular_gas() {
             "the regular gas burned, the reservoir back"
         );
     }
+}
+
+/* ---------- the legacy engine's rows ---------- */
+
+// The legacy engine halted a transaction a limit stopped, and gave back what detention withheld
+// through a rescue of the remaining gas. Here the stop is a revert that settles like any EIP-8037
+// revert, and detention never moves gas out of a frame's tracker, so there is nothing to rescue.
+// These rows keep the legacy scenarios and take their expectation from that rule.
+
+/// A gas limit whose reservoir pays the state and history gas of a thousand fresh slots, so the
+/// writes spend nothing but compute from the frame's regular gas.
+const ROOMY: u64 = 1_000_000_000;
+
+/// Appends writes of the fresh slots `1..=1,000`: 22,100,000 of compute, past the cap.
+fn thousand_writes(code: BytecodeBuilder) -> BytecodeBuilder {
+    (1..=1_000_u64).fold(code, |code, slot| code.sstore(U256::from(slot), U256::from(slot)))
+}
+
+/// Appends a call to the Oracle with `gas`, dropping its status. The Oracle's code in these rows
+/// reads its slot zero, which is the read of its storage detention caps.
+fn call_oracle(code: BytecodeBuilder, gas: Option<u64>) -> BytecodeBuilder {
+    let code =
+        code.append_many([PUSH0, PUSH0, PUSH0, PUSH0, PUSH0]).push_address(ORACLE_CONTRACT_ADDRESS);
+    let code = match gas {
+        Some(gas) => code.push_number(gas),
+        None => code.append(GAS),
+    };
+    code.append_many([CALL, POP])
+}
+
+/// `db` with the Oracle's code a read of its slot zero.
+fn with_oracle_read(db: MemoryDatabase) -> MemoryDatabase {
+    db.account_code(
+        ORACLE_CONTRACT_ADDRESS,
+        BytecodeBuilder::default().append_many([PUSH0, SLOAD, POP]).stop().build(),
+    )
+}
+
+/// Runs `db`'s `A` under `limits` with [`ROOMY`] gas and asserts the detention stop: a revert
+/// carrying `MegaLimitExceeded(2, limit)` for the limit the reads set, billed the intrinsic gas
+/// plus that limit and nothing of the gas the transaction had left. Returns the limit and what the
+/// transaction read.
+fn assert_detention_stop(
+    db: MemoryDatabase,
+    limits: EvmTxRuntimeLimits,
+) -> (u64, mega_evm::VolatileDataAccess) {
+    let intrinsic = intrinsic(ROOMY);
+    let mut evm = MegaEvm::new(context(db).with_tx_runtime_limits(limits));
+    let outcome = evm.execute_transaction(call(CALLER, A, U256::ZERO, ROOMY)).unwrap();
+    let detention = evm.ctx().detention();
+    let limit = detention.compute_limit().expect("a read set a limit");
+    let stop = LimitCheck::ExceedsLimit {
+        kind: LimitKind::ComputeGas,
+        limit,
+        used: limit,
+        frame_local: false,
+    };
+    assert!(!outcome.result.is_halt(), "a revert, not a halt: {:?}", outcome.result);
+    assert_eq!(outcome.result.output(), Some(&stop.revert_data()));
+    assert_eq!(outcome.limit_exceeded, Some(stop));
+    assert_eq!(outcome.gas.regular, intrinsic.gas.regular + limit);
+    assert_eq!(outcome.gas.gas_used, intrinsic.gas.gas_used + limit);
+    assert_eq!(outcome.gas.reservoir_remaining, intrinsic.gas.reservoir_remaining);
+    assert!(outcome.result.logs().is_empty());
+    (limit, detention.accessed())
+}
+
+/// A frame that reads the block's timestamp and then writes a thousand fresh slots stops at the
+/// limit the read set, and bills that limit: the transaction's own frame, a child whose caller
+/// never runs on, and a caller whose child did its work after the read.
+#[test]
+fn test_volatile_data_access_oog_does_not_consume_all_gas() {
+    let code = thousand_writes(BytecodeBuilder::default().append_many([TIMESTAMP, POP]));
+    let db = MemoryDatabase::default().account_code(A, code.stop().build());
+    let (limit, accessed) = assert_detention_stop(db, EvmTxRuntimeLimits::default());
+    assert!(limit - CAP < 1_000, "the read came first: {}", limit - CAP);
+    assert_eq!(accessed, mega_evm::VolatileDataAccess::TIMESTAMP);
+}
+
+/// A child that reads the block's timestamp and then writes a thousand fresh slots stops the
+/// transaction: its caller's code after the call never runs.
+#[test]
+fn test_nested_call_block_env_access_child_oog() {
+    let child = thousand_writes(BytecodeBuilder::default().append_many([TIMESTAMP, POP]));
+    let parent = call_all(BytecodeBuilder::default(), B).append(POP).sstore(MARKER, U256::from(1));
+    let db = MemoryDatabase::default()
+        .account_code(A, parent.stop().build())
+        .account_code(B, child.stop().build());
+    let (limit, _) = assert_detention_stop(db, EvmTxRuntimeLimits::default());
+    assert!(limit - CAP < 10_000, "the child read near the start: {}", limit - CAP);
+}
+
+/// A frame that reads the block's timestamp, calls a child that does some work, then writes a
+/// thousand fresh slots stops at the limit its read set: the child's work counts towards it.
+#[test]
+fn test_parent_block_env_access_oog_after_nested_call() {
+    let child =
+        BytecodeBuilder::default().push_number(1_u8).push_number(2_u8).append(ADD).append(POP);
+    let parent = call_all(BytecodeBuilder::default().append_many([TIMESTAMP, POP]), B).append(POP);
+    let db = MemoryDatabase::default()
+        .account_code(A, thousand_writes(parent).stop().build())
+        .account_code(B, child.stop().build());
+    let (limit, _) = assert_detention_stop(db, EvmTxRuntimeLimits::default());
+    assert!(limit - CAP < 1_000, "the read came first: {}", limit - CAP);
+}
+
+/// A call to the Oracle that reads its storage, then a thousand fresh slots: the transaction stops
+/// at the compute at the read plus the Oracle's cap, the spec's 20,000,000, and bills it.
+#[test]
+fn test_an_oracle_read_holds_the_transaction_to_its_cap() {
+    let code = thousand_writes(call_oracle(BytecodeBuilder::default(), None));
+    let db = with_oracle_read(MemoryDatabase::default().account_code(A, code.stop().build()));
+    let (limit, accessed) = assert_detention_stop(db, EvmTxRuntimeLimits::default());
+    assert!(limit - ORACLE_ACCESS_COMPUTE_GAS < 10_000, "{}", limit - ORACLE_ACCESS_COMPUTE_GAS);
+    assert_eq!(accessed, mega_evm::VolatileDataAccess::ORACLE);
+}
+
+/// The same with the Oracle called on 65,535 gas: the stop bills the limit, not the gas limit.
+#[test]
+fn test_oracle_volatile_data_access_oog_does_not_consume_all_gas() {
+    let code = thousand_writes(call_oracle(BytecodeBuilder::default(), Some(0xffff)));
+    let db = with_oracle_read(MemoryDatabase::default().account_code(A, code.stop().build()));
+    assert_detention_stop(db, EvmTxRuntimeLimits::default());
+}
+
+/// A contract that calls one that reads the Oracle's storage and then writes a thousand fresh
+/// slots: the stop reaches the outer contract, whose reads after the call never run.
+#[test]
+fn test_parent_runs_out_of_gas_after_oracle_access() {
+    let middle = thousand_writes(call_oracle(BytecodeBuilder::default(), None));
+    let outer =
+        call_all(BytecodeBuilder::default(), B).append(POP).append_many([PUSH0, SLOAD, POP]);
+    let db = MemoryDatabase::default()
+        .account_code(A, outer.stop().build())
+        .account_code(B, middle.stop().build());
+    let (_, accessed) = assert_detention_stop(with_oracle_read(db), EvmTxRuntimeLimits::default());
+    assert_eq!(accessed, mega_evm::VolatileDataAccess::ORACLE);
+}
+
+/// A read of the block's timestamp, then of the Oracle's storage under a lower cap: the most
+/// restrictive limit binds, the Oracle's, and the stop bills it.
+#[test]
+fn test_both_volatile_data_access_oog_does_not_consume_all_gas() {
+    const ORACLE_CAP: u64 = 1_000_000;
+    let code = call_oracle(BytecodeBuilder::default().append_many([TIMESTAMP, POP]), Some(0xffff));
+    let db = MemoryDatabase::default().account_code(A, thousand_writes(code).stop().build());
+    let limits = EvmTxRuntimeLimits::default().with_oracle_access_compute_gas_limit(ORACLE_CAP);
+    let (limit, accessed) = assert_detention_stop(with_oracle_read(db), limits);
+    assert!(limit - ORACLE_CAP < 10_000, "the Oracle's read binds: {limit}");
+    assert_eq!(
+        accessed,
+        mega_evm::VolatileDataAccess::TIMESTAMP | mega_evm::VolatileDataAccess::ORACLE
+    );
+}
+
+/// A read of the block's timestamp, then compute past the cap: the stop comes at the compute at the
+/// read plus the cap.
+#[test]
+fn test_volatile_access_post_access_cap_enforced() {
+    let code = work(BytecodeBuilder::default().append_many([TIMESTAMP, POP]), ROUNDS);
+    let db = MemoryDatabase::default().account_code(A, code.stop().build());
+    let (limit, _) = assert_detention_stop(db, EvmTxRuntimeLimits::default());
+    assert!(limit - CAP < 1_000, "{}", limit - CAP);
+}
+
+/// A read whose limit is past what the transaction's gas reaches does not bind: the frame runs out
+/// of its own gas first, and that is an ordinary out-of-gas, which halts and burns the gas, not the
+/// stop. Ten million of compute, the read, then sixteen million more, on 25,000,000 of gas.
+#[test]
+fn test_non_binding_detention_reports_a_normal_out_of_gas() {
+    use revm::context::result::HaltReason;
+
+    let code = work(BytecodeBuilder::default(), 3_300).append_many([TIMESTAMP, POP]);
+    let db = MemoryDatabase::default().account_code(A, work(code, 5_200).stop().build());
+    let gas_limit = 25_000_000;
+    let mut evm = MegaEvm::new(context(db));
+    let outcome = evm.execute_transaction(call(CALLER, A, U256::ZERO, gas_limit)).unwrap();
+    let limit = evm.ctx().detention().compute_limit().expect("the read set a limit");
+    assert!(limit > gas_limit, "the read's limit is past the gas: {limit}");
+    assert!(
+        matches!(
+            &outcome.result,
+            ExecutionResult::Halt { reason: MegaHaltReason::Base(HaltReason::OutOfGas(_)), .. }
+        ),
+        "{:?}",
+        outcome.result
+    );
+    assert_eq!(outcome.limit_exceeded, None);
+    assert_eq!(outcome.gas.gas_used, gas_limit, "an out-of-gas burns the gas");
+}
+
+/// A transaction that reads the beneficiary's balance with far more gas than the cap succeeds and
+/// pays for what it ran, the same as with detention off: while it ran, its frame could spend only
+/// the cap, and the rest was withheld, never spent.
+#[test]
+fn test_detained_gas_is_restored() {
+    /// The spendable and withheld parts of the frame's gas after each step.
+    #[derive(Default)]
+    struct Parts(Vec<(u64, u64)>);
+    impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for Parts {
+        fn step_end(
+            &mut self,
+            interp: &mut Interpreter<EthInterpreter>,
+            _context: &mut MegaContext<DB>,
+        ) {
+            self.0.push((interp.gas.spendable(), interp.gas.withheld()));
+        }
+    }
+
+    let code = BytecodeBuilder::default().push_address(BENEFICIARY).append_many([BALANCE, POP]);
+    let db = MemoryDatabase::default().account_code(A, code.stop().build());
+    let tx = || call(CALLER, A, U256::ZERO, ABOVE);
+    let mut evm = MegaEvm::new(context(db.clone())).with_inspector(Parts::default());
+    let detained = evm.execute_transaction(tx()).unwrap();
+    assert_eq!(evm.ctx().detention().accessed(), mega_evm::VolatileDataAccess::BENEFICIARY_BALANCE);
+    let parts = &evm.inspector().0;
+    let (spendable, withheld) = parts[1];
+    assert!(spendable <= CAP && withheld > TX_GAS_LIMIT_CAP - 2 * CAP, "after the read: {parts:?}");
+
+    let undetained =
+        MegaEvm::new(context(db).with_tx_runtime_limits(EvmTxRuntimeLimits::no_limits()))
+            .execute_transaction(tx())
+            .unwrap();
+    assert!(detained.result.is_success(), "{:?}", detained.result);
+    assert_eq!(detained.gas, undetained.gas, "the withheld gas was never spent");
+    assert!(detained.gas.gas_used < 50_000, "{}", detained.gas.gas_used);
+}
+
+/// A body over the transaction's data-size limit stops the transaction before its first frame: a
+/// revert carrying the stop, not a halt, billed the intrinsic gas alone.
+#[test]
+fn test_data_limit_just_exceed() {
+    let limit = TX_BODY_SIZE - 1;
+    let db = || MemoryDatabase::default().account_code(A, writer(1));
+    let outcome =
+        execute(db(), EvmTxRuntimeLimits::default().with_tx_data_size_limit(limit), BELOW);
+    let stop = LimitCheck::ExceedsLimit {
+        kind: LimitKind::DataSize,
+        limit,
+        used: TX_BODY_SIZE,
+        frame_local: false,
+    };
+    assert!(!outcome.result.is_halt(), "{:?}", outcome.result);
+    assert_eq!(outcome.result.output(), Some(&stop.revert_data()));
+    assert_eq!(outcome.limit_exceeded, Some(stop));
+    assert_eq!(outcome.usage, LimitUsage { data_size: TX_BODY_SIZE, write_records: 0 });
+    assert_eq!(outcome.gas.gas_used, intrinsic(BELOW).gas.gas_used, "nothing ran");
+}
+
+/// A library's write, one call down, crosses a limit one byte above the body: the stop is a
+/// revert, and the transaction is billed what ran.
+#[test]
+fn test_data_limit_exceed_in_nested_call() {
+    let limit = TX_BODY_SIZE + 1;
+    let library = BytecodeBuilder::default().push_number(1_u8).append_many([PUSH0, SLOAD, SSTORE]);
+    let db = MemoryDatabase::default()
+        .account_code(A, call_all(BytecodeBuilder::default(), B).append(POP).stop().build())
+        .account_code(B, library.stop().build());
+    let outcome = execute(db, EvmTxRuntimeLimits::default().with_tx_data_size_limit(limit), BELOW);
+    let stop = LimitCheck::ExceedsLimit {
+        kind: LimitKind::DataSize,
+        limit,
+        used: TX_BODY_SIZE + WRITE_RECORD_SIZE,
+        frame_local: false,
+    };
+    assert!(!outcome.result.is_halt(), "{:?}", outcome.result);
+    assert_eq!(outcome.result.output(), Some(&stop.revert_data()));
+    assert_eq!(outcome.limit_exceeded, Some(stop));
+    assert!(outcome.gas.gas_used < 200_000, "the stop burns nothing: {}", outcome.gas.gas_used);
+}
+
+/// A value transfer to a contract that writes a slot, under a limit one byte above the body: the
+/// first frame's start crosses it, so the value never moves and the contract never runs.
+#[test]
+fn test_state_revert_when_exceeding_limit() {
+    let db = MemoryDatabase::default()
+        .account_code(A, BytecodeBuilder::default().sstore(U256::ZERO, U256::from(1)).build())
+        .account_balance(CALLER, U256::from(10_000));
+    let outcome = MegaEvm::new(context(db).with_tx_runtime_limits(
+        EvmTxRuntimeLimits::default().with_tx_data_size_limit(TX_BODY_SIZE + 1),
+    ))
+    .execute_transaction(call(CALLER, A, U256::from(100), BELOW))
+    .unwrap();
+    assert!(!outcome.result.is_halt(), "{:?}", outcome.result);
+    assert!(matches!(
+        outcome.limit_exceeded,
+        Some(LimitCheck::ExceedsLimit { kind: LimitKind::DataSize, frame_local: false, .. })
+    ));
+    assert_eq!(outcome.usage, LimitUsage { data_size: TX_BODY_SIZE, write_records: 0 });
+    assert!(outcome.state.get(&A).is_none_or(|a| a.storage.is_empty() && a.info.balance.is_zero()));
+    assert_eq!(outcome.state[&CALLER].info.balance, U256::from(10_000), "the value did not move");
+}
+
+/// Data size is held before write records: a body that crosses the data-size limit is its stop
+/// whatever the KV limit, and so is a write that crosses both.
+#[test]
+fn test_check_limit_priority_data_size_before_kv_update() {
+    let db = || MemoryDatabase::default().account_code(A, writer(1));
+    let both = |data_size: u64| {
+        EvmTxRuntimeLimits::default().with_tx_data_size_limit(data_size).with_tx_kv_update_limit(0)
+    };
+    for (data_size, used) in [
+        (1, TX_BODY_SIZE),
+        (TX_BODY_SIZE + LOG_BASE_SIZE, TX_BODY_SIZE + LOG_BASE_SIZE + WRITE_RECORD_SIZE),
+    ] {
+        let outcome = execute(db(), both(data_size), BELOW);
+        assert_eq!(
+            outcome.limit_exceeded,
+            Some(LimitCheck::ExceedsLimit {
+                kind: LimitKind::DataSize,
+                limit: data_size,
+                used,
+                frame_local: false,
+            }),
+            "data size {data_size}"
+        );
+    }
+}
+
+/// A transaction detained from its start — its sender is the block's beneficiary — whose body
+/// crosses the data-size limit is the data-size stop, billed its intrinsic gas: detention adds
+/// nothing to what it pays.
+#[test]
+fn test_detention_plus_intrinsic_data_size_overflow() {
+    let db =
+        || MemoryDatabase::default().account_code(A, BytecodeBuilder::default().stop().build());
+    let run = |limits| {
+        MegaEvm::new(context(db()).with_tx_runtime_limits(limits))
+            .execute_transaction(call(BENEFICIARY, A, U256::ZERO, ROOMY))
+            .unwrap()
+    };
+    let unlimited = run(EvmTxRuntimeLimits::default());
+    let stopped = run(EvmTxRuntimeLimits::default().with_tx_data_size_limit(100));
+    assert!(!stopped.result.is_halt(), "{:?}", stopped.result);
+    assert_eq!(
+        stopped.limit_exceeded,
+        Some(LimitCheck::ExceedsLimit {
+            kind: LimitKind::DataSize,
+            limit: 100,
+            used: TX_BODY_SIZE,
+            frame_local: false,
+        })
+    );
+    assert_eq!(stopped.gas, unlimited.gas, "the intrinsic gas alone, the reservoir back");
+}
+
+/// The transaction's own frame crossing its frame budget — a frame cap of a hundred records' bytes,
+/// crossed by the 101st write — reverts it alone: a revert, not a halt, and no latch. The body is
+/// all the transaction keeps.
+#[test]
+fn test_data_size_top_level_exceed_is_frame_local_revert() {
+    let cap = 100 * WRITE_RECORD_SIZE;
+    let code = (1..=101_u64).fold(BytecodeBuilder::default(), |code, slot| {
+        code.sstore(U256::from(slot), U256::from(1))
+    });
+    let db = MemoryDatabase::default().account_code(A, code.stop().build());
+    let outcome = execute(db, EvmTxRuntimeLimits::default().with_frame_data_size_limit(cap), BELOW);
+    let stop = LimitCheck::ExceedsLimit {
+        kind: LimitKind::DataSize,
+        limit: cap,
+        used: 0,
+        frame_local: true,
+    };
+    assert!(!outcome.result.is_halt(), "{:?}", outcome.result);
+    assert_eq!(outcome.result.output(), Some(&stop.revert_data()));
+    assert_eq!(outcome.limit_exceeded, None, "a frame budget latches nothing");
+    assert_eq!(outcome.usage, LimitUsage { data_size: TX_BODY_SIZE, write_records: 0 });
 }

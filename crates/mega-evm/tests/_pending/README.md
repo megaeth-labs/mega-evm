@@ -28,12 +28,11 @@ Do not add a `_pending/main.rs`.
 | Owning mechanism | Tests | From `tests/` | From `src/` | Keep | Rewrite | Undecided |
 |---|---:|---:|---:|---:|---:|---:|
 | the common execution layer | 21 | 21 | 0 | 21 | 0 | 0 |
-| revert-class aborts | 17 | 17 | 0 | 0 | 17 | 0 |
 | the pre-block system calls | 34 | 22 | 12 | 30 | 4 | 0 |
 | system contract deployment | 11 | 5 | 6 | 11 | 0 | 0 |
 | inspector support | 4 | 4 | 0 | 1 | 3 | 0 |
 | — (undecided: D57 preload-warm cold charging, D58 98/100 forwarding) | 7 | 7 | 0 | 0 | 0 | 7 |
-| **Total** | **94** | **76** | **18** | **63** | **24** | **7** |
+| **Total** | **77** | **59** | **18** | **63** | **7** | **7** |
 
 ## Tests ported in place
 
@@ -329,6 +328,23 @@ These 69 rows run in a real test target now, adapted to the Satin API: a keyless
 | `src/sandbox/execution.rs` | native keyless deployment (2) | 2 | `tests/system/keyless/rules.rs` |
 | **Total** | | **69** | |
 
+## Tests ported by revert-class aborts
+
+These 17 rows run in a real test target now, adapted to the Satin API: a transaction-level limit — data size, KV updates, state gas or gas detention's compute limit — stops the transaction with a revert carrying `MegaLimitExceeded`, which settles like an EIP-8037 revert, where the legacy engine halted and rescued the remaining gas; a frame budget reverts its frame alone. The counts above are lower than the inventory's by exactly these rows.
+
+| Legacy file | Owner in the inventory | Tests | Now in |
+|---|---|---:|---|
+| `mini_rex/access_beneficiary_balance.rs` | revert-class aborts (1) | 1 | `tests/satin/stops.rs` |
+| `mini_rex/block_env_gas_limit.rs` | revert-class aborts (3) | 3 | `tests/satin/stops.rs` |
+| `mini_rex/oracle.rs` | revert-class aborts (3) | 3 | `tests/satin/stops.rs` |
+| `mini_rex/tx_data_and_kv_update_limit.rs` | revert-class aborts (4) | 4 | `tests/satin/stops.rs` |
+| `rex3/oracle_gas_limit.rs` | revert-class aborts (1) | 1 | `tests/satin/stops.rs` |
+| `rex4/beneficiary_detention.rs` | revert-class aborts (1) | 1 | `tests/satin/stops.rs` |
+| `rex4/frame_limits.rs` | revert-class aborts (1) | 1 | `tests/satin/stops.rs` |
+| `rex4/gas_detention.rs` | revert-class aborts (2) | 2 | `tests/satin/stops.rs` |
+| `rex5/oracle_hint_metering.rs` | revert-class aborts (1) | 1 | `tests/system/oracle.rs` |
+| **Total** | | **17** | |
+
 ## Tests retired after the inventory
 
 These 21 rows were parked when the inventory was applied and have since been retired: the mechanism that owns them landed and left them nothing to pin, so no later mechanism will port them.
@@ -382,21 +398,12 @@ Each cell lists `disposition count (mechanism · decision)`.
 | `block_executor/inspector.rs` | 3 | keep 1 (inspector support); rewrite 2 (inspector support · D39/D41) |
 | `block_executor/sequencer_registry.rs` | 7 | keep 7 (the pre-block system calls) |
 | `compute_gas/claims.rs` | 5 | undecided 5 (— · D57, open: whether preload-warm addresses (precompile / beneficiary / access-list) are charged cold) |
-| `mini_rex/access_beneficiary_balance.rs` | 1 | rewrite 1 (revert-class aborts · D48) |
-| `mini_rex/block_env_gas_limit.rs` | 3 | rewrite 3 (revert-class aborts · D48 (detention halt -> revert-class)) |
 | `mini_rex/gas.rs` | 2 | undecided 2 (— · D58, open: 98/100 forwarding, while the design has frames follow EIP-8037 (63/64)) |
-| `mini_rex/oracle.rs` | 3 | rewrite 3 (revert-class aborts · D48) |
-| `mini_rex/tx_data_and_kv_update_limit.rs` | 4 | rewrite 4 (revert-class aborts · D48) |
-| `rex3/oracle_gas_limit.rs` | 1 | rewrite 1 (revert-class aborts · D48) |
-| `rex4/beneficiary_detention.rs` | 1 | rewrite 1 (revert-class aborts · D48) |
 | `rex4/create_safety.rs` | 1 | keep 1 (the common execution layer · canonical revm behaviour) |
-| `rex4/frame_limits.rs` | 1 | rewrite 1 (revert-class aborts · D48) |
-| `rex4/gas_detention.rs` | 2 | rewrite 2 (revert-class aborts · D48/D53) |
 | `rex4/intrinsic_limit_bypass.rs` | 1 | rewrite 1 (inspector support · D41) |
 | `rex5/apply_pending_changes_gas_budget.rs` | 4 | rewrite 4 (the pre-block system calls · D51 (system source m = 1; the system-call reservoir split)) |
 | `rex5/create2_empty_initcode.rs` | 5 | keep 5 (the common execution layer · canonical revm behaviour) |
 | `rex5/create2_resize_gas_metering.rs` | 2 | keep 2 (the common execution layer · canonical behaviour) |
-| `rex5/oracle_hint_metering.rs` | 1 | rewrite 1 (revert-class aborts · D48) |
 | `rex5/pre_block_system_calls.rs` | 11 | keep 11 (the pre-block system calls) |
 | `rex6/create2_metering_order.rs` | 11 | keep 11 (the common execution layer · canonical halt reasons; D04 512 KiB boundary) |
 | `rex6/error_paths.rs` | 2 | keep 2 (the common execution layer · canonical) |
