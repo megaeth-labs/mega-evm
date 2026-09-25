@@ -4,19 +4,25 @@
 //! inspector sees it as one call frame in which no interpreter runs.
 
 use mega_evm::{
+    alloy_consensus::{
+        proofs::{state_root_unhashed, storage_root_unhashed},
+        TrieAccount,
+    },
     system::keyless::{KEYLESS_DEPLOY_CODE_HASH, KEYLESS_DEPLOY_OVERHEAD_GAS},
     test_utils::BytecodeBuilder,
 };
 use revm::{
     bytecode::opcode::{CALL, GAS, POP, STOP},
     context::{ContextTr, JournalTr},
+    database::{states::bundle_state::BundleRetention, PlainAccount, State},
     handler::{EvmTr, FrameResult, ItemOrResult},
     interpreter::{
         interpreter::EthInterpreter, interpreter_action::FrameInit, CallInput, CallInputs,
         CallOutcome, CallScheme, CallValue, CreateScheme, FrameInput, InstructionResult,
         Interpreter, SharedMemory,
     },
-    Database, Inspector,
+    primitives::KECCAK_EMPTY,
+    Database, DatabaseCommit, Inspector,
 };
 
 use super::*;
@@ -275,6 +281,64 @@ fn test_a_call_is_dispatched_where_the_state_holds_no_contract_code() {
             EvmTxRuntimeLimits::no_limits(),
         );
         assert_eq!(returned(&outcome).deployedAddress, deployment.address, "at {gas_limit}");
+    }
+}
+
+/// The state root over `accounts`, as a node computes it from the committed state.
+fn state_root<'a>(accounts: impl IntoIterator<Item = (Address, &'a PlainAccount)>) -> B256 {
+    state_root_unhashed(accounts.into_iter().map(|(address, account)| {
+        let storage = account.storage.iter().filter(|(_, value)| !value.is_zero());
+        let leaf = TrieAccount {
+            nonce: account.info.nonce,
+            balance: account.info.balance,
+            storage_root: storage_root_unhashed(
+                storage.map(|(key, value)| (B256::from(*key), *value)),
+            ),
+            code_hash: account.info.code_hash,
+        };
+        (address, leaf)
+    }))
+}
+
+/// Where the state holds no contract code, the call's frame is built on an account that does not
+/// exist, and the call touches it as it touches any target. A touched empty account is not
+/// committed (EIP-161): once the state is applied the account is still absent, the changes the
+/// block hands on hold nothing for it, and the state root is the root of the other accounts alone,
+/// which a committed empty account would have moved.
+#[test]
+fn test_a_call_where_the_state_holds_no_contract_code_commits_nothing_for_it() {
+    let deployment = Deployment::new(deploying(&runtime(1)));
+    for gas_limit in GAS_LIMITS {
+        let db =
+            MemoryDatabase::default().account_balance(CALLER, U256::from(1_000_000_000_000_u64));
+        let mut state = State::builder().with_database(db).with_bundle_update().build();
+        let mut tx =
+            call_tx(KEYLESS_DEPLOY_ADDRESS, deployment.call_data(LARGE_OVERRIDE), U256::ZERO);
+        tx.0.base.gas_limit = gas_limit;
+        let outcome = MegaEvm::new(context(&mut state))
+            .execute_transaction(tx)
+            .expect("the transaction is valid");
+        assert_eq!(returned(&outcome).deployedAddress, deployment.address, "at {gas_limit}");
+        let contract = &outcome.state[&KEYLESS_DEPLOY_ADDRESS];
+        assert!(contract.is_touched(), "the call touches its target");
+        assert!(contract.is_loaded_as_not_existing(), "which does not exist");
+
+        state.commit(outcome.result_and_state.state);
+        state.merge_transitions(BundleRetention::Reverts);
+        assert_eq!(state.basic(KEYLESS_DEPLOY_ADDRESS).unwrap(), None, "still absent");
+        let bundle = state.take_bundle();
+        assert!(bundle.account(&KEYLESS_DEPLOY_ADDRESS).is_none(), "no change for the contract");
+        assert!(bundle.account(&deployment.address).is_some(), "the deployment is committed");
+
+        let accounts: Vec<_> = state.cache.trie_account().into_iter().collect();
+        let root = state_root(accounts.iter().copied());
+        let others =
+            accounts.iter().copied().filter(|(address, _)| *address != KEYLESS_DEPLOY_ADDRESS);
+        assert_eq!(root, state_root(others), "the root is the other accounts' alone");
+        let empty = PlainAccount::new_empty_with_storage(Default::default());
+        assert_eq!(empty.info.code_hash, KECCAK_EMPTY);
+        let with_empty = accounts.iter().copied().chain([(KEYLESS_DEPLOY_ADDRESS, &empty)]);
+        assert_ne!(root, state_root(with_empty), "a committed empty account moves the root");
     }
 }
 
