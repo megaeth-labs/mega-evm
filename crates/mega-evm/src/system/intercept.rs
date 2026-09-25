@@ -20,7 +20,7 @@
 //!    - the two control contracts have a fallback that reverts with `NotIntercepted()`, so every
 //!      selector they do not intercept ends there;
 //!    - `KeylessDeploy` has no fallback, so a selector it does not declare reverts with empty data;
-//!      a `keylessDeploy` call the keyless rewrite did not take — one a contract makes — reaches
+//!      a `keylessDeploy` call the keyless dispatch did not take — one a contract makes — reaches
 //!      the method body and its own `NotIntercepted()`;
 //!    - the Oracle's other selectors are methods it runs (`getSlot`, `version`), and one it does
 //!      not declare reverts with empty data.
@@ -74,7 +74,7 @@ const SYSTEM_CONTRACT_PREFIX: [u8; 19] = {
 ///
 /// The High-Precision Timestamp wrapper and the `SequencerRegistry` are not here: they have no
 /// interceptor and run their bytecode. `KeylessDeploy` is, but its `keylessDeploy` calls are taken
-/// by the keyless rewrite before interception (see [`crate::system::keyless`]).
+/// by the keyless dispatch before interception (see [`crate::system::keyless`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum InterceptedContract {
     /// The Oracle: `sendHint` reaches the node's oracle service.
@@ -113,7 +113,7 @@ pub(crate) fn intercepted_contract(address: &Address) -> Option<InterceptedContr
 /// `depth` is the depth of the frame the call would start, which is the calling frame's journal
 /// depth, and `caller_remaining` the regular gas the calling frame has left after the call
 /// deducted its forward — zero for a transaction's own call, which no frame makes. The caller has
-/// already applied the scheme guard, and the keyless rewrite has already taken the
+/// already applied the scheme guard, and the keyless dispatch has already taken the
 /// `keylessDeploy` calls it deploys: a call to `KeylessDeploy` that reaches here is one it did not
 /// take, and runs the contract's bytecode.
 ///
