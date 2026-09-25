@@ -137,6 +137,13 @@ The error's argument is a `uint8`: a refused `SLOTNUM` names access type 12, whi
 The two caps are runtime limits, 20,000,000 each by default; `EvmTxRuntimeLimits::no_limits()` leaves them unlimited, and a transaction whose caps are both unlimited is not detained.
 The protocol's own transactions and the system calls are not detained either.
 
+Every transaction-level limit — data size, KV updates, state gas, gas detention's compute limit — stops a transaction the same way.
+The frame that crosses it reverts with `MegaLimitExceeded(kind, limit)`, and every frame above returns the same revert without running another instruction, whatever produced its result: revm, an interceptor, or an inspector that rewrites it into a success or a halt.
+The transaction settles like any EIP-8037 revert: it keeps nothing it wrote or logged, its sender pays the intrinsic gas and what ran, and gets back the rest of its regular gas and the reservoir, less the body's history.
+Nothing is rescued, because nothing was taken: detention withholds gas inside a frame's own tracker and never spends it.
+A frame budget reverts its frame alone, and its caller runs on; a real out-of-gas and a precompile given less than its price still halt and burn what their frame was given.
+`tests/satin/stops.rs` pins every limit at the transaction's own frame and three calls down, below and above the execution cap, with and without an inspector that rewrites every result.
+
 ## Quick start
 
 ```rust,ignore
