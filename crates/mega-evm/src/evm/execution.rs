@@ -492,7 +492,7 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
             return Ok(ItemOrResult::Result(result));
         }
         let ctx = &mut self.inner.ctx;
-        let refused = caller_refuses_start(ctx, &frame_init.frame_input);
+        let refused = start_refused(ctx, &frame_init.frame_input);
         if refused {
             ctx.additional_limit.push_empty_frame();
         } else {
@@ -673,6 +673,9 @@ where
         &mut self,
         mut frame_init: FrameInit,
     ) -> Result<FrameInitResult<'_, Self::Frame>, ContextDbError<Self::Context>> {
+        // An inspector may have rewritten the input the opcode left pending, or rewrite it at the
+        // frame's start: the caller's answer is asked again on the input it leaves.
+        let _ = self.inner.ctx.additional_limit.take_start_refused();
         let (ctx, inspector) = self.ctx_inspector();
         if let Some(output) = frame_start(ctx, inspector, &mut frame_init.frame_input) {
             return answered_by_inspector(ctx, inspector, &frame_init, output)
@@ -1349,6 +1352,36 @@ pub(crate) fn caller_refuses_start<DB: revm::Database, ExtEnvs: ExternalEnvTypes
     }
 }
 
+/// [`caller_refuses_start`] for the frame `input` asks for, as the opcode starting it — or, for the
+/// transaction's own frame, the charge of its record before execution — already found it: nothing
+/// between the two changes the caller's account, so a second lookup of it would give the same
+/// answer. A debug build makes the lookup and asserts that it does.
+///
+/// A start that moves no value and creates nothing is never refused there, and takes nothing.
+#[inline]
+fn start_refused<DB: revm::Database, ExtEnvs: ExternalEnvTypes>(
+    ctx: &mut MegaContext<DB, ExtEnvs>,
+    input: &FrameInput,
+) -> bool {
+    let refusable = match input {
+        FrameInput::Call(inputs) => inputs.transfers_value(),
+        FrameInput::Create(_) => true,
+        FrameInput::Empty => false,
+    };
+    if !refusable {
+        return false;
+    }
+    let Some(refused) = ctx.additional_limit.take_start_refused() else {
+        return caller_refuses_start(ctx, input);
+    };
+    debug_assert_eq!(
+        refused,
+        caller_refuses_start(ctx, input),
+        "the answer staged for a frame's start is the one its caller's account gives"
+    );
+    refused
+}
+
 /// Whether `caller`'s account refuses a frame start that moves `value` and, for a `creation`,
 /// bumps its nonce: the balance revm's transfer checks, and the nonce revm's creation bumps.
 ///
@@ -1440,7 +1473,8 @@ struct AppliedAuthorities {
 /// frame revm refuses to start on its sender's account makes no record, and is charged none
 /// ([`caller_refuses_start`]): among the transactions that pay history, that is a creation from an
 /// account whose nonce cannot be bumped, which only a caller that turned the nonce check off can
-/// run, and which revm answers with a success.
+/// run, and which revm answers with a success. The answer is left for the first frame's init,
+/// which asks the same of the same account.
 /// `false` when the transaction cannot pay, which is an out-of-gas before it runs.
 fn charge_records_made_outside_a_frame<DB: Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &mut MegaContext<DB, ExtEnvs>,
@@ -1459,8 +1493,12 @@ fn charge_records_made_outside_a_frame<DB: Database, ExtEnvs: ExternalEnvTypes>(
                 !ctx.additional_limit.target_is_authority()
         }
     };
-    let top_level_record =
-        writes_a_record && !caller_refuses(ctx, tx.caller(), tx.value(), tx.kind().is_create());
+    let (caller, value, creation) = (tx.caller(), tx.value(), tx.kind().is_create());
+    let top_level_record = writes_a_record && {
+        let refused = caller_refuses(ctx, caller, value, creation);
+        ctx.additional_limit.stage_start_refused(refused);
+        !refused
+    };
     let Some(top_level) = write_record_history_gas(u64::from(top_level_record)) else {
         return false;
     };

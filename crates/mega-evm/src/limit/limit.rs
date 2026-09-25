@@ -84,6 +84,11 @@ pub struct AdditionalLimit {
     /// The history gas the running opcode charged its own frame for the records the frame it is
     /// starting will make, waiting for that frame's lane to be pushed.
     pending_frame_charge: FrameCharge,
+    /// Whether revm refuses, on its caller's account, the start of the frame the last
+    /// frame-starting opcode suspended on — or, before the first frame, the transaction's own
+    /// frame — as that opcode, or the charge of the transaction's record, found it. See
+    /// [`stage_start_refused`](Self::stage_start_refused).
+    pending_start_refused: Option<bool>,
     /// The history gas the settled transaction spent.
     history_gas_spent: u64,
     /// The history bytes the settled transaction appended.
@@ -125,6 +130,7 @@ impl AdditionalLimit {
         self.intrinsic_history_bytes = 0;
         self.top_level_write_record_gas = 0;
         self.pending_frame_charge = FrameCharge::NONE;
+        self.pending_start_refused = None;
         self.history_gas_spent = 0;
         self.history_bytes = 0;
         self.state_gas.reset();
@@ -346,6 +352,31 @@ impl AdditionalLimit {
         caller: u64,
     ) {
         self.pending_frame_charge = FrameCharge { records: Some(records), on_lane, caller };
+    }
+
+    /// Leaves whether revm refuses the start of the frame about to start on its caller's account,
+    /// for the frame's init to take ([`take_start_refused`](Self::take_start_refused)) rather than
+    /// read the caller's account again: found by the opcode starting the frame, or, for the
+    /// transaction's own frame, by the charge of its record before execution.
+    ///
+    /// Only a start revm can refuse there — a call that transfers value, a creation — takes it.
+    /// One an opcode makes finds the answer that opcode staged, which stages one for every frame
+    /// it starts and so replaces whatever an earlier start left. The transaction's own frame finds
+    /// the one its record's charge staged, or none: the reset cleared what the transaction before
+    /// it left. A start answered before its init leaves its answer for no other start to take.
+    /// The one start past the first frame no opcode makes, a keyless deployment's creation, is
+    /// cleared for ([`set_frame_creator`](Self::set_frame_creator)), and so is every start on the
+    /// inspected path, whose inspector may rewrite the input.
+    #[inline]
+    pub(crate) const fn stage_start_refused(&mut self, refused: bool) {
+        self.pending_start_refused = Some(refused);
+    }
+
+    /// Takes what [`stage_start_refused`](Self::stage_start_refused) left for the frame about to
+    /// start, if anything.
+    #[inline]
+    pub(crate) const fn take_start_refused(&mut self) -> Option<bool> {
+        self.pending_start_refused.take()
     }
 
     /// Records the history gas the settled transaction spent.
@@ -763,7 +794,11 @@ impl AdditionalLimit {
     /// The creation's start writes the creator's nonce, so the frame's lane runs as the creator:
     /// the creation records that write as its creator's, on the frame's lane once the creation
     /// fails, unless the creator is the transaction's sender, whose account the body counts.
+    ///
+    /// No opcode starts the creation, so nothing staged the answer to whether its creator's
+    /// account refuses it; one staged for the call's own start is not the creation's.
     pub(crate) fn set_frame_creator(&mut self, creator: Address) {
+        self.pending_start_refused = None;
         let sender = self.sender;
         if let Some(lane) = self.tracker.current_mut() {
             lane.address = Some(creator);
