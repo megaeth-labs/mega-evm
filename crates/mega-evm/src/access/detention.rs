@@ -443,7 +443,15 @@ impl Detention {
             // gas limit is above the allowance and the frame would have had the rest withheld. An
             // answer built on less than the frame was forwarded is settled on what it was
             // forwarded.
-            let withheld = NonZeroU64::new(gas_limit - allowance)?;
+            //
+            // State and history gas that spilled onto regular gas would have drawn the withheld
+            // part first, and the revert that settles the stop credits the spill back, so the
+            // crossing withholds what is left once the spill is taken out, as the tracker's own
+            // record of a running frame does. The spill is below `gas_limit - allowance`, since
+            // the regular gas the answer spent past it exceeds the allowance.
+            let withheld = NonZeroU64::new(
+                (gas_limit - allowance).saturating_sub(result.gas.state_gas_spilled()),
+            )?;
             result.result = InstructionResult::OutOfGas;
             result.gas.tracker_mut().set_limit(gas_limit);
             result.gas.set_withheld_crossing(Some(WithheldCrossing::new(withheld)));

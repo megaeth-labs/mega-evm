@@ -1247,3 +1247,54 @@ fn test_a_slotnum_refusal_is_past_the_enum() {
         VolatileDataAccessType::BlockHash
     );
 }
+
+/// Answers the call to [`CONTRACT`] itself: past the cap in regular gas, and with 1,000 of state or
+/// history gas charged on top.
+#[derive(Clone, Copy)]
+struct AnswersPastTheCapWithASpill {
+    history: bool,
+}
+
+impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for AnswersPastTheCapWithASpill {
+    fn call(&mut self, _: &mut MegaContext<DB>, inputs: &mut CallInputs) -> Option<CallOutcome> {
+        if inputs.target_address != CONTRACT {
+            return None;
+        }
+        let mut gas = Gas::new_with_regular_gas_and_reservoir(inputs.gas_limit, inputs.reservoir);
+        assert!(gas.record_regular_cost(CAP + 1));
+        if self.history {
+            assert!(gas.record_history_cost(1_000));
+        } else {
+            assert!(gas.record_state_cost(1_000));
+        }
+        Some(CallOutcome::new(
+            InterpreterResult::new(InstructionResult::Return, Bytes::new(), gas),
+            inputs.return_memory_offset.clone(),
+        ))
+    }
+}
+
+/// An answer past the allowance is the stop, billed the intrinsic gas and the limit, whatever state
+/// or history gas the answer charged: below the execution cap that gas spills onto regular gas and
+/// the stop's revert gives it back, so the stop withholds none of it a second time. Above the cap
+/// the reservoir pays it and nothing spills.
+#[test]
+fn test_an_answer_past_the_allowance_with_a_spill_is_billed_the_limit() {
+    for gas_limit in TIERS {
+        for history in [false, true] {
+            let db = MemoryDatabase::default().account_code(CONTRACT, Bytes::from_static(&[STOP]));
+            let intrinsic = run_on(
+                &mut MegaEvm::new(context(db.clone())),
+                tx(BENEFICIARY, CONTRACT, gas_limit),
+            )
+            .outcome
+            .gas
+            .regular;
+            let mut evm =
+                MegaEvm::new(context(db)).with_inspector(AnswersPastTheCapWithASpill { history });
+            let run = run_on(&mut evm, tx(BENEFICIARY, CONTRACT, gas_limit));
+            assert_eq!(run.outcome.result.output(), Some(&stop_data(CAP)), "{gas_limit} {history}");
+            assert_eq!(run.outcome.gas.regular, intrinsic + CAP, "{gas_limit}, history {history}");
+        }
+    }
+}
