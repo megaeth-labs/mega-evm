@@ -1182,6 +1182,38 @@ fn test_a_keyless_calls_charges_are_held_to_what_the_limit_leaves() {
     }
 }
 
+/// A refused `keylessDeploy` call is an answer held to the allowance by the regular gas it spent:
+/// below the execution cap, the signer's account it was charged spills onto its regular gas, and
+/// that is state gas, not compute. The canonical `CREATE2` factory's signer has no account, and
+/// its address is taken, so the call pays the overhead and the signer's account and is refused
+/// `ContractAlreadyExists()`. From the beneficiary, under a cap past the overhead and short of the
+/// two together, it is refused as without the read, below and above the cap.
+#[test]
+fn test_a_refused_keyless_calls_spilled_state_gas_is_not_compute() {
+    let data = keyless_deploy_call(CREATE2_FACTORY_TX);
+    for gas_limit in TIERS {
+        let run = |caller: Address, cap: u64| {
+            let limits = EvmTxRuntimeLimits::default().with_block_env_access_compute_gas_limit(cap);
+            let db = MemoryDatabase::default()
+                .account_code(KEYLESS_DEPLOY_ADDRESS, KEYLESS_DEPLOY_CODE)
+                .account_code(CREATE2_FACTORY_CONTRACT, BytecodeBuilder::default().stop().build());
+            let mut evm = MegaEvm::new(context(db).with_tx_runtime_limits(limits));
+            run_on(&mut evm, tx_to(caller, KEYLESS_DEPLOY_ADDRESS, &data, gas_limit))
+        };
+        let refused = run(CALLER, CAP);
+        assert_eq!(
+            refused.outcome.result.output(),
+            Some(&Bytes::from(IKeylessDeploy::ContractAlreadyExists::SELECTOR.to_vec())),
+        );
+        let cap = KEYLESS_DEPLOY_OVERHEAD_GAS + 1_000;
+        let detained = run(BENEFICIARY, cap);
+        assert_eq!(detained.limit, Some(cap), "the sender is the beneficiary");
+        assert_eq!(detained.outcome.result, refused.outcome.result, "refused as without the read");
+        assert_eq!(detained.outcome.gas, refused.outcome.gas);
+        assert_eq!(detained.outcome.limit_exceeded, None);
+    }
+}
+
 /// The calldata of a `keylessDeploy` call carrying `tx`, with a `gasLimitOverride` past any
 /// forward.
 fn keyless_deploy_call(tx: &[u8]) -> Bytes {

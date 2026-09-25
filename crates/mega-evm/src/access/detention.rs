@@ -400,9 +400,11 @@ impl Detention {
     /// ([`restore_forward`](Self::restore_forward)) — crossed the limit. Otherwise, an answer that
     /// halts burns the whole gas limit: nothing ran with it. An answer that spent more regular gas
     /// than the limit leaves the frame — the allowance it would have run on — is a charge the
-    /// frame could not have made: it is answered out of gas and marked as a crossing of what the
-    /// frame would have had withheld. A crossing is settled by the same rule as a frame that ran
-    /// ([`stop`](Self::stop)). Returns the limit when it crossed.
+    /// frame could not have made; state and history gas that spilled onto its regular gas are not
+    /// counted, as they are not a running frame's compute. Such an answer is answered out of gas
+    /// and marked as a crossing of what the frame would have had withheld. A crossing is
+    /// settled by the same rule as a frame that ran ([`stop`](Self::stop)). Returns the limit
+    /// when it crossed.
     pub(crate) fn on_answer(
         &mut self,
         result: &mut InterpreterResult,
@@ -418,7 +420,12 @@ impl Detention {
                 return None;
             }
             let allowance = self.allowance(depth, gas_limit)?;
-            if gas_limit.saturating_sub(result.gas.remaining()) <= allowance {
+            // The regular gas the answer spent: state and history gas that spilled onto it are not
+            // compute, as they are not a running frame's.
+            let spent = gas_limit
+                .saturating_sub(result.gas.remaining())
+                .saturating_sub(result.gas.state_gas_spilled());
+            if spent <= allowance {
                 return None;
             }
             // The answer spent more than the allowance, and no more than the gas limit, so the
@@ -757,8 +764,9 @@ mod tests {
         }
     }
 
-    /// An answer that halts burns the gas limit; one that spent more than the frame's allowance is
-    /// answered out of gas and stops at the limit, with what the frame would have had withheld.
+    /// An answer that halts burns the gas limit; one that spent more regular gas than the frame's
+    /// allowance is answered out of gas and stops at the limit, with what the frame would have had
+    /// withheld. State gas that spilled onto the answer's regular gas is not compute.
     #[test]
     fn test_an_answer_is_held_to_the_allowance_it_would_have_run_on() {
         let mut detention = detaining();
@@ -776,6 +784,12 @@ mod tests {
         let mut within = answer(BLOCK_ENV_ACCESS_COMPUTE_GAS, InstructionResult::Return);
         assert_eq!(detention.on_answer(&mut within, 1, 90_000_000), None);
         assert_eq!(within.result, InstructionResult::Return);
+
+        let mut spilled = answer(BLOCK_ENV_ACCESS_COMPUTE_GAS, InstructionResult::Revert);
+        assert!(spilled.gas.record_state_cost(1_000));
+        assert_eq!(spilled.gas.state_gas_spilled(), 1_000);
+        assert_eq!(detention.on_answer(&mut spilled, 1, 90_000_000), None, "a spill is no compute");
+        assert_eq!(spilled.result, InstructionResult::Revert);
 
         let mut halted = answer(0, InstructionResult::PrecompileError);
         assert_eq!(detention.on_answer(&mut halted, 1, 90_000_000), None);
