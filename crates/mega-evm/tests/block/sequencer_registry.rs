@@ -11,16 +11,18 @@ use std::sync::{Arc, Mutex};
 use alloy_consensus::transaction::Recovered;
 use alloy_evm::{block::BlockExecutor, EvmFactory};
 use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
-use alloy_primitives::{address, Address, Bytes, B256, U256};
-use alloy_sol_types::SolCall;
+use alloy_primitives::{address, keccak256, Address, Bytes, B256, U256};
+use alloy_sol_types::{SolCall, SolValue};
 use mega_evm::{
     system::{
         storage_slots::{
-            ADMIN, CURRENT_SEQUENCER, CURRENT_SYSTEM_ADDRESS, PENDING_ADMIN, PENDING_SEQUENCER,
-            PENDING_SYSTEM_ADDRESS, SEQUENCER_ACTIVATION_BLOCK, SYSTEM_ADDRESS_ACTIVATION_BLOCK,
+            ADMIN, CURRENT_SEQUENCER, CURRENT_SYSTEM_ADDRESS, MIN_ROTATION_DELAY, PENDING_ADMIN,
+            PENDING_SEQUENCER, PENDING_SYSTEM_ADDRESS, SEQUENCER_ACTIVATION_BLOCK,
+            SYSTEM_ADDRESS_ACTIVATION_BLOCK,
         },
         IOracle, ISequencerRegistry, SequencerRegistryConfig, MEGA_SYSTEM_ADDRESS,
         ORACLE_CONTRACT_ADDRESS, SEQUENCER_REGISTRY_ADDRESS, SEQUENCER_REGISTRY_CODE,
+        SEQUENCER_REGISTRY_CODE_HASH,
     },
     test_utils::MemoryDatabase,
     BlockLimits, MegaBlockExecutionCtx, MegaBlockExecutor, MegaEvm, MegaEvmFactory,
@@ -342,8 +344,19 @@ fn test_bootstrap_block_resolves_system_address() {
         registry.storage[&CURRENT_SYSTEM_ADDRESS].present_value(),
         word(GENESIS_SYSTEM_ADDRESS)
     );
-
+    assert_eq!(registry.info.code_hash, SEQUENCER_REGISTRY_CODE_HASH, "the deployed code");
     drop(executor);
+
+    // The registry is the one this engine ships, seeded with the schedule's roles and delay.
+    assert_eq!(
+        state.basic(SEQUENCER_REGISTRY_ADDRESS).unwrap().unwrap().code_hash,
+        SEQUENCER_REGISTRY_CODE_HASH,
+    );
+    assert_eq!(
+        slot(&mut state, MIN_ROTATION_DELAY),
+        U256::from(common::registry_config().min_rotation_delay)
+    );
+    assert_eq!(slot(&mut state, CURRENT_SEQUENCER), word(common::SEQUENCER));
 
     // The default schedule seeds the engine's default address, and the read finds it.
     let mut state = common::state();
@@ -447,4 +460,133 @@ fn test_admin_handoff_via_block_executor() {
 
     assert_eq!(slot(&mut state, ADMIN), word(NEXT_ADMIN));
     assert_eq!(slot(&mut state, PENDING_ADMIN), U256::ZERO);
+}
+
+/// The EIP-712 digest of a rotation to `new_sequencer` at `activation_block`, built here from the
+/// contract's domain and type strings rather than asked of the contract, so a test that the
+/// contract accepts a proof over it cross-checks the deployed bytecode.
+fn rotation_digest(new_sequencer: Address, activation_block: U256) -> B256 {
+    let domain_typehash = keccak256(
+        b"EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)",
+    );
+    let rotation_typehash =
+        keccak256(b"SequencerRotation(address newSequencer,uint256 activationBlock)");
+    let domain_separator = keccak256(
+        (
+            domain_typehash,
+            keccak256(b"MegaETH SequencerRegistry"),
+            keccak256(b"1"),
+            U256::from(common::CHAIN_ID),
+            SEQUENCER_REGISTRY_ADDRESS,
+        )
+            .abi_encode(),
+    );
+    let struct_hash = keccak256((rotation_typehash, new_sequencer, activation_block).abi_encode());
+    let mut preimage = Vec::with_capacity(66);
+    preimage.extend_from_slice(b"\x19\x01");
+    preimage.extend_from_slice(domain_separator.as_slice());
+    preimage.extend_from_slice(struct_hash.as_slice());
+    keccak256(&preimage)
+}
+
+/// The key of the sequencer a rotation brings in, and its address.
+fn next_sequencer_key() -> (Address, B256) {
+    use alloy_consensus::crypto::secp256k1::{recover_signer, sign_message};
+    let secret = B256::from(U256::from(0x5ec5_ec5e_c5ec_u64));
+    let probe = B256::from(U256::from(1));
+    let signature = sign_message(secret, probe).expect("the key signs");
+    (recover_signer(&signature, probe).expect("the signer recovers"), secret)
+}
+
+/// The 65-byte `(r, s, v)` proof, signed by `secret`, that its key takes over at
+/// `activation_block`.
+fn rotation_proof(secret: B256, new_sequencer: Address, activation_block: U256) -> Bytes {
+    let digest = rotation_digest(new_sequencer, activation_block);
+    let signature =
+        alloy_consensus::crypto::secp256k1::sign_message(secret, digest).expect("the key signs");
+    let mut proof = Vec::with_capacity(65);
+    proof.extend_from_slice(&signature.r().to_be_bytes::<32>());
+    proof.extend_from_slice(&signature.s().to_be_bytes::<32>());
+    proof.push(27 + u8::from(signature.v()));
+    proof.into()
+}
+
+/// A block at `number` over `state`, its pre-block changes applied.
+fn started_block_at(state: &mut State<MemoryDatabase>, number: u64) -> Executor<'_> {
+    let mut env = common::evm_env();
+    env.block_env.number = U256::from(number);
+    let evm = MegaEvmFactory::new().with_external_env_factory(envs_at(1)).create_evm(state, env);
+    let ctx = MegaBlockExecutionCtx::new(
+        B256::ZERO,
+        Some(B256::ZERO),
+        Bytes::new(),
+        BlockLimits::no_limits(),
+    );
+    let mut executor =
+        MegaBlockExecutor::new(evm, ctx, common::chain_spec(), OpAlloyReceiptBuilder::default());
+    executor.apply_pre_execution_changes().expect("the block starts");
+    executor
+}
+
+/// The admin's `scheduleNextSequencerChange` call, carrying `proof`, run and committed in a
+/// block at [`BLOCK_NUMBER`] over `state`. Answers whether the call succeeded.
+fn schedule(
+    state: &mut State<MemoryDatabase>,
+    next: Address,
+    activation: u64,
+    proof: Bytes,
+) -> bool {
+    let mut executor = started_block_at(state, BLOCK_NUMBER);
+    let input = ISequencerRegistry::scheduleNextSequencerChangeCall {
+        newSequencer: next,
+        activationBlock: U256::from(activation),
+        newSequencerSignature: proof,
+    }
+    .abi_encode();
+    let outcome =
+        executor.run_transaction(&registry_call_from(common::ADMIN, input)).expect("it executes");
+    let succeeded = outcome.result.is_success();
+    executor.commit_transaction(outcome);
+    succeeded
+}
+
+/// A state whose registry the first block deploys, with a funded admin.
+fn state_with_funded_admin() -> State<MemoryDatabase> {
+    let mut db = common::database();
+    db.set_account_balance(common::ADMIN, U256::from(10_u64.pow(18)));
+    State::builder().with_database(db).build()
+}
+
+/// A sequencer rotation end to end: the admin schedules it in one block with the new key's
+/// EIP-712 proof of possession, through an ordinary transaction, and the block at its activation
+/// block applies it before its transactions; the block before does not.
+#[test]
+fn test_a_rotation_with_a_valid_proof_activates_at_its_block() {
+    let (next, secret) = next_sequencer_key();
+    let activation = BLOCK_NUMBER + common::registry_config().min_rotation_delay;
+    let mut state = state_with_funded_admin();
+
+    let proof = rotation_proof(secret, next, U256::from(activation));
+    assert!(schedule(&mut state, next, activation, proof), "the proof is accepted");
+    assert_eq!(slot(&mut state, PENDING_SEQUENCER), word(next));
+    assert_eq!(slot(&mut state, SEQUENCER_ACTIVATION_BLOCK), U256::from(activation));
+
+    drop(started_block_at(&mut state, activation - 1));
+    assert_eq!(slot(&mut state, CURRENT_SEQUENCER), word(common::SEQUENCER), "not before");
+
+    drop(started_block_at(&mut state, activation));
+    assert_eq!(slot(&mut state, CURRENT_SEQUENCER), word(next), "applied at its block");
+    assert_eq!(slot(&mut state, PENDING_SEQUENCER), U256::ZERO);
+}
+
+/// A schedule without a proof of possession is refused by the contract: the transaction is
+/// included, its call reverts, and nothing is pending.
+#[test]
+fn test_a_schedule_without_a_proof_reverts() {
+    let (next, _) = next_sequencer_key();
+    let activation = BLOCK_NUMBER + common::registry_config().min_rotation_delay;
+    let mut state = state_with_funded_admin();
+
+    assert!(!schedule(&mut state, next, activation, Bytes::new()), "the call reverts");
+    assert_eq!(slot(&mut state, PENDING_SEQUENCER), U256::ZERO);
 }

@@ -388,7 +388,8 @@ fn test_a_block_is_refused_when_a_pre_block_call_reverts() {
         matches!(
             &err,
             BlockExecutionError::Validation(BlockValidationError::BlockHashContractCall { message })
-                if message.contains("Revert")
+                if message.contains("EIP-2935 pre-block call did not succeed")
+                    && message.contains("Revert")
         ),
         "{err}"
     );
@@ -401,7 +402,10 @@ fn test_a_block_is_refused_when_a_pre_block_call_reverts() {
     assert!(
         matches!(
             &err,
-            BlockExecutionError::Validation(BlockValidationError::BeaconRootContractCall { .. })
+            BlockExecutionError::Validation(BlockValidationError::BeaconRootContractCall {
+                message,
+                ..
+            }) if message.contains("EIP-4788 pre-block call did not succeed")
         ),
         "{err}"
     );
