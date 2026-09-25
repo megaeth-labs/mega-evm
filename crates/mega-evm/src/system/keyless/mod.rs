@@ -16,6 +16,18 @@
 //!
 //! What the native frame means for a deployment:
 //!
+//! - The call is a frame on revm's stack, built on the contract as any call to it is: at depth 0,
+//!   with its own journal checkpoint and gas. No code runs in it, and the contract's bytecode never
+//!   runs for a call the dispatch takes. The contract's account and code are loaded to start the
+//!   transaction's first frame, as for any transaction to the contract, so a witness holds them
+//!   either way; the frame touches the account, as a call touches its target, and a call that
+//!   reverts takes the touch back. An inspector sees one call frame, started and ended as any
+//!   call's, with no interpreter initialized and no step in it.
+//! - A call carrying value is refused `NoEtherTransfer()`, having paid the overhead, before revm
+//!   builds its frame: no value moves, and nothing its start would write is counted.
+//! - The dispatch is by address and selector, whatever the address holds: where the state holds no
+//!   contract code, the frame is built on the contract's own. A chain holds it from the fork that
+//!   deploys it on.
 //! - `ORIGIN` and `GASPRICE` in the init code are the transaction's own.
 //! - The creation runs at depth 1, as the call's child: one level below the same init code sent as
 //!   a creation transaction, which runs at depth 0. Its frames reach the call-stack limit one frame

@@ -89,7 +89,9 @@ The Oracle's storage is read through the node's oracle service: an `SLOAD` in th
 A node that replays a block without the service must price and witness it as the node that built it did, and it cannot tell which source the building node read, so nothing may depend on the source: every such read is priced as a cold access, and the slot is loaded either way, so a later write to it finds it warm and a stateless witness carries it.
 
 `KeylessDeploy` deploys a pre-EIP-155 signed creation — Nick's Method — at the address its signer's first creation gets on every chain, with the gas limit the caller chooses.
-A `keylessDeploy` call a transaction makes becomes a native creation before any interceptor sees it; a tracer sees the call, and the creation as its child.
+A `keylessDeploy` call a transaction makes is taken before any interceptor sees it, and runs as a frame of its own in which no code runs; the deployment is a native creation, the call's child, and a tracer sees the call, and the creation as its child.
+The call's frame is built on the contract as any call's is: the contract's account, which a transaction to it loads with its code in any case, is touched by a call that returns, and the contract's bytecode never runs for it.
+A call carrying value is refused before its frame is built, so no value moves.
 The call pays a fixed 100,000 gas for decoding the transaction and recovering its signer, and is held to the legacy engine's nine rules and error ABI, in the legacy engine's order.
 It pays for the signer's account when the creation's nonce bump is what creates it, and what a `CREATE` opcode charges its frame: its regular gas, the created account, and the two write records of the creation's start.
 It then starts the creation as the signer, below it, with `gasLimitOverride` capped to what it has left.
