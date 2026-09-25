@@ -19,7 +19,7 @@
 use alloy_sol_types::SolError;
 use mega_evm::{
     constants::TX_GAS_LIMIT_CAP, system::keyless::KEYLESS_DEPLOY_OVERHEAD_GAS, LimitCheck,
-    LimitKind, MegaLimitExceeded,
+    LimitKind, MegaLimitExceeded, LOG_BASE_SIZE, WRITE_RECORD_SIZE,
 };
 use revm::{
     bytecode::opcode::{LOG0, PUSH0, REVERT, TIMESTAMP},
@@ -139,12 +139,15 @@ fn test_a_transaction_latched_by_its_body_deploys_nothing() {
 
 /// A log that crosses the transaction's data-size limit stops the transaction. The limit holds the
 /// body, the two records of the creation's start and 100 bytes more, so the body passes and the
-/// creation starts, and the constructor's `LOG0` of 2,000 bytes is what crosses: the call reverts
-/// with the stop, and the deployment is taken back whole.
+/// creation starts, and the constructor's `LOG0` of 2,000 bytes is what crosses: the stop reports
+/// the body, the two records and the whole log as used, the call reverts with the stop, and the
+/// deployment is taken back whole.
 #[test]
 fn test_a_deployment_crossing_the_transaction_data_size_limit_stops_it() {
     let deployment = Deployment::new(logging(2_000));
-    let limit = body_bytes(&deployment) + 2 * 40 + 100;
+    let start = body_bytes(&deployment) + 2 * WRITE_RECORD_SIZE;
+    let limit = start + 100;
+    let used = start + LOG_BASE_SIZE + 2_000;
     for gas_limit in GAS_LIMITS {
         let outcome = limited(
             &deployment,
@@ -152,10 +155,16 @@ fn test_a_deployment_crossing_the_transaction_data_size_limit_stops_it() {
             EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(limit),
         );
         assert_eq!(stop(&outcome), MegaLimitExceeded { kind: 0, limit }, "at {gas_limit}");
-        assert!(matches!(
+        assert_eq!(
             outcome.limit_exceeded,
-            Some(LimitCheck::ExceedsLimit { kind: LimitKind::DataSize, frame_local: false, .. })
-        ));
+            Some(LimitCheck::ExceedsLimit {
+                kind: LimitKind::DataSize,
+                limit,
+                used,
+                frame_local: false
+            }),
+            "at {gas_limit}: the constructor's log crosses"
+        );
         assert_stopped_whole(&outcome, &deployment, gas_limit);
     }
 }
@@ -486,37 +495,66 @@ impl Crossing {
     }
 
     /// The limits under which a deployment of `deployment`, by a signer at `signer_nonce`,
-    /// crosses the limit, with the kind and the limit of the stop it reports.
-    fn limits(
-        self,
-        deployment: &Deployment,
-        signer_nonce: u64,
-    ) -> (EvmTxRuntimeLimits, LimitKind, u64) {
+    /// crosses the limit, with the stop it reports: its kind, its limit, and what it counts as
+    /// used where the constructor crosses.
+    fn limits(self, deployment: &Deployment, signer_nonce: u64) -> (EvmTxRuntimeLimits, Crossed) {
         let limits = EvmTxRuntimeLimits::no_limits();
         match self {
             Self::DataSize => {
-                // The body, the two records of the creation's start and 100 bytes more.
-                let limit = body_bytes(deployment) + 2 * 40 + 100;
-                (limits.with_tx_data_size_limit(limit), LimitKind::DataSize, limit)
+                // The body, the two records of the creation's start and 100 bytes more; the
+                // constructor's log crosses with all its bytes.
+                let start = body_bytes(deployment) + 2 * WRITE_RECORD_SIZE;
+                let limit = start + 100;
+                let used = start + LOG_BASE_SIZE + 2_000;
+                (
+                    limits.with_tx_data_size_limit(limit),
+                    Crossed::new(LimitKind::DataSize, limit, used),
+                )
             }
             Self::StateGas => {
-                // The signer's account when the bump creates it, the created account, and one
-                // gas short of the slot.
+                // The signer's account when the bump creates it, the created account, and the
+                // slot, which crosses a limit one gas short of it.
                 let signer =
                     if signer_nonce == 0 { entry(GasId::new_account_state_gas()) } else { 0 };
-                let limit = signer +
+                let used = signer +
                     entry(GasId::create_state_gas()) +
-                    entry(GasId::sstore_set_state_gas()) -
-                    1;
-                (limits.with_tx_state_gas_limit(limit), LimitKind::StateGrowth, limit)
+                    entry(GasId::sstore_set_state_gas());
+                let limit = used - 1;
+                let stop = Crossed::new(LimitKind::StateGrowth, limit, used);
+                (limits.with_tx_state_gas_limit(limit), stop)
             }
             Self::Compute => {
-                // Read at the call's charges and the read's own two gas.
+                // Read at the call's charges and the read's own two gas; the stop brings the
+                // compute to the limit exactly.
                 let charges = KEYLESS_DEPLOY_OVERHEAD_GAS + create_regular(self.init_code().len());
                 let limit = charges + 2 + COMPUTE_CAP;
                 let limits = limits.with_block_env_access_compute_gas_limit(COMPUTE_CAP);
-                (limits, LimitKind::ComputeGas, limit)
+                (limits, Crossed::new(LimitKind::ComputeGas, limit, limit))
             }
+        }
+    }
+}
+
+/// What a crossing reports: the kind of the stop, its limit, and what it counts as used.
+#[derive(Clone, Copy, Debug)]
+struct Crossed {
+    kind: LimitKind,
+    limit: u64,
+    used: u64,
+}
+
+impl Crossed {
+    const fn new(kind: LimitKind, limit: u64, used: u64) -> Self {
+        Self { kind, limit, used }
+    }
+
+    /// The limit check the transaction's outcome reports for the stop.
+    const fn check(self) -> LimitCheck {
+        LimitCheck::ExceedsLimit {
+            kind: self.kind,
+            limit: self.limit,
+            used: self.used,
+            frame_local: false,
         }
     }
 }
@@ -573,18 +611,22 @@ fn plain_and_rewritten(
 /// nonce 0 and at nonce 1, below the execution cap and above it, without an inspector and under
 /// one that rewrites every frame result into a success and revives the creation.
 ///
-/// Every run reverts with the stop and keeps nothing of the deployment: the signer's nonce is
-/// where it was, neither spent from 0 nor left at 2 from 1; no code, no record, and no state or
-/// history gas beyond the transaction's body; above the cap the reservoir comes back. A compute
-/// stop bills exactly its limit past the body: the call's charges, the read and the cap. The
-/// inspector sees the creation end with the stop, then the call, and changes nothing the
-/// transaction reports.
+/// Every run reverts with the stop, and the stop counts as used what the constructor's crossing
+/// brings the transaction to: the body, the start's two records and the whole log; the accounts
+/// the deployment adds and the slot; the compute up to the limit. So the crossing is the
+/// constructor's, not the creation's start or the call's charges. Every run keeps nothing of the
+/// deployment: the signer's nonce is where it was, neither spent from 0 nor left at 2 from 1; no
+/// code, no record, and no state or history gas beyond the transaction's body; above the cap the
+/// reservoir comes back. A compute stop bills exactly its limit past the body: the call's
+/// charges, the read and the cap. The inspector sees the creation end with the stop, then the
+/// call, and changes nothing the transaction reports.
 #[test]
 fn test_every_limit_stops_a_deployment_from_either_nonce_at_either_tier() {
     for crossing in Crossing::ALL {
         let deployment = Deployment::new(crossing.init_code());
         for signer_nonce in [0, 1] {
-            let (limits, kind, limit) = crossing.limits(&deployment, signer_nonce);
+            let (limits, expected) = crossing.limits(&deployment, signer_nonce);
+            let Crossed { kind, limit, .. } = expected;
             let db = match signer_nonce {
                 0 => system_db(),
                 nonce => system_db().account_nonce(deployment.signer, nonce),
@@ -600,15 +642,10 @@ fn test_every_limit_stops_a_deployment_from_either_nonce_at_either_tier() {
                         MegaLimitExceeded { kind: kind.as_u8(), limit },
                         "{cell}"
                     );
-                    assert!(
-                        matches!(
-                            outcome.limit_exceeded,
-                            Some(LimitCheck::ExceedsLimit {
-                                kind: stopped, limit: at, frame_local: false, ..
-                            }) if stopped == kind && at == limit
-                        ),
-                        "{cell}: {:?}",
-                        outcome.limit_exceeded
+                    assert_eq!(
+                        outcome.limit_exceeded,
+                        Some(expected.check()),
+                        "{cell}: the constructor crosses"
                     );
                     assert_nothing_kept(outcome, &deployment, gas_limit, signer_nonce, &cell);
                     if kind == LimitKind::ComputeGas {
