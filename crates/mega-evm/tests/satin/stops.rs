@@ -409,6 +409,63 @@ fn limits_of(limit: Limit, crossing: usize, slot: u64) -> (EvmTxRuntimeLimits, O
     }
 }
 
+/* ---------- a detained callee does not burn its callers' gas ---------- */
+
+/// A callee at `depth` that reads the block's timestamp and then computes past the cap, below
+/// callers that forward it all their gas and would write [`MARKER`] once it returned.
+fn detained_callee_at(depth: usize) -> MemoryDatabase {
+    let callee = work(log(BytecodeBuilder::default()).append_many([TIMESTAMP, POP]), ROUNDS);
+    let callee = callee.sstore(MARKER, U256::from(1)).stop().build();
+    (0..depth)
+        .fold(MemoryDatabase::default(), |db, caller| {
+            let code = call_all(BytecodeBuilder::default(), CHAIN[caller + 1]).append(POP);
+            db.account_code(CHAIN[caller], code.sstore(MARKER, U256::from(1)).stop().build())
+        })
+        .account_code(CHAIN[depth], callee)
+}
+
+/// A callee that reads the block's timestamp and then computes past the cap does not make its
+/// callers burn their gas: the stop bills the transaction its intrinsic gas plus the limit the read
+/// set — its compute at the read plus the cap — and nothing of what the callers held, whatever the
+/// gas limit, one call down or three, below the execution cap and above it.
+#[test]
+fn test_a_callee_that_reads_the_timestamp_does_not_make_its_callers_burn_their_gas() {
+    for depth in [1, 3] {
+        let bills: Vec<_> = [BELOW, ABOVE, 1_000_000_000]
+            .into_iter()
+            .map(|gas_limit| {
+                let case = format!("depth {depth}, gas limit {gas_limit}");
+                let intrinsic = intrinsic(gas_limit);
+                let mut evm = MegaEvm::new(context(detained_callee_at(depth)));
+                let outcome =
+                    evm.execute_transaction(call(CALLER, A, U256::ZERO, gas_limit)).unwrap();
+                let limit = evm.ctx().detention().compute_limit().expect("the read set a limit");
+                let stop = LimitCheck::ExceedsLimit {
+                    kind: LimitKind::ComputeGas,
+                    limit,
+                    used: limit,
+                    frame_local: false,
+                };
+                assert_eq!(outcome.result.output(), Some(&stop.revert_data()), "{case}");
+                assert!(!outcome.result.is_halt(), "{case}");
+                assert_eq!(outcome.limit_exceeded, Some(stop), "{case}");
+                // The read came after the callers' calls and the callee's log: its compute then is
+                // theirs alone, a sliver of the cap.
+                assert!(limit - CAP < 50_000, "{case}: compute at the read {}", limit - CAP);
+                assert_eq!(outcome.gas.regular, intrinsic.gas.regular + limit, "{case}");
+                assert_eq!(outcome.gas.gas_used, intrinsic.gas.gas_used + limit, "{case}");
+                assert_eq!(
+                    outcome.gas.reservoir_remaining, intrinsic.gas.reservoir_remaining,
+                    "{case}: the reservoir comes back"
+                );
+                assert!(outcome.result.logs().is_empty(), "{case}");
+                (outcome.gas.gas_used, outcome.gas.regular, outcome.gas.state, outcome.gas.history)
+            })
+            .collect();
+        assert!(bills.windows(2).all(|pair| pair[0] == pair[1]), "depth {depth}: {bills:?}");
+    }
+}
+
 /* ---------- frame budgets ---------- */
 
 /// The slot a frame stores its call's status in.
