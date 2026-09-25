@@ -31,6 +31,7 @@ mod schedule;
 mod state;
 mod state_gas_limit;
 mod static_callee;
+mod stops;
 mod storage_call_stipend;
 mod strategic_stop;
 mod synthetic_frame_gas;
