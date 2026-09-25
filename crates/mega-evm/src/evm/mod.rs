@@ -344,6 +344,32 @@ where
 {
 }
 
+/// The transaction a system call runs, on the gas limit its caller names.
+trait SystemCallTxWithGasLimit: SystemCallTx {
+    /// revm's system-call transaction from `caller` to `contract` with `data`
+    /// ([`SystemCallTx::new_system_tx_with_caller`]), on `gas_limit` instead of revm's
+    /// [`SYSTEM_CALL_GAS_LIMIT`](revm::handler::SYSTEM_CALL_GAS_LIMIT).
+    fn new_system_tx_with_gas_limit(
+        caller: Address,
+        contract: Address,
+        data: Bytes,
+        gas_limit: u64,
+    ) -> Self;
+}
+
+impl SystemCallTxWithGasLimit for MegaTransaction {
+    fn new_system_tx_with_gas_limit(
+        caller: Address,
+        contract: Address,
+        data: Bytes,
+        gas_limit: u64,
+    ) -> Self {
+        let mut tx = Self::new_system_tx_with_caller(caller, contract, data);
+        tx.0.base.gas_limit = gas_limit;
+        tx
+    }
+}
+
 impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> SystemCallEvm for MegaEvm<DB, INSP, ExtEnvs> {
     fn system_call_one_with_caller(
         &mut self,
@@ -378,8 +404,7 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
         data: Bytes,
         gas_limit: u64,
     ) -> Result<ResultAndState<OpHaltReason>, EVMError<DB::Error, MegaTransactionError>> {
-        let mut tx = MegaTransaction::new_system_tx_with_caller(caller, contract, data);
-        tx.0.base.gas_limit = gas_limit;
+        let tx = MegaTransaction::new_system_tx_with_gas_limit(caller, contract, data, gas_limit);
         let result = self.run_system_call(tx).map_err(map_op_err)?;
         Ok(ResultAndState::new(result, ExecuteEvm::finalize(self)))
     }
