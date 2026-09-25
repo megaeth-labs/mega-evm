@@ -761,3 +761,126 @@ fn test_a_failed_keyless_transaction_leaves_nothing_for_the_next() {
         assert_eq!(outcome.usage.write_records, 0, "no record of the deployment is left over");
     }
 }
+
+/* ---------- EIP-7708 transfer logs ---------- */
+
+/// Counts the logs an inspector is told of.
+#[derive(Default)]
+struct LogCounter(usize);
+
+impl<DB: Database> revm::Inspector<MegaContext<DB>, revm::interpreter::interpreter::EthInterpreter>
+    for LogCounter
+{
+    fn log(&mut self, _: &mut MegaContext<DB>, _: alloy_primitives::Log) {
+        self.0 += 1;
+    }
+}
+
+/// A deployment carrying value moves it from the signer to the created account at the creation's
+/// start, and revm journals the EIP-7708 transfer log of the move, which the receipt carries and
+/// an inspector is told of once. The `keylessDeploy` call itself carries none. The log is data
+/// size and nothing else: next to the same deployment without value, each against a transaction
+/// carrying its calldata and nothing else, it counts 160 bytes more and the same records, history
+/// gas and history bytes.
+#[test]
+fn test_a_deployment_carrying_value_logs_the_move() {
+    let with_value = Deployment::with_value(deploying(&runtime(1)), U256::from(7_777));
+    let without = Deployment::new(deploying(&runtime(1)));
+    for gas_limit in GAS_LIMITS {
+        let moved = deploy(db_for(&with_value, U256::from(10_000)), &with_value, gas_limit);
+        assert_eq!(returned(&moved).deployedAddress, with_value.address);
+        let transfer = mega_evm::test_utils::transfer_log(
+            with_value.signer,
+            with_value.address,
+            U256::from(7_777),
+        );
+        assert_eq!(moved.result.logs(), [transfer], "at {gas_limit}");
+
+        let still = deploy(db_for(&without, U256::ZERO), &without, gas_limit);
+        assert!(still.result.logs().is_empty());
+        let beyond_reference = |outcome: &MegaTransactionOutcome, deployment: &Deployment| {
+            let reference = reference(deployment.call_data(LARGE_OVERRIDE), gas_limit);
+            (
+                outcome.usage.data_size - reference.usage.data_size,
+                outcome.usage.write_records,
+                beyond(outcome, &reference)[3..].to_vec(),
+            )
+        };
+        let (moved_bytes, moved_records, moved_history) = beyond_reference(&moved, &with_value);
+        let (still_bytes, still_records, still_history) = beyond_reference(&still, &without);
+        assert_eq!(moved_bytes, still_bytes + 160, "the transfer log's bytes, at {gas_limit}");
+        assert_eq!((moved_records, moved_history), (still_records, still_history));
+
+        let mut evm = MegaEvm::new(context(db_for(&with_value, U256::from(10_000))))
+            .with_inspector(LogCounter::default());
+        let mut tx =
+            call_tx(KEYLESS_DEPLOY_ADDRESS, with_value.call_data(LARGE_OVERRIDE), U256::ZERO);
+        tx.0.base.gas_limit = gas_limit;
+        let inspected = evm.execute_transaction(tx).expect("the transaction is valid");
+        assert_eq!(inspected.result, moved.result, "inspected as plain");
+        assert_eq!(evm.inspector().0, 1, "the inspector is told of the log once");
+    }
+}
+
+/// A `keylessDeploy` call carrying value is refused before anything moves: it logs nothing and
+/// counts what a transaction carrying the same calldata to an account with no code counts, its
+/// body alone.
+#[test]
+fn test_a_call_carrying_value_moves_and_logs_nothing() {
+    let deployment = Deployment::new(deploying(&runtime(1)));
+    for gas_limit in GAS_LIMITS {
+        let mut tx =
+            call_tx(KEYLESS_DEPLOY_ADDRESS, deployment.call_data(LARGE_OVERRIDE), U256::from(1));
+        tx.0.base.gas_limit = gas_limit;
+        let refused = MegaEvm::new(context(system_db()))
+            .execute_transaction(tx)
+            .expect("a valid transaction");
+        assert_eq!(refusal(&refused), KeylessDeployError::NoEtherTransfer);
+        assert!(refused.result.logs().is_empty());
+        let reference = reference(deployment.call_data(LARGE_OVERRIDE), gas_limit);
+        assert_eq!(refused.usage, reference.usage, "the body alone, at {gas_limit}");
+    }
+}
+
+/// The transfer log is counted with the creation's start, before revm builds the creation and
+/// moves the value: a creation whose budget holds its two records and not the log is stopped at
+/// its start, alone, with the value unmoved and no log journaled — the debug build's check of
+/// every frame start holds it to exactly that. The same deployment without value deploys under
+/// the same limit.
+#[test]
+fn test_a_creation_is_stopped_on_its_transfer_log_before_the_value_moves() {
+    let with_value = Deployment::with_value(deploying(&runtime(1)), U256::from(7_777));
+    let without = Deployment::new(deploying(&runtime(1)));
+    // The creation gets 98% of what the call leaves: 235 bytes, room for its records' 80 and
+    // its byte of code, not for the log's 160 on top of the records.
+    let limits = |deployment: &Deployment, gas_limit| {
+        let body = reference(deployment.call_data(LARGE_OVERRIDE), gas_limit).usage.data_size;
+        EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(body + 240)
+    };
+    for gas_limit in GAS_LIMITS {
+        let stopped = run_with(
+            db_for(&with_value, U256::from(10_000)),
+            with_value.call_data(LARGE_OVERRIDE),
+            gas_limit,
+            limits(&with_value, gas_limit),
+        );
+        let KeylessDeployError::ExecutionReverted { output, .. } = failure(&stopped) else {
+            panic!("the creation was not stopped: {:?}", stopped.result);
+        };
+        let stop = mega_evm::MegaLimitExceeded::abi_decode(&output).expect("a limit stop");
+        assert_eq!(stop.kind, mega_evm::LimitKind::DataSize.as_u8(), "at {gas_limit}");
+        assert!(stopped.result.logs().is_empty(), "no log is journaled");
+        let balance = |address| stopped.state.get(&address).map(|account| account.info.balance);
+        assert_eq!(balance(with_value.signer), Some(U256::from(10_000)), "the value is unmoved");
+        assert!(balance(with_value.address).is_none_or(|balance| balance.is_zero()));
+        assert_eq!(nonce(&stopped, with_value.signer), 1, "a stopped creation spends the nonce");
+
+        let deployed = run_with(
+            db_for(&without, U256::ZERO),
+            without.call_data(LARGE_OVERRIDE),
+            gas_limit,
+            limits(&without, gas_limit),
+        );
+        assert_eq!(returned(&deployed).deployedAddress, without.address, "at {gas_limit}");
+    }
+}

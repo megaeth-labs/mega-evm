@@ -450,3 +450,70 @@ fn test_a_deployment_is_counted_but_not_stopped_under_the_exemption() {
 }
 
 use revm::primitives::KECCAK_EMPTY;
+
+/// Runs a `keylessDeploy` of `deployment` over `db` at `gas_limit` under `limits`, with the
+/// signer's SALT bucket at `m_signer` times the minimum and the deploy address's at `m_address`.
+fn crowded_run(
+    db: MemoryDatabase,
+    deployment: &Deployment,
+    gas_limit: u64,
+    limits: EvmTxRuntimeLimits,
+    (m_signer, m_address): (u64, u64),
+) -> Outcome {
+    let envs = crowded(TestExternalEnvs::new(), deployment.signer, m_signer);
+    let envs = crowded(envs, deployment.address, m_address);
+    let context = MegaContext::<_, TestExternalEnvs<String>>::new_with_external_envs(
+        db,
+        MegaSpecId::SATIN,
+        ExternalEnvs { salt_env: envs.clone(), oracle_env: envs },
+    )
+    .with_block(block())
+    .with_chain(mega_evm::test_utils::zero_fee_l1_block_info())
+    .with_tx_runtime_limits(limits);
+    let mut tx = call_tx(KEYLESS_DEPLOY_ADDRESS, deployment.call_data(LARGE_OVERRIDE), U256::ZERO);
+    tx.0.base.gas_limit = gas_limit;
+    MegaEvm::new(context).execute_transaction(tx).expect("the transaction is valid")
+}
+
+/// The state-gas limit holds each upfront charge of a deployment once, at the price its bucket
+/// sets: the signer's account the call pays for, and the created account the creation's start
+/// holds, as the frame-start hold holds any `CREATE`'s. With the signer's bucket at twice the
+/// minimum and the deploy address's at four times, a deployment holds `2 ×` the new account, `4 ×`
+/// the created account and `4 ×` its deposited byte. A limit of exactly that deploys, as without a
+/// limit; one gas less stops the transaction. A signer that has an account pays for none, and the
+/// limit that holds the rest deploys it.
+#[test]
+fn test_the_upfront_charges_are_held_once_at_their_bucket_prices() {
+    let deployment = Deployment::new(deploying(&runtime(1)));
+    assert_ne!(bucket(deployment.signer), bucket(deployment.address));
+    let created = entry(GasId::create_state_gas()) + satin_gas_params().code_deposit_state_gas(1);
+    let held = 2 * entry(GasId::new_account_state_gas()) + 4 * created;
+    let limited = |db: MemoryDatabase, gas_limit, limit| {
+        let limits = EvmTxRuntimeLimits::no_limits().with_tx_state_gas_limit(limit);
+        crowded_run(db, &deployment, gas_limit, limits, (2, 4))
+    };
+    for gas_limit in GAS_LIMITS {
+        let unlimited = crowded_run(
+            system_db(),
+            &deployment,
+            gas_limit,
+            EvmTxRuntimeLimits::no_limits(),
+            (2, 4),
+        );
+        assert_eq!(unlimited.gas.state, held, "at {gas_limit}");
+
+        let exact = limited(system_db(), gas_limit, held);
+        assert_eq!(returned(&exact).deployedAddress, deployment.address, "at {gas_limit}");
+        assert_eq!(exact.gas, unlimited.gas);
+        let short = limited(system_db(), gas_limit, held - 1);
+        assert_eq!(stop(&short), MegaLimitExceeded { kind: 3, limit: held - 1 });
+        assert_stopped_whole(&short, &deployment, gas_limit);
+
+        let funded = db_for(&deployment, U256::from(1));
+        let exact = limited(funded.clone(), gas_limit, 4 * created);
+        assert_eq!(returned(&exact).deployedAddress, deployment.address, "at {gas_limit}");
+        assert_eq!(exact.gas.state, 4 * created);
+        let short = limited(funded, gas_limit, 4 * created - 1);
+        assert_eq!(stop(&short), MegaLimitExceeded { kind: 3, limit: 4 * created - 1 });
+    }
+}
