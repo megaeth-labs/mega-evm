@@ -3,8 +3,10 @@
 //!
 //! The registry is deployed before every block. After the deploy, the executor reads whether a
 //! role change is due in the block and, when one is, makes the `applyPendingChanges()` system
-//! call; then it reads the system address the block's system-address transactions must come
-//! from. Each step's state reaches the pre-block observer before it is committed.
+//! call. Each step's state reaches the pre-block observer before it is committed. The executor
+//! does not read the system address: a transaction of the system shape reads it out of the
+//! registry when it is validated, so every EVM — the block's, or one a node builds outside block
+//! execution — promotes the address the state names.
 
 use std::sync::{Arc, Mutex};
 
@@ -32,6 +34,9 @@ use mega_evm::{
 use revm::{database::State, inspector::NoOpInspector, state::EvmState, Database};
 
 use crate::common::{self, pre_block_states, PreBlockLog, BLOCK_NUMBER};
+
+/// The outcome of a transaction the tests run.
+type Outcome = mega_evm::MegaBlockTxResult<mega_evm::MegaTxType>;
 
 /// The system address a pending change rotates to.
 const NEXT_SYSTEM_ADDRESS: Address = address!("0x3000000000000000000000000000000000000003");
@@ -136,7 +141,7 @@ fn record(executor: &mut Executor<'_>) -> PreBlockLog {
 }
 
 /// The registry's own steps the observer received, in order: the deploy of it, the read of its
-/// pending changes, the call that applies them and the read of the system address.
+/// pending changes and the call that applies them.
 fn registry_steps(log: &PreBlockLog) -> Vec<(PreBlockStateSource, EvmState)> {
     pre_block_states(log)
         .into_iter()
@@ -145,8 +150,7 @@ fn registry_steps(log: &PreBlockLog) -> Vec<(PreBlockStateSource, EvmState)> {
                 source,
                 PreBlockStateSource::SystemContract(SEQUENCER_REGISTRY_ADDRESS) |
                     PreBlockStateSource::PendingChanges |
-                    PreBlockStateSource::ApplyPendingChanges |
-                    PreBlockStateSource::SystemAddress
+                    PreBlockStateSource::ApplyPendingChanges
             )
         })
         .collect()
@@ -162,22 +166,7 @@ fn start_block(
     let mut executor = executor(state, envs, gas_limit);
     let log = record(&mut executor);
     executor.apply_pre_execution_changes().expect("the block starts");
-    assert_eq!(
-        executor.evm().ctx().system_address(),
-        Address::from_word(slot_of(&registry_steps(&log), CURRENT_SYSTEM_ADDRESS).into()),
-        "the EVM holds the system address the registry read found",
-    );
     registry_steps(&log)
-}
-
-/// The value the last registry step read or wrote for `slot`.
-fn slot_of(steps: &[(PreBlockStateSource, EvmState)], slot: U256) -> U256 {
-    steps
-        .iter()
-        .rev()
-        .find_map(|(_, state)| state.get(&SEQUENCER_REGISTRY_ADDRESS)?.storage.get(&slot))
-        .map(|slot| slot.present_value())
-        .expect("a registry step touched the slot")
 }
 
 /// The registry's `slot`, as the block left it.
@@ -206,7 +195,6 @@ fn test_a_due_change_is_applied_under_a_crowded_bucket() {
             PreBlockStateSource::SystemContract(SEQUENCER_REGISTRY_ADDRESS),
             PreBlockStateSource::PendingChanges,
             PreBlockStateSource::ApplyPendingChanges,
-            PreBlockStateSource::SystemAddress,
         ]
     );
     assert_eq!(envs.total_bucket_queries(), 0, "no pre-block step read a capacity");
@@ -228,7 +216,6 @@ fn test_a_block_with_nothing_due_makes_no_call() {
             [
                 PreBlockStateSource::SystemContract(SEQUENCER_REGISTRY_ADDRESS),
                 PreBlockStateSource::PendingChanges,
-                PreBlockStateSource::SystemAddress,
             ]
         );
         let registry = &steps[1].1[&SEQUENCER_REGISTRY_ADDRESS];
@@ -280,8 +267,10 @@ fn chain_seeding_genesis_system_address() -> MegaHardforkConfig {
 }
 
 /// A legacy call from `sender` to the Oracle's `getSlot(0)`: a system-address transaction when
-/// `sender` is the block's system address, an ordinary one otherwise. It carries a gas price, so
-/// an ordinary one needs a balance its sender does not have here.
+/// `sender` is the system address the registry names, an ordinary one otherwise. It carries a
+/// gas price, so an ordinary one needs a balance its sender does not have here. `getSlot` does not
+/// read the registry itself, so what the transaction's state holds of the registry is what its
+/// validation read.
 fn oracle_call_from(sender: Address, nonce: u64) -> Recovered<MegaTxEnvelope> {
     let input = IOracle::getSlotCall { slot: U256::ZERO }.abi_encode();
     Recovered::new_unchecked(
@@ -299,31 +288,45 @@ fn registry_call_from(sender: Address, input: Vec<u8>) -> Recovered<MegaTxEnvelo
 }
 
 /// Asserts `sender` is the block's system address: its Oracle call runs as the protocol's own
-/// transaction, with no fee and no history gas, from an account holding nothing.
-fn assert_is_the_system_address(executor: &mut Executor<'_>, sender: Address) {
-    assert_eq!(executor.evm().ctx().system_address(), sender);
+/// transaction, with no fee and no history gas, from an account holding nothing. Answers the
+/// outcome, not committed.
+fn assert_is_the_system_address(executor: &mut Executor<'_>, sender: Address) -> Outcome {
     let outcome = executor
         .run_transaction(&oracle_call_from(sender, 0))
         .expect("a system-address transaction is accepted without a balance");
     assert!(outcome.result.is_success(), "{:?}", outcome.result);
     assert_eq!(outcome.gas.history, 0, "the protocol's own transaction pays no history");
+    assert!(executor.evm().ctx().is_system_originated(), "it is the protocol's own transaction");
+    outcome
 }
 
 /// Asserts `sender` is not the block's system address: the same call is an ordinary transaction
 /// from an account that cannot pay its fee.
 fn assert_is_not_the_system_address(executor: &mut Executor<'_>, sender: Address) {
-    assert_ne!(executor.evm().ctx().system_address(), sender);
     let err = executor
         .run_transaction(&oracle_call_from(sender, 0))
         .expect_err("an ordinary transaction from an empty account is refused");
     assert!(err.to_string().contains("lack of funds"), "{err}");
 }
 
-/// A fresh chain's first block deploys the registry and reads the system address its schedule
-/// seeded it with: the registry's, not the engine's default. The read reaches the observer as a
-/// read-only entry of the one slot.
+/// Asserts `state` holds what a system-address transaction's validation read: the registry's
+/// account, untouched, with the one slot naming `system_address`, unchanged.
+fn assert_carries_the_system_address_read(state: &EvmState, system_address: Address) {
+    let registry = &state[&SEQUENCER_REGISTRY_ADDRESS];
+    assert!(!registry.is_touched(), "a read-only entry");
+    assert_eq!(registry.info.code_hash, SEQUENCER_REGISTRY_CODE_HASH);
+    assert_eq!(registry.storage.len(), 1, "exactly the one slot read");
+    let slot = &registry.storage[&CURRENT_SYSTEM_ADDRESS];
+    assert!(!slot.is_changed());
+    assert_eq!(slot.present_value(), word(system_address));
+}
+
+/// A fresh chain's first block deploys the registry seeded with the system address its schedule
+/// names, and that address is the system address from the block's first transaction: the
+/// registry's, not the engine's default. No pre-block step reads it; the system-address
+/// transaction does, and its state carries the read.
 #[test]
-fn test_bootstrap_block_resolves_system_address() {
+fn test_the_bootstrap_block_promotes_the_seeded_system_address() {
     let mut state = common::state();
     let mut executor = executor_on(
         &mut state,
@@ -333,19 +336,17 @@ fn test_bootstrap_block_resolves_system_address() {
     );
     let log = record(&mut executor);
     executor.apply_pre_execution_changes().expect("the block starts");
-    assert_eq!(executor.evm().ctx().system_address(), GENESIS_SYSTEM_ADDRESS);
-
-    let steps = registry_steps(&log);
-    let (source, read) = steps.last().expect("the read reached the observer");
-    assert_eq!(*source, PreBlockStateSource::SystemAddress);
-    let registry = &read[&SEQUENCER_REGISTRY_ADDRESS];
-    assert!(!registry.is_touched(), "a read-only entry");
-    assert_eq!(registry.storage.len(), 1);
+    let sources = sources(&registry_steps(&log));
     assert_eq!(
-        registry.storage[&CURRENT_SYSTEM_ADDRESS].present_value(),
-        word(GENESIS_SYSTEM_ADDRESS)
+        sources,
+        [
+            PreBlockStateSource::SystemContract(SEQUENCER_REGISTRY_ADDRESS),
+            PreBlockStateSource::PendingChanges,
+        ]
     );
-    assert_eq!(registry.info.code_hash, SEQUENCER_REGISTRY_CODE_HASH, "the deployed code");
+    let outcome = assert_is_the_system_address(&mut executor, GENESIS_SYSTEM_ADDRESS);
+    assert_carries_the_system_address_read(&outcome.inner.state, GENESIS_SYSTEM_ADDRESS);
+    assert_is_not_the_system_address(&mut executor, MEGA_SYSTEM_ADDRESS);
     drop(executor);
 
     // The registry is the one this engine ships, seeded with the schedule's roles and delay.
@@ -353,17 +354,41 @@ fn test_bootstrap_block_resolves_system_address() {
         state.basic(SEQUENCER_REGISTRY_ADDRESS).unwrap().unwrap().code_hash,
         SEQUENCER_REGISTRY_CODE_HASH,
     );
+    assert_eq!(slot(&mut state, CURRENT_SYSTEM_ADDRESS), word(GENESIS_SYSTEM_ADDRESS));
     assert_eq!(
         slot(&mut state, MIN_ROTATION_DELAY),
         U256::from(common::registry_config().min_rotation_delay)
     );
     assert_eq!(slot(&mut state, CURRENT_SEQUENCER), word(common::SEQUENCER));
 
-    // The default schedule seeds the engine's default address, and the read finds it.
+    // The default schedule seeds the engine's default address, and it is the system address.
     let mut state = common::state();
     let mut default = self::executor(&mut state, envs_at(1), common::BLOCK_GAS_LIMIT);
     default.apply_pre_execution_changes().expect("the block starts");
-    assert_eq!(default.evm().ctx().system_address(), MEGA_SYSTEM_ADDRESS);
+    assert_is_the_system_address(&mut default, MEGA_SYSTEM_ADDRESS);
+}
+
+/// Once the registry is in place, no pre-block step carries the system address's slot: the
+/// deploy leaves the registry as a read-only entry without storage, and the read of the pending
+/// changes reads the pending slots alone. The slot is in the system-address transaction's own
+/// state instead, read-only and cold, as its validation read it.
+#[test]
+fn test_the_slot_is_in_the_system_transactions_state_not_the_pre_block_witness() {
+    let mut state = State::builder().with_database(registry_with(&[])).build();
+    let mut executor = executor(&mut state, envs_at(1), common::BLOCK_GAS_LIMIT);
+    let log = record(&mut executor);
+    executor.apply_pre_execution_changes().expect("the block starts");
+    for (source, state) in pre_block_states(&log) {
+        let slot = state
+            .get(&SEQUENCER_REGISTRY_ADDRESS)
+            .and_then(|registry| registry.storage.get(&CURRENT_SYSTEM_ADDRESS));
+        assert!(slot.is_none(), "{source:?} carries the system address's slot");
+    }
+
+    let outcome = assert_is_the_system_address(&mut executor, MEGA_SYSTEM_ADDRESS);
+    assert_carries_the_system_address_read(&outcome.inner.state, MEGA_SYSTEM_ADDRESS);
+    let registry = &outcome.inner.state[&SEQUENCER_REGISTRY_ADDRESS];
+    assert!(registry.storage[&CURRENT_SYSTEM_ADDRESS].is_cold, "the read left the slot cold");
 }
 
 /// A system-address transaction is recognised by the address read out of the registry: from it,
@@ -395,11 +420,34 @@ fn test_system_address_change() {
     assert_is_not_the_system_address(&mut executor, MEGA_SYSTEM_ADDRESS);
 }
 
+/// A rotation governs every block from its activation block on, and no block before it: the
+/// block before promotes the old address and not the new one, the activation block and the block
+/// after it the new one and not the old.
+#[test]
+fn test_a_rotation_governs_the_blocks_from_its_activation_block() {
+    let activation = BLOCK_NUMBER + 1;
+    let mut state =
+        State::builder().with_database(registry_with(&system_address_change(activation))).build();
+
+    let mut before = started_block_at(&mut state, activation - 1);
+    assert_is_the_system_address(&mut before, MEGA_SYSTEM_ADDRESS);
+    assert_is_not_the_system_address(&mut before, NEXT_SYSTEM_ADDRESS);
+    drop(before);
+
+    for number in [activation, activation + 1] {
+        let mut block = started_block_at(&mut state, number);
+        let outcome = assert_is_the_system_address(&mut block, NEXT_SYSTEM_ADDRESS);
+        assert_carries_the_system_address_read(&outcome.inner.state, NEXT_SYSTEM_ADDRESS);
+        assert_is_not_the_system_address(&mut block, MEGA_SYSTEM_ADDRESS);
+    }
+    assert_eq!(slot(&mut state, PENDING_SYSTEM_ADDRESS), U256::ZERO, "applied once");
+}
+
 /// An EVM a node builds outside block execution, over the state these tests run on.
 type OutsideEvm<'a> = MegaEvm<&'a mut State<MemoryDatabase>, NoOpInspector, Envs>;
 
 /// A context over `state` for the block [`executor`] runs, as a node builds one outside block
-/// execution: no block is started on it, so it reads no registry.
+/// execution: no block is started on it and nothing tells it the system address.
 fn context_outside_block<'a>(
     state: &'a mut State<MemoryDatabase>,
     envs: &Envs,
@@ -411,13 +459,13 @@ fn context_outside_block<'a>(
 }
 
 /// An EVM a node builds outside block execution — for an RPC call, or to replay a block's
-/// transactions for a trace — reads no registry, so the node sets the address it read there
-/// itself. Given the rotated address, through the context's builder or the setter on a factory's
-/// EVM, it promotes that address's Oracle transaction exactly as the block executor does: the same
-/// result, state, gas and usage. Without it, it runs the transaction as an ordinary one, which the
-/// empty sender cannot pay for.
+/// transactions for a trace — starts no block and is told nothing, and on a state after a
+/// rotation it promotes the rotated address's Oracle transaction exactly as the block executor
+/// does: the same result, state, gas and usage, whether it was built from a context or by the
+/// factory. The address the rotation retired sends an ordinary transaction, which its empty
+/// account cannot pay for.
 #[test]
-fn test_a_context_built_with_the_rotated_address_promotes_as_the_block_does() {
+fn test_an_evm_outside_block_execution_promotes_the_rotated_address() {
     let envs = envs_at(1);
     let mut state =
         State::builder().with_database(registry_with(&system_address_change(BLOCK_NUMBER))).build();
@@ -425,14 +473,11 @@ fn test_a_context_built_with_the_rotated_address_promotes_as_the_block_does() {
 
     let mut executor = executor(&mut state, envs.clone(), common::BLOCK_GAS_LIMIT);
     executor.apply_pre_execution_changes().expect("the block starts");
-    let in_block = executor.run_transaction(&tx).expect("the block promotes it").inner;
+    let in_block = assert_is_the_system_address(&mut executor, NEXT_SYSTEM_ADDRESS).inner;
     drop(executor);
-    assert!(in_block.result.is_success(), "{:?}", in_block.result);
-    assert_eq!(in_block.gas.history, 0, "the protocol's own transaction pays no history");
 
     // The state now holds the rotation the block applied, as the one a node's EVM runs on does.
     let assert_as_in_block = |evm: &mut OutsideEvm<'_>| {
-        assert_eq!(evm.ctx().system_address(), NEXT_SYSTEM_ADDRESS);
         let outside = evm.execute_transaction(tx.to_tx_env()).expect("promoted");
         assert!(evm.ctx().is_system_originated(), "it is the protocol's own transaction");
         assert_eq!(outside.result, in_block.result);
@@ -440,22 +485,20 @@ fn test_a_context_built_with_the_rotated_address_promotes_as_the_block_does() {
         assert_eq!(outside.gas, in_block.gas);
         assert_eq!(outside.usage, in_block.usage);
         assert_eq!(outside.limit_exceeded, in_block.limit_exceeded);
-    };
-    assert_as_in_block(&mut MegaEvm::new(
-        context_outside_block(&mut state, &envs).with_system_address(NEXT_SYSTEM_ADDRESS),
-    ));
-    let mut evm = MegaEvmFactory::new()
-        .with_external_env_factory(envs.clone())
-        .create_evm(&mut state, common::evm_env());
-    evm.ctx_mut().set_system_address(NEXT_SYSTEM_ADDRESS);
-    assert_as_in_block(&mut evm);
 
-    let mut evm = MegaEvm::new(context_outside_block(&mut state, &envs));
-    assert_eq!(evm.ctx().system_address(), MEGA_SYSTEM_ADDRESS);
-    let err = evm
-        .execute_transaction(tx.to_tx_env())
-        .expect_err("an ordinary transaction from an empty account is refused");
-    assert!(err.to_string().contains("lack of funds"), "{err}");
+        let retired = oracle_call_from(MEGA_SYSTEM_ADDRESS, 0);
+        let err = evm
+            .execute_transaction(retired.to_tx_env())
+            .expect_err("an ordinary transaction from an empty account is refused");
+        assert!(err.to_string().contains("lack of funds"), "{err}");
+        assert!(!evm.ctx().is_system_originated());
+    };
+    assert_as_in_block(&mut MegaEvm::new(context_outside_block(&mut state, &envs)));
+    assert_as_in_block(
+        &mut MegaEvmFactory::new()
+            .with_external_env_factory(envs.clone())
+            .create_evm(&mut state, common::evm_env()),
+    );
 }
 
 /// A sequencer rotation leaves the system address as it was.

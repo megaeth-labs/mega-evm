@@ -11,8 +11,15 @@
 //! executor reads whether one is due ([`is_apply_pending_changes_due`]) and, when one is, calls
 //! `applyPendingChanges()` ([`transact_apply_pending_changes`]). The call is permissionless and
 //! applies only what is due, so a block that makes it applies the same changes whoever calls.
-//! Then it reads the live system address out of the registry ([`resolve_system_address`]), which
-//! the block's system-address transactions must come from.
+//!
+//! The live system address, which a system-address transaction must be sent from, is read out of
+//! the registry by the transaction itself, and only by a transaction that has the system shape
+//! ([`has_system_transaction_shape`](crate::system::has_system_transaction_shape)): validation
+//! reads `_currentSystemAddress` from the journal without warming it ([`inspect_system_address`])
+//! and compares it with the caller. Nothing inside a block can change the address after the
+//! pre-block call — a change can only be scheduled for a later block — so every transaction of a
+//! block reads the address the block's pre-block step left, and an EVM a node builds outside block
+//! execution reads the one in the state it runs on without being told.
 
 use alloy_evm::block::BlockExecutionError;
 use alloy_primitives::{address, Address, Bytes, U256};
@@ -26,7 +33,7 @@ use revm::{
 use super::MEGA_SYSTEM_ADDRESS;
 use crate::{
     transact_pre_block_call, ExternalEnvTypes, HardforkParams, HardforkParamsError,
-    MegaBlockExecutionError, MegaEvm, MegaHardfork,
+    JournalInspectTr, MegaBlockExecutionError, MegaEvm, MegaHardfork,
 };
 use storage_slots::{
     CURRENT_SYSTEM_ADDRESS, PENDING_SEQUENCER, PENDING_SYSTEM_ADDRESS, SEQUENCER_ACTIVATION_BLOCK,
@@ -204,43 +211,34 @@ where
     transact_pre_block_call(evm, "applyPendingChanges()", SEQUENCER_REGISTRY_ADDRESS, data, refused)
 }
 
-/// Reads the live system address out of the registry: the address a system-address transaction
-/// must be sent from in the block. Also answers the read, as a read-only entry of the registry's
-/// account, which the caller hands on as a witness.
+/// The live system address, read out of the registry in the running transaction's journal: the
+/// address a system-address transaction must be sent from.
 ///
-/// It is read once the block's pre-block changes are committed — the registry deployed and a due
-/// rotation applied — so a rotation takes effect at its activation block.
+/// `None` when the registry names no address this engine trusts: it has no account, it holds other
+/// code than [`SEQUENCER_REGISTRY_CODE`], or its `_currentSystemAddress` is zero. Block execution
+/// never leaves such a registry behind — the pre-block deploy puts this code there or refuses the
+/// block, and the contract writes no zero address — so these are states an EVM run outside block
+/// execution may meet, and in none of them is any transaction a system-address transaction.
+///
+/// The registry's account and the one slot are loaded cold and without the code: they are in the
+/// transaction's state, so a stateless witness carries the read, and the transaction's own access
+/// to either pays what it would have paid without it.
 ///
 /// # Errors
 ///
-/// The deploy before it guarantees what is checked here, so each of these is a state no Satin
-/// block leaves behind, and the block is refused rather than run against the wrong authority:
-/// [`MegaBlockExecutionError::MissingSequencerRegistry`] when the registry has no account,
-/// [`MegaBlockExecutionError::SequencerRegistryCodeMismatch`] when it holds other code than
-/// [`SEQUENCER_REGISTRY_CODE`], and [`MegaBlockExecutionError::ZeroSystemAddress`] when its
-/// `_currentSystemAddress` is zero. A database error is the database's.
-pub fn resolve_system_address<DB: alloy_evm::Database>(
-    db: &mut DB,
-) -> Result<(Address, EvmState), BlockExecutionError> {
-    let info = db
-        .basic(SEQUENCER_REGISTRY_ADDRESS)
-        .map_err(BlockExecutionError::other)?
-        .ok_or(MegaBlockExecutionError::MissingSequencerRegistry)?;
-    if info.code_hash != SEQUENCER_REGISTRY_CODE_HASH {
-        return Err(MegaBlockExecutionError::SequencerRegistryCodeMismatch {
-            expected: SEQUENCER_REGISTRY_CODE_HASH,
-            found: info.code_hash,
-        }
-        .into());
+/// The database's, when the account or the slot cannot be read.
+pub(crate) fn inspect_system_address<J: JournalInspectTr>(
+    journal: &mut J,
+) -> Result<Option<Address>, J::DBError> {
+    if journal.inspect_account_code_hash(SEQUENCER_REGISTRY_ADDRESS)? !=
+        SEQUENCER_REGISTRY_CODE_HASH
+    {
+        return Ok(None);
     }
-    let mut registry = Account::from(info);
-    let current =
-        read_slot(db, &mut registry, CURRENT_SYSTEM_ADDRESS).map_err(BlockExecutionError::other)?;
-    if current.is_zero() {
-        return Err(MegaBlockExecutionError::ZeroSystemAddress.into());
-    }
-    let address = Address::from_word(current.into());
-    Ok((address, EvmState::from_iter([(SEQUENCER_REGISTRY_ADDRESS, registry)])))
+    let current = journal
+        .inspect_storage(SEQUENCER_REGISTRY_ADDRESS, CURRENT_SYSTEM_ADDRESS)?
+        .present_value();
+    Ok((!current.is_zero()).then(|| Address::from_word(current.into())))
 }
 
 #[cfg(test)]
@@ -249,7 +247,7 @@ mod tests {
     use crate::{MegaContext, MegaSpecId};
     use alloy_primitives::address;
     use revm::{
-        context::{BlockEnv, ContextTr, Transaction},
+        context::{BlockEnv, ContextTr, JournalTr, Transaction},
         database::{InMemoryDB, State},
         handler::SYSTEM_CALL_REGULAR_GAS_LIMIT,
         state::{AccountInfo, Bytecode},
@@ -501,68 +499,86 @@ mod tests {
         db
     }
 
-    fn resolve(db: &mut InMemoryDB) -> Result<(Address, EvmState), BlockExecutionError> {
-        resolve_system_address(&mut State::builder().with_database(db).build())
+    /// Reads the live system address out of `db` through a fresh journal, and answers it with the
+    /// journal the read left behind.
+    fn inspect(db: InMemoryDB) -> (Option<Address>, revm::Journal<InMemoryDB>) {
+        let mut journal = revm::Journal::new(db);
+        let address = inspect_system_address(&mut journal).expect("the read succeeds");
+        (address, journal)
     }
 
-    /// A registry holding the code this engine deploys resolves to the address it stores.
+    /// A registry holding the code this engine deploys names the address it stores. The read
+    /// leaves the registry's account and the one slot it read in the journal, cold, untouched and
+    /// unchanged: a witness of the read, and nothing a later access would find warm.
     #[test]
-    fn test_resolve_expects_the_deployed_code_hash() {
-        let mut db = registry_holding(SEQUENCER_REGISTRY_CODE, Some(NEXT_SYSTEM_ADDRESS));
-        let (address, _) = resolve(&mut db).expect("the deployed registry resolves");
-        assert_eq!(address, NEXT_SYSTEM_ADDRESS);
-    }
+    fn test_inspect_answers_the_stored_system_address_and_warms_nothing() {
+        let db = registry_holding(SEQUENCER_REGISTRY_CODE, Some(NEXT_SYSTEM_ADDRESS));
+        let (address, journal) = inspect(db);
+        assert_eq!(address, Some(NEXT_SYSTEM_ADDRESS));
 
-    /// A registry still holding the legacy engine's first bytecode is not the one this engine
-    /// deploys, and the read refuses it.
-    #[test]
-    fn test_resolve_rejects_the_v1_code_hash() {
-        use mega_system_contracts::sequencer_registry::{V1_0_0_CODE, V1_0_0_CODE_HASH};
-        let mut db = registry_holding(V1_0_0_CODE, Some(NEXT_SYSTEM_ADDRESS));
-        let err = resolve(&mut db).expect_err("the v1 registry fails closed");
-        assert!(err.to_string().contains("code hash mismatch"), "{err}");
-        assert!(err.to_string().contains(&V1_0_0_CODE_HASH.to_string()), "{err}");
-    }
-
-    /// The read answers the stored address and a witness holding the registry's account and the
-    /// one slot it read, read-only.
-    #[test]
-    fn test_resolve_returns_stored_system_address_with_witness() {
-        let mut db = registry_holding(SEQUENCER_REGISTRY_CODE, Some(NEXT_SYSTEM_ADDRESS));
-        let (address, witness) = resolve(&mut db).unwrap();
-        assert_eq!(address, NEXT_SYSTEM_ADDRESS);
-
-        assert_eq!(witness.len(), 1);
-        let registry = &witness[&SEQUENCER_REGISTRY_ADDRESS];
+        let registry = &journal.inner.state[&SEQUENCER_REGISTRY_ADDRESS];
         assert_eq!(registry.info.code_hash, SEQUENCER_REGISTRY_CODE_HASH);
+        assert!(registry.is_cold_transaction_id(journal.transaction_id), "the account stays cold");
         assert!(!registry.is_touched(), "a read-only entry");
         assert_eq!(registry.storage.len(), 1, "exactly the one slot read");
         let slot = &registry.storage[&CURRENT_SYSTEM_ADDRESS];
+        assert!(slot.is_cold, "the slot stays cold");
         assert!(!slot.is_changed());
         assert_eq!(slot.present_value(), word(NEXT_SYSTEM_ADDRESS));
-        assert_eq!(slot.original_value(), slot.present_value());
+        assert!(journal.inner.journal.is_empty(), "the read leaves no journal entry");
     }
 
-    /// A registry whose system address is zero is refused.
+    /// A registry still holding the legacy engine's first bytecode is not the one this engine
+    /// deploys: it names no address, and its slot is not read.
     #[test]
-    fn test_resolve_zero_slot_errors() {
-        let mut db = registry_holding(SEQUENCER_REGISTRY_CODE, None);
-        let err = resolve(&mut db).expect_err("a zero system address fails closed");
-        assert!(err.to_string().contains("zero system address"), "{err}");
+    fn test_inspect_refuses_the_v1_code_hash() {
+        use mega_system_contracts::sequencer_registry::V1_0_0_CODE;
+        let (address, journal) = inspect(registry_holding(V1_0_0_CODE, Some(NEXT_SYSTEM_ADDRESS)));
+        assert_eq!(address, None);
+        assert!(journal.inner.state[&SEQUENCER_REGISTRY_ADDRESS].storage.is_empty());
     }
 
-    /// A registry with no account is refused.
+    /// A registry holding foreign code names no address, whatever it stores.
     #[test]
-    fn test_resolve_missing_registry_errors() {
-        let err = resolve(&mut InMemoryDB::default()).expect_err("no registry fails closed");
-        assert!(err.to_string().contains("does not exist"), "{err}");
+    fn test_inspect_refuses_foreign_code() {
+        let db = registry_holding(Bytes::from_static(&[0x60, 0x00]), Some(NEXT_SYSTEM_ADDRESS));
+        let (address, journal) = inspect(db);
+        assert_eq!(address, None);
+        assert!(journal.inner.state[&SEQUENCER_REGISTRY_ADDRESS].storage.is_empty());
     }
 
-    /// A registry holding foreign code is refused, whatever it stores.
+    /// A registry whose system address is zero names none: no caller, the zero address included,
+    /// is the system address of an empty registry.
     #[test]
-    fn test_resolve_wrong_code_hash_errors() {
-        let mut db = registry_holding(Bytes::from_static(&[0x60, 0x00]), Some(NEXT_SYSTEM_ADDRESS));
-        let err = resolve(&mut db).expect_err("foreign code fails closed");
-        assert!(err.to_string().contains("code hash mismatch"), "{err}");
+    fn test_inspect_answers_no_address_for_a_zero_slot() {
+        let (address, journal) = inspect(registry_holding(SEQUENCER_REGISTRY_CODE, None));
+        assert_eq!(address, None);
+        assert!(journal.inner.state[&SEQUENCER_REGISTRY_ADDRESS]
+            .storage
+            .contains_key(&CURRENT_SYSTEM_ADDRESS));
+    }
+
+    /// A state without the registry names no address, and the read records the account's
+    /// absence.
+    #[test]
+    fn test_inspect_answers_no_address_without_a_registry() {
+        let (address, journal) = inspect(InMemoryDB::default());
+        assert_eq!(address, None);
+        let registry = &journal.inner.state[&SEQUENCER_REGISTRY_ADDRESS];
+        assert!(registry.is_loaded_as_not_existing());
+        assert!(registry.storage.is_empty());
+    }
+
+    /// A read the database cannot serve is the database's error, not an absent address.
+    #[test]
+    fn test_inspect_reports_a_database_error() {
+        use crate::test_utils::{ErrorInjectingDatabase, MemoryDatabase};
+        let mut db = ErrorInjectingDatabase::new(
+            MemoryDatabase::default()
+                .account_code(SEQUENCER_REGISTRY_ADDRESS, SEQUENCER_REGISTRY_CODE),
+        );
+        db.fail_on_storage = Some((SEQUENCER_REGISTRY_ADDRESS, CURRENT_SYSTEM_ADDRESS));
+        let err = inspect_system_address(&mut revm::Journal::new(db)).expect_err("the read fails");
+        assert!(err.to_string().contains("injected storage() error"), "{err}");
     }
 }

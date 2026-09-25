@@ -295,7 +295,6 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> ExecuteEvm for MegaEvm<DB, I
 
     fn transact_one(&mut self, tx: Self::Tx) -> Result<Self::ExecutionResult, Self::Error> {
         self.inner.ctx.set_tx(tx);
-        self.inner.ctx.on_new_tx();
         MegaHandler::<_, Self::Error, _>::new().run(self)
     }
 
@@ -306,7 +305,6 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> ExecuteEvm for MegaEvm<DB, I
     fn replay(
         &mut self,
     ) -> Result<ExecResultAndState<Self::ExecutionResult, Self::State>, Self::Error> {
-        self.inner.ctx.on_new_tx();
         let result = MegaHandler::<_, Self::Error, _>::new().run(self)?;
         Ok(ExecResultAndState::new(result, self.finalize()))
     }
@@ -334,7 +332,6 @@ where
 
     fn inspect_one_tx(&mut self, tx: Self::Tx) -> Result<Self::ExecutionResult, Self::Error> {
         self.inner.ctx.set_tx(tx);
-        self.inner.ctx.on_new_tx();
         MegaHandler::<_, Self::Error, _>::new().inspect_run(self)
     }
 }

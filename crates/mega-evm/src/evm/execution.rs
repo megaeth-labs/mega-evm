@@ -10,6 +10,7 @@ use core::{cell::Cell, num::NonZeroU64};
 
 use op_revm::{
     handler::{IsTxError, OpHandler},
+    transaction::deposit::DEPOSIT_TRANSACTION_TYPE,
     OpHaltReason, OpTransactionError,
 };
 use std::{boxed::Box, vec::Vec};
@@ -49,10 +50,7 @@ use revm::{
 use crate::{
     evm::{history::transaction_body_bytes, inspector::frame_end_checked},
     history_gas, synthetic_frame_result,
-    system::{
-        is_deposit_like_transaction,
-        keyless::{self, Rewrite},
-    },
+    system::keyless::{self, Rewrite},
     write_record_history_gas, Detention, ExternalEnvTypes, JournalInspectTr, LimitCheck, LimitKind,
     MegaContext, MegaEvm, MegaInstructions, VolatileDataAccess,
 };
@@ -155,11 +153,23 @@ where
         Ok(Some(PreExecutionOutput { eip7702_refund, checkpoint }))
     }
 
-    /// Validates a transaction sent from the system address and promotes it to a deposit, then
-    /// validates the transaction as op-revm does — as a deposit, when it was promoted.
+    /// Decides whether the transaction is a system-address transaction and prepares the common
+    /// execution layer for it, then validates a system-address transaction and promotes it to a
+    /// deposit, then validates the transaction as op-revm does — as a deposit, when it was
+    /// promoted.
+    ///
+    /// This is the handler's first phase, so the layer is prepared before anything else of the
+    /// transaction runs, and a read the database cannot serve fails the transaction through the
+    /// handler's error path, which discards what the journal loaded. Only a transaction of the
+    /// system shape reads the live system address, from the journal and without warming it; every
+    /// other transaction pays the shape test, a comparison or two on its own fields.
     fn validate_env(&self, evm: &mut Self::Evm) -> Result<(), Self::Error> {
-        let system_address = evm.ctx_ref().system_address();
-        crate::system::validate_and_promote::<_, _, Self::Error>(evm.ctx_mut(), system_address)?;
+        let ctx = evm.ctx_mut();
+        let system_transaction = crate::system::is_live_system_transaction(ctx)?;
+        ctx.on_new_tx(system_transaction);
+        if system_transaction {
+            crate::system::validate_and_promote::<_, _, Self::Error>(ctx)?;
+        }
         self.op.validate_env(evm)
     }
 
@@ -1296,15 +1306,17 @@ fn unbuilt_first_frame<DB: Database, ExtEnvs: ExternalEnvTypes>(
 /// whose caller is empty, which the deposit path materialises by bumping its nonce or by minting
 /// to it.
 ///
-/// Read before op-revm deducts the caller, which is what materialises the account. Every other
-/// transaction pays a fee its caller must hold, so it has an account already.
+/// Read before op-revm deducts the caller, which is what materialises the account, and after
+/// [`validate_env`](Handler::validate_env), which promoted a system-address transaction: a
+/// deposit-like transaction is a deposit by then. Every other transaction pays a fee its caller
+/// must hold, so it has an account already.
 ///
 /// The read does not warm the account: the transaction's own touches of it pay what they would
 /// have paid without the check.
 fn deposit_creates_caller<DB: Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &mut MegaContext<DB, ExtEnvs>,
 ) -> Result<bool, DB::Error> {
-    if !is_deposit_like_transaction(ctx.tx(), ctx.system_address()) {
+    if ctx.tx().tx_type() != DEPOSIT_TRANSACTION_TYPE {
         return Ok(false);
     }
     let caller = ctx.tx().caller();

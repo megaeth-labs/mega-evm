@@ -52,16 +52,16 @@ fn deploy_sources() -> [PreBlockStateSource; SYSTEM_CONTRACT_DEPLOY_COUNT] {
 }
 
 /// The two EIP calls, the seven deploys, then the read of the registry's pending changes, which
-/// finds none due on these blocks, and the read of the system address.
+/// finds none due on these blocks. The live system address is not read before the block: a
+/// system-address transaction reads it itself.
 fn assert_pre_block_order(outcomes: &[(PreBlockStateSource, revm::state::EvmState)]) {
-    assert_eq!(outcomes.len(), 2 + SYSTEM_CONTRACT_DEPLOY_COUNT + 2);
+    assert_eq!(outcomes.len(), 2 + SYSTEM_CONTRACT_DEPLOY_COUNT + 1);
     assert_eq!(outcomes[0].0, PreBlockStateSource::Eip2935);
     assert_eq!(outcomes[1].0, PreBlockStateSource::Eip4788);
     for (i, source) in deploy_sources().iter().enumerate() {
         assert_eq!(outcomes[2 + i].0, *source);
     }
     assert_eq!(outcomes[2 + SYSTEM_CONTRACT_DEPLOY_COUNT].0, PreBlockStateSource::PendingChanges);
-    assert_eq!(outcomes[3 + SYSTEM_CONTRACT_DEPLOY_COUNT].0, PreBlockStateSource::SystemAddress);
 }
 
 fn assert_registry_account_seed(account: &Account, config: &SequencerRegistryConfig) {

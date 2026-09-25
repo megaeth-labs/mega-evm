@@ -18,7 +18,7 @@ use crate::{
         history::transaction_body_bytes,
         schedule::{satin_gas_params, satin_gas_params_history_exempt},
     },
-    system::{self, keyless::KeylessCall, MEGA_SYSTEM_ADDRESS},
+    system::{self, keyless::KeylessCall},
     AdditionalLimit, BlockHashRecord, BucketError, BucketMultipliers, Detention, EmptyExternalEnv,
     EthSpecId, EvmTxRuntimeLimits, ExternalEnvTypes, ExternalEnvs, MegaSpecId, MegaTransaction,
     SaltEnv, VolatileDataAccess,
@@ -54,13 +54,11 @@ pub struct MegaContext<DB: Database, ExtEnvs: ExternalEnvTypes = EmptyExternalEn
     pub(crate) block_hash_record: BlockHashRecord,
     /// The SALT bucket multipliers the running transaction has read.
     bucket_multipliers: BucketMultipliers,
-    /// Whether the running transaction is system-originated, and so prices its state gas at the
-    /// minimum bucket. See [`system::is_system_originated`].
+    /// Whether the running transaction is the protocol's own, decided when it is validated. See
+    /// [`MegaContext::is_system_originated`].
     system_originated: bool,
     /// Whether the running transaction pays history gas. See [`MegaContext::prices_history`].
     prices_history: bool,
-    /// The address system-address transactions come from. See [`MegaContext::system_address`].
-    system_address: Address,
     /// The `keylessDeploy` call the running transaction's creation runs under, from the rewrite
     /// that started the creation until the creation's result is settled into it. See the
     /// [`keyless`](crate::system::keyless) module.
@@ -96,7 +94,6 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
             bucket_multipliers: BucketMultipliers::default(),
             system_originated: false,
             prices_history: true,
-            system_address: MEGA_SYSTEM_ADDRESS,
             keyless_call: None,
             #[cfg(any(test, feature = "test-utils"))]
             neutral: false,
@@ -293,41 +290,15 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     }
 
     /// Whether the running (or last) transaction is system-originated, and so prices every
-    /// EIP-8037 state gas charge at the minimum bucket and is held to no per-transaction limit.
-    /// See [`system::is_system_originated`].
+    /// EIP-8037 state gas charge at the minimum bucket and is held to no per-transaction limit
+    /// (see [`system::is_system_originated`]). A system call always is.
+    ///
+    /// A transaction's answer is decided when it is validated: a system-address transaction is
+    /// recognised by the live system address its validation reads out of the `SequencerRegistry`
+    /// in the state the EVM runs on, so every EVM answers as block execution does, however it was
+    /// built.
     pub const fn is_system_originated(&self) -> bool {
         self.system_originated
-    }
-
-    /// The address a system-address transaction must be sent from: a legacy call from it to a
-    /// whitelisted contract is the protocol's own, promoted to a deposit (see the
-    /// [`system`](crate::system) module).
-    ///
-    /// Block execution reads it out of the `SequencerRegistry` before every block's transactions,
-    /// once a rotation due in the block has been applied, so it is the live one for the block. A
-    /// context no block has been started on uses [`MEGA_SYSTEM_ADDRESS`] unless its builder set
-    /// another ([`set_system_address`](Self::set_system_address)).
-    pub const fn system_address(&self) -> Address {
-        self.system_address
-    }
-
-    /// Sets the address system-address transactions come from, for every transaction from now
-    /// on.
-    ///
-    /// The block executor sets it itself, to the address it read out of the `SequencerRegistry`
-    /// before the block's transactions. An EVM a node builds outside block execution — an RPC
-    /// call, or the replay of a block's transactions for a trace — has no block to read it, so
-    /// the node reads the live address from the `SequencerRegistry` in the state the EVM runs on
-    /// and sets it here; otherwise, once the address has been rotated, that EVM runs the rotated
-    /// address's transactions as ordinary ones.
-    pub const fn set_system_address(&mut self, address: Address) {
-        self.system_address = address;
-    }
-
-    /// [`set_system_address`](Self::set_system_address), as a builder.
-    pub const fn with_system_address(mut self, address: Address) -> Self {
-        self.system_address = address;
-        self
     }
 
     /// Whether the running (or last) transaction pays history gas for the bytes it appends.
@@ -347,15 +318,17 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
         self.prices_history
     }
 
-    /// Prepares the common execution layer for a new transaction. Every transaction entry point
-    /// of [`MegaEvm`](crate::MegaEvm) calls it before it runs the handler.
-    pub(crate) fn on_new_tx(&mut self) {
-        let system_originated = system::is_system_originated(&self.inner.tx, self.system_address);
-        self.prepare(system_originated);
+    /// Prepares the common execution layer for a new transaction, which is a system-address
+    /// transaction or not as `system_transaction` says. The handler calls it first thing, once
+    /// validation has read the live system address for a transaction of the system shape, so the
+    /// layer is prepared before anything else of the transaction runs.
+    pub(crate) fn on_new_tx(&mut self, system_transaction: bool) {
+        self.prepare(system::originates_from_the_protocol(&self.inner.tx, system_transaction));
     }
 
     /// Prepares the context for a system call. Every system-call entry point of
-    /// [`MegaEvm`](crate::MegaEvm) calls it instead of [`on_new_tx`](Self::on_new_tx).
+    /// [`MegaEvm`](crate::MegaEvm) calls it before it runs the handler's system-call path, which
+    /// skips validation and so [`on_new_tx`](Self::on_new_tx).
     ///
     /// A system call is system-originated whatever caller it names: it is the protocol running,
     /// not a transaction anybody sent.
@@ -744,7 +717,7 @@ mod tests {
         assert_eq!(ctx.account_bucket_multiplier(ACCOUNT), Ok(4));
         assert_eq!(env.bucket_queries(bucket), 1, "the second charge came from the cache");
 
-        ctx.on_new_tx();
+        ctx.on_new_tx(false);
         assert_eq!(ctx.bucket_multipliers().cached_buckets().len(), 0);
         assert_eq!(ctx.account_bucket_multiplier(ACCOUNT), Ok(4));
         assert_eq!(env.bucket_queries(bucket), 2, "the next transaction read it again");
@@ -849,7 +822,7 @@ mod tests {
             MegaContext::new(EmptyDB::default(), MegaSpecId::SATIN).with_neutral_cfg(cfg.clone());
 
         ctx.set_tx(call_from(Address::repeat_byte(0x11)));
-        ctx.on_new_tx();
+        ctx.on_new_tx(false);
         assert!(!ctx.prices_history(), "a user's transaction pays no history");
         assert_cfg_is(&ctx, &cfg);
 
@@ -861,13 +834,13 @@ mod tests {
         deposit.0.deposit.source_hash = revm::primitives::B256::repeat_byte(1);
         deposit.0.base.tx_type = DEPOSIT_TRANSACTION_TYPE;
         ctx.set_tx(deposit);
-        ctx.on_new_tx();
+        ctx.on_new_tx(false);
         assert!(!ctx.prices_history());
         assert_cfg_is(&ctx, &cfg);
 
         // And back to a user's transaction, after an exempt one would have swapped the schedule.
         ctx.set_tx(call_from(Address::repeat_byte(0x11)));
-        ctx.on_new_tx();
+        ctx.on_new_tx(false);
         assert!(!ctx.prices_history());
         assert_cfg_is(&ctx, &cfg);
     }
@@ -883,7 +856,7 @@ mod tests {
         assert!(!ctx.is_neutral());
         assert_satin_cfg(&ctx);
         ctx.set_tx(call_from(Address::repeat_byte(0x11)));
-        ctx.on_new_tx();
+        ctx.on_new_tx(false);
         assert!(ctx.prices_history());
         assert_satin_cfg(&ctx);
     }
@@ -906,7 +879,7 @@ mod tests {
             let mut ctx =
                 MegaContext::new(EmptyDB::default(), MegaSpecId::SATIN).with_neutral_cfg(cfg);
             ctx.set_tx(call_from(Address::repeat_byte(0x11)));
-            ctx.on_new_tx();
+            ctx.on_new_tx(false);
             assert_eq!(
                 ctx.additional_limit.frame_start_transfer_log(&endowed_creation),
                 emits_transfer_logs(ctx.cfg()),
@@ -930,7 +903,7 @@ mod tests {
             cfg.amsterdam_eip7708_disabled = true;
         });
         ctx.set_tx(call_from(Address::repeat_byte(0x11)));
-        ctx.on_new_tx();
+        ctx.on_new_tx(false);
         assert!(ctx.additional_limit.frame_start_transfer_log(&endowed_creation));
     }
 
@@ -940,7 +913,7 @@ mod tests {
         let mut ctx = MegaContext::new(EmptyDB::default(), MegaSpecId::SATIN);
         assert!(!ctx.is_neutral());
         ctx.set_tx(call_from(Address::repeat_byte(0x11)));
-        ctx.on_new_tx();
+        ctx.on_new_tx(false);
         assert!(ctx.prices_history());
     }
 }

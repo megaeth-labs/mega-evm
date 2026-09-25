@@ -901,6 +901,7 @@ fn test_a_system_transactions_value_is_logged_and_no_limit_stops_it() {
         MemoryDatabase::default()
             .account_balance(MEGA_SYSTEM_ADDRESS, U256::from(VALUE))
             .account_code(ORACLE_CONTRACT_ADDRESS, Bytes::from_static(&[STOP]))
+            .sequencer_registry(MEGA_SYSTEM_ADDRESS)
     };
     let system = |value: u64| {
         OpTx(op_transaction(TxEnv {

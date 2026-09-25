@@ -349,7 +349,11 @@ fn test_the_system_address_is_not_detained() {
     let oracle = work(BytecodeBuilder::default().append_many([PUSH0, SLOAD, POP]), PAST_THE_CAP)
         .stop()
         .build();
-    let db = || MemoryDatabase::default().account_code(ORACLE_CONTRACT_ADDRESS, oracle.clone());
+    let db = || {
+        MemoryDatabase::default()
+            .account_code(ORACLE_CONTRACT_ADDRESS, oracle.clone())
+            .sequencer_registry(MEGA_SYSTEM_ADDRESS)
+    };
 
     let system = op_transaction(TxEnv {
         caller: MEGA_SYSTEM_ADDRESS,
