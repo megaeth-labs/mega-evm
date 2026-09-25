@@ -1,7 +1,7 @@
 # AGENTS.md
 
 ## OVERVIEW
-The six system contracts: their addresses and bytecode, the interceptor dispatch that answers calls to four of them, the system-address transaction, and the pre-block deploy of those six plus the EIP-7997 factory, and the `SequencerRegistry`'s pre-block steps: the due-change read, the `applyPendingChanges()` system call and the read of the live system address.
+The six system contracts: their addresses and bytecode, the interceptor dispatch that answers calls to four of them, the system-address transaction, and the pre-block deploy of those six plus the EIP-7997 factory, and the `SequencerRegistry`'s pre-block steps: the due-change read and the `applyPendingChanges()` system call. The live system address is read by a transaction of the system shape when it is validated, not before the block.
 
 ## STRUCTURE
 - `oracle.rs`: the Oracle's address, code and ABI, and the `sendHint` side effect. Its storage is read by the Host (`evm/host.rs`), through the oracle environment.
@@ -9,10 +9,10 @@ The six system contracts: their addresses and bytecode, the interceptor dispatch
 - `keyless/`: native keyless deployment. The `KeylessDeploy` address, code and ABI and the semantics of a deployment (`mod.rs`); the dispatch, the overhead, the nine rules, the charges of the creation's start and the rewrite into a creation (`dispatch.rs`); the settlement of the creation into its call and the ABI answer (`settle.rs`); the pre-EIP-155 transaction format and the error ABI (`tx.rs`, `error.rs`).
 - `control.rs`: `MegaAccessControl`'s address, code, ABI and revert payloads, `SLOT_NUM_ACCESS_TYPE`, and its interceptor, which steers gas detention's switch.
 - `limit_control.rs`: `MegaLimitControl`'s address, code, ABI and its interceptor, which answers the compute the calling frame could still spend.
-- `sequencer_registry.rs`: the `SequencerRegistry`'s address, code and ABI, the [`SequencerRegistryConfig`] that seeds it, and its three pre-block helpers — `is_apply_pending_changes_due` (the read-only due check and its witness), `transact_apply_pending_changes` (the system call on `pre_block_call_gas_limit`) and `resolve_system_address` (fail-closed read of `_currentSystemAddress`). No interceptor.
+- `sequencer_registry.rs`: the `SequencerRegistry`'s address, code and ABI, the [`SequencerRegistryConfig`] that seeds it, its two pre-block helpers — `is_apply_pending_changes_due` (the read-only due check and its witness) and `transact_apply_pending_changes` (the system call on `pre_block_call_gas_limit`) — and `inspect_system_address`, the journal read of `_currentSystemAddress` a system-shaped transaction makes (no address unless the registry holds this engine's code and a non-zero address). No interceptor.
 - `deploy.rs`: the declarative spec, `transact_deploy`, the EIP-7997 factory, and the list of seven predeploys.
 - `intercept.rs`: the dispatch — the address test, the selector peek, the value policy and the shape of an answer.
-- `tx.rs`: the system-address transaction, its whitelist and the validation that precedes its promotion to a deposit.
+- `tx.rs`: the system-address transaction, its whitelist and shape, the per-transaction decision (`is_live_system_transaction`) and the validation that precedes its promotion to a deposit.
 
 ## KEY PATTERNS
 - The dispatch order is: the scheme guard (`MegaEvm::intercept`), the address, the selector, then the method's value policy. Each step is cheaper than the next; the address test is one comparison against the shared `0x6342…` prefix and runs on every call a transaction makes.
@@ -29,8 +29,9 @@ The six system contracts: their addresses and bytecode, the interceptor dispatch
 - An interceptor that acts for its caller takes the caller as the frame one level above the frame the call would start (`depth - 1`). A transaction that calls a system contract directly has no calling frame: `MegaAccessControl` then switches nothing off, enables without refusal and answers `false`, and `remainingComputeGas()` answers the transaction's own frame's regular gas, or detention's cap when it is detained from its start (its sender is the block beneficiary).
 - `remainingComputeGas()` is read when the call reaches the dispatch, after the calling opcode charged its own costs: the lesser of the caller's regular gas with the forward counted back (`MegaEvm::intercept` passes what the caller has left; the answer returns the forward untouched) and gas detention's allowance at the call. That is the caller's spendable regular gas before the forward, which detention caps. This departs from the legacy engine's figure, which came from a separate compute ledger, with per-frame budgets of 98/100 of the caller's remaining compute under the transaction's compute limit, so it could exceed the caller's gas; here compute is regular gas, and the answer is at most the caller's own. The one property carried over is that forwarded gas is not counted.
 - `VolatileDataAccessDisabled`'s argument is a `uint8` on the wire. A refused `SLOTNUM` names 12 (`SLOT_NUM_ACCESS_TYPE`), past the contract's enum, so Solidity handlers decode the argument as `uint8`; the contracts are not changed for it, and their code hashes stay.
-- The system-address transaction is validated before it is promoted to a deposit, because the deposit path validates nothing. The whitelist, the chain id, the nonce and EIP-3607 are checked there, each under the configuration switch a user transaction obeys.
-- Accounts read during validation are read without warming them, so the transaction pays what any other transaction would pay for its first touch.
+- A transaction is a system-address transaction when it has the system shape (a legacy call to a whitelisted contract) and its caller is the address the registry names. The shape is tested first, on the transaction's own fields, and only a shaped transaction reads the registry: every other transaction pays two comparisons and reads nothing, and one of another shape from the system address is an ordinary transaction.
+- The system-address transaction is validated before it is promoted to a deposit, because the deposit path validates nothing. The chain id, the nonce and EIP-3607 are checked there, each under the configuration switch a user transaction obeys.
+- Accounts and slots read during validation are read without warming them, so the transaction pays what any other transaction would pay for its first touch: the registry's account and slot, and the system address's account.
 
 ## PRE-BLOCK STATE CHANGE CONTRACT
 
@@ -57,7 +58,8 @@ The executor hands it to the pre-block observer, then commits: the sequence the 
 - Do not add a length check to a selector match. Admission is the four bytes.
 - Do not accept value on a read-only or control method without saying why in the interceptor and pinning it with a test.
 - Do not deploy system bytecode from a literal in this crate; the `mega-system-contracts` crate ships the code and its hash. The timestamp wrapper is the one exception, because the Oracle's address is baked into its code.
-- Do not read the system address from a constant in new code once the `SequencerRegistry` is read: the address can be rotated.
+- Do not read the system address from a constant or hold it on the context: the address can be rotated, and the registry in the state the EVM runs on is the one source.
+- Do not make a transaction that lacks the system shape read the registry: the shape test is what keeps every other transaction free of the read.
 - Do not call `db.commit(...)` inside a helper that participates in `apply_pre_execution_changes`.
   It hides the step from a witness generator.
 - Do not return nothing from a helper on a "no change needed" path.
@@ -72,4 +74,5 @@ The executor hands it to the pre-block observer, then commits: the sequence the 
 - Change what a deposit-like transaction pays for the account it creates: `evm/execution.rs`, where the charge is made in the pre-execution phase.
 - Add a predeploy: a spec in `deploy.rs::system_contract_specs`, seeded from chain params if it has storage.
 - Change how a block deploys the contracts: `block/executor.rs::apply_pre_execution_changes` iterates the spec list, delivers each witness to the pre-block observer, and commits.
-- Change when a role change is applied or how the live system address is read: `sequencer_registry.rs`, whose three helpers `block/executor.rs::apply_pre_execution_changes` calls after the deploys, in that order; the result lives on the context (`MegaContext::system_address`).
+- Change when a role change is applied: `sequencer_registry.rs`, whose two pre-block helpers `block/executor.rs::apply_pre_execution_changes` calls after the deploys, in that order.
+- Change how the live system address is read or which transactions read it: `sequencer_registry.rs::inspect_system_address` and `tx.rs::is_live_system_transaction`, which `MegaHandler::validate_env` calls; the answer lives on the context as the transaction's system-originated flag (`MegaContext::is_system_originated`).
