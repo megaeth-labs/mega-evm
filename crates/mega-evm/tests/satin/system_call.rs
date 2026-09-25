@@ -233,7 +233,7 @@ fn test_a_system_call_above_30m_carries_the_excess_as_reservoir() {
 /// The default reservoir holds sixteen fresh slots at Satin's price. That many writes empty it and
 /// spend no regular gas on state; the next one spills what the reservoir cannot pay onto the
 /// regular budget. `GAS`, read after the writes, shows the spill: the regular gas the next write
-/// took is its own regular cost, which the write before it shows, plus the part of its slot the
+/// took is its own regular cost, which the writes before it show, plus the part of its slot the
 /// reservoir did not hold.
 #[test]
 fn test_a_system_call_s_state_draws_the_reservoir_first_then_spills() {
@@ -260,18 +260,17 @@ fn test_a_system_call_s_state_draws_the_reservoir_first_then_spills() {
     // The most slots the reservoir holds, and what the one after them spills.
     let held = DEFAULT_RESERVOIR / slot();
     let spill = (held + 1) * slot() - DEFAULT_RESERVOIR;
-    let (before, reservoir_before) = run(held - 1);
+    let (two_short, _) = run(held - 2);
+    let (one_short, reservoir_one_short) = run(held - 1);
     let (at, reservoir_at) = run(held);
-    let (after, reservoir_after) = run(held + 1);
-    assert_eq!(reservoir_before, DEFAULT_RESERVOIR - (held - 1) * slot());
+    let (past, reservoir_past) = run(held + 1);
+    assert_eq!(reservoir_one_short, DEFAULT_RESERVOIR - (held - 1) * slot());
     assert_eq!(reservoir_at, DEFAULT_RESERVOIR - held * slot(), "empty at Satin's price");
-    assert_eq!(reservoir_after, 0);
-    let one_write = before - at;
-    assert!(
-        one_write < slot(),
-        "the last write the reservoir held took regular gas for itself alone"
-    );
-    assert_eq!(at - after, one_write + spill, "the next one spilled");
+    assert_eq!(reservoir_past, 0);
+    // A write the reservoir holds takes regular gas for itself alone, the same for each.
+    let one_write = one_short - at;
+    assert_eq!(two_short - one_short, one_write);
+    assert_eq!(at - past, one_write + spill, "the next one spilled");
 }
 
 /// What is left of the reservoir is reported, slot by slot, and a call that writes nothing

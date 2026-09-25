@@ -419,9 +419,13 @@ fn test_a_block_is_refused_when_a_pre_block_call_reverts() {
 #[test]
 fn test_the_block_aware_budget_accepts_a_pre_block_call_above_30m() {
     const SLOTS: u16 = 400;
-    assert!(u64::from(SLOTS) * SLOT_STATE_GAS > SYSTEM_CALL_REGULAR_GAS_LIMIT);
     assert_eq!(pre_block_call_gas_limit(250_000_000), 250_000_000);
     assert_eq!(pre_block_call_gas_limit(1_000_000), SYSTEM_CALL_REGULAR_GAS_LIMIT);
+    // The slot count is sized at Satin's own price; other byte prices move the 30M boundary.
+    if !mega_evm::active_satin_prices().is_constants() {
+        return;
+    }
+    assert!(u64::from(SLOTS) * SLOT_STATE_GAS > SYSTEM_CALL_REGULAR_GAS_LIMIT);
 
     let database = || {
         let mut db = common::database();
