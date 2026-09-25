@@ -488,7 +488,7 @@ fn creation_run(
 /// start crosses, the limit is what the transaction used before it.
 fn creation_limits(creation: Creation, limit: Limit, gas_limit: u64) -> EvmTxRuntimeLimits {
     let limits = EvmTxRuntimeLimits::default();
-    if let Creation::NestedStart = creation {
+    if matches!(creation, Creation::NestedStart) {
         return match limit {
             Limit::DataSize => limits.with_tx_data_size_limit(TX_BODY_SIZE),
             Limit::KvUpdates => limits.with_tx_kv_update_limit(0),
