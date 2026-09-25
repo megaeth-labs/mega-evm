@@ -27,9 +27,12 @@ use mega_evm::{
     MegaSpecId, MegaTransactionError, TestExternalEnvs,
 };
 use revm::{
-    bytecode::opcode::{CALL, CALLER, CREATE, GAS, INVALID, MSTORE, POP, PUSH0, REVERT, STOP},
+    bytecode::opcode::{
+        CALL, CALLER, CREATE, GAS, INVALID, MSTORE, POP, PUSH0, PUSH1, PUSH3, REVERT, STOP,
+    },
     context::{result::EVMError, CfgEnv},
     context_interface::cfg::GasId,
+    primitives::KECCAK_EMPTY,
     state::{AccountInfo, Bytecode},
     DatabaseCommit,
 };
@@ -778,6 +781,61 @@ fn test_nonces_a_delegated_signer_spends_in_its_deployment_stay_spent() {
                 assert_eq!(nonce(&later, address), 1, "{name}: {address} created at {gas_limit}");
             }
         }
+    }
+}
+
+/// A nonce the signer's own code spends in the constructor stays spent whether an account stands
+/// at it or not: a delegated signer whose delegation makes one `CREATE` of init code that reverts
+/// spends its nonce 2 and leaves nothing at `create(signer, 2)`. The creation's bump below it is
+/// kept all the same — the settlement takes the bump back only when it is the last nonce change,
+/// and never moves the nonce back under a later bump, which may stand for an account — so the
+/// signer ends at 3, and a resubmission is refused `SignerNonceTooHigh` there.
+#[test]
+fn test_a_delegated_signer_whose_creation_reverts_keeps_every_bump() {
+    let delegate = address!("0x00000000000000000000000000000000000d1e6b");
+    // One `CREATE` of `PUSH0 PUSH0 REVERT`: the nonce is spent and no account is created.
+    let creating_a_reverting_child = Bytes::from_static(&[
+        PUSH3, PUSH0, PUSH0, REVERT, PUSH0, MSTORE, PUSH1, 3, PUSH1, 29, PUSH0, CREATE, POP, STOP,
+    ]);
+    let calling_the_signer = [PUSH0, PUSH0, PUSH0, PUSH0, PUSH0, CALLER, GAS, CALL, POP];
+    let deployment = Deployment::new(constructor(&calling_the_signer, &runtime(1)));
+    let delegation = Bytecode::new_eip7702(delegate);
+    let mut db = system_db().account_code(delegate, creating_a_reverting_child);
+    db.insert_account_info(
+        deployment.signer,
+        AccountInfo {
+            nonce: 1,
+            code_hash: delegation.hash_slow(),
+            code: Some(delegation),
+            ..Default::default()
+        },
+    );
+    let spent = deployment.signer.create(2);
+    for gas_limit in GAS_LIMITS {
+        let outcome = deploy(db.clone(), &deployment, gas_limit);
+        assert_eq!(returned(&outcome).deployedAddress, deployment.address, "at {gas_limit}");
+        assert_eq!(nonce(&outcome, deployment.signer), 3, "every bump stays at {gas_limit}");
+        let at_spent = outcome.state.get(&spent);
+        assert!(
+            at_spent.is_none_or(|account| {
+                account.info.nonce == 0 &&
+                    account.info.code_hash == KECCAK_EMPTY &&
+                    !account.is_created()
+            }),
+            "nothing stands at {spent} at {gas_limit}: {at_spent:?}",
+        );
+
+        // The same deployment submitted again, by the relayer's next transaction.
+        let mut committed = db.clone();
+        committed.commit(outcome.result_and_state.state);
+        let limits = EvmTxRuntimeLimits::no_limits();
+        let again = run_nth(committed, deployment.call_data(LARGE_OVERRIDE), gas_limit, limits, 1);
+        assert_eq!(
+            refusal(&again),
+            KeylessDeployError::SignerNonceTooHigh { signer_nonce: 3 },
+            "resubmitted at {gas_limit}",
+        );
+        assert_eq!(nonce(&again, deployment.signer), 3, "resubmitted at {gas_limit}");
     }
 }
 
