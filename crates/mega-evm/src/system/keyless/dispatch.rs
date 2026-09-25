@@ -36,6 +36,7 @@ use crate::{
         },
     },
     untouched_call_gas, write_record_history_gas, ExternalEnvTypes, JournalInspectTr, MegaContext,
+    VolatileDataAccess,
 };
 
 /// What the keyless rewrite made of a frame about to start.
@@ -110,7 +111,9 @@ pub(crate) struct KeylessCall {
 /// 4. The init code is within the configured initcode size limit (`InitCodeTooLarge`).
 /// 5. `gasLimitOverride` covers the signed gas limit (`GasLimitTooLow`).
 /// 6. The signer can be recovered (`InvalidSignature()`).
-/// 7. The signer's nonce is at most 1 (`SignerNonceTooHigh`).
+/// 7. The signer's nonce is at most 1 (`SignerNonceTooHigh`). A signer that is the block
+///    beneficiary makes this read a read of the beneficiary's account, which gas detention caps as
+///    it caps a sender that is the beneficiary.
 /// 8. Unless EIP-3607 is disabled, the signer has no code other than an EIP-7702 delegation
 ///    (`SignerHasCode()`).
 /// 9. The signer's account, when the creation's nonce bump is what creates it: state gas, priced by
@@ -350,6 +353,12 @@ fn prepare<DB: Database, ExtEnvs: ExternalEnvTypes>(
 
     let checks_code = !ctx.cfg().is_eip3607_disabled();
     let signer_info = ctx.journal_mut().inspect_account(signer, checks_code)?.info.clone();
+    // A signer that is the block beneficiary: the rules read the beneficiary's account through
+    // the journal, where the Host marks nothing, and the creation runs for it as a `CREATE` runs
+    // in a frame of it, which a read of the account started.
+    if signer == ctx.block().beneficiary {
+        ctx.detention.read_by_frame(VolatileDataAccess::BENEFICIARY_BALANCE, gas);
+    }
     if signer_info.nonce > 1 {
         refuse!(KeylessDeployError::SignerNonceTooHigh { signer_nonce: signer_info.nonce });
     }

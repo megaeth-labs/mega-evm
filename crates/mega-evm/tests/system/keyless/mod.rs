@@ -8,6 +8,7 @@
 
 mod charges;
 mod deploy;
+mod detention;
 mod dispatch;
 mod inspector;
 mod limits;

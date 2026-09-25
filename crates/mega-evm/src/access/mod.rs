@@ -12,7 +12,7 @@
 //! | Kind | Read by | Cap |
 //! |---|---|---|
 //! | the block environment | `NUMBER`, `TIMESTAMP`, `COINBASE`, `PREVRANDAO`, `GASLIMIT`, `BASEFEE`, `BLOBBASEFEE`, `SLOTNUM`, `BLOCKHASH` | [`block_env_access_compute_gas_limit`](crate::EvmTxRuntimeLimits::block_env_access_compute_gas_limit) |
-//! | the block beneficiary's account | `BALANCE`, `SELFBALANCE`, `EXTCODESIZE`, `EXTCODECOPY`, `EXTCODEHASH`, the four calls (and the EIP-7702 delegate they follow), `SELFDESTRUCT` as either end; a transaction whose sender or recipient is the beneficiary or whose recipient delegates to it, and an applied EIP-7702 authority that is | [`block_env_access_compute_gas_limit`](crate::EvmTxRuntimeLimits::block_env_access_compute_gas_limit) |
+//! | the block beneficiary's account | `BALANCE`, `SELFBALANCE`, `EXTCODESIZE`, `EXTCODECOPY`, `EXTCODEHASH`, the four calls (and the EIP-7702 delegate they follow), `SELFDESTRUCT` as either end; a transaction whose sender or recipient is the beneficiary or whose recipient delegates to it, an applied EIP-7702 authority that is, and a keyless deployment's signer that is | [`block_env_access_compute_gas_limit`](crate::EvmTxRuntimeLimits::block_env_access_compute_gas_limit) |
 //! | the Oracle's storage | `SLOAD` in the Oracle's own frame | [`oracle_access_compute_gas_limit`](crate::EvmTxRuntimeLimits::oracle_access_compute_gas_limit) |
 //!
 //! The caps are runtime limits ([`EvmTxRuntimeLimits`](crate::EvmTxRuntimeLimits)): the spec's,
@@ -119,7 +119,10 @@
 //! regular gas — on gas held to the limit as a running frame's is, so a charge past the limit
 //! is a crossing, whether a rule would then refuse the call or its creation would run. A call
 //! that starts its creation is kept as a frame suspended on it, and its charges are compute as a
-//! caller's are; a call a rule refuses is an answer held by the rule above.
+//! caller's are; a call a rule refuses is an answer held by the rule above. The call reads its
+//! signer's account through the journal, where the Host marks nothing, so a signer that is the
+//! beneficiary is marked there, at the call's compute then: the creation runs for that account,
+//! as a `CREATE` runs in a frame of it, which a read of the account started.
 //!
 //! # Nothing withheld leaks
 //!

@@ -351,6 +351,17 @@ impl Detention {
         self.frames.push(DetainedFrame { at_suspension: regular_spent(gas), contribution: 0 });
     }
 
+    /// Records a read of `access` the running frame, whose gas is `gas`, makes itself rather than
+    /// through an opcode — a keyless deployment's call reading its signer's account — and holds
+    /// the frame to the limit it sets, as an opcode's read is committed
+    /// ([`commit_reads`](Self::commit_reads)). A transaction detention does not hold records
+    /// nothing, as the Host observes nothing for it.
+    pub(crate) fn read_by_frame(&mut self, access: VolatileDataAccess, gas: &mut Gas) {
+        if self.detains {
+            self.commit_reads(access, gas, 0);
+        }
+    }
+
     /// The frame at `depth` returns `result` with `gas`, after it ran. The switch turns back on if
     /// the frame, or a frame below it, turned it off. A frame that halts burns what it had left.
     ///
@@ -872,6 +883,24 @@ mod tests {
         assert_eq!(detention.compute(&creation), 132_000, "the charges, not the forward");
         assert_eq!(creation.spendable(), BLOCK_ENV_ACCESS_COMPUTE_GAS - 132_000);
         assert_eq!(detention.allowance(2, 0), Some(BLOCK_ENV_ACCESS_COMPUTE_GAS - 132_000));
+    }
+
+    /// A frame's own read is committed as an opcode's is: the limit is its compute at the read
+    /// plus the cap. A transaction detention does not hold records nothing.
+    #[test]
+    fn test_a_frames_own_read_sets_the_limit_from_its_compute() {
+        let mut detention = detaining();
+        let mut call = gas(100_000_000, 0);
+        assert!(call.record_regular_cost(100_000));
+        detention.read_by_frame(VolatileDataAccess::BENEFICIARY_BALANCE, &mut call);
+        assert_eq!(detention.compute_limit(), Some(100_000 + BLOCK_ENV_ACCESS_COMPUTE_GAS));
+        assert_eq!(detention.accessed(), VolatileDataAccess::BENEFICIARY_BALANCE);
+        assert_eq!(call.spendable(), BLOCK_ENV_ACCESS_COMPUTE_GAS);
+
+        let mut free = Detention::default();
+        free.reset(false, BLOCK_ENV_ACCESS_COMPUTE_GAS, ORACLE_ACCESS_COMPUTE_GAS);
+        free.read_by_frame(VolatileDataAccess::BENEFICIARY_BALANCE, &mut call);
+        assert_eq!((free.compute_limit(), free.accessed()), (None, VolatileDataAccess::empty()));
     }
 
     /// The switch holds for the frame that turned it off and every frame below it, turns back on
