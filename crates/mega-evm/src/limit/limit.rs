@@ -863,14 +863,18 @@ impl AdditionalLimit {
     }
 }
 
-/// `remaining` × [`FRAME_DATA_SHARE_NUMERATOR`] / [`FRAME_DATA_SHARE_DENOMINATOR`].
+/// `remaining` × [`FRAME_DATA_SHARE_NUMERATOR`] / [`FRAME_DATA_SHARE_DENOMINATOR`], rounded down.
 ///
-/// The product is taken in `u128`, so a remaining budget near `u64::MAX` does not wrap.
+/// The share is `N / D = 1 − 1 / K` with `K = D / (D − N)` a whole number, so the floor of the
+/// product is `remaining − ⌈remaining / K⌉`, which stays in `u64` and never wraps. A `u128`
+/// product would call the 128-bit division routine on every frame start, where a division of a
+/// `u64` by a constant compiles to a multiplication.
 const fn share_of_remaining(remaining: u64) -> u64 {
-    let remaining = remaining as u128;
-    let numerator = FRAME_DATA_SHARE_NUMERATOR as u128;
-    let denominator = FRAME_DATA_SHARE_DENOMINATOR as u128;
-    ((remaining * numerator) / denominator) as u64
+    const N: u64 = FRAME_DATA_SHARE_NUMERATOR;
+    const D: u64 = FRAME_DATA_SHARE_DENOMINATOR;
+    const _: () = assert!(N < D && D % (D - N) == 0);
+    const K: u64 = D / (D - N);
+    remaining - remaining.div_ceil(K)
 }
 
 /// Whether starting `input` moves value from one account to another, which is what revm journals
@@ -941,6 +945,24 @@ mod tests {
     const SENDER: Address = address!("00000000000000000000000000000000000f0001");
     const CALLEE: Address = address!("00000000000000000000000000000000000f0002");
     const TARGET: Address = address!("00000000000000000000000000000000000f0003");
+
+    #[test]
+    fn test_share_of_remaining_is_the_floor_of_the_exact_product() {
+        let exact = |x: u64| {
+            (u128::from(x) * u128::from(FRAME_DATA_SHARE_NUMERATOR) /
+                u128::from(FRAME_DATA_SHARE_DENOMINATOR)) as u64
+        };
+        let mut x = 0x9e37_79b9_7f4a_7c15_u64;
+        let edges = [0, 1, 49, 50, 51, 99, 100, 101, u64::MAX, u64::MAX - 1, u64::MAX / 100 * 100];
+        for v in edges.into_iter().chain((0..100_000).map(|_| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x >> (x % 64)
+        })) {
+            assert_eq!(share_of_remaining(v), exact(v), "{v}");
+        }
+    }
 
     fn call_inputs(scheme: CallScheme, value: U256) -> CallInputs {
         CallInputs {
