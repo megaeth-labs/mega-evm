@@ -59,6 +59,8 @@ pub struct MegaContext<DB: Database, ExtEnvs: ExternalEnvTypes = EmptyExternalEn
     system_originated: bool,
     /// Whether the running transaction pays history gas. See [`MegaContext::prices_history`].
     prices_history: bool,
+    /// The address system-address transactions come from. See [`MegaContext::system_address`].
+    system_address: Address,
     /// The `keylessDeploy` call the running transaction's creation runs under, from the rewrite
     /// that started the creation until the creation's result is settled into it. See the
     /// [`keyless`](crate::system::keyless) module.
@@ -94,6 +96,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
             bucket_multipliers: BucketMultipliers::default(),
             system_originated: false,
             prices_history: true,
+            system_address: MEGA_SYSTEM_ADDRESS,
             keyless_call: None,
             #[cfg(any(test, feature = "test-utils"))]
             neutral: false,
@@ -296,6 +299,23 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
         self.system_originated
     }
 
+    /// The address a system-address transaction must be sent from: a legacy call from it to a
+    /// whitelisted contract is the protocol's own, promoted to a deposit (see the
+    /// [`system`](crate::system) module).
+    ///
+    /// Block execution reads it out of the `SequencerRegistry` before every block's transactions,
+    /// once a rotation due in the block has been applied, so it is the live one for the block. A
+    /// context no block has been started on uses [`MEGA_SYSTEM_ADDRESS`].
+    pub const fn system_address(&self) -> Address {
+        self.system_address
+    }
+
+    /// Sets the address system-address transactions come from, for every transaction from now
+    /// on. Block execution sets the one it read out of the `SequencerRegistry`.
+    pub(crate) const fn set_system_address(&mut self, address: Address) {
+        self.system_address = address;
+    }
+
     /// Whether the running (or last) transaction pays history gas for the bytes it appends.
     ///
     /// Three kinds of transaction pay none: a deposit, a transaction the protocol itself produced
@@ -316,7 +336,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     /// Prepares the common execution layer for a new transaction. Every transaction entry point
     /// of [`MegaEvm`](crate::MegaEvm) calls it before it runs the handler.
     pub(crate) fn on_new_tx(&mut self) {
-        let system_originated = system::is_system_originated(&self.inner.tx, MEGA_SYSTEM_ADDRESS);
+        let system_originated = system::is_system_originated(&self.inner.tx, self.system_address);
         self.prepare(system_originated);
     }
 

@@ -52,15 +52,16 @@ fn deploy_sources() -> [PreBlockStateSource; SYSTEM_CONTRACT_DEPLOY_COUNT] {
 }
 
 /// The two EIP calls, the seven deploys, then the read of the registry's pending changes, which
-/// finds none due on these blocks.
+/// finds none due on these blocks, and the read of the system address.
 fn assert_pre_block_order(outcomes: &[(PreBlockStateSource, revm::state::EvmState)]) {
-    assert_eq!(outcomes.len(), 2 + SYSTEM_CONTRACT_DEPLOY_COUNT + 1);
+    assert_eq!(outcomes.len(), 2 + SYSTEM_CONTRACT_DEPLOY_COUNT + 2);
     assert_eq!(outcomes[0].0, PreBlockStateSource::Eip2935);
     assert_eq!(outcomes[1].0, PreBlockStateSource::Eip4788);
     for (i, source) in deploy_sources().iter().enumerate() {
         assert_eq!(outcomes[2 + i].0, *source);
     }
     assert_eq!(outcomes[2 + SYSTEM_CONTRACT_DEPLOY_COUNT].0, PreBlockStateSource::PendingChanges);
+    assert_eq!(outcomes[3 + SYSTEM_CONTRACT_DEPLOY_COUNT].0, PreBlockStateSource::SystemAddress);
 }
 
 fn assert_registry_account_seed(account: &Account, config: &SequencerRegistryConfig) {
@@ -109,7 +110,7 @@ fn assert_registry_seed(state: &mut State<MemoryDatabase>, config: &SequencerReg
 
 /// The first block deploys all seven predeploys with the pinned hashes, nonce 1, and the
 /// registry's seeded slots. The executor's own observer sees the two EIP calls, the seven deploy
-/// states and the read of the registry's pending changes, in that order.
+/// states and the two reads of the registry, in that order.
 #[test]
 fn test_the_first_block_deploys_every_system_contract() {
     let mut state = common::state();
@@ -147,8 +148,8 @@ fn test_the_first_block_deploys_every_system_contract() {
 }
 
 /// A second block changes nothing in the seven deploys: the executor's own observer reports
-/// exactly seven read-only account entries, the two EIP calls still precede them and the read of
-/// the registry's pending changes follows them.
+/// exactly seven read-only account entries, the two EIP calls still precede them and the two
+/// reads of the registry follow them.
 #[test]
 fn test_the_second_block_is_seven_read_only_entries() {
     let mut state = common::state();

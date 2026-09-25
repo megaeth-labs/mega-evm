@@ -52,7 +52,6 @@ use crate::{
     system::{
         is_deposit_like_transaction,
         keyless::{self, Rewrite},
-        MEGA_SYSTEM_ADDRESS,
     },
     write_record_history_gas, Detention, ExternalEnvTypes, JournalInspectTr, LimitCheck, LimitKind,
     MegaContext, MegaEvm, MegaInstructions, VolatileDataAccess,
@@ -159,10 +158,8 @@ where
     /// Validates a transaction sent from the system address and promotes it to a deposit, then
     /// validates the transaction as op-revm does — as a deposit, when it was promoted.
     fn validate_env(&self, evm: &mut Self::Evm) -> Result<(), Self::Error> {
-        crate::system::validate_and_promote::<_, _, Self::Error>(
-            evm.ctx_mut(),
-            MEGA_SYSTEM_ADDRESS,
-        )?;
+        let system_address = evm.ctx_ref().system_address();
+        crate::system::validate_and_promote::<_, _, Self::Error>(evm.ctx_mut(), system_address)?;
         self.op.validate_env(evm)
     }
 
@@ -1270,7 +1267,7 @@ fn unbuilt_first_frame<DB: Database, ExtEnvs: ExternalEnvTypes>(
 fn deposit_creates_caller<DB: Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &mut MegaContext<DB, ExtEnvs>,
 ) -> Result<bool, DB::Error> {
-    if !is_deposit_like_transaction(ctx.tx(), MEGA_SYSTEM_ADDRESS) {
+    if !is_deposit_like_transaction(ctx.tx(), ctx.system_address()) {
         return Ok(false);
     }
     let caller = ctx.tx().caller();

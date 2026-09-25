@@ -11,6 +11,8 @@
 //! executor reads whether one is due ([`is_apply_pending_changes_due`]) and, when one is, calls
 //! `applyPendingChanges()` ([`transact_apply_pending_changes`]). The call is permissionless and
 //! applies only what is due, so a block that makes it applies the same changes whoever calls.
+//! Then it reads the live system address out of the registry ([`resolve_system_address`]), which
+//! the block's system-address transactions must come from.
 
 #[cfg(not(feature = "std"))]
 use alloc as std;
@@ -31,7 +33,7 @@ use crate::{
     MegaBlockExecutionError, MegaEvm, MegaHardfork,
 };
 use storage_slots::{
-    PENDING_SEQUENCER, PENDING_SYSTEM_ADDRESS, SEQUENCER_ACTIVATION_BLOCK,
+    CURRENT_SYSTEM_ADDRESS, PENDING_SEQUENCER, PENDING_SYSTEM_ADDRESS, SEQUENCER_ACTIVATION_BLOCK,
     SYSTEM_ADDRESS_ACTIVATION_BLOCK,
 };
 
@@ -56,7 +58,7 @@ pub const PLACEHOLDER_MIN_ROTATION_DELAY: u64 = 10;
 /// Bootstrap configuration for the `SequencerRegistry`, attached to Satin via [`HardforkParams`].
 ///
 /// These values seed the registry's storage on a fresh deploy. After that the live roles are
-/// whatever the contract holds; rotating them is a later pre-block system call. The contract
+/// whatever the contract holds, rotated by the `applyPendingChanges()` pre-block call. The contract
 /// has no setter for `_minRotationDelay`, so a matching-code registry cannot be repaired later
 /// through this helper: the delay must be seeded here, and it must not be zero.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -215,6 +217,45 @@ where
     Ok(outcome)
 }
 
+/// Reads the live system address out of the registry: the address a system-address transaction
+/// must be sent from in the block. Also answers the read, as a read-only entry of the registry's
+/// account, which the caller hands on as a witness.
+///
+/// It is read once the block's pre-block changes are committed — the registry deployed and a due
+/// rotation applied — so a rotation takes effect at its activation block.
+///
+/// # Errors
+///
+/// The deploy before it guarantees what is checked here, so each of these is a state no Satin
+/// block leaves behind, and the block is refused rather than run against the wrong authority:
+/// [`MegaBlockExecutionError::MissingSequencerRegistry`] when the registry has no account,
+/// [`MegaBlockExecutionError::SequencerRegistryCodeMismatch`] when it holds other code than
+/// [`SEQUENCER_REGISTRY_CODE`], and [`MegaBlockExecutionError::ZeroSystemAddress`] when its
+/// `_currentSystemAddress` is zero. A database error is the database's.
+pub fn resolve_system_address<DB: alloy_evm::Database>(
+    db: &mut DB,
+) -> Result<(Address, EvmState), BlockExecutionError> {
+    let info = db
+        .basic(SEQUENCER_REGISTRY_ADDRESS)
+        .map_err(BlockExecutionError::other)?
+        .ok_or(MegaBlockExecutionError::MissingSequencerRegistry)?;
+    if info.code_hash != SEQUENCER_REGISTRY_CODE_HASH {
+        return Err(MegaBlockExecutionError::SequencerRegistryCodeMismatch {
+            expected: SEQUENCER_REGISTRY_CODE_HASH,
+            found: info.code_hash,
+        }
+        .into());
+    }
+    let mut registry = Account::from(info);
+    let current =
+        read_slot(db, &mut registry, CURRENT_SYSTEM_ADDRESS).map_err(BlockExecutionError::other)?;
+    if current.is_zero() {
+        return Err(MegaBlockExecutionError::ZeroSystemAddress.into());
+    }
+    let address = Address::from_word(current.into());
+    Ok((address, EvmState::from_iter([(SEQUENCER_REGISTRY_ADDRESS, registry)])))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -227,7 +268,7 @@ mod tests {
         state::{AccountInfo, Bytecode},
         Database, DatabaseCommit,
     };
-    use storage_slots::{CURRENT_SEQUENCER, CURRENT_SYSTEM_ADDRESS};
+    use storage_slots::CURRENT_SEQUENCER;
 
     const NEXT_SYSTEM_ADDRESS: Address = address!("0x1111111111111111111111111111111111111111");
     const NEXT_SEQUENCER: Address = address!("0x2222222222222222222222222222222222222222");
@@ -418,5 +459,89 @@ mod tests {
         let err = transact_apply_pending_changes(&mut evm(&mut db, 30_000_000))
             .expect_err("a reverting registry fails closed");
         assert!(err.to_string().contains("reverted or halted"), "{err}");
+    }
+
+    /// A database whose registry holds `code` and `current` as its system address.
+    fn registry_holding(code: Bytes, current: Option<Address>) -> InMemoryDB {
+        let code = Bytecode::new_raw(code);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(
+            SEQUENCER_REGISTRY_ADDRESS,
+            AccountInfo { code_hash: code.hash_slow(), code: Some(code), ..Default::default() },
+        );
+        if let Some(current) = current {
+            db.insert_account_storage(
+                SEQUENCER_REGISTRY_ADDRESS,
+                CURRENT_SYSTEM_ADDRESS,
+                word(current),
+            )
+            .unwrap();
+        }
+        db
+    }
+
+    fn resolve(db: &mut InMemoryDB) -> Result<(Address, EvmState), BlockExecutionError> {
+        resolve_system_address(&mut State::builder().with_database(db).build())
+    }
+
+    /// A registry holding the code this engine deploys resolves to the address it stores.
+    #[test]
+    fn test_resolve_expects_the_deployed_code_hash() {
+        let mut db = registry_holding(SEQUENCER_REGISTRY_CODE, Some(NEXT_SYSTEM_ADDRESS));
+        let (address, _) = resolve(&mut db).expect("the deployed registry resolves");
+        assert_eq!(address, NEXT_SYSTEM_ADDRESS);
+    }
+
+    /// A registry still holding the legacy engine's first bytecode is not the one this engine
+    /// deploys, and the read refuses it.
+    #[test]
+    fn test_resolve_rejects_the_v1_code_hash() {
+        use mega_system_contracts::sequencer_registry::{V1_0_0_CODE, V1_0_0_CODE_HASH};
+        let mut db = registry_holding(V1_0_0_CODE, Some(NEXT_SYSTEM_ADDRESS));
+        let err = resolve(&mut db).expect_err("the v1 registry fails closed");
+        assert!(err.to_string().contains("code hash mismatch"), "{err}");
+        assert!(err.to_string().contains(&V1_0_0_CODE_HASH.to_string()), "{err}");
+    }
+
+    /// The read answers the stored address and a witness holding the registry's account and the
+    /// one slot it read, read-only.
+    #[test]
+    fn test_resolve_returns_stored_system_address_with_witness() {
+        let mut db = registry_holding(SEQUENCER_REGISTRY_CODE, Some(NEXT_SYSTEM_ADDRESS));
+        let (address, witness) = resolve(&mut db).unwrap();
+        assert_eq!(address, NEXT_SYSTEM_ADDRESS);
+
+        assert_eq!(witness.len(), 1);
+        let registry = &witness[&SEQUENCER_REGISTRY_ADDRESS];
+        assert_eq!(registry.info.code_hash, SEQUENCER_REGISTRY_CODE_HASH);
+        assert!(!registry.is_touched(), "a read-only entry");
+        assert_eq!(registry.storage.len(), 1, "exactly the one slot read");
+        let slot = &registry.storage[&CURRENT_SYSTEM_ADDRESS];
+        assert!(!slot.is_changed());
+        assert_eq!(slot.present_value(), word(NEXT_SYSTEM_ADDRESS));
+        assert_eq!(slot.original_value(), slot.present_value());
+    }
+
+    /// A registry whose system address is zero is refused.
+    #[test]
+    fn test_resolve_zero_slot_errors() {
+        let mut db = registry_holding(SEQUENCER_REGISTRY_CODE, None);
+        let err = resolve(&mut db).expect_err("a zero system address fails closed");
+        assert!(err.to_string().contains("zero system address"), "{err}");
+    }
+
+    /// A registry with no account is refused.
+    #[test]
+    fn test_resolve_missing_registry_errors() {
+        let err = resolve(&mut InMemoryDB::default()).expect_err("no registry fails closed");
+        assert!(err.to_string().contains("does not exist"), "{err}");
+    }
+
+    /// A registry holding foreign code is refused, whatever it stores.
+    #[test]
+    fn test_resolve_wrong_code_hash_errors() {
+        let mut db = registry_holding(Bytes::from_static(&[0x60, 0x00]), Some(NEXT_SYSTEM_ADDRESS));
+        let err = resolve(&mut db).expect_err("foreign code fails closed");
+        assert!(err.to_string().contains("code hash mismatch"), "{err}");
     }
 }

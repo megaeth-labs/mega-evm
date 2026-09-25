@@ -29,11 +29,11 @@ Do not add a `_pending/main.rs`.
 |---|---:|---:|---:|---:|---:|---:|
 | the common execution layer | 21 | 21 | 0 | 21 | 0 | 0 |
 | revert-class aborts | 17 | 17 | 0 | 0 | 17 | 0 |
-| the pre-block system calls | 10 | 10 | 0 | 7 | 3 | 0 |
-| system contract deployment | 11 | 5 | 6 | 11 | 0 | 0 |
+| the pre-block system calls | 3 | 3 | 0 | 0 | 3 | 0 |
+| system contract deployment | 5 | 5 | 0 | 5 | 0 | 0 |
 | inspector support | 4 | 4 | 0 | 1 | 3 | 0 |
 | — (undecided: D57 preload-warm cold charging, D58 98/100 forwarding) | 7 | 7 | 0 | 0 | 0 | 7 |
-| **Total** | **70** | **64** | **6** | **40** | **23** | **7** |
+| **Total** | **57** | **57** | **0** | **27** | **23** | **7** |
 
 ## Tests ported in place
 
@@ -331,15 +331,16 @@ These 69 rows run in a real test target now, adapted to the Satin API: a keyless
 
 ## Tests ported by the pre-block system calls
 
-These 24 rows run in a real test target now, adapted to the Satin API: a system call runs on at most 30,000,000 of regular gas with the rest of its gas limit as its state-gas reservoir, priced at the minimum SALT bucket and held to no per-transaction limit; a pre-block call that does not succeed refuses the block; and a due `SequencerRegistry` change is applied by a pre-block call before the live system address is read out of the registry. The counts above are lower than the inventory's by exactly these rows.
+These 37 rows run in a real test target now, adapted to the Satin API: a system call runs on at most 30,000,000 of regular gas with the rest of its gas limit as its state-gas reservoir, priced at the minimum SALT bucket and held to no per-transaction limit; a pre-block call that does not succeed refuses the block; and a due `SequencerRegistry` change is applied by a pre-block call before the live system address is read out of the registry. The counts above are lower than the inventory's by exactly these rows.
 
 | Legacy file | Owner in the inventory | Tests | Now in |
 |---|---|---:|---|
+| `block_executor/sequencer_registry.rs` | the pre-block system calls (7) | 7 | `tests/block/sequencer_registry.rs` |
 | `rex5/apply_pending_changes_gas_budget.rs` | the pre-block system calls (1) | 1 | `tests/block/sequencer_registry.rs` |
 | `rex5/pre_block_system_calls.rs` | the pre-block system calls (11) | 11 | `tests/block/eips.rs` |
 | `src/evm/mod.rs` | the pre-block system calls (3) | 3 | `src/evm/mod.rs` |
-| `src/system/sequencer_registry.rs` | the pre-block system calls (9) | 9 | `src/system/sequencer_registry.rs` |
-| **Total** | | **24** | |
+| `src/system/sequencer_registry.rs` | the pre-block system calls (9), system contract deployment (6) | 15 | `src/system/sequencer_registry.rs` |
+| **Total** | | **37** | |
 
 ## Tests retired after the inventory
 
@@ -368,13 +369,6 @@ They are not counted above.
 
 | File | Test | Parked under | Reason |
 |---|---|---|---|
-| `block_executor/sequencer_registry.rs` | `test_admin_handoff_via_block_executor` | the pre-block system calls | the pre-block system calls own the two-step admin handoff |
-| `block_executor/sequencer_registry.rs` | `test_bootstrap_block_resolves_system_address` | the pre-block system calls | the pre-block system calls own resolving the live system address |
-| `block_executor/sequencer_registry.rs` | `test_dual_change_in_same_block` | the pre-block system calls | the pre-block system calls own applying a pending rotation |
-| `block_executor/sequencer_registry.rs` | `test_pending_not_yet_due_is_noop` | the pre-block system calls | the pre-block system calls own applying a pending rotation |
-| `block_executor/sequencer_registry.rs` | `test_sequencer_change_does_not_affect_system_address` | the pre-block system calls | the pre-block system calls own applying a pending rotation |
-| `block_executor/sequencer_registry.rs` | `test_system_address_change` | the pre-block system calls | the pre-block system calls own applying a pending rotation |
-| `block_executor/sequencer_registry.rs` | `test_system_tx_uses_resolved_system_address` | the pre-block system calls | the pre-block system calls own resolving the live system address |
 
 ## Files
 
@@ -383,7 +377,6 @@ Each cell lists `disposition count (mechanism · decision)`.
 | File | Tests | Owners |
 |---|---:|---|
 | `block_executor/inspector.rs` | 3 | keep 1 (inspector support); rewrite 2 (inspector support · D39/D41) |
-| `block_executor/sequencer_registry.rs` | 7 | keep 7 (the pre-block system calls) |
 | `compute_gas/claims.rs` | 5 | undecided 5 (— · D57, open: whether preload-warm addresses (precompile / beneficiary / access-list) are charged cold) |
 | `mini_rex/access_beneficiary_balance.rs` | 1 | rewrite 1 (revert-class aborts · D48) |
 | `mini_rex/block_env_gas_limit.rs` | 3 | rewrite 3 (revert-class aborts · D48 (detention halt -> revert-class)) |
@@ -403,4 +396,3 @@ Each cell lists `disposition count (mechanism · decision)`.
 | `rex6/create2_metering_order.rs` | 11 | keep 11 (the common execution layer · canonical halt reasons; D04 512 KiB boundary) |
 | `rex6/error_paths.rs` | 2 | keep 2 (the common execution layer · canonical) |
 | `rex6/sequencer_registry_rotation.rs` | 5 | keep 5 (system contract deployment) |
-| `src/system/sequencer_registry.rs` | 6 | keep 6 (system contract deployment · the pre-block system calls for transact_apply_pending_changes) |

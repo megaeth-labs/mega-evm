@@ -36,12 +36,15 @@ use crate::{
     MegaContext,
 };
 
-/// The address the sequencer sends the protocol's own transactions from.
+/// The address the sequencer sends the protocol's own transactions from, until the
+/// `SequencerRegistry` says otherwise.
 ///
-/// A transaction from it is executed as a deposit: no signature, no nonce check of op-revm's own
-/// and no fee. Which address it is can be rotated through the `SequencerRegistry`; reading the
-/// rotated one out of the registry's storage belongs to system contract deployment, and until
-/// then this is the address.
+/// A transaction from the system address is executed as a deposit: no signature, no nonce check
+/// of op-revm's own and no fee. Which address that is can be rotated through the registry, and
+/// block execution reads the live one out of it before every block
+/// ([`MegaContext::system_address`](crate::MegaContext::system_address)). This is the address a
+/// context uses before any block has been started on it, and the one the unknown-chain
+/// placeholder schedule seeds the registry with.
 pub const MEGA_SYSTEM_ADDRESS: Address = address!("0xA887dCB9D5f39Ef79272801d05Abdf707CFBbD1d");
 
 /// The contracts a system-address transaction may call. It may call nothing else and create
