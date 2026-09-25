@@ -504,3 +504,69 @@ fn test_beacon_root_pre_block_call_db_error_returns_validation_error() {
         "{err}"
     );
 }
+
+/// What the observer receives for a pre-block call is the state op-revm's own system call
+/// produces for it: the same call from the same state, on the same configuration — the split
+/// switched on — and the same pre-block budget. The contract stores the regular gas it had, which
+/// is 30M of the 250M budget, and the word it was called with.
+#[test]
+fn test_the_observer_receives_a_pre_block_call_as_op_revm_runs_it() {
+    use op_revm::{handler::OpHandler, L1BlockInfo, OpEvm, OpSpecId, OpTransaction};
+    use revm::{
+        bytecode::opcode::{GAS, PUSH0, PUSH1, STOP},
+        context::{result::EVMError, BlockEnv, CfgEnv, Context, ContextSetters, ContextTr, TxEnv},
+        handler::{EthFrame, ExecuteEvm, Handler, SystemCallTx},
+        inspector::NoOpInspector,
+        interpreter::interpreter::EthInterpreter,
+        Journal,
+    };
+    type OpContext = Context<
+        BlockEnv,
+        OpTransaction<TxEnv>,
+        CfgEnv<OpSpecId>,
+        MemoryDatabase,
+        Journal<MemoryDatabase>,
+        L1BlockInfo,
+    >;
+
+    let code = BytecodeBuilder::default()
+        .append_many([GAS, PUSH0, SSTORE])
+        .append_many([PUSH0, CALLDATALOAD, PUSH1, 1, SSTORE, STOP])
+        .build();
+    let mut db = common::database();
+    db.set_account_code(HISTORY_STORAGE_ADDRESS, code);
+    db.set_account_code(BEACON_ROOTS_ADDRESS, recorder());
+
+    let mut state = State::builder().with_database(db.clone()).build();
+    let mut executor = executor_with_env(&mut state, ctx(), env_with_gas_limit(250_000_000));
+    let log = record_pre_block(&mut executor);
+    executor.apply_pre_execution_changes().expect("the block starts");
+    let (source, delivered) = pre_block_states(&log).into_iter().next().expect("a first step");
+    assert_eq!(source, PreBlockStateSource::Eip2935);
+    let (cfg, block) = (executor.evm().ctx().cfg().clone(), executor.evm().ctx().block().clone());
+    assert!(cfg.system_call_state_gas_margin_in_reservoir);
+    drop(executor);
+
+    let mut op = OpEvm::new(
+        OpContext::new(db, OpSpecId::KARST).with_cfg(cfg).with_block(block),
+        NoOpInspector,
+    );
+    let mut tx = OpTransaction::<TxEnv>::new_system_tx_with_caller(
+        mega_evm::SYSTEM_ADDRESS,
+        HISTORY_STORAGE_ADDRESS,
+        PARENT_HASH.0.into(),
+    );
+    tx.base.gas_limit = pre_block_call_gas_limit(250_000_000);
+    op.0.ctx.set_tx(tx);
+    let result: Result<_, EVMError<core::convert::Infallible, op_revm::OpTransactionError>> =
+        OpHandler::<_, _, EthFrame<EthInterpreter>>::new().run_system_call(&mut op);
+    assert!(result.expect("op-revm runs the call").is_success());
+    let expected = op.finalize();
+
+    assert_eq!(delivered, expected, "the observer sees op-revm's state");
+    let stored = &delivered[&HISTORY_STORAGE_ADDRESS].storage;
+    let gas = stored[&U256::ZERO].present_value();
+    assert!(gas < U256::from(SYSTEM_CALL_REGULAR_GAS_LIMIT), "30M of regular gas: {gas}");
+    assert!(gas > U256::from(SYSTEM_CALL_REGULAR_GAS_LIMIT - 10), "all of it: {gas}");
+    assert_eq!(B256::from(stored[&U256::from(1)].present_value().to_be_bytes()), PARENT_HASH);
+}
