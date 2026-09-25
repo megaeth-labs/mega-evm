@@ -462,10 +462,16 @@ fn system_address_transaction(gas_limit: u64) -> (TxEnv, OpTransaction<TxEnv>) {
 
 /// A system-address transaction is a transaction, not a system call: below the execution cap its
 /// whole gas limit is regular gas, and above it the reservoir is what exceeds the cap, as for the
-/// deposit op-revm runs for it — never the system call's 30M split.
+/// deposit op-revm runs for it — never the system call's 30M split, which the rows between 30M and
+/// the cap would see.
 #[test]
 fn test_a_system_address_transaction_is_split_by_the_execution_cap() {
-    for (gas_limit, reservoir) in [(1_000_000, 0), (TX_GAS_LIMIT_CAP + 5_000_000, 5_000_000)] {
+    for (gas_limit, reservoir) in [
+        (1_000_000, 0),
+        (100_000_000, 0),
+        (TX_GAS_LIMIT_CAP, 0),
+        (TX_GAS_LIMIT_CAP + 5_000_000, 5_000_000),
+    ] {
         let db = MemoryDatabase::default()
             .account_balance(MEGA_SYSTEM_ADDRESS, U256::from(1))
             .account_code(ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE);
