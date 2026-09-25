@@ -1367,7 +1367,7 @@ fn test_data_size_top_level_exceed_is_frame_local_revert() {
 fn test_a_call_revived_past_its_budget_stops_its_caller_before_it_runs_on() {
     const FRAME_CAP: u64 = 1_000;
     const LOGGED: u64 = 1_000;
-    assert!(LOG_BASE_SIZE + LOGGED > FRAME_CAP, "the log crosses A's budget too");
+    const { assert!(LOG_BASE_SIZE + LOGGED > FRAME_CAP, "the log crosses A's budget too") };
     let share = FRAME_CAP * FRAME_DATA_SHARE_NUMERATOR / FRAME_DATA_SHARE_DENOMINATOR;
     let a = call_all(BytecodeBuilder::default(), B)
         .append(POP)

@@ -937,7 +937,7 @@ impl AdditionalLimit {
 const fn share_of_remaining(remaining: u64) -> u64 {
     const N: u64 = FRAME_DATA_SHARE_NUMERATOR;
     const D: u64 = FRAME_DATA_SHARE_DENOMINATOR;
-    const _: () = assert!(N < D && D % (D - N) == 0);
+    const _: () = assert!(N < D && D.is_multiple_of(D - N));
     const K: u64 = D / (D - N);
     remaining - remaining.div_ceil(K)
 }
