@@ -332,6 +332,62 @@ fn test_every_limit_stops_the_transaction_at_every_depth_and_tier() {
     }
 }
 
+/// Rewrites every frame result it sees end into `into`, and leaves its gas as it is.
+struct Halter {
+    into: InstructionResult,
+}
+
+impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for Halter {
+    fn call_end(
+        &mut self,
+        _context: &mut MegaContext<DB>,
+        _inputs: &CallInputs,
+        outcome: &mut CallOutcome,
+    ) {
+        outcome.result.result = self.into;
+    }
+}
+
+/// An inspector that rewrites every frame result into a halt cannot turn a stop into a halt either:
+/// under the latch every result is the stop, whatever produced it, so the transaction reports the
+/// stop and bills what ran, as it does without the inspector, rather than burning its gas.
+#[test]
+fn test_an_inspector_cannot_turn_a_stop_into_a_halt() {
+    let slot = one_slot();
+    let halts = [
+        InstructionResult::OutOfGas,
+        InstructionResult::PrecompileOOG,
+        InstructionResult::InvalidFEOpcode,
+    ];
+    for limit in Limit::ALL {
+        for crossing in [0, 3] {
+            for gas_limit in TIERS {
+                let (configured, _) = limits_of(limit, crossing, slot);
+                let plain = execute(chain(limit, crossing, false), configured, gas_limit);
+                for into in halts {
+                    let case =
+                        format!("{limit:?} at depth {crossing}, gas limit {gas_limit}, {into:?}");
+                    let mut evm = MegaEvm::new(
+                        context(chain(limit, crossing, false)).with_tx_runtime_limits(configured),
+                    )
+                    .with_inspector(Halter { into });
+                    let halted =
+                        evm.execute_transaction(call(CALLER, A, U256::ZERO, gas_limit)).unwrap();
+                    assert!(
+                        matches!(&halted.result, ExecutionResult::Revert { .. }),
+                        "{case}: {:?}",
+                        halted.result
+                    );
+                    assert_eq!(halted.result.output(), plain.result.output(), "{case}");
+                    assert_eq!(halted.limit_exceeded, plain.limit_exceeded, "{case}");
+                    assert_eq!(halted.gas, plain.gas, "{case}");
+                    assert_eq!(halted.usage, plain.usage, "{case}");
+                }
+            }
+        }
+    }
+}
+
 /// The limits a cell runs under, and the stop's limit where it is known before the run: every
 /// dimension but the compute limit, which the read sets.
 fn limits_of(limit: Limit, crossing: usize, slot: u64) -> (EvmTxRuntimeLimits, Option<u64>) {
