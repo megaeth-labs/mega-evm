@@ -19,10 +19,10 @@
 //! - `ORIGIN` and `GASPRICE` in the init code are the transaction's own.
 //! - The creation runs at depth 1, as the call's child: one level below the same init code sent as
 //!   a creation transaction, which runs at depth 0. Its frames reach the call-stack limit one frame
-//!   earlier, and `remainingComputeGas()` and `disableVolatileDataAccess()`, which act for the
-//!   frame one level above the one a call would start, see the keyless call as the frame above the
-//!   constructor: volatile-data access switched off from the call's depth covers the constructor,
-//!   and the call's charges are compute a detained constructor has already spent.
+//!   earlier. The call is the frame above the constructor, and its charges — the overhead and the
+//!   `CREATE` opcode's regular gas — are compute the transaction spent before the constructor ran:
+//!   a detained constructor has spent them already, and one detained from the transaction's start
+//!   hears `remainingComputeGas()` answer the cap less them.
 //! - The signer's nonce is bumped by the creation, as any creator's is, and a deployment is refused
 //!   once the signer's nonce is above 1 (`SignerNonceTooHigh`). A deployment from nonce 0 keeps the
 //!   bump, which is the replay barrier. From nonce 1 the creation's bump is taken back, whether the
