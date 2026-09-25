@@ -18,13 +18,16 @@
 //!
 //! - `ORIGIN` and `GASPRICE` in the init code are the transaction's own.
 //! - The signer's nonce is bumped by the creation, as any creator's is, and a deployment is refused
-//!   once the signer's nonce is above 1 (`SignerNonceTooHigh`). A deployment keeps the bump only
-//!   from 0 to 1, which is the replay barrier; from nonce 1, whether it succeeds or fails, it
-//!   leaves the nonce at 1 and keeps no record of the bump, as the legacy engine never took a
-//!   signer past 1. The call is permissionless and the signed transaction public, so no number of
-//!   failing calls, whoever makes them, gets a signer's deployment refused, and a deployment that
-//!   succeeded answers a resubmission with `ContractAlreadyExists()`. Nonces a delegated signer's
-//!   own code spends in the constructor stay spent.
+//!   once the signer's nonce is above 1 (`SignerNonceTooHigh`). A deployment from nonce 0 keeps the
+//!   bump, which is the replay barrier. A deployment from nonce 1 takes the bump back, with its
+//!   record, whether it succeeds or fails, when the bump is the last nonce change the deployment
+//!   made: the signer stays at 1, as in the legacy engine. The call is permissionless and the
+//!   signed transaction public, so no number of failing calls, whoever makes them, gets such a
+//!   signer's deployment refused, and a deployment that succeeded answers a resubmission with
+//!   `ContractAlreadyExists()`. A delegated signer whose code creates accounts in the constructor
+//!   spends further nonces after the bump; those stay spent, and so does the bump, because the
+//!   nonce cannot go back below an account the signer created. Such a signer ends above 1, and
+//!   every later deployment of it is refused `SignerNonceTooHigh`.
 //! - A signer with no account is charged its account as state gas, once, by the call: the nonce
 //!   bump creates it, and no other charge does.
 //! - The call pays what the `CREATE` opcode charges its frame: its regular gas, which stays spent,

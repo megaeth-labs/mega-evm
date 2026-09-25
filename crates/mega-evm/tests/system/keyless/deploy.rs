@@ -123,7 +123,7 @@ fn test_keyless_deploy_increments_nonce_from_zero() {
 }
 
 /// A signer at nonce 1 still deploys at its Nick's-Method address, which is its first creation's
-/// and not its nonce's, and stays at nonce 1: a deployment takes no signer past 1.
+/// and not its nonce's, and stays at nonce 1: the creation's bump from 1 is taken back.
 #[test]
 fn test_a_signer_at_nonce_one_deploys_at_the_same_address() {
     for gas_limit in GAS_LIMITS {

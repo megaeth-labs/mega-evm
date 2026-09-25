@@ -281,7 +281,7 @@ fn test_a_failed_deployment_gives_the_created_account_back_at_its_price() {
 /// A signer that sends its own deployment is the transaction's sender, whose account the body
 /// counts: the creation's nonce bump makes no record of its own, only the created account does,
 /// and the signer, an account already, is charged nothing for it. The transaction's own bump took
-/// it to nonce 1, and a deployment takes no signer past 1.
+/// it to nonce 1, and the creation's bump from there is taken back.
 #[test]
 fn test_a_signer_that_sends_its_own_deployment_makes_no_record_of_its_own() {
     let deployment = Deployment::new(deploying(&runtime(RUNTIME_LEN)));

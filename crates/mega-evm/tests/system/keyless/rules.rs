@@ -5,9 +5,11 @@
 //! The rules, their order and the error ABI are the legacy engine's; `precedence` pins the error a
 //! call several rules refuse reports. What moved is the balance rule, which asks the signer for
 //! the transaction's value alone — a deployment pays no gas out of the signer's balance — and
-//! rule 4, which now counts real nonces: a deployment keeps the creation's bump only from 0 to 1,
-//! and takes no signer past 1, as the legacy engine did. A signer at nonce 1 stays there however
-//! often its deployment fails, whoever submits it, and once it deploys.
+//! rule 4, which now counts real nonces: a deployment keeps the creation's bump from 0 to 1, and
+//! takes it back from 1, as the legacy engine did, unless the signer's own code spent a nonce
+//! after it. A signer at nonce 1 stays there however often its deployment fails, whoever submits
+//! it, and once it deploys; a delegated signer that creates accounts in its constructor ends above
+//! 1, and is refused thereafter.
 
 use alloy_primitives::{address, keccak256, Signature};
 use mega_evm::{
@@ -462,7 +464,7 @@ fn fail_then_deploy(
         3,
     );
     assert_eq!(returned(&deployed).deployedAddress, address, "at {deploying_at}");
-    assert_eq!(nonce(&deployed, signer), 1, "a deployment takes no signer past 1");
+    assert_eq!(nonce(&deployed, signer), 1, "the creation's bump from 1 is taken back");
     db.commit(deployed.result_and_state.state);
     db
 }
@@ -698,10 +700,12 @@ fn test_a_delegated_signer_deploys() {
 
 /// A delegated signer's own code can spend its nonces while its deployment runs: a constructor
 /// that calls the signer runs the delegation, which creates two accounts at the signer's next
-/// nonces. Those stay spent — the settlement takes back the creation's own bump and nothing
-/// else — so the nonce never goes back below an account the signer created, and the signer's
-/// next creations land at fresh addresses. A creation that reverts takes the delegation's
-/// creations back with it, and the signer ends at 1.
+/// nonces. Those stay spent, and so does the creation's own bump below them — the settlement
+/// takes back nothing — so the nonce never goes back below an account the signer created, and
+/// the signer's next creations land at fresh addresses. The signer ends at 4, and a resubmission
+/// is refused `SignerNonceTooHigh` at that nonce. A creation that reverts takes the delegation's
+/// creations back with it: the bump is the last one again, it is taken back, the signer ends at 1,
+/// and a resubmission runs and fails as the first did.
 #[test]
 fn test_nonces_a_delegated_signer_spends_in_its_deployment_stay_spent() {
     let delegate = address!("0x00000000000000000000000000000000000d1e6a");
@@ -738,6 +742,25 @@ fn test_nonces_a_delegated_signer_spends_in_its_deployment_stay_spent() {
                 assert_eq!(nonce(&outcome, created), 1, "{name}: nonce {spent} at {gas_limit}");
             }
             db.commit(outcome.result_and_state.state);
+
+            // The same deployment submitted again, by the relayer's next transaction.
+            let limits = EvmTxRuntimeLimits::no_limits();
+            let again =
+                run_nth(db.clone(), deployment.call_data(LARGE_OVERRIDE), gas_limit, limits, 1);
+            if *ends_at > 1 {
+                assert_eq!(
+                    refusal(&again),
+                    KeylessDeployError::SignerNonceTooHigh { signer_nonce: *ends_at },
+                    "{name}: resubmitted at {gas_limit}",
+                );
+            } else {
+                let error = failure(&again);
+                assert!(
+                    matches!(error, KeylessDeployError::ExecutionReverted { .. }),
+                    "{name}: resubmitted at {gas_limit}: {error:?}",
+                );
+            }
+            assert_eq!(nonce(&again, deployment.signer), *ends_at, "{name}: resubmitted");
 
             // The signer's next two creations, its delegation run by a plain call.
             let next = [ends_at, &(ends_at + 1)].map(|nonce| deployment.signer.create(*nonce));
