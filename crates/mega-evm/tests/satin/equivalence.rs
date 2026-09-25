@@ -413,7 +413,9 @@ fn test_system_call_matches_op_revm() {
     assert!(mega_outcome.result.is_success());
     assert_eq!(
         mega_outcome.result.gas().reservoir_remaining(),
-        SYSTEM_CALL_GAS_LIMIT - SYSTEM_CALL_REGULAR_GAS_LIMIT - SLOT_STATE_GAS,
+        SYSTEM_CALL_GAS_LIMIT -
+            SYSTEM_CALL_REGULAR_GAS_LIMIT -
+            satin_gas_params().get(GasId::sstore_set_state_gas()),
     );
     assert_same(&mega_outcome, &op_outcome);
 }

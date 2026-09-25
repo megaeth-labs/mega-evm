@@ -19,6 +19,7 @@ use alloy_primitives::{address, Address, Bytes, TxKind, B256, U256};
 use alloy_sol_types::SolCall;
 use mega_evm::{
     constants::{SLOT_STATE_GAS, TX_GAS_LIMIT_CAP},
+    satin_gas_params,
     system::{
         storage_slots::{
             CURRENT_SYSTEM_ADDRESS, PENDING_SYSTEM_ADDRESS, SYSTEM_ADDRESS_ACTIVATION_BLOCK,
@@ -41,6 +42,7 @@ use revm::{
         result::{EVMError, ExecResultAndState, ExecutionResult},
         BlockEnv, CfgEnv, Context, ContextSetters, ContextTr, Transaction, TxEnv,
     },
+    context_interface::cfg::GasId,
     handler::{
         EthFrame, ExecuteEvm, Handler, SystemCallTx, SYSTEM_CALL_GAS_LIMIT,
         SYSTEM_CALL_REGULAR_GAS_LIMIT,
@@ -51,6 +53,8 @@ use revm::{
     Journal,
 };
 
+use crate::common::runs_at_measurement_prices;
+
 const CALLER: Address = address!("0x4000000000000000000000000000000000000001");
 const CONTRACT: Address = address!("0x5000000000000000000000000000000000000001");
 
@@ -59,6 +63,12 @@ const SYSTEM_ADDRESS: Address = alloy_eips::eip4788::SYSTEM_ADDRESS;
 
 /// The reservoir a system call on revm's default gas limit carries: the margin above 30M.
 const DEFAULT_RESERVOIR: u64 = SYSTEM_CALL_GAS_LIMIT - SYSTEM_CALL_REGULAR_GAS_LIMIT;
+
+/// The state gas of one fresh slot at the minimum bucket, under the schedule in force: Satin's
+/// own, [`SLOT_STATE_GAS`], or the one a measurement build's byte prices built.
+fn slot() -> u64 {
+    satin_gas_params().get(GasId::sstore_set_state_gas())
+}
 
 type Outcome = ExecResultAndState<ExecutionResult<MegaHaltReason>, EvmState>;
 type OpContext = Context<
@@ -193,7 +203,7 @@ fn test_a_system_call_within_30m_has_no_reservoir() {
             run_both(both_evms(db_with(gas_to_slot())), CALLER, CONTRACT, Bytes::new(), gas_limit);
         assert!(mega.result.is_success(), "{:?}", mega.result);
         assert_eq!(mega.result.gas().reservoir_remaining(), 0);
-        assert_eq!(mega.result.gas().state_gas_spent_final(), SLOT_STATE_GAS);
+        assert_eq!(mega.result.gas().state_gas_spent_final(), slot());
         assert!(stored_gas(&mega) > gas_limit - 10, "all {gas_limit} of it is regular gas");
         assert_same(&mega, &op);
     }
@@ -213,20 +223,24 @@ fn test_a_system_call_above_30m_carries_the_excess_as_reservoir() {
         assert!(gas > SYSTEM_CALL_REGULAR_GAS_LIMIT - 10, "all of it: {gas}");
         assert_eq!(
             mega.result.gas().reservoir_remaining(),
-            gas_limit - SYSTEM_CALL_REGULAR_GAS_LIMIT - SLOT_STATE_GAS,
+            gas_limit - SYSTEM_CALL_REGULAR_GAS_LIMIT - slot(),
             "the excess, less the one slot it paid for",
         );
         assert_same(&mega, &op);
     }
 }
 
-/// The default reservoir holds sixteen fresh slots at Satin's price. Sixteen writes empty it and
-/// spend no regular gas on state; a seventeenth spills its state gas onto the regular budget.
-/// `GAS`, read after the writes, shows the spill: the regular gas the seventeenth write took is
-/// its own regular cost, which the sixteenth write's shows, plus one slot of state gas.
+/// The default reservoir holds sixteen fresh slots at Satin's price. That many writes empty it and
+/// spend no regular gas on state; the next one spills what the reservoir cannot pay onto the
+/// regular budget. `GAS`, read after the writes, shows the spill: the regular gas the next write
+/// took is its own regular cost, which the write before it shows, plus the part of its slot the
+/// reservoir did not hold.
 #[test]
 fn test_a_system_call_s_state_draws_the_reservoir_first_then_spills() {
-    assert_eq!(DEFAULT_RESERVOIR, 16 * SLOT_STATE_GAS);
+    if !runs_at_measurement_prices() {
+        assert_eq!(SLOT_STATE_GAS, slot());
+        assert_eq!(DEFAULT_RESERVOIR, 16 * SLOT_STATE_GAS);
+    }
     // The reading is stored into a slot that already holds a value, which writes no new state.
     const READING: u64 = 0xff;
     let run = |writes| {
@@ -237,21 +251,27 @@ fn test_a_system_call_s_state_draws_the_reservoir_first_then_spills() {
         let (mega, op) =
             run_both(both_evms(db), CALLER, CONTRACT, Bytes::new(), SYSTEM_CALL_GAS_LIMIT);
         assert!(mega.result.is_success(), "{:?}", mega.result);
-        assert_eq!(mega.result.gas().state_gas_spent_final(), writes * SLOT_STATE_GAS);
+        assert_eq!(mega.result.gas().state_gas_spent_final(), writes * slot());
         assert_same(&mega, &op);
         let reading = mega.state[&CONTRACT].storage[&U256::from(READING)].present_value();
         (reading.to::<u64>(), mega.result.gas().reservoir_remaining())
     };
 
-    let (after_15, reservoir_15) = run(15);
-    let (after_16, reservoir_16) = run(16);
-    let (after_17, reservoir_17) = run(17);
-    assert_eq!(reservoir_15, SLOT_STATE_GAS);
-    assert_eq!(reservoir_16, 0, "sixteen slots empty the reservoir");
-    assert_eq!(reservoir_17, 0);
-    let one_write = after_15 - after_16;
-    assert!(one_write < SLOT_STATE_GAS, "the sixteenth write took regular gas for itself alone");
-    assert_eq!(after_16 - after_17, one_write + SLOT_STATE_GAS, "the seventeenth spilled");
+    // The most slots the reservoir holds, and what the one after them spills.
+    let held = DEFAULT_RESERVOIR / slot();
+    let spill = (held + 1) * slot() - DEFAULT_RESERVOIR;
+    let (before, reservoir_before) = run(held - 1);
+    let (at, reservoir_at) = run(held);
+    let (after, reservoir_after) = run(held + 1);
+    assert_eq!(reservoir_before, DEFAULT_RESERVOIR - (held - 1) * slot());
+    assert_eq!(reservoir_at, DEFAULT_RESERVOIR - held * slot(), "empty at Satin's price");
+    assert_eq!(reservoir_after, 0);
+    let one_write = before - at;
+    assert!(
+        one_write < slot(),
+        "the last write the reservoir held took regular gas for itself alone"
+    );
+    assert_eq!(at - after, one_write + spill, "the next one spilled");
 }
 
 /// What is left of the reservoir is reported, slot by slot, and a call that writes nothing
@@ -269,7 +289,7 @@ fn test_reservoir_remaining_is_what_the_writes_left() {
         );
         assert_eq!(
             mega.result.gas().reservoir_remaining(),
-            DEFAULT_RESERVOIR - writes * SLOT_STATE_GAS,
+            DEFAULT_RESERVOIR - writes * slot(),
             "{writes} writes",
         );
         assert_same(&mega, &op);
@@ -336,7 +356,7 @@ fn test_a_system_call_with_a_reservoir_stays_exempt() {
     let (mega_outcome, op_outcome) =
         run_both((mega, op), SYSTEM_ADDRESS, CONTRACT, Bytes::new(), 250_000_000);
     assert!(mega_outcome.result.is_success(), "{:?}", mega_outcome.result);
-    assert_eq!(mega_outcome.result.gas().state_gas_spent_final(), 20 * SLOT_STATE_GAS, "m = 1");
+    assert_eq!(mega_outcome.result.gas().state_gas_spent_final(), 20 * slot(), "m = 1");
     assert_eq!(crowded.total_bucket_queries(), 0, "no capacity was read");
     assert_same(&mega_outcome, &op_outcome);
 }
@@ -378,7 +398,7 @@ fn test_apply_pending_changes_at_30m_is_priced_at_the_minimum_bucket() {
     assert!(mega.result.is_success(), "{:?}", mega.result);
     assert_eq!(mega.result.gas().reservoir_remaining(), 0);
     assert!(mega.result.gas().state_gas_spent_final() > 0, "the change wrote fresh slots");
-    assert_eq!(mega.result.gas().state_gas_spent_final() % SLOT_STATE_GAS, 0, "at m = 1");
+    assert_eq!(mega.result.gas().state_gas_spent_final() % slot(), 0, "at m = 1");
     assert_eq!(crowded.total_bucket_queries(), 0);
     assert_same(&mega, &op);
 }
@@ -417,7 +437,7 @@ fn test_the_default_pre_block_calls_keep_the_30m_regular_budget_in_a_crowded_reg
         assert_eq!(mega.ctx().tx().gas_limit(), SYSTEM_CALL_GAS_LIMIT, "not the block's 10B");
         assert_eq!(
             mega_outcome.result.gas().reservoir_remaining(),
-            DEFAULT_RESERVOIR - slots * SLOT_STATE_GAS,
+            DEFAULT_RESERVOIR - slots * slot(),
         );
         assert_eq!(crowded.total_bucket_queries(), 0);
         assert_same(&mega_outcome, &op_outcome);
