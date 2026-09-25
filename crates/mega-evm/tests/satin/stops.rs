@@ -305,6 +305,13 @@ fn assert_cell(limit: Limit, crossing: usize, gas_limit: u64, slot: u64) {
     // did not reach a caller: the inspector changed nothing the transaction reports.
     assert_eq!(rewritten.gas, plain.gas, "{row}");
     assert_eq!(rewriter.marker_writes, 0, "{row}: no frame ran on after the crossing");
+    // A caller that resumed after a compute stop would fail its first charge on the withheld part
+    // and report the same stop on the same bill: only its step shows it ran.
+    assert_eq!(
+        rewriter.last.map(|(frame, ..)| frame),
+        Some(CHAIN[crossing]),
+        "{row}: the last step ran in the crossing frame"
+    );
     if limit != Limit::Compute {
         assert_eq!(
             rewriter.last,
@@ -414,6 +421,33 @@ fn limits_of(limit: Limit, crossing: usize, slot: u64) -> (EvmTxRuntimeLimits, O
 
 /* ---------- a detained callee does not burn its callers' gas ---------- */
 
+/// Records the frame the last step ran in.
+///
+/// After a compute stop the transaction's compute sits at the limit, so a caller that resumed
+/// would fail its first charge on the withheld part and be stopped the same way, on the same bill:
+/// the frame of the last step is what tells it ran.
+#[derive(Default)]
+struct LastStep(Option<Address>);
+
+impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for LastStep {
+    fn step(&mut self, interp: &mut Interpreter<EthInterpreter>, _context: &mut MegaContext<DB>) {
+        self.0 = Some(interp.input.target_address);
+    }
+}
+
+/// Runs `tx` on `db` under `limits` and a [`LastStep`], and returns the outcome and the frame the
+/// last step ran in.
+fn run_recording_steps(
+    db: MemoryDatabase,
+    limits: EvmTxRuntimeLimits,
+    tx: mega_evm::MegaTransaction,
+) -> (MegaTransactionOutcome, Option<Address>) {
+    let mut evm = MegaEvm::new(context(db).with_tx_runtime_limits(limits))
+        .with_inspector(LastStep::default());
+    let outcome = evm.execute_transaction(tx).expect("the transaction is valid");
+    (outcome, evm.inspector().0)
+}
+
 /// A callee at `depth` that reads the block's timestamp and then computes past the cap, below
 /// callers that forward it all their gas and would write [`MARKER`] once it returned.
 fn detained_callee_at(depth: usize) -> MemoryDatabase {
@@ -430,7 +464,8 @@ fn detained_callee_at(depth: usize) -> MemoryDatabase {
 /// A callee that reads the block's timestamp and then computes past the cap does not make its
 /// callers burn their gas: the stop bills the transaction its intrinsic gas plus the limit the read
 /// set — its compute at the read plus the cap — and nothing of what the callers held, whatever the
-/// gas limit, one call down or three, below the execution cap and above it.
+/// gas limit, one call down or three, below the execution cap and above it. No caller resumes: the
+/// callee runs the last step.
 #[test]
 fn test_a_callee_that_reads_the_timestamp_does_not_make_its_callers_burn_their_gas() {
     for depth in [1, 3] {
@@ -439,10 +474,21 @@ fn test_a_callee_that_reads_the_timestamp_does_not_make_its_callers_burn_their_g
             .map(|gas_limit| {
                 let case = format!("depth {depth}, gas limit {gas_limit}");
                 let intrinsic = intrinsic(gas_limit);
+                let tx = || call(CALLER, A, U256::ZERO, gas_limit);
                 let mut evm = MegaEvm::new(context(detained_callee_at(depth)));
-                let outcome =
-                    evm.execute_transaction(call(CALLER, A, U256::ZERO, gas_limit)).unwrap();
+                let outcome = evm.execute_transaction(tx()).unwrap();
                 let limit = evm.ctx().detention().compute_limit().expect("the read set a limit");
+                let (recorded, last) = run_recording_steps(
+                    detained_callee_at(depth),
+                    EvmTxRuntimeLimits::default(),
+                    tx(),
+                );
+                assert_eq!(last, Some(CHAIN[depth]), "{case}: the last step ran in the callee");
+                assert_eq!(
+                    (&recorded.result, recorded.gas),
+                    (&outcome.result, outcome.gas),
+                    "{case}: the recorder changes nothing"
+                );
                 let stop = LimitCheck::ExceedsLimit {
                     kind: LimitKind::ComputeGas,
                     limit,
@@ -767,15 +813,24 @@ fn with_oracle_read(db: MemoryDatabase) -> MemoryDatabase {
 
 /// Runs `db`'s `A` under `limits` with [`ROOMY`] gas and asserts the detention stop: a revert
 /// carrying `MegaLimitExceeded(2, limit)` for the limit the reads set, billed the intrinsic gas
-/// plus that limit and nothing of the gas the transaction had left. Returns the limit and what the
-/// transaction read.
+/// plus that limit and nothing of the gas the transaction had left. The frame `crossing` crossed
+/// it, and ran the last step: no caller resumed. Returns the limit and what the transaction read.
 fn assert_detention_stop(
     db: MemoryDatabase,
     limits: EvmTxRuntimeLimits,
+    crossing: Address,
 ) -> (u64, mega_evm::VolatileDataAccess) {
     let intrinsic = intrinsic(ROOMY);
+    let (recorded, last) =
+        run_recording_steps(db.clone(), limits, call(CALLER, A, U256::ZERO, ROOMY));
+    assert_eq!(last, Some(crossing), "the last step ran in the crossing frame");
     let mut evm = MegaEvm::new(context(db).with_tx_runtime_limits(limits));
     let outcome = evm.execute_transaction(call(CALLER, A, U256::ZERO, ROOMY)).unwrap();
+    assert_eq!(
+        (&recorded.result, recorded.gas),
+        (&outcome.result, outcome.gas),
+        "the recorder changes nothing"
+    );
     let detention = evm.ctx().detention();
     let limit = detention.compute_limit().expect("a read set a limit");
     let stop = LimitCheck::ExceedsLimit {
@@ -801,7 +856,7 @@ fn assert_detention_stop(
 fn test_volatile_data_access_oog_does_not_consume_all_gas() {
     let code = thousand_writes(BytecodeBuilder::default().append_many([TIMESTAMP, POP]));
     let db = MemoryDatabase::default().account_code(A, code.stop().build());
-    let (limit, accessed) = assert_detention_stop(db, EvmTxRuntimeLimits::default());
+    let (limit, accessed) = assert_detention_stop(db, EvmTxRuntimeLimits::default(), A);
     assert!(limit - CAP < 1_000, "the read came first: {}", limit - CAP);
     assert_eq!(accessed, mega_evm::VolatileDataAccess::TIMESTAMP);
 }
@@ -815,7 +870,7 @@ fn test_nested_call_block_env_access_child_oog() {
     let db = MemoryDatabase::default()
         .account_code(A, parent.stop().build())
         .account_code(B, child.stop().build());
-    let (limit, _) = assert_detention_stop(db, EvmTxRuntimeLimits::default());
+    let (limit, _) = assert_detention_stop(db, EvmTxRuntimeLimits::default(), B);
     assert!(limit - CAP < 10_000, "the child read near the start: {}", limit - CAP);
 }
 
@@ -829,7 +884,7 @@ fn test_parent_block_env_access_oog_after_nested_call() {
     let db = MemoryDatabase::default()
         .account_code(A, thousand_writes(parent).stop().build())
         .account_code(B, child.stop().build());
-    let (limit, _) = assert_detention_stop(db, EvmTxRuntimeLimits::default());
+    let (limit, _) = assert_detention_stop(db, EvmTxRuntimeLimits::default(), A);
     assert!(limit - CAP < 1_000, "the read came first: {}", limit - CAP);
 }
 
@@ -839,7 +894,7 @@ fn test_parent_block_env_access_oog_after_nested_call() {
 fn test_an_oracle_read_holds_the_transaction_to_its_cap() {
     let code = thousand_writes(call_oracle(BytecodeBuilder::default(), None));
     let db = with_oracle_read(MemoryDatabase::default().account_code(A, code.stop().build()));
-    let (limit, accessed) = assert_detention_stop(db, EvmTxRuntimeLimits::default());
+    let (limit, accessed) = assert_detention_stop(db, EvmTxRuntimeLimits::default(), A);
     assert!(limit - ORACLE_ACCESS_COMPUTE_GAS < 10_000, "{}", limit - ORACLE_ACCESS_COMPUTE_GAS);
     assert_eq!(accessed, mega_evm::VolatileDataAccess::ORACLE);
 }
@@ -849,7 +904,7 @@ fn test_an_oracle_read_holds_the_transaction_to_its_cap() {
 fn test_oracle_volatile_data_access_oog_does_not_consume_all_gas() {
     let code = thousand_writes(call_oracle(BytecodeBuilder::default(), Some(0xffff)));
     let db = with_oracle_read(MemoryDatabase::default().account_code(A, code.stop().build()));
-    assert_detention_stop(db, EvmTxRuntimeLimits::default());
+    assert_detention_stop(db, EvmTxRuntimeLimits::default(), A);
 }
 
 /// A contract that calls one that reads the Oracle's storage and then writes a thousand fresh
@@ -862,7 +917,8 @@ fn test_parent_runs_out_of_gas_after_oracle_access() {
     let db = MemoryDatabase::default()
         .account_code(A, outer.stop().build())
         .account_code(B, middle.stop().build());
-    let (_, accessed) = assert_detention_stop(with_oracle_read(db), EvmTxRuntimeLimits::default());
+    let (_, accessed) =
+        assert_detention_stop(with_oracle_read(db), EvmTxRuntimeLimits::default(), B);
     assert_eq!(accessed, mega_evm::VolatileDataAccess::ORACLE);
 }
 
@@ -874,7 +930,7 @@ fn test_both_volatile_data_access_oog_does_not_consume_all_gas() {
     let code = call_oracle(BytecodeBuilder::default().append_many([TIMESTAMP, POP]), Some(0xffff));
     let db = MemoryDatabase::default().account_code(A, thousand_writes(code).stop().build());
     let limits = EvmTxRuntimeLimits::default().with_oracle_access_compute_gas_limit(ORACLE_CAP);
-    let (limit, accessed) = assert_detention_stop(with_oracle_read(db), limits);
+    let (limit, accessed) = assert_detention_stop(with_oracle_read(db), limits, A);
     assert!(limit - ORACLE_CAP < 10_000, "the Oracle's read binds: {limit}");
     assert_eq!(
         accessed,
@@ -888,7 +944,7 @@ fn test_both_volatile_data_access_oog_does_not_consume_all_gas() {
 fn test_volatile_access_post_access_cap_enforced() {
     let code = work(BytecodeBuilder::default().append_many([TIMESTAMP, POP]), ROUNDS);
     let db = MemoryDatabase::default().account_code(A, code.stop().build());
-    let (limit, _) = assert_detention_stop(db, EvmTxRuntimeLimits::default());
+    let (limit, _) = assert_detention_stop(db, EvmTxRuntimeLimits::default(), A);
     assert!(limit - CAP < 1_000, "{}", limit - CAP);
 }
 
