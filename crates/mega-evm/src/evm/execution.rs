@@ -571,6 +571,16 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
         let action = meter_deployed_code(ctx, frame, action);
         let mut next = frame.process_next_action(ctx, action);
         after_frame_run(ctx, frame, &mut next);
+        // No frame runs an instruction once the transaction is latched, and every site that
+        // latches rewrites its own frame's action to the stop, so no frame returns a halt under
+        // the latch. Checked on this path alone: on the inspected one an inspector's step hooks
+        // can rewrite a running frame's action, and the latch writes over that halt instead.
+        debug_assert!(
+            !matches!(&next, Ok(ItemOrResult::Result(result))
+                if result.instruction_result().is_halt() &&
+                    ctx.additional_limit.latched().is_some()),
+            "a frame returned a halt under the latch"
+        );
         next.inspect(|next| {
             if next.is_result() {
                 frame.set_finished(true);
