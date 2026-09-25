@@ -9,7 +9,9 @@
 mod charges;
 mod deploy;
 mod detention;
+mod differential;
 mod dispatch;
+mod frame;
 mod inspector;
 mod limits;
 mod precedence;

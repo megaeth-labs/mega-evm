@@ -1,178 +1,184 @@
 //! The settlement of a keyless deployment: the creation's result returned into the
 //! `keylessDeploy` call that started it, and the call's answer in the `IKeylessDeploy` ABI.
 
-#[cfg(not(feature = "std"))]
-use alloc as std;
-use std::{boxed::Box, vec::Vec};
-
 use alloy_evm::Database;
 use alloy_primitives::{Address, Bytes};
 use alloy_sol_types::SolCall;
 use revm::{
     context::{
-        result::{FromStringError, HaltReason, OutOfGasError},
-        ContextTr, JournalTr,
+        result::{HaltReason, OutOfGasError},
+        ContextError, ContextTr, FrameStack, JournalTr,
     },
-    context_interface::journaled_state::account::JournaledAccountTr,
-    handler::FrameResult,
+    context_interface::{cfg::gas::GasTracker, journaled_state::account::JournaledAccountTr},
+    handler::{handle_reservoir_remaining_gas, EthFrame, FrameResult},
     interpreter::{
-        CallInputs, CallOutcome, Gas, InstructionResult, InterpreterResult, SuccessOrHalt,
+        interpreter::EthInterpreter, Gas, InstructionResult, InterpreterAction, SuccessOrHalt,
     },
     primitives::KECCAK_EMPTY,
 };
 
 use crate::{
-    settle_frame_result,
-    system::keyless::{
-        encode_error_result, IKeylessDeploy, KeylessDeployError, KEYLESS_DEPLOY_ADDRESS,
-    },
+    system::keyless::{encode_error_result, IKeylessDeploy, KeylessDeployError},
     ExternalEnvTypes, MegaContext, MegaHaltReason,
 };
 
-use super::dispatch::KeylessCall;
+use super::dispatch::{KeylessFrame, Started};
 
-/// Keeps `refund`, the history gas the creation's lane gave back when the creation returned, for
-/// the `keylessDeploy` call that paid it: the creation is the outermost frame revm runs, so no
-/// frame of revm's receives it.
-pub(crate) fn give_back_history<DB: Database, ExtEnvs: ExternalEnvTypes>(
-    ctx: &mut MegaContext<DB, ExtEnvs>,
-    refund: u64,
-) {
-    if let Some(call) = &mut ctx.keyless_call {
-        call.returned_history = call.returned_history.saturating_add(refund);
-    }
+/// What a `keylessDeploy` call answers from, once its creation returned into it.
+#[derive(Debug)]
+pub(crate) struct Returned {
+    started: Started,
+    creation: Creation,
 }
 
-/// Settles the result of a keyless deployment's creation into the `keylessDeploy` call that
-/// started it, and replaces `result` with the call's own; returns the call's inputs, which an
-/// inspector is told the call ended from. Nothing to do for a transaction that started no keyless
-/// deployment.
+/// What the creation a `keylessDeploy` call started returned.
+#[derive(Debug)]
+pub(crate) struct Creation {
+    result: InstructionResult,
+    output: Bytes,
+    /// What the creation spent ([`creation_gas_used`]).
+    gas_used: u64,
+    /// The address revm reports the creation at.
+    created: Option<Address>,
+}
+
+/// The creation a `keylessDeploy` call started, when `result`, about to be returned to the frame
+/// that waits for it, is that creation's, returning into the call; `None` for every other result.
 ///
-/// The call's gas takes the creation's back exactly as a `CREATE`'s frame does
-/// ([`settle_frame_result`]): the unspent forward, the reservoir, the creation's state and history
-/// gas when it succeeded, and the created account's charge when it did not — priced through the
-/// same hook it was charged through. The history of the records the creation did not keep comes
-/// back too. The creation's lane was popped when it returned, or is popped here when it never
-/// ran.
-///
-/// A deployment from nonce 0 keeps the creation's nonce bump. From nonce 1 the bump is taken back,
-/// whether the deployment succeeded or failed, only when it is the last nonce change the
-/// deployment made ([`take_back_bump`]), leaving the nonce at 1, as the legacy engine did; its
-/// write record and that record's history go with it, unless the creation succeeded and moved
-/// value out of the signer. The call is permissionless and the signed transaction public, so a
-/// nonce every failure spent would let anybody make a signer's address undeployable with two
-/// failing calls; and a success that spent it would answer a resubmission with
-/// `SignerNonceTooHigh` rather than `ContractAlreadyExists`. When the signer's own code spent a
-/// nonce in the constructor that survived it — on a default configuration, a delegated signer's
-/// `CREATE` or `CREATE2`, successful or not — nothing is taken back: a later bump may stand for an
-/// account, so the nonce is never moved back under one. That signer ends above 1, and a
-/// resubmission is refused `SignerNonceTooHigh`.
-///
-/// Then the call answers, as a frame that resumes after its child returned would:
-///
-/// - with the stop a limit left it, when there is one: the latched one, or its own budget's, which
-///   the nonce record a failed creation leaves a signer at nonce 0 on the call's lane can cross.
-///   The call reverts with it, and its journal checkpoint goes with the revert, the signer's nonce
-///   included;
-/// - otherwise with `keylessDeploy`'s return: the deployed address when the creation left code at
-///   it, or the zero address and the error the creation failed with — `ExecutionReverted`,
-///   `ExecutionHalted`, or `EmptyCodeDeployed` for a creation that left no code, having deployed
-///   none or destroyed itself. The call succeeds, and keeps what the creation's start wrote: a
-///   signer at nonce 0 whose deployment failed has spent its nonce all the same.
-///
-/// `gasUsed` is what the creation spent: its regular gas and the state and history gas it kept,
-/// from whichever pool paid it. It is the same whether the transaction has a state-gas reservoir
-/// or not, and it counts nothing the call paid for the creation's start.
-pub(crate) fn settle<DB, ExtEnvs, ERROR>(
-    ctx: &mut MegaContext<DB, ExtEnvs>,
-    result: &mut FrameResult,
-) -> Result<Option<Box<CallInputs>>, ERROR>
-where
-    DB: Database,
-    ExtEnvs: ExternalEnvTypes,
-    ERROR: From<DB::Error> + FromStringError,
-{
-    let Some(mut call) = ctx.keyless_call.take() else { return Ok(None) };
-    // The call's lane and the creation's: the creation returned through the frame lifecycle when
-    // it ran, and never reached it when it was answered at its start.
-    if ctx.additional_limit.frame_depth() > 1 {
-        let refund = ctx.additional_limit.on_frame_return(result);
-        call.returned_history = call.returned_history.saturating_add(refund);
+/// It is read here, before revm merges it into the call, which keeps nothing of it but its gas and
+/// whether it succeeded. The call is the frame at depth 0: the creation's result lands in it when
+/// the frame on top of the stack is the creation, finished, or the call itself, which a creation
+/// answered without a frame of its own returns into directly.
+pub(crate) fn returning<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    ctx: &MegaContext<DB, ExtEnvs>,
+    stack: &mut FrameStack<EthFrame<EthInterpreter>>,
+    result: &FrameResult,
+) -> Option<Creation> {
+    if !matches!(ctx.keyless_frame, Some(KeylessFrame::Deploying(_))) {
+        return None;
     }
-    settle_frame_result::<_, ERROR>(ctx, call.gas.tracker_mut(), result)?;
-    call.gas.refill_history(call.returned_history);
+    let top = stack.index()?;
+    if top != usize::from(stack.get().is_finished()) {
+        return None;
+    }
+    let result_code = result.instruction_result();
+    // The creation's gas as revm's settlement leaves it before the merge: a creation that failed
+    // rolls its state and history gas back, and one that halted spends its regular gas.
+    let mut gas = *result.gas();
+    handle_reservoir_remaining_gas(result_code, &mut GasTracker::default(), gas.tracker_mut());
+    Some(Creation {
+        result: result_code,
+        output: result.interpreter_result().output.clone(),
+        gas_used: creation_gas_used(&gas),
+        created: match result {
+            FrameResult::Create(outcome) => outcome.address,
+            FrameResult::Call(_) => None,
+        },
+    })
+}
+
+/// Settles `creation`, which revm has just merged into the `keylessDeploy` call whose gas is
+/// `gas`, and keeps what the call answers from on its resume ([`answer`]).
+///
+/// The merge is revm's own, as for a `CREATE`'s frame: the unspent forward, the reservoir, the
+/// creation's state and history gas when it succeeded, and the created account's charge when it
+/// did not — priced through the same hook it was charged through — with the history of the records
+/// the creation did not keep given back after it.
+///
+/// What is left is what a `CREATE` has no counterpart for. The signer's account comes back when
+/// the creation's start never created it. And a deployment from nonce 0 keeps the creation's nonce
+/// bump, while from nonce 1 the bump is taken back, whether the deployment succeeded or failed,
+/// only when it is the last nonce change the deployment made ([`take_back_bump`]), leaving the
+/// nonce at 1, as the legacy engine did; its write record and that record's history go with it,
+/// unless the creation succeeded and moved value out of the signer. The call is permissionless
+/// and the signed transaction public, so a nonce every failure spent would let anybody make a
+/// signer's address undeployable with two failing calls; and a success that spent it would answer
+/// a resubmission with `SignerNonceTooHigh` rather than `ContractAlreadyExists`. When the signer's
+/// own code spent a nonce in the constructor that survived it — on a default configuration, a
+/// delegated signer's `CREATE` or `CREATE2`, successful or not — nothing is taken back: a later
+/// bump may stand for an account, so the nonce is never moved back under one. That signer ends
+/// above 1, and a resubmission is refused `SignerNonceTooHigh`.
+///
+/// It runs before the call resumes, because the record it takes back may be what put the call
+/// over its budget: the call is held to its limits again without it, and the stop it returns on
+/// its resume, if any, is the one that stands then.
+pub(crate) fn settle<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    ctx: &mut MegaContext<DB, ExtEnvs>,
+    gas: &mut Gas,
+    creation: Creation,
+) -> Result<(), ContextError<DB::Error>> {
+    let Some(KeylessFrame::Deploying(started)) = ctx.keyless_frame.take() else {
+        unreachable!("a creation returns into a keylessDeploy call that started it")
+    };
     // The creation's start is what creates an empty signer's account. revm bumps the nonce of
     // every creation it is asked to build, and a creation the limits stop at its start is bumped
     // all the same; one an inspector answered in its place never started, and adds no account.
     // A signer that had an account was charged nothing, and gets nothing back.
-    let nonce = account_nonce(ctx, call.signer);
-    if nonce == call.signer_nonce {
-        call.gas.refill_reservoir(call.signer_account_charge);
+    let nonce = account_nonce(ctx, started.signer);
+    if nonce == started.signer_nonce {
+        gas.refill_reservoir(started.signer_account_charge);
     }
     // A deployment from nonce 1 keeps no bump of its own: a failure leaves the address
     // deployable, a success leaves it occupied. The creation's bump is the one above the nonce
     // the call started from, and it is taken back only when it is the last one: a later bump the
     // signer's own code made may stand for an account, so the nonce is never moved back under it.
-    if call.signer_nonce > 0 && nonce == call.signer_nonce + 1 {
-        take_back_bump(ctx, &mut call, result)?;
+    if started.signer_nonce > 0 && nonce == started.signer_nonce + 1 {
+        take_back_bump(ctx, gas, &started, creation.result)?;
     }
-
-    let (status, output) = match ctx.additional_limit.stop_before_run() {
-        Some(stop) => (InstructionResult::Revert, stop.revert_data()),
-        None => answer(ctx, &call, result),
-    };
-    if status.is_ok() {
-        ctx.journal_mut().checkpoint_commit();
-    } else {
-        ctx.journal_mut().checkpoint_revert(call.checkpoint);
-    }
-    *result = FrameResult::Call(CallOutcome {
-        result: InterpreterResult::new(status, output, call.gas),
-        memory_offset: call.inputs.return_memory_offset.clone(),
-        was_precompile_called: false,
-        precompile_call_logs: Vec::new(),
-        charged_new_account_state_gas: call.inputs.charged_new_account_state_gas,
-        charged_state_gas_address: KEYLESS_DEPLOY_ADDRESS,
-    });
-    Ok(Some(call.inputs))
+    ctx.keyless_frame = Some(KeylessFrame::Returned(Returned { started, creation }));
+    Ok(())
 }
 
-/// The `keylessDeploy` answer of a call whose creation settled into `result`.
+/// The action of a `keylessDeploy` call resuming on `gas` once its creation `returned` into it, a
+/// stop aside: `keylessDeploy`'s return — the deployed address when the creation left code at it,
+/// or the zero address and the error the creation failed with, `ExecutionReverted`,
+/// `ExecutionHalted`, or `EmptyCodeDeployed` for a creation that left no code, having deployed none
+/// or destroyed itself. The call succeeds, and keeps what the creation's start wrote: a signer at
+/// nonce 0 whose deployment failed has spent its nonce all the same.
+///
+/// `gasUsed` is what the creation spent: its regular gas and the state and history gas it kept,
+/// from whichever pool paid it. It is the same whether the transaction has a state-gas reservoir
+/// or not, and it counts nothing the call paid for the creation's start.
 ///
 /// A creation revm reports as a success at another address than the pinned one, or at none, is a
 /// broken engine rather than a failed deployment: the call reverts with `AddressMismatch()` or
 /// `NoContractCreated()`, which no deployment reaches.
-fn answer<DB: Database, ExtEnvs: ExternalEnvTypes>(
+pub(crate) fn answer<DB: Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &MegaContext<DB, ExtEnvs>,
-    call: &KeylessCall,
-    result: &FrameResult,
+    returned: &Returned,
+    gas: Gas,
+) -> InterpreterAction {
+    let (result, output) = answer_of(ctx, returned);
+    InterpreterAction::new_return(result, output, gas)
+}
+
+/// The result and output of [`answer`].
+fn answer_of<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    ctx: &MegaContext<DB, ExtEnvs>,
+    returned: &Returned,
 ) -> (InstructionResult, Bytes) {
-    let gas_used = creation_gas_used(result.gas());
-    let instruction_result = result.instruction_result();
-    if instruction_result.is_revert() {
-        let output = result.interpreter_result().output.clone();
+    let Returned { started, creation } = returned;
+    let gas_used = creation.gas_used;
+    if creation.result.is_revert() {
+        let output = creation.output.clone();
         return failed(KeylessDeployError::ExecutionReverted { gas_used, output }, gas_used);
     }
-    if !instruction_result.is_ok() {
-        let reason = halt_reason(instruction_result);
+    if !creation.result.is_ok() {
+        let reason = halt_reason(creation.result);
         return failed(KeylessDeployError::ExecutionHalted { gas_used, reason }, gas_used);
     }
-    let created = match result {
-        FrameResult::Create(outcome) => outcome.address,
-        FrameResult::Call(_) => None,
-    };
-    if created != Some(call.deploy_address) {
-        let error = if created.is_some() {
+    if creation.created != Some(started.deploy_address) {
+        let error = if creation.created.is_some() {
             KeylessDeployError::AddressMismatch
         } else {
             KeylessDeployError::NoContractCreated
         };
         return (InstructionResult::Revert, encode_error_result(error));
     }
-    if !holds_code(ctx, call.deploy_address) {
+    if !holds_code(ctx, started.deploy_address) {
         return failed(KeylessDeployError::EmptyCodeDeployed { gas_used }, gas_used);
     }
-    returned(gas_used, call.deploy_address, Bytes::new())
+    returned_value(gas_used, started.deploy_address, Bytes::new())
 }
 
 /// Whether the deployment left code at `address`. The code the journal holds, not the code the
@@ -194,20 +200,16 @@ fn holds_code<DB: Database, ExtEnvs: ExternalEnvTypes>(
 /// The record goes unless the signer's account keeps another write it stands for: the value a
 /// creation that succeeded moved out of it. A creation that failed took its value transfer back
 /// with the rest of its writes.
-fn take_back_bump<DB, ExtEnvs, ERROR>(
+fn take_back_bump<DB: Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &mut MegaContext<DB, ExtEnvs>,
-    call: &mut KeylessCall,
-    result: &FrameResult,
-) -> Result<(), ERROR>
-where
-    DB: Database,
-    ExtEnvs: ExternalEnvTypes,
-    ERROR: From<DB::Error>,
-{
-    ctx.journal_mut().load_account_mut(call.signer)?.data.set_nonce(call.signer_nonce);
-    let moved_value = call.moves_value && result.instruction_result().is_ok();
+    gas: &mut Gas,
+    started: &Started,
+    result: InstructionResult,
+) -> Result<(), ContextError<DB::Error>> {
+    ctx.journal_mut().load_account_mut(started.signer)?.data.set_nonce(started.signer_nonce);
+    let moved_value = started.moves_value && result.is_ok();
     if !moved_value && ctx.additional_limit.take_back_creator_record() {
-        call.gas.refill_history(call.signer_record_charge);
+        gas.refill_history(started.signer_record_charge);
     }
     Ok(())
 }
@@ -222,11 +224,11 @@ fn account_nonce<DB: Database, ExtEnvs: ExternalEnvTypes>(
 
 /// `keylessDeploy`'s return for a deployment that failed with `error`.
 fn failed(error: KeylessDeployError, gas_used: u64) -> (InstructionResult, Bytes) {
-    returned(gas_used, Address::ZERO, encode_error_result(error))
+    returned_value(gas_used, Address::ZERO, encode_error_result(error))
 }
 
 /// `keylessDeploy`'s return: a success, whatever the deployment did.
-fn returned(
+fn returned_value(
     gas_used: u64,
     deployed_address: Address,
     error_data: Bytes,

@@ -232,7 +232,7 @@ fn test_a_creation_an_inspector_answers_charges_nothing_it_did_not_start() {
     }
 }
 
-/// A transaction the latch stopped before its first frame is not rewritten on the inspected path
+/// A transaction the latch stopped before its first frame is not dispatched on the inspected path
 /// either: the inspector sees the call and its stop, and no creation.
 #[test]
 fn test_a_latched_transaction_is_seen_as_the_call_it_is() {

@@ -1,8 +1,8 @@
 //! The `KeylessDeploy` dispatch: which calls are recognised, what they are charged, and which
 //! run the deployed bytecode instead.
 //!
-//! A recognised call pays the fixed overhead before anything else, then is either rewritten into
-//! its deployment or answered. The tests here send transactions a rule refuses, so that what is
+//! A recognised call pays the fixed overhead before anything else, then either starts its
+//! deployment or is refused. The tests here send transactions a rule refuses, so that what is
 //! left beyond the reference transaction — the same calldata to an account with no code — is the
 //! overhead alone.
 

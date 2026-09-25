@@ -567,7 +567,7 @@ fn test_the_created_deposit_caller_diverges_from_op_revm() {
 }
 
 /// A `keylessDeploy` transaction is a deployment in Satin and a call to the contract's bytecode in
-/// op-revm, which has no keyless rewrite: Satin deploys the canonical `CREATE2` factory at its
+/// op-revm, which has no keyless dispatch: Satin deploys the canonical `CREATE2` factory at its
 /// canonical address, while op-revm runs the method body, which reverts with `NotIntercepted()`
 /// and deploys nothing.
 ///

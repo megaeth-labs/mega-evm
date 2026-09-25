@@ -1,7 +1,7 @@
 //! Frame results built without running a frame, and how they settle.
 //!
 //! `MegaETH` answers some frames itself: the depth guard, a transaction stopped by a limit, the
-//! system contract interceptors, a `keylessDeploy` call its rules refuse, and, when it lands,
+//! system contract interceptors, a `keylessDeploy` call carrying value, and, when it lands,
 //! precompile normalisation. Such a result goes back to the caller like any frame's, and the
 //! caller settles it the way revm settles a frame it ran:
 //!
@@ -15,9 +15,8 @@
 //! the reservoir the frame inherited ([`untouched_call_gas`], [`with_pools_of`]), never
 //! `Gas::new(limit)`, which would carry none and bill the sender for the whole reservoir; and it
 //! carries the calling opcode's upfront-charge flags, so step 1 refunds the charge.
-//! [`synthetic_frame_result`] builds one; [`settle_frame_result`] is the settlement, for a
-//! mechanism that settles a result into a caller itself — a keyless deployment's call, which
-//! takes back its creation's result as the frame of a `CREATE` does.
+//! [`synthetic_frame_result`] builds one; [`settle_frame_result`] is that settlement, for a caller
+//! that settles a result into its own gas outside revm's frame return.
 
 use alloy_primitives::Bytes;
 use revm::{

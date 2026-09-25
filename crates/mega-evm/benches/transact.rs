@@ -49,7 +49,7 @@
 //!   native creation below the call (`satin`), next to op-revm running the same init code as a
 //!   creation transaction (`op_revm`). The gap is what the keyless path adds to a creation:
 //!   decoding the signed transaction, recovering its signer — most of it — the rules' reads, the
-//!   call's upfront charges and its settlement into the ABI answer.
+//!   call's upfront charges, and the creation's return into the call and its ABI answer.
 //!
 //! `oracle_reads` runs once more through `MegaEvm` alone (`/service`), against an oracle service
 //! that answers all 200 slots; every slot is loaded all the same, so the two arms differ by the
