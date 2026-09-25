@@ -55,15 +55,18 @@ pub(crate) fn give_back_history<DB: Database, ExtEnvs: ExternalEnvTypes>(
 /// back too. The creation's lane was popped when it returned, or is popped here when it never
 /// ran.
 ///
-/// A deployment from nonce 0 keeps the creation's nonce bump. A deployment from nonce 1, whether
-/// it succeeded or failed, takes the bump back when it is the last nonce change the deployment
-/// made ([`take_back_bump`]), leaving the nonce at 1, as the legacy engine did. The call is
-/// permissionless and the signed transaction public, so a nonce every failure spent would let
-/// anybody make a signer's address undeployable with two failing calls; and a success that spent
-/// it would answer a resubmission with `SignerNonceTooHigh` rather than `ContractAlreadyExists`.
-/// When a delegated signer's code spent further nonces in the constructor, creating accounts at
-/// them, nothing is taken back: the nonce cannot go back below an account the signer created. That
-/// signer ends above 1, and a resubmission is refused `SignerNonceTooHigh`.
+/// A deployment from nonce 0 keeps the creation's nonce bump. From nonce 1 the bump is taken back,
+/// whether the deployment succeeded or failed, only when it is the last nonce change the
+/// deployment made ([`take_back_bump`]), leaving the nonce at 1, as the legacy engine did; its
+/// write record and that record's history go with it, unless the creation succeeded and moved
+/// value out of the signer. The call is permissionless and the signed transaction public, so a
+/// nonce every failure spent would let anybody make a signer's address undeployable with two
+/// failing calls; and a success that spent it would answer a resubmission with
+/// `SignerNonceTooHigh` rather than `ContractAlreadyExists`. When the signer's own code spent a
+/// nonce in the constructor that survived it — on a default configuration, a delegated signer's
+/// `CREATE` or `CREATE2`, successful or not — nothing is taken back: a later bump may stand for an
+/// account, so the nonce is never moved back under one. That signer ends above 1, and a
+/// resubmission is refused `SignerNonceTooHigh`.
 ///
 /// Then the call answers, as a frame that resumes after its child returned would:
 ///
@@ -108,8 +111,8 @@ where
     }
     // A deployment from nonce 1 keeps no bump of its own: a failure leaves the address
     // deployable, a success leaves it occupied. The creation's bump is the one above the nonce
-    // the call started from, and it is taken back only when it is the last one: a further bump
-    // the signer's own code made holds an account at the nonce below it.
+    // the call started from, and it is taken back only when it is the last one: a later bump the
+    // signer's own code made may stand for an account, so the nonce is never moved back under it.
     if call.signer_nonce > 0 && nonce == call.signer_nonce + 1 {
         take_back_bump(ctx, &mut call, result)?;
     }

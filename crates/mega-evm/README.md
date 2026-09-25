@@ -98,7 +98,8 @@ Once the creation returns the call answers in the contract's ABI — the deploye
 A signer is refused once its nonce is above 1.
 A deployment spends the signer's nonce from 0 to 1.
 A signer at nonce 1 stays there, as in the legacy engine, however often its deployment fails, so nobody can use up its attempts, and once it deploys, so a resubmission finds the address taken (`ContractAlreadyExists()`).
-The exception is a delegated signer whose code creates accounts in the constructor: the nonces it spends stay spent, and so does the creation's bump below them, so it ends above 1 and every later deployment of it is refused.
+The creation's bump is taken back with its write record, which stays only when a creation that succeeded moved value out of the signer.
+The exception is a signer whose own code spends a nonce in the constructor that survives it — on a default configuration, a delegated signer's `CREATE` or `CREATE2`, successful or not: every bump stays, the creation's included, because a later bump may stand for an account, so the signer ends above 1 and every later deployment of it is refused.
 A `keylessDeploy` call a contract makes is not a deployment: it runs the method body, which reverts with `NotIntercepted()`.
 
 The system address sends the protocol's own transactions: a legacy transaction from it to a whitelisted contract is validated — the whitelist, the chain id, the nonce and EIP-3607 — and promoted to a deposit, which pays no fee and rewards none.

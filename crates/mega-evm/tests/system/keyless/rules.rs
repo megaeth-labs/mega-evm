@@ -8,8 +8,8 @@
 //! rule 4, which now counts real nonces: a deployment keeps the creation's bump from 0 to 1, and
 //! takes it back from 1, as the legacy engine did, unless the signer's own code spent a nonce
 //! after it. A signer at nonce 1 stays there however often its deployment fails, whoever submits
-//! it, and once it deploys; a delegated signer that creates accounts in its constructor ends above
-//! 1, and is refused thereafter.
+//! it, and once it deploys; a delegated signer whose code spends a nonce in its constructor,
+//! creating an account at it or not, ends above 1, and is refused thereafter.
 
 use alloy_primitives::{address, keccak256, Signature};
 use mega_evm::{

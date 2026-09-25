@@ -25,15 +25,19 @@
 //!   and the call's charges are compute a detained constructor has already spent.
 //! - The signer's nonce is bumped by the creation, as any creator's is, and a deployment is refused
 //!   once the signer's nonce is above 1 (`SignerNonceTooHigh`). A deployment from nonce 0 keeps the
-//!   bump, which is the replay barrier. A deployment from nonce 1 takes the bump back, with its
-//!   record, whether it succeeds or fails, when the bump is the last nonce change the deployment
-//!   made: the signer stays at 1, as in the legacy engine. The call is permissionless and the
-//!   signed transaction public, so no number of failing calls, whoever makes them, gets such a
-//!   signer's deployment refused, and a deployment that succeeded answers a resubmission with
-//!   `ContractAlreadyExists()`. A delegated signer whose code creates accounts in the constructor
-//!   spends further nonces after the bump; those stay spent, and so does the bump, because the
-//!   nonce cannot go back below an account the signer created. Such a signer ends above 1, and
-//!   every later deployment of it is refused `SignerNonceTooHigh`.
+//!   bump, which is the replay barrier. From nonce 1 the creation's bump is taken back, whether the
+//!   deployment succeeds or fails, only when it is the last nonce change the deployment made: the
+//!   signer stays at 1, as in the legacy engine. The call is permissionless and the signed
+//!   transaction public, so no number of failing calls, whoever makes them, gets such a signer's
+//!   deployment refused, and a deployment that succeeded answers a resubmission with
+//!   `ContractAlreadyExists()`. The bump goes with its write record and that record's history,
+//!   unless the creation succeeded and moved value out of the signer, whose account then keeps a
+//!   write of its own. A signer whose own code spends a nonce in the constructor that survives it
+//!   keeps every bump, the creation's included: it ends above 1, and every later deployment of it
+//!   is refused `SignerNonceTooHigh`. On a default configuration only a delegated signer's code can
+//!   do that, with a `CREATE` or `CREATE2`, successful or not: a signer with other code is refused
+//!   `SignerHasCode()` unless EIP-3607 is disabled. The nonce is never moved back under a later
+//!   bump, because a later bump may stand for an account.
 //! - A signer with no account is charged its account as state gas, once, by the call: the nonce
 //!   bump creates it, and no other charge does.
 //! - The call pays what the `CREATE` opcode charges its frame: its regular gas, which stays spent,
