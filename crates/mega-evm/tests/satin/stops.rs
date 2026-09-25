@@ -29,6 +29,7 @@ use mega_evm::{
     constants::{
         BLOCK_ENV_ACCESS_COMPUTE_GAS, ORACLE_ACCESS_COMPUTE_GAS, TX_DATA_LIMIT, TX_GAS_LIMIT_CAP,
     },
+    satin_gas_params,
     system::ORACLE_CONTRACT_ADDRESS,
     test_utils::{BytecodeBuilder, MemoryDatabase},
     EvmTxRuntimeLimits, LimitCheck, LimitKind, LimitUsage, MegaContext, MegaEvm, MegaHaltReason,
@@ -41,6 +42,7 @@ use revm::{
         RETURNDATASIZE, REVERT, SLOAD, SSTORE, TIMESTAMP,
     },
     context::result::ExecutionResult,
+    context_interface::cfg::GasId,
     interpreter::{
         interpreter::EthInterpreter, interpreter_types::Jumps, CallInputs, CallOutcome,
         CreateInputs, CreateOutcome, Gas, InstructionResult, Interpreter, InterpreterResult,
@@ -1425,7 +1427,8 @@ fn answered_chain(answered: Answered, twin: bool) -> MemoryDatabase {
 }
 
 /// The limits `answered`'s chain crosses its limit under, and the stop it reports. The compute
-/// limit is set by `A`'s read, at the read's own two gas plus the cap.
+/// limit is set by `A`'s read, at the read's own two gas plus the cap; the state-gas limit is one
+/// gas short of the schedule's new account, which the test database prices at the minimum bucket.
 fn answered_limits(answered: Answered) -> (EvmTxRuntimeLimits, LimitCheck) {
     let stop =
         |kind, limit, used| LimitCheck::ExceedsLimit { kind, limit, used, frame_local: false };
@@ -1434,10 +1437,7 @@ fn answered_limits(answered: Answered) -> (EvmTxRuntimeLimits, LimitCheck) {
             (EvmTxRuntimeLimits::default(), stop(LimitKind::ComputeGas, 2 + CAP, 2 + CAP))
         }
         Answered::NewAccount => {
-            let unlimited =
-                execute(answered_chain(answered, false), EvmTxRuntimeLimits::no_limits(), BELOW);
-            assert!(unlimited.result.is_success(), "{:?}", unlimited.result);
-            let account = unlimited.gas.state;
+            let account = satin_gas_params().get(GasId::new_account_state_gas());
             (
                 EvmTxRuntimeLimits::no_limits().with_tx_state_gas_limit(account - 1),
                 stop(LimitKind::StateGrowth, account - 1, account),
@@ -1533,7 +1533,9 @@ fn run_answered(
 ///
 /// A compute stop bills exactly its limit past the intrinsic gas. Any other stop bills what ran,
 /// read off the twin: the same frames without limits, each reverting once its call returned, which
-/// bills what the stopped frames ran plus the two pushes of each revert.
+/// bills what the stopped frames ran plus the two pushes of each revert. The twin runs on the same
+/// engine, so that bill pins that a stop bills what ran and no more; it pins no price, and a
+/// charge both runs make, such as `C`'s own `CALL`, would be wrong in both alike.
 fn assert_answered_cell(answered: Answered, gas_limit: u64) {
     let row = format!("{answered:?}, gas limit {gas_limit}");
     let intrinsic = intrinsic(gas_limit);
@@ -1600,6 +1602,13 @@ fn assert_answered_cell(answered: Answered, gas_limit: u64) {
         rewritten.ended, ended,
         "{row}: the answered frame, then every caller, ended stopped"
     );
+    if answered == Answered::PastTheAllowance {
+        // Its answer is an inspector's, which in this column rewrites nothing.
+        assert_eq!(
+            plain.ended, ended,
+            "{row}, not rewritten: the answered frame, then every caller, ended stopped"
+        );
+    }
 }
 
 /// A frame three calls down that is answered without running, and whose answer crosses a limit,
