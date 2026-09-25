@@ -289,6 +289,26 @@ fn test_a_sender_that_is_the_beneficiary_holds_the_whole_deployment_to_the_cap()
     }
 }
 
+/// A sender that is the beneficiary, under a cap below the overhead: the call is held to the cap
+/// before it charges anything, so the overhead is the charge that crosses, and the transaction
+/// stops at the cap having computed exactly the cap. A call held only once its charges were paid
+/// would pay the overhead and the `CREATE` opcode's regular gas in full, past the cap, and stop
+/// at its creation's first charge instead. Plain and inspected.
+#[test]
+fn test_a_sender_that_is_the_beneficiary_is_held_before_the_overhead() {
+    let deployment = Deployment::new(deploying(&runtime(1)));
+    let data = deployment.call_data(LARGE_OVERRIDE);
+    let cap = KEYLESS_DEPLOY_OVERHEAD_GAS - 1;
+    for gas_limit in GAS_LIMITS {
+        for inspected in [false, true] {
+            let ctx = context_in(db_for(&deployment, U256::ZERO), RELAYER, capped(cap));
+            let run = run_tx(ctx, keyless_tx(data.clone(), gas_limit), inspected);
+            assert_eq!(run.limit, Some(cap), "detained from its start, at no compute");
+            assert_stopped(&run, &deployment, gas_limit);
+        }
+    }
+}
+
 /* ---------- the control contracts ---------- */
 
 /// A deployment in a subtree where volatile-data access is switched off keeps the refusal. With
