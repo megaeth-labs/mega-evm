@@ -110,12 +110,16 @@
 //! caller survives. A precompile run on the allowance also sees the allowance as its gas limit.
 //!
 //! An interceptor builds its answer on all the gas the caller forwarded, the caller's withheld
-//! part included: an answer that spent more than the allowance the frame would have run on is
-//! answered out of gas and marked as a crossing, and the same rule stops the transaction. An
-//! interceptor may instead charge the frame, by taking gas off its limit, and let it run. The
-//! charge is the interceptor's own work, and compute whether the call is then answered or runs:
-//! one the allowance cannot pay stops the transaction before the frame runs, and one it can pay
-//! leaves the frame the rest.
+//! part included: an answer that spent more regular gas than the allowance the frame would have
+//! run on is answered out of gas and marked as a crossing, and the same rule stops the
+//! transaction.
+//!
+//! A keyless deployment's call is the transaction's own frame, and runs no code: it charges its
+//! own work — the overhead of decoding and recovering the signer, then the `CREATE` opcode's
+//! regular gas — on gas held to the limit as a running frame's is, so a charge past the limit
+//! is a crossing, whether a rule would then refuse the call or its creation would run. A call
+//! that starts its creation is kept as a frame suspended on it, and its charges are compute as a
+//! caller's are; a call a rule refuses is an answer held by the rule above.
 //!
 //! # Nothing withheld leaks
 //!

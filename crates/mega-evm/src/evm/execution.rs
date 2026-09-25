@@ -23,11 +23,12 @@ use revm::{
     },
     context_interface::{
         cfg::{gas::GasTracker, GasId, StateGasCharge, StateGasSite},
-        journaled_state::{account::JournaledAccountTr, entry::JournalEntry},
+        journaled_state::{account::JournaledAccountTr, entry::JournalEntry, JournalCheckpoint},
         Host,
     },
     handler::{
         evm::{ContextDbError, FrameInitResult, FrameTr},
+        execution::runtime_oog_unwind,
         instructions::InstructionProvider,
         EthFrame, EvmTr, EvmTrError, FrameInitOrResult, FrameResult, Handler, ItemOrResult,
         PreExecutionOutput,
@@ -47,8 +48,12 @@ use revm::{
 
 use crate::{
     evm::{history::transaction_body_bytes, inspector::frame_end_checked},
-    history_gas, synthetic_call_result, synthetic_frame_result,
-    system::{is_deposit_like_transaction, MEGA_SYSTEM_ADDRESS},
+    history_gas, synthetic_frame_result,
+    system::{
+        is_deposit_like_transaction,
+        keyless::{self, Rewrite},
+        MEGA_SYSTEM_ADDRESS,
+    },
     write_record_history_gas, Detention, ExternalEnvTypes, JournalInspectTr, LimitCheck, LimitKind,
     MegaContext, MegaEvm, MegaInstructions, VolatileDataAccess,
 };
@@ -258,12 +263,21 @@ where
     /// Keeps the history gas the transaction spent: what the body was charged, and what the frames
     /// charged net of what they gave back; and the history bytes it appended, which are what those
     /// charges were made for.
+    ///
+    /// The outermost frame of a keyless deployment is the creation its `keylessDeploy` call
+    /// started, and the call is the transaction's own frame: the creation's result is settled into
+    /// the call first, which answers in the `IKeylessDeploy` ABI ([`keyless::settle`]). The
+    /// translation is made here, where every first-frame result arrives — a creation answered at
+    /// its start never returns through the frame lifecycle. The inspected path settles it earlier,
+    /// to tell the inspector the call ended ([`InspectorHandler::inspect_execution`]), and the
+    /// settlement here then finds nothing to do.
     fn last_frame_result(
         &mut self,
         evm: &mut Self::Evm,
         frame_result: &mut FrameResult,
         parent_gas: &mut GasTracker,
     ) -> Result<(), Self::Error> {
+        keyless::settle::<_, _, Self::Error>(evm.ctx_mut(), frame_result)?;
         evm.ctx_mut().additional_limit.on_last_frame_return(frame_result);
         self.op.last_frame_result(evm, frame_result, parent_gas)?;
         // The write record the transaction's own frame makes was charged before execution; a
@@ -367,6 +381,33 @@ where
         + IsTxError,
 {
     type IT = EthInterpreter;
+
+    /// revm's inspected execution, with the end of a keyless deployment's call reported.
+    ///
+    /// The call is the transaction's own frame, which runs no code, and its creation is the
+    /// outermost frame revm runs: revm's loop tells the inspector the creation ended, and nothing
+    /// tells it the call did. So the creation is settled into the call here, before
+    /// [`last_frame_result`](Handler::last_frame_result) would settle it, and the inspector is
+    /// told the call ended with the answer the settlement made. The rest is revm's.
+    fn inspect_execution(
+        &mut self,
+        evm: &mut Self::Evm,
+        checkpoint: JournalCheckpoint,
+        gas: &mut GasTracker,
+    ) -> Result<Option<FrameResult>, Self::Error> {
+        let Some(first_frame_input) = self.first_frame_input(evm, gas)? else {
+            unwind_runtime_oog(evm.ctx(), checkpoint)?;
+            return Ok(None);
+        };
+        evm.ctx().journal_mut().checkpoint_commit();
+        let mut frame_result = self.inspect_run_exec_loop(evm, first_frame_input)?;
+        let (ctx, inspector) = evm.ctx_inspector();
+        if let Some(call) = keyless::settle::<_, _, Self::Error>(ctx, &mut frame_result)? {
+            frame_end_checked(ctx, inspector, &FrameInput::Call(call), &mut frame_result);
+        }
+        self.last_frame_result(evm, &mut frame_result, gas)?;
+        Ok(Some(frame_result))
+    }
 }
 
 impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, ExtEnvs> {
@@ -399,9 +440,11 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
     /// 1. the latch: a latched transaction's frame is answered with the stop;
     /// 2. the depth guard: a `CALL` or `STATICCALL` past the call-stack limit is answered with
     ///    `CallTooDeep` before anything could intercept it;
-    /// 3. system contract interception ([`MegaEvm::intercept`]), which answers the frame or charges
-    ///    it;
-    /// 4. the keyless deployment rewrite ([`MegaEvm::rewrite_keyless`]);
+    /// 3. the keyless deployment rewrite ([`keyless::rewrite`]): a `keylessDeploy` call a
+    ///    transaction makes becomes the creation it stands for, started below the call, or is
+    ///    answered;
+    /// 4. system contract interception ([`MegaEvm::intercept`]), which answers the frame or lets it
+    ///    start;
     /// 5. the frame's lane is pushed and the writes its start makes are counted; a limit they cross
     ///    answers the frame with the stop before it runs. A start revm refuses on its caller's
     ///    account ([`caller_refuses_start`]) makes no write and journals no transfer log, so it
@@ -411,15 +454,17 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
     ///    state-gas limit, unless revm refused the frame and so gives it back
     ///    ([`hold_upfront_state_gas`]).
     ///
-    /// A frame answered at step 3 or 6 — an interceptor's answer, a precompile's, revm's for a call
-    /// it did not start — is held to the compute limit before step 7, as a frame that ran would be
-    /// ([`settle_answer`]). A precompile, which revm runs at step 6, is run on the gas the compute
-    /// limit leaves the frame rather than on all its caller forwarded ([`hold_precompile`]).
+    /// A frame answered at step 3, 4 or 6 — a `keylessDeploy` call the rewrite refused, an
+    /// interceptor's answer, a precompile's, revm's for a call it did not start — is held to the
+    /// compute limit before step 7, as a frame that ran would be ([`settle_answer`]). A precompile,
+    /// which revm runs at step 6, is run on the gas the compute limit leaves the frame rather than
+    /// on all its caller forwarded ([`hold_precompile`]).
     ///
-    /// Steps 1 and 2 are the pre-frame check: they answer a frame nothing may start. The frame's
-    /// own writes are counted after the interceptor and the rewrite, because the rewrite decides
-    /// which frame starts (a keyless deployment becomes a creation) and an intercepted frame's
-    /// writes are the interceptor's to count.
+    /// Steps 1 and 2 are the pre-frame check: they answer a frame nothing may start. The rewrite
+    /// comes before interception, so a keyless deployment's creation is an ordinary creation from
+    /// there on; it pushes the lane of the call it rewrites itself, and the creation's is pushed at
+    /// step 5 as its child's. The frame's own writes are counted after the interceptor, because an
+    /// intercepted frame's writes are the interceptor's to count.
     ///
     /// A frame answered before revm builds it gets an empty lane, so the lanes stay aligned with
     /// the results [`frame_return_result`](EvmTr::frame_return_result) pops. A creation answered
@@ -444,17 +489,19 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
             self.inner.ctx.additional_limit.push_empty_frame();
             return Ok(ItemOrResult::Result(result));
         }
-        // What the caller forwarded, before an interceptor takes anything off it.
+        let answer = match keyless::rewrite(&mut self.inner.ctx, &mut frame_init)? {
+            Rewrite::Answered(answer) => Some(answer),
+            Rewrite::Rewritten | Rewrite::NotKeyless => self.intercept(&frame_init),
+        };
+        // The frame that starts, as its caller forwarded it: the creation, when the rewrite made
+        // one of a `keylessDeploy` call, and the call itself when the rewrite answered it.
         let (depth, gas_limit) = (frame_init.depth, input_gas_limit(&frame_init.frame_input));
-        if let Some(mut result) = self.intercept(&mut frame_init) {
+        if let Some(mut result) = answer {
             self.inner.ctx.additional_limit.push_empty_frame();
             settle_answer(&mut self.inner.ctx, depth, gas_limit, &mut result);
             hold_upfront_state_gas(&mut self.inner.ctx, Some(&mut result));
             return Ok(ItemOrResult::Result(result));
         }
-        // What an interceptor that lets the frame run charged it, by taking it off its limit.
-        let charge = gas_limit.saturating_sub(input_gas_limit(&frame_init.frame_input));
-        let mut frame_init = self.rewrite_keyless(frame_init);
         let ctx = &mut self.inner.ctx;
         let refused = caller_refuses_start(ctx, &frame_init.frame_input);
         if refused {
@@ -491,7 +538,6 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
         match outcome {
             Ok(address) => {
                 ctx.additional_limit.set_frame_address(address);
-                ctx.detention.on_charged_frame_built(depth, charge);
                 hold_upfront_state_gas(ctx, None);
                 Ok(ItemOrResult::Item(self.inner.frame_stack.get()))
             }
@@ -555,9 +601,12 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
         let returned = self.inner.frame_return_result(result)?;
         // The history of the records the caller paid for and the frame did not keep, given back
         // after the merge that adopted the frame's pools. `Some` means the outermost frame
-        // returned and there is no caller to give anything back to.
+        // returned: its caller, when it has one, is the `keylessDeploy` call that started it,
+        // which is settled once the transaction's frames are done.
         if returned.is_none() {
             self.inner.frame_stack.get().interpreter.gas.refill_history(refund);
+        } else {
+            keyless::give_back_history(&mut self.inner.ctx, refund);
         }
         Ok(returned)
     }
@@ -608,25 +657,40 @@ where
     /// revm's inspected frame start, with the lanes kept aligned: a frame the inspector answers
     /// itself never reaches [`EvmTr::frame_init`], so an empty lane stands in for it, and its
     /// answer is held to the state-gas limit as revm's own is ([`hold_upfront_state_gas`]).
+    ///
+    /// A keyless deployment is seen as the frames it is made of. The inspector is told the
+    /// transaction's `keylessDeploy` call starts; the keyless rewrite then turns it into its
+    /// creation, and the inspector is told the creation starts, as the call's child, one journal
+    /// depth below it. Every step of the init code follows, then the creation's end, and the
+    /// call's end once the creation is settled into it
+    /// ([`inspect_execution`](InspectorHandler::inspect_execution)). A `keylessDeploy` call the
+    /// rewrite answers is seen as the call it is, `call` and `call_end` paired around the answer.
     #[inline]
     fn inspect_frame_init(
         &mut self,
         mut frame_init: FrameInit,
     ) -> Result<FrameInitResult<'_, Self::Frame>, ContextDbError<Self::Context>> {
         let (ctx, inspector) = self.ctx_inspector();
-        if let Some(mut output) = frame_start(ctx, inspector, &mut frame_init.frame_input) {
-            // The inspector answered the frame. The latch and the depth guard still hold: an
-            // answer cannot start a frame of a stopped transaction, nor reach past the call-stack
-            // limit.
-            if let Some(answer) = answer_before_building(ctx, &frame_init)? {
-                output = answer;
+        if let Some(output) = frame_start(ctx, inspector, &mut frame_init.frame_input) {
+            return answered_by_inspector(ctx, inspector, &frame_init, output)
+                .map(ItemOrResult::Result);
+        }
+        match keyless::rewrite(ctx, &mut frame_init)? {
+            Rewrite::NotKeyless => {}
+            Rewrite::Answered(output) => {
+                return Ok(ItemOrResult::Result(answered_without_running(
+                    ctx,
+                    inspector,
+                    &frame_init,
+                    output,
+                )));
             }
-            ctx.additional_limit.push_empty_frame();
-            let gas_limit = input_gas_limit(&frame_init.frame_input);
-            settle_answer(ctx, frame_init.depth, gas_limit, &mut output);
-            hold_upfront_state_gas(ctx, Some(&mut output));
-            frame_end_checked(ctx, inspector, &frame_init.frame_input, &mut output);
-            return Ok(ItemOrResult::Result(output));
+            Rewrite::Rewritten => {
+                if let Some(output) = frame_start(ctx, inspector, &mut frame_init.frame_input) {
+                    return answered_by_inspector(ctx, inspector, &frame_init, output)
+                        .map(ItemOrResult::Result);
+                }
+            }
         }
         let frame_input = frame_init.frame_input.clone();
         let logs_i = ctx.journal().logs().len();
@@ -946,48 +1010,20 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
     /// contract. A creation reaches no interceptor either.
     ///
     /// An answer is a [`synthetic_frame_result`](crate::synthetic_frame_result), so it settles
-    /// like a frame revm ran. An interceptor that lets the frame run may charge it instead of
-    /// answering it, which is why the frame is taken mutably. What each contract answers is in
-    /// the `system` module.
-    ///
-    /// The charge is compute for gas detention. One that crosses the compute limit is answered
-    /// here, as a frame that spent the charge and nothing else, which the answer's settlement
-    /// turns into the stop ([`settle_answer`]), as it does an interceptor's answer that spent
-    /// past the limit.
+    /// like a frame revm ran. What each contract answers is in the `system` module.
     #[inline]
-    fn intercept(&mut self, frame_init: &mut FrameInit) -> Option<FrameResult> {
-        let FrameInput::Call(inputs) = &mut frame_init.frame_input else { return None };
+    fn intercept(&mut self, frame_init: &FrameInit) -> Option<FrameResult> {
+        let FrameInput::Call(inputs) = &frame_init.frame_input else { return None };
         if !matches!(inputs.scheme, CallScheme::Call | CallScheme::StaticCall) {
             return None;
         }
-        let forwarded = inputs.gas_limit;
         // The calling frame is on top of the stack, suspended on this call; the transaction's own
         // call has none.
         let caller_remaining = match self.inner.frame_stack.index() {
             Some(_) => self.inner.frame_stack.get().interpreter.gas.remaining(),
             None => 0,
         };
-        let ctx = &mut self.inner.ctx;
-        if let Some(answer) =
-            crate::system::intercept(ctx, inputs, frame_init.depth, caller_remaining)
-        {
-            return Some(answer);
-        }
-        let charge = forwarded - inputs.gas_limit;
-        ctx.detention
-            .charge_crosses(frame_init.depth, forwarded, charge)
-            .then(|| synthetic_call_result(inputs, InstructionResult::Stop, Bytes::new()))
-    }
-
-    /// The keyless deployment rewrite: a keyless deployment call turned into the native creation
-    /// it stands for.
-    ///
-    /// The extension point of native keyless deployment; nothing is rewritten yet.
-    // Takes the EVM mutably: the rewrite validates the deployment against the journal.
-    #[allow(clippy::needless_pass_by_ref_mut)]
-    #[inline]
-    const fn rewrite_keyless(&mut self, frame_init: FrameInit) -> FrameInit {
-        frame_init
+        crate::system::intercept(&mut self.inner.ctx, inputs, frame_init.depth, caller_remaining)
     }
 }
 
@@ -1023,6 +1059,57 @@ fn hold_upfront_state_gas<DB: Database, ExtEnvs: ExternalEnvTypes>(
     {
         ctx.additional_limit.apply_latch(answer);
     }
+}
+
+/// revm's unwinding of a runtime phase that ran out of gas before the first frame.
+///
+/// Called through this function rather than directly: the inspector handler's bounds keep the
+/// compiler from reading the journal's database error as `DB::Error`, and here nothing does.
+fn unwind_runtime_oog<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    ctx: &mut MegaContext<DB, ExtEnvs>,
+    checkpoint: JournalCheckpoint,
+) -> Result<(), DB::Error> {
+    runtime_oog_unwind(ctx, checkpoint)
+}
+
+/// Settles `output`, the answer the inspector gave the frame `frame_init` starts in its place.
+/// The latch and the depth guard still hold: an answer cannot start a frame of a stopped
+/// transaction, nor reach past the call-stack limit.
+fn answered_by_inspector<DB: Database, ExtEnvs: ExternalEnvTypes, INSP>(
+    ctx: &mut MegaContext<DB, ExtEnvs>,
+    inspector: &mut INSP,
+    frame_init: &FrameInit,
+    mut output: FrameResult,
+) -> Result<FrameResult, ContextDbError<MegaContext<DB, ExtEnvs>>>
+where
+    INSP: Inspector<MegaContext<DB, ExtEnvs>, EthInterpreter>,
+{
+    if let Some(answer) = answer_before_building(ctx, frame_init)? {
+        output = answer;
+    }
+    Ok(answered_without_running(ctx, inspector, frame_init, output))
+}
+
+/// Settles `output`, the answer the frame `frame_init` starts gets without running on the
+/// inspected path — an inspector's, or a `keylessDeploy` call's the rewrite refused — as
+/// [`EvmTr::frame_init`] settles an answer: an empty lane stands in for the frame, and the answer
+/// is held to the compute limit ([`settle_answer`]) and to the state-gas limit
+/// ([`hold_upfront_state_gas`]). Then the inspector is told the frame ended.
+fn answered_without_running<DB: Database, ExtEnvs: ExternalEnvTypes, INSP>(
+    ctx: &mut MegaContext<DB, ExtEnvs>,
+    inspector: &mut INSP,
+    frame_init: &FrameInit,
+    mut output: FrameResult,
+) -> FrameResult
+where
+    INSP: Inspector<MegaContext<DB, ExtEnvs>, EthInterpreter>,
+{
+    ctx.additional_limit.push_empty_frame();
+    let gas_limit = input_gas_limit(&frame_init.frame_input);
+    settle_answer(ctx, frame_init.depth, gas_limit, &mut output);
+    hold_upfront_state_gas(ctx, Some(&mut output));
+    frame_end_checked(ctx, inspector, &frame_init.frame_input, &mut output);
+    output
 }
 
 /// The answer a frame gets before anything builds or answers it otherwise, in this order: the

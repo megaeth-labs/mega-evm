@@ -357,40 +357,6 @@ fn decode_keyless_deploy_return(
 // TESTS
 // ============================================================================
 
-/// REX5 sandbox success propagates resource usage to the parent transaction.
-///
-/// A keyless deploy constructor that writes storage slots should have its resource usage
-/// (compute gas, data size, KV updates, state growth) reflected in the parent transaction.
-#[test]
-fn test_rex5_sandbox_success_propagates_resource_usage() {
-    // Constructor that writes two storage slots, then returns 1 byte of runtime code.
-    // Two-slot variant (vs the shared `minimal_1byte_constructor`) exercises multiple KV
-    // updates so the kv_updates assertion below is non-trivial.
-    let init_code = BytecodeBuilder::default()
-        .sstore(U256::from(0), U256::from(42))
-        .sstore(U256::from(1), U256::from(43))
-        .push_number(1_u8)
-        .push_number(0_u8)
-        .push_number(0_u8)
-        .append(CODECOPY)
-        .push_number(1_u8)
-        .push_number(0_u8)
-        .append(RETURN)
-        .build();
-    let (tx_bytes, signer) = create_pre_eip155_deploy_tx(init_code);
-    let mut db = funded_signer_db(signer);
-
-    let (result, usage) =
-        execute_keyless_deploy(MegaSpecId::REX5, &mut db, tx_bytes, LARGE_GAS_LIMIT_OVERRIDE);
-    assert!(result.is_success(), "keyless deploy should succeed: {result:?}");
-
-    // REX5 should propagate sandbox resource usage to parent.
-    assert!(usage.compute_gas > 0, "compute gas should include sandbox execution");
-    assert!(usage.data_size > 0, "data size should include sandbox storage writes");
-    assert!(usage.kv_updates > 0, "KV updates should include sandbox storage writes");
-    assert!(usage.state_growth > 0, "state growth should include new account from sandbox");
-}
-
 /// Executes a keyless deploy with custom runtime limits, returning the full `ResultAndState`.
 fn execute_keyless_deploy_with_limits(
     spec: MegaSpecId,
@@ -608,59 +574,6 @@ fn test_rex5_sandbox_volatile_merge_runs_on_in_sandbox_failure_empty_code() {
 // ============================================================================
 // OUTER EVM GAS DEBIT (REX5+)
 // ============================================================================
-
-/// REX5 sandbox: the outer keyless-deploy call's `gas_used` must include the
-/// sandbox's `gas_used`; otherwise only the 100K dispatch overhead is counted.
-#[test]
-fn test_rex5_sandbox_outer_gas_used_includes_sandbox_gas_used_on_success() {
-    let init_code = minimal_1byte_constructor(42);
-    let (tx_bytes, signer) = create_pre_eip155_deploy_tx(init_code);
-    let mut db = funded_signer_db(signer);
-    let (result, _usage, _volatile) = execute_keyless_deploy_with_volatile(
-        MegaSpecId::REX5,
-        &mut db,
-        tx_bytes,
-        LARGE_GAS_LIMIT_OVERRIDE,
-    );
-    let outer_gas_used = result.gas_used();
-    let decoded = decode_keyless_deploy_return(&result);
-    let sandbox_gas_used = decoded.gasUsed;
-
-    assert!(
-        outer_gas_used >= constants::rex2::KEYLESS_DEPLOY_OVERHEAD_GAS + sandbox_gas_used,
-        "outer gas_used ({}) must be >= overhead ({}) + sandbox gas_used ({})",
-        outer_gas_used,
-        constants::rex2::KEYLESS_DEPLOY_OVERHEAD_GAS,
-        sandbox_gas_used,
-    );
-}
-
-/// REX5 sandbox: on in-sandbox failure (`EmptyCodeDeployed` via STOP-only
-/// constructor), the outer `gas_used` must still include `sandbox_gas_used`.
-#[test]
-fn test_rex5_sandbox_outer_gas_used_includes_sandbox_gas_used_on_in_sandbox_failure() {
-    let init_code = BytecodeBuilder::default().append(STOP).build();
-    let (tx_bytes, signer) = create_pre_eip155_deploy_tx(init_code);
-    let mut db = funded_signer_db(signer);
-    let (result, _usage, _volatile) = execute_keyless_deploy_with_volatile(
-        MegaSpecId::REX5,
-        &mut db,
-        tx_bytes,
-        LARGE_GAS_LIMIT_OVERRIDE,
-    );
-    let outer_gas_used = result.gas_used();
-    let decoded = decode_keyless_deploy_return(&result);
-    let sandbox_gas_used = decoded.gasUsed;
-    assert!(!decoded.errorData.is_empty(), "in-sandbox failure should be encoded");
-    assert!(
-        outer_gas_used >= constants::rex2::KEYLESS_DEPLOY_OVERHEAD_GAS + sandbox_gas_used,
-        "in-sandbox failure: outer gas_used ({}) must include sandbox gas_used \
-         ({}) + overhead ({})",
-        outer_gas_used,
-        sandbox_gas_used,
-        constants::rex2::KEYLESS_DEPLOY_OVERHEAD_GAS,
-    );
-}
 
 /// REX5 sandbox: when the merged sandbox usage pushes the parent over a
 /// TX-level compute-gas cap, `reject_if_tx_limit_overflow` halts the outer

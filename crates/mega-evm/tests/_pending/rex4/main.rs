@@ -6,5 +6,4 @@ mod eip7702_delegation_cycle;
 mod frame_limits;
 mod gas_detention;
 mod intrinsic_limit_bypass;
-mod keyless_deploy;
 mod storage_call_stipend;

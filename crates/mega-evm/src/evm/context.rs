@@ -18,7 +18,7 @@ use crate::{
         history::transaction_body_bytes,
         schedule::{satin_gas_params, satin_gas_params_history_exempt},
     },
-    system::{self, MEGA_SYSTEM_ADDRESS},
+    system::{self, keyless::KeylessCall, MEGA_SYSTEM_ADDRESS},
     AdditionalLimit, BlockHashRecord, BucketError, BucketMultipliers, Detention, EmptyExternalEnv,
     EthSpecId, EvmTxRuntimeLimits, ExternalEnvTypes, ExternalEnvs, MegaSpecId, MegaTransaction,
     SaltEnv, VolatileDataAccess,
@@ -59,6 +59,10 @@ pub struct MegaContext<DB: Database, ExtEnvs: ExternalEnvTypes = EmptyExternalEn
     system_originated: bool,
     /// Whether the running transaction pays history gas. See [`MegaContext::prices_history`].
     prices_history: bool,
+    /// The `keylessDeploy` call the running transaction's creation runs under, from the rewrite
+    /// that started the creation until the creation's result is settled into it. See the
+    /// [`keyless`](crate::system::keyless) module.
+    pub(crate) keyless_call: Option<KeylessCall>,
     /// Whether the context runs the neutral configuration. See [`MegaContext::with_neutral_cfg`].
     #[cfg(any(test, feature = "test-utils"))]
     neutral: bool,
@@ -90,6 +94,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
             bucket_multipliers: BucketMultipliers::default(),
             system_originated: false,
             prices_history: true,
+            keyless_call: None,
             #[cfg(any(test, feature = "test-utils"))]
             neutral: false,
         }
@@ -339,6 +344,8 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
         self.additional_limit.reset();
         self.additional_limit.set_transfer_logs(emits_transfer_logs(&self.inner.cfg));
         self.bucket_multipliers.reset();
+        // A transaction that failed with an error left its `keylessDeploy` call unsettled.
+        self.keyless_call = None;
         self.system_originated = system_originated;
         let exempt = self.inner.tx.tx_type() == DEPOSIT_TRANSACTION_TYPE || system_originated;
         self.set_history_exempt(exempt);

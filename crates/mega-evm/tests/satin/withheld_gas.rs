@@ -18,8 +18,11 @@ use alloy_primitives::{address, Address, Bytes, TxKind, U256};
 use alloy_sol_types::{SolCall, SolError};
 use mega_evm::{
     constants::TX_GAS_LIMIT_CAP,
+    satin_gas_params,
     system::{
         keyless::{
+            decode_keyless_tx,
+            tests::{CREATE2_FACTORY_CONTRACT, CREATE2_FACTORY_DEPLOYER, CREATE2_FACTORY_TX},
             IKeylessDeploy, KEYLESS_DEPLOY_ADDRESS, KEYLESS_DEPLOY_CODE,
             KEYLESS_DEPLOY_OVERHEAD_GAS,
         },
@@ -1079,88 +1082,120 @@ fn test_a_precompile_whose_input_fails_past_its_gas_check_stops_past_the_allowan
     }
 }
 
-/// An interceptor that charges its frame by taking gas off the frame's limit charges compute,
-/// whether it then answers the call or lets the frame run: a `keylessDeploy` call from the
-/// beneficiary, carrying value (answered, `NoEtherTransfer()`) or not (the frame runs the deployed
-/// contract to `NotIntercepted()`), against the same call from another sender.
+/// A keyless deployment's call is the transaction's own frame, and runs no code: its own charges —
+/// the overhead of decoding the transaction and recovering its signer, then the `CREATE` opcode's
+/// regular gas — are compute, drawn from gas held to what the limit leaves the frame, whether a
+/// rule then refuses the call or its creation runs. A `keylessDeploy` call from the beneficiary,
+/// detained from its start, carrying value (refused, `NoEtherTransfer()`) or deploying the
+/// canonical `CREATE2` factory, against the same call from another sender, plain and inspected:
 ///
-/// - Under a cap below the keyless overhead, the charge alone crosses the limit: both stop at it,
-///   and the stop's gas is the frame's as its caller forwarded it, so a tracer reading the answer
-///   sees the allowance spent and the rest left.
-/// - Under a cap a hundred gas above the overhead, the charge fits: the answer is the same as
-///   without the read, and the frame that runs has a hundred gas of compute left for itself, so it
-///   stops at the limit where it would run on.
+/// - under a cap below the overhead, the overhead alone crosses the limit, and both stop at it;
+/// - under a cap past the overhead and short of the `CREATE` opcode's regular gas, the refusal
+///   answers as without the read, and the deployment stops at the opcode's charge;
+/// - under a cap past both and one gas short of what the creation computes, the creation stops at
+///   the limit where it would deploy, and the stop takes the deployment back; one gas more, and it
+///   deploys as without the read;
+/// - under the spec's cap, both run as without the read.
 #[test]
-fn test_an_interceptors_charge_is_held_to_what_the_limit_leaves() {
-    let calldata: Bytes = IKeylessDeploy::keylessDeployCall {
-        keylessDeploymentTransaction: Bytes::from_static(b"a transaction"),
-        gasLimitOverride: U256::ZERO,
+fn test_a_keyless_calls_charges_are_held_to_what_the_limit_leaves() {
+    let refused = keyless_deploy_call(b"a transaction");
+    let deploys = keyless_deploy_call(CREATE2_FACTORY_TX);
+    let init_code = decode_keyless_tx(CREATE2_FACTORY_TX).unwrap().tx().input.len();
+    let create = satin_gas_params().create_cost() + satin_gas_params().initcode_cost(init_code);
+    for gas_limit in TIERS {
+        let run = |caller: Address, value: u64, data: &Bytes, cap: u64, inspected: bool| {
+            let limits = EvmTxRuntimeLimits::default().with_block_env_access_compute_gas_limit(cap);
+            let db = MemoryDatabase::default()
+                .account_balance(caller, U256::from(10))
+                .account_code(KEYLESS_DEPLOY_ADDRESS, KEYLESS_DEPLOY_CODE);
+            let tx = OpTx(op_transaction(TxEnv {
+                caller,
+                kind: TxKind::Call(KEYLESS_DEPLOY_ADDRESS),
+                gas_limit,
+                value: U256::from(value),
+                data: data.clone(),
+                ..Default::default()
+            }));
+            let evm = MegaEvm::new(context(db).with_tx_runtime_limits(limits));
+            if inspected {
+                run_on(&mut evm.with_inspector(Calls::default()), tx)
+            } else {
+                run_on(&mut { evm }, tx)
+            }
+        };
+        // Each case plain and inspected: the inspected path settles the call as the plain one.
+        let both = |caller, value, data: &Bytes, cap| {
+            let plain = run(caller, value, data, cap, false);
+            let inspected = run(caller, value, data, cap, true);
+            assert_eq!(inspected.outcome.result, plain.outcome.result, "{caller} under {cap}");
+            assert_eq!(inspected.outcome.gas, plain.outcome.gas, "{caller} under {cap}");
+            plain
+        };
+        let answered = both(CALLER, 1, &refused, CAP);
+        assert_eq!(
+            answered.outcome.result.output(),
+            Some(&Bytes::from(IKeylessDeploy::NoEtherTransfer::SELECTOR.to_vec())),
+            "the answer without detention"
+        );
+        let refused_intrinsic = answered.outcome.gas.regular - KEYLESS_DEPLOY_OVERHEAD_GAS;
+        let deployed = both(CALLER, 0, &deploys, CAP);
+        let answer = IKeylessDeploy::keylessDeployCall::abi_decode_returns(
+            deployed.outcome.result.output().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(answer.deployedAddress, CREATE2_FACTORY_CONTRACT, "it deploys");
+        let deploy_intrinsic = intrinsic_with(&deploys, gas_limit);
+
+        let cap = KEYLESS_DEPLOY_OVERHEAD_GAS / 2;
+        let detained = both(BENEFICIARY, 1, &refused, cap);
+        assert_eq!(detained.limit, Some(cap), "the sender is the beneficiary");
+        assert_stopped(&detained, refused_intrinsic);
+        assert_stopped(&both(BENEFICIARY, 0, &deploys, cap), deploy_intrinsic);
+
+        let cap = KEYLESS_DEPLOY_OVERHEAD_GAS + create - 1;
+        let detained = both(BENEFICIARY, 1, &refused, cap);
+        assert_eq!(detained.outcome.result, answered.outcome.result, "the overhead fits");
+        assert_eq!(detained.outcome.gas, answered.outcome.gas);
+        let stopped = both(BENEFICIARY, 0, &deploys, cap);
+        assert_stopped(&stopped, deploy_intrinsic);
+        assert_eq!(nonce_of(&stopped, CREATE2_FACTORY_DEPLOYER), 0, "the creation never started");
+
+        // The creation's own compute: the regular gas the deployment spent past the call's.
+        let creation =
+            deployed.outcome.gas.regular - deploy_intrinsic - KEYLESS_DEPLOY_OVERHEAD_GAS - create;
+        let cap = KEYLESS_DEPLOY_OVERHEAD_GAS + create + creation - 1;
+        let stopped = both(BENEFICIARY, 0, &deploys, cap);
+        assert_stopped(&stopped, deploy_intrinsic);
+        assert!(
+            stopped.outcome.state.get(&CREATE2_FACTORY_CONTRACT).is_none_or(|a| a.info.is_empty()),
+            "the stop takes the deployment back"
+        );
+        assert_eq!(nonce_of(&stopped, CREATE2_FACTORY_DEPLOYER), 0, "the signer's nonce with it");
+        let detained = both(BENEFICIARY, 0, &deploys, cap + 1);
+        assert_eq!(detained.outcome.result, deployed.outcome.result, "the creation fits");
+        assert_eq!(detained.outcome.gas, deployed.outcome.gas);
+
+        let detained = both(BENEFICIARY, 0, &deploys, CAP);
+        assert_eq!(detained.limit, Some(CAP));
+        assert_eq!(detained.outcome.result, deployed.outcome.result, "as without the read");
+        assert_eq!(detained.outcome.gas, deployed.outcome.gas);
     }
-    .abi_encode()
-    .into();
-    let run = |caller: Address, value: u64, cap: u64| {
-        let limits = EvmTxRuntimeLimits::default().with_block_env_access_compute_gas_limit(cap);
-        let db = MemoryDatabase::default()
-            .account_balance(caller, U256::from(10))
-            .account_code(KEYLESS_DEPLOY_ADDRESS, KEYLESS_DEPLOY_CODE);
-        let tx = OpTx(op_transaction(TxEnv {
-            caller,
-            kind: TxKind::Call(KEYLESS_DEPLOY_ADDRESS),
-            gas_limit: BELOW,
-            value: U256::from(value),
-            data: calldata.clone(),
-            ..Default::default()
-        }));
-        let evm = MegaEvm::new(context(db).with_tx_runtime_limits(limits));
-        let mut evm = evm.with_inspector(Calls::default());
-        let run = run_on(&mut evm, tx);
-        (run, evm.inspector().calls[0].spent)
-    };
-    // What each call spends before its first instruction: the answered one spends the overhead,
-    // taken off the limit it answers on, and nothing of that limit.
-    let (answered, spent) = run(CALLER, 1, KEYLESS_DEPLOY_OVERHEAD_GAS / 2);
-    assert_eq!(spent, 0);
-    assert_eq!(
-        answered.outcome.result.output(),
-        Some(&Bytes::from(IKeylessDeploy::NoEtherTransfer::SELECTOR.to_vec())),
-        "the answer without detention"
-    );
-    let answered_intrinsic = answered.outcome.gas.regular - KEYLESS_DEPLOY_OVERHEAD_GAS;
-    let (runs, _) = run(CALLER, 0, KEYLESS_DEPLOY_OVERHEAD_GAS / 2);
-    assert!(!runs.outcome.result.is_success(), "the contract's own NotIntercepted()");
-    let ran = runs.outcome.gas.regular - intrinsic_of_keyless(&calldata);
-    assert!(ran > KEYLESS_DEPLOY_OVERHEAD_GAS + 100, "{ran}");
-
-    let cap = KEYLESS_DEPLOY_OVERHEAD_GAS / 2;
-    let (detained, stop_spent) = run(BENEFICIARY, 1, cap);
-    assert_eq!(detained.limit, Some(cap), "the sender is the beneficiary");
-    assert_eq!(stop_spent, cap, "the stop spent the allowance of the limit it was forwarded");
-    assert_stopped(&detained, answered_intrinsic);
-    let (detained, stop_spent) = run(BENEFICIARY, 0, cap);
-    assert_eq!(stop_spent, cap, "stopped before it ran, on the same allowance");
-    assert_stopped(&detained, intrinsic_of_keyless(&calldata));
-
-    let cap = KEYLESS_DEPLOY_OVERHEAD_GAS + 100;
-    let (detained, _) = run(BENEFICIARY, 1, cap);
-    assert_eq!(detained.outcome.result, answered.outcome.result, "the charge fits the allowance");
-    assert_eq!(detained.outcome.gas, answered.outcome.gas);
-    let (detained, _) = run(BENEFICIARY, 0, cap);
-    assert_stopped(&detained, intrinsic_of_keyless(&calldata));
 }
 
-/// What a `keylessDeploy` call without value, from `CALLER`, spends before its first
-/// instruction: the same call with the contract not deployed spends the overhead and nothing else.
-fn intrinsic_of_keyless(calldata: &Bytes) -> u64 {
-    let tx = OpTx(op_transaction(TxEnv {
-        caller: CALLER,
-        kind: TxKind::Call(KEYLESS_DEPLOY_ADDRESS),
-        gas_limit: BELOW,
-        data: calldata.clone(),
-        ..Default::default()
-    }));
-    let run = execute(MemoryDatabase::default(), tx);
-    assert!(run.outcome.result.is_success(), "no code: the call stops at once");
-    run.outcome.gas.regular - KEYLESS_DEPLOY_OVERHEAD_GAS
+/// The calldata of a `keylessDeploy` call carrying `tx`, with a `gasLimitOverride` past any
+/// forward.
+fn keyless_deploy_call(tx: &[u8]) -> Bytes {
+    IKeylessDeploy::keylessDeployCall {
+        keylessDeploymentTransaction: Bytes::copy_from_slice(tx),
+        gasLimitOverride: U256::from(u64::MAX),
+    }
+    .abi_encode()
+    .into()
+}
+
+/// The nonce `address` ends the transaction with; zero when the transaction did not touch it.
+fn nonce_of(run: &Run, address: Address) -> u64 {
+    run.outcome.state.get(&address).map_or(0, |account| account.info.nonce)
 }
 
 /* ---------- the refusal's access type ---------- */
