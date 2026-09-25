@@ -1,0 +1,281 @@
+name: Execution-spec tests on Satin
+
+# Runs the execution-spec-test state fixtures through MegaEvm with the state-test runner
+# (crates/mega-state-test), on one download of the fixtures:
+#
+# - equivalence mode, a gate: Satin's machinery priced as each fixture fork prices it, on the
+#   Osaka entries of the main release and the Amsterdam entries of the glamsterdam devnet
+#   release. Every test passes, is skipped for a reason the fork's own runner shares, or fails on
+#   a deviation registered in crates/mega-state-test/src/deviations.rs, which lists the exact
+#   entries it explains with the hashes Satin produces, and every listed entry fails exactly as
+#   listed; the executed and skipped counts are pinned below.
+# - Satin mode, a report: the same entries under Satin's own configuration, counted by outcome
+#   in the step summary. It does not fail the job.
+#
+# The fixture releases are the ones the revm fork's `scripts/run-tests.sh` names at the tag
+# Cargo.lock pins, so this gate and the fork runner's (exec-spec.yml) judge the same fixtures.
+#
+# The `execution-spec gate on Satin` job always runs and reports the gate: it passes when the gate
+# passed, or when a pull request changes nothing the gate covers and the gate did not run. It is
+# the check a branch rule can require; a path filter on the pull request trigger would leave that
+# check pending on every pull request it filters out, so pull requests are filtered by the
+# `changes` job instead.
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches: [satin]
+    paths:
+      - Cargo.lock
+      - Cargo.toml
+      - rust-toolchain.toml
+      - crates/mega-evm/**
+      - crates/mega-state-test/**
+      - crates/state-test/**
+      - crates/system-contracts/**
+      - .github/workflows/exec-spec-satin.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  changes:
+    name: changes the gate covers
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      run: ${{ steps.diff.outputs.run }}
+    steps:
+      - uses: actions/checkout@v4
+        if: github.event_name == 'pull_request'
+        with:
+          # The merge commit and its parents; the first parent is the base it merges into.
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Compare the pull request with its base
+        id: diff
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          # A push to satin passed the push trigger's path filter, and a manual run asks for the gate.
+          if [ "$EVENT" != pull_request ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if ! git rev-parse --verify -q 'HEAD^2' > /dev/null; then
+            echo "::warning::HEAD is not the pull request's merge commit; running the gate"
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # The paths the push trigger filters on; the two lists stay equal. A rename lists both of
+          # its paths, so a file moved out of a covered path counts.
+          covered='^(Cargo\.lock|Cargo\.toml|rust-toolchain\.toml|\.github/workflows/exec-spec-satin\.yml)$|^crates/(mega-evm|mega-state-test|state-test|system-contracts)/'
+          if git diff --name-only --no-renames 'HEAD^1' HEAD | grep -qE "$covered"; then
+            run=true
+          else
+            run=false
+          fi
+          echo "the gate runs: $run"
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+
+  exec-spec-satin:
+    name: execution-spec tests on Satin
+    needs: changes
+    if: needs.changes.outputs.run == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      # Tests equivalence mode executes and skips, per fork, on the pinned fixture releases. The
+      # runner skips what the fork's own runner skips, so these are the counts exec-spec.yml pins
+      # for it. A change that moves the fork pin, and with it the fixtures, updates both, and the
+      # entries the deviations in crates/mega-state-test/src/deviations.rs list.
+      OSAKA_EXECUTED: "19465"
+      OSAKA_SKIPPED: "52"
+      AMSTERDAM_EXECUTED: "15754"
+      AMSTERDAM_SKIPPED: "72"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Read the fork pin from Cargo.lock
+        id: pin
+        run: |
+          sources=$(grep -o 'git+https://github.com/megaeth-labs/revm?tag=[^"#]*#[0-9a-f]*' Cargo.lock | sort -u)
+          if [ "$(printf '%s\n' "$sources" | grep -c .)" -ne 1 ]; then
+            printf 'expected exactly one revm fork revision in Cargo.lock, found:\n%s\n' "$sources" >&2
+            exit 1
+          fi
+          tag=${sources#*tag=}
+          tag=${tag%%#*}
+          commit=${sources##*#}
+          echo "fork tag $tag at $commit"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          repository: megaeth-labs/revm
+          ref: ${{ steps.pin.outputs.tag }}
+          path: revm-fork
+          sparse-checkout: scripts
+          persist-credentials: false
+
+      - name: Check the tag names the locked revision
+        working-directory: revm-fork
+        env:
+          COMMIT: ${{ steps.pin.outputs.commit }}
+        run: test "$(git rev-parse HEAD)" = "$COMMIT"
+
+      - name: Read the fixture releases the fork's runner downloads
+        id: fixtures
+        run: |
+          set -euo pipefail
+          script=revm-fork/scripts/run-tests.sh
+          # One `NAME="value"` assignment each; a script that no longer has one fails the step
+          # rather than downloading something else.
+          read_var() {
+            local value
+            value=$(sed -n "s/^$1=\"\(.*\)\"$/\1/p" "$script")
+            if [ -z "$value" ] || [ "$(printf '%s\n' "$value" | grep -c .)" -ne 1 ]; then
+              echo "::error::$script: no single $1 assignment" >&2
+              return 1
+            fi
+            printf '%s' "$value"
+          }
+          main_version=$(read_var MAIN_VERSION)
+          devnet_version=$(read_var DEVNET_VERSION)
+          main_url=$(read_var FIXTURES_URL)
+          devnet_url=$(read_var DEVNET_FIXTURES_URL)
+          devnet_tar=$(read_var DEVNET_TAR)
+          # The runner downloads the develop release unless REVM_STATETEST_STABLE is set.
+          grep -q '^    MAIN_TAR="fixtures_develop.tar.gz"$' "$script"
+          main="$main_url/$main_version/fixtures_develop.tar.gz"
+          devnet="$devnet_url/$devnet_version/$devnet_tar"
+          # The cache is keyed on the archives themselves: another name or host at the same
+          # version is another download.
+          archives=$(printf '%s\n%s\n' "$main" "$devnet" | sha256sum | cut -c1-16)
+          {
+            echo "main=$main"
+            echo "devnet=$devnet"
+            echo "key=eest-state-tests-$main_version-$devnet_version-$archives"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Restore the fixtures
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: fixtures
+          key: ${{ steps.fixtures.outputs.key }}
+
+      - name: Download the fixtures
+        if: steps.cache.outputs.cache-hit != 'true'
+        env:
+          MAIN_URL: ${{ steps.fixtures.outputs.main }}
+          DEVNET_URL: ${{ steps.fixtures.outputs.devnet }}
+        run: |
+          set -euo pipefail
+          fetch() {
+            mkdir -p "fixtures/$1"
+            curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors "$2" -o "fixtures/$1.tar.gz"
+            # Only the state tests: the archive's top-level `fixtures/` directory is stripped, as
+            # the fork's runner strips it.
+            tar -xzf "fixtures/$1.tar.gz" --strip-components=1 -C "fixtures/$1" fixtures/state_tests
+            rm "fixtures/$1.tar.gz"
+          }
+          fetch main "$MAIN_URL"
+          fetch devnet "$DEVNET_URL"
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - uses: foundry-rs/foundry-toolchain@v1
+
+      - name: Build the runner
+        run: cargo build --release --locked -p state-test
+
+      - name: Equivalence mode, the gate
+        run: |
+          set -uo pipefail
+          {
+            echo "### Equivalence mode"
+            echo
+            echo "| Fixtures | Executed | Skipped | Passed | Deviated | Unattributed | Unreproduced |"
+            echo "|---|---:|---:|---:|---:|---:|---:|"
+          } >> "$GITHUB_STEP_SUMMARY"
+          gate() {
+            local fork=$1 dir=$2 executed=$3 skipped=$4 status=0
+            target/release/state-test --fork "$fork" "$dir" \
+              --expect-executed "$executed" --expect-skipped "$skipped" --expect-deviations \
+              --summary-json "equivalence-$fork.json" || status=$?
+            if [ -f "equivalence-$fork.json" ]; then
+              jq -r --arg fork "$fork" '.summary as $s | "| \($fork) | \($s.executed) | \([$s.skipped[]] | add // 0) | \($s.passed) | \([$s.deviated[]] | add // 0) | \($s.unattributed) | \([$s.unreproduced[]] | add // 0) |"' \
+                "equivalence-$fork.json" >> "$GITHUB_STEP_SUMMARY"
+            fi
+            if [ "$status" -ne 0 ]; then
+              echo "::error::equivalence mode failed on the $fork fixtures"
+            fi
+            return "$status"
+          }
+          status=0
+          gate Osaka fixtures/main/state_tests "$OSAKA_EXECUTED" "$OSAKA_SKIPPED" || status=1
+          gate Amsterdam fixtures/devnet/state_tests "$AMSTERDAM_EXECUTED" "$AMSTERDAM_SKIPPED" || status=1
+          exit "$status"
+
+      - name: Satin mode, the report
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          {
+            echo "### Satin mode (a report)"
+            echo
+            echo "| Fixtures | Executed | Skipped | Passed | Failed | Failed by kind |"
+            echo "|---|---:|---:|---:|---:|---|"
+          } >> "$GITHUB_STEP_SUMMARY"
+          status=0
+          for run in "Osaka fixtures/main/state_tests" "Amsterdam fixtures/devnet/state_tests"; do
+            read -r fork dir <<< "$run"
+            target/release/state-test --mode satin --fork "$fork" "$dir" \
+              --summary-json "satin-$fork.json" || status=1
+            if [ -f "satin-$fork.json" ]; then
+              jq -r --arg fork "$fork" '.summary as $s | "| \($fork) | \($s.executed) | \([$s.skipped[]] | add // 0) | \($s.passed) | \([$s.failed[]] | add // 0) | \($s.failed | to_entries | map("\(.key) \(.value)") | join(", ")) |"' \
+                "satin-$fork.json" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          done
+          exit "$status"
+
+  gate:
+    name: execution-spec gate on Satin
+    needs: [changes, exec-spec-satin]
+    # Always, a cancelled run included: a required check that is skipped counts as passed.
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Report the gate's outcome
+        env:
+          CHANGES: ${{ needs.changes.result }}
+          RUN: ${{ needs.changes.outputs.run }}
+          GATE: ${{ needs.exec-spec-satin.result }}
+        run: |
+          if [ "$CHANGES" != success ]; then
+            echo "::error::could not tell whether the gate had to run: the changes job ended $CHANGES"
+            exit 1
+          fi
+          if [ "$RUN" != true ]; then
+            echo "nothing the gate covers changed; the gate did not run"
+            exit 0
+          fi
+          if [ "$GATE" != success ]; then
+            echo "::error::the gate ended $GATE"
+            exit 1
+          fi
+          echo "the gate passed"

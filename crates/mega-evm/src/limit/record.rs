@@ -47,6 +47,33 @@ pub(crate) enum RecordEffect {
     Refund(LimitUsage),
 }
 
+/// The history bytes a committed record appends, or takes back.
+///
+/// They are the record's data size and nothing else: what a log or a write record weighs in a
+/// block is what the data-size limit meters it at, so the two cannot drift apart. That is the
+/// pairing, and it holds per record; a transaction's two totals part where the byte table says
+/// they do.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HistoryBytes {
+    /// Nothing to charge.
+    None,
+    /// Bytes the record appends.
+    Appended(u64),
+    /// Bytes a record that was taken back no longer appends.
+    Taken(u64),
+}
+
+impl RecordEffect {
+    /// The history bytes this effect appends or takes back.
+    pub(crate) const fn history_bytes(self) -> HistoryBytes {
+        match self {
+            Self::None => HistoryBytes::None,
+            Self::Record(usage) => HistoryBytes::Appended(usage.data_size),
+            Self::Refund(usage) => HistoryBytes::Taken(usage.data_size),
+        }
+    }
+}
+
 impl StagedRecord {
     /// What committing the record counts, per site:
     ///
@@ -86,11 +113,20 @@ impl StagedRecord {
             }
         }
     }
+
+    /// Whether the opcode moved value to another account: a `SELFDESTRUCT` of an account that had
+    /// a balance, to a beneficiary other than itself. revm journals an EIP-7708 transfer log for
+    /// exactly that move, whoever the beneficiary is — the sender included — and none for a
+    /// destruction to itself, which burns the balance on Satin's base spec.
+    pub(crate) const fn moves_value(&self) -> bool {
+        matches!(self, Self::SelfDestruct { had_value: true, to_other_account: true, .. })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{LOG_BASE_SIZE, LOG_TOPIC_SIZE, WRITE_RECORD_SIZE};
     use alloy_primitives::{address, U256};
 
     const SENDER: Address = address!("0000000000000000000000000000000000005e4d");
@@ -131,6 +167,35 @@ mod tests {
         );
     }
 
+    /// A record's history bytes are its data size, at every site: a log's own bytes, a write
+    /// record's forty, and nothing for a write that leaves no record.
+    #[test]
+    fn test_history_bytes_are_the_records_data_size() {
+        assert_eq!(
+            sstore(0, 0, 1).effect(SENDER).history_bytes(),
+            HistoryBytes::Appended(WRITE_RECORD_SIZE)
+        );
+        assert_eq!(
+            sstore(0, 1, 0).effect(SENDER).history_bytes(),
+            HistoryBytes::Taken(WRITE_RECORD_SIZE)
+        );
+        assert_eq!(sstore(3, 3, 3).effect(SENDER).history_bytes(), HistoryBytes::None);
+        assert_eq!(
+            StagedRecord::Log { topics: 3, data_len: 32 }.effect(SENDER).history_bytes(),
+            HistoryBytes::Appended(LOG_BASE_SIZE + 3 * LOG_TOPIC_SIZE + 32)
+        );
+        let to_other = StagedRecord::SelfDestruct {
+            had_value: true,
+            target_exists: true,
+            to_other_account: true,
+            beneficiary: OTHER,
+        };
+        assert_eq!(
+            to_other.effect(SENDER).history_bytes(),
+            HistoryBytes::Appended(WRITE_RECORD_SIZE)
+        );
+    }
+
     /// Only value that moves to another account is a beneficiary write.
     #[test]
     fn test_selfdestruct_record_rules() {
@@ -155,5 +220,33 @@ mod tests {
             beneficiary: SENDER,
         };
         assert_eq!(to_sender.effect(SENDER), RecordEffect::None, "the body counts the sender");
+    }
+
+    /// Value moves to another account only when a destructed account had a balance and a
+    /// beneficiary other than itself, the sender included; a write or a log moves none.
+    #[test]
+    fn test_only_a_destruction_to_another_account_moves_value() {
+        let sd = |had_value, to_other_account, beneficiary| StagedRecord::SelfDestruct {
+            had_value,
+            target_exists: true,
+            to_other_account,
+            beneficiary,
+        };
+        assert!(sd(true, true, OTHER).moves_value());
+        assert!(sd(true, true, SENDER).moves_value(), "the body's record is not the log");
+        assert!(!sd(true, false, OTHER).moves_value(), "a destruction to itself burns");
+        assert!(!sd(false, true, OTHER).moves_value(), "nothing to move");
+        assert!(!sstore(0, 0, 1).moves_value());
+        assert!(!StagedRecord::Log { topics: 3, data_len: 32 }.moves_value());
+    }
+
+    /// A transfer log counts what a `LOG3` carrying one word counts: the same rule, not a number
+    /// of its own.
+    #[test]
+    fn test_a_transfer_log_counts_what_a_log3_of_one_word_counts() {
+        assert_eq!(
+            StagedRecord::Log { topics: 3, data_len: 32 }.effect(SENDER),
+            RecordEffect::Record(crate::limit::TRANSFER_LOG)
+        );
     }
 }

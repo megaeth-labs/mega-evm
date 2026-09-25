@@ -9,16 +9,20 @@ use alloy_evm::{EvmEnv, EvmFactory};
 use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
 use alloy_primitives::{address, Address, Bytes, Signature, TxKind, B256, U256};
 use mega_evm::{
-    test_utils::MemoryDatabase, BlockLimits, EmptyExternalEnv, MegaBlockExecutionCtx,
-    MegaBlockExecutor, MegaBlockExecutorFactory, MegaEvm, MegaEvmFactory, MegaHardforkConfig,
-    MegaSpecId, MegaTxEnvelope,
+    system::{SequencerRegistryConfig, MEGA_SYSTEM_ADDRESS},
+    test_utils::MemoryDatabase,
+    BlockLimits, EmptyExternalEnv, MegaBlockExecutionCtx, MegaBlockExecutor,
+    MegaBlockExecutorFactory, MegaEvm, MegaEvmFactory, MegaHardforkConfig, MegaSpecId,
+    MegaTxEnvelope, PreBlockStateSource,
 };
 use op_alloy_consensus::TxDeposit;
 use revm::{
     context::{BlockEnv, CfgEnv},
     database::State,
     inspector::NoOpInspector,
+    state::EvmState,
 };
+use std::sync::{Arc, Mutex};
 
 /// The sender every test transaction comes from.
 pub(crate) const CALLER: Address = address!("0x2000000000000000000000000000000000000002");
@@ -64,9 +68,26 @@ pub(crate) fn evm_env() -> EvmEnv<MegaSpecId> {
     EvmEnv::new(cfg_env, block_env)
 }
 
-/// A schedule that activates Satin at genesis.
+/// The sequencer the tests seed into the registry, distinct from the system address and admin.
+pub(crate) const SEQUENCER: Address = address!("0x2222222222222222222222222222222222222222");
+
+/// The admin the tests seed into the registry, distinct from the system address and sequencer.
+pub(crate) const ADMIN: Address = address!("0x3333333333333333333333333333333333333333");
+
+/// Registry params the block tests attach to a Satin-at-genesis schedule.
+pub(crate) fn registry_config() -> SequencerRegistryConfig {
+    SequencerRegistryConfig {
+        initial_system_address: MEGA_SYSTEM_ADDRESS,
+        initial_sequencer: SEQUENCER,
+        initial_admin: ADMIN,
+        initial_from_block: 1,
+        min_rotation_delay: 100,
+    }
+}
+
+/// A schedule that activates Satin at genesis and can seed the `SequencerRegistry`.
 pub(crate) fn chain_spec() -> MegaHardforkConfig {
-    MegaHardforkConfig::default().with_all_activated()
+    MegaHardforkConfig::default().with_all_activated().with_params(registry_config())
 }
 
 /// The context of a block held to `limits`.
@@ -148,6 +169,26 @@ fn build(
 ) -> TestExecutor<'_> {
     let evm = MegaEvmFactory::new().create_evm(state, env);
     MegaBlockExecutor::new(evm, ctx, spec, OpAlloyReceiptBuilder::default())
+}
+
+/// Shared log of pre-block states an executor observer records.
+pub(crate) type PreBlockLog = Arc<Mutex<Vec<(PreBlockStateSource, EvmState)>>>;
+
+/// Installs a recording observer on `executor` and returns the log it writes.
+pub(crate) fn record_pre_block(executor: &mut TestExecutor<'_>) -> PreBlockLog {
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let captured = Arc::clone(&log);
+    executor.set_pre_block_observer(Some(Box::new(
+        move |source: PreBlockStateSource, state: &EvmState| {
+            captured.lock().expect("pre-block observer").push((source, state.clone()));
+        },
+    )));
+    log
+}
+
+/// The states the log holds, in execution order.
+pub(crate) fn pre_block_states(log: &PreBlockLog) -> Vec<(PreBlockStateSource, EvmState)> {
+    log.lock().expect("pre-block observer").clone()
 }
 
 /// A legacy transaction from [`CALLER`].

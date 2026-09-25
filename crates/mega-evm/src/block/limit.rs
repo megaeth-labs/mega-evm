@@ -1,8 +1,11 @@
 //! What a block admits, and what it counts of the transactions it packed.
 //!
 //! [`BlockLimits`] is the configuration a node passes in the block execution context;
-//! [`BlockLimiter`] is the state one block keeps while it executes. Every limit defaults to
-//! unlimited, so a caller that configures nothing gets op-revm's block rules and nothing else.
+//! [`BlockLimiter`] is the state one block keeps while it executes. Data size defaults to the
+//! production caps — [`BLOCK_DATA_LIMIT`](crate::constants::BLOCK_DATA_LIMIT) for the block and
+//! [`TX_DATA_LIMIT`](crate::constants::TX_DATA_LIMIT) for each transaction — gas detention's caps
+//! to the spec's, and every other limit to unlimited. [`BlockLimits::no_limits`] clears the
+//! data-size and detention caps too.
 //!
 //! # When each limit is checked
 //!
@@ -10,19 +13,42 @@
 //! its own gas limit, encoded size and data-availability size, and what each of those would add
 //! to the block.
 //!
-//! A limit only known after execution — the execution ledger and the data-size bytes a
-//! transaction kept — is accumulated when the transaction commits and checked before the *next*
-//! transaction starts. The transaction that crosses such a limit is therefore still packed, and
-//! the ones after it are refused; this is what keeps a block full rather than dropping the work
-//! already done. A block whose counter has crossed refuses every later transaction, so the
-//! overshoot is bounded by one transaction per dimension.
+//! A limit only known after execution — the execution ledger, the state ledger, and the data-size
+//! bytes and write records a transaction kept — is accumulated when the transaction commits. The
+//! transaction that crosses such a limit is therefore still packed, and the ones after it are
+//! refused; this is what keeps a block full rather than dropping the work already done. A block
+//! whose counter has reached its limit refuses what comes after it, so the overshoot is bounded by
+//! one transaction per dimension, besides what deposits add:
+//!
+//! - the execution ledger, the data-size bytes and the write records are checked before the *next*
+//!   transaction starts, and a block that has reached any of them refuses every later transaction —
+//!   a deposit excepted;
+//! - the state ledger is checked once the next transaction has executed, and a block that has
+//!   reached its limit refuses a later transaction only if it adds state gas — a deposit excepted.
+//!   One that adds none still fits, and only its own execution can tell which it is.
+//!
+//! # Deposits
+//!
+//! A deposit is an L1 message the chain cannot censor: the block derived from L1 must include it,
+//! and the builder does not choose it. So a deposit is exempt from both data-availability limits
+//! and does not count towards the block's. The execution-gas, state-gas, data-size and KV limits
+//! are packing budgets for the transactions the builder chooses, so none of them refuses a deposit
+//! either. A deposit still counts towards all four, so the transactions after it find the room it
+//! used.
+//!
+//! The per-transaction limits the block installs on the EVM — data size, write records, state gas
+//! — are not block limits: they hold a deposit's own execution the way they hold any
+//! transaction's, and a deposit that crosses one is included with the stop as its result.
 //!
 //! # Which dimensions are enforced
 //!
-//! Of the three gas ledgers the block counts ([`BlockGasCounters`]), only execution has a block
-//! limit. History has none by design. The state ledger and the write-record count are
-//! accumulated here and enforced by nobody: the state-gas block limit arrives with the
-//! state-gas limits, and the write-record limit with the state-growth and KV limits.
+//! Of the three gas ledgers the block counts ([`BlockGasCounters`]), execution and state have a
+//! block limit. History has none by design; the history bytes beside it are reported, not
+//! limited. The write-record count, which is the block's KV count, has one too:
+//! [`BlockLimits::block_kv_update_limit`]. Every record weighs forty bytes of data size, so a
+//! block held to [`BLOCK_DATA_LIMIT`](crate::constants::BLOCK_DATA_LIMIT) keeps at most 327,680
+//! records whatever its KV limit; the KV limit binds only below that, and is unlimited unless a
+//! node sets it.
 
 use alloy_primitives::TxHash;
 
@@ -39,8 +65,9 @@ use crate::{
 
 /// The limits one block holds its transactions to.
 ///
-/// [`no_limits`](Self::no_limits) is the neutral value every field starts from; a node sets the
-/// ones its chain configures, and the block executor always sets
+/// [`Default`] carries the production data-size caps and leaves every other dimension unlimited.
+/// [`no_limits`](Self::no_limits) clears the data-size caps too. A node sets the dimensions its
+/// chain configures, and the block executor always sets
 /// [`block_gas_limit`](Self::block_gas_limit) from the block environment.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct BlockLimits {
@@ -59,23 +86,45 @@ pub struct BlockLimits {
     /// The most data-availability bytes the block's transactions may take together. Deposits are
     /// exempt and do not count towards it.
     pub block_da_size_limit: u64,
-    /// The most execution gas the block's transactions may spend together.
+    /// The most execution gas the block's transactions may spend together. The transaction that
+    /// reaches it is packed; after it, only a deposit is, which it never refuses and which counts
+    /// towards it.
     pub block_execution_gas_limit: u64,
+    /// The most state gas the block's transactions may spend together. The transaction that
+    /// reaches it is packed; after it, only a transaction that adds no state gas is, or a deposit,
+    /// which it never refuses and which counts towards it.
+    pub block_state_gas_limit: u64,
     /// The most data-size bytes the block's transactions may keep together.
+    ///
+    /// [`Default`] is [`BLOCK_DATA_LIMIT`](crate::constants::BLOCK_DATA_LIMIT). The transaction
+    /// that reaches it is packed; after it, only a deposit is, which it never refuses and which
+    /// counts towards it.
     pub block_txs_data_limit: u64,
+    /// The most write records the block's transactions may keep together: the block's KV count.
+    ///
+    /// The transaction that reaches it is packed; after it, only a deposit is, which it never
+    /// refuses and which counts towards it.
+    pub block_kv_update_limit: u64,
     /// The limits every transaction of the block runs under, which the executor installs on the
     /// EVM.
+    ///
+    /// [`Default`] sets the transaction data-size limit to
+    /// [`TX_DATA_LIMIT`](crate::constants::TX_DATA_LIMIT) and leaves the frame cap unlimited, so a
+    /// frame's budget is the 98% share of what its parent has left; gas detention's caps are the
+    /// spec's, as [`EvmTxRuntimeLimits::default`] holds them.
     pub tx_runtime_limits: EvmTxRuntimeLimits,
 }
 
 impl Default for BlockLimits {
     fn default() -> Self {
-        Self::no_limits()
+        Self::with_production_data_limits()
     }
 }
 
 impl BlockLimits {
-    /// No limit at all.
+    /// No limit at all, gas detention's caps included, so no transaction of the block is
+    /// detained ([`EvmTxRuntimeLimits::no_limits`]): for benches and tests, not for executing the
+    /// chain.
     pub const fn no_limits() -> Self {
         Self {
             tx_gas_limit: u64::MAX,
@@ -85,9 +134,28 @@ impl BlockLimits {
             tx_da_size_limit: u64::MAX,
             block_da_size_limit: u64::MAX,
             block_execution_gas_limit: u64::MAX,
+            block_state_gas_limit: u64::MAX,
             block_txs_data_limit: u64::MAX,
+            block_kv_update_limit: u64::MAX,
             tx_runtime_limits: EvmTxRuntimeLimits::no_limits(),
         }
+    }
+
+    /// The limits a block runs under when its caller configures nothing else.
+    ///
+    /// Every dimension is unlimited except data size and gas detention's caps: the block holds
+    /// [`BLOCK_DATA_LIMIT`](crate::constants::BLOCK_DATA_LIMIT) bytes, each transaction holds
+    /// [`TX_DATA_LIMIT`](crate::constants::TX_DATA_LIMIT), and a read of volatile data caps the
+    /// transaction's compute at the spec's caps. The block executor installs the transaction half
+    /// on the EVM.
+    pub const fn with_production_data_limits() -> Self {
+        let mut limits = Self::no_limits();
+        limits.block_txs_data_limit = crate::constants::BLOCK_DATA_LIMIT;
+        limits.tx_runtime_limits = EvmTxRuntimeLimits::no_limits()
+            .with_tx_data_size_limit(crate::constants::TX_DATA_LIMIT)
+            .with_block_env_access_compute_gas_limit(crate::constants::BLOCK_ENV_ACCESS_COMPUTE_GAS)
+            .with_oracle_access_compute_gas_limit(crate::constants::ORACLE_ACCESS_COMPUTE_GAS);
+        limits
     }
 
     /// Sets the per-transaction gas limit.
@@ -135,9 +203,21 @@ impl BlockLimits {
         self
     }
 
+    /// Sets the block's state-gas limit.
+    pub const fn with_block_state_gas_limit(mut self, limit: u64) -> Self {
+        self.block_state_gas_limit = limit;
+        self
+    }
+
     /// Sets the block's data-size limit.
     pub const fn with_block_txs_data_limit(mut self, limit: u64) -> Self {
         self.block_txs_data_limit = limit;
+        self
+    }
+
+    /// Sets the block's KV limit: the most write records its transactions may keep together.
+    pub const fn with_block_kv_update_limit(mut self, limit: u64) -> Self {
+        self.block_kv_update_limit = limit;
         self
     }
 
@@ -173,7 +253,8 @@ pub struct BlockUsage {
     pub da_size: u64,
     /// The transaction's data-availability footprint, in gas.
     pub da_footprint: u64,
-    /// Whether the transaction is a deposit, which the data-availability dimensions exempt.
+    /// Whether the transaction is a deposit, which the data-availability dimensions exempt and the
+    /// execution-gas, state-gas, data-size and KV limits never refuse.
     pub is_deposit: bool,
 }
 
@@ -206,7 +287,7 @@ impl BlockLimiter {
         Self {
             limits,
             block_gas_used: 0,
-            gas: BlockGasCounters { execution: 0, state: 0, history: 0 },
+            gas: BlockGasCounters { execution: 0, state: 0, history: 0, history_bytes: 0 },
             usage: LimitUsage { data_size: 0, write_records: 0 },
             block_tx_size_used: 0,
             block_da_size_used: 0,
@@ -227,10 +308,12 @@ impl BlockLimiter {
 
     /// Whether `tx` may execute in this block.
     ///
-    /// Checks the transaction against its own limits, and against what the block has left. It
-    /// reads the counters and changes nothing;
-    /// [`post_execution_update`](Self::post_execution_update) advances them once the
-    /// transaction commits.
+    /// Checks the transaction against its own limits, and against what the block has left; a
+    /// deposit is held to neither data-availability limit, nor to the execution-gas, the data-size
+    /// or the KV limit. It reads the counters and changes nothing;
+    /// [`post_execution_check`](Self::post_execution_check) checks what only the transaction's
+    /// execution reveals, and [`post_execution_update`](Self::post_execution_update) advances the
+    /// counters once the transaction commits.
     ///
     /// # Errors
     ///
@@ -311,8 +394,14 @@ impl BlockLimiter {
             }
         }
 
-        // The dimensions a transaction's own execution reveals: the transaction that crossed one
-        // is already packed, so what is refused here is the next one.
+        // The packing budgets: the dimensions a transaction's own execution reveals. The
+        // transaction that crossed one is already packed, so what is refused here is the next
+        // one — never a deposit, which is not the builder's to refuse. Every committed
+        // transaction counts towards them, a deposit included, in `post_execution_update`.
+        if is_deposit {
+            return Ok(());
+        }
+
         if self.gas.execution >= self.limits.block_execution_gas_limit {
             return Err(invalid_tx(
                 tx_hash,
@@ -333,10 +422,57 @@ impl BlockLimiter {
             ));
         }
 
-        // `self.gas.state`, `self.gas.history` and `self.usage.write_records` are accumulated and
-        // not checked: history has no block limit, the state-gas block limit arrives with the
-        // state-gas limits, and the write-record limit with the state-growth and KV limits.
+        // The block's KV count.
+        if self.usage.write_records >= self.limits.block_kv_update_limit {
+            return Err(invalid_tx(
+                tx_hash,
+                MegaBlockLimitExceededError::KVUpdateLimit {
+                    block_used: self.usage.write_records,
+                    limit: self.limits.block_kv_update_limit,
+                },
+            ));
+        }
 
+        // `self.gas.state` is checked after execution, in `post_execution_check`: a block that has
+        // reached its state gas still admits a transaction that adds none. `self.gas.history` is
+        // accumulated and not checked: history has no block limit.
+
+        Ok(())
+    }
+
+    /// Whether the executed transaction whose block usage is `usage` may be packed in this block.
+    ///
+    /// A block that has reached its state-gas limit refuses a transaction that adds state gas, and
+    /// only such a transaction: whether one does is known only once it has run. The transaction
+    /// that reaches the limit is itself packed — the block had not reached it when that
+    /// transaction came — so the block overshoots its limit by at most one transaction's state
+    /// gas, besides what deposits add: a deposit is never refused. Like
+    /// [`pre_execution_check`](Self::pre_execution_check) it changes nothing.
+    ///
+    /// # Errors
+    ///
+    /// A [`MegaBlockLimitExceededError::StateGasLimit`] when the block has no state gas left and
+    /// the transaction, not a deposit, adds some, which a builder answers by trying the next
+    /// transaction.
+    pub fn post_execution_check(
+        &self,
+        tx_hash: TxHash,
+        usage: &BlockUsage,
+    ) -> Result<(), BlockExecutionError> {
+        // A deposit is not the builder's to refuse; it still counts, in `post_execution_update`.
+        if !usage.is_deposit &&
+            usage.gas.state > 0 &&
+            self.gas.state >= self.limits.block_state_gas_limit
+        {
+            return Err(invalid_tx(
+                tx_hash,
+                MegaBlockLimitExceededError::StateGasLimit {
+                    block_used: self.gas.state,
+                    tx_used: usage.gas.state,
+                    limit: self.limits.block_state_gas_limit,
+                },
+            ));
+        }
         Ok(())
     }
 
@@ -372,6 +508,32 @@ mod tests {
     use super::*;
     use alloy_primitives::B256;
 
+    /// A block that configures nothing holds the production data-size caps and gas detention's
+    /// caps, and nothing else.
+    #[test]
+    fn test_the_default_limits_are_the_production_data_size_caps() {
+        let limits = BlockLimits::default();
+        assert_eq!(limits, BlockLimits::with_production_data_limits());
+        assert_eq!(limits.block_txs_data_limit, crate::constants::BLOCK_DATA_LIMIT);
+        assert_eq!(limits.tx_runtime_limits.tx_data_size_limit, crate::constants::TX_DATA_LIMIT);
+        assert_eq!(
+            limits.tx_runtime_limits,
+            EvmTxRuntimeLimits::default().with_tx_data_size_limit(crate::constants::TX_DATA_LIMIT)
+        );
+        assert_eq!(limits.tx_runtime_limits.frame_data_size_limit, u64::MAX);
+        assert_eq!(limits.tx_gas_limit, u64::MAX);
+        assert_eq!(limits.block_execution_gas_limit, u64::MAX);
+        assert_eq!(limits.block_state_gas_limit, u64::MAX);
+        assert_eq!(limits.block_kv_update_limit, u64::MAX);
+        assert_eq!(limits.tx_runtime_limits.tx_kv_update_limit, u64::MAX);
+        assert_eq!(limits.tx_runtime_limits.frame_kv_update_limit, u64::MAX);
+
+        let unlimited = BlockLimits::no_limits();
+        assert_eq!(unlimited.block_txs_data_limit, u64::MAX);
+        assert_eq!(unlimited.block_kv_update_limit, u64::MAX);
+        assert_eq!(unlimited.tx_runtime_limits, EvmTxRuntimeLimits::no_limits());
+    }
+
     fn limits_with_block_gas(block_gas_limit: u64) -> BlockLimits {
         BlockLimits::no_limits().with_block_gas_limit(block_gas_limit).with_tx_gas_limit(u64::MAX)
     }
@@ -383,6 +545,7 @@ mod tests {
                 regular: u64::MAX,
                 state: u64::MAX,
                 history: u64::MAX,
+                history_bytes: u64::MAX,
                 ..Default::default()
             },
             usage: LimitUsage { data_size: u64::MAX, write_records: u64::MAX },
@@ -429,6 +592,7 @@ mod tests {
             execution: u64::MAX - 1,
             state: u64::MAX - 1,
             history: u64::MAX - 1,
+            history_bytes: u64::MAX - 1,
         };
         limiter.usage = LimitUsage { data_size: u64::MAX - 1, write_records: u64::MAX - 1 };
         limiter.block_tx_size_used = u64::MAX - 1;
@@ -440,7 +604,12 @@ mod tests {
         assert_eq!(limiter.block_gas_used, u64::MAX);
         assert_eq!(
             limiter.gas,
-            BlockGasCounters { execution: u64::MAX, state: u64::MAX, history: u64::MAX }
+            BlockGasCounters {
+                execution: u64::MAX,
+                state: u64::MAX,
+                history: u64::MAX,
+                history_bytes: u64::MAX,
+            }
         );
         assert_eq!(limiter.usage, LimitUsage { data_size: u64::MAX, write_records: u64::MAX });
         assert_eq!(limiter.block_tx_size_used, u64::MAX);
@@ -488,6 +657,59 @@ mod tests {
             .pre_execution_check(B256::ZERO, 0, 0, 0, false)
             .expect_err("the block's execution gas has reached its limit");
         assert!(std::format!("{err}").contains("Block execution gas limit reached"), "{err}");
+    }
+
+    /// A deposit is never refused by the execution-gas limit, however far past it the block is,
+    /// and still counts towards it: an ordinary transaction after the deposits finds the room
+    /// they used.
+    #[test]
+    fn test_execution_gas_limit_never_refuses_a_deposit_and_counts_it() {
+        let mut limiter =
+            BlockLimiter::new(BlockLimits::no_limits().with_block_execution_gas_limit(1_000));
+        let deposit = BlockUsage {
+            gas: MegaGasUsage { regular: 600, ..Default::default() },
+            is_deposit: true,
+            ..Default::default()
+        };
+
+        // Two deposits cross the limit between them, and a third finds the block past it.
+        for _ in 0..3 {
+            assert!(limiter.pre_execution_check(B256::ZERO, 0, 0, 0, true).is_ok());
+            limiter.post_execution_update(&deposit);
+        }
+        assert_eq!(limiter.gas.execution, 1_800, "every deposit counts");
+
+        let err = limiter
+            .pre_execution_check(B256::ZERO, 0, 0, 0, false)
+            .expect_err("the deposits used the room an ordinary transaction would need");
+        assert!(std::format!("{err}").contains("block_used=1800"), "{err}");
+    }
+
+    /// A deposit is never refused by the block's data-size limit, however far past it the block
+    /// is, and still counts towards it: an ordinary transaction after the deposits finds the room
+    /// they used.
+    #[test]
+    fn test_data_size_limit_never_refuses_a_deposit_and_counts_it() {
+        let mut limiter =
+            BlockLimiter::new(BlockLimits::no_limits().with_block_txs_data_limit(1_000));
+        let deposit = BlockUsage {
+            usage: LimitUsage { data_size: 600, write_records: 0 },
+            is_deposit: true,
+            ..Default::default()
+        };
+
+        // Two deposits cross the limit between them, and a third finds the block past it.
+        for _ in 0..3 {
+            assert!(limiter.pre_execution_check(B256::ZERO, 0, 0, 0, true).is_ok());
+            limiter.post_execution_update(&deposit);
+        }
+        assert_eq!(limiter.usage.data_size, 1_800, "every deposit counts");
+
+        let err = limiter
+            .pre_execution_check(B256::ZERO, 0, 0, 0, false)
+            .expect_err("the deposits used the room an ordinary transaction would need");
+        assert!(std::format!("{err}").contains("Block transactions data limit reached"), "{err}");
+        assert!(std::format!("{err}").contains("block_used=1800"), "{err}");
     }
 
     /// Every limit is an inclusive bound: a transaction that exactly fills what the limit — or
@@ -586,21 +808,156 @@ mod tests {
         assert_eq!(limiter.available_gas(), 0);
     }
 
-    /// The state and history ledgers and the write-record count are accumulated, and no check
-    /// refuses a transaction on them.
+    /// The history ledger and the history bytes are accumulated, and no check refuses a
+    /// transaction on them; nor on the state ledger or the write records, whose limits are
+    /// unlimited unless a node sets them.
     #[test]
-    fn test_state_history_and_write_records_are_counted_but_not_enforced() {
+    fn test_history_is_counted_but_not_enforced() {
         let mut limiter = BlockLimiter::new(BlockLimits::no_limits());
-
-        limiter.post_execution_update(&BlockUsage {
-            gas: MegaGasUsage { state: 10_000, history: 20_000, ..Default::default() },
+        let usage = BlockUsage {
+            gas: MegaGasUsage {
+                state: 10_000,
+                history: 20_000,
+                history_bytes: 250,
+                ..Default::default()
+            },
             usage: LimitUsage { data_size: 0, write_records: 30 },
             ..Default::default()
-        });
+        };
+
+        limiter.post_execution_update(&usage);
 
         assert_eq!(limiter.gas.state, 10_000);
         assert_eq!(limiter.gas.history, 20_000);
+        assert_eq!(limiter.gas.history_bytes, 250);
         assert_eq!(limiter.usage.write_records, 30);
         assert!(limiter.pre_execution_check(B256::ZERO, 0, 0, 0, false).is_ok());
+        assert!(limiter.post_execution_check(B256::ZERO, &usage).is_ok());
+    }
+
+    /// What one committed transaction kept of write records, and nothing else.
+    fn keeps_records(write_records: u64) -> BlockUsage {
+        BlockUsage { usage: LimitUsage { data_size: 0, write_records }, ..Default::default() }
+    }
+
+    /// The block's KV limit is a packing budget like its data size: the transaction that reaches
+    /// it is packed, the next one is refused before it runs, and the limit is an inclusive bound.
+    #[test]
+    fn test_kv_limit_refuses_the_transaction_after_the_crossing() {
+        let mut limiter =
+            BlockLimiter::new(BlockLimits::no_limits().with_block_kv_update_limit(1_000));
+
+        limiter.post_execution_update(&keeps_records(999));
+        assert!(limiter.pre_execution_check(B256::ZERO, 0, 0, 0, false).is_ok());
+
+        // The crossing transaction had been admitted, and it is packed: the block overshoots.
+        limiter.post_execution_update(&keeps_records(5));
+        assert_eq!(limiter.usage.write_records, 1_004);
+        let err = limiter
+            .pre_execution_check(B256::ZERO, 0, 0, 0, false)
+            .expect_err("the block's write records have reached their limit");
+        assert!(std::format!("{err}").contains("Block KV update limit reached"), "{err}");
+        assert!(std::format!("{err}").contains("block_used=1004"), "{err}");
+
+        // A block that kept exactly its limit is full.
+        let mut limiter =
+            BlockLimiter::new(BlockLimits::no_limits().with_block_kv_update_limit(1_000));
+        limiter.post_execution_update(&keeps_records(1_000));
+        assert!(limiter.pre_execution_check(B256::ZERO, 0, 0, 0, false).is_err());
+    }
+
+    /// A deposit is never refused by the block's KV limit, however far past it the block is, and
+    /// still counts towards it: an ordinary transaction after the deposits finds the room they
+    /// used.
+    #[test]
+    fn test_kv_limit_never_refuses_a_deposit_and_counts_it() {
+        let mut limiter =
+            BlockLimiter::new(BlockLimits::no_limits().with_block_kv_update_limit(1_000));
+        let deposit = BlockUsage { is_deposit: true, ..keeps_records(600) };
+
+        for _ in 0..3 {
+            assert!(limiter.pre_execution_check(B256::ZERO, 0, 0, 0, true).is_ok());
+            limiter.post_execution_update(&deposit);
+        }
+        assert_eq!(limiter.usage.write_records, 1_800, "every deposit counts");
+
+        let err = limiter
+            .pre_execution_check(B256::ZERO, 0, 0, 0, false)
+            .expect_err("the deposits used the room an ordinary transaction would need");
+        assert!(std::format!("{err}").contains("block_used=1800"), "{err}");
+    }
+
+    /// What one committed transaction spent on the state ledger, and nothing else.
+    fn adds_state(state: u64) -> BlockUsage {
+        BlockUsage { gas: MegaGasUsage { state, ..Default::default() }, ..Default::default() }
+    }
+
+    /// The state ledger's block limit: the transaction that reaches it is packed, and after it a
+    /// transaction is refused only if it adds state gas.
+    #[test]
+    fn test_state_gas_limit_packs_the_crossing_transaction_and_skips_the_next_that_adds_state() {
+        let mut limiter =
+            BlockLimiter::new(BlockLimits::no_limits().with_block_state_gas_limit(1_000));
+
+        // The n-th transaction finds the block below its limit and crosses it: it is packed.
+        limiter.post_execution_update(&adds_state(900));
+        assert!(limiter.post_execution_check(B256::ZERO, &adds_state(300)).is_ok());
+        limiter.post_execution_update(&adds_state(300));
+        assert_eq!(limiter.gas.state, 1_200, "the block overshoots by that one transaction");
+
+        // The (n+1)-th adds state gas: refused, with the state dimension's own error.
+        let err = limiter
+            .post_execution_check(B256::ZERO, &adds_state(1))
+            .expect_err("the block has no state gas left");
+        assert!(std::format!("{err}").contains("Block state gas limit reached"), "{err}");
+        assert!(std::format!("{err}").contains("block_used=1200"), "{err}");
+        assert!(std::format!("{err}").contains("tx_used=1"), "{err}");
+
+        // One that adds none still fits, before execution and after it.
+        assert!(limiter.pre_execution_check(B256::ZERO, 0, 0, 0, false).is_ok());
+        assert!(limiter.post_execution_check(B256::ZERO, &adds_state(0)).is_ok());
+    }
+
+    /// A deposit is never refused by the state-gas limit, however far past it the block is, and
+    /// still counts towards it: an ordinary transaction after the deposits finds the room they
+    /// used.
+    #[test]
+    fn test_state_gas_limit_never_refuses_a_deposit_and_counts_it() {
+        let mut limiter =
+            BlockLimiter::new(BlockLimits::no_limits().with_block_state_gas_limit(1_000));
+        let deposit = |state| BlockUsage { is_deposit: true, ..adds_state(state) };
+
+        // Two deposits cross the limit between them.
+        for _ in 0..2 {
+            assert!(limiter.post_execution_check(B256::ZERO, &deposit(600)).is_ok());
+            limiter.post_execution_update(&deposit(600));
+        }
+        assert_eq!(limiter.gas.state, 1_200);
+
+        // A third finds the block past its limit and is still admitted.
+        assert!(limiter.post_execution_check(B256::ZERO, &deposit(600)).is_ok());
+        limiter.post_execution_update(&deposit(600));
+        assert_eq!(limiter.gas.state, 1_800, "every deposit counts");
+
+        let err = limiter
+            .post_execution_check(B256::ZERO, &adds_state(1))
+            .expect_err("the deposits used the room an ordinary transaction would need");
+        assert!(std::format!("{err}").contains("block_used=1800"), "{err}");
+    }
+
+    /// The state-gas limit is an inclusive bound like every other: a block may spend exactly its
+    /// limit, and the block that has is full.
+    #[test]
+    fn test_state_gas_limit_admits_what_exactly_fills_it() {
+        let mut limiter =
+            BlockLimiter::new(BlockLimits::no_limits().with_block_state_gas_limit(1_000));
+        limiter.post_execution_update(&adds_state(999));
+        assert!(limiter.post_execution_check(B256::ZERO, &adds_state(1)).is_ok());
+
+        limiter.post_execution_update(&adds_state(1));
+        assert!(
+            limiter.post_execution_check(B256::ZERO, &adds_state(1)).is_err(),
+            "a block that spent exactly its limit is full"
+        );
     }
 }

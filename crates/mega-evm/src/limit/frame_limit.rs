@@ -6,6 +6,10 @@
 //! records of applied EIP-7702 authorities) and what the outermost frame kept sit on the
 //! transaction's own lane.
 //!
+//! The history bytes a frame appends beside its write records — its logs, and the code it
+//! deposits when it is a creation — ride on the same lanes and follow the same rule, so what a
+//! transaction reports it appended is what it kept.
+//!
 //! Every operation is O(1): the totals are cached and kept in step with each change.
 
 #[cfg(not(feature = "std"))]
@@ -14,11 +18,22 @@ use std::vec::Vec;
 
 use alloy_primitives::Address;
 
-use super::{LimitUsage, WRITE_RECORD};
+use super::{LimitUsage, UNLIMITED, WRITE_RECORD};
 
 /// One frame's lane.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Lane {
+    /// History gas the caller paid for the records on this lane, which the frame's failure gives
+    /// back to it.
+    pub(crate) history_charge: u64,
+    /// History gas the caller paid for the record of its own account
+    /// ([`holds_caller_record`](Self::holds_caller_record)), which follows that record's own
+    /// lifetime: a value transfer's sender record dies with the frame, a creation's nonce record
+    /// outlives it.
+    pub(crate) caller_history_charge: u64,
+    /// Whether the writes this lane stands for were recorded at all. False for a frame answered
+    /// without running, whose caller paid for records nothing ever made.
+    pub(crate) records_made: bool,
     /// What the frame, and the children it kept, counted.
     pub(crate) used: LimitUsage,
     /// What the frame, and the children it kept, took back: a slot written back to its original
@@ -36,27 +51,66 @@ pub(crate) struct Lane {
     /// Whether the caller's record on this lane is a creator's nonce, which survives the
     /// creation's failure once the nonce was bumped.
     pub(crate) creator_record: bool,
-    /// The most data-size bytes the frame may keep; `u64::MAX` when it has no budget.
-    pub(crate) budget: u64,
+    /// The most the frame may keep: data-size bytes and write records, each `u64::MAX` where the
+    /// frame has no budget.
+    pub(crate) budget: LimitUsage,
+    /// What is left of the history allowance this frame was granted, if it was granted one. It
+    /// never enters the frame's gas, and what it does not spend disappears with the frame.
+    pub(crate) stipend_remaining: u64,
+    /// The history bytes the frame, and the children it kept, appended that are not write
+    /// records: the logs it emitted and, when it is a creation, the code it deposits. Its write
+    /// records are history too, and are counted in [`used`](Self::used), as are these bytes.
+    pub(crate) log_and_code_bytes: u64,
 }
 
 impl Lane {
-    /// A lane for a frame running as `address`.
-    pub(crate) const fn new(address: Option<Address>, account_recorded: bool, budget: u64) -> Self {
+    /// A lane for a frame running as `address`, whose caller paid `history_charge` for the
+    /// records the frame's start makes on it.
+    pub(crate) const fn new(
+        address: Option<Address>,
+        account_recorded: bool,
+        budget: LimitUsage,
+        history_charge: u64,
+    ) -> Self {
         Self {
             used: LimitUsage::ZERO,
             refund: LimitUsage::ZERO,
+            history_charge,
+            caller_history_charge: 0,
+            records_made: true,
             address,
             account_recorded,
             holds_caller_record: false,
             creator_record: false,
             budget,
+            stipend_remaining: 0,
+            log_and_code_bytes: 0,
         }
     }
 
-    /// A lane for a frame that does not run: a result built without an interpreter.
-    pub(crate) const fn empty() -> Self {
-        Self::new(None, false, u64::MAX)
+    /// A lane for a frame that does not run: a result built without an interpreter. Its caller
+    /// paid `history_charge` for records nothing made, so all of it comes back.
+    pub(crate) const fn empty(history_charge: u64) -> Self {
+        Self { records_made: false, ..Self::new(None, false, UNLIMITED, history_charge) }
+    }
+
+    /// The history gas the caller gets back when this frame returns.
+    ///
+    /// Everything, when the writes were never recorded; what the frame's failure discards, when
+    /// they were; nothing, when the frame kept them. A creation's nonce record survives the
+    /// creation's failure, so the caller keeps paying for it.
+    pub(crate) const fn history_refund(&self, success: bool) -> u64 {
+        if !self.records_made {
+            return self.history_charge.saturating_add(self.caller_history_charge);
+        }
+        if success {
+            return 0;
+        }
+        if self.creator_record {
+            self.history_charge
+        } else {
+            self.history_charge.saturating_add(self.caller_history_charge)
+        }
     }
 
     /// What the frame keeps if it succeeds.
@@ -64,9 +118,9 @@ impl Lane {
         self.used.saturating_sub(self.refund)
     }
 
-    /// The data-size bytes the frame may still keep.
-    pub(crate) const fn remaining_budget(&self) -> u64 {
-        self.budget.saturating_sub(self.net().data_size)
+    /// What the frame may still keep: the data-size bytes and the write records.
+    pub(crate) const fn remaining_budget(&self) -> LimitUsage {
+        self.budget.saturating_sub(self.net())
     }
 }
 
@@ -83,6 +137,8 @@ pub(crate) struct FrameLimitTracker {
     total_used: LimitUsage,
     /// `tx_refund` plus every lane's `refund`.
     total_refund: LimitUsage,
+    /// The log and code bytes the outermost frame kept, plus every lane's.
+    log_and_code_bytes: u64,
 }
 
 impl FrameLimitTracker {
@@ -93,6 +149,7 @@ impl FrameLimitTracker {
         self.lanes.clear();
         self.total_used = LimitUsage::ZERO;
         self.total_refund = LimitUsage::ZERO;
+        self.log_and_code_bytes = 0;
     }
 
     /// The number of lanes, which is the number of frames on the call stack.
@@ -105,6 +162,12 @@ impl FrameLimitTracker {
         self.total_used.saturating_sub(self.total_refund)
     }
 
+    /// The history bytes the transaction appended beside its write records — its logs and the
+    /// code it deposited — with every running frame counted as if it succeeds.
+    pub(crate) const fn log_and_code_bytes(&self) -> u64 {
+        self.log_and_code_bytes
+    }
+
     /// The running frame's lane.
     pub(crate) fn current(&self) -> Option<&Lane> {
         self.lanes.last()
@@ -113,6 +176,25 @@ impl FrameLimitTracker {
     /// The running frame's lane, mutably.
     pub(crate) fn current_mut(&mut self) -> Option<&mut Lane> {
         self.lanes.last_mut()
+    }
+
+    /// Grants the running frame a history allowance of `amount`.
+    ///
+    /// Must run right after the frame's lane was pushed: the allowance belongs to the frame that
+    /// is starting, not to the one that granted it.
+    pub(crate) fn grant_stipend(&mut self, amount: u64) {
+        if let Some(lane) = self.lanes.last_mut() {
+            lane.stipend_remaining = amount;
+        }
+    }
+
+    /// Draws up to `amount` from the running frame's allowance and reports what it gave. The
+    /// caller pays the rest out of the frame's gas.
+    pub(crate) fn consume_stipend(&mut self, amount: u64) -> u64 {
+        let Some(lane) = self.lanes.last_mut() else { return 0 };
+        let drawn = lane.stipend_remaining.min(amount);
+        lane.stipend_remaining -= drawn;
+        drawn
     }
 
     /// Pushes the lane of a frame that starts.
@@ -131,6 +213,15 @@ impl FrameLimitTracker {
         self.total_used = self.total_used.saturating_add(usage);
     }
 
+    /// Counts `bytes` of a log or of deposited code on the running frame's lane, or on the
+    /// transaction's outside any frame.
+    pub(crate) fn record_log_and_code_bytes(&mut self, bytes: u64) {
+        if let Some(lane) = self.lanes.last_mut() {
+            lane.log_and_code_bytes = lane.log_and_code_bytes.saturating_add(bytes);
+        }
+        self.log_and_code_bytes = self.log_and_code_bytes.saturating_add(bytes);
+    }
+
     /// Counts `usage` on the transaction's own lane, whatever frame is running: what it stands
     /// for is outside the state, so no frame's failure takes it back.
     pub(crate) fn record_tx(&mut self, usage: LimitUsage) {
@@ -147,10 +238,11 @@ impl FrameLimitTracker {
     }
 
     /// Records the running frame's caller's account on the running frame's lane, unless the
-    /// caller's lane already counts it. A `creator` record is a creation's nonce.
+    /// caller's lane already counts it. A `creator` record is a creation's nonce, and
+    /// `history_charge` is what the caller paid for the record.
     ///
     /// Must run right after the running frame's lane was pushed, with the caller's lane below it.
-    pub(crate) fn record_caller(&mut self, creator: bool) {
+    pub(crate) fn record_caller(&mut self, creator: bool, history_charge: u64) {
         let [.., caller, lane] = self.lanes.as_mut_slice() else { return };
         if caller.account_recorded {
             return;
@@ -158,6 +250,7 @@ impl FrameLimitTracker {
         caller.account_recorded = true;
         lane.holds_caller_record = true;
         lane.creator_record = creator;
+        lane.caller_history_charge = history_charge;
         lane.used = lane.used.saturating_add(WRITE_RECORD);
         self.total_used = self.total_used.saturating_add(WRITE_RECORD);
     }
@@ -176,11 +269,30 @@ impl FrameLimitTracker {
         self.total_used = self.total_used.saturating_sub(WRITE_RECORD);
     }
 
+    /// Takes back everything the running frame's start counted, its caller's record included
+    /// ([`drop_caller_record`](Self::drop_caller_record)): the start did not happen after all, so
+    /// the lane keeps nothing whatever the frame's answer, and its caller gets back all it paid
+    /// for the records. Must run before the frame runs, when its start is all the lane holds.
+    pub(crate) fn undo_frame_start(&mut self) {
+        self.drop_caller_record();
+        let Some(lane) = self.lanes.last_mut() else { return };
+        debug_assert_eq!(
+            lane.refund,
+            LimitUsage::ZERO,
+            "a frame that has not run took nothing back"
+        );
+        debug_assert_eq!(lane.log_and_code_bytes, 0, "a frame that has not run logged nothing");
+        self.total_used = self.total_used.saturating_sub(lane.used);
+        lane.used = LimitUsage::ZERO;
+        lane.records_made = false;
+    }
+
     /// Pops the lane of the frame that returned: `success` merges it into its caller's lane (or
     /// the transaction's), a failure discards it.
     ///
-    /// A creator's record outlives the creation's failure; any other record of the caller dies
-    /// with it, and the caller's account stops counting as recorded.
+    /// A creator's record outlives the creation's failure and lands on the caller's lane, which
+    /// nothing here holds to its budget; any other record of the caller dies with it, and the
+    /// caller's account stops counting as recorded.
     pub(crate) fn pop(&mut self, success: bool) -> Option<Lane> {
         let lane = self.lanes.pop()?;
         if success {
@@ -188,6 +300,8 @@ impl FrameLimitTracker {
                 Some(caller) => {
                     caller.used = caller.used.saturating_add(lane.used);
                     caller.refund = caller.refund.saturating_add(lane.refund);
+                    caller.log_and_code_bytes =
+                        caller.log_and_code_bytes.saturating_add(lane.log_and_code_bytes);
                     if lane.address.is_some() && lane.address == caller.address {
                         caller.account_recorded |= lane.account_recorded;
                     }
@@ -201,6 +315,7 @@ impl FrameLimitTracker {
         }
         self.total_used = self.total_used.saturating_sub(lane.used);
         self.total_refund = self.total_refund.saturating_sub(lane.refund);
+        self.log_and_code_bytes = self.log_and_code_bytes.saturating_sub(lane.log_and_code_bytes);
         if let Some(caller) = self.lanes.last_mut() {
             if lane.creator_record {
                 caller.used = caller.used.saturating_add(WRITE_RECORD);
@@ -236,14 +351,34 @@ mod tests {
         LimitUsage { data_size, write_records: 0 }
     }
 
+    /// The depth and the running lane follow the frame stack: a push adds a lane and a pop takes
+    /// the running one away, whatever the frame's outcome.
+    #[test]
+    fn test_depth_and_the_running_lane_follow_the_frame_stack() {
+        let mut t = FrameLimitTracker::default();
+        assert_eq!(t.depth(), 0);
+        assert!(t.current().is_none(), "no frame has started");
+        t.push(Lane::new(Some(ADDR), false, bytes(7), 0));
+        t.push(Lane::empty(0));
+        assert_eq!(t.depth(), 2);
+        assert_eq!(t.current().unwrap().address, None, "the empty lane is the running one");
+        assert!(t.pop(false).is_some());
+        assert_eq!(t.depth(), 1);
+        assert_eq!(t.current().unwrap().budget, bytes(7));
+        assert!(t.pop(true).is_some());
+        assert_eq!(t.depth(), 0);
+        assert!(t.current().is_none());
+        assert!(t.pop(true).is_none(), "there is nothing left to pop");
+    }
+
     /// Recording a caller on an empty stack, or on a lane with no caller below it, is a no-op.
     #[test]
     fn test_record_caller_without_a_caller_lane_is_noop() {
         let mut t = FrameLimitTracker::default();
-        t.record_caller(true);
+        t.record_caller(true, 0);
         assert_eq!(t.net(), LimitUsage::ZERO);
-        t.push(Lane::new(Some(ADDR), false, u64::MAX));
-        t.record_caller(true);
+        t.push(Lane::new(Some(ADDR), false, UNLIMITED, 0));
+        t.record_caller(true, 0);
         assert_eq!(t.net(), LimitUsage::ZERO);
         assert!(!t.current().unwrap().holds_caller_record);
     }
@@ -252,12 +387,12 @@ mod tests {
     #[test]
     fn test_record_caller_records_a_caller_once() {
         let mut t = FrameLimitTracker::default();
-        t.push(Lane::new(Some(ADDR), false, u64::MAX));
-        t.push(Lane::new(None, true, u64::MAX));
-        t.record_caller(true);
+        t.push(Lane::new(Some(ADDR), false, UNLIMITED, 0));
+        t.push(Lane::new(None, true, UNLIMITED, 0));
+        t.record_caller(true, 0);
         assert!(t.pop(true).is_some());
-        t.push(Lane::new(None, true, u64::MAX));
-        t.record_caller(true);
+        t.push(Lane::new(None, true, UNLIMITED, 0));
+        t.record_caller(true, 0);
         assert!(!t.current().unwrap().holds_caller_record, "the caller is recorded already");
         assert_eq!(t.net(), WRITE_RECORD);
     }
@@ -276,19 +411,19 @@ mod tests {
         assert_eq!(t.net(), bytes(100));
 
         // Frame 1.
-        t.push(Lane::new(Some(ADDR), false, u64::MAX));
+        t.push(Lane::new(Some(ADDR), false, UNLIMITED, 0));
         t.record(bytes(30));
         t.refund(bytes(10));
         assert_eq!(t.net(), t.net_uncached());
 
         // Frame 2, nested.
-        t.push(Lane::new(None, false, u64::MAX));
+        t.push(Lane::new(None, false, UNLIMITED, 0));
         t.record(bytes(15));
         t.refund(bytes(3));
         assert_eq!(t.net(), t.net_uncached());
 
         // Frame 3 fails: its usage and refund leave the totals.
-        t.push(Lane::new(None, false, u64::MAX));
+        t.push(Lane::new(None, false, UNLIMITED, 0));
         t.record(bytes(11));
         t.refund(bytes(2));
         let before_revert = t.net();
@@ -298,7 +433,7 @@ mod tests {
         assert_eq!(t.net(), bytes(before_revert.data_size - 9));
 
         // Frame 3 again, succeeding: merging moves usage, the totals do not change.
-        t.push(Lane::new(None, false, u64::MAX));
+        t.push(Lane::new(None, false, UNLIMITED, 0));
         t.record(bytes(6));
         t.refund(bytes(1));
         let before_success = t.net();
@@ -320,11 +455,50 @@ mod tests {
         assert_eq!(t.depth(), 0);
     }
 
+    /// Log and code bytes follow the frame that appended them: a running frame counts as if it
+    /// succeeds, a success hands them to its caller, a failure discards them, and what was
+    /// counted outside any frame is the transaction's.
+    #[test]
+    fn test_log_and_code_bytes_follow_their_frame() {
+        let mut t = FrameLimitTracker::default();
+        t.record_log_and_code_bytes(5);
+        t.push(Lane::new(Some(ADDR), false, UNLIMITED, 0));
+        t.record_log_and_code_bytes(10);
+        t.push(Lane::new(None, false, UNLIMITED, 0));
+        t.record_log_and_code_bytes(100);
+        assert_eq!(t.log_and_code_bytes(), 115);
+
+        let failed = t.pop(false).expect("the child popped");
+        assert_eq!(failed.log_and_code_bytes, 100);
+        assert_eq!(t.log_and_code_bytes(), 15, "the failed child's bytes are gone");
+
+        t.push(Lane::new(None, false, UNLIMITED, 0));
+        t.record_log_and_code_bytes(20);
+        t.pop(true);
+        assert_eq!(t.log_and_code_bytes(), 35);
+        assert_eq!(
+            t.current().unwrap().log_and_code_bytes,
+            30,
+            "the kept child's are its caller's"
+        );
+
+        t.pop(false);
+        assert_eq!(t.log_and_code_bytes(), 5, "only what was outside the outermost frame is left");
+
+        t.push(Lane::new(Some(ADDR), false, UNLIMITED, 0));
+        t.record_log_and_code_bytes(7);
+        t.pop(true);
+        assert_eq!(t.log_and_code_bytes(), 12, "the outermost frame's success keeps its bytes");
+
+        t.reset();
+        assert_eq!(t.log_and_code_bytes(), 0);
+    }
+
     /// A refund larger than the usage clamps the net at zero.
     #[test]
     fn test_net_usage_saturates_when_refund_exceeds_used() {
         let mut t = FrameLimitTracker::default();
-        t.push(Lane::new(None, false, u64::MAX));
+        t.push(Lane::new(None, false, UNLIMITED, 0));
         t.record(bytes(10));
         t.refund(bytes(100));
         assert_eq!(t.net(), LimitUsage::ZERO);
@@ -339,17 +513,17 @@ mod tests {
     #[test]
     fn test_failed_child_discards_sender_record_but_keeps_creator_record() {
         let mut t = FrameLimitTracker::default();
-        t.push(Lane::new(Some(ADDR), false, u64::MAX));
+        t.push(Lane::new(Some(ADDR), false, UNLIMITED, 0));
 
-        t.push(Lane::new(None, true, u64::MAX));
-        t.record_caller(false);
+        t.push(Lane::new(None, true, UNLIMITED, 0));
+        t.record_caller(false, 0);
         t.record(WRITE_RECORD);
         t.pop(false);
         assert_eq!(t.net(), LimitUsage::ZERO);
         assert!(!t.current().unwrap().account_recorded, "the sender record died with the child");
 
-        t.push(Lane::new(None, true, u64::MAX));
-        t.record_caller(true);
+        t.push(Lane::new(None, true, UNLIMITED, 0));
+        t.record_caller(true, 0);
         t.record(WRITE_RECORD);
         t.pop(false);
         assert_eq!(t.net(), WRITE_RECORD, "the creator's nonce outlives the creation");
@@ -361,9 +535,9 @@ mod tests {
     #[test]
     fn test_drop_caller_record_rearms_the_caller() {
         let mut t = FrameLimitTracker::default();
-        t.push(Lane::new(Some(ADDR), false, u64::MAX));
-        t.push(Lane::new(None, true, u64::MAX));
-        t.record_caller(true);
+        t.push(Lane::new(Some(ADDR), false, UNLIMITED, 0));
+        t.push(Lane::new(None, true, UNLIMITED, 0));
+        t.record_caller(true, 0);
         t.drop_caller_record();
         t.drop_caller_record();
         assert_eq!(t.net(), LimitUsage::ZERO);
@@ -377,23 +551,23 @@ mod tests {
     #[test]
     fn test_same_account_child_merges_the_recorded_flag() {
         let mut t = FrameLimitTracker::default();
-        t.push(Lane::new(Some(ADDR), false, u64::MAX));
-        t.push(Lane::new(Some(ADDR), true, u64::MAX));
+        t.push(Lane::new(Some(ADDR), false, UNLIMITED, 0));
+        t.push(Lane::new(Some(ADDR), true, UNLIMITED, 0));
         t.pop(true);
         assert!(t.current().unwrap().account_recorded);
 
         let other = address!("0000000000000000000000000000000000005678");
-        t.push(Lane::new(Some(other), false, u64::MAX));
-        t.push(Lane::new(Some(other), false, u64::MAX));
+        t.push(Lane::new(Some(other), false, UNLIMITED, 0));
+        t.push(Lane::new(Some(other), false, UNLIMITED, 0));
         t.current_mut().unwrap().account_recorded = true;
         t.pop(false);
         assert!(!t.current().unwrap().account_recorded, "a failed child hands nothing back");
 
-        t.push(Lane::new(Some(ADDR), true, u64::MAX));
+        t.push(Lane::new(Some(ADDR), true, UNLIMITED, 0));
         assert_eq!(t.depth(), 3);
         t.pop(true);
         assert!(!t.current().unwrap().account_recorded, "another account's flag is its own");
-        t.push(Lane::new(None, true, u64::MAX));
+        t.push(Lane::new(None, true, UNLIMITED, 0));
         t.pop(true);
         assert!(!t.current().unwrap().account_recorded, "an unknown account is not the caller's");
     }

@@ -9,6 +9,7 @@ mod context;
 mod execution;
 mod factory;
 mod frame;
+mod history;
 mod host;
 mod inspector;
 mod instructions;
@@ -23,6 +24,7 @@ pub use context::*;
 pub use execution::*;
 pub use factory::*;
 pub use frame::*;
+pub use history::*;
 pub use host::*;
 pub use inspector::*;
 pub use precompiles::*;
@@ -243,7 +245,11 @@ where
     ) -> Result<MegaTransactionOutcome, EVMError<DB::Error, MegaTransactionError>> {
         let result_and_state = self.run_transaction(tx)?;
         let layer = &self.inner.ctx.additional_limit;
-        let gas = MegaGasUsage::new(result_and_state.result.gas(), layer.history_gas_spent());
+        let gas = MegaGasUsage::new(
+            result_and_state.result.gas(),
+            layer.history_gas_spent(),
+            layer.history_bytes(),
+        );
         Ok(MegaTransactionOutcome {
             result_and_state,
             gas,

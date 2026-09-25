@@ -29,7 +29,7 @@ fn through_contract(scheme: u8, data: &[u8], value: u64) -> (bool, Bytes) {
 }
 
 /// The three methods are intercepted: the two switches return nothing and the query answers
-/// `false`, which is what the common execution layer knows while detention is not here.
+/// `false` for a caller nothing switched off. What the switch does is in `access_control`.
 #[test]
 fn test_the_three_methods_are_intercepted() {
     let disabled = IMegaAccessControl::isVolatileDataAccessDisabledCall::abi_encode_returns(&false);

@@ -1,9 +1,9 @@
 //! The `MegaLimitControl` system contract.
 //!
-//! It answers what the running call has left of the resources `MegaETH` meters; today that is
-//! `remainingComputeGas()`. Its methods are intercepted: the deployed bytecode only carries the
-//! ABI and reverts with `NotIntercepted()`. Its Solidity source is
-//! `crates/system-contracts/contracts/MegaLimitControl.sol`.
+//! It answers what the calling frame has left of the resources `MegaETH` meters; today that is
+//! `remainingComputeGas()`, the compute it could still spend. Its methods are intercepted: the
+//! deployed bytecode only carries the ABI and reverts with `NotIntercepted()`. Its Solidity source
+//! is `crates/system-contracts/contracts/MegaLimitControl.sol`.
 
 use alloy_evm::Database;
 use alloy_primitives::{address, Address, Bytes};
@@ -33,18 +33,52 @@ pub use mega_system_contracts::limit_control::IMegaLimitControl;
 /// Answers a call to `MegaLimitControl`, or `None` when the selector is not `remainingComputeGas`
 /// and the deployed bytecode runs.
 ///
-/// # What `remainingComputeGas` answers today
+/// `depth` is the depth of the frame the call would start, and `caller_remaining` the regular gas
+/// the calling frame has left once the call deducted the gas it forwards, the part gas detention
+/// withholds included: [`Gas::remaining`](revm::interpreter::Gas::remaining). A transaction that
+/// calls the contract directly has no calling frame, and passes zero.
 ///
-/// The compute ledger belongs to compute gas, which is what will make this the compute gas the
-/// transaction has left. Until then the interceptor answers what the common execution layer
-/// knows: the regular gas the intercepted call was forwarded, which is the regular gas its frame
-/// could still spend. Regular gas is capped at the execution cap, so the answer never counts the
-/// state-gas reservoir.
+/// # What `remainingComputeGas()` answers
+///
+/// The compute the caller could still spend: the regular gas a regular charge of the calling frame
+/// could draw once the call returns. That is the lesser of two figures, both read when the call
+/// reaches the interceptor — after the `CALL` or `STATICCALL` charged its own costs, and with the
+/// gas it forwarded counted back:
+///
+/// - the caller's own regular gas, `caller_remaining` plus what the call forwarded. The answer
+///   gives the forward back untouched, so this is what the caller holds when the call returns;
+/// - the compute gas detention leaves the transaction, once a read of volatile data set a limit:
+///   the limit less the transaction's compute at the call, the forward not counted
+///   ([`Detention::allowance`](crate::Detention)). A transaction that read nothing, or that
+///   detention does not hold, has no such limit.
+///
+/// Detention holds a frame's spendable gas at the lesser of the two at all times, so the answer is
+/// the caller's spendable regular gas before the forward, which detention caps. For a transaction
+/// that calls the contract directly, the caller's own gas is the regular gas its frame was given;
+/// a transaction whose sender is the block beneficiary is detained from its start, so it hears
+/// what a block-environment read's cap leaves it when its frame holds more.
+///
+/// The figure is taken before the forward: taken after it, a caller that forwards what `GAS`
+/// reports would hear back one sixty-fourth of its gas. That is the one property carried over
+/// from the legacy engine, whose compute never counted the gas a call forwarded. The figure
+/// itself departs from the legacy engine's, which came from a separate compute ledger, with
+/// per-frame budgets of 98/100 of the caller's remaining compute under the transaction's compute
+/// limit, so it could exceed the caller's gas. Here compute is regular gas, and the answer is at
+/// most the caller's own.
+///
+/// It is regular gas only, capped at the execution cap: the state-gas reservoir is not compute,
+/// and a transaction above the cap hears the cap's share at most. It is not a promise of compute
+/// either: state or history gas the caller later pays out of its regular gas comes out of the
+/// same figure. A frame a value call started holds its stipend in its own regular gas, and
+/// detention counts the stipend outside compute, so the frame hears it counted whether or not it
+/// is detained.
 ///
 /// The method reads and takes no value.
 pub(crate) fn intercept<DB: Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &MegaContext<DB, ExtEnvs>,
     inputs: &CallInputs,
+    depth: usize,
+    caller_remaining: u64,
 ) -> Option<FrameResult> {
     let selector = peek_selector(&inputs.input, ctx)?;
     // Selector-only admission: the four bytes decide, whatever follows them.
@@ -54,6 +88,11 @@ pub(crate) fn intercept<DB: Database, ExtEnvs: ExternalEnvTypes>(
     if let Some(rejected) = reject_non_zero_transfer(inputs) {
         return Some(rejected);
     }
-    let output = IMegaLimitControl::remainingComputeGasCall::abi_encode_returns(&inputs.gas_limit);
+    let own = caller_remaining.saturating_add(inputs.gas_limit);
+    let remaining = ctx
+        .detention
+        .allowance(depth, inputs.gas_limit)
+        .map_or(own, |allowance| own.min(allowance));
+    let output = IMegaLimitControl::remainingComputeGasCall::abi_encode_returns(&remaining);
     Some(synthetic_call_result(inputs, InstructionResult::Return, Bytes::from(output)))
 }
