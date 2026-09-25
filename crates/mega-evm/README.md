@@ -100,7 +100,8 @@ A signer at nonce 1 stays there however often its deployment fails, so nobody ca
 A `keylessDeploy` call a contract makes is not a deployment: it runs the method body, which reverts with `NotIntercepted()`.
 
 The system address sends the protocol's own transactions: a legacy transaction from it to a whitelisted contract is validated — the whitelist, the chain id, the nonce and EIP-3607 — and promoted to a deposit, which pays no fee and rewards none.
-It is the address the `SequencerRegistry` holds, which block execution reads before each block's transactions, once a rotation due in the block has been applied (`MegaContext::system_address`); a context no block has been started on uses `MEGA_SYSTEM_ADDRESS`.
+It is the address the `SequencerRegistry` holds, which block execution reads before each block's transactions, once a rotation due in the block has been applied (`MegaContext::system_address`); a context no block has been started on uses `MEGA_SYSTEM_ADDRESS` unless it is given one.
+A node that builds an EVM outside block execution — an RPC call, the replay of a block's transactions for a trace — reads the live address from the registry itself and sets it (`MegaContext::set_system_address`, `MegaContext::with_system_address`).
 The account such a transaction creates for its caller is charged the account-creation state gas exactly once.
 
 History gas is in place: every byte a transaction appends to the chain is priced at MegaETH's cost per history byte, and the byte counts are the ones the data-size limit meters, so a record's history bytes are its own data size.

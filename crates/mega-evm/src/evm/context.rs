@@ -305,15 +305,29 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     ///
     /// Block execution reads it out of the `SequencerRegistry` before every block's transactions,
     /// once a rotation due in the block has been applied, so it is the live one for the block. A
-    /// context no block has been started on uses [`MEGA_SYSTEM_ADDRESS`].
+    /// context no block has been started on uses [`MEGA_SYSTEM_ADDRESS`] unless its builder set
+    /// another ([`set_system_address`](Self::set_system_address)).
     pub const fn system_address(&self) -> Address {
         self.system_address
     }
 
     /// Sets the address system-address transactions come from, for every transaction from now
-    /// on. Block execution sets the one it read out of the `SequencerRegistry`.
-    pub(crate) const fn set_system_address(&mut self, address: Address) {
+    /// on.
+    ///
+    /// The block executor sets it itself, to the address it read out of the `SequencerRegistry`
+    /// before the block's transactions. An EVM a node builds outside block execution — an RPC
+    /// call, or the replay of a block's transactions for a trace — has no block to read it, so
+    /// the node reads the live address from the `SequencerRegistry` in the state the EVM runs on
+    /// and sets it here; otherwise, once the address has been rotated, that EVM runs the rotated
+    /// address's transactions as ordinary ones.
+    pub const fn set_system_address(&mut self, address: Address) {
         self.system_address = address;
+    }
+
+    /// [`set_system_address`](Self::set_system_address), as a builder.
+    pub const fn with_system_address(mut self, address: Address) -> Self {
+        self.system_address = address;
+        self
     }
 
     /// Whether the running (or last) transaction pays history gas for the bytes it appends.

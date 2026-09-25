@@ -9,7 +9,7 @@
 use std::sync::{Arc, Mutex};
 
 use alloy_consensus::transaction::Recovered;
-use alloy_evm::{block::BlockExecutor, EvmFactory};
+use alloy_evm::{block::BlockExecutor, EvmEnv, EvmFactory, ToTxEnv};
 use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
 use alloy_primitives::{address, keccak256, Address, Bytes, B256, U256};
 use alloy_sol_types::{SolCall, SolValue};
@@ -25,8 +25,9 @@ use mega_evm::{
         SEQUENCER_REGISTRY_CODE_HASH,
     },
     test_utils::MemoryDatabase,
-    BlockLimits, MegaBlockExecutionCtx, MegaBlockExecutor, MegaEvm, MegaEvmFactory,
-    MegaHardforkConfig, MegaTxEnvelope, PreBlockStateSource, TestExternalEnvs, MIN_BUCKET_SIZE,
+    BlockLimits, ExternalEnvFactory, MegaBlockExecutionCtx, MegaBlockExecutor, MegaContext,
+    MegaEvm, MegaEvmFactory, MegaHardforkConfig, MegaTxEnvelope, PreBlockStateSource,
+    TestExternalEnvs, MIN_BUCKET_SIZE,
 };
 use revm::{database::State, inspector::NoOpInspector, state::EvmState, Database};
 
@@ -392,6 +393,69 @@ fn test_system_address_change() {
     executor.apply_pre_execution_changes().expect("the block starts");
     assert_is_the_system_address(&mut executor, NEXT_SYSTEM_ADDRESS);
     assert_is_not_the_system_address(&mut executor, MEGA_SYSTEM_ADDRESS);
+}
+
+/// An EVM a node builds outside block execution, over the state these tests run on.
+type OutsideEvm<'a> = MegaEvm<&'a mut State<MemoryDatabase>, NoOpInspector, Envs>;
+
+/// A context over `state` for the block [`executor`] runs, as a node builds one outside block
+/// execution: no block is started on it, so it reads no registry.
+fn context_outside_block<'a>(
+    state: &'a mut State<MemoryDatabase>,
+    envs: &Envs,
+) -> MegaContext<&'a mut State<MemoryDatabase>, Envs> {
+    let EvmEnv { cfg_env, block_env } = common::evm_env();
+    MegaContext::new_with_external_envs(state, cfg_env.spec, envs.external_envs(BLOCK_NUMBER))
+        .with_cfg(cfg_env)
+        .with_block(block_env)
+}
+
+/// An EVM a node builds outside block execution — for an RPC call, or to replay a block's
+/// transactions for a trace — reads no registry, so the node sets the address it read there
+/// itself. Given the rotated address, through the context's builder or the setter on a factory's
+/// EVM, it promotes that address's Oracle transaction exactly as the block executor does: the same
+/// result, state, gas and usage. Without it, it runs the transaction as an ordinary one, which the
+/// empty sender cannot pay for.
+#[test]
+fn test_a_context_built_with_the_rotated_address_promotes_as_the_block_does() {
+    let envs = envs_at(1);
+    let mut state =
+        State::builder().with_database(registry_with(&system_address_change(BLOCK_NUMBER))).build();
+    let tx = oracle_call_from(NEXT_SYSTEM_ADDRESS, 0);
+
+    let mut executor = executor(&mut state, envs.clone(), common::BLOCK_GAS_LIMIT);
+    executor.apply_pre_execution_changes().expect("the block starts");
+    let in_block = executor.run_transaction(&tx).expect("the block promotes it").inner;
+    drop(executor);
+    assert!(in_block.result.is_success(), "{:?}", in_block.result);
+    assert_eq!(in_block.gas.history, 0, "the protocol's own transaction pays no history");
+
+    // The state now holds the rotation the block applied, as the one a node's EVM runs on does.
+    let assert_as_in_block = |evm: &mut OutsideEvm<'_>| {
+        assert_eq!(evm.ctx().system_address(), NEXT_SYSTEM_ADDRESS);
+        let outside = evm.execute_transaction(tx.to_tx_env()).expect("promoted");
+        assert!(evm.ctx().is_system_originated(), "it is the protocol's own transaction");
+        assert_eq!(outside.result, in_block.result);
+        assert_eq!(outside.state, in_block.state);
+        assert_eq!(outside.gas, in_block.gas);
+        assert_eq!(outside.usage, in_block.usage);
+        assert_eq!(outside.limit_exceeded, in_block.limit_exceeded);
+    };
+    assert_as_in_block(&mut MegaEvm::new(
+        context_outside_block(&mut state, &envs).with_system_address(NEXT_SYSTEM_ADDRESS),
+    ));
+    let mut evm = MegaEvmFactory::new()
+        .with_external_env_factory(envs.clone())
+        .create_evm(&mut state, common::evm_env());
+    evm.ctx_mut().set_system_address(NEXT_SYSTEM_ADDRESS);
+    assert_as_in_block(&mut evm);
+
+    let mut evm = MegaEvm::new(context_outside_block(&mut state, &envs));
+    assert_eq!(evm.ctx().system_address(), MEGA_SYSTEM_ADDRESS);
+    let err = evm
+        .execute_transaction(tx.to_tx_env())
+        .expect_err("an ordinary transaction from an empty account is refused");
+    assert!(err.to_string().contains("lack of funds"), "{err}");
 }
 
 /// A sequencer rotation leaves the system address as it was.
