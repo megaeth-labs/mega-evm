@@ -473,7 +473,13 @@ mod tests {
             ),
             "{err:?}"
         );
-        assert!(err.to_string().contains("reverted or halted"), "{err}");
+        assert!(
+            err.to_string().starts_with(
+                "the SequencerRegistry's pending changes could not be applied: \
+                 the applyPendingChanges() pre-block call did not succeed: Revert {"
+            ),
+            "{err}"
+        );
     }
 
     /// A database whose registry holds `code` and `current` as its system address.

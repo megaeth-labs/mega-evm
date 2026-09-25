@@ -254,10 +254,9 @@ impl fmt::Display for MegaBlockExecutionError {
                 f,
                 "system contract at {address} has empty code but nonce {nonce}; refusing to overwrite a used account"
             ),
-            Self::ApplyPendingChangesFailed { message } => write!(
-                f,
-                "the SequencerRegistry applyPendingChanges() pre-block call reverted or halted: {message}"
-            ),
+            Self::ApplyPendingChangesFailed { message } => {
+                write!(f, "the SequencerRegistry's pending changes could not be applied: {message}")
+            }
             Self::MissingSequencerRegistry => {
                 f.write_str("the SequencerRegistry does not exist; the system address cannot be read")
             }
