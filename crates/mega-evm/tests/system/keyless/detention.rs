@@ -170,7 +170,7 @@ fn burn(code: BytecodeBuilder, rounds: u16) -> BytecodeBuilder {
 
 /// Init code that runs `first` — a read, or a same-priced opcode that reads nothing — then
 /// `rounds` rounds of [`burn`], and deploys a one-byte runtime.
-fn reads_then_burns(first: u8, rounds: u16) -> Bytes {
+pub(super) fn reads_then_burns(first: u8, rounds: u16) -> Bytes {
     let prefix = burn(BytecodeBuilder::default().append_many([first, POP]), rounds);
     constructor(&prefix.build_vec(), &runtime(1))
 }

@@ -8,6 +8,10 @@
 //! deployment wrote, the signer's nonce included, and the sender pays for what ran and gets the
 //! rest of its gas and its reservoir back.
 //!
+//! The stop is pinned as a column of the matrix: every transaction-level limit a creation can
+//! cross, from a signer at nonce 0 and at nonce 1, below the execution cap and above it, with and
+//! without an inspector that rewrites every frame result into a success.
+//!
 //! The last tests pin the three places gas a mechanism grants a frame could leak back to a
 //! caller or to the sender: an answer built without a frame, the settlement of a stopped
 //! transaction, and the return of the frame's unspent gas.
@@ -17,9 +21,16 @@ use mega_evm::{
     constants::TX_GAS_LIMIT_CAP, system::keyless::KEYLESS_DEPLOY_OVERHEAD_GAS, LimitCheck,
     LimitKind, MegaLimitExceeded,
 };
-use revm::bytecode::opcode::{LOG0, PUSH0, REVERT};
+use revm::{
+    bytecode::opcode::{LOG0, PUSH0, REVERT, TIMESTAMP},
+    interpreter::{
+        interpreter::EthInterpreter, CallInputs, CallOutcome, CreateInputs, CreateOutcome,
+        InstructionResult,
+    },
+    Database, Inspector,
+};
 
-use super::*;
+use super::{detention::reads_then_burns, *};
 use crate::common::context;
 
 /// Init code that logs `len` bytes of data and deploys a one-byte runtime.
@@ -74,18 +85,34 @@ fn creation_stop(outcome: &Outcome) -> MegaLimitExceeded {
 /// record is kept, and above the execution cap the whole reservoir but the body's history comes
 /// back. The sender pays the overhead and what ran.
 fn assert_stopped_whole(outcome: &Outcome, deployment: &Deployment, gas_limit: u64) {
+    assert_nothing_kept(outcome, deployment, gas_limit, 0, "");
+}
+
+/// [`assert_stopped_whole`], for a signer whose nonce was `signer_nonce`: the transaction leaves
+/// it there, whether it touched the signer's account or not.
+fn assert_nothing_kept(
+    outcome: &Outcome,
+    deployment: &Deployment,
+    gas_limit: u64,
+    signer_nonce: u64,
+    case: &str,
+) {
     let reference = reference(deployment.call_data(LARGE_OVERRIDE), gas_limit);
-    assert_eq!(nonce(outcome, deployment.signer), 0, "the signer's nonce is taken back");
-    assert!(code_hash(outcome, deployment.address).is_none_or(|hash| hash == KECCAK_EMPTY));
+    let nonce = outcome.state.get(&deployment.signer).map_or(signer_nonce, |a| a.info.nonce);
+    assert_eq!(nonce, signer_nonce, "{case}: the signer's nonce is taken back");
+    assert!(
+        code_hash(outcome, deployment.address).is_none_or(|hash| hash == KECCAK_EMPTY),
+        "{case}: no code is deployed"
+    );
     let [_, regular, state, history_gas, history_bytes] = beyond(outcome, &reference);
-    assert_eq!([state, history_gas, history_bytes], [0; 3], "at {gas_limit}");
-    assert!(regular >= KEYLESS_DEPLOY_OVERHEAD_GAS, "the overhead stays spent");
-    assert_eq!(outcome.usage.write_records, 0, "no record is kept");
+    assert_eq!([state, history_gas, history_bytes], [0; 3], "{case} at {gas_limit}");
+    assert!(regular >= KEYLESS_DEPLOY_OVERHEAD_GAS, "{case}: the overhead stays spent");
+    assert_eq!(outcome.usage.write_records, 0, "{case}: no record is kept");
     if gas_limit > TX_GAS_LIMIT_CAP {
         assert_eq!(
             outcome.result.gas().reservoir_remaining(),
             reference.result.gas().reservoir_remaining(),
-            "the reservoir comes back",
+            "{case}: the reservoir comes back",
         );
     }
 }
@@ -427,6 +454,180 @@ fn test_the_unspent_forward_comes_back_on_success_and_revert_alike() {
                 returned(&revert).gasUsed,
             "revert at {gas_limit}",
         );
+    }
+}
+
+/* ---------- the stop, as a column of the matrix ---------- */
+
+/// A transaction-level limit a deployment's creation crosses.
+#[derive(Clone, Copy, Debug)]
+enum Crossing {
+    /// The constructor's `LOG0` of 2,000 bytes crosses the data-size limit.
+    DataSize,
+    /// The slot the constructor fills crosses the state-gas limit.
+    StateGas,
+    /// The constructor reads the block's timestamp, then computes past the cap.
+    Compute,
+}
+
+/// The cap on a read of the block environment the compute crossing runs under.
+const COMPUTE_CAP: u64 = 1_000;
+
+impl Crossing {
+    const ALL: [Self; 3] = [Self::DataSize, Self::StateGas, Self::Compute];
+
+    /// The init code whose run crosses the limit.
+    fn init_code(self) -> Bytes {
+        match self {
+            Self::DataSize => logging(2_000),
+            Self::StateGas => filling_a_slot(),
+            Self::Compute => reads_then_burns(TIMESTAMP, 1_000),
+        }
+    }
+
+    /// The limits under which a deployment of `deployment`, by a signer at `signer_nonce`,
+    /// crosses the limit, with the kind and the limit of the stop it reports.
+    fn limits(
+        self,
+        deployment: &Deployment,
+        signer_nonce: u64,
+    ) -> (EvmTxRuntimeLimits, LimitKind, u64) {
+        let limits = EvmTxRuntimeLimits::no_limits();
+        match self {
+            Self::DataSize => {
+                // The body, the two records of the creation's start and 100 bytes more.
+                let limit = body_bytes(deployment) + 2 * 40 + 100;
+                (limits.with_tx_data_size_limit(limit), LimitKind::DataSize, limit)
+            }
+            Self::StateGas => {
+                // The signer's account when the bump creates it, the created account, and one
+                // gas short of the slot.
+                let signer =
+                    if signer_nonce == 0 { entry(GasId::new_account_state_gas()) } else { 0 };
+                let limit = signer +
+                    entry(GasId::create_state_gas()) +
+                    entry(GasId::sstore_set_state_gas()) -
+                    1;
+                (limits.with_tx_state_gas_limit(limit), LimitKind::StateGrowth, limit)
+            }
+            Self::Compute => {
+                // Read at the call's charges and the read's own two gas.
+                let charges = KEYLESS_DEPLOY_OVERHEAD_GAS + create_regular(self.init_code().len());
+                let limit = charges + 2 + COMPUTE_CAP;
+                let limits = limits.with_block_env_access_compute_gas_limit(COMPUTE_CAP);
+                (limits, LimitKind::ComputeGas, limit)
+            }
+        }
+    }
+}
+
+/// Records the result of every frame it sees end, then rewrites it into a success with no output
+/// — a creation's too, whose address it revives: a tool's inspector the stop must see through.
+#[derive(Default)]
+struct Rewriter {
+    /// The frames that ended, deepest first: whether each was a creation, and its result before
+    /// the rewrite.
+    ended: Vec<(bool, InstructionResult)>,
+}
+
+impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for Rewriter {
+    fn call_end(&mut self, _: &mut MegaContext<DB>, _: &CallInputs, outcome: &mut CallOutcome) {
+        self.ended.push((false, outcome.result.result));
+        outcome.result.result = InstructionResult::Stop;
+        outcome.result.output = Bytes::new();
+    }
+
+    fn create_end(
+        &mut self,
+        _: &mut MegaContext<DB>,
+        inputs: &CreateInputs,
+        outcome: &mut CreateOutcome,
+    ) {
+        self.ended.push((true, outcome.result.result));
+        outcome.result.result = InstructionResult::Return;
+        outcome.result.output = Bytes::new();
+        outcome.address = Some(inputs.created_address(1));
+    }
+}
+
+/// Runs a `keylessDeploy` of `deployment` over `db` at `gas_limit` under `limits`, without an
+/// inspector and under a [`Rewriter`]: both outcomes, and the frames the rewriter saw end.
+fn plain_and_rewritten(
+    db: MemoryDatabase,
+    deployment: &Deployment,
+    gas_limit: u64,
+    limits: EvmTxRuntimeLimits,
+) -> (Outcome, Outcome, Vec<(bool, InstructionResult)>) {
+    let plain = run_with(db.clone(), deployment.call_data(LARGE_OVERRIDE), gas_limit, limits);
+    let mut tx = call_tx(KEYLESS_DEPLOY_ADDRESS, deployment.call_data(LARGE_OVERRIDE), U256::ZERO);
+    tx.0.base.gas_limit = gas_limit;
+    let mut evm = MegaEvm::new(context(db).with_tx_runtime_limits(limits))
+        .with_inspector(Rewriter::default());
+    let rewritten = evm.execute_transaction(tx).expect("the transaction is valid");
+    let ended = evm.inspector().ended.clone();
+    (plain, rewritten, ended)
+}
+
+/// The stop, as a column of the matrix: each transaction-level limit a deployment's creation can
+/// cross — data size, state gas, and gas detention's compute limit — crossed from a signer at
+/// nonce 0 and at nonce 1, below the execution cap and above it, without an inspector and under
+/// one that rewrites every frame result into a success and revives the creation.
+///
+/// Every run reverts with the stop and keeps nothing of the deployment: the signer's nonce is
+/// where it was, neither spent from 0 nor left at 2 from 1; no code, no record, and no state or
+/// history gas beyond the transaction's body; above the cap the reservoir comes back. A compute
+/// stop bills exactly its limit past the body: the call's charges, the read and the cap. The
+/// inspector sees the creation end with the stop, then the call, and changes nothing the
+/// transaction reports.
+#[test]
+fn test_every_limit_stops_a_deployment_from_either_nonce_at_either_tier() {
+    for crossing in Crossing::ALL {
+        let deployment = Deployment::new(crossing.init_code());
+        for signer_nonce in [0, 1] {
+            let (limits, kind, limit) = crossing.limits(&deployment, signer_nonce);
+            let db = match signer_nonce {
+                0 => system_db(),
+                nonce => system_db().account_nonce(deployment.signer, nonce),
+            };
+            for gas_limit in GAS_LIMITS {
+                let row = format!("{crossing:?}, signer at {signer_nonce}, gas limit {gas_limit}");
+                let (plain, rewritten, ended) =
+                    plain_and_rewritten(db.clone(), &deployment, gas_limit, limits);
+                for (column, outcome) in [("plain", &plain), ("rewritten", &rewritten)] {
+                    let cell = format!("{row}, {column}");
+                    assert_eq!(
+                        stop(outcome),
+                        MegaLimitExceeded { kind: kind.as_u8(), limit },
+                        "{cell}"
+                    );
+                    assert!(
+                        matches!(
+                            outcome.limit_exceeded,
+                            Some(LimitCheck::ExceedsLimit {
+                                kind: stopped, limit: at, frame_local: false, ..
+                            }) if stopped == kind && at == limit
+                        ),
+                        "{cell}: {:?}",
+                        outcome.limit_exceeded
+                    );
+                    assert_nothing_kept(outcome, &deployment, gas_limit, signer_nonce, &cell);
+                    if kind == LimitKind::ComputeGas {
+                        let reference = reference(deployment.call_data(LARGE_OVERRIDE), gas_limit);
+                        let [_, regular, ..] = beyond(outcome, &reference);
+                        assert_eq!(regular, limit, "{cell}: computed up to the limit exactly");
+                    }
+                }
+                assert_eq!(
+                    ended,
+                    [(true, InstructionResult::Revert), (false, InstructionResult::Revert)],
+                    "{row}: the creation, then the call, each ended with the stop",
+                );
+                assert_eq!(rewritten.result_and_state, plain.result_and_state, "{row}");
+                assert_eq!(rewritten.gas, plain.gas, "{row}");
+                assert_eq!(rewritten.usage, plain.usage, "{row}");
+                assert_eq!(rewritten.limit_exceeded, plain.limit_exceeded, "{row}");
+            }
+        }
     }
 }
 
