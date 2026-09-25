@@ -404,8 +404,8 @@ impl Detention {
     }
 
     /// The frame at `depth`, whose gas limit was `gas_limit`, was answered without running —
-    /// `result` is the answer: a precompile's, an interceptor's, an inspector's, or revm's for a
-    /// call it did not start.
+    /// `result` is the answer: a precompile's, an interceptor's, a refused `keylessDeploy` call's,
+    /// an inspector's, or revm's for a call it did not start.
     ///
     /// An answer marked as a crossing — a precompile that ran out of the allowance it was held to
     /// ([`restore_forward`](Self::restore_forward)) — crossed the limit. Otherwise, an answer that
@@ -440,8 +440,10 @@ impl Detention {
                 return None;
             }
             // The answer spent more than the allowance, and no more than the gas limit, so the
-            // gas limit is above the allowance and the frame would have had the rest withheld. An
-            // answer built on less than the frame was forwarded is settled on what it was
+            // gas limit is above the allowance and the frame would have had the rest withheld. The
+            // one answer of the engine's own that spends regular gas is a refused `keylessDeploy`
+            // call's, built on the whole forward; the limit is set to the forward all the same, so
+            // an inspector's answer built on another limit is settled on what the frame was
             // forwarded.
             //
             // State and history gas that spilled onto regular gas would have drawn the withheld

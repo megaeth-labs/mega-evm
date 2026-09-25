@@ -17,6 +17,12 @@
 //! What the native frame means for a deployment:
 //!
 //! - `ORIGIN` and `GASPRICE` in the init code are the transaction's own.
+//! - The creation runs at depth 1, as the call's child: one level below the same init code sent as
+//!   a creation transaction, which runs at depth 0. Its frames reach the call-stack limit one frame
+//!   earlier, and `remainingComputeGas()` and `disableVolatileDataAccess()`, which act for the
+//!   frame one level above the one a call would start, see the keyless call as the frame above the
+//!   constructor: volatile-data access switched off from the call's depth covers the constructor,
+//!   and the call's charges are compute a detained constructor has already spent.
 //! - The signer's nonce is bumped by the creation, as any creator's is, and a deployment is refused
 //!   once the signer's nonce is above 1 (`SignerNonceTooHigh`). A deployment from nonce 0 keeps the
 //!   bump, which is the replay barrier. A deployment from nonce 1 takes the bump back, with its
