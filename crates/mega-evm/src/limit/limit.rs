@@ -796,7 +796,10 @@ impl AdditionalLimit {
     /// fails, unless the creator is the transaction's sender, whose account the body counts.
     ///
     /// No opcode starts the creation, so nothing staged the answer to whether its creator's
-    /// account refuses it; one staged for the call's own start is not the creation's.
+    /// account refuses it. Clearing the staged answer is defensive: the only answer staged for the
+    /// call's own start is that of a call carrying value, which is answered before its frame is
+    /// built and so never starts a creation. Nothing staged can reach the creation; the clear is
+    /// kept so that none ever does.
     pub(crate) fn set_frame_creator(&mut self, creator: Address) {
         self.pending_start_refused = None;
         let sender = self.sender;
