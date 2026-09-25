@@ -64,7 +64,8 @@ A system call runs as EIP-8037 has it: at most 30,000,000 of its gas limit is re
 revm's default system-call gas limit, 31,566,720, is 30,000,000 and a reservoir of sixteen fresh slots.
 The block's pre-block calls run on the block's gas limit and never less than 30,000,000, the legacy engine's budget kept as it was; what it adds above 30,000,000 is reservoir, not regular gas.
 The legacy engine widened it for the storage gas a crowded SALT bucket multiplied, which a system call no longer pays: it prices its state at the minimum bucket.
-A pre-block call that does not succeed refuses the block with the call's own validation error; a database error during it is an internal error instead, since it says nothing about the block.
+A pre-block call that does not succeed refuses the block with the call's own validation error; a database error the database calls fatal is an internal error instead, since it says nothing about the block.
+That is the rule alloy-evm's block executor holds a transaction's database error to.
 A system call pays no history gas, is held to no per-transaction limit and is not detained.
 A transaction is not a system call: every transaction's gas, the system-address transaction's included, is split by the execution cap.
 

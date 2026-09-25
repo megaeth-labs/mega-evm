@@ -189,9 +189,9 @@ fn read_slot<DB: revm::Database>(
 /// # Errors
 ///
 /// [`MegaBlockExecutionError::ApplyPendingChangesFailed`] when the call reverts or halts, or an
-/// error other than the database's stops it: a change the registry scheduled for this block must
-/// be applied in it. A database error is an internal error, as for every pre-block call: it says
-/// nothing about the block.
+/// error other than a fatal database error stops it: a change the registry scheduled for this
+/// block must be applied in it. A fatal database error is an internal error, as for every
+/// pre-block call: it says nothing about the block.
 pub fn transact_apply_pending_changes<DB, INSP, ExtEnvs>(
     evm: &mut MegaEvm<DB, INSP, ExtEnvs>,
 ) -> Result<ResultAndState<OpHaltReason>, BlockExecutionError>

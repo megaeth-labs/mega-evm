@@ -7,9 +7,9 @@
 //! A pre-block call is a system call on [`pre_block_call_gas_limit`], and a block whose
 //! pre-block call does not succeed is refused: the state the protocol maintains before the
 //! block's transactions is not optional, and a block that could not write it is not one the
-//! chain can build on. A database error is not a verdict on the block: it is an internal error.
-//! Every pre-block call runs through [`transact_pre_block_call`], which holds that rule for all of
-//! them.
+//! chain can build on. A database error the database calls fatal is not a verdict on the block:
+//! it is an internal error. Every pre-block call runs through [`transact_pre_block_call`], which
+//! holds that rule for all of them.
 
 #[cfg(not(feature = "std"))]
 use alloc as std;
@@ -27,7 +27,7 @@ use op_revm::OpHaltReason;
 use revm::{
     context::{
         result::{EVMError, ResultAndState},
-        Block, ContextTr,
+        Block, ContextTr, DBErrorMarker,
     },
     database::State,
     handler::SYSTEM_CALL_REGULAR_GAS_LIMIT,
@@ -60,14 +60,17 @@ pub fn pre_block_call_gas_limit(block_gas_limit: u64) -> u64 {
 /// on the pre-block budget of the block `evm` is set up for ([`pre_block_call_gas_limit`]).
 /// Answers its result and state; nothing is committed.
 ///
-/// One rule holds for every pre-block call:
+/// One rule holds for every pre-block call, and it is the rule alloy-evm's block executor holds a
+/// transaction's database error to ([`BlockExecutionError::evm`]):
 ///
-/// - a database error is an internal error ([`BlockExecutionError::other`]): a read the database
-///   could not serve says nothing about the block, and a node must not refuse a valid block because
-///   its storage failed;
+/// - a database error the database calls fatal ([`DBErrorMarker::is_fatal`]) is an internal error
+///   ([`BlockExecutionError::other`]): a read the database could not serve says nothing about the
+///   block, and a node must not refuse a valid block because its storage failed;
 /// - any other failure refuses the block with the call's own error, which `refused` builds from a
-///   message: an EVM error other than the database's, and an outcome that is not a success, whether
-///   the call reverted or halted.
+///   message: a database error that is not fatal, an EVM error other than the database's, and an
+///   outcome that is not a success, whether the call reverted or halted. Under revm's `State` the
+///   one database error that is not fatal is an EIP-7928 block access list that does not cover a
+///   read, which is a verdict on the block.
 pub(crate) fn transact_pre_block_call<DB, INSP, ExtEnvs>(
     evm: &mut MegaEvm<DB, INSP, ExtEnvs>,
     name: &str,
@@ -83,7 +86,9 @@ where
     let outcome =
         match evm.transact_system_call_with_gas_limit(SYSTEM_ADDRESS, target, data, gas_limit) {
             Ok(outcome) => outcome,
-            Err(EVMError::Database(error)) => return Err(BlockExecutionError::other(error)),
+            Err(EVMError::Database(error)) if error.is_fatal() => {
+                return Err(BlockExecutionError::other(error))
+            }
             Err(error) => return Err(refused(error.to_string())),
         };
     if !outcome.result.is_success() {
@@ -97,8 +102,8 @@ where
 ///
 /// Answers `None`, having run nothing, when Prague is not active or the block is the genesis
 /// block, where EIP-2935 makes no call. A call that does not succeed refuses the block with
-/// [`BlockValidationError::BlockHashContractCall`], and its state is handed to nobody; a database
-/// error is an internal error, as for every pre-block call. The state is not committed.
+/// [`BlockValidationError::BlockHashContractCall`], and its state is handed to nobody; a fatal
+/// database error is an internal error, as for every pre-block call. The state is not committed.
 ///
 /// [EIP-2935]: https://eips.ethereum.org/EIPS/eip-2935
 pub fn transact_blockhashes_contract_call<H, DB, INSP, ExtEnvs>(
@@ -131,8 +136,8 @@ where
 /// Answers `None`, having run nothing, when Cancun is not active or the block is the genesis
 /// block, where EIP-4788 makes no call and requires a zero root. A call that does not succeed
 /// refuses the block with [`BlockValidationError::BeaconRootContractCall`], and its state is
-/// handed to nobody; a database error is an internal error, as for every pre-block call. The
-/// state is not committed.
+/// handed to nobody; a fatal database error is an internal error, as for every pre-block call.
+/// The state is not committed.
 ///
 /// [EIP-4788]: https://eips.ethereum.org/EIPS/eip-4788
 pub fn transact_beacon_root_contract_call<H, DB, INSP, ExtEnvs>(
@@ -203,8 +208,17 @@ pub fn transact_balance_increments<DB: Database>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        test_utils::{ErrorInjectingDatabase, InjectedDbError, MemoryDatabase},
+        MegaContext, MegaSpecId,
+    };
     use alloy_primitives::address;
-    use revm::{database::InMemoryDB, state::AccountInfo, DatabaseCommit};
+    use revm::{
+        context::BlockEnv,
+        database::InMemoryDB,
+        state::{AccountInfo, Bytecode},
+        DatabaseCommit,
+    };
     use std::vec;
 
     #[test]
@@ -287,5 +301,83 @@ mod tests {
         .expect("Should return state");
 
         assert!(produced.is_empty());
+    }
+
+    /// A database error that says it is not fatal, as a block access list that does not cover a
+    /// read does.
+    #[derive(Debug)]
+    struct NotFatal(InjectedDbError);
+
+    impl core::fmt::Display for NotFatal {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            self.0.fmt(f)
+        }
+    }
+
+    impl core::error::Error for NotFatal {}
+
+    impl DBErrorMarker for NotFatal {
+        fn is_fatal(&self) -> bool {
+            false
+        }
+    }
+
+    /// An [`ErrorInjectingDatabase`] whose errors are not fatal.
+    #[derive(Debug)]
+    struct NotFatalDb(ErrorInjectingDatabase);
+
+    impl Database for NotFatalDb {
+        type Error = NotFatal;
+
+        fn basic(&mut self, address: Address) -> Result<Option<AccountInfo>, NotFatal> {
+            self.0.basic(address).map_err(NotFatal)
+        }
+
+        fn code_by_hash(&mut self, code_hash: B256) -> Result<Bytecode, NotFatal> {
+            self.0.code_by_hash(code_hash).map_err(NotFatal)
+        }
+
+        fn storage(&mut self, address: Address, index: U256) -> Result<U256, NotFatal> {
+            self.0.storage(address, index).map_err(NotFatal)
+        }
+
+        fn block_hash(&mut self, number: u64) -> Result<B256, NotFatal> {
+            self.0.block_hash(number).map_err(NotFatal)
+        }
+    }
+
+    /// A pre-block call's database error is an internal error only when the database calls it
+    /// fatal; one it does not refuses the block with the call's own error, as a transaction's
+    /// does.
+    #[test]
+    fn test_a_database_error_is_internal_only_when_it_is_fatal() {
+        let unreadable = address!("0x7000000000000000000000000000000000000007");
+        let mut db = ErrorInjectingDatabase::new(MemoryDatabase::default());
+        db.fail_on_account = Some(unreadable);
+        let block =
+            BlockEnv { number: U256::from(1_000), gas_limit: 30_000_000, ..Default::default() };
+        let refused = |message| BlockValidationError::BlockHashContractCall { message }.into();
+
+        let mut fatal = db.clone();
+        let mut evm =
+            MegaEvm::new(MegaContext::new(&mut fatal, MegaSpecId::SATIN).with_block(block.clone()));
+        let err = transact_pre_block_call(&mut evm, "test", unreadable, Bytes::new(), refused)
+            .expect_err("the read fails");
+        assert!(matches!(err, BlockExecutionError::Internal(_)), "{err:?}");
+
+        let mut not_fatal = NotFatalDb(db);
+        let mut evm =
+            MegaEvm::new(MegaContext::new(&mut not_fatal, MegaSpecId::SATIN).with_block(block));
+        let err = transact_pre_block_call(&mut evm, "test", unreadable, Bytes::new(), refused)
+            .expect_err("the read fails");
+        assert!(
+            matches!(
+                &err,
+                BlockExecutionError::Validation(BlockValidationError::BlockHashContractCall {
+                    message
+                }) if message.contains("injected basic() error")
+            ),
+            "{err:?}"
+        );
     }
 }
