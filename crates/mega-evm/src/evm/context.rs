@@ -59,6 +59,8 @@ pub struct MegaContext<DB: Database, ExtEnvs: ExternalEnvTypes = EmptyExternalEn
     system_originated: bool,
     /// Whether the running transaction pays history gas. See [`MegaContext::prices_history`].
     prices_history: bool,
+    /// The address system-address transactions come from. See [`MegaContext::system_address`].
+    system_address: Address,
     /// The `keylessDeploy` call the running transaction's creation runs under, from the rewrite
     /// that started the creation until the creation's result is settled into it. See the
     /// [`keyless`](crate::system::keyless) module.
@@ -94,6 +96,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
             bucket_multipliers: BucketMultipliers::default(),
             system_originated: false,
             prices_history: true,
+            system_address: MEGA_SYSTEM_ADDRESS,
             keyless_call: None,
             #[cfg(any(test, feature = "test-utils"))]
             neutral: false,
@@ -296,6 +299,37 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
         self.system_originated
     }
 
+    /// The address a system-address transaction must be sent from: a legacy call from it to a
+    /// whitelisted contract is the protocol's own, promoted to a deposit (see the
+    /// [`system`](crate::system) module).
+    ///
+    /// Block execution reads it out of the `SequencerRegistry` before every block's transactions,
+    /// once a rotation due in the block has been applied, so it is the live one for the block. A
+    /// context no block has been started on uses [`MEGA_SYSTEM_ADDRESS`] unless its builder set
+    /// another ([`set_system_address`](Self::set_system_address)).
+    pub const fn system_address(&self) -> Address {
+        self.system_address
+    }
+
+    /// Sets the address system-address transactions come from, for every transaction from now
+    /// on.
+    ///
+    /// The block executor sets it itself, to the address it read out of the `SequencerRegistry`
+    /// before the block's transactions. An EVM a node builds outside block execution — an RPC
+    /// call, or the replay of a block's transactions for a trace — has no block to read it, so
+    /// the node reads the live address from the `SequencerRegistry` in the state the EVM runs on
+    /// and sets it here; otherwise, once the address has been rotated, that EVM runs the rotated
+    /// address's transactions as ordinary ones.
+    pub const fn set_system_address(&mut self, address: Address) {
+        self.system_address = address;
+    }
+
+    /// [`set_system_address`](Self::set_system_address), as a builder.
+    pub const fn with_system_address(mut self, address: Address) -> Self {
+        self.system_address = address;
+        self
+    }
+
     /// Whether the running (or last) transaction pays history gas for the bytes it appends.
     ///
     /// Three kinds of transaction pay none: a deposit, a transaction the protocol itself produced
@@ -316,7 +350,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     /// Prepares the common execution layer for a new transaction. Every transaction entry point
     /// of [`MegaEvm`](crate::MegaEvm) calls it before it runs the handler.
     pub(crate) fn on_new_tx(&mut self) {
-        let system_originated = system::is_system_originated(&self.inner.tx, MEGA_SYSTEM_ADDRESS);
+        let system_originated = system::is_system_originated(&self.inner.tx, self.system_address);
         self.prepare(system_originated);
     }
 
@@ -442,8 +476,13 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
 /// transfer log is data size like any log, and pays no history gas: Ethereum prices it at
 /// nothing, and it is not a byte the transaction chose to write (see the `limit` module).
 ///
-/// The system-call reservoir margin is set off rather than left alone: it belongs to the
-/// system-call reservoir split.
+/// A system call runs as EIP-8037 has it: on at most the base 30,000,000 of regular gas, the
+/// rest of its gas limit being its state-gas reservoir, which the state it writes draws first.
+/// The switch for it is set on whatever the caller's configuration says, because which pool pays
+/// the protocol's own state writes, and what `GAS` reads inside a system contract, are part of
+/// executing the chain. It reaches system calls only: every transaction's gas is split by the
+/// execution cap as before, the system-address transaction's included, which is a deposit and
+/// not a system call.
 fn spec_cfg(mut cfg: CfgEnv<MegaSpecId>) -> CfgEnv<MegaSpecId> {
     cfg.gas_params = satin_gas_params();
     cfg.enable_amsterdam_eip8037 = true;
@@ -451,7 +490,7 @@ fn spec_cfg(mut cfg: CfgEnv<MegaSpecId>) -> CfgEnv<MegaSpecId> {
     cfg.tx_gas_limit_cap = Some(constants::TX_GAS_LIMIT_CAP);
     cfg.enable_amsterdam_eip7708 = true;
     cfg.amsterdam_eip7708_disabled = false;
-    cfg.system_call_state_gas_margin_in_reservoir = false;
+    cfg.system_call_state_gas_margin_in_reservoir = true;
     cfg.limit_contract_code_size = Some(constants::MAX_CONTRACT_SIZE);
     cfg.limit_contract_initcode_size = Some(constants::MAX_INITCODE_SIZE);
     cfg
@@ -537,7 +576,7 @@ mod tests {
             assert_eq!(cfg.cap, Some(constants::TX_GAS_LIMIT_CAP), "execution cap");
             assert!(cfg.eip7708, "EIP-7708 must be on");
             assert!(!cfg.eip7708_disabled, "EIP-7708 must not be disabled");
-            assert!(!cfg.margin, "the system-call reservoir margin stays off");
+            assert!(cfg.margin, "a system call's gas above 30M must be its reservoir");
             assert_eq!(cfg.code_size, Some(constants::MAX_CONTRACT_SIZE), "contract size");
             assert_eq!(cfg.initcode_size, Some(constants::MAX_INITCODE_SIZE), "initcode size");
             assert_eq!(cfg.gas_params.table(), satin_gas_params().table(), "gas schedule");
@@ -598,7 +637,7 @@ mod tests {
             cfg.tx_gas_limit_cap = Some(1 << 24);
             cfg.enable_amsterdam_eip7708 = false;
             cfg.amsterdam_eip7708_disabled = true;
-            cfg.system_call_state_gas_margin_in_reservoir = true;
+            cfg.system_call_state_gas_margin_in_reservoir = false;
             cfg.limit_contract_code_size = Some(24 * 1024);
             cfg.limit_contract_initcode_size = Some(48 * 1024);
             cfg.gas_params = GasParams::new_spec(EthSpecId::AMSTERDAM);
@@ -632,8 +671,10 @@ mod tests {
     }
 
     #[test]
-    fn test_the_system_call_reservoir_margin_stays_off() {
-        assert_satin_cfg(&context_with(|cfg| cfg.system_call_state_gas_margin_in_reservoir = true));
+    fn test_the_system_call_reservoir_margin_stays_on() {
+        assert_satin_cfg(&context_with(|cfg| {
+            cfg.system_call_state_gas_margin_in_reservoir = false;
+        }));
     }
 
     #[test]

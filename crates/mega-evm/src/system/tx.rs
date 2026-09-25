@@ -1,7 +1,9 @@
 //! The system-address transaction: how the protocol maintains its own state.
 //!
 //! The sequencer writes what the protocol owes the chain — the oracle values it served, for one
-//! — through transactions sent from [`MEGA_SYSTEM_ADDRESS`]. They carry no signature and pay no
+//! — through transactions sent from the system address the `SequencerRegistry` names
+//! ([`MegaContext::system_address`](crate::MegaContext::system_address); [`MEGA_SYSTEM_ADDRESS`]
+//! until a block has read it or the context is given one). They carry no signature and pay no
 //! fee, so they are executed as deposit transactions: the engine stamps
 //! [`MEGA_SYSTEM_TRANSACTION_SOURCE_HASH`] on one before it validates it, and op-revm's deposit
 //! path takes it from there.
@@ -36,12 +38,15 @@ use crate::{
     MegaContext,
 };
 
-/// The address the sequencer sends the protocol's own transactions from.
+/// The address the sequencer sends the protocol's own transactions from, until the
+/// `SequencerRegistry` says otherwise.
 ///
-/// A transaction from it is executed as a deposit: no signature, no nonce check of op-revm's own
-/// and no fee. Which address it is can be rotated through the `SequencerRegistry`; reading the
-/// rotated one out of the registry's storage belongs to system contract deployment, and until
-/// then this is the address.
+/// A transaction from the system address is executed as a deposit: no signature, no nonce check
+/// of op-revm's own and no fee. Which address that is can be rotated through the registry, and
+/// block execution reads the live one out of it before every block
+/// ([`MegaContext::system_address`](crate::MegaContext::system_address)). This is the address a
+/// context uses before any block has been started on it, unless it is given another, and the one
+/// the unknown-chain placeholder schedule seeds the registry with.
 pub const MEGA_SYSTEM_ADDRESS: Address = address!("0xA887dCB9D5f39Ef79272801d05Abdf707CFBbD1d");
 
 /// The contracts a system-address transaction may call. It may call nothing else and create

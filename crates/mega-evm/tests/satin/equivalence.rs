@@ -172,9 +172,10 @@ fn assert_same(mega: &Outcome, op: &Outcome) {
 }
 
 /// Both engines run on the Satin configuration: Karst on the Satin gas schedule, EIP-8037,
-/// EIP-2780 and EIP-7708 switched on, the 200M execution cap, `MegaETH`'s code-size limits, and the
-/// system-call reservoir margin off. So op-revm journals the same transfer logs, and the logs of
-/// the two are compared as they are.
+/// EIP-2780 and EIP-7708 switched on, the 200M execution cap, `MegaETH`'s code-size limits, and a
+/// system call's gas above 30M in its reservoir. So op-revm journals the same transfer logs, and
+/// the logs of the two are compared as they are, and op-revm splits a system call's gas as Satin
+/// does.
 fn assert_satin_cfg(cfg: &CfgEnv<OpSpecId>) {
     assert_eq!(cfg.spec, OpSpecId::KARST);
     assert_eq!(cfg.gas_params.table(), satin_gas_params().table());
@@ -185,7 +186,7 @@ fn assert_satin_cfg(cfg: &CfgEnv<OpSpecId>) {
     assert_eq!(cfg.limit_contract_initcode_size, Some(MAX_INITCODE_SIZE));
     assert!(cfg.enable_amsterdam_eip7708);
     assert!(!cfg.amsterdam_eip7708_disabled);
-    assert!(!cfg.system_call_state_gas_margin_in_reservoir);
+    assert!(cfg.system_call_state_gas_margin_in_reservoir);
 }
 
 #[test]
@@ -396,16 +397,26 @@ fn test_refund_matches_op_revm() {
     assert_same_but_history(&mega, &op);
 }
 
-/// A system call runs exactly as op-revm runs it.
+/// A system call runs exactly as op-revm runs it, its gas above 30M in the reservoir on both: the
+/// fresh slot it writes is paid out of the reservoir, and what is left of it is reported.
 #[test]
 fn test_system_call_matches_op_revm() {
-    use revm::handler::system_call::SystemCallEvm;
+    use revm::handler::{
+        system_call::SystemCallEvm, SYSTEM_CALL_GAS_LIMIT, SYSTEM_CALL_REGULAR_GAS_LIMIT,
+    };
     let code = BytecodeBuilder::default().sstore(U256::ZERO, U256::from(3)).stop().build();
-    let (mut mega, mut op, _) =
+    let (mut mega, mut op, cfg) =
         both_evms(MemoryDatabase::default().account_code(CALLEE, code), block());
+    assert_satin_cfg(&cfg);
     let mega_outcome = mega.system_call_with_caller(CALLER, CALLEE, Default::default()).unwrap();
     let op_outcome = op.system_call_with_caller(CALLER, CALLEE, Default::default()).unwrap();
     assert!(mega_outcome.result.is_success());
+    assert_eq!(
+        mega_outcome.result.gas().reservoir_remaining(),
+        SYSTEM_CALL_GAS_LIMIT -
+            SYSTEM_CALL_REGULAR_GAS_LIMIT -
+            satin_gas_params().get(GasId::sstore_set_state_gas()),
+    );
     assert_same(&mega_outcome, &op_outcome);
 }
 

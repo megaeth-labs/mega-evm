@@ -34,6 +34,7 @@ mod static_callee;
 mod storage_call_stipend;
 mod strategic_stop;
 mod synthetic_frame_gas;
+mod system_call;
 mod transfer_logs;
 mod volatile_access;
 mod withheld_gas;

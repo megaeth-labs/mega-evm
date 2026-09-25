@@ -354,13 +354,48 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> SystemCallEvm for MegaEvm<DB
         system_contract_address: Address,
         data: Bytes,
     ) -> Result<Self::ExecutionResult, Self::Error> {
-        self.inner.ctx.set_tx(MegaTransaction::new_system_tx_with_caller(
+        self.run_system_call(MegaTransaction::new_system_tx_with_caller(
             caller,
             system_contract_address,
             data,
-        ));
+        ))
+    }
+}
+
+impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
+    /// Runs a system call from `caller` to `contract` with `data` on `gas_limit`, and returns its
+    /// result and state. Nothing is committed.
+    ///
+    /// It is [`transact_system_call`](alloy_evm::Evm::transact_system_call) on the gas limit the
+    /// caller names instead of revm's [`SYSTEM_CALL_GAS_LIMIT`]. The limit is split as every
+    /// system call's is: at most [`SYSTEM_CALL_REGULAR_GAS_LIMIT`] of it is regular gas and the
+    /// rest is the call's state-gas reservoir, so a limit above 30,000,000 widens the reservoir
+    /// and never the regular budget. The block's pre-block calls run through it.
+    ///
+    /// [`SYSTEM_CALL_GAS_LIMIT`]: revm::handler::SYSTEM_CALL_GAS_LIMIT
+    /// [`SYSTEM_CALL_REGULAR_GAS_LIMIT`]: revm::handler::SYSTEM_CALL_REGULAR_GAS_LIMIT
+    pub fn transact_system_call_with_gas_limit(
+        &mut self,
+        caller: Address,
+        contract: Address,
+        data: Bytes,
+        gas_limit: u64,
+    ) -> Result<ResultAndState<OpHaltReason>, EVMError<DB::Error, MegaTransactionError>> {
+        let mut tx = MegaTransaction::new_system_tx_with_caller(caller, contract, data);
+        tx.0.base.gas_limit = gas_limit;
+        let result = self.run_system_call(tx).map_err(map_op_err)?;
+        Ok(ResultAndState::new(result, ExecuteEvm::finalize(self)))
+    }
+
+    /// Runs `tx` as a system call: the protocol's own work, prepared as such (see
+    /// [`MegaContext`]'s system-call preparation) and run through the handler's system-call path.
+    fn run_system_call(
+        &mut self,
+        tx: MegaTransaction,
+    ) -> Result<ExecutionResult<OpHaltReason>, MegaEvmError<DB::Error>> {
+        self.inner.ctx.set_tx(tx);
         self.inner.ctx.on_new_system_call();
-        MegaHandler::<_, Self::Error, _>::new().run_system_call(self)
+        MegaHandler::<_, MegaEvmError<DB::Error>, _>::new().run_system_call(self)
     }
 }
 
@@ -458,8 +493,9 @@ mod tests {
     use alloy_op_evm::OpTx;
     use alloy_primitives::{address, TxKind, U256};
     use revm::{
-        context::{result::InvalidTransaction, ContextSetters, TxEnv},
+        context::{result::InvalidTransaction, ContextSetters, Transaction, TxEnv},
         database::State,
+        handler::{SYSTEM_CALL_GAS_LIMIT, SYSTEM_CALL_REGULAR_GAS_LIMIT},
         DatabaseRef,
     };
     use revm_inspectors::tracing::{TracingInspector, TracingInspectorConfig};
@@ -575,6 +611,68 @@ mod tests {
             TracingInspector::new(TracingInspectorConfig::default_parity()),
         );
         assert_eq!(evm.inspector().traces().nodes()[0].trace.address, Address::ZERO);
+    }
+
+    /// A system call from any caller runs through revm's system-call entry point.
+    #[test]
+    fn test_revm_system_call_with_caller_works() {
+        let mut db = funded_db();
+        let mut evm = MegaEvm::new(context(&mut db));
+        let result =
+            SystemCallEvm::system_call_one_with_caller(&mut evm, CALLER, CALLEE, Bytes::new())
+                .unwrap();
+        assert!(result.is_success());
+        assert_eq!(evm.ctx().tx().caller(), CALLER);
+        assert_eq!(evm.ctx().tx().kind(), TxKind::Call(CALLEE));
+    }
+
+    /// The gas limit a caller names is the system call's: the part above 30M is its reservoir,
+    /// and a limit below 30M is regular gas alone.
+    #[test]
+    fn test_transact_system_call_with_gas_limit_uses_passed_value() {
+        let mut db = funded_db();
+        let mut evm = MegaEvm::new(context(&mut db));
+
+        let result = evm
+            .transact_system_call_with_gas_limit(CALLER, CALLEE, Bytes::new(), 123_456_789)
+            .unwrap();
+        assert!(result.result.is_success());
+        assert_eq!(evm.ctx().tx().gas_limit(), 123_456_789);
+        assert_eq!(
+            result.result.gas().reservoir_remaining(),
+            123_456_789 - SYSTEM_CALL_REGULAR_GAS_LIMIT,
+            "an empty callee draws nothing from the reservoir",
+        );
+
+        let result = evm
+            .transact_system_call_with_gas_limit(CALLER, CALLEE, Bytes::new(), 1_000_000)
+            .unwrap();
+        assert!(result.result.is_success());
+        assert_eq!(evm.ctx().tx().gas_limit(), 1_000_000);
+        assert_eq!(result.result.gas().reservoir_remaining(), 0);
+    }
+
+    /// The default system-call entry point runs on revm's system-call gas limit whatever the
+    /// block's gas limit is: its regular budget is the base 30M, and the margin above it is the
+    /// reservoir. Only an explicit gas limit moves either.
+    #[test]
+    fn test_default_system_call_keeps_the_30m_regular_budget() {
+        let mut db = funded_db();
+        let mut evm = MegaEvm::new(
+            context(&mut db).with_block(BlockEnv { gas_limit: 100_000_000, ..Default::default() }),
+        );
+
+        let result =
+            SystemCallEvm::system_call_with_caller(&mut evm, CALLER, CALLEE, Bytes::new()).unwrap();
+        assert!(result.result.is_success());
+        // The literals, not revm's constants: this pins what revm's default is.
+        assert_eq!(evm.ctx().tx().gas_limit(), 31_566_720);
+        assert_eq!(SYSTEM_CALL_GAS_LIMIT, 31_566_720);
+        assert_eq!(
+            result.result.gas().reservoir_remaining(),
+            31_566_720 - 30_000_000,
+            "30M of it is regular gas",
+        );
     }
 
     #[test]

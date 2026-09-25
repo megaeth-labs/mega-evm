@@ -48,6 +48,12 @@ use crate::{EthSpecId, ExternalEnvTypes, MegaEvm, MegaSpecId};
 ///   otherwise keys on the spec id; EIP-7825's execution cap; the EIP-7954 code-size limits, set
 ///   explicitly for the same reason.
 ///
+/// On both, a system call's whole gas limit is regular gas, as revm's runner has it: the switch
+/// that makes the part above 30,000,000 a state-gas reservoir, which Satin sets, is off. Under
+/// Osaka it would do nothing, EIP-8037 being off. Under Amsterdam upstream revm splits no system
+/// call's gas, and no state fixture makes a system call, so neither release the gate runs can
+/// tell the two apart.
+///
 /// Every other field is revm's default: chain id 1, which a caller replaces with the fixture's.
 pub fn neutral_cfg(fork: EthSpecId) -> Option<CfgEnv<MegaSpecId>> {
     let amsterdam = match fork {
@@ -147,6 +153,8 @@ mod tests {
         assert_eq!(cfg.max_initcode_size(), eip3860::MAX_INITCODE_SIZE);
         assert_eq!(cfg.max_code_size(), osaka.max_code_size());
         assert_eq!(cfg.max_initcode_size(), osaka.max_initcode_size());
+        assert!(!cfg.system_call_state_gas_margin_in_reservoir());
+        assert!(!osaka.system_call_state_gas_margin_in_reservoir());
     }
 
     /// Amsterdam's configuration carries what revm's runner derives from the Amsterdam spec id,
@@ -163,6 +171,8 @@ mod tests {
         assert_eq!(cfg.max_code_size(), amsterdam.max_code_size());
         assert_eq!(cfg.max_initcode_size(), amsterdam.max_initcode_size());
         assert_eq!(cfg.max_code_size(), eip7954::MAX_CODE_SIZE);
+        assert!(!cfg.system_call_state_gas_margin_in_reservoir());
+        assert!(!amsterdam.system_call_state_gas_margin_in_reservoir());
     }
 
     /// Neither configuration is Satin's, and both run Satin's spec.
