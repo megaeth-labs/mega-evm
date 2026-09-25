@@ -57,7 +57,16 @@ The execution figure a block counts for a transaction is its regular ledger — 
 A block's state gas can be capped: the transaction that reaches the cap is packed, and after it only a transaction that adds no state gas is.
 No block cap on execution gas, state gas, data size or write records refuses a deposit, which the block must include; a deposit still counts towards all four.
 A builder that executes candidates and chooses among them commits through `commit_transaction_outcome`, which checks the block's counters again; alloy-evm's `commit_transaction` cannot fail and expects each outcome to commit before the next transaction executes, and a debug build asserts it.
-`apply_pre_execution_changes` deploys the six MegaETH system contracts and the EIP-7997 `CREATE2` factory every block, idempotently, hands each pre-block state (the two EIP calls and the seven deploys) to an optional observer before it commits — that sequence is the witness a stateless client needs — and leaves one hook point empty: the pre-block system calls.
+`apply_pre_execution_changes` makes the EIP-2935 and EIP-4788 calls, deploys the six MegaETH system contracts and the EIP-7997 `CREATE2` factory every block, idempotently, applies a role change the `SequencerRegistry` has due in the block with its `applyPendingChanges()` call, and reads the live system address out of the registry.
+It hands each pre-block state — the two EIP calls, the seven deploys, the registry's two reads and its call — to an optional observer before it commits; that sequence is the witness a stateless client needs.
+
+A system call runs as EIP-8037 has it: at most 30,000,000 of its gas limit is regular gas, which is what `GAS` reads inside it, and the rest is its state-gas reservoir, which the state it writes draws first.
+revm's default system-call gas limit, 31,566,720, is 30,000,000 and a reservoir of sixteen fresh slots.
+The block's pre-block calls run on the block's gas limit and never less than 30,000,000, the legacy engine's budget kept as it was; what it adds above 30,000,000 is reservoir, not regular gas.
+The legacy engine widened it for the storage gas a crowded SALT bucket multiplied, which a system call no longer pays: it prices its state at the minimum bucket.
+A pre-block call that does not succeed refuses the block.
+A system call pays no history gas, is held to no per-transaction limit and is not detained.
+A transaction is not a system call: every transaction's gas, the system-address transaction's included, is split by the execution cap.
 
 SALT pricing is in place: every EIP-8037 state gas charge costs the schedule's entry times the capacity of the SALT bucket it lands in, counted in minimum buckets, so a slot written into a region eight times as crowded as the minimum costs eight times as much.
 The multiplier applies to the state dimension only; regular gas never scales.
@@ -90,7 +99,8 @@ A deployment spends the signer's nonce from 0 to 1 and takes no signer past 1, a
 A signer at nonce 1 stays there however often its deployment fails, so nobody can use up its attempts, and once it deploys, so a resubmission finds the address taken (`ContractAlreadyExists()`).
 A `keylessDeploy` call a contract makes is not a deployment: it runs the method body, which reverts with `NotIntercepted()`.
 
-The system address (`MEGA_SYSTEM_ADDRESS`) sends the protocol's own transactions: a legacy transaction from it to a whitelisted contract is validated — the whitelist, the chain id, the nonce and EIP-3607 — and promoted to a deposit, which pays no fee and rewards none.
+The system address sends the protocol's own transactions: a legacy transaction from it to a whitelisted contract is validated — the whitelist, the chain id, the nonce and EIP-3607 — and promoted to a deposit, which pays no fee and rewards none.
+It is the address the `SequencerRegistry` holds, which block execution reads before each block's transactions, once a rotation due in the block has been applied (`MegaContext::system_address`); a context no block has been started on uses `MEGA_SYSTEM_ADDRESS`.
 The account such a transaction creates for its caller is charged the account-creation state gas exactly once.
 
 History gas is in place: every byte a transaction appends to the chain is priced at MegaETH's cost per history byte, and the byte counts are the ones the data-size limit meters, so a record's history bytes are its own data size.
