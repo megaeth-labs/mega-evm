@@ -531,7 +531,9 @@ where
     /// The EIP-2935 and EIP-4788 calls run before the deploy. They write the parent hash and
     /// the parent beacon root into their own contracts (`0x0…2935` and `0x0…4788`), which are
     /// not `MegaETH` system contracts and do not read them, so their outcome does not depend on
-    /// the deploy that follows.
+    /// the deploy that follows. Each runs on the pre-block budget
+    /// ([`pre_block_call_gas_limit`](eips::pre_block_call_gas_limit)), and one that does not
+    /// succeed refuses the block before its state reaches the observer.
     ///
     /// The pre-block system calls that apply a due `SequencerRegistry` change are still an empty
     /// hook after the deploy.

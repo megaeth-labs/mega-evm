@@ -29,11 +29,11 @@ Do not add a `_pending/main.rs`.
 |---|---:|---:|---:|---:|---:|---:|
 | the common execution layer | 21 | 21 | 0 | 21 | 0 | 0 |
 | revert-class aborts | 17 | 17 | 0 | 0 | 17 | 0 |
-| the pre-block system calls | 31 | 22 | 9 | 27 | 4 | 0 |
+| the pre-block system calls | 20 | 11 | 9 | 16 | 4 | 0 |
 | system contract deployment | 11 | 5 | 6 | 11 | 0 | 0 |
 | inspector support | 4 | 4 | 0 | 1 | 3 | 0 |
 | — (undecided: D57 preload-warm cold charging, D58 98/100 forwarding) | 7 | 7 | 0 | 0 | 0 | 7 |
-| **Total** | **91** | **76** | **15** | **60** | **24** | **7** |
+| **Total** | **80** | **65** | **15** | **49** | **24** | **7** |
 
 ## Tests ported in place
 
@@ -331,12 +331,13 @@ These 69 rows run in a real test target now, adapted to the Satin API: a keyless
 
 ## Tests ported by the pre-block system calls
 
-These 3 rows run in a real test target now, adapted to the Satin API: a system call runs on at most 30,000,000 of regular gas with the rest of its gas limit as its state-gas reservoir, priced at the minimum SALT bucket and held to no per-transaction limit; a pre-block call that does not succeed refuses the block; and a due `SequencerRegistry` change is applied by a pre-block call before the live system address is read out of the registry. The counts above are lower than the inventory's by exactly these rows.
+These 14 rows run in a real test target now, adapted to the Satin API: a system call runs on at most 30,000,000 of regular gas with the rest of its gas limit as its state-gas reservoir, priced at the minimum SALT bucket and held to no per-transaction limit; a pre-block call that does not succeed refuses the block; and a due `SequencerRegistry` change is applied by a pre-block call before the live system address is read out of the registry. The counts above are lower than the inventory's by exactly these rows.
 
 | Legacy file | Owner in the inventory | Tests | Now in |
 |---|---|---:|---|
+| `rex5/pre_block_system_calls.rs` | the pre-block system calls (11) | 11 | `tests/block/eips.rs` |
 | `src/evm/mod.rs` | the pre-block system calls (3) | 3 | `src/evm/mod.rs` |
-| **Total** | | **3** | |
+| **Total** | | **14** | |
 
 ## Tests retired after the inventory
 
@@ -406,7 +407,6 @@ Each cell lists `disposition count (mechanism · decision)`.
 | `rex5/create2_empty_initcode.rs` | 5 | keep 5 (the common execution layer · canonical revm behaviour) |
 | `rex5/create2_resize_gas_metering.rs` | 2 | keep 2 (the common execution layer · canonical behaviour) |
 | `rex5/oracle_hint_metering.rs` | 1 | rewrite 1 (revert-class aborts · D48) |
-| `rex5/pre_block_system_calls.rs` | 11 | keep 11 (the pre-block system calls) |
 | `rex6/create2_metering_order.rs` | 11 | keep 11 (the common execution layer · canonical halt reasons; D04 512 KiB boundary) |
 | `rex6/error_paths.rs` | 2 | keep 2 (the common execution layer · canonical) |
 | `rex6/sequencer_registry_rotation.rs` | 5 | keep 5 (system contract deployment) |
