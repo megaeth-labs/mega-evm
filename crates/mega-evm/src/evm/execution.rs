@@ -491,22 +491,20 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
             refused,
             ctx.journal_ref().logs().len(),
         );
-        let (withheld, crossing) = match hold_precompile(
+        let hold = hold_precompile(
             ctx,
             &self.inner.precompiles,
             &self.priced_precompiles,
             &mut frame_init,
             refused,
-        ) {
-            Ok(withheld) => (withheld, None),
-            Err(answer) => (None, Some(answer)),
-        };
-        let outcome = match crossing {
-            Some(answer) => Err(answer),
-            None => match self.inner.frame_init(frame_init)? {
+        );
+        let outcome = if hold == PrecompileHold::Crossing {
+            Err(crossing_answer(&frame_init.frame_input))
+        } else {
+            match self.inner.frame_init(frame_init)? {
                 ItemOrResult::Item(frame) => Ok(frame.interpreter.input.target_address),
                 ItemOrResult::Result(result) => Err(result),
-            },
+            }
         };
         let ctx = &mut self.inner.ctx;
         #[cfg(debug_assertions)]
@@ -527,7 +525,7 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
                         ctx.additional_limit.creation_did_not_bump_nonce();
                     }
                 }
-                if let Some(withheld) = withheld {
+                if let PrecompileHold::Clamped(withheld) = hold {
                     Detention::restore_forward(result.interpreter_result_mut(), withheld);
                 }
                 settle_answer(ctx, depth, gas_limit, &mut result);
@@ -817,20 +815,31 @@ fn settle_answer<DB: Database, ExtEnvs: ExternalEnvTypes>(
     }
 }
 
+/// How gas detention holds the precompile call a frame start makes ([`hold_precompile`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PrecompileHold {
+    /// The call runs as it would without the limit.
+    Unheld,
+    /// The call runs on the allowance, and its answer gets back what was taken off the forward.
+    Clamped(NonZeroU64),
+    /// The call's price crosses the limit: it is answered without running ([`crossing_answer`]).
+    Crossing,
+}
+
 /// Holds a precompile the frame `frame_init` is about to call to what gas detention's limit leaves
 /// it: revm runs the precompile inside the frame's start, against its gas limit, so a precompile
 /// forwarded more than the allowance would otherwise compute past the limit before its answer
 /// could be classified.
 ///
-/// A call to anything else, and a forward within the allowance, run as they are (`Ok(None)`). A
-/// precompile the engine can price ([`PricedPrecompiles::price`]) is decided from its price
-/// before it runs:
+/// A call to anything else, and a forward within the allowance, run as they are
+/// ([`Unheld`](PrecompileHold::Unheld)). A precompile the engine can price
+/// ([`PricedPrecompiles::price`]) is decided from its price before it runs:
 ///
 /// - priced within the allowance, it runs on its whole forward, as without the limit: it charges
 ///   its price either way;
 /// - priced past the allowance and within the forward, it needs gas the limit withholds: it is
-///   answered without running, out of gas and marked as a crossing ([`Detention::cross_at_price`]),
-///   which the answer's settlement turns into the stop (`Err`);
+///   answered without running ([`Crossing`](PrecompileHold::Crossing)), out of gas and marked as a
+///   crossing, which the answer's settlement turns into the stop;
 /// - priced past its whole forward, it runs on the forward and runs out of gas, as without the
 ///   limit: a failed call its caller survives.
 ///
@@ -839,42 +848,65 @@ fn settle_answer<DB: Database, ExtEnvs: ExternalEnvTypes>(
 /// those checks would fail the call. A call revm refuses on its caller's account — a value it
 /// cannot fund — runs no precompile, and revm answers it as without the limit.
 ///
-/// A precompile the engine cannot price is run on the allowance and sees it as its gas limit;
-/// its answer gets the rest back ([`Detention::restore_forward`]) before it is settled
-/// (`Ok(Some)`, what was taken off the forward). One priced past the allowance runs out of gas on
-/// it and is the stop, whether its price is within the forward or not.
+/// A precompile the engine cannot price is run on the allowance and sees it as its gas limit
+/// ([`Clamped`](PrecompileHold::Clamped), with what was taken off the forward); its answer gets the
+/// rest back ([`Detention::restore_forward`]) before it is settled. One priced past the allowance
+/// runs out of gas on it and is the stop, whether its price is within the forward or not.
+#[inline]
 fn hold_precompile<DB: Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &MegaContext<DB, ExtEnvs>,
     precompiles: &PrecompilesMap,
     priced: &PricedPrecompiles,
     frame_init: &mut FrameInit,
     refused: bool,
-) -> Result<Option<NonZeroU64>, FrameResult> {
-    let FrameInput::Call(inputs) = &mut frame_init.frame_input else { return Ok(None) };
+) -> PrecompileHold {
+    if ctx.detention.compute_limit().is_none() {
+        return PrecompileHold::Unheld;
+    }
+    hold_detained_precompile(ctx, precompiles, priced, frame_init, refused)
+}
+
+/// [`hold_precompile`] once a read set a compute limit.
+#[inline(never)]
+fn hold_detained_precompile<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    ctx: &MegaContext<DB, ExtEnvs>,
+    precompiles: &PrecompilesMap,
+    priced: &PricedPrecompiles,
+    frame_init: &mut FrameInit,
+    refused: bool,
+) -> PrecompileHold {
+    let FrameInput::Call(inputs) = &mut frame_init.frame_input else {
+        return PrecompileHold::Unheld;
+    };
     let Some(allowance) = ctx.detention.allowance(frame_init.depth, inputs.gas_limit) else {
-        return Ok(None);
+        return PrecompileHold::Unheld;
     };
     let Some(withheld) = NonZeroU64::new(inputs.gas_limit.saturating_sub(allowance)) else {
-        return Ok(None);
+        return PrecompileHold::Unheld;
     };
     if precompiles.get(&inputs.bytecode_address).is_none() {
-        return Ok(None);
+        return PrecompileHold::Unheld;
     }
     let price = priced.price(precompiles, &inputs.bytecode_address, &inputs.input.as_bytes(ctx));
     let Some(price) = price else {
         inputs.gas_limit = allowance;
-        return Ok(Some(withheld));
+        return PrecompileHold::Clamped(withheld);
     };
     if price <= allowance || price > inputs.gas_limit || refused {
-        return Ok(None);
+        return PrecompileHold::Unheld;
     }
-    let mut answer = synthetic_frame_result(
-        &frame_init.frame_input,
-        InstructionResult::PrecompileOOG,
-        Bytes::new(),
-    );
+    PrecompileHold::Crossing
+}
+
+/// The answer to the precompile call `input` starts when its price crosses gas detention's limit
+/// ([`PrecompileHold::Crossing`]): out of gas without running, the forward untouched, and marked
+/// as the crossing ([`Detention::cross_at_price`]).
+#[cold]
+#[inline(never)]
+fn crossing_answer(input: &FrameInput) -> FrameResult {
+    let mut answer = synthetic_frame_result(input, InstructionResult::PrecompileOOG, Bytes::new());
     Detention::cross_at_price(answer.interpreter_result_mut());
-    Err(answer)
+    answer
 }
 
 /// The gas limit of the frame `input` starts.
@@ -1487,8 +1519,8 @@ mod tests {
         }
     }
 
-    /// What `hold_precompile` decides for a call to `to` with `input`, forwarded `forward`, under
-    /// an allowance of `cap`, with `priced`; and the gas limit the call is left to run on.
+    /// What `hold_precompile` decides for a call to `to`, forwarded `forward`, under an allowance
+    /// of `cap`, with `priced`; and the gas limit the call is left to run on.
     fn hold(
         cap: u64,
         priced: &PricedPrecompiles,
@@ -1496,7 +1528,7 @@ mod tests {
         to: Address,
         forward: u64,
         refused: bool,
-    ) -> (Result<Option<NonZeroU64>, FrameResult>, u64) {
+    ) -> (PrecompileHold, u64) {
         let ctx = detained(cap);
         let mut frame_init = static_call(to, &[0; 32], forward);
         let held = hold_precompile(&ctx, dispatched, priced, &mut frame_init, refused);
@@ -1516,37 +1548,45 @@ mod tests {
 
         // Within the allowance: runs on the forward.
         let (held, ran_on) = hold(PRICE, &priced, &map, KZG, 3 * PRICE, false);
-        assert!(matches!(held, Ok(None)), "{held:?}");
-        assert_eq!(ran_on, 3 * PRICE);
+        assert_eq!((held, ran_on), (PrecompileHold::Unheld, 3 * PRICE));
 
         // Past the allowance, within the forward: the crossing, without running.
         for forward in [PRICE, 3 * PRICE] {
             let (held, ran_on) = hold(PRICE - 1, &priced, &map, KZG, forward, false);
-            let Err(FrameResult::Call(answer)) = held else { panic!("{held:?}") };
+            assert_eq!((held, ran_on), (PrecompileHold::Crossing, forward), "the input as it was");
+        }
+
+        // Past the whole forward: a plain out-of-gas, run on the forward.
+        let (held, ran_on) = hold(PRICE / 2, &priced, &map, KZG, PRICE - 1, false);
+        assert_eq!((held, ran_on), (PrecompileHold::Unheld, PRICE - 1));
+
+        // Refused on the caller's account: revm answers it without running the precompile.
+        let (held, ran_on) = hold(PRICE - 1, &priced, &map, KZG, 3 * PRICE, true);
+        assert_eq!((held, ran_on), (PrecompileHold::Unheld, 3 * PRICE));
+
+        // A forward within the allowance, and a call to anything but a precompile, run as they are.
+        let (held, ran_on) = hold(3 * PRICE, &priced, &map, KZG, 3 * PRICE, false);
+        assert_eq!((held, ran_on), (PrecompileHold::Unheld, 3 * PRICE));
+        let (held, ran_on) = hold(PRICE - 1, &priced, &map, TARGET, 3 * PRICE, false);
+        assert_eq!((held, ran_on), (PrecompileHold::Unheld, 3 * PRICE));
+    }
+
+    /// The answer to a call whose price crosses the limit is out of gas without running, with its
+    /// forward untouched and the crossing recorded with the forward.
+    #[test]
+    fn test_a_crossing_answer_is_marked_with_its_forward() {
+        for forward in [1, 100_000, 3_000_000] {
+            let input = static_call(crate::kzg_point_evaluation::ADDRESS, &[0; 32], forward);
+            let FrameResult::Call(answer) = crossing_answer(&input.frame_input) else {
+                panic!("a call's answer")
+            };
             assert!(!answer.was_precompile_called, "answered without running");
             assert_eq!(answer.result.result, InstructionResult::PrecompileOOG);
             assert_eq!(answer.result.gas.limit(), forward);
             assert_eq!(answer.result.gas.remaining(), forward, "nothing spent");
             let record = NonZeroU64::new(forward).map(WithheldCrossing::with_remaining);
             assert_eq!(answer.result.gas.withheld_crossing(), record);
-            assert_eq!(ran_on, forward, "the input is left as it was");
         }
-
-        // Past the whole forward: a plain out-of-gas, run on the forward.
-        let (held, ran_on) = hold(PRICE / 2, &priced, &map, KZG, PRICE - 1, false);
-        assert!(matches!(held, Ok(None)), "{held:?}");
-        assert_eq!(ran_on, PRICE - 1);
-
-        // Refused on the caller's account: revm answers it without running the precompile.
-        let (held, ran_on) = hold(PRICE - 1, &priced, &map, KZG, 3 * PRICE, true);
-        assert!(matches!(held, Ok(None)), "{held:?}");
-        assert_eq!(ran_on, 3 * PRICE);
-
-        // A forward within the allowance, and a call to anything but a precompile, run as they are.
-        let (held, ran_on) = hold(3 * PRICE, &priced, &map, KZG, 3 * PRICE, false);
-        assert!(matches!(held, Ok(None)) && ran_on == 3 * PRICE, "{held:?}");
-        let (held, ran_on) = hold(PRICE - 1, &priced, &map, TARGET, 3 * PRICE, false);
-        assert!(matches!(held, Ok(None)) && ran_on == 3 * PRICE, "{held:?}");
     }
 
     /// A precompile the engine cannot price keeps the clamp: it runs on the allowance, and its
@@ -1568,7 +1608,8 @@ mod tests {
             (&foreign, pairing),
         ] {
             let (held, ran_on) = hold(1_000, priced, &map, to, 300_000, false);
-            assert_eq!(held.ok(), Some(NonZeroU64::new(299_000)), "{to}");
+            let clamped = PrecompileHold::Clamped(NonZeroU64::new(299_000).unwrap());
+            assert_eq!(held, clamped, "{to}");
             assert_eq!(ran_on, 1_000, "{to}: run on the allowance");
         }
     }
