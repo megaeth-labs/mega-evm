@@ -94,6 +94,8 @@ pub struct MegaEvm<DB: Database, INSP, ExtEnvs: ExternalEnvTypes = EmptyExternal
     /// Whether the inspector's type carries a [`TrustedObserver`] declaration. Set only by the
     /// constructors that require the declaration; true without an inspector.
     trusted_inspector: bool,
+    /// Which precompile calls gas detention may price from the Satin table.
+    priced_precompiles: PricedPrecompiles,
 }
 
 impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, NoOpInspector, ExtEnvs> {
@@ -107,7 +109,12 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, NoOpInspector, ExtEnvs
             precompiles: satin_precompiles_map(),
             frame_stack: FrameStack::new_prealloc(8),
         };
-        Self { inner, inspect: false, trusted_inspector: true }
+        Self {
+            inner,
+            inspect: false,
+            trusted_inspector: true,
+            priced_precompiles: PricedPrecompiles::default(),
+        }
     }
 }
 
@@ -123,6 +130,7 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
             inner: self.inner.with_inspector(inspector),
             inspect: true,
             trusted_inspector: false,
+            priced_precompiles: self.priced_precompiles,
         }
     }
 
@@ -137,6 +145,7 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
             inner: self.inner.with_inspector(inspector),
             inspect: true,
             trusted_inspector: true,
+            priced_precompiles: self.priced_precompiles,
         }
     }
 
@@ -172,15 +181,28 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
     /// Adds `dyn_precompiles` on top of the Satin set, replacing an entry whose address is
     /// already taken.
     ///
-    /// A node's RPC builds these; the chain's own set is the one [`MegaEvm::new`] installs.
+    /// A node's RPC builds these; the chain's own set is the one [`MegaEvm::new`] installs. A
+    /// Satin address replaced here is no longer priced from the Satin table: gas detention runs a
+    /// call to it on the allowance, as it does every precompile it cannot price (see the
+    /// `precompiles` module).
     pub fn with_dyn_precompiles(
         mut self,
         dyn_precompiles: HashMap<Address, DynPrecompile>,
     ) -> Self {
         for (address, dyn_precompile) in dyn_precompiles {
+            self.priced_precompiles.record_replaced(address);
             self.inner.precompiles.apply_precompile(&address, move |_| Some(dyn_precompile));
         }
         self
+    }
+
+    /// Replaces the whole precompile set with `precompiles`, a set that is not the Satin one: the
+    /// neutral configuration's, the fixture fork's own. Gas detention prices nothing from the
+    /// Satin table from then on.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(crate) fn replace_precompile_set(&mut self, precompiles: PrecompilesMap) {
+        self.inner.precompiles = precompiles;
+        self.priced_precompiles.record_foreign();
     }
 
     /// Enforces `limits` on every transaction this EVM runs from now on.

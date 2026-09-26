@@ -898,9 +898,9 @@ fn run_precompile(
 }
 
 /// revm runs a precompile inside the frame's start, against the gas limit of the frame, so after
-/// a read the precompile is run on the allowance the frame would have — what the limit leaves the
-/// transaction — and never on what its caller forwarded past it. Without the read, it runs on the
-/// forward.
+/// a read a precompile the engine cannot price — here a node's own — is run on the allowance the
+/// frame would have — what the limit leaves the transaction — and never on what its caller
+/// forwarded past it. Without the read, it runs on the forward.
 ///
 /// Priced within the allowance, it answers as without the read. Priced at the allowance exactly,
 /// it answers, and its caller's next charge crosses the limit. Priced a unit past it, it answers
@@ -941,16 +941,16 @@ fn test_a_precompile_runs_on_the_allowance() {
     }
 }
 
-/// Modexp on a costly input, after a read, against the same call without it:
+/// Modexp on a costly input, replaced by a node's recording copy of it, which the engine does not
+/// price, after a read, against the same call without it:
 ///
 /// - priced within the allowance, it computes on the allowance and answers as without the read;
 /// - priced past the allowance but within what its caller forwarded, it runs out of the allowance
 ///   without computing, and the transaction stops at the limit — without the read it computes;
 /// - forwarded less than its price, within the allowance, it runs out of gas as without the read;
 /// - forwarded less than its price, past the allowance, it runs out of the allowance too, and the
-///   transaction stops at the limit. Without the read the call fails and its caller goes on: the
-///   precompile's price is not known without running it, so it cannot be told from one priced
-///   within the forward.
+///   transaction stops at the limit. Without the read the call fails and its caller goes on: with
+///   no price, it cannot be told from one priced within the forward.
 ///
 /// The cheap input is padded to the length of the costly one, so the two calls leave the same
 /// allowance, which the stop's bill reads out.
@@ -1010,14 +1010,25 @@ fn test_a_precompile_is_held_to_what_the_limit_leaves() {
 }
 
 /// A modexp priced far above the cap, 58,687,488 and 125,796,352 gas, called after a read with all
-/// the gas, is run on the allowance, computes nothing, and the transaction is billed the limit, in
-/// the built-in precompile set the chain runs as in the recording one. A transaction the
-/// beneficiary sends straight to the precompile is detained from the start, so the precompile runs
-/// on the cap itself. The same transaction from another sender computes.
+/// the gas.
+///
+/// The built-in set the chain runs prices it before it runs: priced within what its caller
+/// forwarded, it needs gas the limit withholds, and is the stop, answered without running; priced
+/// past the forward, it runs out of gas as it does without the read, and its caller goes on. Below
+/// the execution cap the forward is under 100,000,000, so the two prices fall on either side of
+/// it; above the cap both are within it.
+///
+/// A modexp a node replaced is not priced: it is run on the allowance, computes nothing, and is
+/// the stop, whatever its price. A transaction the beneficiary sends straight to it is detained
+/// from the start, so it runs on the cap itself. The same transaction from another sender
+/// computes.
 #[test]
 fn test_a_precompile_priced_past_the_cap_computes_nothing() {
+    let mut cases = (0, 0);
     for (exponent_len, price) in [(128, 58_687_488), (256, 125_796_352)] {
         let input = costly_modexp_input(exponent_len, 0);
+        let builtin = mega_evm::satin_precompiles().get(&MODEXP).unwrap();
+        assert_eq!(builtin.required_gas(&input), Some(price), "the built-in's price");
         // Without the read, it computes, and costs its price on top of what the transaction spends
         // before its first instruction.
         let plain = run_precompile(
@@ -1032,18 +1043,42 @@ fn test_a_precompile_priced_past_the_cap_computes_nothing() {
         let intrinsic = plain.run.outcome.gas.regular - price;
 
         for gas_limit in TIERS {
-            let code = calls_precompile(TIMESTAMP, MODEXP, None);
-            let db = MemoryDatabase::default().account_code(CONTRACT, code);
+            let db = |first| {
+                MemoryDatabase::default()
+                    .account_code(CONTRACT, calls_precompile(first, MODEXP, None))
+            };
             let called =
-                run_precompile(db.clone(), MODEXP, recording_modexp, tx_with(&input, gas_limit));
+                run_precompile(db(TIMESTAMP), MODEXP, recording_modexp, tx_with(&input, gas_limit));
             assert_stopped(&called.run, intrinsic_with(&input, gas_limit));
-            let built_in = execute(db, tx_with(&input, gas_limit));
-            assert_stopped(&built_in, intrinsic_with(&input, gas_limit));
             assert!(
                 matches!(called.ran_on[..], [(gas, false)] if gas < CAP),
                 "{:?}",
                 called.ran_on
             );
+
+            let built_in = |first| {
+                let mut evm = MegaEvm::new(context(db(first))).with_inspector(Calls::default());
+                let run = run_on(&mut evm, tx_with(&input, gas_limit));
+                let call = evm.inspector().calls.iter().find(|call| call.target == MODEXP).unwrap();
+                let (forward, ran) = (call.forward, call.precompile_ran);
+                (run, forward, ran)
+            };
+            let (detained, forward, ran) = built_in(TIMESTAMP);
+            let (plain, plain_forward, plain_ran) = built_in(PUSH0);
+            assert_eq!(forward, plain_forward, "the read leaves the forward as it is");
+            assert!(forward > CAP, "{forward}");
+            if price <= forward {
+                assert_stopped(&detained, intrinsic_with(&input, gas_limit));
+                assert!(!ran, "answered without running");
+                assert!(plain_ran && plain.outcome.result.is_success());
+                assert_eq!(slot(&plain, 0), Some(U256::from(1)), "without the read it computes");
+                cases.0 += 1;
+            } else {
+                assert_as_without_read(&detained, &plain, "a price past the forward");
+                assert!(ran && plain_ran, "run on the forward, out of gas");
+                assert_eq!(slot(&detained, 0), Some(U256::ZERO), "the call fails");
+                cases.1 += 1;
+            }
 
             let tx = tx_to(BENEFICIARY, MODEXP, &input, gas_limit);
             let sent = run_precompile(MemoryDatabase::default(), MODEXP, recording_modexp, tx);
@@ -1052,6 +1087,105 @@ fn test_a_precompile_priced_past_the_cap_computes_nothing() {
             assert_eq!(sent.spent, CAP);
             assert_stopped(&sent.run, intrinsic);
         }
+    }
+    assert_eq!(cases, (3, 1), "the stop above the cap for both, and below it for the cheaper");
+}
+
+/// The built-in modexp priced within the allowance runs as without the read: revm runs it, on the
+/// whole forward, and it charges its price, the same result and the same bill.
+#[test]
+fn test_a_priced_precompile_within_the_allowance_runs_as_without_the_read() {
+    let input = costly_modexp_input(32, 32);
+    let price = mega_evm::satin_precompiles().get(&MODEXP).unwrap().required_gas(&input).unwrap();
+    assert!(price < CAP / 2, "{price}");
+    for gas_limit in TIERS {
+        let run = |first| {
+            let db = MemoryDatabase::default()
+                .account_code(CONTRACT, calls_precompile(first, MODEXP, None));
+            let mut evm = MegaEvm::new(context(db)).with_inspector(Calls::default());
+            let run = run_on(&mut evm, tx_with(&input, gas_limit));
+            let call = evm.inspector().calls.iter().find(|call| call.target == MODEXP).unwrap();
+            assert!(call.precompile_ran, "revm runs it");
+            assert_eq!(call.spent, price, "it charges its price");
+            run
+        };
+        let (detained, plain) = (run(TIMESTAMP), run(PUSH0));
+        assert_as_without_read(&detained, &plain, "a price the allowance pays");
+        assert_eq!(slot(&detained, 0), Some(U256::from(1)));
+    }
+}
+
+/// A Satin address a node replaced is not priced from the built-in set, even when its precompile
+/// carries the built-in's id: forwarded less than its price and more than the allowance, the
+/// replaced modexp runs on the allowance and is the stop, where the built-in one, which the engine
+/// prices, runs out of gas as without the read, and its caller goes on.
+#[test]
+fn test_a_replaced_precompile_is_not_priced_from_the_built_in_set() {
+    let input = costly_modexp_input(64, 0);
+    let price = mega_evm::satin_precompiles().get(&MODEXP).unwrap().required_gas(&input).unwrap();
+    assert!(price > CAP, "{price}");
+    let short = u32::try_from(price - 1).unwrap();
+    for gas_limit in TIERS {
+        let db = |first| {
+            MemoryDatabase::default()
+                .account_code(CONTRACT, calls_precompile(first, MODEXP, Some(short)))
+        };
+        let replaced =
+            run_precompile(db(TIMESTAMP), MODEXP, recording_modexp, tx_with(&input, gas_limit));
+        assert_stopped(&replaced.run, intrinsic_with(&input, gas_limit));
+        assert!(
+            matches!(replaced.ran_on[..], [(gas, false)] if gas < CAP),
+            "run on the allowance: {:?}",
+            replaced.ran_on
+        );
+
+        let (built_in, plain) = (
+            execute(db(TIMESTAMP), tx_with(&input, gas_limit)),
+            execute(db(PUSH0), tx_with(&input, gas_limit)),
+        );
+        assert_as_without_read(&built_in, &plain, "a price past the forward");
+        assert_eq!(slot(&built_in, 0), Some(U256::ZERO), "the call fails and its caller goes on");
+    }
+}
+
+/// op-revm's wrapper of the BN254 pairing carries no price, so it keeps the clamp: forwarded less
+/// than its price and more than the allowance — three pairs, 147,000 gas, forwarded 120,000 under a
+/// cap of 100,000 — it runs on the allowance and is the stop. The KZG entry, which carries its
+/// price, forwarded less than it and more than the allowance — 100,000, forwarded 80,000 under a
+/// cap of 50,000 — runs out of gas as without the read.
+#[test]
+fn test_an_unpriced_wrapper_keeps_the_clamp() {
+    let pairing = vec![0_u8; 3 * 192];
+    let kzg = vec![0_u8; 192];
+    let kzg_address = mega_evm::kzg_point_evaluation::ADDRESS;
+    assert_eq!(
+        mega_evm::satin_precompiles().get(&EC_PAIRING).unwrap().required_gas(&pairing),
+        None
+    );
+    for gas_limit in TIERS {
+        let run = |first, to, forward, cap, input: &[u8]| {
+            let limits = EvmTxRuntimeLimits::default().with_block_env_access_compute_gas_limit(cap);
+            let db = MemoryDatabase::default()
+                .account_code(CONTRACT, calls_precompile(first, to, Some(forward)));
+            let mut evm = MegaEvm::new(context(db).with_tx_runtime_limits(limits))
+                .with_inspector(Calls::default());
+            let run = run_on(&mut evm, tx_with(input, gas_limit));
+            let call = evm.inspector().calls.iter().find(|call| call.target == to).unwrap();
+            assert_eq!(call.forward, u64::from(forward));
+            assert!(call.precompile_ran, "{to}: revm runs it");
+            run
+        };
+
+        let detained = run(TIMESTAMP, EC_PAIRING, 120_000, 100_000, &pairing);
+        let plain = run(PUSH0, EC_PAIRING, 120_000, 100_000, &pairing);
+        assert_stopped(&detained, intrinsic_with(&pairing, gas_limit));
+        assert!(plain.outcome.result.is_success());
+        assert_eq!(slot(&plain, 0), Some(U256::ZERO), "without the read the call fails");
+
+        let detained = run(TIMESTAMP, kzg_address, 80_000, 50_000, &kzg);
+        let plain = run(PUSH0, kzg_address, 80_000, 50_000, &kzg);
+        assert_as_without_read(&detained, &plain, "a price past the forward");
+        assert_eq!(slot(&detained, 0), Some(U256::ZERO), "the call fails and its caller goes on");
     }
 }
 

@@ -1035,6 +1035,10 @@ pub(crate) struct CallRecord {
     pub(crate) result: InstructionResult,
     pub(crate) output: Bytes,
     pub(crate) spent: u64,
+    /// The gas the caller forwarded.
+    pub(crate) forward: u64,
+    /// Whether revm ran a precompile for the call.
+    pub(crate) precompile_ran: bool,
 }
 
 impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for Calls {
@@ -1056,6 +1060,8 @@ impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for Calls {
             result: outcome.result.result,
             output: outcome.result.output.clone(),
             spent: gas.limit() - gas.remaining(),
+            forward: inputs.gas_limit,
+            precompile_ran: outcome.was_precompile_called,
         });
     }
 }

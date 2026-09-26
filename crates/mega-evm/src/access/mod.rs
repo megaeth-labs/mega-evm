@@ -98,16 +98,30 @@
 //!
 //! A frame answered without running is held the same way. revm runs a precompile inside the
 //! frame's start, against the frame's gas limit, before its answer can be classified, so after a
-//! read a precompile forwarded more than the allowance its frame would start with is run on that
-//! allowance, and its answer gets the rest of the forward back. Priced within the allowance, it
-//! answers as it would without the read. Priced past it, it answers out of gas without computing;
-//! the answer is marked as a crossing, and the same rule stops the transaction. The price is not
-//! known without running the precompile, so one priced past its whole forward runs out of the
-//! allowance too, and is the stop, where without the read it would be a failed call that burns its
-//! forward and that its caller survives. So is one priced between the allowance and its forward
-//! whose input fails a check made after its gas check: it runs out of the allowance before that
-//! check, where without the read the check fails the call, which burns its forward and which its
-//! caller survives. A precompile run on the allowance also sees the allowance as its gas limit.
+//! read a precompile forwarded more than the allowance its frame would start with is decided
+//! before it runs, from its price where the engine knows it (the `precompiles` module of `evm`):
+//!
+//! - priced within the allowance, it runs on its whole forward and answers as it would without the
+//!   read;
+//! - priced past the allowance and within the forward, it needs gas the limit withholds: it is
+//!   answered out of gas without running, the answer is marked as a crossing, and the same rule
+//!   stops the transaction;
+//! - priced past its whole forward, it runs on the forward and runs out of gas, as without the
+//!   read: a failed call that burns its forward and that its caller survives.
+//!
+//! One residual is a choice: the price does not tell whether an input passes the checks a
+//! precompile makes after its gas check, so an input priced between the allowance and the forward
+//! that would fail such a check is the stop, where without the read the check fails the call,
+//! which burns its forward and which its caller survives. Running it to find out would compute
+//! past the limit.
+//!
+//! A precompile the engine cannot price — a node's own, a Satin address a node replaced, one of
+//! op-revm's size-limited wrappers, which carry no price — is run on the allowance, and its
+//! answer gets the rest of the forward back. Within the allowance, it answers as it would without
+//! the read. Past it, it answers out of gas without computing, the answer is marked as a crossing,
+//! and it is the stop, whether its price is within its forward or not: one priced past its whole
+//! forward is the stop too, where without the read it would be a failed call its caller survives.
+//! It also sees the allowance as its gas limit.
 //!
 //! An interceptor builds its answer on all the gas the caller forwarded, the caller's withheld
 //! part included: an answer that spent more regular gas than the allowance the frame would have

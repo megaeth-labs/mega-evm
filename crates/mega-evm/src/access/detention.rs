@@ -397,8 +397,10 @@ impl Detention {
     /// `result` is the answer: a precompile's, an interceptor's, a `keylessDeploy` call's that
     /// carries value, an inspector's, or revm's for a call it did not start.
     ///
-    /// An answer marked as a crossing — a precompile that ran out of the allowance it was held to
-    /// ([`restore_forward`](Self::restore_forward)) — crossed the limit. Otherwise, an answer that
+    /// An answer marked as a crossing — a precompile whose price crosses the limit
+    /// ([`cross_at_price`](Self::cross_at_price)), or one the engine cannot price that ran out of
+    /// the allowance it was held to ([`restore_forward`](Self::restore_forward)) — crossed the
+    /// limit. Otherwise, an answer that
     /// halts burns the whole gas limit: nothing ran with it. An answer that spent more regular gas
     /// than the limit leaves the frame — the allowance it would have run on — is a charge the
     /// frame could not have made; state and history gas that spilled onto its regular gas are not
@@ -455,17 +457,15 @@ impl Detention {
         self.stop(&mut result.gas, spendable)
     }
 
-    /// Gives a precompile's answer, which ran on `withheld` less than its caller forwarded — the
-    /// allowance, not the forward — the rest back, as the frame would have had it withheld: the
-    /// answer's gas limit is the forward again, and an answer that did not halt keeps the
-    /// withheld part unspent. A precompile that ran out of gas on the allowance ran out of what
-    /// the limit left the transaction: the answer is marked as a crossing of the withheld part,
-    /// and [`on_answer`](Self::on_answer) settles it as the stop.
+    /// Gives the answer of a precompile the engine cannot price, which ran on `withheld` less than
+    /// its caller forwarded — the allowance, not the forward — the rest back, as the frame would
+    /// have had it withheld: the answer's gas limit is the forward again, and an answer that did
+    /// not halt keeps the withheld part unspent. A precompile that ran out of gas on the allowance
+    /// ran out of what the limit left the transaction: the answer is marked as a crossing, and
+    /// [`on_answer`](Self::on_answer) settles it as the stop.
     ///
-    /// The precompile's price is not known without running it, so a precompile priced above its
-    /// whole forward runs out of the allowance as well, and is the stop too. So is one priced
-    /// within its forward, past the allowance, whose input fails a check made after its gas check,
-    /// which without the read fails the call instead.
+    /// Without a price the run on the allowance is all there is to go by, so such a precompile
+    /// priced above its whole forward runs out of the allowance as well, and is the stop too.
     pub(crate) fn restore_forward(result: &mut InterpreterResult, withheld: NonZeroU64) {
         let forward = withheld.saturating_add(result.gas.limit());
         result.gas.tracker_mut().set_limit(forward.get());
@@ -474,6 +474,17 @@ impl Detention {
             result.gas.set_withheld_crossing(Some(WithheldCrossing::with_remaining(forward)));
         } else if !result.result.is_halt() {
             result.gas.erase_cost(withheld.get());
+        }
+    }
+
+    /// Marks `result`, the answer to a precompile call held to an allowance below its forward and
+    /// answered without running because its price is past the allowance and within the forward,
+    /// as that crossing: the record holds the forward, the regular gas the frame had before the
+    /// charge, since the call spent none of it. [`on_answer`](Self::on_answer) settles it as the
+    /// stop.
+    pub(crate) fn cross_at_price(result: &mut InterpreterResult) {
+        if let Some(forward) = NonZeroU64::new(result.gas.limit()) {
+            result.gas.set_withheld_crossing(Some(WithheldCrossing::with_remaining(forward)));
         }
     }
 
