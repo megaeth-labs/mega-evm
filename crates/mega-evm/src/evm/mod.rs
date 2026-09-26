@@ -551,6 +551,26 @@ mod tests {
         MegaContext::new(db, MegaSpecId::SATIN).with_chain(zero_fee_l1_block_info())
     }
 
+    /// Replacing the whole precompile set installs the set it is given, and gas detention prices
+    /// nothing from the Satin table after it: the fixture fork's set is not the Satin one.
+    #[test]
+    fn test_a_replaced_precompile_set_is_dispatched_and_not_priced() {
+        use revm::{handler::PrecompileProvider, precompile::Precompiles};
+        type Ctx = MegaContext<MemoryDatabase>;
+        let mut evm = MegaEvm::new(context(MemoryDatabase::default()));
+        let kzg = crate::kzg_point_evaluation::ADDRESS;
+        let price = |evm: &MegaEvm<MemoryDatabase, NoOpInspector>| {
+            evm.priced_precompiles.price(&evm.inner.precompiles, &kzg, &[])
+        };
+        assert_eq!(price(&evm), Some(crate::kzg_point_evaluation::GAS_COST));
+
+        let osaka = crate::test_utils::neutral_precompiles(crate::EthSpecId::OSAKA).unwrap();
+        evm.replace_precompile_set(osaka);
+        let dispatched = PrecompileProvider::<Ctx>::warm_addresses(&evm.inner.precompiles);
+        assert!(core::ptr::eq(dispatched, Precompiles::osaka().addresses_set()), "Osaka's set");
+        assert_eq!(price(&evm), None);
+    }
+
     /// A call to `CALLEE`, with room for the state gas a value transfer to it draws: `CALLEE`
     /// holds nothing, so a transfer creates it and pays the new account's state gas.
     fn tx(value: U256) -> MegaTransaction {
