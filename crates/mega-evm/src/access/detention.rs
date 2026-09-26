@@ -501,10 +501,11 @@ impl Detention {
         // Every frame below the reading one was built in the transaction while no read had set a
         // limit, so revm building it recorded its caller.
         let records = &self.callers[..depth];
+        let reading_limit = gas.limit();
         let figures = &mut self.figures;
         figures.clear();
         for (index, record) in records.iter().enumerate() {
-            let child_limit = records.get(index + 1).map_or(gas.limit(), |child| child.limit);
+            let child_limit = records.get(index + 1).map_or(reading_limit, |child| child.limit);
             let contribution = record.spent.saturating_sub(child_limit);
             figures.suspended = figures.suspended.saturating_add(contribution);
             figures.frames.push(DetainedFrame { at_suspension: record.spent, contribution });
