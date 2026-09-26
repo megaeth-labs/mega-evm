@@ -1545,8 +1545,21 @@ mod tests {
         forward: u64,
         refused: bool,
     ) -> (PrecompileHold, u64) {
+        hold_input(cap, priced, dispatched, to, &[0; 32], forward, refused)
+    }
+
+    /// [`hold`] for a call of `input`.
+    fn hold_input(
+        cap: u64,
+        priced: &PricedPrecompiles,
+        dispatched: &PrecompilesMap,
+        to: Address,
+        input: &[u8],
+        forward: u64,
+        refused: bool,
+    ) -> (PrecompileHold, u64) {
         let ctx = detained(cap);
-        let mut frame_init = static_call(to, &[0; 32], forward);
+        let mut frame_init = static_call(to, input, forward);
         let held = hold_precompile(&ctx, dispatched, priced, &mut frame_init, refused);
         (held, input_gas_limit(&frame_init.frame_input))
     }
@@ -1585,6 +1598,63 @@ mod tests {
         assert_eq!((held, ran_on), (PrecompileHold::Unheld, 3 * PRICE));
         let (held, ran_on) = hold(PRICE - 1, &priced, &map, TARGET, 3 * PRICE, false);
         assert_eq!((held, ran_on), (PrecompileHold::Unheld, 3 * PRICE));
+    }
+
+    /// op-revm's size-limited precompiles in the Satin set — the BN254 pairing and the BLS12-381
+    /// G1 MSM, G2 MSM and pairing — are decided from their prices as the KZG entry is. Called
+    /// with two pairs of zeros, which their EIPs price, the call runs on its forward within the
+    /// allowance and past its forward, and is the crossing between the two. An input past the size
+    /// limit is refused before any gas check, so its price is nothing, and it runs on its forward
+    /// under any allowance, to be refused as without the limit.
+    #[test]
+    fn test_a_size_limited_precompile_is_decided_from_its_price() {
+        use op_revm::precompiles::{bls12_381, bn254_pair};
+        let (priced, map) = (PricedPrecompiles::default(), crate::satin_precompiles_map());
+        // (the precompile, the length of a pair, the size limit, the price of two pairs)
+        let wrappers = [
+            // EIP-1108: 45,000, and 34,000 a pair.
+            (bn254_pair::KARST, 192, bn254_pair::KARST_MAX_INPUT_SIZE, 45_000 + 2 * 34_000),
+            // EIP-2537: 12,000 a pair, two pairs discounted to 949 per mille.
+            (
+                bls12_381::JOVIAN_G1_MSM,
+                160,
+                bls12_381::JOVIAN_G1_MSM_MAX_INPUT_SIZE,
+                2 * 12_000 * 949 / 1_000,
+            ),
+            // EIP-2537: 22,500 a pair, two pairs undiscounted.
+            (bls12_381::JOVIAN_G2_MSM, 288, bls12_381::JOVIAN_G2_MSM_MAX_INPUT_SIZE, 2 * 22_500),
+            // EIP-2537: 37,700, and 32,600 a pair.
+            (
+                bls12_381::JOVIAN_PAIRING,
+                384,
+                bls12_381::JOVIAN_PAIRING_MAX_INPUT_SIZE,
+                37_700 + 2 * 32_600,
+            ),
+        ];
+        for (precompile, pair, limit, price) in wrappers {
+            let to = *precompile.address();
+            let two_pairs = std::vec![0; 2 * pair];
+            let hold = |cap, input: &[u8], forward| {
+                hold_input(cap, &priced, &map, to, input, forward, false)
+            };
+
+            // Within the allowance: runs on the forward.
+            assert_eq!(hold(price, &two_pairs, 3 * price), (PrecompileHold::Unheld, 3 * price));
+
+            // Past the allowance, within the forward: the crossing, without running.
+            for forward in [price, 3 * price] {
+                let held = hold(price - 1, &two_pairs, forward);
+                assert_eq!(held, (PrecompileHold::Crossing, forward), "{to}: {forward}");
+            }
+
+            // Past the whole forward: a plain out-of-gas, run on the forward.
+            let held = hold(price / 2, &two_pairs, price - 1);
+            assert_eq!(held, (PrecompileHold::Unheld, price - 1), "{to}");
+
+            // Past the size limit: priced at nothing, run on the forward.
+            let over = std::vec![0; limit + pair];
+            assert_eq!(hold(1, &over, 3 * price), (PrecompileHold::Unheld, 3 * price), "{to}");
+        }
     }
 
     /// The answer to a call whose price crosses the limit is out of gas without running, with its

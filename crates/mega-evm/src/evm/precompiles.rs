@@ -415,6 +415,69 @@ mod tests {
         }
     }
 
+    /// op-revm's size-limited entries of the Satin set are priced by their EIPs up to their size
+    /// limits, and at nothing past them, where the wrapper refuses the input before any gas check:
+    ///
+    /// - the BN254 pairing (EIP-1108): 45,000, and 34,000 per whole 192-byte pair, a stray byte
+    ///   included, since the run checks the length after its gas;
+    /// - the BLS12-381 G1 and G2 MSMs (EIP-2537): 12,000 and 22,500 per pair of 160 and 288 bytes,
+    ///   discounted by the EIP's tables — per mille, 1,000 and 949 for one and two G1 pairs, 1,000
+    ///   for one and two G2 pairs, and from 128 pairs on 519 and 524 — and nothing for a length
+    ///   that is not a positive multiple of a pair, which the run refuses before its gas check;
+    /// - the BLS12-381 pairing (EIP-2537): 37,700, and 32,600 per 384-byte pair, and nothing for a
+    ///   length that is not a positive multiple of a pair.
+    #[test]
+    fn test_the_size_limited_entries_are_priced_by_their_eips() {
+        use op_revm::precompiles::{bls12_381, bn254_pair};
+        let price = |precompile: &revm::precompile::Precompile, len: usize| {
+            let entry = satin_precompiles().get(precompile.address()).unwrap();
+            assert_eq!(entry.id(), precompile.id(), "the Satin set dispatches the wrapper");
+            entry.required_gas(&std::vec![0; len]).unwrap()
+        };
+
+        // The BN254 pairing: its 57,600 bytes are 300 pairs.
+        let pairing = &bn254_pair::KARST;
+        assert_eq!(bn254_pair::KARST_MAX_INPUT_SIZE, 300 * 192);
+        for pairs in [0, 1, 2, 300] {
+            let at = 45_000 + 34_000 * pairs as u64;
+            assert_eq!(price(pairing, pairs * 192), at, "{pairs} pairs");
+            if pairs < 300 {
+                assert_eq!(price(pairing, pairs * 192 + 1), at, "{pairs} pairs and a byte");
+            }
+        }
+        for len in [300 * 192 + 1, 301 * 192] {
+            assert_eq!(price(pairing, len), 0, "{len} bytes: past the limit");
+        }
+
+        // The MSMs: the G1 limit is 1,806 pairs, the G2 limit 968.
+        assert_eq!(bls12_381::JOVIAN_G1_MSM_MAX_INPUT_SIZE, 1_806 * 160);
+        assert_eq!(bls12_381::JOVIAN_G2_MSM_MAX_INPUT_SIZE, 968 * 288);
+        let msms = [
+            (&bls12_381::JOVIAN_G1_MSM, 160, 12_000, [1_000, 949, 519], 1_806),
+            (&bls12_381::JOVIAN_G2_MSM, 288, 22_500, [1_000, 1_000, 524], 968),
+        ];
+        for (msm, pair, base, [one, two, most], limit) in msms {
+            let id = msm.id();
+            for (pairs, discount) in [(1, one), (2, two), (128, most), (129, most), (limit, most)] {
+                let at = pairs as u64 * base * discount / 1_000;
+                assert_eq!(price(msm, pairs * pair), at, "{id:?}: {pairs} pairs");
+            }
+            for len in [0, pair - 1, pair + 1, limit * pair + 1, (limit + 1) * pair] {
+                assert_eq!(price(msm, len), 0, "{id:?}: {len} bytes");
+            }
+        }
+
+        // The BLS12-381 pairing: its 156,672 bytes are 408 pairs.
+        let pairing = &bls12_381::JOVIAN_PAIRING;
+        assert_eq!(bls12_381::JOVIAN_PAIRING_MAX_INPUT_SIZE, 408 * 384);
+        for pairs in [1, 2, 408] {
+            assert_eq!(price(pairing, pairs * 384), 37_700 + 32_600 * pairs as u64, "{pairs}");
+        }
+        for len in [0, 383, 385, 408 * 384 + 1, 409 * 384] {
+            assert_eq!(price(pairing, len), 0, "{len} bytes");
+        }
+    }
+
     /// The KZG entry's price is its run's: below [`GAS_COST`](kzg_point_evaluation::GAS_COST) the
     /// run is out of gas, and from it on the run gives one result that uses exactly the price, a
     /// valid proof, a malformed input and an empty one alike.

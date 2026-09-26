@@ -71,6 +71,15 @@ const EC_ADD: Address = address!("0000000000000000000000000000000000000006");
 /// The BN254 pairing precompile.
 const EC_PAIRING: Address = address!("0000000000000000000000000000000000000008");
 
+/// The BLS12-381 G1 MSM precompile (EIP-2537).
+const BLS12_G1_MSM: Address = address!("000000000000000000000000000000000000000c");
+
+/// The BLS12-381 G2 MSM precompile (EIP-2537).
+const BLS12_G2_MSM: Address = address!("000000000000000000000000000000000000000e");
+
+/// The BLS12-381 pairing precompile (EIP-2537).
+const BLS12_PAIRING: Address = address!("000000000000000000000000000000000000000f");
+
 /// Runs the transaction `build` makes for a first instruction that reads the timestamp, then for
 /// one that pushes a zero at the same price: detained, then not.
 fn with_and_without_read(build: impl Fn(u8) -> (MemoryDatabase, u64)) -> (Run, Run) {
@@ -1294,6 +1303,96 @@ fn test_a_precompile_whose_input_fails_past_its_gas_check_stops_past_the_allowan
         assert_as_without_read(&detained, &plain, "a price the allowance pays");
         assert_eq!(slot(&detained, 0), Some(U256::ZERO), "the call fails on its input");
     }
+}
+
+/// A size-limited precompile of the Satin set called with `input`, which its EIP prices at
+/// `price`, after a read, against the same call without it:
+///
+/// - forwarded all the gas under a cap that leaves it less than its price, it needs gas the limit
+///   withholds: it is answered without running, and the transaction stops, where without the read
+///   it computes;
+/// - under the spec's cap, which leaves it its price, revm runs it and it charges its price, as
+///   without the read;
+/// - forwarded one gas short of its price under a cap that leaves it less still, it runs on its
+///   forward and runs out of gas as without the read, and its caller goes on.
+fn assert_held_from_its_price(to: Address, input: &[u8], price: u64) {
+    let entry = mega_evm::satin_precompiles().get(&to).unwrap();
+    assert_eq!(entry.required_gas(input), Some(price), "the entry's price is the EIP's");
+    let short = u32::try_from(price - 1).unwrap();
+    let cap = price / 2;
+    for gas_limit in TIERS {
+        let run = |first, cap, gas| {
+            let limits = EvmTxRuntimeLimits::default().with_block_env_access_compute_gas_limit(cap);
+            let db =
+                MemoryDatabase::default().account_code(CONTRACT, calls_precompile(first, to, gas));
+            let mut evm = MegaEvm::new(context(db).with_tx_runtime_limits(limits))
+                .with_inspector(Calls::default());
+            let run = run_on(&mut evm, tx_with(input, gas_limit));
+            let call = evm.inspector().calls.iter().find(|call| call.target == to).unwrap();
+            let (forward, spent, ran) = (call.forward, call.spent, call.precompile_ran);
+            (run, forward, spent, ran)
+        };
+
+        // Past the allowance, within the forward: the stop, without running.
+        let (detained, forward, _, ran) = run(TIMESTAMP, cap, None);
+        let (plain, _, plain_spent, plain_ran) = run(PUSH0, cap, None);
+        let allowance = cap - charges_to_the_precompile(input.len(), None).total();
+        assert!(allowance < price && price <= forward, "{to}: {allowance} {price} {forward}");
+        assert_stopped(&detained, intrinsic_with(input, gas_limit), allowance);
+        assert!(!ran, "{to}: answered without running");
+        assert!(plain_ran && plain.outcome.result.is_success(), "{to}");
+        assert_eq!(plain_spent, price, "{to}: without the read it computes, at its price");
+        assert_eq!(slot(&plain, 0), Some(U256::from(1)), "{to}");
+
+        // Within the allowance: run, at its price, as without the read.
+        let (detained, _, spent, ran) = run(TIMESTAMP, CAP, None);
+        let (plain, ..) = run(PUSH0, CAP, None);
+        assert!(ran, "{to}: revm runs it");
+        assert_eq!(spent, price, "{to}: it charges its price");
+        assert_as_without_read(&detained, &plain, "a price the allowance pays");
+        assert_eq!(slot(&detained, 0), Some(U256::from(1)), "{to}");
+
+        // Past the whole forward: run on the forward, out of gas, as without the read.
+        let (detained, forward, _, ran) = run(TIMESTAMP, cap, Some(short));
+        let (plain, ..) = run(PUSH0, cap, Some(short));
+        let allowance = cap - charges_to_the_precompile(input.len(), Some(short)).total();
+        assert!(allowance < forward && forward < price, "{to}: {allowance} {forward} {price}");
+        assert!(ran, "{to}: revm runs it");
+        assert_as_without_read(&detained, &plain, "a price past the forward");
+        assert_eq!(
+            slot(&detained, 0),
+            Some(U256::ZERO),
+            "{to}: the call fails, its caller goes on"
+        );
+    }
+}
+
+/// op-revm's wrapper of the BN254 pairing, two pairs of zeros: 45,000, and 34,000 a pair
+/// (EIP-1108).
+#[test]
+fn test_the_bn254_pairing_is_held_from_its_price() {
+    assert_held_from_its_price(EC_PAIRING, &[0; 2 * 192], 45_000 + 2 * 34_000);
+}
+
+/// op-revm's wrapper of the BLS12-381 G1 MSM, two pairs of zeros: 12,000 a pair, discounted to
+/// 949 per mille for two (EIP-2537).
+#[test]
+fn test_the_bls12_g1_msm_is_held_from_its_price() {
+    assert_held_from_its_price(BLS12_G1_MSM, &[0; 2 * 160], 2 * 12_000 * 949 / 1_000);
+}
+
+/// op-revm's wrapper of the BLS12-381 G2 MSM, two pairs of zeros: 22,500 a pair, undiscounted for
+/// two (EIP-2537).
+#[test]
+fn test_the_bls12_g2_msm_is_held_from_its_price() {
+    assert_held_from_its_price(BLS12_G2_MSM, &[0; 2 * 288], 2 * 22_500 * 1_000 / 1_000);
+}
+
+/// op-revm's wrapper of the BLS12-381 pairing, two pairs of zeros: 37,700, and 32,600 a pair
+/// (EIP-2537).
+#[test]
+fn test_the_bls12_pairing_is_held_from_its_price() {
+    assert_held_from_its_price(BLS12_PAIRING, &[0; 2 * 384], 37_700 + 2 * 32_600);
 }
 
 /// A keyless deployment's call is the transaction's own frame, and runs no code: its own charges —
