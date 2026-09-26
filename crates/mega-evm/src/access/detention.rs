@@ -457,9 +457,12 @@ impl Detention {
             result.gas.set_withheld_crossing(Some(WithheldCrossing::with_remaining(remaining)));
         }
         let limit = self.stop(&mut result.gas)?;
-        let used =
-            self.compute_at_start(depth, gas_limit).saturating_add(regular_spent(&result.gas));
-        Some(ComputeStop { limit, used })
+        // Every crossing an answer carries was marked by the engine with the regular gas the frame
+        // had before the charge: the forward less the spill here, the forward for a precompile's,
+        // which spills nothing. Put back, it leaves the answer no regular gas spent, so the stop's
+        // compute is the transaction's when the frame started.
+        debug_assert_eq!(regular_spent(&result.gas), 0, "a stopped answer spent nothing");
+        Some(ComputeStop { limit, used: self.compute_at_start(depth, gas_limit) })
     }
 
     /// Gives the answer of a precompile the engine cannot price, which ran on `withheld` less than
