@@ -422,14 +422,15 @@ impl Detention {
     pub(crate) fn on_frame_run(&mut self, gas: &mut Gas, depth: usize) {
         self.refusing = self.disabled_from.is_some_and(|from| depth >= from);
         self.depth = depth;
-        if !self.detains {
-            return;
-        }
         #[cfg(debug_assertions)]
-        self.eager.on_frame_run(gas.limit(), depth);
+        if self.detains {
+            self.eager.on_frame_run(gas.limit(), depth);
+        }
+        // Only a read of a transaction detention holds sets a limit.
         if self.limit.is_none() {
             return;
         }
+        debug_assert!(self.detains, "a limit on a transaction detention does not hold");
         if self.frames.len() == depth {
             let contribution = self.caller_contribution(depth, gas.limit());
             if let Some(caller) = depth.checked_sub(1).and_then(|i| self.frames.get_mut(i)) {
