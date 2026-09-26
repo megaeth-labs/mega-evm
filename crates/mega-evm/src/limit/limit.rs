@@ -615,20 +615,19 @@ impl AdditionalLimit {
     /// runs out of gas whatever the limit. Empty code deposits nothing and is held to nothing.
     ///
     /// The state gas is held with what the creation already holds, and before the bytes, as it is
-    /// wherever both cross at one site. The same bytes are history beside the write records,
-    /// counted here on the same lane, so the history a transaction reports it appended and the
-    /// data size it kept move together: a creation that deposits nothing, or whose deposit fails,
-    /// appends neither.
+    /// wherever both cross at one site. A deposit the schedule charges no state gas for adds none,
+    /// and holding what the creation already held finds nothing its own charges did not. The same
+    /// bytes are history beside the write records, counted here on the same lane, so the
+    /// history a transaction reports it appended and the data size it kept move together: a
+    /// creation that deposits nothing, or whose deposit fails, appends neither.
     pub(crate) fn on_code_deposit(&mut self, deposit: &CodeDeposit<'_>) -> Result<(), Bytes> {
         let bytes = deposit.code.len() as u64;
         if bytes == 0 {
             return Ok(());
         }
-        if deposit.state_gas() > 0 {
-            let check = self.check_state_gas(deposit.gas_after.state_gas_spent());
-            if check.exceeded_limit() {
-                return Err(check.revert_data());
-            }
+        let check = self.check_state_gas(deposit.gas_after.state_gas_spent());
+        if check.exceeded_limit() {
+            return Err(check.revert_data());
         }
         debug_assert!(self.tracker.current().is_some(), "a creation returns on its own lane");
         self.tracker.record(LimitUsage { data_size: bytes, write_records: 0 });
