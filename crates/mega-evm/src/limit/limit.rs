@@ -1,9 +1,10 @@
 //! The per-transaction state of the common execution layer.
 
-use alloy_primitives::Address;
+use alloy_primitives::{Address, Bytes};
 use revm::{
+    context_interface::context::CodeDeposit,
     handler::FrameResult,
-    interpreter::{CallInputs, CallScheme, FrameInput, InstructionResult, InterpreterResult},
+    interpreter::{CallInputs, CallScheme, FrameInput, InstructionResult},
 };
 
 use super::{
@@ -595,42 +596,48 @@ impl AdditionalLimit {
         self.check()
     }
 
-    /// Counts the code a creation is about to deposit, on the creation's own lane, and turns the
-    /// return into the stop when that crosses a limit.
+    /// Holds the code a creation deposits to the limits, and names the stop when it crosses one:
+    /// first the state gas `return_create` charged for the bytes, then the bytes themselves,
+    /// counted on the creation's own lane.
     ///
-    /// Called from the frame run, on a return `return_create` would deposit — a success whose code
-    /// it accepts, from a frame that can pay what it charges for the deposit — before it makes
-    /// those charges and commits the creation's journal checkpoint. A rewrite after that commit
-    /// would leave the code deployed: the checkpoint is already gone, and flipping the frame
-    /// result does not reopen it. A stop here makes `return_create` revert the checkpoint instead,
-    /// so the code is not written. The bytes stay on the lane until the frame returns; a success
-    /// merges them into the caller, and the failure — the stop included — discards them.
+    /// Called through
+    /// [`ContextTr::admit_code_deposit`](revm::context::ContextTr::admit_code_deposit), which
+    /// `return_create` asks once it decided to deposit the code — the code passed every check
+    /// and every deposit charge is recorded — and before it commits the creation's journal
+    /// checkpoint. A stop refuses the deposit: `return_create` reverts the checkpoint, so the code
+    /// is not written, puts the frame's gas back to what it had before the deposit's charges, and
+    /// ends the creation as a revert carrying the stop. The bytes stay on the lane until the frame
+    /// returns; a success merges them into the caller, and the failure — the stop included —
+    /// discards them.
     ///
-    /// A return that is already a revert or a halt deposits nothing, and its output is the
-    /// revert data, not code. Empty code deposits nothing either, and neither does code
-    /// `return_create` refuses or a creation that cannot pay for its deposit: those fail the
-    /// creation there, and are never counted.
+    /// A creation `return_create` fails itself is never offered: a revert or a halt of the init
+    /// code, code it refuses, and a creation that cannot pay one of the deposit's charges, which
+    /// runs out of gas whatever the limit. Empty code deposits nothing and is held to nothing.
     ///
-    /// The same bytes are history beside the write records, counted here on the same lane, so
-    /// the history a transaction reports it appended and the data size it kept move together:
-    /// a creation that deposits nothing, or whose deposit fails, appends neither.
-    pub(crate) fn on_create_return(&mut self, result: &mut InterpreterResult) {
-        if !result.result.is_ok() {
-            return;
-        }
-        let bytes = result.output.len() as u64;
+    /// The state gas is held with what the creation already holds, and before the bytes, as it is
+    /// wherever both cross at one site. The same bytes are history beside the write records,
+    /// counted here on the same lane, so the history a transaction reports it appended and the
+    /// data size it kept move together: a creation that deposits nothing, or whose deposit fails,
+    /// appends neither.
+    pub(crate) fn on_code_deposit(&mut self, deposit: &CodeDeposit<'_>) -> Result<(), Bytes> {
+        let bytes = deposit.code.len() as u64;
         if bytes == 0 {
-            return;
+            return Ok(());
+        }
+        if deposit.state_gas() > 0 {
+            let check = self.check_state_gas(deposit.gas_after.state_gas_spent());
+            if check.exceeded_limit() {
+                return Err(check.revert_data());
+            }
         }
         debug_assert!(self.tracker.current().is_some(), "a creation returns on its own lane");
         self.tracker.record(LimitUsage { data_size: bytes, write_records: 0 });
         self.tracker.record_log_and_code_bytes(bytes);
         let check = self.check();
-        if !check.exceeded_limit() {
-            return;
+        if check.exceeded_limit() {
+            return Err(check.revert_data());
         }
-        result.result = InstructionResult::Revert;
-        result.output = check.revert_data();
+        Ok(())
     }
 
     /// The budget of the frame about to start, in data-size bytes and in write records.

@@ -20,7 +20,7 @@ use revm::{
     context::{
         result::{FromStringError, InvalidTransaction, ResultGas},
         transaction::TransactionType,
-        Cfg, ContextError, ContextTr, FrameStack, JournalTr, Transaction,
+        ContextError, ContextTr, FrameStack, JournalTr, Transaction,
     },
     context_interface::{
         cfg::{gas::GasTracker, GasId, StateGasCharge, StateGasSite},
@@ -545,8 +545,6 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
                 ctx,
             ),
         };
-        // Before `return_create` commits a successful creation. See `on_create_return`.
-        let action = meter_deployed_code(ctx, frame, action);
         let mut next = frame.process_next_action(ctx, action);
         after_frame_run(ctx, frame, &mut next);
         // No frame runs an instruction once the transaction is latched, and every site that
@@ -712,8 +710,6 @@ where
                 instructions.gas_table(),
             ),
         };
-        // The inspected path commits a creation through the same `return_create`.
-        let action = meter_deployed_code(ctx, frame, action);
         let mut next = frame.process_next_action(ctx, action);
         after_frame_run(ctx, frame, &mut next);
         if let Ok(ItemOrResult::Result(result)) = &mut next {
@@ -722,120 +718,6 @@ where
         }
         next
     }
-}
-
-/// Holds the bytecode a creation is about to deposit to the limits, and turns that return into
-/// the stop when it crosses one, before revm commits the creation: first the state gas
-/// `return_create` will charge for the bytes, then the bytes themselves.
-///
-/// Only a deposit `return_create` would make its state charge for is held
-/// ([`deposit_state_gas`]). A creation that fails before that charge fails there, alone, and the
-/// chain keeps none of its code: counted, those bytes and their state gas could cross the
-/// transaction's limit and stop every frame above a creation that fails by itself.
-fn meter_deployed_code<DB: Database, ExtEnvs: ExternalEnvTypes>(
-    ctx: &mut MegaContext<DB, ExtEnvs>,
-    frame: &EthFrame<EthInterpreter>,
-    mut action: InterpreterAction,
-) -> InterpreterAction {
-    if frame.data.is_create() {
-        if let InterpreterAction::Return(result) = &mut action {
-            let address = frame.interpreter.input.target_address;
-            if let Some(state_gas) = deposit_state_gas(ctx, address, result) {
-                hold_deposit_state_gas(ctx, result, state_gas);
-                ctx.additional_limit.on_create_return(result);
-            }
-        }
-    }
-    action
-}
-
-/// Holds the `state_gas` `return_create` is about to charge for the code a creation deposits to
-/// the state-gas limit, with what the creation already holds, and turns the return into the stop
-/// when it crosses it.
-///
-/// A crossing after `return_create` would leave the code deployed: the charge is made inside it,
-/// after which it commits the creation's checkpoint. So the limit binds here, just before the
-/// charge, and only once [`deposit_state_gas`] found that `return_create` will make it: a charge
-/// the creation cannot pay is an out-of-gas whatever the limit, as it is at every other site.
-fn hold_deposit_state_gas<DB: Database, ExtEnvs: ExternalEnvTypes>(
-    ctx: &mut MegaContext<DB, ExtEnvs>,
-    result: &mut InterpreterResult,
-    state_gas: u64,
-) {
-    if state_gas == 0 {
-        return;
-    }
-    let running = result.gas.state_gas_spent().saturating_add_unsigned(state_gas);
-    let check = ctx.additional_limit.check_state_gas(running);
-    if check.exceeded_limit() {
-        result.result = InstructionResult::Revert;
-        result.output = check.revert_data();
-    }
-}
-
-/// The state gas `return_create` charges for the code a creation at `address` returns, when it
-/// reaches that charge and the creation can pay it — zero when it charges none; `None` when it
-/// fails the creation at that charge or before it.
-///
-/// It retraces revm's `return_create` (`crates/handler/src/frame.rs`), step by step and on a copy
-/// of the frame's gas, up to and including the state charge:
-///
-/// 1. a return that is not a success deposits nothing: `if !interpreter_result.result.is_ok()`;
-/// 2. code over the code-size limit fails the creation: `interpreter_result.output.len() >
-///    max_code_size`;
-/// 3. so does code starting with `0xEF`, unless EIP-3541 is off: `!is_eip3541_disabled &&
-///    interpreter_result.output.first() == Some(&0xEF)`;
-/// 4. the regular deposit cost, `gas_params.code_deposit_cost(len)`, is charged, and a frame that
-///    cannot pay it runs out of gas;
-/// 5. under EIP-8037, so is the regular cost of hashing the code, `gas_params.keccak256_cost(len)`;
-/// 6. under EIP-8037, when the schedule prices deposited code (`code_deposit_state_gas(len) > 0`),
-///    the state gas is priced through the hook — a lookup that fails fails the creation — and
-///    recorded as `record_state_cost` records it, the reservoir first and then regular gas, and a
-///    frame that cannot pay it runs out of gas.
-///
-/// Only a creation that passes all six is held, so every out-of-gas `return_create` would report
-/// is still reported, and the hook is asked for a price only where `return_create` asks it: a
-/// lookup that fails here fails there the same way. What `return_create` charges after the state
-/// gas — the deposited code's history — is a charge like the history after any other state
-/// charge, which the limit holds before.
-///
-/// `return_create` also gates steps 2, 3 and 4's out-of-gas on EIP-170, London and Homestead,
-/// which Satin's base spec, Osaka, enables.
-fn deposit_state_gas<DB: Database, ExtEnvs: ExternalEnvTypes>(
-    ctx: &mut MegaContext<DB, ExtEnvs>,
-    address: Address,
-    result: &InterpreterResult,
-) -> Option<u64> {
-    let code = &result.output;
-    let len = code.len();
-    let cfg = ctx.cfg();
-    if !result.result.is_ok() ||
-        len > cfg.max_code_size() ||
-        (!cfg.is_eip3541_disabled() && code.first() == Some(&0xEF))
-    {
-        return None;
-    }
-    let mut gas = result.gas;
-    let gas_params = cfg.gas_params();
-    if !gas.record_regular_cost(gas_params.code_deposit_cost(len)) {
-        return None;
-    }
-    if !cfg.is_amsterdam_eip8037_enabled() {
-        return Some(0);
-    }
-    if !gas.record_regular_cost(gas_params.keccak256_cost(len)) {
-        return None;
-    }
-    if gas_params.code_deposit_state_gas(len) == 0 {
-        return Some(0);
-    }
-    let charge = StateGasCharge::units(
-        GasId::code_deposit_state_gas(),
-        StateGasSite::account(address),
-        len as u64,
-    );
-    let cost = ctx.state_gas_charge(charge)?;
-    gas.record_state_cost(cost).then_some(cost)
 }
 
 /// The action of a frame about to run: the stop it returns without running an instruction, when

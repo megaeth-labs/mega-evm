@@ -100,10 +100,13 @@
 //! a value call its caller cannot fund, one past the call-stack limit — gives that charge back and
 //! is never held for it; a frame revm builds, or answers with a success, returns the stop.
 //!
-//! Deployed code is held just before `return_create` charges it, as its bytes are, so a crossing
-//! leaves no code behind — and only once `return_create` is sure to make the charge: a creation
-//! that cannot pay the regular costs it charges first, or the state gas itself, runs out of gas
-//! there whatever the limit.
+//! Deployed code is held once `return_create` has charged every part of its deposit and before it
+//! commits the creation, as its bytes are ([`ContextTr::admit_code_deposit`]), so a crossing
+//! leaves no code behind: the creation reverts with the stop, on the gas it had before the
+//! deposit. A creation that cannot pay a part of its deposit — the regular costs, the state gas,
+//! the history — runs out of gas there whatever the limit.
+//!
+//! [`ContextTr::admit_code_deposit`]: revm::context::ContextTr::admit_code_deposit
 //!
 //! Wherever the state gas and a record cross together at one site, the state gas is the stop
 //! reported. At a frame start the records are held before revm builds the frame, and a frame they

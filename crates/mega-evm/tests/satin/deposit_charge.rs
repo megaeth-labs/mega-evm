@@ -1,26 +1,25 @@
-//! Deployed code is held to the limits only where `return_create` charges its state gas.
+//! Deployed code is held to the limits only once `return_create` charged every part of its
+//! deposit.
 //!
 //! `return_create` charges a creation's deposit in this order: the regular deposit cost, the
 //! regular cost of hashing the code under EIP-8037, then the code's state gas — the reservoir
-//! first, then regular gas — and last the code's history. A creation that cannot pay one of them
-//! runs out of gas there, alone, and the chain keeps none of its code. The state-gas limit and the
-//! data-size limit both hold the deposit before `return_create` commits it, and only once the
-//! state gas is paid: a creation that cannot pay a charge up to it runs out of gas whatever the
-//! limit, and its caller goes on. The history after it is held like a record's history after the
-//! state gas of its slot: the limit comes first.
+//! first, then regular gas — and last the code's history, the same way. A creation that cannot
+//! pay one of them runs out of gas there, alone, and the chain keeps none of its code. The
+//! state-gas limit and the data-size limit both hold the deposit after the last of those charges
+//! and before `return_create` commits it: a creation that cannot pay a charge runs out of gas
+//! whatever the limit, and its caller goes on.
 //!
 //! Each case finds its boundary on the engine: the least gas `A` can call the creator `B` with for
-//! `return_create` to charge the code's state gas — or, without EIP-8037, to deposit the code —
-//! when no limit is set. The creation then has no regular gas left after it, so it is exactly
-//! enough. With that gas a limit the deposit crosses stops the creation; one gas short the
-//! creation runs out of gas, under the limit exactly as without it.
+//! the creation to deposit its code when no limit is set. The creation then has no regular gas left
+//! after the deposit, so it is exactly enough. With that gas a limit the deposit crosses stops the
+//! creation; one gas short the creation runs out of gas, under the limit exactly as without it.
 //!
 //! Which charge the creation runs out of gas on follows from where the gas comes from. Above the
 //! execution cap the reservoir pays the code's state gas and history, so the last regular charge
-//! is the hash. Below it there is no reservoir, and the state gas is paid out of regular gas after
-//! the hash. The regular deposit cost is zero under EIP-8037, so it binds only on a configuration
-//! without it: the neutral one of Osaka, where no state gas is charged and the data-size limit is
-//! the one that holds the code.
+//! is the hash. Below it there is no reservoir, and the state gas and then the history are paid out
+//! of regular gas after the hash. The regular deposit cost is zero under EIP-8037, so it binds only
+//! on a configuration without it: the neutral one of Osaka, where no state gas is charged and the
+//! data-size limit is the one that holds the code.
 
 use alloy_primitives::{address, Address, U256};
 use mega_evm::{
@@ -169,14 +168,6 @@ struct CreationEnd {
     remaining: u64,
 }
 
-impl CreationEnd {
-    /// Whether `return_create` got as far as the charge the limits hold the deposit before: the
-    /// code's state gas, or, without EIP-8037, the deposit itself.
-    const fn reached(&self) -> bool {
-        self.deposited || self.charged_state_gas
-    }
-}
-
 impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for CreationEnd {
     fn create_end(
         &mut self,
@@ -201,20 +192,20 @@ fn creation_end(setup: Setup, gas: u64) -> CreationEnd {
     *evm.inspector()
 }
 
-/// The least gas `A` can call `B` with for `return_create` to reach the charge the limits hold the
-/// deposit before, with no limit set; and the unlimited outcome one gas short of it.
+/// The least gas `A` can call `B` with for the creation to deposit its code, with no limit set;
+/// and the unlimited outcome one gas short of it.
 ///
-/// At the boundary the creation has no regular gas left after that charge, so it is exactly
-/// enough; one gas short the creation runs out of gas and deploys nothing.
+/// At the boundary the creation has no regular gas left after the deposit's last charge, so it is
+/// exactly enough; one gas short the creation runs out of gas and deploys nothing.
 fn boundary(setup: Setup) -> (u64, MegaTransactionOutcome) {
     let (mut short, mut enough) = (0, 5_000_000);
     assert!(
-        !creation_end(setup, short).reached() && creation_end(setup, enough).reached(),
+        !creation_end(setup, short).deposited && creation_end(setup, enough).deposited,
         "{setup:?}: the search brackets the boundary"
     );
     while enough - short > 1 {
         let middle = short + (enough - short) / 2;
-        if creation_end(setup, middle).reached() {
+        if creation_end(setup, middle).deposited {
             enough = middle;
         } else {
             short = middle;
@@ -294,37 +285,36 @@ fn assert_data_size_limit_stands_aside(setup: Setup) {
     assert_eq!(ran_out.usage, short.usage, "{setup:?}: and it keeps what it keeps without it");
 }
 
-/// Above the execution cap the reservoir pays the code's state gas: a creation that cannot pay
-/// the hash of its code runs out of gas on it, whatever the state-gas limit.
+/// Above the execution cap the reservoir pays the code's state gas and history: a creation that
+/// cannot pay the hash of its code runs out of gas on it, whatever the state-gas limit.
 #[test]
 fn test_a_creation_that_cannot_pay_the_hash_runs_out_of_gas_under_the_state_gas_limit() {
     let setup = Setup::Satin(ABOVE_CAP);
     let (enough, _) = boundary(setup);
+    let end = creation_end(setup, enough - 1);
+    assert!(!end.charged_state_gas, "one gas short, the hash is what it cannot pay: {end:?}");
+    assert_state_gas_limit_stands_aside(setup);
+}
+
+/// Below the execution cap the code's state gas and then its history are paid out of regular gas:
+/// a creation that can pay its state gas but not its history runs out of gas on the history,
+/// whatever the state-gas limit. The limit holds the deposit once all of it is paid, not at the
+/// state gas: a creation that could pay the state gas alone would otherwise be stopped by a limit
+/// it never reaches.
+#[test]
+fn test_a_creation_that_cannot_pay_its_history_runs_out_of_gas_under_the_state_gas_limit() {
+    let setup = Setup::Satin(BELOW_CAP);
+    let (enough, _) = boundary(setup);
+    let end = creation_end(setup, enough - 1);
     assert!(
-        deployed(&run(setup, enough, EvmTxRuntimeLimits::no_limits())),
-        "the hash is the last charge the frame's own gas pays"
+        end.charged_state_gas && !end.deposited,
+        "one gas short, the history is what it cannot pay: {end:?}"
     );
     assert_state_gas_limit_stands_aside(setup);
 }
 
-/// Below the execution cap the code's state gas is paid out of regular gas: a creation that can
-/// pay the hash of its code but not its state gas runs out of gas on the state gas, whatever the
-/// state-gas limit.
-///
-/// With exactly enough for the state gas the check fires, although without a limit the creation
-/// would then run out of gas on the code's history: that is charged after the state gas, as a
-/// record's history is after its slot's, and the limit holds what was charged before it.
-#[test]
-fn test_a_creation_that_cannot_pay_its_state_gas_runs_out_of_gas_under_the_state_gas_limit() {
-    let setup = Setup::Satin(BELOW_CAP);
-    let (enough, _) = boundary(setup);
-    let end = creation_end(setup, enough);
-    assert!(end.charged_state_gas && !end.deposited, "the history is what it cannot pay: {end:?}");
-    assert_state_gas_limit_stands_aside(setup);
-}
-
 /// The data-size limit counts deployed code behind the same check: a creation that cannot pay the
-/// hash of its code, or its state gas, runs out of gas whatever the limit.
+/// hash of its code, or its history, runs out of gas whatever the limit.
 #[test]
 fn test_a_creation_that_cannot_pay_for_its_code_runs_out_of_gas_under_the_data_size_limit() {
     assert_data_size_limit_stands_aside(Setup::Satin(ABOVE_CAP));
