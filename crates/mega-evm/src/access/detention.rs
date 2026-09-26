@@ -595,6 +595,10 @@ impl Detention {
     /// ([`stop`](Self::stop)): the frame spent nothing before the charge, so it is given its whole
     /// gas back, and the stop's compute is the transaction's when the frame started. Returns the
     /// stop when it crossed.
+    ///
+    /// Until a read sets a limit an answer can only burn: nothing it spends can cross a limit, and
+    /// only the engine marks an answer as a crossing, which it does only under a limit.
+    #[inline]
     pub(crate) fn on_answer(
         &mut self,
         result: &mut InterpreterResult,
@@ -604,6 +608,24 @@ impl Detention {
         if !self.detains {
             return None;
         }
+        if self.limit.is_none() && result.gas.withheld_crossing().is_none() {
+            if result.result.is_halt() {
+                self.burned = self.burned.saturating_add(gas_limit);
+            }
+            return None;
+        }
+        self.on_held_answer(result, depth, gas_limit)
+    }
+
+    /// [`on_answer`](Self::on_answer) once a read set a limit, or for an answer marked as a
+    /// crossing.
+    #[inline(never)]
+    fn on_held_answer(
+        &mut self,
+        result: &mut InterpreterResult,
+        depth: usize,
+        gas_limit: u64,
+    ) -> Option<ComputeStop> {
         if result.gas.withheld_crossing().is_none() {
             if result.result.is_halt() {
                 self.burned = self.burned.saturating_add(gas_limit);
