@@ -368,9 +368,10 @@ fn prepare<DB: Database, ExtEnvs: ExternalEnvTypes>(
     let signer_info = ctx.journal_mut().inspect_account(signer, checks_code)?.info.clone();
     // A signer that is the block beneficiary: the rules read the beneficiary's account through
     // the journal, where the Host marks nothing, and the creation runs for it as a `CREATE` runs
-    // in a frame of it, which a read of the account started.
+    // in a frame of it, which a read of the account started. The call is the transaction's own
+    // frame, at depth 0.
     if signer == ctx.block().beneficiary {
-        ctx.detention.read_by_frame(VolatileDataAccess::BENEFICIARY_BALANCE, gas);
+        ctx.detention.read_by_frame(VolatileDataAccess::BENEFICIARY_BALANCE, gas, 0);
     }
     if signer_info.nonce > 1 {
         refuse!(KeylessDeployError::SignerNonceTooHigh { signer_nonce: signer_info.nonce });

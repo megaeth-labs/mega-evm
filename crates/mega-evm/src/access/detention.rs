@@ -219,8 +219,6 @@ pub struct Detention {
     left_at_halt: Option<u64>,
     /// The frames' figures, once a read set a limit.
     figures: FrameFigures,
-    /// The depth of the frame that runs.
-    depth: usize,
     /// While no read has set a limit: at each depth, the record of the frame there when revm last
     /// built a child of it in the transaction ([`on_child_build`](Self::on_child_build)). An entry
     /// below the running frame's depth is its caller's, made when revm built the frame above it.
@@ -257,7 +255,6 @@ impl Detention {
         self.burned = 0;
         self.left_at_halt = None;
         self.figures.clear();
-        self.depth = 0;
         self.callers.clear();
         #[cfg(debug_assertions)]
         self.eager.clear();
@@ -358,10 +355,11 @@ impl Detention {
         self.observed.replace(VolatileDataAccess::empty())
     }
 
-    /// Commits the reads `observed` of the opcode the running frame completed, whose gas is `gas`:
-    /// the transaction's limit becomes its compute now plus the reads' cap, unless it is already
-    /// lower, and the frame's spendable gas is held to what the limit leaves it. The first read
-    /// that sets a limit starts keeping the frames' figures ([`track`](Self::track)).
+    /// Commits the reads `observed` of the opcode the running frame, at `depth` and whose gas is
+    /// `gas`, completed: the transaction's limit becomes its compute now plus the reads' cap,
+    /// unless it is already lower, and the frame's spendable gas is held to what the limit leaves
+    /// it. The first read that sets a limit starts keeping the frames' figures
+    /// ([`track`](Self::track)).
     ///
     /// `forwarded` is the regular gas the opcode forwarded to a frame it is about to start, which
     /// the frame's regular gas spent includes and its compute does not.
@@ -369,6 +367,7 @@ impl Detention {
         &mut self,
         observed: VolatileDataAccess,
         gas: &mut Gas,
+        depth: usize,
         forwarded: u64,
     ) {
         self.accessed |= observed;
@@ -377,7 +376,7 @@ impl Detention {
             return;
         }
         if self.limit.is_none() {
-            self.track(gas);
+            self.track(gas, depth);
         }
         let compute = self.compute(gas).saturating_sub(forwarded);
         let limit = self.lower_limit(compute.saturating_add(cap));
@@ -430,7 +429,6 @@ impl Detention {
     #[inline]
     pub(crate) fn on_frame_run(&mut self, gas: &mut Gas, depth: usize) {
         self.refusing = self.disabled_from.is_some_and(|from| depth >= from);
-        self.depth = depth;
         #[cfg(debug_assertions)]
         if self.detains {
             self.eager.on_frame_run(gas.limit(), depth);
@@ -490,7 +488,7 @@ impl Detention {
     }
 
     /// Starts keeping the frames' figures at the first read that sets a limit, made by the frame
-    /// that runs, whose gas is `gas`.
+    /// that runs, at `depth` and whose gas is `gas`.
     ///
     /// The frames it runs under are those suspended on a running child, and each one's record is
     /// the one made when revm built that child: what the frame adds to the transaction's compute is
@@ -499,10 +497,10 @@ impl Detention {
     /// have been when each child first ran.
     #[cold]
     #[inline(never)]
-    fn track(&mut self, gas: &Gas) {
+    fn track(&mut self, gas: &Gas, depth: usize) {
         // Every frame below the reading one was built in the transaction while no read had set a
         // limit, so revm building it recorded its caller.
-        let records = &self.callers[..self.depth];
+        let records = &self.callers[..depth];
         let figures = &mut self.figures;
         figures.clear();
         for (index, record) in records.iter().enumerate() {
@@ -516,14 +514,19 @@ impl Detention {
         self.eager.assert_kept(&self.figures);
     }
 
-    /// Records a read of `access` the running frame, whose gas is `gas`, makes itself rather than
-    /// through an opcode — a keyless deployment's call reading its signer's account — and holds
-    /// the frame to the limit it sets, as an opcode's read is committed
+    /// Records a read of `access` the running frame, at `depth` and whose gas is `gas`, makes
+    /// itself rather than through an opcode — a keyless deployment's call reading its signer's
+    /// account — and holds the frame to the limit it sets, as an opcode's read is committed
     /// ([`commit_reads`](Self::commit_reads)). A transaction detention does not hold records
     /// nothing, as the Host observes nothing for it.
-    pub(crate) fn read_by_frame(&mut self, access: VolatileDataAccess, gas: &mut Gas) {
+    pub(crate) fn read_by_frame(
+        &mut self,
+        access: VolatileDataAccess,
+        gas: &mut Gas,
+        depth: usize,
+    ) {
         if self.detains {
-            self.commit_reads(access, gas, 0);
+            self.commit_reads(access, gas, depth, 0);
         }
     }
 
@@ -848,7 +851,7 @@ mod tests {
         let mut frame = gas(100_000_000, 7);
         detention.on_frame_run(&mut frame, 0);
         assert!(frame.record_regular_cost(1_000));
-        detention.commit_reads(VolatileDataAccess::TIMESTAMP, &mut frame, 0);
+        detention.commit_reads(VolatileDataAccess::TIMESTAMP, &mut frame, 0, 0);
 
         assert_eq!(detention.compute_limit(), Some(1_000 + BLOCK_ENV_ACCESS_COMPUTE_GAS));
         assert_eq!(frame.spendable(), BLOCK_ENV_ACCESS_COMPUTE_GAS);
@@ -864,9 +867,9 @@ mod tests {
         let mut detention = detaining();
         let mut frame = gas(100_000_000, 0);
         detention.on_frame_run(&mut frame, 0);
-        detention.commit_reads(VolatileDataAccess::TIMESTAMP, &mut frame, 0);
+        detention.commit_reads(VolatileDataAccess::TIMESTAMP, &mut frame, 0, 0);
         assert!(frame.record_regular_cost(5_000));
-        detention.commit_reads(VolatileDataAccess::ORACLE, &mut frame, 0);
+        detention.commit_reads(VolatileDataAccess::ORACLE, &mut frame, 0, 0);
         assert_eq!(detention.compute_limit(), Some(BLOCK_ENV_ACCESS_COMPUTE_GAS));
         assert_eq!(frame.spendable(), BLOCK_ENV_ACCESS_COMPUTE_GAS - 5_000);
     }
@@ -878,7 +881,7 @@ mod tests {
         let mut detention = detaining();
         let mut frame = gas(100_000_000, 0);
         detention.on_frame_run(&mut frame, 0);
-        detention.commit_reads(VolatileDataAccess::TIMESTAMP, &mut frame, 0);
+        detention.commit_reads(VolatileDataAccess::TIMESTAMP, &mut frame, 0, 0);
         assert!(frame.record_state_cost(1_000_000));
         detention.hold(&mut frame);
         assert_eq!(detention.compute(&frame), 0);
@@ -896,7 +899,7 @@ mod tests {
             let mut detention = detaining();
             let mut frame = gas(100_000_000, 0);
             detention.on_frame_run(&mut frame, 0);
-            detention.commit_reads(VolatileDataAccess::TIMESTAMP, &mut frame, 0);
+            detention.commit_reads(VolatileDataAccess::TIMESTAMP, &mut frame, 0, 0);
             assert!(frame.record_regular_cost(10));
             assert!(!frame.record_regular_cost(BLOCK_ENV_ACCESS_COMPUTE_GAS));
             if zeroed {
@@ -918,7 +921,7 @@ mod tests {
         let mut detention = detaining();
         let mut caller = gas(100_000_000, 0);
         detention.on_frame_run(&mut caller, 0);
-        detention.commit_reads(VolatileDataAccess::TIMESTAMP, &mut caller, 0);
+        detention.commit_reads(VolatileDataAccess::TIMESTAMP, &mut caller, 0, 0);
         assert!(caller.record_regular_cost(7_000));
         assert!(caller.record_withheld_first_cost(50_000_000));
         detention.on_frame_suspend(&caller, 0);
@@ -941,7 +944,7 @@ mod tests {
         let mut detention = detaining();
         let mut frame = gas(100_000_000, 0);
         detention.on_frame_run(&mut frame, 0);
-        detention.commit_reads(VolatileDataAccess::TIMESTAMP, &mut frame, 0);
+        detention.commit_reads(VolatileDataAccess::TIMESTAMP, &mut frame, 0, 0);
         assert!(!frame.record_regular_cost(100_000_001));
         detention.note_halt(frame.remaining());
         frame.spend_all();
@@ -952,7 +955,7 @@ mod tests {
         let mut detention = detaining();
         let mut frame = gas(1_000_000, 0);
         detention.on_frame_run(&mut frame, 0);
-        detention.commit_reads(VolatileDataAccess::TIMESTAMP, &mut frame, 0);
+        detention.commit_reads(VolatileDataAccess::TIMESTAMP, &mut frame, 0, 0);
         assert_eq!(frame.withheld(), 0, "nothing to withhold");
         assert!(!frame.record_regular_cost(1_000_001));
         frame.spend_all();
@@ -1027,7 +1030,7 @@ mod tests {
         assert!(detention.figures.frames.is_empty(), "nothing kept before a read");
         assert_eq!(detention.burned, 9_000);
 
-        detention.commit_reads(VolatileDataAccess::TIMESTAMP, &mut grandchild, 0);
+        detention.commit_reads(VolatileDataAccess::TIMESTAMP, &mut grandchild, 2, 0);
         let caller_adds = 2_000 + 10_000 + 9_000 + 60_000 - (60_000 + 2_300);
         let child_adds = 4_000 + 30_000 - 30_000;
         assert_eq!(detention.figures.suspended, caller_adds + child_adds);
@@ -1058,7 +1061,7 @@ mod tests {
         assert!(detention.records_callers());
         let mut frame = gas(1_000_000, 0);
         detention.on_frame_run(&mut frame, 0);
-        detention.commit_reads(VolatileDataAccess::TIMESTAMP, &mut frame, 0);
+        detention.commit_reads(VolatileDataAccess::TIMESTAMP, &mut frame, 0, 0);
         assert!(!detention.records_callers(), "a read set a limit");
 
         detention.reset(true, BLOCK_ENV_ACCESS_COMPUTE_GAS, ORACLE_ACCESS_COMPUTE_GAS);
@@ -1073,7 +1076,7 @@ mod tests {
         let mut detention = detaining();
         let mut caller = gas(1_000_000, 0);
         detention.on_frame_run(&mut caller, 0);
-        detention.commit_reads(VolatileDataAccess::TIMESTAMP, &mut caller, 0);
+        detention.commit_reads(VolatileDataAccess::TIMESTAMP, &mut caller, 0, 0);
         assert!(caller.record_regular_cost(7_000));
         assert!(caller.record_withheld_first_cost(500_000));
         detention.on_frame_suspend(&caller, 0);
@@ -1090,7 +1093,7 @@ mod tests {
         detention.on_child_build(1, &caller);
         let mut child = gas(500_000, 0);
         detention.on_frame_run(&mut child, 1);
-        detention.commit_reads(VolatileDataAccess::TIMESTAMP, &mut child, 0);
+        detention.commit_reads(VolatileDataAccess::TIMESTAMP, &mut child, 1, 0);
         assert_eq!(detention.figures.suspended, 3_000);
         assert_eq!(detention.figures.frames.len(), 2);
         assert_eq!(detention.compute_limit(), Some(3_000 + BLOCK_ENV_ACCESS_COMPUTE_GAS));
@@ -1161,7 +1164,7 @@ mod tests {
         let mut detention = detaining();
         let mut caller = gas(100_000_000, 0);
         detention.on_frame_run(&mut caller, 0);
-        detention.commit_reads(VolatileDataAccess::TIMESTAMP, &mut caller, 0);
+        detention.commit_reads(VolatileDataAccess::TIMESTAMP, &mut caller, 0, 0);
         assert!(caller.record_withheld_first_cost(90_000_000));
         detention.on_frame_suspend(&caller, 0);
 
@@ -1210,7 +1213,7 @@ mod tests {
         let mut detention = detaining();
         let mut caller = gas(100_000_000, 0);
         detention.on_frame_run(&mut caller, 0);
-        detention.commit_reads(VolatileDataAccess::TIMESTAMP, &mut caller, 0);
+        detention.commit_reads(VolatileDataAccess::TIMESTAMP, &mut caller, 0, 0);
         assert!(caller.record_withheld_first_cost(90_000_000));
         detention.on_frame_suspend(&caller, 0);
         let allowance = detention.allowance(1, 90_000_000).unwrap();
@@ -1283,14 +1286,14 @@ mod tests {
         let mut call = gas(100_000_000, 0);
         detention.on_frame_run(&mut call, 0);
         assert!(call.record_regular_cost(100_000));
-        detention.read_by_frame(VolatileDataAccess::BENEFICIARY_BALANCE, &mut call);
+        detention.read_by_frame(VolatileDataAccess::BENEFICIARY_BALANCE, &mut call, 0);
         assert_eq!(detention.compute_limit(), Some(100_000 + BLOCK_ENV_ACCESS_COMPUTE_GAS));
         assert_eq!(detention.accessed(), VolatileDataAccess::BENEFICIARY_BALANCE);
         assert_eq!(call.spendable(), BLOCK_ENV_ACCESS_COMPUTE_GAS);
 
         let mut free = Detention::default();
         free.reset(false, BLOCK_ENV_ACCESS_COMPUTE_GAS, ORACLE_ACCESS_COMPUTE_GAS);
-        free.read_by_frame(VolatileDataAccess::BENEFICIARY_BALANCE, &mut call);
+        free.read_by_frame(VolatileDataAccess::BENEFICIARY_BALANCE, &mut call, 0);
         assert_eq!((free.compute_limit(), free.accessed()), (None, VolatileDataAccess::empty()));
     }
 
@@ -1424,11 +1427,11 @@ mod tests {
         assert!(detention.detains());
         let mut frame = gas(100_000_000, 0);
         detention.on_frame_run(&mut frame, 0);
-        detention.commit_reads(VolatileDataAccess::TIMESTAMP, &mut frame, 0);
+        detention.commit_reads(VolatileDataAccess::TIMESTAMP, &mut frame, 0, 0);
         detention.mark_before_execution(VolatileDataAccess::BENEFICIARY_BALANCE);
         assert_eq!(detention.compute_limit(), None, "an unlimited cap sets no limit");
         assert_eq!(frame.withheld(), 0);
-        detention.commit_reads(VolatileDataAccess::ORACLE, &mut frame, 0);
+        detention.commit_reads(VolatileDataAccess::ORACLE, &mut frame, 0, 0);
         assert_eq!(detention.compute_limit(), Some(5));
     }
 }

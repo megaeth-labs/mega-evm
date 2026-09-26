@@ -495,7 +495,7 @@ fn settle_reads<DB: Database, ExtEnvs: ExternalEnvTypes>(
         }
         _ => 0,
     };
-    host.detention.commit_reads(observed, &mut interpreter.gas, forwarded);
+    host.detention.commit_reads(observed, &mut interpreter.gas, interpreter.input.depth, forwarded);
     result
 }
 
