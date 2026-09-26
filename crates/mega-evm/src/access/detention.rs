@@ -1061,6 +1061,67 @@ mod tests {
         assert_eq!(child.spendable(), CAP - 600);
     }
 
+    /// A caller is recorded only while it may be needed: the transaction is detained and no read
+    /// has set a limit yet. From the first read on, the frames are kept as they run.
+    #[test]
+    fn test_callers_are_recorded_only_until_the_first_read() {
+        let mut free = Detention::default();
+        free.reset(false, BLOCK_ENV_ACCESS_COMPUTE_GAS, ORACLE_ACCESS_COMPUTE_GAS);
+        assert!(!free.records_callers(), "a transaction detention does not hold");
+
+        let mut detention = detaining();
+        assert!(detention.records_callers());
+        let mut frame = gas(1_000_000, 0);
+        detention.on_frame_run(&mut frame, 0);
+        detention.commit_reads(VolatileDataAccess::TIMESTAMP, &mut frame, 0);
+        assert!(!detention.records_callers(), "a read set a limit");
+
+        detention.reset(true, BLOCK_ENV_ACCESS_COMPUTE_GAS, ORACLE_ACCESS_COMPUTE_GAS);
+        detention.mark_before_execution(VolatileDataAccess::BENEFICIARY_BALANCE);
+        assert!(!detention.records_callers(), "a read before any frame set a limit");
+    }
+
+    /// A transaction can end with frames still running — an error stops it mid-frame — and the
+    /// next one starts from nothing: a read in its child rebuilds from its own records alone.
+    #[test]
+    fn test_a_reset_forgets_the_frames_a_transaction_left_running() {
+        let mut detention = detaining();
+        let mut caller = gas(1_000_000, 0);
+        detention.on_frame_run(&mut caller, 0);
+        detention.commit_reads(VolatileDataAccess::TIMESTAMP, &mut caller, 0);
+        assert!(caller.record_regular_cost(7_000));
+        assert!(caller.record_withheld_first_cost(500_000));
+        detention.on_frame_suspend(&caller, 0);
+        let mut child = gas(500_000, 0);
+        detention.on_frame_run(&mut child, 1);
+        assert_eq!(detention.suspended, 7_000);
+
+        detention.reset(true, BLOCK_ENV_ACCESS_COMPUTE_GAS, ORACLE_ACCESS_COMPUTE_GAS);
+        let mut caller = gas(1_000_000, 0);
+        detention.on_frame_run(&mut caller, 0);
+        assert!(caller.record_regular_cost(3_000));
+        assert!(caller.record_withheld_first_cost(500_000));
+        detention.on_frame_suspend(&caller, 0);
+        detention.on_child_build(1, &caller);
+        let mut child = gas(500_000, 0);
+        detention.on_frame_run(&mut child, 1);
+        detention.commit_reads(VolatileDataAccess::TIMESTAMP, &mut child, 0);
+        assert_eq!(detention.suspended, 3_000);
+        assert_eq!(detention.frames.len(), 2);
+        assert_eq!(detention.compute_limit(), Some(3_000 + BLOCK_ENV_ACCESS_COMPUTE_GAS));
+    }
+
+    /// The eager figures debug builds keep catch a kept figure that parts from them.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "the compute of the suspended frames")]
+    fn test_the_eager_figures_catch_a_kept_one_that_parts_from_them() {
+        let mut eager = EagerFrames::default();
+        eager.on_frame_run(1_000_000, 0);
+        eager.assert_kept(&[DetainedFrame::default()], 0);
+        eager.assert_kept(&[DetainedFrame::default()], 1);
+    }
+
     /// What a halting child burns is not compute: its caller's compute after it returns is what
     /// the child ran, not the gas the child was given — whether the halt left the gas in place or
     /// zeroed it after the child's wrapper noted it.
