@@ -370,8 +370,12 @@ impl Detention {
         }
         debug_assert_eq!(self.frames.len(), depth + 1, "the frame that returns is the last");
         self.frames.pop();
-        if let Some(limit) = self.stop(gas) {
-            return Some(limit);
+        if let Some(crossing) = gas.withheld_crossing() {
+            // The record holds the regular gas left before the failed charge; the spendable part of
+            // it was what the limit left the transaction then.
+            gas.set_remaining(crossing.remaining());
+            let spendable = self.limit.map_or(0, |limit| limit.saturating_sub(self.compute(gas)));
+            return self.stop(gas, spendable);
         }
         if result.is_halt() {
             // The settlement rolls the spill back into regular gas and burns it all.
@@ -436,15 +440,19 @@ impl Detention {
             // part first, and the revert that settles the stop credits the spill back, so the
             // crossing withholds what is left once the spill is taken out, as the tracker's own
             // record of a running frame does. The spill is below `gas_limit - allowance`, since
-            // the regular gas the answer spent past it exceeds the allowance.
-            let withheld = NonZeroU64::new(
-                (gas_limit - allowance).saturating_sub(result.gas.state_gas_spilled()),
-            )?;
+            // the regular gas the answer spent past it exceeds the allowance. The record holds the
+            // regular gas the frame had before the charge: the gas limit, less the spill.
+            let spilled = result.gas.state_gas_spilled();
+            if gas_limit - allowance <= spilled {
+                return None;
+            }
+            let remaining = NonZeroU64::new(gas_limit - spilled)?;
             result.result = InstructionResult::OutOfGas;
             result.gas.tracker_mut().set_limit(gas_limit);
-            result.gas.set_withheld_crossing(Some(WithheldCrossing::new(withheld)));
+            result.gas.set_withheld_crossing(Some(WithheldCrossing::with_remaining(remaining)));
         }
-        self.stop(&mut result.gas)
+        let spendable = self.allowance(depth, gas_limit).unwrap_or(0);
+        self.stop(&mut result.gas, spendable)
     }
 
     /// Gives a precompile's answer, which ran on `withheld` less than its caller forwarded — the
@@ -459,10 +467,11 @@ impl Detention {
     /// within its forward, past the allowance, whose input fails a check made after its gas check,
     /// which without the read fails the call instead.
     pub(crate) fn restore_forward(result: &mut InterpreterResult, withheld: NonZeroU64) {
-        let forward = result.gas.limit().saturating_add(withheld.get());
-        result.gas.tracker_mut().set_limit(forward);
+        let forward = withheld.saturating_add(result.gas.limit());
+        result.gas.tracker_mut().set_limit(forward.get());
         if result.result == InstructionResult::PrecompileOOG {
-            result.gas.set_withheld_crossing(Some(WithheldCrossing::new(withheld)));
+            // The record holds the regular gas the frame had before the charge: its forward.
+            result.gas.set_withheld_crossing(Some(WithheldCrossing::with_remaining(forward)));
         } else if !result.result.is_halt() {
             result.gas.erase_cost(withheld.get());
         }
@@ -470,15 +479,16 @@ impl Detention {
 
     /// Settles a frame whose regular gas ran out on a charge the withheld part would have paid —
     /// the fork records it as a [`WithheldCrossing`] — and returns the limit it crossed.
+    /// `spendable` is the spendable part the frame had at the crossing.
     ///
     /// The frame's gas becomes the withheld part at the crossing: the spendable part the frame had
     /// counts as spent, which brings the transaction's compute to the limit, and the withheld part
     /// goes back to its caller. Whether the halt already zeroed the frame's gas (`OutOfGas`) or not
     /// (`MemoryOOG`), the settlement is the same. A crossing only ever ends a frame on an
     /// out-of-gas, and only a frame detention held carries one.
-    fn stop(&self, gas: &mut Gas) -> Option<u64> {
+    fn stop(&self, gas: &mut Gas, spendable: u64) -> Option<u64> {
         let crossing = gas.withheld_crossing()?;
-        gas.set_remaining(crossing.withheld());
+        gas.set_remaining(crossing.remaining().saturating_sub(spendable));
         gas.clear_withheld_crossing();
         self.limit
     }
@@ -850,7 +860,11 @@ mod tests {
         detention.burned = 0;
 
         let mut out_of_gas = answer(InstructionResult::PrecompileOOG, 0);
-        assert_eq!(out_of_gas.gas.withheld_crossing(), Some(WithheldCrossing::new(withheld)));
+        let forward = NonZeroU64::new(90_000_000).unwrap();
+        assert_eq!(
+            out_of_gas.gas.withheld_crossing(),
+            Some(WithheldCrossing::with_remaining(forward))
+        );
         assert_eq!(
             detention.on_answer(&mut out_of_gas, 1, 90_000_000),
             Some(BLOCK_ENV_ACCESS_COMPUTE_GAS)
