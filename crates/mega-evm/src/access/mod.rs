@@ -117,13 +117,14 @@
 //! which burns its forward and which its caller survives. Running it to find out would compute
 //! past the limit.
 //!
-//! A precompile the engine cannot price — a node's own, a Satin address a node replaced, one of
-//! op-revm's size-limited wrappers, which carry no price — is run on the allowance, and its
-//! answer gets the rest of the forward back. Within the allowance, it answers as it would without
-//! the read. Past it, it answers out of gas without computing, the answer is marked as a crossing,
-//! and it is the stop, whether its price is within its forward or not: one priced past its whole
-//! forward is the stop too, where without the read it would be a failed call its caller survives.
-//! It also sees the allowance as its gas limit.
+//! Every entry of the Satin set is priced, op-revm's size-limited wrappers of the BN254 pairing
+//! and the BLS12-381 MSMs and pairing included. A precompile the engine cannot price — a node's
+//! own, a Satin address a node replaced — is run on the allowance, and its answer gets the rest of
+//! the forward back. Within the allowance, it answers as it would without the read. Past it, it
+//! answers out of gas without computing, the answer is marked as a crossing, and it is the stop,
+//! whether its price is within its forward or not: one priced past its whole forward is the stop
+//! too, where without the read it would be a failed call its caller survives. It also sees the
+//! allowance as its gas limit.
 //!
 //! An interceptor builds its answer on all the gas the caller forwarded, the caller's withheld
 //! part included: an answer that spent more regular gas than the allowance the frame would have

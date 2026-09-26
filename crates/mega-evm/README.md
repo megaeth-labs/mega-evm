@@ -8,7 +8,7 @@ The legacy engine (specs `Equivalence` through `Rex7`) is the 1.x line.
 ## Base
 
 - **revm**: 40.0.3, from the [MegaETH fork of revm](https://github.com/megaeth-labs/revm) (the revm 43 gas core with EIP-8037 and EIP-2780, plus MegaETH hooks)
-- **op-revm**: 20.0.0, from the [MegaETH fork of op-revm](https://github.com/megaeth-labs/op-revm)
+- **op-revm**: 20.0.0, from the [MegaETH fork of op-revm](https://github.com/megaeth-labs/op-revm) (op-revm's size-limited precompiles priced through the revm fork's `Precompile::required_gas`)
 - **alloy-evm**: 0.36; **alloy-op-evm**: 0.32
 
 A consumer redirects all twelve revm crates and `op-revm` to the forks with `[patch]` entries; see this repository's root `Cargo.toml`.
@@ -149,7 +149,8 @@ That charge crossed the cap, and it is not made: the transaction is stopped with
 The stop reports that compute as what the transaction used.
 A precompile forwarded more than what the limit leaves its frame is decided from its price before it runs: priced within what the limit leaves, it runs as without the read; priced past it and within its forward, it computes nothing and is the same crossing, as is an interceptor's answer that spent more than the limit leaves; priced past its whole forward, it is a failed call its caller survives, as without the read.
 So an input priced between what the limit leaves and the forward that would fail a check made after the gas check is the crossing too, where without the read that check fails the call.
-A precompile the engine cannot price — a node's own, an address a node replaced, op-revm's size-limited wrappers — is run on what the limit leaves its frame, and one it does not pay is the crossing, whatever its price.
+Every precompile of the Satin set is priced, op-revm's size-limited BN254 pairing and BLS12-381 MSMs and pairing included.
+A precompile the engine cannot price — a node's own, an address a node replaced — is run on what the limit leaves its frame, and one it does not pay is the crossing, whatever its price.
 A keyless deployment's call is the transaction's own frame, held to the limit as any frame is: the overhead and the `CREATE` opcode's regular gas it charges are compute whether a rule then refuses the call or its creation runs, and the creation runs under what the limit leaves it.
 Every other out-of-gas halts and burns as it would without the read.
 While `MegaAccessControl`'s switch is off for a frame, its volatile reads are refused: the frame reverts with `VolatileDataAccessDisabled`, having paid the opcode's static gas and nothing more.

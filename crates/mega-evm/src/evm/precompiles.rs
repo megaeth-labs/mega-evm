@@ -15,17 +15,19 @@
 //! allowance can pay from one that crosses the limit ([`PricedPrecompiles::price`]). A price
 //! belongs to the precompile that runs: every entry revm defines carries one
 //! ([`Precompile::required_gas`](revm::precompile::Precompile::required_gas)), and so does the
-//! KZG entry here. The map erases what it holds once a node changes it, so the engine prices from
-//! its own table, [`satin_precompiles`], and only an address whose dispatched entry is still the
-//! table's. These calls are not priced, and gas detention runs them on the allowance:
+//! KZG entry here. So does every one of op-revm's size-limited wrappers — here the BN254 pairing
+//! and the BLS12-381 G1 MSM, G2 MSM and pairing — which prices an input within its size limit as
+//! the run it wraps does, and one past it at nothing, since it refuses that input before any gas
+//! check. Every entry of the table is priced.
+//!
+//! The map erases what it holds once a node changes it, so the engine prices from its own table,
+//! [`satin_precompiles`], and only an address whose dispatched entry is still the table's. These
+//! calls are not priced, and gas detention runs them on the allowance:
 //!
 //! - a call to a node's own precompile, at a new address;
 //! - a call to an address a node replaced: through
 //!   [`MegaEvm::with_dyn_precompiles`](crate::MegaEvm), which records it, or through the map's own
 //!   API with an entry of another id;
-//! - a call to an entry of the table built without a price function: op-revm's size-limited
-//!   wrappers of the BN254 pairing and the BLS12-381 G1 MSM, G2 MSM and pairing, until the op-revm
-//!   fork prices them;
 //! - every call, once the whole set was replaced by one that is not the Satin set: the neutral
 //!   configuration's, the fixture fork's own.
 //!
@@ -109,8 +111,9 @@ impl PricedPrecompiles {
     /// The price is the Satin table's, and only for an address whose dispatched entry is still
     /// the table's: the set is the Satin one, no node replaced the address through the engine
     /// ([`record_replaced`](Self::record_replaced)), and the entry carries the table entry's id,
-    /// so a replacement made through the map's own API under another id is not priced either. An
-    /// entry of the table built without a price function answers `None`.
+    /// so a replacement made through the map's own API under another id is not priced either.
+    /// Every entry of the table carries a price function; one built without it would answer
+    /// `None`.
     pub(crate) fn price(
         &self,
         dispatched: &PrecompilesMap,
