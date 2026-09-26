@@ -405,27 +405,14 @@ mod tests {
         assert_eq!(over.result, InstructionResult::PrecompileError);
     }
 
-    /// Every entry of the Satin set carries a price, but op-revm's size-limited wrappers, which
-    /// the op-revm fork builds without one: the BN254 pairing and the BLS12-381 G1 MSM, G2 MSM and
-    /// pairing. Gas detention runs a call to one of those on the allowance.
+    /// Every entry of the Satin set carries a price, op-revm's size-limited wrappers of the BN254
+    /// pairing and the BLS12-381 G1 MSM, G2 MSM and pairing included, so gas detention decides a
+    /// call to any of them from its price.
     #[test]
-    fn test_every_satin_entry_is_priced_but_op_revms_wrappers() {
-        let mut unpriced: std::vec::Vec<_> = satin_precompiles()
-            .inner()
-            .values()
-            .filter(|precompile| precompile.required_gas(&[]).is_none())
-            .map(|precompile| precompile.id().clone())
-            .collect();
-        unpriced.sort_by_key(|id| id.name().to_owned());
-        let mut wrappers = std::vec![
-            PrecompileId::Bn254Pairing,
-            PrecompileId::Bls12G1Msm,
-            PrecompileId::Bls12G2Msm,
-            PrecompileId::Bls12Pairing,
-        ];
-        wrappers.sort_by_key(|id| id.name().to_owned());
-        assert_eq!(unpriced, wrappers);
-        assert!(satin_precompiles().len() > wrappers.len(), "the rest are priced");
+    fn test_every_satin_entry_is_priced() {
+        for precompile in satin_precompiles().inner().values() {
+            assert!(precompile.required_gas(&[]).is_some(), "{:?} is priced", precompile.id());
+        }
     }
 
     /// The KZG entry's price is its run's: below [`GAS_COST`](kzg_point_evaluation::GAS_COST) the
@@ -462,7 +449,8 @@ mod tests {
     /// A Satin address is priced from the Satin table only while the entry the map dispatches
     /// there is still the table's: one a node replaced through the engine is not, whatever id its
     /// precompile carries, nor is one replaced through the map's own API under another id. An
-    /// address outside the table, and one of op-revm's wrappers, are never priced.
+    /// address outside the table is never priced; op-revm's wrapper of the BN254 pairing is, from
+    /// its own entry.
     #[test]
     fn test_a_replaced_address_is_not_priced_from_the_satin_table() {
         let modexp = *revm::precompile::modexp::OSAKA.address();
@@ -509,10 +497,10 @@ mod tests {
         assert_eq!(recorded.price(&map, &own_address, &input), None);
         assert_eq!(recorded.price(&map, &modexp, &input), Some(500));
 
-        // op-revm's wrapper of the BN254 pairing.
+        // op-revm's wrapper of the BN254 pairing: one pair, 45,000 and 34,000 per pair (EIP-1108).
         let pairing = *op_revm::precompiles::bn254_pair::KARST.address();
         assert!(untouched.get(&pairing).is_some());
-        assert_eq!(none.price(&untouched, &pairing, &[0; 192]), None);
+        assert_eq!(none.price(&untouched, &pairing, &[0; 192]), Some(45_000 + 34_000));
     }
 
     /// A `ModExp` header of `base_len`, `exp_len` and `mod_len`, followed by the operands.

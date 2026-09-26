@@ -3186,7 +3186,7 @@ dependencies = [
 [[package]]
 name = "op-revm"
 version = "20.0.0"
-source = "git+https://github.com/megaeth-labs/op-revm?tag=v20.0.0-mega.2#260f65329f1f47b7412a1b2c1fda85453f66521c"
+source = "git+https://github.com/megaeth-labs/op-revm?tag=v20.0.0-mega.3#58bc98e2fcaffcdea23595b2680fc68daddd7b69"
 dependencies = [
  "auto_impl",
  "revm",

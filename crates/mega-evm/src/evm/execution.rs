@@ -1606,19 +1606,29 @@ mod tests {
     }
 
     /// A precompile the engine cannot price keeps the clamp: it runs on the allowance, and its
-    /// answer is owed the rest of the forward. That is op-revm's wrapper of the BN254 pairing, a
-    /// Satin address a node replaced, and every precompile of a set that is not the Satin one.
+    /// answer is owed the rest of the forward. That is a node's own precompile, a Satin address a
+    /// node replaced, and every precompile of a set that is not the Satin one, op-revm's wrapper of
+    /// the BN254 pairing included.
     #[test]
     fn test_an_unpriced_precompile_runs_on_the_allowance() {
         const KZG: Address = crate::kzg_point_evaluation::ADDRESS;
         let pairing = *op_revm::precompiles::bn254_pair::KARST.address();
-        let map = crate::satin_precompiles_map();
+        let own = address!("00000000000000000000000000000000000e0003");
+        let mut map = crate::satin_precompiles_map();
+        map.apply_precompile(&own, |_| {
+            Some(alloy_evm::precompiles::DynPrecompile::new(
+                revm::precompile::PrecompileId::Custom("own".into()),
+                |input| {
+                    Ok(revm::precompile::PrecompileOutput::new(1, Bytes::new(), input.reservoir))
+                },
+            ))
+        });
         let mut replaced = PricedPrecompiles::default();
         replaced.record_replaced(KZG);
         let mut foreign = PricedPrecompiles::default();
         foreign.record_foreign();
         for (priced, to) in [
-            (&PricedPrecompiles::default(), pairing),
+            (&PricedPrecompiles::default(), own),
             (&replaced, KZG),
             (&foreign, KZG),
             (&foreign, pairing),

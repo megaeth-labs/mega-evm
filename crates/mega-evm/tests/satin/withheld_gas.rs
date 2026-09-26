@@ -1211,54 +1211,65 @@ fn test_a_replaced_precompile_is_not_priced_from_the_built_in_set() {
     }
 }
 
-/// op-revm's wrapper of the BN254 pairing carries no price, so it keeps the clamp: forwarded less
-/// than its price and more than the allowance — three pairs, 147,000 gas, forwarded 120,000 under a
-/// cap of 100,000 — it runs on the allowance and is the stop. The KZG entry, which carries its
-/// price, forwarded less than it and more than the allowance — 100,000, forwarded 80,000 under a
-/// cap of 50,000 — runs out of gas as without the read.
+/// op-revm's wrapper of the BN254 pairing is priced, so a call forwarded less than its price and
+/// more than the allowance — three pairs, 147,000 gas, forwarded 120,000 under a cap of 100,000 —
+/// runs on its forward and runs out of gas as without the read, and its caller goes on, as the KZG
+/// entry does — 100,000, forwarded 80,000 under a cap of 50,000. A node's own precompile, which the
+/// engine cannot price, keeps the clamp: at the pairing's price and forward, it runs on the
+/// allowance and is the stop.
 #[test]
-fn test_an_unpriced_wrapper_keeps_the_clamp() {
+fn test_a_nodes_own_precompile_keeps_the_clamp_a_priced_wrapper_does_not() {
     let pairing = vec![0_u8; 3 * 192];
+    // EIP-1108: 45,000, and 34,000 a pair.
+    let price = 45_000 + 3 * 34_000;
+    let entry = mega_evm::satin_precompiles().get(&EC_PAIRING).unwrap();
+    assert_eq!(entry.required_gas(&pairing), Some(price));
     let kzg = vec![0_u8; 192];
     let kzg_address = mega_evm::kzg_point_evaluation::ADDRESS;
-    assert_eq!(
-        mega_evm::satin_precompiles().get(&EC_PAIRING).unwrap().required_gas(&pairing),
-        None
-    );
+    let own_input = U256::from(price).to_be_bytes::<32>();
+    let limits = |cap| EvmTxRuntimeLimits::default().with_block_env_access_compute_gas_limit(cap);
     for gas_limit in TIERS {
         let run = |first, to, forward, cap, input: &[u8]| {
-            let limits = EvmTxRuntimeLimits::default().with_block_env_access_compute_gas_limit(cap);
             let db = MemoryDatabase::default()
                 .account_code(CONTRACT, calls_precompile(first, to, Some(forward)));
-            let mut evm = MegaEvm::new(context(db).with_tx_runtime_limits(limits))
+            let mut evm = MegaEvm::new(context(db).with_tx_runtime_limits(limits(cap)))
                 .with_inspector(Calls::default());
             let run = run_on(&mut evm, tx_with(input, gas_limit));
             let call = evm.inspector().calls.iter().find(|call| call.target == to).unwrap();
             assert_eq!(call.forward, u64::from(forward));
-            assert!(call.precompile_ran, "{to}: revm runs it");
+            assert!(call.precompile_ran, "{to}: revm runs it, on its forward");
             run
         };
 
         let detained = run(TIMESTAMP, EC_PAIRING, 120_000, 100_000, &pairing);
         let plain = run(PUSH0, EC_PAIRING, 120_000, 100_000, &pairing);
-        let allowance = 100_000 - charges_to_the_precompile(pairing.len(), Some(120_000)).total();
-        assert_stopped(&detained, intrinsic_with(&pairing, gas_limit), allowance);
-        assert!(plain.outcome.result.is_success());
-        assert_eq!(slot(&plain, 0), Some(U256::ZERO), "without the read the call fails");
+        assert_as_without_read(&detained, &plain, "a price past the forward");
+        assert_eq!(slot(&detained, 0), Some(U256::ZERO), "the call fails and its caller goes on");
 
         let detained = run(TIMESTAMP, kzg_address, 80_000, 50_000, &kzg);
         let plain = run(PUSH0, kzg_address, 80_000, 50_000, &kzg);
         assert_as_without_read(&detained, &plain, "a price past the forward");
         assert_eq!(slot(&detained, 0), Some(U256::ZERO), "the call fails and its caller goes on");
+
+        let runs = Runs::default();
+        let db = MemoryDatabase::default()
+            .account_code(CONTRACT, calls_precompile(TIMESTAMP, PRICED, Some(120_000)));
+        let mut evm = MegaEvm::new(context(db).with_tx_runtime_limits(limits(100_000)))
+            .with_dyn_precompiles(HashMap::from_iter([(PRICED, priced(&runs))]));
+        let own = run_on(&mut evm, tx_with(&own_input, gas_limit));
+        let allowance = 100_000 - charges_to_the_precompile(32, Some(120_000)).total();
+        assert_stopped(&own, intrinsic_with(&own_input, gas_limit), allowance);
+        assert_eq!(*runs.lock().unwrap(), [(allowance, false)], "run on the allowance");
     }
 }
 
 /// A precompile priced between the allowance and its forward whose input fails a check made after
-/// its gas check: the BN254 pairing of three pairs and a stray byte, priced 147,000, which checks
-/// the input's length after its gas. Under a cap of 100,000 it runs out of the allowance before the
-/// length check, and the transaction stops; without the read the length check fails the call,
-/// which burns its forward, and the caller goes on to store the failure. Under the default cap the
-/// allowance pays the price, and the call fails on its input as without the read.
+/// its gas check: the BN254 pairing of three pairs and a stray byte, priced 147,000 for its three
+/// whole pairs, which checks the input's length after its gas. Under a cap of 100,000 it is
+/// answered without running, before the length check, and the transaction stops; without the read
+/// the length check fails the call, which burns its forward, and the caller goes on to store the
+/// failure. Under the default cap the allowance pays the price, and the call fails on its input as
+/// without the read.
 #[test]
 fn test_a_precompile_whose_input_fails_past_its_gas_check_stops_past_the_allowance() {
     let input = vec![0_u8; 3 * 192 + 1];
@@ -1267,15 +1278,19 @@ fn test_a_precompile_whose_input_fails_past_its_gas_check_stops_past_the_allowan
             let limits = EvmTxRuntimeLimits::default().with_block_env_access_compute_gas_limit(cap);
             let code = calls_precompile(first, EC_PAIRING, None);
             let db = MemoryDatabase::default().account_code(CONTRACT, code);
-            let mut evm = MegaEvm::new(context(db).with_tx_runtime_limits(limits));
-            run_on(&mut evm, tx_with(&input, gas_limit))
+            let mut evm = MegaEvm::new(context(db).with_tx_runtime_limits(limits))
+                .with_inspector(Calls::default());
+            let run = run_on(&mut evm, tx_with(&input, gas_limit));
+            let call = evm.inspector().calls.iter().find(|call| call.target == EC_PAIRING).unwrap();
+            (run, call.precompile_ran)
         };
-        let (detained, plain) = (run(TIMESTAMP, 100_000), run(PUSH0, 100_000));
+        let ((detained, ran), (plain, plain_ran)) = (run(TIMESTAMP, 100_000), run(PUSH0, 100_000));
         let allowance = 100_000 - charges_to_the_precompile(input.len(), None).total();
         assert_stopped(&detained, intrinsic_with(&input, gas_limit), allowance);
+        assert!(!ran && plain_ran, "answered without running");
         assert!(plain.outcome.result.is_success());
         assert_eq!(slot(&plain, 0), Some(U256::ZERO), "without the read the call fails");
-        let (detained, plain) = (run(TIMESTAMP, CAP), run(PUSH0, CAP));
+        let ((detained, _), (plain, _)) = (run(TIMESTAMP, CAP), run(PUSH0, CAP));
         assert_as_without_read(&detained, &plain, "a price the allowance pays");
         assert_eq!(slot(&detained, 0), Some(U256::ZERO), "the call fails on its input");
     }

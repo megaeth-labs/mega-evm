@@ -250,4 +250,4 @@ revm-inspector = { git = "https://github.com/megaeth-labs/revm", tag = "v40.0.3-
 [patch."https://github.com/ethereum-optimism/optimism"]
 # megaeth fork of op-revm (the OP monorepo copy ported to the revm fork's gas core), built
 # against the revm tag above.
-op-revm = { git = "https://github.com/megaeth-labs/op-revm", tag = "v20.0.0-mega.2" }
+op-revm = { git = "https://github.com/megaeth-labs/op-revm", tag = "v20.0.0-mega.3" }
