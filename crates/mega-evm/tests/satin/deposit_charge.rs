@@ -21,7 +21,7 @@
 //! on a configuration without it: the neutral one of Osaka, where no state gas is charged and the
 //! data-size limit is the one that holds the code.
 
-use alloy_primitives::{address, Address, U256};
+use alloy_primitives::{address, Address, Bytes, U256};
 use mega_evm::{
     constants::TX_GAS_LIMIT_CAP,
     test_utils::{neutral_cfg, neutralize_evm, BytecodeBuilder, MemoryDatabase},
@@ -157,7 +157,7 @@ fn creation_answer(outcome: &MegaTransactionOutcome) -> U256 {
 }
 
 /// The creation's frame once `return_create` is done with it.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 struct CreationEnd {
     /// Whether the creation deposited its code.
     deposited: bool,
@@ -166,6 +166,8 @@ struct CreationEnd {
     charged_state_gas: bool,
     /// The regular gas the creation had left.
     remaining: u64,
+    /// What the creation reverted with, if it reverted.
+    reverted_with: Option<Bytes>,
 }
 
 impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for CreationEnd {
@@ -180,16 +182,21 @@ impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for CreationEnd {
             deposited: outcome.result.is_ok(),
             charged_state_gas: gas.state_gas_spent() > 0,
             remaining: gas.remaining(),
+            reverted_with: outcome.result.is_revert().then(|| outcome.result.output.clone()),
         };
     }
 }
 
 /// How the creation ends when `A` calls `B` with `gas` and no limit is set.
 fn creation_end(setup: Setup, gas: u64) -> CreationEnd {
-    let mut evm =
-        evm(setup, gas, EvmTxRuntimeLimits::no_limits()).with_inspector(CreationEnd::default());
+    creation_end_under(setup, gas, EvmTxRuntimeLimits::no_limits())
+}
+
+/// How the creation ends when `A` calls `B` with `gas`, under `limits`.
+fn creation_end_under(setup: Setup, gas: u64, limits: EvmTxRuntimeLimits) -> CreationEnd {
+    let mut evm = evm(setup, gas, limits).with_inspector(CreationEnd::default());
     evm.execute_transaction(call(CALLER, A, U256::ZERO, gas_limit(setup))).unwrap();
-    *evm.inspector()
+    evm.inspector().clone()
 }
 
 /// The least gas `A` can call `B` with for the creation to deposit its code, with no limit set;
@@ -231,6 +238,12 @@ fn creation_state_gas() -> u64 {
 /// Under a state-gas limit one gas short of what the creation holds with its code, the creation
 /// that reaches the charge is stopped, and the one that cannot runs out of gas as it does without
 /// the limit: the transaction succeeds with no code deployed and the same gas.
+///
+/// The stop latches the transaction, so the whole transaction reverts whichever frame crossed; a
+/// limit held anywhere after the deposit — at `A`'s next `SSTORE`, which holds the state gas the
+/// transaction has by then — would report the same stop and deploy nothing as well. The creation's
+/// own end tells them apart: the deposit is held where it is made when the creation itself reverts
+/// with the stop.
 fn assert_state_gas_limit_stands_aside(setup: Setup) {
     let (enough, short) = boundary(setup);
     let creation = creation_state_gas();
@@ -246,6 +259,13 @@ fn assert_state_gas_limit_stands_aside(setup: Setup) {
     };
     assert_eq!(stopped.limit_exceeded, Some(stop), "{setup:?}: exactly enough, the check fires");
     assert!(!deployed(&stopped), "{setup:?}");
+    let end = creation_end_under(setup, enough, limits);
+    assert!(!end.deposited, "{setup:?}: the deposit is refused: {end:?}");
+    assert_eq!(
+        end.reverted_with,
+        Some(stop.revert_data()),
+        "{setup:?}: the creation that made the deposit is the one the stop ends",
+    );
 
     let ran_out = run(setup, enough - 1, limits);
     assert!(ran_out.result.is_success(), "{setup:?}: {:?}", ran_out.result);

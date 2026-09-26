@@ -30,8 +30,17 @@
 //!   configuration's, the fixture fork's own.
 //!
 //! A node changes the set through `with_dyn_precompiles`, or the factory's builder, which calls
-//! it. The engine cannot see a change made through the map's mutable accessors that keeps the id
-//! of the entry it replaces.
+//! it. The engine cannot see a change made around it, through the mutable reference to the map
+//! that revm's `EvmTr::all_mut` and alloy-evm's `Evm::components_mut` hand out:
+//!
+//! - an entry replaced through the map's mutable accessors under the id of the entry it replaces;
+//! - the whole map replaced by another set: an address whose dispatched entry carries the id of the
+//!   Satin table's entry there is then priced from the Satin table, whatever the other set charges
+//!   for it.
+//!
+//! Neither accessor is a sign of a change: revm reaches the context and the frame stack through
+//! `all_mut` on every frame, and alloy-evm's transaction tracer calls `components_mut`, so a
+//! trace would stop pricing where block execution priced.
 
 #[cfg(not(feature = "std"))]
 use alloc as std;
@@ -72,8 +81,9 @@ pub(crate) struct PricedPrecompiles {
     /// The Satin addresses a node replaced with a precompile of its own
     /// ([`MegaEvm::with_dyn_precompiles`](crate::MegaEvm)).
     replaced: AddressSet,
-    /// Whether the whole set was replaced by one that is not the Satin set: the neutral
-    /// configuration's, the fixture fork's own.
+    /// Whether the whole set was replaced, through the engine, by one that is not the Satin set:
+    /// the neutral configuration's, the fixture fork's own. A set replaced through a mutable
+    /// reference to the map is not recorded.
     foreign: bool,
 }
 

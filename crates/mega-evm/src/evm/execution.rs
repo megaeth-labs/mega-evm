@@ -415,7 +415,8 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
     ///    makes is answered when it carries value, and otherwise readied for revm to build as the
     ///    frame whose actions [`keyless::run`] makes ([`keyless::ready`]);
     /// 4. system contract interception ([`MegaEvm::intercept`]), for any other frame, which answers
-    ///    the frame or lets it start;
+    ///    the frame or lets it start; the caller of a frame that starts is recorded for gas
+    ///    detention while no read has set a compute limit ([`record_caller`]);
     /// 5. the frame's lane is pushed and the writes its start makes are counted; a limit they cross
     ///    answers the frame with the stop before it runs. A start revm refuses on its caller's
     ///    account ([`caller_refuses_start`]) makes no write and journals no transfer log, so it
@@ -466,6 +467,7 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
             hold_upfront_state_gas(&mut self.inner.ctx, Some(&mut result));
             return Ok(ItemOrResult::Result(result));
         }
+        record_caller(&mut self.inner.ctx, &mut self.inner.frame_stack, depth);
         let ctx = &mut self.inner.ctx;
         let refused = start_refused(ctx, &frame_init.frame_input);
         if refused {
@@ -791,6 +793,20 @@ fn after_frame_run<DB: Database, ExtEnvs: ExternalEnvTypes, E>(
             }
         }
         Err(_) => {}
+    }
+}
+
+/// Records, for gas detention, the frame revm is about to build a child of at `depth`, while no
+/// read has set a limit ([`Detention::on_child_build`]): the caller is still on top of the stack.
+#[inline]
+fn record_caller<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    ctx: &mut MegaContext<DB, ExtEnvs>,
+    frame_stack: &mut FrameStack<EthFrame<EthInterpreter>>,
+    depth: usize,
+) {
+    if depth > 0 && ctx.detention.records_callers() {
+        debug_assert_eq!(frame_stack.index(), Some(depth - 1), "the caller is on top");
+        ctx.detention.on_child_build(depth, &frame_stack.get().interpreter.gas);
     }
 }
 

@@ -571,6 +571,30 @@ mod tests {
         assert_eq!(price(&evm), None);
     }
 
+    /// A whole set put in the map's place through the mutable reference `EvmTr::all_mut` hands
+    /// out is not seen: an address whose dispatched entry carries the id of the Satin table's
+    /// entry there is still priced from the Satin table, whatever the new set charges for it.
+    #[test]
+    fn test_a_set_replaced_through_a_mutable_reference_is_priced_where_its_ids_match() {
+        use revm::{
+            handler::{EvmTr, PrecompileProvider},
+            precompile::Precompiles,
+        };
+        type Ctx = MegaContext<MemoryDatabase>;
+        let mut evm = MegaEvm::new(context(MemoryDatabase::default()));
+        let kzg = crate::kzg_point_evaluation::ADDRESS;
+
+        let osaka = crate::test_utils::neutral_precompiles(crate::EthSpecId::OSAKA).unwrap();
+        *EvmTr::all_mut(&mut evm).2 = osaka;
+        let dispatched = PrecompileProvider::<Ctx>::warm_addresses(&evm.inner.precompiles);
+        assert!(core::ptr::eq(dispatched, Precompiles::osaka().addresses_set()), "Osaka's set");
+        let osaka_kzg = Precompiles::osaka().get(&kzg).unwrap();
+        assert_ne!(osaka_kzg.required_gas(&[]), Some(crate::kzg_point_evaluation::GAS_COST));
+
+        let price = evm.priced_precompiles.price(&evm.inner.precompiles, &kzg, &[]);
+        assert_eq!(price, Some(crate::kzg_point_evaluation::GAS_COST), "the Satin table's price");
+    }
+
     /// A call to `CALLEE`, with room for the state gas a value transfer to it draws: `CALLEE`
     /// holds nothing, so a transfer creates it and pays the new account's state gas.
     fn tx(value: U256) -> MegaTransaction {
