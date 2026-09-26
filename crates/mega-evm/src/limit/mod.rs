@@ -9,7 +9,7 @@
 //! [`Detention`](crate::Detention), because what it meters is gas rather than anything the lanes
 //! count, and it holds a frame to the cap with the gas the frame may spend. It stops a transaction
 //! through the same latch ([`AdditionalLimit::latch`]), with the compute the transaction may reach
-//! as the limit, and the limit as what was used ([`LimitCheck::ExceedsLimit`]).
+//! as the limit, and its compute at the crossing as what was used ([`LimitCheck::ExceedsLimit`]).
 //!
 //! It also counts what those limits meter at the sites the data-size limit counts: data-size
 //! bytes and write records, on a lane per frame ([`AdditionalLimit`]). The Host stages what it
@@ -513,10 +513,12 @@ pub enum LimitCheck {
         limit: u64,
         /// The usage that crossed it.
         ///
-        /// For [`LimitKind::ComputeGas`] it is the limit itself. Gas detention stops a frame on a
-        /// regular charge its spendable gas could not pay, and the charge's size is not kept; the
-        /// spendable gas the frame had counts as spent, which brings the transaction's compute to
-        /// the limit exactly.
+        /// For [`LimitKind::ComputeGas`] it is the transaction's compute before the charge that
+        /// would have crossed the limit, which the regular ledger bills: gas detention stops a
+        /// frame on a regular charge its spendable gas could not pay, does not make it, and puts
+        /// the frame's gas back to what it had before it. The charge's size is not kept, so this
+        /// is at most the limit, unless a halting frame's leftover, counted as compute, took the
+        /// transaction past it before the charge.
         used: u64,
         /// Whether the limit is a frame budget rather than a transaction-level limit.
         frame_local: bool,

@@ -30,7 +30,10 @@ use revm::{
     Database, Inspector,
 };
 
-use super::{detention::reads_then_burns, *};
+use super::{
+    detention::{crossing_left, reads_then_burns},
+    *,
+};
 use crate::common::context;
 
 /// Init code that logs `len` bytes of data and deploys a one-byte runtime.
@@ -524,12 +527,16 @@ impl Crossing {
                 (limits.with_tx_state_gas_limit(limit), stop)
             }
             Self::Compute => {
-                // Read at the call's charges and the read's own two gas; the stop brings the
-                // compute to the limit exactly.
+                // Read at the call's charges and the read's own two gas. The stop lands on the
+                // first charge of the constructor's loop the cap leaves no room for — after the
+                // read's `POP` and the push of its counter, 26 gas a round: `JUMPDEST`, `PUSH1`,
+                // `SWAP1`, `SUB`, `DUP1`, the push of its start and `JUMPI` — and counts as used
+                // the compute before it.
                 let charges = KEYLESS_DEPLOY_OVERHEAD_GAS + create_regular(self.init_code().len());
                 let limit = charges + 2 + COMPUTE_CAP;
+                let left = crossing_left(COMPUTE_CAP, &[2, 3], &[1, 3, 3, 3, 3, 3, 10]);
                 let limits = limits.with_block_env_access_compute_gas_limit(COMPUTE_CAP);
-                (limits, Crossed::new(LimitKind::ComputeGas, limit, limit))
+                (limits, Crossed::new(LimitKind::ComputeGas, limit, limit - left))
             }
         }
     }
@@ -617,16 +624,17 @@ fn plain_and_rewritten(
 /// constructor's, not the creation's start or the call's charges. Every run keeps nothing of the
 /// deployment: the signer's nonce is where it was, neither spent from 0 nor left at 2 from 1; no
 /// code, no record, and no state or history gas beyond the transaction's body; above the cap the
-/// reservoir comes back. A compute stop bills exactly its limit past the body: the call's
-/// charges, the read and the cap. The inspector sees the creation end with the stop, then the
-/// call, and changes nothing the transaction reports.
+/// reservoir comes back. A compute stop bills what it counts as used past the body: the call's
+/// charges, the read, and the constructor's compute up to the charge that crosses the cap. The
+/// inspector sees the creation end with the stop, then the call, and changes nothing the
+/// transaction reports.
 #[test]
 fn test_every_limit_stops_a_deployment_from_either_nonce_at_either_tier() {
     for crossing in Crossing::ALL {
         let deployment = Deployment::new(crossing.init_code());
         for signer_nonce in [0, 1] {
             let (limits, expected) = crossing.limits(&deployment, signer_nonce);
-            let Crossed { kind, limit, .. } = expected;
+            let Crossed { kind, limit, used } = expected;
             let db = match signer_nonce {
                 0 => system_db(),
                 nonce => system_db().account_nonce(deployment.signer, nonce),
@@ -651,7 +659,7 @@ fn test_every_limit_stops_a_deployment_from_either_nonce_at_either_tier() {
                     if kind == LimitKind::ComputeGas {
                         let reference = reference(deployment.call_data(LARGE_OVERRIDE), gas_limit);
                         let [_, regular, ..] = beyond(outcome, &reference);
-                        assert_eq!(regular, limit, "{cell}: computed up to the limit exactly");
+                        assert_eq!(regular, used, "{cell}: computed up to the charge that crossed");
                     }
                 }
                 assert_eq!(

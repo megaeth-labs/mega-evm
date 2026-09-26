@@ -11,6 +11,17 @@ use revm::interpreter::{gas::WithheldCrossing, Gas, InstructionResult, Interpret
 use super::VolatileDataAccess;
 use crate::system::VOLATILE_DATA_ACCESS_DISABLED_SELECTOR;
 
+/// A transaction gas detention stops: the compute limit it crossed, and its compute at the
+/// crossing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ComputeStop {
+    /// The most compute the transaction may reach.
+    pub(crate) limit: u64,
+    /// The transaction's compute before the charge that would have crossed the limit: what its
+    /// regular ledger bills once the stopped frame's gas is put back.
+    pub(crate) used: u64,
+}
+
 /// What detention keeps of one frame that runs.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct DetainedFrame {
@@ -351,16 +362,17 @@ impl Detention {
     /// The frame at `depth` returns `result` with `gas`, after it ran. The switch turns back on if
     /// the frame, or a frame below it, turned it off. A frame that halts burns what it had left.
     ///
-    /// Returns the limit when the frame ran out of gas on a charge the withheld part of its gas
+    /// Returns the stop when the frame ran out of gas on a charge the withheld part of its gas
     /// would have paid ([`stop`](Self::stop)): the frame crossed the limit, and must stop the
-    /// transaction rather than halt.
+    /// transaction rather than halt. The stop's compute is the transaction's with the frame's gas
+    /// put back.
     #[inline]
     pub(crate) fn on_frame_end(
         &mut self,
         result: InstructionResult,
         gas: &mut Gas,
         depth: usize,
-    ) -> Option<u64> {
+    ) -> Option<ComputeStop> {
         let left_at_halt = self.left_at_halt.take();
         if self.disabled_from.is_some_and(|from| from >= depth) {
             self.disabled_from = None;
@@ -370,12 +382,8 @@ impl Detention {
         }
         debug_assert_eq!(self.frames.len(), depth + 1, "the frame that returns is the last");
         self.frames.pop();
-        if let Some(crossing) = gas.withheld_crossing() {
-            // The record holds the regular gas left before the failed charge; the spendable part of
-            // it was what the limit left the transaction then.
-            gas.set_remaining(crossing.remaining());
-            let spendable = self.limit.map_or(0, |limit| limit.saturating_sub(self.compute(gas)));
-            return self.stop(gas, spendable);
+        if let Some(limit) = self.stop(gas) {
+            return Some(ComputeStop { limit, used: self.compute(gas) });
         }
         if result.is_halt() {
             // The settlement rolls the spill back into regular gas and burns it all.
@@ -400,20 +408,21 @@ impl Detention {
     /// An answer marked as a crossing — a precompile whose price crosses the limit
     /// ([`cross_at_price`](Self::cross_at_price)), or one the engine cannot price that ran out of
     /// the allowance it was held to ([`restore_forward`](Self::restore_forward)) — crossed the
-    /// limit. Otherwise, an answer that
-    /// halts burns the whole gas limit: nothing ran with it. An answer that spent more regular gas
-    /// than the limit leaves the frame — the allowance it would have run on — is a charge the
-    /// frame could not have made; state and history gas that spilled onto its regular gas are not
-    /// counted, as they are not a running frame's compute. Such an answer is answered out of gas
-    /// and marked as a crossing of what the frame would have had withheld. A crossing is
-    /// settled by the same rule as a frame that ran ([`stop`](Self::stop)). Returns the limit
-    /// when it crossed.
+    /// limit. Otherwise, an answer that halts burns the whole gas limit: nothing ran with it. An
+    /// answer that spent more regular gas than the limit leaves the frame — the allowance it would
+    /// have run on — is a charge the frame could not have made; state and history gas that spilled
+    /// onto its regular gas are not counted, as they are not a running frame's compute. Such an
+    /// answer is answered out of gas and marked as a crossing, the answer's spending being the
+    /// charge that crossed. A crossing is settled by the same rule as a frame that ran
+    /// ([`stop`](Self::stop)): the frame spent nothing before the charge, so it is given its whole
+    /// gas back, and the stop's compute is the transaction's when the frame started. Returns the
+    /// stop when it crossed.
     pub(crate) fn on_answer(
         &mut self,
         result: &mut InterpreterResult,
         depth: usize,
         gas_limit: u64,
-    ) -> Option<u64> {
+    ) -> Option<ComputeStop> {
         if !self.detains {
             return None;
         }
@@ -438,23 +447,19 @@ impl Detention {
             // an inspector's answer built on another limit is settled on what the frame was
             // forwarded.
             //
-            // State and history gas that spilled onto regular gas would have drawn the withheld
-            // part first, and the revert that settles the stop credits the spill back, so the
-            // crossing withholds what is left once the spill is taken out, as the tracker's own
-            // record of a running frame does. The spill is below `gas_limit - allowance`, since
-            // the regular gas the answer spent past it exceeds the allowance. The record holds the
-            // regular gas the frame had before the charge: the gas limit, less the spill.
-            let spilled = result.gas.state_gas_spilled();
-            if gas_limit - allowance <= spilled {
-                return None;
-            }
-            let remaining = NonZeroU64::new(gas_limit - spilled)?;
+            // The record holds the regular gas the frame had before the charge: the gas limit,
+            // less the state and history gas that spilled onto it, which the revert that settles
+            // the stop credits back. The spill is below the gas limit, less the regular gas the
+            // answer spent, so what is left is never zero.
+            let remaining = NonZeroU64::new(gas_limit - result.gas.state_gas_spilled())?;
             result.result = InstructionResult::OutOfGas;
             result.gas.tracker_mut().set_limit(gas_limit);
             result.gas.set_withheld_crossing(Some(WithheldCrossing::with_remaining(remaining)));
         }
-        let spendable = self.allowance(depth, gas_limit).unwrap_or(0);
-        self.stop(&mut result.gas, spendable)
+        let limit = self.stop(&mut result.gas)?;
+        let used =
+            self.compute_at_start(depth, gas_limit).saturating_add(regular_spent(&result.gas));
+        Some(ComputeStop { limit, used })
     }
 
     /// Gives the answer of a precompile the engine cannot price, which ran on `withheld` less than
@@ -490,16 +495,18 @@ impl Detention {
 
     /// Settles a frame whose regular gas ran out on a charge the withheld part would have paid —
     /// the fork records it as a [`WithheldCrossing`] — and returns the limit it crossed.
-    /// `spendable` is the spendable part the frame had at the crossing.
     ///
-    /// The frame's gas becomes the withheld part at the crossing: the spendable part the frame had
-    /// counts as spent, which brings the transaction's compute to the limit, and the withheld part
-    /// goes back to its caller. Whether the halt already zeroed the frame's gas (`OutOfGas`) or not
-    /// (`MemoryOOG`), the settlement is the same. A crossing only ever ends a frame on an
-    /// out-of-gas, and only a frame detention held carries one.
-    fn stop(&self, gas: &mut Gas, spendable: u64) -> Option<u64> {
+    /// The frame's regular gas is put back to what it had before the charge that crossed, the
+    /// record's [`remaining`](WithheldCrossing::remaining): the charge is not made, so the
+    /// transaction is billed its compute at the crossing, less than one charge short of the limit,
+    /// and all the frame had left, its spendable and withheld parts together, goes back to its
+    /// caller. Whether the halt already zeroed the frame's gas (`OutOfGas`) or not (`MemoryOOG`,
+    /// or `return_create`'s own out-of-gas on a deposit charge), the settlement is the same. A
+    /// crossing only ever ends a frame on an out-of-gas, and only a frame detention held carries
+    /// one.
+    fn stop(&self, gas: &mut Gas) -> Option<u64> {
         let crossing = gas.withheld_crossing()?;
-        gas.set_remaining(crossing.remaining().saturating_sub(spendable));
+        gas.set_remaining(crossing.remaining());
         gas.clear_withheld_crossing();
         self.limit
     }
@@ -689,10 +696,11 @@ mod tests {
         assert_eq!(frame.spendable(), BLOCK_ENV_ACCESS_COMPUTE_GAS);
     }
 
-    /// A regular charge the withheld part would have paid is the cap: the frame's gas becomes the
-    /// withheld part, and the spendable part it had counts as spent.
+    /// A regular charge the withheld part would have paid is the cap: the frame's gas is put back
+    /// to what it had before the charge, and the stop's compute is the transaction's then — here
+    /// the 10 the frame charged after the read, whatever the halt did to its gas.
     #[test]
-    fn test_a_crossing_stops_with_the_withheld_part_left() {
+    fn test_a_crossing_stops_with_the_gas_it_had_before_the_charge() {
         for (result, zeroed) in
             [(InstructionResult::OutOfGas, true), (InstructionResult::MemoryOOG, false)]
         {
@@ -706,11 +714,36 @@ mod tests {
                 frame.spend_all();
             }
             let stop = detention.on_frame_end(result, &mut frame, 0);
-            assert_eq!(stop, Some(BLOCK_ENV_ACCESS_COMPUTE_GAS), "{result:?}");
-            assert_eq!(frame.remaining(), 100_000_000 - BLOCK_ENV_ACCESS_COMPUTE_GAS);
+            let limit = BLOCK_ENV_ACCESS_COMPUTE_GAS;
+            assert_eq!(stop, Some(ComputeStop { limit, used: 10 }), "{result:?}");
+            assert_eq!(frame.remaining(), 100_000_000 - 10);
             assert_eq!(frame.withheld_crossing(), None);
-            assert_eq!(regular_spent(&frame), BLOCK_ENV_ACCESS_COMPUTE_GAS, "compute at the limit");
+            assert_eq!(regular_spent(&frame), 10, "the charge that crossed is not made");
         }
+    }
+
+    /// A child's crossing stops with the compute of the whole transaction: what its callers
+    /// computed before they suspended, less the gas they forwarded, and what it computed itself.
+    #[test]
+    fn test_a_childs_crossing_stops_with_the_transactions_compute() {
+        let mut detention = detaining();
+        let mut caller = gas(100_000_000, 0);
+        detention.on_frame_run(&mut caller, 0);
+        detention.commit_reads(VolatileDataAccess::TIMESTAMP, &mut caller, 0);
+        assert!(caller.record_regular_cost(7_000));
+        assert!(caller.record_withheld_first_cost(50_000_000));
+        detention.on_frame_suspend(&caller, 0);
+        let mut child = gas(50_000_000, 0);
+        detention.on_frame_run(&mut child, 1);
+        assert_eq!(child.spendable(), BLOCK_ENV_ACCESS_COMPUTE_GAS - 7_000);
+        assert!(child.record_regular_cost(3_000));
+        assert!(!child.record_regular_cost(BLOCK_ENV_ACCESS_COMPUTE_GAS));
+        child.spend_all();
+
+        let stop = detention.on_frame_end(InstructionResult::OutOfGas, &mut child, 1);
+        let limit = BLOCK_ENV_ACCESS_COMPUTE_GAS;
+        assert_eq!(stop, Some(ComputeStop { limit, used: 7_000 + 3_000 }));
+        assert_eq!(child.remaining(), 50_000_000 - 3_000);
     }
 
     /// An out-of-gas nothing withheld could have paid halts and burns what the frame had.
@@ -793,8 +826,8 @@ mod tests {
     }
 
     /// An answer that halts burns the gas limit; one that spent more regular gas than the frame's
-    /// allowance is answered out of gas and stops at the limit, with what the frame would have had
-    /// withheld. State gas that spilled onto the answer's regular gas is not compute.
+    /// allowance is answered out of gas and stops at the limit, with its whole gas limit back but
+    /// the spill. State gas that spilled onto the answer's regular gas is not compute.
     #[test]
     fn test_an_answer_is_held_to_the_allowance_it_would_have_run_on() {
         let mut detention = detaining();
@@ -824,18 +857,26 @@ mod tests {
         assert_eq!(detention.burned, 90_000_000);
         detention.burned = 0;
 
-        let mut beyond = answer(BLOCK_ENV_ACCESS_COMPUTE_GAS + 1, InstructionResult::Return);
-        assert_eq!(
-            detention.on_answer(&mut beyond, 1, 90_000_000),
-            Some(BLOCK_ENV_ACCESS_COMPUTE_GAS)
-        );
-        assert_eq!(beyond.result, InstructionResult::OutOfGas);
-        assert_eq!(beyond.gas.remaining(), 90_000_000 - BLOCK_ENV_ACCESS_COMPUTE_GAS);
+        // The answer's spending is the charge that crossed: before it the frame had its whole gas
+        // limit, less the spill, which the revert that settles the stop credits back.
+        let limit = BLOCK_ENV_ACCESS_COMPUTE_GAS;
+        for spill in [0, 1_000] {
+            let mut beyond = answer(BLOCK_ENV_ACCESS_COMPUTE_GAS + 1, InstructionResult::Return);
+            assert!(beyond.gas.record_state_cost(spill));
+            assert_eq!(
+                detention.on_answer(&mut beyond, 1, 90_000_000),
+                Some(ComputeStop { limit, used: 0 }),
+                "the transaction computed nothing before the answer: {spill}"
+            );
+            assert_eq!(beyond.result, InstructionResult::OutOfGas);
+            assert_eq!(beyond.gas.remaining(), 90_000_000 - spill);
+            assert_eq!(regular_spent(&beyond.gas), 0);
+        }
     }
 
     /// A precompile run on the allowance gets the rest of the forward back: a success keeps it
     /// unspent, a halt burns the forward as it would without the read, and an out-of-gas on the
-    /// allowance is a crossing, which the answer's settlement stops with the rest left.
+    /// allowance is a crossing, which the answer's settlement stops with the whole forward back.
     #[test]
     fn test_a_precompile_run_on_the_allowance_is_settled_on_the_forward() {
         let mut detention = detaining();
@@ -878,9 +919,9 @@ mod tests {
         );
         assert_eq!(
             detention.on_answer(&mut out_of_gas, 1, 90_000_000),
-            Some(BLOCK_ENV_ACCESS_COMPUTE_GAS)
+            Some(ComputeStop { limit: BLOCK_ENV_ACCESS_COMPUTE_GAS, used: 0 })
         );
-        assert_eq!(out_of_gas.gas.remaining(), withheld.get(), "the allowance counts as spent");
+        assert_eq!(out_of_gas.gas.remaining(), 90_000_000, "the precompile computed nothing");
         assert_eq!(out_of_gas.gas.withheld_crossing(), None);
         assert_eq!(detention.burned, 0, "a crossing burns nothing");
     }

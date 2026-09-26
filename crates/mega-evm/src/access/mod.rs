@@ -80,7 +80,7 @@
 //!
 //! So a transaction that read volatile data runs exactly as it would without the read until a
 //! regular charge needs the withheld part. That charge fails as it would with nothing withheld,
-//! and the fork records the crossing, with the withheld part it could not draw.
+//! and the fork records the crossing, with the regular gas the frame had before the charge.
 //!
 //! # The stop
 //!
@@ -88,10 +88,12 @@
 //! the withheld part would have paid the charge. The frame stops the transaction the way every
 //! transaction-level limit does — it reverts with `MegaLimitExceeded` (kind: compute), the
 //! transaction is latched, no caller resumes, and the transaction settles like an EIP-8037 revert
-//! (see [`AdditionalLimit`](crate::AdditionalLimit)). The stopped frame's gas is the withheld part
-//! at the crossing: the spendable part it had counts as spent, which brings the transaction's
-//! compute to the limit exactly, and the withheld part goes back to the sender. The stop reports
-//! the limit as what was used; the size of the charge that crossed is not kept.
+//! (see [`AdditionalLimit`](crate::AdditionalLimit)). The stopped frame's gas is put back to what
+//! it had before the charge that crossed, from the record: the charge is not made, the spendable
+//! part the frame had and the withheld part go back to the sender, and the transaction is billed
+//! its compute at the crossing, less than one charge short of the limit. The stop reports that
+//! compute as what was used, the same figure at every site a crossing is made: a frame that ran,
+//! an answer, a precompile; the size of the charge that crossed is not kept.
 //!
 //! Every other out-of-gas halts and burns as it would without the read: an operand above `usize`,
 //! a failed state or history charge, and a regular charge the frame's whole gas could not pay.
@@ -144,8 +146,9 @@
 //! Withheld gas never leaves the frame's tracker, so there is nothing to release and nothing that
 //! can escape the cap: a child's withheld part goes back to its caller with the rest of its gas,
 //! and the caller is held again as it resumes; a frame answered without running starts with
-//! nothing withheld and hands its forwarded gas back; the stop hands the withheld part back with
-//! its revert; and a halt burns the frame's gas, withheld part included, as it would undetained.
+//! nothing withheld and hands its forwarded gas back; the stop hands the frame's gas back with its
+//! revert, both parts as they were before the charge that crossed; and a halt burns the frame's
+//! gas, withheld part included, as it would undetained.
 //! `return_create`'s deposit and hash charges, the creating frame's own compute, draw the spendable
 //! part like any other regular charge.
 //!
@@ -166,6 +169,7 @@
 mod detention;
 mod volatile;
 
+pub(crate) use detention::ComputeStop;
 pub use detention::{
     decode_volatile_data_access_disabled, volatile_data_access_disabled_revert_data, Detention,
 };

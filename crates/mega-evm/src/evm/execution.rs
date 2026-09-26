@@ -47,6 +47,7 @@ use revm::{
 };
 
 use crate::{
+    access::ComputeStop,
     evm::{history::transaction_body_bytes, inspector::frame_end_checked},
     history_gas, synthetic_frame_result,
     system::keyless,
@@ -785,10 +786,10 @@ fn after_frame_run<DB: Database, ExtEnvs: ExternalEnvTypes, E>(
         }
         Ok(ItemOrResult::Result(result)) => {
             let instruction_result = result.instruction_result();
-            if let Some(limit) =
+            if let Some(stop) =
                 ctx.detention.on_frame_end(instruction_result, result.gas_mut(), frame.depth)
             {
-                stop_at_the_compute_limit(ctx, result.interpreter_result_mut(), limit);
+                stop_at_the_compute_limit(ctx, result.interpreter_result_mut(), stop);
             }
         }
         Err(_) => {}
@@ -811,8 +812,8 @@ fn settle_answer<DB: Database, ExtEnvs: ExternalEnvTypes>(
     answer: &mut FrameResult,
 ) {
     let answer = answer.interpreter_result_mut();
-    if let Some(limit) = ctx.detention.on_answer(answer, depth, gas_limit) {
-        stop_at_the_compute_limit(ctx, answer, limit);
+    if let Some(stop) = ctx.detention.on_answer(answer, depth, gas_limit) {
+        stop_at_the_compute_limit(ctx, answer, stop);
     }
 }
 
@@ -885,20 +886,19 @@ const fn input_gas_limit(input: &FrameInput) -> u64 {
     }
 }
 
-/// Turns a frame that crossed gas detention's compute `limit` into the transaction-level stop: a
+/// Turns a frame that crossed gas detention's compute limit into the transaction-level stop: a
 /// revert carrying `MegaLimitExceeded` (kind: compute), with the transaction latched, so no caller
-/// resumes. The frame's gas is what detention left it — the withheld part at the crossing — which
-/// goes back with the revert, to the caller and in the end to the sender.
+/// resumes. The frame's gas is what it had before the charge that crossed, which goes back with
+/// the revert, to the caller and in the end to the sender.
 ///
-/// The crossing charge's size is not kept, so the stop reports the limit as what was used
-/// ([`LimitCheck::ExceedsLimit`]): the transaction's compute reached it exactly, the spendable gas
-/// the frame had counting as spent.
+/// The crossing charge's size is not kept, so the stop reports the transaction's compute at the
+/// crossing as what was used ([`LimitCheck::ExceedsLimit`]): what its regular ledger bills.
 fn stop_at_the_compute_limit<DB: Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &mut MegaContext<DB, ExtEnvs>,
     result: &mut InterpreterResult,
-    limit: u64,
+    stop: ComputeStop,
 ) {
-    let stop = ctx.additional_limit.latch(LimitKind::ComputeGas, limit, limit);
+    let stop = ctx.additional_limit.latch(LimitKind::ComputeGas, stop.limit, stop.used);
     result.result = InstructionResult::Revert;
     result.output = stop.revert_data();
 }

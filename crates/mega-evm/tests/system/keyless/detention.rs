@@ -125,9 +125,10 @@ fn run_as_creation(init_code: Bytes, gas_limit: u64, limits: EvmTxRuntimeLimits)
     run_tx(context_in(system_db(), BENEFICIARY, limits), tx, false)
 }
 
-/// Asserts `run` of `deployment` at `gas_limit` was stopped by gas detention, having computed
-/// exactly its limit past its intrinsic gas, and kept nothing of the deployment.
-fn assert_stopped(run: &Run, deployment: &Deployment, gas_limit: u64) {
+/// Asserts `run` of `deployment` at `gas_limit` was stopped by gas detention, having computed up
+/// to the charge that crossed its limit, `left` short of it, past its intrinsic gas, and kept
+/// nothing of the deployment.
+fn assert_stopped(run: &Run, deployment: &Deployment, gas_limit: u64, left: u64) {
     let limit = run.limit.expect("a read set a limit");
     let ExecutionResult::Revert { output, .. } = &run.outcome.result else {
         panic!("expected the detention stop, got {:?}", run.outcome.result);
@@ -136,20 +137,21 @@ fn assert_stopped(run: &Run, deployment: &Deployment, gas_limit: u64) {
         MegaLimitExceeded::abi_decode(output).expect("the revert data is a limit stop"),
         MegaLimitExceeded { kind: LimitKind::ComputeGas.as_u8(), limit },
     );
+    let used = limit - left;
     assert_eq!(
         run.outcome.limit_exceeded,
         Some(LimitCheck::ExceedsLimit {
             kind: LimitKind::ComputeGas,
             limit,
-            used: limit,
-            frame_local: false,
+            used,
+            frame_local: false
         }),
     );
     let reference = reference(deployment.call_data(LARGE_OVERRIDE), gas_limit);
     assert_eq!(
         run.outcome.gas.regular,
-        reference.gas.regular + limit,
-        "the transaction computed up to its limit and not one unit past it, at {gas_limit}",
+        reference.gas.regular + used,
+        "the transaction computed up to the charge that crossed its limit, at {gas_limit}",
     );
     assert_eq!(run.outcome.gas.state, 0, "a stop keeps no state");
     assert_eq!(nonce(&run.outcome, deployment.signer), 0, "the signer's nonce is taken back");
@@ -202,7 +204,8 @@ fn refused_read(outcome: &MegaTransactionOutcome) -> VolatileDataAccess {
 /// rules, through the journal, and the creation runs for that account, so the deployment is
 /// detained from the read, at the call's compute then — the overhead — as a sender that is the
 /// beneficiary is from its start. Under the spec's cap it deploys as without the read. Under a cap
-/// its `CREATE` opcode's regular gas crosses, it stops at that charge, before the creation starts.
+/// its `CREATE` opcode's regular gas crosses, it stops at that charge, before the creation starts,
+/// the call's first charge after the read: the whole cap is left.
 /// A signer that is not the beneficiary is not detained.
 #[test]
 fn test_a_signer_that_is_the_beneficiary_detains_its_deployment() {
@@ -226,7 +229,7 @@ fn test_a_signer_that_is_the_beneficiary_detains_its_deployment() {
         let cap = create_regular(init_code.len()) - 1;
         let stopped = run_in(db_for(&deployment, U256::ZERO), signer, data.clone(), gas_limit, cap);
         assert_eq!(stopped.limit, Some(KEYLESS_DEPLOY_OVERHEAD_GAS + cap));
-        assert_stopped(&stopped, &deployment, gas_limit);
+        assert_stopped(&stopped, &deployment, gas_limit, cap);
     }
 }
 
@@ -237,8 +240,9 @@ fn test_a_signer_that_is_the_beneficiary_detains_its_deployment() {
 /// the limit is the same constructor's as a creation transaction's, plus the overhead and the
 /// `CREATE` opcode's regular gas. Within the cap the deployment is the same as its twin's, whose
 /// constructor reads nothing in the read's place (`PUSH0`, the same two gas), on every ledger.
-/// Past it, the constructor stops at the limit: the call reverts with the stop, and the deployment
-/// is taken back whole. Plain and inspected, below and above the execution cap.
+/// Past it, the constructor stops at the first charge of its loop past the limit: the call reverts
+/// with the stop, and the deployment is taken back whole. Plain and inspected, below and above the
+/// execution cap.
 #[test]
 fn test_a_constructor_that_reads_volatile_data_is_held_to_the_cap() {
     let init_code = reads_then_burns(TIMESTAMP, 1_000);
@@ -257,7 +261,10 @@ fn test_a_constructor_that_reads_volatile_data_is_held_to_the_cap() {
 
         let stopped = run_both(&reads, gas_limit, capped(1_000));
         assert_eq!(stopped.limit, Some(charges + 2 + 1_000));
-        assert_stopped(&stopped, &reads, gas_limit);
+        // The read's `POP`, then the loop: the push of its counter, and 26 gas a round — its
+        // `JUMPDEST`, `PUSH1`, `SWAP1`, `SUB`, `DUP1`, the push of its start and `JUMPI`.
+        let left = crossing_left(1_000, &[2, 3], &[1, 3, 3, 3, 3, 3, 10]);
+        assert_stopped(&stopped, &reads, gas_limit, left);
         let twin_deploys = run_both(&twin, gas_limit, capped(1_000));
         assert_eq!(returned(&twin_deploys.outcome).deployedAddress, twin.address);
     }
@@ -265,7 +272,8 @@ fn test_a_constructor_that_reads_volatile_data_is_held_to_the_cap() {
 
 /// A sender that is the beneficiary is detained from its start, before the call charges anything:
 /// the call's work and the constructor's together are held to the cap. A cap that pays both
-/// deploys as without the read; one gas less, and the constructor's last charge crosses.
+/// deploys as without the read; one gas less, and the deployment's last regular charge crosses:
+/// the hash of its one-byte runtime, one word at six gas, which leaves five.
 #[test]
 fn test_a_sender_that_is_the_beneficiary_holds_the_whole_deployment_to_the_cap() {
     let init_code = reads_then_burns(PUSH0, 100);
@@ -285,15 +293,15 @@ fn test_a_sender_that_is_the_beneficiary_holds_the_whole_deployment_to_the_cap()
         assert_eq!(fits.outcome.gas, plain.outcome.gas, "at {gas_limit}");
         let short =
             run_in(db_for(&deployment, U256::ZERO), RELAYER, data.clone(), gas_limit, compute - 1);
-        assert_stopped(&short, &deployment, gas_limit);
+        assert_stopped(&short, &deployment, gas_limit, 6 - 1);
     }
 }
 
 /// A sender that is the beneficiary, under a cap below the overhead: the call is held to the cap
 /// before it charges anything, so the overhead is the charge that crosses, and the transaction
-/// stops at the cap having computed exactly the cap. A call held only once its charges were paid
-/// would pay the overhead and the `CREATE` opcode's regular gas in full, past the cap, and stop
-/// at its creation's first charge instead. Plain and inspected.
+/// stops having computed nothing. A call held only once its charges were paid would pay the
+/// overhead and the `CREATE` opcode's regular gas in full, past the cap, and stop at its
+/// creation's first charge instead. Plain and inspected.
 #[test]
 fn test_a_sender_that_is_the_beneficiary_is_held_before_the_overhead() {
     let deployment = Deployment::new(deploying(&runtime(1)));
@@ -304,7 +312,7 @@ fn test_a_sender_that_is_the_beneficiary_is_held_before_the_overhead() {
             let ctx = context_in(db_for(&deployment, U256::ZERO), RELAYER, capped(cap));
             let run = run_tx(ctx, keyless_tx(data.clone(), gas_limit), inspected);
             assert_eq!(run.limit, Some(cap), "detained from its start, at no compute");
-            assert_stopped(&run, &deployment, gas_limit);
+            assert_stopped(&run, &deployment, gas_limit, cap);
         }
     }
 }
@@ -460,8 +468,10 @@ fn reads_the_oracle(rounds: u16) -> Bytes {
 
 /// A constructor reads the Oracle's storage as any frame does: it gets the service's value when
 /// the service answers and the chain's otherwise, at the same price either way, and the read is
-/// volatile, under the Oracle's cap. Past the cap, the constructor stops at the limit, and the
-/// deployment is taken back whole.
+/// volatile, under the Oracle's cap. Past a cap of 1,000, the constructor stops at its write of
+/// what it read — a fresh, cold slot, whose dynamic charge of 22,000 no such cap pays — after the
+/// Oracle's return and the constructor's `POP`, push, `MLOAD`, `PUSH0` and `SSTORE`'s static gas,
+/// and the deployment is taken back whole.
 #[test]
 fn test_a_constructor_reads_the_oracle_as_any_frame_does() {
     let deployment = Deployment::new(reads_the_oracle(1_000));
@@ -497,9 +507,72 @@ fn test_a_constructor_reads_the_oracle_as_any_frame_does() {
         assert_eq!(answered.accessed, VolatileDataAccess::ORACLE);
         assert!(answered.limit.is_some());
 
+        // The Oracle's own instructions after its load, measured on its frame in a run the cap
+        // does not stop.
+        let mut evm =
+            MegaEvm::new(oracle_context(db(), service.clone(), ORACLE_ACCESS_COMPUTE_GAS))
+                .with_inspector(OracleTail::default());
+        evm.execute_transaction(tx()).expect("the transaction is valid");
+        let tail = evm.inspector().tail();
+        let left = crossing_left(1_000, &[tail, 2, 3, 3, 2, 100, 22_000], &[]);
+        assert!(left > 0, "the write is the charge that crosses: {left}");
+
         let stopped = run_tx(oracle_context(db(), service.clone(), 1_000), tx(), true);
-        assert_stopped(&stopped, &deployment, gas_limit);
+        assert_stopped(&stopped, &deployment, gas_limit, left);
         assert_eq!(stopped.accessed, VolatileDataAccess::ORACLE);
+    }
+}
+
+/// What `allowance` has left at the first charge it cannot pay, of `charges` then `round` over
+/// and over: what a frame the limit left `allowance` at the read has when it crosses the limit.
+pub(super) fn crossing_left(mut allowance: u64, charges: &[u64], round: &[u64]) -> u64 {
+    for charge in charges.iter().chain(round.iter().cycle()) {
+        if *charge > allowance {
+            return allowance;
+        }
+        allowance -= charge;
+    }
+    panic!("the charges end within the allowance")
+}
+
+/// Measures what the Oracle's frame spends after its storage load: what it has at its next
+/// instruction, less what it returns with.
+#[derive(Default)]
+struct OracleTail {
+    loading: bool,
+    after_load: Option<u64>,
+    returned: Option<u64>,
+}
+
+impl OracleTail {
+    fn tail(&self) -> u64 {
+        self.after_load.expect("the Oracle loaded") - self.returned.expect("the Oracle returned")
+    }
+}
+
+impl<DB: revm::Database, E: ExternalEnvTypes> Inspector<MegaContext<DB, E>, EthInterpreter>
+    for OracleTail
+{
+    fn step(&mut self, interp: &mut Interpreter<EthInterpreter>, _: &mut MegaContext<DB, E>) {
+        use revm::interpreter::interpreter_types::Jumps;
+        if interp.input.target_address != ORACLE_CONTRACT_ADDRESS {
+            return;
+        }
+        if self.loading && self.after_load.is_none() {
+            self.after_load = Some(interp.gas.remaining());
+        }
+        self.loading = interp.bytecode.opcode() == revm::bytecode::opcode::SLOAD;
+    }
+
+    fn call_end(
+        &mut self,
+        _: &mut MegaContext<DB, E>,
+        inputs: &CallInputs,
+        outcome: &mut CallOutcome,
+    ) {
+        if inputs.target_address == ORACLE_CONTRACT_ADDRESS {
+            self.returned = Some(outcome.result.gas.remaining());
+        }
     }
 }
 
