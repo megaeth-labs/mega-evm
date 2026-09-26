@@ -212,9 +212,8 @@ pub struct Detention {
     /// The depth of the frame that runs.
     depth: usize,
     /// While no read has set a limit: at each depth, the record of the frame there when revm last
-    /// built a child of it ([`on_child_build`](Self::on_child_build)). An entry below the running
-    /// frame's depth is its caller's, made when revm built the frame above it; the others are
-    /// stale, and are never read. Kept across transactions, for its allocation.
+    /// built a child of it in the transaction ([`on_child_build`](Self::on_child_build)). An entry
+    /// below the running frame's depth is its caller's, made when revm built the frame above it.
     callers: Vec<CallerRecord>,
     /// The frames' figures kept eagerly from the transaction's first frame on, in debug builds, to
     /// hold the ones rebuilt at the first read, and every one kept after it, to them.
@@ -250,6 +249,7 @@ impl Detention {
         self.left_at_halt = None;
         self.frames.clear();
         self.depth = 0;
+        self.callers.clear();
         #[cfg(debug_assertions)]
         self.eager.clear();
     }
@@ -504,17 +504,16 @@ impl Detention {
     #[cold]
     #[inline(never)]
     fn track(&mut self, gas: &Gas) {
-        let depth = self.depth;
-        debug_assert!(self.callers.len() >= depth, "every frame below the reading one recorded");
+        // Every frame below the reading one was built in the transaction while no read had set a
+        // limit, so revm building it recorded its caller.
+        let records = &self.callers[..self.depth];
         self.frames.clear();
         self.suspended = 0;
-        for index in 0..depth {
-            let record = |index: usize| self.callers.get(index).copied().unwrap_or_default();
-            let at_suspension = record(index).spent;
-            let child_limit = if index + 1 < depth { record(index + 1).limit } else { gas.limit() };
-            let contribution = at_suspension.saturating_sub(child_limit);
+        for (index, record) in records.iter().enumerate() {
+            let child_limit = records.get(index + 1).map_or(gas.limit(), |child| child.limit);
+            let contribution = record.spent.saturating_sub(child_limit);
             self.suspended = self.suspended.saturating_add(contribution);
-            self.frames.push(DetainedFrame { at_suspension, contribution });
+            self.frames.push(DetainedFrame { at_suspension: record.spent, contribution });
         }
         self.frames.push(DetainedFrame::default());
         #[cfg(debug_assertions)]
@@ -1109,6 +1108,19 @@ mod tests {
         assert_eq!(detention.suspended, 3_000);
         assert_eq!(detention.frames.len(), 2);
         assert_eq!(detention.compute_limit(), Some(3_000 + BLOCK_ENV_ACCESS_COMPUTE_GAS));
+    }
+
+    /// A reset forgets the callers a transaction recorded: the next one reads only its own.
+    #[test]
+    fn test_a_reset_forgets_the_callers_a_transaction_recorded() {
+        let mut detention = detaining();
+        let caller = gas(1_000_000, 0);
+        detention.on_child_build(1, &caller);
+        detention.on_child_build(2, &caller);
+        assert_eq!(detention.callers.len(), 2);
+
+        detention.reset(true, BLOCK_ENV_ACCESS_COMPUTE_GAS, ORACLE_ACCESS_COMPUTE_GAS);
+        assert!(detention.callers.is_empty());
     }
 
     /// The eager figures debug builds keep catch a kept figure that parts from them.
