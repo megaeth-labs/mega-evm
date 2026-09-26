@@ -1,9 +1,9 @@
 //! Frame results built without running a frame, and how they settle.
 //!
 //! `MegaETH` answers some frames itself: the depth guard, a transaction stopped by a limit, the
-//! system contract interceptors, a `keylessDeploy` call carrying value, and, when it lands,
-//! precompile normalisation. Such a result goes back to the caller like any frame's, and the
-//! caller settles it the way revm settles a frame it ran:
+//! system contract interceptors, a `keylessDeploy` call carrying value, and a precompile call gas
+//! detention answers from its price without running it. Such a result goes back to the caller like
+//! any frame's, and the caller settles it the way revm settles a frame it ran:
 //!
 //! 1. an upfront state-gas charge the calling opcode made for the frame (a new account, a creation)
 //!    is priced for refund when the frame failed;
