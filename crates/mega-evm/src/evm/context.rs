@@ -7,8 +7,8 @@ use revm::{
         BlockEnv, Cfg, CfgEnv, Context, ContextError, ContextSetters, ContextTr, LocalContext,
         Transaction,
     },
-    context_interface::cfg::GasId,
-    primitives::{Address, StorageKey},
+    context_interface::{cfg::GasId, context::CodeDeposit},
+    primitives::{Address, Bytes, StorageKey},
     Database, Journal,
 };
 
@@ -518,6 +518,15 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> ContextTr for MegaContext<DB, ExtE
             );
             fn error(&mut self) -> &mut Result<(), ContextError<DB::Error>>;
         }
+    }
+
+    /// Holds the code a creation deposits to the state-gas and data-size limits, and counts its
+    /// history bytes, once `return_create` made every charge for the deposit and before it commits
+    /// the creation ([`AdditionalLimit::on_code_deposit`]). A crossing refuses the deposit with the
+    /// stop's revert data: the creation reverts with it, on the gas it had before the deposit.
+    #[inline]
+    fn admit_code_deposit(&mut self, deposit: &CodeDeposit<'_>) -> Result<(), Bytes> {
+        self.additional_limit.on_code_deposit(deposit)
     }
 }
 

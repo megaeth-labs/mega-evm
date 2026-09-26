@@ -9,7 +9,7 @@
 //! [`Detention`](crate::Detention), because what it meters is gas rather than anything the lanes
 //! count, and it holds a frame to the cap with the gas the frame may spend. It stops a transaction
 //! through the same latch ([`AdditionalLimit::latch`]), with the compute the transaction may reach
-//! as the limit, and the limit as what was used ([`LimitCheck::ExceedsLimit`]).
+//! as the limit, and its compute at the crossing as what was used ([`LimitCheck::ExceedsLimit`]).
 //!
 //! It also counts what those limits meter at the sites the data-size limit counts: data-size
 //! bytes and write records, on a lane per frame ([`AdditionalLimit`]). The Host stages what it
@@ -100,10 +100,13 @@
 //! a value call its caller cannot fund, one past the call-stack limit — gives that charge back and
 //! is never held for it; a frame revm builds, or answers with a success, returns the stop.
 //!
-//! Deployed code is held just before `return_create` charges it, as its bytes are, so a crossing
-//! leaves no code behind — and only once `return_create` is sure to make the charge: a creation
-//! that cannot pay the regular costs it charges first, or the state gas itself, runs out of gas
-//! there whatever the limit.
+//! Deployed code is held once `return_create` has charged every part of its deposit and before it
+//! commits the creation, as its bytes are ([`ContextTr::admit_code_deposit`]), so a crossing
+//! leaves no code behind: the creation reverts with the stop, on the gas it had before the
+//! deposit. A creation that cannot pay a part of its deposit — the regular costs, the state gas,
+//! the history — runs out of gas there whatever the limit.
+//!
+//! [`ContextTr::admit_code_deposit`]: revm::context::ContextTr::admit_code_deposit
 //!
 //! Wherever the state gas and a record cross together at one site, the state gas is the stop
 //! reported. At a frame start the records are held before revm builds the frame, and a frame they
@@ -510,10 +513,12 @@ pub enum LimitCheck {
         limit: u64,
         /// The usage that crossed it.
         ///
-        /// For [`LimitKind::ComputeGas`] it is the limit itself. Gas detention stops a frame on a
-        /// regular charge its spendable gas could not pay, and the charge's size is not kept; the
-        /// spendable gas the frame had counts as spent, which brings the transaction's compute to
-        /// the limit exactly.
+        /// For [`LimitKind::ComputeGas`] it is the transaction's compute before the charge that
+        /// would have crossed the limit, which the regular ledger bills: gas detention stops a
+        /// frame on a regular charge its spendable gas could not pay, does not make it, and puts
+        /// the frame's gas back to what it had before it. The charge's size is not kept, so this
+        /// is at most the limit, unless a halting frame's leftover, counted as compute, took the
+        /// transaction past it before the charge.
         used: u64,
         /// Whether the limit is a frame budget rather than a transaction-level limit.
         frame_local: bool,

@@ -107,8 +107,8 @@ pub fn neutralize_evm<DB: Database, INSP, ExtEnvs: ExternalEnvTypes>(
     fork: EthSpecId,
 ) -> Option<()> {
     let (precompiles, gas_table) = (neutral_precompiles(fork)?, neutral_gas_table(fork)?);
-    let (_, instructions, evm_precompiles, _) = evm.all_mut();
-    *evm_precompiles = precompiles;
+    evm.replace_precompile_set(precompiles);
+    let (_, instructions, _, _) = evm.all_mut();
     *instructions.gas_table_mut() = gas_table;
     Some(())
 }

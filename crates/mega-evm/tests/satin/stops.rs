@@ -53,7 +53,7 @@ use revm::{
 
 use crate::{
     common::{call, call_with_data, create},
-    detention::{context, work, BENEFICIARY},
+    detention::{context, work, Charges, BENEFICIARY},
     withheld_gas::{priced, Runs, PRICED},
 };
 
@@ -271,16 +271,20 @@ fn assert_cell(limit: Limit, crossing: usize, gas_limit: u64, slot: u64) {
 
     // The limit crossed, and the usage that crossed it: one more byte, record or unit of state gas
     // than the limit. The compute limit is set by the read, at the compute it ran to plus the cap,
-    // and the stop reports it as what was used.
+    // and the stop reports the compute up to the charge that crosses it: after the read's `POP`,
+    // one of the work's.
     let (configured, value) = limits_of(limit, crossing, slot);
     let (value, used) = match value {
         Some(value) => (value, value + 1),
-        None => (before_crossing + CAP, before_crossing + CAP),
+        None => {
+            let left = Charges::default().then(&[2]).work(ROUNDS, 0).left(CAP);
+            (before_crossing + CAP, before_crossing + CAP - left)
+        }
     };
     let stop =
         LimitCheck::ExceedsLimit { kind: limit.kind(), limit: value, used, frame_local: false };
-    // What ran: up to the crossing, and for the compute limit the cap past the read.
-    let ran = if limit == Limit::Compute { value } else { before_crossing };
+    // What ran: up to the crossing, and for the compute limit up to the charge that crosses it.
+    let ran = if limit == Limit::Compute { used } else { before_crossing };
 
     let plain = execute(chain(limit, crossing, false), configured, gas_limit);
     let mut evm =
@@ -630,10 +634,10 @@ fn detained_callee_at(depth: usize) -> MemoryDatabase {
 }
 
 /// A callee that reads the block's timestamp and then computes past the cap does not make its
-/// callers burn their gas: the stop bills the transaction its intrinsic gas plus the limit the read
-/// set — its compute at the read plus the cap — and nothing of what the callers held, whatever the
-/// gas limit, one call down or three, below the execution cap and above it. No caller resumes: the
-/// callee runs the last step.
+/// callers burn their gas: the stop bills the transaction its intrinsic gas plus its compute up to
+/// the charge that crosses the limit the read set — its compute at the read plus the cap — and
+/// nothing of what the callers held, whatever the gas limit, one call down or three, below the
+/// execution cap and above it. No caller resumes: the callee runs the last step.
 #[test]
 fn test_a_callee_that_reads_the_timestamp_does_not_make_its_callers_burn_their_gas() {
     for depth in [1, 3] {
@@ -657,10 +661,12 @@ fn test_a_callee_that_reads_the_timestamp_does_not_make_its_callers_burn_their_g
                     (&outcome.result, outcome.gas),
                     "{case}: the recorder changes nothing"
                 );
+                // The read's `POP`, then the callee's work.
+                let used = limit - Charges::default().then(&[2]).work(ROUNDS, 0).left(CAP);
                 let stop = LimitCheck::ExceedsLimit {
                     kind: LimitKind::ComputeGas,
                     limit,
-                    used: limit,
+                    used,
                     frame_local: false,
                 };
                 assert!(
@@ -673,8 +679,8 @@ fn test_a_callee_that_reads_the_timestamp_does_not_make_its_callers_burn_their_g
                 // The read came after the callers' calls and the callee's log: its compute then is
                 // theirs alone, a sliver of the cap.
                 assert!(limit - CAP < 50_000, "{case}: compute at the read {}", limit - CAP);
-                assert_eq!(outcome.gas.regular, intrinsic.gas.regular + limit, "{case}");
-                assert_eq!(outcome.gas.gas_used, intrinsic.gas.gas_used + limit, "{case}");
+                assert_eq!(outcome.gas.regular, intrinsic.gas.regular + used, "{case}");
+                assert_eq!(outcome.gas.gas_used, intrinsic.gas.gas_used + used, "{case}");
                 assert_eq!(
                     outcome.gas.reservoir_remaining, intrinsic.gas.reservoir_remaining,
                     "{case}: the reservoir comes back"
@@ -985,12 +991,14 @@ fn with_oracle_read(db: MemoryDatabase) -> MemoryDatabase {
 
 /// Runs `db`'s `A` under `limits` with [`ROOMY`] gas and asserts the detention stop: a revert
 /// carrying `MegaLimitExceeded(2, limit)` for the limit the reads set, billed the intrinsic gas
-/// plus that limit and nothing of the gas the transaction had left. The frame `crossing` crossed
-/// it, and ran the last step: no caller resumed. Returns the limit and what the transaction read.
+/// plus the compute up to the charge that crosses that limit, `left` short of it, and nothing of
+/// the gas the transaction had left. The frame `crossing` crossed it, and ran the last step: no
+/// caller resumed. Returns the limit and what the transaction read.
 fn assert_detention_stop(
     db: MemoryDatabase,
     limits: EvmTxRuntimeLimits,
     crossing: Address,
+    left: u64,
 ) -> (u64, mega_evm::VolatileDataAccess) {
     let intrinsic = intrinsic(ROOMY);
     let (recorded, last) =
@@ -1005,12 +1013,9 @@ fn assert_detention_stop(
     );
     let detention = evm.ctx().detention();
     let limit = detention.compute_limit().expect("a read set a limit");
-    let stop = LimitCheck::ExceedsLimit {
-        kind: LimitKind::ComputeGas,
-        limit,
-        used: limit,
-        frame_local: false,
-    };
+    let used = limit - left;
+    let stop =
+        LimitCheck::ExceedsLimit { kind: LimitKind::ComputeGas, limit, used, frame_local: false };
     assert!(
         matches!(&outcome.result, ExecutionResult::Revert { output, .. }
             if output == &stop.revert_data()),
@@ -1018,21 +1023,34 @@ fn assert_detention_stop(
         outcome.result
     );
     assert_eq!(outcome.limit_exceeded, Some(stop));
-    assert_eq!(outcome.gas.regular, intrinsic.gas.regular + limit);
-    assert_eq!(outcome.gas.gas_used, intrinsic.gas.gas_used + limit);
+    assert_eq!(outcome.gas.regular, intrinsic.gas.regular + used);
+    assert_eq!(outcome.gas.gas_used, intrinsic.gas.gas_used + used);
     assert_eq!(outcome.gas.reservoir_remaining, intrinsic.gas.reservoir_remaining);
     assert!(outcome.result.logs().is_empty());
     (limit, detention.accessed())
 }
 
+/// The writes after a read: the read's `POP`, then the thousand fresh slots, of which the reservoir
+/// pays the state and history gas.
+fn pop_then_writes() -> Charges {
+    Charges::default().then(&[2]).fresh_writes(1_000)
+}
+
+/// After the Oracle's read: its `POP`, its caller's, then the thousand fresh slots.
+fn oracle_pops_then_writes() -> Charges {
+    Charges::default().then(&[2, 2]).fresh_writes(1_000)
+}
+
 /// A frame that reads the block's timestamp and then writes a thousand fresh slots stops at the
-/// limit the read set, and bills that limit: the transaction's own frame, a child whose caller
-/// never runs on, and a caller whose child did its work after the read.
+/// first write's charge past the limit the read set, and bills its compute before it: the
+/// transaction's own frame, a child whose caller never runs on, and a caller whose child did its
+/// work after the read.
 #[test]
 fn test_volatile_data_access_oog_does_not_consume_all_gas() {
     let code = thousand_writes(BytecodeBuilder::default().append_many([TIMESTAMP, POP]));
     let db = MemoryDatabase::default().account_code(A, code.stop().build());
-    let (limit, accessed) = assert_detention_stop(db, EvmTxRuntimeLimits::default(), A);
+    let left = pop_then_writes().left(CAP);
+    let (limit, accessed) = assert_detention_stop(db, EvmTxRuntimeLimits::default(), A, left);
     assert!(limit - CAP < 1_000, "the read came first: {}", limit - CAP);
     assert_eq!(accessed, mega_evm::VolatileDataAccess::TIMESTAMP);
 }
@@ -1046,7 +1064,8 @@ fn test_nested_call_block_env_access_child_oog() {
     let db = MemoryDatabase::default()
         .account_code(A, parent.stop().build())
         .account_code(B, child.stop().build());
-    let (limit, _) = assert_detention_stop(db, EvmTxRuntimeLimits::default(), B);
+    let left = pop_then_writes().left(CAP);
+    let (limit, _) = assert_detention_stop(db, EvmTxRuntimeLimits::default(), B, left);
     assert!(limit - CAP < 10_000, "the child read near the start: {}", limit - CAP);
 }
 
@@ -1060,27 +1079,36 @@ fn test_parent_block_env_access_oog_after_nested_call() {
     let db = MemoryDatabase::default()
         .account_code(A, thousand_writes(parent).stop().build())
         .account_code(B, child.stop().build());
-    let (limit, _) = assert_detention_stop(db, EvmTxRuntimeLimits::default(), A);
+    // The read's `POP`, the call's five pushes, its address, `GAS` and cold access, the child's
+    // two pushes, `ADD` and `POP`, the caller's `POP`, then the writes.
+    let left = Charges::default()
+        .then(&[2, 2, 2, 2, 2, 2, 3, 2, 2_600, 3, 3, 3, 2, 2])
+        .fresh_writes(1_000)
+        .left(CAP);
+    let (limit, _) = assert_detention_stop(db, EvmTxRuntimeLimits::default(), A, left);
     assert!(limit - CAP < 1_000, "the read came first: {}", limit - CAP);
 }
 
 /// A call to the Oracle that reads its storage, then a thousand fresh slots: the transaction stops
-/// at the compute at the read plus the Oracle's cap, the spec's 20,000,000, and bills it.
+/// at the first write's charge past its compute at the read plus the Oracle's cap, the spec's
+/// 20,000,000, and bills its compute before it.
 #[test]
 fn test_an_oracle_read_holds_the_transaction_to_its_cap() {
     let code = thousand_writes(call_oracle(BytecodeBuilder::default(), None));
     let db = with_oracle_read(MemoryDatabase::default().account_code(A, code.stop().build()));
-    let (limit, accessed) = assert_detention_stop(db, EvmTxRuntimeLimits::default(), A);
+    let left = oracle_pops_then_writes().left(ORACLE_ACCESS_COMPUTE_GAS);
+    let (limit, accessed) = assert_detention_stop(db, EvmTxRuntimeLimits::default(), A, left);
     assert!(limit - ORACLE_ACCESS_COMPUTE_GAS < 10_000, "{}", limit - ORACLE_ACCESS_COMPUTE_GAS);
     assert_eq!(accessed, mega_evm::VolatileDataAccess::ORACLE);
 }
 
-/// The same with the Oracle called on 65,535 gas: the stop bills the limit, not the gas limit.
+/// The same with the Oracle called on 65,535 gas: the stop bills the compute, not the gas limit.
 #[test]
 fn test_oracle_volatile_data_access_oog_does_not_consume_all_gas() {
     let code = thousand_writes(call_oracle(BytecodeBuilder::default(), Some(0xffff)));
     let db = with_oracle_read(MemoryDatabase::default().account_code(A, code.stop().build()));
-    assert_detention_stop(db, EvmTxRuntimeLimits::default(), A);
+    let left = oracle_pops_then_writes().left(ORACLE_ACCESS_COMPUTE_GAS);
+    assert_detention_stop(db, EvmTxRuntimeLimits::default(), A, left);
 }
 
 /// A contract that calls one that reads the Oracle's storage and then writes a thousand fresh
@@ -1093,20 +1121,23 @@ fn test_parent_runs_out_of_gas_after_oracle_access() {
     let db = MemoryDatabase::default()
         .account_code(A, outer.stop().build())
         .account_code(B, middle.stop().build());
+    let left = oracle_pops_then_writes().left(ORACLE_ACCESS_COMPUTE_GAS);
     let (_, accessed) =
-        assert_detention_stop(with_oracle_read(db), EvmTxRuntimeLimits::default(), B);
+        assert_detention_stop(with_oracle_read(db), EvmTxRuntimeLimits::default(), B, left);
     assert_eq!(accessed, mega_evm::VolatileDataAccess::ORACLE);
 }
 
 /// A read of the block's timestamp, then of the Oracle's storage under a lower cap: the most
-/// restrictive limit binds, the Oracle's, and the stop bills it.
+/// restrictive limit binds, the Oracle's, and the stop bills the compute up to the charge that
+/// crosses it.
 #[test]
 fn test_both_volatile_data_access_oog_does_not_consume_all_gas() {
     const ORACLE_CAP: u64 = 1_000_000;
     let code = call_oracle(BytecodeBuilder::default().append_many([TIMESTAMP, POP]), Some(0xffff));
     let db = MemoryDatabase::default().account_code(A, thousand_writes(code).stop().build());
     let limits = EvmTxRuntimeLimits::default().with_oracle_access_compute_gas_limit(ORACLE_CAP);
-    let (limit, accessed) = assert_detention_stop(with_oracle_read(db), limits, A);
+    let left = oracle_pops_then_writes().left(ORACLE_CAP);
+    let (limit, accessed) = assert_detention_stop(with_oracle_read(db), limits, A, left);
     assert!(limit - ORACLE_CAP < 10_000, "the Oracle's read binds: {limit}");
     assert_eq!(
         accessed,
@@ -1114,13 +1145,14 @@ fn test_both_volatile_data_access_oog_does_not_consume_all_gas() {
     );
 }
 
-/// A read of the block's timestamp, then compute past the cap: the stop comes at the compute at the
-/// read plus the cap.
+/// A read of the block's timestamp, then compute past the cap: the stop comes at the work's first
+/// charge past the compute at the read plus the cap.
 #[test]
 fn test_volatile_access_post_access_cap_enforced() {
     let code = work(BytecodeBuilder::default().append_many([TIMESTAMP, POP]), ROUNDS);
     let db = MemoryDatabase::default().account_code(A, code.stop().build());
-    let (limit, _) = assert_detention_stop(db, EvmTxRuntimeLimits::default(), A);
+    let left = Charges::default().then(&[2]).work(ROUNDS, 0).left(CAP);
+    let (limit, _) = assert_detention_stop(db, EvmTxRuntimeLimits::default(), A, left);
     assert!(limit - CAP < 1_000, "{}", limit - CAP);
 }
 
@@ -1470,16 +1502,32 @@ fn answered_chain(answered: Answered, twin: bool) -> MemoryDatabase {
         .account_balance(C, U256::from(1))
 }
 
+/// The compute `answered`'s chain spends after `A`'s read up to the answered call: `A`'s `POP`,
+/// then the three calls down — five pushes, the address, `GAS` and the callee's cold access —
+/// `C`'s own being, for the precompile, the price word's `MSTORE` — two pushes, the opcode and a
+/// word of memory — the call's five pushes, its address, `GAS` and the precompile's warm access.
+fn to_the_answer(answered: Answered) -> u64 {
+    let call_all = 2 * 5 + 3 + 2 + 2_600;
+    let c = match answered {
+        Answered::Precompile => 3 + 3 + 3 + 3 + 2 * 2 + 3 + 2 * 2 + 3 + 2 + 100,
+        _ => call_all,
+    };
+    2 + 2 * call_all + c
+}
+
 /// The limits `answered`'s chain crosses its limit under, and the stop it reports. The compute
-/// limit is set by `A`'s read, at the read's own two gas plus the cap; the state-gas limit is one
-/// gas short of the schedule's new account, which the test database prices at the minimum bucket.
+/// limit is set by `A`'s read, at the read's own two gas plus the cap, and the answer is the
+/// charge that crosses it: the stop reports the compute when the answered call was made. The
+/// state-gas limit is one gas short of the schedule's new account, which the test database prices
+/// at the minimum bucket.
 fn answered_limits(answered: Answered) -> (EvmTxRuntimeLimits, LimitCheck) {
     let stop =
         |kind, limit, used| LimitCheck::ExceedsLimit { kind, limit, used, frame_local: false };
     match answered {
-        Answered::PastTheAllowance | Answered::Precompile => {
-            (EvmTxRuntimeLimits::default(), stop(LimitKind::ComputeGas, 2 + CAP, 2 + CAP))
-        }
+        Answered::PastTheAllowance | Answered::Precompile => (
+            EvmTxRuntimeLimits::default(),
+            stop(LimitKind::ComputeGas, 2 + CAP, 2 + to_the_answer(answered)),
+        ),
         Answered::NewAccount => {
             let account = satin_gas_params().get(GasId::new_account_state_gas());
             (
@@ -1575,18 +1623,18 @@ fn run_answered(
 /// One answered cell, both columns: `answered`'s chain at `gas_limit`, without the rewrite and
 /// with it.
 ///
-/// A compute stop bills exactly its limit past the intrinsic gas. Any other stop bills what ran,
-/// read off the twin: the same frames without limits, each reverting once its call returned, which
-/// bills what the stopped frames ran plus the two pushes of each revert. The twin runs on the same
-/// engine, so that bill pins that a stop bills what ran and no more; it pins no price, and a
-/// charge both runs make, such as `C`'s own `CALL`, would be wrong in both alike.
+/// A compute stop bills its compute up to the answer past the intrinsic gas. Any other stop bills
+/// what ran, read off the twin: the same frames without limits, each reverting once its call
+/// returned, which bills what the stopped frames ran plus the two pushes of each revert. The twin
+/// runs on the same engine, so that bill pins that a stop bills what ran and no more; it pins no
+/// price, and a charge both runs make, such as `C`'s own `CALL`, would be wrong in both alike.
 fn assert_answered_cell(answered: Answered, gas_limit: u64) {
     let row = format!("{answered:?}, gas limit {gas_limit}");
     let intrinsic = intrinsic(gas_limit);
     let (limits, stop) = answered_limits(answered);
-    let LimitCheck::ExceedsLimit { kind, limit, .. } = stop else { unreachable!() };
+    let LimitCheck::ExceedsLimit { kind, used, .. } = stop else { unreachable!() };
     let ran = if kind == LimitKind::ComputeGas {
-        limit
+        used
     } else {
         let twin =
             execute(answered_chain(answered, true), EvmTxRuntimeLimits::no_limits(), gas_limit);
@@ -1630,10 +1678,8 @@ fn assert_answered_cell(answered: Answered, gas_limit: u64) {
             "{cell}: no value moved"
         );
         if answered == Answered::Precompile {
-            let [(allowance, false)] = run.ran_on[..] else {
-                panic!("{cell}: the precompile ran on {:?}", run.ran_on)
-            };
-            assert!(allowance < CAP, "{cell}: run on the allowance, {allowance}");
+            let allowance = CAP - to_the_answer(answered);
+            assert_eq!(run.ran_on, [(allowance, false)], "{cell}: run on the allowance");
         }
     }
     assert_eq!(rewritten.outcome.result, plain.outcome.result, "{row}");
