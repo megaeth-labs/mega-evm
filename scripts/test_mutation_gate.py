@@ -180,6 +180,10 @@ class NothingToTest(GateCase):
         results = self.results(files={"no-mutants.txt": "INFO Diff file is empty\n"})
         self.assert_nothing_to_test(results, "Diff file is empty")
 
+    def test_cargo_mutants_said_so_for_a_diff_of_no_rust_source(self) -> None:
+        results = self.results(files={"no-mutants.txt": "INFO Diff changes no Rust source files\n"})
+        self.assert_nothing_to_test(results, "Diff changes no Rust source files")
+
     def test_every_mutant_unviable(self) -> None:
         results = self.results(outcomes=outcomes_json(mutant(UNVIABLE, "Unviable")))
         code, text = self.report(results)
@@ -287,6 +291,17 @@ class NoteEmpty(GateCase):
         code, text = self.report(results)
         self.assertEqual(code, 0, text)
 
+    def test_it_records_a_diff_of_no_rust_source(self) -> None:
+        # What cargo-mutants 27.1.0 prints, and all it does, for a diff that changes only
+        # Markdown files: it writes no results and exits 0.
+        results = self.tmp / "mutants.out"
+        log = "\x1b[32m INFO\x1b[0m Diff changes no Rust source files\n"
+        self.assertEqual(self.note(log, results), 0)
+        self.assertEqual((results / "no-mutants.txt").read_text(),
+                         "INFO Diff changes no Rust source files\n")
+        code, text = self.report(results)
+        self.assertEqual(code, 0, text)
+
     def test_it_refuses_output_that_says_no_such_thing(self) -> None:
         results = self.tmp / "mutants.out"
         self.assertEqual(self.note("error: could not compile\n", results), 1)
@@ -330,6 +345,31 @@ class TimeoutRe(GateCase):
     def test_results_without_outcomes_select_nothing(self) -> None:
         self.assertEqual(self.regexes(self.results(files={"mutants.json": "[]"})), [])
         self.assertEqual(self.regexes(self.tmp / "absent"), [])
+
+
+class DiffScope(unittest.TestCase):
+    """The diff the driver hands cargo-mutants holds every Rust source of the crate and nothing else."""
+
+    ROOT = SCRIPTS.parent
+    SRC = "crates/mega-evm/src"
+
+    def ls_files(self, *pathspecs: str) -> list[str]:
+        run = subprocess.run(["git", "ls-files", "--", *pathspecs], cwd=self.ROOT,
+                             capture_output=True, text=True, timeout=60)
+        if run.returncode != 0:
+            self.skipTest(f"not a git checkout: {run.stderr.strip()}")
+        return run.stdout.splitlines()
+
+    def test_the_pathspec_selects_every_rust_source_and_nothing_else(self) -> None:
+        driver = (SCRIPTS / "mutation_test.sh").read_text()
+        match = re.search(r"^SRC_PATHSPEC='([^']+)'$", driver, re.MULTILINE)
+        self.assertIsNotNone(match, "the driver names its pathspec")
+        tracked = self.ls_files(self.SRC)
+        rust = [path for path in tracked if path.endswith(".rs")]
+        self.assertIn(f"{self.SRC}/lib.rs", rust)
+        self.assertTrue(any(not path.endswith(".rs") for path in tracked),
+                        "src/ holds files that are not Rust sources, which the scope leaves out")
+        self.assertEqual(self.ls_files(match.group(1)), rust)
 
 
 class DriverGuard(unittest.TestCase):

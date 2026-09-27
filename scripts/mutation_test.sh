@@ -46,6 +46,10 @@ cd "$ROOT_DIR"
 rm -rf "$OUT_DIR"
 
 SUPPRESS="${SUPPRESS:-$ROOT_DIR/mutants/suppressions.toml}"
+# The files cargo-mutants can mutate: the crate's Rust sources, at any depth. The
+# `:(glob)` magic lets `**/` match no directory, so the files at the top of src/
+# are in; git's default pathspec would need a second `/` there and leave them out.
+SRC_PATHSPEC=':(glob)crates/mega-evm/src/**/*.rs'
 JOBS="${JOBS:-$(nproc)}"
 PKG_ARGS=(--package mega-evm)
 CONFIG_ARGS=()
@@ -158,11 +162,12 @@ case "$cmd" in
         base="${1:?usage: mutation_test.sh diff <base-ref>}"
         diff_file="$OUT_DIR.diff"
         mkdir -p "$(dirname "$diff_file")"
-        # Only src/ is mutatable; scoping the diff there avoids a non-empty diff
-        # (and a wasted run) when a PR touches only tests/, Cargo.toml, etc. An
-        # empty diff still goes to cargo-mutants, which says it has nothing to
-        # mutate, so the gate passes on its word rather than on missing results.
-        git diff --no-color "$base"...HEAD -- 'crates/mega-evm/src/**' > "$diff_file"
+        # Only the crate's Rust sources are mutatable; scoping the diff to them
+        # avoids a non-empty diff (and a wasted run) when a PR touches only tests/,
+        # Cargo.toml or a module guide under src/. An empty diff still goes to
+        # cargo-mutants, which says it has nothing to mutate, so the gate passes on
+        # its word rather than on missing results.
+        git diff --no-color "$base"...HEAD -- "$SRC_PATHSPEC" > "$diff_file"
         run_mutants --in-diff "$diff_file"
         ;;
     full)

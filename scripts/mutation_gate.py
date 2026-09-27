@@ -11,7 +11,8 @@ Subcommands:
   note-empty  --log <cargo-mutants output> --results <mutants.out dir>
         Record that cargo-mutants itself said it had nothing to mutate. With
         `--in-diff`, cargo-mutants writes no results at all when the diff is
-        empty or touches no mutant, and says so only in its output; this writes
+        empty, changes no Rust source file or touches no mutant, and says so
+        only in its output; this writes
         that line to <results>/no-mutants.txt. Does nothing when <results>
         exists, and fails when it does not and the output says no such thing.
 
@@ -62,8 +63,13 @@ from pathlib import Path
 MAX_SURVIVORS_SHOWN = 20
 
 # What cargo-mutants 27 prints, and writes no results for, when `--in-diff`
-# leaves it nothing to mutate.
-NOTHING_TO_MUTATE = ("No mutants to filter", "Diff file is empty")
+# leaves it nothing to mutate: a diff touching no mutant, an empty diff, and a
+# diff changing no `.rs` file (a module guide under src/, say).
+NOTHING_TO_MUTATE = (
+    "No mutants to filter",
+    "Diff file is empty",
+    "Diff changes no Rust source files",
+)
 
 # The file `note-empty` records such a line in.
 NO_MUTANTS_NOTE = "no-mutants.txt"
