@@ -49,7 +49,9 @@ no mutant, or a `no-mutants.txt` written by `note-empty`. Anything else fails:
 no results directory, no outcomes, a run that did not finish, a baseline that
 failed or is missing, no `mutants.json` beside the outcomes, a selected mutant
 without an outcome or an outcome of a mutant not selected, an outcome of a kind
-this script does not know.
+this script does not know, and results holding the `run-failed.txt` that
+scripts/mutation_test.sh writes into them when the run that wrote them exited
+abnormally, whatever else they hold.
 
 The gate is intended to run diff-scoped (cargo mutants --in-diff), so every
 mutant it sees lives on a line the PR changed; an unsuppressed survivor there is
@@ -87,6 +89,10 @@ NOTHING_TO_MUTATE = (
 
 # The file `note-empty` records such a line in.
 NO_MUTANTS_NOTE = "no-mutants.txt"
+
+# The file scripts/mutation_test.sh writes into the results of a run it started that exited
+# abnormally: an exit the files the run left cannot show.
+RUN_FAILED_NOTE = "run-failed.txt"
 
 # The outcome kinds a mutant can have, by the list they are reported in.
 MUTANT_SUMMARIES = {
@@ -196,6 +202,12 @@ def load_run(results: Path) -> Run:
         raise ResultsError(
             f"no results at {results}: the run did not happen, crashed before it wrote "
             f"anything, or wrote elsewhere"
+        )
+    failed = results / RUN_FAILED_NOTE
+    if failed.exists():
+        raise ResultsError(
+            f"the run that wrote {results} exited abnormally ({failed.read_text().strip()}), "
+            f"so what it left does not show that it finished"
         )
     outcomes_path = results / "outcomes.json"
     if not outcomes_path.exists():

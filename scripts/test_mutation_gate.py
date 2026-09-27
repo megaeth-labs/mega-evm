@@ -250,6 +250,16 @@ class ResultsThatCannotBeScored(GateCase):
         self.assertEqual(code, 2, text)
         self.assertIn("baseline failed", text)
 
+    def test_a_recheck_that_exited_abnormally(self) -> None:
+        # Its files record the timeout caught and the run finished; the driver's note of its exit
+        # outweighs them.
+        results = self.results(outcomes=outcomes_json(mutant(TIMEOUT, "Timeout")))
+        recheck = self.results("recheck", outcomes=outcomes_json(mutant(TIMEOUT, "CaughtMutant")),
+                               files={"run-failed.txt": "cargo-mutants exited 70\n"})
+        code, text = self.report(results, recheck)
+        self.assertEqual(code, 2, text)
+        self.assertIn("exited abnormally (cargo-mutants exited 70)", text)
+
 
 class NothingToTest(GateCase):
     """A run that tested nothing passes only on the producer's own word for it."""
@@ -493,6 +503,88 @@ class DiffScope(unittest.TestCase):
         self.assertTrue(any(not path.endswith(".rs") for path in tracked),
                         "src/ holds files that are not Rust sources, which the scope leaves out")
         self.assertEqual(self.ls_files(match.group(1)), rust)
+
+
+def bash5() -> str | None:
+    """A bash 5 or newer, if this machine has one."""
+    for shell in (shutil.which("bash"), "/opt/homebrew/bin/bash", "/usr/local/bin/bash",
+                  "/usr/bin/bash", "/bin/bash"):
+        if shell and Path(shell).exists() and (DriverGuard.bash_major(shell) or 0) >= 5:
+            return shell
+    return None
+
+
+# A stand-in for `cargo mutants`: it writes the results the test prepared for the run it is asked
+# for, the first run or the re-check (the one given `--re`), and exits as the test says.
+FAKE_CARGO = """#!/bin/sh
+[ "$1" = mutants ] || exit 99
+shift
+if [ "$1" = --version ]; then echo "cargo-mutants 27.1.0"; exit 0; fi
+out=""; run=main
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --output) out="$2"; shift ;;
+        --re) run=recheck ;;
+    esac
+    shift
+done
+if [ -d "$FAKE_RUNS/$run" ]; then
+    mkdir -p "$out/mutants.out"
+    cp -R "$FAKE_RUNS/$run/." "$out/mutants.out/"
+fi
+exit "$(cat "$FAKE_RUNS/$run.exit")"
+"""
+
+
+class DriverRecheck(GateCase):
+    """scripts/mutation_test.sh re-runs a timed-out mutant alone and carries a failed re-check's
+    exit into its results, which the gate then refuses."""
+
+    def drive(self, recheck_exit: int, recheck: dict | None) -> tuple[int, str, Path]:
+        shell = bash5()
+        if shell is None:
+            self.skipTest("no bash 5 or newer on this machine")
+        runs = self.tmp / "runs"
+        self.results("runs/main", outcomes=outcomes_json(
+            mutant(CAUGHT, "CaughtMutant"), mutant(TIMEOUT, "Timeout")))
+        (runs / "main.exit").write_text("3\n")
+        if recheck is not None:
+            self.results("runs/recheck", outcomes=recheck)
+        (runs / "recheck.exit").write_text(f"{recheck_exit}\n")
+        bin_dir = self.tmp / "bin"
+        bin_dir.mkdir()
+        (bin_dir / "cargo").write_text(FAKE_CARGO)
+        (bin_dir / "cargo").chmod(0o755)
+        (bin_dir / "python3").symlink_to(sys.executable)
+        out = self.tmp / "out" / "mutants"
+        env = {"PATH": f"{bin_dir}:/usr/bin:/bin", "FAKE_RUNS": str(runs), "OUT_DIR": str(out),
+               "JOBS": "1", "SUPPRESS": str(self.tmp / "no-suppressions.toml")}
+        run = subprocess.run([shell, str(DriverGuard.DRIVER), "file", "crates/mega-evm/src/a.rs"],
+                             capture_output=True, text=True, timeout=120, env=env)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertIn("Re-checking 1 timed-out mutant(s) one at a time", run.stderr)
+        code, text = self.report(out / "mutants.out", out / "recheck" / "mutants.out")
+        return code, text, out / "recheck" / "mutants.out"
+
+    def test_a_recheck_that_finishes_decides_the_timeout(self) -> None:
+        code, text, recheck = self.drive(0, outcomes_json(mutant(TIMEOUT, "CaughtMutant")))
+        self.assertFalse((recheck / "run-failed.txt").exists())
+        self.assertEqual(code, 0, text)
+        self.assertIn("1 caught, 0 survived, 0 timed out again", text)
+
+    def test_a_recheck_that_exits_abnormally_is_refused(self) -> None:
+        # Its files are those of a finished run that caught the timeout: only its exit says
+        # otherwise.
+        code, text, recheck = self.drive(70, outcomes_json(mutant(TIMEOUT, "CaughtMutant")))
+        self.assertEqual((recheck / "run-failed.txt").read_text(), "cargo-mutants exited 70\n")
+        self.assertEqual(code, 2, text)
+        self.assertIn("exited abnormally (cargo-mutants exited 70)", text)
+
+    def test_a_recheck_that_writes_nothing_is_refused(self) -> None:
+        code, text, recheck = self.drive(1, None)
+        self.assertEqual(sorted(p.name for p in recheck.iterdir()), ["run-failed.txt"])
+        self.assertEqual(code, 2, text)
+        self.assertIn("exited abnormally (cargo-mutants exited 1)", text)
 
 
 class DriverGuard(unittest.TestCase):

@@ -64,6 +64,7 @@ A run that tested nothing passes only on the producer's own word for it: cargo-m
 
 A mutant that **timed out** was tested beside the others the run tests at once, each running the whole suite on the same cores, so the driver re-runs every unsuppressed one once, alone (`--jobs 1`, into `recheck/mutants.out`), and the gate takes that outcome for it.
 One caught alone is caught, one that survives alone is a survivor, and one that times out again stays inconclusive and fails the gate.
+A re-check that exits abnormally proves nothing by the files it left, so the driver records its exit in its results (`run-failed.txt`), and the gate refuses to score them, saying why.
 
 ## Suppressions (hybrid)
 

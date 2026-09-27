@@ -16,8 +16,9 @@
 # When cargo-mutants has nothing to mutate and writes no results, which it does
 # when --in-diff leaves no mutant, the driver records its saying so there
 # instead. A mutant that timed out is re-run once, alone, into
-# $OUT_DIR/recheck/mutants.out/. Run scripts/mutation_gate.py afterwards to score
-# + gate the run, passing both.
+# $OUT_DIR/recheck/mutants.out/; a re-check that exits abnormally has its exit
+# recorded there, in run-failed.txt, and the gate refuses it. Run
+# scripts/mutation_gate.py afterwards to score + gate the run, passing both.
 #
 # MUTANTS_SHARD=k/n runs only shard k (0-based) of n of whichever mutant set the
 # subcommand selects (cargo-mutants' own --shard), for a diff too large for one
@@ -148,10 +149,14 @@ recheck_timeouts() {
         --no-shuffle \
         -vV \
         "${re_args[@]}" 2>&1 | tee "$OUT_DIR/recheck.log" || rc=$?
-    # A re-check that fails as a run leaves the timeouts standing, and the gate
-    # reports its results as it finds them rather than the job ending here.
+    # A re-check that fails as a run proves nothing by the files it left, which
+    # can look like a finished run's. Its exit goes into its results, which the
+    # gate then refuses to score, saying why, rather than the job ending here
+    # without a report.
     if ! run_outcome "$rc"; then
         echo "the re-check of the timed-out mutants failed (exit $rc); see $OUT_DIR/recheck.log" >&2
+        mkdir -p "$OUT_DIR/recheck/mutants.out"
+        echo "cargo-mutants exited $rc" > "$OUT_DIR/recheck/mutants.out/run-failed.txt"
     fi
 }
 
