@@ -318,8 +318,12 @@ where
 /// sees it fail and the frame runs on. So the record a callback leaves is put back to what it was
 /// before the callback, and the frame ends on the charges it made itself.
 ///
-/// It stands in for the inspector in revm's instruction loop alone, which makes the four callbacks
-/// forwarded here and no other; frame starts and ends reach the inspector itself.
+/// It stands in for the inspector in revm's instruction loop alone (`inspect_instructions`), which
+/// makes the four callbacks forwarded here and no other; frame starts and ends reach the inspector
+/// itself. The other callbacks are left to the trait's no-op defaults rather than forwarded,
+/// because the loop never makes them and a forward nothing reaches is one nothing tests. So a
+/// callback the loop gains in a later revision of the fork reaches no inspector until it is
+/// forwarded here: a fork upgrade checks the loop's callbacks against this list.
 pub(crate) struct StepGuard<'a, I>(pub(crate) &'a mut I);
 
 impl<I, CTX, INTR> Inspector<CTX, INTR> for StepGuard<'_, I>
