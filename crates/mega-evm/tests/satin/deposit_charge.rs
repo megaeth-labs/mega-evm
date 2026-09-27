@@ -46,13 +46,22 @@ const A: Address = address!("0000000000000000000000000000000000a00001");
 const B: Address = address!("0000000000000000000000000000000000a00002");
 
 /// The bytes the creation deploys.
-const CODE_LEN: u16 = 1_024;
+///
+/// Enough that the deposit, and not `B`, binds at any byte price. `B` keeps a sixty-fourth of what
+/// it forwards, and below the execution cap it pays the history of the creation's two write
+/// records, 80 bytes, out of it after the forward; the creation pays the history of every byte of
+/// its code at the same price, and their state gas on top. More than 63 × 80 bytes of code outweigh
+/// the records whatever the prices, where a kilobyte does only while a state byte is dear.
+const CODE_LEN: u16 = 6 * 1_024;
 
 /// Below the execution cap: there is no reservoir, and every state charge is paid out of regular
 /// gas.
-const BELOW_CAP: u64 = 10_000_000;
+const BELOW_CAP: u64 = 100_000_000;
 /// Above the execution cap: the reservoir pays every state and history charge.
 const ABOVE_CAP: u64 = TX_GAS_LIMIT_CAP + 100_000_000;
+
+/// The neutral configuration's gas limit: Osaka holds a transaction to 2^24 gas (EIP-7825).
+const NEUTRAL_GAS_LIMIT: u64 = 10_000_000;
 
 /// A frame cap below what the creation keeps with its code, and above what any other frame keeps.
 const FRAME_CAP: u64 = 1_000;
@@ -135,7 +144,7 @@ fn evm(
 const fn gas_limit(setup: Setup) -> u64 {
     match setup {
         Setup::Satin(gas_limit) => gas_limit,
-        Setup::NeutralOsaka => BELOW_CAP,
+        Setup::NeutralOsaka => NEUTRAL_GAS_LIMIT,
     }
 }
 
@@ -203,9 +212,10 @@ fn creation_end_under(setup: Setup, gas: u64, limits: EvmTxRuntimeLimits) -> Cre
 /// and the unlimited outcome one gas short of it.
 ///
 /// At the boundary the creation has no regular gas left after the deposit's last charge, so it is
-/// exactly enough; one gas short the creation runs out of gas and deploys nothing.
+/// exactly enough; one gas short the creation runs out of gas and deploys nothing. The search
+/// starts from half the transaction's gas, which leaves `A` the other half for its own writes.
 fn boundary(setup: Setup) -> (u64, MegaTransactionOutcome) {
-    let (mut short, mut enough) = (0, 5_000_000);
+    let (mut short, mut enough) = (0, gas_limit(setup) / 2);
     assert!(
         !creation_end(setup, short).deposited && creation_end(setup, enough).deposited,
         "{setup:?}: the search brackets the boundary"
