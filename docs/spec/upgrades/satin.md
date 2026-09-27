@@ -306,6 +306,7 @@ When each charge is made:
   A gas limit that cannot cover it MUST make the transaction invalid (see [Two-Pool Gas](#4-two-pool-gas-eip-8037-replaces-the-dual-gas-model)).
   The body's history gas MUST NOT be reported on the state ledger.
 - The records of the applied EIP-7702 authorities, and the record the transaction's own frame makes (its value's recipient or its created account), MUST be charged before the first frame.
+  The authorities' records are the transaction's own and MUST be kept when the first frame fails or is stopped; the first frame's record is that frame's, and comes back with it.
 - A log, a storage write's record and the record of a `SELFDESTRUCT`'s beneficiary MUST be charged by the opcode, once it completed.
 - A `CALL`, `CALLCODE`, `CREATE` or `CREATE2` MUST charge its own frame for the records the frame it starts makes (a value transfer's sender and recipient; a creation's creator nonce and created account), after the gas it forwards is computed, so the forward is not reduced by them.
   A caller that cannot pay MUST halt with out-of-gas, and the frame MUST NOT start.
@@ -409,15 +410,21 @@ Every transaction-level limit — data size, KV updates, state gas, and gas dete
 
 1. The frame that crosses the limit MUST revert with `MegaLimitExceeded(uint8 kind, uint64 limit)` as its output.
 2. From then on no frame runs another instruction: a caller receiving that result MUST return the same revert instead of resuming, a frame about to start MUST be answered with it, and every result returned upward MUST be rewritten to it, whatever produced the result.
-3. The transaction MUST settle like an EIP-8037 revert: it keeps none of its writes or logs; the sender pays the intrinsic gas, the body's history gas and what ran; the unspent regular gas and the reservoir return to the sender.
+3. The transaction MUST settle like an EIP-8037 revert: every write and log its frames made MUST be reverted, the value its first frame carried and that frame's write record included; the sender pays the intrinsic gas, the body's history gas, the charges of what it keeps from before the first frame (below), and what ran; the unspent regular gas and the reservoir return to the sender.
 4. The transaction is included with a failed receipt, and its usage counts towards the block's counters.
+
+What was applied before the first frame is not the frames' doing, and a later stop MUST NOT revert it, as a revert of the first frame does not:
+
+- the sender's nonce and the fees it pays; for a deposit, its mint and the caller account it created, with that account's state gas;
+- the EIP-7702 authorizations admitted before the first frame: their authorities' nonce and delegation writes, their state gas, their write records, and the history gas those records cost.
 
 A limit is enforced before the writes it guards:
 
 - A frame whose start would cross a limit MUST be answered with the stop before it is built, so no value moves; a stopped creation still bumps its creator's nonce.
   The one exception is the state gas the calling opcode charges upfront for the account the frame adds: it is held once the frame is decided, so a frame built by then returns the stop before its first instruction, a frame answered without running is rewritten to the stop, and what the start moved is reverted with the frames the stop reverts.
 - A body over the data-size limit MUST stop the transaction before it runs: no authorization is applied, no record made outside a frame is charged, the first frame's start is charged nothing, and the first frame is answered with the stop.
-- EIP-7702 authorities whose state gas or records would cross a limit MUST be taken back before the first frame.
+- EIP-7702 authorities whose state gas or records would cross a limit MUST be taken back before the first frame, with their writes and the state gas applying them charged; the first frame is then answered with the stop.
+  Authorities admitted there are kept through a later stop, as above.
 
 A frame budget MUST revert its frame alone, with the same revert data, and its caller continues.
 A real out-of-gas, a precompile given less than its price, and an invalid opcode still halt and consume the frame's gas.
