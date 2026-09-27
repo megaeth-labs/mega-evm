@@ -3,7 +3,7 @@
 The EVM of MegaETH, built on [revm](https://github.com/bluealloy/revm) and [op-revm](https://github.com/ethereum-optimism/optimism/tree/develop/rust/op-revm).
 
 This is the 2.x line: the **Satin** engine.
-The legacy engine (specs `Equivalence` through `Rex7`) is the 1.x line.
+The legacy engine (specs `Equivalence` through `Rex6`) is the 1.x line.
 
 ## Base
 
