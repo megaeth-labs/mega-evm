@@ -1,13 +1,14 @@
 name: Mutation Testing
 
-# All mutation-testing CI lives here. Four concerns, one file:
+# All mutation-testing CI lives here. Five concerns, one file:
 #   * cargo-mutants gate   — generic operators (diff-scoped on PRs, full nightly)
 #   * infrastructure gate  — the same operators on the code that implements the
 #                            test gates, which the production scope excludes
 #   * spec-gate            — universalmutator + comby custom operators for
 #                            backward-compat spec gates (diff PR + nightly sweep)
 #   * suppression hygiene  — flag suppressions that no longer match a live mutant
-# All four share the scorer scripts/mutation_gate.py. See mutants/README.md.
+#   * gate self-test       — the scorer's and the driver's own tests
+# All four gates share the scorer scripts/mutation_gate.py. See mutants/README.md.
 
 on:
   workflow_dispatch:
@@ -95,7 +96,7 @@ jobs:
             try {
               body = fs.readFileSync('mutation-report.md', 'utf8');
             } catch {
-              body = '## 🧬 Mutation testing\n\nNo report produced (no mega-evm changes to mutate).';
+              body = '## 🧬 Mutation testing\n\nNo report produced: the mutation run failed before the gate scored it. See the job log.';
             }
             const marker = '<!-- mutation-testing-report -->';
             body = `${marker}\n${body}`;
@@ -124,6 +125,7 @@ jobs:
           path: |
             target/mutants/mutants.out
             target/mutants.diff
+            target/mutants.log
             mutation-report.md
           if-no-files-found: ignore
 
@@ -182,7 +184,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: mutation-results-infra
-          path: target/mutants-infra/mutants.out
+          path: |
+            target/mutants-infra/mutants.out
+            target/mutants-infra.log
           if-no-files-found: ignore
 
   # ── spec-gate: diff-scoped blocking gate on PRs ────────────────────────────
@@ -317,6 +321,19 @@ jobs:
           name: spec-gate-mutation-${{ matrix.subsystem }}
           path: target/umutate/${{ matrix.subsystem }}
           if-no-files-found: ignore
+
+  # ── gate self-test: the scorer's and the driver's own tests ────────────────
+  # The gate reads a run fail-closed; its tests hold every way a run can leave
+  # results that say nothing to a failure, and the driver's refusal of an old
+  # bash. Seconds long, so it runs on every PR.
+  gate-selftest:
+    name: mutation gate self-test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test the gate and the driver's guards
+        run: python3 -m unittest discover -s scripts -p 'test_*.py' -v
 
   # ── suppression hygiene: gate on relevant PR changes, plus nightly ─────────
   # `changes` scopes the hygiene job to PRs that could orphan a suppression

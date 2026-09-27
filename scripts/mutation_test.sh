@@ -13,11 +13,25 @@
 # own.
 #
 # Results land in $OUT_DIR/mutants.out/ (missed.txt, caught.txt, outcomes.json).
-# Run scripts/mutation_gate.py afterwards to score + gate the run.
+# When cargo-mutants has nothing to mutate and writes no results, which it does
+# when --in-diff leaves no mutant, the driver records its saying so there
+# instead. Run scripts/mutation_gate.py afterwards to score + gate the run.
 #
 # MUTANTS_SHARD=k/n runs only shard k (0-based) of n of whichever mutant set the
 # subcommand selects (cargo-mutants' own --shard), for a diff too large for one
 # job; give each shard its own OUT_DIR and gate each one. See REVIEW.md.
+
+# Bash 5 or newer: the driver relies on mapfile and on expanding empty arrays
+# under `set -u`, which bash 3.2 (macOS's /bin/bash) does not have. Written in
+# POSIX sh so the refusal itself runs under any shell.
+case "${BASH_VERSION:-}" in
+    [5-9].* | [1-9][0-9].*) ;;
+    *)
+        echo "scripts/mutation_test.sh needs bash 5 or newer; this shell is ${BASH_VERSION:+bash }${BASH_VERSION:-not bash}." >&2
+        echo "Install a newer bash (on macOS: brew install bash) and run it as 'bash scripts/mutation_test.sh ...' with that bash first on PATH." >&2
+        exit 1
+        ;;
+esac
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -34,6 +48,10 @@ INFRA_FILES=(
 )
 
 cd "$ROOT_DIR"
+
+# Clear the results before anything that can fail, so a run that stops early
+# leaves nothing behind for the gate to mistake for its results.
+rm -rf "$OUT_DIR"
 
 if ! cargo mutants --version >/dev/null 2>&1; then
     echo "cargo-mutants is required. Install with 'cargo install cargo-mutants --locked'." >&2
@@ -55,34 +73,46 @@ EXCLUDE_ARGS=()
 SHARD_ARGS=()
 [[ -n "${MUTANTS_SHARD:-}" ]] && SHARD_ARGS=(--shard "$MUTANTS_SHARD")
 
+# cargo-mutants exit codes (https://mutants.rs/exit-codes.html): 0 = all caught,
+# 2 = missed mutants, 3 = timeouts. Those three are normal run outcomes that the
+# gate (scripts/mutation_gate.py) is responsible for scoring, so swallow them and
+# let the gate be the single source of truth for pass/fail. Everything else
+# (1 usage, 4 baseline broken, 5/6 bad --in-diff, 70 internal) is a real failure
+# of the run itself and must abort.
+run_outcome() {
+    case "$1" in
+        0 | 2 | 3) return 0 ;;
+        *) return "$1" ;;
+    esac
+}
+
 run_mutants() {
     rm -rf "$OUT_DIR"
     mkdir -p "$(dirname "$OUT_DIR")" # cargo-mutants creates OUT_DIR itself but not its parents
     # --no-shuffle: test mutants in deterministic source order so runs are
     #   reproducible and comparable (recommended by https://mutants.rs/pr-diff.html).
     # -vV: verbose progress + version banner, for diagnosable CI logs.
+    local args=(
+        "${CONFIG_ARGS[@]}"
+        "${PKG_ARGS[@]}"
+        --jobs "$JOBS"
+        --output "$OUT_DIR"
+        --no-shuffle
+        -vV
+        "${EXCLUDE_ARGS[@]}"
+        "${SHARD_ARGS[@]}"
+        "$@"
+    )
+    # A listing writes no results: there is nothing to record or re-check.
+    if [[ " $* " == *" --list "* ]]; then
+        cargo mutants "${args[@]}"
+        return
+    fi
     local rc=0
-    cargo mutants \
-        "${CONFIG_ARGS[@]}" \
-        "${PKG_ARGS[@]}" \
-        --jobs "$JOBS" \
-        --output "$OUT_DIR" \
-        --no-shuffle \
-        -vV \
-        "${EXCLUDE_ARGS[@]}" \
-        "${SHARD_ARGS[@]}" \
-        "$@" || rc=$?
-
-    # cargo-mutants exit codes (https://mutants.rs/exit-codes.html): 0 = all caught,
-    # 2 = missed mutants, 3 = timeouts. Those three are normal run outcomes that the
-    # gate (scripts/mutation_gate.py) is responsible for scoring, so swallow them and
-    # let the gate be the single source of truth for pass/fail. Everything else
-    # (1 usage, 4 baseline broken, 5/6 bad --in-diff, 70 internal) is a real failure
-    # of the run itself and must abort.
-    case "$rc" in
-        0 | 2 | 3) return 0 ;;
-        *) return "$rc" ;;
-    esac
+    cargo mutants "${args[@]}" 2>&1 | tee "$OUT_DIR.log" || rc=$?
+    run_outcome "$rc" || return
+    python3 "$ROOT_DIR/scripts/mutation_gate.py" note-empty \
+        --log "$OUT_DIR.log" --results "$OUT_DIR/mutants.out"
 }
 
 cmd="${1:-}"
@@ -93,12 +123,10 @@ case "$cmd" in
         diff_file="$OUT_DIR.diff"
         mkdir -p "$(dirname "$diff_file")"
         # Only src/ is mutatable; scoping the diff there avoids a non-empty diff
-        # (and a wasted run) when a PR touches only tests/, Cargo.toml, etc.
+        # (and a wasted run) when a PR touches only tests/, Cargo.toml, etc. An
+        # empty diff still goes to cargo-mutants, which says it has nothing to
+        # mutate, so the gate passes on its word rather than on missing results.
         git diff --no-color "$base"...HEAD -- 'crates/mega-evm/src/**' > "$diff_file"
-        if [[ ! -s "$diff_file" ]]; then
-            echo "No changes under crates/mega-evm vs $base; nothing to mutate." >&2
-            exit 0
-        fi
         run_mutants --in-diff "$diff_file"
         ;;
     full)
