@@ -8,7 +8,8 @@ MegaEVM (mega-evm) — a specialized EVM implementation for MegaETH, built on **
 
 This branch (`satin`) builds **Satin**, the new engine: a single spec on the MegaETH fork of revm 40.0.3 and the MegaETH fork of op-revm 20.0.0.
 Today's `main` is the legacy engine; Satin is the only active spec.
-The legacy engine (specs `Equivalence` through `Rex7`, the 1.x crate line on crates.io revm 27) is frozen and is not edited here.
+The legacy engine (specs `Equivalence` through `Rex6`, the 1.x crate line on crates.io revm 27) is frozen and is not edited here.
+Satin follows Rex6 on the spec ladder and is the one unstable spec.
 
 Satin is being built mechanism by mechanism from an empty skeleton.
 The module table below says what exists and which mechanisms fill the rest.
@@ -96,7 +97,7 @@ The root `Cargo.toml` pins `revm = "=40.0.3"` and redirects all twelve revm crat
 
 - `SATIN` is the unstable spec under active development: it has no activation timestamp yet (`block/chain.rs` lists the two chains with the Satin timestamp unset), and its behavior may change until it is sealed.
 - Display and `FromStr` use `"Satin"`; serde uses the variant name `"SATIN"`.
-- The legacy spec names (`Equivalence` … `Rex7`) parse to `ParseMegaSpecError::Legacy`; they are never mapped to Satin.
+- The legacy spec names (`Equivalence` … `Rex6`) parse to `ParseMegaSpecError::Legacy`; they are never mapped to Satin.
 - There are no spec gates: a single-spec engine has nothing to gate.
   The spec that follows Satin introduces the first `is_enabled`-style gate.
 
