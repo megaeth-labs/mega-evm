@@ -179,6 +179,8 @@ def load_run(results: Path) -> Run:
         data = json.loads(outcomes_path.read_text())
         outcomes = data["outcomes"]
         total = data["total_mutants"]
+        if not isinstance(outcomes, list) or not all(isinstance(o, dict) for o in outcomes):
+            raise TypeError("`outcomes` is not a list of objects")
     except (json.JSONDecodeError, KeyError, TypeError) as err:
         raise ResultsError(f"{outcomes_path} is not a mutation run's outcomes: {err!r}") from err
 
@@ -294,10 +296,8 @@ def cmd_report(args: argparse.Namespace) -> int:
         )
         return 2
 
-    if run.nothing_to_test is not None and not (run.timeout or run.caught or run.missed):
+    if run.nothing_to_test is not None:
         note = f"**Nothing to test**: {run.nothing_to_test}"
-        if run.unviable:
-            note += f" ({len(run.unviable)} unviable)"
         write_report(f"## 🧬 Mutation testing — ✅ PASS\n\n{note}.\n", args)
         return 0
 

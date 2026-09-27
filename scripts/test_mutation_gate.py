@@ -135,6 +135,11 @@ class ResultsThatCannotBeScored(GateCase):
         results = self.results(files={"outcomes.json": "{"})
         self.assert_unscorable(results, "is not a mutation run's outcomes")
 
+    def test_outcomes_that_are_not_objects(self) -> None:
+        results = self.results(files={"outcomes.json": json.dumps(
+            {"total_mutants": 1, "outcomes": ["Baseline", CAUGHT]})})
+        self.assert_unscorable(results, "not a list of objects")
+
     def test_a_listed_run_without_outcomes(self) -> None:
         results = self.results(files={"mutants.json": json.dumps([{"name": CAUGHT}])})
         self.assert_unscorable(results, "stopped before it recorded an outcome")
