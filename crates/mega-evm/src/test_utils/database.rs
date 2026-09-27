@@ -8,6 +8,10 @@ use revm::{
     state::{AccountInfo, Bytecode, EvmState},
 };
 
+use crate::system::{
+    storage_slots::CURRENT_SYSTEM_ADDRESS, SEQUENCER_REGISTRY_ADDRESS, SEQUENCER_REGISTRY_CODE,
+};
+
 /// A memory database for testing purposes.
 #[derive(Debug, Default, Clone, derive_more::Deref, derive_more::DerefMut)]
 pub struct MemoryDatabase {
@@ -97,6 +101,17 @@ impl MemoryDatabase {
     ) -> Self {
         self.set_account_storage(address, storage_key, value);
         self
+    }
+
+    /// Installs the `SequencerRegistry` this engine deploys, naming `system_address` the live
+    /// system address: a legacy call from it to a whitelisted contract is then a system-address
+    /// transaction, as it is on a chain whose registry names it.
+    pub fn sequencer_registry(self, system_address: Address) -> Self {
+        self.account_code(SEQUENCER_REGISTRY_ADDRESS, SEQUENCER_REGISTRY_CODE).account_storage(
+            SEQUENCER_REGISTRY_ADDRESS,
+            CURRENT_SYSTEM_ADDRESS,
+            U256::from_be_bytes(system_address.into_word().0),
+        )
     }
 }
 

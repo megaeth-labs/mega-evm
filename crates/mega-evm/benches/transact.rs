@@ -45,6 +45,11 @@
 //!   the state gas and the write records it keeps, so every fresh slot is held to both as it is
 //!   written (`satin`); and under a state-gas limit one gas short, so the last slot crosses and the
 //!   transaction is stopped (`stopped`). Its op-revm baseline is `data_size_limit/op_revm`.
+//! - `keyless_deploy`: a `keylessDeploy` of the canonical `CREATE2` factory, which Satin runs as a
+//!   native creation below the call (`satin`), next to op-revm running the same init code as a
+//!   creation transaction (`op_revm`). The gap is what the keyless path adds to a creation:
+//!   decoding the signed transaction, recovering its signer — most of it — the rules' reads, the
+//!   call's upfront charges, and the creation's return into the call and its ABI answer.
 //!
 //! `oracle_reads` runs once more through `MegaEvm` alone (`/service`), against an oracle service
 //! that answers all 200 slots; every slot is loaded all the same, so the two arms differ by the
@@ -74,6 +79,11 @@ use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 use mega_evm::{
     constants::COST_PER_HISTORY_BYTE,
     system::{
+        keyless::{
+            decode_keyless_tx,
+            tests::{CREATE2_FACTORY_CODE_HASH, CREATE2_FACTORY_CONTRACT, CREATE2_FACTORY_TX},
+            IKeylessDeploy, KEYLESS_DEPLOY_ADDRESS, KEYLESS_DEPLOY_CODE,
+        },
         IMegaAccessControl, IMegaLimitControl, ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE,
         LIMIT_CONTROL_ADDRESS, LIMIT_CONTROL_CODE, ORACLE_CONTRACT_ADDRESS,
     },
@@ -383,7 +393,8 @@ fn bench_transact(c: &mut Criterion) {
         .account_code(HASHER, hasher_code())
         .account_code(ORACLE_CONTRACT_ADDRESS, reader_code())
         .account_code(ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE)
-        .account_code(LIMIT_CONTROL_ADDRESS, LIMIT_CONTROL_CODE);
+        .account_code(LIMIT_CONTROL_ADDRESS, LIMIT_CONTROL_CODE)
+        .account_code(KEYLESS_DEPLOY_ADDRESS, KEYLESS_DEPLOY_CODE);
     let cfg = mega_context(db.clone()).cfg().clone();
 
     let mut depth = [0u8; 32];
@@ -599,6 +610,59 @@ fn bench_transact(c: &mut Criterion) {
         b.iter_batched(
             || MegaEvm::new(salt_context(db.clone(), service.clone())),
             |mut evm| evm.transact(OpTx(oracle_tx.clone())).unwrap(),
+            BatchSize::SmallInput,
+        );
+    });
+
+    // The keyless arms: the canonical `CREATE2` factory through `keylessDeploy`, next to op-revm
+    // running its init code as a creation transaction. Both must deploy it.
+    let keyless_tx = call_tx(
+        KEYLESS_DEPLOY_ADDRESS,
+        IKeylessDeploy::keylessDeployCall {
+            keylessDeploymentTransaction: Bytes::from_static(CREATE2_FACTORY_TX),
+            gasLimitOverride: U256::from(10_000_000),
+        }
+        .abi_encode()
+        .into(),
+        30_000_000,
+    );
+    let deployed = MegaEvm::new(mega_context(db.clone()))
+        .execute_transaction(OpTx(keyless_tx.clone()))
+        .unwrap();
+    let output = deployed.result.output().cloned().unwrap_or_default();
+    let answer = IKeylessDeploy::keylessDeployCall::abi_decode_returns(&output)
+        .expect("keyless_deploy: the call answers in the keylessDeploy ABI");
+    assert_eq!(answer.deployedAddress, CREATE2_FACTORY_CONTRACT, "keyless_deploy: it deployed");
+    assert_eq!(
+        deployed.state[&CREATE2_FACTORY_CONTRACT].info.code_hash, CREATE2_FACTORY_CODE_HASH,
+        "keyless_deploy: the factory's code is what it deployed",
+    );
+    let init_code = decode_keyless_tx(CREATE2_FACTORY_TX).unwrap().tx().input.clone();
+    let creation_tx = op_transaction(TxEnv {
+        caller: CALLER,
+        kind: TxKind::Create,
+        data: init_code,
+        gas_limit: 30_000_000,
+        ..Default::default()
+    });
+    let op_ctx = || {
+        OpContext::new(db.clone(), OpSpecId::KARST)
+            .with_cfg(cfg.clone())
+            .with_chain(zero_fee_l1_block_info())
+    };
+    let created = OpEvm::new(op_ctx(), NoOpInspector).transact(creation_tx.clone()).unwrap();
+    assert!(created.result.is_success(), "keyless_deploy/op_revm: {:?}", created.result);
+    group.bench_function("keyless_deploy/satin", |b| {
+        b.iter_batched(
+            || MegaEvm::new(mega_context(db.clone())),
+            |mut evm| evm.transact(OpTx(keyless_tx.clone())).unwrap(),
+            BatchSize::SmallInput,
+        );
+    });
+    group.bench_function("keyless_deploy/op_revm", |b| {
+        b.iter_batched(
+            || OpEvm::new(op_ctx(), NoOpInspector),
+            |mut evm| evm.transact(creation_tx.clone()).unwrap(),
             BatchSize::SmallInput,
         );
     });

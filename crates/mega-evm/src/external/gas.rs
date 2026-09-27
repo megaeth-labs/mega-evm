@@ -59,8 +59,9 @@ impl<E: fmt::Display> fmt::Display for BucketError<E> {
 /// The SALT bucket multipliers the running transaction has looked up.
 ///
 /// One entry per bucket the transaction has priced a charge in. It is cleared with the rest of
-/// the per-transaction state at every entry point of [`MegaEvm`](crate::MegaEvm), so a
-/// transaction never prices against a capacity an earlier transaction read.
+/// the per-transaction state before every transaction and system call a
+/// [`MegaEvm`](crate::MegaEvm) runs, so a transaction never prices against a capacity an earlier
+/// transaction read.
 ///
 /// The environment is passed in rather than held, so the cache adds no second copy of it and
 /// puts no `Clone` bound on the engine's external environment types.

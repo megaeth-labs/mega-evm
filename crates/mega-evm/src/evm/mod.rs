@@ -94,6 +94,8 @@ pub struct MegaEvm<DB: Database, INSP, ExtEnvs: ExternalEnvTypes = EmptyExternal
     /// Whether the inspector's type carries a [`TrustedObserver`] declaration. Set only by the
     /// constructors that require the declaration; true without an inspector.
     trusted_inspector: bool,
+    /// Which precompile calls gas detention may price from the Satin table.
+    priced_precompiles: PricedPrecompiles,
 }
 
 impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, NoOpInspector, ExtEnvs> {
@@ -107,7 +109,12 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, NoOpInspector, ExtEnvs
             precompiles: satin_precompiles_map(),
             frame_stack: FrameStack::new_prealloc(8),
         };
-        Self { inner, inspect: false, trusted_inspector: true }
+        Self {
+            inner,
+            inspect: false,
+            trusted_inspector: true,
+            priced_precompiles: PricedPrecompiles::default(),
+        }
     }
 }
 
@@ -123,6 +130,7 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
             inner: self.inner.with_inspector(inspector),
             inspect: true,
             trusted_inspector: false,
+            priced_precompiles: self.priced_precompiles,
         }
     }
 
@@ -137,6 +145,7 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
             inner: self.inner.with_inspector(inspector),
             inspect: true,
             trusted_inspector: true,
+            priced_precompiles: self.priced_precompiles,
         }
     }
 
@@ -172,15 +181,28 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
     /// Adds `dyn_precompiles` on top of the Satin set, replacing an entry whose address is
     /// already taken.
     ///
-    /// A node's RPC builds these; the chain's own set is the one [`MegaEvm::new`] installs.
+    /// A node's RPC builds these; the chain's own set is the one [`MegaEvm::new`] installs. A
+    /// Satin address replaced here is no longer priced from the Satin table: gas detention runs a
+    /// call to it on the allowance, as it does every precompile it cannot price (see the
+    /// `precompiles` module).
     pub fn with_dyn_precompiles(
         mut self,
         dyn_precompiles: HashMap<Address, DynPrecompile>,
     ) -> Self {
         for (address, dyn_precompile) in dyn_precompiles {
+            self.priced_precompiles.record_replaced(address);
             self.inner.precompiles.apply_precompile(&address, move |_| Some(dyn_precompile));
         }
         self
+    }
+
+    /// Replaces the whole precompile set with `precompiles`, a set that is not the Satin one: the
+    /// neutral configuration's, the fixture fork's own. Gas detention prices nothing from the
+    /// Satin table from then on.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(crate) fn replace_precompile_set(&mut self, precompiles: PrecompilesMap) {
+        self.inner.precompiles = precompiles;
+        self.priced_precompiles.record_foreign();
     }
 
     /// Enforces `limits` on every transaction this EVM runs from now on.
@@ -295,7 +317,6 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> ExecuteEvm for MegaEvm<DB, I
 
     fn transact_one(&mut self, tx: Self::Tx) -> Result<Self::ExecutionResult, Self::Error> {
         self.inner.ctx.set_tx(tx);
-        self.inner.ctx.on_new_tx();
         MegaHandler::<_, Self::Error, _>::new().run(self)
     }
 
@@ -306,7 +327,6 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> ExecuteEvm for MegaEvm<DB, I
     fn replay(
         &mut self,
     ) -> Result<ExecResultAndState<Self::ExecutionResult, Self::State>, Self::Error> {
-        self.inner.ctx.on_new_tx();
         let result = MegaHandler::<_, Self::Error, _>::new().run(self)?;
         Ok(ExecResultAndState::new(result, self.finalize()))
     }
@@ -334,7 +354,6 @@ where
 
     fn inspect_one_tx(&mut self, tx: Self::Tx) -> Result<Self::ExecutionResult, Self::Error> {
         self.inner.ctx.set_tx(tx);
-        self.inner.ctx.on_new_tx();
         MegaHandler::<_, Self::Error, _>::new().inspect_run(self)
     }
 }
@@ -347,6 +366,32 @@ where
 {
 }
 
+/// The transaction a system call runs, on the gas limit its caller names.
+trait SystemCallTxWithGasLimit: SystemCallTx {
+    /// revm's system-call transaction from `caller` to `contract` with `data`
+    /// ([`SystemCallTx::new_system_tx_with_caller`]), on `gas_limit` instead of revm's
+    /// [`SYSTEM_CALL_GAS_LIMIT`](revm::handler::SYSTEM_CALL_GAS_LIMIT).
+    fn new_system_tx_with_gas_limit(
+        caller: Address,
+        contract: Address,
+        data: Bytes,
+        gas_limit: u64,
+    ) -> Self;
+}
+
+impl SystemCallTxWithGasLimit for MegaTransaction {
+    fn new_system_tx_with_gas_limit(
+        caller: Address,
+        contract: Address,
+        data: Bytes,
+        gas_limit: u64,
+    ) -> Self {
+        let mut tx = Self::new_system_tx_with_caller(caller, contract, data);
+        tx.0.base.gas_limit = gas_limit;
+        tx
+    }
+}
+
 impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> SystemCallEvm for MegaEvm<DB, INSP, ExtEnvs> {
     fn system_call_one_with_caller(
         &mut self,
@@ -354,13 +399,47 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> SystemCallEvm for MegaEvm<DB
         system_contract_address: Address,
         data: Bytes,
     ) -> Result<Self::ExecutionResult, Self::Error> {
-        self.inner.ctx.set_tx(MegaTransaction::new_system_tx_with_caller(
+        self.run_system_call(MegaTransaction::new_system_tx_with_caller(
             caller,
             system_contract_address,
             data,
-        ));
+        ))
+    }
+}
+
+impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
+    /// Runs a system call from `caller` to `contract` with `data` on `gas_limit`, and returns its
+    /// result and state. Nothing is committed.
+    ///
+    /// It is [`transact_system_call`](alloy_evm::Evm::transact_system_call) on the gas limit the
+    /// caller names instead of revm's [`SYSTEM_CALL_GAS_LIMIT`]. The limit is split as every
+    /// system call's is: at most [`SYSTEM_CALL_REGULAR_GAS_LIMIT`] of it is regular gas and the
+    /// rest is the call's state-gas reservoir, so a limit above 30,000,000 widens the reservoir
+    /// and never the regular budget. The block's pre-block calls run through it.
+    ///
+    /// [`SYSTEM_CALL_GAS_LIMIT`]: revm::handler::SYSTEM_CALL_GAS_LIMIT
+    /// [`SYSTEM_CALL_REGULAR_GAS_LIMIT`]: revm::handler::SYSTEM_CALL_REGULAR_GAS_LIMIT
+    pub fn transact_system_call_with_gas_limit(
+        &mut self,
+        caller: Address,
+        contract: Address,
+        data: Bytes,
+        gas_limit: u64,
+    ) -> Result<ResultAndState<OpHaltReason>, EVMError<DB::Error, MegaTransactionError>> {
+        let tx = MegaTransaction::new_system_tx_with_gas_limit(caller, contract, data, gas_limit);
+        let result = self.run_system_call(tx).map_err(map_op_err)?;
+        Ok(ResultAndState::new(result, ExecuteEvm::finalize(self)))
+    }
+
+    /// Runs `tx` as a system call: the protocol's own work, prepared as such (see
+    /// [`MegaContext`]'s system-call preparation) and run through the handler's system-call path.
+    fn run_system_call(
+        &mut self,
+        tx: MegaTransaction,
+    ) -> Result<ExecutionResult<OpHaltReason>, MegaEvmError<DB::Error>> {
+        self.inner.ctx.set_tx(tx);
         self.inner.ctx.on_new_system_call();
-        MegaHandler::<_, Self::Error, _>::new().run_system_call(self)
+        MegaHandler::<_, MegaEvmError<DB::Error>, _>::new().run_system_call(self)
     }
 }
 
@@ -458,8 +537,9 @@ mod tests {
     use alloy_op_evm::OpTx;
     use alloy_primitives::{address, TxKind, U256};
     use revm::{
-        context::{result::InvalidTransaction, ContextSetters, TxEnv},
+        context::{result::InvalidTransaction, ContextSetters, Transaction, TxEnv},
         database::State,
+        handler::{SYSTEM_CALL_GAS_LIMIT, SYSTEM_CALL_REGULAR_GAS_LIMIT},
         DatabaseRef,
     };
     use revm_inspectors::tracing::{TracingInspector, TracingInspectorConfig};
@@ -469,6 +549,50 @@ mod tests {
 
     fn context<DB: Database>(db: DB) -> MegaContext<DB> {
         MegaContext::new(db, MegaSpecId::SATIN).with_chain(zero_fee_l1_block_info())
+    }
+
+    /// Replacing the whole precompile set installs the set it is given, and gas detention prices
+    /// nothing from the Satin table after it: the fixture fork's set is not the Satin one.
+    #[test]
+    fn test_a_replaced_precompile_set_is_dispatched_and_not_priced() {
+        use revm::{handler::PrecompileProvider, precompile::Precompiles};
+        type Ctx = MegaContext<MemoryDatabase>;
+        let mut evm = MegaEvm::new(context(MemoryDatabase::default()));
+        let kzg = crate::kzg_point_evaluation::ADDRESS;
+        let price = |evm: &MegaEvm<MemoryDatabase, NoOpInspector>| {
+            evm.priced_precompiles.price(&evm.inner.precompiles, &kzg, &[])
+        };
+        assert_eq!(price(&evm), Some(crate::kzg_point_evaluation::GAS_COST));
+
+        let osaka = crate::test_utils::neutral_precompiles(crate::EthSpecId::OSAKA).unwrap();
+        evm.replace_precompile_set(osaka);
+        let dispatched = PrecompileProvider::<Ctx>::warm_addresses(&evm.inner.precompiles);
+        assert!(core::ptr::eq(dispatched, Precompiles::osaka().addresses_set()), "Osaka's set");
+        assert_eq!(price(&evm), None);
+    }
+
+    /// A whole set put in the map's place through the mutable reference `EvmTr::all_mut` hands
+    /// out is not seen: an address whose dispatched entry carries the id of the Satin table's
+    /// entry there is still priced from the Satin table, whatever the new set charges for it.
+    #[test]
+    fn test_a_set_replaced_through_a_mutable_reference_is_priced_where_its_ids_match() {
+        use revm::{
+            handler::{EvmTr, PrecompileProvider},
+            precompile::Precompiles,
+        };
+        type Ctx = MegaContext<MemoryDatabase>;
+        let mut evm = MegaEvm::new(context(MemoryDatabase::default()));
+        let kzg = crate::kzg_point_evaluation::ADDRESS;
+
+        let osaka = crate::test_utils::neutral_precompiles(crate::EthSpecId::OSAKA).unwrap();
+        *EvmTr::all_mut(&mut evm).2 = osaka;
+        let dispatched = PrecompileProvider::<Ctx>::warm_addresses(&evm.inner.precompiles);
+        assert!(core::ptr::eq(dispatched, Precompiles::osaka().addresses_set()), "Osaka's set");
+        let osaka_kzg = Precompiles::osaka().get(&kzg).unwrap();
+        assert_ne!(osaka_kzg.required_gas(&[]), Some(crate::kzg_point_evaluation::GAS_COST));
+
+        let price = evm.priced_precompiles.price(&evm.inner.precompiles, &kzg, &[]);
+        assert_eq!(price, Some(crate::kzg_point_evaluation::GAS_COST), "the Satin table's price");
     }
 
     /// A call to `CALLEE`, with room for the state gas a value transfer to it draws: `CALLEE`
@@ -575,6 +699,68 @@ mod tests {
             TracingInspector::new(TracingInspectorConfig::default_parity()),
         );
         assert_eq!(evm.inspector().traces().nodes()[0].trace.address, Address::ZERO);
+    }
+
+    /// A system call from any caller runs through revm's system-call entry point.
+    #[test]
+    fn test_revm_system_call_with_caller_works() {
+        let mut db = funded_db();
+        let mut evm = MegaEvm::new(context(&mut db));
+        let result =
+            SystemCallEvm::system_call_one_with_caller(&mut evm, CALLER, CALLEE, Bytes::new())
+                .unwrap();
+        assert!(result.is_success());
+        assert_eq!(evm.ctx().tx().caller(), CALLER);
+        assert_eq!(evm.ctx().tx().kind(), TxKind::Call(CALLEE));
+    }
+
+    /// The gas limit a caller names is the system call's: the part above 30M is its reservoir,
+    /// and a limit below 30M is regular gas alone.
+    #[test]
+    fn test_transact_system_call_with_gas_limit_uses_passed_value() {
+        let mut db = funded_db();
+        let mut evm = MegaEvm::new(context(&mut db));
+
+        let result = evm
+            .transact_system_call_with_gas_limit(CALLER, CALLEE, Bytes::new(), 123_456_789)
+            .unwrap();
+        assert!(result.result.is_success());
+        assert_eq!(evm.ctx().tx().gas_limit(), 123_456_789);
+        assert_eq!(
+            result.result.gas().reservoir_remaining(),
+            123_456_789 - SYSTEM_CALL_REGULAR_GAS_LIMIT,
+            "an empty callee draws nothing from the reservoir",
+        );
+
+        let result = evm
+            .transact_system_call_with_gas_limit(CALLER, CALLEE, Bytes::new(), 1_000_000)
+            .unwrap();
+        assert!(result.result.is_success());
+        assert_eq!(evm.ctx().tx().gas_limit(), 1_000_000);
+        assert_eq!(result.result.gas().reservoir_remaining(), 0);
+    }
+
+    /// The default system-call entry point runs on revm's system-call gas limit whatever the
+    /// block's gas limit is: its regular budget is the base 30M, and the margin above it is the
+    /// reservoir. Only an explicit gas limit moves either.
+    #[test]
+    fn test_default_system_call_keeps_the_30m_regular_budget() {
+        let mut db = funded_db();
+        let mut evm = MegaEvm::new(
+            context(&mut db).with_block(BlockEnv { gas_limit: 100_000_000, ..Default::default() }),
+        );
+
+        let result =
+            SystemCallEvm::system_call_with_caller(&mut evm, CALLER, CALLEE, Bytes::new()).unwrap();
+        assert!(result.result.is_success());
+        // The literals, not revm's constants: this pins what revm's default is.
+        assert_eq!(evm.ctx().tx().gas_limit(), 31_566_720);
+        assert_eq!(SYSTEM_CALL_GAS_LIMIT, 31_566_720);
+        assert_eq!(
+            result.result.gas().reservoir_remaining(),
+            31_566_720 - 30_000_000,
+            "30M of it is regular gas",
+        );
     }
 
     #[test]

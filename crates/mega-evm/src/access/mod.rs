@@ -12,7 +12,7 @@
 //! | Kind | Read by | Cap |
 //! |---|---|---|
 //! | the block environment | `NUMBER`, `TIMESTAMP`, `COINBASE`, `PREVRANDAO`, `GASLIMIT`, `BASEFEE`, `BLOBBASEFEE`, `SLOTNUM`, `BLOCKHASH` | [`block_env_access_compute_gas_limit`](crate::EvmTxRuntimeLimits::block_env_access_compute_gas_limit) |
-//! | the block beneficiary's account | `BALANCE`, `SELFBALANCE`, `EXTCODESIZE`, `EXTCODECOPY`, `EXTCODEHASH`, the four calls (and the EIP-7702 delegate they follow), `SELFDESTRUCT` as either end; a transaction whose sender or recipient is the beneficiary or whose recipient delegates to it, and an applied EIP-7702 authority that is | [`block_env_access_compute_gas_limit`](crate::EvmTxRuntimeLimits::block_env_access_compute_gas_limit) |
+//! | the block beneficiary's account | `BALANCE`, `SELFBALANCE`, `EXTCODESIZE`, `EXTCODECOPY`, `EXTCODEHASH`, the four calls (and the EIP-7702 delegate they follow), `SELFDESTRUCT` as either end; a transaction whose sender or recipient is the beneficiary or whose recipient delegates to it, an applied EIP-7702 authority that is, and a keyless deployment's signer that is | [`block_env_access_compute_gas_limit`](crate::EvmTxRuntimeLimits::block_env_access_compute_gas_limit) |
 //! | the Oracle's storage | `SLOAD` in the Oracle's own frame | [`oracle_access_compute_gas_limit`](crate::EvmTxRuntimeLimits::oracle_access_compute_gas_limit) |
 //!
 //! The caps are runtime limits ([`EvmTxRuntimeLimits`](crate::EvmTxRuntimeLimits)): the spec's,
@@ -80,7 +80,7 @@
 //!
 //! So a transaction that read volatile data runs exactly as it would without the read until a
 //! regular charge needs the withheld part. That charge fails as it would with nothing withheld,
-//! and the fork records the crossing, with the withheld part it could not draw.
+//! and the fork records the crossing, with the regular gas the frame had before the charge.
 //!
 //! # The stop
 //!
@@ -88,42 +88,68 @@
 //! the withheld part would have paid the charge. The frame stops the transaction the way every
 //! transaction-level limit does — it reverts with `MegaLimitExceeded` (kind: compute), the
 //! transaction is latched, no caller resumes, and the transaction settles like an EIP-8037 revert
-//! (see [`AdditionalLimit`](crate::AdditionalLimit)). The stopped frame's gas is the withheld part
-//! at the crossing: the spendable part it had counts as spent, which brings the transaction's
-//! compute to the limit exactly, and the withheld part goes back to the sender. The stop reports
-//! the limit as what was used; the size of the charge that crossed is not kept.
+//! (see [`AdditionalLimit`](crate::AdditionalLimit)). The stopped frame's gas is put back to what
+//! it had before the charge that crossed, from the record: the charge is not made, the spendable
+//! part the frame had and the withheld part go back to the sender, and the transaction is billed
+//! its compute at the crossing, less than one charge short of the limit. The stop reports that
+//! compute as what was used, the same figure at every site a crossing is made: a frame that ran,
+//! an answer, a precompile; the size of the charge that crossed is not kept.
 //!
 //! Every other out-of-gas halts and burns as it would without the read: an operand above `usize`,
 //! a failed state or history charge, and a regular charge the frame's whole gas could not pay.
 //!
 //! A frame answered without running is held the same way. revm runs a precompile inside the
 //! frame's start, against the frame's gas limit, before its answer can be classified, so after a
-//! read a precompile forwarded more than the allowance its frame would start with is run on that
-//! allowance, and its answer gets the rest of the forward back. Priced within the allowance, it
-//! answers as it would without the read. Priced past it, it answers out of gas without computing;
-//! the answer is marked as a crossing, and the same rule stops the transaction. The price is not
-//! known without running the precompile, so one priced past its whole forward runs out of the
-//! allowance too, and is the stop, where without the read it would be a failed call that burns its
-//! forward and that its caller survives. So is one priced between the allowance and its forward
-//! whose input fails a check made after its gas check: it runs out of the allowance before that
-//! check, where without the read the check fails the call, which burns its forward and which its
-//! caller survives. A precompile run on the allowance also sees the allowance as its gas limit.
+//! read a precompile forwarded more than the allowance its frame would start with is decided
+//! before it runs, from its price where the engine knows it (the `precompiles` module of `evm`):
+//!
+//! - priced within the allowance, it runs on its whole forward and answers as it would without the
+//!   read;
+//! - priced past the allowance and within the forward, it needs gas the limit withholds: it is
+//!   answered out of gas without running, the answer is marked as a crossing, and the same rule
+//!   stops the transaction;
+//! - priced past its whole forward, it runs on the forward and runs out of gas, as without the
+//!   read: a failed call that burns its forward and that its caller survives.
+//!
+//! One residual is a choice: the price does not tell whether an input passes the checks a
+//! precompile makes after its gas check, so an input priced between the allowance and the forward
+//! that would fail such a check is the stop, where without the read the check fails the call,
+//! which burns its forward and which its caller survives. Running it to find out would compute
+//! past the limit.
+//!
+//! Every entry of the Satin set is priced, op-revm's size-limited wrappers of the BN254 pairing
+//! and the BLS12-381 MSMs and pairing included. A precompile the engine cannot price — a node's
+//! own, a Satin address a node replaced — is run on the allowance, and its answer gets the rest of
+//! the forward back. Within the allowance, it answers as it would without the read. Past it, it
+//! answers out of gas without computing, the answer is marked as a crossing, and it is the stop,
+//! whether its price is within its forward or not: one priced past its whole forward is the stop
+//! too, where without the read it would be a failed call its caller survives. It also sees the
+//! allowance as its gas limit.
 //!
 //! An interceptor builds its answer on all the gas the caller forwarded, the caller's withheld
-//! part included: an answer that spent more than the allowance the frame would have run on is
-//! answered out of gas and marked as a crossing, and the same rule stops the transaction. An
-//! interceptor may instead charge the frame, by taking gas off its limit, and let it run. The
-//! charge is the interceptor's own work, and compute whether the call is then answered or runs:
-//! one the allowance cannot pay stops the transaction before the frame runs, and one it can pay
-//! leaves the frame the rest.
+//! part included: an answer that spent more regular gas than the allowance the frame would have
+//! run on is answered out of gas and marked as a crossing, and the same rule stops the
+//! transaction.
+//!
+//! A keyless deployment's call is the transaction's own frame, and runs no code: it charges its
+//! own work — the overhead of decoding and recovering the signer, then the `CREATE` opcode's
+//! regular gas — on its frame's gas, held to the limit as any frame's is, so a charge past the
+//! limit is a crossing, whether a rule would then refuse the call or its creation would run. A
+//! call that starts its creation suspends on it, and its charges are compute as a caller's are; a
+//! call carrying value is refused before its frame is built, an answer held by the rule above.
+//! The call reads its
+//! signer's account through the journal, where the Host marks nothing, so a signer that is the
+//! beneficiary is marked there, at the call's compute then: the creation runs for that account,
+//! as a `CREATE` runs in a frame of it, which a read of the account started.
 //!
 //! # Nothing withheld leaks
 //!
 //! Withheld gas never leaves the frame's tracker, so there is nothing to release and nothing that
 //! can escape the cap: a child's withheld part goes back to its caller with the rest of its gas,
 //! and the caller is held again as it resumes; a frame answered without running starts with
-//! nothing withheld and hands its forwarded gas back; the stop hands the withheld part back with
-//! its revert; and a halt burns the frame's gas, withheld part included, as it would undetained.
+//! nothing withheld and hands its forwarded gas back; the stop hands the frame's gas back with its
+//! revert, both parts as they were before the charge that crossed; and a halt burns the frame's
+//! gas, withheld part included, as it would undetained.
 //! `return_create`'s deposit and hash charges, the creating frame's own compute, draw the spendable
 //! part like any other regular charge.
 //!
@@ -144,6 +170,7 @@
 mod detention;
 mod volatile;
 
+pub(crate) use detention::ComputeStop;
 pub use detention::{
     decode_volatile_data_access_disabled, volatile_data_access_disabled_revert_data, Detention,
 };

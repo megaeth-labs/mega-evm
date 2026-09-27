@@ -437,16 +437,16 @@ fn test_a_forwarded_hint_keeps_the_reservoir() {
 }
 
 /// A dispatched `keylessDeploy` call is charged its overhead out of regular gas, so it costs the
-/// same whether there is a pool or not and the pool comes back whole. The charge is not an
-/// answer: the deployed bytecode runs after it and reverts with `NotIntercepted()`, because the
-/// rewrite that turns the call into a deployment is not here yet.
+/// same whether there is a pool or not and the pool comes back whole. A call the rules refuse —
+/// here one whose bytes are not a signed transaction — is answered after the overhead with the
+/// rule's error, and the answer carries the reservoir.
 #[test]
 fn test_the_keyless_overhead_comes_out_of_regular_gas() {
     assert_the_reservoir_survives(
         KEYLESS_DEPLOY_ADDRESS,
         keyless_deploy_call(),
         U256::ZERO,
-        Expected::Revert(Bytes::from_static(&IKeylessDeploy::NotIntercepted::SELECTOR)),
+        Expected::Revert(Bytes::from_static(&IKeylessDeploy::MalformedEncoding::SELECTOR)),
     );
 }
 
@@ -482,9 +482,9 @@ fn test_the_keyless_value_refusal_keeps_the_reservoir() {
     }
 }
 
-/// A `keylessDeploy` call forwarded less regular gas than the overhead is answered out of gas,
-/// with the reservoir it inherited carried, and that answer settles into a caller exactly as
-/// revm's own frame return settles a frame that ran out.
+/// A `keylessDeploy` call forwarded less regular gas than the overhead runs out of gas on its
+/// first run, with the reservoir it inherited carried, and that result settles into a caller
+/// exactly as revm's own frame return settles a frame that ran out.
 #[test]
 fn test_a_keyless_call_below_the_overhead_runs_out_of_gas() {
     use core::convert::Infallible;
@@ -494,11 +494,19 @@ fn test_a_keyless_call_below_the_overhead_runs_out_of_gas() {
 
     let forwarded = KEYLESS_DEPLOY_OVERHEAD_GAS - 1;
     let mut evm = MegaEvm::new(context(system_db()));
+    // The accounts a transaction's validation and its first frame input load.
+    let journal = evm.ctx_mut().journal_mut();
+    journal.load_account(CALLER).unwrap();
+    journal.load_account_with_code(KEYLESS_DEPLOY_ADDRESS).unwrap();
     let init = call_frame_init_to(0, KEYLESS_DEPLOY_ADDRESS, keyless_deploy_call(), forwarded);
-    let ItemOrResult::Result(result) =
+    let ItemOrResult::Item(_) =
         EvmTr::frame_init(&mut evm, init).expect("frame_init does not fail")
     else {
-        panic!("a call that cannot pay the overhead starts no frame");
+        panic!("the call's frame is built");
+    };
+    let ItemOrResult::Result(result) = EvmTr::frame_run(&mut evm).expect("frame_run does not fail")
+    else {
+        panic!("a call that cannot pay the overhead starts no creation");
     };
     let FrameResult::Call(outcome) = &result else { panic!("expected a call result: {result:?}") };
     assert_eq!(outcome.result.result, InstructionResult::OutOfGas);
