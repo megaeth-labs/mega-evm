@@ -16,7 +16,7 @@ use mega_evm::{
     constants::TX_GAS_LIMIT_CAP,
     test_utils::{BytecodeBuilder, MemoryDatabase},
     EvmTxRuntimeLimits, LimitCheck, LimitKind, MegaContext, MegaEvm, MegaTransaction,
-    MegaTransactionOutcome, TX_BODY_SIZE, WRITE_RECORD_SIZE,
+    MegaTransactionOutcome, AUTHORIZATION_SIZE, TX_BODY_SIZE, WRITE_RECORD_SIZE,
 };
 use revm::{
     bytecode::opcode::{
@@ -540,6 +540,75 @@ fn test_charges_before_the_first_frame_and_in_it_add_up() {
         "the authority fitted, and the stop in the frame does not take it back"
     );
     assert_eq!(stopped.gas.state, authority, "the authority's state gas stays with it");
+}
+
+/// A stop takes back what the frames did and keeps what was applied before the first frame. An
+/// admitted authority keeps its nonce, its delegation, its state gas, its write record and the
+/// history that record cost, as it does when its frame does nothing; the value the first frame
+/// carried and that frame's own record come back with the frame.
+#[test]
+fn test_a_stop_keeps_what_was_applied_before_the_first_frame() {
+    let delegation = |outcome: &MegaTransactionOutcome| {
+        outcome.state[&AUTHORITY_1].info.code.as_ref().map(|code| code.original_bytes())
+    };
+    for value in [U256::ZERO, U256::from(1)] {
+        let writes =
+            funded().account_code(A, write_slots(BytecodeBuilder::default(), 0, 1).stop().build());
+        let idle = funded().account_code(A, BytecodeBuilder::default().stop().build());
+        let tx = authorizing_call(CALLER, A, value, BELOW_CAP, DELEGATE, &[(AUTHORITY_1, 0)]);
+        let held = state_gas_of(&writes, &tx);
+        let stopped = run_under(writes, tx.clone(), held - 1);
+        assert_state_stopped("the slot after the authority", &stopped, held - 1, held);
+        let applied = run_under(idle, tx, u64::MAX);
+        assert!(applied.result.is_success(), "{:?}", applied.result);
+
+        assert_eq!(stopped.state[&AUTHORITY_1].info.nonce, 1, "value {value}");
+        assert!(delegation(&stopped).is_some_and(|code| !code.is_empty()), "value {value}");
+        assert_eq!(delegation(&stopped), delegation(&applied), "value {value}");
+        assert_eq!(stopped.gas.state, applied.gas.state, "value {value}");
+        assert_eq!(stopped.usage.write_records, 1, "value {value}: the authority's record alone");
+        assert_eq!(
+            stopped.gas.history_bytes,
+            TX_BODY_SIZE + AUTHORIZATION_SIZE + WRITE_RECORD_SIZE,
+            "value {value}: the body, its authorization and the authority's record"
+        );
+        if value.is_zero() {
+            assert_eq!(stopped.gas.history, applied.gas.history);
+        } else {
+            assert_eq!(
+                applied.gas.history_bytes - stopped.gas.history_bytes,
+                WRITE_RECORD_SIZE,
+                "the recipient's record comes back with the frame"
+            );
+        }
+        assert_eq!(stopped.state[&A].info.balance, U256::from(1_000), "value {value}");
+    }
+}
+
+/// A deposit-like transaction's caller, created before the first frame, outlives a stop with the
+/// deposit's mint and the state gas charged for the account.
+#[test]
+fn test_a_stopped_deposit_keeps_the_caller_it_created() {
+    let fresh = address!("00000000000000000000000000000000006000ff");
+    let deposit = |code: Bytes| {
+        let mut tx = call(fresh, A, U256::ZERO, BELOW_CAP);
+        tx.0.deposit.source_hash = B256::repeat_byte(0x11);
+        tx.0.deposit.mint = Some(5);
+        tx.0.base.gas_price = 0;
+        (funded().account_code(A, code), tx)
+    };
+    let (writes, tx) = deposit(write_slots(BytecodeBuilder::default(), 0, 1).stop().build());
+    let held = state_gas_of(&writes, &tx);
+    let stopped = run_under(writes, tx, held - 1);
+    assert_state_stopped("the slot after the caller", &stopped, held - 1, held);
+    let (idle, tx) = deposit(BytecodeBuilder::default().stop().build());
+    let created = run_under(idle, tx, u64::MAX);
+    assert!(created.result.is_success(), "{:?}", created.result);
+
+    let caller = &stopped.state[&fresh].info;
+    assert_eq!((caller.balance, caller.nonce), (U256::from(5), 1), "the mint and the nonce stay");
+    assert_eq!(stopped.gas.state, created.gas.state, "the caller's state gas stays with it");
+    assert_eq!(stopped.gas.state, one_account());
 }
 
 /* ---------- refills give their room back ---------- */
