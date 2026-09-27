@@ -748,7 +748,7 @@ A block MUST be invalid when:
 ## Developer Impact
 
 Gas numbers move for every transaction.
-At the minimum bucket: an empty call uses 42,280 gas (15,000 regular and 27,280 history), a transfer to an existing account 51,800, a fresh `SSTORE` 165,826 (97,920 of it state gas), a `LOG1` with 32 bytes of data 51,746, and a value `CALL` that creates its recipient 267,241 (183,600 of it state gas).
+At the minimum bucket: an empty call uses 42,280 gas (15,000 regular and 27,280 history), a transfer to an existing account 51,800, a fresh `SSTORE` 165,826 (97,920 of it state gas), a `LOG1` with 32 bytes of data about 51,750, and a value `CALL` that creates its recipient about 267,240 (183,600 of it state gas); the last two move by a few gas with the code that sets them up.
 Calldata, logs and deployed code cost 88 gas per byte of history; a fresh slot or account costs state gas even in a minimum-size bucket, and `m` times that in a bucket `m` times larger.
 
 Gas limits above 200,000,000 behave differently: at most 200,000,000, less the intrinsic regular gas, is available to computation and `GAS`, and the rest can pay only state and history gas.
