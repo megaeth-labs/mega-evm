@@ -27,6 +27,25 @@ from pathlib import Path
 
 SCRIPTS = Path(__file__).resolve().parent
 
+# The gate reads TOML with tomllib, new in Python 3.11. An older Python runs one test in place of
+# the rest, which fails with the reason: a failure, not a skip, so a job on an old Python fails
+# rather than passing on nothing tested.
+TOO_OLD = sys.version_info < (3, 11)
+REASON = (f"the mutation gate and its tests need Python 3.11 or newer, for tomllib; this is "
+          f"Python {sys.version.split()[0]}")
+
+
+class PythonVersion(unittest.TestCase):
+    def test_python_is_new_enough(self) -> None:
+        if TOO_OLD:
+            self.fail(REASON)
+
+
+def load_tests(loader: unittest.TestLoader, tests: unittest.TestSuite,
+               pattern: str | None) -> unittest.TestSuite:
+    """On an older Python, the version test alone: the others need the gate, which cannot load."""
+    return loader.loadTestsFromTestCase(PythonVersion) if TOO_OLD else tests
+
 
 def load_gate():
     spec = importlib.util.spec_from_file_location("mutation_gate", SCRIPTS / "mutation_gate.py")
@@ -37,7 +56,7 @@ def load_gate():
     return module
 
 
-gate = load_gate()
+gate = None if TOO_OLD else load_gate()
 
 CAUGHT = "crates/mega-evm/src/a.rs:1:1: replace f -> u64 with 0"
 MISSED = "crates/mega-evm/src/a.rs:2:5: replace + with - in g"

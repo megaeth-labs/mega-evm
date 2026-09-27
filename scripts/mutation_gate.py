@@ -54,9 +54,15 @@ import argparse
 import json
 import re
 import sys
-import tomllib
-from dataclasses import dataclass, field
-from pathlib import Path
+
+# tomllib is new in Python 3.11: say so rather than fail on the import below.
+if sys.version_info < (3, 11):
+    sys.exit(f"scripts/mutation_gate.py needs Python 3.11 or newer, for tomllib; this is Python "
+             f"{sys.version.split()[0]}.")
+
+import tomllib  # noqa: E402
+from dataclasses import dataclass, field  # noqa: E402
+from pathlib import Path  # noqa: E402
 
 # Cap how many survivors are rendered inline in the PR comment (GitHub caps a
 # single comment at 65536 chars). The rest live in the run artifacts.

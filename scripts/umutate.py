@@ -46,8 +46,14 @@ import signal
 import subprocess
 import sys
 import tempfile
-import tomllib
-from pathlib import Path
+
+# tomllib is new in Python 3.11: say so rather than fail on the import below.
+if sys.version_info < (3, 11):
+    sys.exit(f"scripts/umutate.py needs Python 3.11 or newer, for tomllib; this is Python "
+             f"{sys.version.split()[0]}.")
+
+import tomllib  # noqa: E402
+from pathlib import Path  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 OPERATORS_DIR = ROOT / "mutants" / "operators"

@@ -43,8 +43,8 @@ python3 scripts/mutation_gate.py report --results target/mutants-infra/mutants.o
 MUTANTS_SHARD=0/4 OUT_DIR=target/mutants-0 scripts/mutation_test.sh diff origin/main
 ```
 
-The driver needs bash 5 or later and Python 3.11 or later on `PATH`; it refuses to start under an older bash (macOS's `/bin/bash` is 3.2), and with Python 3.9 it fails before mutating anything.
-The gate's own tests run with `python3 -m unittest discover -s scripts -p 'test_*.py'`, on the same Python.
+The driver needs bash 5 or later and Python 3.11 or later on `PATH`; it refuses to start under an older bash (macOS's `/bin/bash` is 3.2), and under an older Python (macOS's `python3` is 3.9) the gate's scripts say so and exit before anything is mutated.
+The gate's own tests run with `python3 -m unittest discover -s scripts -p 'test_*.py'`, on the same Python; an older one runs a single test in their place, which fails with the reason.
 When to shard is in `REVIEW.md` (Test gates, Mutation testing).
 
 ## The gate
