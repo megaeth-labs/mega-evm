@@ -386,7 +386,7 @@ For the `SequencerRegistry`, pre-Rex6 blocks keep deploying and running the vers
 The version 2.0.0 upgrade preserves the storage layout (slots 0–12 are byte-identical; slot 13 is appended per the layout's append-only rule) and changes no behavior of `applyPendingChanges`, so validators' role resolution and the pre-block apply flow are unaffected.
 
 Rex6 is frozen: no further change to its semantics will be made.
-Because no network has scheduled it yet, none of the changes on this page is live; each takes effect on a network at the block where that network activates Rex6.
+It is scheduled on both networks (see the [upgrade overview](overview.md) for the activation timestamps), and each change on this page takes effect on a network at the block where that network activates Rex6.
 
 ## References
 

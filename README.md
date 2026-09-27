@@ -4,14 +4,14 @@ A specialized Ethereum Virtual Machine (EVM) implementation tailored for MegaETH
 
 ## Crates
 
-| Crate                                            | Description                                                               |
-| ------------------------------------------------ | ------------------------------------------------------------------------- |
-| [mega-evm](crates/mega-evm)                      | Core EVM implementation with MegaETH specs (`EQUIVALENCE` through `REX7`) |
-| [mega-system-contracts](crates/system-contracts) | Solidity system contracts with Rust bindings                              |
-| [mega-evme](bin/mega-evme)                       | CLI tool for EVM execution (`run`, `tx`, `replay`)                        |
-| [mega-t8n](bin/mega-t8n)                         | Standalone state transition (t8n) tool                                    |
-| [mega-state-test](crates/mega-state-test)        | Execution-spec state-test runner on the Satin engine                      |
-| [state-test](crates/state-test)                  | CLI of the execution-spec state-test runner                               |
+| Crate                                            | Description                                                                                                      |
+| ------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------- |
+| [mega-evm](crates/mega-evm)                      | Core EVM implementation: the Satin engine (`SATIN`, unstable); the legacy engine is `EQUIVALENCE` through `REX6` |
+| [mega-system-contracts](crates/system-contracts) | Solidity system contracts with Rust bindings                                                                     |
+| [mega-evme](bin/mega-evme)                       | CLI tool for EVM execution (`run`, `tx`, `replay`)                                                               |
+| [mega-t8n](bin/mega-t8n)                         | Standalone state transition (t8n) tool                                                                           |
+| [mega-state-test](crates/mega-state-test)        | Execution-spec state-test runner on the Satin engine                                                             |
+| [state-test](crates/state-test)                  | CLI of the execution-spec state-test runner                                                                      |
 
 ## Installation
 
