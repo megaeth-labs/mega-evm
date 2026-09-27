@@ -200,7 +200,8 @@ fn test_gas_answers_the_whole_regular_gas_after_a_read() {
 /// writes draw the reservoir the transaction has, not the caller's withheld gas. The bound pays
 /// the compute of three fresh slots and what one of them spills: below the execution cap, where
 /// every slot's state gas and history spill onto it, the callee runs out of gas before its third
-/// write completes; above it the reservoir pays all three — each as without the read.
+/// write completes — at the spec's prices already on its second write's state gas, which is more
+/// than one write's compute; above it the reservoir pays all three — each as without the read.
 #[test]
 fn test_a_bounded_callee_writes_what_it_writes_without_the_read() {
     let child = BytecodeBuilder::default()
