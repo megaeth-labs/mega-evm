@@ -332,26 +332,35 @@ class DriverGuard(unittest.TestCase):
 
     DRIVER = SCRIPTS / "mutation_test.sh"
 
+    @staticmethod
+    def bash_major(shell: str) -> int | None:
+        """The bash major version `shell` is, or None when it is not bash."""
+        out = subprocess.run([shell, "-c", 'echo "${BASH_VERSION:-}"'], capture_output=True,
+                             text=True).stdout.strip()
+        return int(out.split(".")[0]) if out else None
+
     def assert_refused(self, shell: str) -> None:
-        run = subprocess.run([shell, str(self.DRIVER), "full"], capture_output=True, text=True,
-                             timeout=60)
+        major = self.bash_major(shell)
+        if major is not None and major >= 5:
+            self.skipTest(f"{shell} is bash {major}")
+        # A subcommand the driver does not have and a scratch output directory: were the guard to
+        # let the shell through, the driver would print its usage and touch nothing else.
+        with tempfile.TemporaryDirectory() as out:
+            run = subprocess.run([shell, str(self.DRIVER), "guard-check"], capture_output=True,
+                                 text=True, timeout=60, env={"PATH": "/usr/bin:/bin",
+                                                             "OUT_DIR": f"{out}/mutants"})
         self.assertEqual(run.returncode, 1, run.stderr)
         self.assertIn("needs bash 5 or newer", run.stderr)
         self.assertEqual(run.stdout, "")
 
     def test_a_posix_shell_is_refused(self) -> None:
-        # dash on Linux, bash 3.2 in POSIX mode on macOS.
+        # dash on Debian and Ubuntu, bash 3.2 in POSIX mode on macOS.
         self.assert_refused("/bin/sh")
 
     def test_an_old_bash_is_refused(self) -> None:
-        bash = shutil.which("bash", path="/bin")
-        if bash is None:
+        if not Path("/bin/bash").exists():
             self.skipTest("no /bin/bash")
-        version = subprocess.run([bash, "-c", "echo ${BASH_VERSINFO[0]}"], capture_output=True,
-                                 text=True).stdout.strip()
-        if int(version) >= 5:
-            self.skipTest(f"/bin/bash is bash {version}")
-        self.assert_refused(bash)
+        self.assert_refused("/bin/bash")
 
 
 if __name__ == "__main__":
