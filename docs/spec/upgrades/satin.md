@@ -472,13 +472,17 @@ A contract can revert with the same bytes, so the revert data alone does not ide
   Every precompile of the Satin set has a price; an input over a size limit is priced at zero, since it is refused before any gas check.
   An input priced between the allowance and the forward that would fail a check the precompile makes after its gas check is the crossing too.
   A call refused on its caller's account runs no precompile and is answered as without the read.
-  A precompile the node adds or replaces has no price: it MUST run on the allowance, and running out of it is the crossing.
 - **Interceptor answers.**
   A system contract's intercepted answer that spent more regular gas than the frame's allowance MUST be the crossing.
 - **Refused reads.**
   See [Volatile-Data Access Control](#13-volatile-data-access-control-and-remainingcomputegas).
 - **Exemptions.**
   A system-originated transaction and a system call MUST NOT be detained, whatever they read (see [The Protocol's Own Transactions](#19-the-protocols-own-transactions)).
+
+{% hint style="info" %}
+A precompile a node adds or replaces is outside the Satin set and outside this specification.
+The reference implementation has no price for one, so it runs such a precompile on the allowance and treats running out of it as the crossing.
+{% endhint %}
 
 ### 13. Volatile-Data Access Control and `remainingComputeGas()`
 
