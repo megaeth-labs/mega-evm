@@ -38,6 +38,13 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT_DIR="${OUT_DIR:-$ROOT_DIR/target/mutants}"
+
+cd "$ROOT_DIR"
+
+# Clear the results before anything that can fail, so a run that stops early
+# leaves nothing behind for the gate to mistake for its results.
+rm -rf "$OUT_DIR"
+
 SUPPRESS="${SUPPRESS:-$ROOT_DIR/mutants/suppressions.toml}"
 JOBS="${JOBS:-$(nproc)}"
 PKG_ARGS=(--package mega-evm)
@@ -48,12 +55,6 @@ CONFIG_ARGS=()
 INFRA_FILES=(
     crates/mega-evm/src/test_utils/scenario.rs
 )
-
-cd "$ROOT_DIR"
-
-# Clear the results before anything that can fail, so a run that stops early
-# leaves nothing behind for the gate to mistake for its results.
-rm -rf "$OUT_DIR"
 
 if ! cargo mutants --version >/dev/null 2>&1; then
     echo "cargo-mutants is required. Install with 'cargo install cargo-mutants --locked'." >&2
