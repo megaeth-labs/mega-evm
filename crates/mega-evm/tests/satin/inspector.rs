@@ -659,3 +659,71 @@ fn test_only_the_inspecting_system_call_entry_point_runs_the_inspector() {
     assert_eq!(*evm.inspector(), Seen { frames: 1, steps: 3 }, "PUSH0, POP, STOP");
     assert!(evm.ctx().additional_limit().latched().is_none(), "no limit holds a system call");
 }
+
+/// Answers every call itself with a success, and counts the answers.
+#[derive(Default)]
+struct SkipAllCallsInspector {
+    answered: usize,
+}
+
+impl<CTX> Inspector<CTX, EthInterpreter> for SkipAllCallsInspector {
+    fn call(&mut self, _: &mut CTX, inputs: &mut CallInputs) -> Option<CallOutcome> {
+        self.answered += 1;
+        Some(CallOutcome::new(
+            InterpreterResult::new(
+                InstructionResult::Stop,
+                Bytes::new(),
+                Gas::new(inputs.gas_limit),
+            ),
+            inputs.return_memory_offset.clone(),
+        ))
+    }
+}
+
+/// A body over the data-size limit latches the transaction before it runs, and its first frame is
+/// answered with the stop — in place of the answer an inspector that answers every call gives it.
+/// The transaction is the one no inspector runs: the stop, which settles like a revert, so the
+/// sender gets back what the frame did not spend.
+#[test]
+fn test_intrinsic_data_size_overflow_with_inspector_early_return() {
+    const LIMIT: u64 = 100;
+    const TX_GAS_LIMIT: u64 = 100_000_000;
+    let db = || {
+        MemoryDatabase::default()
+            .account_code(A, Bytes::from_static(&[revm::bytecode::opcode::STOP]))
+    };
+    let limits = mega_evm::EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(LIMIT);
+    let tx = call(CALLER, A, U256::ZERO, TX_GAS_LIMIT);
+    assert!(mega_evm::transaction_body_bytes(&tx) > LIMIT, "the body alone crosses the limit");
+
+    let plain = MegaEvm::new(context(db()).with_tx_runtime_limits(limits))
+        .execute_transaction(tx.clone())
+        .unwrap();
+    let mut evm = MegaEvm::new(context(db()).with_tx_runtime_limits(limits))
+        .with_inspector(SkipAllCallsInspector::default());
+    let answered = evm.execute_transaction(tx).unwrap();
+
+    assert_eq!(evm.inspector().answered, 1, "the inspector answered the first frame");
+    let stop = answered.limit_exceeded.expect("the transaction is stopped");
+    assert!(
+        matches!(
+            stop,
+            mega_evm::LimitCheck::ExceedsLimit {
+                kind: mega_evm::LimitKind::DataSize,
+                limit: LIMIT,
+                ..
+            }
+        ),
+        "{stop:?}"
+    );
+    assert!(
+        matches!(&answered.result, revm::context::result::ExecutionResult::Revert { output, .. }
+            if output == &stop.revert_data()),
+        "the stop, not the answer: {:?}",
+        answered.result
+    );
+    assert_eq!(answered.result, plain.result);
+    assert_eq!(answered.gas, plain.gas);
+    assert_eq!(answered.usage, plain.usage);
+    assert!(answered.gas.gas_used < TX_GAS_LIMIT / 100, "the unspent gas comes back");
+}
