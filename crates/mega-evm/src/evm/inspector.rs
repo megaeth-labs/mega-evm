@@ -8,15 +8,42 @@
 //! asked for, within the bounds below. Rewriting is a tool feature — Foundry's cheatcodes are built
 //! on it — supported and unmeasured.
 //!
+//! # Where an inspector runs
+//!
+//! - **A user transaction** runs every callback: `initialize_interp`, `step` and `step_end`,
+//!   `log_full`, `log` for what a frame journals without running an instruction (an EIP-7708
+//!   transfer log, a precompile's logs), `frame_start` and `frame_end`, `call` and `call_end`,
+//!   `create` and `create_end`, and `selfdestruct`. A keyless deployment is seen as the frames it
+//!   is made of: its `keylessDeploy` call, which runs no instruction and so gets no
+//!   `initialize_interp` and no step, and the creation below it. The inspector may rewrite anything
+//!   outside block execution, within the bounds below.
+//! - **A system transaction** — a system-address transaction, promoted to a deposit before its
+//!   first callback — runs through the same handler and the same callbacks, and may be rewritten
+//!   the same way. It is the protocol's own work, held to no per-transaction limit, so no latch
+//!   writes the stop over its results.
+//! - **A pre-block system call** — the EIP-2935 and EIP-4788 calls, and the `SequencerRegistry`'s
+//!   `applyPendingChanges()` — runs on the handler's plain system-call path, as alloy-evm's
+//!   `transact_system_call` runs one: no callback, whatever inspector the EVM holds, so a block's
+//!   tracer sees the block's transactions and nothing of its preparation. A tool that wants to
+//!   watch a system call runs it through revm's `InspectSystemCallEvm`, which does hand it to the
+//!   inspector, with every exemption a system call has.
+//! - **The end of a block** runs no code: the post-block balance increments are database writes. No
+//!   callback runs, and the EVM handed back carries the inspector with what it collected.
+//!
 //! # The admission gate
 //!
 //! [`TrustedObserver`] is a declaration, made in source about one inspector type, that none of its
 //! callbacks writes anything back. A [`MegaEvm`](crate::MegaEvm) built with
 //! [`with_trusted_inspector`](crate::MegaEvm::with_trusted_inspector) carries the declaration, and
 //! [`has_rewriting_inspector`](crate::MegaEvm::has_rewriting_inspector) is what block execution
-//! refuses a transaction on: a rewriting inspector has no route to a block. [`DeclaredObserver`]
-//! carries the declaration for a tracer whose type cannot, and in debug builds checks it around
-//! every callback.
+//! refuses on: a rewriting inspector has no route to a block. [`DeclaredObserver`] carries the
+//! declaration for a tracer whose type cannot, and in debug builds checks it around every callback.
+//!
+//! Block execution checks the gate at every entry point, before anything changes: the pre-block
+//! changes, the execution of a transaction — a system transaction as a user one — the commit of an
+//! outcome, and the end of the block. So a declared observer sees the block's transactions, user
+//! and system alike, and a rewriting inspector sees nothing of a block: it is refused before the
+//! pre-block calls, which it would not run on anyway, and before any transaction.
 //!
 //! # What a rewrite does not change
 //!
