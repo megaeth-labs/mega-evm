@@ -38,7 +38,7 @@ Its byte prices are an input: the `satin-price-override` feature, off by default
 The precompile set is op-revm's Karst set with KZG point evaluation repriced to 100,000.
 It is carried as an alloy-evm `PrecompilesMap`, so a node can add or replace an address through `MegaEvmFactory::with_dyn_precompiles_builder`.
 
-The common execution layer is in place: the frame lifecycle the later mechanisms plug into, the count of data-size bytes and write records per frame, the abort protocol that stops a transaction crossing a limit with a revert, and the inspector admission gate.
+The common execution layer is in place: the frame lifecycle the later mechanisms plug into, the count of data-size bytes and write records per frame, the abort protocol that stops a transaction crossing a limit with a revert, and the inspector contract: the admission gate and what a rewrite does not change.
 
 The data-size limit is in place on top of it.
 A transaction is held to a data-size limit, and every frame to a budget: the transaction's own frame gets what its body leaves, and a child 98% of what its parent has left.
@@ -208,6 +208,13 @@ use mega_evm::DeclaredObserver;
 let evm = MegaEvm::new(context).with_trusted_inspector(DeclaredObserver(tracer));
 assert!(!evm.has_rewriting_inspector());
 ```
+
+A declared observer sees a block's transactions, user and system alike, and nothing else: the pre-block calls run no inspector, and the end of the block runs no code.
+Outside block execution an inspector may rewrite what execution produces — Foundry's cheatcodes are built on that — within the inspector contract.
+A failed creation rewritten into a success is refused, and a limit's stop is not rewritten.
+A frame an inspector answered in place of running, or a failed frame it turned into a success, settles into its caller as a frame that kept nothing: the caller sees the success, the output and the regular gas the inspector chose, and no state gas, history gas, refund or write record of writes the journal does not hold.
+Gas an inspector writes after a frame's last instruction reaches nobody, and a charge a frame cannot pay is refused without stopping it.
+`tests/satin/inspector_cheatcodes.rs` drives `deal`, `store`, `pauseGasMetering` / `resumeGasMetering` and `expectRevert` through the engine as Foundry's inspector does.
 
 ## Documentation
 
