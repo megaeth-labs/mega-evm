@@ -94,6 +94,12 @@
 //!   callback what it did. A tool that wants a frame out of gas says so through its result. Under
 //!   gas detention the refusal of an opcode's charge the withheld part would have paid is the
 //!   crossing; the refusal of an inspector's is not, and classifies nothing ([`StepGuard`]).
+//! - **Gas an inspector puts back carries the split it was taken with.** The part gas detention
+//!   withholds is in the frame's `Gas`, and detention sets it where it can have moved: at a read of
+//!   volatile data, when the frame starts or resumes, and after an `SSTORE`. An inspector that
+//!   overwrites the interpreter's gas — Foundry's `pauseGasMetering` puts a snapshot back before
+//!   every instruction — overwrites the split with it, and the frame runs on the snapshot's split
+//!   until detention next sets it. Only the crossing record is kept from a callback's write.
 //! - **An answer carries only the regular gas the inspector chose.** A frame the inspector answered
 //!   never ran, so it drew nothing from the reservoir: whatever `Gas` the answer is built on —
 //!   `Gas::new(limit)`, as Foundry answers a cheatcode, carries no reservoir — its caller merges
