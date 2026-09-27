@@ -48,7 +48,10 @@ use revm::{
 
 use crate::{
     access::ComputeStop,
-    evm::{history::transaction_body_bytes, inspector::frame_end_checked},
+    evm::{
+        history::transaction_body_bytes,
+        inspector::{frame_end_checked, StepGuard},
+    },
     history_gas, synthetic_frame_result,
     system::keyless,
     write_record_history_gas, Detention, ExternalEnvTypes, JournalInspectTr, LimitCheck, LimitKind,
@@ -709,6 +712,9 @@ where
     /// revm's inspected frame run, with the stop short-circuit of [`EvmTr::frame_run`]: a frame
     /// with a stop to return returns it without a step, and the inspector sees it end. A
     /// `keylessDeploy` call's frame makes its actions by hand, as on the plain path, with no step.
+    ///
+    /// The step callbacks run through [`StepGuard`], so a charge the inspector makes on the
+    /// interpreter's gas and the frame cannot pay does not classify the frame's end.
     #[inline]
     fn inspect_frame_run(
         &mut self,
@@ -720,7 +726,7 @@ where
             None => inspect_instructions(
                 ctx,
                 &mut frame.interpreter,
-                &mut *inspector,
+                StepGuard(&mut *inspector),
                 instructions.instruction_table(),
                 instructions.gas_table(),
             ),
