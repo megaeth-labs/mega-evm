@@ -16,6 +16,7 @@ import contextlib
 import importlib.util
 import io
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -75,10 +76,12 @@ class GateCase(unittest.TestCase):
         path.write_text("\n".join(entries))
         return path
 
-    def report(self, results: Path, suppressions: Path | None = None) -> tuple[int, str]:
+    def report(self, results: Path, recheck: Path | None = None,
+               suppressions: Path | None = None) -> tuple[int, str]:
         comment = self.tmp / "comment.md"
         args = Namespace(
             results=str(results),
+            recheck=str(recheck) if recheck else None,
             suppressions=str(suppressions) if suppressions else None,
             comment=str(comment),
             summary=None,
@@ -140,6 +143,12 @@ class ResultsThatCannotBeScored(GateCase):
         results = self.results(files={"no-mutants.txt": "nothing to see here\n"})
         self.assert_unscorable(results, "does not hold a line cargo-mutants prints")
 
+    def test_a_broken_recheck_of_a_timeout(self) -> None:
+        results = self.results(outcomes=outcomes_json(mutant(TIMEOUT, "Timeout")))
+        recheck = self.results("recheck", outcomes=outcomes_json(baseline="Failure"))
+        code, text = self.report(results, recheck)
+        self.assertEqual(code, 2, text)
+        self.assertIn("baseline failed", text)
 
 
 class NothingToTest(GateCase):
@@ -198,18 +207,60 @@ class Scoring(GateCase):
             code, text = self.report(results, suppressions=self.suppressions(suppressed))
             self.assertEqual(code, 0, text)
 
-    def test_a_timeout_fails(self) -> None:
+    def test_a_timeout_without_a_recheck_fails(self) -> None:
         results = self.results(outcomes=outcomes_json(
             mutant(CAUGHT, "CaughtMutant"), mutant(TIMEOUT, "Timeout")))
-        code, text = self.report(results)
+        code, text = self.report(results, self.tmp / "no-recheck")
         self.assertEqual(code, 1, text)
-        self.assertIn("Timed-out mutants", text)
+        self.assertIn("none of the 1 that timed out", text)
 
     def test_a_suppressed_timeout_passes(self) -> None:
         results = self.results(outcomes=outcomes_json(
             mutant(CAUGHT, "CaughtMutant"), mutant(TIMEOUT, "Timeout")))
         code, text = self.report(results, suppressions=self.suppressions(TIMEOUT))
         self.assertEqual(code, 0, text)
+
+    def recheck_of_the_timeout(self, summary: str) -> tuple[int, str]:
+        results = self.results(outcomes=outcomes_json(
+            mutant(CAUGHT, "CaughtMutant"), mutant(TIMEOUT, "Timeout")))
+        recheck = self.results("recheck", outcomes=outcomes_json(mutant(TIMEOUT, summary)))
+        return self.report(results, recheck)
+
+    def test_a_timeout_caught_alone_passes(self) -> None:
+        code, text = self.recheck_of_the_timeout("CaughtMutant")
+        self.assertEqual(code, 0, text)
+        self.assertIn("1 caught, 0 survived, 0 timed out again", text)
+        self.assertIn("(2/2 viable mutants killed)", text)
+
+    def test_a_timeout_that_survives_alone_is_a_survivor(self) -> None:
+        code, text = self.recheck_of_the_timeout("MissedMutant")
+        self.assertEqual(code, 1, text)
+        self.assertIn("Survivors needing attention", text)
+        self.assertNotIn("Timed-out mutants", text)
+
+    def test_a_timeout_that_times_out_alone_stays_inconclusive(self) -> None:
+        code, text = self.recheck_of_the_timeout("Timeout")
+        self.assertEqual(code, 1, text)
+        self.assertIn("1 timed out again", text)
+        self.assertIn("Timed-out mutants", text)
+
+    def test_a_timeout_the_recheck_did_not_run_stays_inconclusive(self) -> None:
+        results = self.results(outcomes=outcomes_json(mutant(TIMEOUT, "Timeout")))
+        recheck = self.results("recheck", outcomes=outcomes_json(mutant(CAUGHT, "CaughtMutant")))
+        code, text = self.report(results, recheck)
+        self.assertEqual(code, 1, text)
+        self.assertIn("1 not re-run", text)
+
+    def test_a_recheck_only_speaks_for_the_timeouts(self) -> None:
+        # A mutant the first run decided is not re-decided by a re-check that happens to
+        # include it.
+        results = self.results(outcomes=outcomes_json(
+            mutant(MISSED, "MissedMutant"), mutant(TIMEOUT, "Timeout")))
+        recheck = self.results("recheck", outcomes=outcomes_json(
+            mutant(MISSED, "CaughtMutant"), mutant(TIMEOUT, "CaughtMutant")))
+        code, text = self.report(results, recheck)
+        self.assertEqual(code, 1, text)
+        self.assertIn(MISSED, text)
 
 
 class NoteEmpty(GateCase):
@@ -242,6 +293,38 @@ class NoteEmpty(GateCase):
         results = self.results(outcomes=outcomes_json(mutant(CAUGHT, "CaughtMutant")))
         self.assertEqual(self.note(" INFO Diff file is empty\n", results), 0)
         self.assertFalse((results / "no-mutants.txt").exists())
+
+
+class TimeoutRe(GateCase):
+    """`timeout-re` selects exactly the unsuppressed mutants that timed out."""
+
+    def regexes(self, results: Path, suppressions: Path | None = None) -> list[str]:
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            code = gate.cmd_timeout_re(Namespace(
+                results=str(results), suppressions=str(suppressions) if suppressions else None))
+        self.assertEqual(code, 0)
+        lines = out.getvalue().splitlines()
+        self.assertEqual(lines[0::2], ["--re"] * (len(lines) // 2))
+        return lines[1::2]
+
+    def test_one_anchored_regex_per_timeout(self) -> None:
+        other = "crates/mega-evm/src/system/keyless/dispatch.rs:367:23: delete ! in prepare2"
+        results = self.results(outcomes=outcomes_json(
+            mutant(CAUGHT, "CaughtMutant"), mutant(TIMEOUT, "Timeout"), mutant(other, "Timeout")))
+        regexes = self.regexes(results)
+        self.assertEqual(len(regexes), 2)
+        names = [CAUGHT, TIMEOUT, other]
+        for regex, timed_out in zip(regexes, [TIMEOUT, other]):
+            self.assertEqual([n for n in names if re.search(regex, n)], [timed_out])
+
+    def test_suppressed_timeouts_are_not_rerun(self) -> None:
+        results = self.results(outcomes=outcomes_json(mutant(TIMEOUT, "Timeout")))
+        self.assertEqual(self.regexes(results, self.suppressions(TIMEOUT)), [])
+
+    def test_results_without_outcomes_select_nothing(self) -> None:
+        self.assertEqual(self.regexes(self.results(files={"mutants.json": "[]"})), [])
+        self.assertEqual(self.regexes(self.tmp / "absent"), [])
 
 
 class DriverGuard(unittest.TestCase):

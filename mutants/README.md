@@ -29,7 +29,7 @@ The two scopes are disjoint; a mutant belongs to exactly one of them.
 # Mutate only what your branch changed (what CI runs on a PR):
 scripts/mutation_test.sh diff origin/main
 python3 scripts/mutation_gate.py report --results target/mutants/mutants.out \
-        --suppressions mutants/suppressions.toml
+        --recheck target/mutants/recheck/mutants.out --suppressions mutants/suppressions.toml
 
 # One subsystem while iterating:
 scripts/mutation_test.sh file 'crates/mega-evm/src/limit/**'
@@ -37,7 +37,7 @@ scripts/mutation_test.sh file 'crates/mega-evm/src/limit/**'
 # The infrastructure scope (its own output directory, so it does not overwrite the production run):
 OUT_DIR=target/mutants-infra scripts/mutation_test.sh infra
 python3 scripts/mutation_gate.py report --results target/mutants-infra/mutants.out \
-        --suppressions mutants/suppressions.toml
+        --recheck target/mutants-infra/recheck/mutants.out --suppressions mutants/suppressions.toml
 
 # Shard k of n of a large run (cargo-mutants' --shard), each into its own directory:
 MUTANTS_SHARD=0/4 OUT_DIR=target/mutants-0 scripts/mutation_test.sh diff origin/main
@@ -57,6 +57,9 @@ The reported mutation score is informational.
 The gate reads a run **fail-closed**: it scores `outcomes.json`, and only a run whose baseline succeeded and whose every mutant has an outcome.
 Missing results, a missing or failed baseline, or an interrupted run fail the gate with the reason, instead of reading as nothing to test.
 A run that tested nothing passes only on the producer's own word for it: cargo-mutants' empty `mutants.json` when its filters leave no mutant, or, when `--in-diff` leaves none and cargo-mutants writes no results at all, the line it printed saying so, which the driver records in `no-mutants.txt`.
+
+A mutant that **timed out** was tested beside the others the run tests at once, each running the whole suite on the same cores, so the driver re-runs every unsuppressed one once, alone (`--jobs 1`, into `recheck/mutants.out`), and the gate takes that outcome for it.
+One caught alone is caught, one that survives alone is a survivor, and one that times out again stays inconclusive and fails the gate.
 
 ## Suppressions (hybrid)
 

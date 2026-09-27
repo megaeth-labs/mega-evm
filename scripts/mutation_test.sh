@@ -15,7 +15,9 @@
 # Results land in $OUT_DIR/mutants.out/ (missed.txt, caught.txt, outcomes.json).
 # When cargo-mutants has nothing to mutate and writes no results, which it does
 # when --in-diff leaves no mutant, the driver records its saying so there
-# instead. Run scripts/mutation_gate.py afterwards to score + gate the run.
+# instead. A mutant that timed out is re-run once, alone, into
+# $OUT_DIR/recheck/mutants.out/. Run scripts/mutation_gate.py afterwards to score
+# + gate the run, passing both.
 #
 # MUTANTS_SHARD=k/n runs only shard k (0-based) of n of whichever mutant set the
 # subcommand selects (cargo-mutants' own --shard), for a diff too large for one
@@ -113,6 +115,39 @@ run_mutants() {
     run_outcome "$rc" || return
     python3 "$ROOT_DIR/scripts/mutation_gate.py" note-empty \
         --log "$OUT_DIR.log" --results "$OUT_DIR/mutants.out"
+    recheck_timeouts
+}
+
+# A mutant that timed out was tested beside $JOBS others, each running the whole
+# suite on the same cores, so it may have timed out on the contention alone.
+# Re-run each once, alone; the gate takes that outcome for it. One that is
+# caught or survives alone is decided; one that times out again stays
+# inconclusive. Suppressed timeouts are not re-run.
+recheck_timeouts() {
+    local re_output
+    if ! re_output="$(python3 "$ROOT_DIR/scripts/mutation_gate.py" timeout-re \
+        --results "$OUT_DIR/mutants.out" --suppressions "$SUPPRESS")"; then
+        echo "failed to list the timed-out mutants in $OUT_DIR/mutants.out" >&2
+        return 1
+    fi
+    [[ -n "$re_output" ]] || return 0
+    local re_args=()
+    mapfile -t re_args <<< "$re_output"
+    echo "Re-checking $((${#re_args[@]} / 2)) timed-out mutant(s) one at a time" >&2
+    local rc=0
+    cargo mutants \
+        "${CONFIG_ARGS[@]}" \
+        "${PKG_ARGS[@]}" \
+        --jobs 1 \
+        --output "$OUT_DIR/recheck" \
+        --no-shuffle \
+        -vV \
+        "${re_args[@]}" 2>&1 | tee "$OUT_DIR/recheck.log" || rc=$?
+    # A re-check that fails as a run leaves the timeouts standing, and the gate
+    # reports its results as it finds them rather than the job ending here.
+    if ! run_outcome "$rc"; then
+        echo "the re-check of the timed-out mutants failed (exit $rc); see $OUT_DIR/recheck.log" >&2
+    fi
 }
 
 cmd="${1:-}"
@@ -150,4 +185,4 @@ esac
 
 echo
 echo "Mutation results written to $OUT_DIR/mutants.out/"
-echo "Score + gate with: python3 scripts/mutation_gate.py report --results $OUT_DIR/mutants.out"
+echo "Score + gate with: python3 scripts/mutation_gate.py report --results $OUT_DIR/mutants.out --recheck $OUT_DIR/recheck/mutants.out"

@@ -15,12 +15,18 @@ Subcommands:
         that line to <results>/no-mutants.txt. Does nothing when <results>
         exists, and fails when it does not and the output says no such thing.
 
-  report      --results <mutants.out dir> [--suppressions <toml>]
-              [--comment <path>] [--summary <path>]
-        Read the run outcomes, apply line-scoped suppressions, compute the
-        mutation score, write a Markdown report, and exit non-zero if any
-        unsuppressed survivor or timeout remains (the "no new survivors" gate).
-        Exits 2, with a report saying why, when the results cannot be scored.
+  timeout-re  --results <mutants.out dir> [--suppressions <toml>]
+        Print one `--re <regex>` pair per line for every unsuppressed mutant
+        that timed out, each regex matching that mutant's name alone. Consumed
+        by scripts/mutation_test.sh to re-run those mutants one at a time.
+
+  report      --results <mutants.out dir> [--recheck <mutants.out dir>]
+              [--suppressions <toml>] [--comment <path>] [--summary <path>]
+        Read the run outcomes, take the re-check's outcome for a mutant that
+        timed out, apply line-scoped suppressions, compute the mutation score,
+        write a Markdown report, and exit non-zero if any unsuppressed survivor
+        or timeout remains (the "no new survivors" gate). Exits 2, with a
+        report saying why, when the results cannot be scored.
 
   orphans     --suppressions <toml> --universe <file>
         Flag suppressions that match no live mutant.
@@ -248,6 +254,22 @@ def is_suppressed(name: str, supp: set[str]) -> bool:
     return name in supp or mutant_body(name) in supp
 
 
+def cmd_timeout_re(args: argparse.Namespace) -> int:
+    try:
+        run = load_run(Path(args.results))
+    except ResultsError as err:
+        # Nothing to re-check; the gate reports why the results cannot be scored.
+        print(f"no timed-out mutants to re-check: {err}", file=sys.stderr)
+        return 0
+    supp = suppressed_names(args.suppressions)
+    for name in run.timeout:
+        if is_suppressed(name, supp):
+            continue
+        print("--re")
+        print(f"^{re.escape(name)}$")
+    return 0
+
+
 def write_report(report: str, args: argparse.Namespace) -> None:
     if args.comment:
         Path(args.comment).write_text(report)
@@ -261,6 +283,9 @@ def cmd_report(args: argparse.Namespace) -> int:
     results = Path(args.results)
     try:
         run = load_run(results)
+        recheck = None
+        if run.timeout and args.recheck and Path(args.recheck).exists():
+            recheck = load_run(Path(args.recheck))
     except ResultsError as err:
         write_report(
             "## 🧬 Mutation testing — ❌ FAIL\n\n"
@@ -276,7 +301,23 @@ def cmd_report(args: argparse.Namespace) -> int:
         write_report(f"## 🧬 Mutation testing — ✅ PASS\n\n{note}.\n", args)
         return 0
 
-    caught, missed, timeout = run.caught, run.missed, run.timeout
+    caught, missed, timeout = list(run.caught), list(run.missed), []
+    rechecked: dict[str, list[str]] = {"caught": [], "missed": [], "timeout": [], "absent": []}
+    if recheck is not None:
+        verdicts = {n: k for k in ("caught", "missed", "timeout", "unviable") for n in getattr(recheck, k)}
+        for name in run.timeout:
+            verdict = verdicts.get(name)
+            if verdict == "caught":
+                caught.append(name)
+                rechecked["caught"].append(name)
+            elif verdict == "missed":
+                missed.append(name)
+                rechecked["missed"].append(name)
+            else:
+                timeout.append(name)
+                rechecked["timeout" if verdict else "absent"].append(name)
+    else:
+        timeout = list(run.timeout)
 
     supp = suppressed_names(args.suppressions)
 
@@ -321,6 +362,15 @@ def cmd_report(args: argparse.Namespace) -> int:
         f"- suppressed (equivalent/dead-code): {len(suppressed) + len(supp_timeouts)}",
         f"- unviable: {len(run.unviable)} · timeout total: {len(timeout)}",
     ]
+    if run.timeout:
+        if recheck is None:
+            md.append(f"- re-checked: none of the {len(run.timeout)} that timed out (no re-check results)")
+        else:
+            md.append(
+                f"- re-checked alone after timing out: {len(run.timeout)} — "
+                f"{len(rechecked['caught'])} caught, {len(rechecked['missed'])} survived, "
+                f"{len(rechecked['timeout'])} timed out again, {len(rechecked['absent'])} not re-run"
+            )
     md.append("")
 
     def section(title: str, blurb: str, items: list[str], artifact: str) -> list[str]:
@@ -422,8 +472,15 @@ def main() -> int:
     pn.add_argument("--results", required=True)
     pn.set_defaults(func=cmd_note_empty)
 
+    pt = sub.add_parser("timeout-re", help="--re arguments selecting the mutants that timed out")
+    pt.add_argument("--results", required=True)
+    pt.add_argument("--suppressions", default=None)
+    pt.set_defaults(func=cmd_timeout_re)
+
     pr = sub.add_parser("report")
     pr.add_argument("--results", required=True)
+    pr.add_argument("--recheck", default=None,
+                    help="results of re-running the timed-out mutants one at a time")
     pr.add_argument("--suppressions", default=None)
     pr.add_argument("--comment", default=None, help="write Markdown report here")
     pr.add_argument("--summary", default=None, help="append report here (GITHUB_STEP_SUMMARY)")
