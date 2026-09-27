@@ -1,5 +1,5 @@
 ---
-description: MegaETH network upgrade history — hardfork timeline from MiniRex through Rex7 with activation dates and behavioral deltas.
+description: MegaETH network upgrade history — hardfork timeline from MiniRex through Satin with activation dates and behavioral deltas.
 ---
 
 # Overview
@@ -154,6 +154,20 @@ Not yet scheduled
 
 Unstable; under active development.
 No behavioral change over Rex6 yet.
+
+### [Satin](satin.md)
+
+{% tabs %}
+{% tab title="Testnet" %}
+Not yet scheduled
+{% endtab %}
+{% tab title="Mainnet" %}
+Not yet scheduled
+{% endtab %}
+{% endtabs %}
+
+Unstable; under active development.
+Optimism Karst (Ethereum Osaka) base, [EIP-8037](https://eips.ethereum.org/EIPS/eip-8037) regular gas under a 200,000,000 execution cap with a state-gas reservoir, SALT-scaled state gas, history gas per byte appended, per-transaction limits that stop a transaction with a revert, gas detention on withheld gas, [EIP-7708](https://eips.ethereum.org/EIPS/eip-7708) transfer logs, native [KeylessDeploy](../system-contracts/keyless-deploy.md) creation, system calls on 30,000,000 regular gas plus reservoir, the live system address read by the transaction, block limits as packing budgets, and the EIP-7997 factory.
 
 ## How to Read These Pages
 

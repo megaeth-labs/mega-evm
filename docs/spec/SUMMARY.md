@@ -40,6 +40,7 @@
 - [Rex5](upgrades/rex5.md)
 - [Rex6](upgrades/rex6.md)
 - [Rex7](upgrades/rex7.md)
+- [Satin](upgrades/satin.md)
 
 ## Reference
 
