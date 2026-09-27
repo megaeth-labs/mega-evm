@@ -214,6 +214,7 @@ Outside block execution an inspector may rewrite what execution produces — Fou
 A failed creation rewritten into a success is refused, and a limit's stop is not rewritten.
 A frame an inspector answered in place of running, or a failed frame it turned into a success, settles into its caller as a frame that kept nothing: the caller sees the success, the output and the regular gas the inspector chose, and no state gas, history gas, refund or write record of writes the journal does not hold.
 An answer hands its caller back the reservoir it forwarded, whatever gas the inspector built it on.
+A success an inspector rewrites into a failure has its journal taken back as a failed frame's is, so the state follows the failure its ledgers settle as.
 Gas an inspector writes after a frame's last instruction reaches nobody, and a charge a frame cannot pay is refused without stopping it.
 `tests/satin/inspector_cheatcodes.rs` drives `deal`, `store`, `pauseGasMetering` / `resumeGasMetering` and `expectRevert` through the engine as Foundry's inspector does.
 

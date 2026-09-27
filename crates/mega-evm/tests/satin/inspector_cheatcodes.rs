@@ -13,9 +13,10 @@
 //!
 //! What each does to Satin's ledgers follows from the inspector contract: a journal write from a
 //! callback is on no gas ledger and in no count, a paused region spends no gas of any kind while
-//! what it writes is still counted, and a failed call `expectRevert` turns into a success settles
-//! as the failure on every ledger. `expectRevert` is honored on a result revm answers without
-//! running a frame — a precompile's, a call to an account with no code — as on a frame's.
+//! what it writes is still counted, a failed call `expectRevert` turns into a success settles as
+//! the failure on every ledger, and a success it turns into a failure keeps none of its writes.
+//! `expectRevert` is honored on a result revm answers without running a frame — a precompile's, a
+//! call to an account with no code — as on a frame's.
 
 use alloy_primitives::{address, keccak256, Address, Bytes, B256, U256};
 use alloy_sol_types::{sol, SolCall};

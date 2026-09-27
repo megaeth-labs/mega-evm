@@ -1,5 +1,6 @@
 //! What a frame that kept nothing settles into its caller, whatever an inspector made of its
-//! result.
+//! result, and what a success an inspector rewrites into a failure keeps: nothing, the journal
+//! following the result as it follows a frame that fails.
 //!
 //! Two frames keep nothing in the journal: one that failed, whose checkpoint was reverted before
 //! the inspector saw its result, and one the inspector answered in place of running, which never
@@ -27,12 +28,14 @@ use mega_evm::{
     MegaEvm, MegaTransaction, MegaTransactionOutcome, WRITE_RECORD_SIZE,
 };
 use revm::{
-    bytecode::opcode::{CALL, POP, PUSH0, STOP},
-    context_interface::{cfg::GasId, Transaction},
+    bytecode::opcode::{CALL, POP, PUSH0, RETURN, REVERT, STOP},
+    context::{ContextTr, JournalTr},
+    context_interface::{cfg::GasId, journaled_state::account::JournaledAccountTr, Transaction},
     interpreter::{
         interpreter::EthInterpreter, CallInputs, CallOutcome, CreateInputs, CreateOutcome, Gas,
-        InstructionResult, InterpreterResult, InterpreterTypes,
+        InstructionResult, Interpreter, InterpreterResult, InterpreterTypes,
     },
+    state::{AccountStatus, EvmStorageSlot},
     Inspector,
 };
 
@@ -430,4 +433,283 @@ fn test_an_answered_call_holds_nothing_against_the_state_gas_limit() {
     assert_eq!(answered.limit_exceeded, None, "{:?}", answered.result);
     assert!(answered.result.is_success(), "{:?}", answered.result);
     assert_eq!(answered.gas.state, slot, "the slot alone");
+}
+
+/* ---------- a success rewritten into a failure ---------- */
+
+/// The data Foundry's `expectRevert` gives a call that did not revert.
+const DID_NOT_REVERT: &[u8] = b"call did not revert as expected";
+
+/// Turns every successful result of a call to `target`, and of every creation when `target` is
+/// zero, into `result` carrying Foundry's "did not revert" data — the shape of `expectRevert` on a
+/// call that did not revert — or, with no `result`, rewrites nothing. Records the journal's depth
+/// at every instruction, which Foundry's `expectRevert` compares.
+#[derive(Clone)]
+struct Fails {
+    target: Address,
+    result: Option<InstructionResult>,
+    depths: Vec<usize>,
+}
+
+impl Fails {
+    const fn call(target: Address, result: InstructionResult) -> Self {
+        Self { target, result: Some(result), depths: Vec::new() }
+    }
+
+    const fn creation(result: InstructionResult) -> Self {
+        Self::call(Address::ZERO, result)
+    }
+
+    /// The same inspector, rewriting nothing.
+    fn recording(&self) -> Self {
+        Self { result: None, ..self.clone() }
+    }
+
+    fn fail(&self, result: &mut InterpreterResult) {
+        if let Some(failure) = self.result.filter(|_| result.result.is_ok()) {
+            result.result = failure;
+            result.output = Bytes::from_static(DID_NOT_REVERT);
+        }
+    }
+}
+
+impl<CTX: ContextTr, INTR: InterpreterTypes> Inspector<CTX, INTR> for Fails {
+    fn step(&mut self, _: &mut Interpreter<INTR>, context: &mut CTX) {
+        self.depths.push(context.journal_ref().depth());
+    }
+
+    fn call_end(&mut self, _: &mut CTX, inputs: &CallInputs, outcome: &mut CallOutcome) {
+        if inputs.target_address == self.target {
+            self.fail(&mut outcome.result);
+        }
+    }
+
+    fn create_end(&mut self, _: &mut CTX, _: &CreateInputs, outcome: &mut CreateOutcome) {
+        if self.target == Address::ZERO {
+            self.fail(&mut outcome.result);
+        }
+    }
+}
+
+/// Runs `tx` over `db()` reading `envs()` under `fails`, and again under the same inspector
+/// rewriting nothing; hands back the first once the journal's depth was the same at every
+/// instruction of both: taking a frame's journal back leaves the depth as it was.
+fn rewritten(
+    db: impl Fn() -> MemoryDatabase,
+    envs: impl Fn() -> SaltEnvs,
+    tx: &MegaTransaction,
+    fails: Fails,
+) -> MegaTransactionOutcome {
+    let run = |inspector: Fails| {
+        let mut evm = MegaEvm::new(salt_context(db(), envs())).with_inspector(inspector);
+        let outcome = evm.execute_transaction(tx.clone()).expect("a valid transaction");
+        (outcome, evm.inspector().depths.clone())
+    };
+    let (_, recorded) = run(fails.recording());
+    let (outcome, depths) = run(fails);
+    assert_eq!(depths, recorded, "the journal's depth at every instruction");
+    outcome
+}
+
+/// The failures a success is rewritten into: Foundry's revert, and a halt.
+const FAILURES: [InstructionResult; 2] = [InstructionResult::Revert, InstructionResult::OutOfGas];
+
+/// An account as a state is compared on without its code: status, balance, nonce and storage.
+type AccountBesideCode = (Address, AccountStatus, U256, u64, Vec<(U256, EvmStorageSlot)>);
+
+/// `outcome`'s state without the code of its accounts, in address order: what two runs whose
+/// programs differ in their last opcodes are compared on.
+fn state_without_code(outcome: &MegaTransactionOutcome) -> Vec<AccountBesideCode> {
+    let mut accounts: Vec<_> = outcome
+        .state
+        .iter()
+        .map(|(address, account)| {
+            let mut storage: Vec<_> =
+                account.storage.iter().map(|(key, slot)| (*key, slot.clone())).collect();
+            storage.sort_by_key(|(key, _)| *key);
+            (*address, account.status, account.info.balance, account.info.nonce, storage)
+        })
+        .collect();
+    accounts.sort_by_key(|(address, ..)| *address);
+    accounts
+}
+
+/// A value call that adds an account, rewritten into a failure, keeps nothing. `EMPTY` has no code,
+/// so revm answers the call without building a frame, and what its start journaled — the value's
+/// move, the account it touched, the transfer log — is taken back to where the start began: the
+/// value stays with its sender and no account is added. The failure then settles as the same
+/// failure an inspector answers in place of the call does, on every ledger and in the state: no
+/// state gas, the body's history alone. At the transaction's own frame and one call down, below
+/// and above the execution cap; run, the call adds the account and logs the transfer.
+#[test]
+fn test_a_value_call_rewritten_into_a_failure_keeps_nothing() {
+    let envs = || crowded_account(minimal_envs(), EMPTY, 3);
+    let caller = value_call(EMPTY).append(POP).stop().build();
+    for gas_limit in GAS_LIMITS {
+        let cases = [
+            ("the transaction's own", Bytes::new(), to(EMPTY, 1, Bytes::new(), gas_limit)),
+            ("one call down", caller.clone(), to(CONTRACT, 0, Bytes::new(), gas_limit)),
+        ];
+        for (at, code, tx) in cases {
+            let db = || db(code.clone());
+            let ran = plain(db(), envs(), tx.clone());
+            assert!(holds_something(&ran, EMPTY), "{at}: run, the call adds the account");
+            assert_eq!(ran.result.logs().len(), 1, "{at}: and logs the transfer");
+            for result in FAILURES {
+                let case = format!("{at}, rewritten into {result:?}, gas limit {gas_limit}");
+                let rewritten = rewritten(db, envs, &tx, Fails::call(EMPTY, result));
+                let answered = inspected(db(), envs(), tx.clone(), Answers::call(EMPTY, result));
+                assert_keeps_only_its_body(&case, &tx, &rewritten);
+                assert!(!holds_something(&rewritten, EMPTY), "{case}: no account");
+                assert!(rewritten.result.logs().is_empty(), "{case}: no transfer log");
+                assert_eq!(rewritten.gas, answered.gas, "{case}: every ledger");
+                assert_eq!(rewritten.usage, answered.usage, "{case}: every count");
+                assert_eq!(rewritten.state, answered.state, "{case}: the state");
+            }
+        }
+    }
+}
+
+/// Where a creation case runs one init code: the code of `CONTRACT` and the transaction.
+type CreationSetup<'a> = &'a dyn Fn(&[u8]) -> (Bytes, MegaTransaction);
+
+/// A creation rewritten into a failure keeps what a creation that fails keeps: its creator's nonce
+/// bump, which revm makes before the creation's checkpoint, and its record — nothing after the
+/// checkpoint: no account, no code, no endowment. It settles as a creation whose init code reverts
+/// in place of returning does, on the state beside the code, state and history gas and the counts;
+/// a revert keeps the regular gas the run spent. At the transaction's own frame and one call down,
+/// below and above the execution cap; run, the creation adds its account.
+#[test]
+fn test_a_creation_rewritten_into_a_failure_keeps_what_a_failed_creation_keeps() {
+    let (deploys, reverts) = (&[PUSH0, PUSH0, RETURN][..], &[PUSH0, PUSH0, REVERT][..]);
+    let creates = |init: &[u8]| {
+        BytecodeBuilder::default().create(U256::from(1), init).append(POP).stop().build()
+    };
+    for gas_limit in GAS_LIMITS {
+        let own = |init: &[u8]| {
+            let data = Bytes::copy_from_slice(init);
+            (Bytes::new(), tx_with_gas(TxKind::Create, data, U256::from(1), gas_limit))
+        };
+        let down = |init: &[u8]| (creates(init), to(CONTRACT, 0, Bytes::new(), gas_limit));
+        let cases: [(&str, Address, CreationSetup<'_>); 2] = [
+            ("the transaction's own", CALLER.create(0), &own),
+            ("one call down", CONTRACT.create(0), &down),
+        ];
+        for (at, created, setup) in cases {
+            let envs = || crowded_account(minimal_envs(), created, 3);
+            let ((deploying, tx), (reverting, reverting_tx)) = (setup(deploys), setup(reverts));
+            let ran = plain(db(deploying.clone()), envs(), tx.clone());
+            assert!(holds_something(&ran, created), "{at}: run, the creation adds its account");
+            let failed = plain(db(reverting), envs(), reverting_tx);
+            assert!(!holds_something(&failed, created), "{at}: reverting, it adds none");
+            for result in FAILURES {
+                let case = format!("{at}, rewritten into {result:?}, gas limit {gas_limit}");
+                let rewritten =
+                    rewritten(|| db(deploying.clone()), envs, &tx, Fails::creation(result));
+                assert!(!holds_something(&rewritten, created), "{case}: no account");
+                let state = state_without_code(&rewritten);
+                assert_eq!(state, state_without_code(&failed), "{case}: the state");
+                assert_eq!(rewritten.usage, failed.usage, "{case}: every count");
+                assert_eq!(rewritten.gas.state, failed.gas.state, "{case}: state gas");
+                assert_eq!(rewritten.gas.history, failed.gas.history, "{case}: history gas");
+                assert_eq!(rewritten.gas.history_bytes, failed.gas.history_bytes, "{case}");
+                if result == InstructionResult::Revert {
+                    assert_eq!(rewritten.gas.regular, ran.gas.regular, "{case}: regular gas");
+                }
+            }
+        }
+    }
+}
+
+/// Where a call case runs one program: the database holding it.
+type CallSetup<'a> = &'a dyn Fn(&Bytes) -> MemoryDatabase;
+
+/// A call whose frame ran and wrote — a fresh slot filled and a word logged — rewritten into a
+/// failure keeps none of it: the frame's journal is taken back to its checkpoint, so the slot is
+/// not in the state and the log is not in the receipt. It settles as the same writes reverting do,
+/// on the state beside the code, state and history gas and the counts; a revert keeps the regular
+/// gas the run spent. At the transaction's own frame and one call down, below and above the
+/// execution cap; run, the slot and the log are kept.
+#[test]
+fn test_a_call_that_wrote_rewritten_into_a_failure_keeps_none_of_it() {
+    let writes = || BytecodeBuilder::default().sstore(U256::from(1), U256::from(1)).log3_word();
+    let (stopping, reverting) = (writes().stop().build(), writes().revert().build());
+    let caller = BytecodeBuilder::default().call(CALLEE, U256::ZERO).append(POP).stop().build();
+    let own = |code: &Bytes| db(code.clone());
+    let down = |code: &Bytes| db(caller.clone()).account_code(CALLEE, code.clone());
+    let cases: [(&str, Address, CallSetup<'_>); 2] =
+        [("the transaction's own", CONTRACT, &own), ("one call down", CALLEE, &down)];
+    for gas_limit in GAS_LIMITS {
+        let tx = to(CONTRACT, 0, Bytes::new(), gas_limit);
+        for (at, writer, setup) in cases {
+            let slot = |outcome: &MegaTransactionOutcome| {
+                outcome.state[&writer].storage.get(&U256::from(1)).is_some_and(|s| s.is_changed())
+            };
+            let ran = plain(setup(&stopping), minimal_envs(), tx.clone());
+            assert!(slot(&ran) && !ran.result.logs().is_empty(), "{at}: run, the writes are kept");
+            let failed = plain(setup(&reverting), minimal_envs(), tx.clone());
+            for result in FAILURES {
+                let case = format!("{at}, rewritten into {result:?}, gas limit {gas_limit}");
+                let fails = Fails::call(writer, result);
+                let rewritten = rewritten(|| setup(&stopping), minimal_envs, &tx, fails);
+                assert!(!slot(&rewritten), "{case}: no slot");
+                assert!(rewritten.result.logs().is_empty(), "{case}: no log");
+                let state = state_without_code(&rewritten);
+                assert_eq!(state, state_without_code(&failed), "{case}: the state");
+                assert_eq!(rewritten.usage, failed.usage, "{case}: every count");
+                assert_eq!(rewritten.gas.state, failed.gas.state, "{case}: state gas");
+                assert_eq!(rewritten.gas.history, failed.gas.history, "{case}: history gas");
+                if result == InstructionResult::Revert {
+                    assert_eq!(rewritten.gas.regular, ran.gas.regular, "{case}: regular gas");
+                }
+            }
+        }
+    }
+}
+
+/// An account the inspector of [`WritesAtTheEnd`] writes to.
+const NOTE: Address = address!("0000000000000000000000000000000000c000bb");
+
+/// Writes a balance to `NOTE` in the `call_end` of every call to `CALLEE`, and, when `fails`, turns
+/// a success into a revert there.
+struct WritesAtTheEnd {
+    fails: bool,
+}
+
+impl Inspector<MegaContext<MemoryDatabase, SaltEnvs>, EthInterpreter> for WritesAtTheEnd {
+    fn call_end(
+        &mut self,
+        context: &mut MegaContext<MemoryDatabase, SaltEnvs>,
+        inputs: &CallInputs,
+        outcome: &mut CallOutcome,
+    ) {
+        if inputs.target_address != CALLEE {
+            return;
+        }
+        let mut account = context.journal_mut().load_account_mut(NOTE).expect("loads");
+        account.data.set_balance(U256::from(7));
+        if self.fails && outcome.result.result.is_ok() {
+            outcome.result.result = InstructionResult::Revert;
+        }
+    }
+}
+
+/// What an inspector writes to the journal in the callback that turns a success into a failure is
+/// journaled after the frame's checkpoint, and goes with the frame's writes; written in a callback
+/// that leaves the success alone, it stays. Where revm fails the frame itself, the checkpoint is
+/// gone before `call_end`, so a write made there stays: the one place the rewrite and a real
+/// failure part.
+#[test]
+fn test_a_write_an_inspector_makes_as_it_fails_a_frame_goes_with_the_frame() {
+    let caller = BytecodeBuilder::default().call(CALLEE, U256::ZERO).append(POP).stop().build();
+    let db = |callee: Bytes| db(caller.clone()).account_code(CALLEE, callee);
+    let stopping = BytecodeBuilder::default().stop().build();
+    let reverting = BytecodeBuilder::default().revert().build();
+    let tx = to(CONTRACT, 0, Bytes::new(), GAS_LIMITS[0]);
+    let run = |callee: &Bytes, fails: bool| {
+        inspected(db(callee.clone()), minimal_envs(), tx.clone(), WritesAtTheEnd { fails })
+    };
+    assert!(holds_something(&run(&stopping, false), NOTE), "left a success, the write stays");
+    assert!(!holds_something(&run(&stopping, true), NOTE), "failing it, the write goes");
+    assert!(holds_something(&run(&reverting, false), NOTE), "revm failed it: the write stays");
 }

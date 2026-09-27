@@ -50,7 +50,7 @@ use crate::{
     access::ComputeStop,
     evm::{
         history::transaction_body_bytes,
-        inspector::{frame_end_checked, StepGuard},
+        inspector::{frame_end_checked, journal_position, ResultSource, StepGuard},
     },
     history_gas, synthetic_frame_result,
     system::keyless,
@@ -680,7 +680,11 @@ where
                 .map(ItemOrResult::Result);
         }
         let (frame_input, depth) = (frame_init.frame_input.clone(), frame_init.depth);
-        let logs_i = ctx.journal().logs().len();
+        // What the start journals begins here. A start answered with a success without a frame
+        // is revm's — a call to a precompile or to an account with no code, which takes its
+        // checkpoint before it journals anything — or an interceptor's, which journals nothing.
+        let start = journal_position(ctx);
+        let logs_i = start.log_i;
         if let ItemOrResult::Result(mut output) = self.frame_init(frame_init)? {
             let (ctx, inspector) = self.ctx_inspector();
             // Logs the frame journaled without running: the EIP-7708 transfer log, and the logs
@@ -696,7 +700,8 @@ where
                     }
                 }
             }
-            frame_end_checked(ctx, inspector, &frame_input, &mut output, depth, false);
+            let source = ResultSource::Engine(start);
+            frame_end_checked(ctx, inspector, &frame_input, &mut output, depth, source);
             return Ok(ItemOrResult::Result(output));
         }
         let (ctx, inspector, frame) = self.ctx_inspector_frame();
@@ -734,7 +739,8 @@ where
         let mut next = frame.process_next_action(ctx, action);
         after_frame_run(ctx, frame, &mut next);
         if let Ok(ItemOrResult::Result(result)) = &mut next {
-            frame_end_checked(ctx, inspector, &frame.input, result, frame.depth, false);
+            let source = ResultSource::Engine(frame.checkpoint);
+            frame_end_checked(ctx, inspector, &frame.input, result, frame.depth, source);
             frame.set_finished(true);
         }
         next
@@ -1086,7 +1092,8 @@ where
     ctx.additional_limit.push_empty_frame();
     let gas_limit = input_gas_limit(&frame_init.frame_input);
     settle_answer(ctx, frame_init.depth, gas_limit, &mut output);
-    frame_end_checked(ctx, inspector, &frame_init.frame_input, &mut output, frame_init.depth, true);
+    let (input, depth) = (&frame_init.frame_input, frame_init.depth);
+    frame_end_checked(ctx, inspector, input, &mut output, depth, ResultSource::Inspector);
     output
 }
 

@@ -66,6 +66,17 @@
 //!   gas the inspector chose, and nothing else of the frame: no state or history gas, no refund and
 //!   no write record for writes the journal does not hold, and the upfront state gas its caller's
 //!   opcode was charged for an account the frame did not add comes back.
+//! - **A success rewritten into a failure keeps nothing either.** A frame the inspector turns from
+//!   a success into a failure — Foundry's `expectRevert` on a call that did not revert — has its
+//!   journal taken back to its checkpoint, as revm takes back a frame that fails: the frame's own,
+//!   or, for a start revm answers without building a frame (a call to a precompile or to an account
+//!   with no code), where the start began. So the state follows the failure its ledgers settle as:
+//!   no account, slot, code, value moved or log of the frame's is kept, and a creation keeps its
+//!   creator's nonce bump, which revm makes before the creation's checkpoint, as one that fails
+//!   does. Everything journaled since the checkpoint goes, what the inspector itself wrote to the
+//!   journal during the frame or in the callback that rewrote its result included; where revm fails
+//!   a frame the checkpoint is gone before `call_end`, so a write made there stays. The journal's
+//!   depth is left as it was.
 //! - **The latch.** Once a limit stopped the transaction, every frame's result is the stop,
 //!   whatever produced it: an inspector turns it into neither a success nor a halt.
 //!
@@ -96,7 +107,7 @@ use std::{format, string::String};
 
 use revm::{
     context::{ContextError, ContextTr, JournalTr},
-    context_interface::{cfg::StateGasCharge, Host},
+    context_interface::{cfg::StateGasCharge, journaled_state::JournalCheckpoint, Host},
     handler::FrameResult,
     inspector::{handler::frame_end, JournalExt, NoOpInspector},
     interpreter::{
@@ -440,18 +451,34 @@ fn assert_result_unwritten(before: ResultSnapshot, result: &FrameResult, callbac
     }
 }
 
+/// Where the result [`frame_end_checked`] hands the inspector came from.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum ResultSource {
+    /// The inspector answered the frame in place of running it: nothing of the frame is in the
+    /// journal.
+    Inspector,
+    /// The engine produced it — a frame that ran, or a start revm or the engine answered without
+    /// building a frame — and what the frame journaled begins at the checkpoint: the frame's own,
+    /// or where the journal stood when the start began.
+    Engine(JournalCheckpoint),
+}
+
 /// Hands a frame's end to the inspector, then settles what its rewrite does not change.
 ///
 /// - **The refusal.** A creation that failed, rewritten into a success, is put back and fails the
 ///   transaction with [`FORBIDDEN_CREATE_REVIVAL`] — unless the transaction is latched, where the
 ///   creation is put back and reports the stop, which the latch writes over every result.
-/// - **A frame that kept nothing.** A frame the inspector answered in place of running
-///   (`answered`), and a frame that failed before the inspector saw it, made no write the journal
-///   kept. Whatever the inspector left the result saying, it settles into its caller as such a
-///   frame does ([`settle_kept_nothing`]).
+/// - **A frame that kept nothing.** A frame the inspector answered in place of running, and a frame
+///   that failed before the inspector saw it, made no write the journal kept. Whatever the
+///   inspector left the result saying, it settles into its caller as such a frame does
+///   ([`settle_kept_nothing`]).
+/// - **A success rewritten into a failure.** The journal follows the result: what the frame
+///   journaled is taken back to its checkpoint, as revm takes back a frame that fails, so the state
+///   holds none of the writes the failure's settlement bills nothing for. A frame the inspector
+///   answered journaled nothing, so nothing is taken back for it.
 ///
-/// Every place a frame result reaches the inspector goes through here, so both cover a result a
-/// frame ran to produce and one answered without running. A frame the inspector answered with a
+/// Every place a frame result reaches the inspector goes through here, so all three cover a result
+/// a frame ran to produce and one answered without running. A frame the inspector answered with a
 /// success itself is no revival: nothing failed. The latch is read after the hooks that can set
 /// it — the frame's run, detention's classification of its end, the hold on a start's upfront state
 /// gas, and the answer before building — have run, so a creation the latch stopped is never
@@ -463,7 +490,7 @@ pub(crate) fn frame_end_checked<DB, ExtEnvs, INTR, INSP>(
     frame_input: &FrameInput,
     frame_result: &mut FrameResult,
     depth: usize,
-    answered: bool,
+    source: ResultSource,
 ) where
     DB: Database,
     ExtEnvs: ExternalEnvTypes,
@@ -473,6 +500,15 @@ pub(crate) fn frame_end_checked<DB, ExtEnvs, INTR, INSP>(
     let before = frame_result.instruction_result();
     frame_end(context, inspector, frame_input, frame_result);
     refuse_create_revival(context, before, frame_result);
+    let answered = match source {
+        ResultSource::Inspector => true,
+        ResultSource::Engine(checkpoint) => {
+            if before.is_ok() && !frame_result.instruction_result().is_ok() {
+                revert_journal_to(context, checkpoint);
+            }
+            false
+        }
+    };
     if answered || !before.is_ok() {
         settle_kept_nothing(context, frame_input, frame_result, depth, answered);
     }
@@ -543,6 +579,30 @@ fn settle_kept_nothing<DB: Database, ExtEnvs: ExternalEnvTypes>(
     gas.refill_reservoir(upfront.unwrap_or_default());
     gas.refill_history(history);
     context.additional_limit.discard_returning_lane();
+}
+
+/// Where the journal stands: the checkpoint a frame starting now would take, taken without
+/// changing the journal's depth.
+#[inline]
+pub(crate) fn journal_position<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    context: &mut MegaContext<DB, ExtEnvs>,
+) -> JournalCheckpoint {
+    let journal = context.journal_mut();
+    let checkpoint = journal.checkpoint();
+    journal.checkpoint_commit();
+    checkpoint
+}
+
+/// Takes back every journal entry, log and self-destruct made since `checkpoint`, as revm takes
+/// back a frame that fails, and leaves the journal's depth as it is: the frame's own checkpoint was
+/// already closed, so one is opened for the revert to close.
+fn revert_journal_to<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    context: &mut MegaContext<DB, ExtEnvs>,
+    checkpoint: JournalCheckpoint,
+) {
+    let journal = context.journal_mut();
+    let _ = journal.checkpoint();
+    journal.checkpoint_revert(checkpoint);
 }
 
 /// Sets `result`'s upfront-charge flags to those of `input`, the frame it answers: what revm's
