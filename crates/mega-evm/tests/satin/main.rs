@@ -15,6 +15,7 @@ mod history_exemption;
 mod history_gas;
 mod history_reservoir;
 mod inspector;
+mod inspector_cheatcodes;
 mod inspector_limits;
 mod inspector_settlement;
 mod intrinsic;
