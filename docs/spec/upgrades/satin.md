@@ -25,8 +25,7 @@ Detention holds each frame's spendable regular gas inside the frame's own gas, s
 
 Satin also brings EIP-7708 transfer logs, deploys a `keylessDeploy` transaction as a native creation instead of in a sandbox, runs system calls on at most 30,000,000 of regular gas with the rest as reservoir, has a system-address transaction read the live system address itself, and makes every block-level execution limit a packing budget that never refuses a deposit.
 
-Satin follows Rex7 on the spec ladder.
-Rex7 changes no behavior of [Rex6](rex6.md), so every **Previous behavior** below is Rex6's.
+Satin follows [Rex6](rex6.md) on the spec ladder, so every **Previous behavior** below is Rex6's.
 Satin does not add to the Rex6 rules one by one: it restates the execution layer, and a Rex6 rule this page does not carry over does not apply under Satin.
 
 The changes, in the order this page records them:

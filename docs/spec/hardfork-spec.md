@@ -51,17 +51,17 @@ Protocol-level changes outside the verifiable execution layer (e.g., networking,
 ## Spec Progression
 
 ```
-EQUIVALENCE → MINI_REX → MINI_REX_1 → MINI_REX_2 → REX → REX1 → REX2 → REX3 → REX4 → REX5 → REX6 → REX7 → SATIN
+EQUIVALENCE → MINI_REX → MINI_REX_1 → MINI_REX_2 → REX → REX1 → REX2 → REX3 → REX4 → REX5 → REX6 → SATIN
 ```
 
 Each newer behavior-introducing spec includes all previous behaviors.
 The alias rungs `MINI_REX_1` (behavior: `EQUIVALENCE`) and `MINI_REX_2` (behavior: `MINI_REX`) are the exception: an alias rung introduces no behavior of its own and instead executes exactly its target's earlier behavior (see [Alias Specs](#alias-specs-behavior-vs-position)).
-Every spec through REX7 builds on Optimism Isthmus (Ethereum Prague) as the base layer; SATIN builds on Optimism Karst (Ethereum Osaka).
-All specs through REX6 are frozen; REX7 and SATIN are **unstable** and under active development.
+Every spec through REX6 builds on Optimism Isthmus (Ethereum Prague) as the base layer; SATIN builds on Optimism Karst (Ethereum Osaka).
+All specs through REX6 are frozen; SATIN is **unstable** and under active development.
 
 Frozen and activated are separate properties.
 A frozen spec's semantics no longer change, but it takes effect on a network only once that network schedules the corresponding hardfork.
-REX7 and SATIN are unstable and have no activation timestamp on either mainnet or testnet.
+SATIN is unstable and has no activation timestamp on either mainnet or testnet.
 
 ### Backward Compatibility
 
@@ -184,18 +184,11 @@ REX6 is frozen and scheduled on both networks; see the [upgrade overview](upgrad
 
 _See [Rex6 Network Upgrade](upgrades/rex6.md) for full details._
 
-### REX7
-
-REX7 is the current **unstable** spec under active development.
-It introduces no behavioral change over REX6 yet; its semantics may change at any time before it is frozen.
-
-_See [Rex7 Network Upgrade](upgrades/rex7.md) for the current state._
-
 ### SATIN
 
-SATIN is an **unstable** spec under active development, scheduled by the `Satin` hardfork.
+SATIN is the current **unstable** spec under active development, scheduled by the `Satin` hardfork.
 It is not scheduled on any network, and its semantics may change at any time before it is frozen.
-It restates MegaETH's execution rules on Optimism Karst (Ethereum Osaka) rather than adding to REX7's:
+It restates MegaETH's execution rules on Optimism Karst (Ethereum Osaka) rather than adding to REX6's:
 
 - **Two-pool gas** — [EIP-8037](https://eips.ethereum.org/EIPS/eip-8037) regular gas under a 200,000,000 per-transaction execution cap, with the rest of the gas limit as a state-gas reservoir, replacing the [dual gas model](evm/dual-gas-model.md).
 - **State gas** — EIP-8037's byte counts at MegaETH's cost per state byte, scaled by the [SALT bucket](glossary.md#salt-bucket) the state lands in.
