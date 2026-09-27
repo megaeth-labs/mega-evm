@@ -358,7 +358,7 @@ At these prices it never raises a receipt's gas used, because the history gas of
 
 - Four runtime transaction-level limits: compute gas `TX_COMPUTE_GAS_LIMIT` = 200,000,000, data size `TX_DATA_LIMIT` = 13,107,200 bytes, KV updates `TX_KV_UPDATE_LIMIT` = 500,000, state growth `TX_STATE_GROWTH_LIMIT` = 1,000 new accounts and slots.
 - Every call frame gets 98/100 of its parent's remaining budget in each of the four dimensions.
-- Data size and KV updates are counted by Rex6's own per-operation rules; the post-execution fee-reward credits are counted at runtime.
+- Data size and KV updates are counted by Rex6's own per-operation rules; the post-execution fee-reward credits are recorded after the transaction's result is final, and cannot change it.
 - A transaction crossing a limit halts; a frame crossing its budget reverts alone.
 
 #### New behavior
