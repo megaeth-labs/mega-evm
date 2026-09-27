@@ -11,9 +11,7 @@ use alloy_evm::{
     Evm, EvmFactory, FromRecoveredTx,
 };
 use alloy_primitives::{address, Address, Bytes, Signature, TxKind, B256, U256};
-use alloy_sol_types::SolCall;
 use mega_evm::{
-    system::{IOracle, MEGA_SYSTEM_ADDRESS, ORACLE_CONTRACT_ADDRESS},
     test_utils::{BytecodeBuilder, GasInspector, MemoryDatabase},
     transaction_body_bytes, BlockLimits, DeclaredObserver, LimitUsage, MegaBlockExecutionCtx,
     MegaContext, MegaEvmFactory, MegaTransaction, MegaTransactionOutcome, MegaTxEnvelope,
@@ -37,7 +35,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use crate::common::{self, user_tx};
+use crate::common::{self, system_tx, user_tx};
 
 /// A declared observer reaches a block: its type says it writes nothing back, so what the block
 /// executes is what the chain executes.
@@ -232,16 +230,6 @@ fn recording_ctx() -> MegaBlockExecutionCtx {
         Some(B256::repeat_byte(0xcd)),
         Bytes::new(),
         BlockLimits::no_limits(),
-    )
-}
-
-/// A system-address transaction: a legacy call from the system address the registry names to the
-/// Oracle's `getSlot(0)`.
-fn system_tx() -> Recovered<MegaTxEnvelope> {
-    let input = IOracle::getSlotCall { slot: U256::ZERO }.abi_encode();
-    Recovered::new_unchecked(
-        common::tx(0, ORACLE_CONTRACT_ADDRESS, input.into(), 1_000_000),
-        MEGA_SYSTEM_ADDRESS,
     )
 }
 
