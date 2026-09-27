@@ -38,8 +38,8 @@ use mega_evm::{
 };
 use revm::{
     bytecode::opcode::{
-        ADD, BALANCE, CALL, GAS, JUMP, JUMPDEST, LOG0, MLOAD, POP, PUSH0, RETURNDATACOPY,
-        RETURNDATASIZE, REVERT, SLOAD, SSTORE, TIMESTAMP,
+        ADD, BALANCE, CALL, GAS, LOG0, MLOAD, POP, PUSH0, RETURNDATACOPY, RETURNDATASIZE, REVERT,
+        SLOAD, SSTORE, TIMESTAMP,
     },
     context::result::ExecutionResult,
     context_interface::cfg::GasId,
@@ -838,9 +838,10 @@ fn armed() -> EvmTxRuntimeLimits {
         .with_tx_state_gas_limit(TX_GAS_LIMIT_CAP)
 }
 
-/// A loop that never ends.
+/// A loop that never ends. A round copies 32 KiB within memory, which costs 3,075 gas and the
+/// interpreter one instruction, so the frame runs out of however much gas it has in few rounds.
 fn spin() -> Bytes {
-    BytecodeBuilder::default().append(JUMPDEST).append_many([PUSH0, JUMP]).build()
+    crate::detention::spin(BytecodeBuilder::default())
 }
 
 /// The ECRECOVER precompile, whose price is 3,000 whatever its input.

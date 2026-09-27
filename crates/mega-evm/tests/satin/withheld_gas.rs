@@ -882,20 +882,21 @@ fn recording_modexp(runs: &Runs) -> DynPrecompile {
     })
 }
 
-/// The calldata of a modexp that is costly to compute: a 1,024-byte base with no zero byte, an
-/// exponent of `exponent_len` bytes, all ones, and an odd 1,024-byte modulus, then `padding`
-/// zero bytes the precompile ignores. Its price grows with the exponent, and so does the work.
+/// The calldata of a modexp that is costly: a 1,024-byte base with no zero byte, an exponent of
+/// `exponent_len` bytes, all ones, and an odd one-byte modulus, then `padding` zero bytes the
+/// precompile ignores. Its price grows with the exponent.
+///
+/// The price is that of a 1,024-byte modulus: it counts the longer of the base and the modulus.
+/// The work is sized by the modulus, so the call computes in a moment what an unoptimized test
+/// build takes a second over at 1,024 bytes; nothing here depends on how long it computes.
 pub(crate) fn costly_modexp_input(exponent_len: usize, padding: usize) -> Vec<u8> {
     let mut input = Vec::new();
-    for len in [1_024_usize, exponent_len, 1_024] {
+    for len in [1_024_usize, exponent_len, 1] {
         input.extend_from_slice(&U256::from(len).to_be_bytes::<32>());
     }
     input.extend((0..1_024_u32).map(|i| (i % 251) as u8 + 1));
     input.extend(core::iter::repeat_n(0xff_u8, exponent_len));
-    let mut modulus: Vec<u8> = (0..1_024_u32).map(|i| (i % 241) as u8).collect();
-    modulus[0] = 0xff;
-    modulus[1_023] |= 1;
-    input.extend(modulus);
+    input.push(0xfb);
     input.extend(core::iter::repeat_n(0_u8, padding));
     input
 }
