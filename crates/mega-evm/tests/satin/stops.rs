@@ -1389,17 +1389,17 @@ fn test_data_size_top_level_exceed_is_frame_local_revert() {
 }
 
 /// A call its own frame budget stopped, revived into a success by an inspector, hands its caller
-/// everything it counted: more than the share the caller gave it. The caller is held to its own
-/// budget with it and returns its stop before it runs another instruction, as a creator a failed
-/// creation's nonce record puts over its budget does.
+/// nothing it counted: its checkpoint was reverted before the inspector saw its result, so its log
+/// is not kept, and its lane goes the way its log did. Its caller runs on within its own budget,
+/// and the transaction is the one no inspector runs: the rewrite changed only the flag `A` drops.
 ///
 /// `A` has a frame cap of 1,000 bytes and gives `B` 98% of it. `B`'s log of 1,000 bytes counts
-/// 1,032, which crosses `B`'s budget and, handed to `A`, `A`'s.
+/// 1,032, which crosses `B`'s budget, and would cross `A`'s were it handed on.
 #[test]
-fn test_a_call_revived_past_its_budget_stops_its_caller_before_it_runs_on() {
+fn test_a_call_revived_past_its_budget_hands_its_caller_nothing() {
     const FRAME_CAP: u64 = 1_000;
     const LOGGED: u64 = 1_000;
-    const { assert!(LOG_BASE_SIZE + LOGGED > FRAME_CAP, "the log crosses A's budget too") };
+    const { assert!(LOG_BASE_SIZE + LOGGED > FRAME_CAP, "the log would cross A's budget too") };
     let share = FRAME_CAP * FRAME_DATA_SHARE_NUMERATOR / FRAME_DATA_SHARE_DENOMINATOR;
     let a = call_all(BytecodeBuilder::default(), B)
         .append(POP)
@@ -1410,26 +1410,36 @@ fn test_a_call_revived_past_its_budget_stops_its_caller_before_it_runs_on() {
         BytecodeBuilder::default().push_number(LOGGED).append_many([PUSH0, LOG0]).stop().build();
     let db = MemoryDatabase::default().account_code(A, a).account_code(B, b);
     let limits = EvmTxRuntimeLimits::no_limits().with_frame_data_size_limit(FRAME_CAP);
+    let plain = execute(db.clone(), limits, BELOW);
     let mut evm = MegaEvm::new(context(db).with_tx_runtime_limits(limits))
         .with_inspector(Rewriter::default());
     let outcome = evm.execute_transaction(call(CALLER, A, U256::ZERO, BELOW)).unwrap();
     let rewriter = evm.inspector();
 
-    let stop = |limit| {
-        LimitCheck::ExceedsLimit { kind: LimitKind::DataSize, limit, used: 0, frame_local: true }
-            .revert_data()
-    };
+    let stop = LimitCheck::ExceedsLimit {
+        kind: LimitKind::DataSize,
+        limit: share,
+        used: 0,
+        frame_local: true,
+    }
+    .revert_data();
     assert_eq!(
         rewriter.ended,
-        vec![
-            (B, InstructionResult::Revert, stop(share)),
-            (A, InstructionResult::Revert, stop(FRAME_CAP))
-        ],
-        "B crossed its budget, and A its own with what B handed it"
+        vec![(B, InstructionResult::Revert, stop), (A, InstructionResult::Stop, Bytes::new())],
+        "B crossed its budget; A did not"
     );
-    assert_eq!(rewriter.marker_writes, 0, "A ran no instruction after its call returned");
-    assert!(outcome.result.is_success(), "the inspector rewrote A too: {:?}", outcome.result);
+    assert_eq!(rewriter.marker_writes, 1, "A ran on after its call returned");
+    assert!(outcome.result.is_success(), "{:?}", outcome.result);
     assert_eq!(outcome.limit_exceeded, None, "a frame budget latches nothing");
+    assert_eq!(
+        outcome.usage,
+        LimitUsage { data_size: TX_BODY_SIZE + WRITE_RECORD_SIZE, write_records: 1 },
+        "the body and A's marker: none of B's log"
+    );
+    assert!(outcome.result.logs().is_empty(), "B's log was reverted with B");
+    assert!(plain.result.is_success(), "{:?}", plain.result);
+    assert_eq!((&outcome.result, &outcome.state), (&plain.result, &plain.state));
+    assert_eq!((outcome.gas, outcome.usage), (plain.gas, plain.usage));
 }
 
 /* ---------- a frame three calls down, answered without running ---------- */

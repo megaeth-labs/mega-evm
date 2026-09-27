@@ -1,29 +1,88 @@
-//! What an inspector may do to a Satin transaction, and the one thing it may not.
+//! What an inspector may do to a Satin transaction, and what its rewrites do not change.
 //!
 //! An inspector is not a passive observer. A callback holding a live interpreter can write to its
-//! gas and its pending action, a callback holding a frame's inputs can change them, and every
-//! `*_end` callback can rewrite a result's classification, gas and output. Satin keeps no ledger
-//! beside revm's `Gas` (compute is the regular gas spent), so an inspector that changes the gas
-//! changes what the transaction owes, and a rewriting inspector gets exactly what it asked for.
-//! Rewriting is a tool feature, supported and unmeasured.
+//! gas and its pending action, a callback holding a frame's inputs can change them or answer the
+//! frame itself, and every `*_end` callback can rewrite a result's classification, gas and output.
+//! Satin keeps no ledger beside revm's `Gas` (compute is the regular gas spent), so an inspector
+//! that changes the gas changes what the transaction owes, and a rewriting inspector gets what it
+//! asked for, within the bounds below. Rewriting is a tool feature — Foundry's cheatcodes are built
+//! on it — supported and unmeasured.
 //!
-//! Two things bound it:
+//! # Where an inspector runs
 //!
-//! - **The admission gate.** [`TrustedObserver`] is a declaration, made in source about one
-//!   inspector type, that none of its callbacks writes anything back. A [`MegaEvm`](crate::MegaEvm)
-//!   built with [`with_trusted_inspector`](crate::MegaEvm::with_trusted_inspector) carries the
-//!   declaration, and [`has_rewriting_inspector`](crate::MegaEvm::has_rewriting_inspector) is what
-//!   block execution refuses a transaction on: a rewriting inspector has no route to a block.
-//!   [`DeclaredObserver`] carries the declaration for a tracer whose type cannot, and in debug
-//!   builds checks it around every callback.
+//! - **A user transaction** runs every callback: `initialize_interp`, `step` and `step_end`,
+//!   `log_full`, `log` for what a frame journals without running an instruction (an EIP-7708
+//!   transfer log, a precompile's logs), `frame_start` and `frame_end`, `call` and `call_end`,
+//!   `create` and `create_end`, and `selfdestruct`. A keyless deployment is seen as the frames it
+//!   is made of: its `keylessDeploy` call, which runs no instruction and so gets no
+//!   `initialize_interp` and no step, and the creation below it. The inspector may rewrite anything
+//!   outside block execution, within the bounds below.
+//! - **A system transaction** — a system-address transaction, promoted to a deposit before its
+//!   first callback — runs through the same handler and the same callbacks, and may be rewritten
+//!   the same way. It is the protocol's own work, held to no per-transaction limit, so no latch
+//!   writes the stop over its results.
+//! - **A pre-block system call** — the EIP-2935 and EIP-4788 calls, and the `SequencerRegistry`'s
+//!   `applyPendingChanges()` — runs on the handler's plain system-call path, as alloy-evm's
+//!   `transact_system_call` runs one: no callback, whatever inspector the EVM holds, so a block's
+//!   tracer sees the block's transactions and nothing of its preparation. A tool that wants to
+//!   watch a system call runs it through revm's `InspectSystemCallEvm`, which does hand it to the
+//!   inspector, with every exemption a system call has.
+//! - **The end of a block** runs no code: the post-block balance increments are database writes. No
+//!   callback runs, and the EVM handed back carries the inspector with what it collected.
+//!
+//! # The admission gate
+//!
+//! [`TrustedObserver`] is a declaration, made in source about one inspector type, that none of its
+//! callbacks writes anything back. A [`MegaEvm`](crate::MegaEvm) built with
+//! [`with_trusted_inspector`](crate::MegaEvm::with_trusted_inspector) carries the declaration, and
+//! [`has_rewriting_inspector`](crate::MegaEvm::has_rewriting_inspector) is what block execution
+//! refuses on: a rewriting inspector has no route to a block. [`DeclaredObserver`] carries the
+//! declaration for a tracer whose type cannot, and in debug builds checks it around every callback.
+//!
+//! Block execution checks the gate at every entry point, before anything changes: the pre-block
+//! changes, the execution of a transaction — a system transaction as a user one — the commit of an
+//! outcome, and the end of the block. So a declared observer sees the block's transactions, user
+//! and system alike, and a rewriting inspector sees nothing of a block: it is refused before the
+//! pre-block calls, which it would not run on anyway, and before any transaction.
+//!
+//! # What a rewrite does not change
+//!
 //! - **The refusal.** A failed contract creation rewritten into a successful one is refused: the
 //!   transaction fails with [`FORBIDDEN_CREATE_REVIVAL`] as an `EVMError::Custom`. By the time
 //!   `create_end` runs, revm has reverted the frame and deposited no code, so the rewrite would
-//!   push an address for code that does not exist and merge the frame's state gas for state that
-//!   was rolled back. A transaction a limit stopped is the exception: once it is latched, every
-//!   frame's result is the stop whatever produced it, so a revived creation is put back and reports
-//!   the stop, and the transaction does not fail. A creation stopped by its own frame budget
-//!   latches nothing, and its revival is refused. Every other rewrite is the tool's business.
+//!   push an address for code that does not exist. A transaction a limit stopped is the exception:
+//!   once it is latched, every frame's result is the stop whatever produced it, so a revived
+//!   creation is put back and reports the stop, and the transaction does not fail. A creation
+//!   stopped by its own frame budget latches nothing, and its revival is refused.
+//! - **A frame that kept nothing.** A frame the inspector answered in place of running never
+//!   started, and a frame that failed had its journal checkpoint reverted before the inspector saw
+//!   its result. Whatever the inspector hands the caller for either — Foundry's `expectRevert`
+//!   turns a failed call into a success — the caller sees the success, the output and the regular
+//!   gas the inspector chose, and nothing else of the frame: no state or history gas, no refund and
+//!   no write record for writes the journal does not hold, and the upfront state gas its caller's
+//!   opcode was charged for an account the frame did not add comes back.
+//! - **The latch.** Once a limit stopped the transaction, every frame's result is the stop,
+//!   whatever produced it: an inspector turns it into neither a success nor a halt.
+//!
+//! Every other rewrite is the tool's business.
+//!
+//! # What an inspector's writes to gas cannot do
+//!
+//! - **Gas changed at a frame's end has no effect.** The instruction that ends a frame copies the
+//!   frame's gas into the result it returns, so what `step_end` writes to the interpreter's gas
+//!   after it reaches nobody. A tool that changes what a frame returns changes its result, in
+//!   `call_end`, `create_end` or `frame_end`: that gas is what the caller, or the transaction's
+//!   settlement, takes in.
+//! - **An inspector cannot overdraw a frame.** A charge the frame's spendable gas cannot pay is
+//!   refused and takes nothing, and the frame is not halted: the interpreter does not ask the
+//!   callback what it did. A tool that wants a frame out of gas says so through its result. Under
+//!   gas detention the refusal of an opcode's charge the withheld part would have paid is the
+//!   crossing; the refusal of an inspector's is not, and classifies nothing ([`StepGuard`]).
+//! - **An answer carries the gas its caller merges.** The caller adopts an answer's `Gas` as the
+//!   frame's, reservoir included. An answer built on `Gas::new(limit)` carries no reservoir, and a
+//!   caller above the execution cap adopts that; one built on
+//!   [`untouched_call_gas`](crate::untouched_call_gas) or
+//!   [`untouched_create_gas`](crate::untouched_create_gas) hands the reservoir back.
 
 #[cfg(not(feature = "std"))]
 use alloc as std;
@@ -31,17 +90,18 @@ use std::{format, string::String};
 
 use revm::{
     context::{ContextError, ContextTr, JournalTr},
+    context_interface::{cfg::StateGasCharge, Host},
     handler::FrameResult,
     inspector::{handler::frame_end, JournalExt, NoOpInspector},
     interpreter::{
         CallInputs, CallOutcome, CreateInputs, CreateOutcome, FrameInput, InstructionResult,
         Interpreter, InterpreterTypes,
     },
-    primitives::{Address, Log, U256},
+    primitives::{Address, Bytes, Log, U256},
     Database, Inspector,
 };
 
-use crate::{ExternalEnvTypes, MegaContext};
+use crate::{synthetic_frame_result, ExternalEnvTypes, MegaContext};
 
 /// The message of the `EVMError::Custom` a refused creation revival fails the transaction with.
 ///
@@ -231,6 +291,52 @@ where
     }
 }
 
+/// Hands a running frame's instruction-loop callbacks to the inspector inside, and keeps what they
+/// do to the interpreter's gas from classifying the frame.
+///
+/// A regular charge the frame's spendable gas cannot pay is refused, and when the part gas
+/// detention withholds would have paid it the refusal is recorded as the crossing, which stops the
+/// transaction at the compute limit when the frame ends. An opcode's refused charge halts the
+/// frame at once, so its record is the frame's end. An inspector's does not: the interpreter never
+/// sees it fail and the frame runs on. So the record a callback leaves is put back to what it was
+/// before the callback, and the frame ends on the charges it made itself.
+///
+/// It stands in for the inspector in revm's instruction loop alone, which makes the four callbacks
+/// forwarded here and no other; frame starts and ends reach the inspector itself.
+pub(crate) struct StepGuard<'a, I>(pub(crate) &'a mut I);
+
+impl<I, CTX, INTR> Inspector<CTX, INTR> for StepGuard<'_, I>
+where
+    I: Inspector<CTX, INTR>,
+    INTR: InterpreterTypes,
+{
+    #[inline]
+    fn step(&mut self, interp: &mut Interpreter<INTR>, context: &mut CTX) {
+        let crossing = interp.gas.withheld_crossing();
+        self.0.step(interp, context);
+        interp.gas.set_withheld_crossing(crossing);
+    }
+
+    #[inline]
+    fn step_end(&mut self, interp: &mut Interpreter<INTR>, context: &mut CTX) {
+        let crossing = interp.gas.withheld_crossing();
+        self.0.step_end(interp, context);
+        interp.gas.set_withheld_crossing(crossing);
+    }
+
+    #[inline]
+    fn log_full(&mut self, interp: &mut Interpreter<INTR>, context: &mut CTX, log: Log) {
+        let crossing = interp.gas.withheld_crossing();
+        self.0.log_full(interp, context, log);
+        interp.gas.set_withheld_crossing(crossing);
+    }
+
+    #[inline]
+    fn selfdestruct(&mut self, contract: Address, target: Address, value: U256) {
+        self.0.selfdestruct(contract, target, value);
+    }
+}
+
 /// The journal's entry and log counts, for the debug-build proof. `None` in release builds.
 type JournalSnapshot = Option<(usize, usize)>;
 
@@ -328,16 +434,21 @@ fn assert_result_unwritten(before: ResultSnapshot, result: &FrameResult, callbac
     }
 }
 
-/// Hands a frame's end to the inspector, then applies the one refusal: a creation that failed,
-/// rewritten into a success, is put back and fails the transaction with
-/// [`FORBIDDEN_CREATE_REVIVAL`] — unless the transaction is latched, where the creation is put back
-/// and reports the stop, which the latch writes over every result.
+/// Hands a frame's end to the inspector, then settles what its rewrite does not change.
 ///
-/// Every place a frame result reaches the inspector goes through here, so the refusal covers a
-/// result a frame ran to produce and one answered without running. A frame the inspector answered
-/// with a success itself is no revival: nothing failed. The latch is read after the hooks that can
-/// set it — the frame's run, detention's classification of its end, the hold on a start's upfront
-/// state gas, and the answer before building — have run, so a creation the latch stopped is never
+/// - **The refusal.** A creation that failed, rewritten into a success, is put back and fails the
+///   transaction with [`FORBIDDEN_CREATE_REVIVAL`] — unless the transaction is latched, where the
+///   creation is put back and reports the stop, which the latch writes over every result.
+/// - **A frame that kept nothing.** A frame the inspector answered in place of running
+///   (`answered`), and a frame that failed before the inspector saw it, made no write the journal
+///   kept. Whatever the inspector left the result saying, it settles into its caller as such a
+///   frame does ([`settle_kept_nothing`]).
+///
+/// Every place a frame result reaches the inspector goes through here, so both cover a result a
+/// frame ran to produce and one answered without running. A frame the inspector answered with a
+/// success itself is no revival: nothing failed. The latch is read after the hooks that can set
+/// it — the frame's run, detention's classification of its end, the hold on a start's upfront state
+/// gas, and the answer before building — have run, so a creation the latch stopped is never
 /// refused.
 #[inline]
 pub(crate) fn frame_end_checked<DB, ExtEnvs, INTR, INSP>(
@@ -345,6 +456,8 @@ pub(crate) fn frame_end_checked<DB, ExtEnvs, INTR, INSP>(
     inspector: &mut INSP,
     frame_input: &FrameInput,
     frame_result: &mut FrameResult,
+    depth: usize,
+    answered: bool,
 ) where
     DB: Database,
     ExtEnvs: ExternalEnvTypes,
@@ -354,6 +467,82 @@ pub(crate) fn frame_end_checked<DB, ExtEnvs, INTR, INSP>(
     let before = frame_result.instruction_result();
     frame_end(context, inspector, frame_input, frame_result);
     refuse_create_revival(context, before, frame_result);
+    if answered || !before.is_ok() {
+        settle_kept_nothing(context, frame_input, frame_result, depth);
+    }
+}
+
+/// Settles the result of a frame at `depth` that kept nothing in the journal — one an inspector
+/// answered in place of running, or one whose checkpoint was reverted before the inspector saw its
+/// result — as such a frame settles, whatever the inspector made of the result.
+///
+/// The calling opcode's upfront state-gas charge — the account a value call adds, the account a
+/// creation adds, or EIP-2780's for the transaction's own frame — is given back: the frame added
+/// no account. The result carries the frame's own upfront-charge flags again, so a result that
+/// fails gets it back from revm's settlement, as revm's own do; one an inspector answered carries
+/// none of them otherwise.
+///
+/// A result that says success is not one revm's settlement treats as keeping nothing, so it is made
+/// to settle like the failure it stands for, save what the inspector chose — the success its caller
+/// sees, the output, the regular gas:
+///
+/// - its state and history charges are rolled back and its refunds dropped, as a failure's are,
+///   before its caller merges them;
+/// - the upfront charge comes back through it: the result holds it as state its frame gave back, as
+///   a frame that restored a slot its caller filled does, and its caller's merge nets it out;
+/// - for the transaction's own frame, the history of the write record charged before execution for
+///   its start comes back the same way;
+/// - its lane is discarded as a failure's is, so nothing it counted reaches its caller, which gets
+///   back the history it paid for the records.
+///
+/// A latched transaction is left to the latch, which writes the stop over every result, and the
+/// stop settles as a revert.
+fn settle_kept_nothing<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    context: &mut MegaContext<DB, ExtEnvs>,
+    input: &FrameInput,
+    result: &mut FrameResult,
+    depth: usize,
+) {
+    carry_upfront_flags(input, result);
+    if !result.instruction_result().is_ok() || context.additional_limit.latched().is_some() {
+        return;
+    }
+    // A creation answered with a success and no address is one revm's settlement gives the
+    // charge back for itself.
+    let upfront = upfront_charge(input).filter(|_| result.refundable_state_gas_charge().is_none());
+    // A failed lookup records its cause, which fails the transaction before the result settles.
+    let upfront = upfront.map_or(Some(0), |charge| context.state_gas_charge(charge));
+    let history =
+        if depth == 0 { context.additional_limit.top_level_write_record_gas() } else { 0 };
+    let gas = result.gas_mut();
+    gas.rollback_state_gas();
+    gas.set_refunded(0);
+    gas.refill_reservoir(upfront.unwrap_or_default());
+    gas.refill_history(history);
+    context.additional_limit.discard_returning_lane();
+}
+
+/// Sets `result`'s upfront-charge flags to those of `input`, the frame it answers: what revm's
+/// settlement reads to give the calling opcode's upfront state-gas charge back.
+fn carry_upfront_flags(input: &FrameInput, result: &mut FrameResult) {
+    match (input, result) {
+        (FrameInput::Call(inputs), FrameResult::Call(outcome)) => {
+            outcome.charged_new_account_state_gas = inputs.charged_new_account_state_gas;
+            outcome.charged_state_gas_address = inputs.target_address;
+        }
+        (FrameInput::Create(inputs), FrameResult::Create(outcome)) => {
+            outcome.charged_create_state_gas = inputs.charged_create_state_gas();
+            outcome.charged_state_gas_address = inputs.charged_state_gas_address();
+        }
+        _ => {}
+    }
+}
+
+/// The upfront state-gas charge the calling opcode made for the frame `input` starts: the charge
+/// revm's settlement gives back when that frame fails.
+fn upfront_charge(input: &FrameInput) -> Option<StateGasCharge> {
+    synthetic_frame_result(input, InstructionResult::Revert, Bytes::new())
+        .refundable_state_gas_charge()
 }
 
 /// Puts a revived creation back to `before` and, unless the transaction is latched, records the

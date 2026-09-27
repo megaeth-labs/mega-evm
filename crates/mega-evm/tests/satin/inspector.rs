@@ -600,3 +600,130 @@ fn test_false_declaration_of_a_journal_write_fails_in_debug() {
 fn test_false_declaration_of_a_frame_end_rewrite_fails_in_debug() {
     run_declared(Writer { rewrite_frame_end: true, ..Default::default() });
 }
+
+/// Counts the frames an inspector sees start and the instructions it sees run.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Seen {
+    frames: usize,
+    steps: usize,
+}
+
+impl<CTX> Inspector<CTX, EthInterpreter> for Seen {
+    fn step(&mut self, _: &mut Interpreter<EthInterpreter>, _: &mut CTX) {
+        self.steps += 1;
+    }
+
+    fn frame_start(
+        &mut self,
+        _: &mut CTX,
+        _: &mut revm::interpreter::FrameInput,
+    ) -> Option<revm::handler::FrameResult> {
+        self.frames += 1;
+        None
+    }
+}
+
+/// A system call runs on the handler's plain system-call path wherever the engine and alloy-evm
+/// make one — the pre-block calls' entry point, alloy-evm's and revm's — so the EVM's inspector
+/// sees nothing of it, as alloy-evm's own EVMs have it. revm's inspecting entry point is the one
+/// that hands it to the inspector, and there the call keeps every exemption a system call has: a
+/// data-size limit of zero, which would stop a transaction before its first frame, stops nothing.
+#[test]
+fn test_only_the_inspecting_system_call_entry_point_runs_the_inspector() {
+    use revm::{InspectSystemCallEvm, SystemCallEvm};
+    let code = BytecodeBuilder::default().append_many([PUSH0, revm::bytecode::opcode::POP]).stop();
+    let db = MemoryDatabase::default().account_code(A, code.build());
+    let limits = mega_evm::EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(0);
+    let mut evm =
+        MegaEvm::new(context(db).with_tx_runtime_limits(limits)).with_inspector(Seen::default());
+
+    let result = evm.transact_system_call_with_gas_limit(CALLER, A, Bytes::new(), 30_000_000);
+    assert!(result.unwrap().result.is_success());
+    assert!(Evm::transact_system_call(&mut evm, CALLER, A, Bytes::new())
+        .unwrap()
+        .result
+        .is_success());
+    assert!(SystemCallEvm::system_call_one_with_caller(&mut evm, CALLER, A, Bytes::new())
+        .unwrap()
+        .is_success());
+    assert_eq!(*evm.inspector(), Seen::default(), "none of them ran the inspector");
+
+    let inspected = InspectSystemCallEvm::inspect_one_system_call_with_caller(
+        &mut evm,
+        CALLER,
+        A,
+        Bytes::new(),
+    )
+    .unwrap();
+    assert!(inspected.is_success(), "{inspected:?}");
+    assert_eq!(*evm.inspector(), Seen { frames: 1, steps: 3 }, "PUSH0, POP, STOP");
+    assert!(evm.ctx().additional_limit().latched().is_none(), "no limit holds a system call");
+}
+
+/// Answers every call itself with a success, and counts the answers.
+#[derive(Default)]
+struct SkipAllCallsInspector {
+    answered: usize,
+}
+
+impl<CTX> Inspector<CTX, EthInterpreter> for SkipAllCallsInspector {
+    fn call(&mut self, _: &mut CTX, inputs: &mut CallInputs) -> Option<CallOutcome> {
+        self.answered += 1;
+        Some(CallOutcome::new(
+            InterpreterResult::new(
+                InstructionResult::Stop,
+                Bytes::new(),
+                Gas::new(inputs.gas_limit),
+            ),
+            inputs.return_memory_offset.clone(),
+        ))
+    }
+}
+
+/// A body over the data-size limit latches the transaction before it runs, and its first frame is
+/// answered with the stop — in place of the answer an inspector that answers every call gives it.
+/// The transaction is the one no inspector runs: the stop, which settles like a revert, so the
+/// sender gets back what the frame did not spend.
+#[test]
+fn test_intrinsic_data_size_overflow_with_inspector_early_return() {
+    const LIMIT: u64 = 100;
+    const TX_GAS_LIMIT: u64 = 100_000_000;
+    let db = || {
+        MemoryDatabase::default()
+            .account_code(A, Bytes::from_static(&[revm::bytecode::opcode::STOP]))
+    };
+    let limits = mega_evm::EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(LIMIT);
+    let tx = call(CALLER, A, U256::ZERO, TX_GAS_LIMIT);
+    assert!(mega_evm::transaction_body_bytes(&tx) > LIMIT, "the body alone crosses the limit");
+
+    let plain = MegaEvm::new(context(db()).with_tx_runtime_limits(limits))
+        .execute_transaction(tx.clone())
+        .unwrap();
+    let mut evm = MegaEvm::new(context(db()).with_tx_runtime_limits(limits))
+        .with_inspector(SkipAllCallsInspector::default());
+    let answered = evm.execute_transaction(tx).unwrap();
+
+    assert_eq!(evm.inspector().answered, 1, "the inspector answered the first frame");
+    let stop = answered.limit_exceeded.expect("the transaction is stopped");
+    assert!(
+        matches!(
+            stop,
+            mega_evm::LimitCheck::ExceedsLimit {
+                kind: mega_evm::LimitKind::DataSize,
+                limit: LIMIT,
+                ..
+            }
+        ),
+        "{stop:?}"
+    );
+    assert!(
+        matches!(&answered.result, revm::context::result::ExecutionResult::Revert { output, .. }
+            if output == &stop.revert_data()),
+        "the stop, not the answer: {:?}",
+        answered.result
+    );
+    assert_eq!(answered.result, plain.result);
+    assert_eq!(answered.gas, plain.gas);
+    assert_eq!(answered.usage, plain.usage);
+    assert!(answered.gas.gas_used < TX_GAS_LIMIT / 100, "the unspent gas comes back");
+}

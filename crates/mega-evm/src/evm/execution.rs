@@ -48,7 +48,10 @@ use revm::{
 
 use crate::{
     access::ComputeStop,
-    evm::{history::transaction_body_bytes, inspector::frame_end_checked},
+    evm::{
+        history::transaction_body_bytes,
+        inspector::{frame_end_checked, StepGuard},
+    },
     history_gas, synthetic_frame_result,
     system::keyless,
     write_record_history_gas, Detention, ExternalEnvTypes, JournalInspectTr, LimitCheck, LimitKind,
@@ -654,7 +657,7 @@ where
 
     /// revm's inspected frame start, with the lanes kept aligned: a frame the inspector answers
     /// itself never reaches [`EvmTr::frame_init`], so an empty lane stands in for it, and its
-    /// answer is held to the state-gas limit as revm's own is ([`hold_upfront_state_gas`]).
+    /// answer settles as a frame that never started ([`answered_without_running`]).
     ///
     /// A frame nothing may start — a latched transaction's, one past the call-stack limit — is
     /// answered by [`EvmTr::frame_init`], after the inspector's `frame_start`, as every frame
@@ -676,7 +679,7 @@ where
             return answered_by_inspector(ctx, inspector, &frame_init, output)
                 .map(ItemOrResult::Result);
         }
-        let frame_input = frame_init.frame_input.clone();
+        let (frame_input, depth) = (frame_init.frame_input.clone(), frame_init.depth);
         let logs_i = ctx.journal().logs().len();
         if let ItemOrResult::Result(mut output) = self.frame_init(frame_init)? {
             let (ctx, inspector) = self.ctx_inspector();
@@ -693,7 +696,7 @@ where
                     }
                 }
             }
-            frame_end_checked(ctx, inspector, &frame_input, &mut output);
+            frame_end_checked(ctx, inspector, &frame_input, &mut output, depth, false);
             return Ok(ItemOrResult::Result(output));
         }
         let (ctx, inspector, frame) = self.ctx_inspector_frame();
@@ -709,6 +712,9 @@ where
     /// revm's inspected frame run, with the stop short-circuit of [`EvmTr::frame_run`]: a frame
     /// with a stop to return returns it without a step, and the inspector sees it end. A
     /// `keylessDeploy` call's frame makes its actions by hand, as on the plain path, with no step.
+    ///
+    /// The step callbacks run through [`StepGuard`], so a charge the inspector makes on the
+    /// interpreter's gas and the frame cannot pay does not classify the frame's end.
     #[inline]
     fn inspect_frame_run(
         &mut self,
@@ -720,7 +726,7 @@ where
             None => inspect_instructions(
                 ctx,
                 &mut frame.interpreter,
-                &mut *inspector,
+                StepGuard(&mut *inspector),
                 instructions.instruction_table(),
                 instructions.gas_table(),
             ),
@@ -728,7 +734,7 @@ where
         let mut next = frame.process_next_action(ctx, action);
         after_frame_run(ctx, frame, &mut next);
         if let Ok(ItemOrResult::Result(result)) = &mut next {
-            frame_end_checked(ctx, inspector, &frame.input, result);
+            frame_end_checked(ctx, inspector, &frame.input, result, frame.depth, false);
             frame.set_finished(true);
         }
         next
@@ -1063,8 +1069,11 @@ where
 
 /// Settles `output`, the answer an inspector gave the frame `frame_init` starts in its place, as
 /// [`EvmTr::frame_init`] settles an answer: an empty lane stands in for the frame, and the answer
-/// is held to the compute limit ([`settle_answer`]) and to the state-gas limit
-/// ([`hold_upfront_state_gas`]). Then the inspector is told the frame ended.
+/// is held to the compute limit ([`settle_answer`]). Then the inspector is told the frame ended,
+/// and the answer settles as a frame that kept nothing: the frame never started, so no value moved
+/// and no account was added, and the upfront state gas its caller's opcode was charged comes back
+/// whatever the answer ([`frame_end_checked`]). That charge never stands, so it is not held to the
+/// state-gas limit.
 fn answered_without_running<DB: Database, ExtEnvs: ExternalEnvTypes, INSP>(
     ctx: &mut MegaContext<DB, ExtEnvs>,
     inspector: &mut INSP,
@@ -1077,8 +1086,7 @@ where
     ctx.additional_limit.push_empty_frame();
     let gas_limit = input_gas_limit(&frame_init.frame_input);
     settle_answer(ctx, frame_init.depth, gas_limit, &mut output);
-    hold_upfront_state_gas(ctx, Some(&mut output));
-    frame_end_checked(ctx, inspector, &frame_init.frame_input, &mut output);
+    frame_end_checked(ctx, inspector, &frame_init.frame_input, &mut output, frame_init.depth, true);
     output
 }
 
