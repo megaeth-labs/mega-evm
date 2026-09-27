@@ -32,17 +32,24 @@ Subcommands:
   orphans     --suppressions <toml> --universe <file>
         Flag suppressions that match no live mutant.
 
-The results a run leaves are read fail-closed. A run is scored from its
-`outcomes.json`, cargo-mutants' own record (scripts/umutate.py writes the same
-shape): `total_mutants`, and `outcomes`, each with a `scenario`, `"Baseline"` or
-`{"Mutant": {"name": ...}}`, and a `summary`. It is scored only if its baseline
-succeeded and every mutant has an outcome. A run without `outcomes.json` tested
-nothing, and passes only on the producer's own word that it had nothing to
-test: a `mutants.json` holding `[]`, which cargo-mutants writes when its
-filters leave no mutant, or a `no-mutants.txt` written by `note-empty`.
-Anything else fails: no results directory, no outcomes, a baseline that failed
-or is missing, a mutant without an outcome, an outcome of a kind this script
-does not know.
+The results a run leaves are read fail-closed, on the contract cargo-mutants 27
+keeps and scripts/umutate.py keeps with it. Before it tests anything the
+producer writes `mutants.json`, a list of objects each with the `name` of a
+mutant it selected. It then writes `outcomes.json`: `outcomes`, each with a
+`scenario`, `"Baseline"` or `{"Mutant": {"name": ...}}`, and a `summary`; and
+`end_time`, null until the run finishes. cargo-mutants rewrites `outcomes.json`
+after every outcome, so a run that stops part way leaves one that looks whole;
+its `total_mutants` counts the outcomes recorded so far, not the mutants
+selected, and proves nothing about completion. A run is scored only if its
+`end_time` is set, its baseline succeeded, and its outcomes name exactly the
+mutants `mutants.json` selects. A run without `outcomes.json` tested nothing,
+and passes only on the producer's own word that it had nothing to test: a
+`mutants.json` holding `[]`, which cargo-mutants writes when its filters leave
+no mutant, or a `no-mutants.txt` written by `note-empty`. Anything else fails:
+no results directory, no outcomes, a run that did not finish, a baseline that
+failed or is missing, no `mutants.json` beside the outcomes, a selected mutant
+without an outcome or an outcome of a mutant not selected, an outcome of a kind
+this script does not know.
 
 The gate is intended to run diff-scoped (cargo mutants --in-diff), so every
 mutant it sees lives on a line the PR changed; an unsuppressed survivor there is
@@ -54,6 +61,7 @@ import argparse
 import json
 import re
 import sys
+from collections import Counter
 
 # tomllib is new in Python 3.11: say so rather than fail on the import below.
 if sys.version_info < (3, 11):
@@ -148,19 +156,30 @@ def nothing_to_mutate(line: str) -> bool:
     return any(re.search(rf"\b(INFO|WARN)\s+{re.escape(m)}\s*$", line) for m in NOTHING_TO_MUTATE)
 
 
+def read_selection(results: Path) -> list[str] | None:
+    """The names of the mutants a run selected, from its `mutants.json`; None without one."""
+    listed = results / "mutants.json"
+    if not listed.exists():
+        return None
+    try:
+        mutants = json.loads(listed.read_text())
+        if not isinstance(mutants, list) or not all(
+                isinstance(m, dict) and isinstance(m.get("name"), str) for m in mutants):
+            raise TypeError("not a list of objects each with a string `name`")
+    except (json.JSONDecodeError, TypeError) as err:
+        raise ResultsError(f"{listed} is not a list of mutants: {err!r}") from err
+    return [m["name"] for m in mutants]
+
+
 def empty_list_evidence(results: Path) -> str | None:
     """The producer's own word that it had nothing to test, if it gave it."""
-    listed = results / "mutants.json"
-    if listed.exists():
-        try:
-            mutants = json.loads(listed.read_text())
-        except json.JSONDecodeError as err:
-            raise ResultsError(f"{listed} is not JSON: {err}") from err
-        if mutants == []:
+    selected = read_selection(results)
+    if selected is not None:
+        if not selected:
             return "the mutant list under the run's filters was empty"
         raise ResultsError(
-            f"{listed} lists {len(mutants)} mutants but {results} has no outcomes.json: "
-            f"the run stopped before it recorded an outcome"
+            f"{results / 'mutants.json'} lists {len(selected)} mutants but {results} has no "
+            f"outcomes.json: the run stopped before it recorded an outcome"
         )
     note = results / NO_MUTANTS_NOTE
     if note.exists():
@@ -190,11 +209,17 @@ def load_run(results: Path) -> Run:
     try:
         data = json.loads(outcomes_path.read_text())
         outcomes = data["outcomes"]
-        total = data["total_mutants"]
         if not isinstance(outcomes, list) or not all(isinstance(o, dict) for o in outcomes):
             raise TypeError("`outcomes` is not a list of objects")
     except (json.JSONDecodeError, KeyError, TypeError) as err:
         raise ResultsError(f"{outcomes_path} is not a mutation run's outcomes: {err!r}") from err
+
+    end_time = data.get("end_time")
+    if not isinstance(end_time, str) or not end_time:
+        raise ResultsError(
+            f"{outcomes_path} records no end_time ({end_time!r}): the producer sets it only once "
+            f"the run finishes, so this is the record of a run that stopped part way"
+        )
 
     baselines = [o for o in outcomes if o.get("scenario") == "Baseline"]
     if not baselines:
@@ -223,12 +248,28 @@ def load_run(results: Path) -> Run:
                 f"({', '.join(MUTANT_SUMMARIES)})"
             )
         getattr(run, kind).append(name)
-    if len(mutants) != total:
+
+    selected = read_selection(results)
+    if selected is None:
         raise ResultsError(
-            f"{len(mutants)} of {total} mutants have an outcome in {outcomes_path}: "
-            f"the run was interrupted"
+            f"{results} has outcomes.json but no mutants.json: nothing says which mutants the "
+            f"run selected, so nothing shows each has an outcome"
         )
-    if total == 0:
+    tested = Counter(o["scenario"]["Mutant"]["name"] for o in mutants)
+    untested = Counter(selected) - tested
+    if untested:
+        raise ResultsError(
+            f"{sum(untested.values())} of the {len(selected)} mutants mutants.json selects have "
+            f"no outcome in {outcomes_path}, `{next(iter(untested))}` among them: the run did not "
+            f"test them all"
+        )
+    unselected = tested - Counter(selected)
+    if unselected:
+        raise ResultsError(
+            f"{outcomes_path} records {sum(unselected.values())} outcomes of mutants mutants.json "
+            f"does not select, `{next(iter(unselected))}` among them: the two are not one run's"
+        )
+    if not selected:
         run.nothing_to_test = "the run tested no mutant"
     return run
 

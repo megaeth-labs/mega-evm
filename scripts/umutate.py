@@ -24,10 +24,14 @@ Subcommands:
   run  [--diff <base>] [--packs a,b] --output <dir>
         Full pipeline: generate -> mutate -> analyze (run the test command per
         mutant) -> write caught.txt/missed.txt/unviable.txt/timeout.txt into
-        <dir>, ready for `mutation_gate.py report --results <dir>`, with the
-        record the gate scores: outcomes.json in cargo-mutants' shape when a
-        mutant was tested, and mutants.json holding [] when none was generated.
-        A failing baseline exits before anything is written.
+        <dir>, ready for `mutation_gate.py report --results <dir>`. It keeps the
+        gate's contract as cargo-mutants 27 does: mutants.json, every mutant the
+        run selected, is written before any is tested, and outcomes.json, the
+        baseline and one outcome per selected mutant with the `end_time` that
+        marks the run finished, only when every one is tested. A run that
+        generates no mutant writes mutants.json holding [] and no outcomes. A
+        failing baseline, or a run that stops part way, leaves the selection
+        without outcomes, which the gate refuses.
 
 In `--diff <base>` mode only files AND lines changed vs <base> are mutated
 (the PR-gate scope); without it, every gate site in the crate is mutated.
@@ -35,6 +39,7 @@ In `--diff <base>` mode only files AND lines changed vs <base> are mutated
 from __future__ import annotations
 
 import argparse
+import datetime
 import difflib
 import fnmatch
 import glob
@@ -271,6 +276,36 @@ def _run_test(test_cmd: str) -> str:
         return "timeout"
 
 
+def now() -> str:
+    """The time, as cargo-mutants writes `start_time` and `end_time`."""
+    return datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def write_selection(out: Path, selected: list[str]) -> None:
+    """Write mutants.json: every mutant the run selected, before it tests any.
+
+    The gate holds a run's outcomes to this list, so a run that stops part way is
+    refused rather than scored on the mutants it reached."""
+    (out / "mutants.json").write_text(json.dumps([{"name": n} for n in selected], indent=2) + "\n")
+
+
+def write_outcomes(out: Path, start_time: str, caught: list[str], missed: list[str],
+                   timeouts: list[str]) -> None:
+    """Write outcomes.json in cargo-mutants' shape: a successful baseline, one outcome per
+    mutant, and the `end_time` that says the run finished. Written once, when every
+    selected mutant has an outcome."""
+    outcomes = [{"scenario": "Baseline", "summary": "Success"}]
+    for names, summary in ((caught, "CaughtMutant"), (missed, "MissedMutant"),
+                           (timeouts, "Timeout")):
+        outcomes += [{"scenario": {"Mutant": {"name": n}}, "summary": summary} for n in names]
+    (out / "outcomes.json").write_text(json.dumps({
+        "outcomes": outcomes,
+        "total_mutants": len(caught) + len(missed) + len(timeouts),
+        "caught": len(caught), "missed": len(missed), "timeout": len(timeouts), "unviable": 0,
+        "start_time": start_time, "end_time": now(),
+    }, indent=2) + "\n")
+
+
 def baseline_ok(test_cmd: str) -> bool:
     """The test command must pass on the UNMUTATED tree; otherwise every mutant
     looks 'caught' (non-zero) and the run is meaningless."""
@@ -330,6 +365,7 @@ def cmd_plan(args) -> int:
 
 def cmd_run(args) -> int:
     require_tools()
+    start_time = now()
     out = Path(args.output)
     out.mkdir(parents=True, exist_ok=True)
     # An earlier run's record must not outlive this one, whatever this one writes.
@@ -359,21 +395,30 @@ def cmd_run(args) -> int:
         baselined.add(tc)
 
     with tempfile.TemporaryDirectory() as tmp:
+        # Generate every pack's mutants first, so the selection is on disk before
+        # any mutant is tested.
+        planned, selected = [], []
         for pack in packs:
             rules = ensure_rules(pack)
             for src in resolve_targets(pack, changed_files, args.files):
                 md = Path(tmp) / pack["name"] / src.replace("/", "_")
                 allowed = changed_lines.get(src) if changed_lines is not None else None
                 generate_mutants(pack, rules, src, md, allowed)
-                if not any(p.is_file() for p in md.glob("*")):
+                files = sorted(p for p in md.glob("*") if p.is_file())
+                if not files:
                     continue
-                ensure_baseline(pack.get("test_cmd", DEFAULT_TEST_CMD))
-                c, s, t = analyze(pack, src, md)
-                for names, sink in ((c, caught), (s, missed), (t, timeouts)):
-                    for name in names:
-                        a = _adapt(pack, src, name, md, allowed)
-                        if a:
-                            sink.append(a)
+                planned.append((pack, src, md, allowed))
+                ids = (_adapt(pack, src, m.name, md, allowed) for m in files)
+                selected += [a for a in ids if a]
+        write_selection(out, selected)
+        for pack, src, md, allowed in planned:
+            ensure_baseline(pack.get("test_cmd", DEFAULT_TEST_CMD))
+            c, s, t = analyze(pack, src, md)
+            for names, sink in ((c, caught), (s, missed), (t, timeouts)):
+                for name in names:
+                    a = _adapt(pack, src, name, md, allowed)
+                    if a:
+                        sink.append(a)
 
     def write(name, items):
         (out / name).write_text("\n".join(items) + ("\n" if items else ""))
@@ -385,19 +430,10 @@ def cmd_run(args) -> int:
     # bucket; write an empty file so the gate's reader is happy.
     write("unviable.txt", [])
     # The record the gate scores, in the shape cargo-mutants writes it. With no
-    # baseline run, no mutant was generated: say so as cargo-mutants does.
+    # baseline run, no mutant was generated, and the selection written above,
+    # holding [], says so as cargo-mutants does.
     if baselined:
-        outcomes = [{"scenario": "Baseline", "summary": "Success"}]
-        for names, summary in ((caught, "CaughtMutant"), (missed, "MissedMutant"),
-                               (timeouts, "Timeout")):
-            outcomes += [{"scenario": {"Mutant": {"name": n}}, "summary": summary} for n in names]
-        (out / "outcomes.json").write_text(json.dumps({
-            "total_mutants": len(caught) + len(missed) + len(timeouts),
-            "caught": len(caught), "missed": len(missed), "timeout": len(timeouts),
-            "unviable": 0, "outcomes": outcomes,
-        }, indent=2) + "\n")
-    else:
-        (out / "mutants.json").write_text("[]\n")
+        write_outcomes(out, start_time, caught, missed, timeouts)
     print(f"caught: {len(caught)}  missed: {len(missed)}  timeout: {len(timeouts)}  -> {out}")
     print(f"score with: python3 scripts/mutation_gate.py report --results {out} "
           f"--suppressions mutants/suppressions.toml")

@@ -7,7 +7,7 @@ tomllib):
     python3 -m unittest discover -s scripts -p 'test_*.py' -v
 
 Each case writes the files a mutation run leaves in a temporary directory, in the
-shapes cargo-mutants 27 and scripts/umutate.py write them, and runs the gate's
+shapes cargo-mutants 27.1.0 and scripts/umutate.py write them, and runs the gate's
 subcommands on it.
 """
 from __future__ import annotations
@@ -47,8 +47,8 @@ def load_tests(loader: unittest.TestLoader, tests: unittest.TestSuite,
     return loader.loadTestsFromTestCase(PythonVersion) if TOO_OLD else tests
 
 
-def load_gate():
-    spec = importlib.util.spec_from_file_location("mutation_gate", SCRIPTS / "mutation_gate.py")
+def load_script(name: str):
+    spec = importlib.util.spec_from_file_location(name, SCRIPTS / f"{name}.py")
     module = importlib.util.module_from_spec(spec)
     # Registered before it runs: its dataclasses look their module up.
     sys.modules[spec.name] = module
@@ -56,7 +56,8 @@ def load_gate():
     return module
 
 
-gate = None if TOO_OLD else load_gate()
+gate = None if TOO_OLD else load_script("mutation_gate")
+umutate = None if TOO_OLD else load_script("umutate")
 
 CAUGHT = "crates/mega-evm/src/a.rs:1:1: replace f -> u64 with 0"
 MISSED = "crates/mega-evm/src/a.rs:2:5: replace + with - in g"
@@ -64,14 +65,39 @@ TIMEOUT = "crates/mega-evm/src/system/keyless/dispatch.rs:367:23: delete ! in pr
 UNVIABLE = "crates/mega-evm/src/a.rs:3:9: replace h -> Foo with Default::default()"
 
 
+# When a run finished, as cargo-mutants writes `end_time`.
+FINISHED = "2026-09-27T07:17:03.989998Z"
+
+
 def mutant(name: str, summary: str) -> dict:
     return {"scenario": {"Mutant": {"name": name}}, "summary": summary}
 
 
-def outcomes_json(*mutants: dict, baseline: str | None = "Success", total: int | None = None) -> dict:
+def outcomes_json(*mutants: dict, baseline: str | None = "Success",
+                  end_time: str | None = FINISHED) -> dict:
+    """An `outcomes.json` as cargo-mutants 27.1.0 writes it, after every outcome and once more
+    when it finishes: its counters are the outcomes recorded so far, and `end_time` is null
+    until the run finishes."""
     outcomes = [] if baseline is None else [{"scenario": "Baseline", "summary": baseline}]
     outcomes += list(mutants)
-    return {"total_mutants": len(mutants) if total is None else total, "outcomes": outcomes}
+    summaries = [m["summary"] for m in mutants]
+    return {
+        "outcomes": outcomes,
+        "total_mutants": len(mutants),
+        "missed": summaries.count("MissedMutant"),
+        "caught": summaries.count("CaughtMutant"),
+        "timeout": summaries.count("Timeout"),
+        "unviable": summaries.count("Unviable"),
+        "success": summaries.count("Success"),
+        "start_time": "2026-09-27T07:16:56.385727Z",
+        "end_time": end_time,
+        "cargo_mutants_version": "27.1.0",
+    }
+
+
+def mutants_json(*names: str) -> str:
+    """A `mutants.json`: every mutant a run selected, written before it tests any."""
+    return json.dumps([{"name": n, "file": n.split(":", 1)[0]} for n in names])
 
 
 class GateCase(unittest.TestCase):
@@ -80,12 +106,20 @@ class GateCase(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.tmp)
 
     def results(self, name: str = "mutants.out", outcomes: dict | None = None,
-                files: dict[str, str] | None = None) -> Path:
+                files: dict[str, str] | None = None, selected: list[str] | None = None) -> Path:
+        """A results directory. With `outcomes` and no `mutants.json` of its own, it selects the
+        mutants the outcomes name, as a run that finished does."""
         path = self.tmp / name
         path.mkdir(parents=True)
+        files = files or {}
         if outcomes is not None:
             (path / "outcomes.json").write_text(json.dumps(outcomes))
-        for file, text in (files or {}).items():
+            if selected is None and "mutants.json" not in files:
+                selected = [o["scenario"]["Mutant"]["name"] for o in outcomes["outcomes"]
+                            if isinstance(o.get("scenario"), dict)]
+        if selected is not None:
+            (path / "mutants.json").write_text(mutants_json(*selected))
+        for file, text in files.items():
             (path / file).write_text(text)
         return path
 
@@ -142,9 +176,51 @@ class ResultsThatCannotBeScored(GateCase):
         results = self.results(outcomes=outcomes_json(mutant(CAUGHT, "CaughtMutant"), baseline=None))
         self.assert_unscorable(results, "no baseline outcome")
 
-    def test_an_interrupted_run(self) -> None:
-        results = self.results(outcomes=outcomes_json(mutant(CAUGHT, "CaughtMutant"), total=3))
-        self.assert_unscorable(results, "1 of 3 mutants have an outcome")
+    def test_a_run_stopped_after_its_baseline(self) -> None:
+        # What cargo-mutants 27.1.0 leaves when it stops once its baseline passed and before it
+        # records a mutant: the selection in mutants.json, and an outcomes.json holding the
+        # baseline alone, counting no mutant, with no end_time.
+        record = outcomes_json(end_time=None)
+        self.assertEqual(record["total_mutants"], 0)
+        results = self.results(outcomes=record, selected=[CAUGHT, MISSED])
+        self.assert_unscorable(results, "records no end_time")
+
+    def test_a_run_stopped_after_catching_part_of_its_selection(self) -> None:
+        # The same record once some of the selection was caught: total_mutants counts the
+        # outcomes recorded, so it equals them and says nothing of the mutants still to test.
+        record = outcomes_json(mutant(CAUGHT, "CaughtMutant"), end_time=None)
+        self.assertEqual(record["total_mutants"], 1)
+        results = self.results(outcomes=record, selected=[CAUGHT, MISSED])
+        self.assert_unscorable(results, "records no end_time")
+
+    def test_a_record_without_an_end_time(self) -> None:
+        record = outcomes_json(mutant(CAUGHT, "CaughtMutant"))
+        del record["end_time"]
+        self.assert_unscorable(self.results(outcomes=record), "records no end_time")
+
+    def test_a_finished_record_missing_a_selected_mutant(self) -> None:
+        results = self.results(outcomes=outcomes_json(mutant(CAUGHT, "CaughtMutant")),
+                               selected=[CAUGHT, MISSED])
+        self.assert_unscorable(results, "1 of the 2 mutants mutants.json selects have no outcome")
+
+    def test_a_mutant_selected_twice_needs_two_outcomes(self) -> None:
+        results = self.results(outcomes=outcomes_json(mutant(CAUGHT, "CaughtMutant")),
+                               selected=[CAUGHT, CAUGHT])
+        self.assert_unscorable(results, "1 of the 2 mutants mutants.json selects have no outcome")
+
+    def test_an_outcome_of_a_mutant_not_selected(self) -> None:
+        results = self.results(outcomes=outcomes_json(
+            mutant(CAUGHT, "CaughtMutant"), mutant(MISSED, "CaughtMutant")), selected=[CAUGHT])
+        self.assert_unscorable(results, "outcomes of mutants mutants.json does not select")
+
+    def test_outcomes_without_a_selection(self) -> None:
+        results = self.results(files={"outcomes.json": json.dumps(
+            outcomes_json(mutant(CAUGHT, "CaughtMutant")))})
+        self.assert_unscorable(results, "no mutants.json")
+
+    def test_a_selection_that_is_not_a_list_of_mutants(self) -> None:
+        results = self.results(outcomes=outcomes_json(), files={"mutants.json": json.dumps([CAUGHT])})
+        self.assert_unscorable(results, "is not a list of mutants")
 
     def test_an_outcome_of_an_unknown_kind(self) -> None:
         results = self.results(outcomes=outcomes_json(mutant(CAUGHT, "Exploded")))
@@ -289,6 +365,34 @@ class Scoring(GateCase):
         code, text = self.report(results, recheck)
         self.assertEqual(code, 1, text)
         self.assertIn(MISSED, text)
+
+
+class UmutateRecord(GateCase):
+    """scripts/umutate.py writes the record the gate scores, on the contract cargo-mutants keeps."""
+
+    def test_a_finished_run_is_scored(self) -> None:
+        out = self.results("umutate")
+        umutate.write_selection(out, [CAUGHT, MISSED])
+        umutate.write_outcomes(out, umutate.now(), [CAUGHT], [MISSED], [])
+        code, text = self.report(out)
+        self.assertEqual(code, 1, text)
+        self.assertIn("(1/2 viable mutants killed)", text)
+        self.assertIn(MISSED, text)
+
+    def test_a_run_that_stops_part_way_is_refused(self) -> None:
+        # The selection is on disk before any mutant is tested, the outcomes only once all are.
+        out = self.results("umutate")
+        umutate.write_selection(out, [CAUGHT, MISSED])
+        code, text = self.report(out)
+        self.assertEqual(code, 2, text)
+        self.assertIn("stopped before it recorded an outcome", text)
+
+    def test_a_run_that_generates_nothing_has_nothing_to_test(self) -> None:
+        out = self.results("umutate")
+        umutate.write_selection(out, [])
+        code, text = self.report(out)
+        self.assertEqual(code, 0, text)
+        self.assertIn("mutant list under the run's filters was empty", text)
 
 
 class NoteEmpty(GateCase):

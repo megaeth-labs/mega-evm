@@ -54,8 +54,12 @@ Policy is **no new survivors**: if a mutant on changed code survives and is not 
 To pass, either add a test that kills it, or — only if it is provably equivalent/dead — add a justified entry to `suppressions.toml`.
 The reported mutation score is informational.
 
-The gate reads a run **fail-closed**: it scores `outcomes.json`, and only a run whose baseline succeeded and whose every mutant has an outcome.
-Missing results, a missing or failed baseline, or an interrupted run fail the gate with the reason, instead of reading as nothing to test.
+The gate reads a run **fail-closed**: it scores `outcomes.json`, and only a run that finished, whose baseline succeeded, and whose every selected mutant has an outcome.
+cargo-mutants rewrites `outcomes.json` after every outcome, so a run that stops part way leaves one that looks whole; the gate reads completion from the two things the producer writes for it.
+One is `end_time`, which stays null until the run finishes.
+The other is `mutants.json`, the selection written before any mutant is tested, which the outcomes must name exactly.
+`total_mutants` counts the outcomes recorded so far, not the mutants selected, and the gate does not read it.
+Missing results, a run that did not finish, a missing or failed baseline, or a selected mutant without an outcome fail the gate with the reason, instead of reading as nothing to test.
 A run that tested nothing passes only on the producer's own word for it: cargo-mutants' empty `mutants.json` when its filters leave no mutant, or, when `--in-diff` leaves none and cargo-mutants writes no results at all, the line it printed saying so, which the driver records in `no-mutants.txt`.
 
 A mutant that **timed out** was tested beside the others the run tests at once, each running the whole suite on the same cores, so the driver re-runs every unsuppressed one once, alone (`--jobs 1`, into `recheck/mutants.out`), and the gate takes that outcome for it.
@@ -90,6 +94,7 @@ cargo-mutants applies a fixed, generic operator set and cannot be extended.
 To mutate mega-evm-specific constructs — starting with **spec gates**, the lever for backward-compatibility — there is a second engine built on [universalmutator](https://github.com/agroce/universalmutator) in `--comby` mode.
 
 The two engines are complementary and **share one gate**: both write `outcomes.json` in cargo-mutants' shape, with the `caught.txt`/`missed.txt` lists beside it, which `scripts/mutation_gate.py` scores, so suppressions, the PR comment, and the exit code are identical for both.
+`umutate.py` keeps the same completion contract: it writes `mutants.json` with every mutant it selected before it tests any, and `outcomes.json`, with its `end_time`, only once every one has an outcome.
 
 ```
 cargo-mutants ─(mutation_test.sh)─┐
