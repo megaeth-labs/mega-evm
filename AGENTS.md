@@ -451,6 +451,9 @@ When a PR creation is requested, the agent should:
    When generating the PR title and description, consider the overall changes in this branch across commits.
    In the PR description, make sure a `Summary` section is put on the top.
    The PR will be merged with `Squash and Merge` operation, whose commit description should include the summary.
+7. Label the PR as `.github/pull_request_template.md` lists.
+   Satin is the unstable spec, so a PR that changes Satin's behavior is `spec:unstable`.
+   `spec:new` is only for a PR that introduces a new `MegaSpecId` variant.
 
 ### Implementing features or bug fixes
 
