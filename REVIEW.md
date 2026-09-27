@@ -106,7 +106,8 @@ These checks guard every change to the Satin engine.
 
 ### Instruction counts (CodSpeed)
 
-- The bench set is `transact` (`MegaEvm` next to op-revm's `OpEvm`, from an empty transaction to 64-deep calls and loops of storage writes and logs), `corpus` (the JSON scenarios under `benches/scenarios` through `MegaEvm`, a bench input rather than a conformance suite) and `factory` (EVM construction through `MegaEvmFactory`), all in `crates/mega-evm/benches`.
+- The bench set is `transact` (`MegaEvm` next to op-revm's `OpEvm`, from an empty transaction to 64-deep calls and loops of storage writes and logs), `corpus` (the JSON scenarios under `benches/scenarios` through `MegaEvm`, a bench input rather than a conformance suite), `factory` (EVM construction through `MegaEvmFactory`) and `block` (a block through `MegaBlockExecutor`), all in `crates/mega-evm/benches`.
+- `block` measures a chain's steady state: a block on a state that already holds the predeploys, under `BlockLimits::default()`; the one-off deployment of the first block after activation is its own arm, `block/activation_pre_block`.
 - `codspeed.yml` runs them under instrumentation on every pull request that touches code and on every push to `satin`; the baseline a pull request is compared with is the latest `satin` push.
 - Read regressions from the CodSpeed report on the pull request (the CodSpeed comment and the `CodSpeed Performance Analysis` check).
   The regression threshold that fails that check is a setting of the repository's CodSpeed project; it is not recorded in this repository or in the reports CodSpeed posts, so this file does not state a number.
