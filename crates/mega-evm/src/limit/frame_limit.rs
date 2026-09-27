@@ -115,8 +115,10 @@ impl Lane {
 
     /// Whether the frame's return hands its caller what no check held the caller to: a failed
     /// creation's nonce record, which outlives it and lands on the creator's lane
-    /// ([`FrameLimitTracker::pop`]), or a success past the frame's own budget, which only an
-    /// inspector's rewrite of the frame's stop into a success returns.
+    /// ([`FrameLimitTracker::pop`]), or a success past the frame's own budget, which no frame
+    /// returns — a frame past its budget failed, and a failure an inspector rewrites into a success
+    /// has its lane discarded first ([`FrameLimitTracker::discard_running_lane`]) — and which is
+    /// held all the same.
     ///
     /// Any other return hands the caller nothing, or what the frame kept within its budget, which
     /// is at most the share of what the caller had left.
@@ -300,6 +302,18 @@ impl FrameLimitTracker {
         self.total_used = self.total_used.saturating_sub(lane.used);
         lane.used = LimitUsage::ZERO;
         lane.records_made = false;
+    }
+
+    /// Settles the running frame's lane as its failure would, before the frame returns: what it
+    /// counted is discarded, its caller's record with it, and an empty lane stands in for it,
+    /// holding the history its caller gets back for records the failure did not keep. So the frame
+    /// returns into its caller as a frame that made nothing, whatever it is popped with.
+    ///
+    /// For a frame whose journal checkpoint was reverted and whose result then became a success
+    /// all the same: the lane follows the checkpoint, not the result.
+    pub(crate) fn discard_running_lane(&mut self) {
+        let Some(lane) = self.pop(false) else { return };
+        self.lanes.push(Lane::empty(lane.history_refund(false)));
     }
 
     /// Takes the record of the running frame's own account back from its lane, where a child
@@ -621,6 +635,51 @@ mod tests {
         t.push(Lane::new(Some(ADDR), false, UNLIMITED, 0));
         assert!(t.hands_unchecked(&lane, true), "a caller is");
         assert!(!t.hands_unchecked(&lane, false), "which a failure hands nothing");
+    }
+
+    /// A lane discarded before its frame returns keeps nothing, whatever it is popped with: what
+    /// it counted leaves the totals, its caller's account stops counting as recorded, and the
+    /// empty lane in its place hands the caller back what the failure gives back — here the
+    /// charges for the lane's record and for the caller's own.
+    #[test]
+    fn test_a_discarded_lane_keeps_nothing_and_gives_the_failures_history_back() {
+        let mut t = FrameLimitTracker::default();
+        t.push(Lane::new(Some(ADDR), false, UNLIMITED, 0));
+        t.record(bytes(10));
+        t.push(Lane::new(None, false, bytes(100), 7));
+        t.record_caller(false, 3);
+        t.record(WRITE_RECORD);
+        t.record_log_and_code_bytes(5);
+        t.discard_running_lane();
+
+        assert_eq!(t.depth(), 2, "an empty lane stands in for the frame");
+        let lane = *t.current().unwrap();
+        assert!(!lane.records_made);
+        assert_eq!(lane.used, LimitUsage::ZERO);
+        assert_eq!(lane.address, None);
+        assert_eq!(lane.budget, UNLIMITED);
+        assert_eq!(t.net(), bytes(10), "only the caller's count is left");
+        assert_eq!(t.net(), t.net_uncached());
+        assert_eq!(t.log_and_code_bytes(), 0);
+        assert!(!t.lanes[0].account_recorded, "the caller's record went with the frame");
+
+        let popped = t.pop(true).unwrap();
+        assert_eq!(popped.history_refund(true), 7 + 3, "the lane's record and the caller's");
+        assert!(!t.hands_unchecked(&popped, true), "it hands nothing");
+        assert_eq!(t.net(), bytes(10));
+
+        // A creator's nonce record outlives the creation: the discard lands it on the creator,
+        // and the history the creator paid for it is not given back.
+        t.push(Lane::new(None, false, UNLIMITED, 0));
+        t.record_caller(true, 4);
+        t.discard_running_lane();
+        assert_eq!(t.net(), bytes(10).saturating_add(WRITE_RECORD));
+        assert_eq!(t.pop(true).unwrap().history_refund(true), 0);
+
+        // With no lane to discard, nothing happens.
+        let mut empty = FrameLimitTracker::default();
+        empty.discard_running_lane();
+        assert_eq!(empty.depth(), 0);
     }
 
     /// A creation that fails before bumping the nonce takes the creator record back.

@@ -31,17 +31,18 @@ use std::{format, string::String};
 
 use revm::{
     context::{ContextError, ContextTr, JournalTr},
+    context_interface::{cfg::StateGasCharge, Host},
     handler::FrameResult,
     inspector::{handler::frame_end, JournalExt, NoOpInspector},
     interpreter::{
         CallInputs, CallOutcome, CreateInputs, CreateOutcome, FrameInput, InstructionResult,
         Interpreter, InterpreterTypes,
     },
-    primitives::{Address, Log, U256},
+    primitives::{Address, Bytes, Log, U256},
     Database, Inspector,
 };
 
-use crate::{ExternalEnvTypes, MegaContext};
+use crate::{synthetic_frame_result, ExternalEnvTypes, MegaContext};
 
 /// The message of the `EVMError::Custom` a refused creation revival fails the transaction with.
 ///
@@ -328,16 +329,21 @@ fn assert_result_unwritten(before: ResultSnapshot, result: &FrameResult, callbac
     }
 }
 
-/// Hands a frame's end to the inspector, then applies the one refusal: a creation that failed,
-/// rewritten into a success, is put back and fails the transaction with
-/// [`FORBIDDEN_CREATE_REVIVAL`] — unless the transaction is latched, where the creation is put back
-/// and reports the stop, which the latch writes over every result.
+/// Hands a frame's end to the inspector, then settles what its rewrite does not change.
 ///
-/// Every place a frame result reaches the inspector goes through here, so the refusal covers a
-/// result a frame ran to produce and one answered without running. A frame the inspector answered
-/// with a success itself is no revival: nothing failed. The latch is read after the hooks that can
-/// set it — the frame's run, detention's classification of its end, the hold on a start's upfront
-/// state gas, and the answer before building — have run, so a creation the latch stopped is never
+/// - **The refusal.** A creation that failed, rewritten into a success, is put back and fails the
+///   transaction with [`FORBIDDEN_CREATE_REVIVAL`] — unless the transaction is latched, where the
+///   creation is put back and reports the stop, which the latch writes over every result.
+/// - **A frame that kept nothing.** A frame the inspector answered in place of running
+///   (`answered`), and a frame that failed before the inspector saw it, made no write the journal
+///   kept. Whatever the inspector left the result saying, it settles into its caller as such a
+///   frame does ([`settle_kept_nothing`]).
+///
+/// Every place a frame result reaches the inspector goes through here, so both cover a result a
+/// frame ran to produce and one answered without running. A frame the inspector answered with a
+/// success itself is no revival: nothing failed. The latch is read after the hooks that can set
+/// it — the frame's run, detention's classification of its end, the hold on a start's upfront state
+/// gas, and the answer before building — have run, so a creation the latch stopped is never
 /// refused.
 #[inline]
 pub(crate) fn frame_end_checked<DB, ExtEnvs, INTR, INSP>(
@@ -345,6 +351,8 @@ pub(crate) fn frame_end_checked<DB, ExtEnvs, INTR, INSP>(
     inspector: &mut INSP,
     frame_input: &FrameInput,
     frame_result: &mut FrameResult,
+    depth: usize,
+    answered: bool,
 ) where
     DB: Database,
     ExtEnvs: ExternalEnvTypes,
@@ -354,6 +362,82 @@ pub(crate) fn frame_end_checked<DB, ExtEnvs, INTR, INSP>(
     let before = frame_result.instruction_result();
     frame_end(context, inspector, frame_input, frame_result);
     refuse_create_revival(context, before, frame_result);
+    if answered || !before.is_ok() {
+        settle_kept_nothing(context, frame_input, frame_result, depth);
+    }
+}
+
+/// Settles the result of a frame at `depth` that kept nothing in the journal — one an inspector
+/// answered in place of running, or one whose checkpoint was reverted before the inspector saw its
+/// result — as such a frame settles, whatever the inspector made of the result.
+///
+/// The calling opcode's upfront state-gas charge — the account a value call adds, the account a
+/// creation adds, or EIP-2780's for the transaction's own frame — is given back: the frame added
+/// no account. The result carries the frame's own upfront-charge flags again, so a result that
+/// fails gets it back from revm's settlement, as revm's own do; one an inspector answered carries
+/// none of them otherwise.
+///
+/// A result that says success is not one revm's settlement treats as keeping nothing, so it is made
+/// to settle like the failure it stands for, save what the inspector chose — the success its caller
+/// sees, the output, the regular gas:
+///
+/// - its state and history charges are rolled back and its refunds dropped, as a failure's are,
+///   before its caller merges them;
+/// - the upfront charge comes back through it: the result holds it as state its frame gave back, as
+///   a frame that restored a slot its caller filled does, and its caller's merge nets it out;
+/// - for the transaction's own frame, the history of the write record charged before execution for
+///   its start comes back the same way;
+/// - its lane is discarded as a failure's is, so nothing it counted reaches its caller, which gets
+///   back the history it paid for the records.
+///
+/// A latched transaction is left to the latch, which writes the stop over every result, and the
+/// stop settles as a revert.
+fn settle_kept_nothing<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    context: &mut MegaContext<DB, ExtEnvs>,
+    input: &FrameInput,
+    result: &mut FrameResult,
+    depth: usize,
+) {
+    carry_upfront_flags(input, result);
+    if !result.instruction_result().is_ok() || context.additional_limit.latched().is_some() {
+        return;
+    }
+    // A creation answered with a success and no address is one revm's settlement gives the
+    // charge back for itself.
+    let upfront = upfront_charge(input).filter(|_| result.refundable_state_gas_charge().is_none());
+    // A failed lookup records its cause, which fails the transaction before the result settles.
+    let upfront = upfront.map_or(Some(0), |charge| context.state_gas_charge(charge));
+    let history =
+        if depth == 0 { context.additional_limit.top_level_write_record_gas() } else { 0 };
+    let gas = result.gas_mut();
+    gas.rollback_state_gas();
+    gas.set_refunded(0);
+    gas.refill_reservoir(upfront.unwrap_or_default());
+    gas.refill_history(history);
+    context.additional_limit.discard_returning_lane();
+}
+
+/// Sets `result`'s upfront-charge flags to those of `input`, the frame it answers: what revm's
+/// settlement reads to give the calling opcode's upfront state-gas charge back.
+fn carry_upfront_flags(input: &FrameInput, result: &mut FrameResult) {
+    match (input, result) {
+        (FrameInput::Call(inputs), FrameResult::Call(outcome)) => {
+            outcome.charged_new_account_state_gas = inputs.charged_new_account_state_gas;
+            outcome.charged_state_gas_address = inputs.target_address;
+        }
+        (FrameInput::Create(inputs), FrameResult::Create(outcome)) => {
+            outcome.charged_create_state_gas = inputs.charged_create_state_gas();
+            outcome.charged_state_gas_address = inputs.charged_state_gas_address();
+        }
+        _ => {}
+    }
+}
+
+/// The upfront state-gas charge the calling opcode made for the frame `input` starts: the charge
+/// revm's settlement gives back when that frame fails.
+fn upfront_charge(input: &FrameInput) -> Option<StateGasCharge> {
+    synthetic_frame_result(input, InstructionResult::Revert, Bytes::new())
+        .refundable_state_gas_charge()
 }
 
 /// Puts a revived creation back to `before` and, unless the transaction is latched, records the
