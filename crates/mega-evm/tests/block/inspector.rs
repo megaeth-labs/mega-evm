@@ -114,8 +114,8 @@ fn test_a_disabled_inspector_is_admitted() {
 }
 
 /// The gate is checked at every entry point, not once: an inspector enabled after the block was
-/// set up is refused by the transaction that would run under it, by a commit and by the end of
-/// the block.
+/// set up is refused by the transaction that would run under it, by the checked commit and by the
+/// end of the block.
 #[test]
 fn test_enabling_a_rewriting_inspector_after_the_block_started_is_refused() {
     let mut state = common::state();
@@ -139,6 +139,32 @@ fn test_enabling_a_rewriting_inspector_after_the_block_started_is_refused() {
     assert!(is_refused(executor.commit_transaction_outcome(outcome)), "nothing commits");
     assert!(executor.receipts().is_empty(), "the block packed nothing");
     assert!(is_refused(executor.finish_with_counters()), "and the block does not finish");
+}
+
+/// alloy-evm's `commit_transaction` cannot fail and checks nothing: it commits the outcome the
+/// last execution produced, which passed the gate before it ran, so an inspector enabled since
+/// cannot reach it. The next execution is the one the gate refuses.
+#[test]
+fn test_the_unchecked_commit_commits_what_ran_under_the_gate() {
+    let mut state = common::state();
+    let factory = common::factory();
+    let mut evm = MegaEvmFactory::new()
+        .create_evm(&mut state, common::evm_env())
+        .with_inspector(GasInspector::new());
+    evm.set_inspector_enabled(false);
+
+    let mut executor = factory.create_executor(evm, common::unlimited_ctx());
+    executor.apply_pre_execution_changes().expect("a disabled inspector rewrites nothing");
+    let outcome = executor
+        .execute_transaction_without_commit(&user_tx(0, 100_000))
+        .expect("the block is still clean");
+
+    executor.evm_mut().set_inspector_enabled(true);
+
+    executor.commit_transaction(outcome);
+    assert_eq!(executor.receipts().len(), 1, "the outcome that ran under the gate is committed");
+    assert!(is_refused(executor.execute_transaction(&user_tx(1, 100_000))), "nothing runs after");
+    assert_eq!(executor.receipts().len(), 1);
 }
 
 /// The gate holds for a caller that never runs the block's pre-execution changes: the check is on

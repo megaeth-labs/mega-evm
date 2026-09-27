@@ -39,11 +39,16 @@
 //! refuses on: a rewriting inspector has no route to a block. [`DeclaredObserver`] carries the
 //! declaration for a tracer whose type cannot, and in debug builds checks it around every callback.
 //!
-//! Block execution checks the gate at every entry point, before anything changes: the pre-block
-//! changes, the execution of a transaction — a system transaction as a user one — the commit of an
-//! outcome, and the end of the block. So a declared observer sees the block's transactions, user
-//! and system alike, and a rewriting inspector sees nothing of a block: it is refused before the
-//! pre-block calls, which it would not run on anyway, and before any transaction.
+//! Block execution checks the gate before anything changes wherever an outcome is produced or
+//! chosen: the pre-block changes, the execution of a transaction — a system transaction as a user
+//! one — the end of the block, and
+//! [`commit_transaction_outcome`](crate::MegaBlockExecutor::commit_transaction_outcome), the commit
+//! of an outcome a builder chose among candidates. alloy-evm's `commit_transaction` checks nothing
+//! and needs no check: it cannot fail, runs no code, and commits the outcome the last execution
+//! produced, which passed the gate before it ran and which no inspector enabled since can reach.
+//! So a declared observer sees the block's transactions, user and system alike, and a rewriting
+//! inspector sees nothing of a block: it is refused before the pre-block calls, which it would not
+//! run on anyway, and before any transaction.
 //!
 //! # What a rewrite does not change
 //!
