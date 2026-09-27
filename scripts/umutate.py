@@ -24,7 +24,10 @@ Subcommands:
   run  [--diff <base>] [--packs a,b] --output <dir>
         Full pipeline: generate -> mutate -> analyze (run the test command per
         mutant) -> write caught.txt/missed.txt/unviable.txt/timeout.txt into
-        <dir>, ready for `mutation_gate.py report --results <dir>`.
+        <dir>, ready for `mutation_gate.py report --results <dir>`, with the
+        record the gate scores: outcomes.json in cargo-mutants' shape when a
+        mutant was tested, and mutants.json holding [] when none was generated.
+        A failing baseline exits before anything is written.
 
 In `--diff <base>` mode only files AND lines changed vs <base> are mutated
 (the PR-gate scope); without it, every gate site in the crate is mutated.
@@ -35,6 +38,7 @@ import argparse
 import difflib
 import fnmatch
 import glob
+import json
 import os
 import re
 import shutil
@@ -322,6 +326,10 @@ def cmd_run(args) -> int:
     require_tools()
     out = Path(args.output)
     out.mkdir(parents=True, exist_ok=True)
+    # An earlier run's record must not outlive this one, whatever this one writes.
+    for name in ("outcomes.json", "mutants.json", "caught.txt", "missed.txt", "timeout.txt",
+                 "unviable.txt"):
+        (out / name).unlink(missing_ok=True)
     caught, missed, timeouts = [], [], []
     packs = load_packs(args.packs)
     changed_files = changed_lines = None
@@ -370,6 +378,20 @@ def cmd_run(args) -> int:
     # Spec-gate mutants are valid Rust by construction, so there is no unviable
     # bucket; write an empty file so the gate's reader is happy.
     write("unviable.txt", [])
+    # The record the gate scores, in the shape cargo-mutants writes it. With no
+    # baseline run, no mutant was generated: say so as cargo-mutants does.
+    if baselined:
+        outcomes = [{"scenario": "Baseline", "summary": "Success"}]
+        for names, summary in ((caught, "CaughtMutant"), (missed, "MissedMutant"),
+                               (timeouts, "Timeout")):
+            outcomes += [{"scenario": {"Mutant": {"name": n}}, "summary": summary} for n in names]
+        (out / "outcomes.json").write_text(json.dumps({
+            "total_mutants": len(caught) + len(missed) + len(timeouts),
+            "caught": len(caught), "missed": len(missed), "timeout": len(timeouts),
+            "unviable": 0, "outcomes": outcomes,
+        }, indent=2) + "\n")
+    else:
+        (out / "mutants.json").write_text("[]\n")
     print(f"caught: {len(caught)}  missed: {len(missed)}  timeout: {len(timeouts)}  -> {out}")
     print(f"score with: python3 scripts/mutation_gate.py report --results {out} "
           f"--suppressions mutants/suppressions.toml")

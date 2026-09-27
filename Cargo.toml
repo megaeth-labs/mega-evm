@@ -200,6 +200,8 @@ split-debuginfo = "unpacked"
 
 # Speed up tests.
 [profile.dev.package]
+blst.opt-level = 3
+c-kzg.opt-level = 3
 proptest.opt-level = 3
 rand_chacha.opt-level = 3
 rand_xorshift.opt-level = 3
