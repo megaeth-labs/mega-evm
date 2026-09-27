@@ -61,8 +61,11 @@ const TEST: Address = address!("0000000000000000000000000000000000f00001");
 const TARGET: Address = address!("0000000000000000000000000000000000f00002");
 /// The BN254 addition precompile, which a point off the curve fails.
 const ADDITION: Address = address!("0000000000000000000000000000000000000006");
-/// Below the execution cap: Foundry answers a cheatcode on `Gas::new`, which carries no reservoir.
+/// Below the execution cap, where a transaction has no reservoir.
 const GAS_LIMIT: u64 = 10_000_000;
+/// Foundry's default gas limit for a test, 2^30: above the execution cap, so a test transaction
+/// runs with a reservoir.
+const FOUNDRY_GAS_LIMIT: u64 = 1 << 30;
 
 /// The revert data Foundry's `expectRevert` gives a call that did not revert.
 const DID_NOT_REVERT: &[u8] = b"call did not revert as expected";
@@ -196,7 +199,16 @@ fn call_and_note(code: BytecodeBuilder, target: Address, input: &[u8]) -> Byteco
 
 /// Runs a call from `CALLER` to `TEST` over `db`, under the cheatcode handler when `cheats` is set.
 fn run(db: MemoryDatabase, cheats: bool) -> (MegaTransactionOutcome, usize) {
-    let tx = call(CALLER, TEST, U256::ZERO, GAS_LIMIT);
+    run_with_gas_limit(db, cheats, GAS_LIMIT)
+}
+
+/// [`run`] with the transaction's gas limit `gas_limit`.
+fn run_with_gas_limit(
+    db: MemoryDatabase,
+    cheats: bool,
+    gas_limit: u64,
+) -> (MegaTransactionOutcome, usize) {
+    let tx = call(CALLER, TEST, U256::ZERO, gas_limit);
     if !cheats {
         return (MegaEvm::new(context(db)).execute_transaction(tx).expect("valid"), 0);
     }
@@ -375,4 +387,31 @@ fn test_expect_revert_is_honored_on_a_result_no_frame_ran_to_produce() {
     let mut word = [0_u8; 32];
     word[..DID_NOT_REVERT.len()].copy_from_slice(DID_NOT_REVERT);
     assert_eq!(slot(&no_code, TEST, 1), U256::from_be_bytes(word), "with Foundry's reason");
+}
+
+/// At Foundry's default gas limit a test transaction runs above the execution cap, with a
+/// reservoir, and Foundry answers every cheatcode call on `Gas::new`, which carries none. The
+/// answered frame never ran, so its caller merges back the reservoir it forwarded: a program that
+/// calls `deal`, fills a fresh slot and notes `GAS` costs, on every ledger, what it costs where the
+/// cheatcode's call reaches an account with no code — its state gas drawn from the reservoir rather
+/// than spilled onto regular gas — reads the same `GAS`, and ends with the same reservoir.
+#[test]
+fn test_a_cheatcode_keeps_the_reservoir_at_foundrys_default_gas_limit() {
+    let code =
+        cheat(BytecodeBuilder::default(), Vm::dealCall { who: TARGET, newBalance: U256::ONE })
+            .sstore(U256::ZERO, U256::ONE)
+            .append(GAS)
+            .push_number(1_u8)
+            .append(SSTORE)
+            .stop()
+            .build();
+    let db = || MemoryDatabase::default().account_code(TEST, code.clone());
+    let (cheated, answered) = run_with_gas_limit(db(), true, FOUNDRY_GAS_LIMIT);
+    assert_eq!(answered, 1);
+    assert_eq!(cheated.state[&TARGET].info.balance, U256::ONE, "the cheatcode ran");
+    let (plain, _) = run_with_gas_limit(db(), false, FOUNDRY_GAS_LIMIT);
+    assert!(plain.gas.reservoir_remaining > 0, "the transaction runs with a reservoir");
+    assert_eq!(cheated.gas, plain.gas, "every ledger, the reservoir included");
+    assert_eq!(cheated.usage, plain.usage, "every count");
+    assert_eq!(slot(&cheated, TEST, 1), slot(&plain, TEST, 1), "the same `GAS`");
 }

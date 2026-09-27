@@ -11,7 +11,10 @@
 //!
 //! Every expectation here is the rule's: a caller that drops the flag cannot tell a rewritten
 //! failure from the failure, and a frame answered without running adds no account and writes
-//! nothing, so the transaction's state gas is zero and its history is its body's. Where a new
+//! nothing, so the transaction's state gas is zero and its history is its body's. An answer
+//! carries nothing but the regular gas the inspector chose, so every answer is given twice — on
+//! the gas the frame was forwarded, untouched, and on `Gas::new` of it, as Foundry answers, which
+//! carries no reservoir — and the two settle alike. Where a new
 //! account is charged, its bucket is crowded (`m = 3`), so the charge that comes back is the one
 //! that was made, priced at the account it was made for.
 
@@ -25,9 +28,9 @@ use mega_evm::{
 };
 use revm::{
     bytecode::opcode::{CALL, POP, PUSH0, STOP},
-    context_interface::cfg::GasId,
+    context_interface::{cfg::GasId, Transaction},
     interpreter::{
-        interpreter::EthInterpreter, CallInputs, CallOutcome, CreateInputs, CreateOutcome,
+        interpreter::EthInterpreter, CallInputs, CallOutcome, CreateInputs, CreateOutcome, Gas,
         InstructionResult, InterpreterResult, InterpreterTypes,
     },
     Inspector,
@@ -35,7 +38,7 @@ use revm::{
 
 use crate::salt::{
     create_with, crowded_account, db, entry, minimal_envs, salt_context, tx_with_gas, value_call,
-    SaltEnvs, CONTRACT, EMPTY,
+    SaltEnvs, CALLER, CONTRACT, EMPTY,
 };
 
 /// A contract `CONTRACT` calls.
@@ -64,28 +67,39 @@ impl<CTX, INTR: InterpreterTypes> Inspector<CTX, INTR> for Revives {
 }
 
 /// Answers every call to `target`, and every creation, itself with `result`, on the gas the frame
-/// was forwarded, untouched: the frame never starts. An answered creation reports `address`.
+/// was forwarded, untouched, or, when `fresh`, on `Gas::new` of it: the frame never starts. An
+/// answered creation reports `address`.
+#[derive(Clone, Copy, Debug)]
 struct Answers {
     target: Address,
     result: InstructionResult,
     address: Option<Address>,
+    fresh: bool,
 }
 
 impl Answers {
     const fn call(target: Address, result: InstructionResult) -> Self {
-        Self { target, result, address: None }
+        Self { target, result, address: None, fresh: false }
     }
 
     const fn creation(result: InstructionResult, address: Option<Address>) -> Self {
-        Self { target: Address::ZERO, result, address }
+        Self { target: Address::ZERO, result, address, fresh: false }
+    }
+
+    /// The same answers, built on `Gas::new` of the gas the frame was forwarded, as Foundry
+    /// answers a cheatcode: gas that carries no reservoir.
+    const fn on_fresh_gas(self) -> Self {
+        Self { fresh: true, ..self }
     }
 }
 
 impl<CTX, INTR: InterpreterTypes> Inspector<CTX, INTR> for Answers {
     fn call(&mut self, _: &mut CTX, inputs: &mut CallInputs) -> Option<CallOutcome> {
         (inputs.target_address == self.target).then(|| {
+            let gas =
+                if self.fresh { Gas::new(inputs.gas_limit) } else { untouched_call_gas(inputs) };
             CallOutcome::new(
-                InterpreterResult::new(self.result, Bytes::new(), untouched_call_gas(inputs)),
+                InterpreterResult::new(self.result, Bytes::new(), gas),
                 inputs.return_memory_offset.clone(),
             )
         })
@@ -93,10 +107,12 @@ impl<CTX, INTR: InterpreterTypes> Inspector<CTX, INTR> for Answers {
 
     fn create(&mut self, _: &mut CTX, inputs: &mut CreateInputs) -> Option<CreateOutcome> {
         (self.target == Address::ZERO).then(|| {
-            CreateOutcome::new(
-                InterpreterResult::new(self.result, Bytes::new(), untouched_create_gas(inputs)),
-                self.address,
-            )
+            let gas = if self.fresh {
+                Gas::new(inputs.gas_limit())
+            } else {
+                untouched_create_gas(inputs)
+            };
+            CreateOutcome::new(InterpreterResult::new(self.result, Bytes::new(), gas), self.address)
         })
     }
 }
@@ -122,17 +138,43 @@ where
         .expect("a valid transaction")
 }
 
+/// Runs `tx` over `db()` reading `envs()` under `answers`, on the gas the answered frame was
+/// forwarded, untouched, and again on `Gas::new` of it; hands back the first once the second
+/// settled alike. The frame never ran, so its answer carries nothing but the regular gas the
+/// inspector chose, and its caller merges back the reservoir it forwarded whatever the answer was
+/// built on.
+fn answered(
+    db: impl Fn() -> MemoryDatabase,
+    envs: impl Fn() -> SaltEnvs,
+    tx: &MegaTransaction,
+    answers: Answers,
+) -> MegaTransactionOutcome {
+    let untouched = inspected(db(), envs(), tx.clone(), answers);
+    let fresh = inspected(db(), envs(), tx.clone(), answers.on_fresh_gas());
+    assert_eq!(fresh.result, untouched.result, "{answers:?}: on fresh gas");
+    assert_eq!(fresh.gas, untouched.gas, "{answers:?}: every ledger, on fresh gas");
+    assert_eq!(fresh.usage, untouched.usage, "{answers:?}: every count, on fresh gas");
+    assert_eq!(fresh.state, untouched.state, "{answers:?}: the state, on fresh gas");
+    untouched
+}
+
 /// A call from `CALLER` to `to` carrying `value` and `data`, at `gas_limit`.
 fn to(to: Address, value: u64, data: Bytes, gas_limit: u64) -> MegaTransaction {
     tx_with_gas(TxKind::Call(to), data, U256::from(value), gas_limit)
 }
 
 /// A transaction that keeps nothing but its body: no state gas, its body's history alone, and its
-/// body's bytes alone on the data size.
+/// body's bytes alone on the data size. Above the execution cap the reservoir paid for the body and
+/// nothing else, so what is left of it comes back.
 fn assert_keeps_only_its_body(case: &str, tx: &MegaTransaction, outcome: &MegaTransactionOutcome) {
     let body = transaction_body_bytes(tx);
     assert_eq!(outcome.gas.state, 0, "{case}: no state gas");
     assert_eq!(outcome.gas.history, history_gas(body).unwrap(), "{case}: the body's history");
+    assert_eq!(
+        outcome.gas.reservoir_remaining,
+        tx.gas_limit().saturating_sub(TX_GAS_LIMIT_CAP).saturating_sub(outcome.gas.history),
+        "{case}: the reservoir less the body's history"
+    );
     assert_eq!(outcome.gas.history_bytes, body, "{case}: the body's bytes");
     assert_eq!(outcome.usage, LimitUsage { data_size: body, write_records: 0 }, "{case}");
 }
@@ -271,7 +313,7 @@ fn test_a_value_call_an_inspector_answers_gives_its_new_account_charge_back() {
             [InstructionResult::Stop, InstructionResult::Revert, InstructionResult::OutOfGas].map(
                 |result| {
                     let answered =
-                        inspected(db(caller()), envs(), tx.clone(), Answers::call(EMPTY, result));
+                        answered(|| db(caller()), envs, &tx, Answers::call(EMPTY, result));
                     let case = format!("answered with {result:?}, gas limit {gas_limit}");
                     assert!(answered.result.is_success(), "{case}: {:?}", answered.result);
                     assert_keeps_only_its_body(&case, &tx, &answered);
@@ -296,8 +338,7 @@ fn test_the_transactions_own_value_transfer_an_inspector_answers_keeps_nothing()
 
         for result in [InstructionResult::Stop, InstructionResult::Revert] {
             let case = format!("answered with {result:?}, gas limit {gas_limit}");
-            let answered =
-                inspected(db(Bytes::new()), envs(), tx.clone(), Answers::call(EMPTY, result));
+            let answered = answered(|| db(Bytes::new()), envs, &tx, Answers::call(EMPTY, result));
             assert_eq!(answered.result.is_success(), result.is_ok(), "{case}: the answer");
             assert_keeps_only_its_body(&case, &tx, &answered);
             assert!(!holds_something(&answered, EMPTY), "{case}: no account");
@@ -325,8 +366,7 @@ fn test_a_creation_an_inspector_answers_gives_its_charge_back() {
             (InstructionResult::Revert, None),
         ]
         .map(|(result, address)| {
-            let answered =
-                inspected(db(caller()), envs(), tx.clone(), Answers::creation(result, address));
+            let answered = answered(|| db(caller()), envs, &tx, Answers::creation(result, address));
             let case = format!("answered with {result:?}, gas limit {gas_limit}");
             assert!(answered.result.is_success(), "{case}: {:?}", answered.result);
             assert_keeps_only_its_body(&case, &tx, &answered);
@@ -335,6 +375,34 @@ fn test_a_creation_an_inspector_answers_gives_its_charge_back() {
         });
         assert_eq!(answers[0], answers[1], "gas limit {gas_limit}: with an address or without");
         assert_eq!(answers[0], answers[2], "gas limit {gas_limit}: a success costs a revert's");
+    }
+}
+
+/// The transaction's own creation, answered by an inspector: the account EIP-2780 charged the
+/// frame's start for is not added, and neither is the write record charged before execution,
+/// whatever the answer. Run, the creation adds its account in its bucket.
+#[test]
+fn test_the_transactions_own_creation_an_inspector_answers_keeps_nothing() {
+    let created = CALLER.create(0);
+    let envs = || crowded_account(minimal_envs(), created, 3);
+    for gas_limit in GAS_LIMITS {
+        let tx = tx_with_gas(TxKind::Create, Bytes::from_static(&[STOP]), U256::ZERO, gas_limit);
+        let ran = plain(db(Bytes::new()), envs(), tx.clone());
+        assert!(ran.result.is_success(), "{:?}", ran.result);
+        assert_eq!(ran.gas.state, 3 * entry(GasId::create_state_gas()), "in its bucket");
+
+        for (result, address) in [
+            (InstructionResult::Return, Some(ANSWERED)),
+            (InstructionResult::Stop, None),
+            (InstructionResult::Revert, None),
+        ] {
+            let case = format!("answered with {result:?}, gas limit {gas_limit}");
+            let answered =
+                answered(|| db(Bytes::new()), envs, &tx, Answers::creation(result, address));
+            assert_eq!(answered.result.is_success(), result.is_ok(), "{case}: the answer");
+            assert_keeps_only_its_body(&case, &tx, &answered);
+            assert!(!holds_something(&answered, created), "{case}: no account");
+        }
     }
 }
 

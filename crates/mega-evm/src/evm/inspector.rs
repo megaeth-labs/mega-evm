@@ -78,11 +78,12 @@
 //!   callback what it did. A tool that wants a frame out of gas says so through its result. Under
 //!   gas detention the refusal of an opcode's charge the withheld part would have paid is the
 //!   crossing; the refusal of an inspector's is not, and classifies nothing ([`StepGuard`]).
-//! - **An answer carries the gas its caller merges.** The caller adopts an answer's `Gas` as the
-//!   frame's, reservoir included. An answer built on `Gas::new(limit)` carries no reservoir, and a
-//!   caller above the execution cap adopts that; one built on
-//!   [`untouched_call_gas`](crate::untouched_call_gas) or
-//!   [`untouched_create_gas`](crate::untouched_create_gas) hands the reservoir back.
+//! - **An answer carries only the regular gas the inspector chose.** A frame the inspector answered
+//!   never ran, so it drew nothing from the reservoir: whatever `Gas` the answer is built on —
+//!   `Gas::new(limit)`, as Foundry answers a cheatcode, carries no reservoir — its caller merges
+//!   back the reservoir it forwarded, and none of the state gas, history gas or refund the answer
+//!   carries. The gas of a result a frame ran to produce is the inspector's to rewrite, reservoir
+//!   included.
 
 #[cfg(not(feature = "std"))]
 use alloc as std;
@@ -468,7 +469,7 @@ pub(crate) fn frame_end_checked<DB, ExtEnvs, INTR, INSP>(
     frame_end(context, inspector, frame_input, frame_result);
     refuse_create_revival(context, before, frame_result);
     if answered || !before.is_ok() {
-        settle_kept_nothing(context, frame_input, frame_result, depth);
+        settle_kept_nothing(context, frame_input, frame_result, depth, answered);
     }
 }
 
@@ -481,6 +482,14 @@ pub(crate) fn frame_end_checked<DB, ExtEnvs, INTR, INSP>(
 /// no account. The result carries the frame's own upfront-charge flags again, so a result that
 /// fails gets it back from revm's settlement, as revm's own do; one an inspector answered carries
 /// none of them otherwise.
+///
+/// A frame the inspector answered (`answered`) never ran, so it drew nothing from its pools: its
+/// answer's gas carries nothing but the regular gas the inspector chose. Whatever `Gas` the answer
+/// was built on — `Gas::new(limit)`, which carries no reservoir, or one carrying charges — its
+/// state and history charges are rolled back, its refund is dropped, and its reservoir is the one
+/// the frame inherited, so its caller merges back the reservoir it forwarded. The rollback comes
+/// first: it unwinds the charges against the answer's own reservoir, which the inherited one then
+/// replaces, so a charge the answer carries is counted neither in the reservoir nor on a ledger.
 ///
 /// A result that says success is not one revm's settlement treats as keeping nothing, so it is made
 /// to settle like the failure it stands for, save what the inspector chose — the success its caller
@@ -502,9 +511,20 @@ fn settle_kept_nothing<DB: Database, ExtEnvs: ExternalEnvTypes>(
     input: &FrameInput,
     result: &mut FrameResult,
     depth: usize,
+    answered: bool,
 ) {
     carry_upfront_flags(input, result);
-    if !result.instruction_result().is_ok() || context.additional_limit.latched().is_some() {
+    let success =
+        result.instruction_result().is_ok() && context.additional_limit.latched().is_none();
+    let gas = result.gas_mut();
+    if answered || success {
+        gas.rollback_state_gas();
+        gas.set_refunded(0);
+    }
+    if answered {
+        gas.set_reservoir(inherited_reservoir(input));
+    }
+    if !success {
         return;
     }
     // A creation answered with a success and no address is one revm's settlement gives the
@@ -515,8 +535,6 @@ fn settle_kept_nothing<DB: Database, ExtEnvs: ExternalEnvTypes>(
     let history =
         if depth == 0 { context.additional_limit.top_level_write_record_gas() } else { 0 };
     let gas = result.gas_mut();
-    gas.rollback_state_gas();
-    gas.set_refunded(0);
     gas.refill_reservoir(upfront.unwrap_or_default());
     gas.refill_history(history);
     context.additional_limit.discard_returning_lane();
@@ -535,6 +553,15 @@ fn carry_upfront_flags(input: &FrameInput, result: &mut FrameResult) {
             outcome.charged_state_gas_address = inputs.charged_state_gas_address();
         }
         _ => {}
+    }
+}
+
+/// The reservoir the frame `input` starts inherits from its caller.
+const fn inherited_reservoir(input: &FrameInput) -> u64 {
+    match input {
+        FrameInput::Call(inputs) => inputs.reservoir,
+        FrameInput::Create(inputs) => inputs.reservoir(),
+        FrameInput::Empty => 0,
     }
 }
 

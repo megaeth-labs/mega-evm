@@ -6,14 +6,15 @@
 //! - An inspector cannot overdraw a frame: a charge the frame's spendable gas cannot pay is refused
 //!   and takes nothing, the frame runs on, and nothing is left behind to classify its end — not
 //!   even under gas detention, where the same refusal of an opcode's charge is the crossing.
-//! - An answer carries the gas its caller merges, reservoir included: an answer built on `Gas::new`
-//!   carries no reservoir, and a caller above the execution cap adopts that.
+//! - An answer carries only the regular gas its inspector chose: the frame never ran, so its caller
+//!   merges back the reservoir it forwarded, whatever `Gas` the answer was built on.
 
 use alloy_primitives::{address, Address, Bytes, Log, U256};
 use mega_evm::{
     constants::TX_GAS_LIMIT_CAP,
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    untouched_call_gas, EvmTxRuntimeLimits, MegaContext, MegaEvm, MegaTransactionOutcome,
+    untouched_call_gas, with_pools_of, EvmTxRuntimeLimits, MegaContext, MegaEvm,
+    MegaTransactionOutcome,
 };
 use revm::{
     bytecode::opcode::{LOG0, POP, PUSH0, TIMESTAMP},
@@ -231,32 +232,54 @@ fn test_an_inspector_cannot_overdraw_a_frame() {
     }
 }
 
-/// Answers every call to `B` with a success, on the call's untouched gas or on `Gas::new`.
+/// How [`AnswersB`] builds the gas of its answer.
+#[derive(Clone, Copy, Debug)]
+enum AnswerGas {
+    /// The call's untouched gas, which carries the reservoir the frame inherited.
+    Untouched,
+    /// `Gas::new` of the call's gas limit, as Foundry answers a cheatcode: no reservoir.
+    Fresh,
+    /// Fresh regular gas carrying the pools of the untouched gas after a state and a history
+    /// charge ([`with_pools_of`]): charges the frame, which never ran, did not make.
+    Charged,
+}
+
+/// Answers every call to `B` with `result`, on gas built as `gas` says.
 #[derive(Clone)]
 struct AnswersB {
-    untouched: bool,
+    result: InstructionResult,
+    gas: AnswerGas,
 }
 
 impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for AnswersB {
     fn call(&mut self, _: &mut MegaContext<DB>, inputs: &mut CallInputs) -> Option<CallOutcome> {
         (inputs.target_address == B).then(|| {
-            let gas = if self.untouched {
-                untouched_call_gas(inputs)
-            } else {
-                Gas::new(inputs.gas_limit)
+            let gas = match self.gas {
+                AnswerGas::Untouched => untouched_call_gas(inputs),
+                AnswerGas::Fresh => Gas::new(inputs.gas_limit),
+                AnswerGas::Charged => {
+                    let mut charged = untouched_call_gas(inputs);
+                    assert!(
+                        charged.record_state_cost(40_000) && charged.record_history_cost(3_000)
+                    );
+                    with_pools_of(inputs.gas_limit, &charged)
+                }
             };
             CallOutcome::new(
-                InterpreterResult::new(InstructionResult::Stop, Bytes::new(), gas),
+                InterpreterResult::new(self.result, Bytes::new(), gas),
                 inputs.return_memory_offset.clone(),
             )
         })
     }
 }
 
-/// The gas an answer carries is what its caller merges, the reservoir included. Above the
-/// execution cap, an answer built on the frame's untouched gas hands the caller back the reservoir
-/// it forwarded, and the transaction keeps its reservoir as it does when `B` runs; an answer built
-/// on `Gas::new` carries none, the caller adopts that, and the sender pays for the reservoir.
+/// An answered frame never ran, so its gas carries nothing but the regular gas its inspector
+/// chose: its caller merges back the reservoir it forwarded, whatever `Gas` the answer was built
+/// on. Above the execution cap, an answer on the frame's untouched gas, one on `Gas::new` — which
+/// carries no reservoir — and one carrying charges the frame never made settle alike, a success, a
+/// revert and a halt each, and the transaction keeps the reservoir it keeps when `B` runs. The
+/// charges are rolled back against the answer's own reservoir before the inherited one replaces
+/// it, so neither the reservoir nor a ledger counts them.
 #[test]
 fn test_an_answer_carries_the_reservoir_its_caller_merges() {
     let gas_limit = TX_GAS_LIMIT_CAP + 100_000_000;
@@ -264,14 +287,19 @@ fn test_an_answer_carries_the_reservoir_its_caller_merges() {
     let (plain, _) = run::<AnswersB>(a_calls_b(), limits, gas_limit, None);
     assert!(plain.gas.reservoir_remaining > 0, "the reservoir comes back");
 
-    let (untouched, _) = run(a_calls_b(), limits, gas_limit, Some(AnswersB { untouched: true }));
-    assert_eq!(untouched.gas.reservoir_remaining, plain.gas.reservoir_remaining);
-
-    let (fresh, _) = run(a_calls_b(), limits, gas_limit, Some(AnswersB { untouched: false }));
-    assert_eq!(fresh.gas.reservoir_remaining, 0, "the caller adopted an empty reservoir");
-    assert_eq!(
-        fresh.gas.gas_used,
-        untouched.gas.gas_used + plain.gas.reservoir_remaining,
-        "and the sender paid for it"
-    );
+    for result in [InstructionResult::Stop, InstructionResult::Revert, InstructionResult::OutOfGas]
+    {
+        let answer = |gas| {
+            let inspector = AnswersB { result, gas };
+            run(a_calls_b(), limits, gas_limit, Some(inspector)).0
+        };
+        let untouched = answer(AnswerGas::Untouched);
+        assert_eq!(untouched.gas.reservoir_remaining, plain.gas.reservoir_remaining, "{result:?}");
+        for gas in [AnswerGas::Fresh, AnswerGas::Charged] {
+            let answered = answer(gas);
+            assert!(answered.result.is_success(), "{result:?}, {gas:?}: `A` ignores the answer");
+            assert_eq!(answered.gas, untouched.gas, "{result:?}, {gas:?}: every ledger");
+            assert_eq!(answered.usage, untouched.usage, "{result:?}, {gas:?}: every count");
+        }
+    }
 }
