@@ -1,6 +1,6 @@
 #[cfg(not(feature = "std"))]
 use alloc as std;
-use std::{collections::BTreeMap, string::ToString, vec::Vec};
+use std::{boxed::Box, collections::BTreeMap, string::ToString, vec::Vec};
 
 use alloy_evm::{precompiles::PrecompilesMap, Database};
 use alloy_primitives::{Address, Bytes, TxKind, U256};
@@ -19,6 +19,7 @@ use revm::{
     },
     handler::{
         evm::{ContextDbError, FrameInitResult},
+        execution::create_init_frame,
         instructions::InstructionProvider,
         post_execution::{build_result_gas, output as post_execution_output},
         pre_execution::validate_account_nonce_and_code,
@@ -33,8 +34,8 @@ use revm::{
         gas::{get_tokens_in_calldata, NON_ZERO_BYTE_MULTIPLIER_ISTANBUL},
         interpreter::EthInterpreter,
         interpreter_action::FrameInit,
-        CallOutcome, CallScheme, CreateOutcome, FrameInput, Gas, InitialAndFloorGas,
-        InstructionResult, InterpreterAction, InterpreterResult,
+        CallInput, CallInputs, CallOutcome, CallScheme, CallValue, CreateOutcome, FrameInput, Gas,
+        InitialAndFloorGas, InstructionResult, InterpreterAction, InterpreterResult, SharedMemory,
     },
     primitives::CALL_STACK_LIMIT,
     Inspector, Journal,
@@ -912,6 +913,53 @@ where
         Ok(initial_and_floor_gas)
     }
 
+    /// Builds the first frame of a call transaction without reading its target.
+    ///
+    /// revm's `create_init_frame` reads the target, and through an EIP-7702 designation its
+    /// delegate, with their code before any frame-init hook runs. The deployed implementation read
+    /// them only when it created the frame, past the checks in `frame_init` that can end the first
+    /// frame without creating one (a limit already exceeded, the call-depth guard, a system
+    /// contract interceptor), so a first frame ended by one of them read neither. The frame is
+    /// built here with no bytecode, and `frame_init` reads it where the deployed implementation
+    /// did. A stateless witness carries only what the deployed execution read.
+    fn first_frame_input(
+        &mut self,
+        evm: &mut Self::Evm,
+        gas_limit: u64,
+        reservoir: u64,
+    ) -> Result<FrameInit, Self::Error> {
+        let ctx = evm.ctx_mut();
+        let mut memory = SharedMemory::new_with_buffer(ctx.local().shared_memory_buffer().clone());
+        memory.set_memory_limit(ctx.cfg().memory_limit());
+
+        let frame_input = match ctx.tx().kind() {
+            TxKind::Call(target_address) => {
+                ctx.first_frame_code_pending = true;
+                let tx = ctx.tx();
+                FrameInput::Call(Box::new(CallInputs {
+                    input: CallInput::Bytes(tx.input().clone()),
+                    gas_limit,
+                    target_address,
+                    bytecode_address: target_address,
+                    known_bytecode: Default::default(),
+                    caller: tx.caller(),
+                    value: CallValue::Transfer(tx.value()),
+                    scheme: CallScheme::Call,
+                    is_static: false,
+                    return_memory_offset: 0..0,
+                    reservoir,
+                    charged_new_account_state_gas: false,
+                }))
+            }
+            TxKind::Create => {
+                ctx.first_frame_code_pending = false;
+                create_init_frame(ctx, gas_limit, reservoir)?
+            }
+        };
+
+        Ok(FrameInit { depth: 0, memory, frame_input })
+    }
+
     /// This function copies the logic from `revm::handler::Handler::execution` to and
     /// add new account storage gas
     #[inline]
@@ -1262,6 +1310,11 @@ where
         let is_rex4_enabled = self.ctx().spec.is_enabled(MegaSpecId::REX4);
         let is_rex5_enabled = self.ctx().spec.is_enabled(MegaSpecId::REX5);
         let additional_limit = self.ctx().additional_limit.clone();
+        // A call transaction's first frame arrives without its bytecode (see
+        // `MegaHandler::first_frame_input`). Taken here, so a first frame that a check below ends
+        // leaves nothing pending.
+        let first_frame_code_pending =
+            frame_init.depth == 0 && core::mem::take(&mut self.ctx().first_frame_code_pending);
 
         // Check if this is a call to the oracle contract and mark it as accessed.
         // This handles both direct transaction calls and internal CALL operations.
@@ -1370,6 +1423,25 @@ where
                 .before_frame_init(&mut frame_init, self.ctx().journal_mut())?
             {
                 return Ok(FrameInitResult::Result(frame_result));
+            }
+        }
+
+        // Every check that can end the frame early has passed: read the first frame's bytecode as
+        // revm's `create_init_frame` does, at the point where the deployed implementation read it.
+        if first_frame_code_pending {
+            if let FrameInput::Call(inputs) = &mut frame_init.frame_input {
+                let journal = self.ctx().journal_mut();
+                let (code_hash, code) = {
+                    let info = &journal.load_account_with_code(inputs.bytecode_address)?.info;
+                    (info.code_hash(), info.code.clone().unwrap_or_default())
+                };
+                inputs.known_bytecode = match code.eip7702_address() {
+                    Some(delegate) => {
+                        let info = &journal.load_account_with_code(delegate)?.info;
+                        (info.code_hash(), info.code.clone().unwrap_or_default())
+                    }
+                    None => (code_hash, code),
+                };
             }
         }
 

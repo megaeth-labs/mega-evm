@@ -95,6 +95,13 @@ pub struct MegaContext<DB: Database, ExtEnvs: ExternalEnvTypes> {
     /// benchmarks — the writes then act as optimization barriers around that body.
     pub(crate) call_target_load_phase: CallTargetLoadPhase,
 
+    /// Whether the transaction's first frame still has to read its target's bytecode.
+    ///
+    /// Set when the first frame of a call transaction is built without reading its target, and
+    /// cleared when that frame is initialized, where the read happens. Purely per-transaction
+    /// state, so it is not carried over when a context is rebuilt.
+    pub(crate) first_frame_code_pending: bool,
+
     /// Set to `true` when this context is itself a sandbox execution.
     ///
     /// Suppresses sandbox interception (preventing recursive sandboxing) and signals other
@@ -214,6 +221,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
                 tx_limits.oracle_access_compute_gas_limit,
             ))),
             call_target_load_phase: CallTargetLoadPhase::Idle,
+            first_frame_code_pending: false,
             inside_sandbox: Rc::new(RefCell::new(false)),
             system_address: crate::MEGA_SYSTEM_ADDRESS,
             inner,
@@ -291,6 +299,7 @@ impl<DB: Database, ExtEnvTypes: ExternalEnvTypes> MegaContext<DB, ExtEnvTypes> {
                 tx_limits.oracle_access_compute_gas_limit,
             ))),
             call_target_load_phase: CallTargetLoadPhase::Idle,
+            first_frame_code_pending: false,
             inside_sandbox: Rc::new(RefCell::new(false)),
             system_address: crate::MEGA_SYSTEM_ADDRESS,
             inner,
@@ -320,6 +329,7 @@ impl<DB: Database, ExtEnvTypes: ExternalEnvTypes> MegaContext<DB, ExtEnvTypes> {
             oracle_env: self.oracle_env,
             volatile_data_tracker: self.volatile_data_tracker,
             call_target_load_phase: CallTargetLoadPhase::Idle,
+            first_frame_code_pending: false,
             inside_sandbox: self.inside_sandbox,
             system_address: self.system_address,
         }
@@ -471,6 +481,7 @@ impl<DB: Database, ExtEnvTypes: ExternalEnvTypes> MegaContext<DB, ExtEnvTypes> {
             oracle_env: Rc::new(RefCell::new(external_envs.oracle_env)),
             volatile_data_tracker: self.volatile_data_tracker,
             call_target_load_phase: CallTargetLoadPhase::Idle,
+            first_frame_code_pending: false,
             inside_sandbox: self.inside_sandbox,
             system_address: self.system_address,
         }

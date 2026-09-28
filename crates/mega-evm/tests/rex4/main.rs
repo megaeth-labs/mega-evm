@@ -6,6 +6,7 @@ mod call_stipend_forwarding;
 mod create_safety;
 mod deployment;
 mod eip7702_delegation_cycle;
+mod first_frame_target_read;
 mod frame_limits;
 mod frame_state_growth;
 mod gas_detention;
