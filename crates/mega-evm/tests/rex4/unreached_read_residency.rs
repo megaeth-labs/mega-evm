@@ -15,7 +15,7 @@
 
 use alloy_primitives::{address, Address, Bytes, U256};
 use mega_evm::{
-    test_utils::{BytecodeBuilder, MemoryDatabase},
+    test_utils::{BytecodeBuilder, ErrorInjectingDatabase, MemoryDatabase},
     MegaContext, MegaEvm, MegaSpecId, MegaTransaction, MegaTransactionNew as _,
 };
 use revm::{
@@ -182,6 +182,101 @@ fn test_delegate_of_a_halted_call_stays_warm_when_prewarmed() {
                     "{spec:?}: opcode 0x{opcode:02x} to a delegator of a precompile, budget {budget}",
                 );
             }
+        }
+    }
+}
+
+/// A contract reached only as a delegate, whose code the database serves lazily and cannot serve.
+const CODED: Address = address!("00000000000000000000000000000000004300cc");
+/// An EIP-7702 delegator whose delegate is [`CODED`].
+const CODED_DELEGATOR: Address = address!("00000000000000000000000000000000004300cd");
+
+/// The deployed CALL-family read loaded an EIP-7702 delegate's account but not its code, so the
+/// recreated read must not fetch that code either: a node that cannot serve it — a stateless
+/// witness carries only what the deployed execution read — still executes the transaction.
+#[test]
+fn test_recreated_delegate_read_does_not_fetch_the_delegate_code() {
+    let delegate_code = Bytes::from_static(&[STOP]);
+    let delegate_code_hash = Bytecode::new_raw(delegate_code).hash_slow();
+    let mut raw = vec![0xef, 0x01, 0x00];
+    raw.extend_from_slice(CODED.as_slice());
+    let designation = Bytes::from(raw);
+    assert!(
+        Bytecode::new_raw(designation.clone()).is_eip7702(),
+        "fixture must install a real delegation"
+    );
+
+    for spec in [MegaSpecId::REX5, MegaSpecId::REX6] {
+        for opcode in [CALL, CALLCODE, DELEGATECALL, STATICCALL] {
+            let mut memory = MemoryDatabase::default()
+                .account_balance(CALLER, U256::from(1_000_000_000_000_000_u64))
+                .account_lazy_code(CODED, delegate_code_hash);
+            install(&mut memory, CODED_DELEGATOR, designation.clone());
+            install(&mut memory, INNER, inner_call(opcode, CODED_DELEGATOR));
+            install(&mut memory, OUTER, outer_code(80, PLAIN));
+            let mut db = ErrorInjectingDatabase::new(memory);
+            db.fail_on_code_by_hash = Some(delegate_code_hash);
+
+            let mut context = MegaContext::new(&mut db, spec)
+                .with_block(BlockEnv { beneficiary: BENEFICIARY, ..Default::default() });
+            context.modify_chain(|chain| {
+                chain.operator_fee_scalar = Some(U256::ZERO);
+                chain.operator_fee_constant = Some(U256::ZERO);
+            });
+            let mut evm = MegaEvm::new(context);
+            let mut tx = MegaTransaction::new(
+                TxEnvBuilder::default()
+                    .caller(CALLER)
+                    .call(OUTER)
+                    .gas_limit(5_000_000)
+                    .build_fill(),
+            );
+            tx.enveloped_tx = Some(Bytes::new());
+            let outcome = alloy_evm::Evm::transact_raw(&mut evm, tx);
+            assert!(
+                outcome.as_ref().is_ok_and(|outcome| outcome.result.is_success()),
+                "{spec:?}: opcode 0x{opcode:02x} to a delegator below its static charge: {outcome:?}",
+            );
+        }
+    }
+}
+
+/// A database error on a read the deployed schedule issued before halting fails the transaction,
+/// as the deployed read did, for both the CALL-family delegate and the `EXTCODECOPY` target.
+#[test]
+fn test_recreated_read_database_error_fails_the_transaction() {
+    let mut raw = vec![0xef, 0x01, 0x00];
+    raw.extend_from_slice(CODED.as_slice());
+    let designation = Bytes::from(raw);
+    for spec in [MegaSpecId::REX5, MegaSpecId::REX6] {
+        for (budget, inner) in
+            [(80, inner_call(CALL, CODED_DELEGATOR)), (15, inner_extcodecopy(CODED, 32))]
+        {
+            let mut memory = MemoryDatabase::default()
+                .account_balance(CALLER, U256::from(1_000_000_000_000_000_u64));
+            install(&mut memory, CODED_DELEGATOR, designation.clone());
+            install(&mut memory, INNER, inner.clone());
+            install(&mut memory, OUTER, outer_code(budget, PLAIN));
+            let mut db = ErrorInjectingDatabase::new(memory);
+            db.fail_on_account = Some(CODED);
+
+            let mut context = MegaContext::new(&mut db, spec)
+                .with_block(BlockEnv { beneficiary: BENEFICIARY, ..Default::default() });
+            context.modify_chain(|chain| {
+                chain.operator_fee_scalar = Some(U256::ZERO);
+                chain.operator_fee_constant = Some(U256::ZERO);
+            });
+            let mut evm = MegaEvm::new(context);
+            let mut tx = MegaTransaction::new(
+                TxEnvBuilder::default()
+                    .caller(CALLER)
+                    .call(OUTER)
+                    .gas_limit(5_000_000)
+                    .build_fill(),
+            );
+            tx.enveloped_tx = Some(Bytes::new());
+            let outcome = alloy_evm::Evm::transact_raw(&mut evm, tx);
+            assert!(outcome.is_err(), "{spec:?}: budget {budget}: {outcome:?}");
         }
     }
 }

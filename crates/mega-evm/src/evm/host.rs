@@ -503,11 +503,12 @@ pub trait HostExt: Host {
     /// address is pre-warmed (a precompile, the coinbase, an access-list entry), otherwise cold
     /// with the warm-up journaled, which the revert undoes. It left an account that was already
     /// resident as it was. So this loads `address` only when the journal holds no entry for it,
-    /// and — with `follow_delegation`, for a read that also followed an EIP-7702 designation —
-    /// does the same for the delegate. The caller's frame must be halting.
+    /// with its code, and — with `follow_delegation`, for a read that also followed an EIP-7702
+    /// designation — does the same for the delegate, whose code that read did not load. The
+    /// caller's frame must be halting.
     ///
-    /// Marks nothing: the callers recreate the beneficiary mark themselves. Returns `false` on a
-    /// database error.
+    /// Marks nothing: the callers recreate the beneficiary mark themselves. On a database error it
+    /// records the error as the transaction's, as the deployed read did, and returns `false`.
     fn recreate_reverted_account_read(&mut self, address: Address, follow_delegation: bool)
         -> bool;
 }
@@ -617,10 +618,18 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> HostExt for MegaContext<DB, ExtEnv
         address: Address,
         follow_delegation: bool,
     ) -> bool {
+        // Split borrow, as in `JournalInspectTr`: a database error is stashed in `error`, which
+        // surfaces it as the transaction's error, exactly as the deployed read's would have.
         let journal = &mut self.inner.journaled_state;
-        if !journal.state.contains_key(&address) && journal.load_account_with_code(address).is_err()
-        {
-            return false;
+        let error = &mut self.inner.error;
+        let mut stash = |e: <DB as revm::Database>::Error| {
+            *error = Err(ContextError::Custom(format!("{e}")));
+            false
+        };
+        if !journal.state.contains_key(&address) {
+            if let Err(e) = journal.load_account_with_code(address) {
+                return stash(e);
+            }
         }
         if !follow_delegation {
             return true;
@@ -628,11 +637,12 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> HostExt for MegaContext<DB, ExtEnv
         // The account is resident now; reading its code this way leaves its warmth alone.
         let delegate = match inspect_account(journal, address, true) {
             Ok(account) => account.info.code.as_ref().and_then(Bytecode::eip7702_address),
-            Err(_) => return false,
+            Err(e) => return stash(e),
         };
+        // The deployed read loaded the delegate's account but not its code.
         match delegate {
             Some(delegate) if !journal.state.contains_key(&delegate) => {
-                journal.load_account_with_code(delegate).is_ok()
+                journal.load_account(delegate).map_or_else(stash, |_| true)
             }
             _ => true,
         }
