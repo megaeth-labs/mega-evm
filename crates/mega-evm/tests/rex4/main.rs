@@ -16,6 +16,7 @@ mod intrinsic_limit_bypass;
 mod keyless_deploy;
 mod limit_control;
 mod selfdestruct_state_growth;
+mod short_stack_halts;
 mod storage_call_stipend;
 mod unreached_call_target_coldness;
 mod unreached_load_detention;
