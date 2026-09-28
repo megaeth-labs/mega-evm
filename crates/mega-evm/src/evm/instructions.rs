@@ -19,7 +19,7 @@ use revm::{
         interpreter::EthInterpreter,
         interpreter_types::{InputsTr, LoopControl, MemoryTr, RuntimeFlag},
         num_words, CallScheme, FrameInput, GasTable, Instruction, InstructionContext,
-        InstructionExecResult, InstructionResult, InstructionTable, InterpreterAction,
+        InstructionExecResult, InstructionResult, InstructionTable, Interpreter, InterpreterAction,
         InterpreterTypes, SStoreResult, Stack,
     },
     primitives::KECCAK_EMPTY,
@@ -3283,6 +3283,24 @@ pub mod compute_gas_ext {
         selfdestruct_impl::<true, WIRE, H>(context)
     }
 
+    /// Halts a `SELFDESTRUCT` that cannot afford its charge with the frame's remaining gas set to
+    /// `remaining`, the amount the deployed implementation left.
+    ///
+    /// The deployed implementation charged the opcode's whole cost in one step and, when that
+    /// charge failed, halted with the frame's gas as it stood before the opcode; revm 40 charges in
+    /// steps and zeroes a frame that halts out of gas. The halted frame's remaining gas is
+    /// observable: a frame-local limit exceed turns the halt into a revert that hands it back to
+    /// the caller, and a transaction-level one refunds it to the sender. The halt action set here
+    /// is kept by the interpreter loop, which zeroes the gas only when no action is set.
+    pub(super) fn halt_out_of_gas_with_remaining<WIRE: InterpreterTypes>(
+        interpreter: &mut Interpreter<WIRE>,
+        remaining: u64,
+    ) {
+        let current = interpreter.gas.remaining();
+        interpreter.gas.erase_cost(remaining.saturating_sub(current));
+        set_halt_action!(interpreter, InstructionResult::OutOfGas);
+    }
+
     /// Shared body of the two `SELFDESTRUCT` compute-gas wrappers.
     ///
     /// `SELF_CHARGES_STATIC_GAS` says who owes the opcode's static gas: when set, this handler
@@ -3306,15 +3324,30 @@ pub mod compute_gas_ext {
         context: InstructionContext<'_, H, WIRE>,
     ) -> InstructionExecResult {
         let gas_before = context.interpreter.gas.remaining();
-
-        // Call the original instruction
-        run_inner_instruction_or_abort!(instructions::host::selfdestruct, context, inner_outcome);
-
-        if SELF_CHARGES_STATIC_GAS {
-            charge_static_gas!(context, SELFDESTRUCT);
-        }
         let pre_charged =
             if SELF_CHARGES_STATIC_GAS { 0 } else { const { static_gas(opcode::SELFDESTRUCT) } };
+
+        // Call the original instruction
+        run_inner_instruction_or_abort!(
+            instructions::host::selfdestruct,
+            context,
+            inner_outcome,
+            on_halt: |halt| {
+                if halt == InstructionResult::OutOfGas {
+                    halt_out_of_gas_with_remaining(context.interpreter, gas_before + pre_charged);
+                }
+            }
+        );
+
+        if SELF_CHARGES_STATIC_GAS &&
+            !context
+                .interpreter
+                .gas
+                .record_regular_cost(const { static_gas(opcode::SELFDESTRUCT) })
+        {
+            halt_out_of_gas_with_remaining(context.interpreter, gas_before);
+            return Err(InstructionResult::OutOfGas);
+        }
         let gas_used = pre_charged + gas_before.saturating_sub(context.interpreter.gas.remaining());
         let mut additional_limit = context.host.additional_limit().borrow_mut();
         if !additional_limit.record_compute_gas_all_dims(gas_used) {
