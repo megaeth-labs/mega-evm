@@ -72,6 +72,13 @@ This refund MUST NOT be applied when `SELFDESTRUCT` targets a pre-existing accou
 
 The refund is frame-aware: if the call frame that performed the `SELFDESTRUCT` reverts, the refund MUST be discarded together with the destruction effect.
 
+### Running Out of Gas After Recording
+
+`SELFDESTRUCT` records a [beneficiary account creation](#beneficiary-account-creation) and applies the [state growth refund](#state-growth-refund) before it charges its EVM gas: the base cost, the cold-access surcharge for its target, and the new-account cost.
+If that charge fails, the frame halts out of gas and discards both, with the rest of the frame's usage.
+The frame's local budget check still counts them when the frame halts.
+If they put the frame over its [per-call-frame budget](resource-limits.md#per-call-frame-runtime-budgets), the frame MUST revert with `MegaLimitExceeded(uint8 kind, uint64 limit)` instead, and return to its caller the gas it held before the failed charge.
+
 ## Constants
 
 | Constant                            | Value  | Description                                                                                                    |

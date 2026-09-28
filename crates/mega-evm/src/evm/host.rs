@@ -147,10 +147,21 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> Host for MegaContext<DB, ExtEnvs> 
         // Repeated SELFDESTRUCT on the same account still returns a result but with
         // `previously_destroyed == true` — refunding again would double-count.
         if let Some(refund) = selfdestruct_refund {
-            if let Ok(ref state_load) = result {
-                if !state_load.data.previously_destroyed {
-                    self.additional_limit.borrow_mut().on_selfdestruct(refund);
+            let first_destruction = match &result {
+                Ok(state_load) => !state_load.data.previously_destroyed,
+                // The deployed body read the target and destroyed the account before charging for
+                // either, so a frame too poor for the cold read still recorded the refund before it
+                // halted. The refund is the frame's own usage: the halt discards it, but the
+                // frame-end limit check still sees it.
+                Err(LoadError::ColdLoadSkipped) => {
+                    self.inner.journaled_state.state.get(&address).is_some_and(|account| {
+                        !(account.is_selfdestructed() && account.is_selfdestructed_locally())
+                    })
                 }
+                Err(LoadError::DBError) => false,
+            };
+            if first_destruction {
+                self.additional_limit.borrow_mut().on_selfdestruct(refund);
             }
         }
 

@@ -27,6 +27,7 @@ mod pre_block_system_calls;
 mod precompile_compute_gas;
 mod sandbox_accounting;
 mod selfdestruct_beneficiary;
+mod selfdestruct_cold_skip_refund;
 mod selfdestruct_oog_remaining_gas;
 mod sstore_storage_gas_error;
 mod stipend_accounting;
