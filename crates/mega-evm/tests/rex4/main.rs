@@ -18,4 +18,5 @@ mod selfdestruct_state_growth;
 mod storage_call_stipend;
 mod unreached_call_target_coldness;
 mod unreached_load_detention;
+mod unreached_read_residency;
 mod volatile_guard_gas;

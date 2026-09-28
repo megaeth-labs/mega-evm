@@ -495,6 +495,21 @@ pub trait HostExt: Host {
     /// Closes the scope opened by [`Self::begin_call_target_resolution`], so subsequent account
     /// loads are attributed to the opcode that issues them again.
     fn end_call_target_resolution(&mut self);
+
+    /// Leaves in the journal what the deployed implementation's read of `address` left once the
+    /// frame that issued it reverted, for a read revm 40 never issues because it halts first.
+    ///
+    /// The deployed read loaded an absent account the way every journal load does: warm if the
+    /// address is pre-warmed (a precompile, the coinbase, an access-list entry), otherwise cold
+    /// with the warm-up journaled, which the revert undoes. It left an account that was already
+    /// resident as it was. So this loads `address` only when the journal holds no entry for it,
+    /// and — with `follow_delegation`, for a read that also followed an EIP-7702 designation —
+    /// does the same for the delegate. The caller's frame must be halting.
+    ///
+    /// Marks nothing: the callers recreate the beneficiary mark themselves. Returns `false` on a
+    /// database error.
+    fn recreate_reverted_account_read(&mut self, address: Address, follow_delegation: bool)
+        -> bool;
 }
 
 impl<DB: Database, ExtEnvs: ExternalEnvTypes> HostExt for MegaContext<DB, ExtEnvs> {
@@ -595,6 +610,32 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> HostExt for MegaContext<DB, ExtEnv
     #[inline]
     fn end_call_target_resolution(&mut self) {
         self.call_target_load_phase = CallTargetLoadPhase::Idle;
+    }
+
+    fn recreate_reverted_account_read(
+        &mut self,
+        address: Address,
+        follow_delegation: bool,
+    ) -> bool {
+        let journal = &mut self.inner.journaled_state;
+        if !journal.state.contains_key(&address) && journal.load_account_with_code(address).is_err()
+        {
+            return false;
+        }
+        if !follow_delegation {
+            return true;
+        }
+        // The account is resident now; reading its code this way leaves its warmth alone.
+        let delegate = match inspect_account(journal, address, true) {
+            Ok(account) => account.info.code.as_ref().and_then(Bytecode::eip7702_address),
+            Err(_) => return false,
+        };
+        match delegate {
+            Some(delegate) if !journal.state.contains_key(&delegate) => {
+                journal.load_account_with_code(delegate).is_ok()
+            }
+            _ => true,
+        }
     }
 }
 

@@ -1472,8 +1472,9 @@ pub mod volatile_data_ext {
 
     /// Recreates what the deployed host did as revm's CALL-family body loaded its target, for a
     /// frame that halted before revm 40's body got there although the deployed schedule did: from
-    /// `REX6` the stack operand's own journal entry, when the storage-gas wrapper did not already
-    /// inspect it, and the beneficiary-access mark (see [`mark_call_target_beneficiary`]).
+    /// `REX6` the stack operand's cold journal entry, when the storage-gas wrapper did not already
+    /// inspect it; then the body's own read of the operand and, through an EIP-7702 designation,
+    /// of its delegate; and the beneficiary-access mark (see [`mark_call_target_beneficiary`]).
     pub(super) fn recreate_reached_load<H: HostExt + JournalInspectTr + ?Sized>(
         host: &mut H,
         to: Address,
@@ -1481,10 +1482,16 @@ pub mod volatile_data_ext {
     ) -> InstructionExecResult {
         if host.spec_id().is_enabled(MegaSpecId::REX6) && storage_address != to {
             // The operand alone, code hydrated, exactly as the delegate resolution inspects it —
-            // not `inspect_account_delegated`, which would also materialize the delegate.
+            // not `inspect_account_delegated`, which would also materialize the delegate cold.
             if host.inspect_account(to, true).is_err() {
                 return Err(InstructionResult::FatalExternalError);
             }
+        }
+        // The body then read the operand and its delegate through the journal. An entry an
+        // earlier inspection left resident is unaffected; an absent one — the operand of a
+        // `REX5` CALLCODE, or any delegate from `REX5` — is loaded as that read loaded it.
+        if !host.recreate_reverted_account_read(to, true) {
+            return Err(InstructionResult::FatalExternalError);
         }
         mark_call_target_beneficiary(host, to);
         Ok(())
@@ -1690,10 +1697,11 @@ pub mod volatile_data_ext {
 
             // `EXTCODECOPY` is the one member whose revm 40 body halts between its operand pop and
             // its load: it validates its operands, charges the copy cost and expands memory
-            // first. The deployed schedule loaded — and the host marked beneficiary access — right
-            // after the pop, so a halt on any of those steps left the target marked there. The
-            // other members load, and the host marks, before anything they can halt on after the
-            // pop, so their raw target is not needed. Captured before the body pops it.
+            // first. The deployed schedule loaded the target — leaving its journal entry and, for
+            // the beneficiary, the access mark — right after the pop, so a halt on any of those
+            // steps left both behind there. The other members load, and the host marks, before
+            // anything they can halt on after the pop, so their raw target is not needed.
+            // Captured before the body pops it.
             let target: Option<Address> = if opcode::$opcode == opcode::EXTCODECOPY {
                 context.interpreter.stack.inspect::<0>().map(|w| w.into_address())
             } else {
@@ -1707,15 +1715,19 @@ pub mod volatile_data_ext {
                 on_halt: |halt| {
                     // A stack underflow is raised by the pop itself, ahead of the deployed load.
                     // The wrapper still aborts here without applying the cap, as the deployed one
-                    // did, so the mark caps the transaction only once a later tail applies it.
-                    if halt != InstructionResult::StackUnderflow &&
-                        target == Some(context.host.beneficiary_address())
+                    // did, so the mark caps the transaction only once a later tail applies it. A
+                    // database error on the recreated read keeps this halt's own result.
+                    if let Some(target) =
+                        target.filter(|_| halt != InstructionResult::StackUnderflow)
                     {
-                        context
-                            .host
-                            .volatile_data_tracker()
-                            .borrow_mut()
-                            .mark_beneficiary_balance_accessed();
+                        let _ = context.host.recreate_reverted_account_read(target, false);
+                        if target == context.host.beneficiary_address() {
+                            context
+                                .host
+                                .volatile_data_tracker()
+                                .borrow_mut()
+                                .mark_beneficiary_balance_accessed();
+                        }
                     }
                 }
             );
