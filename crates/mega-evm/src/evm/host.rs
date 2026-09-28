@@ -501,11 +501,12 @@ pub trait HostExt: Host {
     ///
     /// The deployed read loaded an absent account the way every journal load does: warm if the
     /// address is pre-warmed (a precompile, the coinbase, an access-list entry), otherwise cold
-    /// with the warm-up journaled, which the revert undoes. It left an account that was already
-    /// resident as it was. So this loads `address` only when the journal holds no entry for it,
-    /// with its code, and — with `follow_delegation`, for a read that also followed an EIP-7702
-    /// designation — does the same for the delegate, whose code that read did not load. The
-    /// caller's frame must be halting.
+    /// with the warm-up journaled, which the revert undoes. Of an account that was already
+    /// resident it kept only the code it fetched. So this loads `address` with its code when the
+    /// journal holds no entry for it, and otherwise fetches the code the entry lacks, leaving its
+    /// warmth alone. With `follow_delegation`, for a read that also followed an EIP-7702
+    /// designation, it then loads the delegate when absent, without its code, as that read did.
+    /// The caller's frame must be halting.
     ///
     /// Marks nothing: the callers recreate the beneficiary mark themselves. On a database error it
     /// records the error as the transaction's, as the deployed read did, and returns `false`.
@@ -631,14 +632,14 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> HostExt for MegaContext<DB, ExtEnv
                 return stash(e);
             }
         }
-        if !follow_delegation {
-            return true;
-        }
         // The account is resident now; reading its code this way leaves its warmth alone.
         let delegate = match inspect_account(journal, address, true) {
             Ok(account) => account.info.code.as_ref().and_then(Bytecode::eip7702_address),
             Err(e) => return stash(e),
         };
+        if !follow_delegation {
+            return true;
+        }
         // The deployed read loaded the delegate's account but not its code.
         match delegate {
             Some(delegate) if !journal.state.contains_key(&delegate) => {

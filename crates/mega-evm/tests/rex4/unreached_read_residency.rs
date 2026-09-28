@@ -280,3 +280,53 @@ fn test_recreated_read_database_error_fails_the_transaction() {
         }
     }
 }
+
+/// The deployed `EXTCODECOPY` read fetched the code of a target that was already resident without
+/// it, before halting: a database that cannot serve that code fails the transaction.
+#[test]
+fn test_recreated_extcodecopy_read_fetches_a_resident_target_code() {
+    let code_hash = Bytecode::new_raw(Bytes::from_static(&[STOP])).hash_slow();
+    // `OUTER` reads the target's balance first, which leaves it resident without its code.
+    let outer: Bytes = [
+        BytecodeBuilder::default().push_address(CODED).append(BALANCE).append(POP).build(),
+        outer_code(15, PLAIN),
+    ]
+    .concat()
+    .into();
+    for spec in WRAPPED_CALL_SPECS {
+        for unservable in [false, true] {
+            let mut memory = MemoryDatabase::default()
+                .account_balance(CALLER, U256::from(1_000_000_000_000_000_u64))
+                .account_lazy_code(CODED, code_hash);
+            install(&mut memory, INNER, inner_extcodecopy(CODED, 32));
+            install(&mut memory, OUTER, outer.clone());
+            let mut db = ErrorInjectingDatabase::new(memory);
+            db.fail_on_code_by_hash = unservable.then_some(code_hash);
+
+            let mut context = MegaContext::new(&mut db, spec)
+                .with_block(BlockEnv { beneficiary: BENEFICIARY, ..Default::default() });
+            context.modify_chain(|chain| {
+                chain.operator_fee_scalar = Some(U256::ZERO);
+                chain.operator_fee_constant = Some(U256::ZERO);
+            });
+            let mut evm = MegaEvm::new(context);
+            let mut tx = MegaTransaction::new(
+                TxEnvBuilder::default()
+                    .caller(CALLER)
+                    .call(OUTER)
+                    .gas_limit(5_000_000)
+                    .build_fill(),
+            );
+            tx.enveloped_tx = Some(Bytes::new());
+            let outcome = alloy_evm::Evm::transact_raw(&mut evm, tx);
+            if unservable {
+                assert!(outcome.is_err(), "{spec:?}: {outcome:?}");
+            } else {
+                assert!(
+                    outcome.as_ref().is_ok_and(|outcome| outcome.result.is_success()),
+                    "{spec:?}: {outcome:?}",
+                );
+            }
+        }
+    }
+}
