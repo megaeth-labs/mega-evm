@@ -138,10 +138,16 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> Host for MegaContext<DB, ExtEnvs> 
         // described on [`Self::resident_entry_prices_cold`] — and the `inspect_account` above is
         // itself one of the ways `target` ends up resident but cold.
         let resident_entry_is_cold = self.resident_entry_prices_cold(&target);
-        let mut result = self.inner.selfdestruct(address, target, skip_cold_load);
-        if let Ok(ref mut state_load) = result {
-            state_load.is_cold |= resident_entry_is_cold;
-        }
+        let result = match self.inner.selfdestruct(address, target, skip_cold_load) {
+            Ok(mut state_load) => {
+                state_load.is_cold |= resident_entry_is_cold;
+                Ok(state_load)
+            }
+            Err(LoadError::ColdLoadSkipped) if skip_cold_load => {
+                Err(self.read_declined_account(target))
+            }
+            Err(e) => Err(e),
+        };
 
         // Record state growth refund only on the first effective destruction.
         // Repeated SELFDESTRUCT on the same account still returns a result but with
@@ -183,7 +189,12 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> Host for MegaContext<DB, ExtEnvs> 
         if self.spec.is_enabled(MegaSpecId::MINI_REX) && address == ORACLE_CONTRACT_ADDRESS {
             return self.oracle_sload(address, key, skip_cold_load);
         }
-        self.inner.sload_skip_cold_load(address, key, skip_cold_load)
+        match self.inner.sload_skip_cold_load(address, key, skip_cold_load) {
+            Err(LoadError::ColdLoadSkipped) if skip_cold_load => {
+                Err(self.read_declined_slot(address, key))
+            }
+            result => result,
+        }
     }
 
     fn sstore_skip_cold_load(
@@ -356,6 +367,38 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
             .is_some_and(|storage_keys| !storage_keys.is_empty())
     }
 
+    /// Reads a storage slot revm 40 declined to read because the frame could not afford a cold
+    /// access, and returns the error the declining host method reports.
+    ///
+    /// `MegaETH` has always read a slot before charging for it, so a frame too poor for a cold
+    /// `SLOAD` read the slot and then ran out of gas on the charge. revm 40 halts it before the
+    /// read, which would drop the slot from the transaction's read set and from the state the
+    /// transaction hands back, which is what a stateless witness is built from. Reading it here
+    /// keeps both. The read warms the slot inside the halting frame, whose revert cools it
+    /// again, so the slot ends up exactly as the deployed read left it.
+    ///
+    /// Returns [`LoadError::ColdLoadSkipped`], which halts the frame out of gas as before, or
+    /// [`LoadError::DBError`] when the read fails, which the deployed read also surfaced as the
+    /// transaction's error.
+    fn read_declined_slot(&mut self, address: Address, key: StorageKey) -> LoadError {
+        match self.inner.sload_skip_cold_load(address, key, false) {
+            Err(LoadError::DBError) => LoadError::DBError,
+            _ => LoadError::ColdLoadSkipped,
+        }
+    }
+
+    /// Reads, without its code, an account revm 40 declined to read because the frame could not
+    /// afford a cold access, and returns the error the declining host method reports.
+    ///
+    /// The account counterpart of [`Self::read_declined_slot`], for `SELFDESTRUCT`'s beneficiary,
+    /// which the deployed implementation loaded before charging for it.
+    fn read_declined_account(&mut self, address: Address) -> LoadError {
+        match self.inner.load_account_info_skip_cold_load(address, false, false) {
+            Err(LoadError::DBError) => LoadError::DBError,
+            _ => LoadError::ColdLoadSkipped,
+        }
+    }
+
     /// `SLOAD` against the oracle contract on `MINI_REX`+ — the single home of `MegaETH`'s three
     /// oracle storage-read customizations. Called from [`Host::sload_skip_cold_load`], which owns
     /// the address/spec predicate; [`Host::sload`] reaches it through the same method via its
@@ -377,8 +420,10 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     /// turns into `OutOfGas`) is exactly where the read would have landed anyway: the interpreter
     /// sets `skip_cold_load` on precisely the condition under which its own cold-surcharge charge
     /// fails. So the outcome is unchanged from before the parameter existed — serve the value,
-    /// force `is_cold = true`, run out of gas on the surcharge — while skipping an
-    /// oracle/journal load whose result would be discarded. Neither under- nor over-charging is
+    /// force `is_cold = true`, run out of gas on the surcharge. The read itself still happens
+    /// although its value is discarded: it decides what the oracle environment records as
+    /// accessed and which slots the transaction reads, and both stay what they were when every
+    /// oracle read was served before its surcharge. Neither under- nor over-charging is
     /// possible: no oracle read is ever served below the cold price, and no read is refused
     /// that could have paid it.
     ///
@@ -408,9 +453,13 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
         }
 
         // The read is cold by construction, so an interpreter that cannot afford a cold load
-        // cannot afford this one.
+        // cannot afford this one. It still reads, as the deployed read did before it was charged:
+        // the oracle environment first, then the journal when the environment has no value.
         if skip_cold_load {
-            return Err(LoadError::ColdLoadSkipped);
+            if self.oracle_env.borrow().get_oracle_storage(key).is_some() {
+                return Err(LoadError::ColdLoadSkipped);
+            }
+            return Err(self.read_declined_slot(address, key));
         }
 
         // If the oracle env provides a value, return it. Otherwise, fall back to the inner context.
@@ -513,16 +562,32 @@ pub trait HostExt: Host {
     /// The deployed read loaded an absent account the way every journal load does: warm if the
     /// address is pre-warmed (a precompile, the coinbase, an access-list entry), otherwise cold
     /// with the warm-up journaled, which the revert undoes. Of an account that was already
-    /// resident it kept only the code it fetched. So this loads `address` with its code when the
-    /// journal holds no entry for it, and otherwise fetches the code the entry lacks, leaving its
-    /// warmth alone. With `follow_delegation`, for a read that also followed an EIP-7702
-    /// designation, it then loads the delegate when absent, without its code, as that read did.
-    /// The caller's frame must be halting.
+    /// resident it kept only the code it fetched. So this loads `address` when the journal holds
+    /// no entry for it, and otherwise fetches the code the entry lacks when `read` includes the
+    /// code, leaving its warmth alone. For [`RevertedAccountRead::AccountCodeAndDelegate`] it then
+    /// loads the EIP-7702 delegate when absent, without its code, as that read did. The caller's
+    /// frame must be halting.
     ///
     /// Marks nothing: the callers recreate the beneficiary mark themselves. On a database error it
     /// records the error as the transaction's, as the deployed read did, and returns `false`.
-    fn recreate_reverted_account_read(&mut self, address: Address, follow_delegation: bool)
-        -> bool;
+    fn recreate_reverted_account_read(
+        &mut self,
+        address: Address,
+        read: RevertedAccountRead,
+    ) -> bool;
+}
+
+/// Which parts of an account a recreated read loads — the parts the deployed read it stands in
+/// for loaded. See [`HostExt::recreate_reverted_account_read`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RevertedAccountRead {
+    /// The account without its code, as `BALANCE` read it.
+    Account,
+    /// The account and its code, as `EXTCODESIZE`, `EXTCODEHASH` and `EXTCODECOPY` read it.
+    AccountAndCode,
+    /// The account and its code and, when the code is an EIP-7702 designation, the delegate's
+    /// account without its code, as the CALL family read its target.
+    AccountCodeAndDelegate,
 }
 
 impl<DB: Database, ExtEnvs: ExternalEnvTypes> HostExt for MegaContext<DB, ExtEnvs> {
@@ -628,7 +693,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> HostExt for MegaContext<DB, ExtEnv
     fn recreate_reverted_account_read(
         &mut self,
         address: Address,
-        follow_delegation: bool,
+        read: RevertedAccountRead,
     ) -> bool {
         // Split borrow, as in `JournalInspectTr`: a database error is stashed in `error`, which
         // surfaces it as the transaction's error, exactly as the deployed read's would have.
@@ -638,6 +703,14 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> HostExt for MegaContext<DB, ExtEnv
             *error = Err(ContextError::Custom(format!("{e}")));
             false
         };
+        if read == RevertedAccountRead::Account {
+            if !journal.state.contains_key(&address) {
+                if let Err(e) = journal.load_account(address) {
+                    return stash(e);
+                }
+            }
+            return true;
+        }
         if !journal.state.contains_key(&address) {
             if let Err(e) = journal.load_account_with_code(address) {
                 return stash(e);
@@ -648,7 +721,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> HostExt for MegaContext<DB, ExtEnv
             Ok(account) => account.info.code.as_ref().and_then(Bytecode::eip7702_address),
             Err(e) => return stash(e),
         };
-        if !follow_delegation {
+        if read != RevertedAccountRead::AccountCodeAndDelegate {
             return true;
         }
         // The deployed read loaded the delegate's account but not its code.
