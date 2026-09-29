@@ -40,11 +40,13 @@
 //! # Deposits
 //!
 //! A deposit is an L1 message the chain cannot censor: the block derived from L1 must include it,
-//! and the builder does not choose it. So a deposit is exempt from both data-availability limits
-//! and does not count towards the block's. The execution-gas, state-gas, data-size and KV limits
-//! are packing budgets for the transactions the builder chooses, so none of them refuses a deposit
-//! either. A deposit still counts towards all four, so the transactions after it find the room it
-//! used.
+//! and the builder does not choose it. So no limit only a builder applies refuses a deposit — its
+//! declared gas, its encoded size and its data-availability size, and what those add to the block
+//! — and a deposit does not count towards the block's data-availability size. The execution-gas,
+//! state-gas, data-size and KV limits are packing budgets for the transactions the builder
+//! chooses, so none of them refuses a deposit either. A deposit still counts towards all four, and
+//! towards the block's encoded size, so the transactions after it find the room it used. The one
+//! limit that holds a deposit is the block's gas limit, which is the header's.
 //!
 //! The per-transaction limits the block installs on the EVM — data size, write records, state gas
 //! — are not block limits: they hold a deposit's own execution the way they hold any
@@ -277,15 +279,16 @@ impl HardforkParams for ProtocolLimits {
 ///   from the block environment.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct BlockLimits {
-    /// The most gas a single transaction may declare.
+    /// The most gas a single transaction may declare. Deposits are exempt.
     pub tx_gas_limit: u64,
     /// The block's gas limit: a transaction is admitted only if its declared gas limit fits in
     /// what the block has left. Also the budget the data-availability footprint of the block's
     /// transactions is held to.
     pub block_gas_limit: u64,
-    /// The most bytes a single transaction's EIP-2718 encoding may take.
+    /// The most bytes a single transaction's EIP-2718 encoding may take. Deposits are exempt.
     pub tx_encode_size_limit: u64,
-    /// The most bytes the block's transaction bodies may take together, uncompressed.
+    /// The most bytes the block's transaction bodies may take together, uncompressed. Deposits are
+    /// exempt, and count towards it.
     pub block_txs_encode_size_limit: u64,
     /// The most data-availability bytes a single transaction may take. Deposits are exempt.
     pub tx_da_size_limit: u64,
@@ -446,8 +449,8 @@ pub struct BlockUsage {
     pub da_size: u64,
     /// The transaction's data-availability footprint, in gas.
     pub da_footprint: u64,
-    /// Whether the transaction is a deposit, which the data-availability dimensions exempt and the
-    /// execution-gas, state-gas, data-size and KV limits never refuse.
+    /// Whether the transaction is a deposit, which the data-availability dimensions exempt and
+    /// which no limit but the block's gas limit refuses.
     pub is_deposit: bool,
 }
 
@@ -502,8 +505,9 @@ impl BlockLimiter {
     /// Whether `tx` may execute in this block.
     ///
     /// Checks the transaction against its own limits, and against what the block has left; a
-    /// deposit is held to neither data-availability limit, nor to the execution-gas, the data-size
-    /// or the KV limit. It reads the counters and changes nothing;
+    /// deposit is held to the block's gas limit alone — to no limit only a builder applies, and to
+    /// neither the execution-gas, the data-size nor the KV limit. It reads the counters and changes
+    /// nothing;
     /// [`post_execution_check`](Self::post_execution_check) checks what only the transaction's
     /// execution reveals, and [`post_execution_update`](Self::post_execution_update) advances the
     /// counters once the transaction commits.
@@ -522,7 +526,12 @@ impl BlockLimiter {
         da_size: u64,
         is_deposit: bool,
     ) -> Result<(), BlockExecutionError> {
-        if gas_limit > self.limits.tx_gas_limit {
+        // A deposit is an L1 message the chain cannot censor: the block derived from L1 must
+        // include it, and the builder does not choose it. So no limit only a builder applies
+        // refuses it — its declared gas, its encoded size and its data-availability size, and what
+        // those add to the block — and it does not count towards the block's data-availability
+        // size. The block's gas limit, the header's, holds it as it holds every transaction.
+        if !is_deposit && gas_limit > self.limits.tx_gas_limit {
             return Err(invalid_tx(
                 tx_hash,
                 MegaTxLimitExceededError::TransactionGasLimit {
@@ -538,6 +547,14 @@ impl BlockLimiter {
                 block_available_gas: self.available_gas(),
             }
             .into());
+        }
+
+        // The packing budgets below are the dimensions a transaction's own execution reveals. The
+        // transaction that crossed one is already packed, so what they refuse is the next one —
+        // never a deposit, which is not the builder's to refuse either. Every committed
+        // transaction counts towards them, a deposit included, in `post_execution_update`.
+        if is_deposit {
+            return Ok(());
         }
 
         if tx_size > self.limits.tx_encode_size_limit {
@@ -562,37 +579,25 @@ impl BlockLimiter {
             ));
         }
 
-        // A deposit is an L1 message the chain cannot censor, so it is exempt from both
-        // data-availability limits and does not count towards the block's.
-        if !is_deposit {
-            if da_size > self.limits.tx_da_size_limit {
-                return Err(invalid_tx(
-                    tx_hash,
-                    MegaTxLimitExceededError::DataAvailabilitySizeLimit {
-                        da_size,
-                        limit: self.limits.tx_da_size_limit,
-                    },
-                ));
-            }
-
-            if da_size.saturating_add(self.block_da_size_used) > self.limits.block_da_size_limit {
-                return Err(invalid_tx(
-                    tx_hash,
-                    MegaBlockLimitExceededError::DataAvailabilitySizeLimit {
-                        block_used: self.block_da_size_used,
-                        tx_used: da_size,
-                        limit: self.limits.block_da_size_limit,
-                    },
-                ));
-            }
+        if da_size > self.limits.tx_da_size_limit {
+            return Err(invalid_tx(
+                tx_hash,
+                MegaTxLimitExceededError::DataAvailabilitySizeLimit {
+                    da_size,
+                    limit: self.limits.tx_da_size_limit,
+                },
+            ));
         }
 
-        // The packing budgets: the dimensions a transaction's own execution reveals. The
-        // transaction that crossed one is already packed, so what is refused here is the next
-        // one — never a deposit, which is not the builder's to refuse. Every committed
-        // transaction counts towards them, a deposit included, in `post_execution_update`.
-        if is_deposit {
-            return Ok(());
+        if da_size.saturating_add(self.block_da_size_used) > self.limits.block_da_size_limit {
+            return Err(invalid_tx(
+                tx_hash,
+                MegaBlockLimitExceededError::DataAvailabilitySizeLimit {
+                    block_used: self.block_da_size_used,
+                    tx_used: da_size,
+                    limit: self.limits.block_da_size_limit,
+                },
+            ));
         }
 
         if self.gas.execution >= self.limits.block_execution_gas_limit {
@@ -1213,6 +1218,68 @@ mod tests {
             );
             assert!(check(&limiter, bound + 1).is_err(), "{name}: one unit more is refused");
         }
+    }
+
+    /// No limit only a builder applies refuses a deposit, which the block derived from L1 must
+    /// include: not its declared gas, not its encoded size, not what its encoding adds to the
+    /// block's. The same transaction not a deposit is refused by each, and the block's gas limit,
+    /// the header's, refuses a deposit as it refuses any transaction.
+    #[test]
+    fn test_no_building_policy_refuses_a_deposit() {
+        let cases: [(&str, BlockLimits, u64, u64); 5] = [
+            ("a declared gas", BlockLimits::no_limits().with_tx_gas_limit(100), 101, 0),
+            ("an encoded size", BlockLimits::no_limits().with_tx_encode_size_limit(10), 0, 11),
+            (
+                "the block's encoded size",
+                BlockLimits::no_limits().with_block_txs_encode_size_limit(10),
+                0,
+                11,
+            ),
+            ("a data-availability size", BlockLimits::no_limits().with_tx_da_size_limit(10), 0, 11),
+            (
+                "the block's data-availability size",
+                BlockLimits::no_limits().with_block_da_size_limit(10),
+                0,
+                11,
+            ),
+        ];
+        for (name, limits, gas_limit, size) in cases {
+            let limiter = BlockLimiter::new(limits);
+            // The one size feeds both the encoded and the data-availability size.
+            let check = |is_deposit| {
+                limiter.pre_execution_check(B256::ZERO, gas_limit, size, size, is_deposit)
+            };
+            assert!(check(true).is_ok(), "{name} over the policy: a deposit is admitted");
+            assert!(check(false).is_err(), "{name} over the policy: a transaction is refused");
+        }
+
+        let limiter = BlockLimiter::new(limits_with_block_gas(100));
+        let err = limiter
+            .pre_execution_check(B256::ZERO, 101, 0, 0, true)
+            .expect_err("the block's gas limit holds a deposit");
+        assert!(std::format!("{err}").contains("transaction gas limit 101 is more than"), "{err}");
+    }
+
+    /// A deposit counts towards the block's encoded size though it is never refused by it, so the
+    /// transaction after it finds the room it used.
+    #[test]
+    fn test_a_deposit_counts_towards_the_blocks_encoded_size() {
+        let mut limiter =
+            BlockLimiter::new(BlockLimits::no_limits().with_block_txs_encode_size_limit(1_000));
+        for _ in 0..2 {
+            assert!(limiter.pre_execution_check(B256::ZERO, 0, 600, 0, true).is_ok());
+            limiter.post_execution_update(&BlockUsage {
+                tx_size: 600,
+                is_deposit: true,
+                ..Default::default()
+            });
+        }
+        assert_eq!(limiter.block_tx_size_used, 1_200, "every deposit counts");
+
+        let err = limiter
+            .pre_execution_check(B256::ZERO, 0, 1, 0, false)
+            .expect_err("the deposits used the room an ordinary transaction would need");
+        assert!(std::format!("{err}").contains("block_used=1200"), "{err}");
     }
 
     /// What the block has left is what its refusal reports, and it is the limit minus what the

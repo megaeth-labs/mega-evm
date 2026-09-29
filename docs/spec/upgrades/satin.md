@@ -721,7 +721,9 @@ Four of those counts can be limited:
 - The block gas limit is unchanged: a transaction's declared gas limit MUST fit in what the block has left.
 - The four limits are protocol values the chain configuration carries as parameters of the Satin hardfork, with the per-transaction limits (see [Resource Limits](#10-resource-limits)); the defaults are the table's.
   A node validating a block MUST hold it to the chain's values, as the rules above state them, and to no other value.
-- A block builder MAY pack tighter, as building policy: it MAY refuse a transaction for its declared gas limit, its encoded size or its data-availability size (from which deposits are exempt), hold the block to an encoded-size or data-availability budget, and hold any of the four limits below the chain's value, never above it.
+- A block builder MAY pack tighter, as building policy: it MAY refuse a transaction for its declared gas limit, its encoded size or its data-availability size, hold the block to an encoded-size or data-availability budget, and hold any of the four limits below the chain's value, never above it.
+  A building policy MUST NOT refuse a deposit, which the block derived from L1 must include: none of those per-transaction limits and budgets applies to one.
+  A deposit counts towards the block's encoded size and not towards its data-availability size; the block gas limit holds it as it holds every transaction.
   A node validating a block MUST NOT apply a building policy, and a policy never changes what a packed block computes: it only decides which transactions the builder packs.
 
 ### 21. Transaction and Block Refusals
@@ -749,7 +751,7 @@ A transaction MUST be skipped for the current block, and MAY be included in a la
 
 A block that contains a transaction it should have skipped is invalid.
 
-A block builder MAY also skip a transaction under its own building policy (see [Block Limits](#20-block-limits)): a per-transaction declared-gas, encoded-size or data-availability limit, a block encoded-size or data-availability budget, or one of the four block limits held below the chain's value.
+A block builder MAY also skip a transaction other than a deposit under its own building policy (see [Block Limits](#20-block-limits)): a per-transaction declared-gas, encoded-size or data-availability limit, a block encoded-size or data-availability budget, or one of the four block limits held below the chain's value.
 A transaction over a builder's per-transaction limit never fits that builder's blocks, and the builder MAY drop it.
 A block is not invalid for a transaction a building policy would have skipped.
 
