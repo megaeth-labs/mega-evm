@@ -28,6 +28,11 @@ pub struct MegaBlockExecutorFactory<R, Spec, EvmF> {
 
 impl<R, Spec, EvmF> MegaBlockExecutorFactory<R, Spec, EvmF> {
     /// Creates a factory over a receipt builder, a hardfork schedule and an EVM factory.
+    ///
+    /// The executors hold every block to the limits `spec` carries, whatever the EVM they run on
+    /// was created with. A node gives the EVM factory the same schedule
+    /// ([`MegaEvmFactory::with_schedule`]), so the EVMs it creates outside block execution run
+    /// under the same limits.
     pub const fn new(receipt_builder: R, spec: Spec, evm_factory: EvmF) -> Self {
         Self { receipt_builder, spec, evm_factory }
     }

@@ -395,7 +395,7 @@ Three dimensions are limited per transaction; compute is not one of them (see [T
   A creation onto an occupied address is counted, and a crossing it causes stops it where it would otherwise have failed on the collision.
 - The per-transaction limits and the per-frame caps are protocol values: the chain configuration carries them as parameters of the Satin hardfork, together with the detention caps and the block limits, and a node MUST hold every transaction to the values the chain configures, never to values it is handed with a block.
   The values above are the defaults.
-  A chain configuration that activates Satin without these parameters MUST be refused when it is loaded, and so MUST one that sets a limit to zero, a transaction data-size limit below `TX_BODY_SIZE`, or an unlimited detention cap.
+  A chain configuration that activates Satin without these parameters MUST be refused when it is loaded, and so MUST one that sets a limit to zero, a transaction data-size limit below `TX_BODY_SIZE`, or a detention cap no transaction's compute reaches (see [Gas Detention on Withheld Gas](#12-gas-detention-on-withheld-gas)).
   The 98/100 share is not a parameter.
   At the default data-size limit a transaction keeps fewer than 327,680 write records (13,107,200 / 40), so a KV limit binds only below that.
 
@@ -464,7 +464,8 @@ A contract can revert with the same bytes, so the revert data alone does not ide
   What a halting frame burns is not compute, with one exception: when an opcode's static gas cannot be paid, what the halting frame had left counts as compute.
 - **The limit.**
   A read MUST set `limit = compute_at_read + cap`, with `cap` = `BLOCK_ENV_ACCESS_COMPUTE_GAS` = 20,000,000 for the block environment and the beneficiary and `ORACLE_ACCESS_COMPUTE_GAS` = 20,000,000 for the Oracle; the limit only goes down, so the most restrictive read binds.
-  The caps are protocol values the chain configuration carries with the other limits (see [Resource Limits](#10-resource-limits)), 20,000,000 each by default; a chain's caps MUST be finite.
+  The caps are protocol values the chain configuration carries with the other limits (see [Resource Limits](#10-resource-limits)), 20,000,000 each by default.
+  A chain's caps MUST be below 199,987,900, the most compute a transaction can spend, so that they can stop one: the execution cap less EIP-2780's base cost of 12,000, which every transaction pays, and the 100 of a warm account access, the least a frame pays for the code it runs.
 - **Withheld gas.**
   Once a limit is set, every frame's regular gas MUST be split into a spendable part, held at what the limit leaves the transaction (`limit − compute`), and a withheld part, the rest.
   The split MUST be applied when the read's opcode completes, when a frame starts or resumes, and after an `SSTORE` (whose restore of a slot can refill regular gas).
@@ -721,8 +722,11 @@ Four of those counts can be limited:
 - The block gas limit is unchanged: a transaction's declared gas limit MUST fit in what the block has left.
 - The four limits are protocol values the chain configuration carries as parameters of the Satin hardfork, with the per-transaction limits (see [Resource Limits](#10-resource-limits)); the defaults are the table's.
   A node validating a block MUST hold it to the chain's values, as the rules above state them, and to no other value.
-- A block builder MAY pack tighter, as building policy: it MAY refuse a transaction for its declared gas limit, its encoded size or its data-availability size (from which deposits are exempt), hold the block to an encoded-size or data-availability budget, and hold any of the four limits below the chain's value, never above it.
+- A block builder MAY pack tighter, as building policy: it MAY refuse a transaction for its declared gas limit, its encoded size or its data-availability size, hold the block to an encoded-size or data-availability budget, and hold any of the four limits below the chain's value, never above it.
+  A building policy MUST NOT refuse a deposit, which the block derived from L1 must include: none of those per-transaction limits and budgets applies to one.
+  A deposit counts towards the block's encoded size and not towards its data-availability size; the block gas limit holds it as it holds every transaction.
   A node validating a block MUST NOT apply a building policy, and a policy never changes what a packed block computes: it only decides which transactions the builder packs.
+- Satin sets no limit on a transaction's or a block's encoded size; a block-size rule of the base layer, where a chain adopts one, is the node's to apply and is not one of these limits.
 
 ### 21. Transaction and Block Refusals
 
@@ -749,7 +753,7 @@ A transaction MUST be skipped for the current block, and MAY be included in a la
 
 A block that contains a transaction it should have skipped is invalid.
 
-A block builder MAY also skip a transaction under its own building policy (see [Block Limits](#20-block-limits)): a per-transaction declared-gas, encoded-size or data-availability limit, a block encoded-size or data-availability budget, or one of the four block limits held below the chain's value.
+A block builder MAY also skip a transaction other than a deposit under its own building policy (see [Block Limits](#20-block-limits)): a per-transaction declared-gas, encoded-size or data-availability limit, a block encoded-size or data-availability budget, or one of the four block limits held below the chain's value.
 A transaction over a builder's per-transaction limit never fits that builder's blocks, and the builder MAY drop it.
 A block is not invalid for a transaction a building policy would have skipped.
 

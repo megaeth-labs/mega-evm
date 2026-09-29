@@ -1598,3 +1598,59 @@ fn test_a_refill_after_the_read_does_not_lift_the_cap() {
     let left = Charges::default().then(&[2, 3, 3, 100]).spin(0).left(CAP);
     assert_stopped(&run, intrinsic(BELOW), left);
 }
+
+/// A chain's caps must be below [`MAX_TX_COMPUTE_GAS`], the most compute a transaction can
+/// spend. The transaction that can spend it pays the least a frame that runs code can before its
+/// first instruction — a call to its own sender, which EIP-2780 charges its base cost alone, whose
+/// delegate, the block beneficiary, is warm — and is detained from its start, since its recipient
+/// delegates to the beneficiary; above the execution cap its body's history is the reservoir's.
+/// Its frame holds exactly the most compute, so a cap there never stops it, and it runs out of its
+/// own gas; a cap below what it holds by more than any one charge of its loop stops it.
+#[test]
+fn test_the_most_compute_a_transaction_can_spend_bounds_the_caps() {
+    use mega_evm::constants::MAX_TX_COMPUTE_GAS;
+    let intrinsic = TX_GAS_LIMIT_CAP - MAX_TX_COMPUTE_GAS;
+    let run_under = |cap: u64, code: Bytes| {
+        let db = with_delegation(
+            MemoryDatabase::default()
+                .account_code(BENEFICIARY, code)
+                .account_balance(DELEGATOR, U256::from(1_u64 << 60)),
+            DELEGATOR,
+            BENEFICIARY,
+        );
+        let limits = EvmTxRuntimeLimits::default()
+            .with_block_env_access_compute_gas_limit(cap)
+            .with_oracle_access_compute_gas_limit(cap);
+        run_on(
+            &mut MegaEvm::new(context(db).with_tx_runtime_limits(limits)),
+            tx(DELEGATOR, DELEGATOR, ABOVE),
+        )
+    };
+
+    // `GAS` answers what the frame holds, less its own 2.
+    let answers_gas = BytecodeBuilder::default()
+        .append(GAS)
+        .append_many([PUSH0, MSTORE])
+        .push_number(32_u8)
+        .append_many([PUSH0, RETURN])
+        .build();
+    let run = run_under(MAX_TX_COMPUTE_GAS, answers_gas);
+    assert_eq!(run.limit, Some(MAX_TX_COMPUTE_GAS), "detained from the start");
+    let output = run.outcome.result.output().expect("the frame returns");
+    assert_eq!(U256::from_be_slice(output), U256::from(MAX_TX_COMPUTE_GAS - 2));
+    assert_eq!(run.outcome.gas.regular, intrinsic + 15, "the program's 15 is its only compute");
+
+    let spinner = spin(BytecodeBuilder::default());
+    let run = run_under(MAX_TX_COMPUTE_GAS, spinner.clone());
+    assert_eq!(run.limit, Some(MAX_TX_COMPUTE_GAS));
+    assert_eq!(run.outcome.limit_exceeded, None, "a cap at the most compute never stops it");
+    assert!(
+        matches!(run.outcome.result, ExecutionResult::Halt { .. }),
+        "it runs out of its own gas: {:?}",
+        run.outcome.result
+    );
+
+    let cap = MAX_TX_COMPUTE_GAS - 10_000;
+    let run = run_under(cap, spinner);
+    assert_eq!(assert_stopped(&run, intrinsic, Charges::default().spin(0).left(cap)), cap);
+}

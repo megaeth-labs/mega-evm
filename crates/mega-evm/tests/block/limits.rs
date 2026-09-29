@@ -4,8 +4,8 @@ use alloy_consensus::{transaction::Recovered, Transaction};
 use alloy_evm::block::BlockExecutor;
 use alloy_primitives::{address, Address, Bytes, U256};
 use mega_evm::{
-    test_utils::BytecodeBuilder, BlockLimits, EnrichedMegaTx, EvmTxRuntimeLimits, LimitCheck,
-    LimitKind, MegaTransactionExt, MegaTxEnvelope, ProtocolLimits,
+    test_utils::BytecodeBuilder, BlockLimits, EnrichedMegaTx, LimitCheck, LimitKind,
+    MegaTransactionExt, MegaTxEnvelope, ProtocolLimits,
 };
 use op_revm::constants::{
     DA_FOOTPRINT_GAS_SCALAR_OFFSET, DA_FOOTPRINT_GAS_SCALAR_SLOT, L1_BLOCK_CONTRACT,
@@ -280,8 +280,8 @@ fn test_the_transaction_data_size_limit_stops_a_deposit_that_is_still_included()
     let mut state = common::state();
     let mut executor = common::executor_with_limits(
         &mut state,
-        ProtocolLimits::no_limits()
-            .with_tx_runtime_limits(EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(limit)),
+        ProtocolLimits::loosest()
+            .with_tx_runtime_limits(common::loosest_tx().with_tx_data_size_limit(limit)),
     );
     executor.apply_pre_execution_changes().expect("the block starts");
 
@@ -593,6 +593,44 @@ fn test_deposit_exempt_from_block_da_limit() {
     assert_eq!(executor.limiter().block_da_size_used, 0, "and adds nothing to the block's");
     let (_, result) = executor.finish_with_counters().expect("the block finishes");
     assert_eq!(result.receipts().len(), 1);
+}
+
+/// No building policy refuses a deposit, which the block derived from L1 must include: a builder
+/// holding transactions to a declared gas, an encoded size and a block encoded size that one
+/// deposit is over on each packs it, and counts its encoding towards the block's. A user
+/// transaction over the same policy is refused.
+#[test]
+fn test_no_building_policy_refuses_a_deposit() {
+    const GAS_LIMIT: u64 = 3_000_000;
+    const CALLDATA: usize = 1_000;
+    let policy = BlockLimits::no_limits()
+        .with_tx_gas_limit(GAS_LIMIT - 1)
+        .with_tx_encode_size_limit(CALLDATA as u64)
+        .with_block_txs_encode_size_limit(CALLDATA as u64);
+    let mut state = common::state();
+    let mut executor = executor(&mut state, common::block_ctx(policy));
+    executor.apply_pre_execution_changes().expect("the block starts");
+
+    let deposit = common::deposit_tx(Bytes::from(vec![0xab; CALLDATA]), GAS_LIMIT);
+    let tx_size = MegaTransactionExt::tx_size(&deposit);
+    assert!(tx_size > CALLDATA as u64, "the deposit's encoding is over both size limits");
+    executor.execute_transaction(&deposit).expect("no building policy refuses a deposit");
+    assert_eq!(executor.limiter().block_tx_size_used, tx_size, "and it counts its encoding");
+
+    for (tx, refusal) in [
+        (common::user_tx_with_input(0, Bytes::new(), GAS_LIMIT), "Transaction gas limit exceeded"),
+        (
+            common::user_tx_with_input(0, Bytes::from(vec![0xab; CALLDATA]), GAS_LIMIT - 1),
+            "Transaction encode size limit exceeded",
+        ),
+        (common::user_tx_with_input(0, Bytes::new(), GAS_LIMIT - 1), "block_used="),
+    ] {
+        let err = executor.execute_transaction(&tx).expect_err("the policy binds a transaction");
+        assert!(format!("{err}").contains(refusal), "{refusal}: {err}");
+    }
+
+    let (_, result) = executor.finish_with_counters().expect("the block finishes");
+    assert_eq!(result.receipts().len(), 1, "the deposit alone is packed");
 }
 
 /// The three cases in one block: a small user transaction, a large deposit, a large user

@@ -12,7 +12,7 @@ use alloy_sol_types::SolCall;
 use mega_evm::{
     system::{IOracle, SequencerRegistryConfig, MEGA_SYSTEM_ADDRESS, ORACLE_CONTRACT_ADDRESS},
     test_utils::MemoryDatabase,
-    BlockLimits, EmptyExternalEnv, MegaBlockExecutionCtx, MegaBlockExecutor,
+    BlockLimits, EmptyExternalEnv, EvmTxRuntimeLimits, MegaBlockExecutionCtx, MegaBlockExecutor,
     MegaBlockExecutorFactory, MegaEvm, MegaEvmFactory, MegaHardforkConfig, MegaSpecId,
     MegaTxEnvelope, PreBlockStateSource, ProtocolLimits,
 };
@@ -87,23 +87,30 @@ pub(crate) fn registry_config() -> SequencerRegistryConfig {
 }
 
 /// A schedule that activates Satin at genesis, can seed the `SequencerRegistry`, and holds its
-/// blocks to no limit at all.
+/// blocks to the loosest limits a chain may carry.
 ///
-/// Its limits are [`ProtocolLimits::no_limits`], which no chain may carry, so they are attached
-/// through the test-only unchecked route: most block tests exercise one mechanism and take the
-/// limits out, and a test that holds a block or a transaction to a limit attaches its own
-/// ([`chain_spec_with`]).
+/// Its limits are [`ProtocolLimits::loosest`]: most block tests exercise one mechanism and take
+/// the limits out, and a test that holds a block or a transaction to a limit attaches its own
+/// ([`chain_spec_with`]). Every limit is unlimited but gas detention's caps, which no transaction
+/// of a block this size reaches, so a transaction that reads volatile data is detained and never
+/// stopped.
 pub(crate) fn chain_spec() -> MegaHardforkConfig {
-    chain_spec_with(ProtocolLimits::no_limits())
+    chain_spec_with(ProtocolLimits::loosest())
 }
 
-/// [`chain_spec`], holding its blocks to `limits`, attached unchecked so a test may run under a
-/// value no chain may carry.
+/// [`chain_spec`], holding its blocks to `limits`, which must be limits a chain may carry: the
+/// block executor refuses a block under any other.
 pub(crate) fn chain_spec_with(limits: ProtocolLimits) -> MegaHardforkConfig {
     MegaHardforkConfig::default()
         .with_all_activated()
         .with_params(registry_config())
-        .with_params_unchecked(limits)
+        .with_params(limits)
+}
+
+/// The per-transaction half of [`ProtocolLimits::loosest`], for a test that holds a block's
+/// transactions to one limit and no other.
+pub(crate) const fn loosest_tx() -> EvmTxRuntimeLimits {
+    ProtocolLimits::loosest().tx_runtime_limits
 }
 
 /// The context of a block the builder packs under `policy`.

@@ -260,7 +260,9 @@ pub struct LimitUsage {
 ///
 /// Every value here changes a transaction's result, so in block execution they are the chain's:
 /// the per-transaction half of [`ProtocolLimits`](crate::ProtocolLimits), which the block executor
-/// installs before every transaction. Set on a standalone EVM, they are its caller's choice.
+/// installs before every transaction. [`MegaEvmFactory`](crate::MegaEvmFactory) resolves the same
+/// for an EVM it creates outside block execution; set on a standalone EVM, they are its caller's
+/// choice.
 ///
 /// [`BLOCK_ENV_ACCESS_COMPUTE_GAS`]: crate::constants::BLOCK_ENV_ACCESS_COMPUTE_GAS
 /// [`ORACLE_ACCESS_COMPUTE_GAS`]: crate::constants::ORACLE_ACCESS_COMPUTE_GAS
@@ -319,7 +321,9 @@ impl EvmTxRuntimeLimits {
     /// It turns detention off together with every other per-transaction limit. It is what the
     /// execution-spec gate's equivalence mode installs, and what tests use to take the limits
     /// out; the chain executes on its own ([`ProtocolLimits`](crate::ProtocolLimits)), whose
-    /// detention caps must be finite.
+    /// detention caps must be below
+    /// [`MAX_TX_COMPUTE_GAS`](crate::constants::MAX_TX_COMPUTE_GAS), the most compute a
+    /// transaction can spend.
     pub const fn no_limits() -> Self {
         Self {
             tx_data_size_limit: u64::MAX,
