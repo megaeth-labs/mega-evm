@@ -372,6 +372,9 @@ impl BlockLimits {
     /// These limits held within `protocol`: each of the block's four budgets is the smaller of
     /// this policy's cap and the protocol's limit, so a builder's setting can tighten a budget and
     /// never loosen one. The limits only a builder applies are kept as they are.
+    ///
+    /// A cap above the protocol's limit gives way to it without a word; a node that wants to
+    /// refuse or report such a setting compares the two itself.
     pub fn within(self, protocol: &ProtocolLimits) -> Self {
         Self {
             block_execution_gas_limit: self

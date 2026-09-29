@@ -133,7 +133,9 @@ pub trait MegaHardforks: OpHardforks {
     /// active there carries, or `None` when no `MegaETH` fork is active there or the fork carries
     /// none.
     ///
-    /// This is where block execution reads them; a later fork that changes a limit answers here.
+    /// This is where block execution reads them; a later fork that changes a limit answers here,
+    /// with a params type of its own, since a params type belongs to one fork
+    /// ([`HardforkParams::FORK`]).
     fn protocol_limits(&self, timestamp: BlockTimestamp) -> Option<ProtocolLimits> {
         match self.hardfork(timestamp)? {
             MegaHardfork::Satin => self.fork_params::<ProtocolLimits>().copied(),
