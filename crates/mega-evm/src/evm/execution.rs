@@ -14,7 +14,7 @@ use op_revm::{
 use revm::{
     context::{
         result::{ExecutionResult, FromStringError, InvalidTransaction, ResultGas},
-        transaction::{AuthorizationTr, TransactionType},
+        transaction::{AccessListItemTr, AuthorizationTr, TransactionType},
         Block, Cfg, ContextError, ContextTr, FrameStack, JournalTr, LocalContextTr, Transaction,
     },
     handler::{
@@ -590,6 +590,38 @@ where
             fn reimburse_caller(&self, evm: &mut Self::Evm, exec_result: &mut <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult) -> Result<(), Self::Error>;
             fn refund(&self, evm: &mut Self::Evm, exec_result: &mut <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult, eip7702_refund: i64);
         }
+    }
+
+    /// Warms the precompiles, the coinbase and the access list as revm does, then loads every
+    /// access-list entry that lists storage keys — the account and each listed slot — into the
+    /// journal.
+    ///
+    /// revm 40 only records the access list as pre-warmed and reads an entry the first time the
+    /// transaction touches it. `MegaETH` has always read an entry with storage keys here, before
+    /// the first frame, so the account and its listed slots are in the transaction's read set,
+    /// and in the state it hands back, whether or not execution goes on to touch them. Loading
+    /// them here keeps that read set and prices nothing differently: the access list makes such
+    /// an entry warm whether it is read now or on first touch. An entry listing no storage keys
+    /// is only marked warm and stays unread, as it always has.
+    fn load_accounts(&self, evm: &mut Self::Evm) -> Result<(), Self::Error> {
+        revm::handler::pre_execution::load_accounts::<_, Self::Error>(evm)?;
+        let (tx, journal) = evm.ctx().tx_journal_mut();
+        if tx.tx_type() == TransactionType::Legacy {
+            return Ok(());
+        }
+        let Some(access_list) = tx.access_list() else { return Ok(()) };
+        for item in access_list {
+            let mut keys = item.storage_slots().peekable();
+            if keys.peek().is_none() {
+                continue;
+            }
+            let address = *item.address();
+            journal.load_account(address)?;
+            for key in keys {
+                journal.sload(address, U256::from_be_bytes(key.0))?;
+            }
+        }
+        Ok(())
     }
 
     fn pre_execution(

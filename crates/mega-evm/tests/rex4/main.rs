@@ -1,6 +1,7 @@
 //! Tests for `Rex4` hardfork features.
 
 mod access_control;
+mod access_list_preload;
 mod beneficiary_detention;
 mod call_stipend_forwarding;
 mod create_safety;
