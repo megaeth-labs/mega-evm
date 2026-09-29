@@ -87,8 +87,8 @@
 //! grows is the state gas it spends: [`EvmTxRuntimeLimits::tx_state_gas_limit`] holds it, and
 //! nothing counts new accounts and slots beside it. What is held is net — what a frame refilled
 //! and what a failed frame rolled back is out of it — and is the state gas charged before the
-//! first frame plus what every frame on the call stack holds (the `state_gas` module). The limit is
-//! per transaction, with no frame budget: a crossing anywhere stops the transaction, reported as
+//! first frame plus what every frame on the call stack holds (the `frame_limit` module). The limit
+//! is per transaction, with no frame budget: a crossing anywhere stops the transaction, reported as
 //! [`LimitKind::StateGrowth`] with the limit in gas.
 //!
 //! The limit holds each charge where it is made, once it is made, so a charge the frame cannot
@@ -160,7 +160,6 @@ mod frame_limit;
 #[allow(clippy::module_inception)]
 mod limit;
 mod record;
-mod state_gas;
 
 pub use limit::AdditionalLimit;
 pub(crate) use limit::FrameStartRecords;

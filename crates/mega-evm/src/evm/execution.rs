@@ -446,9 +446,9 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
     /// the results [`frame_return_result`](EvmTr::frame_return_result) pops. A creation answered
     /// with a stop still bumps its creator's nonce, as one that starts and reverts does.
     ///
-    /// Before any of it, the state gas the caller holds is noted: the state-gas limit counts it
-    /// as held outside the frame, with its own entry pushed beside the frame's lane, and adds to
-    /// it what the frame charges. An interceptor's answer is held as revm's own is at step 7.
+    /// The frame's lane holds outside it what its caller held when it suspended on this frame
+    /// ([`after_frame_run`]), which the state-gas limit adds what the frame charges to. An
+    /// interceptor's answer is held as revm's own is at step 7.
     #[inline]
     fn frame_init(
         &mut self,
@@ -762,7 +762,8 @@ fn before_frame_run<DB: Database, ExtEnvs: ExternalEnvTypes>(
 }
 
 /// Settles gas detention once the frame ran: a frame that suspends on a child keeps its compute
-/// for the child's start to add to the transaction's; a frame that returns is classified.
+/// for the child's start to add to the transaction's, and its state gas on its lane for the
+/// child's to hold outside it; a frame that returns is classified.
 ///
 /// The frame's result is read here, after revm processed its last action — `return_create`
 /// included, whose deposit and hash charges are the creating frame's own compute — and before
@@ -782,6 +783,7 @@ fn after_frame_run<DB: Database, ExtEnvs: ExternalEnvTypes, E>(
     match next {
         Ok(ItemOrResult::Item(_)) => {
             ctx.detention.on_frame_suspend(&frame.interpreter.gas, frame.depth);
+            ctx.additional_limit.on_frame_suspend(frame.interpreter.gas.state_gas_spent());
         }
         Ok(ItemOrResult::Result(result)) => {
             let instruction_result = result.instruction_result();
@@ -987,19 +989,11 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
     /// start ([`answer_before_building`]), with the empty lane that stands in for it. It comes
     /// before the keyless dispatch, so the dispatch never sees a latched transaction; on the
     /// inspected path it comes after the inspector's `frame_start`.
-    ///
-    /// Before it, the state gas the caller holds is noted: it is held outside the frame it starts.
-    /// The caller is the frame on top of the stack, suspended on this frame's input; the
-    /// transaction's own frame has none, and starts on what was charged before it.
     #[inline]
     fn answered_before_building(
         &mut self,
         frame_init: &FrameInit,
     ) -> Result<Option<FrameResult>, ContextDbError<MegaContext<DB, ExtEnvs>>> {
-        if self.inner.frame_stack.index().is_some() {
-            let held = self.inner.frame_stack.get().interpreter.gas.state_gas_spent();
-            self.inner.ctx.additional_limit.note_caller_state_gas(held);
-        }
         let answer = answer_before_building(&mut self.inner.ctx, frame_init)?;
         if answer.is_some() {
             self.inner.ctx.additional_limit.push_empty_frame();
@@ -1024,9 +1018,9 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
 /// frame that later fails gives the charge back too, but by then it has started, and a crossing
 /// inside a frame that later fails is a crossing.
 ///
-/// The frame's own entry is on top by now, and holds what its caller held, the charge included;
-/// the frame itself holds nothing yet. Every other charge was held where it was made, so only the
-/// upfront one can cross here.
+/// The frame's own lane is on top by now, and holds outside it what its caller held, the charge
+/// included; the frame itself holds nothing yet. Every other charge was held where it was made, so
+/// only the upfront one can cross here.
 fn hold_upfront_state_gas<DB: Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &mut MegaContext<DB, ExtEnvs>,
     answer: Option<&mut FrameResult>,
@@ -1498,13 +1492,13 @@ mod tests {
     }
 
     /// A context under a state-gas limit of 99, with the transaction's own frame on the call stack
-    /// holding 100 — the upfront charge of the frame it starts — and the entry of that frame
+    /// holding 100 — the upfront charge of the frame it starts — and the lane of that frame
     /// pushed.
     fn starting_a_frame_charged_100() -> MegaContext<MemoryDatabase> {
         let mut ctx = MegaContext::new(MemoryDatabase::default(), MegaSpecId::SATIN)
             .with_tx_runtime_limits(EvmTxRuntimeLimits::no_limits().with_tx_state_gas_limit(99));
         let _ = ctx.additional_limit.on_frame_init(&call(CALLER, CALLER, 0, false), 0);
-        ctx.additional_limit.note_caller_state_gas(100);
+        ctx.additional_limit.on_frame_suspend(100);
         ctx.additional_limit.push_empty_frame();
         ctx
     }

@@ -10,7 +10,6 @@ use revm::{
 use super::{
     frame_limit::{FrameLimitTracker, Lane},
     record::{HistoryBytes, RecordEffect, StagedRecord},
-    state_gas::StateGasMeter,
     EvmTxRuntimeLimits, LimitCheck, LimitKind, LimitUsage, FRAME_DATA_SHARE_DENOMINATOR,
     FRAME_DATA_SHARE_NUMERATOR, TRANSFER_LOG, WRITE_RECORD, WRITE_RECORD_SIZE,
 };
@@ -97,8 +96,6 @@ pub struct AdditionalLimit {
     history_gas_spent: u64,
     /// The history bytes the settled transaction appended.
     history_bytes: u64,
-    /// The state gas the transaction holds outside the running frame, for the state-gas limit.
-    state_gas: StateGasMeter,
     /// Whether the running transaction's value movements journal EIP-7708 transfer logs, which
     /// revm emits itself and the data size counts where the value moves.
     transfer_logs: bool,
@@ -138,7 +135,6 @@ impl AdditionalLimit {
         self.pending_start_refused = None;
         self.history_gas_spent = 0;
         self.history_bytes = 0;
-        self.state_gas.reset();
         self.transfer_logs = false;
     }
 
@@ -532,8 +528,7 @@ impl AdditionalLimit {
     /// what a failed frame rolled back, is out of what it holds, so a write taken back gives its
     /// room back.
     pub(crate) fn check_state_gas(&mut self, running: i64) -> LimitCheck {
-        debug_assert_eq!(self.state_gas.depth(), self.tracker.depth(), "one entry per lane");
-        let used = self.state_gas.held(running);
+        let used = self.tracker.state_gas_held(running);
         let limit = self.limits.tx_state_gas_limit;
         if used > limit {
             return self.latch(LimitKind::StateGrowth, limit, used);
@@ -545,14 +540,15 @@ impl AdditionalLimit {
     /// holds it to the limit. A crossing latches the transaction, and its first frame is answered
     /// with the stop before it is built.
     pub(crate) fn on_state_gas_before_frames(&mut self, spent: i64) {
-        self.state_gas.set_before_frames(spent);
+        self.tracker.set_state_gas_before_frames(spent);
         self.check_state_gas(spent);
     }
 
-    /// Records the state gas `held` by the frame that is starting the next one, which the next
-    /// frame counts as held outside it.
-    pub(crate) const fn note_caller_state_gas(&mut self, held: i64) {
-        self.state_gas.note_caller(held);
+    /// Records the state gas `held` by the running frame as it suspends on a child, which the
+    /// child's lane counts as held outside it.
+    #[inline]
+    pub(crate) fn on_frame_suspend(&mut self, held: i64) {
+        self.tracker.set_state_gas_at_suspension(held);
     }
 
     /* Frame lanes */
@@ -670,7 +666,6 @@ impl AdditionalLimit {
     }
 
     fn push_lane(&mut self, input: &FrameInput, depth: usize) {
-        self.state_gas.push();
         let budget = self.frame_budget();
         // What the caller paid for these records at its opcode. The transaction's own frame has
         // no such caller: its record is charged before execution and given back by the settlement
@@ -724,7 +719,7 @@ impl AdditionalLimit {
                 }
             }
             // No frame starts from an empty input: revm's own frame init is `unreachable!` on
-            // one. The state-gas entry pushed above is the lane's, one per lane.
+            // one.
             FrameInput::Empty => unreachable!(
                 "a frame input always names a call or a creation, as revm's frame init asserts"
             ),
@@ -844,7 +839,6 @@ impl AdditionalLimit {
     /// the lane and comes back when it is popped, whatever the answer was.
     pub(crate) fn push_empty_frame(&mut self) {
         self.frame_began = true;
-        self.state_gas.push();
         let charge = core::mem::replace(&mut self.pending_frame_charge, FrameCharge::NONE);
         self.tracker.push(Lane::empty(charge.on_lane.saturating_add(charge.caller)));
     }
@@ -884,7 +878,6 @@ impl AdditionalLimit {
         let success = result.instruction_result().is_ok();
         let lane = self.tracker.pop(success);
         let refund = lane.as_ref().map_or(0, |lane| lane.history_refund(success));
-        self.state_gas.pop();
         let unchecked = lane.is_some_and(|lane| self.tracker.hands_unchecked(&lane, success));
         self.resume_stop = if unchecked {
             let check = self.check();
