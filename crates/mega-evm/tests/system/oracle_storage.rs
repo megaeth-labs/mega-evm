@@ -86,11 +86,13 @@ impl OracleEnv for Service {
 
 type Envs = (EmptyExternalEnv, Service);
 
-/// What a transaction did, and what gas detention made of its reads.
+/// What a transaction did, what gas detention made of its reads, and the oracle reads the EVM
+/// reports for it afterwards.
 struct Run {
     outcome: MegaTransactionOutcome,
     accessed: VolatileDataAccess,
     limit: Option<u64>,
+    evm_reads: Vec<OracleRead>,
 }
 
 /// Runs `tx` over `db` against `service`, under `limits`.
@@ -109,7 +111,12 @@ fn run_under(
     let mut evm = MegaEvm::new(configure(ctx));
     let outcome = evm.execute_transaction(tx).expect("the transaction is valid");
     let detention = evm.ctx().detention();
-    Run { outcome, accessed: detention.accessed(), limit: detention.compute_limit() }
+    Run {
+        outcome,
+        accessed: detention.accessed(),
+        limit: detention.compute_limit(),
+        evm_reads: evm.oracle_reads().to_vec(),
+    }
 }
 
 /// Runs `tx` over `db` against `service`, under the default limits, which detain.
@@ -459,6 +466,7 @@ fn test_the_reads_a_transaction_made_are_on_its_outcome() {
     assert_eq!(returned_word(&with_answer), SERVICE_VALUE);
     let read = OracleRead { slot: SLOT, answer: Some(SERVICE_VALUE) };
     assert_eq!(with_answer.outcome.oracle_reads, [read]);
+    assert_eq!(with_answer.evm_reads, [read], "the EVM reports the last transaction's reads");
 
     let silent = Service::default();
     let without = run(db_with_state().account_code(CONTRACT, code), &silent, tx());
