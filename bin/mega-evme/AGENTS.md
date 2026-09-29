@@ -29,7 +29,7 @@ Two engines: the in-tree sources run Satin; a spec from `Equivalence` to `Rex6` 
 - Do not edit or re-implement the legacy leg: it is the released 1.7.1 code, pinned with its dependency versions (`tests/legacy_line.rs`).
 - Do not move a package `tests/legacy_line.rs` pins without deciding it there. The leg shares most of its dependencies with the Satin engine and the tool, one copy per compatibility line: the precompiles' backends (`secp256k1`, `k256`, `sha2`, `ripemd`, `aurora-engine-modexp`, arkworks, `blst`, `c-kzg`, `p256`), hashing and word arithmetic (`alloy-primitives`, `ruint`, `sha3`) and the encodings. Each is pinned at the release's version; `alloy-rlp`, `alloy-trie` and the `alloy-sol-types` family, which the Satin engine's alloy 2 line holds above it, are pinned at the version the workspace holds (`AHEAD_OF_THE_RELEASE`). Transport, JSON and derive crates float.
 - Do not use `cargo ... -p mega-evme`: the name also matches the linked 1.7.1 package. Use `--manifest-path bin/mega-evme/Cargo.toml`.
-- Do not build a Satin hardfork schedule, or attach its params, in the CLI: a counterfactual takes the engine's own schedule for a chain it does not know (`mega_evm::all_activated_hardforks`), so it carries every params type Satin requires, and a chain's own Satin schedule is used as it is or refused.
+- Do not build a Satin hardfork schedule, or attach its params, in the CLI: a counterfactual takes the engine's own schedule for a chain it does not know (`mega_evm::all_activated_hardforks`), so it carries every params type Satin requires, and a chain's own Satin schedule — the engine's table's, or the one `mega_evm::SatinChainConfig::hardforks` builds from the chain's genesis file (`--genesis`) — is used as it is or refused. Do not parse a genesis file's Satin keys here either: `SatinChainConfig::from_genesis_config` is the one parser every reader shares.
 - Do not duplicate chain/spec parsing logic across commands.
 - Add shared parsing in `src/common/` and reuse.
 - Do not print partial execution output before final outcome object assembly.
@@ -40,5 +40,5 @@ Two engines: the in-tree sources run Satin; a spec from `Equivalence` to `Rex6` 
 - Add a new top-level command: `src/cmd.rs` enum + module wiring in `src/main.rs`.
 - Add a new shared CLI option family: `src/common/*` and flatten into command structs.
 - Change state-forking or prestate merge semantics: `src/common/state.rs`.
-- Change which engine a spec or block runs on: `src/engine.rs`; which Satin schedule and limits it runs under: `src/common/schedule.rs`.
+- Change which engine a spec or block runs on: `src/engine.rs`; which Satin schedule and limits it runs under: `src/common/schedule.rs`, which also holds the genesis file a run was given (`--genesis`) and the activation table `src/engine.rs` reads through it.
 - Change receipt/summary formatting: `src/common/outcome.rs` and printer helpers.

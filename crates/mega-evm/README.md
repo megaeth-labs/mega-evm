@@ -223,6 +223,23 @@ A success an inspector rewrites into a failure has its journal taken back as a f
 Gas an inspector writes after a frame's last instruction reaches nobody, and a charge a frame cannot pay is refused without stopping it.
 `tests/satin/inspector_cheatcodes.rs` drives `deal`, `store`, `pauseGasMetering` / `resumeGasMetering` and `expectRevert` through the engine as Foundry's inspector does.
 
+## Node integration
+
+A node, a stateless validator and a tool take the following from the engine rather than restating it, so they cannot disagree with it.
+The crate builds on Rust 1.94.
+
+- `spec_cfg(cfg)` is the configuration Satin runs on: the caller's configuration with every field the spec fixes set from the spec.
+  A node builds its `EvmEnv` through it, so what reads the env before an EVM exists — gas estimation reads the execution cap — reads what the EVM executes on.
+- `validate_transaction_stateless(cfg, block, tx, system_address)` is a pool's check: it runs the handler's own validation phases on an EVM over an empty database and returns the intrinsic gas by ledger, `IntrinsicGas { regular, state, history, floor }`.
+  `system::live_system_address(db)` reads the address it takes, off the state the pool validates against, as a transaction's validation reads it.
+  The state a transaction adds is charged when it runs, so a new recipient or authority is not in the intrinsic gas; a deposit that fails validation is included as a failed deposit rather than refused.
+- `MegaTransactionOutcome::limit_stop()`, or `LimitStop::from_result(result, limit_exceeded)` for a result read elsewhere, gives the kind, limit and usage of the limit that stopped a transaction, for an RPC's error.
+  `decode_mega_limit_exceeded` reads revert data alone; bytes that decode are no stop without the outcome's `limit_exceeded`.
+- `SatinChainConfig::from_genesis_config(config)` reads a genesis file's `config` object: `satinTime` and one flat `satin`-prefixed key per field of `SequencerRegistryConfig` and `ProtocolLimits`.
+  It refuses a missing, unknown or mistyped key and a value the parameters or the schedule refuse, and `hardforks()` builds the schedule; it serializes to the same keys, for a genesis generator.
+  The key format is provisional.
+  `SequencerRegistryConfig` and `ProtocolLimits` also serialize on their own, camelCase with no unknown field.
+
 ## Documentation
 
 - [Specification](https://megaeth-labs.github.io/mega-evm/) (describes the legacy engine until the Satin pages land)
