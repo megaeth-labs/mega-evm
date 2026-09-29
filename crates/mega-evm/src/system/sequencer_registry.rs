@@ -64,7 +64,13 @@ pub const PLACEHOLDER_MIN_ROTATION_DELAY: u64 = 10;
 /// whatever the contract holds, rotated by the `applyPendingChanges()` pre-block call. The contract
 /// has no setter for `_minRotationDelay`, so a matching-code registry cannot be repaired later
 /// through this helper: the delay must be seeded here, and it must not be zero.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// It travels with the chain configuration as [`ProtocolLimits`](crate::ProtocolLimits) does: a
+/// JSON object with camelCase keys, every field required and no other accepted. Deserializing does
+/// not validate; whoever loads it runs [`HardforkParams::validate`], as the chain-config parser and
+/// [`validate_schedule`](crate::MegaHardforks::validate_schedule) do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SequencerRegistryConfig {
     /// Seeded into `_currentSystemAddress` and `_initialSystemAddress`.
     pub initial_system_address: Address,
@@ -587,6 +593,43 @@ mod tests {
         let registry = &journal.inner.state[&SEQUENCER_REGISTRY_ADDRESS];
         assert!(registry.is_loaded_as_not_existing());
         assert!(registry.storage.is_empty());
+    }
+
+    /// The seeds travel with a chain configuration: they survive a round trip through its JSON,
+    /// whose shape is written out here. A field left out is an error rather than a zero, and so is
+    /// one the type does not have. Deserializing does not validate: a zero address reads, and
+    /// [`HardforkParams::validate`] is what refuses it on load.
+    #[test]
+    fn test_sequencer_registry_config_round_trip() {
+        let config = SequencerRegistryConfig {
+            initial_system_address: NEXT_SYSTEM_ADDRESS,
+            initial_sequencer: NEXT_SEQUENCER,
+            initial_admin: CURRENT_SEQUENCER_ADDRESS,
+            initial_from_block: 7,
+            min_rotation_delay: 11,
+        };
+        let json = serde_json::to_string(&config).expect("serializes");
+        assert_eq!(
+            json,
+            r#"{"initialSystemAddress":"0x1111111111111111111111111111111111111111","initialSequencer":"0x2222222222222222222222222222222222222222","initialAdmin":"0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","initialFromBlock":7,"minRotationDelay":11}"#
+        );
+        assert_eq!(serde_json::from_str::<SequencerRegistryConfig>(&json).unwrap(), config);
+        assert_eq!(config.validate(), Ok(()));
+
+        let missing = json.replace(r#","minRotationDelay":11"#, "");
+        assert!(serde_json::from_str::<SequencerRegistryConfig>(&missing).is_err(), "{missing}");
+        let unknown = json.replace(r#""minRotationDelay":11"#, r#""minRotationDelay":11,"x":1"#);
+        assert!(serde_json::from_str::<SequencerRegistryConfig>(&unknown).is_err(), "{unknown}");
+        let snake = json.replace("minRotationDelay", "min_rotation_delay");
+        assert!(serde_json::from_str::<SequencerRegistryConfig>(&snake).is_err(), "{snake}");
+
+        let zero =
+            json.replace("0x2222222222222222222222222222222222222222", &Address::ZERO.to_string());
+        let read = serde_json::from_str::<SequencerRegistryConfig>(&zero).expect("it reads");
+        assert_eq!(
+            read.validate().map_err(|e| e.message),
+            Err("SequencerRegistryConfig.initial_sequencer must not be zero".into())
+        );
     }
 
     /// Read off a database, the live system address is what a transaction's validation reads:
