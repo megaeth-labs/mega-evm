@@ -8,7 +8,10 @@
 
 #[cfg(not(feature = "std"))]
 use alloc as std;
-use core::{any::Any, fmt};
+use core::{
+    any::{Any, TypeId},
+    fmt,
+};
 use std::{boxed::Box, string::String, sync::Arc, vec, vec::Vec};
 
 use alloy_hardforks::{hardfork, EthereumHardfork, EthereumHardforks, ForkCondition, Hardfork};
@@ -60,7 +63,8 @@ impl core::error::Error for HardforkParamsError {}
 ///
 /// A params type belongs to exactly one fork ([`FORK`](Self::FORK)), so
 /// [`fork_params`](MegaHardforks::fork_params) returns it without the caller naming the fork
-/// twice. [`validate`](Self::validate) states the invariants of the value itself;
+/// twice. A fork may require several params types; a schedule carries one value of each.
+/// [`validate`](Self::validate) states the invariants of the value itself;
 /// [`MegaHardforkConfig::with_params`] runs it when the configuration is built, so a bad value
 /// fails at load. A fork that cannot run without its parameters also registers the requirement in
 /// [`validate_schedule`](MegaHardforks::validate_schedule).
@@ -89,14 +93,22 @@ pub trait MegaHardforks: OpHardforks {
     /// carry it.
     fn mega_fork_activation(&self, fork: MegaHardfork) -> ForkCondition;
 
-    /// The parameters attached to `fork`, type-erased. Forks without parameters answer `None`.
-    fn fork_params_any(&self, _fork: MegaHardfork) -> Option<&(dyn Any + Send + Sync)> {
+    /// The parameters of the type `params` names that are attached to `fork`, type-erased; `None`
+    /// when the schedule carries no value of that type for the fork.
+    ///
+    /// A fork may carry several params types, so the value is looked up by fork and type: an
+    /// implementation answers each `(fork, TypeId::of::<P>())` it holds a `P` for with that `P`.
+    fn fork_params_any(
+        &self,
+        _fork: MegaHardfork,
+        _params: TypeId,
+    ) -> Option<&(dyn Any + Send + Sync)> {
         None
     }
 
-    /// The parameters of the fork `P` belongs to, or `None` when the schedule carries none.
+    /// The `P` attached to the fork `P` belongs to, or `None` when the schedule carries none.
     fn fork_params<P: HardforkParams>(&self) -> Option<&P> {
-        self.fork_params_any(P::FORK)?.downcast_ref::<P>()
+        self.fork_params_any(P::FORK, TypeId::of::<P>())?.downcast_ref::<P>()
     }
 
     /// The latest `MegaETH` fork active at `timestamp`, or `None` before the first one.
@@ -237,12 +249,13 @@ impl fmt::Display for ScheduleError {
 
 impl core::error::Error for ScheduleError {}
 
-/// One fork of a schedule: which fork, when it activates, and the parameters it carries.
+/// One fork of a schedule: which fork, when it activates, and the parameters it carries, one
+/// value per params type.
 #[derive(Debug)]
 struct ForkEntry {
     fork: Box<dyn Hardfork>,
     condition: ForkCondition,
-    params: Option<Arc<dyn Any + Send + Sync>>,
+    params: Vec<(TypeId, Arc<dyn Any + Send + Sync>)>,
 }
 
 impl Clone for ForkEntry {
@@ -278,7 +291,7 @@ where
                 .map(|(fork, condition)| ForkEntry {
                     fork: Box::new(fork) as Box<dyn Hardfork>,
                     condition,
-                    params: None,
+                    params: Vec::new(),
                 })
                 .collect(),
         }
@@ -331,7 +344,7 @@ impl MegaHardforkConfig {
         Self {
             entries: forks
                 .into_iter()
-                .map(|(fork, condition)| ForkEntry { fork, condition, params: None })
+                .map(|(fork, condition)| ForkEntry { fork, condition, params: Vec::new() })
                 .collect(),
         }
     }
@@ -372,7 +385,8 @@ impl MegaHardforkConfig {
         self.attach(params)
     }
 
-    /// Attaches `params` to their fork's entry.
+    /// Attaches `params` to their fork's entry, replacing a value of the same type and keeping
+    /// the values of every other type.
     fn attach<P: HardforkParams>(mut self, params: P) -> Self {
         let entry = self
             .entries
@@ -386,7 +400,11 @@ impl MegaHardforkConfig {
                     P::FORK,
                 )
             });
-        entry.params = Some(Arc::new(params));
+        let value: Arc<dyn Any + Send + Sync> = Arc::new(params);
+        match entry.params.iter_mut().find(|(type_id, _)| *type_id == TypeId::of::<P>()) {
+            Some((_, slot)) => *slot = value,
+            None => entry.params.push((TypeId::of::<P>(), value)),
+        }
         self
     }
 
@@ -409,7 +427,11 @@ impl MegaHardforkConfig {
         if let Some(index) = index {
             self.entries[index].condition = condition;
         } else {
-            self.entries.push(ForkEntry { fork: Box::new(hardfork), condition, params: None });
+            self.entries.push(ForkEntry {
+                fork: Box::new(hardfork),
+                condition,
+                params: Vec::new(),
+            });
         }
     }
 
@@ -439,11 +461,13 @@ impl MegaHardforks for MegaHardforkConfig {
         self.get(fork).copied().unwrap_or(ForkCondition::Never)
     }
 
-    fn fork_params_any(&self, fork: MegaHardfork) -> Option<&(dyn Any + Send + Sync)> {
-        self.entries
-            .iter()
-            .find(|entry| entry.fork.name() == fork.name())
-            .and_then(|entry| entry.params.as_deref())
+    fn fork_params_any(
+        &self,
+        fork: MegaHardfork,
+        params: TypeId,
+    ) -> Option<&(dyn Any + Send + Sync)> {
+        let entry = self.entries.iter().find(|entry| entry.fork.name() == fork.name())?;
+        entry.params.iter().find(|(type_id, _)| *type_id == params).map(|(_, value)| value.as_ref())
     }
 }
 
@@ -565,6 +589,36 @@ mod tests {
 
         let retrieved = config.fork_params::<TestParams>().expect("params were attached");
         assert_eq!(retrieved, &params());
+    }
+
+    /// A fork carries one value per params type: attaching a second type keeps the first, and
+    /// attaching a type again replaces that type's value alone.
+    #[test]
+    fn test_a_fork_carries_one_value_per_params_type() {
+        #[derive(Clone, Debug, PartialEq, Eq)]
+        struct OtherParams(u64);
+
+        impl HardforkParams for OtherParams {
+            const FORK: MegaHardfork = MegaHardfork::Satin;
+            const NAME: &'static str = "OtherParams";
+        }
+
+        let config = MegaHardforkConfig::default()
+            .with_all_activated()
+            .with_params(params())
+            .with_params(OtherParams(1));
+        assert_eq!(config.fork_params::<TestParams>(), Some(&params()));
+        assert_eq!(config.fork_params::<OtherParams>(), Some(&OtherParams(1)));
+
+        let replaced = config.with_params(OtherParams(2));
+        assert_eq!(replaced.fork_params::<TestParams>(), Some(&params()), "untouched");
+        assert_eq!(replaced.fork_params::<OtherParams>(), Some(&OtherParams(2)));
+
+        // The type-erased lookup answers by fork and type.
+        assert!(replaced
+            .fork_params_any(MegaHardfork::Satin, TypeId::of::<OtherParams>())
+            .is_some_and(|value| value.downcast_ref::<OtherParams>() == Some(&OtherParams(2))));
+        assert!(replaced.fork_params_any(MegaHardfork::Satin, TypeId::of::<u64>()).is_none());
     }
 
     #[test]
