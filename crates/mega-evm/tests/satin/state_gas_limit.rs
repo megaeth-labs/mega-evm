@@ -11,7 +11,8 @@
 //! The figures are read off the engine rather than written out: each case first runs without a
 //! limit, and the state gas it reports is what the limit is set against. Where a state byte costs
 //! nothing, which only a measurement build arranges, no transaction adds state gas and the limit
-//! has nothing to hold, so the cases that need a crossing return early.
+//! has nothing to hold, so the cases that need a crossing, or an upfront charge to give back,
+//! return early.
 
 use alloy_primitives::{address, Address, Bytes, B256, U256};
 use mega_evm::{
@@ -535,6 +536,11 @@ fn one_wei_to(to: Address, data: &[u8]) -> MegaTransaction {
 /// does without a limit, and nothing moves.
 #[test]
 fn test_a_first_frame_revm_answers_with_a_failure_is_not_held_for_its_upfront_charge() {
+    // Where a state byte is free the start is charged nothing for the account, and there is no
+    // charge to give back.
+    if state_is_free() {
+        return;
+    }
     let account = one_account();
     let tx = one_wei_to(BN254_PAIRING, &[1]);
     let free = run_under(funded(), tx.clone(), u64::MAX);
@@ -561,6 +567,11 @@ fn test_a_first_frame_revm_answers_with_a_failure_is_not_held_for_its_upfront_ch
 /// stays spent. A creation transaction keeps its creator's nonce bump, so it cannot be replayed.
 #[test]
 fn test_a_first_frame_revm_decides_is_held_for_its_upfront_charge() {
+    // Where a state byte is free the start is charged nothing for the account, and there is no
+    // charge to hold.
+    if state_is_free() {
+        return;
+    }
     let account = one_account();
     let word = [7_u8; 32];
     let cases = [
@@ -604,6 +615,11 @@ fn test_a_first_frame_revm_decides_is_held_for_its_upfront_charge() {
 /// the state-gas limit its upfront charge would have crossed is not what stops it.
 #[test]
 fn test_a_first_frame_start_whose_records_cross_is_stopped_for_its_records() {
+    // Where a state byte is free the start is charged nothing for the account, and there is no
+    // state-gas crossing for the records' stop to come before.
+    if state_is_free() {
+        return;
+    }
     let account = one_account();
     let limit = TX_BODY_SIZE + WRITE_RECORD_SIZE + mega_evm::TRANSFER_LOG_SIZE - 1;
     let outcome = MegaEvm::new(
@@ -652,6 +668,11 @@ impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for AnswersEmpty {
 /// transaction keeps the inspector's answer.
 #[test]
 fn test_a_first_frame_an_inspector_answers_is_not_held_for_its_upfront_charge() {
+    // Where a state byte is free the start is charged nothing for the account, and there is no
+    // charge to give back.
+    if state_is_free() {
+        return;
+    }
     let account = one_account();
     let mut evm = MegaEvm::new(context(funded()).with_tx_runtime_limits(
         EvmTxRuntimeLimits::no_limits().with_tx_state_gas_limit(account - 1),
