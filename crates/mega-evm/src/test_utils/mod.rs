@@ -7,6 +7,7 @@ mod inspectors;
 mod logs;
 mod neutral;
 mod opcode_gen;
+mod price_guard;
 mod scenario;
 
 pub use bytes::*;
@@ -16,4 +17,5 @@ pub use inspectors::*;
 pub use logs::*;
 pub use neutral::*;
 pub use opcode_gen::*;
+pub use price_guard::*;
 pub use scenario::*;

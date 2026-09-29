@@ -5,7 +5,7 @@ use alloy_op_evm::OpTx;
 use alloy_primitives::{Address, Bytes, TxKind, U256};
 use mega_evm::{
     active_satin_prices,
-    test_utils::{op_transaction, zero_fee_l1_block_info},
+    test_utils::{note_price_guard, op_transaction, zero_fee_l1_block_info},
     LimitUsage, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
     MegaTransactionOutcome,
 };
@@ -125,22 +125,13 @@ pub(crate) fn execute<DB: alloy_evm::Database>(
 /// every state-gas number. A test that asserts one of those numbers returns early instead of
 /// failing on a price the developer asked for.
 ///
-/// The notice goes straight to stderr and only once: the harness captures the print macros of a
-/// test that passes, so a message written with them would never be read.
+/// Each test that returns early leaves a note (`note_price_guard`), which the byte-price
+/// grid counts.
 pub(crate) fn runs_at_measurement_prices() -> bool {
-    use std::io::Write;
-
     if active_satin_prices().is_constants() {
         return false;
     }
-    static NOTICE: std::sync::Once = std::sync::Once::new();
-    NOTICE.call_once(|| {
-        let _ = writeln!(
-            std::io::stderr(),
-            "note: skipping the tests that assert the spec's byte prices, because \
-             MEGA_SATIN_CPSB or MEGA_SATIN_CPHB fixed other ones; unset them to run those tests"
-        );
-    });
+    note_price_guard("MEGA_SATIN_CPSB or MEGA_SATIN_CPHB fixed prices other than the spec's");
     true
 }
 
@@ -149,23 +140,14 @@ pub(crate) fn runs_at_measurement_prices() -> bool {
 ///
 /// Only a measurement build arranges that, with `MEGA_SATIN_CPSB` at 0 or at a price every entry
 /// rounds to nothing. A test whose scenario is state gas — a limit to cross with it, a bucket to
-/// scale it, a charge to give back — has nothing to run then, and returns early; the notice goes
-/// to stderr once, like [`runs_at_measurement_prices`]'s.
+/// scale it, a charge to give back — has nothing to run then, and returns early, with a note like
+/// [`runs_at_measurement_prices`]'s.
 pub(crate) fn state_is_free() -> bool {
-    use std::io::Write;
-
     let params = mega_evm::satin_gas_params();
     if !mega_evm::STATE_GAS_REPRICED.iter().all(|&(id, _)| params.get(id()) == 0) {
         return false;
     }
-    static NOTICE: std::sync::Once = std::sync::Once::new();
-    NOTICE.call_once(|| {
-        let _ = writeln!(
-            std::io::stderr(),
-            "note: skipping the tests that need state gas, because MEGA_SATIN_CPSB prices a state \
-             byte at nothing"
-        );
-    });
+    note_price_guard("MEGA_SATIN_CPSB prices a state byte at nothing");
     true
 }
 
@@ -175,19 +157,10 @@ pub(crate) fn state_is_free() -> bool {
 /// history gas has nothing to run then, and returns early, with a notice like
 /// [`state_is_free`]'s.
 pub(crate) fn history_is_free() -> bool {
-    use std::io::Write;
-
     if active_satin_prices().cphb.milli_gas() != 0 {
         return false;
     }
-    static NOTICE: std::sync::Once = std::sync::Once::new();
-    NOTICE.call_once(|| {
-        let _ = writeln!(
-            std::io::stderr(),
-            "note: skipping the tests that need history gas, because MEGA_SATIN_CPHB prices a \
-             history byte at nothing"
-        );
-    });
+    note_price_guard("MEGA_SATIN_CPHB prices a history byte at nothing");
     true
 }
 

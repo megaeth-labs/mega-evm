@@ -275,25 +275,17 @@ pub fn active_satin_prices() -> SatinPrices {
 /// number in the schedule. A test that asserts one of those numbers returns early instead of
 /// failing on a price the developer asked for.
 ///
-/// The notice goes straight to stderr and only once: the harness captures the print macros of a
-/// test that passes, so a message written with them would never be read.
+/// Each test that returns early leaves a note (`note_price_guard`), which the byte-price
+/// grid counts.
 #[cfg(test)]
 pub(crate) fn runs_at_measurement_prices() -> bool {
     if active_satin_prices().is_constants() {
         return false;
     }
     #[cfg(feature = "satin-price-override")]
-    {
-        use std::io::Write;
-        static NOTICE: std::sync::Once = std::sync::Once::new();
-        NOTICE.call_once(|| {
-            let _ = writeln!(
-                std::io::stderr(),
-                "note: skipping the tests that assert the spec's byte prices, because \
-                 {CPSB_ENV_VAR} or {CPHB_ENV_VAR} fixed other ones; unset them to run those tests"
-            );
-        });
-    }
+    crate::test_utils::note_price_guard(&format!(
+        "{CPSB_ENV_VAR} or {CPHB_ENV_VAR} fixed prices other than the spec's"
+    ));
     true
 }
 

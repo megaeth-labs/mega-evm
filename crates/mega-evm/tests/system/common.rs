@@ -140,23 +140,14 @@ pub(crate) fn revert_data(result: &ResultAndState<MegaHaltReason>) -> Bytes {
 ///
 /// Only a measurement build arranges that, with `MEGA_SATIN_CPSB` at 0 or at a price every entry
 /// rounds to nothing. A test whose scenario is state gas — a limit to cross with it, a bucket to
-/// scale it, a charge that cannot be paid — has nothing to run then, and returns early; the notice
-/// goes to stderr once, since the harness keeps a passing test's output to itself.
+/// scale it, a charge that cannot be paid — has nothing to run then, and returns early, leaving a
+/// note (`note_price_guard`), which the byte-price grid counts.
 pub(crate) fn state_is_free() -> bool {
-    use std::io::Write;
-
     let params = mega_evm::satin_gas_params();
     if !mega_evm::STATE_GAS_REPRICED.iter().all(|&(id, _)| params.get(id()) == 0) {
         return false;
     }
-    static NOTICE: std::sync::Once = std::sync::Once::new();
-    NOTICE.call_once(|| {
-        let _ = writeln!(
-            std::io::stderr(),
-            "note: skipping the tests that need state gas, because MEGA_SATIN_CPSB prices a state \
-             byte at nothing"
-        );
-    });
+    mega_evm::test_utils::note_price_guard("MEGA_SATIN_CPSB prices a state byte at nothing");
     true
 }
 

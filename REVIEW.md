@@ -116,6 +116,7 @@ These checks guard every change to the Satin engine.
 - Nightly and on dispatch it runs the whole grid: CPSB 0, 1, 312.5, 700, 1530, 2000, 5000 and 10000 by CPHB 0, 1, 20, 50, 88, 100, 200, 300 and 1000, and 0.001 on both.
 - It is not a required check.
   A failure is a test that assumes a price, a scenario that does not scale with it, or an engine defect; the first two are fixed in the test, the third is not hidden behind a guard.
+- Each point reports how many tests a price guard held back (`guarded`, from `note_price_guard`; the tests are listed in the point's `.guards` file beside its log): every point passes the same number of tests, and this column tells a point at which tests returned early from one at which they ran.
 - Locally, `scripts/price_grid.sh --pr`, `--full`, or the points named (`scripts/price_grid.sh 312.5/20 5000/300`); each point's log is under `target/price-grid/`.
 
 ### Instruction counts (CodSpeed)

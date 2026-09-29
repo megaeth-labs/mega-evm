@@ -12,9 +12,10 @@
 # feature, which reads the two variables at run time, and run once per point with
 # `--no-fail-fast`, so every failing test of every point is reported.
 #
-# Each point's output lands in $OUT_DIR/<cpsb>_<cphb>.log (default target/price-grid). A summary
-# line per point goes to stdout and, when $GITHUB_STEP_SUMMARY is set, a table to the step summary.
-# Exits 1 if any point fails.
+# Each point's output lands in $OUT_DIR/<cpsb>_<cphb>.log (default target/price-grid), and the
+# tests a price guard held back at it (`note_price_guard`) in <cpsb>_<cphb>.guards, one per line. A
+# summary line per point, with how many passed, were guarded and failed, goes to stdout and, when
+# $GITHUB_STEP_SUMMARY is set, a table to the step summary. Exits 1 if any point fails.
 #
 # The grid brackets the prices under consideration and adds the edges the code allows: a price of
 # nothing on either axis, the smallest price the code represents (0.001), the cheapest price that
@@ -51,7 +52,7 @@ case "${1:-}" in
         points="$points $EXTRA_POINTS"
         ;;
     "" | -h | --help)
-        sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'
+        sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'
         exit 2
         ;;
     *)
@@ -61,6 +62,8 @@ esac
 
 rm -rf "$OUT_DIR"
 mkdir -p "$OUT_DIR"
+# The tests run in their package's directory, so the guard file is named by its absolute path.
+out_abs="$(cd "$OUT_DIR" && pwd)"
 
 echo "Building the test binaries with --features $FEATURES"
 if ! cargo test -p mega-evm --features "$FEATURES" --locked --no-run; then
@@ -68,7 +71,7 @@ if ! cargo test -p mega-evm --features "$FEATURES" --locked --no-run; then
     exit 1
 fi
 
-summary="| CPSB | CPHB | result | passed | failed |"$'\n'"|---|---|---|---:|---:|"
+summary="| CPSB | CPHB | result | passed | guarded | failed |"$'\n'"|---|---|---|---:|---:|---:|"
 failed_points=""
 for point in $points; do
     cpsb="${point%/*}"
@@ -76,7 +79,10 @@ for point in $points; do
     set -- env -u MEGA_SATIN_CPSB -u MEGA_SATIN_CPHB
     [ "$cpsb" != "-" ] && set -- "$@" "MEGA_SATIN_CPSB=$cpsb"
     [ "$cphb" != "-" ] && set -- "$@" "MEGA_SATIN_CPHB=$cphb"
-    log="$OUT_DIR/${cpsb//-/unset}_${cphb//-/unset}.log"
+    name="${cpsb//-/unset}_${cphb//-/unset}"
+    log="$OUT_DIR/$name.log"
+    guards="$out_abs/$name.guards"
+    set -- "$@" "MEGA_PRICE_GUARD_LOG=$guards"
 
     start=$(date +%s)
     "$@" cargo test -p mega-evm --features "$FEATURES" --locked --no-fail-fast >"$log" 2>&1
@@ -85,19 +91,22 @@ for point in $points; do
 
     passed=$(grep -E '^test result:' "$log" | sed -E 's/.* ([0-9]+) passed.*/\1/' | awk '{s += $1} END {print s + 0}')
     failed=$(grep -cE '^test .* \.\.\. FAILED$' "$log")
+    guarded=0
+    [ -f "$guards" ] && guarded=$(wc -l <"$guards" | tr -d ' ')
     if [ "$status" -eq 0 ]; then
         result="ok"
     else
         result="FAILED"
         failed_points="$failed_points $point"
     fi
-    printf '%-12s %-7s %5s passed %4s failed  %4ss  %s\n' "$point" "$result" "$passed" "$failed" "$seconds" "$log"
+    printf '%-12s %-7s %5s passed %4s guarded %4s failed  %4ss  %s\n' \
+        "$point" "$result" "$passed" "$guarded" "$failed" "$seconds" "$log"
     if [ "$status" -ne 0 ]; then
         grep -E '^test .* \.\.\. FAILED$' "$log" | sed 's/^/    /'
         # A failure that is not a test's, such as a build error, shows in the log's tail.
         [ "$failed" -eq 0 ] && tail -20 "$log" | sed 's/^/    /'
     fi
-    summary="$summary"$'\n'"| $cpsb | $cphb | $result | $passed | $failed |"
+    summary="$summary"$'\n'"| $cpsb | $cphb | $result | $passed | $guarded | $failed |"
 done
 
 if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
