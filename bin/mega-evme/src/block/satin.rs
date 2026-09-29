@@ -31,9 +31,8 @@ use crate::common::{
 /// The block runs as a validator runs it: under the schedule [`satin_schedule`] gives — the
 /// chain's own when it runs Satin at the block, otherwise the engine's fallback, a counterfactual
 /// — held to the protocol limits that schedule carries, or `limits_override` over them, with no
-/// building policy, and with the
-/// block's gas limit from its header. A transaction the engine refuses is reported as refused and
-/// left out, and the block goes on.
+/// building policy, and with the block's gas limit from its header. A transaction the engine
+/// refuses is reported as refused and left out, and the block goes on.
 pub(super) fn execute(
     chain_id: u64,
     header: &HeaderFields,
