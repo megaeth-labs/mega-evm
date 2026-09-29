@@ -70,9 +70,8 @@ mod tests {
     fn test_a_real_satin_block_runs_under_the_chains_own_limits() {
         let own = ProtocolLimits::DEFAULT
             .with_tx_runtime_limits(EvmTxRuntimeLimits::default().with_tx_data_size_limit(350));
-        let chain = scheduled()
-            .with_params(SequencerRegistryConfig::placeholder())
-            .with_params(own);
+        let chain =
+            scheduled().with_params(SequencerRegistryConfig::placeholder()).with_params(own);
 
         let before = schedule_for(chain.clone(), ACTIVATION - 1).unwrap();
         assert_eq!(before.protocol_limits(ACTIVATION - 1), Some(ProtocolLimits::DEFAULT));
