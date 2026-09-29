@@ -115,13 +115,22 @@ fn test_an_override_no_chain_may_carry_is_refused() {
 }
 
 /// A command on a legacy spec, the default one included, is refused with the override before it
-/// reaches the released CLI, which knows no such flag.
+/// reaches the released CLI, which knows no such flag: `run`, `tx` and a transaction replay.
 #[test]
 fn test_an_override_is_refused_on_a_legacy_spec() {
     for args in [
         &["run", "0x00", "--override.limits", "{}"][..],
         &["run", "0x00", "--spec", "Rex3", "--override.limits", "{}"],
         &["tx", "--spec", "Rex6", "--override.limits", "{}"],
+        // The engine comes from the forced spec, so the refusal needs no RPC.
+        &[
+            "replay",
+            "0x0000000000000000000000000000000000000000000000000000000000000001",
+            "--override.spec",
+            "Rex6",
+            "--override.limits",
+            "{}",
+        ],
     ] {
         let output = evme(args);
         assert_eq!(output.code, 1, "{args:?}: {}", output.stderr);
