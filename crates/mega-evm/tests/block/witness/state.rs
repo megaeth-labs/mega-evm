@@ -1,20 +1,30 @@
 //! State-changing mechanisms through the harness: an EIP-7702 delegation, a creation, the two
 //! shapes of `SELFDESTRUCT`, a value transfer that creates its recipient, and deposits — with the
-//! L1 block info a user transaction reads and a deposit does not.
+//! L1 block info a user transaction is priced against, which the pre-block phase carries.
 
 use alloy_primitives::{address, Address, Bytes, TxKind, U256};
-use mega_evm::test_utils::BytecodeBuilder;
-use op_revm::constants::{
-    DA_FOOTPRINT_GAS_SCALAR_SLOT, ECOTONE_L1_BLOB_BASE_FEE_SLOT, ECOTONE_L1_FEE_SCALARS_SLOT,
-    L1_BASE_FEE_SLOT, L1_BLOCK_CONTRACT, OPERATOR_FEE_SCALARS_SLOT,
+use mega_evm::{
+    test_utils::{BytecodeBuilder, MemoryDatabase},
+    PreBlockStateSource,
 };
-use revm::bytecode::opcode::{CODECOPY, PUSH0, RETURN, SELFDESTRUCT};
+use op_revm::constants::{
+    BASE_FEE_SCALAR_OFFSET, BLOB_BASE_FEE_SCALAR_OFFSET, ECOTONE_L1_BLOB_BASE_FEE_SLOT,
+    ECOTONE_L1_FEE_SCALARS_SLOT, L1_BASE_FEE_SLOT, L1_BLOCK_CONTRACT, L1_FEE_RECIPIENT,
+    L1_OVERHEAD_SLOT, OPERATOR_FEE_RECIPIENT, OPERATOR_FEE_SCALARS_SLOT,
+};
+use revm::{
+    bytecode::opcode::{CODECOPY, PUSH0, RETURN},
+    state::Account,
+};
 
 use super::{
     basics::{slot, slot_writer, write_gas},
-    harness::{authorization, call, call_with_value, create, deposit, eip7702, Case},
+    harness::{authorization, call, call_with_value, create, deposit, eip7702, Case, Run},
 };
-use crate::common::{self, CALLER, CONTRACT};
+use crate::{
+    common::{self, CALLER, CONTRACT},
+    rules::{l1_block_setter, scalars_word},
+};
 
 /// An account that holds nothing.
 const EMPTY: Address = address!("0x4000000000000000000000000000000000000004");
@@ -102,7 +112,6 @@ fn test_selfdestructs_replay() {
     assert_eq!(run.tx(0).result.logs().len(), 1, "the transfer log");
     let created = CONTRACT.create(1);
     assert!(run.tx(1).state[&created].is_selfdestructed());
-    let _ = SELFDESTRUCT;
 }
 
 /// A value transfer that creates its recipient: the recipient is absent in the record, created
@@ -121,22 +130,70 @@ fn test_a_transfer_creating_its_recipient_replays() {
     }
 }
 
-/// The L1 block info slots a user transaction is priced against.
-fn l1_slots() -> [U256; 5] {
+/// The L1 attributes depositor, whose deposit sets the L1 block info every block.
+const L1_ATTRIBUTES_DEPOSITOR: Address = address!("0xDeaDDEaDDeAdDeAdDEAdDEaddeAddEAdDEAd0001");
+
+/// The DA footprint gas scalar the chain holds before the block, and the one the block's L1
+/// attributes deposit writes.
+const PARENT_FOOTPRINT_SCALAR: u16 = 400;
+const BLOCK_FOOTPRINT_SCALAR: u16 = 800;
+
+/// The word the L1 block contract holds at its Ecotone fee-scalars slot: the base fee scalar and
+/// the blob base fee scalar at the offsets the fork reads them from.
+fn fee_scalars_word(base_fee_scalar: u32, blob_base_fee_scalar: u32) -> U256 {
+    let mut word = [0_u8; 32];
+    word[BASE_FEE_SCALAR_OFFSET..BASE_FEE_SCALAR_OFFSET + 4]
+        .copy_from_slice(&base_fee_scalar.to_be_bytes());
+    word[BLOB_BASE_FEE_SCALAR_OFFSET..BLOB_BASE_FEE_SCALAR_OFFSET + 4]
+        .copy_from_slice(&blob_base_fee_scalar.to_be_bytes());
+    U256::from_be_bytes(word)
+}
+
+/// The operator fee scalars word the chain holds before the block.
+fn parent_scalars_word() -> U256 {
+    scalars_word(PARENT_FOOTPRINT_SCALAR, 5, 7)
+}
+
+/// The L1 block info the chain holds before the block: a distinct non-zero value in every slot
+/// the transactions are priced against, so a slot a witness answered with zero would show in the
+/// L1 fee, the operator fee or the footprint.
+fn l1_info() -> [(U256, U256); 5] {
     [
-        L1_BASE_FEE_SLOT,
-        ECOTONE_L1_BLOB_BASE_FEE_SLOT,
-        ECOTONE_L1_FEE_SCALARS_SLOT,
-        OPERATOR_FEE_SCALARS_SLOT,
-        DA_FOOTPRINT_GAS_SCALAR_SLOT,
+        (L1_BASE_FEE_SLOT, U256::from(1_000_000_000_u64)),
+        (ECOTONE_L1_FEE_SCALARS_SLOT, fee_scalars_word(1_000_000, 1_000_000)),
+        (L1_OVERHEAD_SLOT, U256::from(188)),
+        (ECOTONE_L1_BLOB_BASE_FEE_SLOT, U256::from(1_000_000_000_u64)),
+        (OPERATOR_FEE_SCALARS_SLOT, parent_scalars_word()),
     ]
+}
+
+/// A chain holding the L1 block contract with `code` and the info of [`l1_info`], and the slot
+/// writer at [`CONTRACT`].
+fn chain_with_l1_info(code: Bytes) -> MemoryDatabase {
+    let mut db = common::database();
+    db.set_account_code(CONTRACT, slot_writer());
+    db.set_account_code(L1_BLOCK_CONTRACT, code);
+    for (slot, value) in l1_info() {
+        db.set_account_storage(L1_BLOCK_CONTRACT, slot, value);
+    }
+    db
+}
+
+/// The L1 block info entry of a run's pre-block states: the last state, and the one entry in it.
+fn l1_entry(run: &Run) -> &Account {
+    let (source, state) = run.pre_block.last().expect("a pre-block state");
+    assert_eq!(*source, PreBlockStateSource::L1BlockInfo, "the L1 block info is the last state");
+    assert_eq!(state.len(), 1, "the L1 block contract alone");
+    &state[&L1_BLOCK_CONTRACT]
 }
 
 /// A deposit minting to a fresh depositor: the depositor's absent account is read (for the
 /// receipt's nonce and as the caller), created and priced, and the deposit writes its slot. A
-/// block of deposits alone reads no L1 block info.
+/// block of deposits alone prices no transaction against the L1 block info; the pre-block phase
+/// reads it all the same, here from a chain that does not hold the contract, which the entry
+/// records as not existing without a slot read.
 #[test]
-fn test_a_deposit_only_block_replays_and_reads_no_l1_info() {
+fn test_a_deposit_only_block_replays_and_reads_no_l1_slot() {
     let mut db = common::database();
     db.set_account_code(CONTRACT, slot_writer());
     let replay = Case::new("deposits", db)
@@ -155,38 +212,91 @@ fn test_a_deposit_only_block_replays_and_reads_no_l1_info() {
     assert_eq!(run.tx(0).depositor_nonce, Some(0));
     assert_eq!(run.tx(1).depositor_nonce, Some(1), "the nonce the first deposit left");
     assert_eq!(run.record.accounts.get(&DEPOSITOR), Some(&None));
+    assert!(l1_entry(run).is_loaded_as_not_existing(), "the chain holds no L1 block contract");
+    assert_eq!(run.record.accounts.get(&L1_BLOCK_CONTRACT), Some(&None), "read once, pre-block");
     assert!(
-        !run.record.accounts.contains_key(&L1_BLOCK_CONTRACT),
-        "a deposit is priced against no L1 info and has no footprint"
+        !run.record.storage.keys().any(|(address, _)| *address == L1_BLOCK_CONTRACT),
+        "no slot of an absent contract is read"
     );
     if !common::state_is_free() {
         assert!(run.bucket_ids.len() >= 2, "the depositor's bucket and the slots'");
     }
 }
 
-/// A user transaction is priced against the L1 block info, read straight from the database and
-/// not through the journal: the L1 block contract's account and its slots are in the record —
-/// what a witness built from the transaction's state alone would miss.
+/// A user transaction is priced against the L1 block info, which is read on the database itself
+/// and not through the transaction's journal: the L1 block contract is in no transaction's state,
+/// and the pre-block phase carries its account and slots as read-only entries with the chain's
+/// values, so a witness built from the states holds what the transaction's L1 fee, operator fee
+/// and footprint were computed from.
 #[test]
-fn test_a_user_transaction_reads_the_l1_block_info_outside_the_journal() {
-    let mut db = common::database();
-    db.set_account_code(CONTRACT, slot_writer());
-    // The L1 block contract exists, as the predeploy does on a chain: an absent account's slots
-    // are known to be zero without a read.
-    db.set_account_code(L1_BLOCK_CONTRACT, Bytes::from(vec![0x00]));
+fn test_a_user_transaction_is_priced_against_the_l1_info_the_pre_block_state_carries() {
+    let db = chain_with_l1_info(Bytes::from(vec![0x00]));
     let replay = Case::new("l1 info", db).tx(call(0, CONTRACT, slot(1), write_gas())).run();
     let run = &replay.recorded;
-    assert!(run.tx(0).result.is_success());
-    assert!(run.record.accounts.get(&L1_BLOCK_CONTRACT).is_some_and(Option::is_some), "read");
-    for slot in l1_slots() {
-        assert_eq!(run.record.storage.get(&(L1_BLOCK_CONTRACT, slot)), Some(&U256::ZERO), "{slot}");
+    let tx = run.tx(0);
+    assert!(tx.result.is_success(), "{:?}", tx.result);
+    assert!(!tx.state.contains_key(&L1_BLOCK_CONTRACT), "in no transaction's state");
+
+    let account = l1_entry(run);
+    assert!(!account.is_touched() && !account.is_created(), "a read-only entry");
+    assert_eq!(account.info.code_hash, alloy_primitives::keccak256([0x00]));
+    for (slot, value) in l1_info() {
+        let entry = account.storage.get(&slot).expect("every slot of the set");
+        assert_eq!(entry.present_value, value, "{slot}");
+        assert!(!entry.is_changed(), "{slot} is unchanged");
+        assert_eq!(
+            run.record.storage.get(&(L1_BLOCK_CONTRACT, slot)),
+            Some(&value),
+            "{slot} was read from the database, before the transactions"
+        );
     }
-    assert!(
-        !run.tx(0).state.contains_key(&L1_BLOCK_CONTRACT),
-        "the L1 block contract is in no transaction's state"
+
+    let footprint_scalar = u64::from(PARENT_FOOTPRINT_SCALAR);
+    assert_eq!(
+        tx.da_footprint,
+        tx.da_size * footprint_scalar,
+        "the footprint the chain's scalar gives"
     );
-    assert!(
-        !run.pre_block.iter().any(|(_, state)| state.contains_key(&L1_BLOCK_CONTRACT)),
-        "nor in any pre-block state"
+    let credited = |vault: Address| tx.state.get(&vault).map_or(U256::ZERO, |a| a.info.balance);
+    assert!(!credited(L1_FEE_RECIPIENT).is_zero(), "an L1 fee was paid from the info");
+    assert!(!credited(OPERATOR_FEE_RECIPIENT).is_zero(), "an operator fee was paid from the info");
+}
+
+/// The production shape: the L1 attributes deposit comes first and writes the block's info over
+/// the parent's. The pre-block entry holds the parent's values, the deposit's own returned state
+/// holds the write, and the transaction after the deposit is priced against the write; so
+/// everything its footprint was computed from is in one of the block's states.
+#[test]
+fn test_the_l1_attributes_deposit_first_prices_the_transactions_after_it() {
+    let db = chain_with_l1_info(l1_block_setter());
+    let word = scalars_word(BLOCK_FOOTPRINT_SCALAR, 9, 11);
+    let replay = Case::new("l1 attributes deposit first", db)
+        .tx(deposit(
+            L1_ATTRIBUTES_DEPOSITOR,
+            TxKind::Call(L1_BLOCK_CONTRACT),
+            0,
+            U256::ZERO,
+            Bytes::from(word.to_be_bytes::<32>()),
+            200_000 + common::new_account_state_gas(),
+        ))
+        .tx(call(0, CONTRACT, slot(1), write_gas()))
+        .run();
+    let run = &replay.recorded;
+    assert!(run.tx(0).result.is_success(), "{:?}", run.tx(0).result);
+    assert!(run.tx(1).result.is_success(), "{:?}", run.tx(1).result);
+
+    let before = l1_entry(run).storage.get(&OPERATOR_FEE_SCALARS_SLOT).expect("in the entry");
+    assert_eq!(before.present_value, parent_scalars_word(), "the parent's info, pre-block");
+    let written = &run.tx(0).state[&L1_BLOCK_CONTRACT].storage[&OPERATOR_FEE_SCALARS_SLOT];
+    assert_eq!(written.original_value, parent_scalars_word());
+    assert_eq!(written.present_value, word, "the deposit's state carries the write");
+    assert_eq!(run.tx(0).da_footprint, 0, "a deposit has no footprint");
+
+    let tx = run.tx(1);
+    assert_eq!(
+        tx.da_footprint,
+        tx.da_size * u64::from(BLOCK_FOOTPRINT_SCALAR),
+        "priced against the deposit's write"
     );
+    assert_ne!(tx.da_footprint, tx.da_size * u64::from(PARENT_FOOTPRINT_SCALAR));
 }

@@ -6,6 +6,7 @@ mod executor;
 mod factory;
 mod hardfork;
 mod helpers;
+mod l1_block_info;
 mod limit;
 mod result;
 
@@ -15,5 +16,6 @@ pub use executor::*;
 pub use factory::*;
 pub use hardfork::*;
 pub use helpers::*;
+pub use l1_block_info::*;
 pub use limit::*;
 pub use result::*;
