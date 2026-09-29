@@ -188,8 +188,9 @@ fn test_limits_the_check_refuses_run_no_block() {
     let error = executor.apply_pre_execution_changes().expect_err("the block does not start");
     assert_eq!(internal(&error), &refusal);
     assert!(executor.evm().db().bundle_state.state.is_empty(), "no pre-block step ran");
-    let error =
-        executor.execute_transaction(&user_tx(0, 100_000)).expect_err("no transaction runs either");
+    let error = executor
+        .execute_transaction(&user_tx(0, empty_call_gas()))
+        .expect_err("no transaction runs either");
     assert_eq!(internal(&error), &refusal);
     assert!(executor.receipts().is_empty());
     let Err(error) = executor.finish() else { panic!("nor is the block finished") };
@@ -208,5 +209,5 @@ fn test_limits_the_check_refuses_run_no_block() {
     );
     assert_eq!(executor.protocol_limits(), Some(&ProtocolLimits::DEFAULT));
     executor.apply_pre_execution_changes().expect("the block starts");
-    executor.execute_transaction(&user_tx(0, 100_000)).expect("the transaction executes");
+    executor.execute_transaction(&user_tx(0, empty_call_gas())).expect("the transaction executes");
 }
