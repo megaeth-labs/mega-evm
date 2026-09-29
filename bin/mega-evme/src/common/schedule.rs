@@ -66,6 +66,11 @@ pub fn use_genesis(genesis: GenesisChain) -> Result<()> {
     Ok(())
 }
 
+/// Whether the run was given a genesis file (`--genesis`).
+pub fn genesis_in_use() -> bool {
+    GENESIS.get().is_some()
+}
+
 /// The activation table of `chain_id`: the genesis file's when the run was given one for that
 /// chain, and otherwise the Satin engine's ([`mega_evm::chain_activation`]).
 pub fn chain_activation(chain_id: u64) -> Option<ChainActivation> {

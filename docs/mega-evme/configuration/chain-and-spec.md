@@ -122,7 +122,8 @@ A command on a legacy spec is refused with `--override.limits`: the legacy engin
 A chain the tool does not know, a devnet for one, is replayed as its nodes run it only with its own Satin configuration: which blocks run Satin, the `SequencerRegistry` seeds its first Satin block deploys, and its protocol limits.
 `--genesis <FILE>` takes them from the chain's genesis file, on every command, `replay` included.
 The file's `config` object (or a file that is the `config` object) is read for its `chainId` and its Satin keys, with the parser the node and the stateless validator read them with, so a key the node refuses is refused here too.
-For that chain the file replaces the tool's table: a block runs Satin from the file's `satinTime`, under the registry seeds and the limits the file carries, as the chain's own limits and not as an override; a file without Satin keys runs every block on the legacy engine's table.
+For that chain the file replaces the tool's table: a block runs Satin from the file's `satinTime`, under the registry seeds and the limits the file carries, as the chain's own limits and not as an override.
+A block before the file's `satinTime` would run on the legacy engine, which runs a chain on its own table and knows nothing of the file, so it is refused, as is every block of a file without Satin keys.
 A command on another chain is refused, and so is a command on a legacy spec.
 `--override.limits` still replaces the fields it names, over the file's limits.
 

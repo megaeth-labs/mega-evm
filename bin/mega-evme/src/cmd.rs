@@ -19,7 +19,7 @@ pub struct MainCmd {
     /// Satin only: the genesis file of the chain the command runs on. Its `config` object's
     /// `chainId` and Satin keys (`satinTime`, the registry seeds, the protocol limits) replace the
     /// engine's table for that chain: which blocks run Satin, and the schedule they run under. A
-    /// run on another chain is refused
+    /// run on another chain, or on a block before the file's `satinTime`, is refused
     #[arg(long = "genesis", global = true, value_name = "FILE", value_parser = parse_genesis)]
     pub genesis: Option<GenesisChain>,
 

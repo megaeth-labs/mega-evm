@@ -331,8 +331,9 @@ fn mainnet_genesis(dir: &tempfile::TempDir, satin_time: u64) -> String {
 
 /// A genesis file decides which of its chain's blocks run Satin, and the schedule they run under:
 /// a recorded mainnet block, legacy by the engine's table, runs on Satin from a file's `satinTime`
-/// of zero, held to the file's limits as the chain's own rather than as an override; a file whose
-/// `satinTime` is after the block leaves it on the legacy engine.
+/// of zero, held to the file's limits as the chain's own rather than as an override. A block
+/// before the file's `satinTime` would run on the legacy engine, which runs a chain on its own
+/// table and knows nothing of the file: it is refused, and so is one a forced legacy spec runs.
 #[test]
 fn test_a_genesis_file_runs_its_chains_blocks_on_its_schedule() {
     let cache = cache_copy_with_absent_factory();
@@ -354,7 +355,12 @@ fn test_a_genesis_file_runs_its_chains_blocks_on_its_schedule() {
         assert_eq!(tx["satin"]["limit_exceeded"]["limit"], 310, "{tx}");
     }
 
-    let run = replay(BLOCKS[0], cache.path(), &["--genesis", &mainnet_genesis(&dir, u64::MAX)]);
-    assert_eq!(run.code, 0, "{}", run.stderr);
-    assert_eq!(blocks_of(&run.records())[0]["engine"], "legacy");
+    let later = mainnet_genesis(&dir, u64::MAX);
+    let forced = mainnet_genesis(&dir, 0);
+    for args in [&["--genesis", &later][..], &["--genesis", &forced, "--override.spec", "Rex6"]] {
+        let run = replay(BLOCKS[0], cache.path(), args);
+        assert_eq!(run.code, 1, "{args:?}: {}", run.stdout);
+        let error = run.records()[0]["error"].as_str().unwrap().to_string();
+        assert!(error.contains("--genesis applies to Satin blocks only"), "{args:?}: {error}");
+    }
 }
