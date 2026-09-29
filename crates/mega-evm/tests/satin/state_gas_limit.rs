@@ -15,7 +15,7 @@ use alloy_primitives::{address, Address, Bytes, B256, U256};
 use mega_evm::{
     constants::TX_GAS_LIMIT_CAP,
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    EvmTxRuntimeLimits, LimitCheck, LimitKind, MegaContext, MegaEvm, MegaTransaction,
+    EvmTxRuntimeLimits, LimitCheck, LimitKind, LimitUsage, MegaContext, MegaEvm, MegaTransaction,
     MegaTransactionOutcome, AUTHORIZATION_SIZE, TX_BODY_SIZE, WRITE_RECORD_SIZE,
 };
 use revm::{
@@ -23,11 +23,14 @@ use revm::{
         CALL, CALLCODE, CREATE, CREATE2, DELEGATECALL, GAS, INVALID, POP, PUSH0, PUSH1, RETURN,
         REVERT, SELFDESTRUCT, STOP,
     },
-    interpreter::{interpreter::EthInterpreter, CallInputs, CallOutcome, InstructionResult},
+    interpreter::{
+        interpreter::EthInterpreter, CallInputs, CallOutcome, Gas, InstructionResult,
+        InterpreterResult,
+    },
     Database, Inspector,
 };
 
-use crate::common::{authorizing_call, call, context, create};
+use crate::common::{authorizing_call, call, call_with_value_and_data, context, create};
 
 const CALLER: Address = address!("0000000000000000000000000000000000600000");
 const A: Address = address!("0000000000000000000000000000000000600001");
@@ -489,6 +492,154 @@ fn test_a_frame_start_whose_records_cross_is_stopped_for_its_records() {
         "the caller's account, the recipient's and the transfer log, over the limit by one byte",
     );
     assert_eq!(outcome.gas.state, 0);
+}
+
+/* ---------- the first frame's upfront charge, held once revm has decided the frame ---------- */
+
+/// The identity precompile, which answers any input with a success.
+const IDENTITY: Address = address!("0000000000000000000000000000000000000004");
+/// The BN254 pairing precompile, which rejects an input that is not a whole number of pairs.
+const BN254_PAIRING: Address = address!("0000000000000000000000000000000000000008");
+
+/// A transaction of one wei from [`CALLER`] to `to` carrying `data`.
+fn one_wei_to(to: Address, data: &[u8]) -> MegaTransaction {
+    call_with_value_and_data(CALLER, to, U256::from(1), Bytes::copy_from_slice(data), BELOW_CAP)
+}
+
+/// The transaction's own frame is held for the account EIP-2780 charges its start for as every
+/// frame is held for its opcode's upfront charge: once revm has decided the frame. A first frame
+/// revm answers with a failure — a value transfer to a precompile that rejects its input — adds no
+/// account, and its charge comes back, so no limit holds it: the transaction halts exactly as it
+/// does without a limit, and nothing moves.
+#[test]
+fn test_a_first_frame_revm_answers_with_a_failure_is_not_held_for_its_upfront_charge() {
+    let account = one_account();
+    let tx = one_wei_to(BN254_PAIRING, &[1]);
+    let free = run_under(funded(), tx.clone(), u64::MAX);
+    assert!(free.result.is_halt(), "the pairing rejects a one-byte input: {:?}", free.result);
+    assert_eq!(free.gas.state, 0, "the account charge came back");
+    for limit in [account - 1, 0] {
+        let limited = run_under(funded(), tx.clone(), limit);
+        assert_eq!(limited.limit_exceeded, None, "limit {limit}");
+        assert_eq!(limited.result, free.result, "limit {limit}: as without the limit");
+        assert_eq!(limited.gas, free.gas, "limit {limit}");
+        assert!(
+            limited.state.get(&BN254_PAIRING).is_none_or(|account| account.info.balance.is_zero()),
+            "limit {limit}: nothing moved"
+        );
+    }
+}
+
+/// A first frame revm builds, or answers with a success, adds the account EIP-2780 charged its
+/// start for, so the charge is held once revm has decided the frame, and a crossing stops the
+/// transaction: a built frame before its first instruction, an answer by being rewritten to the
+/// stop. The stop keeps none of what the start wrote — no value moved, no account added, the
+/// record and the transfer log not counted, the record's history given back — and bills what ran,
+/// as a stop below the first frame does: a precompile answered with a success ran, and its price
+/// stays spent. A creation transaction keeps its creator's nonce bump, so it cannot be replayed.
+#[test]
+fn test_a_first_frame_revm_decides_is_held_for_its_upfront_charge() {
+    let account = one_account();
+    let word = [7_u8; 32];
+    let cases = [
+        ("a value transfer to an account with no code", one_wei_to(EMPTY, &[]), EMPTY, 0),
+        (
+            "a value transfer to a precompile that answers",
+            one_wei_to(IDENTITY, &word),
+            IDENTITY,
+            32,
+        ),
+        ("a creation transaction", create(CALLER, Bytes::new(), BELOW_CAP), CALLER.create(0), 0),
+    ];
+    for (name, tx, added, calldata) in cases {
+        let free = run_under(funded(), tx.clone(), u64::MAX);
+        assert!(free.result.is_success(), "{name}: {:?}", free.result);
+        assert_eq!(free.gas.state, account, "{name}: the account EIP-2780 charged");
+
+        let stopped = run_under(funded(), tx, account - 1);
+        assert_state_stopped(name, &stopped, account - 1, account);
+        assert_eq!(stopped.gas.state, 0, "{name}");
+        let body = mega_evm::history_gas(TX_BODY_SIZE + calldata).expect("a body has a price");
+        assert_eq!(stopped.gas.history, body, "{name}: the record's history came back");
+        assert_eq!(stopped.gas.regular, free.gas.regular, "{name}: what ran is billed");
+        assert_eq!(
+            stopped.usage,
+            LimitUsage { data_size: TX_BODY_SIZE + calldata, write_records: 0 },
+            "{name}: the body alone"
+        );
+        let account = stopped.state.get(&added);
+        assert!(
+            account.is_none_or(|account| account.info.balance.is_zero() && !account.is_created()),
+            "{name}: nothing moved, nothing added"
+        );
+        assert_eq!(stopped.state[&CALLER].info.nonce, 1, "{name}: the sender's nonce");
+    }
+}
+
+/// The first frame's start is held as every frame start is: its record and transfer log before
+/// revm builds the frame, its upfront state gas after revm has decided it. A value transfer whose
+/// record and transfer log cross the data-size limit is stopped for them and adds no account, so
+/// the state-gas limit its upfront charge would have crossed is not what stops it.
+#[test]
+fn test_a_first_frame_start_whose_records_cross_is_stopped_for_its_records() {
+    let account = one_account();
+    let limit = TX_BODY_SIZE + WRITE_RECORD_SIZE + mega_evm::TRANSFER_LOG_SIZE - 1;
+    let outcome = MegaEvm::new(
+        context(funded()).with_tx_runtime_limits(
+            EvmTxRuntimeLimits::no_limits()
+                .with_tx_state_gas_limit(account - 1)
+                .with_tx_data_size_limit(limit),
+        ),
+    )
+    .execute_transaction(one_wei_to(EMPTY, &[]))
+    .unwrap();
+    assert_eq!(
+        outcome.limit_exceeded,
+        Some(LimitCheck::ExceedsLimit {
+            kind: LimitKind::DataSize,
+            limit,
+            used: limit + 1,
+            frame_local: false,
+        }),
+        "the recipient's record and the transfer log, over the limit by one byte",
+    );
+    assert_eq!(outcome.gas.state, 0);
+    assert!(outcome.state.get(&EMPTY).is_none_or(|account| account.info.balance.is_zero()));
+}
+
+/// Answers every call to [`EMPTY`] itself, with a success.
+struct AnswersEmpty;
+
+impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for AnswersEmpty {
+    fn call(&mut self, _: &mut MegaContext<DB>, inputs: &mut CallInputs) -> Option<CallOutcome> {
+        (inputs.target_address == EMPTY).then(|| {
+            CallOutcome::new(
+                InterpreterResult::new(
+                    InstructionResult::Stop,
+                    Bytes::new(),
+                    Gas::new(inputs.gas_limit),
+                ),
+                inputs.return_memory_offset.clone(),
+            )
+        })
+    }
+}
+
+/// A first frame an inspector answers in place of running never started: it adds no account, and
+/// its upfront charge comes back whatever the answer. So no limit holds that charge, and the
+/// transaction keeps the inspector's answer.
+#[test]
+fn test_a_first_frame_an_inspector_answers_is_not_held_for_its_upfront_charge() {
+    let account = one_account();
+    let mut evm = MegaEvm::new(context(funded()).with_tx_runtime_limits(
+        EvmTxRuntimeLimits::no_limits().with_tx_state_gas_limit(account - 1),
+    ))
+    .with_inspector(AnswersEmpty);
+    let outcome = evm.execute_transaction(one_wei_to(EMPTY, &[])).unwrap();
+    assert_eq!(outcome.limit_exceeded, None);
+    assert!(outcome.result.is_success(), "{:?}", outcome.result);
+    assert_eq!(outcome.gas.state, 0);
+    assert!(outcome.state.get(&EMPTY).is_none_or(|account| account.info.balance.is_zero()));
 }
 
 /* ---------- one limit for the whole call stack ---------- */

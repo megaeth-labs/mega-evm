@@ -93,12 +93,13 @@
 //!
 //! The limit holds each charge where it is made, once it is made, so a charge the frame cannot
 //! pay is an out-of-gas whatever the limit: the authorities' before the first frame, which are
-//! taken back on a crossing; the first frame's recipient or created account, which the first frame
-//! is then answered with the stop for; a fresh slot and a destruction's new beneficiary, which
-//! stop the frame; and a new account a `CALL`, `CREATE` or `CREATE2` adds, which its opcode is
-//! charged for upfront and the limit holds once revm has decided the frame. A frame revm refuses —
-//! a value call its caller cannot fund, one past the call-stack limit — gives that charge back and
-//! is never held for it; a frame revm builds, or answers with a success, returns the stop.
+//! taken back on a crossing; a fresh slot and a destruction's new beneficiary, which stop the
+//! frame; and a new account a frame's start adds — the first frame's recipient or created account,
+//! which EIP-2780 charges the transaction for, and the account a `CALL`, `CREATE` or `CREATE2`
+//! adds, which its opcode is charged for — held once revm has decided the frame. A frame refused —
+//! a value its caller cannot fund, one past the call-stack limit — or answered with a failure gives
+//! that charge back and is never held for it; a frame revm builds, or answers with a success,
+//! returns the stop, and an answer of the transaction's own frame takes its writes back with it.
 //!
 //! Deployed code is held once `return_create` has charged every part of its deposit and before it
 //! commits the creation, as its bytes are ([`ContextTr::admit_code_deposit`]), so a crossing

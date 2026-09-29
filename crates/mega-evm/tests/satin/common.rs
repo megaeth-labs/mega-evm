@@ -39,6 +39,17 @@ pub(crate) fn call_with_data(
     tx(caller, TxKind::Call(to), data, U256::ZERO, gas_limit)
 }
 
+/// A call from `caller` to `to` carrying `value` and `data`.
+pub(crate) fn call_with_value_and_data(
+    caller: Address,
+    to: Address,
+    value: U256,
+    data: Bytes,
+    gas_limit: u64,
+) -> MegaTransaction {
+    tx(caller, TxKind::Call(to), data, value, gas_limit)
+}
+
 /// A creation from `caller` running `init_code`.
 pub(crate) fn create(caller: Address, init_code: Bytes, gas_limit: u64) -> MegaTransaction {
     tx(caller, TxKind::Create, init_code, U256::ZERO, gas_limit)

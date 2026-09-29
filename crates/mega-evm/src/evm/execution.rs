@@ -24,7 +24,7 @@ use revm::{
     },
     context_interface::{
         cfg::{gas::GasTracker, GasId, StateGasCharge, StateGasSite},
-        journaled_state::{account::JournaledAccountTr, entry::JournalEntry},
+        journaled_state::{account::JournaledAccountTr, entry::JournalEntry, JournalCheckpoint},
         Host,
     },
     handler::{
@@ -50,7 +50,9 @@ use crate::{
     access::ComputeStop,
     evm::{
         history::transaction_body_bytes,
-        inspector::{frame_end_checked, journal_position, ResultSource, StepGuard},
+        inspector::{
+            frame_end_checked, journal_position, revert_journal_to, ResultSource, StepGuard,
+        },
     },
     history_gas, synthetic_frame_result,
     system::keyless,
@@ -246,12 +248,13 @@ where
     /// out-of-gas in place of the stop that bound first. The input carries no charged flag, so
     /// the stop's settlement gives nothing back that was not charged.
     ///
-    /// Once revm has built the first frame, the state gas the transaction has been charged is all
-    /// it holds outside its frames: the account a deposit-like transaction creates for its caller,
-    /// the applied authorities, and the new account EIP-2780 charges the first frame's start for.
-    /// It is held to the state-gas limit there, and a crossing latches the transaction: the frame
-    /// is answered with the stop before it runs, and its settlement gives the start's charge back
-    /// as it does for any first frame that fails.
+    /// Once revm has prepared the first frame, the state gas the transaction has been charged is
+    /// all it holds outside its frames: the account a deposit-like transaction creates for its
+    /// caller, the applied authorities, and the new account EIP-2780 charges the first frame's
+    /// start for. The first two stand whatever the first frame does, and are held to the
+    /// state-gas limit here: a crossing latches the transaction, and the frame is answered with the
+    /// stop before it is built. The third is the first frame's upfront charge, held as every
+    /// frame's is, once revm has decided the frame ([`hold_upfront_state_gas`]).
     fn first_frame_input(
         &mut self,
         evm: &mut Self::Evm,
@@ -260,8 +263,10 @@ where
         if evm.ctx_ref().additional_limit.latched().is_some() {
             return Ok(Some(unbuilt_first_frame(evm.ctx_ref(), gas)));
         }
+        let stands = gas.state_gas_spent();
         let frame = self.op.first_frame_input(evm, gas)?;
-        evm.ctx_mut().additional_limit.on_state_gas_before_frames(gas.state_gas_spent());
+        let spent = gas.state_gas_spent();
+        evm.ctx_mut().additional_limit.on_state_gas_before_frames(stands, spent);
         evm.ctx_mut().mark_beneficiary_delegate();
         Ok(frame)
     }
@@ -427,7 +432,10 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
     /// 6. revm builds the frame, or answers it;
     /// 7. the state gas the caller was charged upfront for the frame's start is held to the
     ///    state-gas limit, unless revm refused the frame and so gives it back
-    ///    ([`hold_upfront_state_gas`]).
+    ///    ([`hold_upfront_state_gas`]); for the transaction's own frame, the account EIP-2780
+    ///    charges its start for. A success answer of the transaction's own frame rewritten into the
+    ///    stop has its journal taken back to where its start began, since no caller's revert will
+    ///    take back what the answer wrote.
     ///
     /// A frame answered at step 3, 4 or 6 — a `keylessDeploy` call carrying value, an
     /// interceptor's answer, a precompile's, revm's for a call it did not start — is held to the
@@ -495,6 +503,8 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
             &mut frame_init,
             refused,
         );
+        // Where the transaction's own frame starts, for an answer the engine then stops.
+        let start = (depth == 0).then(|| journal_position(ctx));
         let outcome = if hold == PrecompileHold::Crossing {
             Err(crossing_answer(&frame_init.frame_input))
         } else {
@@ -520,8 +530,12 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
                 if let PrecompileHold::Clamped(withheld) = hold {
                     Detention::restore_forward(result.interpreter_result_mut(), withheld);
                 }
+                let succeeded = result.instruction_result().is_ok();
                 settle_answer(ctx, depth, gas_limit, &mut result);
                 hold_upfront_state_gas(ctx, Some(&mut result));
+                if let Some(start) = start {
+                    take_back_a_stopped_answer(ctx, start, succeeded, &result);
+                }
                 Ok(ItemOrResult::Result(result))
             }
         }
@@ -1003,20 +1017,23 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
 }
 
 /// Holds the state gas the caller was charged upfront for the frame that is starting — the new
-/// account a value `CALL` adds, a creation's account — to the state-gas limit, once revm has
-/// decided the frame. `answer` is the frame's result when it was answered without running; a
-/// frame revm built has none yet.
+/// account a value `CALL` adds, a creation's account, or, for the transaction's own frame, the
+/// recipient or created account EIP-2780 charges the transaction for — to the state-gas limit,
+/// once revm has decided the frame. `answer` is the frame's result when it was answered without
+/// running; a frame revm built has none yet.
 ///
-/// revm's `CALL`, `CREATE` and `CREATE2` make that charge before anything knows whether the frame
-/// can start, and a frame that adds no account gives it back when its answer returns
-/// ([`FrameResult::refundable_state_gas_charge`]): a value call its caller cannot fund, a call past
-/// the call-stack limit, an answer that fails. Such a charge is never held. A charge that stands —
-/// the frame is built, or answered with a success, as a value call to an account with no code is
-/// — is held, and a crossing latches the transaction: a built frame returns the stop before its
-/// first instruction, and an answer is rewritten to it here, so an inspector sees the answer the
-/// caller gets. The writes the frame's start made go with the frames the stop reverts. A built
-/// frame that later fails gives the charge back too, but by then it has started, and a crossing
-/// inside a frame that later fails is a crossing.
+/// revm's `CALL`, `CREATE` and `CREATE2`, and its EIP-2780 phase for the first frame, make that
+/// charge before anything knows whether the frame can start, and a frame that adds no account
+/// gives it back when its answer returns ([`FrameResult::refundable_state_gas_charge`]): a value
+/// call its caller cannot fund, a call past the call-stack limit, an answer that fails. Such a
+/// charge is never held. A charge that stands — the frame is built, or answered with a success, as
+/// a value call to an account with no code is — is held, and a crossing latches the transaction: a
+/// built frame returns the stop before its first instruction, and an answer is rewritten to it
+/// here, so an inspector sees the answer the caller gets. The writes the frame's start made go with
+/// the frames the stop reverts; an answer of the transaction's own frame, which no frame's revert
+/// follows, is taken back by its start ([`take_back_a_stopped_answer`]). A built frame that later
+/// fails gives the charge back too, but by then it has started, and a crossing inside a frame that
+/// later fails is a crossing.
 ///
 /// The frame's own lane is on top by now, and holds outside it what its caller held, the charge
 /// included; the frame itself holds nothing yet. Every other charge was held where it was made, so
@@ -1033,6 +1050,26 @@ fn hold_upfront_state_gas<DB: Database, ExtEnvs: ExternalEnvTypes>(
         ctx.additional_limit.check_state_gas(0).exceeded_limit()
     {
         ctx.additional_limit.apply_latch(answer);
+    }
+}
+
+/// Takes the journal back to `start`, where the transaction's own frame began, when revm answered
+/// that frame with a success (`succeeded`) that the engine then rewrote into `result`, the stop.
+///
+/// revm commits an answered frame's journal checkpoint before its answer returns: a value transfer
+/// to an account with no code, or to a precompile that answers, has moved the value, created the
+/// recipient and journaled the transfer log by then. Below the transaction's own frame the stop
+/// reverts every caller, and the caller's checkpoint takes the answer's writes back with its own;
+/// the transaction's own frame has no caller, so its answer's writes are taken back here, as revm
+/// takes back a frame that fails. The journal's depth is left as it is.
+fn take_back_a_stopped_answer<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    ctx: &mut MegaContext<DB, ExtEnvs>,
+    start: JournalCheckpoint,
+    succeeded: bool,
+    result: &FrameResult,
+) {
+    if succeeded && !result.instruction_result().is_ok() {
+        revert_journal_to(ctx, start);
     }
 }
 

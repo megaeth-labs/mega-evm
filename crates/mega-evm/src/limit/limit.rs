@@ -536,12 +536,15 @@ impl AdditionalLimit {
         LimitCheck::WithinLimit
     }
 
-    /// Records the state gas the transaction was charged before its first frame, `spent`, and
-    /// holds it to the limit. A crossing latches the transaction, and its first frame is answered
-    /// with the stop before it is built.
-    pub(crate) fn on_state_gas_before_frames(&mut self, spent: i64) {
+    /// Records the state gas the transaction was charged before its first frame, `spent`, which
+    /// the first frame's lane holds outside it, and holds to the limit the part of it that stands
+    /// whatever the first frame does, `stands`: all of it but the account EIP-2780 charges the
+    /// first frame's start for, which is held once revm has decided the frame, as every frame's
+    /// upfront charge is. A crossing latches the transaction, and its first frame is answered with
+    /// the stop before it is built.
+    pub(crate) fn on_state_gas_before_frames(&mut self, stands: i64, spent: i64) {
         self.tracker.set_state_gas_before_frames(spent);
-        self.check_state_gas(spent);
+        self.check_state_gas(stands);
     }
 
     /// Records the state gas `held` by the running frame as it suspends on a child, which the
