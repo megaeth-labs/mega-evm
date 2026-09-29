@@ -1,0 +1,170 @@
+//! Oracle reads, hints and the high-precision timestamp through the harness.
+//!
+//! An oracle read loads the chain's slot, then takes the service's answer over it. The chain's
+//! slot is in the record like any slot; the service's answer is not in any database, so a replay
+//! matches only when it is given the answer — or when the chain holds it, which is what a node
+//! must arrange for a validator that runs no service.
+
+use alloy_primitives::{Bytes, B256, U256};
+use alloy_sol_types::SolCall;
+use mega_evm::{
+    system::{
+        IOracle, HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS, ORACLE_CONTRACT_ADDRESS,
+        ORACLE_CONTRACT_CODE,
+    },
+    test_utils::{BytecodeBuilder, MemoryDatabase},
+};
+use revm::bytecode::opcode::{CALL, GAS, POP, PUSH0};
+
+use super::harness::{assert_differs, assert_same_run, call, Case, Envs, Oracle};
+use crate::common::{self, CONTRACT};
+
+/// The slot the tests read, the value the service answers, and the value the chain holds.
+const SLOT: U256 = U256::from_limbs([42, 0, 0, 0]);
+const SERVICE_VALUE: U256 = U256::from_limbs([0x1234_5678, 0, 0, 0]);
+const STATE_VALUE: U256 = U256::from_limbs([0xfedc_ba98, 0, 0, 0]);
+
+/// The selector of the timestamp contract's `timestamp()`.
+const TIMESTAMP_SELECTOR: [u8; 4] = [0xb8, 0x07, 0x77, 0xea];
+
+/// A microsecond timestamp the service holds in the Oracle's slot 0.
+const MICROSECONDS: U256 = U256::from_limbs([1_800_000_000_000_000, 0, 0, 0]);
+
+/// A chain holding the Oracle, as every chain does after its first Satin block: a block that
+/// creates the Oracle clears its storage, and a created account's slots are known to be zero
+/// without a read, so only a chain that already holds it reads the Oracle's slots.
+fn db() -> MemoryDatabase {
+    common::database().account_code(ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE)
+}
+
+/// A gas limit with room for a call into the Oracle carrying `calldata` bytes.
+fn gas(calldata: u64) -> u64 {
+    1_000_000 + common::body_history(calldata)
+}
+
+/// The calldata of `getSlot(SLOT)`.
+fn get_slot() -> Bytes {
+    IOracle::getSlotCall { slot: SLOT }.abi_encode().into()
+}
+
+/// The word a successful call returned.
+fn returned(run: &super::harness::Run, index: usize) -> U256 {
+    let output = run.tx(index).result.output().cloned().unwrap_or_default();
+    U256::from_be_slice(&output)
+}
+
+/// A read the service answers over the chain's value: the read and its answer are in the record,
+/// and so is the chain's slot; a replay given the answers matches, and one without a service
+/// answers the chain's value and produces another block.
+#[test]
+fn test_an_oracle_read_replays_with_its_answer_and_not_without() {
+    let db = db().account_storage(ORACLE_CONTRACT_ADDRESS, SLOT, STATE_VALUE);
+    let case = Case::new("oracle read", db)
+        .envs(Envs::new().with_oracle_storage(SLOT, SERVICE_VALUE))
+        .tx(call(0, ORACLE_CONTRACT_ADDRESS, get_slot(), gas(36)));
+    let recorded = case.record();
+    assert_eq!(returned(&recorded, 0), SERVICE_VALUE, "the service answered");
+    assert_eq!(recorded.record.oracle_reads, vec![(SLOT, Some(SERVICE_VALUE))]);
+    assert_eq!(
+        recorded.record.storage.get(&(ORACLE_CONTRACT_ADDRESS, SLOT)),
+        Some(&STATE_VALUE),
+        "the chain's slot was loaded all the same"
+    );
+
+    let given = case.replay(&recorded.record, Oracle::Recorded);
+    assert_same_run("oracle read, answers given", &recorded, &given);
+
+    let without = case.replay(&recorded.record, Oracle::Absent);
+    assert_eq!(returned(&without, 0), STATE_VALUE, "the chain's value stands in");
+    assert_differs("oracle read, no service", &recorded, &without);
+    assert!(recorded.record.covers(&without.record), "it read nothing else");
+}
+
+/// When the chain holds what the service answers — the node wrote it before the read — a replay
+/// without a service produces the same block: the read is priced cold on both paths and the slot
+/// is loaded on both.
+#[test]
+fn test_an_oracle_read_the_chain_holds_replays_without_a_service() {
+    let db = db().account_storage(ORACLE_CONTRACT_ADDRESS, SLOT, SERVICE_VALUE);
+    let case = Case::new("oracle read on chain", db)
+        .envs(Envs::new().with_oracle_storage(SLOT, SERVICE_VALUE))
+        .tx(call(0, ORACLE_CONTRACT_ADDRESS, get_slot(), gas(36)));
+    let recorded = case.record();
+    assert_eq!(recorded.record.oracle_reads, vec![(SLOT, Some(SERVICE_VALUE))]);
+    let without = case.replay(&recorded.record, Oracle::Absent);
+    assert_same_run("oracle read on chain, no service", &recorded, &without);
+}
+
+/// A read the service does not answer takes the chain's value on both runs.
+#[test]
+fn test_an_unanswered_oracle_read_replays() {
+    let db = db().account_storage(ORACLE_CONTRACT_ADDRESS, SLOT, STATE_VALUE);
+    let replay = Case::new("oracle unanswered", db)
+        .tx(call(0, ORACLE_CONTRACT_ADDRESS, get_slot(), gas(36)))
+        .run();
+    assert_eq!(returned(&replay.recorded, 0), STATE_VALUE);
+    assert_eq!(replay.recorded.record.oracle_reads, vec![(SLOT, None)]);
+}
+
+/// Code that sends a hint naming `SLOT`, then reads `SLOT` through the Oracle and returns it.
+fn hint_then_read() -> Bytes {
+    let hint = IOracle::sendHintCall {
+        topic: SLOT.into(),
+        data: Bytes::from(SERVICE_VALUE.to_be_bytes::<32>()),
+    }
+    .abi_encode();
+    let read = get_slot();
+    let mut code = BytecodeBuilder::default().mstore(0, &hint);
+    code = code
+        .append_many([PUSH0, PUSH0])
+        .push_number(hint.len() as u64)
+        .append_many([PUSH0, PUSH0])
+        .push_address(ORACLE_CONTRACT_ADDRESS)
+        .append_many([GAS, CALL, POP]);
+    code = code.mstore(0x100, &read);
+    code.push_number(32_u8)
+        .push_number(0x200_u16)
+        .push_number(read.len() as u64)
+        .push_number(0x100_u16)
+        .append(PUSH0)
+        .push_address(ORACLE_CONTRACT_ADDRESS)
+        .append_many([GAS, CALL, POP])
+        .push_number(32_u8)
+        .push_number(0x200_u16)
+        .append(revm::bytecode::opcode::RETURN)
+        .build()
+}
+
+/// A hint followed by a read: the hint reaches the service and is in the record, in order before
+/// the read, and the read's answer replays.
+#[test]
+fn test_a_hint_and_a_read_replay() {
+    let mut db = db();
+    db.set_account_code(CONTRACT, hint_then_read());
+    let replay = Case::new("hint then read", db)
+        .envs(Envs::new().with_oracle_storage(SLOT, SERVICE_VALUE))
+        .tx(call(0, CONTRACT, Bytes::new(), 2_000_000 + common::body_history(0)))
+        .run();
+    let run = &replay.recorded;
+    assert_eq!(returned(run, 0), SERVICE_VALUE);
+    assert_eq!(run.record.hints.len(), 1, "the hint reached the service");
+    assert_eq!(run.record.hints[0].topic, B256::from(SLOT));
+    assert_eq!(run.record.oracle_reads, vec![(SLOT, Some(SERVICE_VALUE))]);
+}
+
+/// The high-precision timestamp is an Oracle read of slot 0 through the wrapper's own bytecode:
+/// the read is in the record, and the value the service answers replays.
+#[test]
+fn test_the_high_precision_timestamp_replays() {
+    let replay = Case::new("timestamp", db())
+        .envs(Envs::new().with_oracle_storage(U256::ZERO, MICROSECONDS))
+        .tx(call(0, HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS, TIMESTAMP_SELECTOR.into(), gas(4)))
+        .run();
+    let run = &replay.recorded;
+    assert_eq!(returned(run, 0), MICROSECONDS, "{:?}", run.tx(0).result);
+    assert_eq!(run.record.oracle_reads, vec![(U256::ZERO, Some(MICROSECONDS))]);
+    assert!(
+        run.record.storage.contains_key(&(ORACLE_CONTRACT_ADDRESS, U256::ZERO)),
+        "the Oracle's slot 0 is loaded from the chain"
+    );
+}
