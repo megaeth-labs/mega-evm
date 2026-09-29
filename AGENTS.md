@@ -22,6 +22,7 @@ cargo build
 
 # Test
 cargo test                                # all tests
+cargo test --workspace --release --locked # the release CI job
 cargo test -p mega-evm                    # core crate only
 cargo test -p mega-evm -- test_name       # single test
 cargo test --manifest-path bin/mega-evme/Cargo.toml   # the mega-evme tool (not `-p`: it links mega-evme 1.7.1)
@@ -62,6 +63,7 @@ cargo check -p mega-evm --target riscv64imac-unknown-none-elf --no-default-featu
 
 # System contracts (requires Foundry)
 cd crates/system-contracts && forge build
+cd crates/system-contracts && forge test  # the system-contract CI job
 ```
 
 Git submodules are required — clone with `--recursive` or run `git submodule update --init --recursive`.

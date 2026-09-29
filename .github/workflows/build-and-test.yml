@@ -48,6 +48,33 @@ jobs:
       - name: Run Test
         run: cargo test --workspace
 
+  test-release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+      - name: Run tests in release
+        run: cargo test --workspace --release --locked
+
+  system-contracts:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+      - name: Run forge tests
+        working-directory: crates/system-contracts
+        run: forge test
+
   no-std:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
