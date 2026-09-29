@@ -3656,6 +3656,7 @@ dependencies = [
  "mega-system-contracts 2.0.0-alpha.1",
  "op-alloy-consensus 2.0.0",
  "op-revm 20.0.0",
+ "proptest",
  "revm 40.0.3",
  "revm-inspectors 0.40.4",
  "serde",

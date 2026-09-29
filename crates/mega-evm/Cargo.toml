@@ -44,6 +44,7 @@ serde = { workspace = true, features = ["derive"] }
 # once under valgrind and reports layout-insensitive instruction counts.
 criterion = { package = "codspeed-criterion-compat", version = "5.0.1", default-features = false, features = ["cargo_bench_support", "html_reports", "plotters"] }
 mega-evm = { path = ".", features = ["test-utils"] }
+proptest = { workspace = true, features = ["std"] }
 revm-inspectors = { workspace = true, features = ["std"] }
 serde_json = { workspace = true, features = ["std"] }
 
