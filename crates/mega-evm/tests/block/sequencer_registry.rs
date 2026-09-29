@@ -260,7 +260,7 @@ const NEXT_ADMIN: Address = address!("0x6000000000000000000000000000000000000006
 
 /// A Satin-at-genesis schedule whose registry is seeded with [`GENESIS_SYSTEM_ADDRESS`].
 fn chain_seeding_genesis_system_address() -> MegaHardforkConfig {
-    MegaHardforkConfig::default().with_all_activated().with_params(SequencerRegistryConfig {
+    common::chain_spec().with_params(SequencerRegistryConfig {
         initial_system_address: GENESIS_SYSTEM_ADDRESS,
         ..common::registry_config()
     })

@@ -14,7 +14,7 @@ use mega_evm::{
     test_utils::MemoryDatabase,
     BlockLimits, EmptyExternalEnv, MegaBlockExecutionCtx, MegaBlockExecutor,
     MegaBlockExecutorFactory, MegaEvm, MegaEvmFactory, MegaHardforkConfig, MegaSpecId,
-    MegaTxEnvelope, PreBlockStateSource,
+    MegaTxEnvelope, PreBlockStateSource, ProtocolLimits,
 };
 use op_alloy_consensus::TxDeposit;
 use revm::{
@@ -86,20 +86,35 @@ pub(crate) fn registry_config() -> SequencerRegistryConfig {
     }
 }
 
-/// A schedule that activates Satin at genesis and can seed the `SequencerRegistry`.
+/// A schedule that activates Satin at genesis, can seed the `SequencerRegistry`, and holds its
+/// blocks to no limit at all.
+///
+/// Its limits are [`ProtocolLimits::no_limits`], which no chain may carry, so they are attached
+/// through the test-only unchecked route: most block tests exercise one mechanism and take the
+/// limits out, and a test that holds a block or a transaction to a limit attaches its own
+/// ([`chain_spec_with`]).
 pub(crate) fn chain_spec() -> MegaHardforkConfig {
-    MegaHardforkConfig::default().with_all_activated().with_params(registry_config())
+    chain_spec_with(ProtocolLimits::no_limits())
 }
 
-/// The context of a block held to `limits`.
+/// [`chain_spec`], holding its blocks to `limits`, attached unchecked so a test may run under a
+/// value no chain may carry.
+pub(crate) fn chain_spec_with(limits: ProtocolLimits) -> MegaHardforkConfig {
+    MegaHardforkConfig::default()
+        .with_all_activated()
+        .with_params(registry_config())
+        .with_params_unchecked(limits)
+}
+
+/// The context of a block the builder packs under `policy`.
 ///
 /// Cancun is active, so the block carries a parent beacon block root; without one the EIP-4788
 /// pre-block call refuses the block.
-pub(crate) fn block_ctx(limits: BlockLimits) -> MegaBlockExecutionCtx {
-    MegaBlockExecutionCtx::new(B256::ZERO, Some(B256::ZERO), Bytes::new(), limits)
+pub(crate) fn block_ctx(policy: BlockLimits) -> MegaBlockExecutionCtx {
+    MegaBlockExecutionCtx::new(B256::ZERO, Some(B256::ZERO), Bytes::new(), policy)
 }
 
-/// The context of a block with no limits at all.
+/// The context of a block packed under no building policy, as a validator executes one.
 pub(crate) fn unlimited_ctx() -> MegaBlockExecutionCtx {
     block_ctx(BlockLimits::no_limits())
 }
@@ -113,16 +128,20 @@ pub(crate) type TestExecutor<'a> =
     MegaBlockExecutor<TestEvm<'a>, OpAlloyReceiptBuilder, MegaHardforkConfig>;
 
 /// The factory the tests build executors from.
-pub(crate) fn factory() -> MegaBlockExecutorFactory<
+pub(crate) type TestFactory = MegaBlockExecutorFactory<
     OpAlloyReceiptBuilder,
     MegaHardforkConfig,
     MegaEvmFactory<EmptyExternalEnv>,
-> {
-    MegaBlockExecutorFactory::new(
-        OpAlloyReceiptBuilder::default(),
-        chain_spec(),
-        MegaEvmFactory::new(),
-    )
+>;
+
+/// The factory the tests build executors from.
+pub(crate) fn factory() -> TestFactory {
+    factory_on(chain_spec())
+}
+
+/// A factory of executors for blocks on the chain `spec` describes.
+pub(crate) fn factory_on(spec: MegaHardforkConfig) -> TestFactory {
+    MegaBlockExecutorFactory::new(OpAlloyReceiptBuilder::default(), spec, MegaEvmFactory::new())
 }
 
 /// An executor over `state`, for a block held to `ctx`.
@@ -140,6 +159,15 @@ pub(crate) fn executor_with_env(
     env: EvmEnv<MegaSpecId>,
 ) -> TestExecutor<'_> {
     build(state, ctx, env, chain_spec())
+}
+
+/// An executor over `state`, for a block the chain holds to `limits`, packed under no building
+/// policy.
+pub(crate) fn executor_with_limits(
+    state: &mut State<MemoryDatabase>,
+    limits: ProtocolLimits,
+) -> TestExecutor<'_> {
+    build(state, unlimited_ctx(), evm_env(), chain_spec_with(limits))
 }
 
 /// An executor over `state`, for a block on the chain `spec` describes.

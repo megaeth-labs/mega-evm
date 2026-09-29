@@ -116,9 +116,11 @@
 //! `m` times the minimum costs `m` times the schedule's entry, and reaches the limit that many
 //! times sooner.
 //!
-//! Every limit is unlimited unless a caller sets it. A block executor installs the ones its block
-//! limits carry, whose default holds a transaction to
-//! [`TX_DATA_LIMIT`](crate::constants::TX_DATA_LIMIT) of data size and to nothing else.
+//! Every limit is unlimited unless a caller sets it, gas detention's caps aside. A block executor
+//! installs the chain's, the per-transaction half of the Satin fork's parameters
+//! ([`ProtocolLimits`](crate::ProtocolLimits)), whose default holds a transaction to
+//! [`TX_DATA_LIMIT`](crate::constants::TX_DATA_LIMIT) of data size, to detention's caps and to
+//! nothing else.
 //!
 //! # The exemption
 //!
@@ -256,6 +258,10 @@ pub struct LimitUsage {
 /// unlimited, the caps included, and a transaction whose caps are both unlimited is not detained:
 /// limits built from it do not execute the chain.
 ///
+/// Every value here changes a transaction's result, so in block execution they are the chain's:
+/// the per-transaction half of [`ProtocolLimits`](crate::ProtocolLimits), which the block executor
+/// installs before every transaction. Set on a standalone EVM, they are its caller's choice.
+///
 /// [`BLOCK_ENV_ACCESS_COMPUTE_GAS`]: crate::constants::BLOCK_ENV_ACCESS_COMPUTE_GAS
 /// [`ORACLE_ACCESS_COMPUTE_GAS`]: crate::constants::ORACLE_ACCESS_COMPUTE_GAS
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -312,7 +318,8 @@ impl EvmTxRuntimeLimits {
     ///
     /// It turns detention off together with every other per-transaction limit. It is what the
     /// execution-spec gate's equivalence mode installs, and what tests use to take the limits
-    /// out; the chain executes on [`Default`], which holds detention's caps at the spec's.
+    /// out; the chain executes on its own ([`ProtocolLimits`](crate::ProtocolLimits)), whose
+    /// detention caps must be finite.
     pub const fn no_limits() -> Self {
         Self {
             tx_data_size_limit: u64::MAX,

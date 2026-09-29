@@ -17,7 +17,7 @@ use mega_evm::{
         SEQUENCER_REGISTRY_CODE_HASH, SYSTEM_CONTRACT_DEPLOY_COUNT,
     },
     test_utils::MemoryDatabase,
-    MegaHardfork, MegaHardforkConfig, MegaHardforks, PreBlockStateSource,
+    MegaHardfork, MegaHardforkConfig, MegaHardforks, PreBlockStateSource, ProtocolLimits,
 };
 use revm::{context::result::ExecutionResult, database::State, state::Account, Database};
 
@@ -259,7 +259,8 @@ fn test_foreign_code_at_a_system_address_fails_the_block() {
 #[test]
 fn test_missing_registry_params_fail_at_load_and_at_the_block() {
     let missing = MegaHardforkConfig::default()
-        .with(MegaHardfork::Satin, alloy_hardforks::ForkCondition::Timestamp(0));
+        .with(MegaHardfork::Satin, alloy_hardforks::ForkCondition::Timestamp(0))
+        .with_params(ProtocolLimits::DEFAULT);
     assert_eq!(
         missing.validate_schedule().unwrap_err().to_string(),
         "hardfork Satin is scheduled but its SequencerRegistryConfig params are not configured"

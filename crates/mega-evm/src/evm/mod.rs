@@ -207,8 +207,10 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
 
     /// Enforces `limits` on every transaction this EVM runs from now on.
     ///
-    /// Block execution installs the block's limits this way, so a transaction runs under them
-    /// whatever the caller configured when it built the EVM.
+    /// Block execution installs the chain's limits this way before every transaction
+    /// ([`ProtocolLimits`](crate::ProtocolLimits)), so a block's transaction runs under them
+    /// whatever the caller configured on the EVM. Outside block execution — an RPC call, a tool,
+    /// a test — this is how the caller chooses the limits a transaction runs under.
     #[must_use]
     pub fn with_tx_runtime_limits(mut self, limits: crate::EvmTxRuntimeLimits) -> Self {
         self.set_tx_runtime_limits(limits);

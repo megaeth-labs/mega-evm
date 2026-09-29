@@ -1,11 +1,21 @@
 //! What a block admits, and what it counts of the transactions it packed.
 //!
-//! [`BlockLimits`] is the configuration a node passes in the block execution context;
-//! [`BlockLimiter`] is the state one block keeps while it executes. Data size defaults to the
-//! production caps — [`BLOCK_DATA_LIMIT`](crate::constants::BLOCK_DATA_LIMIT) for the block and
-//! [`TX_DATA_LIMIT`](crate::constants::TX_DATA_LIMIT) for each transaction — gas detention's caps
-//! to the spec's, and every other limit to unlimited. [`BlockLimits::no_limits`] clears the
-//! data-size and detention caps too.
+//! The limits come from two places, by who must agree on them:
+//!
+//! - [`ProtocolLimits`] are the limits every node of a chain holds its blocks and transactions to,
+//!   because a different value is a different result: the per-transaction limits the EVM enforces
+//!   and the block's four budgets. They are the Satin fork's parameters, read from the schedule at
+//!   the block's timestamp, and their default is [`ProtocolLimits::DEFAULT`]: data size capped at
+//!   [`TX_DATA_LIMIT`](crate::constants::TX_DATA_LIMIT) per transaction and
+//!   [`BLOCK_DATA_LIMIT`](crate::constants::BLOCK_DATA_LIMIT) per block, gas detention's caps at
+//!   the spec's, and every other limit unlimited.
+//! - [`BlockLimits`] is the building policy a node passes in the block execution context: the
+//!   limits only a builder applies — a transaction's declared gas, the encoded sizes and the
+//!   data-availability sizes — and caps a builder may put on the block's budgets below the
+//!   protocol's. It never loosens a protocol limit ([`BlockLimits::within`]), and a validator
+//!   leaves it at its default, which restricts nothing.
+//!
+//! [`BlockLimiter`] is the state one block keeps while it executes, held to both.
 //!
 //! # When each limit is checked
 //!
@@ -45,10 +55,10 @@
 //! Of the three gas ledgers the block counts ([`BlockGasCounters`]), execution and state have a
 //! block limit. History has none by design; the history bytes beside it are reported, not
 //! limited. The write-record count, which is the block's KV count, has one too:
-//! [`BlockLimits::block_kv_update_limit`]. Every record weighs forty bytes of data size, so a
+//! [`ProtocolLimits::block_kv_update_limit`]. Every record weighs forty bytes of data size, so a
 //! block held to [`BLOCK_DATA_LIMIT`](crate::constants::BLOCK_DATA_LIMIT) keeps at most 327,680
-//! records whatever its KV limit; the KV limit binds only below that, and is unlimited unless a
-//! node sets it.
+//! records whatever its KV limit; the KV limit binds only below that, and is unlimited unless the
+//! chain sets it.
 
 use alloy_primitives::TxHash;
 
@@ -246,12 +256,25 @@ impl HardforkParams for ProtocolLimits {
     }
 }
 
-/// The limits one block holds its transactions to.
+/// The building policy one block is packed under: the limits only a builder applies, and the
+/// caps it may put on the block's budgets below the protocol's.
 ///
-/// [`Default`] carries the production data-size caps and leaves every other dimension unlimited.
-/// [`no_limits`](Self::no_limits) clears the data-size caps too. A node sets the dimensions its
-/// chain configures, and the block executor always sets
-/// [`block_gas_limit`](Self::block_gas_limit) from the block environment.
+/// A node passes it in the block execution context. None of it is a protocol value: the
+/// protocol's limits are [`ProtocolLimits`], which the block executor reads from the chain's
+/// schedule, and this can only make a block tighter than they do ([`within`](Self::within)). So a
+/// builder packs under it and a validator re-executing the block leaves it at [`Default`], which
+/// restricts nothing: every block a builder packed under a policy fits the protocol's limits, and
+/// a validator that applied the builder's policy too would only refuse blocks, never accept one
+/// the protocol refuses.
+///
+/// - [`tx_gas_limit`](Self::tx_gas_limit), the two encoded-size limits and the two
+///   data-availability size limits are the builder's alone: the protocol holds a transaction's
+///   declared gas to the block's gas limit, and what a block writes to its data-size budget, which
+///   counts calldata.
+/// - The four block budgets are the builder's caps on the protocol's: the block executor holds a
+///   block to the smaller of the two.
+/// - [`block_gas_limit`](Self::block_gas_limit) is the header's: the block executor always sets it
+///   from the block environment.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct BlockLimits {
     /// The most gas a single transaction may declare.
@@ -272,42 +295,43 @@ pub struct BlockLimits {
     /// The most execution gas the block's transactions may spend together. The transaction that
     /// reaches it is packed; after it, only a deposit is, which it never refuses and which counts
     /// towards it.
+    ///
+    /// A builder's cap: the block is held to the smaller of this and
+    /// [`ProtocolLimits::block_execution_gas_limit`].
     pub block_execution_gas_limit: u64,
     /// The most state gas the block's transactions may spend together. The transaction that
     /// reaches it is packed; after it, only a transaction that adds no state gas is, or a deposit,
     /// which it never refuses and which counts towards it.
-    pub block_state_gas_limit: u64,
-    /// The most data-size bytes the block's transactions may keep together.
     ///
-    /// [`Default`] is [`BLOCK_DATA_LIMIT`](crate::constants::BLOCK_DATA_LIMIT). The transaction
-    /// that reaches it is packed; after it, only a deposit is, which it never refuses and which
-    /// counts towards it.
+    /// A builder's cap: the block is held to the smaller of this and
+    /// [`ProtocolLimits::block_state_gas_limit`].
+    pub block_state_gas_limit: u64,
+    /// The most data-size bytes the block's transactions may keep together. The transaction that
+    /// reaches it is packed; after it, only a deposit is, which it never refuses and which counts
+    /// towards it.
+    ///
+    /// A builder's cap: the block is held to the smaller of this and
+    /// [`ProtocolLimits::block_txs_data_limit`].
     pub block_txs_data_limit: u64,
     /// The most write records the block's transactions may keep together: the block's KV count.
-    ///
     /// The transaction that reaches it is packed; after it, only a deposit is, which it never
     /// refuses and which counts towards it.
-    pub block_kv_update_limit: u64,
-    /// The limits every transaction of the block runs under, which the executor installs on the
-    /// EVM.
     ///
-    /// [`Default`] sets the transaction data-size limit to
-    /// [`TX_DATA_LIMIT`](crate::constants::TX_DATA_LIMIT) and leaves the frame cap unlimited, so a
-    /// frame's budget is the 98% share of what its parent has left; gas detention's caps are the
-    /// spec's, as [`EvmTxRuntimeLimits::default`] holds them.
-    pub tx_runtime_limits: EvmTxRuntimeLimits,
+    /// A builder's cap: the block is held to the smaller of this and
+    /// [`ProtocolLimits::block_kv_update_limit`].
+    pub block_kv_update_limit: u64,
 }
 
 impl Default for BlockLimits {
+    /// No restriction: what a validator passes.
     fn default() -> Self {
-        Self::with_production_data_limits()
+        Self::no_limits()
     }
 }
 
 impl BlockLimits {
-    /// No limit at all, gas detention's caps included, so no transaction of the block is
-    /// detained ([`EvmTxRuntimeLimits::no_limits`]): for benches and tests, not for executing the
-    /// chain.
+    /// No restriction at all: every limit unlimited, so a block is held to the protocol's limits
+    /// alone.
     pub const fn no_limits() -> Self {
         Self {
             tx_gas_limit: u64::MAX,
@@ -320,25 +344,22 @@ impl BlockLimits {
             block_state_gas_limit: u64::MAX,
             block_txs_data_limit: u64::MAX,
             block_kv_update_limit: u64::MAX,
-            tx_runtime_limits: EvmTxRuntimeLimits::no_limits(),
         }
     }
 
-    /// The limits a block runs under when its caller configures nothing else.
-    ///
-    /// Every dimension is unlimited except data size and gas detention's caps: the block holds
-    /// [`BLOCK_DATA_LIMIT`](crate::constants::BLOCK_DATA_LIMIT) bytes, each transaction holds
-    /// [`TX_DATA_LIMIT`](crate::constants::TX_DATA_LIMIT), and a read of volatile data caps the
-    /// transaction's compute at the spec's caps. The block executor installs the transaction half
-    /// on the EVM.
-    pub const fn with_production_data_limits() -> Self {
-        let mut limits = Self::no_limits();
-        limits.block_txs_data_limit = crate::constants::BLOCK_DATA_LIMIT;
-        limits.tx_runtime_limits = EvmTxRuntimeLimits::no_limits()
-            .with_tx_data_size_limit(crate::constants::TX_DATA_LIMIT)
-            .with_block_env_access_compute_gas_limit(crate::constants::BLOCK_ENV_ACCESS_COMPUTE_GAS)
-            .with_oracle_access_compute_gas_limit(crate::constants::ORACLE_ACCESS_COMPUTE_GAS);
-        limits
+    /// These limits held within `protocol`: each of the block's four budgets is the smaller of
+    /// this policy's cap and the protocol's limit, so a builder's setting can tighten a budget and
+    /// never loosen one. The limits only a builder applies are kept as they are.
+    pub fn within(self, protocol: &ProtocolLimits) -> Self {
+        Self {
+            block_execution_gas_limit: self
+                .block_execution_gas_limit
+                .min(protocol.block_execution_gas_limit),
+            block_state_gas_limit: self.block_state_gas_limit.min(protocol.block_state_gas_limit),
+            block_txs_data_limit: self.block_txs_data_limit.min(protocol.block_txs_data_limit),
+            block_kv_update_limit: self.block_kv_update_limit.min(protocol.block_kv_update_limit),
+            ..self
+        }
     }
 
     /// Sets the per-transaction gas limit.
@@ -380,39 +401,28 @@ impl BlockLimits {
         self
     }
 
-    /// Sets the block's execution-gas limit.
+    /// Caps the block's execution gas.
     pub const fn with_block_execution_gas_limit(mut self, limit: u64) -> Self {
         self.block_execution_gas_limit = limit;
         self
     }
 
-    /// Sets the block's state-gas limit.
+    /// Caps the block's state gas.
     pub const fn with_block_state_gas_limit(mut self, limit: u64) -> Self {
         self.block_state_gas_limit = limit;
         self
     }
 
-    /// Sets the block's data-size limit.
+    /// Caps the block's data size.
     pub const fn with_block_txs_data_limit(mut self, limit: u64) -> Self {
         self.block_txs_data_limit = limit;
         self
     }
 
-    /// Sets the block's KV limit: the most write records its transactions may keep together.
+    /// Caps the block's KV count: the write records its transactions may keep together.
     pub const fn with_block_kv_update_limit(mut self, limit: u64) -> Self {
         self.block_kv_update_limit = limit;
         self
-    }
-
-    /// Sets the limits every transaction of the block runs under.
-    pub const fn with_tx_runtime_limits(mut self, limits: EvmTxRuntimeLimits) -> Self {
-        self.tx_runtime_limits = limits;
-        self
-    }
-
-    /// The limits every transaction of the block runs under.
-    pub const fn to_evm_tx_runtime_limits(&self) -> EvmTxRuntimeLimits {
-        self.tx_runtime_limits
     }
 
     /// A limiter that holds a block to these limits.
@@ -869,30 +879,89 @@ mod tests {
             .with_params(ProtocolLimits::no_limits());
     }
 
-    /// A block that configures nothing holds the production data-size caps and gas detention's
-    /// caps, and nothing else.
+    /// The default building policy restricts nothing, so a validator that leaves it holds a block
+    /// to the protocol's limits alone. Every field is named, so a limit added later cannot be left
+    /// out of it.
     #[test]
-    fn test_the_default_limits_are_the_production_data_size_caps() {
-        let limits = BlockLimits::default();
-        assert_eq!(limits, BlockLimits::with_production_data_limits());
-        assert_eq!(limits.block_txs_data_limit, crate::constants::BLOCK_DATA_LIMIT);
-        assert_eq!(limits.tx_runtime_limits.tx_data_size_limit, crate::constants::TX_DATA_LIMIT);
+    fn test_the_default_building_policy_restricts_nothing() {
+        assert_eq!(BlockLimits::default(), BlockLimits::no_limits());
+        let BlockLimits {
+            tx_gas_limit,
+            block_gas_limit,
+            tx_encode_size_limit,
+            block_txs_encode_size_limit,
+            tx_da_size_limit,
+            block_da_size_limit,
+            block_execution_gas_limit,
+            block_state_gas_limit,
+            block_txs_data_limit,
+            block_kv_update_limit,
+        } = BlockLimits::default();
+        for limit in [
+            tx_gas_limit,
+            block_gas_limit,
+            tx_encode_size_limit,
+            block_txs_encode_size_limit,
+            tx_da_size_limit,
+            block_da_size_limit,
+            block_execution_gas_limit,
+            block_state_gas_limit,
+            block_txs_data_limit,
+            block_kv_update_limit,
+        ] {
+            assert_eq!(limit, u64::MAX);
+        }
         assert_eq!(
-            limits.tx_runtime_limits,
-            EvmTxRuntimeLimits::default().with_tx_data_size_limit(crate::constants::TX_DATA_LIMIT)
+            BlockLimits::default().within(&ProtocolLimits::DEFAULT).block_txs_data_limit,
+            crate::constants::BLOCK_DATA_LIMIT,
+            "held within the protocol's, the default policy is the protocol's"
         );
-        assert_eq!(limits.tx_runtime_limits.frame_data_size_limit, u64::MAX);
-        assert_eq!(limits.tx_gas_limit, u64::MAX);
-        assert_eq!(limits.block_execution_gas_limit, u64::MAX);
-        assert_eq!(limits.block_state_gas_limit, u64::MAX);
-        assert_eq!(limits.block_kv_update_limit, u64::MAX);
-        assert_eq!(limits.tx_runtime_limits.tx_kv_update_limit, u64::MAX);
-        assert_eq!(limits.tx_runtime_limits.frame_kv_update_limit, u64::MAX);
+    }
 
-        let unlimited = BlockLimits::no_limits();
-        assert_eq!(unlimited.block_txs_data_limit, u64::MAX);
-        assert_eq!(unlimited.block_kv_update_limit, u64::MAX);
-        assert_eq!(unlimited.tx_runtime_limits, EvmTxRuntimeLimits::no_limits());
+    /// A builder's cap on a block budget holds the block only where it is below the protocol's
+    /// limit: it tightens, and never loosens. The limits only a builder applies pass through.
+    #[test]
+    fn test_a_building_policy_tightens_a_budget_and_never_loosens_it() {
+        let protocol = ProtocolLimits::DEFAULT
+            .with_block_execution_gas_limit(100)
+            .with_block_state_gas_limit(200)
+            .with_block_txs_data_limit(300)
+            .with_block_kv_update_limit(400);
+
+        let tighter = BlockLimits::no_limits()
+            .with_block_execution_gas_limit(10)
+            .with_block_state_gas_limit(20)
+            .with_block_txs_data_limit(30)
+            .with_block_kv_update_limit(40)
+            .with_tx_gas_limit(1)
+            .with_tx_encode_size_limit(2)
+            .with_block_txs_encode_size_limit(3)
+            .with_tx_da_size_limit(4)
+            .with_block_da_size_limit(5)
+            .with_block_gas_limit(6);
+        assert_eq!(tighter.within(&protocol), tighter, "every cap is below the protocol's");
+
+        let looser = BlockLimits::no_limits()
+            .with_block_execution_gas_limit(1_000)
+            .with_block_state_gas_limit(2_000)
+            .with_block_txs_data_limit(3_000)
+            .with_block_kv_update_limit(4_000);
+        let held = looser.within(&protocol);
+        assert_eq!(
+            (
+                held.block_execution_gas_limit,
+                held.block_state_gas_limit,
+                held.block_txs_data_limit,
+                held.block_kv_update_limit,
+            ),
+            (100, 200, 300, 400),
+            "a cap above the protocol's gives way to it"
+        );
+        assert_eq!(
+            BlockLimits { tx_gas_limit: 7, ..held },
+            BlockLimits { tx_gas_limit: 7, ..BlockLimits::no_limits().within(&protocol) },
+            "nothing else changes"
+        );
     }
 
     fn limits_with_block_gas(block_gas_limit: u64) -> BlockLimits {
@@ -1171,7 +1240,7 @@ mod tests {
 
     /// The history ledger and the history bytes are accumulated, and no check refuses a
     /// transaction on them; nor on the state ledger or the write records, whose limits are
-    /// unlimited unless a node sets them.
+    /// unlimited unless the chain sets them.
     #[test]
     fn test_history_is_counted_but_not_enforced() {
         let mut limiter = BlockLimiter::new(BlockLimits::no_limits());
