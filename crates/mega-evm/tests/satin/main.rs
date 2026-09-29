@@ -25,6 +25,7 @@ mod kv_limit;
 mod limit_exemption;
 mod neutral;
 mod outcome;
+mod pool_validation;
 mod precompile_gas;
 mod pricing_table;
 mod salt;

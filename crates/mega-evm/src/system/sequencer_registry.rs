@@ -211,6 +211,22 @@ where
     transact_pre_block_call(evm, "applyPendingChanges()", SEQUENCER_REGISTRY_ADDRESS, data, refused)
 }
 
+/// The live system address in the state `db` holds: the address a system-address transaction
+/// must be sent from, read as a transaction of the system shape reads it when it is validated
+/// ([`inspect_system_address`]).
+///
+/// It is what a transaction pool gives
+/// [`validate_transaction_stateless`](crate::validate_transaction_stateless), read off the state
+/// the pool validates against. `None` when the registry names no address this engine trusts.
+///
+/// # Errors
+///
+/// The database's, when the registry's account or its slot cannot be read.
+pub fn live_system_address<DB: revm::Database>(db: DB) -> Result<Option<Address>, DB::Error> {
+    let mut journal: revm::Journal<DB> = revm::context::JournalTr::new(db);
+    inspect_system_address(&mut journal)
+}
+
 /// The live system address, read out of the registry in the running transaction's journal: the
 /// address a system-address transaction must be sent from.
 ///
@@ -571,6 +587,23 @@ mod tests {
         let registry = &journal.inner.state[&SEQUENCER_REGISTRY_ADDRESS];
         assert!(registry.is_loaded_as_not_existing());
         assert!(registry.storage.is_empty());
+    }
+
+    /// Read off a database, the live system address is what a transaction's validation reads:
+    /// the address the registry stores when it holds this engine's code, and none otherwise.
+    #[test]
+    fn test_live_system_address_reads_what_validation_reads() {
+        let read = |db: InMemoryDB| live_system_address(db).expect("the read succeeds");
+        assert_eq!(
+            read(registry_holding(SEQUENCER_REGISTRY_CODE, Some(NEXT_SYSTEM_ADDRESS))),
+            Some(NEXT_SYSTEM_ADDRESS)
+        );
+        assert_eq!(read(registry_holding(SEQUENCER_REGISTRY_CODE, None)), None);
+        assert_eq!(
+            read(registry_holding(Bytes::from_static(&[0x60, 0x00]), Some(NEXT_SYSTEM_ADDRESS))),
+            None
+        );
+        assert_eq!(read(InMemoryDB::default()), None);
     }
 
     /// A read the database cannot serve is the database's error, not an absent address.
