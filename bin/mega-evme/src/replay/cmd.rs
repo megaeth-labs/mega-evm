@@ -422,7 +422,9 @@ impl Cmd {
         cfg_env.chain_id = ctx.chain_id;
         let evm_env = EvmEnv::new(cfg_env, block_env);
 
-        let evm_factory = MegaEvmFactory::new().with_external_env_factory(external_envs);
+        let evm_factory = MegaEvmFactory::new()
+            .with_schedule(hardforks.clone())
+            .with_external_env_factory(external_envs);
         let block_executor_factory = MegaBlockExecutorFactory::new(
             OpAlloyReceiptBuilder::default(),
             &hardforks,

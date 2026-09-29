@@ -12,14 +12,14 @@ use mega_evm::{
         context::{block::BlockEnv, cfg::CfgEnv},
         primitives::eip4844,
     },
-    AHashBucketHasher, MegaContext, MegaSpecId, TestExternalEnvs,
+    AHashBucketHasher, MegaContext, MegaHardforks, MegaSpecId, ProtocolLimits, TestExternalEnvs,
 };
 
 /// External environment type for mega-evme using the real AHash-based SALT bucket hasher.
 pub type EvmeExternalEnvs = TestExternalEnvs<Infallible, AHashBucketHasher>;
 use tracing::{debug, trace};
 
-use super::{EvmeError, Result};
+use super::{satin_schedule, EvmeError, Result};
 
 /// Chain configuration arguments (spec and chain ID)
 #[derive(Args, Debug, Clone)]
@@ -52,6 +52,15 @@ impl ChainArgs {
         cfg.chain_id = self.chain_id;
         debug!(cfg = ?cfg, "Evm CfgEnv created");
         Ok(cfg)
+    }
+
+    /// The protocol limits a Satin run of this chain at `timestamp` is held to: those of the
+    /// schedule [`satin_schedule`] gives, which for a chain that does not run Satin at `timestamp`
+    /// is a counterfactual on [`ProtocolLimits::DEFAULT`].
+    pub fn protocol_limits(&self, timestamp: u64) -> Result<ProtocolLimits> {
+        satin_schedule(self.chain_id, timestamp)?.protocol_limits(timestamp).ok_or_else(|| {
+            EvmeError::Other(format!("the Satin schedule carries no limits at {timestamp}"))
+        })
     }
 }
 
@@ -190,6 +199,10 @@ impl EnvArgs {
 
     /// Creates a [`MegaContext`] with all environment configurations.
     ///
+    /// The transaction is held to the per-transaction limits a block of the chain at the block's
+    /// timestamp would hold it to ([`ChainArgs::protocol_limits`]), as a node's EVM factory holds
+    /// an EVM it builds outside block execution.
+    ///
     /// The `system_address` defaults to `MEGA_SYSTEM_ADDRESS`. For `run`/`tx` modes this is
     /// correct: these paths don't go through the block executor and don't resolve from
     /// `SequencerRegistry`. If fork-state simulation with a changed sequencer is needed,
@@ -201,10 +214,13 @@ impl EnvArgs {
         let cfg = self.create_cfg_env()?;
         let block = self.create_block_env()?;
         let external_envs = self.create_external_envs()?;
+        let limits = self.chain.protocol_limits(self.block.block_timestamp)?;
+        debug!(limits = ?limits.tx_runtime_limits, "Per-transaction limits resolved");
 
         Ok(MegaContext::new_with_external_envs(db, cfg.spec, external_envs.into())
             .with_cfg(cfg)
-            .with_block(block))
+            .with_block(block)
+            .with_tx_runtime_limits(limits.tx_runtime_limits))
     }
 }
 
@@ -229,4 +245,26 @@ pub fn parse_bucket_capacity(s: &str) -> Result<(u32, u64)> {
 
     trace!(string = %s, bucket_id = %bucket_id, capacity = %capacity, "Parsed bucket capacity");
     Ok((bucket_id, capacity))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mega_evm::{revm::database::EmptyDB, MegaEvm};
+
+    /// A `run` or `tx` on Satin is held to the chain's per-transaction limits: on the tool's
+    /// default chain, which does not run Satin, the protocol's defaults, where a bare context
+    /// would hold it to gas detention's caps alone.
+    #[test]
+    fn test_a_satin_run_is_held_to_the_protocol_limits() {
+        let args = EnvArgs::parse_from(["run", "--spec", "Satin"]);
+        let evm = MegaEvm::new(args.create_evm_context(EmptyDB::default()).unwrap());
+        assert_eq!(*evm.tx_runtime_limits(), ProtocolLimits::DEFAULT.tx_runtime_limits);
+        assert_ne!(
+            *MegaEvm::new(MegaContext::new(EmptyDB::default(), MegaSpecId::SATIN))
+                .tx_runtime_limits(),
+            ProtocolLimits::DEFAULT.tx_runtime_limits,
+            "a bare context does not hold the transaction data-size limit"
+        );
+    }
 }

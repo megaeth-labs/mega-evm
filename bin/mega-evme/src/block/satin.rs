@@ -65,7 +65,7 @@ pub(super) fn execute(
     let factory = MegaBlockExecutorFactory::new(
         OpAlloyReceiptBuilder::default(),
         &hardforks,
-        MegaEvmFactory::new().with_external_env_factory(envs),
+        MegaEvmFactory::new().with_schedule(hardforks.clone()).with_external_env_factory(envs),
     );
     let block_ctx = MegaBlockExecutionCtx::new(
         header.parent_hash,
