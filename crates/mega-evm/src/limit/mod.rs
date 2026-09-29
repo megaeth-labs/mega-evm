@@ -87,18 +87,19 @@
 //! grows is the state gas it spends: [`EvmTxRuntimeLimits::tx_state_gas_limit`] holds it, and
 //! nothing counts new accounts and slots beside it. What is held is net — what a frame refilled
 //! and what a failed frame rolled back is out of it — and is the state gas charged before the
-//! first frame plus what every frame on the call stack holds (the `state_gas` module). The limit is
-//! per transaction, with no frame budget: a crossing anywhere stops the transaction, reported as
+//! first frame plus what every frame on the call stack holds (the `frame_limit` module). The limit
+//! is per transaction, with no frame budget: a crossing anywhere stops the transaction, reported as
 //! [`LimitKind::StateGrowth`] with the limit in gas.
 //!
 //! The limit holds each charge where it is made, once it is made, so a charge the frame cannot
 //! pay is an out-of-gas whatever the limit: the authorities' before the first frame, which are
-//! taken back on a crossing; the first frame's recipient or created account, which the first frame
-//! is then answered with the stop for; a fresh slot and a destruction's new beneficiary, which
-//! stop the frame; and a new account a `CALL`, `CREATE` or `CREATE2` adds, which its opcode is
-//! charged for upfront and the limit holds once revm has decided the frame. A frame revm refuses —
-//! a value call its caller cannot fund, one past the call-stack limit — gives that charge back and
-//! is never held for it; a frame revm builds, or answers with a success, returns the stop.
+//! taken back on a crossing; a fresh slot and a destruction's new beneficiary, which stop the
+//! frame; and a new account a frame's start adds — the first frame's recipient or created account,
+//! which EIP-2780 charges the transaction for, and the account a `CALL`, `CREATE` or `CREATE2`
+//! adds, which its opcode is charged for — held once revm has decided the frame. A frame refused —
+//! a value its caller cannot fund, one past the call-stack limit — or answered with a failure gives
+//! that charge back and is never held for it; a frame revm builds, or answers with a success,
+//! returns the stop, and an answer of the transaction's own frame takes its writes back with it.
 //!
 //! Deployed code is held once `return_create` has charged every part of its deposit and before it
 //! commits the creation, as its bytes are ([`ContextTr::admit_code_deposit`]), so a crossing
@@ -126,12 +127,13 @@
 //!
 //! The protocol's own work is held to none of these per-transaction limits: a system-originated
 //! transaction ([`crate::system::is_system_originated`]) and a system call — the pre-block calls
-//! among them — run under [`LimitCheck::Exempt`], sticky for the transaction, which the one place
-//! every stop comes from answers whatever they cross: the data size, the KV count, the state gas
-//! and the frame budgets of the first two. It is the set that pays no history gas, exempt for the
-//! same reason: the protocol's maintenance must not fail on a resource limit. What such a
-//! transaction uses is counted all the same and reported in its usage and in the block's
-//! counters, as a deposit's is. A user's deposit is not in the set and is held to every limit.
+//! among them — are exempt ([`AdditionalLimit::is_exempt`]), sticky for the transaction, and the
+//! one place every stop comes from answers that they are within the limits whatever they cross:
+//! the data size, the KV count, the state gas and the frame budgets of the first two. It is the set
+//! that pays no history gas, exempt for the same reason: the protocol's maintenance must not fail
+//! on a resource limit. What such a transaction uses is counted all the same and reported in its
+//! usage and in the block's counters, as a deposit's is. A user's deposit is not in the set and is
+//! held to every limit.
 //!
 //! # The byte table
 //!
@@ -159,7 +161,6 @@ mod frame_limit;
 #[allow(clippy::module_inception)]
 mod limit;
 mod record;
-mod state_gas;
 
 pub use limit::AdditionalLimit;
 pub(crate) use limit::FrameStartRecords;
@@ -510,8 +511,8 @@ impl LimitKind {
 ///
 /// A transaction-level exceed stops the transaction: the frame that crosses it reverts, the
 /// transaction is latched and every frame above reverts in turn. A frame-local exceed (a frame
-/// budget) reverts the frame alone and its caller resumes. `Exempt` is sticky for the
-/// transaction: nothing it does is stopped by a limit.
+/// budget) reverts the frame alone and its caller resumes. A transaction exempt from the limits
+/// ([`AdditionalLimit::is_exempt`]) is within them whatever it crosses.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum LimitCheck {
     /// Every limit holds.
@@ -535,27 +536,19 @@ pub enum LimitCheck {
         /// Whether the limit is a frame budget rather than a transaction-level limit.
         frame_local: bool,
     },
-    /// The transaction is exempt from every per-transaction limit: it is the protocol's own work.
-    Exempt,
 }
 
 impl LimitCheck {
-    /// Whether a limit was crossed. `Exempt` is not.
+    /// Whether a limit was crossed.
     #[inline]
     pub const fn exceeded_limit(&self) -> bool {
         matches!(self, Self::ExceedsLimit { .. })
     }
 
-    /// Whether the check passed. `Exempt` is a state of its own, not a pass.
+    /// Whether the check passed.
     #[inline]
     pub const fn within_limit(&self) -> bool {
         matches!(self, Self::WithinLimit)
-    }
-
-    /// Whether the transaction is exempt from metering.
-    #[inline]
-    pub const fn is_exempt(&self) -> bool {
-        matches!(self, Self::Exempt)
     }
 
     /// Whether a frame budget, rather than a transaction-level limit, was crossed.
@@ -570,7 +563,7 @@ impl LimitCheck {
             Self::ExceedsLimit { kind, limit, .. } => {
                 MegaLimitExceeded { kind: kind.as_u8(), limit: *limit }.abi_encode().into()
             }
-            Self::WithinLimit | Self::Exempt => Bytes::new(),
+            Self::WithinLimit => Bytes::new(),
         }
     }
 }
@@ -659,18 +652,7 @@ mod tests {
         );
     }
 
-    /// `Exempt` passes no predicate that would stop a frame, and has no revert data.
-    #[test]
-    fn test_limit_check_exempt_predicate_truth_table() {
-        let exempt = LimitCheck::Exempt;
-        assert!(!exempt.exceeded_limit());
-        assert!(!exempt.within_limit());
-        assert!(exempt.is_exempt());
-        assert!(!exempt.is_frame_local());
-        assert!(exempt.revert_data().is_empty());
-    }
-
-    /// `within_limit` follows the variant.
+    /// `within_limit` follows the variant, and is the exact complement of `exceeded_limit`.
     #[test]
     fn test_within_limit_reflects_variant() {
         assert!(LimitCheck::WithinLimit.within_limit());
@@ -683,9 +665,8 @@ mod tests {
         assert!(!exceeded.within_limit());
         assert!(exceeded.exceeded_limit());
         assert!(!exceeded.is_frame_local());
-        assert!(!exceeded.is_exempt());
-        assert!(!LimitCheck::WithinLimit.is_exempt());
         assert!(!LimitCheck::WithinLimit.exceeded_limit());
+        assert!(!LimitCheck::WithinLimit.is_frame_local());
         assert!(LimitCheck::WithinLimit.revert_data().is_empty());
         let frame_local = LimitCheck::ExceedsLimit {
             kind: LimitKind::DataSize,
