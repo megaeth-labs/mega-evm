@@ -40,8 +40,9 @@ pub struct IntrinsicGas {
     /// transaction.
     pub history: u64,
     /// The EIP-7623 calldata floor. The gas limit must cover it, and a transaction pays at least
-    /// it; a transaction that pays history gas pays more than it on the same bytes, so for one of
-    /// those it binds nothing.
+    /// it. At the spec's byte prices a transaction that pays history gas pays more than the floor
+    /// for the same bytes, so the floor binds only one exempt from history; the byte prices are
+    /// provisional.
     pub floor: u64,
 }
 

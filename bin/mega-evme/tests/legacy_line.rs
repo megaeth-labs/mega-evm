@@ -91,8 +91,9 @@ const LEGACY_LINE: &[(&str, &str)] = &[
 ];
 
 /// The packages of the legacy leg's encodings that the Satin engine's alloy 2 line holds above
-/// the released version: `(name, locked, released)`. alloy 2.4 requires `alloy-rlp` 0.3.14,
-/// `alloy-trie` 0.9.2 and `alloy-sol-types` 1.6.0 at least, so the leg runs these at `locked`.
+/// the released version: `(name, locked, released)`. The alloy 2 line the workspace locks (2.1)
+/// requires `alloy-rlp` 0.3.14, `alloy-trie` 0.9.2 and `alloy-sol-types` 1.6.0 at least, so the leg
+/// runs these at `locked`.
 const AHEAD_OF_THE_RELEASE: &[(&str, &str, &str)] = &[
     ("alloy-rlp", "0.3.16", "0.3.12"),
     ("alloy-rlp-derive", "0.3.16", "0.3.12"),
