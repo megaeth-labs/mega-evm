@@ -48,6 +48,26 @@ jobs:
       - name: Run Test
         run: cargo test --workspace
 
+  msrv:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      # The workspace's declared `rust-version`; the variable takes precedence over
+      # rust-toolchain.toml, so every cargo call below runs on it.
+      RUSTUP_TOOLCHAIN: "1.94.0"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install Rust 1.94.0
+        run: rustup toolchain install 1.94.0 --profile minimal --target riscv64imac-unknown-none-elf
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+      - name: Check the workspace
+        run: cargo check --workspace --all-targets --locked
+      - name: Check no_std
+        run: cargo check -p mega-evm --target riscv64imac-unknown-none-elf --no-default-features --locked
+
   no-std:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
