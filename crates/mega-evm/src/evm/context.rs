@@ -21,7 +21,7 @@ use crate::{
     system::{self, keyless::KeylessFrame},
     AdditionalLimit, BlockHashRecord, BucketError, BucketMultipliers, BucketRecord, Detention,
     EmptyExternalEnv, EthSpecId, EvmTxRuntimeLimits, ExternalEnvTypes, ExternalEnvs, MegaSpecId,
-    MegaTransaction, SaltEnv, VolatileDataAccess,
+    MegaTransaction, OracleReadRecord, SaltEnv, VolatileDataAccess,
 };
 
 /// The revm context the Satin engine runs on: op-revm's context shape with the `MegaETH`
@@ -41,8 +41,9 @@ pub(crate) type MegaInnerContext<DB> =
 /// [`Host`](revm::interpreter::Host) method except the three that stage what a state-writing
 /// opcode did and the ones that load volatile data (see the `host` module). It also carries the
 /// common execution layer's state for the running transaction ([`AdditionalLimit`]), gas
-/// detention's ([`Detention`]) and the SALT bucket multipliers that transaction has priced state
-/// gas with ([`BucketMultipliers`]).
+/// detention's ([`Detention`]), the SALT bucket multipliers that transaction has priced state
+/// gas with ([`BucketMultipliers`]) and the reads of the Oracle's storage it made through the
+/// oracle service ([`OracleReadRecord`]).
 #[derive(Debug)]
 pub struct MegaContext<DB: Database, ExtEnvs: ExternalEnvTypes = EmptyExternalEnv> {
     pub(crate) inner: MegaInnerContext<DB>,
@@ -56,6 +57,9 @@ pub struct MegaContext<DB: Database, ExtEnvs: ExternalEnvTypes = EmptyExternalEn
     bucket_multipliers: BucketMultipliers,
     /// The SALT buckets execution has asked the environment about, over the block.
     bucket_record: BucketRecord,
+    /// The reads of the Oracle's storage the running transaction made through the oracle
+    /// service, with the service's answers.
+    pub(crate) oracle_reads: OracleReadRecord,
     /// Whether the running transaction is the protocol's own, decided when it is validated. See
     /// [`MegaContext::is_system_originated`].
     system_originated: bool,
@@ -94,6 +98,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
             block_hash_record: BlockHashRecord::default(),
             bucket_multipliers: BucketMultipliers::default(),
             bucket_record: BucketRecord::default(),
+            oracle_reads: OracleReadRecord::default(),
             system_originated: false,
             prices_history: true,
             keyless_frame: None,
@@ -243,6 +248,17 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
         self.bucket_record.clear();
     }
 
+    /// The reads of the Oracle's storage the running (or last) transaction made through the
+    /// oracle service, in order, each with the service's answer.
+    ///
+    /// The record belongs to one transaction: it is emptied before every transaction and system
+    /// call, and the transaction's outcome carries a copy
+    /// ([`MegaTransactionOutcome::oracle_reads`](crate::MegaTransactionOutcome::oracle_reads)),
+    /// which is where a node takes the reads of the transactions it includes from.
+    pub const fn oracle_reads(&self) -> &OracleReadRecord {
+        &self.oracle_reads
+    }
+
     /// The common execution layer's state for the running (or last) transaction.
     pub const fn additional_limit(&self) -> &AdditionalLimit {
         &self.additional_limit
@@ -362,8 +378,8 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     /// Prepares the common execution layer for a transaction or a system call that is, or is not,
     /// `system_originated`.
     ///
-    /// The SALT bucket multipliers go with it: they are what one transaction read, so the next
-    /// one reads its own.
+    /// The SALT bucket multipliers and the oracle reads go with it: they are what one transaction
+    /// read, so the next one reads its own.
     ///
     /// A system-originated transaction is exempt from every per-transaction limit — the data size,
     /// the KV count, the state gas, and the frame budgets of the first two — before anything is
@@ -374,6 +390,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
         self.additional_limit.reset();
         self.additional_limit.set_transfer_logs(emits_transfer_logs(&self.inner.cfg));
         self.bucket_multipliers.reset();
+        self.oracle_reads.clear();
         // A transaction that failed with an error, or was stopped, left its `keylessDeploy` call
         // unanswered.
         self.keyless_frame = None;
@@ -796,6 +813,24 @@ mod tests {
         assert!(ctx.bucket_record().is_empty());
         assert_eq!(ctx.account_bucket_multiplier(ACCOUNT), Ok(1));
         assert_eq!(ctx.bucket_record().to_vec(), vec![account], "and records again after");
+    }
+
+    /// The oracle read record is one transaction's: a transaction and a system call each start
+    /// with an empty one.
+    #[test]
+    fn test_the_oracle_reads_are_forgotten_before_the_next_transaction() {
+        let mut ctx = MegaContext::new(EmptyDB::default(), MegaSpecId::SATIN);
+        assert!(ctx.oracle_reads().is_empty());
+
+        ctx.oracle_reads.record(U256::from(42), Some(U256::from(1)));
+        assert_eq!(ctx.oracle_reads().reads().len(), 1);
+
+        ctx.on_new_tx(false);
+        assert!(ctx.oracle_reads().is_empty(), "the next transaction starts with none");
+
+        ctx.oracle_reads.record(U256::from(42), None);
+        ctx.on_new_system_call();
+        assert!(ctx.oracle_reads().is_empty(), "so does a system call");
     }
 
     /// Two contexts may read one SALT environment — a node builds an EVM per transaction over

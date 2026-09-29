@@ -271,6 +271,13 @@ where
     pub fn clear_accessed_bucket_ids(&mut self) {
         self.ctx_mut().clear_bucket_record();
     }
+
+    /// The reads of the Oracle's storage the running (or last) transaction or system call made
+    /// through the oracle service, in order, each with the service's answer. It is emptied before
+    /// every transaction and system call; a transaction's outcome carries a copy.
+    pub fn oracle_reads(&self) -> &[OracleRead] {
+        self.ctx().oracle_reads().reads()
+    }
 }
 
 impl<DB, INSP, ExtEnvs> MegaEvm<DB, INSP, ExtEnvs>
@@ -280,8 +287,9 @@ where
     ExtEnvs: ExternalEnvTypes,
 {
     /// Executes `tx`, through the inspector when one is enabled, and returns its outcome: the
-    /// result and state, the gas by ledger, the usage the common execution layer counted and the
-    /// limit that stopped the transaction, if any. Nothing is committed.
+    /// result and state, the gas by ledger, the usage the common execution layer counted, the
+    /// limit that stopped the transaction, if any, and the reads of the Oracle's storage it made
+    /// through the oracle service. Nothing is committed.
     pub fn execute_transaction(
         &mut self,
         tx: MegaTransaction,
@@ -298,6 +306,7 @@ where
             gas,
             usage: layer.usage(),
             limit_exceeded: layer.latched().copied(),
+            oracle_reads: self.inner.ctx.oracle_reads().reads().to_vec(),
         })
     }
 }

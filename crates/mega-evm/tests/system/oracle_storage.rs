@@ -14,7 +14,7 @@ use mega_evm::{
     test_utils::{op_transaction, zero_fee_l1_block_info, BytecodeBuilder, MemoryDatabase},
     volatile_data_access_disabled_revert_data, EmptyExternalEnv, EvmTxRuntimeLimits, ExternalEnvs,
     LimitCheck, LimitKind, MegaContext, MegaEvm, MegaSpecId, MegaTransaction,
-    MegaTransactionOutcome, OracleEnv, VolatileDataAccess,
+    MegaTransactionOutcome, OracleEnv, OracleRead, VolatileDataAccess,
 };
 use revm::{
     bytecode::opcode::{
@@ -418,6 +418,7 @@ fn test_a_read_the_frame_cannot_pay_for_asks_nothing() {
         "the call failed"
     );
     assert!(service.seen().is_empty(), "a read the frame cannot pay for asks nothing");
+    assert!(run.outcome.oracle_reads.is_empty(), "and records nothing");
     assert_eq!(run.accessed, VolatileDataAccess::empty());
 }
 
@@ -441,7 +442,36 @@ fn test_a_refused_read_asks_nothing() {
     assert!(!status);
     assert_eq!(data, &volatile_data_access_disabled_revert_data(VolatileDataAccess::ORACLE)[..]);
     assert!(service.seen().is_empty());
+    assert!(run.outcome.oracle_reads.is_empty(), "a refused read records nothing");
     assert_eq!(run.accessed, VolatileDataAccess::empty());
+}
+
+/// Every read a transaction makes through the service is on its outcome, in the order the
+/// service was asked, with the answer the frame saw: the service's value, or `None` where the
+/// service had none and the loaded value stood. The record is the service's own view of the
+/// transaction, so a validator given it in place of the service answers every read alike.
+#[test]
+fn test_the_reads_a_transaction_made_are_on_its_outcome() {
+    let answered = Service::holding(SLOT, SERVICE_VALUE);
+    let code = calls_with(CALL, ORACLE_CONTRACT_ADDRESS, &get_slot(SLOT), 0);
+    let tx = || call_tx(CONTRACT, [], U256::ZERO);
+    let with_answer = run(db_with_state().account_code(CONTRACT, code.clone()), &answered, tx());
+    assert_eq!(returned_word(&with_answer), SERVICE_VALUE);
+    let read = OracleRead { slot: SLOT, answer: Some(SERVICE_VALUE) };
+    assert_eq!(with_answer.outcome.oracle_reads, [read]);
+
+    let silent = Service::default();
+    let without = run(db_with_state().account_code(CONTRACT, code), &silent, tx());
+    assert_eq!(returned_word(&without), STATE_VALUE, "the loaded value stood");
+    assert_eq!(without.outcome.oracle_reads, [OracleRead { slot: SLOT, answer: None }]);
+
+    // Two reads of one slot in one frame are two records, in order, as the service saw them.
+    let answered = Service::holding(SLOT, SERVICE_VALUE);
+    let db = db_with_state().account_code(ORACLE_CONTRACT_ADDRESS, two_reads());
+    let twice = run(db, &answered, call_tx(ORACLE_CONTRACT_ADDRESS, [], U256::ZERO));
+    assert!(twice.outcome.result.is_success(), "{:?}", twice.outcome.result);
+    assert_eq!(twice.outcome.oracle_reads, [read, read]);
+    assert_eq!(answered.seen(), [Seen::Read(SLOT), Seen::Read(SLOT)]);
 }
 
 /// The Oracle's own code answers `getSlot` from the service too: the read is the `SLOAD` in its

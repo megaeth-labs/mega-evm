@@ -24,9 +24,13 @@
 //! five fixed write records even when fewer fee accounts are written, and the EIP-7708 transfer
 //! logs of its value movements, which nothing prices, are not in it.
 
+#[cfg(not(feature = "std"))]
+use alloc as std;
+use std::vec::Vec;
+
 use revm::context::result::{ResultAndState, ResultGas};
 
-use crate::{LimitCheck, LimitUsage, MegaHaltReason};
+use crate::{LimitCheck, LimitUsage, MegaHaltReason, OracleRead};
 
 /// What executing one transaction produced: revm's result and state, and what `MegaETH` counts
 /// beside them.
@@ -45,6 +49,11 @@ pub struct MegaTransactionOutcome {
     /// revert whose output is its [`MegaLimitExceeded`](crate::MegaLimitExceeded); this, not the
     /// output, tells a limit stop from a contract reverting with the same bytes.
     pub limit_exceeded: Option<LimitCheck>,
+    /// The reads of the Oracle's storage the transaction made through the oracle service, in
+    /// order, each with the service's answer. The answers are in no database: a node building a
+    /// stateless witness takes them from the transactions it includes, and a validator given them
+    /// answers each read as the building node's service did.
+    pub oracle_reads: Vec<OracleRead>,
 }
 
 impl core::ops::Deref for MegaTransactionOutcome {
