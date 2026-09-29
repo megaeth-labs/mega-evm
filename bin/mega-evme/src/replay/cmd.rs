@@ -129,8 +129,10 @@ impl Cmd {
     /// the one its chain ran, or runs, its block on.
     ///
     /// Without an override this reads the chain id, and, only on a chain that switches engines
-    /// at a scheduled timestamp, the block's timestamp, from the source the replay itself reads,
-    /// through a provider that persists nothing.
+    /// at a scheduled timestamp, the timestamp of the block the replay runs the transaction in,
+    /// from the source the replay itself reads, through a provider that persists nothing: the
+    /// transaction's block, or for a pending transaction the latest block, whose environment and
+    /// schedule the replay runs it in.
     pub async fn engine(&self) -> Result<Engine> {
         let tx_hash = self.tx_hash();
         if let Some(spec) = &self.spec_override {
@@ -145,17 +147,18 @@ impl Cmd {
             .await
             .map_err(|e| ReplayError::RpcError(format!("Failed to fetch transaction: {e}")))?
             .ok_or(ReplayError::TransactionNotFound(tx_hash))?;
-        let timestamp = match tx.block_number {
-            Some(number) => provider
-                .get_block_by_number(number.into())
-                .await
-                .map_err(|e| ReplayError::RpcError(format!("RPC transport error: {e}")))?
-                .ok_or(ReplayError::BlockNotFound(number))?
-                .header
-                .timestamp(),
-            // A pending transaction executes on top of the latest block, at a later timestamp.
-            None => u64::MAX,
+        let transport = |e| ReplayError::RpcError(format!("RPC transport error: {e}"));
+        let number = match tx.block_number {
+            Some(number) => number,
+            None => provider.get_block_number().await.map_err(transport)?,
         };
+        let timestamp = provider
+            .get_block_by_number(number.into())
+            .await
+            .map_err(transport)?
+            .ok_or(ReplayError::BlockNotFound(number))?
+            .header
+            .timestamp();
         Ok(Engine::of_block(chain_id, timestamp))
     }
 
