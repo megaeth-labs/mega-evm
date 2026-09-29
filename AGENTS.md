@@ -24,6 +24,7 @@ cargo build
 cargo test                                # all tests
 cargo test -p mega-evm                    # core crate only
 cargo test -p mega-evm -- test_name       # single test
+cargo test --manifest-path bin/mega-evme/Cargo.toml   # the mega-evme tool (not `-p`: it links mega-evme 1.7.1)
 
 # The gas schedule's byte prices are an input; this feature lets a measurement build change them
 cargo test -p mega-evm --features satin-price-override,test-utils
@@ -70,11 +71,15 @@ Git submodules are required — clone with `--recursive` or run `git submodule u
 | `mega-system-contracts` | `crates/system-contracts` | yes    | Solidity system contracts with Rust bindings (Foundry-based)                |
 | `mega-state-test`       | `crates/mega-state-test`  | yes    | Execution-spec state-test runner on Satin: the equivalence gate, the report |
 | `state-test`            | `crates/state-test`       | yes    | The runner's CLI                                                            |
-| `mega-evme`             | `bin/mega-evme`           | no     | EVM execution CLI; rejoins when ported to Satin                             |
+| `mega-evme`             | `bin/mega-evme`           | yes    | EVM execution CLI: Satin in-tree, legacy specs on the released 1.7.1 CLI    |
 | `mega-t8n`              | `bin/mega-t8n`            | no     | State transition (t8n) tool; rejoins when ported to Satin                   |
 
-The two tool binaries `mega-evme` and `mega-t8n` still target the legacy engine.
-They are outside `[workspace] members`, so no workspace command builds them; do not edit their sources until they are ported to Satin.
+`mega-evme` runs a command on the engine its spec names: `Satin` on the in-tree sources, a spec from `Equivalence` to `Rex6` on the released `mega-evme` 1.7.1 and `mega-evm` 1.7.1, which it links under the aliases `mega-evme-legacy` and `mega-evm-legacy` (its `legacy` feature, on by default).
+Because it links a package of its own name, select it by manifest path, not with `-p`: `cargo test --manifest-path bin/mega-evme/Cargo.toml`.
+The legacy line's versions are pinned to the 1.7.1 release's lockfile and guarded by `bin/mega-evme/tests/legacy_line.rs`.
+
+`mega-t8n` still targets the legacy engine.
+It is outside `[workspace] members`, so no workspace command builds it; do not edit its sources until it is ported to Satin.
 
 ### Dependencies on the forks
 
@@ -82,7 +87,8 @@ The root `Cargo.toml` pins `revm = "=40.0.3"` and redirects all twelve revm crat
 `op-revm` is declared from the OP monorepo revision the node locks and redirected to the MegaETH fork of op-revm with `[patch."https://github.com/ethereum-optimism/optimism"]`; the OP alloy crates (`alloy-op-evm`, `op-alloy-*`) come from the same monorepo revision.
 
 - Patch the twelve revm crates together, or the build resolves a second copy of revm.
-- `cargo tree -i revm` must show exactly one revm, from the fork.
+- `cargo tree -i revm` must show exactly one revm, from the fork: the engine's graph (the default member) never reaches another.
+  The workspace also locks revm 27.1.0, linked only by `mega-evme`'s legacy leg (`cargo tree --workspace -i revm@27.1.0`).
 - The fork pins move by editing the patch blocks; commit the regenerated `Cargo.lock` with them.
 - Gas detention builds on the fork's withheld part of a frame's regular gas (`GasTracker::limit_spendable`, `withheld_crossing`, `set_withheld_crossing`), whose crossing record holds the regular gas the frame had before the charge that crossed (`WithheldCrossing::remaining`), and on the fork's precompile price (`Precompile::required_gas`), neither of which upstream revm has.
 - The op-revm fork prices its size-limited precompiles through that hook, which upstream op-revm does not, so gas detention decides a call to the BN254 pairing or a BLS12-381 MSM or pairing from its price rather than running it on the allowance.

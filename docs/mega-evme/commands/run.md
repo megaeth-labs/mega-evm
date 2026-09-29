@@ -74,17 +74,18 @@ No banners or diagnostic text are printed in JSON mode — stdout contains exact
 
 The object includes these fields:
 
-| Field              | Type             | Description                                                                  |
-| ------------------ | ---------------- | ---------------------------------------------------------------------------- |
-| `success`          | `bool`           | Whether execution succeeded                                                  |
-| `gas_used`         | `number`         | Gas consumed                                                                 |
-| `output`           | `string \| null` | Hex-encoded return data (present only on success with non-empty output)      |
-| `contract_address` | `string \| null` | Deployed address (present only for successful `--create` transactions)       |
-| `logs_count`       | `number`         | Number of log entries emitted                                                |
-| `revert_reason`    | `string \| null` | Decoded revert reason (present only on revert)                               |
-| `halt_reason`      | `string \| null` | Halt reason (present only on halt)                                           |
-| `trace`            | `object \| null` | Execution trace (when `--trace` is enabled without `--trace.output`)         |
-| `state`            | `object \| null` | Post-execution state dump (when `--dump` is enabled without `--dump.output`) |
+| Field              | Type             | Description                                                                                                                           |
+| ------------------ | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `success`          | `bool`           | Whether execution succeeded                                                                                                           |
+| `gas_used`         | `number`         | Gas consumed                                                                                                                          |
+| `output`           | `string \| null` | Hex-encoded return data (present only on success with non-empty output)                                                               |
+| `contract_address` | `string \| null` | Deployed address (present only for successful `--create` transactions)                                                                |
+| `logs_count`       | `number`         | Number of log entries emitted                                                                                                         |
+| `revert_reason`    | `string \| null` | Decoded revert reason (present only on revert)                                                                                        |
+| `halt_reason`      | `string \| null` | Halt reason (present only on halt)                                                                                                    |
+| `trace`            | `object \| null` | Execution trace (when `--trace` is enabled without `--trace.output`)                                                                  |
+| `state`            | `object \| null` | Post-execution state dump (when `--dump` is enabled without `--dump.output`)                                                          |
+| `satin`            | `object`         | On `--spec Satin` only: the gas by ledger and the limits' counts, see [Satin output](../configuration/chain-and-spec.md#satin-output) |
 
 When `--trace` or `--dump` is used with an output file (`--trace.output`, `--dump.output`), data is written to that file and the corresponding JSON field is omitted.
 When no output file is specified, the data is inlined into the JSON object.
@@ -327,7 +328,7 @@ RPC Options:
 
 Chain Options:
       --spec <SPEC>
-          Name of spec to use, possible values: `Equivalence`, `MiniRex`, `MiniRex1`, `MiniRex2`, `Rex`, `Rex1`, `Rex2`, `Rex3`, `Rex4`, `Rex5`, `Rex6` (`MiniRex1`/`MiniRex2` are alias specs executing `Equivalence`/`MiniRex` behavior)
+          Name of spec to use. `Satin` runs on the Satin engine; `Equivalence`, `MiniRex`, `MiniRex1`, `MiniRex2`, `Rex`, `Rex1`, `Rex2`, `Rex3`, `Rex4`, `Rex5`, `Rex6` run on the legacy engine, the released 1.7.1 (`MiniRex1`/`MiniRex2` are alias specs executing `Equivalence`/`MiniRex` behavior)
 
           [default: Rex6]
 

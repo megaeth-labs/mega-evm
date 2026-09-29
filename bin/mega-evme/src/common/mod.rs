@@ -1,6 +1,5 @@
 mod env;
 mod error;
-mod hardfork;
 mod hex;
 mod logging;
 mod outcome;
@@ -12,7 +11,6 @@ mod tx_override;
 
 pub use env::*;
 pub use error::*;
-pub use hardfork::*;
 pub use hex::*;
 pub use logging::*;
 pub use outcome::*;

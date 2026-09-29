@@ -12,7 +12,7 @@ use clap::Parser;
 use mega_evm::{
     op_revm::OpHaltReason,
     revm::{context::result::ExecutionResult, state::EvmState},
-    MegaHaltReason, MegaTxType,
+    LimitCheck, LimitKind, MegaHaltReason, MegaTransactionOutcome, MegaTxType,
 };
 use op_alloy_consensus::{OpDepositReceipt, OpReceiptEnvelope};
 use serde::Serialize;
@@ -33,6 +33,79 @@ pub struct EvmeOutcome {
     pub exec_time: Duration,
     /// Optional trace data (if tracing was enabled)
     pub trace_data: Option<String>,
+    /// What Satin counted beside the result
+    pub satin: SatinReport,
+}
+
+/// What the Satin engine counts for a transaction beside revm's result: the gas by ledger, the
+/// data size and write records it kept, and the limit that stopped it.
+///
+/// It is the one part of the output a legacy run has no counterpart for, so it is carried in a
+/// field of its own and every other field keeps its legacy name and meaning.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct SatinReport {
+    /// Regular (compute) gas spent, before the refund.
+    pub regular_gas: u64,
+    /// EIP-8037 state gas spent, net of refills.
+    pub state_gas: u64,
+    /// History gas spent, net of refills.
+    pub history_gas: u64,
+    /// History bytes the transaction appended, whoever paid for them.
+    pub history_bytes: u64,
+    /// The EIP-8037 reservoir left unspent, which the sender gets back.
+    pub reservoir_remaining: u64,
+    /// The EIP-7623 floor the receipt's gas used cannot fall below.
+    pub floor_gas: u64,
+    /// Data-size bytes the transaction kept.
+    pub data_size: u64,
+    /// Account and storage write records the transaction kept: its KV count.
+    pub write_records: u64,
+    /// The transaction-level limit that stopped the transaction, if one did.
+    pub limit_exceeded: Option<LimitStop>,
+}
+
+/// A transaction-level limit that stopped a Satin transaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct LimitStop {
+    /// The dimension: `data_size`, `kv_update`, `compute_gas` or `state_growth`.
+    pub kind: &'static str,
+    /// The limit crossed, in the dimension's unit.
+    pub limit: u64,
+    /// The usage that crossed it.
+    pub used: u64,
+}
+
+impl SatinReport {
+    /// The report of `outcome`.
+    pub fn of(outcome: &MegaTransactionOutcome) -> Self {
+        let gas = outcome.gas;
+        Self {
+            regular_gas: gas.regular,
+            state_gas: gas.state,
+            history_gas: gas.history,
+            history_bytes: gas.history_bytes,
+            reservoir_remaining: gas.reservoir_remaining,
+            floor_gas: gas.floor,
+            data_size: outcome.usage.data_size,
+            write_records: outcome.usage.write_records,
+            limit_exceeded: match outcome.limit_exceeded {
+                Some(LimitCheck::ExceedsLimit { kind, limit, used, .. }) => {
+                    Some(LimitStop { kind: limit_kind_name(kind), limit, used })
+                }
+                _ => None,
+            },
+        }
+    }
+}
+
+/// The name of a limit dimension in output.
+pub const fn limit_kind_name(kind: LimitKind) -> &'static str {
+    match kind {
+        LimitKind::DataSize => "data_size",
+        LimitKind::KVUpdate => "kv_update",
+        LimitKind::ComputeGas => "compute_gas",
+        LimitKind::StateGrowth => "state_growth",
+    }
 }
 
 impl EvmeOutcome {
@@ -44,7 +117,7 @@ impl EvmeOutcome {
         // Build base receipt
         let receipt = Receipt {
             status: Eip658Value::Eip658(self.exec_result.is_success()),
-            cumulative_gas_used: self.exec_result.gas_used(),
+            cumulative_gas_used: self.exec_result.tx_gas_used(),
             logs: self.exec_result.logs().to_vec(),
         };
 
@@ -54,6 +127,7 @@ impl EvmeOutcome {
             MegaTxType::Eip2930 => OpReceiptEnvelope::Eip2930(receipt.with_bloom()),
             MegaTxType::Eip1559 => OpReceiptEnvelope::Eip1559(receipt.with_bloom()),
             MegaTxType::Eip7702 => OpReceiptEnvelope::Eip7702(receipt.with_bloom()),
+            MegaTxType::PostExec => OpReceiptEnvelope::PostExec(receipt.with_bloom()),
             MegaTxType::Deposit => {
                 let deposit_receipt = OpDepositReceipt {
                     inner: receipt,
@@ -123,8 +197,9 @@ pub fn print_execution_summary(
     println!();
     println!("=== Transaction Summary ===");
 
+    let gas_used = exec_result.tx_gas_used();
     match exec_result {
-        ExecutionResult::Success { gas_used, logs, output, .. } => {
+        ExecutionResult::Success { logs, output, .. } => {
             println!("Status:           Success");
             println!("Gas Used:         {}", gas_used);
             println!("Execution Time:   {:?}", exec_time);
@@ -139,18 +214,35 @@ pub fn print_execution_summary(
                 println!("Output:           0x{}", hex::encode(output_data));
             }
         }
-        ExecutionResult::Revert { gas_used, output } => {
+        ExecutionResult::Revert { output, .. } => {
             println!("Status:           Reverted");
             println!("Gas Used:         {}", gas_used);
             println!("Execution Time:   {:?}", exec_time);
             println!("Revert Reason:    {}", decode_revert_reason(output));
         }
-        ExecutionResult::Halt { gas_used, reason } => {
+        ExecutionResult::Halt { reason, .. } => {
             println!("Status:           Halted");
             println!("Gas Used:         {}", gas_used);
             println!("Execution Time:   {:?}", exec_time);
             println!("Halt Reason:      {}", format_halt_reason(reason));
         }
+    }
+}
+
+/// Print what Satin counted, after the summary it adds to.
+pub fn print_satin_report(report: &SatinReport) {
+    println!();
+    println!("=== Satin Gas ===");
+    println!("Regular Gas:      {}", report.regular_gas);
+    println!("State Gas:        {}", report.state_gas);
+    println!("History Gas:      {}", report.history_gas);
+    println!("History Bytes:    {}", report.history_bytes);
+    println!("Reservoir Left:   {}", report.reservoir_remaining);
+    println!("Floor Gas:        {}", report.floor_gas);
+    println!("Data Size:        {}", report.data_size);
+    println!("Write Records:    {}", report.write_records);
+    if let Some(stop) = report.limit_exceeded {
+        println!("Limit Exceeded:   {} (limit {}, used {})", stop.kind, stop.limit, stop.used);
     }
 }
 
@@ -160,7 +252,7 @@ pub fn print_execution_summary(
 /// - `Error(string)` via `alloy_sol_types::Revert`
 /// - `Panic(uint256)` via `alloy_sol_types::Panic`
 /// - Raw hex fallback
-fn decode_revert_reason(output: &Bytes) -> String {
+pub fn decode_revert_reason(output: &Bytes) -> String {
     if output.is_empty() {
         return "(empty)".to_string();
     }
@@ -184,15 +276,7 @@ fn decode_revert_reason(output: &Bytes) -> String {
 }
 
 /// Format halt reason for display.
-fn format_halt_reason(reason: &MegaHaltReason) -> String {
-    match reason {
-        MegaHaltReason::Base(op_reason) => format_op_halt_reason(op_reason),
-        _ => format!("{:?}", reason),
-    }
-}
-
-/// Format OP halt reason for display.
-fn format_op_halt_reason(reason: &OpHaltReason) -> String {
+pub fn format_halt_reason(reason: &MegaHaltReason) -> String {
     match reason {
         OpHaltReason::Base(eth_reason) => format!("{:?}", eth_reason),
         _ => format!("{:?}", reason),
@@ -274,6 +358,9 @@ pub struct ExecutionSummary {
     /// Transaction receipt (present only for `tx` command)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub receipt: Option<serde_json::Value>,
+    /// What Satin counted beside the result; absent on a legacy run, which has no counterpart
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub satin: Option<SatinReport>,
 }
 
 impl ExecutionSummary {
@@ -319,12 +406,13 @@ impl ExecutionSummary {
         exec_result: &ExecutionResult<MegaHaltReason>,
         contract_address: Option<Address>,
     ) -> Self {
+        let gas_used = exec_result.tx_gas_used();
         match exec_result {
-            ExecutionResult::Success { gas_used, logs, output, .. } => {
+            ExecutionResult::Success { logs, output, .. } => {
                 let output_data = output.data();
                 Self {
                     success: true,
-                    gas_used: *gas_used,
+                    gas_used,
                     output: if output_data.is_empty() {
                         None
                     } else {
@@ -335,16 +423,14 @@ impl ExecutionSummary {
                     ..Default::default()
                 }
             }
-            ExecutionResult::Revert { gas_used, output } => Self {
-                gas_used: *gas_used,
+            ExecutionResult::Revert { output, .. } => Self {
+                gas_used,
                 revert_reason: Some(decode_revert_reason(output)),
                 ..Default::default()
             },
-            ExecutionResult::Halt { gas_used, reason } => Self {
-                gas_used: *gas_used,
-                halt_reason: Some(format!("{:?}", reason)),
-                ..Default::default()
-            },
+            ExecutionResult::Halt { reason, .. } => {
+                Self { gas_used, halt_reason: Some(format!("{:?}", reason)), ..Default::default() }
+            }
         }
     }
 }

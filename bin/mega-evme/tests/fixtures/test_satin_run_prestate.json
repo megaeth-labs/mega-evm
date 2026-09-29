@@ -1,0 +1,34 @@
+{
+  "description": "Satin: --prestate loads dumped state: SLOAD reads 0xaa from slot 0 of preloaded account",
+  "args": [
+    "run",
+    "--prestate",
+    "{fixtures}/prestate_data.json",
+    "--sender",
+    "0x1111111111111111111111111111111111111111",
+    "--sender.balance",
+    "1ether",
+    "--receiver",
+    "0x0000000000000000000000000000000000000000",
+    "0x60005460005260206000f3",
+    "--spec",
+    "Satin"
+  ],
+  "expected": {
+    "success": true,
+    "gas_used": 44398,
+    "output": "0x00000000000000000000000000000000000000000000000000000000000000aa",
+    "logs_count": 0,
+    "satin": {
+      "regular_gas": 17118,
+      "state_gas": 0,
+      "history_gas": 27280,
+      "history_bytes": 310,
+      "reservoir_remaining": 0,
+      "floor_gas": 15000,
+      "data_size": 310,
+      "write_records": 0,
+      "limit_exceeded": null
+    }
+  }
+}

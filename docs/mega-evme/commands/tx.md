@@ -79,7 +79,7 @@ Each group has its own reference page with the full flag table.
 Pass `--json` to emit a single `ExecutionSummary` JSON object to stdout instead of the human-readable banner.
 No banners or diagnostic text are printed in JSON mode — stdout contains exactly one JSON object.
 
-The output includes the same fields as [`run --json`](run.md#json-output), plus one additional field:
+The output includes the same fields as [`run --json`](run.md#json-output) (with `satin` on `--spec Satin`), plus one additional field:
 
 | Field     | Type             | Description                                                                 |
 | --------- | ---------------- | --------------------------------------------------------------------------- |
@@ -213,7 +213,7 @@ RPC Options:
       --rpc.rate-limit <CU/S>            Retry-layer compute-units-per-second budget [default: 660]
 
 Chain Options:
-      --spec <SPEC>                Spec [default: Rex6]
+      --spec <SPEC>                Spec: `Satin`, or a legacy spec `Equivalence` to `Rex6` [default: Rex6]
       --chain-id <CHAIN_ID>       Chain ID [default: 6342] [aliases: --chainid]
 
 Block Options:

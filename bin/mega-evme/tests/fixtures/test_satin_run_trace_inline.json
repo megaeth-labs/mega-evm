@@ -1,0 +1,112 @@
+{
+  "description": "Satin: --json --trace includes opcode trace in JSON (PUSH1 0x42, MSTORE, RETURN)",
+  "args": [
+    "run",
+    "--trace",
+    "--tracer",
+    "opcode",
+    "0x604260005260206000f3",
+    "--spec",
+    "Satin"
+  ],
+  "expected": {
+    "success": true,
+    "gas_used": 42298,
+    "output": "0x0000000000000000000000000000000000000000000000000000000000000042",
+    "logs_count": 0,
+    "trace": {
+      "failed": false,
+      "gas": 42298,
+      "returnValue": "0x0000000000000000000000000000000000000000000000000000000000000042",
+      "structLogs": [
+        {
+          "pc": 0,
+          "op": "PUSH1",
+          "gas": 9957720,
+          "gasCost": 3,
+          "depth": 1,
+          "stack": [],
+          "memory": [],
+          "refund": 0
+        },
+        {
+          "pc": 2,
+          "op": "PUSH1",
+          "gas": 9957717,
+          "gasCost": 3,
+          "depth": 1,
+          "stack": [
+            "0x42"
+          ],
+          "memory": [],
+          "refund": 0
+        },
+        {
+          "pc": 4,
+          "op": "MSTORE",
+          "gas": 9957714,
+          "gasCost": 6,
+          "depth": 1,
+          "stack": [
+            "0x42",
+            "0x0"
+          ],
+          "memory": [],
+          "refund": 0
+        },
+        {
+          "pc": 5,
+          "op": "PUSH1",
+          "gas": 9957708,
+          "gasCost": 3,
+          "depth": 1,
+          "stack": [],
+          "memory": [
+            "0x0000000000000000000000000000000000000000000000000000000000000042"
+          ],
+          "refund": 0
+        },
+        {
+          "pc": 7,
+          "op": "PUSH1",
+          "gas": 9957705,
+          "gasCost": 3,
+          "depth": 1,
+          "stack": [
+            "0x20"
+          ],
+          "memory": [
+            "0x0000000000000000000000000000000000000000000000000000000000000042"
+          ],
+          "refund": 0
+        },
+        {
+          "pc": 9,
+          "op": "RETURN",
+          "gas": 9957702,
+          "gasCost": 0,
+          "depth": 1,
+          "stack": [
+            "0x20",
+            "0x0"
+          ],
+          "memory": [
+            "0x0000000000000000000000000000000000000000000000000000000000000042"
+          ],
+          "refund": 0
+        }
+      ]
+    },
+    "satin": {
+      "regular_gas": 15018,
+      "state_gas": 0,
+      "history_gas": 27280,
+      "history_bytes": 310,
+      "reservoir_remaining": 0,
+      "floor_gas": 15000,
+      "data_size": 310,
+      "write_records": 0,
+      "limit_exceeded": null
+    }
+  }
+}

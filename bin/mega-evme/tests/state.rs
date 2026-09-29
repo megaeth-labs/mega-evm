@@ -319,3 +319,51 @@ async fn test_create_initial_state_fork_real_rpc_storage_cache_hit() {
 
     assert_eq!(phase1_value, phase2_value, "cache reload must return the same storage value");
 }
+
+/// A forked state reads an account the RPC reports as all zeros as absent, and an account with a
+/// balance as present: an RPC answers zeros for an account that does not exist.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_forked_state_reads_an_all_zero_account_as_absent() {
+    use wiremock::{matchers, Mock, MockServer, ResponseTemplate};
+
+    let absent = Address::from_str("0x00000000000000000000000000000000000000aa").unwrap();
+    let funded = Address::from_str("0x00000000000000000000000000000000000000bb").unwrap();
+    let server = MockServer::start().await;
+    let respond = |method: &'static str, needle: Option<String>, result: &'static str| {
+        let mut mock = Mock::given(matchers::method("POST"))
+            .and(matchers::body_string_contains(format!("\"{method}\"")));
+        if let Some(needle) = needle {
+            mock = mock.and(matchers::body_string_contains(needle));
+        }
+        mock.respond_with(move |req: &wiremock::Request| {
+            let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+            ResponseTemplate::new(200).set_body_json(
+                serde_json::json!({ "jsonrpc": "2.0", "id": body["id"], "result": result }),
+            )
+        })
+    };
+    respond("eth_chainId", None, "0x10e6").mount(&server).await;
+    respond("eth_getBalance", Some(format!("{funded:#x}")), "0x64")
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    respond("eth_getBalance", None, "0x0").with_priority(2).mount(&server).await;
+    respond("eth_getTransactionCount", None, "0x0").mount(&server).await;
+    respond("eth_getCode", None, "0x").mount(&server).await;
+
+    let prestate_args = PreStateArgs::parse_from(["mega-evme", "--fork", "--fork.block", "100"]);
+    let rpc_args = RpcArgs::parse_from([
+        "mega-evme",
+        "--rpc",
+        &server.uri(),
+        "--rpc.no-cache-file",
+        "--rpc.max-retries",
+        "0",
+    ]);
+    let (state, _store) =
+        prestate_args.create_initial_state(&Address::ZERO, &rpc_args).await.expect("fork");
+
+    assert_eq!(state.basic_ref(absent).expect("absent account"), None);
+    let present = state.basic_ref(funded).expect("funded account").expect("present");
+    assert_eq!(present.balance, U256::from(100));
+}
