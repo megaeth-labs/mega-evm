@@ -317,11 +317,11 @@ mega-evme replay --block 26400000..26400199 \
   --rpc https://mainnet.megaeth.com/rpc --block-cache ./blocks --verify
 ```
 
-**Replay the recorded blocks on Satin, offline once they are cached**
+**Replay the recorded blocks on Satin; once a Satin run has cached them, later runs can drop `--rpc`**
 
 ```bash
 mega-evme replay --block 26400000..26400199 --block-cache ./blocks \
-  --override.spec Satin --json > satin.ndjson
+  --rpc https://mainnet.megaeth.com/rpc --override.spec Satin --json > satin.ndjson
 ```
 
 ## See Also

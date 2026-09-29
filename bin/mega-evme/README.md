@@ -277,8 +277,9 @@ mega-evme replay 0x1234...txhash --override.input-file calldata.hex
 # Check 200 blocks against the chain and record them
 mega-evme replay --block 26400000..26400199 --rpc https://mainnet.megaeth.com/rpc --block-cache ./blocks --verify
 
-# The same blocks on Satin, as NDJSON
-mega-evme replay --block 26400000..26400199 --block-cache ./blocks --override.spec Satin --json > satin.ndjson
+# The same blocks on Satin, as NDJSON (the first Satin run reads the EIP-7997 factory over RPC;
+# later runs of the same blocks can drop --rpc)
+mega-evme replay --block 26400000..26400199 --rpc https://mainnet.megaeth.com/rpc --block-cache ./blocks --override.spec Satin --json > satin.ndjson
 ```
 
 Fetching a block needs an archive endpoint with the `debug` namespace (`debug_traceBlockByNumber` with `prestateTracer`); a cached block replays offline.

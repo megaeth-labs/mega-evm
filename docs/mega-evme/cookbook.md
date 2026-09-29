@@ -68,11 +68,12 @@ mega-evme replay --block 26400000..26400099 \
   --rpc https://mainnet.megaeth.com/rpc --block-cache ./blocks --verify
 ```
 
-Replay the same blocks on Satin, offline once the first Satin run has cached what Satin reads beyond the legacy replay, and keep the per-transaction records:
+Replay the same blocks on Satin and keep the per-transaction records.
+The first Satin run reads over RPC what Satin reads beyond the legacy replay (the EIP-7997 factory its pre-block changes deploy) and adds it to the cache; later runs of the same blocks can drop `--rpc`:
 
 ```bash
 mega-evme replay --block 26400000..26400099 --block-cache ./blocks \
-  --override.spec Satin --json > satin.ndjson
+  --rpc https://mainnet.megaeth.com/rpc --override.spec Satin --json > satin.ndjson
 ```
 
 Each transaction record carries the chain's values beside the replayed ones (`chain`, `differs`) and Satin's ledgers (`satin`).
