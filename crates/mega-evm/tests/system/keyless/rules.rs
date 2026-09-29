@@ -13,6 +13,7 @@
 
 use alloy_primitives::{address, keccak256, Signature};
 use mega_evm::{
+    active_satin_prices,
     alloy_consensus::TxEip1559,
     constants::{MAX_INITCODE_SIZE, TX_GAS_LIMIT_CAP},
     system::keyless::{
@@ -100,21 +101,76 @@ fn test_keyless_deploy_gas_limit_too_low() {
 }
 
 /// An override equal to the signed gas limit passes rule 2, and the creation runs with exactly
-/// that much. The canonical `CREATE2` factory was signed for a chain that charges no state gas
-/// for deployed code: without a reservoir its 100,000 gas does not cover the code it deposits,
-/// and the creation runs out of gas; above the execution cap the reservoir pays that state gas,
-/// and the same gas limit deploys it.
+/// that much: signed short of what its creation spends below the execution cap, it runs out of gas
+/// having spent all of it. The canonical `CREATE2` factory was signed for a chain that charges no
+/// state gas for deployed code: at the spec's prices its 100,000 gas does not cover the code it
+/// deposits without a reservoir; above the execution cap the reservoir pays that state gas, and the
+/// same gas limit deploys it.
 #[test]
 fn test_keyless_deploy_gas_limit_exactly_equal() {
-    let narrow = submit(system_db(), CREATE2_FACTORY_TX, 100_000, GAS_LIMITS[0]);
-    let KeylessDeployError::ExecutionHalted { gas_used, .. } = failure(&narrow) else {
-        panic!("expected the creation to run out of gas: {:?}", narrow.result);
-    };
-    assert_eq!(gas_used, 100_000, "the creation ran on the signed gas limit, and spent it");
-    assert_eq!(nonce(&narrow, CREATE2_FACTORY_DEPLOYER), 1, "the nonce is spent all the same");
+    let canonical = (
+        Bytes::from_static(CREATE2_FACTORY_TX),
+        100_000,
+        CREATE2_FACTORY_DEPLOYER,
+        CREATE2_FACTORY_CONTRACT,
+    );
+    let short = short_of_their_creation();
+    let covered = short.iter().any(|(tx, ..)| *tx == canonical.0);
+    for (tx, signed, signer, _) in short {
+        let narrow = submit(system_db(), &tx, signed, GAS_LIMITS[0]);
+        let KeylessDeployError::ExecutionHalted { gas_used, .. } = failure(&narrow) else {
+            panic!("expected the creation to run out of gas: {:?}", narrow.result);
+        };
+        assert_eq!(gas_used, signed, "the creation ran on the signed gas limit, and spent it");
+        assert_eq!(nonce(&narrow, signer), 1, "the nonce is spent all the same");
+    }
+    if !covered {
+        // Prices at which 100,000 pays for the factory's code without a reservoir.
+        let narrow = submit(system_db(), &canonical.0, canonical.1, GAS_LIMITS[0]);
+        assert_eq!(returned(&narrow).deployedAddress, canonical.3);
+    }
 
-    let wide = submit(system_db(), CREATE2_FACTORY_TX, 100_000, GAS_LIMITS[1]);
-    assert_eq!(returned(&wide).deployedAddress, CREATE2_FACTORY_CONTRACT);
+    let wide = submit(system_db(), &canonical.0, canonical.1, GAS_LIMITS[1]);
+    assert_eq!(returned(&wide).deployedAddress, canonical.3);
+}
+
+/// What the creation of the public transaction `tx` spends given all the gas it wants: its
+/// `gasUsed`, what it spent from either pool, the same below the execution cap as above it.
+fn creation_spend(tx: &[u8]) -> u64 {
+    returned(&submit(system_db(), tx, LARGE_OVERRIDE, GAS_LIMITS[0])).gasUsed
+}
+
+/// A public transaction whose signed gas limit is too little for its creation below the execution
+/// cap: its bytes, that gas limit, its signer and the address it deploys at.
+type ShortDeployment = (Bytes, u64, Address, Address);
+
+/// The public transactions whose signed gas limit is too little for their creation below the
+/// execution cap, at the prices the schedule was built with.
+///
+/// One is signed with a gas less than its creation spends, whatever the prices. The canonical ones
+/// join it where their creation spends more than they were signed with: they were signed for chains
+/// that charge no state gas for deployed code, and at the spec's prices neither signed gas limit
+/// covers the code it deposits.
+fn short_of_their_creation() -> Vec<ShortDeployment> {
+    let init_code = deploying(&runtime(64));
+    let spend = creation_spend(&Deployment::new(init_code.clone()).tx);
+    let one_short = Deployment::signed(0, spend - 1, U256::ZERO, init_code);
+    let mut short = vec![(one_short.tx, spend - 1, one_short.signer, one_short.address)];
+    let canonical: Vec<_> =
+        CANONICAL.into_iter().filter(|(tx, signed, ..)| creation_spend(tx) > *signed).collect();
+    if active_satin_prices().is_constants() {
+        assert_eq!(
+            canonical.len(),
+            CANONICAL.len(),
+            "at the spec's prices neither covers its code"
+        );
+    }
+    short.extend(
+        canonical
+            .into_iter()
+            .map(|(tx, signed, signer, address)| (Bytes::from_static(tx), signed, signer, address)),
+    );
+    short
 }
 
 /// The gas limit at which a `keylessDeploy` of `deployment`, carrying `init_len` bytes of init
@@ -395,7 +451,8 @@ fn test_a_signer_at_nonce_one_stays_there_however_often_it_fails() {
 
 /// The two canonical keyless deployments: the transaction, the gas limit it was signed with, its
 /// signer and the address it deploys at. Signed for chains that charge no state gas for deployed
-/// code: without a reservoir, the signed gas limit does not cover the code either deposits.
+/// code: at the spec's prices, without a reservoir, the signed gas limit does not cover the code
+/// either deposits.
 const CANONICAL: [(&[u8], u64, Address, Address); 2] = [
     (CREATE2_FACTORY_TX, 100_000, CREATE2_FACTORY_DEPLOYER, CREATE2_FACTORY_CONTRACT),
     (EIP1820_TX, 800_000, EIP1820_DEPLOYER, EIP1820_CONTRACT),
@@ -406,9 +463,10 @@ const CANONICAL: [(&[u8], u64, Address, Address); 2] = [
 /// ends at nonce 1, and a relayer that forwards enough gas deploys at the signer's address.
 #[test]
 fn test_failing_attempts_by_anybody_leave_the_address_deployable() {
+    let short = short_of_their_creation();
     for deploying_at in GAS_LIMITS {
-        for (tx, signed, signer, address) in CANONICAL {
-            fail_then_deploy(tx, signed, signer, address, GAS_LIMITS[0], deploying_at);
+        for (tx, signed, signer, address) in &short {
+            fail_then_deploy(tx, *signed, *signer, *address, GAS_LIMITS[0], deploying_at);
         }
     }
     // Init code that expands memory past what its signed gas limit pays for fails on it, whatever
@@ -478,9 +536,11 @@ fn fail_then_deploy(
 /// signer whose nonce is spent.
 #[test]
 fn test_a_resubmission_after_failures_and_a_deployment_finds_the_address_taken() {
+    let short = short_of_their_creation();
     for deploying_at in GAS_LIMITS {
-        for (tx, signed, signer, address) in CANONICAL {
-            let db = fail_then_deploy(tx, signed, signer, address, GAS_LIMITS[0], deploying_at);
+        for (tx, signed, signer, address) in &short {
+            let (signer, address) = (*signer, *address);
+            let db = fail_then_deploy(tx, *signed, signer, address, GAS_LIMITS[0], deploying_at);
             let resubmitted = run_nth(
                 db,
                 keyless_deploy_call(tx, U256::from(LARGE_OVERRIDE)),

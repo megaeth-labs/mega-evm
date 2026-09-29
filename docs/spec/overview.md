@@ -47,13 +47,22 @@ For the current stable behavior as a single reference, see the [MegaEVM Overview
 | **Optimism EVM** | [op-revm v8.1.0](https://github.com/bluealloy/op-revm)     |
 | **Alloy EVM**    | [alloy-evm v0.15.0](https://github.com/alloy-rs/alloy-evm) |
 
+<details>
+<summary>Satin (unstable): base layer and reference implementation</summary>
+
+Satin inherits standard EVM semantics from Optimism Karst (Ethereum Osaka) unless explicitly overridden, and every transaction pays history gas, so no transaction behaves identically to Optimism under Satin.
+Its reference implementation is the 2.x line of [MegaEVM](https://github.com/megaeth-labs/mega-evm), built on the [MegaETH fork of revm](https://github.com/megaeth-labs/revm) 40.0.3 (`v40.0.3-mega.4`), the [MegaETH fork of op-revm](https://github.com/megaeth-labs/op-revm) 20.0.0 (`v20.0.0-mega.3`), and alloy-evm 0.36.
+See the [Satin Network Upgrade](upgrades/satin.md).
+
+</details>
+
 ## Spec Progression
 
 MegaETH uses a spec system to version its verifiable behavior at each stage of the protocol's evolution.
 Each newer behavior-introducing spec includes all previous behaviors:
 
 ```
-EQUIVALENCE → MINI_REX → MINI_REX_1 → MINI_REX_2 → REX → REX1 → REX2 → REX3 → REX4 → REX5 → REX6 → REX7
+EQUIVALENCE → MINI_REX → MINI_REX_1 → MINI_REX_2 → REX → REX1 → REX2 → REX3 → REX4 → REX5 → REX6 → SATIN
 ```
 
 `MINI_REX_1` and `MINI_REX_2` are [alias rungs](hardfork-spec.md#alias-specs-behavior-vs-position) with no behavior of their own: they execute `EQUIVALENCE` and `MINI_REX` behavior respectively, expressing a rollback while the spec ladder keeps climbing.
@@ -74,7 +83,7 @@ Contracts deployed under a given spec will continue to behave identically, regar
 - **REX4** — Per-call-frame resource budgets, relative gas detention, [storage gas stipend](glossary.md#storage-gas-stipend), MegaAccessControl and MegaLimitControl system contracts.
 - **REX5** — SequencerRegistry system contract, Oracle v2.0.0 with dynamic system address, caller-account update deduplication, storage-gas-stipend separated-allowance model, value-transfer CALL/CALLCODE parent compute-gas attribution, CREATE code-deposit compute-gas atomicity, EIP-2935/EIP-4788 pre-block gas floor with fail-closed block rejection, CREATE2 empty-initcode short-circuit, KeylessDeploy trailing-bytes rejection and empty-code log forwarding.
 - **REX6** — Unified per-opcode gas metering order, consolidated EIP-7702 authorization accounting, CREATE-frame accounting corrections, KeylessDeploy sandbox hardening, post-execution fee-reward accounting, system-originated transaction metering exemption, extended beneficiary detention coverage, and SequencerRegistry v2.0.0 rotation hardening.
-- **REX7** — The **unstable** spec, currently open for development. No behavioral change over REX6 yet.
+- **SATIN** — The **unstable** spec, not scheduled on any network. Restates MegaETH's execution rules on Optimism Karst (Ethereum Osaka): EIP-8037 regular gas under a 200,000,000 execution cap with a state-gas reservoir, SALT-scaled state gas, history gas, revert-class limit stops, gas detention on withheld gas, EIP-7708 transfer logs, native KeylessDeploy creation, and block limits as packing budgets.
 
 See [Hardforks and Specs](hardfork-spec.md) for full details.
 

@@ -18,7 +18,8 @@ use revm::{
 };
 
 use crate::common::{
-    self, deposit_tx, executor, unlimited_ctx, user_tx, TestExecutor, BLOCK_GAS_LIMIT, BLOCK_NUMBER,
+    self, deposit_tx, executor, system_tx, unlimited_ctx, user_tx, TestExecutor, BLOCK_GAS_LIMIT,
+    BLOCK_NUMBER,
 };
 
 /// The word the L1 block contract holds at its scalars slot: the data-availability footprint
@@ -95,6 +96,23 @@ fn test_activation_block_rejects_a_user_transaction() {
     assert!(executor.receipts().is_empty(), "nothing was packed");
 }
 
+/// Rule 1 decides on the envelope: a Mega System Transaction is a legacy transaction in the block,
+/// so an activation block refuses it before it runs, as it refuses a user's, although the engine
+/// would promote it to a deposit as it ran it.
+#[test]
+fn test_activation_block_rejects_a_mega_system_transaction() {
+    let mut state = common::state();
+    let mut executor = executor(&mut state, unlimited_ctx().with_no_user_tx_activation_block(true));
+    executor.apply_pre_execution_changes().expect("the block starts");
+
+    let err = executor
+        .execute_transaction(&system_tx())
+        .expect_err("a legacy envelope has no place in an activation block");
+
+    assert!(format!("{err}").contains("non-deposit transaction in fork activation block"), "{err}");
+    assert!(executor.receipts().is_empty(), "nothing was packed");
+}
+
 /// Rule 1, the other half: the same block executes deposits.
 #[test]
 fn test_activation_block_executes_deposits() {
@@ -145,6 +163,29 @@ fn test_da_footprint_within_the_block_budget_is_reported_as_blob_gas() {
     assert_eq!(executor.limiter().block_da_footprint_used, expected);
     let (_, result) = executor.finish_with_counters().expect("the block finishes");
     assert_eq!(result.blob_gas_used, expected, "the block reports its footprint as blob gas");
+}
+
+/// Rule 2 decides on the envelope too: a Mega System Transaction, which the engine runs as the
+/// protocol's own, costs the block the data-availability footprint of the legacy transaction it
+/// is, and counts towards the block's data-availability size, where a deposit costs neither. The
+/// packing budgets read the same envelope.
+#[test]
+fn test_a_mega_system_transaction_costs_its_da_footprint() {
+    const SCALAR: u16 = 3;
+    let mut state = state_with_scalars(scalars_word(SCALAR, 0, 0));
+    let mut executor = executor(&mut state, unlimited_ctx());
+    executor.apply_pre_execution_changes().expect("the block starts");
+
+    let system = system_tx();
+    let da_size = mega_evm::MegaTransactionExt::estimated_da_size(&system);
+    let outcome = executor.run_transaction(&system).expect("the system transaction executes");
+    assert!(outcome.inner.result.is_success(), "{:?}", outcome.inner.result);
+    assert!(executor.evm().ctx().is_system_originated(), "the engine ran it as the protocol's own");
+    assert!(!outcome.is_deposit, "the block did not: its envelope is legacy");
+    executor.commit_transaction(outcome);
+
+    assert_eq!(executor.limiter().block_da_footprint_used, da_size * u64::from(SCALAR));
+    assert_eq!(executor.limiter().block_da_size_used, da_size);
 }
 
 /// Rule 2: a transaction whose footprint does not fit in the block's budget — the block's gas

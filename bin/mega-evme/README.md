@@ -265,7 +265,7 @@ These options are available across all commands.
 
 | Option                 | Default | Description                               |
 | ---------------------- | ------- | ----------------------------------------- |
-| `--spec <SPEC>`        | Rex7    | Spec: `Equivalence`, `MiniRex`, `MiniRex1`, `MiniRex2`, `Rex`, `Rex1`, `Rex2`, `Rex3`, `Rex4`, `Rex5`, `Rex6`, `Rex7` (`MiniRex1`/`MiniRex2` are aliases executing `Equivalence`/`MiniRex` behavior) |
+| `--spec <SPEC>`        | Rex6    | Spec: `Equivalence`, `MiniRex`, `MiniRex1`, `MiniRex2`, `Rex`, `Rex1`, `Rex2`, `Rex3`, `Rex4`, `Rex5`, `Rex6` (`MiniRex1`/`MiniRex2` are aliases executing `Equivalence`/`MiniRex` behavior) |
 | `--chain-id <ID>`      | 6342    | Chain ID                                  |
 
 ### Block Environment
