@@ -165,3 +165,39 @@ fn test_errors_print_as_their_engine_prints_them() {
         ["Failed to read file: No such file or directory (os error 2)"]
     );
 }
+
+/// A legacy `run` or `tx` that leaves `--spec` out runs on the tool's default spec whatever shape
+/// its arguments take: a `--` ending the options, which the 1.7.1 CLI accepts, still prints what
+/// the pinned fixture and the same command with `--spec Rex6` print.
+#[cfg(feature = "legacy")]
+#[test]
+fn test_a_legacy_command_ending_its_options_runs_on_the_default_spec() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let fixture = |name: &str| -> Fixture {
+        serde_json::from_str(&std::fs::read_to_string(dir.join(name)).unwrap()).unwrap()
+    };
+    let run = |args: &[&str]| -> serde_json::Value {
+        let output = Command::new(env!("CARGO_BIN_EXE_mega-evme")).args(args).output().unwrap();
+        assert!(
+            output.status.success(),
+            "{args:?} exited {:?}: {}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).unwrap()
+    };
+
+    // `run`, the code after the separator.
+    let basic = fixture("test_run_basic_return.json");
+    let ["run", code] = basic.args.iter().map(String::as_str).collect::<Vec<_>>()[..] else {
+        panic!("the fixture runs one code: {:?}", basic.args)
+    };
+    assert_eq!(run(&["run", "--json", "--", code]), basic.expected);
+    assert_eq!(run(&["run", "--spec", "Rex6", "--json", "--", code]), basic.expected);
+
+    // `tx`, a separator with nothing after it.
+    let transfer = fixture("test_tx_value_transfer.json");
+    let mut args: Vec<&str> = transfer.args.iter().map(String::as_str).collect();
+    args.extend(["--json", "--"]);
+    assert_eq!(run(&args), transfer.expected);
+}

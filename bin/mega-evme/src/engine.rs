@@ -86,15 +86,14 @@ impl Engine {
 
 /// Runs `args` on the released 1.7.1 CLI.
 ///
-/// `append_default_spec` appends `--spec Rex6` for a `run` or `tx` whose `--spec` was left out:
+/// `add_default_spec` adds `--spec Rex6` for a `run` or `tx` whose `--spec` was left out:
 /// the 1.7.1 parser's own default is `Rex7`, which this tool refuses.
 #[cfg(feature = "legacy")]
-pub async fn run_legacy(mut args: Vec<OsString>, append_default_spec: bool) -> Result<()> {
+pub async fn run_legacy(mut args: Vec<OsString>, add_default_spec: bool) -> Result<()> {
     use clap::Parser;
 
-    if append_default_spec {
-        args.push("--spec".into());
-        args.push(DEFAULT_SPEC.into());
+    if add_default_spec {
+        args = with_default_spec(args);
     }
     if let Err(e) = mega_evme_legacy::cmd::MainCmd::parse_from(args).run().await {
         // What the 1.7.1 binary's `main` does with an error its command returns: print it to
@@ -106,9 +105,22 @@ pub async fn run_legacy(mut args: Vec<OsString>, append_default_spec: bool) -> R
     Ok(())
 }
 
+/// `args` with `--spec Rex6` added where the 1.7.1 parser reads it as the option: before the first
+/// `--`, which ends the options, or at the end when there is none.
+///
+/// After a `--` every argument is a positional, so a flag appended behind one would be read as
+/// the code or the raw transaction. No option of either CLI takes a value starting with a hyphen,
+/// so the first `--` after the program name is the separator.
+#[cfg(feature = "legacy")]
+fn with_default_spec(mut args: Vec<OsString>) -> Vec<OsString> {
+    let at = args.iter().skip(1).position(|arg| arg == "--").map_or(args.len(), |i| i + 1);
+    args.splice(at..at, [OsString::from("--spec"), OsString::from(DEFAULT_SPEC)]);
+    args
+}
+
 /// Refuses a legacy spec in a build without the legacy leg.
 #[cfg(not(feature = "legacy"))]
-pub async fn run_legacy(_args: Vec<OsString>, _append_default_spec: bool) -> Result<()> {
+pub async fn run_legacy(_args: Vec<OsString>, _add_default_spec: bool) -> Result<()> {
     Err(EvmeError::InvalidInput(
         "this build runs Satin only (built without the `legacy` feature); a spec from \
          `Equivalence` to `Rex6` needs the legacy leg"
@@ -128,6 +140,27 @@ mod tests {
             assert_eq!(Engine::of_spec(legacy).unwrap(), Engine::Legacy, "{legacy}");
         }
         assert_eq!(Engine::of_spec(DEFAULT_SPEC).unwrap(), Engine::Legacy);
+    }
+
+    /// The default spec goes where the 1.7.1 parser reads it as the option: at the end, or
+    /// before the first `--`, after which every argument is a positional.
+    #[cfg(feature = "legacy")]
+    #[test]
+    fn test_the_default_spec_goes_before_the_options_end() {
+        let args = |list: &[&str]| list.iter().map(OsString::from).collect::<Vec<_>>();
+        assert_eq!(
+            with_default_spec(args(&["mega-evme", "run", "--json", "0x00"])),
+            args(&["mega-evme", "run", "--json", "0x00", "--spec", "Rex6"])
+        );
+        assert_eq!(
+            with_default_spec(args(&["mega-evme", "run", "--json", "--", "0x00"])),
+            args(&["mega-evme", "run", "--json", "--spec", "Rex6", "--", "0x00"])
+        );
+        // A `--` after the separator is a positional, and the program name is no argument.
+        assert_eq!(
+            with_default_spec(args(&["--", "tx", "--", "--"])),
+            args(&["--", "tx", "--spec", "Rex6", "--", "--"])
+        );
     }
 
     #[test]

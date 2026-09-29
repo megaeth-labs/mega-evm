@@ -49,6 +49,7 @@ pub enum Error {
 ///
 /// A command on a legacy spec is handed, with `args` as they are, to the released 1.7.1 CLI,
 /// which parses them again and runs on the legacy engine; everything else runs here, on Satin.
+/// The one argument added is the default spec of a `run` or `tx` that left `--spec` out.
 pub async fn run_cli(args: Vec<OsString>) -> Result<(), Error> {
     let matches = MainCmd::command().get_matches_from(&args);
     let spec_is_default = spec_is_default(&matches);

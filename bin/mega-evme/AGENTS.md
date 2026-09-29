@@ -6,7 +6,7 @@ Two engines: the in-tree sources run Satin; a spec from `Equivalence` to `Rex6` 
 
 ## STRUCTURE
 - `src/main.rs`: CLI bootstrap and panic hook.
-- `src/cmd.rs`: argument parsing, engine selection, and dispatch; a legacy spec's arguments are handed unchanged to the 1.7.1 CLI.
+- `src/cmd.rs`: argument parsing, engine selection, and dispatch; a legacy spec's arguments are handed unchanged to the 1.7.1 CLI, but for `--spec Rex6` added, before any `--`, to a `run` or `tx` that left `--spec` out (the 1.7.1 default is `Rex7`).
 - `src/engine.rs`: which engine a spec or a block runs on; the hand-off to the legacy CLI.
 - `src/common/`: shared CLI args, state loading, tracing, tx parsing, output printers; `schedule.rs` is the one place a Satin run's hardfork schedule, and so its protocol limits, is chosen, `--override.limits` included.
 - `src/run/`: bytecode execution command.
