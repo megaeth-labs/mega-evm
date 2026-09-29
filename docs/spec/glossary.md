@@ -137,7 +137,7 @@ The multiplier is determined per-account and per-storage-slot based on which SAL
 
 ## Stateless witness
 
-_(Satin, unstable)_ What a block's execution read outside its transactions and header, as the chain held it before the block: the accounts, slots, code and block hashes the database served, absent accounts and zero slots included; the capacities of the [SALT buckets](#salt-bucket) its state charges were priced in; and the oracle service's answers, or the chain's slots holding them.
+_(Satin, unstable)_ What a validator re-executing a block is given: every account and storage slot the block's pre-block states and included transactions' returned states name, as the chain held it before the block, absent accounts and zero slots included, with their code; the hashes `BLOCKHASH` read and the capacities of the [SALT buckets](#salt-bucket) its state charges were priced in, both exported by the block's execution; and the oracle service's answers the included transactions recorded, or the chain's slots holding them.
 
 A stateless validator re-executes the block from it, and must produce the same receipts, state changes, gas ledgers and block counters.
 
