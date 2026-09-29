@@ -1,0 +1,93 @@
+name: Randomized tests, long mode
+
+# Runs the randomized tests of the Satin engine (crates/mega-evm/tests/fuzz) in their long mode:
+# many more cases per property than the bounded run every pull request makes, drawn from a seed
+# this run chooses (or the one given), in a debug build, where every debug assertion runs, and in
+# a release build, where none does. A failure prints the seed and the case count that reproduce it
+# and the minimal case it shrank to; the job's log is the record.
+#
+# It also runs the byte-price record at two prices and compares them: where a case followed the
+# same path at both, its state gas must not fall as the cost per state byte rises, nor its history
+# gas as the cost per history byte rises (scripts/fuzz_price_monotonic.py).
+#
+# Dispatch only: a scheduled trigger fires on the default branch alone, which the Satin
+# integration branch is not. Dispatch it from the branch to test, with a seed to reproduce a run
+# or none to draw a new one.
+
+on:
+  workflow_dispatch:
+    inputs:
+      cases:
+        description: "Cases per property (the bounded mode runs 256 to 768)"
+        required: false
+        default: "20000"
+      seed:
+        description: "The seed to draw the cases from; empty draws one from the clock"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  long:
+    name: long mode (${{ matrix.profile }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [debug, release]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+
+      - name: Run the properties
+        env:
+          MEGA_FUZZ_LONG: "1"
+          MEGA_FUZZ_CASES: ${{ inputs.cases }}
+          MEGA_FUZZ_SEED: ${{ inputs.seed }}
+        run: |
+          # An empty seed must be unset, not the empty string, for the run to draw one.
+          [ -n "$MEGA_FUZZ_SEED" ] || unset MEGA_FUZZ_SEED
+          if [ "${{ matrix.profile }}" = "release" ]; then
+            cargo test --release --locked -p mega-evm --test fuzz -- --nocapture --test-threads=1
+          else
+            cargo test --locked -p mega-evm --test fuzz -- --nocapture --test-threads=1
+          fi
+
+  price-monotonicity:
+    name: state and history gas along the byte prices
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+
+      - name: Record the cases at the constants and at dearer bytes
+        env:
+          MEGA_FUZZ_SEED: ${{ inputs.seed || '1' }}
+          MEGA_FUZZ_CASES: ${{ inputs.cases }}
+        run: |
+          cargo test --release --locked -p mega-evm --features satin-price-override,test-utils --test fuzz --no-run
+          MEGA_FUZZ_PRICE_RECORD="$PWD/target/price-low.txt" \
+            cargo test --release --locked -p mega-evm --features satin-price-override,test-utils --test fuzz -- price_record
+          MEGA_SATIN_CPSB=2000 MEGA_SATIN_CPHB=100 MEGA_FUZZ_PRICE_RECORD="$PWD/target/price-high.txt" \
+            cargo test --release --locked -p mega-evm --features satin-price-override,test-utils --test fuzz -- price_record
+
+      - name: Compare the records
+        run: python3 scripts/fuzz_price_monotonic.py target/price-low.txt target/price-high.txt
