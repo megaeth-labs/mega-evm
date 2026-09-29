@@ -19,8 +19,9 @@
 //! [`BLOCK_ENV_ACCESS_COMPUTE_GAS`](crate::constants::BLOCK_ENV_ACCESS_COMPUTE_GAS) and
 //! [`ORACLE_ACCESS_COMPUTE_GAS`](crate::constants::ORACLE_ACCESS_COMPUTE_GAS), by default. In block
 //! execution they are the chain's ([`ProtocolLimits`](crate::ProtocolLimits)), which must be
-//! finite; a standalone EVM's caller may set either. A cap of `u64::MAX` caps nothing, and a
-//! transaction whose caps are both unlimited — under
+//! below [`TX_COMPUTE_GAS_BOUND`](crate::constants::TX_COMPUTE_GAS_BOUND), a compute no
+//! transaction reaches; a standalone EVM's caller may set either. A cap of `u64::MAX` caps nothing,
+//! and a transaction whose caps are both unlimited — under
 //! [`no_limits`](crate::EvmTxRuntimeLimits::no_limits), as the execution-spec gate runs — is not
 //! detained. `no_limits` turns detention off together with every other per-transaction limit: it is
 //! for the gate's equivalence mode and for tests, not for executing the chain.

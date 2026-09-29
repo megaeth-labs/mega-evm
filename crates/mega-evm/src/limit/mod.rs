@@ -319,7 +319,9 @@ impl EvmTxRuntimeLimits {
     /// It turns detention off together with every other per-transaction limit. It is what the
     /// execution-spec gate's equivalence mode installs, and what tests use to take the limits
     /// out; the chain executes on its own ([`ProtocolLimits`](crate::ProtocolLimits)), whose
-    /// detention caps must be finite.
+    /// detention caps must be below
+    /// [`TX_COMPUTE_GAS_BOUND`](crate::constants::TX_COMPUTE_GAS_BOUND), which no transaction's
+    /// compute reaches.
     pub const fn no_limits() -> Self {
         Self {
             tx_data_size_limit: u64::MAX,

@@ -71,9 +71,9 @@ use std::{boxed::Box, format};
 use alloy_evm::block::{BlockExecutionError, BlockValidationError};
 
 use crate::{
-    BlockGasCounters, EvmTxRuntimeLimits, HardforkParams, HardforkParamsError, LimitUsage,
-    MegaBlockLimitExceededError, MegaGasUsage, MegaHardfork, MegaTxLimitExceededError,
-    TX_BODY_SIZE,
+    constants::TX_COMPUTE_GAS_BOUND, BlockGasCounters, EvmTxRuntimeLimits, HardforkParams,
+    HardforkParamsError, LimitUsage, MegaBlockLimitExceededError, MegaGasUsage, MegaHardfork,
+    MegaTxLimitExceededError, TX_BODY_SIZE,
 };
 
 /// The limits the protocol holds every block and every transaction to: the Satin fork's
@@ -199,8 +199,9 @@ impl HardforkParams for ProtocolLimits {
     ///   stops or refuses every transaction that uses the dimension;
     /// - a transaction data-size limit below [`TX_BODY_SIZE`], the bytes every transaction's body
     ///   counts, which stops every transaction before it runs;
-    /// - an unlimited gas-detention cap: `u64::MAX` caps nothing, and a read of volatile data must
-    ///   be held to a finite one on a chain.
+    /// - a gas-detention cap at or above [`TX_COMPUTE_GAS_BOUND`], which no transaction's compute
+    ///   reaches: such a cap never stops a read of volatile data, `u64::MAX` among them, and a
+    ///   chain's caps must be able to.
     ///
     /// `u64::MAX` is a valid value for every other limit: it leaves the dimension unlimited.
     fn validate(&self) -> Result<(), HardforkParamsError> {
@@ -247,10 +248,11 @@ impl HardforkParams for ProtocolLimits {
             ));
         }
         for (name, cap) in detention_caps {
-            if cap == u64::MAX {
+            if cap >= TX_COMPUTE_GAS_BOUND {
                 return invalid(format!(
-                    "ProtocolLimits.{name} must be finite: u64::MAX leaves a read of volatile \
-                     data undetained"
+                    "ProtocolLimits.{name} must be below {TX_COMPUTE_GAS_BOUND}, which no \
+                     transaction's compute reaches: a cap there leaves a read of volatile data \
+                     undetained"
                 ));
             }
         }
@@ -782,8 +784,8 @@ mod tests {
     }
 
     /// Every limit refuses zero, the value a field left out of a configuration reads as; the
-    /// transaction's data size refuses less than a body; the detention caps refuse `u64::MAX`,
-    /// and every other limit accepts it.
+    /// transaction's data size refuses less than a body; the detention caps refuse a value no
+    /// transaction's compute reaches, and every other limit accepts `u64::MAX`.
     #[test]
     fn test_validate_refuses_what_no_chain_can_run_on() {
         let base = ProtocolLimits::DEFAULT;
@@ -836,21 +838,34 @@ mod tests {
                 name != "tx_runtime_limits.tx_data_size_limit",
                 "{name} at one"
             );
-            let unlimited = set(base, u64::MAX).validate();
             if name.ends_with("compute_gas_limit") {
+                // A cap no transaction's compute reaches is refused, the execution cap and
+                // `u64::MAX` among them; one below the bound is accepted.
+                for cap in [
+                    TX_COMPUTE_GAS_BOUND,
+                    crate::constants::TX_GAS_LIMIT_CAP,
+                    u64::MAX - 1,
+                    u64::MAX,
+                ] {
+                    assert_eq!(
+                        set(base, cap).validate(),
+                        Err(HardforkParamsError {
+                            message: std::format!(
+                                "ProtocolLimits.{name} must be below {TX_COMPUTE_GAS_BOUND}, \
+                                 which no transaction's compute reaches: a cap there leaves a \
+                                 read of volatile data undetained"
+                            )
+                        }),
+                        "{name} at {cap}"
+                    );
+                }
                 assert_eq!(
-                    unlimited,
-                    Err(HardforkParamsError {
-                        message: std::format!(
-                            "ProtocolLimits.{name} must be finite: u64::MAX leaves a read of \
-                             volatile data undetained"
-                        )
-                    }),
-                    "{name}"
+                    set(base, TX_COMPUTE_GAS_BOUND - 1).validate(),
+                    Ok(()),
+                    "{name} just below"
                 );
-                assert_eq!(set(base, u64::MAX - 1).validate(), Ok(()), "{name} just below");
             } else {
-                assert_eq!(unlimited, Ok(()), "{name} may be unlimited");
+                assert_eq!(set(base, u64::MAX).validate(), Ok(()), "{name} may be unlimited");
             }
         }
 
@@ -877,7 +892,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "Invalid params for fork Satin: \
                     ProtocolLimits.tx_runtime_limits.block_env_access_compute_gas_limit must be \
-                    finite")]
+                    below 199988000")]
     fn test_a_schedule_refuses_the_unlimited_protocol_limits() {
         let _ = MegaHardforkConfig::default()
             .with_all_activated()
