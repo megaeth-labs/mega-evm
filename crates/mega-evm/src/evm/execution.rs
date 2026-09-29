@@ -29,6 +29,7 @@ use revm::{
     },
     handler::{
         evm::{ContextDbError, FrameInitResult, FrameTr},
+        execution::runtime_oog_unwind,
         instructions::InstructionProvider,
         EthFrame, EvmTr, EvmTrError, FrameInitOrResult, FrameResult, Handler, ItemOrResult,
         PreExecutionOutput,
@@ -131,8 +132,13 @@ where
     ) -> Result<Option<PreExecutionOutput>, Self::Error> {
         self.load_accounts(evm)?;
         let checkpoint = evm.ctx().journal_mut().checkpoint();
+        // A bail-out of the runtime gas phase unwinds as revm's does: the checkpoint is reverted
+        // and a creation's sender gets the nonce bump the frame would have made, so an included
+        // out-of-gas creation cannot be replayed. revm's own pre-execution never needs the bump,
+        // because only an EIP-7702 transaction, always a call, can bail out there; the two
+        // charges made here can fail for a creation too.
         if self.deposit_creates_caller.get() && !charge_created_caller(evm.ctx_mut(), gas) {
-            evm.ctx().journal_mut().checkpoint_revert(checkpoint);
+            runtime_oog_unwind(evm.ctx(), checkpoint)?;
             return Ok(None);
         }
         if evm.ctx_ref().additional_limit.latched().is_some() {
@@ -140,7 +146,7 @@ where
         }
         let gas_before = *gas;
         let Some(eip7702_refund) = self.apply_eip7702_auth_list(evm, gas)? else {
-            evm.ctx().journal_mut().checkpoint_revert(checkpoint);
+            runtime_oog_unwind(evm.ctx(), checkpoint)?;
             return Ok(None);
         };
         let authorities =
@@ -152,7 +158,7 @@ where
             return Ok(Some(PreExecutionOutput { eip7702_refund: 0, checkpoint }));
         }
         if !charge_records_made_outside_a_frame(evm.ctx_mut(), gas, authorities.applied) {
-            evm.ctx().journal_mut().checkpoint_revert(checkpoint);
+            runtime_oog_unwind(evm.ctx(), checkpoint)?;
             return Ok(None);
         }
         Ok(Some(PreExecutionOutput { eip7702_refund, checkpoint }))

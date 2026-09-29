@@ -751,3 +751,59 @@ fn test_a_crowded_salt_bucket_is_where_satin_leaves_op_revm() {
     assert_eq!(mega.result.output(), op.result.output(), "output");
     assert_eq!(mega.state, op.state, "state");
 }
+
+/// A creation transaction that runs out of gas in the runtime gas phase bumps its sender's nonce
+/// on both engines, so an included out-of-gas creation cannot be replayed, and burns its whole gas
+/// limit. Satin runs out on the history of the record its own frame would make, the one charge of
+/// the phase it adds; op-revm on EIP-2780's charge for the created account, its last.
+///
+/// Where a history byte costs nothing Satin's phase has nothing of its own left to charge, and the
+/// case returns early.
+#[test]
+fn test_an_out_of_gas_creation_before_the_first_frame_matches_op_revm() {
+    if crate::common::history_is_free() || crate::common::state_is_free() {
+        return;
+    }
+    let db = || MemoryDatabase::default().account_balance(CALLER, U256::from(10u64.pow(18)));
+    let init_code = BytecodeBuilder::default().stop().build();
+    let creation = |gas_limit| TxEnv {
+        caller: CALLER,
+        kind: TxKind::Create,
+        data: init_code.clone(),
+        gas_limit,
+        ..Default::default()
+    };
+    // A creation whose init code stops spends its intrinsic gas and nothing else on the regular
+    // ledger; the body and the created account's record are its history, the account its state.
+    let (success, op_success, _) = run_both(db(), creation(1_000_000 + account_state_gas()));
+    assert!(success.result.is_success() && op_success.result.is_success());
+    let intrinsic = success.gas.regular;
+    let mega_limit =
+        intrinsic + body_history(init_code.len() as u64) + history(WRITE_RECORD_SIZE) - 1;
+    let op_limit = op_success.result.gas().total_gas_spent() - 1;
+
+    let (mega, _, cfg) = run_both(db(), creation(mega_limit));
+    let (_, op, _) = run_both(db(), creation(op_limit));
+    assert_satin_cfg(&cfg);
+    for (engine, result, gas_limit) in
+        [("Satin", &mega.result, mega_limit), ("op-revm", &op.result, op_limit)]
+    {
+        assert!(result.is_halt(), "{engine}: {result:?}");
+        assert_eq!(
+            result.gas().total_gas_spent(),
+            gas_limit,
+            "{engine}: the whole gas limit burns"
+        );
+        assert_eq!(result.gas().reservoir_remaining(), 0, "{engine}: no reservoir comes back");
+    }
+    assert_eq!(mega.gas.history, body_history(init_code.len() as u64), "the ledger reads the body");
+    // op-revm reaches the charge for the created account and loads its address; Satin falls short
+    // before it, so only the sender is compared: its nonce moved and nothing else.
+    assert_eq!(mega.state[&CALLER], op.state[&CALLER], "the sender's account");
+    assert_eq!(mega.state[&CALLER].info.nonce, 1, "the sender's nonce moves by one");
+    assert!(
+        mega.state.values().all(|account| !account.is_created()),
+        "nothing was created: {:?}",
+        mega.state.keys().collect::<Vec<_>>()
+    );
+}
