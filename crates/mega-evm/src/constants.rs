@@ -17,7 +17,7 @@
 //! | [`BLOCK_DATA_LIMIT`] | 13,107,200 | data size one block may produce (as Rex6) | the default protocol limits |
 //! | [`BLOCK_ENV_ACCESS_COMPUTE_GAS`] | 20,000,000 | compute a transaction may still spend once it read the block environment or the beneficiary (as Rex6) | the default detention cap of the runtime limits and of the protocol limits |
 //! | [`ORACLE_ACCESS_COMPUTE_GAS`] | 20,000,000 | compute a transaction may still spend once it read the Oracle's storage (as Rex6) | the default detention cap of the runtime limits and of the protocol limits |
-//! | [`TX_COMPUTE_GAS_BOUND`] | 199,988,000 | a bound no transaction's compute reaches: the execution cap less EIP-2780's base cost | the protocol limits, whose detention caps must be below it |
+//! | [`MAX_TX_COMPUTE_GAS`] | 199,987,900 | the most compute one transaction can spend: the execution cap less EIP-2780's base cost and one warm account access | the protocol limits, whose detention caps must be below it |
 //!
 //! The Satin gas schedule builds its state-gas entries from the EIP-8037 byte counts at
 //! [`COST_PER_STATE_BYTE`], read through [`SatinPrices`](crate::SatinPrices) so a measurement
@@ -33,9 +33,12 @@
 //! [`ProtocolLimits::block_state_gas_limit`](crate::ProtocolLimits::block_state_gas_limit). A chain
 //! sets both, and both are unlimited by default.
 
-use revm::primitives::{
-    eip2780,
-    eip8037::{NEW_ACCOUNT_BYTES, SSTORE_SET_BYTES},
+use revm::{
+    context_interface::cfg::gas::WARM_STORAGE_READ_COST,
+    primitives::{
+        eip2780,
+        eip8037::{NEW_ACCOUNT_BYTES, SSTORE_SET_BYTES},
+    },
 };
 
 /// Gas per byte of new state, the EIP-8037 `COST_PER_STATE_BYTE`. Provisional.
@@ -84,17 +87,17 @@ pub const BLOCK_ENV_ACCESS_COMPUTE_GAS: u64 = 20_000_000;
 /// specs capped an Oracle read at 1,000,000. Provisional.
 pub const ORACLE_ACCESS_COMPUTE_GAS: u64 = 20_000_000;
 
-/// A bound no transaction's compute reaches: the execution cap less EIP-2780's base cost, the
-/// intrinsic regular gas every transaction pays before its first frame. Derived from
-/// [`TX_GAS_LIMIT_CAP`].
+/// The most compute one transaction can spend: the most regular gas its first frame can hold
+/// when that frame runs code. Derived from [`TX_GAS_LIMIT_CAP`].
 ///
-/// Compute is the regular gas a transaction's frames spend, and their regular gas is what the
-/// execution cap leaves once the intrinsic gas is paid, so a gas-detention cap at or above this
-/// bound never stops a transaction, however early it read: a chain's caps must be below it. A
-/// frame that runs code pays a little more before its first instruction — at least a warm account
-/// access, for the recipient or the delegate it runs — so the most compute a transaction can
-/// spend is a little below the bound.
-pub const TX_COMPUTE_GAS_BOUND: u64 = TX_GAS_LIMIT_CAP - eip2780::TX_BASE_COST;
+/// Compute is the regular gas a transaction's frames spend, and the first frame holds what the
+/// execution cap leaves once the transaction paid for itself: EIP-2780's base cost, which every
+/// transaction pays, and the account whose code the frame runs — a recipient other than the sender
+/// at the cold rate, the delegate of a sender that calls itself at least at the warm one (Satin
+/// keeps Osaka's). A gas-detention cap at or above this never stops a transaction, however early
+/// it read, so a chain's caps must be below it.
+pub const MAX_TX_COMPUTE_GAS: u64 =
+    TX_GAS_LIMIT_CAP - eip2780::TX_BASE_COST - WARM_STORAGE_READ_COST;
 
 #[cfg(test)]
 mod tests {
@@ -114,6 +117,6 @@ mod tests {
         assert_eq!(BLOCK_DATA_LIMIT, 13_107_200);
         assert_eq!(BLOCK_ENV_ACCESS_COMPUTE_GAS, 20_000_000);
         assert_eq!(ORACLE_ACCESS_COMPUTE_GAS, 20_000_000);
-        assert_eq!(TX_COMPUTE_GAS_BOUND, 199_988_000);
+        assert_eq!(MAX_TX_COMPUTE_GAS, 199_987_900);
     }
 }

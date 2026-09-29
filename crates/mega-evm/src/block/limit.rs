@@ -71,7 +71,7 @@ use std::{boxed::Box, format};
 use alloy_evm::block::{BlockExecutionError, BlockValidationError};
 
 use crate::{
-    constants::TX_COMPUTE_GAS_BOUND, BlockGasCounters, EvmTxRuntimeLimits, HardforkParams,
+    constants::MAX_TX_COMPUTE_GAS, BlockGasCounters, EvmTxRuntimeLimits, HardforkParams,
     HardforkParamsError, LimitUsage, MegaBlockLimitExceededError, MegaGasUsage, MegaHardfork,
     MegaTxLimitExceededError, TX_BODY_SIZE,
 };
@@ -199,8 +199,8 @@ impl HardforkParams for ProtocolLimits {
     ///   stops or refuses every transaction that uses the dimension;
     /// - a transaction data-size limit below [`TX_BODY_SIZE`], the bytes every transaction's body
     ///   counts, which stops every transaction before it runs;
-    /// - a gas-detention cap at or above [`TX_COMPUTE_GAS_BOUND`], which no transaction's compute
-    ///   reaches: such a cap never stops a read of volatile data, `u64::MAX` among them, and a
+    /// - a gas-detention cap at or above [`MAX_TX_COMPUTE_GAS`], the most compute a transaction can
+    ///   spend: such a cap never stops a read of volatile data, `u64::MAX` among them, and a
     ///   chain's caps must be able to.
     ///
     /// `u64::MAX` is a valid value for every other limit: it leaves the dimension unlimited.
@@ -248,10 +248,10 @@ impl HardforkParams for ProtocolLimits {
             ));
         }
         for (name, cap) in detention_caps {
-            if cap >= TX_COMPUTE_GAS_BOUND {
+            if cap >= MAX_TX_COMPUTE_GAS {
                 return invalid(format!(
-                    "ProtocolLimits.{name} must be below {TX_COMPUTE_GAS_BOUND}, which no \
-                     transaction's compute reaches: a cap there leaves a read of volatile data \
+                    "ProtocolLimits.{name} must be below {MAX_TX_COMPUTE_GAS}, the most compute \
+                     a transaction can spend: a cap there leaves a read of volatile data \
                      undetained"
                 ));
             }
@@ -840,27 +840,24 @@ mod tests {
             );
             if name.ends_with("compute_gas_limit") {
                 // A cap no transaction's compute reaches is refused, the execution cap and
-                // `u64::MAX` among them; one below the bound is accepted.
-                for cap in [
-                    TX_COMPUTE_GAS_BOUND,
-                    crate::constants::TX_GAS_LIMIT_CAP,
-                    u64::MAX - 1,
-                    u64::MAX,
-                ] {
+                // `u64::MAX` among them; one below the most compute is accepted.
+                for cap in
+                    [MAX_TX_COMPUTE_GAS, crate::constants::TX_GAS_LIMIT_CAP, u64::MAX - 1, u64::MAX]
+                {
                     assert_eq!(
                         set(base, cap).validate(),
                         Err(HardforkParamsError {
                             message: std::format!(
-                                "ProtocolLimits.{name} must be below {TX_COMPUTE_GAS_BOUND}, \
-                                 which no transaction's compute reaches: a cap there leaves a \
-                                 read of volatile data undetained"
+                                "ProtocolLimits.{name} must be below {MAX_TX_COMPUTE_GAS}, the \
+                                 most compute a transaction can spend: a cap there leaves a read \
+                                 of volatile data undetained"
                             )
                         }),
                         "{name} at {cap}"
                     );
                 }
                 assert_eq!(
-                    set(base, TX_COMPUTE_GAS_BOUND - 1).validate(),
+                    set(base, MAX_TX_COMPUTE_GAS - 1).validate(),
                     Ok(()),
                     "{name} just below"
                 );
@@ -892,7 +889,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "Invalid params for fork Satin: \
                     ProtocolLimits.tx_runtime_limits.block_env_access_compute_gas_limit must be \
-                    below 199988000")]
+                    below 199987900")]
     fn test_a_schedule_refuses_the_unlimited_protocol_limits() {
         let _ = MegaHardforkConfig::default()
             .with_all_activated()

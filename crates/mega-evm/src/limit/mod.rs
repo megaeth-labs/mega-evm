@@ -320,8 +320,8 @@ impl EvmTxRuntimeLimits {
     /// execution-spec gate's equivalence mode installs, and what tests use to take the limits
     /// out; the chain executes on its own ([`ProtocolLimits`](crate::ProtocolLimits)), whose
     /// detention caps must be below
-    /// [`TX_COMPUTE_GAS_BOUND`](crate::constants::TX_COMPUTE_GAS_BOUND), which no transaction's
-    /// compute reaches.
+    /// [`MAX_TX_COMPUTE_GAS`](crate::constants::MAX_TX_COMPUTE_GAS), the most compute a
+    /// transaction can spend.
     pub const fn no_limits() -> Self {
         Self {
             tx_data_size_limit: u64::MAX,
