@@ -4,7 +4,10 @@ use clap::{parser::ValueSource, ArgMatches, CommandFactory, FromArgMatches, Pars
 use tracing::error;
 
 use crate::{
-    common::{parse_genesis, use_genesis, EvmeError, GenesisChain, LimitsOverride, LogArgs},
+    common::{
+        check_genesis_chain, parse_genesis, use_genesis, EvmeError, GenesisChain, LimitsOverride,
+        LogArgs,
+    },
     engine::Engine,
 };
 
@@ -19,7 +22,8 @@ pub struct MainCmd {
     /// Satin only: the genesis file of the chain the command runs on. Its `config` object's
     /// `chainId` and Satin keys (`satinTime`, the registry seeds, the protocol limits) replace the
     /// engine's table for that chain: which blocks run Satin, and the schedule they run under. A
-    /// run on another chain, or on a block before the file's `satinTime`, is refused
+    /// run on another chain, on a legacy spec, before the file's `satinTime`, or on a file without
+    /// Satin keys is refused
     #[arg(long = "genesis", global = true, value_name = "FILE", value_parser = parse_genesis)]
     pub genesis: Option<GenesisChain>,
 
@@ -63,6 +67,14 @@ pub async fn run_cli(args: Vec<OsString>) -> Result<(), Error> {
     let cmd = MainCmd::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
     if let Some(genesis) = &cmd.genesis {
         if let Err(e) = use_genesis(genesis.clone()) {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    }
+    // The chain is checked before the engine is picked: a run on another chain than the file's is
+    // refused for its chain, whatever its spec.
+    if let Some(chain_id) = cmd.command.chain_id() {
+        if let Err(e) = check_genesis_chain(chain_id) {
             eprintln!("{e}");
             std::process::exit(1);
         }
@@ -132,6 +144,16 @@ impl Commands {
             Self::Run(cmd) => Engine::of_spec(&cmd.env_args.chain.spec),
             Self::Tx(cmd) => Engine::of_spec(&cmd.env_args.chain.spec),
             Self::Replay(cmd) => cmd.engine().await,
+        }
+    }
+
+    /// The chain `run` or `tx` runs on (`--chain-id`); `None` for `replay`, which learns its
+    /// chain from the source it replays.
+    pub const fn chain_id(&self) -> Option<u64> {
+        match self {
+            Self::Run(cmd) => Some(cmd.env_args.chain.chain_id),
+            Self::Tx(cmd) => Some(cmd.env_args.chain.chain_id),
+            Self::Replay(_) => None,
         }
     }
 

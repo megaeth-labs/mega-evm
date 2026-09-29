@@ -314,6 +314,11 @@ fn test_an_override_refuses_a_legacy_block() {
 /// seeds and the protocol's default limits but a transaction data-size limit of the body alone,
 /// in `dir`.
 fn mainnet_genesis(dir: &tempfile::TempDir, satin_time: u64) -> String {
+    genesis_of(dir, mega_evm::MAINNET_CHAIN_ID, satin_time)
+}
+
+/// [`mainnet_genesis`] for chain `chain_id`.
+fn genesis_of(dir: &tempfile::TempDir, chain_id: u64, satin_time: u64) -> String {
     let limits = ProtocolLimits::DEFAULT.with_tx_runtime_limits(
         ProtocolLimits::DEFAULT.tx_runtime_limits.with_tx_data_size_limit(310),
     );
@@ -323,8 +328,8 @@ fn mainnet_genesis(dir: &tempfile::TempDir, satin_time: u64) -> String {
         protocol_limits: limits,
     };
     let mut config = serde_json::to_value(satin).unwrap();
-    config["chainId"] = mega_evm::MAINNET_CHAIN_ID.into();
-    let path = dir.path().join(format!("genesis-{satin_time}.json"));
+    config["chainId"] = chain_id.into();
+    let path = dir.path().join(format!("genesis-{chain_id}-{satin_time}.json"));
     std::fs::write(&path, serde_json::json!({ "config": config }).to_string()).unwrap();
     path.to_str().unwrap().to_string()
 }
@@ -333,7 +338,8 @@ fn mainnet_genesis(dir: &tempfile::TempDir, satin_time: u64) -> String {
 /// a recorded mainnet block, legacy by the engine's table, runs on Satin from a file's `satinTime`
 /// of zero, held to the file's limits as the chain's own rather than as an override. A block
 /// before the file's `satinTime` would run on the legacy engine, which runs a chain on its own
-/// table and knows nothing of the file: it is refused, and so is one a forced legacy spec runs.
+/// table and knows nothing of the file: it is refused, and so is one a forced legacy spec runs,
+/// one a forced Satin runs before the file's `satinTime`, and a block of another chain.
 #[test]
 fn test_a_genesis_file_runs_its_chains_blocks_on_its_schedule() {
     let cache = cache_copy_with_absent_factory();
@@ -363,4 +369,22 @@ fn test_a_genesis_file_runs_its_chains_blocks_on_its_schedule() {
         let error = run.records()[0]["error"].as_str().unwrap().to_string();
         assert!(error.contains("--genesis applies to Satin blocks only"), "{args:?}: {error}");
     }
+
+    let run = replay(BLOCKS[0], cache.path(), &["--genesis", &later, "--override.spec", "Satin"]);
+    assert_eq!(run.code, 1, "{}", run.stdout);
+    let error = run.records()[0]["error"].as_str().unwrap().to_string();
+    assert!(
+        error.contains(&format!("--genesis activates Satin at timestamp {}", u64::MAX)),
+        "{error}"
+    );
+
+    // A block of another chain is refused for its chain, before the engine the table gives it.
+    let run = replay(BLOCKS[0], cache.path(), &["--genesis", &genesis_of(&dir, 6342, 0)]);
+    assert_eq!(run.code, 1, "{}", run.stdout);
+    let error = run.records()[0]["error"].as_str().unwrap().to_string();
+    let expected = format!(
+        "--genesis configures chain 6342, and the run is on chain {}",
+        mega_evm::MAINNET_CHAIN_ID
+    );
+    assert!(error.contains(&expected), "{error}");
 }

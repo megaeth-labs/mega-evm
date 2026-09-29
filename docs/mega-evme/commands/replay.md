@@ -162,7 +162,8 @@ Any other chain runs Satin from genesis, the rung the Satin engine pins for an u
 The 1.7.1 tool ran such a chain through `Rex7`, the legacy line's unstable spec, which Satin supersedes.
 Use `--override.spec` below to replay a chain that runs a legacy spec.
 
-Given the chain's genesis file (`--genesis <FILE>`, see [A chain's genesis file](../configuration/chain-and-spec.md#a-chains-genesis-file)), the file decides instead: a block runs on Satin from the file's `satinTime`, under the registry seeds and limits the file carries, and a block before it is refused.
+Given the chain's genesis file (`--genesis <FILE>`, see [A chain's genesis file](../configuration/chain-and-spec.md#a-chains-genesis-file)), the file decides instead: a block runs on Satin from the file's `satinTime`, under the registry seeds and limits the file carries, and a block before it is refused, whether it would run on the legacy engine or `--override.spec` forces Satin on it.
+A replay on another chain than the file's is refused for its chain, before any engine is picked.
 
 ### `--override.spec <SPEC>`
 

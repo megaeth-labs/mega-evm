@@ -64,7 +64,8 @@ impl ChainArgs {
 
     /// The protocol limits a Satin run of this chain at `timestamp` is held to: those of the
     /// schedule [`satin_schedule`] gives, which for a chain that does not run Satin at `timestamp`
-    /// is a counterfactual on [`ProtocolLimits::DEFAULT`], with `--override.limits` over them.
+    /// is a counterfactual on [`ProtocolLimits::DEFAULT`] (refused under `--genesis`), with
+    /// `--override.limits` over them.
     pub fn protocol_limits(&self, timestamp: u64) -> Result<ProtocolLimits> {
         satin_schedule(self.chain_id, timestamp, self.limits_override.as_ref())?
             .protocol_limits(timestamp)

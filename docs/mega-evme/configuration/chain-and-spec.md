@@ -123,8 +123,14 @@ A chain the tool does not know, a devnet for one, is replayed as its nodes run i
 `--genesis <FILE>` takes them from the chain's genesis file, on every command, `replay` included.
 The file's `config` object (or a file that is the `config` object) is read for its `chainId` and its Satin keys, with the parser the node and the stateless validator read them with, so a key the node refuses is refused here too.
 For that chain the file replaces the tool's table: a block runs Satin from the file's `satinTime`, under the registry seeds and the limits the file carries, as the chain's own limits and not as an override.
-A block before the file's `satinTime` would run on the legacy engine, which runs a chain on its own table and knows nothing of the file, so it is refused, as is every block of a file without Satin keys.
-A command on another chain is refused, and so is a command on a legacy spec.
+Every command under it holds to one rule: a run the file cannot configure is refused, never run on the tool's own table.
+
+- A command on another chain than the file's `chainId` is refused first, whatever its spec.
+- A command on a legacy spec is refused: the legacy engine runs a chain on its own table and knows nothing of the file.
+- A Satin run before the file's `satinTime` is refused, and so is every Satin run on a file without Satin keys.
+  For `run` and `tx` the run's timestamp is `--block.timestamp`, `1` by default, so a file that activates Satin later needs a `--block.timestamp` at or after its `satinTime`.
+  For `replay` it is the block's: a block before the file's `satinTime` would run on the legacy engine and is refused, and so is one `--override.spec Satin` forces there.
+
 `--override.limits` still replaces the fields it names, over the file's limits.
 
 ## Examples
@@ -147,4 +153,7 @@ mega-evme run 0x600160005260... --spec Satin --override.limits '{"txRuntimeLimit
 
 # A devnet block, replayed on the devnet's own Satin configuration
 mega-evme replay --block 12 --rpc http://localhost:8545 --genesis devnet/genesis.json
+
+# Bytecode on the devnet's Satin configuration, at a timestamp from its satinTime on
+mega-evme run 0x600160005260... --genesis devnet/genesis.json --block.timestamp 1800000000
 ```

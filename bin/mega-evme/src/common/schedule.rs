@@ -27,13 +27,20 @@ use super::{EvmeError, Result};
 /// counterfactual either way.
 ///
 /// The chain's own schedule is the one its genesis file gives, when the run was given the file
-/// (`--genesis`), and otherwise the Satin engine's table ([`mega_evm::hardfork_schedule`]).
+/// (`--genesis`), and otherwise the Satin engine's table ([`mega_evm::hardfork_schedule`]). A run
+/// given the file makes no counterfactual: one the file does not run on Satin — before its
+/// `satinTime`, or on a file without Satin keys — is refused, since the file was given to
+/// configure the run and cannot.
 pub fn satin_schedule(
     chain_id: u64,
     timestamp: u64,
     limits_override: Option<&LimitsOverride>,
 ) -> Result<MegaHardforkConfig> {
-    schedule_for(chain_schedule(GENESIS.get(), chain_id)?, timestamp, limits_override)
+    let chain = match GENESIS.get() {
+        Some(genesis) => genesis_schedule(genesis, chain_id, timestamp)?,
+        None => mega_evm::hardfork_schedule(chain_id),
+    };
+    schedule_for(chain, timestamp, limits_override)
 }
 
 /// The genesis file this run was given (`--genesis`), set once before the command runs.
@@ -83,22 +90,52 @@ pub fn chain_activation(chain_id: u64) -> Option<ChainActivation> {
     }
 }
 
-/// The schedule `chain_id` runs on: `genesis`'s, which must be the same chain's, or the Satin
-/// engine's table without one.
-fn chain_schedule(genesis: Option<&GenesisChain>, chain_id: u64) -> Result<MegaHardforkConfig> {
-    let Some(genesis) = genesis else { return Ok(mega_evm::hardfork_schedule(chain_id)) };
-    if genesis.chain_id != chain_id {
+/// Refuses a run on `chain_id` when the run was given the genesis file of another chain.
+///
+/// A command checks this before it picks its engine, where it knows its chain first, so that a
+/// run on the wrong chain is refused for its chain rather than for a spec the file cannot
+/// configure.
+pub fn check_genesis_chain(chain_id: u64) -> Result<()> {
+    GENESIS.get().map_or(Ok(()), |genesis| genesis.check_chain(chain_id))
+}
+
+impl GenesisChain {
+    /// Refuses a run on `chain_id` unless it is this file's chain.
+    fn check_chain(&self, chain_id: u64) -> Result<()> {
+        if self.chain_id != chain_id {
+            return Err(EvmeError::InvalidInput(format!(
+                "--genesis configures chain {}, and the run is on chain {chain_id}",
+                self.chain_id
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// The schedule a Satin run of `chain_id` at `timestamp` takes from `genesis`: refused when the
+/// file is another chain's, has no Satin keys, or activates Satin after `timestamp`.
+fn genesis_schedule(
+    genesis: &GenesisChain,
+    chain_id: u64,
+    timestamp: u64,
+) -> Result<MegaHardforkConfig> {
+    genesis.check_chain(chain_id)?;
+    let Some(satin) = &genesis.satin else {
         return Err(EvmeError::InvalidInput(format!(
-            "--genesis configures chain {}, and the run is on chain {chain_id}",
-            genesis.chain_id
+            "--genesis: the file has no Satin keys, so chain {chain_id} never runs Satin on it; \
+             a Satin run needs a file that activates Satin"
+        )));
+    };
+    if timestamp < satin.activation_time {
+        return Err(EvmeError::InvalidInput(format!(
+            "--genesis activates Satin at timestamp {}, and the run is at timestamp {timestamp}: \
+             the file configures no Satin run before it",
+            satin.activation_time
         )));
     }
-    match &genesis.satin {
-        Some(satin) => satin.hardforks().map_err(|e| {
-            EvmeError::InvalidInput(format!("--genesis: the schedule it makes is refused: {e}"))
-        }),
-        None => Ok(MegaHardforkConfig::new()),
-    }
+    satin.hardforks().map_err(|e| {
+        EvmeError::InvalidInput(format!("--genesis: the schedule it makes is refused: {e}"))
+    })
 }
 
 /// Parses `--genesis`: the path of a genesis file, whose `config` object carries the chain id and
@@ -340,39 +377,59 @@ mod tests {
         let genesis = parse_genesis(&path).unwrap();
         assert_eq!(genesis, GenesisChain { chain_id: 6342, satin: Some(satin) });
 
-        let chain = chain_schedule(Some(&genesis), 6342).unwrap();
-        let schedule = schedule_for(chain, ACTIVATION, None).unwrap();
-        assert_eq!(schedule.spec_id(ACTIVATION - 1), None);
-        assert_eq!(schedule.protocol_limits(ACTIVATION), Some(satin.protocol_limits));
-        assert_eq!(
-            schedule.fork_params::<SequencerRegistryConfig>(),
-            Some(&satin.sequencer_registry)
-        );
-        let table = schedule_for(chain_schedule(None, 6342).unwrap(), ACTIVATION, None).unwrap();
+        for timestamp in [ACTIVATION, u64::MAX] {
+            let chain = genesis_schedule(&genesis, 6342, timestamp).unwrap();
+            let schedule = schedule_for(chain, timestamp, None).unwrap();
+            assert_eq!(schedule.spec_id(ACTIVATION - 1), None);
+            assert_eq!(schedule.protocol_limits(timestamp), Some(satin.protocol_limits));
+            assert_eq!(
+                schedule.fork_params::<SequencerRegistryConfig>(),
+                Some(&satin.sequencer_registry)
+            );
+        }
+        let table = mega_evm::hardfork_schedule(6342);
+        let table = schedule_for(table, ACTIVATION, None).unwrap();
         assert_eq!(
             table.fork_params::<SequencerRegistryConfig>(),
             Some(&SequencerRegistryConfig::placeholder()),
             "without the file, the unknown-chain fallback"
         );
 
-        // Before its activation the file's chain does not run Satin: a Satin run there is the
-        // same counterfactual a chain without Satin gets.
-        let before = schedule_for(chain_schedule(Some(&genesis), 6342).unwrap(), 0, None).unwrap();
-        assert_eq!(before.protocol_limits(0), Some(ProtocolLimits::DEFAULT));
+        // Before its activation the file configures no Satin run: the run is refused, not made
+        // the counterfactual a run without the file would be.
+        for timestamp in [0, ACTIVATION - 1] {
+            let error = genesis_schedule(&genesis, 6342, timestamp).unwrap_err().to_string();
+            assert!(
+                error.contains(&format!(
+                    "--genesis activates Satin at timestamp {ACTIVATION}, and the run is at \
+                     timestamp {timestamp}"
+                )),
+                "{error}"
+            );
+        }
     }
 
     /// A genesis file is its own chain's: a run on another chain is refused rather than run on
-    /// either schedule. A file without Satin keys gives a schedule without Satin.
+    /// either schedule, and so is a Satin run on a file without Satin keys, at any timestamp.
     #[test]
     fn test_a_genesis_file_of_another_chain_is_refused() {
         let dir = tempfile::tempdir().unwrap();
         let (path, _) = genesis_file(&dir, 6342);
         let genesis = parse_genesis(&path).unwrap();
-        let error = chain_schedule(Some(&genesis), 6343).unwrap_err().to_string();
-        assert!(error.contains("--genesis configures chain 6342"), "{error}");
+        for timestamp in [0, ACTIVATION] {
+            let error = genesis_schedule(&genesis, 6343, timestamp).unwrap_err().to_string();
+            assert!(error.contains("--genesis configures chain 6342"), "{error}");
+            assert!(genesis.check_chain(6343).is_err());
+        }
+        assert!(genesis.check_chain(6342).is_ok());
 
         let without_satin = GenesisChain { chain_id: 6342, satin: None };
-        assert_eq!(chain_schedule(Some(&without_satin), 6342).unwrap().spec_id(u64::MAX), None);
+        for timestamp in [0, u64::MAX] {
+            let error = genesis_schedule(&without_satin, 6342, timestamp).unwrap_err().to_string();
+            assert!(error.contains("--genesis: the file has no Satin keys"), "{error}");
+        }
+        let error = genesis_schedule(&without_satin, 6343, 0).unwrap_err().to_string();
+        assert!(error.contains("--genesis configures chain 6342"), "the chain first: {error}");
     }
 
     /// The file is read as a genesis file or as its `config` object; one without a chain id, or

@@ -197,9 +197,10 @@ pub async fn replay_blocks(
 /// spec the chain's schedule gives at the block's timestamp.
 ///
 /// `limits_override` replaces the protocol limits a Satin block runs under; a legacy block,
-/// whose limits its spec fixes, is refused with one. A legacy block is refused under a genesis
-/// file (`--genesis`) too: the legacy engine runs a chain on its own table, which knows nothing of
-/// the file, and for a chain it does not know that is a spec no chain ran.
+/// whose limits its spec fixes, is refused with one. Under a genesis file (`--genesis`) a block of
+/// another chain is refused first, and then a legacy block: the legacy engine runs a chain on its
+/// own table, which knows nothing of the file, and for a chain it does not know that is a spec no
+/// chain ran.
 pub fn execute_block(
     engine: Engine,
     inputs: &super::inputs::BlockInputs,
@@ -208,6 +209,7 @@ pub fn execute_block(
     limits_override: Option<&LimitsOverride>,
     state: &mut BlockState,
 ) -> Result<(super::exec::ExecutedBlock, String)> {
+    crate::common::check_genesis_chain(inputs.chain_id)?;
     match engine {
         Engine::Satin => {
             let executed = satin::execute(
