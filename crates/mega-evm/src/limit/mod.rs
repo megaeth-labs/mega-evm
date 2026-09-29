@@ -532,6 +532,13 @@ pub enum LimitCheck {
         /// the frame's gas back to what it had before it. The charge's size is not kept, so this
         /// is at most the limit, unless a halting frame's leftover, counted as compute, took the
         /// transaction past it before the charge.
+        ///
+        /// For [`LimitKind::StateGrowth`] it is the state gas the transaction held where the limit
+        /// was crossed. Before the first frame that is what stands whatever the frame does — a
+        /// deposit's created caller, the applied authorities — and not the account EIP-2780
+        /// charges the first frame's start for, which is held once revm has decided the frame: a
+        /// deposit whose created caller alone crosses the limit reports that account, even where
+        /// its first frame would add another.
         used: u64,
         /// Whether the limit is a frame budget rather than a transaction-level limit.
         frame_local: bool,

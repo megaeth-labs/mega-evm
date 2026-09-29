@@ -817,6 +817,42 @@ fn test_a_stopped_deposit_keeps_the_caller_it_created() {
     assert_eq!(stopped.gas.state, one_account());
 }
 
+/// A stop reports as used the state gas held where the limit was crossed. Before the first frame
+/// that is what stands whatever the frame does, a deposit's created caller, and not the account
+/// EIP-2780 charges the first frame's start for, which is held once revm has decided the frame.
+/// So a deposit that creates its caller and sends value to an account that does not exist
+/// reports the caller alone when the caller crosses the limit, and both accounts when only both
+/// do.
+#[test]
+fn test_a_stop_reports_the_state_gas_held_where_it_crossed() {
+    if state_is_free() {
+        return;
+    }
+    let fresh = address!("00000000000000000000000000000000006000fe");
+    let deposit = || {
+        let mut tx = call(fresh, EMPTY, U256::from(1), BELOW_CAP);
+        tx.0.deposit.source_hash = B256::repeat_byte(0x11);
+        tx.0.deposit.mint = Some(5);
+        tx.0.base.gas_price = 0;
+        tx
+    };
+    let account = one_account();
+    let caller_alone = run_under(funded(), deposit(), account - 1);
+    assert_state_stopped("the created caller", &caller_alone, account - 1, account);
+    let both = run_under(funded(), deposit(), 2 * account - 1);
+    assert_state_stopped("the caller and the recipient", &both, 2 * account - 1, 2 * account);
+    for stopped in [&caller_alone, &both] {
+        assert!(
+            stopped.state.get(&EMPTY).is_none_or(|a| a.info.balance.is_zero()),
+            "no value moved"
+        );
+        assert_eq!(
+            stopped.gas.state, account,
+            "the caller's account stays, the recipient's does not"
+        );
+    }
+}
+
 /* ---------- refills give their room back ---------- */
 
 /// The limit holds what the transaction holds net: a slot written back gives its room back, and

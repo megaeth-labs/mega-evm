@@ -76,7 +76,9 @@ pub struct LimitStop {
     pub kind: &'static str,
     /// The limit crossed, in the dimension's unit.
     pub limit: u64,
-    /// The usage that crossed it.
+    /// The usage that crossed it, where it crossed it: for `state_growth`, the state gas held
+    /// at that point, so a deposit whose created caller alone crosses the limit reports that
+    /// account, even where its first frame would add another.
     pub used: u64,
 }
 

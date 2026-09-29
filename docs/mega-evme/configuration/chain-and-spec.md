@@ -112,6 +112,7 @@ The whole shape, at the defaults:
 `18446744073709551615` (`u64::MAX`) leaves a limit unlimited.
 The limits an override leaves are held to what a chain configuration is: an unknown field, a zero limit, a transaction data-size limit below the 310 bytes every transaction's body counts, or a compute cap no transaction reaches is refused.
 A transaction a limit stops reports it in `satin.limit_exceeded`.
+Its `used` is the usage where the limit was crossed; for `state_growth`, the state gas held there, so a deposit whose created caller alone crosses the limit reports that account, even where its first frame would add another.
 A run under an override reports the limits it was held to in `satin.limits_override`, the merged object whole, so a counterfactual's output says what it ran under; in text mode they follow the Satin numbers as `Limits Override:`.
 A command on a legacy spec is refused with `--override.limits`: the legacy engine's limits are its spec's.
 
