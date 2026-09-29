@@ -104,21 +104,14 @@ impl MainCmd {
         // Initialize logging first
         self.log.init();
 
-        match self.command {
-            Commands::Run(cmd) => {
-                cmd.run().await?;
-                Ok(())
-            }
-            Commands::Tx(cmd) => {
-                cmd.run().await?;
-                Ok(())
-            }
-            Commands::Replay(cmd) => {
-                cmd.run().await?;
-                Ok(())
-            }
-        }
-        .inspect_err(|e| {
+        // The command's error is bound first and then reported: a `?` inside an arm would return
+        // from this function before the report.
+        let result = match self.command {
+            Commands::Run(cmd) => cmd.run().await,
+            Commands::Tx(cmd) => cmd.run().await,
+            Commands::Replay(cmd) => cmd.run().await,
+        };
+        result.map_err(Error::from).inspect_err(|e| {
             error!(err = ?e, "Error executing command");
             eprintln!("{e}");
             std::process::exit(1);

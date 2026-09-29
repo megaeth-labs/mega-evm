@@ -138,3 +138,30 @@ fn assert_superset(satin: &serde_json::Value, legacy: &serde_json::Value, name: 
         _ => {}
     }
 }
+
+/// An error prints as the engine that ran the command prints it: on a legacy spec exactly as the
+/// 1.7.1 binary did (its `Debug` form to stdout, then `Error: ...` to stderr), on Satin once, to
+/// stderr, as a message. Both exit with code 1.
+#[cfg(feature = "legacy")]
+#[test]
+fn test_errors_print_as_their_engine_prints_them() {
+    let run = |args: &[&str]| {
+        let output = Command::new(env!("CARGO_BIN_EXE_mega-evme")).args(args).output().unwrap();
+        let text = |bytes: Vec<u8>| String::from_utf8(bytes).unwrap();
+        (output.status.code(), text(output.stdout), text(output.stderr))
+    };
+
+    let (code, stdout, stderr) = run(&["run", "--codefile", "/nonexistent/code.hex"]);
+    assert_eq!(code, Some(1));
+    assert!(stdout.starts_with("Evme(FileRead(Os {"), "{stdout}");
+    assert!(stderr.starts_with("Error: Evme(FileRead(Os {"), "{stderr}");
+
+    let (code, stdout, stderr) =
+        run(&["run", "--codefile", "/nonexistent/code.hex", "--spec", "Satin"]);
+    assert_eq!(code, Some(1));
+    assert_eq!(stdout, "");
+    assert_eq!(
+        stderr.lines().collect::<Vec<_>>(),
+        ["Failed to read file: No such file or directory (os error 2)"]
+    );
+}

@@ -96,10 +96,14 @@ pub async fn run_legacy(mut args: Vec<OsString>, append_default_spec: bool) -> R
         args.push("--spec".into());
         args.push(DEFAULT_SPEC.into());
     }
-    mega_evme_legacy::cmd::MainCmd::parse_from(args)
-        .run()
-        .await
-        .map_err(|e| EvmeError::Other(format!("legacy engine: {e}")))
+    if let Err(e) = mega_evme_legacy::cmd::MainCmd::parse_from(args).run().await {
+        // What the 1.7.1 binary's `main` does with an error its command returns: print it to
+        // stdout, then return it from `main`, which prints it to stderr and exits with code 1.
+        println!("{e:?}");
+        eprintln!("Error: {e:?}");
+        std::process::exit(1);
+    }
+    Ok(())
 }
 
 /// Refuses a legacy spec in a build without the legacy leg.
