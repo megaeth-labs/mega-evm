@@ -8,13 +8,17 @@ use alloy_sol_types::SolCall;
 use mega_evm::{
     system::{IMegaAccessControl, IOracle, ACCESS_CONTROL_ADDRESS, ORACLE_CONTRACT_ADDRESS},
     test_utils::BytecodeBuilder,
+    OracleRead,
 };
 use revm::{
     bytecode::opcode::{BALANCE, BLOCKHASH, CALL, GAS, POP, PUSH0, SLOAD},
     context::result::ExecutionResult,
 };
 
-use super::harness::{call, Case};
+use super::{
+    harness::{call, Case},
+    oracle::db as chain_with_oracle,
+};
 use crate::common::{self, BLOCK_NUMBER, CONTRACT};
 
 /// An account no transaction here funds or reads unless a cold load is made.
@@ -94,13 +98,14 @@ fn test_a_cold_account_load_short_of_gas_reads_no_account() {
 }
 
 /// An oracle read the frame cannot pay is neither loaded nor asked: a call into the Oracle with
-/// less gas than a cold access leaves the slot out of the record and the service unasked.
+/// less gas than a cold access leaves the slot out of the record and the service unasked, on a
+/// chain that holds the Oracle, so the slot would have been read from the database otherwise.
 #[test]
 fn test_an_oracle_read_short_of_gas_asks_nothing() {
     let input: Bytes = IOracle::getSlotCall { slot: U256::from(42) }.abi_encode().into();
     let calldata = input.len() as u64;
     let case = |room: u64| {
-        Case::new("oracle short of gas", common::database())
+        Case::new("oracle short of gas", chain_with_oracle())
             .envs(super::harness::Envs::new().with_oracle_storage(U256::from(42), U256::from(1)))
             .tx(call(
                 0,
@@ -120,7 +125,14 @@ fn test_an_oracle_read_short_of_gas_asks_nothing() {
 
     let enough = case(50_000).run();
     assert!(enough.recorded.tx(0).result.is_success());
-    assert_eq!(enough.recorded.record.oracle_reads, vec![(U256::from(42), Some(U256::from(1)))]);
+    assert_eq!(
+        enough.recorded.record.oracle_reads,
+        vec![OracleRead { slot: U256::from(42), answer: Some(U256::from(1)) }]
+    );
+    assert!(
+        enough.recorded.record.storage.contains_key(&(ORACLE_CONTRACT_ADDRESS, U256::from(42))),
+        "with the gas, the slot is read from the database"
+    );
 }
 
 /// Code that switches its volatile-data access off, then runs `then`.
@@ -158,26 +170,41 @@ fn test_a_refused_block_hash_read_reads_nothing() {
     assert!(run.block_hashes.is_empty());
 }
 
-/// A refused oracle read loads nothing and asks nothing.
-#[test]
-fn test_a_refused_oracle_read_reads_nothing() {
-    let mut db = common::database();
+/// Code that reads slot 42 through the Oracle and stops.
+fn read_slot_then_stop() -> BytecodeBuilder {
     let read = IOracle::getSlotCall { slot: U256::from(42) }.abi_encode();
-    let then = BytecodeBuilder::default().mstore(0, &read);
-    let then = then
-        .append_many([PUSH0, PUSH0])
+    let code = BytecodeBuilder::default().mstore(0, &read);
+    code.append_many([PUSH0, PUSH0])
         .push_number(read.len() as u64)
         .append_many([PUSH0, PUSH0])
         .push_address(ORACLE_CONTRACT_ADDRESS)
         .append_many([GAS, CALL, POP])
-        .stop();
-    db.set_account_code(CONTRACT, disabled_then(then));
-    let replay = Case::new("refused oracle read", db)
-        .envs(super::harness::Envs::new().with_oracle_storage(U256::from(42), U256::from(1)))
-        .tx(call(0, CONTRACT, Bytes::new(), 1_000_000 + common::body_history(0)))
-        .run();
-    let run = &replay.recorded;
+        .stop()
+}
+
+/// A refused oracle read loads nothing and asks nothing, on a chain that holds the Oracle: the
+/// same read with the frame's access on is loaded from the database and asked.
+#[test]
+fn test_a_refused_oracle_read_reads_nothing() {
+    let slot = (ORACLE_CONTRACT_ADDRESS, U256::from(42));
+    let case = |name: &str, code: Bytes| {
+        let mut db = chain_with_oracle();
+        db.set_account_code(CONTRACT, code);
+        Case::new(name, db)
+            .envs(super::harness::Envs::new().with_oracle_storage(U256::from(42), U256::from(1)))
+            .tx(call(0, CONTRACT, Bytes::new(), 1_000_000 + common::body_history(0)))
+            .run()
+    };
+
+    let refused = case("refused oracle read", disabled_then(read_slot_then_stop()));
+    let run = &refused.recorded;
     assert!(run.tx(0).result.is_success(), "the outer frame survives the Oracle's revert");
     assert!(run.record.oracle_reads.is_empty());
-    assert!(!run.record.storage.contains_key(&(ORACLE_CONTRACT_ADDRESS, U256::from(42))));
+    assert!(!run.record.storage.contains_key(&slot));
+
+    let allowed = case("allowed oracle read", read_slot_then_stop().build());
+    let run = &allowed.recorded;
+    assert!(run.tx(0).result.is_success());
+    assert_eq!(run.record.oracle_reads.len(), 1, "with access on, the service is asked");
+    assert!(run.record.storage.contains_key(&slot), "and the slot is read from the database");
 }

@@ -3,21 +3,36 @@
 //!
 //! A stateless validator re-executes a block from a witness: the accounts, slots, code and block
 //! hashes the block read, as the chain held them, and the SALT bucket capacities its state charges
-//! were priced with. [`WitnessRecord`] is that set, filled by a [`RecordingDatabase`] and the
-//! [`RecordingEnvFactory`]'s environments while a block executes, and served back, and nothing
-//! else, by a [`StrictDatabase`] and a [`StrictEnvFactory`]: a replay that asks for a key the
-//! record does not hold fails with a [`WitnessError`], the way a validator's database fails on a
-//! missing code or bucket, and the way it must not silently answer a missing account or slot.
+//! were priced with. [`WitnessRecord`] is that set, and a [`StrictDatabase`] and a
+//! [`StrictEnvFactory`] serve it back and nothing else: a replay that asks for a key the record
+//! does not hold fails with a [`WitnessError`], the way a validator's database fails on a missing
+//! code or bucket, and the way it must not silently answer a missing account or slot.
+//!
+//! A record is built two ways, and the two are different checks.
+//!
+//! - **From the channels a node has**, with [`WitnessRecord::from_channels`]: the accounts and
+//!   slots the pre-block states and the included transactions' returned states name, collected by
+//!   [`WitnessKeys`] and resolved against the state the block ran on; the code those states carry
+//!   and the chain holds for those accounts; the block hashes and buckets the engine exported; and
+//!   the oracle reads the included transactions recorded. That is the witness a node builds, and a
+//!   replay on it is the check a validator's witness must pass: a read the engine makes outside
+//!   every state and export is a key the record lacks, and the replay fails on it.
+//! - **From every read the database served**, with a [`RecordingDatabase`] and the
+//!   [`RecordingEnvFactory`]'s environments around the block: what a recorder at the database level
+//!   sees. A replay on it shows the block reads nothing outside its database and environments and
+//!   computes the same block twice; it cannot show a read is missing from the channels, because the
+//!   recorder sees every read wherever it lands.
 //!
 //! The recording database serves code lazily, as a node's database does: an account comes back
 //! without its bytecode, and the bytecode is served by hash on request. So every code the engine
-//! needs travels through `code_by_hash`, and the record holds what a validator, which serves code
-//! by hash, must be given.
+//! needs travels through `code_by_hash`, and both records hold what a validator, which serves
+//! code by hash, must be given.
 //!
 //! The oracle service is the one source a replay cannot take from the chain: the recording
-//! environment keeps every answer the service gave, in order, and the [`ReplayingOracleEnv`]
-//! answers the same reads the same way — or answers nothing, as a validator without an oracle
-//! service does, to show what a replay then depends on.
+//! environment keeps every answer the service gave, in order, the engine records each
+//! transaction's own on its outcome, and the [`ReplayingOracleEnv`] answers the same reads the
+//! same way — or answers nothing, as a validator without an oracle service does, to show what a
+//! replay then depends on.
 
 #[cfg(not(feature = "std"))]
 use alloc as std;
@@ -26,7 +41,7 @@ use core::{
     marker::PhantomData,
 };
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     format,
     rc::Rc,
     string::{String, ToString},
@@ -42,7 +57,8 @@ use revm::{
 };
 
 use crate::{
-    BucketId, ExternalEnvFactory, ExternalEnvTypes, ExternalEnvs, OracleEnv, RecordedHint, SaltEnv,
+    BucketId, ExternalEnvFactory, ExternalEnvTypes, ExternalEnvs, OracleEnv, OracleRead,
+    RecordedHint, SaltEnv,
 };
 
 /// What execution read outside the transactions and the header, as the sources answered it.
@@ -64,12 +80,88 @@ pub struct WitnessRecord {
     /// failed with.
     pub buckets: BTreeMap<BucketId, Result<u64, String>>,
     /// Every read of the oracle service, in order: the slot and what the service answered.
-    pub oracle_reads: Vec<(U256, Option<U256>)>,
+    pub oracle_reads: Vec<OracleRead>,
     /// Every hint the oracle service received, in order.
     pub hints: Vec<RecordedHint>,
 }
 
+/// The keys a node's witness builder collects from its channels: every account and slot the
+/// pre-block states and the included transactions' returned states name, and the bytecode those
+/// states carry for the accounts the engine loaded with their code.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct WitnessKeys {
+    /// Every account a state names.
+    pub accounts: BTreeSet<Address>,
+    /// Every slot a state names, with its account.
+    pub slots: BTreeSet<(Address, StorageKey)>,
+    /// The bytecode the states carry, by hash: the code of every account loaded with its code,
+    /// and the code the block deployed.
+    pub codes: BTreeMap<B256, Bytecode>,
+}
+
+impl WitnessKeys {
+    /// Adds every account and slot `state` names, and the code it carries.
+    pub fn add_state(&mut self, state: &EvmState) {
+        for (address, account) in state {
+            self.accounts.insert(*address);
+            for key in account.storage.keys() {
+                self.slots.insert((*address, *key));
+            }
+            if let Some(code) = &account.info.code {
+                if !code.is_empty() {
+                    self.codes.insert(account.info.code_hash, code.clone());
+                }
+            }
+        }
+    }
+}
+
 impl WitnessRecord {
+    /// The witness a node builds from its channels, resolved against `chain`, the state the block
+    /// ran on: every account `keys` names as the chain holds it, an absent one recorded as absent,
+    /// with the code the chain holds for it beside the code the states carried; every slot `keys`
+    /// names of an account the chain holds, zeroes included — the slots of an absent account are
+    /// zero without a read, so none is recorded; and the block hashes, the buckets and the
+    /// included transactions' oracle reads as given. Hints are not in it: a validator has no
+    /// service to hand them to.
+    ///
+    /// # Errors
+    ///
+    /// The chain's, when a read fails.
+    pub fn from_channels<DB: Database>(
+        chain: &mut DB,
+        keys: &WitnessKeys,
+        block_hashes: BTreeMap<u64, B256>,
+        buckets: BTreeMap<BucketId, Result<u64, String>>,
+        oracle_reads: Vec<OracleRead>,
+    ) -> Result<Self, DB::Error> {
+        let mut record = Self {
+            codes: keys.codes.clone(),
+            block_hashes,
+            buckets,
+            oracle_reads,
+            ..Self::default()
+        };
+        for address in &keys.accounts {
+            let info = chain.basic(*address)?.map(|mut info| {
+                if let Some(code) = info.code.take() {
+                    if !code.is_empty() {
+                        record.codes.insert(info.code_hash, code);
+                    }
+                }
+                info
+            });
+            record.accounts.insert(*address, info);
+        }
+        for (address, key) in &keys.slots {
+            if record.accounts.get(address).is_some_and(Option::is_some) {
+                let value = chain.storage(*address, *key)?;
+                record.storage.insert((*address, *key), value);
+            }
+        }
+        Ok(record)
+    }
+
     /// Whether every key `other` holds is in this record with the same answer: what a replay
     /// read is what the original run read.
     pub fn covers(&self, other: &Self) -> bool {
@@ -296,7 +388,7 @@ pub struct RecordingOracleEnv<O> {
 impl<O: OracleEnv> OracleEnv for RecordingOracleEnv<O> {
     fn get_oracle_storage(&self, slot: U256) -> Option<U256> {
         let answer = self.inner.get_oracle_storage(slot);
-        self.record.borrow_mut().oracle_reads.push((slot, answer));
+        self.record.borrow_mut().oracle_reads.push(OracleRead { slot, answer });
         answer
     }
 
@@ -371,7 +463,7 @@ impl<S: SaltEnv> SaltEnv for StrictSaltEnv<S> {
 /// `None`, and none is a mismatch.
 #[derive(Clone, Debug)]
 pub struct ReplayingOracleEnv {
-    reads: Rc<Vec<(U256, Option<U256>)>>,
+    reads: Rc<Vec<OracleRead>>,
     next: Rc<Cell<usize>>,
     mismatched: Rc<Cell<bool>>,
     absent: bool,
@@ -379,7 +471,7 @@ pub struct ReplayingOracleEnv {
 
 impl ReplayingOracleEnv {
     /// A service replaying `reads` in order.
-    pub fn new(reads: Vec<(U256, Option<U256>)>) -> Self {
+    pub fn new(reads: Vec<OracleRead>) -> Self {
         Self {
             reads: Rc::new(reads),
             next: Rc::new(Cell::new(0)),
@@ -408,7 +500,7 @@ impl OracleEnv for ReplayingOracleEnv {
         let index = self.next.get();
         self.next.set(index + 1);
         match self.reads.get(index) {
-            Some((recorded, answer)) if *recorded == slot => *answer,
+            Some(read) if read.slot == slot => read.answer,
             _ => {
                 self.mismatched.set(true);
                 None

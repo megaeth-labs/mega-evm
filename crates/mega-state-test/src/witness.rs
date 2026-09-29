@@ -1,13 +1,21 @@
 //! Replaying a fixture from the witness of its own execution.
 //!
 //! [`check_replay`] executes an entry once on a database and environments that record every read
-//! ([`RecordingDatabase`], [`RecordingEnvFactory`]), then again on a strict database and
-//! environments that serve exactly the record and refuse everything else ([`StrictDatabase`],
-//! [`StrictEnvFactory`]), and holds the second run to the first: the result, the state, the gas
-//! by ledger, the usage and the stop, the state changes committed, and the buckets and block
-//! hashes the engine exported. A replay that reads what the record does not hold fails on the
-//! read; one that computes something else fails on the comparison. The record is the witness a
-//! stateless validator would be given for the transaction.
+//! ([`RecordingDatabase`], [`RecordingEnvFactory`]), then twice more on a strict database and
+//! environments that serve exactly a witness and refuse everything else ([`StrictDatabase`],
+//! [`StrictEnvFactory`]): once on the record of every database read, once on the witness a node
+//! builds from its channels — the accounts and slots the transaction's returned state names, as
+//! the pre-state holds them, the code it carries, the block hashes and buckets the engine
+//! exported, and the oracle reads the transaction recorded. Each replay is held to the first
+//! run: the result, the state, the gas by ledger, the usage and the stop, the state changes
+//! committed, and the buckets and block hashes the engine exported. A replay that reads what its
+//! witness does not hold fails on the read; one that computes something else fails on the
+//! comparison.
+//!
+//! The channel witness is what a stateless validator is given for the transaction, so its replay
+//! is the check the witness must pass; the database-level replay shows the transaction reads
+//! nothing outside its database and environments. An entry the engine rejects is not replayed on
+//! the channels: it has no returned state, and is in no block.
 
 use std::collections::BTreeMap;
 
@@ -23,9 +31,9 @@ use mega_evm::{
     },
     test_utils::{
         RecordingDatabase, RecordingEnvFactory, SharedWitnessRecord, StrictDatabase,
-        StrictEnvFactory, WitnessRecord,
+        StrictEnvFactory, WitnessKeys, WitnessRecord,
     },
-    BucketId, EmptyExternalEnv, ExternalEnvFactory, MegaTransactionOutcome,
+    BucketId, EmptyExternalEnv, ExternalEnvFactory, MegaTransactionOutcome, SaltEnv,
 };
 
 use crate::{
@@ -99,10 +107,12 @@ where
 }
 
 /// Executes the entry `test` of `unit` on `fork` in `mode`, records what it read, replays it on
-/// exactly the record, and compares the two runs.
+/// exactly the record and, when the engine executed it, on the witness a node builds from the
+/// transaction's returned state and the engine's exports, and compares each replay to the first
+/// run.
 ///
-/// `Ok(None)` when the replay produced the same result, state, ledgers, usage, stop, state
-/// changes and exports, having read nothing the record does not hold; `Ok(Some(reason))` when
+/// `Ok(None)` when every replay produced the same result, state, ledgers, usage, stop, state
+/// changes and exports, having read nothing its witness does not hold; `Ok(Some(reason))` when
 /// the entry is not executed, for the reason the reference runner shares; `Err` with what
 /// differed, or what the fixture lacks, otherwise.
 pub fn check_replay(
@@ -136,9 +146,9 @@ pub fn check_replay(
         fork,
         RecordingDatabase::new(StrictDatabase::new(record.clone()), reads.clone()),
         RecordingEnvFactory::new(strict.clone(), reads.clone()),
-        block,
+        block.clone(),
         chain_id,
-        tx,
+        tx.clone(),
     );
     let reads: WitnessRecord = reads.take();
 
@@ -151,6 +161,44 @@ pub fn check_replay(
     }
     if !strict.oracle().replayed_exactly() {
         return Err("the oracle reads were not replayed in order".into());
+    }
+
+    // The channel witness: what a node builds for a transaction it includes, so only for an
+    // entry the engine executed.
+    let Ok(outcome) = &recorded.outcome else {
+        return Ok(None);
+    };
+    let mut keys = WitnessKeys::default();
+    keys.add_state(&outcome.state);
+    let buckets = recorded
+        .bucket_ids
+        .iter()
+        .map(|id| {
+            (*id, EmptyExternalEnv.get_bucket_capacity(*id).map_err(|error| error.to_string()))
+        })
+        .collect();
+    let witness = WitnessRecord::from_channels(
+        &mut prestate(unit),
+        &keys,
+        recorded.block_hashes.clone(),
+        buckets,
+        outcome.oracle_reads.clone(),
+    )
+    .map_err(|error| format!("the pre-state could not be read: {error}"))?;
+    let reads = SharedWitnessRecord::default();
+    let strict = StrictEnvFactory::<EmptyExternalEnv>::replaying(&witness);
+    let channel = run(
+        mode,
+        fork,
+        RecordingDatabase::new(StrictDatabase::new(witness), reads.clone()),
+        RecordingEnvFactory::new(strict.clone(), reads),
+        block,
+        chain_id,
+        tx,
+    );
+    compare(&recorded, &channel).map_err(|why| format!("on the channel witness: {why}"))?;
+    if !strict.oracle().replayed_exactly() {
+        return Err("the oracle reads were not replayed in order on the channel witness".into());
     }
     Ok(None)
 }

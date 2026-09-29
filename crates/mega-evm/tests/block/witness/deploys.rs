@@ -10,7 +10,7 @@ use mega_evm::{
         ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE, SEQUENCER_REGISTRY_ADDRESS,
         SEQUENCER_REGISTRY_CODE,
     },
-    test_utils::{BytecodeBuilder, MemoryDatabase},
+    test_utils::MemoryDatabase,
     PreBlockStateSource,
 };
 use revm::bytecode::opcode::{CODECOPY, PUSH0, RETURN};
@@ -126,5 +126,4 @@ fn test_an_activation_block_replays() {
     let run = &replay.recorded;
     assert!(run.tx(0).result.is_success(), "{:?}", run.tx(0).result);
     assert!(run.refusal(1).contains("activation block"), "{}", run.refusal(1));
-    let _ = BytecodeBuilder::default();
 }

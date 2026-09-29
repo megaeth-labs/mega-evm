@@ -1,10 +1,11 @@
-//! The harness on ordinary blocks: writes, an empty block and a refused transaction.
+//! The harness on ordinary blocks: writes, an empty block, a refused transaction, a dropped
+//! candidate and a SALT lookup that fails.
 
 use alloy_primitives::{Bytes, U256};
-use mega_evm::test_utils::BytecodeBuilder;
+use mega_evm::{test_utils::BytecodeBuilder, SaltEnv};
 use revm::bytecode::opcode::{CALLDATALOAD, PUSH0, SSTORE};
 
-use super::harness::{call, Case};
+use super::harness::{call, Case, Envs};
 use crate::common::{self, CONTRACT};
 
 /// Code that sets the slot the first calldata word names to one.
@@ -72,9 +73,9 @@ fn test_an_empty_block_replays_from_its_witness() {
 }
 
 /// A transaction the block refuses before it runs — its declared gas above the block's gas
-/// limit — reads nothing and is refused the same way on replay.
+/// limit — reads nothing, is in no state, and is not run on replay.
 #[test]
-fn test_a_refused_transaction_reads_nothing_and_is_refused_on_replay() {
+fn test_a_refused_transaction_reads_nothing_and_is_not_replayed() {
     let mut db = common::database();
     db.set_account_code(CONTRACT, slot_writer());
     let replay = Case::new("refused", db)
@@ -89,4 +90,60 @@ fn test_a_refused_transaction_reads_nothing_and_is_refused_on_replay() {
         !run.record.storage.contains_key(&(CONTRACT, U256::from(2))),
         "the refused transaction read no slot"
     );
+    assert!(!run.keys.slots.contains(&(CONTRACT, U256::from(2))), "and no state names it");
+    assert!(replay.replayed.txs[1].is_err() && replay.channel.txs[1].is_err(), "not replayed");
+}
+
+/// A candidate the builder executes and drops reads like any transaction — its reads are in the
+/// database-level record — and is in no state, no receipt and no replay; the block's other
+/// transaction replays on a witness that holds nothing of it.
+#[test]
+fn test_a_dropped_candidate_is_in_no_state_and_no_replay() {
+    let mut db = common::database();
+    db.set_account_code(CONTRACT, slot_writer());
+    let replay = Case::new("dropped candidate", db)
+        .tx(call(0, CONTRACT, slot(1), write_gas()))
+        .dropped(0)
+        .tx(call(0, CONTRACT, slot(2), write_gas()))
+        .run();
+    let run = &replay.recorded;
+    assert!(run.txs[0].is_err(), "dropped");
+    assert!(run.tx(1).result.is_success());
+    assert_eq!(run.receipts.len(), 1);
+    assert!(run.record.storage.contains_key(&(CONTRACT, U256::from(1))), "executed, so read");
+    assert!(!run.keys.slots.contains(&(CONTRACT, U256::from(1))), "in no state");
+    assert!(run.keys.slots.contains(&(CONTRACT, U256::from(2))));
+    assert!(replay.channel.txs[0].is_err() && replay.channel.tx(1).result.is_success());
+    if !common::state_is_free() {
+        assert_eq!(run.bucket_ids.len(), 2, "the export holds the dropped candidate's bucket too");
+    }
+}
+
+/// A SALT lookup that fails fails its transaction, which is in no block: the failure is in the
+/// environment's record, the bucket is not exported, and the block's other transaction replays
+/// on a witness that proves the answered bucket alone.
+#[test]
+fn test_a_failed_salt_lookup_fails_its_transaction_and_is_not_exported() {
+    if common::state_is_free() {
+        return;
+    }
+    let failing = <Envs as SaltEnv>::bucket_id_for_slot(CONTRACT, U256::from(1));
+    let answered = <Envs as SaltEnv>::bucket_id_for_slot(CONTRACT, U256::from(2));
+    let mut db = common::database();
+    db.set_account_code(CONTRACT, slot_writer());
+    let replay = Case::new("failed lookup", db)
+        .envs(Envs::new().with_failing_bucket(failing, "salt backend unreachable".into()))
+        .tx(call(0, CONTRACT, slot(1), write_gas()))
+        .tx(call(0, CONTRACT, slot(2), write_gas()))
+        .run();
+    let run = &replay.recorded;
+    assert!(run.refusal(0).contains("salt backend unreachable"), "{}", run.refusal(0));
+    assert!(run.tx(1).result.is_success());
+    assert_eq!(run.receipts.len(), 1);
+    assert_eq!(
+        run.record.buckets.get(&failing),
+        Some(&Err("salt backend unreachable".into())),
+        "the environment recorded the failure"
+    );
+    assert_eq!(run.bucket_ids, vec![answered], "the export holds the answered bucket alone");
 }

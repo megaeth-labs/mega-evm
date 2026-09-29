@@ -6,15 +6,16 @@
 //! per-transaction multiplier cache is forgotten before every transaction, so a record that lived
 //! there would lose every transaction's buckets but the last one's.
 
+use alloy_eips::eip2935::{HISTORY_STORAGE_ADDRESS, HISTORY_STORAGE_CODE};
 use alloy_evm::{block::BlockExecutor, EvmFactory};
 use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
-use alloy_primitives::{address, Address, Bytes, U256};
+use alloy_primitives::{address, Address, Bytes, B256, U256};
 use mega_evm::{
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    BucketId, MegaBlockExecutor, MegaEvm, MegaEvmFactory, MegaHardforkConfig, SaltEnv,
-    TestExternalEnvs,
+    BlockLimits, BucketId, MegaBlockExecutionCtx, MegaBlockExecutor, MegaEvm, MegaEvmFactory,
+    MegaHardforkConfig, PreBlockStateSource, SaltEnv, TestExternalEnvs,
 };
-use revm::{database::State, inspector::NoOpInspector};
+use revm::{database::State, inspector::NoOpInspector, state::EvmState};
 
 use crate::common::{self, system_tx, CALLER, CONTRACT};
 
@@ -158,8 +159,9 @@ fn test_two_blocks_over_the_same_evm_report_only_their_own_buckets() {
     );
 }
 
-/// The protocol's own work reads no bucket: a block of pre-block calls and a system transaction
-/// leaves the record empty, and the environment was never asked.
+/// The protocol's own work reads no bucket: a block whose EIP-2935 pre-block call writes a fresh
+/// slot of the history contract and whose system transaction creates its caller leaves the
+/// record empty, and the environment was never asked.
 #[test]
 fn test_the_pre_block_calls_and_a_system_transaction_add_no_bucket() {
     let envs = Envs::new();
@@ -169,9 +171,33 @@ fn test_the_pre_block_calls_and_a_system_transaction_add_no_bucket() {
         mega_evm::system::ORACLE_CONTRACT_ADDRESS,
         mega_evm::system::ORACLE_CONTRACT_CODE,
     );
+    db.set_account_code(HISTORY_STORAGE_ADDRESS, HISTORY_STORAGE_CODE.clone());
     let mut state = State::builder().with_database(db).build();
-    let mut executor = executor(&mut state, envs.clone());
+    // A non-zero parent hash, so the EIP-2935 call's write changes the ring slot it lands in.
+    let evm = MegaEvmFactory::new()
+        .with_external_env_factory(envs.clone())
+        .create_evm(&mut state, common::evm_env());
+    let ctx = MegaBlockExecutionCtx::new(
+        B256::repeat_byte(0x11),
+        Some(B256::ZERO),
+        Bytes::new(),
+        BlockLimits::no_limits(),
+    );
+    let mut executor =
+        MegaBlockExecutor::new(evm, ctx, common::chain_spec(), OpAlloyReceiptBuilder::default());
+    let written = std::sync::Arc::new(std::sync::Mutex::new(false));
+    let seen = std::sync::Arc::clone(&written);
+    executor.set_pre_block_observer(Some(Box::new(
+        move |source: PreBlockStateSource, state: &EvmState| {
+            if source == PreBlockStateSource::Eip2935 {
+                let changed = state[&HISTORY_STORAGE_ADDRESS].changed_storage_slots().count();
+                *seen.lock().expect("pre-block observer") = changed > 0;
+            }
+        },
+    )));
     executor.apply_pre_execution_changes().expect("the block starts");
+    assert!(*written.lock().expect("pre-block observer"), "the EIP-2935 call wrote a slot");
+    assert!(executor.get_accessed_bucket_ids().is_empty(), "priced at the minimum bucket");
     let outcome = executor.run_transaction(&system_tx()).expect("it executes");
     assert!(outcome.result.is_success(), "{:?}", outcome.result);
     assert!(executor.evm().ctx().is_system_originated());
