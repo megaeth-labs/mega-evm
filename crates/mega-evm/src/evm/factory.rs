@@ -232,7 +232,7 @@ mod tests {
         sync::atomic::{AtomicUsize, Ordering},
     };
     use revm::{
-        context::{CfgEnv, TxEnv},
+        context::{CfgEnv, ContextTr, TxEnv},
         precompile::{PrecompileId, PrecompileOutput},
         primitives::HashMap,
     };
@@ -263,6 +263,64 @@ mod tests {
         assert_eq!(evm.cfg_env().tx_gas_limit_cap, Some(crate::constants::TX_GAS_LIMIT_CAP));
         assert!(evm.cfg_env().enable_amsterdam_eip8037);
         assert_eq!(evm.block().number, U256::from(5));
+    }
+
+    /// The configuration [`spec_cfg`](crate::spec_cfg) returns is the one an EVM created from the
+    /// same env runs with, in both views, before and after it runs a transaction: a node that
+    /// mirrors it in its `EvmEnv` reads what the EVM executes on. A deposit runs on the schedule
+    /// that prices no history, and the next transaction that pays history is back on the spec's.
+    #[test]
+    fn test_the_exported_cfg_is_the_one_the_evm_runs_with() {
+        let mut cfg_env = CfgEnv::new_with_spec(MegaSpecId::SATIN);
+        cfg_env.chain_id = 4326;
+        cfg_env.disable_nonce_check = true;
+        cfg_env.tx_gas_limit_cap = Some(1 << 24);
+        cfg_env.enable_amsterdam_eip8037 = false;
+        cfg_env.enable_amsterdam_eip2780 = false;
+        cfg_env.enable_amsterdam_eip7708 = false;
+        cfg_env.limit_contract_code_size = None;
+        let exported = crate::spec_cfg(cfg_env.clone());
+        assert_eq!(crate::spec_cfg(exported.clone()), exported, "applying it twice is a no-op");
+        assert_eq!(exported.chain_id, 4326, "the caller's own fields are kept");
+        assert!(exported.disable_nonce_check);
+        let op_view = exported.clone().with_spec_and_gas_params(
+            MegaSpecId::SATIN.into_op_spec(),
+            exported.gas_params.clone(),
+        );
+
+        let mut evm = MegaEvmFactory::new().create_evm(
+            MemoryDatabase::default(),
+            EvmEnv { cfg_env, block_env: evm_env().block_env },
+        );
+        let runs_with = |evm: &MegaEvm<MemoryDatabase, NoOpInspector>| {
+            (evm.ctx().mega_cfg().clone(), evm.ctx().cfg().clone())
+        };
+        assert_eq!(runs_with(&evm), (exported.clone(), op_view.clone()));
+        let on_chain = |mut tx: MegaTransaction| {
+            tx.0.base.chain_id = Some(4326);
+            tx
+        };
+
+        evm.transact_raw(on_chain(call(CUSTOM))).unwrap();
+        assert_eq!(runs_with(&evm), (exported.clone(), op_view.clone()));
+
+        let mut deposit = on_chain(call(CUSTOM));
+        deposit.0.deposit.source_hash = alloy_primitives::B256::repeat_byte(0x11);
+        evm.transact_raw(deposit).unwrap();
+        let (mega, _) = runs_with(&evm);
+        assert_eq!(
+            mega.gas_params,
+            crate::satin_gas_params_history_exempt(),
+            "a deposit runs the schedule that prices no history",
+        );
+        assert_eq!(
+            mega.with_spec_and_gas_params(exported.spec, exported.gas_params.clone()),
+            exported,
+            "and nothing else of the configuration moves",
+        );
+
+        evm.transact_raw(on_chain(call(CUSTOM))).unwrap();
+        assert_eq!(runs_with(&evm), (exported, op_view));
     }
 
     /// Records the block number each EVM's external environments are created for.
