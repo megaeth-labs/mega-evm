@@ -9,7 +9,7 @@ use mega_evm::{
         inspector::NoOpInspector,
     },
     test_utils::{neutral_cfg, neutralize_evm, zero_fee_l1_block_info},
-    EvmTxRuntimeLimits, MegaContext, MegaEvm, MegaSpecId,
+    EvmTxRuntimeLimits, ExternalEnvTypes, ExternalEnvs, MegaContext, MegaEvm, MegaSpecId,
 };
 use serde::Serialize;
 
@@ -75,7 +75,20 @@ impl Mode {
         block: BlockEnv,
         chain_id: u64,
     ) -> MegaContext<DB> {
-        let ctx = MegaContext::new(db, MegaSpecId::SATIN);
+        self.context_with_envs(fork, db, block, chain_id, ExternalEnvs::default())
+    }
+
+    /// [`context`](Self::context) over the external environments `envs`, for a run that records
+    /// or replays what the SALT and oracle environments answer.
+    pub fn context_with_envs<DB: Database, E: ExternalEnvTypes>(
+        self,
+        fork: Fork,
+        db: DB,
+        block: BlockEnv,
+        chain_id: u64,
+        envs: ExternalEnvs<E>,
+    ) -> MegaContext<DB, E> {
+        let ctx = MegaContext::new_with_external_envs(db, MegaSpecId::SATIN, envs);
         let cfg = self.cfg(fork, chain_id);
         let ctx = match self {
             Self::Equivalence => {
@@ -97,7 +110,19 @@ impl Mode {
         block: BlockEnv,
         chain_id: u64,
     ) -> MegaEvm<DB, NoOpInspector> {
-        let mut evm = MegaEvm::new(self.context(fork, db, block, chain_id));
+        self.evm_with_envs(fork, db, block, chain_id, ExternalEnvs::default())
+    }
+
+    /// [`evm`](Self::evm) over the external environments `envs`.
+    pub fn evm_with_envs<DB: Database, E: ExternalEnvTypes>(
+        self,
+        fork: Fork,
+        db: DB,
+        block: BlockEnv,
+        chain_id: u64,
+        envs: ExternalEnvs<E>,
+    ) -> MegaEvm<DB, NoOpInspector, E> {
+        let mut evm = MegaEvm::new(self.context_with_envs(fork, db, block, chain_id, envs));
         if self == Self::Equivalence {
             neutralize_evm(&mut evm, fork.spec_id())
                 .expect("every runner fork has a neutral configuration");

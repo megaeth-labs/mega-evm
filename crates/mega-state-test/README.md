@@ -57,6 +57,18 @@ cargo run --release -p state-test -- --mode satin --fork Osaka <main>/state_test
 `--expect-executed`, `--expect-skipped` and `--expect-deviations` turn a full run into the pinned gate CI runs (`.github/workflows/exec-spec-satin.yml`).
 `--json-outcome` prints one JSON line per test, a failure's produced hashes included, and `--trace` runs each test under an EIP-3155 tracer.
 
+## Replaying from a witness
+
+`witness::check_replay` executes an entry on a database and environments that record every read, replays it on a strict database and environments that serve exactly the record, and holds the replay to the first run: the result, the state, the gas by ledger, the usage, the stop, the state changes, and the buckets and block hashes the engine exported.
+It is the check a stateless validator's witness must pass, run on Ethereum's fixtures.
+A fixture written into the test always runs; a sample of the execution-spec fixtures runs on demand:
+
+```bash
+MEGA_STATE_TEST_FIXTURES=<main>/state_tests cargo test -p mega-state-test --release --test witness -- --ignored
+```
+
+`MEGA_STATE_TEST_SAMPLE` is how many fixture files to take, spread over the tree (300 unless set, 0 for all), `MEGA_STATE_TEST_FORK` the fork (`Osaka` unless set) and `MEGA_STATE_TEST_MODE` the mode (`satin` unless set).
+
 ## Deviations
 
 A deviation lists the exact entries it explains: the fixture file (relative to the release's `state_tests` directory), the test, the data, gas and value indices, and the hashes Satin produces — the state root, or for a logs mismatch the logs hash and the state root.
