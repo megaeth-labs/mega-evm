@@ -6,6 +6,8 @@
 
 use alloy_primitives::{Bytes, Log};
 
+use mega_evm::ProtocolLimits;
+
 use crate::common::SatinReport;
 
 /// How an included transaction ended.
@@ -69,6 +71,9 @@ pub enum TxResult {
 pub struct ExecutedBlock {
     /// One result per transaction, in block order.
     pub transactions: Vec<TxResult>,
+    /// The protocol limits a Satin block ran under when `--override.limits` replaced the
+    /// schedule's; `None` otherwise, and on the legacy engine.
+    pub limits_override: Option<ProtocolLimits>,
 }
 
 impl ExecutedBlock {

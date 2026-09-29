@@ -184,7 +184,7 @@ pub(super) fn execute(
                     satin: None,
                 });
             }
-            Ok(ExecutedBlock { transactions: results })
+            Ok(ExecutedBlock { transactions: results, limits_override: None })
         };
         run()
     };

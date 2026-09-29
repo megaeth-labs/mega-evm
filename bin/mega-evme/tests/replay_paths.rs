@@ -196,7 +196,13 @@ async fn test_a_transaction_replayed_alone_is_the_one_the_block_replay_runs() {
             }
             let run = run_evme(&args);
             assert_eq!(run.code, 0, "{engine} tx {index}: {}{}", run.stderr, run.stdout);
-            let single: Value = serde_json::from_str(&run.stdout).unwrap();
+            let mut single: Value = serde_json::from_str(&run.stdout).unwrap();
+            // A transaction replayed alone reports the limits an override held it to; a block's
+            // record reports them for its transactions.
+            let overridden = single
+                .get_mut("satin")
+                .and_then(|satin| satin.as_object_mut().unwrap().remove("limits_override"));
+            assert_eq!(overridden.is_some(), limits.is_some(), "{engine} tx {index}");
             assert_eq!(single["gas_used"], row["gas_used"], "{engine} tx {index}");
             assert_eq!(single["success"], row["status"] == "success", "{engine} tx {index}");
             assert_eq!(single["logs_count"], row["logs"], "{engine} tx {index}");

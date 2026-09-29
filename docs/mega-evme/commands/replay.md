@@ -181,6 +181,7 @@ Replay on Satin under other protocol limits than the chain's, a counterfactual: 
 Without it, a Satin replay of a block its chain does not run on Satin runs on Satin's default limits.
 The object's shape, the defaults and what is refused are in [Protocol limits](../configuration/chain-and-spec.md#protocol-limits).
 It applies to both the transaction replay and the block replay; a replay that runs on the legacy engine is refused with it, and so is a legacy block of a block replay.
+The limits a replay ran under are reported: a transaction replay's in its `satin.limits_override`, a block's in the `satin.limits_override` of its block record, and in text mode as `limits overridden` on the block's line.
 
 ```
 mega-evme replay --override.spec Satin --override.limits '{"txRuntimeLimits":{"txDataSizeLimit":100000}}' <TX_HASH>

@@ -207,6 +207,15 @@ impl EnvArgs {
         self.ext.create_external_envs()
     }
 
+    /// The protocol limits a Satin run is held to when `--override.limits` replaced the
+    /// schedule's, for its report; `None` without an override.
+    pub fn limits_override_in_force(&self) -> Result<Option<Box<ProtocolLimits>>> {
+        if self.chain.limits_override.is_none() {
+            return Ok(None);
+        }
+        self.chain.protocol_limits(self.block.block_timestamp).map(|limits| Some(Box::new(limits)))
+    }
+
     /// Creates a [`MegaContext`] with all environment configurations.
     ///
     /// The transaction is held to the per-transaction limits a block of the chain at the block's

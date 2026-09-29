@@ -12,7 +12,7 @@ use clap::Parser;
 use mega_evm::{
     op_revm::OpHaltReason,
     revm::{context::result::ExecutionResult, state::EvmState},
-    LimitCheck, LimitKind, MegaHaltReason, MegaTransactionOutcome, MegaTxType,
+    LimitCheck, LimitKind, MegaHaltReason, MegaTransactionOutcome, MegaTxType, ProtocolLimits,
 };
 use op_alloy_consensus::{OpDepositReceipt, OpReceiptEnvelope};
 use serde::Serialize;
@@ -42,7 +42,7 @@ pub struct EvmeOutcome {
 ///
 /// It is the one part of the output a legacy run has no counterpart for, so it is carried in a
 /// field of its own and every other field keeps its legacy name and meaning.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct SatinReport {
     /// Regular (compute) gas spent, before the refund.
     pub regular_gas: u64,
@@ -62,6 +62,11 @@ pub struct SatinReport {
     pub write_records: u64,
     /// The transaction-level limit that stopped the transaction, if one did.
     pub limit_exceeded: Option<LimitStop>,
+    /// The protocol limits the run was held to, in the shape `--override.limits` takes them;
+    /// present only when that flag replaced the schedule's, so the record of a counterfactual
+    /// says what it ran under. Boxed: only such a run carries them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limits_override: Option<Box<ProtocolLimits>>,
 }
 
 /// A transaction-level limit that stopped a Satin transaction.
@@ -94,6 +99,7 @@ impl SatinReport {
                 }
                 _ => None,
             },
+            limits_override: None,
         }
     }
 }
@@ -243,6 +249,9 @@ pub fn print_satin_report(report: &SatinReport) {
     println!("Write Records:    {}", report.write_records);
     if let Some(stop) = report.limit_exceeded {
         println!("Limit Exceeded:   {} (limit {}, used {})", stop.kind, stop.limit, stop.used);
+    }
+    if let Some(limits) = &report.limits_override {
+        println!("Limits Override:  {}", serde_json::to_string(limits).expect("limits serialize"));
     }
 }
 

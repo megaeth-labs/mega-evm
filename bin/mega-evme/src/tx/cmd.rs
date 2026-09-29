@@ -102,8 +102,9 @@ impl Cmd {
         info!("Executing transaction");
         let evm_context = self.env_args.create_evm_context(&mut state)?;
         let start = Instant::now();
-        let (exec_result, evm_state, trace_data, satin) =
+        let (exec_result, evm_state, trace_data, mut satin) =
             self.trace_args.execute_transaction(evm_context, tx.clone())?;
+        satin.limits_override = self.env_args.limits_override_in_force()?;
         let exec_time = start.elapsed();
 
         // Log execution result
@@ -175,7 +176,7 @@ impl Cmd {
         if self.output_args.json {
             let mut summary = ExecutionSummary::from_result(&outcome.exec_result, contract_address);
             summary.fill_trace_and_dump(outcome, &self.trace_args, &self.dump_args)?;
-            summary.satin = Some(outcome.satin);
+            summary.satin = Some(outcome.satin.clone());
             summary.receipt =
                 Some(serde_json::to_value(&receipt).expect("failed to serialize receipt"));
             println!(

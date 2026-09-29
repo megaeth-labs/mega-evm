@@ -15,7 +15,7 @@ use mega_evm::{
         DatabaseRef,
     },
     BlockLimits, DeclaredObserver, MegaBlockExecutionCtx, MegaBlockExecutorFactory, MegaEvmFactory,
-    MegaSpecId,
+    MegaHardforks, MegaSpecId,
 };
 use tracing::{debug, info, trace, warn};
 
@@ -502,7 +502,10 @@ impl Cmd {
             .run_transaction(wrapped_tx)
             .map_err(|e| ReplayError::Other(format!("Block execution error: {e}")))?;
         trace!(tx_hash = %ctx.target_tx.inner.inner.tx_hash(), ?outcome, "Target transaction executed");
-        let satin = SatinReport::of(&outcome.inner);
+        let mut satin = SatinReport::of(&outcome.inner);
+        if self.limits_override.is_some() {
+            satin.limits_override = hardforks.protocol_limits(timestamp).map(Box::new);
+        }
         let exec_result = outcome.inner.result.clone();
         let evm_state = outcome.inner.state.clone();
 
@@ -587,7 +590,7 @@ impl Cmd {
             summary.fill_trace_and_dump(&result.outcome, &self.trace_args, &self.dump_args)?;
             summary.receipt =
                 Some(serde_json::to_value(&result.receipt).expect("failed to serialize receipt"));
-            summary.satin = Some(result.outcome.satin);
+            summary.satin = Some(result.outcome.satin.clone());
             println!(
                 "{}",
                 serde_json::to_string_pretty(&summary).expect("failed to serialize output")

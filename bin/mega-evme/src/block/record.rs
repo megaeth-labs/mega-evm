@@ -148,7 +148,7 @@ pub fn records(
                 record.cumulative_gas_used = receipt.cumulative_gas_used;
                 record.logs = receipt.logs.len();
                 record.reason.clone_from(reason);
-                record.satin = *satin;
+                record.satin = satin.clone();
                 previous = receipt.cumulative_gas_used;
                 if receipt.success != chain.success() {
                     record.differs.push("status");
@@ -170,7 +170,10 @@ pub fn records(
     let encoded: Vec<Bytes> = executed.receipts().map(|r| r.encoded.clone()).collect();
     let root = receipts_root(&encoded);
     let differing = txs.iter().filter(|tx| !tx.differs.is_empty()).count();
-    let satin = (engine == Engine::Satin).then(|| sum_satin(txs.iter().filter_map(|t| t.satin)));
+    let satin = (engine == Engine::Satin).then(|| SatinReport {
+        limits_override: executed.limits_override.map(Box::new),
+        ..sum_satin(txs.iter().filter_map(|t| t.satin.as_ref()))
+    });
     let block = BlockRecord {
         kind: "block",
         block: number,
@@ -202,7 +205,7 @@ fn chain_view(chain: &ChainReceipt) -> ChainView {
 
 /// The sum of `reports` over a block: every ledger and count added up; the reservoir left and
 /// the floor are per transaction and summed as they are; no limit stop.
-fn sum_satin(reports: impl Iterator<Item = SatinReport>) -> SatinReport {
+fn sum_satin<'a>(reports: impl Iterator<Item = &'a SatinReport>) -> SatinReport {
     reports.fold(SatinReport::default(), |acc, r| SatinReport {
         regular_gas: acc.regular_gas + r.regular_gas,
         state_gas: acc.state_gas + r.state_gas,
@@ -213,6 +216,7 @@ fn sum_satin(reports: impl Iterator<Item = SatinReport>) -> SatinReport {
         data_size: acc.data_size + r.data_size,
         write_records: acc.write_records + r.write_records,
         limit_exceeded: None,
+        limits_override: None,
     })
 }
 

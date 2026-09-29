@@ -12,8 +12,8 @@ use mega_evm::{
         inspector::NoOpInspector,
         primitives::eip4844,
     },
-    BlockLimits, MegaBlockExecutionCtx, MegaBlockExecutorFactory, MegaEvmFactory, MegaSpecId,
-    MegaTxEnvelope,
+    BlockLimits, MegaBlockExecutionCtx, MegaBlockExecutorFactory, MegaEvmFactory, MegaHardforks,
+    MegaSpecId, MegaTxEnvelope,
 };
 
 use super::{
@@ -127,7 +127,9 @@ pub(super) fn execute(
                     satin: Some(satin),
                 });
             }
-            Ok(ExecutedBlock { transactions: results })
+            let limits_override =
+                limits_override.and_then(|_| hardforks.protocol_limits(header.timestamp));
+            Ok(ExecutedBlock { transactions: results, limits_override })
         };
         run()
     };

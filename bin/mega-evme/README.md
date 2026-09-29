@@ -30,7 +30,7 @@ Every command runs on the engine its spec names.
 `Equivalence` through `Rex6` run on the legacy engine: the released `mega-evme` and `mega-evm` 1.7.1, linked in as `mega-evme-legacy` and `mega-evm-legacy`, which receive the command's arguments unchanged, so a legacy spec prints exactly what the 1.7.1 tool printed.
 `Rex7` is refused: it never activated on a chain, and Satin supersedes it.
 
-On Satin every output field keeps its legacy name and meaning, and a `satin` object is added with the gas by ledger (`regular_gas`, `state_gas`, `history_gas`, `history_bytes`, `reservoir_remaining`, `floor_gas`) and the limits' counts (`data_size`, `write_records`, `limit_exceeded`).
+On Satin every output field keeps its legacy name and meaning, and a `satin` object is added with the gas by ledger (`regular_gas`, `state_gas`, `history_gas`, `history_bytes`, `reservoir_remaining`, `floor_gas`) and the limits' counts (`data_size`, `write_records`, `limit_exceeded`, and under `--override.limits` the limits the run was held to, `limits_override`).
 `tests/integration.rs` checks that on every fixture pair, and `tests/satin-differences.md` pins what the two engines produce on the same inputs.
 
 A Satin run is held to the protocol limits of the chain's schedule at the block's timestamp; a chain that does not run Satin there (mainnet and testnet today, the default chain, any chain the tool does not know) runs on Satin's default limits, a counterfactual.

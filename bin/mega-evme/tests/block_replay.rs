@@ -241,14 +241,33 @@ fn test_an_override_replays_a_satin_block_under_other_limits() {
         (records.into_iter().filter(|r| r["kind"] == "tx").collect(), block)
     };
 
-    let (counterfactual, _) = replay_under(None);
+    let (counterfactual, plain) = replay_under(None);
+    assert!(plain["satin"].get("limits_override").is_none(), "{}", plain["satin"]);
     let defaults = serde_json::to_string(&ProtocolLimits::DEFAULT).unwrap();
-    assert_eq!(replay_under(Some(&defaults)).0, counterfactual, "it runs on the defaults");
+    let (on_the_defaults, overridden) = replay_under(Some(&defaults));
+    assert_eq!(on_the_defaults, counterfactual, "it runs on the defaults");
+    assert_eq!(
+        overridden["satin"]["limits_override"],
+        serde_json::to_value(ProtocolLimits::DEFAULT).unwrap(),
+        "the block's record says what it ran under"
+    );
+    let dir = cache.path().to_str().unwrap();
+    let block = number.to_string();
+    let args = ["replay", "--block", &block, "--block-cache", dir, "--override.spec", "Satin"];
+    let human = run_evme(&[&args[..], &["--override.limits", &defaults]].concat());
+    assert_eq!(human.code, 0, "{}", human.stderr);
+    assert!(human.stdout.contains(", limits overridden]"), "{}", human.stdout);
+    assert!(!run_evme(&args).stdout.contains("limits overridden"));
     assert!(counterfactual.iter().all(|tx| tx["satin"]["limit_exceeded"].is_null()));
 
     let recorded = read_block(cache.path(), number);
     let sent = recorded.block["transactions"].as_array().unwrap();
-    let (stopped, _) = replay_under(Some(r#"{"txRuntimeLimits":{"txDataSizeLimit":310}}"#));
+    let (stopped, stopped_block) =
+        replay_under(Some(r#"{"txRuntimeLimits":{"txDataSizeLimit":310}}"#));
+    assert_eq!(
+        stopped_block["satin"]["limits_override"]["txRuntimeLimits"]["txDataSizeLimit"],
+        310
+    );
     let (mut protocols, mut others) = (0, 0);
     for (tx, sent) in stopped.iter().zip(sent) {
         let stop = &tx["satin"]["limit_exceeded"];

@@ -3,6 +3,7 @@
 
 use std::process::Command;
 
+use mega_evm::ProtocolLimits;
 use serde_json::{json, Value};
 
 /// Two fresh `SSTORE`s, keeping two write records: 310 bytes of body and 40 per record.
@@ -39,8 +40,16 @@ fn run_two_writes(limits: Option<&str>) -> Value {
     evme(&args).json()
 }
 
+/// The protocol's default limits with `txDataSizeLimit` at `limit`, as a report carries them.
+fn defaults_with_tx_data_size(limit: u64) -> Value {
+    let mut limits = serde_json::to_value(ProtocolLimits::DEFAULT).unwrap();
+    limits["txRuntimeLimits"]["txDataSizeLimit"] = json!(limit);
+    limits
+}
+
 /// Without an override the run keeps both writes; an override of the transaction data size or of
-/// its write records stops it at the second write, and takes both back.
+/// its write records stops it at the second write, and takes both back. A run under an override
+/// reports the limits it ran under, and one on the schedule's limits reports none.
 #[test]
 fn test_an_override_holds_a_satin_run_to_other_limits() {
     let kept = run_two_writes(None);
@@ -48,6 +57,7 @@ fn test_an_override_holds_a_satin_run_to_other_limits() {
     assert_eq!(kept["satin"]["data_size"], 390);
     assert_eq!(kept["satin"]["write_records"], 2);
     assert_eq!(kept["satin"]["limit_exceeded"], Value::Null);
+    assert!(kept["satin"].get("limits_override").is_none(), "{}", kept["satin"]);
 
     let data_size = run_two_writes(Some(r#"{"txRuntimeLimits":{"txDataSizeLimit":350}}"#));
     assert_eq!(data_size["success"], false);
@@ -56,6 +66,7 @@ fn test_an_override_holds_a_satin_run_to_other_limits() {
         json!({ "kind": "data_size", "limit": 350, "used": 390 })
     );
     assert_eq!(data_size["satin"]["write_records"], 0, "the stop takes the writes back");
+    assert_eq!(data_size["satin"]["limits_override"], defaults_with_tx_data_size(350));
 
     let records = run_two_writes(Some(r#"{"txRuntimeLimits":{"txKvUpdateLimit":1}}"#));
     assert_eq!(
@@ -91,6 +102,27 @@ fn test_an_override_holds_a_satin_tx_to_other_limits() {
         stopped["satin"]["limit_exceeded"],
         json!({ "kind": "data_size", "limit": 310, "used": 311 })
     );
+    assert_eq!(stopped["satin"]["limits_override"], defaults_with_tx_data_size(310));
+}
+
+/// The human-readable report names the limits a run was held to under an override, and says
+/// nothing of them otherwise.
+#[test]
+fn test_the_report_names_an_override() {
+    let limits = r#"{"txRuntimeLimits":{"txDataSizeLimit":350}}"#;
+    let overridden = evme(&["run", TWO_WRITES, "--spec", "Satin", "--override.limits", limits]);
+    assert_eq!(overridden.code, 0, "{}", overridden.stderr);
+    let line = overridden
+        .stdout
+        .lines()
+        .find(|line| line.starts_with("Limits Override:"))
+        .unwrap_or_else(|| panic!("no override line: {}", overridden.stdout));
+    let named: Value = serde_json::from_str(line["Limits Override:".len()..].trim()).unwrap();
+    assert_eq!(named, defaults_with_tx_data_size(350));
+
+    let plain = evme(&["run", TWO_WRITES, "--spec", "Satin"]);
+    assert_eq!(plain.code, 0, "{}", plain.stderr);
+    assert!(!plain.stdout.contains("Limits Override"), "{}", plain.stdout);
 }
 
 /// An override is held to what a chain configuration is: an unknown field, a value of the wrong

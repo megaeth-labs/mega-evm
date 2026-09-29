@@ -280,9 +280,10 @@ fn print_block(txs: &[TxRecord], block: &BlockRecord, json: bool) {
         };
         format!("{} of {} transactions differ{root}", block.differing, block.transactions)
     };
-    let ledgers = block.satin.map_or_else(String::new, |satin| {
+    let ledgers = block.satin.as_ref().map_or_else(String::new, |satin| {
+        let overridden = if satin.limits_override.is_some() { ", limits overridden" } else { "" };
         format!(
-            " [regular {} state {} history {}]",
+            " [regular {} state {} history {}{overridden}]",
             satin.regular_gas, satin.state_gas, satin.history_gas
         )
     });
