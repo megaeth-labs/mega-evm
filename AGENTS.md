@@ -24,6 +24,7 @@ cargo build
 cargo test                                # all tests
 cargo test -p mega-evm                    # core crate only
 cargo test -p mega-evm -- test_name       # single test
+cargo test --manifest-path bin/mega-evme/Cargo.toml   # the mega-evme tool (not `-p`: it links mega-evme 1.7.1)
 
 # The gas schedule's byte prices are an input; this feature lets a measurement build change them
 cargo test -p mega-evm --features satin-price-override,test-utils

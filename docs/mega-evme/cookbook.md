@@ -46,6 +46,37 @@ mega-evme tx \
 
 Compare the `gasUsed` in the output to understand the impact of spec changes on your contract.
 
+## Compare a Call on the Legacy Engine and on Satin
+
+The same command runs on the legacy engine under a legacy spec and on the Satin engine under `Satin`; the Satin output adds the gas by ledger:
+
+```bash
+# Rex6, the chain's current spec, on the legacy engine
+mega-evme run 0x60aa600055 --json
+
+# The same bytecode on Satin: `satin.state_gas` prices the new slot,
+# `satin.history_gas` the transaction's body and its write record
+mega-evme run 0x60aa600055 --json --spec Satin
+```
+
+## Check Blocks Against the Chain, Then Replay Them on Satin
+
+Replay a range of blocks on the engine the chain ran them on, compare every receipt and the receipts root with the chain's, and record the blocks in a cache:
+
+```bash
+mega-evme replay --block 26400000..26400099 \
+  --rpc https://mainnet.megaeth.com/rpc --block-cache ./blocks --verify
+```
+
+Replay the same blocks on Satin, offline once the first Satin run has cached what Satin reads beyond the legacy replay, and keep the per-transaction records:
+
+```bash
+mega-evme replay --block 26400000..26400099 --block-cache ./blocks \
+  --override.spec Satin --json > satin.ndjson
+```
+
+Each transaction record carries the chain's values beside the replayed ones (`chain`, `differs`) and Satin's ledgers (`satin`).
+
 ## Deploy and Interact in Two Steps
 
 Deploy a contract, capture the state, then call it:

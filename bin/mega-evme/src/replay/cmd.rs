@@ -62,7 +62,8 @@ pub struct Cmd {
     #[command(flatten)]
     pub trace_args: run::TraceArgs,
 
-    /// Override the spec to use (default: auto-detect from chain ID and block timestamp)
+    /// Override the spec to use (default: auto-detect from chain ID and block timestamp).
+    /// `Satin` replays on the Satin engine, a legacy spec on the legacy engine
     #[arg(long = "override.spec", value_name = "SPEC")]
     pub spec_override: Option<String>,
 

@@ -29,7 +29,7 @@ pub enum Commands {
     Run(crate::run::Cmd),
     /// Run arbitrary transaction
     Tx(crate::tx::Cmd),
-    /// Replay a transaction from RPC
+    /// Replay a transaction, or whole blocks, from RPC or a block cache
     Replay(crate::replay::Cmd),
 }
 

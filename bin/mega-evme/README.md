@@ -17,11 +17,23 @@ A command-line tool for executing and debugging EVM bytecode, similar to go-ethe
 
 `mega-evme` provides three main commands for EVM execution:
 
-| Command  | Description                                     |
-| -------- | ----------------------------------------------- |
-| `run`    | Execute arbitrary EVM bytecode directly         |
-| `tx`     | Run a transaction with full transaction context |
-| `replay` | Replay an existing transaction from RPC         |
+| Command  | Description                                                              |
+| -------- | ------------------------------------------------------------------------ |
+| `run`    | Execute arbitrary EVM bytecode directly                                  |
+| `tx`     | Run a transaction with full transaction context                          |
+| `replay` | Replay an existing transaction, or whole blocks compared with the chain |
+
+### Two engines
+
+Every command runs on the engine its spec names.
+`Satin` runs on the Satin engine, this repository's `mega-evm`.
+`Equivalence` through `Rex6` run on the legacy engine: the released `mega-evme` and `mega-evm` 1.7.1, linked in as `mega-evme-legacy` and `mega-evm-legacy`, which receive the command's arguments unchanged, so a legacy spec prints exactly what the 1.7.1 tool printed.
+`Rex7` is refused: it never activated on a chain, and Satin supersedes it.
+
+On Satin every output field keeps its legacy name and meaning, and a `satin` object is added with the gas by ledger (`regular_gas`, `state_gas`, `history_gas`, `history_bytes`, `reservoir_remaining`, `floor_gas`) and the limits' counts (`data_size`, `write_records`, `limit_exceeded`).
+`tests/integration.rs` checks that on every fixture pair, and `tests/satin-differences.md` pins what the two engines produce on the same inputs.
+
+The legacy leg is the default feature `legacy`; `--no-default-features` builds a Satin-only binary.
 
 ## Installation
 
@@ -34,9 +46,12 @@ cargo install mega-evme --locked
 Or build from source:
 
 ```bash
-cargo build --release -p mega-evme
+cargo build --release --manifest-path bin/mega-evme/Cargo.toml
 # The binary will be at target/release/mega-evme
 ```
+
+Select the tool by manifest path, not with `-p mega-evme`: it links the released `mega-evme` 1.7.1, a package of the same name, so `-p mega-evme` names two packages.
+The same holds for its tests: `cargo test --manifest-path bin/mega-evme/Cargo.toml`.
 
 The `--locked` flag ensures the exact tested dependency versions are used.
 
@@ -200,6 +215,7 @@ mega-evme tx --tx-type 4 \
 ### replay Command
 
 Replay an existing transaction from RPC. Fetches the transaction and its execution context from a remote node and re-executes it locally.
+The spec, and so the engine, comes from the chain's schedule at the block's timestamp; `--override.spec Satin` replays the transaction as it would run on Satin.
 
 ```bash
 # Replay a transaction
@@ -246,6 +262,27 @@ mega-evme replay 0x1234...txhash --override.input 0xabcdef
 mega-evme replay 0x1234...txhash --override.input-file calldata.hex
 ```
 
+#### Whole Blocks
+
+`--block N[..M]` replays whole blocks, each on the engine its spec names, and compares every receipt (status, gas used, cumulative gas used, logs) and the receipts root with the chain's.
+
+| Option                | Description                                                                                             |
+| --------------------- | ------------------------------------------------------------------------------------------------------- |
+| `--block <N[..M]>`    | Replay block N, or blocks N through M                                                                    |
+| `--block-cache <DIR>` | Read blocks from DIR; write blocks fetched over `--rpc` to it, with what their replay read beyond the trace |
+| `--verify`            | Exit with code 2 when a block differs from the chain                                                     |
+| `--json`              | One JSON record per transaction and per block                                                            |
+
+```bash
+# Check 200 blocks against the chain and record them
+mega-evme replay --block 26400000..26400199 --rpc https://mainnet.megaeth.com/rpc --block-cache ./blocks --verify
+
+# The same blocks on Satin, as NDJSON
+mega-evme replay --block 26400000..26400199 --block-cache ./blocks --override.spec Satin --json > satin.ndjson
+```
+
+Fetching a block needs an archive endpoint with the `debug` namespace (`debug_traceBlockByNumber` with `prestateTracer`); a cached block replays offline.
+
 ---
 
 ## Common Options
@@ -265,7 +302,7 @@ These options are available across all commands.
 
 | Option                 | Default | Description                               |
 | ---------------------- | ------- | ----------------------------------------- |
-| `--spec <SPEC>`        | Rex6    | Spec: `Equivalence`, `MiniRex`, `MiniRex1`, `MiniRex2`, `Rex`, `Rex1`, `Rex2`, `Rex3`, `Rex4`, `Rex5`, `Rex6` (`MiniRex1`/`MiniRex2` are aliases executing `Equivalence`/`MiniRex` behavior) |
+| `--spec <SPEC>`        | Rex6    | Spec: `Satin` (the Satin engine), or `Equivalence`, `MiniRex`, `MiniRex1`, `MiniRex2`, `Rex`, `Rex1`, `Rex2`, `Rex3`, `Rex4`, `Rex5`, `Rex6` (the legacy engine; `MiniRex1`/`MiniRex2` are aliases executing `Equivalence`/`MiniRex` behavior) |
 | `--chain-id <ID>`      | 6342    | Chain ID                                  |
 
 ### Block Environment
