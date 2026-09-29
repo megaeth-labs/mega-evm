@@ -68,7 +68,10 @@ pub async fn run_cli(args: Vec<OsString>) -> Result<(), Error> {
     };
     match engine {
         Engine::Legacy => {
-            crate::engine::run_legacy(args, spec_is_default).await?;
+            if let Err(e) = crate::engine::run_legacy(args, spec_is_default).await {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
             Ok(())
         }
         Engine::Satin => cmd.run().await,
