@@ -28,6 +28,10 @@ const WRITES_TWO: Address = address!("0x1000000000000000000000000000000000000012
 /// A contract that writes the slot its calldata names.
 const WRITES_NAMED: Address = address!("0x1000000000000000000000000000000000000013");
 
+/// The gas limit of the transactions here: enough for two writes at any byte price a measurement
+/// build runs, so what stops or refuses them is a limit, never their gas.
+const GAS_LIMIT: u64 = 2_000_000;
+
 /// Senders, one per transaction, so a transaction a builder leaves out does not stall the nonces
 /// of the ones after it.
 const SENDERS: [Address; 5] = [
@@ -115,7 +119,7 @@ fn test_a_block_is_held_to_the_limits_its_chain_carries() {
 
     // Two writes: stopped at the chain's transaction limit, and included with the stop.
     let outcome = executor
-        .run_transaction(&tx_from(SENDERS[0], WRITES_TWO, Bytes::new(), 1_000_000))
+        .run_transaction(&tx_from(SENDERS[0], WRITES_TWO, Bytes::new(), GAS_LIMIT))
         .expect("the transaction runs");
     assert_eq!(
         outcome.inner.limit_exceeded,
@@ -131,7 +135,7 @@ fn test_a_block_is_held_to_the_limits_its_chain_carries() {
 
     // One write fits, and fills the chain's KV budget.
     let outcome = executor
-        .run_transaction(&tx_from(SENDERS[1], WRITES_ONE, Bytes::new(), 1_000_000))
+        .run_transaction(&tx_from(SENDERS[1], WRITES_ONE, Bytes::new(), GAS_LIMIT))
         .expect("the transaction runs");
     assert!(outcome.inner.result.is_success(), "{:?}", outcome.inner.result);
     executor.commit_transaction_outcome(outcome).expect("it is included");
@@ -139,7 +143,7 @@ fn test_a_block_is_held_to_the_limits_its_chain_carries() {
 
     // The block has reached the chain's KV budget: the next transaction is refused.
     let err = executor
-        .run_transaction(&tx_from(SENDERS[2], WRITES_ONE, Bytes::new(), 1_000_000))
+        .run_transaction(&tx_from(SENDERS[2], WRITES_ONE, Bytes::new(), GAS_LIMIT))
         .expect_err("the block's write records have reached the chain's limit");
     assert!(err.to_string().contains("Block KV update limit reached"), "{err}");
     assert!(err.to_string().contains("limit=1"), "{err}");
@@ -153,7 +157,7 @@ fn test_a_block_is_held_to_the_limits_its_chain_carries() {
     );
     executor.apply_pre_execution_changes().expect("the block starts");
     let outcome = executor
-        .run_transaction(&tx_from(SENDERS[0], WRITES_TWO, Bytes::new(), 1_000_000))
+        .run_transaction(&tx_from(SENDERS[0], WRITES_TWO, Bytes::new(), GAS_LIMIT))
         .expect("the transaction runs");
     assert!(outcome.inner.result.is_success(), "{:?}", outcome.inner.result);
     assert_eq!(outcome.inner.limit_exceeded, None);
@@ -228,16 +232,19 @@ fn test_a_builder_and_a_validator_that_differ_on_building_policy_agree_on_the_bl
         input.extend_from_slice(&incompressible(input_len));
         tx_from(sender, WRITES_NAMED, input.into(), gas_limit)
     };
+    // The builder's cap on a transaction's declared gas is the candidates' own, so only the one
+    // candidate above it is refused for gas.
+    let gas = GAS_LIMIT;
     let candidates = [
-        writes(SENDERS[0], 1, 0, 200_000),
+        writes(SENDERS[0], 1, 0, gas),
         // Refused by the builder's data-availability cap on one transaction.
-        writes(SENDERS[1], 2, 4_000, 400_000),
+        writes(SENDERS[1], 2, 4_000, gas),
         // Refused by the builder's cap on a transaction's declared gas.
-        writes(SENDERS[2], 3, 0, 5_000_000),
+        writes(SENDERS[2], 3, 0, gas + 1),
         // Packed: it is the transaction that reaches the builder's data-size cap.
-        writes(SENDERS[3], 4, 0, 200_000),
+        writes(SENDERS[3], 4, 0, gas),
         // Refused: the block has reached the builder's data-size cap, not the chain's.
-        writes(SENDERS[4], 5, 0, 200_000),
+        writes(SENDERS[4], 5, 0, gas),
     ];
     let da_size = |index: usize| MegaTransactionExt::estimated_da_size(&candidates[index]);
     assert!(da_size(1) > 2_000 && da_size(0) < 1_000, "{} {}", da_size(0), da_size(1));
@@ -249,7 +256,7 @@ fn test_a_builder_and_a_validator_that_differ_on_building_policy_agree_on_the_bl
 
     let builder_policy = BlockLimits::no_limits()
         .with_tx_da_size_limit(2_000)
-        .with_tx_gas_limit(1_000_000)
+        .with_tx_gas_limit(gas)
         .with_block_txs_data_limit(2 * one_write);
     let (built, outcomes) = build(limits, builder_policy, &candidates);
     let refusal = |index: usize| outcomes[index].clone().expect_err("the builder refused it");
@@ -259,7 +266,10 @@ fn test_a_builder_and_a_validator_that_differ_on_building_policy_agree_on_the_bl
         refusal(1)
     );
     assert!(
-        refusal(2).contains("Transaction gas limit exceeded: tx_gas_limit=5000000 > limit=1000000"),
+        refusal(2).contains(&format!(
+            "Transaction gas limit exceeded: tx_gas_limit={} > limit={gas}",
+            gas + 1
+        )),
         "{}",
         refusal(2)
     );
