@@ -21,19 +21,18 @@ use super::{
     inputs::{HeaderFields, TxInput},
     state::{BlockState, SatinDb},
 };
-use crate::{
-    common::{
-        decode_revert_reason, format_halt_reason, EvmeError, EvmeExternalEnvs, Result, SatinReport,
-    },
-    replay::satin_hardforks,
+use crate::common::{
+    decode_revert_reason, format_halt_reason, satin_schedule, EvmeError, EvmeExternalEnvs, Result,
+    SatinReport,
 };
 
 /// Executes the block `header` describes, with `transactions`, on Satin over `state`.
 ///
-/// The block runs as a node runs a Satin block it configures nothing else for: the chain's own
-/// schedule when it activates Satin at the block, otherwise every fork active (a counterfactual),
-/// the production data-size caps and gas detention's caps, the block's gas limit from its header.
-/// A transaction the engine refuses is reported as refused and left out, and the block goes on.
+/// The block runs as a validator runs it: under the schedule [`satin_schedule`] gives — the
+/// chain's own when it runs Satin at the block, otherwise the engine's fallback, a counterfactual
+/// — held to the protocol limits that schedule carries, with no building policy, and with the
+/// block's gas limit from its header. A transaction the engine refuses is reported as refused and
+/// left out, and the block goes on.
 pub(super) fn execute(
     chain_id: u64,
     header: &HeaderFields,
@@ -41,7 +40,7 @@ pub(super) fn execute(
     bucket_capacities: &[(u32, u64)],
     state: &mut BlockState,
 ) -> Result<ExecutedBlock> {
-    let hardforks = satin_hardforks(chain_id, header.timestamp);
+    let hardforks = satin_schedule(chain_id, header.timestamp)?;
     let mut cfg = CfgEnv::new_with_spec(MegaSpecId::SATIN);
     cfg.chain_id = chain_id;
     let mut block_env = BlockEnv {

@@ -14,9 +14,8 @@ use mega_evm::{
         primitives::eip4844,
         DatabaseRef,
     },
-    system::SequencerRegistryConfig,
     BlockLimits, DeclaredObserver, MegaBlockExecutionCtx, MegaBlockExecutorFactory, MegaEvmFactory,
-    MegaHardforkConfig, MegaHardforks, MegaSpecId,
+    MegaSpecId,
 };
 use tracing::{debug, info, trace, warn};
 
@@ -25,9 +24,9 @@ use op_alloy_rpc_types::Transaction;
 use crate::{
     common::{
         op_receipt_to_tx_receipt, parse_bucket_capacity, print_execution_summary,
-        print_execution_trace, print_receipt, print_satin_report, BuildProviderOutput,
-        EvmeExternalEnvs, EvmeOutcome, ExecutionSummary, ExternalEnvSnapshot, OpTxReceipt,
-        RpcCacheStore, SatinReport, TxOverrideArgs,
+        print_execution_trace, print_receipt, print_satin_report, satin_schedule,
+        BuildProviderOutput, EvmeExternalEnvs, EvmeOutcome, ExecutionSummary, ExternalEnvSnapshot,
+        OpTxReceipt, RpcCacheStore, SatinReport, TxOverrideArgs,
     },
     engine::Engine,
     run, EvmeState,
@@ -405,7 +404,7 @@ impl Cmd {
         P: Provider<op_alloy_network::Optimism> + Clone + std::fmt::Debug,
     {
         let timestamp = ctx.block.header.timestamp();
-        let hardforks = satin_hardforks(ctx.chain_id, timestamp);
+        let hardforks = satin_schedule(ctx.chain_id, timestamp)?;
         debug!(chain_id = ctx.chain_id, spec = %MegaSpecId::SATIN, "Chain configuration");
 
         info!(fork_block = ctx.parent_block.header.number(), "Forking state from parent block",);
@@ -429,9 +428,8 @@ impl Cmd {
             &hardforks,
             evm_factory,
         );
-        // The limits a Satin block runs under when its node configures nothing else: the
-        // production data-size caps and gas detention's caps; the block's gas limit comes from
-        // its header.
+        // The block is held to the protocol limits its schedule carries, with no building
+        // policy, as a validator holds it; the block's gas limit comes from its header.
         let block_ctx = MegaBlockExecutionCtx::new(
             ctx.parent_block.hash(),
             ctx.block.header.parent_beacon_block_root(),
@@ -600,24 +598,6 @@ impl Cmd {
         }
         Ok(())
     }
-}
-
-/// The hardfork schedule a Satin replay of a block of `chain_id` at `timestamp` runs under.
-///
-/// A block the chain's own schedule runs on Satin runs under that schedule. Any other block is a
-/// counterfactual: it runs as if Satin were active from genesis, with the placeholder registry
-/// parameters, which only a registry deployed from scratch reads; a chain whose registry is
-/// already deployed keeps the roles in its storage.
-pub(crate) fn satin_hardforks(chain_id: u64, timestamp: u64) -> MegaHardforkConfig {
-    let schedule = mega_evm::hardfork_schedule(chain_id);
-    if schedule.spec_id(timestamp) == Some(MegaSpecId::SATIN) &&
-        schedule.fork_params::<SequencerRegistryConfig>().is_some()
-    {
-        return schedule;
-    }
-    MegaHardforkConfig::new()
-        .with_all_activated()
-        .with_params(SequencerRegistryConfig::placeholder())
 }
 
 /// Build a [`BlockEnv`] from the RPC block header.

@@ -5,7 +5,6 @@
 
 mod cmd;
 
-pub(crate) use cmd::satin_hardforks;
 pub use cmd::Cmd;
 
 // Re-export EvmeError and Result from common module
