@@ -18,9 +18,9 @@ use mega_evm::{
     constants::{BLOCK_ENV_ACCESS_COMPUTE_GAS, ORACLE_ACCESS_COMPUTE_GAS, TX_GAS_LIMIT_CAP},
     system::{IMegaLimitControl, LIMIT_CONTROL_ADDRESS, ORACLE_CONTRACT_ADDRESS},
     test_utils::{op_transaction, zero_fee_l1_block_info, BytecodeBuilder, MemoryDatabase},
-    volatile_data_access_disabled_revert_data, write_record_history_gas, BlockLimits,
-    EvmTxRuntimeLimits, LimitCheck, LimitKind, MegaContext, MegaEvm, MegaLimitExceeded, MegaSpecId,
-    MegaTransaction, MegaTransactionOutcome, VolatileDataAccess,
+    volatile_data_access_disabled_revert_data, write_record_history_gas, EvmTxRuntimeLimits,
+    LimitCheck, LimitKind, MegaContext, MegaEvm, MegaLimitExceeded, MegaSpecId, MegaTransaction,
+    MegaTransactionOutcome, ProtocolLimits, VolatileDataAccess,
 };
 use revm::{
     bytecode::opcode::*,
@@ -839,7 +839,7 @@ fn test_a_callers_limits_set_the_caps() {
 }
 
 /// The default runtime limits detain: [`EvmTxRuntimeLimits::default`], and the transaction half
-/// of [`BlockLimits::default`] that a block executor installs, hold each kind of read to the
+/// of [`ProtocolLimits::DEFAULT`] that a block executor installs, hold each kind of read to the
 /// spec's cap. It is `no_limits` that turns detention off, with every other per-transaction limit.
 #[test]
 fn test_the_default_limits_detain() {
@@ -847,7 +847,7 @@ fn test_the_default_limits_detain() {
     let timestamp = op(BytecodeBuilder::default(), TIMESTAMP).stop().build();
     let reads_oracle =
         call(BytecodeBuilder::default(), CALL, ORACLE_CONTRACT_ADDRESS).stop().build();
-    for limits in [EvmTxRuntimeLimits::default(), BlockLimits::default().tx_runtime_limits] {
+    for limits in [EvmTxRuntimeLimits::default(), ProtocolLimits::DEFAULT.tx_runtime_limits] {
         let run_under = |limits: EvmTxRuntimeLimits, code: &Bytes| {
             let db = MemoryDatabase::default()
                 .account_code(CONTRACT, code.clone())

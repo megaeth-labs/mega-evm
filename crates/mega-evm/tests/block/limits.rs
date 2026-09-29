@@ -5,7 +5,7 @@ use alloy_evm::block::BlockExecutor;
 use alloy_primitives::{address, Address, Bytes, U256};
 use mega_evm::{
     test_utils::BytecodeBuilder, BlockLimits, EnrichedMegaTx, EvmTxRuntimeLimits, LimitCheck,
-    LimitKind, MegaTransactionExt, MegaTxEnvelope,
+    LimitKind, MegaTransactionExt, MegaTxEnvelope, ProtocolLimits,
 };
 use op_revm::constants::{
     DA_FOOTPRINT_GAS_SCALAR_OFFSET, DA_FOOTPRINT_GAS_SCALAR_SLOT, L1_BLOCK_CONTRACT,
@@ -278,11 +278,10 @@ fn test_the_block_data_size_limit_never_refuses_a_deposit() {
 fn test_the_transaction_data_size_limit_stops_a_deposit_that_is_still_included() {
     let limit = mega_evm::TX_BODY_SIZE + 10;
     let mut state = common::state();
-    let mut executor = executor(
+    let mut executor = common::executor_with_limits(
         &mut state,
-        common::block_ctx(BlockLimits::no_limits().with_tx_runtime_limits(
-            EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(limit),
-        )),
+        ProtocolLimits::no_limits()
+            .with_tx_runtime_limits(EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(limit)),
     );
     executor.apply_pre_execution_changes().expect("the block starts");
 

@@ -13,21 +13,24 @@
 //! | [`TX_GAS_LIMIT_CAP`] | 200,000,000 | execution cap: regular gas one transaction may spend | the spec configuration |
 //! | [`MAX_CONTRACT_SIZE`] | 524,288 | the most bytes a deployed contract may hold | the spec configuration |
 //! | [`MAX_INITCODE_SIZE`] | 1,048,576 | the most bytes an initcode may hold | the spec configuration |
-//! | [`TX_DATA_LIMIT`] | 13,107,200 | data size one transaction may produce (as Rex6) | the block's default transaction limits |
-//! | [`BLOCK_DATA_LIMIT`] | 13,107,200 | data size one block may produce (as Rex6) | the block's default data-size limit |
-//! | [`BLOCK_ENV_ACCESS_COMPUTE_GAS`] | 20,000,000 | compute a transaction may still spend once it read the block environment or the beneficiary (as Rex6) | the default detention cap of the runtime limits |
-//! | [`ORACLE_ACCESS_COMPUTE_GAS`] | 20,000,000 | compute a transaction may still spend once it read the Oracle's storage (as Rex6) | the default detention cap of the runtime limits |
+//! | [`TX_DATA_LIMIT`] | 13,107,200 | data size one transaction may produce (as Rex6) | the default protocol limits |
+//! | [`BLOCK_DATA_LIMIT`] | 13,107,200 | data size one block may produce (as Rex6) | the default protocol limits |
+//! | [`BLOCK_ENV_ACCESS_COMPUTE_GAS`] | 20,000,000 | compute a transaction may still spend once it read the block environment or the beneficiary (as Rex6) | the default detention cap of the runtime limits and of the protocol limits |
+//! | [`ORACLE_ACCESS_COMPUTE_GAS`] | 20,000,000 | compute a transaction may still spend once it read the Oracle's storage (as Rex6) | the default detention cap of the runtime limits and of the protocol limits |
 //!
 //! The Satin gas schedule builds its state-gas entries from the EIP-8037 byte counts at
 //! [`COST_PER_STATE_BYTE`], read through [`SatinPrices`](crate::SatinPrices) so a measurement
 //! build can run other byte prices without touching this table. [`SLOT_STATE_GAS`] and
 //! [`ACCOUNT_STATE_GAS`] are two of those products written out: the tests assert the schedule
 //! against them, and changing one of the two moves a test rather than a price.
-//! The state-gas limits are not fixed here either: the per-transaction one is
+//! [`TX_DATA_LIMIT`], [`BLOCK_DATA_LIMIT`] and the two detention caps are the defaults of the
+//! Satin fork's parameters, [`ProtocolLimits::DEFAULT`](crate::ProtocolLimits::DEFAULT): a chain
+//! carries its own in its configuration, and block execution reads them from there. The state-gas
+//! limits have no constant at all: the per-transaction one is
 //! [`EvmTxRuntimeLimits::tx_state_gas_limit`](crate::EvmTxRuntimeLimits::tx_state_gas_limit) and
 //! the per-block one
-//! [`BlockLimits::block_state_gas_limit`](crate::BlockLimits::block_state_gas_limit). A node sets
-//! both, and both are unlimited by default.
+//! [`ProtocolLimits::block_state_gas_limit`](crate::ProtocolLimits::block_state_gas_limit). A chain
+//! sets both, and both are unlimited by default.
 
 use revm::primitives::eip8037::{NEW_ACCOUNT_BYTES, SSTORE_SET_BYTES};
 
