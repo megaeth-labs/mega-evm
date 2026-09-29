@@ -32,9 +32,9 @@ use mega_evm::{
     satin_gas_params,
     system::ORACLE_CONTRACT_ADDRESS,
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    EvmTxRuntimeLimits, LimitCheck, LimitKind, LimitUsage, MegaContext, MegaEvm, MegaHaltReason,
-    MegaTransactionOutcome, FRAME_DATA_SHARE_DENOMINATOR, FRAME_DATA_SHARE_NUMERATOR,
-    LOG_BASE_SIZE, TRANSFER_LOG_SIZE, TX_BODY_SIZE, WRITE_RECORD_SIZE,
+    EvmTxRuntimeLimits, LimitCheck, LimitKind, LimitStop, LimitUsage, MegaContext, MegaEvm,
+    MegaHaltReason, MegaTransactionOutcome, FRAME_DATA_SHARE_DENOMINATOR,
+    FRAME_DATA_SHARE_NUMERATOR, LOG_BASE_SIZE, TRANSFER_LOG_SIZE, TX_BODY_SIZE, WRITE_RECORD_SIZE,
 };
 use revm::{
     bytecode::opcode::{
@@ -309,6 +309,11 @@ fn assert_cell(limit: Limit, crossing: usize, gas_limit: u64, slot: u64) {
             other => panic!("{cell}: expected the stop, got {other:?}"),
         }
         assert_eq!(outcome.limit_exceeded, Some(stop), "{cell}");
+        assert_eq!(
+            outcome.limit_stop(),
+            Some(LimitStop { kind: limit.kind(), limit: value, used }),
+            "{cell}: what an RPC maps the stop to"
+        );
 
         // The bill: intrinsic gas plus what ran, on the regular ledger alone.
         assert_eq!(outcome.gas.regular, intrinsic.gas.regular + ran, "{cell}: regular");

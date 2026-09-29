@@ -26,7 +26,7 @@
 
 use revm::context::result::{ResultAndState, ResultGas};
 
-use crate::{LimitCheck, LimitUsage, MegaHaltReason};
+use crate::{LimitCheck, LimitStop, LimitUsage, MegaHaltReason};
 
 /// What executing one transaction produced: revm's result and state, and what `MegaETH` counts
 /// beside them.
@@ -45,6 +45,14 @@ pub struct MegaTransactionOutcome {
     /// revert whose output is its [`MegaLimitExceeded`](crate::MegaLimitExceeded); this, not the
     /// output, tells a limit stop from a contract reverting with the same bytes.
     pub limit_exceeded: Option<LimitCheck>,
+}
+
+impl MegaTransactionOutcome {
+    /// The transaction-level limit that stopped the transaction, if one did, read off the result
+    /// and [`limit_exceeded`](Self::limit_exceeded) together ([`LimitStop::from_result`]).
+    pub fn limit_stop(&self) -> Option<LimitStop> {
+        LimitStop::from_result(&self.result, self.limit_exceeded.as_ref())
+    }
 }
 
 impl core::ops::Deref for MegaTransactionOutcome {

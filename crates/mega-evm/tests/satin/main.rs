@@ -23,6 +23,7 @@ mod inspector_settlement;
 mod intrinsic;
 mod kv_limit;
 mod limit_exemption;
+mod limit_stop;
 mod neutral;
 mod outcome;
 mod pool_validation;
