@@ -174,3 +174,60 @@ fn test_an_override_is_refused_on_a_legacy_spec() {
         );
     }
 }
+
+/// A genesis file for chain `chain_id` activating Satin at genesis, with the protocol's default
+/// limits but a KV limit of one, in `dir`.
+fn genesis_with_one_record(dir: &tempfile::TempDir, chain_id: u64) -> String {
+    let limits = ProtocolLimits::DEFAULT.with_tx_runtime_limits(
+        ProtocolLimits::DEFAULT.tx_runtime_limits.with_tx_kv_update_limit(1),
+    );
+    let satin = mega_evm::SatinChainConfig {
+        activation_time: 0,
+        sequencer_registry: mega_evm::system::SequencerRegistryConfig::placeholder(),
+        protocol_limits: limits,
+    };
+    let mut config = serde_json::to_value(satin).unwrap();
+    config["chainId"] = json!(chain_id);
+    let path = dir.path().join("genesis.json");
+    std::fs::write(&path, json!({ "config": config }).to_string()).unwrap();
+    path.to_str().unwrap().to_string()
+}
+
+/// A Satin run given its chain's genesis file is held to the limits the file carries, as the
+/// chain's own and not as an override: the second write crosses the file's KV limit of one.
+#[test]
+fn test_a_genesis_file_holds_a_satin_run_to_its_limits() {
+    let dir = tempfile::tempdir().unwrap();
+    let genesis = genesis_with_one_record(&dir, 6342);
+    let run = |extra: &[&str]| {
+        let args =
+            [&["run", TWO_WRITES, "--spec", "Satin", "--json", "--genesis", &genesis], extra];
+        evme(&args.concat())
+    };
+    let stopped = run(&[]).json();
+    assert_eq!(
+        stopped["satin"]["limit_exceeded"],
+        json!({ "kind": "kv_update", "limit": 1, "used": 2 })
+    );
+    assert!(stopped["satin"].get("limits_override").is_none(), "{}", stopped["satin"]);
+
+    // An override still replaces what it names, over the file's limits.
+    let overridden = run(&["--override.limits", r#"{"txRuntimeLimits":{"txKvUpdateLimit":5}}"#]);
+    assert_eq!(overridden.json()["satin"]["limit_exceeded"], Value::Null);
+
+    // The file is its chain's: a run on another chain is refused.
+    let other = run(&["--chain-id", "6343"]);
+    assert_eq!(other.code, 1, "{}", other.stderr);
+    assert!(other.stderr.contains("--genesis configures chain 6342"), "{}", other.stderr);
+}
+
+/// The file applies to Satin only: a command on a legacy spec is refused with it, as with an
+/// override, before it reaches the released CLI.
+#[test]
+fn test_a_genesis_file_is_refused_on_a_legacy_spec() {
+    let dir = tempfile::tempdir().unwrap();
+    let genesis = genesis_with_one_record(&dir, 6342);
+    let output = evme(&["run", "0x00", "--spec", "Rex6", "--genesis", &genesis]);
+    assert_eq!(output.code, 1, "{}", output.stderr);
+    assert!(output.stderr.contains("--genesis applies to Satin only"), "{}", output.stderr);
+}
