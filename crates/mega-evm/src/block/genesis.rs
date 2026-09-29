@@ -788,11 +788,32 @@ mod tests {
         assert_eq!(with_time(json!({ "value": 1 })), refused);
     }
 
-    /// Anything but an object is refused.
+    /// Anything but an object is refused, saying an object was expected.
     #[test]
     fn test_a_configuration_that_is_not_an_object_is_refused() {
         for config in [json!([]), json!(1), json!("config"), json!(null)] {
-            assert!(matches!(parse(&config), Err(SatinChainConfigError::Malformed(_))), "{config}");
+            match parse(&config) {
+                Err(SatinChainConfigError::Malformed(message)) => assert!(
+                    message.contains("expected a chain configuration object"),
+                    "{config}: {message}"
+                ),
+                other => panic!("{config}: {other:?}"),
+            }
+        }
+    }
+
+    /// A deserializer other than `serde_json`'s can hand a key a value no JSON document holds, a
+    /// byte array: the configuration is refused as malformed, saying what was expected.
+    #[test]
+    fn test_a_value_no_json_holds_is_refused_as_malformed() {
+        use serde::de::value::{Error, MapDeserializer};
+        let entries = [(SATIN_TIME_KEY, &b"\x01"[..])];
+        let config = MapDeserializer::<_, Error>::new(entries.into_iter());
+        match SatinChainConfig::from_genesis_config(config) {
+            Err(SatinChainConfigError::Malformed(message)) => {
+                assert!(message.contains("expected any value"), "{message}")
+            }
+            other => panic!("{other:?}"),
         }
     }
 
