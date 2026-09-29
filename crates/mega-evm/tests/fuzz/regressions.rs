@@ -1,5 +1,10 @@
 //! The minimal cases the properties found, one named test each, so a finding is pinned without
 //! its seed.
+//!
+//! Each case is pinned at the spec's byte prices, where it was found: its gas limit is the one the
+//! minimal case carries, and the charge it falls short on moves with the prices. At other prices
+//! the tests return early, with the note the byte-price grid counts; the properties themselves
+//! hold at any price and run there.
 
 use crate::{
     gen::{
@@ -11,6 +16,18 @@ use crate::{
     },
     render::render,
 };
+
+/// Whether this process prices bytes at something other than the constants, in which case the
+/// minimal cases below do not reproduce what they were found with.
+fn runs_at_measurement_prices() -> bool {
+    if mega_evm::active_satin_prices().is_constants() {
+        return false;
+    }
+    mega_evm::test_utils::note_price_guard(
+        "MEGA_SATIN_CPSB or MEGA_SATIN_CPHB fixed prices other than the spec's",
+    );
+    true
+}
 
 /// A world of empty programs, with the sender funded and nothing else.
 fn plain_world() -> World {
@@ -50,6 +67,9 @@ fn stop() -> Program {
 /// second time, into the reservoir, which the halt does not burn.
 #[test]
 fn test_an_out_of_gas_before_the_first_frame_burns_the_whole_gas_limit() {
+    if runs_at_measurement_prices() {
+        return;
+    }
     let case = Case {
         world: plain_world(),
         tx: Tx {
@@ -93,6 +113,9 @@ fn test_an_out_of_gas_before_the_first_frame_burns_the_whole_gas_limit() {
 /// was reported beside the halt.
 #[test]
 fn test_a_failed_deposit_reports_no_stop() {
+    if runs_at_measurement_prices() {
+        return;
+    }
     use crate::gen::world::{DataLimit, DetentionCap, StateLimit};
     let mut world = plain_world();
     world.limits = Limits::Custom {
@@ -149,6 +172,9 @@ fn test_a_failed_deposit_reports_no_stop() {
 /// revert, which took the bump the creation frame makes back and made none of its own.
 #[test]
 fn test_an_out_of_gas_creation_bumps_the_sender_s_nonce() {
+    if runs_at_measurement_prices() {
+        return;
+    }
     use crate::gen::program::{AccountRead, Forward, Op, Scheme, SystemContract, Target};
     let mut world = plain_world();
     world.caller.balance = Balance::Small;
