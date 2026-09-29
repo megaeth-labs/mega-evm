@@ -19,9 +19,14 @@ use mega_evm::{
 };
 
 use super::*;
+use crate::common::state_is_free;
 
-/// The gas limit the matrix's deployments are signed with.
-const SIGNED: u64 = 500_000;
+/// The gas limit the matrix's deployments are signed with: 500,000 on top of the state gas of the
+/// account the creation adds, at the byte prices in effect, so the creation's charges leave part of
+/// it whatever a state byte costs.
+fn signed_gas() -> u64 {
+    500_000 + entry(GasId::create_state_gas())
+}
 
 /// What a call is answered with.
 #[derive(Debug, PartialEq, Eq)]
@@ -79,10 +84,10 @@ fn leaving(data: &Bytes, left: u64) -> u64 {
         left
 }
 
-/// `GasLimitTooLow` for a deployment signed with [`SIGNED`], with `provided`.
-const fn too_low(provided: u64) -> Answer {
+/// `GasLimitTooLow` for a deployment signed with [`signed_gas`], with `provided`.
+fn too_low(provided: u64) -> Answer {
     Answer::Refused(KeylessDeployError::GasLimitTooLow {
-        tx_gas_limit: SIGNED,
+        tx_gas_limit: signed_gas(),
         provided_gas_limit: provided,
     })
 }
@@ -91,17 +96,17 @@ const fn too_low(provided: u64) -> Answer {
 /// legacy engine checked first is the one reported.
 #[test]
 fn test_a_call_two_rules_refuse_reports_the_first_the_legacy_engine_checked() {
-    let plain = signed(SIGNED, 0);
-    let carrying = signed(SIGNED, 1);
+    let plain = signed(signed_gas(), 0);
+    let carrying = signed(signed_gas(), 1);
     for gas_limit in GAS_LIMITS {
         let data = plain.call_data(LARGE_OVERRIDE);
         let cases = [
             Case {
                 rules: "gasLimitOverride below the signed gas limit, and an occupied address",
                 db: occupied(funded(system_db(), &plain), &plain),
-                data: plain.call_data(SIGNED - 1),
+                data: plain.call_data(signed_gas() - 1),
                 gas_limit,
-                answer: too_low(SIGNED - 1),
+                answer: too_low(signed_gas() - 1),
             },
             Case {
                 rules: "the signer's nonce, and an occupied address",
@@ -177,9 +182,9 @@ fn test_a_value_bearing_call_that_does_not_decode_is_refused_for_the_value() {
 #[test]
 fn test_the_signers_account_and_the_forward_come_before_the_address_and_the_balance() {
     let new_account = entry(GasId::new_account_state_gas());
-    let plain = signed(SIGNED, 0);
-    let carrying = signed(SIGNED, 1);
-    let carrying_two = signed(SIGNED, 2);
+    let plain = signed(signed_gas(), 0);
+    let carrying = signed(signed_gas(), 1);
+    let carrying_two = signed(signed_gas(), 2);
     let small = signed(1_000, 0);
     let small_carrying = signed(1_000, 1);
     let data = |deployment: &Deployment| deployment.call_data(LARGE_OVERRIDE);
@@ -202,23 +207,23 @@ fn test_the_signers_account_and_the_forward_come_before_the_address_and_the_bala
             rules: "a forward below the signed gas limit, and an occupied address",
             db: occupied(funded(system_db(), &plain), &plain),
             data: data(&plain),
-            gas_limit: leaving(&data(&plain), SIGNED - 1),
-            answer: too_low(SIGNED - 1),
+            gas_limit: leaving(&data(&plain), signed_gas() - 1),
+            answer: too_low(signed_gas() - 1),
         },
         Case {
             rules: "a forward the signer's account takes below the signed gas limit, and an \
                     occupied address",
             db: occupied(system_db(), &plain),
             data: data(&plain),
-            gas_limit: leaving(&data(&plain), new_account + SIGNED - 1),
-            answer: too_low(SIGNED - 1),
+            gas_limit: leaving(&data(&plain), new_account + signed_gas() - 1),
+            answer: too_low(signed_gas() - 1),
         },
         Case {
             rules: "a forward below the signed gas limit, and a value the signer cannot fund",
             db: funded(system_db(), &carrying_two),
             data: data(&carrying_two),
-            gas_limit: leaving(&data(&carrying_two), SIGNED - 1),
-            answer: too_low(SIGNED - 1),
+            gas_limit: leaving(&data(&carrying_two), signed_gas() - 1),
+            answer: too_low(signed_gas() - 1),
         },
         Case {
             rules:
@@ -226,7 +231,7 @@ fn test_the_signers_account_and_the_forward_come_before_the_address_and_the_bala
                     signed gas limit",
             db: occupied(funded(system_db(), &plain), &plain),
             data: data(&plain),
-            gas_limit: leaving(&data(&plain), SIGNED),
+            gas_limit: leaving(&data(&plain), signed_gas()),
             answer: Answer::Refused(KeylessDeployError::ContractAlreadyExists),
         },
         Case {
@@ -241,7 +246,7 @@ fn test_the_signers_account_and_the_forward_come_before_the_address_and_the_bala
                     take below the signed gas limit",
             db: system_db(),
             data: data(&carrying),
-            gas_limit: leaving(&data(&carrying), new_account + SIGNED),
+            gas_limit: leaving(&data(&carrying), new_account + signed_gas()),
             answer: Answer::Refused(KeylessDeployError::InsufficientBalance),
         },
         Case {
@@ -252,7 +257,15 @@ fn test_the_signers_account_and_the_forward_come_before_the_address_and_the_bala
             answer: Answer::Refused(KeylessDeployError::InsufficientBalance),
         },
     ];
-    cases.into_iter().for_each(Case::check);
+    // An account that costs nothing is one any call can pay for: the two cases of a signer's
+    // account the call cannot pay have nothing to run where a state byte is free.
+    let free = state_is_free();
+    cases
+        .into_iter()
+        .filter(|case| {
+            !(free && case.rules.starts_with("the signer's account the call cannot pay"))
+        })
+        .for_each(Case::check);
 }
 
 /// Above the execution cap the reservoir pays the signer's account, and only a signed gas limit
@@ -299,7 +312,7 @@ fn test_the_forward_comes_before_the_address_and_the_balance_above_the_cap() {
 /// `limits::test_a_refusal_after_the_creations_charges_gives_the_reservoir_back`.
 #[test]
 fn test_the_creations_charges_can_refuse_a_call_no_rule_refuses() {
-    let plain = signed(SIGNED, 0);
+    let plain = signed(signed_gas(), 0);
     let small = signed(1_000, 0);
     let data = |deployment: &Deployment| deployment.call_data(LARGE_OVERRIDE);
     let charges = create_regular(deploying(&runtime(1)).len()) +
@@ -317,8 +330,8 @@ fn test_the_creations_charges_can_refuse_a_call_no_rule_refuses() {
             rules: "a forward the creation's charges take below the signed gas limit",
             db: funded(system_db(), &plain),
             data: data(&plain),
-            gas_limit: leaving(&data(&plain), SIGNED),
-            answer: too_low(SIGNED - charges),
+            gas_limit: leaving(&data(&plain), signed_gas()),
+            answer: too_low(signed_gas() - charges),
         },
     ];
     cases.into_iter().for_each(Case::check);

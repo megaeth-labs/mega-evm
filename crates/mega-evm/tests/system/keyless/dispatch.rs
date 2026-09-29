@@ -21,8 +21,8 @@ use revm::{
 
 use super::{beyond, reference, refusal, run_with, GAS_LIMITS};
 use crate::common::{
-    call_tx, calls_with, output, revert_data, run, split_outcome, system_db, with_contract,
-    CONTRACT, GAS_LIMIT,
+    body_history, call_tx, calls_with, output, revert_data, run, split_outcome, system_db,
+    with_contract, CONTRACT, GAS_LIMIT,
 };
 
 /// No runtime limit.
@@ -104,8 +104,10 @@ fn test_a_call_from_a_contract_is_not_dispatched() {
         let (status, returned) = split_outcome(&outcome);
         assert!(!status, "scheme {scheme:#x}");
         assert_eq!(returned, NOT_INTERCEPTED, "scheme {scheme:#x}");
+        // The transaction's body is its only history: what it spent beside it is less than the
+        // overhead.
         assert!(
-            result.result.gas().total_gas_spent() < KEYLESS_DEPLOY_OVERHEAD_GAS,
+            result.result.gas().total_gas_spent() - body_history(0) < KEYLESS_DEPLOY_OVERHEAD_GAS,
             "scheme {scheme:#x} paid the overhead of a dispatch that did not happen",
         );
     }
@@ -129,8 +131,11 @@ fn test_an_unknown_selector_is_not_dispatched() {
             "an input of {} bytes reverted with data the contract has no code to return",
             input.len(),
         );
+        // The transaction's body is its only history: what it spent beside it is less than the
+        // overhead.
+        let spent = result.result.gas().total_gas_spent() - body_history(input.len() as u64);
         assert!(
-            result.result.gas().total_gas_spent() < KEYLESS_DEPLOY_OVERHEAD_GAS,
+            spent < KEYLESS_DEPLOY_OVERHEAD_GAS,
             "an input of {} bytes paid an overhead it does not owe",
             input.len(),
         );
@@ -142,7 +147,8 @@ fn test_an_unknown_selector_is_not_dispatched() {
 #[test]
 fn test_a_call_that_cannot_pay_the_overhead_runs_out_of_gas() {
     let data = keyless_deploy(b"a transaction");
-    let gas_limit = 60_000;
+    // 60,000 on top of the body's history: the intrinsic gas and less than the overhead beside it.
+    let gas_limit = 60_000 + body_history(data.len() as u64);
     let mut tx = call_tx(KEYLESS_DEPLOY_ADDRESS, data, U256::ZERO);
     tx.0.base.gas_limit = gas_limit;
 

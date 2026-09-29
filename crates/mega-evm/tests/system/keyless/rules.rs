@@ -15,7 +15,7 @@ use alloy_primitives::{address, keccak256, Signature};
 use mega_evm::{
     active_satin_prices,
     alloy_consensus::TxEip1559,
-    constants::{MAX_INITCODE_SIZE, TX_GAS_LIMIT_CAP},
+    constants::MAX_INITCODE_SIZE,
     system::keyless::{
         tests::{
             CREATE2_FACTORY_CONTRACT, CREATE2_FACTORY_DEPLOYER, CREATE2_FACTORY_TX,
@@ -39,6 +39,7 @@ use revm::{
 };
 
 use super::*;
+use crate::common::state_is_free;
 
 /// A `keylessDeploy` of `tx` with `gas_limit_override`, over `db`, at `gas_limit`.
 fn submit(db: MemoryDatabase, tx: &[u8], gas_limit_override: u64, gas_limit: u64) -> Outcome {
@@ -191,6 +192,13 @@ fn gas_limit_forwarding(deployment: &Deployment, init_len: usize, forward: u64) 
         forward
 }
 
+/// A signed gas limit the signer's account can take the forward below: 500,000 on top of the
+/// account's state gas at the byte prices in effect, so the call can pay for the account out of
+/// the forward whatever a state byte costs.
+fn signed_above_the_account() -> u64 {
+    500_000 + entry(GasId::new_account_state_gas())
+}
+
 /// The length of the init code the forwarding tests deploy: a one-byte runtime.
 fn one_byte_init_len() -> usize {
     deploying(&runtime(1)).len()
@@ -236,10 +244,15 @@ fn test_a_forward_at_the_signed_gas_limit_deploys() {
 /// none. Above the execution cap the reservoir pays the charge, and both deploy.
 #[test]
 fn test_the_signers_account_can_take_the_forward_below_the_signed_gas_limit() {
-    let deployment = Deployment::signed(0, 500_000, U256::ZERO, deploying(&runtime(1)));
+    // An account that costs nothing takes nothing from the forward.
+    if state_is_free() {
+        return;
+    }
+    let signed = signed_above_the_account();
+    let deployment = Deployment::signed(0, signed, U256::ZERO, deploying(&runtime(1)));
     let new_account = entry(GasId::new_account_state_gas());
     let gas_limit =
-        gas_limit_forwarding(&deployment, one_byte_init_len(), 500_000 + new_account / 2);
+        gas_limit_forwarding(&deployment, one_byte_init_len(), signed + new_account / 2);
 
     let funded = submit(db_for(&deployment, U256::ONE), &deployment.tx, LARGE_OVERRIDE, gas_limit);
     assert_eq!(returned(&funded).deployedAddress, deployment.address, "the control deploys");
@@ -247,8 +260,8 @@ fn test_the_signers_account_can_take_the_forward_below_the_signed_gas_limit() {
     assert_eq!(
         refusal(&empty),
         KeylessDeployError::GasLimitTooLow {
-            tx_gas_limit: 500_000,
-            provided_gas_limit: 500_000 + new_account / 2 - new_account,
+            tx_gas_limit: signed,
+            provided_gas_limit: signed + new_account / 2 - new_account,
         },
     );
     assert_nothing_written(&empty, &deployment, 0);
@@ -384,7 +397,7 @@ fn test_init_code_over_the_limit_is_refused() {
     let deployment = Deployment::new(vec![0; MAX_INITCODE_SIZE + 1].into());
     // Gas limits that cover the body of a transaction carrying a mebibyte of calldata: its
     // history alone is past the narrow limit of the other tests.
-    for gas_limit in [TX_GAS_LIMIT_CAP * 3 / 4, 10 * TX_GAS_LIMIT_CAP] {
+    for gas_limit in tiers_carrying(deployment.call_data(LARGE_OVERRIDE).len()) {
         let outcome = submit(system_db(), &deployment.tx, LARGE_OVERRIDE, gas_limit);
         assert_eq!(
             refusal(&outcome),
@@ -403,7 +416,7 @@ fn test_init_code_over_the_limit_is_refused() {
 #[test]
 fn test_init_code_at_the_limit_is_admitted() {
     let deployment = Deployment::new(vec![0; MAX_INITCODE_SIZE].into());
-    for gas_limit in [TX_GAS_LIMIT_CAP * 3 / 4, 10 * TX_GAS_LIMIT_CAP] {
+    for gas_limit in tiers_carrying(deployment.call_data(LARGE_OVERRIDE).len()) {
         let outcome = submit(system_db(), &deployment.tx, LARGE_OVERRIDE, gas_limit);
         assert!(
             matches!(failure(&outcome), KeylessDeployError::EmptyCodeDeployed { .. }),
@@ -1026,6 +1039,10 @@ fn test_a_call_below_the_overhead_reads_nothing() {
 /// and the reservoir pays the state charges, so no gas limit leaves the call this little.
 #[test]
 fn test_a_call_that_cannot_pay_the_signers_account_runs_out_of_gas() {
+    // An account that costs nothing is one any call can pay for.
+    if state_is_free() {
+        return;
+    }
     let deployment = small();
     let reference = reference(deployment.call_data(LARGE_OVERRIDE), GAS_LIMITS[0]);
     let intrinsic = reference.result.gas().total_gas_spent();
@@ -1047,9 +1064,14 @@ fn test_a_call_that_cannot_pay_the_signers_account_runs_out_of_gas() {
 /// `limits::test_a_refusal_after_the_charges_gives_the_reservoir_back`.
 #[test]
 fn test_a_call_refused_after_its_charges_keeps_their_regular_gas_alone() {
-    let deployment = Deployment::signed(0, 500_000, U256::ZERO, deploying(&runtime(1)));
+    // An account that costs nothing takes nothing from the forward.
+    if state_is_free() {
+        return;
+    }
+    let signed = signed_above_the_account();
+    let deployment = Deployment::signed(0, signed, U256::ZERO, deploying(&runtime(1)));
     // Enough for everything but the signer's account, which the empty signer adds.
-    let gas_limit = gas_limit_forwarding(&deployment, one_byte_init_len(), 500_000);
+    let gas_limit = gas_limit_forwarding(&deployment, one_byte_init_len(), signed);
     let outcome = submit(system_db(), &deployment.tx, LARGE_OVERRIDE, gas_limit);
     assert!(matches!(refusal(&outcome), KeylessDeployError::GasLimitTooLow { .. }));
     let [total, regular, state, history_gas, _] =
@@ -1065,17 +1087,21 @@ fn test_a_call_refused_after_its_charges_keeps_their_regular_gas_alone() {
 /// The refusal runs below the execution cap, as the refusals above; the failure runs at both.
 #[test]
 fn test_the_signers_account_is_charged_exactly_when_its_nonce_is_spent() {
+    let signed = signed_above_the_account();
     let deployment =
-        Deployment::signed(0, 500_000, U256::ZERO, Bytes::from_static(&[PUSH0, PUSH0, REVERT]));
-    let refused = submit(
-        system_db(),
-        &deployment.tx,
-        LARGE_OVERRIDE,
-        gas_limit_forwarding(&deployment, 3, 500_000),
-    );
-    assert!(matches!(refusal(&refused), KeylessDeployError::GasLimitTooLow { .. }));
-    assert_eq!(nonce(&refused, deployment.signer), 0);
-    assert_eq!(refused.gas.state, 0);
+        Deployment::signed(0, signed, U256::ZERO, Bytes::from_static(&[PUSH0, PUSH0, REVERT]));
+    // An account that costs nothing takes nothing from the forward, and refuses nothing.
+    if !state_is_free() {
+        let refused = submit(
+            system_db(),
+            &deployment.tx,
+            LARGE_OVERRIDE,
+            gas_limit_forwarding(&deployment, 3, signed),
+        );
+        assert!(matches!(refusal(&refused), KeylessDeployError::GasLimitTooLow { .. }));
+        assert_eq!(nonce(&refused, deployment.signer), 0);
+        assert_eq!(refused.gas.state, 0);
+    }
 
     for gas_limit in GAS_LIMITS {
         let failed = submit(system_db(), &deployment.tx, LARGE_OVERRIDE, gas_limit);
@@ -1158,6 +1184,10 @@ fn assert_db_error(
 /// for either of the two accounts the call charges: the price is never guessed.
 #[test]
 fn test_a_failed_salt_lookup_fails_the_transaction() {
+    // A charge that costs nothing costs nothing at any capacity, and the engine asks for none.
+    if state_is_free() {
+        return;
+    }
     for gas_limit in GAS_LIMITS {
         let deployment = small();
         for failing in [deployment.signer, deployment.address] {
