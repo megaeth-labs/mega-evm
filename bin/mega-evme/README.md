@@ -267,7 +267,7 @@ mega-evme replay 0x1234...txhash --override.input-file calldata.hex
 
 #### Whole Blocks
 
-`--block N[..M]` replays whole blocks, each on the engine its spec names, and compares every receipt (status, gas used, cumulative gas used, logs) and the receipts root with the chain's.
+`--block N[..M]` replays whole blocks, each on the engine its spec names, and compares every receipt (status, gas used, cumulative gas used, logs) and the receipts root with the chain's; the state the block leaves is not compared with the header's state root.
 
 | Option                | Description                                                                                             |
 | --------------------- | ------------------------------------------------------------------------------------------------------- |

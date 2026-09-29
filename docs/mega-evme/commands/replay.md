@@ -156,6 +156,7 @@ Hardcoded hardfork configs exist for:
 
 On these chains a block runs on Satin from the timestamp the chain's schedule activates it, and on the legacy engine before it, which resolves the legacy spec from the chain's legacy schedule.
 Neither chain schedules Satin yet, so every block of theirs replays on the legacy engine, exactly as the 1.7.1 tool replayed it.
+To pick the engine, a transaction replay without `--override.spec` first reads the chain ID over RPC (one `eth_chainId` request, or the replay file's), and on a chain that schedules Satin also the timestamp of the block the transaction runs in; a legacy replay then makes the 1.7.1 tool's own requests.
 
 Any other chain runs Satin from genesis, the rung the Satin engine pins for an unrecognized chain.
 The 1.7.1 tool ran such a chain through `Rex7`, the legacy line's unstable spec, which Satin supersedes.
@@ -193,6 +194,7 @@ mega-evme replay --block 26400001 --rpc <URL> --block-cache ./blocks --override.
 `--block <N>` replays block `N`, and `--block <N>..<M>` blocks `N` through `M`.
 Each block runs on the engine its spec names: the one `--override.spec` forces, or the one the chain's schedule gives at the block's timestamp.
 Every transaction of the block runs in order after the block's pre-block changes, as a node runs the block, and every receipt is compared with the chain's: status, gas used, cumulative gas used, and every log's address, topics and data; the replayed receipts root is compared with the header's.
+The state the block leaves is not compared with the header's state root, so a difference that leaves every receipt as it was (a storage write that emits no log) passes.
 
 A block's inputs are the block with its transactions, the chain's receipts, and the state its parent left for everything the block reads, built from a `prestateTracer` trace of the block.
 A read the trace does not cover (what only a pre-block system call reads, or a path a counterfactual takes that the chain did not) is read from the parent block over RPC.
