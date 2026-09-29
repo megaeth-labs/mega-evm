@@ -18,5 +18,6 @@ mod rules;
 mod salt;
 mod schedule;
 mod sequencer_registry;
+mod sequences;
 mod state_gas;
 mod transfer_logs;

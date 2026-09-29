@@ -699,6 +699,34 @@ fn test_a_rotation_with_a_valid_proof_activates_at_its_block() {
     assert_eq!(slot(&mut state, PENDING_SEQUENCER), U256::ZERO);
 }
 
+/// A sequencer rotation scheduled in one block takes effect at its activation block and stays
+/// in force in the block after it.
+///
+/// The block before the activation block still names the sequencer the registry was seeded with,
+/// and the change is still pending. The activation block applies it and clears the pending
+/// change. The next block names the new sequencer and applies nothing again.
+#[test]
+fn test_a_sequencer_rotation_takes_effect_across_blocks() {
+    let (next, secret) = next_sequencer_key();
+    let activation = BLOCK_NUMBER + common::registry_config().min_rotation_delay;
+    let mut state = state_with_funded_admin();
+
+    let proof = rotation_proof(secret, next, U256::from(activation));
+    assert!(schedule(&mut state, next, activation, proof), "the proof is accepted");
+
+    drop(started_block_at(&mut state, activation - 1));
+    assert_eq!(slot(&mut state, CURRENT_SEQUENCER), word(common::SEQUENCER), "not yet");
+    assert_eq!(slot(&mut state, PENDING_SEQUENCER), word(next), "still pending");
+
+    drop(started_block_at(&mut state, activation));
+    assert_eq!(slot(&mut state, CURRENT_SEQUENCER), word(next), "applied at its block");
+    assert_eq!(slot(&mut state, PENDING_SEQUENCER), U256::ZERO, "the pending change is cleared");
+
+    drop(started_block_at(&mut state, activation + 1));
+    assert_eq!(slot(&mut state, CURRENT_SEQUENCER), word(next), "the next block still names it");
+    assert_eq!(slot(&mut state, PENDING_SEQUENCER), U256::ZERO, "nothing is applied again");
+}
+
 /// A schedule without a proof of possession is refused by the contract: the transaction is
 /// included, its call reverts, and nothing is pending.
 #[test]
