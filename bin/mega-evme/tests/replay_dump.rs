@@ -7,6 +7,10 @@
 //! with the state-test runner, check byte-reproducibility, and verify the
 //! transaction-override and `--override.spec` guards. (Benchmarking lives in
 //! `state-test --bench`; see `bench/replay/`.)
+//!
+//! The dump is the legacy leg's: the transaction replays on the released 1.7.1 CLI, and the
+//! fixture is validated by the 1.7.1 state-test runner.
+#![cfg(feature = "legacy")]
 
 use std::{
     process::Command,
@@ -78,7 +82,7 @@ fn test_replay_dump_fixture_writes_validatable_file() {
 
     // Validate the dumped fixture through the state-test runner (no RPC).
     let elapsed = Arc::new(Mutex::new(Duration::ZERO));
-    let result = state_test::runner::execute_test_suite(&out, &elapsed, false, false);
+    let result = mega_state_test_legacy::runner::execute_test_suite(&out, &elapsed, false, false);
     let _ = std::fs::remove_file(&out);
     result.unwrap_or_else(|e| panic!("dumped fixture failed to validate: {e}"));
 }

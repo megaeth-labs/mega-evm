@@ -37,17 +37,18 @@ pub struct ChainArgs {
 }
 
 impl ChainArgs {
-    /// Gets the spec ID from the spec name
+    /// Gets the spec ID from the spec name. Only `Satin` parses: a legacy spec runs on the
+    /// legacy engine, which this crate hands the command to before it gets here.
     pub fn spec_id(&self) -> Result<MegaSpecId> {
         MegaSpecId::from_str(&self.spec)
-            .map_err(|e| EvmeError::InvalidInput(format!("Invalid spec name: {:?}", e)))
+            .map_err(|e| EvmeError::InvalidInput(format!("Invalid spec name: {e}")))
     }
 
-    /// Creates [`CfgEnv`].
+    /// Creates [`CfgEnv`]. The fields Satin fixes (its gas schedule, the EIP-8037 and EIP-2780
+    /// switches, the execution cap, the code-size limits) are set when the context takes it.
     pub fn create_cfg_env(&self) -> Result<CfgEnv<MegaSpecId>> {
-        let mut cfg = CfgEnv::default();
+        let mut cfg = CfgEnv::new_with_spec(self.spec_id()?);
         cfg.chain_id = self.chain_id;
-        cfg.spec = self.spec_id()?;
         debug!(cfg = ?cfg, "Evm CfgEnv created");
         Ok(cfg)
     }
@@ -106,6 +107,7 @@ impl BlockEnvArgs {
             difficulty: self.block_difficulty,
             prevrandao: Some(self.block_prevrandao),
             blob_excess_gas_and_price: None,
+            slot_num: 0,
         };
 
         // Set blob excess gas if provided
@@ -199,10 +201,9 @@ impl EnvArgs {
         let block = self.create_block_env()?;
         let external_envs = self.create_external_envs()?;
 
-        Ok(MegaContext::new(db, cfg.spec)
+        Ok(MegaContext::new_with_external_envs(db, cfg.spec, external_envs.into())
             .with_cfg(cfg)
-            .with_block(block)
-            .with_external_envs(external_envs.into()))
+            .with_block(block))
     }
 }
 

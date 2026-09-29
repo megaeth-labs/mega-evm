@@ -12,7 +12,7 @@ use tracing::{debug, info, trace, warn};
 
 use crate::common::{
     load_hex, op_receipt_to_tx_receipt, print_execution_summary, print_execution_trace,
-    print_receipt, DecodedRawTx, EvmeError, EvmeOutcome, ExecutionSummary,
+    print_receipt, print_satin_report, DecodedRawTx, EvmeError, EvmeOutcome, ExecutionSummary,
 };
 
 use super::Result;
@@ -92,7 +92,7 @@ impl Cmd {
             self.prestate_args.create_initial_state(&sender, &self.rpc_args).await?;
         debug!(sender = %sender, "State initialized");
 
-        state.deploy_system_contracts(spec);
+        state.deploy_system_contracts();
         debug!(spec = ?spec, "System contracts deployed");
 
         let pre_execution_nonce = state.basic_ref(sender)?.map(|acc| acc.nonce).unwrap_or(0);
@@ -102,19 +102,20 @@ impl Cmd {
         info!("Executing transaction");
         let evm_context = self.env_args.create_evm_context(&mut state)?;
         let start = Instant::now();
-        let (exec_result, evm_state, trace_data) =
+        let (exec_result, evm_state, trace_data, satin) =
             self.trace_args.execute_transaction(evm_context, tx.clone())?;
         let exec_time = start.elapsed();
 
         // Log execution result
+        let gas_used = exec_result.tx_gas_used();
         match &exec_result {
-            ExecutionResult::Success { gas_used, .. } => {
+            ExecutionResult::Success { .. } => {
                 info!(gas_used, "Execution succeeded");
             }
-            ExecutionResult::Revert { gas_used, .. } => {
+            ExecutionResult::Revert { .. } => {
                 warn!(gas_used, "Execution reverted");
             }
-            ExecutionResult::Halt { reason, gas_used } => {
+            ExecutionResult::Halt { reason, .. } => {
                 warn!(?reason, gas_used, "Execution halted");
             }
         }
@@ -125,6 +126,7 @@ impl Cmd {
             state: evm_state,
             exec_time,
             trace_data,
+            satin,
         };
 
         // Step 4: Output results (including state dump if requested)
@@ -164,7 +166,7 @@ impl Cmd {
             receiver,
             contract_address,
             effective_gas_price,
-            outcome.exec_result.gas_used(),
+            outcome.exec_result.tx_gas_used(),
             None,
             None,
             0,
@@ -173,6 +175,7 @@ impl Cmd {
         if self.output_args.json {
             let mut summary = ExecutionSummary::from_result(&outcome.exec_result, contract_address);
             summary.fill_trace_and_dump(outcome, &self.trace_args, &self.dump_args)?;
+            summary.satin = Some(outcome.satin);
             summary.receipt =
                 Some(serde_json::to_value(&receipt).expect("failed to serialize receipt"));
             println!(
@@ -182,6 +185,7 @@ impl Cmd {
         } else {
             // Human-readable summary
             print_execution_summary(&outcome.exec_result, contract_address, outcome.exec_time);
+            print_satin_report(&outcome.satin);
 
             print_receipt(&receipt);
 

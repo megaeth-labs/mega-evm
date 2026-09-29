@@ -1,7 +1,12 @@
-use clap::{Parser, Subcommand};
+use std::ffi::OsString;
+
+use clap::{parser::ValueSource, ArgMatches, CommandFactory, FromArgMatches, Parser, Subcommand};
 use tracing::error;
 
-use crate::common::LogArgs;
+use crate::{
+    common::{EvmeError, LogArgs},
+    engine::Engine,
+};
 
 /// Main CLI for the mega-evme tool
 #[derive(Parser, Debug)]
@@ -36,11 +41,57 @@ pub enum Error {
     Custom(&'static str),
     /// Evme error (used by run, tx, and replay commands)
     #[error("{0}")]
-    Evme(#[from] crate::common::EvmeError),
+    Evme(#[from] EvmeError),
+}
+
+/// Parses `args` (the program name first), picks the engine the command's spec names and runs the
+/// command on it.
+///
+/// A command on a legacy spec is handed, with `args` as they are, to the released 1.7.1 CLI,
+/// which parses them again and runs on the legacy engine; everything else runs here, on Satin.
+pub async fn run_cli(args: Vec<OsString>) -> Result<(), Error> {
+    let matches = MainCmd::command().get_matches_from(&args);
+    let spec_is_default = spec_is_default(&matches);
+    let cmd = MainCmd::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+
+    let engine = match cmd.command.engine().await {
+        Ok(engine) => engine,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    };
+    match engine {
+        Engine::Legacy => {
+            crate::engine::run_legacy(args, spec_is_default).await?;
+            Ok(())
+        }
+        Engine::Satin => cmd.run().await,
+    }
+}
+
+/// Whether `run`'s or `tx`'s `--spec` was left at its default. Always `false` for `replay`, which
+/// has no `--spec`.
+fn spec_is_default(matches: &ArgMatches) -> bool {
+    match matches.subcommand() {
+        Some(("run" | "tx", sub)) => sub.value_source("spec") != Some(ValueSource::CommandLine),
+        _ => false,
+    }
+}
+
+impl Commands {
+    /// The engine this command runs on.
+    pub async fn engine(&self) -> Result<Engine, EvmeError> {
+        match self {
+            Self::Run(cmd) => Engine::of_spec(&cmd.env_args.chain.spec),
+            Self::Tx(cmd) => Engine::of_spec(&cmd.env_args.chain.spec),
+            Self::Replay(cmd) => cmd.engine().await,
+        }
+    }
 }
 
 impl MainCmd {
-    /// Execute the main command
+    /// Execute the command on the Satin engine.
     pub async fn run(self) -> Result<(), Error> {
         // Initialize logging first
         self.log.init();

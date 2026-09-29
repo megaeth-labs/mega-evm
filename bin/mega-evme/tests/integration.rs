@@ -76,3 +76,65 @@ fn test_fixture(
 ) {
     check(&path);
 }
+
+/// Every field a legacy run prints, a Satin run of the same command prints too, at the same path
+/// and of the same JSON kind: Satin's extra output is additive only.
+///
+/// Each `test_satin_<name>.json` is `test_<name>.json` run with `--spec Satin`; both pin their
+/// full output, so comparing the pinned outputs compares what the two engines print.
+#[test]
+fn test_satin_output_is_additive_to_legacy_output() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let mut pairs = 0;
+    for entry in std::fs::read_dir(&dir).unwrap() {
+        let path = entry.unwrap().path();
+        let name = path.file_name().unwrap().to_str().unwrap().to_string();
+        let Some(rest) = name.strip_prefix("test_satin_") else { continue };
+        let legacy_path = dir.join(format!("test_{rest}"));
+        let load = |p: &Path| -> Fixture {
+            serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap()
+        };
+        let (satin, legacy) = (load(&path), load(&legacy_path));
+        assert_eq!(
+            satin.args[..satin.args.len() - 2],
+            legacy.args[..],
+            "{name} runs the legacy fixture's command with `--spec Satin` appended"
+        );
+        assert_eq!(satin.args[satin.args.len() - 2..], ["--spec", "Satin"], "{name}");
+        assert_superset(&satin.expected, &legacy.expected, &name, "$");
+        assert!(satin.expected.get("satin").is_some_and(|v| v.is_object()), "{name}");
+        assert!(legacy.expected.get("satin").is_none(), "a legacy run has no `satin` field");
+        pairs += 1;
+    }
+    assert!(pairs >= 14, "every run and tx fixture has its Satin twin, found {pairs}");
+}
+
+/// Asserts that every object key of `legacy` is in `satin` at the same path, with the same JSON
+/// kind, recursively. Array elements are compared up to the shorter length: an opcode trace is
+/// as long as the run, and Satin prices the run differently, not with other opcodes.
+fn assert_superset(satin: &serde_json::Value, legacy: &serde_json::Value, name: &str, at: &str) {
+    use serde_json::Value;
+    let kind = |v: &Value| match v {
+        Value::Null => "null",
+        Value::Bool(_) => "bool",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    };
+    assert_eq!(kind(satin), kind(legacy), "{name}: {at} changed kind");
+    match (satin, legacy) {
+        (Value::Object(s), Value::Object(l)) => {
+            for (key, value) in l {
+                let found = s.get(key).unwrap_or_else(|| panic!("{name}: {at}.{key} is missing"));
+                assert_superset(found, value, name, &format!("{at}.{key}"));
+            }
+        }
+        (Value::Array(s), Value::Array(l)) => {
+            for (i, (sv, lv)) in s.iter().zip(l).enumerate() {
+                assert_superset(sv, lv, name, &format!("{at}[{i}]"));
+            }
+        }
+        _ => {}
+    }
+}
