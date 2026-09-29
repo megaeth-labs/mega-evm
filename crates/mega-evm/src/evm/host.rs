@@ -147,10 +147,21 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> Host for MegaContext<DB, ExtEnvs> 
         // Repeated SELFDESTRUCT on the same account still returns a result but with
         // `previously_destroyed == true` — refunding again would double-count.
         if let Some(refund) = selfdestruct_refund {
-            if let Ok(ref state_load) = result {
-                if !state_load.data.previously_destroyed {
-                    self.additional_limit.borrow_mut().on_selfdestruct(refund);
+            let first_destruction = match &result {
+                Ok(state_load) => !state_load.data.previously_destroyed,
+                // The deployed body read the target and destroyed the account before charging for
+                // either, so a frame too poor for the cold read still recorded the refund before it
+                // halted. The refund is the frame's own usage: the halt discards it, but the
+                // frame-end limit check still sees it.
+                Err(LoadError::ColdLoadSkipped) => {
+                    self.inner.journaled_state.state.get(&address).is_some_and(|account| {
+                        !(account.is_selfdestructed() && account.is_selfdestructed_locally())
+                    })
                 }
+                Err(LoadError::DBError) => false,
+            };
+            if first_destruction {
+                self.additional_limit.borrow_mut().on_selfdestruct(refund);
             }
         }
 
@@ -185,12 +196,14 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> Host for MegaContext<DB, ExtEnvs> 
         self.inner.sstore_skip_cold_load(address, key, value, skip_cold_load)
     }
 
-    /// The single beneficiary-marking site for account loads.
+    /// The beneficiary-marking site for the account loads that happen.
     ///
     /// Every account-reading opcode — BALANCE, EXTCODESIZE, EXTCODECOPY, EXTCODEHASH and the CALL
-    /// family — reaches the journal through here, so marking here rather than in the instruction
-    /// wrappers keeps each mark at the exact point the account is read (an opcode that runs out of
-    /// gas before its load marks nothing) and makes a double mark structurally impossible.
+    /// family — reaches the journal through here, and marks here before the load can give up on a
+    /// cold account it cannot afford, so the mark lands where the account is read. The instruction
+    /// layer marks in one other case only: a CALL-family or EXTCODECOPY frame that revm 40 halts
+    /// before its load, where the deployed implementation, which loaded before charging, had
+    /// already marked. Marking is idempotent.
     ///
     /// `account_load_marks_beneficiary` owns the one case where the loaded address alone does not
     /// decide the mark: a CALL-family EIP-7702 delegate hop.
@@ -493,6 +506,23 @@ pub trait HostExt: Host {
     /// Closes the scope opened by [`Self::begin_call_target_resolution`], so subsequent account
     /// loads are attributed to the opcode that issues them again.
     fn end_call_target_resolution(&mut self);
+
+    /// Leaves in the journal what the deployed implementation's read of `address` left once the
+    /// frame that issued it reverted, for a read revm 40 never issues because it halts first.
+    ///
+    /// The deployed read loaded an absent account the way every journal load does: warm if the
+    /// address is pre-warmed (a precompile, the coinbase, an access-list entry), otherwise cold
+    /// with the warm-up journaled, which the revert undoes. Of an account that was already
+    /// resident it kept only the code it fetched. So this loads `address` with its code when the
+    /// journal holds no entry for it, and otherwise fetches the code the entry lacks, leaving its
+    /// warmth alone. With `follow_delegation`, for a read that also followed an EIP-7702
+    /// designation, it then loads the delegate when absent, without its code, as that read did.
+    /// The caller's frame must be halting.
+    ///
+    /// Marks nothing: the callers recreate the beneficiary mark themselves. On a database error it
+    /// records the error as the transaction's, as the deployed read did, and returns `false`.
+    fn recreate_reverted_account_read(&mut self, address: Address, follow_delegation: bool)
+        -> bool;
 }
 
 impl<DB: Database, ExtEnvs: ExternalEnvTypes> HostExt for MegaContext<DB, ExtEnvs> {
@@ -593,6 +623,41 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> HostExt for MegaContext<DB, ExtEnv
     #[inline]
     fn end_call_target_resolution(&mut self) {
         self.call_target_load_phase = CallTargetLoadPhase::Idle;
+    }
+
+    fn recreate_reverted_account_read(
+        &mut self,
+        address: Address,
+        follow_delegation: bool,
+    ) -> bool {
+        // Split borrow, as in `JournalInspectTr`: a database error is stashed in `error`, which
+        // surfaces it as the transaction's error, exactly as the deployed read's would have.
+        let journal = &mut self.inner.journaled_state;
+        let error = &mut self.inner.error;
+        let mut stash = |e: <DB as revm::Database>::Error| {
+            *error = Err(ContextError::Custom(format!("{e}")));
+            false
+        };
+        if !journal.state.contains_key(&address) {
+            if let Err(e) = journal.load_account_with_code(address) {
+                return stash(e);
+            }
+        }
+        // The account is resident now; reading its code this way leaves its warmth alone.
+        let delegate = match inspect_account(journal, address, true) {
+            Ok(account) => account.info.code.as_ref().and_then(Bytecode::eip7702_address),
+            Err(e) => return stash(e),
+        };
+        if !follow_delegation {
+            return true;
+        }
+        // The deployed read loaded the delegate's account but not its code.
+        match delegate {
+            Some(delegate) if !journal.state.contains_key(&delegate) => {
+                journal.load_account(delegate).map_or_else(stash, |_| true)
+            }
+            _ => true,
+        }
     }
 }
 

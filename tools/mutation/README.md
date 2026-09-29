@@ -52,10 +52,16 @@ An adjacent swap moves the activation boundary by **exactly one** spec, so a
 survivor pinpoints an untested boundary between two specific specs.
 
 - Same site inventory and exclusions as `spec_gate` (product gates only).
-- Spec order (must match `MegaSpecId` in `crates/mega-evm/src/evm/spec.rs`;
-  enumeration hard-fails if the source enum diverges):
+- Spec order (must match the behavior-introducing variants of `MegaSpecId` in
+  `crates/mega-evm/src/evm/spec.rs`; enumeration hard-fails if the source enum
+  diverges):
 
   `EQUIVALENCE → MINI_REX → REX → REX1 → REX2 → REX3 → REX4 → REX5 → REX6 → REX7`
+
+  Alias rungs (`MINI_REX_1`, `MINI_REX_2`) are parsed from `MegaSpecId::behavior`
+  and excluded: they re-execute an earlier spec's behavior instead of introducing
+  their own, so they have no position on the axis an adjacent swap moves along.
+  A product gate on an alias rung stops enumeration rather than guessing a shift.
 
 - For each site with `MegaSpecId::X`:
   - **pred**: replace with predecessor (skipped when `X` is first)

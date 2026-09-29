@@ -31,9 +31,14 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-# The full MegaSpecId progression, oldest -> newest, frozen and unstable alike
-# (see crates/mega-evm/src/evm/spec.rs). Keep in spec order. This is the
-# *adjacency* universe: it decides which spec sits next to which.
+# The behavior-introducing MegaSpecId progression, oldest -> newest, frozen and
+# unstable alike (see crates/mega-evm/src/evm/spec.rs). Keep in spec order.
+# This is the *adjacency* universe: it decides which spec sits next to which.
+#
+# The alias rungs (MINI_REX_1, MINI_REX_2) are deliberately absent: is_enabled
+# gates compare behavior projections, and an alias executes an earlier spec's
+# behavior instead of introducing its own — on the behavior axis these rungs do
+# not exist, so a boundary shift onto one would be a double shift in disguise.
 ALL_SPECS = [
     "EQUIVALENCE",
     "MINI_REX",

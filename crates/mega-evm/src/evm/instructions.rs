@@ -18,9 +18,9 @@ use revm::{
         instructions::{self, control, gas_table_spec, utility::IntoAddress},
         interpreter::EthInterpreter,
         interpreter_types::{InputsTr, LoopControl, MemoryTr, RuntimeFlag},
-        CallScheme, FrameInput, GasTable, Instruction, InstructionContext, InstructionExecResult,
-        InstructionResult, InstructionTable, InterpreterAction, InterpreterTypes, SStoreResult,
-        Stack,
+        num_words, CallScheme, FrameInput, GasTable, Instruction, InstructionContext,
+        InstructionExecResult, InstructionResult, InstructionTable, Interpreter, InterpreterAction,
+        InterpreterTypes, SStoreResult, Stack,
     },
     primitives::KECCAK_EMPTY,
 };
@@ -122,7 +122,9 @@ use revm::{
 ///
 /// ## Spec Progression and Opcode Overrides
 ///
-/// Each spec builds on the previous one. Only the opcodes that change are listed:
+/// Each behavior-introducing spec builds on the previous one; the alias specs have no table of
+/// their own and select their behavior target's (see [`MegaInstructions::new`]). Only the
+/// opcodes that change are listed:
 ///
 /// - **EQUIVALENCE**: Standard revm mainnet instruction table (no custom wrappers).
 /// - **`MINI_REX`** (base custom table): All 256 opcodes initialized from scratch.
@@ -193,9 +195,14 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaInstructions<DB, ExtEnvs> {
         // the static gas table is always built from that spec rather than `SpecId::default()`.
         let eth_spec = spec.into_eth_spec();
         let gas_table = gas_table_for_spec(spec);
+        // An alias spec is grouped with its `behavior()` target so it executes exactly the
+        // target's table; the grouping must agree with `behavior()`, pinned by
+        // `test_alias_specs_use_their_behavior_targets_table`.
         let instruction_table = match spec {
-            MegaSpecId::EQUIVALENCE => EthInstructions::new_mainnet_with_spec(eth_spec),
-            MegaSpecId::MINI_REX => EthInstructions::new(
+            MegaSpecId::EQUIVALENCE | MegaSpecId::MINI_REX_1 => {
+                EthInstructions::new_mainnet_with_spec(eth_spec)
+            }
+            MegaSpecId::MINI_REX | MegaSpecId::MINI_REX_2 => EthInstructions::new(
                 mini_rex::instruction_table::<EthInterpreter, MegaContext<DB, ExtEnvs>>(),
                 gas_table,
                 eth_spec,
@@ -250,10 +257,12 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaInstructions<DB, ExtEnvs> {
 /// wrapper has its gas entry adjusted right beside it.
 fn gas_table_for_spec(spec: MegaSpecId) -> GasTable {
     let base = gas_table_spec(spec.into_eth_spec());
+    // An alias spec is grouped with its `behavior()` target, mirroring `MegaInstructions::new`;
+    // the grouping is pinned by `test_alias_specs_use_their_behavior_targets_table`.
     match spec {
         // Vanilla mainnet table and handlers — no volatile wrappers, nothing to zero.
-        MegaSpecId::EQUIVALENCE => base,
-        MegaSpecId::MINI_REX => mini_rex::gas_table(base),
+        MegaSpecId::EQUIVALENCE | MegaSpecId::MINI_REX_1 => base,
+        MegaSpecId::MINI_REX | MegaSpecId::MINI_REX_2 => mini_rex::gas_table(base),
         MegaSpecId::REX | MegaSpecId::REX1 => rex::gas_table(base),
         MegaSpecId::REX2 => rex2::gas_table(base),
         MegaSpecId::REX3 => rex3::gas_table(base),
@@ -713,10 +722,11 @@ macro_rules! run_inner_instruction_or_abort {
             Err(result) => Err(result),
         };
     };
-    // Same as above, but a plain out-of-gas halt runs `$tripwire` before the early return skips
-    // the wrapper's tail. Debug builds only; see
-    // `volatile_data_ext::debug_check_frozen_detention_window` for what the tripwire watches.
-    ($inner_fn:path, $context:expr, $out:ident, on_plain_oog: $tripwire:expr) => {
+    // Same as above, but a halting result runs `$on_halt` — with the result bound to `$halt` —
+    // before the early return skips the wrapper's tail. Callers use it to restore what the halting
+    // body would have done on the deployed schedule, and which results they restore for is theirs
+    // to decide.
+    ($inner_fn:path, $context:expr, $out:ident, on_halt: |$halt:ident| $on_halt:expr) => {
         let ctx = InstructionContext::<'_, H, WIRE> {
             interpreter: &mut *$context.interpreter,
             host: &mut *$context.host,
@@ -725,9 +735,9 @@ macro_rules! run_inner_instruction_or_abort {
         let $out: InstructionExecResult = match $inner_fn(ctx) {
             Ok(()) => Ok(()),
             Err(result) if result.is_halt() => {
-                #[cfg(debug_assertions)]
-                if matches!(result, InstructionResult::OutOfGas) {
-                    $tripwire;
+                {
+                    let $halt = result;
+                    $on_halt;
                 }
                 return Err(result);
             }
@@ -1324,44 +1334,272 @@ pub mod volatile_data_ext {
         };
     }
 
-    /// Debug-build tripwire for the frozen detention window (CALL family and EXTCODECOPY).
+    /// Recreates, for a frame that cannot afford the static-gas charge this wrapper takes ahead of
+    /// revm's body, what the pre-revm-40 schedule did before it charged the opcode anything.
     ///
-    /// revm 27 loaded these opcodes' target account before charging the opcode's own costs, so a
-    /// frame that ran out of gas on those charges had already marked beneficiary access and the
-    /// rest of the transaction ran detained. revm 40 charges first, so the same frame halts with
-    /// the beneficiary unmarked and the rest of the transaction runs undetained. Release builds
-    /// accept the revm 40 order; the full-history replay that gates a release is what proves no
-    /// historical transaction sits in that window — and this check, compiled only under debug
-    /// assertions, is the tripwire such a replay must run with: it fires exactly when a window
-    /// transaction is found, so the wrapper backfill archived for that case gets implemented
-    /// instead of the divergence going unnoticed.
+    /// The deployed implementation charged the CALL family's static gas from inside revm's body,
+    /// after the target was loaded, so a frame that could not afford it had already run three
+    /// sites this frame now skips. In the order the opcode reached them:
     ///
-    /// The check over-approximates on purpose — it does not reconstruct how far revm 27 would
-    /// have gotten — with one exception: a `MemoryOOG` halt is never routed here, because memory
-    /// expansion was charged before the load under revm 27 as well, so that halt shape cannot
-    /// diverge. An already-marked transaction is skipped for the same reason: the mark is
-    /// idempotent, so losing a duplicate cannot change replay.
-    #[cfg(debug_assertions)]
-    fn debug_check_frozen_detention_window<H: HostExt + ?Sized>(
-        host: &mut H,
-        opcode: u8,
-        raw_target: Option<Address>,
-    ) {
-        let Some(target) = raw_target else { return };
-        if host.volatile_data_tracker().borrow().has_accessed_beneficiary_balance() {
-            return;
+    /// 1. The storage-gas wrapper's inspection of the account it meters, which runs ahead of revm's
+    ///    body and is therefore unconditional. `select_addr` must be the same selector that wrapper
+    ///    uses, and the `REX5` split below the same one: `CALLCODE` meters against the current
+    ///    frame from `REX5`, which is why its stack operand legitimately stays unmaterialized
+    ///    there.
+    /// 2. From `REX6`, the stack operand's own journal entry, materialized by the raw-operand
+    ///    delegate resolution in [`Host::load_account_info_skip_cold_load`]. The resolution
+    ///    inspects the operand alone — it reads the delegate's address off the operand's code and
+    ///    never inspects the delegate. revm's own load then brought the delegate in as a fresh
+    ///    entry, which a frame revert leaves priced exactly like an absent one, so the delegate is
+    ///    not touched here.
+    /// 3. The beneficiary-access mark the host set as revm's body loaded the target — see
+    ///    [`mark_call_target_beneficiary`].
+    ///
+    /// Sites 2 and 3 sit inside revm's load, which the deployed schedule reached only if the frame
+    /// got through everything ahead of it: the storage-gas wrapper's new-account charge, the
+    /// body's static-call check on a value transfer, and its two memory expansions. Each is
+    /// replayed here against the gas the frame holds, and a frame that would have stopped on any
+    /// of them gets neither — recreating either for a frame that never reached the load diverges
+    /// just as much, in the other direction.
+    ///
+    /// Journal entries are recreated cold, which is the state the frame's out-of-gas revert left
+    /// them in. `MegaETH` prices a resident-but-cold entry as a cold access even for an address the
+    /// pre-warmed sets cover, so whether they exist decides what every later access to the address
+    /// costs in the transaction. The mark is not journaled and survives the halt, capping the rest
+    /// of the transaction once the caller's tail applies it.
+    ///
+    /// `HAS_VALUE_OPERAND` is `true` for the two opcodes carrying a `value` operand (`CALL` and
+    /// `CALLCODE`), whose memory operands sit one stack position deeper. `IS_CALL` is `true` for
+    /// `CALL`, the only one of the family revm rejects in a static frame when it carries value.
+    fn recreate_unreached_call_load<
+        const HAS_VALUE_OPERAND: bool,
+        const IS_CALL: bool,
+        WIRE: InterpreterTypes<Stack: StackInspectTr>,
+        H: HostExt + ContextTr + JournalInspectTr + ?Sized,
+    >(
+        context: &mut InstructionContext<'_, H, WIRE>,
+        select_addr: fn(MegaSpecId, Address, Address) -> Address,
+    ) -> InstructionExecResult {
+        // A stack too short to hold the target is a stack underflow raised before the storage-gas
+        // wrapper inspected anything.
+        let Some(to) = context.interpreter.stack.inspect::<1>() else { return Ok(()) };
+        let to = to.into_address();
+        let spec = context.interpreter.runtime_flag.spec_id();
+        let mega_spec = context.host.spec_id();
+        let current_address = context.interpreter.input.target_address();
+        let storage_address = select_addr(mega_spec, current_address, to);
+        let storage_is_empty = if mega_spec.is_enabled(MegaSpecId::REX5) {
+            context
+                .host
+                .inspect_account(storage_address, false)
+                .map(|a| a.state_clear_aware_is_empty(spec))
+        } else {
+            context
+                .host
+                .inspect_account_delegated(mega_spec, storage_address)
+                .map(|a| a.state_clear_aware_is_empty(spec))
+        };
+        let Ok(storage_is_empty) = storage_is_empty else {
+            return Err(InstructionResult::FatalExternalError);
+        };
+
+        // Everything below replays what stood between the storage-gas wrapper's inspection and
+        // revm's load. A failed `record_regular_cost` debits nothing, so the frame still holds
+        // exactly what the deployed schedule had at this point, and its memory is untouched.
+        let has_transfer = if HAS_VALUE_OPERAND {
+            let Some(value) = context.interpreter.stack.inspect::<2>() else { return Ok(()) };
+            !value.is_zero()
+        } else {
+            false
+        };
+        let mut budget = context.interpreter.gas.remaining();
+        if storage_is_empty && has_transfer {
+            // The storage-gas wrapper's new-account charge, taken the way that wrapper takes it.
+            // Draining the frame's storage stipend here is what the deployed schedule did on this
+            // path too, and the frame is about to halt, so nothing observes the drained allowance.
+            let Some(new_account_storage_gas) =
+                context.host.new_account_storage_gas(storage_address)
+            else {
+                return Err(InstructionResult::FatalExternalError);
+            };
+            let drained = context
+                .host
+                .additional_limit()
+                .borrow_mut()
+                .try_consume_storage_stipend(new_account_storage_gas);
+            let Some(left) = budget.checked_sub(new_account_storage_gas - drained) else {
+                return Ok(());
+            };
+            budget = left;
         }
+        if !deployed_body_reaches_load::<HAS_VALUE_OPERAND, IS_CALL, _, _>(
+            context,
+            has_transfer,
+            budget,
+        ) {
+            return Ok(());
+        }
+        recreate_reached_load(context.host, to, storage_address)
+    }
+
+    /// Whether revm's CALL-family body, entered with `budget` gas, got through the steps it takes
+    /// ahead of its load on the deployed schedule: the rejection of a valued `CALL` from a static
+    /// frame, and its two memory expansions. Must be asked before the body runs, which pops the
+    /// memory operands; a stack too short to hold them is a stack underflow raised before the load.
+    pub(super) fn deployed_body_reaches_load<
+        const HAS_VALUE_OPERAND: bool,
+        const IS_CALL: bool,
+        WIRE: InterpreterTypes<Stack: StackInspectTr>,
+        H: HostExt + ?Sized,
+    >(
+        context: &InstructionContext<'_, H, WIRE>,
+        has_transfer: bool,
+        budget: u64,
+    ) -> bool {
+        if IS_CALL && has_transfer && context.interpreter.runtime_flag.is_static() {
+            return false;
+        }
+        let Some(ranges) = call_memory_ranges::<HAS_VALUE_OPERAND, _, _>(context) else {
+            return false;
+        };
+        call_memory_expansions_affordable(
+            context,
+            *context.interpreter.gas.memory(),
+            budget,
+            ranges,
+        )
+    }
+
+    /// Recreates what the deployed host did as revm's CALL-family body loaded its target, for a
+    /// frame that halted before revm 40's body got there although the deployed schedule did: from
+    /// `REX6` the stack operand's cold journal entry, when the storage-gas wrapper did not already
+    /// inspect it; then the body's own read of the operand and, through an EIP-7702 designation,
+    /// of its delegate; and the beneficiary-access mark (see [`mark_call_target_beneficiary`]).
+    pub(super) fn recreate_reached_load<H: HostExt + JournalInspectTr + ?Sized>(
+        host: &mut H,
+        to: Address,
+        storage_address: Address,
+    ) -> InstructionExecResult {
+        if host.spec_id().is_enabled(MegaSpecId::REX6) && storage_address != to {
+            // The operand alone, code hydrated, exactly as the delegate resolution inspects it —
+            // not `inspect_account_delegated`, which would also materialize the delegate cold.
+            if host.inspect_account(to, true).is_err() {
+                return Err(InstructionResult::FatalExternalError);
+            }
+        }
+        // The body then read the operand and its delegate through the journal. An entry an
+        // earlier inspection left resident is unaffected; an absent one — the operand of a
+        // `REX5` CALLCODE, or any delegate from `REX5` — is loaded as that read loaded it.
+        if !host.recreate_reverted_account_read(to, true) {
+            return Err(InstructionResult::FatalExternalError);
+        }
+        mark_call_target_beneficiary(host, to);
+        Ok(())
+    }
+
+    /// Marks beneficiary access for a CALL-family target the way the deployed host did as revm's
+    /// body loaded it: the raw stack operand when it is the block beneficiary, and from `REX6` the
+    /// operand's one-hop EIP-7702 delegate when that is.
+    ///
+    /// revm 40 charges the static gas and the value-transfer cost ahead of that load, so a frame
+    /// that halts on either never reaches the host's marking; the halting exits call this in its
+    /// place, only where the deployed schedule would have reached the load. The mark is idempotent,
+    /// so calling it after a halt that did follow the load changes nothing.
+    ///
+    /// The delegate is resolved the way the deployed host resolved it — best-effort, which inspects
+    /// the operand (as that host did) and falls back to the raw operand on a database error.
+    pub(super) fn mark_call_target_beneficiary<H: HostExt + ?Sized>(host: &mut H, to: Address) {
         let beneficiary = host.beneficiary_address();
-        let hits_beneficiary = target == beneficiary ||
-            (host.spec_id().is_enabled(MegaSpecId::REX6) &&
-                host.best_effort_resolve_eip7702_delegate_address(target) == beneficiary);
-        debug_assert!(
-            !hits_beneficiary,
-            "frozen detention window hit: opcode 0x{opcode:02x} ran out of gas before loading \
-             the beneficiary, which revm 27 marked (detaining the rest of the transaction). \
-             Replaying this transaction diverges from its historical execution; implement the \
-             wrapper backfill archived in REVM_40_REVIEW_GUIDE.md (wontfix #20)."
-        );
+        let mut marks = to == beneficiary;
+        if host.spec_id().is_enabled(MegaSpecId::REX6) {
+            marks |= host.best_effort_resolve_eip7702_delegate_address(to) == beneficiary;
+        }
+        if marks {
+            host.volatile_data_tracker().borrow_mut().mark_beneficiary_balance_accessed();
+        }
+    }
+
+    /// The `(offset, len)` operand pairs of a CALL-family opcode's input and output memory ranges,
+    /// in the order revm's body expands them.
+    pub(super) type CallMemoryRanges = [U256; 4];
+
+    /// Reads a CALL-family opcode's memory-range operands off the stack.
+    ///
+    /// Must be called before revm's body runs, which pops them. `None` means the stack is too short
+    /// to hold them, which the body raises as a stack underflow ahead of its load.
+    ///
+    /// `HAS_VALUE_OPERAND` is `true` for the two opcodes carrying a `value` operand (`CALL` and
+    /// `CALLCODE`), whose memory operands sit one stack position deeper.
+    pub(super) fn call_memory_ranges<
+        const HAS_VALUE_OPERAND: bool,
+        WIRE: InterpreterTypes<Stack: StackInspectTr>,
+        H: HostExt + ?Sized,
+    >(
+        context: &InstructionContext<'_, H, WIRE>,
+    ) -> Option<CallMemoryRanges> {
+        let stack = &context.interpreter.stack;
+        let operands = if HAS_VALUE_OPERAND {
+            [stack.inspect::<3>(), stack.inspect::<4>(), stack.inspect::<5>(), stack.inspect::<6>()]
+        } else {
+            [stack.inspect::<2>(), stack.inspect::<3>(), stack.inspect::<4>(), stack.inspect::<5>()]
+        };
+        let [Some(in_offset), Some(in_len), Some(out_offset), Some(out_len)] = operands else {
+            return None;
+        };
+        Some([in_offset, in_len, out_offset, out_len])
+    }
+
+    /// Reports whether `budget` gas covers the two memory expansions revm's CALL-family body
+    /// performs before it loads the target, for a frame whose memory accounting stands at
+    /// `memory_gas`.
+    ///
+    /// Answers the question without charging anything, because both callers ask it about a budget
+    /// the frame no longer has: one is about to return out of gas without having debited the
+    /// static charge, the other has already had it debited by a body that then halted.
+    ///
+    /// Mirrors revm's `resize_memory`: a zero length neither reads its offset nor touches memory,
+    /// an operand revm's `as_usize_or_fail!` would reject makes the body halt ahead of its load
+    /// (so it counts as unaffordable), and the two expansions together cost exactly what reaching
+    /// their high-water mark costs, because memory gas is cumulative and priced off the size alone.
+    pub(super) fn call_memory_expansions_affordable<WIRE: InterpreterTypes, H: HostExt + ?Sized>(
+        context: &InstructionContext<'_, H, WIRE>,
+        memory_gas: gas::MemoryGas,
+        budget: u64,
+        ranges: CallMemoryRanges,
+    ) -> bool {
+        let [in_offset, in_len, out_offset, out_len] = ranges;
+        let (Some(in_words), Some(out_words)) =
+            (memory_range_words(in_offset, in_len), memory_range_words(out_offset, out_len))
+        else {
+            return false;
+        };
+        let words = in_words.max(out_words);
+        if words <= memory_gas.words_num {
+            return true;
+        }
+        context.host.gas_params().memory_cost(words).saturating_sub(memory_gas.expansion_cost) <=
+            budget
+    }
+
+    /// The memory size, in words, one `(offset, len)` operand pair requires. `None` for an operand
+    /// revm's `as_usize_or_fail!` would have rejected.
+    fn memory_range_words(offset: U256, len: U256) -> Option<usize> {
+        let len = operand_as_usize(len)?;
+        if len == 0 {
+            return Some(0);
+        }
+        let offset = operand_as_usize(offset)?;
+        Some(num_words(offset.saturating_add(len)))
+    }
+
+    /// Converts a memory operand to `usize`, reporting `None` for a value revm's
+    /// `as_usize_or_fail!` would have rejected.
+    fn operand_as_usize(value: U256) -> Option<usize> {
+        let limbs = value.as_limbs();
+        if limbs[0] > usize::MAX as u64 || limbs[1] != 0 || limbs[2] != 0 || limbs[3] != 0 {
+            return None;
+        }
+        Some(limbs[0] as usize)
     }
 
     /// Rejects the guarded opcode with the `disableVolatileDataAccess` revert data and returns from
@@ -1457,23 +1695,41 @@ pub mod volatile_data_ext {
                 }
             }
 
-            // The raw stack target, captured before the body pops it, for the frozen-window
-            // tripwire. EXTCODECOPY is the family member with a real window (its revm body
-            // charges the copy cost before the load); for the others the hook doubles as a
-            // running check that their loads do mark before any out-of-gas halt.
-            #[cfg(debug_assertions)]
-            let tripwire_target: Option<Address> =
-                context.interpreter.stack.inspect::<0>().map(|w| w.into_address());
+            // `EXTCODECOPY` is the one member whose revm 40 body halts between its operand pop and
+            // its load: it validates its operands, charges the copy cost and expands memory
+            // first. The deployed schedule loaded the target — leaving its journal entry and, for
+            // the beneficiary, the access mark — right after the pop, so a halt on any of those
+            // steps left both behind there. The other members load, and the host marks, before
+            // anything they can halt on after the pop, so their raw target is not needed.
+            // Captured before the body pops it.
+            let target: Option<Address> = if opcode::$opcode == opcode::EXTCODECOPY {
+                context.interpreter.stack.inspect::<0>().map(|w| w.into_address())
+            } else {
+                None
+            };
 
             run_inner_instruction_or_abort!(
                 $original_fn,
                 context,
                 inner_outcome,
-                on_plain_oog: debug_check_frozen_detention_window(
-                    context.host,
-                    opcode::$opcode,
-                    tripwire_target
-                )
+                on_halt: |halt| {
+                    // A stack underflow is raised by the pop itself, ahead of the deployed load.
+                    // The wrapper still aborts here without applying the cap, as the deployed one
+                    // did, so the mark caps the transaction only once a later tail applies it. A
+                    // database error on the recreated read keeps this halt's own result.
+                    if let Some(target) =
+                        target.filter(|_| halt != InstructionResult::StackUnderflow)
+                    {
+                        let _ = context.host.recreate_reverted_account_read(target, false);
+                        if target == context.host.beneficiary_address() {
+                            context
+                                .host
+                                .volatile_data_tracker()
+                                .borrow_mut()
+                                .mark_beneficiary_balance_accessed();
+                        }
+                    }
+                }
             );
             apply_compute_gas_limit!(context);
             inner_outcome
@@ -1697,13 +1953,14 @@ pub mod volatile_data_ext {
     /// for a frame that can afford them.
     ///
     /// A frame that *cannot* afford the charge is the case where that order shows: the body never
-    /// runs, so it never loads the target and never marks beneficiary access. That divergence is
-    /// unreachable from a wrapper. What is reachable is the tail: the detention cap below is
-    /// applied on every path out of this handler, including the out-of-gas one, so an access marked
-    /// by an already-returned inner frame is still propagated into the transaction's compute
-    /// budget.
+    /// runs, so it never loads the target, where the deployed implementation, which loaded before
+    /// charging, did. The out-of-gas exit therefore recreates what that load left behind whenever
+    /// the deployed body would have reached it (see [`recreate_unreached_call_load`]). The
+    /// detention cap below is applied on every path out of this handler, including the
+    /// out-of-gas one, so an access marked there, or by an already-returned inner frame, is
+    /// propagated into the transaction's compute budget.
     macro_rules! wrap_call_volatile_check {
-    ($fn_name:ident, $opcode:ident, $inner_fn:path) => {
+    ($fn_name:ident, $opcode:ident, $inner_fn:path, $select_addr:path) => {
         #[doc = concat!("`", stringify!($opcode), "` opcode with volatile data access disabled check for beneficiary.")]
         #[inline]
         pub fn $fn_name<
@@ -1750,19 +2007,28 @@ pub mod volatile_data_ext {
                     }
                 }
             }
-            // The raw stack target, captured before the body pops it, for the frozen-window
-            // tripwire. The CALL family is where the window lives: this wrapper's static charge
-            // and the body's value-transfer charge both precede the load that marks.
-            #[cfg(debug_assertions)]
-            let tripwire_target: Option<Address> =
-                context.interpreter.stack.inspect::<1>().map(|w| w.into_address());
-
             // Charged here rather than after the body — see the macro's doc comment. The charge
             // does not return early: the detention tail below has to run on this path too.
             const STATIC_GAS: u64 = static_gas(opcode::$opcode);
             if !context.interpreter.gas.record_regular_cost(STATIC_GAS) {
-                #[cfg(debug_assertions)]
-                debug_check_frozen_detention_window(context.host, opcode::$opcode, tripwire_target);
+                // The charge is where revm 40 put it, but it is not where this family's consensus
+                // schedule takes it: the deployed implementation charged from inside revm's body,
+                // after the target was loaded, so a frame that cannot afford the charge had
+                // already materialized journal entries and marked beneficiary access. Recreate
+                // them here, ahead of the tail that applies the detention cap.
+                const HAS_VALUE_OPERAND: bool =
+                    opcode::$opcode == opcode::CALL || opcode::$opcode == opcode::CALLCODE;
+                const IS_CALL: bool = opcode::$opcode == opcode::CALL;
+                {
+                    let mut ctx = InstructionContext::<'_, H, WIRE> {
+                        interpreter: &mut *context.interpreter,
+                        host: &mut *context.host,
+                    };
+                    recreate_unreached_call_load::<HAS_VALUE_OPERAND, IS_CALL, _, _>(
+                        &mut ctx,
+                        $select_addr,
+                    )?;
+                }
                 apply_compute_gas_limit!(context);
                 return Err(InstructionResult::OutOfGas);
             }
@@ -1779,13 +2045,6 @@ pub mod volatile_data_ext {
                 inner_outcome = $inner_fn(ctx);
             }
 
-            // A plain out-of-gas halt from the body can be its value-transfer charge, which
-            // sits before the load: the frozen-window tripwire has to look at it.
-            #[cfg(debug_assertions)]
-            if matches!(inner_outcome, Err(InstructionResult::OutOfGas)) {
-                debug_check_frozen_detention_window(context.host, opcode::$opcode, tripwire_target);
-            }
-
             // Propagate the detained compute gas limit if the CALL triggered beneficiary
             // access (marked by the host as the CALL's target account was loaded).
             // `apply_compute_gas_limit!` only touches the tracker and `AdditionalLimit`,
@@ -1799,10 +2058,33 @@ pub mod volatile_data_ext {
 
     // Conditionally volatile CALL-like opcodes — volatile only when targeting the block
     // beneficiary. These wrap forward_gas_ext handlers with a pre-execution beneficiary check.
-    wrap_call_volatile_check!(call, CALL, forward_gas_ext::call);
-    wrap_call_volatile_check!(static_call, STATICCALL, forward_gas_ext::static_call);
-    wrap_call_volatile_check!(delegate_call, DELEGATECALL, forward_gas_ext::delegate_call);
-    wrap_call_volatile_check!(call_code, CALLCODE, forward_gas_ext::call_code);
+    // The trailing selector must stay the one `storage_gas_ext`'s wrapper meters this opcode
+    // against: it is what `recreate_unreached_call_load` reproduces when the frame cannot
+    // afford the static charge above.
+    wrap_call_volatile_check!(
+        call,
+        CALL,
+        forward_gas_ext::call,
+        storage_gas_ext::storage_addr_from_to
+    );
+    wrap_call_volatile_check!(
+        static_call,
+        STATICCALL,
+        forward_gas_ext::static_call,
+        storage_gas_ext::storage_addr_from_to
+    );
+    wrap_call_volatile_check!(
+        delegate_call,
+        DELEGATECALL,
+        forward_gas_ext::delegate_call,
+        storage_gas_ext::storage_addr_from_to
+    );
+    wrap_call_volatile_check!(
+        call_code,
+        CALLCODE,
+        forward_gas_ext::call_code,
+        storage_gas_ext::storage_addr_for_callcode
+    );
 }
 
 /// Extends opcodes with additional limit (kv update limit, data limit, etc.) enforcement.
@@ -1909,7 +2191,11 @@ pub mod storage_gas_ext {
 
     /// Address-selector for opcodes where the storage account is the stack `to` address (e.g.
     /// CALL).
-    fn storage_addr_from_to(_mega_spec: MegaSpecId, _current: Address, to: Address) -> Address {
+    pub(super) fn storage_addr_from_to(
+        _mega_spec: MegaSpecId,
+        _current: Address,
+        to: Address,
+    ) -> Address {
         to
     }
 
@@ -1928,7 +2214,11 @@ pub mod storage_gas_ext {
     /// Address-selector for CALLCODE: Rex5+ uses the current frame's address because CALLCODE
     /// executes borrowed code in the caller's own storage context; pre-Rex5 preserves the frozen
     /// behavior of metering against the code-source (stack `to`).
-    fn storage_addr_for_callcode(mega_spec: MegaSpecId, current: Address, to: Address) -> Address {
+    pub(super) fn storage_addr_for_callcode(
+        mega_spec: MegaSpecId,
+        current: Address,
+        to: Address,
+    ) -> Address {
         if mega_spec.is_enabled(MegaSpecId::REX5) {
             current
         } else {
@@ -2031,17 +2321,96 @@ pub mod storage_gas_ext {
                         .borrow_mut()
                         .try_consume_storage_stipend(new_account_storage_gas);
                     let charged = new_account_storage_gas - drained;
-                    gas!(context.interpreter, charged);
+                    if !context.interpreter.gas.record_regular_cost(charged) {
+                        // The deployed schedule took this charge with the opcode's static gas
+                        // still in the frame — revm 40 debits it first, through this family's
+                        // wrapper or the interpreter's pre-charge — so a frame short of the charge
+                        // by less than that static gas paid it there and went on towards its load.
+                        // A failed charge debits nothing, so the frame's gas is as it was.
+                        const IS_CALL: bool = opcode::$opcode == opcode::CALL;
+                        let budget = context
+                            .interpreter
+                            .gas
+                            .remaining()
+                            .saturating_add(static_gas(opcode::$opcode))
+                            .checked_sub(charged);
+                        if budget.is_some_and(|budget| {
+                            volatile_data_ext::deployed_body_reaches_load::<
+                                $has_transfer_logic,
+                                IS_CALL,
+                                _,
+                                _,
+                            >(&context, has_transfer, budget)
+                        }) {
+                            volatile_data_ext::recreate_reached_load(
+                                context.host,
+                                to,
+                                storage_address,
+                            )?;
+                        }
+                        return Err(InstructionResult::OutOfGas);
+                    }
                     charged
                 } else {
                     0
                 };
 
+                // revm 40 takes two charges ahead of its load that the deployed schedule took after
+                // it — the opcode's static gas, debited before this handler was entered, and the
+                // body's value-transfer cost — so a frame that halts on either never reaches the
+                // load. That is where the deployed host marked beneficiary access and, from REX6,
+                // gave the raw operand a journal entry of its own. Deciding whether that schedule
+                // would have reached the load needs the memory ranges revm's body expands on the
+                // way there, and the body pops them, so they are read here.
+                let memory_ranges =
+                    volatile_data_ext::call_memory_ranges::<$has_transfer_logic, _, _>(&context);
+                let memory_gas_before = *context.interpreter.gas.memory();
+
                 // Run the raw opcode and record compute gas once after the body completes
                 // (canonical metering order). Byte-equivalent to the pre-REX6 layering on every
                 // spec because nothing between the `gas_before` capture and the storage charge
                 // above consumes EVM gas.
-                run_inner_instruction_or_abort!($raw_fn, context, inner_outcome);
+                run_inner_instruction_or_abort!(
+                    $raw_fn,
+                    context,
+                    inner_outcome,
+                    on_halt: |halt| {
+                        let reached_load = match halt {
+                            // The body cleared its memory expansions and halted on a gas charge.
+                            // Every one of those the deployed schedule took after the load, and a
+                            // body that did reach it has already marked and materialized, which
+                            // repeating leaves as it is.
+                            InstructionResult::OutOfGas => true,
+                            // The body halted on a memory expansion, which the deployed schedule
+                            // ran with the static charge still in the frame. That charge was
+                            // debited before this handler was entered, by this family's wrapper
+                            // or by the interpreter's pre-charge, and nothing between it and
+                            // `gas_before` consumes EVM gas besides the storage charge above, so
+                            // this recovers the budget the deployed schedule had.
+                            InstructionResult::MemoryOOG => memory_ranges.is_some_and(|ranges| {
+                                volatile_data_ext::call_memory_expansions_affordable(
+                                    &context,
+                                    memory_gas_before,
+                                    gas_before
+                                        .saturating_sub(storage_charged)
+                                        .saturating_add(static_gas(opcode::$opcode)),
+                                    ranges,
+                                )
+                            }),
+                            // Everything else the body can raise before its load — a stack
+                            // underflow, an oversized memory operand, a value transfer inside
+                            // a static call — stopped the deployed schedule in the same place.
+                            _ => false,
+                        };
+                        if reached_load {
+                            volatile_data_ext::recreate_reached_load(
+                                context.host,
+                                to,
+                                storage_address,
+                            )?;
+                        }
+                    }
+                );
                 record_storage_compute_gas!(
                     context,
                     gas_before,
@@ -2926,6 +3295,24 @@ pub mod compute_gas_ext {
         selfdestruct_impl::<true, WIRE, H>(context)
     }
 
+    /// Halts a `SELFDESTRUCT` that cannot afford its charge with the frame's remaining gas set to
+    /// `remaining`, the amount the deployed implementation left.
+    ///
+    /// The deployed implementation charged the opcode's whole cost in one step and, when that
+    /// charge failed, halted with the frame's gas as it stood before the opcode; revm 40 charges in
+    /// steps and zeroes a frame that halts out of gas. The halted frame's remaining gas is
+    /// observable: a frame-local limit exceed turns the halt into a revert that hands it back to
+    /// the caller, and a transaction-level one refunds it to the sender. The halt action set here
+    /// is kept by the interpreter loop, which zeroes the gas only when no action is set.
+    pub(super) fn halt_out_of_gas_with_remaining<WIRE: InterpreterTypes>(
+        interpreter: &mut Interpreter<WIRE>,
+        remaining: u64,
+    ) {
+        let current = interpreter.gas.remaining();
+        interpreter.gas.erase_cost(remaining.saturating_sub(current));
+        set_halt_action!(interpreter, InstructionResult::OutOfGas);
+    }
+
     /// Shared body of the two `SELFDESTRUCT` compute-gas wrappers.
     ///
     /// `SELF_CHARGES_STATIC_GAS` says who owes the opcode's static gas: when set, this handler
@@ -2949,15 +3336,30 @@ pub mod compute_gas_ext {
         context: InstructionContext<'_, H, WIRE>,
     ) -> InstructionExecResult {
         let gas_before = context.interpreter.gas.remaining();
-
-        // Call the original instruction
-        run_inner_instruction_or_abort!(instructions::host::selfdestruct, context, inner_outcome);
-
-        if SELF_CHARGES_STATIC_GAS {
-            charge_static_gas!(context, SELFDESTRUCT);
-        }
         let pre_charged =
             if SELF_CHARGES_STATIC_GAS { 0 } else { const { static_gas(opcode::SELFDESTRUCT) } };
+
+        // Call the original instruction
+        run_inner_instruction_or_abort!(
+            instructions::host::selfdestruct,
+            context,
+            inner_outcome,
+            on_halt: |halt| {
+                if halt == InstructionResult::OutOfGas {
+                    halt_out_of_gas_with_remaining(context.interpreter, gas_before + pre_charged);
+                }
+            }
+        );
+
+        if SELF_CHARGES_STATIC_GAS &&
+            !context
+                .interpreter
+                .gas
+                .record_regular_cost(const { static_gas(opcode::SELFDESTRUCT) })
+        {
+            halt_out_of_gas_with_remaining(context.interpreter, gas_before);
+            return Err(InstructionResult::OutOfGas);
+        }
         let gas_used = pre_charged + gas_before.saturating_sub(context.interpreter.gas.remaining());
         let mut additional_limit = context.host.additional_limit().borrow_mut();
         if !additional_limit.record_compute_gas_all_dims(gas_used) {
@@ -2992,19 +3394,7 @@ impl StackInspectTr for Stack {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    const ALL_SPECS: [MegaSpecId; 10] = [
-        MegaSpecId::EQUIVALENCE,
-        MegaSpecId::MINI_REX,
-        MegaSpecId::REX,
-        MegaSpecId::REX1,
-        MegaSpecId::REX2,
-        MegaSpecId::REX3,
-        MegaSpecId::REX4,
-        MegaSpecId::REX5,
-        MegaSpecId::REX6,
-        MegaSpecId::REX7,
-    ];
+    use crate::{test_utils::MemoryDatabase, EmptyExternalEnv};
 
     /// [`STATIC_GAS_TABLE`] is a single table shared by every handler, so the static gas it adds
     /// back is only correct as long as every spec's instruction table was built from the same
@@ -3012,7 +3402,7 @@ mod tests {
     /// table instead of silently metering against this one.
     #[test]
     fn test_static_gas_table_is_spec_invariant() {
-        for spec in ALL_SPECS {
+        for spec in MegaSpecId::ALL.iter().copied() {
             assert_eq!(
                 gas_table_spec(spec.into_eth_spec()),
                 STATIC_GAS_TABLE,
@@ -3107,7 +3497,7 @@ mod tests {
     /// is not a surface this table is used to pin.
     #[test]
     fn test_only_volatile_guarded_opcodes_have_zero_static_gas() {
-        for spec in ALL_SPECS {
+        for spec in MegaSpecId::ALL.iter().copied() {
             let vanilla = gas_table_spec(spec.into_eth_spec());
             let table = gas_table_for_spec(spec);
             let expected = volatile_guarded_opcodes(spec);
@@ -3144,15 +3534,47 @@ mod tests {
     /// (empty formatter write) fails.
     #[test]
     fn test_mega_instructions_debug_fmt_is_non_empty() {
-        let instructions = MegaInstructions::<
-            crate::test_utils::MemoryDatabase,
-            crate::EmptyExternalEnv,
-        >::new(MegaSpecId::REX5);
+        let instructions =
+            MegaInstructions::<MemoryDatabase, EmptyExternalEnv>::new(MegaSpecId::REX5);
         let rendered = format!("{instructions:?}");
         assert!(!rendered.is_empty(), "Debug output must write at least one byte",);
         assert!(
             rendered.contains("MegaethInstructions") || rendered.contains("REX5"),
             "Debug output must identify the type or the configured spec; got {rendered}",
         );
+    }
+
+    /// Every alias spec must select exactly its `behavior()` target's instruction
+    /// table and static gas table — the matches in `MegaInstructions::new` and
+    /// `gas_table_for_spec` each state the alias→target mapping again, and this test is
+    /// the reconciliation between them. Both instruction tables come from the same
+    /// monomorphization, so identical arms produce identical fn pointers. revm wraps each
+    /// entry in an opaque `Instruction` whose pointer is only observable through its `Debug`
+    /// rendering, so that rendering is what gets compared.
+    #[test]
+    fn test_alias_specs_use_their_behavior_targets_table() {
+        for spec in MegaSpecId::ALL {
+            if !spec.is_alias() {
+                continue;
+            }
+            let alias = MegaInstructions::<MemoryDatabase, EmptyExternalEnv>::new(*spec);
+            let target = MegaInstructions::<MemoryDatabase, EmptyExternalEnv>::new(spec.behavior());
+            let (alias_table, target_table) =
+                (alias.instruction_table(), target.instruction_table());
+            for opcode in 0..=0xff_usize {
+                assert_eq!(
+                    format!("{:?}", alias_table[opcode]),
+                    format!("{:?}", target_table[opcode]),
+                    "{spec:?} table diverges from its behavior target {:?} at opcode {opcode:#04x}",
+                    spec.behavior(),
+                );
+            }
+            assert_eq!(
+                alias.gas_table(),
+                target.gas_table(),
+                "{spec:?} static gas table diverges from its behavior target {:?}",
+                spec.behavior(),
+            );
+        }
     }
 }

@@ -193,7 +193,29 @@ pub fn transact_deploy_sequencer_registry<DB: Database>(
     db: &mut DB,
     config: &SequencerRegistryConfig,
 ) -> Result<Option<EvmState>, BlockExecutionError> {
-    if !hardforks.is_rex_5_active_at_timestamp(block_timestamp) {
+    let spec = hardforks.spec_id(block_timestamp);
+    let rex6_config = hardforks.fork_params::<SequencerRegistryRex6Config>();
+    transact_deploy_sequencer_registry_for(spec, rex6_config, current_block_number, db, config)
+}
+
+/// [`transact_deploy_sequencer_registry`] against an already-resolved spec.
+///
+/// The block executor resolves the spec once per block and calls this directly; the public
+/// wrapper above resolves it for callers that hold a hardfork config. Like the flat-registry
+/// spec builders, this deliberately does not take a hardfork config — everything a deploy
+/// depends on arrives resolved (the spec and the typed params), so a per-fork activation gate
+/// cannot be reintroduced here.
+pub(crate) fn transact_deploy_sequencer_registry_for<DB: Database>(
+    spec: crate::MegaSpecId,
+    rex6_config: Option<&SequencerRegistryRex6Config>,
+    current_block_number: u64,
+    db: &mut DB,
+    config: &SequencerRegistryConfig,
+) -> Result<Option<EvmState>, BlockExecutionError> {
+    // Gate and bytecode selection follow the scheduled spec, not per-fork registration:
+    // a registry once deployed stays deployed through a spec rollback, and a config that
+    // schedules only a later fork must still get the Rex5 bootstrap.
+    if !spec.reaches(crate::MegaSpecId::REX5) {
         return Ok(None);
     }
 
@@ -207,17 +229,15 @@ pub fn transact_deploy_sequencer_registry<DB: Database>(
     // Select the bytecode version and, for v2.0.0, resolve the seeded minimum rotation delay.
     // The Rex6 params are required as soon as Rex6 is active: failing fast here surfaces a
     // misconfigured chain at the activation block instead of deploying an unseeded registry.
-    let rex6 = hardforks.is_rex_6_active_at_timestamp(block_timestamp);
+    let rex6 = spec.reaches(crate::MegaSpecId::REX6);
     let (target_code, target_code_hash) = if rex6 {
         (SEQUENCER_REGISTRY_CODE_REX6, SEQUENCER_REGISTRY_CODE_HASH_REX6)
     } else {
         (SEQUENCER_REGISTRY_CODE, SEQUENCER_REGISTRY_CODE_HASH)
     };
     let min_rotation_delay = if rex6 {
-        let params = hardforks.fork_params::<SequencerRegistryRex6Config>().ok_or_else(|| {
-            BlockValidationError::BlockHashContractCall {
-                message: "Rex6 active but SequencerRegistryRex6Config not configured".into(),
-            }
+        let params = rex6_config.ok_or_else(|| BlockValidationError::BlockHashContractCall {
+            message: "Rex6 active but SequencerRegistryRex6Config not configured".into(),
         })?;
         debug_assert!(
             params.validate().is_ok(),
@@ -391,6 +411,12 @@ where
 /// - Pre-REX5: returns `(MEGA_SYSTEM_ADDRESS, None)`.
 /// - REX5: reads `_currentSystemAddress` from committed registry storage.
 ///
+/// The single `spec` is read through two projections that answer different questions:
+/// `is_enabled` (behavior) gates whether dynamic system-address resolution applies — an alias
+/// window whose behavior projects below REX5 returns [`MEGA_SYSTEM_ADDRESS`] again — while
+/// `reaches` (position) selects which registry bytecode version the pre-block deploy installed,
+/// which a rollback does not change.
+///
 /// The optional `EvmState` captures account + slot reads as a witness record.
 /// The executor MUST commit this via `db.commit()`: the commit is what fires the
 /// witness-recording state hook installed on the revm `State` database.
@@ -399,6 +425,8 @@ pub fn resolve_system_address<DB: Database>(
     spec: crate::MegaSpecId,
     db: &mut DB,
 ) -> Result<(Address, Option<EvmState>), BlockExecutionError> {
+    // One spec, two projections: `is_enabled` (behavior) gates whether dynamic resolution
+    // applies at all; `reaches` (position) selects the installed bytecode version below.
     if !spec.is_enabled(crate::MegaSpecId::REX5) {
         return Ok((MEGA_SYSTEM_ADDRESS, None));
     }
@@ -420,9 +448,10 @@ pub fn resolve_system_address<DB: Database>(
     };
 
     // Unreachable: deploy verifies the code hash before seeding storage. The expected version
-    // follows the spec: the pre-block deploy has already swapped the bytecode to v2.0.0 at the
-    // Rex6 activation block, so an exact per-spec match holds on every block.
-    let expected_code_hash = if spec.is_enabled(crate::MegaSpecId::REX6) {
+    // follows the scheduled spec, matching what the pre-block deploy installed: the
+    // bytecode was already swapped to v2.0.0 at the Rex6 activation block, so an exact match
+    // holds on every block.
+    let expected_code_hash = if spec.reaches(crate::MegaSpecId::REX6) {
         SEQUENCER_REGISTRY_CODE_HASH_REX6
     } else {
         SEQUENCER_REGISTRY_CODE_HASH

@@ -63,6 +63,10 @@ pub enum SpecName {
     Osaka, // SKIPPED
     /// `MegaETH` `MiniRex` hardfork
     MiniRex,
+    /// `MegaETH` `MiniRex1` alias spec (behavior: `Equivalence`)
+    MiniRex1,
+    /// `MegaETH` `MiniRex2` alias spec (behavior: `MiniRex`)
+    MiniRex2,
     /// `MegaETH` `Equivalence` spec (Ethereum-equivalent baseline)
     Equivalence,
     /// `MegaETH` `Rex` spec
@@ -98,6 +102,8 @@ impl SpecName {
     pub fn to_spec_id(&self) -> Result<MegaSpecId, UnknownSpecError> {
         match self {
             Self::MiniRex => Ok(MegaSpecId::MINI_REX),
+            Self::MiniRex1 => Ok(MegaSpecId::MINI_REX_1),
+            Self::MiniRex2 => Ok(MegaSpecId::MINI_REX_2),
             Self::Rex => Ok(MegaSpecId::REX),
             Self::Rex1 => Ok(MegaSpecId::REX1),
             Self::Rex2 => Ok(MegaSpecId::REX2),
@@ -119,6 +125,8 @@ impl SpecName {
     pub fn from_mega_spec(spec: MegaSpecId) -> Self {
         match spec {
             MegaSpecId::MINI_REX => Self::MiniRex,
+            MegaSpecId::MINI_REX_1 => Self::MiniRex1,
+            MegaSpecId::MINI_REX_2 => Self::MiniRex2,
             MegaSpecId::EQUIVALENCE => Self::Equivalence,
             MegaSpecId::REX => Self::Rex,
             MegaSpecId::REX1 => Self::Rex1,
@@ -141,6 +149,8 @@ mod tests {
     fn test_to_spec_id_known_specs_succeed() {
         // MegaETH specs map to their own ids.
         assert_eq!(SpecName::MiniRex.to_spec_id(), Ok(MegaSpecId::MINI_REX));
+        assert_eq!(SpecName::MiniRex1.to_spec_id(), Ok(MegaSpecId::MINI_REX_1));
+        assert_eq!(SpecName::MiniRex2.to_spec_id(), Ok(MegaSpecId::MINI_REX_2));
         assert_eq!(SpecName::Rex.to_spec_id(), Ok(MegaSpecId::REX));
         assert_eq!(SpecName::Rex1.to_spec_id(), Ok(MegaSpecId::REX1));
         assert_eq!(SpecName::Rex2.to_spec_id(), Ok(MegaSpecId::REX2));
@@ -180,6 +190,8 @@ mod tests {
     fn test_from_mega_spec_round_trips_known_specs() {
         for spec in [
             MegaSpecId::MINI_REX,
+            MegaSpecId::MINI_REX_1,
+            MegaSpecId::MINI_REX_2,
             MegaSpecId::EQUIVALENCE,
             MegaSpecId::REX,
             MegaSpecId::REX1,
@@ -191,6 +203,20 @@ mod tests {
             MegaSpecId::REX7,
         ] {
             assert_eq!(SpecName::from_mega_spec(spec).to_spec_id(), Ok(spec));
+        }
+    }
+
+    #[test]
+    fn test_alias_spec_names_match_mega_evm_names() {
+        // A fixture dumped under an alias spec keys its `post` map by the
+        // serialized `SpecName`, and `--override.spec` parses the same string
+        // through `MegaSpecId`'s `FromStr` — the two name surfaces must agree.
+        for (spec_name, mega_name) in [
+            (SpecName::MiniRex1, mega_evm::name::MINI_REX_1),
+            (SpecName::MiniRex2, mega_evm::name::MINI_REX_2),
+        ] {
+            let serialized = serde_json::to_string(&spec_name).expect("serialize");
+            assert_eq!(serialized, format!("\"{mega_name}\""));
         }
     }
 

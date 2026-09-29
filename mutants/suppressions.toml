@@ -340,7 +340,7 @@ reviewer = "improve-mutation-score (William Aaron Cheung)"
 kind = "line"
 category = "equivalent"
 file = "crates/mega-evm/src/evm/precompiles.rs"
-mutant = "crates/mega-evm/src/evm/precompiles.rs:135:49: replace || with && in modexp::run_osaka_legacy"
+mutant = "crates/mega-evm/src/evm/precompiles.rs:137:49: replace || with && in modexp::run_osaka_legacy"
 justification = "Equivalent: weakening the first || only skips the early halt when exactly one of base_len/mod_len exceeds the EIP-7823 limit while exp_len does not. The zero-base/zero-modulus short-circuit cannot fire there (the offending length is non-zero), so control reaches upstream osaka_run, whose identical EIP-7823 check returns Err(ModexpEip7823LimitSize); the wrapper maps it to the same PrecompileOutput::halt(ModexpEip7823LimitSize, reservoir) the unmutated line returns. Full suite green with the mutant applied."
 reviewer = "RealiCZ (cz)"
 

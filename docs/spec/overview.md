@@ -50,11 +50,13 @@ For the current stable behavior as a single reference, see the [MegaEVM Overview
 ## Spec Progression
 
 MegaETH uses a spec system to version its verifiable behavior at each stage of the protocol's evolution.
-Each newer spec includes all previous behaviors:
+Each newer behavior-introducing spec includes all previous behaviors:
 
 ```
-EQUIVALENCE → MINI_REX → REX → REX1 → REX2 → REX3 → REX4 → REX5 → REX6 → REX7
+EQUIVALENCE → MINI_REX → MINI_REX_1 → MINI_REX_2 → REX → REX1 → REX2 → REX3 → REX4 → REX5 → REX6 → REX7
 ```
+
+`MINI_REX_1` and `MINI_REX_2` are [alias rungs](hardfork-spec.md#alias-specs-behavior-vs-position) with no behavior of their own: they execute `EQUIVALENCE` and `MINI_REX` behavior respectively, expressing a rollback while the spec ladder keeps climbing.
 
 {% hint style="info" %}
 **Backward Compatibility** — EVM semantics for frozen specs are fixed.
@@ -64,6 +66,7 @@ Contracts deployed under a given spec will continue to behave identically, regar
 
 - **EQUIVALENCE** — Baseline. Full Optimism Isthmus compatibility with block environment access tracking for parallel execution.
 - **MINI_REX** — Dual gas model, multidimensional resource limits, gas detention, 98/100 gas forwarding, SELFDESTRUCT disabled, Oracle and Timestamp system contracts.
+- **MINI_REX_1 / MINI_REX_2** — Alias rungs with no behavior of their own; they execute EQUIVALENCE and MINI_REX behavior respectively.
 - **REX** — Revised storage gas economics (`base × (multiplier − 1)`), transaction intrinsic storage gas, state growth tracking, consistent CALL-like opcode behavior.
 - **REX1** — Fix: compute gas limit reset between transactions.
 - **REX2** — SELFDESTRUCT re-enabled (EIP-6780), KeylessDeploy system contract.

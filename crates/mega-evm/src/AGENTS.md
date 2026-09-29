@@ -17,7 +17,7 @@ Core MegaEVM crate implementation layer that composes execution, block processin
 ## KEY PATTERNS
 - `no_std` discipline is active for this crate.
 - Use `#[cfg(not(feature = "std"))] use alloc as std;` when std collections are required.
-- Spec progression is additive.
+- Spec progression is additive for behavior-introducing specs; alias rungs (`MINI_REX_1`, `MINI_REX_2`) re-execute an earlier behavior instead.
 - Keep behavior gates explicit via `spec.is_enabled(...)` at call sites.
 - Per-frame trackers must stay stack-aligned with EVM frame lifecycle hooks.
 - Intercepted synthetic frame results must keep tracker alignment via empty-frame pushes.
