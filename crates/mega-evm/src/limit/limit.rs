@@ -581,7 +581,8 @@ impl AdditionalLimit {
     /// So the count is a prediction of what revm will do, and it is called only for a start revm
     /// makes as far as the caller's account decides it. A start revm refuses there — a value its
     /// caller cannot fund, a creation whose creator's nonce cannot be bumped — moves and writes
-    /// nothing, and gets an empty lane instead ([`push_empty_frame`](Self::push_empty_frame)).
+    /// nothing, and gets an empty lane instead ([`push_empty_frame`](Self::push_empty_frame)); so
+    /// does a start past the call-stack limit, which the depth guard answers before it is counted.
     /// The one refusal decided after the count is a creation onto an occupied address: revm reads
     /// the created address's account only once it builds the frame. Its records and transfer log
     /// are counted, a crossing they cause stops the creation before revm could refuse it, and
@@ -666,21 +667,6 @@ impl AdditionalLimit {
             None => self.limits.tx_usage_limit().saturating_sub(self.tracker.net()),
         };
         forwarded.min(self.limits.frame_usage_limit())
-    }
-
-    /// Takes back what a creation's start counted: revm answered the creation without bumping its
-    /// creator's nonce, so the start wrote nothing and moved nothing — no creator's nonce, no
-    /// created account, no transfer log.
-    ///
-    /// A failure would discard the lane anyway, but not the creator's record, which outlives a
-    /// failed creation once the nonce was bumped. And one answer of this kind is a success: a
-    /// creator whose nonce cannot be bumped is answered with a `Return` and no address, which
-    /// would merge the lane into the caller's. Such a start is predicted and counts nothing in
-    /// the first place ([`on_frame_init`](Self::on_frame_init)); this holds the lane to revm's
-    /// answer whatever was counted. The caller gets back all it paid for the records when the
-    /// frame returns.
-    pub(crate) fn creation_did_not_bump_nonce(&mut self) {
-        self.tracker.undo_frame_start();
     }
 
     fn push_lane(&mut self, input: &FrameInput, depth: usize) {
@@ -1400,37 +1386,6 @@ mod tests {
             100_000,
             0,
         )))
-    }
-
-    /// A creation revm answers without bumping its creator's nonce keeps nothing its start
-    /// counted, whatever the answer: a failure, and the success a creator whose nonce cannot be
-    /// bumped is answered with. The created account's record, the transfer log and the creator's
-    /// record all go, the caller gets back all it paid for them, and the creator's account is no
-    /// longer counted as recorded, so its next value transfer records it.
-    #[test]
-    fn test_a_creation_that_did_not_bump_the_nonce_keeps_nothing() {
-        let inner = creation(CALLEE, U256::from(1));
-        for answer in [InstructionResult::Return, InstructionResult::OutOfFunds] {
-            let mut limit = logging(EvmTxRuntimeLimits::no_limits());
-            limit.on_frame_init(&call_from_to(SENDER, CALLEE, U256::ZERO), 0);
-            limit.stage_frame_charge(limit.frame_start_records(&inner), 1_000, 2_000);
-            limit.on_frame_init(&inner, 1);
-            assert_eq!(
-                limit.usage(),
-                LimitUsage {
-                    data_size: 2 * WRITE_RECORD_SIZE + TRANSFER_LOG_SIZE,
-                    write_records: 2,
-                },
-                "{answer:?}: the created account, the creator and the log",
-            );
-
-            limit.creation_did_not_bump_nonce();
-            let mut result = crate::synthetic_frame_result(&inner, answer, Bytes::new());
-            assert_eq!(limit.on_frame_return(&mut result), 3_000, "{answer:?}: all of it back");
-            assert_eq!(limit.usage(), LimitUsage::ZERO, "{answer:?}: nothing kept");
-            let next = limit.frame_start_records(&call_from_to(CALLEE, TARGET, U256::from(1)));
-            assert!(next.caller, "{answer:?}: the creator is not recorded");
-        }
     }
 
     /// Exactly the frame starts that move value to another account count a transfer log: a value

@@ -412,8 +412,8 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
     /// Starts a frame, in this order:
     ///
     /// 1. the latch: a latched transaction's frame is answered with the stop;
-    /// 2. the depth guard: a `CALL` or `STATICCALL` past the call-stack limit is answered with
-    ///    `CallTooDeep` before anything could intercept it;
+    /// 2. the depth guard: a frame past the call-stack limit is answered with `CallTooDeep`, as
+    ///    revm answers it, before anything could intercept it or count its start;
     /// 3. the keyless dispatch ([`keyless::is_dispatched`]): a `keylessDeploy` call a transaction
     ///    makes is answered when it carries value, and otherwise readied for revm to build as the
     ///    frame whose actions [`keyless::run`] makes ([`keyless::ready`]);
@@ -482,14 +482,6 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
                 return Ok(ItemOrResult::Result(stop_before_building(ctx, &frame_init, &check)?));
             }
         }
-        // The creator of a creation, to tell afterwards whether revm bumped its nonce: a creation
-        // revm answers without the bump made nothing its start counted.
-        let creator = match &frame_init.frame_input {
-            FrameInput::Create(inputs) => {
-                Some((inputs.caller(), account_nonce(ctx, inputs.caller())))
-            }
-            _ => None,
-        };
         #[cfg(debug_assertions)]
         let counted = (
             ctx.additional_limit.frame_start_transfer_log(&frame_init.frame_input),
@@ -525,11 +517,6 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
                 Ok(ItemOrResult::Item(self.inner.frame_stack.get()))
             }
             Err(mut result) => {
-                if let Some((creator, nonce)) = creator {
-                    if account_nonce(ctx, creator) == nonce {
-                        ctx.additional_limit.creation_did_not_bump_nonce();
-                    }
-                }
                 if let PrecompileHold::Clamped(withheld) = hold {
                     Detention::restore_forward(result.interpreter_result_mut(), withheld);
                 }
@@ -1125,16 +1112,21 @@ fn stop_before_building<DB: Database, ExtEnvs: ExternalEnvTypes>(
     Ok(stopped_frame_result(frame_init, check))
 }
 
-/// The depth guard: a `CALL` or `STATICCALL` past the call-stack limit, answered with
-/// `CallTooDeep`, its gas untouched and its reservoir carried.
+/// The depth guard: a frame past the call-stack limit, of any call scheme or a creation, answered
+/// with `CallTooDeep`, its gas untouched and its reservoir carried — the answer revm gives it.
 ///
-/// revm checks the depth when it builds a frame; an interceptor or an inspector answers before
-/// revm builds anything, so without the guard a system contract could be reached at any depth.
-/// `CALLCODE` and `DELEGATECALL` never reach an interceptor and are left to revm's own check.
+/// revm checks the depth first when it builds a frame, before it moves value or bumps a creator's
+/// nonce. The guard gives the same answer before anything else sees the frame: an interceptor or an
+/// inspector answers before revm builds anything, so without the guard a system contract could be
+/// reached at any depth; and a start's writes are counted before revm decides it, so without the
+/// guard a creation past the limit would count its creator's nonce record — which outlives a failed
+/// creation — for a nonce revm never bumps.
+///
+/// No transaction reaches the limit: regular gas is capped by the execution cap and every call
+/// forwards at most sixty-three sixty-fourths of what its caller has left, so a frame at depth
+/// 1,024 has a few gas.
 fn call_too_deep(frame_init: &FrameInit) -> Option<FrameResult> {
-    let FrameInput::Call(inputs) = &frame_init.frame_input else { return None };
-    let guarded = matches!(inputs.scheme, CallScheme::Call | CallScheme::StaticCall);
-    (guarded && frame_init.depth > CALL_STACK_LIMIT as usize).then(|| {
+    (frame_init.depth > CALL_STACK_LIMIT as usize).then(|| {
         synthetic_frame_result(
             &frame_init.frame_input,
             InstructionResult::CallTooDeep,
@@ -1155,7 +1147,9 @@ fn call_too_deep(frame_init: &FrameInit) -> Option<FrameResult> {
 /// is where a divergence from revm's own rules would show. revm refuses a start on its caller's
 /// account with `OutOfFunds`, for a value the caller cannot fund, and with a `Return` for a
 /// creation whose creator's nonce cannot be bumped — the one creation it answers with a success.
-/// A built frame has run no instruction yet, so the move is all revm has done. An answered call
+/// It refuses a start past the call-stack limit too, but the depth guard answers that start
+/// before revm sees it ([`call_too_deep`]), so revm never answers one. A built frame has run no
+/// instruction yet, so the move is all revm has done. An answered call
 /// moved the value when it succeeded — a call to an account with no code, a precompile — and took
 /// the move back when it failed. A creation revm answers never moved value: it refused before its
 /// checkpoint, or reverted it (a creation onto an occupied address). Only transfer logs are
@@ -1166,6 +1160,10 @@ fn assert_start_as_counted<DB: Database, ExtEnvs: ExternalEnvTypes>(
     (counted, refused, logs_i): (bool, bool, usize),
     answer: Option<&FrameResult>,
 ) {
+    debug_assert!(
+        answer.is_none_or(|answer| answer.instruction_result() != InstructionResult::CallTooDeep),
+        "the depth guard answers every start past the call-stack limit"
+    );
     let refused_by_revm = match answer {
         None => false,
         Some(FrameResult::Call(outcome)) => outcome.result.result == InstructionResult::OutOfFunds,
@@ -1351,14 +1349,6 @@ fn caller_refuses<DB: revm::Database, ExtEnvs: ExternalEnvTypes>(
     account.is_some_and(|account| {
         account.info.balance < value || (creation && account.info.nonce == u64::MAX)
     })
-}
-
-/// The nonce of an account the journal holds; zero for one it does not.
-fn account_nonce<DB: Database, ExtEnvs: ExternalEnvTypes>(
-    ctx: &MegaContext<DB, ExtEnvs>,
-    address: Address,
-) -> u64 {
-    ctx.journal_ref().state.get(&address).map_or(0, |account| account.info.nonce)
 }
 
 /// Records the account writes of the EIP-7702 authorities applied since journal entry
@@ -1771,6 +1761,20 @@ mod tests {
     fn test_a_predicted_refusal_revm_did_not_make_trips() {
         let ctx = MegaContext::new(MemoryDatabase::default(), MegaSpecId::SATIN);
         assert_start_as_counted(&ctx, (false, true, 0), None);
+    }
+
+    /// The guard trips on a start revm answered past the call-stack limit, which the depth guard
+    /// answers before revm sees it, for a creation and a call alike.
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "the depth guard answers every start past the call-stack limit")]
+    fn test_a_start_revm_answered_past_the_depth_limit_trips() {
+        let ctx = MegaContext::new(MemoryDatabase::default(), MegaSpecId::SATIN);
+        for input in [creation(), value_call()] {
+            let too_deep =
+                synthetic_frame_result(&input, InstructionResult::CallTooDeep, Bytes::new());
+            assert_start_as_counted(&ctx, (false, false, 0), Some(&too_deep));
+        }
     }
 
     /// The guard expects no log where nothing moved, whatever the input would count: a start

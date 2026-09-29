@@ -272,38 +272,6 @@ impl FrameLimitTracker {
         self.total_used = self.total_used.saturating_add(WRITE_RECORD);
     }
 
-    /// Drops the caller's record from the running frame's lane: the frame failed before the
-    /// write it stands for happened (a creation that did not bump the creator's nonce).
-    pub(crate) fn drop_caller_record(&mut self) {
-        let [.., caller, lane] = self.lanes.as_mut_slice() else { return };
-        if !lane.holds_caller_record {
-            return;
-        }
-        caller.account_recorded = false;
-        lane.holds_caller_record = false;
-        lane.creator_record = false;
-        lane.used = lane.used.saturating_sub(WRITE_RECORD);
-        self.total_used = self.total_used.saturating_sub(WRITE_RECORD);
-    }
-
-    /// Takes back everything the running frame's start counted, its caller's record included
-    /// ([`drop_caller_record`](Self::drop_caller_record)): the start did not happen after all, so
-    /// the lane keeps nothing whatever the frame's answer, and its caller gets back all it paid
-    /// for the records. Must run before the frame runs, when its start is all the lane holds.
-    pub(crate) fn undo_frame_start(&mut self) {
-        self.drop_caller_record();
-        let Some(lane) = self.lanes.last_mut() else { return };
-        debug_assert_eq!(
-            lane.refund,
-            LimitUsage::ZERO,
-            "a frame that has not run took nothing back"
-        );
-        debug_assert_eq!(lane.log_and_code_bytes, 0, "a frame that has not run logged nothing");
-        self.total_used = self.total_used.saturating_sub(lane.used);
-        lane.used = LimitUsage::ZERO;
-        lane.records_made = false;
-    }
-
     /// Settles the running frame's lane as its failure would, before the frame returns: what it
     /// counted is discarded, its caller's record with it, and an empty lane stands in for it,
     /// holding the history its caller gets back for records the failure did not keep. So the frame
@@ -680,22 +648,6 @@ mod tests {
         let mut empty = FrameLimitTracker::default();
         empty.discard_running_lane();
         assert_eq!(empty.depth(), 0);
-    }
-
-    /// A creation that fails before bumping the nonce takes the creator record back.
-    #[test]
-    fn test_drop_caller_record_rearms_the_caller() {
-        let mut t = FrameLimitTracker::default();
-        t.push(Lane::new(Some(ADDR), false, UNLIMITED, 0));
-        t.push(Lane::new(None, true, UNLIMITED, 0));
-        t.record_caller(true, 0);
-        t.drop_caller_record();
-        t.drop_caller_record();
-        assert_eq!(t.net(), LimitUsage::ZERO);
-        assert!(!t.lanes[0].account_recorded);
-        t.pop(false);
-        assert_eq!(t.net(), LimitUsage::ZERO);
-        assert_eq!(t.net(), t.net_uncached());
     }
 
     /// The creator record a failed creation left its creator is taken back once, and a lane with
