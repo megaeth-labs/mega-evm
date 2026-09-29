@@ -50,6 +50,8 @@ jobs:
 
   msrv:
     runs-on: ubuntu-24.04
+    # Sized for a cold cache, which compiles the whole graph, the legacy leg's included, and then
+    # the no_std target.
     timeout-minutes: 15
     env:
       # The workspace's declared `rust-version`; the variable takes precedence over
@@ -60,11 +62,16 @@ jobs:
         with:
           submodules: recursive
       - name: Install Rust 1.94.0
-        run: rustup toolchain install 1.94.0 --profile minimal --target riscv64imac-unknown-none-elf
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          # Installed in place of rust-toolchain.toml's, and set as the directory's override; the
+          # cache is keyed on it, apart from the other jobs'.
+          toolchain: "1.94.0"
+          target: riscv64imac-unknown-none-elf
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
       - name: Check the workspace
-        run: cargo check --workspace --all-targets --locked
+        run: cargo check --workspace --all-targets --all-features --locked
       - name: Check no_std
         run: cargo check -p mega-evm --target riscv64imac-unknown-none-elf --no-default-features --locked
 

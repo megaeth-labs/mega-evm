@@ -61,7 +61,7 @@ cargo codspeed build -p mega-evm --bench <target> && cargo codspeed run   # inst
 cargo check -p mega-evm --target riscv64imac-unknown-none-elf --no-default-features
 
 # The declared minimum toolchain, as CI's msrv job runs it
-cargo +1.94.0 check --workspace --all-targets --locked
+cargo +1.94.0 check --workspace --all-targets --all-features --locked
 
 # System contracts (requires Foundry)
 cd crates/system-contracts && forge build
@@ -555,7 +555,7 @@ When the agent is requested to implement a new feature or bug fix, it should con
   A fork may carry several params types (Satin carries `SequencerRegistryConfig` and `ProtocolLimits`): a schedule keeps one value per type, and `MegaHardforks::fork_params_any` answers by fork and `TypeId`.
   A field added to Satin's params needs its flat genesis key: a test of `block/genesis.rs` fails until `SatinChainConfig` reads and writes it.
 - **Keep the workspace on its declared minimum toolchain (1.94).**
-  CI's msrv job checks the workspace on 1.94.0 with the lock as it is.
+  CI's msrv job checks the workspace on 1.94.0, every feature on, with the lock as it is.
   A dependency whose newer releases declare a newer compiler (alloy 2.2 and later declare 1.94.1) is updated with `CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS=fallback cargo update <crates>`, which picks the newest release the declared version builds.
 - **Pre-block helpers must return state, not commit directly.**
   Any helper participating in pre-block execution (system contract deploys, pre-block system calls, etc.) returns `Option<EvmState>` and never calls `db.commit(...)` directly, so the witness generator sees the complete read and write set.
