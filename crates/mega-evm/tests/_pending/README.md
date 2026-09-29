@@ -1,38 +1,15 @@
 # Pending tests
 
-Tests of the legacy engine that survive into Satin but cannot run until the mechanism that owns them lands.
-The dispositions come from the test inventory made for the engine rewrite and were applied mechanically when the Satin skeleton replaced the legacy core.
-Every test the inventory marks `legacy-only` or `retired` was deleted; every other test is marked `keep`, `rewrite` or `undecided` and was moved here unchanged.
+The test inventory made for the engine rewrite kept a set of the legacy engine's tests; every one of them has since been ported into a real test target or retired, and none is parked here any more.
+This file records where each one went: the sections below list them by the mechanism that ported or retired them.
 Decision ids (`Dnn`) index the Satin decision table, the numbered list of design decisions behind this engine; it is published with the engine's specification.
 
-## How this directory is excluded from the build
-
-Cargo discovers integration tests only as `tests/*.rs` and `tests/*/main.rs`.
-`_pending/` has no `main.rs`, so nothing below it is compiled, formatted or linted.
-Do not add a `_pending/main.rs`.
-
-## Rules for porting
-
-- Port the rows your mechanism owns into a real test target, adapting them to the Satin API and the decision cited in the table.
-- `keep` rows keep their scenario and expectation; `rewrite` rows keep the scenario and take the new expectation from the cited decision; `undecided` rows wait for their decision.
-- Delete a row from its file here in the same commit that ports it, and delete the file once it holds no rows.
-- A row whose owning mechanism has landed and left it nothing to pin is retired rather than kept parked: it moves to "Tests retired after the inventory" with the reason, and its row is deleted from the file here in the same commit.
-- The 44 legacy mutant killers the inventory kept (`tests/mutation/`) are not here: each was keyed to a surviving mutant of the legacy sources, and the test gates found no survivor in the Satin sources to regenerate one for.
-  A mechanism whose code leaves a survivor gets a new killer from the mutation gate, next to the code or as a system test under `tests/mutation/`; what the retired rows cited is kept in "Retired mutant killers" below.
-- Files under `src/` are the inline unit-test modules of the legacy core, extracted when the Satin skeleton replaced `crates/mega-evm/src`.
-  The code they test is at `git show a8f8c7c9:crates/mega-evm/src/<path>`.
-- Helper functions and `main.rs` / `common.rs` harness files were moved as they were; the owner decides what to keep.
-
-## Tests per owning mechanism
-
-| Owning mechanism | Tests | From `tests/` | From `src/` | Keep | Rewrite | Undecided |
-|---|---:|---:|---:|---:|---:|---:|
-| — (undecided: D57 preload-warm cold charging, D58 98/100 forwarding) | 7 | 7 | 0 | 0 | 0 | 7 |
-| **Total** | **7** | **7** | **0** | **0** | **0** | **7** |
+The directory holds this record alone.
+It has no `main.rs`, and Cargo discovers integration tests only as `tests/*.rs` and `tests/*/main.rs`, so nothing here is built; do not add one.
 
 ## Tests ported in place
 
-These rows came back with the code they test and run in `crates/mega-evm/src`, so the counts above are lower than the inventory's per-mechanism totals by exactly these rows.
+These rows came back with the code they test and run in `crates/mega-evm/src`.
 
 | Legacy file | Owner in the inventory | Tests | Now in |
 |---|---|---:|---|
@@ -67,7 +44,7 @@ What the retired `tests/mutation/` rows cited, for the mechanisms that own them.
 
 ## Tests ported by the common execution layer
 
-These 45 rows run in a real test target now, adapted to the Satin API, so the counts above are lower than the inventory's by exactly these rows.
+These 45 rows run in a real test target now, adapted to the Satin API.
 
 | Legacy file | Owner in the inventory | Tests | Now in |
 |---|---|---:|---|
@@ -87,7 +64,7 @@ These 45 rows run in a real test target now, adapted to the Satin API, so the co
 
 ## Tests ported by the Satin gas table
 
-These 34 rows run in a real test target now, adapted to the Satin API and to the schedule the decision they cite fixes, so the counts above are lower than the inventory's by exactly these rows.
+These 34 rows run in a real test target now, adapted to the Satin API and to the schedule the decision they cite fixes.
 
 | Legacy file | Owner in the inventory | Tests | Now in |
 |---|---|---:|---|
@@ -102,7 +79,7 @@ These 34 rows run in a real test target now, adapted to the Satin API and to the
 
 ## Tests ported by the block executor
 
-These 53 rows run in a real test target now, adapted to the Satin API, so the counts above are lower than the inventory's by exactly these rows.
+These 53 rows run in a real test target now, adapted to the Satin API.
 
 | Legacy file | Owner in the inventory | Tests | Now in |
 |---|---|---:|---|
@@ -124,7 +101,7 @@ These 53 rows run in a real test target now, adapted to the Satin API, so the co
 
 ## Tests ported by SALT pricing
 
-These 67 rows run in a real test target now, adapted to the Satin API and to the pricing hook the decision they cite fixes, so the counts above are lower than the inventory's by exactly these rows.
+These 67 rows run in a real test target now, adapted to the Satin API and to the pricing hook the decision they cite fixes.
 
 | Legacy file | Owner in the inventory | Tests | Now in |
 |---|---|---:|---|
@@ -144,7 +121,7 @@ These 67 rows run in a real test target now, adapted to the Satin API and to the
 
 ## Tests ported by the system contract interceptors
 
-These 61 rows run in a real test target now, adapted to the Satin API and to the dispatch the decision they cite fixes, so the counts above are lower than the inventory's by exactly these rows.
+These 61 rows run in a real test target now, adapted to the Satin API and to the dispatch the decision they cite fixes.
 
 | Legacy file | Owner in the inventory | Tests | Now in |
 |---|---|---:|---|
@@ -163,7 +140,7 @@ These 61 rows run in a real test target now, adapted to the Satin API and to the
 
 ## Tests ported by history gas
 
-These 28 rows run in a real test target now, adapted to the Satin API and to the history ledger the decision they cite fixes, so the counts above are lower than the inventory's by exactly these rows.
+These 28 rows run in a real test target now, adapted to the Satin API and to the history ledger the decision they cite fixes.
 
 | Legacy file | Owner in the inventory | Tests | Now in |
 |---|---|---:|---|
@@ -175,7 +152,7 @@ These 28 rows run in a real test target now, adapted to the Satin API and to the
 
 ## Tests ported by system contract deployment
 
-These 29 rows run in a real test target now, adapted to the Satin API and to the single-spec deploy, so the counts above are lower than the inventory's by exactly these rows.
+These 29 rows run in a real test target now, adapted to the Satin API and to the single-spec deploy.
 
 | Legacy file | Owner in the inventory | Tests | Now in |
 |---|---|---:|---|
@@ -193,7 +170,7 @@ These 29 rows run in a real test target now, adapted to the Satin API and to the
 
 ## Tests ported by compute gas
 
-These 24 rows run in a real test target now, adapted to the Satin API and to a compute figure read off the gas revm settles, so the counts above are lower than the inventory's by exactly these rows.
+These 24 rows run in a real test target now, adapted to the Satin API and to a compute figure read off the gas revm settles.
 
 | Legacy file | Owner in the inventory | Tests | Now in |
 |---|---|---:|---|
@@ -204,7 +181,7 @@ These 24 rows run in a real test target now, adapted to the Satin API and to a c
 
 ## Tests ported by the data-size limit
 
-These 47 rows run in a real test target now, adapted to the Satin API and to the byte table and budget rule the decision they cite fixes, so the counts above are lower than the inventory's by exactly these rows.
+These 47 rows run in a real test target now, adapted to the Satin API and to the byte table and budget rule the decision they cite fixes.
 
 | Legacy file | Owner in the inventory | Tests | Now in |
 |---|---|---:|---|
@@ -221,7 +198,7 @@ These 47 rows run in a real test target now, adapted to the Satin API and to the
 
 ## Tests ported by the state-growth and KV limits
 
-These 54 rows run in a real test target now, adapted to the Satin API: the state growth they pin is held as EIP-8037 state gas by a per-transaction state-gas limit, and the KV updates they count are the write records the common execution layer keeps, held to a KV limit that follows the data-size limit's transaction and frame rules. The counts above are lower than the inventory's by exactly these rows.
+These 54 rows run in a real test target now, adapted to the Satin API: the state growth they pin is held as EIP-8037 state gas by a per-transaction state-gas limit, and the KV updates they count are the write records the common execution layer keeps, held to a KV limit that follows the data-size limit's transaction and frame rules.
 
 | Legacy file | Owner in the inventory | Tests | Now in |
 |---|---|---:|---|
@@ -239,7 +216,7 @@ These 54 rows run in a real test target now, adapted to the Satin API: the state
 
 ## Tests ported by detention
 
-These 89 rows run in a real test target now, adapted to the Satin API and to the relative cap, the revert-class stop and the load-time marking the decisions they cite fix, so the counts above are lower than the inventory's by exactly these rows.
+These 89 rows run in a real test target now, adapted to the Satin API and to the relative cap, the revert-class stop and the load-time marking the decisions they cite fix.
 
 | Legacy file | Owner in the inventory | Tests | Now in |
 |---|---|---:|---|
@@ -264,7 +241,7 @@ These 89 rows run in a real test target now, adapted to the Satin API and to the
 
 ## Tests ported by the oracle and control contracts
 
-These 77 rows run in a real test target now, adapted to the Satin API: the Oracle's storage is read through the oracle environment, `MegaAccessControl` steers gas detention's switch, and `remainingComputeGas()` answers from the caller's regular gas and detention's allowance, as the decisions they cite fix. The counts above are lower than the inventory's by exactly these rows.
+These 77 rows run in a real test target now, adapted to the Satin API: the Oracle's storage is read through the oracle environment, `MegaAccessControl` steers gas detention's switch, and `remainingComputeGas()` answers from the caller's regular gas and detention's allowance, as the decisions they cite fix.
 
 | Legacy file | Owner in the inventory | Tests | Now in |
 |---|---|---:|---|
@@ -278,7 +255,7 @@ These 77 rows run in a real test target now, adapted to the Satin API: the Oracl
 
 ## Tests ported by native keyless deployment
 
-These 69 rows run in a real test target now, adapted to the Satin API: a keyless deployment is a native creation below its `keylessDeploy` call, validated by the same rules and answered in the same error ABI, so what the sandbox merged back is counted, charged and limited as any frame's is. The counts above are lower than the inventory's by exactly these rows.
+These 69 rows run in a real test target now, adapted to the Satin API: a keyless deployment is a native creation below its `keylessDeploy` call, validated by the same rules and answered in the same error ABI, so what the sandbox merged back is counted, charged and limited as any frame's is.
 
 | Legacy file | Owner in the inventory | Tests | Now in |
 |---|---|---:|---|
@@ -296,7 +273,7 @@ These 69 rows run in a real test target now, adapted to the Satin API: a keyless
 
 ## Tests ported by the pre-block system calls
 
-These 45 rows run in a real test target now, adapted to the Satin API: a system call runs on at most 30,000,000 of regular gas with the rest of its gas limit as its state-gas reservoir, priced at the minimum SALT bucket and held to no per-transaction limit; a pre-block call that does not succeed refuses the block; and a due `SequencerRegistry` change is applied by a pre-block call before the live system address is read out of the registry. The counts above are lower than the inventory's by exactly these rows.
+These 45 rows run in a real test target now, adapted to the Satin API: a system call runs on at most 30,000,000 of regular gas with the rest of its gas limit as its state-gas reservoir, priced at the minimum SALT bucket and held to no per-transaction limit; a pre-block call that does not succeed refuses the block; and a due `SequencerRegistry` change is applied by a pre-block call before the live system address is read out of the registry.
 
 | Legacy file | Owner in the inventory | Tests | Now in |
 |---|---|---:|---|
@@ -310,7 +287,7 @@ These 45 rows run in a real test target now, adapted to the Satin API: a system 
 
 ## Tests ported by revert-class aborts
 
-These 17 rows run in a real test target now, adapted to the Satin API: a transaction-level limit — data size, KV updates, state gas or gas detention's compute limit — stops the transaction with a revert carrying `MegaLimitExceeded`, which settles like an EIP-8037 revert, where the legacy engine halted and rescued the remaining gas; a frame budget reverts its frame alone. The counts above are lower than the inventory's by exactly these rows.
+These 17 rows run in a real test target now, adapted to the Satin API: a transaction-level limit — data size, KV updates, state gas or gas detention's compute limit — stops the transaction with a revert carrying `MegaLimitExceeded`, which settles like an EIP-8037 revert, where the legacy engine halted and rescued the remaining gas; a frame budget reverts its frame alone.
 
 | Legacy file | Owner in the inventory | Tests | Now in |
 |---|---|---:|---|
@@ -327,7 +304,7 @@ These 17 rows run in a real test target now, adapted to the Satin API: a transac
 
 ## Tests ported by inspector support
 
-These 4 rows run in a real test target now, adapted to the Satin API: block execution admits an inspector only when it is declared an observer, so an inspector that answers a frame has no route to a block and is exercised on the EVM, where a frame it answers, or a failed frame it rewrites into a success, settles as a frame that kept nothing; and a body over the data-size limit is stopped before any inspector's answer to its first frame. The counts above are lower than the inventory's by exactly these rows.
+These 4 rows run in a real test target now, adapted to the Satin API: block execution admits an inspector only when it is declared an observer, so an inspector that answers a frame has no route to a block and is exercised on the EVM, where a frame it answers, or a failed frame it rewrites into a success, settles as a frame that kept nothing; and a body over the data-size limit is stopped before any inspector's answer to its first frame.
 
 | Legacy file | Owner in the inventory | Tests | Now in |
 |---|---|---:|---|
@@ -337,23 +314,25 @@ These 4 rows run in a real test target now, adapted to the Satin API: block exec
 
 ## Tests ported when the last rows were settled
 
-These 21 rows run in a real test target now, so the counts above are lower than the inventory's by exactly these rows.
+These 28 rows were the last ones parked, and run in a real test target now.
 The CREATE and CREATE2 rows owed to the common execution layer keep their transactions and what Satin keeps of their expectations: the halt reasons, and the order in which revm's own `CREATE2` checks its operands, at the Satin init-code limit; what they compared with another legacy spec or read off the legacy compute ledger has no counterpart.
 Six of them are the static-callee rows, whose Satin assertions already ran in `tests/satin/static_callee.rs` under the same names; the rest of each compared with a legacy spec.
+The rows that waited for D57 and D58 take the answer the engine gives, which is Ethereum's: a preload-warm address (a precompile, the block beneficiary, an access-list address) is charged warm on its first touch, and a call or creation forwards all but a 64th of its gas.
 
 | Legacy file | Owner in the inventory | Tests | Now in |
 |---|---|---:|---|
+| `compute_gas/claims.rs` | none (5) | 5 | `tests/satin/inherited_costs.rs` |
+| `mini_rex/gas.rs` | none (2) | 2 | `tests/satin/inherited_costs.rs` |
 | `rex4/create_safety.rs` | the common execution layer (1) | 1 | `tests/satin/create_opcodes.rs` |
 | `rex5/create2_empty_initcode.rs` | the common execution layer (5) | 5 | `tests/satin/create_opcodes.rs` |
 | `rex5/create2_resize_gas_metering.rs` | the common execution layer (2) | 2 | `tests/satin/create_opcodes.rs` |
 | `rex6/create2_metering_order.rs` | the common execution layer (11) | 11 | `tests/satin/create_opcodes.rs`, `tests/satin/static_callee.rs` |
 | `rex6/error_paths.rs` | the common execution layer (2) | 2 | `tests/satin/create_opcodes.rs` |
-| **Total** | | **21** | |
+| **Total** | | **28** | |
 
 ## Tests retired after the inventory
 
 These 21 rows were parked when the inventory was applied and have since been retired: the mechanism that owns them landed and left them nothing to pin, so no later mechanism will port them.
-They are not counted above.
 
 | Legacy file | Owner in the inventory | Tests | Why |
 |---|---|---:|---|
@@ -367,12 +346,3 @@ They are not counted above.
 | `src/system/limit_control.rs` | system contract deployment (2) | 2 | Satin is a single spec with no per-fork deploy gate: the contract is deployed at every block; Satin does not overwrite foreign code: a system address with different code is an error, not an in-place upgrade |
 | `src/system/oracle.rs` | system contract deployment (3) | 3 | Satin does not overwrite foreign code: a system address with different code is an error, not an in-place upgrade; Satin is a single spec and ships one Oracle bytecode; there is no per-fork version gate to pin |
 | **Total** | | **21** | |
-
-## Files
-
-Each cell lists `disposition count (mechanism · decision)`.
-
-| File | Tests | Owners |
-|---|---:|---|
-| `compute_gas/claims.rs` | 5 | undecided 5 (— · D57, open: whether preload-warm addresses (precompile / beneficiary / access-list) are charged cold) |
-| `mini_rex/gas.rs` | 2 | undecided 2 (— · D58, open: 98/100 forwarding, while the design has frames follow EIP-8037 (63/64)) |

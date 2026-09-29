@@ -422,9 +422,8 @@ Every later mechanism plugs into these; a change to one comes back to this layer
 - `satin/` — tests of the Satin engine (integration tests; add new ones here or in a new directory with a `main.rs`).
 - `block/` — tests of block execution: the Karst block rules, the block-level limits, the counters, the factory and the admission gate.
 - `system/` — tests of the system contracts: the interceptor dispatch, what each contract answers, keyless deployment (`system/keyless/`) and the system-address transaction.
-- `_pending/` — the legacy tests the test inventory keeps, parked until the mechanism they test lands.
-  It has no `main.rs`, so Cargo does not build it; its `README.md` names the mechanism that owns every file.
-  The change that ports a pending test deletes it from `_pending/` in the same commit.
+- `_pending/` — no test any more: its `README.md` records where each legacy test the test inventory kept went, ported into one of the targets above or retired, and why.
+  It has no `main.rs`, so Cargo builds nothing there.
 - Unit tests live next to the code in `#[cfg(test)] mod tests`.
 
 ## Test Gates

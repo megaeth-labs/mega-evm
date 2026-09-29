@@ -15,6 +15,7 @@ mod history_bytes;
 mod history_exemption;
 mod history_gas;
 mod history_reservoir;
+mod inherited_costs;
 mod inspector;
 mod inspector_cheatcodes;
 mod inspector_limits;
