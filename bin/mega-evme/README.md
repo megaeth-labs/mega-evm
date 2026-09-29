@@ -33,6 +33,9 @@ Every command runs on the engine its spec names.
 On Satin every output field keeps its legacy name and meaning, and a `satin` object is added with the gas by ledger (`regular_gas`, `state_gas`, `history_gas`, `history_bytes`, `reservoir_remaining`, `floor_gas`) and the limits' counts (`data_size`, `write_records`, `limit_exceeded`).
 `tests/integration.rs` checks that on every fixture pair, and `tests/satin-differences.md` pins what the two engines produce on the same inputs.
 
+A Satin run is held to the protocol limits of the chain's schedule at the block's timestamp; a chain that does not run Satin there (mainnet and testnet today, the default chain, any chain the tool does not know) runs on Satin's default limits, a counterfactual.
+`--override.limits <JSON|FILE>` on `run`, `tx` and `replay` replaces the fields it names of those limits; it is refused on a legacy spec.
+
 The legacy leg is the default feature `legacy`; `--no-default-features` builds a Satin-only binary.
 
 ## Installation

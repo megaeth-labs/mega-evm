@@ -67,7 +67,7 @@ Each group has its own reference page with the full flag table.
 | ----------------- | -------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
 | Transaction       | Sender, receiver, value, gas, calldata, nonce, tx type               | [Transaction Types](../transaction-types.md)                                    |
 | State management  | Prestate file, sender balance, faucet, storage overrides, state dump | [State Management](../configuration/state-management.md)                        |
-| Chain / spec      | Spec version, chain ID                                               | [Chain and Spec](../configuration/chain-and-spec.md)                            |
+| Chain / spec      | Spec version, chain ID, protocol limits override                     | [Chain and Spec](../configuration/chain-and-spec.md)                            |
 | Block environment | Block number, timestamp, coinbase, basefee, gas limit, prevrandao    | [Block Environment](../configuration/block-environment.md)                      |
 | SALT buckets      | Per-bucket capacity overrides for dynamic gas pricing                | [SALT Buckets](../configuration/salt-buckets.md)                                |
 | RPC cache / retry | Cache size, cache dir, retry and rate-limit                          | [RPC Cache and Retry](../configuration/state-management.md#rpc-cache-and-retry) |
@@ -215,6 +215,7 @@ RPC Options:
 Chain Options:
       --spec <SPEC>                Spec: `Satin`, or a legacy spec `Equivalence` to `Rex6` [default: Rex6]
       --chain-id <CHAIN_ID>       Chain ID [default: 6342] [aliases: --chainid]
+      --override.limits <JSON|FILE>  Satin only: protocol limits to run under instead of the chain's
 
 Block Options:
       --block.number <NUM>               Block number [default: 1]

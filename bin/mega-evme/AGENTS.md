@@ -8,7 +8,7 @@ Two engines: the in-tree sources run Satin; a spec from `Equivalence` to `Rex6` 
 - `src/main.rs`: CLI bootstrap and panic hook.
 - `src/cmd.rs`: argument parsing, engine selection, and dispatch; a legacy spec's arguments are handed unchanged to the 1.7.1 CLI.
 - `src/engine.rs`: which engine a spec or a block runs on; the hand-off to the legacy CLI.
-- `src/common/`: shared CLI args, state loading, tracing, tx parsing, output printers.
+- `src/common/`: shared CLI args, state loading, tracing, tx parsing, output printers; `schedule.rs` is the one place a Satin run's hardfork schedule, and so its protocol limits, is chosen, `--override.limits` included.
 - `src/run/`: bytecode execution command.
 - `src/tx/`: full transaction execution command with raw-tx override support.
 - `src/replay/`: RPC-backed historical transaction replay through block executor (Satin; a legacy spec is the 1.7.1 CLI's).
@@ -27,6 +27,7 @@ Two engines: the in-tree sources run Satin; a spec from `Equivalence` to `Rex6` 
 ## ANTI-PATTERNS
 - Do not edit or re-implement the legacy leg: it is the released 1.7.1 code, pinned with its dependency versions (`tests/legacy_line.rs`).
 - Do not use `cargo ... -p mega-evme`: the name also matches the linked 1.7.1 package. Use `--manifest-path bin/mega-evme/Cargo.toml`.
+- Do not build a Satin hardfork schedule, or attach its params, in the CLI: a counterfactual takes the engine's own schedule for a chain it does not know (`mega_evm::all_activated_hardforks`), so it carries every params type Satin requires, and a chain's own Satin schedule is used as it is or refused.
 - Do not duplicate chain/spec parsing logic across commands.
 - Add shared parsing in `src/common/` and reuse.
 - Do not print partial execution output before final outcome object assembly.
@@ -37,5 +38,5 @@ Two engines: the in-tree sources run Satin; a spec from `Equivalence` to `Rex6` 
 - Add a new top-level command: `src/cmd.rs` enum + module wiring in `src/main.rs`.
 - Add a new shared CLI option family: `src/common/*` and flatten into command structs.
 - Change state-forking or prestate merge semantics: `src/common/state.rs`.
-- Change replay hardfork/spec selection: `src/replay/{cmd.rs,hardforks.rs}`.
+- Change which engine a spec or block runs on: `src/engine.rs`; which Satin schedule and limits it runs under: `src/common/schedule.rs`.
 - Change receipt/summary formatting: `src/common/outcome.rs` and printer helpers.

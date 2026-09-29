@@ -10,10 +10,11 @@ The `replay` command auto-detects the spec from the chain ID and block timestamp
 
 ## Options
 
-| Flag              | Default | Aliases     | Description         |
-| ----------------- | ------- | ----------- | ------------------- |
-| `--spec <SPEC>`   | `Rex6`  | —           | MegaETH spec to use |
-| `--chain-id <ID>` | `6342`  | `--chainid` | Chain ID            |
+| Flag                             | Default     | Aliases     | Description                                                                               |
+| -------------------------------- | ----------- | ----------- | ----------------------------------------------------------------------------------------- |
+| `--spec <SPEC>`                  | `Rex6`      | —           | MegaETH spec to use                                                                       |
+| `--chain-id <ID>`                | `6342`      | `--chainid` | Chain ID                                                                                  |
+| `--override.limits <JSON\|FILE>` | the chain's | —           | Satin only: protocol limits to run under instead, see [Protocol limits](#protocol-limits) |
 
 ## Available Specs
 
@@ -66,6 +67,52 @@ On Satin, every output field keeps its legacy name and meaning, and one field is
 In text mode the same numbers follow the summary under `=== Satin Gas ===`.
 A legacy run has no `satin` field.
 
+### Protocol limits
+
+A Satin run is held to the protocol limits of the chain it names, read from the chain's schedule at the block's timestamp, as a node holds a block of that chain.
+On a chain whose schedule runs Satin at that timestamp, these are the chain's own limits.
+Any other Satin run is a counterfactual: MegaETH mainnet and testnet, which do not schedule Satin yet, the default chain `6342`, and any chain the tool does not know run on Satin's default limits.
+
+| Limit                                                                    | Default    |
+| ------------------------------------------------------------------------ | ---------- |
+| A transaction's data size (`txDataSizeLimit`)                            | 13,107,200 |
+| A block's data size (`blockTxsDataLimit`)                                | 13,107,200 |
+| Compute after a block-environment read (`blockEnvAccessComputeGasLimit`) | 20,000,000 |
+| Compute after an Oracle read (`oracleAccessComputeGasLimit`)             | 20,000,000 |
+| Every other limit                                                        | unlimited  |
+
+The defaults are provisional, as Satin is.
+A chain whose schedule runs Satin but does not carry its limits is refused: the tool does not guess a chain's limits.
+`run` and `tx` hold the transaction to the per-transaction limits; `replay` holds a whole block to them and to the block's budgets.
+
+`--override.limits` runs under other limits, a counterfactual.
+It takes a JSON object in the shape a chain configuration carries the limits in, inline or as the path of a file.
+The fields it names replace the chain's, and every other stays.
+The whole shape, at the defaults:
+
+```json
+{
+  "txRuntimeLimits": {
+    "txDataSizeLimit": 13107200,
+    "frameDataSizeLimit": 18446744073709551615,
+    "txKvUpdateLimit": 18446744073709551615,
+    "frameKvUpdateLimit": 18446744073709551615,
+    "txStateGasLimit": 18446744073709551615,
+    "blockEnvAccessComputeGasLimit": 20000000,
+    "oracleAccessComputeGasLimit": 20000000
+  },
+  "blockExecutionGasLimit": 18446744073709551615,
+  "blockStateGasLimit": 18446744073709551615,
+  "blockTxsDataLimit": 13107200,
+  "blockKvUpdateLimit": 18446744073709551615
+}
+```
+
+`18446744073709551615` (`u64::MAX`) leaves a limit unlimited.
+The limits an override leaves are held to what a chain configuration is: an unknown field, a zero limit, a transaction data-size limit below the 310 bytes every transaction's body counts, or a compute cap no transaction reaches is refused.
+A transaction a limit stops reports it in `satin.limit_exceeded`.
+A command on a legacy spec is refused with `--override.limits`: the legacy engine's limits are its spec's.
+
 ## Examples
 
 ```bash
@@ -80,4 +127,7 @@ mega-evme run 0x600160005260... --chain-id 1
 
 # The same bytecode on Satin
 mega-evme run 0x600160005260... --spec Satin
+
+# On Satin, with a transaction allowed to keep one write record
+mega-evme run 0x600160005260... --spec Satin --override.limits '{"txRuntimeLimits":{"txKvUpdateLimit":1}}'
 ```

@@ -175,6 +175,18 @@ mega-evme replay --override.spec Satin <TX_HASH>
 A Satin replay needs a state whose system contracts are at the versions Satin deploys, which MegaETH mainnet and testnet reach at `Rex6`.
 On an older block Satin's own deploy check refuses to overwrite them, and the replay fails with an error naming the contract.
 
+### `--override.limits <JSON|FILE>`
+
+Replay on Satin under other protocol limits than the chain's, a counterfactual: the fields the JSON object names replace the chain's, and every other stays.
+Without it, a Satin replay of a block its chain does not run on Satin runs on Satin's default limits.
+The object's shape, the defaults and what is refused are in [Protocol limits](../configuration/chain-and-spec.md#protocol-limits).
+It applies to both the transaction replay and the block replay; a replay that runs on the legacy engine is refused with it, and so is a legacy block of a block replay.
+
+```
+mega-evme replay --override.spec Satin --override.limits '{"txRuntimeLimits":{"txDataSizeLimit":100000}}' <TX_HASH>
+mega-evme replay --block 26400001 --rpc <URL> --block-cache ./blocks --override.spec Satin --override.limits limits.json
+```
+
 ## Replaying Whole Blocks
 
 `--block <N>` replays block `N`, and `--block <N>..<M>` blocks `N` through `M`.
@@ -228,7 +240,7 @@ The exit code is 0, 1 when a block could not be replayed, or 2 when `--verify` i
 
 ### The Satin counterfactual
 
-`--override.spec Satin` runs every block as it would run on Satin: every transaction as signed, on the state its parent block left, under the limits a Satin block runs under by default.
+`--override.spec Satin` runs every block as it would run on Satin: every transaction as signed, on the state its parent block left, under Satin's default protocol limits, or those `--override.limits` gives, with no building policy of a block builder applied.
 A transaction the Satin engine refuses (it cannot pay for its gas, or a block budget is full) is reported `refused` and left out, and the block goes on.
 A transaction signed with a gas limit sized for legacy costs can run out of gas on Satin: that is the counterfactual's answer, not a tool fault.
 Satin's pre-block changes deploy the EIP-7997 factory at `0x4e59b44847b379578588920cA78FbF26c0B4956C`, which no legacy spec reads, so a block cached from a legacy replay does not hold it; the first Satin replay of the block reads it over RPC and adds it to the cache.

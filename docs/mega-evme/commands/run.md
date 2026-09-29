@@ -51,7 +51,7 @@ Each group is documented on its own page.
 | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------- |
 | Transaction       | `--create`, `--gas`, `--basefee`, `--priority-fee`, `--tx-type`, `--value`, `--sender`, `--receiver`, `--nonce`, `--input`, `--inputfile`, `--source-hash`, `--mint`, `--auth`, `--access` | [Transaction Types](../transaction-types.md)                                    |
 | State management  | `--prestate`, `--sender.balance`, `--faucet`, `--balance`, `--storage`, `--block-hash`, `--fork`, `--fork.block`, `--rpc`, `--dump`, `--dump.output`                                       | [State Management](../configuration/state-management.md)                        |
-| Chain and spec    | `--spec`, `--chain-id`                                                                                                                                                                     | [Chain and Spec](../configuration/chain-and-spec.md)                            |
+| Chain and spec    | `--spec`, `--chain-id`, `--override.limits`                                                                                                                                                | [Chain and Spec](../configuration/chain-and-spec.md)                            |
 | Block environment | `--block.number`, `--block.coinbase`, `--block.timestamp`, `--block.gaslimit`, `--block.basefee`, `--block.difficulty`, `--block.prevrandao`, `--block.blobexcessgas`                      | [Block Environment](../configuration/block-environment.md)                      |
 | SALT buckets      | `--bucket-capacity`                                                                                                                                                                        | [SALT Buckets](../configuration/salt-buckets.md)                                |
 | RPC cache / retry | `--rpc.cache-size`, `--rpc.cache-dir`, `--rpc.no-cache-file`, `--rpc.clear-cache`, `--rpc.max-retries`, `--rpc.backoff-ms`, `--rpc.rate-limit`                                             | [RPC Cache and Retry](../configuration/state-management.md#rpc-cache-and-retry) |
@@ -334,6 +334,9 @@ Chain Options:
 
       --chain-id <CHAIN_ID>
           Chain ID [default: 6342] [aliases: --chainid]
+
+      --override.limits <JSON|FILE>
+          Satin only: run under these protocol limits instead of the chain's, a counterfactual. A JSON object in the shape a chain configuration carries `ProtocolLimits` in (camelCase, per-transaction limits under `txRuntimeLimits`), inline or in a file; the fields it names replace the chain's, every other stays. Refused when it names an unknown field or a value no chain may carry
 
 Block Options:
       --block.number <BLOCK_NUMBER>          Block number [default: 1]
