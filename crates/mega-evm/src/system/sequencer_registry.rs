@@ -226,6 +226,11 @@ where
 /// has no account, it holds other code than [`SEQUENCER_REGISTRY_CODE`], or its
 /// `_currentSystemAddress` is zero.
 ///
+/// It reads two things and writes nothing, so any database serves: pass `&mut db` for a
+/// [`Database`](revm::Database) the caller keeps, and `WrapDatabaseRef(&db)`
+/// ([`revm::database_interface::WrapDatabaseRef`]) for a [`DatabaseRef`](revm::DatabaseRef),
+/// such as a read-only view of a block's state.
+///
 /// # Errors
 ///
 /// The database's, when the registry's account or its slot cannot be read.
@@ -648,6 +653,12 @@ mod tests {
             None
         );
         assert_eq!(read(InMemoryDB::default()), None);
+
+        // A database the caller keeps, and one it can only read through `DatabaseRef`.
+        let mut db = registry_holding(SEQUENCER_REGISTRY_CODE, Some(NEXT_SYSTEM_ADDRESS));
+        assert_eq!(live_system_address(&mut db).unwrap(), Some(NEXT_SYSTEM_ADDRESS));
+        let wrapped = revm::database_interface::WrapDatabaseRef(&db);
+        assert_eq!(live_system_address(wrapped).unwrap(), Some(NEXT_SYSTEM_ADDRESS));
     }
 
     /// A read the database cannot serve is the database's error, not an absent address.
