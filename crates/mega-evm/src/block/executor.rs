@@ -125,7 +125,7 @@ use crate::{
         is_apply_pending_changes_due, system_contract_specs, transact_apply_pending_changes,
         transact_deploy, SequencerRegistryConfig, SystemContractDeployError,
     },
-    BlockGasCounters, BlockLimiter, BlockLimits, ExternalEnvTypes, HardforkParams,
+    BlockGasCounters, BlockLimiter, BlockLimits, BucketId, ExternalEnvTypes, HardforkParams,
     MegaBlockExecutionResult, MegaBlockTxResult, MegaContext, MegaEvm, MegaHardforks,
     MegaTransaction, MegaTransactionExt, ProtocolLimits,
 };
@@ -637,6 +637,33 @@ where
     pub fn clear_accessed_block_hashes(&mut self) {
         self.evm.clear_accessed_block_hashes();
     }
+
+    /// The SALT buckets this block's execution has asked the SALT environment about so far, in
+    /// ascending order: every bucket a state charge of any of its transactions was priced in.
+    ///
+    /// A bucket's capacity is read through the SALT environment, which no database sees, and a
+    /// validator that lacks a bucket's proof cannot price the charge that landed in it, so this is
+    /// where a stateless witness learns which buckets it must carry. The record covers this
+    /// executor's block:
+    /// [`apply_pre_execution_changes`](BlockExecutor::apply_pre_execution_changes) empties it
+    /// when the block starts, and nothing empties it between the block's transactions,
+    /// whose own multiplier caches are forgotten one transaction at a time.
+    ///
+    /// The set is complete for the block: the engine asks about a bucket at a state charge site
+    /// and nowhere else, a validator re-executing the block's transactions reaches the same charge
+    /// sites, and a bucket is recorded before the environment answers, so a lookup that failed —
+    /// which fails its transaction, leaving it out of the block — is in the set too, as a proof a
+    /// validator does not use. The pre-block calls and the system transactions read no bucket and
+    /// add none.
+    pub fn get_accessed_bucket_ids(&self) -> Vec<BucketId> {
+        self.evm.get_accessed_bucket_ids()
+    }
+
+    /// Forgets the SALT buckets asked about so far, so the next asks are attributable to one
+    /// transaction. The record decides nothing, so clearing it changes no execution result.
+    pub fn clear_accessed_bucket_ids(&mut self) {
+        self.evm.clear_accessed_bucket_ids();
+    }
 }
 
 impl<DB, INSP, ExtEnvs, R, Spec> BlockExecutor
@@ -656,8 +683,8 @@ where
 
     /// Runs what a block does before its transactions.
     ///
-    /// In order: the admission gate, the reset of the block-hash record, the EIP-2935 and
-    /// EIP-4788 pre-block calls, the system-contract deploys and the `SequencerRegistry`'s due
+    /// In order: the admission gate, the reset of the block-hash and bucket records, the EIP-2935
+    /// and EIP-4788 pre-block calls, the system-contract deploys and the `SequencerRegistry`'s due
     /// role changes. Each step's state is handed to the
     /// pre-block observer and then committed here rather than inside its helper, so a witness
     /// generator sees every step's read and write set. The sequence the observer receives is
@@ -686,9 +713,10 @@ where
         self.check_admission()?;
         self.require_protocol_limits()?;
 
-        // The block starts with an empty block-hash record, so what it holds at the end is what
-        // this block read.
+        // The block starts with empty block-hash and bucket records, so what they hold at the end
+        // is what this block read.
         self.evm.clear_accessed_block_hashes();
+        self.evm.clear_accessed_bucket_ids();
 
         let state = eips::transact_blockhashes_contract_call(
             &self.spec,

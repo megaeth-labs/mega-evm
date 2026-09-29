@@ -19,9 +19,9 @@ use crate::{
         schedule::{satin_gas_params, satin_gas_params_history_exempt},
     },
     system::{self, keyless::KeylessFrame},
-    AdditionalLimit, BlockHashRecord, BucketError, BucketMultipliers, Detention, EmptyExternalEnv,
-    EthSpecId, EvmTxRuntimeLimits, ExternalEnvTypes, ExternalEnvs, MegaSpecId, MegaTransaction,
-    SaltEnv, VolatileDataAccess,
+    AdditionalLimit, BlockHashRecord, BucketError, BucketMultipliers, BucketRecord, Detention,
+    EmptyExternalEnv, EthSpecId, EvmTxRuntimeLimits, ExternalEnvTypes, ExternalEnvs, MegaSpecId,
+    MegaTransaction, SaltEnv, VolatileDataAccess,
 };
 
 /// The revm context the Satin engine runs on: op-revm's context shape with the `MegaETH`
@@ -54,6 +54,8 @@ pub struct MegaContext<DB: Database, ExtEnvs: ExternalEnvTypes = EmptyExternalEn
     pub(crate) block_hash_record: BlockHashRecord,
     /// The SALT bucket multipliers the running transaction has read.
     bucket_multipliers: BucketMultipliers,
+    /// The SALT buckets execution has asked the environment about, over the block.
+    bucket_record: BucketRecord,
     /// Whether the running transaction is the protocol's own, decided when it is validated. See
     /// [`MegaContext::is_system_originated`].
     system_originated: bool,
@@ -91,6 +93,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
             detention: Detention::default(),
             block_hash_record: BlockHashRecord::default(),
             bucket_multipliers: BucketMultipliers::default(),
+            bucket_record: BucketRecord::default(),
             system_originated: false,
             prices_history: true,
             keyless_frame: None,
@@ -226,6 +229,20 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
         self.block_hash_record.clear();
     }
 
+    /// The SALT buckets execution has asked the environment about on this context.
+    ///
+    /// The record belongs to one block: it is not forgotten between transactions, as the
+    /// multipliers are ([`bucket_multipliers`](Self::bucket_multipliers)), and block execution
+    /// empties it when the block starts.
+    pub const fn bucket_record(&self) -> &BucketRecord {
+        &self.bucket_record
+    }
+
+    /// Forgets the SALT buckets asked about so far.
+    pub fn clear_bucket_record(&mut self) {
+        self.bucket_record.clear();
+    }
+
     /// The common execution layer's state for the running (or last) transaction.
     pub const fn additional_limit(&self) -> &AdditionalLimit {
         &self.additional_limit
@@ -265,11 +282,16 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     /// from [`BucketMultipliers`] afterwards. A bucket the environment could not report, and one
     /// it reported below the minimum capacity a bucket can hold, both fail
     /// ([`BucketError`](crate::BucketError)).
+    ///
+    /// The bucket is recorded for the block's witness ([`bucket_record`](Self::bucket_record))
+    /// before the environment is asked, whatever it answers.
     pub fn account_bucket_multiplier(
         &mut self,
         address: Address,
     ) -> Result<u64, BucketError<<ExtEnvs::SaltEnv as SaltEnv>::Error>> {
-        self.bucket_multipliers.account(&self.external_envs.salt_env, address)
+        let bucket = <ExtEnvs::SaltEnv as SaltEnv>::bucket_id_for_account(address);
+        self.bucket_record.record(bucket);
+        self.bucket_multipliers.of_bucket(&self.external_envs.salt_env, bucket)
     }
 
     /// The SALT bucket multiplier of the slot `key` of `address`, which scales every slot-scoped
@@ -280,7 +302,9 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
         address: Address,
         key: StorageKey,
     ) -> Result<u64, BucketError<<ExtEnvs::SaltEnv as SaltEnv>::Error>> {
-        self.bucket_multipliers.slot(&self.external_envs.salt_env, address, key)
+        let bucket = <ExtEnvs::SaltEnv as SaltEnv>::bucket_id_for_slot(address, key);
+        self.bucket_record.record(bucket);
+        self.bucket_multipliers.of_bucket(&self.external_envs.salt_env, bucket)
     }
 
     /// The SALT bucket multipliers the running (or last) transaction read.
@@ -730,6 +754,48 @@ mod tests {
         assert_eq!(ctx.bucket_multipliers().cached_buckets().len(), 0);
         assert_eq!(ctx.account_bucket_multiplier(ACCOUNT), Ok(4));
         assert_eq!(env.bucket_queries(bucket), 2, "the next transaction read it again");
+    }
+
+    /// The bucket record outlives the multipliers: a bucket a transaction asked about stays
+    /// recorded once the next transaction has forgotten its multiplier, a slot's bucket and an
+    /// account's are both recorded, a bucket whose lookup failed is recorded, and a system call,
+    /// which prices at the minimum bucket, records nothing. Clearing empties it.
+    #[test]
+    fn test_the_bucket_record_holds_every_ask_over_the_block() {
+        const ACCOUNT: alloy_primitives::Address =
+            alloy_primitives::address!("00000000000000000000000000000000000000a1");
+        const OTHER: alloy_primitives::Address =
+            alloy_primitives::address!("00000000000000000000000000000000000000a2");
+        let account = <TestExternalEnvs as SaltEnv>::bucket_id_for_account(ACCOUNT);
+        let slot = <TestExternalEnvs as SaltEnv>::bucket_id_for_slot(ACCOUNT, U256::from(3));
+        let failing = <TestExternalEnvs as SaltEnv>::bucket_id_for_account(OTHER);
+        let env = TestExternalEnvs::<String>::new()
+            .with_failing_bucket(failing, "salt backend unreachable".into());
+        let mut ctx = MegaContext::new_with_external_envs(
+            EmptyDB::default(),
+            MegaSpecId::SATIN,
+            ExternalEnvs::<TestExternalEnvs<String>> { salt_env: env.clone(), oracle_env: env },
+        );
+        assert!(ctx.bucket_record().is_empty());
+
+        assert_eq!(ctx.account_bucket_multiplier(ACCOUNT), Ok(1));
+        ctx.on_new_tx(false);
+        assert_eq!(ctx.bucket_multipliers().cached_buckets().len(), 0, "the multiplier is gone");
+        assert_eq!(ctx.bucket_record().to_vec(), vec![account], "the record is not");
+
+        assert_eq!(ctx.slot_bucket_multiplier(ACCOUNT, U256::from(3)), Ok(1));
+        assert!(ctx.account_bucket_multiplier(OTHER).is_err(), "the lookup fails");
+        let mut expected = vec![account, slot, failing];
+        expected.sort_unstable();
+        assert_eq!(ctx.bucket_record().to_vec(), expected, "every ask, the failed one included");
+
+        ctx.on_new_system_call();
+        assert_eq!(ctx.bucket_record().to_vec(), expected, "a system call forgets nothing");
+
+        ctx.clear_bucket_record();
+        assert!(ctx.bucket_record().is_empty());
+        assert_eq!(ctx.account_bucket_multiplier(ACCOUNT), Ok(1));
+        assert_eq!(ctx.bucket_record().to_vec(), vec![account], "and records again after");
     }
 
     /// Two contexts may read one SALT environment — a node builds an EVM per transaction over

@@ -121,7 +121,7 @@ impl BucketMultipliers {
     /// Only a multiplier is cached, so a bucket whose capacity could not be turned into one is
     /// asked for again rather than remembered as anything.
     #[inline]
-    fn of_bucket<S: SaltEnv>(
+    pub(crate) fn of_bucket<S: SaltEnv>(
         &mut self,
         salt_env: &S,
         bucket: BucketId,

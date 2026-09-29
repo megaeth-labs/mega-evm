@@ -36,7 +36,7 @@ pub use state::*;
 
 #[cfg(not(feature = "std"))]
 use alloc as std;
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, vec::Vec};
 
 use alloy_evm::{
     precompiles::{DynPrecompile, PrecompilesMap},
@@ -62,7 +62,7 @@ use revm::{
     DatabaseCommit, ExecuteCommitEvm, ExecuteEvm,
 };
 
-use crate::{EmptyExternalEnv, ExternalEnvTypes, MegaTransaction, MegaTransactionError};
+use crate::{BucketId, EmptyExternalEnv, ExternalEnvTypes, MegaTransaction, MegaTransactionError};
 
 /// The instruction table of the Satin engine.
 pub(crate) type MegaInstructions<DB, ExtEnvs> =
@@ -253,6 +253,23 @@ where
     /// transaction. The record decides nothing, so clearing it changes no execution result.
     pub fn clear_accessed_block_hashes(&mut self) {
         self.ctx_mut().clear_block_hash_record();
+    }
+
+    /// The SALT buckets execution has asked the SALT environment about on this EVM so far, in
+    /// ascending order.
+    ///
+    /// A bucket's capacity is read through a side channel no database sees, so this is where a
+    /// stateless witness learns which buckets it must prove. The record starts empty and is
+    /// emptied again when block execution starts a block; it is not emptied between the
+    /// transactions of a block, as the per-transaction multiplier cache is.
+    pub fn get_accessed_bucket_ids(&self) -> Vec<BucketId> {
+        self.ctx().bucket_record().to_vec()
+    }
+
+    /// Forgets the SALT buckets asked about so far, so the next asks are attributable to one
+    /// transaction. The record decides nothing, so clearing it changes no execution result.
+    pub fn clear_accessed_bucket_ids(&mut self) {
+        self.ctx_mut().clear_bucket_record();
     }
 }
 
