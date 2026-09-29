@@ -32,7 +32,7 @@ cargo test -p mega-evm --features satin-price-override,test-utils
 # that assert the spec's own byte prices skip, and the suite checks less than it looks like it does
 
 # The suite at other byte prices, as the byte-price grid job runs it (logs under target/price-grid)
-scripts/price_grid.sh --pr                # four points; --full for the whole grid, or name points: 312.5/20
+scripts/price_grid.sh --pr                # five points; --full for the whole grid, or name points: 312.5/20
 
 # Regenerate the checked-in pricing table after an intentional schedule or engine change
 UPDATE_SATIN_PRICING_TABLE=1 cargo test -p mega-evm --test satin
@@ -443,8 +443,9 @@ Every later mechanism plugs into these; a change to one comes back to this layer
   - Equivalence mode is the gate: Satin's machinery — handler, frame lifecycle, Host, instruction table — priced as the fixture's fork prices it, through the neutral configuration (`MegaContext::with_neutral_cfg`, `test_utils::{neutral_cfg, neutralize_evm}`), which exists only behind `test-utils`, and held to no runtime limit (`EvmTxRuntimeLimits::no_limits()`, installed by the runner itself).
     Every failure must be explained by a deviation in `crates/mega-state-test/src/deviations.rs`, with its rule, its reason and the exact entries it explains, each with the hashes Satin produces, and every listed entry must fail exactly as listed; the executed and skipped counts are pinned in the workflow and equal the fork runner's.
   - Satin mode is a report: the same fixtures under Satin's own configuration, counted by outcome in the step summary; it never fails the job.
-- **The byte-price grid** (`scripts/price_grid.sh`, `.github/workflows/price-grid.yml`): the `mega-evm` suite with the `satin-price-override` feature at other costs per state and history byte, four points on a pull request and the whole grid nightly.
-  The prices are provisional, so a test holds at any of them: it sizes its gas from the schedule at the prices in effect, and a case whose scenario is state or history gas returns early where that byte costs nothing (`state_is_free`, `history_is_free`).
+- **The byte-price grid** (`scripts/price_grid.sh`, `.github/workflows/price-grid.yml`): the `mega-evm` suite with the `satin-price-override` feature at other costs per state and history byte, five points on a pull request and the whole grid nightly.
+  The prices are provisional, so a test holds at any of them — a byte price of nothing, or one gas per byte up to the grid's dearest point: it sizes its gas from the schedule at the prices in effect, and a case whose scenario is state or history gas returns early where that byte costs nothing (`state_is_free`, `history_is_free`).
+  Below one gas per byte the schedule's entries round to nothing one at a time, and no test is held there.
 
 ## Version Control
 
@@ -512,6 +513,7 @@ When the agent is requested to implement a new feature or bug fix, it should con
   A change that makes Satin differ from op-revm on purpose must update `tests/satin/equivalence.rs` (or add a case) so the difference is pinned, not silently absorbed.
 - **Hold a test at any byte price.**
   A gas limit is regular room on top of what the scenario adds at the prices in effect (`satin_gas_params()`, `history_gas`), never a number that happened to cover it at the constants; a call or creation that forwards all but a 64th of its gas keeps 64 times the history of the records it pays for.
+  A charge a scenario must not be able to pay is derived the same way — a gas limit one short of it — not a number that is short of it only while a byte is dear.
   A test that pins the spec's own numbers returns early at other prices (`runs_at_measurement_prices`); run `scripts/price_grid.sh --pr` before committing a test change.
 - **Keep the execution-spec gate honest.**
   A change that makes Satin's machinery differ from Ethereum's fixtures on purpose registers a deviation (its rule, its reason, the entries it fails with the hashes Satin produces for them) and regenerates `crates/mega-state-test/DEVIATIONS.md`; a failure that is a bug is fixed, never registered.

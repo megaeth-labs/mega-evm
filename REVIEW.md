@@ -64,7 +64,8 @@ This is the single most important correctness concern in mega-evm.
 - A test that asserts one of the spec's own byte-price numbers must return early when the process runs at other prices (`runs_at_measurement_prices`).
   A measurement build fixes other prices through the `satin-price-override` feature, and a test without the guard fails there on a price the developer asked for.
   Flag a new state-gas assertion that lacks it: the failure only shows in the configuration nobody watches.
-- Every other test holds at any byte price, and the byte-price grid job checks it.
+- Every other test holds at a byte price of nothing and at any price from one gas per byte up to the grid's dearest point, and the byte-price grid job checks it.
+  Below one gas per byte the schedule's entries round to nothing one at a time, and past the grid a fixed-size scenario outgrows any transaction below the execution cap; no test is held there.
   A gas limit is its regular room on top of what the scenario adds at the prices in effect, read off the schedule and `history_gas`, not a number that happened to cover it at the constants; a call or creation that forwards all but a 64th of its gas keeps 64 times the history of the records it pays for.
   A case whose scenario is state or history gas — a limit to cross, a bucket to scale, a charge that cannot be paid — returns early where that byte costs nothing (`state_is_free`, `history_is_free` in each test target's `common.rs`), and its other assertions still run.
 - **Benchmark methodology.**
@@ -110,9 +111,9 @@ These checks guard every change to the Satin engine.
 ### Byte-price grid
 
 - `.github/workflows/price-grid.yml` runs the `mega-evm` suite at byte prices other than the constants, through `scripts/price_grid.sh`: a cost per state byte and a cost per history byte per point, each run with `--no-fail-fast`.
-- On a pull request it runs four points: both bytes free (0 / 0), the cheapest and the dearest pair under consideration (312.5 / 20 and 5000 / 300), and a point past every candidate (10000 / 1000).
-  Before the suite held at any price, these four failed every test the whole grid failed.
-- Nightly and on dispatch it runs the whole grid: CPSB 0, 312.5, 700, 1530, 2000, 5000 and 10000 by CPHB 0, 20, 50, 88, 100, 200, 300 and 1000, and 0.001 on both.
+- On a pull request it runs five points: both bytes free (0 / 0), both at one gas (1 / 1), the cheapest and the dearest pair under consideration (312.5 / 20 and 5000 / 300), and a point past every candidate (10000 / 1000).
+  Between them they have failed every test the whole grid failed; 1 / 1 is where a premise that a charge cannot be paid, true only while a byte is dear, breaks.
+- Nightly and on dispatch it runs the whole grid: CPSB 0, 1, 312.5, 700, 1530, 2000, 5000 and 10000 by CPHB 0, 1, 20, 50, 88, 100, 200, 300 and 1000, and 0.001 on both.
 - It is not a required check.
   A failure is a test that assumes a price, a scenario that does not scale with it, or an engine defect; the first two are fixed in the test, the third is not hidden behind a guard.
 - Locally, `scripts/price_grid.sh --pr`, `--full`, or the points named (`scripts/price_grid.sh 312.5/20 5000/300`); each point's log is under `target/price-grid/`.

@@ -5,11 +5,12 @@ name: Byte-price grid
 # (scripts/price_grid.sh). Both prices are provisional until the economics sign-off, so the suite
 # must hold at any price it may end at, and a test that only holds at the constants shows here:
 #
-# - on a pull request, four points: both bytes free, the cheapest and the dearest pair under
-#   consideration (312.5 / 20 and 5000 / 300), and a point past every candidate (10000 / 1000);
-# - nightly and on dispatch, the whole grid: a cost per state byte of 0, 312.5, 700, 1530, 2000,
-#   5000 and 10000 by a cost per history byte of 0, 20, 50, 88, 100, 200, 300 and 1000, and 0.001 on
-#   both.
+# - on a pull request, five points: both bytes free, both at one gas (1 / 1), the cheapest and the
+#   dearest pair under consideration (312.5 / 20 and 5000 / 300), and a point past every candidate
+#   (10000 / 1000);
+# - nightly and on dispatch, the whole grid: a cost per state byte of 0, 1, 312.5, 700, 1530, 2000,
+#   5000 and 10000 by a cost per history byte of 0, 1, 20, 50, 88, 100, 200, 300 and 1000, and 0.001
+#   on both.
 #
 # The run at the constants is the `test` job of build-and-test.yml.
 
@@ -30,7 +31,7 @@ jobs:
   price-grid:
     name: byte-price grid
     runs-on: ubuntu-24.04
-    # The pull-request points take minutes; the nightly grid runs the suite 57 times.
+    # The pull-request points take minutes; the nightly grid runs the suite 73 times.
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4

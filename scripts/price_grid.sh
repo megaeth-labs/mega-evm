@@ -17,18 +17,20 @@
 # Exits 1 if any point fails.
 #
 # The grid brackets the prices under consideration and adds the edges the code allows: a price of
-# nothing on either axis, the smallest price the code represents (0.001), and a point past the
-# dearest candidate on both axes.
+# nothing on either axis, the smallest price the code represents (0.001), the cheapest price that
+# charges a byte at all (1), and a point past the dearest candidate on both axes. The suite holds
+# at a price of nothing and at any price from 1 up to that point; below 1 the schedule's entries
+# round to nothing one at a time, and no test is held there.
 
 set -uo pipefail
 
-CPSB_AXIS="0 312.5 700 1530 2000 5000 10000"
-CPHB_AXIS="0 20 50 88 100 200 300 1000"
+CPSB_AXIS="0 1 312.5 700 1530 2000 5000 10000"
+CPHB_AXIS="0 1 20 50 88 100 200 300 1000"
 EXTRA_POINTS="0.001/0.001"
-# Both bytes free; the cheapest and the dearest pair under consideration; and a point past every
-# candidate. Before the suite was made to hold at any price, these four failed every test the
-# full grid failed.
-PR_POINTS="0/0 312.5/20 5000/300 10000/1000"
+# Both bytes free; both at one gas, where a premise that a charge cannot be paid holds only if a
+# byte is dear; the cheapest and the dearest pair under consideration; and a point past every
+# candidate. Between them they have failed every test the full grid failed.
+PR_POINTS="0/0 1/1 312.5/20 5000/300 10000/1000"
 
 FEATURES="satin-price-override,test-utils"
 
@@ -49,7 +51,7 @@ case "${1:-}" in
         points="$points $EXTRA_POINTS"
         ;;
     "" | -h | --help)
-        sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
+        sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'
         exit 2
         ;;
     *)
