@@ -199,7 +199,8 @@ impl<ITEM, META> Pointer<TraceNode<ITEM, META>> {
 /// Represents gas information for a single opcode execution.
 #[derive(Clone)]
 pub struct OpcodeGasInfo {
-    /// The opcode executed.
+    /// The opcode executed. A byte no opcode is defined for, which halts the frame with
+    /// `OpcodeNotFound`, is recorded as `INVALID`.
     pub opcode: OpCode,
     /// Gas remaining before the opcode execution.
     pub gas_before: u64,
@@ -320,7 +321,7 @@ impl<CTX: ContextTr, INTR: InterpreterTypes> Inspector<CTX, INTR> for GasInspect
         let opcode = interp.bytecode.opcode();
         let depth = context.journal().depth();
         let step = OpcodeGasInfo {
-            opcode: OpCode::new(opcode).unwrap(),
+            opcode: OpCode::new(opcode).unwrap_or(OpCode::INVALID),
             gas_before,
             gas_after: gas_before, // Will be updated in step_end
             depth: depth as u64,
