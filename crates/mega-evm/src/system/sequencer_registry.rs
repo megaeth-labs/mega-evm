@@ -218,12 +218,13 @@ where
 }
 
 /// The live system address in the state `db` holds: the address a system-address transaction
-/// must be sent from, read as a transaction of the system shape reads it when it is validated
-/// ([`inspect_system_address`]).
+/// must be sent from, read as a transaction of the system shape reads it when it is validated.
 ///
 /// It is what a transaction pool gives
 /// [`validate_transaction_stateless`](crate::validate_transaction_stateless), read off the state
-/// the pool validates against. `None` when the registry names no address this engine trusts.
+/// the pool validates against. `None` when the registry names no address this engine trusts: it
+/// has no account, it holds other code than [`SEQUENCER_REGISTRY_CODE`], or its
+/// `_currentSystemAddress` is zero.
 ///
 /// # Errors
 ///
