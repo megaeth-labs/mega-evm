@@ -19,7 +19,7 @@ use alloy_op_hardforks::{OpHardfork, OpHardforks};
 use alloy_primitives::{BlockTimestamp, U256};
 use auto_impl::auto_impl;
 
-use crate::MegaSpecId;
+use crate::{MegaSpecId, ProtocolLimits};
 
 hardfork! {
     /// `MegaETH` network upgrades that schedule a Satin-engine spec. It is expected to mix with
@@ -129,6 +129,17 @@ pub trait MegaHardforks: OpHardforks {
         self.hardfork(timestamp).map(|fork| fork.spec_id())
     }
 
+    /// The limits the protocol holds a block at `timestamp` to: the [`ProtocolLimits`] the fork
+    /// active there carries, or `None` when no `MegaETH` fork is active there or the fork carries
+    /// none.
+    ///
+    /// This is where block execution reads them; a later fork that changes a limit answers here.
+    fn protocol_limits(&self, timestamp: BlockTimestamp) -> Option<ProtocolLimits> {
+        match self.hardfork(timestamp)? {
+            MegaHardfork::Satin => self.fork_params::<ProtocolLimits>().copied(),
+        }
+    }
+
     /// Whether [`MegaHardfork::Satin`] has activated at `timestamp`.
     fn is_satin_active_at_timestamp(&self, timestamp: BlockTimestamp) -> bool {
         self.mega_fork_activation(MegaHardfork::Satin).active_at_timestamp(timestamp)
@@ -182,7 +193,8 @@ pub trait MegaHardforks: OpHardforks {
     /// - The parameters every scheduled fork requires are attached, and their values pass their
     ///   type's own checks ([`require_params`](Self::require_params)). Satin requires
     ///   [`SequencerRegistryConfig`](crate::system::SequencerRegistryConfig) so the registry can be
-    ///   seeded at the first block.
+    ///   seeded at the first block, and [`ProtocolLimits`], the limits every node of the chain
+    ///   holds its blocks and transactions to.
     ///
     /// There is no ordering or gap check: a single fork has nothing to be out of order with. The
     /// spec that follows Satin brings the ladder back, and with it those checks.
@@ -196,6 +208,7 @@ pub trait MegaHardforks: OpHardforks {
 
         // Required parameters, one `self.require_params::<P>()?` per params type.
         self.require_params::<crate::system::SequencerRegistryConfig>()?;
+        self.require_params::<ProtocolLimits>()?;
 
         Ok(())
     }
@@ -703,10 +716,68 @@ mod tests {
             })
         );
 
+        // Satin requires both of its params types: the registry's alone does not load.
         let with_registry = MegaHardforkConfig::default()
             .with_all_activated()
             .with_params(crate::system::SequencerRegistryConfig::placeholder());
-        assert_eq!(with_registry.validate_schedule(), Ok(()));
+        assert_eq!(
+            with_registry.validate_schedule(),
+            Err(ScheduleError::MissingParams {
+                fork: MegaHardfork::Satin,
+                params: "ProtocolLimits",
+            })
+        );
+        assert_eq!(
+            with_registry.validate_schedule().unwrap_err().to_string(),
+            "hardfork Satin is scheduled but its ProtocolLimits params are not configured"
+        );
+        let with_limits = MegaHardforkConfig::default()
+            .with_all_activated()
+            .with_params(ProtocolLimits::default());
+        assert_eq!(
+            with_limits.validate_schedule(),
+            Err(ScheduleError::MissingParams {
+                fork: MegaHardfork::Satin,
+                params: "SequencerRegistryConfig",
+            })
+        );
+        let with_both = with_registry.with_params(ProtocolLimits::default());
+        assert_eq!(with_both.validate_schedule(), Ok(()));
+
+        // Limits no chain may carry are refused at load, however they were attached.
+        let unlimited = MegaHardforkConfig::default()
+            .with_all_activated()
+            .with_params(crate::system::SequencerRegistryConfig::placeholder())
+            .with_params_unchecked(ProtocolLimits::no_limits());
+        assert!(
+            matches!(
+                unlimited.validate_schedule(),
+                Err(ScheduleError::InvalidParams {
+                    fork: MegaHardfork::Satin,
+                    params: "ProtocolLimits",
+                    ..
+                })
+            ),
+            "{:?}",
+            unlimited.validate_schedule()
+        );
+    }
+
+    /// A block reads the limits of the fork active at its timestamp: Satin's from its activation
+    /// on, and none before it or on a schedule that carries none.
+    #[test]
+    fn test_protocol_limits_are_the_active_forks_params() {
+        let limits = ProtocolLimits::default().with_block_kv_update_limit(7);
+        let config = MegaHardforkConfig::default()
+            .with(MegaHardfork::Satin, ForkCondition::Timestamp(100))
+            .with_params(limits);
+
+        assert_eq!(config.protocol_limits(99), None, "no MegaETH fork is active yet");
+        assert_eq!(config.protocol_limits(100), Some(limits));
+        assert_eq!(config.protocol_limits(u64::MAX), Some(limits));
+
+        let without = MegaHardforkConfig::default().with_all_activated();
+        assert_eq!(without.protocol_limits(0), None, "Satin carries no limits here");
     }
 
     /// A scheduled fork's params are checked at load even when they were attached without

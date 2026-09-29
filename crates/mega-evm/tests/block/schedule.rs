@@ -4,8 +4,8 @@ use alloy_evm::block::BlockExecutor;
 use alloy_hardforks::ForkCondition;
 use mega_evm::{
     chain_activation, mainnet_hardforks, system::SequencerRegistryConfig, testnet_hardforks,
-    MegaHardfork, MegaHardforkConfig, MegaHardforks, ScheduleError, MAINNET_CHAIN_ID,
-    TESTNET_CHAIN_ID,
+    MegaHardfork, MegaHardforkConfig, MegaHardforks, ProtocolLimits, ScheduleError,
+    MAINNET_CHAIN_ID, TESTNET_CHAIN_ID,
 };
 
 use crate::common::{self, registry_config, user_tx};
@@ -64,11 +64,20 @@ fn test_a_schedule_missing_its_fork_params_is_refused_at_load() {
         }),
     );
 
-    // With the parameters attached the schedule loads, and a block runs on it.
-    let loaded = missing.with_params(registry_config());
-    assert_eq!(loaded.require_params::<SequencerRegistryConfig>(), Ok(()));
+    // The registry's alone is not enough: Satin requires its limits too.
+    let registry_only = missing.with_params(registry_config());
+    assert_eq!(registry_only.require_params::<SequencerRegistryConfig>(), Ok(()));
+    assert_eq!(
+        registry_only.validate_schedule(),
+        Err(ScheduleError::MissingParams { fork: MegaHardfork::Satin, params: "ProtocolLimits" }),
+    );
+
+    // With both attached the schedule loads, and a block runs on it.
+    let loaded = registry_only.with_params(ProtocolLimits::DEFAULT);
+    assert_eq!(loaded.require_params::<ProtocolLimits>(), Ok(()));
     assert_eq!(loaded.validate_schedule(), Ok(()));
     assert_eq!(loaded.fork_params::<SequencerRegistryConfig>(), Some(&registry_config()));
+    assert_eq!(loaded.fork_params::<ProtocolLimits>(), Some(&ProtocolLimits::DEFAULT));
 
     let mut state = common::state();
     let mut executor = common::executor_with_spec(&mut state, common::unlimited_ctx(), loaded);
@@ -82,5 +91,6 @@ fn test_an_unscheduled_fork_needs_no_params() {
     let unscheduled = MegaHardforkConfig::default();
 
     assert_eq!(unscheduled.require_params::<SequencerRegistryConfig>(), Ok(()));
+    assert_eq!(unscheduled.require_params::<ProtocolLimits>(), Ok(()));
     assert_eq!(unscheduled.validate_schedule(), Ok(()));
 }

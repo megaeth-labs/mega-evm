@@ -54,14 +54,197 @@ use alloy_primitives::TxHash;
 
 #[cfg(not(feature = "std"))]
 use alloc as std;
-use std::boxed::Box;
+use std::{boxed::Box, format};
 
 use alloy_evm::block::{BlockExecutionError, BlockValidationError};
 
 use crate::{
-    BlockGasCounters, EvmTxRuntimeLimits, LimitUsage, MegaBlockLimitExceededError, MegaGasUsage,
-    MegaTxLimitExceededError,
+    BlockGasCounters, EvmTxRuntimeLimits, HardforkParams, HardforkParamsError, LimitUsage,
+    MegaBlockLimitExceededError, MegaGasUsage, MegaHardfork, MegaTxLimitExceededError,
+    TX_BODY_SIZE,
 };
+
+/// The limits the protocol holds every block and every transaction to: the Satin fork's
+/// parameters.
+///
+/// Each of them changes what a validator computes when it re-executes a block, so every node of
+/// a chain holds the same values, and they travel with the chain configuration, attached to the
+/// fork ([`HardforkParams`]). Block execution reads them from the schedule at the block's
+/// timestamp ([`MegaHardforks::protocol_limits`](crate::MegaHardforks::protocol_limits)); a node
+/// does not pass them with a block.
+///
+/// - [`tx_runtime_limits`](Self::tx_runtime_limits) holds each transaction's own execution: a
+///   transaction that crosses one is stopped, or a frame reverted, and that is the result its
+///   receipt records. There is no tighter setting a builder could run a transaction under and still
+///   agree with a validator; a builder that wants to avoid such a transaction leaves it out.
+/// - The four block budgets hold what a block's transactions spend and keep together. A validator
+///   refuses a block that packs a transaction after the block reached one; a builder may pack
+///   tighter ([`BlockLimits`]), never looser.
+///
+/// [`Default`] is [`DEFAULT`](Self::DEFAULT): the values of [`crate::constants`], provisional
+/// until the economics sign-off fixes them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProtocolLimits {
+    /// The limits every transaction runs under, which the block executor installs on the EVM:
+    /// data size, write records and state gas, per transaction and per frame, and gas
+    /// detention's two caps.
+    pub tx_runtime_limits: EvmTxRuntimeLimits,
+    /// The most execution gas a block's transactions may spend together. The transaction that
+    /// reaches it is packed; after it, only a deposit is.
+    pub block_execution_gas_limit: u64,
+    /// The most state gas a block's transactions may spend together. The transaction that reaches
+    /// it is packed; after it, only a transaction that adds no state gas is, or a deposit.
+    pub block_state_gas_limit: u64,
+    /// The most data-size bytes a block's transactions may keep together. The transaction that
+    /// reaches it is packed; after it, only a deposit is.
+    pub block_txs_data_limit: u64,
+    /// The most write records a block's transactions may keep together: the block's KV count. The
+    /// transaction that reaches it is packed; after it, only a deposit is.
+    pub block_kv_update_limit: u64,
+}
+
+impl Default for ProtocolLimits {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+impl ProtocolLimits {
+    /// Satin's limits: each transaction holds [`TX_DATA_LIMIT`] bytes of data size and a block
+    /// [`BLOCK_DATA_LIMIT`], a read of volatile data caps the transaction's compute at
+    /// [`BLOCK_ENV_ACCESS_COMPUTE_GAS`] or [`ORACLE_ACCESS_COMPUTE_GAS`], and every other limit is
+    /// unlimited. Provisional, as the constants are.
+    ///
+    /// [`TX_DATA_LIMIT`]: crate::constants::TX_DATA_LIMIT
+    /// [`BLOCK_DATA_LIMIT`]: crate::constants::BLOCK_DATA_LIMIT
+    /// [`BLOCK_ENV_ACCESS_COMPUTE_GAS`]: crate::constants::BLOCK_ENV_ACCESS_COMPUTE_GAS
+    /// [`ORACLE_ACCESS_COMPUTE_GAS`]: crate::constants::ORACLE_ACCESS_COMPUTE_GAS
+    pub const DEFAULT: Self = Self {
+        tx_runtime_limits: EvmTxRuntimeLimits::no_limits()
+            .with_tx_data_size_limit(crate::constants::TX_DATA_LIMIT)
+            .with_block_env_access_compute_gas_limit(crate::constants::BLOCK_ENV_ACCESS_COMPUTE_GAS)
+            .with_oracle_access_compute_gas_limit(crate::constants::ORACLE_ACCESS_COMPUTE_GAS),
+        block_execution_gas_limit: u64::MAX,
+        block_state_gas_limit: u64::MAX,
+        block_txs_data_limit: crate::constants::BLOCK_DATA_LIMIT,
+        block_kv_update_limit: u64::MAX,
+    };
+
+    /// No limit at all, gas detention's caps included, so no transaction is detained
+    /// ([`EvmTxRuntimeLimits::no_limits`]).
+    ///
+    /// For tests and equivalence runs: [`validate`](HardforkParams::validate) refuses it, so no
+    /// chain configuration carries it.
+    pub const fn no_limits() -> Self {
+        Self {
+            tx_runtime_limits: EvmTxRuntimeLimits::no_limits(),
+            block_execution_gas_limit: u64::MAX,
+            block_state_gas_limit: u64::MAX,
+            block_txs_data_limit: u64::MAX,
+            block_kv_update_limit: u64::MAX,
+        }
+    }
+
+    /// Sets the limits every transaction runs under.
+    pub const fn with_tx_runtime_limits(mut self, limits: EvmTxRuntimeLimits) -> Self {
+        self.tx_runtime_limits = limits;
+        self
+    }
+
+    /// Sets the block's execution-gas limit.
+    pub const fn with_block_execution_gas_limit(mut self, limit: u64) -> Self {
+        self.block_execution_gas_limit = limit;
+        self
+    }
+
+    /// Sets the block's state-gas limit.
+    pub const fn with_block_state_gas_limit(mut self, limit: u64) -> Self {
+        self.block_state_gas_limit = limit;
+        self
+    }
+
+    /// Sets the block's data-size limit.
+    pub const fn with_block_txs_data_limit(mut self, limit: u64) -> Self {
+        self.block_txs_data_limit = limit;
+        self
+    }
+
+    /// Sets the block's KV limit: the most write records its transactions may keep together.
+    pub const fn with_block_kv_update_limit(mut self, limit: u64) -> Self {
+        self.block_kv_update_limit = limit;
+        self
+    }
+}
+
+impl HardforkParams for ProtocolLimits {
+    const FORK: MegaHardfork = MegaHardfork::Satin;
+    const NAME: &'static str = "ProtocolLimits";
+
+    /// Refuses a value no chain can run on:
+    ///
+    /// - a limit of zero, which is what a field left out of a configuration reads as, and which
+    ///   stops or refuses every transaction that uses the dimension;
+    /// - a transaction data-size limit below [`TX_BODY_SIZE`], the bytes every transaction's body
+    ///   counts, which stops every transaction before it runs;
+    /// - an unlimited gas-detention cap: `u64::MAX` caps nothing, and a read of volatile data must
+    ///   be held to a finite one on a chain.
+    ///
+    /// `u64::MAX` is a valid value for every other limit: it leaves the dimension unlimited.
+    fn validate(&self) -> Result<(), HardforkParamsError> {
+        let EvmTxRuntimeLimits {
+            tx_data_size_limit,
+            frame_data_size_limit,
+            tx_kv_update_limit,
+            frame_kv_update_limit,
+            tx_state_gas_limit,
+            block_env_access_compute_gas_limit,
+            oracle_access_compute_gas_limit,
+        } = self.tx_runtime_limits;
+        let detention_caps = [
+            (
+                "tx_runtime_limits.block_env_access_compute_gas_limit",
+                block_env_access_compute_gas_limit,
+            ),
+            ("tx_runtime_limits.oracle_access_compute_gas_limit", oracle_access_compute_gas_limit),
+        ];
+        let limits = [
+            ("tx_runtime_limits.tx_data_size_limit", tx_data_size_limit),
+            ("tx_runtime_limits.frame_data_size_limit", frame_data_size_limit),
+            ("tx_runtime_limits.tx_kv_update_limit", tx_kv_update_limit),
+            ("tx_runtime_limits.frame_kv_update_limit", frame_kv_update_limit),
+            ("tx_runtime_limits.tx_state_gas_limit", tx_state_gas_limit),
+            detention_caps[0],
+            detention_caps[1],
+            ("block_execution_gas_limit", self.block_execution_gas_limit),
+            ("block_state_gas_limit", self.block_state_gas_limit),
+            ("block_txs_data_limit", self.block_txs_data_limit),
+            ("block_kv_update_limit", self.block_kv_update_limit),
+        ];
+
+        let invalid = |message| Err(HardforkParamsError { message });
+        for (name, limit) in limits {
+            if limit == 0 {
+                return invalid(format!("ProtocolLimits.{name} must not be zero"));
+            }
+        }
+        if tx_data_size_limit < TX_BODY_SIZE {
+            return invalid(format!(
+                "ProtocolLimits.tx_runtime_limits.tx_data_size_limit must be at least \
+                 {TX_BODY_SIZE}, the bytes every transaction's body counts"
+            ));
+        }
+        for (name, cap) in detention_caps {
+            if cap == u64::MAX {
+                return invalid(format!(
+                    "ProtocolLimits.{name} must be finite: u64::MAX leaves a read of volatile \
+                     data undetained"
+                ));
+            }
+        }
+        Ok(())
+    }
+}
 
 /// The limits one block holds its transactions to.
 ///
@@ -506,7 +689,185 @@ fn invalid_tx(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{MegaHardforkConfig, MegaHardforks};
     use alloy_primitives::B256;
+
+    /// The protocol's default limits, written out so a change to one is a visible diff: today's
+    /// provisional constants, and unlimited everywhere else.
+    #[test]
+    fn test_the_default_protocol_limits_are_the_provisional_constants() {
+        use crate::constants::{
+            BLOCK_DATA_LIMIT, BLOCK_ENV_ACCESS_COMPUTE_GAS, ORACLE_ACCESS_COMPUTE_GAS,
+            TX_DATA_LIMIT,
+        };
+        assert_eq!(ProtocolLimits::default(), ProtocolLimits::DEFAULT);
+        assert_eq!(
+            ProtocolLimits::DEFAULT,
+            ProtocolLimits {
+                tx_runtime_limits: EvmTxRuntimeLimits {
+                    tx_data_size_limit: TX_DATA_LIMIT,
+                    frame_data_size_limit: u64::MAX,
+                    tx_kv_update_limit: u64::MAX,
+                    frame_kv_update_limit: u64::MAX,
+                    tx_state_gas_limit: u64::MAX,
+                    block_env_access_compute_gas_limit: BLOCK_ENV_ACCESS_COMPUTE_GAS,
+                    oracle_access_compute_gas_limit: ORACLE_ACCESS_COMPUTE_GAS,
+                },
+                block_execution_gas_limit: u64::MAX,
+                block_state_gas_limit: u64::MAX,
+                block_txs_data_limit: BLOCK_DATA_LIMIT,
+                block_kv_update_limit: u64::MAX,
+            }
+        );
+        assert_eq!(
+            ProtocolLimits::DEFAULT.tx_runtime_limits,
+            EvmTxRuntimeLimits::default().with_tx_data_size_limit(TX_DATA_LIMIT),
+            "a transaction's defaults are a bare context's, with the data-size limit"
+        );
+        assert_eq!(ProtocolLimits::DEFAULT.validate(), Ok(()));
+    }
+
+    /// The limits travel with a chain configuration: they survive a round trip through its JSON,
+    /// whose shape is written out here, and through a schedule, which hands back what was
+    /// attached.
+    #[test]
+    fn test_protocol_limits_round_trip() {
+        let limits = ProtocolLimits::DEFAULT
+            .with_tx_runtime_limits(
+                ProtocolLimits::DEFAULT
+                    .tx_runtime_limits
+                    .with_frame_data_size_limit(1)
+                    .with_tx_kv_update_limit(2)
+                    .with_frame_kv_update_limit(3)
+                    .with_tx_state_gas_limit(4),
+            )
+            .with_block_execution_gas_limit(5)
+            .with_block_state_gas_limit(6)
+            .with_block_txs_data_limit(7)
+            .with_block_kv_update_limit(8);
+
+        let json = serde_json::to_string(&limits).expect("serializes");
+        assert_eq!(
+            json,
+            r#"{"txRuntimeLimits":{"txDataSizeLimit":13107200,"frameDataSizeLimit":1,"txKvUpdateLimit":2,"frameKvUpdateLimit":3,"txStateGasLimit":4,"blockEnvAccessComputeGasLimit":20000000,"oracleAccessComputeGasLimit":20000000},"blockExecutionGasLimit":5,"blockStateGasLimit":6,"blockTxsDataLimit":7,"blockKvUpdateLimit":8}"#
+        );
+        assert_eq!(serde_json::from_str::<ProtocolLimits>(&json).expect("deserializes"), limits);
+
+        // A field left out is an error, not a zero; so is one the type does not have.
+        let missing = json.replace(r#","blockKvUpdateLimit":8"#, "");
+        assert!(serde_json::from_str::<ProtocolLimits>(&missing).is_err(), "{missing}");
+        let missing_tx = json.replace(r#""txStateGasLimit":4,"#, "");
+        assert!(serde_json::from_str::<ProtocolLimits>(&missing_tx).is_err(), "{missing_tx}");
+        let unknown = json.replace(r#""blockKvUpdateLimit":8"#, r#""blockKvUpdateLimit":8,"x":1"#);
+        assert!(serde_json::from_str::<ProtocolLimits>(&unknown).is_err(), "{unknown}");
+
+        let schedule = MegaHardforkConfig::default().with_all_activated().with_params(limits);
+        assert_eq!(schedule.fork_params::<ProtocolLimits>(), Some(&limits));
+        assert_eq!(schedule.protocol_limits(0), Some(limits));
+    }
+
+    /// Every limit refuses zero, the value a field left out of a configuration reads as; the
+    /// transaction's data size refuses less than a body; the detention caps refuse `u64::MAX`,
+    /// and every other limit accepts it.
+    #[test]
+    fn test_validate_refuses_what_no_chain_can_run_on() {
+        let base = ProtocolLimits::DEFAULT;
+        let tx = |f: fn(EvmTxRuntimeLimits, u64) -> EvmTxRuntimeLimits, value| {
+            base.with_tx_runtime_limits(f(base.tx_runtime_limits, value))
+        };
+        type Set = fn(ProtocolLimits, u64) -> ProtocolLimits;
+        let fields: [(&str, Set); 11] = [
+            ("tx_runtime_limits.tx_data_size_limit", |l, v| {
+                l.with_tx_runtime_limits(l.tx_runtime_limits.with_tx_data_size_limit(v))
+            }),
+            ("tx_runtime_limits.frame_data_size_limit", |l, v| {
+                l.with_tx_runtime_limits(l.tx_runtime_limits.with_frame_data_size_limit(v))
+            }),
+            ("tx_runtime_limits.tx_kv_update_limit", |l, v| {
+                l.with_tx_runtime_limits(l.tx_runtime_limits.with_tx_kv_update_limit(v))
+            }),
+            ("tx_runtime_limits.frame_kv_update_limit", |l, v| {
+                l.with_tx_runtime_limits(l.tx_runtime_limits.with_frame_kv_update_limit(v))
+            }),
+            ("tx_runtime_limits.tx_state_gas_limit", |l, v| {
+                l.with_tx_runtime_limits(l.tx_runtime_limits.with_tx_state_gas_limit(v))
+            }),
+            ("tx_runtime_limits.block_env_access_compute_gas_limit", |l, v| {
+                l.with_tx_runtime_limits(
+                    l.tx_runtime_limits.with_block_env_access_compute_gas_limit(v),
+                )
+            }),
+            ("tx_runtime_limits.oracle_access_compute_gas_limit", |l, v| {
+                l.with_tx_runtime_limits(
+                    l.tx_runtime_limits.with_oracle_access_compute_gas_limit(v),
+                )
+            }),
+            ("block_execution_gas_limit", ProtocolLimits::with_block_execution_gas_limit),
+            ("block_state_gas_limit", ProtocolLimits::with_block_state_gas_limit),
+            ("block_txs_data_limit", ProtocolLimits::with_block_txs_data_limit),
+            ("block_kv_update_limit", ProtocolLimits::with_block_kv_update_limit),
+        ];
+
+        for (name, set) in fields {
+            assert_eq!(
+                set(base, 0).validate(),
+                Err(HardforkParamsError {
+                    message: std::format!("ProtocolLimits.{name} must not be zero")
+                }),
+                "{name}"
+            );
+            assert_eq!(
+                set(base, 1).validate().is_ok(),
+                name != "tx_runtime_limits.tx_data_size_limit",
+                "{name} at one"
+            );
+            let unlimited = set(base, u64::MAX).validate();
+            if name.ends_with("compute_gas_limit") {
+                assert_eq!(
+                    unlimited,
+                    Err(HardforkParamsError {
+                        message: std::format!(
+                            "ProtocolLimits.{name} must be finite: u64::MAX leaves a read of \
+                             volatile data undetained"
+                        )
+                    }),
+                    "{name}"
+                );
+                assert_eq!(set(base, u64::MAX - 1).validate(), Ok(()), "{name} just below");
+            } else {
+                assert_eq!(unlimited, Ok(()), "{name} may be unlimited");
+            }
+        }
+
+        // The transaction's data size holds at least a body, and exactly a body is enough.
+        assert_eq!(
+            tx(EvmTxRuntimeLimits::with_tx_data_size_limit, TX_BODY_SIZE - 1).validate(),
+            Err(HardforkParamsError {
+                message: std::format!(
+                    "ProtocolLimits.tx_runtime_limits.tx_data_size_limit must be at least \
+                     {TX_BODY_SIZE}, the bytes every transaction's body counts"
+                )
+            })
+        );
+        assert_eq!(
+            tx(EvmTxRuntimeLimits::with_tx_data_size_limit, TX_BODY_SIZE).validate(),
+            Ok(())
+        );
+
+        // The unlimited set of tests and equivalence runs is refused.
+        assert!(ProtocolLimits::no_limits().validate().is_err());
+    }
+
+    /// A schedule refuses to carry the unlimited set, so no validated chain configuration does.
+    #[test]
+    #[should_panic(expected = "Invalid params for fork Satin: \
+                    ProtocolLimits.tx_runtime_limits.block_env_access_compute_gas_limit must be \
+                    finite")]
+    fn test_a_schedule_refuses_the_unlimited_protocol_limits() {
+        let _ = MegaHardforkConfig::default()
+            .with_all_activated()
+            .with_params(ProtocolLimits::no_limits());
+    }
 
     /// A block that configures nothing holds the production data-size caps and gas detention's
     /// caps, and nothing else.
