@@ -19,7 +19,7 @@ use mega_evm::{
 pub type EvmeExternalEnvs = TestExternalEnvs<Infallible, AHashBucketHasher>;
 use tracing::{debug, trace};
 
-use super::{satin_schedule, EvmeError, Result};
+use super::{parse_limits_override, satin_schedule, EvmeError, LimitsOverride, Result};
 
 /// Chain configuration arguments (spec and chain ID)
 #[derive(Args, Debug, Clone)]
@@ -35,6 +35,14 @@ pub struct ChainArgs {
     /// `ChainID` to use
     #[arg(long = "chain-id", visible_aliases = ["chainid"], default_value = "6342")]
     pub chain_id: u64,
+
+    /// Satin only: run under these protocol limits instead of the chain's, a counterfactual. A
+    /// JSON object in the shape a chain configuration carries `ProtocolLimits` in (camelCase,
+    /// per-transaction limits under `txRuntimeLimits`), inline or in a file; the fields it names
+    /// replace the chain's, every other stays. Refused when it names an unknown field or a value
+    /// no chain may carry
+    #[arg(long = "override.limits", value_name = "JSON|FILE", value_parser = parse_limits_override)]
+    pub limits_override: Option<LimitsOverride>,
 }
 
 impl ChainArgs {
@@ -56,11 +64,13 @@ impl ChainArgs {
 
     /// The protocol limits a Satin run of this chain at `timestamp` is held to: those of the
     /// schedule [`satin_schedule`] gives, which for a chain that does not run Satin at `timestamp`
-    /// is a counterfactual on [`ProtocolLimits::DEFAULT`].
+    /// is a counterfactual on [`ProtocolLimits::DEFAULT`], with `--override.limits` over them.
     pub fn protocol_limits(&self, timestamp: u64) -> Result<ProtocolLimits> {
-        satin_schedule(self.chain_id, timestamp)?.protocol_limits(timestamp).ok_or_else(|| {
-            EvmeError::Other(format!("the Satin schedule carries no limits at {timestamp}"))
-        })
+        satin_schedule(self.chain_id, timestamp, self.limits_override.as_ref())?
+            .protocol_limits(timestamp)
+            .ok_or_else(|| {
+                EvmeError::Other(format!("the Satin schedule carries no limits at {timestamp}"))
+            })
     }
 }
 

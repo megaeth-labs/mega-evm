@@ -23,10 +23,11 @@ use op_alloy_rpc_types::Transaction;
 
 use crate::{
     common::{
-        op_receipt_to_tx_receipt, parse_bucket_capacity, print_execution_summary,
-        print_execution_trace, print_receipt, print_satin_report, satin_schedule,
-        BuildProviderOutput, EvmeExternalEnvs, EvmeOutcome, ExecutionSummary, ExternalEnvSnapshot,
-        OpTxReceipt, RpcCacheStore, SatinReport, TxOverrideArgs,
+        op_receipt_to_tx_receipt, parse_bucket_capacity, parse_limits_override,
+        print_execution_summary, print_execution_trace, print_receipt, print_satin_report,
+        satin_schedule, BuildProviderOutput, EvmeExternalEnvs, EvmeOutcome, ExecutionSummary,
+        ExternalEnvSnapshot, LimitsOverride, OpTxReceipt, RpcCacheStore, SatinReport,
+        TxOverrideArgs,
     },
     engine::Engine,
     run, EvmeState,
@@ -65,6 +66,14 @@ pub struct Cmd {
     /// `Satin` replays on the Satin engine, a legacy spec on the legacy engine
     #[arg(long = "override.spec", value_name = "SPEC")]
     pub spec_override: Option<String>,
+
+    /// Satin only: replay under these protocol limits instead of the chain's, a counterfactual. A
+    /// JSON object in the shape a chain configuration carries `ProtocolLimits` in (camelCase,
+    /// per-transaction limits under `txRuntimeLimits`), inline or in a file; the fields it names
+    /// replace the chain's, every other stays. Refused when it names an unknown field or a value
+    /// no chain may carry, and for a block that runs on the legacy engine
+    #[arg(long = "override.limits", value_name = "JSON|FILE", value_parser = parse_limits_override)]
+    pub limits_override: Option<LimitsOverride>,
 
     /// Transaction override configuration
     #[command(flatten)]
@@ -175,6 +184,7 @@ impl Cmd {
                 &self.rpc_args,
                 &bucket_capacities,
                 self.spec_override.as_deref(),
+                self.limits_override.as_ref(),
                 self.output_args.json,
             )
             .await?;
@@ -404,7 +414,7 @@ impl Cmd {
         P: Provider<op_alloy_network::Optimism> + Clone + std::fmt::Debug,
     {
         let timestamp = ctx.block.header.timestamp();
-        let hardforks = satin_schedule(ctx.chain_id, timestamp)?;
+        let hardforks = satin_schedule(ctx.chain_id, timestamp, self.limits_override.as_ref())?;
         debug!(chain_id = ctx.chain_id, spec = %MegaSpecId::SATIN, "Chain configuration");
 
         info!(fork_block = ctx.parent_block.header.number(), "Forking state from parent block",);

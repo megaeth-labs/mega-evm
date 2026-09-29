@@ -6,11 +6,12 @@ mod common;
 
 use std::path::Path;
 
-use alloy_primitives::{B256, U256};
+use alloy_primitives::{Address, B256, U256};
 use common::blocks::{
     block_path, cache_copy, cache_copy_with_absent_factory, code_of, fixtures, read_block,
     run_evme, write_block, BLOCKS, FACTORY,
 };
+use mega_evm::{system::MEGA_SYSTEM_ADDRESS, ProtocolLimits};
 use mega_evme::block::PreAccount;
 use serde_json::Value;
 
@@ -217,4 +218,75 @@ async fn test_a_block_fetched_over_rpc_is_cached_and_replays_offline() {
     assert_eq!(run.code, 0, "{}", run.stderr);
     assert_eq!(blocks_of(&run.records())[0]["rpc_reads"], 0);
     assert!(read_block(cache.path(), number).prestate.accounts.contains_key(&FACTORY));
+}
+
+/// `--override.limits` replays a Satin block under other protocol limits: the fields it names
+/// replace the chain's, and every other stays. At the protocol's defaults it changes nothing; a
+/// transaction data-size limit of the body alone stops every transaction but the protocol's own,
+/// which no per-transaction limit holds; a block data budget of one byte packs the first
+/// transaction and refuses every later one.
+#[test]
+fn test_an_override_replays_a_satin_block_under_other_limits() {
+    let cache = cache_copy_with_absent_factory();
+    let number = BLOCKS[0];
+    let replay_under = |limits: Option<&str>| -> (Vec<Value>, Value) {
+        let mut args = vec!["--override.spec", "Satin"];
+        if let Some(limits) = limits {
+            args.extend(["--override.limits", limits]);
+        }
+        let run = replay(number, cache.path(), &args);
+        assert_eq!(run.code, 0, "{}", run.stderr);
+        let records = run.records();
+        let block = blocks_of(&records)[0].clone();
+        (records.into_iter().filter(|r| r["kind"] == "tx").collect(), block)
+    };
+
+    let (counterfactual, _) = replay_under(None);
+    let defaults = serde_json::to_string(&ProtocolLimits::DEFAULT).unwrap();
+    assert_eq!(replay_under(Some(&defaults)).0, counterfactual, "it runs on the defaults");
+    assert!(counterfactual.iter().all(|tx| tx["satin"]["limit_exceeded"].is_null()));
+
+    let recorded = read_block(cache.path(), number);
+    let sent = recorded.block["transactions"].as_array().unwrap();
+    let (stopped, _) = replay_under(Some(r#"{"txRuntimeLimits":{"txDataSizeLimit":310}}"#));
+    let (mut protocols, mut others) = (0, 0);
+    for (tx, sent) in stopped.iter().zip(sent) {
+        let stop = &tx["satin"]["limit_exceeded"];
+        let from: Address = sent["from"].as_str().unwrap().parse().unwrap();
+        if from == MEGA_SYSTEM_ADDRESS {
+            protocols += 1;
+            assert!(
+                stop.is_null(),
+                "the protocol's transaction {} is held to no limit",
+                tx["index"]
+            );
+            assert!(tx["satin"]["data_size"].as_u64().unwrap() > 310);
+        } else {
+            others += 1;
+            assert_eq!(stop["kind"], "data_size", "{tx}");
+            assert_eq!(stop["limit"], 310, "{tx}");
+            assert_eq!(stop["used"], tx["satin"]["data_size"], "{tx}");
+        }
+    }
+    assert!(protocols > 0 && others > 0, "{protocols} {others}");
+
+    let (packed, block) = replay_under(Some(r#"{"blockTxsDataLimit":1}"#));
+    assert_eq!(block["refused"], block["transactions"].as_u64().unwrap() - 1);
+    assert_eq!(packed[0], counterfactual[0], "the transaction that reaches the budget is packed");
+    for tx in &packed[1..] {
+        assert_eq!(tx["status"], "refused", "{tx}");
+        let reason = tx["reason"].as_str().unwrap();
+        assert!(reason.contains("Block transactions data limit reached"), "{reason}");
+    }
+}
+
+/// `--override.limits` is Satin's: a block the legacy engine replays is refused with it, and
+/// the replay exits with code 1.
+#[test]
+fn test_an_override_refuses_a_legacy_block() {
+    let cache = cache_copy();
+    let run = replay(BLOCKS[0], cache.path(), &["--override.limits", "{}"]);
+    assert_eq!(run.code, 1, "{}", run.stdout);
+    let error = run.records()[0]["error"].as_str().unwrap().to_string();
+    assert!(error.contains("--override.limits applies to Satin only"), "{error}");
 }

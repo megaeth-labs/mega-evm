@@ -4,7 +4,7 @@ use clap::{parser::ValueSource, ArgMatches, CommandFactory, FromArgMatches, Pars
 use tracing::error;
 
 use crate::{
-    common::{EvmeError, LogArgs},
+    common::{EvmeError, LimitsOverride, LogArgs},
     engine::Engine,
 };
 
@@ -67,6 +67,19 @@ pub async fn run_cli(args: Vec<OsString>) -> Result<(), Error> {
         }
     };
     match engine {
+        // The released CLI knows no such flag: its engine holds a transaction to its spec's own
+        // limits. Refused here rather than left to its parser.
+        Engine::Legacy if cmd.command.limits_override().is_some() => {
+            eprintln!(
+                "{}",
+                EvmeError::InvalidInput(
+                    "--override.limits applies to Satin only: the legacy engine holds a \
+                     transaction to its spec's own limits"
+                        .to_string()
+                )
+            );
+            std::process::exit(1);
+        }
         Engine::Legacy => {
             if let Err(e) = crate::engine::run_legacy(args, spec_is_default).await {
                 eprintln!("{e}");
@@ -94,6 +107,15 @@ impl Commands {
             Self::Run(cmd) => Engine::of_spec(&cmd.env_args.chain.spec),
             Self::Tx(cmd) => Engine::of_spec(&cmd.env_args.chain.spec),
             Self::Replay(cmd) => cmd.engine().await,
+        }
+    }
+
+    /// The protocol limits the command overrides the chain's with (`--override.limits`), if any.
+    pub const fn limits_override(&self) -> Option<&LimitsOverride> {
+        match self {
+            Self::Run(cmd) => cmd.env_args.chain.limits_override.as_ref(),
+            Self::Tx(cmd) => cmd.env_args.chain.limits_override.as_ref(),
+            Self::Replay(cmd) => cmd.limits_override.as_ref(),
         }
     }
 }

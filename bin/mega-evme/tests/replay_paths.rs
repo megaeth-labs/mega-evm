@@ -141,13 +141,16 @@ impl Server {
     }
 }
 
-/// The block replay's transaction records, on `spec`'s engine.
-fn block_rows(spec: Option<&str>) -> Vec<Value> {
+/// The block replay's transaction records, on `spec`'s engine, under `limits` when given.
+fn block_rows(spec: Option<&str>, limits: Option<&str>) -> Vec<Value> {
     let cache = cache_copy_with_absent_factory();
     let mut args = vec!["replay", "--block", "26400110", "--json", "--block-cache"];
     args.push(cache.path().to_str().unwrap());
     if let Some(spec) = spec {
         args.extend(["--override.spec", spec]);
+    }
+    if let Some(limits) = limits {
+        args.extend(["--override.limits", limits]);
     }
     let run = run_evme(&args);
     assert_eq!(run.code, 0, "{}", run.stderr);
@@ -170,14 +173,26 @@ async fn test_a_transaction_replayed_alone_is_the_one_the_block_replay_runs() {
     let server = Server::start(recorded).await;
     let uri = server.0.uri();
 
-    for (spec, engine) in [(None, "legacy"), (Some("Satin"), "satin")] {
-        let rows = block_rows(spec);
+    // The last leg holds both paths to a transaction data-size limit of the body alone, which
+    // stops every transaction but the protocol's own.
+    let stopping = r#"{"txRuntimeLimits":{"txDataSizeLimit":310}}"#;
+    let mut stops = 0;
+    for (spec, engine, limits) in [
+        (None, "legacy", None),
+        (Some("Satin"), "satin", None),
+        (Some("Satin"), "satin", Some(stopping)),
+    ] {
+        let rows = block_rows(spec, limits);
         for index in checked(&rows) {
             let row = &rows[index];
             let mut args = vec!["replay", row["hash"].as_str().unwrap(), "--rpc", &uri];
             args.extend(["--rpc.no-cache-file", "--rpc.max-retries", "0", "--json"]);
             if let Some(spec) = spec {
                 args.extend(["--override.spec", spec]);
+            }
+            if let Some(limits) = limits {
+                args.extend(["--override.limits", limits]);
+                stops += usize::from(!row["satin"]["limit_exceeded"].is_null());
             }
             let run = run_evme(&args);
             assert_eq!(run.code, 0, "{engine} tx {index}: {}{}", run.stderr, run.stdout);
@@ -198,4 +213,5 @@ async fn test_a_transaction_replayed_alone_is_the_one_the_block_replay_runs() {
             }
         }
     }
+    assert!(stops > 0, "the limits leg checks a stopped transaction");
 }

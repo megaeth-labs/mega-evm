@@ -12,7 +12,7 @@ use super::{
     state::{BlockState, ParentStateRpc},
 };
 use crate::{
-    common::{EvmeError, Result, RpcArgs},
+    common::{EvmeError, LimitsOverride, Result, RpcArgs},
     engine::Engine,
 };
 
@@ -107,6 +107,7 @@ pub async fn replay_blocks(
     rpc_args: &RpcArgs,
     bucket_capacities: &[(u32, u64)],
     spec_override: Option<&str>,
+    limits_override: Option<&LimitsOverride>,
     json: bool,
 ) -> Result<ReplaySummary> {
     let (provider, chain_id) = if rpc_args.rpc_url.is_some() {
@@ -134,8 +135,14 @@ pub async fn replay_blocks(
                 source.provider().and_then(|p| ParentStateRpc::new(p.clone(), number - 1));
             let mut state =
                 BlockState::new(inputs.prestate.clone(), std::mem::take(&mut codes), fallback);
-            let executed =
-                execute_block(engine, &inputs, bucket_capacities, spec_override, &mut state);
+            let executed = execute_block(
+                engine,
+                &inputs,
+                bucket_capacities,
+                spec_override,
+                limits_override,
+                &mut state,
+            );
             let rpc_reads = state.fallback_reads;
             let BlockState { prestate, codes: mut store, .. } = state;
             let result = match executed {
@@ -188,11 +195,15 @@ pub async fn replay_blocks(
 /// Executes the block `inputs` describes on `engine` over `state`, returning what it produced
 /// and the spec it ran under: `spec_override` when given, otherwise, on the legacy engine, the
 /// spec the chain's schedule gives at the block's timestamp.
+///
+/// `limits_override` replaces the protocol limits a Satin block runs under; a legacy block,
+/// whose limits its spec fixes, is refused with one.
 pub fn execute_block(
     engine: Engine,
     inputs: &super::inputs::BlockInputs,
     bucket_capacities: &[(u32, u64)],
     spec_override: Option<&str>,
+    limits_override: Option<&LimitsOverride>,
     state: &mut BlockState,
 ) -> Result<(super::exec::ExecutedBlock, String)> {
     match engine {
@@ -202,10 +213,16 @@ pub fn execute_block(
                 &inputs.header,
                 &inputs.transactions,
                 bucket_capacities,
+                limits_override,
                 state,
             )?;
             Ok((executed, mega_evm::MegaSpecId::SATIN.to_string()))
         }
+        Engine::Legacy if limits_override.is_some() => Err(EvmeError::InvalidInput(format!(
+            "block {} runs on the legacy engine, whose limits its spec fixes; --override.limits \
+             applies to Satin only",
+            inputs.header.number
+        ))),
         Engine::Legacy => run_legacy_block(inputs, bucket_capacities, spec_override, state),
     }
 }
