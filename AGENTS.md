@@ -431,9 +431,39 @@ Every later mechanism plugs into these; a change to one comes back to this layer
 - `satin/` — tests of the Satin engine (integration tests; add new ones here or in a new directory with a `main.rs`).
 - `block/` — tests of block execution: the Karst block rules, the block-level limits, the counters, the factory and the admission gate.
 - `system/` — tests of the system contracts: the interceptor dispatch, what each contract answers, keyless deployment (`system/keyless/`) and the system-address transaction.
+- `fuzz/` — randomized tests: properties the engine must hold on any input, and the neutral differential against op-revm and revm's mainnet EVM (see Randomized tests below).
 - `_pending/` — no test any more: its `README.md` records where each legacy test the test inventory kept went, ported into one of the targets above or retired, and why.
   It has no `main.rs`, so Cargo builds nothing there.
 - Unit tests live next to the code in `#[cfg(test)] mod tests`.
+
+### Randomized tests (`crates/mega-evm/tests/fuzz/`)
+
+The hand-written tests fix an input and an expectation; the randomized ones draw the input and state what must hold of any outcome.
+They run on `proptest`, through the target's own runner (`harness.rs`), and every property is one `#[test]`.
+
+```bash
+cargo test -p mega-evm --test fuzz                                  # the bounded mode, as CI runs it
+cargo test --release -p mega-evm --test fuzz                        # the same in release, where the debug assertions are gone
+MEGA_FUZZ_LONG=1 cargo test -p mega-evm --test fuzz -- --nocapture  # the long mode: 50x the cases, a seed from the clock, printed
+MEGA_FUZZ_SEED=7 MEGA_FUZZ_CASES=5000 cargo test -p mega-evm --test fuzz -- --test-threads=1 a_stop_keeps  # one property, a chosen run
+```
+
+- **Two modes.**
+  The bounded mode is deterministic: seed 0, a fixed case count per property (256 to 768), a few seconds in debug.
+  It is part of `cargo test --workspace`, and the `fuzz-release` job of `build-and-test.yml` runs it in release.
+  The long mode (`MEGA_FUZZ_LONG=1`) multiplies the cases by fifty and draws a seed from the clock unless `MEGA_FUZZ_SEED` names one; `fuzz.yml` runs it on `workflow_dispatch`, in debug and in release, since a schedule fires only on the default branch.
+  `MEGA_FUZZ_CASES` and `MEGA_FUZZ_SEED` override either mode.
+- **A failure is reproducible.**
+  The runner panics with the property's name, the reason, the seed and case count that reproduce the run, and the minimal case proptest shrank to, rendered as the generator types (`Case`, `BlockCase`), from which a regression test is written by hand into `regressions.rs`.
+- **The generators** (`gen/`) build a `Case`: a `World` (four fixed accounts, a beneficiary that may be one of them, a delegation, SALT capacities with multipliers above one and a failing bucket, the Oracle's answers, valid runtime limits, the block), a `Tx` of one of six shapes (call, creation, EIP-7702, deposit, system-address, keyless) at five gas tiers, and the `Program`s of the three contracts, lists of self-contained ops biased towards what the engine meters.
+  `Case::execute` runs it on a fresh EVM; `blocks.rs` runs envelopes through `MegaBlockExecutor`.
+  `Flavor::Neutral` replaces what only `MegaETH` has by its plain counterpart, for the differential.
+- **To add a property**, write a `#[test]` that calls `harness::check(name, bounded_cases, || case(Flavor::Satin), |case| { ... })` and returns `Err` through `prop_eq!` / `prop_check!` where the outcome breaks the property; keep the bounded case count such that the whole target stays under a minute in debug.
+  A property that does not hold by design is stated as what does hold, with the reason in its doc comment, never weakened silently.
+  To add an op or a transaction shape, extend the enum and its strategy in `gen/`, its assembly, and, if op-revm cannot express it, its `neutralized` counterpart.
+- **The byte prices** are a process-wide constant, so a case cannot run at two prices in one test.
+  `prices.rs` checks the schedule builder's monotonicity in-process, and under `satin-price-override` records what every case spent (`MEGA_FUZZ_PRICE_RECORD`) for `scripts/fuzz_price_monotonic.py` to compare two runs at two prices, which `fuzz.yml` does.
+  The properties themselves hold at any byte price and run in the byte-price grid; the regression tests pin a minimal case at the spec's prices and return early at others.
 
 ## Test Gates
 
