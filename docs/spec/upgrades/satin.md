@@ -389,7 +389,7 @@ Three dimensions are limited per transaction; compute is not one of them (see [T
   Because it is a limit on gas, a slot or an account in a bucket `m` times the minimum reaches it `m` times sooner.
 - **Order at one site.**
   Where the state gas and a count cross at the same site, the state gas is the dimension reported; between the counts, data size is checked before write records, and a transaction limit before a frame budget.
-  A frame start is the exception: its records and transfer log are held before the frame is built, and the state gas its opcode charged upfront for the account it adds only once the frame is decided; a start the records stop adds no account, so its upfront state gas is given back rather than held, and the data-size or KV stop is the one reported.
+  A frame start is the exception: its records and transfer log are held before the frame is built, and the state gas charged upfront for the account it adds — by its opcode, or, for the first frame, by EIP-2780 — only once the frame is decided; a start the records stop adds no account, so its upfront state gas is given back rather than held, and the data-size or KV stop is the one reported.
 - **A frame start** is counted before the frame is built.
   A start the caller's account refuses — a value the caller cannot fund, a creation whose creator nonce cannot be bumped — MUST count nothing, be charged nothing, and be stopped by no limit.
   A creation onto an occupied address is counted, and a crossing it causes stops it where it would otherwise have failed on the collision.
@@ -423,7 +423,7 @@ What was applied before the first frame is not the frames' doing, and a later st
 A limit is enforced before the writes it guards:
 
 - A frame whose start would cross a limit MUST be answered with the stop before it is built, so no value moves; a stopped creation still bumps its creator's nonce.
-  The one exception is the state gas the calling opcode charges upfront for the account the frame adds: it is held once the frame is decided, so a frame built by then returns the stop before its first instruction, a frame answered without running is rewritten to the stop, and what the start moved is reverted with the frames the stop reverts.
+  The one exception is the state gas charged upfront for the account the frame adds — by the calling opcode, or, for the first frame, by EIP-2780: it is held once the frame is decided, so a frame built by then returns the stop before its first instruction, a frame answered without running is rewritten to the stop, and what the start moved is reverted with the frames the stop reverts — for the first frame, which no frame's revert follows, with its answer.
 - A body over the data-size limit MUST stop the transaction before it runs: no authorization is applied, no record made outside a frame is charged, the first frame's start is charged nothing, and the first frame is answered with the stop.
 - EIP-7702 authorities whose state gas or records would cross a limit MUST be taken back before the first frame, with their writes and the state gas applying them charged; the first frame is then answered with the stop.
   Authorities admitted there are kept through a later stop, as above.
