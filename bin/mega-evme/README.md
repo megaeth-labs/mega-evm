@@ -36,7 +36,7 @@ On Satin every output field keeps its legacy name and meaning, and a `satin` obj
 A Satin run is held to the protocol limits of the chain's schedule at the block's timestamp; a chain that does not run Satin there (mainnet and testnet today, the default chain, any chain the tool does not know) runs on Satin's default limits, a counterfactual.
 `--override.limits <JSON|FILE>` on `run`, `tx` and `replay` replaces the fields it names of those limits; it is refused on a legacy spec.
 `--genesis <FILE>` gives a chain the tool does not know, a devnet for one, its own Satin configuration: its genesis file's `satinTime`, registry seeds and limits replace the tool's table for that chain, read with the parser a node reads them with.
-Under it a run the file cannot configure — on another chain, on a legacy spec, before the file's `satinTime`, or on a file without Satin keys — is refused rather than run on the tool's table.
+Under it `run` and `tx` default to `--spec Satin`, and a run the file cannot configure — on another chain, on a legacy spec, before the file's `satinTime`, or on a file without Satin keys — is refused rather than run on the tool's table.
 
 The legacy leg is the default feature `legacy`; `--no-default-features` builds a Satin-only binary.
 
@@ -308,7 +308,7 @@ These options are available across all commands.
 
 | Option                 | Default | Description                               |
 | ---------------------- | ------- | ----------------------------------------- |
-| `--spec <SPEC>`        | Rex6    | Spec: `Satin` (the Satin engine), or `Equivalence`, `MiniRex`, `MiniRex1`, `MiniRex2`, `Rex`, `Rex1`, `Rex2`, `Rex3`, `Rex4`, `Rex5`, `Rex6` (the legacy engine; `MiniRex1`/`MiniRex2` are aliases executing `Equivalence`/`MiniRex` behavior) |
+| `--spec <SPEC>`        | Rex6    | Spec: `Satin` (the Satin engine), or `Equivalence`, `MiniRex`, `MiniRex1`, `MiniRex2`, `Rex`, `Rex1`, `Rex2`, `Rex3`, `Rex4`, `Rex5`, `Rex6` (the legacy engine; `MiniRex1`/`MiniRex2` are aliases executing `Equivalence`/`MiniRex` behavior); `Satin` by default under `--genesis` |
 | `--chain-id <ID>`      | 6342    | Chain ID                                  |
 
 ### Block Environment

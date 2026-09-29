@@ -195,21 +195,27 @@ fn genesis_with_one_record(dir: &tempfile::TempDir, chain_id: u64, satin_time: u
 
 /// A Satin run given its chain's genesis file is held to the limits the file carries, as the
 /// chain's own and not as an override: the second write crosses the file's KV limit of one.
+/// `run` and `tx` run Satin under the file without being told `--spec Satin`.
 #[test]
 fn test_a_genesis_file_holds_a_satin_run_to_its_limits() {
     let dir = tempfile::tempdir().unwrap();
     let genesis = genesis_with_one_record(&dir, 6342, 0);
     let run = |extra: &[&str]| {
-        let args =
-            [&["run", TWO_WRITES, "--spec", "Satin", "--json", "--genesis", &genesis], extra];
+        let args = [&["run", TWO_WRITES, "--json", "--genesis", &genesis], extra];
         evme(&args.concat())
     };
-    let stopped = run(&[]).json();
-    assert_eq!(
-        stopped["satin"]["limit_exceeded"],
-        json!({ "kind": "kv_update", "limit": 1, "used": 2 })
-    );
-    assert!(stopped["satin"].get("limits_override").is_none(), "{}", stopped["satin"]);
+    for spec in [&["--spec", "Satin"][..], &[]] {
+        let stopped = run(spec).json();
+        assert_eq!(
+            stopped["satin"]["limit_exceeded"],
+            json!({ "kind": "kv_update", "limit": 1, "used": 2 }),
+            "{spec:?}"
+        );
+        assert!(stopped["satin"].get("limits_override").is_none(), "{}", stopped["satin"]);
+    }
+    let tx = evme(&["tx", "--input", "0x00", "--json", "--genesis", &genesis]).json();
+    assert_eq!(tx["success"], true);
+    assert_eq!(tx["satin"]["data_size"], 311, "a Satin report: {tx}");
 
     // An override still replaces what it names, over the file's limits.
     let overridden = run(&["--override.limits", r#"{"txRuntimeLimits":{"txKvUpdateLimit":5}}"#]);
@@ -240,28 +246,19 @@ fn test_a_genesis_file_refuses_a_run_it_cannot_configure() {
         assert!(output.stderr.contains(message), "{args:?}: {}", output.stderr);
     };
     let before = "--genesis activates Satin at timestamp 1800000000, and the run is at timestamp";
-    for command in
-        [&["run", TWO_WRITES, "--spec", "Satin"][..], &["tx", "--input", "0x00", "--spec", "Satin"]]
-    {
-        let args = [command, &["--json", "--genesis", &later]].concat();
-        refused(&args, &format!("{before} 1:"));
-        let args = [&args[..], &["--block.timestamp", "1799999999"]].concat();
-        refused(&args, &format!("{before} 1799999999:"));
-        let args = [command, &["--json", "--genesis", without_satin]].concat();
-        refused(&args, "--genesis: the file has no Satin keys");
+    for command in [&["run", TWO_WRITES][..], &["tx", "--input", "0x00"]] {
+        for spec in [&["--spec", "Satin"][..], &[]] {
+            let args = [command, spec, &["--json", "--genesis", &later]].concat();
+            refused(&args, &format!("{before} 1:"));
+            let args = [&args[..], &["--block.timestamp", "1799999999"]].concat();
+            refused(&args, &format!("{before} 1799999999:"));
+            let args = [command, spec, &["--json", "--genesis", without_satin]].concat();
+            refused(&args, "--genesis: the file has no Satin keys");
+        }
     }
 
-    let from = evme(&[
-        "run",
-        TWO_WRITES,
-        "--spec",
-        "Satin",
-        "--json",
-        "--genesis",
-        &later,
-        "--block.timestamp",
-        SATIN_TIME,
-    ]);
+    let from =
+        evme(&["run", TWO_WRITES, "--json", "--genesis", &later, "--block.timestamp", SATIN_TIME]);
     assert_eq!(
         from.json()["satin"]["limit_exceeded"],
         json!({ "kind": "kv_update", "limit": 1, "used": 2 })

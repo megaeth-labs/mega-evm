@@ -12,7 +12,7 @@ The `replay` command auto-detects the spec from the chain ID and block timestamp
 
 | Flag                             | Default     | Aliases     | Description                                                                                |
 | -------------------------------- | ----------- | ----------- | ------------------------------------------------------------------------------------------ |
-| `--spec <SPEC>`                  | `Rex6`      | —           | MegaETH spec to use                                                                        |
+| `--spec <SPEC>`                  | `Rex6`      | —           | MegaETH spec to use; `Satin` by default under `--genesis`                                  |
 | `--chain-id <ID>`                | `6342`      | `--chainid` | Chain ID                                                                                   |
 | `--override.limits <JSON\|FILE>` | the chain's | —           | Satin only: protocol limits to run under instead, see [Protocol limits](#protocol-limits)  |
 | `--genesis <FILE>`               | —           | —           | Satin only: the chain's genesis file, see [A chain's genesis file](#a-chains-genesis-file) |
@@ -127,6 +127,7 @@ Every command under it holds to one rule: a run the file cannot configure is ref
 
 - A command on another chain than the file's `chainId` is refused first, whatever its spec.
 - A command on a legacy spec is refused: the legacy engine runs a chain on its own table and knows nothing of the file.
+  `run` and `tx` run `Satin` when `--spec` is left out, the one spec the file configures.
 - A Satin run before the file's `satinTime` is refused, and so is every Satin run on a file without Satin keys.
   For `run` and `tx` the run's timestamp is `--block.timestamp`, `1` by default, so a file that activates Satin later needs a `--block.timestamp` at or after its `satinTime`.
   For `replay` it is the block's: a block before the file's `satinTime` would run on the legacy engine and is refused, and so is one `--override.spec Satin` forces there.

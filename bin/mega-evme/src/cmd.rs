@@ -3,6 +3,8 @@ use std::ffi::OsString;
 use clap::{parser::ValueSource, ArgMatches, CommandFactory, FromArgMatches, Parser, Subcommand};
 use tracing::error;
 
+use mega_evm::MegaSpecId;
+
 use crate::{
     common::{
         check_genesis_chain, parse_genesis, use_genesis, EvmeError, GenesisChain, LimitsOverride,
@@ -21,9 +23,9 @@ pub struct MainCmd {
 
     /// Satin only: the genesis file of the chain the command runs on. Its `config` object's
     /// `chainId` and Satin keys (`satinTime`, the registry seeds, the protocol limits) replace the
-    /// engine's table for that chain: which blocks run Satin, and the schedule they run under. A
-    /// run on another chain, on a legacy spec, before the file's `satinTime`, or on a file without
-    /// Satin keys is refused
+    /// engine's table for that chain: which blocks run Satin, and the schedule they run under.
+    /// `run` and `tx` default to `--spec Satin` under it. A run on another chain, on a legacy
+    /// spec, before the file's `satinTime`, or on a file without Satin keys is refused
     #[arg(long = "genesis", global = true, value_name = "FILE", value_parser = parse_genesis)]
     pub genesis: Option<GenesisChain>,
 
@@ -64,11 +66,15 @@ pub enum Error {
 pub async fn run_cli(args: Vec<OsString>) -> Result<(), Error> {
     let matches = MainCmd::command().get_matches_from(&args);
     let spec_is_default = spec_is_default(&matches);
-    let cmd = MainCmd::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+    let mut cmd = MainCmd::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
     if let Some(genesis) = &cmd.genesis {
         if let Err(e) = use_genesis(genesis.clone()) {
             eprintln!("{e}");
             std::process::exit(1);
+        }
+        // The file configures Satin alone, so a `run` or `tx` that left `--spec` out runs it.
+        if spec_is_default {
+            cmd.command.set_spec(MegaSpecId::SATIN.to_string());
         }
     }
     // The chain is checked before the engine is picked: a run on another chain than the file's is
@@ -154,6 +160,15 @@ impl Commands {
             Self::Run(cmd) => Some(cmd.env_args.chain.chain_id),
             Self::Tx(cmd) => Some(cmd.env_args.chain.chain_id),
             Self::Replay(_) => None,
+        }
+    }
+
+    /// Sets the spec of `run` or `tx` (`--spec`) to `spec`; `replay` has none.
+    fn set_spec(&mut self, spec: String) {
+        match self {
+            Self::Run(cmd) => cmd.env_args.chain.spec = spec,
+            Self::Tx(cmd) => cmd.env_args.chain.spec = spec,
+            Self::Replay(_) => {}
         }
     }
 

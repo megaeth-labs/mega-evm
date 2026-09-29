@@ -28,7 +28,7 @@ pub struct ChainArgs {
     /// Name of spec to use. `Satin` runs on the Satin engine; `Equivalence`, `MiniRex`,
     /// `MiniRex1`, `MiniRex2`, `Rex`, `Rex1`, `Rex2`, `Rex3`, `Rex4`, `Rex5`, `Rex6` run on the
     /// legacy engine, the released 1.7.1 (`MiniRex1`/`MiniRex2` are alias specs executing
-    /// `Equivalence`/`MiniRex` behavior)
+    /// `Equivalence`/`MiniRex` behavior). Under `--genesis` the default is `Satin`
     #[arg(long = "spec", default_value = "Rex6")]
     pub spec: String,
 
