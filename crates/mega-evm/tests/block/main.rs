@@ -12,6 +12,7 @@ mod factory;
 mod inspector;
 mod limits;
 mod protocol_limits;
+mod receipt_goldens;
 mod receipts;
 mod rules;
 mod salt;
