@@ -79,7 +79,7 @@ Git submodules are required — clone with `--recursive` or run `git submodule u
 
 `mega-evme` runs a command on the engine its spec names: `Satin` on the in-tree sources, a spec from `Equivalence` to `Rex6` on the released `mega-evme` 1.7.1 and `mega-evm` 1.7.1, which it links under the aliases `mega-evme-legacy` and `mega-evm-legacy` (its `legacy` feature, on by default).
 Because it links a package of its own name, select it by manifest path, not with `-p`: `cargo test --manifest-path bin/mega-evme/Cargo.toml`.
-The legacy line's versions are pinned to the 1.7.1 release's lockfile and guarded by `bin/mega-evme/tests/legacy_line.rs`.
+The legacy line's versions are pinned to the 1.7.1 release's lockfile and guarded by `bin/mega-evme/tests/legacy_line.rs`, the precompiles' backends and the encodings it shares with the engine included; the few the engine's alloy 2 line holds above the release are pinned where they are.
 
 `mega-t8n` still targets the legacy engine.
 It is outside `[workspace] members`, so no workspace command builds it; do not edit its sources until it is ported to Satin.

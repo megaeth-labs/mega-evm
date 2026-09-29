@@ -26,6 +26,7 @@ Two engines: the in-tree sources run Satin; a spec from `Equivalence` to `Rex6` 
 
 ## ANTI-PATTERNS
 - Do not edit or re-implement the legacy leg: it is the released 1.7.1 code, pinned with its dependency versions (`tests/legacy_line.rs`).
+- Do not move a package `tests/legacy_line.rs` pins without deciding it there. The leg shares most of its dependencies with the Satin engine and the tool, one copy per compatibility line: the precompiles' backends (`secp256k1`, `k256`, `sha2`, `ripemd`, `aurora-engine-modexp`, arkworks, `blst`, `c-kzg`, `p256`), hashing and word arithmetic (`alloy-primitives`, `ruint`, `sha3`) and the encodings. Each is pinned at the release's version; `alloy-rlp`, `alloy-trie` and the `alloy-sol-types` family, which the Satin engine's alloy 2 line holds above it, are pinned at the version the workspace holds (`AHEAD_OF_THE_RELEASE`). Transport, JSON and derive crates float.
 - Do not use `cargo ... -p mega-evme`: the name also matches the linked 1.7.1 package. Use `--manifest-path bin/mega-evme/Cargo.toml`.
 - Do not build a Satin hardfork schedule, or attach its params, in the CLI: a counterfactual takes the engine's own schedule for a chain it does not know (`mega_evm::all_activated_hardforks`), so it carries every params type Satin requires, and a chain's own Satin schedule is used as it is or refused.
 - Do not duplicate chain/spec parsing logic across commands.
