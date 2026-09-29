@@ -287,13 +287,21 @@ fn test_a_create2_round_trip_through_the_factory() {
     let mut input = salt.to_vec();
     input.extend_from_slice(&init);
     let expected = CREATE2_FACTORY_ADDRESS.create2_from_code(salt, init.as_ref());
+    // 1,000,000 of regular gas on top of the account the creation adds, the history of the body,
+    // and 64 times the history of the creation's two write records, at the byte prices in effect:
+    // the factory forwards all but a 64th of its gas to the creation and pays the records from
+    // the 64th it keeps.
+    let gas_limit = 1_000_000 +
+        common::new_account_state_gas() +
+        common::body_history(input.len() as u64) +
+        64 * mega_evm::write_record_history_gas(2).expect("two records have a price");
 
     let outcome = executor
         .execute_transaction_without_commit(&recovered(tx(
             0,
             CREATE2_FACTORY_ADDRESS,
             Bytes::from(input),
-            1_000_000,
+            gas_limit,
         )))
         .expect("the factory call runs");
     match &outcome.result {

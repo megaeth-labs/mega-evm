@@ -185,8 +185,14 @@ fn test_direct_construction_stops_a_transaction_over_the_chains_data_size_limit(
     executor.apply_pre_execution_changes().expect("the block starts");
     executor.evm_mut().set_tx_runtime_limits(EvmTxRuntimeLimits::no_limits());
 
+    // The second write is counted once its opcode completed, so the gas covers both slots, their
+    // records and the body at the byte prices in effect.
+    let gas_limit = 1_000_000 +
+        2 * common::slot_state_gas() +
+        common::body_history(0) +
+        mega_evm::write_record_history_gas(2).expect("two records have a price");
     let outcome = executor
-        .execute_transaction_without_commit(&user_tx(0, 1_000_000))
+        .execute_transaction_without_commit(&user_tx(0, gas_limit))
         .expect("the transaction runs");
 
     assert_eq!(

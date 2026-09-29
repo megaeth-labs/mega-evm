@@ -18,8 +18,8 @@ use revm::{
 };
 
 use crate::common::{
-    self, deposit_tx, executor, system_tx, unlimited_ctx, user_tx, TestExecutor, BLOCK_GAS_LIMIT,
-    BLOCK_NUMBER,
+    self, deposit_tx, empty_call_gas, executor, system_tx, unlimited_ctx, user_tx, TestExecutor,
+    BLOCK_GAS_LIMIT, BLOCK_NUMBER,
 };
 
 /// The word the L1 block contract holds at its scalars slot: the data-availability footprint
@@ -89,7 +89,7 @@ fn test_activation_block_rejects_a_user_transaction() {
     executor.apply_pre_execution_changes().expect("the block starts");
 
     let err = executor
-        .execute_transaction(&user_tx(0, 100_000))
+        .execute_transaction(&user_tx(0, empty_call_gas()))
         .expect_err("a user transaction has no place in an activation block");
 
     assert!(format!("{err}").contains("non-deposit transaction in fork activation block"), "{err}");
@@ -136,7 +136,7 @@ fn test_da_footprint_is_inert_without_a_scalar() {
     let mut executor = executor(&mut state, unlimited_ctx());
     executor.apply_pre_execution_changes().expect("the block starts");
 
-    executor.execute_transaction(&user_tx(0, 100_000)).expect("the transaction executes");
+    executor.execute_transaction(&user_tx(0, empty_call_gas())).expect("the transaction executes");
 
     let (_, result) = executor.finish_with_counters().expect("the block finishes");
     assert_eq!(result.blob_gas_used, 0, "no scalar, no footprint");
@@ -151,8 +151,8 @@ fn test_da_footprint_within_the_block_budget_is_reported_as_blob_gas() {
     let mut executor = executor(&mut state, unlimited_ctx());
     executor.apply_pre_execution_changes().expect("the block starts");
 
-    let first = user_tx(0, 100_000);
-    let second = user_tx(1, 100_000);
+    let first = user_tx(0, empty_call_gas());
+    let second = user_tx(1, empty_call_gas());
     let expected = (mega_evm::MegaTransactionExt::estimated_da_size(&first) +
         mega_evm::MegaTransactionExt::estimated_da_size(&second)) *
         u64::from(SCALAR);
@@ -272,7 +272,7 @@ fn test_l1_block_info_is_read_by_the_first_transaction_that_prices_against_it() 
     assert_eq!(executor.evm().ctx().chain().l2_block, None, "the block starts with no info");
 
     executor
-        .execute_transaction(&user_tx(0, 100_000))
+        .execute_transaction(&user_tx(0, empty_call_gas()))
         .expect("an empty L1 block contract is not an error");
 
     let chain = executor.evm().ctx().chain();
@@ -300,7 +300,9 @@ fn test_l1_block_info_of_this_block_is_not_overwritten() {
     });
 
     executor.apply_pre_execution_changes().expect("the block starts");
-    let gas = executor.execute_transaction(&user_tx(0, 100_000)).expect("the transaction executes");
+    let gas = executor
+        .execute_transaction(&user_tx(0, empty_call_gas()))
+        .expect("the transaction executes");
 
     let chain = executor.evm().ctx().chain();
     assert_eq!(
@@ -347,7 +349,9 @@ fn test_the_l1_info_deposit_prices_the_transactions_after_it() {
     assert_eq!(state_scalars(&mut executor), word, "the deposit wrote the block's scalars");
 
     // The deposit bumped the sender's nonce, so the user transaction after it carries nonce 1.
-    let gas = executor.execute_transaction(&user_tx(1, 100_000)).expect("the transaction executes");
+    let gas = executor
+        .execute_transaction(&user_tx(1, empty_call_gas()))
+        .expect("the transaction executes");
 
     let paid = operator_fee_paid(executor);
     assert_eq!(
@@ -371,7 +375,9 @@ fn test_operator_fee_is_charged_on_the_karst_formula() {
     let mut executor = executor(&mut state, unlimited_ctx());
     executor.apply_pre_execution_changes().expect("the block starts");
 
-    let gas = executor.execute_transaction(&user_tx(0, 100_000)).expect("the transaction executes");
+    let gas = executor
+        .execute_transaction(&user_tx(0, empty_call_gas()))
+        .expect("the transaction executes");
 
     assert_eq!(
         operator_fee_paid(executor),
