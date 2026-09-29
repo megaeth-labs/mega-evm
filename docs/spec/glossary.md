@@ -135,6 +135,14 @@ At `multiplier > 1`, storage gas scales linearly.
 
 The multiplier is determined per-account and per-storage-slot based on which SALT bucket they reside in.
 
+## Stateless witness
+
+_(Satin, unstable)_ What a block's execution read outside its transactions and header, as the chain held it before the block: the accounts, slots, code and block hashes the database served, absent accounts and zero slots included; the capacities of the [SALT buckets](#salt-bucket) its state charges were priced in; and the oracle service's answers, or the chain's slots holding them.
+
+A stateless validator re-executes the block from it, and must produce the same receipts, state changes, gas ledgers and block counters.
+
+See the [Satin](upgrades/satin.md) network upgrade.
+
 ## Gas detention
 
 A mechanism that caps remaining compute gas after a transaction accesses [volatile data](evm/gas-detention.md).

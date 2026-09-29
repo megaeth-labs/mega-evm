@@ -1,5 +1,5 @@
 ---
-description: Satin network upgrade (unstable) — MegaETH's execution rules restated on Optimism Karst (Ethereum Osaka) — EIP-8037 regular and state gas under a 200,000,000 execution cap with a state-gas reservoir, a history-gas ledger for the bytes a transaction appends, SALT-scaled state gas, per-transaction limits that stop a transaction with a revert, gas detention on withheld gas, EIP-7708 transfer logs, keyless deployment as a native creation, system calls on a split budget, the live system address read by the transaction itself, and block limits as packing budgets.
+description: Satin network upgrade (unstable) — MegaETH's execution rules restated on Optimism Karst (Ethereum Osaka) — EIP-8037 regular and state gas under a 200,000,000 execution cap with a state-gas reservoir, a history-gas ledger for the bytes a transaction appends, SALT-scaled state gas, per-transaction limits that stop a transaction with a revert, gas detention on withheld gas, EIP-7708 transfer logs, keyless deployment as a native creation, system calls on a split budget, the live system address read by the transaction itself, block limits as packing budgets, and the witness a stateless validator re-executes a block from.
 ---
 
 # Satin Network Upgrade
@@ -51,6 +51,7 @@ The changes, in the order this page records them:
 19. **The protocol's own transactions.**
 20. **Block limits.**
 21. **Transaction and block refusals.**
+22. **The stateless witness.** What a validator re-executing a block must be given, and what the engine exports for it.
 
 ## What Changed
 
@@ -765,6 +766,47 @@ A block MUST be invalid when:
 - a pre-block call does not succeed (see [System Calls and Pre-Block Calls](#18-system-calls-and-pre-block-calls));
 - a system-contract address holds foreign code or has empty code and a used nonce, or the factory's address holds the factory's code at nonce 0;
 - it contains a transaction the rules above skip.
+
+### 22. The Stateless Witness
+
+#### Previous behavior
+
+- The block executor exports the SALT bucket ids the block looked up, kept in a cache reset once per block, and the block hashes its database cached, which may hold hashes an earlier block read.
+- The node records the pre-block state changes through a state hook the executor exposes, and resolves the live system address once per block through the executor.
+
+#### New behavior
+
+A stateless validator re-executes a block from a witness of what the block's execution read.
+A node building the witness and a validator consuming it MUST agree on the following.
+
+- **What the block reads.**
+  Beside the transactions and the header, a block's execution reads the chain's state through the database — accounts, storage slots, code by hash and block hashes — the capacities of SALT buckets through the SALT environment, the oracle service's answers through the oracle environment, and the chain configuration: the schedule with its `ProtocolLimits` and `SequencerRegistryConfig`, the parent hash, the parent beacon block root, the extra data and the activation flag.
+- **The database reads.**
+  A witness MUST hold every account, slot, code and block hash the block's execution asked the database for, as the chain held it before the block, an absent account recorded as absent and an empty slot as zero.
+  A validator's database that answers an absent witness entry with `None` or zero rather than an error turns a missing entry into a silent divergence, so the set MUST be complete.
+  The set is what a recorder at the database level sees; it is not what the transactions' returned states hold, because two reads are made on the database itself and land in no transaction's state and no pre-block state: op-revm's read of the L1 block info — the L1 block contract's account, `L1_BASE_FEE_SLOT`, the Ecotone blob base fee and fee-scalars slots, `L1_OVERHEAD_SLOT` when the scalars are empty, the operator fee scalars slot and the DA footprint scalar slot — by the first non-deposit transaction the block prices against it, and the block executor's read of the L1 block contract's account and its DA footprint scalar slot before every non-deposit transaction.
+  A witness built from the transactions' states and the pre-block states alone MUST add them.
+- **The reads a validator makes again.**
+  A read that gas or a limit skipped is skipped again on replay, so the witness need not carry it: a cold `SLOAD` or account load with less gas than the cold surcharge, a `BLOCKHASH` of the current block or outside the last 256 blocks, an oracle read the frame cannot pay, a read a frame whose volatile-data access is off is refused, a keyless deployment's reads after a rule refused it, the bucket of a charge a system-originated transaction or a system call makes, and the L1 block info of a block that holds deposits alone.
+- **The SALT buckets.**
+  The engine records every bucket the SALT environment is asked about, over the whole block, and the block executor exports the set (`get_accessed_bucket_ids`), emptied when the block starts and not between its transactions.
+  A witness MUST prove the capacity of every bucket in the set.
+  The set is complete because a bucket is asked about at a state charge site and nowhere else, and a validator re-executing the block's transactions reaches the same charge sites.
+  A bucket whose lookup failed is in the set too: the lookup fails its transaction, which is in no block, so the proof goes unused.
+  The pre-block calls and the system transactions price at the minimum bucket and add none.
+- **The block hashes.**
+  The engine records every hash `BLOCKHASH` was served and the block executor exports the record (`get_accessed_block_hashes`), emptied when the block starts; it is the same set a database-level recorder sees.
+- **The oracle.**
+  An `SLOAD` in the Oracle's own frame loads the chain's slot, which is in the transaction's state and the witness, then takes the service's answer over it.
+  The answer is in no database.
+  A validator MUST either be given, for every oracle read, the value the building node's service answered, in the order the reads were made, or run no service and find the answered value in the chain's slot at the read — which is the node's to arrange, by writing every value its service answers into the Oracle's storage before the transaction that reads it.
+  A validator without a service that finds another value in the slot computes another block.
+  Hints reach the service alone and change nothing a validator computes.
+- **The pre-block phase.**
+  The pre-block observer receives every pre-block state before it is committed: the two EIP calls' states, each deploy's read-only or created entry, the registry's pending slots the due-change decision read, and the `applyPendingChanges()` call's state.
+  A transaction of the system shape reads the live system address out of the registry in its own state, so the read is in that transaction's witness, and a block whose pre-block call rotated the address has the rotated value in its own writes before any transaction reads it.
+- **The check.**
+  A block recorded and replayed on exactly its record MUST produce the same receipts, state changes, gas ledgers, logs, block counters and exports, and MUST read nothing the record does not hold.
 
 ## Developer Impact
 
