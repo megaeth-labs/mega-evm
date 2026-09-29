@@ -12,32 +12,19 @@
 //! `block_replay.rs` shows changes no transaction row.
 #![cfg(feature = "legacy")]
 
-use std::{path::Path, process::Command, sync::Arc};
+mod common;
 
-use alloy_primitives::{address, Address, B256, U256};
+use std::sync::Arc;
+
+use alloy_primitives::{Address, B256, U256};
+use common::blocks::{
+    cache_copy_with_absent_factory, code_of, fixtures, read_block, run_evme, FACTORY,
+};
 use mega_evme::block::{CachedBlock, PreAccount};
 use serde_json::{json, Value};
 use wiremock::{matchers, Mock, MockServer, Respond, ResponseTemplate};
 
 const BLOCK: u64 = 26_400_110;
-const FACTORY: Address = address!("0x4e59b44847b379578588920cA78FbF26c0B4956C");
-
-fn fixtures() -> &'static Path {
-    Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/blocks"))
-}
-
-fn read_block(dir: &Path) -> CachedBlock {
-    let path =
-        dir.join("blocks").join((BLOCK / 10_000).to_string()).join(format!("{BLOCK}.json.zst"));
-    let compressed = std::fs::read(path).unwrap();
-    serde_json::from_slice(&zstd::decode_all(compressed.as_slice()).unwrap()).unwrap()
-}
-
-fn code_of(hash: B256) -> Vec<u8> {
-    let hex = hash.to_string();
-    std::fs::read(fixtures().join("codes").join(&hex[2..4]).join(format!("{}.bin", &hex[2..])))
-        .unwrap()
-}
 
 /// Answers JSON-RPC from the recorded block alone.
 struct Recording {
@@ -154,67 +141,17 @@ impl Server {
     }
 }
 
-/// Runs `mega-evme` on its own thread (the mock serves on this test's runtime).
-fn run(args: Vec<String>) -> (i32, String, String) {
-    std::thread::spawn(move || {
-        let output = Command::new(env!("CARGO_BIN_EXE_mega-evme")).args(&args).output().unwrap();
-        (
-            output.status.code().unwrap(),
-            String::from_utf8(output.stdout).unwrap(),
-            String::from_utf8(output.stderr).unwrap(),
-        )
-    })
-    .join()
-    .unwrap()
-}
-
-fn strings(args: &[&str]) -> Vec<String> {
-    args.iter().map(|s| s.to_string()).collect()
-}
-
 /// The block replay's transaction records, on `spec`'s engine.
 fn block_rows(spec: Option<&str>) -> Vec<Value> {
-    let cache = tempfile::tempdir().unwrap();
-    for entry in ["blocks", "codes"] {
-        copy_dir(&fixtures().join(entry), &cache.path().join(entry));
-    }
-    let mut block = read_block(cache.path());
-    block.prestate.accounts.insert(FACTORY, PreAccount::default());
-    let path = cache
-        .path()
-        .join("blocks")
-        .join((BLOCK / 10_000).to_string())
-        .join(format!("{BLOCK}.json.zst"));
-    std::fs::write(
-        path,
-        zstd::encode_all(serde_json::to_vec(&block).unwrap().as_slice(), 3).unwrap(),
-    )
-    .unwrap();
-    let mut args = strings(&["replay", "--block", &BLOCK.to_string(), "--json", "--block-cache"]);
-    args.push(cache.path().to_str().unwrap().to_string());
+    let cache = cache_copy_with_absent_factory();
+    let mut args = vec!["replay", "--block", "26400110", "--json", "--block-cache"];
+    args.push(cache.path().to_str().unwrap());
     if let Some(spec) = spec {
-        args.extend(strings(&["--override.spec", spec]));
+        args.extend(["--override.spec", spec]);
     }
-    let (code, stdout, stderr) = run(args);
-    assert_eq!(code, 0, "{stderr}");
-    stdout
-        .lines()
-        .map(|line| serde_json::from_str::<Value>(line).unwrap())
-        .filter(|record| record["kind"] == "tx")
-        .collect()
-}
-
-fn copy_dir(from: &Path, to: &Path) {
-    std::fs::create_dir_all(to).unwrap();
-    for entry in std::fs::read_dir(from).unwrap() {
-        let entry = entry.unwrap();
-        let target = to.join(entry.file_name());
-        if entry.file_type().unwrap().is_dir() {
-            copy_dir(&entry.path(), &target);
-        } else {
-            std::fs::copy(entry.path(), target).unwrap();
-        }
-    }
+    let run = run_evme(&args);
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    run.records().into_iter().filter(|record| record["kind"] == "tx").collect()
 }
 
 /// The transactions checked: the first user transaction, the plain value transfer, one in the
@@ -229,7 +166,7 @@ fn checked(rows: &[Value]) -> Vec<usize> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_a_transaction_replayed_alone_is_the_one_the_block_replay_runs() {
-    let recorded = read_block(fixtures());
+    let recorded = read_block(fixtures(), BLOCK);
     let server = Server::start(recorded).await;
     let uri = server.0.uri();
 
@@ -237,14 +174,14 @@ async fn test_a_transaction_replayed_alone_is_the_one_the_block_replay_runs() {
         let rows = block_rows(spec);
         for index in checked(&rows) {
             let row = &rows[index];
-            let mut args = strings(&["replay", row["hash"].as_str().unwrap(), "--rpc", &uri]);
-            args.extend(strings(&["--rpc.no-cache-file", "--rpc.max-retries", "0", "--json"]));
+            let mut args = vec!["replay", row["hash"].as_str().unwrap(), "--rpc", &uri];
+            args.extend(["--rpc.no-cache-file", "--rpc.max-retries", "0", "--json"]);
             if let Some(spec) = spec {
-                args.extend(strings(&["--override.spec", spec]));
+                args.extend(["--override.spec", spec]);
             }
-            let (code, stdout, stderr) = run(args);
-            assert_eq!(code, 0, "{engine} tx {index}: {stderr}{stdout}");
-            let single: Value = serde_json::from_str(&stdout).unwrap();
+            let run = run_evme(&args);
+            assert_eq!(run.code, 0, "{engine} tx {index}: {}{}", run.stderr, run.stdout);
+            let single: Value = serde_json::from_str(&run.stdout).unwrap();
             assert_eq!(single["gas_used"], row["gas_used"], "{engine} tx {index}");
             assert_eq!(single["success"], row["status"] == "success", "{engine} tx {index}");
             assert_eq!(single["logs_count"], row["logs"], "{engine} tx {index}");

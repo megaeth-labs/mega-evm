@@ -4,9 +4,12 @@
 //! is not picked up as a standalone test target.
 //!
 //! Add helpers only when a third caller shows up; the current set is sized to
-//! the patterns shared between `tests/provider.rs` and `tests/state.rs`.
+//! the patterns shared between `tests/provider.rs` and `tests/state.rs`, and
+//! (`blocks`) between the tests that replay the recorded blocks.
 
 #![allow(dead_code)] // Each test binary uses a different subset of helpers.
+
+pub(crate) mod blocks;
 
 use clap::Parser;
 use mega_evme::common::RpcArgs;

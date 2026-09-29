@@ -1,83 +1,35 @@
-//! `mega-evme replay --block`: whole blocks on either engine, compared with the chain.
-//!
-//! The fixtures under `tests/fixtures/blocks` are three `MegaETH` mainnet blocks (Rex6) in the
-//! block cache layout, recorded from the chain: each block with its transactions, the chain's
-//! receipts, and the state its parent left for everything the block read. 26400001 is the most
-//! varied block of its range (39 transactions to 19 distinct call targets), 26400007 holds a
-//! transaction that failed on chain, 26400110 a plain value transfer.
+//! `mega-evme replay --block`: whole blocks on either engine, compared with the chain, on the
+//! recorded mainnet blocks of `tests/fixtures/blocks` (see `common/blocks.rs`).
 #![cfg(feature = "legacy")]
 
-use std::{path::Path, process::Command};
+mod common;
 
-use alloy_primitives::{address, Address, B256, U256};
-use mega_evme::block::{CachedBlock, PreAccount};
+use std::path::Path;
+
+use alloy_primitives::{B256, U256};
+use common::blocks::{
+    block_path, cache_copy, cache_copy_with_absent_factory, code_of, fixtures, read_block,
+    run_evme, write_block, BLOCKS, FACTORY,
+};
+use mega_evme::block::PreAccount;
 use serde_json::Value;
-
-/// The recorded blocks.
-const BLOCKS: [u64; 3] = [26_400_001, 26_400_007, 26_400_110];
-
-/// The EIP-7997 factory, which Satin's pre-block changes deploy and the legacy engine never
-/// reads: the one account a Satin replay reads that the recording does not hold.
-const FACTORY: Address = address!("0x4e59b44847b379578588920cA78FbF26c0B4956C");
-
-fn fixtures() -> &'static Path {
-    Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/blocks"))
-}
-
-/// A copy of the recorded block cache, so no test can write to the fixtures.
-fn cache_copy() -> tempfile::TempDir {
-    let dir = tempfile::tempdir().unwrap();
-    copy_dir(fixtures(), dir.path());
-    dir
-}
-
-fn copy_dir(from: &Path, to: &Path) {
-    std::fs::create_dir_all(to).unwrap();
-    for entry in std::fs::read_dir(from).unwrap() {
-        let entry = entry.unwrap();
-        let target = to.join(entry.file_name());
-        if entry.file_type().unwrap().is_dir() {
-            copy_dir(&entry.path(), &target);
-        } else {
-            std::fs::copy(entry.path(), target).unwrap();
-        }
-    }
-}
-
-fn block_path(dir: &Path, number: u64) -> std::path::PathBuf {
-    dir.join("blocks").join((number / 10_000).to_string()).join(format!("{number}.json.zst"))
-}
-
-fn read_block(dir: &Path, number: u64) -> CachedBlock {
-    let compressed = std::fs::read(block_path(dir, number)).unwrap();
-    serde_json::from_slice(&zstd::decode_all(compressed.as_slice()).unwrap()).unwrap()
-}
-
-fn write_block(dir: &Path, number: u64, block: &CachedBlock) {
-    let json = serde_json::to_vec(block).unwrap();
-    std::fs::write(block_path(dir, number), zstd::encode_all(json.as_slice(), 3).unwrap()).unwrap();
-}
-
-/// Adds the factory to the recorded pre-state of every block, absent.
-fn with_absent_factory(dir: &Path) {
-    for number in BLOCKS {
-        let mut block = read_block(dir, number);
-        block.prestate.accounts.insert(FACTORY, PreAccount::default());
-        write_block(dir, number, &block);
-    }
-}
-
-/// Runs `mega-evme` with `args`, returning its exit code and its JSON lines.
-fn run(args: &[&str]) -> (i32, Vec<Value>, String) {
-    let output = Command::new(env!("CARGO_BIN_EXE_mega-evme")).args(args).output().unwrap();
-    let stdout = String::from_utf8(output.stdout).unwrap();
-    let records =
-        stdout.lines().filter_map(|line| serde_json::from_str::<Value>(line).ok()).collect();
-    (output.status.code().unwrap(), records, String::from_utf8(output.stderr).unwrap())
-}
 
 fn blocks_of(records: &[Value]) -> Vec<&Value> {
     records.iter().filter(|r| r["kind"] == "block").collect()
+}
+
+/// `replay --block N --block-cache DIR`, with `extra` arguments.
+fn replay(number: u64, dir: &Path, extra: &[&str]) -> common::blocks::Run {
+    let mut args = vec![
+        "replay".to_string(),
+        "--block".to_string(),
+        number.to_string(),
+        "--block-cache".to_string(),
+        dir.to_str().unwrap().to_string(),
+        "--json".to_string(),
+    ];
+    args.extend(extra.iter().map(|s| s.to_string()));
+    run_evme(&args)
 }
 
 /// The legacy leg replays each recorded block exactly as the chain executed it: every
@@ -86,19 +38,11 @@ fn blocks_of(records: &[Value]) -> Vec<&Value> {
 #[test]
 fn test_the_legacy_leg_replays_recorded_blocks_as_the_chain_did() {
     let cache = cache_copy();
-    let dir = cache.path().to_str().unwrap();
     let before = std::fs::read(block_path(cache.path(), BLOCKS[0])).unwrap();
     for number in BLOCKS {
-        let (code, records, stderr) = run(&[
-            "replay",
-            "--block",
-            &number.to_string(),
-            "--block-cache",
-            dir,
-            "--verify",
-            "--json",
-        ]);
-        assert_eq!(code, 0, "block {number}: {stderr}");
+        let run = replay(number, cache.path(), &["--verify"]);
+        assert_eq!(run.code, 0, "block {number}: {}", run.stderr);
+        let records = run.records();
         let blocks = blocks_of(&records);
         assert_eq!(blocks.len(), 1);
         let block = blocks[0];
@@ -113,7 +57,7 @@ fn test_the_legacy_leg_replays_recorded_blocks_as_the_chain_did() {
         assert!(txs.iter().all(|tx| tx.get("satin").is_none()), "a legacy record has no satin");
     }
     // The failed transaction of 26400007 failed in the replay too.
-    let (_, records, _) = run(&["replay", "--block", "26400007", "--block-cache", dir, "--json"]);
+    let records = replay(26_400_007, cache.path(), &[]).records();
     assert!(records.iter().any(|r| r["kind"] == "tx" && r["chain"]["status"] == "failure"));
     assert_eq!(std::fs::read(block_path(cache.path(), BLOCKS[0])).unwrap(), before);
 }
@@ -123,17 +67,9 @@ fn test_the_legacy_leg_replays_recorded_blocks_as_the_chain_did() {
 #[test]
 fn test_a_read_the_recording_lacks_fails_the_block_offline() {
     let cache = cache_copy();
-    let (code, records, _) = run(&[
-        "replay",
-        "--block",
-        &BLOCKS[0].to_string(),
-        "--block-cache",
-        cache.path().to_str().unwrap(),
-        "--override.spec",
-        "Satin",
-        "--json",
-    ]);
-    assert_eq!(code, 1);
+    let run = replay(BLOCKS[0], cache.path(), &["--override.spec", "Satin"]);
+    assert_eq!(run.code, 1);
+    let records = run.records();
     let error = records[0]["error"].as_str().unwrap();
     assert!(error.contains("no RPC to read it"), "{error}");
     assert!(error.to_lowercase().contains(&format!("{FACTORY:#x}")), "{error}");
@@ -144,21 +80,11 @@ fn test_a_read_the_recording_lacks_fails_the_block_offline() {
 /// from the chain with exit code 2.
 #[test]
 fn test_the_satin_counterfactual_of_recorded_blocks() {
-    let cache = cache_copy();
-    with_absent_factory(cache.path());
-    let dir = cache.path().to_str().unwrap();
+    let cache = cache_copy_with_absent_factory();
     for number in BLOCKS {
-        let (code, records, stderr) = run(&[
-            "replay",
-            "--block",
-            &number.to_string(),
-            "--block-cache",
-            dir,
-            "--override.spec",
-            "Satin",
-            "--json",
-        ]);
-        assert_eq!(code, 0, "{stderr}");
+        let run = replay(number, cache.path(), &["--override.spec", "Satin"]);
+        assert_eq!(run.code, 0, "{}", run.stderr);
+        let records = run.records();
         let block = blocks_of(&records)[0];
         assert_eq!(block["engine"], "satin");
         assert_eq!(block["spec"], "Satin");
@@ -167,20 +93,10 @@ fn test_the_satin_counterfactual_of_recorded_blocks() {
         assert!(block["satin"]["history_gas"].as_u64().unwrap() > 0);
     }
 
-    let (_, legacy, _) =
-        run(&["replay", "--block", &BLOCKS[0].to_string(), "--block-cache", dir, "--json"]);
-    let (code, satin, _) = run(&[
-        "replay",
-        "--block",
-        &BLOCKS[0].to_string(),
-        "--block-cache",
-        dir,
-        "--override.spec",
-        "Satin",
-        "--verify",
-        "--json",
-    ]);
-    assert_eq!(code, 2, "a counterfactual differs from the chain");
+    let legacy = replay(BLOCKS[0], cache.path(), &[]).records();
+    let run = replay(BLOCKS[0], cache.path(), &["--override.spec", "Satin", "--verify"]);
+    assert_eq!(run.code, 2, "a counterfactual differs from the chain");
+    let satin = run.records();
     assert_eq!(legacy.len(), satin.len());
     for (legacy, satin) in legacy.iter().zip(&satin) {
         let (Value::Object(l), Value::Object(s)) = (legacy, satin) else { panic!() };
@@ -196,8 +112,7 @@ fn test_the_satin_counterfactual_of_recorded_blocks() {
 /// transaction.
 #[test]
 fn test_the_factory_state_does_not_change_the_satin_rows() {
-    let absent = cache_copy();
-    with_absent_factory(absent.path());
+    let absent = cache_copy_with_absent_factory();
     let present = cache_copy();
     for number in BLOCKS {
         let mut block = read_block(present.path(), number);
@@ -222,21 +137,12 @@ fn test_the_factory_state_does_not_change_the_satin_rows() {
     .unwrap();
 
     for number in BLOCKS {
-        let replay = |dir: &Path| {
-            let (code, records, stderr) = run(&[
-                "replay",
-                "--block",
-                &number.to_string(),
-                "--block-cache",
-                dir.to_str().unwrap(),
-                "--override.spec",
-                "Satin",
-                "--json",
-            ]);
-            assert_eq!(code, 0, "{stderr}");
-            records
+        let rows = |dir: &Path| {
+            let run = replay(number, dir, &["--override.spec", "Satin"]);
+            assert_eq!(run.code, 0, "{}", run.stderr);
+            run.records()
         };
-        assert_eq!(replay(absent.path()), replay(present.path()), "block {number}");
+        assert_eq!(rows(absent.path()), rows(present.path()), "block {number}");
     }
 }
 
@@ -254,12 +160,7 @@ async fn test_a_block_fetched_over_rpc_is_cached_and_replays_offline() {
     for (address, account) in &recorded.prestate.accounts {
         let mut entry = serde_json::json!({ "balance": account.balance, "nonce": account.nonce });
         if let Some(hash) = account.code_hash {
-            let hex = hash.to_string();
-            let code = std::fs::read(
-                fixtures().join("codes").join(&hex[2..4]).join(format!("{}.bin", &hex[2..])),
-            )
-            .unwrap();
-            entry["code"] = Value::String(alloy_primitives::hex::encode_prefixed(code));
+            entry["code"] = Value::String(alloy_primitives::hex::encode_prefixed(code_of(hash)));
         }
         let storage: serde_json::Map<_, _> = account
             .storage
@@ -293,41 +194,27 @@ async fn test_a_block_fetched_over_rpc_is_cached_and_replays_offline() {
     respond("eth_getCode", serde_json::json!("0x")).mount(&server).await;
 
     let cache = tempfile::tempdir().unwrap();
-    let dir = cache.path().to_str().unwrap().to_string();
     let uri = server.uri();
-    let block = number.to_string();
-    let run_blocking = move |args: Vec<String>| {
-        std::thread::spawn(move || {
-            let args: Vec<&str> = args.iter().map(String::as_str).collect();
-            run(&args)
-        })
-        .join()
-        .unwrap()
-    };
-    let args = |extra: &[&str]| -> Vec<String> {
-        ["replay", "--block", &block, "--block-cache", &dir, "--json"]
-            .iter()
-            .chain(extra)
-            .map(|s| s.to_string())
-            .collect()
-    };
 
-    let (code, records, stderr) = run_blocking(args(&["--rpc", &uri, "--verify"]));
-    assert_eq!(code, 0, "{stderr}");
-    assert_eq!(blocks_of(&records)[0]["matches_chain"], true);
+    let run = replay(number, cache.path(), &["--rpc", &uri, "--verify"]);
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    assert_eq!(blocks_of(&run.records())[0]["matches_chain"], true);
     assert!(block_path(cache.path(), number).exists(), "the fetched block is cached");
 
-    let (code, records, stderr) = run_blocking(args(&["--rpc", &uri, "--override.spec", "Satin"]));
-    assert_eq!(code, 0, "{stderr}");
-    assert!(blocks_of(&records)[0]["rpc_reads"].as_u64().unwrap() > 0, "the factory came over RPC");
+    let run = replay(number, cache.path(), &["--rpc", &uri, "--override.spec", "Satin"]);
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    assert!(
+        blocks_of(&run.records())[0]["rpc_reads"].as_u64().unwrap() > 0,
+        "the factory came over RPC"
+    );
 
     // Offline now: the cache holds the block and the factory the Satin replay read.
     drop(server);
-    let (code, records, stderr) = run_blocking(args(&["--verify"]));
-    assert_eq!(code, 0, "{stderr}");
-    assert_eq!(blocks_of(&records)[0]["matches_chain"], true);
-    let (code, records, stderr) = run_blocking(args(&["--override.spec", "Satin"]));
-    assert_eq!(code, 0, "{stderr}");
-    assert_eq!(blocks_of(&records)[0]["rpc_reads"], 0);
+    let run = replay(number, cache.path(), &["--verify"]);
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    assert_eq!(blocks_of(&run.records())[0]["matches_chain"], true);
+    let run = replay(number, cache.path(), &["--override.spec", "Satin"]);
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    assert_eq!(blocks_of(&run.records())[0]["rpc_reads"], 0);
     assert!(read_block(cache.path(), number).prestate.accounts.contains_key(&FACTORY));
 }
