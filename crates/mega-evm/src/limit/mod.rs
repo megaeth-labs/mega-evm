@@ -126,12 +126,13 @@
 //!
 //! The protocol's own work is held to none of these per-transaction limits: a system-originated
 //! transaction ([`crate::system::is_system_originated`]) and a system call — the pre-block calls
-//! among them — run under [`LimitCheck::Exempt`], sticky for the transaction, which the one place
-//! every stop comes from answers whatever they cross: the data size, the KV count, the state gas
-//! and the frame budgets of the first two. It is the set that pays no history gas, exempt for the
-//! same reason: the protocol's maintenance must not fail on a resource limit. What such a
-//! transaction uses is counted all the same and reported in its usage and in the block's
-//! counters, as a deposit's is. A user's deposit is not in the set and is held to every limit.
+//! among them — are exempt ([`AdditionalLimit::is_exempt`]), sticky for the transaction, and the
+//! one place every stop comes from answers that they are within the limits whatever they cross:
+//! the data size, the KV count, the state gas and the frame budgets of the first two. It is the set
+//! that pays no history gas, exempt for the same reason: the protocol's maintenance must not fail
+//! on a resource limit. What such a transaction uses is counted all the same and reported in its
+//! usage and in the block's counters, as a deposit's is. A user's deposit is not in the set and is
+//! held to every limit.
 //!
 //! # The byte table
 //!
@@ -506,8 +507,8 @@ impl LimitKind {
 ///
 /// A transaction-level exceed stops the transaction: the frame that crosses it reverts, the
 /// transaction is latched and every frame above reverts in turn. A frame-local exceed (a frame
-/// budget) reverts the frame alone and its caller resumes. `Exempt` is sticky for the
-/// transaction: nothing it does is stopped by a limit.
+/// budget) reverts the frame alone and its caller resumes. A transaction exempt from the limits
+/// ([`AdditionalLimit::is_exempt`]) is within them whatever it crosses.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum LimitCheck {
     /// Every limit holds.
@@ -531,27 +532,19 @@ pub enum LimitCheck {
         /// Whether the limit is a frame budget rather than a transaction-level limit.
         frame_local: bool,
     },
-    /// The transaction is exempt from every per-transaction limit: it is the protocol's own work.
-    Exempt,
 }
 
 impl LimitCheck {
-    /// Whether a limit was crossed. `Exempt` is not.
+    /// Whether a limit was crossed.
     #[inline]
     pub const fn exceeded_limit(&self) -> bool {
         matches!(self, Self::ExceedsLimit { .. })
     }
 
-    /// Whether the check passed. `Exempt` is a state of its own, not a pass.
+    /// Whether the check passed.
     #[inline]
     pub const fn within_limit(&self) -> bool {
         matches!(self, Self::WithinLimit)
-    }
-
-    /// Whether the transaction is exempt from metering.
-    #[inline]
-    pub const fn is_exempt(&self) -> bool {
-        matches!(self, Self::Exempt)
     }
 
     /// Whether a frame budget, rather than a transaction-level limit, was crossed.
@@ -566,7 +559,7 @@ impl LimitCheck {
             Self::ExceedsLimit { kind, limit, .. } => {
                 MegaLimitExceeded { kind: kind.as_u8(), limit: *limit }.abi_encode().into()
             }
-            Self::WithinLimit | Self::Exempt => Bytes::new(),
+            Self::WithinLimit => Bytes::new(),
         }
     }
 }
@@ -655,18 +648,7 @@ mod tests {
         );
     }
 
-    /// `Exempt` passes no predicate that would stop a frame, and has no revert data.
-    #[test]
-    fn test_limit_check_exempt_predicate_truth_table() {
-        let exempt = LimitCheck::Exempt;
-        assert!(!exempt.exceeded_limit());
-        assert!(!exempt.within_limit());
-        assert!(exempt.is_exempt());
-        assert!(!exempt.is_frame_local());
-        assert!(exempt.revert_data().is_empty());
-    }
-
-    /// `within_limit` follows the variant.
+    /// `within_limit` follows the variant, and is the exact complement of `exceeded_limit`.
     #[test]
     fn test_within_limit_reflects_variant() {
         assert!(LimitCheck::WithinLimit.within_limit());
@@ -679,9 +661,8 @@ mod tests {
         assert!(!exceeded.within_limit());
         assert!(exceeded.exceeded_limit());
         assert!(!exceeded.is_frame_local());
-        assert!(!exceeded.is_exempt());
-        assert!(!LimitCheck::WithinLimit.is_exempt());
         assert!(!LimitCheck::WithinLimit.exceeded_limit());
+        assert!(!LimitCheck::WithinLimit.is_frame_local());
         assert!(LimitCheck::WithinLimit.revert_data().is_empty());
         let frame_local = LimitCheck::ExceedsLimit {
             kind: LimitKind::DataSize,

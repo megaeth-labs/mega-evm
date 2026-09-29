@@ -19,7 +19,7 @@ use crate::storage_call_stipend;
 /// What the common execution layer tracks for the running transaction: the per-frame lanes of
 /// data-size bytes and write records, the state gas the transaction holds outside each frame, the
 /// record the Host staged for the running opcode, and where the transaction stands with its
-/// limits — within them, latched by one, or exempt from all of them.
+/// limits — within them or latched by one — and whether it is exempt from all of them.
 ///
 /// It lives on the [`MegaContext`](crate::MegaContext), is reset before each transaction and
 /// system call, and is driven by the Host (staging), the opcode wrappers (commit and discard)
@@ -42,8 +42,9 @@ use crate::storage_call_stipend;
 /// The protocol's own work is held to none of the per-transaction limits: a system-originated
 /// transaction and a system call are marked exempt before their body is counted, and the mark is
 /// sticky for the transaction ([`is_exempt`](Self::is_exempt)). Every stop the layer hands out
-/// comes from one place, which answers an exempt transaction with [`LimitCheck::Exempt`] whatever
-/// it crossed — a transaction limit or a frame budget, in any dimension — and never latches it.
+/// comes from one place, which answers an exempt transaction with [`LimitCheck::WithinLimit`]
+/// whatever it crossed — a transaction limit or a frame budget, in any dimension — and never
+/// latches it.
 /// What the transaction uses is counted all the same, so its usage is reported as any other
 /// transaction's is.
 #[derive(Clone, Debug, Default)]
@@ -51,10 +52,12 @@ pub struct AdditionalLimit {
     pub(crate) tracker: FrameLimitTracker,
     staged: Option<StagedRecord>,
     limits: EvmTxRuntimeLimits,
-    /// Where the transaction stands with its limits: within them, stopped by the transaction-level
-    /// limit it latched, or exempt from all of them. The latter two are sticky for the
-    /// transaction.
+    /// Where the transaction stands with its limits: within them, or stopped by the
+    /// transaction-level limit it latched, which is sticky for the transaction.
     standing: LimitCheck,
+    /// Whether the transaction is exempt from every per-transaction limit, sticky for the
+    /// transaction. See [`exempt`](Self::exempt).
+    exempt: bool,
     /// The stop the frame a child returned into must return instead of running on, when what the
     /// child left it put it over a limit. See [`on_frame_return`](Self::on_frame_return).
     resume_stop: Option<LimitCheck>,
@@ -122,6 +125,7 @@ impl AdditionalLimit {
         self.tracker.reset();
         self.staged = None;
         self.standing = LimitCheck::WithinLimit;
+        self.exempt = false;
         self.resume_stop = None;
         self.target_is_authority = false;
         self.sender = Address::ZERO;
@@ -156,13 +160,13 @@ impl AdditionalLimit {
     pub const fn latched(&self) -> Option<&LimitCheck> {
         match &self.standing {
             latched @ LimitCheck::ExceedsLimit { .. } => Some(latched),
-            LimitCheck::WithinLimit | LimitCheck::Exempt => None,
+            LimitCheck::WithinLimit => None,
         }
     }
 
     /// Whether the running transaction is exempt from every per-transaction limit.
     pub const fn is_exempt(&self) -> bool {
-        self.standing.is_exempt()
+        self.exempt
     }
 
     /// Exempts the running transaction from every per-transaction limit, until the next
@@ -171,13 +175,13 @@ impl AdditionalLimit {
     /// Called for the protocol's own work — a system-originated transaction and a system call —
     /// before its body is counted. See the type's documentation.
     pub(crate) const fn exempt(&mut self) {
-        self.standing = LimitCheck::Exempt;
+        self.exempt = true;
     }
 
     /// Latches the transaction: `kind`'s transaction-level `limit` was crossed at `used`. The
     /// running frame must stop with [`LimitCheck::revert_data`]; the frame lifecycle stops every
     /// frame above it. A later latch does not replace the first, and an exempt transaction is not
-    /// latched at all: the verdict is then [`LimitCheck::Exempt`].
+    /// latched at all: the verdict is then [`LimitCheck::WithinLimit`].
     pub fn latch(&mut self, kind: LimitKind, limit: u64, used: u64) -> LimitCheck {
         self.crossed(kind, limit, used, false)
     }
@@ -186,17 +190,19 @@ impl AdditionalLimit {
     /// which reverts the running frame alone, and the transaction's latch otherwise.
     ///
     /// Every stop the layer hands out comes from here, so this is where the exemption applies: an
-    /// exempt transaction's verdict is [`LimitCheck::Exempt`], whatever it crossed.
+    /// exempt transaction's verdict is [`LimitCheck::WithinLimit`], whatever it crossed.
     fn crossed(&mut self, kind: LimitKind, limit: u64, used: u64, frame_local: bool) -> LimitCheck {
-        match self.standing {
-            LimitCheck::Exempt => LimitCheck::Exempt,
-            _ if frame_local => LimitCheck::ExceedsLimit { kind, limit, used, frame_local },
-            LimitCheck::WithinLimit => {
-                self.standing = LimitCheck::ExceedsLimit { kind, limit, used, frame_local };
-                self.standing
-            }
-            latched @ LimitCheck::ExceedsLimit { .. } => latched,
+        if self.exempt {
+            return LimitCheck::WithinLimit;
         }
+        let crossed = LimitCheck::ExceedsLimit { kind, limit, used, frame_local };
+        if frame_local {
+            return crossed;
+        }
+        if !self.standing.exceeded_limit() {
+            self.standing = crossed;
+        }
+        self.standing
     }
 
     /// Checks the limits after the running frame counted something: what the transaction keeps
@@ -926,9 +932,7 @@ impl AdditionalLimit {
         if !self.frame_began {
             let body = self.body_bytes;
             self.tracker.reset();
-            if self.standing.exceeded_limit() {
-                self.standing = LimitCheck::WithinLimit;
-            }
+            self.standing = LimitCheck::WithinLimit;
             self.tracker.record_tx(LimitUsage { data_size: body, write_records: 0 });
             return;
         }
@@ -1324,14 +1328,14 @@ mod tests {
     }
 
     /// An exempt transaction is stopped by no limit, in any dimension, at the transaction or at a
-    /// frame: every verdict is `Exempt`, nothing is latched and no caller is stopped. What it uses
-    /// is counted all the same.
+    /// frame: every verdict is within the limits, nothing is latched and no caller is stopped. What
+    /// it uses is counted all the same.
     #[test]
     fn test_an_exempt_transaction_is_stopped_by_no_limit() {
         let mut limit = AdditionalLimit::new(zero_limits());
         limit.exempt();
-        assert_eq!(count_a_transaction(&mut limit), [LimitCheck::Exempt; 3]);
-        assert_eq!(limit.latch(LimitKind::DataSize, 0, 1), LimitCheck::Exempt);
+        assert_eq!(count_a_transaction(&mut limit), [LimitCheck::WithinLimit; 3]);
+        assert_eq!(limit.latch(LimitKind::DataSize, 0, 1), LimitCheck::WithinLimit);
         assert_eq!(limit.latched(), None);
         assert_eq!(limit.stop_before_run(), None);
         assert_eq!(
