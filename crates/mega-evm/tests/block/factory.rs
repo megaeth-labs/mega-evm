@@ -48,9 +48,10 @@ fn factory() -> common::TestFactory {
 fn test_trait_path_applies_the_chains_runtime_limits() {
     let mut state = common::state();
     let factory = factory();
-    // Built without any caller-side limits: the case a caller that forgot them produces.
+    // Built by an EVM factory that was not given the chain's schedule: the case a caller that
+    // forgot it produces, whose EVM runs under the protocol's defaults, not the chain's.
     let evm = factory.evm_factory().create_evm(&mut state, common::evm_env());
-    assert_eq!(evm.tx_runtime_limits().tx_data_size_limit, u64::MAX);
+    assert_eq!(*evm.tx_runtime_limits(), ProtocolLimits::DEFAULT.tx_runtime_limits);
 
     let executor = factory.create_executor(evm, common::unlimited_ctx());
 
@@ -138,9 +139,10 @@ fn test_trait_path_replaces_limits_the_caller_applied() {
 #[test]
 fn test_direct_construction_applies_the_chains_runtime_limits() {
     let mut state = common::state();
-    // Built without any caller-side limits: the case a caller that forgot them produces.
+    // Built by an EVM factory that was not given the chain's schedule: the case a caller that
+    // forgot it produces, whose EVM runs under the protocol's defaults, not the chain's.
     let evm = MegaEvmFactory::new().create_evm(&mut state, common::evm_env());
-    assert_eq!(evm.tx_runtime_limits().tx_data_size_limit, u64::MAX);
+    assert_eq!(*evm.tx_runtime_limits(), ProtocolLimits::DEFAULT.tx_runtime_limits);
 
     let executor = MegaBlockExecutor::new(
         evm,
@@ -206,4 +208,23 @@ fn test_direct_construction_stops_a_transaction_over_the_chains_data_size_limit(
         ),
         other => panic!("expected a revert-class stop, got {other:?}"),
     }
+}
+
+/// A node gives its EVM factory the schedule it gives its block executor factory: an EVM the
+/// factory creates, for a block or for an RPC call, then runs under the chain's limits before any
+/// executor installs them, and the executor installs the same.
+#[test]
+fn test_an_evm_factory_on_the_chains_schedule_creates_evms_under_its_limits() {
+    let spec = common::chain_spec_with(limits());
+    let factory = mega_evm::MegaBlockExecutorFactory::new(
+        OpAlloyReceiptBuilder::default(),
+        spec.clone(),
+        MegaEvmFactory::new().with_schedule(spec),
+    );
+    let mut state = common::state();
+    let evm = factory.evm_factory().create_evm(&mut state, common::evm_env());
+    assert_eq!(*evm.tx_runtime_limits(), limits().tx_runtime_limits, "before any executor");
+
+    let executor = factory.create_executor(evm, common::unlimited_ctx());
+    assert_eq!(*executor.evm().tx_runtime_limits(), limits().tx_runtime_limits);
 }

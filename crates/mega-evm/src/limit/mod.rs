@@ -260,7 +260,9 @@ pub struct LimitUsage {
 ///
 /// Every value here changes a transaction's result, so in block execution they are the chain's:
 /// the per-transaction half of [`ProtocolLimits`](crate::ProtocolLimits), which the block executor
-/// installs before every transaction. Set on a standalone EVM, they are its caller's choice.
+/// installs before every transaction. [`MegaEvmFactory`](crate::MegaEvmFactory) resolves the same
+/// for an EVM it creates outside block execution; set on a standalone EVM, they are its caller's
+/// choice.
 ///
 /// [`BLOCK_ENV_ACCESS_COMPUTE_GAS`]: crate::constants::BLOCK_ENV_ACCESS_COMPUTE_GAS
 /// [`ORACLE_ACCESS_COMPUTE_GAS`]: crate::constants::ORACLE_ACCESS_COMPUTE_GAS

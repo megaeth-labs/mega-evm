@@ -186,13 +186,14 @@ let tx = OpTx(op_revm::OpTransaction {
 let result = evm.transact_raw(tx)?;
 ```
 
-A node executes a block through the factory, which installs the block's limits on the EVM:
+A node executes a block through the factory, which installs the block's limits on the EVM; given the same schedule, the EVM factory runs the EVMs it creates outside block execution — an RPC call, a simulation — under the chain's limits too:
 
 ```rust,ignore
 use alloy_evm::block::{BlockExecutor as _, BlockExecutorFactory as _};
 use mega_evm::{BlockLimits, MegaBlockExecutionCtx, MegaBlockExecutorFactory, MegaEvmFactory};
 
-let factory = MegaBlockExecutorFactory::new(receipt_builder, chain_spec, MegaEvmFactory::new());
+let evm_factory = MegaEvmFactory::new().with_schedule(chain_spec.clone());
+let factory = MegaBlockExecutorFactory::new(receipt_builder, chain_spec, evm_factory);
 let ctx = MegaBlockExecutionCtx::new(parent_hash, parent_beacon_block_root, extra_data, BlockLimits::no_limits());
 
 let mut executor = factory.create_executor(evm, ctx);
