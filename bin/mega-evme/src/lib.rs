@@ -6,6 +6,8 @@
 //! the library directly and exercise the public API the same way an external
 //! consumer would.
 
+/// Whole-block replay on either engine, compared with the chain.
+pub mod block;
 /// Top-level CLI command parser and dispatch (`MainCmd`, `Commands`, `Error`).
 pub mod cmd;
 /// Shared building blocks: RPC provider/session, state, env, error, output

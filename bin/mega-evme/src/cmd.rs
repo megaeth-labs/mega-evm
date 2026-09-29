@@ -54,7 +54,12 @@ pub async fn run_cli(args: Vec<OsString>) -> Result<(), Error> {
     let spec_is_default = spec_is_default(&matches);
     let cmd = MainCmd::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
 
-    let engine = match cmd.command.engine().await {
+    // Whole-block replay runs here for both engines, choosing one per block.
+    let engine = match &cmd.command {
+        Commands::Replay(replay) if replay.replays_blocks() => Ok(Engine::Satin),
+        command => command.engine().await,
+    };
+    let engine = match engine {
         Ok(engine) => engine,
         Err(e) => {
             eprintln!("{e}");

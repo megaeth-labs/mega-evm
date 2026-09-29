@@ -252,7 +252,7 @@ pub fn print_satin_report(report: &SatinReport) {
 /// - `Error(string)` via `alloy_sol_types::Revert`
 /// - `Panic(uint256)` via `alloy_sol_types::Panic`
 /// - Raw hex fallback
-fn decode_revert_reason(output: &Bytes) -> String {
+pub fn decode_revert_reason(output: &Bytes) -> String {
     if output.is_empty() {
         return "(empty)".to_string();
     }
@@ -276,7 +276,7 @@ fn decode_revert_reason(output: &Bytes) -> String {
 }
 
 /// Format halt reason for display.
-fn format_halt_reason(reason: &MegaHaltReason) -> String {
+pub fn format_halt_reason(reason: &MegaHaltReason) -> String {
     match reason {
         OpHaltReason::Base(eth_reason) => format!("{:?}", eth_reason),
         _ => format!("{:?}", reason),

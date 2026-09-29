@@ -39,8 +39,12 @@ use super::{ReplayError, Result};
 #[derive(Parser, Debug)]
 pub struct Cmd {
     /// Transaction hash to replay
-    #[arg(value_name = "TX_HASH")]
-    pub tx_hash: B256,
+    #[arg(value_name = "TX_HASH", required_unless_present = "block")]
+    pub tx_hash: Option<B256>,
+
+    /// Block replay configuration (`--block`)
+    #[command(flatten)]
+    pub block_args: crate::block::BlockArgs,
 
     /// RPC configuration
     #[command(flatten)]
@@ -119,6 +123,7 @@ impl Cmd {
     /// at a scheduled timestamp, the block's timestamp, from the source the replay itself reads,
     /// through a provider that persists nothing.
     pub async fn engine(&self) -> Result<Engine> {
+        let tx_hash = self.tx_hash();
         if let Some(spec) = &self.spec_override {
             return Engine::of_spec(spec);
         }
@@ -127,10 +132,10 @@ impl Cmd {
             return Ok(engine);
         }
         let tx = provider
-            .get_transaction_by_hash(self.tx_hash)
+            .get_transaction_by_hash(tx_hash)
             .await
             .map_err(|e| ReplayError::RpcError(format!("Failed to fetch transaction: {e}")))?
-            .ok_or(ReplayError::TransactionNotFound(self.tx_hash))?;
+            .ok_or(ReplayError::TransactionNotFound(tx_hash))?;
         let timestamp = match tx.block_number {
             Some(number) => provider
                 .get_block_by_number(number.into())
@@ -145,8 +150,41 @@ impl Cmd {
         Ok(Engine::of_block(chain_id, timestamp))
     }
 
-    /// Replay a historical transaction on the Satin engine.
+    /// Whether this replays whole blocks (`--block`), which runs here for both engines.
+    pub fn replays_blocks(&self) -> bool {
+        self.block_args.block.is_some()
+    }
+
+    /// The transaction to replay; present unless `--block` is.
+    fn tx_hash(&self) -> B256 {
+        self.tx_hash.expect("clap requires TX_HASH unless --block is given")
+    }
+
+    /// Replay a historical transaction on the Satin engine, or whole blocks on either engine.
     pub async fn run(&self) -> Result<()> {
+        if let Some(range) = self.block_args.block {
+            let bucket_capacities = self
+                .ext_args
+                .bucket_capacity
+                .iter()
+                .map(|s| parse_bucket_capacity(s))
+                .collect::<Result<Vec<_>>>()?;
+            let summary = crate::block::replay_blocks(
+                range,
+                &self.block_args,
+                &self.rpc_args,
+                &bucket_capacities,
+                self.spec_override.as_deref(),
+                self.output_args.json,
+            )
+            .await?;
+            let code = summary.exit_code(self.block_args.verify);
+            if code != 0 {
+                std::process::exit(code);
+            }
+            return Ok(());
+        }
+
         // A dumped fixture is re-executed by a state-test runner that prices the transaction as
         // the chain does; no such runner exists for Satin, so the dump is refused before any
         // network or state work. On a legacy spec the dump is the 1.7.1 tool's, unchanged.
@@ -242,12 +280,13 @@ impl Cmd {
     where
         P: Provider<op_alloy_network::Optimism>,
     {
-        info!(tx_hash = %self.tx_hash, "Fetching transaction");
+        let tx_hash = self.tx_hash();
+        info!(%tx_hash, "Fetching transaction");
         let target_tx = provider
-            .get_transaction_by_hash(self.tx_hash)
+            .get_transaction_by_hash(tx_hash)
             .await
             .map_err(|e| ReplayError::RpcError(format!("Failed to fetch transaction: {e}")))?
-            .ok_or_else(|| ReplayError::TransactionNotFound(self.tx_hash))?;
+            .ok_or_else(|| ReplayError::TransactionNotFound(tx_hash))?;
         debug!(block_number = ?target_tx.block_number, "Transaction found");
 
         let (state_base_block, block_number, is_pending) = if let Some(n) = target_tx.block_number {
@@ -280,7 +319,7 @@ impl Cmd {
         let mut preceding_tx_hashes = vec![];
         if !is_pending {
             for hash in block.transactions.hashes() {
-                if hash == self.tx_hash {
+                if hash == tx_hash {
                     break;
                 }
                 preceding_tx_hashes.push(hash);
