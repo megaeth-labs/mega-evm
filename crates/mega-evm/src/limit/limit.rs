@@ -912,10 +912,7 @@ impl AdditionalLimit {
     /// it is the transaction's, not its frames'.
     pub(crate) fn on_last_frame_return(&mut self, result: &mut FrameResult) {
         if !self.frame_began {
-            let body = self.body_bytes;
-            self.tracker.reset();
-            self.standing = LimitCheck::WithinLimit;
-            self.tracker.record_tx(LimitUsage { data_size: body, write_records: 0 });
+            self.settle_without_frames();
             return;
         }
         debug_assert!(self.tracker.depth() <= 1, "only the outermost lane can be left");
@@ -927,6 +924,28 @@ impl AdditionalLimit {
         } else {
             self.apply_latch(result);
         }
+    }
+}
+
+impl AdditionalLimit {
+    /// Settles a transaction the handler answered with a result after an error: op-revm's failed
+    /// deposit, which discards everything the deposit did — whether it was refused before it ran
+    /// or halted after its frames ran — and reports a halt. The layer settles as it does for an
+    /// out-of-gas before the first frame: the halt is what the transaction reports, so a stop its
+    /// body latched goes with the reset, and the body is what it kept.
+    pub(crate) fn on_transaction_error(&mut self) {
+        self.settle_without_frames();
+    }
+
+    /// The settlement of a transaction that kept nothing of what its frames did, or whose frames
+    /// never ran: whatever was counted goes, the latch with it, and the body is put back, since the
+    /// transaction is in the block whatever it did. The exemption stays: it is the transaction's,
+    /// not its frames'.
+    fn settle_without_frames(&mut self) {
+        let body = self.body_bytes;
+        self.tracker.reset();
+        self.standing = LimitCheck::WithinLimit;
+        self.tracker.record_tx(LimitUsage { data_size: body, write_records: 0 });
     }
 }
 

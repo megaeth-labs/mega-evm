@@ -11,6 +11,7 @@ mod deposit_charge;
 mod detained_transfers;
 mod detention;
 mod equivalence;
+mod failed_deposit;
 mod history_bytes;
 mod history_exemption;
 mod history_gas;

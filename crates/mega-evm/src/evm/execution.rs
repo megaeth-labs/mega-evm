@@ -371,12 +371,19 @@ where
         self.op.execution_result(evm, result, result_gas)
     }
 
+    /// op-revm's error handling, which answers a deposit's transaction error with a failed-deposit
+    /// halt and discards everything the deposit did. The common execution layer then settles as it
+    /// does for an out-of-gas before the first frame: the halt is what the transaction reports,
+    /// not a stop its body may have latched before the error, and the body is what it kept. Any
+    /// other error refuses the transaction, and the layer's state is reset by the next one.
     fn catch_error(
         &self,
         evm: &mut Self::Evm,
         error: Self::Error,
     ) -> Result<revm::context::result::ExecutionResult<Self::HaltReason>, Self::Error> {
-        self.op.catch_error(evm, error)
+        let result = self.op.catch_error(evm, error)?;
+        evm.ctx_mut().additional_limit.on_transaction_error();
+        Ok(result)
     }
 }
 
