@@ -12,7 +12,7 @@
 //!
 //! A SALT bucket's capacity is read through the transaction's [`SaltEnv`](crate::SaltEnv), a side
 //! channel no database sees, and a validator that lacks a bucket's proof cannot price the charge
-//! that landed in it. The context records every bucket the SALT environment is asked about in the
+//! that landed in it. The context records every bucket the SALT environment answered in the
 //! [`BucketRecord`], which is emptied when a block starts and not between its transactions: the
 //! per-transaction cache of multipliers ([`BucketMultipliers`](crate::BucketMultipliers)) is
 //! forgotten before every transaction, and a record that lived there would lose every
@@ -66,20 +66,21 @@ impl BlockHashRecord {
     }
 }
 
-/// The SALT buckets execution has asked the SALT environment about.
+/// The SALT buckets the SALT environment answered the capacity of.
 ///
-/// One entry per bucket, recorded when the environment is asked for its capacity, whatever it
-/// answers: a lookup that fails fails its transaction with its cause, so the transaction is in no
-/// block and a validator never makes the lookup, and recording it costs a validator nothing but a
-/// proof it does not use. What a block's execution asked about is what a validator re-executing
-/// the block asks about, because the engine reads a bucket at a charge site and nothing else
-/// decides whether a charge site is reached.
+/// One entry per bucket, recorded once the environment answered its capacity, on the cache miss
+/// that asked it. A lookup that fails is not recorded: it fails its transaction with its cause,
+/// so the transaction is in no block and a validator never makes the lookup, and a builder whose
+/// environment failed on the bucket is not held to proving it. What a block's execution was
+/// answered is what a validator re-executing the block asks about, because the engine reads a
+/// bucket at a charge site and nothing else decides whether a charge site is reached.
 ///
-/// The record accumulates over the transactions of one block, the pre-block calls and the system
-/// transactions included, which read none: block execution empties it at the start of the block,
-/// and a caller that attributes the reads to one transaction empties it between transactions
-/// ([`MegaEvm::clear_accessed_bucket_ids`](crate::MegaEvm)). It records what was read and decides
-/// nothing, so emptying it changes no execution result.
+/// The record accumulates over everything one EVM executes for a block — the pre-block calls and
+/// the system transactions included, which read none, and a candidate the builder executed and
+/// dropped, whose buckets a validator does not need: block execution empties it at the start of
+/// the block, and a caller that attributes the reads to one transaction empties it between
+/// transactions ([`MegaEvm::clear_accessed_bucket_ids`](crate::MegaEvm)). It records what was
+/// read and decides nothing, so emptying it changes no execution result.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct BucketRecord(BTreeSet<BucketId>);
 

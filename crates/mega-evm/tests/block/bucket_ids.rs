@@ -181,10 +181,11 @@ fn test_the_pre_block_calls_and_a_system_transaction_add_no_bucket() {
     assert_eq!(envs.total_bucket_queries(), 0);
 }
 
-/// A bucket whose lookup fails is recorded all the same: the ask is made, and the transaction it
-/// fails is in no block, so a validator never repeats it.
+/// A bucket whose lookup fails is not recorded: the transaction it fails is in no block, so a
+/// validator never makes the lookup, and the builder is not held to proving a bucket its
+/// environment could not answer.
 #[test]
-fn test_a_failed_lookup_is_recorded_and_its_transaction_is_not_in_the_block() {
+fn test_a_failed_lookup_is_not_recorded_and_its_transaction_is_not_in_the_block() {
     if common::state_is_free() {
         return;
     }
@@ -196,14 +197,12 @@ fn test_a_failed_lookup_is_recorded_and_its_transaction_is_not_in_the_block() {
     let error =
         executor.run_transaction(&write(0, 1)).expect_err("the lookup fails the transaction");
     assert!(error.to_string().contains("salt backend unreachable"), "{error}");
-    assert_eq!(executor.get_accessed_bucket_ids(), vec![slot_bucket(1)], "the ask is recorded");
+    assert!(executor.get_accessed_bucket_ids().is_empty(), "a failed lookup is not recorded");
 
-    // The block goes on: the next transaction's bucket is answered, and both are recorded.
+    // The block goes on: the next transaction's bucket is answered and recorded.
     let outcome = executor.run_transaction(&write(0, 2)).expect("it executes");
     executor.commit_transaction_outcome(outcome).expect("the block has room");
-    let mut expected = vec![slot_bucket(1), slot_bucket(2)];
-    expected.sort_unstable();
-    assert_eq!(executor.get_accessed_bucket_ids(), expected);
+    assert_eq!(executor.get_accessed_bucket_ids(), vec![slot_bucket(2)]);
     let (_, result) = executor.finish_with_counters().expect("the block finishes");
     assert_eq!(result.receipts().len(), 1, "the failed transaction is not in the block");
 }

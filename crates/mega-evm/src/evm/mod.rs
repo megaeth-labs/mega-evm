@@ -255,13 +255,16 @@ where
         self.ctx_mut().clear_block_hash_record();
     }
 
-    /// The SALT buckets execution has asked the SALT environment about on this EVM so far, in
+    /// The SALT buckets whose capacity the SALT environment answered on this EVM so far, in
     /// ascending order.
     ///
     /// A bucket's capacity is read through a side channel no database sees, so this is where a
-    /// stateless witness learns which buckets it must prove. The record starts empty and is
-    /// emptied again when block execution starts a block; it is not emptied between the
-    /// transactions of a block, as the per-transaction multiplier cache is.
+    /// stateless witness learns which buckets it must prove. The record holds what this EVM
+    /// executed since it was last cleared, dropped candidates included and lookups that failed
+    /// left out: it starts empty, block execution empties it when a block starts, and nothing
+    /// empties it between the transactions of a block, as the per-transaction multiplier cache
+    /// is. An EVM reused across blocks outside a block executor reports every block it ran since
+    /// it was last cleared; a node that executes on several EVMs takes the union of their records.
     pub fn get_accessed_bucket_ids(&self) -> Vec<BucketId> {
         self.ctx().bucket_record().to_vec()
     }

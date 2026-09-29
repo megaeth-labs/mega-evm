@@ -658,23 +658,32 @@ where
         self.evm.clear_accessed_block_hashes();
     }
 
-    /// The SALT buckets this block's execution has asked the SALT environment about so far, in
-    /// ascending order: every bucket a state charge of any of its transactions was priced in.
+    /// The SALT buckets whose capacity the SALT environment answered during this block's execution
+    /// so far, in ascending order: every bucket a state charge was priced in.
     ///
     /// A bucket's capacity is read through the SALT environment, which no database sees, and a
     /// validator that lacks a bucket's proof cannot price the charge that landed in it, so this is
-    /// where a stateless witness learns which buckets it must carry. The record covers this
-    /// executor's block:
-    /// [`apply_pre_execution_changes`](BlockExecutor::apply_pre_execution_changes) empties it
-    /// when the block starts, and nothing empties it between the block's transactions,
-    /// whose own multiplier caches are forgotten one transaction at a time.
+    /// where a stateless witness learns which buckets it must carry. The set is complete for the
+    /// transactions this executor's EVM ran: the engine asks about a bucket at a state charge site
+    /// and nowhere else, and a validator re-executing them reaches the same charge sites. A lookup
+    /// that failed is not in it, because it failed its transaction, which is in no block; the
+    /// pre-block calls and the system transactions read no bucket and add none.
     ///
-    /// The set is complete for the block: the engine asks about a bucket at a state charge site
-    /// and nowhere else, a validator re-executing the block's transactions reaches the same charge
-    /// sites, and a bucket is recorded before the environment answers, so a lookup that failed —
-    /// which fails its transaction, leaving it out of the block — is in the set too, as a proof a
-    /// validator does not use. The pre-block calls and the system transactions read no bucket and
-    /// add none.
+    /// What the record covers, and what it does not:
+    ///
+    /// - It holds what this executor's EVM executed since the block started:
+    ///   [`apply_pre_execution_changes`](BlockExecutor::apply_pre_execution_changes) empties it,
+    ///   and nothing empties it between the block's transactions, whose own multiplier caches are
+    ///   forgotten one transaction at a time. A candidate the builder executed here and dropped
+    ///   leaves its buckets in the set, which a validator does not need but is not harmed by.
+    /// - It holds nothing of an outcome executed elsewhere: an outcome another EVM produced and
+    ///   this executor committed through
+    ///   [`commit_transaction_outcome`](Self::commit_transaction_outcome) added no bucket here. A
+    ///   node that executes on several EVMs, or builds one per transaction, takes the union of what
+    ///   each reports; one that clears the record between transactions
+    ///   ([`clear_accessed_bucket_ids`](Self::clear_accessed_bucket_ids)) does the same.
+    /// - An EVM reused across blocks outside a block executor is emptied by neither, and reports
+    ///   every block it ran since it was last cleared.
     pub fn get_accessed_bucket_ids(&self) -> Vec<BucketId> {
         self.evm.get_accessed_bucket_ids()
     }

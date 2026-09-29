@@ -19,9 +19,9 @@ use crate::{
         schedule::{satin_gas_params, satin_gas_params_history_exempt},
     },
     system::{self, keyless::KeylessFrame},
-    AdditionalLimit, BlockHashRecord, BucketError, BucketMultipliers, BucketRecord, Detention,
-    EmptyExternalEnv, EthSpecId, EvmTxRuntimeLimits, ExternalEnvTypes, ExternalEnvs, MegaSpecId,
-    MegaTransaction, OracleReadRecord, SaltEnv, VolatileDataAccess,
+    AdditionalLimit, BlockHashRecord, BucketError, BucketId, BucketMultipliers, BucketRecord,
+    Detention, EmptyExternalEnv, EthSpecId, EvmTxRuntimeLimits, ExternalEnvTypes, ExternalEnvs,
+    MegaSpecId, MegaTransaction, OracleReadRecord, SaltEnv, VolatileDataAccess,
 };
 
 /// The revm context the Satin engine runs on: op-revm's context shape with the `MegaETH`
@@ -300,14 +300,13 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     /// ([`BucketError`](crate::BucketError)).
     ///
     /// The bucket is recorded for the block's witness ([`bucket_record`](Self::bucket_record))
-    /// before the environment is asked, whatever it answers.
+    /// once the environment answered its capacity; see
+    /// [`bucket_multiplier`](Self::bucket_multiplier).
     pub fn account_bucket_multiplier(
         &mut self,
         address: Address,
     ) -> Result<u64, BucketError<<ExtEnvs::SaltEnv as SaltEnv>::Error>> {
-        let bucket = <ExtEnvs::SaltEnv as SaltEnv>::bucket_id_for_account(address);
-        self.bucket_record.record(bucket);
-        self.bucket_multipliers.of_bucket(&self.external_envs.salt_env, bucket)
+        self.bucket_multiplier(<ExtEnvs::SaltEnv as SaltEnv>::bucket_id_for_account(address))
     }
 
     /// The SALT bucket multiplier of the slot `key` of `address`, which scales every slot-scoped
@@ -318,9 +317,28 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
         address: Address,
         key: StorageKey,
     ) -> Result<u64, BucketError<<ExtEnvs::SaltEnv as SaltEnv>::Error>> {
-        let bucket = <ExtEnvs::SaltEnv as SaltEnv>::bucket_id_for_slot(address, key);
+        self.bucket_multiplier(<ExtEnvs::SaltEnv as SaltEnv>::bucket_id_for_slot(address, key))
+    }
+
+    /// The multiplier of `bucket`: the one the running transaction already read, or the one the
+    /// environment answers, which is cached for the transaction and recorded for the block's
+    /// witness.
+    ///
+    /// The record is written on the cache miss alone, once the environment answered: a cache
+    /// hit adds nothing the miss did not, and a lookup that failed fails the transaction with its
+    /// cause, so the transaction is in no block and a validator never makes the lookup — a proof
+    /// of that bucket is one nobody uses, and a builder whose environment failed on it must not
+    /// be held to proving it.
+    fn bucket_multiplier(
+        &mut self,
+        bucket: BucketId,
+    ) -> Result<u64, BucketError<<ExtEnvs::SaltEnv as SaltEnv>::Error>> {
+        if let Some(multiplier) = self.bucket_multipliers.cached(bucket) {
+            return Ok(multiplier);
+        }
+        let multiplier = self.bucket_multipliers.fetch(&self.external_envs.salt_env, bucket)?;
         self.bucket_record.record(bucket);
-        self.bucket_multipliers.of_bucket(&self.external_envs.salt_env, bucket)
+        Ok(multiplier)
     }
 
     /// The SALT bucket multipliers the running (or last) transaction read.
@@ -775,8 +793,9 @@ mod tests {
 
     /// The bucket record outlives the multipliers: a bucket a transaction asked about stays
     /// recorded once the next transaction has forgotten its multiplier, a slot's bucket and an
-    /// account's are both recorded, a bucket whose lookup failed is recorded, and a system call,
-    /// which prices at the minimum bucket, records nothing. Clearing empties it.
+    /// account's are both recorded, a bucket whose lookup failed is not, a cache hit records
+    /// nothing new, and a system call, which prices at the minimum bucket, records nothing.
+    /// Clearing empties it.
     #[test]
     fn test_the_bucket_record_holds_every_ask_over_the_block() {
         const ACCOUNT: alloy_primitives::Address =
@@ -791,7 +810,10 @@ mod tests {
         let mut ctx = MegaContext::new_with_external_envs(
             EmptyDB::default(),
             MegaSpecId::SATIN,
-            ExternalEnvs::<TestExternalEnvs<String>> { salt_env: env.clone(), oracle_env: env },
+            ExternalEnvs::<TestExternalEnvs<String>> {
+                salt_env: env.clone(),
+                oracle_env: env.clone(),
+            },
         );
         assert!(ctx.bucket_record().is_empty());
 
@@ -802,9 +824,12 @@ mod tests {
 
         assert_eq!(ctx.slot_bucket_multiplier(ACCOUNT, U256::from(3)), Ok(1));
         assert!(ctx.account_bucket_multiplier(OTHER).is_err(), "the lookup fails");
-        let mut expected = vec![account, slot, failing];
+        let mut expected = vec![account, slot];
         expected.sort_unstable();
-        assert_eq!(ctx.bucket_record().to_vec(), expected, "every ask, the failed one included");
+        assert_eq!(ctx.bucket_record().to_vec(), expected, "every answered ask, not the failed");
+        assert_eq!(ctx.slot_bucket_multiplier(ACCOUNT, U256::from(3)), Ok(1), "a cache hit");
+        assert_eq!(ctx.bucket_record().to_vec(), expected, "which records nothing new");
+        assert_eq!(env.bucket_queries(slot), 1, "and asked the environment nothing");
 
         ctx.on_new_system_call();
         assert_eq!(ctx.bucket_record().to_vec(), expected, "a system call forgets nothing");
