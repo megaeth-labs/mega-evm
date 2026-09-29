@@ -206,9 +206,13 @@ pub enum MegaBlockExecutionError {
         found: B256,
     },
     /// Satin is scheduled but the schedule does not carry a [`SequencerRegistryConfig`].
+    ///
+    /// A gap in the node's configuration, not a verdict on the block: an internal error.
     MissingSequencerRegistryConfig,
     /// The schedule carries no [`ProtocolLimits`] for the block's timestamp: no `MegaETH` fork is
     /// active there, or the fork active there carries none.
+    ///
+    /// A gap in the node's configuration, not a verdict on the block: an internal error.
     MissingProtocolLimits {
         /// The block's timestamp.
         timestamp: u64,
@@ -280,8 +284,24 @@ impl fmt::Display for MegaBlockExecutionError {
 impl core::error::Error for MegaBlockExecutionError {}
 
 impl From<MegaBlockExecutionError> for BlockExecutionError {
+    /// A block refused for what the node's configuration lacks is an internal error: a schedule
+    /// without a parameter the block needs says nothing about the block, and a node must not mark
+    /// a block invalid because its own configuration is incomplete. Every other refusal is a
+    /// verdict on the block, a validation error.
     fn from(error: MegaBlockExecutionError) -> Self {
-        Self::Validation(alloy_evm::block::BlockValidationError::Other(Box::new(error)))
+        match error {
+            MegaBlockExecutionError::MissingSequencerRegistryConfig |
+            MegaBlockExecutionError::MissingProtocolLimits { .. } => Self::other(error),
+            MegaBlockExecutionError::UnexpectedNonDepositTxInActivationBlock |
+            MegaBlockExecutionError::TransactionDaFootprintAboveGasLimit { .. } |
+            MegaBlockExecutionError::RewritingInspector |
+            MegaBlockExecutionError::ForeignSystemContractCode { .. } |
+            MegaBlockExecutionError::ZeroFactoryNonce { .. } |
+            MegaBlockExecutionError::UsedEmptyAccount { .. } |
+            MegaBlockExecutionError::ApplyPendingChangesFailed { .. } => {
+                Self::Validation(alloy_evm::block::BlockValidationError::Other(Box::new(error)))
+            }
+        }
     }
 }
 
@@ -1066,14 +1086,81 @@ mod tests {
         assert_eq!(executor.protocol_limits(), None);
         let error = executor.apply_pre_execution_changes().expect_err("no limits, no block");
         assert_eq!(
-            error.to_string(),
-            MegaBlockExecutionError::MissingProtocolLimits { timestamp: 7 }.to_string()
+            internal(&error),
+            &MegaBlockExecutionError::MissingProtocolLimits { timestamp: 7 },
+            "a gap in the node's configuration is not a verdict on the block"
         );
         assert_eq!(
             error.to_string(),
             "the schedule carries no ProtocolLimits for the block at timestamp 7"
         );
         assert!(executor.receipts().is_empty());
+    }
+
+    /// The `MegaBlockExecutionError` an internal error carries; panics on a validation error.
+    fn internal(error: &BlockExecutionError) -> &MegaBlockExecutionError {
+        error
+            .as_internal()
+            .and_then(|error| error.downcast_other::<MegaBlockExecutionError>())
+            .unwrap_or_else(|| panic!("not an internal refusal of this engine: {error:?}"))
+    }
+
+    /// A schedule that activates Satin without a `SequencerRegistryConfig` refuses the block at
+    /// the deploy, as an internal error: the registry cannot be seeded, and that is the node's
+    /// configuration, not the block.
+    #[test]
+    fn test_a_block_without_the_registry_config_is_an_internal_error() {
+        let ctx = MegaContext::new(MemoryDatabase::default(), MegaSpecId::SATIN)
+            .with_block(BlockEnv { gas_limit: 30_000_000, ..Default::default() });
+        let mut executor = MegaBlockExecutor::new(
+            MegaEvm::new(ctx),
+            MegaBlockExecutionCtx::new(
+                B256::ZERO,
+                Some(B256::ZERO),
+                Bytes::new(),
+                BlockLimits::default(),
+            ),
+            MegaHardforkConfig::default().with_all_activated().with_params(ProtocolLimits::DEFAULT),
+            alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder::default(),
+        );
+
+        let error = executor.apply_pre_execution_changes().expect_err("no registry, no block");
+        assert_eq!(internal(&error), &MegaBlockExecutionError::MissingSequencerRegistryConfig);
+    }
+
+    /// Every refusal but a configuration gap is a verdict on the block: a validation error.
+    #[test]
+    fn test_a_refusal_of_the_block_is_a_validation_error() {
+        let address = alloy_primitives::Address::repeat_byte(1);
+        for refusal in [
+            MegaBlockExecutionError::UnexpectedNonDepositTxInActivationBlock,
+            MegaBlockExecutionError::TransactionDaFootprintAboveGasLimit {
+                transaction_da_footprint: 2,
+                available_block_da_footprint: 1,
+            },
+            MegaBlockExecutionError::RewritingInspector,
+            MegaBlockExecutionError::ForeignSystemContractCode {
+                address,
+                expected: B256::ZERO,
+                found: B256::repeat_byte(1),
+            },
+            MegaBlockExecutionError::ZeroFactoryNonce { address },
+            MegaBlockExecutionError::UsedEmptyAccount { address, nonce: 1 },
+            MegaBlockExecutionError::ApplyPendingChangesFailed { message: String::new() },
+        ] {
+            let error = BlockExecutionError::from(refusal.clone());
+            let Some(alloy_evm::block::BlockValidationError::Other(inner)) = error.as_validation()
+            else {
+                panic!("{refusal:?} is a verdict on the block: {error:?}");
+            };
+            assert_eq!(inner.downcast_ref::<MegaBlockExecutionError>(), Some(&refusal));
+        }
+        for gap in [
+            MegaBlockExecutionError::MissingSequencerRegistryConfig,
+            MegaBlockExecutionError::MissingProtocolLimits { timestamp: 1 },
+        ] {
+            assert_eq!(internal(&BlockExecutionError::from(gap.clone())), &gap);
+        }
     }
 
     /// The executor prints whether a pre-block observer is installed. A trait object has no
