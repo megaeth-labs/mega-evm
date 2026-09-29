@@ -295,10 +295,15 @@ mod tests {
 
     /// A call from `CALLER` to `to`.
     fn call(to: Address) -> MegaTransaction {
+        call_with_gas_limit(to, 1_000_000)
+    }
+
+    /// A call from `CALLER` to `to` on `gas_limit`.
+    fn call_with_gas_limit(to: Address, gas_limit: u64) -> MegaTransaction {
         OpTx(op_transaction(TxEnv {
             caller: CALLER,
             kind: TxKind::Call(to),
-            gas_limit: 1_000_000,
+            gas_limit,
             ..Default::default()
         }))
     }
@@ -419,7 +424,15 @@ mod tests {
     #[test]
     fn test_an_evm_from_the_factory_stops_what_the_chain_stops() {
         use crate::{test_utils::BytecodeBuilder, LimitCheck, LimitKind};
+        use revm::context_interface::cfg::GasId;
         const WRITER: Address = address!("0x0000000000000000000000000000000000077700");
+        // Below the execution cap the two fresh slots' state gas spills onto regular gas, and the
+        // body and the two write records pay history: 1,000,000 of regular room on top of what
+        // they cost at the byte prices in effect, so the second write is made and its record
+        // counted whatever a byte costs.
+        let gas_limit = 1_000_000 +
+            2 * crate::satin_gas_params().get(GasId::sstore_set_state_gas()) +
+            crate::history_gas(crate::TX_BODY_SIZE + 2 * crate::WRITE_RECORD_SIZE).unwrap();
         let run = |factory: &MegaEvmFactory| {
             let mut db = MemoryDatabase::default();
             db.set_account_code(
@@ -432,7 +445,8 @@ mod tests {
             );
             let block_env = BlockEnv { timestamp: U256::from(SATIN_AT), ..evm_env().block_env };
             let mut evm = factory.create_evm(db, EvmEnv { cfg_env: evm_env().cfg_env, block_env });
-            evm.execute_transaction(call(WRITER)).expect("the call is valid")
+            evm.execute_transaction(call_with_gas_limit(WRITER, gas_limit))
+                .expect("the call is valid")
         };
 
         let stopped = run(&MegaEvmFactory::new().with_schedule(chain(chain_limits())));
