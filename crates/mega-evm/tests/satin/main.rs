@@ -3,6 +3,7 @@
 mod common;
 mod compute_gas;
 mod contract_size;
+mod create_opcodes;
 mod data_size;
 mod data_size_counts;
 mod db_error;

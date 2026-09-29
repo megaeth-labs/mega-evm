@@ -27,9 +27,8 @@ Do not add a `_pending/main.rs`.
 
 | Owning mechanism | Tests | From `tests/` | From `src/` | Keep | Rewrite | Undecided |
 |---|---:|---:|---:|---:|---:|---:|
-| the common execution layer | 21 | 21 | 0 | 21 | 0 | 0 |
 | — (undecided: D57 preload-warm cold charging, D58 98/100 forwarding) | 7 | 7 | 0 | 0 | 0 | 7 |
-| **Total** | **28** | **28** | **0** | **21** | **0** | **7** |
+| **Total** | **7** | **7** | **0** | **0** | **0** | **7** |
 
 ## Tests ported in place
 
@@ -65,36 +64,6 @@ What the retired `tests/mutation/` rows cited, for the mechanisms that own them.
 | the state-growth and KV limits | 1 | rewrite | D45 |
 | the block executor | 17 | keep | the test gates regenerate |
 | the block executor | 5 | rewrite | single spec / Satin schedule |
-
-## Tests parked under the common execution layer
-
-These 21 rows belong to the test gates in the inventory and pin canonical CREATE and CREATE2 behavior.
-The test gates had turned them into scenarios of a differential harness against revm 43; that harness is maintained outside this repository now, so the rows are parked here again, owed to the common execution layer, and counted under it above.
-6 of them also assert the halt reason of a creation in a static callee: those assertions already run in `tests/satin/static_callee.rs`, under the same test names, and a port of one of those rows carries the rest of its assertions.
-
-| Legacy file | Test | Static-callee halt reason |
-|---|---|---|
-| `rex4/create_safety.rs` | `test_create2_with_oversize_initcode_len_does_not_panic` | — |
-| `rex5/create2_empty_initcode.rs` | `test_create2_len_zero_offset_zero_succeeds_on_both_specs` | — |
-| `rex5/create2_empty_initcode.rs` | `test_rex5_create2_len_nonzero_offset_max_still_halts` | — |
-| `rex5/create2_empty_initcode.rs` | `test_rex5_create2_len_zero_large_offset_skips_memory_expansion` | — |
-| `rex5/create2_empty_initcode.rs` | `test_rex5_create2_len_zero_offset_max_succeeds` | — |
-| `rex5/create2_empty_initcode.rs` | `test_rex5_create2_len_zero_offset_zero_succeeds` | — |
-| `rex5/create2_resize_gas_metering.rs` | `test_create2_missing_salt_halts_consistently_across_specs` | — |
-| `rex5/create2_resize_gas_metering.rs` | `test_rex5_create2_with_non_trivial_resize_succeeds` | — |
-| `rex6/create2_metering_order.rs` | `test_create2_exact_boundary_initcode_length` | — |
-| `rex6/create2_metering_order.rs` | `test_create2_missing_salt_consistent_rex5_rex6` | — |
-| `rex6/create2_metering_order.rs` | `test_create2_moderately_oversized_initcode_same_reason_both_specs` | — |
-| `rex6/create2_metering_order.rs` | `test_create2_oversized_initcode_halts_before_prework_rex6` | — |
-| `rex6/create2_metering_order.rs` | `test_create2_oversized_len_unrepresentable_offset_halts_initcode_limit_rex6` | — |
-| `rex6/create2_metering_order.rs` | `test_create2_static_hugely_oversized_initcode_halt_reason` | `tests/satin/static_callee.rs` |
-| `rex6/create2_metering_order.rs` | `test_create2_static_missing_operands_halt_reason` | `tests/satin/static_callee.rs` |
-| `rex6/create2_metering_order.rs` | `test_create2_static_oversized_initcode_reports_static_rejection` | `tests/satin/static_callee.rs` |
-| `rex6/create2_metering_order.rs` | `test_create2_static_zero_length_initcode_reports_static_rejection` | `tests/satin/static_callee.rs` |
-| `rex6/create2_metering_order.rs` | `test_create2_static_zero_length_low_gas_halt_reason` | `tests/satin/static_callee.rs` |
-| `rex6/create2_metering_order.rs` | `test_create_static_low_gas_halt_reason` | `tests/satin/static_callee.rs` |
-| `rex6/error_paths.rs` | `test_rex6_create2_missing_length_stack_underflow` | — |
-| `rex6/error_paths.rs` | `test_rex6_create2_missing_offset_stack_underflow` | — |
 
 ## Tests ported by the common execution layer
 
@@ -366,6 +335,21 @@ These 4 rows run in a real test target now, adapted to the Satin API: block exec
 | `rex4/intrinsic_limit_bypass.rs` | inspector support (1) | 1 | `tests/satin/inspector.rs` |
 | **Total** | | **4** | |
 
+## Tests ported when the last rows were settled
+
+These 21 rows run in a real test target now, so the counts above are lower than the inventory's by exactly these rows.
+The CREATE and CREATE2 rows owed to the common execution layer keep their transactions and what Satin keeps of their expectations: the halt reasons, and the order in which revm's own `CREATE2` checks its operands, at the Satin init-code limit; what they compared with another legacy spec or read off the legacy compute ledger has no counterpart.
+Six of them are the static-callee rows, whose Satin assertions already ran in `tests/satin/static_callee.rs` under the same names; the rest of each compared with a legacy spec.
+
+| Legacy file | Owner in the inventory | Tests | Now in |
+|---|---|---:|---|
+| `rex4/create_safety.rs` | the common execution layer (1) | 1 | `tests/satin/create_opcodes.rs` |
+| `rex5/create2_empty_initcode.rs` | the common execution layer (5) | 5 | `tests/satin/create_opcodes.rs` |
+| `rex5/create2_resize_gas_metering.rs` | the common execution layer (2) | 2 | `tests/satin/create_opcodes.rs` |
+| `rex6/create2_metering_order.rs` | the common execution layer (11) | 11 | `tests/satin/create_opcodes.rs`, `tests/satin/static_callee.rs` |
+| `rex6/error_paths.rs` | the common execution layer (2) | 2 | `tests/satin/create_opcodes.rs` |
+| **Total** | | **21** | |
+
 ## Tests retired after the inventory
 
 These 21 rows were parked when the inventory was applied and have since been retired: the mechanism that owns them landed and left them nothing to pin, so no later mechanism will port them.
@@ -384,16 +368,6 @@ They are not counted above.
 | `src/system/oracle.rs` | system contract deployment (3) | 3 | Satin does not overwrite foreign code: a system address with different code is an error, not an in-place upgrade; Satin is a single spec and ships one Oracle bytecode; there is no per-fork version gate to pin |
 | **Total** | | **21** | |
 
-## Tests the inventory assigns to the Satin skeleton that are parked under another mechanism
-
-| File | Test | Parked under | Reason |
-|---|---|---|---|
-
-## Tests parked under a later mechanism than the inventory named
-
-| File | Test | Parked under | Reason |
-|---|---|---|---|
-
 ## Files
 
 Each cell lists `disposition count (mechanism · decision)`.
@@ -402,8 +376,3 @@ Each cell lists `disposition count (mechanism · decision)`.
 |---|---:|---|
 | `compute_gas/claims.rs` | 5 | undecided 5 (— · D57, open: whether preload-warm addresses (precompile / beneficiary / access-list) are charged cold) |
 | `mini_rex/gas.rs` | 2 | undecided 2 (— · D58, open: 98/100 forwarding, while the design has frames follow EIP-8037 (63/64)) |
-| `rex4/create_safety.rs` | 1 | keep 1 (the common execution layer · canonical revm behaviour) |
-| `rex5/create2_empty_initcode.rs` | 5 | keep 5 (the common execution layer · canonical revm behaviour) |
-| `rex5/create2_resize_gas_metering.rs` | 2 | keep 2 (the common execution layer · canonical behaviour) |
-| `rex6/create2_metering_order.rs` | 11 | keep 11 (the common execution layer · canonical halt reasons; D04 512 KiB boundary) |
-| `rex6/error_paths.rs` | 2 | keep 2 (the common execution layer · canonical) |
