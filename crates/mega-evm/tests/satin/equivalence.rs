@@ -752,6 +752,56 @@ fn test_a_crowded_salt_bucket_is_where_satin_leaves_op_revm() {
     assert_eq!(mega.state, op.state, "state");
 }
 
+/// A transaction that runs out of gas in the runtime gas phase, before its first frame — here on
+/// EIP-2780's charge for the account its value creates — burns its whole gas limit on both
+/// engines and keeps nothing but its sender's nonce: no reservoir comes back from a transaction
+/// below the execution cap, and Satin's history ledger reads the body, the record its frame
+/// would have made given back.
+///
+/// Each engine runs one gas short of what the same transfer spends on it when it succeeds, so
+/// each falls short on the last charge of the phase at any byte price: op-revm has no history to
+/// charge and needs less. Where a state byte costs nothing there is no such charge on op-revm, and
+/// the case returns early.
+#[test]
+fn test_an_out_of_gas_before_the_first_frame_matches_op_revm() {
+    if crate::common::state_is_free() {
+        return;
+    }
+    let db = || MemoryDatabase::default().account_balance(CALLER, U256::from(10u64.pow(18)));
+    let transfer = |gas_limit| TxEnv {
+        caller: CALLER,
+        kind: TxKind::Call(CALLEE),
+        value: U256::from(1_000),
+        gas_limit,
+        ..Default::default()
+    };
+    let (mega_success, op_success, _) = run_both(db(), transfer(1_000_000 + account_state_gas()));
+    assert!(mega_success.result.is_success() && op_success.result.is_success());
+    let mega_limit = mega_success.result.gas().total_gas_spent() - 1;
+    let op_limit = op_success.result.gas().total_gas_spent() - 1;
+    assert!(mega_limit > op_limit, "Satin charges the body's and the record's history on top");
+
+    let (mega, _, cfg) = run_both(db(), transfer(mega_limit));
+    let (_, op, _) = run_both(db(), transfer(op_limit));
+    assert_satin_cfg(&cfg);
+    for (engine, result, gas_limit) in
+        [("Satin", &mega.result, mega_limit), ("op-revm", &op.result, op_limit)]
+    {
+        assert!(result.is_halt(), "{engine}: {result:?}");
+        let gas = result.gas();
+        assert_eq!(gas.total_gas_spent(), gas_limit, "{engine}: the whole gas limit burns");
+        assert_eq!(gas.reservoir_remaining(), 0, "{engine}: no reservoir comes back");
+        assert_eq!(gas.tx_gas_used(), gas_limit, "{engine}: the receipt bills the gas limit");
+    }
+    assert_eq!(mega.gas.history, body_history(0), "the history ledger reads the body");
+    assert_eq!(mega.gas.history_bytes, TX_BODY_SIZE);
+    assert_eq!(mega.gas.state, 0, "the account was not created");
+    // With no gas price the fee is nothing, so the two states are the same: the sender's nonce
+    // moved and nothing else.
+    assert_eq!(mega.state, op.state, "state");
+    assert_eq!(mega.state[&CALLER].info.nonce, 1);
+}
+
 /// A creation transaction that runs out of gas in the runtime gas phase bumps its sender's nonce
 /// on both engines, so an included out-of-gas creation cannot be replayed, and burns its whole gas
 /// limit. Satin runs out on the history of the record its own frame would make, the one charge of
