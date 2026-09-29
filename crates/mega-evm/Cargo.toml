@@ -35,7 +35,7 @@ mega-system-contracts = { workspace = true, default-features = false }
 auto_impl.workspace = true
 delegate.workspace = true
 derive_more = { workspace = true, optional = true, features = ["debug", "deref", "deref_mut", "display", "error"] }
-serde = { workspace = true, features = ["derive"] }
+serde = { workspace = true, features = ["alloc", "derive"] }
 
 [dev-dependencies]
 # CodSpeed drop-in: `codspeed-criterion-compat` re-exports criterion's API, so
