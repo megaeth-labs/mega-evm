@@ -26,7 +26,7 @@ The `--locked` flag ensures the exact tested dependency versions are used.
 Or build from source:
 
 ```bash
-cargo build --release -p mega-evme
+cargo build --release --manifest-path bin/mega-evme/Cargo.toml
 ```
 
 ### Prebuilt binary

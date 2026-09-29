@@ -176,7 +176,8 @@ async fn test_storage_cache_hit_round_trip_via_mock() {
 /// `MEGA_EVME_TEST_RPC_URL` environment variable. Run with:
 ///
 /// ```text
-/// cargo test -p mega-evme test_create_initial_state_fork_real_rpc_smoke -- --ignored
+/// cargo test --manifest-path bin/mega-evme/Cargo.toml --test state \
+///     test_create_initial_state_fork_real_rpc_smoke -- --ignored
 /// ```
 ///
 /// Stability: the Oracle is a `MegaETH` system contract predeployed at
@@ -247,7 +248,8 @@ async fn test_create_initial_state_fork_real_rpc_smoke() {
 /// `MEGA_EVME_TEST_RPC_URL` environment variable.
 ///
 /// ```text
-/// cargo test -p mega-evme test_create_initial_state_fork_real_rpc_storage_cache_hit -- --ignored
+/// cargo test --manifest-path bin/mega-evme/Cargo.toml --test state \
+///     test_create_initial_state_fork_real_rpc_storage_cache_hit -- --ignored
 /// ```
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires network access for phase 1"]

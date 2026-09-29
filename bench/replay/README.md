@@ -77,7 +77,8 @@ filled offline with `state-test --fill`, so it too is validated and benched.
 ## Running locally
 
 ```bash
-cargo build --release -p mega-evme -p state-test
+cargo build --release --manifest-path bin/mega-evme/Cargo.toml
+cargo build --release -p state-test
 
 # Measure the current build:
 python3 bench/replay/run.py --bin pr=target/release
