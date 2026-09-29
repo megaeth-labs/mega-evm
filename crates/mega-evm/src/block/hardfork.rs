@@ -137,17 +137,26 @@ pub trait MegaHardforks: OpHardforks {
         }) || self.is_no_user_tx_activation_block(parent_timestamp, block_timestamp)
     }
 
-    /// Refuses a schedule that activates `P::FORK` without attaching `P`.
+    /// Refuses a schedule that activates `P::FORK` without attaching `P`, or with a `P` its
+    /// [`validate`](HardforkParams::validate) refuses.
     ///
     /// This is the rule [`validate_schedule`](Self::validate_schedule) applies to every params
-    /// type a fork requires; it is public so a params type can be checked on its own.
+    /// type a fork requires; it is public so a params type can be checked on its own. The value
+    /// is checked here as well as in [`MegaHardforkConfig::with_params`], because a node's own
+    /// implementation of this trait attaches its parameters without going through that method.
+    /// A fork the schedule does not activate requires nothing.
     fn require_params<P: HardforkParams>(&self) -> Result<(), ScheduleError> {
-        if self.mega_fork_activation(P::FORK) != ForkCondition::Never &&
-            self.fork_params::<P>().is_none()
-        {
-            return Err(ScheduleError::MissingParams { fork: P::FORK, params: P::NAME });
+        if self.mega_fork_activation(P::FORK) == ForkCondition::Never {
+            return Ok(());
         }
-        Ok(())
+        let params = self
+            .fork_params::<P>()
+            .ok_or(ScheduleError::MissingParams { fork: P::FORK, params: P::NAME })?;
+        params.validate().map_err(|error| ScheduleError::InvalidParams {
+            fork: P::FORK,
+            params: P::NAME,
+            message: error.message,
+        })
     }
 
     /// Checks that this schedule is one a chain can run, so a configuration mistake is caught
@@ -158,8 +167,8 @@ pub trait MegaHardforks: OpHardforks {
     /// - Every registered `MegaETH` fork activates by [`ForkCondition::Timestamp`] (or is
     ///   [`ForkCondition::Never`]). Resolution is timestamp-scoped, so a block-number or
     ///   total-difficulty condition would silently never activate the fork.
-    /// - The parameters every scheduled fork requires are attached
-    ///   ([`require_params`](Self::require_params)). Satin requires
+    /// - The parameters every scheduled fork requires are attached, and their values pass their
+    ///   type's own checks ([`require_params`](Self::require_params)). Satin requires
     ///   [`SequencerRegistryConfig`](crate::system::SequencerRegistryConfig) so the registry can be
     ///   seeded at the first block.
     ///
@@ -196,6 +205,15 @@ pub enum ScheduleError {
         /// The required params type, as [`HardforkParams::NAME`] names it.
         params: &'static str,
     },
+    /// A scheduled fork carries parameters whose own checks refuse them.
+    InvalidParams {
+        /// The scheduled fork.
+        fork: MegaHardfork,
+        /// The params type, as [`HardforkParams::NAME`] names it.
+        params: &'static str,
+        /// What [`HardforkParams::validate`] reported.
+        message: String,
+    },
 }
 
 impl fmt::Display for ScheduleError {
@@ -209,6 +227,9 @@ impl fmt::Display for ScheduleError {
                     f,
                     "hardfork {fork:?} is scheduled but its {params} params are not configured"
                 )
+            }
+            Self::InvalidParams { fork, params, message } => {
+                write!(f, "hardfork {fork:?} is scheduled with invalid {params} params: {message}")
             }
         }
     }
@@ -329,10 +350,30 @@ impl MegaHardforkConfig {
     ///
     /// If the fork is not registered in this schedule, or if `params.validate()` refuses the
     /// value — a chain configuration is built once, at load, and a bad one must not start.
-    pub fn with_params<P: HardforkParams>(mut self, params: P) -> Self {
+    pub fn with_params<P: HardforkParams>(self, params: P) -> Self {
         if let Err(e) = params.validate() {
             panic!("Invalid params for fork {:?}: {}", P::FORK, e.message);
         }
+        self.attach(params)
+    }
+
+    /// Attaches `params` to the fork they belong to without checking them.
+    ///
+    /// Test tooling, behind the `test-utils` feature: it lets a test run block execution under a
+    /// value no chain may carry, such as limits that leave gas detention off. A production build
+    /// has no such route: [`with_params`](Self::with_params) checks every value it attaches, and
+    /// [`validate_schedule`](MegaHardforks::validate_schedule) checks them again at load.
+    ///
+    /// # Panics
+    ///
+    /// If the fork is not registered in this schedule.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn with_params_unchecked<P: HardforkParams>(self, params: P) -> Self {
+        self.attach(params)
+    }
+
+    /// Attaches `params` to their fork's entry.
+    fn attach<P: HardforkParams>(mut self, params: P) -> Self {
         let entry = self
             .entries
             .iter_mut()
@@ -612,6 +653,36 @@ mod tests {
             .with_all_activated()
             .with_params(crate::system::SequencerRegistryConfig::placeholder());
         assert_eq!(with_registry.validate_schedule(), Ok(()));
+    }
+
+    /// A scheduled fork's params are checked at load even when they were attached without
+    /// [`MegaHardforkConfig::with_params`], as a node's own schedule type attaches them; an
+    /// unscheduled fork's are not read at all.
+    #[test]
+    fn test_require_params_refuses_a_value_its_type_refuses() {
+        let invalid = TestParams { sequencer: alloy_primitives::Address::ZERO };
+
+        let scheduled =
+            MegaHardforkConfig::default().with_all_activated().with_params_unchecked(invalid);
+        let error = scheduled.require_params::<TestParams>().unwrap_err();
+        assert_eq!(
+            error,
+            ScheduleError::InvalidParams {
+                fork: MegaHardfork::Satin,
+                params: "TestParams",
+                message: "sequencer must be set".into(),
+            }
+        );
+        assert_eq!(
+            error.to_string(),
+            "hardfork Satin is scheduled with invalid TestParams params: sequencer must be set"
+        );
+
+        // The same value on a schedule that never activates the fork requires nothing.
+        let unscheduled = MegaHardforkConfig::default()
+            .with(MegaHardfork::Satin, ForkCondition::Never)
+            .with_params_unchecked(TestParams { sequencer: alloy_primitives::Address::ZERO });
+        assert_eq!(unscheduled.require_params::<TestParams>(), Ok(()));
     }
 
     /// The block a fork activates in carries the chain's own transactions only, and only that
