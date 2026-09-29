@@ -31,6 +31,9 @@ cargo test -p mega-evm --features satin-price-override,test-utils
 # Run the suite with MEGA_SATIN_CPSB and MEGA_SATIN_CPHB unset: with either of them set the tests
 # that assert the spec's own byte prices skip, and the suite checks less than it looks like it does
 
+# The suite at other byte prices, as the byte-price grid job runs it (logs under target/price-grid)
+scripts/price_grid.sh --pr                # four points; --full for the whole grid, or name points: 312.5/20
+
 # Regenerate the checked-in pricing table after an intentional schedule or engine change
 UPDATE_SATIN_PRICING_TABLE=1 cargo test -p mega-evm --test satin
 
@@ -427,20 +430,21 @@ Every later mechanism plugs into these; a change to one comes back to this layer
 - `satin/` — tests of the Satin engine (integration tests; add new ones here or in a new directory with a `main.rs`).
 - `block/` — tests of block execution: the Karst block rules, the block-level limits, the counters, the factory and the admission gate.
 - `system/` — tests of the system contracts: the interceptor dispatch, what each contract answers, keyless deployment (`system/keyless/`) and the system-address transaction.
-- `_pending/` — the legacy tests the test inventory keeps, parked until the mechanism they test lands.
-  It has no `main.rs`, so Cargo does not build it; its `README.md` names the mechanism that owns every file.
-  The change that ports a pending test deletes it from `_pending/` in the same commit.
+- `_pending/` — no test any more: its `README.md` records where each legacy test the test inventory kept went, ported into one of the targets above or retired, and why.
+  It has no `main.rs`, so Cargo builds nothing there.
 - Unit tests live next to the code in `#[cfg(test)] mod tests`.
 
 ## Test Gates
 
-`REVIEW.md` lists every check a pull request meets; two of them are this repository's own execution gates.
+`REVIEW.md` lists every check a pull request meets; two of them are this repository's own execution gates, and a third holds the suite at other byte prices.
 
 - **The op-revm baseline** (`tests/satin/equivalence.rs`): an ordinary transaction through `MegaEvm` against op-revm on the same configuration, which Satin differs from by its history ledger alone.
 - **The execution-spec gate** (`crates/mega-state-test`, `.github/workflows/exec-spec-satin.yml`): Ethereum's state-test fixtures through `MegaEvm`, on the fixture releases the fork's own runner (`.github/workflows/exec-spec.yml`) uses.
   - Equivalence mode is the gate: Satin's machinery — handler, frame lifecycle, Host, instruction table — priced as the fixture's fork prices it, through the neutral configuration (`MegaContext::with_neutral_cfg`, `test_utils::{neutral_cfg, neutralize_evm}`), which exists only behind `test-utils`, and held to no runtime limit (`EvmTxRuntimeLimits::no_limits()`, installed by the runner itself).
     Every failure must be explained by a deviation in `crates/mega-state-test/src/deviations.rs`, with its rule, its reason and the exact entries it explains, each with the hashes Satin produces, and every listed entry must fail exactly as listed; the executed and skipped counts are pinned in the workflow and equal the fork runner's.
   - Satin mode is a report: the same fixtures under Satin's own configuration, counted by outcome in the step summary; it never fails the job.
+- **The byte-price grid** (`scripts/price_grid.sh`, `.github/workflows/price-grid.yml`): the `mega-evm` suite with the `satin-price-override` feature at other costs per state and history byte, four points on a pull request and the whole grid nightly.
+  The prices are provisional, so a test holds at any of them: it sizes its gas from the schedule at the prices in effect, and a case whose scenario is state or history gas returns early where that byte costs nothing (`state_is_free`, `history_is_free`).
 
 ## Version Control
 
@@ -506,6 +510,9 @@ When the agent is requested to implement a new feature or bug fix, it should con
   The agent should always consider accompanying tests or suggest to add additional tests.
 - **Keep the op-revm baseline honest.**
   A change that makes Satin differ from op-revm on purpose must update `tests/satin/equivalence.rs` (or add a case) so the difference is pinned, not silently absorbed.
+- **Hold a test at any byte price.**
+  A gas limit is regular room on top of what the scenario adds at the prices in effect (`satin_gas_params()`, `history_gas`), never a number that happened to cover it at the constants; a call or creation that forwards all but a 64th of its gas keeps 64 times the history of the records it pays for.
+  A test that pins the spec's own numbers returns early at other prices (`runs_at_measurement_prices`); run `scripts/price_grid.sh --pr` before committing a test change.
 - **Keep the execution-spec gate honest.**
   A change that makes Satin's machinery differ from Ethereum's fixtures on purpose registers a deviation (its rule, its reason, the entries it fails with the hashes Satin produces for them) and regenerates `crates/mega-state-test/DEVIATIONS.md`; a failure that is a bug is fixed, never registered.
   A price or a limit `MegaETH` sets is not a deviation: equivalence mode takes it out, and a new pricing or limit dimension extends the neutral configuration, or the limits the runner installs, rather than the registry.

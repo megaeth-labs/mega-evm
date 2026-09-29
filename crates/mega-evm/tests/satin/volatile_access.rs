@@ -20,10 +20,13 @@ use mega_evm::{
 };
 use revm::{bytecode::opcode::*, context::TxEnv, interpreter::InstructionResult, state::Bytecode};
 
-use crate::detention::{
-    assert_stopped, burn, call, context, execute, intrinsic, on_beneficiary, op, run_on, spin,
-    stop_data, tx, with_delegation, work, Calls, Charges, BELOW, BENEFICIARY, CALLER, CAP, CHILD,
-    CONTRACT, DELEGATOR, TIERS,
+use crate::{
+    common::body_history,
+    detention::{
+        assert_stopped, burn, call, context, execute, intrinsic, on_beneficiary, op, run_on, spin,
+        stop_data, tx, with_delegation, work, Calls, Charges, BELOW, BENEFICIARY, CALLER, CAP,
+        CHILD, CONTRACT, DELEGATOR, TIERS,
+    },
 };
 
 /// A second contract, never the beneficiary.
@@ -144,8 +147,12 @@ fn test_a_read_within_the_cap_bills_what_ran() {
             );
             assert!(run.outcome.result.is_success(), "{opcode:#04x}");
             assert!(run.limit.is_some(), "{opcode:#04x}");
+            // What it ran is well under 100,000; the body's history comes on top.
             let used = run.outcome.result.gas().tx_gas_used();
-            assert!(used < 100_000, "{opcode:#04x}: {used}, not the gas it was given");
+            assert!(
+                used < 100_000 + body_history(0),
+                "{opcode:#04x}: {used}, not the gas it was given"
+            );
         }
         let code = BytecodeBuilder::default().push_number(299_u16).append(BLOCKHASH).stop().build();
         let run = execute(
@@ -153,7 +160,7 @@ fn test_a_read_within_the_cap_bills_what_ran() {
             tx(CALLER, CONTRACT, gas_limit),
         );
         assert!(run.outcome.result.is_success());
-        assert!(run.outcome.result.gas().tx_gas_used() < 100_000);
+        assert!(run.outcome.result.gas().tx_gas_used() < 100_000 + body_history(0));
     }
 }
 
@@ -188,7 +195,7 @@ fn test_a_read_two_frames_down_caps_every_caller() {
             tx(CALLER, CONTRACT, gas_limit),
         );
         assert!(run.outcome.result.is_success());
-        assert!(run.outcome.result.gas().tx_gas_used() < 200_000);
+        assert!(run.outcome.result.gas().tx_gas_used() < 200_000 + body_history(0));
     }
 }
 

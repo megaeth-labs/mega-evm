@@ -25,10 +25,17 @@ const WRITER: Address = address!("0x1000000000000000000000000000000000000d01");
 /// The sender of the ordinary transaction, so its nonce does not depend on the deposits'.
 const SENDER: Address = address!("0x2000000000000000000000000000000000000d02");
 
-const GAS_LIMIT: u64 = 1_000_000;
-
 /// Calldata past the slot word, so each deposit carries data size well beyond its body.
 const PADDING: usize = 1_000;
+
+/// 1,000,000 of regular gas on top of what the slot, its write record and the body of an
+/// ordinary transaction cost at the byte prices in effect.
+fn gas_limit() -> u64 {
+    1_000_000 +
+        common::slot_state_gas() +
+        common::body_history(32 + PADDING as u64) +
+        mega_evm::write_record_history_gas(1).expect("a record has a price")
+}
 
 fn state() -> State<mega_evm::test_utils::MemoryDatabase> {
     let mut db = common::database();
@@ -54,7 +61,7 @@ fn input(slot: u64) -> Bytes {
 /// A deposit that fills the fresh `slot`: execution gas, state gas, data size and a write record,
 /// all four.
 fn deposit(slot: u64) -> Recovered<MegaTxEnvelope> {
-    common::deposit_tx_to(WRITER, input(slot), GAS_LIMIT)
+    common::deposit_tx_to(WRITER, input(slot), gas_limit())
 }
 
 /// An ordinary transaction that fills the fresh `slot`, so each of the four limits has something
@@ -64,7 +71,7 @@ fn ordinary(slot: u64) -> Recovered<MegaTxEnvelope> {
         chain_id: Some(CHAIN_ID),
         nonce: 0,
         gas_price: 1_000_000,
-        gas_limit: GAS_LIMIT,
+        gas_limit: gas_limit(),
         to: TxKind::Call(WRITER),
         value: U256::ZERO,
         input: input(slot),
@@ -86,7 +93,8 @@ fn one_deposit() -> (BlockGasCounters, LimitUsage) {
     probe.apply_pre_execution_changes().expect("the block starts");
     probe.execute_transaction(&deposit(1)).expect("the probe executes");
     let (gas, usage) = (*probe.gas(), probe.limiter().usage);
-    assert!(gas.execution > 0 && gas.state > 0 && usage.data_size > 0, "{gas:?} {usage:?}");
+    assert!(gas.execution > 0 && usage.data_size > 0, "{gas:?} {usage:?}");
+    assert_eq!(gas.state, common::slot_state_gas(), "the slot's state gas");
     assert_eq!(usage.write_records, 1, "the slot");
     (gas, usage)
 }
@@ -155,6 +163,11 @@ enum Route {
 fn test_no_block_limit_refuses_a_deposit_and_every_deposit_counts() {
     let (gas, usage) = one_deposit();
     for cap in [Cap::ExecutionGas, Cap::StateGas, Cap::DataSize, Cap::KvUpdates, Cap::All] {
+        // A deposit that adds no state gas cannot cross a state-gas cap, and the ordinary
+        // transaction after it adds none to be refused for.
+        if matches!(cap, Cap::StateGas) && common::state_is_free() {
+            continue;
+        }
         for route in [Route::OneByOne, Route::CheckedCommit, Route::TraitCommit] {
             let name = format!("{cap:?} by {route:?}");
             let limits = cap.limits(&gas, &usage);

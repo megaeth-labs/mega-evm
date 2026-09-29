@@ -6,7 +6,9 @@ use alloy_op_hardforks::OpHardfork;
 use alloy_primitives::Bytes;
 use op_alloy_consensus::OpReceiptEnvelope;
 
-use crate::common::{self, deposit_tx, executor, executor_with_spec, unlimited_ctx, user_tx};
+use crate::common::{
+    self, deposit_tx, empty_call_gas, executor, executor_with_spec, unlimited_ctx, user_tx,
+};
 
 /// The deposit receipt of the block's only transaction.
 fn deposit_receipt(receipts: &[OpReceiptEnvelope]) -> &op_alloy_consensus::OpDepositReceipt {
@@ -25,10 +27,10 @@ fn test_the_receipts_are_readable_during_the_block_and_leave_with_its_result() {
     executor.apply_pre_execution_changes().expect("the block starts");
 
     assert!(executor.receipts().is_empty(), "nothing is packed yet");
-    executor.execute_transaction(&user_tx(0, 100_000)).expect("the transaction executes");
+    executor.execute_transaction(&user_tx(0, empty_call_gas())).expect("the transaction executes");
     assert_eq!(executor.receipts().len(), 1, "the committed transaction has its receipt");
 
-    executor.execute_transaction(&user_tx(1, 100_000)).expect("the transaction executes");
+    executor.execute_transaction(&user_tx(1, empty_call_gas())).expect("the transaction executes");
     assert_eq!(executor.receipts().len(), 2);
 
     let (_, result) = executor.finish_with_counters().expect("the block finishes");

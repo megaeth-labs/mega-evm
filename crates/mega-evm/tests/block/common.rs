@@ -19,6 +19,7 @@ use mega_evm::{
 use op_alloy_consensus::TxDeposit;
 use revm::{
     context::{BlockEnv, CfgEnv},
+    context_interface::cfg::GasId,
     database::State,
     inspector::NoOpInspector,
     state::EvmState,
@@ -227,6 +228,19 @@ pub(crate) fn pre_block_states(log: &PreBlockLog) -> Vec<(PreBlockStateSource, E
     log.lock().expect("pre-block observer").clone()
 }
 
+/// The history gas the body of a legacy transaction carrying `calldata_len` bytes of calldata
+/// pays, at the byte prices in effect.
+pub(crate) fn body_history(calldata_len: u64) -> u64 {
+    mega_evm::history_gas(mega_evm::tx_body_history_bytes(calldata_len, 0, 0, 0))
+        .expect("the body has a price")
+}
+
+/// A gas limit for a call to the empty [`CONTRACT`]: 100,000 of regular gas on top of the
+/// history its body pays, so the call has the same room whatever a history byte costs.
+pub(crate) fn empty_call_gas() -> u64 {
+    100_000 + body_history(0)
+}
+
 /// A legacy transaction from [`CALLER`].
 pub(crate) fn tx(nonce: u64, to: Address, input: Bytes, gas_limit: u64) -> MegaTxEnvelope {
     let tx_legacy = TxLegacy {
@@ -250,12 +264,51 @@ pub(crate) fn user_tx(nonce: u64, gas_limit: u64) -> Recovered<MegaTxEnvelope> {
     recovered(tx(nonce, CONTRACT, Bytes::new(), gas_limit))
 }
 
+/// The state gas one fresh storage slot costs at the byte prices in effect, in the minimum
+/// bucket the tests' environment prices every slot in.
+pub(crate) fn slot_state_gas() -> u64 {
+    mega_evm::satin_gas_params().get(GasId::sstore_set_state_gas())
+}
+
+/// Whether a state byte costs nothing at the prices in effect: every state-gas entry of the
+/// schedule is zero.
+///
+/// Only a measurement build arranges that, with `MEGA_SATIN_CPSB` at 0 or at a price every entry
+/// rounds to nothing. A case whose scenario is state gas to cross a limit with has nothing to run
+/// then, and is skipped; the notice goes to stderr once, since the harness keeps a passing test's
+/// output to itself.
+pub(crate) fn state_is_free() -> bool {
+    use std::io::Write;
+
+    let params = mega_evm::satin_gas_params();
+    if !mega_evm::STATE_GAS_REPRICED.iter().all(|&(id, _)| params.get(id()) == 0) {
+        return false;
+    }
+    static NOTICE: std::sync::Once = std::sync::Once::new();
+    NOTICE.call_once(|| {
+        let _ = writeln!(
+            std::io::stderr(),
+            "note: skipping the cases that need state gas, because MEGA_SATIN_CPSB prices a state \
+             byte at nothing"
+        );
+    });
+    true
+}
+
+/// The state gas one new account costs at the byte prices in effect.
+pub(crate) fn new_account_state_gas() -> u64 {
+    mega_evm::satin_gas_params().get(GasId::new_account_state_gas())
+}
+
 /// A Mega System Transaction: a legacy call from the system address the registry names to the
 /// Oracle's `getSlot(0)`.
+///
+/// Its gas is 1,000,000 on top of the account the engine creates for its caller, which the
+/// tests' state does not hold, so it runs the same whatever a state byte costs.
 pub(crate) fn system_tx() -> Recovered<MegaTxEnvelope> {
     let input = IOracle::getSlotCall { slot: U256::ZERO }.abi_encode();
     Recovered::new_unchecked(
-        tx(0, ORACLE_CONTRACT_ADDRESS, input.into(), 1_000_000),
+        tx(0, ORACLE_CONTRACT_ADDRESS, input.into(), 1_000_000 + new_account_state_gas()),
         MEGA_SYSTEM_ADDRESS,
     )
 }

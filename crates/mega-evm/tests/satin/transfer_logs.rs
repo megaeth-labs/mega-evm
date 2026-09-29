@@ -50,7 +50,7 @@ use revm::{
     Database, Inspector,
 };
 
-use crate::common::context;
+use crate::common::{account_state_gas, context};
 
 const CALLER: Address = address!("0000000000000000000000000000000000d00000");
 /// The contract a nested site's transaction calls: it calls [`ACTOR`] and returns what that
@@ -295,7 +295,9 @@ fn deposit(kind: TxKind, mint: u128, value: u64) -> MegaTransaction {
         caller: DEPOSITOR,
         kind,
         value: U256::from(value),
-        gas_limit: 1_000_000,
+        // Room for the depositor's account and the one it creates or pays, at the byte prices in
+        // effect.
+        gas_limit: 1_000_000 + 2 * account_state_gas(),
         gas_price: 0,
         ..Default::default()
     }));
@@ -708,10 +710,16 @@ fn test_a_value_call_its_caller_cannot_fund_is_charged_nothing() {
         }))
     };
     // About 150,000 gas for the actor, of which it keeps a sixty-fourth at its `CALL`: less than
-    // the history of the two records the move would make.
+    // the history of the two records the move would make. Where 64 times that history is not
+    // above the 20,000 the actor needs to reach its `CALL`, as where a history byte costs
+    // nothing, no actor both reaches the call and keeps less than the records cost.
     let records = history_gas(2 * WRITE_RECORD_SIZE).unwrap();
-    assert!(150_000 / 64 < records, "the actor keeps less than the records cost");
-    let gas_limit = 21_000 + history_gas(transaction_body_bytes(&tx(0))).unwrap() + 150_000;
+    let actor_gas = (64 * records).saturating_sub(1).min(150_000);
+    if actor_gas < 20_000 {
+        return;
+    }
+    assert!(actor_gas / 64 < records, "the actor keeps less than the records cost");
+    let gas_limit = 21_000 + history_gas(transaction_body_bytes(&tx(0))).unwrap() + actor_gas;
 
     let refused = execute(db(VALUE - 1), tx(gas_limit), EvmTxRuntimeLimits::no_limits());
     assert!(refused.result.is_success(), "{:?}", refused.result);
@@ -1009,7 +1017,11 @@ fn test_a_deposit_its_depositor_cannot_fund_fails_as_without_a_limit() {
         let body = transaction_body_bytes(&tx);
         let free = execute(db(), tx.clone(), EvmTxRuntimeLimits::no_limits());
         assert!(free.result.is_halt(), "{kind:?}: {:?}", free.result);
-        assert_eq!(free.result.tx_gas_used(), 1_000_000, "{kind:?}: the gas limit is spent");
+        assert_eq!(
+            free.result.tx_gas_used(),
+            tx.0.base.gas_limit,
+            "{kind:?}: the gas limit is spent"
+        );
         assert!(free.result.logs().is_empty(), "{kind:?}");
 
         let limit = body + WRITE_RECORD_SIZE + TRANSFER_LOG_SIZE - 1;

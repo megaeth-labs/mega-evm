@@ -1,0 +1,62 @@
+name: Byte-price grid
+
+# Runs the mega-evm test suite at state and history byte prices other than the constants, through
+# the `satin-price-override` feature and the MEGA_SATIN_CPSB / MEGA_SATIN_CPHB variables
+# (scripts/price_grid.sh). Both prices are provisional until the economics sign-off, so the suite
+# must hold at any price it may end at, and a test that only holds at the constants shows here:
+#
+# - on a pull request, four points: both bytes free, the cheapest and the dearest pair under
+#   consideration (312.5 / 20 and 5000 / 300), and a point past every candidate (10000 / 1000);
+# - nightly and on dispatch, the whole grid: a cost per state byte of 0, 312.5, 700, 1530, 2000,
+#   5000 and 10000 by a cost per history byte of 0, 20, 50, 88, 100, 200, 300 and 1000, and 0.001 on
+#   both.
+#
+# The run at the constants is the `test` job of build-and-test.yml.
+
+on:
+  workflow_dispatch:
+  pull_request:
+  schedule:
+    - cron: "0 4 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  price-grid:
+    name: byte-price grid
+    runs-on: ubuntu-24.04
+    # The pull-request points take minutes; the nightly grid runs the suite 57 times.
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+
+      - name: Run the suite at each point
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT" = "pull_request" ]; then
+            scripts/price_grid.sh --pr
+          else
+            scripts/price_grid.sh --full
+          fi
+
+      - name: Upload the logs of a failing run
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: price-grid-logs
+          path: target/price-grid/
+          retention-days: 7

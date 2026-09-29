@@ -34,7 +34,7 @@ use super::{
     detention::{crossing_left, reads_then_burns},
     *,
 };
-use crate::common::context;
+use crate::common::{context, state_is_free};
 
 /// Init code that logs `len` bytes of data and deploys a one-byte runtime.
 fn logging(len: u64) -> Bytes {
@@ -295,6 +295,10 @@ fn test_a_deployment_crossing_its_kv_budget_reverts_alone() {
 /// transaction before the init code runs.
 #[test]
 fn test_the_upfront_state_gas_is_held_to_the_state_gas_limit() {
+    // A deployment that adds no state gas has no state-gas limit to cross.
+    if state_is_free() {
+        return;
+    }
     let deployment = Deployment::new(deploying(&runtime(1)));
     let upfront = entry(GasId::new_account_state_gas()) + entry(GasId::create_state_gas());
     for gas_limit in GAS_LIMITS {
@@ -311,6 +315,10 @@ fn test_the_upfront_state_gas_is_held_to_the_state_gas_limit() {
 /// A slot the constructor fills counts on top of the upfront state gas.
 #[test]
 fn test_a_deployment_crossing_the_state_gas_limit_stops_it() {
+    // A deployment that adds no state gas has no state-gas limit to cross.
+    if state_is_free() {
+        return;
+    }
     let deployment = Deployment::new(filling_a_slot());
     let upfront = entry(GasId::new_account_state_gas()) + entry(GasId::create_state_gas());
     let limit = upfront + entry(GasId::sstore_set_state_gas()) - 1;
@@ -329,6 +337,10 @@ fn test_a_deployment_crossing_the_state_gas_limit_stops_it() {
 /// code is written.
 #[test]
 fn test_the_deposited_code_is_held_to_the_state_gas_limit() {
+    // A deployment that adds no state gas has no state-gas limit to cross.
+    if state_is_free() {
+        return;
+    }
     let deployment = Deployment::new(deploying(&runtime(5)));
     let limit = entry(GasId::new_account_state_gas()) +
         entry(GasId::create_state_gas()) +
@@ -630,7 +642,10 @@ fn plain_and_rewritten(
 /// transaction reports.
 #[test]
 fn test_every_limit_stops_a_deployment_from_either_nonce_at_either_tier() {
-    for crossing in Crossing::ALL {
+    // A deployment that adds no state gas, where a state byte is free, crosses no state-gas limit.
+    let free = state_is_free();
+    for crossing in Crossing::ALL.into_iter().filter(|c| !(free && matches!(c, Crossing::StateGas)))
+    {
         let deployment = Deployment::new(crossing.init_code());
         for signer_nonce in [0, 1] {
             let (limits, expected) = crossing.limits(&deployment, signer_nonce);
@@ -732,6 +747,10 @@ fn crowded_run(
 /// limit that holds the rest deploys it.
 #[test]
 fn test_the_upfront_charges_are_held_once_at_their_bucket_prices() {
+    // A deployment that adds no state gas has no state-gas limit to cross.
+    if state_is_free() {
+        return;
+    }
     let deployment = Deployment::new(deploying(&runtime(1)));
     assert_ne!(bucket(deployment.signer), bucket(deployment.address));
     let created = entry(GasId::create_state_gas()) + satin_gas_params().code_deposit_state_gas(1);

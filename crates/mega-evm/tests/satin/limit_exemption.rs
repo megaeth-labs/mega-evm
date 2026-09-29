@@ -23,7 +23,7 @@ use revm::{
     context::TxEnv,
 };
 
-use crate::common::context;
+use crate::common::{context, slot_state_gas, state_is_free};
 
 const CALLER: Address = address!("0000000000000000000000000000000000b00000");
 /// A contract the program calls, which writes a slot of its own.
@@ -123,7 +123,7 @@ fn test_a_system_transaction_is_held_to_no_limit() {
     assert!(free.result.is_success(), "{:?}", free.result);
     assert_eq!(free.usage.write_records, 3, "three slots");
     assert_eq!(free.usage.data_size, TX_BODY_SIZE + 3 * WRITE_RECORD_SIZE + 32 + 64);
-    assert!(free.gas.state > 0);
+    assert!(free.gas.state >= 3 * slot_state_gas(), "at least its three slots' state gas");
 
     for (name, limits) in limits() {
         let outcome = execute(db(), tx(), limits);
@@ -200,6 +200,11 @@ fn test_a_deposit_and_a_user_call_to_a_system_contract_are_held_to_the_limits() 
         ),
     ];
     for (name, tx, limits, kind) in cases {
+        // A transaction that adds no state gas, where a state byte is free, crosses no state-gas
+        // limit.
+        if kind == LimitKind::StateGrowth && state_is_free() {
+            continue;
+        }
         let outcome = execute(db(), tx, limits);
         let stop = outcome.limit_exceeded.unwrap_or_else(|| panic!("{name}, {kind:?}: stopped"));
         assert!(

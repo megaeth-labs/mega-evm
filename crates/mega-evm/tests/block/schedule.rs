@@ -16,7 +16,7 @@ use mega_evm::{
     TESTNET_CHAIN_ID,
 };
 
-use crate::common::{self, registry_config, user_tx};
+use crate::common::{self, empty_call_gas, registry_config, user_tx};
 
 /// The canonical schedules are the chain activation table: the two are one source, so a
 /// timestamp cannot be right in one and wrong in the other. What the published upgrade pages
@@ -90,7 +90,7 @@ fn test_a_schedule_missing_its_fork_params_is_refused_at_load() {
     let mut state = common::state();
     let mut executor = common::executor_with_spec(&mut state, common::unlimited_ctx(), loaded);
     executor.apply_pre_execution_changes().expect("the block starts");
-    executor.execute_transaction(&user_tx(0, 100_000)).expect("the transaction executes");
+    executor.execute_transaction(&user_tx(0, empty_call_gas())).expect("the transaction executes");
 }
 
 /// A fork the schedule does not activate needs no parameters.

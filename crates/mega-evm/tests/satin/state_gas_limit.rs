@@ -9,7 +9,9 @@
 //! it happens: there are no frame budgets.
 //!
 //! The figures are read off the engine rather than written out: each case first runs without a
-//! limit, and the state gas it reports is what the limit is set against.
+//! limit, and the state gas it reports is what the limit is set against. Where a state byte costs
+//! nothing, which only a measurement build arranges, no transaction adds state gas and the limit
+//! has nothing to hold, so the cases that need a crossing return early.
 
 use alloy_primitives::{address, Address, Bytes, B256, U256};
 use mega_evm::{
@@ -27,7 +29,7 @@ use revm::{
     Database, Inspector,
 };
 
-use crate::common::{authorizing_call, call, context, create};
+use crate::common::{authorizing_call, call, context, create, state_is_free};
 
 const CALLER: Address = address!("0000000000000000000000000000000000600000");
 const A: Address = address!("0000000000000000000000000000000000600001");
@@ -183,6 +185,9 @@ fn sites(gas_limit: u64) -> Vec<(&'static str, MemoryDatabase, MegaTransaction)>
 /// the figure it reports. The stop keeps none of it, below and above the execution cap alike.
 #[test]
 fn test_every_site_is_held_to_the_limit_at_the_state_gas_it_reports() {
+    if state_is_free() {
+        return;
+    }
     for gas_limit in [BELOW_CAP, ABOVE_CAP] {
         for (name, db, tx) in sites(gas_limit) {
             let name = format!("{name}, gas limit {gas_limit}");
@@ -213,6 +218,9 @@ fn test_every_site_is_held_to_the_limit_at_the_state_gas_it_reports() {
 /// halts; the stop spends none of it.
 #[test]
 fn test_the_crossing_charge_is_where_the_transaction_stops() {
+    if state_is_free() {
+        return;
+    }
     let deployed = constructor_returning(32);
     let cases: [(&str, BytecodeBuilder); 5] = [
         ("a fresh slot", write_slots(BytecodeBuilder::default(), 0, 1)),
@@ -242,6 +250,9 @@ fn test_the_crossing_charge_is_where_the_transaction_stops() {
 /// the transaction's own or a nested one: the limit is held before `return_create` commits it.
 #[test]
 fn test_deployed_code_that_crosses_is_not_left_deployed() {
+    if state_is_free() {
+        return;
+    }
     let deployed = constructor_returning(32);
     let nested = funded()
         .account_code(A, then_create(BytecodeBuilder::default(), &deployed, false).stop().build());
@@ -348,6 +359,9 @@ fn then_create_with(builder: BytecodeBuilder, create2: bool, value: u64) -> Byte
 /// and the unit tests of the frame lifecycle pin it.
 #[test]
 fn test_a_frame_revm_refuses_is_not_held_for_its_upfront_charge() {
+    if state_is_free() {
+        return;
+    }
     let account = one_account();
     let empty_init = Bytes::new();
     let taken = |address: Address| funded().account_nonce(address, 1);
@@ -428,6 +442,9 @@ impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for CallsToEmpty {
 /// its records given back.
 #[test]
 fn test_a_frame_revm_decides_is_held_for_its_upfront_charge() {
+    if state_is_free() {
+        return;
+    }
     let account = one_account();
     let body = mega_evm::history_gas(TX_BODY_SIZE).expect("a body has a price");
     let cases: [(&str, BytecodeBuilder); 3] = [
@@ -465,6 +482,9 @@ fn test_a_frame_revm_decides_is_held_for_its_upfront_charge() {
 /// state-gas limit that charge would have crossed is not.
 #[test]
 fn test_a_frame_start_whose_records_cross_is_stopped_for_its_records() {
+    if state_is_free() {
+        return;
+    }
     let account = one_account();
     let limit = TX_BODY_SIZE + 2 * WRITE_RECORD_SIZE + mega_evm::TRANSFER_LOG_SIZE - 1;
     let db =
@@ -498,6 +518,9 @@ fn test_a_frame_start_whose_records_cross_is_stopped_for_its_records() {
 /// of three slots is crossed in `C`, with the three slots as the figure.
 #[test]
 fn test_a_childs_crossing_latches_the_transaction() {
+    if state_is_free() {
+        return;
+    }
     let slot = one_slot();
     let db = funded()
         .account_code(
@@ -526,6 +549,9 @@ fn test_a_childs_crossing_latches_the_transaction() {
 /// transaction creates and a slot its frame writes cross a limit neither crosses alone.
 #[test]
 fn test_charges_before_the_first_frame_and_in_it_add_up() {
+    if state_is_free() {
+        return;
+    }
     let slot = one_slot();
     let db = funded().account_code(A, write_slots(BytecodeBuilder::default(), 0, 1).stop().build());
     let tx = authorizing_call(CALLER, A, U256::ZERO, BELOW_CAP, DELEGATE, &[(AUTHORITY_1, 0)]);
@@ -548,6 +574,9 @@ fn test_charges_before_the_first_frame_and_in_it_add_up() {
 /// carried and that frame's own record come back with the frame.
 #[test]
 fn test_a_stop_keeps_what_was_applied_before_the_first_frame() {
+    if state_is_free() {
+        return;
+    }
     let delegation = |outcome: &MegaTransactionOutcome| {
         outcome.state[&AUTHORITY_1].info.code.as_ref().map(|code| code.original_bytes())
     };
@@ -589,6 +618,9 @@ fn test_a_stop_keeps_what_was_applied_before_the_first_frame() {
 /// deposit's mint and the state gas charged for the account.
 #[test]
 fn test_a_stopped_deposit_keeps_the_caller_it_created() {
+    if state_is_free() {
+        return;
+    }
     let fresh = address!("00000000000000000000000000000000006000ff");
     let deposit = |code: Bytes| {
         let mut tx = call(fresh, A, U256::ZERO, BELOW_CAP);
@@ -706,6 +738,9 @@ fn test_what_is_given_back_gives_its_room_back() {
 /// slots in minimal buckets but crosses on the second when the first is in the crowded one.
 #[test]
 fn test_a_crowded_bucket_reaches_the_limit_sooner() {
+    if state_is_free() {
+        return;
+    }
     use crate::salt::{crowded_slot, minimal_envs, salt_context};
 
     let slot = one_slot();
@@ -780,6 +815,9 @@ fn account_and_delegation() -> (u64, u64) {
 /// nobody — adds nothing and leaves its authority as it was.
 #[test]
 fn test_an_authorization_adds_state_only_when_it_applies() {
+    if state_is_free() {
+        return;
+    }
     let (account, delegation) = account_and_delegation();
     let a1 = Some(AUTHORITY_1);
     let a2 = Some(AUTHORITY_2);
@@ -879,9 +917,13 @@ fn test_an_authorization_adds_state_only_when_it_applies() {
 fn test_a_crowded_authority_moves_the_state_ledger_alone() {
     use crate::salt::{crowded_account, minimal_envs, salt_context};
     let (account, delegation) = account_and_delegation();
+    // Room below the execution cap for the authority at the crowded price.
+    let gas_limit = BELOW_CAP + 100 * (account + delegation);
     let run = |envs| {
+        let mut tx = authorizing(A, U256::ZERO, &[(Some(AUTHORITY_1), 0, 0)]);
+        tx.0.base.gas_limit = gas_limit;
         MegaEvm::new(salt_context(funded().account_code(A, Bytes::from_static(&[STOP])), envs))
-            .execute_transaction(authorizing(A, U256::ZERO, &[(Some(AUTHORITY_1), 0, 0)]))
+            .execute_transaction(tx)
             .unwrap()
     };
     let minimal = run(minimal_envs());
@@ -899,6 +941,9 @@ fn test_a_crowded_authority_moves_the_state_ledger_alone() {
 /// the authorization back.
 #[test]
 fn test_an_authority_the_transaction_cannot_pay_for_is_not_applied() {
+    if state_is_free() {
+        return;
+    }
     use crate::salt::{crowded_account, minimal_envs, salt_context};
     let tx = |gas_limit| {
         let mut tx = authorizing(A, U256::ZERO, &[(Some(AUTHORITY_1), 0, 0)]);
@@ -921,7 +966,10 @@ fn test_an_authority_the_transaction_cannot_pay_for_is_not_applied() {
         authority.is_none_or(|a| a.info.nonce == 0 && a.info.is_empty_code_hash()),
         "the authorization was taken back: {authority:?}"
     );
-    assert!(run(crowded_account(minimal_envs(), AUTHORITY_1, 100), BELOW_CAP).result.is_success());
+    // And a gas limit that covers the authority at the crowded price applies it.
+    let (account, delegation) = account_and_delegation();
+    let roomy = BELOW_CAP + 100 * (account + delegation);
+    assert!(run(crowded_account(minimal_envs(), AUTHORITY_1, 100), roomy).result.is_success());
 }
 
 /// A value transaction to an authority it creates pays for one new account, not two: by the time
@@ -951,6 +999,9 @@ fn test_an_authority_that_is_the_recipient_pays_for_one_account() {
 /// in that alone spend the same gas.
 #[test]
 fn test_authorities_crossing_any_limit_are_not_applied() {
+    if state_is_free() {
+        return;
+    }
     let (account, delegation) = account_and_delegation();
     let both = [(Some(AUTHORITY_1), 0, 0), (Some(AUTHORITY_2), 0, 0)];
     let fresh = || funded().account_code(A, Bytes::from_static(&[STOP]));
@@ -1092,6 +1143,9 @@ fn test_a_destruction_grows_state_only_when_it_creates_its_beneficiary() {
 /// fourth `SSTORE`, and none of the four is kept.
 #[test]
 fn test_fresh_slots_fit_a_limit_of_their_state_gas_and_one_more_stops() {
+    if state_is_free() {
+        return;
+    }
     let slot = one_slot();
     let run = |slots| {
         run_under(
@@ -1118,6 +1172,9 @@ fn test_fresh_slots_fit_a_limit_of_their_state_gas_and_one_more_stops() {
 /// that crosses the state-gas and data-size limits at once is the state-gas limit's stop.
 #[test]
 fn test_a_slot_crossing_both_limits_reports_the_state_gas() {
+    if state_is_free() {
+        return;
+    }
     let slot = one_slot();
     let db = funded().account_code(A, write_slots(BytecodeBuilder::default(), 0, 1).stop().build());
     let outcome = MegaEvm::new(

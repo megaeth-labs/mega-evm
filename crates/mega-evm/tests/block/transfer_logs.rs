@@ -53,6 +53,19 @@ fn state() -> State<mega_evm::test_utils::MemoryDatabase> {
     State::builder().with_database(db).build()
 }
 
+/// A gas limit for any transaction here: 1,000,000 of regular gas on top of the state of two new
+/// accounts and a fresh slot, a kilobyte of history beyond the body, and 64 times the history of
+/// two write records, at the byte prices in effect: [`FORWARDER`] forwards all but a 64th of its
+/// gas with the value it passes on, and pays the records of the frame it starts from the 64th it
+/// keeps.
+fn gas_limit() -> u64 {
+    1_000_000 +
+        2 * common::new_account_state_gas() +
+        common::slot_state_gas() +
+        common::body_history(1_000) +
+        64 * mega_evm::write_record_history_gas(2).expect("two records have a price")
+}
+
 /// A legacy transaction from `signer` with `value`.
 fn legacy(
     signer: Address,
@@ -65,7 +78,7 @@ fn legacy(
         chain_id: Some(CHAIN_ID),
         nonce,
         gas_price: 1_000_000,
-        gas_limit: 1_000_000,
+        gas_limit: gas_limit(),
         to,
         value: U256::from(value),
         input,
@@ -87,7 +100,7 @@ fn deposit(mint: u128, value: u64) -> Recovered<MegaTxEnvelope> {
         mint,
         value: U256::from(value),
         // Room for the state gas of the two accounts it creates: its depositor's and its payee's.
-        gas_limit: 1_000_000,
+        gas_limit: gas_limit(),
         is_system_transaction: false,
         input: Bytes::new(),
     };

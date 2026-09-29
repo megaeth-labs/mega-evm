@@ -41,6 +41,20 @@ use crate::common::{block, call_tx, context, system_db};
 /// A gas limit under the execution cap, and one above it.
 pub(crate) const GAS_LIMITS: [u64; 2] = [TX_GAS_LIMIT_CAP / 4, TX_GAS_LIMIT_CAP * 2];
 
+/// The gas limits a transaction carrying `calldata_len` bytes of calldata runs at: three quarters
+/// of the execution cap, below it, where the body's history is paid out of regular gas; and ten
+/// times the cap, above it, where the reservoir pays it.
+///
+/// The tier below the cap is left out where the body's history at the byte prices in effect leaves
+/// it less than 25,000,000 and two new accounts for the rest: no transaction that large can pay for
+/// its own body below the cap there.
+pub(crate) fn tiers_carrying(calldata_len: usize) -> Vec<u64> {
+    let below = TX_GAS_LIMIT_CAP * 3 / 4;
+    let room = 25_000_000 + 2 * crate::common::account_state_gas();
+    let fits = crate::common::body_history(calldata_len as u64) + room <= below;
+    [below, 10 * TX_GAS_LIMIT_CAP].into_iter().filter(|&tier| fits || tier > below).collect()
+}
+
 /// The gas limit the tests sign their deployments with.
 pub(crate) const SIGNED_GAS_LIMIT: u64 = 1_000_000;
 

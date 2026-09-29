@@ -30,7 +30,7 @@ use mega_evm::{
     },
     test_utils::{op_transaction, BytecodeBuilder, MemoryDatabase},
     volatile_data_access_disabled_revert_data, EvmTxRuntimeLimits, LimitCheck, LimitKind,
-    MegaContext, MegaEvm, MegaHaltReason, VolatileDataAccess,
+    MegaContext, MegaEvm, MegaHaltReason, VolatileDataAccess, WRITE_RECORD_SIZE,
 };
 use revm::{
     bytecode::opcode::*,
@@ -49,10 +49,13 @@ use revm::{
     Database, Inspector,
 };
 
-use crate::detention::{
-    assert_stopped, burn, context, execute, fresh_write_spill, intrinsic, memory_cost, op, run_on,
-    spin, stop_data, tx, work, Calls, Charges, Run, ABOVE, BELOW, BENEFICIARY, CALLER, CAP, CHILD,
-    CONTRACT, FRESH_WRITE, TIERS,
+use crate::{
+    common::history,
+    detention::{
+        assert_stopped, burn, context, execute, fresh_write_spill, intrinsic, memory_cost, op,
+        run_on, spin, stop_data, tx, work, Calls, Charges, Run, ABOVE, BELOW, BENEFICIARY, CALLER,
+        CAP, CHILD, CONTRACT, FRESH_WRITE, TIERS,
+    },
 };
 
 /// A contract between the transaction's frame and `CHILD`.
@@ -211,7 +214,9 @@ fn test_a_bounded_callee_writes_what_it_writes_without_the_read() {
         .stop()
         .build();
     let bound = u32::try_from(3 * FRESH_WRITE + fresh_write_spill()).expect("a bound in a push");
-    for (gas_limit, status) in [(BELOW, 0), (ABOVE, 1)] {
+    // Where a write spills nothing, the bound pays all three below the cap too.
+    let below = u64::from(fresh_write_spill() == 0);
+    for (gas_limit, status) in [(BELOW, below), (ABOVE, 1)] {
         let (detained, plain) = with_and_without_read(|first| {
             let parent =
                 call_keeping_status(op(BytecodeBuilder::default(), first), CHILD, Some(bound));
@@ -287,7 +292,12 @@ fn test_a_creation_that_cannot_pay_its_deposit_halts_as_without_the_read() {
     let deposit = len * satin_gas_params().get(GasId::code_deposit_state_gas()) +
         history_gas(len).expect("the code's history has a price");
     let gas_limit = BELOW.min(deposit);
-    assert!(gas_limit > 2 * CAP, "the transaction holds more than the cap: {gas_limit}");
+    // Where that code costs no more than twice the cap, as where a state byte is free and a
+    // history byte cheap, no gas limit both withholds gas at the read and falls short of the
+    // deposit.
+    if gas_limit <= 2 * CAP {
+        return;
+    }
     let run = |first| {
         let initcode = op(BytecodeBuilder::default(), first)
             .push_number(len)
@@ -341,8 +351,10 @@ fn test_a_callees_out_of_gas_is_caught_as_without_the_read() {
 /// that, completes as without the read.
 ///
 /// The callee's charge fails on an operand, a memory expansion, a hash, four copies, a log and an
-/// invalid opcode, all on all the gas; and, on 400,000, on the history of the write records a value
-/// call makes, after the call forwarded 63/64 of its gas to a frame that never starts. Above the
+/// invalid opcode, all on all the gas; and on the history of the write records a value call makes,
+/// after the call forwarded 63/64 of its gas to a frame that never starts. That callee is given
+/// 400,000, or less where it would pay that history out of the 64th it keeps, and its caller
+/// computes twenty rounds further, so the limit is left less than the callee forwards. Above the
 /// execution cap the reservoir pays that history, so that case runs below it. A precompile that
 /// rejects its input halts without running a frame, and burns all it was forwarded too.
 #[test]
@@ -370,13 +382,23 @@ fn test_what_a_halting_callee_burns_is_not_compute() {
     ];
     // 6,396 rounds: 19,878,768 of compute before the call.
     let rounds = 6_396;
+    // The value call's callee keeps a 64th of what it has at its `CALL`, which has to be less than
+    // the history of the records the call makes. It spends at most 40,000 before the forward — the
+    // value transfer, the new account and the cold access. Where 64 times that history is under
+    // 100,000, as where a history byte costs nothing, the callee cannot also forward past the
+    // margin its caller leaves, and the case has nothing to show.
+    let middle_gas = (64 * history(2 * WRITE_RECORD_SIZE)).saturating_sub(1).min(400_000);
     for gas_limit in TIERS {
         for (name, callee) in &cases {
             let records = name.starts_with("a value call");
-            if records && gas_limit == ABOVE {
+            if records && (gas_limit == ABOVE || middle_gas < 100_000) {
                 continue;
             }
-            let (to, gas) = if records { (MIDDLE, Some(400_000)) } else { (CHILD, None) };
+            let (to, gas, rounds) = if records {
+                (MIDDLE, Some(middle_gas as u32), rounds + 20)
+            } else {
+                (CHILD, None, rounds)
+            };
             let (detained, plain) = with_and_without_read(|first| {
                 let parent = work(op(BytecodeBuilder::default(), first), rounds);
                 let parent = store_status(call_keeping_status(parent, to, gas));
@@ -389,12 +411,13 @@ fn test_what_a_halting_callee_burns_is_not_compute() {
             assert_as_without_read(&detained, &plain, name);
             assert_eq!(slot(&detained, 0), Some(U256::ZERO), "{name}: the call failed");
             if records {
-                // `MIDDLE` halted on all 400,000; the rest of the regular ledger is compute, and
-                // it leaves the limit less than the 63/64 `MIDDLE` forwarded, so counting that
+                // `MIDDLE` halted on all it was given; the rest of the regular ledger is compute,
+                // and it leaves the limit less than the 63/64 `MIDDLE` forwarded, so counting that
                 // forward as compute would have stopped the transaction.
-                let compute = plain.outcome.gas.regular - intrinsic(gas_limit) - 400_000;
+                let compute = plain.outcome.gas.regular - intrinsic(gas_limit) - middle_gas;
                 let margin = detained.limit.unwrap() - compute;
-                assert!(margin < 150_000, "{name}: {margin} short of the limit");
+                let forwarded = (middle_gas - 40_000) * 63 / 64;
+                assert!(margin < forwarded, "{name}: {margin} short of the limit");
             }
         }
 
