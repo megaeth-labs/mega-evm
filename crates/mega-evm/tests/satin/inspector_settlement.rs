@@ -39,9 +39,12 @@ use revm::{
     Inspector,
 };
 
-use crate::salt::{
-    create_with, crowded_account, db, entry, minimal_envs, salt_context, tx_with_gas, value_call,
-    SaltEnvs, CALLER, CONTRACT, EMPTY,
+use crate::{
+    common::state_is_free,
+    salt::{
+        create_with, crowded_account, db, entry, minimal_envs, salt_context, tx_with_gas,
+        value_call, SaltEnvs, CALLER, CONTRACT, EMPTY,
+    },
 };
 
 /// A contract `CONTRACT` calls.
@@ -214,7 +217,11 @@ fn test_a_failed_call_rewritten_into_a_success_settles_as_the_failure() {
         let tx = to(CONTRACT, 0, Bytes::new(), gas_limit);
         let kept = plain(stopping.clone(), minimal_envs(), tx.clone());
         assert!(kept.result.is_success(), "{:?}", kept.result);
-        assert!(kept.gas.state > 0, "kept, the fresh slot costs state gas");
+        assert_eq!(
+            kept.gas.state,
+            entry(GasId::sstore_set_state_gas()),
+            "kept, the fresh slot costs state gas"
+        );
         assert_eq!(kept.usage.write_records, 2, "and both slots are records");
 
         let failed = plain(reverting.clone(), minimal_envs(), tx.clone());
@@ -415,6 +422,10 @@ fn test_the_transactions_own_creation_an_inspector_answers_keeps_nothing() {
 /// together stops the caller whose call ran, and not the one whose call was answered.
 #[test]
 fn test_an_answered_call_holds_nothing_against_the_state_gas_limit() {
+    // A slot and an account that add no state gas have no state-gas limit to cross.
+    if state_is_free() {
+        return;
+    }
     let caller =
         || value_call(EMPTY).append(POP).sstore(U256::from(1), U256::from(1)).stop().build();
     let slot = entry(GasId::sstore_set_state_gas());

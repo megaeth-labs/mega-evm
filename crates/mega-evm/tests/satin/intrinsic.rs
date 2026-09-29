@@ -134,16 +134,21 @@ fn test_the_floor_is_sixty_four_gas_for_every_calldata_byte() {
 
 /// A zero byte costs the same as a non-zero one in the floor: EIP-7976 prices the space a byte
 /// takes in a block, not its value. On the history ledger it costs the same too, and for the same
-/// reason; only the intrinsic token rate tells the two apart, which is why the bill does.
+/// reason; only the intrinsic token rate tells the two apart, which is why the bill does. The bill
+/// is the larger of the intrinsic charge with the body's history and the floor, so where a history
+/// byte is cheap enough for the floor to bind, it binds both alike.
 #[test]
 fn test_a_zero_calldata_byte_costs_the_same_as_a_non_zero_one() {
     let zeros = charged(funded(), with_calldata(1_024, 0x00)).expect("valid");
     let non_zeros = charged(funded(), with_calldata(1_024, 0xff)).expect("valid");
     assert_eq!(zeros.floor, non_zeros.floor);
     assert_eq!(zeros.floor, EMPTY_CALL + FLOOR_PER_BYTE * 1_024);
+    let bill =
+        |per_byte: u64| (EMPTY_CALL + per_byte * 1_024 + body_history(1_024)).max(zeros.floor);
+    assert_eq!(zeros.gas_used, bill(4), "a zero byte: four gas and its history");
     assert_eq!(
-        non_zeros.gas_used - zeros.gas_used,
-        1_024 * 12,
+        non_zeros.gas_used,
+        bill(16),
         "only the intrinsic token rate, four against sixteen, tells them apart",
     );
 }
@@ -214,9 +219,11 @@ fn test_access_list_bytes_are_counted_in_the_floor_at_sixty_four_each() {
             Ok(EMPTY_CALL + address_bytes + key_bytes * keys),
             "{keys} keys: the floor counts every byte at the same rate"
         );
+        // The floor binds only where a history byte is cheap: the bill is the larger of the two.
+        let floor = EMPTY_CALL + address_bytes + key_bytes * keys;
         assert_eq!(
             gas_used(funded(), with_access_list(keys as usize)),
-            Ok(EMPTY_CALL + 2_400 + 1_900 * keys + body_history(20 + 32 * keys)),
+            Ok((EMPTY_CALL + 2_400 + 1_900 * keys + body_history(20 + 32 * keys)).max(floor)),
             "{keys} keys: the intrinsic charge and the entry's bytes of history"
         );
     }
@@ -259,9 +266,11 @@ fn test_the_execution_cap_bounds_the_calldata_a_transaction_may_carry() {
     let db = funded().account_balance(CALLER, U256::from(10u128.pow(24)));
     let charged = charged(db.clone(), with_calldata_over_the_cap(LARGEST_CALLDATA)).expect("valid");
     assert_eq!(charged.floor, floor);
+    // The floor binds where a history byte is cheaper than the floor's rate less the intrinsic
+    // one: the bill is the larger of the two.
     assert_eq!(
         charged.gas_used,
-        EMPTY_CALL + 4 * LARGEST_CALLDATA + body_history(LARGEST_CALLDATA)
+        (EMPTY_CALL + 4 * LARGEST_CALLDATA + body_history(LARGEST_CALLDATA)).max(floor)
     );
 
     let expected = format!(

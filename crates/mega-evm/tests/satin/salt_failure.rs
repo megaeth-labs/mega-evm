@@ -18,10 +18,13 @@ use revm::{
     context_interface::cfg::GasId,
 };
 
-use crate::salt::{
-    account_bucket, authorization_tx, call_contract, create_empty_contract, crowded_account, db,
-    entry, minimal_envs, run, salt_context, selfdestruct_to, slot_bucket, try_run, tx, value_call,
-    SaltEnvs, AUTHORITY, CALLER, CONTRACT, EMPTY,
+use crate::{
+    common::state_is_free,
+    salt::{
+        account_bucket, authorization_tx, call_contract, create_empty_contract, crowded_account,
+        db, entry, minimal_envs, run, salt_context, selfdestruct_to, slot_bucket, try_run, tx,
+        value_call, SaltEnvs, AUTHORITY, CALLER, CONTRACT, EMPTY,
+    },
 };
 
 /// What a broken SALT backend reports.
@@ -46,6 +49,9 @@ fn assert_fails(site: &str, db: MemoryDatabase, envs: SaltEnvs, tx: MegaTransact
 }
 
 /// Runs the probe and requires it to fail with a cause naming `cause`.
+///
+/// Where a state byte costs nothing, a charge costs nothing at any capacity and the engine asks
+/// for none, so no probe can fail on a bucket and there is nothing to run.
 fn assert_fails_with(
     site: &str,
     cause: &str,
@@ -53,6 +59,9 @@ fn assert_fails_with(
     envs: SaltEnvs,
     tx: MegaTransaction,
 ) {
+    if state_is_free() {
+        return;
+    }
     match try_run(db, envs, tx) {
         Err(EVMError::Custom(message)) => assert!(
             message.contains(cause),

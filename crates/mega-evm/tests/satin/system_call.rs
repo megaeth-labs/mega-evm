@@ -53,7 +53,7 @@ use revm::{
     Journal,
 };
 
-use crate::common::runs_at_measurement_prices;
+use crate::common::{runs_at_measurement_prices, state_is_free};
 
 const CALLER: Address = address!("0x4000000000000000000000000000000000000001");
 const CONTRACT: Address = address!("0x5000000000000000000000000000000000000001");
@@ -237,6 +237,10 @@ fn test_a_system_call_above_30m_carries_the_excess_as_reservoir() {
 /// reservoir did not hold.
 #[test]
 fn test_a_system_call_s_state_draws_the_reservoir_first_then_spills() {
+    // Slots that cost nothing never empty the reservoir, and there is nothing to spill.
+    if state_is_free() {
+        return;
+    }
     if !runs_at_measurement_prices() {
         assert_eq!(SLOT_STATE_GAS, slot());
         assert_eq!(DEFAULT_RESERVOIR, 16 * SLOT_STATE_GAS);
@@ -277,7 +281,9 @@ fn test_a_system_call_s_state_draws_the_reservoir_first_then_spills() {
 /// leaves all of it.
 #[test]
 fn test_reservoir_remaining_is_what_the_writes_left() {
-    for writes in [0, 1, 5] {
+    // As many as five writes, and no more than the reservoir holds at the byte prices in effect.
+    let most = DEFAULT_RESERVOIR.checked_div(slot()).map_or(5, |held| held.min(5));
+    for writes in [0, 1, most] {
         let code = fresh_writes(writes).stop().build();
         let (mega, op) = run_both(
             both_evms(db_with(code)),
@@ -396,8 +402,12 @@ fn test_apply_pending_changes_at_30m_is_priced_at_the_minimum_bucket() {
     );
     assert!(mega.result.is_success(), "{:?}", mega.result);
     assert_eq!(mega.result.gas().reservoir_remaining(), 0);
-    assert!(mega.result.gas().state_gas_spent_final() > 0, "the change wrote fresh slots");
-    assert_eq!(mega.result.gas().state_gas_spent_final() % slot(), 0, "at m = 1");
+    // Where a state byte is free the slots cost nothing, at any bucket.
+    if !state_is_free() {
+        let state = mega.result.gas().state_gas_spent_final();
+        assert!(state > 0, "the change wrote fresh slots");
+        assert_eq!(state % slot(), 0, "at m = 1");
+    }
     assert_eq!(crowded.total_bucket_queries(), 0);
     assert_same(&mega, &op);
 }

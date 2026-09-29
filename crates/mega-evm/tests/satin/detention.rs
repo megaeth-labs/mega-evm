@@ -1540,6 +1540,11 @@ fn test_state_and_history_gas_are_not_compute() {
     // As many fresh slots as the cap leaves compute for, and as a gas limit below the execution
     // cap pays for with a million to spare: at the spec's prices, more state gas than the cap.
     let spill = fresh_write_spill();
+    // A write that spills nothing, where a state byte and a record's history are both free, has
+    // nothing beside its compute to leave out of it.
+    if spill == 0 {
+        return;
+    }
     let slots = (CAP / FRESH_WRITE).min((BELOW - 1_000_000) / (FRESH_WRITE + spill));
     assert!(slots * (FRESH_WRITE + spill) > CAP, "counted as compute, the writes cross the cap");
     let mut code = op(BytecodeBuilder::default(), TIMESTAMP);
