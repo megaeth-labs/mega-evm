@@ -385,10 +385,14 @@ impl MegaHardforkConfig {
 
     /// Attaches `params` to the fork they belong to without checking them.
     ///
-    /// Test tooling, behind the `test-utils` feature: it lets a test run block execution under a
-    /// value no chain may carry, such as limits that leave gas detention off. A production build
-    /// has no such route: [`with_params`](Self::with_params) checks every value it attaches, and
-    /// [`validate_schedule`](MegaHardforks::validate_schedule) checks them again at load.
+    /// Test tooling, behind the `test-utils` feature: it lets a test build a schedule that carries
+    /// a value no chain may carry, such as limits that leave gas detention off, to test what
+    /// refuses it. It is not the only way such a value reaches block execution: a node's own
+    /// implementation of [`MegaHardforks`] attaches its parameters without
+    /// [`with_params`](Self::with_params) and hands the block executor whatever it holds. What
+    /// stands in the way is [`validate_schedule`](MegaHardforks::validate_schedule), which a node
+    /// runs when it loads its chain configuration, and the block executor, which refuses a block
+    /// whose [`ProtocolLimits`] their own check refuses.
     ///
     /// # Panics
     ///

@@ -11,8 +11,10 @@
 //! ([`MegaHardforks::protocol_limits`]), installs their per-transaction half on the EVM before
 //! every transaction, and holds the block to their four budgets. The node's context adds only the
 //! builder's policy ([`BlockLimits`]), which can tighten a budget and never loosen one; a validator
-//! leaves it at its default. A block whose schedule carries no limits at its timestamp is refused
-//! before anything runs.
+//! leaves it at its default. A block whose schedule carries no limits at its timestamp, or limits
+//! their own check refuses ([`HardforkParams::validate`](crate::HardforkParams::validate)), is
+//! refused before anything runs, as an internal error: the schedule is the node's configuration,
+//! and a node's own schedule type may hand the executor values nothing checked at load.
 //!
 //! # The block rules of the Karst base
 //!
@@ -123,9 +125,9 @@ use crate::{
         is_apply_pending_changes_due, system_contract_specs, transact_apply_pending_changes,
         transact_deploy, SequencerRegistryConfig, SystemContractDeployError,
     },
-    BlockGasCounters, BlockLimiter, BlockLimits, ExternalEnvTypes, MegaBlockExecutionResult,
-    MegaBlockTxResult, MegaContext, MegaEvm, MegaHardforks, MegaTransaction, MegaTransactionExt,
-    ProtocolLimits,
+    BlockGasCounters, BlockLimiter, BlockLimits, ExternalEnvTypes, HardforkParams,
+    MegaBlockExecutionResult, MegaBlockTxResult, MegaContext, MegaEvm, MegaHardforks,
+    MegaTransaction, MegaTransactionExt, ProtocolLimits,
 };
 
 /// What the node hands block execution beside the EVM.
@@ -217,6 +219,17 @@ pub enum MegaBlockExecutionError {
         /// The block's timestamp.
         timestamp: u64,
     },
+    /// The schedule carries [`ProtocolLimits`] for the block's timestamp that their own check
+    /// refuses ([`HardforkParams::validate`](crate::HardforkParams::validate)): limits no chain
+    /// may carry, which a schedule checked at load cannot hold.
+    ///
+    /// A gap in the node's configuration, not a verdict on the block: an internal error.
+    InvalidProtocolLimits {
+        /// The block's timestamp.
+        timestamp: u64,
+        /// What the check reported.
+        message: String,
+    },
     /// The EIP-7997 factory holds the right runtime but nonce 0.
     ZeroFactoryNonce {
         /// The factory address.
@@ -266,6 +279,11 @@ impl fmt::Display for MegaBlockExecutionError {
                 f,
                 "the schedule carries no ProtocolLimits for the block at timestamp {timestamp}"
             ),
+            Self::InvalidProtocolLimits { timestamp, message } => write!(
+                f,
+                "the schedule's ProtocolLimits for the block at timestamp {timestamp} are \
+                 invalid: {message}"
+            ),
             Self::ZeroFactoryNonce { address } => write!(
                 f,
                 "EIP-7997 factory at {address} has matching code but nonce 0; refusing to accept a zero-nonce factory"
@@ -291,7 +309,8 @@ impl From<MegaBlockExecutionError> for BlockExecutionError {
     fn from(error: MegaBlockExecutionError) -> Self {
         match error {
             MegaBlockExecutionError::MissingSequencerRegistryConfig |
-            MegaBlockExecutionError::MissingProtocolLimits { .. } => Self::other(error),
+            MegaBlockExecutionError::MissingProtocolLimits { .. } |
+            MegaBlockExecutionError::InvalidProtocolLimits { .. } => Self::other(error),
             MegaBlockExecutionError::UnexpectedNonDepositTxInActivationBlock |
             MegaBlockExecutionError::TransactionDaFootprintAboveGasLimit { .. } |
             MegaBlockExecutionError::RewritingInspector |
@@ -372,9 +391,9 @@ pub struct MegaBlockExecutor<E, R: OpReceiptBuilder, Spec> {
     /// What the block has used, and the limits it is held to. Private, so the limits cannot be
     /// changed once the executor has read them; [`limiter`](Self::limiter) reads it.
     limiter: BlockLimiter,
-    /// The limits the schedule holds this block to, read at the block's timestamp; `None` when it
-    /// carries none there, which refuses the block.
-    protocol_limits: Option<ProtocolLimits>,
+    /// The limits the schedule holds this block to, read at the block's timestamp and checked;
+    /// the refusal of the block when the schedule carries none there, or limits the check refuses.
+    protocol_limits: Result<ProtocolLimits, MegaBlockExecutionError>,
     /// Whether Canyon is active, which decides whether a deposit receipt carries a version.
     is_canyon: bool,
     /// Whether Regolith is active, which decides whether a deposit receipt carries a nonce.
@@ -437,9 +456,15 @@ where
     /// number consensus holds the block to, and it is also the budget the data-availability
     /// footprint of the block's transactions is held to.
     ///
-    /// A schedule with no limits at the block's timestamp builds an executor all the same; the
-    /// block is refused at its first entry point
-    /// ([`MegaBlockExecutionError::MissingProtocolLimits`]).
+    /// A schedule with no limits at the block's timestamp, or with limits their own check refuses
+    /// ([`HardforkParams::validate`](crate::HardforkParams::validate)), builds an executor all
+    /// the same, which installs nothing on the EVM; the block is refused at its first entry point
+    /// ([`MegaBlockExecutionError::MissingProtocolLimits`],
+    /// [`MegaBlockExecutionError::InvalidProtocolLimits`]). The check is made here, whatever the
+    /// schedule's type: a node's own implementation of [`MegaHardforks`] attaches its parameters
+    /// without [`MegaHardforkConfig::with_params`](crate::MegaHardforkConfig::with_params), and
+    /// [`validate_schedule`](MegaHardforks::validate_schedule) checks them only when a node calls
+    /// it.
     pub fn new(
         mut evm: MegaEvm<DB, INSP, ExtEnvs>,
         ctx: MegaBlockExecutionCtx,
@@ -450,13 +475,22 @@ where
             let block = evm.ctx().block();
             (block.timestamp().saturating_to(), block.gas_limit())
         };
-        let protocol_limits = spec.protocol_limits(timestamp);
+        let protocol_limits = match spec.protocol_limits(timestamp) {
+            None => Err(MegaBlockExecutionError::MissingProtocolLimits { timestamp }),
+            Some(limits) => match limits.validate() {
+                Ok(()) => Ok(limits),
+                Err(error) => Err(MegaBlockExecutionError::InvalidProtocolLimits {
+                    timestamp,
+                    message: error.message,
+                }),
+            },
+        };
         let policy = match &protocol_limits {
-            Some(protocol) => {
+            Ok(protocol) => {
                 evm.set_tx_runtime_limits(protocol.tx_runtime_limits);
                 ctx.block_limits.within(protocol)
             }
-            None => ctx.block_limits,
+            Err(_) => ctx.block_limits,
         };
         let limits = policy.with_block_gas_limit(block_gas_limit);
         Self {
@@ -473,9 +507,13 @@ where
         }
     }
 
-    /// The limits the schedule holds this block to, read at the block's timestamp.
+    /// The limits the schedule holds this block to, read at the block's timestamp; `None` when it
+    /// carries none there, or limits their own check refuses, either of which refuses the block.
     pub const fn protocol_limits(&self) -> Option<&ProtocolLimits> {
-        self.protocol_limits.as_ref()
+        match &self.protocol_limits {
+            Ok(limits) => Some(limits),
+            Err(_) => None,
+        }
     }
 }
 
@@ -555,14 +593,12 @@ where
     }
 
     /// The limits the schedule holds this block to, or the refusal of a block whose schedule
-    /// carries none at its timestamp.
+    /// carries none at its timestamp, or limits their own check refuses.
     fn require_protocol_limits(&self) -> Result<ProtocolLimits, BlockExecutionError> {
-        self.protocol_limits.ok_or_else(|| {
-            MegaBlockExecutionError::MissingProtocolLimits {
-                timestamp: self.evm.block().timestamp().saturating_to(),
-            }
-            .into()
-        })
+        match &self.protocol_limits {
+            Ok(limits) => Ok(*limits),
+            Err(refusal) => Err(refusal.clone().into()),
+        }
     }
 
     /// Refuses an EVM that runs an inspector which may rewrite what execution produces.
@@ -1158,6 +1194,7 @@ mod tests {
         for gap in [
             MegaBlockExecutionError::MissingSequencerRegistryConfig,
             MegaBlockExecutionError::MissingProtocolLimits { timestamp: 1 },
+            MegaBlockExecutionError::InvalidProtocolLimits { timestamp: 1, message: String::new() },
         ] {
             assert_eq!(internal(&BlockExecutionError::from(gap.clone())), &gap);
         }

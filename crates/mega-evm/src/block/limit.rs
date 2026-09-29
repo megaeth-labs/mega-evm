@@ -146,8 +146,9 @@ impl ProtocolLimits {
     /// No limit at all, gas detention's caps included, so no transaction is detained
     /// ([`EvmTxRuntimeLimits::no_limits`]).
     ///
-    /// For tests and equivalence runs: [`validate`](HardforkParams::validate) refuses it, so no
-    /// chain configuration carries it.
+    /// For tests of what refuses it: [`validate`](HardforkParams::validate) refuses it, so no
+    /// chain configuration carries it, and the block executor refuses a block under it. A test
+    /// that runs blocks without holding them to a limit uses [`loosest`](Self::loosest).
     pub const fn no_limits() -> Self {
         Self {
             tx_runtime_limits: EvmTxRuntimeLimits::no_limits(),
@@ -156,6 +157,22 @@ impl ProtocolLimits {
             block_txs_data_limit: u64::MAX,
             block_kv_update_limit: u64::MAX,
         }
+    }
+
+    /// The loosest limits a chain may carry: every limit unlimited, and gas detention's caps at
+    /// the largest [`validate`](HardforkParams::validate) accepts, one below
+    /// [`MAX_TX_COMPUTE_GAS`].
+    ///
+    /// A read of volatile data still detains the transaction, but a cap that high stops only a
+    /// transaction that spends the most compute any can. For tests and test chains that run blocks
+    /// without holding them to a limit.
+    pub const fn loosest() -> Self {
+        let cap = MAX_TX_COMPUTE_GAS - 1;
+        Self::no_limits().with_tx_runtime_limits(
+            EvmTxRuntimeLimits::no_limits()
+                .with_block_env_access_compute_gas_limit(cap)
+                .with_oracle_access_compute_gas_limit(cap),
+        )
     }
 
     /// Sets the limits every transaction runs under.
@@ -881,8 +898,19 @@ mod tests {
             Ok(())
         );
 
-        // The unlimited set of tests and equivalence runs is refused.
+        // The unlimited set is refused; the loosest a chain may carry is unlimited but for
+        // detention's caps, one below the most compute a transaction can spend.
         assert!(ProtocolLimits::no_limits().validate().is_err());
+        assert_eq!(ProtocolLimits::loosest().validate(), Ok(()));
+        let cap = MAX_TX_COMPUTE_GAS - 1;
+        assert_eq!(
+            ProtocolLimits::loosest(),
+            ProtocolLimits::no_limits().with_tx_runtime_limits(
+                EvmTxRuntimeLimits::no_limits()
+                    .with_block_env_access_compute_gas_limit(cap)
+                    .with_oracle_access_compute_gas_limit(cap)
+            )
+        );
     }
 
     /// A schedule refuses to carry the unlimited set, so no validated chain configuration does.

@@ -31,8 +31,8 @@ const FRAME_DATA_SIZE_LIMIT: u64 = 7_654_321;
 
 /// The chain's limits in these tests.
 fn limits() -> ProtocolLimits {
-    ProtocolLimits::no_limits().with_tx_runtime_limits(
-        EvmTxRuntimeLimits::no_limits()
+    ProtocolLimits::loosest().with_tx_runtime_limits(
+        common::loosest_tx()
             .with_tx_data_size_limit(TX_DATA_SIZE_LIMIT)
             .with_frame_data_size_limit(FRAME_DATA_SIZE_LIMIT),
     )
@@ -178,9 +178,8 @@ fn test_direct_construction_stops_a_transaction_over_the_chains_data_size_limit(
     // that carries no limits of its own.
     let mut executor = common::executor_with_limits(
         &mut state,
-        ProtocolLimits::no_limits().with_tx_runtime_limits(
-            EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(DATA_SIZE_LIMIT),
-        ),
+        ProtocolLimits::loosest()
+            .with_tx_runtime_limits(common::loosest_tx().with_tx_data_size_limit(DATA_SIZE_LIMIT)),
     );
     executor.apply_pre_execution_changes().expect("the block starts");
     executor.evm_mut().set_tx_runtime_limits(EvmTxRuntimeLimits::no_limits());
