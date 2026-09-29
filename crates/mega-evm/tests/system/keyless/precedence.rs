@@ -182,6 +182,9 @@ fn test_a_value_bearing_call_that_does_not_decode_is_refused_for_the_value() {
 #[test]
 fn test_the_signers_account_and_the_forward_come_before_the_address_and_the_balance() {
     let new_account = entry(GasId::new_account_state_gas());
+    // What a call left one short of the signer's account has once it paid its overhead. The cases
+    // that leave it are filtered out below where the account costs nothing.
+    let short_of_the_account = new_account.saturating_sub(1);
     let plain = signed(signed_gas(), 0);
     let carrying = signed(signed_gas(), 1);
     let carrying_two = signed(signed_gas(), 2);
@@ -193,14 +196,14 @@ fn test_the_signers_account_and_the_forward_come_before_the_address_and_the_bala
             rules: "the signer's account the call cannot pay, and an occupied address",
             db: occupied(system_db(), &plain),
             data: data(&plain),
-            gas_limit: leaving(&data(&plain), 1_000),
+            gas_limit: leaving(&data(&plain), short_of_the_account),
             answer: Answer::OutOfGas,
         },
         Case {
             rules: "the signer's account the call cannot pay, and a value it cannot fund",
             db: system_db(),
             data: data(&carrying),
-            gas_limit: leaving(&data(&carrying), 1_000),
+            gas_limit: leaving(&data(&carrying), short_of_the_account),
             answer: Answer::OutOfGas,
         },
         Case {

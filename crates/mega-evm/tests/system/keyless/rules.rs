@@ -1046,7 +1046,9 @@ fn test_a_call_that_cannot_pay_the_signers_account_runs_out_of_gas() {
     let deployment = small();
     let reference = reference(deployment.call_data(LARGE_OVERRIDE), GAS_LIMITS[0]);
     let intrinsic = reference.result.gas().total_gas_spent();
-    let gas_limit = intrinsic + KEYLESS_DEPLOY_OVERHEAD_GAS + 1_000;
+    // One short of the account, once the overhead is paid.
+    let short = entry(GasId::new_account_state_gas()) - 1;
+    let gas_limit = intrinsic + KEYLESS_DEPLOY_OVERHEAD_GAS + short;
     let outcome = submit(system_db(), &deployment.tx, LARGE_OVERRIDE, gas_limit);
     assert!(matches!(outcome.result, ExecutionResult::Halt { .. }), "{:?}", outcome.result);
     assert_nothing_written(&outcome, &deployment, 0);

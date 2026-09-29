@@ -235,16 +235,20 @@ fn test_a_system_call_above_30m_carries_the_excess_as_reservoir() {
 /// regular budget. `GAS`, read after the writes, shows the spill: the regular gas the next write
 /// took is its own regular cost, which the writes before it show, plus the part of its slot the
 /// reservoir did not hold.
+///
+/// Where a slot is cheaper, the default reservoir holds more fresh slots than the regular budget
+/// can write, so the call is given a reservoir of sixteen.
 #[test]
 fn test_a_system_call_s_state_draws_the_reservoir_first_then_spills() {
     // Slots that cost nothing never empty the reservoir, and there is nothing to spill.
-    if state_is_free() {
+    if state_is_free() || slot() == 0 {
         return;
     }
     if !runs_at_measurement_prices() {
         assert_eq!(SLOT_STATE_GAS, slot());
         assert_eq!(DEFAULT_RESERVOIR, 16 * SLOT_STATE_GAS);
     }
+    let reservoir = DEFAULT_RESERVOIR.min(16 * slot());
     // The reading is stored into a slot that already holds a value, which writes no new state.
     const READING: u64 = 0xff;
     let run = |writes| {
@@ -252,8 +256,8 @@ fn test_a_system_call_s_state_draws_the_reservoir_first_then_spills() {
             fresh_writes(writes).append(GAS).push_number(READING as u8).append(SSTORE).stop();
         let db =
             db_with(code.build()).account_storage(CONTRACT, U256::from(READING), U256::from(1));
-        let (mega, op) =
-            run_both(both_evms(db), CALLER, CONTRACT, Bytes::new(), SYSTEM_CALL_GAS_LIMIT);
+        let gas_limit = SYSTEM_CALL_REGULAR_GAS_LIMIT + reservoir;
+        let (mega, op) = run_both(both_evms(db), CALLER, CONTRACT, Bytes::new(), gas_limit);
         assert!(mega.result.is_success(), "{:?}", mega.result);
         assert_eq!(mega.result.gas().state_gas_spent_final(), writes * slot());
         assert_same(&mega, &op);
@@ -262,14 +266,14 @@ fn test_a_system_call_s_state_draws_the_reservoir_first_then_spills() {
     };
 
     // The most slots the reservoir holds, and what the one after them spills.
-    let held = DEFAULT_RESERVOIR / slot();
-    let spill = (held + 1) * slot() - DEFAULT_RESERVOIR;
+    let held = reservoir / slot();
+    let spill = (held + 1) * slot() - reservoir;
     let (two_short, _) = run(held - 2);
     let (one_short, reservoir_one_short) = run(held - 1);
     let (at, reservoir_at) = run(held);
     let (past, reservoir_past) = run(held + 1);
-    assert_eq!(reservoir_one_short, DEFAULT_RESERVOIR - (held - 1) * slot());
-    assert_eq!(reservoir_at, DEFAULT_RESERVOIR - held * slot(), "empty at Satin's price");
+    assert_eq!(reservoir_one_short, reservoir - (held - 1) * slot());
+    assert_eq!(reservoir_at, reservoir - held * slot(), "empty at Satin's price");
     assert_eq!(reservoir_past, 0);
     // A write the reservoir holds takes regular gas for itself alone, the same for each.
     let one_write = one_short - at;

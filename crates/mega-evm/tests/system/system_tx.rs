@@ -631,6 +631,20 @@ fn test_a_deposit_that_creates_two_accounts_pays_for_both() {
     assert_eq!(two, one * 2, "two accounts created, two charges");
 }
 
+/// A deposit from `sender`, an account that does not exist, to the Oracle, whose gas limit is one
+/// short of its intrinsic gas and the account it creates for its caller, at the byte prices in
+/// effect.
+fn deposit_one_short_of_its_caller(sender: Address) -> MegaTransaction {
+    let deposit = || deposit_tx(sender, TxKind::Call(ORACLE_CONTRACT_ADDRESS), U256::ZERO, 0);
+    // A transaction without calldata has its intrinsic gas as its floor; run with its caller in
+    // place, the deposit creates no account.
+    let intrinsic =
+        run_outcome(chain_db().account_balance(sender, U256::from(1)), deposit()).gas.floor;
+    let mut tx = deposit();
+    tx.0.base.gas_limit = intrinsic + account_state_gas() - 1;
+    tx
+}
+
 /// A deposit that cannot pay for the account it creates for its caller is an out-of-gas halt,
 /// as a transaction that runs out in its runtime phase is.
 #[test]
@@ -640,10 +654,7 @@ fn test_a_deposit_that_cannot_pay_for_its_caller_halts() {
         return;
     }
     let sender = address!("0x00000000000000000000000000000000000f0006");
-    let mut tx = deposit_tx(sender, TxKind::Call(ORACLE_CONTRACT_ADDRESS), U256::ZERO, 0);
-    tx.0.base.gas_limit = 30_000;
-
-    let outcome = run_outcome(chain_db(), tx);
+    let outcome = run_outcome(chain_db(), deposit_one_short_of_its_caller(sender));
     assert!(
         matches!(outcome.result, ExecutionResult::Halt { .. }),
         "{:?} is not a halt",
@@ -661,13 +672,11 @@ fn test_a_deposit_over_the_data_size_limit_that_cannot_pay_for_its_caller_halts(
         return;
     }
     let sender = address!("0x00000000000000000000000000000000000f0008");
-    let mut tx = deposit_tx(sender, TxKind::Call(ORACLE_CONTRACT_ADDRESS), U256::ZERO, 0);
-    tx.0.base.gas_limit = 30_000;
     let limits =
         EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(mega_evm::TX_BODY_SIZE - 1);
 
     let outcome = MegaEvm::new(chain_context(chain_db()).with_tx_runtime_limits(limits))
-        .execute_transaction(tx)
+        .execute_transaction(deposit_one_short_of_its_caller(sender))
         .expect("the deposit is included");
     assert!(
         matches!(outcome.result, ExecutionResult::Halt { .. }),

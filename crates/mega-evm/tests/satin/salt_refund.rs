@@ -40,11 +40,11 @@ use revm::{
 };
 
 use crate::{
-    common::state_is_free,
+    common::{history, state_is_free},
     salt::{
         account_bucket, authorization_tx, call_contract, capacity, create_with, crowded_account,
         crowded_slot, db, entry, minimal_envs, run, salt_context, selfdestruct_to, slot_bucket,
-        try_run, tx, SaltEnvs, AUTHORITY, CALLER, CONTRACT, EMPTY, GAS_LIMIT,
+        try_run, tx, tx_with_gas, SaltEnvs, AUTHORITY, CALLER, CONTRACT, EMPTY, GAS_LIMIT,
     },
 };
 
@@ -613,8 +613,8 @@ fn test_a_synthetic_creation_failure_refunds_the_crowded_upfront_charge() {
 /* A deposit charge that is made and then rolled back. */
 
 /// How many bytes of runtime code the creation below deploys when its deposit is meant to fail.
-/// At the crowded price a byte costs `code_deposit_state_gas x 8`, so this many bytes is far
-/// beyond what the transaction brought.
+/// At the crowded price a byte costs `code_deposit_state_gas x 8` and its history; at the spec's
+/// prices this many bytes is far beyond what [`GAS_LIMIT`] brings.
 const UNAFFORDABLE_CODE: u64 = 20_000;
 
 /// How many it deploys when the deposit is meant to go through.
@@ -648,8 +648,24 @@ fn test_a_creation_that_cannot_pay_its_code_deposit_keeps_no_state_gas() {
         crowded_slot(envs, created, U256::from(SLOT), SYNTHETIC_MULTIPLIER)
     };
 
+    // What the program spends with nothing to deposit, and at least what the deposit costs: its
+    // state gas at the crowded price and its history.
+    let without_the_deposit =
+        run(creation_depositing(0), crowd(minimal_envs()), call_contract()).gas.gas_used;
+    let deposit = entry(GasId::code_deposit_state_gas()) * SYNTHETIC_MULTIPLIER * UNAFFORDABLE_CODE +
+        history(UNAFFORDABLE_CODE);
+    // A deposit that costs less than the rest of the transaction leaves no gas limit at which the
+    // creation runs its init code and then cannot pay for the deposit.
+    if deposit < without_the_deposit {
+        return;
+    }
+    // The deposit's price on top of the rest, below the execution cap as every probe here runs:
+    // forwarded 63/64 of it, the creation runs its init code and falls short of the deposit.
+    let gas_limit = (without_the_deposit + deposit).min(GAS_LIMIT);
+
     let envs = crowd(minimal_envs());
-    let outcome = run(creation_depositing(UNAFFORDABLE_CODE), envs.clone(), call_contract());
+    let call = tx_with_gas(TxKind::Call(CONTRACT), Bytes::new(), U256::ZERO, gas_limit);
+    let outcome = run(creation_depositing(UNAFFORDABLE_CODE), envs.clone(), call);
     assert_eq!(outcome.gas.state, 0, "the failed creation kept neither charge");
     assert_eq!(
         envs.bucket_queries(slot_bucket(created, U256::from(SLOT))),

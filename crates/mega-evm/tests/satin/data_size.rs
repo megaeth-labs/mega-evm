@@ -985,9 +985,14 @@ fn test_a_body_over_the_limit_is_the_stop_at_the_smallest_valid_gas_limit() {
             "{name}: the limit does not move validation"
         );
 
+        let stopped = outcome_at(tx(valid), limit).unwrap();
         // Where a state byte and a record's history are both free the start costs nothing past
-        // the intrinsic gas, and there is no out-of-gas for the stop to stand in for.
-        if !(state_is_free() && history(WRITE_RECORD_SIZE) == 0) {
+        // the intrinsic gas, and there is no out-of-gas for the stop to stand in for. Where a
+        // history byte is cheap enough, the calldata floor lifts the smallest valid gas limit past
+        // the intrinsic cost, which the stop spends alone, and what it covers past it may pay the
+        // start.
+        let free = state_is_free() && history(WRITE_RECORD_SIZE) == 0;
+        if !free && valid == stopped.result.gas().total_gas_spent() {
             let unlimited = outcome_at(tx(valid), u64::MAX).unwrap();
             assert!(
                 matches!(
@@ -1002,7 +1007,6 @@ fn test_a_body_over_the_limit_is_the_stop_at_the_smallest_valid_gas_limit() {
             );
         }
 
-        let stopped = outcome_at(tx(valid), limit).unwrap();
         assert_stopped(&stopped, limit, body);
         assert_eq!(stopped.usage, LimitUsage { data_size: body, write_records: 0 }, "{name}");
         assert_eq!(stopped.result.gas().tx_gas_used(), valid, "{name}: the intrinsic cost only");
