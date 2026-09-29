@@ -128,7 +128,9 @@ impl<ExtEnvFactory> MegaEvmFactory<ExtEnvFactory> {
     /// [`with_tx_runtime_limits`](Self::with_tx_runtime_limits).
     ///
     /// A node hands it the schedule it hands its block executor factory, so the EVMs it builds
-    /// outside block execution — an RPC call, a simulation — stop what the chain stops.
+    /// outside block execution — an RPC call, a simulation — stop what the chain stops. A schedule
+    /// held in an `Arc` is handed over as a clone of the `Arc`: [`MegaHardforks`] holds for an
+    /// `Arc` or a `Box` of a schedule.
     pub fn with_schedule<Spec>(mut self, spec: Spec) -> Self
     where
         Spec: MegaHardforks + Send + Sync + 'static,
@@ -370,6 +372,19 @@ mod tests {
         let evm = evm_at(&MegaEvmFactory::new(), SATIN_AT);
         assert_eq!(*evm.tx_runtime_limits(), ProtocolLimits::DEFAULT.tx_runtime_limits);
         assert_ne!(*evm.tx_runtime_limits(), EvmTxRuntimeLimits::default());
+    }
+
+    /// A schedule shared behind an `Arc`, as a node holds its chain spec, is handed over as a
+    /// clone of the `Arc`, and resolves the limits the schedule it points to carries.
+    #[test]
+    fn test_a_schedule_behind_an_arc_is_a_schedule() {
+        let shared = Arc::new(chain(chain_limits()));
+        let factory = MegaEvmFactory::new().with_schedule(Arc::clone(&shared));
+        assert_eq!(factory.tx_runtime_limits(SATIN_AT), chain_limits().tx_runtime_limits);
+        assert_eq!(
+            factory.tx_runtime_limits(SATIN_AT),
+            shared.protocol_limits(SATIN_AT).unwrap().tx_runtime_limits
+        );
     }
 
     /// Given the chain's schedule, the factory's EVMs run under the limits it carries at the

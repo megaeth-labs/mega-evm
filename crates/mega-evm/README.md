@@ -192,6 +192,7 @@ A node executes a block through the factory, which installs the block's limits o
 use alloy_evm::block::{BlockExecutor as _, BlockExecutorFactory as _};
 use mega_evm::{BlockLimits, MegaBlockExecutionCtx, MegaBlockExecutorFactory, MegaEvmFactory};
 
+// `chain_spec` is shared, an `Arc` of the node's schedule: `MegaHardforks` holds for an `Arc` of one.
 let evm_factory = MegaEvmFactory::new().with_schedule(chain_spec.clone());
 let factory = MegaBlockExecutorFactory::new(receipt_builder, chain_spec, evm_factory);
 let ctx = MegaBlockExecutionCtx::new(parent_hash, parent_beacon_block_root, extra_data, BlockLimits::no_limits());
