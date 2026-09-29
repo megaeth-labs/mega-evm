@@ -156,19 +156,22 @@ fn parent_scalars_word() -> U256 {
 
 /// The L1 block info the chain holds before the block: a distinct non-zero value in every slot
 /// the transactions are priced against, so a slot a witness answered with zero would show in the
-/// L1 fee, the operator fee or the footprint.
-fn l1_info() -> [(U256, U256); 5] {
+/// L1 fee, the operator fee or the footprint. The Ecotone scalars are set, so the overhead is not
+/// read.
+fn l1_info() -> [(U256, U256); 4] {
     [
         (L1_BASE_FEE_SLOT, U256::from(1_000_000_000_u64)),
         (ECOTONE_L1_FEE_SCALARS_SLOT, fee_scalars_word(1_000_000, 1_000_000)),
-        (L1_OVERHEAD_SLOT, U256::from(188)),
         (ECOTONE_L1_BLOB_BASE_FEE_SLOT, U256::from(1_000_000_000_u64)),
         (OPERATOR_FEE_SCALARS_SLOT, parent_scalars_word()),
     ]
 }
 
-/// A chain holding the L1 block contract with `code` and the info of [`l1_info`], and the slot
-/// writer at [`CONTRACT`].
+/// The L1 fee overhead the chain holds, which the pricing reads only when the scalars are empty.
+const OVERHEAD: U256 = U256::from_limbs([188, 0, 0, 0]);
+
+/// A chain holding the L1 block contract with `code`, the info of [`l1_info`] and the overhead,
+/// and the slot writer at [`CONTRACT`].
 fn chain_with_l1_info(code: Bytes) -> MemoryDatabase {
     let mut db = common::database();
     db.set_account_code(CONTRACT, slot_writer());
@@ -176,6 +179,7 @@ fn chain_with_l1_info(code: Bytes) -> MemoryDatabase {
     for (slot, value) in l1_info() {
         db.set_account_storage(L1_BLOCK_CONTRACT, slot, value);
     }
+    db.set_account_storage(L1_BLOCK_CONTRACT, L1_OVERHEAD_SLOT, OVERHEAD);
     db
 }
 
@@ -240,6 +244,7 @@ fn test_a_user_transaction_is_priced_against_the_l1_info_the_pre_block_state_car
     let account = l1_entry(run);
     assert!(!account.is_touched() && !account.is_created(), "a read-only entry");
     assert_eq!(account.info.code_hash, alloy_primitives::keccak256([0x00]));
+    assert_eq!(account.storage.len(), l1_info().len(), "the slots the pricing reads, no more");
     for (slot, value) in l1_info() {
         let entry = account.storage.get(&slot).expect("every slot of the set");
         assert_eq!(entry.present_value, value, "{slot}");
@@ -250,6 +255,10 @@ fn test_a_user_transaction_is_priced_against_the_l1_info_the_pre_block_state_car
             "{slot} was read from the database, before the transactions"
         );
     }
+    assert!(
+        !run.record.storage.contains_key(&(L1_BLOCK_CONTRACT, L1_OVERHEAD_SLOT)),
+        "the overhead is not read while the scalars are set"
+    );
 
     let footprint_scalar = u64::from(PARENT_FOOTPRINT_SCALAR);
     assert_eq!(
@@ -260,6 +269,23 @@ fn test_a_user_transaction_is_priced_against_the_l1_info_the_pre_block_state_car
     let credited = |vault: Address| tx.state.get(&vault).map_or(U256::ZERO, |a| a.info.balance);
     assert!(!credited(L1_FEE_RECIPIENT).is_zero(), "an L1 fee was paid from the info");
     assert!(!credited(OPERATOR_FEE_RECIPIENT).is_zero(), "an operator fee was paid from the info");
+}
+
+/// With the Ecotone scalars empty the pricing falls back to the overhead, and the pre-block entry
+/// reads it too: the slot is in the entry and in the record, and the block replays.
+#[test]
+fn test_the_overhead_is_in_the_entry_when_the_scalars_are_empty() {
+    let mut db = chain_with_l1_info(Bytes::from(vec![0x00]));
+    db.set_account_storage(L1_BLOCK_CONTRACT, ECOTONE_L1_FEE_SCALARS_SLOT, U256::ZERO);
+    let replay = Case::new("l1 overhead", db).tx(call(0, CONTRACT, slot(1), write_gas())).run();
+    let run = &replay.recorded;
+    assert!(run.tx(0).result.is_success(), "{:?}", run.tx(0).result);
+    let account = l1_entry(run);
+    assert_eq!(account.storage.len(), l1_info().len() + 1, "the overhead beside the set");
+    let overhead = account.storage.get(&L1_OVERHEAD_SLOT).expect("read with empty scalars");
+    assert_eq!(overhead.present_value, OVERHEAD);
+    assert!(!overhead.is_changed());
+    assert_eq!(run.record.storage.get(&(L1_BLOCK_CONTRACT, L1_OVERHEAD_SLOT)), Some(&OVERHEAD));
 }
 
 /// The production shape: the L1 attributes deposit comes first and writes the block's info over
