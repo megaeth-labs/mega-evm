@@ -1036,10 +1036,15 @@ where
     /// The block's gas used is the sum of its receipts, as it has always been; the three ledgers
     /// and the data-size and write-record counts ride beside it, where no upstream type has a
     /// place for them. The blob gas used is the block's data-availability footprint.
+    ///
+    /// A block whose schedule carries no limits at its timestamp, or limits their own check
+    /// refuses, is refused here too, before the post-block balance increments: a caller that never
+    /// started the block cannot finish it either.
     pub fn finish_with_counters(
         mut self,
     ) -> Result<MegaFinishedBlock<DB, INSP, ExtEnvs, R>, BlockExecutionError> {
         self.check_admission()?;
+        self.require_protocol_limits()?;
 
         let balance_increments =
             post_block_balance_increments::<Header>(&self.spec, self.evm.block(), &[], None);
@@ -1102,7 +1107,8 @@ mod tests {
     }
 
     /// A schedule that carries no limits at the block's timestamp refuses the block before any
-    /// pre-block step runs: the block is not executed under limits nobody chose.
+    /// pre-block step runs, and refuses to finish it: the block is not executed under limits
+    /// nobody chose.
     #[test]
     fn test_a_block_without_protocol_limits_is_refused_before_it_starts() {
         let ctx =
@@ -1131,6 +1137,13 @@ mod tests {
             "the schedule carries no ProtocolLimits for the block at timestamp 7"
         );
         assert!(executor.receipts().is_empty());
+
+        // Nor can it be finished: the post-block balance increments do not run on it.
+        let Err(error) = executor.finish() else { panic!("no limits, no finished block") };
+        assert_eq!(
+            internal(&error),
+            &MegaBlockExecutionError::MissingProtocolLimits { timestamp: 7 }
+        );
     }
 
     /// The `MegaBlockExecutionError` an internal error carries; panics on a validation error.

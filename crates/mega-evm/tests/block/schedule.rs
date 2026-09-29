@@ -151,8 +151,9 @@ fn internal(error: &BlockExecutionError) -> &MegaBlockExecutionError {
 
 /// Limits their own check refuses run no block, even when they reach the block executor without
 /// the load-time check: a node's own schedule type hands them over as it holds them. The executor
-/// installs nothing on the EVM and refuses the block at every entry point, as an internal error —
-/// the schedule is the node's configuration, not the block.
+/// installs nothing on the EVM and refuses the block at every entry point — its start, a
+/// transaction, its end — as an internal error: the schedule is the node's configuration, not the
+/// block.
 #[test]
 fn test_limits_the_check_refuses_run_no_block() {
     let invalid = ProtocolLimits::no_limits();
@@ -191,6 +192,8 @@ fn test_limits_the_check_refuses_run_no_block() {
         executor.execute_transaction(&user_tx(0, 100_000)).expect_err("no transaction runs either");
     assert_eq!(internal(&error), &refusal);
     assert!(executor.receipts().is_empty());
+    let Err(error) = executor.finish() else { panic!("nor is the block finished") };
+    assert_eq!(internal(&error), &refusal);
 
     // The same schedule holding limits a chain may carry runs the block.
     let schedule = NodeSchedule { inner: common::chain_spec(), limits: ProtocolLimits::DEFAULT };
