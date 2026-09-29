@@ -556,7 +556,7 @@ When the agent is requested to implement a new feature or bug fix, it should con
   A field added to Satin's params needs its flat genesis key: a test of `block/genesis.rs` fails until `SatinChainConfig` reads and writes it.
 - **Keep the workspace on its declared minimum toolchain (1.94).**
   CI's msrv job checks the workspace on 1.94.0, every feature on, with the lock as it is.
-  A dependency whose newer releases declare a newer compiler (alloy 2.2 and later declare 1.94.1) is updated with `CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS=fallback cargo update <crates>`, which picks the newest release the declared version builds.
+  A dependency whose newer releases declare a newer compiler (alloy 2.2 and later declare 1.94.1) stays on the newest release the declared version builds: `.cargo/config.toml` sets the resolver's `incompatible-rust-versions = "fallback"`, so a `cargo update` run in the repository picks it.
 - **Pre-block helpers must return state, not commit directly.**
   Any helper participating in pre-block execution (system contract deploys, pre-block system calls, etc.) returns `Option<EvmState>` and never calls `db.commit(...)` directly, so the witness generator sees the complete read and write set.
   `block/eips.rs` holds the EIP-2935 and EIP-4788 calls and the post-block balance increments, `system/sequencer_registry.rs` the registry's due-change read and its `applyPendingChanges()` call, and the block executor is what commits them.
