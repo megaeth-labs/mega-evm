@@ -57,6 +57,7 @@ pub(crate) const PUBLIC_MUTATING_OPS: &[&str] = &[
     "null_transaction",
     "drop_transaction",
     "drain_sender_balance",
+    "set_account_code",
     "zero_transaction_gas",
     "reassign_transaction_sender",
     "set_transaction_field",
@@ -66,6 +67,7 @@ pub(crate) const PUBLIC_MUTATING_OPS: &[&str] = &[
     "mark_transaction_pending",
     "push_cloned_transaction",
     "rewrite_receipt",
+    "rewrite_receipt_of",
     "null_receipt",
     "drop_receipt",
     "null_block",
@@ -276,6 +278,27 @@ impl DoctoredEnvelope {
         self
     }
 
+    /// Replaces the unique `eth_getCode` answer for `address` at block `number`
+    /// with `code`.
+    ///
+    /// The block body and every transaction stay byte-identical, so the replay
+    /// authenticates everything it fetches and executes the doctored code:
+    /// this is how an honest-looking execution divergence (a different gas
+    /// charge, different logs) is manufactured.
+    #[must_use]
+    pub(crate) fn set_account_code(mut self, address: &str, number: u64, code: &str) -> Self {
+        let params = format!("[\"{address}\",\"0x{number:x}\"]");
+        let key = cache_key("eth_getCode", &params);
+        let idx = self.find_one(
+            |entry| entry["key"].as_str() == Some(key.as_str()),
+            &format!("eth_getCode answer for {address} at block {number}"),
+        );
+        self.rewrite_at(idx, |response| {
+            response["result"] = Value::String(code.to_string());
+        });
+        self
+    }
+
     /// Sets `gas` to `0x0` on the unique transaction object for `tx_hash`.
     #[must_use]
     pub(crate) fn zero_transaction_gas(self, tx_hash: &str) -> Self {
@@ -411,6 +434,27 @@ impl DoctoredEnvelope {
     #[must_use]
     pub(crate) fn rewrite_receipt(mut self, doctor: impl FnOnce(&mut Value)) -> Self {
         let idx = self.receipt_index();
+        self.rewrite_result_at(idx, doctor);
+        self
+    }
+
+    /// Rewrites the receipt result of `tx_hash`, for captures holding more than
+    /// one receipt.
+    #[must_use]
+    pub(crate) fn rewrite_receipt_of(
+        mut self,
+        tx_hash: &str,
+        doctor: impl FnOnce(&mut Value),
+    ) -> Self {
+        let idx = self.find_one(
+            |entry| {
+                is_receipt_entry(entry) &&
+                    result_object(entry).is_some_and(|result| {
+                        result.get("transactionHash").and_then(Value::as_str) == Some(tx_hash)
+                    })
+            },
+            &format!("receipt for {tx_hash}"),
+        );
         self.rewrite_result_at(idx, doctor);
         self
     }

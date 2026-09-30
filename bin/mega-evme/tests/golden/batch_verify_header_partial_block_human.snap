@@ -1,0 +1,19 @@
+# mega-evme replay equivalence baseline
+# case:    batch_verify_header_partial_block_human
+# capture: replay_batch_blocks.cache.json
+# argv:    replay --rpc.replay-file <CAPTURE> --verify-header --tx-file <TX_FILE>
+
+== input <TX_FILE> ==
+# equivalence corpus
+0x323ddc8e67dfc134284d78c65f3c1dc7ff45ba1db02eeaf62e211ae3253478ef
+
+0x323ddc8e67dfc134284d78c65f3c1dc7ff45ba1db02eeaf62e211ae3253478ef
+
+== exit code ==
+1
+
+== stdout ==
+(empty)
+
+== stderr ==
+error: Invalid input: --verify-header needs every transaction of each replayed block, but the --tx-file leaves some out: block 22945844 is missing 22 of its 23 transaction(s) (first: 0xde3d56dc739484166b8af1bea757bf7e3e9a4b9a0fb62d722703345570dfc1d6). List whole blocks, or replay them with --block <N>

@@ -303,6 +303,10 @@ struct Expect {
     /// Values a `--json` run must print that report a per-target failure
     /// instead of a result (`{"tx_hash":…,"error":{…}}`).
     error_lines: Option<usize>,
+    /// Values a `--json` run must print that carry a block's header verdict
+    /// (`{"block_number":…,"header_verification":…}`). They are neither result
+    /// nor error lines.
+    header_lines: Option<usize>,
     /// Whether the row's single-file destination — a dumped fixture, a written
     /// trace, a written state dump — must exist afterwards.
     file_written: Option<bool>,
@@ -396,6 +400,12 @@ impl Row {
     /// Declare how many per-target error values a `--json` run must print.
     fn error_lines(mut self, count: usize) -> Self {
         self.expect.error_lines = Some(count);
+        self
+    }
+
+    /// Declare how many block header verdicts a `--json` run must print.
+    fn header_lines(mut self, count: usize) -> Self {
+        self.expect.header_lines = Some(count);
         self
     }
 
@@ -794,6 +804,49 @@ fn row_batch_block_verify(_scratch: &Path) -> Row {
         .error_lines(0)
 }
 
+/// Replay a whole block and verify both its receipts and its header.
+///
+/// The header verdict is its own line after the block's target lines, carrying
+/// no `tx_hash`.
+fn row_batch_block_verify_header(_scratch: &Path) -> Row {
+    Row::new(
+        CAPTURE_BLOCKS,
+        &["--block", &BLOCK.to_string(), "--verify-receipt", "--verify-header"],
+    )
+    .result_lines(BLOCK_TX_COUNT)
+    .error_lines(0)
+    .header_lines(1)
+}
+
+/// Replay a whole block whose execution burns different gas than the chain's.
+///
+/// Every fetched object authenticates; one contract's code is rewritten, so the
+/// divergence is the replay's own. It surfaces in the diverging receipt, in the
+/// cumulative gas of every later receipt, and in the header's gas used and
+/// receipts root, and the run exits `2`.
+fn row_batch_block_header_mismatch(_scratch: &Path) -> Row {
+    Row::new(
+        CAPTURE_BLOCKS,
+        &["--block", &BLOCK.to_string(), "--verify-receipt", "--verify-header"],
+    )
+    .doctored(doctor_gas_divergence)
+    .exits(2)
+    .result_lines(BLOCK_TX_COUNT)
+    .error_lines(0)
+    .header_lines(1)
+}
+
+/// Ask for header verification over a list that covers only part of a block:
+/// refused before any block runs.
+fn row_batch_verify_header_partial_block(scratch: &Path) -> Row {
+    Row::new(CAPTURE_BLOCKS, &["--verify-header"])
+        .with_tx_file(scratch, &[BLOCK_MID_TX])
+        .exits(1)
+        .result_lines(0)
+        .error_lines(0)
+        .header_lines(0)
+}
+
 /// Replay a target subset spanning both blocks of the capture.
 fn row_batch_tx_file(scratch: &Path) -> Row {
     Row::new(CAPTURE_BLOCKS, &[])
@@ -916,6 +969,15 @@ fn doctor_receipt_gas_used(source: &Path, scratch: &Path) -> PathBuf {
         envelope.rewrite_receipt(|receipt| {
             receipt["gasUsed"] = serde_json::Value::String("0x1".into());
         })
+    })
+}
+
+/// Replace the code of [`BLOCK`]'s index-13 callee with a bare `STOP`, so that
+/// transaction burns less gas than it did on chain while every fetched object
+/// still authenticates.
+fn doctor_gas_divergence(source: &Path, scratch: &Path) -> PathBuf {
+    write_doctored_capture(source, scratch, "gas_divergence", |envelope| {
+        envelope.set_account_code("0x681e908b8ab57c49c74d770f369754ccc3e1ae09", BLOCK - 1, "0x00")
     })
 }
 
@@ -1253,7 +1315,13 @@ fn check_json_stream(case: &str, row: &Row, exit: i32, stdout: &str) {
     }
 
     // A per-target failure carries its transaction hash alongside `error`; a
-    // result line carries no top-level `error` at all.
+    // result line carries no top-level `error` at all. A block's header verdict
+    // is neither.
+    let header_lines =
+        values.iter().filter(|value| value.get("header_verification").is_some()).count();
+    if let Some(expected) = row.expect.header_lines {
+        assert_eq!(header_lines, expected, "{case}: the row declares {expected} header line(s)");
+    }
     let error_lines =
         values.iter().filter(|value| !is_run_error(value) && value.get("error").is_some()).count();
     if let Some(expected) = row.expect.error_lines {
@@ -1264,7 +1332,7 @@ fn check_json_stream(case: &str, row: &Row, exit: i32, stdout: &str) {
     }
     if let Some(expected) = row.expect.result_lines {
         assert_eq!(
-            values.len() - run_errors - error_lines,
+            values.len() - run_errors - error_lines - header_lines,
             expected,
             "{case}: the row declares {expected} target result line(s)",
         );
@@ -1532,6 +1600,9 @@ matrix! {
     single_preceding_null: row_single_preceding_null,
     batch_block: row_batch_block,
     batch_block_verify: row_batch_block_verify,
+    batch_block_verify_header: row_batch_block_verify_header,
+    batch_block_header_mismatch: row_batch_block_header_mismatch,
+    batch_verify_header_partial_block: row_batch_verify_header_partial_block,
     batch_tx_file: row_batch_tx_file,
     batch_tx_file_verify: row_batch_tx_file_verify,
     batch_mixed_failures: row_batch_mixed_failures,
