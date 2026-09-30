@@ -5,7 +5,7 @@ use std::{path::Path, time::Duration};
 use super::{EvmeError, StateDumpArgs, TraceArgs};
 
 use alloy_consensus::{Eip658Value, Receipt};
-use alloy_primitives::{hex, Address, BlockHash, Bytes, TxHash};
+use alloy_primitives::{hex, Address, BlockHash, Bytes, TxHash, TxKind};
 use alloy_rpc_types_eth::TransactionReceipt;
 use alloy_sol_types::{Panic, Revert, SolError};
 use clap::Parser;
@@ -65,6 +65,35 @@ impl EvmeOutcome {
             }
         }
     }
+}
+
+/// The address a contract-creation transaction targets, as its receipt's
+/// `contractAddress` reports it: `sender.create(nonce)` for every CREATE,
+/// whether or not it deployed anything, and `None` for a call.
+///
+/// This is the node's rule. reth's receipt builder derives the field from the
+/// transaction kind alone, never from the status, and op-reth corrects it for
+/// deposits to the deposit nonce — the sender's nonce before execution, which
+/// the OP deposit-receipt spec requires instead of a deposit's hard-coded zero.
+/// `pre_execution_nonce` is that nonce for every transaction type: for a
+/// non-deposit it equals the transaction's own nonce, which execution
+/// validated.
+///
+/// Every command's receipt goes through this one function; the execution
+/// summary narrows it with [`deployed_contract`].
+pub fn create_address(sender: Address, kind: TxKind, pre_execution_nonce: u64) -> Option<Address> {
+    kind.is_create().then(|| sender.create(pre_execution_nonce))
+}
+
+/// The contract a transaction deployed: its [`create_address`], but only when
+/// execution succeeded. A reverted or halted creation targets an address it
+/// left empty, which the receipt still reports and the execution summary does
+/// not.
+pub fn deployed_contract(
+    exec_result: &ExecutionResult<MegaHaltReason>,
+    create_address: Option<Address>,
+) -> Option<Address> {
+    create_address.filter(|_| exec_result.is_success())
 }
 
 /// Convert an [`OpReceiptEnvelope`] to an OP transaction receipt.
@@ -128,11 +157,16 @@ pub fn op_receipt_to_tx_receipt(
 }
 
 /// Print a human-readable execution summary.
+///
+/// `create_address` is the transaction's [`create_address`]; the summary names
+/// it as a contract address only when the creation deployed
+/// ([`deployed_contract`]).
 pub fn print_execution_summary(
     exec_result: &ExecutionResult<MegaHaltReason>,
-    contract_address: Option<Address>,
+    create_address: Option<Address>,
     exec_time: Duration,
 ) {
+    let deployed = deployed_contract(exec_result, create_address);
     println!();
     println!("=== Transaction Summary ===");
 
@@ -141,7 +175,7 @@ pub fn print_execution_summary(
             println!("Status:           Success");
             println!("Gas Used:         {}", exec_result.tx_gas_used());
             println!("Execution Time:   {:?}", exec_time);
-            if let Some(addr) = contract_address {
+            if let Some(addr) = deployed {
                 println!("Contract Address: {}", addr);
             }
             if !logs.is_empty() {
@@ -331,11 +365,14 @@ impl ExecutionSummary {
         Ok(())
     }
 
-    /// Create from an `ExecutionResult` and optional contract address.
+    /// Create from an `ExecutionResult` and the transaction's
+    /// [`create_address`], which the summary reports as `contract_address`
+    /// only when the creation deployed ([`deployed_contract`]).
     pub fn from_result(
         exec_result: &ExecutionResult<MegaHaltReason>,
-        contract_address: Option<Address>,
+        create_address: Option<Address>,
     ) -> Self {
+        let contract_address = deployed_contract(exec_result, create_address);
         match exec_result {
             ExecutionResult::Success { logs, output, .. } => {
                 let output_data = output.data();
@@ -371,6 +408,57 @@ mod tests {
     use super::*;
     use alloy_primitives::{address, b256, Bytes, Log as PrimitiveLog, LogData, B256};
     use alloy_sol_types::SolError;
+
+    const CREATOR: Address = address!("0x00000000000000000000000000000000000000c1");
+
+    fn success() -> ExecutionResult<MegaHaltReason> {
+        ExecutionResult::Success {
+            reason: mega_evm::revm::context::result::SuccessReason::Return,
+            gas: Default::default(),
+            logs: Vec::new(),
+            output: mega_evm::revm::context::result::Output::Create(Bytes::new(), None),
+        }
+    }
+
+    fn revert() -> ExecutionResult<MegaHaltReason> {
+        ExecutionResult::Revert { gas: Default::default(), logs: Vec::new(), output: Bytes::new() }
+    }
+
+    fn halt() -> ExecutionResult<MegaHaltReason> {
+        ExecutionResult::Halt {
+            reason: MegaHaltReason::DataLimitExceeded { limit: 1, actual: 2 },
+            gas: Default::default(),
+            logs: Vec::new(),
+        }
+    }
+
+    /// Like the node's receipt, a creation reports `sender.create(nonce)` and a
+    /// call reports nothing; the status plays no part.
+    #[test]
+    fn test_create_address_follows_the_transaction_kind_only() {
+        assert_eq!(create_address(CREATOR, TxKind::Create, 7), Some(CREATOR.create(7)));
+        assert_eq!(create_address(CREATOR, TxKind::Call(CREATOR), 7), None);
+    }
+
+    /// Only a successful creation deployed the contract its receipt names.
+    #[test]
+    fn test_deployed_contract_requires_success() {
+        let created = create_address(CREATOR, TxKind::Create, 0);
+        assert_eq!(deployed_contract(&success(), created), created);
+        assert_eq!(deployed_contract(&revert(), created), None);
+        assert_eq!(deployed_contract(&halt(), created), None);
+        assert_eq!(deployed_contract(&success(), None), None);
+    }
+
+    /// The summary takes the receipt's address and names it only for a
+    /// deployment, so a failed creation's summary carries no contract.
+    #[test]
+    fn test_execution_summary_names_only_a_deployed_contract() {
+        let created = create_address(CREATOR, TxKind::Create, 3);
+        assert_eq!(ExecutionSummary::from_result(&success(), created).contract_address, created);
+        assert_eq!(ExecutionSummary::from_result(&revert(), created).contract_address, None);
+        assert_eq!(ExecutionSummary::from_result(&halt(), created).contract_address, None);
+    }
 
     #[test]
     fn test_decode_revert_reason_empty() {

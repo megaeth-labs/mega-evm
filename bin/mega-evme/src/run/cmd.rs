@@ -6,7 +6,7 @@ use tracing::{debug, info, trace, warn};
 
 use super::{load_hex, Result, RunError};
 use crate::common::{
-    print_execution_summary, print_execution_trace, EvmeOutcome, ExecutionSummary,
+    create_address, print_execution_summary, print_execution_trace, EvmeOutcome, ExecutionSummary,
 };
 
 // Re-export TracerType from common module
@@ -144,12 +144,13 @@ impl Cmd {
 
     /// Output execution results
     fn output_results(&self, outcome: &EvmeOutcome) -> Result<()> {
-        // Determine contract address for CREATE transactions
-        let contract_address = (self.tx_args.create() && outcome.exec_result.is_success())
-            .then(|| self.tx_args.sender().create(outcome.pre_execution_nonce));
+        // `run` emits no receipt; the summary names this address only if the
+        // creation deployed.
+        let create_address =
+            create_address(self.tx_args.sender(), self.tx_args.kind(), outcome.pre_execution_nonce);
 
         if self.output_args.json {
-            let mut summary = ExecutionSummary::from_result(&outcome.exec_result, contract_address);
+            let mut summary = ExecutionSummary::from_result(&outcome.exec_result, create_address);
             summary.fill_trace_and_dump(outcome, &self.trace_args, &self.dump_args)?;
             println!(
                 "{}",
@@ -157,7 +158,7 @@ impl Cmd {
             );
         } else {
             // Human-readable summary
-            print_execution_summary(&outcome.exec_result, contract_address, outcome.exec_time);
+            print_execution_summary(&outcome.exec_result, create_address, outcome.exec_time);
 
             print_execution_trace(
                 outcome.trace_data.as_deref(),

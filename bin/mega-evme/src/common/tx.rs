@@ -285,6 +285,16 @@ impl TxArgs {
         self.receiver.unwrap_or_default()
     }
 
+    /// Returns the transaction kind: a creation with `--create`, otherwise a
+    /// call to the receiver.
+    pub fn kind(&self) -> TxKind {
+        if self.create() {
+            TxKind::Create
+        } else {
+            TxKind::Call(self.receiver())
+        }
+    }
+
     /// Returns the parsed value, defaulting to 0.
     pub fn value(&self) -> Result<U256> {
         self.value.as_deref().map(parse_ether_value).transpose().map(|v| v.unwrap_or_default())
@@ -317,7 +327,7 @@ impl TxArgs {
         self.validate()?;
 
         let data = load_hex(self.input.clone(), self.inputfile.clone())?.unwrap_or_default();
-        let kind = if self.create() { TxKind::Create } else { TxKind::Call(self.receiver()) };
+        let kind = self.kind();
         let authorization_list =
             self.parse_authorization_list(chain_id)?.into_iter().map(Either::Right).collect();
         let access_list = self.parse_access_list()?;

@@ -85,6 +85,9 @@ The output includes the same fields as [`run --json`](run.md#json-output), plus 
 | --------- | ---------------- | --------------------------------------------------------------------------- |
 | `receipt` | `object \| null` | Full transaction receipt with status, logs, gas usage, and contract address |
 
+Like a node's receipt, `receipt.contractAddress` is set for every `--create` transaction, including one that reverted or halted: it is the address the creation targeted, derived from the sender and its nonce.
+The top-level `contract_address` names a deployed contract, so it appears only when the creation succeeded.
+
 ```bash
 mega-evme tx --fork --rpc https://mainnet.megaeth.com/rpc \
   --sender.balance 1ether \

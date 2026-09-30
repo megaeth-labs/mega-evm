@@ -32,7 +32,7 @@ use std::{
 
 use alloy_consensus::{transaction::Recovered, BlockHeader};
 use alloy_network::ReceiptResponse;
-use alloy_primitives::{Address, B256};
+use alloy_primitives::B256;
 use alloy_provider::Provider;
 use alloy_rpc_types_eth::Block;
 use mega_evm::{
@@ -243,7 +243,6 @@ struct ExecutedTx {
     block_number: u64,
     tx_index: u64,
     exec_result: ExecutionResult<MegaHaltReason>,
-    contract_address: Option<Address>,
     exec_time: Duration,
     receipt: OpTxReceipt,
     /// On-chain receipt verdict, present iff `--verify-receipt` was given.
@@ -1295,7 +1294,6 @@ where
                     block_number: number,
                     tx_index: target.tx_index,
                     exec_result: target.exec_result,
-                    contract_address: target.contract_address,
                     exec_time: target.exec_time,
                     receipt: target.receipt,
                     verification,
@@ -1820,7 +1818,7 @@ fn emit(entry: &BatchEntry, json: bool) {
         let line = match entry {
             BatchEntry::Executed(tx) => {
                 let mut summary =
-                    ExecutionSummary::from_result(&tx.exec_result, tx.contract_address);
+                    ExecutionSummary::from_result(&tx.exec_result, tx.receipt.contract_address);
                 summary.receipt =
                     Some(serde_json::to_value(&tx.receipt).expect("failed to serialize receipt"));
                 summary.verification = tx.verification.as_ref().map(|verification| {
@@ -1850,7 +1848,7 @@ fn emit(entry: &BatchEntry, json: bool) {
                 "=== Transaction {} (block {}, index {}) ===",
                 tx.tx_hash, tx.block_number, tx.tx_index
             );
-            print_execution_summary(&tx.exec_result, tx.contract_address, tx.exec_time);
+            print_execution_summary(&tx.exec_result, tx.receipt.contract_address, tx.exec_time);
             print_receipt(&tx.receipt);
             if let Some(verification) = &tx.verification {
                 println!();
