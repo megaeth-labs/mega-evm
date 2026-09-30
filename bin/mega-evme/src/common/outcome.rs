@@ -82,6 +82,15 @@ impl EvmeOutcome {
 /// Every command's receipt goes through this one function; the execution
 /// summary narrows it with [`deployed_contract`].
 pub fn create_address(sender: Address, kind: TxKind, pre_execution_nonce: u64) -> Option<Address> {
+    // TODO: node divergence for deposit CREATEs. The OP deposit-receipt spec
+    // derives a deposit creation's `contractAddress` from its `depositNonce`,
+    // and so does this function (the pre-execution nonce is the deposit nonce).
+    // mega-reth develop (bd8c41d) and v2.2.1/v2.2.2 predate op-reth's fix
+    // (ethereum-optimism/optimism#21449) and report `CREATE(from, 0)`, so its
+    // receipt differs from ours whenever the deposit sender's nonce is above 0.
+    // Drop this note once mega-reth carries the fix.
+    // Spec: <https://specs.optimism.io/protocol/deposits.html#deposit-receipt>
+    // Fix: <https://github.com/ethereum-optimism/optimism/pull/21449>
     kind.is_create().then(|| sender.create(pre_execution_nonce))
 }
 
