@@ -1,8 +1,10 @@
 # Changelog
 
-## v1.7.2
+## v1.7.2 (2026-09-30)
 
-_No changes recorded since the previous release._
+### Fixes
+
+- evm: load L1 block info at block 0 on release-v1.7.2 ([#397](https://github.com/megaeth-labs/mega-evm/pull/397))
 
 ## v1.7.1 (2026-09-08)
 
