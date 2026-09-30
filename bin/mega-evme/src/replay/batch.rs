@@ -40,6 +40,7 @@ use mega_evm::{
     revm::{context::result::ExecutionResult, inspector::NoOpInspector, DatabaseRef},
     BlockLimits, MegaBlockExecutionCtx, MegaHaltReason, MegaHardforks, MegaSpecId, MegaTxEnvelope,
 };
+use op_alloy_consensus::OpReceiptEnvelope;
 use op_alloy_rpc_types::Transaction;
 use serde::Serialize;
 use state_test::types::MegaEnv;
@@ -1114,7 +1115,7 @@ where
     // each feature below.
     let need_receipts = verify_receipt || dump_dir.is_some();
     let onchain_receipts = if need_receipts {
-        fetch_target_receipts(provider, &targets, block.hash()).await
+        fetch_target_receipts(provider, &targets, &block).await
     } else {
         BTreeMap::new()
     };
@@ -1616,21 +1617,32 @@ fn fixture_report_from_build_err(err: fixture::FixtureBuildError) -> FixtureRepo
 ///
 /// Each target maps either to the consensus facts its receipt reports, or to the
 /// message explaining why it could not be verified (the endpoint failed the
-/// call or pruned the receipt, or the receipt describes a different inclusion
-/// than the block being replayed).
+/// call or pruned the receipt, the receipt describes a different inclusion
+/// than the block being replayed, or the block's receipts do not authenticate
+/// against its header).
+///
+/// When the targets cover the whole body, the fetched receipts are also
+/// authenticated against the header's `receiptsRoot`
+/// ([`authenticate_block_receipts`]), so a verdict is never rendered against a
+/// receipt the chain did not commit to.
 async fn fetch_target_receipts<P>(
     provider: &P,
     targets: &[B256],
-    block_hash: B256,
+    block: &Block<Transaction>,
 ) -> BTreeMap<B256, std::result::Result<ReceiptFacts, String>>
 where
     P: Provider<op_alloy_network::Optimism>,
 {
+    let block_hash = block.hash();
     let mut receipts = BTreeMap::new();
+    let mut envelopes = HashMap::with_capacity(targets.len());
     for tx_hash in targets {
         let fetched = match verify::fetch_receipt(provider, *tx_hash).await {
             Ok(receipt) => match verify::check_inclusion(receipt.block_hash(), block_hash) {
-                Ok(()) => Ok(ReceiptFacts::from_onchain(&receipt)),
+                Ok(()) => {
+                    envelopes.insert(*tx_hash, verify::consensus_receipt(&receipt));
+                    Ok(ReceiptFacts::from_onchain(&receipt))
+                }
                 Err(message) => Err(message),
             },
             // The reported entry already carries the `rpc` kind, so the error's
@@ -1643,7 +1655,49 @@ where
         }
         receipts.insert(*tx_hash, fetched);
     }
+    let body: Vec<B256> = block.transactions.hashes().collect();
+    authenticate_block_receipts(&mut receipts, &envelopes, &body, block.header.receipts_root());
     receipts
+}
+
+/// Authenticate a block's fetched receipts against the header's `receiptsRoot`
+/// when they cover its whole body.
+///
+/// Each receipt was only checked against the question it answers (its
+/// transaction and inclusion); the root is what ties the set to the chain. A
+/// set that does not reproduce it is unauthentic endpoint data — the same
+/// unanswered class as a receipt the endpoint could not serve — so every
+/// fetched receipt of the block becomes unavailable rather than being compared.
+/// A partial set (not every body transaction is a target, or a fetch failed)
+/// cannot be checked and is left as fetched.
+fn authenticate_block_receipts(
+    receipts: &mut BTreeMap<B256, std::result::Result<ReceiptFacts, String>>,
+    envelopes: &HashMap<B256, OpReceiptEnvelope>,
+    body: &[B256],
+    receipts_root: B256,
+) {
+    if body.is_empty() {
+        return;
+    }
+    let Some(ordered) =
+        body.iter().map(|hash| envelopes.get(hash).cloned()).collect::<Option<Vec<_>>>()
+    else {
+        return;
+    };
+    let computed = header::receipts_root(&ordered);
+    if computed == receipts_root {
+        return;
+    }
+    let message = format!(
+        "The block's on-chain receipts do not authenticate against its header: they commit to \
+         receipts root {computed}, the header to {receipts_root}"
+    );
+    warn!(%computed, header = %receipts_root, "On-chain receipts do not match the receiptsRoot");
+    for fetched in receipts.values_mut() {
+        if fetched.is_ok() {
+            *fetched = Err(message.clone());
+        }
+    }
 }
 
 /// Fetch a block by number, using the same call shape as the single-transaction path.

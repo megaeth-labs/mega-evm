@@ -83,6 +83,13 @@ impl ReceiptFacts {
     }
 }
 
+/// The consensus receipt an on-chain RPC receipt describes, as the block's
+/// `receiptsRoot` commits to it.
+pub(super) fn consensus_receipt(receipt: &OpTransactionReceipt) -> OpReceiptEnvelope {
+    let envelope: OpReceiptEnvelope<RpcLog> = receipt.inner.inner.clone().into();
+    envelope.map_logs(|log| log.inner)
+}
+
 /// The verdict for one verified transaction.
 ///
 /// Three shapes on the wire:
