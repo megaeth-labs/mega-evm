@@ -321,7 +321,8 @@ pub(super) struct HarvestedTarget<D> {
     /// contract address above was derived from, reported so a driver does not
     /// have to read it back from a database the target has since committed to.
     pub(super) pre_execution_nonce: u64,
-    /// Address a successful contract creation deployed to.
+    /// Address a contract creation targets, reported for a failed creation too
+    /// (as the node's receipt does); `None` for a call.
     pub(super) contract_address: Option<Address>,
     /// Receipt built from the block's own receipt for this target.
     pub(super) receipt: OpTxReceipt,
@@ -576,7 +577,13 @@ where
                     });
                     continue;
                 };
-                let contract_address = (target.to.is_none() && envelope.is_success())
+                // The node reports the address a creation targets whether or not
+                // it deployed anything, so a failed CREATE carries it too. The
+                // execution summary still only names a deployed contract: it
+                // reads this field on the success arm alone.
+                let contract_address = target
+                    .to
+                    .is_none()
                     .then(|| target.from.create(target.pre_execution_nonce));
                 // Block-global log index: cumulative log count of all committed
                 // receipts that precede this target in the block.

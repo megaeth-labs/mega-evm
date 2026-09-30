@@ -92,3 +92,35 @@ fn test_halted_mainnet_creates_report_failure_with_no_logs() {
         assert!(logs.is_empty(), "{tx} must replay with an empty receipt log list, got: {logs:?}");
     }
 }
+
+/// A failed CREATE still reports the address it targeted, exactly as the node's receipt does.
+///
+/// The address is derived from the sender and its nonce, not from a deployment, so the node
+/// stamps it on every creation receipt whatever the outcome. The expected values are the ones
+/// the captured on-chain receipts carry. The execution summary keeps naming a deployed contract
+/// only, so it must not report one for these halts.
+#[test]
+fn test_halted_mainnet_creates_report_the_onchain_contract_address() {
+    const ONCHAIN_CONTRACT_ADDRESSES: [(&str, &str); 3] = [
+        (TXS[0], "0x3152a8cd6ca0c64675c73486b06203a9d8226448"),
+        (TXS[1], "0xd8e977e9e7e81d29daec823bf60e0303e80281cb"),
+        (TXS[2], "0xa190ae4c4f01740a4ac1e15d4e26a9991cfaeaab"),
+    ];
+    for (tx, expected) in ONCHAIN_CONTRACT_ADDRESSES {
+        let (success, stdout, stderr) = replay(tx, &["--json"]);
+
+        assert!(success, "{tx} must replay.\nstderr: {stderr}");
+        let result = common::json_values(&stdout)
+            .pop()
+            .unwrap_or_else(|| panic!("{tx} produced no JSON result"));
+        assert_eq!(
+            result["receipt"]["contractAddress"],
+            serde_json::json!(expected),
+            "{tx} must report the on-chain contractAddress, got: {result}",
+        );
+        assert!(
+            result.get("contract_address").is_none(),
+            "a halted CREATE deployed nothing, so the summary must not name a contract: {result}",
+        );
+    }
+}

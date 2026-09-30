@@ -1309,8 +1309,9 @@ impl Cmd {
 
         let from = ctx.target_tx.inner.inner.signer();
         let to = ctx.target_tx.inner.inner.to();
-        let contract_address = (to.is_none() && receipt_envelope.is_success())
-            .then(|| from.create(pre_execution_nonce));
+        // Reported for a failed creation too, matching the node's receipt; the
+        // execution summary only prints it on success.
+        let contract_address = to.is_none().then(|| from.create(pre_execution_nonce));
         let receipt = op_receipt_to_tx_receipt(
             &receipt_envelope,
             ctx.block.number(),
