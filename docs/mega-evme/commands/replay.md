@@ -1,5 +1,5 @@
 ---
-description: Fetch and re-execute one or many on-chain transactions with optional overrides, tracing, and on-chain receipt verification.
+description: Fetch and re-execute one or many on-chain transactions with optional overrides, tracing, and on-chain receipt and block header verification.
 ---
 
 # replay
@@ -72,6 +72,7 @@ An explicit `--rpc.no-cache-file` still wins over both flags and keeps the disk 
 
 A plain batch replay issues the same RPC calls as single-transaction replay, so an offline envelope captured by single-transaction runs serves a batch run without a cache miss.
 `--verify-receipt` and `--dump-fixture-dir` are the exception: both fetch the receipt of every target in the block, including transactions a single-transaction capture never asked about, so an older envelope will miss them and the run exits `3`.
+[`--verify-header`](#header-verification) issues no additional call: the header it compares against is the one the replay already fetched.
 
 ### `--tx-file <PATH>`
 
@@ -140,6 +141,7 @@ A final one-line summary (transactions replayed, transactions failed, elapsed ti
 
 With [`--verify-receipt`](#receipt-verification), each result line additionally carries a `verification` object.
 With [`--dump-fixture-dir`](#--dump-fixture-dir-dir), each result line additionally carries a `fixture` object (`path`, `skipped`, or `error`).
+With [`--verify-header`](#header-verification), each block adds one header line after its result lines; it carries `block_number` and `header_verification` but no `tx_hash`.
 
 ### Exit Status
 
@@ -194,11 +196,18 @@ Replaying a transaction only proves that the local EVM produced _some_ result; e
 Verify every replayed transaction against its on-chain receipt.
 Supported in both single-transaction and [batch](#batch-replay) mode.
 
-Three dimensions are compared:
+Every field of the consensus receipt is compared:
 
 - **Status** — the success flag.
-- **Gas used** — the transaction's gas, not the block's cumulative gas.
+- **Gas used** — the transaction's own gas.
+- **Cumulative gas used** — the block's gas up to and including this transaction, so a divergence in an earlier transaction of the block also surfaces here.
+- **Type** — the receipt's EIP-2718 type.
+- **Deposit nonce and deposit receipt version** — for a deposit receipt; `null` on any other type.
 - **Logs** — the number of logs, and each log's `address`, `topics`, and `data`.
+
+Together these are exactly what the block header's `receiptsRoot` commits to, so a verified transaction's receipt agrees with the chain's commitment, not only with the endpoint's answer.
+The receipt's `contractAddress` is not compared, since it is derived from the sender and nonce rather than produced by execution.
+Like the node, replay reports it for every contract creation, including one that reverted or halted.
 
 Logs are compared explicitly rather than inferred from gas: `LOG` gas depends on topic count and data length, never on content, so two executions can burn identical gas yet emit different log payloads.
 
@@ -214,6 +223,8 @@ Anything that prevents the comparison from running is an infrastructure failure 
 - The receipt describes a different inclusion than the replayed block (its `blockHash` differs from the replayed block, or is null — a reorg in progress, or a load-balanced endpoint serving divergent views): reported as an `rpc` failure, because comparing against it would compare the replay to the wrong on-chain execution, and a receipt with no inclusion hash cannot be anchored at all.
 - The receipt describes a different transaction than the one requested (its `transactionHash` is not the hash the receipt was asked for — an inconsistent endpoint, or a tampered capture): reported as an `rpc` failure, because the verdict would describe the wrong transaction, and two transactions sharing their consensus facts would even yield a spurious match.
 - The target is a pending transaction, which has no receipt yet: rejected up front in single-transaction mode, and reported as a `pending` error entry in batch mode.
+- In a batch run whose targets cover a whole block (`--block`, or a `--tx-file` listing every transaction of it), the fetched receipts do not reproduce the header's `receiptsRoot`: every receipt of the block is reported as an `rpc` failure, because the endpoint served receipts the chain did not commit to.
+  A run over part of a block cannot check the root and compares each receipt as served.
 
 In batch mode, when a target already produced an execution result and only the receipt fetch failed, the target keeps its full result line (execution summary, local receipt, timing) and reports the failure on that line as `"verification": {"error": "…"}`.
 The target still counts as `replayed`; the unanswered receipt is tallied as `rpc` and the run exits `3`.
@@ -238,7 +249,8 @@ An unanswered receipt (fetch failed, pruned, reorg / divergent inclusion) carrie
 { "error": "No on-chain receipt was fetched for this transaction" }
 ```
 
-A mismatch carries a `diff` holding only the dimensions that disagreed, each as `{"onchain": …, "replay": …}`:
+A mismatch carries a `diff` holding only the dimensions that disagreed, each as `{"onchain": …, "replay": …}`.
+The keys are `status`, `gas_used`, `cumulative_gas_used`, `tx_type`, `deposit_nonce`, `deposit_receipt_version`, and `logs`:
 
 ```json
 {
@@ -277,6 +289,7 @@ The failed line is used when the comparison never ran.
 
 A run in which every target replayed and every verification matched exits `0`.
 A verification mismatch exits `2` through a dedicated error (`Receipt verification mismatch: N of M verified transaction(s) did not reproduce the on-chain receipt`), reported after every result line has been written.
+With [`--verify-header`](#header-verification) the message also counts the block headers that were not reproduced.
 Infrastructure failures keep their own exit code and take precedence in a batch run: a target that never replayed was also never verified, so reporting it as a mismatch would overstate what the run found.
 An execution or input failure exits `1`, an RPC failure (including a receipt the endpoint cannot serve) exits `3`.
 See [Exit codes](../overview.md#exit-codes) for the full taxonomy and the batch precedence rule.
@@ -310,6 +323,97 @@ mega-evme replay --rpc https://mainnet.megaeth.com/rpc \
 
 mega-evme replay --rpc.replay-file ./corpus.cache.json \
   --tx-file ./corpus.txt --verify-receipt --json
+```
+
+## Header Verification
+
+Receipt verification checks each transaction against the answer the endpoint serves for it.
+Header verification checks a whole block against the commitment the chain sealed: after the replay has executed every transaction of a block, it compares what the replayed block commits to against the block's header.
+The header is authenticated before anything reads it (its hash is recomputed from the served fields), so a match ties the replay to the chain itself.
+It also authenticates the block body: the transactions root is rebuilt from the executed transactions, so a body listing the endpoint forged fails the check.
+
+### `--verify-header`
+
+Verify every replayed block against its header.
+Batch mode only, and only for whole blocks: `--block <N>`, or a `--tx-file` that lists every transaction of each block it touches.
+A single-transaction replay stops at its target and never produces the block the header describes, so it is rejected up front.
+A `--tx-file` that leaves out any transaction of a block it touches is rejected before any block runs (exit `1`), naming the incomplete block.
+
+These header fields are compared:
+
+- **`transactionsRoot`** — rebuilt from the EIP-2718 encoding of every executed transaction.
+- **`receiptsRoot`** — rebuilt from the receipts the replay produced.
+- **`logsBloom`** — the union of the produced receipts' blooms.
+- **`gasUsed`** — the block's gas as the block executor accounted it.
+- **`blobGasUsed`** — likewise.
+- **`requestsHash`** — the EIP-7685 requests the block produced; a header without the field must come from a block that produced none.
+
+The state root and the withdrawals root are not compared: both commit to the post-block state trie, which a replay over forked RPC state does not build.
+
+The flag can be combined with `--verify-receipt`.
+The receipt verdicts then say which transactions diverged, and the header verdict says whether the block as a whole reproduces the chain.
+
+### Output
+
+With `--json`, each block adds one line after its result lines:
+
+```json
+{
+  "block_number": 22945844,
+  "block_hash": "0x538f…a833",
+  "header_verification": { "match": true }
+}
+```
+
+A mismatch carries a `diff` holding only the fields that disagreed, each as `{"onchain": …, "replay": …}`, where `onchain` is the header's value.
+The keys are `transactions_root`, `receipts_root`, `logs_bloom`, `gas_used`, `blob_gas_used`, and `requests_hash`:
+
+```json
+{
+  "match": false,
+  "diff": {
+    "receipts_root": { "onchain": "0xcc7e…13e0", "replay": "0xba03…bb94" },
+    "gas_used": { "onchain": 7734063, "replay": 7722641 }
+  }
+}
+```
+
+A block whose body did not execute in full (a transaction aborted the walk, or the block could not be finished) has nothing to compare, and its verdict carries only the error, never a `match` field:
+
+```json
+{ "error": "the block body did not execute in full: …" }
+```
+
+The failure itself is reported on the affected transactions' lines and decides the exit code.
+A header line has no `tx_hash`, which is how a consumer tells it apart from a transaction line.
+
+Without `--json`, the verdict is printed under a block heading after the block's transactions:
+
+```
+=== Block 22945844 (0x538f…a833) ===
+header verification: MATCH
+header verification: MISMATCH (receipts_root: onchain 0xcc7e… vs replay 0xba03…, gas_used: onchain 7734063 vs replay 7722641)
+header verification: FAILED (the block body did not execute in full: …)
+```
+
+### Exit Status
+
+A header mismatch exits `2`, like a receipt mismatch, and the two are counted together in the error message (`Header verification mismatch: N of M verified block(s) did not reproduce the block header`, or `Verification mismatch: …; …` when receipts were verified too).
+Infrastructure failures keep their precedence over a mismatch, see [Exit codes](../overview.md#exit-codes).
+
+### Examples
+
+Verify a whole block, its receipts and its header, against a live RPC:
+
+```bash
+mega-evme replay --rpc https://mainnet.megaeth.com/rpc \
+  --block 22945844 --verify-receipt --verify-header --json
+```
+
+Select the blocks whose header was not reproduced:
+
+```bash
+jq -c 'select(.header_verification.match == false)' results.ndjson
 ```
 
 ## RPC Cache File
@@ -527,6 +631,8 @@ Options marked _(single transaction only)_ are rejected in [batch mode](#batch-r
   See [Batch Replay](#batch-replay) above.
 - **Receipt verification** — Check every replayed transaction against its on-chain receipt via `--verify-receipt`.
   See [Receipt Verification](#receipt-verification) above.
+- **Header verification** _(whole-block batch only)_ — Check every replayed block against its header via `--verify-header`.
+  See [Header Verification](#header-verification) above.
 - **SALT buckets** — Configure SALT bucket capacity for dynamic storage gas pricing.
   See [SALT Buckets](../configuration/salt-buckets.md).
 - **State dump** _(single transaction only)_ — Dump or load pre/post-state snapshots.
@@ -587,6 +693,12 @@ mega-evme replay --rpc https://mainnet.megaeth.com/rpc --block 22945844 --json
 
 ```bash
 mega-evme replay --rpc https://mainnet.megaeth.com/rpc --block 22945844 --verify-receipt --json
+```
+
+**Verify a whole block against its receipts and its header**
+
+```bash
+mega-evme replay --rpc https://mainnet.megaeth.com/rpc --block 22945844 --verify-receipt --verify-header --json
 ```
 
 ## See Also
