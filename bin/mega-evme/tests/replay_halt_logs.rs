@@ -8,8 +8,10 @@
 //!
 //! A full-history replay of the pre-REX4 range caught three mainnet transactions doing exactly
 //! that. They are captured here with their on-chain receipts, so the regression is pinned against
-//! the chain rather than against a hand-written expectation: `--verify-receipt` compares status,
-//! gas and logs, and fails the run on any difference.
+//! the chain rather than against a hand-written expectation: `--verify-receipt` compares the
+//! receipt's consensus fields (status, gas, logs, type), and fails the run on any difference. One
+//! of the three closes its block, whose whole body is captured, so `--verify-header` also checks
+//! that block against its header.
 //!
 //! Runs fully offline — `--rpc.replay-file` never falls back to the network, and a cache miss is a
 //! hard error. The unit-level coverage of the same defect lives in the `mega-evm` crate's
@@ -123,4 +125,48 @@ fn test_halted_mainnet_creates_report_the_onchain_contract_address() {
             "a halted CREATE deployed nothing, so the summary must not name a contract: {result}",
         );
     }
+}
+
+/// The first capture's transaction is the last of its block, and the capture holds every body
+/// transaction before it, so the whole block replays offline. `--verify-header` then checks the
+/// halted CREATE against the chain's own commitment rather than only against its served receipt:
+/// the rebuilt receipts root (which commits to its status, cumulative gas and empty logs), logs
+/// bloom and gas used must reproduce the header. The capture holds only the targets' receipts, so
+/// `--verify-receipt` cannot run over this block.
+#[test]
+fn test_halted_create_block_reproduces_its_header() {
+    const BLOCK: u64 = 3_452_027;
+    const BODY_LEN: usize = 22;
+
+    let output = Command::new(env!("CARGO_BIN_EXE_mega-evme"))
+        .args(["replay", "--rpc.replay-file", cache().to_str().expect("cache path is utf-8")])
+        .args(["--block", &BLOCK.to_string(), "--verify-header", "--json"])
+        .output()
+        .expect("failed to run mega-evme");
+    let stdout = String::from_utf8(output.stdout).expect("stdout is utf-8");
+    let stderr = String::from_utf8(output.stderr).expect("stderr is utf-8");
+    assert!(output.status.success(), "block {BLOCK} must replay in full.\nstderr: {stderr}");
+
+    let lines = common::json_values(&stdout);
+    let (headers, txs): (Vec<_>, Vec<_>) =
+        lines.iter().partition(|line| line.get("header_verification").is_some());
+    assert_eq!(txs.len(), BODY_LEN, "every body transaction must replay: {stdout}");
+    assert!(
+        txs.iter().all(|line| line.get("error").is_none()),
+        "no transaction may fail: {stdout}"
+    );
+    assert_eq!(
+        txs.last().expect("the block has transactions")["tx_hash"],
+        serde_json::json!(TXS[0]),
+        "the halted CREATE is the last transaction of the block",
+    );
+    let [header] = headers.as_slice() else {
+        panic!("expected exactly one header verdict, got {headers:?}");
+    };
+    assert_eq!(header["block_number"], serde_json::json!(BLOCK));
+    assert_eq!(
+        header["header_verification"],
+        serde_json::json!({ "match": true }),
+        "the replayed block must reproduce its header, got: {header}",
+    );
 }
