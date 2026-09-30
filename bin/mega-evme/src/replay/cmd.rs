@@ -143,8 +143,9 @@ pub struct Cmd {
     /// Verify every replayed transaction against its on-chain receipt.
     ///
     /// Fetches the receipt of each target and compares the success status, the
-    /// gas used, and the emitted logs (count plus each log's address, topics,
-    /// and data). The verdict is reported per transaction, and a mismatch makes
+    /// gas used, the block-cumulative gas used, the receipt type, a deposit
+    /// receipt's nonce and version, and the emitted logs (count plus each log's
+    /// address, topics, and data). The verdict is reported per transaction, and a mismatch makes
     /// the run exit non-zero. A target whose receipt cannot be fetched, or whose
     /// receipt describes a different inclusion than the replayed block, is
     /// reported as an infrastructure failure rather than a mismatch. Supported
@@ -1057,7 +1058,7 @@ impl Cmd {
 
         let verification = onchain_receipt.as_ref().map(|onchain| {
             verify::compare(
-                &verify::ReceiptFacts::from_receipt(&onchain.inner),
+                &verify::ReceiptFacts::from_onchain(onchain),
                 &verify::ReceiptFacts::from_receipt(&executed.receipt),
             )
         });

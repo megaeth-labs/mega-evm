@@ -14,43 +14,71 @@
 
 use core::fmt;
 
-use alloy_consensus::TxReceipt;
 use alloy_network::ReceiptResponse;
 use alloy_primitives::{keccak256, Address, Bytes, Log, B256};
 use alloy_provider::Provider;
-use alloy_rpc_types_eth::{Log as RpcLog, TransactionReceipt};
+use alloy_rpc_types_eth::Log as RpcLog;
 use mega_evm::{alloy_consensus::transaction::SignerRecoverable, alloy_eips::Encodable2718};
+use op_alloy_consensus::OpReceiptEnvelope;
 use op_alloy_rpc_types::{OpTransactionReceipt, Transaction};
 use serde::Serialize;
+
+use crate::common::OpTxReceipt;
 
 use super::{ReplayError, Result};
 
 /// The consensus facts compared between the on-chain receipt and the receipt
 /// the local replay produced.
+///
+/// Every field of the consensus receipt encoding is covered — the envelope type,
+/// status, cumulative gas, logs, and a deposit receipt's nonce and version — so
+/// a verified transaction's receipt agrees with the one the block's
+/// `receiptsRoot` commits to. The bloom is derived from the logs and is not
+/// compared separately.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ReceiptFacts {
     /// Whether the transaction succeeded.
     pub status: bool,
     /// Gas the transaction used.
     pub gas_used: u64,
+    /// Gas the block had used up to and including this transaction.
+    pub cumulative_gas_used: u64,
+    /// EIP-2718 type of the receipt envelope.
+    pub tx_type: u8,
+    /// Deposit nonce of a deposit receipt; `None` for any other type.
+    pub deposit_nonce: Option<u64>,
+    /// Deposit receipt version of a deposit receipt; `None` for any other type.
+    pub deposit_receipt_version: Option<u64>,
     /// The consensus logs the transaction emitted, in order.
     pub logs: Vec<Log>,
 }
 
 impl ReceiptFacts {
+    /// Extract the compared facts from the receipt the local replay built.
+    pub(super) fn from_receipt(receipt: &OpTxReceipt) -> Self {
+        Self::from_envelope(&receipt.inner, receipt.gas_used)
+    }
+
+    /// Extract the compared facts from an on-chain RPC receipt.
+    pub(super) fn from_onchain(receipt: &OpTransactionReceipt) -> Self {
+        let envelope: OpReceiptEnvelope<RpcLog> = receipt.inner.inner.clone().into();
+        Self::from_envelope(&envelope, receipt.inner.gas_used)
+    }
+
     /// Extract the compared facts from a receipt envelope.
     ///
     /// Both sides go through this one accessor set — the on-chain side is the
     /// RPC receipt's inner envelope, the local side the envelope the replay
     /// built — so neither side can be read with different semantics.
-    pub(super) fn from_receipt<T>(receipt: &TransactionReceipt<T>) -> Self
-    where
-        T: TxReceipt<Log = RpcLog>,
-    {
+    fn from_envelope(envelope: &OpReceiptEnvelope<RpcLog>, gas_used: u64) -> Self {
         Self {
-            status: receipt.inner.status(),
-            gas_used: receipt.gas_used,
-            logs: receipt.logs().iter().map(|log| log.inner.clone()).collect(),
+            status: envelope.status(),
+            gas_used,
+            cumulative_gas_used: envelope.cumulative_gas_used(),
+            tx_type: envelope.tx_type() as u8,
+            deposit_nonce: envelope.deposit_nonce(),
+            deposit_receipt_version: envelope.deposit_receipt_version(),
+            logs: envelope.logs().iter().map(|log| log.inner.clone()).collect(),
         }
     }
 }
@@ -139,6 +167,19 @@ pub(super) struct VerificationDiff {
     /// Present when the gas used differs.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gas_used: Option<Mismatch<u64>>,
+    /// Present when the block-cumulative gas at this transaction differs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cumulative_gas_used: Option<Mismatch<u64>>,
+    /// Present when the receipt envelope types differ.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tx_type: Option<Mismatch<u8>>,
+    /// Present when the deposit nonces differ (`null` on a non-deposit side).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deposit_nonce: Option<Mismatch<Option<u64>>>,
+    /// Present when the deposit receipt versions differ (`null` on a non-deposit
+    /// side).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deposit_receipt_version: Option<Mismatch<Option<u64>>>,
     /// Present when the emitted logs differ.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub logs: Option<LogsDiff>,
@@ -147,7 +188,13 @@ pub(super) struct VerificationDiff {
 impl VerificationDiff {
     /// Whether every compared dimension agreed.
     fn is_empty(&self) -> bool {
-        self.status.is_none() && self.gas_used.is_none() && self.logs.is_none()
+        self.status.is_none() &&
+            self.gas_used.is_none() &&
+            self.cumulative_gas_used.is_none() &&
+            self.tx_type.is_none() &&
+            self.deposit_nonce.is_none() &&
+            self.deposit_receipt_version.is_none() &&
+            self.logs.is_none()
     }
 
     /// Render every mismatched dimension as one comma-separated line.
@@ -158,6 +205,27 @@ impl VerificationDiff {
         }
         if let Some(m) = &self.gas_used {
             parts.push(format!("gas_used: onchain {} vs replay {}", m.onchain, m.replay));
+        }
+        if let Some(m) = &self.cumulative_gas_used {
+            parts
+                .push(format!("cumulative_gas_used: onchain {} vs replay {}", m.onchain, m.replay));
+        }
+        if let Some(m) = &self.tx_type {
+            parts.push(format!("tx_type: onchain {} vs replay {}", m.onchain, m.replay));
+        }
+        if let Some(m) = &self.deposit_nonce {
+            parts.push(format!(
+                "deposit_nonce: onchain {} vs replay {}",
+                display_optional(m.onchain),
+                display_optional(m.replay)
+            ));
+        }
+        if let Some(m) = &self.deposit_receipt_version {
+            parts.push(format!(
+                "deposit_receipt_version: onchain {} vs replay {}",
+                display_optional(m.onchain),
+                display_optional(m.replay)
+            ));
         }
         if let Some(logs) = &self.logs {
             if let Some(m) = &logs.count {
@@ -175,6 +243,11 @@ impl VerificationDiff {
         }
         parts.join(", ")
     }
+}
+
+/// Render an optional deposit field for the human verdict line.
+fn display_optional(value: Option<u64>) -> String {
+    value.map_or_else(|| "none".to_string(), |value| value.to_string())
 }
 
 /// One dimension's two values.
@@ -284,6 +357,25 @@ pub(super) fn compare(onchain: &ReceiptFacts, replay: &ReceiptFacts) -> Verifica
     }
     if onchain.gas_used != replay.gas_used {
         diff.gas_used = Some(Mismatch { onchain: onchain.gas_used, replay: replay.gas_used });
+    }
+    if onchain.cumulative_gas_used != replay.cumulative_gas_used {
+        diff.cumulative_gas_used = Some(Mismatch {
+            onchain: onchain.cumulative_gas_used,
+            replay: replay.cumulative_gas_used,
+        });
+    }
+    if onchain.tx_type != replay.tx_type {
+        diff.tx_type = Some(Mismatch { onchain: onchain.tx_type, replay: replay.tx_type });
+    }
+    if onchain.deposit_nonce != replay.deposit_nonce {
+        diff.deposit_nonce =
+            Some(Mismatch { onchain: onchain.deposit_nonce, replay: replay.deposit_nonce });
+    }
+    if onchain.deposit_receipt_version != replay.deposit_receipt_version {
+        diff.deposit_receipt_version = Some(Mismatch {
+            onchain: onchain.deposit_receipt_version,
+            replay: replay.deposit_receipt_version,
+        });
     }
     let logs = compare_logs(&onchain.logs, &replay.logs);
     if !logs.is_empty() {
@@ -574,7 +666,25 @@ mod tests {
 
     /// A successful 21,000-gas receipt emitting the given logs.
     fn facts(logs: Vec<Log>) -> ReceiptFacts {
-        ReceiptFacts { status: true, gas_used: 21_000, logs }
+        ReceiptFacts {
+            status: true,
+            gas_used: 21_000,
+            cumulative_gas_used: 42_000,
+            tx_type: 2,
+            deposit_nonce: None,
+            deposit_receipt_version: None,
+            logs,
+        }
+    }
+
+    /// A deposit receipt's facts: type `0x7e` with its nonce and version.
+    fn deposit_facts(deposit_nonce: Option<u64>, version: Option<u64>) -> ReceiptFacts {
+        ReceiptFacts {
+            tx_type: 0x7e,
+            deposit_nonce,
+            deposit_receipt_version: version,
+            ..facts(vec![])
+        }
     }
 
     /// The `diff` of an outcome that must be a mismatch.
@@ -796,6 +906,7 @@ mod tests {
             status: false,
             gas_used: 30_000,
             logs: vec![log(ADDR_B, &[TOPIC_A], data("0x")), log(ADDR_A, &[], data("0x"))],
+            ..facts(vec![])
         };
 
         let outcome = compare(&onchain, &replay);
@@ -812,6 +923,116 @@ mod tests {
                  gas_used: onchain 21000 vs replay 30000, logs_count: onchain 1 vs replay 2, \
                  logs[0].address: onchain {ADDR_A} vs replay {ADDR_B})"
             )
+        );
+    }
+
+    /// The block-cumulative gas is compared even when the transaction's own gas
+    /// agrees: a preceding transaction that used different gas shifts it.
+    #[test]
+    fn test_compare_reports_cumulative_gas_delta() {
+        let onchain = facts(vec![]);
+        let replay = ReceiptFacts { cumulative_gas_used: 43_000, ..facts(vec![]) };
+
+        let outcome = compare(&onchain, &replay);
+
+        let diff = diff_of(&outcome);
+        assert!(diff.gas_used.is_none(), "own gas agreed, so it must be absent: {diff:?}");
+        assert_eq!(diff.cumulative_gas_used, Some(Mismatch { onchain: 42_000, replay: 43_000 }));
+        assert_eq!(
+            json(&outcome),
+            serde_json::json!({
+                "match": false,
+                "diff": { "cumulative_gas_used": { "onchain": 42_000, "replay": 43_000 } }
+            })
+        );
+        assert_eq!(
+            outcome.verdict_line(),
+            "verification: MISMATCH (cumulative_gas_used: onchain 42000 vs replay 43000)"
+        );
+    }
+
+    #[test]
+    fn test_compare_reports_tx_type_delta() {
+        let onchain = facts(vec![]);
+        let replay = ReceiptFacts { tx_type: 0, ..facts(vec![]) };
+
+        let outcome = compare(&onchain, &replay);
+
+        assert_eq!(diff_of(&outcome).tx_type, Some(Mismatch { onchain: 2, replay: 0 }));
+        assert_eq!(
+            outcome.verdict_line(),
+            "verification: MISMATCH (tx_type: onchain 2 vs replay 0)"
+        );
+    }
+
+    #[test]
+    fn test_compare_equal_deposit_receipts_match() {
+        let outcome = compare(&deposit_facts(Some(7), Some(1)), &deposit_facts(Some(7), Some(1)));
+
+        assert!(outcome.matched, "{outcome:?}");
+    }
+
+    #[test]
+    fn test_compare_reports_deposit_nonce_and_version_deltas() {
+        let onchain = deposit_facts(Some(7), Some(1));
+        let replay = deposit_facts(Some(8), None);
+
+        let outcome = compare(&onchain, &replay);
+
+        let diff = diff_of(&outcome);
+        assert_eq!(diff.deposit_nonce, Some(Mismatch { onchain: Some(7), replay: Some(8) }));
+        assert_eq!(diff.deposit_receipt_version, Some(Mismatch { onchain: Some(1), replay: None }));
+        assert_eq!(
+            json(&outcome)["diff"],
+            serde_json::json!({
+                "deposit_nonce": { "onchain": 7, "replay": 8 },
+                "deposit_receipt_version": { "onchain": 1, "replay": null }
+            })
+        );
+        assert_eq!(
+            outcome.verdict_line(),
+            "verification: MISMATCH (deposit_nonce: onchain 7 vs replay 8, \
+             deposit_receipt_version: onchain 1 vs replay none)"
+        );
+    }
+
+    /// An on-chain deposit receipt is read with its envelope type, cumulative gas,
+    /// nonce and version — the fields its consensus encoding commits to.
+    #[test]
+    fn test_from_onchain_reads_the_deposit_receipt_fields() {
+        let receipt: OpTransactionReceipt = serde_json::from_value(serde_json::json!({
+            "type": "0x7e",
+            "status": "0x1",
+            "cumulativeGasUsed": "0xb",
+            "logs": [],
+            "logsBloom": format!("0x{}", "0".repeat(512)),
+            "transactionHash": b256!("0x1111111111111111111111111111111111111111111111111111111111111111"),
+            "transactionIndex": "0x0",
+            "blockHash": b256!("0x2222222222222222222222222222222222222222222222222222222222222222"),
+            "blockNumber": "0x1",
+            "gasUsed": "0xa",
+            "effectiveGasPrice": "0x0",
+            "from": ADDR_A,
+            "to": ADDR_B,
+            "contractAddress": null,
+            "depositNonce": "0x5",
+            "depositReceiptVersion": "0x1"
+        }))
+        .expect("a well-formed deposit receipt");
+
+        let facts = ReceiptFacts::from_onchain(&receipt);
+
+        assert_eq!(
+            facts,
+            ReceiptFacts {
+                status: true,
+                gas_used: 10,
+                cumulative_gas_used: 11,
+                tx_type: 0x7e,
+                deposit_nonce: Some(5),
+                deposit_receipt_version: Some(1),
+                logs: vec![],
+            }
         );
     }
 
