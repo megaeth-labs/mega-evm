@@ -98,21 +98,22 @@ pub enum EvmeError {
     #[error("Unsupported transaction type: {0}")]
     UnsupportedTxType(u8),
 
-    /// A `replay --verify-receipt` run found at least one local replay that did
-    /// not reproduce the on-chain receipt.
+    /// A `replay --verify-receipt` / `--verify-header` run found at least one
+    /// local replay that did not reproduce the on-chain receipt or block header.
     ///
     /// Distinct from the infrastructure error variants so a verification
     /// mismatch can be told apart from a target that could not be replayed or
     /// verified at all.
-    #[error(
-        "Receipt verification mismatch: {mismatched} of {total} verified transaction(s) did \
-         not reproduce the on-chain receipt"
-    )]
+    #[error("{}", verification_mismatch_message(*mismatched, *total, *headers_mismatched, *headers_total))]
     VerificationMismatch {
         /// Number of verified transactions whose replay diverged.
         mismatched: usize,
         /// Number of transactions that were verified.
         total: usize,
+        /// Number of verified blocks whose replay did not reproduce the header.
+        headers_mismatched: usize,
+        /// Number of blocks verified against their header.
+        headers_total: usize,
     },
 
     /// A batch replay in which at least one target did not come out clean.
@@ -173,6 +174,8 @@ pub struct BatchFailureCounts {
     pub rpc: usize,
     /// Targets that replayed but did not reproduce their on-chain receipt.
     pub mismatched: usize,
+    /// Blocks whose replay did not reproduce their header (`--verify-header`).
+    pub headers_mismatched: usize,
     /// Targets the run reported on.
     pub total: usize,
     /// Non-target abort class that floors the run exit without being a target
@@ -199,6 +202,13 @@ impl core::fmt::Display for BatchFailureCounts {
                 self.mismatched,
             )?;
         }
+        if self.headers_mismatched > 0 {
+            write!(
+                f,
+                "; {} replayed block(s) did not reproduce the block header",
+                self.headers_mismatched,
+            )?;
+        }
         Ok(())
     }
 }
@@ -212,6 +222,30 @@ impl From<EvmDatabaseError<Self>> for EvmeError {
             EvmDatabaseError::Database(e) => e,
             EvmDatabaseError::Bal(e) => Self::Other(format!("BAL error: {e}")),
         }
+    }
+}
+
+/// Render [`EvmeError::VerificationMismatch`].
+///
+/// A receipt-only run keeps the message it has always printed; header findings
+/// are named alongside it only when the run verified headers.
+fn verification_mismatch_message(
+    mismatched: usize,
+    total: usize,
+    headers_mismatched: usize,
+    headers_total: usize,
+) -> String {
+    let receipts = format!(
+        "{mismatched} of {total} verified transaction(s) did not reproduce the on-chain receipt"
+    );
+    let headers = format!(
+        "{headers_mismatched} of {headers_total} verified block(s) did not reproduce the block \
+         header"
+    );
+    match (headers_total > 0, total > 0) {
+        (false, _) => format!("Receipt verification mismatch: {receipts}"),
+        (true, false) => format!("Header verification mismatch: {headers}"),
+        (true, true) => format!("Verification mismatch: {receipts}; {headers}"),
     }
 }
 

@@ -152,6 +152,18 @@ pub struct Cmd {
     /// in both single-transaction and batch mode.
     #[arg(long = "verify-receipt")]
     pub verify_receipt: bool,
+
+    /// Verify every replayed block against its authenticated header.
+    ///
+    /// After a block's whole body executed, the replayed block's transactions
+    /// root, receipts root, logs bloom, gas used, blob gas used, and EIP-7685
+    /// requests are compared against the header the chain sealed, and one verdict
+    /// per block is reported. A mismatch makes the run exit `2`, like a receipt
+    /// mismatch. The state root is not compared. Whole-block batch replay only:
+    /// `--block`, or a `--tx-file` that lists every transaction of each block it
+    /// touches; anything else is rejected.
+    #[arg(long = "verify-header")]
+    pub verify_header: bool,
 }
 
 /// Resolved provider and associated metadata from `--rpc` / `--rpc.capture-file` /
@@ -457,6 +469,14 @@ impl Cmd {
 
     /// Reject batch-only flags in single-transaction mode.
     fn validate_single_args(&self) -> Result<()> {
+        if self.verify_header {
+            return Err(ReplayError::Other(
+                "--verify-header needs a whole-block replay (--block <N>, or a --tx-file listing \
+                 every transaction of each block): a single transaction does not execute the \
+                 block its header describes"
+                    .to_string(),
+            ));
+        }
         if self.dump_fixture_dir.is_some() {
             return Err(ReplayError::Other(
                 "--dump-fixture-dir is only supported by batch replay (--tx-file / --block); \
@@ -599,6 +619,7 @@ impl Cmd {
             batch::ReportArgs {
                 json: self.output_args.json,
                 verify_receipt: self.verify_receipt,
+                verify_header: self.verify_header,
                 dump_fixture_dir: self.dump_fixture_dir.clone(),
                 overwrite: self.overwrite,
             },
@@ -645,7 +666,12 @@ impl Cmd {
             info!(path = %path.display(), "Wrote self-validating fixture");
         }
         if mismatched {
-            return Err(ReplayError::VerificationMismatch { mismatched: 1, total: 1 });
+            return Err(ReplayError::VerificationMismatch {
+                mismatched: 1,
+                total: 1,
+                headers_mismatched: 0,
+                headers_total: 0,
+            });
         }
         Ok(())
     }
@@ -1139,6 +1165,9 @@ impl Cmd {
                 },
                 tx_hashes: &tx_hashes,
                 targets: &targets,
+                // A single-transaction replay stops at its target, so it never
+                // produces the block its header describes.
+                summarize: false,
             },
             &mut lifecycle,
         )
@@ -1155,7 +1184,8 @@ impl Cmd {
         // run was asked about. Checking the walk first keeps the attribution the
         // one the user gets today — a failed target is reported as its own
         // failure, not as the block's inability to finish afterwards.
-        let kernel::BlockRun { loop_outcome, finish } = run;
+        // Never asked for: the walk stops at the target.
+        let kernel::BlockRun { loop_outcome, finish, summary: _ } = run;
         let clean = match loop_outcome {
             kernel::LoopOutcome::Completed(proof) => proof,
             kernel::LoopOutcome::Aborted { error, .. } => return Err(error),
@@ -1682,6 +1712,33 @@ mod tests {
             message.contains("--dump-fixture-dir") && message.contains("batch"),
             "unexpected rejection: {message}"
         );
+    }
+
+    /// `--verify-header` needs the whole block executed, which a single-transaction
+    /// replay never does, so it is rejected up front with the modes that can.
+    #[test]
+    fn test_verify_header_rejected_in_single_transaction_mode() {
+        let cmd = parse(&["--verify-header", TX]).expect("parse");
+        let message =
+            cmd.validate().expect_err("single-tx must reject --verify-header").to_string();
+        assert!(
+            message.contains("--verify-header") && message.contains("--block"),
+            "unexpected rejection: {message}"
+        );
+    }
+
+    /// Both batch modes accept `--verify-header`; whether a `--tx-file` covers
+    /// whole blocks is only known once its targets are resolved.
+    #[test]
+    fn test_verify_header_accepted_in_batch_mode() {
+        for extra in [["--block", "1"], ["--tx-file", "/tmp/list.txt"]] {
+            let mut argv = extra.to_vec();
+            argv.push("--verify-header");
+            let cmd = parse(&argv).expect("parse");
+            assert!(cmd.verify_header, "the flag must be recorded for {extra:?}");
+            cmd.validate()
+                .unwrap_or_else(|e| panic!("--verify-header must be accepted for {extra:?}: {e}"));
+        }
     }
 
     /// Batch mode accepts `--dump-fixture-dir` and still rejects the single-file

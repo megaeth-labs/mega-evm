@@ -52,7 +52,7 @@ use std::{
 
 use alloy_consensus::Transaction as _;
 use alloy_eips::Encodable2718;
-use alloy_primitives::{Address, B256};
+use alloy_primitives::{Address, Bytes, B256};
 use alloy_provider::Provider;
 use mega_evm::{
     alloy_evm::{block::BlockExecutor, Evm, EvmEnv, IntoTxEnv, RecoveredTx},
@@ -76,7 +76,7 @@ use crate::{
     EvmeState,
 };
 
-use super::{verify, ReplayError, Result};
+use super::{header::BlockSummary, verify, ReplayError, Result};
 
 /// Identity of the block being replayed, as stamped onto harvested receipts.
 ///
@@ -120,6 +120,10 @@ pub(super) struct MinedBlockRun<'a, H, I> {
     /// Hashes whose results the driver wants reported. The kernel stops once the
     /// last of them has committed.
     pub(super) targets: &'a HashSet<B256>,
+    /// Summarize the finished block for header verification
+    /// ([`BlockRun::summary`]). Only meaningful when the targets reach the end of
+    /// the body, since the walk stops at the last target.
+    pub(super) summarize: bool,
 }
 
 /// A failure that stopped the block before any transaction ran.
@@ -223,6 +227,11 @@ pub(super) struct BlockRun<D> {
     pub(super) loop_outcome: LoopOutcome,
     /// What `finish()` produced.
     pub(super) finish: FinishOutcome<D>,
+    /// The header commitments of the finished block, present iff the driver
+    /// asked for them, every transaction of the body executed and committed, and
+    /// `finish()` succeeded. A block that stopped anywhere short of that commits
+    /// to a different block than its header describes, so it has no summary.
+    pub(super) summary: Option<BlockSummary>,
 }
 
 /// How the walk over the block body ended.
@@ -392,6 +401,7 @@ where
         identity,
         tx_hashes,
         targets,
+        summarize,
     } = run;
 
     info!(block = identity.number, fork_block, "Forking state for block");
@@ -432,6 +442,11 @@ where
         .max();
     let mut pending: Vec<PendingTarget<K::Draft>> = Vec::new();
     let mut committed = 0usize;
+    // EIP-2718 encodings of the executed body, in order, for the transactions
+    // root of the block summary. Each one comes from a transaction that already
+    // authenticated against its body-listed hash.
+    let mut raw_transactions: Vec<Bytes> =
+        if summarize { Vec::with_capacity(tx_hashes.len()) } else { Vec::new() };
 
     // Run the block's transactions in order. Any failure aborts the block: the
     // executor state no longer matches the chain, so the remaining targets
@@ -476,6 +491,9 @@ where
             verify::authenticate_transaction(&tx, *tx_hash).map_err(|message| {
                 ReplayError::BlockBodyTransactionFetch { tx_hash: *tx_hash, message }
             })?;
+            if summarize {
+                raw_transactions.push(tx.inner.inner.encoded_2718().into());
+            }
 
             if !targets.contains(tx_hash) {
                 // Not reported on, so it only has to move the state the way the
@@ -559,10 +577,22 @@ where
 
     // Finish the block even when it aborted midway: targets that already ran
     // still have a receipt worth reporting.
+    let mut summary = None;
     let finish = match block_executor.finish() {
         Ok((evm, block_result)) => {
             let (db, _) = evm.finish();
             db.merge_transitions(BundleRetention::Reverts);
+            // Only a walk that executed and committed the whole body produced the
+            // block its header describes.
+            if summarize && aborted.is_none() && committed == tx_hashes.len() {
+                summary = Some(BlockSummary::new(
+                    &raw_transactions,
+                    &block_result.receipts,
+                    block_result.gas_used,
+                    block_result.blob_gas_used,
+                    block_result.requests,
+                ));
+            }
             let receipts = block_result.receipts;
             // Receipts are pushed one per committed transaction; index from the
             // end so any receipt produced before the first transaction (now or
@@ -581,10 +611,8 @@ where
                 // it deployed anything, so a failed CREATE carries it too. The
                 // execution summary still only names a deployed contract: it
                 // reads this field on the success arm alone.
-                let contract_address = target
-                    .to
-                    .is_none()
-                    .then(|| target.from.create(target.pre_execution_nonce));
+                let contract_address =
+                    target.to.is_none().then(|| target.from.create(target.pre_execution_nonce));
                 // Block-global log index: cumulative log count of all committed
                 // receipts that precede this target in the block.
                 //
@@ -644,5 +672,5 @@ where
         None => LoopOutcome::Completed(CleanRun(())),
     };
 
-    Ok(BlockRun { loop_outcome, finish })
+    Ok(BlockRun { loop_outcome, finish, summary })
 }

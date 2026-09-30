@@ -305,7 +305,7 @@ impl ExitCode {
             Self::ExecutionError
         } else if counts.rpc > 0 || matches!(counts.exit_floor, BatchExitFloor::Rpc) {
             Self::RpcFailure
-        } else if counts.mismatched > 0 {
+        } else if counts.mismatched > 0 || counts.headers_mismatched > 0 {
             Self::VerificationMismatch
         } else {
             Self::ExecutionError
@@ -659,7 +659,12 @@ mod tests {
     /// A completed run whose replay diverged from the chain exits 2.
     #[test]
     fn test_verification_mismatch_maps_to_two() {
-        let err = EvmeError::VerificationMismatch { mismatched: 1, total: 3 };
+        let err = EvmeError::VerificationMismatch {
+            mismatched: 1,
+            total: 3,
+            headers_mismatched: 0,
+            headers_total: 0,
+        };
         assert_eq!(ExitCode::from_evme_error(&err), ExitCode::VerificationMismatch);
     }
 
@@ -717,6 +722,7 @@ mod tests {
             execution: 0,
             rpc: 2,
             mismatched: 0,
+            headers_mismatched: 0,
             total: 2,
             exit_floor: BatchExitFloor::Execution,
         };
@@ -737,6 +743,7 @@ mod tests {
             execution: 0,
             rpc: 0,
             mismatched: 1,
+            headers_mismatched: 0,
             total: 1,
             exit_floor: BatchExitFloor::Rpc,
         };

@@ -16,6 +16,12 @@
 //! exception: both fetch `eth_getTransactionReceipt` for *every* target of a
 //! block, including the non-targets a single-transaction capture never asked
 //! about. Offline, those come back as `rpc` entries and the run exits `3`.
+//!
+//! `--verify-header` adds one verdict per block: once a block's whole body has
+//! executed, the replayed block's header commitments are compared against the
+//! authenticated header ([`super::header`]). It needs every transaction of the
+//! block to be a target, which `--block` guarantees and `--tx-file` is checked
+//! for before any block runs. It issues no extra RPC call.
 
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -51,7 +57,9 @@ use crate::{
 use super::{
     cmd::retrieve_block_env,
     coherence::{self, Incoherence, MembershipClaim, TargetPlacement},
-    fixture, kernel,
+    fixture,
+    header::{self, HeaderVerification},
+    kernel,
     verify::{self, ReceiptFacts, VerificationOutcome},
     ReplayError, Result,
 };
@@ -63,6 +71,9 @@ pub(super) struct ReportArgs {
     pub json: bool,
     /// Verify every target against its on-chain receipt.
     pub verify_receipt: bool,
+    /// Verify every replayed block against its authenticated header. Requires
+    /// every transaction of each block to be a target.
+    pub verify_header: bool,
     /// When set, dump a self-validating fixture for every successful target into
     /// this directory as `<DIR>/<tx_hash>.json`.
     pub dump_fixture_dir: Option<PathBuf>,
@@ -247,6 +258,21 @@ struct FailedTx {
     message: String,
 }
 
+/// One block's header verdict, present iff `--verify-header` was given.
+struct HeaderReport {
+    /// Number of the verified block.
+    block_number: u64,
+    /// Hash of the verified block, when the block was fetched.
+    block_hash: Option<B256>,
+    /// The verdict.
+    verification: HeaderVerification,
+    /// Class of an unavailable verdict that no target entry of the block
+    /// carries, so the run exit still reflects it. `None` when the verdict was
+    /// compared, or when the block's own target failures already carry the
+    /// cause (a block that never started, aborted, or failed to finish).
+    uncounted: Option<BatchErrorKind>,
+}
+
 /// Running tally of a batch run's per-target outcomes.
 ///
 /// A batch reports each target as it goes and fails once at the end, so the
@@ -265,6 +291,10 @@ struct BatchTally {
     replayed: usize,
     /// Targets compared against an on-chain receipt.
     verified: usize,
+    /// Blocks compared against their header.
+    headers_verified: usize,
+    /// Blocks whose replay did not reproduce their header.
+    headers_mismatched: usize,
     /// Failed and mismatched targets, by class (reported targets only).
     counts: BatchFailureCounts,
     /// Run-level exit floor from a non-target abort not carried by any target.
@@ -346,6 +376,24 @@ impl BatchTally {
         }
     }
 
+    /// Count one block's header verdict.
+    ///
+    /// A mismatch is a divergence finding like a receipt mismatch. An unavailable
+    /// verdict is a finding only when no target entry already carries its cause:
+    /// then it floors the exit by its class, exactly like a non-target abort.
+    fn record_header(&mut self, report: &HeaderReport) {
+        if report.verification.is_unavailable() {
+            if let Some(kind) = report.uncounted {
+                self.record_uncounted_abort(kind);
+            }
+            return;
+        }
+        self.headers_verified += 1;
+        if !report.verification.matched {
+            self.headers_mismatched += 1;
+        }
+    }
+
     /// Record a mid-block abort whose root-cause class is not already carried by
     /// a per-target failure entry.
     ///
@@ -391,13 +439,16 @@ impl BatchTally {
             return Some(ReplayError::BatchFailed(BatchFailureCounts {
                 total: self.reported,
                 exit_floor: self.exit_floor,
+                headers_mismatched: self.headers_mismatched,
                 ..self.counts
             }));
         }
-        if self.counts.mismatched > 0 {
+        if self.counts.mismatched > 0 || self.headers_mismatched > 0 {
             return Some(ReplayError::VerificationMismatch {
                 mismatched: self.counts.mismatched,
                 total: self.verified,
+                headers_mismatched: self.headers_mismatched,
+                headers_total: self.headers_verified,
             });
         }
         None
@@ -542,6 +593,17 @@ struct BatchResultLine<'a> {
     fixture: Option<&'a FixtureReport>,
 }
 
+/// NDJSON line carrying one block's header verdict (`--verify-header`).
+///
+/// It has no `tx_hash`, which is how a consumer tells it from a target line.
+#[derive(Serialize)]
+struct BatchHeaderLine<'a> {
+    block_number: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    block_hash: Option<B256>,
+    header_verification: &'a HeaderVerification,
+}
+
 /// NDJSON line for a target that produced an infrastructure error.
 #[derive(Serialize)]
 struct BatchErrorLine<'a> {
@@ -618,13 +680,19 @@ where
             }
         }
         BatchMode::TxList(hashes) => {
-            let (jobs, failures) = resolve_targets(provider, hashes).await;
+            let (mut jobs, failures) = resolve_targets(provider, hashes).await;
             info!(
                 requested = hashes.len(),
                 blocks = jobs.len(),
                 unresolved = failures.len(),
                 "Batch replay of a transaction list",
             );
+            // Refuse before reporting anything: a header verdict needs every
+            // transaction of the block executed, and a list that leaves one out
+            // is a malformed request rather than a per-block finding.
+            if report.verify_header {
+                require_whole_blocks(provider, &mut jobs).await?;
+            }
             for failure in failures {
                 let entry = BatchEntry::Failed(failure);
                 tally.record(&entry);
@@ -635,6 +703,7 @@ where
     };
 
     for job in jobs {
+        let block_number = job.number;
         let outcome = replay_block(provider, chain_id, job, external_envs.clone(), &report).await;
         for entry in outcome.entries {
             if let BatchEntry::Executed(tx) = &entry {
@@ -652,6 +721,20 @@ where
         if let Some(kind) = outcome.uncounted_abort {
             tally.record_uncounted_abort(kind);
         }
+        if report.verify_header {
+            // A block that stopped before it ran reports no verdict of its own;
+            // its targets' failure lines already say why.
+            let header = outcome.header.unwrap_or_else(|| HeaderReport {
+                block_number,
+                block_hash: None,
+                verification: HeaderVerification::unavailable(
+                    "the block did not execute; see its transactions' errors",
+                ),
+                uncounted: None,
+            });
+            tally.record_header(&header);
+            emit_header(&header, report.json);
+        }
     }
 
     info!(
@@ -665,6 +748,13 @@ where
             verified = tally.verified,
             mismatched = tally.counts.mismatched,
             "On-chain receipt verification finished",
+        );
+    }
+    if report.verify_header {
+        info!(
+            verified = tally.headers_verified,
+            mismatched = tally.headers_mismatched,
+            "Block header verification finished",
         );
     }
     if report.dump_fixture_dir.is_some() {
@@ -749,6 +839,48 @@ where
     (jobs, failures)
 }
 
+/// Check that every job lists every transaction of its block, as
+/// `--verify-header` requires, and keep each fetched body on its job so the
+/// replay does not ask for it again.
+///
+/// A block that cannot be fetched here is left to [`replay_block`], which
+/// reports the same fetch failure against each of its targets.
+async fn require_whole_blocks<P>(provider: &P, jobs: &mut [BlockJob]) -> Result<()>
+where
+    P: Provider<op_alloy_network::Optimism>,
+{
+    let mut partial = Vec::new();
+    for job in jobs.iter_mut() {
+        let block = match fetch_block(provider, job.number).await {
+            Ok(block) => block,
+            Err(e) => {
+                warn!(block = job.number, error = %e, "Could not fetch block to check coverage");
+                continue;
+            }
+        };
+        let listed: HashSet<B256> = job.targets.iter().map(|target| target.hash).collect();
+        let missing: Vec<B256> =
+            block.transactions.hashes().filter(|hash| !listed.contains(hash)).collect();
+        if let Some(first) = missing.first() {
+            partial.push(format!(
+                "block {} is missing {} of its {} transaction(s) (first: {first})",
+                job.number,
+                missing.len(),
+                block.transactions.len(),
+            ));
+        }
+        job.block = Some(block);
+    }
+    if partial.is_empty() {
+        return Ok(());
+    }
+    Err(ReplayError::InvalidInput(format!(
+        "--verify-header needs every transaction of each replayed block, but the --tx-file \
+         leaves some out: {}. List whole blocks, or replay them with --block <N>",
+        partial.join("; ")
+    )))
+}
+
 /// Outcome of replaying one block's targets.
 struct BlockReplayOutcome {
     /// One entry per target of the job (executed or failed).
@@ -758,6 +890,9 @@ struct BlockReplayOutcome {
     /// Present when the aborting transaction is not a target: swept targets stay
     /// `rpc`, and this class is tallied so the run exit reflects the abort.
     uncounted_abort: Option<BatchErrorKind>,
+    /// The block's header verdict, present when `--verify-header` was given and
+    /// the block reached execution.
+    header: Option<HeaderReport>,
 }
 
 impl BlockReplayOutcome {
@@ -773,7 +908,17 @@ impl BlockReplayOutcome {
         block_tx_order: Option<&[B256]>,
         uncounted_abort: Option<BatchErrorKind>,
     ) -> Self {
-        Self { entries: order_block_entries(entries, job_targets, block_tx_order), uncounted_abort }
+        Self {
+            entries: order_block_entries(entries, job_targets, block_tx_order),
+            uncounted_abort,
+            header: None,
+        }
+    }
+
+    /// Attach the block's header verdict.
+    fn with_header(mut self, header: Option<HeaderReport>) -> Self {
+        self.header = header;
+        self
     }
 }
 
@@ -836,6 +981,7 @@ where
 {
     let BlockJob { number, block, targets: job_targets } = job;
     let verify_receipt = report.verify_receipt;
+    let verify_header = report.verify_header;
     let dump_dir = report.dump_fixture_dir.as_deref();
     let overwrite = report.overwrite;
     let target_hashes = || job_targets.iter().map(|t| t.hash);
@@ -1056,6 +1202,7 @@ where
             identity: kernel::BlockIdentity { number, timestamp, hash: block.hash() },
             tx_hashes: &tx_hashes,
             targets: &target_set,
+            summarize: verify_header,
         },
         &mut hook,
     )
@@ -1065,7 +1212,7 @@ where
     // was asked about, classified by what stopped it: a failed fork is an
     // unanswered endpoint question, while rejected pre-execution changes are
     // the executor's own verdict on the block.
-    let kernel::BlockRun { loop_outcome, finish } = match run {
+    let kernel::BlockRun { loop_outcome, finish, summary } = match run {
         Ok(run) => run,
         Err(setup) => {
             let (kind, message) = match setup {
@@ -1080,6 +1227,9 @@ where
             );
         }
     };
+
+    let header = verify_header
+        .then(|| block_header_report(number, &block, summary.as_ref(), &loop_outcome, &finish));
 
     // `entries` already holds any inclusion/membership failure recorded before
     // the block started; the harvested targets are appended to it here.
@@ -1242,6 +1392,44 @@ where
     }
 
     BlockReplayOutcome::ordered(entries, &job_targets, Some(&block_tx_order), uncounted_abort)
+        .with_header(header)
+}
+
+/// Judge one executed block against its header.
+///
+/// A block without a summary did not execute its whole body, so there is
+/// nothing to compare. When the walk aborted or the block could not be finished,
+/// the targets' own failure entries carry the cause; any other gap is an
+/// execution-class failure of the run, since the driver asked for the whole
+/// body.
+fn block_header_report<D>(
+    number: u64,
+    block: &Block<Transaction>,
+    summary: Option<&header::BlockSummary>,
+    loop_outcome: &kernel::LoopOutcome,
+    finish: &kernel::FinishOutcome<D>,
+) -> HeaderReport {
+    let (verification, uncounted) = match (summary, loop_outcome, finish) {
+        (Some(summary), _, _) => (header::compare(&block.header, summary), None),
+        (None, kernel::LoopOutcome::Aborted { error, .. }, _) => (
+            HeaderVerification::unavailable(format!(
+                "the block body did not execute in full: {error}"
+            )),
+            None,
+        ),
+        (None, _, kernel::FinishOutcome::Failed { error, .. }) => (
+            HeaderVerification::unavailable(format!("the block could not be finished: {error}")),
+            None,
+        ),
+        (None, _, _) => (
+            HeaderVerification::unavailable("the replay did not execute the whole block body"),
+            Some(BatchErrorKind::Execution),
+        ),
+    };
+    if let Some(diff) = &verification.diff {
+        warn!(block = number, ?diff, "Replayed block does not reproduce its header");
+    }
+    HeaderReport { block_number: number, block_hash: Some(block.hash()), verification, uncounted }
 }
 
 /// Inputs for [`prepare_target_fixture`], grouped so the dump path stays a single
@@ -1625,6 +1813,25 @@ fn emit(entry: &BatchEntry, json: bool) {
             println!("Error ({}): {}", tx.kind.as_str(), tx.message);
         }
     }
+}
+
+/// Write one block's header verdict to stdout, after the block's target entries.
+fn emit_header(report: &HeaderReport, json: bool) {
+    if json {
+        let line = serde_json::to_string(&BatchHeaderLine {
+            block_number: report.block_number,
+            block_hash: report.block_hash,
+            header_verification: &report.verification,
+        });
+        println!("{}", line.expect("failed to serialize output"));
+        return;
+    }
+    println!();
+    match report.block_hash {
+        Some(hash) => println!("=== Block {} ({hash}) ===", report.block_number),
+        None => println!("=== Block {} ===", report.block_number),
+    }
+    println!("{}", report.verification.verdict_line());
 }
 
 /// Parse the newline-separated transaction hash list behind `--tx-file`.
@@ -2012,7 +2219,15 @@ mod tests {
     fn test_batch_tally_mismatch_only_reports_the_verification_error() {
         let err = tally(&[], 4, 2).into_error().expect("run failed");
         assert!(
-            matches!(err, ReplayError::VerificationMismatch { mismatched: 2, total: 4 }),
+            matches!(
+                err,
+                ReplayError::VerificationMismatch {
+                    mismatched: 2,
+                    total: 4,
+                    headers_mismatched: 0,
+                    headers_total: 0
+                }
+            ),
             "unexpected error: {err:?}"
         );
     }
