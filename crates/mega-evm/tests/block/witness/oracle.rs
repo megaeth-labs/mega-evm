@@ -4,7 +4,9 @@
 //! slot is in the record like any slot; the service's answer is not in any database, so a replay
 //! matches only when it is given the answer — the included transactions' own records, in block
 //! order — or when the chain holds it at the read, which is what a node must arrange for a
-//! validator that runs no service.
+//! validator that runs no service, and can arrange only when every answer a transaction was given
+//! is a value the slot can hold at that read: a transaction answered two values for one slot
+//! replays from its record alone.
 
 use alloy_primitives::{Bytes, TxKind, B256, U256};
 use alloy_sol_types::SolCall;

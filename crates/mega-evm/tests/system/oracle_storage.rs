@@ -11,7 +11,9 @@ use alloy_sol_types::SolCall;
 use mega_evm::{
     constants::{ORACLE_ACCESS_COMPUTE_GAS, TX_GAS_LIMIT_CAP},
     system::{IOracle, ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE},
-    test_utils::{op_transaction, zero_fee_l1_block_info, BytecodeBuilder, MemoryDatabase},
+    test_utils::{
+        op_transaction, zero_fee_l1_block_info, BytecodeBuilder, MemoryDatabase, ReplayingOracleEnv,
+    },
     volatile_data_access_disabled_revert_data, EmptyExternalEnv, EvmTxRuntimeLimits, ExternalEnvs,
     LimitCheck, LimitKind, MegaContext, MegaEvm, MegaSpecId, MegaTransaction,
     MegaTransactionOutcome, OracleEnv, OracleRead, VolatileDataAccess,
@@ -480,6 +482,96 @@ fn test_the_reads_a_transaction_made_are_on_its_outcome() {
     assert!(twice.outcome.result.is_success(), "{:?}", twice.outcome.result);
     assert_eq!(twice.outcome.oracle_reads, [read, read]);
     assert_eq!(answered.seen(), [Seen::Read(SLOT), Seen::Read(SLOT)]);
+}
+
+/// Runs `tx` over `db` as a validator does, under the default limits, answering the Oracle's
+/// reads from `oracle` in place of a service.
+fn validate<O: OracleEnv>(
+    db: MemoryDatabase,
+    oracle: O,
+    tx: MegaTransaction,
+) -> MegaTransactionOutcome {
+    let envs =
+        ExternalEnvs::<(EmptyExternalEnv, O)> { salt_env: EmptyExternalEnv, oracle_env: oracle };
+    let ctx = MegaContext::new_with_external_envs(db, MegaSpecId::SATIN, envs)
+        .with_block(block())
+        .with_chain(zero_fee_l1_block_info())
+        .with_tx_runtime_limits(EvmTxRuntimeLimits::default());
+    MegaEvm::new(ctx).execute_transaction(tx).expect("the transaction is valid")
+}
+
+/// One transaction can be answered two values for one slot: it reads the slot, sends a hint that
+/// has the service fetch another value, and reads the slot again. Its outcome records both
+/// answers, in order, and a validator given that record replays the transaction. A validator that
+/// runs no service answers each read from the Oracle's slot, which only the system address writes,
+/// so the transaction finds one value there at both reads: whichever of the two answers the node
+/// has the slot hold, the other read comes out differently, and the transaction computes another
+/// result.
+#[test]
+fn test_two_answers_for_one_slot_replay_only_from_the_record() {
+    let hint = IOracle::sendHintCall {
+        topic: B256::from(SLOT),
+        data: Bytes::copy_from_slice(&SERVICE_VALUE.to_be_bytes::<32>()),
+    }
+    .abi_encode();
+    let read = get_slot(SLOT);
+
+    // Each call writes its calldata at 0x100 and its answer at `ret`: the first read's at 0, the
+    // second's at 0x20. The hint returns nothing.
+    let call = |code: BytecodeBuilder, data: &[u8], ret: u16| {
+        code.mstore(0x100, data)
+            .push_number(32_u8) // retSize
+            .push_number(ret) // retOffset
+            .push_number(data.len() as u64) // argsSize
+            .push_number(0x100_u16) // argsOffset
+            .push_number(0_u8) // value
+            .push_address(ORACLE_CONTRACT_ADDRESS)
+            .append(GAS)
+            .append_many([CALL, POP])
+    };
+    let code = call(call(call(BytecodeBuilder::default(), &read, 0), &hint, 0x40), &read, 0x20)
+        .push_number(64_u8)
+        .append_many([PUSH0, RETURN])
+        .build();
+    let db = || db_with_state().account_code(CONTRACT, code.clone());
+    let tx = || call_tx(CONTRACT, [], U256::ZERO);
+    let words = |outcome: &MegaTransactionOutcome| {
+        assert!(outcome.result.is_success(), "{:?}", outcome.result);
+        let output = outcome.result.output().cloned().unwrap_or_default();
+        (U256::from_be_slice(&output[..32]), U256::from_be_slice(&output[32..64]))
+    };
+
+    // The building node: its service has no value for the slot until the hint, so the first read
+    // takes the chain's value and the second the value the hint had the service fetch.
+    let built = run(db(), &Service::default(), tx()).outcome;
+    assert_eq!(words(&built), (STATE_VALUE, SERVICE_VALUE));
+    assert_eq!(
+        built.oracle_reads,
+        [
+            OracleRead { slot: SLOT, answer: None },
+            OracleRead { slot: SLOT, answer: Some(SERVICE_VALUE) }
+        ],
+        "two answers for one slot, in order"
+    );
+
+    // A validator given the record answers both reads as the service did.
+    let record = ReplayingOracleEnv::new(built.oracle_reads.clone());
+    let replayed = validate(db(), record.clone(), tx());
+    assert!(record.replayed_exactly(), "every recorded answer was replayed, in order");
+    assert_eq!(replayed.result, built.result);
+    assert_eq!(replayed.state, built.state);
+    assert_eq!(replayed.gas, built.gas);
+    assert_eq!(replayed.usage, built.usage);
+    assert_eq!(replayed.oracle_reads, built.oracle_reads);
+
+    // A validator without a service finds one value in the slot at both reads, whichever of the
+    // two answers the slot holds.
+    for held in [STATE_VALUE, SERVICE_VALUE] {
+        let db = db().account_storage(ORACLE_CONTRACT_ADDRESS, SLOT, held);
+        let without = validate(db, ReplayingOracleEnv::absent(), tx());
+        assert_eq!(words(&without), (held, held), "the slot holds {held:#x}");
+        assert_ne!(without.result, built.result, "the slot holds {held:#x}");
+    }
 }
 
 /// The Oracle's own code answers `getSlot` from the service too: the read is the `SLOAD` in its
