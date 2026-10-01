@@ -474,12 +474,6 @@ fn run_block(case: &BlockCase) -> Result<BlockRun, proptest::test_runner::TestCa
                     executor.limiter()
                 );
                 let gas = outcome.gas;
-                let result_gas = outcome.result.gas();
-                prop_eq!(
-                    gas.regular + gas.state + gas.history,
-                    result_gas.total_gas_spent(),
-                    "tx {index}: the ledgers add up"
-                );
                 prop_check!(
                     outcome.usage.write_records * WRITE_RECORD_SIZE <= outcome.usage.data_size,
                     "tx {index}: KV x 40 within the data size"

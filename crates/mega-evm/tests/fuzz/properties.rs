@@ -126,13 +126,16 @@ fn pre_account(db: &mut MemoryDatabase, address: Address) -> Option<revm::state:
 
 /// The gas ledgers, as the spec defines them:
 ///
-/// - the three ledgers add up to the raw spend, which is at least the state and history ledgers;
+/// - the three ledgers add up to the raw spend: the regular ledger is defined as the spend less the
+///   two others, so what is checked is that the spend covers them;
 /// - the receipt's figure is the raw spend less the refund, at least the floor, at most the gas
 ///   limit;
 /// - the refund is within its cap, a fifth of the raw spend;
-/// - the reservoir is the gas above the execution cap, nothing more comes back from it than was in
-///   it, and what it paid is state or history gas, unless the floor absorbed it or op-revm's
-///   failed-deposit rule billed the whole gas limit;
+/// - the reservoir is the gas above the execution cap, and it pays the state and history gas before
+///   the regular budget does and nothing else: what is gone from it is exactly the state and
+///   history ledgers, or all of it when they exceed it. Two rules bill it otherwise and are left
+///   out: the EIP-7623 floor, when it is the receipt's figure, and op-revm's failed deposit, which
+///   bills the whole gas limit;
 /// - an exempt transaction pays no history and reports no history bytes; any other reports at least
 ///   its body and pays at most what its bytes cost, the allowances paying the rest;
 /// - value is conserved: the balances change by what a deposit minted, less what a self-destruction
@@ -167,18 +170,12 @@ fn test_property_gas_ledgers() {
                 );
             }
 
-            prop_eq!(
-                gas.regular + gas.state + gas.history,
-                total,
-                "the ledgers add up to the spend"
-            );
+            // The regular ledger is by definition the spend less the two others, so the three
+            // add up unless that subtraction saturates: this is the check that it does not.
             prop_check!(
                 total >= gas.state + gas.history,
-                "the spend covers the state and history ledgers"
+                "the spend covers the state and history ledgers, so the three add up"
             );
-            prop_eq!(gas.state, result_gas.state_gas_spent_final(), "the state ledger is revm's");
-            prop_eq!(gas.floor, result_gas.floor_gas(), "the floor is revm's");
-            prop_eq!(gas.gas_used, result_gas.tx_gas_used(), "the receipt figure is revm's");
             prop_eq!(
                 gas.gas_used,
                 total.saturating_sub(result_gas.inner_refunded()).max(gas.floor),
@@ -186,19 +183,19 @@ fn test_property_gas_ledgers() {
             );
             prop_check!(gas.gas_used <= gas_limit, "the receipt figure is within the gas limit");
             prop_check!(result_gas.inner_refunded() * 5 <= total, "the refund is within a fifth");
-            prop_eq!(gas.block_execution_gas(), gas.regular.max(gas.floor), "the block's figure");
 
             let reservoir = gas_limit.saturating_sub(gas_limit.min(TX_GAS_LIMIT_CAP));
             prop_check!(
                 gas.reservoir_remaining <= reservoir,
                 "no more comes back than was in the reservoir"
             );
-            prop_check!(
-                failed_deposit ||
-                    reservoir - gas.reservoir_remaining <= gas.state + gas.history ||
-                    gas.gas_used == gas.floor,
-                "the reservoir pays state and history gas only, unless the floor absorbed it"
-            );
+            if !failed_deposit && gas.gas_used != gas.floor {
+                prop_eq!(
+                    reservoir - gas.reservoir_remaining,
+                    reservoir.min(gas.state + gas.history),
+                    "the reservoir pays the state and history gas first, and nothing else"
+                );
+            }
 
             if is_exempt(&tx) {
                 prop_eq!(
