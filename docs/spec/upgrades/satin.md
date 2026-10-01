@@ -667,7 +667,8 @@ An out-of-gas step halts the call, consuming its regular gas.
   1. make the EIP-2935 call;
   2. make the EIP-4788 call (neither call runs in the genesis block, and a block without a parent beacon block root is invalid, as EIP-2935 and EIP-4788 define);
   3. deploy the six MegaETH system contracts in address order — Oracle, High-Precision Timestamp, KeylessDeploy, MegaAccessControl, MegaLimitControl, SequencerRegistry — and then the [EIP-7997](https://eips.ethereum.org/EIPS/eip-7997) `CREATE2` factory at `0x4e59b44847b379578588920ca78fbf26c0b4956c` with nonce 1;
-  4. read whether the `SequencerRegistry` has a role change due in the block, and if it has, call `applyPendingChanges()`.
+  4. read whether the `SequencerRegistry` has a role change due in the block, and if it has, call `applyPendingChanges()`;
+  5. read the L1 block contract's account and its five fee slots, as [the stateless witness](#22-the-stateless-witness) lays out.
 - **Deploys.**
   Each deploy is idempotent: an address already holding the expected code is only read (its nonce kept).
   An absent account, or one with empty code and nonce 0, MUST get the code, nonce 1 and the registry's seed slots; it keeps any balance it has, and any storage it had is cleared.
@@ -675,7 +676,8 @@ An out-of-gas step halts the call, consuming its regular gas.
 - **Failure.**
   A pre-block call that does not succeed MUST make the block invalid, before its state is used.
   A database error the node's database declares fatal is an internal error of the node, not a verdict on the block; any other failure of a call — a non-fatal database error, another EVM error, an outcome that is not a success — makes the block invalid.
-  A database error in a deploy or in the due-change read is always an internal error.
+  A database error in a deploy, in the due-change read or in the read of the L1 block info is always an internal error.
+  The L1 block info is read for every block, whatever its transactions, so a node whose database cannot serve the L1 block contract's account, or one of the five slots of a contract the chain holds, cannot execute the block: it fails before the block's first transaction, as an internal error, even for a block of deposits alone, which prices nothing against the contract, or a block whose transactions never read the overhead slot (5).
 
 ### 19. The Protocol's Own Transactions
 
