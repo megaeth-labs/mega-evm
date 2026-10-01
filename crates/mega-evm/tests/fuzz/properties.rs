@@ -319,7 +319,9 @@ fn test_property_kv_weighs_no_more_than_data_size() {
 /// delegation, and a deposit's mint; the records kept are the applied authorities', and the data
 /// size is the body, those records and the payloads of the Oracle hints it forwarded, which have
 /// left the machine and are counted whatever the frame that sent them did, and nothing of a hint
-/// that crossed the limit, which was not forwarded; the state gas kept is the applied
+/// that crossed the limit, which was not forwarded (a hint that was admitted and did not decode
+/// is counted too, so where a program can send one the hints forwarded are a lower bound); the
+/// state gas kept is the applied
 /// authorizations', the sender's own delegation included, and that of the caller account a deposit
 /// created, which is the body's account and no record. An authority that is also a fee recipient
 /// is credited the fee, as any fee recipient is.
@@ -520,13 +522,27 @@ pub(crate) fn check_survivors(
         applied,
         "the records kept are the distinct applied authorities' but the sender's\n{rendered}"
     );
-    prop_eq!(
-        usage.data_size,
-        transaction_body_bytes(tx) + usage.write_records * WRITE_RECORD_SIZE + hint_bytes,
-        "the data size kept is the body, the records and the hints\n{rendered}"
+    // The hints counted: what the data size holds beside the body and the records. Every hint
+    // forwarded is in it. A hint that was admitted and did not decode is in it too, and reached
+    // nobody: only a raw call of the Oracle, whose calldata is whatever memory holds, sends one.
+    let priced = transaction_body_bytes(tx) + usage.write_records * WRITE_RECORD_SIZE;
+    let Some(hints_counted) = usage.data_size.checked_sub(priced) else {
+        return Err(crate::harness::fail(format!(
+            "the data size kept is below the body and the records\n{rendered}"
+        )));
+    };
+    prop_check!(
+        hints_counted >= hint_bytes,
+        "a forwarded hint stays counted: {hints_counted} < {hint_bytes}\n{rendered}"
     );
+    if !case.may_send_a_hint_that_does_not_decode() {
+        prop_eq!(
+            hints_counted,
+            hint_bytes,
+            "the data size kept is the body, the records and the hints forwarded\n{rendered}"
+        );
+    }
     if !is_exempt(tx) {
-        let priced = usage.data_size - hint_bytes;
         prop_eq!(
             outcome.gas.history_bytes,
             priced,

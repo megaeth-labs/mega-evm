@@ -244,6 +244,17 @@ impl Case {
         }
     }
 
+    /// Whether a program of the case can send the Oracle a hint that is admitted and does not
+    /// decode ([`Program::calls_the_oracle_with_memory`]): counted as data size, as every admitted
+    /// hint is before it is decoded, and never forwarded.
+    pub(crate) fn may_send_a_hint_that_does_not_decode(&self) -> bool {
+        self.main.calls_the_oracle_with_memory() ||
+            self.a.calls_the_oracle_with_memory() ||
+            self.b.calls_the_oracle_with_memory() ||
+            matches!(&self.tx.shape, Shape::Keyless { init: super::program::InitCode::Runs(program), .. }
+                if program.calls_the_oracle_with_memory())
+    }
+
     /// Whether any program of the case, or any init code in them, destroys an account.
     pub(crate) fn destroys(&self) -> bool {
         self.main.destroys() ||

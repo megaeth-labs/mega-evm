@@ -643,6 +643,24 @@ impl Program {
             })
     }
 
+    /// Whether the program, or any init code it creates with, calls the Oracle with calldata
+    /// taken from memory as it stands: at least a selector's worth of bytes, which may be the
+    /// `sendHint` selector an earlier op left there, with a payload that does not decode.
+    pub(crate) fn calls_the_oracle_with_memory(&self) -> bool {
+        self.ops.iter().any(|op| match op {
+            Op::Call {
+                scheme: Scheme::Call | Scheme::StaticCall,
+                target: Target::System(SystemContract::Oracle),
+                args_len,
+                ..
+            } => *args_len >= 4,
+            Op::Create { init: InitCode::Runs(program), .. } => {
+                program.calls_the_oracle_with_memory()
+            }
+            _ => false,
+        })
+    }
+
     /// The program with every init code it creates with rewritten so that it cannot destroy the
     /// account it is creating ([`InitCode::without_destruction`]). The program's own ending
     /// stands: run as a contract's code it destroys an account that existed before the
