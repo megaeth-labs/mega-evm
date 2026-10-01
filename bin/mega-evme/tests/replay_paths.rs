@@ -7,9 +7,10 @@
 //! and on Satin (the in-tree port against the block driver).
 //!
 //! The RPC is a mock that answers only from the recorded block: a read the recording does not
-//! hold is an error, not a guess. The one exception is the EIP-7997 factory, which Satin's
-//! pre-block changes read and no recording holds; it is served as absent, which
-//! `block_replay.rs` shows changes no transaction row.
+//! hold is an error, not a guess. The two exceptions are what Satin's pre-block changes read and
+//! no recording holds: the EIP-7997 factory, served as absent, and the L1 block contract's L1 fee
+//! overhead, served as zero, as the chain held both. `block_replay.rs` shows neither changes a
+//! transaction row.
 #![cfg(feature = "legacy")]
 
 mod common;
@@ -18,7 +19,7 @@ use std::sync::Arc;
 
 use alloy_primitives::{Address, B256, U256};
 use common::blocks::{
-    cache_copy_with_absent_factory, code_of, fixtures, read_block, run_evme, FACTORY,
+    cache_copy_for_satin, code_of, fixtures, overhead_slot, read_block, run_evme, FACTORY, L1_BLOCK,
 };
 use mega_evme::block::{CachedBlock, PreAccount};
 use serde_json::{json, Value};
@@ -34,6 +35,11 @@ struct Recording {
 impl Recording {
     fn account(&self, address: Address) -> Option<PreAccount> {
         match self.block.prestate.accounts.get(&address) {
+            Some(account) if address == L1_BLOCK => {
+                let mut account = account.clone();
+                account.storage.entry(overhead_slot()).or_insert(U256::ZERO);
+                Some(account)
+            }
             Some(account) => Some(account.clone()),
             None if address == FACTORY => Some(PreAccount::default()),
             None => None,
@@ -143,7 +149,7 @@ impl Server {
 
 /// The block replay's transaction records, on `spec`'s engine, under `limits` when given.
 fn block_rows(spec: Option<&str>, limits: Option<&str>) -> Vec<Value> {
-    let cache = cache_copy_with_absent_factory();
+    let cache = cache_copy_for_satin();
     let mut args = vec!["replay", "--block", "26400110", "--json", "--block-cache"];
     args.push(cache.path().to_str().unwrap());
     if let Some(spec) = spec {

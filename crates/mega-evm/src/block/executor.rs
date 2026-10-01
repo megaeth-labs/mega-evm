@@ -80,9 +80,11 @@
 //! block's first non-deposit transaction against the L1 block contract's slots read on the
 //! database itself, and this executor reads the DA footprint gas scalar the same way before every
 //! non-deposit transaction, so neither read lands in a transaction's returned state. The
-//! pre-block entry carries the account and the slots as the chain held them before the block
-//! ([`read_l1_block_info`]); the block's own L1 attributes deposit, when it has one, carries the
-//! values it writes over them in its own returned state.
+//! pre-block entry carries the account and every slot either read can reach, as the chain held
+//! them before the block ([`read_l1_block_info`]) — the L1 fee overhead among them, which
+//! op-revm reads only when the scalars the block's deposits left are empty; the block's own L1
+//! attributes deposit, when it has one, carries the values it writes over them in its own
+//! returned state.
 //!
 //! # The pre-block system calls
 //!
@@ -353,9 +355,9 @@ pub enum PreBlockStateSource {
     /// The `SequencerRegistry.applyPendingChanges()` system call.
     ApplyPendingChanges,
     /// The read of the L1 block info the block's transactions are priced against: the L1 block
-    /// contract's account and the slots of [`L1_BLOCK_INFO_SLOTS`](crate::L1_BLOCK_INFO_SLOTS), as
-    /// read-only entries, or the
-    /// account as not existing on a chain that does not hold it. It is the last pre-block state.
+    /// contract's account and every slot of [`L1_BLOCK_INFO_SLOTS`](crate::L1_BLOCK_INFO_SLOTS),
+    /// as read-only entries, or the account as not existing on a chain that does not hold it. It
+    /// is the last pre-block state.
     L1BlockInfo,
 }
 
@@ -719,10 +721,12 @@ where
     /// generator sees every step's read and write set. The sequence the observer receives is
     /// the witness a stateless client needs.
     ///
-    /// The L1 block info is not read here. op-revm's handler reads it when it deducts the caller
-    /// of the first non-deposit transaction, which is after the block's own L1 info deposit has
-    /// committed; reading it here would price every transaction of the block against the parent
-    /// block's values.
+    /// The transactions are not priced against the read made here. op-revm's handler fetches the
+    /// L1 block info when it deducts the caller of the first non-deposit transaction, which is
+    /// after the block's own L1 info deposit has committed; pricing from this read would price
+    /// every transaction of the block against the parent block's values. The read here puts the
+    /// L1 block contract's account and every slot that fetch can reach in the pre-block states,
+    /// and nothing else.
     ///
     /// The EIP-2935 and EIP-4788 calls run before the deploy. They write the parent hash and
     /// the parent beacon root into their own contracts (`0x0…2935` and `0x0…4788`), which are
@@ -800,8 +804,10 @@ where
 
         // The L1 block info the transactions are priced against is read on the database itself,
         // by op-revm once per block and by `execute` before every non-deposit transaction, so it
-        // lands in no transaction's state. Read here, it is in the pre-block states instead; the
-        // read fills the state cache and commits nothing.
+        // lands in no transaction's state. Read here, it is in the pre-block states instead:
+        // every slot those reads can reach, because which ones they reach is decided by the state
+        // the block's deposits leave, not by this one. The read fills the state cache and commits
+        // nothing.
         let state = read_l1_block_info(self.evm.db_mut()).map_err(BlockExecutionError::other)?;
         self.deliver_pre_block(PreBlockStateSource::L1BlockInfo, state);
 

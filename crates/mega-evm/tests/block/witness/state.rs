@@ -215,8 +215,8 @@ fn parent_scalars_word() -> U256 {
 
 /// The L1 block info the chain holds before the block: a distinct non-zero value in every slot
 /// the transactions are priced against, so a slot a witness answered with zero would show in the
-/// L1 fee, the operator fee or the footprint. The Ecotone scalars are set, so the overhead is not
-/// read.
+/// L1 fee, the operator fee or the footprint. The Ecotone scalars are set, so the pricing does not
+/// read the overhead, which the chain holds beside them ([`OVERHEAD`]).
 fn l1_info() -> [(U256, U256); 4] {
     [
         (L1_BASE_FEE_SLOT, U256::from(1_000_000_000_u64)),
@@ -226,7 +226,8 @@ fn l1_info() -> [(U256, U256); 4] {
     ]
 }
 
-/// The L1 fee overhead the chain holds, which the pricing reads only when the scalars are empty.
+/// The L1 fee overhead the chain holds, which the pricing reads only when the scalars it finds
+/// are empty, and the pre-block entry carries whatever they hold.
 const OVERHEAD: U256 = U256::from_limbs([188, 0, 0, 0]);
 
 /// A chain holding the L1 block contract with `code`, the info of [`l1_info`] and the overhead,
@@ -291,7 +292,8 @@ fn test_a_deposit_only_block_replays_and_reads_no_l1_slot() {
 /// and not through the transaction's journal: the L1 block contract is in no transaction's state,
 /// and the pre-block phase carries its account and slots as read-only entries with the chain's
 /// values, so a witness built from the states holds what the transaction's L1 fee, operator fee
-/// and footprint were computed from.
+/// and footprint were computed from. The entry holds the overhead beside them, which the pricing
+/// does not read while the scalars are set: the pre-block read is the one read of it.
 #[test]
 fn test_a_user_transaction_is_priced_against_the_l1_info_the_pre_block_state_carries() {
     let db = chain_with_l1_info(Bytes::from(vec![0x00]));
@@ -304,8 +306,9 @@ fn test_a_user_transaction_is_priced_against_the_l1_info_the_pre_block_state_car
     let account = l1_entry(run);
     assert!(!account.is_touched() && !account.is_created(), "a read-only entry");
     assert_eq!(account.info.code_hash, alloy_primitives::keccak256([0x00]));
-    assert_eq!(account.storage.len(), l1_info().len(), "the slots the pricing reads, no more");
-    for (slot, value) in l1_info() {
+    let held = l1_info().into_iter().chain([(L1_OVERHEAD_SLOT, OVERHEAD)]);
+    assert_eq!(account.storage.len(), held.clone().count(), "the slots the pricing can read");
+    for (slot, value) in held {
         let entry = account.storage.get(&slot).expect("every slot of the set");
         assert_eq!(entry.present_value, value, "{slot}");
         assert!(!entry.is_changed(), "{slot} is unchanged");
@@ -315,10 +318,6 @@ fn test_a_user_transaction_is_priced_against_the_l1_info_the_pre_block_state_car
             "{slot} was read from the database, before the transactions"
         );
     }
-    assert!(
-        !run.record.storage.contains_key(&(L1_BLOCK_CONTRACT, L1_OVERHEAD_SLOT)),
-        "the overhead is not read while the scalars are set"
-    );
 
     let footprint_scalar = u64::from(PARENT_FOOTPRINT_SCALAR);
     assert_eq!(
@@ -331,8 +330,9 @@ fn test_a_user_transaction_is_priced_against_the_l1_info_the_pre_block_state_car
     assert!(!credited(OPERATOR_FEE_RECIPIENT).is_zero(), "an operator fee was paid from the info");
 }
 
-/// With the Ecotone scalars empty the pricing falls back to the overhead, and the pre-block entry
-/// reads it too: the slot is in the entry and in the record, and the block replays.
+/// With the Ecotone scalars empty before the block the pricing reads the overhead at the first
+/// transaction it prices; the pre-block entry holds the same five slots as with set scalars, the
+/// overhead among them, and the block replays.
 #[test]
 fn test_the_overhead_is_in_the_entry_when_the_scalars_are_empty() {
     let mut db = chain_with_l1_info(Bytes::from(vec![0x00]));
@@ -341,8 +341,8 @@ fn test_the_overhead_is_in_the_entry_when_the_scalars_are_empty() {
     let run = &replay.recorded;
     assert!(run.tx(0).result.is_success(), "{:?}", run.tx(0).result);
     let account = l1_entry(run);
-    assert_eq!(account.storage.len(), l1_info().len() + 1, "the overhead beside the set");
-    let overhead = account.storage.get(&L1_OVERHEAD_SLOT).expect("read with empty scalars");
+    assert_eq!(account.storage.len(), l1_info().len() + 1, "the same set as with set scalars");
+    let overhead = account.storage.get(&L1_OVERHEAD_SLOT).expect("in the entry");
     assert_eq!(overhead.present_value, OVERHEAD);
     assert!(!overhead.is_changed());
     assert_eq!(run.record.storage.get(&(L1_BLOCK_CONTRACT, L1_OVERHEAD_SLOT)), Some(&OVERHEAD));

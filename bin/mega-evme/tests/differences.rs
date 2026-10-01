@@ -16,7 +16,7 @@ mod common;
 
 use std::{collections::BTreeMap, fmt::Write as _, path::Path};
 
-use common::blocks::{cache_copy_with_absent_factory, read_block, run_evme, BLOCKS};
+use common::blocks::{cache_copy_for_satin, read_block, run_evme, BLOCKS};
 use mega_evm::constants::{COST_PER_HISTORY_BYTE, COST_PER_STATE_BYTE};
 use serde_json::Value;
 
@@ -150,7 +150,7 @@ fn is_success(record: &Value) -> bool {
 }
 
 fn render_blocks(out: &mut String) {
-    let cache = cache_copy_with_absent_factory();
+    let cache = cache_copy_for_satin();
     let mut pairs = Vec::new();
     writeln!(out, "## Recorded mainnet blocks\n").unwrap();
     writeln!(
